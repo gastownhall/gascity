@@ -316,20 +316,44 @@ func TestReadyEmitsADedicatedWireTypeNotTheDomainBead(t *testing.T) {
 //
 // When beads.Bead gains or loses a JSON field this test goes red. That is the
 // point: the external array follows only when someone says it should.
+//
+// # The one deliberate divergence
+//
+// `blocked_by` is emitted by `gc ready` and is NOT a beads.Bead field, and that
+// was decided rather than drifted into. It is a COMPUTED projection, not a
+// column: the crash-recovery arm (--status in_progress) resolves each row's
+// blocking dependencies through the leg that served the row, because the
+// consumer of that arm — the hook's work query — needs the blocker's STATUS to
+// decide whether a resumed holder's own bead is currently gated, and
+// `dependencies` carries edges without statuses. bd's own `bd ready --json`
+// emits exactly this field in exactly this shape, so adding it makes the
+// drop-in MORE faithful, not less. It stays out of beads.Bead because it is
+// derived per-read, not stored.
 func TestReadyWireFieldSetIsPinnedToTheHTTPBeadShape(t *testing.T) {
+	// computedReadyWireFields are emitted by gc ready but deliberately absent
+	// from beads.Bead. Every entry needs a stated reason above; the set is small
+	// on purpose.
+	computedReadyWireFields := map[string]bool{"blocked_by": true}
+
 	want := []string{
-		"assignee", "created_at", "defer_until", "dependencies", "description",
-		"ephemeral", "from", "id", "is_blocked", "issue_type", "labels",
-		"metadata", "needs", "no_history", "parent", "priority", "ref",
-		"status", "title", "updated_at",
+		"assignee", "blocked_by", "created_at", "defer_until", "dependencies",
+		"description", "ephemeral", "from", "id", "is_blocked", "issue_type",
+		"labels", "metadata", "needs", "no_history", "parent", "priority",
+		"ref", "status", "title", "updated_at",
 	}
 	got := jsonFieldNames(reflect.TypeOf(readyBead{}))
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("readyBead JSON fields = %v, want %v", got, want)
 	}
+	stored := make([]string, 0, len(got))
+	for _, field := range got {
+		if !computedReadyWireFields[field] {
+			stored = append(stored, field)
+		}
+	}
 	domain := jsonFieldNames(reflect.TypeOf(beads.Bead{}))
-	if !reflect.DeepEqual(got, domain) {
-		t.Fatalf("readyBead JSON fields = %v but beads.Bead publishes %v; the external array's field set diverged from the HTTP Bead shape — decide deliberately whether the wire follows, then update this pin", got, domain)
+	if !reflect.DeepEqual(stored, domain) {
+		t.Fatalf("readyBead's stored JSON fields = %v but beads.Bead publishes %v; the external array's field set diverged from the HTTP Bead shape — decide deliberately whether the wire follows, then update this pin", stored, domain)
 	}
 }
 

@@ -119,6 +119,15 @@ func cmdHookRun(args []string, opts hookRunOptions, stdin io.Reader, stdout, std
 		return 1
 	}
 	cmd := exec.CommandContext(ctx, exe, args...)
+	// Mark the child as a provider CALLBACK lane. gc hook run is the managed
+	// wrapper every rendered provider hook command flows through, and it runs
+	// arbitrary gc argv verbatim — nothing stops `hook --claim` appearing there,
+	// today by operator edit and tomorrow by a new overlay. A callback's stdout
+	// goes to the hook runner, never to a model, so a claim minted in one is
+	// parked the instant it is won; the claim path refuses on this marker (F-A,
+	// hookClaimNonTurnMarker). Every other hook use of a callback lane —
+	// --inject, nudge drain, mail check — is read-only and unaffected.
+	cmd.Env = append(os.Environ(), "GC_HOOK_CALLBACK_LANE=1")
 	// Read the provider's hook stdin FULLY into a buffer before running the
 	// wrapped command, then hand it that buffer. Forwarding the live stdin
 	// (cmd.Stdin = stdin) let the wrapped command exit — on its fast path or on
@@ -299,6 +308,17 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	// transient session-store fault, so a healthy worker still falls through to the
 	// suspension and config checks below.
 	if opts.Claim {
+		// F-A, at the earliest point that can answer it. tryHookClaim carries the
+		// same fence over the same predicate — it is the seam every ops-level
+		// caller funnels through — but by the time it runs, the federated store
+		// selection has already spent a work query bounded by hookWorkQueryTimeout
+		// (60s), and a provider callback's whole budget is 15s
+		// (defaultHookRunTimeout). Refusing here keeps a callback lane cheap and
+		// makes its refusal something the provider actually receives rather than
+		// something its timeout truncates.
+		if marker := hookClaimNonTurnMarker(os.Environ()); marker != "" {
+			return writeHookClaimNonTurnDrain(marker, hookClaimOptions{JSON: opts.JSON}, stdout, stderr)
+		}
 		if code, handled := fenceHookClaimSession(cityPath, cfg, strings.TrimSpace(os.Getenv("GC_SESSION_ID")), opts, stdout, stderr); handled {
 			return code
 		}
