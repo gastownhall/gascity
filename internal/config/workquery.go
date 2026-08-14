@@ -359,7 +359,7 @@ func standardAssignedInProgressWorkQueryScript(topo QueryTopology) string {
 		`[ -z "$id" ] && continue; ` +
 		assignedInProgressTierCommand("id", topo) +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
-		inProgressBlockedByEnrichmentScript("r", topo.FederatedReady) +
+		inProgressBlockedByEnrichmentScript(topo.FederatedReady) +
 		`fi; ` +
 		ephemeralAssignedInProgressProbeScript("id", topo) +
 		`done; `
@@ -423,7 +423,10 @@ func standardAssignedInProgressWorkQueryScript(topo QueryTopology) string {
 // never fire there — it would be pure added shell on the path every existing
 // deployment runs, for zero behavior change. Same zero-risk scoping the ready
 // tiers used for their own swap.
-func inProgressBlockedByEnrichmentScript(shellVar string, federated bool) string {
+func inProgressBlockedByEnrichmentScript(federated bool) string {
+	// The tier stores its candidate row in $r and its enriched copy in
+	// $r_enriched; both callers use those names.
+	const shellVar = "r"
 	const blockingDepsJQ = `[.[0].dependencies[]? | ` +
 		`select(.dependency_type == "blocks" or .dependency_type == "waits-for" or ` +
 		`.dependency_type == "conditional-blocks") | {id, status}]`
@@ -498,7 +501,7 @@ func legacyControlAssignedInProgressWorkQueryScript(topo QueryTopology) string {
 		`[ -z "$cand" ] && continue; ` +
 		assignedInProgressTierCommand("cand", topo) +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
-		inProgressBlockedByEnrichmentScript("r", topo.FederatedReady) +
+		inProgressBlockedByEnrichmentScript(topo.FederatedReady) +
 		`fi; ` +
 		ephemeralAssignedInProgressProbeScript("cand", topo) +
 		`done; ` +

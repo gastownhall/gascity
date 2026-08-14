@@ -373,8 +373,8 @@ func renormalizeFederatedCommand(federated string) string {
 		return strings.ReplaceAll(in, singleQuoteEscaped(from), singleQuoteEscaped(to))
 	}
 	federated = replaceFragment(federated,
-		inProgressBlockedByEnrichmentScript("r", true),
-		inProgressBlockedByEnrichmentScript("r", false))
+		inProgressBlockedByEnrichmentScript(true),
+		inProgressBlockedByEnrichmentScript(false))
 	for _, shellVar := range []string{"id", "cand"} {
 		federated = replaceFragment(federated,
 			assignedInProgressTierCommand(shellVar, QueryTopology{FederatedReady: true}),

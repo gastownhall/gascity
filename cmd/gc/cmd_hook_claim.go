@@ -437,9 +437,9 @@ func (ops *hookClaimOps) claimMutationContext() (context.Context, context.Cancel
 func refuseExpiredHookClaimWindow(candidateID string, ops hookClaimOps, stderr io.Writer) hookClaimResult {
 	age := ops.invocationAge()
 	parentAlive := os.Getppid() != 1
-	fmt.Fprintf(stderr,
+	_, _ = fmt.Fprintf(stderr,
 		"gc hook --claim: refusing to claim %s: the %s claim window is spent (invocation age %s, parent alive %t); the turn that invoked this claim is gone\n",
-		candidateID, ops.claimWindowOrDefault(), age.Round(time.Millisecond), parentAlive) //nolint:errcheck
+		candidateID, ops.claimWindowOrDefault(), age.Round(time.Millisecond), parentAlive)
 	ops.EmitClaimWindowExpired(hookClaimWindowExpiry{
 		BeadID:        candidateID,
 		InvocationAge: age,
@@ -731,9 +731,9 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 	// the invoking turn is already gone. That is the same parked claim by another
 	// route, so it takes the same unwind as an undelivered one.
 	if minted && ops.claimWindowSpent() {
-		fmt.Fprintf(stderr,
+		_, _ = fmt.Fprintf(stderr,
 			"gc hook --claim: claim of %s landed after the %s claim window closed (invocation age %s); releasing it rather than parking it\n",
-			bead.ID, ops.claimWindowOrDefault(), ops.invocationAge().Round(time.Millisecond)) //nolint:errcheck
+			bead.ID, ops.claimWindowOrDefault(), ops.invocationAge().Round(time.Millisecond))
 		return unwindUndeliveredHookClaim(hookClaimReleaseReasonStraddled, bead, opts, ops, dir, stderr)
 	}
 	result.RootBeadID = strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
@@ -834,9 +834,9 @@ func writeHookClaimNoWork(opts hookClaimOptions, ops hookClaimOps, claimsErrored
 // drain on its behalf) and the exit code is 0 regardless, so a provider does not
 // retry the refusal on every prompt submit. Only a failed JSON write is an error.
 func writeHookClaimNonTurnDrain(marker string, opts hookClaimOptions, stdout, stderr io.Writer) int {
-	fmt.Fprintf(stderr,
+	_, _ = fmt.Fprintf(stderr,
 		"gc hook --claim: refusing to claim from a non-turn context (%s is set); a provider callback's result reaches no agent turn, so a claim minted here would be parked the instant it is won\n",
-		marker) //nolint:errcheck
+		marker)
 	if !opts.JSON {
 		return 0
 	}

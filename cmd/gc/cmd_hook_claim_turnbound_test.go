@@ -62,8 +62,8 @@ func (r *turnBoundClaimRecorder) ops(t *testing.T, output string) hookClaimOps {
 		},
 		// A run-map publish on the claim hot path would touch the filesystem; the
 		// fences under test never depend on it.
-		PublishRunMap: func(string, string, ...string) error { return nil },
-		StampWorkMeta: func(context.Context, string, []string, string, string, map[string]string) error { return nil },
+		PublishRunMap:     func(string, string, ...string) error { return nil },
+		StampWorkMeta:     func(context.Context, string, []string, string, string, map[string]string) error { return nil },
 		ResolveWorkBranch: func(string) string { return "" },
 	}
 }
