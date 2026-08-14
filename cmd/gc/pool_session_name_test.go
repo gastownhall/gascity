@@ -1163,7 +1163,7 @@ func TestCollectAndReleaseOrphanPoolStepBead_Issue2793(t *testing.T) {
 
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}
 
-	found, foundStores, foundStoreRefs, _, partial := collectAssignedWorkBeadsWithStores(cfg, store, nil, nil, nil)
+	found, foundStores, foundStoreRefs, _, partial := collectAssignedWorkBeadsWithStores("", cfg, store, nil, nil, nil)
 	if partial {
 		t.Fatal("collectAssignedWorkBeadsWithStores reported partial results")
 	}
@@ -1214,7 +1214,7 @@ func TestCollectAndReleaseOrphanWorkflowRunTargetBead(t *testing.T) {
 
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}
 
-	found, foundStores, foundStoreRefs, _, partial := collectAssignedWorkBeadsWithStores(cfg, store, nil, nil, nil)
+	found, foundStores, foundStoreRefs, _, partial := collectAssignedWorkBeadsWithStores("", cfg, store, nil, nil, nil)
 	if partial {
 		t.Fatal("collectAssignedWorkBeadsWithStores reported partial results")
 	}
@@ -1264,7 +1264,7 @@ func TestCollectAndReleaseNonWorkflowRunTargetBeadStaysAssigned(t *testing.T) {
 
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}
 
-	found, foundStores, foundStoreRefs, _, partial := collectAssignedWorkBeadsWithStores(cfg, store, nil, nil, nil)
+	found, foundStores, foundStoreRefs, _, partial := collectAssignedWorkBeadsWithStores("", cfg, store, nil, nil, nil)
 	if partial {
 		t.Fatal("collectAssignedWorkBeadsWithStores reported partial results")
 	}
@@ -1303,6 +1303,7 @@ func TestCollectAssignedWorkBeadsIncludesUnassignedInProgressPoolWorkForRecovery
 	}
 
 	found, stores, _, _, partial := collectAssignedWorkBeadsWithStores(
+		"",
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		store,
 		nil,

@@ -70,6 +70,7 @@ package storeref
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -469,16 +470,58 @@ func shadowLegsCovering(id string, legs []Leg) []Leg {
 // role, because that is the reason the leg is there.
 func dedupeLegs(p ResolvedPlan) ResolvedPlan {
 	out := p.Legs[:0]
-	seen := make(map[beads.Store]bool, len(p.Legs))
+	var seen storeSet
 	for _, l := range p.Legs {
-		if l.Leg.Store == nil || seen[l.Leg.Store] {
+		if !seen.addIfNew(l.Leg.Store) {
 			continue
 		}
-		seen[l.Leg.Store] = true
 		out = append(out, l)
 	}
 	p.Legs = out
 	return p
+}
+
+// storeSet tracks store identity for a dedupe pass without assuming a store can
+// be a map key.
+//
+// beads.Store is an INTERFACE, and an implementation whose dynamic type is a
+// struct carrying a slice or a map is not comparable: putting one in a map
+// panics with "hash of unhashable type", and so does ==. Plans are built over
+// whatever stores the caller opened, so the resolver cannot make that
+// assumption about them.
+//
+// An uncomparable store is therefore treated as distinct from everything. That
+// is the safe direction of the two: a duplicated leg is read twice, while a
+// wrongly-dropped one is a leg silently missing from a federated answer, which
+// is the whole failure class this package exists to close.
+//
+// Identity is ==, so two DIFFERENT backends behind a value-typed store that
+// happens to compare equal — a zero-size store double, say — read as one leg.
+// Every production store is reference-identified (a pointer, or a wrapper
+// carrying one), which is what makes == the right rule here.
+type storeSet struct{ seen []beads.Store }
+
+// addIfNew reports whether store is a leg worth keeping — non-nil, and not one
+// already added.
+func (s *storeSet) addIfNew(store beads.Store) bool {
+	if store == nil {
+		return false
+	}
+	if !comparableStore(store) {
+		return true
+	}
+	for _, have := range s.seen {
+		if comparableStore(have) && have == store {
+			return false
+		}
+	}
+	s.seen = append(s.seen, store)
+	return true
+}
+
+func comparableStore(store beads.Store) bool {
+	t := reflect.TypeOf(store)
+	return t != nil && t.Comparable()
 }
 
 // ResolveOwner probes a FirstOwner plan and pins the store that holds id.
@@ -632,6 +675,26 @@ func Union[T any](p ResolvedPlan, id func(T) string, fn func(Leg) ([]T, error)) 
 		return out, err
 	}
 	return out, nil
+}
+
+// EachLeg visits every leg of a plan in order, with the reason it is there and
+// the meaning of its failure. It performs NO I/O and cannot fail.
+//
+// It is the enumeration seam for a consumer that genuinely cannot run its reads
+// inside Walk: one that fans the legs out CONCURRENTLY (the controller's census
+// arms, which read every leg in parallel and fold per-arm partials), or one that
+// resolves the leg set once and reads it repeatedly under different queries (the
+// `gc ready` reader, whose three arms share one leg set).
+//
+// Those consumers still must not hand-roll a store list, because the two things
+// a hand-rolled list loses are the two things that were wrong at 31 call sites:
+// the leg ORDER and the per-leg error POLICY. EachLeg hands over both, so what a
+// consumer supplies is only its own fan-out shape. Walk remains the executor for
+// reads — the place a policy is APPLIED — and a consumer that can use it should.
+func EachLeg(p ResolvedPlan, visit func(leg Leg, role Role, onError ErrPolicy)) {
+	for _, l := range p.Legs {
+		visit(l.Leg, l.Role, l.OnError)
+	}
 }
 
 // WalkResult is what a leg-by-leg pass over a Union plan reports beyond the

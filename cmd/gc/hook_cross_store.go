@@ -14,10 +14,12 @@ import (
 type hookStore struct {
 	dir string
 	env []string
-	// command overrides the shared work query for this store. Empty on every
-	// store of a single-store city, where one command is run against each store
-	// in turn; set only by scopeFederatedHookStores, which pins the city-wide
-	// reader to the primary and leaves the extras on the single-store command.
+	// command overrides the shared work query for this store, and is empty on
+	// every store production builds: one command is run against each leg in
+	// turn. It was set by scopeFederatedHookStores when that pinned the
+	// city-wide reader to the primary and left the extras on the single-store
+	// command; the extras are dropped now, so nothing sets it. Retired with the
+	// rest of that mechanism in ga-gu4xg.
 	command string
 }
 
@@ -30,37 +32,48 @@ func hookStoreCommand(st hookStore, command string) string {
 	return command
 }
 
-// scopeFederatedHookStores pins a city-wide work query to ONE store.
+// scopeFederatedHookStores collapses a city-wide work query onto ONE leg.
 //
-// The federated reader (`gc ready`) already covers the city store, every bound
-// rig store and the relocated graph leg in a single call, so running it once per
-// hookStore re-asks the same question R+1 times and re-opens every leg each
-// time — the store loop exists because `bd ready` reads exactly one store, and
-// that premise no longer holds for the tiers that were swapped.
+// # Leg relevance, taken from the plan rather than from the store list
 //
-// The extras are not dropped: the crash-recovery (`bd list --status
-// in_progress`) and ephemeral (`bd query`) tiers are still per-store reads the
-// city-wide reader does not answer, so collapsing the loop outright would
-// silently strip rig coverage from crash recovery. Instead every store after the
-// primary keeps the SINGLE-STORE command it ran before the swap, which is
-// exactly its previous cost and previous coverage; only the city-wide read is
-// deduplicated.
+// The hook's legs are bd WORKSPACES, and it fans out across them because
+// `bd ready` reads exactly one store. On a federated city that premise is gone:
+// the primary leg runs `gc ready`, whose own legs are Plan(RoutedWork) — the
+// city work store, the rigs ascending, the relocated binding last — so its
+// answer is a SUPERSET of every extra leg's, tier by tier. An extra can
+// therefore never contribute a candidate the primary did not already return; it
+// can only re-open every store and pay the federated legs again.
+//
+// So the relevant leg set for a federated claim read is exactly one leg, and
+// that is what this returns. On mc's topology it takes a hook tick from six
+// full work-query runs (one federated, five single-store) to one, and the
+// dropped five were each a strictly narrower view of the same city.
+//
+// # Why the extras are no longer coverage
+//
+// They used to be: the crash-recovery tier ran `bd list --status in_progress`
+// and the wisp probes ran `bd query`, neither of which the city-wide reader
+// answered, so collapsing the loop would have stripped rig coverage from crash
+// recovery. Both are closed now. The crash-recovery tier swapped to `gc ready
+// --status in_progress`, and every federated leg is read at
+// beads.FederatedReadTier, which spans the wisp tier — so the ephemeral rows a
+// per-store `bd query` used to find are in the federated answer.
+// TestTheFederatedReaderAnswersEveryTierTheExtrasUsedTo is the guard: if either
+// tier regresses to a single-store read, the extras have to come back.
+//
+// # The signal
 //
 // federatedCommand and singleStoreCommand are the two forms of the same agent's
-// query. They are equal for a custom (verbatim) work_query and on a city that
-// relocates nothing, and the call is then a no-op returning stores unchanged —
-// which is what keeps a single-store city byte-identical.
+// query. They are EQUAL for a custom (verbatim) work_query and on a city that
+// relocates nothing, and the call is then a no-op returning stores unchanged.
+// That is not an optimization detail: a custom work_query reads one store
+// whatever the topology, so the fan-out is its only coverage and must survive.
 func scopeFederatedHookStores(stores []hookStore, federatedCommand, singleStoreCommand string) []hookStore {
 	singleStoreCommand = strings.TrimSpace(singleStoreCommand)
 	if len(stores) < 2 || singleStoreCommand == "" || singleStoreCommand == strings.TrimSpace(federatedCommand) {
 		return stores
 	}
-	scoped := make([]hookStore, len(stores))
-	copy(scoped, stores)
-	for i := 1; i < len(scoped); i++ {
-		scoped[i].command = singleStoreCommand
-	}
-	return scoped
+	return stores[:1:1]
 }
 
 // hookStoreRunner runs a work query against one federated store's dir and env.
@@ -366,10 +379,19 @@ func bestStoreWithWork(command string, stores []hookStore, primary hookStore, ru
 }
 
 // hookFederationPinnedToPrimary reports whether this store set is the shape
-// scopeFederatedHookStores produces: the primary runs the city-wide federated
-// command and every extra carries its own single-store override. That is exactly
-// when a primary failure costs the federation rather than one leg, so it is read
-// off the store set rather than passed down as a flag.
+// scopeFederatedHookStores USED to produce: the primary runs the city-wide
+// federated command and every extra carries its own single-store override. That
+// is exactly when a primary failure costs the federation rather than one leg, so
+// it is read off the store set rather than passed down as a flag.
+//
+// NO PRODUCTION CALLER PRODUCES THAT SHAPE ANY MORE. scopeFederatedHookStores
+// now drops the extras outright, so a federated fan-out is one leg and this
+// answers false — the single leg's failure is surfaced by bestStoreWithWork's
+// own ownStoreErr path instead, with the same outcome. The mechanism is left
+// standing rather than deleted here because removing it also removes
+// bestStoreWithWork's federated-primary-failure semantics and their tests, which
+// is a provable deletion of its own and does not belong in the same commit as a
+// census leg-set change (ga-gu4xg).
 func hookFederationPinnedToPrimary(stores []hookStore, primary hookStore) bool {
 	if len(stores) < 2 {
 		return false
@@ -492,7 +514,22 @@ func hookRankCandidate(row map[string]any) hookCandidateRank {
 // is the primary (own) store; a federated store erroring at claim time is
 // best-effort and falls through to re-selection, mirroring bestStoreWithWork's
 // emit-on-timeout contract so a flaky rig store can't wedge the claim.
-func claimStoreWithFallback(command string, stores []hookStore, selected, primary hookStore, run hookStoreRunner) (string, hookStore, error) {
+//
+// # One leg means nothing to fall back TO, so there is nothing to re-validate
+//
+// The whole reason to re-read is the LATER store: draining as "no work" when a
+// federated peer still has ready routed work is the strand this exists to
+// prevent. A single-leg fan-out — every federated city after S3, where the
+// primary's reader answers for the whole plan — has no later store, so the
+// second read can only pay another full city-wide query for a row the claim
+// itself re-checks anyway (`bd update --claim` skips rows it cannot take). On
+// mc's topology that read is the more expensive half of the claim.
+//
+// discovered is the output selection already read from this store, moments ago.
+func claimStoreWithFallback(command string, stores []hookStore, selected, primary hookStore, discovered string, run hookStoreRunner) (string, hookStore, error) {
+	if len(stores) == 1 {
+		return discovered, selected, nil
+	}
 	selectedOut, err := run(hookStoreCommand(selected, command), selected.dir, selected.env)
 	if err != nil {
 		if sameHookStore(selected, primary) {
@@ -505,6 +542,22 @@ func claimStoreWithFallback(command string, stores []hookStore, selected, primar
 		return selectedOut, selected, nil
 	}
 	return bestStoreWithWork(command, stores, primary, run)
+}
+
+// hookClaimReadsPerTick counts the work-query runs one claim attempt performs
+// over a given leg set: one to select, and one to re-validate unless there is
+// nothing to fall back to. It exists so the cost this slice removes is asserted
+// rather than described (TestFederatedClaimTickIssuesOneWorkQueryRun).
+//
+// It is a CEILING, not a measurement. A tier-0 hit in the primary store
+// short-circuits bestStoreWithWork before the later legs run, and each RUN is
+// itself a tier ladder that exits on its first hit — so a real tick reads this
+// many times or fewer, never more. Do not quote it as an observed number.
+func hookClaimReadsPerTick(stores []hookStore) int {
+	if len(stores) == 1 {
+		return 1
+	}
+	return len(stores) + 1
 }
 
 // isZeroHookStore reports whether s is the zero hookStore that bestStoreWithWork

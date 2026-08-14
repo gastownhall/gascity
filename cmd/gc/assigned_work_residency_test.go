@@ -422,7 +422,7 @@ func TestRegisteredControllerRoutesAnswerResidencyWithoutASecondOpen(t *testing.
 	seedNoRoutes(t, cityPath) // the one-shot funnel says "no split"
 	binding := beads.NewMemStore()
 	routes := splitRoutes(binding)
-	registerResidencyRoutes(cityPath, routes)
+	registerResidencyRoutes(cityPath, routes, nil)
 	t.Cleanup(func() { unregisterResidencyRoutes(cityPath, routes) })
 
 	work := beads.NewMemStore()
@@ -461,8 +461,8 @@ func TestUnregisterResidencyRoutesOnlyDropsItsOwnRegistration(t *testing.T) {
 	winnerBinding := beads.NewMemStore()
 	winner := splitRoutes(winnerBinding)
 
-	registerResidencyRoutes(cityPath, loser)
-	registerResidencyRoutes(cityPath, winner)
+	registerResidencyRoutes(cityPath, loser, nil)
+	registerResidencyRoutes(cityPath, winner, nil)
 	t.Cleanup(func() { unregisterResidencyRoutes(cityPath, winner) })
 
 	// The loser's shutdown defer runs after the winner has registered.

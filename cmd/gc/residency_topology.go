@@ -64,26 +64,25 @@ func cliResidencyTopology(cityPath string, cfg *config.City, work beads.Store, r
 }
 
 // residencyTopology builds the controller's topology from the binding it opened
-// at boot and the stores it supervises.
+// at boot, its city work store, and the rig legs it is TOLD are serving.
 //
-// # It currently includes SUSPENDED rigs, and S3 must fix that before consuming it
+// # The suspension frame is a parameter, and that is load-bearing
 //
-// rigBeadStores() is every rig the runtime holds open, suspended or not. The
-// census path today does not read it raw: buildDesiredState computes
-// suspendedRigPaths (build_desired_state.go:401) and threads it into
-// collectAllOpenSessionInfos, which is what keeps a suspended rig out of the
-// scan. This constructor has no suspension frame to thread, so a Topology built
-// here carries the suspended rig as an ordinary FederationTail leg.
+// rigBeadStores() is every rig the runtime holds open, suspended or not, and a
+// suspended rig is routinely DARK — its store is an unavailableStore whose every
+// read returns the open error. Planning a census over it makes each result
+// Partial, and Partial means retain-don't-reap: one suspended rig would pin the
+// whole fleet's sessions against every drain and reap decision. So the serving
+// set arrives from the caller that already computed it
+// (buildSuspendedRigPathsForCity, threaded through the census arms) rather than
+// being re-derived here: the constructor is told, it does not decide.
 //
-// That is harmless while nothing consumes it — S0 changes no behavior — and it
-// is a REGRESSION the moment S3 routes the census through Plan(Census): a rig
-// suspended because it is dark would fail its leg, mark every census result
-// Partial, and trip the retain-don't-reap rule fleet-wide. S3 must pass the
-// suspension frame in (excluding suspended rigs from the map it hands here, the
-// "it is told, it does not decide" contract) before the first consumer lands.
-func (cr *CityRuntime) residencyTopology() storeref.Topology {
+// MintsReserved stays false for the same reason it does everywhere else —
+// nothing in this build verifies a binding's mint prefix — so the residence
+// probe stays in every plan.
+func (cr *CityRuntime) residencyTopology(servingRigs map[string]beads.Store) storeref.Topology {
 	bindings, refused := residencyBindingsFromRoutes(cr.storageRoutes)
-	return assembleResidencyTopology(cr.cfg, cr.cityBeadStore(), cr.rigBeadStores(), bindings, refused)
+	return assembleResidencyTopology(cr.cfg, cr.cityBeadStore(), servingRigs, bindings, refused)
 }
 
 // residencyTopologyForCity builds a topology over the caller's own opened work
@@ -100,11 +99,36 @@ func (cr *CityRuntime) residencyTopology() storeref.Topology {
 // binding root, a duplicate managed-Dolt server or a second sqlite writer,
 // which is a worse bug than the blindness this closes.
 func residencyTopologyForCity(cityPath string, cfg *config.City, work beads.Store, rigs map[string]beads.Store) storeref.Topology {
-	if routes, ok := registeredResidencyRoutes(cityPath); ok {
-		bindings, refused := residencyBindingsFromRoutes(routes)
+	if entry, ok := registeredResidencyEntry(cityPath); ok {
+		bindings, refused := residencyBindingsFromRoutes(entry.routes)
 		return assembleResidencyTopology(cfg, work, rigs, bindings, refused)
 	}
 	return cliResidencyTopology(cityPath, cfg, work, rigs)
+}
+
+// registeredCityWorkStore returns the CITY WORK store the runtime serving
+// cityPath opened at boot, or nil when no runtime here serves that city.
+//
+// The census needs it because the store its arms are HANDED is the sessions
+// leg, which on a converged split is the binding — and a census whose work leg
+// is the binding is the E2 dual role: the binding stands in for the city work
+// store, and a city-scope routed WORK bead is then in no leg at all (D6,
+// ga-88mxz). Naming both requires the work store, and reopening it from
+// cityPath would put a second handle on the work root, which is a worse bug
+// than the blindness it closes — the same argument that made the binding half a
+// registration rather than a funnel call.
+//
+// It is a func rather than a beads.Store because the runtime registers under
+// the controller lock, and its controllerState (which owns the cached city
+// store) is installed a few statements later. Reading the accessor at census
+// time rather than at registration time means the registration cannot capture a
+// nil.
+func registeredCityWorkStore(cityPath string) beads.Store {
+	entry, ok := registeredResidencyEntry(cityPath)
+	if !ok || entry.work == nil {
+		return nil
+	}
+	return entry.work()
 }
 
 // registerResidencyRoutes records the routes a long-running runtime opened at
@@ -129,16 +153,18 @@ func residencyTopologyForCity(cityPath string, cfg *config.City, work beads.Stor
 // stays open, and the 21 non-test sites that call cliStorageRoutes directly
 // keep using it. Neutralizing the funnel is not this slice's scope; keeping the spine off
 // it is.
-func registerResidencyRoutes(cityPath string, routes *storageRoutes) {
+// work is the runtime's city WORK-store accessor, read lazily (see
+// registeredCityWorkStore); pass nil from a caller that has none.
+func registerResidencyRoutes(cityPath string, routes *storageRoutes, work func() beads.Store) {
 	if cityPath == "" {
 		return
 	}
 	key := filepath.Clean(cityPath)
 	residencyRoutesMu.Lock()
 	if residencyRoutesByCity == nil {
-		residencyRoutesByCity = make(map[string]*storageRoutes, 1)
+		residencyRoutesByCity = make(map[string]residencyRegistration, 1)
 	}
-	residencyRoutesByCity[key] = routes
+	residencyRoutesByCity[key] = residencyRegistration{routes: routes, work: work}
 	residencyRoutesMu.Unlock()
 	dropCLIResidencyBindings(key)
 }
@@ -161,30 +187,38 @@ func unregisterResidencyRoutes(cityPath string, routes *storageRoutes) {
 	}
 	key := filepath.Clean(cityPath)
 	residencyRoutesMu.Lock()
-	if current, ok := residencyRoutesByCity[key]; ok && current == routes {
+	if current, ok := residencyRoutesByCity[key]; ok && current.routes == routes {
 		delete(residencyRoutesByCity, key)
 	}
 	residencyRoutesMu.Unlock()
 	dropCLIResidencyBindings(key)
 }
 
-// registeredResidencyRoutes reports the runtime-registered routes for a city.
+// residencyRegistration is what one long-running runtime declares about a city:
+// the class routes it opened at boot, and the accessor for the city WORK store
+// it supervises.
+type residencyRegistration struct {
+	routes *storageRoutes
+	work   func() beads.Store
+}
+
+// registeredResidencyEntry reports the runtime-registered stores for a city.
 // The bool distinguishes "this process serves the city and relocates nothing"
 // (registered nil routes) from "no runtime here", which is what keeps a
 // single-store controller off the one-shot funnel entirely.
-func registeredResidencyRoutes(cityPath string) (*storageRoutes, bool) {
+func registeredResidencyEntry(cityPath string) (residencyRegistration, bool) {
 	if cityPath == "" {
-		return nil, false
+		return residencyRegistration{}, false
 	}
 	residencyRoutesMu.Lock()
 	defer residencyRoutesMu.Unlock()
-	routes, ok := residencyRoutesByCity[filepath.Clean(cityPath)]
-	return routes, ok
+	entry, ok := residencyRoutesByCity[filepath.Clean(cityPath)]
+	return entry, ok
 }
 
 var (
 	residencyRoutesMu     sync.Mutex
-	residencyRoutesByCity map[string]*storageRoutes
+	residencyRoutesByCity map[string]residencyRegistration
 )
 
 // cliResidencyBindingsEntry is one city's resolved bindings, computed at most
@@ -259,6 +293,18 @@ func dropCLIResidencyBindings(key string) {
 // code describe the whole split this build serves (five classes, one binding)
 // and a per-class fan-out it does not (one class each). The tripwire that this
 // build produces only the former lives in the constructors' test, in one place.
+//
+// # Why a map keyed by beads.Store is safe HERE and is not in the resolver
+//
+// storeref.dedupeLegs cannot key a map on a store — beads.Store is an interface,
+// and an implementation whose dynamic type carries a slice is neither hashable
+// nor ==-able, so a caller's store panics it. This map is confined to the
+// CONSTRUCTORS: every value in it comes from routes.storeFor, which returns what
+// storage boot opened — a *SQLiteStore, a *BdStore, a *CachingStore or a
+// refusedClassStore, all pointer-typed and therefore reference-identified. Same
+// confinement for relocatedGraphLegFrom's `binding == cityStore`. A route that
+// ever yields a value-typed store makes both of these the resolver's bug, one
+// file over; reuse storeref's identity-based set at that point.
 func residencyBindingsFromRoutes(routes *storageRoutes) ([]storeref.ClassBinding, error) {
 	byStore := map[beads.Store][]coordclass.Class{}
 	var order []beads.Store
@@ -302,6 +348,19 @@ func residencyBindingsFor(order []beads.Store, byStore map[beads.Store][]coordcl
 	}
 	sort.SliceStable(bindings, func(i, j int) bool { return bindings[i].Leg.Ref < bindings[j].Leg.Ref })
 	return bindings, refused
+}
+
+// infrastructureClasses is the class set a whole split relocates: every
+// coordination class but work. Derived from coordclass rather than listed, so a
+// sixth class joins every binding the day it is declared.
+func infrastructureClasses() []coordclass.Class {
+	classes := make([]coordclass.Class, 0, len(coordclass.Classes()))
+	for _, class := range coordclass.Classes() {
+		if class.IsInfrastructure() {
+			classes = append(classes, class)
+		}
+	}
+	return classes
 }
 
 // reservedPrefixesFor returns the reserved id prefixes a class set mints.

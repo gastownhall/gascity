@@ -1,6 +1,17 @@
 # residency-boundary baseline: path <TAB> function <TAB> pattern <TAB> count.
 # SHRINK ONLY. Regenerate when a migration slice RETIRES sites; growth is a
 # new blind reader and the check refuses it. See scripts/check-residency-boundary.sh.
+#
+# Regenerate with BOTH emitters, or the halves disagree and one silently wins:
+#   scripts/check-residency-boundary.sh --emit-baseline          # the grep rows
+#   RESIDENCY_BASELINE_EMIT=1 go test ./scripts -v \
+#     -run TestResidencyResolverBoundary                         # the ast: rows
+#
+# A row here is a CENSUS entry, not a verdict. Some are genuine blind readers
+# awaiting a migration slice; others are sanctioned shapes whose growth is still
+# worth reviewing — internal/api/residency_by_id.go's three []storeref.Leg
+# returners are the WorkAxisRouter the resolver itself declares, and
+# c:storeref.EachLeg's two entries are the enumeration seam's only consumers.
 cmd/gc/api_state.go	BeadStores	a:BeadStores	1
 cmd/gc/api_state.go	BeadStores	ast:returns-store-list	1
 cmd/gc/api_state.go	beadEventStoresLocked	ast:returns-store-list	1
@@ -8,10 +19,7 @@ cmd/gc/api_state.go	beadEventStoresLocked	c:beads.Store-literal	1
 cmd/gc/api_state.go	buildStores	ast:returns-store-list	1
 cmd/gc/api_state.go	reconcileExecutionCompletions	c:beads.Store-literal	1
 cmd/gc/bd_relocated_classes.go	relocatedBeadClasses	d:ReservedClassPrefix	1
-cmd/gc/build_desired_state.go	collectAllOpenSessionInfos	a:coordClassStoreCandidates	1
-cmd/gc/build_desired_state.go	collectAssignedWorkBeadsWithStores	a:coordClassStoreCandidates	1
 cmd/gc/build_desired_state.go	collectAssignedWorkBeadsWithStores	ast:returns-store-list	1
-cmd/gc/build_desired_state.go	collectOpenUnassignedRoutedWork	a:coordClassStoreCandidates	1
 cmd/gc/build_desired_state.go	collectOpenUnassignedRoutedWork	ast:returns-store-list	1
 cmd/gc/by_id_store_route.go	classRouteCandidates	ast:returns-store-list	1
 cmd/gc/by_id_store_route.go	classRouteCandidates	b:storeref.ClassCandidates	1
@@ -19,6 +27,7 @@ cmd/gc/by_id_store_route.go	classRouteCandidates	c:beads.Store-literal	1
 cmd/gc/by_id_store_route.go	classRouteCandidates	d:ReservedClassPrefix	1
 cmd/gc/by_id_store_route.go	classRoutedStoreForID	b:graphClassBinding	1
 cmd/gc/by_id_store_route.go	classRoutedStoreForID	d:bdIDIsClassReserved	1
+cmd/gc/census_residency.go	censusLegCandidates	c:storeref.EachLeg	1
 cmd/gc/city_runtime.go	beadReconcileTick	a:rigBeadStores	1
 cmd/gc/city_runtime.go	buildStandaloneRigStores	ast:returns-store-list	1
 cmd/gc/city_runtime.go	openStandaloneRigStores	ast:returns-store-list	1
@@ -34,7 +43,6 @@ cmd/gc/city_runtime.go	syncBeadsAndUpdateIndex	a:rigBeadStores	1
 cmd/gc/city_runtime.go	tick	a:rigBeadStores	4
 cmd/gc/claim_class_route.go	holds	d:bdIDIsClassReserved	1
 cmd/gc/claim_class_route.go	hookClaimClassRouteForCity	b:graphClassBinding	1
-cmd/gc/class_store.go	cityQueryTopology	b:graphClassBinding	1
 cmd/gc/class_store.go	graphClassBinding	b:graphClassBinding	1
 cmd/gc/class_store.go	graphClassBinding	b:routes.storeFor	1
 cmd/gc/class_store.go	resolveClassStore	b:routes.storeFor	1
@@ -73,10 +81,9 @@ cmd/gc/order_store.go	appendOrdersSweepStore	ast:returns-store-list	1
 cmd/gc/order_store.go	orderTrackingSweepStoresForConfigTargets	ast:returns-store-list	1
 cmd/gc/order_store.go	orderTrackingSweepStoresFromTargets	ast:returns-store-list	1
 cmd/gc/order_store.go	rawOrderStores	ast:returns-store-list	1
+cmd/gc/ready_federation.go	readyLegsForTopology	c:storeref.EachLeg	1
 cmd/gc/ready_federation.go	readyRigLegStores	ast:returns-store-list	1
-cmd/gc/ready_federation.go	relocatedGraphLegStore	b:graphClassBinding	1
 cmd/gc/route_recovery.go	recoverUnroutedWorkRoutes	a:rigBeadStores	1
-cmd/gc/session_beads.go	coordClassStoreCandidates	a:coordClassStoreCandidates	1
 internal/api/dashport_support.go	BeadStores	a:BeadStores	1
 internal/api/dashport_support.go	BeadStores	ast:returns-store-list	1
 internal/api/handler_agents.go	findActiveBeadForAssigneesWithFreshness	a:BeadStores	1
@@ -95,6 +102,9 @@ internal/api/huma_handlers_convoys.go	humaHandleConvoyDelete	a:BeadStores	1
 internal/api/huma_handlers_convoys.go	humaHandleConvoyGet	a:BeadStores	1
 internal/api/huma_handlers_convoys.go	humaHandleConvoyList	a:BeadStores	1
 internal/api/huma_handlers_convoys.go	humaHandleConvoyRemove	a:BeadStores	1
+internal/api/residency_by_id.go	WorkLegsForID	ast:returns-store-list	1
+internal/api/residency_by_id.go	configuredPrefixLegs	ast:returns-store-list	1
 internal/api/residency_by_id.go	resolveLegByConfiguredIDPrefix	d:IDInNamespace	1
 internal/api/residency_by_id.go	unroutedWorkLegs	a:BeadStores	1
+internal/api/residency_by_id.go	unroutedWorkLegs	ast:returns-store-list	1
 internal/api/state.go	(file-scope)	a:BeadStores	1

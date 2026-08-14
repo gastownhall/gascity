@@ -115,8 +115,16 @@ func assignedWorkPlanForSessionInfo(cityPath string, cfg *config.City, store bea
 // binding's ref, and answering "no refs" there would drop every claim-holder on
 // that city into the no-wake-reason drain — the failure the refusal is supposed
 // to prevent, delivered by the guard against it.
+//
+// The work leg comes from censusWorkLeg, NOT from the caller's leading store,
+// and that is load-bearing: this set is matched against refs the CENSUS emitted,
+// and the census resolves its work leg the same way. Taking the caller's leading
+// store here would, on the reconciler's plane, make the work leg and the binding
+// the same store — collapsing their two refs into one — while the census (which
+// has the runtime's real work store) emitted both. Every binding-resident claim
+// would then be collected and rejected.
 func assignedWorkClaimRefs(cityPath string, cfg *config.City, leading beads.Store) []string {
-	refs := residencyTopologyForCity(cityPath, cfg, leading, nil).ClaimRefs()
+	refs := residencyTopologyForCity(cityPath, cfg, censusWorkLeg(cityPath, leading), nil).ClaimRefs()
 	out := make([]string, 0, len(refs))
 	for _, ref := range refs {
 		out = append(out, string(ref))

@@ -321,7 +321,7 @@ func TestCollectAllOpenSessionInfos(t *testing.T) {
 			t.Fatalf("close session bead: %v", err)
 		}
 
-		infos, err := collectAllOpenSessionInfos(&config.City{}, cityStore, nil, nil)
+		infos, err := collectAllOpenSessionInfos("", &config.City{}, cityStore, nil, nil)
 		if err != nil {
 			t.Fatalf("collectAllOpenSessionInfos: %v", err)
 		}
@@ -354,7 +354,7 @@ func TestCollectAllOpenSessionInfos(t *testing.T) {
 		}
 		store := &partialSessionListStore{MemStore: backing}
 
-		infos, err := collectAllOpenSessionInfos(&config.City{}, store, nil, nil)
+		infos, err := collectAllOpenSessionInfos("", &config.City{}, store, nil, nil)
 		if err == nil {
 			t.Fatal("collectAllOpenSessionInfos returned nil error on a partial-result store")
 		}
@@ -373,6 +373,12 @@ func TestCollectAllOpenSessionInfos(t *testing.T) {
 		rigPath := filepath.Clean("/c/rigs/rig-A")
 		cfg := &config.City{Rigs: []config.Rig{{Name: "rig-A", Path: rigPath}}}
 
+		// DISTINCT id sequences. The session census folds first-leg-wins by id
+		// (a migrated city holds the same session bead in the binding and in the
+		// work ledger, and counting it twice reaps a live worker), and two bare
+		// MemStores both mint "gc-1" — a fixture collision, not two sessions.
+		// Real stores cannot collide: config.ValidateRigs rejects duplicate
+		// prefixes.
 		cityStore := beads.NewMemStore()
 		cityBead, err := cityStore.Create(beads.Bead{
 			Status: "open", Type: sessionBeadType,
@@ -381,7 +387,7 @@ func TestCollectAllOpenSessionInfos(t *testing.T) {
 		if err != nil {
 			t.Fatalf("create city session bead: %v", err)
 		}
-		rigStore := beads.NewMemStore()
+		rigStore := beads.NewMemStoreFrom(100, nil, nil)
 		if _, err := rigStore.Create(beads.Bead{
 			Status: "open", Type: sessionBeadType,
 			Metadata: map[string]string{"template": "rig-A/worker", "state": "active"},
@@ -391,7 +397,7 @@ func TestCollectAllOpenSessionInfos(t *testing.T) {
 		rigStores := map[string]beads.Store{"rig-A": rigStore}
 
 		// Control: with the rig live, both sessions are collected.
-		liveInfos, err := collectAllOpenSessionInfos(cfg, cityStore, rigStores, nil)
+		liveInfos, err := collectAllOpenSessionInfos("", cfg, cityStore, rigStores, nil)
 		if err != nil {
 			t.Fatalf("collectAllOpenSessionInfos (live rig): %v", err)
 		}
@@ -401,7 +407,7 @@ func TestCollectAllOpenSessionInfos(t *testing.T) {
 
 		// Suspending the rig drops its store from the fan-out.
 		suspended := map[string]bool{rigPath: true}
-		infos, err := collectAllOpenSessionInfos(cfg, cityStore, rigStores, suspended)
+		infos, err := collectAllOpenSessionInfos("", cfg, cityStore, rigStores, suspended)
 		if err != nil {
 			t.Fatalf("collectAllOpenSessionInfos (suspended rig): %v", err)
 		}
@@ -2103,7 +2109,7 @@ func TestCollectAssignedWorkBeads_PreservesPartialInProgressSurvivors(t *testing
 		t.Fatalf("reload work bead: %v", err)
 	}
 
-	got, stores, storeRefs, _, partial := collectAssignedWorkBeadsWithStores(&config.City{}, store, nil, nil, nil)
+	got, stores, storeRefs, _, partial := collectAssignedWorkBeadsWithStores("", &config.City{}, store, nil, nil, nil)
 	if !partial {
 		t.Fatal("partial = false, want true")
 	}
@@ -2134,7 +2140,7 @@ func TestCollectAssignedWorkBeads_PreservesPartialReadySurvivors(t *testing.T) {
 		t.Fatalf("create work bead: %v", err)
 	}
 
-	got, stores, storeRefs, _, partial := collectAssignedWorkBeadsWithStores(&config.City{}, store, nil, nil, nil)
+	got, stores, storeRefs, _, partial := collectAssignedWorkBeadsWithStores("", &config.City{}, store, nil, nil, nil)
 	if !partial {
 		t.Fatal("partial = false, want true")
 	}
@@ -2181,7 +2187,7 @@ func TestCollectAssignedWorkBeads_SkipsReadyProbeForInProgressAssignee(t *testin
 	}
 	snapshot := newSessionBeadSnapshot([]beads.Bead{session})
 
-	got, _, _, _, partial := collectAssignedWorkBeadsWithStores(&config.City{}, store, nil, nil, snapshot)
+	got, _, _, _, partial := collectAssignedWorkBeadsWithStores("", &config.City{}, store, nil, nil, snapshot)
 	if partial {
 		t.Fatal("collectAssignedWorkBeadsWithStores reported partial results")
 	}
@@ -2227,6 +2233,7 @@ func TestCollectAssignedWorkBeads_SkipsCityReadyProbeForRigInProgressAssignee(t 
 	snapshot := newSessionBeadSnapshot([]beads.Bead{session})
 
 	got, _, _, _, partial := collectAssignedWorkBeadsWithStores(
+		"",
 		&config.City{Rigs: []config.Rig{{Name: "repo", Path: "repo"}}},
 		cityStore,
 		map[string]beads.Store{"repo": rigStore},
@@ -2298,7 +2305,7 @@ func TestCollectAssignedWorkBeads_ReadyProbeStillRunsForOtherAssignees(t *testin
 	}
 	snapshot := newSessionBeadSnapshot([]beads.Bead{activeSession, readySession})
 
-	got, _, _, _, partial := collectAssignedWorkBeadsWithStores(&config.City{}, store, nil, nil, snapshot)
+	got, _, _, _, partial := collectAssignedWorkBeadsWithStores("", &config.City{}, store, nil, nil, snapshot)
 	if partial {
 		t.Fatal("collectAssignedWorkBeadsWithStores reported partial results")
 	}
@@ -2362,7 +2369,7 @@ func TestCollectAssignedWorkBeads_ReadyProbeIncludesActiveSessionAssignees(t *te
 	}
 	snapshot := newSessionBeadSnapshot([]beads.Bead{activeSession, sleepySession})
 
-	got, _, _, _, partial := collectAssignedWorkBeadsWithStores(&config.City{}, store, nil, nil, snapshot)
+	got, _, _, _, partial := collectAssignedWorkBeadsWithStores("", &config.City{}, store, nil, nil, snapshot)
 	if partial {
 		t.Fatal("collectAssignedWorkBeadsWithStores reported partial results")
 	}
@@ -2433,6 +2440,7 @@ func TestCollectAssignedWorkBeads_ReadyProbeExcludesFutureNamedSessionRuntimeAss
 	}
 
 	got, stores, storeRefs, _, partial := collectAssignedWorkBeadsWithStores(
+		"",
 		cfg,
 		cityStore,
 		map[string]beads.Store{"repo": rigStore},
@@ -2484,6 +2492,7 @@ func TestCollectAssignedWorkBeadsWithStores_TracksRigStore(t *testing.T) {
 	}
 
 	got, stores, storeRefs, _, partial := collectAssignedWorkBeadsWithStores(
+		"",
 		&config.City{Rigs: []config.Rig{{Name: "repo", Path: "/repo"}}},
 		cityStore,
 		map[string]beads.Store{"repo": rigStore},
@@ -2544,6 +2553,7 @@ func TestCollectAssignedWorkBeadsWithStores_PreservesCrossStoreIDCollisions(t *t
 	}
 
 	got, stores, storeRefs, _, partial := collectAssignedWorkBeadsWithStores(
+		"",
 		&config.City{Rigs: []config.Rig{{Name: "repo", Path: "/repo"}}},
 		cityStore,
 		map[string]beads.Store{"repo": rigStore},
@@ -2629,6 +2639,7 @@ func TestCollectAssignedWorkBeadsWithStores_ReadinessIsStoreScoped(t *testing.T)
 	}
 
 	got, _, _, readyAssigned, partial := collectAssignedWorkBeadsWithStores(
+		"",
 		&config.City{Rigs: []config.Rig{{Name: "repo", Path: "/repo"}}},
 		cityStore,
 		map[string]beads.Store{"repo": rigStore},
@@ -2720,6 +2731,7 @@ func TestCollectAssignedWorkBeadsWithStores_SkipSetIsStoreScopedAcrossSameID(t *
 	})
 
 	got, _, _, _, partial := collectAssignedWorkBeadsWithStores(
+		"",
 		&config.City{Rigs: []config.Rig{{Name: "repo", Path: "/repo"}}},
 		cityStore,
 		map[string]beads.Store{"repo": rigStore},
@@ -12397,6 +12409,7 @@ func TestCollectOpenUnassignedRoutedWorkKeepsSameIDAcrossStoreScopes(t *testing.
 	}
 
 	work, _, refs, _ := collectOpenUnassignedRoutedWork(
+		"",
 		cfg,
 		cityStore,
 		map[string]beads.Store{"city": rigStore},
@@ -12459,9 +12472,15 @@ func TestCollectOpenUnassignedRoutedWorkReportsCanonicalStoreRefs(t *testing.T) 
 	}
 	var stderr bytes.Buffer
 	collectOpenUnassignedRoutedWork(
+		"",
 		cfg,
-		listFailStore{},
-		map[string]beads.Store{"fixture": listFailStore{}},
+		// Two DISTINCT failing stores. A zero-value listFailStore{} used twice is
+		// == to itself, so the census leg dedupe (a binding that resolved back to
+		// the work store must not be read twice) would legitimately collapse them
+		// into one leg and the rig diagnostic would never be emitted. Every
+		// production store is reference-identified; the fixture has to be too.
+		listFailStore{Store: beads.NewMemStore()},
+		map[string]beads.Store{"fixture": listFailStore{Store: beads.NewMemStore()}},
 		nil,
 		&stderr,
 	)

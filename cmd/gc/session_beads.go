@@ -961,39 +961,19 @@ func compactSessionAssignmentIdentifiers(raw []string) []string {
 	return identifiers
 }
 
-// classStoreCandidate is one store in a per-class candidate fan-out, paired
-// with the store-ref label the controller records for beads it owns. The empty
-// ref is the city's canonical store-ref for assigned-work index alignment; the
-// session and unassigned-routed arms label the city store "city".
+// classStoreCandidate is one leg of a census fan-out, paired with the store-ref
+// label the controller records for beads it owns. The legs, their order and
+// their error policy come from Plan(Census) (census_residency.go); the ref
+// vocabulary is the arm's.
+//
+// onError travels with the leg so a consumer that wants to distinguish "a rig
+// went dark" from "the binding went dark" can. Today every arm folds either into
+// the same partial flag, which is the SAFE direction for all of them — a partial
+// census means retain rather than reap — so no arm reads it yet.
 type classStoreCandidate struct {
-	store beads.Store
-	ref   string
-}
-
-// coordClassStoreCandidates builds the index-aligned per-class candidate
-// fan-out the controller reconciler iterates each tick: the city store first
-// (labeled with cityRef), then every non-suspended configured rig store in
-// cfg.Rigs order. It is the single source of truth for the "city + rigs"
-// candidate list that the session-iteration arm and the work-collection arms
-// each build; both arms feed the same store today (identity), but expressing
-// them through one named builder keeps the work-vs-session split structurally
-// explicit and the workBeads/workStores slices per-bead aligned. cityRef
-// distinguishes the assigned-work arm (which records the city store under the
-// empty ref) from the session and unassigned arms (which label it "city").
-func coordClassStoreCandidates(cfg *config.City, cityStore beads.Store, rigStores map[string]beads.Store, suspendedRigPaths map[string]bool, cityRef string) []classStoreCandidate {
-	candidates := []classStoreCandidate{{store: cityStore, ref: cityRef}}
-	if cfg == nil {
-		return candidates
-	}
-	for _, rig := range cfg.Rigs {
-		if suspendedRigPaths[filepath.Clean(rig.Path)] {
-			continue
-		}
-		if s, ok := rigStores[rig.Name]; ok {
-			candidates = append(candidates, classStoreCandidate{store: s, ref: rig.Name})
-		}
-	}
-	return candidates
+	store   beads.Store
+	ref     string
+	onError storeref.ErrPolicy
 }
 
 // sweepAssignedWorkLegs runs visit over the leg set a session-retirement scan

@@ -2256,7 +2256,7 @@ func reconcileCities(
 		// replacement that LOSES this lock repoint the live city's release
 		// sweeps at a handle it is about to close. Same reason the socket is
 		// started after the lock rather than before it.
-		registerResidencyRoutes(path, cityRuntime.storageRoutes)
+		registerResidencyRoutes(path, cityRuntime.storageRoutes, cityRuntime.cityBeadStore)
 
 		// Start controller socket AFTER the alreadyRunning check so we
 		// never destroy a live city's socket or leak a listener.

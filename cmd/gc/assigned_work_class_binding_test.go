@@ -89,6 +89,43 @@ func TestSessionWakeFilterKeepsAClaimRecordedUnderTheBindingRef(t *testing.T) {
 	}
 }
 
+// The S3 row the one above pre-declared: the same claim under the binding's own
+// ref, seen from the RECONCILER'S plane — where the leading store IS the
+// binding, because buildDesiredState hands the census its sessions-class store.
+//
+// That combination is the one production actually runs, and it is where the ref
+// vocabulary can strand a claim: the census now labels binding-resident rows
+// "class:*", so if the accepted set is derived from a topology whose work leg is
+// ALSO the binding, the two collapse to one ref and the new label matches
+// nothing. A ref the census emits and the wake filter rejects is ga-whzrt with
+// the arrow reversed — the claim is collected and then dropped, and its holder
+// drains with no wake reason.
+func TestSessionWakeFilterKeepsABindingRefClaimOnTheReconcilerPlane(t *testing.T) {
+	cfg, cityPath, infos := rigScopedWakeFixture(t)
+	work := beads.NewMemStore()
+	binding := beads.NewMemStore()
+	routes := splitRoutes(binding)
+	registerResidencyRoutes(cityPath, routes, func() beads.Store { return work })
+	t.Cleanup(func() { unregisterResidencyRoutes(cityPath, routes) })
+
+	// Exactly what the census produces for this claim on this city.
+	candidates, err := censusStoreCandidates(cityPath, cfg, binding, nil, nil, censusRefBare)
+	if err != nil {
+		t.Fatalf("censusStoreCandidates: %v", err)
+	}
+	bindingRef := candidates[len(candidates)-1].ref
+	if bindingRef == "" {
+		t.Fatalf("the census labeled the binding leg %q; this row is about the DISTINCT label", bindingRef)
+	}
+	workBeads := []beads.Bead{{ID: "gcg-1", Status: "in_progress", Assignee: "test-city--worker-1"}}
+
+	kept, keptRefs := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, binding, infos, workBeads, []string{bindingRef})
+
+	if len(kept) != 1 || kept[0].ID != "gcg-1" || len(keptRefs) != 1 || keptRefs[0] != bindingRef {
+		t.Fatalf("filtered work = %#v refs = %#v, want the claim kept under %q — the census emits that ref and the filter must accept it", kept, keptRefs, bindingRef)
+	}
+}
+
 // Control: the same bead in the same arm, assigned to an unrelated identity. The
 // widening is COLLECTION only, so this must still be dropped — a different
 // outcome from the row above, which is what proves the keep is identity-scoped

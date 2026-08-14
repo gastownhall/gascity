@@ -43,6 +43,10 @@ const WorkRef StoreRef = ""
 // RigRef is the canonical ref of a rig work store.
 func RigRef(name string) StoreRef { return StoreRef("rig:" + strings.TrimSpace(name)) }
 
+// classRefPrefix is the binding family's marker, spelled once so ClassRef and
+// the scope predicates that read it back cannot drift apart.
+const classRefPrefix = "class:"
+
 // ClassRef is the canonical ref of the binding serving a class set.
 //
 // The token is the classes' initials in name order, which identifies a binding
@@ -68,7 +72,7 @@ func ClassRef(classes []coordclass.Class) StoreRef {
 		seen[n] = true
 		token.WriteString(n[:1])
 	}
-	return StoreRef("class:" + token.String())
+	return StoreRef(classRefPrefix + token.String())
 }
 
 // Leg is one store the resolver can name, with the id prefix it was CONFIGURED
@@ -156,16 +160,11 @@ func (t Topology) IsSingleStore() bool { return len(t.Bindings) == 0 }
 // dedupe needs the stores.
 func (t Topology) ClaimRefs() []StoreRef {
 	refs := []StoreRef{t.Work.Ref}
-	seen := map[beads.Store]bool{}
-	if t.Work.Store != nil {
-		seen[t.Work.Store] = true
-	}
+	var seen storeSet
+	seen.addIfNew(t.Work.Store)
 	for _, b := range t.orderedBindings() {
-		if b.Leg.Store != nil {
-			if seen[b.Leg.Store] {
-				continue
-			}
-			seen[b.Leg.Store] = true
+		if b.Leg.Store != nil && !seen.addIfNew(b.Leg.Store) {
+			continue
 		}
 		refs = append(refs, b.Leg.Ref)
 	}
