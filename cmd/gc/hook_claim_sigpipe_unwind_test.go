@@ -170,21 +170,25 @@ func TestRealClosedPipeKillsAnUnprotectedProcess(t *testing.T) {
 // TestMainIgnoresSIGPIPE pins the WIRING. The helper above calls ignoreSIGPIPE
 // explicitly, which proves the mechanism; this proves production actually
 // installs it, so the fix cannot be left defined-but-uncalled.
+//
+// It checks mainExitCode rather than main because the exit-bypass census
+// requires main's body to be exactly the os.Exit around mainExitCode — so
+// mainExitCode is where pre-dispatch startup work has to live.
 func TestMainIgnoresSIGPIPE(t *testing.T) {
 	source, err := os.ReadFile("main.go")
 	if err != nil {
 		t.Fatalf("reading main.go: %v", err)
 	}
 	body := string(source)
-	start := strings.Index(body, "\nfunc main() {")
+	start := strings.Index(body, "\nfunc mainExitCode(")
 	if start < 0 {
-		t.Fatal("could not find func main in main.go")
+		t.Fatal("could not find func mainExitCode in main.go")
 	}
 	end := strings.Index(body[start+1:], "\nfunc ")
 	if end < 0 {
 		end = len(body) - start - 1
 	}
 	if !strings.Contains(body[start:start+1+end], "ignoreSIGPIPE()") {
-		t.Fatal("func main does not call ignoreSIGPIPE(); a closed stdout would kill gc mid-write and no claim unwind could run")
+		t.Fatal("mainExitCode does not call ignoreSIGPIPE(); a closed stdout would kill gc mid-write and no claim unwind could run")
 	}
 }

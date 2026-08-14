@@ -29,14 +29,17 @@ import (
 )
 
 func main() {
+	os.Exit(mainExitCode(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+// mainExitCode is the central process-entry funnel. main's body is required by
+// the exit-bypass census to be nothing but the os.Exit around this call, so any
+// work that must happen before dispatch belongs here rather than there.
+func mainExitCode(args []string, stdout, stderr io.Writer) int {
 	// Before any dispatch: a closed stdout/stderr must surface as an EPIPE the
 	// command can handle, not as a signal that kills gc mid-write. The claim
 	// path's delivery unwind depends on surviving that write.
 	ignoreSIGPIPE()
-	os.Exit(mainExitCode(os.Args[1:], os.Stdout, os.Stderr))
-}
-
-func mainExitCode(args []string, stdout, stderr io.Writer) int {
 	if handled, code := privateProductMetricsEntrypoint(args); handled {
 		return code
 	}
