@@ -59,6 +59,10 @@ func TestBDVersionPins(t *testing.T) {
 	if got, want := goModMatch[1], bdCurrentRef[:12]; got != want {
 		t.Fatalf("go.mod beads pseudo-version commit = %q, want BD_CURRENT_REF prefix %q", got, want)
 	}
+	integrationTest := readFile(t, root, "test/integration/integration_test.go")
+	if !strings.Contains(integrationTest, `const want = "`+bdCurrent+`"`) {
+		t.Fatalf("test/integration pinned beads version must equal deps.env BD_CURRENT_VERSION (%s)", bdCurrent)
+	}
 	dockerfile := readFile(t, root, "contrib/k8s/Dockerfile.agent")
 	if !strings.Contains(dockerfile, "ARG BD_SOURCE_REF="+bdCurrentRef) {
 		t.Fatalf("contrib/k8s/Dockerfile.agent BD_SOURCE_REF must equal deps.env BD_CURRENT_REF (%s)", bdCurrentRef)
