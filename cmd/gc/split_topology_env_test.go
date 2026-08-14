@@ -182,6 +182,13 @@ func newSplitEnvWith(t *testing.T, split bool, opts splitEnvOptions) splitEnv {
 		e.routes = splitEnvRoutes(e.class)
 	}
 	writeSplitTopologyCityConfig(t, cityPath, rigPath, split)
+	// The assigned-work spine resolves a city's bindings BY PATH, because its
+	// scans are free functions reached from both planes. Registering the routes
+	// this fixture staged is the same thing newCityRuntime does with the ones
+	// storageBootGate opened, so both subtests answer residency from the routes
+	// the env decided rather than from a second funnel.
+	registerResidencyRoutes(cityPath, e.routes)
+	t.Cleanup(func() { unregisterResidencyRoutes(cityPath) })
 	if opts.rig {
 		e.attachRigLeg(t, rigPath)
 	}

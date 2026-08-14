@@ -13,6 +13,16 @@ import (
 
 // The ga-whzrt rows: a claim a rig-scoped worker HOLDS on the leading
 // class-binding arm must reach the wake machinery, and nothing else must.
+//
+// S2 PORT: the arm's ref is no longer the classBindingAssignedWorkStoreRef
+// constant but whatever assignedWorkClaimRefs resolves for the city, and the
+// split is expressed as SERVED ROUTES rather than as a [storage] section in
+// cfg. Those are the same change: the constant was the empty string because the
+// reconciler's leading arm happens to be the binding, and the cfg shape gate
+// answered "no split" for a city whose section was deleted after it had served
+// one. Both facts now come from the routes.
+//
+// The rows themselves are unchanged, which is the point of a pin.
 
 func rigScopedWakeFixture(t *testing.T) (*config.City, string, []sessionpkg.Info) {
 	t.Helper()
@@ -43,16 +53,39 @@ func rigScopedWakeFixture(t *testing.T) (*config.City, string, []sessionpkg.Info
 // exact identity — so the wake filter must keep it.
 func TestSessionWakeFilterKeepsAClaimOnTheClassBindingArm(t *testing.T) {
 	cfg, cityPath, infos := rigScopedWakeFixture(t)
+	binding := beads.NewMemStore()
+	seedSplitRoutes(t, cityPath, binding)
 	work := []beads.Bead{{ID: "gcg-1", Status: "in_progress", Assignee: "test-city--worker-1"}}
-	refs := []string{classBindingAssignedWorkStoreRef}
+	refs := []string{""}
 
-	kept, keptRefs := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, infos, work, refs)
+	kept, keptRefs := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, binding, infos, work, refs)
 
 	if len(kept) != 1 || kept[0].ID != "gcg-1" {
 		t.Fatalf("filtered work = %#v, want the binding-resident claim kept", kept)
 	}
-	if len(keptRefs) != 1 || keptRefs[0] != classBindingAssignedWorkStoreRef {
+	if len(keptRefs) != 1 || keptRefs[0] != "" {
 		t.Fatalf("filtered refs = %#v, want the binding arm's ref preserved", keptRefs)
+	}
+}
+
+// The mixed-version row (§7 attack 2): the same claim recorded under the
+// BINDING's own ref rather than under the leading arm's "". Nothing emits that
+// ref today — the census records the binding arm as the city arm — but S3 makes
+// it a distinct census leg, and a city rolling from one binary to the other has
+// rows of both shapes in flight. One filter has to read both.
+func TestSessionWakeFilterKeepsAClaimRecordedUnderTheBindingRef(t *testing.T) {
+	cfg, cityPath, infos := rigScopedWakeFixture(t)
+	binding := beads.NewMemStore()
+	seedSplitRoutes(t, cityPath, binding)
+	work := []beads.Bead{{ID: "gcg-1", Status: "in_progress", Assignee: "test-city--worker-1"}}
+	refs := []string{"class:gmnos"}
+
+	// A work-led plane: the leading store is NOT the binding, so the binding
+	// carries its own ref and both spellings are in the accepted set.
+	kept, keptRefs := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, beads.NewMemStore(), infos, work, refs)
+
+	if len(kept) != 1 || kept[0].ID != "gcg-1" || len(keptRefs) != 1 || keptRefs[0] != "class:gmnos" {
+		t.Fatalf("filtered work = %#v refs = %#v, want the claim kept under the binding's own ref", kept, keptRefs)
 	}
 }
 
@@ -62,10 +95,12 @@ func TestSessionWakeFilterKeepsAClaimOnTheClassBindingArm(t *testing.T) {
 // and not a blanket "keep the leading arm".
 func TestSessionWakeFilterStillDropsAForeignClaimOnTheClassBindingArm(t *testing.T) {
 	cfg, cityPath, infos := rigScopedWakeFixture(t)
+	binding := beads.NewMemStore()
+	seedSplitRoutes(t, cityPath, binding)
 	work := []beads.Bead{{ID: "gcg-1", Status: "in_progress", Assignee: "test-city--someone-else"}}
-	refs := []string{classBindingAssignedWorkStoreRef}
+	refs := []string{""}
 
-	kept, _ := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, infos, work, refs)
+	kept, _ := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, binding, infos, work, refs)
 
 	if len(kept) != 0 {
 		t.Fatalf("filtered work = %#v, want a foreign assignee dropped", kept)
@@ -77,10 +112,12 @@ func TestSessionWakeFilterStillDropsAForeignClaimOnTheClassBindingArm(t *testing
 // session of the template on one another's stores.
 func TestSessionWakeFilterKeepsTemplateMatchesRigScoped(t *testing.T) {
 	cfg, cityPath, infos := rigScopedWakeFixture(t)
+	binding := beads.NewMemStore()
+	seedSplitRoutes(t, cityPath, binding)
 	work := []beads.Bead{{ID: "gcg-1", Status: "in_progress", Assignee: "riga/worker"}}
-	refs := []string{classBindingAssignedWorkStoreRef}
+	refs := []string{""}
 
-	kept, _ := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, infos, work, refs)
+	kept, _ := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, binding, infos, work, refs)
 
 	if len(kept) != 0 {
 		t.Fatalf("filtered work = %#v, want a template-key match to stay scoped to its rig store", kept)
@@ -93,12 +130,14 @@ func TestSessionWakeFilterKeepsTemplateMatchesRigScoped(t *testing.T) {
 // arm renders as "no-wake-reason" and recycles a live claim holder.
 func TestClassBindingClaimYieldsAnAssignedWorkWakeReason(t *testing.T) {
 	cfg, cityPath, infos := rigScopedWakeFixture(t)
+	binding := beads.NewMemStore()
+	seedSplitRoutes(t, cityPath, binding)
 	work := []beads.Bead{{ID: "gcg-1", Status: "in_progress", Assignee: "test-city--worker-1"}}
-	refs := []string{classBindingAssignedWorkStoreRef}
+	refs := []string{""}
 
-	kept, keptRefs := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, infos, work, refs)
+	kept, keptRefs := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, binding, infos, work, refs)
 	readyFlags := readyAssignedFlagsForBeads(
-		map[storeScopedBeadKey]bool{{StoreRef: classBindingAssignedWorkStoreRef, ID: "gcg-1"}: true},
+		map[storeScopedBeadKey]bool{{StoreRef: "", ID: "gcg-1"}: true},
 		kept, keptRefs)
 
 	input := buildAwakeInputFromReconciler(
@@ -123,20 +162,16 @@ func TestClassBindingClaimYieldsAnAssignedWorkWakeReason(t *testing.T) {
 // ledger a routed claim was written into.
 func TestReachableStoresScanTheClassBindingOnASplitCity(t *testing.T) {
 	cfg, cityPath, infos := rigScopedWakeFixture(t)
-	cfg.Storage = infraSplitConfig(filepath.Join(cityPath, "infra")).Storage
-	binding := beads.NewMemStore()   // the sessions/graph binding the reconciler leads with
-	rigStore := beads.NewMemStore()  // the rig work store
-	cityStore := beads.NewMemStore() // unrelated: proves the extra leg is the LEADING store, not a fan-out
+	binding := beads.NewMemStore()  // the sessions/graph binding the reconciler leads with
+	rigStore := beads.NewMemStore() // the rig work store
+	seedSplitRoutes(t, cityPath, binding)
 
-	stores, err := reachableStoresForSessionInfo(cityPath, cfg, binding, map[string]beads.Store{"riga": rigStore}, infos[0])
+	plan, err := assignedWorkPlanForSessionInfo(cityPath, cfg, binding, map[string]beads.Store{"riga": rigStore}, infos[0])
 	if err != nil {
-		t.Fatalf("reachableStoresForSessionInfo: %v", err)
+		t.Fatalf("assignedWorkPlanForSessionInfo: %v", err)
 	}
-	if len(stores) != 2 || stores[0] != rigStore || stores[1] != binding {
-		t.Fatalf("reachable stores = %#v, want [rig store, class binding] in that order", stores)
-	}
-	if sameStoreSet(stores, cityStore) {
-		t.Fatal("an unrelated store leaked into the scan")
+	if got := planStores(t, plan); !sameStores(got, rigStore, binding) {
+		t.Fatalf("reachable stores = %#v, want [rig store, class binding] in that order", got)
 	}
 }
 
@@ -144,23 +179,15 @@ func TestReachableStoresScanTheClassBindingOnASplitCity(t *testing.T) {
 // today. The extra leg is a property of the SPLIT, not a general widening.
 func TestReachableStoresStayRigScopedOnASingleStoreCity(t *testing.T) {
 	cfg, cityPath, infos := rigScopedWakeFixture(t)
+	seedNoRoutes(t, cityPath)
 	cityStore := beads.NewMemStore()
 	rigStore := beads.NewMemStore()
 
-	stores, err := reachableStoresForSessionInfo(cityPath, cfg, cityStore, map[string]beads.Store{"riga": rigStore}, infos[0])
+	plan, err := assignedWorkPlanForSessionInfo(cityPath, cfg, cityStore, map[string]beads.Store{"riga": rigStore}, infos[0])
 	if err != nil {
-		t.Fatalf("reachableStoresForSessionInfo: %v", err)
+		t.Fatalf("assignedWorkPlanForSessionInfo: %v", err)
 	}
-	if len(stores) != 1 || stores[0] != rigStore {
-		t.Fatalf("reachable stores = %#v, want only the rig store on a city that relocates nothing", stores)
+	if got := planStores(t, plan); !sameStores(got, rigStore) {
+		t.Fatalf("reachable stores = %#v, want only the rig store on a city that relocates nothing", got)
 	}
-}
-
-func sameStoreSet(stores []beads.Store, want beads.Store) bool {
-	for _, s := range stores {
-		if s == want {
-			return true
-		}
-	}
-	return false
 }

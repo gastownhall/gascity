@@ -259,6 +259,42 @@ func TestReaderAgreement(t *testing.T) {
 	}
 }
 
+// TestSweepAndDemandReadTheSameStores is the S2 half of the property: the
+// surface that COUNTS claimable work and the surface that SWEEPS an identity's
+// claims must read the same leg SET, or a claim lands somewhere no release, gate
+// or re-wake pass looks.
+//
+// It is asserted rather than assumed because the two used to be built by
+// different hands — the demand federation in one file, the retirement sweeps in
+// another, the drain-ack release in a third. Sharing planWorkFederation makes it
+// true by construction; this row is what fails if someone gives one of them its
+// own builder again.
+func TestSweepAndDemandReadTheSameStores(t *testing.T) {
+	for _, f := range allTopologies() {
+		if f.topo.Refused != nil {
+			continue
+		}
+		t.Run(f.name, func(t *testing.T) {
+			demand := mustPlan(t, RoutedWork{}, f.topo)
+			sweep := mustPlan(t, AssignedWork{}, f.topo)
+			if got, want := sweep.String(), demand.String(); got != want {
+				t.Fatalf("the assigned-work sweep reads\n %s\nwhile demand reads\n %s\n— a claim on a leg only one of them has is invisible to the other", got, want)
+			}
+
+			// Claim escalation is the deliberate ASYMMETRY of the intent pair:
+			// the same leg set, the opposite order, so a co-resident id is
+			// claimed where the reader serves it. Same set, different string.
+			escalation := mustPlan(t, AssignedWork{Purpose: AssignedWorkClaimEscalation}, f.topo)
+			if got, want := refSet(escalation), refSet(sweep); !equalStringSets(got, want) {
+				t.Fatalf("claim escalation reads legs %v and the sweep reads %v; a claim may only land where the sweep can see it", got, want)
+			}
+			if len(sweep.Legs) > 1 && escalation.String() == sweep.String() {
+				t.Fatal("claim escalation and the sweep render identically; the order asymmetry is a documented property of the pair and must stay visible")
+			}
+		})
+	}
+}
+
 // legThatContributed reports the first leg of a union plan that holds id — the
 // leg first-leg-wins attributes the row to.
 func legThatContributed(t *testing.T, p ResolvedPlan, id string) StoreRef {

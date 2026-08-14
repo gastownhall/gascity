@@ -753,11 +753,7 @@ func releaseUnexecutedClaimsForSession(cityPath, sessionName string, stderr io.W
 	if cfg != nil {
 		rigStores = buildStandaloneRigStores(cfg, cityPath, io.Discard)
 	}
-	var classStores []beads.Store
-	if binding, relocated := graphClassBinding(cliStorageRoutes(cityPath)); relocated { // residency:allow same binding probe `gc session close` uses to hand its release the graph leg
-		classStores = append(classStores, binding)
-	}
-	releaseUnexecutedClaimsOnDrainAck(store, rigStores, sessionBead, drainAckReleaseBudget, stderr, classStores...)
+	releaseUnexecutedClaimsOnDrainAck(cityPath, cfg, store, rigStores, sessionBead, drainAckReleaseBudget, stderr)
 }
 
 // drainAckReleaseBudget bounds the whole held-claim release pass.

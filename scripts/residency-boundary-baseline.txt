@@ -63,7 +63,6 @@ cmd/gc/cmd_convoy_dispatch.go	controlGraphBinding	b:graphClassBinding	1
 cmd/gc/cmd_convoy_dispatch.go	findUniqueBeadAcrossStoresView	a:openSourceWorkflowStores	1
 cmd/gc/cmd_convoy_dispatch.go	openSourceWorkflowStores	a:openSourceWorkflowStores	1
 cmd/gc/cmd_convoy_dispatch.go	runControlDispatcherWithStoreAndConfig	c:beads.Store-literal	1
-cmd/gc/cmd_session.go	cmdSessionClose	b:graphClassBinding	1
 cmd/gc/cmd_wait.go	loadWaitDependencyBead	a:convoyStoreCandidates	1
 cmd/gc/convergence_tick.go	buildConvergenceScopes	a:rigBeadStores	1
 cmd/gc/doctor_order_tracking_retention.go	Run	c:beads.Store-literal	1
@@ -78,18 +77,6 @@ cmd/gc/ready_federation.go	readyRigLegStores	ast:returns-store-list	1
 cmd/gc/ready_federation.go	relocatedGraphLegStore	b:graphClassBinding	1
 cmd/gc/route_recovery.go	recoverUnroutedWorkRoutes	a:rigBeadStores	1
 cmd/gc/session_beads.go	coordClassStoreCandidates	a:coordClassStoreCandidates	1
-cmd/gc/session_beads.go	reassignWorkAssignedToRetiredSessionBead	a:workAssignmentStores	1
-cmd/gc/session_beads.go	reassignWorkAssignedToRetiredSessionInfo	a:workAssignmentStores	1
-cmd/gc/session_beads.go	unclaimWorkAssignedToRetiredSessionBead	a:workAssignmentStores	1
-cmd/gc/session_beads.go	unclaimWorkAssignedToRetiredSessionInfo	a:workAssignmentStores	1
-cmd/gc/session_beads.go	workAssignmentStores	a:workAssignmentStores	1
-cmd/gc/session_beads.go	workAssignmentStores	ast:returns-store-list	1
-cmd/gc/session_beads.go	workAssignmentStores	c:beads.Store-literal	1
-cmd/gc/session_reconciler.go	reachableStoresForSession	a:workAssignmentStores	1
-cmd/gc/session_reconciler.go	reachableStoresForSession	ast:returns-store-list	1
-cmd/gc/session_reconciler.go	reachableStoresForSession	c:beads.Store-literal	2
-cmd/gc/session_reconciler.go	reachableStoresForSessionInfo	a:workAssignmentStores	3
-cmd/gc/session_reconciler.go	reachableStoresForSessionInfo	ast:returns-store-list	1
 internal/api/dashport_support.go	BeadStores	a:BeadStores	1
 internal/api/dashport_support.go	BeadStores	ast:returns-store-list	1
 internal/api/handler_agents.go	findActiveBeadForAssigneesWithFreshness	a:BeadStores	1

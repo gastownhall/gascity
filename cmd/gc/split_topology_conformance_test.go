@@ -751,7 +751,15 @@ func conformanceHookClaimClassRouting(t *testing.T, e splitEnv, workBeadID strin
 //     binding. That is a property of the topology rather than of any call site,
 //     which is exactly why it is asserted rather than assumed.
 //   - `gc session close` leads with the WORK store (openCityStore), so it cannot
-//     see the binding on its own and is handed the graph binding as a class leg.
+//     see the binding on its own.
+//
+// S2 UPDATE (ga-j4ob9): the second scan is no longer HANDED the binding by its
+// call site. Both rows now resolve the same leg set from the city's own routes
+// (assignedWorkSweepPlan), which is what closes the case the hand-threading
+// never covered — the Info-form retired-session sweep, which took no class leg
+// at all, so a dead session's binding-resident claim had no automatic reopen
+// lane. The rows below are unchanged in what they assert; only the mechanism
+// that puts the binding in the scan moved.
 //
 // What is NOT closed here, and is ga-zp3uj: the agent-side recovery tiers
 // (`bd list --status in_progress`, on_death, on_boot) are raw bd commands in the
@@ -764,20 +772,22 @@ func assertClassRoutedClaimIsReleasable(t *testing.T, e splitEnv) {
 	for _, tt := range []struct {
 		name    string
 		leading beads.Store
-		class   []beads.Store
 	}{
 		{
 			name:    "reconciler scan — leads with the sessions-class store, which IS the binding",
 			leading: e.sessionsStore(),
 		},
 		{
-			name:    "gc session close — leads with the work store and is handed the binding",
+			name:    "gc session close — leads with the work store and resolves the binding from the routes",
 			leading: e.work,
-			class:   []beads.Store{e.class},
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if !workAssignmentStoresReach(workAssignmentStores(tt.leading, e.rigStores, tt.class...), e.class) {
+			plan, err := assignedWorkSweepPlan(e.cityPath, e.cfg, tt.leading, e.rigStores, nil)
+			if err != nil {
+				t.Fatalf("resolving the release scan's leg set: %v", err)
+			}
+			if !workAssignmentStoresReach(planStores(t, plan), e.class) {
 				t.Fatalf("no leg of the release scan is the class binding; a claim routed there is released by nothing")
 			}
 			sessionBead := beads.Bead{ID: "gcg-retired-session", Metadata: map[string]string{"session_name": "worker-1"}}
@@ -786,7 +796,7 @@ func assertClassRoutedClaimIsReleasable(t *testing.T, e splitEnv) {
 				status:   "in_progress",
 				assignee: sessionBead.ID,
 			})
-			unclaimWorkAssignedToRetiredSessionBead(tt.leading, e.rigStores, sessionBead, "", io.Discard, tt.class...)
+			unclaimWorkAssignedToRetiredSessionBead(e.cityPath, e.cfg, tt.leading, e.rigStores, sessionBead, "", io.Discard)
 			released, err := e.class.Get(step.ID)
 			if err != nil {
 				t.Fatalf("reading the claimed graph step back from the binding: %v", err)
@@ -1157,24 +1167,28 @@ func conformanceWarmTickDemand(t *testing.T, e splitEnv) {
 // bead came out of; both resolve from cfg plus the holder's own identities, so a
 // legacy city and a split city cannot diverge.
 //
-// The two mechanisms no longer answer the same question, and that is deliberate.
+// The two mechanisms now answer the SAME question, which is the S2 flip this
+// row's own note asked for ("if you widen the ownership index, update its
+// assertion here and re-check that both sub-topologies still agree").
 //
-//   - The WAKE filter now keeps a claim on the LEADING arm when the assignee is
-//     one of the holder's own exact identities, whatever the holder's rig scope.
+//   - The WAKE filter keeps a claim on the LEADING arm when the assignee is one
+//     of the holder's own exact identities, whatever the holder's rig scope.
 //     That arm is the relocated class binding on a split city — where claim-time
 //     class routing writes the assignee — and the city store on a legacy one,
 //     which a rig-scoped agent's hook fan-out reaches anyway
 //     (appendCityHookStore). Dropping the claim left a live holder with
 //     AwakeDecision{Reason:""} and the no-wake-reason drain recycled it mid-step
-//     (ga-whzrt). Both sub-topologies keep it, so the conformance property holds.
-//   - The ownership INDEX is unchanged and stays rig-scoped. It is a fast path
-//     for orphan release, and its last-resort live-session probe already spares
-//     a class-resident claim (I2 proves that), so the gap it leaves is a
-//     per-tick cost rather than a wrong answer. Widening it is a release-path
-//     change with its own blast radius and belongs to its own slice.
+//     (ga-whzrt).
+//   - The ownership INDEX now grants the same arm to the same identities. It had
+//     to move WITH the release path's own widening, not after it: the
+//     orphan-release scan reads the binding as a leg now, so an index that still
+//     answered "this holder owns only its rig" would let the scan reap a LIVE
+//     worker's binding-resident claim. A missed wake costs a cycle; a false
+//     release is claim loss (ga-j4ob9).
 //
-// If you widen the ownership index, update its assertion here and re-check that
-// both sub-topologies still agree.
+// Both sub-topologies answer identically, which is the conformance property:
+// neither mechanism reads which physical store a bead came out of, and the refs
+// they compare come from the city's own residency topology.
 func conformanceWakeOwnershipFastPath(t *testing.T, e splitEnv) {
 	sess, err := e.sessionsStore().Create(splitEnvPoolSessionBead(e.qualified, "executor-1"))
 	if err != nil {
@@ -1198,22 +1212,29 @@ func conformanceWakeOwnershipFastPath(t *testing.T, e splitEnv) {
 	}
 
 	infos := sessionInfosFromBeads([]beads.Bead{sess})
+	leading := e.sessionsStore()
 	kept, keptRefs := filterAssignedWorkBeadsForSessionWake(
-		e.cfg, e.cityPath, infos,
+		e.cfg, e.cityPath, leading, infos,
 		[]beads.Bead{wisp, rigWork}, []string{"", e.rigName},
 	)
-	index := makeOpenSessionStoreRefIndex(e.cityPath, e.cfg, infos, true)
+	index := makeOpenSessionStoreRefIndex(e.cityPath, e.cfg, leading, infos, true)
 
 	if len(kept) != 2 || kept[0].ID != wisp.ID || kept[1].ID != rigWork.ID ||
-		len(keptRefs) != 2 || keptRefs[0] != classBindingAssignedWorkStoreRef || keptRefs[1] != e.rigName {
+		len(keptRefs) != 2 || keptRefs[0] != "" || keptRefs[1] != e.rigName {
 		t.Fatalf("wake filter kept %d beads (ids %v refs %v), want the leading-arm claim %s under ref %q AND the rig-store claim %s under ref %q",
-			len(kept), assignedWorkIDs(kept), keptRefs, wisp.ID, classBindingAssignedWorkStoreRef, rigWork.ID, e.rigName)
+			len(kept), assignedWorkIDs(kept), keptRefs, wisp.ID, "", rigWork.ID, e.rigName)
 	}
 	if !openSessionOwnsWork(nil, index, sess.ID, e.rigName, true) {
 		t.Error("the ownership index does not own the rig-store leg for its own rig-bound holder — orphan release would fall to the per-bead live probe every tick")
 	}
-	if openSessionOwnsWork(nil, index, sess.ID, "", true) {
-		t.Error("the ownership index owns the leading-store leg for a rig-bound holder; reachability is cfg-derived and must answer the same on both topologies. If you are landing the coordination-class reachability arm, update this assertion and the single-store one together.")
+	if !openSessionOwnsWork(nil, index, sess.ID, "", true) {
+		t.Error("the ownership index does not own the leading-store leg for its own rig-bound holder; the orphan-release scan reads that leg now, so a LIVE worker's claim written there is reaped — claim loss, not a missed wake (ga-j4ob9)")
+	}
+	// The widening is per-identity ownership, not a blanket keep of the leading
+	// arm: a foreign assignee on the same leg is still not owned, which is what
+	// keeps orphan release able to recover a genuinely dead holder's claim.
+	if openSessionOwnsWork(nil, index, "some-other-session", "", true) {
+		t.Error("the ownership index owns the leading-store leg for a FOREIGN identity; that would make every binding-resident claim unreleasable")
 	}
 }
 

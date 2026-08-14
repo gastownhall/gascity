@@ -605,24 +605,11 @@ type UnionResult[T any] struct {
 // already paid for (internal/api's graphPlaneUnavailable carries exactly these).
 func Union[T any](p ResolvedPlan, id func(T) string, fn func(Leg) ([]T, error)) (UnionResult[T], error) {
 	var out UnionResult[T]
-	if p.Mode != ModeUnion {
-		return out, fmt.Errorf("storeref: Union needs a %s plan, got %s", ModeUnion, p.Mode)
-	}
 	seen := make(map[string]bool)
-	for _, leg := range p.Legs {
-		items, err := fn(leg.Leg)
-		if err != nil {
-			if leg.OnError == PolicyRefusalTolerated && IsStandingRefusal(err) {
-				continue
-			}
-			if leg.OnError != PolicyPartialDegrade {
-				out.Items = nil
-				out.Partial = true
-				return out, fmt.Errorf("reading %s: %w", legName(leg.Leg.Ref), err)
-			}
-			out.Partial = true
-			out.LegErrors = append(out.LegErrors, LegError{Ref: leg.Leg.Ref, Err: err})
-			continue
+	walked, err := Walk(p, func(leg Leg) (bool, error) {
+		items, ferr := fn(leg)
+		if ferr != nil {
+			return false, ferr
 		}
 		for _, item := range items {
 			if id != nil {
@@ -634,6 +621,78 @@ func Union[T any](p ResolvedPlan, id func(T) string, fn func(Leg) ([]T, error)) 
 				}
 			}
 			out.Items = append(out.Items, item)
+		}
+		return false, nil
+	})
+	out.Partial = walked.Partial
+	out.LegErrors = walked.LegErrors
+	if err != nil {
+		out.Items = nil
+		out.Partial = true
+		return out, err
+	}
+	return out, nil
+}
+
+// WalkResult is what a leg-by-leg pass over a Union plan reports beyond the
+// caller's own side effects: whether it stopped early and where, and the honest
+// statement of which legs went dark.
+type WalkResult struct {
+	// Stopped reports that visit asked to stop, and StoppedAt names the leg it
+	// stopped on. A pass that read every leg leaves both zero.
+	Stopped   bool
+	StoppedAt StoreRef
+
+	// Visited counts the legs visit was called for, degraded legs included.
+	Visited int
+
+	// Partial marks a pass that could not read every leg it planned to. A
+	// consumer answering an EXISTENCE question must treat it as "cannot prove
+	// absence" and retain rather than reap — a partial pass reported as a clean
+	// "this session holds nothing" is the drain-a-live-holder shape.
+	Partial   bool
+	LegErrors []LegError
+}
+
+// Walk visits every leg of a Union plan in order, honoring per-leg ErrPolicy,
+// and stops early when visit returns stop.
+//
+// It is the executor for the union questions whose answer is not a merged row
+// set: an existence probe that must stop at the first leg that answers, a
+// release sweep that mutates as it goes, a pass bounded by a time budget. Those
+// are the sites that used to build a []beads.Store and read it themselves — and
+// reading it themselves is how the leg order, the dedupe rule and the fail-loud
+// policy came to be restated once per site.
+//
+// Union is implemented on top of this, so the two executors cannot disagree
+// about what a leg failure means.
+func Walk(p ResolvedPlan, visit func(Leg) (stop bool, err error)) (WalkResult, error) {
+	var out WalkResult
+	if p.Mode != ModeUnion {
+		return out, fmt.Errorf("storeref: Walk needs a %s plan, got %s", ModeUnion, p.Mode)
+	}
+	for _, leg := range p.Legs {
+		out.Visited++
+		stop, err := visit(leg.Leg)
+		if err != nil {
+			if leg.OnError == PolicyRefusalTolerated && IsStandingRefusal(err) {
+				// A refused city still serves WORK, and a leg carrying this
+				// policy was only ever consulted in case the binding held the
+				// answer. The city is refused, not degraded.
+				continue
+			}
+			if leg.OnError != PolicyPartialDegrade {
+				out.Partial = true
+				return out, fmt.Errorf("reading %s: %w", legName(leg.Leg.Ref), err)
+			}
+			out.Partial = true
+			out.LegErrors = append(out.LegErrors, LegError{Ref: leg.Leg.Ref, Err: err})
+			continue
+		}
+		if stop {
+			out.Stopped = true
+			out.StoppedAt = leg.Leg.Ref
+			return out, nil
 		}
 	}
 	return out, nil

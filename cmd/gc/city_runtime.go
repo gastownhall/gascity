@@ -360,6 +360,12 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The assigned-work spine's scans are free functions reached from both
+	// planes and carry no runtime, so they resolve this city's bindings by
+	// PATH. Registering the routes opened here is what keeps them off the
+	// one-shot funnel, which would open a second handle on the same binding
+	// root — a duplicate managed-Dolt server or a second sqlite writer.
+	registerResidencyRoutes(p.CityPath, routes)
 
 	sweepOrphanedOrderTrackingAtBoot(routes, p.CityPath, p.Cfg, p.Rec, p.Stderr)
 
@@ -2486,7 +2492,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	cr.recordReconcileTraceInputs(trace, openInfos, desiredState, poolDesired, workSet, traceWorkRequested, readyWaitSet, result, recordPhase)
 
 	phaseStart = time.Now()
-	awakeAssignedWorkBeads, awakeAssignedStoreRefs := filterAssignedWorkBeadsForSessionWake(cr.cfg, cr.cityPath, openInfos, assignedWorkBeads, assignedWorkStoreRefs)
+	awakeAssignedWorkBeads, awakeAssignedStoreRefs := filterAssignedWorkBeadsForSessionWake(cr.cfg, cr.cityPath, store, openInfos, assignedWorkBeads, assignedWorkStoreRefs)
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.filter_assigned_work_for_wake", phaseStart, map[string]any{
 		"assigned_work_bead_count":       len(assignedWorkBeads),
 		"awake_assigned_work_bead_count": len(awakeAssignedWorkBeads),
@@ -3853,6 +3859,10 @@ func (cr *CityRuntime) shutdown() {
 		// process that exits holding it leaves the successor's open racing this
 		// one's.
 		defer func() {
+			// Stop naming these routes before closing them: a sweep that
+			// resolved its bindings from a closed handle would answer every leg
+			// with an error instead of falling back to the one-shot funnel.
+			unregisterResidencyRoutes(cr.cityPath)
 			if err := cr.storageRoutes.close(); err != nil {
 				fmt.Fprintf(cr.stderr, "%s: closing the storage binding: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 			}

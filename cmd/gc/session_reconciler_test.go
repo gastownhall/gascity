@@ -3261,12 +3261,12 @@ func TestCollectSessionAssignedWorkIncludesAssignedWisp(t *testing.T) {
 		t.Fatalf("Create wisp work: %v", err)
 	}
 
-	got, err := collectSessionAssignedWork("", nil, store, nil, session)
+	got, err := collectSessionAssignedWorkInfo("", nil, store, nil, sessionInfosFromBeads([]beads.Bead{session})[0])
 	if err != nil {
-		t.Fatalf("collectSessionAssignedWork: %v", err)
+		t.Fatalf("collectSessionAssignedWorkInfo: %v", err)
 	}
 	if len(got) != 1 || got[0].bead.ID != work.ID {
-		t.Fatalf("collectSessionAssignedWork = %#v, want assigned wisp %s", got, work.ID)
+		t.Fatalf("collectSessionAssignedWorkInfo = %#v, want assigned wisp %s", got, work.ID)
 	}
 }
 

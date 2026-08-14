@@ -9,22 +9,6 @@ import (
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
-// classBindingAssignedWorkStoreRef names the store-ref the assigned-work
-// collection records for its LEADING arm — the store the controller reconciler
-// leads with, which on a converged split city IS the relocated
-// coordination-class binding (coordClassStoreCandidates, called with an empty
-// cityRef from collectAssignedWorkBeadsWithStores).
-//
-// The VALUE must stay empty. It is not a label chosen for this arm; it is the
-// same empty string assignedWorkStoreRefForAgent returns for every agent with no
-// configured rig, and the two are compared to each other here, in
-// assignedWorkIndexReachableFromAgent, and in openSessionOwnsWork. Renaming it
-// (to, say, "class:sessions") would make a rig-less agent stop matching its own
-// city-store work in all three places — a wake/demand regression far larger than
-// the trace clarity it would buy. The constant exists so the arm can be NAMED at
-// the sites that reason about it, without changing what it is.
-const classBindingAssignedWorkStoreRef = ""
-
 func assignedWorkStoreRefForAgent(cityPath string, cfg *config.City, agentCfg *config.Agent) string {
 	if cfg == nil || agentCfg == nil {
 		return ""
@@ -82,11 +66,12 @@ func sessionAgentConfigInfo(cfg *config.City, info sessionpkg.Info) *config.Agen
 	return findAgentByTemplate(cfg, template)
 }
 
-// openSessionReachableStoreRefInfo returns the store-ref under which an open
+// openSessionReachableStoreRefInfo returns the store-refs under which an open
 // session bead owns assigned work, for makeOpenSessionStoreRefIndex. The SESSION
-// side reads typed session.Info (WI-5 W3 per-parameter split, migrated alongside
-// reachableStoresForSession); store-ref resolution stays cfg-derived. A
-// cross-store eligible (city-scoped) session federates across every store
+// side reads typed session.Info (WI-5 W3 per-parameter split); the refs come
+// from the residency resolver.
+//
+// A cross-store eligible (city-scoped) session federates across every store
 // (vp-kvp), so it is indexed under crossStoreOpenSessionStoreRef — a wildcard
 // openSessionOwnsWork matches against any work store-ref. This mirrors the
 // cross-store ownership the demand and session-wake filters already grant
@@ -94,17 +79,29 @@ func sessionAgentConfigInfo(cfg *config.City, info sessionpkg.Info) *config.Agen
 // live city-scoped holder's rig-routed work and a backup worker is minted on the
 // same bead (#3453). A session whose template/agent cannot be resolved falls back
 // to unresolvedOpenSessionStoreRef (also a wildcard), preserving the legacy
-// keep-on-match fail-safe; every other session stays scoped to its configured
-// rig's store-ref.
-func openSessionReachableStoreRefInfo(cityPath string, cfg *config.City, info sessionpkg.Info) string {
+// keep-on-match fail-safe.
+//
+// Every other session is its configured rig's store-ref PLUS the refs a claim
+// can be recorded under whatever the holder's rig scope (assignedWorkClaimRefs:
+// the leading work arm and every relocated class binding). That addition is the
+// counterweight to this slice widening what the release path can SEE: claim-time
+// class routing writes a rig-scoped agent's claim into the binding, the
+// orphan-release scan now reads that leg, and an index that still answered
+// "this holder owns only its rig" would let the scan reap a LIVE worker's claim
+// — claim loss, not a missed wake. It is the same widening the wake filter
+// already applies to the same identities (ga-whzrt), which is what makes the two
+// mechanisms answer one question instead of two.
+// claimRefs is the city-level answer from assignedWorkClaimRefs, resolved once
+// by the caller because it is a property of the CITY and this runs per session.
+func openSessionReachableStoreRefInfo(cityPath string, cfg *config.City, claimRefs []string, info sessionpkg.Info) []string {
 	agentCfg := sessionAgentConfigInfo(cfg, info)
 	if agentCfg == nil {
-		return unresolvedOpenSessionStoreRef
+		return []string{unresolvedOpenSessionStoreRef}
 	}
 	if agentIsCrossStoreEligible(agentCfg) {
-		return crossStoreOpenSessionStoreRef
+		return []string{crossStoreOpenSessionStoreRef}
 	}
-	return assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg)
+	return append([]string{assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg)}, claimRefs...)
 }
 
 func assignedWorkIndexReachableFromAgent(cityPath string, cfg *config.City, agentCfg *config.Agent, storeRefs []string, index int) bool {
@@ -189,6 +186,7 @@ func filterAssignedWorkBeadsForPoolDemand(
 func filterAssignedWorkBeadsForSessionWake(
 	cfg *config.City,
 	cityPath string,
+	leading beads.Store,
 	sessionInfos []sessionpkg.Info,
 	assignedWorkBeads []beads.Bead,
 	assignedWorkStoreRefs []string,
@@ -199,6 +197,7 @@ func filterAssignedWorkBeadsForSessionWake(
 	if cfg == nil {
 		return assignedWorkBeads, assignedWorkStoreRefs
 	}
+	claimRefs := assignedWorkClaimRefs(cityPath, cfg, leading)
 	reachableRefsByAssignee := make(map[string]map[string]struct{})
 	// crossStore identities belong to city-scoped (cross-store-eligible) agents
 	// and are reachable from ANY store (vp-kvp). They bypass the per-ref match.
@@ -250,22 +249,31 @@ func filterAssignedWorkBeadsForSessionWake(
 		storeRef := assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg)
 		for _, id := range sessionBeadAssigneeIdentitiesInfo(sb) {
 			add(id, storeRef)
-			// A claim this session HOLDS can also live on the leading
-			// class-binding arm, whatever the owning agent's rig scope: on a
-			// split city that is where claim-time class routing writes the
-			// assignee (claim_class_route.go), and even on a single-store city
-			// the agent's own hook fan-out reaches the city store
-			// (appendCityHookStore) — so a bead it can claim was being dropped
-			// here for a store it demonstrably reads. Dropping it is what left a
-			// claim-holder with AwakeDecision{Reason:""} and drained it down the
-			// no-wake-reason arm while it owned in-progress work (ga-whzrt).
+			// A claim this session HOLDS can also live on the leading work arm
+			// or in a relocated class binding, whatever the owning agent's rig
+			// scope: on a split city the binding is where claim-time class
+			// routing writes the assignee (claim_class_route.go), and even on a
+			// single-store city the agent's own hook fan-out reaches the city
+			// store (appendCityHookStore) — so a bead it can claim was being
+			// dropped here for a store it demonstrably reads. Dropping it is
+			// what left a claim-holder with AwakeDecision{Reason:""} and drained
+			// it down the no-wake-reason arm while it owned in-progress work
+			// (ga-whzrt).
+			//
+			// The refs come from the resolver rather than from a constant, so a
+			// city mid-rollout is readable by ONE filter: the census records a
+			// binding-resident claim under "" while the reconciler's leading arm
+			// is the binding, and under the binding's own "class:*" ref once it
+			// is a distinct census leg. Both are in the set.
 			//
 			// This widens COLLECTION only. The match is still this session's own
 			// exact assignee identity, so no bead belonging to anyone else
 			// becomes visible; the template key below deliberately does NOT get
-			// the extra arm, because a template match is a scope statement
+			// the extra arms, because a template match is a scope statement
 			// rather than an ownership one.
-			add(id, classBindingAssignedWorkStoreRef)
+			for _, ref := range claimRefs {
+				add(id, ref)
+			}
 		}
 		add(template, storeRef)
 	}

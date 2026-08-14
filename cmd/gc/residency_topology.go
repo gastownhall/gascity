@@ -86,6 +86,80 @@ func (cr *CityRuntime) residencyTopology() storeref.Topology {
 	return assembleResidencyTopology(cr.cfg, cr.cityBeadStore(), cr.rigBeadStores(), bindings, refused)
 }
 
+// residencyTopologyForCity builds a topology over the caller's own opened work
+// legs and the bindings THIS process serves for cityPath.
+//
+// It is the constructor for the assigned-work spine, whose scans are reached
+// from both planes through the same free functions — a reconciler tick and a
+// one-shot `gc session close` both call the same release sweep, and neither
+// carries a CityRuntime down to it. So the binding half is resolved by city
+// rather than by handle: a controller REGISTERS the routes it opened at boot
+// (registerResidencyRoutes) and every other caller falls back to the one-shot
+// funnel. That registration is not a convenience — resolving a controller's
+// bindings through the one-shot funnel would open a SECOND handle on the same
+// binding root, a duplicate managed-Dolt server or a second sqlite writer,
+// which is a worse bug than the blindness this closes.
+func residencyTopologyForCity(cityPath string, cfg *config.City, work beads.Store, rigs map[string]beads.Store) storeref.Topology {
+	if routes, ok := registeredResidencyRoutes(cityPath); ok {
+		bindings, refused := residencyBindingsFromRoutes(routes)
+		return assembleResidencyTopology(cfg, work, rigs, bindings, refused)
+	}
+	return cliResidencyTopology(cityPath, cfg, work, rigs)
+}
+
+// registerResidencyRoutes records the routes a long-running runtime opened at
+// boot as this process's answer for cityPath. Wired into newCityRuntime, and
+// released by unregisterResidencyRoutes when the runtime closes them.
+//
+// The one-shot memo for that city is dropped alongside, so a command that
+// already resolved the funnel in this process cannot keep answering from a
+// second set of handles.
+func registerResidencyRoutes(cityPath string, routes *storageRoutes) {
+	if cityPath == "" {
+		return
+	}
+	key := filepath.Clean(cityPath)
+	residencyRoutesMu.Lock()
+	if residencyRoutesByCity == nil {
+		residencyRoutesByCity = make(map[string]*storageRoutes, 1)
+	}
+	residencyRoutesByCity[key] = routes
+	residencyRoutesMu.Unlock()
+	dropCLIResidencyBindings(key)
+}
+
+// unregisterResidencyRoutes drops a runtime's registration. The routes it named
+// are the runtime's to close; this only stops the spine from naming them.
+func unregisterResidencyRoutes(cityPath string) {
+	if cityPath == "" {
+		return
+	}
+	key := filepath.Clean(cityPath)
+	residencyRoutesMu.Lock()
+	delete(residencyRoutesByCity, key)
+	residencyRoutesMu.Unlock()
+	dropCLIResidencyBindings(key)
+}
+
+// registeredResidencyRoutes reports the runtime-registered routes for a city.
+// The bool distinguishes "this process serves the city and relocates nothing"
+// (registered nil routes) from "no runtime here", which is what keeps a
+// single-store controller off the one-shot funnel entirely.
+func registeredResidencyRoutes(cityPath string) (*storageRoutes, bool) {
+	if cityPath == "" {
+		return nil, false
+	}
+	residencyRoutesMu.Lock()
+	defer residencyRoutesMu.Unlock()
+	routes, ok := residencyRoutesByCity[filepath.Clean(cityPath)]
+	return routes, ok
+}
+
+var (
+	residencyRoutesMu     sync.Mutex
+	residencyRoutesByCity map[string]*storageRoutes
+)
+
 // cliResidencyBindingsEntry is one city's resolved bindings, computed at most
 // once per process.
 type cliResidencyBindingsEntry struct {
@@ -140,6 +214,13 @@ func cliResidencyBindings(cityPath string) ([]storeref.ClassBinding, error) {
 func resetCLIResidencyBindings() {
 	cliResidencyBindingsMu.Lock()
 	cliResidencyBindingsByCity = nil
+	cliResidencyBindingsMu.Unlock()
+}
+
+// dropCLIResidencyBindings drops one city's memoized funnel answer.
+func dropCLIResidencyBindings(key string) {
+	cliResidencyBindingsMu.Lock()
+	delete(cliResidencyBindingsByCity, key)
 	cliResidencyBindingsMu.Unlock()
 }
 
