@@ -4161,20 +4161,55 @@ func reachableStoresForSession(cityPath string, cfg *config.City, store beads.St
 // reachableStoresForSession (the raw form stays for the raw-by-design stranded
 // diagnostic collector). The store fan-out is work-class and stays bead-shaped;
 // only the agent/name resolution reads Info.
+//
+// Every branch also scans the relocated coordination-class binding, when the
+// city has one (classBindingLegForSessionScan). A claim this session holds can
+// live there by design on a split city — claim_class_route.go writes the
+// assignee into the binding for a bead no work store holds — and a scan that
+// cannot see it reports a claim-holder as having no assigned work, which is what
+// let the drain arm recycle a live worker mid-step (ga-whzrt). The binding goes
+// LAST, through workAssignmentStores' documented extra leg, so the work stores
+// keep answering first and a pointer-identical leg is deduped rather than
+// scanned twice.
 func reachableStoresForSessionInfo(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, info sessionpkg.Info) ([]beads.Store, error) {
+	binding := classBindingLegForSessionScan(cfg, store)
 	agentCfg := sessionAgentConfigInfo(cfg, info)
 	if agentCfg == nil || agentIsCrossStoreEligible(agentCfg) {
-		return workAssignmentStores(store, rigStores), nil
+		return workAssignmentStores(store, rigStores, binding), nil
 	}
 	storeRef := assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg)
 	if storeRef == "" {
-		return []beads.Store{store}, nil
+		return workAssignmentStores(store, nil, binding), nil
 	}
 	rigStore, ok := rigStores[storeRef]
 	if !ok || rigStore == nil {
 		return nil, fmt.Errorf("rig store %q unavailable for session %q", storeRef, info.SessionNameMetadata)
 	}
-	return []beads.Store{rigStore}, nil
+	return workAssignmentStores(rigStore, nil, binding), nil
+}
+
+// classBindingLegForSessionScan returns the relocated coordination-class binding
+// a session's assigned work can also live in, or nil for a city that relocates
+// nothing.
+//
+// It reads the binding off the store the caller already holds rather than
+// opening one. This build serves exactly one split shape — work on the reserved
+// binding and ALL five infrastructure classes, sessions and graph included, on
+// ONE shared binding (storageSplitWhole; every other arrangement is refused at
+// boot, storage_boot.go) — and the controller reconciler leads with the
+// sessions-class store. So on a city that relocates anything at all, the leading
+// store IS the graph binding a routed claim writes into, and naming it costs no
+// second handle, no second open, and no plumbing through the reconciler's
+// call chain. A city with no [storage] section relocates nothing and gets nil,
+// which workAssignmentStores drops.
+func classBindingLegForSessionScan(cfg *config.City, store beads.Store) beads.Store {
+	if cfg == nil || cfg.Storage == nil {
+		return nil
+	}
+	if shape, _ := storageSplitShapeOf(cfg.EffectiveStorage()); shape != storageSplitWhole {
+		return nil
+	}
+	return store
 }
 
 // firstOpenAssignedWorkBeadForReachableStore returns the first open or

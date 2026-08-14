@@ -132,7 +132,7 @@ func doHookClaim(workQuery, dir string, opts hookClaimOptions, ops hookClaimOps,
 	if res.terminal {
 		return res.code
 	}
-	return writeHookClaimNoWork(opts, ops, res.claimsErrored, stdout, stderr)
+	return writeHookClaimNoWork(opts, ops, res.claimsErrored, dir, stdout, stderr)
 }
 
 // tryHookClaim runs the work query for one store (dir, via ops.Runner) and
@@ -524,12 +524,23 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 // "claims_errored" when claimsErrored is set — ready work existed but every
 // eligible claim mutation errored — so an operational write failure stays
 // distinguishable from idle even though both still drain and reclaim next tick.
-func writeHookClaimNoWork(opts hookClaimOptions, ops hookClaimOps, claimsErrored bool, stdout, stderr io.Writer) int {
+//
+// dir is the store context the diagnostics classification reads through; it is
+// used ONLY after the drain has been written. See recordDemandClaimDivergence:
+// a demand-spawned seat draining empty is either correct pull or a broken
+// agreement invariant, and the drain itself cannot tell an operator which.
+func writeHookClaimNoWork(opts hookClaimOptions, ops hookClaimOps, claimsErrored bool, dir string, stdout, stderr io.Writer) int {
 	reason := hookClaimReasonNoWork
 	if claimsErrored {
 		reason = hookClaimReasonClaimsErrored
 	}
-	return writeHookClaimDrain(reason, opts.JSON, opts.DrainAck, ops.DrainAck, stdout, stderr)
+	code := writeHookClaimDrain(reason, opts.JSON, opts.DrainAck, ops.DrainAck, stdout, stderr)
+	// Strictly after the result: the drain is already written and its exit code
+	// is already decided, so nothing below can influence either.
+	if reason == hookClaimReasonNoWork {
+		hookRecordDemandClaimDivergence(reason, dir, opts, ops, stderr)
+	}
+	return code
 }
 
 // writeHookClaimStaleSessionDrain emits the terminal result for a refused stale

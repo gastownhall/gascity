@@ -2425,6 +2425,9 @@
             "$ref": "#/components/schemas/ConditionalWritesDegradedPayload"
           },
           {
+            "$ref": "#/components/schemas/ExecutionStepStalledPayload"
+          },
+          {
             "$ref": "#/components/schemas/GroupCreatedEventPayload"
           },
           {
@@ -2465,6 +2468,9 @@
           },
           {
             "$ref": "#/components/schemas/SessionCreateSucceededPayload"
+          },
+          {
+            "$ref": "#/components/schemas/SessionDemandClaimDivergencePayload"
           },
           {
             "$ref": "#/components/schemas/SessionDrainAckedWithAssignedWorkPayload"
@@ -2669,6 +2675,30 @@
           "type",
           "ts",
           "actor"
+        ],
+        "type": "object"
+      },
+      "ExecutionStepStalledPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "attempts": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "bead_id": {
+            "type": "string"
+          },
+          "root_bead_id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "bead_id",
+          "session_id",
+          "attempts"
         ],
         "type": "object"
       },
@@ -7221,6 +7251,36 @@
         "required": [
           "request_id",
           "session"
+        ],
+        "type": "object"
+      },
+      "SessionDemandClaimDivergencePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "classification": {
+            "type": "string"
+          },
+          "drain_reason": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "template": {
+            "type": "string"
+          },
+          "trigger_bead_id": {
+            "type": "string"
+          },
+          "trigger_status_at_drain": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "template",
+          "drain_reason",
+          "classification"
         ],
         "type": "object"
       },
@@ -11943,6 +12003,7 @@
             "events.rotated": "#/components/schemas/TypedEventStreamEnvelopeEventsRotated",
             "execution.step_completed": "#/components/schemas/TypedEventStreamEnvelopeExecutionStepCompleted",
             "execution.step_defined": "#/components/schemas/TypedEventStreamEnvelopeExecutionStepDefined",
+            "execution.step_stalled": "#/components/schemas/TypedEventStreamEnvelopeExecutionStepStalled",
             "execution.step_started": "#/components/schemas/TypedEventStreamEnvelopeExecutionStepStarted",
             "execution.work_associated": "#/components/schemas/TypedEventStreamEnvelopeExecutionWorkAssociated",
             "extmsg.adapter_added": "#/components/schemas/TypedEventStreamEnvelopeExtmsgAdapterAdded",
@@ -11980,6 +12041,7 @@
             "rig.provision.progress": "#/components/schemas/TypedEventStreamEnvelopeRigProvisionProgress",
             "session.cold_start_timeout": "#/components/schemas/TypedEventStreamEnvelopeSessionColdStartTimeout",
             "session.crashed": "#/components/schemas/TypedEventStreamEnvelopeSessionCrashed",
+            "session.demand_claim_divergence": "#/components/schemas/TypedEventStreamEnvelopeSessionDemandClaimDivergence",
             "session.drain_acked_with_assigned_work": "#/components/schemas/TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork",
             "session.draining": "#/components/schemas/TypedEventStreamEnvelopeSessionDraining",
             "session.idle_killed": "#/components/schemas/TypedEventStreamEnvelopeSessionIdleKilled",
@@ -12077,6 +12139,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeExecutionStepDefined"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeExecutionStepStalled"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeExecutionStepStarted"
@@ -12188,6 +12253,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionCrashed"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionDemandClaimDivergence"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork"
@@ -13351,6 +13419,7 @@
                 "session.unknown_state",
                 "session.reset_stalled",
                 "session.work_query_failed",
+                "session.demand_claim_divergence",
                 "session.cold_start_timeout",
                 "bead.created",
                 "bead.closed",
@@ -13364,6 +13433,7 @@
                 "execution.step_defined",
                 "execution.step_started",
                 "execution.step_completed",
+                "execution.step_stalled",
                 "mail.sent",
                 "mail.read",
                 "mail.archived",
@@ -13722,6 +13792,63 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope execution.step_defined",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeExecutionStepStalled": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ExecutionStepStalledPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "execution.step_stalled",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope execution.step_stalled",
         "type": "object"
       },
       "TypedEventStreamEnvelopeExecutionStepStarted": {
@@ -15833,6 +15960,63 @@
         "title": "TypedEventStreamEnvelope session.crashed",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeSessionDemandClaimDivergence": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionDemandClaimDivergencePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.demand_claim_divergence",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.demand_claim_divergence",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork": {
         "additionalProperties": false,
         "properties": {
@@ -17285,6 +17469,7 @@
             "events.rotated": "#/components/schemas/TypedTaggedEventStreamEnvelopeEventsRotated",
             "execution.step_completed": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionStepCompleted",
             "execution.step_defined": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionStepDefined",
+            "execution.step_stalled": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionStepStalled",
             "execution.step_started": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionStepStarted",
             "execution.work_associated": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionWorkAssociated",
             "extmsg.adapter_added": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgAdapterAdded",
@@ -17322,6 +17507,7 @@
             "rig.provision.progress": "#/components/schemas/TypedTaggedEventStreamEnvelopeRigProvisionProgress",
             "session.cold_start_timeout": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionColdStartTimeout",
             "session.crashed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionCrashed",
+            "session.demand_claim_divergence": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence",
             "session.drain_acked_with_assigned_work": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork",
             "session.draining": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDraining",
             "session.idle_killed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionIdleKilled",
@@ -17419,6 +17605,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionStepDefined"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionStepStalled"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionStepStarted"
@@ -17530,6 +17719,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionCrashed"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork"
@@ -18768,6 +18960,7 @@
                 "session.unknown_state",
                 "session.reset_stalled",
                 "session.work_query_failed",
+                "session.demand_claim_divergence",
                 "session.cold_start_timeout",
                 "bead.created",
                 "bead.closed",
@@ -18781,6 +18974,7 @@
                 "execution.step_defined",
                 "execution.step_started",
                 "execution.step_completed",
+                "execution.step_stalled",
                 "mail.sent",
                 "mail.read",
                 "mail.archived",
@@ -19160,6 +19354,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope execution.step_defined",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeExecutionStepStalled": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ExecutionStepStalledPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "execution.step_stalled",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope execution.step_stalled",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeExecutionStepStarted": {
@@ -21417,6 +21672,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope session.crashed",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionDemandClaimDivergencePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.demand_claim_divergence",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.demand_claim_divergence",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork": {

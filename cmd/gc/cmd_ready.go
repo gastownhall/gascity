@@ -191,6 +191,19 @@ orchestration step runs as are claimable work here whether or not
 			return nil
 		},
 	}
+	registerReadyFlags(cmd, &opts, &includeEphemeral, &jsonOut)
+	return cmd
+}
+
+// registerReadyFlags binds the `gc ready` flag surface onto cmd.
+//
+// It is a function rather than an inline block so the SAME flag surface can be
+// parsed outside the command — specifically by the reader-agreement conformance
+// test, which takes the routed-demand tier straight out of the generated work
+// query, parses it here, and runs the real filterReadyBeads over a row corpus.
+// A test that re-declared these flags would be testing its own copy of the
+// contract, which is the drift this whole lane exists to remove.
+func registerReadyFlags(cmd *cobra.Command, opts *readyOpts, includeEphemeral, jsonOut *bool) {
 	cmd.Flags().StringVar(&opts.assignee, "assignee", "", "only work assigned to this identity")
 	cmd.Flags().BoolVar(&opts.unassigned, "unassigned", false, "only unassigned work")
 	cmd.Flags().StringArrayVar(&opts.metadataFields, "metadata-field", nil, "require metadata \"key=value\", or bare \"key\" for any non-empty value (repeatable)")
@@ -205,13 +218,12 @@ orchestration step runs as are claimable work here whether or not
 	// Binding it to a discarded variable is deliberate — a readyOpts field
 	// nothing consults is how a flag ends up looking honored while one leg
 	// quietly narrows (ga-8lyxc).
-	cmd.Flags().BoolVar(&includeEphemeral, "include-ephemeral", false, "accept --include-ephemeral for bd-ready parity (every leg already spans the wisp tier)")
+	cmd.Flags().BoolVar(includeEphemeral, "include-ephemeral", false, "accept --include-ephemeral for bd-ready parity (every leg already spans the wisp tier)")
 	cmd.Flags().StringVar(&opts.status, "status", "", "list beads in this status instead of ready work: open|in_progress|blocked|closed")
 	// --json is accepted for parity with `bd ready --json`, which the generated
 	// work_query carries verbatim. The payload is a JSON array either way; the
 	// flag exists so the query does not have to be rewritten to drop it.
-	cmd.Flags().BoolVar(&jsonOut, "json", true, "accept --json for bd-ready parity (output is always a JSON array)")
-	return cmd
+	cmd.Flags().BoolVar(jsonOut, "json", true, "accept --json for bd-ready parity (output is always a JSON array)")
 }
 
 func cmdReady(opts readyOpts, stdout, stderr io.Writer) int {

@@ -64,12 +64,17 @@ var defaultNudgeSubmitKeySequence = []string{"Enter"}
 // #4706 was filed against a k8s codex agent whose first turn never started:
 // codex's TUI buffers a send-keys burst as a paste, so a lone trailing Enter
 // is swallowed as a composer newline rather than treated as submit — codex's
-// actual submit sequence is Escape then Enter. This fork's tmux carrier does
-// not yet carry that fix; adding it here is left to a follow-up once the
-// change is exercised against a live codex TUI in this repo's own test
-// harness (it is out of scope for this claude-focused patch, but the table
-// exists precisely so that follow-up is a one-line addition, not another
-// pass through the delivery mechanics).
+// actual submit sequence is Escape then Enter, which is the codex entry below.
+//
+// Exactly ONE Escape reaches a codex pane, and that is load-bearing. codex stays
+// in providersSkippingEscapeBeforeEnter, so the pre-submit Escape at step 3 of
+// NudgeSession is skipped and this entry supplies the only one; sending both
+// would put Escape-Escape into the pane, which codex binds to
+// backtrack/edit-previous rather than to submit. Declaring it here (instead of
+// dropping codex from the skip list, which would produce the same two keystrokes
+// today) also keeps the pair RETRYABLE as a unit: sendNudgeSubmitSequence is what
+// the submit-confirm loop and the best-effort fallback re-send, and a re-sent
+// bare Enter would be swallowed exactly like the first one.
 //
 // This table does NOT yet contain an entry for the claude-specific stall
 // this patch was scoped to fix (ra-oudpha finding-3 / gascity#5012, #5013's
@@ -86,7 +91,9 @@ var defaultNudgeSubmitKeySequence = []string{"Enter"}
 // traced, the fix — whatever key sequence or timing claude's TUI turns out
 // to need — is a single entry in this table plus a test, not a rewrite of
 // NudgeSession.
-var nudgeSubmitKeySequences = map[string][]string{}
+var nudgeSubmitKeySequences = map[string][]string{
+	"codex": {"Escape", "Enter"},
+}
 
 // nudgeSubmitKeySequenceForFamily returns the declared submit key sequence
 // for a provider family, or defaultNudgeSubmitKeySequence when the family
@@ -2001,14 +2008,43 @@ func (t *Tmux) paneBusy(target string) (bool, error) {
 }
 
 // submitVerifyEligible reports whether the target runs a provider whose busy
-// indicator is reliable enough to confirm a submit. Scoped to the Claude family
-// (the confirmed ga-bwm failure); other providers keep best-effort single
-// delivery so this change cannot regress them.
+// indicator is reliable enough to confirm a submit.
 func (t *Tmux) submitVerifyEligible(target string) bool {
 	if provider := t.providerEnv(target); provider != "" {
-		return sessionlog.ProviderFamily(provider) == "claude"
+		return submitVerifyEligibleFamily(sessionlog.ProviderFamily(provider))
 	}
-	return t.targetLooksLikeProvider(target, "claude")
+	for _, family := range submitVerifyEligibleFamilies {
+		if t.targetLooksLikeProvider(target, family) {
+			return true
+		}
+	}
+	return false
+}
+
+// submitVerifyEligibleFamilies are the provider families whose busy indicator
+// paneContainsBusyIndicator can actually read: claude (its spinner/elapsed-timer
+// footer, the confirmed ga-bwm failure) and codex, whose TUI shows the same
+// "esc to interrupt" string that function has always matched.
+//
+// Eligibility is what makes an unconfirmed submit an ERROR instead of a silent
+// success, and that is the point for codex: the best-effort fallback reports
+// delivery as soon as the keys reach tmux, so the queue acks and DELETES an item
+// whose paste may still be sitting unsubmitted in the composer — the nudge is
+// then gone with nothing to retry. With verification, an unconfirmed submit
+// requeues under the existing attempt cap instead.
+//
+// Adding a family here is a promise about its busy indicator: a provider whose
+// indicator is unreadable would report every delivery as unconfirmed and burn
+// the queue's attempts re-pasting messages that already landed.
+var submitVerifyEligibleFamilies = []string{"claude", "codex"}
+
+func submitVerifyEligibleFamily(family string) bool {
+	for _, eligible := range submitVerifyEligibleFamilies {
+		if family == eligible {
+			return true
+		}
+	}
+	return false
 }
 
 // nudgeSubmitKeySequence resolves target's declared submit key sequence (see
@@ -2138,6 +2174,17 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	// dependence on an external observer re-kicking the session. Providers
 	// without a reliable indicator keep best-effort delivery.
 	submitKeys := t.nudgeSubmitKeySequence(target)
+	// RE-SEND HAZARD (noted, not redesigned): a submit sequence that leads with
+	// Escape is only safe to repeat while the pane is still idle. If the first
+	// attempt actually submitted and the pane went busy, a re-sent Escape is an
+	// INTERRUPT for the very TUIs that need the Escape (codex reads it as
+	// cancel), so a retry could kill the turn it just started. submitEnterAndConfirm
+	// re-checks busy before every re-send, which is why the verified path is safe
+	// — and why codex is on it (submitVerifyEligibleFamilies). The best-effort
+	// fallback below and NudgePane's retry loop do NOT re-check; they are safe
+	// only for single-key (plain Enter) sequences, which is what every family
+	// without a table entry has. Adding a multi-key entry for a family that is
+	// not submit-verify eligible would need that gap closed first.
 	sendSubmit := func() error { return t.sendNudgeSubmitSequence(target, submitKeys) }
 	wake := func() { t.WakePaneIfDetached(session) }
 	if t.submitVerifyEligible(target) {

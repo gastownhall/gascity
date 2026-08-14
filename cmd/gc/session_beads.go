@@ -1638,8 +1638,20 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		}
 		isManagedPool := origin == "ephemeral"
 		isPoolInstance := poolSlot > 0
+		// A transient pool slot is the LOGICAL instance name (tp.InstanceName,
+		// b.Metadata["agent_name"]) and never an ownership identity, so the
+		// fallbacks below must not resurrect it as one. Leaving managedAlias empty
+		// is what disables the whole alias lane for these beads: the create arm
+		// skips meta["alias"], needsAliasSync compares "" against an already-empty
+		// alias, and needsManagedPoolAliasValidation requires a non-empty alias.
+		//
+		// Without this gate the create path's unaliasing survives exactly zero
+		// production ticks — buildDesiredState hands sync a slot-form
+		// InstanceName, sync writes it straight back, and the session starts from
+		// a re-aliased bead (see TestPoolSlotStaysUnaliasedAcrossReconcileTicks).
+		transientPoolSlot := usesTransientPoolSlotIdentity(findAgentByTemplate(cfg, tp.TemplateName))
 		managedAlias := strings.TrimSpace(tp.Alias)
-		if managedAlias == "" && isManagedPool && isPoolInstance {
+		if managedAlias == "" && isManagedPool && isPoolInstance && !transientPoolSlot {
 			managedAlias = strings.TrimSpace(tp.InstanceName)
 		}
 
@@ -1693,7 +1705,11 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			if slot, err := strconv.Atoi(strings.TrimSpace(b.Metadata["pool_slot"])); err == nil && slot > 0 {
 				poolSlot = slot
 				isPoolInstance = true
-				if managedAlias == "" {
+				// Same rule on the exists-recovery lane: agent_name carries the slot
+				// for a transient pool member, so reading it here would re-alias the
+				// bead the moment a tick rediscovers pool_slot from the store rather
+				// than from tp.
+				if managedAlias == "" && !transientPoolSlot {
 					if cfgAgent := findAgentByTemplate(cfg, tp.TemplateName); cfgAgent != nil && cfgAgent.UsesCanonicalSingletonPoolIdentity() {
 						managedAlias = cfgAgent.QualifiedName()
 					} else {

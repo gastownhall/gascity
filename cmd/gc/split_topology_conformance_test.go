@@ -116,7 +116,18 @@ func TestSplitTopologyConformance(t *testing.T) {
 // (city_runtime.go). On a split city the leading store is the class store, so
 // the HQ work store is in NEITHER arm and a city-scope routed WORK bead is
 // invisible to controller-tick demand — the same "no work" fail-open this
-// invariant is named for, live today. cmd_start.go already names the dual role
+// invariant is named for, live today.
+//
+// THE TWO LEG SETS, named together so the delta stays one fact rather than two
+// hand-maintained lists. The CLAIM read's legs are enumerated in
+// ready_federation.go's contract header: city work store, then rigs by name
+// ascending, then the relocated binding LAST. The DEMAND read's legs are the
+// ones this row asserts: the leading sessions-class store (the binding on a
+// split city) plus rigBeadStores(). Their only difference is this row's subject
+// — the HQ work store, present in the claim set and absent from the demand set.
+// Every other divergence class between the two readers is closed at the row
+// level (demand_serve_predicate.go and its agreement conformance); this one is
+// a LEG-SET difference and is the last one outstanding. cmd_start.go already names the dual role
 // as a shared E2 two-store split. `gc session close` still reaches the HQ store
 // through unclaimWorkAssignedToRetiredSessionBead, so the bead is not lost
 // forever; the controller tick is what is blind. The hqWork row below asserts
@@ -1140,21 +1151,30 @@ func conformanceWarmTickDemand(t *testing.T, e splitEnv) {
 	}
 }
 
-// conformanceWakeOwnershipFastPath (I10) pins the reachability model the wake
-// filter and the orphan-release ownership index share: it is resolved from CFG —
-// the holder's configured rig — and never from which physical store the bead came
-// out of. The consequence is the conformance property: the answer is IDENTICAL on
-// both topologies. A rig-bound pool holder owns the rig-store leg and does not own
-// the leading-store leg, on a legacy city and on a split city alike.
+// conformanceWakeOwnershipFastPath (I10) pins the conformance property of the
+// wake filter and the orphan-release ownership index: whatever each answers, it
+// answers IDENTICALLY on both topologies. Neither reads which physical store a
+// bead came out of; both resolve from cfg plus the holder's own identities, so a
+// legacy city and a split city cannot diverge.
 //
-// KNOWN GAP, pinned rather than asserted as desirable: on a split city the
-// leading store IS the class store, so a rig-bound holder's CLAIMED
-// class-resident bead has no wake reason and is not ownership-matched — the
-// reachability model has no coordination-class arm. Orphan release still spares
-// it through the last-resort live-session probe (I2 proves that), but the wake
-// filter drops it every tick. Closing that gap is a later slice; when it lands,
-// the two assertions below are the ones to update, and they must be updated
-// TOGETHER or the topologies stop agreeing.
+// The two mechanisms no longer answer the same question, and that is deliberate.
+//
+//   - The WAKE filter now keeps a claim on the LEADING arm when the assignee is
+//     one of the holder's own exact identities, whatever the holder's rig scope.
+//     That arm is the relocated class binding on a split city — where claim-time
+//     class routing writes the assignee — and the city store on a legacy one,
+//     which a rig-scoped agent's hook fan-out reaches anyway
+//     (appendCityHookStore). Dropping the claim left a live holder with
+//     AwakeDecision{Reason:""} and the no-wake-reason drain recycled it mid-step
+//     (ga-whzrt). Both sub-topologies keep it, so the conformance property holds.
+//   - The ownership INDEX is unchanged and stays rig-scoped. It is a fast path
+//     for orphan release, and its last-resort live-session probe already spares
+//     a class-resident claim (I2 proves that), so the gap it leaves is a
+//     per-tick cost rather than a wrong answer. Widening it is a release-path
+//     change with its own blast radius and belongs to its own slice.
+//
+// If you widen the ownership index, update its assertion here and re-check that
+// both sub-topologies still agree.
 func conformanceWakeOwnershipFastPath(t *testing.T, e splitEnv) {
 	sess, err := e.sessionsStore().Create(splitEnvPoolSessionBead(e.qualified, "executor-1"))
 	if err != nil {
@@ -1184,8 +1204,10 @@ func conformanceWakeOwnershipFastPath(t *testing.T, e splitEnv) {
 	)
 	index := makeOpenSessionStoreRefIndex(e.cityPath, e.cfg, infos, true)
 
-	if len(kept) != 1 || kept[0].ID != rigWork.ID || len(keptRefs) != 1 || keptRefs[0] != e.rigName {
-		t.Fatalf("wake filter kept %d beads (refs %v), want exactly the rig-store claim %s under ref %q", len(kept), keptRefs, rigWork.ID, e.rigName)
+	if len(kept) != 2 || kept[0].ID != wisp.ID || kept[1].ID != rigWork.ID ||
+		len(keptRefs) != 2 || keptRefs[0] != classBindingAssignedWorkStoreRef || keptRefs[1] != e.rigName {
+		t.Fatalf("wake filter kept %d beads (ids %v refs %v), want the leading-arm claim %s under ref %q AND the rig-store claim %s under ref %q",
+			len(kept), assignedWorkIDs(kept), keptRefs, wisp.ID, classBindingAssignedWorkStoreRef, rigWork.ID, e.rigName)
 	}
 	if !openSessionOwnsWork(nil, index, sess.ID, e.rigName, true) {
 		t.Error("the ownership index does not own the rig-store leg for its own rig-bound holder — orphan release would fall to the per-bead live probe every tick")

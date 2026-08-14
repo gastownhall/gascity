@@ -124,19 +124,6 @@ func bdReadyIncludeEphemeralArg(includeEphemeralReady bool) string {
 	return ""
 }
 
-// excludeHoldLabelsShellArgs renders a repeated --exclude-label flag for
-// every beadmeta.DispatchHoldLabels value, so route-scoped, unassigned
-// pool-demand queries never surface a bead intentionally parked on a
-// dispatch hold (ga-x9kptu / ga-5736js). Assignee-scoped tiers (Tier 1/2)
-// must stay hold-transparent by design and must never call this.
-func excludeHoldLabelsShellArgs() string {
-	var args string
-	for _, label := range beadmeta.DispatchHoldLabels {
-		args += ` --exclude-label "` + label + `"`
-	}
-	return args
-}
-
 // holdLabelMatchCondsJQ renders the jq boolean expression that tests whether
 // the label currently in scope (`.`) is one of the beadmeta.DispatchHoldLabels
 // values, e.g. `. == "hold:mayor" or . == "hold:external"`. Shared by every
@@ -177,8 +164,61 @@ func jqMeta(key string) string {
 	return `(.metadata["` + key + `"] // "")`
 }
 
+// PoolDemandServeRules names, in Go, exactly what the generated Tier-3
+// pool-demand query will and will not serve a worker for a template.
+//
+// It exists because the CONTROLLER has to answer the same question — "would a
+// T-worker be served this row?" — before it counts the row as capacity demand,
+// and it cannot run the query to find out. Two hand-maintained copies of that
+// answer is how the pool came to spawn seats for rows their own hooks are
+// forbidden to claim: a routed epic, or a bead parked on a dispatch hold, was
+// permanent demand and every worker it spawned saw an empty query.
+//
+// The shell builder below renders its flags FROM this value, so the descriptor
+// is not a description of the query — it is the query's source. A flag added
+// there without a field here cannot exist.
+type PoolDemandServeRules struct {
+	// RequireUnassigned mirrors --unassigned: a row carrying any assignee is
+	// not routed pool demand.
+	RequireUnassigned bool
+	// ExcludeTypes mirrors --exclude-type: issue types the tier never serves.
+	ExcludeTypes []string
+	// ExcludeLabels mirrors the repeated --exclude-label flags: the dispatch
+	// holds a worker is deliberately forbidden to claim through.
+	ExcludeLabels []string
+}
+
+// PoolDemandServeRulesForQuery returns the serving rules of the generated
+// routed pool-demand tier. Callers that classify a row (rather than build a
+// query) consume this; see the controller demand loop in cmd/gc.
+func PoolDemandServeRulesForQuery() PoolDemandServeRules {
+	return PoolDemandServeRules{
+		RequireUnassigned: true,
+		ExcludeTypes:      []string{"epic"},
+		ExcludeLabels:     append([]string(nil), beadmeta.DispatchHoldLabels...),
+	}
+}
+
+// ShellArgs renders the rules as the bd flag string a routed pool-demand tier
+// carries. It is the single rendering path — every generated demand query, in
+// this package and in the control dispatcher's own probe, is built from it, so
+// the descriptor and the queries cannot drift.
+func (r PoolDemandServeRules) ShellArgs() string {
+	var args string
+	if r.RequireUnassigned {
+		args += " --unassigned"
+	}
+	for _, typ := range r.ExcludeTypes {
+		args += " --exclude-type=" + typ
+	}
+	for _, label := range r.ExcludeLabels {
+		args += ` --exclude-label "` + label + `"`
+	}
+	return args
+}
+
 func bdReadyPoolDemandShell(limitFlag string, topo QueryTopology) string {
-	return readyReaderCommand(topo.FederatedReady) + bdReadyIncludeEphemeralArg(topo.includeEphemeralReady()) + ` --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$target" --unassigned --exclude-type=epic` + excludeHoldLabelsShellArgs() + ` --json ` + limitFlag
+	return readyReaderCommand(topo.FederatedReady) + bdReadyIncludeEphemeralArg(topo.includeEphemeralReady()) + ` --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$target"` + PoolDemandServeRulesForQuery().ShellArgs() + ` --json ` + limitFlag
 }
 
 // bdReadyPoolDemandMigrationShell is a temporary raw compatibility probe for
@@ -190,7 +230,7 @@ func bdReadyPoolDemandShell(limitFlag string, topo QueryTopology) string {
 // requires jq in the default worker/reconciler environment; remove it with the
 // Go-side legacy candidates after the backfill completion tracked by ga-dhf44.
 func bdReadyPoolDemandMigrationShell(limitFlag string, topo QueryTopology) string {
-	return readyReaderCommand(topo.FederatedReady) + bdReadyIncludeEphemeralArg(topo.includeEphemeralReady()) + ` --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$target" --metadata-field "` + beadmeta.KindMetadataKey + `=` + beadmeta.KindWorkflow + `" --unassigned --exclude-type=epic` + excludeHoldLabelsShellArgs() + ` --json --sort oldest ` + limitFlag
+	return readyReaderCommand(topo.FederatedReady) + bdReadyIncludeEphemeralArg(topo.includeEphemeralReady()) + ` --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$target" --metadata-field "` + beadmeta.KindMetadataKey + `=` + beadmeta.KindWorkflow + `"` + PoolDemandServeRulesForQuery().ShellArgs() + ` --json --sort oldest ` + limitFlag
 }
 
 func poolDemandMigrationFilterJQ(limit int) string {

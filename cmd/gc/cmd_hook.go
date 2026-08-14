@@ -648,10 +648,16 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 	// report claims_errored instead of laundering a write failure into no_work.
 	claimsErrored := false
 	for len(remaining) > 0 {
-		_, selected, err := bestStoreWithWork(workQuery, remaining, primary, run)
+		_, selected, err := selectStoreWithWorkRetrying(workQuery, remaining, primary, run)
 		if err != nil {
 			emitFailure(workQuery, err)
 			fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck // best-effort stderr
+			// Deliberately NO drain result and NO drain-ack. A failed read is not
+			// an idle store: the controller counted demand for this seat, so
+			// draining here would convert a transport failure into a false idle,
+			// reap the seat, and leave the work for the next tick to rediscover.
+			// Exit non-zero, keep the seat, and let the event above carry the
+			// cause; the idle-claim backstop re-drives the hook.
 			return 1
 		}
 		if isZeroHookStore(selected) {
@@ -692,7 +698,32 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		// signal to the shared drain.
 		remaining = removeHookStore(remaining, claimStore)
 	}
-	return writeHookClaimNoWork(claimOpts, ops, claimsErrored, stdout, stderr)
+	return writeHookClaimNoWork(claimOpts, ops, claimsErrored, workDir, stdout, stderr)
+}
+
+// Claim-read retry pacing. A work-query ERROR is a failed read, and the failures
+// this bounds are transport-shaped: a contended SQLite leg, a store mid-write, a
+// binding whose engine is briefly refusing. Those clear in seconds, and the
+// alternative — exiting 1 and parking a seat the controller minted demand for
+// until the 90s backstop re-drives it — is strictly worse. Emptiness is NOT
+// retried: an empty read is an answer, and a seat that lost the sibling race must
+// drain promptly. Package vars follow hookWorkQueryTimeout's convention so tests
+// drive the loop without sleeping.
+var (
+	hookClaimQueryRetryAttempts = 3
+	hookClaimQueryRetryInterval = 5 * time.Second
+)
+
+// selectStoreWithWorkRetrying is bestStoreWithWork with a bounded retry around
+// the ERROR case only. It returns the first successful selection, or the last
+// error once the budget is spent.
+func selectStoreWithWorkRetrying(workQuery string, stores []hookStore, primary hookStore, run hookStoreRunner) (string, hookStore, error) {
+	out, selected, err := bestStoreWithWork(workQuery, stores, primary, run)
+	for attempt := 0; err != nil && attempt < hookClaimQueryRetryAttempts; attempt++ {
+		time.Sleep(hookClaimQueryRetryInterval)
+		out, selected, err = bestStoreWithWork(workQuery, stores, primary, run)
+	}
+	return out, selected, err
 }
 
 func hookClaimPrimaryRouteTarget(a *config.Agent) string {

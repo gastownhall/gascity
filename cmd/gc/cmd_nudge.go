@@ -707,9 +707,9 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 		fmt.Fprintf(stderr, "gc nudge poll: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	store := openNudgeBeadStore(target.cityPath)
-	if store.Store == nil {
-		fmt.Fprintf(stderr, "gc nudge poll: opening city store for %q\n", target.agentKey()) //nolint:errcheck
+	store, err := openNudgeBeadStoreErr(target.cityPath)
+	if err != nil || store.Store == nil {
+		fmt.Fprintf(stderr, "gc nudge poll: opening the nudge store for %q: %v\n", target.agentKey(), err) //nolint:errcheck
 		return 1
 	}
 	// Session-class store for the observe read (nudgeObserveTarget); the raw
@@ -781,9 +781,9 @@ func shouldKeepNudgePollerAlive(target nudgeTarget, missingSince, now time.Time)
 }
 
 func deliverSessionNudge(target nudgeTarget, message string, mode nudgeDeliveryMode, jsonOutput bool, stdout, stderr io.Writer) int {
-	store := openNudgeBeadStore(target.cityPath)
-	if store.Store == nil {
-		fmt.Fprintf(stderr, "gc session nudge: opening city store for %q\n", target.agentKey()) //nolint:errcheck
+	store, err := openNudgeBeadStoreErr(target.cityPath)
+	if err != nil || store.Store == nil {
+		fmt.Fprintf(stderr, "gc session nudge: opening the nudge store for %q: %v\n", target.agentKey(), err) //nolint:errcheck
 		return 1
 	}
 	sp, err := newSessionProvider()
@@ -796,7 +796,7 @@ func deliverSessionNudge(target nudgeTarget, message string, mode nudgeDeliveryM
 
 func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp runtime.Provider, message string, mode nudgeDeliveryMode, jsonOutput bool, stdout, stderr io.Writer) int {
 	if mode == nudgeDeliveryQueue {
-		return queueSessionNudgeWithWorker(target, store, sp, message, mode, jsonOutput, stdout, stderr)
+		return queueSessionNudgeWithWorker(target, store, sp, message, mode, jsonOutput, "", stdout, stderr)
 	}
 	// Two-store split: the raw store keeps threading the nudge-enqueue currency,
 	// while the session-class observe/handle reads below route through sessStore.
@@ -830,7 +830,7 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 	// those would needlessly downgrade live delivery to queued. (gco-90ui)
 	if mode == nudgeDeliveryWaitIdle && target.sessionTransport() != "acp" && target.providerName() == "claude" {
 		if obs, obsErr := nudgeObserveTarget(target, sessStore, sp); obsErr == nil && obs.Running && nudgeObservationBusy(obs) {
-			return queueSessionNudgeWithWorker(target, store, sp, message, mode, jsonOutput, stdout, stderr)
+			return queueSessionNudgeWithWorker(target, store, sp, message, mode, jsonOutput, worker.NudgeUndeliveredNoIdleBoundary, stdout, stderr)
 		}
 	}
 	delivery, ok := workerNudgeDeliveryForMode(mode)
@@ -851,7 +851,7 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 	if err != nil {
 		if errors.Is(err, runtime.ErrSessionNotFound) && target.sessionTransport() == "acp" {
 			if mode == nudgeDeliveryWaitIdle {
-				return queueSessionNudgeWithWorker(target, store, sp, message, mode, jsonOutput, stdout, stderr)
+				return queueSessionNudgeWithWorker(target, store, sp, message, mode, jsonOutput, "", stdout, stderr)
 			}
 			if mode == nudgeDeliveryImmediate {
 				fmt.Fprintf(stderr, "gc session nudge: live ACP delivery failed for %s because this process does not own the ACP connection; retry with --delivery=wait-idle or --delivery=queue so the queued dispatcher can deliver it\n", target.agentKey()) //nolint:errcheck
@@ -862,7 +862,7 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 		return 1
 	}
 	if mode == nudgeDeliveryWaitIdle && !result.Delivered {
-		return queueSessionNudgeWithWorker(target, store, sp, message, mode, jsonOutput, stdout, stderr)
+		return queueSessionNudgeWithWorker(target, store, sp, message, mode, jsonOutput, result.Undelivered, stdout, stderr)
 	}
 	if jsonOutput {
 		return writeCLIJSONLineOrExit(stdout, stderr, "gc session nudge", sessionNudgeJSON{
@@ -928,7 +928,7 @@ func queueManagedSessionNudgeWake(target nudgeTarget, store beads.Store, message
 	if err := nudgePokeController(target.cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc session nudge: warning: poke failed: %v\n", err) //nolint:errcheck
 	}
-	return writeQueuedSessionNudgeResult(target, mode, jsonOutput, stdout, stderr)
+	return writeQueuedSessionNudgeResult(target, mode, jsonOutput, "", stdout, stderr)
 }
 
 func enqueueManagedNudgeThenWake(target nudgeTarget, store beads.Store, item queuedNudge) error {
@@ -959,6 +959,17 @@ func enqueueManagedNudgeThenWake(target nudgeTarget, store beads.Store, item que
 // nudges class.
 func requestManagedNudgeWake(target nudgeTarget, sessFront *session.Store) error {
 	if !sessFront.Backed() || target.sessionID == "" {
+		// The item IS enqueued; what did not happen is the wake that gets a
+		// stopped session to drain it. Returning nil silently made those two
+		// facts indistinguishable, so a nudge to a stopped session with no
+		// session-store backing looked delivered and simply sat in the queue.
+		// Report the downgrade rather than failing the enqueue: the queued item
+		// is still valid and the controller's own patrol tick can deliver it.
+		if nudgeWarningWriter != nil {
+			fmt.Fprintf(nudgeWarningWriter, //nolint:errcheck // best-effort warning
+				"gc session nudge: queued for %s but no managed wake was requested (%s); it is delivered when the session next runs\n",
+				target.agentKey(), managedNudgeWakeSkipReason(target, sessFront))
+		}
 		return nil
 	}
 	res, err := sessFront.WakeSession(target.sessionID, time.Now().UTC(), session.WakeOpts{})
@@ -974,6 +985,19 @@ func requestManagedNudgeWake(target nudgeTarget, sessFront *session.Store) error
 		}
 	}
 	return nil
+}
+
+// managedNudgeWakeSkipReason names which precondition of the managed wake was
+// missing, so the downgrade line is actionable rather than merely present.
+func managedNudgeWakeSkipReason(target nudgeTarget, sessFront *session.Store) string {
+	switch {
+	case !sessFront.Backed():
+		return "no session store is backing this command"
+	case target.sessionID == "":
+		return "the target resolved to no session bead id"
+	default:
+		return "unknown"
+	}
 }
 
 func workerHandleForNudgeTarget(target nudgeTarget, store beads.Store, sp runtime.Provider) (worker.Handle, error) {
@@ -1092,7 +1116,11 @@ func deliverSessionNudgeWithProvider(target nudgeTarget, sp runtime.Provider, mo
 	return deliverSessionNudgeWithWorker(target, nil, sp, "check deploy status", mode, false, stdout, stderr)
 }
 
-func queueSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp runtime.Provider, message string, mode nudgeDeliveryMode, jsonOutput bool, stdout, stderr io.Writer) int {
+// queueSessionNudgeWithWorker enqueues a nudge the live leg could not (or must
+// not) deliver. undelivered names why live delivery was skipped so the operator
+// line can say it; it is empty for a caller that queued by request rather than
+// by downgrade.
+func queueSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp runtime.Provider, message string, mode nudgeDeliveryMode, jsonOutput bool, undelivered worker.NudgeUndeliveredReason, stdout, stderr io.Writer) int {
 	if err := enqueueQueuedNudge(target.cityPath, newQueuedNudgeWithOptions(target.agentKey(), message, "session", time.Now(), queuedNudgeOptionsFromTarget(target))); err != nil {
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
 		return 1
@@ -1102,10 +1130,14 @@ func queueSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp runti
 	if obs, err := workerObserveNudgeTarget(target, cliSessionStore(store, target.cfg, target.cityPath), sp); err == nil && obs.Running {
 		maybeStartNudgePoller(target)
 	}
-	return writeQueuedSessionNudgeResult(target, mode, jsonOutput, stdout, stderr)
+	return writeQueuedSessionNudgeResult(target, mode, jsonOutput, undelivered, stdout, stderr)
 }
 
-func writeQueuedSessionNudgeResult(target nudgeTarget, mode nudgeDeliveryMode, jsonOutput bool, stdout, stderr io.Writer) int {
+// writeQueuedSessionNudgeResult reports a queued nudge truthfully: WHERE it was
+// queued (the flock'd state.json that is the queue's authority — the shadow bead
+// is a projection of it, so an operator looking for the item needs this path)
+// and, when the live leg was skipped rather than tried, WHY.
+func writeQueuedSessionNudgeResult(target nudgeTarget, mode nudgeDeliveryMode, jsonOutput bool, undelivered worker.NudgeUndeliveredReason, stdout, stderr io.Writer) int {
 	if jsonOutput {
 		return writeCLIJSONLineOrExit(stdout, stderr, "gc session nudge", sessionNudgeJSON{
 			SchemaVersion: "1",
@@ -1118,14 +1150,38 @@ func writeQueuedSessionNudgeResult(target nudgeTarget, mode nudgeDeliveryMode, j
 			Outcome:       "queued",
 		})
 	}
-	fmt.Fprintf(stdout, "Queued nudge for %s\n", target.agentKey()) //nolint:errcheck
+	fmt.Fprintf(stdout, //nolint:errcheck // best-effort stdout
+		"Queued nudge for %s in %s%s\n",
+		target.agentKey(), nudgequeue.StatePath(target.cityPath), queuedNudgeDowngradeNote(target, undelivered))
 	return 0
 }
 
+// queuedNudgeDowngradeNote renders the reason the live leg was skipped, or "" for
+// a nudge that was queued by request. It names the provider for the unsupported
+// case because that is the actionable half: the operator's next question is
+// always "unsupported by what".
+func queuedNudgeDowngradeNote(target nudgeTarget, undelivered worker.NudgeUndeliveredReason) string {
+	switch undelivered {
+	case worker.NudgeUndeliveredProviderUnsupported:
+		provider := strings.TrimSpace(target.providerName())
+		if provider == "" {
+			provider = "this provider"
+		}
+		return fmt.Sprintf(" (live delivery is unsupported for %s; the queued dispatcher delivers it)", provider)
+	case worker.NudgeUndeliveredNoIdleBoundary:
+		return " (the session never reached an idle boundary; the queued dispatcher delivers it)"
+	default:
+		return ""
+	}
+}
+
 func sendMailNotify(target nudgeTarget, sender string) error {
-	store := openNudgeBeadStore(target.cityPath)
+	store, err := openNudgeBeadStoreErr(target.cityPath)
+	if err != nil {
+		return err
+	}
 	if store.Store == nil {
-		return fmt.Errorf("opening city store for %q", target.agentKey())
+		return fmt.Errorf("opening the nudge store for %q returned no store", target.agentKey())
 	}
 	sp, err := newSessionProvider()
 	if err != nil {

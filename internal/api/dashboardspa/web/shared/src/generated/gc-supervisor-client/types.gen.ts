@@ -859,7 +859,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -927,6 +927,13 @@ export type EventStreamEnvelope = {
     ts: string;
     type: string;
     workflow?: WorkflowEventProjection;
+};
+
+export type ExecutionStepStalledPayload = {
+    attempts: number;
+    bead_id: string;
+    root_bead_id?: string;
+    session_id: string;
 };
 
 export type ExtMsgAdapterRegisterInputBody = {
@@ -3084,6 +3091,15 @@ export type SessionCreateSucceededPayload = {
     session: SessionResponse;
 };
 
+export type SessionDemandClaimDivergencePayload = {
+    classification: string;
+    drain_reason: string;
+    session_id: string;
+    template: string;
+    trigger_bead_id?: string;
+    trigger_status_at_drain?: string;
+};
+
 export type SessionDrainAckedWithAssignedWorkPayload = {
     /**
      * ID of the work bead still holding this session as its assignee.
@@ -5169,6 +5185,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeExecutionStepCompleted) | ({
     type: 'execution.step_defined';
 } & TypedEventStreamEnvelopeExecutionStepDefined) | ({
+    type: 'execution.step_stalled';
+} & TypedEventStreamEnvelopeExecutionStepStalled) | ({
     type: 'execution.step_started';
 } & TypedEventStreamEnvelopeExecutionStepStarted) | ({
     type: 'execution.work_associated';
@@ -5243,6 +5261,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeSessionColdStartTimeout) | ({
     type: 'session.crashed';
 } & TypedEventStreamEnvelopeSessionCrashed) | ({
+    type: 'session.demand_claim_divergence';
+} & TypedEventStreamEnvelopeSessionDemandClaimDivergence) | ({
     type: 'session.drain_acked_with_assigned_work';
 } & TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork) | ({
     type: 'session.draining';
@@ -5725,6 +5745,24 @@ export type TypedEventStreamEnvelopeExecutionStepDefined = {
     subject?: string;
     ts: string;
     type: 'execution.step_defined';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope execution.step_stalled
+ */
+export type TypedEventStreamEnvelopeExecutionStepStalled = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: ExecutionStepStalledPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'execution.step_stalled';
     workflow?: WorkflowEventProjection;
 };
 
@@ -6395,6 +6433,24 @@ export type TypedEventStreamEnvelopeSessionCrashed = {
 };
 
 /**
+ * TypedEventStreamEnvelope session.demand_claim_divergence
+ */
+export type TypedEventStreamEnvelopeSessionDemandClaimDivergence = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionDemandClaimDivergencePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.demand_claim_divergence';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope session.drain_acked_with_assigned_work
  */
 export type TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork = {
@@ -6896,6 +6952,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeExecutionStepCompleted) | ({
     type: 'execution.step_defined';
 } & TypedTaggedEventStreamEnvelopeExecutionStepDefined) | ({
+    type: 'execution.step_stalled';
+} & TypedTaggedEventStreamEnvelopeExecutionStepStalled) | ({
     type: 'execution.step_started';
 } & TypedTaggedEventStreamEnvelopeExecutionStepStarted) | ({
     type: 'execution.work_associated';
@@ -6970,6 +7028,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeSessionColdStartTimeout) | ({
     type: 'session.crashed';
 } & TypedTaggedEventStreamEnvelopeSessionCrashed) | ({
+    type: 'session.demand_claim_divergence';
+} & TypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence) | ({
     type: 'session.drain_acked_with_assigned_work';
 } & TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork) | ({
     type: 'session.draining';
@@ -7476,6 +7536,25 @@ export type TypedTaggedEventStreamEnvelopeExecutionStepDefined = {
     subject?: string;
     ts: string;
     type: 'execution.step_defined';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope execution.step_stalled
+ */
+export type TypedTaggedEventStreamEnvelopeExecutionStepStalled = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: ExecutionStepStalledPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'execution.step_stalled';
     workflow?: WorkflowEventProjection;
 };
 
@@ -8179,6 +8258,25 @@ export type TypedTaggedEventStreamEnvelopeSessionCrashed = {
     subject?: string;
     ts: string;
     type: 'session.crashed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope session.demand_claim_divergence
+ */
+export type TypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionDemandClaimDivergencePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.demand_claim_divergence';
     workflow?: WorkflowEventProjection;
 };
 
