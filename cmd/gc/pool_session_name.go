@@ -78,13 +78,13 @@ func PoolSessionName(template, beadID string) string {
 // typed session.Info projection (WI-5 W4); the close is a session-class op
 // routed through the session front door. Returns the IDs of session beads
 // that were closed.
-func GCSweepSessionBeads(store beads.Store, rigStores map[string]beads.Store, sessionInfos []session.Info) []string {
+func GCSweepSessionBeads(cityPath string, store beads.Store, rigStores map[string]beads.Store, sessionInfos []session.Info) []string {
 	var closed []string
 	for _, info := range sessionInfos {
 		if info.Closed {
 			continue
 		}
-		if !closeSessionInfoIfUnassigned(store, rigStores, nil, info, "gc_swept", time.Now().UTC(), nil) {
+		if !closeSessionInfoIfUnassigned(cityPath, store, rigStores, nil, info, "gc_swept", time.Now().UTC(), nil) {
 			continue
 		}
 		closed = append(closed, info.ID)
@@ -137,7 +137,7 @@ func releaseOrphanedPoolAssignments(
 		log.Printf("releaseOrphanedPoolAssignments: assigned work/store-ref length mismatch: work=%d storeRefs=%d", len(assignedWorkBeads), len(assignedWorkStoreRefs))
 	}
 
-	openIdentifiers := makeOpenSessionStoreRefIndex(cityPath, cfg, openSessionInfos, storeRefAware)
+	openIdentifiers := makeOpenSessionStoreRefIndex(cityPath, cfg, store, openSessionInfos, storeRefAware)
 	legacyOpenIdentifiers := make(map[string]struct{}, len(openSessionInfos)*5)
 	for _, info := range openSessionInfos {
 		if info.Closed {
@@ -295,11 +295,13 @@ const unresolvedOpenSessionStoreRef = "\x00unresolved"
 // The \x00 prefix cannot collide with a real rig name.
 const crossStoreOpenSessionStoreRef = "\x00crossstore"
 
-func makeOpenSessionStoreRefIndex(cityPath string, cfg *config.City, openSessionInfos []session.Info, storeRefAware bool) map[string]map[string]struct{} {
+func makeOpenSessionStoreRefIndex(cityPath string, cfg *config.City, leading beads.Store, openSessionInfos []session.Info, storeRefAware bool) map[string]map[string]struct{} {
 	index := make(map[string]map[string]struct{}, len(openSessionInfos)*5)
 	if !storeRefAware {
 		return index
 	}
+	// A property of the CITY, so it is resolved once rather than per session.
+	claimRefs := assignedWorkClaimRefs(cityPath, cfg, leading)
 	for _, info := range openSessionInfos {
 		if info.Closed {
 			continue
@@ -308,9 +310,11 @@ func makeOpenSessionStoreRefIndex(cityPath string, cfg *config.City, openSession
 		// through Info for both the store-ref resolution and the assignee
 		// identities (WI-5 W4 — the boundary projection this loop used to carry
 		// moved to the snapshot's load edge).
-		storeRef := openSessionReachableStoreRefInfo(cityPath, cfg, info)
+		storeRefs := openSessionReachableStoreRefInfo(cityPath, cfg, claimRefs, info)
 		for _, id := range sessionBeadAssigneeIdentitiesInfo(info) {
-			addOpenSessionStoreRef(index, id, storeRef)
+			for _, storeRef := range storeRefs {
+				addOpenSessionStoreRef(index, id, storeRef)
+			}
 		}
 	}
 	return index

@@ -75,7 +75,7 @@ func TestFilterAssignedWorkBeadsForSessionWakeKeepsOnlyReachableAssigneeSources(
 	}
 	storeRefs := []string{"", "riga", "", "riga", "rigb", "rigb"}
 
-	got, gotRefs := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, sessionInfosFromBeads(sessions), work, storeRefs)
+	got, gotRefs := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, nil, sessionInfosFromBeads(sessions), work, storeRefs)
 
 	wantIDs := []string{"city-named", "rig-named", "city-session", "rig-session"}
 	wantRefs := []string{"", "riga", "", "riga"}
@@ -126,7 +126,7 @@ func TestFilterAssignedWorkBeadsForSessionWakeCityScopedAgentIsCrossStoreEligibl
 	}
 	storeRefs := []string{"", "riga"} // city store + rig store
 
-	got, gotRefs := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, nil, work, storeRefs)
+	got, gotRefs := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, nil, nil, work, storeRefs)
 
 	if len(got) != 2 {
 		t.Fatalf("city-scoped %q must be reachable from BOTH stores; got %d: %#v", identity, len(got), got)
@@ -430,9 +430,9 @@ func TestSessionAssignedWorkGuardsFederateForCityScopedSession(t *testing.T) {
 		t.Fatalf("stranded-bead lookup must find rig-store work for a city-scoped session; found=%v bead=%q want=%q", found, bead.ID, rigWork.ID)
 	}
 
-	stranded, err := collectSessionAssignedWork(cityPath, cfg, cityStore, rigStores, session)
+	stranded, err := collectSessionAssignedWorkInfo(cityPath, cfg, cityStore, rigStores, sessiontest.SeedBead(t, session))
 	if err != nil {
-		t.Fatalf("collectSessionAssignedWork: %v", err)
+		t.Fatalf("collectSessionAssignedWorkInfo: %v", err)
 	}
 	if len(stranded) != 1 || stranded[0].bead.ID != rigWork.ID {
 		t.Fatalf("stranded-work collector must include rig-store work for a city-scoped session; got %#v", stranded)

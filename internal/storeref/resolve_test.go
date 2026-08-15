@@ -379,6 +379,137 @@ func TestRigRefRoundTripsThroughScopeRigContext(t *testing.T) {
 	}
 }
 
+// The binding ref the census records has to read back as a CITY scope, and as a
+// class binding. Both facts are consumed outside this package by the ref
+// normalizers, so both are pinned against ClassRef's own output rather than
+// against a literal.
+func TestClassRefRoundTripsAsCityScope(t *testing.T) {
+	ref := string(ClassRef(infraClasses))
+	rig, ok := ScopeRigContext(ref)
+	if !ok || rig != "" {
+		t.Fatalf("ScopeRigContext(%q) = (%q, %v), want (\"\", true) — a binding is city scope", ref, rig, ok)
+	}
+	if !IsClassRef(ref) {
+		t.Fatalf("IsClassRef(%q) = false", ref)
+	}
+	// The control: the rig family must NOT read as a binding, or the
+	// normalizers would fold every rig leg onto the city.
+	if IsClassRef(string(RigRef("alpha"))) {
+		t.Fatal("IsClassRef accepted a rig ref")
+	}
+	if IsClassRef("class:") {
+		t.Fatal("IsClassRef accepted a token-less class ref")
+	}
+}
+
+// uncomparableStore is a store whose dynamic type carries a slice, so it can be
+// neither a map key nor an == operand. Real consumers have these — a test
+// double that pre-loads snapshots, or any store that embeds a []beads.Bead —
+// and a plan is built over whatever stores the caller opened.
+type uncomparableStore struct {
+	beads.Store
+	snapshot []beads.Bead
+}
+
+// A plan must never PANIC on the stores it is handed. The dedupe pass used to
+// put every leg in a map[beads.Store]bool, which is a runtime panic the moment
+// a caller's store is not hashable — an outage of the whole controller tick
+// dressed as an unrelated test double.
+func TestPlanAcceptsStoresThatCannotBeMapKeys(t *testing.T) {
+	work := uncomparableStore{Store: beads.NewMemStore(), snapshot: []beads.Bead{{ID: "ga-1"}}}
+	topo := Topology{Work: Leg{Ref: WorkRef, Store: work}}
+
+	plan, err := Plan(Census{}, topo)
+	if err != nil {
+		t.Fatalf("Plan(Census) over an uncomparable work store: %v", err)
+	}
+	if got, want := plan.String(), `Union(first-leg-wins): ""[Authority,Fatal]`; got != want {
+		t.Fatalf("plan = %q, want %q", got, want)
+	}
+	if got := topo.ClaimRefs(); len(got) != 1 || got[0] != WorkRef {
+		t.Fatalf("ClaimRefs = %v, want the work ref alone", got)
+	}
+	// The control: a COMPARABLE store repeated across two legs still collapses,
+	// so the fix widened what the dedupe tolerates rather than turning it off.
+	shared := beads.NewMemStore()
+	both := Topology{
+		Work:     Leg{Ref: WorkRef, Store: shared},
+		Bindings: []ClassBinding{{Classes: infraClasses, Leg: Leg{Ref: ClassRef(infraClasses), Store: shared}}},
+	}
+	collapsed, err := Plan(Census{}, both)
+	if err != nil {
+		t.Fatalf("Plan(Census) over a collapsed split: %v", err)
+	}
+	if len(collapsed.Legs) != 1 {
+		t.Fatalf("a binding that resolved back to the work store produced %d legs, want 1", len(collapsed.Legs))
+	}
+}
+
+// TouchesBinding is the one bit a consumer that cannot execute a plan acts on,
+// so it has to be true for exactly the plans that reach a binding.
+func TestTouchesBindingIsTrueForExactlyTheBindingPlans(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		f      topoFixture
+		intent Intent
+		want   bool
+	}{
+		{"single-store RoutedWork", newT0(), RoutedWork{}, false},
+		{"whole-split RoutedWork", newT1(), RoutedWork{}, true},
+		{"split+rigs RoutedWork", newT2(), RoutedWork{}, true},
+		// A work-only census reaches no binding even on a split city, which is
+		// what makes this a property of the PLAN and not of the topology.
+		{"whole-split work census", newT1(), Census{Classes: []coordclass.Class{coordclass.ClassWork}}, false},
+		{"whole-split graph census", newT1(), Census{Classes: []coordclass.Class{coordclass.ClassGraph}}, true},
+		{"whole-split Class(work)", newT1(), Class{C: coordclass.ClassWork}, false},
+		{"whole-split Class(graph)", newT1(), Class{C: coordclass.ClassGraph}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := mustPlan(t, tc.intent, tc.f.topo).TouchesBinding(); got != tc.want {
+				t.Fatalf("TouchesBinding() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// EachLeg is the enumeration seam for consumers that cannot run their reads
+// inside Walk. It must hand over the plan's ORDER and the plan's POLICY — those
+// are the two things a hand-rolled store list loses — and must perform no I/O,
+// because a consumer building a leg list has not decided to read anything yet.
+func TestEachLegHandsOverOrderAndPolicyWithoutReading(t *testing.T) {
+	f := newT2()
+	plan := mustPlan(t, RoutedWork{}, f.topo)
+
+	var refs []StoreRef
+	var policies []ErrPolicy
+	EachLeg(plan, func(leg Leg, _ Role, onError ErrPolicy) {
+		refs = append(refs, leg.Ref)
+		policies = append(policies, onError)
+	})
+
+	if len(refs) != len(plan.Legs) {
+		t.Fatalf("EachLeg visited %d legs, want %d", len(refs), len(plan.Legs))
+	}
+	for i, leg := range plan.Legs {
+		if refs[i] != leg.Leg.Ref || policies[i] != leg.OnError {
+			t.Fatalf("leg %d = (%q, %v), want (%q, %v) — the order or the policy did not survive", i, refs[i], policies[i], leg.Leg.Ref, leg.OnError)
+		}
+	}
+	// The policies really do differ across legs, so "hands over the policy" is
+	// an assertion and not a constant.
+	distinct := map[ErrPolicy]bool{}
+	for _, p := range policies {
+		distinct[p] = true
+	}
+	if len(distinct) < 2 {
+		t.Fatalf("every leg of RoutedWork x T2 carries the same policy (%v); this test cannot tell a consumer that drops the policy from one that keeps it", policies)
+	}
+	// No reads: the probe-counting fixture would have seen one.
+	if got := f.totalGets(); got != 0 {
+		t.Fatalf("EachLeg performed %d Gets; it is an enumeration, not an executor", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Plan rendering is the corpus's artifact, so its own shape is pinned here.
 

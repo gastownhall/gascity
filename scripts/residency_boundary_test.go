@@ -495,28 +495,39 @@ func scanStoreListSignatures(root string, dirs []string, allowlist map[string]bo
 	return found, nil
 }
 
-// isRawStoreList reports whether expr is []beads.Store or
-// map[string]beads.Store — the two shapes that hand a caller a probe list with
-// no leg order and no error policy attached.
+// isRawStoreList reports whether expr is []beads.Store, map[string]beads.Store
+// or []storeref.Leg — the shapes that hand a caller a probe list it will read
+// itself.
+//
+// The first two carry no leg order and no error policy at all. []storeref.Leg
+// is the subtler one: a consumer that enumerated a plan through EachLeg and
+// then RETURNS the bare legs has stripped the policy back off and handed the
+// next caller the same unpoliced list, one function further from the resolver.
+// The grep half ratchets the EachLeg call; this ratchets the shape it can be
+// laundered into.
 func isRawStoreList(expr ast.Expr) bool {
 	switch typed := expr.(type) {
 	case *ast.ArrayType:
-		return typed.Len == nil && isBeadsStore(typed.Elt)
+		return typed.Len == nil && (isBeadsStore(typed.Elt) || isStorerefLeg(typed.Elt))
 	case *ast.MapType:
 		key, ok := typed.Key.(*ast.Ident)
-		return ok && key.Name == "string" && isBeadsStore(typed.Value)
+		return ok && key.Name == "string" && (isBeadsStore(typed.Value) || isStorerefLeg(typed.Value))
 	default:
 		return false
 	}
 }
 
-func isBeadsStore(expr ast.Expr) bool {
+func isBeadsStore(expr ast.Expr) bool { return isQualifiedType(expr, "beads", "Store") }
+
+func isStorerefLeg(expr ast.Expr) bool { return isQualifiedType(expr, "storeref", "Leg") }
+
+func isQualifiedType(expr ast.Expr, pkg, name string) bool {
 	sel, ok := expr.(*ast.SelectorExpr)
-	if !ok || sel.Sel == nil || sel.Sel.Name != "Store" {
+	if !ok || sel.Sel == nil || sel.Sel.Name != name {
 		return false
 	}
-	pkg, ok := sel.X.(*ast.Ident)
-	return ok && pkg.Name == "beads"
+	ident, ok := sel.X.(*ast.Ident)
+	return ok && ident.Name == pkg
 }
 
 // ---------------------------------------------------------------------------

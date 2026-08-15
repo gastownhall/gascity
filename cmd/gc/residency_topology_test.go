@@ -2,6 +2,7 @@ package main
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -36,7 +37,7 @@ func TestControllerResidencyTopologyIsSingleStoreWithoutRoutes(t *testing.T) {
 	work := beads.NewMemStore()
 	cr := &CityRuntime{cfg: residencyTestConfig(), standaloneCityStore: work}
 
-	topo := cr.residencyTopology()
+	topo := cr.residencyTopology(cr.rigBeadStores())
 	if !topo.IsSingleStore() {
 		t.Fatalf("nil routes produced %d bindings, want none", len(topo.Bindings))
 	}
@@ -64,7 +65,7 @@ func TestControllerResidencyTopologyBuildsFromOpenedRoutes(t *testing.T) {
 		storageRoutes:       splitRoutes(binding),
 	}
 
-	topo := cr.residencyTopology()
+	topo := cr.residencyTopology(cr.rigBeadStores())
 	if len(topo.Bindings) != 1 {
 		t.Fatalf("got %d bindings, want 1 — the whole split is ONE store", len(topo.Bindings))
 	}
@@ -90,6 +91,46 @@ func TestControllerResidencyTopologyBuildsFromOpenedRoutes(t *testing.T) {
 	}
 }
 
+// THE S0 CARRY-FORWARD. A suspended rig is routinely DARK, and a dark
+// FederationTail leg makes every census result Partial — which means
+// retain-don't-reap fleet-wide. The constructor is TOLD which rigs are serving,
+// so the serving set never contains one.
+//
+// The control is the same topology built with the suspended rig INCLUDED: it
+// must produce the leg, or the assertion below would pass on a constructor that
+// simply lost all rig legs.
+func TestControllerResidencyTopologyIsToldWhichRigsAreServing(t *testing.T) {
+	cfg := residencyTestConfig()
+	cr := &CityRuntime{
+		cfg:                 cfg,
+		standaloneCityStore: beads.NewMemStore(),
+		standaloneRigStores: map[string]beads.Store{"alpha": beads.NewMemStore(), "bravo": beads.NewMemStore()},
+		storageRoutes:       splitRoutes(beads.NewMemStore()),
+	}
+	suspended := map[string]bool{filepath.Clean("/tmp/bravo"): true}
+
+	serving := cr.residencyTopology(servingRigStores(cfg, cr.rigBeadStores(), suspended))
+	census, err := storeref.Plan(storeref.Census{}, serving)
+	if err != nil {
+		t.Fatalf("Plan(Census): %v", err)
+	}
+	want := `Union(first-leg-wins): ""[Authority,Fatal] > rig:alpha[FederationTail,PartialDegrade] > class:gmnos[FederationTail,Fatal]`
+	if got := census.String(); got != want {
+		t.Fatalf("census over the SERVING rigs =\n %s\nwant\n %s", got, want)
+	}
+
+	// Control: with no suspension frame the bravo leg is present, so the row
+	// above is asserting exclusion rather than an empty rig set.
+	all := cr.residencyTopology(servingRigStores(cfg, cr.rigBeadStores(), nil))
+	control, err := storeref.Plan(storeref.Census{}, all)
+	if err != nil {
+		t.Fatalf("Plan(Census) over every rig: %v", err)
+	}
+	if !strings.Contains(control.String(), "rig:bravo") {
+		t.Fatalf("the control lost the bravo leg too (%s); the exclusion assertion above proves nothing", control.String())
+	}
+}
+
 // A refused city's routes serve every infrastructure class from a store that
 // refuses, and the topology must carry that verdict rather than degrade.
 func TestControllerResidencyTopologyCarriesTheStandingRefusal(t *testing.T) {
@@ -100,7 +141,7 @@ func TestControllerResidencyTopologyCarriesTheStandingRefusal(t *testing.T) {
 		storageRoutes:       splitRoutes(refusedClassStore{err: refusal}),
 	}
 
-	topo := cr.residencyTopology()
+	topo := cr.residencyTopology(cr.rigBeadStores())
 	if topo.Refused == nil {
 		t.Fatal("a refusing binding produced a topology with no refusal")
 	}

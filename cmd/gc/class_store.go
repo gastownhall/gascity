@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // This file is the controller/CLI-side seam of the per-class store refactor.
@@ -382,28 +383,64 @@ func graphClassBinding(routes *storageRoutes) (beads.Store, bool) {
 // configured for, and whether its claimable work is spread across stores a
 // single `bd ready` in the agent's work directory cannot reach.
 //
-// The second question is graphClassBinding's, not config's, and the difference
-// is not academic. storageSplitShapeOf reads [storage] alone and answers "no
-// split" for a city whose section was DELETED after it had already served one —
-// the exact edit storage_boot.go's bypass note exists to catch. That city's
-// graph beads are in a binding, its boot refuses, and its routes serve every
-// infrastructure class from refusedClassStore; asking config would build it a
-// `bd ready` command that reads the work ledger and reports "no work" forever,
-// while asking the routes builds it the federated command, which fails loud with
-// the refusal that names the remedy. Same authority as resolveClassStore, same
-// answer, one place.
+// The second question is the RESOLVER'S, and it is answered as a projection of
+// Plan(RoutedWork) — the same plan the demand surface reads. A generated query
+// is the one consumer that cannot take a plan: its legs are bd subprocesses in a
+// workspace, and a relocated class binding is not a bd workspace at all. What it
+// can take is the plan's DECISION, which is exactly one bit: does the claimable
+// set live anywhere a bd workspace cannot reach? A binding leg in the plan means
+// yes, and the query is built around the federated reader.
 //
-// A nil cfg still resolves the routes: cliStorageRoutes reads the city's own
-// city.toml rather than the caller's snapshot, precisely because where a city
-// serves its classes from is a property of the CITY.
+// Projecting rather than re-asking is what stops the query from disagreeing with
+// the reader it drives. It also keeps the cityQueryTopology lesson intact:
+// storageSplitShapeOf reads [storage] alone and answers "no split" for a city
+// whose section was DELETED after it had already served one. That city's graph
+// beads are in a binding, its boot refuses, and Plan REFUSES over it — which is
+// projected here as FederatedReady, so the query is the federated one and fails
+// loud with the refusal that names the remedy, rather than a `bd ready` that
+// reads the work ledger and reports "no work" forever.
+//
+// A nil cfg still resolves the routes: the topology constructor reads the city's
+// own city.toml rather than the caller's snapshot, precisely because where a
+// city serves its classes from is a property of the CITY.
 func cityQueryTopology(cityPath string, cfg *config.City) config.QueryTopology {
 	topo := config.QueryTopology{}
 	if cfg != nil {
 		topo.Beads = cfg.Beads
 	}
-	_, topo.FederatedReady = graphClassBinding(cliStorageRoutes(cityPath))
+	topo.FederatedReady = routedWorkNeedsFederatedReader(cityPath, cfg)
 	return topo
 }
+
+// routedWorkNeedsFederatedReader reports whether this city's claimable set spans
+// a store no bd workspace can reach.
+//
+// The work legs of Plan(RoutedWork) are bd workspaces — the city work store and
+// the rigs — and the hook already fans out across them. The binding is not one,
+// so its presence in the plan is the whole answer. A REFUSED city answers yes:
+// the refusal is about a relocated class, and only the federated reader carries
+// it to the operator instead of silently reading the wrong ledger.
+//
+// The topology is built with no work legs on purpose. This asks about the SHAPE
+// of the city, not about a caller's opened stores, and every caller here — `gc
+// hook`, `gc prime`, `gc agent list`, the dispatch runtime — holds a different
+// set or none at all. Bindings do not depend on which work stores the caller
+// opened, so the answer is the same for all of them.
+func routedWorkNeedsFederatedReader(cityPath string, cfg *config.City) bool {
+	topo := residencyTopologyForCity(cityPath, cfg, queryTopologyWorkProbe{}, nil)
+	plan, err := storeref.Plan(storeref.RoutedWork{}, topo)
+	if err != nil {
+		return true
+	}
+	return plan.TouchesBinding()
+}
+
+// queryTopologyWorkProbe stands in for the work leg of a topology built to be
+// PLANNED over and never read. Plan refuses a legless topology — a Union that
+// reported zero rows as a complete answer is the silent-shrink shape — so the
+// leg has to exist; nothing in this file executes the plan, so it never answers
+// a call.
+type queryTopologyWorkProbe struct{ beads.Store }
 
 // newCityMailProvider builds the controller's mail provider as a two-store mail
 // provider: message beads persist in the messaging-class store, and mail's

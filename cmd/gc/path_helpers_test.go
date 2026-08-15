@@ -13,10 +13,41 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cenkalti/backoff/v4"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doltorphan"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gastownhall/gascity/test/tmuxtest"
+)
+
+// doltLeakGuardGraceInitialInterval and doltLeakGuardGraceMaxElapsedTime
+// bound how long runWith tolerates a candidate leak surviving past
+// runTests() returning. A dolt sql-server that a test has already signaled
+// to stop still needs a bounded, non-zero amount of wall-clock time to
+// actually leave the process table (flush, close listeners, OS reap); under
+// host contention that ordinary shutdown tail can still be in flight the
+// instant the first final scan fires, which misclassifies a process
+// finishing an already-in-progress clean shutdown as a permanent leak
+// (ga-szv0ge). The guard's real invariant is "no test leaves a dolt server
+// running forever," not "no test leaves a dolt server running for one more
+// scheduler tick after Run() returns" — mirrors the hang-budget framing in
+// ga-f5clwo: this is a hang detector, not a latency SLO, so per ga-f5clwo's
+// own carve-out it gets "one shared generous budget" rather than per-test
+// tuning. Round 2's 5s budget still false-positived under host contention
+// (ga-d5nmtj gate evidence: PID 2911558 outlived the grace window, a later
+// scan found it already gone). Round 3 sets the ceiling to
+// config.DefaultDoltStopTimeout rather than a new arbitrary literal: that
+// constant is this same codebase's existing answer to "how long may a
+// managed dolt server take to actually stop" (its SIGTERM→SIGKILL grace,
+// cmd/gc/dolt_stop_managed.go), so the guard now tolerates exactly the
+// shutdown tail the system itself is already configured to allow — no
+// process the system considers to be stopping normally can trip it. Sized
+// well below normal package test timeouts so a genuine leak (one that never
+// clears, e.g. ga-vltdpl) still fails within tens of seconds, not minutes.
+const (
+	doltLeakGuardGraceInitialInterval = 250 * time.Millisecond
+	doltLeakGuardGraceMaxElapsedTime  = config.DefaultDoltStopTimeout
 )
 
 func canonicalTestPath(path string) string {
@@ -178,7 +209,7 @@ func (g *doltLeakGuardedTestingM) nonEmptyLeakRoots() []string {
 }
 
 func (g *doltLeakGuardedTestingM) Run() int {
-	return g.runWith(g.m.Run, discoverDoltProcesses, g.sweepStaleCmdGCTestDoltProcesses, sweepOrphanDoltStoreDirs, reapManagedDoltTestProcesses, reapDoltLeakProcesses)
+	return g.runWith(g.m.Run, discoverDoltProcesses, g.sweepStaleCmdGCTestDoltProcesses, sweepOrphanDoltStoreDirs, reapManagedDoltTestProcesses, reapDoltLeakProcesses, doltLeakGuardGraceInitialInterval, doltLeakGuardGraceMaxElapsedTime)
 }
 
 func (g *doltLeakGuardedTestingM) runWith(
@@ -188,6 +219,7 @@ func (g *doltLeakGuardedTestingM) runWith(
 	sweepOrphanDirs func(),
 	reapRegistered func(),
 	reapLeaks func([]DoltProcInfo),
+	graceInitialInterval, graceMaxElapsedTime time.Duration,
 ) int {
 	_ = sweepStale("startup")
 	sweepOrphanDirs()
@@ -203,11 +235,11 @@ func (g *doltLeakGuardedTestingM) runWith(
 
 	guardFailed := initialErr != nil
 	if initialErr == nil {
-		final, finalErr := snapshotDoltProcessesForConfigRoots(enumerate, g.leakRoots())
+		leaked, finalErr := g.waitForFinalScanToClear(enumerate, initial, graceInitialInterval, graceMaxElapsedTime)
 		if finalErr != nil {
 			fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: final scan failed: %v\n", finalErr) //nolint:errcheck
 			guardFailed = true
-		} else if leaked := diffDoltProcessSnapshots(initial, final); len(leaked) > 0 {
+		} else if len(leaked) > 0 {
 			fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: leaked %d dolt sql-server process(es) under %s\n", len(leaked), strings.Join(g.nonEmptyLeakRoots(), ", ")) //nolint:errcheck
 			writeDoltLeakReport(os.Stderr, leaked)
 			reapLeaks(leaked)
@@ -222,6 +254,55 @@ func (g *doltLeakGuardedTestingM) runWith(
 		return 1
 	}
 	return code
+}
+
+// waitForFinalScanToClear polls the final process-table scan, diffing
+// against initial each time, until it shows no candidates or
+// maxElapsedTime is exhausted. It tolerates the ordinary tail latency of a
+// dolt sql-server's graceful shutdown (already signaled to stop, not yet
+// reaped from the process table) without weakening detection of a process
+// still present when the grace window closes: the last observed diff is
+// what gets reported and reaped in that case, identical to a single
+// immediate scan finding the same result.
+func (g *doltLeakGuardedTestingM) waitForFinalScanToClear(
+	enumerate func() ([]DoltProcInfo, error),
+	initial map[int]DoltProcInfo,
+	initialInterval, maxElapsedTime time.Duration,
+) ([]DoltProcInfo, error) {
+	var leaked []DoltProcInfo
+	var finalScanErr error
+
+	bo := backoff.NewExponentialBackOff()
+	bo.InitialInterval = initialInterval
+	bo.MaxElapsedTime = maxElapsedTime
+
+	// backoff.Retry (v4.3.0) already unwraps a *backoff.PermanentError it
+	// returns internally and hands back the inner error directly, so
+	// type-asserting on Retry's own return value can never see a
+	// *backoff.PermanentError. Capture the scan error directly via this
+	// closure variable instead, mirroring leaked above: set at the same
+	// point backoff.Permanent(finalErr) is returned, read after Retry
+	// returns.
+	_ = backoff.Retry(func() error {
+		final, err := snapshotDoltProcessesForConfigRoots(enumerate, g.leakRoots())
+		if err != nil {
+			finalScanErr = err
+			return backoff.Permanent(err)
+		}
+		leaked = diffDoltProcessSnapshots(initial, final)
+		if len(leaked) == 0 {
+			return nil
+		}
+		return fmt.Errorf("%d dolt sql-server process(es) still present", len(leaked))
+	}, bo)
+	if finalScanErr != nil {
+		return nil, finalScanErr
+	}
+	// Retries exhausted with a non-empty diff on the last poll falls
+	// through here too: leaked already holds that observation, and the
+	// sentinel error returned by Retry in that case carries no
+	// information beyond "still non-empty".
+	return leaked, nil
 }
 
 func (g *doltLeakGuardedTestingM) installSignalHandler() func() {

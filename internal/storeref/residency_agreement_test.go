@@ -2,6 +2,7 @@ package storeref
 
 import (
 	"errors"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -254,6 +255,48 @@ func TestReaderAgreement(t *testing.T) {
 			}
 			if _, ok := claimLegFor(t, escalation, ghostID); ok {
 				t.Fatalf("ghost id %q resolved to a leg — fixture rot", ghostID)
+			}
+		})
+	}
+}
+
+// TestSweepAndDemandReadTheSameStores is the S2 half of the property: the
+// surface that COUNTS claimable work and the surface that SWEEPS an identity's
+// claims must read the same leg SET, or a claim lands somewhere no release, gate
+// or re-wake pass looks.
+//
+// It is asserted rather than assumed because the two used to be built by
+// different hands — the demand federation in one file, the retirement sweeps in
+// another, the drain-ack release in a third. Sharing planWorkFederation makes it
+// true by construction; this row is what fails if someone gives one of them its
+// own builder again.
+func TestSweepAndDemandReadTheSameStores(t *testing.T) {
+	for _, f := range allTopologies() {
+		if f.topo.Refused != nil {
+			continue
+		}
+		t.Run(f.name, func(t *testing.T) {
+			demand := mustPlan(t, RoutedWork{}, f.topo)
+			sweep := mustPlan(t, AssignedWork{}, f.topo)
+			if got, want := sweep.String(), demand.String(); got != want {
+				t.Fatalf("the assigned-work sweep reads\n %s\nwhile demand reads\n %s\n— a claim on a leg only one of them has is invisible to the other", got, want)
+			}
+
+			// Claim escalation reads the SAME legs in the SAME order as the
+			// sweep — work first, binding last — and only the mode differs
+			// (FirstOwner vs Union). That agreement is the point: a claim may
+			// only land where the sweep can see it, and it must land on the
+			// copy the sweep would attribute the row to.
+			//
+			// The documented ASYMMETRY of the intent pair is escalation vs
+			// ByID, not escalation vs sweep: ByID leads with the binding
+			// because it is the sole minter, escalation leads with work because
+			// the claim must land where the reader serves from. That row is
+			// pinned in TestReaderAgreement (2b), which is where it belongs —
+			// it needs a co-resident id to be meaningful.
+			escalation := mustPlan(t, AssignedWork{Purpose: AssignedWorkClaimEscalation}, f.topo)
+			if got, want := escalation.Refs(), sweep.Refs(); !slices.Equal(got, want) {
+				t.Fatalf("claim escalation reads legs %v and the sweep reads %v, in that order; a claim may only land where the sweep can see it", got, want)
 			}
 		})
 	}

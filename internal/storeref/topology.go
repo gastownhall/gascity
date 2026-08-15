@@ -43,6 +43,10 @@ const WorkRef StoreRef = ""
 // RigRef is the canonical ref of a rig work store.
 func RigRef(name string) StoreRef { return StoreRef("rig:" + strings.TrimSpace(name)) }
 
+// classRefPrefix is the binding family's marker, spelled once so ClassRef and
+// the scope predicates that read it back cannot drift apart.
+const classRefPrefix = "class:"
+
 // ClassRef is the canonical ref of the binding serving a class set.
 //
 // The token is the classes' initials in name order, which identifies a binding
@@ -68,7 +72,7 @@ func ClassRef(classes []coordclass.Class) StoreRef {
 		seen[n] = true
 		token.WriteString(n[:1])
 	}
-	return StoreRef("class:" + token.String())
+	return StoreRef(classRefPrefix + token.String())
 }
 
 // Leg is one store the resolver can name, with the id prefix it was CONFIGURED
@@ -137,6 +141,35 @@ type Topology struct {
 // city every class collapses to the work store and by-id resolution is the
 // caller's own read: no probe, no funnel, byte-identical to the pre-split path.
 func (t Topology) IsSingleStore() bool { return len(t.Bindings) == 0 }
+
+// ClaimRefs returns the store-refs a claim held by ONE identity can be recorded
+// under, whatever work scope the holder has: the work arm, then every relocated
+// class binding this city serves.
+//
+// This is the wake filter's and the orphan-release index's question, and it is
+// answered from the topology rather than from a Plan for two reasons. The
+// asker matches persisted census refs and reads no store, so a plan's executor
+// has nothing to do. And a REFUSED city still has claims recorded under its
+// binding's ref, so the answer has to exist exactly where a plan correctly
+// refuses — losing it there would drop every claim-holder on the city the
+// refusal is about into the no-wake-reason drain.
+//
+// Legs that resolved to the same store collapse, so a city whose leading arm IS
+// its binding answers with the one ref its census actually records. That
+// collapse is why this is a Topology method and not a list of binding refs: the
+// dedupe needs the stores.
+func (t Topology) ClaimRefs() []StoreRef {
+	refs := []StoreRef{t.Work.Ref}
+	var seen storeSet
+	seen.addIfNew(t.Work.Store)
+	for _, b := range t.orderedBindings() {
+		if b.Leg.Store != nil && !seen.addIfNew(b.Leg.Store) {
+			continue
+		}
+		refs = append(refs, b.Leg.Ref)
+	}
+	return refs
+}
 
 // BindingFor returns the binding serving class c, if any.
 func (t Topology) BindingFor(c coordclass.Class) (ClassBinding, bool) {

@@ -190,6 +190,22 @@ run_self_test() {
 	printf 'package main\n\n// b would call rigBeadStores() but only in prose.\nfunc b() {}\n' >"$tmp/comment/cmd/gc/prose.go"
 	expect 0 "a comment naming the vocabulary is not a site" "$tmp/comment"
 
+	# THE ROGUE CONSUMER. storeref.EachLeg is the sanctioned enumeration seam, so
+	# a consumer that takes the legs and then reads them in its OWN order with
+	# its OWN error handling names no forbidden symbol: no []beads.Store literal,
+	# no .Leg.Store, no base enumerator. It passed both halves of this guard
+	# before c:storeref.EachLeg was ratcheted. A third consumer must be a
+	# reviewed baseline change, not a silent one.
+	fixture "$tmp/rogue" $'cmd/gc/existing.go\ta\ta:BeadStores\t1\n'
+	printf 'package main\n\nfunc rogue(p storeref.ResolvedPlan) {\n\tstoreref.EachLeg(p, func(leg storeref.Leg, _ storeref.Role, _ storeref.ErrPolicy) {\n\t\t_, _ = leg.Store.Get("ga-1")\n\t})\n}\n' >"$tmp/rogue/cmd/gc/rogue.go"
+	expect 1 "a NEW storeref.EachLeg consumer must fail" "$tmp/rogue"
+
+	# And its control: the same consumer, baselined, passes — so the row above
+	# ratchets growth rather than banning the seam the two real consumers need.
+	fixture "$tmp/rogue-baselined" $'cmd/gc/existing.go\ta\ta:BeadStores\t1\ncmd/gc/rogue.go\trogue\tc:storeref.EachLeg\t1\n'
+	printf 'package main\n\nfunc rogue(p storeref.ResolvedPlan) {\n\tstoreref.EachLeg(p, func(leg storeref.Leg, _ storeref.Role, _ storeref.ErrPolicy) {\n\t\t_, _ = leg.Store.Get("ga-1")\n\t})\n}\n' >"$tmp/rogue-baselined/cmd/gc/rogue.go"
+	expect 0 "a BASELINED storeref.EachLeg consumer must pass" "$tmp/rogue-baselined"
+
 	return $rc
 }
 

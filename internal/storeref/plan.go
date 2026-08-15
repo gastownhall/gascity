@@ -3,11 +3,16 @@ package storeref
 // The plan: which stores answer this question, in what order, and what a
 // per-leg failure means.
 //
-// A ResolvedPlan is DATA. It performs no I/O, it is comparable, and it prints
-// as the row format the conformance corpus pins. That is what lets a migration
-// slice assert "the store list this site builds today == the resolver's plan"
-// before it swaps in the executor, and what makes a leg-order change a diff in
-// a golden table rather than a paragraph in a review.
+// A ResolvedPlan is DATA. It performs no I/O and it prints as the row format
+// the conformance corpus pins. That is what lets a migration slice assert "the
+// store list this site builds today == the resolver's plan" before it swaps in
+// the executor, and what makes a leg-order change a diff in a golden table
+// rather than a paragraph in a review.
+//
+// It is NOT comparable — it carries a leg slice, so `==` on two plans does not
+// compile. Compare them the way the corpus does, through String(); comparing
+// their leg SETS is refSet's job in the tests, and it exists precisely because
+// the two comparisons have to fail differently.
 
 import (
 	"strconv"
@@ -184,6 +189,24 @@ func (p ResolvedPlan) String() string {
 		parts = append(parts, l.String())
 	}
 	return p.Mode.String() + ": " + strings.Join(parts, " > ")
+}
+
+// TouchesBinding reports whether any leg of this plan is a relocated class
+// binding.
+//
+// It is the one bit a consumer that cannot execute a plan can still act on: the
+// generated work_query's legs are bd SUBPROCESSES in a workspace, and a binding
+// is not a bd workspace, so "does the answer live anywhere a bd workspace cannot
+// reach" decides which reader the query is built around. Answering it from the
+// plan rather than by re-asking the routes is what keeps a generated query and
+// the reader it drives from disagreeing.
+func (p ResolvedPlan) TouchesBinding() bool {
+	for _, l := range p.Legs {
+		if IsClassRef(string(l.Leg.Ref)) {
+			return true
+		}
+	}
+	return false
 }
 
 // Refs returns the plan's leg refs in order — the census/wake vocabulary a

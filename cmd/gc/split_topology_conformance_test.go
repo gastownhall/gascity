@@ -57,13 +57,25 @@ import (
 //
 // Others pin behavior main HAS but should not keep. Those carry a KNOWN GAP
 // paragraph naming the divergence, the assertions that move when it closes, and
-// the slice that closes it — I1 and I2 (the HQ work store is in neither arm of
-// the controller's cross-store scan on a split city), I5 (the RELEASE tier does
-// not follow the now class-routed claim: crash recovery, on_death/on_boot and
-// the retired-session sweep are all still work-only) and I10 (the wake filter
-// has no coordination-class reachability arm). Leaving such a leg UNSEEDED is the
-// failure mode this convention exists to prevent: the invariant then reads as
-// coverage of a path it never touches.
+// the slice that closes it. Leaving such a leg UNSEEDED is the failure mode this
+// convention exists to prevent: the invariant then reads as coverage of a path
+// it never touches.
+//
+// The list, current as of the residency resolver's S2 slice:
+//
+//   - OPEN — I1 and I2: the HQ work store is in neither arm of the controller's
+//     cross-store scan on a split city. That is the census/demand side, and S3
+//     closes it (the D6 flip: the binding becomes a leg BESIDE the city work
+//     store instead of replacing it).
+//   - CLOSED by S2 — I5's release-tier gap. Crash recovery, the retired-session
+//     sweep, `gc session close` and drain-ack all resolve the same leg set from
+//     the city's routes (assignedWorkSweepPlan), so a class-routed claim is
+//     released by the same pass that releases a work-store one. What remains
+//     open there is ga-zp3uj, named in I5's own text: the AGENT-SIDE recovery
+//     tiers are raw bd commands in a work directory and stay topology-blind.
+//   - CLOSED — I10's wake-filter gap (ga-whzrt, #5250) and its ownership-index
+//     half (ga-j4ob9, S2). Both mechanisms now resolve their refs from the
+//     city's residency topology, and I10 asserts they agree.
 //
 // # Which authority an invariant is pinning
 //
@@ -110,30 +122,21 @@ func TestSplitTopologyConformance(t *testing.T) {
 // rig store's own routed work alongside it. A leading store resolved to the WORK
 // class instead would read zero and drain the fleet.
 //
-// KNOWN GAP, pinned rather than asserted as desirable — the HQ WORK store leg.
-// The scan's arms are the leading store plus the RIG stores, and production
-// builds the rig arm as rigBeadStores(), which deletes the city entry
-// (city_runtime.go). On a split city the leading store is the class store, so
-// the HQ work store is in NEITHER arm and a city-scope routed WORK bead is
-// invisible to controller-tick demand — the same "no work" fail-open this
-// invariant is named for, live today.
+// THE TWO LEG SETS AGREE, and that is what this row now pins. The CLAIM read's
+// legs are enumerated in ready_federation.go's contract header: city work store,
+// then rigs by name ascending, then the relocated binding LAST. The DEMAND
+// read's legs are the same set, because both are now Plan(RoutedWork)/
+// Plan(Census) over one topology (S3) rather than two hand-maintained lists.
 //
-// THE TWO LEG SETS, named together so the delta stays one fact rather than two
-// hand-maintained lists. The CLAIM read's legs are enumerated in
-// ready_federation.go's contract header: city work store, then rigs by name
-// ascending, then the relocated binding LAST. The DEMAND read's legs are the
-// ones this row asserts: the leading sessions-class store (the binding on a
-// split city) plus rigBeadStores(). Their only difference is this row's subject
-// — the HQ work store, present in the claim set and absent from the demand set.
-// Every other divergence class between the two readers is closed at the row
-// level (demand_serve_predicate.go and its agreement conformance); this one is
-// a LEG-SET difference and is the last one outstanding. cmd_start.go already names the dual role
-// as a shared E2 two-store split. `gc session close` still reaches the HQ store
-// through unclaimWorkAssignedToRetiredSessionBead, so the bead is not lost
-// forever; the controller tick is what is blind. The hqWork row below asserts
-// today's asymmetric answer on both topologies. When the coordination-class /
-// HQ-work arm lands, that row's expectation flips to found-on-both and this
-// paragraph goes with it.
+// The HQ WORK store was the last leg-set divergence, and it is closed here. The
+// scan used to take the store it was HANDED as its city leg — the sessions-class
+// store, which on a converged split IS the binding — while the rig arm is
+// rigBeadStores(), which deletes the city entry. So the HQ work store was in
+// NEITHER arm and a city-scope routed WORK bead was invisible to controller-tick
+// demand: the "no work" fail-open this invariant is named for (D6, ga-88mxz).
+// Now the work store and the binding are DISTINCT ref'd legs, so the hqWork row
+// below is found on both topologies and the graph rows answer under the
+// binding's own "class:*" ref.
 func conformanceReadyFederation(t *testing.T, e splitEnv) {
 	durable := mintDurableGraphBead(t, e, "routed ready control bead", e.qualified)
 	wisp := e.mintWispWith(t, wispOpts{title: "routed ready wisp", routedTo: e.qualified})
@@ -160,7 +163,7 @@ func conformanceReadyFederation(t *testing.T, e splitEnv) {
 		t.Fatalf("HQ bead %s classifies as infrastructure; this leg is about the WORK class specifically", hqWork.ID)
 	}
 
-	found, stores, refs, partial := collectOpenUnassignedRoutedWork(e.cfg, e.sessionsStore(), e.rigStores, nil, os.Stderr)
+	found, stores, refs, partial := collectOpenUnassignedRoutedWork(e.cityPath, e.cfg, e.sessionsStore(), e.rigStores, nil, os.Stderr)
 	if partial {
 		t.Fatal("collectOpenUnassignedRoutedWork reported a partial scan; the demand read must be complete for this invariant to mean anything")
 	}
@@ -169,7 +172,15 @@ func conformanceReadyFederation(t *testing.T, e splitEnv) {
 	}
 
 	leadingOwner, ownerName := e.owner()
-	leadingRef, rigRef := "city:"+e.cfg.Workspace.Name, "rig:"+e.rigName
+	cityRef, rigRef := "city:"+e.cfg.Workspace.Name, "rig:"+e.rigName
+	// The graph-class rows answer from the leg that HOLDS them, under that leg's
+	// own ref: the binding's on a split city, the city work store's otherwise.
+	// Before S3 both spelled themselves "city:<name>", because the binding was
+	// the city leg.
+	leadingRef := cityRef
+	if e.split {
+		leadingRef = string(storeref.ClassRef(wholeSplitClasses()))
+	}
 	for _, tc := range []struct {
 		name    string
 		id      string
@@ -193,47 +204,36 @@ func conformanceReadyFederation(t *testing.T, e splitEnv) {
 		}
 	}
 
-	// The HQ work leg, stated per topology because the answer really differs.
-	// See the KNOWN GAP paragraph above: this pins what main does, not what it
-	// should do.
+	// The HQ work leg — the D6 subject, and the same answer on both topologies
+	// now that the city work store is a leg of its own rather than a store the
+	// binding stood in for.
 	hqIndex := beadIndexOf(found, hqWork.ID)
-	if e.split {
-		if hqIndex >= 0 {
-			t.Errorf("routed HQ work bead %s IS in the split-city demand scan (store-ref %q). Two things produce this and they need opposite responses: the HQ-work arm landed (flip this row to expect it on both topologies, drop this invariant's KNOWN GAP paragraph, and update I2's hq leg with it) — or the LEADING store regressed to the work class, which is the #5127/#5125 bug and shows up as the durable/wisp rows going missing above", hqWork.ID, refs[hqIndex])
-		}
-		return
-	}
 	if hqIndex < 0 {
-		t.Errorf("routed HQ work bead %s is missing from the single-store demand scan — on a legacy city the HQ work store IS the leading store, so this is the \"no work\" fail-open with nothing topological to blame", hqWork.ID)
-		return
+		t.Fatalf("routed HQ work bead %s is missing from the demand scan. On a legacy city the HQ work store IS the leading store; on a split city it is the Plan(Census) work leg. Either way this is the \"no work\" fail-open: a pool spawns for work its demand read cannot see, then drains (D6/ga-88mxz, closed by S3)", hqWork.ID)
 	}
 	if !sameStorePtr(stores[hqIndex], e.work) {
 		t.Errorf("routed HQ work bead %s was captured under a store that does not hold it", hqWork.ID)
 	}
-	if refs[hqIndex] != leadingRef {
-		t.Errorf("routed HQ work bead %s captured under store-ref %q, want %q", hqWork.ID, refs[hqIndex], leadingRef)
+	if refs[hqIndex] != cityRef {
+		t.Errorf("routed HQ work bead %s captured under store-ref %q, want %q", hqWork.ID, refs[hqIndex], cityRef)
 	}
 }
 
 // conformanceAssignedWorkCapture (I2) guards the post-claim half of the
 // spawn/drain treadmill and the orphan-release TOCTOU class. A claimed
 // (in_progress) routed bead whose assignee is a DEAD session must be captured by
-// collectAssignedWorkBeadsWithStores under the leading store's arm (owner store
-// aligned, store-ref "") so orphan release can recover it; a claimed bead held
-// by a LIVE open session must NOT be released. Both topologies expect the same
-// outcome — release exactly the dead claim — which on a split city means the
-// capture and the release both have to reach the CLASS store, because that is
-// the leading store the reconciler is handed.
+// collectAssignedWorkBeadsWithStores under the leg that HOLDS it — owner store
+// aligned, and labeled with that leg's ref — so orphan release can recover it; a
+// claimed bead held by a LIVE open session must NOT be released. Both topologies
+// expect the same outcome: release exactly the dead claims.
 //
-// KNOWN GAP, pinned rather than asserted as desirable — the HQ WORK store leg,
-// the same one I1 names. The capture arms are the leading store plus the rig
-// stores, and rigBeadStores() deletes the city entry, so on a split city a dead
-// claim on a city-scope WORK bead is captured by nothing and released by
-// nothing: the bead stays in_progress against a session that is gone until some
-// other path (`gc session close`'s unclaimWorkAssignedToRetiredSessionBead)
-// happens to reach it. The hqDead leg below asserts that asymmetry on both
-// topologies. When the HQ-work arm lands, it flips to released-on-both, together
-// with I1's hqWork row.
+// The HQ WORK store leg, the same one I1 names, is the D6 half. Before S3 the
+// capture arms were the leading store (the binding, on a split city) plus the
+// rig stores, and rigBeadStores() deletes the city entry — so a dead claim on a
+// city-scope WORK bead was captured by nothing and released by nothing, staying
+// in_progress against a session that is gone until `gc session close` happened
+// to reach it. Plan(Census) names the work store and the binding as distinct
+// legs, so hqDead recovers on both topologies.
 func conformanceAssignedWorkCapture(t *testing.T, e splitEnv) {
 	sess, err := e.sessionsStore().Create(splitEnvPoolSessionBead(e.qualified, "executor-1"))
 	if err != nil {
@@ -243,9 +243,16 @@ func conformanceAssignedWorkCapture(t *testing.T, e splitEnv) {
 	dead := e.mintWispWith(t, wispOpts{title: "dead-held claimed wisp", routedTo: e.qualified, status: "in_progress", assignee: splitEnvDeadAssignee})
 	hqDead := splitEnvDeadClaimedWorkBead(t, e.work, e.qualified)
 
-	got, stores, refs, _, partial := collectAssignedWorkBeadsWithStores(e.cfg, e.sessionsStore(), e.rigStores, nil, nil)
+	got, stores, refs, _, partial := collectAssignedWorkBeadsWithStores(e.cityPath, e.cfg, e.sessionsStore(), e.rigStores, nil, nil)
 	if partial {
 		t.Fatal("collectAssignedWorkBeadsWithStores reported partial results")
+	}
+	// The graph-class wisps answer from the leg that holds them, under that
+	// leg's own ref: the binding's on a split city, the work store's ("") on a
+	// legacy one.
+	wispRef := ""
+	if e.split {
+		wispRef = string(storeref.ClassRef(wholeSplitClasses()))
 	}
 	for _, want := range []beads.Bead{live, dead} {
 		i := beadIndexOf(got, want.ID)
@@ -255,19 +262,21 @@ func conformanceAssignedWorkCapture(t *testing.T, e splitEnv) {
 		if !sameStorePtr(stores[i], e.sessionsStore()) {
 			t.Errorf("wisp %s captured with the wrong owner store — release would mutate a store that does not hold it", want.ID)
 		}
-		if refs[i] != "" {
-			t.Errorf("wisp %s captured under store-ref %q, want \"\" (the leading-store arm)", want.ID, refs[i])
+		if refs[i] != wispRef {
+			t.Errorf("wisp %s captured under store-ref %q, want %q", want.ID, refs[i], wispRef)
 		}
 	}
 
-	// The HQ leg's capture half, per topology. See the KNOWN GAP paragraph.
-	hqCaptured := beadIndexOf(got, hqDead.ID) >= 0
-	if hqCaptured != !e.split {
-		if e.split {
-			t.Errorf("dead-claimed HQ work bead %s IS captured on a split city. Either the HQ-work arm landed (flip this leg and I1's hqWork row to expect capture and release on both topologies, and drop both KNOWN GAP paragraphs) or the LEADING store regressed to the work class, which is the #5127/#5125 bug and shows up as the wisp rows above failing too", hqDead.ID)
-		} else {
-			t.Errorf("dead-claimed HQ work bead %s is NOT captured on a legacy city, where the HQ work store IS the leading store — post-claim HQ work has gone invisible to the reconciler", hqDead.ID)
-		}
+	// The HQ leg's capture half — the same answer on both topologies now.
+	hqIndex := beadIndexOf(got, hqDead.ID)
+	if hqIndex < 0 {
+		t.Fatalf("dead-claimed HQ work bead %s is NOT captured. The city work store is a Plan(Census) leg on both topologies; if this fails on the split arm the work leg has collapsed back onto the binding (D6 regression), and if it fails on both the leading store regressed (#5127/#5125, which also shows up as the wisp rows above)", hqDead.ID)
+	}
+	if !sameStorePtr(stores[hqIndex], e.work) {
+		t.Errorf("dead-claimed HQ work bead %s captured under a store that does not hold it", hqDead.ID)
+	}
+	if refs[hqIndex] != "" {
+		t.Errorf("dead-claimed HQ work bead %s captured under store-ref %q, want \"\" (the work leg)", hqDead.ID, refs[hqIndex])
 	}
 
 	released := releaseOrphanedPoolAssignments(
@@ -276,13 +285,7 @@ func conformanceAssignedWorkCapture(t *testing.T, e splitEnv) {
 		got, stores, refs,
 		e.rigStores,
 	)
-	// On a legacy city the HQ work store IS the leading store, so the dead HQ
-	// claim recovers alongside the dead wisp. On a split city it is in neither
-	// arm, so only the wisp does.
-	wantReleased := []string{dead.ID}
-	if !e.split {
-		wantReleased = append(wantReleased, hqDead.ID)
-	}
+	wantReleased := []string{dead.ID, hqDead.ID}
 	releasedIDs := make(map[string]bool, len(released))
 	for _, b := range released {
 		releasedIDs[b.ID] = true
@@ -295,16 +298,12 @@ func conformanceAssignedWorkCapture(t *testing.T, e splitEnv) {
 			t.Errorf("dead claim %s was not released; it stays assigned to a session that is gone", want)
 		}
 	}
-	if e.split {
-		// The gap, asserted rather than assumed: the HQ dead claim is still
-		// stranded after the release pass a split-city controller tick runs.
-		stranded, err := e.work.Get(hqDead.ID)
-		if err != nil {
-			t.Fatalf("reload HQ dead-claimed work bead: %v", err)
-		}
-		if stranded.Status != "in_progress" || stranded.Assignee != splitEnvDeadAssignee {
-			t.Errorf("HQ dead claim %s = status %q assignee %q, want it still stranded at in_progress/%s. If a controller-tick path now recovers it, the HQ-work arm has landed: update this leg, the capture check above and I1's hqWork row together", hqDead.ID, stranded.Status, stranded.Assignee, splitEnvDeadAssignee)
-		}
+	recovered, err := e.work.Get(hqDead.ID)
+	if err != nil {
+		t.Fatalf("reload HQ dead-claimed work bead: %v", err)
+	}
+	if recovered.Assignee != "" {
+		t.Errorf("HQ dead claim %s is still assigned to %q after the release pass a controller tick runs", hqDead.ID, recovered.Assignee)
 	}
 
 	reloaded, err := e.graphStore().Get(live.ID)
@@ -751,7 +750,15 @@ func conformanceHookClaimClassRouting(t *testing.T, e splitEnv, workBeadID strin
 //     binding. That is a property of the topology rather than of any call site,
 //     which is exactly why it is asserted rather than assumed.
 //   - `gc session close` leads with the WORK store (openCityStore), so it cannot
-//     see the binding on its own and is handed the graph binding as a class leg.
+//     see the binding on its own.
+//
+// S2 UPDATE (ga-j4ob9): the second scan is no longer HANDED the binding by its
+// call site. Both rows now resolve the same leg set from the city's own routes
+// (assignedWorkSweepPlan), which is what closes the case the hand-threading
+// never covered — the Info-form retired-session sweep, which took no class leg
+// at all, so a dead session's binding-resident claim had no automatic reopen
+// lane. The rows below are unchanged in what they assert; only the mechanism
+// that puts the binding in the scan moved.
 //
 // What is NOT closed here, and is ga-zp3uj: the agent-side recovery tiers
 // (`bd list --status in_progress`, on_death, on_boot) are raw bd commands in the
@@ -764,20 +771,22 @@ func assertClassRoutedClaimIsReleasable(t *testing.T, e splitEnv) {
 	for _, tt := range []struct {
 		name    string
 		leading beads.Store
-		class   []beads.Store
 	}{
 		{
 			name:    "reconciler scan — leads with the sessions-class store, which IS the binding",
 			leading: e.sessionsStore(),
 		},
 		{
-			name:    "gc session close — leads with the work store and is handed the binding",
+			name:    "gc session close — leads with the work store and resolves the binding from the routes",
 			leading: e.work,
-			class:   []beads.Store{e.class},
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if !workAssignmentStoresReach(workAssignmentStores(tt.leading, e.rigStores, tt.class...), e.class) {
+			plan, err := assignedWorkSweepPlan(e.cityPath, e.cfg, tt.leading, e.rigStores, nil)
+			if err != nil {
+				t.Fatalf("resolving the release scan's leg set: %v", err)
+			}
+			if !workAssignmentStoresReach(planStores(t, plan), e.class) {
 				t.Fatalf("no leg of the release scan is the class binding; a claim routed there is released by nothing")
 			}
 			sessionBead := beads.Bead{ID: "gcg-retired-session", Metadata: map[string]string{"session_name": "worker-1"}}
@@ -786,7 +795,7 @@ func assertClassRoutedClaimIsReleasable(t *testing.T, e splitEnv) {
 				status:   "in_progress",
 				assignee: sessionBead.ID,
 			})
-			unclaimWorkAssignedToRetiredSessionBead(tt.leading, e.rigStores, sessionBead, "", io.Discard, tt.class...)
+			unclaimWorkAssignedToRetiredSessionBead(e.cityPath, e.cfg, tt.leading, e.rigStores, sessionBead, "", io.Discard)
 			released, err := e.class.Get(step.ID)
 			if err != nil {
 				t.Fatalf("reading the claimed graph step back from the binding: %v", err)
@@ -1157,24 +1166,28 @@ func conformanceWarmTickDemand(t *testing.T, e splitEnv) {
 // bead came out of; both resolve from cfg plus the holder's own identities, so a
 // legacy city and a split city cannot diverge.
 //
-// The two mechanisms no longer answer the same question, and that is deliberate.
+// The two mechanisms now answer the SAME question, which is the S2 flip this
+// row's own note asked for ("if you widen the ownership index, update its
+// assertion here and re-check that both sub-topologies still agree").
 //
-//   - The WAKE filter now keeps a claim on the LEADING arm when the assignee is
-//     one of the holder's own exact identities, whatever the holder's rig scope.
+//   - The WAKE filter keeps a claim on the LEADING arm when the assignee is one
+//     of the holder's own exact identities, whatever the holder's rig scope.
 //     That arm is the relocated class binding on a split city — where claim-time
 //     class routing writes the assignee — and the city store on a legacy one,
 //     which a rig-scoped agent's hook fan-out reaches anyway
 //     (appendCityHookStore). Dropping the claim left a live holder with
 //     AwakeDecision{Reason:""} and the no-wake-reason drain recycled it mid-step
-//     (ga-whzrt). Both sub-topologies keep it, so the conformance property holds.
-//   - The ownership INDEX is unchanged and stays rig-scoped. It is a fast path
-//     for orphan release, and its last-resort live-session probe already spares
-//     a class-resident claim (I2 proves that), so the gap it leaves is a
-//     per-tick cost rather than a wrong answer. Widening it is a release-path
-//     change with its own blast radius and belongs to its own slice.
+//     (ga-whzrt).
+//   - The ownership INDEX now grants the same arm to the same identities. It had
+//     to move WITH the release path's own widening, not after it: the
+//     orphan-release scan reads the binding as a leg now, so an index that still
+//     answered "this holder owns only its rig" would let the scan reap a LIVE
+//     worker's binding-resident claim. A missed wake costs a cycle; a false
+//     release is claim loss (ga-j4ob9).
 //
-// If you widen the ownership index, update its assertion here and re-check that
-// both sub-topologies still agree.
+// Both sub-topologies answer identically, which is the conformance property:
+// neither mechanism reads which physical store a bead came out of, and the refs
+// they compare come from the city's own residency topology.
 func conformanceWakeOwnershipFastPath(t *testing.T, e splitEnv) {
 	sess, err := e.sessionsStore().Create(splitEnvPoolSessionBead(e.qualified, "executor-1"))
 	if err != nil {
@@ -1198,22 +1211,29 @@ func conformanceWakeOwnershipFastPath(t *testing.T, e splitEnv) {
 	}
 
 	infos := sessionInfosFromBeads([]beads.Bead{sess})
+	leading := e.sessionsStore()
 	kept, keptRefs := filterAssignedWorkBeadsForSessionWake(
-		e.cfg, e.cityPath, infos,
+		e.cfg, e.cityPath, leading, infos,
 		[]beads.Bead{wisp, rigWork}, []string{"", e.rigName},
 	)
-	index := makeOpenSessionStoreRefIndex(e.cityPath, e.cfg, infos, true)
+	index := makeOpenSessionStoreRefIndex(e.cityPath, e.cfg, leading, infos, true)
 
 	if len(kept) != 2 || kept[0].ID != wisp.ID || kept[1].ID != rigWork.ID ||
-		len(keptRefs) != 2 || keptRefs[0] != classBindingAssignedWorkStoreRef || keptRefs[1] != e.rigName {
+		len(keptRefs) != 2 || keptRefs[0] != "" || keptRefs[1] != e.rigName {
 		t.Fatalf("wake filter kept %d beads (ids %v refs %v), want the leading-arm claim %s under ref %q AND the rig-store claim %s under ref %q",
-			len(kept), assignedWorkIDs(kept), keptRefs, wisp.ID, classBindingAssignedWorkStoreRef, rigWork.ID, e.rigName)
+			len(kept), assignedWorkIDs(kept), keptRefs, wisp.ID, "", rigWork.ID, e.rigName)
 	}
 	if !openSessionOwnsWork(nil, index, sess.ID, e.rigName, true) {
 		t.Error("the ownership index does not own the rig-store leg for its own rig-bound holder — orphan release would fall to the per-bead live probe every tick")
 	}
-	if openSessionOwnsWork(nil, index, sess.ID, "", true) {
-		t.Error("the ownership index owns the leading-store leg for a rig-bound holder; reachability is cfg-derived and must answer the same on both topologies. If you are landing the coordination-class reachability arm, update this assertion and the single-store one together.")
+	if !openSessionOwnsWork(nil, index, sess.ID, "", true) {
+		t.Error("the ownership index does not own the leading-store leg for its own rig-bound holder; the orphan-release scan reads that leg now, so a LIVE worker's claim written there is reaped — claim loss, not a missed wake (ga-j4ob9)")
+	}
+	// The widening is per-identity ownership, not a blanket keep of the leading
+	// arm: a foreign assignee on the same leg is still not owned, which is what
+	// keeps orphan release able to recover a genuinely dead holder's claim.
+	if openSessionOwnsWork(nil, index, "some-other-session", "", true) {
+		t.Error("the ownership index owns the leading-store leg for a FOREIGN identity; that would make every binding-resident claim unreleasable")
 	}
 }
 
@@ -1671,7 +1691,7 @@ func conformanceCLIReadyDeadRigLeg(t *testing.T, e splitEnv) {
 		t.Fatalf("API partial_errors = %v, want the dead rig %q named", body.PartialErrors, deadRig)
 	}
 
-	legs := readyFederationLegs(loadedCityName(dead.cfg, dead.cityPath), dead.work, dead.rigStores, fixtureGraphLeg(dead))
+	legs := mustReadyLegs(t, loadedCityName(dead.cfg, dead.cityPath), dead.work, dead.rigStores, fixtureGraphLeg(dead))
 	rows, err := readyBeadsForOpts(legs, readyOpts{})
 	if err == nil {
 		t.Fatalf("gc ready served %d beads over the same dead %q leg; the API said that read was PARTIAL, and a bare array has nowhere to say so — the CLI's equivalent of Partial 200 is a non-zero exit", len(rows), deadRig)
@@ -1699,7 +1719,7 @@ func containsSubstring(list []string, want string) bool {
 // gate, so this exercises the leg-selection decision rather than restating it.
 func cliReadyIDs(t *testing.T, e splitEnv) []string {
 	t.Helper()
-	legs := readyFederationLegs(
+	legs := mustReadyLegs(t,
 		loadedCityName(e.cfg, e.cityPath),
 		e.work,
 		e.rigStores,
@@ -1865,7 +1885,7 @@ func conformanceFederatedInFlightTier(t *testing.T, e splitEnv, ownerName string
 		t.Fatalf("claiming the in-flight graph wisp %s: %v", claimed.ID, err)
 	}
 
-	legs := readyFederationLegs(loadedCityName(e.cfg, e.cityPath), e.work, e.rigStores, fixtureGraphLeg(e))
+	legs := mustReadyLegs(t, loadedCityName(e.cfg, e.cityPath), e.work, e.rigStores, fixtureGraphLeg(e))
 	rows, err := readyBeadsForOpts(legs, readyOpts{status: readyStatusInProgress})
 	if err != nil {
 		t.Fatalf("gc ready --status in_progress over the fixture stores: %v", err)
@@ -2068,7 +2088,7 @@ func conformanceProjectionCoherence(t *testing.T, e splitEnv) {
 	}
 
 	// The way out the refusal names, on both topologies.
-	legs := readyFederationLegs(loadedCityName(e.cfg, e.cityPath), e.work, e.rigStores, fixtureGraphLeg(e))
+	legs := mustReadyLegs(t, loadedCityName(e.cfg, e.cityPath), e.work, e.rigStores, fixtureGraphLeg(e))
 	readyIDs := func(status string) []string {
 		t.Helper()
 		rows, err := readyBeadsForOpts(legs, readyOpts{status: status, metadataFields: []string{selector}})
@@ -2231,7 +2251,7 @@ func conformanceWorkQueryFederation(t *testing.T, e splitEnv) {
 	}
 
 	routed := e.mintWispWith(t, wispOpts{title: "routed graph step", routedTo: e.qualified})
-	legs := readyFederationLegs(loadedCityName(e.cfg, e.cityPath), e.work, e.rigStores, fixtureGraphLeg(e))
+	legs := mustReadyLegs(t, loadedCityName(e.cfg, e.cityPath), e.work, e.rigStores, fixtureGraphLeg(e))
 	rows, err := readyBeadsForOpts(legs, readyOpts{
 		unassigned:     true,
 		metadataFields: []string{beadmeta.RoutedToMetadataKey + "=" + e.qualified},
@@ -2314,7 +2334,7 @@ func conformanceWorkQueryClaimsWhatItSees(t *testing.T, e splitEnv) {
 // command.
 func assertFederatedReaderServes(t *testing.T, e splitEnv, graphBeadID, tier string, opts readyOpts) {
 	t.Helper()
-	legs := readyFederationLegs(loadedCityName(e.cfg, e.cityPath), e.work, e.rigStores, fixtureGraphLeg(e))
+	legs := mustReadyLegs(t, loadedCityName(e.cfg, e.cityPath), e.work, e.rigStores, fixtureGraphLeg(e))
 	rows, err := readyBeadsForOpts(legs, opts)
 	if err != nil {
 		t.Fatalf("the reader the split work_query's %s tier names failed over healthy stores: %v", tier, err)

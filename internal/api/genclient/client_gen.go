@@ -996,6 +996,7 @@ type AgentPatch struct {
 	PromptTemplate          *string           `json:"PromptTemplate"`
 	Provider                *string           `json:"Provider"`
 	ResumeCommand           *string           `json:"ResumeCommand"`
+	Rig                     string            `json:"Rig"`
 	ScaleCheck              *string           `json:"ScaleCheck"`
 	Scope                   *string           `json:"Scope"`
 	Session                 *string           `json:"Session"`
@@ -1017,7 +1018,7 @@ type AgentPatch struct {
 
 // AgentPatchSetInputBody defines model for AgentPatchSetInputBody.
 type AgentPatchSetInputBody struct {
-	// Dir Agent directory scope.
+	// Dir Agent directory scope (legacy targeting key; prefer rig).
 	Dir *string `json:"dir,omitempty"`
 
 	// Env Override environment variables.
@@ -1028,6 +1029,9 @@ type AgentPatchSetInputBody struct {
 
 	// Provider Override the agent's provider.
 	Provider *string `json:"provider,omitempty"`
+
+	// Rig Rig targeting key. "*" matches the agent name across all rigs and city. Mutually exclusive with dir.
+	Rig *string `json:"rig,omitempty"`
 
 	// Scope Override agent scope.
 	Scope *string `json:"scope,omitempty"`
