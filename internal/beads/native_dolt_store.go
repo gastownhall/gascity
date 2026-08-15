@@ -1118,8 +1118,47 @@ func (s *NativeDoltStore) Close(id string) error {
 		return err
 	}
 	defer release()
-	ctx, cancel := nativeDoltOperationContext(context.TODO())
-	defer cancel()
+
+	return retryOnNativeDoltSerializationConflict(func() error {
+		ctx, cancel := nativeDoltOperationContext(context.TODO())
+		defer cancel()
+		return s.closeOnce(ctx, storage, id)
+	})
+}
+
+// closeOnce performs one complete close attempt, read included. A retry calls
+// this whole operation rather than just the write, so every attempt decides
+// from freshly read state.
+//
+// Replaying the write is safe because a serialization conflict guarantees the
+// write did not land, and because every CloseIssue path commits exactly once.
+// There are three such paths and they do not share a mechanism, so the property
+// is stated per branch rather than asserted for "both backends":
+//
+//   - dolt.DoltStore, permanent bead: withRetryTx/withWriteTx (issues.go
+//     CloseIssue).
+//   - dolt.DoltStore, active wisp: CloseIssue branches to closeWisp, which uses
+//     a bare BeginTx/Commit with a deferred Rollback and deliberately no
+//     withRetryTx. Its own comment says not to add one, which is precisely why
+//     the retry belongs out here: that path has no internal retry at all.
+//   - embeddeddolt.EmbeddedDoltStore: one withConn transaction.
+//
+// Single-commit is the whole argument, so contrast it with a real two-commit
+// caller rather than a guessed one: beadslib's RunInTransaction commits the
+// regular tx and the ignored tx separately and can fail after the first landed,
+// which is why its callers cannot simply replay. SetMetadataBatch is NOT such a
+// caller despite the shape of its name; it calls storage.UpdateIssue directly,
+// which branches the same three ways Close does: permanent Dolt under
+// withRetryTx, active wisps through updateWisp's bare BeginTx/Commit, and
+// embedded under withConn. Close has no two-commit window on any branch.
+//
+// The re-read is what makes an attempt correct in the presence of OTHER
+// writers, which is a live case rather than a hypothetical: the retry sleeps
+// between attempts, so a concurrent actor can close the bead in that gap. The
+// short-circuit returns nil instead of issuing a redundant CloseIssue, and
+// recomputing the reason per attempt keeps it consistent with the state the
+// attempt actually observed.
+func (s *NativeDoltStore) closeOnce(ctx context.Context, storage beadslib.Storage, id string) error {
 	current, err := storage.GetIssue(ctx, id)
 	if err != nil {
 		return nativeStoreError(id, err)
@@ -1144,8 +1183,29 @@ func (s *NativeDoltStore) Reopen(id string) error {
 		return err
 	}
 	defer release()
-	ctx, cancel := nativeDoltOperationContext(context.TODO())
-	defer cancel()
+
+	return retryOnNativeDoltSerializationConflict(func() error {
+		ctx, cancel := nativeDoltOperationContext(context.TODO())
+		defer cancel()
+		return s.reopenOnce(ctx, storage, id)
+	})
+}
+
+// reopenOnce is closeOnce's mirror and is safe to replay for the same reason:
+// a serialization conflict means the write did not land, and the re-read
+// short-circuits an already-open bead. The two short-circuits are separate
+// lines testing separate statuses, so each is proven by its own test rather
+// than by symmetry with the other.
+//
+// The empty reason below is load-bearing, not incidental. beadslib's
+// ReopenIssue performs UpdateIssue and then, ONLY when reason is non-empty, a
+// separate AddComment in its own transaction. Passing a real reason would
+// therefore split this into two independent writes and reintroduce exactly the
+// window this function does not otherwise have: if the update commits and the
+// comment conflicts, the replay re-reads, sees StatusOpen, short-circuits, and
+// the comment is silently dropped. Anything that starts passing a reason has to
+// move the comment inside the retried unit or make its loss explicit.
+func (s *NativeDoltStore) reopenOnce(ctx context.Context, storage beadslib.Storage, id string) error {
 	current, err := storage.GetIssue(ctx, id)
 	if err != nil {
 		return nativeStoreError(id, err)

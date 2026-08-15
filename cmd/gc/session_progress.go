@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -24,6 +25,114 @@ func openPoolSessionCountForTemplate(infoByID map[string]sessionpkg.Info, cfg *c
 		}
 	}
 	return open
+}
+
+// isWarmFloorCandidate reports whether a session Info currently occupies a warm
+// min_active_sessions floor slot: an open session in a genuinely-live runtime
+// state (on its way to, or currently, active). It is an explicit ALLOW-LIST —
+// only StateNone (freshly stamped, not yet transitioned), StateActive and
+// StateAwake (running; Awake is the reconciler healState alias for Active —
+// session_reconcile.go / lifecycle_projection.go RuntimeProjectionAlive),
+// StateCreating, and StateStartPending count.
+//
+// It adopts countMinActiveCovered's allow-list SHAPE (compute_awake_set.go)
+// rather than diverging into a deny-list — but deliberately not its state SET.
+// countMinActiveCovered admits only active/creating (plus an asleep bead an
+// earlier pass already marked desired-awake); this predicate additionally
+// admits Awake, StartPending and StateNone, and never admits asleep. The two
+// answer different questions: this one ranks the CURRENT warm occupancy of one
+// session, so anything on its way to (or already) running counts and a dormant
+// bead never does, while countMinActiveCovered counts coverage of the floor
+// including the asleep sessions this tick's wake pass will revive.
+//
+// Why an allow-list (Doc adversarial re-review, sc-sabwwn): every other state —
+// Asleep, Suspended, Draining, Drained, Archived, FailedCreate, Quarantined,
+// Closed — is a dormant, terminal, or non-runnable bead that can persist with
+// Closed==false yet is NOT a warm occupant. Counting any such stale low-id bead
+// would inflate the floor rank in isMinFloorExemptIdleSession and mask the ACTUAL
+// live low-id floor session out of the deterministic exempt set, getting that
+// warm session idle-killed and cold-recreated — the exact 0<->1 oscillation this
+// fix (sc-5mtyhy) exists to eliminate. A deny-list silently reopened that gap for
+// every state it forgot (Quarantined/FailedCreate/Drained/Archived did leak); the
+// allow-list fails closed — an unknown or newly-added state is excluded, never a
+// spurious floor occupant. The info.Closed guard stays first: a closed bead has
+// State=="" (StateNone), which the allow-list admits, so occupancy must be
+// rejected on Closed before the state switch.
+func isWarmFloorCandidate(info sessionpkg.Info) bool {
+	if info.Closed {
+		return false
+	}
+	switch info.State {
+	case sessionpkg.StateNone, sessionpkg.StateActive, sessionpkg.StateAwake,
+		sessionpkg.StateCreating, sessionpkg.StateStartPending:
+		return true
+	default:
+		return false
+	}
+}
+
+// isMinFloorExemptIdleSession reports whether sessionID is one of the
+// deterministic min_active_sessions floor members for template — the minSess
+// lowest-bead-id warm pool sessions — which the idle-timeout path keeps WARM
+// (exempt from the idle kill) instead of killing and cold-recreating it every
+// tick (sc-5mtyhy). This is the per-session, deterministic complement to the
+// count-based isMinFloorIdleWorker the progress-stall recycler uses.
+//
+// The exempt set is the POOL-MANAGED floor members only. Ranking mirrors
+// isMinActivePoolBead (compute_awake_set.go), the predicate that defines which
+// beads the min_active_sessions guarantee covers: configured-named, manual and
+// dependency-only sessions are excluded because they carry their own keep-awake
+// rules and never participate in the floor. Excluding them matters in both
+// directions — a lower-id non-pool session must not consume a floor rank (which
+// would push the real pool member out of the exempt set and no-op this fix in a
+// mixed-identity template), and a non-pool session must never become
+// idle-exempt itself. Like isMinActivePoolBead the filter is exclusion-based:
+// it does NOT require a positive pool-managed flag, so legacy pool beads
+// predating that projection still rank.
+//
+// Determinism (spec acceptance 4): the exempt set is the minSess lowest-id warm
+// same-template pool sessions, mirroring cityStopPoolBeads' bead-ID ordering, so
+// the same concrete sessions stay warm tick over tick with no flapping over
+// which one is exempt. sessionID is exempt exactly when it is itself a warm
+// same-template pool session AND fewer than minSess such sessions sort below its
+// ID. Elastic sessions ABOVE the floor are never exempt and idle-reclaim
+// normally (acceptance 2); max_active_sessions still caps the total because this
+// only defers idle kills for the bottom minSess sessions — it never creates any.
+//
+// Selection reads the coherent infoByID snapshot and cfg in memory; no I/O.
+func isMinFloorExemptIdleSession(infoByID map[string]sessionpkg.Info, cfg *config.City, template, sessionID string) bool {
+	if cfg == nil || sessionID == "" {
+		return false
+	}
+	cfgAgent := findAgentByTemplate(cfg, template)
+	if cfgAgent == nil {
+		return false
+	}
+	minFloor := cfgAgent.EffectiveMinActiveSessions()
+	if minFloor <= 0 {
+		return false
+	}
+	self := false
+	lower := 0
+	for sid, info := range infoByID {
+		if !isWarmFloorCandidate(info) || normalizedSessionTemplateInfo(info, cfg) != template {
+			continue
+		}
+		// Pool-managed identities only, mirroring isMinActivePoolBead. The
+		// filter runs before the self-check below, so an excluded identity
+		// neither consumes a floor rank nor becomes exempt itself.
+		if isNamedSessionInfo(info) || strings.TrimSpace(info.ConfiguredNamedIdentity) != "" ||
+			isManualSessionInfo(info) || info.DependencyOnly {
+			continue
+		}
+		switch {
+		case sid == sessionID:
+			self = true
+		case sid < sessionID:
+			lower++
+		}
+	}
+	return self && lower < minFloor
 }
 
 // isMinFloorIdleWorker reports whether a session is a legitimate pool floor

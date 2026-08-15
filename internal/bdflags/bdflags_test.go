@@ -247,3 +247,128 @@ func TestScanUnknownFlagsBareBdWithoutGcPrefix(t *testing.T) {
 		t.Fatalf("ScanUnknownFlags() = %v, want exactly 1 finding", findings)
 	}
 }
+
+func TestScanUnknownFlagsAcceptsGCScopeFlagsOnGCBD(t *testing.T) {
+	// --city and --rig are gc-owned: cmd/gc/cmd_bd.go extractBdScopeFlags
+	// strips them before forwarding the remaining args to bd, and gc's own
+	// help documents "gc bd list --rig my-project -s open".
+	cases := []string{
+		"gc bd list --rig my-project --status open --json",
+		"gc bd list --rig={{ .Rig }} --status=open --json",
+		"gc bd --rig my-project create \"New task\"",
+		"gc bd create --city /path/to/city --type task \"t\"",
+		"gc bd --city=/path/to/city list --json",
+	}
+	for _, line := range cases {
+		if findings := ScanUnknownFlags([]byte(line)); len(findings) != 0 {
+			t.Errorf("ScanUnknownFlags(%q) = %v, want no findings", line, findings)
+		}
+	}
+}
+
+func TestScanUnknownFlagsRejectsGCScopeFlagsOnBareBD(t *testing.T) {
+	// Bare bd has no --rig: "bd list --rig gascity" exits with
+	// "Error: unknown flag: --rig". Only the "gc bd" form accepts it.
+	findings := ScanUnknownFlags([]byte("bd list --rig my-project --json"))
+	if len(findings) != 1 {
+		t.Fatalf("ScanUnknownFlags() = %v, want exactly 1 finding", findings)
+	}
+	if findings[0].Flag != "--rig" {
+		t.Errorf("Flag = %q, want %q", findings[0].Flag, "--rig")
+	}
+}
+
+func TestScanUnknownFlagsDetectsTypoAfterLeadingScopeFlags(t *testing.T) {
+	// "gc bd --rig <name> <sub> ..." and the --city form place the gc-owned
+	// scope flags before the subcommand. The scanner must consume the leading
+	// scope flags and still validate the resolved subcommand, so a typo after
+	// the verb is reported instead of the whole invocation being skipped.
+	cases := []struct {
+		line string
+		flag string
+		sub  string
+	}{
+		{"gc bd --rig my-project create --asignee bob", "--asignee", "create"},
+		{"gc bd --rig=my-project create --asignee bob", "--asignee", "create"},
+		{"gc bd --city /path/to/city update <id> --asignee bob", "--asignee", "update"},
+		{"gc bd --city=/path/to/city update <id> --asignee bob", "--asignee", "update"},
+		{"gc bd --rig my-project mol pour <id> --asignee builder", "--asignee", "mol pour"},
+	}
+	for _, tc := range cases {
+		findings := ScanUnknownFlags([]byte(tc.line))
+		if len(findings) != 1 {
+			t.Errorf("ScanUnknownFlags(%q) = %v, want exactly 1 finding", tc.line, findings)
+			continue
+		}
+		if findings[0].Flag != tc.flag {
+			t.Errorf("ScanUnknownFlags(%q) Flag = %q, want %q", tc.line, findings[0].Flag, tc.flag)
+		}
+		if findings[0].Subcommand != tc.sub {
+			t.Errorf("ScanUnknownFlags(%q) Subcommand = %q, want %q", tc.line, findings[0].Subcommand, tc.sub)
+		}
+	}
+}
+
+func TestScanUnknownFlagsAcceptsCleanLeadingScopeFlags(t *testing.T) {
+	// The leading scope-flag forms with no typo must still produce no
+	// findings after the scanner starts validating the subcommand that
+	// follows the consumed scope flags.
+	cases := []string{
+		"gc bd --rig my-project create --json",
+		"gc bd --city /path/to/city update <id> --claim",
+		"gc bd --rig=my-project list --status open --json",
+	}
+	for _, line := range cases {
+		if findings := ScanUnknownFlags([]byte(line)); len(findings) != 0 {
+			t.Errorf("ScanUnknownFlags(%q) = %v, want no findings", line, findings)
+		}
+	}
+}
+
+func TestScanUnknownFlagsStopsAtShellSeparators(t *testing.T) {
+	// Flags after a pipe belong to the downstream command, not to bd.
+	cases := []string{
+		"gc bd show <id> --json | jq -r '.metadata.reason'",
+		"gc bd list --json | head -5",
+		"gc bd ready --json && echo -n done",
+		"gc bd show <id> --json ; grep -c foo",
+	}
+	for _, line := range cases {
+		if findings := ScanUnknownFlags([]byte(line)); len(findings) != 0 {
+			t.Errorf("ScanUnknownFlags(%q) = %v, want no findings", line, findings)
+		}
+	}
+}
+
+func TestScanUnknownFlagsAngleBracketPlaceholdersDoNotSplit(t *testing.T) {
+	// "<id>" is a placeholder in prompt templates, not a redirection, so it
+	// must not end the invocation and hide a typo that follows it.
+	findings := ScanUnknownFlags([]byte("gc bd update <id> --asignee bob"))
+	if len(findings) != 1 {
+		t.Fatalf("ScanUnknownFlags() = %v, want exactly 1 finding", findings)
+	}
+	if findings[0].Flag != "--asignee" {
+		t.Errorf("Flag = %q, want %q", findings[0].Flag, "--asignee")
+	}
+}
+
+func TestScanUnknownFlagsQuotedSeparatorDoesNotSplit(t *testing.T) {
+	// A pipe inside a quoted argument is data, not a shell separator, so the
+	// bd invocation continues and a real typo after it is still reported.
+	findings := ScanUnknownFlags([]byte(`gc bd list --json --title "a | b" --asignee bob`))
+	if len(findings) != 1 {
+		t.Fatalf("ScanUnknownFlags() = %v, want exactly 1 finding", findings)
+	}
+	if findings[0].Flag != "--asignee" {
+		t.Errorf("Flag = %q, want %q", findings[0].Flag, "--asignee")
+	}
+}
+
+func TestScanUnknownFlagsMarkdownTableCellIsolatesInvocations(t *testing.T) {
+	// Prompt templates document commands in markdown tables; the cell pipes
+	// must not carry a neighboring cell's flags into the bd invocation.
+	line := "| Show bead | `gc bd show <id> --json` | pipe to `jq -r .id` |"
+	if findings := ScanUnknownFlags([]byte(line)); len(findings) != 0 {
+		t.Errorf("ScanUnknownFlags(%q) = %v, want no findings", line, findings)
+	}
+}

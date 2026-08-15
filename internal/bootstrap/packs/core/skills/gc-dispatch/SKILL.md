@@ -135,14 +135,40 @@ These require the gastown pack. They extend the built-in
 
 **mol-polecat-work** — Feature-branch variant. Creates a worktree and
 feature branch, implements, then pushes and reassigns to the refinery
-for merge review. Production default for multi-agent setups. The polecat's
-`base_branch` comes from `metadata.target` on the work bead if present,
-otherwise from a parent convoy with `metadata.target`, otherwise from
-the rig repo's default branch.
+for merge review. Production default for multi-agent setups.
 
 ```
 gc sling <agent> <bead-id> --on mol-polecat-work
 ```
+
+The polecat cuts its branch from `origin/<base_branch>` and stamps
+`metadata.target` for the refinery, so `base_branch` decides where the
+work lands. `gc sling` resolves it in this order, first match wins:
+
+1. `metadata.target` on the work bead, or on the nearest parent convoy
+   that carries one — the per-bead override.
+2. `default_branch` recorded for the bead's rig in `city.toml`.
+3. `default_branch` recorded for the agent's rig in `city.toml`.
+4. A live probe of the rig repo's `origin/HEAD`.
+
+Tiers 2 and 3 are the knob to reach for when a repo's mainline is not
+what `origin/HEAD` advertises. A repo whose `origin/HEAD` still points at
+a mirror-only `main` while work belongs on an integration branch sets it
+once, per rig:
+
+```toml
+[[rigs]]
+name = "myrig"
+default_branch = "develop"
+```
+
+Without that, resolution falls through to the tier-4 probe and every
+polecat branch is cut from the mirror. `gc rig add` captures
+`default_branch` from the repo at add time, so a rig registered before
+its mainline moved keeps the stale value until you update it — check
+`gc rig list --json` rather than inferring the answer from
+`git symbolic-ref refs/remotes/origin/HEAD`, which only ever reports
+tier 4.
 
 **mol-idea-to-plan** — Planning workflow for a coordinator session. Turns a
 rough idea into a PRD, reviewed design doc, and beads DAG using Gas City's
