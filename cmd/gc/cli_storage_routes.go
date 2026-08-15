@@ -150,7 +150,12 @@ func resolveCLIStorageRoutes(cityPath string) *storageRoutes {
 	}
 	routes, err := storageBootGate(cityPath, cfg, cliStorageLogPrefix, nil, cliStorageStderr)
 	if err == nil {
-		return routes
+		// The one and only place a class store is given an emit target. A
+		// one-shot command has no live event bus, so without this its writes to
+		// a relocated class land in a store nothing observes; the controller
+		// resolves its routes through openStorageRoutes, never here, so its
+		// side stays exactly as it was. See class_store_emit.go.
+		return routes.withCLIEmission(cityPath)
 	}
 	// Once, here, rather than at each call site: a command that discards the
 	// store error still has to leave the operator holding the remedy.
