@@ -1183,7 +1183,7 @@ func cmdRigRemove(rigName string, stdout, stderr io.Writer) int {
 	// [[patches.agent]] and [[orders.overrides]]; the rest fail the same way on
 	// rig removal, so sweep them all.
 	cfg.Patches.Agents = slices.DeleteFunc(cfg.Patches.Agents,
-		func(p config.AgentPatch) bool { return p.Dir == rigName })
+		func(p config.AgentPatch) bool { return p.Dir == rigName || p.Rig == rigName })
 	cfg.Patches.NamedSessions = slices.DeleteFunc(cfg.Patches.NamedSessions,
 		func(p config.NamedSessionPatch) bool { return p.Dir == rigName })
 	cfg.Patches.Rigs = slices.DeleteFunc(cfg.Patches.Rigs,
