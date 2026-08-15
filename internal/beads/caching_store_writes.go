@@ -132,6 +132,18 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 	return nil
 }
 
+// RenewLease renews a claim lease through the backing store when it supports
+// lease renewal, and reports ErrLeaseRenewalUnsupported otherwise. Lease
+// fields are not part of the cached Bead projection, so no cache refresh is
+// needed — the renewal only has to reach the backend.
+func (c *CachingStore) RenewLease(id, holder string) error {
+	renewer, ok := c.backing.(LeaseRenewer)
+	if !ok {
+		return ErrLeaseRenewalUnsupported
+	}
+	return renewer.RenewLease(id, holder)
+}
+
 // ReleaseIfCurrent clears an in-progress assignment through the backing store
 // and refreshes the cache only when the conditional release succeeds.
 func (c *CachingStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {

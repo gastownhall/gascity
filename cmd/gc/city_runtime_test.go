@@ -1576,6 +1576,38 @@ func TestCityRuntimeTickDispatchesOrdersBeforeDemandSnapshot(t *testing.T) {
 	}
 }
 
+// TestCityRuntimeTickRunsTheLeaseRenewalWatchdog pins the wiring rather than
+// the watchdog's own logic: every other lease-renewal test calls
+// runLeaseRenewalWatchdog directly, so deleting its call from tick() — or
+// handing it the wrong snapshot — would leave claim leases lapsing mid-work
+// (gas-76r) with the whole unit suite still green. A completed sweep stamps
+// leaseRenewalLastSuccess, so a non-zero stamp after one patrol tick proves
+// the watchdog was reached with a real sessions-class snapshot.
+func TestCityRuntimeTickRunsTheLeaseRenewalWatchdog(t *testing.T) {
+	cr := &CityRuntime{
+		cityName:            "test-city",
+		cityPath:            t.TempDir(),
+		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		sp:                  runtime.NewFake(),
+		standaloneCityStore: beads.NewMemStore(),
+		od:                  &recordingOrderDispatcher{},
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+	}
+	cr.buildFnWithSessionBeads = func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+		return DesiredStateResult{State: map[string]TemplateParams{}}
+	}
+
+	var dirty atomic.Bool
+	var lastProviderName string
+	var prevPoolRunning map[string]bool
+	cr.tick(context.Background(), &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
+
+	if cr.leaseRenewalLastSuccess.IsZero() {
+		t.Fatal("leaseRenewalLastSuccess is zero after a patrol tick; the lease-renewal watchdog is not wired into tick()")
+	}
+}
+
 func TestCityRuntimePatrolReconcilesGraphStepClosedAfterWatcherStartup(t *testing.T) {
 	backing := beads.NewMemStore()
 	root, err := backing.Create(beads.Bead{ID: "gcg-run", Metadata: map[string]string{

@@ -50,6 +50,26 @@ var specs = []Spec{
 			"while the guarded-verb bd pin is untagged.",
 	},
 	{
+		Key:            keyBeadsLeaseRenewal,
+		Category:       InfraRollout,
+		ConfigPath:     "beads.lease_renewal",
+		EnvOverride:    envBeadsLeaseRenewal,
+		EnvSemantics:   EnvOverrides,
+		Default:        Default{Mode: ptr(Auto)},
+		Owner:          Owner{Bead: "ga-furrj5", GitHub: "@gastownhall/gascity-admin"},
+		Expires:        "2027-01-15",
+		VersionAnchor:  "sweepClaimLeaseRenewals",
+		SelectsBetween: [2]string{"no renewal driver (a claim lease lapses mid-work and bd reclaim cannot tell a working holder from a dead one)", "controller-driven renewal of live sessions' claim leases at a third of the TTL"},
+		Justification: "Drive claim-lease renewal from the controller so an in_progress bead held by a " +
+			"live session stops reading expired for ~70% of its runtime (gas-76r). This gate is the " +
+			"kill switch and the seam the ownership-fencing epic's Stage B renewal slice replaces. It " +
+			"defaults ON, unlike its beads.* siblings, for two reasons: it adopts no new bd verb behind " +
+			"an untagged pin (bd's heartbeat ships today), and OFF is not a safe legacy path but the " +
+			"defect itself — bd stamps a claim lease on every claim and ships bd reclaim to reap " +
+			"expired ones, so with no renewal driver a working holder is indistinguishable from a dead " +
+			"one (the shape the epic's DESIGN.md D11 invariant is written against).",
+	},
+	{
 		Key:            keyDaemonFormulaV2,
 		Category:       InfraMigration,
 		ConfigPath:     "daemon.formula_v2",
@@ -96,6 +116,10 @@ func specByKey(key string) Spec {
 
 // beadsConditionalWritesSpec returns the canonical Spec for the beads CAS gate.
 func beadsConditionalWritesSpec() Spec { return specByKey(keyBeadsConditionalWrites) }
+
+// beadsLeaseRenewalSpec returns the canonical Spec for the claim-lease
+// renewal gate.
+func beadsLeaseRenewalSpec() Spec { return specByKey(keyBeadsLeaseRenewal) }
 
 // beadsGuardedReleaseSpec returns the canonical Spec for the beads
 // guarded-release gate.

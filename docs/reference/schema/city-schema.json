@@ -1058,6 +1058,15 @@
           ],
           "description": "GuardedRelease selects the ownership-release discipline for work beads:\n\"off\" (legacy, owner-blind bd update/unclaim), \"auto\" (fence-guarded\nrelease verbs where the bd binary is capable, loud degrade otherwise), or\n\"require\" (guarded release or a typed refusal). Empty defaults to \"off\".\nAny other value fails config load."
         },
+        "lease_renewal": {
+          "type": "string",
+          "enum": [
+            "off",
+            "auto",
+            "require"
+          ],
+          "description": "LeaseRenewal selects whether the controller renews the claim leases of\nbeads held by live sessions: \"off\" (no renewal driver — leases lapse\nmid-work and bd reclaim cannot tell a working holder from a dead one),\n\"auto\" (renew through stores capable of it, skipping lease-less stores),\nor \"require\" (renew, or report a store that cannot as an error). Empty\ndefaults to \"auto\". Any other value fails config load."
+        },
         "policies": {
           "additionalProperties": {
             "$ref": "#/$defs/BeadPolicyConfig"
@@ -1289,6 +1298,11 @@
           "type": "string",
           "description": "PatrolInterval is the health patrol interval. Duration string (e.g., \"30s\", \"5m\", \"1h\"). Defaults to \"30s\".",
           "default": "30s"
+        },
+        "claim_lease_ttl": {
+          "type": "string",
+          "description": "ClaimLeaseTTL is the bead claim-lease TTL the bead backend enforces:\na claim lease expires this long after its last heartbeat. It is the\nsingle value the controller derives its lease-renewal cadence from\n(renewals run at one third of the TTL), so the two cannot drift apart\n(gas-76r). Duration string (e.g., \"5m\"). Defaults to \"5m\", matching\nbd's claim-lease TTL; change it only if the bead backend's TTL changes.",
+          "default": "5m"
         },
         "max_restarts": {
           "type": "integer",

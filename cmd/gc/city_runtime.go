@@ -134,7 +134,15 @@ type CityRuntime struct {
 	orderSweepWatchdogLast             time.Time
 	orderTrackingRetentionWatchdogLast time.Time
 	nudgeMailSweepWatchdogLast         time.Time
-	wispIndexMigrationApplied          bool
+	// Claim-lease renewal pacing (gas-76r). The cadence is measured from the
+	// last COMPLETE sweep, not the last attempt, so a failed renewal does not
+	// spend a full cadence of lease margin; leaseRenewalFailures drives the
+	// retry backoff and leaseRenewalCursor resumes a budget-truncated sweep.
+	leaseRenewalLastSuccess   time.Time
+	leaseRenewalLastAttempt   time.Time
+	leaseRenewalFailures      int
+	leaseRenewalCursor        string
+	wispIndexMigrationApplied bool
 
 	rec events.Recorder
 	cs  *controllerState // nil when controller-managed bead stores are unavailable
@@ -1347,6 +1355,13 @@ func (cr *CityRuntime) tick(
 		cr.beadReconcileTick(ctx, result, sessionBeads, trace, false)
 		recordPhase(TraceSiteControllerTickPhase, "bead_reconcile_tick", phaseStart, traceDesiredStateFields(result))
 	}
+	// Claim-lease renewal: keep the leases of beads held by live sessions
+	// continuously valid so bd reclaim can tell a working holder from a dead
+	// one (gas-76r). Self-gated to one third of the configured claim-lease
+	// TTL, so extra event-driven ticks are cheap no-ops.
+	phaseStart = time.Now()
+	renewedLeases := cr.runLeaseRenewalWatchdog(time.Now(), sessionBeads)
+	recordPhase(TraceSiteControllerTickPhase, "lease_renewal_watchdog", phaseStart, map[string]any{"renewed": renewedLeases})
 	// Graph stores intentionally do not emit bead.closed. Reconcile their
 	// closed graph.v2 steps only at the authoritative patrol cadence, not on
 	// event-driven ticks, so lifecycle recovery remains bounded and idempotent.

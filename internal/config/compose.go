@@ -1045,12 +1045,16 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 		// field still wins.
 		conditionalWrites := base.Beads.ConditionalWrites
 		guardedRelease := base.Beads.GuardedRelease
+		leaseRenewal := base.Beads.LeaseRenewal
 		base.Beads = fragment.Beads
 		if !fragMeta.IsDefined("beads", "conditional_writes") {
 			base.Beads.ConditionalWrites = conditionalWrites
 		}
 		if !fragMeta.IsDefined("beads", "guarded_release") {
 			base.Beads.GuardedRelease = guardedRelease
+		}
+		if !fragMeta.IsDefined("beads", "lease_renewal") {
+			base.Beads.LeaseRenewal = leaseRenewal
 		}
 	}
 	if fragMeta.IsDefined("dolt") {

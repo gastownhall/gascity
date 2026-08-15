@@ -21,6 +21,7 @@ config-valid
 legacy-suspended-field
 rollout:beads.conditional_writes
 rollout:beads.guarded_release
+rollout:beads.lease_renewal
 rollout:daemon.formula_v2
 config-refs
 stale-local-pack-dirs

@@ -432,7 +432,10 @@ const (
 	bdTransientReadAttempts  = 3
 )
 
-var _ ConditionalAssignmentReleaser = (*BdStore)(nil)
+var (
+	_ ConditionalAssignmentReleaser = (*BdStore)(nil)
+	_ LeaseRenewer                  = (*BdStore)(nil)
+)
 
 // BdStoreOption configures optional bd CLI behavior for a BdStore.
 type BdStoreOption func(*BdStore)
@@ -1560,6 +1563,24 @@ func (s *BdStore) Claim(id string) (Bead, bool, error) {
 		return Bead{}, false, fmt.Errorf("claiming bead %q: %w", id, err)
 	}
 	return claimed, true, nil
+}
+
+// RenewLease renews the claim lease on bead id through bd's heartbeat verb,
+// acting as holder. bd only lets the current owner heartbeat, so the holder
+// (the bead's assignee) is passed explicitly via --actor rather than inherited
+// from the store's environment: the controller renews leases for the sessions
+// it supervises, not for itself (gas-76r). A renewal that cannot land (holder
+// lost the lease, bead closed, bd unreachable) returns an error so the caller
+// can surface it — a silently failed renewal is how live agents lose work.
+func (s *BdStore) RenewLease(id, holder string) error {
+	holder = strings.TrimSpace(holder)
+	if holder == "" {
+		return fmt.Errorf("renewing lease on %q: empty holder", id)
+	}
+	if _, err := s.runBDTransientWriteOutput("heartbeat", id, "--actor", holder, "--json"); err != nil {
+		return fmt.Errorf("renewing lease on %q for holder %q: %w", id, holder, err)
+	}
+	return nil
 }
 
 func parseBDMutationBead(op string, out []byte) (Bead, error) {

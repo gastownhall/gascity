@@ -50,6 +50,13 @@ func Resolve(cfg *config.City, opts ResolveOptions) (Flags, error) {
 		return Flags{}, err
 	}
 
+	// beads.lease_renewal — Mode gate, EnvOverrides semantics.
+	if err := resolveModeGate(cfg, lookup, &f, beadsLeaseRenewalSpec(),
+		readBeadsLeaseRenewal,
+		func(f *Flags, r resolved[Mode]) { f.beadsLeaseRenewal = r }); err != nil {
+		return Flags{}, err
+	}
+
 	// daemon.formula_v2 — bool migration gate, no env override.
 	if value, defined := readDaemonFormulaV2(cfg); defined {
 		f.formulaV2 = resolved[bool]{value: value, origin: OriginConfig}

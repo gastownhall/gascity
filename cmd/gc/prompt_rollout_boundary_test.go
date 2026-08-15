@@ -81,6 +81,7 @@ var pinnedRenderFiles = []string{"prompt.go", "template_resolve.go", "cmd_prime.
 var flagValuePins = map[string]string{
 	"beads.conditional_writes": "NormalizedConditionalWrites",
 	"beads.guarded_release":    "NormalizedGuardedRelease",
+	"beads.lease_renewal":      "NormalizedLeaseRenewal",
 	"daemon.formula_v2":        "FormulaV2Enabled",
 }
 

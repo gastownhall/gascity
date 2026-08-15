@@ -686,6 +686,43 @@ func TestBdBasicCRUD(t *testing.T) {
 	})
 }
 
+// TestBdClaimLease pins the claim-lease verbs the controller's lease-renewal
+// sweep rides (gas-76r): a claim stamps a lease, the holder may push it forward
+// with bd heartbeat, and a non-holder may not. The Go side pins only the argv it
+// produces itself, so without this case a rename or a change of holder-identity
+// rule in bd would go unnoticed until live agents silently lost their work.
+func TestBdClaimLease(t *testing.T) {
+	dir := initBeadsDir(t)
+
+	t.Run("ClaimStampsALease", func(t *testing.T) {
+		id := createBead(t, dir, "leased work")
+
+		out := requireBD(t, dir, "update", id, "--claim", "--actor", "holder-a", "--json")
+		if !strings.Contains(out, "lease_expires_at") {
+			t.Fatalf("bd update --claim did not stamp a lease:\n%s", out)
+		}
+	})
+
+	t.Run("HeartbeatByHolderRenewsTheLease", func(t *testing.T) {
+		id := createBead(t, dir, "heartbeat work")
+		requireBD(t, dir, "update", id, "--claim", "--actor", "holder-a", "--json")
+
+		// The controller renews AS the holder, not as its own identity: the
+		// lease belongs to the bead's assignee.
+		requireBD(t, dir, "heartbeat", id, "--actor", "holder-a", "--json")
+	})
+
+	t.Run("HeartbeatByNonHolderFails", func(t *testing.T) {
+		id := createBead(t, dir, "fenced work")
+		requireBD(t, dir, "update", id, "--claim", "--actor", "holder-a", "--json")
+
+		out, err := runBD(t, dir, "heartbeat", id, "--actor", "intruder", "--json")
+		if err == nil {
+			t.Fatalf("bd heartbeat by a non-holder succeeded; the lease is not fenced:\n%s", out)
+		}
+	})
+}
+
 // TestBdDependencies exercises all dependency operations against a single
 // shared beads directory.
 func TestBdDependencies(t *testing.T) {
