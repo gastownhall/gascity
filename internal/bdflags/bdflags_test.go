@@ -278,6 +278,53 @@ func TestScanUnknownFlagsRejectsGCScopeFlagsOnBareBD(t *testing.T) {
 	}
 }
 
+func TestScanUnknownFlagsDetectsTypoAfterLeadingScopeFlags(t *testing.T) {
+	// "gc bd --rig <name> <sub> ..." and the --city form place the gc-owned
+	// scope flags before the subcommand. The scanner must consume the leading
+	// scope flags and still validate the resolved subcommand, so a typo after
+	// the verb is reported instead of the whole invocation being skipped.
+	cases := []struct {
+		line string
+		flag string
+		sub  string
+	}{
+		{"gc bd --rig my-project create --asignee bob", "--asignee", "create"},
+		{"gc bd --rig=my-project create --asignee bob", "--asignee", "create"},
+		{"gc bd --city /path/to/city update <id> --asignee bob", "--asignee", "update"},
+		{"gc bd --city=/path/to/city update <id> --asignee bob", "--asignee", "update"},
+		{"gc bd --rig my-project mol pour <id> --asignee builder", "--asignee", "mol pour"},
+	}
+	for _, tc := range cases {
+		findings := ScanUnknownFlags([]byte(tc.line))
+		if len(findings) != 1 {
+			t.Errorf("ScanUnknownFlags(%q) = %v, want exactly 1 finding", tc.line, findings)
+			continue
+		}
+		if findings[0].Flag != tc.flag {
+			t.Errorf("ScanUnknownFlags(%q) Flag = %q, want %q", tc.line, findings[0].Flag, tc.flag)
+		}
+		if findings[0].Subcommand != tc.sub {
+			t.Errorf("ScanUnknownFlags(%q) Subcommand = %q, want %q", tc.line, findings[0].Subcommand, tc.sub)
+		}
+	}
+}
+
+func TestScanUnknownFlagsAcceptsCleanLeadingScopeFlags(t *testing.T) {
+	// The leading scope-flag forms with no typo must still produce no
+	// findings after the scanner starts validating the subcommand that
+	// follows the consumed scope flags.
+	cases := []string{
+		"gc bd --rig my-project create --json",
+		"gc bd --city /path/to/city update <id> --claim",
+		"gc bd --rig=my-project list --status open --json",
+	}
+	for _, line := range cases {
+		if findings := ScanUnknownFlags([]byte(line)); len(findings) != 0 {
+			t.Errorf("ScanUnknownFlags(%q) = %v, want no findings", line, findings)
+		}
+	}
+}
+
 func TestScanUnknownFlagsStopsAtShellSeparators(t *testing.T) {
 	// Flags after a pipe belong to the downstream command, not to bd.
 	cases := []string{

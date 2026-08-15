@@ -114,7 +114,15 @@ func scanLineForUnknownFlags(tokens []string, lineNo int) []Finding {
 			i++
 			continue
 		}
-		key, consumed, ok := matchSubcommand(tokens, subStart)
+		// "gc bd" may place the gc-owned scope flags before the subcommand
+		// ("gc bd --rig <name> create ..."); consume them so the subcommand
+		// that follows is still validated. Bare "bd" does not accept scope
+		// flags, so its leading forms are left for matchSubcommand to reject.
+		verbStart := subStart
+		if viaGC {
+			verbStart = skipLeadingScopeFlags(tokens, subStart)
+		}
+		key, consumed, ok := matchSubcommand(tokens, verbStart)
 		if !ok {
 			// Not a subcommand this package has a manifest for (e.g.
 			// "formula show"); resume scanning right after "bd"/"gc bd" so
@@ -122,61 +130,109 @@ func scanLineForUnknownFlags(tokens []string, lineNo int) []Finding {
 			i = subStart
 			continue
 		}
-		valueFlags := ValueFlags(key)
-		boolFlags := BoolFlags(key)
-		if viaGC {
-			for flag := range gcScopeValueFlags {
-				valueFlags[flag] = true
-			}
-		}
-
-		j := subStart + consumed
-		for j < len(tokens) {
-			tok := tokens[j]
-			if tok == "--" {
-				j++
-				break
-			}
-			if next, _ := bdSubcommandStart(tokens, j); next >= 0 {
-				break // a new bd invocation begins; let the outer loop handle it
-			}
-			if !strings.HasPrefix(tok, "-") || tok == "-" {
-				j++
-				continue
-			}
-			name := tok
-			hasInlineValue := false
-			if eq := strings.IndexByte(tok, '='); eq >= 0 {
-				name = tok[:eq]
-				hasInlineValue = true
-			}
-			switch {
-			case boolFlags[name]:
-				j++
-			case valueFlags[name]:
-				if hasInlineValue {
-					j++
-				} else {
-					j += 2
-				}
-			default:
-				findings = append(findings, Finding{Line: lineNo, Subcommand: key, Flag: name})
-				j++
-			}
-		}
-		i = j
+		flagFindings, resume := scanInvocationFlags(tokens, verbStart+consumed, key, viaGC, lineNo)
+		findings = append(findings, flagFindings...)
+		i = resume
 	}
 	return findings
 }
 
-// bdSubcommandStart returns the token index where a bd subcommand begins if
-// tokens[i] opens a bd invocation ("bd", or "gc" immediately followed by
-// "bd"), along with whether it opened via the "gc bd" form, which accepts
-// the gc-owned scope flags. It returns -1 if tokens[i] does not open one.
+// skipLeadingScopeFlags advances past any gc-owned scope flags that a "gc bd"
+// invocation places before its subcommand ("--rig <name>", "--city <path>",
+// or their inline "--rig=<name>" forms), returning the index of the first
+// token that is not one. This lets "gc bd --rig <name> create ..." reach and
+// validate the subcommand after the scope flags instead of skipping the whole
+// invocation.
+func skipLeadingScopeFlags(tokens []string, i int) int {
+	for i < len(tokens) {
+		name, hasInlineValue := splitFlagToken(tokens[i])
+		if !gcScopeValueFlags[name] {
+			return i
+		}
+		if hasInlineValue {
+			i++ // "--rig=<name>" carries its value in the same token
+		} else {
+			i += 2 // "--rig <name>" also consumes the following value token
+		}
+	}
+	return i
+}
+
+// scanInvocationFlags scans the flag tokens of a single bd invocation whose
+// subcommand resolved to key and whose flags begin at flagStart. It reports
+// any unrecognized flag and returns the token index at which the outer scan
+// should resume. viaGC additionally allows the gc-owned scope flags in the
+// trailing position ("gc bd list --rig <name>").
+func scanInvocationFlags(tokens []string, flagStart int, key string, viaGC bool, lineNo int) (findings []Finding, resume int) {
+	valueFlags := ValueFlags(key)
+	boolFlags := BoolFlags(key)
+	if viaGC {
+		// Safe to mutate in place: ValueFlags returns a freshly allocated map
+		// per call (mergeFlagSets), so this never leaks scope flags into
+		// another invocation's or consumer's manifest.
+		for flag := range gcScopeValueFlags {
+			valueFlags[flag] = true
+		}
+	}
+	j := flagStart
+	for j < len(tokens) {
+		tok := tokens[j]
+		if tok == "--" {
+			return findings, j + 1 // positional args follow; stop flag scanning
+		}
+		if next, _ := bdSubcommandStart(tokens, j); next >= 0 {
+			return findings, j // a new bd invocation begins; the outer loop takes it
+		}
+		if !strings.HasPrefix(tok, "-") || tok == "-" {
+			j++
+			continue
+		}
+		name, advance, unknown := classifyFlag(tok, valueFlags, boolFlags)
+		if unknown {
+			findings = append(findings, Finding{Line: lineNo, Subcommand: key, Flag: name})
+		}
+		j += advance
+	}
+	return findings, j
+}
+
+// splitFlagToken splits a flag token into its name and whether it carried an
+// inline "=value": "--rig=x" -> ("--rig", true); "--rig" -> ("--rig", false).
+func splitFlagToken(tok string) (name string, hasInlineValue bool) {
+	if eq := strings.IndexByte(tok, '='); eq >= 0 {
+		return tok[:eq], true
+	}
+	return tok, false
+}
+
+// classifyFlag resolves a "-"-prefixed flag token against a subcommand's value
+// and boolean flag sets. It returns the flag name, how many tokens the flag
+// consumes (2 when a value flag takes the following token, otherwise 1), and
+// whether the flag is unrecognized.
+func classifyFlag(tok string, valueFlags, boolFlags map[string]bool) (name string, advance int, unknown bool) {
+	name, hasInlineValue := splitFlagToken(tok)
+	switch {
+	case boolFlags[name]:
+		return name, 1, false
+	case valueFlags[name]:
+		if hasInlineValue {
+			return name, 1, false
+		}
+		return name, 2, false
+	default:
+		return name, 1, true
+	}
+}
+
+// bdSubcommandStart returns the token index immediately after "bd"/"gc bd"
+// when tokens[i] opens a bd invocation ("bd", or "gc" immediately followed by
+// "bd"), along with whether it opened via the "gc bd" form, which accepts the
+// gc-owned scope flags. It returns -1 if tokens[i] does not open one.
 //
-// "gc bd --rig <name> list" places the scope flags before the subcommand,
-// which this scanner skips over as it searches for a known subcommand key;
-// only the trailing form ("gc bd list --rig <name>") reaches flag scanning.
+// The returned index is where the subcommand search begins. For the "gc bd"
+// form the caller first consumes any leading scope flags
+// (skipLeadingScopeFlags), so both "gc bd --rig <name> list" and the trailing
+// "gc bd list --rig <name>" flow through subcommand and flag validation.
 func bdSubcommandStart(tokens []string, i int) (start int, viaGC bool) {
 	switch {
 	case tokens[i] == "bd":
