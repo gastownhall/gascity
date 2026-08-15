@@ -317,6 +317,82 @@ func TestFileRecorderPreservesTimestamp(t *testing.T) {
 	}
 }
 
+// TestFileRecorderNormalizesExplicitTsToLocalZone is a regression test for
+// #5300: writeRecordLocked only filled Ts when zero, so a caller-supplied Ts
+// serialized in whatever zone the caller happened to construct it in --
+// three cmd/gc emitters pass .UTC() while every other row on the host goes
+// through the IsZero() branch and gets local-with-offset. The log ends up
+// mixing "...Z" and "...-04:00" rows for the same instant, which silently
+// breaks lexical/window filters over ts (a filter written against one form
+// drops every row in the other).
+func TestFileRecorderNormalizesExplicitTsToLocalZone(t *testing.T) {
+	// Force a non-UTC local zone for the test's duration -- per the issue's
+	// own note, "on a UTC host the bug is invisible", so a host-dependent
+	// zone would make this test meaningless on CI runners set to UTC.
+	origLocal := time.Local
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skipf("America/New_York tzdata not available: %v", err)
+	}
+	time.Local = loc
+	defer func() { time.Local = origLocal }()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close() //nolint:errcheck // test cleanup
+
+	// A caller-supplied Ts, explicitly UTC -- the exact shape of the three
+	// buggy emitters (now.UTC() / time.Now().UTC()).
+	explicitUTC := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+	rec.Record(Event{Type: BeadCreated, Actor: "human", Ts: explicitUTC})
+
+	// A zero Ts on the same host, going through the recorder's own default --
+	// this is the format every other row in a real log actually has.
+	rec.Record(Event{Type: BeadCreated, Actor: "human"})
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("got %d lines, want 2:\n%s", len(lines), raw)
+	}
+
+	events, err := ReadAll(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("got %d events, want 2", len(events))
+	}
+
+	// The instant must survive normalization exactly (TestFileRecorderPreservesTimestamp's
+	// invariant) -- only the zone representation should change.
+	if !events[0].Ts.Equal(explicitUTC) {
+		t.Errorf("Ts instant changed: got %v, want %v", events[0].Ts, explicitUTC)
+	}
+
+	// Every row on this host must serialize in the same zone form. The
+	// explicit-UTC row (line 0) must NOT end in "Z" once normalized -- it
+	// must match the zero-Ts row's (line 1) local-with-offset form.
+	if strings.HasSuffix(strings.TrimRight(lines[0], "\r"), `Z"}`) {
+		t.Errorf("caller-supplied UTC Ts was not normalized to local -- log line still ends in \"Z\":\n%s", lines[0])
+	}
+	wantSuffix := "-04:00" // America/New_York, EDT, for the 2026-08-15 test date
+	if !strings.Contains(lines[0], wantSuffix) {
+		t.Errorf("expected the explicit-Ts row normalized to America/New_York's offset (%s), got:\n%s", wantSuffix, lines[0])
+	}
+	if strings.HasSuffix(strings.TrimRight(lines[1], "\r"), `Z"}`) {
+		t.Fatalf("test invariant broken: the zero-Ts row (recorder's own default) unexpectedly serialized as UTC-Z:\n%s", lines[1])
+	}
+}
+
 func TestFakeRecordsEvents(t *testing.T) {
 	f := NewFake()
 	f.Record(Event{Type: BeadCreated, Actor: "human", Subject: "gc-1"})
