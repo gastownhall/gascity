@@ -8,6 +8,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
@@ -70,8 +71,18 @@ func (cr *CityRuntime) routeRecoveryEventProvider() events.Provider {
 // invisible to. Its class-binding tail is skipped by walkRouteRecoveryLegs, for
 // the reason stated there.
 func (cr *CityRuntime) routeRecoveryPlan() (storeref.ResolvedPlan, error) {
-	topo := residencyTopologyForCity(cr.cityPath, cr.cfg, cr.cityBeadStore(), cr.routeRecoveryRigStores())
+	cfg := cr.serviceConfigSnapshot()
+	topo := residencyTopologyForCity(cr.cityPath, cfg, cr.cityBeadStore(), cr.routeRecoveryRigStores(cfg))
 	return storeref.Plan(storeref.RoutedWork{}, topo)
+}
+
+// serviceConfigSnapshot reads the published config under the lock a reload
+// writes it with. The backstop lane runs on its own goroutine, so an unlocked
+// read of cr.cfg here would race the config swap in reloadConfigTraced.
+func (cr *CityRuntime) serviceConfigSnapshot() *config.City {
+	cr.serviceStateMu.RLock()
+	defer cr.serviceStateMu.RUnlock()
+	return cr.cfg
 }
 
 // routeRecoveryRigStores is the suspension FRAME for this lane: the rig legs it
@@ -91,12 +102,12 @@ func (cr *CityRuntime) routeRecoveryPlan() (storeref.ResolvedPlan, error) {
 // residency:allow — a constructor INPUT, not a residency answer. It filters the
 // runtime's own open-store map by the configured suspension set and hands the
 // result to residencyTopologyForCity; it consults no binding and no leg order.
-func (cr *CityRuntime) routeRecoveryRigStores() map[string]beads.Store {
+func (cr *CityRuntime) routeRecoveryRigStores(cfg *config.City) map[string]beads.Store {
 	rigs := cr.rigBeadStores() // residency:allow — constructor input to residencyTopologyForCity, not a residency answer
-	if cr.cfg == nil {
+	if cfg == nil {
 		return rigs
 	}
-	return servingRigStores(cr.cfg, rigs, buildSuspendedRigPathsForCity(cr.cfg, cr.cityPath))
+	return servingRigStores(cfg, rigs, buildSuspendedRigPathsForCity(cfg, cr.cityPath))
 }
 
 // recoverUnroutedWorkRoutes runs the authoritative convergence scan across every
@@ -114,6 +125,13 @@ func (cr *CityRuntime) recoverUnroutedWorkRoutes() {
 // runRouteRecoveryBackstop executes one authoritative pass and reports it.
 func (cr *CityRuntime) runRouteRecoveryBackstop(reason string) routeRecoveryReport {
 	lane := cr.routeRecoveryLaneOf()
+	if !lane.beginBackstop() {
+		// Another pass is already reading the same state. On a large city the
+		// startup scan outlives several poller ticks, and stacking scans would
+		// multiply the ledger load to converge once.
+		return routeRecoveryReport{lane: "backstop", reason: reason}
+	}
+	defer lane.endBackstop()
 	plan, err := cr.routeRecoveryPlan()
 	if err != nil {
 		// A refused city is the one case Plan declines to answer, and its remedy
@@ -155,32 +173,49 @@ func (cr *CityRuntime) recoverUnroutedWorkRoutesDelta() routeRecoveryReport {
 	return report
 }
 
-// startRouteRecovery arms both halves of the lane: the journal feed that makes
-// the tick's delta pass possible, and the background scan that converges what
-// the feed can miss.
+// startTickDeltaLanes arms both halves of every delta lane: the single journal
+// feed that makes the tick's delta passes possible, and the background sweeps
+// that converge what the feed can miss.
 //
-// The scan is minutes of sequential remote reads on a large city — 46% of a
-// 360s tick before this slice — so it runs off the tick's critical path, the
-// same shape as the bead-event watcher and the store-maintenance loop. A nil
-// provider leaves the lane backstop-only, which startEventFeed records by
-// forcing the scan.
-func (cr *CityRuntime) startRouteRecovery(ctx context.Context, prov events.Provider) {
-	lane := cr.routeRecoveryLaneOf()
-	lane.startEventFeed(ctx, prov)
-	go func() {
-		ticker := time.NewTicker(routeRecoveryBackstopPollInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-			}
-			if reason, due := lane.backstopDue(time.Now()); due {
-				cr.safeTick(func() { cr.runRouteRecoveryBackstop(reason) }, "route-recovery-backstop")
-			}
+// One feed, two lanes. A second watcher on the same journal would be a second
+// cursor to keep honest, and the gap semantics have to be identical anyway: an
+// event the tail missed is a gap for BOTH lanes.
+//
+// The sweeps are minutes of sequential remote reads on a large city — together
+// 65% of a 360s tick before this slice — so they run off the tick's critical
+// path, the same shape as the bead-event watcher and the store-maintenance loop.
+// A nil provider leaves both lanes sweep-only, which the feed records by
+// declaring a gap.
+func (cr *CityRuntime) startTickDeltaLanes(ctx context.Context, prov events.Provider) {
+	route := cr.routeRecoveryLaneOf()
+	completions := cr.completionsLaneOf()
+	watchJournalForDeltaLanes(ctx, prov,
+		func() {
+			route.force(routeRecoveryBackstopForced)
+			completions.force()
+		},
+		func(evt events.Event) {
+			route.observe(evt)
+			completions.observe(evt)
+		})
+	go cr.runRouteRecoveryBackstopLoop(ctx, route)
+	go cr.runCompletionsSweepLoop(ctx, completions)
+}
+
+// runRouteRecoveryBackstopLoop polls the route-recovery cadence off-tick.
+func (cr *CityRuntime) runRouteRecoveryBackstopLoop(ctx context.Context, lane *routeRecoveryLane) {
+	ticker := time.NewTicker(routeRecoveryBackstopPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
 		}
-	}()
+		if reason, due := lane.backstopDue(time.Now()); due {
+			cr.safeTick(func() { cr.runRouteRecoveryBackstop(reason) }, "route-recovery-backstop")
+		}
+	}
 }
 
 // routeRecoveryBackstopPollInterval is how often the background lane asks

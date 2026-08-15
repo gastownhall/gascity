@@ -170,6 +170,12 @@ func (r routeRecoveryReport) outcome() TraceOutcomeCode {
 type routeRecoveryLane struct {
 	mu sync.Mutex
 
+	// passMu admits ONE authoritative scan at a time. The startup scan can run
+	// for minutes on a large city while the background poller is already ticking,
+	// and two concurrent full scans would double the ledger load to converge the
+	// same state twice.
+	passMu sync.Mutex
+
 	// pending is the delta feed's candidate set: bead ids the journal named
 	// since the cursor whose snapshot carried a recoverable route.
 	pending map[string]struct{}
@@ -205,6 +211,13 @@ func newRouteRecoveryLane() *routeRecoveryLane {
 		forcedReason: routeRecoveryBackstopStartup,
 	}
 }
+
+// beginBackstop reports whether this caller owns the authoritative scan. A
+// caller that loses simply skips: the pass in flight is reading the same state.
+func (l *routeRecoveryLane) beginBackstop() bool { return l.passMu.TryLock() }
+
+// endBackstop releases the scan slot.
+func (l *routeRecoveryLane) endBackstop() { l.passMu.Unlock() }
 
 // force marks the next backstop pass due immediately. Every way the event feed
 // can stop naming everything funnels through here.
@@ -297,21 +310,29 @@ func (l *routeRecoveryLane) noteBackstopRan(now time.Time, partial bool) {
 	l.retrySoon = partial
 }
 
-// startEventFeed tails the journal and feeds the delta lane. It watches from the
-// CURRENT head: history before this point is the startup backstop's job, and
-// replaying it would be a second full pass wearing the delta lane's name.
-//
-// Every failure mode here forces the backstop, which is the whole reason the
-// backstop exists: a feed that cannot promise to name every change must not be
-// the only thing looking.
+// startEventFeed tails the journal and feeds this lane.
 func (l *routeRecoveryLane) startEventFeed(ctx context.Context, prov events.Provider) {
+	watchJournalForDeltaLanes(ctx, prov,
+		func() { l.force(routeRecoveryBackstopForced) },
+		l.observe)
+}
+
+// watchJournalForDeltaLanes tails the event journal and hands every event to the
+// tick's delta lanes. It watches from the CURRENT head: history before this point
+// is the startup backstop's job, and replaying it would be a second full pass
+// wearing the delta lane's name.
+//
+// Every failure mode here calls onGap, which is the whole reason the backstops
+// exist: a feed that cannot promise to name every change must not be the only
+// thing looking.
+func watchJournalForDeltaLanes(ctx context.Context, prov events.Provider, onGap func(), observe func(events.Event)) {
 	if prov == nil {
-		l.force(routeRecoveryBackstopForced)
+		onGap()
 		return
 	}
 	seq, err := prov.LatestSeq()
 	if err != nil {
-		l.force(routeRecoveryBackstopForced)
+		onGap()
 		return
 	}
 	go func() {
@@ -321,7 +342,7 @@ func (l *routeRecoveryLane) startEventFeed(ctx context.Context, prov events.Prov
 				if ctx.Err() != nil {
 					return
 				}
-				l.force(routeRecoveryBackstopForced)
+				onGap()
 				select {
 				case <-ctx.Done():
 					return
@@ -338,17 +359,17 @@ func (l *routeRecoveryLane) startEventFeed(ctx context.Context, prov events.Prov
 				if evt.Seq < seq {
 					// A regressed sequence means the log this watcher is reading
 					// is not the log the cursor came from.
-					l.force(routeRecoveryBackstopForced)
+					onGap()
 				}
 				seq = evt.Seq
-				l.observe(evt)
+				observe(evt)
 			}
 			if ctx.Err() != nil {
 				return
 			}
 			// The watcher ended without the context being done: the tail broke.
 			// Whatever it missed between here and the next Watch is a gap.
-			l.force(routeRecoveryBackstopForced)
+			onGap()
 		}
 	}()
 }
@@ -614,6 +635,7 @@ func (l *routeRecoveryLane) restoreRoute(store beads.Store, live beads.Bead, bac
 
 	l.mu.Lock()
 	delete(l.consecutiveRecheckFailures, live.ID)
+	l.pruneRestoresLocked()
 	l.restores[live.ID]++
 	restoreCount := l.restores[live.ID]
 	l.mu.Unlock()
@@ -642,6 +664,27 @@ func (l *routeRecoveryLane) restoreRoute(store beads.Store, live beads.Bead, bac
 		return routeRestoreOutcome{writes: 1, err: fmt.Errorf("bead %s: restoring gc.routed_to=%q: %w", live.ID, route, err)}
 	}
 	return routeRestoreOutcome{restored: true, writes: 1}
+}
+
+// pruneRestoresLocked bounds the per-bead restore tally, which otherwise grows
+// for the life of the controller.
+//
+// A single restore is the normal outcome, not a flap, so those entries are the
+// ones worth forgetting. If forgetting them is not enough the whole tally is
+// dropped: flap detection restarting is a degraded diagnostic, and an unbounded
+// map in a process that runs for weeks is a defect.
+func (l *routeRecoveryLane) pruneRestoresLocked() {
+	if len(l.restores) < routeRecoveryCandidateCap {
+		return
+	}
+	for id, count := range l.restores {
+		if count <= 1 {
+			delete(l.restores, id)
+		}
+	}
+	if len(l.restores) >= routeRecoveryCandidateCap {
+		l.restores = map[string]int{}
+	}
 }
 
 // noteRecheckFailure counts a candidate whose live row disagreed with the scan

@@ -1,0 +1,249 @@
+package main
+
+import (
+	"io"
+	"testing"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/executionevent"
+)
+
+// The tick's read budget, as a golden table.
+//
+// A controller tick's latency is not a wall-clock property of this machine; it
+// is the number of SEQUENTIAL store round trips the tick makes, multiplied by
+// whatever the slowest leg's RTT happens to be. On maintainer-city the work
+// ledger is remote postgres at ~5.4s per query, and that multiplication is the
+// whole incident: ~35 round trips in route recovery alone was 185.3s of a ~360s
+// tick, and the completions walk added 72.4s on top (ga-l7jdg, ga-4qdfn).
+//
+// So the regression gate counts round trips. A leg that quietly goes back to
+// scanning per tick fails here as a deterministic integer diff — not as a flaky
+// timing assertion on a loaded CI box. The latency injector below exists only so
+// the wall-clock half can be stated as narrative: at a stand-in RTT, this many
+// round trips is this many seconds.
+
+// tickRTT is the stand-in for the remote ledger's per-query latency. It is small
+// enough to keep the test fast and large enough that the wall-clock narrative
+// below is not measuring scheduler noise.
+const tickRTT = 2 * time.Millisecond
+
+// latencyStore charges tickRTT for every store round trip and counts them.
+type latencyStore struct {
+	beads.Store
+	roundTrips int
+	elapsed    time.Duration
+}
+
+func (s *latencyStore) charge() {
+	time.Sleep(tickRTT)
+	s.roundTrips++
+	s.elapsed += tickRTT
+}
+
+func (s *latencyStore) Get(id string) (beads.Bead, error) {
+	s.charge()
+	return s.Store.Get(id)
+}
+
+func (s *latencyStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	s.charge()
+	return s.Store.List(q)
+}
+
+func (s *latencyStore) ListByMetadata(filters map[string]string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	s.charge()
+	return s.Store.ListByMetadata(filters, limit, opts...)
+}
+
+func (s *latencyStore) SetMetadata(id, key, value string) error {
+	s.charge()
+	return s.Store.SetMetadata(id, key, value)
+}
+
+func (s *latencyStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	s.charge()
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+// TestSteadyTickStoreRoundTripBudget is the regression gate for the two legs
+// this slice moved off the tick. Both budgets are ZERO: a steady tick names no
+// candidate and no root, so it must not reach a store at all.
+//
+// Every row carries its own control in the third column — the same leg over the
+// same corpus in its convergence form — because a budget of zero is also what a
+// leg that stopped working reports.
+func TestSteadyTickStoreRoundTripBudget(t *testing.T) {
+	for _, row := range []struct {
+		leg          string
+		steadyBudget int
+		// convergence runs the leg's backstop form over the identical corpus and
+		// returns its round-trip count, which must EXCEED the steady budget.
+		steady      func(t *testing.T) (*latencyStore, int)
+		convergence func(t *testing.T) int
+	}{
+		{
+			leg:          "recover_unrouted_work_routes",
+			steadyBudget: 0,
+			steady: func(t *testing.T) (*latencyStore, int) {
+				store, cr := budgetRouteRuntime(t)
+				cr.recoverUnroutedWorkRoutesDelta()
+				return store, store.roundTrips
+			},
+			convergence: func(t *testing.T) int {
+				store, cr := budgetRouteRuntime(t)
+				cr.runRouteRecoveryBackstop(routeRecoveryBackstopCadence)
+				return store.roundTrips
+			},
+		},
+		{
+			leg:          "reconcile_execution_completions",
+			steadyBudget: 0,
+			steady: func(t *testing.T) (*latencyStore, int) {
+				store, recorder, _ := budgetCompletionsCorpus(t)
+				executionevent.ReconcileCompletedRoots(recorder, []beads.GraphStore{{Store: store}}, nil, "execution-reconcile")
+				return store, store.roundTrips
+			},
+			convergence: func(t *testing.T) int {
+				store, recorder, _ := budgetCompletionsCorpus(t)
+				executionevent.ReconcileCompletedStores(recorder, []beads.GraphStore{{Store: store}}, "execution-reconcile")
+				return store.roundTrips
+			},
+		},
+	} {
+		t.Run(row.leg, func(t *testing.T) {
+			start := time.Now()
+			store, got := row.steady(t)
+			wall := time.Since(start)
+			if got != row.steadyBudget {
+				t.Fatalf("%s cost %d store round trip(s) on a steady tick, budget %d — at maintainer-city's ~5.4s ledger RTT that is %v of tick",
+					row.leg, got, row.steadyBudget, time.Duration(got)*5400*time.Millisecond)
+			}
+			if store.elapsed != time.Duration(got)*tickRTT {
+				t.Fatalf("the latency injector charged %v for %d round trip(s); the budget is not being measured through it", store.elapsed, got)
+			}
+			// Soft, narrative only: the deterministic count above is the gate.
+			if wall > time.Second {
+				t.Logf("%s steady pass took %v of wall clock, which is far more than %d round trips explain", row.leg, wall, got)
+			}
+			// Control: the convergence form of the SAME leg over the SAME corpus
+			// costs strictly more. Without it, a leg that had simply stopped
+			// reading would pass the budget above.
+			if conv := row.convergence(t); conv <= got {
+				t.Fatalf("%s costs %d round trip(s) in its convergence form and %d on a steady tick; the budget is not measuring anything",
+					row.leg, conv, got)
+			}
+		})
+	}
+}
+
+// TestDeltaPassReadBudgetScalesWithWorkNotWithCorpus is the second half of the
+// gate: when a delta pass DOES have work, its cost must track the number of
+// things the journal named, never the size of the corpus behind them.
+func TestDeltaPassReadBudgetScalesWithWorkNotWithCorpus(t *testing.T) {
+	// Route repair: one batched IN-list re-verify plus one write per repaired
+	// bead, whatever the corpus size.
+	for _, corpus := range []int{4, 40} {
+		store := &latencyStore{Store: beads.NewMemStoreFrom(0, budgetUnroutedBeads(corpus), nil)}
+		cr := &CityRuntime{cityName: "city", standaloneCityStore: store, stderr: io.Discard}
+		lane := cr.routeRecoveryLaneOf()
+		named := []string{"T-0", "T-1"}
+		for _, id := range named {
+			lane.observe(beadCreatedEvent(t, unroutedWorkBead(id)))
+		}
+		cr.recoverUnroutedWorkRoutesDelta()
+		if want := 1 + len(named); store.roundTrips != want {
+			t.Fatalf("route repair over a %d-bead corpus cost %d round trip(s) for %d named bead(s), budget %d",
+				corpus, store.roundTrips, len(named), want)
+		}
+	}
+
+	// Completions: one batched read for the named roots plus one steps read per
+	// named root, whatever the corpus size.
+	for _, corpus := range []int{4, 40} {
+		store, recorder, rootIDs := budgetCompletionsCorpusOfSize(t, corpus)
+		named := rootIDs[:2]
+		executionevent.ReconcileCompletedRoots(recorder, []beads.GraphStore{{Store: store}}, named, "execution-reconcile")
+		if want := 1 + len(named); store.roundTrips != want {
+			t.Fatalf("completions over a %d-root corpus cost %d round trip(s) for %d named root(s), budget %d",
+				corpus, store.roundTrips, len(named), want)
+		}
+	}
+
+	// Control: the convergence forms DO scale with the corpus, so the invariance
+	// above is a property of the delta lanes and not of the fixtures.
+	small, _, _ := budgetCompletionsCorpusOfSize(t, 4)
+	large, _, _ := budgetCompletionsCorpusOfSize(t, 40)
+	executionevent.ReconcileCompletedStores(events.NewFake(), []beads.GraphStore{{Store: small}}, "execution-reconcile")
+	executionevent.ReconcileCompletedStores(events.NewFake(), []beads.GraphStore{{Store: large}}, "execution-reconcile")
+	if large.roundTrips <= small.roundTrips {
+		t.Fatalf("the full pass cost %d round trip(s) over 40 roots and %d over 4; it does not scale with the corpus and the invariance above is vacuous",
+			large.roundTrips, small.roundTrips)
+	}
+}
+
+func budgetUnroutedBeads(n int) []beads.Bead {
+	out := make([]beads.Bead, 0, n)
+	for i := range n {
+		out = append(out, unroutedWorkBead("T-"+itoaSmall(i)))
+	}
+	return out
+}
+
+func itoaSmall(i int) string {
+	if i < 10 {
+		return string(rune('0' + i))
+	}
+	return string(rune('0'+i/10)) + string(rune('0'+i%10))
+}
+
+func budgetRouteRuntime(t *testing.T) (*latencyStore, *CityRuntime) {
+	t.Helper()
+	store := &latencyStore{Store: beads.NewMemStoreFrom(0, budgetUnroutedBeads(8), nil)}
+	return store, &CityRuntime{cityName: "city", standaloneCityStore: store, stderr: io.Discard}
+}
+
+func budgetCompletionsCorpus(t *testing.T) (*latencyStore, events.Provider, []string) {
+	t.Helper()
+	return budgetCompletionsCorpusOfSize(t, 8)
+}
+
+// budgetCompletionsCorpusOfSize seeds n graph.v2 roots, each with one closed
+// step — the closed-molecule corpus the full pass walks and the delta pass must
+// not.
+func budgetCompletionsCorpusOfSize(t *testing.T, n int) (*latencyStore, events.Provider, []string) {
+	t.Helper()
+	backing := beads.NewMemStore()
+	closed := "closed"
+	rootIDs := make([]string, 0, n)
+	for i := range n {
+		root, err := backing.Create(beads.Bead{Metadata: map[string]string{
+			beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+			beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+		}})
+		if err != nil {
+			t.Fatalf("create root: %v", err)
+		}
+		rootIDs = append(rootIDs, root.ID)
+		step, err := backing.Create(beads.Bead{
+			ID: "gcg-budget-step-" + itoaSmall(i),
+			Metadata: map[string]string{
+				beadmeta.RootBeadIDMetadataKey: root.ID,
+				beadmeta.StepIDMetadataKey:     "build",
+			},
+		})
+		if err != nil {
+			t.Fatalf("create step: %v", err)
+		}
+		if err := backing.Update(step.ID, beads.UpdateOpts{
+			Status:   &closed,
+			Metadata: map[string]string{beadmeta.SessionIDMetadataKey: "gcs-session"},
+		}); err != nil {
+			t.Fatalf("close step: %v", err)
+		}
+	}
+	return &latencyStore{Store: backing}, events.NewFake(), rootIDs
+}

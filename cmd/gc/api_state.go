@@ -541,13 +541,43 @@ func (cs *controllerState) startBeadEventWatcher(ctx context.Context) {
 }
 
 // reconcileExecutionCompletions repairs graph.v2 completion facts from the
-// authoritative graph store. It is safe to call at startup and on patrol ticks:
+// authoritative graph store, over the WHOLE corpus. It is the convergence
+// backstop: safe to call at startup and from the background sweep, because
 // ReconcileCompleted uses the event journal's exact fact as its idempotency
 // record, so repeated passes do not duplicate lifecycle events.
+//
+// It is deliberately not on the tick. Walking every workflow root ever created,
+// closed ones included, was 72.4s of a ~360s tick (ga-l7jdg); the tick runs
+// reconcileExecutionCompletionsDelta instead.
 func (cs *controllerState) reconcileExecutionCompletions() {
-	ep := cs.EventProvider()
+	ep, graphStores := cs.completionReconcileInputs()
 	if ep == nil {
 		return
+	}
+	executionevent.ReconcileCompletedStores(ep, graphStores, "execution-reconcile")
+}
+
+// reconcileExecutionCompletionsDelta repairs completion facts for the roots the
+// journal named since the last pass. With no named roots it reads nothing at
+// all — neither the graph stores nor the journal — which is the steady tick.
+func (cs *controllerState) reconcileExecutionCompletionsDelta(rootIDs []string) int {
+	if len(rootIDs) == 0 {
+		return 0
+	}
+	ep, graphStores := cs.completionReconcileInputs()
+	if ep == nil {
+		return 0
+	}
+	return executionevent.ReconcileCompletedRoots(ep, graphStores, rootIDs, "execution-reconcile")
+}
+
+// completionReconcileInputs resolves the journal and the graph-store fan both
+// completion lanes read, so the delta pass and the sweep can never disagree
+// about which stores hold the execution DAG.
+func (cs *controllerState) completionReconcileInputs() (events.Provider, []beads.GraphStore) {
+	ep := cs.EventProvider()
+	if ep == nil {
+		return nil, nil
 	}
 
 	// Graph coordination may be relocated from the city work store, while
@@ -589,7 +619,7 @@ func (cs *controllerState) reconcileExecutionCompletions() {
 		}
 		graphStores = append(graphStores, beads.GraphStore{Store: store})
 	}
-	executionevent.ReconcileCompletedStores(ep, graphStores, "execution-reconcile")
+	return ep, graphStores
 }
 
 // uncachedBeadStore peels the controller's policy/cache read layers so a

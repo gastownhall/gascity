@@ -17,7 +17,7 @@ cmd/gc/api_state.go	BeadStores	ast:returns-store-list	1
 cmd/gc/api_state.go	beadEventStoresLocked	ast:returns-store-list	1
 cmd/gc/api_state.go	beadEventStoresLocked	c:beads.Store-literal	1
 cmd/gc/api_state.go	buildStores	ast:returns-store-list	1
-cmd/gc/api_state.go	reconcileExecutionCompletions	c:beads.Store-literal	1
+cmd/gc/api_state.go	completionReconcileInputs	c:beads.Store-literal	1
 cmd/gc/bd_relocated_classes.go	relocatedBeadClasses	d:ReservedClassPrefix	1
 cmd/gc/build_desired_state.go	collectAssignedWorkBeadsWithStores	ast:returns-store-list	1
 cmd/gc/build_desired_state.go	collectOpenUnassignedRoutedWork	ast:returns-store-list	1

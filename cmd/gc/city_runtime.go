@@ -137,6 +137,11 @@ type CityRuntime struct {
 	routeRecovery     *routeRecoveryLane
 	routeRecoveryOnce sync.Once
 
+	// completions is the graph.v2 completion-fact lane, the same delta/sweep
+	// split as routeRecovery.
+	completions     *completionsLane
+	completionsOnce sync.Once
+
 	orderSweepWatchdogLast             time.Time
 	orderTrackingRetentionWatchdogLast time.Time
 	nudgeMailSweepWatchdogLast         time.Time
@@ -642,18 +647,21 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// (ga-n2d.4). Placed before the expensive reconcile for the same reason as
 	// startup-orders: routed demand should not wait behind cold-start drift work.
 	//
+	// The journal feed is armed FIRST, then the startup scan runs. The feed
+	// watches from the journal head at the moment it starts, so arming it before
+	// the scan makes the two overlap: everything older than the head is the
+	// scan's to repair and everything newer is the delta lane's. Arming it after
+	// would leave the scan's own duration as a hole no lane is watching. The
+	// overlap costs nothing — both passes are idempotent.
+	cr.startTickDeltaLanes(ctx, cr.routeRecoveryEventProvider())
 	// This is the lane's startup backstop, and it is the LAST full scan on the
 	// critical path: from here the tick sees only the event-fed delta pass, and
-	// the authoritative scan runs on cadence in the background lane armed below.
+	// the authoritative scan runs on cadence in the background lane.
 	startupRouteRecoveryStart := time.Now()
 	cr.safeTick(func() {
 		cr.recoverUnroutedWorkRoutes()
 	}, "startup-route-recovery")
 	logPhaseElapsed("startup-route-recovery", startupRouteRecoveryStart)
-	// Arm the journal feed only after the startup scan has converged: the feed
-	// watches from the current head, so anything older is the scan's to repair
-	// and replaying it would be a second full pass wearing the delta lane's name.
-	cr.startRouteRecovery(ctx, cr.routeRecoveryEventProvider())
 	if ctx.Err() != nil {
 		return
 	}
@@ -1368,13 +1376,24 @@ func (cr *CityRuntime) tick(
 		cr.beadReconcileTick(ctx, result, sessionBeads, trace, false)
 		recordPhase(TraceSiteControllerTickPhase, "bead_reconcile_tick", phaseStart, traceDesiredStateFields(result))
 	}
-	// Graph stores intentionally do not emit bead.closed. Reconcile their
-	// closed graph.v2 steps only at the authoritative patrol cadence, not on
-	// event-driven ticks, so lifecycle recovery remains bounded and idempotent.
-	if trigger == "patrol" && cr.cs != nil {
+	// Graph stores intentionally do not emit bead.closed, so a step closed
+	// between the durable write and the best-effort journal append would be a
+	// permanent lifecycle gap. The tick repairs only the roots the journal named
+	// since the last pass; the whole-corpus convergence sweep runs off-tick in
+	// the background lane.
+	//
+	// The old gate here was `trigger == "patrol"`, which is not a cadence: under
+	// overload every surviving ticker fire IS a patrol trigger, so the full pass
+	// ran on every tick and cost 72.4s of it (ga-l7jdg).
+	if cr.cs != nil {
 		phaseStart = time.Now()
-		cr.cs.reconcileExecutionCompletions()
-		recordPhase(TraceSiteControllerTickPhase, "reconcile_execution_completions", phaseStart, nil)
+		namedRoots := cr.completionsLaneOf().takePending()
+		emitted := cr.cs.reconcileExecutionCompletionsDelta(namedRoots)
+		recordPhase(TraceSiteControllerTickPhase, "reconcile_execution_completions", phaseStart, map[string]any{
+			"lane":        "delta",
+			"named_roots": len(namedRoots),
+			"emitted":     emitted,
+		})
 	}
 
 	// Wisp GC: purge expired closed molecules. The molecule/wisp/workflow purge
