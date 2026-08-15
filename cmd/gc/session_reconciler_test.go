@@ -9475,7 +9475,7 @@ func TestReconcileSessionBeads_IdleTimeoutMinFloorIgnoresNonPoolSession(t *testi
 		"configured_named_identity": "named",
 	})
 	pool := env.createSessionBead("w1", "worker")
-	if !(named.ID < pool.ID) {
+	if named.ID >= pool.ID {
 		t.Fatalf("fixture: named bead id %q must sort below the pool bead id %q", named.ID, pool.ID)
 	}
 	env.markSessionActive(&named)
