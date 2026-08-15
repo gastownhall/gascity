@@ -77,14 +77,18 @@ type completionsLane struct {
 
 	pending map[string]struct{}
 
-	forced      bool
-	sweepRan    bool
-	lastSweepAt time.Time
+	forced          bool
+	sweepRan        bool
+	lastSweepAt     time.Time
+	lastSweepReason string
 
 	// Per-sweep accumulators. A sweep spans several chunks, so its summary line
 	// has to be assembled across them or it reports one chunk and calls it a
-	// convergence pass.
+	// convergence pass. The reason is latched from the chunk that STARTED the
+	// sweep: a sweep that began because the feed declared a gap is a gap-driven
+	// sweep even if its later chunks would have been due on cadence anyway.
 	sweepStartedAt time.Time
+	sweepReason    string
 	sweepEmitted   int
 	sweepRoots     int
 
@@ -95,8 +99,10 @@ func newCompletionsLane() *completionsLane {
 	return &completionsLane{
 		pending:  map[string]struct{}{},
 		interval: completionsBackstopInterval,
-		// Nothing has converged yet, so the first thing this lane does is sweep.
-		forced: true,
+		// Nothing has converged yet, so the first thing this lane does is sweep —
+		// expressed by sweepRan being false rather than by pre-setting the forced
+		// latch. Both make the first pass due; only this one lets it report itself
+		// as a startup pass instead of as a cursor gap that never happened.
 	}
 }
 
@@ -159,25 +165,37 @@ func (l *completionsLane) takePending() []string {
 	return out
 }
 
-// sweepDue reports whether the full convergence sweep should run now.
-func (l *completionsLane) sweepDue(now time.Time) bool {
+// sweepDue reports whether the full convergence sweep should run now, and WHY.
+//
+// The reason is not decoration. A sweep running because the event feed declared
+// a gap and a sweep running on its hourly cadence are different events with
+// different follow-ups, and the trace field they both land in cannot tell them
+// apart unless the lane says which.
+func (l *completionsLane) sweepDue(now time.Time) (string, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.forced || !l.sweepRan {
-		return true
+	switch {
+	case l.forced:
+		return backstopReasonCursorGap, true
+	case !l.sweepRan:
+		return backstopReasonStartup, true
+	case now.Sub(l.lastSweepAt) >= l.interval:
+		return backstopReasonCadence, true
+	default:
+		return "", false
 	}
-	return now.Sub(l.lastSweepAt) >= l.interval
 }
 
 // noteSweepChunk folds one chunk into the sweep in progress and, when the chunk
 // completed a full traversal, closes the sweep out: it clears the force latch,
 // advances the cadence, and returns the whole sweep's totals for the summary
 // line. A sweep still in progress returns done=false and keeps the lane due.
-func (l *completionsLane) noteSweepChunk(now time.Time, emitted, roots int, complete bool) (total completionsSweepTotals, done bool) {
+func (l *completionsLane) noteSweepChunk(now time.Time, reason string, emitted, roots int, complete bool) (total completionsSweepTotals, done bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.sweepStartedAt.IsZero() {
 		l.sweepStartedAt = now
+		l.sweepReason = reason
 	}
 	l.sweepEmitted += emitted
 	l.sweepRoots += roots
@@ -188,11 +206,14 @@ func (l *completionsLane) noteSweepChunk(now time.Time, emitted, roots int, comp
 		Emitted: l.sweepEmitted,
 		Roots:   l.sweepRoots,
 		Elapsed: now.Sub(l.sweepStartedAt),
+		Reason:  l.sweepReason,
 	}
 	l.lastSweepAt = now
+	l.lastSweepReason = l.sweepReason
 	l.sweepRan = true
 	l.forced = false
 	l.sweepStartedAt = time.Time{}
+	l.sweepReason = ""
 	l.sweepEmitted = 0
 	l.sweepRoots = 0
 	return total, true
@@ -203,16 +224,20 @@ type completionsSweepTotals struct {
 	Emitted int
 	Roots   int
 	Elapsed time.Duration
+	// Reason is why the sweep was due, latched from its first chunk.
+	Reason string
 }
 
-// lastSweep reports when the last FULL traversal finished, and whether one ever
-// has. It is what the tick's trace record carries so an operator can see the
-// convergence lane's age without reading the log: a backstop whose age nobody
-// can see is a backstop nobody notices has stopped.
-func (l *completionsLane) lastSweep() (time.Time, bool) {
+// lastSweep reports when the last FULL traversal finished, why it was due, and
+// whether one ever has. It is what the tick's trace record carries so an
+// operator can see the convergence lane's age and trigger without reading the
+// log: a backstop whose age nobody can see is a backstop nobody notices has
+// stopped, and one whose reason nobody can see is a gap indistinguishable from
+// a schedule.
+func (l *completionsLane) lastSweep() (at time.Time, reason string, ran bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.lastSweepAt, l.sweepRan
+	return l.lastSweepAt, l.lastSweepReason, l.sweepRan
 }
 
 // completionsLaneOf returns this runtime's completions lane, creating it on
@@ -243,10 +268,11 @@ func (cr *CityRuntime) runCompletionsSweepLoop(ctx context.Context, lane *comple
 			return
 		case <-ticker.C:
 		}
-		if !lane.sweepDue(time.Now()) {
+		reason, due := lane.sweepDue(time.Now())
+		if !due {
 			continue
 		}
-		cr.safeTick(func() { cr.runCompletionsSweepChunk(backstop, lane) }, "completions-sweep")
+		cr.safeTick(func() { cr.runCompletionsSweepChunk(backstop, lane, reason) }, "completions-sweep")
 	}
 }
 
@@ -254,7 +280,7 @@ func (cr *CityRuntime) runCompletionsSweepLoop(ctx context.Context, lane *comple
 // reports what it repaired. The cadence latch advances only on a COMPLETE
 // traversal, so a sweep spread over several chunks keeps running rather than
 // being counted as done after its first one.
-func (cr *CityRuntime) runCompletionsSweepChunk(backstop *executionevent.CompletionBackstop, lane *completionsLane) executionevent.CompletionBackstopResult {
+func (cr *CityRuntime) runCompletionsSweepChunk(backstop *executionevent.CompletionBackstop, lane *completionsLane, reason string) executionevent.CompletionBackstopResult {
 	if cr.cs == nil {
 		return executionevent.CompletionBackstopResult{SweepComplete: true}
 	}
@@ -269,10 +295,10 @@ func (cr *CityRuntime) runCompletionsSweepChunk(backstop *executionevent.Complet
 	for _, listErr := range result.ListErrors {
 		fmt.Fprintf(cr.stderr, "%s: completions sweep: %v\n", cr.logPrefix, listErr) //nolint:errcheck // best-effort stderr
 	}
-	total, done := lane.noteSweepChunk(time.Now(), result.Emitted, result.RootsVisited, result.SweepComplete)
+	total, done := lane.noteSweepChunk(time.Now(), reason, result.Emitted, result.RootsVisited, result.SweepComplete)
 	if done {
-		summary := fmt.Sprintf("converged %d root(s), emitted %d completion fact(s), took %s (stores=%d)",
-			total.Roots, total.Emitted, total.Elapsed.Round(time.Millisecond), len(graphStores))
+		summary := fmt.Sprintf("reason=%s converged %d root(s), emitted %d completion fact(s), took %s (stores=%d)",
+			total.Reason, total.Roots, total.Emitted, total.Elapsed.Round(time.Millisecond), len(graphStores))
 		fmt.Fprintf(cr.stderr, "%s: completions sweep: %s\n", cr.logPrefix, summary) //nolint:errcheck // best-effort stderr
 	}
 	return result

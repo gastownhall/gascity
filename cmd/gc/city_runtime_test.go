@@ -1664,7 +1664,7 @@ func TestCityRuntimeSweepReconcilesGraphStepClosedWithNoEvent(t *testing.T) {
 	// The sweep repairs it, exactly once.
 	lane := cr.completionsLaneOf()
 	backstop := &executionevent.CompletionBackstop{}
-	if result := cr.runCompletionsSweepChunk(backstop, lane); result.Emitted != 1 || !result.SweepComplete {
+	if result := cr.runCompletionsSweepChunk(backstop, lane, backstopReasonCadence); result.Emitted != 1 || !result.SweepComplete {
 		t.Fatalf("sweep chunk = %+v, want one fact and a complete traversal", result)
 	}
 	completed := completedFacts()
@@ -1675,7 +1675,7 @@ func TestCityRuntimeSweepReconcilesGraphStepClosedWithNoEvent(t *testing.T) {
 		t.Fatalf("completed event = %#v", got)
 	}
 
-	if result := cr.runCompletionsSweepChunk(backstop, lane); result.Emitted != 0 {
+	if result := cr.runCompletionsSweepChunk(backstop, lane, backstopReasonCadence); result.Emitted != 0 {
 		t.Fatalf("second sweep chunk = %+v, want no new facts", result)
 	}
 	if got := completedFacts(); len(got) != 1 {

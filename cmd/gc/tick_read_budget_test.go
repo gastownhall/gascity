@@ -103,7 +103,7 @@ func TestSteadyTickStoreRoundTripBudget(t *testing.T) {
 			},
 			convergence: func(t *testing.T) int {
 				store, cr := budgetRouteRuntime(t)
-				cr.runRouteRecoveryBackstop(routeRecoveryBackstopCadence)
+				cr.runRouteRecoveryBackstop(backstopReasonCadence)
 				return store.roundTrips
 			},
 		},

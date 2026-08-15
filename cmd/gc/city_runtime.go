@@ -1402,8 +1402,8 @@ func (cr *CityRuntime) tick(
 			"named_roots": len(namedRoots),
 			"emitted":     emitted,
 		}
-		sweptAt, swept := completionsLane.lastSweep()
-		addBackstopAgeFields(completionFields, sweptAt, "", swept)
+		sweptAt, sweptReason, swept := completionsLane.lastSweep()
+		addBackstopAgeFields(completionFields, sweptAt, sweptReason, swept)
 		recordPhase(TraceSiteControllerTickPhase, "reconcile_execution_completions", phaseStart, completionFields)
 	}
 

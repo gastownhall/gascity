@@ -123,7 +123,7 @@ func TestRouteRecoverySteadyTickIssuesZeroWorkLedgerReads(t *testing.T) {
 
 	// Control: the backstop over the identical store DOES scan and DOES repair.
 	// A lane that lost the ability to read at all would fail here and pass above.
-	report := cr.runRouteRecoveryBackstop(routeRecoveryBackstopCadence)
+	report := cr.runRouteRecoveryBackstop(backstopReasonCadence)
 	if report.restored != 1 {
 		t.Fatalf("backstop restored %d, want 1 — the zero-read assertion above measured a lane that cannot repair", report.restored)
 	}
@@ -228,7 +228,7 @@ func TestRouteRecoveryBackstopHealsWhatTheEventFeedLost(t *testing.T) {
 		t.Fatalf("T-lost gc.routed_to = %q after delta ticks, want empty (the delta path is scanning)", got)
 	}
 
-	first := cr.runRouteRecoveryBackstop(routeRecoveryBackstopCadence)
+	first := cr.runRouteRecoveryBackstop(backstopReasonCadence)
 	if first.restored != 1 {
 		t.Fatalf("first backstop restored %d, want 1", first.restored)
 	}
@@ -237,7 +237,7 @@ func TestRouteRecoveryBackstopHealsWhatTheEventFeedLost(t *testing.T) {
 	}
 
 	writesAfterHeal := store.writes
-	second := cr.runRouteRecoveryBackstop(routeRecoveryBackstopCadence)
+	second := cr.runRouteRecoveryBackstop(backstopReasonCadence)
 	if second.restored != 0 {
 		t.Fatalf("second backstop restored %d, want 0 (not idempotent)", second.restored)
 	}
@@ -284,7 +284,7 @@ func TestRouteRecoveryBackstopHealsABindingResidentLossOnAConvergedCity(t *testi
 		t.Fatalf("GB-lost gc.routed_to = %q after delta ticks, want empty (the delta path is scanning)", got)
 	}
 
-	first := lane.backstopPass(plan, routeRecoveryBackstopCadence)
+	first := lane.backstopPass(plan, backstopReasonCadence)
 	if first.restored != 1 {
 		t.Fatalf("the convergence pass restored %d, want 1 — a binding-resident loss has no other repair path", first.restored)
 	}
@@ -294,7 +294,7 @@ func TestRouteRecoveryBackstopHealsABindingResidentLossOnAConvergedCity(t *testi
 
 	// Idempotency: converging twice writes once.
 	writesAfterHeal := binding.writes
-	if second := lane.backstopPass(plan, routeRecoveryBackstopCadence); second.restored != 0 {
+	if second := lane.backstopPass(plan, backstopReasonCadence); second.restored != 0 {
 		t.Fatalf("the second convergence pass restored %d, want 0", second.restored)
 	}
 	if binding.writes != writesAfterHeal {
@@ -310,10 +310,10 @@ func TestRouteRecoveryCursorGapForcesTheBackstop(t *testing.T) {
 	lane := newRouteRecoveryLane()
 
 	// A lane that has never scanned is due, because nothing has converged yet.
-	if reason, due := lane.backstopDue(now); !due || reason != routeRecoveryBackstopStartup {
-		t.Fatalf("fresh lane due=%v reason=%q, want due with reason %q", due, reason, routeRecoveryBackstopStartup)
+	if reason, due := lane.backstopDue(now); !due || reason != backstopReasonStartup {
+		t.Fatalf("fresh lane due=%v reason=%q, want due with reason %q", due, reason, backstopReasonStartup)
 	}
-	lane.noteBackstopRan(now, routeRecoveryBackstopCadence, false)
+	lane.noteBackstopRan(now, backstopReasonCadence, false)
 	// Control: right after a clean pass it is NOT due, so "always due" is not
 	// what the assertions below are measuring.
 	if _, due := lane.backstopDue(now.Add(time.Minute)); due {
@@ -324,15 +324,15 @@ func TestRouteRecoveryCursorGapForcesTheBackstop(t *testing.T) {
 	}
 
 	// A cursor gap makes it due immediately, with the reason recorded.
-	lane.force(routeRecoveryBackstopForced)
+	lane.force(backstopReasonCursorGap)
 	reason, due := lane.backstopDue(now.Add(time.Second))
-	if !due || reason != routeRecoveryBackstopForced {
-		t.Fatalf("after a forced gap due=%v reason=%q, want due with reason %q", due, reason, routeRecoveryBackstopForced)
+	if !due || reason != backstopReasonCursorGap {
+		t.Fatalf("after a forced gap due=%v reason=%q, want due with reason %q", due, reason, backstopReasonCursorGap)
 	}
 
 	// A pass that could not read every leg comes back on the short retry
 	// cadence, not the hourly one: the leg it missed is the overdue one.
-	lane.noteBackstopRan(now, routeRecoveryBackstopCadence, true)
+	lane.noteBackstopRan(now, backstopReasonCadence, true)
 	if _, due := lane.backstopDue(now.Add(routeRecoveryBackstopRetryInterval)); !due {
 		t.Fatal("a partial pass did not reschedule on the retry cadence")
 	}
@@ -347,16 +347,16 @@ func TestRouteRecoveryCursorGapForcesTheBackstop(t *testing.T) {
 // being silently dropped.
 func TestRouteRecoveryCandidateOverflowFallsBackToTheScan(t *testing.T) {
 	lane := newRouteRecoveryLane()
-	lane.noteBackstopRan(time.Now(), routeRecoveryBackstopCadence, false)
+	lane.noteBackstopRan(time.Now(), backstopReasonCadence, false)
 	for i := range routeRecoveryCandidateCap + 1 {
 		lane.observe(beadCreatedEvent(t, unroutedWorkBead(overflowBeadID(i))))
 	}
-	if reason, due := lane.backstopDue(time.Now()); !due || reason != routeRecoveryBackstopForced {
-		t.Fatalf("after candidate overflow due=%v reason=%q, want due with reason %q", due, reason, routeRecoveryBackstopForced)
+	if reason, due := lane.backstopDue(time.Now()); !due || reason != backstopReasonCursorGap {
+		t.Fatalf("after candidate overflow due=%v reason=%q, want due with reason %q", due, reason, backstopReasonCursorGap)
 	}
 	// Control: under the cap the feed keeps its candidates and does not force.
 	small := newRouteRecoveryLane()
-	small.noteBackstopRan(time.Now(), routeRecoveryBackstopCadence, false)
+	small.noteBackstopRan(time.Now(), backstopReasonCadence, false)
 	small.observe(beadCreatedEvent(t, unroutedWorkBead("T-1")))
 	if _, due := small.backstopDue(time.Now()); due {
 		t.Fatal("a single candidate forced the backstop; overflow is not what the assertion above measured")
@@ -390,7 +390,7 @@ func TestRouteRecoveryEventFeedNamesCandidatesAndForcesOnAMissingJournal(t *test
 	prov := &observedEventProvider{Provider: backing, observed: make(chan struct{}, 8), after: 2}
 
 	lane := newRouteRecoveryLane()
-	lane.noteBackstopRan(time.Now(), routeRecoveryBackstopCadence, false)
+	lane.noteBackstopRan(time.Now(), backstopReasonCadence, false)
 	// The feed watches from the CURRENT head, so rewind it to replay the two
 	// events already recorded — the production lane's head is set before the
 	// startup scan for the same reason.
@@ -412,10 +412,10 @@ func TestRouteRecoveryEventFeedNamesCandidatesAndForcesOnAMissingJournal(t *test
 
 	// No journal: the lane must say so by forcing the scan.
 	blind := newRouteRecoveryLane()
-	blind.noteBackstopRan(time.Now(), routeRecoveryBackstopCadence, false)
+	blind.noteBackstopRan(time.Now(), backstopReasonCadence, false)
 	blind.startEventFeed(ctx, nil)
-	if reason, due := blind.backstopDue(time.Now()); !due || reason != routeRecoveryBackstopForced {
-		t.Fatalf("a lane with no journal due=%v reason=%q, want due with reason %q", due, reason, routeRecoveryBackstopForced)
+	if reason, due := blind.backstopDue(time.Now()); !due || reason != backstopReasonCursorGap {
+		t.Fatalf("a lane with no journal due=%v reason=%q, want due with reason %q", due, reason, backstopReasonCursorGap)
 	}
 }
 
@@ -493,7 +493,7 @@ func TestRouteRecoveryQuarantinesACandidateOnlyAfterTwoFailedBackstopPasses(t *t
 	store := &recheckDropStore{Store: backing, drop: map[string]bool{"T-relic": true}}
 	cr := &CityRuntime{cityName: "city", standaloneCityStore: store, stderr: io.Discard}
 
-	first := cr.runRouteRecoveryBackstop(routeRecoveryBackstopCadence)
+	first := cr.runRouteRecoveryBackstop(backstopReasonCadence)
 	if first.quarantined != 0 {
 		t.Fatalf("first backstop quarantined %d, want 0 — one failed re-check is the ordinary claim race", first.quarantined)
 	}
@@ -501,7 +501,7 @@ func TestRouteRecoveryQuarantinesACandidateOnlyAfterTwoFailedBackstopPasses(t *t
 		t.Fatalf("T-relic quarantine reason after one pass = %q, want empty", q)
 	}
 
-	second := cr.runRouteRecoveryBackstop(routeRecoveryBackstopCadence)
+	second := cr.runRouteRecoveryBackstop(backstopReasonCadence)
 	if second.quarantined != 1 {
 		t.Fatalf("second backstop quarantined %d, want 1", second.quarantined)
 	}
@@ -520,7 +520,7 @@ func TestRouteRecoveryQuarantinesACandidateOnlyAfterTwoFailedBackstopPasses(t *t
 	// Quarantine is a LABEL, not a skip: the bead stays a candidate, and the
 	// pass whose re-check finally passes clears the marker on its own.
 	store.drop = nil
-	third := cr.runRouteRecoveryBackstop(routeRecoveryBackstopCadence)
+	third := cr.runRouteRecoveryBackstop(backstopReasonCadence)
 	if third.restored != 1 {
 		t.Fatalf("third backstop restored %d, want 1 — a quarantined bead must re-enter", third.restored)
 	}
@@ -563,12 +563,12 @@ func TestRouteRecoveryBoundsRestampsAndReportsAFlap(t *testing.T) {
 	cr := &CityRuntime{cityName: "city", standaloneCityStore: store, stderr: io.Discard}
 
 	for pass := 1; pass <= routeRecoveryFlapLimit; pass++ {
-		report := cr.runRouteRecoveryBackstop(routeRecoveryBackstopCadence)
+		report := cr.runRouteRecoveryBackstop(backstopReasonCadence)
 		if len(report.flapping) != 0 {
 			t.Fatalf("pass %d reported a flap at or below the bound (%v)", pass, report.flapping)
 		}
 	}
-	over := cr.runRouteRecoveryBackstop(routeRecoveryBackstopCadence)
+	over := cr.runRouteRecoveryBackstop(backstopReasonCadence)
 	if len(over.flapping) != 1 || over.flapping[0] != "T-flap" {
 		t.Fatalf("pass %d reported flapping=%v, want [T-flap]", routeRecoveryFlapLimit+1, over.flapping)
 	}
@@ -633,7 +633,7 @@ func TestRouteRecoveryRuntimePlaneReadsTheBindingAndNeverTheLedger(t *testing.T)
 
 	t.Run("runtime plane", func(t *testing.T) {
 		plan, work, rig, binding := newPlan(t)
-		report := newRouteRecoveryLane().backstopPassOnPlane(plan, routeRecoveryBackstopCadence, runtimePlane)
+		report := newRouteRecoveryLane().backstopPassOnPlane(plan, backstopReasonCadence, runtimePlane)
 		if got := work.reads() + rig.reads(); got != 0 {
 			t.Fatalf("the runtime plane issued %d work-ledger/rig round trip(s), want 0 — a ledger leg on the tick is a misrouting bug", got)
 		}
@@ -652,7 +652,7 @@ func TestRouteRecoveryRuntimePlaneReadsTheBindingAndNeverTheLedger(t *testing.T)
 
 	t.Run("reconcile plane converges every leg, binding included", func(t *testing.T) {
 		plan, work, rig, binding := newPlan(t)
-		report := newRouteRecoveryLane().backstopPassOnPlane(plan, routeRecoveryBackstopCadence, reconcilePlane)
+		report := newRouteRecoveryLane().backstopPassOnPlane(plan, backstopReasonCadence, reconcilePlane)
 		if work.reads() == 0 || rig.reads() == 0 {
 			t.Fatalf("work reads=%d rig reads=%d, want both non-zero", work.reads(), rig.reads())
 		}
@@ -830,7 +830,7 @@ func TestRouteRecoveryBackstopAlwaysReportsItselfAndItsAge(t *testing.T) {
 	store := &countingRouteStore{Store: beads.NewMemStore()} // nothing to repair
 	cr := &CityRuntime{cityName: "city", standaloneCityStore: store, logPrefix: "gc", stderr: &stderr}
 
-	report := cr.runRouteRecoveryBackstop(routeRecoveryBackstopCadence)
+	report := cr.runRouteRecoveryBackstop(backstopReasonCadence)
 	if report.restored != 0 {
 		t.Fatalf("the fixture had something to repair (restored=%d); it is not testing the QUIET pass", report.restored)
 	}
@@ -851,7 +851,7 @@ func TestRouteRecoveryBackstopAlwaysReportsItselfAndItsAge(t *testing.T) {
 
 	// And the age is queryable, which is what the tick's trace record carries.
 	at, reason, ran := cr.routeRecoveryLaneOf().lastBackstop()
-	if !ran || reason != routeRecoveryBackstopCadence || time.Since(at) > time.Minute {
+	if !ran || reason != backstopReasonCadence || time.Since(at) > time.Minute {
 		t.Fatalf("lastBackstop = (%s, %q, %t), want a recent cadence pass", at, reason, ran)
 	}
 	// Control: a lane that has not run reports so, rather than reporting an age

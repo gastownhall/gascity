@@ -129,11 +129,23 @@ const (
 )
 
 // Backstop reasons, as they appear in the trace and the log line.
+//
+// ONE vocabulary for both delta lanes. They write the same trace field
+// (`backstop_last_reason`), so an operator reading it must not have to know
+// which lane wrote it — and two per-lane spellings of "cursor-gap" is how that
+// field stops being groupable a release after someone adds the second one.
 const (
-	routeRecoveryBackstopStartup    = "startup"
-	routeRecoveryBackstopCadence    = "cadence"
-	routeRecoveryBackstopForced     = "cursor-gap"
-	routeRecoveryBackstopLegDegrade = "leg-degrade"
+	// backstopReasonStartup: nothing has converged yet in this process.
+	backstopReasonStartup = "startup"
+	// backstopReasonCadence: the ordinary schedule came due.
+	backstopReasonCadence = "cadence"
+	// backstopReasonCursorGap: the event feed can no longer claim to name every
+	// change — it never started, it restarted, its sequence regressed, or its
+	// candidate set overflowed.
+	backstopReasonCursorGap = "cursor-gap"
+	// backstopReasonLegDegrade: a leg errored on the previous pass, so its
+	// convergence is owed now rather than at the next cadence.
+	backstopReasonLegDegrade = "leg-degrade"
 )
 
 // routeRecoveryReport is one pass's outcome, in the terms the tick trace and the
@@ -250,7 +262,7 @@ func newRouteRecoveryLane() *routeRecoveryLane {
 		retry:                      routeRecoveryBackstopRetryInterval,
 		// Nothing has scanned yet, so the first thing this lane does is scan.
 		forced:       true,
-		forcedReason: routeRecoveryBackstopStartup,
+		forcedReason: backstopReasonStartup,
 	}
 }
 
@@ -267,7 +279,7 @@ func (l *routeRecoveryLane) force(reason string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.forced = true
-	if l.forcedReason == "" || l.forcedReason == routeRecoveryBackstopCadence {
+	if l.forcedReason == "" || l.forcedReason == backstopReasonCadence {
 		l.forcedReason = reason
 	}
 }
@@ -293,7 +305,7 @@ func (l *routeRecoveryLane) observe(evt events.Event) {
 		// the scan rather than silently dropping candidates.
 		l.pending = map[string]struct{}{}
 		l.forced = true
-		l.forcedReason = routeRecoveryBackstopForced
+		l.forcedReason = backstopReasonCursorGap
 		return
 	}
 	l.pending[bead.ID] = struct{}{}
@@ -322,19 +334,19 @@ func (l *routeRecoveryLane) backstopDue(now time.Time) (string, bool) {
 	if l.forced {
 		reason := l.forcedReason
 		if reason == "" {
-			reason = routeRecoveryBackstopForced
+			reason = backstopReasonCursorGap
 		}
 		return reason, true
 	}
 	if !l.backstopRan {
-		return routeRecoveryBackstopStartup, true
+		return backstopReasonStartup, true
 	}
 	cadence := l.interval
 	if l.retrySoon {
 		cadence = l.retry
 	}
 	if now.Sub(l.lastBackstopAt) >= cadence {
-		return routeRecoveryBackstopCadence, true
+		return backstopReasonCadence, true
 	}
 	return "", false
 }
@@ -366,7 +378,7 @@ func (l *routeRecoveryLane) noteBackstopRan(now time.Time, reason string, partia
 // startEventFeed tails the journal and feeds this lane.
 func (l *routeRecoveryLane) startEventFeed(ctx context.Context, prov events.Provider) {
 	watchJournalForDeltaLanes(ctx, prov,
-		func() { l.force(routeRecoveryBackstopForced) },
+		func() { l.force(backstopReasonCursorGap) },
 		l.observe)
 }
 

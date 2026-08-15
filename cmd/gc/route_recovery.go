@@ -120,7 +120,7 @@ func (cr *CityRuntime) routeRecoveryRigStores(cfg *config.City) map[string]beads
 // restart-recovery contract is exactly a startup backstop — and afterwards from
 // the background lane on cadence, never from the tick.
 func (cr *CityRuntime) recoverUnroutedWorkRoutes() {
-	cr.runRouteRecoveryBackstop(routeRecoveryBackstopStartup)
+	cr.runRouteRecoveryBackstop(backstopReasonStartup)
 }
 
 // runRouteRecoveryBackstop executes one authoritative pass and reports it.
@@ -140,7 +140,7 @@ func (cr *CityRuntime) runRouteRecoveryBackstop(reason string) routeRecoveryRepo
 		// that looks like success while reading the store the relocated classes
 		// were migrated off.
 		fmt.Fprintf(cr.stderr, "%s: route recovery: resolving work legs: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
-		lane.force(routeRecoveryBackstopForced)
+		lane.force(backstopReasonCursorGap)
 		return routeRecoveryReport{lane: "backstop", reason: reason, err: err}
 	}
 	started := time.Now()
@@ -174,14 +174,14 @@ func (cr *CityRuntime) recoverUnroutedWorkRoutesDelta() routeRecoveryReport {
 	plan, err := cr.routeRecoveryPlan()
 	if err != nil {
 		fmt.Fprintf(cr.stderr, "%s: route recovery: resolving work legs: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
-		lane.force(routeRecoveryBackstopForced)
+		lane.force(backstopReasonCursorGap)
 		return routeRecoveryReport{lane: "delta", candidates: len(candidates), err: err}
 	}
 	report := lane.deltaPass(plan, candidates)
 	if report.partial || report.err != nil {
 		// A leg the delta pass could not read is a leg whose convergence is now
 		// owed to the scan.
-		lane.force(routeRecoveryBackstopLegDegrade)
+		lane.force(backstopReasonLegDegrade)
 	}
 	cr.logRouteRecovery(report)
 	return report
@@ -205,7 +205,7 @@ func (cr *CityRuntime) startTickDeltaLanes(ctx context.Context, prov events.Prov
 	completions := cr.completionsLaneOf()
 	watchJournalForDeltaLanes(ctx, prov,
 		func() {
-			route.force(routeRecoveryBackstopForced)
+			route.force(backstopReasonCursorGap)
 			completions.force()
 		},
 		func(evt events.Event) {
