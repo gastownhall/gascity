@@ -131,6 +131,12 @@ type CityRuntime struct {
 	orderRescanLast         time.Time
 	trace                   *sessionReconcilerTraceManager
 
+	// routeRecovery is the route-repair lane: an event-fed delta pass in the
+	// tick and a cadenced authoritative scan behind it. Created on first use so
+	// a directly-constructed runtime needs no wiring.
+	routeRecovery     *routeRecoveryLane
+	routeRecoveryOnce sync.Once
+
 	orderSweepWatchdogLast             time.Time
 	orderTrackingRetentionWatchdogLast time.Time
 	nudgeMailSweepWatchdogLast         time.Time
@@ -635,11 +641,19 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// post-restart rig re-enters pool demand without a manual `gc sling`
 	// (ga-n2d.4). Placed before the expensive reconcile for the same reason as
 	// startup-orders: routed demand should not wait behind cold-start drift work.
+	//
+	// This is the lane's startup backstop, and it is the LAST full scan on the
+	// critical path: from here the tick sees only the event-fed delta pass, and
+	// the authoritative scan runs on cadence in the background lane armed below.
 	startupRouteRecoveryStart := time.Now()
 	cr.safeTick(func() {
 		cr.recoverUnroutedWorkRoutes()
 	}, "startup-route-recovery")
 	logPhaseElapsed("startup-route-recovery", startupRouteRecoveryStart)
+	// Arm the journal feed only after the startup scan has converged: the feed
+	// watches from the current head, so anything older is the scan's to repair
+	// and replaying it would be a second full pass wearing the delta lane's name.
+	cr.startRouteRecovery(ctx, cr.routeRecoveryEventProvider())
 	if ctx.Err() != nil {
 		return
 	}
@@ -1191,10 +1205,17 @@ func (cr *CityRuntime) tick(
 	// Re-route ready work whose canonical pool route was lost or never written
 	// (gc.run_target set, gc.routed_to empty), so the autoscaler — which keys on
 	// gc.routed_to — sees it as demand without a manual `gc sling` (ga-n2d.4).
-	// Runs in the cheap dispatch phase before the expensive session reconcile.
+	//
+	// The tick runs the DELTA half only: the beads the event feed named since
+	// the last pass, and nothing else. A steady tick names nothing and reads no
+	// store at all. The authoritative full scan this replaced was 185.3s of a
+	// ~360s tick (ga-l7jdg) and now runs off-tick in the backstop lane.
 	phaseStart = time.Now()
-	cr.recoverUnroutedWorkRoutes()
-	recordPhase(TraceSiteControllerTickPhase, "recover_unrouted_work_routes", phaseStart, nil)
+	routeReport := cr.recoverUnroutedWorkRoutesDelta()
+	if trace != nil {
+		trace.RecordControllerOperation(TraceSiteControllerTickPhase, TraceReasonRetained, routeReport.outcome(),
+			"recover_unrouted_work_routes", time.Since(phaseStart), routeReport.fields())
+	}
 	if ctx.Err() != nil {
 		return
 	}

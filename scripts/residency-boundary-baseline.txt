@@ -83,7 +83,6 @@ cmd/gc/order_store.go	orderTrackingSweepStoresFromTargets	ast:returns-store-list
 cmd/gc/order_store.go	rawOrderStores	ast:returns-store-list	1
 cmd/gc/ready_federation.go	readyLegsForTopology	c:storeref.EachLeg	1
 cmd/gc/ready_federation.go	readyRigLegStores	ast:returns-store-list	1
-cmd/gc/route_recovery.go	recoverUnroutedWorkRoutes	a:rigBeadStores	1
 internal/api/dashport_support.go	BeadStores	a:BeadStores	1
 internal/api/dashport_support.go	BeadStores	ast:returns-store-list	1
 internal/api/handler_agents.go	findActiveBeadForAssigneesWithFreshness	a:BeadStores	1

@@ -1,12 +1,15 @@
 package main
 
 import (
-	"errors"
+	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // carriedPoolRoute returns the pool route a bead already declares for itself and
@@ -41,144 +44,170 @@ func carriedPoolRoute(b beads.Bead) string {
 	return strings.TrimSpace(b.Metadata[beadmeta.RunTargetMetadataKey])
 }
 
-// restoreCarriedWorkRoutes re-stamps gc.routed_to from the route a bead already
-// carries (its legacy gc.run_target route, via carriedPoolRoute) for open,
-// unassigned work whose canonical pool route was lost or never written. It
-// returns the number of beads whose route it restored.
-//
-// The pool autoscaler keys exclusively on gc.routed_to, so an open work bead
-// that carries a gc.run_target hint but an empty gc.routed_to is invisible to
-// pool demand and never spawns a worker — the post-restart stall in ga-n2d.4
-// (ready beads, 0 routed, 0 workers, until a manual `gc sling`). The controller
-// runs this on startup and on every patrol tick so such work re-enters demand
-// on its own. It is the automatic, broader-scoped promotion of the manual
-// `gc doctor --fix` run-target-routed-to-backfill check.
-//
-// The recovery is judgment-free and cannot mis-route (ZFC): carriedPoolRoute
-// only copies a route the bead already declares and skips control-dispatcher and
-// topology beads. A bead with no carried route is left for its owner to sling —
-// which pool ad-hoc work belongs to is the owner's judgment, not the
-// controller's. Idempotent: an already-routed bead yields no route and is
-// skipped.
-//
-// TOCTOU-narrowing (not eliminating): the open-bead List is a snapshot, so
-// before writing, each bead is re-read through the store's authoritative,
-// cache-bypassing live handle and skipped unless it is still open, unassigned,
-// and carries the same recoverable route. This shrinks — but does not close —
-// the window in which the re-stamp could clobber a route a polecat consumed by
-// claiming the bead after the snapshot (ga-bgu): a claim landing between the
-// live re-read and SetMetadata is still possible. The re-stamp stays monotonic
-// (never worse than the prior blind write), so the residual window degrades to
-// the pre-guard behavior rather than a new failure.
-//
-// That re-read guards claims but cannot guard blocks: a claim flips the bead to
-// in_progress, which mapBdStatus preserves, while a block flips it to a status
-// that collapses to "open" (gc-4zb). Blocked work is therefore excluded at the
-// snapshot, by the Live query below, and not here.
-func restoreCarriedWorkRoutes(store beads.Store) (int, error) {
-	if store == nil {
-		return 0, nil
-	}
-	// Open work is the only place a lost pool route can be recovered: closed or
-	// in-progress beads need no route restored. Scanning open beads (not the
-	// whole store) keeps the hot reconcile path cheap while still seeing both
-	// carriers of a legacy route — plain work beads and workflow roots — which a
-	// gc.kind=workflow query would miss. Mirrors sweepDetachedHandoffOrphans'
-	// open-bead scan (AllowScan acknowledges the intentional population read).
-	//
-	// Live is what makes Status:"open" mean open (gc-4zb). mapBdStatus folds
-	// bd's blocked/deferred/review/testing into Gas City's three statuses, so a
-	// blocked bead decodes with Status "open" and is indistinguishable from
-	// ready work in every beads.Bead this function can read. A cached List
-	// filters with ListQuery.Matches against that collapsed status and so hands
-	// back blocked beads; only the backing store filters on the raw status, by
-	// passing --status=open to bd. Live bypasses the CachingStore to get there.
-	// Without it a blocked root that carries gc.run_target is re-stamped on
-	// every patrol tick — the blocked-routed-reaper's recurring offenders. The
-	// workflow-root spawn path selects on gc.routed_to without re-checking
-	// status, so each re-stamp respawns a worker that drains no-op.
-	items, err := store.List(beads.ListQuery{Status: "open", AllowScan: true, Live: true})
-	if err != nil {
-		return 0, fmt.Errorf("listing open work: %w", err)
-	}
-	var (
-		restored int
-		errs     []error
-	)
-	// Resolve the authoritative, cache-bypassing read handle once. Production
-	// stores are CachingStore-wrapped (see wrapWithCachingStore), so a plain
-	// store.Get can return a cached bead that predates a cross-process claim;
-	// handles.Live reads the backing store directly. For a plain store this
-	// degrades to store.Get.
-	handles := beads.HandlesFor(store)
-	for _, b := range items {
-		route := carriedPoolRoute(b)
-		if route == "" {
-			continue
-		}
-		// Only re-route open, unassigned work: an assigned bead is already
-		// claimed. (Belt-and-braces with the Status:"open" query so the guarantee
-		// holds regardless of store-level filtering semantics.)
-		if b.Status != "open" || strings.TrimSpace(b.Assignee) != "" {
-			continue
-		}
-		// Re-read the live bead immediately before writing, through the
-		// authoritative cache-bypassing handle. The open-bead List is a snapshot;
-		// a polecat — often in another process — may have claimed this bead in the
-		// window since, which atomically flips it open->in_progress, records
-		// gc.run_target, and consumes gc.routed_to in one update (ga-sa0). A plain
-		// store.Get would go through the wrapping CachingStore and could return a
-		// stale cached copy that predates a cross-process claim not yet absorbed
-		// into this process's cache; handles.Live reads the backing store and sees
-		// the claim. A blind SetMetadata keyed on the stale snapshot would re-stamp
-		// gc.routed_to onto the now-claimed bead, undoing that consumption and
-		// handing the dispatcher a phantom pool-demand bead that flaps
-		// open<->in_progress and thrashes owners (ga-bgu). Recomputing
-		// carriedPoolRoute on the live bead also yields "" once another restore has
-		// already re-stamped it, so concurrent passes stay idempotent.
-		live, getErr := handles.Live.Get(b.ID)
-		if getErr != nil {
-			errs = append(errs, fmt.Errorf("bead %s: re-reading before route restore: %w", b.ID, getErr))
-			continue
-		}
-		if live.Status != "open" || strings.TrimSpace(live.Assignee) != "" || carriedPoolRoute(live) != route {
-			continue // claimed, closed, or already routed since the snapshot — don't clobber
-		}
-		if setErr := store.SetMetadata(b.ID, beadmeta.RoutedToMetadataKey, route); setErr != nil {
-			errs = append(errs, fmt.Errorf("bead %s: restoring gc.routed_to=%q: %w", b.ID, route, setErr))
-			continue
-		}
-		restored++
-	}
-	return restored, errors.Join(errs...)
+// routeRecoveryLaneOf returns this runtime's lane, creating it on first use so a
+// directly-constructed CityRuntime (every test, every one-shot) needs no wiring.
+func (cr *CityRuntime) routeRecoveryLaneOf() *routeRecoveryLane {
+	cr.routeRecoveryOnce.Do(func() { cr.routeRecovery = newRouteRecoveryLane() })
+	return cr.routeRecovery
 }
 
-// routeRecoveryScope pairs a bead store with a human label for logging.
-type routeRecoveryScope struct {
-	label string
-	store beads.Store
+// routeRecoveryEventProvider is the journal the delta feed tails, or nil when
+// this runtime has no controller state (every one-shot and standalone runtime).
+// A nil provider leaves the lane backstop-only, loudly, rather than pretending a
+// delta pass covers the city.
+func (cr *CityRuntime) routeRecoveryEventProvider() events.Provider {
+	if cr.cs == nil {
+		return nil
+	}
+	return cr.cs.EventProvider()
 }
 
-// recoverUnroutedWorkRoutes restores gc.routed_to from each bead's own carried
-// route across the city store and every active rig store, so ready work
-// re-enters pool demand after a controller restart without a manual `gc sling`
-// (ga-n2d.4). Best-effort: a per-store failure is logged and the remaining
-// stores still run.
+// routeRecoveryPlan resolves the work legs a route-repair pass reads.
+//
+// The leg set comes from the residency resolver rather than from a per-site
+// list: Plan(RoutedWork) is the answer to "which stores hold claimable/routed
+// work", which is precisely the surface a lost gc.routed_to makes a bead
+// invisible to. Its class-binding tail is skipped by walkRouteRecoveryLegs, for
+// the reason stated there.
+func (cr *CityRuntime) routeRecoveryPlan() (storeref.ResolvedPlan, error) {
+	topo := residencyTopologyForCity(cr.cityPath, cr.cfg, cr.cityBeadStore(), cr.routeRecoveryRigStores())
+	return storeref.Plan(storeref.RoutedWork{}, topo)
+}
+
+// routeRecoveryRigStores is the suspension FRAME for this lane: the rig legs it
+// may repair through.
+//
+// Told, not deciding — the same discipline as the census arms. A suspended rig
+// is routinely dark, and its store is an unavailableStore whose every read
+// errors; planning over it would make the pass Partial and reschedule the
+// backstop on the short retry cadence forever.
+//
+// A rig the store map holds but config no longer declares also stays out — the
+// census's rule, and the right one here: repairing an undeclared rig's routes
+// feeds pool demand for a rig nothing serves. A runtime with no config at all
+// (one-shot, standalone) has nothing declaring suspension, so every open rig is
+// serving.
+//
+// residency:allow — a constructor INPUT, not a residency answer. It filters the
+// runtime's own open-store map by the configured suspension set and hands the
+// result to residencyTopologyForCity; it consults no binding and no leg order.
+func (cr *CityRuntime) routeRecoveryRigStores() map[string]beads.Store {
+	rigs := cr.rigBeadStores() // residency:allow — constructor input to residencyTopologyForCity, not a residency answer
+	if cr.cfg == nil {
+		return rigs
+	}
+	return servingRigStores(cr.cfg, rigs, buildSuspendedRigPathsForCity(cr.cfg, cr.cityPath))
+}
+
+// recoverUnroutedWorkRoutes runs the authoritative convergence scan across every
+// work leg, restoring gc.routed_to from each bead's own carried route so ready
+// work re-enters pool demand after a controller restart without a manual
+// `gc sling` (ga-n2d.4).
+//
+// This is the BACKSTOP lane. It is called directly at startup — ga-n2d.4's
+// restart-recovery contract is exactly a startup backstop — and afterwards from
+// the background lane on cadence, never from the tick.
 func (cr *CityRuntime) recoverUnroutedWorkRoutes() {
-	scopes := []routeRecoveryScope{{label: "city", store: cr.cityBeadStore()}}
-	for name, store := range cr.rigBeadStores() {
-		scopes = append(scopes, routeRecoveryScope{label: "rig " + name, store: store})
+	cr.runRouteRecoveryBackstop(routeRecoveryBackstopStartup)
+}
+
+// runRouteRecoveryBackstop executes one authoritative pass and reports it.
+func (cr *CityRuntime) runRouteRecoveryBackstop(reason string) routeRecoveryReport {
+	lane := cr.routeRecoveryLaneOf()
+	plan, err := cr.routeRecoveryPlan()
+	if err != nil {
+		// A refused city is the one case Plan declines to answer, and its remedy
+		// is in the error. Scanning the work ledger anyway would be the answer
+		// that looks like success while reading the store the relocated classes
+		// were migrated off.
+		fmt.Fprintf(cr.stderr, "%s: route recovery: resolving work legs: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+		lane.force(routeRecoveryBackstopForced)
+		return routeRecoveryReport{lane: "backstop", reason: reason, err: err}
 	}
-	for _, sc := range scopes {
-		if sc.store == nil {
-			continue
+	report := lane.backstopPass(plan, reason)
+	lane.noteBackstopRan(time.Now(), report.partial || report.err != nil)
+	cr.logRouteRecovery(report)
+	return report
+}
+
+// recoverUnroutedWorkRoutesDelta is the tick's leg: it repairs only the beads
+// the event feed named since the last pass. A steady tick names nothing, builds
+// no plan, and issues no store read.
+func (cr *CityRuntime) recoverUnroutedWorkRoutesDelta() routeRecoveryReport {
+	lane := cr.routeRecoveryLaneOf()
+	candidates := lane.takePending()
+	if len(candidates) == 0 {
+		return routeRecoveryReport{lane: "delta"}
+	}
+	plan, err := cr.routeRecoveryPlan()
+	if err != nil {
+		fmt.Fprintf(cr.stderr, "%s: route recovery: resolving work legs: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+		lane.force(routeRecoveryBackstopForced)
+		return routeRecoveryReport{lane: "delta", candidates: len(candidates), err: err}
+	}
+	report := lane.deltaPass(plan, candidates)
+	if report.partial || report.err != nil {
+		// A leg the delta pass could not read is a leg whose convergence is now
+		// owed to the scan.
+		lane.force(routeRecoveryBackstopLegDegrade)
+	}
+	cr.logRouteRecovery(report)
+	return report
+}
+
+// startRouteRecovery arms both halves of the lane: the journal feed that makes
+// the tick's delta pass possible, and the background scan that converges what
+// the feed can miss.
+//
+// The scan is minutes of sequential remote reads on a large city — 46% of a
+// 360s tick before this slice — so it runs off the tick's critical path, the
+// same shape as the bead-event watcher and the store-maintenance loop. A nil
+// provider leaves the lane backstop-only, which startEventFeed records by
+// forcing the scan.
+func (cr *CityRuntime) startRouteRecovery(ctx context.Context, prov events.Provider) {
+	lane := cr.routeRecoveryLaneOf()
+	lane.startEventFeed(ctx, prov)
+	go func() {
+		ticker := time.NewTicker(routeRecoveryBackstopPollInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			if reason, due := lane.backstopDue(time.Now()); due {
+				cr.safeTick(func() { cr.runRouteRecoveryBackstop(reason) }, "route-recovery-backstop")
+			}
 		}
-		restored, err := restoreCarriedWorkRoutes(sc.store)
-		if err != nil {
-			fmt.Fprintf(cr.stderr, "%s: route recovery (%s): %v\n", cr.logPrefix, sc.label, err) //nolint:errcheck // best-effort stderr
-		}
-		if restored > 0 {
-			fmt.Fprintf(cr.stderr, "%s: route recovery (%s): restored gc.routed_to on %d ready bead(s) from gc.run_target\n", cr.logPrefix, sc.label, restored) //nolint:errcheck // best-effort stderr
-		}
+	}()
+}
+
+// routeRecoveryBackstopPollInterval is how often the background lane asks
+// whether the scan is due. It bounds the latency between "something forced the
+// backstop" and the scan starting; it is not the scan's cadence.
+const routeRecoveryBackstopPollInterval = time.Minute
+
+// logRouteRecovery emits the operator-facing lines. The restored line keeps its
+// pre-lane wording so an operator's grep still finds it.
+func (cr *CityRuntime) logRouteRecovery(report routeRecoveryReport) {
+	if cr.stderr == nil {
+		return
+	}
+	if report.err != nil {
+		fmt.Fprintf(cr.stderr, "%s: route recovery (%s): %v\n", cr.logPrefix, report.lane, report.err) //nolint:errcheck // best-effort stderr
+	}
+	if report.restored > 0 {
+		fmt.Fprintf(cr.stderr, "%s: route recovery (%s): restored gc.routed_to on %d ready bead(s) from gc.run_target\n", cr.logPrefix, report.lane, report.restored) //nolint:errcheck // best-effort stderr
+	}
+	if len(report.flapping) > 0 {
+		// The loud half of the flap bound: a route that keeps needing restoring
+		// is a sibling lane clearing it, and this lane has stopped writing.
+		flap := fmt.Sprintf("STOPPED re-stamping %d flapping bead(s) after %d restores each (%s); another lane is clearing gc.routed_to — see `gc doctor` route-recovery-quarantine",
+			len(report.flapping), routeRecoveryFlapLimit, strings.Join(report.flapping, " "))
+		fmt.Fprintf(cr.stderr, "%s: route recovery (%s): %s\n", cr.logPrefix, report.lane, flap) //nolint:errcheck // best-effort stderr
+	}
+	if report.quarantined > 0 {
+		fmt.Fprintf(cr.stderr, "%s: route recovery (%s): quarantined %d bead(s) for operator review (`gc doctor` route-recovery-quarantine)\n", cr.logPrefix, report.lane, report.quarantined) //nolint:errcheck // best-effort stderr
 	}
 }
