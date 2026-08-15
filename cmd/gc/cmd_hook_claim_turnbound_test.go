@@ -294,6 +294,69 @@ func TestHookClaimWindowExemptsExistingAssignment(t *testing.T) {
 	}
 }
 
+// TestHookClaimSlowWorkQueryStillClaimsWithinDerivedWindow pins the reconciliation
+// of the claim window with the raised work-query budget. A fresh routed claim whose
+// federated work query legitimately runs long — 70s here, the measured loaded worst
+// case and well past the old flat 45s window — must still CLAIM, not trip
+// execution.claim_window_expired. Before hookClaimWindowDefault was derived from
+// hookWorkQueryTimeout + hookClaimMutationTimeout, raising the query budget was
+// inert on the --claim path: the read succeeded but the fence, anchored at
+// invocation start and charged only 45s, refused the claim it had just found.
+//
+// InvokedAt and ClaimWindow are left unset so applyDefaults derives the window from
+// the production hookClaimWindowDefault — the exact value under test. Under the old
+// flat 45s default this claim was refused; the differently-failing control is
+// TestHookClaimWindowExpiredRefusesFreshClaim, which still refuses a claim whose age
+// exceeds an explicit window.
+func TestHookClaimSlowWorkQueryStillClaimsWithinDerivedWindow(t *testing.T) {
+	rec := &turnBoundClaimRecorder{}
+	ops := rec.ops(t, turnBoundRoutedWork)
+	// A controlled clock rather than a real sleep: the work query "spends" 70s
+	// before returning routed work. applyDefaults stamps InvokedAt at the pre-read
+	// clock, so by the time the claim tier checks the window the invocation age is
+	// 70s — past 45s, inside the derived budget.
+	clk := time.Now()
+	ops.Now = func() time.Time { return clk }
+	ops.Runner = func(string, string) (string, error) {
+		clk = clk.Add(70 * time.Second)
+		return turnBoundRoutedWork, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("query", "/rig", hookClaimOptions{
+		Assignee:     "worker-1",
+		RouteTargets: []string{"worker"},
+		JSON:         true,
+	}, ops, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("code = %d, want 0: a slow-but-alive read must still claim; stderr=%s", code, stderr.String())
+	}
+	if len(rec.claims) != 1 || rec.claims[0] != "work-1" {
+		t.Fatalf("claims = %v, want [work-1]: the raised work-query budget must reach the claim", rec.claims)
+	}
+	if len(rec.windowExpired) != 0 {
+		t.Fatalf("claim_window_expired fired for a read inside the derived window: %+v", rec.windowExpired)
+	}
+	result := decodeTurnBoundResult(t, stdout.String())
+	if result.Action != "work" || result.BeadID != "work-1" {
+		t.Fatalf("result = %+v, want action=work bead=work-1", result)
+	}
+}
+
+// TestHookClaimWindowDefaultCoversWorkQueryBudget guards the derivation itself: the
+// default claim window must leave a full claim-mutation margin after an honest
+// full-budget work query, or the fence would again refuse a claim the raised query
+// just surfaced. Pinning the relation (not the literal 160s) keeps it correct if
+// either budget is retuned.
+func TestHookClaimWindowDefaultCoversWorkQueryBudget(t *testing.T) {
+	if hookClaimWindowDefault < hookWorkQueryTimeout+hookClaimMutationTimeout {
+		t.Fatalf("hookClaimWindowDefault = %s, want >= hookWorkQueryTimeout(%s) + hookClaimMutationTimeout(%s); "+
+			"a smaller window refuses a claim the full-budget work query just found",
+			hookClaimWindowDefault, hookWorkQueryTimeout, hookClaimMutationTimeout)
+	}
+}
+
 // TestHookClaimWindowBoundsTheClaimWriteChild pins the ctx half of F-B: the
 // claim-write child's own deadline is the REMAINING window, not the flat
 // mutation timeout. Without it a claim started at second 44 of a 45s window

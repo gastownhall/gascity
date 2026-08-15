@@ -312,7 +312,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		// same fence over the same predicate — it is the seam every ops-level
 		// caller funnels through — but by the time it runs, the federated store
 		// selection has already spent a work query bounded by hookWorkQueryTimeout
-		// (60s), and a provider callback's whole budget is 15s
+		// (150s), and a provider callback's whole budget is 15s
 		// (defaultHookRunTimeout). Refusing here keeps a callback lane cheap and
 		// makes its refusal something the provider actually receives rather than
 		// something its timeout truncates.
