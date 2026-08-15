@@ -451,6 +451,83 @@ scope = "rig"
 	}
 }
 
+// TestLoadWithIncludes_WildcardPatchKeepsCityBeforeRigPrecedence is the
+// regression for the wildcard partitioning bug: a city-level rig="*" patch
+// whose Name also matches an implicit provider-derived agent used to be fully
+// deferred until AFTER rig overrides ran, so it clobbered the rig override and
+// reversed city-before-rig precedence.
+//
+// The agent is named "claude" — the same name as the provider — so it is BOTH
+// an already-present rig-pack agent (proj/gs.claude) AND an implicit-agent name.
+// The wildcard patch must apply in the normal city patch phase (so the rig
+// override, applied later, still wins on the field they share) while ALSO
+// deferring to the injected implicit-agent tail. Assertions: the wildcard ran
+// (it set Nudge, which the rig override does not touch) AND the rig override
+// won (Suspended=false, set after the wildcard's Suspended=true).
+func TestLoadWithIncludes_WildcardPatchKeepsCityBeforeRigPrecedence(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "city.toml", `
+[workspace]
+name = "test"
+
+[providers.claude]
+base = "builtin:claude"
+
+[[rigs]]
+name = "proj"
+path = "/tmp/proj"
+
+[rigs.imports.gs]
+source = "./packs/gastown"
+
+[[rigs.patches]]
+agent = "claude"
+suspended = false
+
+[[patches.agent]]
+name = "claude"
+rig = "*"
+suspended = true
+nudge = "city wildcard applied"
+`)
+	writeFile(t, dir, "packs/gastown/pack.toml", `
+[pack]
+name = "gastown"
+schema = 2
+
+[[agent]]
+name = "claude"
+provider = "claude"
+scope = "rig"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	var claude *Agent
+	for i := range cfg.Agents {
+		if cfg.Agents[i].QualifiedName() == "proj/gs.claude" {
+			claude = &cfg.Agents[i]
+			break
+		}
+	}
+	if claude == nil {
+		names := make([]string, 0, len(cfg.Agents))
+		for _, a := range cfg.Agents {
+			names = append(names, a.QualifiedName())
+		}
+		t.Fatalf("agent proj/gs.claude not found in merged config; agents: %v", names)
+	}
+	if claude.Nudge != "city wildcard applied" {
+		t.Errorf("claude.Nudge = %q, want city wildcard patch to apply in the normal city phase", claude.Nudge)
+	}
+	if claude.Suspended {
+		t.Errorf("claude.Suspended = true, want false (rig override must win after the city wildcard)")
+	}
+}
+
 func TestLoadWithIncludes_ProvenanceUsesDeferredRigPatchFinalIdentity(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "city.toml", `
