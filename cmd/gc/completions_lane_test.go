@@ -7,6 +7,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 )
 
@@ -94,5 +95,42 @@ func TestCompletionsLaneOverflowForcesTheSweep(t *testing.T) {
 	}
 	if got := small.takePending(); len(got) != 1 || got[0] != "gcg-root-a" {
 		t.Fatalf("pending = %v, want [gcg-root-a]", got)
+	}
+}
+
+// TestCompletionReconcileInputsNarrowToTheInfraStoreOnTheRuntimePlane is the
+// operator invariant on the completions lane (ga-l7jdg, bd memory
+// gascity-runtime-infra-store-invariant): city operations read the infra/class
+// store only, so the tick's delta pass gets ONE leg — the graph class store —
+// while the off-tick convergence lane keeps the whole fan it must converge.
+//
+// resolveGraphStore answers "the binding when the graph class is relocated, the
+// city store otherwise", so the narrowing needs no special case for a
+// single-store city: there the work store IS the infra store, and the runtime
+// plane's one leg is the right one.
+func TestCompletionReconcileInputsNarrowToTheInfraStoreOnTheRuntimePlane(t *testing.T) {
+	cs := &controllerState{
+		cfg:           &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		cityBeadStore: beads.NewMemStore(),
+		beadStores:    map[string]beads.Store{"alpha": beads.NewMemStore(), "beta": beads.NewMemStore()},
+		eventProv:     events.NewFake(),
+	}
+
+	ep, runtimeFan := cs.completionReconcileInputs(runtimePlane)
+	if ep == nil {
+		t.Fatal("no event provider; the fixture cannot express the invariant")
+	}
+	if len(runtimeFan) != 1 {
+		t.Fatalf("the runtime plane fans out to %d store(s), want 1 (the infra/class store)", len(runtimeFan))
+	}
+	// Control: the convergence lane keeps every store, so "one leg" above is a
+	// narrowing and not a fan that collapsed for some other reason.
+	_, reconcileFan := cs.completionReconcileInputs(reconcilePlane)
+	if len(reconcileFan) <= len(runtimeFan) {
+		t.Fatalf("the convergence lane fans out to %d store(s) and the runtime plane to %d; the planes are not distinguishable",
+			len(reconcileFan), len(runtimeFan))
+	}
+	if len(reconcileFan) != 3 {
+		t.Fatalf("the convergence lane fans out to %d store(s), want 3 (city work + two rigs)", len(reconcileFan))
 	}
 }

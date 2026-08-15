@@ -7,8 +7,11 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/executionevent"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // The tick's read budget, as a golden table.
@@ -246,4 +249,56 @@ func budgetCompletionsCorpusOfSize(t *testing.T, n int) (*latencyStore, events.P
 		}
 	}
 	return &latencyStore{Store: backing}, events.NewFake(), rootIDs
+}
+
+// TestSteadyTickLedgerRoundTripBudgetIsZero is the operator invariant as a
+// budget row (ga-l7jdg, bd memory gascity-runtime-infra-store-invariant).
+//
+// The other rows in this file count round trips per leg. This one counts them
+// per STORE CLASS, because the invariant is not "the tick is fast" but "the tick
+// does not touch the work ledger at all". A ledger read on the runtime path is a
+// misrouting bug by definition; a budget that only totals round trips would let
+// one back in as long as it were cheap enough, and on maintainer-city it never
+// is — that leg is 5.4s each.
+//
+// Both halves of the invariant are asserted: the ledger is zero on a steady tick
+// AND on a tick that has work to do, and the binding is what answers instead.
+func TestSteadyTickLedgerRoundTripBudgetIsZero(t *testing.T) {
+	newCity := func(t *testing.T) (storeref.ResolvedPlan, *latencyStore, *latencyStore) {
+		t.Helper()
+		ledger := &latencyStore{Store: beads.NewMemStoreFrom(0, []beads.Bead{unroutedWorkBead("CW-1")}, nil)}
+		binding := &latencyStore{Store: beads.NewMemStoreFrom(0, []beads.Bead{unroutedWorkBead("GB-1")}, nil)}
+		topo := assembleResidencyTopology(&config.City{}, ledger, nil,
+			[]storeref.ClassBinding{{
+				Classes: []coordclass.Class{coordclass.ClassGraph},
+				Leg:     storeref.Leg{Ref: storeref.ClassRef([]coordclass.Class{coordclass.ClassGraph}), Store: binding},
+			}}, nil)
+		plan, err := storeref.Plan(storeref.RoutedWork{}, topo)
+		if err != nil {
+			t.Fatalf("Plan(RoutedWork): %v", err)
+		}
+		return plan, ledger, binding
+	}
+
+	// A steady tick names nothing and touches nothing.
+	plan, ledger, binding := newCity(t)
+	if report := newRouteRecoveryLane().deltaPass(plan, nil); report.legReads != 0 {
+		t.Fatalf("a steady tick reported %d leg read(s), want 0", report.legReads)
+	}
+	if ledger.roundTrips != 0 || binding.roundTrips != 0 {
+		t.Fatalf("a steady tick issued ledger=%d binding=%d round trip(s), want 0 and 0", ledger.roundTrips, binding.roundTrips)
+	}
+
+	// A tick WITH work still owes the ledger nothing: the binding answers.
+	plan, ledger, binding = newCity(t)
+	report := newRouteRecoveryLane().deltaPass(plan, []string{"CW-1", "GB-1"})
+	if ledger.roundTrips != 0 {
+		t.Fatalf("a working tick issued %d ledger round trip(s), want 0 — that is %v of tick at maintainer-city's RTT",
+			ledger.roundTrips, time.Duration(ledger.roundTrips)*5400*time.Millisecond)
+	}
+	// Control: the binding did the work, so the ledger zero is a routing fact
+	// and not a pass that declined to run.
+	if binding.roundTrips == 0 || report.restored != 1 {
+		t.Fatalf("binding round trips=%d restored=%d, want non-zero and 1", binding.roundTrips, report.restored)
+	}
 }

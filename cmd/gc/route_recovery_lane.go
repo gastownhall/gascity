@@ -374,6 +374,32 @@ func watchJournalForDeltaLanes(ctx context.Context, prov events.Provider, onGap 
 	}()
 }
 
+// storePlane names WHICH legs of a resolved plan a pass is allowed to read.
+//
+// # The operator invariant (2026-08-15, ga-l7jdg)
+//
+// Every bd operation on the RUNTIME plane — ticks, hooks, claims, sweeps,
+// census — hits the infra/class binding ONLY. A work-ledger leg on the runtime
+// path is a misrouting bug by definition, not a cost to amortize: it is why a
+// claim needs a 240s window and why this leg cost 185s of a 360s tick. The
+// remote work ledger serves backlog and task management, which are not the
+// runtime plane.
+//
+// So the plane is a property of the CALLER, and the two lanes of this file sit
+// on opposite sides of it. The tick's delta pass is runtime; the rare,
+// separately-scheduled convergence scan is not, which is the only reason it may
+// still consult the ledger at all — and it does so off the tick, on its own
+// cadence, never inline.
+type storePlane int
+
+const (
+	// runtimePlane is city operations. Infra/class binding only.
+	runtimePlane storePlane = iota
+	// reconcilePlane is the rare off-tick convergence lane, which may read the
+	// work ledger because converging it is the whole reason it exists.
+	reconcilePlane
+)
+
 // routeRecoveryLeg is one plan leg the lane may repair through, with the label
 // the operator log has always spelled it with.
 type routeRecoveryLeg struct {
@@ -382,38 +408,74 @@ type routeRecoveryLeg struct {
 }
 
 // routeRecoveryLegLabel spells a plan leg the way the pre-lane log line did:
-// "city" for the work ledger, "rig <name>" for a rig.
+// "city" for the work ledger, "rig <name>" for a rig, and the class ref itself
+// for a binding.
 func routeRecoveryLegLabel(ref storeref.StoreRef) string {
+	if storeref.IsClassRef(string(ref)) {
+		return string(ref)
+	}
 	if rig, ok := storeref.ScopeRigContext(string(ref)); ok && rig != "" {
 		return "rig " + rig
 	}
 	return "city"
 }
 
-// walkRouteRecoveryLegs runs visit over the plan's WORK legs in the resolver's
-// order and under the resolver's per-leg error policy.
+// walkRouteRecoveryLegs runs visit over the legs THIS PLANE may read, in the
+// resolver's order and under the resolver's per-leg error policy.
 //
-// # Why the class bindings are skipped, deliberately and visibly
+// # Which legs each plane gets, and why the split is here rather than in Plan()
 //
-// Plan(RoutedWork) puts every relocated class binding last, and this lane does
-// not read them. It is the same choice RoleShadow's doc names for a consumer
-// whose pre-resolver list did not include a family of legs: it either plans over
-// a topology without them or drops them, and its slice pins which. Dropping is
-// what this slice pins, because the graph binding holds graph.v2 workflow roots
-// and carriedPoolRoute's legacy-workflow arm would treat one carrying
-// gc.run_target as a recoverable pool route. Re-stamping gc.routed_to there
-// respawns a worker that drains no-op on every pass — the exact hazard
-// restoreCarriedWorkRoutes' gc-4zb comment describes. Widening this lane onto
-// the binding is a behavior change that belongs to the demand slice, with its
-// own evidence; a latency slice must not make it silently.
-func walkRouteRecoveryLegs(plan storeref.ResolvedPlan, visit func(routeRecoveryLeg) error) (partial bool, err error) {
+// The runtime plane reads the class bindings and nothing else — the operator
+// invariant above. A city that relocates no class has no binding, and there its
+// work store IS its infra store, so the plan's work leg is the runtime leg: the
+// rule degrades to "the only store there is" rather than to "no store at all",
+// which would silently disable the delta lane on every single-store city.
+//
+// The reconcile plane is the mirror image: work and rigs, no binding. It is the
+// lane that converges the ledger, and the binding is already the runtime plane's
+// to keep fresh.
+//
+// # What reading the binding means for a workflow root
+//
+// carriedPoolRoute's legacy arm restores gc.routed_to on a gc.kind=workflow root
+// whose gc.run_target is set and gc.routed_to empty — the pre-ga-eld2x relic
+// shape, and the graph binding is where those roots live. That is not a new
+// hazard, it is the same repair `gc doctor --fix`'s run-target-routed-to-backfill
+// already performs there, and it is the operator ruling's whole point: routed
+// work lives ONLY in the graph store, so the binding is where a lost route can
+// be lost. The re-stamp-a-blocked-root failure (gc-4zb) is guarded where it
+// always was — the Live raw-status filter on the open read, not by which store
+// is asked.
+//
+// Expressing the invariant as a leg filter here, rather than as a new intent in
+// internal/storeref, is deliberate. Plan(RoutedWork) orders the binding LAST on
+// purpose (#5148 co-residence), and a runtime-plane intent that structurally
+// refuses ledger legs is the resolver's own relevance-descriptor work — the S4
+// surface this slice was told not to grow. TODO(ga-l7jdg/ga-qdt5y): move this
+// refusal into Plan() when that descriptor lands, so a runtime-plane caller
+// cannot even be HANDED a ledger leg.
+func walkRouteRecoveryLegs(plan storeref.ResolvedPlan, plane storePlane, visit func(routeRecoveryLeg) error) (partial bool, err error) {
+	bindingOnly := plane == runtimePlane && plan.TouchesBinding()
 	result, walkErr := storeref.Walk(plan, func(leg storeref.Leg) (bool, error) {
-		if storeref.IsClassRef(string(leg.Ref)) || leg.Store == nil {
+		if leg.Store == nil || !planeReadsLeg(plane, leg.Ref, bindingOnly) {
 			return false, nil
 		}
 		return false, visit(routeRecoveryLeg{label: routeRecoveryLegLabel(leg.Ref), store: leg.Store})
 	})
 	return result.Partial, walkErr
+}
+
+// planeReadsLeg is the per-leg half of the invariant.
+func planeReadsLeg(plane storePlane, ref storeref.StoreRef, bindingOnly bool) bool {
+	isBinding := storeref.IsClassRef(string(ref))
+	if plane == runtimePlane {
+		// Binding-only where a binding exists; otherwise the single-store city's
+		// work store, which is its infra store.
+		return isBinding || !bindingOnly
+	}
+	// The convergence lane owns the ledger and the rigs. The binding is the
+	// runtime plane's, and re-reading it here would only duplicate that work.
+	return !isBinding
 }
 
 // deltaPass repairs only the beads the journal named since the last pass.
@@ -426,7 +488,7 @@ func (l *routeRecoveryLane) deltaPass(plan storeref.ResolvedPlan, candidates []s
 		return report
 	}
 	var errs []error
-	partial, walkErr := walkRouteRecoveryLegs(plan, func(leg routeRecoveryLeg) error {
+	partial, walkErr := walkRouteRecoveryLegs(plan, runtimePlane, func(leg routeRecoveryLeg) error {
 		rows, reads, err := liveRouteCandidates(leg.store, candidates)
 		report.legReads += reads
 		if err != nil {
@@ -460,9 +522,16 @@ func (l *routeRecoveryLane) deltaPass(plan storeref.ResolvedPlan, candidates []s
 // read of every work leg, with the per-candidate Get fan-out replaced by one
 // batched IN-list re-verify per leg.
 func (l *routeRecoveryLane) backstopPass(plan storeref.ResolvedPlan, reason string) routeRecoveryReport {
+	return l.backstopPassOnPlane(plan, reason, reconcilePlane)
+}
+
+// backstopPassOnPlane is the scan restricted to one plane's legs. Only the
+// convergence lane's plane is used in production; the parameter exists so the
+// invariant can be asserted from both sides of it.
+func (l *routeRecoveryLane) backstopPassOnPlane(plan storeref.ResolvedPlan, reason string, plane storePlane) routeRecoveryReport {
 	report := routeRecoveryReport{lane: "backstop", reason: reason}
 	var errs []error
-	partial, walkErr := walkRouteRecoveryLegs(plan, func(leg routeRecoveryLeg) error {
+	partial, walkErr := walkRouteRecoveryLegs(plan, plane, func(leg routeRecoveryLeg) error {
 		legReport := l.backstopLeg(leg.store)
 		report.candidates += legReport.candidates
 		report.restored += legReport.restored

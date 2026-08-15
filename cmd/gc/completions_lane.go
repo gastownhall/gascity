@@ -210,7 +210,7 @@ func (cr *CityRuntime) runCompletionsSweepChunk(backstop *executionevent.Complet
 	if cr.cs == nil {
 		return executionevent.CompletionBackstopResult{SweepComplete: true}
 	}
-	ep, graphStores := cr.cs.completionReconcileInputs()
+	ep, graphStores := cr.cs.completionReconcileInputs(reconcilePlane)
 	if ep == nil {
 		return executionevent.CompletionBackstopResult{}
 	}

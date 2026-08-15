@@ -487,54 +487,123 @@ func TestRouteRecoveryBoundsRestampsAndReportsAFlap(t *testing.T) {
 	}
 }
 
-// TestRouteRecoveryReadsTheResolversWorkLegsAndSkipsTheClassBinding pins the
-// leg set as a resolver answer, and pins the one deliberate subtraction from it.
+// TestRouteRecoveryRuntimePlaneReadsTheBindingAndNeverTheLedger is the operator
+// invariant as a test (ga-l7jdg, bd memory gascity-runtime-infra-store-invariant).
 //
-// Plan(RoutedWork) is where "which stores hold routed work" is decided, so the
-// work leg and the rig legs arrive in the resolver's order under the resolver's
-// error policy. The class binding is in the plan and is NOT read: it holds
-// graph.v2 workflow roots, and carriedPoolRoute's legacy-workflow arm would
-// treat one carrying gc.run_target as a recoverable pool route — re-stamping
-// gc.routed_to there respawns a worker that drains no-op every pass. Widening
-// this lane onto the binding is a demand-slice decision with its own evidence,
-// and a latency slice must not make it silently.
-func TestRouteRecoveryReadsTheResolversWorkLegsAndSkipsTheClassBinding(t *testing.T) {
-	work := &countingRouteStore{Store: beads.NewMemStoreFrom(0, []beads.Bead{unroutedWorkBead("CW-1")}, nil)}
-	rig := &countingRouteStore{Store: beads.NewMemStoreFrom(0, []beads.Bead{unroutedWorkBead("RW-1")}, nil)}
-	binding := &countingRouteStore{Store: beads.NewMemStoreFrom(0, []beads.Bead{unroutedWorkBead("GB-1")}, nil)}
+// Every bd operation on the runtime plane — ticks, hooks, claims, sweeps —
+// touches the infra/class binding ONLY. A work-ledger leg on the tick is a
+// misrouting bug by definition, not a cost to amortize; it is why this leg cost
+// 185s of a 360s tick in the first place. So the tick's delta pass reads the
+// binding and the ledger sees zero round trips, and the mirror-image convergence
+// lane — off the tick, on its own cadence — is the only thing that reads the
+// ledger at all.
+//
+// Each half is the other's control: "the ledger was not read" from a lane that
+// reads nothing would be indistinguishable from correctness, and the second
+// assertion in each plane is what makes it distinguishable.
+func TestRouteRecoveryRuntimePlaneReadsTheBindingAndNeverTheLedger(t *testing.T) {
+	newPlan := func(t *testing.T) (storeref.ResolvedPlan, *countingRouteStore, *countingRouteStore, *countingRouteStore) {
+		t.Helper()
+		work := &countingRouteStore{Store: beads.NewMemStoreFrom(0, []beads.Bead{unroutedWorkBead("CW-1")}, nil)}
+		rig := &countingRouteStore{Store: beads.NewMemStoreFrom(0, []beads.Bead{unroutedWorkBead("RW-1")}, nil)}
+		binding := &countingRouteStore{Store: beads.NewMemStoreFrom(0, []beads.Bead{unroutedWorkBead("GB-1")}, nil)}
+		topo := assembleResidencyTopology(
+			&config.City{Rigs: []config.Rig{{Name: "gascity", Path: "rigs/gascity"}}},
+			work,
+			map[string]beads.Store{"gascity": rig},
+			[]storeref.ClassBinding{{
+				Classes: []coordclass.Class{coordclass.ClassGraph},
+				Leg:     storeref.Leg{Ref: storeref.ClassRef([]coordclass.Class{coordclass.ClassGraph}), Store: binding},
+			}},
+			nil,
+		)
+		plan, err := storeref.Plan(storeref.RoutedWork{}, topo)
+		if err != nil {
+			t.Fatalf("Plan(RoutedWork): %v", err)
+		}
+		if !plan.TouchesBinding() {
+			t.Fatal("the plan carries no binding leg; this fixture cannot express the invariant")
+		}
+		return plan, work, rig, binding
+	}
 
-	topo := assembleResidencyTopology(
-		&config.City{Rigs: []config.Rig{{Name: "gascity", Path: "rigs/gascity"}}},
-		work,
-		map[string]beads.Store{"gascity": rig},
+	t.Run("runtime plane", func(t *testing.T) {
+		plan, work, rig, binding := newPlan(t)
+		report := newRouteRecoveryLane().backstopPassOnPlane(plan, routeRecoveryBackstopCadence, runtimePlane)
+		if got := work.reads() + rig.reads(); got != 0 {
+			t.Fatalf("the runtime plane issued %d work-ledger/rig round trip(s), want 0 — a ledger leg on the tick is a misrouting bug", got)
+		}
+		// Control: it read the binding and repaired what lives there, so the zero
+		// above is a routing statement and not a lane that does nothing.
+		if binding.reads() == 0 || report.restored != 1 {
+			t.Fatalf("binding reads=%d restored=%d, want a read and one repair", binding.reads(), report.restored)
+		}
+		if got := mustRoutedTo(t, binding, "GB-1"); got != routeRecoveryTestPool {
+			t.Fatalf("GB-1 gc.routed_to = %q, want %q", got, routeRecoveryTestPool)
+		}
+		if got := mustRoutedTo(t, work, "CW-1"); got != "" {
+			t.Fatalf("CW-1 gc.routed_to = %q, want empty on the runtime plane", got)
+		}
+	})
+
+	t.Run("reconcile plane", func(t *testing.T) {
+		plan, work, rig, binding := newPlan(t)
+		report := newRouteRecoveryLane().backstopPassOnPlane(plan, routeRecoveryBackstopCadence, reconcilePlane)
+		if work.reads() == 0 || rig.reads() == 0 || report.restored != 2 {
+			t.Fatalf("work reads=%d rig reads=%d restored=%d, want both legs read and both repaired", work.reads(), rig.reads(), report.restored)
+		}
+		// Control: the convergence lane leaves the binding to the runtime plane,
+		// so the two lanes do not both pay for the same rows.
+		if binding.reads() != 0 {
+			t.Fatalf("the convergence lane read the binding %d time(s), want 0", binding.reads())
+		}
+	})
+}
+
+// TestRouteRecoveryDeltaPassRefusesTheLedgerLeg pins the invariant on the lane
+// the tick actually calls, not just on the plane helper.
+func TestRouteRecoveryDeltaPassRefusesTheLedgerLeg(t *testing.T) {
+	work := &countingRouteStore{Store: beads.NewMemStoreFrom(0, []beads.Bead{unroutedWorkBead("CW-1")}, nil)}
+	binding := &countingRouteStore{Store: beads.NewMemStoreFrom(0, []beads.Bead{unroutedWorkBead("GB-1")}, nil)}
+	topo := assembleResidencyTopology(&config.City{}, work, nil,
 		[]storeref.ClassBinding{{
 			Classes: []coordclass.Class{coordclass.ClassGraph},
 			Leg:     storeref.Leg{Ref: storeref.ClassRef([]coordclass.Class{coordclass.ClassGraph}), Store: binding},
-		}},
-		nil,
-	)
+		}}, nil)
 	plan, err := storeref.Plan(storeref.RoutedWork{}, topo)
 	if err != nil {
 		t.Fatalf("Plan(RoutedWork): %v", err)
 	}
-	if !plan.TouchesBinding() {
-		t.Fatal("the plan carries no binding leg; this test is asserting a subtraction from nothing")
-	}
 
-	report := newRouteRecoveryLane().backstopPass(plan, routeRecoveryBackstopCadence)
-	if report.restored != 2 {
-		t.Fatalf("backstop restored %d, want 2 (the work leg and the rig leg)", report.restored)
+	lane := newRouteRecoveryLane()
+	report := lane.deltaPass(plan, []string{"CW-1", "GB-1"})
+	if work.reads() != 0 {
+		t.Fatalf("the delta pass issued %d work-ledger round trip(s), want 0", work.reads())
 	}
-	// Control: the two legs this lane DOES read were read, so "the binding was
-	// not read" is not the answer a lane that read nothing would also give.
-	if work.reads() == 0 || rig.reads() == 0 {
-		t.Fatalf("work reads=%d rig reads=%d, want both non-zero", work.reads(), rig.reads())
+	// Control: the binding-resident candidate WAS repaired, so the zero above is
+	// the ledger being refused rather than the pass being skipped.
+	if report.restored != 1 || binding.reads() == 0 {
+		t.Fatalf("delta restored %d with %d binding read(s), want 1 and non-zero", report.restored, binding.reads())
 	}
-	if binding.reads() != 0 {
-		t.Fatalf("the class binding was read %d time(s), want 0", binding.reads())
+}
+
+// TestRouteRecoverySingleStoreCityKeepsItsOnlyLeg guards the degradation the
+// invariant must not break: a city that relocates no class has no binding, and
+// there the work store IS the infra store. Reading "bindings only" literally
+// would silently disable the delta lane on every such city.
+func TestRouteRecoverySingleStoreCityKeepsItsOnlyLeg(t *testing.T) {
+	work := &countingRouteStore{Store: beads.NewMemStoreFrom(0, []beads.Bead{unroutedWorkBead("CW-1")}, nil)}
+	topo := assembleResidencyTopology(&config.City{}, work, nil, nil, nil)
+	plan, err := storeref.Plan(storeref.RoutedWork{}, topo)
+	if err != nil {
+		t.Fatalf("Plan(RoutedWork): %v", err)
 	}
-	if got := mustRoutedTo(t, binding, "GB-1"); got != "" {
-		t.Fatalf("GB-1 gc.routed_to = %q, want empty — the lane wrote to the graph binding", got)
+	if plan.TouchesBinding() {
+		t.Fatal("the single-store fixture grew a binding; it is not testing the degradation")
+	}
+	report := newRouteRecoveryLane().deltaPass(plan, []string{"CW-1"})
+	if report.restored != 1 {
+		t.Fatalf("delta restored %d on a single-store city, want 1", report.restored)
 	}
 }
 
@@ -577,7 +646,7 @@ func TestRouteRecoveryAgreesWithDemandAndSweepOnTheWorkLegs(t *testing.T) {
 	}
 
 	var visited []string
-	if _, err := walkRouteRecoveryLegs(demand, func(leg routeRecoveryLeg) error {
+	if _, err := walkRouteRecoveryLegs(demand, reconcilePlane, func(leg routeRecoveryLeg) error {
 		visited = append(visited, leg.label)
 		return nil
 	}); err != nil {

@@ -68,8 +68,9 @@ func (cr *CityRuntime) routeRecoveryEventProvider() events.Provider {
 // The leg set comes from the residency resolver rather than from a per-site
 // list: Plan(RoutedWork) is the answer to "which stores hold claimable/routed
 // work", which is precisely the surface a lost gc.routed_to makes a bead
-// invisible to. Its class-binding tail is skipped by walkRouteRecoveryLegs, for
-// the reason stated there.
+// invisible to. Which of those legs a given pass may READ is the plane's
+// business, and walkRouteRecoveryLegs owns it: the tick reads the infra/class
+// binding only, the off-tick convergence lane reads the ledger and the rigs.
 func (cr *CityRuntime) routeRecoveryPlan() (storeref.ResolvedPlan, error) {
 	cfg := cr.serviceConfigSnapshot()
 	topo := residencyTopologyForCity(cr.cityPath, cfg, cr.cityBeadStore(), cr.routeRecoveryRigStores(cfg))
