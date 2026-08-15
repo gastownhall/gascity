@@ -1764,7 +1764,19 @@ func updateMetadataAndClose(store beads.Store, beadID string, metadata map[strin
 		Status:   &status,
 		Metadata: metadata,
 	}); err != nil {
-		return err
+		// beads >= v63 rejects a non-force `update --status closed` on a bead
+		// still blocked by an open dependency (storage.ErrCloseBlocked) instead
+		// of silently leaving it open. In dispatcher convergence the blocker is
+		// a peer control bead being closed in the same pass and the dispatcher
+		// is the closing authority, so the combined update-close having failed,
+		// re-apply the metadata on its own (a metadata-only update is not gated)
+		// and fall through to the force close below. The error surfaced through
+		// BdStore.Update is a generic wrapped subprocess error the dispatcher
+		// cannot classify, so any failure of the combined call takes this path;
+		// if the metadata re-apply also fails, that error is returned.
+		if metaErr := store.Update(beadID, beads.UpdateOpts{Metadata: metadata}); metaErr != nil {
+			return metaErr
+		}
 	}
 	bead, err := store.Get(beadID)
 	if err != nil {
