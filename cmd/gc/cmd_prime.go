@@ -213,7 +213,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 		//
 		// Explicit `gc prime` (no --hook) is untouched: a human asking for the
 		// prompt still gets it.
-		if !primeHookHasManagedIdentity() {
+		if !hookHasManagedIdentity() {
 			writePrimePromptWithFormat(stdout, "", "", "", hookMode, hookFormat, false, "", nil)
 			return 0
 		}
@@ -524,12 +524,12 @@ func primeHookSessionStart(ctx primeHookContext) bool {
 	return strings.TrimSpace(ctx.HookEventName) == "SessionStart"
 }
 
-// primeHookIdentityEnv are the environment markers that show gc, rather than a
+// hookIdentityEnv are the environment markers that show gc, rather than a
 // human, started the process a hook is running inside. gc's session lifecycle
 // sets the session and agent variables and its managed hook wrappers set
 // GC_MANAGED_SESSION_HOOK, so none of them appear in a provider a human
 // launched themselves — even in a directory gc has staged hook overlays into.
-var primeHookIdentityEnv = []string{
+var hookIdentityEnv = []string{
 	"GC_SESSION_ID",
 	"GC_SESSION_NAME",
 	"GC_ALIAS",
@@ -538,14 +538,15 @@ var primeHookIdentityEnv = []string{
 	managedSessionHookEnv,
 }
 
-// primeHookHasManagedIdentity reports whether this process carries any gc
-// identity. It deliberately asks the weaker question than
+// hookHasManagedIdentity reports whether this process carries any gc
+// identity. Shared by every hook-injection entry point (prime --hook,
+// mail check --inject, nudge drain --inject). It deliberately asks the weaker question than
 // primeHookHasLiveManagedSession: not "is there a live session bead" but "did
 // gc start this at all", so real hook flows that legitimately have no session
 // bead yet (manual aliases, template fallbacks, strict-mode validation) are not
 // mistaken for a human-launched provider.
-func primeHookHasManagedIdentity() bool {
-	for _, key := range primeHookIdentityEnv {
+func hookHasManagedIdentity() bool {
+	for _, key := range hookIdentityEnv {
 		if strings.TrimSpace(os.Getenv(key)) != "" {
 			return true
 		}
@@ -712,7 +713,7 @@ func persistPrimeHookProviderSessionKey(hookProviderSessionID string, stderr io.
 		// UI for a session that was never Gas City's to begin with. Keep the
 		// diagnostic only where managed intent is evident, which is where a
 		// missing GC_SESSION_ID really is broken.
-		if primeHookHasManagedIdentity() {
+		if hookHasManagedIdentity() {
 			warn("GC_SESSION_ID is empty")
 		}
 		return
