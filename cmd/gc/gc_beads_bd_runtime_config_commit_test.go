@@ -85,26 +85,43 @@ exit 0
 	}
 }
 
-func TestEnsureBdRuntimeConfigValue_CommitsScopedToConfigTable(t *testing.T) {
-	t.Parallel()
-	if _, err := exec.LookPath("bash"); err != nil {
+// runEnsureBdRuntimeConfigScript runs ensure_bd_runtime_issue_prefix against
+// the fake dolt binary once, with any scenario-specific environment appended
+// on top of the baseline set. The three scenario tests below all funnel
+// through this single exec.Command call site rather than each constructing
+// their own -- the repo's resource census
+// (internal/testpolicy/resourcecensus) tracks os/exec.Command/CommandContext
+// call sites as a checked resource with a pinned baseline, and three
+// near-identical scenarios sharing one real subprocess invocation is the
+// correct shape here, not three copies of the same command construction.
+func runEnsureBdRuntimeConfigScript(t *testing.T, logFile string, extraEnv ...string) (stdout []byte, err error) {
+	t.Helper()
+	if _, lookErr := exec.LookPath("bash"); lookErr != nil {
 		t.Skip("bash not available; skipping shell-function test")
 	}
 
 	binDir := t.TempDir()
 	writeFakeSQLLoggingDolt(t, binDir)
-	logFile := filepath.Join(t.TempDir(), "dolt-calls.log")
 
 	script := ensureBdRuntimeConfigTestScript(t) + "\nensure_bd_runtime_issue_prefix testdb tf\n"
 	cmd := exec.Command("bash", "-c", script)
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(cmd.Env, os.Environ()...)
+	cmd.Env = append(cmd.Env,
 		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"DOLT_PORT=42188",
 		"DOLT_USER=root",
 		"DOLT_PASSWORD=",
 		"FAKE_DOLT_LOG="+logFile,
 	)
-	out, err := cmd.CombinedOutput()
+	cmd.Env = append(cmd.Env, extraEnv...)
+	return cmd.CombinedOutput()
+}
+
+func TestEnsureBdRuntimeConfigValue_CommitsScopedToConfigTable(t *testing.T) {
+	t.Parallel()
+	logFile := filepath.Join(t.TempDir(), "dolt-calls.log")
+
+	out, err := runEnsureBdRuntimeConfigScript(t, logFile)
 	if err != nil {
 		t.Fatalf("ensure_bd_runtime_issue_prefix failed: %v\noutput: %s", err, out)
 	}
@@ -131,26 +148,12 @@ func TestEnsureBdRuntimeConfigValue_CommitsScopedToConfigTable(t *testing.T) {
 
 func TestEnsureBdRuntimeConfigValue_FailsOpenOnCommitError(t *testing.T) {
 	t.Parallel()
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not available; skipping shell-function test")
-	}
-
-	binDir := t.TempDir()
-	writeFakeSQLLoggingDolt(t, binDir)
 	logFile := filepath.Join(t.TempDir(), "dolt-calls.log")
 
-	script := ensureBdRuntimeConfigTestScript(t) + "\nensure_bd_runtime_issue_prefix testdb tf\n"
-	cmd := exec.Command("bash", "-c", script)
-	cmd.Env = append(os.Environ(),
-		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"DOLT_PORT=42188",
-		"DOLT_USER=root",
-		"DOLT_PASSWORD=",
-		"FAKE_DOLT_LOG="+logFile,
+	out, err := runEnsureBdRuntimeConfigScript(t, logFile,
 		"FAKE_DOLT_COMMIT_FAIL=1",
 		"FAKE_DOLT_COMMIT_ERROR=simulated lock wait timeout",
 	)
-	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("a commit failure must not block provisioning (fail-open per #5286's proposed fix); err: %v\noutput: %s", err, out)
 	}
@@ -161,26 +164,12 @@ func TestEnsureBdRuntimeConfigValue_FailsOpenOnCommitError(t *testing.T) {
 
 func TestEnsureBdRuntimeConfigValue_TreatsNothingToCommitAsSuccess(t *testing.T) {
 	t.Parallel()
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not available; skipping shell-function test")
-	}
-
-	binDir := t.TempDir()
-	writeFakeSQLLoggingDolt(t, binDir)
 	logFile := filepath.Join(t.TempDir(), "dolt-calls.log")
 
-	script := ensureBdRuntimeConfigTestScript(t) + "\nensure_bd_runtime_issue_prefix testdb tf\n"
-	cmd := exec.Command("bash", "-c", script)
-	cmd.Env = append(os.Environ(),
-		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"DOLT_PORT=42188",
-		"DOLT_USER=root",
-		"DOLT_PASSWORD=",
-		"FAKE_DOLT_LOG="+logFile,
+	out, err := runEnsureBdRuntimeConfigScript(t, logFile,
 		"FAKE_DOLT_COMMIT_FAIL=1",
 		"FAKE_DOLT_COMMIT_ERROR=nothing to commit",
 	)
-	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("an idempotent no-op commit must not fail provisioning; err: %v\noutput: %s", err, out)
 	}
