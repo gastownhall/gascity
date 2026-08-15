@@ -375,16 +375,16 @@ func mutateAgentSuspended(fs fsys.FS, tomlPath string, raw, expanded *config.Cit
 				// strip it surgically on disk so EditExpanded's lossy
 				// full-struct writeback (which drops every comment)
 				// doesn't run for what is otherwise a no-op city.toml
-				// change. Fall back to the lossy writeback -- raw
-				// already reflects the stripped patch, so it stays
-				// correct -- only when the on-disk block can't be
-				// unambiguously located.
+				// change. Refuse instead of falling back to the lossy
+				// writeback when the on-disk block can't be
+				// unambiguously located -- silently accepting comment
+				// loss here would defeat the point of the surgical edit.
 				dir, base := config.ParseQualifiedName(agent.QualifiedName())
 				if err := config.StripAgentPatchSuspendedForEdit(fs, tomlPath, raw, dir, base); err != nil {
 					if !errors.Is(err, config.ErrSurgicalAgentEditUnsupported) {
 						return err
 					}
-					return nil
+					return fmt.Errorf("agent %q: legacy [[patches.agent]] suspended override could not be surgically stripped: %w", name, err)
 				}
 			}
 			return ErrUnmodified
