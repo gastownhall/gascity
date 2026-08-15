@@ -117,6 +117,7 @@ func TestEvaluatePoolDefaultScaleCheckCountsRoutedReadyWork(t *testing.T) {
 	t.Setenv("PATH", filepath.Dir(bdPath)+":"+filepath.Dir(jqPath)+":"+os.Getenv("PATH"))
 
 	dir := t.TempDir()
+	registerRealBDServerStop(t, dir)
 	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
@@ -162,6 +163,7 @@ func TestEvaluatePoolDefaultScaleCheckIgnoresRoutedActiveUnassignedWork(t *testi
 	t.Setenv("PATH", filepath.Dir(bdPath)+":"+filepath.Dir(jqPath)+":"+os.Getenv("PATH"))
 
 	dir := t.TempDir()
+	registerRealBDServerStop(t, dir)
 	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
@@ -222,6 +224,7 @@ func TestCmdGCRealBDTestsUseTestOwnedDoltContext(t *testing.T) {
 
 	t.Setenv("PATH", filepath.Dir(bdPath)+string(os.PathListSeparator)+os.Getenv("PATH"))
 	dir := t.TempDir()
+	registerRealBDServerStop(t, dir)
 	runExternal(t, dir, bdPath, "init", "-p", "ct", "--skip-hooks", "-q")
 
 	homeConfigPath := filepath.Join(home, ".beads", "config.yaml")
