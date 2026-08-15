@@ -194,6 +194,29 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 	if hookMode {
 		hookContext = readPrimeHookContext()
 		suppressHookPrompt = managedSessionHookPromptAlreadyDelivered(hookContext)
+		// A hook invocation carrying no gc identity at all did not come from a
+		// session gc started, so there is nothing to prime and nothing to
+		// persist. gc stages each provider's hook overlay into the session work
+		// directory — commonly a city or rig root — and those overlays are
+		// ordinary directory-scoped provider config, so a human who opens the
+		// same provider in that directory loads them too. Emitting the worker
+		// persona there turns the human's own session into a queue worker that
+		// ignores what they typed, then fails to claim for want of an agent
+		// identity.
+		//
+		// The existing live-session gate below covers only SessionStart, so
+		// providers whose hooks pass no event name bypassed it entirely and
+		// whether a human got hijacked depended on which provider they opened.
+		// This gate is deliberately weaker than a live-session lookup: manual
+		// aliases, template fallbacks and strict-mode validation are all real
+		// hook flows without a live session bead, and they still carry identity.
+		//
+		// Explicit `gc prime` (no --hook) is untouched: a human asking for the
+		// prompt still gets it.
+		if !primeHookHasManagedIdentity() {
+			writePrimePromptWithFormat(stdout, "", "", "", hookMode, hookFormat, false, "", nil)
+			return 0
+		}
 	}
 	// In non-strict mode, hook side effects fire eagerly (existing behavior).
 	// In strict mode, we defer them until after strict checks pass so that a
@@ -501,6 +524,35 @@ func primeHookSessionStart(ctx primeHookContext) bool {
 	return strings.TrimSpace(ctx.HookEventName) == "SessionStart"
 }
 
+// primeHookIdentityEnv are the environment markers that show gc, rather than a
+// human, started the process a hook is running inside. gc's session lifecycle
+// sets the session and agent variables and its managed hook wrappers set
+// GC_MANAGED_SESSION_HOOK, so none of them appear in a provider a human
+// launched themselves — even in a directory gc has staged hook overlays into.
+var primeHookIdentityEnv = []string{
+	"GC_SESSION_ID",
+	"GC_SESSION_NAME",
+	"GC_ALIAS",
+	"GC_AGENT",
+	"GC_TEMPLATE",
+	managedSessionHookEnv,
+}
+
+// primeHookHasManagedIdentity reports whether this process carries any gc
+// identity. It deliberately asks the weaker question than
+// primeHookHasLiveManagedSession: not "is there a live session bead" but "did
+// gc start this at all", so real hook flows that legitimately have no session
+// bead yet (manual aliases, template fallbacks, strict-mode validation) are not
+// mistaken for a human-launched provider.
+func primeHookHasManagedIdentity() bool {
+	for _, key := range primeHookIdentityEnv {
+		if strings.TrimSpace(os.Getenv(key)) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func primeHookHasLiveManagedSession(cityPath string) bool {
 	sessionID := strings.TrimSpace(os.Getenv("GC_SESSION_ID"))
 	if sessionID == "" {
@@ -653,7 +705,16 @@ func persistPrimeHookProviderSessionKey(hookProviderSessionID string, stderr io.
 		fmt.Fprintf(stderr, "gc prime --hook: provider session key not persisted for %s: "+format+"\n", allArgs...) //nolint:errcheck // hook diagnostics are best effort.
 	}
 	if gcSessionID == "" {
-		warn("GC_SESSION_ID is empty")
+		// Provider overlays set GC_PROVIDER_SESSION_ID_REQUIRED on every session
+		// they open, managed or not, so an absent GC_SESSION_ID is the ordinary
+		// state of a human-launched provider in a directory gc has staged — not
+		// a fault. Reporting it there surfaces an error banner in the provider
+		// UI for a session that was never Gas City's to begin with. Keep the
+		// diagnostic only where managed intent is evident, which is where a
+		// missing GC_SESSION_ID really is broken.
+		if primeHookHasManagedIdentity() {
+			warn("GC_SESSION_ID is empty")
+		}
 		return
 	}
 	if providerSessionID == "" {
