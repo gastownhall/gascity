@@ -142,8 +142,9 @@ func beadWasEntered(b beads.Bead) bool {
 func newMoleculeReapOrphansCmd(stdout io.Writer) *cobra.Command {
 	var dryRun bool
 	cmd := &cobra.Command{
-		Use:   "reap-orphans",
-		Short: "Close molecule roots left open with no runnable work",
+		Use:    "reap-orphans",
+		Short:  "Close molecule roots left open with no runnable work",
+		Hidden: true,
 		Long: strings.TrimSpace(`
 Finds molecule roots whose attached target beads have all reached a terminal
 status and whose step descendants were never entered, then closes each
