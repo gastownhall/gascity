@@ -368,7 +368,7 @@
       "properties": {
         "dir": {
           "type": "string",
-          "description": "Dir is legacy targeting key for rig identity. Empty means city-scoped.\n\nDeprecated: use Rig. Retained for backwards compatibility."
+          "description": "Dir is the legacy targeting key for rig identity. Empty means\ncity-scoped. New configs should set Rig instead; Dir remains the\ncanonical resolved identity that both keys feed into."
         },
         "rig": {
           "type": "string",

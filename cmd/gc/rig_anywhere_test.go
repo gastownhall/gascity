@@ -876,6 +876,43 @@ func TestRigAnywhere_RigRemove(t *testing.T) {
 		}
 	})
 
+	t.Run("sweeps_rig_keyed_agent_patch", func(t *testing.T) {
+		gcHome := t.TempDir()
+		t.Setenv("GC_HOME", gcHome)
+		resetFlags(t)
+
+		cityPath := setupCity(t, "sweep-city")
+		rigDir := filepath.Join(t.TempDir(), "sweep-rig")
+		if err := os.MkdirAll(rigDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		// The rig is targeted by a [[patches.agent]] via the new rig= key (not
+		// the legacy dir= key). Removing the rig must sweep the patch too; left
+		// behind, a rig-keyed patch dangles and hard-fails the next config
+		// compose. The pre-fix sweep only matched p.Dir == rigName, so a
+		// rig=-keyed patch survived.
+		toml := "[workspace]\nname = \"sweep-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"sweep-rig\"\npath = \"" + rigDir + "\"\n\n[[patches.agent]]\nrig = \"sweep-rig\"\nname = \"worker\"\nsuspended = true\n"
+		writeRigAnywhereCityToml(t, cityPath, toml)
+
+		registerCityForRigResolution(t, gcHome, cityPath, "sweep-city")
+
+		cityFlag = cityPath
+		var stdout, stderr bytes.Buffer
+		code := cmdRigRemove("sweep-rig", &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("cmdRigRemove = %d, stderr: %s", code, stderr.String())
+		}
+
+		cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(cfg.Patches.Agents) != 0 {
+			t.Errorf("patches.agent = %#v, want swept (rig=-keyed patch must be removed with the rig)", cfg.Patches.Agents)
+		}
+	})
+
 	t.Run("removes_from_site_binding_without_cities_toml_rig_entries", func(t *testing.T) {
 		gcHome := t.TempDir()
 		t.Setenv("GC_HOME", gcHome)

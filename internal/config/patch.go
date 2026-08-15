@@ -21,9 +21,9 @@ type Patches struct {
 // AgentPatch modifies existing agents identified by rig scope and Name.
 // Pointer fields distinguish "not set" from "set to zero value."
 type AgentPatch struct {
-	// Dir is legacy targeting key for rig identity. Empty means city-scoped.
-	//
-	// Deprecated: use Rig. Retained for backwards compatibility.
+	// Dir is the legacy targeting key for rig identity. Empty means
+	// city-scoped. New configs should set Rig instead; Dir remains the
+	// canonical resolved identity that both keys feed into.
 	Dir string `toml:"dir,omitempty"`
 	// Rig is new targeting key for rig identity (replaces Dir).
 	// "*" matches all rigs + city. Empty means city-scoped unless Dir is set.
@@ -419,6 +419,41 @@ func agentPatchTargetDir(patch *AgentPatch) (string, error) {
 		return patch.Rig, nil
 	}
 	return patch.Dir, nil
+}
+
+// TargetQualifiedName returns the canonical qualified identity this patch
+// targets, folding the legacy Dir key and the newer Rig key into a single
+// string so a patch authored with either key resolves to the same identity
+// ("rigA/name" whether written as dir="rigA" or rig="rigA"). The "*" wildcard
+// is preserved as its own scope ("*/name") so a wildcard patch has a stable
+// identity distinct from a city-scoped one ("name"). The HTTP patch API and
+// the config editor key on this — rather than on Dir alone — so rig- and
+// wildcard-targeted patches can be created, retrieved, and deleted by identity.
+func (p *AgentPatch) TargetQualifiedName() string {
+	dir := p.Dir
+	if p.Rig != "" {
+		dir = p.Rig
+	}
+	return qualifiedNameFromPatch(dir, p.Name)
+}
+
+// Validate reports whether the patch is a well-formed, resolvable target.
+// It enforces the AgentPatch identity contract every write boundary relies on:
+// Name is required, and the legacy Dir key and the newer Rig key (including the
+// "*" wildcard) are mutually exclusive. The HTTP patch API and the config editor
+// call this before persisting so a patch that would hard-fail the next config
+// load — an unresolvable dir+rig combination — can never be written to city.toml
+// and brick config loading. Apply-time resolution (agentPatchTargetDir and
+// applyAgentPatch) enforces the same rule for patches that arrive from other
+// sources, so this is a fail-fast guard at the edge, not the only guard.
+func (p *AgentPatch) Validate() error {
+	if p.Name == "" {
+		return fmt.Errorf("agent patch: name is required")
+	}
+	if p.Dir != "" && p.Rig != "" {
+		return fmt.Errorf("agent patch %q: use only one of dir or rig", p.Name)
+	}
+	return nil
 }
 
 // applyAgentPatch finds agent target(s) and applies patch.

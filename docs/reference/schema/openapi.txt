@@ -384,6 +384,9 @@
               "null"
             ]
           },
+          "Rig": {
+            "type": "string"
+          },
           "ScaleCheck": {
             "type": [
               "string",
@@ -507,6 +510,7 @@
         },
         "required": [
           "Dir",
+          "Rig",
           "Name",
           "WorkDir",
           "TmuxAlias",
@@ -564,7 +568,7 @@
         "additionalProperties": false,
         "properties": {
           "dir": {
-            "description": "Agent directory scope.",
+            "description": "Agent directory scope (legacy targeting key; prefer rig).",
             "type": "string"
           },
           "env": {
@@ -580,6 +584,10 @@
           },
           "provider": {
             "description": "Override the agent's provider.",
+            "type": "string"
+          },
+          "rig": {
+            "description": "Rig targeting key. \"*\" matches the agent name across all rigs and city. Mutually exclusive with dir.",
             "type": "string"
           },
           "scope": {

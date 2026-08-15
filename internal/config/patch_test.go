@@ -263,6 +263,44 @@ func TestApplyPatches_AgentRigAndDirConflict(t *testing.T) {
 	}
 }
 
+// TestAgentPatch_Validate covers the write-boundary identity guard that the
+// HTTP patch API and the config editor both call before persisting a patch:
+// Name is required, and the legacy Dir key and the newer Rig key (including the
+// "*" wildcard) are mutually exclusive. A dir+rig patch would hard-fail the
+// next config load, so it must be rejected fail-fast rather than written.
+func TestAgentPatch_Validate(t *testing.T) {
+	tests := []struct {
+		name    string
+		patch   AgentPatch
+		wantErr string // substring; empty means Validate must return nil
+	}{
+		{name: "name only (city scope)", patch: AgentPatch{Name: "worker"}},
+		{name: "dir only (legacy rig key)", patch: AgentPatch{Dir: "rigA", Name: "worker"}},
+		{name: "rig only (new key)", patch: AgentPatch{Rig: "rigA", Name: "worker"}},
+		{name: "wildcard only", patch: AgentPatch{Rig: "*", Name: "worker"}},
+		{name: "missing name", patch: AgentPatch{Dir: "rigA"}, wantErr: "name is required"},
+		{name: "dir and rig", patch: AgentPatch{Dir: "rigA", Rig: "rigB", Name: "worker"}, wantErr: "use only one of dir or rig"},
+		{name: "dir and wildcard rig", patch: AgentPatch{Dir: "rigA", Rig: "*", Name: "worker"}, wantErr: "use only one of dir or rig"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.patch.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("Validate() = nil, want error containing %q", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Validate() = %q, want substring %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestApplyPatches_AgentCityScopedUnchanged(t *testing.T) {
 	cfg := &City{Agents: []Agent{{Name: "polecat"}, {Name: "polecat", Dir: "rigA"}}}
 	err := ApplyPatches(cfg, Patches{Agents: []AgentPatch{{Name: "polecat", Suspended: ptrBool(true)}}})

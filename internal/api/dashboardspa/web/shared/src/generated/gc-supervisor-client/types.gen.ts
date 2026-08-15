@@ -96,6 +96,7 @@ export type AgentPatch = {
     PromptTemplate: string | null;
     Provider: string | null;
     ResumeCommand: string | null;
+    Rig: string;
     ScaleCheck: string | null;
     Scope: string | null;
     Session: string | null;
@@ -117,7 +118,7 @@ export type AgentPatch = {
 
 export type AgentPatchSetInputBody = {
     /**
-     * Agent directory scope.
+     * Agent directory scope (legacy targeting key; prefer rig).
      */
     dir?: string;
     /**
@@ -134,6 +135,10 @@ export type AgentPatchSetInputBody = {
      * Override the agent's provider.
      */
     provider?: string;
+    /**
+     * Rig targeting key. "*" matches the agent name across all rigs and city. Mutually exclusive with dir.
+     */
+    rig?: string;
     /**
      * Override agent scope.
      */

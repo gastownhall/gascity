@@ -555,16 +555,6 @@ name = "beta"
 	}
 }
 
-func TestAgentPatchMatchesExistingWildcard(t *testing.T) {
-	cfg := &City{Agents: []Agent{{Name: "polecat", Dir: "rig-a"}}}
-	if !agentPatchMatchesExisting(cfg, &AgentPatch{Name: "polecat", Rig: "*"}) {
-		t.Fatal("wildcard should match existing name")
-	}
-	if agentPatchMatchesExisting(cfg, &AgentPatch{Name: "mayor", Rig: "*"}) {
-		t.Fatal("wildcard should not match missing name")
-	}
-}
-
 func TestLoadWithIncludes_WildcardPatchDeferredForImplicitAgents(t *testing.T) {
 	dir := t.TempDir()
 	writeFile := func(rel, data string) {
