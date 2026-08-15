@@ -162,7 +162,30 @@ func currentWorkAssociations(store beads.WorkStore, rootID, convoyID string) ([]
 	return associations, nil
 }
 
+// stepRow pairs a projected step definition with the physical row it was
+// decided from. Callers that need the step's Status or its full metadata read
+// them here instead of re-Getting the bead: the ListByMetadata below already
+// carried both, and a per-step Get made the completions reconcile cost
+// O(roots x steps) sequential round trips against stores whose remote leg
+// answers in seconds.
+type stepRow struct {
+	definition StepDefinition
+	bead       beads.Bead
+}
+
 func currentSteps(store beads.GraphStore, rootID string) ([]StepDefinition, error) {
+	rows, err := currentStepRows(store, rootID)
+	if err != nil {
+		return nil, err
+	}
+	steps := make([]StepDefinition, 0, len(rows))
+	for _, row := range rows {
+		steps = append(steps, row.definition)
+	}
+	return steps, nil
+}
+
+func currentStepRows(store beads.GraphStore, rootID string) ([]stepRow, error) {
 	rows, err := store.ListByMetadata(
 		map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
 		0,
@@ -181,7 +204,7 @@ func currentSteps(store beads.GraphStore, rootID string) ([]StepDefinition, erro
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
-	steps := make([]StepDefinition, 0, len(ids))
+	steps := make([]stepRow, 0, len(ids))
 	for _, id := range ids {
 		row := byID[id]
 		if row.ID == rootID || !eventexport.IsOpaqueRef(row.ID) {
@@ -191,11 +214,14 @@ func currentSteps(store beads.GraphStore, rootID string) ([]StepDefinition, erro
 		if !validNativeStepID(stepID) {
 			continue
 		}
-		steps = append(steps, StepDefinition{
-			BeadID:           row.ID,
-			ExecutionRunID:   rootID,
-			StepID:           stepID,
-			DependsOnStepIDs: canonicalTopology(row.Metadata[beadmeta.NativeStepDependenciesMetadataKey], stepID),
+		steps = append(steps, stepRow{
+			definition: StepDefinition{
+				BeadID:           row.ID,
+				ExecutionRunID:   rootID,
+				StepID:           stepID,
+				DependsOnStepIDs: canonicalTopology(row.Metadata[beadmeta.NativeStepDependenciesMetadataKey], stepID),
+			},
+			bead: row,
 		})
 	}
 	return steps, nil
@@ -357,13 +383,17 @@ func ReconcileCompletedStores(recorder events.Provider, graphStores []beads.Grap
 			if root.Metadata[beadmeta.FormulaContractMetadataKey] != beadmeta.FormulaContractGraphV2 {
 				continue
 			}
-			definitions, err := currentSteps(graphStore, root.ID)
+			rows, err := currentStepRows(graphStore, root.ID)
 			if err != nil {
 				continue
 			}
-			for _, definition := range definitions {
-				step, err := graphStore.Get(definition.BeadID)
-				if err != nil || !strings.EqualFold(strings.TrimSpace(step.Status), "closed") {
+			for _, row := range rows {
+				// The row the steps List already returned decides the status.
+				// Re-Getting it would only narrow a window the journal-keyed
+				// idempotency record already covers: a step that closes between
+				// the List and the write is repaired by the next pass.
+				step := row.bead
+				if !strings.EqualFold(strings.TrimSpace(step.Status), "closed") {
 					continue
 				}
 				event, ok := LifecycleEvent(events.ExecutionStepCompleted, root, step, actor)
