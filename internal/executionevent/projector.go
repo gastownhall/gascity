@@ -307,10 +307,57 @@ func ReconcileCompleted(recorder events.Provider, graphStore beads.GraphStore, a
 	return ReconcileCompletedStores(recorder, []beads.GraphStore{graphStore}, actor)
 }
 
+// ReconcileCache remembers workflow roots whose completion facts are fully
+// reconciled and can never change again: the root is closed and every current
+// step definition is closed with its lifecycle fact in the journal. Terminal
+// roots dominate a long-lived store, and each costs a per-root step query plus
+// a per-step read on every pass — the cache turns that unbounded rescan into a
+// skip. It is an in-memory optimization only: a fresh cache (or a fresh
+// process) degrades to one full pass, which is the previous behavior, and the
+// journal remains the durable idempotency record. A cached root observed with
+// a non-closed status (reopen flows) is evicted and reconciled again.
+type ReconcileCache struct {
+	done map[string]struct{}
+}
+
+// NewReconcileCache returns an empty cache ready for use across passes.
+func NewReconcileCache() *ReconcileCache {
+	return &ReconcileCache{done: make(map[string]struct{})}
+}
+
+func (c *ReconcileCache) isDone(rootID string) bool {
+	if c == nil {
+		return false
+	}
+	_, ok := c.done[rootID]
+	return ok
+}
+
+func (c *ReconcileCache) markDone(rootID string) {
+	if c == nil {
+		return
+	}
+	c.done[rootID] = struct{}{}
+}
+
+func (c *ReconcileCache) evict(rootID string) {
+	if c == nil {
+		return
+	}
+	delete(c.done, rootID)
+}
+
 // ReconcileCompletedStores repairs completion facts across graph stores with
 // one journal read. The completed-fact index is updated after each append so
 // the pass remains idempotent even when more than one source is scanned.
 func ReconcileCompletedStores(recorder events.Provider, graphStores []beads.GraphStore, actor string) int {
+	return ReconcileCompletedStoresCached(recorder, graphStores, actor, nil)
+}
+
+// ReconcileCompletedStoresCached is ReconcileCompletedStores with an optional
+// cross-pass cache of terminally reconciled roots. A nil cache reproduces the
+// uncached full scan.
+func ReconcileCompletedStoresCached(recorder events.Provider, graphStores []beads.GraphStore, actor string, cache *ReconcileCache) int {
 	if recorder == nil {
 		return 0
 	}
@@ -357,13 +404,32 @@ func ReconcileCompletedStores(recorder events.Provider, graphStores []beads.Grap
 			if root.Metadata[beadmeta.FormulaContractMetadataKey] != beadmeta.FormulaContractGraphV2 {
 				continue
 			}
+			rootClosed := strings.EqualFold(strings.TrimSpace(root.Status), "closed")
+			if cache.isDone(root.ID) {
+				if rootClosed {
+					continue
+				}
+				// A reopened root can close steps again; reconcile it live.
+				cache.evict(root.ID)
+			}
 			definitions, err := currentSteps(graphStore, root.ID)
 			if err != nil {
 				continue
 			}
+			// A closed root whose every current step is closed with its fact
+			// already observed in the journal can never strand another
+			// completion; remember it. A pass that emits a new fact does not
+			// qualify — Record is best-effort, so done-status is granted only
+			// once a later pass reads the fact back from the journal.
+			terminal := rootClosed
 			for _, definition := range definitions {
 				step, err := graphStore.Get(definition.BeadID)
-				if err != nil || !strings.EqualFold(strings.TrimSpace(step.Status), "closed") {
+				if err != nil {
+					terminal = false
+					continue
+				}
+				if !strings.EqualFold(strings.TrimSpace(step.Status), "closed") {
+					terminal = false
 					continue
 				}
 				event, ok := LifecycleEvent(events.ExecutionStepCompleted, root, step, actor)
@@ -377,6 +443,10 @@ func ReconcileCompletedStores(recorder events.Provider, graphStores []beads.Grap
 				recorder.Record(event)
 				completed[key] = struct{}{}
 				emitted++
+				terminal = false
+			}
+			if terminal {
+				cache.markDone(root.ID)
 			}
 		}
 	}
