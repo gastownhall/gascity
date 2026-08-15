@@ -349,6 +349,7 @@ server_sql_retry() {
 # (CREATE DATABASE returns before the catalog is fully updated).
 ensure_database_registered() {
     local db="$1"
+    GC_DATABASE_CREATED_BY_ENSURE=false
 
     # Validate database name before SQL interpolation (upstream 38f7b380).
     if ! valid_sql_name "$db"; then
@@ -373,6 +374,7 @@ ensure_database_registered() {
     backoff_ms=100
     for attempt in 1 2 3 4 5; do
         if server_sql "USE \`$db\`" >/dev/null 2>&1; then
+            GC_DATABASE_CREATED_BY_ENSURE=true
             return 0
         fi
         sleep_ms "$backoff_ms" 2>/dev/null || sleep 1
@@ -381,6 +383,35 @@ ensure_database_registered() {
 
     echo "warning: database $db not visible after 5 catalog probes" >&2
     return 1
+}
+
+# seed_fresh_managed_bd_version_witness records the bd version that is about
+# to initialize a database created by this invocation. bd 1.2+ uses this
+# bounded witness to distinguish current server-mode workspaces from legacy
+# .beads/dolt layouts. Never create or replace it for a pre-existing database:
+# doing so would bypass bd's explicit cross-era migration guard.
+seed_fresh_managed_bd_version_witness() {
+    local dir="$1"
+    local marker="$dir/.beads/.local_version"
+    local raw version major tmp
+
+    [ ! -e "$marker" ] || return 0
+
+    if ! raw=$(bd --version 2>/dev/null); then
+        die "failed to read bd version while initializing fresh managed Dolt workspace at $dir"
+    fi
+    version=$(printf '%s\n' "$raw" | sed -nE 's/^bd version v?([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' | head -n 1)
+    if [ -z "$version" ]; then
+        die "unrecognized bd version output while initializing fresh managed Dolt workspace at $dir: $raw"
+    fi
+    major=${version%%.*}
+    if [ "$major" -lt 1 ] 2>/dev/null; then
+        die "bd $version cannot initialize the current managed Dolt workspace at $dir (bd 1.0.0 or newer required)"
+    fi
+
+    tmp="$marker.tmp.$$"
+    (umask 077 && printf '%s\n' "$version" > "$tmp") || die "failed to write bd version witness at $marker"
+    mv "$tmp" "$marker" || die "failed to install bd version witness at $marker"
 }
 
 
@@ -2657,6 +2688,7 @@ op_init() {
     local existing_db=""
     local allow_reserved_existing=false
     local bd_init_force=""
+    local database_created_by_gc=false
     if [ -z "$dir" ] || [ -z "$prefix" ]; then
         die "usage: gc-beads-bd init <dir> <prefix> [dolt_database]"
     fi
@@ -2793,6 +2825,9 @@ op_init() {
             die "managed Dolt server unreachable while inspecting existing store '$dolt_database'; refusing to force-reinitialize (data-safety). retry once the Dolt server is reachable."
         fi
         if ensure_database_registered "$dolt_database"; then
+            if [ "${GC_DATABASE_CREATED_BY_ENSURE:-false}" = true ]; then
+                database_created_by_gc=true
+            fi
             if bd_runtime_schema_ready "$dolt_database"; then
                 # GC owns canonical metadata/config normalization after this backend
                 # bridge returns. Keep the backend focused on database registration
@@ -2827,6 +2862,17 @@ op_init() {
     # where the city's hq database was never created on first start.
     if ! ensure_database_registered "$dolt_database"; then
         die "failed to register Dolt database '$dolt_database' on running server (CREATE DATABASE failed); see warnings above. cannot proceed with bd init."
+    fi
+    if [ "${GC_DATABASE_CREATED_BY_ENSURE:-false}" = true ]; then
+        database_created_by_gc=true
+    fi
+
+    # Gas City creates its managed server root at .beads/dolt before bd init.
+    # For a database proven to have been created above by this invocation,
+    # record the current bd version before bd's legacy-workspace guard runs.
+    # Pre-existing databases deliberately receive no marker here.
+    if [ "$database_created_by_gc" = true ]; then
+        seed_fresh_managed_bd_version_witness "$dir"
     fi
 
     # Run bd init in server mode through the pinned wrapper so the fallback
