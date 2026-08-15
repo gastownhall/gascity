@@ -203,16 +203,41 @@ func computePoolDesiredStates(
 				if namedSessionBeadIDs[sessionBeadID] {
 					continue
 				}
-				// A wake_mode="fresh" pool agent must not resume a stale
-				// *asleep* session left over from before a restart: resuming
-				// runs the dead session's pre_start hook, which hangs and is
-				// killed on the resume deadline, so the pool never materializes
-				// a live member (every reconcile re-attempts the same doomed
-				// resume). Skip the resume and let the scale_check / min-fill
-				// path start a clean session. A live (non-asleep) session still
-				// resumes; agents with unset or wake_mode="resume" are
-				// unaffected. (gastownhall/gascity#4849)
+				// A wake_mode="fresh" pool agent must not inherit a stale
+				// *asleep* session bead: by configuration it never wants the
+				// old session's state back, so resuming that row leaves the
+				// pool bound to a session it will not reuse and the assigned
+				// work stranded. Plan a clean session bound to the same work
+				// instead — the wake-known-identity tier with an empty
+				// SessionBeadID, the same shape the closed-session case
+				// already uses. A live (non-asleep) session still resumes;
+				// agents with unset or wake_mode="resume" are unaffected.
+				// (gastownhall/gascity#4849)
 				if agent.EffectiveWakeMode() == "fresh" && asleepSessionBeadIDs[sessionBeadID] {
+					if _, ok := wakeRequestedTemplates[template]; ok {
+						continue
+					}
+					wakeRequestedTemplates[template] = struct{}{}
+					resumeRequests = append(resumeRequests, SessionRequest{
+						Template:     template,
+						BeadPriority: beadPriority(wb),
+						Tier:         "wake-known-identity",
+						// SessionBeadID intentionally empty: the stale asleep
+						// bead must not be reused, so realizePoolDesiredSessions
+						// plans a clean create.
+						WorkBeadID:     wb.ID,
+						WorkBeadTitle:  strings.TrimSpace(wb.Title),
+						WorkPack:       strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
+						WorkWorkspace:  strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
+						BrainParentSID: strings.TrimSpace(wb.Metadata[beadmeta.BrainParentSIDMetadataKey]),
+					})
+					if trace != nil {
+						trace.RecordDecision(TraceSitePoolWakeKnownIdentity, TraceReasonAssignedWork, TraceOutcomeScheduled, template, "", traceRecordPayload{
+							"tier":                   "wake-known-identity",
+							"work_bead":              wb.ID,
+							"skipped_asleep_session": sessionBeadID,
+						})
+					}
 					continue
 				}
 				resumeRequests = append(resumeRequests, SessionRequest{
