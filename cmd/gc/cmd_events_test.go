@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -799,9 +800,35 @@ func assertCorrelationIDsInJSON(t *testing.T, line, wantRun, wantSession, wantSt
 	}
 }
 
+func assertTopologyInJSON(t *testing.T, line string, want *[]string) {
+	t.Helper()
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(line), &fields); err != nil {
+		t.Fatalf("unmarshal event: %v; line=%q", err, line)
+	}
+	raw, present := fields["depends_on_step_ids"]
+	if want == nil {
+		if present {
+			t.Fatalf("UNKNOWN topology unexpectedly present; line=%q", line)
+		}
+		return
+	}
+	if !present {
+		t.Fatalf("authoritative topology missing; line=%q", line)
+	}
+	var got []string
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal topology: %v; line=%q", err, line)
+	}
+	if !slices.Equal(got, *want) {
+		t.Fatalf("topology = %v, want %v; line=%q", got, *want, line)
+	}
+}
+
 func TestDoEventsCityListForwardsCorrelationFields(t *testing.T) {
+	deps := []string{"step-1"}
 	items := []cliWireEvent{
-		{Actor: "gc", Seq: 1, Subject: "gcg-1", Ts: time.Unix(1700000000, 0).UTC(), Type: "bead.created", RunID: "run-abc", SessionID: "sess-1", StepID: "step-7"},
+		{Actor: "gc", Seq: 1, Subject: "gcg-1", Ts: time.Unix(1700000000, 0).UTC(), Type: "bead.created", RunID: "run-abc", SessionID: "sess-1", StepID: "step-7", DependsOnStepIDs: &deps},
 	}
 	server := newEventsTestServer(t, testEventRoutes{
 		cityEvents: func(w http.ResponseWriter, _ *http.Request) {
@@ -817,11 +844,13 @@ func TestDoEventsCityListForwardsCorrelationFields(t *testing.T) {
 		t.Fatalf("doEvents = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	assertCorrelationIDsInJSON(t, strings.TrimSpace(stdout.String()), "run-abc", "sess-1", "step-7")
+	assertTopologyInJSON(t, strings.TrimSpace(stdout.String()), &deps)
 }
 
 func TestDoEventsSupervisorListForwardsCorrelationFields(t *testing.T) {
+	root := []string{}
 	items := []cliWireTaggedEvent{
-		{Actor: "gc", City: "alpha", Seq: 3, Subject: "gcg-2", Ts: time.Unix(1700000000, 0).UTC(), Type: "bead.created", RunID: "run-xyz", SessionID: "sess-2", StepID: "step-9"},
+		{Actor: "gc", City: "alpha", Seq: 3, Subject: "gcg-2", Ts: time.Unix(1700000000, 0).UTC(), Type: "bead.created", RunID: "run-xyz", SessionID: "sess-2", StepID: "step-9", DependsOnStepIDs: &root},
 	}
 	server := newEventsTestServer(t, testEventRoutes{
 		supervisorEvents: func(w http.ResponseWriter, _ *http.Request) {
@@ -836,6 +865,7 @@ func TestDoEventsSupervisorListForwardsCorrelationFields(t *testing.T) {
 		t.Fatalf("doEvents = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	assertCorrelationIDsInJSON(t, strings.TrimSpace(stdout.String()), "run-xyz", "sess-2", "step-9")
+	assertTopologyInJSON(t, strings.TrimSpace(stdout.String()), &root)
 }
 
 func TestDoEventsWatchCityBufferedReplayForwardsCorrelationFields(t *testing.T) {
@@ -882,14 +912,16 @@ func TestDoEventsWatchSupervisorBufferedReplayForwardsCorrelationFields(t *testi
 func TestDoEventsLocalCityFallbackForwardsCorrelationFields(t *testing.T) {
 	cityDir := t.TempDir()
 	rec := newTestProvider(t, filepath.Join(cityDir, ".gc"))
+	deps := []string{"step-parent"}
 	rec.Record(events.Event{
-		Type:      events.SessionStopped,
-		Actor:     "gc",
-		Subject:   "worker",
-		Message:   "stopped",
-		RunID:     "run-local",
-		SessionID: "sess-local",
-		StepID:    "step-local",
+		Type:             events.SessionStopped,
+		Actor:            "gc",
+		Subject:          "worker",
+		Message:          "stopped",
+		RunID:            "run-local",
+		SessionID:        "sess-local",
+		StepID:           "step-local",
+		DependsOnStepIDs: &deps,
 	})
 
 	server := newEventsTestServer(t, testEventRoutes{
@@ -913,6 +945,22 @@ func TestDoEventsLocalCityFallbackForwardsCorrelationFields(t *testing.T) {
 		t.Fatalf("doEvents = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	assertCorrelationIDsInJSON(t, strings.TrimSpace(stdout.String()), "run-local", "sess-local", "step-local")
+	assertTopologyInJSON(t, strings.TrimSpace(stdout.String()), &deps)
+}
+
+func TestLocalWireEventClonesTopology(t *testing.T) {
+	root := []string{}
+	rootEvent := localWireEvent(events.Event{DependsOnStepIDs: &root}, io.Discard)
+	if rootEvent.DependsOnStepIDs == nil || *rootEvent.DependsOnStepIDs == nil || len(*rootEvent.DependsOnStepIDs) != 0 {
+		t.Fatalf("root topology = %#v, want present empty slice", rootEvent.DependsOnStepIDs)
+	}
+
+	deps := []string{"step-parent"}
+	item := localWireEvent(events.Event{DependsOnStepIDs: &deps}, io.Discard)
+	deps[0] = "mutated"
+	if item.DependsOnStepIDs == &deps || item.DependsOnStepIDs == nil || (*item.DependsOnStepIDs)[0] != "step-parent" {
+		t.Fatalf("local topology retained mutable source: %#v", item.DependsOnStepIDs)
+	}
 }
 
 func TestDoEventsWatchTimesOutWithoutMatch(t *testing.T) {

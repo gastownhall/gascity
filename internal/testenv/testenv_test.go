@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -52,6 +53,26 @@ func TestInitScrubsLeakVectors(t *testing.T) {
 	}
 	if !strings.Contains(got, "GC_FAST_UNIT=should-survive") {
 		t.Errorf("GC_FAST_UNIT was scrubbed but should not be; child output:\n%s", got)
+	}
+}
+
+// TestMetricsOptOutVarsAreLeakVectors pins DO_NOT_TRACK and
+// GC_DISABLE_USAGE_METRICS into LeakVectorVars. TestInitScrubsLeakVectors
+// proves whatever is on the list gets scrubbed, which is tautological about
+// membership — dropping a name from the list would silently satisfy it.
+//
+// Membership is the load-bearing part here. Agent fleets that export
+// GC_DISABLE_USAGE_METRICS=1 into every session leak it into bare `go test`
+// while `make test` (env -i) does not. internal/productmetrics then reported
+// environment-disabled instead of the state under test, and whether a test
+// passed depended on which shell ran it — which invented merge-gate
+// rejections of clean branches and could equally mask a real
+// misclassification regression.
+func TestMetricsOptOutVarsAreLeakVectors(t *testing.T) {
+	for _, name := range []string{"DO_NOT_TRACK", "GC_DISABLE_USAGE_METRICS"} {
+		if !slices.Contains(testenv.LeakVectorVars, name) {
+			t.Errorf("%s missing from LeakVectorVars; an ambient value would reach test code and flip the productmetrics state projection", name)
+		}
 	}
 }
 

@@ -47,32 +47,34 @@ type eventsAPITransportError struct {
 }
 
 type cliWireEvent struct {
-	Actor     string          `json:"actor"`
-	Message   string          `json:"message,omitempty"`
-	Payload   json.RawMessage `json:"payload,omitempty"`
-	RunID     string          `json:"run_id,omitempty"`
-	SessionID string          `json:"session_id,omitempty"`
-	StepID    string          `json:"step_id,omitempty"`
-	Seq       int64           `json:"seq"`
-	Subject   string          `json:"subject,omitempty"`
-	Ts        time.Time       `json:"ts"`
-	Type      string          `json:"type"`
-	OK        bool            `json:"ok"`
+	Actor            string          `json:"actor"`
+	Message          string          `json:"message,omitempty"`
+	Payload          json.RawMessage `json:"payload,omitempty"`
+	RunID            string          `json:"run_id,omitempty"`
+	SessionID        string          `json:"session_id,omitempty"`
+	StepID           string          `json:"step_id,omitempty"`
+	DependsOnStepIDs *[]string       `json:"depends_on_step_ids,omitempty"`
+	Seq              int64           `json:"seq"`
+	Subject          string          `json:"subject,omitempty"`
+	Ts               time.Time       `json:"ts"`
+	Type             string          `json:"type"`
+	OK               bool            `json:"ok"`
 }
 
 type cliWireTaggedEvent struct {
-	Actor     string          `json:"actor"`
-	City      string          `json:"city"`
-	Message   string          `json:"message,omitempty"`
-	Payload   json.RawMessage `json:"payload,omitempty"`
-	RunID     string          `json:"run_id,omitempty"`
-	SessionID string          `json:"session_id,omitempty"`
-	StepID    string          `json:"step_id,omitempty"`
-	Seq       int64           `json:"seq"`
-	Subject   string          `json:"subject,omitempty"`
-	Ts        time.Time       `json:"ts"`
-	Type      string          `json:"type"`
-	OK        bool            `json:"ok"`
+	Actor            string          `json:"actor"`
+	City             string          `json:"city"`
+	Message          string          `json:"message,omitempty"`
+	Payload          json.RawMessage `json:"payload,omitempty"`
+	RunID            string          `json:"run_id,omitempty"`
+	SessionID        string          `json:"session_id,omitempty"`
+	StepID           string          `json:"step_id,omitempty"`
+	DependsOnStepIDs *[]string       `json:"depends_on_step_ids,omitempty"`
+	Seq              int64           `json:"seq"`
+	Subject          string          `json:"subject,omitempty"`
+	Ts               time.Time       `json:"ts"`
+	Type             string          `json:"type"`
+	OK               bool            `json:"ok"`
 }
 
 type cliEventsRotateResponse struct {
@@ -227,6 +229,7 @@ DTO or SSE envelope.`,
 	cmd.Flags().BoolVar(&jsonFlagDeprecated, "json", false, "Deprecated: output is always JSONL. Accepted for back-compat.")
 	_ = cmd.Flags().MarkDeprecated("json", "output is always JSONL; the flag is now a no-op and will be removed in a future release")
 	cmd.AddCommand(newEventsRotateCmd(stdout, stderr))
+	cmd.AddCommand(newEventsReemitExecutionCmd(stdout, stderr))
 	return cmd
 }
 
@@ -748,14 +751,15 @@ func eventsSinceCutoff(sinceFlag string) (time.Time, error) {
 
 func localWireEvent(e events.Event, _ io.Writer) cliWireEvent {
 	item := cliWireEvent{
-		Actor:     e.Actor,
-		Seq:       int64(e.Seq),
-		Ts:        e.Ts,
-		Type:      e.Type,
-		RunID:     e.RunID,
-		SessionID: e.SessionID,
-		StepID:    e.StepID,
-		OK:        true,
+		Actor:            e.Actor,
+		Seq:              int64(e.Seq),
+		Ts:               e.Ts,
+		Type:             e.Type,
+		RunID:            e.RunID,
+		SessionID:        e.SessionID,
+		StepID:           e.StepID,
+		DependsOnStepIDs: cloneCLIEventStepDependencies(e.DependsOnStepIDs),
+		OK:               true,
 	}
 	if e.Subject != "" {
 		item.Subject = e.Subject
@@ -767,6 +771,15 @@ func localWireEvent(e events.Event, _ io.Writer) cliWireEvent {
 		item.Payload = append(json.RawMessage(nil), e.Payload...)
 	}
 	return item
+}
+
+func cloneCLIEventStepDependencies(dependencies *[]string) *[]string {
+	if dependencies == nil {
+		return nil
+	}
+	clone := make([]string, len(*dependencies))
+	copy(clone, *dependencies)
+	return &clone
 }
 
 func cityWireEventFromTyped(item genclient.TypedEventStreamEnvelope) (cliWireEvent, error) {

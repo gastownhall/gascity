@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -26,6 +27,7 @@ import (
 	mailexec "github.com/gastownhall/gascity/internal/mail/exec"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/spf13/cobra"
 )
 
 type countOnlyMailProvider struct{}
@@ -1254,6 +1256,47 @@ func TestResolveMailRecipientIdentity_RejectsTemplatePrefixOnSessionSurface(t *t
 	}
 	if len(all) != 0 {
 		t.Fatalf("session bead count = %d, want 0", len(all))
+	}
+}
+
+func TestCmdMailSendExactSessionIDStaysPinned(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_MAIL", "")
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_SESSION_ID", "")
+	t.Setenv("GC_AGENT", "")
+
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Setenv("GC_CITY", cityPath)
+
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "worker",
+			"session_name": "worker-session",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(session): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdMailSend([]string{sessionBead.ID, "body"}, false, false, "human", "", "", "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdMailSend() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+
+	stored := mailSendTestFindMessage(t, cityPath)
+	if stored.Assignee != sessionBead.ID {
+		t.Fatalf("stored assignee = %q, want typed session ID %q", stored.Assignee, sessionBead.ID)
 	}
 }
 
@@ -2985,6 +3028,33 @@ func TestMailArchiveSelectedAllRecipientsEmptyBody(t *testing.T) {
 
 // --- gc mail send --notify ---
 
+func TestMailNotifyHelpDocumentsManagedWake(t *testing.T) {
+	tests := []struct {
+		name string
+		cmd  func(io.Writer, io.Writer) *cobra.Command
+	}{
+		{name: "send", cmd: newMailSendCmd},
+		{name: "reply", cmd: newMailReplyCmd},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			cmd := tt.cmd(&stdout, &stderr)
+			notify := cmd.Flags().Lookup("notify")
+			if notify == nil {
+				t.Fatal("--notify flag is missing")
+			}
+			if !strings.Contains(notify.Usage, "managed wake") {
+				t.Fatalf("--notify help = %q, want managed-wake behavior", notify.Usage)
+			}
+			if !strings.Contains(cmd.Long, "Unread mail alone does not request a wake") {
+				t.Fatalf("Long help = %q, want unread-mail wake boundary", cmd.Long)
+			}
+		})
+	}
+}
+
 func TestMailSendNotifySuccess(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
@@ -3536,6 +3606,27 @@ func TestMailCheckInjectDoesNotCloseBeads(t *testing.T) {
 	}
 }
 
+// assertAutoHandoffRetainedAddressable pins the dip-6ov51a contract at the inject
+// integration boundary: an injected auto-handoff is MARK-READ + CLOSED and stamped
+// with the retention marker (retain-addressable), NOT hard-deleted, so an
+// unconsumed handoff stays recoverable until the read-gated TTL sweep reclaims it.
+func assertAutoHandoffRetainedAddressable(t *testing.T, store beads.Store, id string) {
+	t.Helper()
+	b, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("auto handoff %s must be retained addressable after injection, not hard-deleted; store.Get = %v", id, err)
+	}
+	if b.Status != "closed" {
+		t.Errorf("auto handoff %s status = %q, want closed", id, b.Status)
+	}
+	if got := b.Metadata[mail.ReadMetadataKey]; got != "true" {
+		t.Errorf("auto handoff %s metadata[%q] = %q, want %q (marked read)", id, mail.ReadMetadataKey, got, "true")
+	}
+	if got := b.Metadata["close_reason"]; got != beadmail.RetentionSweepCloseReason {
+		t.Errorf("auto handoff %s close_reason = %q, want %q (retain-addressable)", id, got, beadmail.RetentionSweepCloseReason)
+	}
+}
+
 func TestMailCheckInjectArchivesAutoHandoffMessages(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
@@ -3562,9 +3653,7 @@ func TestMailCheckInjectArchivesAutoHandoffMessages(t *testing.T) {
 	if !strings.Contains(stdout.String(), auto.ID) {
 		t.Fatalf("injected output missing auto handoff id %s:\n%s", auto.ID, stdout.String())
 	}
-	if _, err := store.Get(auto.ID); !errors.Is(err, beads.ErrNotFound) {
-		t.Fatalf("auto handoff mail should be archived after injection, got err=%v", err)
-	}
+	assertAutoHandoffRetainedAddressable(t, store, auto.ID)
 	b, err := store.Get(ordinary.ID)
 	if err != nil {
 		t.Fatalf("ordinary mail should remain: %v", err)
@@ -3575,9 +3664,10 @@ func TestMailCheckInjectArchivesAutoHandoffMessages(t *testing.T) {
 }
 
 // TestMailCheckInjectArchivesEphemeralAutoHandoffMessages verifies that
-// ephemeral (wisp-tier) auto-handoff mail is archived after injection.
+// ephemeral (wisp-tier) auto-handoff mail is retired after injection.
 // gc handoff --auto creates Ephemeral:true beads; BdStore.Get must fall back
-// to the wisp tier so ArchiveInjectedAutoHandoffs can delete them.
+// to the wisp tier so ArchiveInjectedAutoHandoffs can retire them
+// (mark-read + close, retain-addressable — dip-6ov51a).
 func TestMailCheckInjectArchivesEphemeralAutoHandoffMessages(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
@@ -3601,9 +3691,7 @@ func TestMailCheckInjectArchivesEphemeralAutoHandoffMessages(t *testing.T) {
 	if !strings.Contains(stdout.String(), auto.ID) {
 		t.Fatalf("injected output missing auto handoff id %s:\n%s", auto.ID, stdout.String())
 	}
-	if _, err := store.Get(auto.ID); !errors.Is(err, beads.ErrNotFound) {
-		t.Fatalf("ephemeral auto handoff mail should be archived after injection, got err=%v", err)
-	}
+	assertAutoHandoffRetainedAddressable(t, store, auto.ID)
 }
 
 // TestMailCheckInjectFloatsPriorityAutoHandoffIntoWindow is the deliberate
@@ -3649,10 +3737,8 @@ func TestMailCheckInjectFloatsPriorityAutoHandoffIntoWindow(t *testing.T) {
 	if !strings.Contains(stdout.String(), auto.ID) {
 		t.Fatalf("priority:1 auto handoff id %s should float into the injection window:\n%s", auto.ID, stdout.String())
 	}
-	// ...and is archived (deleted) after injection.
-	if _, err := store.Get(auto.ID); !errors.Is(err, beads.ErrNotFound) {
-		t.Fatalf("priority:1 auto handoff should be archived after injection, got err=%v", err)
-	}
+	// ...and is retired (mark-read+closed, retain-addressable) after injection.
+	assertAutoHandoffRetainedAddressable(t, store, auto.ID)
 	// The lowest-ranked ordinary message is the one clamped out — still open.
 	clampedOut := ordinaryIDs[len(ordinaryIDs)-1]
 	b, err := store.Get(clampedOut)
@@ -4567,9 +4653,7 @@ name = "mayor"
 	if strings.Contains(stdout.String(), "msg-1") {
 		t.Fatalf("inject path used API inbox instead of local provider:\n%s", stdout.String())
 	}
-	if _, err := store.Get(auto.ID); !errors.Is(err, beads.ErrNotFound) {
-		t.Fatalf("auto handoff mail should be archived after local injection, got err=%v", err)
-	}
+	assertAutoHandoffRetainedAddressable(t, store, auto.ID)
 }
 
 func TestRenderMailCheckFromAPIInjectCodexUsesUserPromptSubmit(t *testing.T) {

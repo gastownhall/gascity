@@ -332,8 +332,11 @@ $ gc import credential add github.com/gascity --ssh-key-file ~/.ssh/packbot_ed25
 The `match` argument is a bare host or `host/path-prefix` (longest-prefix wins,
 so same-host different-org credentials coexist). Exactly one pointer flag is
 required. By default the rule is written to `<city>/.gc/credentials.toml`
-(0600); `--global` writes `$GC_HOME/credentials.toml` instead. List and remove
-registered rules with:
+(0600); `--global` writes `$GC_HOME/credentials.toml` instead. gc refuses to
+load a `credentials.toml` that is world-accessible or group-writable: the modes
+it accepts are 0600/0400, plus the root-owned own-group 0440 that a Kubernetes
+Secret volume mounted with `fsGroup` produces. List and remove registered rules
+with:
 
 ```text
 $ gc import credential list

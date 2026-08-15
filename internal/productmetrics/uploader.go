@@ -92,6 +92,20 @@ func (service *Service) lockUploader(ctx context.Context, root *storageRoot) (*l
 	return &lockedUploader{root: root, lock: lock}, nil
 }
 
+func (service *Service) tryLockUploader(root *storageRoot) (*lockedUploader, bool, error) {
+	if service == nil {
+		return nil, false, errors.New("productmetrics: service is nil")
+	}
+	if root == nil {
+		return nil, false, errStorageClosed
+	}
+	lock, acquired, err := root.tryAcquireUploaderLock()
+	if err != nil || !acquired {
+		return nil, false, err
+	}
+	return &lockedUploader{root: root, lock: lock}, true, nil
+}
+
 func (service *Service) uploadOneBatch(ctx context.Context, dependencies uploaderDependencies) (result uploadRunResult, returnErr error) {
 	if service == nil {
 		return result, errors.New("productmetrics: service is nil")

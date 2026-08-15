@@ -1,0 +1,131 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "gc ready result",
+  "description": "A bare JSON array of ready (claimable) beads, in bd's `bd ready --json` row shape. `gc ready` is a drop-in for that single-store command across a split city's stores, so its payload is bd's row contract rather than the gc envelope: consumers already decode this array directly (the hook work-query path unmarshals it into []beads.Bead). Field names match the HTTP Bead schema \u2014 `issue_type` for the type, `parent` for the parent \u2014 and NOT `gc bd dep tree --json`, which uses `parent_id`.",
+  "x-gc-raw-json": true,
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": [
+      "id",
+      "title",
+      "status",
+      "issue_type",
+      "created_at"
+    ],
+    "properties": {
+      "id": {
+        "type": "string"
+      },
+      "title": {
+        "type": "string"
+      },
+      "status": {
+        "type": "string"
+      },
+      "issue_type": {
+        "type": "string"
+      },
+      "priority": {
+        "type": "integer"
+      },
+      "created_at": {
+        "type": "string",
+        "format": "date-time"
+      },
+      "updated_at": {
+        "type": "string",
+        "format": "date-time"
+      },
+      "assignee": {
+        "type": "string"
+      },
+      "from": {
+        "type": "string"
+      },
+      "parent": {
+        "type": "string"
+      },
+      "ref": {
+        "type": "string"
+      },
+      "needs": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "description": {
+        "type": "string"
+      },
+      "labels": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "metadata": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "string"
+        }
+      },
+      "dependencies": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": [
+            "issue_id",
+            "depends_on_id",
+            "type"
+          ],
+          "properties": {
+            "issue_id": {
+              "type": "string"
+            },
+            "depends_on_id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "ephemeral": {
+        "type": "boolean"
+      },
+      "no_history": {
+        "type": "boolean"
+      },
+      "defer_until": {
+        "type": "string",
+        "format": "date-time"
+      },
+      "is_blocked": {
+        "type": "boolean"
+      },
+      "blocked_by": {
+        "type": "array",
+        "description": "Blocking dependencies of this row, each carrying the blocker's status. Populated only on the --status in_progress (crash-recovery) arm; absent elsewhere, which consumers read as not-blocked.",
+        "items": {
+          "type": "object",
+          "required": [
+            "id",
+            "status"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "additionalProperties": false
+  }
+}

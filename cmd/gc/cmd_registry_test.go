@@ -49,6 +49,33 @@ func TestBuildRegistryPublishRequestUsesCleanPushedGitHubHead(t *testing.T) {
 	}
 }
 
+// TestBuildRegistryPublishRequestResolvesSymlinkedPackRoot proves the
+// absPackRoot and repoRoot normalization in buildRegistryPublishRequest
+// (cmd_registry.go) resolves a symlinked pack root before computing the
+// repo-relative PackPath, mirroring
+// TestResolveLocalPackReleaseSourceResolvesSymlinkedSource. Without it,
+// filepath.Rel compares the symlink path against git's resolved toplevel and
+// wrongly reports the pack root as outside the repository.
+func TestBuildRegistryPublishRequestResolvesSymlinkedPackRoot(t *testing.T) {
+	repo, _ := setupRegistryPublishRepo(t)
+
+	link := filepath.Join(t.TempDir(), "link-repo")
+	if err := os.Symlink(repo, link); err != nil {
+		t.Skip("symlinks not supported")
+	}
+
+	request, err := buildRegistryPublishRequest(t.Context(), filepath.Join(link, "packs", "demo"), registryPublishOptions{}, false)
+	if err != nil {
+		t.Fatalf("buildRegistryPublishRequest: %v", err)
+	}
+	if request.PackPath != "packs/demo" {
+		t.Fatalf("PackPath = %q, want %q (real repo root, not the %q symlink)", request.PackPath, "packs/demo", link)
+	}
+	if request.RepoURL != "https://github.com/gastownhall/demo-packs" {
+		t.Fatalf("RepoURL = %q", request.RepoURL)
+	}
+}
+
 func TestBuildRegistryPublishRequestAcceptsWebFormFieldOverrides(t *testing.T) {
 	_, packDir := setupRegistryPublishRepo(t)
 

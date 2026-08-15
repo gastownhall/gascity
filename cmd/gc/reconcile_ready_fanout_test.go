@@ -250,12 +250,12 @@ func TestCollectAssignedWorkBeadsCachedMatchesUncached(t *testing.T) {
 
 	uncachedStore := &readyQueryRecordingStore{MemStore: beads.NewMemStore()}
 	uncachedSnap := seed(uncachedStore)
-	wantBeads, _, _, wantReady, wantPartial := collectAssignedWorkBeadsWithStores(&config.City{}, uncachedStore, nil, nil, uncachedSnap)
+	wantBeads, _, _, wantReady, wantPartial := collectAssignedWorkBeadsWithStores("", &config.City{}, uncachedStore, nil, nil, uncachedSnap)
 
 	cachedStore := &readyQueryRecordingStore{MemStore: beads.NewMemStore()}
 	cachedSnap := seed(cachedStore)
 	cache := newReadyDemandCache()
-	gotBeads, _, _, gotReady, gotPartial := collectAssignedWorkBeadsWithStores(&config.City{}, cachedStore, nil, nil, cachedSnap, cache)
+	gotBeads, _, _, gotReady, gotPartial := collectAssignedWorkBeadsWithStores("", &config.City{}, cachedStore, nil, nil, cachedSnap, cache)
 
 	if wantPartial != gotPartial {
 		t.Fatalf("partial mismatch: uncached=%v cached=%v", wantPartial, gotPartial)

@@ -23,6 +23,47 @@ import (
 // The gate ships warn-only by default — violations are logged but the close
 // proceeds — so existing open beads migrate without breakage. Set
 // GC_WORK_RECORD_ENFORCE to a truthy value to make violations block the close.
+//
+// # What the gate does NOT see: a close the by-ID class door served
+//
+// doBd runs the by-ID class door (cmd_bd_by_id.go maybeRouteBdByID) BEFORE this
+// gate, and a routed close returns from doBd without reaching it. So on a city
+// that relocates a coordination class, `gc bd close <id>` and `gc bd update
+// <id> --status closed` are gated only when they fall through to the bd
+// subprocess. This is a coverage boundary, and it is recorded here rather than
+// closed because closing it would mean re-deriving the gate against a store
+// this file does not resolve.
+//
+// It is narrower than it sounds, in three steps:
+//
+//   - This gate reads the PREFIX store (the caller's resolved work scope). A
+//     bead resident only in the class binding was never visible to it: the Get
+//     missed and the loop skipped the id. Routing those closes through the door
+//     removed nothing, because there was nothing to remove.
+//   - The canonical worker spelling was already outside. graph-worker.md renders
+//     `gc bd update <id> --set-metadata gc.outcome=pass --status closed`, and a
+//     served update on a class-owned bead has been answered by the door since
+//     that verb landed — well before close joined it.
+//   - What the door's close DOES take from the gate is the DUAL-RESIDENT case,
+//     and that population is real rather than hypothetical. `gc storage migrate`
+//     copies every non-work bead with its id preserved and keeps the source
+//     (readInfraSnapshot / infra_class_migrate.go), and coordclass.Classify
+//     routes ANY bead carrying gc.root_bead_id to ClassGraph
+//     (isWorkflowMetadata) — including a plain task-typed molecule work step
+//     with no gc.kind, which is exactly isWorkRecordGatedBead's population. On a
+//     migrated city those steps exist in both stores, and before the door served
+//     close, this gate evaluated them against the work store's RETAINED copy —
+//     the one frozen at migration time, not the one the close now writes. So the
+//     gate's pre-door verdict on a dual resident was already a verdict about a
+//     stale row.
+//
+// The drain path for that population is the sweep, not this gate. Both the CLI
+// door and the HTTP by-id lane now resolve a dual resident to the CLASS copy —
+// the door by its own residence probe, internal/api through the residency
+// resolver's ByID plan, which leads with the binding for exactly this reason —
+// so the two surfaces agree, and both write the row the controller reads. The
+// retained work copy stays reachable through raw bd against the work scope, and
+// it still has to be drained; that is the sweep's job, not this gate's.
 
 // workRecordEnforceEnvVar gates whether work-record violations block the close
 // (enforce) or are logged only (warn-only, the default).
@@ -183,22 +224,35 @@ func bdUpdateClosesStatus(bdArgs []string) bool {
 // `gc bd update --status=closed`) invocation closes against the work-record
 // contract. Best-effort: it never blocks on its own read failure. Returns
 // whether the close should be blocked (only when enforcement is enabled).
-func runWorkRecordCloseGate(bdArgs []string, scopeRoot, cityPath string, cfg *config.City, stderr io.Writer) bool {
+//
+// preOpened and preFetched let a caller that already opened the store and
+// fetched the target beads (e.g. the write-ID collision guard, which reads
+// the same beads for the same IDs immediately before this gate runs) hand
+// them in instead of paying a second openStoreAtForCity + store.Get round
+// trip. Both are optional (nil is fine): preOpened falls back to opening its
+// own store, and any ID missing from preFetched falls back to store.Get.
+func runWorkRecordCloseGate(bdArgs []string, scopeRoot, cityPath string, cfg *config.City, preOpened beads.Store, preFetched map[string]beads.Bead, stderr io.Writer) bool {
 	if _, ok := workRecordCloseTargets(bdArgs); !ok {
 		return false
 	}
-	store, err := openStoreAtForCityWithConfig(scopeRoot, cityPath, cfg)
-	if err != nil {
-		// Cannot verify — never block a close on our own read failure.
-		return false
+	store := preOpened
+	if store == nil {
+		var err error
+		store, err = openStoreAtForCityWithConfig(scopeRoot, cityPath, cfg)
+		if err != nil {
+			// Cannot verify — never block a close on our own read failure.
+			return false
+		}
 	}
-	return evaluateWorkRecordCloseGate(bdArgs, store, scopeRoot, workRecordEnforceEnabled(), stderr)
+	return evaluateWorkRecordCloseGate(bdArgs, store, preFetched, scopeRoot, workRecordEnforceEnabled(), stderr)
 }
 
 // evaluateWorkRecordCloseGate is the store-driven core of the close gate, split
 // from the IO wrapper so it is unit-testable with an in-memory store. It logs
-// each violation and reports whether the close should be blocked.
-func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, scopeRoot string, enforce bool, stderr io.Writer) (block bool) {
+// each violation and reports whether the close should be blocked. preFetched
+// (optional) supplies beads already read by an earlier guard in this same
+// invocation, avoiding a duplicate store.Get for the same ID.
+func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, preFetched map[string]beads.Bead, scopeRoot string, enforce bool, stderr io.Writer) (block bool) {
 	ids, ok := workRecordCloseTargets(bdArgs)
 	if !ok {
 		return false
@@ -208,8 +262,15 @@ func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, scopeRoot s
 		mode = "enforced"
 	}
 	for _, id := range ids {
-		bead, getErr := store.Get(id)
-		if getErr != nil || !isWorkRecordGatedBead(bead) {
+		bead, cached := preFetched[id]
+		if !cached {
+			var getErr error
+			bead, getErr = store.Get(id)
+			if getErr != nil {
+				continue
+			}
+		}
+		if !isWorkRecordGatedBead(bead) {
 			continue
 		}
 		var projectionErr error

@@ -16,6 +16,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -1892,6 +1893,208 @@ func TestReconcileSessionBeads_DrainAckMidPhaseEmitsAssignedWorkEvent(t *testing
 	}
 }
 
+// TestReconcileSessionBeads_DrainAckOwnDrainStepClosesWithoutEvent pins that
+// a session whose ONLY assigned work is its own mol-do-work "drain" step
+// must actually close on drain-ack (no pool respawn) and must NOT emit
+// SessionDrainAckedWithAssignedWork, since nothing is genuinely stranded.
+// Before the close-gate fix, the drain step counted as assigned work, so the
+// bead stayed open forever and the pool controller respawned a fresh session
+// onto the same still-open step every ~20s.
+func TestReconcileSessionBeads_DrainAckOwnDrainStepClosesWithoutEvent(t *testing.T) {
+	env := newReconcilerTestEnv()
+	fake := events.NewFake()
+	env.rec = fake
+
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start(worker): %v", err)
+	}
+
+	root, err := env.store.Create(beads.Bead{
+		Title: "Run of mol-do-work",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.FormulaNameMetadataKey: "mol-do-work",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	drainStep, err := env.store.Create(beads.Bead{
+		Title:    "Close drain step and signal completion",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: session.ID,
+		Metadata: map[string]string{
+			// Formula-qualified, matching what the live store actually writes
+			// — a bare "drain" fixture would pass before and
+			// after the fix and prove nothing.
+			beadmeta.StepRefMetadataKey:    "mol-do-work.drain",
+			beadmeta.RootBeadIDMetadataKey: root.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(drainStep): %v", err)
+	}
+
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+
+	woken := reconcileSessionBeads(
+		context.Background(),
+		[]beads.Bead{session},
+		env.desiredState,
+		nil,
+		env.cfg,
+		env.sp,
+		env.store,
+		dops,
+		nil,
+		nil,
+		env.dt,
+		nil,
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+	gotSession := env.reconcileStopPendingToTerminal(t, env.sp, session, dops, nil)
+	if gotSession.Status != "closed" {
+		t.Fatalf("session bead status = %q, want closed (own drain step must not block close): metadata=%v",
+			gotSession.Status, gotSession.Metadata)
+	}
+
+	matches := 0
+	for i := range fake.Events {
+		if fake.Events[i].Type == events.SessionDrainAckedWithAssignedWork {
+			matches++
+		}
+	}
+	if matches != 0 {
+		t.Fatalf("%s events = %d, want 0 — the session's own drain step is not stranded work", events.SessionDrainAckedWithAssignedWork, matches)
+	}
+
+	// The drain step itself is untouched by the close gate — the event path
+	// (firstOpenAssignedWorkBeadForReachableStore) and IsSessionBeadOrRepairable
+	// classification are deliberately unchanged; this just confirms the fix
+	// didn't mutate the step bead as a side effect.
+	gotStep, err := env.store.Get(drainStep.ID)
+	if err != nil {
+		t.Fatalf("Get(drainStep): %v", err)
+	}
+	if gotStep.Status == "closed" {
+		t.Errorf("drain step status = %q, the close gate must not itself close the step bead", gotStep.Status)
+	}
+}
+
+// TestReconcileSessionBeads_DrainAckStepNamedDrainInOtherFormulaStillBlocksClose
+// guards the narrow-match requirement in isSessionOwnDrainStepBead: a step bead
+// that happens to reuse the literal step id "drain" but whose molecule root was
+// NOT compiled from the mol-do-work formula must still count as assigned work —
+// the exclusion is scoped to mol-do-work's drain step specifically, not to any
+// step named "drain".
+func TestReconcileSessionBeads_DrainAckStepNamedDrainInOtherFormulaStillBlocksClose(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	fake := events.NewFake()
+	env.rec = fake
+
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+
+	root, err := env.store.Create(beads.Bead{
+		Title: "Run of some-other-formula",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.FormulaNameMetadataKey: "some-other-formula",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	decoyStep, err := env.store.Create(beads.Bead{
+		Title:    "drain the widget queue",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: session.ID,
+		Metadata: map[string]string{
+			beadmeta.StepRefMetadataKey:    "some-other-formula.drain",
+			beadmeta.RootBeadIDMetadataKey: root.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(decoyStep): %v", err)
+	}
+
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+
+	woken := reconcileSessionBeads(
+		context.Background(),
+		[]beads.Bead{session},
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		env.sp,
+		env.store,
+		dops,
+		nil,
+		nil,
+		env.dt,
+		nil,
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+	gotSession := env.reconcileStopPendingToTerminal(t, env.sp, session, dops, map[string]bool{"worker": true})
+	if gotSession.Status == "closed" {
+		t.Fatalf("session bead closed unexpectedly: a same-named 'drain' step from an unrelated formula must still block close: metadata=%v", gotSession.Metadata)
+	}
+
+	matches := 0
+	for i := range fake.Events {
+		if fake.Events[i].Type == events.SessionDrainAckedWithAssignedWork {
+			matches++
+		}
+	}
+	if matches != 1 {
+		t.Fatalf("%s events = %d, want exactly 1 for the genuinely-stranded decoy step", events.SessionDrainAckedWithAssignedWork, matches)
+	}
+
+	got, err := env.store.Get(decoyStep.ID)
+	if err != nil {
+		t.Fatalf("Get(decoyStep): %v", err)
+	}
+	if got.Assignee != session.ID {
+		t.Errorf("decoy step assignee = %q, want %q", got.Assignee, session.ID)
+	}
+}
+
 func TestReconcileSessionBeads_DeadDesiredDrainAckWithAssignedWorkEmitsOneEvent(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
@@ -3058,12 +3261,12 @@ func TestCollectSessionAssignedWorkIncludesAssignedWisp(t *testing.T) {
 		t.Fatalf("Create wisp work: %v", err)
 	}
 
-	got, err := collectSessionAssignedWork("", nil, store, nil, session)
+	got, err := collectSessionAssignedWorkInfo("", nil, store, nil, sessionInfosFromBeads([]beads.Bead{session})[0])
 	if err != nil {
-		t.Fatalf("collectSessionAssignedWork: %v", err)
+		t.Fatalf("collectSessionAssignedWorkInfo: %v", err)
 	}
 	if len(got) != 1 || got[0].bead.ID != work.ID {
-		t.Fatalf("collectSessionAssignedWork = %#v, want assigned wisp %s", got, work.ID)
+		t.Fatalf("collectSessionAssignedWorkInfo = %#v, want assigned wisp %s", got, work.ID)
 	}
 }
 
@@ -9163,6 +9366,148 @@ func TestReconcileSessionBeads_IdleTimeoutStopsAndStaysAsleep(t *testing.T) {
 	}
 	if b.Metadata["slept_at"] != env.clk.Now().UTC().Format(time.RFC3339) {
 		t.Errorf("slept_at = %q, want idle stop timestamp", b.Metadata["slept_at"])
+	}
+}
+
+// TestReconcileSessionBeads_IdleTimeoutKeepsMinFloorWarm is the sc-5mtyhy
+// acceptance-1 end-to-end proof: a pool session within the min_active_sessions
+// floor, idle past its timeout with no assigned work, is NOT idle-killed — it
+// stays alive/warm rather than being killed and cold-recreated next tick.
+func TestReconcileSessionBeads_IdleTimeoutKeepsMinFloorWarm(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(1)}}}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	if err := env.sp.SetMeta("worker", "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	it := newFakeIdleTracker()
+	it.idle["worker"] = true
+
+	reconcileSessionBeads(
+		context.Background(), []beads.Bead{session}, env.desiredState, configuredSessionNames(env.cfg, "", env.store),
+		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
+		it, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+	)
+
+	if !env.sp.IsRunning("worker") {
+		t.Fatal("min-floor session must stay warm across idle timeout, not be killed+cold-recreated")
+	}
+	b, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Metadata["sleep_reason"] == "idle-timeout" {
+		t.Errorf("sleep_reason = %q, a kept-warm floor session must not be idle-slept", b.Metadata["sleep_reason"])
+	}
+}
+
+// TestReconcileSessionBeads_IdleTimeoutReclaimsAboveFloorElastic is the
+// acceptance-2 end-to-end proof: with a min_active_sessions=1 floor and two
+// idle sessions, the deterministic lowest-bead-id session stays warm while the
+// above-floor elastic session is idle-reclaimed exactly as before the fix — the
+// floor exemption is bounded to minSess and does not leak the pool warm.
+func TestReconcileSessionBeads_IdleTimeoutReclaimsAboveFloorElastic(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(1)}}}
+	env.addDesired("w1", "worker", true)
+	env.addDesired("w2", "worker", true)
+	s1 := env.createSessionBead("w1", "worker")
+	s2 := env.createSessionBead("w2", "worker")
+	env.markSessionActive(&s1)
+	env.markSessionActive(&s2)
+	if err := env.sp.SetMeta("w1", "GC_SESSION_ID", s1.ID); err != nil {
+		t.Fatalf("SetMeta(w1): %v", err)
+	}
+	if err := env.sp.SetMeta("w2", "GC_SESSION_ID", s2.ID); err != nil {
+		t.Fatalf("SetMeta(w2): %v", err)
+	}
+
+	// The floor member is the lowest-bead-id session; the other is elastic.
+	warmName, warmID, reclaimName := "w1", s1.ID, "w2"
+	if s2.ID < s1.ID {
+		warmName, warmID, reclaimName = "w2", s2.ID, "w1"
+	}
+
+	it := newFakeIdleTracker()
+	it.idle["w1"] = true
+	it.idle["w2"] = true
+
+	reconcileSessionBeads(
+		context.Background(), []beads.Bead{s1, s2}, env.desiredState, configuredSessionNames(env.cfg, "", env.store),
+		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
+		it, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+	)
+
+	if !env.sp.IsRunning(warmName) {
+		t.Errorf("lowest-id floor member %q must stay warm across idle timeout", warmName)
+	}
+	if env.sp.IsRunning(reclaimName) {
+		t.Errorf("above-floor elastic session %q must idle-reclaim as before the fix", reclaimName)
+	}
+	// The kept-warm session is never idle-slept; the reclaimed one is.
+	if wb, err := env.store.Get(warmID); err == nil && wb.Metadata["sleep_reason"] == "idle-timeout" {
+		t.Errorf("floor member %q sleep_reason = idle-timeout, want kept warm", warmName)
+	}
+}
+
+// TestReconcileSessionBeads_IdleTimeoutMinFloorIgnoresNonPoolSession is the
+// mixed-identity end-to-end proof: the min_active_sessions floor covers
+// pool-managed beads only (isMinActivePoolBead), so a LOWER-bead-id
+// configured-named session sharing the template must not consume the floor
+// rank — the real pool member still stays warm — and must not inherit the
+// keep-warm exemption itself: it idle-reclaims exactly as it did before
+// sc-5mtyhy.
+func TestReconcileSessionBeads_IdleTimeoutMinFloorIgnoresNonPoolSession(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(1)}}}
+	env.addDesired("named", "worker", true)
+	env.addDesired("w1", "worker", true)
+
+	// The named session is created FIRST so it holds the lower bead ID: that
+	// is the ordering under which an un-narrowed floor rank would swallow the
+	// pool member's exempt slot and silently no-op the keep-warm fix.
+	named := env.createSessionBead("named", "worker")
+	env.setSessionMetadata(&named, map[string]string{
+		"configured_named_session":  "true",
+		"configured_named_identity": "named",
+	})
+	pool := env.createSessionBead("w1", "worker")
+	if named.ID >= pool.ID {
+		t.Fatalf("fixture: named bead id %q must sort below the pool bead id %q", named.ID, pool.ID)
+	}
+	env.markSessionActive(&named)
+	env.markSessionActive(&pool)
+	if err := env.sp.SetMeta("named", "GC_SESSION_ID", named.ID); err != nil {
+		t.Fatalf("SetMeta(named): %v", err)
+	}
+	if err := env.sp.SetMeta("w1", "GC_SESSION_ID", pool.ID); err != nil {
+		t.Fatalf("SetMeta(w1): %v", err)
+	}
+
+	it := newFakeIdleTracker()
+	it.idle["named"] = true
+	it.idle["w1"] = true
+
+	reconcileSessionBeads(
+		context.Background(), []beads.Bead{named, pool}, env.desiredState, configuredSessionNames(env.cfg, "", env.store),
+		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
+		it, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+	)
+
+	if !env.sp.IsRunning("w1") {
+		t.Error("the pool floor member must stay warm; a lower-id named session must not consume its floor rank")
+	}
+	if pb, err := env.store.Get(pool.ID); err == nil && pb.Metadata["sleep_reason"] == "idle-timeout" {
+		t.Errorf("pool floor member sleep_reason = idle-timeout, want kept warm")
+	}
+	if env.sp.IsRunning("named") {
+		t.Error("the configured-named session is not a floor member and must follow its pre-existing idle path")
+	}
+	if nb, err := env.store.Get(named.ID); err == nil && nb.Metadata["sleep_reason"] != "idle-timeout" {
+		t.Errorf("named session sleep_reason = %q, want idle-timeout (unchanged pre-existing path)", nb.Metadata["sleep_reason"])
 	}
 }
 

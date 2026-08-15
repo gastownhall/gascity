@@ -632,3 +632,105 @@ func TestDoltLeakGuardedTestingMRunWithSweepsOrphanDirsAtStartup(t *testing.T) {
 		t.Fatalf("call order = %v, want [sweepStale sweepOrphanDirs runTests ...]", order)
 	}
 }
+
+// A dolt sql-server rooted in the source checkout rather than under the run's
+// temp root is the leak shape the guard used to miss entirely: cmd/gc's own
+// package dir is structurally outside tempRoot, so PathWithin(tempRoot, cfg)
+// was false and the process was skipped in silence. .gitignore hides the
+// matching cmd/gc/.gc and cmd/gc/.beads dirs, so nothing surfaced it.
+func TestSnapshotDoltProcessesForConfigRootsCatchesSourceTreeLeak(t *testing.T) {
+	tempRoot := filepath.Join("/tmp", "gct12345-678")
+	sourceRoot := filepath.Join("/home", "dev", "gascity", "cmd", "gc")
+
+	underTemp := DoltProcInfo{
+		PID:  1001,
+		Argv: []string{"dolt", "sql-server", "--config", filepath.Join(tempRoot, "TestX", "001", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")},
+	}
+	underSource := DoltProcInfo{
+		PID:  1002,
+		Argv: []string{"dolt", "sql-server", "--config", filepath.Join(sourceRoot, ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")},
+	}
+	// A real city server on the same machine must stay out of the snapshot: the
+	// reaping paths kill everything the snapshot returns, so widening the guard
+	// must not put a developer's own city at risk.
+	realCity := DoltProcInfo{
+		PID:  1003,
+		Argv: []string{"dolt", "sql-server", "--config", filepath.Join("/home", "dev", "city", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")},
+	}
+
+	enumerate := func() ([]DoltProcInfo, error) {
+		return []DoltProcInfo{underTemp, underSource, realCity}, nil
+	}
+
+	got, err := snapshotDoltProcessesForConfigRoots(enumerate, []string{tempRoot, sourceRoot})
+	if err != nil {
+		t.Fatalf("snapshotDoltProcessesForConfigRoots: %v", err)
+	}
+	if _, ok := got[1002]; !ok {
+		t.Errorf("source-tree leak PID 1002 missing from snapshot: %#v", got)
+	}
+	if _, ok := got[1001]; !ok {
+		t.Errorf("temp-root leak PID 1001 missing from snapshot: %#v", got)
+	}
+	if _, ok := got[1003]; ok {
+		t.Errorf("real city server PID 1003 must not be snapshotted (the reaper kills these): %#v", got)
+	}
+
+	// The pre-fix behavior, pinned so a regression to a single root is caught.
+	tempOnly, err := snapshotDoltProcessesForConfigRoots(enumerate, []string{tempRoot})
+	if err != nil {
+		t.Fatalf("snapshotDoltProcessesForConfigRoots(tempRoot only): %v", err)
+	}
+	if _, ok := tempOnly[1002]; ok {
+		t.Errorf("tempRoot-only snapshot should not see the source-tree leak: %#v", tempOnly)
+	}
+}
+
+func TestDoltLeakGuardedTestingMLeakRootsIncludeCheckoutRoot(t *testing.T) {
+	tempRoot := filepath.Join("/tmp", "gct12345-678")
+	checkoutRoot := filepath.Join(t.TempDir(), "gascity")
+	sourceRoot := filepath.Join(checkoutRoot, "cmd", "gc")
+	if err := os.MkdirAll(sourceRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(checkoutRoot, "go.mod"), []byte("module example.com/gascity\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g := &doltLeakGuardedTestingM{
+		tempRoot:     tempRoot,
+		sourceRoot:   sourceRoot,
+		checkoutRoot: checkoutRootForTestSource(sourceRoot),
+	}
+
+	if roots := g.leakRoots(); len(roots) != 3 || roots[2] != checkoutRoot {
+		t.Fatalf("leakRoots() = %q, want checkout root %q", roots, checkoutRoot)
+	}
+}
+
+func TestCheckoutRootForTestSourceRejectsUnexpectedLayout(t *testing.T) {
+	sourceRoot := filepath.Join(t.TempDir(), "cmd", "gc")
+	if err := os.MkdirAll(sourceRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := checkoutRootForTestSource(sourceRoot); got != "" {
+		t.Fatalf("checkoutRootForTestSource() = %q, want empty without go.mod", got)
+	}
+}
+
+// An unresolved root must narrow the snapshot, never widen it to match every
+// dolt server on the host — the reaping paths would then kill real cities.
+func TestSnapshotDoltProcessesForConfigRootsIgnoresEmptyRoots(t *testing.T) {
+	proc := DoltProcInfo{
+		PID:  2001,
+		Argv: []string{"dolt", "sql-server", "--config", filepath.Join("/home", "dev", "city", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")},
+	}
+	got, err := snapshotDoltProcessesForConfigRoots(func() ([]DoltProcInfo, error) {
+		return []DoltProcInfo{proc}, nil
+	}, []string{"", ""})
+	if err != nil {
+		t.Fatalf("snapshotDoltProcessesForConfigRoots: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("empty roots matched %d process(es), want 0: %#v", len(got), got)
+	}
+}

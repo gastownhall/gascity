@@ -87,7 +87,13 @@ func requirePython3(t *testing.T) {
 // that proxy_process.go intentionally seeds into the helper env. Other GC_*
 // leak vectors stay scrubbed. GC_SERVICE_* vars are not leak vectors so they
 // flow through untouched without being listed here.
-const helperPassthroughForTests = "GC_CITY,GC_CITY_PATH,GC_CITY_RUNTIME_DIR,GC_CONTROL_DISPATCHER_TRACE_DEFAULT"
+//
+// GC_DISABLE_USAGE_METRICS is on the list for the same reason: proxy_process.go
+// seeds the opt-out into every helper env deliberately, and that seeding is
+// what TestProxyProcessDisablesProductMetrics asserts. It is a leak vector
+// elsewhere — an ambient value silently flips the productmetrics projection —
+// so only this intentional seeding is exempted, by name.
+const helperPassthroughForTests = "GC_CITY,GC_CITY_PATH,GC_CITY_RUNTIME_DIR,GC_CONTROL_DISPATCHER_TRACE_DEFAULT,GC_DISABLE_USAGE_METRICS"
 
 // setHelperPassthrough installs extraHelperEnv so proxy_process.start()
 // appends the passthrough var to the helper subprocess env. Tests run

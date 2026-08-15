@@ -76,6 +76,30 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 				"session_name": "worker-ga-pool",
 			},
 		},
+		"pool-alias-claim": {
+			// A LEGACY pool bead: minted before pool slots were unaliased, so it
+			// still carries a slot in alias/alias_history. Both values are distinct
+			// from the ID, the session_name, and each other, so the
+			// assignment-identifier rows below compare a genuinely alias-bearing
+			// bead — and must agree, on both the raw and Info form, that the
+			// slot is NOT an assignment identity (see
+			// TestAssignmentGuardsIgnoreTransientPoolSlotAliases). The "named"
+			// fixture cannot exercise this: its alias equals its session_name, so
+			// the difference collapses on dedup.
+			ID:     "gcg-session-alias",
+			Type:   session.BeadType,
+			Title:  "worker",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":      "worker",
+				"pool_managed":  "true",
+				"pool_slot":     "1",
+				"state":         "awake",
+				"session_name":  "gc__run-operator-gcg-session-alias",
+				"alias":         "gascity/gc.run-operator-1",
+				"alias_history": "gascity/gc.run-operator-0",
+			},
+		},
 		"pool-managed-flag-only": {
 			ID:     "ga-poolflag",
 			Type:   session.BeadType,
