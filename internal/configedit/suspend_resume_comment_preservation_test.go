@@ -1,12 +1,14 @@
 package configedit_test
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -311,5 +313,68 @@ schema = 2
 	}
 	if len(added) != 0 {
 		t.Errorf("resume added unrelated content lines %v; city.toml now:\n%s", added, after)
+	}
+}
+
+// TestResumeAgent_LocalDiscovered_AmbiguousLegacyPatch_RefusesLossyRewrite
+// pins ga-47m118 round 3: the sibling failure mode to
+// TestResumeAgent_LocalDiscovered_StripsLegacyPatchSuspended_PreservesComments's
+// single-block success case above. Here two duplicate [[patches.agent]]
+// blocks share the same (dir, name) identity -- a leftover shape
+// findTOMLArrayBlock refuses to guess between -- so
+// StripAgentPatchSuspendedForEdit reports config.ErrSurgicalAgentEditUnsupported.
+// mutateAgentSuspended's OriginDerived branch used to swallow that error and
+// return plain nil, which EditExpanded treats as "write the raw config,"
+// silently deleting every comment in city.toml while leaving the ambiguous
+// patch blocks in place. Resuming must instead surface the refusal and
+// leave city.toml byte-for-byte untouched.
+func TestResumeAgent_LocalDiscovered_AmbiguousLegacyPatch_RefusesLossyRewrite(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, `# City-level rationale: primary orchestration city for gascity.
+[workspace]
+name = "test-city"
+
+[[patches.agent]]
+dir = ""
+name = "worker"
+suspended = true
+
+[[patches.agent]]
+dir = ""
+name = "worker"
+suspended = true
+`)
+	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte(`[pack]
+name = "test-city"
+schema = 2
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	agentDir := filepath.Join(dir, "agents", "worker")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "prompt.template.md"), []byte("You are the worker.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "agent.toml"), []byte("suspended = true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	before := string(mustReadFile(t, path))
+
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+	err := ed.ResumeAgent("worker")
+
+	if err == nil {
+		t.Fatal("expected ResumeAgent to refuse the ambiguous legacy patch, got nil error")
+	}
+	if !errors.Is(err, config.ErrSurgicalAgentEditUnsupported) {
+		t.Errorf("expected error wrapping config.ErrSurgicalAgentEditUnsupported, got: %v", err)
+	}
+
+	after := string(mustReadFile(t, path))
+	if after != before {
+		t.Errorf("refused resume must leave city.toml byte-for-byte unchanged; diff:\nbefore:\n%s\nafter:\n%s", before, after)
 	}
 }
