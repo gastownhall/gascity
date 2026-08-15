@@ -882,16 +882,19 @@ func stopManagedDoltTestPID(t *testing.T, pid int) {
 	}
 }
 
-// registerRealBDServerStop is a placeholder pending ga-hk84x0's GREEN step —
-// it must stop any dolt sql-server rooted under the city path before
-// returning so TestRegisterRealBDServerStopStopsServerBeforeTempDirCleanup
-// passes. Left as a no-op, that test fails at its own assertion (server
-// still alive) rather than at compile time, so RED stays compatible with
-// this repo's pre-commit typecheck gate (make lint-changed rejects any
-// commit that doesn't build). The second parameter is unused until GREEN
-// gives it a body, so it's blanked to satisfy the unused-parameter lint.
-func registerRealBDServerStop(t *testing.T, _ string) {
+// registerRealBDServerStop stops any dolt sql-server rooted under cityPath
+// before the calling test returns. Callers must invoke this after their own
+// t.TempDir() call so t.Cleanup's LIFO ordering runs this cleanup — and so
+// the server's own writes under cityPath stop — before TempDir's automatic
+// RemoveAll walks that directory. Without this, a still-running server can
+// race that RemoveAll and intermittently fail with "directory not empty";
+// the package-level dolt leak guard only sweeps once, at the end of the
+// whole package run, too late to protect any one test's own TempDir cleanup.
+func registerRealBDServerStop(t *testing.T, cityPath string) {
 	t.Helper()
+	t.Cleanup(func() {
+		stopManagedDoltProcessesUnderTestCity(t, cityPath)
+	})
 }
 
 // fakeDoltSQLServerMarkerEnv, when set to "1" in a re-executed cmd/gc test
