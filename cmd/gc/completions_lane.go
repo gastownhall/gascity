@@ -34,6 +34,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -44,6 +45,11 @@ import (
 	"github.com/gastownhall/gascity/internal/executionevent"
 )
 
+// Cadences are consts, not config. Every one of them is an operational knob
+// somebody will eventually want per city, and every one of them is also a knob
+// that lets an operator recreate the hot-backstop bug this lane exists to fix.
+// TODO(ga-l7jdg): expose these under [daemon] once a city has needed a value
+// other than the default; until then a const is one less way to be wrong.
 const (
 	// completionsBackstopInterval is the full sweep's cadence when nothing forces
 	// it sooner.
@@ -74,6 +80,13 @@ type completionsLane struct {
 	forced      bool
 	sweepRan    bool
 	lastSweepAt time.Time
+
+	// Per-sweep accumulators. A sweep spans several chunks, so its summary line
+	// has to be assembled across them or it reports one chunk and calls it a
+	// convergence pass.
+	sweepStartedAt time.Time
+	sweepEmitted   int
+	sweepRoots     int
 
 	interval time.Duration
 }
@@ -156,15 +169,50 @@ func (l *completionsLane) sweepDue(now time.Time) bool {
 	return now.Sub(l.lastSweepAt) >= l.interval
 }
 
-// noteSweepRan records a completed sweep and clears the force latch. A sweep in
-// progress (chunked, not yet complete) does NOT call this: its remaining chunks
-// keep the lane due.
-func (l *completionsLane) noteSweepRan(now time.Time) {
+// noteSweepChunk folds one chunk into the sweep in progress and, when the chunk
+// completed a full traversal, closes the sweep out: it clears the force latch,
+// advances the cadence, and returns the whole sweep's totals for the summary
+// line. A sweep still in progress returns done=false and keeps the lane due.
+func (l *completionsLane) noteSweepChunk(now time.Time, emitted, roots int, complete bool) (total completionsSweepTotals, done bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.sweepStartedAt.IsZero() {
+		l.sweepStartedAt = now
+	}
+	l.sweepEmitted += emitted
+	l.sweepRoots += roots
+	if !complete {
+		return completionsSweepTotals{}, false
+	}
+	total = completionsSweepTotals{
+		Emitted: l.sweepEmitted,
+		Roots:   l.sweepRoots,
+		Elapsed: now.Sub(l.sweepStartedAt),
+	}
 	l.lastSweepAt = now
 	l.sweepRan = true
 	l.forced = false
+	l.sweepStartedAt = time.Time{}
+	l.sweepEmitted = 0
+	l.sweepRoots = 0
+	return total, true
+}
+
+// completionsSweepTotals is one full traversal's summary.
+type completionsSweepTotals struct {
+	Emitted int
+	Roots   int
+	Elapsed time.Duration
+}
+
+// lastSweep reports when the last FULL traversal finished, and whether one ever
+// has. It is what the tick's trace record carries so an operator can see the
+// convergence lane's age without reading the log: a backstop whose age nobody
+// can see is a backstop nobody notices has stopped.
+func (l *completionsLane) lastSweep() (time.Time, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.lastSweepAt, l.sweepRan
 }
 
 // completionsLaneOf returns this runtime's completions lane, creating it on
@@ -215,8 +263,37 @@ func (cr *CityRuntime) runCompletionsSweepChunk(backstop *executionevent.Complet
 		return executionevent.CompletionBackstopResult{}
 	}
 	result := backstop.Pass(ep, graphStores, "execution-reconcile")
-	if result.SweepComplete {
-		lane.noteSweepRan(time.Now())
+	// A store the traversal could not list is skipped so one dark store cannot
+	// stall the sweep. Skipped silently, that is a lane converging nothing while
+	// looking healthy, so every skip is named.
+	for _, listErr := range result.ListErrors {
+		fmt.Fprintf(cr.stderr, "%s: completions sweep: %v\n", cr.logPrefix, listErr) //nolint:errcheck // best-effort stderr
+	}
+	total, done := lane.noteSweepChunk(time.Now(), result.Emitted, result.RootsVisited, result.SweepComplete)
+	if done {
+		summary := fmt.Sprintf("converged %d root(s), emitted %d completion fact(s), took %s (stores=%d)",
+			total.Roots, total.Emitted, total.Elapsed.Round(time.Millisecond), len(graphStores))
+		fmt.Fprintf(cr.stderr, "%s: completions sweep: %s\n", cr.logPrefix, summary) //nolint:errcheck // best-effort stderr
 	}
 	return result
+}
+
+// addBackstopAgeFields records a convergence lane's age on the tick record that
+// consumes it.
+//
+// Both backstops run on background goroutines, so the tick is the only place
+// their liveness is observable from the trace. "Never ran" is reported as a
+// distinct value rather than as an age of zero: a lane that has not converged
+// once and a lane that converged a moment ago are opposite conditions, and
+// collapsing them is how a stalled backstop hides.
+func addBackstopAgeFields(fields map[string]any, at time.Time, reason string, ran bool) {
+	if !ran {
+		fields["backstop_ran"] = false
+		return
+	}
+	fields["backstop_ran"] = true
+	fields["backstop_age_seconds"] = int(time.Since(at).Round(time.Second) / time.Second)
+	if reason != "" {
+		fields["backstop_last_reason"] = reason
+	}
 }

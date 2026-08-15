@@ -1221,8 +1221,15 @@ func (cr *CityRuntime) tick(
 	phaseStart = time.Now()
 	routeReport := cr.recoverUnroutedWorkRoutesDelta()
 	if trace != nil {
+		// The convergence lane runs on a background goroutine, so the tick's
+		// record is where its age becomes visible: `gc trace` answers "when did
+		// the backstop last converge, and why was it due" without an operator
+		// having to find the log line.
+		routeFields := routeReport.fields()
+		backstopAt, backstopReason, backstopRan := cr.routeRecoveryLaneOf().lastBackstop()
+		addBackstopAgeFields(routeFields, backstopAt, backstopReason, backstopRan)
 		trace.RecordControllerOperation(TraceSiteControllerTickPhase, TraceReasonRetained, routeReport.outcome(),
-			"recover_unrouted_work_routes", time.Since(phaseStart), routeReport.fields())
+			"recover_unrouted_work_routes", time.Since(phaseStart), routeFields)
 	}
 	if ctx.Err() != nil {
 		return
@@ -1387,13 +1394,17 @@ func (cr *CityRuntime) tick(
 	// ran on every tick and cost 72.4s of it (ga-l7jdg).
 	if cr.cs != nil {
 		phaseStart = time.Now()
-		namedRoots := cr.completionsLaneOf().takePending()
+		completionsLane := cr.completionsLaneOf()
+		namedRoots := completionsLane.takePending()
 		emitted := cr.cs.reconcileExecutionCompletionsDelta(namedRoots)
-		recordPhase(TraceSiteControllerTickPhase, "reconcile_execution_completions", phaseStart, map[string]any{
+		completionFields := map[string]any{
 			"lane":        "delta",
 			"named_roots": len(namedRoots),
 			"emitted":     emitted,
-		})
+		}
+		sweptAt, swept := completionsLane.lastSweep()
+		addBackstopAgeFields(completionFields, sweptAt, "", swept)
+		recordPhase(TraceSiteControllerTickPhase, "reconcile_execution_completions", phaseStart, completionFields)
 	}
 
 	// Wisp GC: purge expired closed molecules. The molecule/wisp/workflow purge

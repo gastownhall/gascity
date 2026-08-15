@@ -430,6 +430,12 @@ type CompletionBackstopResult struct {
 	// SweepComplete reports that this Pass finished a full traversal, so the
 	// cursor has wrapped and the next Pass begins a new sweep.
 	SweepComplete bool
+	// ListErrors names the stores whose root list this chunk could not read. A
+	// store that cannot be listed is silently skipped by the traversal so one
+	// dark store does not stall the sweep — which is correct, and is exactly why
+	// it has to be REPORTED: a convergence lane that quietly converges nothing
+	// is indistinguishable from one with nothing to do.
+	ListErrors []error
 }
 
 // Pass visits at most ChunkSize roots, resuming from the last Pass's cursor.
@@ -461,7 +467,9 @@ func (b *CompletionBackstop) Pass(recorder events.Provider, graphStores []beads.
 		)
 		if err != nil {
 			// A store that cannot be listed does not stall the sweep; the next
-			// sweep retries it.
+			// sweep retries it. The caller is told, so a lane converging nothing
+			// cannot look like a lane with nothing to converge.
+			result.ListErrors = append(result.ListErrors, fmt.Errorf("listing workflow roots in graph store %d: %w", b.storeIndex, err))
 			b.storeIndex++
 			b.afterRootID = ""
 			continue

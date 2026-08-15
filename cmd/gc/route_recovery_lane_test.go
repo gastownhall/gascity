@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -243,6 +246,62 @@ func TestRouteRecoveryBackstopHealsWhatTheEventFeedLost(t *testing.T) {
 	}
 }
 
+// TestRouteRecoveryBackstopHealsABindingResidentLossOnAConvergedCity is the
+// binding half of the convergence doctrine, and it is the case that makes the
+// doctrine load-bearing rather than decorative.
+//
+// On a converged split city the operator ruling puts ALL routed work in the
+// graph binding, and the runtime plane reads only that binding — delta-only, by
+// construction. So if the binding had no convergence scan behind it, a
+// binding-resident bead whose gc.routed_to is lost with a dropped journal event
+// would be invisible to the pool FOREVER: no tick would name it, and no sweep
+// would look. Hourly is the price; never is not an option.
+//
+// Fixture shape is the same lost-event one the ledger case uses: the store holds
+// a repairable bead the journal never announced.
+func TestRouteRecoveryBackstopHealsABindingResidentLossOnAConvergedCity(t *testing.T) {
+	binding := &countingRouteStore{Store: beads.NewMemStoreFrom(0, []beads.Bead{unroutedWorkBead("GB-lost")}, nil)}
+	work := &countingRouteStore{Store: beads.NewMemStore()}
+	topo := assembleResidencyTopology(&config.City{}, work, nil,
+		[]storeref.ClassBinding{{
+			Classes: []coordclass.Class{coordclass.ClassGraph},
+			Leg:     storeref.Leg{Ref: storeref.ClassRef([]coordclass.Class{coordclass.ClassGraph}), Store: binding},
+		}}, nil)
+	plan, err := storeref.Plan(storeref.RoutedWork{}, topo)
+	if err != nil {
+		t.Fatalf("Plan(RoutedWork): %v", err)
+	}
+	lane := newRouteRecoveryLane()
+
+	// No event ever names it, so no number of ticks repairs it. This is the
+	// delta lane being honestly delta — and it is why the sweep is not optional.
+	for range 3 {
+		if report := lane.deltaPass(plan, nil); report.restored != 0 {
+			t.Fatalf("a delta pass restored %d for an unannounced bead, want 0", report.restored)
+		}
+	}
+	if got := mustRoutedTo(t, binding, "GB-lost"); got != "" {
+		t.Fatalf("GB-lost gc.routed_to = %q after delta ticks, want empty (the delta path is scanning)", got)
+	}
+
+	first := lane.backstopPass(plan, routeRecoveryBackstopCadence)
+	if first.restored != 1 {
+		t.Fatalf("the convergence pass restored %d, want 1 — a binding-resident loss has no other repair path", first.restored)
+	}
+	if got := mustRoutedTo(t, binding, "GB-lost"); got != routeRecoveryTestPool {
+		t.Fatalf("GB-lost gc.routed_to = %q after the convergence pass, want %q", got, routeRecoveryTestPool)
+	}
+
+	// Idempotency: converging twice writes once.
+	writesAfterHeal := binding.writes
+	if second := lane.backstopPass(plan, routeRecoveryBackstopCadence); second.restored != 0 {
+		t.Fatalf("the second convergence pass restored %d, want 0", second.restored)
+	}
+	if binding.writes != writesAfterHeal {
+		t.Fatalf("the second convergence pass issued %d extra write(s), want 0", binding.writes-writesAfterHeal)
+	}
+}
+
 // TestRouteRecoveryCursorGapForcesTheBackstop pins the schedule half: every way
 // the event feed can stop naming every change must make the authoritative scan
 // due immediately, not at the next hourly tick.
@@ -254,7 +313,7 @@ func TestRouteRecoveryCursorGapForcesTheBackstop(t *testing.T) {
 	if reason, due := lane.backstopDue(now); !due || reason != routeRecoveryBackstopStartup {
 		t.Fatalf("fresh lane due=%v reason=%q, want due with reason %q", due, reason, routeRecoveryBackstopStartup)
 	}
-	lane.noteBackstopRan(now, false)
+	lane.noteBackstopRan(now, routeRecoveryBackstopCadence, false)
 	// Control: right after a clean pass it is NOT due, so "always due" is not
 	// what the assertions below are measuring.
 	if _, due := lane.backstopDue(now.Add(time.Minute)); due {
@@ -273,7 +332,7 @@ func TestRouteRecoveryCursorGapForcesTheBackstop(t *testing.T) {
 
 	// A pass that could not read every leg comes back on the short retry
 	// cadence, not the hourly one: the leg it missed is the overdue one.
-	lane.noteBackstopRan(now, true)
+	lane.noteBackstopRan(now, routeRecoveryBackstopCadence, true)
 	if _, due := lane.backstopDue(now.Add(routeRecoveryBackstopRetryInterval)); !due {
 		t.Fatal("a partial pass did not reschedule on the retry cadence")
 	}
@@ -288,7 +347,7 @@ func TestRouteRecoveryCursorGapForcesTheBackstop(t *testing.T) {
 // being silently dropped.
 func TestRouteRecoveryCandidateOverflowFallsBackToTheScan(t *testing.T) {
 	lane := newRouteRecoveryLane()
-	lane.noteBackstopRan(time.Now(), false)
+	lane.noteBackstopRan(time.Now(), routeRecoveryBackstopCadence, false)
 	for i := range routeRecoveryCandidateCap + 1 {
 		lane.observe(beadCreatedEvent(t, unroutedWorkBead(overflowBeadID(i))))
 	}
@@ -297,7 +356,7 @@ func TestRouteRecoveryCandidateOverflowFallsBackToTheScan(t *testing.T) {
 	}
 	// Control: under the cap the feed keeps its candidates and does not force.
 	small := newRouteRecoveryLane()
-	small.noteBackstopRan(time.Now(), false)
+	small.noteBackstopRan(time.Now(), routeRecoveryBackstopCadence, false)
 	small.observe(beadCreatedEvent(t, unroutedWorkBead("T-1")))
 	if _, due := small.backstopDue(time.Now()); due {
 		t.Fatal("a single candidate forced the backstop; overflow is not what the assertion above measured")
@@ -320,7 +379,7 @@ func TestRouteRecoveryEventFeedNamesCandidatesAndForcesOnAMissingJournal(t *test
 
 	prov := events.NewFake()
 	lane := newRouteRecoveryLane()
-	lane.noteBackstopRan(time.Now(), false)
+	lane.noteBackstopRan(time.Now(), routeRecoveryBackstopCadence, false)
 	lane.startEventFeed(ctx, prov)
 	prov.Record(beadCreatedEvent(t, unroutedWorkBead("T-1")))
 	// A bead with no recoverable route must not become a candidate: ordinary
@@ -344,7 +403,7 @@ func TestRouteRecoveryEventFeedNamesCandidatesAndForcesOnAMissingJournal(t *test
 
 	// No journal: the lane must say so by forcing the scan.
 	blind := newRouteRecoveryLane()
-	blind.noteBackstopRan(time.Now(), false)
+	blind.noteBackstopRan(time.Now(), routeRecoveryBackstopCadence, false)
 	blind.startEventFeed(ctx, nil)
 	if reason, due := blind.backstopDue(time.Now()); !due || reason != routeRecoveryBackstopForced {
 		t.Fatalf("a lane with no journal due=%v reason=%q, want due with reason %q", due, reason, routeRecoveryBackstopForced)
@@ -546,16 +605,30 @@ func TestRouteRecoveryRuntimePlaneReadsTheBindingAndNeverTheLedger(t *testing.T)
 		}
 	})
 
-	t.Run("reconcile plane", func(t *testing.T) {
+	t.Run("reconcile plane converges every leg, binding included", func(t *testing.T) {
 		plan, work, rig, binding := newPlan(t)
 		report := newRouteRecoveryLane().backstopPassOnPlane(plan, routeRecoveryBackstopCadence, reconcilePlane)
-		if work.reads() == 0 || rig.reads() == 0 || report.restored != 2 {
-			t.Fatalf("work reads=%d rig reads=%d restored=%d, want both legs read and both repaired", work.reads(), rig.reads(), report.restored)
+		if work.reads() == 0 || rig.reads() == 0 {
+			t.Fatalf("work reads=%d rig reads=%d, want both non-zero", work.reads(), rig.reads())
 		}
-		// Control: the convergence lane leaves the binding to the runtime plane,
-		// so the two lanes do not both pay for the same rows.
-		if binding.reads() != 0 {
-			t.Fatalf("the convergence lane read the binding %d time(s), want 0", binding.reads())
+		// The binding is NOT exempt. On a converged city every routed bead lives
+		// there, so a binding the convergence lane skips is a binding with no
+		// convergence at all: the runtime plane is delta-only, and one dropped
+		// journal event would strand a bead permanently. One local sqlite scan an
+		// hour is the entire price of closing that.
+		if binding.reads() == 0 {
+			t.Fatal("the convergence lane never read the binding; on a converged city that is the ONLY store holding routed work, and nothing else scans it")
+		}
+		if report.restored != 3 {
+			t.Fatalf("backstop restored %d, want 3 (work, rig and binding legs all converged)", report.restored)
+		}
+		for _, row := range []struct {
+			store *countingRouteStore
+			id    string
+		}{{work, "CW-1"}, {rig, "RW-1"}, {binding, "GB-1"}} {
+			if got := mustRoutedTo(t, row.store, row.id); got != routeRecoveryTestPool {
+				t.Fatalf("%s gc.routed_to = %q after the convergence pass, want %q", row.id, got, routeRecoveryTestPool)
+			}
 		}
 	})
 }
@@ -607,21 +680,21 @@ func TestRouteRecoverySingleStoreCityKeepsItsOnlyLeg(t *testing.T) {
 	}
 }
 
-// TestRouteRecoveryAgreesWithDemandAndSweepOnTheWorkLegs is the reader-agreement
-// row for the repair surface, and it is the reason this lane consumes the
-// resolver instead of a list of its own.
+// TestRouteRecoveryAgreesWithDemandAndSweepOnItsLegs is the reader-agreement row
+// for the repair surface, and it is the reason this lane consumes the resolver
+// instead of a list of its own.
 //
 // The D1-D9 divergence class is one shape: two surfaces that must see the same
 // bead read different store sets. Route repair is a third such surface — a
 // gc.routed_to restored on a leg demand does not read is a repair nobody
-// consumes, and a leg demand reads but repair does not is a bead that stays
-// invisible to the pool forever. So the legs it visits must be the demand plan's
-// work legs, in the demand plan's order, and the assigned-work sweep's too.
+// consumes, and a leg demand reads but repair never converges is a bead that
+// stays invisible to the pool forever.
 //
-// The control is the binding: it IS in both plans and is deliberately not
-// visited, so the equality above is a statement about a real subtraction rather
-// than about two identical full lists.
-func TestRouteRecoveryAgreesWithDemandAndSweepOnTheWorkLegs(t *testing.T) {
+// The CONVERGENCE lane therefore agrees with the demand plan exactly: every leg,
+// in the plan's order, nothing subtracted. The RUNTIME lane is the deliberate
+// narrowing — the operator invariant — and its legs must be a strict subset of
+// the same plan, never a set of its own.
+func TestRouteRecoveryAgreesWithDemandAndSweepOnItsLegs(t *testing.T) {
 	topo := assembleResidencyTopology(
 		&config.City{Rigs: []config.Rig{{Name: "alpha", Path: "rigs/alpha"}, {Name: "beta", Path: "rigs/beta"}}},
 		beads.NewMemStore(),
@@ -645,29 +718,49 @@ func TestRouteRecoveryAgreesWithDemandAndSweepOnTheWorkLegs(t *testing.T) {
 		t.Fatalf("demand and sweep disagree before repair is even considered:\n %s\n %s", demand.String(), sweep.String())
 	}
 
-	var visited []string
-	if _, err := walkRouteRecoveryLegs(demand, reconcilePlane, func(leg routeRecoveryLeg) error {
-		visited = append(visited, leg.label)
-		return nil
-	}); err != nil {
-		t.Fatalf("walking the repair legs: %v", err)
+	visit := func(plane storePlane) []string {
+		t.Helper()
+		var seen []string
+		if _, walkErr := walkRouteRecoveryLegs(demand, plane, func(leg routeRecoveryLeg) error {
+			seen = append(seen, leg.label)
+			return nil
+		}); walkErr != nil {
+			t.Fatalf("walking the repair legs: %v", walkErr)
+		}
+		return seen
 	}
-	want := []string{"city", "rig alpha", "rig beta"}
-	if len(visited) != len(want) {
-		t.Fatalf("repair visited %v, want %v", visited, want)
+
+	// The convergence lane reads the demand plan whole — no leg of the surface
+	// that COUNTS work is a leg nothing converges.
+	converged := visit(reconcilePlane)
+	want := []string{"city", "rig alpha", "rig beta", string(storeref.ClassRef([]coordclass.Class{coordclass.ClassGraph}))}
+	if len(converged) != len(want) {
+		t.Fatalf("the convergence lane visited %v, want %v", converged, want)
 	}
 	for i := range want {
-		if visited[i] != want[i] {
-			t.Fatalf("repair visited %v, want %v (order is the resolver's, not this lane's)", visited, want)
+		if converged[i] != want[i] {
+			t.Fatalf("the convergence lane visited %v, want %v (order is the resolver's, not this lane's)", converged, want)
 		}
 	}
-	// Control: the binding is a leg of the plan both other surfaces read, and
-	// repair skips exactly it — one deliberate subtraction, nothing else.
-	if !demand.TouchesBinding() {
-		t.Fatal("the fixture plan carries no binding leg, so the subtraction below asserts nothing")
+	if len(converged) != len(demand.Legs) {
+		t.Fatalf("the convergence lane visited %d of the plan's %d legs; a leg it skips is a leg with no convergence", len(converged), len(demand.Legs))
 	}
-	if got, want := len(demand.Legs)-len(visited), 1; got != want {
-		t.Fatalf("repair skipped %d of the plan's %d legs, want exactly %d (the class binding)", got, len(demand.Legs), want)
+
+	// The runtime lane narrows to the binding — and it narrows the SAME plan
+	// rather than substituting a list of its own.
+	runtime := visit(runtimePlane)
+	if len(runtime) != 1 || !storeref.IsClassRef(runtime[0]) {
+		t.Fatalf("the runtime lane visited %v, want exactly the class binding", runtime)
+	}
+	// Control: a subset, strictly. Equal sets would mean the invariant is not
+	// being applied; a leg outside the plan would mean it is not the resolver's.
+	if len(runtime) >= len(converged) {
+		t.Fatalf("the runtime lane visited %d leg(s) and the convergence lane %d; the narrowing is not narrowing", len(runtime), len(converged))
+	}
+	for _, label := range runtime {
+		if !slices.Contains(converged, label) {
+			t.Fatalf("the runtime lane visited %q, which is on no leg of the demand plan", label)
+		}
 	}
 }
 
@@ -681,4 +774,83 @@ func quarantineReason(t *testing.T, store beads.Store, id string) string {
 		return ""
 	}
 	return b.Metadata[beadmeta.RouteQuarantineReasonMetadataKey]
+}
+
+// TestRouteRecoveryBackstopAlwaysReportsItselfAndItsAge pins the observability
+// contract for the convergence lane. It runs on a background goroutine, so a
+// clean pass that logs nothing is indistinguishable from a lane that stopped —
+// and this is the lane whose whole job is to notice things nothing else notices.
+func TestRouteRecoveryBackstopAlwaysReportsItselfAndItsAge(t *testing.T) {
+	var stderr bytes.Buffer
+	store := &countingRouteStore{Store: beads.NewMemStore()} // nothing to repair
+	cr := &CityRuntime{cityName: "city", standaloneCityStore: store, logPrefix: "gc", stderr: &stderr}
+
+	report := cr.runRouteRecoveryBackstop(routeRecoveryBackstopCadence)
+	if report.restored != 0 {
+		t.Fatalf("the fixture had something to repair (restored=%d); it is not testing the QUIET pass", report.restored)
+	}
+	line := stderr.String()
+	if !strings.Contains(line, "route recovery (backstop): pass reason=cadence") {
+		t.Fatalf("a quiet backstop logged %q, want a pass line naming why it was due", line)
+	}
+	for _, want := range []string{"legs=", "reads=", "restored=0", "took="} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("the backstop line %q is missing %q", line, want)
+		}
+	}
+	// It scanned something: a pass line over zero legs would be a lane reporting
+	// health while converging nothing.
+	if report.legs == 0 {
+		t.Fatalf("the backstop reported %d legs, want at least the city work leg", report.legs)
+	}
+
+	// And the age is queryable, which is what the tick's trace record carries.
+	at, reason, ran := cr.routeRecoveryLaneOf().lastBackstop()
+	if !ran || reason != routeRecoveryBackstopCadence || time.Since(at) > time.Minute {
+		t.Fatalf("lastBackstop = (%s, %q, %t), want a recent cadence pass", at, reason, ran)
+	}
+	// Control: a lane that has not run reports so, rather than reporting an age
+	// of zero that reads as "just converged".
+	if _, _, freshRan := newRouteRecoveryLane().lastBackstop(); freshRan {
+		t.Fatal("a lane that never scanned reports that it did")
+	}
+}
+
+// TestRouteRecoveryDeltaCountsCandidatesItCouldNotResolve pins the
+// DELIVERED-BUT-OFF-PLANE drop class as a number rather than as silence.
+//
+// The journal names a bead, the event is delivered, and the bead lives on a leg
+// the runtime plane refuses — so the tick cannot repair it and it waits for the
+// convergence lane. That is a different failure from a lost event (there the
+// journal never named it at all), it is invisible from the restored count, and a
+// rising count of it is a routing question worth asking.
+func TestRouteRecoveryDeltaCountsCandidatesItCouldNotResolve(t *testing.T) {
+	ledger := &countingRouteStore{Store: beads.NewMemStoreFrom(0, []beads.Bead{unroutedWorkBead("CW-1")}, nil)}
+	binding := &countingRouteStore{Store: beads.NewMemStoreFrom(0, []beads.Bead{unroutedWorkBead("GB-1")}, nil)}
+	topo := assembleResidencyTopology(&config.City{}, ledger, nil,
+		[]storeref.ClassBinding{{
+			Classes: []coordclass.Class{coordclass.ClassGraph},
+			Leg:     storeref.Leg{Ref: storeref.ClassRef([]coordclass.Class{coordclass.ClassGraph}), Store: binding},
+		}}, nil)
+	plan, err := storeref.Plan(storeref.RoutedWork{}, topo)
+	if err != nil {
+		t.Fatalf("Plan(RoutedWork): %v", err)
+	}
+
+	report := newRouteRecoveryLane().deltaPass(plan, []string{"CW-1", "GB-1"})
+	if report.dropped != 1 {
+		t.Fatalf("delta dropped=%d for one on-plane and one off-plane candidate, want 1", report.dropped)
+	}
+	if report.fields()["dropped"] != 1 {
+		t.Fatalf("delta trace fields = %v, want dropped=1 — the drop class must be visible, not inferred", report.fields())
+	}
+	// Control: a pass whose candidates all resolve reports no drops at all, so
+	// the field is a signal rather than a constant.
+	clean := newRouteRecoveryLane().deltaPass(plan, []string{"GB-1"})
+	if clean.dropped != 0 {
+		t.Fatalf("delta dropped=%d when every candidate resolved, want 0", clean.dropped)
+	}
+	if _, present := clean.fields()["dropped"]; present {
+		t.Fatalf("clean delta trace fields = %v, want no dropped key", clean.fields())
+	}
 }

@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -9,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/executionevent"
 )
 
 func closedStepEvent(t *testing.T, stepID, rootID string) events.Event {
@@ -59,7 +63,7 @@ func TestCompletionsLaneSweepCadenceReplacesTriggerNameGating(t *testing.T) {
 	if !lane.sweepDue(now) {
 		t.Fatal("a lane that has never swept is not due; nothing has converged yet")
 	}
-	lane.noteSweepRan(now)
+	lane.noteSweepChunk(now, 0, 0, true)
 	if lane.sweepDue(now.Add(time.Minute)) {
 		t.Fatal("the sweep is due a minute after a full one; the cadence gate is not gating")
 	}
@@ -79,7 +83,7 @@ func TestCompletionsLaneSweepCadenceReplacesTriggerNameGating(t *testing.T) {
 // dropped root is a lifecycle gap nothing else is looking for.
 func TestCompletionsLaneOverflowForcesTheSweep(t *testing.T) {
 	lane := newCompletionsLane()
-	lane.noteSweepRan(time.Now())
+	lane.noteSweepChunk(time.Now(), 0, 0, true)
 	for i := range completionsCandidateCap + 1 {
 		lane.observe(events.Event{Type: events.ExecutionStepCompleted, RunID: overflowBeadID(i)})
 	}
@@ -88,7 +92,7 @@ func TestCompletionsLaneOverflowForcesTheSweep(t *testing.T) {
 	}
 	// Control: below the cap the lane keeps its candidates and stays un-forced.
 	small := newCompletionsLane()
-	small.noteSweepRan(time.Now())
+	small.noteSweepChunk(time.Now(), 0, 0, true)
 	small.observe(events.Event{Type: events.ExecutionStepCompleted, RunID: "gcg-root-a"})
 	if small.sweepDue(time.Now()) {
 		t.Fatal("a single named root forced the sweep; overflow is not what the assertion above measured")
@@ -132,5 +136,116 @@ func TestCompletionReconcileInputsNarrowToTheInfraStoreOnTheRuntimePlane(t *test
 	}
 	if len(reconcileFan) != 3 {
 		t.Fatalf("the convergence lane fans out to %d store(s), want 3 (city work + two rigs)", len(reconcileFan))
+	}
+}
+
+// TestCompletionsSweepSummaryAccumulatesAcrossChunks pins that the sweep reports
+// the SWEEP, not the chunk it happened to finish on.
+//
+// A chunked traversal that logged per chunk would report "converged 2 roots" for
+// a city with two hundred, which is worse than silence: it reads as a healthy
+// small city. The totals are therefore folded across chunks and emitted once,
+// when a full traversal closes.
+func TestCompletionsSweepSummaryAccumulatesAcrossChunks(t *testing.T) {
+	lane := newCompletionsLane()
+	now := time.Now()
+
+	if _, done := lane.noteSweepChunk(now, 1, 2, false); done {
+		t.Fatal("an incomplete chunk closed the sweep")
+	}
+	if _, done := lane.noteSweepChunk(now.Add(time.Second), 2, 3, false); done {
+		t.Fatal("a second incomplete chunk closed the sweep")
+	}
+	total, done := lane.noteSweepChunk(now.Add(2*time.Second), 1, 1, true)
+	if !done {
+		t.Fatal("the completing chunk did not close the sweep")
+	}
+	if total.Emitted != 4 || total.Roots != 6 {
+		t.Fatalf("sweep totals = %+v, want 4 facts over 6 roots (the sum of all three chunks)", total)
+	}
+	if total.Elapsed < 2*time.Second {
+		t.Fatalf("sweep elapsed = %s, want at least the 2s the chunks spanned", total.Elapsed)
+	}
+
+	// Control: the accumulators reset, so the NEXT sweep reports its own totals
+	// rather than the running total since boot.
+	second, done := lane.noteSweepChunk(now.Add(3*time.Second), 5, 5, true)
+	if !done || second.Emitted != 5 || second.Roots != 5 {
+		t.Fatalf("second sweep totals = %+v (done=%t), want 5 facts over 5 roots", second, done)
+	}
+}
+
+// TestCompletionsSweepAlwaysReportsItselfAndItsDarkStores pins the observability
+// contract for a lane that runs on a background goroutine: a clean pass says so,
+// and a store it could not list says so louder.
+//
+// A traversal skips an unlistable store deliberately, so one dark store cannot
+// stall the sweep. Skipped SILENTLY, that is a convergence lane converging
+// nothing while looking exactly like a lane with nothing to converge.
+func TestCompletionsSweepAlwaysReportsItselfAndItsDarkStores(t *testing.T) {
+	var stderr bytes.Buffer
+	cs := &controllerState{
+		cfg:           &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		cityBeadStore: beads.NewMemStore(),
+		eventProv:     events.NewFake(),
+	}
+	cr := &CityRuntime{cityName: "test-city", cityPath: t.TempDir(), cfg: cs.cfg, cs: cs, logPrefix: "gc", stderr: &stderr}
+
+	cr.runCompletionsSweepChunk(&executionevent.CompletionBackstop{}, cr.completionsLaneOf())
+	if got := stderr.String(); !strings.Contains(got, "completions sweep: converged") {
+		t.Fatalf("a clean sweep logged %q, want a completion line — a silent convergence lane cannot be told from a stopped one", got)
+	}
+
+	// A store whose root list fails is named.
+	stderr.Reset()
+	cs.cityBeadStore = errorListStore{Store: beads.NewMemStore(), err: errors.New("dolt circuit breaker is open")}
+	cr.runCompletionsSweepChunk(&executionevent.CompletionBackstop{}, cr.completionsLaneOf())
+	got := stderr.String()
+	if !strings.Contains(got, "dolt circuit breaker is open") {
+		t.Fatalf("a dark store logged %q, want the list failure named", got)
+	}
+	// Control: the sweep still reports itself, so the failure line is additional
+	// information rather than a replacement for the liveness signal.
+	if !strings.Contains(got, "completions sweep: converged") {
+		t.Fatalf("a sweep over a dark store logged %q, want the completion line too", got)
+	}
+}
+
+// errorListStore fails every metadata list, standing in for a store whose
+// backend is refusing (a dolt circuit breaker, a dead remote).
+type errorListStore struct {
+	beads.Store
+	err error
+}
+
+func (s errorListStore) ListByMetadata(map[string]string, int, ...beads.QueryOpt) ([]beads.Bead, error) {
+	return nil, s.err
+}
+
+// TestBackstopAgeFieldsDistinguishNeverRanFromJustRan pins the one distinction a
+// liveness field has to make. A lane that has never converged and a lane that
+// converged a second ago are opposite conditions; reporting both as an age of
+// zero is how a stalled backstop hides in a dashboard.
+func TestBackstopAgeFieldsDistinguishNeverRanFromJustRan(t *testing.T) {
+	never := map[string]any{}
+	addBackstopAgeFields(never, time.Time{}, "", false)
+	if never["backstop_ran"] != false {
+		t.Fatalf("never-ran fields = %v, want backstop_ran=false", never)
+	}
+	if _, ok := never["backstop_age_seconds"]; ok {
+		t.Fatalf("never-ran fields = %v, want no age — an age of zero reads as 'just converged'", never)
+	}
+
+	ran := map[string]any{}
+	addBackstopAgeFields(ran, time.Now().Add(-90*time.Second), routeRecoveryBackstopCadence, true)
+	if ran["backstop_ran"] != true {
+		t.Fatalf("ran fields = %v, want backstop_ran=true", ran)
+	}
+	age, ok := ran["backstop_age_seconds"].(int)
+	if !ok || age < 89 || age > 91 {
+		t.Fatalf("ran fields = %v, want an age near 90s", ran)
+	}
+	if ran["backstop_last_reason"] != routeRecoveryBackstopCadence {
+		t.Fatalf("ran fields = %v, want the reason the pass was due", ran)
 	}
 }

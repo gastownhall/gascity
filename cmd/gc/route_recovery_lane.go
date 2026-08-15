@@ -40,6 +40,23 @@ package main
 // the backstop is not optional and its "events lost, backstop heals" behavior is
 // pinned by its own control test.
 //
+// # Two ways a repair waits for the backstop, and they are not the same way
+//
+// The obvious one is an EVENT-LESS loss: nothing ever named the bead, so the
+// delta lane cannot know it exists and only a scan finds it.
+//
+// The second is DELIVERED-BUT-OFF-PLANE, and it is a product of the operator
+// invariant rather than of any failure. The journal names a bead, the event
+// arrives, the lane accepts it as a candidate — and the bead lives on a leg the
+// runtime plane refuses to read (the work ledger, a rig). The tick resolves
+// nothing for it and it waits for the convergence lane exactly as an event-less
+// loss does. Nothing is broken; the two just have different causes and different
+// remedies, and only one of them is a routing question. The delta report counts
+// them as `dropped` so a rising count is visible instead of silent. The counter
+// is a superset by construction: a candidate claimed or closed since its event
+// also fails to resolve, also waits for the backstop, and telling those apart
+// would mean reading the leg this plane exists to refuse.
+//
 // # Two things the old scanner could not say
 //
 // A candidate whose live re-check keeps failing used to be re-read forever in
@@ -68,6 +85,11 @@ import (
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
+// Cadences and bounds are consts, not config. Each is a knob an operator will
+// eventually want per city — and each is also a knob that lets one recreate the
+// hot-backstop bug this lane exists to fix.
+// TODO(ga-l7jdg): expose under [daemon] once a city has needed a non-default
+// value; until then a const is one less way to be wrong.
 const (
 	// routeRecoveryBackstopInterval is how often the authoritative full scan
 	// runs when nothing forces it sooner. Hourly, in the shape wisp_gc's
@@ -127,6 +149,18 @@ type routeRecoveryReport struct {
 	// legReads counts store round trips this pass issued. It is the unit the
 	// tick's latency is actually measured in, and the budget test asserts on it.
 	legReads int
+	// legs counts the plan legs this pass was allowed to read. A pass reporting
+	// zero legs converged nothing, which must not read as "nothing to converge".
+	legs int
+	// dropped counts named candidates this plane could not resolve. On the
+	// runtime plane it is the DELIVERED-BUT-OFF-PLANE class (§ lane header): the
+	// journal named a bead, the event arrived, and the bead lives on a leg this
+	// plane refuses — so it waits for the convergence lane. It is a superset, not
+	// a diagnosis: a candidate that was claimed or closed since the event also
+	// fails to resolve, and also waits. Both are bounded by the backstop cadence,
+	// which is why one counter serves.
+	dropped  int
+	duration time.Duration
 	partial  bool
 	err      error
 }
@@ -138,7 +172,14 @@ func (r routeRecoveryReport) fields() map[string]any {
 		"candidates":  r.candidates,
 		"restored":    r.restored,
 		"leg_reads":   r.legReads,
+		"legs":        r.legs,
 		"quarantined": r.quarantined,
+	}
+	if r.dropped > 0 {
+		// Named, delivered, and not resolvable on this plane — the convergence
+		// lane's to repair. Surfaced so a rising count is visible as a routing
+		// question rather than as silence.
+		out["dropped"] = r.dropped
 	}
 	if r.reason != "" {
 		out["reason"] = r.reason
@@ -186,9 +227,10 @@ type routeRecoveryLane struct {
 	forced       bool
 	forcedReason string
 
-	lastBackstopAt time.Time
-	backstopRan    bool
-	retrySoon      bool
+	lastBackstopAt     time.Time
+	lastBackstopReason string
+	backstopRan        bool
+	retrySoon          bool
 
 	// consecutiveRecheckFailures and restores are per-bead accounting for the
 	// two things a silent re-scan could never report.
@@ -297,13 +339,24 @@ func (l *routeRecoveryLane) backstopDue(now time.Time) (string, bool) {
 	return "", false
 }
 
+// lastBackstop reports when the authoritative scan last ran and why it was due,
+// plus whether one ever has. It is what the tick's trace record carries so an
+// operator can read the convergence lane's age from `gc trace` — a backstop
+// whose age nobody can see is a backstop nobody notices has stopped.
+func (l *routeRecoveryLane) lastBackstop() (at time.Time, reason string, ran bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.lastBackstopAt, l.lastBackstopReason, l.backstopRan
+}
+
 // noteBackstopRan records the pass and clears the force latch. A pass that could
 // not read every leg schedules itself back on the short retry cadence: the leg
 // it missed is exactly the one whose convergence is now overdue.
-func (l *routeRecoveryLane) noteBackstopRan(now time.Time, partial bool) {
+func (l *routeRecoveryLane) noteBackstopRan(now time.Time, reason string, partial bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.lastBackstopAt = now
+	l.lastBackstopReason = reason
 	l.backstopRan = true
 	l.forced = false
 	l.forcedReason = ""
@@ -431,9 +484,11 @@ func routeRecoveryLegLabel(ref storeref.StoreRef) string {
 // rule degrades to "the only store there is" rather than to "no store at all",
 // which would silently disable the delta lane on every single-store city.
 //
-// The reconcile plane is the mirror image: work and rigs, no binding. It is the
-// lane that converges the ledger, and the binding is already the runtime plane's
-// to keep fresh.
+// The reconcile plane is NOT the mirror image — it reads every leg, binding
+// included. It is a convergence contract rather than a latency one, and a store
+// it skips is a store nothing converges: the runtime plane over that same
+// binding is delta-only, so one dropped journal event would strand a
+// binding-resident bead permanently.
 //
 // # What reading the binding means for a workflow root
 //
@@ -466,16 +521,24 @@ func walkRouteRecoveryLegs(plan storeref.ResolvedPlan, plane storePlane, visit f
 }
 
 // planeReadsLeg is the per-leg half of the invariant.
+//
+// The two planes are not complements, and that asymmetry is the point. The
+// runtime plane NARROWS — it is a latency contract, and the ledger is what it
+// refuses. The reconcile plane does not narrow at all: it is a CONVERGENCE
+// contract, and a store it skips is a store with no convergence.
+//
+// The binding is the case that makes this concrete. On a converged city every
+// routed bead lives there and the runtime plane reads it delta-only, so a
+// binding the convergence lane skipped would leave one dropped journal event
+// stranding a bead permanently — no tick names it, no sweep looks. It costs one
+// local sqlite scan per cadence, which is not a reason to leave a hole.
 func planeReadsLeg(plane storePlane, ref storeref.StoreRef, bindingOnly bool) bool {
-	isBinding := storeref.IsClassRef(string(ref))
-	if plane == runtimePlane {
-		// Binding-only where a binding exists; otherwise the single-store city's
-		// work store, which is its infra store.
-		return isBinding || !bindingOnly
+	if plane != runtimePlane {
+		return true
 	}
-	// The convergence lane owns the ledger and the rigs. The binding is the
-	// runtime plane's, and re-reading it here would only duplicate that work.
-	return !isBinding
+	// Binding-only where a binding exists; otherwise the single-store city's
+	// work store, which is its infra store.
+	return storeref.IsClassRef(string(ref)) || !bindingOnly
 }
 
 // deltaPass repairs only the beads the journal named since the last pass.
@@ -488,13 +551,16 @@ func (l *routeRecoveryLane) deltaPass(plan storeref.ResolvedPlan, candidates []s
 		return report
 	}
 	var errs []error
+	resolved := make(map[string]struct{}, len(candidates))
 	partial, walkErr := walkRouteRecoveryLegs(plan, runtimePlane, func(leg routeRecoveryLeg) error {
+		report.legs++
 		rows, reads, err := liveRouteCandidates(leg.store, candidates)
 		report.legReads += reads
 		if err != nil {
 			return fmt.Errorf("re-reading %d route candidate(s): %w", len(candidates), err)
 		}
 		for _, row := range rows {
+			resolved[row.ID] = struct{}{}
 			outcome := l.restoreRoute(leg.store, row, false)
 			report.legReads += outcome.writes
 			switch {
@@ -512,6 +578,7 @@ func (l *routeRecoveryLane) deltaPass(plan storeref.ResolvedPlan, candidates []s
 		}
 		return nil
 	})
+	report.dropped = len(candidates) - len(resolved)
 	report.partial = partial
 	report.err = errors.Join(append(errs, walkErr)...)
 	sort.Strings(report.flapping)
@@ -532,6 +599,7 @@ func (l *routeRecoveryLane) backstopPassOnPlane(plan storeref.ResolvedPlan, reas
 	report := routeRecoveryReport{lane: "backstop", reason: reason}
 	var errs []error
 	partial, walkErr := walkRouteRecoveryLegs(plan, plane, func(leg routeRecoveryLeg) error {
+		report.legs++
 		legReport := l.backstopLeg(leg.store)
 		report.candidates += legReport.candidates
 		report.restored += legReport.restored

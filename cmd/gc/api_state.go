@@ -587,6 +587,14 @@ func (cs *controllerState) reconcileExecutionCompletionsDelta(rootIDs []string) 
 // runtime plane no longer reads is exactly what an off-tick convergence lane is
 // for.
 //
+// The narrowing is a break after the first surviving leg, which is correct only
+// because this list is BUILT graph-first. That coupling is the fragile part: a
+// future edit that reorders the fan would silently hand the tick the city work
+// store instead of the binding, and nothing here would notice. It is left as-is
+// rather than defended with a second derivation of "which store serves the graph
+// class", because a second derivation is the split-store bug class itself
+// (#5125, #5127) — the durable fix is the same one the TODO below names.
+//
 // TODO(ga-l7jdg/ga-qdt5y): this narrowing belongs in the resolver, as a
 // runtime-plane intent that cannot HAND a caller a ledger leg. It is expressed
 // here rather than in Plan() because that is the S4 relevance-descriptor surface

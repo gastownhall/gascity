@@ -143,9 +143,18 @@ func (cr *CityRuntime) runRouteRecoveryBackstop(reason string) routeRecoveryRepo
 		lane.force(routeRecoveryBackstopForced)
 		return routeRecoveryReport{lane: "backstop", reason: reason, err: err}
 	}
+	started := time.Now()
 	report := lane.backstopPass(plan, reason)
-	lane.noteBackstopRan(time.Now(), report.partial || report.err != nil)
+	report.duration = time.Since(started)
+	lane.noteBackstopRan(time.Now(), reason, report.partial || report.err != nil)
 	cr.logRouteRecovery(report)
+	// The convergence lane always says it ran. A clean pass that logs nothing is
+	// indistinguishable from a lane that stopped running, and this one runs on a
+	// background goroutine where nothing else would notice.
+	summary := fmt.Sprintf("pass reason=%s legs=%d reads=%d candidates=%d restored=%d quarantined=%d partial=%t took=%s",
+		reason, report.legs, report.legReads, report.candidates, report.restored, report.quarantined, report.partial,
+		report.duration.Round(time.Millisecond))
+	fmt.Fprintf(cr.stderr, "%s: route recovery (backstop): %s\n", cr.logPrefix, summary) //nolint:errcheck // best-effort stderr
 	return report
 }
 
@@ -156,6 +165,10 @@ func (cr *CityRuntime) recoverUnroutedWorkRoutesDelta() routeRecoveryReport {
 	lane := cr.routeRecoveryLaneOf()
 	candidates := lane.takePending()
 	if len(candidates) == 0 {
+		// deltaPass guards this too, and deliberately: that guard is its API
+		// contract (it takes a plan and must be cheap for any caller), while this
+		// one is what keeps a steady tick from BUILDING the plan at all. They
+		// bound different work, so neither is redundant.
 		return routeRecoveryReport{lane: "delta"}
 	}
 	plan, err := cr.routeRecoveryPlan()
