@@ -2543,8 +2543,11 @@ func recoverExpiredInFlightNudgesWithClock(state *nudgeQueueState, front *nudgeq
 }
 
 // pruneDeadQueuedNudges removes dead-letter items older than defaultQueuedNudgeDeadRetention
-// when a durable terminal bead record exists in the store. Items without a confirmed terminal
-// bead are retained so terminal history is not lost if the bead store write failed.
+// once the store confirms the item is terminal — either a durable terminal bead record, or
+// the backing bead's outright absence (reaped by wisp compaction / retention sweeps), which
+// is treated as terminal since there is nothing left to confirm against. Items whose bead
+// still exists but isn't confirmed terminal are retained so terminal history is not lost if
+// the bead store write failed.
 func pruneDeadQueuedNudges(state *nudgeQueueState, front *nudgequeue.Store, now, deadline time.Time) error {
 	return pruneDeadQueuedNudgesWithClock(state, front, now, deadline, clock.Real{})
 }
@@ -2570,7 +2573,12 @@ func pruneDeadQueuedNudgesWithClock(state *nudgeQueueState, front *nudgequeue.St
 				filtered = append(filtered, item)
 				continue
 			}
-			if !ok || !nudgequeue.IsTerminalState(shadow.State) {
+			// !ok falls straight through to the retention check below: the
+			// backing bead has been reaped (label lookup found nothing, no
+			// store error). Terminalize is a documented no-op on a missing
+			// bead, so there is nothing left to repair — absence is itself
+			// the strongest possible terminal signal.
+			if ok && !nudgequeue.IsTerminalState(shadow.State) {
 				// Repair historical dead-letter entries whose queue state was
 				// durable but whose backing bead never received terminal state.
 				reason := strings.TrimSpace(item.LastError)
@@ -2586,13 +2594,21 @@ func pruneDeadQueuedNudgesWithClock(state *nudgeQueueState, front *nudgequeue.St
 					continue
 				}
 				shadow, ok, err = front.FindIncludingTerminal(item.ID)
-				if err != nil || !ok || !nudgequeue.IsTerminalState(shadow.State) {
+				if err != nil {
 					filtered = append(filtered, item)
 					continue
 				}
+				if ok && !nudgequeue.IsTerminalState(shadow.State) {
+					filtered = append(filtered, item)
+					continue
+				}
+				// !ok here means the bead was reaped between our two lookups
+				// (or raced the repair write) — also a terminal signal.
 			}
 			if !item.DeadAt.IsZero() && item.DeadAt.Before(cutoff) {
-				// Terminal bead confirmed in store — safe to prune once past retention.
+				// Terminal bead confirmed in store, or the bead is confirmed
+				// reaped — either way there is nothing left to confirm
+				// against, and DeadAt past retention makes this safe to prune.
 				continue
 			}
 		}

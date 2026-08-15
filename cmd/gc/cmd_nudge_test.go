@@ -4335,6 +4335,49 @@ func TestPruneDeadQueuedNudges_RetainsItemsWithoutBeadID(t *testing.T) {
 	}
 }
 
+func TestPruneDeadQueuedNudges_PrunesWhenBackingBeadReaped(t *testing.T) {
+	// Regression for #5278: a dead-letter item whose backing bead was
+	// deleted out from under it (wisp compaction / retention sweep, not a
+	// normal Close) must still be pruned once past retention. Bead absence
+	// -- a clean label-lookup miss with no store error -- is the strongest
+	// possible terminal signal; retaining it forever (as before this fix)
+	// makes every future prune pass pay a store lookup for an item that can
+	// never be repaired, since Terminalize is a documented no-op on a
+	// missing bead.
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	now := time.Now().UTC()
+	item := newQueuedNudgeWithOptions("worker", "reaped dead letter", "session", now.Add(-2*time.Hour), queuedNudgeOptions{
+		ID:        "n-dead-reaped",
+		SessionID: "gc-worker",
+	})
+	beadID, created, err := ensureQueuedNudgeBead(store, item)
+	if err != nil {
+		t.Fatalf("ensureQueuedNudgeBead: %v", err)
+	}
+	if !created {
+		t.Fatal("expected backing nudge bead to be created")
+	}
+	item.BeadID = beadID
+	item.LastError = "expired"
+	item.DeadAt = now.Add(-2 * time.Hour)
+
+	// Simulate a retention sweep reaping the shadow bead entirely -- not a
+	// Close, an actual Delete, so the label lookup finds nothing at all.
+	if err := store.Delete(beadID); err != nil {
+		t.Fatalf("Delete(%s): %v", beadID, err)
+	}
+
+	state := &nudgeQueueState{Dead: []queuedNudge{item}}
+	if err := pruneDeadQueuedNudges(state, nudgeFrontDoor(store), now, noMaintenanceDeadline()); err != nil {
+		t.Fatalf("pruneDeadQueuedNudges: %v", err)
+	}
+	if len(state.Dead) != 0 {
+		t.Fatalf("dead = %d, want 0 (reaped bead past retention must be pruned)", len(state.Dead))
+	}
+}
+
 func TestEnqueueSupersedes_SameAgentSourceReference(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
