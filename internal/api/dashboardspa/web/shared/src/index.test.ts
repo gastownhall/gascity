@@ -197,6 +197,8 @@ test('TRUE_CONTEXT_WINDOWS includes the deployed Claude models', () => {
   assert.equal(TRUE_CONTEXT_WINDOWS['claude-opus-4-7'], 1_000_000);
   assert.equal(TRUE_CONTEXT_WINDOWS['claude-sonnet-4-5'], 1_000_000);
   assert.equal(TRUE_CONTEXT_WINDOWS['claude-sonnet-4-6'], 1_000_000);
+  assert.equal(TRUE_CONTEXT_WINDOWS['claude-sonnet-5'], 1_000_000);
+  assert.equal(TRUE_CONTEXT_WINDOWS['claude-opus-5'], 1_000_000);
 });
 
 test('runtime helpers live in domain leaves and remain re-exported by the barrel', () => {

@@ -7,8 +7,10 @@ import type { DashboardSession } from './dashboard-sessions.js';
 export const TRUE_CONTEXT_WINDOWS: Readonly<Record<string, number>> = {
   'claude-opus-4-7': 1_000_000,
   'claude-opus-4-8': 1_000_000,
+  'claude-opus-5': 1_000_000,
   'claude-sonnet-4-5': 1_000_000,
   'claude-sonnet-4-6': 1_000_000,
+  'claude-sonnet-5': 1_000_000,
 };
 
 /**
