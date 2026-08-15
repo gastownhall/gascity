@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"time"
 
 	gcruntime "github.com/gastownhall/gascity/internal/runtime"
 )
@@ -48,24 +47,18 @@ func TestStateCache_RealEmptyServerObservesEmptyFleet(t *testing.T) {
 		t.Fatalf("KillSession: %v", err)
 	}
 
-	// The server must still be up and holding zero sessions. Poll briefly: tmux
-	// tears the session down asynchronously from the client's return.
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		snap, err = fetcher.FetchState(context.Background())
-		if err == nil && len(snap.Sessions) == 0 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("empty server never observed as an empty fleet: err = %v, sessions = %v", err, snap.Sessions)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if errors.Is(err, gcruntime.ErrRuntimeUnavailable) {
-		t.Fatalf("FetchState = %v, want a successful empty observation for an alive empty server", err)
+	// kill-session completes on the server before the client returns, so the
+	// very next observation must already see the empty-but-alive server.
+	snap, err = fetcher.FetchState(context.Background())
+	if err != nil {
+		t.Fatalf("FetchState against an alive empty server: err = %v (ErrRuntimeUnavailable=%t), want a successful empty observation",
+			err, errors.Is(err, gcruntime.ErrRuntimeUnavailable))
 	}
 	if snap.Sessions == nil {
 		t.Fatal("FetchState Sessions = nil for an alive empty server, want an empty non-nil map")
+	}
+	if len(snap.Sessions) != 0 {
+		t.Fatalf("FetchState Sessions = %v after the last session was killed, want empty", snap.Sessions)
 	}
 
 	// Recovery: a new session on the same server must be observed again with no
