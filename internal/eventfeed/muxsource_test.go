@@ -314,20 +314,24 @@ func TestAdapter_NoLeakFromPayload(t *testing.T) {
 // TestToExport_ForwardsTypedRunSession proves the adapter forwards the typed
 // Event.RunID/SessionID (stamped at the record site) through to the projected
 // envelope when EmitCorrelation is on.
-func TestToExport_ForwardsTypedRunSession(t *testing.T) {
+func TestToExport_ForwardsTypedRunSessionAndNativeTopology(t *testing.T) {
+	deps := []string{"step-a"}
 	te := events.TaggedEvent{
 		Event: events.Event{
 			Seq: 1, Type: "bead.closed", Ts: time.Date(2026, 6, 21, 10, 3, 27, 0, time.UTC),
-			Actor: "cache-reconcile", Subject: "mc-1", RunID: "wf-root-abc", SessionID: "sess-9f2a",
+			Actor: "cache-reconcile", Subject: "mc-1", RunID: "wf-root-abc", SessionID: "sess-9f2a", StepID: "step-b", DependsOnStepIDs: &deps,
 		},
 		City: "c",
 	}
 	ex := toExport(te)
-	if ex.RunID != "wf-root-abc" || ex.SessionID != "sess-9f2a" {
-		t.Fatalf("toExport must forward typed run/session, got run=%q session=%q", ex.RunID, ex.SessionID)
+	if ex.RunID != "wf-root-abc" || ex.SessionID != "sess-9f2a" || ex.StepID != "step-b" || ex.DependsOnStepIDs == nil || (*ex.DependsOnStepIDs)[0] != "step-a" {
+		t.Fatalf("toExport must forward typed correlation/topology, got %+v", ex)
+	}
+	if ex.DependsOnStepIDs == &deps {
+		t.Fatal("toExport retained caller-owned topology slice")
 	}
 	env, ok := eventexport.ProjectEvent(ex, eventexport.Options{Salt: []byte("sixteen-byte-salt-xx"), ExportRef: true, EmitCorrelation: true})
-	if !ok || env.RunID != "wf-root-abc" || env.SessionID != "sess-9f2a" {
-		t.Fatalf("projected envelope must carry forwarded run/session, got %+v", env)
+	if !ok || env.RunID != "wf-root-abc" || env.SessionID != "sess-9f2a" || env.DependsOnStepIDs == nil || (*env.DependsOnStepIDs)[0] != "step-a" {
+		t.Fatalf("projected envelope must carry forwarded correlation/topology, got %+v", env)
 	}
 }

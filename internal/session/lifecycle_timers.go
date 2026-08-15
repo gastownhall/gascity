@@ -35,6 +35,22 @@ const (
 	AssignedWorkHas
 )
 
+// MinFloorFact is the tri-state min_active_sessions floor-membership fact. It
+// is Unknown until the caller has resolved whether this session is one of the
+// deterministic pool floor members that must be kept warm (never idle-timeout
+// killed and cold-recreated). Only the idle-timeout ladder consults it: the
+// floor's keep-warm guarantee is an idle-reclaim exemption, not a
+// max-session-age one — an aged floor session is still restarted for
+// defense-in-depth and the pool's min-fill recreates it (sc-5mtyhy).
+type MinFloorFact int
+
+// Min-floor fact states.
+const (
+	MinFloorUnknown MinFloorFact = iota
+	MinFloorNo
+	MinFloorYes
+)
+
 // TimerAction is what the caller must do next for one session and one timer.
 type TimerAction int
 
@@ -47,6 +63,9 @@ const (
 	// TimerActionGatherAssignedWork means supply TimerFacts.AssignedWork and
 	// decide again.
 	TimerActionGatherAssignedWork
+	// TimerActionGatherMinFloor means supply TimerFacts.MinFloor and decide
+	// again. Emitted only by DecideIdleTimeout, after the assigned-work rung.
+	TimerActionGatherMinFloor
 	// TimerActionDefer means leave the session alone this tick and record
 	// the decision trace.
 	TimerActionDefer
@@ -70,6 +89,11 @@ type TimerFacts struct {
 	// AssignedWork is the open-assigned-work fact, gathered on demand.
 	// Both the max-session-age and idle-timeout ladders consult it.
 	AssignedWork AssignedWorkFact
+	// MinFloor is the min_active_sessions floor-membership fact, gathered on
+	// demand. Consulted only by the idle-timeout ladder, after AssignedWork:
+	// an idle floor member holding no work is kept warm (deferred) rather
+	// than idle-killed and cold-recreated next tick (sc-5mtyhy).
+	MinFloor MinFloorFact
 }
 
 // TimerDecision is the outcome of one ladder evaluation.
@@ -125,13 +149,18 @@ func DecideMaxSessionAge(f TimerFacts) TimerDecision {
 }
 
 // DecideIdleTimeout evaluates the idle-timeout ladder: blocker, then pending
-// interaction, then assigned work, then stop. A pending interaction cancels
-// any pending drain and keeps the session out of this tick's wake pass — an
-// asymmetry with max-session-age that is part of the existing reconciler
-// contract. Assigned work defers the stop, mirroring DecideMaxSessionAge:
-// without this rung, ComputeAwakeSet's assigned-work exemption re-wakes the
-// session within seconds of the kill, producing an unbounded idle-kill/wake
-// treadmill (ga-3ox7rk).
+// interaction, then assigned work, then min_active_sessions floor membership,
+// then stop. A pending interaction cancels any pending drain and keeps the
+// session out of this tick's wake pass — an asymmetry with max-session-age that
+// is part of the existing reconciler contract. Assigned work defers the stop,
+// mirroring DecideMaxSessionAge: without this rung, ComputeAwakeSet's
+// assigned-work exemption re-wakes the session within seconds of the kill,
+// producing an unbounded idle-kill/wake treadmill (ga-3ox7rk). A floor member
+// with no assigned work defers too: it is kept WARM rather than idle-killed and
+// cold-recreated by the min-fill next tick (sc-5mtyhy). The floor rung sits
+// AFTER assigned work so a busy floor session still defers as assigned_work
+// (and feeds the same-bead exhausted backstop); only a genuinely idle floor
+// member reaches the keep-warm defer.
 func DecideIdleTimeout(f TimerFacts) TimerDecision {
 	if !f.Triggered {
 		return TimerDecision{Action: TimerActionNone}
@@ -153,6 +182,12 @@ func DecideIdleTimeout(f TimerFacts) TimerDecision {
 		return TimerDecision{Action: TimerActionGatherAssignedWork}
 	case AssignedWorkHas:
 		return deferDecision("assigned_work", "deferred_busy")
+	}
+	switch f.MinFloor {
+	case MinFloorUnknown:
+		return TimerDecision{Action: TimerActionGatherMinFloor}
+	case MinFloorYes:
+		return deferDecision("min_floor_idle_worker", "deferred_min_floor")
 	}
 	return TimerDecision{
 		Action:       TimerActionStop,

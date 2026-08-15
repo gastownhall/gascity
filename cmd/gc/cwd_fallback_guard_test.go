@@ -153,7 +153,7 @@ func TestCmdInitFromDir_NoArgsNonTerminalRefuses(t *testing.T) {
 	srcDir := t.TempDir()
 
 	var stdout, stderr bytes.Buffer
-	code := cmdInitFromDirWithOptionsInternal(srcDir, nil, "", &stdout, &stderr, true, false)
+	code := cmdInitFromDirWithOptionsInternal(srcDir, nil, "", &stdout, &stderr, true, false, hostedDoltInitOptions{})
 
 	if code == 0 {
 		t.Fatalf("cmdInitFromDirWithOptionsInternal code = 0; want non-zero. stdout=%q stderr=%q", stdout.String(), stderr.String())

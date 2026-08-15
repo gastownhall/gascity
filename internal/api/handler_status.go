@@ -73,6 +73,13 @@ type StatusInput struct {
 // snapshot instead of rendering partial/empty data. CacheAgeS surfaces the
 // age of the latest fresh observation so `gc status` can append a staleness
 // banner when the supervisor is lagging.
+//
+// The gate and the age both read the WORK store, which is the class the body's
+// expensive legs come from (work counts, store health). It deliberately does
+// not gate the session-class store: a CachingStore that cannot serve a read
+// from cache falls through to its backing store rather than answering empty,
+// so a priming sessions binding surfaces as a "sessions:" partial error from
+// statusSessionSnapshot, never as a silent zero-session fleet.
 func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*IndexOutput[StatusBody], error) {
 	store := s.state.CityBeadStore()
 	if err := cacheLiveOr503(store); err != nil {
@@ -146,9 +153,18 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	var rawRunning int
 	agentDetails := make([]StatusAgentDetail, 0, len(cfg.Agents))
 	suspendedRigs := make(map[string]bool, len(cfg.Rigs))
+	// cacheColdRigs mirrors the controller's per-rig cache refresh gate
+	// (rigStoreBackgroundRefresh): a rig suspended by EFFECTIVE state gets no
+	// async full prime and no reconciler, so its cache never reaches live and
+	// the cache-only Ready projection can never answer. It is deliberately not
+	// the same set as suspendedRigs, which grows below to include rigs merely
+	// inferred suspended because every one of their agents is — those keep a
+	// refreshing cache and must still be asked for ready work.
+	cacheColdRigs := make(map[string]bool, len(cfg.Rigs))
 	for _, r := range cfg.Rigs {
 		if suspensionstate.EffectiveRigSuspended(citySt, r.Name, r.EffectiveSuspendedOnStart()) {
 			suspendedRigs[r.Name] = true
+			cacheColdRigs[r.Name] = true
 		}
 	}
 	perRigAgentTotals := make(map[string]int, len(cfg.Rigs))
@@ -247,7 +263,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	var wc workCounts
 	if !lite {
 		var workErrs []string
-		wc, workErrs = s.statusWorkCounts(ctx)
+		wc, workErrs = s.statusWorkCounts(ctx, cacheColdRigs)
 		partialErrors = append(partialErrors, workErrs...)
 	}
 
@@ -281,7 +297,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 		})
 	}
 
-	// Session counts: walk the city bead store for session beads. Omitted in
+	// Session counts: derived from the session-class snapshot. Omitted in
 	// lite mode (detail block, not needed for the high-frequency overview).
 	var sessionCounts *StatusSessionCountsDetail
 	if !lite && len(sessionSnapshot.bySessionName) > 0 {
@@ -470,13 +486,35 @@ type statusSessionInfo struct {
 	state       session.State
 }
 
+// statusSessionSnapshot reads the session-class beads every session-derived
+// field of the status body is built from: per-agent running/suspended state,
+// named-session status, the unlimited-pool expansion, and the session counts.
+//
+// It reads SessionsBeadStore(), not CityBeadStore(). Those are the same store
+// on a city that relocates nothing, so this is byte-identical there; on a city
+// with [beads.classes.sessions] relocated the session beads live in the class
+// binding, and reading them off the work ledger returned an empty fleet at
+// whatever the work ledger costs — on a cross-region hosted work store that is
+// seconds, so the read blew statusStoreReadTimeout and /status reported
+// "sessions: loading session snapshot timed out after 1s" for data sitting in a
+// local store.
 func (s *Server) statusSessionSnapshot(ctx context.Context) statusSessionSnapshot {
 	snapshot := statusSessionSnapshot{
 		bySessionName: make(map[string]statusSessionInfo),
 		byTemplate:    make(map[string][]statusSessionInfo),
 	}
-	store := s.state.CityBeadStore()
+	sessions := s.state.SessionsBeadStore()
+	store := sessions.Store
 	if store == nil {
+		// A nil session-class store is benign only when the city has no bead
+		// store at all. When the work store IS present, the sessions binding
+		// failed to resolve and this projection cannot see the class: say so
+		// rather than reporting an empty fleet, and do NOT fall back to the
+		// work store. Reading session beads off the work ledger is precisely
+		// what kept this mis-routing invisible.
+		if s.state.CityBeadStore() != nil {
+			snapshot.partialErrors = []string{"sessions: session-class bead store unavailable"}
+		}
 		return snapshot
 	}
 
@@ -503,14 +541,14 @@ func (s *Server) statusSessionSnapshot(ctx context.Context) statusSessionSnapsho
 		// it hung the whole handler past its read budget, dragging the
 		// supervisor loop (gc-08qgn). Under the goroutine the same time.After
 		// as the read bounds it.
-		readStore := store
+		readSessions := sessions
 		if scoped, err := s.state.ScopedStoreLike(reqCtx, store); err != nil {
 			done <- snapshotResult{err: fmt.Errorf("resolving scoped store: %w", err)}
 			return
 		} else if scoped != nil {
-			readStore = scoped
+			readSessions = beads.SessionStore{Store: scoped}
 		}
-		infos, partialErrors, err := sessionReadModelInfos(session.NewStore(beads.SessionStore{Store: readStore}))
+		infos, partialErrors, err := sessionReadModelInfos(session.NewStore(readSessions))
 		done <- snapshotResult{infos: infos, partialErrors: partialErrors, err: err}
 	}()
 
@@ -572,12 +610,28 @@ type statusWorkResult struct {
 }
 
 // statusWorkCounts tallies persisted open/in_progress work across BeadStores
-// and federates canonical Ready work exactly like GET /beads/ready: the city
-// store first, then BeadStores excluding the CityName alias. Stores exposing
-// beads.Counter answer persisted counts without hydrating rows — the caching
-// layer counts matches in memory when its cache is clean (#1896). Stores are
-// queried concurrently; results aggregate in deterministic city/rig order.
-func (s *Server) statusWorkCounts(ctx context.Context) (workCounts, []string) {
+// and federates canonical Ready work the way GET /beads/ready does over the
+// work stores: the city store first, then BeadStores excluding the CityName
+// alias. Stores exposing beads.Counter answer persisted counts without
+// hydrating rows — the caching layer counts matches in memory when its cache is
+// clean (#1896). Stores are queried concurrently; results aggregate in
+// deterministic city/rig order.
+//
+// NOT identical to GET /beads/ready on a split city: that handler grew a
+// relocated-graph-store leg (huma_handlers_beads.go) and this one has none, so
+// on a city with [beads.classes.graph] relocated the status ready count omits
+// graph-class ready work while /beads/ready includes it. Left divergent
+// deliberately rather than fixed here: this read is cache-only and error-lenient
+// by design (see cacheColdRigs below), which is the opposite of the graph leg's
+// fail-loud contract, so wiring one in is its own slice, not a rider.
+//
+// Rigs in cacheColdRigs are asked for persisted counts but not for ready work.
+// Their store runs no background cache refresh, so the cache-only Ready
+// projection is guaranteed to decline with ErrCacheUnavailable — reporting that
+// as a partial error made every city with a suspended rig permanently partial,
+// which greys out unrelated status tiles in the dashboard. Skipping the read
+// changes no count: the failing read already contributed zero ready work.
+func (s *Server) statusWorkCounts(ctx context.Context, cacheColdRigs map[string]bool) (workCounts, []string) {
 	stores := s.state.BeadStores()
 	// sortedRigNames deduplicates rigs sharing one store instance, so each
 	// store's persisted statuses are counted exactly once.
@@ -602,7 +656,7 @@ func (s *Server) statusWorkCounts(ctx context.Context) (workCounts, []string) {
 			label:         "rig " + rigName,
 			store:         stores[rigName],
 			includeStored: true,
-			includeReady:  rigName != cityName,
+			includeReady:  rigName != cityName && !cacheColdRigs[rigName],
 		})
 	}
 

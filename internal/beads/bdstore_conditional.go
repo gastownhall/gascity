@@ -334,19 +334,7 @@ func isBdConditionalPrecondition(body bdConditionalErrorBody, msg string) bool {
 // "contains if-revision" check would latch a CAPABLE bd the moment gascity passed
 // some unrelated unknown flag — the exact silent-degrade the latch must avoid.
 func isBdUnknownIfRevisionFlag(msg string) bool {
-	lower := strings.ToLower(msg)
-	for _, anchor := range []string{
-		"unknown flag: --if-revision",
-		"unknown flag: -if-revision",
-		"unknown flag '--if-revision'",
-		"flag provided but not defined: -if-revision",
-		"flag provided but not defined: --if-revision",
-	} {
-		if strings.Contains(lower, anchor) {
-			return true
-		}
-	}
-	return false
+	return isBdUnknownFlagError(msg, "--if-revision")
 }
 
 // conditionalRawDetail returns a bounded forensic snapshot of a failed

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -491,6 +492,42 @@ func diagnosticPtr(diagnostic beads.BeadsDiagnostic) *beads.BeadsDiagnostic {
 	return &diagnostic
 }
 
+// statusNameColumnWidth is the historical fixed pad for the agent-name column
+// in gc status text output. statusNameColumnGutter is the minimum number of
+// spaces that must separate a name from the token that follows it.
+const (
+	statusNameColumnWidth  = 24
+	statusNameColumnGutter = 2
+)
+
+// padStatusName left-aligns name in a width-wide column but always leaves at
+// least statusNameColumnGutter spaces before the next token. A plain "%-24s"
+// has no enforced minimum gutter, so a rig-qualified name at or past the pad
+// width runs straight into the status word
+// ("tar-valon/core.control-dispatcherunknown  (partial status)").
+// Names short enough to keep the gutter pad exactly as "%-*s" did, measured in
+// runes to match fmt's width semantics.
+func padStatusName(name string, width int) string {
+	n := utf8.RuneCountInString(name)
+	if n+statusNameColumnGutter > width {
+		return name + strings.Repeat(" ", statusNameColumnGutter)
+	}
+	return name + strings.Repeat(" ", width-n)
+}
+
+// agentSummaryLine renders the agent-count summary that closes the Agents
+// block. During partial status the runtime probe did not answer, so every
+// non-running row rendered "unknown  (partial status)"; folding those into a
+// running/total ratio reports a live fleet as down and contradicts the rows
+// thirty lines above it. Report unknown separately instead. When the status is
+// not partial (or nothing is unknown) the line is byte-identical to before.
+func agentSummaryLine(running, total int, partial bool) string {
+	if partial && total-running > 0 {
+		return fmt.Sprintf("%d running, %d unknown of %d agents", running, total-running, total)
+	}
+	return fmt.Sprintf("%d/%d agents running", running, total)
+}
+
 func renderCityStatusText(snapshot cityStatusSnapshot, dops drainOps, stdout io.Writer) {
 	fmt.Fprintf(stdout, "%s  %s\n", snapshot.CityName, snapshot.CityPath)                //nolint:errcheck // best-effort stdout
 	fmt.Fprintf(stdout, "  Controller: %s\n", controllerStatusLine(snapshot.Controller)) //nolint:errcheck // best-effort stdout
@@ -512,17 +549,17 @@ func renderCityStatusText(snapshot cityStatusSnapshot, dops drainOps, stdout io.
 		fmt.Fprintln(stdout, "Agents:")
 		for _, row := range snapshot.Agents {
 			if row.ScaleLabel != "" {
-				fmt.Fprintf(stdout, "  %-24s%s\n", row.GroupName, row.ScaleLabel) //nolint:errcheck // best-effort stdout
+				fmt.Fprintf(stdout, "  %s%s\n", padStatusName(row.GroupName, statusNameColumnWidth), row.ScaleLabel) //nolint:errcheck // best-effort stdout
 			}
 			status := agentStatusLineWithPartial(row.Agent.Running, dops, row.SessionName, row.Agent.Suspended, snapshot.Partial)
 			if row.Expanded {
-				fmt.Fprintf(stdout, "    %-22s%s\n", row.Agent.QualifiedName, status) //nolint:errcheck // best-effort stdout
+				fmt.Fprintf(stdout, "    %s%s\n", padStatusName(row.Agent.QualifiedName, statusNameColumnWidth-2), status) //nolint:errcheck // best-effort stdout
 			} else {
-				fmt.Fprintf(stdout, "  %-24s%s\n", row.Agent.QualifiedName, status) //nolint:errcheck // best-effort stdout
+				fmt.Fprintf(stdout, "  %s%s\n", padStatusName(row.Agent.QualifiedName, statusNameColumnWidth), status) //nolint:errcheck // best-effort stdout
 			}
 		}
-		fmt.Fprintln(stdout)                                                                                        //nolint:errcheck // best-effort stdout
-		fmt.Fprintf(stdout, "%d/%d agents running\n", snapshot.Summary.RunningAgents, snapshot.Summary.TotalAgents) //nolint:errcheck // best-effort stdout
+		fmt.Fprintln(stdout)                                                                                                   //nolint:errcheck // best-effort stdout
+		fmt.Fprintln(stdout, agentSummaryLine(snapshot.Summary.RunningAgents, snapshot.Summary.TotalAgents, snapshot.Partial)) //nolint:errcheck // best-effort stdout
 	}
 
 	if len(snapshot.NamedSessions) > 0 {

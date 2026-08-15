@@ -2682,3 +2682,62 @@ func filterNativeIssuesForTest(issues []*beadslib.Issue, filter beadslib.IssueFi
 	}
 	return filtered
 }
+
+// TestOpenNativeDoltStoreAtWithoutAmbientEnvWithholdsTheWholeNamespace pins the
+// hermetic open against the variable class that motivated it: the ones this
+// package's scoped projection does not name.
+//
+// BEADS_DOLT_CREDENTIAL_COMMAND is the sharp one — the library runs it — and it
+// is not in nativeDoltOpenEnvKeys, so the scoped projection leaves it standing.
+// The assertion is made from inside the open, where the library would read it.
+func TestOpenNativeDoltStoreAtWithoutAmbientEnvWithholdsTheWholeNamespace(t *testing.T) {
+	t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "/poison/credential-command")
+	t.Setenv("BEADS_DB", "/poison/db")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient.example.com")
+	oldOpen := nativeDoltOpenBestAvailable
+	t.Cleanup(func() { nativeDoltOpenBestAvailable = oldOpen })
+
+	var seen map[string]string
+	nativeDoltOpenBestAvailable = func(context.Context, string) (beadslib.Storage, error) {
+		seen = map[string]string{}
+		for _, key := range []string{"BEADS_DOLT_CREDENTIAL_COMMAND", "BEADS_DB", "BEADS_DOLT_SERVER_HOST"} {
+			seen[key] = os.Getenv(key)
+		}
+		return &nativeDoltStorageSpy{
+			getConfig: func(context.Context, string) (string, error) { return "gcg", nil },
+		}, nil
+	}
+
+	if _, err := OpenNativeDoltStoreAtWithoutAmbientEnv(context.Background(), filepath.Join(t.TempDir(), "scope")); err != nil {
+		t.Fatalf("OpenNativeDoltStoreAtWithoutAmbientEnv: %v", err)
+	}
+	for key, value := range seen {
+		if value != "" {
+			t.Errorf("%s = %q during the open, want withheld", key, value)
+		}
+	}
+	// Withheld for the open, not for the process: a caller that shares this
+	// process must find its environment exactly as it left it.
+	if got := os.Getenv("BEADS_DOLT_CREDENTIAL_COMMAND"); got != "/poison/credential-command" {
+		t.Errorf("BEADS_DOLT_CREDENTIAL_COMMAND after the open = %q, want the ambient value restored", got)
+	}
+	if got := os.Getenv("BEADS_DOLT_SERVER_HOST"); got != "ambient.example.com" {
+		t.Errorf("BEADS_DOLT_SERVER_HOST after the open = %q, want the ambient value restored", got)
+	}
+}
+
+// TestScopedNativeDoltOpenEnvIgnoresKeysOutsideItsList is the falsification the
+// hermetic open exists for: the scoped projection honors exactly the keys it
+// names, so passing an "empty environment" to it withholds nothing else.
+func TestScopedNativeDoltOpenEnvIgnoresKeysOutsideItsList(t *testing.T) {
+	t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "/poison/credential-command")
+	restore, err := withNativeDoltOpenEnv(map[string]string{"BEADS_DOLT_CREDENTIAL_COMMAND": ""})
+	if err != nil {
+		t.Fatalf("withNativeDoltOpenEnv: %v", err)
+	}
+	got := os.Getenv("BEADS_DOLT_CREDENTIAL_COMMAND")
+	restore()
+	if got != "/poison/credential-command" {
+		t.Fatalf("BEADS_DOLT_CREDENTIAL_COMMAND during a scoped projection = %q; if the projection now honors unlisted keys, the hermetic open's reason to exist has changed", got)
+	}
+}

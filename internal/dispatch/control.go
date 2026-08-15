@@ -463,6 +463,9 @@ func IsTransientControllerError(err error) bool {
 		"database is locked",
 		"database table is locked",
 		"sqlite_busy",
+		// A workflow root may remain blocked briefly while sibling work closes.
+		// Retrying preserves the open finalize bead for the next serve cycle.
+		"cannot close blocked issue",
 		// bd's client-side Dolt breaker fails fast while the server is down.
 		// These errors are recoverable, so a long-running control dispatcher
 		// must keep sweeping rather than exit permanently during the outage.
@@ -762,13 +765,14 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 		rootMeta[beadmeta.RalphStepIDMetadataKey] = stepID
 	}
 	rootStep := formula.RecipeStep{
-		ID:       attemptPrefix,
-		Title:    step.Title,
-		Type:     step.Type,
-		IsRoot:   true,
-		Labels:   append([]string{}, step.Labels...),
-		Assignee: step.Assignee,
-		Metadata: rootMeta,
+		ID:          attemptPrefix,
+		Title:       step.Title,
+		Description: step.Description,
+		Type:        step.Type,
+		IsRoot:      true,
+		Labels:      append([]string{}, step.Labels...),
+		Assignee:    step.Assignee,
+		Metadata:    rootMeta,
 	}
 	if step.Type == "" {
 		rootStep.Type = "task"
@@ -1319,7 +1323,7 @@ func findSpecBead(store beads.Store, control beads.Bead) (beads.Bead, error) {
 	}
 	stepRef := control.Metadata[beadmeta.StepRefMetadataKey]
 
-	all, err := listByWorkflowRoot(store, rootID)
+	all, err := beads.DirectMembers(store, rootID)
 	if err != nil {
 		return beads.Bead{}, err
 	}
@@ -1399,7 +1403,7 @@ func closeGeneratedSpecBeadsForAttempt(store beads.Store, control, attempt beads
 	if rootID == "" {
 		rootID = control.ID
 	}
-	all, err := listByWorkflowRoot(store, rootID)
+	all, err := beads.DirectMembers(store, rootID)
 	if err != nil {
 		return err
 	}
@@ -1431,7 +1435,7 @@ func closeSpecBeadsByRefs(store beads.Store, rootID string, refs []string) error
 	if len(wanted) == 0 {
 		return nil
 	}
-	all, err := listByWorkflowRoot(store, rootID)
+	all, err := beads.DirectMembers(store, rootID)
 	if err != nil {
 		return err
 	}
@@ -1475,7 +1479,7 @@ func findLatestAttempt(store beads.Store, control beads.Bead) (beads.Bead, error
 		rootID = control.ID
 	}
 
-	all, err := listByWorkflowRoot(store, rootID)
+	all, err := beads.DirectMembers(store, rootID)
 	if err == nil {
 		latest := latestAttemptFromCandidates(control, all)
 		if latest.ID != "" {
@@ -1772,6 +1776,6 @@ func updateMetadataAndClose(store beads.Store, beadID string, metadata map[strin
 	return store.Close(beadID)
 }
 
-// Note: listByWorkflowRoot, setOutcomeAndClose, propagateRetrySubjectMetadata,
+// Note: setOutcomeAndClose, propagateRetrySubjectMetadata,
 // classifyRetryAttempt, retryPreservedAssigneeWithConfig, and runRalphCheck are
 // defined in runtime.go, retry.go, and ralph.go respectively.

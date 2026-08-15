@@ -29,9 +29,89 @@ import (
 // real probe mechanics stay covered by controller_test.go.
 func withControllerAlive(t *testing.T, pid int) {
 	t.Helper()
-	prev := controllerAliveHook
-	controllerAliveHook = func(string) int { return pid }
-	t.Cleanup(func() { controllerAliveHook = prev })
+	withControllerHosting(t, pid, controllerHostingStandalone)
+}
+
+func withControllerHosting(t *testing.T, pid int, hostingMode controllerHostingMode) {
+	t.Helper()
+	prev := controllerIdentityHook
+	controllerIdentityHook = func(string) controllerIdentityReply {
+		return controllerIdentityReply{PID: pid, HostingMode: hostingMode}
+	}
+	t.Cleanup(func() { controllerIdentityHook = prev })
+}
+
+func TestEnsureNoStandaloneControllerAcceptsSupervisorHostedController(t *testing.T) {
+	withControllerHosting(t, 4242, controllerHostingSupervisor)
+
+	pid, err := ensureNoStandaloneController(t.TempDir())
+	if err != nil {
+		t.Fatalf("ensureNoStandaloneController: %v", err)
+	}
+	if pid != 0 {
+		t.Fatalf("ensureNoStandaloneController pid = %d, want 0", pid)
+	}
+}
+
+func TestEnsureNoStandaloneControllerRecognizesLegacySupervisorPID(t *testing.T) {
+	withControllerHosting(t, 4242, controllerHostingUnknown)
+	oldSupervisorAlive := supervisorAliveHook
+	supervisorAliveHook = func() int { return 4242 }
+	t.Cleanup(func() { supervisorAliveHook = oldSupervisorAlive })
+
+	pid, err := ensureNoStandaloneController(t.TempDir())
+	if err != nil {
+		t.Fatalf("ensureNoStandaloneController: %v", err)
+	}
+	if pid != 0 {
+		t.Fatalf("ensureNoStandaloneController pid = %d, want 0", pid)
+	}
+}
+
+func TestEnsureNoStandaloneControllerLeavesHeldLockHostingUnknown(t *testing.T) {
+	cityPath := t.TempDir()
+	gcDir := filepath.Join(cityPath, ".gc")
+	if err := os.MkdirAll(gcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := acquireControllerLock(cityPath)
+	if err != nil {
+		t.Fatalf("acquire controller lock: %v", err)
+	}
+	defer lock.Close() //nolint:errcheck // test cleanup
+	withControllerHosting(t, 0, controllerHostingUnknown)
+
+	pid, err := ensureNoStandaloneController(cityPath)
+	if !errors.Is(err, errControllerHostingUnknown) {
+		t.Fatalf("ensureNoStandaloneController error = %v, want unknown hosting", err)
+	}
+	if pid != 0 {
+		t.Fatalf("ensureNoStandaloneController pid = %d, want 0 without a responding controller", pid)
+	}
+}
+
+func TestRegisterCityWithSupervisorDoesNotMislabelLegacyController(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	withControllerHosting(t, 4242, controllerHostingUnknown)
+
+	var stdout, stderr bytes.Buffer
+	if code := registerCityWithSupervisor(cityPath, &stdout, &stderr, "gc start", true); code != 1 {
+		t.Fatalf("registerCityWithSupervisor code = %d, want 1", code)
+	}
+	got := stderr.String()
+	if !strings.Contains(got, "hosting mode is unavailable") || strings.Contains(got, "standalone controller already running") {
+		t.Fatalf("stderr = %q, want unknown-hosting diagnostic without standalone label", got)
+	}
+	if !strings.Contains(got, "gc stop ") {
+		t.Fatalf("stderr = %q, want an actionable 'gc stop' remedy", got)
+	}
+	if want := supervisorRetryCommand("gc start", cityPath); !strings.Contains(got, want) {
+		t.Fatalf("stderr = %q, want retry command %q", got, want)
+	}
 }
 
 //nolint:unparam // tests override hook behavior but keep fixed timeout/poll values for determinism
@@ -54,7 +134,7 @@ func withSupervisorTestHooks(t *testing.T, ensure func(stdout, stderr io.Writer)
 	supervisorAliveHook = alive
 	supervisorCityRunningHook = running
 	supervisorCityErrorHook = supervisorCityError
-	waitForSupervisorControllerStopHook = waitForStandaloneControllerStop
+	waitForSupervisorControllerStopHook = waitForSupervisorControllerStop
 	waitForSupervisorCityHook = waitForSupervisorCity
 	registerCityWithSupervisorTestHook = nil
 	supervisorCityReadyTimeout = timeout
@@ -1881,6 +1961,10 @@ shutdown_timeout = "100ms"
 	if pid := controllerAlive(canonicalTestPath(cityPath)); pid == 0 {
 		t.Fatal("controller socket exists but does not respond to ping")
 	}
+	identity := probeControllerIdentity(canonicalTestPath(cityPath))
+	if identity.PID != os.Getpid() || identity.HostingMode != controllerHostingSupervisor {
+		t.Fatalf("controller identity = %+v, want PID %d hosted by supervisor", identity, os.Getpid())
+	}
 
 	// Verify convergence commands are routed through the event loop.
 	// An unknown command returns a domain error rather than the "no bead store"
@@ -2804,5 +2888,73 @@ func TestConfirmCrossCitySupervisorImpactRegistryReadErrorFailsOpenWithWarning(t
 	}
 	if !strings.Contains(stderr.String(), "simulated registry I/O fault") {
 		t.Errorf("registry read error should include the underlying error message; stderr=%q", stderr.String())
+	}
+}
+
+func TestNormalizeRegisteredCityPathResolvesSymlinks(t *testing.T) {
+	root := t.TempDir()
+	realCity := filepath.Join(root, "real-city")
+	if err := os.MkdirAll(realCity, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link-city")
+	if err := os.Symlink(realCity, link); err != nil {
+		t.Skip("symlinks not supported")
+	}
+
+	got, err := normalizeRegisteredCityPath(link)
+	if err != nil {
+		t.Fatalf("normalizeRegisteredCityPath(%q): %v", link, err)
+	}
+	want := normalizePathForCompare(realCity)
+	if got != want {
+		t.Fatalf("normalizeRegisteredCityPath(%q) = %q, want %q", link, got, want)
+	}
+}
+
+// TestIsStructuralInitFailureMessageDetectsSchemaVersionGate pins #4484:
+// a bd schema-version gate ("database is at vN, binary knows up to vM")
+// is a structural failure -- no retry, and no city.toml edit, can ever
+// resolve it, since the fix is an out-of-band bd binary upgrade. Ordinary
+// transient failures (a lock held, a socket busy) must not match.
+func TestIsStructuralInitFailureMessageDetectsSchemaVersionGate(t *testing.T) {
+	structural := `init: beads lifecycle: init city beads: bd list: exit status 1: { "error": "schema version mismatch: database is at v53, binary knows up to v49 (4 migrations ahead)", "schema_skew": {"current_version":53,"delta":4,"required_version":49}, "schema_version": 1 }`
+	if !isStructuralInitFailureMessage(structural) {
+		t.Errorf("isStructuralInitFailureMessage(%q) = false, want true", structural)
+	}
+
+	transient := "controller lock: lock held by another process"
+	if isStructuralInitFailureMessage(transient) {
+		t.Errorf("isStructuralInitFailureMessage(%q) = true, want false", transient)
+	}
+}
+
+// TestInitFailureBackoffDelayEscalatesStructuralFailuresBeyondTransientCeiling
+// pins #4484: gc supervisor previously applied the same capped exponential
+// backoff (10s doubling to a 5-minute ceiling) to every init failure,
+// including a structural schema-version gate that retrying can never
+// resolve -- observed live retrying at the 5-minute ceiling for ~6 days
+// straight. A structural failure must back off to a far longer interval
+// immediately (not escalate gradually like a transient one), while
+// ordinary transient failures keep their existing behavior unchanged.
+func TestInitFailureBackoffDelayEscalatesStructuralFailuresBeyondTransientCeiling(t *testing.T) {
+	structuralMsg := `init: bd list: exit status 1: schema version mismatch: database is at v53, binary knows up to v49 (4 migrations ahead)`
+
+	if got := initFailureBackoffDelay(1, structuralMsg); got != structuralInitFailureBackoff {
+		t.Errorf("initFailureBackoffDelay(1, structural) = %s, want %s (should not use the transient ceiling even on the first failure)", got, structuralInitFailureBackoff)
+	}
+	if got := initFailureBackoffDelay(27, structuralMsg); got != structuralInitFailureBackoff {
+		t.Errorf("initFailureBackoffDelay(27, structural) = %s, want %s", got, structuralInitFailureBackoff)
+	}
+
+	transientMsg := "controller lock: lock held by another process"
+	if got, want := initFailureBackoffDelay(1, transientMsg), 10*time.Second; got != want {
+		t.Errorf("initFailureBackoffDelay(1, transient) = %s, want %s (unchanged transient behavior)", got, want)
+	}
+	if got, want := initFailureBackoffDelay(7, transientMsg), 5*time.Minute; got != want {
+		t.Errorf("initFailureBackoffDelay(7, transient) = %s, want %s (transient ceiling unchanged)", got, want)
+	}
+	if got := initFailureBackoffDelay(7, transientMsg); got == structuralInitFailureBackoff {
+		t.Errorf("initFailureBackoffDelay(7, transient) = %s, must not equal the structural backoff by coincidence", got)
 	}
 }

@@ -468,6 +468,70 @@ func TestEventWireBuildersForwardCorrelationFields(t *testing.T) {
 	})
 }
 
+func TestEventWireBuildersPreserveTopologyTriState(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		deps *[]string
+	}{
+		{name: "unknown"},
+		{name: "root", deps: ptrToStrings([]string{})},
+		{name: "dependencies", deps: ptrToStrings([]string{"step_1", "step_2"})},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := events.Event{
+				Seq:              7,
+				Type:             "custom.topology.test",
+				Ts:               time.Unix(1711300000, 0).UTC(),
+				Actor:            "cache-reconcile",
+				StepID:           testEventStepID,
+				DependsOnStepIDs: tc.deps,
+			}
+			tagged := events.TaggedEvent{Event: base, City: "gascity"}
+
+			wire, ok := toWireEvent(base)
+			if !ok {
+				t.Fatal("toWireEvent ok = false, want true")
+			}
+			taggedWire, ok := toWireTaggedEvent(tagged)
+			if !ok {
+				t.Fatal("toWireTaggedEvent ok = false, want true")
+			}
+			env, err := wireEventFrom(base, nil)
+			if err != nil {
+				t.Fatalf("wireEventFrom: %v", err)
+			}
+			taggedEnv, err := wireTaggedEventFrom(tagged, nil)
+			if err != nil {
+				t.Fatalf("wireTaggedEventFrom: %v", err)
+			}
+
+			got := []*[]string{
+				wire.DependsOnStepIDs,
+				taggedWire.DependsOnStepIDs,
+				env.DependsOnStepIDs,
+				taggedEnv.DependsOnStepIDs,
+			}
+			for i, dependencies := range got {
+				if !reflect.DeepEqual(dependencies, tc.deps) {
+					t.Fatalf("builder %d topology = %#v, want %#v", i, dependencies, tc.deps)
+				}
+			}
+			for _, value := range []any{wire, taggedWire, env, taggedEnv} {
+				assertJSONCarriesTopology(t, value, tc.deps)
+			}
+
+			if tc.deps != nil && len(*tc.deps) > 0 {
+				(*tc.deps)[0] = "mutated"
+				for i, dependencies := range got {
+					if dependencies == tc.deps || (*dependencies)[0] != "step_1" {
+						t.Fatalf("builder %d retained mutable source topology: %#v", i, dependencies)
+					}
+				}
+			}
+		})
+	}
+}
+
 // TestEventWireBuildersOmitEmptyCorrelationFields locks in the `omitempty`
 // contract: events recorded without correlation ids (mail, session, and
 // request-result paths carry empty run_id) must not emit the keys at all,
@@ -548,6 +612,32 @@ func assertJSONOmitsCorrelation(t *testing.T, v any) {
 		}
 	}
 }
+
+func assertJSONCarriesTopology(t *testing.T, v any, want *[]string) {
+	t.Helper()
+	fields := marshalToJSONFields(t, v)
+	raw, present := fields["depends_on_step_ids"]
+	if want == nil {
+		if present {
+			t.Errorf("JSON carries depends_on_step_ids for UNKNOWN topology")
+		}
+		return
+	}
+	if !present {
+		t.Errorf("JSON omits authoritative depends_on_step_ids=%v", *want)
+		return
+	}
+	var got []string
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Errorf("unmarshal depends_on_step_ids: %v", err)
+		return
+	}
+	if !reflect.DeepEqual(got, *want) {
+		t.Errorf("JSON depends_on_step_ids = %v, want %v", got, *want)
+	}
+}
+
+func ptrToStrings(values []string) *[]string { return &values }
 
 func marshalToJSONFields(t *testing.T, v any) map[string]json.RawMessage {
 	t.Helper()

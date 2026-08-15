@@ -247,7 +247,8 @@ func (c *CachingStore) cachedReadyCompleteOnly(ctx context.Context, query ReadyQ
 	if !c.mu.TryRLock() {
 		return nil, fmt.Errorf("reading complete ready projection from busy cache: %w", ErrCacheUnavailable)
 	}
-	if c.state != cacheLive || !c.depsComplete || c.primePartialErr != nil || len(c.dirty) > 0 {
+	if c.state != cacheLive || !c.depsComplete || c.primePartialErr != nil || len(c.dirty) > 0 ||
+		c.readyReadsMustGoLive() {
 		c.mu.RUnlock()
 		return nil, fmt.Errorf("reading complete ready projection from cache: %w", ErrCacheUnavailable)
 	}
@@ -267,6 +268,10 @@ func (c *CachingStore) cachedReadyCompleteOnly(ctx context.Context, query ReadyQ
 		if query.Assignee != "" && b.Assignee != query.Assignee {
 			continue
 		}
+		if c.readyProjectionUnknownLocked(b.ID) {
+			c.mu.RUnlock()
+			return nil, fmt.Errorf("reading complete ready projection for %s from cache: %w", b.ID, ErrCacheUnavailable)
+		}
 		openBeads = append(openBeads, cloneBead(b))
 	}
 	depsByID := make(map[string][]Dep, len(openBeads))
@@ -285,7 +290,8 @@ func (c *CachingStore) cachedReadyCompleteOnly(ctx context.Context, query ReadyQ
 }
 
 func (c *CachingStore) cachedReadyLocked(query ReadyQuery) ([]Bead, error) {
-	if (c.state != cacheLive && c.state != cachePartial) || c.primePartialErr != nil || len(c.dirty) > 0 {
+	if (c.state != cacheLive && c.state != cachePartial) || c.primePartialErr != nil ||
+		len(c.dirty) > 0 || c.readyReadsMustGoLive() {
 		return nil, fmt.Errorf("reading ready beads from cache: %w", ErrCacheUnavailable)
 	}
 
@@ -299,6 +305,9 @@ func (c *CachingStore) cachedReadyLocked(query ReadyQuery) ([]Bead, error) {
 		}
 		if query.Assignee != "" && b.Assignee != query.Assignee {
 			continue
+		}
+		if c.readyProjectionUnknownLocked(b.ID) {
+			return nil, fmt.Errorf("reading ready beads for %s from cache: %w", b.ID, ErrCacheUnavailable)
 		}
 		openBeads = append(openBeads, cloneBead(b))
 	}

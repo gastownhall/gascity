@@ -57,19 +57,38 @@ func setPoolTemplateRuntimeIdentityInfo(tp *TemplateParams, desiredAlias string,
 		return
 	}
 	if strings.TrimSpace(info.Alias) != strings.TrimSpace(desiredAlias) && poolRuntimeAliasIsDeferredInfo(info) {
-		tp.Alias = ""
-		if tp.Env == nil {
-			tp.Env = make(map[string]string)
-		}
-		tp.Env["GC_ALIAS"] = ""
-		if tp.SessionName != "" {
-			tp.Env["GC_AGENT"] = tp.SessionName
-		}
-		tp.EnvIdentityStamped = false
+		clearPoolTemplateRuntimeIdentity(tp)
 		return
 	}
 	tp.Alias = desiredAlias
 	setTemplateEnvIdentity(tp, desiredAlias)
+}
+
+// clearPoolTemplateRuntimeIdentity leaves a pool spawn with no public identity:
+// no alias, an explicitly BLANK GC_ALIAS, and GC_AGENT on the session name.
+//
+// Blanking GC_ALIAS rather than skipping the stamp is load-bearing.
+// resolveTemplate seeds GC_ALIAS with the agent's bare qualified name for every
+// session (template_resolve.go), so a skipped stamp would leave every member of
+// a pool advertising the SAME identity — worse than per-slot names, because
+// then two live workers claim under one string. The empty value is also what
+// tmux session creation reads as "unset this key" (`env -u`).
+//
+// This was already the deferred-alias behavior for a slot whose name was
+// unavailable; unaliased pools make it the ordinary case.
+func clearPoolTemplateRuntimeIdentity(tp *TemplateParams) {
+	if tp == nil {
+		return
+	}
+	tp.Alias = ""
+	if tp.Env == nil {
+		tp.Env = make(map[string]string)
+	}
+	tp.Env["GC_ALIAS"] = ""
+	if tp.SessionName != "" {
+		tp.Env["GC_AGENT"] = tp.SessionName
+	}
+	tp.EnvIdentityStamped = false
 }
 
 // claimPoolSlotWithConfigInfo is the session.Info sibling of
@@ -89,6 +108,72 @@ func claimPoolSlotWithConfigInfo(cfg *config.City, cfgAgent *config.Agent, info 
 		used[slot] = true
 		return slot
 	}
+}
+
+// preferredPoolSlotAboveCapacityInfo recovers a preferred session's concrete
+// identity when the only configured bound it exceeds is max_active_sessions.
+//
+// Capacity shrink blocks new slots; it must not rename an already-assigned
+// session. Requiring a matching stored template plus a concrete persisted
+// agent/alias/session identity keeps stale, identity-less out-of-bounds
+// pool_slot metadata on the existing bounded fallback path. Namepool length
+// remains an identity bound even when max_active_sessions is temporarily lower.
+func preferredPoolSlotAboveCapacityInfo(cfg *config.City, cfgAgent *config.Agent, info session.Info) int {
+	if cfgAgent == nil || cfgAgent.UsesCanonicalSingletonPoolIdentity() {
+		return 0
+	}
+	if cfg != nil && !storedTemplateMatchesPoolTemplate(
+		sessionBeadStoredTemplateInfo(info),
+		cfgAgent.QualifiedName(),
+		cfg,
+	) {
+		return 0
+	}
+	maxSessions := cfgAgent.EffectiveMaxActiveSessions()
+	if maxSessions == nil || *maxSessions <= 0 {
+		return 0
+	}
+
+	slot := resolvePersistedPoolIdentitySlot(cfgAgent, true, sessionBeadAgentNameInfo(info))
+	if slot == 0 {
+		slot = resolvePersistedPoolIdentitySlot(cfgAgent, true, info.Alias)
+	}
+	if slot == 0 && strings.TrimSpace(info.Alias) == "" && !infoOwnsPoolSessionName(info) {
+		slot = resolvePersistedPoolIdentitySlot(cfgAgent, true, info.SessionNameMetadata)
+	}
+	if slot <= *maxSessions {
+		return 0
+	}
+	if len(cfgAgent.NamepoolNames) > 0 && slot > len(cfgAgent.NamepoolNames) {
+		return 0
+	}
+	return slot
+}
+
+// claimPreferredPoolSlotWithConfigInfo preserves the concrete slot of a
+// session carrying assigned work across a capacity reduction when
+// preserveAboveCapacity is true. General reuse, in-flight-new, and
+// fresh-create paths stay bounded by claimPoolSlotWithConfigInfo.
+func claimPreferredPoolSlotWithConfigInfo(
+	cfg *config.City,
+	cfgAgent *config.Agent,
+	info session.Info,
+	preserveAboveCapacity bool,
+	used map[int]bool,
+) int {
+	if cfgAgent == nil || cfgAgent.UsesCanonicalSingletonPoolIdentity() {
+		return 0
+	}
+	if preserveAboveCapacity {
+		if slot := preferredPoolSlotAboveCapacityInfo(cfg, cfgAgent, info); slot > 0 {
+			if used[slot] {
+				return 0
+			}
+			used[slot] = true
+			return slot
+		}
+	}
+	return claimPoolSlotWithConfigInfo(cfg, cfgAgent, info, used)
 }
 
 // claimDesiredPoolSlotInfo is the session.Info sibling of claimDesiredPoolSlot.
@@ -336,7 +421,7 @@ func normalizeNonExpandingPoolSessionInfo(
 	}
 	if aliasNeedsUpdate {
 		if err := session.WithCitySessionAliasLock(bp.cityPath, canonical, func() error {
-			if err := session.EnsureAliasAvailableWithConfig(bp.beadStore, bp.city, canonical, info.ID); err != nil {
+			if err := session.EnsureAliasAvailableWithConfigForOwner(bp.beadStore, bp.city, canonical, info.ID, canonical); err != nil {
 				return err
 			}
 			return apply()
@@ -378,7 +463,11 @@ func normalizeNonExpandingPoolSessionInfo(
 // recordDeferredNonExpandingPoolAliasConflictInfo is the session.Info sibling of
 // recordDeferredNonExpandingPoolAliasConflict. It records the deferred-alias
 // bookkeeping via the SAME bp.beadStore.Update and folds the batch onto the
-// returned Info (ApplyPatch), the authoritative post-write value.
+// returned Info (ApplyPatch), the authoritative post-write value. Writes are
+// throttled by the shared deferredSingletonAliasRetryDue backoff gate (see
+// session_beads.go) keyed off the same pool_alias_conflict_at field the
+// sync-time path reads, so this call site cannot reset that path's clock
+// without also being subject to it.
 func recordDeferredNonExpandingPoolAliasConflictInfo(
 	bp *agentBuildParams,
 	cfgAgent *config.Agent,
@@ -388,6 +477,16 @@ func recordDeferredNonExpandingPoolAliasConflictInfo(
 	count := 0
 	if existing, err := strconv.Atoi(strings.TrimSpace(info.PoolAliasConflictCount)); err == nil && existing > 0 {
 		count = existing
+	}
+	// Canonical singleton pool identity retries share the same unresolvable-
+	// conflict shape as the sync-time path in session_beads.go (a
+	// max_active_sessions=1 agent with two live sessions never releases the
+	// alias), so it must go through the SAME deferredSingletonAliasRetryDue
+	// gate rather than writing on every buildDesiredState call. Do not
+	// duplicate the backoff predicate here -- that duplication is exactly how
+	// this call site went unguarded the first time.
+	if !deferredSingletonAliasRetryDue(info.PoolAliasConflictAt, count, time.Now().UTC()) {
+		return info, nil
 	}
 	metadata := session.UpdatedAliasMetadataFromInfo(info, "")
 	metadata[poolAliasConflictMetadataKey] = canonical

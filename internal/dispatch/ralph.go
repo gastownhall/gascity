@@ -448,7 +448,7 @@ func appendRalphRetry(store beads.Store, logicalID string, prevSubject, prevChec
 	rootID := prevSubject.Metadata[beadmeta.RootBeadIDMetadataKey]
 	if rootID != "" {
 		var err error
-		rootBeads, err = listByWorkflowRoot(store, rootID)
+		rootBeads, err = beads.DirectMembers(store, rootID)
 		if err != nil {
 			return nil, err
 		}
@@ -844,7 +844,7 @@ func collectRalphAttemptBeads(store beads.Store, subject beads.Bead) (map[string
 	if rootID == "" {
 		return nil, fmt.Errorf("%s: missing gc.root_bead_id", subject.ID)
 	}
-	all, err := listByWorkflowRoot(store, rootID)
+	all, err := beads.DirectMembers(store, rootID)
 	if err != nil {
 		return nil, err
 	}
@@ -960,7 +960,7 @@ func resolveLogicalBeadID(store beads.Store, bead beads.Bead) string {
 			}
 		}
 		if len(candidates) > 0 {
-			all, listErr := listByWorkflowRoot(store, rootID)
+			all, listErr := beads.DirectMembers(store, rootID)
 			if listErr == nil {
 				for _, ref := range candidates {
 					for _, candidate := range all {

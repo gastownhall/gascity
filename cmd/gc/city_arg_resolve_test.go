@@ -337,6 +337,80 @@ func TestResolveCityFlagValueByName(t *testing.T) {
 	}
 }
 
+// makeCitySymlinkAliasFixture creates a real city directory plus a sibling
+// symlink alias to its parent, mirroring makeRigSymlinkAliasFixture in
+// main_test.go. Returns the canonical city path and an alias path that
+// reaches the same city through a symlinked ancestor.
+func makeCitySymlinkAliasFixture(t *testing.T) (cityPath, aliasCityPath string) {
+	t.Helper()
+
+	root := t.TempDir()
+	realRoot := filepath.Join(root, "real")
+	cityPath = filepath.Join(realRoot, "my-city")
+	mkTestCity(t, cityPath)
+	aliasRoot := filepath.Join(root, "alias")
+	if err := os.Symlink(realRoot, aliasRoot); err != nil {
+		t.Skipf("symlink setup unavailable: %v", err)
+	}
+	return cityPath, filepath.Join(aliasRoot, "my-city")
+}
+
+// TestResolveCityFlagValueResolvesSymlinkAlias pins ga-iawy13.8: --city must
+// canonicalize a symlink-alias path to the same value findCity would produce
+// from cwd discovery, not just filepath.Abs it. Deliberately compares with
+// raw == (not samePath, which normalizes both sides and would pass even
+// against the un-normalized result).
+func TestResolveCityFlagValueResolvesSymlinkAlias(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	cityPath, aliasCityPath := makeCitySymlinkAliasFixture(t)
+
+	got, err := resolveCityFlagValue(aliasCityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != cityPath {
+		t.Fatalf("resolveCityFlagValue(%q) = %q, want canonical %q (must resolve the symlink alias, not just Abs it)", aliasCityPath, got, cityPath)
+	}
+}
+
+// TestResolveExplicitCityPathEnvResolvesSymlinkAlias pins ga-iawy13.8 for the
+// GC_CITY_PATH env ingest point (path-only, so it exercises validateCityPath
+// directly without registry name resolution).
+func TestResolveExplicitCityPathEnvResolvesSymlinkAlias(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	cityPath, aliasCityPath := makeCitySymlinkAliasFixture(t)
+
+	t.Setenv("GC_CITY", "")
+	t.Setenv("GC_CITY_PATH", aliasCityPath)
+	t.Setenv("GC_CITY_ROOT", "")
+
+	got, ok := resolveExplicitCityPathEnv()
+	if !ok {
+		t.Fatal("resolveExplicitCityPathEnv() ok = false, want true")
+	}
+	if got != cityPath {
+		t.Fatalf("resolveExplicitCityPathEnv() via GC_CITY_PATH = %q, want canonical %q (must resolve the symlink alias, not just Abs it)", got, cityPath)
+	}
+}
+
+// TestResolveCommandContextPathArgResolvesSymlinkAlias pins ga-iawy13.8 for
+// the bare positional city/rig path argument (resolveContextFromPath's
+// direct HasCityConfig branch), which currently returns the raw Abs'd alias
+// path instead of canonicalizing like its sibling branches (findCity,
+// resolveRigPathToContext) already do.
+func TestResolveCommandContextPathArgResolvesSymlinkAlias(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	cityPath, aliasCityPath := makeCitySymlinkAliasFixture(t)
+
+	ctx, err := resolveCommandContext([]string{aliasCityPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ctx.CityPath != cityPath {
+		t.Fatalf("resolveCommandContext([%q]).CityPath = %q, want canonical %q (must resolve the symlink alias, not just Abs it)", aliasCityPath, ctx.CityPath, cityPath)
+	}
+}
+
 func TestResolveExplicitCityPathEnvByName(t *testing.T) {
 	t.Setenv("GC_HOME", t.TempDir())
 	t.Chdir(t.TempDir())

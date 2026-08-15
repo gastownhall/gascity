@@ -1847,7 +1847,7 @@ func TestRetireDuplicateConfiguredNamedSessionBeads_DoesNotStopWinnerSharingSess
 	indexBySessionName := map[string]int{sessionName: 1}
 
 	retired := retireDuplicateConfiguredNamedSessionBeads(
-		store, nil, sp, cfg, "test-city", openBeads, bySessionName, indexBySessionName, time.Now().UTC(), io.Discard,
+		"", store, nil, sp, cfg, "test-city", openBeads, bySessionName, indexBySessionName, time.Now().UTC(), io.Discard,
 	)
 
 	if !sp.IsRunning(sessionName) {
@@ -1974,7 +1974,7 @@ func TestRetireDuplicateConfiguredNamedSessionBeads_StopFailureKeepsRuntimeOwner
 	}
 
 	retired := retireDuplicateConfiguredNamedSessionBeads(
-		store, nil, sp, cfg, "test-city", openBeads, bySessionName, indexBySessionName, time.Now().UTC(), io.Discard,
+		"", store, nil, sp, cfg, "test-city", openBeads, bySessionName, indexBySessionName, time.Now().UTC(), io.Discard,
 	)
 
 	if !sp.IsRunning(loserSessionName) {
@@ -2032,7 +2032,7 @@ func TestRetireRemovedConfiguredNamedSessionBead_StopFailureKeepsRuntimeOwner(t 
 	}
 
 	var stderr bytes.Buffer
-	retired := retireRemovedConfiguredNamedSessionBead(store, nil, sp, b, now, &stderr)
+	retired := retireRemovedConfiguredNamedSessionBead("", nil, store, nil, sp, b, now, &stderr)
 
 	if retired {
 		t.Fatal("retireRemovedConfiguredNamedSessionBead returned true after runtime stop failed")
@@ -2096,6 +2096,7 @@ func TestCloseSessionBeadIfRuntimeStoppedAndUnassigned_RechecksAssignedWorkAfter
 
 	var stderr bytes.Buffer
 	closed := closeSessionBeadIfRuntimeStoppedAndUnassigned(
+		"",
 		store, nil, sp, nil, b, "suspended", "suspended session", now, &stderr,
 	)
 
@@ -2139,6 +2140,7 @@ func TestCloseSessionBeadIfRuntimeStoppedAndUnassigned_StopLeavesRunningKeepsBea
 
 	var stderr bytes.Buffer
 	closed := closeSessionBeadIfRuntimeStoppedAndUnassigned(
+		"",
 		store, nil, sp, nil, b, "orphaned", "orphaned session", now, &stderr,
 	)
 
@@ -2206,6 +2208,7 @@ func TestCloseSessionBeadIfRuntimeStoppedAndUnassignedPreservesConfiguredNamedSe
 
 	var stderr bytes.Buffer
 	closed := closeSessionBeadIfRuntimeStoppedAndUnassigned(
+		"",
 		store, nil, sp, cfg, b, "suspended", "suspended session", now, &stderr,
 	)
 
@@ -2696,6 +2699,13 @@ func TestSyncSessionBeads_ClearsManagedAliasWhenRemoved(t *testing.T) {
 		t.Fatalf("GetMeta(GC_ALIAS): %v", err)
 	} else if got != "" {
 		t.Fatalf("GC_ALIAS = %q, want empty", got)
+	}
+	for _, key := range []string{"GC_AGENT", "BEADS_ACTOR"} {
+		if got, err := sp.GetMeta("s-gc-123", key); err != nil {
+			t.Fatalf("GetMeta(%s): %v", key, err)
+		} else if got != "s-gc-123" {
+			t.Fatalf("%s = %q, want session-name fallback", key, got)
+		}
 	}
 }
 
@@ -7758,7 +7768,7 @@ func TestUnclaimResetsInProgressStatus(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	unclaimWorkAssignedToRetiredSessionBead(store, nil, sessionBead, "myrig/codex-max", &stderr)
+	unclaimWorkAssignedToRetiredSessionBead("", nil, store, nil, sessionBead, "myrig/codex-max", &stderr)
 
 	gotInProgress, err := store.Get(work.ID)
 	if err != nil {
@@ -7814,7 +7824,7 @@ func TestUnclaimWorkAssignedToRetiredSessionBeadPreservesRunTargetRoute(t *testi
 	}
 
 	var stderr bytes.Buffer
-	unclaimWorkAssignedToRetiredSessionBead(store, nil, sessionBead, "fallback/worker", &stderr)
+	unclaimWorkAssignedToRetiredSessionBead("", nil, store, nil, sessionBead, "fallback/worker", &stderr)
 
 	got, err := store.Get(work.ID)
 	if err != nil {
@@ -7874,7 +7884,7 @@ func TestUnclaimWorkAssignedToRetiredSessionBeadClearsSessionAffinity(t *testing
 	}
 
 	var stderr bytes.Buffer
-	unclaimWorkAssignedToRetiredSessionBead(store, nil, sessionBead, "fallback/worker", &stderr)
+	unclaimWorkAssignedToRetiredSessionBead("", nil, store, nil, sessionBead, "fallback/worker", &stderr)
 
 	got, err := store.Get(work.ID)
 	if err != nil {
@@ -8226,7 +8236,7 @@ func TestCloseSessionBeadIfUnassignedRefusesWhenRigStoreWorkAssignedBySessionNam
 
 	var stderr bytes.Buffer
 	now := time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)
-	if closeSessionBeadIfUnassigned(store, map[string]beads.Store{"demo": rigStore}, nil, sessionBead, "stale-session", now, &stderr) {
+	if closeSessionBeadIfUnassigned("", store, map[string]beads.Store{"demo": rigStore}, nil, sessionBead, "stale-session", now, &stderr) {
 		t.Fatal("closeSessionBeadIfUnassigned returned true; want false because rig-store work is still assigned by session_name")
 	}
 	got, err := store.Get(sessionBead.ID)
@@ -8280,7 +8290,7 @@ func TestUnclaimWorkAssignedToRetiredSessionBeadClearsRigStoreSessionIdentifiers
 
 	var stderr bytes.Buffer
 	unclaimWorkAssignedToRetiredSessionBead(
-		store,
+		"", nil, store,
 		map[string]beads.Store{"frontend": rigStore},
 		sessionBead,
 		"frontend/codex-max",
@@ -8365,7 +8375,7 @@ func TestReassignWorkAssignedToRetiredSessionBeadReassignsRigStoreSessionIdentif
 
 	var stderr bytes.Buffer
 	reassignWorkAssignedToRetiredSessionBead(
-		store,
+		"", nil, store,
 		map[string]beads.Store{"frontend": rigStore},
 		retired,
 		successor.ID,
@@ -8687,4 +8697,76 @@ func TestSyncTailReturnsFreshStoreLoadNotLocalSlice(t *testing.T) {
 	if !reflect.DeepEqual(gotIDs, freshIDs) {
 		t.Fatalf("returned snapshot open set %v != fresh store load %v", gotIDs, freshIDs)
 	}
+}
+
+// TestDeferredSingletonAliasRetryBackoff covers the livelock fix: an
+// unresolvable deferred-singleton alias conflict must not re-attempt (and
+// therefore rewrite its session bead) on every sync tick.
+func TestDeferredSingletonAliasRetryBackoff(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+
+	t.Run("backoff grows then saturates without overflowing", func(t *testing.T) {
+		if got := deferredSingletonAliasRetryBackoff(1); got != deferredSingletonAliasRetryBase {
+			t.Fatalf("count=1: got %v, want %v", got, deferredSingletonAliasRetryBase)
+		}
+		if got := deferredSingletonAliasRetryBackoff(2); got != 2*deferredSingletonAliasRetryBase {
+			t.Fatalf("count=2: got %v, want %v", got, 2*deferredSingletonAliasRetryBase)
+		}
+		// The production counter reached five figures; a naive 1<<count would
+		// overflow to a negative or tiny duration and silently restore the spin.
+		for _, count := range []int{64, 1000, 15237} {
+			got := deferredSingletonAliasRetryBackoff(count)
+			if got != deferredSingletonAliasRetryMax {
+				t.Fatalf("count=%d: got %v, want saturation at %v", count, got, deferredSingletonAliasRetryMax)
+			}
+		}
+	})
+
+	t.Run("a fresh attempt is not due again immediately", func(t *testing.T) {
+		last := now.Add(-1 * time.Second).Format(time.RFC3339)
+		if deferredSingletonAliasRetryDue(last, 5, now) {
+			t.Fatalf("attempt 1s ago should not be due")
+		}
+	})
+
+	t.Run("an elapsed backoff window is due", func(t *testing.T) {
+		last := now.Add(-31 * time.Minute).Format(time.RFC3339)
+		if !deferredSingletonAliasRetryDue(last, 5, now) {
+			t.Fatalf("attempt 31m ago should be due (max backoff is %v)", deferredSingletonAliasRetryMax)
+		}
+	})
+
+	// THE PRODUCTION STATE. ra-9w9c sat at 15k+ iterations incrementing every
+	// sync tick. At that count the backoff is saturated, so a tick arriving
+	// seconds after the last attempt must be suppressed. This is the assertion
+	// that fails without the fix.
+	t.Run("the observed livelock state is throttled", func(t *testing.T) {
+		last := now.Add(-8 * time.Second).Format(time.RFC3339)
+		if deferredSingletonAliasRetryDue(last, 15237, now) {
+			t.Fatalf("15237 attempts, last 8s ago: must NOT be due — this is the livelock")
+		}
+	})
+
+	t.Run("recovery is preserved: retries still fire after the window", func(t *testing.T) {
+		last := now.Add(-deferredSingletonAliasRetryMax - time.Second).Format(time.RFC3339)
+		if !deferredSingletonAliasRetryDue(last, 15237, now) {
+			t.Fatalf("a saturated conflict must still re-attempt after the max window, or it can never recover")
+		}
+	})
+
+	t.Run("missing or unparseable timestamp retries", func(t *testing.T) {
+		if !deferredSingletonAliasRetryDue("", 5, now) {
+			t.Fatalf("empty timestamp should be due")
+		}
+		if !deferredSingletonAliasRetryDue("not-a-time", 5, now) {
+			t.Fatalf("unparseable timestamp should be due")
+		}
+	})
+
+	t.Run("a future timestamp does not suppress retries", func(t *testing.T) {
+		last := now.Add(1 * time.Hour).Format(time.RFC3339)
+		if !deferredSingletonAliasRetryDue(last, 5, now) {
+			t.Fatalf("future timestamp should be treated as due, not stall until the clock catches up")
+		}
+	})
 }

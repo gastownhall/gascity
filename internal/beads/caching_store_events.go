@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 )
@@ -360,14 +362,50 @@ func (c *CachingStore) ApplyDepEvent(beadID string, deps []Dep) {
 	c.updateStatsLocked()
 }
 
+// clearReadyProjectionLocked drops a row's is_blocked so the next read
+// recomputes it, and records the row as unanswerable when dropping the column
+// would change the answer.
+//
+// Invalidation is right — the row's own edges or a blocking target's status
+// just moved — but the dependency-derived predicate that takes over is weaker
+// than the column wherever the row has an edge the predicate does not model
+// (readyPredicateCanAnswerLocked names both gaps). A row that was BLOCKED and
+// whose remaining resident edges now read ready is the case that flips from
+// hidden to offered on the strength of that predicate alone, so its verdict is
+// recorded as lost; readiness then declines for it unless its own edges can
+// reproduce the verdict exactly (ga-cfhgr). A row that is still blocked by a
+// resident open edge loses nothing: the predicate reaches the same verdict the
+// column held.
+//
+// Caller must hold c.mu in write mode.
 func (c *CachingStore) clearReadyProjectionLocked(id string) bool {
 	b, ok := c.beads[id]
 	if !ok || b.IsBlocked == nil {
 		return false
 	}
+	if *b.IsBlocked && !c.residentEdgesStillBlockLocked(id) {
+		c.markReadyProjectionLostLocked(id)
+	}
 	b.IsBlocked = nil
 	c.beads[id] = b
 	return true
+}
+
+// residentEdgesStillBlockLocked reports whether the row's own edges still prove
+// it blocked without the column. It is cachedBeadReady's fallback branch,
+// evaluated against live cache state instead of a snapshot index: a dep blocks
+// only when its type is ready-blocking AND the target is resident AND the
+// target is not closed. Caller must hold c.mu.
+func (c *CachingStore) residentEdgesStillBlockLocked(id string) bool {
+	for _, dep := range c.deps[id] {
+		if !isReadyBlockingDependencyType(dep.Type) {
+			continue
+		}
+		if target, resident := c.beads[dep.DependsOnID]; resident && target.Status != "closed" {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *CachingStore) clearAllReadyProjectionsLocked() bool {
@@ -662,14 +700,47 @@ func (c *CachingStore) notifyChange(eventType string, b Bead) {
 	// free-form metadata map. The run-chain (workflow_id || molecule_id ||
 	// gc.root_bead_id || bead.ID) always resolves to a non-empty id since b.ID is
 	// non-empty; session id is a direct, optional metadata read. Both are
-	// safeRef-gated again at the export boundary.
+	// Run/session are safeRef-gated at the export boundary; native step topology
+	// retains its own established 256-byte domain there.
 	runID := beadmeta.ResolveRunID(b.Metadata, b.ID, "")
 	sessionID := b.Metadata[beadmeta.SessionIDMetadataKey]
-	// step_id is the acting work bead the lifecycle event is about: a work/dispatch
-	// bead carries its own gc.step_id, so a bead.created/closed on one stamps that
-	// step. Non-work beads (sessions, mail, …) carry none → empty, omitted at export.
+	// step_id is the semantic native execution step carried explicitly by the
+	// lifecycle bead. Non-work beads (sessions, mail, …) carry none → omitted.
 	stepID := b.Metadata[beadmeta.StepIDMetadataKey]
-	c.onChange(eventType, b.ID, runID, sessionID, stepID, payload)
+	c.onChange(eventType, b.ID, runID, sessionID, stepID, nativeStepDependencies(b.Metadata, stepID), payload)
+}
+
+// nativeStepDependencies returns the explicit, canonical native topology fact.
+// It never derives edges from physical bead dependencies or other mutable state:
+// absent/malformed metadata is UNKNOWN (nil), while a canonical [] is a known root.
+func nativeStepDependencies(metadata map[string]string, stepID string) *[]string {
+	if !validTopologyStepID(stepID) {
+		return nil
+	}
+	raw, ok := metadata[beadmeta.NativeStepDependenciesMetadataKey]
+	if !ok {
+		return nil
+	}
+	var dependencies []string
+	if err := json.Unmarshal([]byte(raw), &dependencies); err != nil || dependencies == nil {
+		return nil
+	}
+	previous := ""
+	for _, dependency := range dependencies {
+		if !validTopologyStepID(dependency) || dependency == stepID || (previous != "" && dependency <= previous) {
+			return nil
+		}
+		previous = dependency
+	}
+	canonical, err := json.Marshal(dependencies)
+	if err != nil || raw != string(canonical) {
+		return nil
+	}
+	return &dependencies
+}
+
+func validTopologyStepID(id string) bool {
+	return len(id) <= 256 && utf8.ValidString(id) && strings.TrimSpace(id) != ""
 }
 
 type cacheNotification struct {

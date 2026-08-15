@@ -235,7 +235,7 @@ func TestTraceControllerSocketInvalidRequestDoesNotPoke(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		handleControllerConn(server, cityDir, func() {}, nil, nil, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
+		handleControllerConn(server, cityDir, controllerHostingStandalone, func() {}, nil, nil, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
 		close(done)
 	}()
 
@@ -396,7 +396,7 @@ func sendTraceSocketCommand(t *testing.T, cityDir, command string, req traceCont
 
 	done := make(chan struct{})
 	go func() {
-		handleControllerConn(server, cityDir, func() {}, nil, nil, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
+		handleControllerConn(server, cityDir, controllerHostingStandalone, func() {}, nil, nil, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
 		close(done)
 	}()
 
@@ -427,7 +427,7 @@ func sendTraceStatusSocketCommand(t *testing.T, cityDir string, pokeCh chan stru
 
 	done := make(chan struct{})
 	go func() {
-		handleControllerConn(server, cityDir, func() {}, nil, nil, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
+		handleControllerConn(server, cityDir, controllerHostingStandalone, func() {}, nil, nil, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
 		close(done)
 	}()
 

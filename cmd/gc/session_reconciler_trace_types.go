@@ -249,6 +249,7 @@ const (
 	TraceOutcomeStopPending         TraceOutcomeCode = "stop_pending"
 	TraceOutcomeDeferredConfirm     TraceOutcomeCode = "deferred_confirm"
 	TraceOutcomeExempt              TraceOutcomeCode = "exempt"
+	TraceOutcomeDeferredMinFloor    TraceOutcomeCode = "deferred_min_floor"
 	TraceOutcomeRestartInPlace      TraceOutcomeCode = "restart_in_place"
 	TraceOutcomeDeferredPending     TraceOutcomeCode = "deferred_pending"
 	TraceOutcomeRepairInPlace       TraceOutcomeCode = "repair_in_place"

@@ -78,13 +78,13 @@ func PoolSessionName(template, beadID string) string {
 // typed session.Info projection (WI-5 W4); the close is a session-class op
 // routed through the session front door. Returns the IDs of session beads
 // that were closed.
-func GCSweepSessionBeads(store beads.Store, rigStores map[string]beads.Store, sessionInfos []session.Info) []string {
+func GCSweepSessionBeads(cityPath string, store beads.Store, rigStores map[string]beads.Store, sessionInfos []session.Info) []string {
 	var closed []string
 	for _, info := range sessionInfos {
 		if info.Closed {
 			continue
 		}
-		if !closeSessionInfoIfUnassigned(store, rigStores, nil, info, "gc_swept", time.Now().UTC(), nil) {
+		if !closeSessionInfoIfUnassigned(cityPath, store, rigStores, nil, info, "gc_swept", time.Now().UTC(), nil) {
 			continue
 		}
 		closed = append(closed, info.ID)
@@ -137,7 +137,7 @@ func releaseOrphanedPoolAssignments(
 		log.Printf("releaseOrphanedPoolAssignments: assigned work/store-ref length mismatch: work=%d storeRefs=%d", len(assignedWorkBeads), len(assignedWorkStoreRefs))
 	}
 
-	openIdentifiers := makeOpenSessionStoreRefIndex(cityPath, cfg, openSessionInfos, storeRefAware)
+	openIdentifiers := makeOpenSessionStoreRefIndex(cityPath, cfg, store, openSessionInfos, storeRefAware)
 	legacyOpenIdentifiers := make(map[string]struct{}, len(openSessionInfos)*5)
 	for _, info := range openSessionInfos {
 		if info.Closed {
@@ -165,6 +165,10 @@ func releaseOrphanedPoolAssignments(
 		if agentCfg == nil || !agentCfg.SupportsGenericEphemeralSessions() {
 			continue
 		}
+		// Resolved before the liveness gates because the graph-resident-session
+		// probe below reads the same store; the missing-store report stays where
+		// it was, so a bead skipped by a liveness gate never reaches it.
+		ownerStore := assignedWorkOwnerStore(cfg, store, rigStores, assignedWorkStores, i, wb)
 		if assignee == "" {
 			if wb.Status != "in_progress" {
 				continue
@@ -183,20 +187,24 @@ func releaseOrphanedPoolAssignments(
 			if liveOpenSessionAssignmentExists(store, assignee) {
 				continue
 			}
+			// The sessions binding is not the only ledger that can hold a session
+			// bead. Graph-resident run sessions (gcg-session-*) are written into
+			// the same store as the work they drive, so on a city whose graph
+			// binding is separate from the sessions binding the probe above is
+			// structurally blind to every graph-run assignee and releases live
+			// claims. A session bead of that shape lives in the work bead's own
+			// owner store, so probing that one store after the sessions store
+			// misses closes the gap without enumerating every attached store.
+			if ownerStore != nil && liveOpenSessionAssignmentExists(ownerStore, assignee) {
+				continue
+			}
 		}
 
-		var ownerStore beads.Store
-		if storeAware {
-			if i >= len(assignedWorkStores) || assignedWorkStores[i] == nil {
+		if ownerStore == nil {
+			if storeAware {
 				log.Printf("releaseOrphanedPoolAssignments: missing owner store for assigned work %q at index %d", wb.ID, i)
-				continue
 			}
-			ownerStore = assignedWorkStores[i]
-		} else {
-			ownerStore = storeForPoolAssignment(cfg, store, rigStores, wb)
-			if ownerStore == nil {
-				continue
-			}
+			continue
 		}
 		if !liveWorkAssignmentStillReleasable(ownerStore, wb.ID, wb.Status, assignee) {
 			continue
@@ -211,6 +219,21 @@ func releaseOrphanedPoolAssignments(
 		released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i})
 	}
 	return released
+}
+
+// assignedWorkOwnerStore resolves the store that owns the assigned work bead at
+// index i: the index-aligned snapshot store when the caller supplied one (the
+// store-aware form), otherwise the routed/prefix fallback. A nil result means
+// the snapshot is misaligned or no store resolves, and the caller must skip the
+// bead rather than guess at a store.
+func assignedWorkOwnerStore(cfg *config.City, cityStore beads.Store, rigStores map[string]beads.Store, assignedWorkStores []beads.Store, i int, wb beads.Bead) beads.Store {
+	if len(assignedWorkStores) > 0 {
+		if i >= len(assignedWorkStores) {
+			return nil
+		}
+		return assignedWorkStores[i]
+	}
+	return storeForPoolAssignment(cfg, cityStore, rigStores, wb)
 }
 
 func detachedProbeAllowsOrphanRelease(wb beads.Bead) (bool, bool) {
@@ -272,11 +295,13 @@ const unresolvedOpenSessionStoreRef = "\x00unresolved"
 // The \x00 prefix cannot collide with a real rig name.
 const crossStoreOpenSessionStoreRef = "\x00crossstore"
 
-func makeOpenSessionStoreRefIndex(cityPath string, cfg *config.City, openSessionInfos []session.Info, storeRefAware bool) map[string]map[string]struct{} {
+func makeOpenSessionStoreRefIndex(cityPath string, cfg *config.City, leading beads.Store, openSessionInfos []session.Info, storeRefAware bool) map[string]map[string]struct{} {
 	index := make(map[string]map[string]struct{}, len(openSessionInfos)*5)
 	if !storeRefAware {
 		return index
 	}
+	// A property of the CITY, so it is resolved once rather than per session.
+	claimRefs := assignedWorkClaimRefs(cityPath, cfg, leading)
 	for _, info := range openSessionInfos {
 		if info.Closed {
 			continue
@@ -285,9 +310,11 @@ func makeOpenSessionStoreRefIndex(cityPath string, cfg *config.City, openSession
 		// through Info for both the store-ref resolution and the assignee
 		// identities (WI-5 W4 — the boundary projection this loop used to carry
 		// moved to the snapshot's load edge).
-		storeRef := openSessionReachableStoreRefInfo(cityPath, cfg, info)
+		storeRefs := openSessionReachableStoreRefInfo(cityPath, cfg, claimRefs, info)
 		for _, id := range sessionBeadAssigneeIdentitiesInfo(info) {
-			addOpenSessionStoreRef(index, id, storeRef)
+			for _, storeRef := range storeRefs {
+				addOpenSessionStoreRef(index, id, storeRef)
+			}
 		}
 	}
 	return index
@@ -590,48 +617,57 @@ func liveSessionBeadExistsByIdentity(store beads.Store, assignee string) bool {
 	return false
 }
 
+// directSessionBeadIDCandidates returns the bead IDs a work-bead assignee could
+// name, so liveSessionBeadExistsByIdentity can resolve the owning session bead
+// with a direct Get instead of depending on the open-session snapshot or the
+// live gc:session label list.
+//
+// A pool assignee is PoolSessionName(template, beadID) —
+// "<sanitized-template-base>-<beadID>" — and bead IDs contain a "-" themselves
+// ("th-vb20q"), so the ID is not simply the final "-"-delimited segment.
+// Enumerating every suffix that begins just after a "-" covers both the modern
+// form and the legacy "-mc-" form without special-casing either.
+//
+// Extra candidates cannot produce a false "session is live" answer: the caller
+// still requires the resolved bead to be a non-closed session bead whose own
+// assignee identities contain this exact assignee.
 func directSessionBeadIDCandidates(assignee string) []string {
 	assignee = strings.TrimSpace(assignee)
 	if assignee == "" {
 		return nil
 	}
 	candidates := []string{assignee}
-	if idx := strings.LastIndex(assignee, "-mc-"); idx >= 0 {
-		candidates = append(candidates, assignee[idx+1:])
+	for i := 0; i < len(assignee); i++ {
+		if assignee[i] != '-' {
+			continue
+		}
+		// A qualified agent name encodes "/" as "--" (agent.SessionNameFor),
+		// so the byte after a "-" can be another "-". Such a suffix is never a
+		// bead ID, and stores that shell out would read it as a flag.
+		suffix := assignee[i+1:]
+		if suffix == "" || suffix[0] == '-' {
+			continue
+		}
+		candidates = append(candidates, suffix)
 	}
 	return candidates
 }
 
-// liveWorkAssignmentStillReleasable confirms the snapshot is not stale
-// before clearing assignee. The expectedStatus must match the snapshot
-// status the caller observed: if the bead has since transitioned (e.g. a
-// concurrent claim moved open→in_progress, or another release moved
-// in_progress→open) the snapshot's release decision is no longer safe.
-// Open status is required for the issue #2793 path — graph.v2 step
-// beads stuck on a dead session's long-form assignee are status=open,
-// not in_progress.
+// liveWorkAssignmentStillReleasable confirms the snapshot is not stale before
+// clearing assignee, collapsing a read failure to "not releasable" for callers
+// that have no error channel. Open status is required for the issue #2793 path —
+// graph.v2 step beads stuck on a dead session's long-form assignee are
+// status=open, not in_progress.
+//
+// The check itself lives in liveWorkAssignmentAssigneeMatches (work_assignment.go),
+// shared with the work-release and reassign paths.
 func liveWorkAssignmentStillReleasable(store beads.Store, id, expectedStatus, assignee string) bool {
-	id = strings.TrimSpace(id)
-	expectedStatus = strings.TrimSpace(expectedStatus)
-	if store == nil || id == "" || expectedStatus == "" {
-		return false
-	}
-	work, err := store.List(beads.ListQuery{
-		Status:   expectedStatus,
-		Live:     true,
-		TierMode: beads.TierBoth,
-	})
+	matches, err := liveWorkAssignmentAssigneeMatches(store, id, expectedStatus, assignee)
 	if err != nil {
 		log.Printf("releaseOrphanedPoolAssignments: live work validation failed for %q: %v", id, err)
 		return false
 	}
-	for _, wb := range work {
-		if wb.ID != id {
-			continue
-		}
-		return strings.TrimSpace(wb.Assignee) == strings.TrimSpace(assignee)
-	}
-	return false
+	return matches
 }
 
 func assigneePreservesNamedSessionRoute(cfg *config.City, cityPath, template, assignee, workStoreRef string, storeRefAware bool) bool {

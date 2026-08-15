@@ -32,10 +32,16 @@ type liveWorktreeState struct {
 	// directories of live processes. Deduplicated.
 	cwds []string
 	// scanned reports whether the process table was enumerated at all. False
-	// means liveness is indeterminate — the host has no /proc, or the
-	// top-level walk failed — and the reaper must fail closed by protecting
-	// every candidate worktree.
+	// means liveness is indeterminate — no enumeration mechanism was available,
+	// or every one of them failed — and the reaper must fail closed by
+	// protecting every candidate worktree.
 	scanned bool
+	// source names the mechanism that produced this scan (liveScanSourceProc,
+	// liveScanSourceLsof), empty when scanned is false. Recorded so the choice
+	// of mechanism is observable rather than inferred from the host: a fallback
+	// that silently substitutes itself is hard to debug when the gate later
+	// behaves unexpectedly.
+	source string
 }
 
 // collectLiveWorktreeStateFn is the seam the reaper calls to gather live
@@ -45,9 +51,21 @@ type liveWorktreeState struct {
 var collectLiveWorktreeStateFn = collectLiveWorktreeState
 
 // collectLiveWorktreeState walks /proc/<pid>/cwd for every process on the host
-// and records their canonical working directories. On a host without /proc (or
-// when the top-level /proc walk fails outright) it returns scanned=false so the
-// caller fails closed and reaps nothing.
+// and records their canonical working directories. On a host without /proc it
+// falls back to a portable process-table enumeration
+// (bead_worktree_liveness_fallback.go); when no mechanism succeeds it returns
+// scanned=false so the caller fails closed and reaps nothing.
+//
+// The fallback matters because /proc is Linux-only, and returning
+// scanned=false for its absence does not merely make the reaper cautious on
+// other platforms — it disables the feature outright and permanently, while the
+// operator sees only "liveness scan unavailable". Darwin binaries are a
+// published release target, and CI runs on Linux, so nothing here fails on the
+// platform where the gate never worked.
+//
+// The check is at runtime rather than behind a build tag deliberately: /proc can
+// also be absent on Linux (a container without it mounted), and the same
+// fallback covers that case.
 //
 // Per-process readlink failures are skipped, not fatal: a process may exit
 // mid-walk, and a process owned by another user may have a cwd this process
@@ -59,7 +77,7 @@ var collectLiveWorktreeStateFn = collectLiveWorktreeState
 func collectLiveWorktreeState() liveWorktreeState {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
-		return liveWorktreeState{scanned: false}
+		return collectLiveWorktreeStateFallback()
 	}
 	seen := make(map[string]struct{})
 	var cwds []string
@@ -93,7 +111,7 @@ func collectLiveWorktreeState() liveWorktreeState {
 		seen[canon] = struct{}{}
 		cwds = append(cwds, canon)
 	}
-	return liveWorktreeState{cwds: cwds, scanned: true}
+	return liveWorktreeState{cwds: cwds, scanned: true, source: liveScanSourceProc}
 }
 
 // worktreeIsLive reports whether any live signal sits at or beneath

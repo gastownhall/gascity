@@ -85,6 +85,10 @@ type EventsSection struct {
 type ExportConfig struct {
 	// Endpoint is the HTTP URL that receives batched, envelope-only events.
 	Endpoint string `toml:"endpoint,omitempty"`
+	// Cities optionally restricts export to exact registered city names. A nil
+	// slice preserves the all-city default; an explicitly empty slice exports no
+	// city events.
+	Cities []string `toml:"cities,omitempty"`
 	// Token, when set, is sent as an Authorization: Bearer header.
 	Token string `toml:"token,omitempty"`
 	// TokenFile, when set, is a path to a file holding the bearer token. It is

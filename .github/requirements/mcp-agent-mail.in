@@ -2,12 +2,16 @@
 # publishes current wheel/sdist assets.
 mcp-agent-mail @ https://github.com/Dicklesworthstone/mcp_agent_mail/archive/32783f6848bd63c425c4b5004cee3350016635fb.tar.gz
 
-# Security floor: GitPython < 3.1.52 has multiple HIGH-severity command
+# Security floor: GitPython < 3.1.57 has multiple HIGH-severity command
 # injection and path traversal advisories reported by the image gate.
 # Pinning the floor ensures the resolver picks the patched version even if
 # mcp-agent-mail's transitive constraint allows older. Drop this line once
-# mcp-agent-mail upstream pins GitPython>=3.1.52 itself.
-gitpython>=3.1.52
+# mcp-agent-mail upstream pins GitPython>=3.1.57 itself.
+gitpython>=3.1.57
+
+# Security floor: CVE-2026-69244 affects aiohttp < 3.14.3. Keep this explicit
+# until mcp-agent-mail's transitive requirements carry the fixed release.
+aiohttp>=3.14.3
 
 # Security floor: Pillow < 12.3.0 has multiple HIGH-severity image parsing
 # vulnerabilities reported by the image gate. Drop this line once transitive

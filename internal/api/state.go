@@ -159,6 +159,18 @@ type State interface {
 	// store is available.
 	GraphBeadStore() beads.GraphStore
 
+	// OrdersBeadStore returns the store backing orders-class beads — the
+	// order-tracking / order-run records that gate repeat order firing. At the
+	// default backend this is the same store as CityBeadStore; when
+	// [beads.classes.orders] is relocated it is the per-class store, which is
+	// where the controller now creates every tracking bead. Without this
+	// accessor the API layer is structurally unable to route orders: the order
+	// feed and the check/history reads would scan the work store and report a
+	// split city's orders as never having run. The strongly-typed
+	// beads.OrdersStore return makes the orders class statically visible at the
+	// call site; its embedded .Store is nil when no store is available.
+	OrdersBeadStore() beads.OrdersStore
+
 	// Orders returns the current active set of scanned orders.
 	// Returns nil if orders are not configured.
 	Orders() []orders.Order
