@@ -85,6 +85,8 @@ func timerTraceCodes(dec sessionpkg.TimerDecision) (TraceReasonCode, TraceOutcom
 		reason = TraceReasonAssignedWork
 	case string(TraceReasonAssignedWorkExhausted):
 		reason = TraceReasonAssignedWorkExhausted
+	case string(TraceReasonMinFloorIdleWorker):
+		reason = TraceReasonMinFloorIdleWorker
 	default:
 		reason = TraceReasonCode(dec.TraceReason)
 	}
@@ -103,6 +105,8 @@ func timerTraceCodes(dec sessionpkg.TimerDecision) (TraceReasonCode, TraceOutcom
 		outcome = TraceOutcomeDeferredBusy
 	case string(TraceOutcomeStopDeferExhausted):
 		outcome = TraceOutcomeStopDeferExhausted
+	case string(TraceOutcomeDeferredMinFloor):
+		outcome = TraceOutcomeDeferredMinFloor
 	default:
 		outcome = TraceOutcomeCode(dec.TraceOutcome)
 	}
@@ -3215,13 +3219,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				facts.Blocker = lifecycleTimerBlockerInfo(infoByID[id], clk.Now())
 			}
 			dec := sessionpkg.DecideIdleTimeout(facts)
-			for dec.Action == sessionpkg.TimerActionGatherPending || dec.Action == sessionpkg.TimerActionGatherAssignedWork {
-				if dec.Action == sessionpkg.TimerActionGatherPending {
+			for dec.Action == sessionpkg.TimerActionGatherPending ||
+				dec.Action == sessionpkg.TimerActionGatherAssignedWork ||
+				dec.Action == sessionpkg.TimerActionGatherMinFloor {
+				switch dec.Action {
+				case sessionpkg.TimerActionGatherPending:
 					facts.Pending = sessionpkg.PendingNo
 					if pendingInteractionKeepsAwakeInfo(infoByID[id], sp, name, clk) {
 						facts.Pending = sessionpkg.PendingYes
 					}
-				} else {
+				case sessionpkg.TimerActionGatherAssignedWork:
 					hasWork, assignedErr := sessionHasAwakeAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, infoByID[id])
 					if assignedErr != nil {
 						// Fail closed: treat error as "has work" so a transient
@@ -3233,6 +3240,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					facts.AssignedWork = sessionpkg.AssignedWorkNone
 					if hasWork {
 						facts.AssignedWork = sessionpkg.AssignedWorkHas
+					}
+				case sessionpkg.TimerActionGatherMinFloor:
+					// Keep-warm floor exemption (sc-5mtyhy): an idle floor member
+					// with no assigned work is deferred, not idle-killed, so the
+					// pool holds min_active_sessions warm sessions with no
+					// 0↔1 kill/cold-recreate oscillation. Deterministic selection
+					// of the lowest-bead-id floor members off the coherent
+					// infoByID snapshot; no I/O.
+					facts.MinFloor = sessionpkg.MinFloorNo
+					if isMinFloorExemptIdleSession(infoByID, cfg, tp.TemplateName, id) {
+						facts.MinFloor = sessionpkg.MinFloorYes
 					}
 				}
 				dec = sessionpkg.DecideIdleTimeout(facts)
