@@ -657,8 +657,8 @@ func (l *routeRecoveryLane) restoreRoute(store beads.Store, live beads.Bead, bac
 	if isRouteRecoveryQuarantined(live) {
 		// The re-check passes now, so the quarantine verdict is stale. Clearing
 		// it in the same batch as the restore keeps it to one round trip.
-		writes[beadmeta.RouteRecoveryQuarantinedMetadataKey] = ""
-		writes[beadmeta.RouteRecoveryQuarantineReasonMetadataKey] = ""
+		writes[beadmeta.RouteQuarantineMetadataKey] = ""
+		writes[beadmeta.RouteQuarantineReasonMetadataKey] = ""
 	}
 	if err := store.SetMetadataBatch(live.ID, writes); err != nil {
 		return routeRestoreOutcome{writes: 1, err: fmt.Errorf("bead %s: restoring gc.routed_to=%q: %w", live.ID, route, err)}
@@ -710,13 +710,13 @@ func (l *routeRecoveryLane) quarantine(store beads.Store, bead beads.Bead, reaso
 	if store == nil || strings.TrimSpace(bead.ID) == "" {
 		return false, nil
 	}
-	if strings.TrimSpace(bead.Metadata[beadmeta.RouteRecoveryQuarantineReasonMetadataKey]) == reason &&
+	if strings.TrimSpace(bead.Metadata[beadmeta.RouteQuarantineReasonMetadataKey]) == reason &&
 		isRouteRecoveryQuarantined(bead) {
 		return false, nil
 	}
 	err := store.SetMetadataBatch(bead.ID, map[string]string{
-		beadmeta.RouteRecoveryQuarantinedMetadataKey:      "true",
-		beadmeta.RouteRecoveryQuarantineReasonMetadataKey: reason,
+		beadmeta.RouteQuarantineMetadataKey:       "true",
+		beadmeta.RouteQuarantineReasonMetadataKey: reason,
 	})
 	if err != nil {
 		return false, fmt.Errorf("bead %s: marking route-recovery quarantine (%s): %w", bead.ID, reason, err)
@@ -726,5 +726,5 @@ func (l *routeRecoveryLane) quarantine(store beads.Store, bead beads.Bead, reaso
 
 // isRouteRecoveryQuarantined reports whether a bead already carries the marker.
 func isRouteRecoveryQuarantined(b beads.Bead) bool {
-	return strings.TrimSpace(b.Metadata[beadmeta.RouteRecoveryQuarantinedMetadataKey]) == "true"
+	return strings.TrimSpace(b.Metadata[beadmeta.RouteQuarantineMetadataKey]) == "true"
 }

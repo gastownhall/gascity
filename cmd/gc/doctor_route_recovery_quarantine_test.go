@@ -12,9 +12,9 @@ import (
 
 func quarantinedBead(id, reason string) beads.Bead {
 	return beads.Bead{ID: id, Title: "work", Type: "task", Status: "open", Metadata: map[string]string{
-		beadmeta.RunTargetMetadataKey:                     routeRecoveryTestPool,
-		beadmeta.RouteRecoveryQuarantinedMetadataKey:      "true",
-		beadmeta.RouteRecoveryQuarantineReasonMetadataKey: reason,
+		beadmeta.RunTargetMetadataKey:             routeRecoveryTestPool,
+		beadmeta.RouteQuarantineMetadataKey:       "true",
+		beadmeta.RouteQuarantineReasonMetadataKey: reason,
 	}}
 }
 

@@ -75,7 +75,7 @@ func (c *routeRecoveryQuarantineCheck) collect() (found []quarantinedRoute, skip
 		}
 		// A targeted metadata query, not a scan: the marker is the index.
 		items, err := store.List(beads.ListQuery{
-			Metadata:      map[string]string{beadmeta.RouteRecoveryQuarantinedMetadataKey: "true"},
+			Metadata:      map[string]string{beadmeta.RouteQuarantineMetadataKey: "true"},
 			IncludeClosed: true,
 		})
 		if err != nil {
@@ -86,7 +86,7 @@ func (c *routeRecoveryQuarantineCheck) collect() (found []quarantinedRoute, skip
 			if !isRouteRecoveryQuarantined(b) {
 				continue
 			}
-			reason := strings.TrimSpace(b.Metadata[beadmeta.RouteRecoveryQuarantineReasonMetadataKey])
+			reason := strings.TrimSpace(b.Metadata[beadmeta.RouteQuarantineReasonMetadataKey])
 			if reason == "" {
 				reason = "unknown"
 			}
@@ -133,8 +133,8 @@ func (c *routeRecoveryQuarantineCheck) Fix(_ *doctor.CheckContext) error {
 	found, skipped := c.collect()
 	for _, q := range found {
 		if err := q.store.SetMetadataBatch(q.beadID, map[string]string{
-			beadmeta.RouteRecoveryQuarantinedMetadataKey:      "",
-			beadmeta.RouteRecoveryQuarantineReasonMetadataKey: "",
+			beadmeta.RouteQuarantineMetadataKey:       "",
+			beadmeta.RouteQuarantineReasonMetadataKey: "",
 		}); err != nil {
 			return fmt.Errorf("%s bead %s: lifting route-recovery quarantine: %w", q.label, q.beadID, err)
 		}

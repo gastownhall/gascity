@@ -611,5 +611,5 @@ func quarantineReason(t *testing.T, store beads.Store, id string) string {
 	if !isRouteRecoveryQuarantined(b) {
 		return ""
 	}
-	return b.Metadata[beadmeta.RouteRecoveryQuarantineReasonMetadataKey]
+	return b.Metadata[beadmeta.RouteQuarantineReasonMetadataKey]
 }
