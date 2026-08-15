@@ -239,3 +239,76 @@ provider = "claude"
 		t.Errorf("suspend changed unrelated content; added lines = %v, want %v; city.toml now:\n%s", added, wantAdded, after)
 	}
 }
+
+// TestResumeAgent_LocalDiscovered_StripsLegacyPatchSuspended_PreservesComments
+// covers the fixture shape the round-1 review of ga-gc16k3 flagged as
+// uncovered: a locally-discovered agent (agents/<name>/agent.toml) that also
+// carries a legacy [[patches.agent]] suspended override. Resuming such an
+// agent must strip the now-redundant patch override without falling through
+// to the lossy Editor.write struct-marshal rewrite -- mutateAgentSuspended's
+// OriginDerived branch returned plain nil whenever StripAgentPatchSuspended
+// reported a change, and EditExpanded treats plain nil as "write the raw
+// config," dropping every comment. Functional (non-comment) behavior for
+// this exact fixture is already covered by
+// TestResumeAgent_StripsLegacyPatchSuspended in configedit_test.go; this
+// test adds the comment-preservation assertion that test predates.
+func TestResumeAgent_LocalDiscovered_StripsLegacyPatchSuspended_PreservesComments(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, `# City-level rationale: primary orchestration city for gascity.
+[workspace]
+name = "test-city"
+
+[[patches.agent]]
+dir = ""
+name = "worker"
+suspended = true
+`)
+	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte(`[pack]
+name = "test-city"
+schema = 2
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	agentDir := filepath.Join(dir, "agents", "worker")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "prompt.template.md"), []byte("You are the worker.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "agent.toml"), []byte("suspended = true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	before := string(mustReadFile(t, path))
+
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+	if err := ed.ResumeAgent("worker"); err != nil {
+		t.Fatalf("ResumeAgent: %v", err)
+	}
+
+	after := string(mustReadFile(t, path))
+
+	if !strings.Contains(after, "# City-level rationale: primary orchestration city for gascity.") {
+		t.Errorf("resume dropped comment; city.toml now:\n%s", after)
+	}
+
+	if strings.Contains(after, "[[patches.agent]]") {
+		t.Errorf("resume should strip the legacy patch override; city.toml now:\n%s", after)
+	}
+
+	removed, added := diffContentLines(before, after)
+	wantRemoved := []string{
+		`[[patches.agent]]`,
+		`dir = ""`,
+		`name = "worker"`,
+		`suspended = true`,
+	}
+	sort.Strings(wantRemoved)
+	if !stringSlicesEqual(removed, wantRemoved) {
+		t.Errorf("resume changed unexpected content; removed lines = %v, want %v; city.toml now:\n%s", removed, wantRemoved, after)
+	}
+	if len(added) != 0 {
+		t.Errorf("resume added unrelated content lines %v; city.toml now:\n%s", added, after)
+	}
+}
