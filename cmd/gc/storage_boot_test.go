@@ -2018,3 +2018,38 @@ func TestFailedNoteWriteReleasesTheBindingItJustOpened(t *testing.T) {
 		t.Errorf("the opened binding was closed %d time(s), want exactly 1: a boot that refuses must not keep the engine it opened", closes)
 	}
 }
+
+// TestStorageStatusCarriesBootPlanRefusalOnUnresolvedPaths pins the deploy-gate
+// contract doStorageStatus claims for itself: "a city boot refuses must not
+// report may-serve here". That held only on the born-split path, which was the
+// one path that resolved the plan; the served path and the no-binding path
+// returned 0 without ever asking whether boot would refuse.
+//
+// The stdout assertions are the load-bearing half. Carrying the refusal into
+// the exit code is easy to get right by returning early on the plan error, and
+// that suppresses the readout at exactly the moment an operator needs it. These
+// assertions fail such a fix.
+func TestStorageStatusCarriesBootPlanRefusalOnUnresolvedPaths(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{}
+
+	prev := newStorageRegistryForPlan
+	newStorageRegistryForPlan = func() (*storebinding.ProviderRegistry, error) {
+		return nil, errors.New("no storage provider registry for this build")
+	}
+	t.Cleanup(func() { newStorageRegistryForPlan = prev })
+
+	var stdout, stderr bytes.Buffer
+	code := doStorageStatus(storageOperatorRequest{CityPath: cityPath, Cfg: cfg}, &stdout, &stderr)
+
+	if code == 0 {
+		t.Errorf("status = 0 for a city whose boot plan refuses; exit code is the deploy gate\nstdout: %s\nstderr: %s",
+			stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "city: "+cityPath) {
+		t.Errorf("plan refusal suppressed the status header:\n%s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "binding: none") {
+		t.Errorf("plan refusal suppressed the status body:\n%s", stdout.String())
+	}
+}
