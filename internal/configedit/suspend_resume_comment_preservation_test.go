@@ -182,9 +182,10 @@ suspended = true
 
 // TestSuspendAgent_PackDerived_PreservesComments covers the
 // [[patches.agent]] branch of mutateAgentSuspended (a pack-declared agent,
-// not a city-local convention agent). This branch still writes city.toml
-// through the same lossy Editor.write path, so existing comments must
-// survive and the only new content should be the appended patch block.
+// not a city-local convention agent). This fixture's fresh patch append now
+// takes the surgical AppendAgentPatchSuspendedForEdit path and returns
+// ErrUnmodified, so existing comments must survive and the only new content
+// should be the appended patch block.
 func TestSuspendAgent_PackDerived_PreservesComments(t *testing.T) {
 	dir := t.TempDir()
 	path := writeTOML(t, dir, `# City-level rationale: primary orchestration city for gascity.

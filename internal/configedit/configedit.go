@@ -333,12 +333,13 @@ func (e *Editor) ResumeAgent(name string) error {
 
 // mutateAgentSuspended is the shared dispatch for SuspendAgent and
 // ResumeAgent. Branches on agent provenance:
-//   - OriginInline (city.toml [[agent]]): edit the raw struct in memory,
-//     then surgically toggle the on-disk suspended key so the generic
-//     EditExpanded writeback (a lossy full-struct marshal) never runs.
+//   - OriginInline (city.toml [[agent]]): surgically toggle the on-disk
+//     suspended key so the generic EditExpanded writeback (a lossy
+//     full-struct marshal) never runs.
 //   - OriginDerived + convention-discovered (agents/<name>/): write
 //     agents/<name>/agent.toml; also strip any legacy [[patches.agent]]
-//     suspended override so it can't shadow the new value.
+//     suspended override (in memory and, when unambiguous, surgically on
+//     disk too) so it can't shadow the new value.
 //   - OriginDerived + pack-declared: surgically append a [[patches.agent]]
 //     block on disk, falling back to the in-memory patch (and the generic
 //     lossy writeback) only when the surgical append refuses.
@@ -370,7 +371,21 @@ func mutateAgentSuspended(fs fsys.FS, tomlPath string, raw, expanded *config.Cit
 			// only strip the matching patch, not a same-named entry
 			// targeting a different rig.
 			if StripAgentPatchSuspended(raw, agent.QualifiedName()) {
-				return nil
+				// raw now reflects the stripped patch in memory. Also
+				// strip it surgically on disk so EditExpanded's lossy
+				// full-struct writeback (which drops every comment)
+				// doesn't run for what is otherwise a no-op city.toml
+				// change. Fall back to the lossy writeback -- raw
+				// already reflects the stripped patch, so it stays
+				// correct -- only when the on-disk block can't be
+				// unambiguously located.
+				dir, base := config.ParseQualifiedName(agent.QualifiedName())
+				if err := config.StripAgentPatchSuspendedForEdit(fs, tomlPath, raw, dir, base); err != nil {
+					if !errors.Is(err, config.ErrSurgicalAgentEditUnsupported) {
+						return err
+					}
+					return nil
+				}
 			}
 			return ErrUnmodified
 		}

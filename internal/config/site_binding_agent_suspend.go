@@ -71,6 +71,26 @@ func AppendAgentPatchSuspendedForEdit(fs fsys.FS, tomlPath string, cfg *City, di
 	})
 }
 
+// StripAgentPatchSuspendedForEdit removes the suspended override from the
+// [[patches.agent]] block matching (dir, name), directly in the on-disk
+// city.toml bytes, preserving every other byte. If removing suspended would
+// leave the block with nothing but its dir/name identity, the whole block
+// (including its "[[patches.agent]]" header and, if present, the single
+// blank line separating it from the previous section) is removed too --
+// the exact inverse of the blank-line convention appendBlock uses. It
+// refuses (wrapping ErrSurgicalAgentEditUnsupported) rather than guess when
+// the target [[patches.agent]] block cannot be unambiguously located, or has
+// no suspended key to strip.
+func StripAgentPatchSuspendedForEdit(fs fsys.FS, tomlPath string, cfg *City, dir, name string) error {
+	return writeCityBytesForEdit(fs, tomlPath, cfg, func(existing []byte) ([]byte, error) {
+		content, ok := stripAgentPatchSuspendedBytes(existing, name, dir)
+		if !ok {
+			return nil, fmt.Errorf("%w: [[patches.agent]] block for %q could not be unambiguously located in %s, or has no suspended key", ErrSurgicalAgentEditUnsupported, name, tomlPath)
+		}
+		return content, nil
+	})
+}
+
 // findAgentByIdentity returns the first agent in cfg.Agents matching
 // identity (see AgentMatchesIdentity), by value so callers get a stable
 // Name/Dir pair independent of any later mutation of cfg.Agents.
@@ -135,6 +155,52 @@ func toggleAgentSuspendedBytes(existing []byte, header, targetName, targetDir st
 		return nil, false
 	}
 	return []byte(strings.Join(toggleSuspendedInRange(lines, start, end, suspended), "\n")), true
+}
+
+// stripAgentPatchSuspendedBytes locates the single [[patches.agent]] block
+// whose body has name/dir matching targetName/targetDir, and returns
+// existing with that block's suspended key removed. When that leaves the
+// block with only its dir/name identity lines, the whole block (header
+// included) is dropped instead -- mirroring StripAgentPatchSuspended's
+// isAgentPatchOnlyIdentity check on the in-memory path. ok is false when
+// zero or more than one block matches, or the matching block has no
+// suspended key.
+func stripAgentPatchSuspendedBytes(existing []byte, targetName, targetDir string) ([]byte, bool) {
+	lines := strings.Split(string(existing), "\n")
+	start, end, ok := findTOMLArrayBlock(lines, "[[patches.agent]]", targetName, targetDir)
+	if !ok {
+		return nil, false
+	}
+
+	suspendedIdx := -1
+	onlyIdentity := true
+	for i := start; i < end; i++ {
+		switch {
+		case tomlSuspendedLineRe.MatchString(lines[i]):
+			suspendedIdx = i
+		case strings.TrimSpace(lines[i]) == "":
+		case tomlNameLineRe.MatchString(lines[i]), tomlDirLineRe.MatchString(lines[i]):
+		default:
+			onlyIdentity = false
+		}
+	}
+	if suspendedIdx < 0 {
+		return nil, false
+	}
+
+	var out []string
+	if onlyIdentity {
+		blockStart := start - 1 // the "[[patches.agent]]" header line
+		if blockStart > 0 && strings.TrimSpace(lines[blockStart-1]) == "" {
+			blockStart-- // swallow appendBlock's single separating blank line
+		}
+		out = append(out, lines[:blockStart]...)
+		out = append(out, lines[end:]...)
+	} else {
+		out = append(out, lines[:suspendedIdx]...)
+		out = append(out, lines[suspendedIdx+1:]...)
+	}
+	return []byte(strings.Join(out, "\n")), true
 }
 
 // findTOMLArrayBlock scans lines for array-of-tables blocks introduced by a
