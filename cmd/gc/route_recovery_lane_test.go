@@ -373,27 +373,36 @@ func overflowBeadID(i int) string {
 // TestRouteRecoveryEventFeedNamesCandidatesAndForcesOnAMissingJournal pins the
 // feed itself: a live journal produces candidates, and no journal at all forces
 // the scan rather than leaving the city with a delta lane that sees nothing.
+//
+// The wait is a happens-before, not a timeout. The feed loop is
+// `Next() -> observe() -> Next()`, so a SECOND Next call proves the first
+// event was observed. Polling with a sleep would test the same thing more
+// slowly and flake on a loaded machine.
 func TestRouteRecoveryEventFeedNamesCandidatesAndForcesOnAMissingJournal(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	prov := events.NewFake()
-	lane := newRouteRecoveryLane()
-	lane.noteBackstopRan(time.Now(), routeRecoveryBackstopCadence, false)
-	lane.startEventFeed(ctx, prov)
-	prov.Record(beadCreatedEvent(t, unroutedWorkBead("T-1")))
+	backing := events.NewFake()
+	backing.Record(beadCreatedEvent(t, unroutedWorkBead("T-1")))
 	// A bead with no recoverable route must not become a candidate: ordinary
 	// bead traffic on a busy city has to cost the tick nothing.
-	prov.Record(beadCreatedEvent(t, beads.Bead{ID: "T-2", Status: "open"}))
+	backing.Record(beadCreatedEvent(t, beads.Bead{ID: "T-2", Status: "open"}))
+	prov := &observedEventProvider{Provider: backing, observed: make(chan struct{}, 8), after: 2}
 
-	deadline := time.Now().Add(5 * time.Second)
-	var pending []string
-	for time.Now().Before(deadline) {
-		if pending = lane.takePending(); len(pending) > 0 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
+	lane := newRouteRecoveryLane()
+	lane.noteBackstopRan(time.Now(), routeRecoveryBackstopCadence, false)
+	// The feed watches from the CURRENT head, so rewind it to replay the two
+	// events already recorded — the production lane's head is set before the
+	// startup scan for the same reason.
+	prov.watchFrom = 0
+	lane.startEventFeed(ctx, prov)
+
+	select {
+	case <-prov.observed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the feed never consumed a second event; it is not reaching observe")
 	}
+	pending := lane.takePending()
 	if len(pending) != 1 || pending[0] != "T-1" {
 		t.Fatalf("feed produced candidates %v, want exactly [T-1]", pending)
 	}
@@ -408,6 +417,42 @@ func TestRouteRecoveryEventFeedNamesCandidatesAndForcesOnAMissingJournal(t *test
 	if reason, due := blind.backstopDue(time.Now()); !due || reason != routeRecoveryBackstopForced {
 		t.Fatalf("a lane with no journal due=%v reason=%q, want due with reason %q", due, reason, routeRecoveryBackstopForced)
 	}
+}
+
+// observedEventProvider signals once the feed has asked for its Nth event, which
+// is the happens-before for "everything before it was observed".
+type observedEventProvider struct {
+	events.Provider
+	observed  chan struct{}
+	after     int
+	watchFrom uint64
+}
+
+func (p *observedEventProvider) LatestSeq() (uint64, error) { return p.watchFrom, nil }
+
+func (p *observedEventProvider) Watch(ctx context.Context, afterSeq uint64) (events.Watcher, error) {
+	inner, err := p.Provider.Watch(ctx, afterSeq)
+	if err != nil {
+		return nil, err
+	}
+	return &observedWatcher{Watcher: inner, owner: p}, nil
+}
+
+type observedWatcher struct {
+	events.Watcher
+	owner *observedEventProvider
+	calls int
+}
+
+func (w *observedWatcher) Next() (events.Event, error) {
+	w.calls++
+	if w.calls == w.owner.after {
+		select {
+		case w.owner.observed <- struct{}{}:
+		default:
+		}
+	}
+	return w.Watcher.Next()
 }
 
 // recheckDropStore models a candidate the open scan reports but the

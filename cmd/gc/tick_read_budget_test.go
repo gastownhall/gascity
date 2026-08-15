@@ -29,9 +29,15 @@ import (
 // the wall-clock half can be stated as narrative: at a stand-in RTT, this many
 // round trips is this many seconds.
 
-// tickRTT is the stand-in for the remote ledger's per-query latency. It is small
-// enough to keep the test fast and large enough that the wall-clock narrative
-// below is not measuring scheduler noise.
+// tickRTT is the stand-in for the remote ledger's per-query latency —
+// maintainer-city's work store answers in ~5.4s, scaled down to keep the
+// arithmetic readable.
+//
+// It is MODELED, not slept. The gate is the deterministic round-trip count; a
+// real sleep would buy nothing but wall-clock the test does not assert on, would
+// make the suite slower for every future run, and would put a fixed sleep in the
+// test-resource census for no coverage. The elapsed figure below is the count
+// times the RTT, which is exactly what a real sleep would have produced.
 const tickRTT = 2 * time.Millisecond
 
 // latencyStore charges tickRTT for every store round trip and counts them.
@@ -42,7 +48,6 @@ type latencyStore struct {
 }
 
 func (s *latencyStore) charge() {
-	time.Sleep(tickRTT)
 	s.roundTrips++
 	s.elapsed += tickRTT
 }
@@ -129,6 +134,9 @@ func TestSteadyTickStoreRoundTripBudget(t *testing.T) {
 				t.Fatalf("the latency injector charged %v for %d round trip(s); the budget is not being measured through it", store.elapsed, got)
 			}
 			// Soft, narrative only: the deterministic count above is the gate.
+			// Modeled cost is got*tickRTT; real wall clock is logged when it
+			// diverges wildly, which would mean the pass is spending time
+			// somewhere the round-trip model does not see.
 			if wall > time.Second {
 				t.Logf("%s steady pass took %v of wall clock, which is far more than %d round trips explain", row.leg, wall, got)
 			}
