@@ -622,10 +622,10 @@ sub-DAG root, so it won't close until the sub-DAG completes. This is a
 "blocks" dependency only, not a parent-child relationship — the sub-DAG
 root does not become a child of the attached bead (gc bd list --parent
 will not find it), and convoy auto-close, which watches parent-child
-children rather than blocks dependents, is not triggered by the sub-DAG
-completing. This is the core primitive for late-bound DAG expansion — any
-agent, script, or workflow step can call it to expand a bead into a
-sub-workflow at runtime.
+children and "tracks" members rather than blocks dependents, is not
+triggered by the sub-DAG completing. This is the core primitive for
+late-bound DAG expansion — any agent, script, or workflow step can call it
+to expand a bead into a sub-workflow at runtime.
 
 With --attach on a v2 formula — one declaring
 [requires] formula_compiler = ">=2.0.0" — the invocation runs under a
