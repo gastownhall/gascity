@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -242,6 +243,152 @@ func TestControlDispatchRigScopeResolvesAGraphResidentControlBead(t *testing.T) 
 	if outcome := got.Metadata[beadmeta.OutcomeMetadataKey]; outcome != beadmeta.OutcomeCanceled {
 		t.Errorf("gc.outcome = %q, want %q; the dispatcher resolved the root somewhere other than the binding",
 			outcome, beadmeta.OutcomeCanceled)
+	}
+}
+
+// TestRunControlDispatcherResolvesACityGraphBindingResidentControlBead is the
+// MANUAL twin of the serve-path dispatch test above, and it closes the operator
+// half of the same gap.
+//
+// The automated serve loop reaches a binding-resident control bead because it
+// scans every scope and federates the city graph binding as an extra leg. The
+// manual `gc convoy control <id>` entry point instead resolves a single id
+// through findBeadScopeAcrossStores, which probes only the work store and the rig
+// control stores — never the binding. On a [beads.classes.graph]-relocated city a
+// city-scoped molecule materializes its graph-class control beads into that
+// binding, so the operator's recovery command returned `loading bead <id>: ...
+// not found` for exactly the class of beads this routing exists to serve, and
+// precisely when the automated path is wedged and an operator reaches for the
+// manual one.
+//
+// The canceled workflow root lives ONLY in the binding, so the dispatcher's
+// disposition is a direct readout of which ledger it resolved the bead from: a
+// canceled root closes the control bead gc.outcome=canceled; a missing root
+// closes it gc.final_disposition=orphaned_workflow.
+func TestRunControlDispatcherResolvesACityGraphBindingResidentControlBead(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"),
+		[]byte("[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Setenv("GC_CITY", cityPath)
+
+	binding := beads.NewMemStore()
+	seedCLIStorageRoutes(t, cityPath, messagingSplitRoutes(binding))
+
+	root, err := binding.Create(beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+			beadmeta.CancelRequestedMetadataKey: "operator",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create workflow root: %v", err)
+	}
+	control := newControlBead(t, binding, root.ID)
+
+	// PREMISE: the city work store does not hold this id, so a pass can only come
+	// from consulting the binding rather than from a local resolve.
+	workStore, err := openStoreAtForCity(cityPath, cityPath)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity: %v", err)
+	}
+	if _, err := workStore.Get(control.ID); err == nil {
+		t.Fatalf("premise failed: the city work store already holds %s, so this test cannot show the binding was consulted", control.ID)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if err := runControlDispatcher(control.ID, &stdout, &stderr); err != nil {
+		t.Fatalf("manual dispatch of a binding-resident control bead: %v; "+
+			"`gc convoy control <id>` cannot reach a graph-class control bead the serve loop already federates", err)
+	}
+
+	got := beadByID(t, binding, control.ID)
+	if got.Status != "closed" {
+		t.Errorf("binding-resident control bead status = %q, want closed in the binding; the manual dispatch wrote somewhere else", got.Status)
+	}
+	if outcome := got.Metadata[beadmeta.OutcomeMetadataKey]; outcome != beadmeta.OutcomeCanceled {
+		t.Errorf("gc.outcome = %q, want %q; the manual dispatch resolved the root somewhere other than the binding",
+			outcome, beadmeta.OutcomeCanceled)
+	}
+}
+
+// TestFindBeadScopeAcrossStoresRoutesABindingResidentRigBeadToItsRigScope pins
+// the WORK leg the manual entry point must keep for a rig-routed binding-resident
+// control bead.
+//
+// controlBeadLedger keeps the scope store FIRST and consults the binding as an
+// ADDITIONAL leg, so the scope findBeadScopeAcrossStores returns becomes the work
+// leg — the ledger that owns the input convoy an execution snapshot reads. A
+// city-scoped molecule stamps gc.routed_to=<rig>/core.control-dispatcher on the
+// control beads it materializes into the binding and hands to a rig; the input
+// convoy those beads name lives in that RIG's store, not the city's. Resolving
+// such a bead to the city scope would satisfy the graph read (the binding
+// federates either way) but strand the input convoy, so residence must be derived
+// from the bead's route rather than defaulted to the city.
+func TestFindBeadScopeAcrossStoresRoutesABindingResidentRigBeadToItsRigScope(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "rigs", "fixture")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatalf("mkdir rig path: %v", err)
+	}
+	cityTOML := "[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n\n" +
+		"[[rigs]]\nname = \"fixture\"\npath = \"" + rigPath + "\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Setenv("GC_CITY", cityPath)
+
+	binding := beads.NewMemStore()
+	seedCLIStorageRoutes(t, cityPath, messagingSplitRoutes(binding))
+
+	root, err := binding.Create(beads.Bead{
+		Title:    "workflow",
+		Type:     "task",
+		Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow},
+	})
+	if err != nil {
+		t.Fatalf("create workflow root: %v", err)
+	}
+	control := newControlBead(t, binding, root.ID)
+	// The live stranded beads carry gc.routed_to=<rig>/core.control-dispatcher;
+	// gc.run_target (what newRoutedControlBead sets) is a different key the
+	// execution-route resolver does not read, so route the bead explicitly.
+	if err := binding.Update(control.ID, beads.UpdateOpts{
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "fixture/core.control-dispatcher"},
+	}); err != nil {
+		t.Fatalf("route control bead to the rig: %v", err)
+	}
+
+	// PREMISE: neither the city work store nor the rig control store holds the id,
+	// so the scope can only have come from consulting the binding.
+	cityStore, err := openStoreAtForCity(cityPath, cityPath)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(city): %v", err)
+	}
+	if _, err := cityStore.Get(control.ID); err == nil {
+		t.Fatalf("premise failed: the city work store holds %s", control.ID)
+	}
+	rigStore, err := openStoreAtForCity(rigPath, cityPath)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(rig): %v", err)
+	}
+	if _, err := rigStore.Get(control.ID); err == nil {
+		t.Fatalf("premise failed: the rig store holds %s", control.ID)
+	}
+
+	_, storePath, err := findBeadScopeAcrossStores(cityPath, control.ID, io.Discard)
+	if err != nil {
+		t.Fatalf("findBeadScopeAcrossStores for a rig-routed binding-resident control bead: %v; "+
+			"the manual entry point never consults the city graph binding", err)
+	}
+	if filepath.Clean(storePath) != filepath.Clean(rigPath) {
+		t.Errorf("resolved scope path = %q, want the rig path %q; a rig-routed binding-resident bead must keep its rig work leg, "+
+			"or its input convoy is stranded on the wrong store", storePath, rigPath)
 	}
 }
 

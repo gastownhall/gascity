@@ -898,7 +898,76 @@ func findBeadScopeAcrossStores(cityPath, beadID string, warningWriter io.Writer)
 		}
 		return store, rig.Path, nil
 	}
+
+	// The city and rig SCOPE stores are the copies a migration retained and the
+	// rig's own ledger; neither is the city graph binding a split city relocates
+	// its control beads into. A city-scoped molecule materializes graph-class
+	// control beads there and routes them to a rig by name, so the manual entry
+	// point must consult that binding before declaring an id unreachable — the
+	// same leg the serve loop federates.
+	if store, storePath, err := graphBindingResidentScope(cityPath, cfg, beadID); err == nil {
+		return store, storePath, nil
+	} else if !errors.Is(err, beads.ErrNotFound) {
+		return nil, "", fmt.Errorf("getting bead %q from the city graph binding: %w", beadID, err)
+	}
 	return nil, "", fmt.Errorf("getting bead %q: %w", beadID, beads.ErrNotFound)
+}
+
+// graphBindingResidentScope resolves the SCOPE that owns a control bead which
+// lives only in the city graph binding, for the manual `gc convoy control <id>`
+// entry point. It returns beads.ErrNotFound when the city relocates no graph
+// class or the bead is absent from the binding, so findBeadScopeAcrossStores
+// falls through to its own not-found exactly as it did before on unsplit cities.
+//
+// The store returned is the WORK leg, not the graph leg. controlBeadLedger keeps
+// the scope store first and consults the binding as an ADDITIONAL leg, so the
+// work class — the input convoy an execution snapshot reads — must resolve where
+// it actually lives. A binding-resident bead routed to a rig therefore resolves
+// to that RIG's scope, mirroring the serve loop whose rig-scoped scan is what
+// surfaces the bead; a bead with no rig route resolves to the city scope, whose
+// own graph hop reads the binding directly. Deriving residence from the bead
+// rather than defaulting to the city is what keeps a rig-routed bead from losing
+// its input-convoy store.
+//
+// A REFUSING binding is skipped, not surfaced: a standing refusal is a fact about
+// the city's storage configuration and none about a particular bead, the graph
+// plane is already down by the boot gate's own verdict, and the bead is equally
+// unreachable to every scope — so this returns not-found and lets the caller
+// report it, exactly as controlGraphExtraLeg skips the same leg on the serve side.
+func graphBindingResidentScope(cityPath string, cfg *config.City, beadID string) (beads.Store, string, error) {
+	binding, relocated := controlGraphBinding(cityPath, cityPath)
+	if !relocated || binding == nil {
+		return nil, "", beads.ErrNotFound
+	}
+	if _, refused := binding.(refusedClassStore); refused {
+		warnControlGraphLegRefused(cityPath)
+		return nil, "", beads.ErrNotFound
+	}
+	bead, err := binding.Get(beadID)
+	if err != nil {
+		return nil, "", err
+	}
+
+	// Residence: a bead routed to a rig belongs to that rig's scope, whose work
+	// store owns the input convoy. Anything else belongs to the city scope, whose
+	// own graph hop resolves the binding directly.
+	if cfg != nil {
+		if rigContext := workflowExecutionRigContext(bead); rigContext != "" {
+			if rig, ok := rigByName(cfg, rigContext); ok {
+				store, err := openControlStoreAtForCity(rig.Path, cityPath, cfg)
+				if err != nil {
+					return nil, "", fmt.Errorf("opening rig store %q for binding-resident control bead %q: %w", rig.Name, beadID, err)
+				}
+				return store, rig.Path, nil
+			}
+		}
+	}
+
+	cityStore, err := openStoreAtForCity(cityPath, cityPath)
+	if err != nil {
+		return nil, "", fmt.Errorf("opening city store for binding-resident control bead %q: %w", beadID, err)
+	}
+	return cityStore, cityPath, nil
 }
 
 func findUniqueBeadAcrossStoresView(cityPath, beadID string) (convoyStoreView, beads.Bead, error) {
