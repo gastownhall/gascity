@@ -46,13 +46,28 @@ var hookClaimMutationTimeout = 10 * time.Second
 // began a claim mutation may still run. Past it, the turn that invoked the
 // command is assumed gone and the claim would be born into nothing.
 //
-// 45s is chosen from both sides. An honest query-plus-claim finishes well inside
-// it even loaded — hookWorkQueryTimeout's 60s covers the WHOLE multi-tier probe,
-// and a probe that slow has already outlasted every provider's tool patience —
-// while 45s sits below any realistic provider tool timeout that could orphan the
-// process, and below idleClaimNudgeGrace (90s) so the backstop lane never
-// observes a half-open window.
-var hookClaimWindowDefault = 45 * time.Second
+// It is DERIVED from the work-query budget rather than a flat constant. A fresh
+// `gc hook --claim` first spends up to hookWorkQueryTimeout finding routed work —
+// a loaded multi-rig city's federated probe legitimately runs tens of seconds —
+// and only then reaches the claim CAS, which needs up to hookClaimMutationTimeout.
+// A flat 45s window anchored at invocation start charged that read latency
+// against the claim, so raising hookWorkQueryTimeout was inert on the --claim
+// path: the query now succeeds at ~t=70s but the fence refused the claim at 45s,
+// relocating the starvation from session.work_query_failed to
+// execution.claim_window_expired. Summing the two budgets keeps the turn-binding
+// intent — a claim reaching the CAS later than an honest full-budget
+// query-plus-mutation could is treated as orphaned — while giving a genuinely
+// slow-but-alive read the headroom to claim the work the raise now surfaces.
+//
+// Ceilings: a provider CALLBACK lane is refused earlier by hookClaimNonTurnMarker
+// and never reaches this window, so the 15s callback budget is not the bound here;
+// the bound is the DIRECT turn's patience, which the hookWorkQueryTimeout raise
+// already assumes is at least this budget. The window can now exceed
+// idleClaimNudgeGrace (90s); in the measured worst case (~70s) the claim still
+// lands before the backstop's first nudge, and a pathological slow read only earns
+// the idle-claim backstop's next idempotent (NDI) re-nudge, never a double claim.
+// GC_HOOK_CLAIM_WINDOW (resolveHookClaimWindow) still overrides this default.
+var hookClaimWindowDefault = hookWorkQueryTimeout + hookClaimMutationTimeout
 
 // hookClaimNonTurnEnvMarkers are the environment markers that prove a
 // `gc hook --claim` process is a provider CALLBACK rather than an agent turn.
