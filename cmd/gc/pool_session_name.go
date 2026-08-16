@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"log"
 	"path"
@@ -61,12 +63,50 @@ type releasedPoolAssignment struct {
 	Index int
 }
 
-// PoolSessionName derives the tmux session name for a pool worker session.
-// Format: {basename(template)}-{beadID} (e.g., "claude-mc-xyz").
-// Named sessions with an alias use the alias instead.
+// PoolSessionName derives the legacy bead-ID-scoped session name for a pool
+// worker session. Format: {basename(template)}-{beadID} (e.g., "claude-mc-xyz").
+//
+// Fresh pool session beads no longer get their runtime name from this
+// derivation — see poolIdentitySessionName. It survives as the recognizer for
+// beads created before the change (beadOwnsPoolSessionName and the slot-recovery
+// fallbacks in build_desired_state.go still read it).
 func PoolSessionName(template, beadID string) string {
 	base := path.Base(template)
 	return agent.SanitizeQualifiedNameForSession(base) + "-" + beadID
+}
+
+// poolIdentitySessionName returns the runtime session name for a pool
+// instance. It is a pure function of the resolved pool identity — the
+// qualified instance name the planner derives from config and slot — so every
+// create attempt for the same slot addresses the same runtime box.
+//
+// It deliberately does not embed the session bead ID. A bead-ID-scoped name
+// mints a fresh runtime identity on every attempt, and because the runtime
+// name is the sandbox name (and therefore the pod name), a pool whose start op
+// keeps failing then leaks one box per attempt with nothing left to address the
+// previous one by. That is ga-vcjr9: desired=1, 602 pods.
+func poolIdentitySessionName(identity, template string) string {
+	base := strings.TrimSpace(identity)
+	if base == "" {
+		base = targetBasename(template)
+	}
+	if base == "" {
+		base = "pool"
+	}
+	return boundSessionNameLength(agent.SanitizeQualifiedNameForSession(base))
+}
+
+// boundSessionNameLength keeps a derived name inside the explicit-name length
+// limit without giving up identity stability: the shortened form carries a
+// digest of the full name, so identities sharing a long prefix stay distinct
+// and each identity always shortens to the same result.
+func boundSessionNameLength(name string) string {
+	if len(name) <= session.MaxExplicitSessionNameLen {
+		return name
+	}
+	sum := sha256.Sum256([]byte(name))
+	suffix := "-" + hex.EncodeToString(sum[:])[:10]
+	return name[:session.MaxExplicitSessionNameLen-len(suffix)] + suffix
 }
 
 // GCSweepSessionBeads closes open session beads that have no remaining

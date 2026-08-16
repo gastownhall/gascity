@@ -1904,7 +1904,11 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			finalizeCreatedSessionName := func() {
 				createdSessionName = strings.TrimSpace(newBead.Metadata["session_name"])
 				if isPoolInstance {
-					createdSessionName = PoolSessionName(qualifiedTemplate, newBead.ID)
+					// Derived from the pool identity, never the bead ID: a
+					// bead-ID name is a fresh runtime box per attempt, which is
+					// the ga-vcjr9 leak. Same derivation as the planner's
+					// create path (derivePoolSessionName).
+					createdSessionName = poolIdentitySessionName(agentName, qualifiedTemplate)
 					if err := sessFront.SetMarker(newBead.ID, "session_name", createdSessionName); err != nil {
 						finalizeErr = err
 						fmt.Fprintf(stderr, "session beads: setting pool session_name for %s: %v\n", agentName, err) //nolint:errcheck
