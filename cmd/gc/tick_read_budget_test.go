@@ -329,7 +329,7 @@ func budgetRouteRuntime(t *testing.T) (*latencyStore, *CityRuntime) {
 // session bead its route is recovered from.
 func budgetOrphanRuntime(t *testing.T) (*latencyStore, *CityRuntime) {
 	t.Helper()
-	seed := append(budgetUnroutedBeads(8), detachedOrphanSessionBead("S-1", "sess-1"), detachedOrphanWorkBead("D-1", "sess-1"))
+	seed := append(budgetUnroutedBeads(8), detachedOrphanSessionBead(), detachedOrphanWorkBead("D-1"))
 	store := &latencyStore{Store: beads.NewMemStoreFrom(0, seed, nil)}
 	return store, &CityRuntime{cityName: "city", standaloneCityStore: store, logPrefix: "gc", stderr: io.Discard}
 }

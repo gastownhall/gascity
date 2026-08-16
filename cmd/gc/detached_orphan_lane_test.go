@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,26 +18,30 @@ import (
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
-const detachedOrphanTestPool = "gascity/gastown.polecat"
+const (
+	detachedOrphanTestPool    = "gascity/gastown.polecat"
+	detachedOrphanTestSession = "sess-1"
+)
 
 // detachedOrphanWorkBead is the recoverable shape: open, unassigned, kind-less,
 // no route of its own, a pushed branch, and a session back-reference.
-func detachedOrphanWorkBead(id, sessionName string) beads.Bead {
+func detachedOrphanWorkBead(id string) beads.Bead {
 	return beads.Bead{ID: id, Title: "orphaned work", Type: "task", Status: "open", Metadata: map[string]string{
 		beadmeta.WorkBranchMetadataKey:  "polecat/" + id,
-		beadmeta.SessionNameMetadataKey: sessionName,
+		beadmeta.SessionNameMetadataKey: detachedOrphanTestSession,
 	}}
 }
 
-// detachedOrphanSessionBead is the session bead the route is recovered from.
-func detachedOrphanSessionBead(id, sessionName string) beads.Bead {
+// detachedOrphanSessionBead is the session bead every fixture here recovers its
+// route from.
+func detachedOrphanSessionBead() beads.Bead {
 	return beads.Bead{
-		ID:     id,
+		ID:     "S-1",
 		Title:  "session",
 		Type:   sessionBeadType,
 		Labels: []string{sessionBeadLabel},
 		Metadata: map[string]string{
-			"session_name": sessionName,
+			"session_name": detachedOrphanTestSession,
 			"template":     detachedOrphanTestPool,
 		},
 	}
@@ -60,8 +65,8 @@ func detachedOrphanRuntime(t *testing.T, seed ...beads.Bead) (*CityRuntime, *cou
 // by a lane that had simply stopped working.
 func TestDetachedOrphanSweepSteadyTickIssuesZeroWorkLedgerReads(t *testing.T) {
 	cr, store := detachedOrphanRuntime(t,
-		detachedOrphanSessionBead("S-1", "sess-1"),
-		detachedOrphanWorkBead("D-1", "sess-1"))
+		detachedOrphanSessionBead(),
+		detachedOrphanWorkBead("D-1"))
 
 	for range 4 {
 		report := cr.sweepDetachedHandoffOrphansDelta()
@@ -97,15 +102,15 @@ func TestDetachedOrphanSweepSteadyTickIssuesZeroWorkLedgerReads(t *testing.T) {
 // whole batch in ONE round trip rather than one per bead.
 func TestDetachedOrphanDeltaRepairsOnlyEventNamedBeads(t *testing.T) {
 	seed := []beads.Bead{
-		detachedOrphanSessionBead("S-1", "sess-1"),
-		detachedOrphanWorkBead("D-1", "sess-1"),
-		detachedOrphanWorkBead("D-2", "sess-1"),
-		detachedOrphanWorkBead("D-3", "sess-1"),
+		detachedOrphanSessionBead(),
+		detachedOrphanWorkBead("D-1"),
+		detachedOrphanWorkBead("D-2"),
+		detachedOrphanWorkBead("D-3"),
 	}
 	cr, store := detachedOrphanRuntime(t, seed...)
 	lane := cr.detachedOrphanLaneOf()
-	lane.observe(beadCreatedEvent(t, detachedOrphanWorkBead("D-1", "sess-1")))
-	lane.observe(beadCreatedEvent(t, detachedOrphanWorkBead("D-2", "sess-1")))
+	lane.observe(beadCreatedEvent(t, detachedOrphanWorkBead("D-1")))
+	lane.observe(beadCreatedEvent(t, detachedOrphanWorkBead("D-2")))
 
 	report := cr.sweepDetachedHandoffOrphansDelta()
 	if report.restored != 2 {
@@ -129,17 +134,17 @@ func TestDetachedOrphanDeltaRepairsOnlyEventNamedBeads(t *testing.T) {
 func TestDetachedOrphanDeltaReadCountDoesNotScaleWithCandidates(t *testing.T) {
 	counts := map[int]int{}
 	for _, n := range []int{2, 8} {
-		seed := []beads.Bead{detachedOrphanSessionBead("S-1", "sess-1")}
+		seed := []beads.Bead{detachedOrphanSessionBead()}
 		var named []string
 		for i := range n {
 			id := "D-" + string(rune('a'+i))
-			seed = append(seed, detachedOrphanWorkBead(id, "sess-1"))
+			seed = append(seed, detachedOrphanWorkBead(id))
 			named = append(named, id)
 		}
 		cr, store := detachedOrphanRuntime(t, seed...)
 		lane := cr.detachedOrphanLaneOf()
 		for _, id := range named {
-			lane.observe(beadCreatedEvent(t, detachedOrphanWorkBead(id, "sess-1")))
+			lane.observe(beadCreatedEvent(t, detachedOrphanWorkBead(id)))
 		}
 		report := cr.sweepDetachedHandoffOrphansDelta()
 		if report.restored != n {
@@ -158,8 +163,8 @@ func TestDetachedOrphanDeltaReadCountDoesNotScaleWithCandidates(t *testing.T) {
 // bead events at all — so an orphan nothing named must still be repaired.
 func TestDetachedOrphanBackstopHealsWhatTheEventFeedLost(t *testing.T) {
 	cr, store := detachedOrphanRuntime(t,
-		detachedOrphanSessionBead("S-1", "sess-1"),
-		detachedOrphanWorkBead("D-1", "sess-1"))
+		detachedOrphanSessionBead(),
+		detachedOrphanWorkBead("D-1"))
 
 	// No observe() call: the event was lost.
 	if report := cr.sweepDetachedHandoffOrphansDelta(); report.restored != 0 {
@@ -184,9 +189,9 @@ func TestDetachedOrphanBackstopHealsWhatTheEventFeedLost(t *testing.T) {
 func TestDetachedOrphanRuntimePlaneReadsTheBindingAndNeverTheLedger(t *testing.T) {
 	newCity := func(t *testing.T) (storeref.ResolvedPlan, *countingRouteStore, *countingRouteStore, beads.Store) {
 		t.Helper()
-		sessions := beads.NewMemStoreFrom(0, []beads.Bead{detachedOrphanSessionBead("S-1", "sess-1")}, nil)
-		ledger := &countingRouteStore{Store: beads.NewMemStoreFrom(0, []beads.Bead{detachedOrphanWorkBead("CW-1", "sess-1")}, nil)}
-		binding := &countingRouteStore{Store: beads.NewMemStoreFrom(0, []beads.Bead{detachedOrphanWorkBead("GB-1", "sess-1")}, nil)}
+		sessions := beads.NewMemStoreFrom(0, []beads.Bead{detachedOrphanSessionBead()}, nil)
+		ledger := &countingRouteStore{Store: beads.NewMemStoreFrom(0, []beads.Bead{detachedOrphanWorkBead("CW-1")}, nil)}
+		binding := &countingRouteStore{Store: beads.NewMemStoreFrom(0, []beads.Bead{detachedOrphanWorkBead("GB-1")}, nil)}
 		topo := assembleResidencyTopology(&config.City{}, ledger, nil,
 			[]storeref.ClassBinding{{
 				Classes: []coordclass.Class{coordclass.ClassGraph},
@@ -249,7 +254,7 @@ func TestDetachedOrphanCursorGapAndOverflowForceTheBackstop(t *testing.T) {
 	overflow := newDetachedOrphanLane()
 	overflow.noteBackstopRan(now, backstopReasonStartup, false)
 	for i := range detachedOrphanCandidateCap + 1 {
-		overflow.observe(beadCreatedEvent(t, detachedOrphanWorkBead(overflowBeadID(i), "sess-1")))
+		overflow.observe(beadCreatedEvent(t, detachedOrphanWorkBead(overflowBeadID(i))))
 	}
 	if reason, due := overflow.backstopDue(now); !due || reason != backstopReasonCursorGap {
 		t.Fatalf("candidate overflow left the scan due=%t reason=%q, want due with %q", due, reason, backstopReasonCursorGap)
@@ -261,7 +266,7 @@ func TestDetachedOrphanCursorGapAndOverflowForceTheBackstop(t *testing.T) {
 	// Control: below the cap the lane keeps its candidates and stays un-forced.
 	small := newDetachedOrphanLane()
 	small.noteBackstopRan(now, backstopReasonStartup, false)
-	small.observe(beadCreatedEvent(t, detachedOrphanWorkBead("D-1", "sess-1")))
+	small.observe(beadCreatedEvent(t, detachedOrphanWorkBead("D-1")))
 	if _, due := small.backstopDue(now); due {
 		t.Fatal("a single named candidate forced the scan; overflow is not what the assertion above measured")
 	}
@@ -275,11 +280,11 @@ func TestDetachedOrphanCursorGapAndOverflowForceTheBackstop(t *testing.T) {
 // the scan uses.
 func TestDetachedOrphanObserveKeepsOnlyTheOrphanShape(t *testing.T) {
 	lane := newDetachedOrphanLane()
-	routed := detachedOrphanWorkBead("R-1", "sess-1")
+	routed := detachedOrphanWorkBead("R-1")
 	routed.Metadata[beadmeta.RoutedToMetadataKey] = detachedOrphanTestPool
-	assigned := detachedOrphanWorkBead("A-1", "sess-1")
+	assigned := detachedOrphanWorkBead("A-1")
 	assigned.Assignee = "someone"
-	noBranch := detachedOrphanWorkBead("N-1", "sess-1")
+	noBranch := detachedOrphanWorkBead("N-1")
 	delete(noBranch.Metadata, beadmeta.WorkBranchMetadataKey)
 
 	for _, b := range []beads.Bead{routed, assigned, noBranch} {
@@ -290,7 +295,7 @@ func TestDetachedOrphanObserveKeepsOnlyTheOrphanShape(t *testing.T) {
 	}
 	// Control: the orphan shape IS named, so the filter is not simply rejecting
 	// everything.
-	lane.observe(beadCreatedEvent(t, detachedOrphanWorkBead("D-1", "sess-1")))
+	lane.observe(beadCreatedEvent(t, detachedOrphanWorkBead("D-1")))
 	if got := lane.takePending(); len(got) != 1 || got[0] != "D-1" {
 		t.Fatalf("pending = %v, want [D-1]", got)
 	}
@@ -359,63 +364,109 @@ func TestDetachedOrphanTickTraceCarriesTheBackstopAge(t *testing.T) {
 
 // TestBackstopLoopsReArmPastTheirStartupPass is the ALSO of this slice.
 //
-// The live profile showed both convergence lanes reporting reason=startup with
+// The live profile showed the convergence lanes reporting reason=startup with
 // backstop_age climbing monotonically past 23 minutes, which is what a lane that
 // only runs at boot looks like — and a backstop that only runs at boot is the
-// convergence hole reopened. The existing tests assert on backstopDue/sweepDue in
-// isolation and prove nothing about whether the LOOP ever calls them again.
+// convergence hole reopened. The pre-existing tests assert on backstopDue/sweepDue
+// in isolation and prove nothing about whether the LOOP ever calls them again.
 //
-// This drives the real loops. Both must issue a second pass whose reason is NOT
-// startup.
+// This drives the real loops, and waits on each lane's own always-emit operator
+// line rather than polling its internal state: the line IS the signal an operator
+// would look for, so a lane that converges without saying so fails here too.
+// Every loop must emit a pass whose reason is NOT startup.
 func TestBackstopLoopsReArmPastTheirStartupPass(t *testing.T) {
 	t.Run("route recovery", func(t *testing.T) {
-		cr, _ := routeRecoveryRuntime(t, unroutedWorkBead("T-1"))
+		lines := newBackstopLineWatcher("route recovery (backstop): pass reason=" + backstopReasonCadence)
+		store := &countingRouteStore{Store: beads.NewMemStoreFrom(0, []beads.Bead{unroutedWorkBead("T-1")}, nil)}
+		cr := &CityRuntime{cityName: "city", standaloneCityStore: store, logPrefix: "gc", stderr: lines}
 		lane := cr.routeRecoveryLaneOf()
 		lane.interval = time.Millisecond
 		lane.poll = time.Millisecond
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		go cr.runRouteRecoveryBackstopLoop(ctx, lane)
-		waitForBackstopReason(t, func() (string, bool) {
-			_, reason, ran := lane.lastBackstop()
-			return reason, ran
-		}, backstopReasonCadence)
+		lines.await(t)
 	})
 
 	t.Run("detached orphans", func(t *testing.T) {
-		cr, _ := detachedOrphanRuntime(t,
-			detachedOrphanSessionBead("S-1", "sess-1"),
-			detachedOrphanWorkBead("D-1", "sess-1"))
+		lines := newBackstopLineWatcher("detached handoff orphan sweep (backstop): pass reason=" + backstopReasonCadence)
+		store := &countingRouteStore{Store: beads.NewMemStoreFrom(0,
+			[]beads.Bead{detachedOrphanSessionBead(), detachedOrphanWorkBead("D-1")}, nil)}
+		cr := &CityRuntime{cityName: "city", standaloneCityStore: store, logPrefix: "gc", stderr: lines}
 		lane := cr.detachedOrphanLaneOf()
 		lane.interval = time.Millisecond
 		lane.poll = time.Millisecond
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		go cr.runDetachedOrphanBackstopLoop(ctx, lane)
-		waitForBackstopReason(t, func() (string, bool) {
-			_, reason, ran := lane.lastBackstop()
-			return reason, ran
-		}, backstopReasonCadence)
+		lines.await(t)
+	})
+
+	// The completions sweep is the lane whose live trace showed the climbing
+	// startup age, and it is the one that had only a sweepDue-in-isolation
+	// assertion behind it. Its loop has an extra way to stall the other two do
+	// not: the cadence latch advances only when a chunk reports a COMPLETE
+	// traversal, so a chunk that never completes leaves the sweep permanently
+	// mid-pass and the reason permanently "startup".
+	t.Run("completions sweep", func(t *testing.T) {
+		lines := newBackstopLineWatcher("completions sweep: reason=" + backstopReasonCadence)
+		cs := &controllerState{cityBeadStore: beads.NewMemStore(), eventProv: events.NewFake()}
+		cr := &CityRuntime{cityName: "city", cs: cs, logPrefix: "gc", stderr: lines}
+		lane := cr.completionsLaneOf()
+		lane.interval = time.Millisecond
+		lane.poll = time.Millisecond
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go cr.runCompletionsSweepLoop(ctx, lane)
+		lines.await(t)
 	})
 }
 
-// waitForBackstopReason polls until a convergence lane reports the wanted
-// reason, or fails with what it actually reported.
-func waitForBackstopReason(t *testing.T, read func() (string, bool), want string) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	var last string
-	for time.Now().Before(deadline) {
-		reason, ran := read()
-		if ran {
-			last = reason
-			if reason == want {
-				return
-			}
-		}
-		time.Sleep(time.Millisecond)
+// backstopLineWatcher is a runtime stderr that signals when a convergence lane
+// prints the pass line the test is waiting for.
+//
+// Waiting on the line rather than polling lane state is what keeps this test
+// free of a fixed sleep: the signal arrives when the pass happens instead of on
+// a timer, so the test is both deterministic and instant. The whole transcript
+// is retained so a failure can say which passes DID run.
+type backstopLineWatcher struct {
+	want string
+
+	mu    sync.Mutex
+	seen  []string
+	found chan struct{}
+	once  sync.Once
+}
+
+func newBackstopLineWatcher(want string) *backstopLineWatcher {
+	return &backstopLineWatcher{want: want, found: make(chan struct{})}
+}
+
+func (w *backstopLineWatcher) Write(p []byte) (int, error) {
+	line := string(p)
+	w.mu.Lock()
+	w.seen = append(w.seen, strings.TrimSpace(line))
+	w.mu.Unlock()
+	if strings.Contains(line, w.want) {
+		w.once.Do(func() { close(w.found) })
 	}
-	t.Fatalf("the backstop loop never ran a %q pass; its last reason was %q — a lane that only converges at boot is the hole the lane exists to close", want, last)
+	return len(p), nil
+}
+
+// await blocks until the wanted line is printed, or fails with everything the
+// lane did print instead.
+func (w *backstopLineWatcher) await(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	select {
+	case <-w.found:
+	case <-ctx.Done():
+		w.mu.Lock()
+		transcript := strings.Join(w.seen, "\n  ")
+		w.mu.Unlock()
+		t.Fatalf("the backstop loop never printed %q — a lane that only converges at boot is the hole the lane exists to close.\nlines it did print:\n  %s", w.want, transcript)
+	}
 }
 
 // TestTickDeltaLanesShareOneJournalFeed pins the fan-out. Three lanes and the
@@ -428,7 +479,7 @@ func TestTickDeltaLanesShareOneJournalFeed(t *testing.T) {
 
 	backing := events.NewFake()
 	backing.Record(beadCreatedEvent(t, unroutedWorkBead("T-1")))
-	backing.Record(beadCreatedEvent(t, detachedOrphanWorkBead("D-1", "sess-1")))
+	backing.Record(beadCreatedEvent(t, detachedOrphanWorkBead("D-1")))
 	backing.Record(events.Event{Type: events.ExecutionStepCompleted, RunID: "gcg-root-1"})
 	prov := &observedEventProvider{Provider: backing, observed: make(chan struct{}, 8), after: 4}
 	prov.watchFrom = 0
