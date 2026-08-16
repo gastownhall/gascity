@@ -41,6 +41,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is invisible to it regardless of name, while vendor/testdata (tracked or
   not) stay excluded as before. (gascity#4479)
 
+- **`gc status` no longer pays a full event-log scan for a cosmetic field.**
+  `storehealth.LastMaintenance` now prefers the `TailProvider` backward-scan
+  fast path over an unbounded forward `List` when the provider supports it,
+  and a new `Filter.MaxScanBytes` bounds that backward scan so a rare or
+  never-emitted event type (the common case: a city that has never run store
+  maintenance) can no longer force a full-file walk just to populate the
+  `Last GC:` status line. Previously this cost two full scans of
+  `events.jsonl` on every `gc status` call, dominating latency on large event
+  logs and surfacing as a spurious "runtime status probe timed out" warning.
+
+  Operator note: `Last GC:` may now be absent on a busy city even though
+  maintenance has run. The tail scan looks back a bounded 8 MiB, and it reads
+  only the active `events.jsonl` — never the rotated `.gz` archives — so a
+  maintenance event that has aged out of the window, or out of the active file
+  entirely, is reported as absent rather than stale. The field is display-only
+  and nothing gates on it. `gc maintenance status` is the fallback, with one
+  caveat: it reads the supervisor's in-memory run history, so it requires a
+  running supervisor and resets when the supervisor restarts. It is a live
+  view, not an equivalent durable source; for durable history, query the event
+  log for `store.maintenance.*` directly. (gascity#4418)
+
+- **`gc formula cook --attach`'s help text no longer claims a parent-child
+  relationship it never creates.** `--attach=<bead-id>` has only ever added
+  a `blocks` dependency from the attached bead to the sub-DAG root
+  (`ensureFormulaCookAttachDep` / `molecule.Attach` both call
+  `store.DepAdd(..., "blocks")`, never setting `ParentID`), but the long
+  help described it as creating the sub-DAG "as children of the given
+  bead." Since convoy auto-close watches parent-child children, not
+  `blocks` dependents, a user following the old description would wrongly
+  expect an attached sub-DAG's completion to trigger the attached convoy's
+  auto-close — it never does. Help text now describes the actual `blocks`
+  -only relationship and says so explicitly (gastownhall/gascity#2392).
+
 - **`gc stop --help` and `gc stop --json` now state what actually happens to
   a supervisor-managed city's registration.** `gc stop` has always
   unregistered a supervisor-managed city as part of stopping it, but neither

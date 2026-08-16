@@ -130,15 +130,41 @@ func TestSweepDetachedHandoffOrphans_SkipsAssigned(t *testing.T) {
 
 // Workflow-kind beads route via gc.run_target and are handled by
 // restoreCarriedWorkRoutes — the detached-orphan sweep must leave them alone.
+// The kind-ed bead must carry a RESOLVABLE route, or the test does not bite.
+//
+// The original fixture seeded no session bead, so the workflow root resolved no
+// route and restored=0 whether or not the gc.kind exclusion existed — deleting
+// the exclusion left this test, all its siblings, the lane tests and the budget
+// goldens green while the sweep happily stamped gc.routed_to onto a graph
+// construct. That is not a hypothetical now: the convergence lane walks the class
+// binding, which is exactly where every molecule root and step bead lives, and
+// this exclusion is the only thing standing between the scan and re-routing them
+// into pool demand.
+//
+// So the session bead is present and its template resolves. The only reason the
+// root is skipped is its gc.kind, and the no-route case below is kept as the
+// control that fails for the other reason.
 func TestSweepDetachedHandoffOrphans_SkipsWorkflowKind(t *testing.T) {
 	store := beads.NewMemStore()
 
-	_, err := store.Create(beads.Bead{
+	if _, err := store.Create(beads.Bead{
+		Title:  "polecat session",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "gastown__polecat-th-wf",
+			"template":     "gascity/gastown.polecat",
+		},
+	}); err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	root, err := store.Create(beads.Bead{
 		Title:  "workflow root",
 		Status: "open",
 		Metadata: map[string]string{
 			beadmeta.WorkBranchMetadataKey:  "polecat/ga-wf",
-			beadmeta.SessionNameMetadataKey: "some-session",
+			beadmeta.SessionNameMetadataKey: "gastown__polecat-th-wf",
 			beadmeta.KindMetadataKey:        beadmeta.KindWorkflow,
 		},
 	})
@@ -146,12 +172,69 @@ func TestSweepDetachedHandoffOrphans_SkipsWorkflowKind(t *testing.T) {
 		t.Fatalf("create work bead: %v", err)
 	}
 
+	// Control: a bead identical but for gc.kind IS restored from that same
+	// session bead. Without it, "restored=0" would be satisfied by a route that
+	// simply could not be resolved — which is how the pre-fix version of this
+	// test passed against a sweep with no kind exclusion at all.
+	plain, err := store.Create(beads.Bead{
+		Title:  "plain detached work",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.WorkBranchMetadataKey:  "polecat/ga-plain",
+			beadmeta.SessionNameMetadataKey: "gastown__polecat-th-wf",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control bead: %v", err)
+	}
+
 	n, err := sweepDetachedHandoffOrphans(store)
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
-	if n != 0 {
-		t.Fatalf("restored=%d, want 0 (workflow-kind beads are not detached handoff orphans)", n)
+	if n != 1 {
+		t.Fatalf("restored=%d, want 1 (the control bead only) — the route must be resolvable or the kind exclusion is not what this test measures", n)
+	}
+
+	got, err := store.Get(root.ID)
+	if err != nil {
+		t.Fatalf("get workflow root: %v", err)
+	}
+	if route := got.Metadata[beadmeta.RoutedToMetadataKey]; route != "" {
+		t.Fatalf("the workflow root was stamped gc.routed_to=%q; any non-empty gc.kind is a graph construct and re-routing one puts a molecule root into pool demand", route)
+	}
+	control, err := store.Get(plain.ID)
+	if err != nil {
+		t.Fatalf("get control bead: %v", err)
+	}
+	if route := control.Metadata[beadmeta.RoutedToMetadataKey]; route != "gascity/gastown.polecat" {
+		t.Fatalf("control gc.routed_to=%q, want gascity/gastown.polecat — the session route is unresolvable and the assertion above proves nothing", route)
+	}
+}
+
+// The same refusal one layer down, over every kind the dispatcher and the
+// workflow topology use — not just gc.kind=workflow.
+//
+// The predicate's rule is "any non-empty gc.kind", and the class binding holds
+// all of them. A test that only ever names "workflow" would let a narrowing of
+// that rule to one literal through.
+func TestDetachedHandoffOrphanCandidateRefusesEveryKindedBead(t *testing.T) {
+	base := func() beads.Bead {
+		return beads.Bead{ID: "K-1", Status: "open", Metadata: map[string]string{
+			beadmeta.WorkBranchMetadataKey:  "polecat/ga-k",
+			beadmeta.SessionNameMetadataKey: "gastown__polecat-th-wf",
+		}}
+	}
+	// Control first: kind-less, the shape the sweep exists for.
+	if !isDetachedHandoffOrphanCandidate(base()) {
+		t.Fatal("the kind-less base bead is not a candidate; every assertion below would pass vacuously")
+	}
+	for _, kind := range []string{beadmeta.KindWorkflow, "wisp", "check", "retry", "fanout", "tally", "drain", "scope", "spec"} {
+		b := base()
+		b.Metadata[beadmeta.KindMetadataKey] = kind
+		if isDetachedHandoffOrphanCandidate(b) {
+			t.Errorf("a bead with gc.kind=%q is a detached-orphan candidate; the convergence lane would stamp gc.routed_to on a graph construct in the class binding", kind)
+		}
 	}
 }
 
@@ -386,10 +469,11 @@ func TestSweepDetachedHandoffOrphans_NilStore(t *testing.T) {
 }
 
 // A detached handoff orphan can live in a RIG store while its closing session
-// bead lives in the CITY store — the common case sweepDetachedHandoffOrphansAcross
-// Stores exists for. The route index must be built from the city store too, or
-// the rig-stored orphan's session bead is never found and it is never recovered.
-// Cross-store round-trip through the public entry point.
+// bead lives in the CITY store — the common cross-store case. The route must be
+// resolved from the session-class store, not from the work leg the orphan
+// happens to sit in, or the rig-stored orphan's session bead is never found and
+// it is never recovered. Cross-store round trip through the convergence lane,
+// which is the entry point that owns this case now.
 func TestSweepDetachedHandoffOrphansAcrossStores_RigOrphanCityStoredSession(t *testing.T) {
 	cityStore := beads.NewMemStore()
 	rigStore := beads.NewMemStore()
@@ -421,9 +505,16 @@ func TestSweepDetachedHandoffOrphansAcrossStores_RigOrphanCityStoredSession(t *t
 		t.Fatalf("create rig work bead: %v", err)
 	}
 
-	n := sweepDetachedHandoffOrphansAcrossStores(cityStore, map[string]beads.Store{"ga": rigStore}, "test", io.Discard)
-	if n != 1 {
-		t.Fatalf("restored=%d, want 1 (rig orphan recovered via city-stored session bead)", n)
+	cr := &CityRuntime{
+		cityName:            "city",
+		standaloneCityStore: cityStore,
+		standaloneRigStores: map[string]beads.Store{"ga": rigStore},
+		logPrefix:           "test",
+		stderr:              io.Discard,
+	}
+	report := cr.runDetachedOrphanBackstop(backstopReasonCadence)
+	if report.restored != 1 {
+		t.Fatalf("restored=%d (err=%v), want 1 (rig orphan recovered via city-stored session bead)", report.restored, report.err)
 	}
 
 	got, err := rigStore.Get(work.ID)
@@ -480,7 +571,8 @@ func TestSweepDetachedHandoffOrphans_SkipsBlockedCollapsedCandidate(t *testing.T
 		t.Fatalf("create session bead: %v", err)
 	}
 
-	restored, err := sweepDetachedHandoffOrphansWithRouteStore(store, routeStore)
+	result, err := sweepDetachedHandoffOrphansWithRouteStore(store, routeStore)
+	restored := result.restored
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
@@ -538,7 +630,8 @@ func TestSweepDetachedHandoffOrphans_SkipsRaceClaimedCandidate(t *testing.T) {
 		t.Fatalf("create session bead: %v", err)
 	}
 
-	restored, err := sweepDetachedHandoffOrphansWithRouteStore(store, routeStore)
+	result, err := sweepDetachedHandoffOrphansWithRouteStore(store, routeStore)
+	restored := result.restored
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}

@@ -20,8 +20,10 @@ import (
 // is the number of SEQUENTIAL store round trips the tick makes, multiplied by
 // whatever the slowest leg's RTT happens to be. On maintainer-city the work
 // ledger is remote postgres at ~5.4s per query, and that multiplication is the
-// whole incident: ~35 round trips in route recovery alone was 185.3s of a ~360s
-// tick, and the completions walk added 72.4s on top (ga-l7jdg, ga-4qdfn).
+// whole incident: the detached-orphan sweep's per-store open scan was 180.8s of
+// a 373s tick, the completions walk 69.7s on top, and the route-recovery scan was
+// blamed for another 185s before the trace showed it had been the orphan sweep
+// all along (ga-l7jdg, ga-4qdfn).
 //
 // So the regression gate counts round trips. A leg that quietly goes back to
 // scanning per tick fails here as a deterministic integer diff — not as a flaky
@@ -77,9 +79,9 @@ func (s *latencyStore) SetMetadataBatch(id string, kvs map[string]string) error 
 	return s.Store.SetMetadataBatch(id, kvs)
 }
 
-// TestSteadyTickStoreRoundTripBudget is the regression gate for the two legs
-// this slice moved off the tick. Both budgets are ZERO: a steady tick names no
-// candidate and no root, so it must not reach a store at all.
+// TestSteadyTickStoreRoundTripBudget is the regression gate for every leg moved
+// off the tick. All three budgets are ZERO: a steady tick names no candidate and
+// no root, so it must not reach a store at all.
 //
 // Every row carries its own control in the third column — the same leg over the
 // same corpus in its convergence form — because a budget of zero is also what a
@@ -121,6 +123,24 @@ func TestSteadyTickStoreRoundTripBudget(t *testing.T) {
 				return store.roundTrips
 			},
 		},
+		{
+			// The leg nobody scoped until the post-S1/S2 profile named it:
+			// 180.8s of a 373s tick, 48.5%, restored_count=0 on every tick
+			// (ga-l7jdg). A live open-corpus scan of the city ledger and every
+			// rig, serially, to discover nothing.
+			leg:          "sweep_detached_handoff_orphans",
+			steadyBudget: 0,
+			steady: func(t *testing.T) (*latencyStore, int) {
+				store, cr := budgetOrphanRuntime(t)
+				cr.sweepDetachedHandoffOrphansDelta()
+				return store, store.roundTrips
+			},
+			convergence: func(t *testing.T) int {
+				store, cr := budgetOrphanRuntime(t)
+				cr.runDetachedOrphanBackstop(backstopReasonCadence)
+				return store.roundTrips
+			},
+		},
 	} {
 		t.Run(row.leg, func(t *testing.T) {
 			start := time.Now()
@@ -148,6 +168,93 @@ func TestSteadyTickStoreRoundTripBudget(t *testing.T) {
 					row.leg, conv, got)
 			}
 		})
+	}
+}
+
+// journalReadCounter counts the journal reads a completions pass issues, split
+// by the only distinction that matters for cost.
+//
+// A read with no AfterSeq is a FULL read: ReadFiltered gunzips and scans every
+// sibling archive before the active file, so it is O(retained history) — 69.7s
+// of a 373s tick on maintainer-city. A read with AfterSeq set skips every
+// archive whose seq window is already behind the cursor
+// (archiveOverlapsFilter), so it costs the active file alone.
+//
+// It deliberately does NOT implement events.InFlightProvider: embedding the
+// plain Provider interface means completedFacts takes its List branch, so the
+// counts below are the ones the test names.
+type journalReadCounter struct {
+	events.Provider
+	fullReads  int
+	tailReads  int
+	latestSeqs int
+}
+
+func (p *journalReadCounter) List(filter events.Filter) ([]events.Event, error) {
+	if filter.AfterSeq == 0 {
+		p.fullReads++
+	} else {
+		p.tailReads++
+	}
+	return p.Provider.List(filter)
+}
+
+func (p *journalReadCounter) LatestSeq() (uint64, error) {
+	p.latestSeqs++
+	return p.Provider.LatestSeq()
+}
+
+// TestCompletionsDeltaJournalReadBudgetWithNamedRoots is the golden the runtime
+// never reached.
+//
+// The shipped budget rows below assert the named_roots == 0 case. On
+// maintainer-city the journal names 1-2 roots on EVERY tick, so
+// ReconcileCompletedRoots passed its early return and paid a full
+// O(retained-history) journal read on every one — 69.7s of a 373s tick, flat and
+// independent of how many roots were named (ga-l7jdg). The zero-read property
+// was real and the tick never once got it.
+//
+// So the budget for a WORKING tick is stated here: exactly one full journal read
+// to warm the index, and none thereafter no matter how many passes run.
+func TestCompletionsDeltaJournalReadBudgetWithNamedRoots(t *testing.T) {
+	store, base, rootIDs := budgetCompletionsCorpusOfSize(t, 8)
+	journal := &journalReadCounter{Provider: base}
+	graphStores := []beads.GraphStore{{Store: store}}
+	named := rootIDs[:2]
+
+	index := &executionevent.CompletedFactIndex{}
+	if emitted := index.ReconcileRoots(journal, graphStores, named, "execution-reconcile"); emitted != len(named) {
+		t.Fatalf("the warm-up pass emitted %d fact(s) for %d named root(s); the fixture has no completion work and the budget below is vacuous", emitted, len(named))
+	}
+	if journal.fullReads != 1 {
+		t.Fatalf("warming the fact index cost %d full journal read(s), want exactly 1", journal.fullReads)
+	}
+
+	// Steady ticks: roots named every time, as on maintainer-city.
+	for range 8 {
+		index.ReconcileRoots(journal, graphStores, named, "execution-reconcile")
+	}
+	if journal.fullReads != 1 {
+		t.Fatalf("8 ticks with named roots cost %d full journal read(s), budget 1 — at maintainer-city's measured 69.7s per full read that is %v of tick time",
+			journal.fullReads, time.Duration(journal.fullReads-1)*69700*time.Millisecond)
+	}
+	// And not a cheaper journal read either: a warm index reads NOTHING. The
+	// facts it does not emit itself arrive through the journal feed the lane
+	// already tails, which costs the tick nothing at all.
+	if journal.tailReads != 0 || journal.latestSeqs != 0 {
+		t.Fatalf("a warm index issued %d incremental read(s) and %d head read(s), want 0 and 0", journal.tailReads, journal.latestSeqs)
+	}
+
+	// Control: the index is warm, not broken. A root whose step closes AFTER the
+	// index warmed must still get its recovery fact, and the pass must still
+	// refuse to emit a duplicate for a fact the journal already carries.
+	fresh, freshBase, freshRoots := budgetCompletionsCorpusOfSize(t, 2)
+	freshJournal := &journalReadCounter{Provider: freshBase}
+	freshIndex := &executionevent.CompletedFactIndex{}
+	first := freshIndex.ReconcileRoots(freshJournal, []beads.GraphStore{{Store: fresh}}, freshRoots[:1], "execution-reconcile")
+	second := freshIndex.ReconcileRoots(freshJournal, []beads.GraphStore{{Store: fresh}}, freshRoots, "execution-reconcile")
+	if first != 1 || second != 1 {
+		t.Fatalf("first pass emitted %d and the second (one more root) emitted %d, want 1 and 1: the warm index must still repair new work and must not repeat old facts", first, second)
 	}
 }
 
@@ -215,6 +322,16 @@ func budgetRouteRuntime(t *testing.T) (*latencyStore, *CityRuntime) {
 	t.Helper()
 	store := &latencyStore{Store: beads.NewMemStoreFrom(0, budgetUnroutedBeads(8), nil)}
 	return store, &CityRuntime{cityName: "city", standaloneCityStore: store, stderr: io.Discard}
+}
+
+// budgetOrphanRuntime seeds a repairable detached handoff orphan — the shape the
+// convergence scan finds and the delta lane must not go looking for — plus the
+// session bead its route is recovered from.
+func budgetOrphanRuntime(t *testing.T) (*latencyStore, *CityRuntime) {
+	t.Helper()
+	seed := append(budgetUnroutedBeads(8), detachedOrphanSessionBead(), detachedOrphanWorkBead("D-1"))
+	store := &latencyStore{Store: beads.NewMemStoreFrom(0, seed, nil)}
+	return store, &CityRuntime{cityName: "city", standaloneCityStore: store, logPrefix: "gc", stderr: io.Discard}
 }
 
 func budgetCompletionsCorpus(t *testing.T) (*latencyStore, events.Provider, []string) {

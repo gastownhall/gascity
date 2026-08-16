@@ -116,7 +116,7 @@ func TestNonTurnHookInvocationCannotMintExecution(t *testing.T) {
 			}
 			// The refusal must also be CHEAP. A provider callback's whole budget
 			// is 15s (defaultHookRunTimeout) while the work query alone is
-			// bounded at 60s (hookWorkQueryTimeout), so a fence that refuses only
+			// bounded at 150s (hookWorkQueryTimeout), so a fence that refuses only
 			// after the query is a fence whose answer the provider never sees.
 			if readFileForTest(t, argvLog) != "<absent>" {
 				t.Fatalf("a %s callback lane ran the work query before refusing; bd argv log:\n%s", marker.key, readFileForTest(t, argvLog))

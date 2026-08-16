@@ -142,6 +142,11 @@ type CityRuntime struct {
 	completions     *completionsLane
 	completionsOnce sync.Once
 
+	// detachedOrphan is the detached-handoff-orphan lane, the same delta/scan
+	// split applied to the sweep that was 48.5% of the tick (ga-l7jdg).
+	detachedOrphan     *detachedOrphanLane
+	detachedOrphanOnce sync.Once
+
 	orderSweepWatchdogLast             time.Time
 	orderTrackingRetentionWatchdogLast time.Time
 	nudgeMailSweepWatchdogLast         time.Time
@@ -2438,11 +2443,17 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		emitDeadAssigneeReopenedEvents(cr.rec, assignedWorkBeads, released, time.Now())
 		assignedWorkBeads, assignedWorkStoreRefs = filterReleasedAssignedWorkSnapshot(assignedWorkBeads, assignedWorkStoreRefs, released)
 	}
+	// Detached handoff orphans: the tick repairs only the beads the journal named
+	// since the last pass. The whole-corpus scan this replaced was a live
+	// open-corpus read of the city ledger and every rig, serially, on every tick
+	// — 180.8s of a 373s tick with restored_count=0 on every one (ga-l7jdg). It
+	// now runs off-tick on the convergence lane's cadence.
 	phaseStart = time.Now()
-	detachedRestored := sweepDetachedHandoffOrphansAcrossStores(store, rigStores, cr.logPrefix, cr.stderr)
-	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.sweep_detached_handoff_orphans", phaseStart, map[string]any{
-		"restored_count": detachedRestored,
-	})
+	detachedReport := cr.sweepDetachedHandoffOrphansDelta()
+	detachedFields := detachedReport.fields()
+	sweptAt, sweptReason, swept := cr.detachedOrphanLaneOf().lastBackstop()
+	addBackstopAgeFields(detachedFields, sweptAt, sweptReason, swept)
+	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.sweep_detached_handoff_orphans", phaseStart, detachedFields)
 	// Squatter guard (gastownhall/gascity#2930): a foreign Dolt that has bound
 	// this city's managed port returns zero demand, indistinguishable from a
 	// genuinely-idle fleet — and would drain every running pool. This runs on

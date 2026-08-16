@@ -3,7 +3,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"strings"
 
@@ -27,20 +26,36 @@ import (
 // re-enters pool demand; the formula re-evaluates it from there. No role names
 // appear in this function.
 func sweepDetachedHandoffOrphans(store beads.Store) (int, error) {
-	return sweepDetachedHandoffOrphansWithRouteStore(store, nil)
+	result, err := sweepDetachedHandoffOrphansWithRouteStore(store, nil)
+	return result.restored, err
+}
+
+// detachedOrphanSweepResult is one leg's convergence outcome, in the terms the
+// pass's operator line reports: what it found, what it repaired, and what the
+// answer cost in store round trips.
+type detachedOrphanSweepResult struct {
+	candidates int
+	restored   int
+	reads      int
 }
 
 // sweepDetachedHandoffOrphansWithRouteStore is sweepDetachedHandoffOrphans that
 // additionally resolves pool routes from routeStore. Session beads (which carry
-// the template/route) are city-stored, while a detached orphan can live in a rig
-// store — so when sweeping a rig store, routeStore is the city store, and a
-// rig-stored orphan whose closing session bead lives in the city store is
-// recovered (the cross-store case sweepDetachedHandoffOrphansAcrossStores exists
-// for). routeStore may be nil to resolve routes from store alone. Beads are only
+// the template/route) are class-stored, while a detached orphan can live in a rig
+// store — so when sweeping a rig store, routeStore is the session-class store,
+// and a rig-stored orphan whose closing session bead lives there is recovered.
+// routeStore may be nil to resolve routes from store alone. Beads are only
 // re-stamped in store; routeStore is read-only.
-func sweepDetachedHandoffOrphansWithRouteStore(store, routeStore beads.Store) (int, error) {
+//
+// This is the CONVERGENCE form: it finds its own candidates with a full live
+// open-corpus scan. It is one leg of the off-tick backstop pass
+// (detachedOrphanLane.backstopPass), never the tick — that scan was 180.8s of a
+// 373s tick (ga-l7jdg). It reports what it found and what the answer cost, so a
+// pass that repaired nothing can be told from one that looked at nothing.
+func sweepDetachedHandoffOrphansWithRouteStore(store, routeStore beads.Store) (detachedOrphanSweepResult, error) {
+	var result detachedOrphanSweepResult
 	if store == nil {
-		return 0, nil
+		return result, nil
 	}
 	// Scan open beads for detached handoff orphans. Live is what makes
 	// Status:"open" mean open: mapBdStatus folds bd's blocked/deferred/review/
@@ -54,8 +69,9 @@ func sweepDetachedHandoffOrphansWithRouteStore(store, routeStore beads.Store) (i
 	// Live). In steady state there are no candidates, so the expensive session-
 	// index lookup is skipped entirely.
 	items, err := store.List(beads.ListQuery{Status: "open", AllowScan: true, Live: true})
+	result.reads++
 	if err != nil {
-		return 0, fmt.Errorf("listing open beads: %w", err)
+		return result, fmt.Errorf("listing open beads: %w", err)
 	}
 
 	type candidate struct {
@@ -72,31 +88,15 @@ func sweepDetachedHandoffOrphansWithRouteStore(store, routeStore beads.Store) (i
 			sessionName: strings.TrimSpace(b.Metadata[beadmeta.SessionNameMetadataKey]),
 		})
 	}
+	result.candidates = len(candidates)
 	if len(candidates) == 0 {
-		return 0, nil
+		return result, nil
 	}
 
-	// Build the session route index once for all candidates, from this store and
-	// (for cross-store recovery) routeStore. A detached orphan in a rig store has
-	// its session bead in the city store, so without routeStore its route is never
-	// found and it is never recovered. store wins on conflict; the city store
-	// backfills gaps.
-	routeIndex, indexErr := buildDetachedOrphanRouteIndex(store)
+	routeIndex, indexReads, indexErr := detachedOrphanRoutesFor(store, routeStore)
+	result.reads += indexReads
 	if indexErr != nil {
-		return 0, fmt.Errorf("building session route index: %w", indexErr)
-	}
-	// Only union a distinct cross-store index. The city scope in
-	// sweepDetachedHandoffOrphansAcrossStores passes the city store as both store
-	// and routeStore; its routes are already in routeIndex, so rebuilding the same
-	// full ListAllSessionBeads scan and unioning it into itself is pure waste.
-	// Interface identity is the right test here — production stores are pointer-
-	// backed CachingStores.
-	if routeStore != nil && routeStore != store {
-		crossIndex, crossErr := buildDetachedOrphanRouteIndex(routeStore)
-		if crossErr != nil {
-			return 0, fmt.Errorf("building cross-store session route index: %w", crossErr)
-		}
-		routeIndex.backfill(crossIndex)
+		return result, indexErr
 	}
 
 	// Resolve the authoritative, cache-bypassing read handle once. Production
@@ -104,10 +104,7 @@ func sweepDetachedHandoffOrphansWithRouteStore(store, routeStore beads.Store) (i
 	// predates a cross-process claim/close; handles.Live reads the backing store
 	// directly. For a plain store this degrades to store.Get.
 	handles := beads.HandlesFor(store)
-	var (
-		restored int
-		errs     []error
-	)
+	var errs []error
 	for _, c := range candidates {
 		route := routeIndex.route(c.sessionID, c.sessionName)
 		if route == "" {
@@ -126,6 +123,7 @@ func sweepDetachedHandoffOrphansWithRouteStore(store, routeStore beads.Store) (i
 		// this Get too, so the Live candidate List above — not this re-read — is
 		// what excludes blocked/review/testing work; gc-4zb.)
 		live, getErr := handles.Live.Get(c.id)
+		result.reads++
 		if getErr != nil {
 			errs = append(errs, fmt.Errorf("bead %s: re-reading before route restore: %w", c.id, getErr))
 			continue
@@ -134,14 +132,47 @@ func sweepDetachedHandoffOrphansWithRouteStore(store, routeStore beads.Store) (i
 			routeIndex.route(strings.TrimSpace(live.Metadata[beadmeta.SessionIDMetadataKey]), strings.TrimSpace(live.Metadata[beadmeta.SessionNameMetadataKey])) != route {
 			continue // claimed, closed, or re-routed since the snapshot — don't clobber
 		}
+		result.reads++
 		if setErr := store.SetMetadata(c.id, beadmeta.RoutedToMetadataKey, route); setErr != nil {
 			errs = append(errs, fmt.Errorf("bead %s: restoring gc.routed_to=%q: %w", c.id, route, setErr))
 			continue
 		}
 		log.Printf("sweepDetachedHandoffOrphans: restored gc.routed_to=%q on detached handoff orphan %s", route, c.id)
-		restored++
+		result.restored++
 	}
-	return restored, errors.Join(errs...)
+	return result, errors.Join(errs...)
+}
+
+// detachedOrphanRoutesFor builds the session route index one pass over one leg
+// uses, from that leg's own session beads unioned with routeStore's.
+//
+// Both lanes resolve routes through here, so the tick's delta pass and the
+// off-tick scan can never disagree about which session bead answers for an
+// orphan — the reader-agreement rule that makes the delta pass a cheaper form of
+// the same question rather than a second, quieter one.
+//
+// It returns the store round trips it made. ListAllSessionBeads is a two-leg
+// union (by type, by label), so each store consulted costs two.
+func detachedOrphanRoutesFor(store, routeStore beads.Store) (detachedOrphanRouteIndex, int, error) {
+	reads := 2
+	routeIndex, indexErr := buildDetachedOrphanRouteIndex(store)
+	if indexErr != nil {
+		return detachedOrphanRouteIndex{}, reads, fmt.Errorf("building session route index: %w", indexErr)
+	}
+	// Only union a DISTINCT cross-store index. The city leg passes the city store
+	// as both store and routeStore; its routes are already in routeIndex, so
+	// rebuilding the same full ListAllSessionBeads scan and unioning it into
+	// itself is pure waste. Interface identity is the right test here — production
+	// stores are pointer-backed CachingStores.
+	if routeStore != nil && routeStore != store {
+		reads += 2
+		crossIndex, crossErr := buildDetachedOrphanRouteIndex(routeStore)
+		if crossErr != nil {
+			return detachedOrphanRouteIndex{}, reads, fmt.Errorf("building cross-store session route index: %w", crossErr)
+		}
+		routeIndex.backfill(crossIndex)
+	}
+	return routeIndex, reads, nil
 }
 
 // isDetachedHandoffOrphanCandidate reports whether b has the signature of a
@@ -282,37 +313,4 @@ func buildDetachedOrphanRouteIndex(store beads.Store) (detachedOrphanRouteIndex,
 		delete(idx.byName, sn) // refuse to guess a route for an ambiguous name
 	}
 	return idx, nil
-}
-
-// sweepDetachedHandoffOrphansAcrossStores sweeps for fully-detached handoff
-// orphans across the city store and every active rig store. Errors are logged
-// to stderr; per-store failures do not abort remaining stores. Returns the
-// total count of beads whose gc.routed_to was restored.
-func sweepDetachedHandoffOrphansAcrossStores(cityStore beads.Store, rigStores map[string]beads.Store, logPrefix string, stderr io.Writer) int {
-	if stderr == nil {
-		stderr = io.Discard
-	}
-	type scope struct {
-		label string
-		store beads.Store
-	}
-	scopes := []scope{{label: "city", store: cityStore}}
-	for name, s := range rigStores {
-		scopes = append(scopes, scope{label: "rig " + name, store: s})
-	}
-	total := 0
-	for _, sc := range scopes {
-		if sc.store == nil {
-			continue
-		}
-		n, err := sweepDetachedHandoffOrphansWithRouteStore(sc.store, cityStore)
-		if err != nil {
-			fmt.Fprintf(stderr, "%s: detached handoff orphan sweep (%s): %v\n", logPrefix, sc.label, err) //nolint:errcheck
-		}
-		if n > 0 {
-			fmt.Fprintf(stderr, "%s: detached handoff orphan sweep (%s): restored gc.routed_to on %d bead(s)\n", logPrefix, sc.label, n) //nolint:errcheck
-		}
-		total += n
-	}
-	return total
 }

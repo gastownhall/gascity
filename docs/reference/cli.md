@@ -1682,11 +1682,15 @@ Compile and instantiate a formula as real beads in the current store.
 This is a low-level workflow construction tool. It creates the formula root
 and all compiled step beads without routing any work.
 
-With --attach=&lt;bead-id&gt;, the sub-DAG is created as children of the given
-bead. The bead gains a blocking dependency on the sub-DAG root, so it won't
-close until the sub-DAG completes. This is the core primitive for late-bound
-DAG expansion — any agent, script, or workflow step can call it to expand a
-bead into a sub-workflow at runtime.
+With --attach=&lt;bead-id&gt;, the given bead gains a blocking dependency on the
+sub-DAG root, so it won't close until the sub-DAG completes. This is a
+"blocks" dependency only, not a parent-child relationship — the sub-DAG
+root does not become a child of the attached bead (gc bd list --parent
+will not find it), and convoy auto-close, which watches parent-child
+children and "tracks" members rather than blocks dependents, is not
+triggered by the sub-DAG completing. This is the core primitive for
+late-bound DAG expansion — any agent, script, or workflow step can call it
+to expand a bead into a sub-workflow at runtime.
 
 With --attach on a v2 formula — one declaring
 [requires] formula_compiler = "&gt;=2.0.0" — the invocation runs under a

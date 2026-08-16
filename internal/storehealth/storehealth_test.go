@@ -1,7 +1,11 @@
 package storehealth
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -256,5 +260,154 @@ func TestLastMaintenanceNoEvents(t *testing.T) {
 	ts, status := LastMaintenance(ep)
 	if !ts.IsZero() || status != "" {
 		t.Fatalf("LastMaintenance(empty) = (%v,%q), want (zero,\"\")", ts, status)
+	}
+}
+
+// recordingProvider wraps a Fake and counts List vs ListTail calls, so tests
+// can assert which path LastMaintenance actually took rather than only
+// inferring it from the result.
+type recordingProvider struct {
+	*events.Fake
+	listCalls     int
+	listTailCalls int
+}
+
+func (r *recordingProvider) List(filter events.Filter) ([]events.Event, error) {
+	r.listCalls++
+	return r.Fake.List(filter)
+}
+
+func (r *recordingProvider) ListTail(filter events.Filter, limit int) ([]events.Event, error) {
+	r.listTailCalls++
+	return r.Fake.ListTail(filter, limit)
+}
+
+// providerWithoutTail implements events.Provider but deliberately omits
+// ListTail, so LastMaintenance must fall back to the unbounded List path
+// rather than a type assertion panicking or silently returning nothing.
+type providerWithoutTail struct {
+	*events.Fake
+}
+
+func (p *providerWithoutTail) List(filter events.Filter) ([]events.Event, error) {
+	return p.Fake.List(filter)
+}
+
+// TestLastMaintenanceUsesTailProviderFastPath is the regression for #4418:
+// when the provider implements events.TailProvider, LastMaintenance must
+// call ListTail (the bounded backward scan) instead of the unbounded List,
+// which on a large event log with a rare Type filter costs a full-file scan
+// for what is ultimately a cosmetic status field.
+func TestLastMaintenanceUsesTailProviderFastPath(t *testing.T) {
+	rp := &recordingProvider{Fake: events.NewFake()}
+	payload, _ := json.Marshal(events.StoreMaintenanceDonePayload{DurationSeconds: 3})
+	ts := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	rp.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: ts, Payload: payload})
+
+	gotTs, gotStatus := LastMaintenance(rp)
+	if !gotTs.Equal(ts) || gotStatus != "success" {
+		t.Fatalf("LastMaintenance = (%v,%q), want (%v,success)", gotTs, gotStatus, ts)
+	}
+	if rp.listTailCalls == 0 {
+		t.Fatalf("listTailCalls = 0, want > 0 (LastMaintenance should prefer the TailProvider fast path)")
+	}
+	if rp.listCalls != 0 {
+		t.Fatalf("listCalls = %d, want 0 (fast path should not also fall back to List)", rp.listCalls)
+	}
+}
+
+// TestLastMaintenanceFallsBackWithoutTailProvider guards the fallback: a
+// provider that does not implement events.TailProvider (e.g. an exec-script
+// provider) must still get a correct answer via the existing List path.
+func TestLastMaintenanceFallsBackWithoutTailProvider(t *testing.T) {
+	pwt := &providerWithoutTail{Fake: events.NewFake()}
+	payload, _ := json.Marshal(events.StoreMaintenanceFailedPayload{Stage: "gc"})
+	ts := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	pwt.Record(events.Event{Type: events.StoreMaintenanceFailed, Ts: ts, Payload: payload})
+
+	gotTs, gotStatus := LastMaintenance(pwt)
+	if !gotTs.Equal(ts) || gotStatus != "failed" {
+		t.Fatalf("LastMaintenance = (%v,%q), want (%v,failed)", gotTs, gotStatus, ts)
+	}
+}
+
+// writeArchivedEvents writes evts as a gzipped canonical events archive
+// beside path, using the rotation naming convention
+// (events.jsonl.archive-<ts>-seq-<first>-<last>.gz) that the archive-aware
+// read path discovers by directory listing.
+func writeArchivedEvents(t *testing.T, path string, evts []events.Event) {
+	t.Helper()
+	if len(evts) == 0 {
+		t.Fatal("writeArchivedEvents: no events")
+	}
+	var raw bytes.Buffer
+	for _, e := range evts {
+		line, err := json.Marshal(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw.Write(line)
+		raw.WriteString("\n")
+	}
+	var gz bytes.Buffer
+	zw := gzip.NewWriter(&gz)
+	if _, err := zw.Write(raw.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	name := fmt.Sprintf("events.jsonl.archive-%s-seq-%d-%d.gz",
+		evts[0].Ts.UTC().Format("20060102T150405Z"), evts[0].Seq, evts[len(evts)-1].Seq)
+	if err := os.WriteFile(filepath.Join(filepath.Dir(path), name), gz.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestLastMaintenanceDoesNotReadRotatedArchives pins accepted, documented
+// behavior rather than a bug: FileRecorder.ListTail scans the active
+// events.jsonl only, so a maintenance event that has aged into a rotated
+// .gz archive is reported as absent. The old unbounded List path did read
+// archives; taking the archive-aware fall-through here (as
+// fetchEventPageAscending does) would restore the full scan #4418 removed,
+// and LastGCAt is display-only in every consumer. If this test starts
+// failing because LastMaintenance grew a fall-through, that is a
+// deliberate re-trade — update the comment on
+// lastMaintenanceScanWindowBytes with it, do not just delete the test.
+func TestLastMaintenanceDoesNotReadRotatedArchives(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	ts := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	payload, err := json.Marshal(events.StoreMaintenanceDonePayload{DurationSeconds: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The only maintenance event lives in the archive; the active file
+	// holds unrelated traffic, as it would after a rotation.
+	writeArchivedEvents(t, path, []events.Event{
+		{Seq: 1, Type: events.StoreMaintenanceDone, Ts: ts, Payload: payload},
+	})
+
+	rec, err := events.NewFileRecorder(path, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close() //nolint:errcheck // test cleanup
+	rec.Record(events.Event{Type: "unrelated.event", Ts: ts.Add(time.Hour)})
+
+	// Control: the archive-aware List path DOES see it, so an empty result
+	// below is archive-blindness and not a broken fixture.
+	viaList, err := rec.List(events.Filter{Type: events.StoreMaintenanceDone})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(viaList) != 1 {
+		t.Fatalf("List got %d events, want 1 (fixture must be readable via the archive-aware path)", len(viaList))
+	}
+
+	gotTs, gotStatus := LastMaintenance(rec)
+	if !gotTs.IsZero() || gotStatus != "" {
+		t.Fatalf("LastMaintenance = (%v,%q), want (zero,\"\") — the tail fast path reads the active file only", gotTs, gotStatus)
 	}
 }
