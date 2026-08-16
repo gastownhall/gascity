@@ -399,6 +399,17 @@ func readFilteredTailFromFile(f *os.File, size int64, filter Filter, limit int) 
 		if end < n {
 			n = end
 		}
+		// Clamp the read to what remains of the byte budget so a
+		// MaxScanBytes that is not a chunkSize multiple stops the walk
+		// mid-chunk rather than overscanning by up to one full chunk.
+		// The loop condition guarantees remaining > 0 on entry, and the
+		// chunk is read at start = end - n, so a smaller n simply moves
+		// the walk's stopping point without misaligning pending.
+		if filter.MaxScanBytes > 0 {
+			if remaining := filter.MaxScanBytes - (size - end); remaining < n {
+				n = remaining
+			}
+		}
 		start := end - n
 		chunk := make([]byte, n)
 		if _, err := f.ReadAt(chunk, start); err != nil && err != io.EOF {
