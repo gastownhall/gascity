@@ -2365,7 +2365,9 @@ func TestUnloadSupervisorServiceSkipsDefaultUnitForIsolatedGCHome(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	unloadSupervisorService()
+	if err := unloadSupervisorService(); err != nil {
+		t.Fatal(err)
+	}
 
 	if got := strings.TrimSpace(readCommandLog(t, logFile)); got != "" {
 		t.Fatalf("unloadSupervisorService invoked systemctl for default unit under isolated GC_HOME: %q", got)
@@ -2389,7 +2391,9 @@ func TestUnloadSupervisorServiceUsesIsolatedUnitWhenPresent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	unloadSupervisorService()
+	if err := unloadSupervisorService(); err != nil {
+		t.Fatal(err)
+	}
 
 	got := strings.TrimSpace(readCommandLog(t, logFile))
 	if !strings.Contains(got, "--user stop "+supervisorSystemdServiceName()) {
@@ -2418,11 +2422,100 @@ func TestUnloadSupervisorServiceStopsMatchingLegacyDefaultUnitForIsolatedGCHome(
 		t.Fatal(err)
 	}
 
-	unloadSupervisorService()
+	if err := unloadSupervisorService(); err != nil {
+		t.Fatal(err)
+	}
 
 	got := strings.TrimSpace(readCommandLog(t, logFile))
 	if !strings.Contains(got, "--user stop "+defaultSupervisorSystemdUnit) {
 		t.Fatalf("systemctl log = %q, want legacy default unit stop", got)
+	}
+}
+
+func TestUnloadSupervisorServiceDarwinUnloadsAndDisablesCurrentService(t *testing.T) {
+	if goruntime.GOOS != "darwin" {
+		t.Skip("launchd path only applies on darwin")
+	}
+	homeDir := t.TempDir()
+	gcHome := filepath.Join(t.TempDir(), "isolated-home")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", gcHome)
+
+	path := supervisorLaunchdPlistPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("<plist/>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	oldRun := supervisorLaunchctlRun
+	var calls []string
+	supervisorLaunchctlRun = func(args ...string) error {
+		calls = append(calls, strings.Join(args, " "))
+		return nil
+	}
+	t.Cleanup(func() { supervisorLaunchctlRun = oldRun })
+
+	if err := unloadSupervisorService(); err != nil {
+		t.Fatalf("unloadSupervisorService returned error: %v", err)
+	}
+
+	target := supervisorLaunchdServiceTarget(supervisorLaunchdLabel())
+	for _, want := range []string{
+		"unload " + path,
+		"disable " + target,
+	} {
+		if !slices.Contains(calls, want) {
+			t.Fatalf("launchctl calls = %v, want %q", calls, want)
+		}
+	}
+}
+
+func TestUnloadSupervisorServiceDarwinReturnsLaunchctlFailures(t *testing.T) {
+	if goruntime.GOOS != "darwin" {
+		t.Skip("launchd path only applies on darwin")
+	}
+	homeDir := t.TempDir()
+	gcHome := filepath.Join(t.TempDir(), "isolated-home")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", gcHome)
+
+	path := supervisorLaunchdPlistPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("<plist/>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	oldRun := supervisorLaunchctlRun
+	var calls []string
+	supervisorLaunchctlRun = func(args ...string) error {
+		calls = append(calls, strings.Join(args, " "))
+		switch args[0] {
+		case "unload":
+			return errors.New("unload denied")
+		case "disable":
+			return errors.New("disable denied")
+		default:
+			return nil
+		}
+	}
+	t.Cleanup(func() { supervisorLaunchctlRun = oldRun })
+
+	err := unloadSupervisorService()
+	if err == nil {
+		t.Fatal("unloadSupervisorService returned nil, want launchctl failure")
+	}
+	for _, want := range []string{"launchctl unload", "unload denied", "launchctl disable", "disable denied"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want it to contain %q", err.Error(), want)
+		}
+	}
+	target := supervisorLaunchdServiceTarget(supervisorLaunchdLabel())
+	if !slices.Contains(calls, "disable "+target) {
+		t.Fatalf("launchctl calls = %v, want disable attempted after unload failure", calls)
 	}
 }
 
@@ -5712,6 +5805,108 @@ func TestStopSupervisorWithWaitPropagatesDoneErr(t *testing.T) {
 	}
 	if strings.Contains(stdout.String(), "Supervisor stopped.") {
 		t.Fatalf("stdout unexpectedly contains 'Supervisor stopped.' — shutdown reported errors")
+	}
+}
+
+func TestStopSupervisorWithWaitFailsWhenPlatformServiceDoesNotStop(t *testing.T) {
+	gcHome := shortTempDir(t, "gc-home-")
+	runtimeDir := shortTempDir(t, "gc-run-")
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+
+	oldUnload := unloadSupervisorServiceHook
+	unloadSupervisorServiceHook = func() error {
+		return errors.New("launchd job is still loaded")
+	}
+	t.Cleanup(func() { unloadSupervisorServiceHook = oldUnload })
+
+	var stopped atomic.Bool
+	sockPath := filepath.Join(gcHome, "supervisor.sock")
+	startTestSupervisorSocket(t, sockPath, func(cmd string) string {
+		switch cmd {
+		case "ping":
+			if stopped.Load() {
+				return ""
+			}
+			return "4242\n"
+		case "stop":
+			stopped.Store(true)
+			return "ok\ndone:ok\n"
+		}
+		return ""
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := stopSupervisorWithWait(&stdout, &stderr, true, 2*time.Second)
+
+	if code != 1 {
+		t.Fatalf("stopSupervisorWithWait code = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "platform service did not stop durably") || !strings.Contains(stderr.String(), "launchd job is still loaded") {
+		t.Fatalf("stderr = %q, want durable platform-service failure", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Supervisor stopped.") {
+		t.Fatalf("stdout unexpectedly contains 'Supervisor stopped.' when platform service teardown failed")
+	}
+}
+
+func TestStopSupervisorWithWaitFailsWhenLaunchdUnloadFails(t *testing.T) {
+	if goruntime.GOOS != "darwin" {
+		t.Skip("launchd path only applies on darwin")
+	}
+	homeDir := t.TempDir()
+	gcHome := shortTempDir(t, "gc-home-")
+	runtimeDir := shortTempDir(t, "gc-run-")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+
+	plistPath := supervisorLaunchdPlistPath()
+	if err := os.MkdirAll(filepath.Dir(plistPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(plistPath, []byte("<plist/>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	oldRun := supervisorLaunchctlRun
+	var calls []string
+	supervisorLaunchctlRun = func(args ...string) error {
+		calls = append(calls, strings.Join(args, " "))
+		if len(args) > 0 && args[0] == "unload" {
+			return errors.New("launchd unload denied")
+		}
+		return nil
+	}
+	t.Cleanup(func() { supervisorLaunchctlRun = oldRun })
+
+	var stopped atomic.Bool
+	sockPath := filepath.Join(gcHome, "supervisor.sock")
+	startTestSupervisorSocket(t, sockPath, func(cmd string) string {
+		switch cmd {
+		case "ping":
+			if stopped.Load() {
+				return ""
+			}
+			return "4242\n"
+		case "stop":
+			stopped.Store(true)
+			return "ok\ndone:ok\n"
+		}
+		return ""
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := stopSupervisorWithWait(&stdout, &stderr, true, 2*time.Second)
+
+	if code != 1 {
+		t.Fatalf("stopSupervisorWithWait code = %d, want 1; stdout=%q stderr=%q launchctlCalls=%v", code, stdout.String(), stderr.String(), calls)
+	}
+	if !slices.Contains(calls, "unload "+plistPath) {
+		t.Fatalf("launchctl calls = %v, want unload of %s", calls, plistPath)
+	}
+	if strings.Contains(stdout.String(), "Supervisor stopped.") {
+		t.Fatalf("stdout unexpectedly contains success when launchd unload failed: %q", stdout.String())
 	}
 }
 

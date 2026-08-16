@@ -37,6 +37,7 @@ var (
 	ensureSupervisorRunningHook              = ensureSupervisorRunning
 	reloadSupervisorHook                     = reloadSupervisor
 	supervisorAliveHook                      = supervisorAlive
+	unloadSupervisorServiceHook              = unloadSupervisorService
 	supervisorReadyTimeout                   = 15 * time.Second
 	supervisorReadyPollInterval              = 100 * time.Millisecond
 	supervisorSystemdWarmRefreshStopTimeout  = 5 * time.Second
@@ -758,21 +759,36 @@ func waitForSupervisorReady(stderr io.Writer) int {
 // the platform unit/plist is not installed — this keeps unit tests that
 // invoke the stop helper hermetic on machines where the service has
 // never been registered.
-func unloadSupervisorService() {
+func unloadSupervisorService() error {
+	var errs []error
 	switch goruntime.GOOS {
 	case "darwin":
 		path := supervisorLaunchdPlistPath()
-		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
-			_ = supervisorLaunchctlRun("unload", path)
+		if _, err := os.Stat(path); err == nil {
+			if err := supervisorLaunchctlRun("unload", path); err != nil {
+				errs = append(errs, fmt.Errorf("launchctl unload %s: %w", path, err))
+			}
+			target := supervisorLaunchdServiceTarget(supervisorLaunchdLabel())
+			if err := supervisorLaunchctlRun("disable", target); err != nil {
+				errs = append(errs, fmt.Errorf("launchctl disable %s: %w", target, err))
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("stat launchd plist %s: %w", path, err))
 		}
 		_ = unloadLegacySupervisorLaunchd(false)
 	case "linux":
 		service := supervisorSystemdServiceName()
-		if _, err := os.Stat(supervisorSystemdServicePath()); !errors.Is(err, os.ErrNotExist) {
-			_ = supervisorSystemctlRun("--user", "stop", service)
+		path := supervisorSystemdServicePath()
+		if _, err := os.Stat(path); err == nil {
+			if err := supervisorSystemctlRun("--user", "stop", service); err != nil {
+				errs = append(errs, fmt.Errorf("systemctl --user stop %s: %w", service, err))
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("stat systemd unit %s: %w", path, err))
 		}
 		_ = unloadLegacySupervisorSystemd(false)
 	}
+	return errors.Join(errs...)
 }
 
 func newSupervisorLogsCmd(stdout, stderr io.Writer) *cobra.Command {

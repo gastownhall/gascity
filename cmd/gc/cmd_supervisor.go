@@ -841,8 +841,12 @@ func stopSupervisorViaSocketJSON(stdout, stderr io.Writer, wait bool, waitTimeou
 	if !jsonOut {
 		fmt.Fprintln(stdout, "Supervisor stopping...") //nolint:errcheck
 	}
-	unloadSupervisorService()
+	serviceErr := unloadSupervisorServiceHook()
 	if !wait {
+		if serviceErr != nil {
+			fmt.Fprintf(stderr, "gc supervisor stop: platform service did not stop durably: %v\n", serviceErr) //nolint:errcheck
+			return 1
+		}
 		if jsonOut {
 			return writeSupervisorStopSuccess(stdout, stderr, wait)
 		}
@@ -867,6 +871,10 @@ func stopSupervisorViaSocketJSON(stdout, stderr io.Writer, wait bool, waitTimeou
 			// budget — the server already told us shutdown finished.
 			if err := waitForSupervisorExitUntil(sockPath, time.Now().Add(5*time.Second)); err != nil {
 				fmt.Fprintf(stderr, "gc supervisor stop: %v\n", err) //nolint:errcheck
+				return 1
+			}
+			if serviceErr != nil {
+				fmt.Fprintf(stderr, "gc supervisor stop: platform service did not stop durably: %v\n", serviceErr) //nolint:errcheck
 				return 1
 			}
 			if jsonOut {
@@ -897,6 +905,10 @@ func stopSupervisorViaSocketJSON(stdout, stderr io.Writer, wait bool, waitTimeou
 
 	if err := waitForSupervisorExitUntil(sockPath, deadline); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor stop: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	if serviceErr != nil {
+		fmt.Fprintf(stderr, "gc supervisor stop: platform service did not stop durably: %v\n", serviceErr) //nolint:errcheck
 		return 1
 	}
 	if jsonOut {
