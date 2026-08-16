@@ -39,7 +39,15 @@ func TestPoolSessionCreate_FailedRetriesAddressOneRuntimeName(t *testing.T) {
 	seen := map[string]struct{}{}
 	for attempt := 1; attempt <= 5; attempt++ {
 		now := time.Date(2026, 8, 15, 0, 0, attempt, 0, time.UTC)
-		info, err := createPoolSessionBeadWithAlias(store, poolChurnTemplate, nil, nil, now, identity, "")
+		// A fresh tick snapshot, loaded before the previous attempt's rollback
+		// is visible to it — the production shape, and the one that catches a
+		// fix whose retry stalls on its own dead predecessor.
+		open, err := loadSessionBeads(store)
+		if err != nil {
+			t.Fatalf("attempt %d: loadSessionBeads: %v", attempt, err)
+		}
+		snapshot := newSessionBeadSnapshot(open)
+		info, err := createPoolSessionBeadWithAlias(store, poolChurnTemplate, nil, snapshot, now, identity, "")
 		if err != nil {
 			t.Fatalf("attempt %d: createPoolSessionBeadWithAlias: %v", attempt, err)
 		}

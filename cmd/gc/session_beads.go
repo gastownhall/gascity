@@ -1908,7 +1908,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 					// bead-ID name is a fresh runtime box per attempt, which is
 					// the ga-vcjr9 leak. Same derivation as the planner's
 					// create path (derivePoolSessionName).
-					createdSessionName = poolIdentitySessionName(agentName, qualifiedTemplate)
+					createdSessionName = poolRuntimeSessionName(cfg, agentName, qualifiedTemplate)
 					if err := sessFront.SetMarker(newBead.ID, "session_name", createdSessionName); err != nil {
 						finalizeErr = err
 						fmt.Fprintf(stderr, "session beads: setting pool session_name for %s: %v\n", agentName, err) //nolint:errcheck

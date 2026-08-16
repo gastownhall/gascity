@@ -11731,7 +11731,16 @@ func TestFailedCreateIsKnownState(t *testing.T) {
 	}
 }
 
-func TestReconcileSessionBeads_BuildDesiredStateSkipsFailedCreatePoolSession(t *testing.T) {
+// TestReconcileSessionBeads_FailedCreatePoolSlotIsReplacedUnderTheSameRuntimeName
+// pins the retry shape ga-vcjr9 turned into a pod leak. A failed create no
+// longer frees its slot by handing the replacement a NEW runtime name — the
+// name is a pure function of the slot identity, so the replacement addresses
+// the same box. That makes the pending-create lease load-bearing: while the
+// failed bead is still open it holds the identity, and the pool waits one tick
+// rather than running two beads under one name. Once the lease expires and the
+// reconciler closes the bead, the next tick allocates a fresh bead under the
+// same runtime name.
+func TestReconcileSessionBeads_FailedCreatePoolSlotIsReplacedUnderTheSameRuntimeName(t *testing.T) {
 	cases := []struct {
 		name             string
 		startedAt        time.Time
@@ -11785,25 +11794,12 @@ func TestReconcileSessionBeads_BuildDesiredStateSkipsFailedCreatePoolSession(t *
 			if err != nil {
 				t.Fatalf("Create failed-create bead: %v", err)
 			}
+			runtimeName := failedBead.Metadata["session_name"]
 
 			var stdout, stderr bytes.Buffer
-			dsResult := buildDesiredState(cfg.EffectiveCityName(), t.TempDir(), clk.Now().UTC(), cfg, sp, store, &stderr)
-			if _, ok := dsResult.State[failedBead.Metadata["session_name"]]; ok {
-				t.Fatalf("desired state reused failed-create bead %s; state=%#v", failedBead.ID, dsResult.State)
-			}
-
-			var fresh TemplateParams
-			for _, tp := range dsResult.State {
-				if tp.TemplateName == "worker" {
-					fresh = tp
-					break
-				}
-			}
-			if fresh.SessionName == "" {
-				t.Fatalf("desired state did not allocate a fresh worker session; state=%#v stderr:\n%s", dsResult.State, stderr.String())
-			}
-			if fresh.SessionName == failedBead.Metadata["session_name"] {
-				t.Fatalf("fresh session name = %q, want different from failed-create bead", fresh.SessionName)
+			firstTick := buildDesiredState(cfg.EffectiveCityName(), t.TempDir(), clk.Now().UTC(), cfg, sp, store, &stderr)
+			if len(firstTick.State) != 0 {
+				t.Fatalf("open failed-create lease must hold its identity, but the first tick planned %#v; stderr:\n%s", firstTick.State, stderr.String())
 			}
 
 			sessions, err := loadSessionBeads(store)
@@ -11811,23 +11807,20 @@ func TestReconcileSessionBeads_BuildDesiredStateSkipsFailedCreatePoolSession(t *
 				t.Fatalf("loadSessionBeads: %v", err)
 			}
 			cfgNames := configuredSessionNames(cfg, cfg.EffectiveCityName(), store)
-			poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, dsResult.AssignedWorkBeads, sessionInfosFromBeads(sessions), dsResult.ScaleCheckCounts))
+			poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, firstTick.AssignedWorkBeads, sessionInfosFromBeads(sessions), firstTick.ScaleCheckCounts))
 			if poolDesired == nil {
 				poolDesired = make(map[string]int)
 			}
-			mergeNamedSessionDemand(poolDesired, dsResult.NamedSessionDemand, cfg)
+			mergeNamedSessionDemand(poolDesired, firstTick.NamedSessionDemand, cfg)
 
-			woken := reconcileSessionBeads(
-				context.Background(), sessions, dsResult.State, cfgNames,
-				cfg, sp, store, nil, dsResult.AssignedWorkBeads, nil, newDrainTracker(), poolDesired,
-				dsResult.StoreQueryPartial, nil, cfg.EffectiveCityName(),
+			reconcileSessionBeads(
+				context.Background(), sessions, firstTick.State, cfgNames,
+				cfg, sp, store, nil, firstTick.AssignedWorkBeads, nil, newDrainTracker(), poolDesired,
+				firstTick.StoreQueryPartial, nil, cfg.EffectiveCityName(),
 				nil, clk, events.Discard, 0, 0, &stdout, &stderr,
 			)
-			if woken != 1 {
-				t.Fatalf("woken = %d, want 1 for fresh replacement session; stdout:\n%s\nstderr:\n%s", woken, stdout.String(), stderr.String())
-			}
-			if !sp.IsRunning(fresh.SessionName) {
-				t.Fatalf("fresh session %q is not running after reconcile; stdout:\n%s\nstderr:\n%s", fresh.SessionName, stdout.String(), stderr.String())
+			if sp.IsRunning(runtimeName) {
+				t.Fatalf("reconcile started %q for a failed-create bead", runtimeName)
 			}
 
 			gotFailed, err := store.Get(failedBead.ID)
@@ -11840,13 +11833,26 @@ func TestReconcileSessionBeads_BuildDesiredStateSkipsFailedCreatePoolSession(t *
 			if gotFailed.Status == "open" && gotFailed.Metadata["state"] != string(sessionpkg.StateFailedCreate) {
 				t.Fatalf("open failed-create bead state = %q, want %q", gotFailed.Metadata["state"], sessionpkg.StateFailedCreate)
 			}
+
+			var secondTickStderr bytes.Buffer
+			secondTick := buildDesiredState(cfg.EffectiveCityName(), t.TempDir(), clk.Now().UTC(), cfg, sp, store, &secondTickStderr)
+			tp, planned := secondTick.State[runtimeName]
 			if gotFailed.Status == "open" {
-				var secondTickStderr bytes.Buffer
-				secondTick := buildDesiredState(cfg.EffectiveCityName(), t.TempDir(), clk.Now().UTC(), cfg, sp, store, &secondTickStderr)
-				if _, ok := secondTick.State[failedBead.Metadata["session_name"]]; ok {
-					t.Fatalf("second tick reused failed-create bead %s; state=%#v stderr:\n%s", failedBead.ID, secondTick.State, secondTickStderr.String())
+				if planned {
+					t.Fatalf("second tick planned %q while the failed-create lease is still open; stderr:\n%s", runtimeName, secondTickStderr.String())
+				}
+			} else {
+				if !planned {
+					t.Fatalf("second tick did not replace the closed failed-create slot under %q; state=%#v stderr:\n%s", runtimeName, secondTick.State, secondTickStderr.String())
+				}
+				if got := tp.Env["GC_SESSION_ID"]; got == failedBead.ID {
+					t.Fatalf("replacement reused the failed-create bead %s; a fresh bead must back the reused runtime name", failedBead.ID)
+				}
+				if tp.SessionName != runtimeName {
+					t.Fatalf("replacement session name = %q, want the slot's stable runtime name %q", tp.SessionName, runtimeName)
 				}
 			}
+
 			if strings.Contains(stderr.String(), "unknown state") {
 				t.Errorf("reconciler logged unknown state for failed-create bead: %s", stderr.String())
 			}

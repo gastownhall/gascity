@@ -4351,13 +4351,21 @@ func TestControlDispatcherTickRepairsRigRouteAndRestartsRuntimeMissingDispatcher
 	// materializing its replacement, so allow its bounded multi-tick convergence
 	// path without relying on the targeted dispatcher signal. Wait after each
 	// pass so the next tick observes committed async-start state instead of racing
-	// four reconciles ahead of their completion.
+	// several reconciles ahead of their completion.
+	//
+	// The replacement's runtime name is the dead session's name — it is derived
+	// from the dispatcher identity, not from a bead ID (ga-vcjr9) — so the retire
+	// must commit before the create can claim it, and the create before the
+	// start. The main ticks drive retire + re-materialize; the targeted
+	// dispatcher signal then starts the replacement the same way it started the
+	// original above.
 	for tick := range 4 {
 		runMainTick()
 		if !cr.waitForAsyncStarts() {
 			t.Fatalf("replacement async starts did not settle after recovery tick %d", tick+1)
 		}
 	}
+	cr.controlDispatcherTick(context.Background())
 	recoveryDeadline := time.NewTimer(testutil.GoroutineRaceTimeout)
 	recoveryTicker := time.NewTicker(10 * time.Millisecond)
 	defer recoveryDeadline.Stop()

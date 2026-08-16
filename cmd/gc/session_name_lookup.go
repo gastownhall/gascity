@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"log"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,6 +23,12 @@ const poolManagedMetadataKey = "pool_managed"
 // a fresh runtime identity, because minting a fresh name per attempt is what
 // leaks a sandbox box per attempt (ga-vcjr9).
 var errPoolSessionNameUnavailable = errors.New("pool session name unavailable")
+
+// poolRuntimeNameSuffix separates a pool instance's runtime name from the
+// runtime name config reserves for a configured named session built on the same
+// agent. Both identities are the agent's; only one of them may own the bare
+// name, and config's claim wins.
+const poolRuntimeNameSuffix = "-pool"
 
 type explicitBeadIDStore interface {
 	IDPrefix() string
@@ -330,7 +337,7 @@ func derivePoolSessionName(store beads.Store, cfg *config.City, template string,
 	sessionName := resolvedTmuxAlias
 	switch {
 	case sessionName == "":
-		sessionName = poolIdentitySessionName(identity.AgentName, template)
+		sessionName = poolRuntimeSessionName(cfg, identity.AgentName, template)
 	case identity.Slot > 1:
 		// Slot 1 keeps the bare alias; higher slots carry their slot number so
 		// a multi-instance pool sharing one configured alias still maps each
@@ -344,7 +351,18 @@ func derivePoolSessionName(store beads.Store, cfg *config.City, template string,
 		if errors.Is(err, sessionpkg.ErrSessionNameExists) {
 			return "", fmt.Errorf("%w: template %q identity %q wants %q: %w", errPoolSessionNameUnavailable, template, identity.AgentName, sessionName, err)
 		}
-		return "", fmt.Errorf("checking pool session_name for template %q: %w", template, err)
+		if resolvedTmuxAlias != "" {
+			return "", fmt.Errorf("checking pool session_name for template %q: %w", template, err)
+		}
+		// The reservation scan could not answer — a degraded store, not a
+		// collision. Proceed on the identity-derived name: unlike the bead-ID
+		// name it replaced, it is idempotent per pool slot, so an unverified
+		// claim addresses the box this slot already owns instead of
+		// provisioning another one. Refusing would stall every unaliased pool
+		// create for as long as the store is unhappy. A resolved tmux_alias is
+		// a name the operator chose and may be shared, so that lane keeps its
+		// fail-closed behavior.
+		log.Printf("pool session_name check for template %q could not answer; proceeding on identity-derived %q: %v", template, sessionName, err)
 	}
 	return sessionName, nil
 }
@@ -362,6 +380,41 @@ func ensurePoolSessionNameAvailable(store beads.Store, cfg *config.City, snapsho
 	return sessionpkg.EnsureSessionNameAvailableWithConfigForOwner(store, cfg, name, "", selfOwner)
 }
 
+// poolRuntimeSessionName is the runtime session name for a pool instance with
+// no configured tmux_alias. It is poolIdentitySessionName, except that a pool
+// instance of an agent that is ALSO a configured named session's template
+// shares that agent's identity and would otherwise land on the name config
+// reserves for the named session. The pool is a different runtime box, so it
+// steps aside onto a distinct name — still identity-derived, still free of the
+// bead ID.
+func poolRuntimeSessionName(cfg *config.City, identityName, template string) string {
+	name := poolIdentitySessionName(identityName, template)
+	if configuredNamedSessionReservesRuntimeName(cfg, name) {
+		name += poolRuntimeNameSuffix
+	}
+	return name
+}
+
+// configuredNamedSessionReservesRuntimeName reports whether name is the runtime
+// session name config reserves for some configured named session. It mirrors
+// the reservation loop in session.ensureConfiguredSessionNameAvailable so the
+// pool can step aside before that check rejects it.
+func configuredNamedSessionReservesRuntimeName(cfg *config.City, name string) bool {
+	if cfg == nil || strings.TrimSpace(name) == "" {
+		return false
+	}
+	for _, named := range cfg.NamedSessions {
+		reserved := strings.TrimSpace(named.QualifiedName())
+		if reserved == "" {
+			continue
+		}
+		if config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, reserved) == name {
+			return true
+		}
+	}
+	return false
+}
+
 func validateResolvedPoolTmuxAlias(template, resolvedTmuxAlias string) (string, error) {
 	resolvedTmuxAlias = strings.TrimSpace(resolvedTmuxAlias)
 	if resolvedTmuxAlias == "" {
@@ -376,6 +429,13 @@ func validateResolvedPoolTmuxAlias(template, resolvedTmuxAlias string) (string, 
 
 // openSessionNameTaken reports whether any open session bead in the snapshot
 // already advertises name as its session_name.
+//
+// An OPEN bead holds its name even when its state is failed_create: the
+// pending-create lease has not expired, the desired-state map is keyed by
+// session name, and handing the name out twice collapses the two beads onto one
+// entry. The rollback closes the bead, and a closed one is not in this snapshot,
+// so the retry the rollback exists to enable gets the name back on the next
+// tick.
 func openSessionNameTaken(snapshot *sessionBeadSnapshot, name string) bool {
 	if snapshot == nil || strings.TrimSpace(name) == "" {
 		return false
