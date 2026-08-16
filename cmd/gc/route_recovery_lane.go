@@ -251,6 +251,7 @@ type routeRecoveryLane struct {
 
 	interval time.Duration
 	retry    time.Duration
+	poll     time.Duration
 }
 
 func newRouteRecoveryLane() *routeRecoveryLane {
@@ -260,6 +261,7 @@ func newRouteRecoveryLane() *routeRecoveryLane {
 		restores:                   map[string]int{},
 		interval:                   routeRecoveryBackstopInterval,
 		retry:                      routeRecoveryBackstopRetryInterval,
+		poll:                       backstopPollInterval,
 		// Nothing has scanned yet, so the first thing this lane does is scan.
 		forced:       true,
 		forcedReason: backstopReasonStartup,
@@ -349,6 +351,19 @@ func (l *routeRecoveryLane) backstopDue(now time.Time) (string, bool) {
 		return backstopReasonCadence, true
 	}
 	return "", false
+}
+
+// pollEvery is how often the background loop asks whether the scan is due. It is
+// a lane field rather than a bare const read so a test can drive the REAL loop
+// and prove it re-arms past its startup pass, instead of asserting on backstopDue
+// in isolation and hoping the loop calls it.
+func (l *routeRecoveryLane) pollEvery() time.Duration {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.poll <= 0 {
+		return backstopPollInterval
+	}
+	return l.poll
 }
 
 // lastBackstop reports when the authoritative scan last ran and why it was due,
@@ -465,17 +480,17 @@ const (
 	reconcilePlane
 )
 
-// routeRecoveryLeg is one plan leg the lane may repair through, with the label
-// the operator log has always spelled it with.
-type routeRecoveryLeg struct {
+// planeLeg is one plan leg a lane may repair through, with the label the
+// operator log has always spelled it with.
+type planeLeg struct {
 	label string
 	store beads.Store
 }
 
-// routeRecoveryLegLabel spells a plan leg the way the pre-lane log line did:
+// planeLegLabel spells a plan leg the way the pre-lane log line did:
 // "city" for the work ledger, "rig <name>" for a rig, and the class ref itself
 // for a binding.
-func routeRecoveryLegLabel(ref storeref.StoreRef) string {
+func planeLegLabel(ref storeref.StoreRef) string {
 	if storeref.IsClassRef(string(ref)) {
 		return string(ref)
 	}
@@ -485,8 +500,10 @@ func routeRecoveryLegLabel(ref storeref.StoreRef) string {
 	return "city"
 }
 
-// walkRouteRecoveryLegs runs visit over the legs THIS PLANE may read, in the
-// resolver's order and under the resolver's per-leg error policy.
+// walkPlaneLegs runs visit over the legs THIS PLANE may read, in the resolver's
+// order and under the resolver's per-leg error policy. Every tick lane that
+// repairs routed work walks its plan through here, so the invariant below has
+// exactly one implementation.
 //
 // # Which legs each plane gets, and why the split is here rather than in Plan()
 //
@@ -521,13 +538,13 @@ func routeRecoveryLegLabel(ref storeref.StoreRef) string {
 // surface this slice was told not to grow. TODO(ga-l7jdg/ga-qdt5y): move this
 // refusal into Plan() when that descriptor lands, so a runtime-plane caller
 // cannot even be HANDED a ledger leg.
-func walkRouteRecoveryLegs(plan storeref.ResolvedPlan, plane storePlane, visit func(routeRecoveryLeg) error) (partial bool, err error) {
+func walkPlaneLegs(plan storeref.ResolvedPlan, plane storePlane, visit func(planeLeg) error) (partial bool, err error) {
 	bindingOnly := plane == runtimePlane && plan.TouchesBinding()
 	result, walkErr := storeref.Walk(plan, func(leg storeref.Leg) (bool, error) {
 		if leg.Store == nil || !planeReadsLeg(plane, leg.Ref, bindingOnly) {
 			return false, nil
 		}
-		return false, visit(routeRecoveryLeg{label: routeRecoveryLegLabel(leg.Ref), store: leg.Store})
+		return false, visit(planeLeg{label: planeLegLabel(leg.Ref), store: leg.Store})
 	})
 	return result.Partial, walkErr
 }
@@ -564,9 +581,9 @@ func (l *routeRecoveryLane) deltaPass(plan storeref.ResolvedPlan, candidates []s
 	}
 	var errs []error
 	resolved := make(map[string]struct{}, len(candidates))
-	partial, walkErr := walkRouteRecoveryLegs(plan, runtimePlane, func(leg routeRecoveryLeg) error {
+	partial, walkErr := walkPlaneLegs(plan, runtimePlane, func(leg planeLeg) error {
 		report.legs++
-		rows, reads, err := liveRouteCandidates(leg.store, candidates)
+		rows, reads, err := liveOpenCandidates(leg.store, candidates)
 		report.legReads += reads
 		if err != nil {
 			return fmt.Errorf("re-reading %d route candidate(s): %w", len(candidates), err)
@@ -610,7 +627,7 @@ func (l *routeRecoveryLane) backstopPass(plan storeref.ResolvedPlan, reason stri
 func (l *routeRecoveryLane) backstopPassOnPlane(plan storeref.ResolvedPlan, reason string, plane storePlane) routeRecoveryReport {
 	report := routeRecoveryReport{lane: "backstop", reason: reason}
 	var errs []error
-	partial, walkErr := walkRouteRecoveryLegs(plan, plane, func(leg routeRecoveryLeg) error {
+	partial, walkErr := walkPlaneLegs(plan, plane, func(leg planeLeg) error {
 		report.legs++
 		legReport := l.backstopLeg(leg.store)
 		report.candidates += legReport.candidates
@@ -674,7 +691,7 @@ func (l *routeRecoveryLane) backstopLeg(store beads.Store) routeRecoveryReport {
 	if len(ids) == 0 {
 		return report
 	}
-	rows, reads, err := liveRouteCandidates(store, ids)
+	rows, reads, err := liveOpenCandidates(store, ids)
 	report.legReads += reads
 	if err != nil {
 		report.err = fmt.Errorf("re-reading %d route candidate(s): %w", len(ids), err)
@@ -719,8 +736,12 @@ func (l *routeRecoveryLane) backstopLeg(store beads.Store) routeRecoveryReport {
 	return report
 }
 
-// liveRouteCandidates re-reads the named beads through the store's
+// liveOpenCandidates re-reads the named beads through the store's
 // authoritative, cache-bypassing handle, still filtered to raw-open.
+//
+// Shared by every delta lane that re-verifies event-named candidates before
+// writing: a plain read can return a bead that predates a cross-process claim
+// (ga-bgu), and Live is also what makes Status:"open" mean open (gc-4zb).
 //
 // One query for the whole set is the point: the scan it replaces issued one Get
 // per candidate, and against a remote ledger a batch of 33 Gets is 33 sequential
@@ -728,7 +749,7 @@ func (l *routeRecoveryLane) backstopLeg(store beads.Store) routeRecoveryReport {
 // filtered List on a backend that cannot push the IN-list down.
 //
 // It returns the number of store round trips it made so the caller can budget.
-func liveRouteCandidates(store beads.Store, ids []string) ([]beads.Bead, int, error) {
+func liveOpenCandidates(store beads.Store, ids []string) ([]beads.Bead, int, error) {
 	if store == nil || len(ids) == 0 {
 		return nil, 0, nil
 	}

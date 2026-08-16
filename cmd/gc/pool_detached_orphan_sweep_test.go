@@ -386,10 +386,11 @@ func TestSweepDetachedHandoffOrphans_NilStore(t *testing.T) {
 }
 
 // A detached handoff orphan can live in a RIG store while its closing session
-// bead lives in the CITY store — the common case sweepDetachedHandoffOrphansAcross
-// Stores exists for. The route index must be built from the city store too, or
-// the rig-stored orphan's session bead is never found and it is never recovered.
-// Cross-store round-trip through the public entry point.
+// bead lives in the CITY store — the common cross-store case. The route must be
+// resolved from the session-class store, not from the work leg the orphan
+// happens to sit in, or the rig-stored orphan's session bead is never found and
+// it is never recovered. Cross-store round trip through the convergence lane,
+// which is the entry point that owns this case now.
 func TestSweepDetachedHandoffOrphansAcrossStores_RigOrphanCityStoredSession(t *testing.T) {
 	cityStore := beads.NewMemStore()
 	rigStore := beads.NewMemStore()
@@ -421,9 +422,16 @@ func TestSweepDetachedHandoffOrphansAcrossStores_RigOrphanCityStoredSession(t *t
 		t.Fatalf("create rig work bead: %v", err)
 	}
 
-	n := sweepDetachedHandoffOrphansAcrossStores(cityStore, map[string]beads.Store{"ga": rigStore}, "test", io.Discard)
-	if n != 1 {
-		t.Fatalf("restored=%d, want 1 (rig orphan recovered via city-stored session bead)", n)
+	cr := &CityRuntime{
+		cityName:            "city",
+		standaloneCityStore: cityStore,
+		standaloneRigStores: map[string]beads.Store{"ga": rigStore},
+		logPrefix:           "test",
+		stderr:              io.Discard,
+	}
+	report := cr.runDetachedOrphanBackstop(backstopReasonCadence)
+	if report.restored != 1 {
+		t.Fatalf("restored=%d (err=%v), want 1 (rig orphan recovered via city-stored session bead)", report.restored, report.err)
 	}
 
 	got, err := rigStore.Get(work.ID)
@@ -480,7 +488,8 @@ func TestSweepDetachedHandoffOrphans_SkipsBlockedCollapsedCandidate(t *testing.T
 		t.Fatalf("create session bead: %v", err)
 	}
 
-	restored, err := sweepDetachedHandoffOrphansWithRouteStore(store, routeStore)
+	result, err := sweepDetachedHandoffOrphansWithRouteStore(store, routeStore)
+	restored := result.restored
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
@@ -538,7 +547,8 @@ func TestSweepDetachedHandoffOrphans_SkipsRaceClaimedCandidate(t *testing.T) {
 		t.Fatalf("create session bead: %v", err)
 	}
 
-	restored, err := sweepDetachedHandoffOrphansWithRouteStore(store, routeStore)
+	result, err := sweepDetachedHandoffOrphansWithRouteStore(store, routeStore)
+	restored := result.restored
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}

@@ -766,7 +766,7 @@ func TestRouteRecoveryAgreesWithDemandAndSweepOnItsLegs(t *testing.T) {
 	visit := func(plane storePlane) []string {
 		t.Helper()
 		var seen []string
-		if _, walkErr := walkRouteRecoveryLegs(demand, plane, func(leg routeRecoveryLeg) error {
+		if _, walkErr := walkPlaneLegs(demand, plane, func(leg planeLeg) error {
 			seen = append(seen, leg.label)
 			return nil
 		}); walkErr != nil {

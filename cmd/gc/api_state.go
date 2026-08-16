@@ -97,6 +97,12 @@ type controllerState struct {
 	beadEventStartSeq      uint64
 	beadEventStartSeqOK    bool // false when LatestSeq errored at construction; 0+true = genuinely empty log
 
+	// completionsDeltaIndex is the tick delta pass's warm completion-fact
+	// idempotency record: loaded from the journal once, then kept current by the
+	// same journal feed that names the lane's roots. The off-tick convergence
+	// sweep holds its own inside its CompletionBackstop.
+	completionsDeltaIndex executionevent.CompletedFactIndex
+
 	// emergencyCh receives emergency.Record values from the gc emergency
 	// subsystem. startEmergencyEventRelay drains this channel and mirrors
 	// each record into the city event log as an emergency.signaled event.
@@ -560,6 +566,12 @@ func (cs *controllerState) reconcileExecutionCompletions() {
 // reconcileExecutionCompletionsDelta repairs completion facts for the roots the
 // journal named since the last pass. With no named roots it reads nothing at
 // all — neither the graph stores nor the journal — which is the steady tick.
+//
+// The idempotency record is kept WARM across ticks. Rebuilding it per pass was
+// a full O(retained-history) journal read on every tick that named a root, which
+// on maintainer-city is every tick: 69.7s of a 373s tick, paid to re-derive a
+// set that had not changed (ga-l7jdg). The index is owned by this method — the
+// tick goroutine is its only caller, and the off-tick sweep holds its own.
 func (cs *controllerState) reconcileExecutionCompletionsDelta(rootIDs []string) int {
 	if len(rootIDs) == 0 {
 		return 0
@@ -568,7 +580,7 @@ func (cs *controllerState) reconcileExecutionCompletionsDelta(rootIDs []string) 
 	if ep == nil {
 		return 0
 	}
-	return executionevent.ReconcileCompletedRoots(ep, graphStores, rootIDs, "execution-reconcile")
+	return cs.completionsDeltaIndex.ReconcileRoots(ep, graphStores, rootIDs, "execution-reconcile")
 }
 
 // completionReconcileInputs resolves the journal and the graph-store fan a

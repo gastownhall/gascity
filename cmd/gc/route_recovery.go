@@ -69,8 +69,13 @@ func (cr *CityRuntime) routeRecoveryEventProvider() events.Provider {
 // list: Plan(RoutedWork) is the answer to "which stores hold claimable/routed
 // work", which is precisely the surface a lost gc.routed_to makes a bead
 // invisible to. Which of those legs a given pass may READ is the plane's
-// business, and walkRouteRecoveryLegs owns it: the tick reads the infra/class
-// binding only, the off-tick convergence lane reads the ledger and the rigs.
+// business, and walkPlaneLegs owns it: the tick reads the infra/class binding
+// only, the off-tick convergence lane reads the ledger and the rigs.
+//
+// The detached-orphan lane resolves the SAME plan (detachedOrphanPlan). A bead
+// whose gc.routed_to was lost is invisible to pool demand for the same reason
+// whichever lane lost it, so a second derivation of "which stores hold routed
+// work" would be the split-store bug class rather than a second opinion.
 func (cr *CityRuntime) routeRecoveryPlan() (storeref.ResolvedPlan, error) {
 	cfg := cr.serviceConfigSnapshot()
 	topo := residencyTopologyForCity(cr.cityPath, cfg, cr.cityBeadStore(), cr.routeRecoveryRigStores(cfg))
@@ -191,34 +196,41 @@ func (cr *CityRuntime) recoverUnroutedWorkRoutesDelta() routeRecoveryReport {
 // feed that makes the tick's delta passes possible, and the background sweeps
 // that converge what the feed can miss.
 //
-// One feed, two lanes. A second watcher on the same journal would be a second
-// cursor to keep honest, and the gap semantics have to be identical anyway: an
-// event the tail missed is a gap for BOTH lanes.
+// One feed, three lanes plus the completion-fact index. A second watcher on the
+// same journal would be a second cursor to keep honest, and the gap semantics
+// have to be identical anyway: an event the tail missed is a gap for ALL of
+// them.
 //
 // The sweeps are minutes of sequential remote reads on a large city — together
-// 65% of a 360s tick before this slice — so they run off the tick's critical
-// path, the same shape as the bead-event watcher and the store-maintenance loop.
-// A nil provider leaves both lanes sweep-only, which the feed records by
-// declaring a gap.
+// 88% of a 373s tick before this slice and its predecessor — so they run off the
+// tick's critical path, the same shape as the bead-event watcher and the
+// store-maintenance loop. A nil provider leaves every lane sweep-only, which the
+// feed records by declaring a gap.
 func (cr *CityRuntime) startTickDeltaLanes(ctx context.Context, prov events.Provider) {
 	route := cr.routeRecoveryLaneOf()
 	completions := cr.completionsLaneOf()
+	orphans := cr.detachedOrphanLaneOf()
 	watchJournalForDeltaLanes(ctx, prov,
 		func() {
 			route.force(backstopReasonCursorGap)
 			completions.force()
+			orphans.force(backstopReasonCursorGap)
+			cr.invalidateCompletionFacts()
 		},
 		func(evt events.Event) {
 			route.observe(evt)
 			completions.observe(evt)
+			orphans.observe(evt)
+			cr.absorbCompletionFact(evt)
 		})
 	go cr.runRouteRecoveryBackstopLoop(ctx, route)
 	go cr.runCompletionsSweepLoop(ctx, completions)
+	go cr.runDetachedOrphanBackstopLoop(ctx, orphans)
 }
 
 // runRouteRecoveryBackstopLoop polls the route-recovery cadence off-tick.
 func (cr *CityRuntime) runRouteRecoveryBackstopLoop(ctx context.Context, lane *routeRecoveryLane) {
-	ticker := time.NewTicker(routeRecoveryBackstopPollInterval)
+	ticker := time.NewTicker(lane.pollEvery())
 	defer ticker.Stop()
 	for {
 		select {
@@ -232,10 +244,10 @@ func (cr *CityRuntime) runRouteRecoveryBackstopLoop(ctx context.Context, lane *r
 	}
 }
 
-// routeRecoveryBackstopPollInterval is how often the background lane asks
-// whether the scan is due. It bounds the latency between "something forced the
-// backstop" and the scan starting; it is not the scan's cadence.
-const routeRecoveryBackstopPollInterval = time.Minute
+// backstopPollInterval is how often a background convergence lane asks whether
+// its scan is due. It bounds the latency between "something forced the backstop"
+// and the scan starting; it is not any scan's cadence.
+const backstopPollInterval = time.Minute
 
 // logRouteRecovery emits the operator-facing lines. The restored line keeps its
 // pre-lane wording so an operator's grep still finds it.

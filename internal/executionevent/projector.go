@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -357,30 +358,125 @@ func ReconcileCompletedStores(recorder events.Provider, graphStores []beads.Grap
 	return (&CompletionBackstop{}).Pass(recorder, graphStores, actor).Emitted
 }
 
-// ReconcileCompletedRoots is the DELTA form of ReconcileCompletedStores: it
-// repairs completion facts for the named roots only.
+// ReconcileCompletedRoots is the DELTA form of ReconcileCompletedStores over a
+// COLD fact index: it repairs completion facts for the named roots only, and
+// pays the full journal read to build its idempotency record.
 //
-// The full pass walks every workflow root ever created, closed ones included,
-// against a corpus that only grows — 72.4s +/- 0.9s of a ~360s controller tick
-// on maintainer-city (ga-l7jdg). Only a root something happened to since the
-// last pass can have a stranded close, and the journal already names those: the
-// RunID of an execution.step_* fact, and the gc.root_bead_id of a bead.closed
-// step snapshot. The caller decodes them; this projects them.
+// It is the one-shot entry point. A caller on the tick holds a
+// [CompletedFactIndex] and calls [CompletedFactIndex.ReconcileRoots] instead, so
+// the journal read is paid once per process rather than once per pass.
+func ReconcileCompletedRoots(recorder events.Provider, graphStores []beads.GraphStore, rootIDs []string, actor string) int {
+	return (&CompletedFactIndex{}).ReconcileRoots(recorder, graphStores, rootIDs, actor)
+}
+
+// completedFactIndexGrowthCap bounds how far the set may grow BEYOND the size
+// its last journal load produced.
 //
-// With no named roots it reads NOTHING — not the stores, not the journal. That
-// is the steady tick, and it is the whole point: the journal read alone is
-// O(retained history).
+// The index holds one key per completion fact it has seen and a controller runs
+// for weeks, so unbounded it is a leak rather than a cache. The bound is on
+// GROWTH, not on absolute size, and that distinction is load-bearing: a city
+// whose journal already retains more facts than any absolute cap would rebuild
+// on every single pass, which is exactly the O(retained-history) read per tick
+// this type exists to delete. Rebuilding resets the baseline, so each rebuild
+// buys another cap's worth of headroom.
+//
+// A rebuild sees exactly what the retained journal holds — the same set every
+// pass saw before this index existed — so anything it forgets is at worst one
+// restated recovery fact, never a lost repair.
+const completedFactIndexGrowthCap = 50000
+
+// CompletedFactIndex is the journal-derived idempotency record for completion
+// facts, held ACROSS passes instead of rebuilt on each one.
+//
+// # Why it exists
+//
+// ReconcileCompletedRoots was written to read nothing on a steady tick, and it
+// does — but only when the journal names NO root. Maintainer-city names 1-2 on
+// every tick, so the pass cleared its early return and rebuilt this set from the
+// journal every time: 69.7s of a 373s tick, flat, and independent of how many
+// roots were named (ga-l7jdg). The cost is not the roots, it is the read behind
+// them — [events.Provider.List] gunzips and scans every retained archive, and no
+// seq filter avoids that on the active log.
+//
+// # How it stays warm
+//
+// Load once, then two feeds keep it current and neither of them reads:
+//
+//   - facts the pass itself records are added as it records them, exactly as the
+//     per-pass map already did, so one pass cannot repeat its own fact;
+//   - facts appended by anything else arrive through [CompletedFactIndex.Absorb],
+//     called from the journal feed the delta lane already tails. That feed IS the
+//     cursor: it delivers every event in seq order and calls its gap hook on every
+//     way it can stop being able to promise that.
+//
+// # What a gap means here
+//
+// [CompletedFactIndex.Invalidate] drops the set so the next pass reloads. It is
+// wired to the same gap hook that forces the convergence sweep, because a missed
+// fact has the same cause and the opposite cost: it does not strand a repair, it
+// risks a DUPLICATE recovery fact. Reloading is cheap insurance against that and
+// happens only when the feed says it cannot promise completeness.
+//
+// Rotation is deliberately not a gap. It only removes history from the read path,
+// so reloading on it would FORGET facts and start re-emitting them; the watcher
+// spans rotation and keeps delivering.
+//
+// # Ownership
+//
+// One index belongs to one lane, and the lock is what lets the journal feed write
+// to it from its own goroutine while the tick reads. It is held per key lookup,
+// never across a store read.
+type CompletedFactIndex struct {
+	mu     sync.Mutex
+	facts  map[completedFactKey]struct{}
+	loaded bool
+	// baseline is len(facts) as the last journal load left it. Growth past it by
+	// completedFactIndexGrowthCap forces a rebuild; see that const for why the
+	// bound is relative and not absolute.
+	baseline int
+}
+
+// Absorb records a completion fact the journal named, so the next pass does not
+// re-emit it. Events of any other type are ignored, and an index that has not
+// loaded yet ignores everything: its load reads the journal these events are in.
+func (idx *CompletedFactIndex) Absorb(event events.Event) {
+	if event.Type != events.ExecutionStepCompleted {
+		return
+	}
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	if !idx.loaded {
+		return
+	}
+	idx.facts[completedFactKeyFor(event)] = struct{}{}
+}
+
+// Invalidate drops the set so the next pass rebuilds it from the journal. Call
+// it when the event feed can no longer promise to name every fact.
+func (idx *CompletedFactIndex) Invalidate() {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	idx.facts = nil
+	idx.loaded = false
+	idx.baseline = 0
+}
+
+// ReconcileRoots repairs completion facts for the named roots, reusing this
+// index's warm idempotency record.
+//
+// With no named roots it reads NOTHING — not the stores, not the journal. That is
+// the steady tick. With roots named it reads the graph stores for those roots and
+// the journal not at all, because the feed has kept the record current.
 //
 // It is the delta half of a two-lane doctrine, never a replacement. A close can
-// exist with no event naming it — a controller can crash between the durable
-// step close and the best-effort append, and graph stores emit no bead.closed by
+// exist with no event naming it — a controller can crash between the durable step
+// close and the best-effort append, and graph stores emit no bead.closed by
 // design — so the full pass remains the convergence backstop.
-func ReconcileCompletedRoots(recorder events.Provider, graphStores []beads.GraphStore, rootIDs []string, actor string) int {
+func (idx *CompletedFactIndex) ReconcileRoots(recorder events.Provider, graphStores []beads.GraphStore, rootIDs []string, actor string) int {
 	if recorder == nil || len(rootIDs) == 0 {
 		return 0
 	}
-	completed, ok := loadCompletedFactIndex(recorder)
-	if !ok {
+	if !idx.warm(recorder) {
 		return 0
 	}
 	emitted := 0
@@ -399,9 +495,64 @@ func ReconcileCompletedRoots(recorder events.Provider, graphStores []beads.Graph
 			continue
 		}
 		sort.Slice(roots, func(i, j int) bool { return roots[i].ID < roots[j].ID })
-		emitted += reconcileRoots(recorder, graphStore, roots, completed, actor)
+		emitted += reconcileRoots(recorder, graphStore, roots, idx, actor)
 	}
 	return emitted
+}
+
+// warm loads the set from the journal when it is cold and reports whether the
+// index can be used. A journal that cannot be read reports false: emitting
+// without the record would duplicate recovery facts, and a later pass retries.
+func (idx *CompletedFactIndex) warm(recorder events.Provider) bool {
+	idx.mu.Lock()
+	if idx.loaded && len(idx.facts) <= idx.baseline+completedFactIndexGrowthCap {
+		idx.mu.Unlock()
+		return true
+	}
+	idx.mu.Unlock()
+
+	// Read outside the lock: this is the expensive call, and holding the lock
+	// across it would block the journal feed for the length of a full archive
+	// walk. A fact appended during the read can therefore miss both this read and
+	// the concurrent Absorb, and be re-emitted once as a duplicate recovery fact.
+	// That window is the pre-index behavior exactly — every pass read the journal
+	// and then decided — so it is not new, and the emitted fact is a correct
+	// restatement of a real close rather than a wrong one.
+	existing, err := completedFacts(recorder, events.Filter{Type: events.ExecutionStepCompleted})
+	if err != nil {
+		return false
+	}
+	facts := make(map[completedFactKey]struct{}, len(existing))
+	for _, event := range existing {
+		if event.Type == events.ExecutionStepCompleted {
+			facts[completedFactKeyFor(event)] = struct{}{}
+		}
+	}
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	idx.facts = facts
+	idx.baseline = len(facts)
+	idx.loaded = true
+	return true
+}
+
+// has reports whether the journal already carries this exact fact.
+func (idx *CompletedFactIndex) has(key completedFactKey) bool {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	_, exists := idx.facts[key]
+	return exists
+}
+
+// add records a fact this process just emitted.
+func (idx *CompletedFactIndex) add(key completedFactKey) {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	if idx.facts == nil {
+		idx.facts = map[completedFactKey]struct{}{}
+		idx.loaded = true
+	}
+	idx.facts[key] = struct{}{}
 }
 
 // CompletionBackstop is the chunked, resumable form of the full pass.
@@ -421,6 +572,10 @@ type CompletionBackstop struct {
 
 	storeIndex  int
 	afterRootID string
+	// index is this sweep's idempotency record, loaded once per SWEEP rather
+	// than once per chunk. Re-reading the whole journal per chunk would make the
+	// chunking that keeps the sweep bounded cost more than the sweep it bounds.
+	index CompletedFactIndex
 }
 
 // CompletionBackstopResult is one chunk's outcome.
@@ -445,8 +600,13 @@ func (b *CompletionBackstop) Pass(recorder events.Provider, graphStores []beads.
 		result.SweepComplete = true
 		return result
 	}
-	completed, ok := loadCompletedFactIndex(recorder)
-	if !ok {
+	if b.storeIndex == 0 && b.afterRootID == "" {
+		// A new sweep re-derives the record. Nothing feeds this index between
+		// sweeps, so a warm one would only know the facts it emitted itself and
+		// would re-emit everything the delta lane or the close path recorded.
+		b.index.Invalidate()
+	}
+	if !b.index.warm(recorder) {
 		return result
 	}
 	for b.storeIndex < len(graphStores) {
@@ -489,7 +649,7 @@ func (b *CompletionBackstop) Pass(recorder events.Provider, graphStores []beads.
 			}
 		}
 		chunk := remaining[:budget]
-		result.Emitted += reconcileRoots(recorder, graphStore, chunk, completed, actor)
+		result.Emitted += reconcileRoots(recorder, graphStore, chunk, &b.index, actor)
 		result.RootsVisited += len(chunk)
 		if len(chunk) > 0 {
 			b.afterRootID = chunk[len(chunk)-1].ID
@@ -506,9 +666,9 @@ func (b *CompletionBackstop) Pass(recorder events.Provider, graphStores []beads.
 }
 
 // reconcileRoots projects the closed steps of the supplied roots and records the
-// completion facts the journal is missing. completed is updated as it goes so
+// completion facts the journal is missing. The index is updated as it goes so
 // one pass cannot emit the same fact twice across stores.
-func reconcileRoots(recorder events.Recorder, graphStore beads.GraphStore, roots []beads.Bead, completed map[completedFactKey]struct{}, actor string) int {
+func reconcileRoots(recorder events.Recorder, graphStore beads.GraphStore, roots []beads.Bead, completed *CompletedFactIndex, actor string) int {
 	emitted := 0
 	for _, root := range roots {
 		if root.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindWorkflow ||
@@ -533,40 +693,22 @@ func reconcileRoots(recorder events.Recorder, graphStore beads.GraphStore, roots
 				continue
 			}
 			key := completedFactKeyFor(event)
-			if _, exists := completed[key]; exists {
+			if completed.has(key) {
 				continue
 			}
 			recorder.Record(event)
-			completed[key] = struct{}{}
+			completed.add(key)
 			emitted++
 		}
 	}
 	return emitted
 }
 
-// loadCompletedFactIndex reads the retained completion journal into the exact-fact
-// idempotency set. A journal that cannot be read reports !ok: emitting without it
-// would duplicate recovery facts, and a later pass can safely retry.
-func loadCompletedFactIndex(recorder events.Provider) (map[completedFactKey]struct{}, bool) {
-	existing, err := completedFacts(recorder)
-	if err != nil {
-		return nil, false
-	}
-	completed := make(map[completedFactKey]struct{}, len(existing))
-	for _, event := range existing {
-		if event.Type == events.ExecutionStepCompleted {
-			completed[completedFactKeyFor(event)] = struct{}{}
-		}
-	}
-	return completed, true
-}
-
-// completedFacts returns the retained completion journal, including a
+// completedFacts returns the matching completion journal, including a
 // FileRecorder segment that is temporarily awaiting archive compression. A
 // reconciliation pass must see that segment before deciding a close needs a
 // recovery fact; otherwise an event rotation can create a duplicate fact.
-func completedFacts(recorder events.Provider) ([]events.Event, error) {
-	filter := events.Filter{Type: events.ExecutionStepCompleted}
+func completedFacts(recorder events.Provider, filter events.Filter) ([]events.Event, error) {
 	if inFlight, ok := recorder.(events.InFlightProvider); ok {
 		return inFlight.ListInFlight(filter)
 	}

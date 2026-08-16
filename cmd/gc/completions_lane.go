@@ -93,17 +93,31 @@ type completionsLane struct {
 	sweepRoots     int
 
 	interval time.Duration
+	poll     time.Duration
 }
 
 func newCompletionsLane() *completionsLane {
 	return &completionsLane{
 		pending:  map[string]struct{}{},
 		interval: completionsBackstopInterval,
+		poll:     completionsBackstopChunkInterval,
 		// Nothing has converged yet, so the first thing this lane does is sweep —
 		// expressed by sweepRan being false rather than by pre-setting the forced
 		// latch. Both make the first pass due; only this one lets it report itself
 		// as a startup pass instead of as a cursor gap that never happened.
 	}
+}
+
+// pollEvery is how often the background loop asks whether a chunk is due. It is
+// a lane field rather than a bare const read so a test can drive the REAL loop
+// and prove it re-arms past its startup sweep.
+func (l *completionsLane) pollEvery() time.Duration {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.poll <= 0 {
+		return completionsBackstopChunkInterval
+	}
+	return l.poll
 }
 
 func (l *completionsLane) force() {
@@ -247,6 +261,30 @@ func (cr *CityRuntime) completionsLaneOf() *completionsLane {
 	return cr.completions
 }
 
+// absorbCompletionFact hands one journal event to the delta pass's idempotency
+// record, so a tick that names a root does not have to re-read the journal to
+// learn what the journal already carries. A runtime with no controller state has
+// no delta pass to keep warm.
+func (cr *CityRuntime) absorbCompletionFact(evt events.Event) {
+	if cr.cs == nil {
+		return
+	}
+	cr.cs.completionsDeltaIndex.Absorb(evt)
+}
+
+// invalidateCompletionFacts drops the delta pass's idempotency record so the
+// next pass rebuilds it from the journal. It shares the sweep's gap hook because
+// it is the same gap: a feed that can no longer promise to name every event can
+// no longer keep this record current either. The cost of being wrong here is a
+// DUPLICATE recovery fact rather than a stranded repair, and one journal read
+// after a gap is cheap insurance against it.
+func (cr *CityRuntime) invalidateCompletionFacts() {
+	if cr.cs == nil {
+		return
+	}
+	cr.cs.completionsDeltaIndex.Invalidate()
+}
+
 // runCompletionsSweepLoop drives the whole-corpus convergence sweep off-tick,
 // one bounded chunk at a time.
 //
@@ -260,7 +298,7 @@ func (cr *CityRuntime) runCompletionsSweepLoop(ctx context.Context, lane *comple
 		return
 	}
 	backstop := &executionevent.CompletionBackstop{ChunkSize: completionsBackstopChunk}
-	ticker := time.NewTicker(completionsBackstopChunkInterval)
+	ticker := time.NewTicker(lane.pollEvery())
 	defer ticker.Stop()
 	for {
 		select {
