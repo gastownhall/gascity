@@ -1034,6 +1034,8 @@ func reloadSupervisor(stdout, stderr io.Writer) int {
 	return reloadSupervisorJSON(stdout, stderr, false)
 }
 
+const supervisorReloadReconcileTimeoutMessage = "gc supervisor reload: reconcile did not finish before timeout"
+
 func reloadSupervisorJSON(stdout, stderr io.Writer, jsonOut bool) int {
 	sockPath, _ := runningSupervisorSocket()
 	if sockPath == "" {
@@ -1066,7 +1068,7 @@ func reloadSupervisorJSON(stdout, stderr io.Writer, jsonOut bool) int {
 		fmt.Fprintln(stderr, "gc supervisor reload: reconcile queue is busy; try again shortly") //nolint:errcheck
 		return 1
 	case "timeout":
-		fmt.Fprintln(stderr, "gc supervisor reload: reconcile did not finish before timeout") //nolint:errcheck
+		fmt.Fprintln(stderr, supervisorReloadReconcileTimeoutMessage) //nolint:errcheck
 		return 1
 	}
 	fmt.Fprintln(stderr, "gc supervisor reload: supervisor not responding (may be shutting down); try 'gc supervisor start'") //nolint:errcheck

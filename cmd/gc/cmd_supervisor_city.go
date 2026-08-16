@@ -411,25 +411,34 @@ func registerCityWithSupervisorNamed(cityPath, nameOverride string, stdout, stde
 		keepRegisteredCity(entry, stderr, commandName, "supervisor did not start")
 		return 1
 	}
-	if reloadSupervisorHook(io.Discard, io.Discard) != 0 {
-		// The supervisor may be a zombie from a recent "gc supervisor stop" —
-		// alive enough to accept connections but unable to process reload
-		// because its main loop has exited. Poll for it to finish dying,
-		// start a fresh supervisor, and retry.
-		deadline := time.Now().Add(10 * time.Second)
-		for supervisorAliveHook() != 0 && time.Now().Before(deadline) {
-			time.Sleep(250 * time.Millisecond)
-		}
-		if ensureSupervisorRunningHook(stdout, stderr) != 0 {
-			keepRegisteredCity(entry, stderr, commandName, "supervisor did not start after retry")
-			return 1
-		}
-		if reloadSupervisorHook(stdout, stderr) != 0 {
-			keepRegisteredCity(entry, stderr, commandName, "reconcile failed")
-			return 1
+	reloadTimedOut := false
+	if code, timedOut := reloadSupervisorForStart(io.Discard, io.Discard); code != 0 {
+		if timedOut {
+			reloadTimedOut = true
+		} else {
+			// The supervisor may be a zombie from a recent "gc supervisor stop" —
+			// alive enough to accept connections but unable to process reload
+			// because its main loop has exited. Poll for it to finish dying,
+			// start a fresh supervisor, and retry.
+			deadline := time.Now().Add(10 * time.Second)
+			for supervisorAliveHook() != 0 && time.Now().Before(deadline) {
+				time.Sleep(250 * time.Millisecond)
+			}
+			if ensureSupervisorRunningHook(stdout, stderr) != 0 {
+				keepRegisteredCity(entry, stderr, commandName, "supervisor did not start after retry")
+				return 1
+			}
+			code, timedOut = reloadSupervisorForStart(stdout, stderr)
+			if code != 0 {
+				if !timedOut {
+					keepRegisteredCity(entry, stderr, commandName, "reconcile failed")
+					return 1
+				}
+				reloadTimedOut = true
+			}
 		}
 	}
-	if supervisorAliveHook() != 0 {
+	if reloadTimedOut || supervisorAliveHook() != 0 {
 		if showProgress {
 			logInitProgress(stdout, 8, "Waiting for supervisor to start city")
 		} else if stdout != nil {
@@ -448,6 +457,16 @@ func registerCityWithSupervisorNamed(cityPath, nameOverride string, stdout, stde
 		}
 	}
 	return 0
+}
+
+func reloadSupervisorForStart(stdout, stderr io.Writer) (int, bool) {
+	var captured strings.Builder
+	reloadStderr := io.Writer(&captured)
+	if stderr != nil {
+		reloadStderr = io.MultiWriter(stderr, &captured)
+	}
+	code := reloadSupervisorHook(stdout, reloadStderr)
+	return code, strings.Contains(captured.String(), supervisorReloadReconcileTimeoutMessage)
 }
 
 // registerCityForAPI is the registry-write portion of async
