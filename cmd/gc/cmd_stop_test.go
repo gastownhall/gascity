@@ -740,6 +740,73 @@ func TestCmdStopJSONReportsUnregisteredTrueForSupervisorManagedCity(t *testing.T
 	}
 }
 
+// TestCmdStopJSONReportsUnregisteredTrueWhenSupervisorNotRunning closes the
+// remaining #4366 branch: a registered city whose supervisor is not alive
+// falls through to the ordinary loaded-config stop, so the unregister the
+// command just performed must still be reported. The sibling
+// TestCmdStopJSONReportsUnregisteredTrueForSupervisorManagedCity only covers
+// the alive-supervisor early return and never reaches this path, because it
+// stubs the alive hook to a live PID and writes an invalid city.toml. Here
+// the alive hook returns 0 and city.toml is valid, so cmdStopJSONSequence
+// runs stopLoadedCity.
+func TestCmdStopJSONReportsUnregisteredTrueWhenSupervisorNotRunning(t *testing.T) {
+	resetFlags(t)
+	gcHome := shortSocketTempDir(t, "gc-home-")
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityDir := shortSocketTempDir(t, "gc-stop-city-")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "unregistered-on-stop"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Session:   config.SessionConfig{Provider: "subprocess"},
+	}
+	data, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg := registryAt(t, gcHome)
+	if err := reg.Register(cityDir, "unregistered-on-stop"); err != nil {
+		t.Fatal(err)
+	}
+
+	withSupervisorTestHooks(
+		t,
+		func(_, _ io.Writer) int { return 0 },
+		func(_, _ io.Writer) int { return 0 },
+		func() int { return 0 },
+		func(string) (bool, string, bool) { return false, "", true },
+		20*time.Millisecond,
+		time.Millisecond,
+	)
+
+	oldFactory := sessionProviderForStopCity
+	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+	sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) {
+		return runtime.NewFake(), nil
+	}
+
+	var stdout, stderr lockedBuffer
+	code := cmdStopJSON([]string{cityDir}, &stdout, &stderr, time.Second, false, true)
+	if code != 0 {
+		t.Fatalf("cmdStopJSON() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	var got lifecycleActionJSON
+	if err := json.Unmarshal([]byte(stdout.String()), &got); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if got.Unregistered == nil || !*got.Unregistered {
+		t.Fatalf("payload.Unregistered = %v, want pointer to true; payload=%+v", got.Unregistered, got)
+	}
+}
+
 func TestCmdStopSupervisorManagedInvalidCityTomlFailsWhenShutdownFails(t *testing.T) {
 	resetFlags(t)
 	cityDir := setupInvalidConfigManagedRuntime(t)

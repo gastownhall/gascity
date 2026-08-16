@@ -133,8 +133,9 @@ func cmdStopJSONSequence(args []string, stdout, stderr io.Writer, force bool, js
 
 	stopLoadedCity := func() stopCommandOutcome {
 		return stopCommandOutcome{
-			code:     cmdStopBodyWithoutSuccess(cityPath, cfg, force, stopStdout, stderr),
-			cityPath: cityPath,
+			code:         cmdStopBodyWithoutSuccess(cityPath, cfg, force, stopStdout, stderr),
+			cityPath:     cityPath,
+			unregistered: unregisteredFromSupervisor,
 		}
 	}
 	if wallClockCapApplied {
