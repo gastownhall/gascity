@@ -78,13 +78,27 @@ func PoolSessionName(template, beadID string) string {
 // typed session.Info projection (WI-5 W4); the close is a session-class op
 // routed through the session front door. Returns the IDs of session beads
 // that were closed.
-func GCSweepSessionBeads(cityPath string, store beads.Store, rigStores map[string]beads.Store, sessionInfos []session.Info) []string {
+func GCSweepSessionBeads(store beads.Store, rigStores map[string]beads.Store, sessionInfos []session.Info, cityPaths ...string) []string {
+	cityPath := ""
+	if len(cityPaths) > 0 {
+		cityPath = cityPaths[0]
+	}
 	var closed []string
 	for _, info := range sessionInfos {
 		if info.Closed {
 			continue
 		}
-		if !closeSessionInfoIfUnassigned(cityPath, store, rigStores, nil, info, "gc_swept", time.Now().UTC(), nil) {
+		closedCurrent := false
+		acquired, _, err := session.TryWithCitySessionDestructiveLock(cityPath, info.ID, func() error {
+			latest, err := sessionFrontDoor(store).GetLive(info.ID)
+			if err != nil || latest.Closed || session.HasExecutionClaimNudgeStalled(latest) ||
+				drainAckVersionOf(latest) != drainAckVersionOf(info) {
+				return nil
+			}
+			closedCurrent = closeSessionInfoIfUnassigned(cityPath, store, rigStores, nil, latest, "gc_swept", time.Now().UTC(), nil)
+			return nil
+		})
+		if err != nil || !acquired || !closedCurrent {
 			continue
 		}
 		closed = append(closed, info.ID)
@@ -137,7 +151,11 @@ func releaseOrphanedPoolAssignments(
 		log.Printf("releaseOrphanedPoolAssignments: assigned work/store-ref length mismatch: work=%d storeRefs=%d", len(assignedWorkBeads), len(assignedWorkStoreRefs))
 	}
 
-	openIdentifiers := makeOpenSessionStoreRefIndex(cityPath, cfg, store, openSessionInfos, storeRefAware)
+	leading := store
+	if len(assignedWorkStores) > 0 && assignedWorkStores[0] != nil {
+		leading = assignedWorkStores[0]
+	}
+	openIdentifiers := makeOpenSessionStoreRefIndex(cityPath, cfg, leading, openSessionInfos, storeRefAware)
 	legacyOpenIdentifiers := make(map[string]struct{}, len(openSessionInfos)*5)
 	for _, info := range openSessionInfos {
 		if info.Closed {

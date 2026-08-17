@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -606,8 +608,14 @@ func TestVerifiedStop_MatchingToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.Get: %v", err)
 	}
+	if err := sp.SetMeta(info.SessionName, "GC_SESSION_ID", info.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	if err := sp.SetMeta(info.SessionName, "GC_INSTANCE_TOKEN", session.Metadata["instance_token"]); err != nil {
+		t.Fatalf("SetMeta(GC_INSTANCE_TOKEN): %v", err)
+	}
 
-	err = verifiedStop(sessiontest.SeedBead(t, session), store, sp, nil)
+	err = verifiedStop("", sessiontest.SeedBead(t, session), store, sp, nil)
 	if err != nil {
 		t.Errorf("verifiedStop with matching token: %v", err)
 	}
@@ -630,12 +638,15 @@ func TestVerifiedStop_MismatchedToken(t *testing.T) {
 	if err := sp.SetMeta(info.SessionName, "GC_INSTANCE_TOKEN", "old-token"); err != nil {
 		t.Fatalf("SetMeta(GC_INSTANCE_TOKEN): %v", err)
 	}
+	if err := sp.SetMeta(info.SessionName, "GC_SESSION_ID", info.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
 	session, err := store.Get(info.ID)
 	if err != nil {
 		t.Fatalf("store.Get: %v", err)
 	}
 
-	err = verifiedStop(sessiontest.SeedBead(t, session), store, sp, nil)
+	err = verifiedStop("", sessiontest.SeedBead(t, session), store, sp, nil)
 	if err == nil {
 		t.Error("expected error for mismatched token")
 	}
@@ -644,7 +655,7 @@ func TestVerifiedStop_MismatchedToken(t *testing.T) {
 	}
 }
 
-func TestVerifiedStop_NoToken(t *testing.T) {
+func TestVerifiedStop_NoTokenFailsClosed(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig("", store, sp, nil)
@@ -660,9 +671,68 @@ func TestVerifiedStop_NoToken(t *testing.T) {
 		t.Fatalf("store.Get: %v", err)
 	}
 
-	err = verifiedStop(sessiontest.SeedBead(t, session), store, sp, nil)
+	if err := sp.SetMeta(info.SessionName, "GC_SESSION_ID", info.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	err = verifiedStop("", sessiontest.SeedBead(t, session), store, sp, nil)
+	if !errors.Is(err, errRuntimeIdentityUnavailable) {
+		t.Fatalf("verifiedStop with no token error = %v, want errRuntimeIdentityUnavailable", err)
+	}
+	if !sp.IsRunning(info.SessionName) {
+		t.Fatal("verifiedStop killed runtime without a positive token match")
+	}
+}
+
+// A timeout drain carries a tick snapshot into verifiedStop. A later managed
+// start may deliberately reuse the same instance token, so token equality alone
+// cannot authorize the old timeout to kill the new awake interval.
+func TestVerifiedStop_StaleSnapshotDoesNotKillSameTokenRestart(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	cityPath := t.TempDir()
+	mgr := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(cityPath))
+	created, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{
+		Template: "worker", Title: "Worker", Command: "worker", WorkDir: t.TempDir(),
+		Provider: "claude", Resume: sessionpkg.ProviderResume{}, Hints: runtime.Config{},
+		ExtraMeta: map[string]string{"session_origin": "manual"},
+	})
 	if err != nil {
-		t.Errorf("verifiedStop with no token: %v", err)
+		t.Fatalf("CreateSession: %v", err)
+	}
+	staleBead, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get(stale): %v", err)
+	}
+	stale := sessiontest.SeedBead(t, staleBead)
+	if err := sp.SetMeta(created.SessionName, "GC_SESSION_ID", created.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	if err := sp.SetMeta(created.SessionName, "GC_INSTANCE_TOKEN", stale.InstanceToken); err != nil {
+		t.Fatalf("SetMeta(GC_INSTANCE_TOKEN): %v", err)
+	}
+	if err := sp.Stop(created.SessionName); err != nil {
+		t.Fatalf("stop original runtime: %v", err)
+	}
+	if err := mgr.Start(context.Background(), created.ID, "worker", runtime.Config{Command: "worker", WorkDir: t.TempDir()}); err != nil {
+		t.Fatalf("Start replacement: %v", err)
+	}
+	latestBead, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get(latest): %v", err)
+	}
+	latest := sessiontest.SeedBead(t, latestBead)
+	if latest.InstanceToken != stale.InstanceToken {
+		t.Fatalf("fixture rotated token from %q to %q; want same-token restart", stale.InstanceToken, latest.InstanceToken)
+	}
+	if latest.AwakeStartedAt == stale.AwakeStartedAt {
+		t.Fatalf("fixture did not establish a newer awake epoch: %q", latest.AwakeStartedAt)
+	}
+
+	if err := verifiedStop(cityPath, stale, store, sp, nil); err == nil {
+		t.Fatal("stale timeout stop succeeded against a newer same-token lifecycle")
+	}
+	if !sp.IsRunning(created.SessionName) {
+		t.Fatal("stale timeout stop killed the newer same-token runtime")
 	}
 }
 
@@ -859,7 +929,9 @@ func TestAdvanceSessionDrains_ProcessExited(t *testing.T) {
 
 	// No session running (process exited).
 	b, _ := store.Create(beads.Bead{
-		Title: "test",
+		Title:  "test",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
 		Metadata: map[string]string{
 			"session_name": "test-session",
 			"template":     "worker",
@@ -878,7 +950,7 @@ func TestAdvanceSessionDrains_ProcessExited(t *testing.T) {
 
 	cfg := &config.City{}
 
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrainsWithSessionsTraced("", dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
 	}), map[string]wakeEvaluation{}, cfg, clk, nil)
@@ -913,14 +985,21 @@ func TestAdvanceSessionDrains_Timeout(t *testing.T) {
 		Type:   sessionBeadType,
 		Labels: []string{sessionBeadLabel},
 		Metadata: map[string]string{
-			"session_name": "test-session",
-			"template":     "worker",
-			"provider":     "claude",
-			"work_dir":     t.TempDir(),
-			"generation":   "3",
-			"state":        "active",
+			"session_name":   "test-session",
+			"template":       "worker",
+			"provider":       "claude",
+			"work_dir":       t.TempDir(),
+			"generation":     "3",
+			"instance_token": "timeout-token",
+			"state":          "active",
 		},
 	})
+	if err := sp.SetMeta("test-session", "GC_SESSION_ID", b.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	if err := sp.SetMeta("test-session", "GC_INSTANCE_TOKEN", "timeout-token"); err != nil {
+		t.Fatalf("SetMeta(GC_INSTANCE_TOKEN): %v", err)
+	}
 
 	// Drain deadline already passed.
 	dt.set(b.ID, &drainState{
@@ -932,7 +1011,7 @@ func TestAdvanceSessionDrains_Timeout(t *testing.T) {
 
 	cfg := &config.City{}
 
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrainsWithSessionsTraced("", dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
 	}), map[string]wakeEvaluation{}, cfg, clk, nil)
@@ -968,6 +1047,9 @@ func TestAdvanceSessionDrains_WakeReasonsReappear(t *testing.T) {
 			"generation":   "3",
 		},
 	})
+	if err := sp.SetMeta("test-session", "GC_SESSION_ID", b.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
 
 	dt.set(b.ID, &drainState{
 		startedAt:  now.Add(-10 * time.Second),
@@ -979,7 +1061,7 @@ func TestAdvanceSessionDrains_WakeReasonsReappear(t *testing.T) {
 	// A desired pool slot still has WakeConfig, which should cancel the drain.
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(1)}}}
 
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrainsWithSessionsTraced("", dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
 	}), map[string]wakeEvaluation{
@@ -1013,19 +1095,23 @@ func TestAdvanceSessionDrains_DeferredInterrupt_CanceledBeforeSignal(t *testing.
 		Type:   sessionBeadType,
 		Labels: []string{sessionBeadLabel},
 		Metadata: map[string]string{
-			"session_name": "test-session",
-			"template":     "worker",
-			"provider":     "claude",
-			"work_dir":     t.TempDir(),
-			"generation":   "3",
+			"session_name":   "test-session",
+			"template":       "worker",
+			"provider":       "claude",
+			"work_dir":       t.TempDir(),
+			"generation":     "3",
+			"instance_token": "test-token",
 		},
 	})
+	if err := sp.SetMeta("test-session", "GC_SESSION_ID", b.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	if err := sp.SetMeta("test-session", "GC_INSTANCE_TOKEN", "test-token"); err != nil {
+		t.Fatalf("SetMeta(GC_INSTANCE_TOKEN): %v", err)
+	}
 
 	// beginSessionDrain no longer sends Ctrl-C immediately.
-	beginSessionDrainInfo(sessiontest.SeedBead(t, makeWakeBead(b.ID, map[string]string{
-		"session_name": "test-session",
-		"generation":   "3",
-	})), sp, dt, "orphaned", clk, 30*time.Second)
+	beginSessionDrainInfo(wakeInfo(t, b), sp, dt, "orphaned", clk, 30*time.Second)
 
 	// No interrupt should have been sent yet.
 	for _, c := range sp.Calls {
@@ -1036,7 +1122,7 @@ func TestAdvanceSessionDrains_DeferredInterrupt_CanceledBeforeSignal(t *testing.
 
 	// Simulate next tick: wake reasons reappear (store recovered) → cancel drain.
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(1)}}}
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrainsWithSessionsTraced("", dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
 	}), map[string]wakeEvaluation{
@@ -1077,34 +1163,43 @@ func TestAdvanceSessionDrains_OrphanedDrainCanceledForAssignedWork(t *testing.T)
 	if err := sp.Start(context.Background(), "test-session", runtime.Config{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if err := sp.SetMeta("test-session", "GC_DRAIN_ACK", "1"); err != nil {
-		t.Fatalf("SetMeta(GC_DRAIN_ACK): %v", err)
-	}
 	b, err := store.Create(beads.Bead{
 		Title:  "test",
 		Type:   sessionBeadType,
 		Labels: []string{sessionBeadLabel},
 		Metadata: map[string]string{
-			"session_name": "test-session",
-			"template":     "worker",
-			"provider":     "claude",
-			"work_dir":     t.TempDir(),
-			"generation":   "3",
-			"state":        "active",
+			"session_name":   "test-session",
+			"template":       "worker",
+			"provider":       "claude",
+			"work_dir":       t.TempDir(),
+			"generation":     "3",
+			"instance_token": "test-token",
+			"state":          "active",
 		},
 	})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
-	dt.set(b.ID, &drainState{
+	ds := &drainState{
 		startedAt:  now.Add(-10 * time.Second),
 		deadline:   now.Add(20 * time.Second),
 		reason:     "orphaned",
 		generation: 3,
 		ackSet:     true,
-	})
+	}
+	dt.set(b.ID, ds)
+	if err := sp.SetMeta("test-session", "GC_SESSION_ID", b.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	if err := sp.SetMeta("test-session", "GC_INSTANCE_TOKEN", "test-token"); err != nil {
+		t.Fatalf("SetMeta(GC_INSTANCE_TOKEN): %v", err)
+	}
+	if err := setReconcilerDrainAckMetadata(sp, "test-session", ds); err != nil {
+		t.Fatalf("setReconcilerDrainAckMetadata: %v", err)
+	}
 	advanceSessionDrainsWithSessionsTraced(
+		"",
 		dt,
 		sp,
 		store,
@@ -1149,34 +1244,43 @@ func TestAdvanceSessionDrains_NoWakeDrainCanceledForAssignedWork(t *testing.T) {
 	if err := sp.Start(context.Background(), "test-session", runtime.Config{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if err := sp.SetMeta("test-session", "GC_DRAIN_ACK", "1"); err != nil {
-		t.Fatalf("SetMeta(GC_DRAIN_ACK): %v", err)
-	}
 	b, err := store.Create(beads.Bead{
 		Title:  "test",
 		Type:   sessionBeadType,
 		Labels: []string{sessionBeadLabel},
 		Metadata: map[string]string{
-			"session_name": "test-session",
-			"template":     "worker",
-			"provider":     "claude",
-			"work_dir":     t.TempDir(),
-			"generation":   "3",
-			"state":        "active",
+			"session_name":   "test-session",
+			"template":       "worker",
+			"provider":       "claude",
+			"work_dir":       t.TempDir(),
+			"generation":     "3",
+			"instance_token": "test-token",
+			"state":          "active",
 		},
 	})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
-	dt.set(b.ID, &drainState{
+	ds := &drainState{
 		startedAt:  now.Add(-10 * time.Second),
 		deadline:   now.Add(20 * time.Second),
 		reason:     "no-wake-reason",
 		generation: 3,
 		ackSet:     true,
-	})
+	}
+	dt.set(b.ID, ds)
+	if err := sp.SetMeta("test-session", "GC_SESSION_ID", b.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	if err := sp.SetMeta("test-session", "GC_INSTANCE_TOKEN", "test-token"); err != nil {
+		t.Fatalf("SetMeta(GC_INSTANCE_TOKEN): %v", err)
+	}
+	if err := setReconcilerDrainAckMetadata(sp, "test-session", ds); err != nil {
+		t.Fatalf("setReconcilerDrainAckMetadata: %v", err)
+	}
 	advanceSessionDrainsWithSessionsTraced(
+		"",
 		dt,
 		sp,
 		store,
@@ -1245,7 +1349,9 @@ func TestAdvanceSessionDrains_DeferredInterrupt_CancelableNoSignal(t *testing.T)
 	_ = sp.Start(context.Background(), "test-session", runtime.Config{})
 
 	b, _ := store.Create(beads.Bead{
-		Title: "test",
+		Title:  "test",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
 		Metadata: map[string]string{
 			"session_name": "test-session",
 			"template":     "worker",
@@ -1268,7 +1374,7 @@ func TestAdvanceSessionDrains_DeferredInterrupt_CancelableNoSignal(t *testing.T)
 
 	// Simulate next tick: wake reasons reappear → cancel drain before interrupt.
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(1)}}}
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrainsWithSessionsTraced("", dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
 	}), map[string]wakeEvaluation{
@@ -1302,7 +1408,9 @@ func TestAdvanceSessionDrains_ConfigDriftCancelableOnPendingWake(t *testing.T) {
 	_ = sp.Start(context.Background(), "test-session", runtime.Config{})
 
 	b, _ := store.Create(beads.Bead{
-		Title: "test",
+		Title:  "test",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
 		Metadata: map[string]string{
 			"session_name": "test-session",
 			"template":     "worker",
@@ -1318,7 +1426,7 @@ func TestAdvanceSessionDrains_ConfigDriftCancelableOnPendingWake(t *testing.T) {
 	})
 
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrainsWithSessionsTraced("", dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
 	}), map[string]wakeEvaluation{
@@ -1354,6 +1462,9 @@ func TestAdvanceSessionDrains_TimeoutTokenMismatch(t *testing.T) {
 			"instance_token": "old-token", // stale token
 		},
 	})
+	if err := sp.SetMeta("test-session", "GC_SESSION_ID", b.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
 
 	// Drain deadline already passed.
 	dt.set(b.ID, &drainState{
@@ -1365,7 +1476,7 @@ func TestAdvanceSessionDrains_TimeoutTokenMismatch(t *testing.T) {
 
 	cfg := &config.City{}
 
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrainsWithSessionsTraced("", dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
 	}), map[string]wakeEvaluation{}, cfg, clk, nil)
@@ -1390,7 +1501,9 @@ func TestCompleteDrain_ClearsLastWokeAt(t *testing.T) {
 	store := beads.NewMemStore()
 
 	b, _ := store.Create(beads.Bead{
-		Title: "test",
+		Title:  "test",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
 		Metadata: map[string]string{
 			"session_name": "test-session",
 			"last_woke_at": now.Add(-10 * time.Second).UTC().Format(time.RFC3339),
@@ -1398,7 +1511,9 @@ func TestCompleteDrain_ClearsLastWokeAt(t *testing.T) {
 	})
 
 	ds := &drainState{reason: "idle"}
-	completeDrain(wakeInfo(t, b), sessionFrontDoor(store), ds, clk)
+	if outcome, err := completeDrain("", wakeInfo(t, b), sessionFrontDoor(store), ds, clk); err != nil || outcome != drainCompletionApplied {
+		t.Fatalf("completeDrain = (%v, %v), want applied", outcome, err)
+	}
 
 	got, _ := store.Get(b.ID)
 	if got.Metadata["last_woke_at"] != "" {
@@ -1418,7 +1533,9 @@ func TestCompleteDrain_FreshModeClearsIdentity(t *testing.T) {
 	store := beads.NewMemStore()
 
 	b, _ := store.Create(beads.Bead{
-		Title: "test",
+		Title:  "test",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
 		Metadata: map[string]string{
 			"session_name":        "test-session",
 			"wake_mode":           "fresh",
@@ -1429,7 +1546,9 @@ func TestCompleteDrain_FreshModeClearsIdentity(t *testing.T) {
 	})
 
 	ds := &drainState{reason: "idle"}
-	completeDrain(wakeInfo(t, b), sessionFrontDoor(store), ds, clk)
+	if outcome, err := completeDrain("", wakeInfo(t, b), sessionFrontDoor(store), ds, clk); err != nil || outcome != drainCompletionApplied {
+		t.Fatalf("completeDrain = (%v, %v), want applied", outcome, err)
+	}
 
 	got, _ := store.Get(b.ID)
 	if got.Metadata["session_key"] != "" {
@@ -1452,7 +1571,9 @@ func TestCompleteDrain_ResumeModePreservesIdentity(t *testing.T) {
 	store := beads.NewMemStore()
 
 	b, _ := store.Create(beads.Bead{
-		Title: "test",
+		Title:  "test",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
 		Metadata: map[string]string{
 			"session_name":        "test-session",
 			"wake_mode":           "resume",
@@ -1463,7 +1584,9 @@ func TestCompleteDrain_ResumeModePreservesIdentity(t *testing.T) {
 	})
 
 	ds := &drainState{reason: "idle"}
-	completeDrain(wakeInfo(t, b), sessionFrontDoor(store), ds, clk)
+	if outcome, err := completeDrain("", wakeInfo(t, b), sessionFrontDoor(store), ds, clk); err != nil || outcome != drainCompletionApplied {
+		t.Fatalf("completeDrain = (%v, %v), want applied", outcome, err)
+	}
 
 	got, _ := store.Get(b.ID)
 	if got.Metadata["session_key"] != "resume-key" {
@@ -1483,7 +1606,9 @@ func TestCompleteDrain_ClearsPendingCreateClaim(t *testing.T) {
 	store := beads.NewMemStore()
 
 	b, _ := store.Create(beads.Bead{
-		Title: "test",
+		Title:  "test",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
 		Metadata: map[string]string{
 			"session_name":         "test-session",
 			"pending_create_claim": "true",
@@ -1491,11 +1616,113 @@ func TestCompleteDrain_ClearsPendingCreateClaim(t *testing.T) {
 	})
 
 	ds := &drainState{reason: "idle"}
-	completeDrain(wakeInfo(t, b), sessionFrontDoor(store), ds, clk)
+	if outcome, err := completeDrain("", wakeInfo(t, b), sessionFrontDoor(store), ds, clk); err != nil || outcome != drainCompletionApplied {
+		t.Fatalf("completeDrain = (%v, %v), want applied", outcome, err)
+	}
 
 	got, _ := store.Get(b.ID)
 	if got.Metadata["pending_create_claim"] != "" {
 		t.Errorf("pending_create_claim = %q, want cleared after drain completion", got.Metadata["pending_create_claim"])
+	}
+}
+
+// The process-exited decision is made from a tick snapshot. If an operator
+// suspend commits after that snapshot, stale drain completion must not erase the
+// durable hold and turn the session back into an ordinary asleep slot.
+func TestCompleteDrain_StaleSnapshotDoesNotOverwriteSuspend(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	cityPath := t.TempDir()
+	mgr := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(cityPath), sessionpkg.WithClock(clk))
+	created, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{
+		Template: "worker", Title: "Worker", Command: "worker", WorkDir: t.TempDir(),
+		Provider: "claude", Resume: sessionpkg.ProviderResume{}, Hints: runtime.Config{},
+		ExtraMeta: map[string]string{"session_origin": "manual"},
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	staleBead, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get(stale): %v", err)
+	}
+	stale := sessiontest.SeedBead(t, staleBead)
+	if err := mgr.Suspend(created.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	if outcome, err := completeDrain(cityPath, stale, sessionFrontDoor(store), &drainState{reason: "idle"}, clk); err != nil || outcome != drainCompletionSuperseded {
+		t.Fatalf("completeDrain = (%v, %v), want superseded", outcome, err)
+	}
+
+	got, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get(final): %v", err)
+	}
+	if got.Metadata["state"] != string(sessionpkg.StateSuspended) ||
+		got.Metadata["sleep_intent"] != string(sessionpkg.SleepReasonUserHold) ||
+		got.Metadata["sleep_reason"] != string(sessionpkg.SleepReasonUserHold) {
+		t.Fatalf("stale completeDrain erased operator suspend: metadata=%v", got.Metadata)
+	}
+}
+
+func TestAdvanceSessionDrains_SupersededSuspendDoesNotClearNewRuntimeMetadata(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	cityPath := t.TempDir()
+	mgr := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(cityPath), sessionpkg.WithClock(clk))
+	created, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{
+		Template: "worker", Title: "Worker", Command: "worker", WorkDir: t.TempDir(),
+		Provider: "claude", Resume: sessionpkg.ProviderResume{}, Hints: runtime.Config{},
+		ExtraMeta: map[string]string{"session_origin": "manual"},
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	staleBead, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get(stale): %v", err)
+	}
+	stale := sessiontest.SeedBead(t, staleBead)
+	if err := mgr.Suspend(created.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	newRuntimeMeta := map[string]string{
+		"GC_DRAIN_ACK":        "1",
+		"GC_DRAIN_ACK_SOURCE": "agent",
+		"GC_DRAIN_REASON":     "newer-lifecycle",
+	}
+	for key, value := range newRuntimeMeta {
+		if err := sp.SetMeta(created.SessionName, key, value); err != nil {
+			t.Fatalf("SetMeta(%s): %v", key, err)
+		}
+	}
+	generation, _ := strconv.Atoi(stale.Generation)
+	dt := newDrainTracker()
+	dt.set(created.ID, &drainState{
+		startedAt: now.Add(-time.Minute), deadline: now.Add(time.Minute),
+		reason: "idle", generation: generation, ackSet: true,
+	})
+	advanceSessionDrainsWithSessionsTraced(
+		cityPath, dt, sp, store,
+		func(id string) (sessionpkg.Info, bool) { return stale, id == stale.ID },
+		map[string]wakeEvaluation{}, &config.City{}, clk, nil,
+	)
+	if dt.get(created.ID) != nil {
+		t.Fatal("superseded drain tracker was not retired")
+	}
+	for key, want := range newRuntimeMeta {
+		got, err := sp.GetMeta(created.SessionName, key)
+		if err != nil {
+			t.Fatalf("GetMeta(%s): %v", key, err)
+		}
+		if got != want {
+			t.Fatalf("superseded drain erased newer provider metadata %s: got %q want %q", key, got, want)
+		}
 	}
 }
 
@@ -1509,7 +1736,9 @@ func TestAdvanceSessionDrains_CancelsForReadyWait(t *testing.T) {
 	_ = sp.Start(context.Background(), "test-session", runtime.Config{})
 
 	b, _ := store.Create(beads.Bead{
-		Title: "test",
+		Title:  "test",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
 		Metadata: map[string]string{
 			"session_name": "test-session",
 			"template":     "worker",
@@ -1524,7 +1753,7 @@ func TestAdvanceSessionDrains_CancelsForReadyWait(t *testing.T) {
 		generation: 3,
 	})
 
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrainsWithSessionsTraced("", dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
 	}), map[string]wakeEvaluation{
@@ -1547,7 +1776,9 @@ func TestAdvanceSessionDrains_ClearsIdleProbeOnCompletion(t *testing.T) {
 	dt := newDrainTracker()
 
 	b, err := store.Create(beads.Bead{
-		Title: "test",
+		Title:  "test",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
 		Metadata: map[string]string{
 			"session_name": "test-session",
 			"template":     "worker",
@@ -1568,7 +1799,7 @@ func TestAdvanceSessionDrains_ClearsIdleProbeOnCompletion(t *testing.T) {
 		t.Fatal("expected idle probe to start")
 	}
 
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrainsWithSessionsTraced("", dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
 	}), map[string]wakeEvaluation{}, &config.City{}, clk, nil)

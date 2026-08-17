@@ -149,7 +149,10 @@ type FileStore struct {
 	freshness fileFreshness
 }
 
-var _ ConditionalAssignmentReleaser = (*FileStore)(nil)
+var (
+	_ ConditionalAssignmentReleaser = (*FileStore)(nil)
+	_ BatchGetter                   = (*FileStore)(nil)
+)
 
 type fileFreshness struct {
 	known   bool
@@ -527,6 +530,27 @@ func (fs *FileStore) Get(id string) (Bead, error) {
 		return Bead{}, err
 	}
 	return fs.MemStore.Get(id)
+}
+
+// GetBatch refreshes the on-disk store once, then retrieves all requested rows
+// from MemStore under its single batch lock. This explicit override is required
+// because the GetBatch method promoted from the embedded MemStore would bypass
+// FileStore's cross-process freshness check.
+func (fs *FileStore) GetBatch(ids []string) ([]Bead, error) {
+	unique, err := uniqueBatchGetIDs(ids)
+	if err != nil {
+		return nil, fmt.Errorf("getting beads batch: %w", err)
+	}
+	if len(unique) == 0 {
+		return nil, nil
+	}
+
+	fs.fmu.Lock()
+	defer fs.fmu.Unlock()
+	if err := fs.refreshReadStateLocked(); err != nil {
+		return nil, err
+	}
+	return fs.MemStore.GetBatch(unique)
 }
 
 // List reloads the on-disk store before listing beads that match the query.

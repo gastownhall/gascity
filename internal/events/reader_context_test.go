@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -95,10 +96,10 @@ func TestReadFilteredContextAbortsBetweenArchives(t *testing.T) {
 	dir := seedArchives(t)
 	path := filepath.Join(dir, "events.jsonl")
 
-	// Err() call #1 fires before archive 1 is processed (not yet canceled).
-	// Call #2 fires before archive 2 is processed -- that's where this
-	// cancels.
-	ctx := newCancelAfter(2)
+	// Err() call #1 fires before archive 1 is processed and call #2 is the
+	// archive stream's first raw-record cancellation check. Call #3 fires
+	// before archive 2 is processed -- that's where this cancels.
+	ctx := newCancelAfter(3)
 	got, err := ReadFilteredContext(ctx, path, Filter{})
 
 	if !errors.Is(err, context.Canceled) {
@@ -138,8 +139,15 @@ func TestReadFilteredContextAbortsUpfrontWhenAlreadyCanceled(t *testing.T) {
 func TestReadFilteredWithInFlightContextAbortsBetweenArchives(t *testing.T) {
 	dir := seedArchives(t)
 	path := filepath.Join(dir, "events.jsonl")
+	previousReadRotationDir := readRotationDir
+	rotationScans := 0
+	readRotationDir = func(path string) ([]os.DirEntry, error) {
+		rotationScans++
+		return os.ReadDir(path)
+	}
+	t.Cleanup(func() { readRotationDir = previousReadRotationDir })
 
-	ctx := newCancelAfter(2)
+	ctx := newCancelAfter(3)
 	got, err := ReadFilteredWithInFlightContext(ctx, path, Filter{})
 
 	if !errors.Is(err, context.Canceled) {
@@ -147,5 +155,39 @@ func TestReadFilteredWithInFlightContextAbortsBetweenArchives(t *testing.T) {
 	}
 	if len(got) != 2 {
 		t.Fatalf("got %d events, want exactly archive 1's 2 events: %+v", len(got), got)
+	}
+	if rotationScans != 0 {
+		t.Fatalf("post-active rotation scans = %d, want 0 after base scan cancellation", rotationScans)
+	}
+}
+
+// A completion-fact cold seed is deliberately sparse: production history can
+// contain millions of unrelated rows before the next matching fact. Pin that
+// cancellation is checked on raw rotating-source records, not only after a
+// batch of 256 matching records (which could otherwise mean waiting for EOF).
+func TestReadFilteredWithInFlightContextCancelsSparseRotatingScan(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	writeJSONLEvents(t, path)
+
+	seqs := make([]uint64, 4096)
+	for i := range seqs {
+		seqs[i] = uint64(i + 1)
+	}
+	rotating := filepath.Join(dir, "events.jsonl.rotating-20260507T120000Z-seq-1-4096")
+	writeJSONLEvents(t, rotating, seqs...)
+
+	// Calls 1-4 reach the source and its first raw record. Call 5 lands at
+	// the 256-record cadence inside segmentReader.readIntoContext.
+	ctx := newCancelAfter(5)
+	got, err := ReadFilteredWithInFlightContext(ctx, path, Filter{Type: ExecutionStepCompleted})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("sparse completion scan returned %d events, want 0", len(got))
+	}
+	if ctx.calls != 5 {
+		t.Fatalf("ctx.Err calls = %d, want cancellation at raw-record check 5", ctx.calls)
 	}
 }

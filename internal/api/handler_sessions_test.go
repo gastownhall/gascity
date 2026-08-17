@@ -1860,6 +1860,209 @@ func TestHandleSessionWakeStartsSuspendedRuntime(t *testing.T) {
 	}
 }
 
+func TestHandleSessionWakeExpandsRigQualifiedProviderlessStartCommand(t *testing.T) {
+	fs := newSessionFakeState(t)
+	rigDir := t.TempDir()
+	const qualified = "tributary/core.control-dispatcher"
+	wantCommand := config.ControlDispatcherStartCommandFor(qualified)
+	storedCommand := wantCommand + " persisted-runtime-suffix"
+	fs.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         config.ControlDispatcherAgentName,
+			BindingName:  "core",
+			Dir:          "tributary",
+			Scope:        "rig",
+			StartCommand: config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+		}},
+		Rigs: []config.Rig{{Name: "tributary", Path: rigDir}},
+	}
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
+		ExplicitName: "core__control-dispatcher-test",
+		Template:     qualified,
+		Title:        "Control dispatcher",
+		Command:      storedCommand,
+		WorkDir:      rigDir,
+		ExtraMeta:    map[string]string{"agent_name": qualified},
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if info.Provider != "" {
+		t.Fatalf("persisted Provider = %q, want empty providerless configuration", info.Provider)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	w := httptest.NewRecorder()
+	r := newPostRequest(cityURL(fs, "/session/")+info.ID+"/wake", nil)
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	srv.waitForBackground()
+
+	started := fs.sp.LastStartConfig(info.SessionName)
+	if started == nil {
+		t.Fatalf("LastStartConfig(%q) = nil", info.SessionName)
+	}
+	if got := started.Command; got != storedCommand {
+		t.Fatalf("started Command = %q, want expanded comparison to preserve %q", got, storedCommand)
+	}
+	if strings.Contains(started.Command, "{{.Agent}}") {
+		t.Fatalf("started Command = %q, still contains the unresolved agent template", started.Command)
+	}
+	persisted, err := session.NewStore(fs.SessionsBeadStore()).Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get resumed session: %v", err)
+	}
+	if persisted.Provider != "" {
+		t.Fatalf("resumed persisted Provider = %q, want empty providerless configuration", persisted.Provider)
+	}
+}
+
+func TestHandleSessionWakeAlreadyRunningConsumesRequestToken(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Already Running")
+	startsBefore := fs.sp.CountCalls("Start", info.SessionName)
+	w := httptest.NewRecorder()
+	r := newPostRequest(cityURL(fs, "/session/")+info.ID+"/wake", nil)
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	srv.waitForBackground()
+
+	b, err := fs.cityBeadStore.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	for _, key := range []string{"wake_request", "wake_requested_at", "wake_request_token"} {
+		if got := b.Metadata[key]; got != "" {
+			t.Fatalf("%s = %q, want consumed", key, got)
+		}
+	}
+	if got := fs.sp.CountCalls("Start", info.SessionName); got != startsBefore {
+		t.Fatalf("runtime Start calls = %d, want unchanged %d for live convergence", got, startsBefore)
+	}
+}
+
+func TestHandleSessionWakeDelayedStartCannotOverrideSuspend(t *testing.T) {
+	fs := newSessionFakeState(t)
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Delayed Wake")
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("initial Suspend: %v", err)
+	}
+	startsBefore := fs.sp.CountCalls("Start", info.SessionName)
+
+	srv := New(fs)
+	hookEntered := make(chan struct{})
+	hookRelease := make(chan struct{})
+	srv.beforeSessionWakeStart = func(ctx context.Context) error {
+		close(hookEntered)
+		select {
+		case <-hookRelease:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	h := newTestCityHandlerWith(t, fs, srv)
+	w := httptest.NewRecorder()
+	r := newPostRequest(cityURL(fs, "/session/")+info.ID+"/wake", nil)
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	select {
+	case <-hookEntered:
+	case <-time.After(testEventTimeout):
+		t.Fatal("delayed wake hook was not reached")
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("winning Suspend: %v", err)
+	}
+	close(hookRelease)
+	srv.waitForBackground()
+
+	b, err := fs.cityBeadStore.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got := b.Metadata["state"]; got != string(session.StateSuspended) {
+		t.Fatalf("state = %q, want suspended", got)
+	}
+	if got := b.Metadata["wake_request_token"]; got != "" {
+		t.Fatalf("wake_request_token = %q, want cleared by suspend", got)
+	}
+	if got := fs.sp.CountCalls("Start", info.SessionName); got != startsBefore {
+		t.Fatalf("runtime Start calls = %d, want unchanged %d", got, startsBefore)
+	}
+}
+
+func TestHandleSessionWakeStartTimeoutReleasesLifecycleLock(t *testing.T) {
+	fs := newSessionFakeState(t)
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Timed Wake")
+	baseManager := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+	if err := baseManager.Suspend(info.ID); err != nil {
+		t.Fatalf("initial Suspend: %v", err)
+	}
+	provider := &blockingStartProvider{
+		Fake:    fs.sp,
+		started: make(chan struct{}),
+		unblock: make(chan struct{}),
+	}
+	oldTimeout := sessionCreateCommandableTimeout
+	sessionCreateCommandableTimeout = 50 * time.Millisecond
+	t.Cleanup(func() {
+		sessionCreateCommandableTimeout = oldTimeout
+		close(provider.unblock)
+	})
+
+	state := &stateWithSessionProvider{fakeState: fs, provider: provider}
+	srv := New(state)
+	h := newTestCityHandlerWith(t, fs, srv)
+	w := httptest.NewRecorder()
+	r := newPostRequest(cityURL(fs, "/session/")+info.ID+"/wake", nil)
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	select {
+	case <-provider.started:
+	case <-time.After(testEventTimeout):
+		t.Fatal("provider Start was not reached")
+	}
+
+	suspendDone := make(chan error, 1)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, provider, session.WithCityPath(fs.cityPath))
+	go func() { suspendDone <- mgr.Suspend(info.ID) }()
+	select {
+	case err := <-suspendDone:
+		if err != nil {
+			t.Fatalf("Suspend after timed start: %v", err)
+		}
+	case <-time.After(testEventTimeout):
+		t.Fatal("timed-out wake start retained lifecycle lock")
+	}
+	srv.waitForBackground()
+	b, err := fs.cityBeadStore.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got := b.Metadata["state"]; got != string(session.StateSuspended) {
+		t.Fatalf("state = %q, want suspended", got)
+	}
+}
+
 func TestHandleSessionWakeClosed(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)

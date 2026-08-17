@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
@@ -134,6 +136,7 @@ func TestSessionWake_StateTransitionsAndMetadata(t *testing.T) {
 }
 
 func TestDoSessionWake_PokesManagedControllerAfterStateChange(t *testing.T) {
+	expectedCityPath := t.TempDir()
 	store := beads.NewMemStore()
 	sessionBead, err := store.Create(beads.Bead{
 		Title:  "managed wake session",
@@ -154,14 +157,14 @@ func TestDoSessionWake_PokesManagedControllerAfterStateChange(t *testing.T) {
 	var calls []string
 	deps := sessionWakeDeps{
 		store:        store,
-		cityPath:     "/city",
+		cityPath:     expectedCityPath,
 		cityResolved: true,
 		now: func() time.Time {
 			return time.Date(2026, 7, 16, 0, 0, 0, 0, time.UTC)
 		},
 		withdrawQueuedWaitNudges: func(cityPath string, nudgeIDs []string) error {
-			if cityPath != "/city" {
-				t.Fatalf("withdraw cityPath = %q, want /city", cityPath)
+			if cityPath != expectedCityPath {
+				t.Fatalf("withdraw cityPath = %q, want %q", cityPath, expectedCityPath)
 			}
 			if len(nudgeIDs) != 0 {
 				t.Fatalf("withdraw nudge IDs = %v, want none", nudgeIDs)
@@ -170,15 +173,15 @@ func TestDoSessionWake_PokesManagedControllerAfterStateChange(t *testing.T) {
 			return nil
 		},
 		cityUsesManagedReconciler: func(cityPath string) bool {
-			if cityPath != "/city" {
-				t.Fatalf("managed-reconciler cityPath = %q, want /city", cityPath)
+			if cityPath != expectedCityPath {
+				t.Fatalf("managed-reconciler cityPath = %q, want %q", cityPath, expectedCityPath)
 			}
 			calls = append(calls, "managed")
 			return true
 		},
 		pokeController: func(cityPath string) error {
-			if cityPath != "/city" {
-				t.Fatalf("poke cityPath = %q, want /city", cityPath)
+			if cityPath != expectedCityPath {
+				t.Fatalf("poke cityPath = %q, want %q", cityPath, expectedCityPath)
 			}
 			updated, getErr := store.Get(sessionBead.ID)
 			if getErr != nil {
@@ -222,6 +225,7 @@ func TestDoSessionWake_PokesManagedControllerAfterStateChange(t *testing.T) {
 }
 
 func TestDoSessionWake_DoesNotPokeWithoutManagedController(t *testing.T) {
+	cityPath := t.TempDir()
 	store := beads.NewMemStore()
 	sessionBead, err := store.Create(beads.Bead{
 		Type:   session.BeadType,
@@ -238,7 +242,7 @@ func TestDoSessionWake_DoesNotPokeWithoutManagedController(t *testing.T) {
 	poked := false
 	deps := sessionWakeDeps{
 		store:        store,
-		cityPath:     "/city",
+		cityPath:     cityPath,
 		cityResolved: true,
 		now: func() time.Time {
 			return time.Date(2026, 7, 16, 0, 0, 0, 0, time.UTC)
@@ -264,6 +268,7 @@ func TestDoSessionWake_DoesNotPokeWithoutManagedController(t *testing.T) {
 }
 
 func TestDoSessionWake_PokeFailureWarnsWithoutFailingWake(t *testing.T) {
+	cityPath := t.TempDir()
 	store := beads.NewMemStore()
 	sessionBead, err := store.Create(beads.Bead{
 		Type:   session.BeadType,
@@ -279,7 +284,7 @@ func TestDoSessionWake_PokeFailureWarnsWithoutFailingWake(t *testing.T) {
 
 	deps := sessionWakeDeps{
 		store:        store,
-		cityPath:     "/city",
+		cityPath:     cityPath,
 		cityResolved: true,
 		now: func() time.Time {
 			return time.Date(2026, 7, 16, 0, 0, 0, 0, time.UTC)
@@ -308,6 +313,53 @@ func TestDoSessionWake_PokeFailureWarnsWithoutFailingWake(t *testing.T) {
 	}
 	if got := updated.Metadata["state"]; got != "asleep" {
 		t.Fatalf("state = %q, want asleep", got)
+	}
+}
+
+func TestDoSessionWakeNormalizationCannotOverrideLaterSuspend(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"template": "missing-template",
+			"state":    string(session.StateSuspended),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	mgr := session.NewManagerWithOptions(store, runtime.NewFake(), session.WithCityPath(cityPath))
+	deps := sessionWakeDeps{
+		store:    store,
+		cfg:      &config.City{},
+		cityPath: cityPath,
+		now: func() time.Time {
+			return time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+		},
+		beforeWakeNormalization: func() {
+			if err := mgr.Suspend(b.ID); err != nil {
+				t.Fatalf("Suspend between wake and normalization: %v", err)
+			}
+		},
+	}
+	var stderr bytes.Buffer
+	if code := doSessionWake(b.ID, &bytes.Buffer{}, &stderr, false, deps); code != 0 {
+		t.Fatalf("doSessionWake = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	current, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got := current.Metadata["state"]; got != string(session.StateSuspended) {
+		t.Fatalf("state = %q, want suspended", got)
+	}
+	if got := current.Metadata["sleep_intent"]; got != string(session.SleepReasonUserHold) {
+		t.Fatalf("sleep_intent = %q, want user-hold", got)
+	}
+	if got := current.Metadata["wake_request_token"]; got != "" {
+		t.Fatalf("wake_request_token = %q, want cleared by suspend", got)
 	}
 }
 

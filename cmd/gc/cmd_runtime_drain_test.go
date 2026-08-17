@@ -952,6 +952,7 @@ func TestProviderDrainOpsClearDrainAttemptsAllMetadataRemovals(t *testing.T) {
 		reconcilerDrainAckSourceKey,
 		reconcilerDrainAckReasonKey,
 		reconcilerDrainAckGenerationKey,
+		reconcilerDrainAckAwakeEpochKey,
 		"GC_DRAIN",
 	}
 	if !slices.Equal(sp.removeKeys, want) {
@@ -972,6 +973,7 @@ func TestProviderDrainOpsSetDrainAckAttemptsAckAfterCleanupErrors(t *testing.T) 
 	wantRemove := []string{
 		reconcilerDrainAckReasonKey,
 		reconcilerDrainAckGenerationKey,
+		reconcilerDrainAckAwakeEpochKey,
 	}
 	if !slices.Equal(sp.removeKeys, wantRemove) {
 		t.Fatalf("removed keys = %v, want %v", sp.removeKeys, wantRemove)

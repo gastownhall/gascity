@@ -592,6 +592,7 @@ func TestWrapError(t *testing.T) {
 		{"no current target", ErrNoServer},
 		{"duplicate session: test", ErrSessionExists},
 		{"session not found: test", ErrSessionNotFound},
+		{"no such session: test", ErrSessionNotFound},
 		{"can't find session: test", ErrSessionNotFound},
 	}
 
@@ -2141,6 +2142,27 @@ func TestSetGetRemoveEnvironment(t *testing.T) {
 	// Removing a variable that doesn't exist should not error.
 	if err := tm.RemoveEnvironment(sessionName, "GC_NONEXISTENT"); err != nil {
 		t.Errorf("RemoveEnvironment(nonexistent) = %v, want nil", err)
+	}
+}
+
+func TestRemoveEnvironmentAbsentSessionIsSessionNotFound(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	tm := testTmux()
+	anchor := "gt-test-env-anchor-" + t.Name()
+	missing := "gt-test-env-missing-" + t.Name()
+	_ = tm.KillSession(anchor)
+	_ = tm.KillSession(missing)
+	if err := tm.NewSession(anchor, ""); err != nil {
+		t.Fatalf("NewSession anchor: %v", err)
+	}
+	defer func() { _ = tm.KillSession(anchor) }()
+
+	err := tm.RemoveEnvironment(missing, "GC_DRAIN_ACK")
+	if !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("RemoveEnvironment(absent session) = %v, want ErrSessionNotFound", err)
 	}
 }
 

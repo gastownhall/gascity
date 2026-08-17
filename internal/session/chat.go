@@ -209,15 +209,20 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 		}
 	}
 	cfg.Command = freshCmd
-	// Refuse the fresh start if a prior escaped process for this session could
-	// not be confirmed dead: a survivor would race this replacement for the
-	// same work bead. This path reuses the existing bead ID, so there is no
-	// fresh-create to roll back — unroute and propagate the error before Start.
-	if orphanErr := m.killExistingOrphans(ctx, id); orphanErr != nil {
+	// This path reuses the existing bead ID, so there is no fresh-create to roll
+	// back. Confirm any predecessor dead, then clear its ack immediately before
+	// Start so the replacement's own acknowledgement cannot be erased.
+	if prepErr := m.prepareRuntimeStart(ctx, id, sessName); prepErr != nil {
 		if unroute != nil {
 			unroute()
 		}
-		return false, fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
+		return false, prepErr
+	}
+	if err := m.issueProviderSessionKeyReceipt(b, &cfg); err != nil {
+		if unroute != nil {
+			unroute()
+		}
+		return false, err
 	}
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 		if unroute != nil {
@@ -252,6 +257,9 @@ var (
 	// ErrPendingInteraction reports that the session is blocked on a pending
 	// approval or question and cannot accept a new user turn.
 	ErrPendingInteraction = errors.New("session has a pending interaction")
+	// ErrCreateSuperseded reports that an operator suspended or closed a newly
+	// visible session bead before its creator acquired lifecycle ownership.
+	ErrCreateSuperseded = errors.New("session create superseded by lifecycle change")
 )
 
 type sessionMutationLockEntry struct {
@@ -269,10 +277,71 @@ func WithSessionMutationLock(id string, fn func() error) error {
 	return withSessionMutationLock(id, fn)
 }
 
+// TryWithSessionMutationLock is the non-blocking controller form of
+// WithSessionMutationLock. A false acquired result is not an error: another
+// start, wake, suspend, or message mutation currently owns the session, so a
+// background reconciler should fail closed and retry on a later tick rather
+// than stall the city event loop.
+func TryWithSessionMutationLock(id string, fn func() error) (acquired bool, err error) {
+	lock, acquired := tryAcquireSessionMutationLock(id)
+	if !acquired {
+		return false, nil
+	}
+	defer releaseSessionMutationLock(id, lock)
+	return true, fn()
+}
+
 func withSessionMutationLock(id string, fn func() error) error {
 	lock := acquireSessionMutationLock(id)
 	defer releaseSessionMutationLock(id, lock)
 	return fn()
+}
+
+// withLifecycleMutationLock is the lock order for operations that can change a
+// session's durable lifecycle or start/stop its runtime. The city-scoped flock
+// excludes the managed reconciler and other gc processes; the existing keyed
+// mutex preserves the finer in-process serialization expected by Manager.
+// Always acquire in this order -- lifecycle then mutation -- to avoid an
+// inter-process lifecycle waiter deadlocking with an in-process mutation
+// holder.
+func (m *Manager) withLifecycleMutationLock(id string, fn func() error) error {
+	return WithCitySessionLifecycleLock(m.cityPath, id, func() error {
+		return withSessionMutationLock(id, fn)
+	})
+}
+
+// withLifecycleMutationLockContext preserves lifecycle-before-mutation order
+// while allowing an outer, context-owned lifecycle transaction to call through
+// Manager without recursively acquiring the same non-reentrant flock.
+func (m *Manager) withLifecycleMutationLockContext(ctx context.Context, id string, fn func() error) error {
+	if citySessionLifecycleLockHeld(ctx, m.cityPath, id) {
+		return withSessionMutationLock(id, fn)
+	}
+	return WithCitySessionLifecycleLockContext(ctx, m.cityPath, id, func(context.Context) error {
+		return withSessionMutationLock(id, fn)
+	})
+}
+
+// withExecutionStalledGuardedMutation is the common boundary for Manager
+// operations that can advance provider activity or change durable identity /
+// launch authority. The lifecycle flock orders the authoritative live read
+// against the controller's stalled-latch write; the keyed mutex retains the
+// Manager's in-process serialization. Callers whose only mutation is a
+// presentation-only title update intentionally do not need this fence.
+func (m *Manager) withExecutionStalledGuardedMutation(id string, allowClosed bool, fn func(beads.Bead, string) error) error {
+	return m.withLifecycleMutationLock(id, func() error {
+		b, sessName, err := m.loadSessionBead(id, allowClosed)
+		if err != nil {
+			return err
+		}
+		if err := executionStalledRecoveryPendingError(id, b.Metadata); err != nil {
+			return err
+		}
+		if fn == nil {
+			return nil
+		}
+		return fn(b, sessName)
+	})
 }
 
 func acquireSessionMutationLock(id string) *sessionMutationLockEntry {
@@ -287,6 +356,28 @@ func acquireSessionMutationLock(id string) *sessionMutationLockEntry {
 
 	lock.mu.Lock()
 	return lock
+}
+
+func tryAcquireSessionMutationLock(id string) (*sessionMutationLockEntry, bool) {
+	sessionMutationLocksMu.Lock()
+	lock := sessionMutationLocks[id]
+	if lock == nil {
+		lock = &sessionMutationLockEntry{}
+		sessionMutationLocks[id] = lock
+	}
+	lock.refs++
+	sessionMutationLocksMu.Unlock()
+
+	if lock.mu.TryLock() {
+		return lock, true
+	}
+	sessionMutationLocksMu.Lock()
+	lock.refs--
+	if lock.refs == 0 {
+		delete(sessionMutationLocks, id)
+	}
+	sessionMutationLocksMu.Unlock()
+	return nil, false
 }
 
 func releaseSessionMutationLock(id string, lock *sessionMutationLockEntry) {
@@ -309,7 +400,10 @@ func sessionName(id string, b beads.Bead) string {
 }
 
 func (m *Manager) loadSessionBead(id string, allowClosed bool) (beads.Bead, string, error) {
-	b, err := m.store.Get(id)
+	// Manager methods sit on provider/mutation boundaries. Bypass a clean
+	// active-row cache so a durable stalled latch or attach reservation written
+	// by another process is never missed.
+	b, err := beads.HandlesFor(m.store).Live.Get(id)
 	if err != nil {
 		return beads.Bead{}, "", fmt.Errorf("getting session: %w", err)
 	}
@@ -333,15 +427,19 @@ func (m *Manager) sessionBead(id string) (beads.Bead, string, error) {
 }
 
 func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
+	if err := executionStalledRecoveryPendingError(id, b.Metadata); err != nil {
+		return err
+	}
 	transport, transportVerified := m.transportForBead(b, sessName)
 	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
 	if State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName) {
 		if b.Metadata["transport"] == "" && transportVerified {
 			m.persistTransport(id, b.Metadata["provider"], transport)
 		}
-		if err := m.confirmLiveSessionState(id, &b); err != nil {
+		if err := m.confirmLiveSessionState(id, &b, false); err != nil {
 			return err
 		}
+		m.consumeProviderSessionKeyReceipt(&b)
 		return nil
 	}
 	if resumeCommand == "" {
@@ -383,16 +481,19 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	}
 	cfg = runtime.SyncWorkDirEnv(cfg)
 	started := false
-	// Refuse to resume if a prior escaped process for this session could not be
-	// confirmed dead: a survivor would race this replacement for the same work
-	// bead (duplicate bd close). This is the stable/reused-bead-ID path — the
-	// exact "old process survives alongside its replacement" scenario. No
-	// fresh-create to roll back, so unroute and propagate before Start.
-	if orphanErr := m.killExistingOrphans(ctx, id); orphanErr != nil {
+	// This stable/reused-bead-ID path has no fresh-create to roll back. Confirm
+	// any predecessor dead, then clear its ack immediately before Start.
+	if prepErr := m.prepareRuntimeStart(ctx, id, sessName); prepErr != nil {
 		if unroute != nil {
 			unroute()
 		}
-		return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
+		return prepErr
+	}
+	if err := m.issueProviderSessionKeyReceipt(&b, &cfg); err != nil {
+		if unroute != nil {
+			unroute()
+		}
+		return err
 	}
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 		if errors.Is(err, runtime.ErrSessionDiedDuringStartup) && b.Metadata["session_key"] != "" {
@@ -444,19 +545,24 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	if err := m.syncStoredMCPServers(id, &b, cfg.MCPServers); err != nil {
 		return fmt.Errorf("%w: %w", ErrStateSync, err)
 	}
-	if err := m.confirmLiveSessionState(id, &b); err != nil {
+	if err := m.confirmLiveSessionState(id, &b, true); err != nil {
 		if started && !errors.Is(err, ErrStateSync) {
 			_ = m.sp.Stop(sessName)
 		}
 		return err
 	}
+	m.consumeProviderSessionKeyReceipt(&b)
 	return nil
 }
 
 func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
+	if err := executionStalledRecoveryPendingError(id, b.Metadata); err != nil {
+		return err
+	}
 	transport, _ := m.transportForBead(b, sessName)
 	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
 	if m.sp.IsRunning(sessName) {
+		m.consumeProviderSessionKeyReceipt(&b)
 		return nil
 	}
 	if resumeCommand == "" {
@@ -500,15 +606,19 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 	}
 	cfg = runtime.SyncWorkDirEnv(cfg)
 	started := false
-	// Refuse to respawn if a prior escaped process for this session could not
-	// be confirmed dead: a survivor would race this replacement for the same
-	// work bead. This is the reconciler respawn bridge on a stable/reused bead
-	// ID. No fresh-create to roll back, so unroute and propagate before Start.
-	if orphanErr := m.killExistingOrphans(ctx, id); orphanErr != nil {
+	// This reconciler respawn bridge reuses the bead ID. Confirm any predecessor
+	// dead, then clear its ack immediately before Start.
+	if prepErr := m.prepareRuntimeStart(ctx, id, sessName); prepErr != nil {
 		if unroute != nil {
 			unroute()
 		}
-		return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
+		return prepErr
+	}
+	if err := m.issueProviderSessionKeyReceipt(&b, &cfg); err != nil {
+		if unroute != nil {
+			unroute()
+		}
+		return err
 	}
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 		switch {
@@ -542,18 +652,44 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 			}
 		}
 	}
+	m.consumeProviderSessionKeyReceipt(&b)
 	return nil
 }
 
-func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead) error {
+func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead, startsAwakeInterval bool) error {
 	if b == nil {
 		return nil
 	}
 	batch := make(map[string]string)
-	switch State(b.Metadata["state"]) {
-	case "", StateStartPending, StateCreating, StateAsleep, StateSuspended:
-		batch["state"] = string(StateActive)
-		batch["state_reason"] = "creation_complete"
+	if startsAwakeInterval {
+		// A Manager-owned implicit resume is a real wake, even when the runtime
+		// starts and exits before the reconciler can observe it. Persist the same
+		// fresh awake epoch and clear the blockers the explicit wake path owns so
+		// a stale drain finalizer can prove this start superseded its snapshot.
+		for key, value := range ClearWakeBlockersPatch(State(b.Metadata["state"]), b.Metadata["sleep_reason"]) {
+			batch[key] = value
+		}
+		startedAt := m.now().UTC()
+		startedPatch := ConfirmStartedPatch(startedAt)
+		// Injected/frozen clocks can return the previous interval's exact
+		// timestamp. Advance one nanosecond until the durable awake epoch changes;
+		// the finalizer uses this field as part of its supersession proof.
+		for startedPatch["awake_started_at"] == b.Metadata["awake_started_at"] {
+			startedAt = startedAt.Add(time.Nanosecond)
+			startedPatch = ConfirmStartedPatch(startedAt)
+		}
+		for key, value := range startedPatch {
+			batch[key] = value
+		}
+		batch["wake_request"] = ""
+		batch["wake_requested_at"] = ""
+		batch["wake_request_token"] = ""
+	} else {
+		switch State(b.Metadata["state"]) {
+		case "", StateStartPending, StateCreating, StateAsleep, StateSuspended:
+			batch["state"] = string(StateActive)
+			batch["state_reason"] = "creation_complete"
+		}
 	}
 	if strings.TrimSpace(b.Metadata["pending_create_claim"]) != "" {
 		batch["pending_create_claim"] = ""
@@ -562,6 +698,7 @@ func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead) error {
 	if len(batch) == 0 {
 		return nil
 	}
+	batch = BindProviderSessionKeyReceiptAuthority(infoFromPersistedBead(*b), MetadataPatch(batch))
 	if err := m.store.SetMetadataBatch(id, batch); err != nil {
 		return fmt.Errorf("%w: updating session state: %w", ErrStateSync, err)
 	}
@@ -748,7 +885,7 @@ func (m *Manager) sendLocked(ctx context.Context, id string, b beads.Bead, sessN
 }
 
 func (m *Manager) send(ctx context.Context, id, message, resumeCommand string, hints runtime.Config, immediate bool) error {
-	return withSessionMutationLock(id, func() error {
+	return m.withLifecycleMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
@@ -759,9 +896,12 @@ func (m *Manager) send(ctx context.Context, id, message, resumeCommand string, h
 
 func (m *Manager) sendLiveOnly(ctx context.Context, id, message string, immediate bool) (bool, error) {
 	var delivered bool
-	err := withSessionMutationLock(id, func() error {
-		_, sessName, err := m.sessionBead(id)
+	err := m.withLifecycleMutationLock(id, func() error {
+		b, sessName, err := m.sessionBead(id)
 		if err != nil {
+			return err
+		}
+		if err := executionStalledRecoveryPendingError(id, b.Metadata); err != nil {
 			return err
 		}
 		if !m.sp.IsRunning(sessName) {
@@ -781,7 +921,7 @@ func (m *Manager) sendLiveOnly(ctx context.Context, id, message string, immediat
 // It is the canonical manager-level bring-up path for worker handles and
 // other callers that need bounded startup without attaching a terminal.
 func (m *Manager) Start(ctx context.Context, id, resumeCommand string, hints runtime.Config) error {
-	return withSessionMutationLock(id, func() error {
+	return m.withLifecycleMutationLockContext(ctx, id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
@@ -795,7 +935,7 @@ func (m *Manager) Start(ctx context.Context, id, resumeCommand string, hints run
 // bridge while they still own commit/rollback bookkeeping above the worker
 // boundary.
 func (m *Manager) StartRuntimeOnly(ctx context.Context, id, resumeCommand string, hints runtime.Config) error {
-	return withSessionMutationLock(id, func() error {
+	return m.withLifecycleMutationLockContext(ctx, id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
@@ -837,7 +977,7 @@ func (m *Manager) SendImmediateLiveOnly(ctx context.Context, id, message string)
 // an operational error.
 func (m *Manager) TryWaitIdleNudge(ctx context.Context, id, source, message, resumeCommand string, hints runtime.Config) (bool, error) {
 	var delivered bool
-	err := withSessionMutationLock(id, func() error {
+	err := m.withLifecycleMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
@@ -853,9 +993,12 @@ func (m *Manager) TryWaitIdleNudge(ctx context.Context, id, source, message, res
 // session.
 func (m *Manager) TryWaitIdleNudgeLiveOnly(ctx context.Context, id, source, message string) (bool, error) {
 	var delivered bool
-	err := withSessionMutationLock(id, func() error {
+	err := m.withLifecycleMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
+			return err
+		}
+		if err := executionStalledRecoveryPendingError(id, b.Metadata); err != nil {
 			return err
 		}
 		delivered, err = m.tryWaitIdleNudgeLiveOnlyLocked(ctx, b, source, sessName, message)
@@ -925,11 +1068,7 @@ func (m *Manager) PendingByName(sessName string) (*runtime.PendingInteraction, b
 
 // Respond resolves the current pending interaction for a session.
 func (m *Manager) Respond(id string, response runtime.InteractionResponse) error {
-	return withSessionMutationLock(id, func() error {
-		_, sessName, err := m.sessionBead(id)
-		if err != nil {
-			return err
-		}
+	return m.withExecutionStalledGuardedMutation(id, false, func(_ beads.Bead, sessName string) error {
 		ip, ok := m.sp.(runtime.InteractionProvider)
 		if !ok {
 			return ErrInteractionUnsupported

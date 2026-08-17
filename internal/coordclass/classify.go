@@ -14,6 +14,10 @@ import (
 const (
 	// labelSession marks session identity beads. Canonical: session.LabelSession.
 	labelSession = "gc:session"
+	// labelSessionStartReceipt marks the append-only provider SessionStart
+	// handoff record. It belongs to the sessions class but is deliberately not a
+	// gc:session lifecycle row.
+	labelSessionStartReceipt = "gc:session-start-receipt"
 	// typeSession is the session bead type. Canonical: session.BeadType.
 	typeSession = "session"
 	// labelWait marks durable session-wait beads. Canonical: session.WaitBeadLabel.
@@ -156,7 +160,7 @@ func classifyFields(beadType string, labels []string, metadata, metadataRefs map
 		return ClassMessaging
 	case hasLabel(labels, labelOrderTracking):
 		return ClassOrders
-	case hasLabel(labels, labelSession) || beadType == typeSession:
+	case hasLabel(labels, labelSession) || hasLabel(labels, labelSessionStartReceipt) || beadType == typeSession:
 		return ClassSessions
 	case hasLabel(labels, labelWait):
 		return ClassSessions

@@ -443,6 +443,17 @@ type InFlightProvider interface {
 	ListInFlight(filter Filter) ([]Event, error)
 }
 
+// InFlightContextProvider is the cancellable form of [InFlightProvider].
+// File-backed recovery callers use it when a retained-history walk may span
+// large compressed archives: cancellation must be able to stop that walk
+// rather than merely suppressing work after it eventually returns.
+//
+// Providers without a cancellable read surface need not implement this
+// optional extension.
+type InFlightContextProvider interface {
+	ListInFlightContext(ctx context.Context, filter Filter) ([]Event, error)
+}
+
 // Watcher yields events one at a time. Created by [Provider.Watch].
 // Callers must call Close() when done watching.
 type Watcher interface {

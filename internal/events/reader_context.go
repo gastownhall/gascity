@@ -11,17 +11,17 @@ import (
 
 // ReadFilteredContext is ReadFiltered but aborts the archive scan as soon as
 // ctx is canceled, instead of always scanning every overlapping archive to
-// completion. Cancellation is checked once per archive in the loop, so a
-// caller that disconnects mid-scan gets back the events found so far plus
-// ctx.Err(), rather than waiting for the full (potentially large) fallback
-// scan to finish.
+// completion. Cancellation is checked between archives and every bounded
+// number of raw records, so a caller that disconnects mid-scan gets back the
+// events found so far plus ctx.Err(), rather than waiting for a large sparse
+// archive to finish.
 func ReadFilteredContext(ctx context.Context, path string, filter Filter) ([]Event, error) {
 	result, _, err := readFilteredTrackedContext(ctx, path, filter)
 	return result, err
 }
 
-// readFilteredTrackedContext is readFilteredTracked plus ctx cancellation
-// checked as the first step of each archive-loop iteration. See
+// readFilteredTrackedContext is readFilteredTracked plus bounded ctx
+// cancellation throughout archive and active-file decoding. See
 // readFilteredTracked for the archive-window tracking this returns.
 func readFilteredTrackedContext(ctx context.Context, path string, filter Filter) ([]Event, map[eventSeqWindow]struct{}, error) {
 	dir := filepath.Dir(path)
@@ -46,7 +46,10 @@ func readFilteredTrackedContext(ctx context.Context, path string, filter Filter)
 			continue
 		}
 		archivePath := filepath.Join(dir, info.Basename)
-		err := streamArchive(archivePath, filter, func(e Event) bool {
+		err := streamArchiveContext(ctx, archivePath, filter, func(e Event) bool {
+			if filter.BeforeSeq > 0 && e.Seq >= filter.BeforeSeq {
+				return false
+			}
 			if !matchesFilter(e, filter) {
 				return true
 			}
@@ -75,10 +78,20 @@ func readFilteredTrackedContext(ctx context.Context, path string, filter Filter)
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // handle lines up to 1MB
+	checked := 0
 	for scanner.Scan() {
+		if checked%256 == 0 {
+			if err := ctx.Err(); err != nil {
+				return result, listed, err
+			}
+		}
+		checked++
 		var e Event
 		if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
 			continue // skip malformed lines
+		}
+		if filter.BeforeSeq > 0 && e.Seq >= filter.BeforeSeq {
+			break
 		}
 		if !matchesFilter(e, filter) {
 			continue
@@ -99,7 +112,10 @@ func readFilteredTrackedContext(ctx context.Context, path string, filter Filter)
 // ReadFilteredContext does for ReadFiltered.
 func ReadFilteredWithInFlightContext(ctx context.Context, path string, filter Filter) ([]Event, error) {
 	base, listedArchives, baseErr := readFilteredTrackedContext(ctx, path, filter)
-	rotated, rotationErr := readRotationSources(path, filter, listedArchives)
+	if baseErr != nil && ctx.Err() != nil {
+		return base, baseErr
+	}
+	rotated, rotationErr := readRotationSourcesContext(ctx, path, filter, listedArchives)
 	if len(rotated) == 0 {
 		if baseErr == nil {
 			return base, rotationErr

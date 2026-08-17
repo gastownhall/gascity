@@ -80,6 +80,7 @@ func formatSoftReloadFailedSessions(names []string) string {
 // Returns accepted-session, failed-session, stale-drain-cancellation, and
 // empty-desired-state diagnostics for the controller reply.
 func acceptConfigDriftAcrossSessions(
+	cityPath string,
 	sessFront *session.Store,
 	desired map[string]TemplateParams,
 	sessionBeads *sessionBeadSnapshot,
@@ -130,12 +131,6 @@ func acceptConfigDriftAcrossSessions(
 		if storedHash == currentHash {
 			continue
 		}
-		if err := clearSoftReloadConfigDriftDrainAckInfo(info, sp, dt); err != nil {
-			result.Failed++
-			result.FailedSessions = append(result.FailedSessions, name)
-			fmt.Fprintf(stderr, "soft reload: clearing config-drift drain ack metadata for %s: %v; leaving config hash unchanged\n", name, err) //nolint:errcheck // best-effort stderr
-			continue
-		}
 		metadata, err := softReloadAcceptedHashMetadata(agentCfg, currentHash)
 		if err != nil {
 			result.Failed++
@@ -143,13 +138,27 @@ func acceptConfigDriftAcrossSessions(
 			fmt.Fprintf(stderr, "soft reload: preparing config hash metadata for %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
 			continue
 		}
-		if err := sessFront.ApplyPatch(info.ID, metadata); err != nil {
+		canceledDrain := false
+		applied, _, err := tryWithCurrentSessionMutation(cityPath, sessFront, info, false, func(live session.Info) error {
+			if err := clearSoftReloadConfigDriftDrainAckInfo(live, sp, dt); err != nil {
+				return fmt.Errorf("clearing config-drift drain ack metadata: %w", err)
+			}
+			if err := sessFront.ApplyPatch(live.ID, metadata); err != nil {
+				return err
+			}
+			canceledDrain = cancelSoftReloadConfigDriftDrainInfo(live, sp, dt)
+			return nil
+		})
+		if err != nil {
 			result.Failed++
 			result.FailedSessions = append(result.FailedSessions, name)
 			fmt.Fprintf(stderr, "soft reload: updating config hash metadata for %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
 			continue
 		}
-		if cancelSoftReloadConfigDriftDrainInfo(info, sp, dt) {
+		if !applied {
+			continue
+		}
+		if canceledDrain {
 			result.CanceledDrains++
 		}
 		result.Updated++

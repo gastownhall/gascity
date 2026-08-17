@@ -37,7 +37,10 @@ var allProjectedMetadataKeys = []string{
 	aliasHistoryMetadataKey, "continuity_eligible", "last_woke_at", "awake_started_at", "usage_compute_emitted_at", "state_reason",
 	"creation_complete_at", "continuation_reset_pending", SessionCircuitStateMetadataKey,
 	ResetCommittedAtKey,
-	"generation", "started_config_hash", "pin_awake", "held_until", "wait_hold",
+	"generation", "started_config_hash", "pin_awake", ExecutionClaimNudgeStalledMetadataKey, "held_until", "wait_hold",
+	ProviderSessionKeyReceiptTokenMetadataKey, ProviderSessionKeyReceiptAuthorityMetadataKey,
+	ProviderSessionKeyReceiptConsumeAuthorityMetadataKey, ProviderSessionKeyReceiptIssuedAtMetadataKey,
+	SessionHookActivityGateMetadataKey,
 	"churn_count", "wake_mode", "sleep_intent", "instance_token", "detached_at",
 	CurrentBeadIDKey, "core_hash_breakdown", "started_provision_hash",
 	"started_launch_hash", "started_live_hash", "live_hash", "startup_dialog_verified",
@@ -45,7 +48,7 @@ var allProjectedMetadataKeys = []string{
 	"config_drift_deferred_key", "attached_config_drift_deferred_at",
 	"attached_config_drift_deferred_key", "stranded_event_emitted_at",
 	"unknown_state_first_seen", "unknown_state_value", "unknown_state_escalated_at",
-	"session_name_explicit", "wake_request", "restart_requested",
+	"session_name_explicit", "wake_request", "wake_requested_at", "wake_request_token", "restart_requested",
 	"session_id_flag", "template_overrides", "wake_attempts",
 	MetadataLastNudgeDeliveredAt, "provider_kind", "builtin_ancestor",
 	"sleep_policy_fingerprint", "requested_sleep_after_idle",
@@ -93,8 +96,10 @@ func oracleBaseBeads() []beads.Bead {
 		"config_drift_deferred_at": "2026-01-06T00:00:00Z", "config_drift_deferred_key": "k",
 		"attached_config_drift_deferred_at":  "2026-01-07T00:00:00Z",
 		"attached_config_drift_deferred_key": "ak", "stranded_event_emitted_at": "2026-01-08T00:00:00Z",
-		"session_name_explicit": "true", "wake_request": "explicit", "restart_requested": "true",
-		"session_id_flag": "--session-id", "template_overrides": `{"x":"y"}`, "wake_attempts": "3",
+		"session_name_explicit": "true", "wake_request": "explicit",
+		"wake_requested_at": "2026-01-08T00:30:00Z", "wake_request_token": "wake-token",
+		"restart_requested": "true",
+		"session_id_flag":   "--session-id", "template_overrides": `{"x":"y"}`, "wake_attempts": "3",
 		MetadataLastNudgeDeliveredAt: "2026-01-09T00:00:00Z", "provider_kind": "claude",
 		"builtin_ancestor":         "codex",
 		"sleep_policy_fingerprint": "fp-1", "requested_sleep_after_idle": "30m",
@@ -179,8 +184,9 @@ func oraclePatches() []MetadataPatch {
 		{"pending_create_claim": " true "}, // untrimmed mirror vs trimmed bool
 		{"manual_session": "1"},
 		{"session_drainable": "true"},
-		{"wake_requested_at": "2026-01-01T00:00:00Z"}, // unprojected key: must not change Info
-		{"env.GC_FOO": "bar"},                         // unprojected key
+		{"wake_requested_at": "2026-01-01T00:00:00Z"},
+		{"wake_request_token": "replacement-token"},
+		{"env.GC_FOO": "bar"}, // unprojected key
 		{"state": "idle", "session_name": "", "provider": "codex", "wake_attempts": "9", "held_until": ""}, // multi-key mix
 	}
 	return append(patches, edge...)

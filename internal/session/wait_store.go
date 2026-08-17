@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -537,6 +538,11 @@ type WakeOpts struct {
 	// RejectClosed makes a closed session a *WakeConflictError{State:"closed"}
 	// before any write. Other callers pass the zero value.
 	RejectClosed bool
+	// CityPath selects the cross-process lifecycle lock shared with the managed
+	// reconciler. Production callers that can run while a city controller is
+	// active must provide it; an empty value uses the process-local keyed lock
+	// for unmanaged callers and tests.
+	CityPath string
 }
 
 // WakeResult carries the outcome of a WakeSession call.
@@ -547,6 +553,13 @@ type WakeResult struct {
 	// (for crash-history clearing) and MetadataState / Template (for the CLI's
 	// post-wake checks).
 	Info Info
+	// RequestedAt is the human-readable durable wake_requested_at timestamp.
+	// It is diagnostic only because distinct wakes can share one-second precision.
+	RequestedAt string
+	// RequestToken is the unambiguous random identity of this wake request.
+	// requested_at remains human-readable and may collide within one second;
+	// delayed mutations must fence on this token instead.
+	RequestToken string
 }
 
 // WakeSession clears hold/quarantine state and cancels open waits for a session,
@@ -559,47 +572,207 @@ type WakeResult struct {
 // ErrNotSessionBead. A lifecycle conflict — or a closed session when
 // opts.RejectClosed is set — returns a *WakeConflictError.
 func (s *Store) WakeSession(id string, now time.Time, opts WakeOpts) (WakeResult, error) {
-	b, err := s.store.Get(id)
+	var result WakeResult
+	err := WithCitySessionLifecycleLock(opts.CityPath, id, func() error {
+		return WithSessionMutationLock(id, func() error {
+			var err error
+			result, err = s.wakeSessionLocked(id, now, opts)
+			return err
+		})
+	})
+	return result, err
+}
+
+// wakeSessionLocked applies WakeSession while the caller holds the durable
+// per-session lifecycle lock. Keeping the complete read/check/wait-cancel/write
+// sequence inside that critical section gives the reconciler close and the
+// operator wake one unambiguous order: either wake commits first and the close
+// fence observes it, or close commits first and wake returns a closed conflict.
+func (s *Store) wakeSessionLocked(id string, now time.Time, opts WakeOpts) (WakeResult, error) {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	b, err := s.liveSessionBead(id)
 	if err != nil {
 		return WakeResult{}, err
-	}
-	if !IsSessionBeadOrRepairable(b) {
-		return WakeResult{}, fmt.Errorf("%w: %s", ErrNotSessionBead, id)
 	}
 	RepairEmptyType(s.store.Store, &b)
 	info := infoFromPersistedBead(b)
+	if err := executionStalledRecoveryPendingError(id, b.Metadata); err != nil {
+		return WakeResult{}, err
+	}
 	if opts.RejectClosed && b.Status == "closed" {
 		return WakeResult{}, &WakeConflictError{SessionID: id, State: "closed"}
 	}
-	nudgeIDs, err := s.wakeSessionFromBead(b, now)
+	nudgeIDs, requestToken, err := s.wakeSessionFromBeadWithToken(b, now)
 	if err != nil {
 		return WakeResult{}, err
 	}
-	return WakeResult{NudgeIDs: nudgeIDs, Info: info}, nil
+	return WakeResult{
+		NudgeIDs:     nudgeIDs,
+		Info:         info,
+		RequestedAt:  now.UTC().Format(time.RFC3339),
+		RequestToken: requestToken,
+	}, nil
+}
+
+// CancelWakeRequestIfCurrent removes one exact wake request without
+// overwriting a later operator lifecycle decision. The read, epoch/state check,
+// and normalization write are serialized with controller starts and operator
+// suspend/close operations by the per-session lifecycle lock.
+//
+// It returns false without mutation when the request was already consumed or
+// replaced, or when a later suspend/terminal transition won the lock first.
+func (s *Store) CancelWakeRequestIfCurrent(id, expectedRequestToken, cityPath string) (bool, error) {
+	expectedRequestToken = strings.TrimSpace(expectedRequestToken)
+	if expectedRequestToken == "" {
+		return false, nil
+	}
+	canceled := false
+	err := WithCitySessionLifecycleLock(cityPath, id, func() error {
+		return WithSessionMutationLock(id, func() error {
+			b, err := s.liveSessionBead(id)
+			if err != nil {
+				return err
+			}
+			if HasExecutionClaimNudgeStalledMetadata(b.Metadata) {
+				return nil
+			}
+			if b.Status == "closed" || strings.TrimSpace(b.Metadata["wake_request_token"]) != expectedRequestToken {
+				return nil
+			}
+			// CLI normalization is only valid for the exact delta produced by
+			// waking a non-commandable suspended/drained session: ClearWakeBlockers
+			// leaves that request asleep. Even an exact token must not let delayed
+			// cleanup rewrite a later lifecycle state that happened to retain it.
+			if State(strings.TrimSpace(b.Metadata["state"])) != StateAsleep {
+				return nil
+			}
+			if err := s.store.SetMetadataBatch(id, map[string]string{
+				"state":                     string(StateAsleep),
+				"state_reason":              "",
+				"pending_create_claim":      "",
+				"pending_create_started_at": "",
+				"wake_request":              "",
+				"wake_requested_at":         "",
+				"wake_request_token":        "",
+			}); err != nil {
+				return err
+			}
+			canceled = true
+			return nil
+		})
+	})
+	return canceled, err
+}
+
+// RunIfWakeRequestCurrent runs fn only while the exact wake request still owns
+// the session lifecycle. It is the safe bridge for delayed API work: a later
+// suspend, close, or replacement wake either clears/replaces the token before
+// this lock is acquired, or waits until fn has committed and then wins after it.
+func (s *Store) RunIfWakeRequestCurrent(ctx context.Context, id, expectedRequestToken, cityPath string, fn func(context.Context) error) (bool, error) {
+	expectedRequestToken = strings.TrimSpace(expectedRequestToken)
+	if expectedRequestToken == "" || fn == nil {
+		return false, nil
+	}
+	ran := false
+	err := WithCitySessionLifecycleLockContext(ctx, cityPath, id, func(lockedCtx context.Context) error {
+		b, err := s.liveSessionBead(id)
+		if err != nil {
+			return err
+		}
+		if err := executionStalledRecoveryPendingError(id, b.Metadata); err != nil {
+			return err
+		}
+		if b.Status == "closed" || strings.TrimSpace(b.Metadata["wake_request_token"]) != expectedRequestToken {
+			return nil
+		}
+		switch State(strings.TrimSpace(b.Metadata["state"])) {
+		case StateSuspended, StateClosed, StateArchived, StateQuarantined, StateDraining:
+			return nil
+		}
+		if strings.TrimSpace(b.Metadata["sleep_intent"]) == string(SleepReasonUserHold) {
+			return nil
+		}
+		if err := fn(lockedCtx); err != nil {
+			return err
+		}
+		// A successful live-convergence can be a no-op at the Manager layer when
+		// the runtime was already active. Consume the exact wake request here so
+		// that case cannot leave durable controller demand behind. Re-read under
+		// the mutation lock because the callback may already have consumed it.
+		if err := WithSessionMutationLock(id, func() error {
+			current, err := s.liveSessionBead(id)
+			if err != nil {
+				return err
+			}
+			if HasExecutionClaimNudgeStalledMetadata(current.Metadata) || current.Status == "closed" || strings.TrimSpace(current.Metadata["wake_request_token"]) != expectedRequestToken {
+				return nil
+			}
+			return s.store.SetMetadataBatch(id, map[string]string{
+				"wake_request":       "",
+				"wake_requested_at":  "",
+				"wake_request_token": "",
+			})
+		}); err != nil {
+			return err
+		}
+		ran = true
+		return nil
+	})
+	return ran, err
+}
+
+// liveSessionBead is the cache-bypassing read used at lifecycle mutation
+// boundaries. A clean CachingStore row is not authority for wake/token changes:
+// another process may already have persisted the terminal stalled latch.
+func (s *Store) liveSessionBead(id string) (beads.Bead, error) {
+	if s == nil || s.store.Store == nil {
+		return beads.Bead{}, beads.ErrNotFound
+	}
+	live := beads.HandlesFor(s.store.Store).Live
+	if live == nil {
+		return beads.Bead{}, fmt.Errorf("live session reader unavailable")
+	}
+	b, err := live.Get(id)
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	if !IsSessionBeadOrRepairable(b) {
+		return beads.Bead{}, fmt.Errorf("%w: %s", ErrNotSessionBead, id)
+	}
+	return b, nil
 }
 
 // wakeSessionFromBead performs the lifecycle-conflict check, wait cancellation
 // and wake batch over an already-fetched (and empty-type-repaired) session bead.
 // It is shared by the fused WakeSession method and the deprecated package func.
 func (s *Store) wakeSessionFromBead(sessionBead beads.Bead, now time.Time) ([]string, error) {
+	nudgeIDs, _, err := s.wakeSessionFromBeadWithToken(sessionBead, now)
+	return nudgeIDs, err
+}
+
+func (s *Store) wakeSessionFromBeadWithToken(sessionBead beads.Bead, now time.Time) ([]string, string, error) {
 	if sessionBead.ID == "" {
-		return nil, nil
+		return nil, "", nil
 	}
 	lcInput := LifecycleInputFromMetadata(sessionBead.Status, sessionBead.Metadata)
 	lcInput.Now = now
 	view := ProjectLifecycle(lcInput)
 	if state, conflict := lifecycleWakeConflictState(view); conflict {
-		return nil, &WakeConflictError{SessionID: sessionBead.ID, State: state}
+		return nil, "", &WakeConflictError{SessionID: sessionBead.ID, State: state}
 	}
 	nudgeIDs, capped, err := s.cancelWaitsAndCollectNudgeIDs(sessionBead.ID, now)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	state := State(strings.TrimSpace(sessionBead.Metadata["state"]))
 	batch := ClearWakeBlockersPatch(state, sessionBead.Metadata["sleep_reason"])
 	for k, v := range RequestExplicitWakePatch(string(WakeCauseExplicit), now) {
 		batch[k] = v
 	}
+	requestToken := NewInstanceToken()
+	batch["wake_request_token"] = requestToken
 	if view.BaseState == BaseStateArchived && view.ContinuityEligible {
 		batch["archived_at"] = ""
 		batch["continuity_eligible"] = "true"
@@ -608,7 +781,7 @@ func (s *Store) wakeSessionFromBead(sessionBead beads.Bead, now time.Time) ([]st
 		StampWaitLookupCapMetadata(batch, "session:"+sessionBead.ID, SessionWaitLookupLimit, now, "wake-session")
 	}
 	if err := s.store.SetMetadataBatch(sessionBead.ID, batch); err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return nudgeIDs, nil
+	return nudgeIDs, requestToken, nil
 }

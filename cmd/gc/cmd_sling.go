@@ -1645,6 +1645,15 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Stor
 	// today (cliSessionStore is the identity resolver; a nil target.cfg → identity
 	// too), so byte-identical until a [beads.classes.sessions] relocation lands.
 	sessStore := cliSessionStore(store, target.cfg, target.cityPath)
+	blocked, fenceErr := nudgeTargetLifecycleDeliveryBlocked(target, sessStore)
+	if fenceErr != nil {
+		fmt.Fprintf(stderr, "warning: bead routed but lifecycle fence check failed: %v\n", fenceErr) //nolint:errcheck
+		return
+	}
+	if blocked {
+		fmt.Fprintf(stderr, "warning: bead routed but nudge held: %v: %s\n", session.ErrExecutionStalledRecoveryPending, target.sessionID) //nolint:errcheck
+		return
+	}
 	obs, err := workerObserveNudgeTarget(target, sessStore, sp)
 	running := err == nil && obs.Running
 	now := time.Now()
@@ -1670,7 +1679,10 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Stor
 		}
 	}
 
-	if err := enqueueQueuedNudgeWithStore(target.cityPath, beads.NudgesStore{Store: store}, newQueuedNudgeWithOptions(target.agent.QualifiedName(), msg, "sling", now, queuedNudgeOptionsFromTarget(target))); err != nil {
+	item := newQueuedNudgeWithOptions(target.agent.QualifiedName(), msg, "sling", now, queuedNudgeOptionsFromTarget(target))
+	if err := withNudgeTargetLifecycleMutation(target, sessStore, func() error {
+		return enqueueQueuedNudgeWithStore(target.cityPath, beads.NudgesStore{Store: store}, item)
+	}); err != nil {
 		telemetry.RecordNudge(context.Background(), target.agent.QualifiedName(), err)
 		fmt.Fprintf(stderr, "warning: bead routed but nudge failed: %v\n", err) //nolint:errcheck // best-effort
 		return

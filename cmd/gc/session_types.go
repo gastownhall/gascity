@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	sessions "github.com/gastownhall/gascity/internal/session"
 )
 
 // WakeReason describes why a session should be awake.
@@ -52,13 +53,22 @@ type ExecSpec struct {
 // drainState tracks an in-progress async drain. Ephemeral (in-memory only).
 // Lost on controller crash — safe because NDI reconverges.
 type drainState struct {
-	startedAt  time.Time
-	deadline   time.Time
-	reason     string // "idle", "pool-excess", "config-drift", "user"
-	generation int    // generation at drain start — fence for Stop
-	ackSet     bool   // true after GC_DRAIN_ACK has been set by the reconciler
-	followUp   bool   // true when the controller should trigger one more immediate tick
+	startedAt       time.Time
+	deadline        time.Time
+	reason          string // "idle", "pool-excess", "config-drift", "user"
+	generation      int    // generation at drain start — legacy/provider fence
+	lifecycle       drainAckLifecycleVersion
+	lifecyclePinned bool // true when lifecycle is the exact begin-drain epoch
+	ackSet          bool // true after GC_DRAIN_ACK has been set by the reconciler
+	followUp        bool // true when the controller should trigger one more immediate tick
+	// actionGuard re-proves durable authority immediately around each destructive
+	// action. It is populated only by execution-stalled drains; ordinary drains
+	// preserve their existing lifecycle. A clear result retires the tracker, a
+	// hold retries later, and outstanding authorizes the callback.
+	actionGuard drainActionGuard
 }
+
+type drainActionGuard func(action func(sessions.Info) error) (backstopResolution, error)
 
 // idleProbeState tracks an async WaitForIdle probe for interactive idle sleep.
 // It stays in-memory only and is consumed on a later reconciler tick.

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -149,12 +150,29 @@ var bdBeadExists = func(cityPath string, cfg *config.City, target execStoreTarge
 }
 
 func bdCommandEnv(cityPath string, cfg *config.City, target execStoreTarget) ([]string, error) {
+	return bdCommandEnvWithRecovery(cityPath, cfg, target, true)
+}
+
+// bdCommandEnvWithRecovery projects the selected store into a bd subprocess
+// environment. Most interactive commands retain the historical recovery
+// behavior; callers that have an explicit read-only contract can disable the
+// provider health/recover/publish path and consume only already-published or
+// configured runtime state.
+func bdCommandEnvWithRecovery(cityPath string, cfg *config.City, target execStoreTarget, allowRecovery bool) ([]string, error) {
 	var overrides map[string]string
 	var err error
 	if target.ScopeKind == "rig" {
-		overrides, err = bdRuntimeEnvForRigWithError(cityPath, cfg, target.ScopeRoot)
+		if allowRecovery {
+			overrides, err = bdRuntimeEnvForRigWithError(cityPath, cfg, target.ScopeRoot)
+		} else {
+			overrides, err = bdRuntimeEnvForRigWithErrorNoRecovery(cityPath, cfg, target.ScopeRoot)
+		}
 	} else {
-		overrides, err = bdRuntimeEnvWithError(cityPath)
+		if allowRecovery {
+			overrides, err = bdRuntimeEnvWithError(cityPath)
+		} else {
+			overrides, err = bdRuntimeEnvWithErrorNoRecovery(cityPath)
+		}
 	}
 	if err != nil {
 		return nil, err
@@ -169,6 +187,35 @@ func bdCommandEnv(cityPath string, cfg *config.City, target execStoreTarget) ([]
 	overrides["GC_BEADS_PREFIX"] = target.Prefix
 	applyExportSuppressionEnv(overrides)
 	return mergeRuntimeEnv(os.Environ(), overrides), nil
+}
+
+// bdExplicitReadOnlyQuery recognizes only bd's query subcommand carrying an
+// explicit true --readonly flag as the first query argument. Requiring that
+// position matters: bd query also has value-consuming flags, so a later token
+// spelled "--readonly" might be another flag's value rather than an active
+// boolean. It deliberately fails closed for every other command or ordering,
+// an explicit false value, and conflicting later occurrences so ordinary gc bd
+// behavior keeps its recovery and stale-export cleanup semantics.
+func bdExplicitReadOnlyQuery(args []string) bool {
+	if len(args) < 2 || args[0] != "query" {
+		return false
+	}
+	first := args[1]
+	if first != "--readonly" {
+		if !strings.HasPrefix(first, "--readonly=") {
+			return false
+		}
+		value, err := strconv.ParseBool(strings.TrimPrefix(first, "--readonly="))
+		if err != nil || !value {
+			return false
+		}
+	}
+	for _, arg := range args[2:] {
+		if arg == "--readonly" || strings.HasPrefix(arg, "--readonly=") {
+			return false
+		}
+	}
+	return true
 }
 
 func warnExternalBdOverrideDrift(stderr io.Writer, cityPath string, target execStoreTarget) {
@@ -224,6 +271,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	explicitReadOnlyQuery := bdExplicitReadOnlyQuery(bdArgs)
 
 	// Refuse a dropped --set-metadata pair before any store work, so nothing is
 	// written and the exit code is honest. bd applies the subset and exits 0.
@@ -373,7 +421,9 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	reapStaleBdExportJSONL(target.ScopeRoot)
+	if !explicitReadOnlyQuery {
+		reapStaleBdExportJSONL(target.ScopeRoot)
+	}
 	warnExternalBdOverrideDrift(stderr, cityPath, target)
 
 	// Resolve the same binary every other bd path in the tree resolves for
@@ -400,7 +450,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// (close path) — both go through this handoff.
 	stderrScan := &headLimitedWriter{limit: bdStderrScanLimit}
 	cmd.Stderr = io.MultiWriter(stderr, stderrScan)
-	env, err := bdCommandEnv(cityPath, cfg, target)
+	env, err := bdCommandEnvWithRecovery(cityPath, cfg, target, !explicitReadOnlyQuery)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

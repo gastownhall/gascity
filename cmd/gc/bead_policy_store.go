@@ -296,7 +296,7 @@ func policyNameForBead(b beads.Bead) string {
 		return beadPolicyWisp
 	case hasBeadLabel(b.Labels, labelOrderTracking):
 		return beadPolicyOrderTracking
-	case hasBeadLabel(b.Labels, session.LabelSession) || b.Type == session.BeadType:
+	case hasBeadLabel(b.Labels, session.LabelSession) || hasBeadLabel(b.Labels, session.ProviderSessionKeyReceiptLabel) || b.Type == session.BeadType:
 		return beadPolicySession
 	case hasBeadLabel(b.Labels, session.WaitBeadLabel):
 		return beadPolicyWait

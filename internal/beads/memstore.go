@@ -60,7 +60,10 @@ type MemStore struct {
 	localStrings map[string]map[string]string
 }
 
-var _ ConditionalAssignmentReleaser = (*MemStore)(nil)
+var (
+	_ ConditionalAssignmentReleaser = (*MemStore)(nil)
+	_ BatchGetter                   = (*MemStore)(nil)
+)
 
 // NewMemStore returns a new empty MemStore.
 func NewMemStore() *MemStore {
@@ -518,6 +521,43 @@ func (m *MemStore) Get(id string) (Bead, error) {
 		}
 	}
 	return Bead{}, fmt.Errorf("getting bead %q: %w", id, ErrNotFound)
+}
+
+// GetBatch retrieves the authoritative Get-equivalent row for each unique ID
+// in stable first-input order. All rows are cloned while holding one lock, so
+// the batch observes one in-memory state and callers cannot mutate stored data.
+func (m *MemStore) GetBatch(ids []string) ([]Bead, error) {
+	unique, err := uniqueBatchGetIDs(ids)
+	if err != nil {
+		return nil, fmt.Errorf("getting beads batch: %w", err)
+	}
+	if len(unique) == 0 {
+		return nil, nil
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	positions := make(map[string]int, len(unique))
+	for i, id := range unique {
+		positions[id] = i
+	}
+	rows := make([]Bead, len(unique))
+	found := make([]bool, len(unique))
+	for _, bead := range m.beads {
+		i, ok := positions[bead.ID]
+		if !ok || found[i] {
+			continue
+		}
+		rows[i] = cloneBead(bead)
+		found[i] = true
+	}
+	for i, id := range unique {
+		if !found[i] {
+			return nil, fmt.Errorf("getting bead %q in batch: %w", id, ErrNotFound)
+		}
+	}
+	return rows, nil
 }
 
 // Children returns all non-closed beads whose ParentID matches the given ID,

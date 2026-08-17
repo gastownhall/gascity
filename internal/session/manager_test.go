@@ -87,6 +87,18 @@ type noImmediateProvider struct {
 	runtime.Provider
 }
 
+type blockingAttachProvider struct {
+	*runtime.Fake
+	entered chan string
+	release chan struct{}
+}
+
+func (p *blockingAttachProvider) Attach(name string) error {
+	p.entered <- name
+	<-p.release
+	return p.Fake.Attach(name)
+}
+
 type providerWithoutProcessScanner struct {
 	runtime.Provider
 }
@@ -121,10 +133,165 @@ func (p *orphanScanProvider) TerminateRuntime(r runtime.LiveRuntime) error {
 	return p.terminateErr
 }
 
+func runtimeDrainAckMetadataKeys() []string {
+	return []string{
+		runtime.DrainAckMetadataKey,
+		runtime.DrainAckSourceMetadataKey,
+		runtime.DrainAckReasonMetadataKey,
+		runtime.DrainAckGenerationMetadataKey,
+		runtime.DrainAckAwakeEpochMetadataKey,
+	}
+}
+
+func setRuntimeDrainAckMetadata(t *testing.T, sp runtime.Provider, name, marker string) {
+	t.Helper()
+	values := map[string]string{
+		runtime.DrainAckMetadataKey:           "1",
+		runtime.DrainAckSourceMetadataKey:     "agent",
+		runtime.DrainAckReasonMetadataKey:     marker + "-reason",
+		runtime.DrainAckGenerationMetadataKey: marker + "-generation",
+		runtime.DrainAckAwakeEpochMetadataKey: marker + "-awake-epoch",
+	}
+	for key, value := range values {
+		if err := sp.SetMeta(name, key, value); err != nil {
+			t.Fatalf("SetMeta(%s): %v", key, err)
+		}
+	}
+}
+
+func readRuntimeDrainAckMetadata(sp runtime.Provider, name string) (map[string]string, error) {
+	keys := runtimeDrainAckMetadataKeys()
+	got := make(map[string]string, len(keys))
+	for _, key := range keys {
+		value, err := sp.GetMeta(name, key)
+		if err != nil {
+			return nil, fmt.Errorf("GetMeta(%s): %w", key, err)
+		}
+		got[key] = value
+	}
+	return got, nil
+}
+
+func requireRuntimeDrainAckMetadataEmpty(t *testing.T, got map[string]string, stage string) {
+	t.Helper()
+	for _, key := range runtimeDrainAckMetadataKeys() {
+		if got[key] != "" {
+			t.Errorf("%s observed %s = %q, want empty", stage, key, got[key])
+		}
+	}
+}
+
+// orphanDrainAckProvider simulates the narrow race that motivated pre-start
+// cleanup: killing an escaped predecessor exposes its final agent-authored ack
+// metadata after the orphan scan, immediately before the replacement starts.
+type orphanDrainAckProvider struct {
+	*orphanScanProvider
+	observedAck   map[string]string
+	observedDrain string
+}
+
+func (p *orphanDrainAckProvider) TerminateRuntime(r runtime.LiveRuntime) error {
+	p.events = append(p.events, "terminate:"+r.SessionID)
+	if p.terminateErr != nil {
+		return p.terminateErr
+	}
+	for key, value := range map[string]string{
+		runtime.DrainAckMetadataKey:           "1",
+		runtime.DrainAckSourceMetadataKey:     "agent",
+		runtime.DrainAckReasonMetadataKey:     "old-runtime",
+		runtime.DrainAckGenerationMetadataKey: "4",
+		runtime.DrainAckAwakeEpochMetadataKey: "2026-08-06T12:00:00Z",
+		"GC_DRAIN":                            "operator-request",
+	} {
+		if err := p.SetMeta(r.ProviderName, key, value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *orphanDrainAckProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	observed, err := readRuntimeDrainAckMetadata(p, name)
+	if err != nil {
+		return err
+	}
+	p.observedAck = observed
+	p.observedDrain, err = p.GetMeta(name, "GC_DRAIN")
+	if err != nil {
+		return err
+	}
+	p.events = append(p.events, "start:"+cfg.Env["GC_SESSION_ID"])
+	return p.Fake.Start(ctx, name, cfg)
+}
+
+// retryDrainAckProvider records the ack family visible to each armed Start.
+// Its first armed call writes a failed runtime's final ack and reports startup
+// death. Its second starts successfully and writes the replacement's fresh ack
+// before returning, which must not be erased by Manager post-start cleanup.
+type retryDrainAckProvider struct {
+	*runtime.Fake
+	armed       bool
+	attempts    int
+	observedAck []map[string]string
+}
+
+func (p *retryDrainAckProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if !p.armed {
+		return p.Fake.Start(ctx, name, cfg)
+	}
+	p.attempts++
+	observed, err := readRuntimeDrainAckMetadata(p, name)
+	if err != nil {
+		return err
+	}
+	p.observedAck = append(p.observedAck, observed)
+	if p.attempts == 1 {
+		for key, value := range map[string]string{
+			runtime.DrainAckMetadataKey:           "1",
+			runtime.DrainAckSourceMetadataKey:     "agent",
+			runtime.DrainAckReasonMetadataKey:     "failed-start",
+			runtime.DrainAckGenerationMetadataKey: "old-generation",
+			runtime.DrainAckAwakeEpochMetadataKey: "old-awake-epoch",
+		} {
+			if err := p.SetMeta(name, key, value); err != nil {
+				return err
+			}
+		}
+		return fmt.Errorf("%w: %s", runtime.ErrSessionDiedDuringStartup, name)
+	}
+	if err := p.Fake.Start(ctx, name, cfg); err != nil {
+		return err
+	}
+	for key, value := range map[string]string{
+		runtime.DrainAckMetadataKey:           "1",
+		runtime.DrainAckSourceMetadataKey:     "agent",
+		runtime.DrainAckReasonMetadataKey:     "fresh-runtime",
+		runtime.DrainAckGenerationMetadataKey: "fresh-generation",
+		runtime.DrainAckAwakeEpochMetadataKey: "fresh-awake-epoch",
+	} {
+		if err := p.SetMeta(name, key, value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 type nonRunningStopRecorder struct {
 	*runtime.Fake
 	stopCalls int
 	stopErr   error
+}
+
+type failingRunningStopProvider struct {
+	*runtime.Fake
+	stopErr error
+}
+
+func (p *failingRunningStopProvider) Stop(name string) error {
+	if p.stopErr != nil {
+		return p.stopErr
+	}
+	return p.Fake.Stop(name)
 }
 
 func (p *nonRunningStopRecorder) IsRunning(string) bool {
@@ -137,6 +304,43 @@ func (p *nonRunningStopRecorder) Stop(name string) error {
 		return p.stopErr
 	}
 	return p.Fake.Stop(name)
+}
+
+func TestManagerSuspendStopFailureRetainsDurableHoldAndRetries(t *testing.T) {
+	store := beads.NewMemStore()
+	stopErr := errors.New("provider stop failed")
+	sp := &failingRunningStopProvider{Fake: runtime.NewFake(), stopErr: stopErr}
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(t.TempDir()))
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		Template: "helper", Command: "worker", WorkDir: t.TempDir(), Provider: "codex",
+		ExtraMeta: map[string]string{"session_origin": "manual"},
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := mgr.Suspend(info.ID); !errors.Is(err, stopErr) {
+		t.Fatalf("Suspend error = %v, want provider stop failure", err)
+	}
+	bead, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get after failed Stop: %v", err)
+	}
+	if bead.Metadata["state"] != string(StateSuspended) ||
+		bead.Metadata["sleep_intent"] != string(SleepReasonUserHold) ||
+		bead.Metadata["sleep_reason"] != string(SleepReasonUserHold) {
+		t.Fatalf("failed Stop lost durable suspend blocker: metadata=%v", bead.Metadata)
+	}
+	if !sp.IsRunning(info.SessionName) {
+		t.Fatal("fixture runtime not running after failed Stop")
+	}
+
+	sp.stopErr = nil
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("retry Suspend: %v", err)
+	}
+	if sp.IsRunning(info.SessionName) {
+		t.Fatal("idempotent Suspend retry did not finish provider teardown")
+	}
 }
 
 func (p *startOverrideProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
@@ -265,6 +469,24 @@ type failMetadataKeyStore struct {
 	key string
 }
 
+type createVisibleStore struct {
+	beads.Store
+	created chan string
+	release chan struct{}
+}
+
+func (s *createVisibleStore) Create(b beads.Bead) (beads.Bead, error) {
+	created, err := s.Store.Create(b)
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	if b.Type == BeadType {
+		s.created <- created.ID
+		<-s.release
+	}
+	return created, nil
+}
+
 func (s failMetadataKeyStore) SetMetadata(id, key, value string) error {
 	if key == s.key {
 		return errors.New("set metadata failed")
@@ -368,6 +590,89 @@ func TestCreate(t *testing.T) {
 	}
 	if got := startCall.Config.Env["GC_DIR"]; got != "/tmp" {
 		t.Errorf("GC_DIR = %q, want %q", got, "/tmp")
+	}
+}
+
+func TestCreateStartedAbortsWhenVisibleBeadIsSuperseded(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*Manager, string) error
+		check  func(*testing.T, beads.Bead)
+	}{
+		{
+			name: "suspend",
+			mutate: func(m *Manager, id string) error {
+				return m.Suspend(id)
+			},
+			check: func(t *testing.T, b beads.Bead) {
+				t.Helper()
+				if got := b.Metadata["state"]; got != string(StateSuspended) {
+					t.Fatalf("state = %q, want suspended", got)
+				}
+				if got := b.Metadata["sleep_intent"]; got != string(SleepReasonUserHold) {
+					t.Fatalf("sleep_intent = %q, want user-hold", got)
+				}
+			},
+		},
+		{
+			name: "close",
+			mutate: func(m *Manager, id string) error {
+				return m.Close(id)
+			},
+			check: func(t *testing.T, b beads.Bead) {
+				t.Helper()
+				if b.Status != "closed" {
+					t.Fatalf("status = %q, want closed", b.Status)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := beads.NewMemStore()
+			store := &createVisibleStore{
+				Store:   mem,
+				created: make(chan string, 1),
+				release: make(chan struct{}),
+			}
+			sp := runtime.NewFake()
+			mgr := NewManagerWithOptions(store, sp, WithCityPath(t.TempDir()))
+			workDir := t.TempDir()
+			type createResult struct {
+				info Info
+				err  error
+			}
+			createDone := make(chan createResult, 1)
+			go func() {
+				info, err := mgr.CreateSession(context.Background(), CreateOptions{
+					Template: "helper",
+					Command:  "worker",
+					WorkDir:  workDir,
+					Provider: "codex",
+				})
+				createDone <- createResult{info: info, err: err}
+			}()
+
+			id := <-store.created
+			if err := tc.mutate(mgr, id); err != nil {
+				t.Fatalf("superseding mutation: %v", err)
+			}
+			close(store.release)
+			result := <-createDone
+			if !errors.Is(result.err, ErrCreateSuperseded) {
+				t.Fatalf("CreateSession error = %v, want ErrCreateSuperseded", result.err)
+			}
+			if result.info.ID != "" {
+				t.Fatalf("CreateSession info = %+v, want zero Info", result.info)
+			}
+			if got := sp.CountCalls("Start", sessionNameFor(id)); got != 0 {
+				t.Fatalf("runtime Start calls = %d, want 0", got)
+			}
+			b, err := mem.Get(id)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			tc.check(t, b)
+		})
 	}
 }
 
@@ -507,6 +812,140 @@ func TestCreateKillsUntrackedOrphanFromSameCityBeforeStartWithNormalizedPath(t *
 	want := []string{"find:" + info.ID, "terminate:" + info.ID, "start:" + info.ID}
 	if got := strings.Join(sp.events, ","); got != strings.Join(want, ",") {
 		t.Fatalf("events = %v, want %v", sp.events, want)
+	}
+}
+
+func TestCreateClearsOrphanDrainAckImmediatelyBeforeReplacementStart(t *testing.T) {
+	const runtimeName = "ack-cleanup"
+	store := beads.NewMemStore()
+	sp := &orphanDrainAckProvider{orphanScanProvider: &orphanScanProvider{
+		Fake: runtime.NewFake(),
+		results: []runtime.LiveRuntime{{
+			PID:          1234,
+			ProviderName: runtimeName,
+			IsTracked:    false,
+		}},
+	}}
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		Template:     "helper",
+		Command:      "worker",
+		WorkDir:      t.TempDir(),
+		Provider:     "codex",
+		ExplicitName: runtimeName,
+		ExtraMeta:    map[string]string{"session_origin": "manual"},
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	requireRuntimeDrainAckMetadataEmpty(t, sp.observedAck, "replacement Start")
+	if sp.observedDrain != "operator-request" {
+		t.Fatalf("replacement Start observed GC_DRAIN = %q, want preserved", sp.observedDrain)
+	}
+	want := []string{"find:" + info.ID, "terminate:" + info.ID, "start:" + info.ID}
+	if got := strings.Join(sp.events, ","); got != strings.Join(want, ",") {
+		t.Fatalf("events = %v, want %v", sp.events, want)
+	}
+}
+
+func TestCreateDrainAckCleanupErrorPreventsRuntimeStart(t *testing.T) {
+	const runtimeName = "ack-cleanup-error"
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	sp.RemoveMetaErrors[runtimeName] = map[string]error{
+		runtime.DrainAckSourceMetadataKey: errors.New("metadata transport unavailable"),
+	}
+	mgr := NewManagerWithOptions(store, sp)
+
+	_, err := mgr.CreateSession(context.Background(), CreateOptions{
+		Template:     "helper",
+		Command:      "worker",
+		WorkDir:      t.TempDir(),
+		Provider:     "codex",
+		ExplicitName: runtimeName,
+		ExtraMeta:    map[string]string{"session_origin": "manual"},
+	})
+	if err == nil {
+		t.Fatal("CreateSession error = nil, want drain-ack cleanup failure")
+	}
+	if !strings.Contains(err.Error(), "pre-start drain-ack cleanup") ||
+		!strings.Contains(err.Error(), "metadata transport unavailable") {
+		t.Fatalf("CreateSession error = %v, want pre-start cleanup context", err)
+	}
+	for _, call := range sp.Calls {
+		if call.Method == "Start" {
+			t.Fatalf("runtime Start was attempted after cleanup failure: %#v", sp.Calls)
+		}
+	}
+}
+
+func TestStartRetryClearsFailedRuntimeAckAndPreservesFreshRuntimeAck(t *testing.T) {
+	const runtimeName = "ack-retry"
+	store := beads.NewMemStore()
+	sp := &retryDrainAckProvider{Fake: runtime.NewFake()}
+	mgr := NewManagerWithOptions(store, sp, WithStaleKeyDetectionWaiter(immediateStaleKeyDetectionWaiter))
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		Template:     "helper",
+		Command:      "worker",
+		WorkDir:      t.TempDir(),
+		Provider:     "codex",
+		ExplicitName: runtimeName,
+		Resume: ProviderResume{
+			ResumeFlag:    "--resume",
+			SessionIDFlag: "--session-id",
+		},
+		ExtraMeta: map[string]string{"session_origin": "manual"},
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	setRuntimeDrainAckMetadata(t, sp, runtimeName, "preexisting")
+	if err := sp.SetMeta(runtimeName, "GC_DRAIN", "operator-request"); err != nil {
+		t.Fatalf("SetMeta(GC_DRAIN): %v", err)
+	}
+	sp.armed = true
+
+	if err := mgr.Start(context.Background(), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if sp.attempts != 2 {
+		t.Fatalf("armed Start attempts = %d, want 2", sp.attempts)
+	}
+	if len(sp.observedAck) != 2 {
+		t.Fatalf("Start observations = %d, want 2", len(sp.observedAck))
+	}
+	for i, observed := range sp.observedAck {
+		requireRuntimeDrainAckMetadataEmpty(t, observed, fmt.Sprintf("Start attempt %d", i+1))
+	}
+
+	want := map[string]string{
+		runtime.DrainAckMetadataKey:           "1",
+		runtime.DrainAckSourceMetadataKey:     "agent",
+		runtime.DrainAckReasonMetadataKey:     "fresh-runtime",
+		runtime.DrainAckGenerationMetadataKey: "fresh-generation",
+		runtime.DrainAckAwakeEpochMetadataKey: "fresh-awake-epoch",
+	}
+	got, err := readRuntimeDrainAckMetadata(sp, runtimeName)
+	if err != nil {
+		t.Fatalf("read final drain-ack metadata: %v", err)
+	}
+	for key, value := range want {
+		if got[key] != value {
+			t.Errorf("final %s = %q, want %q", key, got[key], value)
+		}
+	}
+	drain, err := sp.GetMeta(runtimeName, "GC_DRAIN")
+	if err != nil {
+		t.Fatalf("GetMeta(GC_DRAIN): %v", err)
+	}
+	if drain != "operator-request" {
+		t.Fatalf("final GC_DRAIN = %q, want preserved", drain)
 	}
 }
 
@@ -764,7 +1203,7 @@ func TestCreateWithProviderWithoutProcessScannerStillStarts(t *testing.T) {
 	}
 }
 
-func TestRuntimeStartCallSitesCleanOrphansFirst(t *testing.T) {
+func TestRuntimeStartCallSitesUsePreparationGate(t *testing.T) {
 	tests := []struct {
 		file   string
 		idExpr string
@@ -785,12 +1224,11 @@ func TestRuntimeStartCallSitesCleanOrphansFirst(t *testing.T) {
 					continue
 				}
 				starts++
-				// The cleanup call may sit a few lines above the Start when its
-				// result gates the Start (manager.go wraps it in an
-				// `if orphanErr := …; orphanErr != nil` refusal), so scan a
-				// short preceding window rather than only the immediate line.
-				if !orphanCleanupPrecedes(lines, i, tt.idExpr) {
-					t.Errorf("%s:%d Start is not preceded by orphan cleanup using %s", tt.file, i+1, tt.idExpr)
+				// The preparation call may sit a few lines above Start while its
+				// error is unwound. Scan a short preceding window so every Start
+				// remains guarded by the single ordered orphan+ack cleanup helper.
+				if !runtimeStartPreparationPrecedes(lines, i, tt.idExpr) {
+					t.Errorf("%s:%d Start is not preceded by runtime preparation using %s", tt.file, i+1, tt.idExpr)
 				}
 			}
 			if starts == 0 {
@@ -800,14 +1238,14 @@ func TestRuntimeStartCallSitesCleanOrphansFirst(t *testing.T) {
 	}
 }
 
-// orphanCleanupPrecedes reports whether m.killExistingOrphans(ctx, idExpr)
-// appears within the short window of non-blank lines preceding the Start at
-// index before. The window keeps the "every Start is guarded by orphan
-// cleanup" invariant while tolerating the gate wrapper that consumes the
-// cleanup's error.
-func orphanCleanupPrecedes(lines []string, before int, idExpr string) bool {
-	needle := "m.killExistingOrphans(ctx, " + idExpr + ")"
-	const window = 10
+// runtimeStartPreparationPrecedes reports whether the ordered preparation
+// helper appears within the short window of non-blank lines preceding Start.
+func runtimeStartPreparationPrecedes(lines []string, before int, idExpr string) bool {
+	needle := "m.prepareRuntimeStart(ctx, " + idExpr + ", sessName)"
+	// The window must accommodate the provider session-key receipt issuance
+	// that sits between preparation and Start: the receipt rotates the launch
+	// token immediately before the provider call by design.
+	const window = 24
 	seen := 0
 	for i := before - 1; i >= 0 && seen < window; i-- {
 		if strings.TrimSpace(lines[i]) == "" {
@@ -2192,6 +2630,86 @@ func TestAttachActiveReattach(t *testing.T) {
 	if got.State != StateActive {
 		t.Errorf("State = %q, want %q", got.State, StateActive)
 	}
+}
+
+func TestAttachRejectedWhenExecutionStalledLatchWinsFirst(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		Template: "helper", Command: "claude", WorkDir: "/tmp", Provider: "claude",
+		ExtraMeta: map[string]string{"session_origin": "manual"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.SetMetadata(info.ID, ExecutionClaimNudgeStalledMetadataKey, "2026-08-14T12:00:00Z"); err != nil {
+		t.Fatalf("latching execution-stalled recovery: %v", err)
+	}
+	attachCalls := sp.CountCalls("Attach", info.SessionName)
+	if err := mgr.Attach(context.Background(), info.ID, "claude --resume", runtime.Config{}); !errors.Is(err, ErrExecutionStalledRecoveryPending) {
+		t.Fatalf("Attach error = %v, want ErrExecutionStalledRecoveryPending", err)
+	}
+	if got := sp.CountCalls("Attach", info.SessionName); got != attachCalls {
+		t.Fatalf("provider Attach calls changed under stalled latch: %d -> %d", attachCalls, got)
+	}
+}
+
+func TestAttachLeaseDefersDestructiveBoundaryWithoutHoldingLifecycleLock(t *testing.T) {
+	store := beads.NewMemStore()
+	cityPath := t.TempDir()
+	sp := &blockingAttachProvider{
+		Fake:    runtime.NewFake(),
+		entered: make(chan string, 1),
+		release: make(chan struct{}),
+	}
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		Template: "helper", Command: "claude", WorkDir: "/tmp", Provider: "claude",
+		ExtraMeta: map[string]string{"session_origin": "manual"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	result := make(chan error, 1)
+	go func() {
+		result <- mgr.Attach(context.Background(), info.ID, "claude --resume", runtime.Config{})
+	}()
+	select {
+	case got := <-sp.entered:
+		if got != info.SessionName {
+			t.Fatalf("Attach entered for %q, want %q", got, info.SessionName)
+		}
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("timed out waiting for provider Attach")
+	}
+
+	// Attach released the lifecycle lock before entering the blocking provider,
+	// so ordinary lifecycle participants can still order/read this session.
+	lifecycleAcquired, err := TryWithCitySessionLifecycleLock(cityPath, info.ID, func() error { return nil })
+	if err != nil || !lifecycleAcquired {
+		t.Fatalf("lifecycle lock while attached = acquired %v err %v, want true/nil", lifecycleAcquired, err)
+	}
+	// A separately-opened exclusive flock conflicts with Manager's shared lease
+	// even in this same process, which is the background latch/stop boundary.
+	releaseExclusive, exclusiveAcquired, err := TryAcquireCitySessionAttachExclusiveLease(cityPath, info.ID)
+	if err != nil {
+		t.Fatalf("TryAcquire exclusive attach lease: %v", err)
+	}
+	if exclusiveAcquired {
+		releaseExclusive()
+		t.Fatal("destructive attach lease acquired while provider Attach was active")
+	}
+
+	close(sp.release)
+	if err := awaitSessionOperation(t, result, "provider Attach completion"); err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	releaseExclusive, exclusiveAcquired, err = TryAcquireCitySessionAttachExclusiveLease(cityPath, info.ID)
+	if err != nil || !exclusiveAcquired {
+		t.Fatalf("exclusive lease after Attach = acquired %v err %v, want true/nil", exclusiveAcquired, err)
+	}
+	releaseExclusive()
 }
 
 func TestSuspendCrashedSession(t *testing.T) {

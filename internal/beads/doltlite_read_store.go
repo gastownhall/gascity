@@ -1081,12 +1081,29 @@ const doltliteMaxHydrateIDsPerChunk = 16000
 // an issues-table row still wins over its wisp twin regardless of where the
 // chunk boundaries fall.
 func (s *DoltliteReadStore) hydrateBeadsByID(query ListQuery, sets []doltliteTableSet, ids []string) ([]Bead, error) {
+	return s.hydrateBeadsByIDWithPolicy(query, sets, ids, false)
+}
+
+// hydrateBeadsByIDStrict is the authoritative batch-read variant of
+// hydrateBeadsByID. It keeps the same chunked row/label/parent hydration but
+// rejects malformed, unexpected, or duplicate rows within a storage table.
+// Cross-table authority is resolved by GetBatch before this helper is called.
+func (s *DoltliteReadStore) hydrateBeadsByIDStrict(query ListQuery, sets []doltliteTableSet, ids []string) ([]Bead, error) {
+	return s.hydrateBeadsByIDWithPolicy(query, sets, ids, true)
+}
+
+func (s *DoltliteReadStore) hydrateBeadsByIDWithPolicy(query ListQuery, sets []doltliteTableSet, ids []string, strict bool) ([]Bead, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
 	merged := make([]Bead, 0, len(ids))
 	seen := make(map[string]struct{}, len(ids))
+	wanted := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		wanted[id] = struct{}{}
+	}
 	for _, tables := range sets {
+		seenInTable := make(map[string]struct{}, len(ids))
 		for start := 0; start < len(ids); start += doltliteMaxHydrateIDsPerChunk {
 			end := start + doltliteMaxHydrateIDsPerChunk
 			if end > len(ids) {
@@ -1102,7 +1119,19 @@ func (s *DoltliteReadStore) hydrateBeadsByID(query ListQuery, sets []doltliteTab
 			if err != nil {
 				return nil, err
 			}
-			for _, row := range rows {
+			for i, row := range rows {
+				if strict {
+					if strings.TrimSpace(row.ID) == "" {
+						return nil, fmt.Errorf("malformed doltlite batch result from %s at index %d: empty bead ID", tables.issues, i)
+					}
+					if _, ok := wanted[row.ID]; !ok {
+						return nil, fmt.Errorf("unexpected bead %q in doltlite %s batch result: %w", row.ID, tables.issues, ErrIDCollision)
+					}
+					if _, duplicate := seenInTable[row.ID]; duplicate {
+						return nil, fmt.Errorf("duplicate bead %q in doltlite %s batch result", row.ID, tables.issues)
+					}
+					seenInTable[row.ID] = struct{}{}
+				}
 				if _, ok := seen[row.ID]; ok {
 					continue
 				}

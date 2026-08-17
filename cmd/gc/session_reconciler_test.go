@@ -122,6 +122,71 @@ func (p *blockingStopProvider) Stop(name string) error {
 	return p.Fake.Stop(name)
 }
 
+// stopThenBlockProvider makes the first stop observable only after the old
+// runtime has actually died, then delays its return. That opens the historical
+// async-stop race window where a same-token Manager.Start can create a newer
+// awake interval before confirm-dead issues its next name-based kill.
+type stopThenBlockProvider struct {
+	*runtime.Fake
+	stopFinished chan struct{}
+	releaseStop  chan struct{}
+	once         sync.Once
+}
+
+func seedDrainAckAsyncStopInfo(t *testing.T, store beads.Store, token string) sessionpkg.Info {
+	t.Helper()
+	const name = "worker"
+	if token == "" {
+		token = "token-" + name
+	}
+	created, err := store.Create(beads.Bead{
+		Title:  name,
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":   name,
+			"template":       "worker",
+			"provider":       "claude",
+			"command":        "worker",
+			"work_dir":       t.TempDir(),
+			"generation":     "1",
+			"instance_token": token,
+			"state":          string(sessionpkg.StateDraining),
+			"state_reason":   sessionpkg.DrainAckStopPendingReason,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create async-stop session: %v", err)
+	}
+	return sessiontest.SeedBead(t, created)
+}
+
+func stampDrainAckRuntimeIdentity(t *testing.T, sp runtime.Provider, info sessionpkg.Info) {
+	t.Helper()
+	for key, value := range map[string]string{
+		"GC_SESSION_ID":         info.ID,
+		"GC_INSTANCE_TOKEN":     info.InstanceToken,
+		"GC_RUNTIME_EPOCH":      info.Generation,
+		"GC_CONTINUATION_EPOCH": info.ContinuationEpoch,
+	} {
+		if value == "" {
+			continue
+		}
+		if err := sp.SetMeta(info.SessionNameMetadata, key, value); err != nil {
+			t.Fatalf("SetMeta(%s): %v", key, err)
+		}
+	}
+}
+
+func (p *stopThenBlockProvider) Stop(name string) error {
+	err := p.Fake.Stop(name)
+	p.once.Do(func() {
+		close(p.stopFinished)
+		<-p.releaseStop
+	})
+	return err
+}
+
 type panicStopProvider struct {
 	*runtime.Fake
 	stopStarted chan string
@@ -363,6 +428,11 @@ func (e *reconcilerTestEnv) createSessionBead(name, template string) beads.Bead 
 	if err != nil {
 		panic("creating test bead: " + err.Error())
 	}
+	// Many reconciler fixtures model a runtime that was started before its bead
+	// was assembled. Seed the same identity metadata real providers persist at
+	// launch so destructive finalizers can require positive ID+token proof.
+	_ = e.sp.SetMeta(name, "GC_SESSION_ID", b.ID)
+	_ = e.sp.SetMeta(name, "GC_INSTANCE_TOKEN", meta["instance_token"])
 	return b
 }
 
@@ -928,9 +998,7 @@ func TestReconcileSessionBeads_DrainAckMarksStopPendingAndStopsAsync(t *testing.
 	env.setSessionMetadata(&session, map[string]string{
 		"pending_create_claim": "true",
 	})
-	if err := sp.SetMeta("worker", "GC_SESSION_ID", session.ID); err != nil {
-		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
-	}
+	stampDrainAckRuntimeIdentity(t, sp, env.sessionInfo(session.ID))
 
 	dops := newFakeDrainOps()
 	if err := dops.setDrainAck("worker"); err != nil {
@@ -1164,6 +1232,12 @@ func TestReconcileSessionBeads_AgentAckStopProceedsDespiteStoreQueryPartial(t *t
 	if err := dops.setDrainAck("worker"); err != nil {
 		t.Fatalf("setDrainAck: %v", err)
 	}
+	asyncStops := &asyncStartTracker{}
+	t.Cleanup(func() {
+		if !asyncStops.wait(time.Second) {
+			t.Error("async drain-ack stop did not drain")
+		}
+	})
 
 	reconcileSessionBeads(
 		context.Background(),
@@ -1188,6 +1262,7 @@ func TestReconcileSessionBeads_AgentAckStopProceedsDespiteStoreQueryPartial(t *t
 		0,
 		&env.stdout,
 		&env.stderr,
+		withAsyncDrainAckStopTracker(asyncStops),
 	)
 
 	got, err := env.store.Get(session.ID)
@@ -1201,13 +1276,15 @@ func TestReconcileSessionBeads_AgentAckStopProceedsDespiteStoreQueryPartial(t *t
 
 func TestQueueDrainAckAsyncStopTracksShutdownWait(t *testing.T) {
 	store := beads.NewMemStore()
+	info := seedDrainAckAsyncStopInfo(t, store, "")
 	sp := newBlockingStopProvider()
 	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
 		t.Fatalf("Start(worker): %v", err)
 	}
+	stampDrainAckRuntimeIdentity(t, sp, info)
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", nil, tracker, &stderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, info, nil, tracker, &stderr)
 
 	select {
 	case <-sp.stopStarted:
@@ -1226,14 +1303,17 @@ func TestQueueDrainAckAsyncStopTracksShutdownWait(t *testing.T) {
 
 func TestQueueDrainAckAsyncStopDedupScopedToTracker(t *testing.T) {
 	store := beads.NewMemStore()
+	info := seedDrainAckAsyncStopInfo(t, store, "")
 	first := newBlockingStopProvider()
 	if err := first.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
 		t.Fatalf("Start(first worker): %v", err)
 	}
+	stampDrainAckRuntimeIdentity(t, first, info)
 	second := newBlockingStopProvider()
 	if err := second.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
 		t.Fatalf("Start(second worker): %v", err)
 	}
+	stampDrainAckRuntimeIdentity(t, second, info)
 	firstReleased := false
 	secondReleased := false
 	defer func() {
@@ -1248,40 +1328,54 @@ func TestQueueDrainAckAsyncStopDedupScopedToTracker(t *testing.T) {
 	var stderr synchronizedBuffer
 	firstTracker := &asyncStartTracker{}
 	secondTracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, first, &config.City{}, "gc-worker", "worker", "", nil, firstTracker, &stderr)
+	queueDrainAckAsyncStop("", store, first, &config.City{}, info, nil, firstTracker, &stderr)
 	select {
 	case <-first.stopStarted:
 	case <-time.After(time.Second):
 		t.Fatal("first async drain-ack stop did not start")
 	}
 
-	queueDrainAckAsyncStop("", store, second, &config.City{}, "gc-worker", "worker", "", nil, secondTracker, &stderr)
+	queueDrainAckAsyncStop("", store, second, &config.City{}, info, nil, secondTracker, &stderr)
+	if !secondTracker.wait(time.Second) {
+		t.Fatal("second tracker did not retire its lifecycle-busy stop")
+	}
 	select {
 	case <-second.stopStarted:
-	case <-time.After(time.Second):
-		t.Fatal("second async drain-ack stop was suppressed by another tracker scope")
+		t.Fatal("second async drain-ack stop bypassed the per-session lifecycle lock")
+	case <-time.After(25 * time.Millisecond):
 	}
 	close(first.releaseStop)
 	firstReleased = true
-	close(second.releaseStop)
-	secondReleased = true
 	if !firstTracker.wait(time.Second) {
 		t.Fatal("first async drain-ack stop tracker did not drain after release")
 	}
-	if !secondTracker.wait(time.Second) {
+	// Lifecycle contention is retryable, not cross-tracker deduplication: once
+	// the first stop releases the fence, a later reconcile tracker can run it.
+	retryTracker := &asyncStartTracker{}
+	queueDrainAckAsyncStop("", store, second, &config.City{}, info, nil, retryTracker, &stderr)
+	select {
+	case <-second.stopStarted:
+	case <-time.After(time.Second):
+		t.Fatal("second async drain-ack stop remained suppressed after lifecycle release")
+	}
+	close(second.releaseStop)
+	secondReleased = true
+	if !retryTracker.wait(time.Second) {
 		t.Fatal("second async drain-ack stop tracker did not drain after release")
 	}
 }
 
 func TestQueueDrainAckAsyncStopRecoversStopPanic(t *testing.T) {
 	store := beads.NewMemStore()
+	info := seedDrainAckAsyncStopInfo(t, store, "")
 	sp := newPanicStopProvider()
 	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
 		t.Fatalf("Start(worker): %v", err)
 	}
+	stampDrainAckRuntimeIdentity(t, sp, info)
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop(t.TempDir(), store, sp, &config.City{}, "gc-worker", "worker", "", nil, tracker, &stderr)
+	queueDrainAckAsyncStop(t.TempDir(), store, sp, &config.City{}, info, nil, tracker, &stderr)
 
 	select {
 	case <-sp.stopStarted:
@@ -1318,13 +1412,15 @@ func TestQueueDrainAckAsyncStopPokesAfterSuccessfulStop(t *testing.T) {
 	t.Cleanup(func() { drainAckAsyncStopPokeController = old })
 
 	store := beads.NewMemStore()
+	info := seedDrainAckAsyncStopInfo(t, store, "")
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+	stampDrainAckRuntimeIdentity(t, sp, info)
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", nil, tracker, &stderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, info, nil, tracker, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1354,14 +1450,16 @@ func TestQueueDrainAckAsyncStopDoesNotPokeOnHardError(t *testing.T) {
 	t.Cleanup(func() { drainAckAsyncStopPokeController = old })
 
 	store := beads.NewMemStore()
+	info := seedDrainAckAsyncStopInfo(t, store, "")
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+	stampDrainAckRuntimeIdentity(t, sp, info)
 	sp.StopErrors = map[string]error{"worker": errors.New("hard kill error")}
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", nil, tracker, &stderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, info, nil, tracker, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1393,10 +1491,12 @@ func TestQueueDrainAckAsyncStopTokenFenceSkipsReusedName(t *testing.T) {
 	t.Cleanup(func() { drainAckAsyncStopPokeController = old })
 
 	store := beads.NewMemStore()
+	info := seedDrainAckAsyncStopInfo(t, store, "stale-token")
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+	stampDrainAckRuntimeIdentity(t, sp, info)
 	// The live session belongs to a replacement with a fresh token.
 	if err := sp.SetMeta("worker", "GC_INSTANCE_TOKEN", "live-token"); err != nil {
 		t.Fatalf("SetMeta: %v", err)
@@ -1405,7 +1505,7 @@ func TestQueueDrainAckAsyncStopTokenFenceSkipsReusedName(t *testing.T) {
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
 	// We queued the stop for the OLD session (stale token).
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "stale-token", nil, tracker, &stderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, info, nil, tracker, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1428,17 +1528,19 @@ func TestQueueDrainAckAsyncStopTokenFenceSkipsReusedName(t *testing.T) {
 // lets the kill proceed when the live token matches the queued token.
 func TestQueueDrainAckAsyncStopTokenFenceKillsMatchingSession(t *testing.T) {
 	store := beads.NewMemStore()
+	info := seedDrainAckAsyncStopInfo(t, store, "live-token")
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+	stampDrainAckRuntimeIdentity(t, sp, info)
 	if err := sp.SetMeta("worker", "GC_INSTANCE_TOKEN", "live-token"); err != nil {
 		t.Fatalf("SetMeta: %v", err)
 	}
 
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "live-token", nil, tracker, &stderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, info, nil, tracker, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1447,6 +1549,159 @@ func TestQueueDrainAckAsyncStopTokenFenceKillsMatchingSession(t *testing.T) {
 	}
 	if got := stderr.String(); strings.Contains(got, "instance token mismatch") {
 		t.Fatalf("stderr = %q, unexpected mismatch on matching token", got)
+	}
+}
+
+// A provider token identifies the durable session, not one awake interval.
+// Manager.Start intentionally reuses it. Confirm-dead therefore needs a
+// lifecycle-epoch fence around every re-kill, or it can kill a replacement that
+// starts after the original async Stop has already taken effect.
+func TestQueueDrainAckAsyncStopDoesNotRekillSameTokenNewerLifecycle(t *testing.T) {
+	oldTimeout, oldPoll := drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll
+	drainAckStopConfirmDeadTimeout = 500 * time.Millisecond
+	drainAckStopConfirmDeadPoll = 10 * time.Millisecond
+	t.Cleanup(func() {
+		drainAckStopConfirmDeadTimeout = oldTimeout
+		drainAckStopConfirmDeadPoll = oldPoll
+	})
+
+	store := beads.NewMemStore()
+	cityPath := t.TempDir()
+	sp := &stopThenBlockProvider{
+		Fake:         runtime.NewFake(),
+		stopFinished: make(chan struct{}),
+		releaseStop:  make(chan struct{}),
+	}
+	created, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":   "worker",
+			"template":       "worker",
+			"provider":       "claude",
+			"command":        "worker",
+			"work_dir":       t.TempDir(),
+			"generation":     "7",
+			"instance_token": "same-token",
+			"state":          string(sessionpkg.StateDraining),
+			"state_reason":   sessionpkg.DrainAckStopPendingReason,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	original := sessiontest.SeedBead(t, created)
+	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "worker"}); err != nil {
+		t.Fatalf("start original: %v", err)
+	}
+	stampDrainAckRuntimeIdentity(t, sp, original)
+
+	tracker := &asyncStartTracker{}
+	var stderr synchronizedBuffer
+	queueDrainAckAsyncStop(cityPath, store, sp, &config.City{}, original, nil, tracker, &stderr)
+	awaitLifecycleRaceSignal(t, sp.stopFinished, "original async stop")
+
+	mgr := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(cityPath))
+	startDone := make(chan error, 1)
+	go func() {
+		startDone <- mgr.Start(context.Background(), original.ID, "worker", runtime.Config{Command: "worker", WorkDir: t.TempDir()})
+	}()
+	// Before the lifecycle-lock fix the restart completes inside the first
+	// Stop's return window. Afterwards it correctly waits for that stop's lock;
+	// either ordering is accepted by the fixture before releasing the stop.
+	select {
+	case err := <-startDone:
+		if err != nil {
+			t.Fatalf("Start replacement before release: %v", err)
+		}
+		startDone = nil
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(sp.releaseStop)
+	if startDone != nil {
+		if err := <-startDone; err != nil {
+			t.Fatalf("Start replacement: %v", err)
+		}
+	}
+	if !tracker.wait(2 * time.Second) {
+		t.Fatal("async stop did not finish")
+	}
+
+	latestBead, err := store.Get(original.ID)
+	if err != nil {
+		t.Fatalf("Get(latest): %v", err)
+	}
+	latest := sessiontest.SeedBead(t, latestBead)
+	if latest.InstanceToken != original.InstanceToken || latest.Generation != original.Generation {
+		t.Fatalf("fixture changed token/generation: before=(%q,%q) after=(%q,%q)", original.InstanceToken, original.Generation, latest.InstanceToken, latest.Generation)
+	}
+	if latest.AwakeStartedAt == original.AwakeStartedAt {
+		t.Fatalf("fixture did not commit a newer awake epoch: %q", latest.AwakeStartedAt)
+	}
+	if !sp.IsRunning("worker") {
+		t.Fatalf("confirm-dead re-killed the same-token newer lifecycle; stderr=%q", stderr.String())
+	}
+}
+
+// Suspend persists the operator hold before calling the provider. If that Stop
+// fails, an already-queued drain may still finish teardown, but only after
+// proving every identity/start discriminator is unchanged. Completion must not
+// consume the hold.
+func TestQueueDrainAckAsyncStopFinishesSameLifecycleAfterSuspendStopFailure(t *testing.T) {
+	store := beads.NewMemStore()
+	cityPath := t.TempDir()
+	sp := runtime.NewFake()
+	original := seedDrainAckAsyncStopInfo(t, store, "same-token")
+	if err := store.SetMetadataBatch(original.ID, map[string]string{
+		"state":        string(sessionpkg.StateActive),
+		"state_reason": "",
+	}); err != nil {
+		t.Fatalf("activate fixture: %v", err)
+	}
+	activeBead, err := store.Get(original.ID)
+	if err != nil {
+		t.Fatalf("Get(active): %v", err)
+	}
+	original = sessiontest.SeedBead(t, activeBead)
+	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "worker"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	stampDrainAckRuntimeIdentity(t, sp, original)
+	sp.StopErrors["worker"] = errors.New("injected suspend stop failure")
+	mgr := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(cityPath))
+	if err := mgr.Suspend(original.ID); err == nil {
+		t.Fatal("Suspend succeeded despite injected provider failure")
+	}
+	held, err := store.Get(original.ID)
+	if err != nil {
+		t.Fatalf("Get(held): %v", err)
+	}
+	if held.Metadata["state"] != string(sessionpkg.StateSuspended) ||
+		held.Metadata["sleep_intent"] != string(sessionpkg.SleepReasonUserHold) {
+		t.Fatalf("Suspend did not persist hold before failed Stop: metadata=%v", held.Metadata)
+	}
+	if !sp.IsRunning("worker") {
+		t.Fatal("fixture runtime did not survive failed Suspend Stop")
+	}
+	delete(sp.StopErrors, "worker")
+	tracker := &asyncStartTracker{}
+	var stderr synchronizedBuffer
+	queueDrainAckAsyncStop(cityPath, store, sp, &config.City{}, original, nil, tracker, &stderr)
+	if !tracker.wait(time.Second) {
+		t.Fatal("queued stop did not finish")
+	}
+	if sp.IsRunning("worker") {
+		t.Fatalf("identity-proven queued drain did not finish provider teardown: stderr=%q", stderr.String())
+	}
+	got, err := store.Get(original.ID)
+	if err != nil {
+		t.Fatalf("Get(final): %v", err)
+	}
+	if got.Metadata["state"] != string(sessionpkg.StateSuspended) ||
+		got.Metadata["sleep_intent"] != string(sessionpkg.SleepReasonUserHold) ||
+		got.Metadata["sleep_reason"] != string(sessionpkg.SleepReasonUserHold) {
+		t.Fatalf("queued stop consumed operator hold: metadata=%v", got.Metadata)
 	}
 }
 
@@ -1468,10 +1723,12 @@ func TestQueueDrainAckAsyncStopConfirmsRuntimeDead(t *testing.T) {
 	}()
 
 	store := beads.NewMemStore()
+	info := seedDrainAckAsyncStopInfo(t, store, "")
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+	stampDrainAckRuntimeIdentity(t, sp, info)
 	// Survivor: Stop reports success but the fake leaves the session (and thus
 	// IsRunning/ProcessAlive) observably alive, mirroring a claude process that
 	// ignores SIGHUP / reparents / races the kill grace period.
@@ -1479,7 +1736,7 @@ func TestQueueDrainAckAsyncStopConfirmsRuntimeDead(t *testing.T) {
 
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", []string{"claude"}, tracker, &stderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, info, []string{"claude"}, tracker, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1497,10 +1754,12 @@ func TestQueueDrainAckAsyncStopConfirmsRuntimeDead(t *testing.T) {
 
 func TestCityRuntimeShutdownWaitsForTrackedAsyncDrainAckStopsBeforeStopSnapshot(t *testing.T) {
 	store := beads.NewMemStore()
+	info := seedDrainAckAsyncStopInfo(t, store, "")
 	sp := newShutdownWaitStopProvider()
 	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
 		t.Fatalf("Start(worker): %v", err)
 	}
+	stampDrainAckRuntimeIdentity(t, sp, info)
 	cr := &CityRuntime{
 		cfg:                 &config.City{Daemon: config.DaemonConfig{ShutdownTimeout: "500ms"}},
 		sp:                  sp,
@@ -1510,7 +1769,7 @@ func TestCityRuntimeShutdownWaitsForTrackedAsyncDrainAckStopsBeforeStopSnapshot(
 		stdout:              ioDiscard{},
 		stderr:              ioDiscard{},
 	}
-	queueDrainAckAsyncStop("", store, sp, cr.cfg, "gc-worker", "worker", "", nil, &cr.asyncStops, &synchronizedBuffer{})
+	queueDrainAckAsyncStop("", store, sp, cr.cfg, info, nil, &cr.asyncStops, &synchronizedBuffer{})
 
 	select {
 	case <-sp.stopStarted:
@@ -1698,17 +1957,19 @@ func TestConfirmDrainAckRuntimeDeadTokenFenceStopsOnReplacement(t *testing.T) {
 	}()
 
 	store := beads.NewMemStore()
+	info := seedDrainAckAsyncStopInfo(t, store, "original-token")
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+	stampDrainAckRuntimeIdentity(t, sp, info)
 	// A re-woken same-name replacement now owns the name with a fresh token.
 	if err := sp.SetMeta("worker", "GC_INSTANCE_TOKEN", "replacement-token"); err != nil {
 		t.Fatalf("SetMeta: %v", err)
 	}
 
 	var stderr synchronizedBuffer
-	dead := confirmDrainAckRuntimeDead("", store, sp, &config.City{}, "worker", "original-token", []string{"claude"}, &stderr)
+	dead := confirmDrainAckRuntimeDead("", store, sp, &config.City{}, info, []string{"claude"}, &stderr)
 	if !dead {
 		t.Fatal("confirm-dead must report the original target dead once a replacement owns the name")
 	}
@@ -2213,6 +2474,12 @@ func TestReconcileSessionBeads_DrainAckCleanHandoffSuppressesAssignedWorkEvent(t
 	if err := dops.setDrainAck("worker"); err != nil {
 		t.Fatalf("setDrainAck: %v", err)
 	}
+	asyncStops := &asyncStartTracker{}
+	t.Cleanup(func() {
+		if !asyncStops.wait(time.Second) {
+			t.Error("async drain-ack stop did not drain")
+		}
+	})
 
 	_ = reconcileSessionBeads(
 		context.Background(),
@@ -2237,6 +2504,7 @@ func TestReconcileSessionBeads_DrainAckCleanHandoffSuppressesAssignedWorkEvent(t
 		0,
 		&env.stdout,
 		&env.stderr,
+		withAsyncDrainAckStopTracker(asyncStops),
 	)
 
 	for _, ev := range fake.Events {
@@ -3542,6 +3810,1487 @@ func (s *failSetMetadataBatchStore) SetMetadataBatch(string, map[string]string) 
 	return nil
 }
 
+func (s *failSetMetadataBatchStore) Update(id string, opts beads.UpdateOpts) error {
+	if s.err != nil {
+		return s.err
+	}
+	return s.Store.Update(id, opts)
+}
+
+// partialBatchTrapStore models a backend whose legacy batch surface can leave
+// one arbitrary key behind before failing. Drain lifecycle clusters must use
+// the single-Update front door instead, so tests expect this trap to remain
+// completely untouched.
+type partialBatchTrapStore struct {
+	beads.Store
+	batchCalls  int
+	updateCalls int
+}
+
+func (s *partialBatchTrapStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	s.batchCalls++
+	for key, value := range kvs {
+		if err := s.SetMetadata(id, key, value); err != nil {
+			return err
+		}
+		break
+	}
+	return errors.New("injected partial batch failure")
+}
+
+func (s *partialBatchTrapStore) Update(id string, opts beads.UpdateOpts) error {
+	s.updateCalls++
+	return s.Store.Update(id, opts)
+}
+
+// retryableDrainCloseFailureStore provides both close-failure shapes covered by
+// the Store.Tx contract. In atomic mode the callback never runs. In sequential
+// mode the terminal metadata lands before Close fails, reproducing a partial
+// transaction on exec/MemStore-like backends. Clearing fail lets the same store
+// prove a later finalizer retry closes successfully.
+type retryableDrainCloseFailureStore struct {
+	beads.Store
+	atomic bool
+	fail   bool
+}
+
+// ambiguousSuccessfulDrainCloseStore models a backend/transport that commits
+// the close but loses its acknowledgement. The detailed finalizer must re-read
+// status and adopt the terminal witness, not restore open stop-pending metadata
+// onto a bead that is already closed.
+type ambiguousSuccessfulDrainCloseStore struct {
+	beads.Store
+}
+
+func (s *ambiguousSuccessfulDrainCloseStore) Tx(msg string, fn func(beads.Tx) error) error {
+	if err := s.Store.Tx(msg, fn); err != nil {
+		return err
+	}
+	if strings.HasPrefix(msg, "gc: close session ") {
+		return errors.New("injected lost close acknowledgement")
+	}
+	return nil
+}
+
+func (s *retryableDrainCloseFailureStore) AtomicTx() bool { return s.atomic }
+
+func (s *retryableDrainCloseFailureStore) Close(id string) error {
+	if s.fail {
+		return errors.New("injected close failure")
+	}
+	return s.Store.Close(id)
+}
+
+func (s *retryableDrainCloseFailureStore) Tx(msg string, fn func(beads.Tx) error) error {
+	if !strings.HasPrefix(msg, "gc: close session ") || !s.fail {
+		return s.Store.Tx(msg, fn)
+	}
+	if s.atomic {
+		return errors.New("injected atomic transaction failure")
+	}
+	return fn(s)
+}
+
+type advancingDrainCloseClock struct {
+	now  time.Time
+	step time.Duration
+}
+
+func (c *advancingDrainCloseClock) Now() time.Time {
+	now := c.now
+	c.now = c.now.Add(c.step)
+	return now
+}
+
+// drainAckClaimFailureStore injects a failure after the direct-ack path has
+// durably claimed drain-ack-stop-pending. Tests construct it only after taking
+// the caller snapshot, so call 1 is always the lifecycle-claim read/write.
+type drainAckClaimFailureStore struct {
+	beads.Store
+	failGetAt int
+	failSetAt int
+	getCalls  int
+	setCalls  int
+}
+
+func (s *drainAckClaimFailureStore) Get(id string) (beads.Bead, error) {
+	s.getCalls++
+	if s.failGetAt > 0 && s.getCalls == s.failGetAt {
+		return beads.Bead{}, errors.New("injected post-claim Get failure")
+	}
+	return s.Store.Get(id)
+}
+
+func (s *drainAckClaimFailureStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	s.setCalls++
+	if s.failSetAt > 0 && s.setCalls == s.failSetAt {
+		return errors.New("injected post-claim metadata failure")
+	}
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+func (s *drainAckClaimFailureStore) Update(id string, opts beads.UpdateOpts) error {
+	s.setCalls++
+	if s.failSetAt > 0 && s.setCalls == s.failSetAt {
+		return errors.New("injected post-claim metadata failure")
+	}
+	return s.Store.Update(id, opts)
+}
+
+// wakeBeforeDrainFinalizeWriteStore deterministically commits an explicit wake
+// after the finalizer's last lifecycle re-read but before its metadata batch.
+// Delegating the final batch afterward reproduces the lost-update ordering that
+// used to restore sleep_intent=user-hold from the stale Info snapshot.
+type wakeBeforeDrainFinalizeWriteStore struct {
+	beads.Store
+	sessionID string
+	now       time.Time
+	triggered bool
+}
+
+func (s *wakeBeforeDrainFinalizeWriteStore) injectWakeBeforeFinalWrite(id string, kvs map[string]string) error {
+	if !s.triggered && id == s.sessionID &&
+		kvs["state"] == string(sessionpkg.StateSuspended) &&
+		kvs["sleep_reason"] == string(sessionpkg.SleepReasonUserHold) {
+		s.triggered = true
+		current, err := s.Get(id)
+		if err != nil {
+			return err
+		}
+		wakePatch := sessionpkg.ClearWakeBlockersPatch(
+			sessionpkg.State(current.Metadata["state"]),
+			current.Metadata["sleep_reason"],
+		)
+		for key, value := range sessionpkg.RequestExplicitWakePatch(string(sessionpkg.WakeCauseExplicit), s.now) {
+			wakePatch[key] = value
+		}
+		if err := s.Store.SetMetadataBatch(id, wakePatch); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *wakeBeforeDrainFinalizeWriteStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if err := s.injectWakeBeforeFinalWrite(id, kvs); err != nil {
+		return err
+	}
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+func (s *wakeBeforeDrainFinalizeWriteStore) Update(id string, opts beads.UpdateOpts) error {
+	if err := s.injectWakeBeforeFinalWrite(id, opts.Metadata); err != nil {
+		return err
+	}
+	return s.Store.Update(id, opts)
+}
+
+// lifecyclePatchBeforeDrainMutationStore deterministically commits an operator
+// lifecycle patch at the finalizer's next front-door Get. The returned bead
+// includes the new intent, reproducing a wake/suspend immediately before a
+// mutation boundary without wall-clock sleeps.
+type lifecyclePatchBeforeDrainMutationStore struct {
+	beads.Store
+	sessionID string
+	patch     map[string]string
+	triggered bool
+}
+
+func (s *lifecyclePatchBeforeDrainMutationStore) Get(id string) (beads.Bead, error) {
+	if !s.triggered && id == s.sessionID {
+		s.triggered = true
+		if err := s.SetMetadataBatch(id, s.patch); err != nil {
+			return beads.Bead{}, err
+		}
+	}
+	return s.Store.Get(id)
+}
+
+type blockWakeLifecycleWriteStore struct {
+	beads.Store
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *blockWakeLifecycleWriteStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if strings.TrimSpace(kvs["wake_request"]) == string(sessionpkg.WakeCauseExplicit) {
+		s.once.Do(func() {
+			close(s.entered)
+			<-s.release
+		})
+	}
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+type blockCloseLifecycleTxStore struct {
+	beads.Store
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *blockCloseLifecycleTxStore) Tx(msg string, fn func(beads.Tx) error) error {
+	if strings.HasPrefix(msg, "gc: close session ") {
+		s.once.Do(func() {
+			close(s.entered)
+			<-s.release
+		})
+	}
+	return s.Store.Tx(msg, fn)
+}
+
+// replacementAfterCloseStore starts a replacement runtime immediately after
+// the old bead's close transaction commits but before closeBead returns. It
+// makes the runtime-name release/metadata-cleanup ordering deterministic.
+type replacementAfterCloseStore struct {
+	beads.Store
+	sessionID  string
+	afterClose func()
+	once       sync.Once
+}
+
+func (s *replacementAfterCloseStore) Tx(msg string, fn func(beads.Tx) error) error {
+	err := s.Store.Tx(msg, fn)
+	if err == nil && strings.HasPrefix(msg, "gc: close session "+s.sessionID) {
+		s.once.Do(s.afterClose)
+	}
+	return err
+}
+
+type blockSuspendStopProvider struct {
+	*runtime.Fake
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (p *blockSuspendStopProvider) Stop(name string) error {
+	p.once.Do(func() {
+		close(p.entered)
+		<-p.release
+	})
+	return p.Fake.Stop(name)
+}
+
+type dieImmediatelyAfterStartProvider struct {
+	*runtime.Fake
+}
+
+func (p *dieImmediatelyAfterStartProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := p.Fake.Start(ctx, name, cfg); err != nil {
+		return err
+	}
+	return p.Stop(name)
+}
+
+func awaitLifecycleRaceSignal(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+	}
+}
+
+func TestFinalizeDrainAckStoppedSessionWakeFirstSkipsBusyLifecycle(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	session := env.createSessionBead("worker", "worker")
+	stale := env.sessionInfo(session.ID)
+	cityPath := t.TempDir()
+	blocking := &blockWakeLifecycleWriteStore{
+		Store:   env.store,
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	wakeDone := make(chan error, 1)
+	go func() {
+		_, err := sessionpkg.NewStore(beads.SessionStore{Store: blocking}).WakeSession(
+			session.ID, env.clk.Now().UTC(), sessionpkg.WakeOpts{CityPath: cityPath},
+		)
+		wakeDone <- err
+	}()
+	awaitLifecycleRaceSignal(t, blocking.entered, "wake write under lifecycle lock")
+
+	result := finalizeDrainAckStoppedSession(
+		cityPath, env.cfg, nil, nil, blocking, nil, stale, "worker", true,
+		newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
+	)
+	if result.requiresSnapshotReload() {
+		t.Fatalf("busy-lock finalizer result = %+v, want fail-closed no-op", result)
+	}
+	close(blocking.release)
+	if err := <-wakeDone; err != nil {
+		t.Fatalf("WakeSession: %v", err)
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Status == "closed" || got.Metadata["wake_request"] != string(sessionpkg.WakeCauseExplicit) {
+		t.Fatalf("wake-first state = status %q metadata %v, want open explicit wake", got.Status, got.Metadata)
+	}
+}
+
+func TestFinalizeDrainAckStopPendingSessionsBusyLifecycleDoesNotSignalReload(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	session := env.createSessionBead("worker", "worker")
+	patch := sessionpkg.DrainAckStopPendingPatch(env.clk.Now().UTC())
+	patch[poolManagedMetadataKey] = boolMetadata(true)
+	if err := env.store.SetMetadataBatch(session.ID, patch); err != nil {
+		t.Fatalf("SetMetadataBatch(stop-pending): %v", err)
+	}
+
+	holderEntered := make(chan struct{})
+	holderRelease := make(chan struct{})
+	holderDone := make(chan error, 1)
+	go func() {
+		holderDone <- sessionpkg.WithCitySessionLifecycleLock("", session.ID, func() error {
+			close(holderEntered)
+			<-holderRelease
+			return nil
+		})
+	}()
+	awaitLifecycleRaceSignal(t, holderEntered, "lifecycle lock holder")
+
+	finalized := finalizeDrainAckStopPendingSessions(
+		"", env.cfg, env.sp, beads.SessionStore{Store: env.store}, nil,
+		[]sessionpkg.Info{env.sessionInfo(session.ID)}, newFakeDrainOps(), env.dt, nil,
+		env.clk, env.rec, &env.stderr,
+	)
+	close(holderRelease)
+	if err := <-holderDone; err != nil {
+		t.Fatalf("lifecycle lock holder: %v", err)
+	}
+	if finalized != 0 {
+		t.Fatalf("finalized = %d, want 0: a busy TryLock is a no-op and must not trigger a snapshot reload", finalized)
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Status == "closed" || !isDrainAckStopPendingInfo(env.sessionInfo(session.ID)) {
+		t.Fatalf("busy finalizer mutated stop-pending session: status=%q metadata=%v", got.Status, got.Metadata)
+	}
+}
+
+func TestFinalizeDrainAckStoppedSessionFinalizerFirstRejectsWake(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	session := env.createSessionBead("worker", "worker")
+	stale := env.sessionInfo(session.ID)
+	cityPath := t.TempDir()
+	blocking := &blockCloseLifecycleTxStore{
+		Store:   env.store,
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	finalizeDone := make(chan drainAckFinalizeResult, 1)
+	go func() {
+		finalizeDone <- finalizeDrainAckStoppedSession(
+			cityPath, env.cfg, nil, nil, blocking, nil, stale, "worker", true,
+			newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
+		)
+	}()
+	awaitLifecycleRaceSignal(t, blocking.entered, "finalizer close transaction")
+
+	wakeDone := make(chan error, 1)
+	go func() {
+		_, err := sessionpkg.NewStore(beads.SessionStore{Store: blocking}).WakeSession(
+			session.ID, env.clk.Now().UTC(), sessionpkg.WakeOpts{CityPath: cityPath},
+		)
+		wakeDone <- err
+	}()
+	select {
+	case err := <-wakeDone:
+		t.Fatalf("WakeSession returned before finalizer released lifecycle lock: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(blocking.release)
+	if result := <-finalizeDone; !result.closed {
+		t.Fatalf("finalizer result = %+v, want closed", result)
+	}
+	wakeErr := <-wakeDone
+	var conflict *sessionpkg.WakeConflictError
+	if !errors.As(wakeErr, &conflict) || conflict.State != "closed" {
+		t.Fatalf("WakeSession error = %v, want closed WakeConflictError", wakeErr)
+	}
+}
+
+func TestFinalizeDrainAckStoppedSessionSuspendFirstPersistsBeforeStop(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	session := env.createSessionBead("worker", "worker")
+	stale := env.sessionInfo(session.ID)
+	cityPath := t.TempDir()
+	provider := &blockSuspendStopProvider{
+		Fake:    runtime.NewFake(),
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	if err := provider.Start(context.Background(), stale.SessionName, runtime.Config{Command: "worker"}); err != nil {
+		t.Fatalf("start fake runtime: %v", err)
+	}
+	mgr := sessionpkg.NewManagerWithOptions(env.store, provider, sessionpkg.WithCityPath(cityPath), sessionpkg.WithClock(env.clk))
+	suspendDone := make(chan error, 1)
+	go func() { suspendDone <- mgr.Suspend(session.ID) }()
+	awaitLifecycleRaceSignal(t, provider.entered, "provider stop after durable suspend")
+
+	whileStopped, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get during Stop: %v", err)
+	}
+	if whileStopped.Metadata["state"] != string(sessionpkg.StateSuspended) ||
+		whileStopped.Metadata["sleep_intent"] != string(sessionpkg.SleepReasonUserHold) {
+		t.Fatalf("suspend intent not durable before Stop: metadata=%v", whileStopped.Metadata)
+	}
+	result := finalizeDrainAckStoppedSession(
+		cityPath, env.cfg, provider, nil, env.store, nil, stale, "worker", true,
+		newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
+	)
+	if result.requiresSnapshotReload() {
+		t.Fatalf("busy-lock finalizer result = %+v, want fail-closed no-op", result)
+	}
+	close(provider.release)
+	if err := <-suspendDone; err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get after Suspend: %v", err)
+	}
+	if got.Status == "closed" || got.Metadata["state"] != string(sessionpkg.StateSuspended) {
+		t.Fatalf("suspend-first state = status %q metadata %v, want open suspended", got.Status, got.Metadata)
+	}
+}
+
+func TestFinalizeDrainAckStoppedSessionFinalizerFirstRejectsSuspend(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	session := env.createSessionBead("worker", "worker")
+	stale := env.sessionInfo(session.ID)
+	cityPath := t.TempDir()
+	blocking := &blockCloseLifecycleTxStore{
+		Store:   env.store,
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	finalizeDone := make(chan drainAckFinalizeResult, 1)
+	go func() {
+		finalizeDone <- finalizeDrainAckStoppedSession(
+			cityPath, env.cfg, nil, nil, blocking, nil, stale, "worker", true,
+			newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
+		)
+	}()
+	awaitLifecycleRaceSignal(t, blocking.entered, "finalizer close transaction")
+
+	mgr := sessionpkg.NewManagerWithOptions(blocking, runtime.NewFake(), sessionpkg.WithCityPath(cityPath), sessionpkg.WithClock(env.clk))
+	suspendDone := make(chan error, 1)
+	go func() { suspendDone <- mgr.Suspend(session.ID) }()
+	select {
+	case err := <-suspendDone:
+		t.Fatalf("Suspend returned before finalizer released lifecycle lock: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(blocking.release)
+	if result := <-finalizeDone; !result.closed {
+		t.Fatalf("finalizer result = %+v, want closed", result)
+	}
+	if err := <-suspendDone; !errors.Is(err, sessionpkg.ErrSessionClosed) {
+		t.Fatalf("Suspend error = %v, want ErrSessionClosed", err)
+	}
+}
+
+func TestFinalizeDrainAckStoppedSessionStartThenImmediateDeathSupersedesStaleClose(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	session := env.createSessionBead("worker", "worker")
+	patch := sessionpkg.DrainAckStopPendingPatch(env.clk.Now().UTC())
+	if err := env.store.SetMetadataBatch(session.ID, patch); err != nil {
+		t.Fatalf("SetMetadataBatch(stop-pending): %v", err)
+	}
+	stale := env.sessionInfo(session.ID)
+	cityPath := t.TempDir()
+	provider := &dieImmediatelyAfterStartProvider{Fake: runtime.NewFake()}
+	mgr := sessionpkg.NewManagerWithOptions(env.store, provider, sessionpkg.WithCityPath(cityPath), sessionpkg.WithClock(env.clk))
+	if err := mgr.Start(context.Background(), session.ID, "worker", runtime.Config{Command: "worker"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if provider.IsRunning(stale.SessionName) {
+		t.Fatal("immediate-death provider still running; fixture did not exercise durable start epoch")
+	}
+
+	result := finalizeDrainAckStoppedSession(
+		cityPath, env.cfg, provider, nil, env.store, nil, stale, "worker", true,
+		newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
+	)
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get after finalizer: %v", err)
+	}
+	if result.closed || got.Status == "closed" || got.Metadata["state"] != string(sessionpkg.StateActive) {
+		t.Fatalf("stale finalizer closed superseding start: result=%+v status=%q metadata=%v", result, got.Status, got.Metadata)
+	}
+	if got.Metadata["awake_started_at"] == "" || got.Metadata["creation_complete_at"] == "" {
+		t.Fatalf("implicit start did not persist superseding epoch: metadata=%v", got.Metadata)
+	}
+}
+
+func TestFinalizeDrainAckStoppedSessionRejectsSupersedingLifecycleStates(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		state  sessionpkg.State
+		reason string
+		wake   string
+	}{
+		{name: "active", state: sessionpkg.StateActive, reason: "creation_complete"},
+		{name: "creating", state: sessionpkg.StateCreating, reason: "work"},
+		{name: "start-pending", state: sessionpkg.StateStartPending, reason: "work"},
+		{name: "asleep-explicit-wake", state: sessionpkg.StateAsleep, wake: string(sessionpkg.WakeCauseExplicit)},
+		{name: "different-drain", state: sessionpkg.StateDraining, reason: "config-drift"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newReconcilerTestEnv()
+			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+			session := env.createSessionBead("worker", "worker")
+			stopPending := sessionpkg.DrainAckStopPendingPatch(env.clk.Now().UTC())
+			if err := env.store.SetMetadataBatch(session.ID, stopPending); err != nil {
+				t.Fatalf("SetMetadataBatch(stop-pending): %v", err)
+			}
+			stale := env.sessionInfo(session.ID)
+			newer := map[string]string{"state": string(tc.state), "state_reason": tc.reason, "wake_request": tc.wake}
+			if err := env.store.SetMetadataBatch(session.ID, newer); err != nil {
+				t.Fatalf("SetMetadataBatch(newer): %v", err)
+			}
+
+			result := finalizeDrainAckStoppedSession(
+				t.TempDir(), env.cfg, nil, nil, env.store, nil, stale, "worker", true,
+				newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
+			)
+			got, err := env.store.Get(session.ID)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if result.closed || got.Status == "closed" || got.Metadata["state"] != string(tc.state) || got.Metadata["state_reason"] != tc.reason {
+				t.Fatalf("superseding lifecycle overwritten: result=%+v status=%q metadata=%v", result, got.Status, got.Metadata)
+			}
+		})
+	}
+}
+
+func TestFinalizeDrainAckStoppedSessionConcurrentWakeWinsOverHeldSnapshot(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	session := env.createSessionBead("worker", "worker")
+	heldUntil := env.clk.Now().Add(100 * time.Hour).UTC().Format(time.RFC3339)
+	env.setSessionMetadata(&session, map[string]string{
+		"state":        string(sessionpkg.StateDraining),
+		"state_reason": sessionpkg.DrainAckStopPendingReason,
+		"sleep_intent": string(sessionpkg.SleepReasonUserHold),
+		"held_until":   heldUntil,
+	})
+	staleHeldInfo := env.sessionInfo(session.ID)
+	interleaving := &wakeBeforeDrainFinalizeWriteStore{
+		Store:     env.store,
+		sessionID: session.ID,
+		now:       env.clk.Now().UTC(),
+	}
+
+	finalizeDrainAckStoppedSession(
+		"", env.cfg, nil, nil, interleaving, nil, staleHeldInfo, "worker", true,
+		newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
+	)
+
+	if !interleaving.triggered {
+		t.Fatal("wake interleaving did not run before final metadata write")
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["sleep_intent"] != "" || got.Metadata["held_until"] != "" {
+		t.Fatalf("drain finalizer restored cleared hold after concurrent wake: metadata=%v", got.Metadata)
+	}
+	if got.Metadata["wake_request"] != string(sessionpkg.WakeCauseExplicit) {
+		t.Fatalf("wake_request = %q, want explicit wake preserved; metadata=%v", got.Metadata["wake_request"], got.Metadata)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("session closed after concurrent wake: metadata=%v", got.Metadata)
+	}
+}
+
+func TestFinalizeDrainAckStoppedSessionObservesWakeBeforeClose(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	session := env.createSessionBead("worker", "worker")
+	heldUntil := env.clk.Now().Add(100 * time.Hour).UTC().Format(time.RFC3339)
+	env.setSessionMetadata(&session, map[string]string{
+		"state":        string(sessionpkg.StateDraining),
+		"state_reason": sessionpkg.DrainAckStopPendingReason,
+		"sleep_intent": string(sessionpkg.SleepReasonUserHold),
+		"held_until":   heldUntil,
+	})
+	staleHeldInfo := env.sessionInfo(session.ID)
+	wakePatch := sessionpkg.ClearWakeBlockersPatch(sessionpkg.StateDraining, string(sessionpkg.SleepReasonUserHold))
+	for key, value := range sessionpkg.RequestExplicitWakePatch(string(sessionpkg.WakeCauseExplicit), env.clk.Now().UTC()) {
+		wakePatch[key] = value
+	}
+	interleaving := &lifecyclePatchBeforeDrainMutationStore{
+		Store:     env.store,
+		sessionID: session.ID,
+		patch:     wakePatch,
+	}
+
+	finalizeDrainAckStoppedSession(
+		"", env.cfg, nil, nil, interleaving, nil, staleHeldInfo, "worker", true,
+		newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
+	)
+
+	if !interleaving.triggered {
+		t.Fatal("wake interleaving did not run at close lifecycle refresh")
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Status == "closed" || got.Metadata["sleep_intent"] != "" || got.Metadata["held_until"] != "" ||
+		got.Metadata["wake_request"] != string(sessionpkg.WakeCauseExplicit) {
+		t.Fatalf("concurrent wake did not survive close/finalization: status=%q metadata=%v", got.Status, got.Metadata)
+	}
+}
+
+func TestFinalizeDrainAckStoppedSessionObservesSuspendAtMutationBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		closeIfUnassigned bool
+	}{
+		{name: "before-close", closeIfUnassigned: true},
+		{name: "before-final-metadata", closeIfUnassigned: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newReconcilerTestEnv()
+			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+			session := env.createSessionBead("worker", "worker")
+			env.setSessionMetadata(&session, map[string]string{
+				"state":        string(sessionpkg.StateDraining),
+				"state_reason": sessionpkg.DrainAckStopPendingReason,
+			})
+			staleNonHoldInfo := env.sessionInfo(session.ID)
+			interleaving := &lifecyclePatchBeforeDrainMutationStore{
+				Store:     env.store,
+				sessionID: session.ID,
+				patch: map[string]string{
+					"state":        string(sessionpkg.StateSuspended),
+					"sleep_reason": string(sessionpkg.SleepReasonUserHold),
+					"sleep_intent": string(sessionpkg.SleepReasonUserHold),
+				},
+			}
+
+			finalizeDrainAckStoppedSession(
+				"", env.cfg, nil, nil, interleaving, nil, staleNonHoldInfo, "worker", tc.closeIfUnassigned,
+				newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
+			)
+
+			if !interleaving.triggered {
+				t.Fatal("suspend interleaving did not run at lifecycle refresh")
+			}
+			got, err := env.store.Get(session.ID)
+			if err != nil {
+				t.Fatalf("Get(%s): %v", session.ID, err)
+			}
+			if got.Status == "closed" {
+				t.Fatalf("session closed after concurrent suspend: metadata=%v", got.Metadata)
+			}
+			if got.Metadata["state"] != string(sessionpkg.StateSuspended) ||
+				got.Metadata["sleep_reason"] != string(sessionpkg.SleepReasonUserHold) ||
+				got.Metadata["sleep_intent"] != string(sessionpkg.SleepReasonUserHold) {
+				t.Fatalf("concurrent suspend did not survive finalization: metadata=%v", got.Metadata)
+			}
+		})
+	}
+}
+
+func TestFinalizeDrainAckStoppedSessionClearsOnlyControllerIdleIntent(t *testing.T) {
+	t.Run("assigned-work clears idle-stop-pending", func(t *testing.T) {
+		env := newReconcilerTestEnv()
+		env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+		session := env.createSessionBead("worker", "worker")
+		patch := sessionpkg.DrainAckStopPendingPatch(env.clk.Now().UTC())
+		patch["sleep_intent"] = "idle-stop-pending"
+		if err := env.store.SetMetadataBatch(session.ID, patch); err != nil {
+			t.Fatalf("SetMetadataBatch(stop-pending): %v", err)
+		}
+		if _, err := env.store.Create(beads.Bead{
+			Title: "assigned work", Type: "task", Status: "open", Assignee: session.ID,
+		}); err != nil {
+			t.Fatalf("Create(assigned work): %v", err)
+		}
+
+		before := env.sessionInfo(session.ID)
+		result := finalizeDrainAckStoppedSession(
+			"", env.cfg, nil, nil, env.store, nil, before, "worker", true,
+			newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
+		)
+		after := env.sessionInfo(session.ID)
+		if after.MetadataState != string(sessionpkg.StateAsleep) ||
+			after.SleepReason != string(sessionpkg.SleepReasonIdle) || after.SleepIntent != "" {
+			t.Fatalf("assigned-work drain completion = state %q reason %q intent %q, want asleep/idle/empty",
+				after.MetadataState, after.SleepReason, after.SleepIntent)
+		}
+		if got := result.applyTo(before); !reflect.DeepEqual(got, after) {
+			t.Fatalf("result fold differs from persisted assigned-work completion:\n got  %+v\n want %+v", got, after)
+		}
+	})
+
+	t.Run("operator user-hold remains authoritative", func(t *testing.T) {
+		env := newReconcilerTestEnv()
+		env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+		session := env.createSessionBead("worker", "worker")
+		heldUntil := env.clk.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+		if err := env.store.SetMetadataBatch(session.ID, map[string]string{
+			"state":        string(sessionpkg.StateSuspended),
+			"state_reason": "operator",
+			"sleep_reason": string(sessionpkg.SleepReasonUserHold),
+			"sleep_intent": string(sessionpkg.SleepReasonUserHold),
+			"held_until":   heldUntil,
+		}); err != nil {
+			t.Fatalf("SetMetadataBatch(user-hold): %v", err)
+		}
+
+		before := env.sessionInfo(session.ID)
+		result := finalizeDrainAckStoppedSession(
+			"", env.cfg, nil, nil, env.store, nil, before, "worker", true,
+			newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
+		)
+		after := env.sessionInfo(session.ID)
+		if after.MetadataState != string(sessionpkg.StateSuspended) ||
+			after.SleepReason != string(sessionpkg.SleepReasonUserHold) ||
+			after.SleepIntent != string(sessionpkg.SleepReasonUserHold) || after.HeldUntil != heldUntil {
+			t.Fatalf("operator hold lost during drain completion: %+v", after)
+		}
+		if got := result.applyTo(before); !reflect.DeepEqual(got, after) {
+			t.Fatalf("result fold differs from persisted operator hold:\n got  %+v\n want %+v", got, after)
+		}
+	})
+}
+
+func TestFinalizeDrainAckStoppedSessionDirectClaimFailureFoldsDurableClaim(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		closeIfUnassigned bool
+		failGetAt         int
+		failSetAt         int
+	}{
+		{name: "close-refresh", closeIfUnassigned: true, failGetAt: 2},
+		{name: "final-refresh", closeIfUnassigned: false, failGetAt: 2},
+		{name: "final-write", closeIfUnassigned: false, failSetAt: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newReconcilerTestEnv()
+			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+			session := env.createSessionBead("worker", "worker")
+			before := env.sessionInfo(session.ID)
+			failing := &drainAckClaimFailureStore{
+				Store: env.store, failGetAt: tc.failGetAt, failSetAt: tc.failSetAt,
+			}
+
+			result := finalizeDrainAckStoppedSession(
+				"", env.cfg, nil, nil, failing, nil, before, "worker", tc.closeIfUnassigned,
+				newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
+			)
+			after := env.sessionInfo(session.ID)
+			if !isDrainAckStopPendingInfo(after) {
+				t.Fatalf("post-claim failure did not leave durable stop-pending claim: %+v", after)
+			}
+			if got := result.applyTo(before); !reflect.DeepEqual(got, after) {
+				t.Fatalf("post-claim %s result lost durable partial write:\n got  %+v\n want %+v", tc.name, got, after)
+			}
+		})
+	}
+}
+
+func TestFinalizeDrainAckStoppedSessionDirectClaimCloseFoldIsExact(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	session := env.createSessionBead("worker", "worker")
+	before := env.sessionInfo(session.ID)
+
+	result := finalizeDrainAckStoppedSession(
+		"", env.cfg, nil, nil, env.store, nil, before, "worker", true,
+		newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
+	)
+	after := env.sessionInfo(session.ID)
+	if !after.Closed {
+		t.Fatalf("direct-ack close did not close session: %+v", after)
+	}
+	if got := result.applyTo(before); !reflect.DeepEqual(got, after) {
+		t.Fatalf("direct-ack claim+close result is not an exact persisted fold:\n got  %+v\n want %+v", got, after)
+	}
+}
+
+func TestDrainAckLifecycleClustersUseSingleUpdate(t *testing.T) {
+	t.Run("mark", func(t *testing.T) {
+		env := newReconcilerTestEnv()
+		session := env.createSessionBead("worker", "worker")
+		trap := &partialBatchTrapStore{Store: env.store}
+
+		got, ok := markDrainAckStopPending("", env.sessionInfo(session.ID), sessionFrontDoor(trap), env.clk, &env.stderr)
+		if !ok || !isDrainAckStopPendingInfo(got) {
+			t.Fatalf("mark result = ok %v info %+v, want stop-pending", ok, got)
+		}
+		if trap.updateCalls != 1 || trap.batchCalls != 0 {
+			t.Fatalf("mark writes = Update %d SetMetadataBatch %d, want 1/0", trap.updateCalls, trap.batchCalls)
+		}
+	})
+
+	t.Run("direct-claim-and-final", func(t *testing.T) {
+		env := newReconcilerTestEnv()
+		env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+		session := env.createSessionBead("worker", "worker")
+		if _, err := env.store.Create(beads.Bead{
+			Title: "assigned work", Type: "task", Status: "open", Assignee: session.ID,
+		}); err != nil {
+			t.Fatalf("Create(assigned work): %v", err)
+		}
+		trap := &partialBatchTrapStore{Store: env.store}
+
+		result := finalizeDrainAckStoppedSession(
+			"", env.cfg, nil, nil, trap, nil, env.sessionInfo(session.ID), "worker", true,
+			newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
+		)
+		got := env.sessionInfo(session.ID)
+		if got.MetadataState != string(sessionpkg.StateAsleep) || !result.requiresSnapshotReload() {
+			t.Fatalf("final result = %+v persisted %+v, want completed assigned-work drain", result, got)
+		}
+		if trap.updateCalls != 2 || trap.batchCalls != 0 {
+			t.Fatalf("claim/final writes = Update %d SetMetadataBatch %d, want 2/0", trap.updateCalls, trap.batchCalls)
+		}
+	})
+}
+
+func TestFinalizeDrainAckStoppedSessionSamplesCloseTimeOnce(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	session := env.createSessionBead("worker", "worker")
+	if err := env.store.SetMetadataBatch(session.ID, sessionpkg.DrainAckStopPendingPatch(env.clk.Now().UTC())); err != nil {
+		t.Fatalf("SetMetadataBatch(stop-pending): %v", err)
+	}
+	before := env.sessionInfo(session.ID)
+	closeClock := &advancingDrainCloseClock{now: env.clk.Now().Add(time.Hour), step: time.Second}
+
+	result := finalizeDrainAckStoppedSession(
+		"", env.cfg, nil, nil, env.store, nil, before, "worker", true,
+		newFakeDrainOps(), env.dt, closeClock, env.rec, &env.stderr,
+	)
+	stored, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !result.closed {
+		t.Fatalf("result = %+v, want closed", result)
+	}
+	if got, want := result.batch["closed_at"], stored.Metadata["closed_at"]; got != want {
+		t.Fatalf("folded close time = %q, persisted = %q; finalizer sampled the clock more than once", got, want)
+	}
+}
+
+func TestFinalizeDrainAckStoppedSessionCloseFailureIsRetryable(t *testing.T) {
+	for _, atomic := range []bool{false, true} {
+		name := "non-atomic"
+		if atomic {
+			name = "atomic"
+		}
+		t.Run(name, func(t *testing.T) {
+			env := newReconcilerTestEnv()
+			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+			fakeEvents := events.NewFake()
+			env.rec = fakeEvents
+			session := env.createSessionBead("worker", "worker")
+			if err := env.store.SetMetadataBatch(session.ID, sessionpkg.DrainAckStopPendingPatch(env.clk.Now().UTC())); err != nil {
+				t.Fatalf("SetMetadataBatch(stop-pending): %v", err)
+			}
+			tracked := &drainState{reason: "idle", generation: 4, ackSet: true}
+			env.dt.set(session.ID, tracked)
+			failing := &retryableDrainCloseFailureStore{Store: env.store, atomic: atomic, fail: true}
+
+			first := finalizeDrainAckStoppedSession(
+				"", env.cfg, nil, nil, failing, nil, env.sessionInfo(session.ID), "worker", true,
+				newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
+			)
+			got, err := env.store.Get(session.ID)
+			if err != nil {
+				t.Fatalf("Get after failed close: %v", err)
+			}
+			if got.Status == "closed" || got.Metadata["state"] != string(sessionpkg.StateDraining) ||
+				got.Metadata["state_reason"] != sessionpkg.DrainAckStopPendingReason {
+				t.Fatalf("failed close lost retry authority: result=%+v status=%q metadata=%v", first, got.Status, got.Metadata)
+			}
+			for _, key := range []string{"close_reason", "closed_at", "synced_at"} {
+				if got.Metadata[key] != "" {
+					t.Errorf("failed close left %s=%q, want cleared", key, got.Metadata[key])
+				}
+			}
+			if current := env.dt.get(session.ID); current != tracked {
+				t.Fatalf("failed close changed tracker: got %+v want pointer %+v", current, tracked)
+			}
+			if len(fakeEvents.Events) != 0 {
+				t.Fatalf("failed close emitted events: %v", fakeEvents.Events)
+			}
+
+			failing.fail = false
+			second := finalizeDrainAckStoppedSession(
+				"", env.cfg, nil, nil, failing, nil, env.sessionInfo(session.ID), "worker", true,
+				newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
+			)
+			closed, err := env.store.Get(session.ID)
+			if err != nil {
+				t.Fatalf("Get after retry: %v", err)
+			}
+			if !second.closed || closed.Status != "closed" {
+				t.Fatalf("retry did not close: result=%+v status=%q metadata=%v", second, closed.Status, closed.Metadata)
+			}
+			if current := env.dt.get(session.ID); current != nil {
+				t.Fatalf("successful retry retained tracker: %+v", current)
+			}
+			if len(fakeEvents.Events) != 1 {
+				t.Fatalf("successful retry events = %v, want one", fakeEvents.Events)
+			}
+		})
+	}
+}
+
+func TestFinalizeDrainAckStoppedSessionAdoptsAmbiguousSuccessfulClose(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	session := env.createSessionBead("worker", "worker")
+	if err := env.store.SetMetadataBatch(session.ID, sessionpkg.DrainAckStopPendingPatch(env.clk.Now().UTC())); err != nil {
+		t.Fatalf("SetMetadataBatch(stop-pending): %v", err)
+	}
+	tracked := &drainState{reason: "idle", generation: 4, ackSet: true}
+	env.dt.set(session.ID, tracked)
+	ambiguous := &ambiguousSuccessfulDrainCloseStore{Store: env.store}
+	before := env.sessionInfo(session.ID)
+
+	result := finalizeDrainAckStoppedSession(
+		"", env.cfg, nil, nil, ambiguous, nil, before, "worker", true,
+		newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
+	)
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != "closed" || !result.applyTo(before).Closed {
+		t.Fatalf("ambiguous successful close not adopted: result=%+v status=%q metadata=%v", result, got.Status, got.Metadata)
+	}
+	if got.Metadata["state"] != "drained" {
+		t.Fatalf("ambiguous successful close was rolled back to %q, want terminal drained", got.Metadata["state"])
+	}
+	if current := env.dt.get(session.ID); current != nil {
+		t.Fatalf("closed witness retained tracker: %+v", current)
+	}
+}
+
+func TestFinalizeDrainAckStoppedSessionVersionExceptionsRequireSameIncarnation(t *testing.T) {
+	for _, exception := range []string{"operator-park", "explicit-wake"} {
+		for _, drift := range []string{"generation", "instance-token", "awake-epoch", "session-name", "continuation-epoch"} {
+			t.Run(exception+"/"+drift, func(t *testing.T) {
+				env := newReconcilerTestEnv()
+				env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+				session := env.createSessionBead("worker", "worker")
+				basePatch := sessionpkg.DrainAckStopPendingPatch(env.clk.Now().UTC())
+				basePatch["generation"] = "7"
+				basePatch["instance_token"] = "incarnation-old"
+				basePatch["awake_started_at"] = "2026-08-05T12:00:00.000000001Z"
+				if err := env.store.SetMetadataBatch(session.ID, basePatch); err != nil {
+					t.Fatalf("SetMetadataBatch(base): %v", err)
+				}
+				stale := env.sessionInfo(session.ID)
+
+				newer := map[string]string{"sleep_reason": "new-incarnation-sentinel"}
+				switch exception {
+				case "operator-park":
+					newer["state"] = string(sessionpkg.StateSuspended)
+					newer["state_reason"] = "new-incarnation-park"
+					newer["sleep_intent"] = string(sessionpkg.SleepReasonUserHold)
+				case "explicit-wake":
+					newer["state"] = string(sessionpkg.StateDraining)
+					newer["state_reason"] = sessionpkg.DrainAckStopPendingReason
+					newer["wake_request"] = string(sessionpkg.WakeCauseExplicit)
+				}
+				switch drift {
+				case "generation":
+					newer["generation"] = "8"
+				case "instance-token":
+					newer["instance_token"] = "incarnation-new"
+				case "awake-epoch":
+					newer["awake_started_at"] = "2026-08-05T12:00:00.000000002Z"
+				case "session-name":
+					newer["session_name"] = "worker-replacement"
+				case "continuation-epoch":
+					newer["continuation_epoch"] = "8"
+				}
+				if err := env.store.SetMetadataBatch(session.ID, newer); err != nil {
+					t.Fatalf("SetMetadataBatch(new incarnation): %v", err)
+				}
+				want := env.sessionInfo(session.ID)
+
+				result := finalizeDrainAckStoppedSession(
+					"", env.cfg, nil, nil, env.store, nil, stale, "worker", true,
+					newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
+				)
+				after := env.sessionInfo(session.ID)
+				if !reflect.DeepEqual(after, want) {
+					t.Fatalf("stale %s exception finalized %s-drifted incarnation:\n got  %+v\n want %+v", exception, drift, after, want)
+				}
+				if got := result.applyTo(stale); !reflect.DeepEqual(got, want) {
+					t.Fatalf("superseded result did not adopt authoritative incarnation:\n got  %+v\n want %+v", got, want)
+				}
+			})
+		}
+	}
+}
+
+func TestFinalizeDrainAckStoppedSessionVersionExceptionsRejectUnmodeledDrift(t *testing.T) {
+	for _, exception := range []string{"operator-park", "explicit-wake"} {
+		t.Run(exception, func(t *testing.T) {
+			env := newReconcilerTestEnv()
+			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+			session := env.createSessionBead("worker", "worker")
+			basePatch := sessionpkg.DrainAckStopPendingPatch(env.clk.Now().UTC())
+			basePatch["generation"] = "7"
+			basePatch["instance_token"] = "incarnation"
+			basePatch["awake_started_at"] = "2026-08-05T12:00:00Z"
+			basePatch["continuation_epoch"] = "3"
+			if err := env.store.SetMetadataBatch(session.ID, basePatch); err != nil {
+				t.Fatalf("SetMetadataBatch(base): %v", err)
+			}
+			stale := env.sessionInfo(session.ID)
+
+			newer := map[string]string{"restart_requested": "unmodeled-drift"}
+			switch exception {
+			case "operator-park":
+				newer["state"] = string(sessionpkg.StateSuspended)
+				newer["sleep_reason"] = string(sessionpkg.SleepReasonUserHold)
+				newer["sleep_intent"] = string(sessionpkg.SleepReasonUserHold)
+			case "explicit-wake":
+				for key, value := range sessionpkg.ClearWakeBlockersPatch(stale.State, stale.SleepReason) {
+					newer[key] = value
+				}
+				for key, value := range sessionpkg.RequestExplicitWakePatch(string(sessionpkg.WakeCauseExplicit), env.clk.Now()) {
+					newer[key] = value
+				}
+				newer["wake_request_token"] = "fresh-wake-token"
+			}
+			if err := env.store.SetMetadataBatch(session.ID, newer); err != nil {
+				t.Fatalf("SetMetadataBatch(newer): %v", err)
+			}
+			want := env.sessionInfo(session.ID)
+
+			result := finalizeDrainAckStoppedSession(
+				"", env.cfg, nil, nil, env.store, nil, stale, "worker", true,
+				newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
+			)
+			if got := result.applyTo(stale); !reflect.DeepEqual(got, want) {
+				t.Fatalf("unmodeled %s drift was finalized:\n got  %+v\n want %+v", exception, got, want)
+			}
+		})
+	}
+}
+
+func TestFinalizeDrainAckStoppedSessionAcceptsExactExplicitWakeDelta(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	session := env.createSessionBead("worker", "worker")
+	heldUntil := env.clk.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	basePatch := sessionpkg.DrainAckStopPendingPatch(env.clk.Now().UTC())
+	for key, value := range map[string]string{
+		"state":              string(sessionpkg.StateSuspended),
+		"sleep_reason":       string(sessionpkg.SleepReasonUserHold),
+		"sleep_intent":       string(sessionpkg.SleepReasonUserHold),
+		"held_until":         heldUntil,
+		"generation":         "7",
+		"instance_token":     "incarnation",
+		"awake_started_at":   "2026-08-05T12:00:00Z",
+		"continuation_epoch": "3",
+	} {
+		basePatch[key] = value
+	}
+	if err := env.store.SetMetadataBatch(session.ID, basePatch); err != nil {
+		t.Fatalf("SetMetadataBatch(base): %v", err)
+	}
+	stale := env.sessionInfo(session.ID)
+	wakePatch := sessionpkg.ClearWakeBlockersPatch(stale.State, stale.SleepReason)
+	for key, value := range sessionpkg.RequestExplicitWakePatch(string(sessionpkg.WakeCauseExplicit), env.clk.Now()) {
+		wakePatch[key] = value
+	}
+	// WakeSession writes the random token in the same lifecycle cluster. The
+	// finalizer admits only this empty-to-fresh request/timestamp/token delta and
+	// must preserve all three while applying its own terminal patch.
+	wakePatch["wake_request_token"] = "wake-token-1"
+	if err := env.store.SetMetadataBatch(session.ID, wakePatch); err != nil {
+		t.Fatalf("SetMetadataBatch(wake): %v", err)
+	}
+
+	result := finalizeDrainAckStoppedSession(
+		"", env.cfg, nil, nil, env.store, nil, stale, "worker", true,
+		newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
+	)
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if result.closed || got.Status == "closed" || got.Metadata["state"] != string(sessionpkg.StateDrained) {
+		t.Fatalf("exact explicit wake was not finalized safely: result=%+v status=%q metadata=%v", result, got.Status, got.Metadata)
+	}
+	if got.Metadata["wake_request"] != string(sessionpkg.WakeCauseExplicit) ||
+		got.Metadata["wake_requested_at"] != env.clk.Now().UTC().Format(time.RFC3339) ||
+		got.Metadata["wake_request_token"] != "wake-token-1" {
+		t.Fatalf("explicit wake identity was not preserved: metadata=%v", got.Metadata)
+	}
+}
+
+func TestExplicitWakePreservesDrainStopIdentityRejectsNonCanonicalCoordinates(t *testing.T) {
+	env := newReconcilerTestEnv()
+	session := env.createSessionBead("worker", "worker")
+	basePatch := sessionpkg.DrainAckStopPendingPatch(env.clk.Now().UTC())
+	basePatch["generation"] = "7"
+	basePatch["instance_token"] = "incarnation"
+	basePatch["awake_started_at"] = "2026-08-05T12:00:00Z"
+	if err := env.store.SetMetadataBatch(session.ID, basePatch); err != nil {
+		t.Fatalf("SetMetadataBatch(base): %v", err)
+	}
+	observed := env.sessionInfo(session.ID)
+	canonicalPatch := sessionpkg.ClearWakeBlockersPatch(observed.State, observed.SleepReason)
+	for key, value := range sessionpkg.RequestExplicitWakePatch(string(sessionpkg.WakeCauseExplicit), env.clk.Now()) {
+		canonicalPatch[key] = value
+	}
+	canonicalPatch["wake_request_token"] = "fresh-token"
+	canonical := observed.ApplyPatch(canonicalPatch)
+	if !explicitWakePreservesDrainStopIdentity(observed, canonical) {
+		t.Fatal("canonical explicit wake delta rejected")
+	}
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(sessionpkg.Info) sessionpkg.Info
+	}{
+		{name: "missing-token", mutate: func(i sessionpkg.Info) sessionpkg.Info { i.WakeRequestToken = ""; return i }},
+		{name: "missing-timestamp", mutate: func(i sessionpkg.Info) sessionpkg.Info { i.WakeRequestedAt = ""; return i }},
+		{name: "malformed-timestamp", mutate: func(i sessionpkg.Info) sessionpkg.Info { i.WakeRequestedAt = "not-a-time"; return i }},
+		{name: "extra-state-reason", mutate: func(i sessionpkg.Info) sessionpkg.Info { i.StateReason = "unrelated"; return i }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if explicitWakePreservesDrainStopIdentity(observed, tc.mutate(canonical)) {
+				t.Fatalf("accepted non-canonical explicit wake coordinate: %s", tc.name)
+			}
+		})
+	}
+
+	alreadyRequested := observed
+	alreadyRequested.WakeRequest = string(sessionpkg.WakeCauseExplicit)
+	alreadyRequested.WakeRequestedAt = env.clk.Now().UTC().Format(time.RFC3339)
+	alreadyRequested.WakeRequestToken = "old-token"
+	secondRequest := alreadyRequested
+	secondRequest.WakeRequestToken = "replacement-token"
+	if explicitWakePreservesDrainStopIdentity(alreadyRequested, secondRequest) {
+		t.Fatal("accepted token replacement as the initial explicit-wake delta")
+	}
+}
+
+func TestFinalizeDrainAckStoppedSessionSupersededWitnessPreservesNewDrainState(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	session := env.createSessionBead("worker", "worker")
+	basePatch := sessionpkg.DrainAckStopPendingPatch(env.clk.Now().UTC())
+	basePatch["awake_started_at"] = "2026-08-05T12:00:00Z"
+	if err := env.store.SetMetadataBatch(session.ID, basePatch); err != nil {
+		t.Fatalf("SetMetadataBatch(base): %v", err)
+	}
+	stale := env.sessionInfo(session.ID)
+	if err := env.store.SetMetadataBatch(session.ID, map[string]string{
+		"state":        string(sessionpkg.StateActive),
+		"state_reason": "creation_complete",
+	}); err != nil {
+		t.Fatalf("SetMetadataBatch(superseding state): %v", err)
+	}
+	wantInfo := env.sessionInfo(session.ID)
+
+	dops := newFakeDrainOps()
+	if err := dops.setDrain("worker"); err != nil {
+		t.Fatalf("setDrain: %v", err)
+	}
+	newDrain := &drainState{reason: "config-drift", generation: 2, ackSet: true}
+	env.dt.set(session.ID, newDrain)
+
+	result := finalizeDrainAckStoppedSession(
+		"", env.cfg, nil, nil, env.store, nil, stale, "worker", true,
+		dops, env.dt, env.clk, env.rec, &env.stderr,
+	)
+	if got := result.applyTo(stale); !reflect.DeepEqual(got, wantInfo) {
+		t.Fatalf("superseded result did not adopt latest Info:\n got  %+v\n want %+v", got, wantInfo)
+	}
+	if got := env.dt.get(session.ID); got != newDrain {
+		t.Fatalf("superseded witness cleared/replaced newer drain tracker: got %+v want pointer %+v", got, newDrain)
+	}
+	if draining, err := dops.isDraining("worker"); err != nil || !draining {
+		t.Fatalf("superseded witness cleared newer provider drain metadata: draining=%v err=%v", draining, err)
+	}
+	if len(dops.clearDrainCalls) != 0 {
+		t.Fatalf("superseded witness clearDrain calls = %v, want none", dops.clearDrainCalls)
+	}
+}
+
+func TestFinalizeDrainAckStoppedSessionClosedWitnessPreservesReusedRuntimeDrain(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	session := env.createSessionBead("worker", "worker")
+	if err := env.store.SetMetadataBatch(session.ID, sessionpkg.DrainAckStopPendingPatch(env.clk.Now().UTC())); err != nil {
+		t.Fatalf("SetMetadataBatch(stop-pending): %v", err)
+	}
+	stale := env.sessionInfo(session.ID)
+	if err := env.store.Close(session.ID); err != nil {
+		t.Fatalf("Close(old session bead): %v", err)
+	}
+
+	// A different bead has already reused the runtime name. Provider drain
+	// metadata is name-scoped, so the old bead's closed-witness path must not
+	// remove any of this replacement incarnation's markers.
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "replacement"}); err != nil {
+		t.Fatalf("Start(replacement runtime): %v", err)
+	}
+	wantMeta := map[string]string{
+		"GC_SESSION_ID":                 "gc-replacement",
+		"GC_INSTANCE_TOKEN":             "replacement-token",
+		"GC_DRAIN":                      "replacement-drain",
+		"GC_DRAIN_ACK":                  "1",
+		reconcilerDrainAckSourceKey:     reconcilerDrainAckSourceValue,
+		reconcilerDrainAckReasonKey:     "config-drift",
+		reconcilerDrainAckGenerationKey: "9",
+	}
+	for key, value := range wantMeta {
+		if err := env.sp.SetMeta("worker", key, value); err != nil {
+			t.Fatalf("SetMeta(%s): %v", key, err)
+		}
+	}
+	oldDrain := &drainState{reason: "old", generation: 1}
+	env.dt.set(session.ID, oldDrain)
+	replacementDrain := &drainState{reason: "config-drift", generation: 9}
+	env.dt.set("gc-replacement", replacementDrain)
+
+	result := finalizeDrainAckStoppedSession(
+		"", env.cfg, env.sp, nil, env.store, nil, stale, "worker", true,
+		newDrainOps(env.sp), env.dt, env.clk, env.rec, &env.stderr,
+	)
+	if got := result.applyTo(stale); !got.Closed {
+		t.Fatalf("closed witness result did not adopt terminal bead: %+v", got)
+	}
+	for key, want := range wantMeta {
+		got, err := env.sp.GetMeta("worker", key)
+		if err != nil || got != want {
+			t.Errorf("replacement metadata %s = %q, err %v, want %q", key, got, err, want)
+		}
+	}
+	if got := env.dt.get(session.ID); got != nil {
+		t.Fatalf("old bead tracker survived closed witness: %+v", got)
+	}
+	if got := env.dt.get("gc-replacement"); got != replacementDrain {
+		t.Fatalf("replacement tracker changed: got %+v want pointer %+v", got, replacementDrain)
+	}
+}
+
+func TestFinalizeDrainAckStoppedSessionClosedWitnessThenAdvancePreservesReplacementDrainLifecycle(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	old := env.createSessionBead("worker", "worker")
+	oldPatch := sessionpkg.DrainAckStopPendingPatch(env.clk.Now().UTC())
+	oldPatch["generation"] = "1"
+	oldPatch["continuation_epoch"] = "1"
+	oldPatch["instance_token"] = "old-token"
+	oldPatch["awake_started_at"] = "2026-08-05T12:00:00Z"
+	if err := env.store.SetMetadataBatch(old.ID, oldPatch); err != nil {
+		t.Fatalf("SetMetadataBatch(old): %v", err)
+	}
+	staleOld := env.sessionInfo(old.ID)
+	if err := env.store.Close(old.ID); err != nil {
+		t.Fatalf("Close(old): %v", err)
+	}
+
+	replacement := env.createSessionBead("worker", "worker")
+	replacementPatch := map[string]string{
+		"state":                string(sessionpkg.StateActive),
+		"state_reason":         "creation_complete",
+		"generation":           "9",
+		"continuation_epoch":   "4",
+		"instance_token":       "replacement-token",
+		"awake_started_at":     "2026-08-05T13:00:00Z",
+		"creation_complete_at": "2026-08-05T13:00:00Z",
+	}
+	if err := env.store.SetMetadataBatch(replacement.ID, replacementPatch); err != nil {
+		t.Fatalf("SetMetadataBatch(replacement): %v", err)
+	}
+	replacementInfo := env.sessionInfo(replacement.ID)
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "replacement"}); err != nil {
+		t.Fatalf("Start(replacement runtime): %v", err)
+	}
+	wantMeta := map[string]string{
+		"GC_SESSION_ID":                 replacement.ID,
+		"GC_INSTANCE_TOKEN":             replacementInfo.InstanceToken,
+		"GC_RUNTIME_EPOCH":              replacementInfo.Generation,
+		"GC_CONTINUATION_EPOCH":         replacementInfo.ContinuationEpoch,
+		"GC_DRAIN":                      "replacement-drain",
+		"GC_DRAIN_ACK":                  "1",
+		reconcilerDrainAckSourceKey:     reconcilerDrainAckSourceValue,
+		reconcilerDrainAckReasonKey:     "config-drift",
+		reconcilerDrainAckGenerationKey: replacementInfo.Generation,
+		reconcilerDrainAckAwakeEpochKey: replacementInfo.AwakeStartedAt,
+	}
+	for key, value := range wantMeta {
+		if err := env.sp.SetMeta("worker", key, value); err != nil {
+			t.Fatalf("SetMeta(%s): %v", key, err)
+		}
+	}
+
+	oldDrain := &drainState{reason: "old", generation: 1, lifecycle: drainAckVersionOf(staleOld), lifecyclePinned: true, ackSet: true}
+	env.dt.set(old.ID, oldDrain)
+	replacementDrain := &drainState{
+		startedAt:       env.clk.Now(),
+		deadline:        env.clk.Now().Add(time.Hour),
+		reason:          "config-drift",
+		generation:      9,
+		lifecycle:       drainAckVersionOf(replacementInfo),
+		lifecyclePinned: true,
+		ackSet:          true,
+	}
+	env.dt.set(replacement.ID, replacementDrain)
+
+	result := finalizeDrainAckStoppedSession(
+		"", env.cfg, env.sp, nil, env.store, nil, staleOld, "worker", true,
+		newDrainOps(env.sp), env.dt, env.clk, env.rec, &env.stderr,
+	)
+	if got := result.applyTo(staleOld); !got.Closed {
+		t.Fatalf("closed witness result did not adopt old terminal bead: %+v", got)
+	}
+	if got := env.dt.get(old.ID); got != nil {
+		t.Fatalf("old tracker survived closed witness: %+v", got)
+	}
+
+	advanceSessionDrainsWithSessionsTraced(
+		"", env.dt, env.sp, env.store,
+		func(id string) (sessionpkg.Info, bool) {
+			if id != replacement.ID {
+				return sessionpkg.Info{}, false
+			}
+			return env.sessionInfo(id), true
+		},
+		map[string]wakeEvaluation{}, env.cfg, env.clk, nil,
+	)
+
+	if got := env.dt.get(replacement.ID); got != replacementDrain {
+		t.Fatalf("replacement tracker changed after witness+advance: got %+v want pointer %+v", got, replacementDrain)
+	}
+	for key, want := range wantMeta {
+		got, err := env.sp.GetMeta("worker", key)
+		if err != nil || got != want {
+			t.Errorf("replacement metadata %s = %q, err %v, want %q", key, got, err, want)
+		}
+	}
+}
+
+func TestFinalizeDrainAckStoppedSessionClearsProviderDrainBeforeClosing(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	session := env.createSessionBead("worker", "worker")
+	if err := env.store.SetMetadataBatch(session.ID, sessionpkg.DrainAckStopPendingPatch(env.clk.Now().UTC())); err != nil {
+		t.Fatalf("SetMetadataBatch(stop-pending): %v", err)
+	}
+	for key, value := range map[string]string{
+		"GC_DRAIN":                  "old-drain",
+		"GC_DRAIN_ACK":              "1",
+		reconcilerDrainAckSourceKey: reconcilerDrainAckSourceValue,
+	} {
+		if err := env.sp.SetMeta("worker", key, value); err != nil {
+			t.Fatalf("SetMeta(old %s): %v", key, err)
+		}
+	}
+
+	wantMeta := map[string]string{
+		"GC_SESSION_ID":                 "gc-replacement",
+		"GC_INSTANCE_TOKEN":             "replacement-token",
+		"GC_DRAIN":                      "replacement-drain",
+		"GC_DRAIN_ACK":                  "1",
+		reconcilerDrainAckSourceKey:     reconcilerDrainAckSourceValue,
+		reconcilerDrainAckReasonKey:     "config-drift",
+		reconcilerDrainAckGenerationKey: "9",
+	}
+	racing := &replacementAfterCloseStore{
+		Store:     env.store,
+		sessionID: session.ID,
+		afterClose: func() {
+			if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "replacement"}); err != nil {
+				t.Errorf("Start(replacement runtime): %v", err)
+				return
+			}
+			for key, value := range wantMeta {
+				if err := env.sp.SetMeta("worker", key, value); err != nil {
+					t.Errorf("SetMeta(replacement %s): %v", key, err)
+				}
+			}
+		},
+	}
+
+	result := finalizeDrainAckStoppedSession(
+		"", env.cfg, env.sp, nil, racing, nil, env.sessionInfo(session.ID), "worker", true,
+		newDrainOps(env.sp), env.dt, env.clk, env.rec, &env.stderr,
+	)
+	if !result.closed {
+		t.Fatalf("finalizer result = %+v, want closed", result)
+	}
+	for key, want := range wantMeta {
+		got, err := env.sp.GetMeta("worker", key)
+		if err != nil || got != want {
+			t.Errorf("replacement metadata %s = %q, err %v, want %q", key, got, err, want)
+		}
+	}
+}
+
+func TestFinalizeDrainAckStoppedSessionProviderClearFailureLeavesAuthorityForRetry(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	fakeEvents := events.NewFake()
+	env.rec = fakeEvents
+	session := env.createSessionBead("worker", "worker")
+	if err := env.store.SetMetadataBatch(session.ID, sessionpkg.DrainAckStopPendingPatch(env.clk.Now().UTC())); err != nil {
+		t.Fatalf("SetMetadataBatch(stop-pending): %v", err)
+	}
+	tracked := &drainState{reason: "idle", generation: 4, ackSet: true}
+	env.dt.set(session.ID, tracked)
+	dops := newFakeDrainOps()
+	dops.err = errors.New("provider metadata unavailable")
+
+	result := finalizeDrainAckStoppedSession(
+		"", env.cfg, nil, nil, env.store, nil, env.sessionInfo(session.ID), "worker", true,
+		dops, env.dt, env.clk, env.rec, &env.stderr,
+	)
+	got := env.sessionInfo(session.ID)
+	if result.requiresSnapshotReload() || got.Closed || !isDrainAckStopPendingInfo(got) {
+		t.Fatalf("provider-clear failure changed terminal authority: result=%+v info=%+v", result, got)
+	}
+	if current := env.dt.get(session.ID); current != tracked {
+		t.Fatalf("provider-clear failure changed tracker: got %+v want pointer %+v", current, tracked)
+	}
+	if len(dops.clearDrainCalls) != 1 {
+		t.Fatalf("clearDrain calls = %v, want one failed attempt", dops.clearDrainCalls)
+	}
+	if len(fakeEvents.Events) != 0 {
+		t.Fatalf("provider-clear failure emitted terminal events: %v", fakeEvents.Events)
+	}
+	if !strings.Contains(env.stderr.String(), "clearing drain metadata") {
+		t.Fatalf("stderr = %q, want provider cleanup failure diagnostic", env.stderr.String())
+	}
+}
+
 func TestFinalizeDrainAckStoppedSessionDoesNotEmitEventsWhenFinalMetadataFails(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
@@ -3557,7 +5306,7 @@ func TestFinalizeDrainAckStoppedSessionDoesNotEmitEventsWhenFinalMetadataFails(t
 
 	failingStore := &failSetMetadataBatchStore{Store: env.store, err: errors.New("metadata write failed")}
 	finalizeDrainAckStoppedSession(
-		"", env.cfg, failingStore, nil, env.sessionInfo(session.ID), "worker", false,
+		"", env.cfg, nil, nil, failingStore, nil, env.sessionInfo(session.ID), "worker", false,
 		newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
 	)
 
@@ -3584,7 +5333,7 @@ func TestFinalizeDrainAckStoppedSessionFallsThroughWhenCloseGateRacesWithAssignm
 
 	racingStore := &assignOnListStore{Store: env.store, sessionID: session.ID}
 	finalizeDrainAckStoppedSession(
-		"", env.cfg, racingStore, nil, env.sessionInfo(session.ID), "worker", true,
+		"", env.cfg, nil, nil, racingStore, nil, env.sessionInfo(session.ID), "worker", true,
 		newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
 	)
 
@@ -4314,6 +6063,13 @@ func (s *failStopPendingStore) SetMetadataBatch(id string, kvs map[string]string
 		return errors.New("stop-pending metadata failed")
 	}
 	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+func (s *failStopPendingStore) Update(id string, opts beads.UpdateOpts) error {
+	if opts.Metadata["state_reason"] == sessionpkg.DrainAckStopPendingReason {
+		return errors.New("stop-pending metadata failed")
+	}
+	return s.Store.Update(id, opts)
 }
 
 func TestReconcileSessionBeads_DrainAckStopPendingMetadataFailureLogsDiagnostic(t *testing.T) {
@@ -6114,6 +7870,170 @@ func TestReconcileSessionBeads_OrphanDrainLiveAssignedWorkStaysOpen(t *testing.T
 	}
 }
 
+// TestReconcileSessionBeads_ExplicitSuspendOverridesLiveAssignedWork guards the
+// managed `gc session suspend` contract. The command persists a user-hold and
+// relies on the reconciler to stop the runtime. When the backing agent is also
+// suspended, the session takes the !desired path; ordinary orphan protection
+// must not let its assigned work override that explicit operator request.
+func TestReconcileSessionBeads_ExplicitSuspendOverridesLiveAssignedWork(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", Suspended: true}}}
+	_ = env.sp.Start(context.Background(), "worker", runtime.Config{})
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"state":        "suspended",
+		"sleep_intent": string(sessionpkg.SleepReasonUserHold),
+		"held_until":   env.clk.Now().Add(100 * time.Hour).UTC().Format(time.RFC3339),
+	})
+
+	if _, err := env.store.Create(beads.Bead{
+		Title:    "claimed work",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: session.Metadata["session_name"],
+	}); err != nil {
+		t.Fatalf("Create assigned work bead: %v", err)
+	}
+
+	dops := newFakeDrainOps()
+	env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{session}, nil, dops)
+
+	ds := env.dt.get(session.ID)
+	if ds == nil {
+		t.Fatal("explicit user-hold must begin a drain despite live assigned work")
+	}
+	if ds.reason != "suspended" {
+		t.Fatalf("drain reason = %q, want suspended", ds.reason)
+	}
+	if !env.sp.IsRunning("worker") {
+		t.Fatal("suspend drain must remain graceful until acknowledgement")
+	}
+
+	// The real drain adapter observes the reconciler's runtime metadata. Seed
+	// the equivalent acknowledgement in the test double, then prove assigned
+	// work cannot cancel the explicit suspend while the stop is dispatched.
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+	refreshed, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get session before acknowledged tick: %v", err)
+	}
+	env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{refreshed}, nil, dops)
+	got := env.reconcileStopPendingToTerminal(t, env.sp, session, dops, nil)
+	if got.Status == "closed" {
+		t.Fatalf("explicitly suspended session bead closed: metadata=%v", got.Metadata)
+	}
+	if got.Metadata["state"] != string(sessionpkg.StateSuspended) ||
+		got.Metadata["sleep_intent"] != string(sessionpkg.SleepReasonUserHold) ||
+		got.Metadata["sleep_reason"] != string(sessionpkg.SleepReasonUserHold) {
+		t.Fatalf("drain ack erased explicit user hold: metadata=%v", got.Metadata)
+	}
+	if got.Metadata["held_until"] == "" {
+		t.Fatalf("drain ack erased explicit hold deadline: metadata=%v", got.Metadata)
+	}
+}
+
+// A suspended idle session must remain an open, explicitly held session after
+// its drain acknowledgement too.  Otherwise close-on-unassigned consumes the
+// operator's durable hold and a later demand observation can recreate it.
+func TestReconcileSessionBeads_ExplicitSuspendDrainAckDoesNotCloseIdleSession(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", Suspended: true}}}
+	_ = env.sp.Start(context.Background(), "worker", runtime.Config{})
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"state":        "suspended",
+		"sleep_intent": string(sessionpkg.SleepReasonUserHold),
+		"held_until":   env.clk.Now().Add(100 * time.Hour).UTC().Format(time.RFC3339),
+	})
+
+	dops := newFakeDrainOps()
+	env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{session}, nil, dops)
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+	refreshed, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get session before acknowledged tick: %v", err)
+	}
+	env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{refreshed}, nil, dops)
+	got := env.reconcileStopPendingToTerminal(t, env.sp, session, dops, nil)
+	if got.Status == "closed" {
+		t.Fatalf("explicitly suspended idle session bead closed: metadata=%v", got.Metadata)
+	}
+	if got.Metadata["state"] != string(sessionpkg.StateSuspended) ||
+		got.Metadata["sleep_intent"] != string(sessionpkg.SleepReasonUserHold) ||
+		got.Metadata["sleep_reason"] != string(sessionpkg.SleepReasonUserHold) {
+		t.Fatalf("idle drain ack erased explicit user hold: metadata=%v", got.Metadata)
+	}
+}
+
+// TestReconcileSessionBeads_ExplicitSuspendOverridesAcknowledgedCancelableDrain
+// covers the ordering where an inferred cancelable drain was acknowledged just
+// before the operator's user-hold became visible. Assigned work would normally
+// cancel orphaned/no-wake drains, but it must not cancel the newer explicit
+// suspend or defer the stop until another pair of patrol ticks.
+func TestReconcileSessionBeads_ExplicitSuspendOverridesAcknowledgedCancelableDrain(t *testing.T) {
+	for _, priorReason := range []string{"orphaned", "no-wake-reason"} {
+		t.Run(priorReason, func(t *testing.T) {
+			env := newReconcilerTestEnv()
+			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", Suspended: true}}}
+			_ = env.sp.Start(context.Background(), "worker", runtime.Config{})
+			session := env.createSessionBead("worker", "worker")
+			env.markSessionActive(&session)
+			env.setSessionMetadata(&session, map[string]string{
+				"state":        "suspended",
+				"sleep_intent": string(sessionpkg.SleepReasonUserHold),
+				"held_until":   env.clk.Now().Add(100 * time.Hour).UTC().Format(time.RFC3339),
+			})
+
+			if _, err := env.store.Create(beads.Bead{
+				Title:    "claimed work",
+				Type:     "task",
+				Status:   "in_progress",
+				Assignee: session.Metadata["session_name"],
+			}); err != nil {
+				t.Fatalf("Create assigned work bead: %v", err)
+			}
+
+			// Reproduce a cancelable drain whose deferred acknowledgement is
+			// already visible when the newer user-hold reaches reconciliation.
+			ds := &drainState{
+				startedAt:  env.clk.Now().Add(-time.Minute),
+				deadline:   env.clk.Now().Add(defaultDrainTimeout - time.Minute),
+				reason:     priorReason,
+				generation: 1,
+			}
+			env.dt.set(session.ID, ds)
+			if err := setReconcilerDrainAckMetadata(env.sp, "worker", ds); err != nil {
+				t.Fatalf("setReconcilerDrainAckMetadata: %v", err)
+			}
+			ds.ackSet = true
+			dops := newFakeDrainOps()
+			if err := dops.setDrainAck("worker"); err != nil {
+				t.Fatalf("setDrainAck: %v", err)
+			}
+
+			env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{session}, nil, dops)
+
+			got, err := env.store.Get(session.ID)
+			if err != nil {
+				t.Fatalf("Get session after acknowledged tick: %v", err)
+			}
+			if got.Metadata["state_reason"] != sessionpkg.DrainAckStopPendingReason {
+				t.Fatalf("state_reason = %q, want %q", got.Metadata["state_reason"], sessionpkg.DrainAckStopPendingReason)
+			}
+			if strings.Contains(env.stdout.String(), "Canceled drain-acked session") {
+				t.Fatalf("newer explicit suspend was canceled as stale %s drain: %s", priorReason, env.stdout.String())
+			}
+			waitForProviderStopped(t, env.sp, "worker")
+		})
+	}
+}
+
 // TestReconcileSessionBeads_OrphanDrainLogThrottled covers issue #855:
 // once a session is draining, the reconciler must not re-emit
 // "Draining session '...': orphaned" on every subsequent tick. The
@@ -6150,9 +8070,6 @@ func TestReconcileSessionBeads_DrainAckedOrphanCanceledForAssignedWork(t *testin
 	if err := env.sp.Start(context.Background(), "orphan", runtime.Config{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if err := env.sp.SetMeta("orphan", "GC_DRAIN_ACK", "1"); err != nil {
-		t.Fatalf("SetMeta(GC_DRAIN_ACK): %v", err)
-	}
 	session := env.createSessionBead("orphan", "worker")
 	env.markSessionActive(&session)
 	work, err := env.store.Create(beads.Bead{
@@ -6168,13 +8085,19 @@ func TestReconcileSessionBeads_DrainAckedOrphanCanceledForAssignedWork(t *testin
 	if err := dops.setDrainAck("orphan"); err != nil {
 		t.Fatalf("setDrainAck: %v", err)
 	}
-	env.dt.set(session.ID, &drainState{
+	ds := &drainState{
 		startedAt:  env.clk.Now().Add(-defaultDrainTimeout),
 		deadline:   env.clk.Now().Add(-time.Second),
 		reason:     "orphaned",
 		generation: 1,
 		ackSet:     true,
-	})
+		lifecycle:  drainAckVersionOf(env.sessionInfo(session.ID)),
+	}
+	ds.lifecyclePinned = true
+	env.dt.set(session.ID, ds)
+	if err := setReconcilerDrainAckMetadata(env.sp, "orphan", ds); err != nil {
+		t.Fatalf("setReconcilerDrainAckMetadata: %v", err)
+	}
 
 	reconcileSessionBeadsAtPath(
 		context.Background(),
@@ -6529,6 +8452,12 @@ func TestReconcileSessionBeads_NoWakeDrainAckWithBlockedOpenAssignedWorkStopsPen
 		generation: 1,
 		ackSet:     true,
 	})
+	asyncStops := &asyncStartTracker{}
+	t.Cleanup(func() {
+		if !asyncStops.wait(time.Second) {
+			t.Error("async drain-ack stop did not drain")
+		}
+	})
 
 	reconcileSessionBeadsAtPath(
 		context.Background(),
@@ -6555,6 +8484,7 @@ func TestReconcileSessionBeads_NoWakeDrainAckWithBlockedOpenAssignedWorkStopsPen
 		0,
 		&env.stdout,
 		&env.stderr,
+		withAsyncDrainAckStopTracker(asyncStops),
 	)
 
 	if len(dops.clearDrainCalls) != 0 {

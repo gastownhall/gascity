@@ -566,20 +566,20 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 	if resolved == nil {
 		return nil, nil
 	}
+	workDir := strings.TrimSpace(info.WorkDir)
+	if workDir == "" {
+		workDir = cityPath
+	}
+	agentCfg, setupCtx := resolvedWorkerSessionSetupContext(cityPath, cfg, info, sessionKind, metadata, workDir)
 	transport := resolvedWorkerRuntimeTransport(info, resolved, configuredTransport, metadata)
-	if transport == "" && startedConfigHashProvesWorkerACPTransport(cityPath, cfg, info, sessionKind, resolved, metadata, configuredTransport) {
+	if transport == "" && startedConfigHashProvesWorkerACPTransport(cityPath, cfg, info, sessionKind, resolved, metadata, configuredTransport, setupCtx) {
 		transport = "acp"
 	}
 	if transport == "" && legacyWorkerACPTransportAmbiguous(resolved, configuredTransport, info.Command, metadata) {
 		return nil, fmt.Errorf("legacy session transport is ambiguous: recreate the stopped session or resume it while ACP metadata can still be persisted")
 	}
 
-	command := resolvedWorkerRuntimeCommandForTransport(cityPath, resolved, transport, info.Command, info.Provider, metadata)
-
-	workDir := strings.TrimSpace(info.WorkDir)
-	if workDir == "" {
-		workDir = cityPath
-	}
+	command := resolvedWorkerRuntimeCommandForTransport(cityPath, resolved, transport, info.Command, info.Provider, metadata, setupCtx)
 	mcpServers, err := resumeRuntimeMCPServersWithConfig(cityPath, cfg, info, resolved, transport, metadata)
 	if err != nil {
 		return nil, err
@@ -611,17 +611,9 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 	// the session_live theme/keybinding hooks never run. The setup context is
 	// built via the reconciler's own sessionSetupContextForAgent() so
 	// {{.Rig}}/{{.RigRoot}}/{{.AgentBase}} expand correctly. See ga-vtkhi.
-	qualifiedName := firstNonEmptyGCString(info.AgentName, info.Template)
 	var sessionLive []string
-	if agentCfg := findAgentByTemplate(cfg, info.Template); agentCfg != nil && len(agentCfg.SessionLive) > 0 {
-		setupCtx := sessionSetupContextForAgent(cityPath, cfg.EffectiveCityName(), qualifiedName, agentCfg, cfg.Rigs)
-		setupCtx.Session = info.SessionName
-		setupCtx.WorkDir = workDir
-		setupCtx.ConfigDir = cityPath
-		if agentCfg.SourceDir != "" {
-			setupCtx.ConfigDir = agentCfg.SourceDir
-		}
-		sessionLive = expandSessionSetup(agentCfg.SessionLive, setupCtx)
+	if agentCfg != nil && setupCtx != nil && len(agentCfg.SessionLive) > 0 {
+		sessionLive = expandSessionSetup(agentCfg.SessionLive, *setupCtx)
 	}
 	// Project the resolved hint subset through the single StartupHints →
 	// runtime.Config mapping (gc-0tna7), then layer the caller-owned
@@ -659,6 +651,34 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 	}, nil
 }
 
+// resolvedWorkerSessionSetupContext reconstructs the same template context as
+// resolveTemplate for a persisted session. Resume/attach bypasses
+// resolveTemplate, so every templated field resolved on that path must share
+// this context or rig-qualified identities can regress to raw {{.Agent}}
+// tokens. A missing backing agent returns no context and leaves legacy
+// fallback commands untouched.
+func resolvedWorkerSessionSetupContext(cityPath string, cfg *config.City, info session.Info, sessionKind string, metadata map[string]string, workDir string) (*config.Agent, *SessionSetupContext) {
+	if cfg == nil {
+		return nil, nil
+	}
+	agentCfg := findAgentByTemplate(cfg, info.Template)
+	if agentCfg == nil {
+		return nil, nil
+	}
+	if !session.UseAgentTemplateForProviderResolution(sessionKind, metadata, info.Provider, agentCfg.Provider, true) {
+		return nil, nil
+	}
+	qualifiedName := firstNonEmptyGCString(info.AgentName, info.Template, agentCfg.QualifiedName())
+	setupCtx := sessionSetupContextForAgent(cityPath, cfg.EffectiveCityName(), qualifiedName, agentCfg, cfg.Rigs)
+	setupCtx.Session = info.SessionName
+	setupCtx.WorkDir = workDir
+	setupCtx.ConfigDir = cityPath
+	if agentCfg.SourceDir != "" {
+		setupCtx.ConfigDir = agentCfg.SourceDir
+	}
+	return agentCfg, &setupCtx
+}
+
 func resolvedWorkerRuntimeProviderLabel(resolved *config.ResolvedProvider, transport string, info session.Info) string {
 	if strings.TrimSpace(configuredWorkerRuntimeCommand(resolved, transport)) != "" {
 		return firstNonEmptyGCString(resolved.Name, info.Provider)
@@ -666,16 +686,19 @@ func resolvedWorkerRuntimeProviderLabel(resolved *config.ResolvedProvider, trans
 	return firstNonEmptyGCString(info.Provider, resolved.Name)
 }
 
-func resolvedWorkerRuntimeCommandForTransport(cityPath string, resolved *config.ResolvedProvider, transport, storedCommand, fallbackProvider string, metadata map[string]string) string {
+func resolvedWorkerRuntimeCommandForTransport(cityPath string, resolved *config.ResolvedProvider, transport, storedCommand, fallbackProvider string, metadata map[string]string, setupCtx *SessionSetupContext) string {
 	command := strings.TrimSpace(storedCommand)
 	configuredCommand := configuredWorkerRuntimeCommand(resolved, transport)
 	if configuredCommand == "" {
 		return firstNonEmptyGCString(command, fallbackProvider, resolved.Name)
 	}
-	desiredCommand := configuredCommand
+	desiredCommand := expandResolvedWorkerRuntimeCommand(configuredCommand, setupCtx)
 	if optionOverrides, err := session.ParseTemplateOverrides(metadata); err == nil {
 		if launchCommand, err := config.BuildProviderLaunchCommand(cityPath, resolved, optionOverrides, transport); err == nil {
-			desiredCommand = firstNonEmptyGCString(launchCommand.Command, configuredCommand, resolved.Name)
+			desiredCommand = expandResolvedWorkerRuntimeCommand(
+				firstNonEmptyGCString(launchCommand.Command, configuredCommand, resolved.Name),
+				setupCtx,
+			)
 			if shouldPreserveStoredRuntimeCommandForTransport(command, desiredCommand, transport, optionOverrides) {
 				desiredCommand = command
 			}
@@ -685,6 +708,17 @@ func resolvedWorkerRuntimeCommandForTransport(cityPath string, resolved *config.
 		command = desiredCommand
 	}
 	return firstNonEmptyGCString(command, fallbackProvider, resolved.Name)
+}
+
+func expandResolvedWorkerRuntimeCommand(command string, setupCtx *SessionSetupContext) string {
+	if setupCtx == nil || !strings.Contains(command, "{{") {
+		return command
+	}
+	expanded := expandSessionSetup([]string{command}, *setupCtx)
+	if len(expanded) == 0 {
+		return command
+	}
+	return expanded[0]
 }
 
 func configuredWorkerRuntimeCommand(resolved *config.ResolvedProvider, transport string) string {
@@ -798,6 +832,7 @@ func startedConfigHashProvesWorkerACPTransport(
 	resolved *config.ResolvedProvider,
 	metadata map[string]string,
 	configuredTransport string,
+	setupCtx *SessionSetupContext,
 ) bool {
 	if cfg == nil || resolved == nil || metadata == nil || strings.TrimSpace(configuredTransport) != "acp" {
 		return false
@@ -806,8 +841,8 @@ func startedConfigHashProvesWorkerACPTransport(
 	if startedHash == "" {
 		return false
 	}
-	acpCommand := resolvedWorkerRuntimeCommandForTransport(cityPath, resolved, "acp", info.Command, info.Provider, metadata)
-	defaultCommand := resolvedWorkerRuntimeCommandForTransport(cityPath, resolved, "", info.Command, info.Provider, metadata)
+	acpCommand := resolvedWorkerRuntimeCommandForTransport(cityPath, resolved, "acp", info.Command, info.Provider, metadata, setupCtx)
+	defaultCommand := resolvedWorkerRuntimeCommandForTransport(cityPath, resolved, "", info.Command, info.Provider, metadata, setupCtx)
 	mcpServers, err := resolvedRuntimeMCPServersWithConfig(
 		cityPath,
 		cfg,

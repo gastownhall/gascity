@@ -250,6 +250,36 @@ func TestScopedStoreLikeSelectsCityScopeWhenDirMatchesCityPath(t *testing.T) {
 	}
 }
 
+// A scoped clone is a cancellation-only transport change. Store identity and
+// CLI feature flags must remain byte-for-byte equivalent to the long-lived
+// backing or a recovery scan can route IDs differently (prefix) or send a bd
+// flag the configured CLI does not support (skip-labels).
+func TestScopedStoreLikePreservesBdStorePrefixAndListOption(t *testing.T) {
+	cityDir := t.TempDir()
+	writeMinimalCityToml(t, cityDir)
+	existing := beads.NewBdStoreWithPrefix(
+		cityDir,
+		noopBdRunner(),
+		"source-prefix",
+		beads.WithBdStoreListSkipLabels(true),
+	)
+
+	scoped, err := scopedStoreLike(context.Background(), cityDir, &config.City{}, existing)
+	if err != nil {
+		t.Fatalf("scopedStoreLike: %v", err)
+	}
+	bs, ok := scoped.(*beads.BdStore)
+	if !ok {
+		t.Fatalf("scopedStoreLike() = %T, want *beads.BdStore", scoped)
+	}
+	if got := bs.IDPrefix(); got != existing.IDPrefix() {
+		t.Fatalf("scoped IDPrefix() = %q, want source %q", got, existing.IDPrefix())
+	}
+	if got := bs.ListSkipLabelsEnabled(); got != existing.ListSkipLabelsEnabled() {
+		t.Fatalf("scoped ListSkipLabelsEnabled() = %v, want source %v", got, existing.ListSkipLabelsEnabled())
+	}
+}
+
 // TestScopedStoreLikeSelectsRigScopeWhenDirIsARig proves the rig branch:
 // when the backing BdStore's dir is a rig root (not the city root), the
 // clone is built via the rig-level env resolution (scopedBdStoreForRig),

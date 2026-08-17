@@ -624,19 +624,37 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 
 // ListRunning returns all tmux session names matching the given prefix.
 //
-// A totally unreachable tmux server (ErrNoServer) is reported as a
-// [runtime.PartialListError] with a nil names slice rather than an empty
-// success: a single-tmux outage is a failed observation, not proof that zero
-// sessions exist. This activates the reconciler-facing IsPartialListError
-// guards (pool on_death, provider swap, shutdown listing, orphan cleanup) so a
-// brief server blip defers destructive action instead of tearing down healthy
-// sessions. It mirrors the multi-backend degraded-but-usable signal that
-// [runtime.MergeBackendListResults] produces for composite providers, and is
-// the ListRunning-side analog of the StateCache liveness fix in #4082.
+// A tmux ErrNoServer is normally reported as a [runtime.PartialListError] with
+// a nil names slice rather than an empty success: a single-tmux outage is a
+// failed observation, not proof that zero sessions exist. For a named socket,
+// however, an absent or stably-refused socket is the endpoint-liveness policy's
+// safe cold-start evidence: no server is reachable through that named endpoint.
+// That case returns an empty success so adoption can bootstrap after a host
+// reboot. A present, live, changed, or otherwise indeterminate socket still
+// fails closed. This keeps the reconciler guards for transient/degraded servers
+// without wedging a city forever when /tmp correctly lost its socket on reboot.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	all, err := p.tm.listSessionNames()
 	if err != nil {
+		if errors.Is(err, ErrNoCurrentTarget) {
+			// The server answered and definitively holds zero sessions.
+			return []string{}, nil
+		}
 		if errors.Is(err, ErrNoServer) {
+			if p.cfg.SocketName != "" {
+				ctx, cancel := context.WithTimeout(context.Background(), newSessionProbeTimeout)
+				defer cancel()
+				path := namedSocketPath(p.cfg.SocketName)
+				observer := p.tm.serverSocketObserver
+				if observer == nil {
+					observer = observeNamedSocket
+				}
+				observationErr := observer(ctx, path)
+				if observationErr == nil {
+					return []string{}, nil
+				}
+				return nil, &runtime.PartialListError{Err: fmt.Errorf("tmux server unreachable: %w (socket observation path=%s: %w)", err, path, observationErr)}
+			}
 			return nil, &runtime.PartialListError{Err: fmt.Errorf("tmux server unreachable: %w", err)}
 		}
 		return nil, err

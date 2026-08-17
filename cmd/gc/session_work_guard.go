@@ -111,6 +111,27 @@ func closeSessionBeadIfReachableStoreUnassigned(
 	stderr io.Writer,
 	excludeOwnDrainStep bool,
 ) bool {
+	return closeSessionBeadIfReachableStoreUnassignedDetailed(
+		cityPath, cfg, store, rigStores, info, reason, now, stderr, excludeOwnDrainStep,
+	).status == sessionCloseClosed
+}
+
+// closeSessionBeadIfReachableStoreUnassignedDetailed is the typed counterpart
+// used by lifecycle finalization. Unlike the legacy bool wrapper, it preserves
+// the difference between a late assignment (fall through to asleep), a close
+// transaction failure (retain stop-pending and retry), and an already-closed
+// witness (adopt the authoritative terminal row).
+func closeSessionBeadIfReachableStoreUnassignedDetailed(
+	cityPath string,
+	cfg *config.City,
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	info sessionpkg.Info,
+	reason string,
+	now time.Time,
+	stderr io.Writer,
+	excludeOwnDrainStep bool,
+) sessionCloseResult {
 	if stderr == nil {
 		stderr = io.Discard
 	}
@@ -121,13 +142,16 @@ func closeSessionBeadIfReachableStoreUnassigned(
 	hasAssignedWork, err := assignedWorkProbe(cityPath, cfg, store, rigStores, info)
 	if err != nil {
 		fmt.Fprintf(stderr, "session work guard: checking reachable assigned work for %s: %v\n", info.ID, err) //nolint:errcheck
-		return false
+		return sessionCloseResult{status: sessionCloseFailed}
 	}
 	if hasAssignedWork {
-		return false
+		return sessionCloseResult{status: sessionCloseAssigned}
 	}
 	if isFailedCreateSessionInfo(info) {
-		return closeFailedCreateBead(sessionFrontDoor(store), info.ID, now, stderr)
+		if closeFailedCreateBead(sessionFrontDoor(store), info.ID, now, stderr) {
+			return sessionCloseResult{status: sessionCloseClosed}
+		}
+		return sessionCloseResult{status: sessionCloseFailed}
 	}
-	return closeBead(store, info.ID, reason, now, stderr)
+	return closeBeadDetailed(store, info.ID, reason, now, stderr)
 }

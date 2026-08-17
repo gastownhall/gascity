@@ -317,10 +317,10 @@ type Tmux struct {
 	// GC_AGENT_SLICE is set (see AgentSliceEnv in agent_slice.go).
 	agentSlice agentSliceWrapper
 
-	// serverSocketObserver observes a named socket only after tmux reports
-	// ErrNoServer during the new-session preflight. Nil selects the production
-	// observer; tests inject a deterministic observation without opening a
-	// socket.
+	// serverSocketObserver observes a named socket after tmux reports
+	// ErrNoServer during guarded new-session or liveness listing. Nil selects the
+	// production observer; tests inject a deterministic observation without
+	// opening a socket.
 	serverSocketObserver func(context.Context, string) error
 }
 
@@ -412,6 +412,7 @@ func wrapError(err error, stderr string, args []string) error {
 		return ErrSessionExists
 	}
 	if strings.Contains(stderr, "session not found") ||
+		strings.Contains(stderr, "no such session") ||
 		strings.Contains(stderr, "can't find session") ||
 		strings.Contains(stderr, "can't find pane") {
 		return ErrSessionNotFound

@@ -288,6 +288,7 @@ func TestSessionReconcilerTraceStartAndDrainSubOps(t *testing.T) {
 			"state":              "active",
 			"generation":         "1",
 			"continuation_epoch": "1",
+			"instance_token":     "drain-token",
 		},
 	})
 	if err != nil {
@@ -295,7 +296,12 @@ func TestSessionReconcilerTraceStartAndDrainSubOps(t *testing.T) {
 	}
 
 	sp := runtime.NewFake()
-	if err := sp.Start(context.Background(), drainBead.Metadata["session_name"], runtime.Config{}); err != nil {
+	if err := sp.Start(context.Background(), drainBead.Metadata["session_name"], runtime.Config{Env: map[string]string{
+		"GC_SESSION_ID":         drainBead.ID,
+		"GC_INSTANCE_TOKEN":     "drain-token",
+		"GC_RUNTIME_EPOCH":      "1",
+		"GC_CONTINUATION_EPOCH": "1",
+	}}); err != nil {
 		t.Fatalf("seed drain session: %v", err)
 	}
 
@@ -384,6 +390,7 @@ func TestSessionReconcilerTraceStartAndDrainSubOps(t *testing.T) {
 		drainBead.ID: {Reasons: nil},
 	}
 	advanceSessionDrainsWithSessionsTraced(
+		cityDir,
 		drainTracker,
 		sp,
 		store,
@@ -438,7 +445,7 @@ func TestSessionReconcilerTraceStartAndDrainSubOps(t *testing.T) {
 					t.Fatalf("drain mutation trace_source = %q, want manual", rec.TraceSource)
 				}
 				if rec.OutcomeCode != TraceOutcomeSuccess {
-					t.Fatalf("drain mutation outcome = %q, want success", rec.OutcomeCode)
+					t.Fatalf("drain mutation outcome = %q, want success; fields=%v", rec.OutcomeCode, rec.Fields)
 				}
 			}
 		case TraceRecordCycleResult:

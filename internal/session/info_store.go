@@ -42,6 +42,13 @@ func infoFromPersistedBead(b beads.Bead) Info {
 	return info
 }
 
+// InfoFromPersistedBead is the exported pure projection for lifecycle guards
+// that already hold an authoritative raw bead snapshot. It intentionally adds
+// no runtime overlay; callers needing provider state must still use Manager.
+func InfoFromPersistedBead(b beads.Bead) Info {
+	return infoFromPersistedBead(b)
+}
+
 // Store is the session-domain front door over a session-class bead store: the
 // single typed seam through which callers read and write sessions without
 // touching *beads.Bead. The read half (Get / List, projecting via
@@ -78,6 +85,28 @@ func (s *Store) Get(id string) (Info, error) {
 	b, err := s.validatedBead(id)
 	if err != nil {
 		return Info{}, err
+	}
+	return infoFromPersistedBead(b), nil
+}
+
+// GetLive returns the authoritative persisted session.Info for id, bypassing a
+// CachingStore's clean active-row cache. Lifecycle guards use this at mutation
+// boundaries where a stale generation/token/awake epoch must not authorize an
+// action against a newly woken runtime incarnation.
+func (s *Store) GetLive(id string) (Info, error) {
+	if s == nil || s.store.Store == nil {
+		return Info{}, fmt.Errorf("loading session %q: %w", id, beads.ErrNotFound)
+	}
+	live := beads.HandlesFor(s.store.Store).Live
+	if live == nil {
+		return Info{}, fmt.Errorf("loading session %q: live session reader unavailable", id)
+	}
+	b, err := live.Get(id)
+	if err != nil {
+		return Info{}, fmt.Errorf("loading session %q: %w", id, err)
+	}
+	if strings.TrimSpace(b.ID) == "" || !IsSessionBeadOrRepairable(b) {
+		return Info{}, fmt.Errorf("%w: %s", ErrSessionNotFound, id)
 	}
 	return infoFromPersistedBead(b), nil
 }

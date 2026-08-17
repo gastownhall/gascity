@@ -46,6 +46,7 @@ type waitSetStateResult struct {
 type sessionWaitDeps struct {
 	sessions         *sessionpkg.Store
 	dependencies     waitDependencyReader
+	cityPath         string
 	now              func() time.Time
 	createdBySession string
 	pokeController   func() error
@@ -278,6 +279,7 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 	return doSessionWait(sessionID, depIDs, matchAny, note, sleep, stdout, stderr, sessionWaitDeps{
 		sessions:         sessFront,
 		dependencies:     dependencies,
+		cityPath:         cityPath,
 		now:              time.Now,
 		createdBySession: os.Getenv("GC_SESSION_ID"),
 		pokeController: func() error {
@@ -332,10 +334,20 @@ func doSessionWait(sessionID string, depIDs []string, matchAny bool, note string
 		return 0
 	}
 	if sleep {
-		if err := deps.sessions.ApplyPatch(sessionID, map[string]string{
-			"wait_hold":    "true",
-			"sleep_intent": "wait-hold",
-		}); err != nil {
+		err := sessionpkg.WithCitySessionLifecycleLock(deps.cityPath, sessionID, func() error {
+			info, err := deps.sessions.GetLive(sessionID)
+			if err != nil {
+				return err
+			}
+			if sessionpkg.HasExecutionClaimNudgeStalled(info) {
+				return fmt.Errorf("%w: %s", sessionpkg.ErrExecutionStalledRecoveryPending, sessionID)
+			}
+			return deps.sessions.ApplyPatch(sessionID, map[string]string{
+				"wait_hold":    "true",
+				"sleep_intent": "wait-hold",
+			})
+		})
+		if err != nil {
 			fmt.Fprintf(stderr, "gc session wait: setting wait hold: %v\n", err) //nolint:errcheck
 			return 1
 		}
@@ -771,7 +783,7 @@ func cmdWaitSetStateResult(waitID, state string, stdout, stderr io.Writer) (wait
 				return result, 1
 			}
 		}
-		if err := clearSessionWaitHoldIfIdle(sessFront, w.SessionID); err != nil {
+		if err := clearSessionWaitHoldIfIdle(sessFront, w.SessionID, cityPath); err != nil {
 			fmt.Fprintf(stderr, "gc wait: clearing session wait hold: %v\n", err) //nolint:errcheck
 			return result, 1
 		}
@@ -997,10 +1009,14 @@ func prepareWaitWakeStateForCity(cityPath string, store beads.Store, now time.Ti
 	dependencies := waitDependencyReaderFunc(func(depID string) (beads.Bead, error) {
 		return loadWaitDependencyBead(cityPath, store, depID)
 	})
-	return prepareWaitWakeStateWithSnapshot(cliSessionFrontDoor(store, cfg, cityPath), dependencies, beads.NudgesStore{Store: store}, now, nil)
+	return prepareWaitWakeStateWithSnapshot(cliSessionFrontDoor(store, cfg, cityPath), dependencies, beads.NudgesStore{Store: store}, now, nil, cityPath)
 }
 
-func prepareWaitWakeStateWithSnapshot(sessFront *sessionpkg.Store, dependencies waitDependencyReader, nudges beads.NudgesStore, now time.Time, sessionBeads *sessionBeadSnapshot) (map[string]bool, error) {
+func prepareWaitWakeStateWithSnapshot(sessFront *sessionpkg.Store, dependencies waitDependencyReader, nudges beads.NudgesStore, now time.Time, sessionBeads *sessionBeadSnapshot, cityPaths ...string) (map[string]bool, error) {
+	cityPath := ""
+	if len(cityPaths) > 0 {
+		cityPath = cityPaths[0]
+	}
 	if sessionBeads == nil {
 		var err error
 		sessionBeads, err = loadSessionBeadSnapshot(sessFront.Store().Store)
@@ -1041,7 +1057,7 @@ func prepareWaitWakeStateWithSnapshot(sessFront *sessionpkg.Store, dependencies 
 			if err := sessFront.CancelWait(wait.ID, now, "continuation-stale"); err != nil {
 				return nil, err
 			}
-			if err := clearSessionWaitHoldIfIdle(sessFront, sessionID); err != nil {
+			if err := clearSessionWaitHoldIfIdle(sessFront, sessionID, cityPath); err != nil {
 				return nil, err
 			}
 			continue
@@ -1060,7 +1076,7 @@ func prepareWaitWakeStateWithSnapshot(sessFront *sessionpkg.Store, dependencies 
 				if err := sessFront.ExpireWait(wait.ID, now); err != nil {
 					return nil, err
 				}
-				if err := clearSessionWaitHoldIfIdle(sessFront, sessionID); err != nil {
+				if err := clearSessionWaitHoldIfIdle(sessFront, sessionID, cityPath); err != nil {
 					return nil, err
 				}
 				continue
@@ -1074,7 +1090,7 @@ func prepareWaitWakeStateWithSnapshot(sessFront *sessionpkg.Store, dependencies 
 				return nil, err
 			}
 			if done {
-				if err := clearSessionWaitHoldIfIdle(sessFront, sessionID); err != nil {
+				if err := clearSessionWaitHoldIfIdle(sessFront, sessionID, cityPath); err != nil {
 					return nil, err
 				}
 				continue
@@ -1093,7 +1109,7 @@ func prepareWaitWakeStateWithSnapshot(sessFront *sessionpkg.Store, dependencies 
 				if err := sessFront.FailWait(wait.ID, now, depErr.Error()); err != nil {
 					return nil, err
 				}
-				if err := clearSessionWaitHoldIfIdle(sessFront, sessionID); err != nil {
+				if err := clearSessionWaitHoldIfIdle(sessFront, sessionID, cityPath); err != nil {
 					return nil, err
 				}
 				continue
@@ -1162,53 +1178,65 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sess
 		if sessionID == "" {
 			continue
 		}
-		sessionInfo, ok := sessionBeads.FindInfoByID(sessionID)
+		_, ok := sessionBeads.FindInfoByID(sessionID)
 		if !ok {
-			continue
-		}
-		if !cachedSessionCanReceiveWaitNudge(sessionInfo) {
 			continue
 		}
 		nudgeID := waitNudgeID(wait)
 		if nudgeID == "" {
 			continue
 		}
-		_, ok, err := nudgeFrontDoor(nudges).Find(nudgeID)
-		if err != nil {
-			if beads.IsLookupLimitError(err) {
-				stampWaitLookupCapDiagnostic(sessFront, sessionID, err, now, "ready-wait-nudge")
-				continue
+		acquired, lockErr := sessionpkg.TryWithCitySessionLifecycleLock(cityPath, sessionID, func() error { //nolint:staticcheck // SA4006 false positive: acquired is read at the loop tail below
+
+			sessionInfo, err := sessFront.GetLive(sessionID)
+			if err != nil {
+				return err
 			}
-			return err
-		}
-		if ok {
-			continue
-		}
-		message := strings.TrimSpace(wait.Note)
-		if message == "" {
-			message = "Wait satisfied."
-		}
-		message = fmt.Sprintf("Wait satisfied (%s): %s", wait.ID, message)
-		item := newQueuedNudgeWithOptions(waitNudgeAgent(sessionInfo), message, "wait", now, queuedNudgeOptions{
-			ID:                nudgeID,
-			SessionID:         sessionID,
-			ContinuationEpoch: wait.RegisteredEpoch,
-			Reference:         &nudgeReference{Kind: "bead", ID: wait.ID},
+			if sessionpkg.HasExecutionClaimNudgeStalled(sessionInfo) || !cachedSessionCanReceiveWaitNudge(sessionInfo) {
+				return nil
+			}
+			_, exists, err := nudgeFrontDoor(nudges).Find(nudgeID)
+			if err != nil {
+				if beads.IsLookupLimitError(err) {
+					stampWaitLookupCapDiagnostic(sessFront, sessionID, err, now, "ready-wait-nudge")
+					return nil
+				}
+				return err
+			}
+			if exists {
+				return nil
+			}
+			message := strings.TrimSpace(wait.Note)
+			if message == "" {
+				message = "Wait satisfied."
+			}
+			message = fmt.Sprintf("Wait satisfied (%s): %s", wait.ID, message)
+			item := newQueuedNudgeWithOptions(waitNudgeAgent(sessionInfo), message, "wait", now, queuedNudgeOptions{
+				ID:                nudgeID,
+				SessionID:         sessionID,
+				ContinuationEpoch: wait.RegisteredEpoch,
+				Reference:         &nudgeReference{Kind: "bead", ID: wait.ID},
+			})
+			if err := enqueueQueuedNudgeWithStore(cityPath, nudges, item); err != nil {
+				return err
+			}
+			if err := sessFront.SetWaitNudgeID(wait.ID, nudgeID); err != nil {
+				return fmt.Errorf("setting wait nudge_id: %w", err)
+			}
+			// Poller creation is part of the same ordering boundary as enqueue:
+			// a durable stalled latch either precedes both or follows both.
+			if waitNudgeProviderNeedsPoller(sessionInfo) && !nudgeDispatcherIsSupervisor(cfg) {
+				if err := startNudgePoller(cityPath, waitNudgePollerKey(sessionInfo), sessionInfo.SessionNameMetadata); err != nil {
+					return fmt.Errorf("starting wait nudge poller: %w", err)
+				}
+			}
+			return nil
 		})
-		if err := enqueueQueuedNudgeWithStore(cityPath, nudges, item); err != nil {
-			return err
+		if lockErr != nil {
+			return lockErr
 		}
-		if err := sessFront.SetWaitNudgeID(wait.ID, nudgeID); err != nil {
-			return fmt.Errorf("setting wait nudge_id: %w", err)
-		}
-		// provider_kind is stamped from ResolvedProvider.Kind /
-		// BuiltinAncestor at session-bead creation, so wrapped aliases
-		// already surface as their built-in family here. The provider
-		// fallback covers sessions created before provider_kind was stamped.
-		if waitNudgeProviderNeedsPoller(sessionInfo) && !nudgeDispatcherIsSupervisor(cfg) {
-			if err := startNudgePoller(cityPath, waitNudgePollerKey(sessionInfo), sessionInfo.SessionNameMetadata); err != nil {
-				return fmt.Errorf("starting wait nudge poller: %w", err)
-			}
+		if !acquired {
+			continue
 		}
 	}
 	return nil
@@ -1283,31 +1311,37 @@ func cancelWaitsForSession(sessFront *sessionpkg.Store, sessionID string) error 
 	return err
 }
 
-func clearSessionWaitHold(sessFront *sessionpkg.Store, sessionID string) error {
-	if sessionID == "" {
+func clearSessionWaitHoldIfIdle(sessFront *sessionpkg.Store, sessionID string, cityPaths ...string) error {
+	if sessFront == nil || sessionID == "" {
 		return nil
 	}
-	batch := map[string]string{
-		"wait_hold":    "",
-		"sleep_intent": "",
+	cityPath := ""
+	if len(cityPaths) > 0 {
+		cityPath = cityPaths[0]
 	}
-	if sessFront != nil {
-		if markers, err := sessFront.PersistedMarkers(sessionID); err == nil && markers.SleepReason == string(sessionpkg.SleepReasonWaitHold) {
+	return sessionpkg.WithCitySessionLifecycleLock(cityPath, sessionID, func() error {
+		hasWaits, err := hasNonTerminalWaits(sessFront, sessionID)
+		if err != nil || hasWaits {
+			return err
+		}
+		// The authoritative read, sleep-reason decision, and lifecycle patch are
+		// one ordered mutation. A stalled latch that wins first freezes all three.
+		info, err := sessFront.GetLive(sessionID)
+		if err != nil {
+			return err
+		}
+		if sessionpkg.HasExecutionClaimNudgeStalled(info) {
+			return nil
+		}
+		batch := map[string]string{
+			"wait_hold":    "",
+			"sleep_intent": "",
+		}
+		if info.SleepReason == string(sessionpkg.SleepReasonWaitHold) {
 			batch["sleep_reason"] = ""
 		}
-	}
-	return sessFront.ApplyPatch(sessionID, batch)
-}
-
-func clearSessionWaitHoldIfIdle(sessFront *sessionpkg.Store, sessionID string) error {
-	hasWaits, err := hasNonTerminalWaits(sessFront, sessionID)
-	if err != nil {
-		return err
-	}
-	if hasWaits {
-		return nil
-	}
-	return clearSessionWaitHold(sessFront, sessionID)
+		return sessFront.ApplyPatch(sessionID, batch)
+	})
 }
 
 func hasNonTerminalWaits(sessFront *sessionpkg.Store, sessionID string) (bool, error) {

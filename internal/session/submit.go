@@ -93,9 +93,12 @@ func (m *Manager) Submit(ctx context.Context, id, message, resumeCommand string,
 
 func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string, hints runtime.Config, intent SubmitIntent) (SubmitOutcome, error) {
 	var outcome SubmitOutcome
-	err := withSessionMutationLock(id, func() error {
+	err := m.withLifecycleMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
+			return err
+		}
+		if err := executionStalledRecoveryPendingError(id, b.Metadata); err != nil {
 			return err
 		}
 		switch intent {

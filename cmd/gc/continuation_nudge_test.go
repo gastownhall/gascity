@@ -500,7 +500,7 @@ func TestNudgeStalledPoolContinuations_ObserveNudgePersistBackoffAndCap(t *testi
 	candidates := []ContinuationClaimCandidate{validContinuationCandidate("step-a", sessionName)}
 	var out bytes.Buffer
 
-	nudgeStalledPoolContinuations(sp, cfg, store, []beads.Bead{session}, candidates, false, clk.Now(), &out)
+	nudgeStalledPoolContinuations("", sp, cfg, store, []beads.Bead{session}, candidates, false, clk.Now(), &out)
 	if got := sp.CountCalls("Nudge", sessionName); got != 0 {
 		t.Fatalf("first tick Nudge calls = %d, want 0 inside grace", got)
 	}
@@ -510,7 +510,7 @@ func TestNudgeStalledPoolContinuations_ObserveNudgePersistBackoffAndCap(t *testi
 
 	session = mustGetTestBead(t, backing, session.ID)
 	clk.Advance(idleClaimNudgeGrace + time.Second)
-	nudgeStalledPoolContinuations(sp, cfg, store, []beads.Bead{session}, candidates, false, clk.Now(), &out)
+	nudgeStalledPoolContinuations("", sp, cfg, store, []beads.Bead{session}, candidates, false, clk.Now(), &out)
 	if got := sp.CountCalls("Nudge", sessionName); got != 1 {
 		t.Fatalf("post-grace Nudge calls = %d, want 1", got)
 	}
@@ -519,7 +519,7 @@ func TestNudgeStalledPoolContinuations_ObserveNudgePersistBackoffAndCap(t *testi
 	// controller restart. The attempt remains inside backoff and must not replay.
 	session = mustGetTestBead(t, backing, session.ID)
 	clk.Advance(time.Minute)
-	nudgeStalledPoolContinuations(sp, cfg, store, []beads.Bead{session}, candidates, false, clk.Now(), &out)
+	nudgeStalledPoolContinuations("", sp, cfg, store, []beads.Bead{session}, candidates, false, clk.Now(), &out)
 	if got := sp.CountCalls("Nudge", sessionName); got != 1 {
 		t.Fatalf("restart-inside-backoff Nudge calls = %d, want 1", got)
 	}
@@ -527,7 +527,7 @@ func TestNudgeStalledPoolContinuations_ObserveNudgePersistBackoffAndCap(t *testi
 	for want := 2; want <= idleClaimNudgeMaxAttempts; want++ {
 		session = mustGetTestBead(t, backing, session.ID)
 		clk.Advance(idleClaimNudgeBackoff + time.Second)
-		nudgeStalledPoolContinuations(sp, cfg, store, []beads.Bead{session}, candidates, false, clk.Now(), &out)
+		nudgeStalledPoolContinuations("", sp, cfg, store, []beads.Bead{session}, candidates, false, clk.Now(), &out)
 		if got := sp.CountCalls("Nudge", sessionName); got != want {
 			t.Fatalf("attempt %d Nudge calls = %d, want %d", want, got, want)
 		}
@@ -536,7 +536,7 @@ func TestNudgeStalledPoolContinuations_ObserveNudgePersistBackoffAndCap(t *testi
 	session = mustGetTestBead(t, backing, session.ID)
 	writesAtCap := store.metadataWrites
 	clk.Advance(time.Hour)
-	nudgeStalledPoolContinuations(sp, cfg, store, []beads.Bead{session}, candidates, false, clk.Now(), &out)
+	nudgeStalledPoolContinuations("", sp, cfg, store, []beads.Bead{session}, candidates, false, clk.Now(), &out)
 	if got := sp.CountCalls("Nudge", sessionName); got != idleClaimNudgeMaxAttempts {
 		t.Fatalf("past-cap Nudge calls = %d, want %d", got, idleClaimNudgeMaxAttempts)
 	}
@@ -557,7 +557,7 @@ func TestNudgeStalledPoolContinuations_WriteAheadFailurePreventsDelivery(t *test
 	session = mustGetTestBead(t, backing, session.ID)
 	store := &continuationFailingMetadataStore{Store: backing}
 
-	nudgeStalledPoolContinuations(
+	nudgeStalledPoolContinuations("",
 		sp,
 		continuationNudgeCfg(),
 		store,
@@ -603,7 +603,7 @@ func TestNudgeStalledPoolContinuations_ReservesBeforeSuccessfulDelivery(t *testi
 		},
 	}
 
-	nudgeStalledPoolContinuations(
+	nudgeStalledPoolContinuations("",
 		sp,
 		continuationNudgeCfg(),
 		store,
@@ -637,7 +637,7 @@ func TestNudgeStalledPoolContinuations_DeliveryFailureConsumesAttempt(t *testing
 	seedContinuationMarker(t, backing, session, candidate, 0, now.Add(-idleClaimNudgeGrace-time.Second))
 	session = mustGetTestBead(t, backing, session.ID)
 
-	nudgeStalledPoolContinuations(
+	nudgeStalledPoolContinuations("",
 		sp,
 		continuationNudgeCfg(),
 		store,
@@ -658,7 +658,7 @@ func TestNudgeStalledPoolContinuations_DeliveryFailureConsumesAttempt(t *testing
 		t.Fatalf("persisted attempt count = %q, want 1 despite delivery failure", got)
 	}
 
-	nudgeStalledPoolContinuations(
+	nudgeStalledPoolContinuations("",
 		sp,
 		continuationNudgeCfg(),
 		store,
@@ -684,7 +684,7 @@ func TestNudgeStalledPoolContinuations_PartialSnapshotPreservesMarker(t *testing
 	session = mustGetTestBead(t, backing, session.ID)
 	store := &continuationMetadataCountingStore{Store: backing}
 
-	nudgeStalledPoolContinuations(
+	nudgeStalledPoolContinuations("",
 		sp,
 		continuationNudgeCfg(),
 		store,
@@ -717,7 +717,7 @@ func TestNudgeStalledPoolContinuations_AmbiguityPreservesMarker(t *testing.T) {
 		session = mustGetTestBead(t, backing, session.ID)
 		store := &continuationMetadataCountingStore{Store: backing}
 
-		nudgeStalledPoolContinuations(
+		nudgeStalledPoolContinuations("",
 			sp,
 			continuationNudgeCfg(),
 			store,
@@ -749,7 +749,7 @@ func TestNudgeStalledPoolContinuations_AmbiguityPreservesMarker(t *testing.T) {
 		secondSession = mustGetTestBead(t, backing, secondSession.ID)
 		store := &continuationMetadataCountingStore{Store: backing}
 
-		nudgeStalledPoolContinuations(
+		nudgeStalledPoolContinuations("",
 			sp,
 			continuationNudgeCfg(),
 			store,
@@ -778,7 +778,7 @@ func TestNudgeStalledPoolContinuations_AmbiguityPreservesMarker(t *testing.T) {
 		session = mustGetTestBead(t, backing, session.ID)
 		store := &continuationMetadataCountingStore{Store: backing}
 
-		nudgeStalledPoolContinuations(
+		nudgeStalledPoolContinuations("",
 			sp,
 			continuationNudgeCfg(),
 			store,
@@ -823,7 +823,7 @@ func TestNudgeStalledPoolContinuations_RevalidatesImmediatelyBeforeDelivery(t *t
 			session = mustGetTestBead(t, backing, session.ID)
 			store := &continuationMetadataCountingStore{Store: backing}
 
-			nudgeStalledPoolContinuations(
+			nudgeStalledPoolContinuations("",
 				sp,
 				continuationNudgeCfg(),
 				store,
@@ -856,7 +856,7 @@ func TestNudgeStalledPoolContinuations_RevalidatesImmediatelyBeforeDelivery(t *t
 		session = mustGetTestBead(t, backing, session.ID)
 		store := &continuationMetadataCountingStore{Store: backing}
 
-		nudgeStalledPoolContinuations(
+		nudgeStalledPoolContinuations("",
 			sp,
 			continuationNudgeCfg(),
 			store,
@@ -936,7 +936,7 @@ func TestNudgeStalledPoolContinuations_RevalidationBypassesPrimedCache(t *testin
 			session = mustGetTestBead(t, sessionBacking, session.ID)
 			sessionStore := &continuationMetadataCountingStore{Store: sessionBacking}
 
-			nudgeStalledPoolContinuations(
+			nudgeStalledPoolContinuations("",
 				sp,
 				continuationNudgeCfg(),
 				sessionStore,
@@ -989,7 +989,7 @@ func TestNudgeStalledPoolContinuations_RevalidationBypassesPrimedCache(t *testin
 		session = mustGetTestBead(t, sessionBacking, session.ID)
 		sessionStore := &continuationMetadataCountingStore{Store: sessionBacking}
 
-		nudgeStalledPoolContinuations(
+		nudgeStalledPoolContinuations("",
 			sp,
 			continuationNudgeCfg(),
 			sessionStore,
@@ -1022,7 +1022,7 @@ func TestNudgeStalledPoolContinuations_ClaimClearsMarker(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	var out bytes.Buffer
 
-	nudgeStalledPoolContinuations(
+	nudgeStalledPoolContinuations("",
 		sp, cfg, store, []beads.Bead{session},
 		[]ContinuationClaimCandidate{validContinuationCandidate("step-a", sessionName)},
 		false, now, &out,
@@ -1030,7 +1030,7 @@ func TestNudgeStalledPoolContinuations_ClaimClearsMarker(t *testing.T) {
 	session = mustGetTestBead(t, backing, session.ID)
 	// The next desired-state snapshot excludes the now-in_progress successor,
 	// so the absence of an open candidate clears its exact persisted marker.
-	nudgeStalledPoolContinuations(sp, cfg, store, []beads.Bead{session}, nil, false, now.Add(time.Second), &out)
+	nudgeStalledPoolContinuations("", sp, cfg, store, []beads.Bead{session}, nil, false, now.Add(time.Second), &out)
 
 	session = mustGetTestBead(t, backing, session.ID)
 	for _, key := range []string{
@@ -1059,7 +1059,7 @@ func TestNudgeStalledPoolContinuations_RecycledGenerationRestartsGrace(t *testin
 	candidates := []ContinuationClaimCandidate{validContinuationCandidate("step-a", sessionName)}
 	var out bytes.Buffer
 
-	nudgeStalledPoolContinuations(sp, cfg, store, []beads.Bead{session}, candidates, false, now, &out)
+	nudgeStalledPoolContinuations("", sp, cfg, store, []beads.Bead{session}, candidates, false, now, &out)
 	if store.metadataWrites != 1 {
 		t.Fatalf("generation 1 writes = %d, want one observation", store.metadataWrites)
 	}
@@ -1068,7 +1068,7 @@ func TestNudgeStalledPoolContinuations_RecycledGenerationRestartsGrace(t *testin
 	}
 	session = mustGetTestBead(t, backing, session.ID)
 	recycledAt := now.Add(idleClaimNudgeGrace + time.Second)
-	nudgeStalledPoolContinuations(sp, cfg, store, []beads.Bead{session}, candidates, false, recycledAt, &out)
+	nudgeStalledPoolContinuations("", sp, cfg, store, []beads.Bead{session}, candidates, false, recycledAt, &out)
 
 	if got := sp.CountCalls("Nudge", sessionName); got != 0 {
 		t.Fatalf("recycled generation Nudge calls = %d, want 0 during fresh grace", got)
@@ -1099,7 +1099,7 @@ func TestNudgeStalledPoolContinuations_DelayedScopeControlStartsGraceAtSuccessor
 
 	// The predecessor has closed, but the unassigned scope-control bead has not
 	// yet produced a ready successor. This phase must be completely write-free.
-	nudgeStalledPoolContinuations(
+	nudgeStalledPoolContinuations("",
 		sp, continuationNudgeCfg(), store, []beads.Bead{session}, nil, false, clk.Now(), &out,
 	)
 	clk.Advance(10 * time.Minute)
@@ -1108,7 +1108,7 @@ func TestNudgeStalledPoolContinuations_DelayedScopeControlStartsGraceAtSuccessor
 	}
 
 	candidates := []ContinuationClaimCandidate{validContinuationCandidate("step-a", sessionName)}
-	nudgeStalledPoolContinuations(
+	nudgeStalledPoolContinuations("",
 		sp, continuationNudgeCfg(), store, []beads.Bead{session}, candidates, false, clk.Now(), &out,
 	)
 	if got := sp.CountCalls("Nudge", sessionName); got != 0 {
@@ -1120,7 +1120,7 @@ func TestNudgeStalledPoolContinuations_DelayedScopeControlStartsGraceAtSuccessor
 
 	session = mustGetTestBead(t, backing, session.ID)
 	clk.Advance(idleClaimNudgeGrace + time.Second)
-	nudgeStalledPoolContinuations(
+	nudgeStalledPoolContinuations("",
 		sp, continuationNudgeCfg(), store, []beads.Bead{session}, candidates, false, clk.Now(), &out,
 	)
 	if got := sp.CountCalls("Nudge", sessionName); got != 1 {
@@ -1135,7 +1135,7 @@ func TestNudgeStalledPoolContinuations_NoCandidateDoesNotWrite(t *testing.T) {
 	backing := beads.NewMemStoreFrom(0, []beads.Bead{session}, nil)
 	store := &continuationMetadataCountingStore{Store: backing}
 
-	nudgeStalledPoolContinuations(
+	nudgeStalledPoolContinuations("",
 		sp, continuationNudgeCfg(), store, []beads.Bead{session}, nil,
 		false, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), &bytes.Buffer{},
 	)
@@ -1156,7 +1156,7 @@ func TestNudgeStalledPoolContinuations_AcceptsCurrentSessionIdentities(t *testin
 			backing := beads.NewMemStoreFrom(0, []beads.Bead{session}, nil)
 			store := &continuationMetadataCountingStore{Store: backing}
 
-			nudgeStalledPoolContinuations(
+			nudgeStalledPoolContinuations("",
 				sp,
 				continuationNudgeCfg(),
 				store,
@@ -1181,7 +1181,7 @@ func TestNudgeStalledPoolContinuations_RejectsHistoricalAlias(t *testing.T) {
 	backing := beads.NewMemStoreFrom(0, []beads.Bead{session}, nil)
 	store := &continuationMetadataCountingStore{Store: backing}
 
-	nudgeStalledPoolContinuations(
+	nudgeStalledPoolContinuations("",
 		sp,
 		continuationNudgeCfg(),
 		store,
@@ -1285,7 +1285,7 @@ func TestNudgeStalledPoolContinuations_FailsClosed(t *testing.T) {
 			backing := beads.NewMemStoreFrom(0, sessions, nil)
 			store := &continuationMetadataCountingStore{Store: backing}
 
-			nudgeStalledPoolContinuations(
+			nudgeStalledPoolContinuations("",
 				sp, continuationNudgeCfg(), store, sessions, tt.candidates, false, now, &bytes.Buffer{},
 			)
 			if got := sp.CountCalls("Nudge", sessionName); got != 0 {

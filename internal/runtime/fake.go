@@ -179,6 +179,17 @@ func (f *Fake) Start(_ context.Context, name string, cfg Config) error {
 		return fmt.Errorf("%w: session %q", ErrSessionExists, name)
 	}
 	f.sessions[name] = cfg
+	// Real providers expose managed runtime identity through GetMeta. Mirror the
+	// identity-bearing launch environment so lifecycle-fence tests exercise the
+	// same positive-ID/token contract instead of relying on an unfaithful fake.
+	if f.meta[name] == nil {
+		f.meta[name] = make(map[string]string)
+	}
+	for _, key := range []string{"GC_SESSION_ID", "GC_INSTANCE_TOKEN", "GC_RUNTIME_EPOCH", "GC_CONTINUATION_EPOCH"} {
+		if value := cfg.Env[key]; value != "" {
+			f.meta[name][key] = value
+		}
+	}
 	return nil
 }
 

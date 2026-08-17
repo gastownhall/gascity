@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -41,6 +43,14 @@ You are an agent in a Gas City workspace. Claim available work and execute it.
 `
 
 const primeHookReadTimeout = 500 * time.Millisecond
+
+// Bounded retry budget for the distributed hook activity gate: five attempts
+// at 200ms covers the controller's receipt-consume fence window without
+// measurably extending the synchronous provider start path.
+const (
+	primeHookActivityLeaseRetries    = 5
+	primeHookActivityLeaseRetryDelay = 200 * time.Millisecond
+)
 
 var primeStdin = func() *os.File { return os.Stdin }
 
@@ -681,34 +691,83 @@ func persistPrimeHookProviderSessionKey(hookProviderSessionID string, stderr io.
 	// (see primeHookSessionTemplate); nil cfg → cliSessionStore identity.
 	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 	sessStore := cliSessionStore(store, cfg, cityPath)
-	// WI-6 R5: route the read through the session front door → Info. Get wraps
-	// absence as "loading session %q" and rejects non-session beads with
-	// ErrSessionNotFound; on this hook path both surface through the existing
-	// warn-and-return diagnostic (a foreign/absent bead never reaches the write),
-	// and the codex guard now resolves the family off Info (Provider precedence:
-	// builtin_ancestor → provider_kind → provider, all carried on Info).
+	// The hook never mutates the session row. Provider Start can synchronously
+	// wait for this hook while the controller owns its host-local lifecycle lock,
+	// and remote K8s/SSH hooks do not share that lock at all. Publish an append-
+	// only receipt into the shared session store instead; the controller consumes
+	// it under its lifecycle boundary after exact live-authority validation.
 	sessFront := sessionFrontDoor(sessStore)
-	info, err := sessFront.Get(gcSessionID)
+	info, err := sessFront.GetLive(gcSessionID)
 	if err != nil {
-		// The front-door Get already wraps with `loading session %q`, carrying the
-		// id — don't re-prefix (that would double-wrap the stderr).
-		warn("%v", err)
+		warn("reading session %q before receipt publish: %v", gcSessionID, err)
 		return
 	}
-	if fromHookStdin && !providerAcceptsHookStdinSessionID(sessionProviderFamily(info)) {
+	family := sessionProviderFamily(info)
+	if fromHookStdin && !providerAcceptsHookStdinSessionID(family) {
 		warn("hook stdin provider session id is only accepted for codex/claude session %q", gcSessionID)
 		return
 	}
-	if existing := strings.TrimSpace(info.SessionKey); existing != "" {
+	input := sessionpkg.ProviderSessionKeyReceiptInput{
+		SessionID:          gcSessionID,
+		Generation:         os.Getenv("GC_RUNTIME_EPOCH"),
+		ContinuationEpoch:  os.Getenv("GC_CONTINUATION_EPOCH"),
+		InstanceToken:      os.Getenv("GC_INSTANCE_TOKEN"),
+		ProviderFamily:     family,
+		ReceiptToken:       os.Getenv(sessionpkg.ProviderSessionKeyReceiptTokenEnv),
+		LaunchAuthority:    os.Getenv(sessionpkg.ProviderSessionKeyReceiptAuthorityEnv),
+		ProviderSessionKey: providerSessionID,
+	}
+	// Claim the shared-store hook activity gate before publishing. Remote
+	// hooks share Dolt but not the controller's host-local lifecycle flock, so
+	// this CAS lease — not a flock — orders hook output against the terminal
+	// stalled fence: while it is held (or its release tombstone is unacknowledged),
+	// the controller defers latching, and while a stall fence is installed the
+	// hook defers publishing. Missing CAS support is a hard refusal; the
+	// bounded retry only covers the short controller consume window.
+	lease, _, leaseErr := acquirePrimeHookActivityLease(sessStore, input)
+	if leaseErr != nil {
+		if !errors.Is(leaseErr, sessionpkg.ErrSessionHookActivitySuperseded) {
+			warn("acquiring hook activity lease for session %q: %v", gcSessionID, leaseErr)
+		}
 		return
 	}
-	if err := sessFront.SetMarker(gcSessionID, "session_key", providerSessionID); err != nil {
-		warn("writing session_key for session %q: %v", gcSessionID, err)
+	defer lease.Release() //nolint:errcheck // released tombstone; reconciler acknowledges
+	if _, err = sessionpkg.PublishProviderSessionKeyReceipt(sessStore, input); err != nil {
+		if !errors.Is(err, sessionpkg.ErrProviderSessionKeyReceiptSuperseded) {
+			warn("publishing provider session-key receipt for session %q: %v", gcSessionID, err)
+		}
 		return
 	}
-	// Runs once per session (the empty-key check above guards re-entry).
 	if stderr != nil {
-		fmt.Fprintf(stderr, "gc prime --hook: persisted resume session_key for %s session %q\n", sessionProviderFamily(info), gcSessionID) //nolint:errcheck // hook diagnostics are best effort.
+		fmt.Fprintf(stderr, "gc prime --hook: published resume session-key receipt for %s session %q\n", family, gcSessionID) //nolint:errcheck // hook diagnostics are best effort.
+	}
+}
+
+// acquirePrimeHookActivityLease claims the distributed hook gate with a small
+// bounded retry. ErrSessionHookActivityBlocked covers only the controller's
+// short receipt-consume fence window; a few hundred-millisecond retries keep a
+// synchronously-starting provider from losing its resume receipt to that
+// window, and the final attempt's failure is reported by the caller like any
+// other refused hook output.
+func acquirePrimeHookActivityLease(store beads.Store, input sessionpkg.ProviderSessionKeyReceiptInput) (*sessionpkg.HookActivityLease, sessionpkg.Info, error) {
+	coordinates := sessionpkg.HookActivityCoordinates{
+		SessionID:         input.SessionID,
+		Generation:        input.Generation,
+		ContinuationEpoch: input.ContinuationEpoch,
+		InstanceToken:     input.InstanceToken,
+	}
+	var (
+		lease   *sessionpkg.HookActivityLease
+		current sessionpkg.Info
+		err     error
+	)
+	for attempt := 0; ; attempt++ {
+		lease, current, err = sessionpkg.AcquireHookActivityLease(store, coordinates)
+		if err == nil || !errors.Is(err, sessionpkg.ErrSessionHookActivityBlocked) ||
+			attempt >= primeHookActivityLeaseRetries {
+			return lease, current, err
+		}
+		time.Sleep(primeHookActivityLeaseRetryDelay)
 	}
 }
 

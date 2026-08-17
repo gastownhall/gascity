@@ -7168,6 +7168,7 @@ prompt_template = "prompts/probe.md"
 		t.Fatal(err)
 	}
 
+	armPrimeReceiptEnv(t, store, sessionBead.ID, nil)
 	orig, _ := os.Getwd()
 	t.Cleanup(func() { _ = os.Chdir(orig) })
 	if err := os.Chdir(dir); err != nil {
@@ -7188,6 +7189,7 @@ prompt_template = "prompts/probe.md"
 	if err != nil {
 		t.Fatal(err)
 	}
+	consumePrimeHookReceipts(t, dir, sessionBead.ID)
 	updated, err := updatedStore.Get(sessionBead.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -7248,6 +7250,7 @@ prompt_template = "prompts/probe.md"
 		t.Fatal(err)
 	}
 
+	armPrimeReceiptEnv(t, store, sessionBead.ID, nil)
 	orig, _ := os.Getwd()
 	t.Cleanup(func() { _ = os.Chdir(orig) })
 	if err := os.Chdir(dir); err != nil {
@@ -7268,6 +7271,7 @@ prompt_template = "prompts/probe.md"
 	if err != nil {
 		t.Fatal(err)
 	}
+	consumePrimeHookReceipts(t, dir, sessionBead.ID)
 	updated, err := updatedStore.Get(sessionBead.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -7297,6 +7301,7 @@ base = "builtin:codex"`)
 	if err != nil {
 		t.Fatal(err)
 	}
+	consumePrimeHookReceipts(t, dir, sessionID)
 	updated, err := updatedStore.Get(sessionID)
 	if err != nil {
 		t.Fatal(err)
@@ -7325,6 +7330,7 @@ base = "builtin:claude"`)
 	if err != nil {
 		t.Fatal(err)
 	}
+	consumePrimeHookReceipts(t, dir, sessionID)
 	updated, err := updatedStore.Get(sessionID)
 	if err != nil {
 		t.Fatal(err)
@@ -7449,6 +7455,7 @@ prompt_template = "prompts/probe.md"
 	if err != nil {
 		t.Fatal(err)
 	}
+	armPrimeReceiptEnv(t, store, sessionBead.ID, nil)
 
 	orig, _ := os.Getwd()
 	t.Cleanup(func() { _ = os.Chdir(orig) })

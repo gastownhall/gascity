@@ -65,11 +65,12 @@ func (o *providerDrainOps) setDrain(sessionName string) error {
 }
 
 func (o *providerDrainOps) clearDrain(sessionName string) error {
-	return errors.Join(
+	return joinDrainAckMutationErrors(
 		o.sp.RemoveMeta(sessionName, "GC_DRAIN_ACK"),
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckSourceKey),
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckReasonKey),
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckGenerationKey),
+		o.sp.RemoveMeta(sessionName, reconcilerDrainAckAwakeEpochKey),
 		o.sp.RemoveMeta(sessionName, "GC_DRAIN"),
 	)
 }
@@ -101,6 +102,7 @@ func (o *providerDrainOps) setDrainAck(sessionName string) error {
 	return joinDrainAckMutationErrors(
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckReasonKey),
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckGenerationKey),
+		o.sp.RemoveMeta(sessionName, reconcilerDrainAckAwakeEpochKey),
 		o.sp.SetMeta(sessionName, reconcilerDrainAckSourceKey, drainAckSourceAgentValue),
 		o.sp.SetMeta(sessionName, "GC_DRAIN_ACK", "1"),
 	)

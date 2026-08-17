@@ -88,6 +88,29 @@ func TestReadFilteredWithInFlightIncludesRotatingFiles(t *testing.T) {
 	}
 }
 
+func TestReadFilteredWithInFlightBeforeSeqBoundsEverySegment(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+
+	source := filepath.Join(dir, "archive-source.jsonl")
+	writeJSONLEvents(t, source, 1, 2)
+	archive := filepath.Join(dir, formatArchiveBasename(time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC), 1, 2))
+	var stderr bytes.Buffer
+	if err := gzipAndArchive(source, archive, &stderr); err != nil {
+		t.Fatalf("gzip archive: %v", err)
+	}
+	writeJSONLEvents(t, filepath.Join(dir, "events.jsonl.rotating-20260507T120500Z-seq-3-4"), 3, 4)
+	writeJSONLEvents(t, path, 5, 6)
+
+	got, err := ReadFilteredWithInFlight(path, Filter{BeforeSeq: 4})
+	if err != nil {
+		t.Fatalf("ReadFilteredWithInFlight: %v", err)
+	}
+	if seqs := seqsOf(got); !reflect.DeepEqual(seqs, []uint64{1, 2, 3}) {
+		t.Fatalf("BeforeSeq=4 seqs = %v, want [1 2 3]", seqs)
+	}
+}
+
 // TestReadFilteredWithInFlightDedupsArchiveRotatingOverlap covers the instant
 // after gzipAndArchive renames the .gz into place but before it removes the
 // source rotating file: both cover the same seq window and the merged read must

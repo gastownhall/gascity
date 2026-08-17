@@ -90,7 +90,18 @@ func TestReconcileSessionBeads_DrainAckNoWorkFreesSlotAndReallocates(t *testing.
 			t.Fatalf("reload loser: %v", err)
 		}
 		loserName := loser.Metadata["session_name"]
-		if err := sp.Start(context.Background(), loserName, runtime.Config{}); err != nil {
+		const loserToken = "pool-loser-token"
+		if err := store.SetMetadata(loser.ID, "instance_token", loserToken); err != nil {
+			t.Fatalf("seed loser token: %v", err)
+		}
+		loser, err = store.Get(loser.ID)
+		if err != nil {
+			t.Fatalf("reload tokenized loser: %v", err)
+		}
+		if err := sp.Start(context.Background(), loserName, runtime.Config{Env: map[string]string{
+			"GC_SESSION_ID":     loser.ID,
+			"GC_INSTANCE_TOKEN": loserToken,
+		}}); err != nil {
 			t.Fatalf("start loser runtime: %v", err)
 		}
 		dops := newFakeDrainOps()

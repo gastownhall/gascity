@@ -1020,7 +1020,10 @@ func (s *Server) humaHandleSessionWake(ctx context.Context, input *SessionIDInpu
 		return nil, humaResolveError(err)
 	}
 
-	res, err := session.NewStore(store).WakeSession(id, time.Now().UTC(), session.WakeOpts{RejectClosed: true})
+	res, err := session.NewStore(store).WakeSession(id, time.Now().UTC(), session.WakeOpts{
+		RejectClosed: true,
+		CityPath:     s.state.CityPath(),
+	})
 	if err != nil {
 		if errors.Is(err, session.ErrNotSessionBead) {
 			return nil, apierr.InvalidRequest.Msg(id + " is not a session")
@@ -1052,8 +1055,27 @@ func (s *Server) humaHandleSessionWake(ctx context.Context, input *SessionIDInpu
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}
+	s.state.Poke()
+	requestToken := res.RequestToken
+	s.backgroundTasks.Add(1)
 	go func() {
-		if err := handle.Start(context.Background()); err != nil {
+		defer s.backgroundTasks.Done()
+		wakeCtx, cancel := context.WithTimeout(context.Background(), sessionCreateCommandableTimeout)
+		defer cancel()
+		if s.beforeSessionWakeStart != nil {
+			if err := s.beforeSessionWakeStart(wakeCtx); err != nil {
+				log.Printf("gc api: delaying wake session %s: %v", id, err)
+				return
+			}
+		}
+		_, err := session.NewStore(store).RunIfWakeRequestCurrent(
+			wakeCtx,
+			id,
+			requestToken,
+			s.state.CityPath(),
+			func(lockedCtx context.Context) error { return handle.Start(lockedCtx) },
+		)
+		if err != nil {
 			log.Printf("gc api: waking session %s: %v", id, err)
 		}
 	}()

@@ -8,6 +8,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessions "github.com/gastownhall/gascity/internal/session"
 )
 
 // backstopPredicate adapts the shared nudge-backstop engine (observe → nudge
@@ -55,20 +56,38 @@ type backstopPredicate interface {
 	clear(store beads.Store, s *beads.Bead, stdout io.Writer)
 }
 
+type executionStalledLatchHandler interface {
+	handlesExecutionStalledLatch() bool
+}
+
+type backstopLifecyclePathProvider interface {
+	backstopLifecycleCityPath() string
+}
+
 // backstopTarget is the durable identity of one outstanding delivery target.
 // ID is the human-facing work bead. RootID, StoreRef, and Generation are
 // optional persisted provenance fields: the initial pool-claim predicate needs
 // only ID, while continuation claims persist all four so same-ID rows in
 // independent stores, recycled graph roots, and recycled pool generations
-// never share pacing state. Assignee and Store retain the exact live-read
-// authority used only for pre-delivery revalidation.
+// never share pacing state. The execution predicate additionally binds the
+// session's instance/awake epochs, the full lifecycle fingerprint captured at
+// exhaustion, and the work row's revision/claim fence so a durable exhaustion
+// latch cannot cross either kind of ABA. Assignee and Store retain the exact
+// live-read authority used only for boundary revalidation.
 type backstopTarget struct {
-	ID         string
-	RootID     string
-	StoreRef   string
-	Generation string
-	Assignee   string
-	Store      beads.Store
+	ID                 string
+	RootID             string
+	StoreRef           string
+	Generation         string
+	InstanceToken      string
+	AwakeStartedAt     string
+	LifecycleAuthority string
+	CloseAuthority     string
+	StalledAt          string
+	WorkRevision       int64
+	WorkClaimFence     int64
+	Assignee           string
+	Store              beads.Store
 }
 
 // backstopResolution distinguishes definite completion from uncertainty.
@@ -144,6 +163,12 @@ func runNudgeBackstop(
 		if !pred.governs(*s) {
 			continue
 		}
+		if sessions.HasExecutionClaimNudgeStalledMetadata(s.Metadata) {
+			handler, ok := pred.(executionStalledLatchHandler)
+			if !ok || !handler.handlesExecutionStalledLatch() {
+				continue
+			}
+		}
 		sessName := strings.TrimSpace(s.Metadata["session_name"])
 		if sessName == "" || !sp.IsRunning(sessName) {
 			continue
@@ -193,17 +218,54 @@ func runNudgeBackstop(
 			default:
 				continue
 			}
-			// Write ahead of the external delivery. If the process crashes
-			// after this point, an attempt may be consumed without delivery,
-			// but a crash or store failure can never replay an unbounded nudge.
-			if !pred.reserve(store, s, target, attempts+1, now, stdout) {
+			cityPath := ""
+			if scoped, ok := pred.(backstopLifecyclePathProvider); ok {
+				cityPath = scoped.backstopLifecycleCityPath()
+			}
+			delivered := false
+			acquired, lockErr := sessions.TryWithCitySessionLifecycleLock(cityPath, s.ID, func() error {
+				current, err := beads.HandlesFor(store).Live.Get(s.ID)
+				if err != nil || current.Status == "closed" || sessions.HasExecutionClaimNudgeStalledMetadata(current.Metadata) {
+					return nil
+				}
+				liveTarget, liveResolution := pred.resolve(current, workByID, sessName)
+				if liveResolution != backstopResolutionOutstanding || !sameBackstopTargetAuthority(target, liveTarget) {
+					return nil
+				}
+				liveSame, liveAttempts, _ := pred.state(current, liveTarget)
+				if !liveSame || liveAttempts != attempts || pred.revalidate(liveTarget) != backstopResolutionOutstanding {
+					return nil
+				}
+				// Write ahead of the external delivery while holding the same
+				// lifecycle lock used by the terminal stalled latch. A latch and
+				// a provider nudge therefore have a single observable order.
+				liveContent := pred.content(current)
+				if liveContent == "" || !pred.reserve(store, &current, liveTarget, attempts+1, now, stdout) {
+					return nil
+				}
+				if err := sp.Nudge(sessName, runtime.TextContent(liveContent)); err != nil {
+					fmt.Fprintf(stdout, "%s: %s failed: %v\n", label, sessName, err) //nolint:errcheck // best-effort
+					return nil
+				}
+				delivered = true
+				return nil
+			})
+			if lockErr != nil {
+				fmt.Fprintf(stdout, "%s: locking %s before delivery failed: %v\n", label, sessName, lockErr) //nolint:errcheck
 				continue
 			}
-			if err := sp.Nudge(sessName, runtime.TextContent(content)); err != nil {
-				fmt.Fprintf(stdout, "%s: %s failed: %v\n", label, sessName, err) //nolint:errcheck // best-effort
+			if !acquired || !delivered {
 				continue
 			}
 			fmt.Fprintf(stdout, "%s: nudged %s for %s (attempt %d/%d)\n", label, sessName, target.ID, attempts+1, idleClaimNudgeMaxAttempts) //nolint:errcheck // best-effort
 		}
 	}
+}
+
+func sameBackstopTargetAuthority(a, b backstopTarget) bool {
+	return a.ID == b.ID && a.RootID == b.RootID && a.StoreRef == b.StoreRef &&
+		a.Generation == b.Generation && a.InstanceToken == b.InstanceToken &&
+		a.AwakeStartedAt == b.AwakeStartedAt && a.LifecycleAuthority == b.LifecycleAuthority &&
+		a.WorkRevision == b.WorkRevision && a.WorkClaimFence == b.WorkClaimFence &&
+		a.Assignee == b.Assignee
 }

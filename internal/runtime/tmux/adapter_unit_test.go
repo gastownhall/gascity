@@ -1,12 +1,28 @@
 package tmux
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
+
+func TestWrapErrorClassifiesNoSuchSession(t *testing.T) {
+	err := wrapError(errors.New("exit status 1"), "no such session: =worker-a", []string{"set-environment"})
+	if !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("wrapError(no such session) = %v, want tmux ErrSessionNotFound", err)
+	}
+	if !runtime.IsSessionGone(err) {
+		t.Fatalf("runtime.IsSessionGone(%v) = false, want true", err)
+	}
+
+	transportErr := wrapError(errors.New("exit status 1"), "permission denied", []string{"set-environment"})
+	if runtime.IsSessionGone(transportErr) {
+		t.Fatalf("runtime.IsSessionGone(%v) = true, want false", transportErr)
+	}
+}
 
 func TestBuildLaunchCommandUnsetsColorKillersForInteractiveExecutables(t *testing.T) {
 	for _, tc := range []struct {
@@ -100,6 +116,9 @@ func TestProviderListRunningReportsPartialOnNoServer(t *testing.T) {
 	fe := &fakeExecutor{err: ErrNoServer}
 	p := NewProviderWithConfig(Config{SocketName: "x"})
 	p.tm.exec = fe
+	p.tm.serverSocketObserver = func(context.Context, string) error {
+		return errors.New("live or indeterminate socket")
+	}
 
 	names, err := p.ListRunning("")
 	if names != nil {
@@ -110,6 +129,66 @@ func TestProviderListRunningReportsPartialOnNoServer(t *testing.T) {
 	}
 	if !errors.Is(err, ErrNoServer) {
 		t.Fatalf("ListRunning err = %v, want wrapped ErrNoServer cause", err)
+	}
+}
+
+func TestProviderListRunningUnnamedNoServerRemainsPartial(t *testing.T) {
+	fe := &fakeExecutor{err: ErrNoServer}
+	p := NewProviderWithConfig(Config{})
+	p.tm.exec = fe
+
+	names, err := p.ListRunning("")
+	if names != nil {
+		t.Fatalf("ListRunning names = %v, want nil", names)
+	}
+	if !runtime.IsPartialListError(err) || !errors.Is(err, ErrNoServer) {
+		t.Fatalf("ListRunning err = %v, want PartialListError wrapping ErrNoServer", err)
+	}
+}
+
+func TestProviderListRunningColdBootAbsentNamedSocketIsEmptySuccess(t *testing.T) {
+	fe := &fakeExecutor{err: ErrNoServer}
+	p := NewProviderWithConfig(Config{SocketName: "ai-city"})
+	p.tm.exec = fe
+	observerCalls := 0
+	p.tm.serverSocketObserver = func(ctx context.Context, path string) error {
+		observerCalls++
+		if ctx.Err() != nil {
+			t.Fatalf("observer context unexpectedly canceled: %v", ctx.Err())
+		}
+		if want := namedSocketPath("ai-city"); path != want {
+			t.Fatalf("observer path = %q, want %q", path, want)
+		}
+		return nil // absent or stable-refused named socket
+	}
+
+	names, err := p.ListRunning("")
+	if err != nil {
+		t.Fatalf("ListRunning err = %v, want nil for definitive cold boot", err)
+	}
+	if len(names) != 0 {
+		t.Fatalf("ListRunning names = %v, want empty", names)
+	}
+	if observerCalls != 1 {
+		t.Fatalf("observer calls = %d, want 1", observerCalls)
+	}
+}
+
+func TestProviderListRunningLiveEmptyServerIsEmptySuccess(t *testing.T) {
+	fe := &fakeExecutor{err: ErrNoCurrentTarget}
+	p := NewProviderWithConfig(Config{SocketName: "ai-city"})
+	p.tm.exec = fe
+	p.tm.serverSocketObserver = func(context.Context, string) error {
+		t.Fatal("live empty server must not be treated as an unreachable socket")
+		return errors.New("unreachable")
+	}
+
+	names, err := p.ListRunning("")
+	if err != nil {
+		t.Fatalf("ListRunning err = %v, want nil for responsive empty server", err)
+	}
+	if len(names) != 0 {
+		t.Fatalf("ListRunning names = %v, want empty", names)
 	}
 }
 

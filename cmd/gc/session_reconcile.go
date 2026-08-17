@@ -439,20 +439,28 @@ func agentTemplateIdentitiesEquivalent(cfg *config.City, a, b string) bool {
 // reads the post-hold sleep_reason (info.SleepReason), so the ordering is
 // load-bearing. On a persist error the segment is returned unchanged, matching the
 // raw `err == nil` mirror gate.
-func healExpiredTimersInfo(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock) sessionpkg.Info {
+func healExpiredTimersInfo(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock, cityPaths ...string) sessionpkg.Info {
+	cityPath := ""
+	if len(cityPaths) > 0 {
+		cityPath = cityPaths[0]
+	}
 	if h := info.HeldUntil; h != "" {
 		if t, _ := time.Parse(time.RFC3339, h); !t.IsZero() && clk.Now().After(t) {
 			batch := sessionpkg.ClearExpiredHoldPatch(info.SleepReason)
-			if err := sessFront.ApplyPatch(info.ID, batch); err == nil {
-				info = info.ApplyPatch(batch)
+			if applied, latest, _ := tryWithCurrentSessionMutation(cityPath, sessFront, info, false, func(current sessionpkg.Info) error {
+				return sessFront.ApplyPatch(current.ID, batch)
+			}); applied {
+				info = latest.ApplyPatch(batch)
 			}
 		}
 	}
 	if q := info.QuarantinedUntil; q != "" {
 		if t, _ := time.Parse(time.RFC3339, q); !t.IsZero() && clk.Now().After(t) {
 			batch := sessionpkg.ClearExpiredQuarantinePatch(info.SleepReason)
-			if err := sessFront.ApplyPatch(info.ID, batch); err == nil {
-				info = info.ApplyPatch(batch)
+			if applied, latest, _ := tryWithCurrentSessionMutation(cityPath, sessFront, info, false, func(current sessionpkg.Info) error {
+				return sessFront.ApplyPatch(current.ID, batch)
+			}); applied {
+				info = latest.ApplyPatch(batch)
 			}
 		}
 	}

@@ -1727,10 +1727,28 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer, jsonOutput ...bo
 			// Controller is running — metadata-only suspend.
 			// Set held_until far in the future so the reconciler drains/stops the session.
 			heldUntil := time.Now().Add(indefiniteHoldDuration).UTC().Format(time.RFC3339)
-			if err := sessionFrontDoor(sessStore).ApplyPatch(sessionID, map[string]string{
-				"held_until":   heldUntil,
-				"sleep_intent": "user-hold",
-				"state":        "suspended",
+			if err := session.WithCitySessionLifecycleLock(cityPath, sessionID, func() error {
+				return session.WithSessionMutationLock(sessionID, func() error {
+					sessFront := sessionFrontDoor(sessStore)
+					info, err := sessFront.GetLive(sessionID)
+					if err != nil {
+						return err
+					}
+					if session.HasExecutionClaimNudgeStalled(info) {
+						return fmt.Errorf("%w: %s", session.ErrExecutionStalledRecoveryPending, sessionID)
+					}
+					if info.Closed {
+						return &session.IllegalTransitionError{From: session.StateClosed, Command: session.CmdSuspend}
+					}
+					return sessFront.ApplyPatch(sessionID, map[string]string{
+						"held_until":         heldUntil,
+						"sleep_intent":       "user-hold",
+						"state":              "suspended",
+						"wake_request":       "",
+						"wake_requested_at":  "",
+						"wake_request_token": "",
+					})
+				})
 			}); err != nil {
 				fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 				return 1

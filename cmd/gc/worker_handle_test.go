@@ -147,6 +147,145 @@ func TestResolvedWorkerRuntimeWithConfigUsesProviderLaunchCommand(t *testing.T) 
 	}
 }
 
+func TestResolvedWorkerRuntimeExpandsRigQualifiedProviderlessStartCommand(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := t.TempDir()
+	const qualified = "tributary/core.control-dispatcher"
+	rawCommand := config.ControlDispatcherStartCommandFor("{{.Agent}}")
+	wantCommand := config.ControlDispatcherStartCommandFor(qualified)
+	storedCommand := wantCommand + " persisted-runtime-suffix"
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         config.ControlDispatcherAgentName,
+			BindingName:  "core",
+			Dir:          "tributary",
+			Scope:        "rig",
+			StartCommand: rawCommand,
+		}},
+		Rigs: []config.Rig{{Name: "tributary", Path: rigDir}},
+	}
+
+	resolved, err := resolvedWorkerRuntimeWithConfig(cityDir, cfg, session.Info{
+		Template:    qualified,
+		AgentName:   qualified,
+		SessionName: "core__control-dispatcher-test",
+		Command:     storedCommand,
+		WorkDir:     rigDir,
+	}, "")
+	if err != nil {
+		t.Fatalf("resolvedWorkerRuntimeWithConfig: %v", err)
+	}
+	if resolved == nil {
+		t.Fatal("resolvedWorkerRuntimeWithConfig() = nil")
+	}
+	if got := resolved.Command; got != storedCommand {
+		t.Fatalf("Command = %q, want expanded comparison to preserve stored command %q", got, storedCommand)
+	}
+	if strings.Contains(resolved.Command, "{{.Agent}}") {
+		t.Fatalf("Command = %q, still contains the unresolved agent template", resolved.Command)
+	}
+	if got := resolved.Provider; got != "" {
+		t.Fatalf("resolver Provider = %q, want empty before worker normalization", got)
+	}
+}
+
+func TestResolvedWorkerRuntimeProviderTrackDoesNotExpandCollidingAgentContext(t *testing.T) {
+	const collidingTemplate = "myrig/worker"
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:     "worker",
+			Dir:      "myrig",
+			Provider: "agent-provider",
+		}},
+		Providers: map[string]config.ProviderSpec{
+			"stored-provider": {
+				Command: "echo {{.Agent}}",
+			},
+			"agent-provider": {
+				Command: "echo agent-provider",
+			},
+		},
+	}
+
+	resolved, err := resolvedWorkerRuntimeWithConfigAndMetadata(t.TempDir(), cfg, session.Info{
+		Template:  collidingTemplate,
+		Provider:  "stored-provider",
+		Command:   "",
+		WorkDir:   t.TempDir(),
+		AgentName: collidingTemplate,
+	}, "provider", map[string]string{"real_world_app_session_kind": "provider"})
+	if err != nil {
+		t.Fatalf("resolvedWorkerRuntimeWithConfigAndMetadata: %v", err)
+	}
+	if resolved == nil {
+		t.Fatal("resolvedWorkerRuntimeWithConfigAndMetadata() = nil")
+	}
+	if got := resolved.Provider; got != "stored-provider" {
+		t.Fatalf("Provider = %q, want stored-provider", got)
+	}
+	if got := resolved.Command; got != "echo {{.Agent}}" {
+		t.Fatalf("Command = %q, want raw provider command without colliding agent context", got)
+	}
+}
+
+func TestWorkerHandleStartExpandsRigQualifiedProviderlessStartCommand(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := t.TempDir()
+	const qualified = "tributary/core.control-dispatcher"
+	wantCommand := config.ControlDispatcherStartCommandFor(qualified)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         config.ControlDispatcherAgentName,
+			BindingName:  "core",
+			Dir:          "tributary",
+			Scope:        "rig",
+			StartCommand: config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+		}},
+		Rigs: []config.Rig{{Name: "tributary", Path: rigDir}},
+	}
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(cityDir, store, sp, cfg)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
+		Alias:        qualified,
+		ExplicitName: "core__control-dispatcher-test",
+		Template:     qualified,
+		Title:        "Control dispatcher",
+		Command:      wantCommand,
+		WorkDir:      rigDir,
+		ExtraMeta:    map[string]string{"agent_name": qualified},
+		BeadOnly:     true,
+	})
+	if err != nil {
+		t.Fatalf("CreateSession(BeadOnly): %v", err)
+	}
+
+	handle, err := workerHandleForSessionWithConfig(cityDir, store, sp, cfg, info.ID)
+	if err != nil {
+		t.Fatalf("workerHandleForSessionWithConfig: %v", err)
+	}
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatalf("handle.Start: %v", err)
+	}
+	started := sp.LastStartConfig(info.SessionName)
+	if started == nil {
+		t.Fatalf("LastStartConfig(%q) = nil", info.SessionName)
+	}
+	if got := started.Command; got != wantCommand {
+		t.Fatalf("started Command = %q, want expanded rig-qualified command %q", got, wantCommand)
+	}
+	state, err := handle.State(context.Background())
+	if err != nil {
+		t.Fatalf("handle.State: %v", err)
+	}
+	if got := state.Provider; got != "sh" {
+		t.Fatalf("worker State.Provider = %q, want executable-derived label %q", got, "sh")
+	}
+}
+
 // TestResolvedWorkerRuntimeResumesPoolSessionPreservesLaunchFlags is a
 // regression test for gastownhall/gascity#799: a pool-agent session
 // resumed through the control-dispatcher path must reconstruct the full

@@ -73,12 +73,11 @@ type codecNeedle struct {
 // (their codec exists only in the edge, or arrives with a fold-in PR) and act as
 // tripwires; the exact-compare handles a missing census entry natively.
 var typedClassCodecNeedles = []codecNeedle{
-	// InfoFromPersistedBead( is a PERMANENT-ZERO tripwire: the exported name was
-	// UNEXPORTED to infoFromPersistedBead in the W-test-fixture endgame, so it can
-	// never re-appear in the interior (the symbol no longer exists — a call would not
-	// compile). The lowercase sibling below polices the interior against a
-	// locally-redefined / re-leaked codec of the new name.
-	{"sessions", "InfoFromPersistedBead(", "session.Store.Get/List (internal/session/info_store.go; exported name UNEXPORTED — permanent-zero tripwire)"},
+	// InfoFromPersistedBead( is exported only for authoritative raw Live.Get
+	// projections at the execution-stalled recovery boundary. Its exact census
+	// keeps that safety exception visible and prevents it spreading further.
+	// The lowercase sibling below remains a permanent-zero interior tripwire.
+	{"sessions", "InfoFromPersistedBead(", "session.Store.Get/List (internal/session/info_store.go; raw Live.Get projection is limited to audited recovery boundaries)"},
 	{"sessions", "infoFromPersistedBead(", "session.Store.Get/List (internal/session/info_store.go; the unexported codec — interior must route through session.Store, never call it directly)"},
 	{"sessions", "SessionInfoFromBead(", "session.Store.Get (internal/session/info_store.go)"},
 	{"sessions", "WaitInfoFromBead(", "session.Store.GetWait/ListWaits (internal/session)"},
@@ -142,17 +141,14 @@ var typedClassCodecEdgeFiles = map[string]bool{
 // carry no entry. Regenerate by running this test with the map empty and pasting
 // the emitted literal.
 var typedClassCodecCensus = map[string]map[string]int{
-	// InfoFromPersistedBead( / infoFromPersistedBead( are both PERMANENT INTERIOR ZEROs
-	// across all four scan dirs (no census entry). The interior was zeroed during the
-	// domain-object migration; the W-test-fixture endgame then migrated every EXTERNAL
-	// _test.go caller (cmd/gc, internal/api, internal/worker) onto real store test
-	// doubles (internal/session/sessiontest: SeedBead / Info / Store; the package-main
-	// seedSessionInfo type-stamp seeder for makeBead corpora; session.Info struct
-	// literals for degraded/empty-id fixtures) and UNEXPORTED the codec
-	// (InfoFromPersistedBead → infoFromPersistedBead). The exported name no longer
-	// exists, so its needle is a can-never-fire tripwire; the lowercase needle guards
-	// against a re-leaked / locally-redefined codec. internal/session's own white-box
-	// tests renamed WITH the codec and are not in any scan dir.
+	// The execution-stalled recovery proof needs to project authoritative raw
+	// Live.Get snapshots without substituting a cacheable typed read. These are
+	// the deliberately reviewed exceptions; the exact count prevents accidental
+	// growth. infoFromPersistedBead( remains an all-zero interior tripwire.
+	"InfoFromPersistedBead(": {
+		"cmd/gc/execution_backstop.go": 6,
+		"cmd/gc/session_beads.go":      4,
+	},
 	"ListAllSessionBeads(": {
 		// pool_detached_orphan_sweep's route-index build lists session beads
 		// (IncludeClosed) to read persisted route metadata (gc.session_id /

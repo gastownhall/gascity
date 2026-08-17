@@ -51,6 +51,9 @@ type FileRecorder struct {
 	seq    uint64
 	stderr io.Writer
 	closed bool
+	// writeRecord, when non-nil, replaces file.Write for focused durability
+	// fault tests. Production recorders leave it nil.
+	writeRecord func([]byte) (int, error)
 
 	// rotations tracks in-flight rotation goroutines so Close can
 	// drain them. Without this, callers that read events.jsonl
@@ -210,6 +213,12 @@ func (r *FileRecorder) Record(e Event) {
 	}
 
 	r.maybeAutoRotateLocked()
+	// A failed auto-rotation can poison/close the recorder (for example when
+	// rolling back a partial anchor append also fails). Do not dereference the
+	// now-nil file; the rotation path already emitted the actionable error.
+	if r.closed || r.file == nil {
+		return
+	}
 
 	// Cross-process flock contention only — r.mu already serializes
 	// in-process callers, so this loop never spins for an in-process peer.
@@ -282,8 +291,17 @@ func (r *FileRecorder) AppendBatch(batch []Event) (resultErr error) {
 	if err != nil {
 		return err
 	}
-	if err := writeBatch(r.file, data); err != nil {
-		return fmt.Errorf("write: %w", err)
+	info, err := r.file.Stat()
+	if err != nil {
+		return fmt.Errorf("stat before write: %w", err)
+	}
+	var writer io.Writer = r.file
+	if r.writeRecord != nil {
+		writer = writerFunc(r.writeRecord)
+	}
+	if err := writeBatch(writer, data); err != nil {
+		rollbackErr := r.restoreAppendBoundaryLocked(info.Size())
+		return fmt.Errorf("write: %w", errors.Join(err, rollbackErr))
 	}
 	r.seq = lastSeq
 	r.recordCount += uint64(len(batch))
@@ -337,32 +355,84 @@ func writeBatch(writer io.Writer, data []byte) error {
 	return err
 }
 
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(data []byte) (int, error) { return f(data) }
+
 // writeRecordLocked appends e to the active log under the recorder
 // mutex. Auto-fills Seq and Ts (if zero). The caller must already
 // hold both r.mu and (if cross-process safety matters) the file's
 // flock. Returns an error on marshal or write failure; the caller
 // decides whether to log to stderr or surface it.
 func (r *FileRecorder) writeRecordLocked(e *Event) error {
-	if latest, err := readLatestActiveSeq(r.path); err == nil && latest > r.seq {
-		r.seq = latest
+	latest := r.seq
+	if diskLatest, err := readLatestActiveSeq(r.path); err == nil && diskLatest > latest {
+		latest = diskLatest
 	} else if err != nil {
 		return fmt.Errorf("latest seq: %w", err)
 	}
-	r.seq++
-	e.Seq = r.seq
-	if e.Ts.IsZero() {
-		e.Ts = time.Now()
+	if latest == ^uint64(0) {
+		return fmt.Errorf("sequence overflow after %d", latest)
 	}
-	data, err := json.Marshal(e)
+	candidate := *e
+	candidate.Seq = latest + 1
+	if candidate.Ts.IsZero() {
+		candidate.Ts = time.Now()
+	}
+	data, err := json.Marshal(&candidate)
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
 	data = append(data, '\n')
-	if _, err := r.file.Write(data); err != nil {
-		return fmt.Errorf("write: %w", err)
+	info, err := r.file.Stat()
+	if err != nil {
+		return fmt.Errorf("stat before write: %w", err)
 	}
+	preWriteSize := info.Size()
+	write := r.file.Write
+	if r.writeRecord != nil {
+		write = r.writeRecord
+	}
+	written, writeErr := write(data)
+	if written != len(data) {
+		writeErr = errors.Join(writeErr, io.ErrShortWrite)
+	}
+	if writeErr != nil {
+		rollbackErr := r.restoreAppendBoundaryLocked(preWriteSize)
+		return fmt.Errorf("write: %w", errors.Join(writeErr, rollbackErr))
+	}
+	// Commit the visible sequence only after the complete record is durable to
+	// the append surface. Advancing it on marshal/write failure creates a phantom
+	// LatestSeq head that no watcher can ever consume.
+	r.seq = candidate.Seq
+	*e = candidate
 	r.recordCount++
 	return nil
+}
+
+// restoreAppendBoundaryLocked removes any prefix persisted by a failed or
+// short O_APPEND write. The caller holds the recorder's in-process mutex and,
+// on the Record path, its cross-process flock, so truncating to the pre-write
+// size cannot discard a conforming peer's append. If restoration itself fails,
+// poison and close the recorder rather than allowing a later append to join
+// onto a malformed fragment and publish a sequence no watcher can consume.
+func (r *FileRecorder) restoreAppendBoundaryLocked(size int64) error {
+	var restoreErr error
+	if err := r.file.Truncate(size); err != nil {
+		restoreErr = fmt.Errorf("truncate partial append to %d: %w", size, err)
+	} else if _, err := r.file.Seek(size, io.SeekStart); err != nil {
+		restoreErr = fmt.Errorf("seek after partial append rollback to %d: %w", size, err)
+	}
+	if restoreErr == nil {
+		return nil
+	}
+	r.closed = true
+	file := r.file
+	r.file = nil
+	if file != nil {
+		restoreErr = errors.Join(restoreErr, file.Close())
+	}
+	return fmt.Errorf("rollback failed; recorder closed: %w", restoreErr)
 }
 
 // maybeAutoRotateLocked is the size-gated rotation hook on the
@@ -466,6 +536,10 @@ func (r *FileRecorder) rotateLocked() (RotationResult, error) {
 
 	newFile, err := os.OpenFile(r.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
+		// The old active log has already been renamed, so there is no writable
+		// file to fall back to. Poison the recorder; Record's post-rotation guard
+		// will drop cleanly instead of dereferencing r.file on this or a later call.
+		r.closed = true
 		return RotationResult{}, fmt.Errorf("opening new active log: %w", err)
 	}
 	r.file = newFile
@@ -487,8 +561,23 @@ func (r *FileRecorder) rotateLocked() (RotationResult, error) {
 		Message: fmt.Sprintf("rotated to %s", archiveBase),
 		Payload: payloadBytes,
 	}
-	if err := r.writeRecordLocked(&anchor); err != nil {
-		return RotationResult{}, fmt.Errorf("writing anchor event: %w", err)
+	anchorFD := int(r.file.Fd())
+	if err := lockRecorderFile(anchorFD, r.path); err != nil {
+		return RotationResult{}, fmt.Errorf("locking anchor event: %w", err)
+	}
+	anchorErr := r.writeRecordLocked(&anchor)
+	unlockErr := syscall.Flock(anchorFD, syscall.LOCK_UN)
+	if anchorErr != nil {
+		if unlockErr != nil {
+			return RotationResult{}, errors.Join(
+				fmt.Errorf("writing anchor event: %w", anchorErr),
+				fmt.Errorf("unlocking anchor event: %w", unlockErr),
+			)
+		}
+		return RotationResult{}, fmt.Errorf("writing anchor event: %w", anchorErr)
+	}
+	if unlockErr != nil {
+		return RotationResult{}, fmt.Errorf("unlocking anchor event: %w", unlockErr)
 	}
 	if err := r.file.Sync(); err != nil {
 		fmt.Fprintf(r.stderr, "events: rotation: sync new active log: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -534,6 +623,12 @@ func (r *FileRecorder) List(filter Filter) ([]Event, error) {
 // keyset walk cannot skip a just-rotated segment mid-rotation.
 func (r *FileRecorder) ListInFlight(filter Filter) ([]Event, error) {
 	return ReadFilteredWithInFlight(r.path, filter)
+}
+
+// ListInFlightContext is ListInFlight with a caller-owned cancellation
+// boundary. It implements [InFlightContextProvider].
+func (r *FileRecorder) ListInFlightContext(ctx context.Context, filter Filter) ([]Event, error) {
+	return ReadFilteredWithInFlightContext(ctx, r.path, filter)
 }
 
 // ListTail returns trailing matching events from the underlying file.

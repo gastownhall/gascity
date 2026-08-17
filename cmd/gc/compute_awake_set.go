@@ -77,6 +77,7 @@ type AwakeSessionBead struct {
 	RestartRequested          bool      // restart_requested metadata is still active
 	ContinuationResetPending  bool      // continuation_reset_pending metadata is set
 	CurrentlyProcessingBeadID string    // work bead the session is currently processing
+	ExecutionStalled          bool      // durable execution-stalled recovery owns lifecycle
 }
 
 // AwakeWorkBead represents a work bead with an assignee.
@@ -405,6 +406,15 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 			if bead.CurrentlyProcessingBeadID != "" && anchor != bead.CurrentlyProcessingBeadID {
 				decision.RequiresFreshCycle = true
 			}
+		}
+		// The execution-stalled latch is a hard lifecycle fence, stronger than
+		// every demand/attachment/pending/wait override below. Recovery either
+		// retires stale preterminal authority or closes a stopped seat; no awake
+		// decision may heal or revive it in between.
+		if bead.ExecutionStalled {
+			decision.Reason = "execution-stalled"
+			result[name] = decision
+			continue
 		}
 
 		// Desired set (demand-driven wake). wait_hold suppresses normal

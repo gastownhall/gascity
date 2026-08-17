@@ -76,6 +76,7 @@ const (
 // looping, and delivery mechanics live there so continuation delivery can
 // reuse them without duplicating this state machine.
 func nudgeStalledPoolClaims(
+	cityPath string,
 	sp runtime.Provider,
 	cfg *config.City,
 	store beads.Store,
@@ -98,8 +99,9 @@ func nudgeStalledPoolClaims(
 	// same-ID beads in different stores apart, so this predicate carries its own
 	// store-scoped snapshot and leaves the engine's ID map empty.
 	runNudgeBackstop(sp, store, sessionBeads, nil, now, stdout, "idle-claim-nudge", poolClaimBackstop{
-		cfg:  cfg,
-		work: newIdleClaimWorkSnapshot(claimWork, claimWorkStoreRefs),
+		cfg:      cfg,
+		work:     newIdleClaimWorkSnapshot(claimWork, claimWorkStoreRefs),
+		cityPath: cityPath,
 	})
 }
 
@@ -117,6 +119,7 @@ func nudgeStalledPoolClaims(
 // immediately before reserving delivery. Any incomplete or ambiguous evidence
 // is silent and write-free.
 func nudgeStalledPoolContinuations(
+	cityPath string,
 	sp runtime.Provider,
 	cfg *config.City,
 	store beads.Store,
@@ -143,6 +146,7 @@ func nudgeStalledPoolContinuations(
 		poolContinuationBackstop{
 			cfg:        cfg,
 			candidates: newPoolContinuationCandidateSnapshot(sessionBeads, candidates),
+			cityPath:   cityPath,
 		},
 	)
 }
@@ -151,8 +155,13 @@ func nudgeStalledPoolContinuations(
 // re-delivers the claim nudge to a slot whose assigned trigger bead is still
 // unclaimed. See nudgeStalledPoolClaims for the full rationale and scope.
 type poolClaimBackstop struct {
-	cfg  *config.City
-	work idleClaimWorkSnapshot
+	cfg      *config.City
+	work     idleClaimWorkSnapshot
+	cityPath string
+}
+
+func (p poolClaimBackstop) backstopLifecycleCityPath() string {
+	return p.cityPath
 }
 
 // poolContinuationBackstop is the backstopPredicate for a graph-v2 successor
@@ -162,6 +171,11 @@ type poolClaimBackstop struct {
 type poolContinuationBackstop struct {
 	cfg        *config.City
 	candidates poolContinuationCandidateSnapshot
+	cityPath   string
+}
+
+func (p poolContinuationBackstop) backstopLifecycleCityPath() string {
+	return p.cityPath
 }
 
 func (p poolContinuationBackstop) governs(s beads.Bead) bool {

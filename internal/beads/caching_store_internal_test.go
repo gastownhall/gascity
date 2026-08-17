@@ -3116,6 +3116,96 @@ func TestCachingStoreApplyEventMergesProjectedIsBlocked(t *testing.T) {
 	}
 }
 
+func TestCachingStoreApplyUpdateInvalidatesDependentProjectionOnlyOnStatusChange(t *testing.T) {
+	t.Parallel()
+
+	blockedProjection := true
+	backing := NewMemStore()
+	blocker, err := backing.Create(Bead{
+		Title:  "blocker",
+		Status: "open",
+		Type:   "task",
+	})
+	if err != nil {
+		t.Fatalf("Create blocker: %v", err)
+	}
+	dependent, err := backing.Create(Bead{
+		Title:     "dependent",
+		Status:    "open",
+		Type:      "task",
+		Needs:     []string{blocker.ID},
+		IsBlocked: &blockedProjection,
+	})
+	if err != nil {
+		t.Fatalf("Create dependent: %v", err)
+	}
+
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	before, err := cache.Get(dependent.ID)
+	if err != nil {
+		t.Fatalf("Get dependent before event: %v", err)
+	}
+	if before.IsBlocked == nil || !*before.IsBlocked {
+		t.Fatalf("dependent IsBlocked before event = %v, want true", before.IsBlocked)
+	}
+
+	// Reconciliation emits a full bead.updated payload for real non-status
+	// changes, and that full row also carries the unchanged status. The
+	// unchanged status must not invalidate every dependent's ready projection
+	// and start a reconcile/event churn loop. Change the title so the test can
+	// prove the event was applied even though complete-event dependency
+	// normalization may clear the updated bead's own IsBlocked projection.
+	updatedBlocker := blocker
+	updatedBlocker.Title = "blocker refreshed"
+	payload, err := json.Marshal(updatedBlocker)
+	if err != nil {
+		t.Fatalf("marshal same-status projection update: %v", err)
+	}
+	cache.ApplyEvent("bead.updated", payload)
+
+	gotBlocker, err := cache.Get(blocker.ID)
+	if err != nil {
+		t.Fatalf("Get blocker after event: %v", err)
+	}
+	if gotBlocker.Title != updatedBlocker.Title {
+		t.Fatalf("blocker title after event = %q, want %q to prove the non-status update applied", gotBlocker.Title, updatedBlocker.Title)
+	}
+
+	after, err := cache.Get(dependent.ID)
+	if err != nil {
+		t.Fatalf("Get dependent after event: %v", err)
+	}
+	if after.IsBlocked == nil || !*after.IsBlocked {
+		t.Fatalf("dependent IsBlocked after same-status projection update = %v, want preserved true", after.IsBlocked)
+	}
+
+	// A real status transition still invalidates the projection so cached
+	// dependency evaluation can determine the new readiness immediately.
+	inProgress := "in_progress"
+	if err := backing.Update(blocker.ID, UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("Update backing blocker status: %v", err)
+	}
+	statusPayload, err := json.Marshal(map[string]string{
+		"id":     blocker.ID,
+		"status": inProgress,
+	})
+	if err != nil {
+		t.Fatalf("marshal status update: %v", err)
+	}
+	cache.ApplyEvent("bead.updated", statusPayload)
+
+	afterStatusChange, err := cache.Get(dependent.ID)
+	if err != nil {
+		t.Fatalf("Get dependent after status update: %v", err)
+	}
+	if afterStatusChange.IsBlocked != nil {
+		t.Fatalf("dependent IsBlocked after status update = %v, want nil fallback to cached deps", afterStatusChange.IsBlocked)
+	}
+}
+
 func TestCachingStoreApplyCloseEventClearsDependentProjectedIsBlocked(t *testing.T) {
 	t.Parallel()
 

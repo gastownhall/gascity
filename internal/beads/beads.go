@@ -112,9 +112,10 @@ type Bead struct {
 	// json:"revision,omitempty". Because json:"-" also skips decode, stores are
 	// responsible for populating it internally by their own means — BdStore
 	// stamps it from bd's machine JSON via the bdIssue envelope (pre-#4682 bd
-	// omits it, leaving 0); the native Mem/File stores maintain it per bead, and
-	// FileStore must persist it out of band because json:"-" keeps it out of the
-	// on-disk []Bead too. A revision observed through a caching layer may lag its
+	// omits it, leaving 0); NativeDoltStore maps the library's opaque RowVersion,
+	// while the native Mem/File stores maintain it per bead, and FileStore must
+	// persist it out of band because json:"-" keeps it out of the on-disk []Bead
+	// too. A revision observed through a caching layer may lag its
 	// backing store until reconcile or CAS-failure eviction; callers read it only
 	// through ConditionalWriter (equality-only; see the revision contract).
 	Revision int64 `json:"-"`

@@ -235,6 +235,7 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 		}
 	case "bead.updated":
 		existing, cached := c.beads[b.ID]
+		statusChanged := !cached || existing.Status != b.Status
 		if !cached || beadChanged(existing, b, false) {
 			c.noteMutationLocked(b.ID)
 			c.absorbFreshLocked(b.ID, b, time.Now(), absorbOpts{
@@ -248,7 +249,7 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 			c.noteMutationLocked(b.ID)
 			mutated = true
 		}
-		if hasCacheEventField(fields, "status") && c.clearDependentReadyProjectionsLocked(b.ID) {
+		if statusChanged && hasCacheEventField(fields, "status") && c.clearDependentReadyProjectionsLocked(b.ID) {
 			mutated = true
 		}
 	case "bead.closed":

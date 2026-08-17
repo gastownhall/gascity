@@ -204,6 +204,7 @@ func PreWakePatch(input PreWakePatchInput) MetadataPatch {
 		"generation":                 fmt.Sprintf("%d", input.Generation),
 		"wake_request":               "",
 		"wake_requested_at":          "",
+		"wake_request_token":         "",
 	}
 	if input.FreshWake {
 		patch["session_key"] = ""

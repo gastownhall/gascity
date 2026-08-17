@@ -46,6 +46,48 @@ func TestSessionMutationLocksArePerSession(t *testing.T) {
 	close(releaseFirst)
 }
 
+func TestTryWithSessionMutationLockFailsClosedWithoutBlocking(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- withSessionMutationLock("shared-session", func() error {
+			close(entered)
+			<-release
+			return nil
+		})
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("blocking owner did not acquire the session lock")
+	}
+	called := false
+	acquired, err := TryWithSessionMutationLock("shared-session", func() error {
+		called = true
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("busy try-lock: %v", err)
+	}
+	if acquired || called {
+		t.Fatalf("busy try-lock = acquired %v callback %v, want false/false", acquired, called)
+	}
+
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("blocking owner: %v", err)
+	}
+	acquired, err = TryWithSessionMutationLock("shared-session", func() error {
+		called = true
+		return nil
+	})
+	if err != nil || !acquired || !called {
+		t.Fatalf("released try-lock = acquired %v callback %v err %v, want true/true/nil", acquired, called, err)
+	}
+}
+
 func TestStripResumeFlag(t *testing.T) {
 	tests := []struct {
 		name       string

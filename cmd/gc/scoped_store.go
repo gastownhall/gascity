@@ -20,6 +20,10 @@ import (
 // to bound. Skips the managed-retry wrapper for the same reason (gascity
 // ga-cdmx6x).
 func scopedBdStoreForCity(ctx context.Context, cityPath string) (*beads.BdStore, error) {
+	return scopedBdStoreForCityWithSettings(ctx, cityPath, "", false)
+}
+
+func scopedBdStoreForCityWithSettings(ctx context.Context, cityPath, idPrefix string, listSkipLabels bool) (*beads.BdStore, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -27,11 +31,15 @@ func scopedBdStoreForCity(ctx context.Context, cityPath string) (*beads.BdStore,
 	if err != nil {
 		return nil, err
 	}
-	return beads.NewBdStore(cityPath, beads.ExecCommandRunnerWithEnvContext(ctx, env)), nil
+	return beads.NewBdStoreWithPrefix(
+		cityPath,
+		beads.ExecCommandRunnerWithEnvContext(ctx, env),
+		idPrefix,
+		scopedBdStoreOptions(listSkipLabels)...,
+	), nil
 }
 
-// scopedBdStoreForRig is scopedBdStoreForCity for a rig-scoped store.
-func scopedBdStoreForRig(ctx context.Context, cityPath string, cfg *config.City, rigDir string) (*beads.BdStore, error) {
+func scopedBdStoreForRigWithSettings(ctx context.Context, cityPath string, cfg *config.City, rigDir, idPrefix string, listSkipLabels bool) (*beads.BdStore, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -39,14 +47,27 @@ func scopedBdStoreForRig(ctx context.Context, cityPath string, cfg *config.City,
 	if err != nil {
 		return nil, err
 	}
-	return beads.NewBdStore(rigDir, beads.ExecCommandRunnerWithEnvContext(ctx, env)), nil
+	return beads.NewBdStoreWithPrefix(
+		rigDir,
+		beads.ExecCommandRunnerWithEnvContext(ctx, env),
+		idPrefix,
+		scopedBdStoreOptions(listSkipLabels)...,
+	), nil
+}
+
+func scopedBdStoreOptions(listSkipLabels bool) []beads.BdStoreOption {
+	if !listSkipLabels {
+		return nil
+	}
+	return []beads.BdStoreOption{beads.WithBdStoreListSkipLabels(true)}
 }
 
 // bdStoreBacking unwraps store through any CachingStore/beadPolicyStore
 // layers to find the underlying *beads.BdStore. It returns ok=false for
-// stores that aren't bd-CLI-backed (native, file, exec, mem, ...) — those
-// have no subprocess to leak, so ga-cdmx6x's mitigation doesn't apply to
-// them. Bounded to a handful of iterations: real store stacks are only a few
+// stores that aren't bd-CLI-backed (native, file, exec, mem, ...). Those keep
+// their existing cancellation behavior; notably exec-backed stores may still
+// run their own background-scoped subprocess deadline. Bounded to a handful
+// of iterations: real store stacks are only a few
 // layers deep (normally beadPolicyStore wrapping CachingStore wrapping the
 // raw store); the bound just guards against an unexpected wrap cycle.
 func bdStoreBacking(store beads.Store) (*beads.BdStore, bool) {
@@ -110,9 +131,9 @@ func scopedStoreLike(ctx context.Context, cityPath string, cfg *config.City, exi
 	var scoped beads.Store
 	var err error
 	if samePath(dir, cityPath) {
-		scoped, err = scopedBdStoreForCity(ctx, cityPath)
+		scoped, err = scopedBdStoreForCityWithSettings(ctx, cityPath, bs.IDPrefix(), bs.ListSkipLabelsEnabled())
 	} else {
-		scoped, err = scopedBdStoreForRig(ctx, cityPath, cfg, dir)
+		scoped, err = scopedBdStoreForRigWithSettings(ctx, cityPath, cfg, dir, bs.IDPrefix(), bs.ListSkipLabelsEnabled())
 	}
 	if err != nil {
 		return nil, err

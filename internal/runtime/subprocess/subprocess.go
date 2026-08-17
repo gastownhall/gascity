@@ -177,10 +177,24 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 		clearWorkDir()
 		return fmt.Errorf("preparing control socket for %q: %w", name, err)
 	}
-	if err := p.ops.start(cmd); err != nil {
+	preservedDrain, err := p.persistStartMetadata(name, cfg.Env)
+	if err != nil {
 		_ = nullFile.Close()
 		clearWorkDir()
-		return fmt.Errorf("starting session %q: %w", name, err)
+		return fmt.Errorf("storing metadata for %q: %w", name, err)
+	}
+	if err := p.ops.start(cmd); err != nil {
+		_ = nullFile.Close()
+		// providerOps.start normally delegates directly to exec.Cmd.Start, but
+		// also defend against an implementation that launches and then reports
+		// an error. Stop it before clearing metadata it could still rewrite.
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+		cleanupErr := p.cleanupFailedStartMetadata(name, preservedDrain)
+		clearWorkDir()
+		return fmt.Errorf("starting session %q: %w", name, errors.Join(err, cleanupErr))
 	}
 	_ = nullFile.Close()
 
@@ -191,16 +205,9 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 		// Socket creation failed — kill the process and bail.
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
+		cleanupErr := p.cleanupFailedStartMetadata(name, preservedDrain)
 		clearWorkDir()
-		return fmt.Errorf("creating control socket for %q: %w", name, err)
-	}
-	if err := p.persistStartMetadata(name, cfg.Env); err != nil {
-		lis.Close() //nolint:errcheck
-		_ = p.removeSocketArtifactsAt(name, socketDir, euid)
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		clearWorkDir()
-		return fmt.Errorf("storing metadata for %q: %w", name, err)
+		return fmt.Errorf("creating control socket for %q: %w", name, errors.Join(err, cleanupErr))
 	}
 
 	go func() {
@@ -392,15 +399,60 @@ func (p *Provider) RemoveMeta(name, key string) error {
 	return err
 }
 
-func (p *Provider) persistStartMetadata(name string, env map[string]string) error {
-	p.clearSessionMeta(name)
-	for key, value := range env {
-		if err := p.SetMeta(name, key, value); err != nil {
-			p.clearSessionMeta(name)
-			return err
+// persistStartMetadata resets stale sidecars and writes the new runtime
+// identity before the child can observe or mutate provider metadata. An
+// explicit drain is name-scoped operator intent, so it survives the reset.
+// The returned value is the drain to restore if a later launch step fails.
+func (p *Provider) persistStartMetadata(name string, env map[string]string) (string, error) {
+	preservedDrain, err := p.GetMeta(name, "GC_DRAIN")
+	if err != nil {
+		return "", fmt.Errorf("reading preserved GC_DRAIN: %w", err)
+	}
+	effectiveDrain := preservedDrain
+	if effectiveDrain == "" {
+		effectiveDrain = env["GC_DRAIN"]
+	}
+
+	if err := p.clearSessionMetaChecked(name); err != nil {
+		cleanupErr := p.cleanupFailedStartMetadata(name, effectiveDrain)
+		return effectiveDrain, errors.Join(err, cleanupErr)
+	}
+
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if err := p.SetMeta(name, key, env[key]); err != nil {
+			cleanupErr := p.cleanupFailedStartMetadata(name, effectiveDrain)
+			return effectiveDrain, errors.Join(err, cleanupErr)
 		}
 	}
-	return nil
+	if preservedDrain != "" {
+		if err := p.SetMeta(name, "GC_DRAIN", preservedDrain); err != nil {
+			cleanupErr := p.cleanupFailedStartMetadata(name, effectiveDrain)
+			return effectiveDrain, errors.Join(err, cleanupErr)
+		}
+	}
+	return effectiveDrain, nil
+}
+
+// cleanupFailedStartMetadata removes the identity initialized for a child that
+// did not become a managed session. Preserve the latest explicit drain when it
+// is readable, falling back to the pre-launch value if cleanup follows a
+// partial metadata failure.
+func (p *Provider) cleanupFailedStartMetadata(name, fallbackDrain string) error {
+	drain, readErr := p.GetMeta(name, "GC_DRAIN")
+	if drain == "" {
+		drain = fallbackDrain
+	}
+	clearErr := p.clearSessionMetaChecked(name)
+	var restoreErr error
+	if drain != "" {
+		restoreErr = p.SetMeta(name, "GC_DRAIN", drain)
+	}
+	return errors.Join(readErr, clearErr, restoreErr)
 }
 
 // GetLastActivity returns zero time — subprocess provider does not
@@ -480,13 +532,21 @@ func (p *Provider) metaPath(name, key string) string {
 }
 
 func (p *Provider) clearSessionMeta(name string) {
+	_ = p.clearSessionMetaChecked(name)
+}
+
+func (p *Provider) clearSessionMetaChecked(name string) error {
 	matches, err := filepath.Glob(filepath.Join(p.dir, metaFilePrefix(name)+".meta.*"))
 	if err != nil {
-		return
+		return err
 	}
+	var removeErrs []error
 	for _, path := range matches {
-		_ = os.Remove(path)
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			removeErrs = append(removeErrs, fmt.Errorf("removing metadata sidecar %q: %w", path, err))
+		}
 	}
+	return errors.Join(removeErrs...)
 }
 
 func metaFilePrefix(name string) string {

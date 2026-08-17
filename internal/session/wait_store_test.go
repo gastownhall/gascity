@@ -559,8 +559,81 @@ func TestWakeSession_HappyPathBatchEqualsPackageFunc(t *testing.T) {
 	if len(pkgBatch) != 1 {
 		t.Fatalf("pkg emitted %d batches, want 1", len(pkgBatch))
 	}
+	fusedToken := fusedBatch[0].Metadata["wake_request_token"]
+	pkgToken := pkgBatch[0].Metadata["wake_request_token"]
+	if fusedToken == "" || pkgToken == "" || fusedToken == pkgToken {
+		t.Fatalf("wake tokens = (%q, %q), want distinct non-empty tokens", fusedToken, pkgToken)
+	}
+	if res.RequestToken != fusedToken {
+		t.Fatalf("res.RequestToken = %q, want persisted token %q", res.RequestToken, fusedToken)
+	}
+	delete(fusedBatch[0].Metadata, "wake_request_token")
+	delete(pkgBatch[0].Metadata, "wake_request_token")
 	if !reflect.DeepEqual(fusedBatch[0].Metadata, pkgBatch[0].Metadata) {
-		t.Fatalf("fused batch %#v != pkg batch %#v", fusedBatch[0].Metadata, pkgBatch[0].Metadata)
+		t.Fatalf("fused batch %#v != pkg batch %#v (excluding unique token)", fusedBatch[0].Metadata, pkgBatch[0].Metadata)
+	}
+}
+
+func TestWakeSessionSameTimestampUsesTokenToFenceDelayedWork(t *testing.T) {
+	b := wakeSessionBeadFixture("s-1", map[string]string{"state": "asleep"})
+	s, rec := recordingWaitStore(t, b)
+
+	first, err := s.WakeSession("s-1", waitStoreNow, WakeOpts{})
+	if err != nil {
+		t.Fatalf("first WakeSession: %v", err)
+	}
+	second, err := s.WakeSession("s-1", waitStoreNow, WakeOpts{})
+	if err != nil {
+		t.Fatalf("second WakeSession: %v", err)
+	}
+	if first.RequestedAt != second.RequestedAt {
+		t.Fatalf("RequestedAt = (%q, %q), want deliberate timestamp collision", first.RequestedAt, second.RequestedAt)
+	}
+	if first.RequestToken == "" || second.RequestToken == "" || first.RequestToken == second.RequestToken {
+		t.Fatalf("RequestToken = (%q, %q), want distinct non-empty values", first.RequestToken, second.RequestToken)
+	}
+
+	canceled, err := s.CancelWakeRequestIfCurrent("s-1", first.RequestToken, "")
+	if err != nil {
+		t.Fatalf("CancelWakeRequestIfCurrent(stale): %v", err)
+	}
+	if canceled {
+		t.Fatal("stale first wake token canceled the second wake")
+	}
+	current, err := rec.Get("s-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got := current.Metadata["wake_request_token"]; got != second.RequestToken {
+		t.Fatalf("wake_request_token = %q, want second token %q", got, second.RequestToken)
+	}
+}
+
+func TestCancelWakeRequestIfCurrentDoesNotRewriteLaterLifecycleState(t *testing.T) {
+	b := wakeSessionBeadFixture("s-1", map[string]string{"state": "suspended"})
+	s, rec := recordingWaitStore(t, b)
+
+	wake, err := s.WakeSession("s-1", waitStoreNow, WakeOpts{})
+	if err != nil {
+		t.Fatalf("WakeSession: %v", err)
+	}
+	if err := rec.SetMetadata("s-1", "state", string(StateFailedCreate)); err != nil {
+		t.Fatalf("SetMetadata(later lifecycle state): %v", err)
+	}
+
+	canceled, err := s.CancelWakeRequestIfCurrent("s-1", wake.RequestToken, "")
+	if err != nil {
+		t.Fatalf("CancelWakeRequestIfCurrent: %v", err)
+	}
+	if canceled {
+		t.Fatal("exact wake token rewrote a later lifecycle state")
+	}
+	current, err := rec.Get("s-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got := current.Metadata["state"]; got != string(StateFailedCreate) {
+		t.Fatalf("state = %q, want later state %q", got, StateFailedCreate)
 	}
 }
 

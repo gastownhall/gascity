@@ -64,6 +64,10 @@ type Server struct {
 
 	backgroundTasks sync.WaitGroup
 
+	// beforeSessionWakeStart is an internal coordination seam for deterministic
+	// lifecycle interleaving tests. Production servers leave it nil.
+	beforeSessionWakeStart func(context.Context) error
+
 	// sessionLogSearchPaths overrides the default search paths for Claude
 	// session JSONL files. Nil means use worker.DefaultSearchPaths().
 	sessionLogSearchPaths []string

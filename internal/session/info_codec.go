@@ -161,6 +161,12 @@ var infoKeyCodec = []infoKeySpec{
 	{"generation", func(i *Info, v string) { i.Generation = v }},
 	{"started_config_hash", func(i *Info, v string) { i.StartedConfigHash = v }},
 	{"pin_awake", func(i *Info, v string) { i.PinAwake = v }},
+	{ExecutionClaimNudgeStalledMetadataKey, func(i *Info, v string) { i.ExecutionClaimNudgeStalled = v }},
+	{ProviderSessionKeyReceiptTokenMetadataKey, func(i *Info, v string) { i.ProviderSessionKeyReceiptToken = v }},
+	{ProviderSessionKeyReceiptAuthorityMetadataKey, func(i *Info, v string) { i.ProviderSessionKeyReceiptAuthority = v }},
+	{ProviderSessionKeyReceiptConsumeAuthorityMetadataKey, func(i *Info, v string) { i.ProviderSessionKeyReceiptConsumeAuthority = v }},
+	{ProviderSessionKeyReceiptIssuedAtMetadataKey, func(i *Info, v string) { i.ProviderSessionKeyReceiptIssuedAt = v }},
+	{SessionHookActivityGateMetadataKey, func(i *Info, v string) { i.SessionHookActivityGate = v }},
 
 	// reconciler decision-read cluster (front-door Phase 5)
 	{"held_until", func(i *Info, v string) { i.HeldUntil = v }},
@@ -187,6 +193,8 @@ var infoKeyCodec = []infoKeySpec{
 	{"unknown_state_escalated_at", func(i *Info, v string) { i.UnknownStateEscalatedAt = v }},
 	{"session_name_explicit", func(i *Info, v string) { i.SessionNameExplicit = v }},
 	{"wake_request", func(i *Info, v string) { i.WakeRequest = v }},
+	{"wake_requested_at", func(i *Info, v string) { i.WakeRequestedAt = v }},
+	{"wake_request_token", func(i *Info, v string) { i.WakeRequestToken = v }},
 	{"restart_requested", func(i *Info, v string) { i.RestartRequested = v }},
 	{"session_id_flag", func(i *Info, v string) { i.SessionIDFlag = v }},
 	{"template_overrides", func(i *Info, v string) { i.TemplateOverrides = v }},

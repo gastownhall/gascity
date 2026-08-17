@@ -228,6 +228,26 @@ func TestNativeDoltStoreConvertsDefaultPriorityAsUnset(t *testing.T) {
 	}
 }
 
+func TestNativeDoltStoreMapsRowVersionToRevisionWithoutInventingClaimFence(t *testing.T) {
+	bead, err := beadFromNativeIssue(&beadslib.Issue{
+		ID:         "gc-row-version",
+		Title:      "row version",
+		Status:     beadslib.StatusInProgress,
+		IssueType:  beadslib.TypeTask,
+		Assignee:   "worker",
+		RowVersion: -739,
+	})
+	if err != nil {
+		t.Fatalf("beadFromNativeIssue: %v", err)
+	}
+	if bead.Revision != -739 {
+		t.Fatalf("Revision = %d, want opaque RowVersion -739", bead.Revision)
+	}
+	if bead.ClaimFence != 0 {
+		t.Fatalf("ClaimFence = %d, want 0; row_lock is not an ownership fence", bead.ClaimFence)
+	}
+}
+
 func TestNativeDoltStoreMapsUpstreamStatusesToGasCityContract(t *testing.T) {
 	tests := []struct {
 		upstream beadslib.Status

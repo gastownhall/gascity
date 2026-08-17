@@ -50,6 +50,7 @@ type sessionWakeDeps struct {
 	withdrawQueuedWaitNudges  func(string, []string) error
 	cityUsesManagedReconciler func(string) bool
 	pokeController            func(string) error
+	beforeWakeNormalization   func()
 }
 
 // cmdSessionWake is the CLI entry point for "gc session wake".
@@ -86,7 +87,7 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 	}
 
 	sessFront := sessionFrontDoor(sessStore)
-	res, err := sessFront.WakeSession(id, deps.now().UTC(), session.WakeOpts{})
+	res, err := sessFront.WakeSession(id, deps.now().UTC(), session.WakeOpts{CityPath: deps.cityPath})
 	if err != nil {
 		if state, conflict := session.WakeConflictState(err); conflict {
 			fmt.Fprintf(stderr, "gc session wake: session %s is %s\n", id, state) //nolint:errcheck
@@ -105,14 +106,10 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 	nudgeIDs := res.NudgeIDs
 	hasRunnableTemplate := sessionWakeHasRunnableTemplateInfo(res.Info, deps.cfg)
 	if !hasRunnableTemplate && sessionWakeRequestedCreateInfo(res.Info) {
-		if err := sessFront.ApplyPatch(id, map[string]string{
-			"state":                     string(session.StateAsleep),
-			"state_reason":              "",
-			"pending_create_claim":      "",
-			"pending_create_started_at": "",
-			"wake_request":              "",
-			"wake_requested_at":         "",
-		}); err != nil {
+		if deps.beforeWakeNormalization != nil {
+			deps.beforeWakeNormalization()
+		}
+		if _, err := sessFront.CancelWakeRequestIfCurrent(id, res.RequestToken, deps.cityPath); err != nil {
 			fmt.Fprintf(stderr, "gc session wake: updating metadata: %v\n", err) //nolint:errcheck
 			return 1
 		}

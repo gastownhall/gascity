@@ -1283,6 +1283,7 @@ func TestAdvanceSessionDrainsWithSessions_UsesProvidedWakeEvaluations(t *testing
 	}
 
 	advanceSessionDrainsWithSessionsTraced(
+		"",
 		dt,
 		sp,
 		nil,

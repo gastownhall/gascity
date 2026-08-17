@@ -330,6 +330,28 @@ type Info struct {
 	// string compare, so the mirror keeps the raw value. Additive, internal-only
 	// (absent from the HTTP wire).
 	PinAwake string // pin_awake (raw)
+	// ExecutionClaimNudgeStalled is the RAW durable execution-stalled latch.
+	// A non-empty value fences every managed wake/start/message path until the
+	// controller either retires stale authority or completes terminal recovery.
+	// Additive, internal-only (absent from the HTTP wire).
+	ExecutionClaimNudgeStalled string // execution_claim_nudge_stalled (raw)
+	// ProviderSessionKeyReceiptToken / Authority / IssuedAt are the durable
+	// controller-owned handoff coordinates for a provider SessionStart hook.
+	// The hook never writes session_key: it publishes a non-authoritative receipt
+	// bead carrying this random token, and the controller consumes it only after
+	// re-proving the exact live lifecycle. These raw mirrors are part of the
+	// execution-stalled authority so a pending handoff cannot be silently adopted
+	// by a stale drain snapshot.
+	ProviderSessionKeyReceiptToken            string // provider_session_key_receipt_token (raw)
+	ProviderSessionKeyReceiptAuthority        string // provider_session_key_receipt_authority (immutable launch authority)
+	ProviderSessionKeyReceiptConsumeAuthority string // provider_session_key_receipt_consume_authority (current consume authority)
+	ProviderSessionKeyReceiptIssuedAt         string // provider_session_key_receipt_issued_at (raw RFC3339Nano)
+	// SessionHookActivityGate is the RAW shared-store CAS lease/fence used to
+	// serialize remote hook output with execution-stalled convergence. Hook and
+	// short controller leases are transient; a stalled fence is durable and is
+	// itself sufficient to suppress managed lifecycle work while its marker
+	// cluster is reconstructed after a crash.
+	SessionHookActivityGate string // session_hook_activity_gate (raw)
 
 	// --- reconciler decision-read cluster (front-door migration, Phase 5) ---
 	//
@@ -428,6 +450,13 @@ type Info struct {
 	// explicit-wake cause. Mirror keeps the raw value so a typed LifecycleInput can
 	// be populated from Info without touching the bead.
 	WakeRequest string // wake_request (raw)
+	// WakeRequestedAt and WakeRequestToken are the RAW wake-request lifecycle
+	// coordinates written atomically with WakeRequest. Destructive fences compare
+	// all three exactly so a later explicit wake supersedes stale lifecycle work;
+	// the timestamp remains diagnostic while the random token is authoritative
+	// when second-precision timestamps collide.
+	WakeRequestedAt  string // wake_requested_at (raw RFC3339)
+	WakeRequestToken string // wake_request_token (raw random token)
 	// RestartRequested is the RAW restart_requested metadata, the §5.2 intra-tick
 	// restart marker compute_awake_bridge reads (trimmed == "true") to surface a
 	// pending restart on the awake scan. Under raw-refresh coexistence the mirror
@@ -721,6 +750,19 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 	return nil
 }
 
+// prepareRuntimeStart establishes the only safe name-scoped cleanup window:
+// after every escaped predecessor is confirmed dead and before the replacement
+// can publish fresh metadata from Provider.Start.
+func (m *Manager) prepareRuntimeStart(ctx context.Context, sessionID, sessionName string) error {
+	if err := m.killExistingOrphans(ctx, sessionID); err != nil {
+		return fmt.Errorf("pre-start orphan cleanup: %w", err)
+	}
+	if err := runtime.ClearDrainAckMetadata(m.sp, sessionName); err != nil {
+		return fmt.Errorf("pre-start drain-ack cleanup: %w", err)
+	}
+	return nil
+}
+
 func (m *Manager) now() time.Time {
 	if m != nil && m.clk != nil {
 		return m.clk.Now()
@@ -920,110 +962,130 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 			return fmt.Errorf("creating session bead: %w", createErr)
 		}
 		b := createdBead
-
-		sessName := explicitName
-		if sessName == "" {
-			sessName = sessionNameFor(b.ID)
-			if err := m.store.SetMetadata(b.ID, "session_name", sessName); err != nil {
-				_ = m.store.Close(b.ID)
-				return fmt.Errorf("storing session name: %w", err)
+		return m.withLifecycleMutationLock(b.ID, func() error {
+			current, err := beads.HandlesFor(m.store).Live.Get(b.ID)
+			if err != nil {
+				return fmt.Errorf("refreshing newly created session: %w", err)
 			}
-		}
-		if b.Metadata == nil {
-			b.Metadata = make(map[string]string)
-		}
-		b.Metadata["session_name"] = sessName
-		if explicitName != "" {
-			b.Metadata["session_name_explicit"] = "true"
-		}
-		if err := m.syncStoredMCPServers(b.ID, &b, hints.MCPServers); err != nil {
-			_ = m.store.Close(b.ID)
-			return err
-		}
-
-		unroute := m.routeACPIfNeeded(provider, transport, sessName)
-		rollbackFailedCreate := func() error {
-			if unroute != nil {
-				unroute()
+			currentState := State(strings.TrimSpace(current.Metadata["state"]))
+			if current.Status == "closed" || currentState != StateActive ||
+				strings.TrimSpace(current.Metadata["instance_token"]) != strings.TrimSpace(meta["instance_token"]) ||
+				HasExecutionClaimNudgeStalledMetadata(current.Metadata) {
+				return fmt.Errorf("%w: %s", ErrCreateSuperseded, b.ID)
 			}
+			b = current
+
+			sessName := explicitName
+			if sessName == "" {
+				sessName = sessionNameFor(b.ID)
+				if err := m.store.SetMetadata(b.ID, "session_name", sessName); err != nil {
+					_ = m.store.Close(b.ID)
+					return fmt.Errorf("storing session name: %w", err)
+				}
+			}
+			if b.Metadata == nil {
+				b.Metadata = make(map[string]string)
+			}
+			b.Metadata["session_name"] = sessName
 			if explicitName != "" {
-				if err := m.store.SetMetadata(b.ID, "session_name", ""); err != nil {
-					return fmt.Errorf("clearing session name during rollback: %w", err)
-				}
-				if err := m.store.SetMetadata(b.ID, "session_name_explicit", ""); err != nil {
-					return fmt.Errorf("clearing explicit session name flag during rollback: %w", err)
-				}
-				b.Metadata["session_name"] = ""
-				b.Metadata["session_name_explicit"] = ""
+				b.Metadata["session_name_explicit"] = "true"
 			}
-			if err := m.store.Close(b.ID); err != nil {
-				return fmt.Errorf("closing rolled-back session bead: %w", err)
+			if err := m.syncStoredMCPServers(b.ID, &b, hints.MCPServers); err != nil {
+				_ = m.store.Close(b.ID)
+				return err
 			}
-			return nil
-		}
 
-		// If the provider supports Generate & Pass, inject --session-id into command.
-		startCommand := command
-		if resume.SessionIDFlag != "" && sessionKey != "" {
-			startCommand = command + " " + resume.SessionIDFlag + " " + sessionKey
-		}
-
-		// Build the session config from the hints, overriding command/workdir/env.
-		cfg := hints
-		cfg.Command = startCommand
-		cfg.WorkDir = workDir
-		runtimeInfo := m.infoFromBead(b)
-		cfg.Env = mergeEnv(mergeEnv(cfg.Env, env), RuntimeEnvWithSessionContext(
-			runtimeInfo,
-			DefaultGeneration,
-			DefaultContinuationEpoch,
-			meta["instance_token"],
-		))
-		if gcProvider := ProviderFamilyFromMetadata(meta, provider); gcProvider != "" {
-			cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
-		}
-		cfg = runtime.SyncWorkDirEnv(cfg)
-
-		// Start the runtime session. Refuse to start if a prior escaped process
-		// for this session could not be confirmed dead: a survivor would race
-		// the replacement for the same work bead (duplicate bd close).
-		if orphanErr := m.killExistingOrphans(ctx, b.ID); orphanErr != nil {
-			if rbErr := rollbackFailedCreate(); rbErr != nil {
-				return errors.Join(fmt.Errorf("pre-start orphan cleanup: %w", orphanErr), rbErr)
-			}
-			return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
-		}
-		if err := m.sp.Start(ctx, sessName, cfg); err != nil {
-			if runtimeSessionMatchesBead(m.sp, sessName, b.ID, meta["instance_token"]) {
-				if metaErr := m.confirmStartedRuntimeMetadata(b.ID, &b); metaErr != nil {
-					return metaErr
+			unroute := m.routeACPIfNeeded(provider, transport, sessName)
+			rollbackFailedCreate := func() error {
+				if unroute != nil {
+					unroute()
 				}
-				info = m.infoFromBead(b)
+				if explicitName != "" {
+					if err := m.store.SetMetadata(b.ID, "session_name", ""); err != nil {
+						return fmt.Errorf("clearing session name during rollback: %w", err)
+					}
+					if err := m.store.SetMetadata(b.ID, "session_name_explicit", ""); err != nil {
+						return fmt.Errorf("clearing explicit session name flag during rollback: %w", err)
+					}
+					b.Metadata["session_name"] = ""
+					b.Metadata["session_name_explicit"] = ""
+				}
+				if err := m.store.Close(b.ID); err != nil {
+					return fmt.Errorf("closing rolled-back session bead: %w", err)
+				}
 				return nil
 			}
-			if errors.Is(err, runtime.ErrSessionExists) && m.sp.IsRunning(sessName) {
-				if rbErr := rollbackFailedCreate(); rbErr != nil {
-					return errors.Join(fmt.Errorf("%w: %q already active in runtime", ErrSessionNameExists, sessName), rbErr)
-				}
-				return fmt.Errorf("%w: %q already active in runtime", ErrSessionNameExists, sessName)
-			}
-			if rbErr := rollbackFailedCreate(); rbErr != nil {
-				return errors.Join(fmt.Errorf("starting session: %w", err), rbErr)
-			}
-			return fmt.Errorf("starting session: %w", err)
-		}
-		if metaErr := m.confirmStartedRuntimeMetadata(b.ID, &b); metaErr != nil {
-			if stopErr := m.sp.Stop(sessName); stopErr != nil {
-				metaErr = errors.Join(metaErr, fmt.Errorf("stopping runtime after metadata failure: %w", stopErr))
-			}
-			if rbErr := rollbackFailedCreate(); rbErr != nil {
-				return errors.Join(metaErr, rbErr)
-			}
-			return metaErr
-		}
 
-		info = m.infoFromBead(b)
-		return nil
+			// If the provider supports Generate & Pass, inject --session-id into command.
+			startCommand := command
+			if resume.SessionIDFlag != "" && sessionKey != "" {
+				startCommand = command + " " + resume.SessionIDFlag + " " + sessionKey
+			}
+
+			// Build the session config from the hints, overriding command/workdir/env.
+			cfg := hints
+			cfg.Command = startCommand
+			cfg.WorkDir = workDir
+			runtimeInfo := m.infoFromBead(b)
+			cfg.Env = mergeEnv(mergeEnv(cfg.Env, env), RuntimeEnvWithSessionContext(
+				runtimeInfo,
+				DefaultGeneration,
+				DefaultContinuationEpoch,
+				meta["instance_token"],
+			))
+			if gcProvider := ProviderFamilyFromMetadata(meta, provider); gcProvider != "" {
+				cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
+			}
+			cfg = runtime.SyncWorkDirEnv(cfg)
+
+			// Start the runtime session only after every escaped predecessor is
+			// confirmed dead and its name-scoped drain acknowledgement is cleared.
+			if prepErr := m.prepareRuntimeStart(ctx, b.ID, sessName); prepErr != nil {
+				if rbErr := rollbackFailedCreate(); rbErr != nil {
+					return errors.Join(prepErr, rbErr)
+				}
+				return prepErr
+			}
+			if receiptErr := m.issueProviderSessionKeyReceipt(&b, &cfg); receiptErr != nil {
+				if rbErr := rollbackFailedCreate(); rbErr != nil {
+					return errors.Join(receiptErr, rbErr)
+				}
+				return receiptErr
+			}
+			if err := m.sp.Start(ctx, sessName, cfg); err != nil {
+				if runtimeSessionMatchesBead(m.sp, sessName, b.ID, meta["instance_token"]) {
+					if metaErr := m.confirmStartedRuntimeMetadata(b.ID, &b); metaErr != nil {
+						return metaErr
+					}
+					m.consumeProviderSessionKeyReceipt(&b)
+					info = m.infoFromBead(b)
+					return nil
+				}
+				if errors.Is(err, runtime.ErrSessionExists) && m.sp.IsRunning(sessName) {
+					if rbErr := rollbackFailedCreate(); rbErr != nil {
+						return errors.Join(fmt.Errorf("%w: %q already active in runtime", ErrSessionNameExists, sessName), rbErr)
+					}
+					return fmt.Errorf("%w: %q already active in runtime", ErrSessionNameExists, sessName)
+				}
+				if rbErr := rollbackFailedCreate(); rbErr != nil {
+					return errors.Join(fmt.Errorf("starting session: %w", err), rbErr)
+				}
+				return fmt.Errorf("starting session: %w", err)
+			}
+			if metaErr := m.confirmStartedRuntimeMetadata(b.ID, &b); metaErr != nil {
+				if stopErr := m.sp.Stop(sessName); stopErr != nil {
+					metaErr = errors.Join(metaErr, fmt.Errorf("stopping runtime after metadata failure: %w", stopErr))
+				}
+				if rbErr := rollbackFailedCreate(); rbErr != nil {
+					return errors.Join(metaErr, rbErr)
+				}
+				return metaErr
+			}
+			m.consumeProviderSessionKeyReceipt(&b)
+
+			info = m.infoFromBead(b)
+			return nil
+		})
 	})
 	if err != nil {
 		return Info{}, err
@@ -1033,6 +1095,9 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 
 func (m *Manager) confirmStartedRuntimeMetadata(id string, b *beads.Bead) error {
 	metadata := ConfirmStartedPatch(time.Now().UTC())
+	if b != nil {
+		metadata = BindProviderSessionKeyReceiptAuthority(infoFromPersistedBead(*b), metadata)
+	}
 	if err := m.store.SetMetadataBatch(id, metadata); err != nil {
 		return fmt.Errorf("storing started runtime metadata: %w", err)
 	}
@@ -1045,6 +1110,50 @@ func (m *Manager) confirmStartedRuntimeMetadata(id string, b *beads.Bead) error 
 		}
 	}
 	return nil
+}
+
+func (m *Manager) issueProviderSessionKeyReceipt(b *beads.Bead, cfg *runtime.Config) error {
+	if b == nil || cfg == nil || strings.TrimSpace(b.ID) == "" {
+		return nil
+	}
+	updated, env, err := IssueProviderSessionKeyReceipt(m.store, infoFromPersistedBead(*b), m.now().UTC())
+	if err != nil {
+		return err
+	}
+	if len(env) == 0 {
+		return nil
+	}
+	if b.Metadata == nil {
+		b.Metadata = make(map[string]string)
+	}
+	b.Metadata[ProviderSessionKeyReceiptTokenMetadataKey] = updated.ProviderSessionKeyReceiptToken
+	b.Metadata[ProviderSessionKeyReceiptAuthorityMetadataKey] = updated.ProviderSessionKeyReceiptAuthority
+	b.Metadata[ProviderSessionKeyReceiptConsumeAuthorityMetadataKey] = updated.ProviderSessionKeyReceiptConsumeAuthority
+	b.Metadata[ProviderSessionKeyReceiptIssuedAtMetadataKey] = updated.ProviderSessionKeyReceiptIssuedAt
+	cfg.Env = mergeEnv(cfg.Env, env)
+	return nil
+}
+
+func (m *Manager) consumeProviderSessionKeyReceipt(b *beads.Bead) {
+	if b == nil || strings.TrimSpace(b.ID) == "" {
+		return
+	}
+	updated, _, err := ConsumeProviderSessionKeyReceipts(m.store, b.ID)
+	if err != nil {
+		log.Printf("session: consuming provider SessionStart receipt for %s: %v", b.ID, err)
+		return
+	}
+	if strings.TrimSpace(updated.ID) == "" {
+		return
+	}
+	if b.Metadata == nil {
+		b.Metadata = make(map[string]string)
+	}
+	b.Metadata["session_key"] = updated.SessionKey
+	b.Metadata[ProviderSessionKeyReceiptTokenMetadataKey] = updated.ProviderSessionKeyReceiptToken
+	b.Metadata[ProviderSessionKeyReceiptAuthorityMetadataKey] = updated.ProviderSessionKeyReceiptAuthority
+	b.Metadata[ProviderSessionKeyReceiptConsumeAuthorityMetadataKey] = updated.ProviderSessionKeyReceiptConsumeAuthority
+	b.Metadata[ProviderSessionKeyReceiptIssuedAtMetadataKey] = updated.ProviderSessionKeyReceiptIssuedAt
 }
 
 func runtimeSessionMatchesBead(sp runtime.Provider, sessionName, beadID, instanceToken string) bool {
@@ -1183,22 +1292,52 @@ func (m *Manager) createBeadOnly(spec CreateOptions) (Info, error) {
 // suspended, it is resumed first using resumeCommand. If the tmux session
 // died (active bead but no process), it is restarted.
 func (m *Manager) Attach(ctx context.Context, id string, resumeCommand string, hints runtime.Config) error {
-	return withSessionMutationLock(id, func() error {
-		b, sessName, err := m.sessionBead(id)
-		if err != nil {
-			return err
+	var (
+		sessName     string
+		releaseLease func()
+	)
+	defer func() {
+		if releaseLease != nil {
+			releaseLease()
 		}
-		if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints); err != nil {
-			return err
-		}
-
-		return m.sp.Attach(sessName)
+	}()
+	// Acquire the crash-recoverable attach lease before releasing the short
+	// lifecycle boundary. A latch/stop that won first prevents setup; one that
+	// arrives later sees the held lease and defers. The provider call itself is
+	// outside both lifecycle and mutation locks, so ordinary message traffic and
+	// operator reads remain live during a long interactive attachment.
+	err := WithCitySessionLifecycleLockContext(ctx, m.cityPath, id, func(lockedCtx context.Context) error {
+		return withSessionMutationLock(id, func() error {
+			b, resolvedName, err := m.sessionBead(id)
+			if err != nil {
+				return err
+			}
+			var acquired bool
+			releaseLease, acquired, err = TryAcquireCitySessionAttachLease(m.cityPath, id)
+			if err != nil {
+				return err
+			}
+			if !acquired {
+				return fmt.Errorf("session %s attachment lease unavailable", id)
+			}
+			if err := m.ensureRunning(lockedCtx, id, b, resolvedName, resumeCommand, hints); err != nil {
+				releaseLease()
+				releaseLease = nil
+				return err
+			}
+			sessName = resolvedName
+			return nil
+		})
 	})
+	if err != nil {
+		return err
+	}
+	return m.sp.Attach(sessName)
 }
 
 // Suspend saves session state and kills the runtime session.
 func (m *Manager) Suspend(id string) error {
-	return withSessionMutationLock(id, func() error {
+	return m.withLifecycleMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
@@ -1209,9 +1348,6 @@ func (m *Manager) Suspend(id string) error {
 			return &IllegalTransitionError{From: StateClosed, Command: CmdSuspend}
 		}
 		current := State(b.Metadata["state"])
-		if current == StateSuspended {
-			return nil // idempotent: already suspended
-		}
 		// failed-create is a create-rollback terminal state: the create never
 		// reached creation_complete, so there is no live turn to suspend — only
 		// a possibly-leaked runtime process to tear down. `gc stop` issues
@@ -1243,8 +1379,27 @@ func (m *Manager) Suspend(id string) error {
 		// after the failed-create pre-check above, preserving closed-guard-
 		// first ordering.
 		current = canonicalLifecycleState(current)
-		if _, err := Transition(current, CmdSuspend); err != nil {
-			return err
+		if current != StateSuspended {
+			if _, err := Transition(current, CmdSuspend); err != nil {
+				return err
+			}
+		}
+
+		// Persist the operator blocker before stopping the provider. If the
+		// process or gc itself dies during Stop, the reconciler must observe a
+		// durable suspend instead of treating the dead runtime as an active bead
+		// eligible for restart. A repeated Suspend remains idempotent but retries
+		// provider teardown, repairing that crash window.
+		if err := m.store.Update(id, beads.UpdateOpts{Metadata: map[string]string{
+			"state":              string(StateSuspended),
+			"suspended_at":       m.now().UTC().Format(time.RFC3339),
+			"sleep_intent":       string(SleepReasonUserHold),
+			"sleep_reason":       string(SleepReasonUserHold),
+			"wake_request":       "",
+			"wake_requested_at":  "",
+			"wake_request_token": "",
+		}}); err != nil {
+			return fmt.Errorf("persisting suspension intent: %w", err)
 		}
 
 		// Kill the runtime session. Stop is provider-idempotent, so call it
@@ -1264,15 +1419,6 @@ func (m *Manager) Suspend(id string) error {
 			}
 		}
 
-		// Update state and suspension timestamp together so stores with a
-		// write-through cache preserve one coherent lifecycle transition.
-		if err := m.store.Update(id, beads.UpdateOpts{Metadata: map[string]string{
-			"state":        string(StateSuspended),
-			"suspended_at": time.Now().UTC().Format(time.RFC3339),
-		}}); err != nil {
-			return fmt.Errorf("updating suspension state: %w", err)
-		}
-
 		return nil
 	})
 }
@@ -1280,8 +1426,12 @@ func (m *Manager) Suspend(id string) error {
 // RequestFreshRestart marks a session for a controller-owned fresh restart
 // without closing its bead or clearing resume metadata immediately.
 func (m *Manager) RequestFreshRestart(id string) error {
-	return withSessionMutationLock(id, func() error {
-		if _, _, err := m.sessionBead(id); err != nil {
+	return m.withLifecycleMutationLock(id, func() error {
+		b, _, err := m.sessionBead(id)
+		if err != nil {
+			return err
+		}
+		if err := executionStalledRecoveryPendingError(id, b.Metadata); err != nil {
 			return err
 		}
 		return m.store.SetMetadataBatch(id, map[string]string{
@@ -1300,7 +1450,7 @@ func (m *Manager) Close(id string) error {
 // CloseDetailed ends a conversation permanently and reports cleanup artifacts.
 func (m *Manager) CloseDetailed(id string) (CloseResult, error) {
 	result := CloseResult{}
-	err := withSessionMutationLock(id, func() error {
+	err := m.withLifecycleMutationLock(id, func() error {
 		b, sessName, err := m.loadSessionBead(id, true)
 		if err != nil {
 			return err
@@ -1418,7 +1568,7 @@ func (m *Manager) Kill(id string) error {
 // responsible for signaling the runtime process to finish its work.
 // Idempotent: returns nil if the session is already draining.
 func (m *Manager) BeginDrain(id, reason string) error {
-	return withSessionMutationLock(id, func() error {
+	return m.withLifecycleMutationLock(id, func() error {
 		cmdLegal, err := m.checkTransition(id, CmdDrain, StateDraining)
 		if err != nil {
 			return err
@@ -1433,7 +1583,7 @@ func (m *Manager) BeginDrain(id, reason string) error {
 // Archive transitions a session from draining to archived. Idempotent:
 // returns nil if the session is already archived.
 func (m *Manager) Archive(id, reason string) error {
-	return withSessionMutationLock(id, func() error {
+	return m.withLifecycleMutationLock(id, func() error {
 		cmdLegal, err := m.checkTransition(id, CmdArchive, StateArchived)
 		if err != nil {
 			return err
@@ -1448,7 +1598,7 @@ func (m *Manager) Archive(id, reason string) error {
 // Quarantine marks a session as crash-quarantined until the given time.
 // Idempotent: returns nil if the session is already quarantined.
 func (m *Manager) Quarantine(id string, until time.Time, cycle int) error {
-	return withSessionMutationLock(id, func() error {
+	return m.withLifecycleMutationLock(id, func() error {
 		cmdLegal, err := m.checkTransition(id, CmdQuarantine, StateQuarantined)
 		if err != nil {
 			return err
@@ -1464,7 +1614,7 @@ func (m *Manager) Quarantine(id string, until time.Time, cycle int) error {
 // asleep so normal wake machinery owns the next runtime start. Idempotent:
 // returns nil if the session is already in an awake-eligible state.
 func (m *Manager) Reactivate(id string) error {
-	return withSessionMutationLock(id, func() error {
+	return m.withLifecycleMutationLock(id, func() error {
 		cmdLegal, err := m.checkTransition(id, CmdWake, StateAsleep)
 		if err != nil {
 			return err
@@ -1488,7 +1638,7 @@ func (m *Manager) Reactivate(id string) error {
 // runtime process has been confirmed alive. Idempotent: returns nil if the
 // session is already active.
 func (m *Manager) ConfirmCreation(id string) error {
-	return withSessionMutationLock(id, func() error {
+	return m.withLifecycleMutationLock(id, func() error {
 		cmdLegal, err := m.checkTransition(id, CmdReady, StateActive)
 		if err != nil {
 			return err
@@ -1540,68 +1690,67 @@ func (m *Manager) Rename(id, title string) error {
 
 // UpdatePresentation updates user-facing session attributes.
 func (m *Manager) UpdatePresentation(id string, title *string, alias *string) error {
-	return withSessionMutationLock(id, func() error {
-		b, sessName, err := m.loadSessionBead(id, true)
-		if err != nil {
-			return err
-		}
-		currentAlias := strings.TrimSpace(b.Metadata["alias"])
-		var nextAlias string
-		if alias != nil {
-			validated, err := ValidateAlias(*alias)
-			if err != nil {
+	// A title is presentation-only and is deliberately excluded from stalled
+	// execution authority. Keep that fast path on the process-local mutation
+	// lock. Alias, however, participates in claim authority and must serialize
+	// its live read and write against the durable stalled latch.
+	if alias == nil {
+		return withSessionMutationLock(id, func() error {
+			if _, _, err := m.loadSessionBead(id, true); err != nil {
 				return err
 			}
-			nextAlias = validated
+			return m.store.Update(id, beads.UpdateOpts{Title: title})
+		})
+	}
+
+	nextAlias, err := ValidateAlias(*alias)
+	if err != nil {
+		return err
+	}
+	// Identifier reservations are acquired before lifecycle ownership, matching
+	// Create's established alias -> lifecycle -> mutation order.
+	return withSessionAliasReservationLock(nextAlias, func() error {
+		return m.withExecutionStalledGuardedMutation(id, true, func(b beads.Bead, sessName string) error {
+			currentAlias := strings.TrimSpace(b.Metadata["alias"])
 			if strings.TrimSpace(b.Metadata["configured_named_session"]) == "true" && nextAlias != currentAlias {
 				return fmt.Errorf("configured named session alias is immutable while config-managed")
 			}
-		}
-		update := beads.UpdateOpts{}
-		if title != nil {
-			update.Title = title
-		}
-		if alias != nil {
-			return withSessionAliasReservationLock(nextAlias, func() error {
-				if nextAlias != currentAlias {
-					if err := ensureSessionAliasAvailable(m.store, nil, nextAlias, id, ""); err != nil {
-						return err
-					}
-				}
-				update.Metadata = UpdatedAliasMetadata(b.Metadata, nextAlias)
-				runtimeInfo := m.infoFromBead(b)
-				runtimeInfo.SessionName = sessName
-				nextRuntimeInfo := runtimeInfo
-				nextRuntimeInfo.Alias = nextAlias
-				runtimeRunning := sessName != "" && m.sp != nil && m.sp.IsRunning(sessName)
-				if runtimeRunning {
-					if err := SyncRuntimeAlias(m.sp, nextRuntimeInfo); err != nil {
-						return fmt.Errorf("updating runtime alias: %w", err)
-					}
-				}
-				if err := m.store.Update(id, update); err != nil {
-					if runtimeRunning {
-						if rollbackErr := SyncRuntimeAlias(m.sp, runtimeInfo); rollbackErr != nil {
-							log.Printf("session %s: restoring runtime alias %q on %s failed: %v", id, currentAlias, sessName, rollbackErr)
-						}
-					}
+			update := beads.UpdateOpts{Metadata: UpdatedAliasMetadata(b.Metadata, nextAlias)}
+			if title != nil {
+				update.Title = title
+			}
+			if nextAlias != currentAlias {
+				if err := ensureSessionAliasAvailable(m.store, nil, nextAlias, id, ""); err != nil {
 					return err
 				}
-				return nil
-			})
-		}
-		return m.store.Update(id, update)
+			}
+			runtimeInfo := m.infoFromBead(b)
+			runtimeInfo.SessionName = sessName
+			nextRuntimeInfo := runtimeInfo
+			nextRuntimeInfo.Alias = nextAlias
+			runtimeRunning := sessName != "" && m.sp != nil && m.sp.IsRunning(sessName)
+			if runtimeRunning {
+				if err := SyncRuntimeAlias(m.sp, nextRuntimeInfo); err != nil {
+					return fmt.Errorf("updating runtime alias: %w", err)
+				}
+			}
+			if err := m.store.Update(id, update); err != nil {
+				if runtimeRunning {
+					if rollbackErr := SyncRuntimeAlias(m.sp, runtimeInfo); rollbackErr != nil {
+						log.Printf("session %s: restoring runtime alias %q on %s failed: %v", id, currentAlias, sessName, rollbackErr)
+					}
+				}
+				return err
+			}
+			return nil
+		})
 	})
 }
 
 // UpdateTemplateOverrides merges option overrides into the session metadata.
 func (m *Manager) UpdateTemplateOverrides(id string, updates map[string]string) (map[string]string, error) {
 	var merged map[string]string
-	err := withSessionMutationLock(id, func() error {
-		b, sessName, err := m.loadSessionBead(id, true)
-		if err != nil {
-			return err
-		}
+	err := m.withExecutionStalledGuardedMutation(id, true, func(b beads.Bead, sessName string) error {
 		state := State(b.Metadata["state"])
 		if IsTemplateOverrideRuntimeActive(state) || templateOverrideWakeInFlight(b.Metadata, state, m.now()) || (strings.TrimSpace(sessName) != "" && m.sp != nil && m.sp.IsRunning(sessName)) {
 			return fmt.Errorf("%w: template overrides apply only before the next launch", ErrSessionActive)
@@ -1970,11 +2119,7 @@ func (m *Manager) PersistSessionKey(id, sessionKey string) error {
 	if id == "" || sessionKey == "" {
 		return nil
 	}
-	return withSessionMutationLock(id, func() error {
-		b, _, err := m.sessionBead(id)
-		if err != nil {
-			return err
-		}
+	return m.withExecutionStalledGuardedMutation(id, false, func(b beads.Bead, _ string) error {
 		if strings.TrimSpace(b.Metadata["session_key"]) != "" {
 			return nil
 		}

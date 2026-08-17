@@ -1193,14 +1193,16 @@ func TestComputeWorkSet_SkipsAllWhenCitySuspended(t *testing.T) {
 func TestHealExpiredTimers_ClearsExpiredHold(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
-	store := newTestStore()
-
 	session := makeBead("b1", map[string]string{
 		"held_until":   now.Add(-1 * time.Hour).Format(time.RFC3339),
 		"sleep_reason": "user-hold",
 	})
 
-	got := healExpiredTimersInfo(seedSessionInfo(session), sessionFrontDoor(store), clk)
+	typed := session
+	typed.Type = sessionBeadType
+	store := beads.NewMemStoreFrom(1, []beads.Bead{typed}, nil)
+	sessFront := sessionFrontDoor(store)
+	got := healExpiredTimersInfo(seedSessionInfo(session), sessFront, clk)
 
 	if got.HeldUntil != "" {
 		t.Error("expected held_until to be cleared")
@@ -1217,7 +1219,6 @@ func TestHealExpiredTimers_ClearsExpiredHold(t *testing.T) {
 func TestHealExpiredTimers_KeepsActiveHold(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
-	store := newTestStore()
 
 	future := now.Add(1 * time.Hour).Format(time.RFC3339)
 	session := makeBead("b1", map[string]string{
@@ -1225,7 +1226,11 @@ func TestHealExpiredTimers_KeepsActiveHold(t *testing.T) {
 		"sleep_reason": "user-hold",
 	})
 
-	got := healExpiredTimersInfo(seedSessionInfo(session), sessionFrontDoor(store), clk)
+	typed := session
+	typed.Type = sessionBeadType
+	store := beads.NewMemStoreFrom(1, []beads.Bead{typed}, nil)
+	sessFront := sessionFrontDoor(store)
+	got := healExpiredTimersInfo(seedSessionInfo(session), sessFront, clk)
 
 	if got.HeldUntil != future {
 		t.Error("active hold should not be cleared")
@@ -1235,15 +1240,17 @@ func TestHealExpiredTimers_KeepsActiveHold(t *testing.T) {
 func TestHealExpiredTimers_ClearsExpiredQuarantine(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
-	store := newTestStore()
-
 	session := makeBead("b1", map[string]string{
 		"quarantined_until": now.Add(-1 * time.Minute).Format(time.RFC3339),
 		"wake_attempts":     "5",
 		"sleep_reason":      "quarantine",
 	})
 
-	got := healExpiredTimersInfo(seedSessionInfo(session), sessionFrontDoor(store), clk)
+	typed := session
+	typed.Type = sessionBeadType
+	store := beads.NewMemStoreFrom(1, []beads.Bead{typed}, nil)
+	sessFront := sessionFrontDoor(store)
+	got := healExpiredTimersInfo(seedSessionInfo(session), sessFront, clk)
 
 	if got.QuarantinedUntil != "" {
 		t.Error("expected quarantined_until to be cleared")
@@ -1274,8 +1281,6 @@ func TestHealExpiredTimers_ClearsExpiredQuarantine(t *testing.T) {
 func TestHealExpiredTimers_ExpiredHoldThenExpiredQuarantineSameCall(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
-	store := newTestStore()
-
 	past := now.Add(-1 * time.Hour).Format(time.RFC3339)
 	session := makeBead("b1", map[string]string{
 		"held_until":        past,
@@ -1285,7 +1290,11 @@ func TestHealExpiredTimers_ExpiredHoldThenExpiredQuarantineSameCall(t *testing.T
 		"churn_count":       "3",
 	})
 
-	got := healExpiredTimersInfo(seedSessionInfo(session), sessionFrontDoor(store), clk)
+	typed := session
+	typed.Type = sessionBeadType
+	store := beads.NewMemStoreFrom(1, []beads.Bead{typed}, nil)
+	sessFront := sessionFrontDoor(store)
+	got := healExpiredTimersInfo(seedSessionInfo(session), sessFront, clk)
 
 	for _, tc := range []struct {
 		key, got, want string
@@ -1452,7 +1461,6 @@ func TestRecordWakeFailure_Quarantine(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
 	store := newTestStore()
-
 	session := makeBead("b1", map[string]string{
 		"wake_attempts": "4", // one below threshold
 	})
@@ -1475,7 +1483,6 @@ func TestRecordWakeFailure_BelowThreshold(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
 	store := newTestStore()
-
 	session := makeBead("b1", map[string]string{
 		"wake_attempts": "1",
 	})
@@ -1495,7 +1502,6 @@ func TestRecordWakeFailure_ClearsStartedConfigHash(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
 	store := newTestStore()
-
 	session := makeBead("b1", map[string]string{
 		"session_key":         "old-key",
 		"started_config_hash": "abc123",
@@ -1516,7 +1522,6 @@ func TestRecordWakeFailure_ClearsStartedConfigHashWhenSessionKeyAlreadyEmpty(t *
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
 	store := newTestStore()
-
 	session := makeBead("b1", map[string]string{
 		"started_config_hash": "abc123",
 	})
@@ -2439,7 +2444,6 @@ func TestCheckStability_RapidExitAfterHealStateKeepsStartedConfigHashCleared(t *
 	now := time.Date(2026, 4, 4, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
 	store := newTestStore()
-
 	session := makeBead("b1", map[string]string{
 		"state":               "active",
 		"session_key":         "old-key",
@@ -2940,7 +2944,6 @@ func TestRecordChurn_Quarantine(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
 	store := newTestStore()
-
 	session := makeBead("b1", map[string]string{
 		"churn_count": "2", // one below threshold (defaultMaxChurnCycles=3)
 	})
@@ -2963,7 +2966,6 @@ func TestRecordChurn_BelowThreshold(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
 	store := newTestStore()
-
 	session := makeBead("b1", map[string]string{
 		"churn_count": "0",
 	})
@@ -2983,7 +2985,6 @@ func TestRecordChurn_ClearsSessionKey(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
 	store := newTestStore()
-
 	session := makeBead("b1", map[string]string{
 		"churn_count": "0",
 		"session_key": "old-key-123",
@@ -3068,8 +3069,6 @@ func TestProductiveLongEnough_NoLastWokeAt(t *testing.T) {
 func TestHealExpiredTimers_ClearsChurnOnQuarantineExpiry(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
-	store := newTestStore()
-
 	// Quarantine expired 1 minute ago. Has churn_count from context-churn.
 	session := makeBead("b1", map[string]string{
 		"quarantined_until": now.Add(-1 * time.Minute).Format(time.RFC3339),
@@ -3078,7 +3077,11 @@ func TestHealExpiredTimers_ClearsChurnOnQuarantineExpiry(t *testing.T) {
 		"sleep_reason":      "context-churn",
 	})
 
-	got := healExpiredTimersInfo(seedSessionInfo(session), sessionFrontDoor(store), clk)
+	typed := session
+	typed.Type = sessionBeadType
+	store := beads.NewMemStoreFrom(1, []beads.Bead{typed}, nil)
+	sessFront := sessionFrontDoor(store)
+	got := healExpiredTimersInfo(seedSessionInfo(session), sessFront, clk)
 
 	if got.QuarantinedUntil != "" {
 		t.Error("quarantined_until should be cleared")

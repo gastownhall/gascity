@@ -163,6 +163,37 @@ func TestExtractBdDirectoryFlag(t *testing.T) {
 	}
 }
 
+func TestBdExplicitReadOnlyQuery(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "sentinel shape", args: []string{"query", "--readonly", "SELECT COUNT(*) FROM issues"}, want: true},
+		{name: "explicit true", args: []string{"query", "--readonly=true", "SELECT 1"}, want: true},
+		{name: "readonly after query flags", args: []string{"query", "--format", "json", "--readonly", "SELECT 1"}, want: false},
+		{name: "readonly consumed as sort value", args: []string{"query", "--sort", "--readonly", "SELECT 1"}, want: false},
+		{name: "missing readonly", args: []string{"query", "SELECT 1"}, want: false},
+		{name: "explicit false", args: []string{"query", "--readonly=false", "SELECT 1"}, want: false},
+		{name: "conflicting false", args: []string{"query", "--readonly", "--readonly=false", "SELECT 1"}, want: false},
+		{name: "conflicting uppercase false", args: []string{"query", "--readonly", "--readonly=FALSE", "SELECT 1"}, want: false},
+		{name: "boolean one", args: []string{"query", "--readonly=1", "SELECT 1"}, want: true},
+		{name: "invalid boolean", args: []string{"query", "--readonly", "--readonly=maybe", "SELECT 1"}, want: false},
+		{name: "later duplicate", args: []string{"query", "--readonly", "--readonly", "SELECT 1"}, want: false},
+		{name: "different command", args: []string{"list", "--readonly"}, want: false},
+		{name: "flag-shaped query after separator", args: []string{"query", "--", "--readonly"}, want: false},
+		{name: "empty", args: nil, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := bdExplicitReadOnlyQuery(tt.args); got != tt.want {
+				t.Fatalf("bdExplicitReadOnlyQuery(%v) = %v, want %v", tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestResolveBdScopeTarget(t *testing.T) {
 	// Isolate cwd from any ambient `.beads/redirect` in the working tree
 	// (e.g. when `make test` runs from a polecat/crew worktree, the worktree's
@@ -826,6 +857,77 @@ esac
 	}
 }
 
+func TestGcBdJSONKeepsNamedSessionWarningsOffStdout(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+
+	origCityFlag := cityFlag
+	origRigFlag := rigFlag
+	defer func() {
+		cityFlag = origCityFlag
+		rigFlag = origRigFlag
+	}()
+	cityFlag = ""
+	rigFlag = ""
+
+	cityDir := t.TempDir()
+	setCwd(t, cityDir)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "warning-city"
+
+[beads]
+provider = "bd"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte(`[pack]
+name = "warning-city"
+schema = 2
+
+[[agent]]
+name = "worker"
+start_command = "true"
+wake_mode = "fresh"
+max_active_sessions = 1
+
+[[named_session]]
+name = "guardian"
+template = "worker"
+mode = "always"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeBuiltinImportsFixture(t, cityDir, "core", "bd")
+
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(`#!/bin/sh
+set -eu
+printf '[{"id":"warning-city-1","metadata":{"ok":"true"}}]\n'
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_CITY_PATH", cityDir)
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"bd", "show", "warning-city-1", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc bd show --json = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil {
+		t.Fatalf("stdout is not clean JSON: %v\nstdout=%q\nstderr=%q", err, stdout.String(), stderr.String())
+	}
+	if len(rows) != 1 || rows[0]["id"] != "warning-city-1" {
+		t.Fatalf("JSON rows = %#v, want the fake bd row", rows)
+	}
+	if strings.Contains(stdout.String(), "named_session") {
+		t.Fatalf("stdout contains named-session diagnostics: %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "named_session") ||
+		!strings.Contains(stderr.String(), "starts a fresh provider session after every drain") {
+		t.Fatalf("stderr = %q, want the named-session safety warning", stderr.String())
+	}
+}
+
 func TestGcBdReapsStaleBdExportJSONLBeforeDirectCommand(t *testing.T) {
 	disableManagedDoltRecoveryForTest(t)
 
@@ -873,6 +975,181 @@ printf '[{"id":"gc-1","title":"ok"}]\n'
 	}
 	if _, err := os.Stat(jsonlPath); !os.IsNotExist(err) {
 		t.Fatalf("issues.jsonl present after direct gc bd command; stat err = %v, want IsNotExist", err)
+	}
+}
+
+func TestGcBdReadOnlyQueryHasNoWrapperRecoveryOrRemoval(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+
+	origCityFlag := cityFlag
+	origRigFlag := rigFlag
+	t.Cleanup(func() {
+		cityFlag = origCityFlag
+		rigFlag = origRigFlag
+	})
+	cityFlag = ""
+	rigFlag = ""
+
+	cityDir := t.TempDir()
+	beadsDir := filepath.Join(cityDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	providerDir := t.TempDir()
+	providerOps := filepath.Join(providerDir, "ops.log")
+	providerScript := filepath.Join(providerDir, "gc-beads-bd")
+	if err := os.WriteFile(providerScript, []byte("#!/bin/sh\nset -eu\nprintf '%s\\n' \"$1\" >> "+strconv.Quote(providerOps)+"\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityTOML := "[workspace]\nname = \"demo\"\n\n[beads]\nprovider = " + strconv.Quote("exec:"+providerScript) + "\n"
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("issue_prefix: gc\ngc.endpoint_origin: managed_city\ngc.endpoint_status: verified\ndolt.auto-start: false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	wantJSONL := []byte(`{"_type":"issue","id":"gc-1"}` + "\n")
+	if err := os.WriteFile(jsonlPath, wantJSONL, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte("#!/bin/sh\nset -eu\nprintf '{\"columns\":[],\"rows\":[]}\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_CITY_PATH", cityDir)
+	setCwd(t, cityDir)
+
+	var stdout, stderr bytes.Buffer
+	args := []string{"query", "--readonly", "SELECT COUNT(*) FROM issues"}
+	if got := doBd(args, &stdout, &stderr); got != 0 {
+		t.Fatalf("doBd(%v) = %d, want 0; stdout=%q stderr=%q", args, got, stdout.String(), stderr.String())
+	}
+	if ops, err := os.ReadFile(providerOps); err == nil {
+		t.Fatalf("read-only query invoked provider lifecycle ops %q; want no health or recover", strings.TrimSpace(string(ops)))
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat provider ops: %v", err)
+	}
+	gotJSONL, err := os.ReadFile(jsonlPath)
+	if err != nil {
+		t.Fatalf("read-only query removed issues.jsonl: %v", err)
+	}
+	if !bytes.Equal(gotJSONL, wantJSONL) {
+		t.Fatalf("issues.jsonl changed by read-only query: got %q want %q", gotJSONL, wantJSONL)
+	}
+}
+
+func TestGcBdRigReadOnlyQueryHasNoWrapperRecoveryOrRemoval(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+
+	origCityFlag := cityFlag
+	origRigFlag := rigFlag
+	t.Cleanup(func() {
+		cityFlag = origCityFlag
+		rigFlag = origRigFlag
+	})
+	cityFlag = ""
+	rigFlag = ""
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	beadsDir := filepath.Join(rigDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	providerDir := t.TempDir()
+	providerOps := filepath.Join(providerDir, "ops.log")
+	providerScript := filepath.Join(providerDir, "gc-beads-bd")
+	if err := os.WriteFile(providerScript, []byte("#!/bin/sh\nset -eu\nprintf '%s\\n' \"$1\" >> "+strconv.Quote(providerOps)+"\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityTOML := "[workspace]\nname = \"demo\"\n\n[beads]\nprovider = " + strconv.Quote("exec:"+providerScript) + "\n\n[[rigs]]\nname = \"frontend\"\npath = \"frontend\"\nprefix = \"fe\"\n"
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("issue_prefix: fe\ngc.endpoint_origin: inherited_city\ngc.endpoint_status: verified\ndolt.auto-start: false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	wantJSONL := []byte(`{"_type":"issue","id":"fe-1"}` + "\n")
+	if err := os.WriteFile(jsonlPath, wantJSONL, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte("#!/bin/sh\nset -eu\nprintf '{\"columns\":[],\"rows\":[]}\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_CITY_PATH", cityDir)
+	setCwd(t, cityDir)
+
+	var stdout, stderr bytes.Buffer
+	args := []string{"--rig=frontend", "query", "--readonly", "SELECT COUNT(*) FROM issues"}
+	if got := doBd(args, &stdout, &stderr); got != 0 {
+		t.Fatalf("doBd(%v) = %d, want 0; stdout=%q stderr=%q", args, got, stdout.String(), stderr.String())
+	}
+	if ops, err := os.ReadFile(providerOps); err == nil {
+		t.Fatalf("rig read-only query invoked provider lifecycle ops %q; want no health or recover", strings.TrimSpace(string(ops)))
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat provider ops: %v", err)
+	}
+	gotJSONL, err := os.ReadFile(jsonlPath)
+	if err != nil {
+		t.Fatalf("rig read-only query removed issues.jsonl: %v", err)
+	}
+	if !bytes.Equal(gotJSONL, wantJSONL) {
+		t.Fatalf("rig issues.jsonl changed by read-only query: got %q want %q", gotJSONL, wantJSONL)
+	}
+}
+
+func TestGcBdReadOnlyQueryDoesNotPublishProviderRuntimeState(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+
+	origCityFlag := cityFlag
+	origRigFlag := rigFlag
+	t.Cleanup(func() {
+		cityFlag = origCityFlag
+		rigFlag = origRigFlag
+	})
+	cityFlag = ""
+	rigFlag = ""
+
+	cityDir := t.TempDir()
+	beadsDir := filepath.Join(cityDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("issue_prefix: gc\ngc.endpoint_origin: managed_city\ngc.endpoint_status: verified\ndolt.auto-start: false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_ = writeReachableProviderManagedDoltState(t, cityDir)
+
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte("#!/bin/sh\nset -eu\nprintf '{\"columns\":[],\"rows\":[]}\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_CITY_PATH", cityDir)
+	setCwd(t, cityDir)
+
+	var stdout, stderr bytes.Buffer
+	args := []string{"query", "--readonly", "SELECT 1"}
+	if got := doBd(args, &stdout, &stderr); got != 0 {
+		t.Fatalf("doBd(%v) = %d, want 0; stdout=%q stderr=%q", args, got, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(managedDoltStatePath(cityDir)); !os.IsNotExist(err) {
+		t.Fatalf("read-only query published managed runtime state; stat err = %v, want IsNotExist", err)
+	}
+	if _, err := os.Stat(filepath.Join(beadsDir, "dolt-server.port")); !os.IsNotExist(err) {
+		t.Fatalf("read-only query published port mirror; stat err = %v, want IsNotExist", err)
 	}
 }
 

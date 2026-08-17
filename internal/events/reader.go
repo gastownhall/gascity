@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -141,6 +142,9 @@ func readFilteredTracked(path string, filter Filter) ([]Event, map[eventSeqWindo
 		}
 		archivePath := filepath.Join(dir, info.Basename)
 		err := streamArchive(archivePath, filter, func(e Event) bool {
+			if filter.BeforeSeq > 0 && e.Seq >= filter.BeforeSeq {
+				return false
+			}
 			if !matchesFilter(e, filter) {
 				return true
 			}
@@ -173,6 +177,9 @@ func readFilteredTracked(path string, filter Filter) ([]Event, map[eventSeqWindo
 		var e Event
 		if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
 			continue // skip malformed lines
+		}
+		if filter.BeforeSeq > 0 && e.Seq >= filter.BeforeSeq {
+			break
 		}
 		if !matchesFilter(e, filter) {
 			continue
@@ -232,6 +239,13 @@ func ReadFilteredWithInFlight(path string, filter Filter) ([]Event, error) {
 // rather than decoding the full archive history twice. That includes later
 // archives the base intentionally did not open after satisfying Filter.Limit.
 func readRotationSources(path string, filter Filter, listedArchives map[eventSeqWindow]struct{}) ([]Event, error) {
+	return readRotationSourcesContext(context.Background(), path, filter, listedArchives)
+}
+
+func readRotationSourcesContext(ctx context.Context, path string, filter Filter, listedArchives map[eventSeqWindow]struct{}) ([]Event, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	dir := filepath.Dir(path)
 	sources, err := listBackfillSources(dir, filter.AfterSeq)
 	if err != nil {
@@ -244,6 +258,12 @@ func readRotationSources(path string, filter Filter, listedArchives map[eventSeq
 	var result []Event
 	maxSeq := filter.AfterSeq
 	for _, src := range sources {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+		if filter.BeforeSeq > 0 && src.firstSeq >= filter.BeforeSeq {
+			break
+		}
 		if src.kind == sourceArchive {
 			if _, ok := listedArchives[eventSeqWindow{first: src.firstSeq, last: src.lastSeq}]; ok {
 				continue
@@ -257,7 +277,11 @@ func readRotationSources(path string, filter Filter, listedArchives map[eventSeq
 			continue
 		}
 		for {
-			done, readErr := reader.readInto(filter, &maxSeq, &result, backfillBatch)
+			if err := ctx.Err(); err != nil {
+				reader.close()
+				return result, err
+			}
+			done, readErr := reader.readIntoContext(ctx, filter, &maxSeq, &result, backfillBatch)
 			if readErr != nil {
 				reader.close()
 				return result, fmt.Errorf("reading rotation source %q: %w", filepath.Base(src.path), readErr)
@@ -333,7 +357,16 @@ func archiveFilesIn(dir string) ([]archiveInfo, error) {
 // as an Event and invoking fn for every event. fn returns false to
 // abort iteration early. Returns nil if iteration completed cleanly
 // or fn requested abort; errors from gzip / scanner are wrapped.
-func streamArchive(path string, _ Filter, fn func(Event) bool) error {
+func streamArchive(path string, filter Filter, fn func(Event) bool) error {
+	return streamArchiveContext(context.Background(), path, filter, fn)
+}
+
+// streamArchiveContext is streamArchive with bounded cancellation latency.
+// Checking every record would put a synchronization read on the hottest event
+// history path, while checking once per archive can pin shutdown for seconds on
+// a large segment. A 256-record cadence keeps the overhead negligible and the
+// cancellation boundary well below one archive.
+func streamArchiveContext(ctx context.Context, path string, filter Filter, fn func(Event) bool) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -348,10 +381,20 @@ func streamArchive(path string, _ Filter, fn func(Event) bool) error {
 
 	scanner := bufio.NewScanner(gr)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	checked := 0
 	for scanner.Scan() {
+		if checked%256 == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+		checked++
 		var e Event
 		if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
 			continue
+		}
+		if filter.BeforeSeq > 0 && e.Seq >= filter.BeforeSeq {
+			return nil
 		}
 		if !fn(e) {
 			return nil

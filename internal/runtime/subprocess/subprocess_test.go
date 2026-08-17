@@ -131,6 +131,212 @@ func TestStartPersistsRuntimeMetadataForGetMeta(t *testing.T) {
 	}
 }
 
+func TestStartInitializesMetadataBeforeLaunchAndPreservesFreshAgentDrainAck(t *testing.T) {
+	p := newTestProvider(t)
+	const name = "meta-order"
+
+	if err := p.SetMeta(name, "STALE_START_META", "old"); err != nil {
+		t.Fatalf("SetMeta(STALE_START_META): %v", err)
+	}
+	if err := p.SetMeta(name, "GC_DRAIN", "explicit-drain"); err != nil {
+		t.Fatalf("SetMeta(GC_DRAIN): %v", err)
+	}
+	if err := p.SetMeta(name, "GC_DRAIN_ACK", "1"); err != nil {
+		t.Fatalf("SetMeta(GC_DRAIN_ACK): %v", err)
+	}
+	if err := p.SetMeta(name, "GC_DRAIN_ACK_SOURCE", "reconciler"); err != nil {
+		t.Fatalf("SetMeta(GC_DRAIN_ACK_SOURCE): %v", err)
+	}
+
+	realStart := p.ops.start
+	launchObserved := false
+	p.ops.start = func(cmd *exec.Cmd) error {
+		launchObserved = true
+		if got, err := p.GetMeta(name, "GC_SESSION_ID"); err != nil || got != "new-session" {
+			t.Fatalf("GC_SESSION_ID before launch = %q, %v; want new-session", got, err)
+		}
+		if got, err := p.GetMeta(name, "STALE_START_META"); err != nil || got != "" {
+			t.Fatalf("STALE_START_META before launch = %q, %v; want cleared", got, err)
+		}
+		if got, err := p.GetMeta(name, "GC_DRAIN"); err != nil || got != "explicit-drain" {
+			t.Fatalf("GC_DRAIN before launch = %q, %v; want explicit-drain", got, err)
+		}
+		for _, key := range []string{"GC_DRAIN_ACK", "GC_DRAIN_ACK_SOURCE"} {
+			if got, err := p.GetMeta(name, key); err != nil || got != "" {
+				t.Fatalf("stale %s before launch = %q, %v; want cleared", key, got, err)
+			}
+		}
+		if err := realStart(cmd); err != nil {
+			return err
+		}
+		// Model an agent that acknowledges a drain immediately after the real
+		// child launch, before providerOps.start returns to Provider.Start.
+		if err := p.SetMeta(name, "GC_DRAIN_ACK_SOURCE", "agent"); err != nil {
+			return err
+		}
+		return p.SetMeta(name, "GC_DRAIN_ACK", "1")
+	}
+
+	if err := p.Start(context.Background(), name, runtime.Config{
+		Command: "sleep 3600",
+		Env:     map[string]string{"GC_SESSION_ID": "new-session"},
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer p.Stop(name) //nolint:errcheck
+
+	if !launchObserved {
+		t.Fatal("providerOps.start was not called")
+	}
+	for key, want := range map[string]string{
+		"GC_DRAIN":            "explicit-drain",
+		"GC_DRAIN_ACK":        "1",
+		"GC_DRAIN_ACK_SOURCE": "agent",
+	} {
+		if got, err := p.GetMeta(name, key); err != nil || got != want {
+			t.Fatalf("%s after Start = %q, %v; want %q", key, got, err, want)
+		}
+	}
+}
+
+func TestStartLaunchFailureCleansInitializedMetadataAndRestoresExplicitDrain(t *testing.T) {
+	p := newTestProvider(t)
+	const name = "launch-failure-meta"
+
+	if err := p.SetMeta(name, "STALE_START_META", "old"); err != nil {
+		t.Fatalf("SetMeta(STALE_START_META): %v", err)
+	}
+	if err := p.SetMeta(name, "GC_DRAIN", "explicit-drain"); err != nil {
+		t.Fatalf("SetMeta(GC_DRAIN): %v", err)
+	}
+
+	startErr := errors.New("injected launch failure")
+	p.ops.start = func(*exec.Cmd) error {
+		if got, err := p.GetMeta(name, "GC_SESSION_ID"); err != nil || got != "new-session" {
+			t.Fatalf("GC_SESSION_ID at launch = %q, %v; want new-session", got, err)
+		}
+		if got, err := p.GetMeta(name, "STALE_START_META"); err != nil || got != "" {
+			t.Fatalf("STALE_START_META at launch = %q, %v; want cleared", got, err)
+		}
+		if got, err := p.GetMeta(name, "GC_DRAIN"); err != nil || got != "explicit-drain" {
+			t.Fatalf("GC_DRAIN at launch = %q, %v; want explicit-drain", got, err)
+		}
+		return startErr
+	}
+
+	err := p.Start(context.Background(), name, runtime.Config{
+		Command: "sleep 3600",
+		Env:     map[string]string{"GC_SESSION_ID": "new-session"},
+	})
+	if !errors.Is(err, startErr) {
+		t.Fatalf("Start error = %v, want %v", err, startErr)
+	}
+	for key, want := range map[string]string{
+		"GC_DRAIN":         "explicit-drain",
+		"GC_SESSION_ID":    "",
+		"STALE_START_META": "",
+	} {
+		if got, getErr := p.GetMeta(name, key); getErr != nil || got != want {
+			t.Fatalf("%s after failed Start = %q, %v; want %q", key, got, getErr, want)
+		}
+	}
+}
+
+func TestStartSocketFailureCleansInitializedMetadataAndRestoresExplicitDrain(t *testing.T) {
+	p := newTestProvider(t)
+	const name = "socket-failure-meta"
+
+	if err := p.SetMeta(name, "STALE_START_META", "old"); err != nil {
+		t.Fatalf("SetMeta(STALE_START_META): %v", err)
+	}
+	if err := p.SetMeta(name, "GC_DRAIN", "explicit-drain"); err != nil {
+		t.Fatalf("SetMeta(GC_DRAIN): %v", err)
+	}
+
+	realStart := p.ops.start
+	p.ops.start = func(cmd *exec.Cmd) error {
+		if got, err := p.GetMeta(name, "GC_SESSION_ID"); err != nil || got != "new-session" {
+			t.Fatalf("GC_SESSION_ID at launch = %q, %v; want new-session", got, err)
+		}
+		if err := realStart(cmd); err != nil {
+			return err
+		}
+		if err := p.SetMeta(name, "GC_DRAIN_ACK_SOURCE", "agent"); err != nil {
+			return err
+		}
+		if err := p.SetMeta(name, "GC_DRAIN_ACK", "1"); err != nil {
+			return err
+		}
+		// A non-empty directory cannot be removed as the socket name sidecar,
+		// deterministically forcing startControlSocket to fail after launch.
+		namePath := filepath.Join(p.socketDir(), p.sockKey(name)+".name")
+		if err := os.Mkdir(namePath, 0o700); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(namePath, "block"), []byte("keep"), 0o600); err != nil {
+			return err
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		namePath := filepath.Join(p.socketDir(), p.sockKey(name)+".name")
+		_ = os.Remove(filepath.Join(namePath, "block"))
+		_ = os.Remove(namePath)
+	})
+
+	err := p.Start(context.Background(), name, runtime.Config{
+		Command: "sleep 3600",
+		Env:     map[string]string{"GC_SESSION_ID": "new-session"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "creating control socket") {
+		t.Fatalf("Start error = %v, want control socket failure", err)
+	}
+	for key, want := range map[string]string{
+		"GC_DRAIN":            "explicit-drain",
+		"GC_DRAIN_ACK":        "",
+		"GC_DRAIN_ACK_SOURCE": "",
+		"GC_SESSION_ID":       "",
+		"STALE_START_META":    "",
+	} {
+		if got, getErr := p.GetMeta(name, key); getErr != nil || got != want {
+			t.Fatalf("%s after failed Start = %q, %v; want %q", key, got, getErr, want)
+		}
+	}
+}
+
+func TestStartMetadataInitializationFailurePreventsChildLaunch(t *testing.T) {
+	p := newTestProvider(t)
+	const name = "metadata-init-failure"
+
+	blockedPath := p.metaPath(name, "GC_SESSION_ID")
+	if err := os.Mkdir(blockedPath, 0o700); err != nil {
+		t.Fatalf("Mkdir blocked metadata path: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(blockedPath, "block"), []byte("keep"), 0o600); err != nil {
+		t.Fatalf("WriteFile blocked metadata path: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Remove(filepath.Join(blockedPath, "block"))
+		_ = os.Remove(blockedPath)
+	})
+
+	startCalls := 0
+	p.ops.start = func(*exec.Cmd) error {
+		startCalls++
+		return errors.New("child launch must not be reached")
+	}
+	err := p.Start(context.Background(), name, runtime.Config{
+		Command: "sleep 3600",
+		Env:     map[string]string{"GC_SESSION_ID": "new-session"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "storing metadata") {
+		t.Fatalf("Start error = %v, want metadata initialization failure", err)
+	}
+	if startCalls != 0 {
+		t.Fatalf("providerOps.start calls = %d, want 0", startCalls)
+	}
+}
+
 func TestStartLongSocketPathUsesShortSocketName(t *testing.T) {
 	// Use /tmp for a short base path — TMPDIR on macOS (/var/folders/...)
 	// is too long to find a depth where legacy > limit but short < limit.

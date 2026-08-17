@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -1387,5 +1388,142 @@ func TestEnsureSessionNameAvailable_RejectsNonReleasablePoolSlotShapes(t *testin
 				t.Fatalf("ensureSessionNameAvailable(%s) = %v, want %v", tc.name, err, ErrSessionNameExists)
 			}
 		})
+	}
+}
+
+func TestTryWithCitySessionLifecycleLockBusyAndCleanup(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		cityPath func(*testing.T) string
+	}{
+		{name: "process-local", cityPath: func(*testing.T) string { return "" }},
+		{name: "city-flock", cityPath: func(t *testing.T) string { return t.TempDir() }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := tc.cityPath(t)
+			holderEntered := make(chan struct{})
+			holderRelease := make(chan struct{})
+			holderDone := make(chan error, 1)
+			go func() {
+				holderDone <- WithCitySessionLifecycleLock(cityPath, "gc-42", func() error {
+					close(holderEntered)
+					<-holderRelease
+					return nil
+				})
+			}()
+			<-holderEntered
+
+			ran := false
+			acquired, err := TryWithCitySessionLifecycleLock(cityPath, "gc-42", func() error {
+				ran = true
+				return nil
+			})
+			if err != nil || acquired || ran {
+				t.Fatalf("busy TryWithCitySessionLifecycleLock = acquired %v ran %v err %v, want false/false/nil", acquired, ran, err)
+			}
+
+			close(holderRelease)
+			if err := <-holderDone; err != nil {
+				t.Fatalf("holder: %v", err)
+			}
+			sentinel := errors.New("callback failure")
+			acquired, err = TryWithCitySessionLifecycleLock(cityPath, "gc-42", func() error { return sentinel })
+			if !acquired || !errors.Is(err, sentinel) {
+				t.Fatalf("post-release TryWithCitySessionLifecycleLock = acquired %v err %v, want true/sentinel", acquired, err)
+			}
+			acquired, err = TryWithCitySessionLifecycleLock(cityPath, "gc-42", func() error { return nil })
+			if !acquired || err != nil {
+				t.Fatalf("post-callback-error TryWithCitySessionLifecycleLock = acquired %v err %v, want true/nil", acquired, err)
+			}
+		})
+	}
+}
+
+func TestLifecycleLockContextProofIsRevokedAfterCallback(t *testing.T) {
+	cityPath := t.TempDir()
+	const id = "gc-42"
+	var retained context.Context
+	if err := WithCitySessionLifecycleLockContext(context.Background(), cityPath, id, func(lockedCtx context.Context) error {
+		retained = lockedCtx
+		if !citySessionLifecycleLockHeld(lockedCtx, cityPath, id) {
+			t.Fatal("callback context did not prove the held lifecycle lock")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("WithCitySessionLifecycleLockContext: %v", err)
+	}
+	if citySessionLifecycleLockHeld(retained, cityPath, id) {
+		t.Fatal("retained callback context still proves lifecycle ownership after unlock")
+	}
+
+	holderEntered := make(chan struct{})
+	holderRelease := make(chan struct{})
+	holderDone := make(chan error, 1)
+	go func() {
+		holderDone <- WithCitySessionLifecycleLock(cityPath, id, func() error {
+			close(holderEntered)
+			<-holderRelease
+			return nil
+		})
+	}()
+	<-holderEntered
+
+	mutationRan := make(chan struct{})
+	mutationDone := make(chan error, 1)
+	m := &Manager{cityPath: cityPath}
+	go func() {
+		mutationDone <- m.withLifecycleMutationLockContext(retained, id, func() error {
+			close(mutationRan)
+			return nil
+		})
+	}()
+	select {
+	case <-mutationRan:
+		t.Fatal("retained context bypassed a later lifecycle lock owner")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(holderRelease)
+	if err := <-holderDone; err != nil {
+		t.Fatalf("holder: %v", err)
+	}
+	if err := <-mutationDone; err != nil {
+		t.Fatalf("mutation: %v", err)
+	}
+	<-mutationRan
+}
+
+func TestLifecycleLockContextAcquisitionHonorsCancellation(t *testing.T) {
+	cityPath := t.TempDir()
+	const id = "gc-bounded"
+	holderEntered := make(chan struct{})
+	holderRelease := make(chan struct{})
+	holderDone := make(chan error, 1)
+	go func() {
+		holderDone <- WithCitySessionLifecycleLock(cityPath, id, func() error {
+			close(holderEntered)
+			<-holderRelease
+			return nil
+		})
+	}()
+	<-holderEntered
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	ran := false
+	err := WithCitySessionLifecycleLockContext(ctx, cityPath, id, func(context.Context) error {
+		ran = true
+		return nil
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want context deadline exceeded", err)
+	}
+	if ran {
+		t.Fatal("callback ran without acquiring the held lifecycle lock")
+	}
+
+	close(holderRelease)
+	if err := <-holderDone; err != nil {
+		t.Fatalf("holder: %v", err)
 	}
 }

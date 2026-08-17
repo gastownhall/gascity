@@ -186,15 +186,31 @@ func activeSegmentReader(f *os.File, size int64) (*segmentReader, error) {
 // segment into out, advancing *maxSeq. It returns done=true at end of segment.
 // Malformed and oversized-but-unparseable lines are skipped, never fatal.
 func (sr *segmentReader) readInto(filter Filter, maxSeq *uint64, out *[]Event, batch int) (bool, error) {
+	return sr.readIntoContext(context.Background(), filter, maxSeq, out, batch)
+}
+
+func (sr *segmentReader) readIntoContext(ctx context.Context, filter Filter, maxSeq *uint64, out *[]Event, batch int) (bool, error) {
 	added := 0
+	read := 0
 	for added < batch {
+		if read%256 == 0 {
+			if err := ctx.Err(); err != nil {
+				return false, err
+			}
+		}
 		line, err := sr.br.ReadBytes('\n')
 		if len(line) > 0 {
+			read++
 			var e Event
-			if json.Unmarshal(trimLine(line), &e) == nil && matchesFilter(e, filter) && e.Seq > *maxSeq {
-				*maxSeq = e.Seq
-				*out = append(*out, e)
-				added++
+			if json.Unmarshal(trimLine(line), &e) == nil {
+				if filter.BeforeSeq > 0 && e.Seq >= filter.BeforeSeq {
+					return true, nil
+				}
+				if matchesFilter(e, filter) && e.Seq > *maxSeq {
+					*maxSeq = e.Seq
+					*out = append(*out, e)
+					added++
+				}
 			}
 		}
 		if err != nil {

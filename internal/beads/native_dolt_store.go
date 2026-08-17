@@ -2066,6 +2066,12 @@ func beadFromNativeIssue(issue *beadslib.Issue) (Bead, error) {
 		Ephemeral:   issue.Ephemeral,
 		NoHistory:   issue.NoHistory,
 		DeferUntil:  cloneTimePtr(issue.DeferUntil),
+		// RowVersion is bd's opaque row_lock equality token. It changes on
+		// lifecycle/ownership and generic issue updates, so it is a conservative
+		// Revision authority for Gas City callers. It is deliberately NOT a
+		// ClaimFence: row_lock also changes on non-ownership updates and has no
+		// monotonic ownership semantics.
+		Revision: issue.RowVersion,
 	}
 	for _, dep := range issue.Dependencies {
 		if dep == nil {

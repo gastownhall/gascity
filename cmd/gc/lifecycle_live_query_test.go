@@ -358,13 +358,7 @@ func TestReassignWorkAssignedToRetiredSessionBead_IncludesEphemeralWork(t *testi
 		t.Fatalf("Create(work): %v", err)
 	}
 
-	reassignWorkAssignedToRetiredSessionBead(
-		"", nil, store,
-		nil,
-		beads.Bead{ID: "retired-session"},
-		"replacement-session",
-		io.Discard,
-	)
+	reassignWorkAssignedToRetiredSessionBead(store, nil, beads.Bead{ID: "retired-session"}, "replacement-session", io.Discard)
 
 	got, err := store.Get(work.ID)
 	if err != nil {

@@ -2687,6 +2687,161 @@ func TestTryDeliverQueuedNudgesByPollerSkipsStaleSessionGeneration(t *testing.T)
 	}
 }
 
+func TestTryDeliverQueuedNudgesByPollerDeadLettersStaleFenceWhileSessionBusy(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	now := time.Now().Add(-time.Minute)
+	store := openNudgeBeadStore(dir)
+
+	stale := newQueuedNudgeWithOptions("worker", "old fenced reminder", "session", now, queuedNudgeOptions{
+		ID:                "n-stale",
+		SessionID:         "gc-1",
+		ContinuationEpoch: "1",
+	})
+	fresh := newQueuedNudgeWithOptions("worker", "current reminder", "session", now, queuedNudgeOptions{
+		ID:                "n-fresh",
+		SessionID:         "gc-1",
+		ContinuationEpoch: "2",
+	})
+	for _, item := range []queuedNudge{stale, fresh} {
+		if err := enqueueQueuedNudgeWithStore(dir, beads.NudgesStore{Store: store.Store}, item); err != nil {
+			t.Fatalf("enqueueQueuedNudgeWithStore(%s): %v", item.ID, err)
+		}
+	}
+
+	fake := runtime.NewFake()
+	recentActivity := time.Now()
+	target := nudgeTarget{
+		cityPath:          dir,
+		agent:             config.Agent{Name: "worker"},
+		sessionID:         "gc-1",
+		continuationEpoch: "2",
+		resolved:          &config.ResolvedProvider{Name: "codex"},
+		sessionName:       "sess-worker",
+	}
+	obs := worker.LiveObservation{Running: true, LastActivity: &recentActivity}
+
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store.Store, store.Store, fake, 3*time.Second, obs)
+	if err != nil {
+		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
+	}
+	if delivered {
+		t.Fatal("delivered = true, want busy session to defer current-fence delivery")
+	}
+	if calls := fake.CountCalls("Nudge", target.sessionName); calls != 0 {
+		t.Fatalf("Nudge calls = %d, want 0 while session is busy", calls)
+	}
+
+	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 1 || pending[0].ID != fresh.ID {
+		t.Fatalf("pending = %+v, want only current-fence item %s", pending, fresh.ID)
+	}
+	if len(inFlight) != 0 {
+		t.Fatalf("inFlight = %+v, want none", inFlight)
+	}
+	if len(dead) != 1 || dead[0].ID != stale.ID {
+		t.Fatalf("dead = %+v, want stale fence item %s", dead, stale.ID)
+	}
+	if dead[0].Attempts != 1 || dead[0].LastAttemptAt.IsZero() {
+		t.Fatalf("dead stale item attempts/last_attempt_at = %d/%v, want 1/non-zero", dead[0].Attempts, dead[0].LastAttemptAt)
+	}
+	if pending[0].Attempts != 0 || !pending[0].LastAttemptAt.IsZero() || !pending[0].ClaimedAt.IsZero() {
+		t.Fatalf("current-fence item was touched while busy: %+v", pending[0])
+	}
+}
+
+func TestTryDeliverQueuedNudgesByPollerQueuesBusyTmuxOpenCodeImmediately(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	item := newQueuedNudge("worker", "review the queued request", time.Now().Add(-time.Minute))
+	if err := enqueueQueuedNudge(dir, item); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	recentActivity := time.Now()
+	target := nudgeTarget{
+		cityPath:    dir,
+		agent:       config.Agent{Name: "worker"},
+		transport:   config.SessionTransportTmux,
+		resolved:    &config.ResolvedProvider{Name: "deepseek-v4-flash-max", BuiltinAncestor: "opencode"},
+		sessionName: "sess-worker",
+	}
+	obs := worker.LiveObservation{Running: true, LastActivity: &recentActivity}
+
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store.Store, store.Store, fake, 3*time.Second, obs)
+	if err != nil {
+		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
+	}
+	if !delivered {
+		t.Fatal("delivered = false, want OpenCode's cooperative input queue to accept the nudge while active")
+	}
+	if calls := fake.CountCalls("WaitForIdle", target.sessionName); calls != 0 {
+		t.Fatalf("WaitForIdle calls = %d, want 0 for tmux OpenCode", calls)
+	}
+	if calls := fake.CountCalls("NudgeNow", target.sessionName); calls != 1 {
+		t.Fatalf("NudgeNow calls = %d, want 1 for tmux OpenCode", calls)
+	}
+	if calls := fake.CountCalls("Nudge", target.sessionName); calls != 0 {
+		t.Fatalf("Nudge calls = %d, want immediate path without provider idle wait", calls)
+	}
+
+	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 0 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("pending/inFlight/dead = %d/%d/%d, want 0/0/0", len(pending), len(inFlight), len(dead))
+	}
+}
+
+func TestQueuedNudgeDeliveryForTargetScopesImmediateToTmuxOpenCode(t *testing.T) {
+	tests := []struct {
+		name   string
+		target nudgeTarget
+		want   worker.NudgeDelivery
+	}{
+		{
+			name: "wrapped opencode over tmux",
+			target: nudgeTarget{
+				transport: config.SessionTransportTmux,
+				resolved:  &config.ResolvedProvider{Name: "deepseek-v4-flash-max", BuiltinAncestor: "opencode"},
+			},
+			want: worker.NudgeDeliveryImmediate,
+		},
+		{
+			name: "opencode over acp",
+			target: nudgeTarget{
+				transport: config.SessionTransportACP,
+				resolved:  &config.ResolvedProvider{Name: "opencode"},
+			},
+			want: worker.NudgeDeliveryDefault,
+		},
+		{
+			name: "claude over tmux",
+			target: nudgeTarget{
+				transport: config.SessionTransportTmux,
+				resolved:  &config.ResolvedProvider{Name: "claude"},
+			},
+			want: worker.NudgeDeliveryDefault,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := queuedNudgeDeliveryForTarget(tt.target); got != tt.want {
+				t.Fatalf("queuedNudgeDeliveryForTarget() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestTryDeliverQueuedNudgesByPollerLeavesACPDeliveryUnwrapped(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
@@ -2873,8 +3028,26 @@ func TestTryDeliverQueuedNudgesByPollerDeliversDespiteStaleFenceBeadMarkFailure(
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
+	// Model a real continuation before launch: the durable epoch is authoritative
+	// input to Start, and the live provider must expose the same fence coordinate.
+	if err := store.SetMetadata(info.ID, "continuation_epoch", "2"); err != nil {
+		t.Fatalf("SetMetadata(continuation_epoch): %v", err)
+	}
 	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
 		t.Fatalf("Start: %v", err)
+	}
+	if err := fake.SetMeta(info.SessionName, "GC_CONTINUATION_EPOCH", "2"); err != nil {
+		t.Fatalf("SetMeta(GC_CONTINUATION_EPOCH): %v", err)
+	}
+	persisted, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get session after continuation setup: %v", err)
+	}
+	if got := persisted.Metadata["continuation_epoch"]; got != "2" {
+		t.Fatalf("durable continuation_epoch = %q, want 2", got)
+	}
+	if got, err := fake.GetMeta(info.SessionName, "GC_CONTINUATION_EPOCH"); err != nil || got != "2" {
+		t.Fatalf("live GC_CONTINUATION_EPOCH = %q, err=%v, want 2/nil", got, err)
 	}
 	idleSince := time.Now().Add(-10 * time.Second)
 	fake.Activity = map[string]time.Time{info.SessionName: idleSince}

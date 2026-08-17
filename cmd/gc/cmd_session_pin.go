@@ -123,7 +123,23 @@ func cmdSessionSetPin(args []string, pinned bool, stdout, stderr io.Writer, json
 		value = "true"
 	}
 	if !materializedForPin {
-		if err := sessionFrontDoor(sessStore).SetMarker(id, "pin_awake", value); err != nil {
+		err := session.WithCitySessionLifecycleLock(cityPath, id, func() error {
+			return session.WithSessionMutationLock(id, func() error {
+				sessFront := sessionFrontDoor(sessStore)
+				live, err := sessFront.GetLive(id)
+				if err != nil {
+					return err
+				}
+				if session.HasExecutionClaimNudgeStalled(live) {
+					return fmt.Errorf("%w: %s", session.ErrExecutionStalledRecoveryPending, id)
+				}
+				if live.Closed {
+					return fmt.Errorf("session %s is closed", id)
+				}
+				return sessFront.SetMarker(id, "pin_awake", value)
+			})
+		})
+		if err != nil {
 			fmt.Fprintf(stderr, "gc session %s: updating metadata: %v\n", action, err) //nolint:errcheck
 			return 1
 		}

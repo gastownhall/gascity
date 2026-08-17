@@ -75,6 +75,10 @@ func cityURL(state State, path string) string {
 // Server so handler dispatch runs against that exact instance.
 func newTestCityHandlerWith(t *testing.T, state State, srv *Server) http.Handler {
 	t.Helper()
+	// Handlers may launch bounded work against state-owned temporary paths.
+	// Register this after the fixture's TempDir cleanup so background tasks are
+	// joined before those paths are removed.
+	t.Cleanup(srv.waitForBackground)
 	sm := NewSupervisorMux(&stateCityResolver{state: state}, nil, false, "test", "", time.Now())
 	sm.cacheMu.Lock()
 	sm.cache[state.CityName()] = cachedCityServer{state: state, srv: srv}

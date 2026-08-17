@@ -1,11 +1,13 @@
 package api
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
+	"text/template"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
@@ -364,10 +366,10 @@ func (s *Server) buildSessionResume(info session.Info) (string, runtime.Config, 
 		return "", runtime.Config{}, err
 	}
 	resolvedInfo := info
-	if command, err := s.resolvedSessionRuntimeCommand(resolved, transport, info.Command, metadata); err == nil {
+	if command, err := s.resolvedSessionRuntimeCommandForInfo(info, workDir, resolved, transport, info.Command, metadata); err == nil {
 		resolvedInfo.Command = command
 	} else {
-		resolvedInfo.Command = fallbackSessionRuntimeCommand(resolved, transport, info.Command, info.Provider)
+		resolvedInfo.Command = s.fallbackSessionRuntimeCommandForInfo(info, workDir, resolved, transport, info.Command, info.Provider, metadata)
 	}
 	resumeCommand := resolved.ResumeCommand
 	if overrides, err := session.ParseTemplateOverrides(metadata); err == nil {
@@ -385,6 +387,20 @@ func (s *Server) buildSessionResume(info session.Info) (string, runtime.Config, 
 }
 
 func (s *Server) resolvedSessionRuntimeCommand(resolved *config.ResolvedProvider, transport, storedCommand string, metadata map[string]string) (string, error) {
+	return s.resolvedSessionRuntimeCommandWithContext(resolved, transport, storedCommand, metadata, nil)
+}
+
+func (s *Server) resolvedSessionRuntimeCommandForInfo(info session.Info, workDir string, resolved *config.ResolvedProvider, transport, storedCommand string, metadata map[string]string) (string, error) {
+	return s.resolvedSessionRuntimeCommandWithContext(
+		resolved,
+		transport,
+		storedCommand,
+		metadata,
+		s.sessionRuntimeTemplateContext(info, workDir, metadata),
+	)
+}
+
+func (s *Server) resolvedSessionRuntimeCommandWithContext(resolved *config.ResolvedProvider, transport, storedCommand string, metadata map[string]string, setupCtx *sessionRuntimeTemplateContext) (string, error) {
 	configuredCommand := configuredSessionRuntimeCommand(resolved, transport)
 	if configuredCommand == "" {
 		if command := strings.TrimSpace(storedCommand); command != "" {
@@ -400,11 +416,86 @@ func (s *Server) resolvedSessionRuntimeCommand(resolved *config.ResolvedProvider
 	if err != nil {
 		return "", fmt.Errorf("building provider launch command: %w", err)
 	}
-	desiredCommand := firstNonEmptyString(launchCommand.Command, configuredCommand, resolved.Name)
+	desiredCommand := expandSessionRuntimeCommand(
+		firstNonEmptyString(launchCommand.Command, configuredCommand, resolved.Name),
+		setupCtx,
+	)
 	if command := strings.TrimSpace(storedCommand); shouldPreserveStoredRuntimeCommandForTransport(command, desiredCommand, transport, optionOverrides) {
 		return command, nil
 	}
 	return desiredCommand, nil
+}
+
+// sessionRuntimeTemplateContext reconstructs the create-time start-command
+// template surface for an existing agent-backed session. The API wake path
+// bypasses cmd/gc's resolveTemplate, so it builds the shared path identity via
+// workdir.PathContextForQualifiedName and adds the session-only fields that
+// start_command receives on creation.
+type sessionRuntimeTemplateContext struct {
+	Session   string
+	Agent     string
+	AgentBase string
+	Rig       string
+	RigRoot   string
+	CityRoot  string
+	CityName  string
+	WorkDir   string
+	ConfigDir string
+}
+
+func (s *Server) sessionRuntimeTemplateContext(info session.Info, workDir string, metadata map[string]string) *sessionRuntimeTemplateContext {
+	cfg := s.state.Config()
+	if cfg == nil {
+		return nil
+	}
+	agentCfg, found := resolveSessionTemplateAgent(cfg, info.Template)
+	if !found || !session.UseAgentTemplateForProviderResolution(
+		legacySessionKind(metadata),
+		metadata,
+		info.Provider,
+		agentCfg.Provider,
+		true,
+	) {
+		return nil
+	}
+	qualifiedName := firstNonEmptyString(info.AgentName, info.Template, agentCfg.QualifiedName())
+	pathCtx := workdirutil.PathContextForQualifiedName(
+		s.state.CityPath(),
+		workdirutil.CityName(s.state.CityPath(), cfg),
+		qualifiedName,
+		agentCfg,
+		cfg.Rigs,
+	)
+	configDir := s.state.CityPath()
+	if agentCfg.SourceDir != "" {
+		configDir = agentCfg.SourceDir
+	}
+	return &sessionRuntimeTemplateContext{
+		Session:   info.SessionName,
+		Agent:     qualifiedName,
+		AgentBase: pathCtx.AgentBase,
+		Rig:       pathCtx.Rig,
+		RigRoot:   pathCtx.RigRoot,
+		CityRoot:  pathCtx.CityRoot,
+		CityName:  pathCtx.CityName,
+		WorkDir:   firstNonEmptyString(workDir, info.WorkDir, s.state.CityPath()),
+		ConfigDir: configDir,
+	}
+}
+
+func expandSessionRuntimeCommand(command string, setupCtx *sessionRuntimeTemplateContext) string {
+	if setupCtx == nil || !strings.Contains(command, "{{") {
+		return command
+	}
+	tmpl, err := template.New("start_command").Parse(command)
+	if err != nil {
+		return command
+	}
+	var expanded bytes.Buffer
+	if err := tmpl.Execute(&expanded, setupCtx); err != nil {
+		return command
+	}
+	return expanded.String()
 }
 
 func configuredSessionRuntimeCommand(resolved *config.ResolvedProvider, transport string) string {
@@ -423,6 +514,13 @@ func configuredSessionRuntimeCommand(resolved *config.ResolvedProvider, transpor
 func fallbackSessionRuntimeCommand(resolved *config.ResolvedProvider, transport, storedCommand, fallbackProvider string) string {
 	resolvedCommand := configuredSessionRuntimeCommand(resolved, transport)
 	return firstNonEmptyString(storedCommand, resolvedCommand, fallbackProvider, resolved.Name)
+}
+
+func (s *Server) fallbackSessionRuntimeCommandForInfo(info session.Info, workDir string, resolved *config.ResolvedProvider, transport, storedCommand, fallbackProvider string, metadata map[string]string) string {
+	return expandSessionRuntimeCommand(
+		fallbackSessionRuntimeCommand(resolved, transport, storedCommand, fallbackProvider),
+		s.sessionRuntimeTemplateContext(info, workDir, metadata),
+	)
 }
 
 func shouldPreserveStoredRuntimeCommand(storedCommand, resolvedCommand string) bool {
@@ -488,9 +586,9 @@ func (s *Server) resolveWorkerSessionRuntimeWithMetadata(info session.Info, _ st
 	if err != nil {
 		return nil, err
 	}
-	command, err := s.resolvedSessionRuntimeCommand(resolved, transport, info.Command, metadata)
+	command, err := s.resolvedSessionRuntimeCommandForInfo(info, workDir, resolved, transport, info.Command, metadata)
 	if err != nil {
-		command = fallbackSessionRuntimeCommand(resolved, transport, info.Command, info.Provider)
+		command = s.fallbackSessionRuntimeCommandForInfo(info, workDir, resolved, transport, info.Command, info.Provider, metadata)
 	}
 	resumeCommand := firstNonEmptyString(resolved.ResumeCommand, info.ResumeCommand)
 	if overrides, err := session.ParseTemplateOverrides(metadata); err == nil {
@@ -579,13 +677,13 @@ func (s *Server) startedConfigHashProvesACPTransport(
 	if startedHash == "" {
 		return false
 	}
-	acpCommand, err := s.resolvedSessionRuntimeCommand(resolved, "acp", info.Command, metadata)
+	acpCommand, err := s.resolvedSessionRuntimeCommandForInfo(info, workDir, resolved, "acp", info.Command, metadata)
 	if err != nil {
-		acpCommand = fallbackSessionRuntimeCommand(resolved, "acp", info.Command, info.Provider)
+		acpCommand = s.fallbackSessionRuntimeCommandForInfo(info, workDir, resolved, "acp", info.Command, info.Provider, metadata)
 	}
-	defaultCommand, err := s.resolvedSessionRuntimeCommand(resolved, "", info.Command, metadata)
+	defaultCommand, err := s.resolvedSessionRuntimeCommandForInfo(info, workDir, resolved, "", info.Command, metadata)
 	if err != nil {
-		defaultCommand = fallbackSessionRuntimeCommand(resolved, "", info.Command, info.Provider)
+		defaultCommand = s.fallbackSessionRuntimeCommandForInfo(info, workDir, resolved, "", info.Command, info.Provider, metadata)
 	}
 	mcpServers, err := s.sessionMCPServers(
 		info.Template,

@@ -210,13 +210,15 @@ func (c startCandidate) logicalTemplate(cfg *config.City) string {
 }
 
 type preparedStart struct {
-	candidate     startCandidate
-	cfg           runtime.Config
-	coreHash      string
-	coreBreakdown runtime.BreakdownV1
-	liveHash      string
-	provisionHash string
-	launchHash    string
+	candidate          startCandidate
+	cityPath           string
+	predecessorRuntime runtimeIdentityFence
+	cfg                runtime.Config
+	coreHash           string
+	coreBreakdown      runtime.BreakdownV1
+	liveHash           string
+	provisionHash      string
+	launchHash         string
 	// promptDelivered reports whether THIS incarnation actually delivers the
 	// rendered startup prompt (S19 confirmation signal 1). It is the pure
 	// promptDelivery decision AND-ed with the fresh-launch condition, i.e. the
@@ -230,6 +232,33 @@ type preparedStart struct {
 	promptHash      string
 }
 
+// runtimeIdentityFence is the exact persisted incarnation that a destructive
+// runtime cleanup is allowed to stop. A bead ID alone is not sufficient: a
+// later incarnation deliberately reuses the same ID and runtime name.
+type runtimeIdentityFence struct {
+	sessionID         string
+	sessionName       string
+	instanceToken     string
+	generation        string
+	continuationEpoch string
+}
+
+func runtimeIdentityFenceFromInfo(info sessionpkg.Info) runtimeIdentityFence {
+	sessionName := strings.TrimSpace(info.SessionNameMetadata)
+	if sessionName == "" {
+		sessionName = strings.TrimSpace(info.SessionName)
+	}
+	return runtimeIdentityFence{
+		sessionID:         strings.TrimSpace(info.ID),
+		sessionName:       sessionName,
+		instanceToken:     strings.TrimSpace(info.InstanceToken),
+		generation:        strings.TrimSpace(info.Generation),
+		continuationEpoch: strings.TrimSpace(info.ContinuationEpoch),
+	}
+}
+
+var errStartLifecycleLeaseLost = errors.New("session start lifecycle lease lost")
+
 type startResult struct {
 	prepared        preparedStart
 	err             error
@@ -238,6 +267,8 @@ type startResult struct {
 	finished        time.Time
 	rollbackPending bool
 	rateLimitScreen bool
+	leaseLost       bool
+	startedFresh    bool // this attempt spawned the runtime and owns exact cleanup
 	// phases captures sub-phase wall-clock so the lifecycle log can pinpoint
 	// where a slow start spent its time. See gc-67o for context.
 	phases startPhaseTimings
@@ -835,40 +866,59 @@ func prepareStartCandidateForCity(
 	workDirResolver taskWorkDirResolver,
 ) (*preparedStart, error) {
 	if id := strings.TrimSpace(candidate.info.ID); id != "" && store != nil {
-		if err := sessionpkg.WithSessionMutationLock(id, func() error {
-			sessFront := sessionFrontDoor(store)
-			// GENUINE store re-Get (WI-6 R4): the whole bead is reloaded through the
-			// session front door AS Info (template_overrides can change out of band,
-			// e.g. bd update; TestPrepareStartCandidateReloadsOverridesBeforeWake), so
-			// the append-captured twin cannot be folded forward — it must be re-read.
-			// GetPersistedResponse returns the Info directly (no raw-bead codec call in
-			// this file): it wraps a load failure with "loading session %q" and rejects
-			// a bead that is no longer a session (IsSessionBeadOrRepairable), the
-			// documented front-door-Get delta from the former raw store.Get. This is
-			// the SANCTIONED cross-goroutine freshness re-read, not a per-patch re-Get.
-			current, _, err := sessFront.GetPersistedResponse(id)
-			if err != nil {
+		var prepared *preparedStart
+		var predecessorRuntime runtimeIdentityFence
+		if err := sessionpkg.WithCitySessionLifecycleLock(cityPath, id, func() error {
+			return sessionpkg.WithSessionMutationLock(id, func() error {
+				sessFront := sessionFrontDoor(store)
+				// GENUINE store re-Get (WI-6 R4): the whole bead is reloaded through the
+				// session front door AS Info (template_overrides can change out of band,
+				// e.g. bd update; TestPrepareStartCandidateReloadsOverridesBeforeWake), so
+				// the append-captured twin cannot be folded forward — it must be re-read.
+				// GetLive returns the authoritative Info directly, bypassing a clean
+				// active-row cache: it wraps a load failure with "loading session %q" and rejects
+				// a bead that is no longer a session (IsSessionBeadOrRepairable), the
+				// documented front-door-Get delta from the former raw store.Get. This is
+				// the SANCTIONED cross-goroutine freshness re-read, not a per-patch re-Get.
+				current, err := sessFront.GetLive(id)
+				if err != nil {
+					return err
+				}
+				if sessionpkg.HasExecutionClaimNudgeStalled(current) {
+					return fmt.Errorf("%w: %s", sessionpkg.ErrExecutionStalledRecoveryPending, id)
+				}
+				if !startLifecycleLeaseStillCurrentInfo(candidate.info, current) {
+					return fmt.Errorf("%w: session %s changed before pre-wake commit", errStartLifecycleLeaseLost, id)
+				}
+				predecessorRuntime = runtimeIdentityFenceFromInfo(current)
+				// preWakeCommit persists its PreWakePatch through the front door and returns
+				// the batch; folding it onto the freshly re-read Info keeps the twin
+				// byte-coherent with the persisted state without a second Get. It shares
+				// preWakeCommit's error contract: a failed re-read already returned above,
+				// so the twin is never folded from a stale/rejected bead.
+				_, _, fold, err := preWakeCommit(current, sessFront, clk)
+				if err != nil {
+					return err
+				}
+				candidate.info = current.ApplyPatch(fold)
+				candidate = refreshConfiguredNamedStartCandidate(candidate, cityPath, cityName, cfg, sp, store, clk, stderr)
+				prepared, _, err = buildPreparedStartWithWorkDirResolver(candidate, cityPath, cfg, store, workDirResolver)
+				if prepared != nil {
+					prepared.cityPath = cityPath
+					prepared.predecessorRuntime = predecessorRuntime
+				}
 				return err
-			}
-			// preWakeCommit persists its PreWakePatch through the front door and returns
-			// the batch; folding it onto the freshly re-read Info keeps the twin
-			// byte-coherent with the persisted state without a second Get. It shares
-			// preWakeCommit's error contract: a failed re-read already returned above,
-			// so the twin is never folded from a stale/rejected bead.
-			_, _, fold, err := preWakeCommit(current, sessFront, clk)
-			if err != nil {
-				return err
-			}
-			candidate.info = current.ApplyPatch(fold)
-			return nil
+			})
 		}); err != nil {
 			return nil, err
 		}
-	} else if _, _, fold, err := preWakeCommit(candidate.info, sessionFrontDoor(store), clk); err != nil {
-		return nil, err
-	} else {
-		candidate.info = candidate.info.ApplyPatch(fold)
+		return prepared, nil
 	}
+	_, _, fold, err := preWakeCommit(candidate.info, sessionFrontDoor(store), clk)
+	if err != nil {
+		return nil, err
+	}
+	candidate.info = candidate.info.ApplyPatch(fold)
 	candidate = refreshConfiguredNamedStartCandidate(candidate, cityPath, cityName, cfg, sp, store, clk, stderr)
 	// buildPreparedStart folds its own post-append mutations (stale-resume clears,
 	// session_key / instance_token mints) onto candidate.info at their write sites, so
@@ -878,6 +928,9 @@ func prepareStartCandidateForCity(
 	// partial-Info second return is only load-bearing for recoverRunningPendingCreate's
 	// abort residue; here the prepared already carries it, so it is discarded.
 	prepared, _, err := buildPreparedStartWithWorkDirResolver(candidate, cityPath, cfg, store, workDirResolver)
+	if prepared != nil {
+		prepared.cityPath = cityPath
+	}
 	return prepared, err
 }
 
@@ -1416,6 +1469,7 @@ func runPreparedStartCandidate(
 	var phases startPhaseTimings
 	startCallBegin := time.Now()
 	startedFresh, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg, &phases, sessionStaleKeyDetectionWaiter)
+	result.startedFresh = startedFresh
 	startCtxErr := startCtx.Err()
 	// Split start_call into provider.Start and the ErrStateSync recovery
 	// branch (gc-9ha). The recovery branch hits the worker observation
@@ -1456,6 +1510,17 @@ func runPreparedStartCandidate(
 		phases.PostStartObserve = time.Since(postStartBegin)
 	}
 	finished := time.Now()
+	if errors.Is(err, errStartLifecycleLeaseLost) {
+		return startResult{
+			prepared:     item,
+			outcome:      TraceOutcomeDeferred,
+			started:      started,
+			finished:     finished,
+			leaseLost:    true,
+			startedFresh: startedFresh,
+			phases:       phases,
+		}
+	}
 	rollbackPending := err != nil && shouldRollbackPendingCreateInfo(item.candidate.info)
 	rateLimitScreen := err != nil && startupRateLimitScreenDetected(item, cityPath, sp, store, cfg)
 	if err != nil && rollbackPending && !rateLimitScreen && runningSessionMatchesPendingCreateInfo(item.candidate.info, item.candidate.name(), sp) {
@@ -1466,6 +1531,7 @@ func runPreparedStartCandidate(
 			started:         started,
 			finished:        finished,
 			rollbackPending: false,
+			startedFresh:    startedFresh,
 			phases:          phases,
 		}
 	}
@@ -1515,6 +1581,7 @@ func runPreparedStartCandidate(
 		finished:        finished,
 		rollbackPending: rollbackPending,
 		rateLimitScreen: rateLimitScreen,
+		startedFresh:    startedFresh,
 		phases:          phases,
 	}
 }
@@ -1647,7 +1714,6 @@ func commitAsyncStartResultWithContext(
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err := fmt.Errorf("panic during async start commit: %v\n%s", recovered, debug.Stack())
-			clearPendingStartInFlightLease(result.prepared.candidate.info.ID, sessFront, stderr)
 			fmt.Fprintf(stderr, "session reconciler: committing async start %s: %s\n", name, formatLifecycleError(err)) //nolint:errcheck
 			// Pass the pre-refresh phases so commit-time panic diagnostics
 			// still show start_call / post_start_observe timings; commit_refresh
@@ -1656,7 +1722,44 @@ func commitAsyncStartResultWithContext(
 			committed = false
 		}
 	}()
+	if result.leaseLost {
+		return false
+	}
+	id := strings.TrimSpace(result.prepared.candidate.info.ID)
+	if store == nil || id == "" {
+		return commitAsyncStartResultLocked(ctx, result, sp, store, sessFront, clk, rec, wave, stdout, stderr, trace)
+	}
+	cityPath := result.prepared.cityPath
+	if strings.TrimSpace(cityPath) == "" {
+		cityPath = strings.TrimSpace(result.prepared.cfg.Env["GC_CITY_PATH"])
+	}
+	err := sessionpkg.WithCitySessionLifecycleLock(cityPath, id, func() error {
+		return sessionpkg.WithSessionMutationLock(id, func() error {
+			committed = commitAsyncStartResultLocked(ctx, result, sp, store, sessFront, clk, rec, wave, stdout, stderr, trace)
+			return nil
+		})
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "session reconciler: locking async start commit %s: %v\n", name, err) //nolint:errcheck
+		return false
+	}
+	return committed
+}
 
+func commitAsyncStartResultLocked(
+	ctx context.Context,
+	result startResult,
+	sp runtime.Provider,
+	store beads.Store,
+	sessFront *sessionpkg.Store,
+	clk clock.Clock,
+	rec events.Recorder,
+	wave int,
+	stdout, stderr io.Writer,
+	trace *sessionReconcilerTraceCycle,
+) bool {
+	name := result.prepared.candidate.name()
+	template := result.prepared.candidate.tp.TemplateName
 	refreshBegin := time.Now()
 	refreshed, ok, cleanupRuntime, releaseInFlight := refreshAsyncStartResult(result, store, stderr)
 	commitRefreshElapsed := time.Since(refreshBegin)
@@ -1681,6 +1784,13 @@ func commitAsyncStartResultWithContext(
 		logLifecycleOutcome(stderr, "start", wave, name, template, outcome, result.started, time.Now(), nil, refreshed.phases)
 		return false
 	}
+	if sessionpkg.HasExecutionClaimNudgeStalled(refreshed.prepared.candidate.info) {
+		if refreshed.startedFresh {
+			stopStaleAsyncStartRuntime(refreshed, sp, stderr)
+		}
+		logLifecycleOutcome(stderr, "start", wave, name, template, "execution_stalled_superseded", refreshed.started, time.Now(), sessionpkg.ErrExecutionStalledRecoveryPending, refreshed.phases)
+		return false
+	}
 	if refreshed.err != nil && refreshed.rollbackPending && runningSessionMatchesPendingCreateInfo(refreshed.prepared.candidate.info, refreshed.prepared.candidate.name(), sp) {
 		refreshed.err = nil
 		refreshed.outcome = TraceOutcomeSessionExistsConverged
@@ -1688,7 +1798,7 @@ func commitAsyncStartResultWithContext(
 	}
 	if ctx != nil && ctx.Err() != nil {
 		if refreshed.err != nil && refreshed.rollbackPending {
-			return commitStartResultTraced(refreshed, sessFront, clk, rec, wave, stdout, stderr, trace)
+			return commitStartResultTracedLocked(refreshed, sessFront, clk, rec, wave, stdout, stderr, trace)
 		}
 		if refreshed.err == nil && shouldRollbackPendingCreateInfo(refreshed.prepared.candidate.info) {
 			stopStaleAsyncStartRuntime(refreshed, sp, stderr)
@@ -1697,10 +1807,7 @@ func commitAsyncStartResultWithContext(
 		logLifecycleOutcome(stderr, "start", wave, name, template, "context_canceled", refreshed.started, time.Now(), ctx.Err(), refreshed.phases)
 		return false
 	}
-	if sp != nil && refreshed.err == nil && refreshed.outcome != TraceOutcomeSessionInitializing {
-		_ = clearReconcilerDrainAckMetadata(sp, refreshed.prepared.candidate.name())
-	}
-	return commitStartResultTraced(refreshed, sessFront, clk, rec, wave, stdout, stderr, trace)
+	return commitStartResultTracedLocked(refreshed, sessFront, clk, rec, wave, stdout, stderr, trace)
 }
 
 // refreshAsyncStartResult re-reads the session bead just before commit so the async
@@ -1710,12 +1817,12 @@ func commitAsyncStartResultWithContext(
 // NOT a forbidden per-patch re-Get: it fires once per async start commit, on the
 // budget-limited start path, never once per reconciler metadata write.
 //
-// The read goes through the session front door via GetPersistedResponse, which
+// The read goes through the session front door via GetLive, which
 // returns the current Info directly (no raw-bead codec call in this file). The
 // staleness gates (asyncStartPreparedCommandStaleInfo, asyncStartSessionStillCurrentInfo)
 // and the commit-time decision reads (which project off candidate.info downstream)
 // all read the SAME re-read Info, so a cross-process writer (bd CLI, API sleep/close)
-// cannot split the gate view from the commit view. GetPersistedResponse applies the
+// cannot split the gate view from the commit view. GetLive applies the
 // front-door session gate: a mid-start bead that lost BOTH its type AND its
 // gc:session label (IsSessionBeadOrRepairable == false) takes the refresh-failed
 // path (lease released, retry next tick) instead of committing — a documented,
@@ -1728,7 +1835,7 @@ func refreshAsyncStartResult(result startResult, store beads.Store, stderr io.Wr
 	if store == nil || strings.TrimSpace(preparedInfo.ID) == "" {
 		return result, true, false, false
 	}
-	currentInfo, _, err := sessionFrontDoor(store).GetPersistedResponse(preparedInfo.ID)
+	currentInfo, err := sessionFrontDoor(store).GetLive(preparedInfo.ID)
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: refreshing async start %s: %v\n", result.prepared.candidate.name(), err) //nolint:errcheck
 		return result, false, false, true
@@ -1737,9 +1844,9 @@ func refreshAsyncStartResult(result startResult, store beads.Store, stderr io.Wr
 		fmt.Fprintf(stderr, "session reconciler: ignoring stale async start result for %s: desired command changed during startup\n", result.prepared.candidate.name()) //nolint:errcheck
 		return result, false, true, true
 	}
-	if !asyncStartSessionStillCurrentInfo(preparedInfo, currentInfo) {
+	if !startLifecycleLeaseStillCurrentInfo(preparedInfo, currentInfo) {
 		fmt.Fprintf(stderr, "session reconciler: ignoring stale async start result for %s\n", result.prepared.candidate.name()) //nolint:errcheck
-		return result, false, asyncStartStaleRuntimeCleanupAllowedInfo(preparedInfo, currentInfo), false
+		return result, false, true, false
 	}
 	result.prepared.candidate.info = currentInfo
 	return result, true, false, false
@@ -1773,7 +1880,7 @@ func stopStaleAsyncStartRuntime(result startResult, sp runtime.Provider, stderr 
 		return
 	}
 	name := result.prepared.candidate.name()
-	if !runningSessionMatchesPendingCreateInfo(result.prepared.candidate.info, name, sp) {
+	if !runtimeMatchesIdentityFence(runtimeIdentityFenceFromInfo(result.prepared.candidate.info), name, sp) {
 		return
 	}
 	if err := sp.Stop(name); err != nil && !runtime.IsSessionGone(err) {
@@ -1789,6 +1896,20 @@ func stopStaleAsyncStartRuntime(result startResult, sp runtime.Provider, stderr 
 // cleared from under us discards (#2073). See PendingCreateLease.CommitVerdict.
 func asyncStartSessionStillCurrentInfo(prepared, current sessionpkg.Info) bool {
 	return sessionpkg.LeaseFromInfo(prepared).CommitVerdict(sessionpkg.LeaseFromInfo(current)) == sessionpkg.LeaseCommit
+}
+
+// startLifecycleLeaseStillCurrentInfo extends the historical pending-create
+// lease with the rest of the durable runtime identity. A session name or
+// continuation change means the prepared command belongs to a different
+// lifecycle version even when an instance token was preserved.
+func startLifecycleLeaseStillCurrentInfo(prepared, current sessionpkg.Info) bool {
+	if !asyncStartSessionStillCurrentInfo(prepared, current) {
+		return false
+	}
+	if strings.TrimSpace(prepared.SessionNameMetadata) != strings.TrimSpace(current.SessionNameMetadata) {
+		return false
+	}
+	return strings.TrimSpace(prepared.ContinuationEpoch) == strings.TrimSpace(current.ContinuationEpoch)
 }
 
 // asyncStartStaleRuntimeCleanupAllowedInfo reports whether the stale-runtime
@@ -1829,6 +1950,39 @@ func startPreparedStartCandidate(
 	phases *startPhaseTimings,
 	staleKeyDetectionWaiter sessionpkg.StaleKeyDetectionWaiter,
 ) (bool, error) {
+	id := strings.TrimSpace(item.candidate.info.ID)
+	if store != nil && id != "" {
+		var startedFresh bool
+		err := sessionpkg.WithCitySessionLifecycleLockContext(ctx, cityPath, id, func(lockedCtx context.Context) error {
+			current, err := sessionFrontDoor(store).GetLive(id)
+			if err != nil {
+				return err
+			}
+			if sessionpkg.HasExecutionClaimNudgeStalled(current) {
+				return fmt.Errorf("%w: %s", sessionpkg.ErrExecutionStalledRecoveryPending, id)
+			}
+			if asyncStartPreparedCommandStaleInfo(item, current) || !startLifecycleLeaseStillCurrentInfo(item.candidate.info, current) {
+				return fmt.Errorf("%w: session %s changed before provider start", errStartLifecycleLeaseLost, id)
+			}
+			item.candidate.info = current
+			startedFresh, err = startPreparedStartCandidateLocked(lockedCtx, item, cityPath, store, sp, cfg, phases, staleKeyDetectionWaiter)
+			return err
+		})
+		return startedFresh, err
+	}
+	return startPreparedStartCandidateLocked(ctx, item, cityPath, store, sp, cfg, phases, staleKeyDetectionWaiter)
+}
+
+func startPreparedStartCandidateLocked(
+	ctx context.Context,
+	item preparedStart,
+	cityPath string,
+	store beads.Store,
+	sp runtime.Provider,
+	cfg *config.City,
+	phases *startPhaseTimings,
+	staleKeyDetectionWaiter sessionpkg.StaleKeyDetectionWaiter,
+) (bool, error) {
 	name := item.candidate.name()
 	if sp != nil {
 		running, alive := observeRuntimeProviderLiveness(sp, name, item.cfg.ProcessNames)
@@ -1850,6 +2004,10 @@ func startPreparedStartCandidate(
 			// create back just recreates the bead next tick against the same
 			// zombie — so recycle it: stop the stale session and fall
 			// through to a fresh start.
+			if !runtimeMatchesIdentityFence(runtimeIdentityFenceFromInfo(item.candidate.info), name, sp) &&
+				!runtimeMatchesIdentityFence(item.predecessorRuntime, name, sp) {
+				return false, fmt.Errorf("%w: refusing to recycle unfenced zombie runtime %q", runtime.ErrSessionExists, name)
+			}
 			recycleBegin := time.Now()
 			stopErr := sp.Stop(name)
 			if phases != nil {
@@ -1881,6 +2039,41 @@ func startPreparedStartCandidate(
 		return true, err
 	}
 	return true, handle.StartResolved(ctx, item.cfg.Command, item.cfg)
+}
+
+func runtimeMatchesIdentityFence(expected runtimeIdentityFence, name string, sp runtime.Provider) bool {
+	name = strings.TrimSpace(name)
+	if sp == nil || expected.sessionID == "" || expected.instanceToken == "" || name == "" ||
+		(expected.sessionName != "" && expected.sessionName != name) {
+		return false
+	}
+	liveID, err := sp.GetMeta(name, "GC_SESSION_ID")
+	if err != nil || strings.TrimSpace(liveID) != expected.sessionID {
+		return false
+	}
+	liveToken, err := sp.GetMeta(name, "GC_INSTANCE_TOKEN")
+	if err != nil || strings.TrimSpace(liveToken) != expected.instanceToken {
+		return false
+	}
+	// Runtime epochs predate instance tokens in some providers. A provider read
+	// error fails closed; an empty legacy value cannot weaken the mandatory exact
+	// token match above, while a present value must match.
+	if expected.generation != "" {
+		liveGeneration, generationErr := sp.GetMeta(name, "GC_RUNTIME_EPOCH")
+		if generationErr != nil {
+			return false
+		}
+		if strings.TrimSpace(liveGeneration) != "" && strings.TrimSpace(liveGeneration) != expected.generation {
+			return false
+		}
+	}
+	if expected.continuationEpoch != "" {
+		liveContinuation, continuationErr := sp.GetMeta(name, "GC_CONTINUATION_EPOCH")
+		if continuationErr != nil || strings.TrimSpace(liveContinuation) != expected.continuationEpoch {
+			return false
+		}
+	}
+	return true
 }
 
 func runtimeObservationLive(obs worker.LiveObservation) bool {
@@ -2059,6 +2252,71 @@ func commitStartResultTraced(
 	stdout, stderr io.Writer,
 	trace *sessionReconcilerTraceCycle,
 ) bool {
+	return commitStartResultTracedWithProvider(result, nil, sessFront, clk, rec, wave, stdout, stderr, trace)
+}
+
+func commitStartResultTracedWithProvider(
+	result startResult,
+	sp runtime.Provider,
+	sessFront *sessionpkg.Store,
+	clk clock.Clock,
+	rec events.Recorder,
+	wave int,
+	stdout, stderr io.Writer,
+	trace *sessionReconcilerTraceCycle,
+) bool {
+	if result.leaseLost {
+		return false
+	}
+	info := result.prepared.candidate.info
+	if sessFront == nil || strings.TrimSpace(info.ID) == "" {
+		return commitStartResultTracedLocked(result, sessFront, clk, rec, wave, stdout, stderr, trace)
+	}
+	committed := false
+	cityPath := result.prepared.cityPath
+	if strings.TrimSpace(cityPath) == "" {
+		cityPath = strings.TrimSpace(result.prepared.cfg.Env["GC_CITY_PATH"])
+	}
+	err := sessionpkg.WithCitySessionLifecycleLock(cityPath, info.ID, func() error {
+		return sessionpkg.WithSessionMutationLock(info.ID, func() error {
+			current, err := sessFront.GetLive(info.ID)
+			if err != nil {
+				return err
+			}
+			if sessionpkg.HasExecutionClaimNudgeStalled(current) {
+				if result.startedFresh {
+					stopStaleAsyncStartRuntime(result, sp, stderr)
+				}
+				return nil
+			}
+			if asyncStartPreparedCommandStaleInfo(result.prepared, current) || !startLifecycleLeaseStillCurrentInfo(info, current) {
+				return nil
+			}
+			result.prepared.candidate.info = current
+			committed = commitStartResultTracedLocked(result, sessFront, clk, rec, wave, stdout, stderr, trace)
+			return nil
+		})
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "session reconciler: refreshing start commit %s: %v\n", result.prepared.candidate.name(), err) //nolint:errcheck
+		return false
+	}
+	return committed
+}
+
+// commitStartResultTracedLocked applies one start result while its caller owns
+// the session lifecycle lock and in-process mutation lock. Refresh, validation,
+// durable mutation, and wake event emission therefore share one ordering point
+// with suspend and close.
+func commitStartResultTracedLocked(
+	result startResult,
+	sessFront *sessionpkg.Store,
+	clk clock.Clock,
+	rec events.Recorder,
+	wave int,
+	stdout, stderr io.Writer,
+	trace *sessionReconcilerTraceCycle,
+) bool {
 	// info is the refreshed typed twin (async: refreshAsyncStartResult's currentInfo;
 	// sync: prepareStartCandidateForCity's coherence refresh) — the sole commit-time
 	// read surface now that the raw candidate.session pointer is gone (WI-6 R4). Its
@@ -2142,6 +2400,7 @@ func commitStartResultTraced(
 			metadata[sessionpkg.MCPIdentityMetadataKey] = storedMCPIdentity
 		}
 	}
+	metadata = sessionpkg.BindProviderSessionKeyReceiptAuthority(info, metadata)
 	if err := sessFront.ApplyPatch(info.ID, metadata); err != nil {
 		clearPendingStartInFlightLease(info.ID, sessFront, stderr)
 		fmt.Fprintf(stderr, "session reconciler: storing hashes for %s: %v\n", name, err) //nolint:errcheck
@@ -2161,6 +2420,9 @@ func commitStartResultTraced(
 		// the session stuck in "creating" where it gets orphan-drained.
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "metadata_batch_failed", result.started, result.finished, err, result.phases)
 		return false
+	}
+	if _, _, receiptErr := sessionpkg.ConsumeProviderSessionKeyReceipts(sessFront.Store().Store, info.ID); receiptErr != nil {
+		fmt.Fprintf(stderr, "session reconciler: consuming provider SessionStart receipt for %s: %v\n", name, receiptErr) //nolint:errcheck
 	}
 	// Announce the wake only after the metadata batch has durably landed.
 	// Emitting earlier lets a subscriber observe a session.woke for a start
@@ -2297,6 +2559,33 @@ func recoverRunningPendingCreate(
 	store beads.Store,
 	clk clock.Clock,
 	trace *sessionReconcilerTraceCycle,
+	cityPaths ...string,
+) (bool, map[string]string) {
+	cityPath := ""
+	if len(cityPaths) > 0 {
+		cityPath = cityPaths[0]
+	}
+	var (
+		recovered bool
+		metadata  map[string]string
+	)
+	applied, _, err := tryWithCurrentSessionMutation(cityPath, sessionFrontDoor(store), info, false, func(live sessionpkg.Info) error {
+		recovered, metadata = recoverRunningPendingCreateLocked(live, tp, cfg, store, clk, trace)
+		return nil
+	})
+	if err != nil || !applied {
+		return false, nil
+	}
+	return recovered, metadata
+}
+
+func recoverRunningPendingCreateLocked(
+	info sessionpkg.Info,
+	tp TemplateParams,
+	cfg *config.City,
+	store beads.Store,
+	clk clock.Clock,
+	trace *sessionReconcilerTraceCycle,
 ) (bool, map[string]string) {
 	if strings.TrimSpace(info.ID) == "" || store == nil {
 		return false, nil
@@ -2374,6 +2663,7 @@ func recoverRunningPendingCreate(
 		PrimedAt:            primedAt,
 		PromptHash:          promptHash,
 	})
+	metadata = sessionpkg.BindProviderSessionKeyReceiptAuthority(info, metadata)
 	if err := sessionFrontDoor(store).ApplyPatch(info.ID, metadata); err != nil {
 		if trace != nil {
 			trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateCommitFailed, TraceOutcomeFailed, tp.TemplateName, tp.SessionName, traceRecordPayload{
@@ -2384,6 +2674,7 @@ func recoverRunningPendingCreate(
 		// mint) are on prepared.candidate.info — fold the residue from there.
 		return false, pendingCreateResidueFold(prepared.candidate.info)
 	}
+	_, _, _ = sessionpkg.ConsumeProviderSessionKeyReceipts(store, info.ID)
 	// buildPreparedStart mints instance_token onto the twin + store (SetMarker) when
 	// it was empty — a residue outside CommitStartedPatch. Carry it in the returned
 	// fold batch so the caller's snapshot reflects it: the Phase-2 drain scan reads
@@ -2868,10 +3159,7 @@ func executePlannedStartsTraced(
 					wakeCount++
 					continue
 				}
-				if result.err == nil && result.outcome != TraceOutcomeSessionInitializing {
-					_ = clearReconcilerDrainAckMetadata(sp, result.prepared.candidate.name())
-				}
-				if commitStartResultTraced(result, sessFront, clk, rec, wave, stdout, stderr, trace) {
+				if commitStartResultTracedWithProvider(result, sp, sessFront, clk, rec, wave, stdout, stderr, trace) {
 					wakeCount++
 				}
 			}

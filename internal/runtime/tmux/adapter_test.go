@@ -55,6 +55,31 @@ func TestTmuxConformance(t *testing.T) {
 	})
 }
 
+func TestProvider_ListRunningColdBootAbsentNamedSocket(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	cfg := DefaultConfig()
+	cfg.SocketName = fmt.Sprintf("gctest-cold-list-%d-%d", os.Getpid(), time.Now().UnixNano())
+	socketPath := namedSocketPath(cfg.SocketName)
+	if err := os.Remove(socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("remove prior socket %q: %v", socketPath, err)
+	}
+
+	p := NewProviderWithConfig(cfg)
+	names, err := p.ListRunning("")
+	if err != nil {
+		t.Fatalf("ListRunning on cold boot: %v", err)
+	}
+	if len(names) != 0 {
+		t.Fatalf("ListRunning names = %v, want empty", names)
+	}
+	if _, err := os.Lstat(socketPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("ListRunning must not create a tmux server; lstat(%q) = %v", socketPath, err)
+	}
+}
+
 func TestProvider_StartStopIsRunning(t *testing.T) {
 	if !hasTmux() {
 		t.Skip("tmux not installed")

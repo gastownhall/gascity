@@ -475,7 +475,7 @@ func (s *Server) handleSessionWake(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := session.NewStore(store).WakeSession(id, time.Now().UTC(), session.WakeOpts{})
+	res, err := session.NewStore(store).WakeSession(id, time.Now().UTC(), session.WakeOpts{CityPath: s.state.CityPath()})
 	if err != nil {
 		if errors.Is(err, session.ErrNotSessionBead) {
 			writeError(w, http.StatusBadRequest, "invalid", id+" is not a session")

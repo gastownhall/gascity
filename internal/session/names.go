@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -11,7 +12,9 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -50,9 +53,16 @@ type sessionIdentifierReservationLockEntry struct {
 	refs int
 }
 
+type sessionAttachLeaseEntry struct {
+	mu   sync.RWMutex
+	refs int
+}
+
 var (
 	sessionIdentifierReservationLocksMu sync.Mutex
 	sessionIdentifierReservationLocks   = map[string]*sessionIdentifierReservationLockEntry{}
+	sessionAttachLeasesMu               sync.Mutex
+	sessionAttachLeases                 = map[string]*sessionAttachLeaseEntry{}
 )
 
 // IsSessionNameSyntaxValid reports whether a persisted session_name uses the
@@ -282,6 +292,260 @@ func WithCitySessionIdentifierLocks(cityPath string, identifiers []string, fn fu
 		})
 	}
 	return lockRecursive(0)
+}
+
+// WithCitySessionLifecycleLock serializes destructive lifecycle finalization
+// with explicit operator mutations for one durable session bead. With a city
+// path it uses the same cross-process flock substrate as identifier reservation;
+// without one it falls back to the process-local keyed mutex used by unit tests
+// and unmanaged callers. Every production wake/suspend path that can race the
+// managed reconciler must participate in this lock before reading or writing
+// lifecycle state.
+//
+// The session bead ID, rather than its mutable alias/runtime name, is the lock
+// identity. It remains stable across wake, suspend, provider restart, and alias
+// changes, so all lifecycle participants converge on one lock file.
+func WithCitySessionLifecycleLock(cityPath, sessionID string, fn func() error) error {
+	return WithCitySessionIdentifierLocks(cityPath, []string{sessionID}, fn)
+}
+
+type citySessionLifecycleLockContextKey struct{}
+
+type citySessionLifecycleLockContextValue struct {
+	cityPath  string
+	sessionID string
+	active    atomic.Bool
+}
+
+// WithCitySessionLifecycleLockContext is the context-aware form of
+// [WithCitySessionLifecycleLock]. The callback context proves ownership of the
+// exact city/session lock to lower session and worker layers, allowing a
+// multi-layer lifecycle transaction to call Manager operations without trying
+// to acquire the non-reentrant flock a second time.
+//
+// The proof is intentionally unexported and exact: callers cannot manufacture
+// one, and a context for another city or session never suppresses acquisition.
+func WithCitySessionLifecycleLockContext(ctx context.Context, cityPath, sessionID string, fn func(context.Context) error) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		acquired, err := TryWithCitySessionLifecycleLock(cityPath, sessionID, func() error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			proof := &citySessionLifecycleLockContextValue{
+				cityPath:  strings.TrimSpace(cityPath),
+				sessionID: strings.TrimSpace(sessionID),
+			}
+			proof.active.Store(true)
+			defer proof.active.Store(false)
+			owned := context.WithValue(ctx, citySessionLifecycleLockContextKey{}, proof)
+			return fn(owned)
+		})
+		if err != nil {
+			return err
+		}
+		if acquired {
+			return nil
+		}
+		timer := time.NewTimer(10 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func citySessionLifecycleLockHeld(ctx context.Context, cityPath, sessionID string) bool {
+	if ctx == nil {
+		return false
+	}
+	owned, ok := ctx.Value(citySessionLifecycleLockContextKey{}).(*citySessionLifecycleLockContextValue)
+	return ok && owned != nil && owned.active.Load() && owned.cityPath == strings.TrimSpace(cityPath) && owned.sessionID == strings.TrimSpace(sessionID)
+}
+
+// TryWithCitySessionLifecycleLock is the non-blocking finalizer form of
+// WithCitySessionLifecycleLock. A false acquired result is not an error: a
+// wake/start/suspend currently owns the session, so the reconciler should fail
+// closed and retry on a later tick instead of stalling the whole city loop.
+func TryWithCitySessionLifecycleLock(cityPath, sessionID string, fn func() error) (acquired bool, err error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return true, fn()
+	}
+	if strings.TrimSpace(cityPath) == "" {
+		lock, ok := tryAcquireSessionIdentifierReservationLock(sessionID)
+		if !ok {
+			return false, nil
+		}
+		defer releaseSessionIdentifierReservationLock(sessionID, lock)
+		return true, fn()
+	}
+	lockPath := filepath.Join(citylayout.SessionNameLocksDir(cityPath), sessionIdentifierLockFileName(sessionID)+".lock")
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
+		return false, fmt.Errorf("creating session lifecycle lock dir: %w", err)
+	}
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return false, fmt.Errorf("opening session lifecycle lock: %w", err)
+	}
+	defer f.Close() //nolint:errcheck // best-effort cleanup
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return false, nil
+		}
+		return false, fmt.Errorf("locking session lifecycle %q: %w", sessionID, err)
+	}
+	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN) //nolint:errcheck // best-effort unlock
+	return true, fn()
+}
+
+// TryAcquireCitySessionAttachLease acquires the crash-recoverable lease that
+// spans a blocking provider Attach call. Attach takes this lease while it still
+// owns the short lifecycle lock, then releases the lifecycle lock before
+// entering the terminal. Destructive/latch paths take the lifecycle lock first
+// and try this same lease; failure means an attach already won and they defer.
+//
+// The production lease is an OS flock, so process death releases it without a
+// durable owner record or timeout guess. The empty-city test/unmanaged fallback
+// uses the existing process-local keyed mutex under a disjoint key.
+func TryAcquireCitySessionAttachLease(cityPath, sessionID string) (release func(), acquired bool, err error) {
+	return tryAcquireCitySessionAttachLease(cityPath, sessionID, false)
+}
+
+// TryAcquireCitySessionAttachExclusiveLease is the destructive-side probe.
+// It conflicts with every shared Attach lease and is held only for the short
+// quiet/identity check plus stop/close mutation.
+func TryAcquireCitySessionAttachExclusiveLease(cityPath, sessionID string) (release func(), acquired bool, err error) {
+	return tryAcquireCitySessionAttachLease(cityPath, sessionID, true)
+}
+
+func tryAcquireCitySessionAttachLease(cityPath, sessionID string, exclusive bool) (release func(), acquired bool, err error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return func() {}, true, nil
+	}
+	leaseID := "attach-lease:" + sessionID
+	if strings.TrimSpace(cityPath) == "" {
+		sessionAttachLeasesMu.Lock()
+		lock := sessionAttachLeases[leaseID]
+		if lock == nil {
+			lock = &sessionAttachLeaseEntry{}
+			sessionAttachLeases[leaseID] = lock
+		}
+		lock.refs++
+		sessionAttachLeasesMu.Unlock()
+		ok := false
+		if exclusive {
+			ok = lock.mu.TryLock()
+		} else {
+			ok = lock.mu.TryRLock()
+		}
+		if !ok {
+			sessionAttachLeasesMu.Lock()
+			lock.refs--
+			if lock.refs == 0 {
+				delete(sessionAttachLeases, leaseID)
+			}
+			sessionAttachLeasesMu.Unlock()
+			return nil, false, nil
+		}
+		var once sync.Once
+		return func() {
+			once.Do(func() {
+				if exclusive {
+					lock.mu.Unlock()
+				} else {
+					lock.mu.RUnlock()
+				}
+				sessionAttachLeasesMu.Lock()
+				lock.refs--
+				if lock.refs == 0 {
+					delete(sessionAttachLeases, leaseID)
+				}
+				sessionAttachLeasesMu.Unlock()
+			})
+		}, true, nil
+	}
+	lockPath := filepath.Join(citylayout.SessionNameLocksDir(cityPath), sessionIdentifierLockFileName(leaseID)+".lock")
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
+		return nil, false, fmt.Errorf("creating session attach lease dir: %w", err)
+	}
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, false, fmt.Errorf("opening session attach lease: %w", err)
+	}
+	mode := syscall.LOCK_SH | syscall.LOCK_NB
+	if exclusive {
+		mode = syscall.LOCK_EX | syscall.LOCK_NB
+	}
+	if err := syscall.Flock(int(f.Fd()), mode); err != nil {
+		_ = f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("locking session attach lease %q: %w", sessionID, err)
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+			_ = f.Close()
+		})
+	}, true, nil
+}
+
+// TryWithCitySessionDestructiveLock is the background stop/close/latch
+// ordering boundary: lifecycle exclusive first, then a nonblocking exclusive
+// attach lease. attachBusy reports that an interactive Attach owns a shared
+// lease; callers must defer without provider or durable lifecycle mutation.
+func TryWithCitySessionDestructiveLock(cityPath, sessionID string, fn func() error) (acquired, attachBusy bool, err error) {
+	acquired, err = TryWithCitySessionLifecycleLock(cityPath, sessionID, func() error {
+		release, leaseAcquired, leaseErr := TryAcquireCitySessionAttachExclusiveLease(cityPath, sessionID)
+		if leaseErr != nil {
+			return leaseErr
+		}
+		if !leaseAcquired {
+			attachBusy = true
+			return nil
+		}
+		defer release()
+		if fn == nil {
+			return nil
+		}
+		return fn()
+	})
+	return acquired, attachBusy, err
+}
+
+func tryAcquireSessionIdentifierReservationLock(identifier string) (*sessionIdentifierReservationLockEntry, bool) {
+	sessionIdentifierReservationLocksMu.Lock()
+	lock := sessionIdentifierReservationLocks[identifier]
+	if lock == nil {
+		lock = &sessionIdentifierReservationLockEntry{}
+		sessionIdentifierReservationLocks[identifier] = lock
+	}
+	lock.refs++
+	sessionIdentifierReservationLocksMu.Unlock()
+
+	if lock.mu.TryLock() {
+		return lock, true
+	}
+	sessionIdentifierReservationLocksMu.Lock()
+	lock.refs--
+	if lock.refs == 0 {
+		delete(sessionIdentifierReservationLocks, identifier)
+	}
+	sessionIdentifierReservationLocksMu.Unlock()
+	return nil, false
 }
 
 func withCitySessionIdentifierLock(cityPath, identifier string, fn func() error) error {

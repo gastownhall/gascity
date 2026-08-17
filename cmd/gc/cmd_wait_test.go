@@ -1796,7 +1796,7 @@ func TestDispatchReadyWaitNudges_EnqueuesDeterministicNudge(t *testing.T) {
 	}
 }
 
-func TestDispatchReadyWaitNudges_UsesOpenSessionSnapshotInsteadOfWorkerRunningCheck(t *testing.T) {
+func TestDispatchReadyWaitNudges_RevalidatesLiveSessionWithoutWorkerRunningCheck(t *testing.T) {
 	setWaitTestFileBeads(t)
 	dir := t.TempDir()
 	base := beads.NewMemStore()
@@ -1837,10 +1837,14 @@ func TestDispatchReadyWaitNudges_UsesOpenSessionSnapshotInsteadOfWorkerRunningCh
 	if err := dispatchReadyWaitNudges(dir, store, sp, time.Now().UTC()); err != nil {
 		t.Fatalf("dispatchReadyWaitNudges: %v", err)
 	}
+	sawLiveSessionRead := false
 	for _, id := range store.getIDs {
 		if id == sessionBead.ID {
-			t.Fatalf("dispatch used Get for session %s instead of the open-session snapshot; getIDs=%v", sessionBead.ID, store.getIDs)
+			sawLiveSessionRead = true
 		}
+	}
+	if !sawLiveSessionRead {
+		t.Fatalf("dispatch did not revalidate session %s at the enqueue boundary; getIDs=%v", sessionBead.ID, store.getIDs)
 	}
 	for _, call := range sp.Calls {
 		switch call.Method {
