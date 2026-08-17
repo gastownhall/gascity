@@ -617,13 +617,22 @@ func waitForSupervisorCity(cityPath string, wantRunning bool, timeout time.Durat
 		case !known && supervisorAliveHook() == 0:
 			return fmt.Errorf("supervisor stopped before city became ready")
 		}
-		if stdout != nil && status != "" && status != lastStatus {
-			fmt.Fprintf(stdout, "  %s\n", statusDisplayText(status)) //nolint:errcheck // best-effort stdout
+		if status != "" && status != lastStatus {
 			lastStatus = status
+			if wantRunning {
+				deadline = time.Now().Add(timeout)
+			}
+			if stdout != nil {
+				fmt.Fprintf(stdout, "  %s\n", statusDisplayText(status)) //nolint:errcheck // best-effort stdout
+			}
 		}
 		if time.Now().After(deadline) {
 			if wantRunning {
-				return fmt.Errorf("city did not become ready under supervisor within %s (increase [daemon].start_ready_timeout or [session].startup_timeout for cities with many or slow-starting sessions)", timeout)
+				msg := fmt.Sprintf("city did not become ready under supervisor within %s", timeout)
+				if lastStatus != "" {
+					msg += fmt.Sprintf("; last status: %s", lastStatus)
+				}
+				return fmt.Errorf("%s (increase [daemon].start_ready_timeout or [session].startup_timeout for cities with many or slow-starting sessions)", msg)
 			}
 			return fmt.Errorf("city did not stop under supervisor")
 		}
@@ -657,6 +666,13 @@ func supervisorCityError(cityPath string) string {
 
 // statusDisplayText maps an init status string to a human-readable display line.
 func statusDisplayText(status string) string {
+	if strings.HasPrefix(status, "running_pool_on_boot:") {
+		detail := strings.TrimPrefix(status, "running_pool_on_boot:")
+		parts := strings.SplitN(detail, ":", 2)
+		if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
+			return fmt.Sprintf("running_pool_on_boot %s (%s)...", parts[0], parts[1])
+		}
+	}
 	switch status {
 	case "loading_config":
 		return "Loading configuration..."

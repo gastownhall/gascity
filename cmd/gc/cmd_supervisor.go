@@ -2277,7 +2277,19 @@ func startOneCity(
 
 	// Run pool on_boot hooks (same as runController does).
 	if err := runPostPrepareStep("running_pool_on_boot", func() error {
-		runPoolOnBoot(cfg, path, shellRunHook, stderr)
+		runPoolOnBootWithProgress(cfg, path, shellRunHook, stderr, func(current, total int, agent string) {
+			cr.BatchUpdate(func(
+				_ map[string]*managedCity,
+				initStatus map[string]cityInitProgress,
+				_ map[string]*initFailRecord,
+				_ map[string]*panicRecord,
+			) {
+				initStatus[path] = cityInitProgress{
+					name:   cityName,
+					status: fmt.Sprintf("running_pool_on_boot:%d/%d:%s", current, total, agent),
+				}
+			})
+		})
 		return nil
 	}); err != nil {
 		// Same as the controller-state branch above: the runtime is built,

@@ -260,6 +260,80 @@ func TestRegisterCityWithSupervisorTreatsReloadTimeoutAsAsyncStart(t *testing.T)
 	}
 }
 
+func TestWaitForSupervisorCityExtendsDeadlineOnStartupProgress(t *testing.T) {
+	oldRunning := supervisorCityRunningHook
+	oldAlive := supervisorAliveHook
+	oldPoll := supervisorCityPollInterval
+	t.Cleanup(func() {
+		supervisorCityRunningHook = oldRunning
+		supervisorAliveHook = oldAlive
+		supervisorCityPollInterval = oldPoll
+	})
+
+	statuses := []struct {
+		running bool
+		status  string
+		known   bool
+	}{
+		{status: "opening_controller_state", known: true},
+		{status: "running_pool_on_boot:1/2:alpha", known: true},
+		{status: "running_pool_on_boot:2/2:beta", known: true},
+		{running: true, known: true},
+	}
+	calls := 0
+	supervisorCityRunningHook = func(string) (bool, string, bool) {
+		if calls >= len(statuses) {
+			last := statuses[len(statuses)-1]
+			return last.running, last.status, last.known
+		}
+		next := statuses[calls]
+		calls++
+		return next.running, next.status, next.known
+	}
+	supervisorAliveHook = func() int { return 4242 }
+	supervisorCityPollInterval = 10 * time.Millisecond
+
+	var stdout bytes.Buffer
+	err := waitForSupervisorCity(t.TempDir(), true, 15*time.Millisecond, &stdout)
+	if err != nil {
+		t.Fatalf("waitForSupervisorCity returned %v, want success after startup progress", err)
+	}
+	got := stdout.String()
+	for _, want := range []string{"opening_controller_state", "1/2", "alpha", "2/2", "beta"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stdout = %q, want progress detail %q", got, want)
+		}
+	}
+}
+
+func TestWaitForSupervisorCityTimeoutIncludesLastStatus(t *testing.T) {
+	oldRunning := supervisorCityRunningHook
+	oldAlive := supervisorAliveHook
+	oldPoll := supervisorCityPollInterval
+	t.Cleanup(func() {
+		supervisorCityRunningHook = oldRunning
+		supervisorAliveHook = oldAlive
+		supervisorCityPollInterval = oldPoll
+	})
+
+	supervisorCityRunningHook = func(string) (bool, string, bool) {
+		return false, "running_pool_on_boot:2/5:brief-shuffler", true
+	}
+	supervisorAliveHook = func() int { return 4242 }
+	supervisorCityPollInterval = time.Millisecond
+
+	err := waitForSupervisorCity(t.TempDir(), true, 5*time.Millisecond, io.Discard)
+	if err == nil {
+		t.Fatal("waitForSupervisorCity returned nil, want timeout")
+	}
+	got := err.Error()
+	for _, want := range []string{"last status", "running_pool_on_boot", "2/5", "brief-shuffler"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("error = %q, want %q", got, want)
+		}
+	}
+}
+
 func TestRegisterCityForAPIRegistersWithoutWaitingForReadiness(t *testing.T) {
 	t.Setenv("GC_HOME", t.TempDir())
 
