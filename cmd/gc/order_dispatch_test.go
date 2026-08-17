@@ -6474,6 +6474,26 @@ func (s labelFailListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	return s.Store.List(query)
 }
 
+// openWorkFailListStore is a store that cannot answer the OPEN-WORK question,
+// whichever read the gate uses to ask it.
+//
+// The gate used to ask with one `order-run:<scoped>` list per order and now asks
+// once per store, unlabeled, through the per-tick index (ga-l7jdg). A fixture
+// pinned to only one of those two spellings stops simulating the outage the
+// moment the other one is the live path, and the order under test quietly
+// dispatches instead of failing closed — which is what this store exists to
+// prevent.
+type openWorkFailListStore struct {
+	beads.Store
+}
+
+func (s openWorkFailListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if strings.HasPrefix(query.Label, "order-run:") || isOrderGateIndexQuery(query) {
+		return nil, fmt.Errorf("list failed for open work")
+	}
+	return s.Store.List(query)
+}
+
 // --- helpers ---
 
 func successfulExec(context.Context, string, string, []string) ([]byte, error) {
@@ -7222,10 +7242,7 @@ func TestOrderDispatchSkipsRigConditionWhenLegacyOpenWorkReadFails(t *testing.T)
 		t.Fatal(err)
 	}
 	rigStore := beads.NewMemStore()
-	legacyStore := labelFailListStore{
-		Store:     beads.NewMemStore(),
-		failLabel: "order-run:rig-digest:rig:frontend",
-	}
+	legacyStore := openWorkFailListStore{Store: beads.NewMemStore()}
 
 	stderr := &bytes.Buffer{}
 	m := &memoryOrderDispatcher{
@@ -7303,6 +7320,10 @@ func TestOrderDispatchConditionUsesScopedEnv(t *testing.T) {
 
 func TestOrderDispatchSkipsRigCooldownWhenLegacyOpenWorkReadFails(t *testing.T) {
 	rigStore := beads.NewMemStore()
+	// The LAST-RUN read is what fails here, so the fixture fails only the
+	// `order-run:` label query LastRunAcross issues. The gate's own index read
+	// succeeds — that is the point: this test pins the last-run path, and its
+	// sibling above pins the gate path.
 	legacyStore := labelFailListStore{
 		Store:     beads.NewMemStore(),
 		failLabel: "order-run:rig-digest:rig:frontend",
@@ -10177,7 +10198,7 @@ func TestSweepClosedOrderTrackingRetentionAcrossStoresBounded_ZeroLimitDeletesNo
 func TestLastRunFuncGatesFallbackOnIndexMiss(t *testing.T) {
 	store := beads.NewMemStore()
 	const storeKey = "city"
-	idx := newOrderDispatchTrackingIndex()
+	idx := newOrderDispatchTrackingIndex(io.Discard)
 	indexed := time.Now().Add(-time.Hour)
 	// Pre-seed the history index so lastRunForStore reads it without listing
 	// the store. The "\x00history" suffix matches historyEntriesForStore's key.

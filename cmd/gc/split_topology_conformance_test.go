@@ -134,9 +134,30 @@ func TestSplitTopologyConformance(t *testing.T) {
 // rigBeadStores(), which deletes the city entry. So the HQ work store was in
 // NEITHER arm and a city-scope routed WORK bead was invisible to controller-tick
 // demand: the "no work" fail-open this invariant is named for (D6, ga-88mxz).
-// Now the work store and the binding are DISTINCT ref'd legs, so the hqWork row
-// below is found on both topologies and the graph rows answer under the
-// binding's own "class:*" ref.
+// Now the work store and the binding are DISTINCT ref'd legs.
+//
+// # The PLANE split, and why the split row's answer changed (tick-S3, ga-l7jdg)
+//
+// The demand read is now Plan(RoutedWork) narrowed to the RUNTIME plane. On a
+// split city that is the binding alone, because the operator ruling is that
+// routed work lives only in the graph store — "gc ready work will never be in
+// the work db" (ga-4qdfn) — and reading the remote work ledger on the tick is a
+// misrouting bug by definition, not a cost to amortize (bd memory
+// gascity-runtime-infra-store-invariant). It was 8.1s of a 24.2s demand leg.
+//
+// So this row asserts the plane, not a single answer: on a LEGACY city every
+// routed bead is still found (the work store IS the infra store there, and the
+// D6 assertion is unchanged), while on a SPLIT city the work-leg rows are
+// deliberately absent and the invariant they used to carry moves to two other
+// places, both asserted below:
+//
+//   - the rows that ARE demandable must still be complete and correctly
+//     attributed — the same fail-open, restated for the plane; and
+//   - a routed bead left on a work leg must not vanish silently. The
+//     route-recovery convergence lane reads every leg on its own cadence and
+//     counts them as off_plane_routed, loudly, with `gc storage migrate` as the
+//     named remedy (route_recovery_lane.go). "No reader sees it" would be D6
+//     again; "the tick does not, and the hourly lane says so" is the plane.
 func conformanceReadyFederation(t *testing.T, e splitEnv) {
 	durable := mintDurableGraphBead(t, e, "routed ready control bead", e.qualified)
 	wisp := e.mintWispWith(t, wispOpts{title: "routed ready wisp", routedTo: e.qualified})
@@ -181,19 +202,37 @@ func conformanceReadyFederation(t *testing.T, e splitEnv) {
 	if e.split {
 		leadingRef = string(storeref.ClassRef(wholeSplitClasses()))
 	}
-	for _, tc := range []struct {
-		name    string
-		id      string
-		store   beads.Store
-		wantRef string
+	// The graph-class rows are demandable on BOTH topologies: they live on the
+	// leading leg, which is the binding on a split city and the work store on a
+	// legacy one. The work-leg rows are demandable only where the work store is
+	// also the infra store.
+	rows := []struct {
+		name      string
+		id        string
+		store     beads.Store
+		wantRef   string
+		onRuntime bool
 	}{
-		{"durable routed control bead", durable.ID, leadingOwner, leadingRef},
-		{"routed wisp", wisp.ID, leadingOwner, leadingRef},
-		{"routed rig work bead", rigWork.ID, e.rig, rigRef},
-	} {
+		{"durable routed control bead", durable.ID, leadingOwner, leadingRef, true},
+		{"routed wisp", wisp.ID, leadingOwner, leadingRef, true},
+		{"routed rig work bead", rigWork.ID, e.rig, rigRef, !e.split},
+		// The D6 subject. On a legacy city the HQ work store IS the infra store
+		// and this row is found exactly as before; on a split city it is a work
+		// ledger the runtime plane refuses, and the convergence lane owns it.
+		{"routed HQ work bead", hqWork.ID, e.work, cityRef, !e.split},
+	}
+	demandable := 0
+	for _, tc := range rows {
 		i := beadIndexOf(found, tc.id)
+		if !tc.onRuntime {
+			if i >= 0 {
+				t.Errorf("%s %s surfaced in the runtime-plane demand scan; on a split city a work-leg read is a misrouting bug by definition (bd memory gascity-runtime-infra-store-invariant)", tc.name, tc.id)
+			}
+			continue
+		}
+		demandable++
 		if i < 0 {
-			t.Errorf("%s %s is missing from the cross-store demand scan — this is the exact \"no work\" fail-open: a pool spawns for work its demand read cannot see, then drains", tc.name, tc.id)
+			t.Errorf("%s %s is missing from the demand scan — this is the exact \"no work\" fail-open: a pool spawns for work its demand read cannot see, then drains (D6/ga-88mxz)", tc.name, tc.id)
 			continue
 		}
 		if !sameStorePtr(stores[i], tc.store) {
@@ -203,19 +242,23 @@ func conformanceReadyFederation(t *testing.T, e splitEnv) {
 			t.Errorf("%s %s captured under store-ref %q, want %q", tc.name, tc.id, refs[i], tc.wantRef)
 		}
 	}
+	// Control: the plane narrowed something on a split city and nothing on a
+	// legacy one, so neither arm of the row above is vacuous.
+	switch {
+	case e.split && demandable == len(rows):
+		t.Fatal("the split topology demanded every leg's routed work; the runtime plane narrowed nothing and this row is pinning the pre-invariant behavior")
+	case !e.split && demandable != len(rows):
+		t.Fatalf("the legacy topology demanded %d of %d rows; there is no ledger to refuse when the work store IS the infra store", demandable, len(rows))
+	}
 
-	// The HQ work leg — the D6 subject, and the same answer on both topologies
-	// now that the city work store is a leg of its own rather than a store the
-	// binding stood in for.
-	hqIndex := beadIndexOf(found, hqWork.ID)
-	if hqIndex < 0 {
-		t.Fatalf("routed HQ work bead %s is missing from the demand scan. On a legacy city the HQ work store IS the leading store; on a split city it is the Plan(Census) work leg. Either way this is the \"no work\" fail-open: a pool spawns for work its demand read cannot see, then drains (D6/ga-88mxz, closed by S3)", hqWork.ID)
-	}
-	if !sameStorePtr(stores[hqIndex], e.work) {
-		t.Errorf("routed HQ work bead %s was captured under a store that does not hold it", hqWork.ID)
-	}
-	if refs[hqIndex] != cityRef {
-		t.Errorf("routed HQ work bead %s captured under store-ref %q, want %q", hqWork.ID, refs[hqIndex], cityRef)
+	// The work-leg rows must not vanish silently: the convergence lane reads
+	// every leg and counts them, which is what makes "the tick cannot see it"
+	// different from "nothing can".
+	if e.split {
+		report := newRouteRecoveryLane().backstopLeg(planeLeg{label: "city", store: e.work})
+		if report.offPlaneRouted == 0 {
+			t.Errorf("the convergence lane reported no off-plane routed work for %s, which the runtime plane just refused; a bead no reader counts is D6 with extra steps", hqWork.ID)
+		}
 	}
 }
 
