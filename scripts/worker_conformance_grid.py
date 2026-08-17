@@ -35,6 +35,7 @@ PROFILE_ORDER = [
     "kimi/tmux-cli",
     "opencode/tmux-cli",
     "mimocode/tmux-cli",
+    "zcode/tmux-cli",
     "pi/tmux-cli",
     "antigravity/tmux-cli",
 ]
