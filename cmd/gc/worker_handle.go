@@ -617,10 +617,7 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 		setupCtx := sessionSetupContextForAgent(cityPath, cfg.EffectiveCityName(), qualifiedName, agentCfg, cfg.Rigs)
 		setupCtx.Session = info.SessionName
 		setupCtx.WorkDir = workDir
-		setupCtx.ConfigDir = cityPath
-		if agentCfg.SourceDir != "" {
-			setupCtx.ConfigDir = agentCfg.SourceDir
-		}
+		setupCtx.ConfigDir = resolveConfigDir(cityPath, agentCfg.SourceDir)
 		sessionLive = expandSessionSetup(agentCfg.SessionLive, setupCtx)
 	}
 	// Project the resolved hint subset through the single StartupHints →
