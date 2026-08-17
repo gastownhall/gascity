@@ -204,6 +204,48 @@ func TestExtractCodexTailUsageModelMissing(t *testing.T) {
 	}
 }
 
+// TestExtractCodexTailUsageModelBeyondTailWindow pins the long-session fix: the
+// model is announced once in a turn_context near the top, then the session runs
+// long enough that the turn_context scrolls past the tail window before the
+// recent token_count events. The model is constant across a codex rollout, so a
+// bounded head scan must still recover it — otherwise mc's long-lived
+// dispatcher/wisp sessions mint model facts with an empty model that the pricing
+// lookup treats as unpriced (the "burn $/hr reads 0" gap).
+func TestExtractCodexTailUsageModelBeyondTailWindow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-2026-04-16T21-49-29-longsession.jsonl")
+	lines := []string{
+		codexSessionMetaLine("2026-04-16T21:49:30.734Z", "/work/dir"),
+		codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-5.6-terra"),
+	}
+	// Filler > tailChunkSize so the turn_context is outside the tail window that
+	// readTail scans; these response_item lines carry no usage and are skipped.
+	filler := strings.Repeat("x", 2048)
+	for i := 0; i < (tailChunkSize/2048)+8; i++ {
+		lines = append(lines, fmt.Sprintf(
+			`{"timestamp":"2026-04-16T21:50:%02d.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":%q}}`,
+			i%60, filler))
+	}
+	// Recent invocations sit in the tail window with no nearby turn_context.
+	lines = append(lines,
+		codexTokenCountLine("2026-04-16T22:10:38.304Z", 15917, 15562, 10624, 355, 166),
+		codexTokenCountLine("2026-04-16T22:10:45.100Z", 34114, 17888, 15232, 309, 28),
+	)
+	writeCodexUsageLines(t, path, lines)
+
+	usages, err := ExtractCodexTailUsage(path)
+	if err != nil {
+		t.Fatalf("ExtractCodexTailUsage: %v", err)
+	}
+	if len(usages) != 2 {
+		t.Fatalf("got %d usages, want 2: %+v", len(usages), usages)
+	}
+	for i, u := range usages {
+		if u.Model != "gpt-5.6-terra" {
+			t.Errorf("usages[%d].Model = %q, want gpt-5.6-terra (recovered from the head turn_context beyond the tail window)", i, u.Model)
+		}
+	}
+}
+
 func TestExtractCodexTailMetaUsesLatestRealUsageShape(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "2026", "04", "16", "rollout-2026-04-16T21-49-29-meta.jsonl")
