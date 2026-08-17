@@ -946,6 +946,55 @@ func TestExportMirrorAccumulatesTurns(t *testing.T) {
 	}
 }
 
+// A turn must be visible in the mirror while it runs, not only once it lands:
+// nothing can observe — or interrupt — a turn that leaves no trace until it
+// returns.
+func TestExportMirrorPublishesTheUserTurnBeforeTheReply(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, map[string]string{"STUB_SID": "sess_pending"})
+	h.run("establish the session\n")
+
+	// Second turn: the session id is known, so the prompt lands in the mirror
+	// before the reply does.
+	h.env["STUB_SLEEP"] = "30"
+	s := h.start()
+	s.send("the long turn")
+	s.waitForOutput("zcode-repl turn in flight", 20*time.Second)
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		export := h.readExport("sess_pending")
+		if len(export.Messages) == 3 {
+			last := export.Messages[2]
+			if last.Info.Role != "user" || last.Parts[0].Text != "the long turn" {
+				t.Fatalf("pending entry = %+v, want the in-flight user turn", last)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("in-flight turn never appeared in the mirror")
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	// Interrupting now leaves the user turn unpaired — exactly what an
+	// interrupted turn looks like for every other family.
+	s.signal(syscall.SIGINT)
+	s.waitForOutput("zcode-repl error rc=", 15*time.Second)
+	s.signal(syscall.SIGTERM)
+	if _, code := s.wait(); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	export := h.readExport("sess_pending")
+	if len(export.Messages) != 3 {
+		t.Fatalf("messages = %d, want the interrupted turn left unpaired at 3", len(export.Messages))
+	}
+	if got := export.Messages[2].Info.ParentID; got != export.Messages[1].Info.ID {
+		t.Fatalf("pending user parentID = %q, want %q", got, export.Messages[1].Info.ID)
+	}
+}
+
 // Config preconditions fail closed with EX_CONFIG, never a half-live pane.
 func TestMissingConfigExitsSeventyEight(t *testing.T) {
 	t.Parallel()

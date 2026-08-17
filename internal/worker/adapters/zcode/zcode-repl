@@ -194,9 +194,23 @@ helper="$workdir/turn.py"
 # never eval, and never through a shell round-trip, since the reply is
 # arbitrary model text.
 cat >"$helper" <<'PY'
-"""Decode one ZCode --json turn: emit the reply, persist the sid, mirror it.
+"""Mirror one ZCode turn into the OpenCode-shaped export gc reads.
 
-argv: <turn.json> <sid-out> <guard-token> <prompt-file> <mirror-dir> <cwd>
+Two modes, because a headless turn produces nothing until it returns:
+
+  prompt <mirror-dir> <cwd> <session-id> <prompt-file>
+      Append the user message when the turn STARTS. Without this the whole
+      turn is invisible to gc while it runs — no transcript entry exists until
+      the reply lands, so nothing can observe, or interrupt, a turn in flight.
+      Only possible once the session id is known, i.e. from the second turn on.
+
+  reply <turn.json> <sid-out> <guard> <prompt-file> <mirror-dir> <cwd> <pre-sid>
+      Print the reply, persist the session id, and append the assistant
+      message — plus the user message when the prompt mode could not run
+      (first turn of a session, or the CLI minted a different session id).
+
+An interrupted turn therefore leaves a user message with no reply, which is
+what an interrupted turn looks like for every other provider family.
 """
 import json
 import os
@@ -204,44 +218,11 @@ import re
 import sys
 import time
 
-src, sid_out, guard, prompt_file, mirror_dir, cwd = sys.argv[1:7]
 
-try:
-    with open(src, encoding="utf-8") as fh:
-        payload = json.load(fh)
-except (OSError, ValueError) as exc:
-    print(f"zcode-repl: could not parse zcode JSON: {exc}", file=sys.stderr)
-    sys.exit(1)
-
-if not isinstance(payload, dict):
-    print("zcode-repl: zcode JSON was not an object", file=sys.stderr)
-    sys.exit(1)
-
-response = str(payload.get("response", ""))
-session_id = str(payload.get("sessionId", ""))
-
-# Indent any reply line that could pass for the adapter's own ready marker.
-lines = response.split("\n")
-sys.stdout.write("\n".join("  " + ln if ln.startswith(guard) else ln for ln in lines))
-sys.stdout.write("\n")
-
-with open(sid_out, "w", encoding="utf-8") as fh:
-    fh.write(session_id)
-
-
-def mirror():
-    """Append this turn to the OpenCode-shaped export the zcode reader reads."""
-    if not mirror_dir or not session_id:
-        return
+def load_export(mirror_dir, session_id, cwd):
     safe = re.sub(r"[^A-Za-z0-9._-]", "_", session_id)
-    if not safe:
-        return
-    try:
-        with open(prompt_file, encoding="utf-8") as fh:
-            prompt = fh.read()
-    except OSError:
-        prompt = ""
-
+    if not mirror_dir or not safe:
+        return None, None
     dst = os.path.join(mirror_dir, safe + ".json")
     export = {"info": {"id": session_id, "directory": cwd}, "messages": []}
     try:
@@ -254,53 +235,118 @@ def mirror():
             export["info"]["directory"] = cwd
     except (OSError, ValueError):
         pass
+    return dst, export
 
-    messages = export["messages"]
-    turn = len(messages) // 2 + 1
-    parent = messages[-1]["info"]["id"] if messages else ""
-    now = int(time.time() * 1000)
 
-    user_id = f"msg_user_{turn}"
-    assistant_id = f"msg_assistant_{turn}"
-    messages.append({
-        "info": {
-            "id": user_id,
-            "sessionID": session_id,
-            "role": "user",
-            "parentID": parent,
-            "time": {"created": now},
-        },
-        "parts": [{"id": f"part_{user_id}", "type": "text", "text": prompt}],
-    })
-    assistant = {
-        "info": {
-            "id": assistant_id,
-            "sessionID": session_id,
-            "role": "assistant",
-            "parentID": user_id,
-            "time": {"created": now},
-        },
-        "parts": [{"id": f"part_{assistant_id}", "type": "text", "text": response}],
-    }
-    # Recorded for provenance only. Gas City registers no invocation-usage
-    # extractor for the zcode family, so nothing reads these fields.
-    usage = payload.get("usage")
-    if isinstance(usage, dict):
-        assistant["info"]["usage"] = usage
-    projection = payload.get("projection")
-    if isinstance(projection, dict):
-        assistant["info"]["projection"] = projection
-    messages.append(assistant)
-
-    os.makedirs(mirror_dir, exist_ok=True)
+def save_export(dst, export):
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
     tmp = dst + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(export, fh, indent=2)
     os.replace(tmp, dst)
 
 
+def append_message(export, session_id, role, text, extra=None):
+    messages = export["messages"]
+    # Sequence by message count, not by turn pairs: an interrupted turn leaves
+    # an unpaired user message and must not collide with the next one.
+    ident = f"msg_{role}_{len(messages) + 1}"
+    info = {
+        "id": ident,
+        "sessionID": session_id,
+        "role": role,
+        "parentID": messages[-1]["info"]["id"] if messages else "",
+        "time": {"created": int(time.time() * 1000)},
+    }
+    if extra:
+        info.update(extra)
+    messages.append({
+        "info": info,
+        "parts": [{"id": f"part_{ident}", "type": "text", "text": text}],
+    })
+    return ident
+
+
+def read_text(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+    except OSError:
+        return ""
+
+
+def last_user_text(export):
+    for message in reversed(export["messages"]):
+        if message["info"].get("role") == "user":
+            return message["parts"][0].get("text", "")
+        return None
+    return None
+
+
+def mode_prompt(argv):
+    mirror_dir, cwd, session_id, prompt_file = argv
+    if not session_id:
+        return
+    dst, export = load_export(mirror_dir, session_id, cwd)
+    if dst is None:
+        return
+    append_message(export, session_id, "user", read_text(prompt_file))
+    save_export(dst, export)
+
+
+def mode_reply(argv):
+    src, sid_out, guard, prompt_file, mirror_dir, cwd, pre_sid = argv
+    try:
+        with open(src, encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except (OSError, ValueError) as exc:
+        print(f"zcode-repl: could not parse zcode JSON: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if not isinstance(payload, dict):
+        print("zcode-repl: zcode JSON was not an object", file=sys.stderr)
+        sys.exit(1)
+
+    response = str(payload.get("response", ""))
+    session_id = str(payload.get("sessionId", ""))
+
+    # Indent any reply line that could pass for the adapter's own ready marker.
+    lines = response.split("\n")
+    sys.stdout.write("\n".join("  " + ln if ln.startswith(guard) else ln for ln in lines))
+    sys.stdout.write("\n")
+
+    with open(sid_out, "w", encoding="utf-8") as fh:
+        fh.write(session_id)
+
+    if not session_id:
+        return
+    dst, export = load_export(mirror_dir, session_id, cwd)
+    if dst is None:
+        return
+
+    prompt = read_text(prompt_file)
+    if session_id != pre_sid or last_user_text(export) != prompt:
+        append_message(export, session_id, "user", prompt)
+
+    # Usage is recorded for provenance only. Gas City registers no
+    # invocation-usage extractor for the zcode family, so nothing reads it.
+    extra = {}
+    for key in ("usage", "projection"):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            extra[key] = value
+    append_message(export, session_id, "assistant", response, extra)
+    save_export(dst, export)
+
+
+mode, args = sys.argv[1], sys.argv[2:]
 try:
-    mirror()
+    if mode == "prompt":
+        mode_prompt(args)
+    elif mode == "reply":
+        mode_reply(args)
+    else:
+        print(f"zcode-repl: unknown helper mode {mode!r}", file=sys.stderr)
+        sys.exit(2)
 except OSError as exc:
     # A broken mirror must not fail the turn; the reply is already delivered.
     print(f"zcode-repl: transcript mirror failed: {exc}", file=sys.stderr)
@@ -441,24 +487,30 @@ while :; do
 
     printf '%s' "$line" >"$prompt_file"
 
-    # run_turn announces the turn once its child is live: a headless turn
-    # prints nothing until it finishes, so without that line the pane's last
-    # line stays the previous turn's ready marker — indistinguishable from idle
-    # to an operator and to gc.
+    # Publish the user turn before running it, so the conversation is visible
+    # to gc while the turn is in flight rather than only once it returns. The
+    # session id is the mirror's key, so this only works from the second turn
+    # of a session on; the first turn's pair lands together at completion.
+    pre_sid="$sid"
+    python3 "$helper" prompt "$transcript_dir" "$PWD" "$pre_sid" "$prompt_file" || true
+
     run_turn "$line" "$sid"
     rc=$?
 
     # A sid restored from disk may name a session this build can no longer
     # resolve; retry that prompt once fresh rather than losing the turn. Gated
-    # on sid_unvalidated so it fires only for the restored sid, never for one
-    # this process established: an interrupted turn (gc's C-c) also returns
-    # rc!=0, and treating that as a stale sid would drop the conversation and
-    # silently re-run the prompt the operator just interrupted.
-    if (( rc != 0 && sid_unvalidated )) && [[ -n "$sid" ]]; then
+    # twice. On sid_unvalidated, so it fires only for a restored sid and never
+    # for one this process established. And on interrupted, because an
+    # interrupted turn returns rc!=0 too: without that gate, interrupting the
+    # first turn after a restart — exactly what gc's interrupt_now does —
+    # would read as a stale session, drop the conversation, and silently
+    # re-run the prompt the operator just cancelled.
+    if (( rc != 0 && sid_unvalidated && ! interrupted )) && [[ -n "$sid" ]]; then
         printf 'zcode-repl: resume of %s failed, starting fresh\n' "$sid"
         sid=""
         sid_unvalidated=0
         rm -f "$sid_path"
+        pre_sid=""
         run_turn "$line" ""
         rc=$?
     fi
@@ -470,7 +522,7 @@ while :; do
         continue
     fi
 
-    if python3 "$helper" "$turn_json" "$sid_out" "$GUARD_TOKEN" "$prompt_file" "$transcript_dir" "$PWD"; then
+    if python3 "$helper" reply "$turn_json" "$sid_out" "$GUARD_TOKEN" "$prompt_file" "$transcript_dir" "$PWD" "$pre_sid"; then
         consecutive_failures=0
         sid_unvalidated=0
         if [[ -s "$sid_out" ]]; then
