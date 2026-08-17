@@ -707,13 +707,13 @@ func (c *CachingStore) notifyChange(eventType string, b Bead) {
 	// step_id is the semantic native execution step carried explicitly by the
 	// lifecycle bead. Non-work beads (sessions, mail, …) carry none → omitted.
 	stepID := b.Metadata[beadmeta.StepIDMetadataKey]
-	c.onChange(eventType, b.ID, runID, sessionID, stepID, nativeStepDependencies(b.Metadata, stepID), payload)
+	c.onChange(eventType, b.ID, runID, sessionID, stepID, NativeStepDependencies(b.Metadata, stepID), payload)
 }
 
-// nativeStepDependencies returns the explicit, canonical native topology fact.
+// NativeStepDependencies returns the explicit, canonical native topology fact.
 // It never derives edges from physical bead dependencies or other mutable state:
 // absent/malformed metadata is UNKNOWN (nil), while a canonical [] is a known root.
-func nativeStepDependencies(metadata map[string]string, stepID string) *[]string {
+func NativeStepDependencies(metadata map[string]string, stepID string) *[]string {
 	if !validTopologyStepID(stepID) {
 		return nil
 	}

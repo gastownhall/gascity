@@ -1606,9 +1606,9 @@ func (cs *controllerState) ScopedStoreLike(ctx context.Context, existing beads.S
 // NudgesBeadStore returns the store backing the nudge-queue shadow beads. At the
 // default backend resolveNudgesStore returns cityBeadStore, so this is byte-identical
 // to CityBeadStore; when [beads.classes.nudges] is relocated it returns the per-class
-// store. cs.eventProv is the recorder (an events.Recorder), matching how the city mail
-// store is wired (newCityMailProvider), so relocated writes through this store emit
-// bead.* exactly like the controller's own nudge writes. The result is wrapped in the
+// store. cs.eventProv is passed for signature parity with the other accessors and is
+// ignored by resolveNudgesStore; the controller's emission comes from the CachingStore
+// around its work ledger, not from this argument. The result is wrapped in the
 // strongly-typed beads.NudgesStore so the nudges class is statically visible to callers;
 // the wrapper carries the same underlying store value, so runtime behavior is unchanged.
 func (cs *controllerState) NudgesBeadStore() beads.NudgesStore {
@@ -1620,8 +1620,8 @@ func (cs *controllerState) NudgesBeadStore() beads.NudgesStore {
 // SessionsBeadStore returns the store backing session-class beads. At the default
 // backend resolveSessionStore returns cityBeadStore, so this is byte-identical to
 // CityBeadStore; when [beads.classes.sessions] is relocated it returns the per-class
-// store. cs.eventProv is the recorder, matching the nudges/mail wiring, so relocated
-// session writes emit bead.* exactly like the controller's own session writes. The
+// store. cs.eventProv is passed for signature parity and ignored by
+// resolveSessionStore, exactly as it is for every other class. The
 // result is wrapped in the strongly-typed beads.SessionStore so the session class is
 // statically visible to callers; the wrapper carries the same underlying store value,
 // so runtime behavior is unchanged.
@@ -1636,8 +1636,10 @@ func (cs *controllerState) SessionsBeadStore() beads.SessionStore {
 // when [beads.classes.graph] is relocated it returns the dedicated graph store at the
 // legacy .gc/beads.sqlite location (or the gcg Postgres schema). cs.eventProv is
 // passed for signature parity with the other accessors but is ignored by
-// resolveGraphStore: the graph store stays event-silent, matching the prior Router
-// graph leg. The result is wrapped in the strongly-typed beads.GraphStore so the
+// resolveGraphStore, as it is for every class: a class store carries no emitting
+// layer, and on this side the controller's CachingStore is the emitter. The
+// one-shot CLI's side is covered by class_store_emit.go. The result is wrapped in
+// the strongly-typed beads.GraphStore so the
 // graph class is statically visible to callers; the wrapper carries the same
 // underlying store value, so runtime behavior is unchanged.
 func (cs *controllerState) GraphBeadStore() beads.GraphStore {

@@ -109,9 +109,12 @@ func (cr *CityRuntime) graphBeadStore() beads.GraphStore {
 }
 
 // sessionsBeadStore returns the runtime's session/session-wait bead store: the
-// configured session class store (with the controller recorder so relocated
-// session writes emit bead.*) when [beads.classes.sessions] relocates sessions,
-// else the work store. Byte-identical to cityBeadStore() at the default bd backend.
+// configured session class store when [beads.classes.sessions] relocates
+// sessions, else the work store. The recorder is passed for signature parity
+// and is not what makes a write observable — the controller's emission comes
+// from the CachingStore around its work ledger, and a relocated class store has
+// no such layer on this side (class_store_emit.go covers the one-shot CLI's).
+// Byte-identical to cityBeadStore() at the default bd backend.
 // Returned as the strongly-typed beads.SessionStore so the session class stays
 // statically visible; the wrapper carries the same underlying store value.
 func (cr *CityRuntime) sessionsBeadStore() beads.SessionStore {
@@ -251,7 +254,13 @@ func (s *beadPolicyGraphStore) graphApplierFor(_ coordclass.Class) beads.GraphAp
 // agree.
 //
 // cfg, cityPath and rec stay in the signature for the per-scope work routing
-// that resolves elsewhere; they are not read here.
+// that resolves elsewhere; they are not read here. rec in particular does NOT
+// make a relocated write observable, for any class: a class store is a bare
+// bead engine with no emitting layer, and what a caller passes here changes
+// nothing about that. Emission is decided where the ROUTES are built, once —
+// the one-shot CLI funnel gives its stores an emit target
+// (storageRoutes.withCLIEmission), and the controller's boot does not, because
+// its own emitter already covers it. See class_store_emit.go.
 func resolveClassStore(routes *storageRoutes, workStore beads.Store, cfg *config.City, cityPath, class string, rec events.Recorder) beads.Store {
 	_ = cfg
 	_ = cityPath
@@ -311,9 +320,9 @@ func resolveSessionStore(routes *storageRoutes, workStore beads.Store, cfg *conf
 
 // resolveGraphStore returns the beads.Store backing the GRAPH coordination
 // class. Identity today: the work store. When graph relocates, the dedicated
-// graph-store dispatch plugs in at resolveClassStore (graph uses its own legacy
-// .gc/ location and is event-silent by design, so rec is accepted for signature
-// parity with the other resolve*Store helpers and ignored here).
+// graph-store dispatch plugs in at resolveClassStore. rec is accepted for
+// signature parity with the other resolve*Store helpers and ignored here, as it
+// is for every class: see resolveClassStore.
 func resolveGraphStore(routes *storageRoutes, workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) beads.Store {
 	return resolveClassStore(routes, workStore, cfg, cityPath, config.BeadClassGraph, rec)
 }

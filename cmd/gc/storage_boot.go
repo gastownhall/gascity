@@ -87,6 +87,13 @@ type storageRoutes struct {
 	// binding names the non-work binding these routes were opened from, for
 	// diagnostics.
 	binding string
+	// emitCityPath is the city whose event log these routes' class stores
+	// append bead.* events to, and it is set on exactly one construction:
+	// the one-shot CLI funnel's (cli_storage_routes.go). openStorageRoutes
+	// leaves it empty, so the controller's routes carry no emit target and
+	// its CachingStore stays the only emitter on that side — see
+	// class_store_emit.go for why the two must not both emit.
+	emitCityPath string
 }
 
 // storeFor returns the store serving a class and whether these routes relocate

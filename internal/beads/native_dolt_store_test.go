@@ -359,7 +359,7 @@ func TestNativeDoltStoreReadyOnlyIncludesOpenAndDeferredUpstreamStatuses(t *test
 		getReadyWork: func(_ context.Context, filter beadslib.WorkFilter) ([]*beadslib.Issue, error) {
 			var result []*beadslib.Issue
 			for _, issue := range issues {
-				if issue.Status != filter.Status {
+				if !workFilterMatchesStatus(filter, issue.Status) {
 					continue
 				}
 				result = append(result, cloneNativeIssueForTest(issue))
@@ -444,7 +444,7 @@ func TestNativeDoltStoreReadyExcludesIndefinitelyDeferredBeads(t *testing.T) {
 		getReadyWork: func(_ context.Context, filter beadslib.WorkFilter) ([]*beadslib.Issue, error) {
 			var result []*beadslib.Issue
 			for _, issue := range issues {
-				if issue.Status != filter.Status {
+				if !workFilterMatchesStatus(filter, issue.Status) {
 					continue
 				}
 				result = append(result, cloneNativeIssueForTest(issue))
