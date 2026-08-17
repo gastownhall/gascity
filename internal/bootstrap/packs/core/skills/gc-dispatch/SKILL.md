@@ -92,9 +92,13 @@ formula's compiler contract:
 
 **Convoy-referencing formulas require a target convoy.** A v2 formula that
 references `{{convoy_id}}` or contains a drain step must launch onto a convoy —
-routing with `--on` satisfies that, because the sling auto-creates the convoy
-(pass `--no-convoy` to suppress it, or `gc formula cook --attach` to target an
-existing one). Launching such a formula bare with `-f` is rejected.
+routing with `--on` satisfies that, because the sling normalizes the target into
+an **input convoy**, creating a one-item convoy that tracks your bead when the
+target is not already a convoy. That input convoy is not optional: `--no-convoy`
+suppresses only the ordinary routing auto-convoy, not the v2 input convoy. To run
+the workflow against a convoy you already have, pass that convoy as the target
+(`gc formula cook <formula> --attach <convoy-id>`). Launching such a formula bare
+with `-f` is rejected.
 
 ## Formulas
 
