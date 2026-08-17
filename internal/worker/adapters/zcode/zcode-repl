@@ -1,0 +1,365 @@
+#!/usr/bin/env bash
+# Persistent tmux-drivable front end for the ZCode CLI (Z.ai GLM harness).
+#
+# ZCode ships no public TUI — the interactive terminal lives only in Z.ai's
+# standalone SEA binary, which has no public release — so a worker pane has
+# nothing to send-keys into. This adapter fills that gap: it holds the pane
+# open, reads a prompt from stdin, and runs each turn as a headless
+# `node $ZCODE_CJS --json --prompt=...` call, threading --resume across turns
+# so the conversation carries.
+#
+# Wire protocol, matching how gc actually delivers a prompt (tmux.go
+# NudgeSession): one literal send-keys of the whole message (embedded newlines
+# included), a short debounce, an Escape, then Enter. So a multi-line prompt
+# lands as N lines with a trailing ESC byte on the last one. We read the first
+# line blocking, drain the rest of the burst on a 1s idle timeout, strip control
+# bytes, and run ONE turn on the join.
+#
+# Prints "zcode-repl ready" at startup and after every turn — the provider's
+# ready_prompt_prefix. Turn failures print "zcode-repl error rc=N" and keep
+# looping (a dead pane strands the worker; an error line does not) until
+# MAX_CONSECUTIVE_FAILURES, which exits 1 with no trailing marker so liveness
+# and readiness both go red instead of looping green forever.
+#
+# Marker spoofing: model output can reproduce the marker verbatim (observed
+# live). Any reply line starting with "zcode-repl " is indented so only this
+# adapter emits it at column 0. That is a mitigation, not a fix — genuine
+# markers from earlier turns persist in tmux scrollback, so real busy/idle
+# discrimination needs an engine-side positional matcher.
+#
+# Session continuity across a gc restart is adapter-internal: the provider
+# session id is persisted under XDG_STATE_HOME and replayed via --resume on the
+# next process's first turn. The builtin spec therefore declares no resume_flag.
+#
+# Serial by design: a prompt arriving mid-turn waits in the tty buffer until the
+# next read. No concurrency, no queue beyond the terminal.
+#
+# Environment (pure — no repo paths, no credential files):
+#   ZCODE_CJS       required, path to the ZCode CJS bundle
+#   ZCODE_API_KEY   required, Z.ai credential (read by the bundle, never logged)
+#   ZCODE_MODEL     optional, model id (read by the bundle)
+#   ZCODE_BASE_URL  optional, API base (read by the bundle)
+#   ZCODE_NODE_BIN  optional, node override (default: node from PATH)
+#   GC_ZCODE_TRANSCRIPT_DIR  optional, export-mirror root override
+set -uo pipefail   # deliberately no -e: a failed turn must not kill the loop
+
+readonly PROG="zcode-repl"
+readonly MARKER="zcode-repl ready"
+readonly GUARD_TOKEN="zcode-repl "
+readonly MAX_CONSECUTIVE_FAILURES=5
+readonly DRAIN_TIMEOUT=1
+
+die_config() {
+    printf '%s: %s\n' "$PROG" "$1" >&2
+    exit 78   # EX_CONFIG
+}
+
+if [[ -z "${ZCODE_CJS:-}" ]]; then
+    die_config "ZCODE_CJS is unset (path to the ZCode CJS bundle)"
+fi
+if [[ ! -r "$ZCODE_CJS" ]]; then
+    die_config "ZCODE_CJS=$ZCODE_CJS is not readable"
+fi
+if [[ -z "${ZCODE_API_KEY:-}" ]]; then
+    die_config "ZCODE_API_KEY is unset"
+fi
+
+NODE_BIN="${ZCODE_NODE_BIN:-$(command -v node || true)}"
+if [[ -z "$NODE_BIN" ]]; then
+    die_config "no node on PATH (the ZCode bundle needs node >= 22.5; set ZCODE_NODE_BIN to override)"
+fi
+# The bundle imports node:sqlite, so the real floor is 22.5, not 20. A distro
+# node 18 on PATH dies with a bare "No such built-in module: node:sqlite".
+node_version="$("$NODE_BIN" --version 2>/dev/null || true)"
+if ! printf '%s\n' "${node_version#v}" | awk -F. '{exit !($1 > 22 || ($1 == 22 && $2 >= 5))}'; then
+    die_config "$NODE_BIN is ${node_version:-an unknown version}; the ZCode bundle needs node >= 22.5 (it imports node:sqlite) — set ZCODE_NODE_BIN"
+fi
+
+if ! command -v python3 >/dev/null 2>&1; then
+    die_config "python3 not found (needed to decode the CLI's JSON turn output)"
+fi
+
+# Session key for sid persistence. gc stamps GC_SESSION into the pane env;
+# GC_SESSION_NAME is checked first for host-session setups.
+sid_key() {
+    local key
+    for key in "${GC_SESSION_NAME:-}" "${GC_SESSION:-}"; do
+        if [[ -n "$key" ]]; then printf '%s' "$key"; return; fi
+    done
+    if [[ -n "${TMUX:-}" ]]; then
+        key="$(tmux display-message -p '#S' 2>/dev/null || true)"
+        if [[ -n "$key" ]]; then printf '%s' "$key"; return; fi
+    fi
+    printf 'default'
+}
+
+state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
+sid_dir="$state_home/gascity/zcode/sids"
+mkdir -p "$sid_dir"
+sid_path="$sid_dir/$(sid_key | tr -c 'A-Za-z0-9._-' '_')"
+
+# Export-mirror root. Gas City's transcript discovery
+# (sessionlog.DefaultZCodeSearchPaths) reads ~/.local/share/gascity/
+# zcode-transcripts, so the default mirrors there; the env var overrides it.
+transcript_dir="${GC_ZCODE_TRANSCRIPT_DIR:-$HOME/.local/share/gascity/zcode-transcripts}"
+
+sid=""
+sid_unvalidated=0
+if [[ -r "$sid_path" ]]; then
+    sid="$(<"$sid_path")"
+    sid="${sid//[[:space:]]/}"
+    # Restored from a previous process — not yet proven resumable in this build.
+    if [[ -n "$sid" ]]; then sid_unvalidated=1; fi
+fi
+
+workdir="$(mktemp -d)"
+stty_saved=""
+cleanup() {
+    if [[ -n "$stty_saved" ]]; then stty "$stty_saved" 2>/dev/null || true; fi
+    rm -rf "$workdir"
+}
+# TERM ends the session; INT must not. gc's Provider.Interrupt sends C-c to
+# interrupt the *turn*, and the foreground child already dies from the process
+# group signal — the rc!=0 branch then reports it and the loop continues with
+# the sid intact. Exiting here would kill the pane on every interrupt.
+interrupted=0
+trap 'cleanup; exit 0' TERM
+trap 'interrupted=1' INT
+trap cleanup EXIT
+
+# Canonical tty input truncates at 4095 bytes, which silently mangles long
+# pasted prompts. Non-canonical mode removes the limit; echo off keeps the
+# pasted body out of the pane (the adapter's own output stays the pane's only
+# content).
+if [[ -t 0 ]]; then
+    stty_saved="$(stty -g 2>/dev/null || true)"
+    stty -icanon -echo min 1 time 0 2>/dev/null || true
+fi
+
+turn_json="$workdir/turn.json"
+turn_err="$workdir/turn.err"
+prompt_file="$workdir/prompt.txt"
+sid_out="$workdir/sid"
+helper="$workdir/turn.py"
+
+# Field extraction and export mirroring via the json module reading files —
+# never eval, and never through a shell round-trip, since the reply is
+# arbitrary model text.
+cat >"$helper" <<'PY'
+"""Decode one ZCode --json turn: emit the reply, persist the sid, mirror it.
+
+argv: <turn.json> <sid-out> <guard-token> <prompt-file> <mirror-dir> <cwd>
+"""
+import json
+import os
+import re
+import sys
+import time
+
+src, sid_out, guard, prompt_file, mirror_dir, cwd = sys.argv[1:7]
+
+try:
+    with open(src, encoding="utf-8") as fh:
+        payload = json.load(fh)
+except (OSError, ValueError) as exc:
+    print(f"zcode-repl: could not parse zcode JSON: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+if not isinstance(payload, dict):
+    print("zcode-repl: zcode JSON was not an object", file=sys.stderr)
+    sys.exit(1)
+
+response = str(payload.get("response", ""))
+session_id = str(payload.get("sessionId", ""))
+
+# Indent any reply line that could pass for the adapter's own ready marker.
+lines = response.split("\n")
+sys.stdout.write("\n".join("  " + ln if ln.startswith(guard) else ln for ln in lines))
+sys.stdout.write("\n")
+
+with open(sid_out, "w", encoding="utf-8") as fh:
+    fh.write(session_id)
+
+
+def mirror():
+    """Append this turn to the OpenCode-shaped export the zcode reader reads."""
+    if not mirror_dir or not session_id:
+        return
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", session_id)
+    if not safe:
+        return
+    try:
+        with open(prompt_file, encoding="utf-8") as fh:
+            prompt = fh.read()
+    except OSError:
+        prompt = ""
+
+    dst = os.path.join(mirror_dir, safe + ".json")
+    export = {"info": {"id": session_id, "directory": cwd}, "messages": []}
+    try:
+        with open(dst, encoding="utf-8") as fh:
+            existing = json.load(fh)
+        if isinstance(existing, dict) and isinstance(existing.get("messages"), list):
+            export = existing
+            export.setdefault("info", {})
+            export["info"]["id"] = session_id
+            export["info"]["directory"] = cwd
+    except (OSError, ValueError):
+        pass
+
+    messages = export["messages"]
+    turn = len(messages) // 2 + 1
+    parent = messages[-1]["info"]["id"] if messages else ""
+    now = int(time.time() * 1000)
+
+    user_id = f"msg_user_{turn}"
+    assistant_id = f"msg_assistant_{turn}"
+    messages.append({
+        "info": {
+            "id": user_id,
+            "sessionID": session_id,
+            "role": "user",
+            "parentID": parent,
+            "time": {"created": now},
+        },
+        "parts": [{"id": f"part_{user_id}", "type": "text", "text": prompt}],
+    })
+    assistant = {
+        "info": {
+            "id": assistant_id,
+            "sessionID": session_id,
+            "role": "assistant",
+            "parentID": user_id,
+            "time": {"created": now},
+        },
+        "parts": [{"id": f"part_{assistant_id}", "type": "text", "text": response}],
+    }
+    # Recorded for provenance only. Gas City registers no invocation-usage
+    # extractor for the zcode family, so nothing reads these fields.
+    usage = payload.get("usage")
+    if isinstance(usage, dict):
+        assistant["info"]["usage"] = usage
+    projection = payload.get("projection")
+    if isinstance(projection, dict):
+        assistant["info"]["projection"] = projection
+    messages.append(assistant)
+
+    os.makedirs(mirror_dir, exist_ok=True)
+    tmp = dst + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(export, fh, indent=2)
+    os.replace(tmp, dst)
+
+
+try:
+    mirror()
+except OSError as exc:
+    # A broken mirror must not fail the turn; the reply is already delivered.
+    print(f"zcode-repl: transcript mirror failed: {exc}", file=sys.stderr)
+PY
+
+# run_turn <prompt> <sid|"">. Single-argv --opt=value forms throughout: the CLI
+# uses node:util parseArgs, which rejects the two-argv form when the value
+# starts with a dash ("Option '--prompt' argument is ambiguous") — markdown
+# bullets and diff lines hit this constantly.
+run_turn() {
+    if [[ -n "$2" ]]; then
+        "$NODE_BIN" "$ZCODE_CJS" --json "--resume=$2" "--prompt=$1" \
+            >"$turn_json" 2>"$turn_err" </dev/null
+    else
+        "$NODE_BIN" "$ZCODE_CJS" --json "--prompt=$1" \
+            >"$turn_json" 2>"$turn_err" </dev/null
+    fi
+}
+
+report_failure() {
+    printf 'zcode-repl error rc=%s\n' "$1"
+    if [[ -s "$turn_err" ]]; then
+        printf 'zcode-repl stderr: %s\n' "$(tr '\n' ' ' <"$turn_err" | cut -c1-300)"
+    fi
+}
+
+note_failure_and_maybe_bail() {
+    consecutive_failures=$(( consecutive_failures + 1 ))
+    if (( consecutive_failures >= MAX_CONSECUTIVE_FAILURES )); then
+        printf 'zcode-repl fatal: %s consecutive turn failures\n' "$MAX_CONSECUTIVE_FAILURES"
+        exit 1
+    fi
+}
+
+consecutive_failures=0
+printf 'zcode-repl: ZCode headless harness (serial, resume-threaded)\n'
+printf '%s\n' "$MARKER"
+
+while :; do
+    interrupted=0
+    IFS= read -r line
+    read_rc=$?
+    if (( read_rc != 0 )); then
+        # A trapped INT interrupts read; that is an interrupt, not end of input.
+        if (( interrupted )) || (( read_rc > 128 )); then continue; fi
+        break
+    fi
+
+    # Coalesce the rest of a pasted burst: gc sends the body, waits, then
+    # Enter, so a 1s idle window closes the paste without splitting it.
+    while IFS= read -r -t "$DRAIN_TIMEOUT" more; do
+        line+=$'\n'"$more"
+    done
+
+    # gc's pre-Enter Escape lands inside the prompt; drop it and any trailing
+    # control bytes (which also trims the blank lines a drain can pick up).
+    line="${line//$'\x1b'/}"
+    while [[ -n "$line" && "$line" == *[$'\x01'-$'\x1f'] ]]; do line="${line%?}"; done
+
+    # A stray Enter before a paste makes the blocking read return empty and the
+    # burst coalesce onto it; drop leading blank lines but keep interior layout.
+    while [[ "$line" == *$'\n'* ]]; do
+        head_line="${line%%$'\n'*}"
+        if [[ -z "${head_line//[[:space:]]/}" ]]; then line="${line#*$'\n'}"; else break; fi
+    done
+
+    probe="${line//[[:cntrl:]]/}"
+    probe="${probe//[[:space:]]/}"
+    if [[ -z "$probe" ]]; then continue; fi
+
+    printf '%s' "$line" >"$prompt_file"
+
+    run_turn "$line" "$sid"
+    rc=$?
+
+    # A sid restored from disk may name a session this build can no longer
+    # resolve; retry that prompt once fresh rather than losing the turn. Gated
+    # on sid_unvalidated so it fires only for the restored sid, never for one
+    # this process established: an interrupted turn (gc's C-c) also returns
+    # rc!=0, and treating that as a stale sid would drop the conversation and
+    # silently re-run the prompt the operator just interrupted.
+    if (( rc != 0 && sid_unvalidated )) && [[ -n "$sid" ]]; then
+        printf 'zcode-repl: resume of %s failed, starting fresh\n' "$sid"
+        sid=""
+        sid_unvalidated=0
+        rm -f "$sid_path"
+        run_turn "$line" ""
+        rc=$?
+    fi
+
+    if (( rc != 0 )); then
+        report_failure "$rc"
+        note_failure_and_maybe_bail
+        printf '%s\n' "$MARKER"
+        continue
+    fi
+
+    if python3 "$helper" "$turn_json" "$sid_out" "$GUARD_TOKEN" "$prompt_file" "$transcript_dir" "$PWD"; then
+        consecutive_failures=0
+        sid_unvalidated=0
+        if [[ -s "$sid_out" ]]; then
+            sid="$(<"$sid_out")"
+            printf '%s\n' "$sid" >"$sid_path"
+        fi
+    else
+        printf 'zcode-repl error rc=0 (unparsable response)\n'
+        note_failure_and_maybe_bail
+    fi
+    printf '%s\n' "$MARKER"
+done
