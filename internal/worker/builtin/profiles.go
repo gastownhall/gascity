@@ -122,9 +122,15 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		InstructionsFile:       "CLAUDE.md",
 		ResumeFlag:             "--resume",
 		ResumeStyle:            "flag",
-		ForkFlag:               "--fork-session",
-		PrintArgs:              []string{"-p"},
-		TitleModel:             "haiku",
+		// Claude Code accepts a caller-supplied UUID at fresh start
+		// (`claude --session-id <uuid>`), which is what lets gc generate the
+		// durable session_key up front and hand it back as `--resume <uuid>`
+		// on restart. Without this the key is never generated and a restart
+		// silently launches a brand-new conversation.
+		SessionIDFlag: "--session-id",
+		ForkFlag:      "--fork-session",
+		PrintArgs:     []string{"-p"},
+		TitleModel:    "haiku",
 		// Config-facing names map to current CLI values: Claude Code rejects the
 		// legacy "auto-edit"/"full-auto" it used to accept (GH#4602).
 		PermissionModes: map[string]string{
