@@ -2893,12 +2893,17 @@ func PackContentHash(fs fsys.FS, topoDir string) string {
 // connection churn was eliminated (gastownhall/gascity#1978 follow-up).
 //
 // The cache keys the content hash by absolute pack dir plus a cheap stat
-// fingerprint (per-file size+mtime, no content reads). An unchanged tree is
-// content-hashed once and reused — both for repeats within a single tick and
-// across ticks. Invalidation follows standard build-cache semantics: any file
-// add/remove, size change, or mtime bump (every normal edit and git checkout)
-// changes the fingerprint and forces a re-hash. The only blind spot is an edit
-// that preserves both size and mtime, which pack tooling does not do.
+// fingerprint (per-file size+mtime+ctime, no content reads). An unchanged
+// tree is content-hashed once and reused — both for repeats within a single
+// tick and across ticks. Invalidation follows standard build-cache semantics:
+// any file add/remove, size change, or mtime bump (every normal edit and git
+// checkout) changes the fingerprint and forces a re-hash. ctime guards the one
+// gap size+mtime leaves open: mtime-preserving deploy tooling (cp -p,
+// rsync --checksum --times) can edit content while leaving size and mtime
+// unchanged, but no standard syscall lets userspace roll ctime back, so it
+// still moves. The residual blind spot is narrower, not gone: a false cache
+// hit now requires size, mtime, AND ctime to all collide simultaneously
+// (e.g. two edits landing in the same coarse filesystem timestamp granule).
 var packContentHashCache sync.Map // absDir(string) -> packContentHashEntry
 
 type packContentHashEntry struct {
@@ -2944,6 +2949,9 @@ func packContentHashRecursive(fs fsys.FS, topoDir string, useCache bool) string 
 		fmt.Fprintf(fp, "%s\x00", relPath) //nolint:errcheck // hash.Write never errors
 		if info, statErr := fs.Stat(filepath.Join(topoDir, relPath)); statErr == nil {
 			fmt.Fprintf(fp, "%d\x00%d\x00", info.Size(), info.ModTime().UnixNano()) //nolint:errcheck
+			if ctime, ok := statCtimeNanos(info); ok {
+				fmt.Fprintf(fp, "%d\x00", ctime) //nolint:errcheck // hash.Write never errors
+			}
 		}
 	}
 	fpSum := fp.Sum64()
