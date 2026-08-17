@@ -1053,6 +1053,58 @@ func TestCLIChildGetsAPerEpochHome(t *testing.T) {
 	}
 }
 
+// The first turn of a session is the boot/priming turn — the one gc is most
+// likely to interrupt — and it has no session id yet to key a mirror by. It
+// still must not vanish.
+func TestCancelledFirstTurnStaysVisibleAndIsAdopted(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, map[string]string{"STUB_SLEEP": "30", "STUB_SID": "sess_after_cancel"})
+	s := h.start()
+	s.send("the boot prompt")
+	s.waitForOutput("zcode-repl turn in flight", 20*time.Second)
+	s.signal(syscall.SIGINT)
+	s.waitForOutput("zcode-repl error rc=", 15*time.Second)
+
+	pending := h.readExport("pending")
+	if len(pending.Messages) != 1 || pending.Messages[0].Parts[0].Text != "the boot prompt" {
+		t.Fatalf("canceled first turn left no usable trace: %+v", pending.Messages)
+	}
+
+	// The next successful turn adopts it, so the conversation reads in order.
+	h.env["STUB_SLEEP"] = "0"
+	h.control(map[string]string{"STUB_SLEEP": "0"})
+	s.send("the turn that lands")
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(h.mirrorDir, h.epochScope(), "sess_after_cancel.json")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("session mirror never appeared:\n%s", s.output())
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	s.signal(syscall.SIGTERM)
+	if _, code := s.wait(); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+
+	export := h.readExport("sess_after_cancel")
+	if len(export.Messages) < 3 {
+		t.Fatalf("adopted history = %d messages, want the canceled turn plus the pair", len(export.Messages))
+	}
+	if got := export.Messages[0].Parts[0].Text; got != "the boot prompt" {
+		t.Fatalf("first message = %q, want the canceled boot prompt carried forward", got)
+	}
+	if got := export.Messages[0].Info.SessionID; got != "sess_after_cancel" {
+		t.Fatalf("adopted message sessionID = %q, want sess_after_cancel", got)
+	}
+	if _, err := os.Stat(filepath.Join(h.mirrorDir, h.epochScope(), "pending.json")); !os.IsNotExist(err) {
+		t.Fatalf("placeholder export survived adoption: %v", err)
+	}
+}
+
 // Config preconditions fail closed with EX_CONFIG, never a half-live pane.
 func TestMissingConfigExitsSeventyEight(t *testing.T) {
 	t.Parallel()

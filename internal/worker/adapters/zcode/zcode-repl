@@ -313,6 +313,9 @@ def last_user_text(export):
     return None
 
 
+PENDING_SESSION = "pending"
+
+
 def mode_prompt(argv):
     mirror_dir, cwd, session_id, prompt_file = argv
     if not session_id:
@@ -322,6 +325,38 @@ def mode_prompt(argv):
         return
     append_message(export, session_id, "user", read_text(prompt_file))
     save_export(dst, export)
+
+
+def mode_cancelled(argv):
+    """Record a turn that never produced a reply.
+
+    With a session id the user message is already published (mode_prompt) and
+    simply stays unpaired. Without one — the first turn of a session, which is
+    the boot/priming turn — nothing exists yet, so write a placeholder export
+    that the next successful turn adopts.
+    """
+    mirror_dir, cwd, session_id, prompt_file = argv
+    if session_id:
+        return
+    dst, export = load_export(mirror_dir, PENDING_SESSION, cwd)
+    if dst is None:
+        return
+    append_message(export, PENDING_SESSION, "user", read_text(prompt_file))
+    save_export(dst, export)
+
+
+def adopt_pending(mirror_dir, cwd, session_id):
+    """Fold a placeholder export into the session that finally established."""
+    pending_path, pending = load_export(mirror_dir, PENDING_SESSION, cwd)
+    if pending_path is None or not pending["messages"]:
+        return None
+    try:
+        os.remove(pending_path)
+    except OSError:
+        pass
+    for message in pending["messages"]:
+        message["info"]["sessionID"] = session_id
+    return pending["messages"]
 
 
 def mode_reply(argv):
@@ -353,6 +388,12 @@ def mode_reply(argv):
     if dst is None:
         return
 
+    carried = adopt_pending(mirror_dir, cwd, session_id)
+    if carried:
+        # Cancelled turns from before this session existed belong at the front
+        # of its history, not lost.
+        export["messages"] = carried + export["messages"]
+
     prompt = read_text(prompt_file)
     if session_id != pre_sid or last_user_text(export) != prompt:
         append_message(export, session_id, "user", prompt)
@@ -372,6 +413,8 @@ mode, args = sys.argv[1], sys.argv[2:]
 try:
     if mode == "prompt":
         mode_prompt(args)
+    elif mode == "cancelled":
+        mode_cancelled(args)
     elif mode == "reply":
         mode_reply(args)
     else:
@@ -555,6 +598,13 @@ while :; do
     fi
 
     if (( rc != 0 )); then
+        # A cancelled turn still has to be visible. Publishing at turn start
+        # needs the session id that keys the mirror, so the FIRST turn of a
+        # session — the boot/priming turn gc is most likely to interrupt — left
+        # no trace at all when it was cancelled. Record it against the session
+        # if one exists, otherwise against a placeholder the next successful
+        # turn adopts, so an interrupted boot is never silently invisible.
+        python3 "$helper" cancelled "$transcript_dir" "$PWD" "$pre_sid" "$prompt_file" || true
         report_failure "$rc"
         note_failure_and_maybe_bail
         printf '%s\n' "$MARKER"
