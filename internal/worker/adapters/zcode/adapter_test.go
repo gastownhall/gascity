@@ -42,9 +42,21 @@ if ctl and os.path.exists(ctl):
             if key:
                 os.environ[key] = value
 
+# ZCode installs its own SIGINT handler and keeps working through one, so the
+# adapter must escalate. STUB_IGNORE_INT reproduces that.
+if os.environ.get("STUB_IGNORE_INT"):
+    import signal
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
 sleep_for = float(os.environ.get("STUB_SLEEP", "0"))
 if sleep_for:
-    time.sleep(sleep_for)
+    deadline = time.time() + sleep_for
+    while time.time() < deadline:
+        time.sleep(0.1)
+    done = os.environ.get("STUB_DONE_FILE")
+    if done:
+        with open(done, "w", encoding="utf-8") as fh:
+            fh.write("finished\n")
 
 if os.environ.get("STUB_BAD_JSON"):
     sys.stderr.write("the cli complained\n")
@@ -622,6 +634,46 @@ func TestInterruptMidTurnContinuesTheLoop(t *testing.T) {
 	}
 	if strings.Contains(out, "starting fresh") {
 		t.Fatalf("an interrupted turn is not a stale-session signal:\n%s", out)
+	}
+}
+
+// The CLI ignoring SIGINT must not leave an orphaned turn running: the adapter
+// escalates until the turn's process group is gone.
+func TestInterruptKillsASigintIgnoringTurn(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, map[string]string{"STUB_SLEEP": "30", "STUB_IGNORE_INT": "1"})
+	doneFile := filepath.Join(h.workDir, "turn-finished")
+	h.env["STUB_DONE_FILE"] = doneFile
+
+	s := h.start()
+	s.send("a turn that ignores interrupts")
+	time.Sleep(3 * time.Second) // well inside the stub's sleep
+	s.signal(syscall.SIGINT)
+
+	// The adapter must report the turn as failed rather than block until the
+	// stub's own deadline.
+	deadline := time.Now().Add(15 * time.Second)
+	for !strings.Contains(s.output(), "zcode-repl error rc=") {
+		if time.Now().After(deadline) {
+			t.Fatalf("adapter did not report an interrupted turn within 15s:\n%s", s.output())
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if !s.alive() {
+		t.Fatalf("adapter exited on SIGINT; it must absorb it:\n%s", s.output())
+	}
+	if _, err := os.Stat(doneFile); err == nil {
+		t.Fatal("the interrupted turn ran to completion; it must be killed, not orphaned")
+	}
+
+	s.signal(syscall.SIGTERM)
+	if _, code := s.wait(); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	// Still absent after the adapter is gone: nothing survived to finish.
+	if _, err := os.Stat(doneFile); err == nil {
+		t.Fatal("an orphaned turn outlived the adapter and completed")
 	}
 }
 

@@ -134,17 +134,42 @@ fi
 
 workdir="$(mktemp -d)"
 stty_saved=""
+turn_pid=""
+
+# stop_turn signals the in-flight turn's process group, escalating until it is
+# actually gone.
+#
+# The escalation is not defensive padding: ZCode installs its own SIGINT
+# handler and keeps working through one. Verified live in a tmux pane — the
+# pane's ^C reached the process group, bash's wait returned 130, and the node
+# child ran the turn to completion anyway, orphaned, still spending tokens and
+# still writing over the turn output the next prompt would read. So the turn
+# runs as a background job in its own process group (set -m) and we take it
+# down ourselves rather than relying on the tty signal.
+stop_turn() {
+    [[ -z "$turn_pid" ]] && return
+    local sig attempt
+    for sig in INT TERM KILL; do
+        kill -"$sig" -- "-$turn_pid" 2>/dev/null || kill -"$sig" "$turn_pid" 2>/dev/null || true
+        for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            kill -0 "$turn_pid" 2>/dev/null || return
+            sleep 0.2
+        done
+    done
+}
+
 cleanup() {
+    stop_turn
     if [[ -n "$stty_saved" ]]; then stty "$stty_saved" 2>/dev/null || true; fi
     rm -rf "$workdir"
 }
 # TERM ends the session; INT must not. gc's Provider.Interrupt sends C-c to
-# interrupt the *turn*, and the foreground child already dies from the process
-# group signal — the rc!=0 branch then reports it and the loop continues with
-# the sid intact. Exiting here would kill the pane on every interrupt.
+# interrupt the *turn*: stop the turn, let the rc!=0 branch report it, and keep
+# looping with the sid intact. Exiting here would kill the pane on every
+# interrupt.
 interrupted=0
 trap 'cleanup; exit 0' TERM
-trap 'interrupted=1' INT
+trap 'interrupted=1; stop_turn' INT
 trap cleanup EXIT
 
 # Canonical tty input truncates at 4095 bytes, which silently mangles long
@@ -283,13 +308,31 @@ PY
 # starts with a dash ("Option '--prompt' argument is ambiguous") — markdown
 # bullets and diff lines hit this constantly.
 run_turn() {
+    # set -m puts the turn in its own process group, so stop_turn can take down
+    # the whole subtree and the pane's ^C reaches only this shell — we forward
+    # it deliberately instead of hoping the CLI honors it.
+    set -m
     if [[ -n "$2" ]]; then
         "$NODE_BIN" "$ZCODE_CJS" --json "--resume=$2" "--prompt=$1" \
-            >"$turn_json" 2>"$turn_err" </dev/null
+            >"$turn_json" 2>"$turn_err" </dev/null &
     else
         "$NODE_BIN" "$ZCODE_CJS" --json "--prompt=$1" \
-            >"$turn_json" 2>"$turn_err" </dev/null
+            >"$turn_json" 2>"$turn_err" </dev/null &
     fi
+    turn_pid=$!
+    set +m
+
+    # A trapped signal interrupts wait and yields 128+signo, which is not the
+    # child's status. Re-wait until the child is genuinely reaped.
+    local rc=0
+    while :; do
+        wait "$turn_pid"
+        rc=$?
+        if (( rc > 128 )) && kill -0 "$turn_pid" 2>/dev/null; then continue; fi
+        break
+    done
+    turn_pid=""
+    return "$rc"
 }
 
 report_stderr() {
