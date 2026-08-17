@@ -45,6 +45,11 @@ var (
 	supervisorLaunchctlRun                   = func(args ...string) error {
 		return exec.Command("launchctl", args...).Run()
 	}
+	supervisorLaunchdLoaded = func(label string) (bool, string) {
+		out, err := exec.Command("launchctl", "print", supervisorLaunchdServiceTarget(label)).CombinedOutput()
+		detail := strings.TrimSpace(string(out))
+		return err == nil, detail
+	}
 	supervisorLaunchdActive = func(label string) bool {
 		out, err := exec.Command("launchctl", "print", supervisorLaunchdServiceTarget(label)).Output()
 		return err == nil && launchdPrintReportsRunning(out)
@@ -765,13 +770,7 @@ func unloadSupervisorService() error {
 	case "darwin":
 		path := supervisorLaunchdPlistPath()
 		if _, err := os.Stat(path); err == nil {
-			if err := supervisorLaunchctlRun("unload", path); err != nil {
-				errs = append(errs, fmt.Errorf("launchctl unload %s: %w", path, err))
-			}
-			target := supervisorLaunchdServiceTarget(supervisorLaunchdLabel())
-			if err := supervisorLaunchctlRun("disable", target); err != nil {
-				errs = append(errs, fmt.Errorf("launchctl disable %s: %w", target, err))
-			}
+			errs = append(errs, durablyStopSupervisorLaunchd(supervisorLaunchdLabel(), path)...)
 		} else if !errors.Is(err, os.ErrNotExist) {
 			errs = append(errs, fmt.Errorf("stat launchd plist %s: %w", path, err))
 		}
@@ -789,6 +788,28 @@ func unloadSupervisorService() error {
 		_ = unloadLegacySupervisorSystemd(false)
 	}
 	return errors.Join(errs...)
+}
+
+func durablyStopSupervisorLaunchd(label, plistPath string) []error {
+	target := supervisorLaunchdServiceTarget(label)
+	var errs []error
+	if err := supervisorLaunchctlRun("disable", target); err != nil {
+		errs = append(errs, fmt.Errorf("launchctl disable %s: %w", target, err))
+	}
+	if err := supervisorLaunchctlRun("bootout", target); err != nil {
+		if unloadErr := supervisorLaunchctlRun("unload", plistPath); unloadErr != nil {
+			errs = append(errs, fmt.Errorf("launchctl bootout %s: %w", target, err))
+			errs = append(errs, fmt.Errorf("launchctl unload %s: %w", plistPath, unloadErr))
+		}
+	}
+	if loaded, detail := supervisorLaunchdLoaded(label); loaded {
+		err := fmt.Errorf("launchd target %s is still loaded after stop", target)
+		if detail != "" {
+			err = fmt.Errorf("%w: %s", err, detail)
+		}
+		errs = append(errs, err)
+	}
+	return errs
 }
 
 func newSupervisorLogsCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -1483,12 +1504,12 @@ func supervisorLaunchdServiceTarget(label string) string {
 }
 
 func loadAndStartSupervisorLaunchd(path, label string) error {
-	if err := supervisorLaunchctlRun("load", path); err != nil {
-		return fmt.Errorf("load %s: %w", path, err)
-	}
 	target := supervisorLaunchdServiceTarget(label)
 	if err := supervisorLaunchctlRun("enable", target); err != nil {
 		return fmt.Errorf("enable %s: %w", target, err)
+	}
+	if err := supervisorLaunchctlRun("load", path); err != nil {
+		return fmt.Errorf("load %s: %w", path, err)
 	}
 	if err := supervisorLaunchctlRun("kickstart", "-p", target); err != nil {
 		return fmt.Errorf("kickstart -p %s: %w", target, err)
@@ -1497,12 +1518,12 @@ func loadAndStartSupervisorLaunchd(path, label string) error {
 }
 
 func loadAndStartSupervisorLaunchdForRollback(path, label string, stderr io.Writer) error {
-	if err := supervisorLaunchctlRun("load", path); err != nil {
-		return fmt.Errorf("load %s: %w", path, err)
-	}
 	target := supervisorLaunchdServiceTarget(label)
 	if err := supervisorLaunchctlRun("enable", target); err != nil {
 		warnSupervisorLaunchdRollback(stderr, "enable %s: %v", target, err)
+	}
+	if err := supervisorLaunchctlRun("load", path); err != nil {
+		return fmt.Errorf("load %s: %w", path, err)
 	}
 	if err := supervisorLaunchctlRun("kickstart", "-p", target); err != nil {
 		warnSupervisorLaunchdRollback(stderr, "kickstart -p %s: %v", target, err)

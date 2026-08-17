@@ -2432,7 +2432,7 @@ func TestUnloadSupervisorServiceStopsMatchingLegacyDefaultUnitForIsolatedGCHome(
 	}
 }
 
-func TestUnloadSupervisorServiceDarwinUnloadsAndDisablesCurrentService(t *testing.T) {
+func TestUnloadSupervisorServiceDarwinDisablesBootsOutAndVerifiesAbsent(t *testing.T) {
 	if goruntime.GOOS != "darwin" {
 		t.Skip("launchd path only applies on darwin")
 	}
@@ -2450,24 +2450,71 @@ func TestUnloadSupervisorServiceDarwinUnloadsAndDisablesCurrentService(t *testin
 	}
 
 	oldRun := supervisorLaunchctlRun
+	oldLoaded := supervisorLaunchdLoaded
 	var calls []string
 	supervisorLaunchctlRun = func(args ...string) error {
 		calls = append(calls, strings.Join(args, " "))
 		return nil
 	}
-	t.Cleanup(func() { supervisorLaunchctlRun = oldRun })
+	supervisorLaunchdLoaded = func(string) (bool, string) { return false, "" }
+	t.Cleanup(func() {
+		supervisorLaunchctlRun = oldRun
+		supervisorLaunchdLoaded = oldLoaded
+	})
 
 	if err := unloadSupervisorService(); err != nil {
 		t.Fatalf("unloadSupervisorService returned error: %v", err)
 	}
 
 	target := supervisorLaunchdServiceTarget(supervisorLaunchdLabel())
-	for _, want := range []string{
-		"unload " + path,
+	wantCalls := []string{
 		"disable " + target,
-	} {
-		if !slices.Contains(calls, want) {
-			t.Fatalf("launchctl calls = %v, want %q", calls, want)
+		"bootout " + target,
+	}
+	if strings.Join(calls, "|") != strings.Join(wantCalls, "|") {
+		t.Fatalf("launchctl calls = %v, want %v", calls, wantCalls)
+	}
+	if strings.Contains(strings.Join(calls, "|"), "unload "+path) {
+		t.Fatalf("launchctl calls = %v, should not use legacy unload after bootout succeeds", calls)
+	}
+}
+
+func TestUnloadSupervisorServiceDarwinFailsWhenTargetStillLoaded(t *testing.T) {
+	if goruntime.GOOS != "darwin" {
+		t.Skip("launchd path only applies on darwin")
+	}
+	homeDir := t.TempDir()
+	gcHome := filepath.Join(t.TempDir(), "isolated-home")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", gcHome)
+
+	path := supervisorLaunchdPlistPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("<plist/>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	oldRun := supervisorLaunchctlRun
+	oldLoaded := supervisorLaunchdLoaded
+	supervisorLaunchctlRun = func(_ ...string) error { return nil }
+	supervisorLaunchdLoaded = func(label string) (bool, string) {
+		return true, "state = running\npid = 4242\nlabel = " + label
+	}
+	t.Cleanup(func() {
+		supervisorLaunchctlRun = oldRun
+		supervisorLaunchdLoaded = oldLoaded
+	})
+
+	err := unloadSupervisorService()
+	if err == nil {
+		t.Fatal("unloadSupervisorService returned nil, want loaded launchd target failure")
+	}
+	got := err.Error()
+	for _, want := range []string{"launchd target", "still loaded", supervisorLaunchdLabel(), "pid = 4242"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("error = %q, want %q", got, want)
 		}
 	}
 }
@@ -2494,10 +2541,12 @@ func TestUnloadSupervisorServiceDarwinReturnsLaunchctlFailures(t *testing.T) {
 	supervisorLaunchctlRun = func(args ...string) error {
 		calls = append(calls, strings.Join(args, " "))
 		switch args[0] {
-		case "unload":
-			return errors.New("unload denied")
 		case "disable":
 			return errors.New("disable denied")
+		case "bootout":
+			return errors.New("bootout denied")
+		case "unload":
+			return errors.New("unload denied")
 		default:
 			return nil
 		}
@@ -2508,14 +2557,15 @@ func TestUnloadSupervisorServiceDarwinReturnsLaunchctlFailures(t *testing.T) {
 	if err == nil {
 		t.Fatal("unloadSupervisorService returned nil, want launchctl failure")
 	}
-	for _, want := range []string{"launchctl unload", "unload denied", "launchctl disable", "disable denied"} {
+	for _, want := range []string{"launchctl disable", "disable denied", "launchctl bootout", "bootout denied", "launchctl unload", "unload denied"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error = %q, want it to contain %q", err.Error(), want)
 		}
 	}
 	target := supervisorLaunchdServiceTarget(supervisorLaunchdLabel())
-	if !slices.Contains(calls, "disable "+target) {
-		t.Fatalf("launchctl calls = %v, want disable attempted after unload failure", calls)
+	wantCalls := []string{"disable " + target, "bootout " + target, "unload " + path}
+	if strings.Join(calls, "|") != strings.Join(wantCalls, "|") {
+		t.Fatalf("launchctl calls = %v, want %v", calls, wantCalls)
 	}
 }
 
@@ -3323,8 +3373,8 @@ func TestInstallSupervisorLaunchdEnablesAndKickstartsLoadedService(t *testing.T)
 	target := "gui/" + strconv.Itoa(os.Getuid()) + "/" + label
 	wantSequence := []string{
 		"unload " + path,
-		"load " + path,
 		"enable " + target,
+		"load " + path,
 		"kickstart -p " + target,
 	}
 	last := -1
@@ -5850,7 +5900,7 @@ func TestStopSupervisorWithWaitFailsWhenPlatformServiceDoesNotStop(t *testing.T)
 	}
 }
 
-func TestStopSupervisorWithWaitFailsWhenLaunchdUnloadFails(t *testing.T) {
+func TestStopSupervisorWithWaitFailsWhenLaunchdStopFails(t *testing.T) {
 	if goruntime.GOOS != "darwin" {
 		t.Skip("launchd path only applies on darwin")
 	}
@@ -5873,7 +5923,10 @@ func TestStopSupervisorWithWaitFailsWhenLaunchdUnloadFails(t *testing.T) {
 	var calls []string
 	supervisorLaunchctlRun = func(args ...string) error {
 		calls = append(calls, strings.Join(args, " "))
-		if len(args) > 0 && args[0] == "unload" {
+		switch args[0] {
+		case "bootout":
+			return errors.New("launchd bootout denied")
+		case "unload":
 			return errors.New("launchd unload denied")
 		}
 		return nil
@@ -5902,11 +5955,14 @@ func TestStopSupervisorWithWaitFailsWhenLaunchdUnloadFails(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("stopSupervisorWithWait code = %d, want 1; stdout=%q stderr=%q launchctlCalls=%v", code, stdout.String(), stderr.String(), calls)
 	}
-	if !slices.Contains(calls, "unload "+plistPath) {
-		t.Fatalf("launchctl calls = %v, want unload of %s", calls, plistPath)
+	target := supervisorLaunchdServiceTarget(supervisorLaunchdLabel())
+	for _, want := range []string{"disable " + target, "bootout " + target, "unload " + plistPath} {
+		if !slices.Contains(calls, want) {
+			t.Fatalf("launchctl calls = %v, want %q", calls, want)
+		}
 	}
 	if strings.Contains(stdout.String(), "Supervisor stopped.") {
-		t.Fatalf("stdout unexpectedly contains success when launchd unload failed: %q", stdout.String())
+		t.Fatalf("stdout unexpectedly contains success when launchd stop failed: %q", stdout.String())
 	}
 }
 
