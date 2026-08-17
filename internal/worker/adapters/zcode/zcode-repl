@@ -148,6 +148,9 @@ turn_pid=""
 # down ourselves rather than relying on the tty signal.
 stop_turn() {
     [[ -z "$turn_pid" ]] && return
+    # Announce it: without this the pane cannot distinguish "the interrupt was
+    # never delivered" from "the interrupt was delivered and the CLI shrugged".
+    printf 'zcode-repl interrupting turn\n'
     local sig attempt
     for sig in INT TERM KILL; do
         kill -"$sig" -- "-$turn_pid" 2>/dev/null || kill -"$sig" "$turn_pid" 2>/dev/null || true
@@ -303,6 +306,30 @@ except OSError as exc:
     print(f"zcode-repl: transcript mirror failed: {exc}", file=sys.stderr)
 PY
 
+# A headless turn prints nothing until it finishes, so without an announcement
+# the pane's last line stays the previous turn's ready marker — indistinguishable
+# from idle to an operator and to anything watching the pane.
+#
+# The announcement must be transient, not just present. A busy line that
+# survives into the next idle period is worse than none: gc's interrupt path
+# watches the pane to decide the turn is really in flight, and a leftover line
+# from the previous turn made it fire while this shell was still reading stdin,
+# so there was no child to kill and the "interrupted" turn ran to completion
+# (observed live, twice). On a tty the line is therefore written without a
+# newline and erased when the turn ends, so it exists exactly while the turn
+# does. Off a tty (piped, as in tests) it is a plain line.
+announce_turn() {
+    if [[ -t 1 ]]; then
+        printf '%s' "$BUSY"
+    else
+        printf '%s\n' "$BUSY"
+    fi
+}
+
+clear_turn_announcement() {
+    if [[ -t 1 ]]; then printf '\r\033[2K'; fi
+}
+
 # run_turn <prompt> <sid|"">. Single-argv --opt=value forms throughout: the CLI
 # uses node:util parseArgs, which rejects the two-argv form when the value
 # starts with a dash ("Option '--prompt' argument is ambiguous") — markdown
@@ -323,12 +350,7 @@ run_turn() {
     turn_pid=$!
     set +m
 
-    # Announce only once the child exists. Announcing first is observably
-    # racy: an observer that interrupts the moment the pane says "busy" would
-    # arrive while turn_pid is still empty, stop_turn would have nothing to
-    # kill, and the turn would run to completion anyway (that is exactly how
-    # live WI-INT recorded a completed "interrupted" turn).
-    printf '%s\n' "$BUSY"
+    announce_turn
 
     # A trapped signal interrupts wait and yields 128+signo, which is not the
     # child's status. Re-wait until the child is genuinely reaped.
@@ -340,6 +362,7 @@ run_turn() {
         break
     done
     turn_pid=""
+    clear_turn_announcement
     return "$rc"
 }
 

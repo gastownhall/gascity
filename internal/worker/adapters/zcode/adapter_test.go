@@ -748,6 +748,9 @@ func TestInterruptKillsASigintIgnoringTurn(t *testing.T) {
 	if _, err := os.Stat(doneFile); err == nil {
 		t.Fatal("the interrupted turn ran to completion; it must be killed, not orphaned")
 	}
+	if !strings.Contains(s.output(), "zcode-repl interrupting turn") {
+		t.Fatalf("the interrupt was not announced in the pane:\n%s", s.output())
+	}
 
 	s.signal(syscall.SIGTERM)
 	if _, code := s.wait(); code != 0 {
