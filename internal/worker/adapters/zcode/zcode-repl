@@ -79,8 +79,8 @@ if ! command -v python3 >/dev/null 2>&1; then
     die_config "python3 not found (needed to decode the CLI's JSON turn output)"
 fi
 
-# Session key for sid persistence. gc stamps GC_SESSION into the pane env;
-# GC_SESSION_NAME is checked first for host-session setups.
+# Session key for sid persistence. gc stamps GC_SESSION_NAME into the pane env;
+# GC_SESSION is checked as a fallback for host-session setups.
 sid_key() {
     local key
     for key in "${GC_SESSION_NAME:-}" "${GC_SESSION:-}"; do
@@ -96,7 +96,26 @@ sid_key() {
 state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
 sid_dir="$state_home/gascity/zcode/sids"
 mkdir -p "$sid_dir"
-sid_path="$sid_dir/$(sid_key | tr -c 'A-Za-z0-9._-' '_')"
+sid_name="$(sid_key | tr -c 'A-Za-z0-9._-' '_')"
+
+# The sid file is scoped to the session's continuation epoch, which is how gc
+# distinguishes "resume the same conversation" from "start a fresh one".
+# GC_RUNTIME_EPOCH bumps on every wake (a plain restart included), so it cannot
+# be used here; GC_CONTINUATION_EPOCH bumps only when gc commits a conversation
+# reset (`gc session reset` sets continuation_reset_pending, and the pre-wake
+# commit increments the epoch). Restart therefore lands on the same sid file and
+# resumes, while reset lands on a new one and starts fresh — the same fresh-wake
+# semantics a resume-flag provider gets when gc clears its session key.
+continuation_epoch="${GC_CONTINUATION_EPOCH:-1}"
+continuation_epoch="${continuation_epoch//[^0-9]/}"
+: "${continuation_epoch:=1}"
+sid_path="$sid_dir/$sid_name#$continuation_epoch"
+
+# Drop this session's superseded epochs so the sid dir does not grow one file
+# per reset for the life of the host.
+for stale in "$sid_dir/$sid_name"#*; do
+    if [[ -f "$stale" && "$stale" != "$sid_path" ]]; then rm -f "$stale"; fi
+done
 
 # Export-mirror root. Gas City's transcript discovery
 # (sessionlog.DefaultZCodeSearchPaths) reads ~/.local/share/gascity/

@@ -332,14 +332,19 @@ func (h *harness) resetLog() {
 }
 
 func (h *harness) sidPath(key string) string {
-	return filepath.Join(h.home, ".local", "state", "gascity", "zcode", "sids", key)
+	epoch := h.env["GC_CONTINUATION_EPOCH"]
+	if epoch == "" {
+		epoch = "1"
+	}
+	return filepath.Join(h.home, ".local", "state", "gascity", "zcode", "sids", key+"#"+epoch)
 }
 
-func (h *harness) sid(key string) string {
+// sid reads the persisted provider session id for the harness's session key.
+func (h *harness) sid() string {
 	h.t.Helper()
-	data, err := os.ReadFile(h.sidPath(key))
+	data, err := os.ReadFile(h.sidPath("test-session"))
 	if err != nil {
-		h.t.Fatalf("read sid %s: %v", key, err)
+		h.t.Fatalf("read sid: %v", err)
 	}
 	return strings.TrimSpace(string(data))
 }
@@ -499,7 +504,7 @@ func TestFailedTurnKeepsLoopingAndPreservesSid(t *testing.T) {
 	if strings.Contains(out, "starting fresh") {
 		t.Fatalf("a live sid must not trigger stale-session fallback:\n%s", out)
 	}
-	if got := h.sid("test-session"); got != "sess_keep" {
+	if got := h.sid(); got != "sess_keep" {
 		t.Fatalf("sid = %q, want sess_keep", got)
 	}
 }
@@ -634,7 +639,7 @@ func TestSidRoundTripsAcrossRestarts(t *testing.T) {
 	h := newHarness(t, map[string]string{"STUB_SID": "sess_persisted"})
 	h.run("first process\n")
 
-	if got := h.sid("test-session"); got != "sess_persisted" {
+	if got := h.sid(); got != "sess_persisted" {
 		t.Fatalf("sid = %q, want sess_persisted", got)
 	}
 
@@ -670,6 +675,45 @@ func TestStaleSidFallsBackToAFreshSession(t *testing.T) {
 	want := []string{"recover please", "recover please"}
 	if got := h.prompts(); !equalStrings(got, want) {
 		t.Fatalf("prompts = %q, want the same prompt retried once: %q", got, want)
+	}
+}
+
+// A conversation reset must not resume: gc bumps GC_CONTINUATION_EPOCH when it
+// commits one, and a plain restart leaves it alone.
+func TestContinuationEpochScopesTheSid(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, map[string]string{"STUB_SID": "sess_epoch_1"})
+	h.env["GC_CONTINUATION_EPOCH"] = "1"
+	h.run("first conversation\n")
+	if got := h.sid(); got != "sess_epoch_1" {
+		t.Fatalf("sid = %q, want sess_epoch_1", got)
+	}
+
+	// Restart at the same epoch resumes.
+	h.resetLog()
+	h.run("same conversation\n")
+	if call := h.calls()[0]; !containsString(call, "--resume=sess_epoch_1") {
+		t.Fatalf("restart at the same epoch did not resume: %q", call)
+	}
+
+	// Reset bumps the epoch: the first turn must be a fresh session.
+	h.resetLog()
+	h.env["GC_CONTINUATION_EPOCH"] = "2"
+	h.env["STUB_SID"] = "sess_epoch_2"
+	h.run("fresh conversation\n")
+	for _, arg := range h.calls()[0] {
+		if strings.HasPrefix(arg, "--resume=") {
+			t.Fatalf("reset still resumed the prior conversation: %q", arg)
+		}
+	}
+	if got := h.sid(); got != "sess_epoch_2" {
+		t.Fatalf("post-reset sid = %q, want sess_epoch_2", got)
+	}
+	// The superseded epoch's sid file is pruned, not left to accumulate.
+	stale := filepath.Join(h.home, ".local", "state", "gascity", "zcode", "sids", "test-session#1")
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("superseded epoch sid file still present: %v", err)
 	}
 }
 
