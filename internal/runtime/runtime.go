@@ -43,6 +43,36 @@ var ErrSessionDiedDuringStartup = errors.New("session died during startup")
 // dispatch with errors.Is.
 var ErrSessionNotFound = errors.New("session not found")
 
+// ErrExecUnsupported reports that a provider implements [ExecProvider] but the
+// underlying runtime does not implement the RPP `exec` wire op (it answered
+// exit 2). Carriers treat this as "fall back to the legacy driving op".
+var ErrExecUnsupported = errors.New("runtime does not implement the exec op")
+
+// ErrRuntimeUnavailable reports that a runtime-liveness query could not observe
+// the underlying runtime at all — the tmux server was unreachable, the process
+// table could not be scanned, etc. It is the runtime-side analog of a partial
+// bead-store read: an observation FAILURE, not the fact "no sessions exist". A
+// destructive reconciler arm (close-as-orphaned, heal-to-asleep, sweep) must
+// treat it as "I could not tell" and defer, exactly as it defers on a partial
+// store read (storeQueryPartial) — never as ground truth that every session is
+// gone. Providers wrap it (with errors.Is-visible provider-specific causes) so
+// callers can dispatch on it with errors.Is.
+//
+// This is distinct from [PartialListError]. ErrRuntimeUnavailable is the
+// single-observation-total-failure signal: zero usable data, used to preserve
+// StateCache last-known-good. PartialListError is the multi-backend-merge
+// signal: partial-but-usable results from [MergeBackendListResults], which does
+// not even emit PartialListError for a total failure. The two are intentionally
+// separate signals for separate call paths.
+var ErrRuntimeUnavailable = errors.New("runtime unavailable: liveness observation failed")
+
+// ErrRelaunchUnsupported reports that the underlying runtime cannot relaunch the
+// agent in a warm box (it is not a [RelaunchProvider], or is conjoined like
+// subprocess/acp/t3bridge). Composite/wrapping providers return it from their
+// own [RelaunchProvider.Relaunch] when the routed/wrapped backend does not
+// support relaunch; the reconciler treats it as "fall back to full Stop+Start".
+var ErrRelaunchUnsupported = errors.New("runtime does not support warm-box relaunch")
+
 // IsSessionGone reports whether err represents a "the session is not
 // there" condition — either ErrSessionNotFound or the legacy provider
 // phrasings that predate the sentinel (tmux/subprocess providers may
@@ -235,6 +265,27 @@ type IdleWaitProvider interface {
 	WaitForIdle(ctx context.Context, name string, timeout time.Duration) error
 }
 
+// ExecProvider is an optional extension for runtimes that expose the RPP
+// connection primitive: run a command inside the box and return its standard
+// output and exit code. It is the op a [Carrier] drives the session-interaction
+// verbs (Nudge / Peek / SendKeys / Interrupt / ClearScrollback) through. The
+// exec Provider drives over it via the tmux carrier and falls back to the
+// dedicated wire ops when Exec returns [ErrExecUnsupported]. A caller using an
+// ExecProvider directly must likewise handle a provider that does not implement
+// ExecProvider, or an Exec that returns [ErrExecUnsupported] (the provider type
+// supports Exec but the underlying runtime does not implement the wire op).
+//
+// argv is the command and its arguments (no shell interpretation by the
+// caller). output is the command's standard output, verbatim. code is the
+// command's exit code: 0 on success, non-zero is the command's own result and
+// is NOT an error; providers whose transport cannot observe the numeric code
+// report 1 for any non-zero exit. A non-nil err signals the op could not run
+// at all (transport/spawn failure, including context cancellation/timeout) or
+// [ErrExecUnsupported] — distinct from a non-zero exit code.
+type ExecProvider interface {
+	Exec(ctx context.Context, name string, argv []string) (output []byte, code int, err error)
+}
+
 // DialogProvider is an optional extension for runtimes that can detect and
 // dismiss known startup-style dialogs (workspace trust, bypass permissions,
 // rate-limit prompts) on an already-running session.
@@ -277,6 +328,22 @@ type InterruptedTurnResetProvider interface {
 // prompt into a session that still intends to finish the interrupted turn.
 type InterruptBoundaryWaitProvider interface {
 	WaitForInterruptBoundary(ctx context.Context, name string, since time.Time, timeout time.Duration) error
+}
+
+// RelaunchProvider is an optional extension for runtimes that can re-launch the
+// agent inside an already-provisioned (warm) box WITHOUT re-provisioning it — the
+// runtime/transport un-weld payoff. The reconciler calls Relaunch on a launch-only
+// config change (LaunchFingerprint moved, ProvisionFingerprint unchanged) instead
+// of a full Stop+Start. A missing box yields ErrSessionNotFound; the box, its env,
+// and any staged files are reused. Runtimes whose agent IS the box (subprocess /
+// acp / t3bridge) do NOT implement this — the reconciler falls back to Stop+Start
+// for them.
+//
+// tmux / ssh / k8s implement it directly (respawn-pane in the warm box); the exec
+// provider relaunches the agent over the exec op for a separable pack and falls
+// back to Stop+Start for a welded pack. See worker-runtime-transport-unweld-v0.md.
+type RelaunchProvider interface {
+	Relaunch(ctx context.Context, name string, cfg Config) error
 }
 
 // LiveRuntime identifies a single agent runtime process discovered via
@@ -373,6 +440,21 @@ type CopyEntry struct {
 // runtime-generated Python cache and editor backup artifacts. Returns empty
 // string on any error (caller should treat as "unknown").
 func HashPathContent(path string) string {
+	return HashPathContentExcluding(path, nil)
+}
+
+// HashPathContentExcluding is HashPathContent with an extra per-file filter:
+// when path is a directory, any file whose slash-separated path relative to
+// path satisfies skip is left out of the hashed manifest. The file stays on
+// disk and is still staged — it just does not contribute to the fingerprint. A
+// nil skip hashes everything, byte-identical to HashPathContent. skip is only
+// consulted for regular files (never directories, never the single-file case).
+//
+// This lets a caller keep a probed directory entry content-fingerprinted while
+// excluding files whose changes must NOT cascade a config-drift restart — e.g.
+// operational/host-tooling scripts under .gc/scripts (issue #3840), mirroring
+// the path-only treatment .gc/settings.json already receives.
+func HashPathContentExcluding(path string, skip func(rel string) bool) string {
 	info, err := os.Stat(path)
 	if err != nil {
 		return ""
@@ -407,6 +489,9 @@ func HashPathContent(path string) string {
 			return nil
 		}
 		if d.IsDir() {
+			return nil
+		}
+		if skip != nil && skip(filepath.ToSlash(rel)) {
 			return nil
 		}
 		entries = append(entries, rel)
@@ -468,6 +553,15 @@ type Config struct {
 	// Lifecycle describes whether the command is long-lived or expected to
 	// exit after one turn. Empty means the default long-lived session lifecycle.
 	Lifecycle Lifecycle
+
+	// Upstream is the model-serving selection identity ("anthropic", "bedrock",
+	// "proxy:<name>") — WHO serves+resolves the model. It is hashed into the
+	// LAUNCH half of the fingerprint (Phase C), so switching upstream relaunches
+	// the agent in the warm box (B2.3) rather than reprovisioning; the resolved
+	// serving env (ANTHROPIC_BASE_URL/_API_KEY, injected into Env) is deliberately
+	// NOT hashed, so a credential rotation never moves a fingerprint. Empty = no
+	// upstream selected (behavior-identical; contributes nothing to the hash).
+	Upstream string
 
 	// Env is additional environment variables set in the session.
 	Env map[string]string
@@ -585,6 +679,15 @@ func OverlayProviderNames(cfg Config) []string {
 
 // OverlayProviderNamesFromParts returns the effective provider overlay slots
 // for a launch provider, concrete overlay provider, and installed hooks.
+//
+// The concrete providerOverlayName is the primary slot, falling back to the
+// launch family providerName only when the concrete name is empty. Callers that
+// stage onto a real overlay source should instead use
+// EffectiveOverlayProviderNames, which downgrades a concrete name with no
+// per-provider/<concrete>/ directory to the family so a custom provider (e.g.
+// base="builtin:pi" "pi-vllm", which has no per-provider/pi-vllm/ overlay)
+// still stages the family overlay where its hooks live (gc-6bw8o), while a
+// provider that ships its own overlay (e.g. Kiro) keeps it.
 func OverlayProviderNamesFromParts(providerName, providerOverlayName string, installAgentHooks []string) []string {
 	primary := strings.TrimSpace(providerOverlayName)
 	if primary == "" {

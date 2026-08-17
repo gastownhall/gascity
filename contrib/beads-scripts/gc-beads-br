@@ -242,6 +242,12 @@ case "$op" in
 
   update)
     id="$1"
+    # KNOWN GAP: this op does not yet forward title, status, type, priority or
+    # remove_labels, all of which the update request may carry (see
+    # docs/reference/exec-beads-provider.md). The Store conformance suite's
+    # UpdateRoundTripsEveryDocumentedField subtest covers them, so
+    # TestBrProviderConformance (build tag: integration, requires br on PATH)
+    # will report exactly which ones br can express.
     input=$(cat)
     cmd_args=(br update --json "$id")
 
@@ -279,7 +285,10 @@ case "$op" in
     if [ "$status" = "closed" ]; then
       exit 0
     fi
-    br close --json "$id" > /dev/null
+    # --force: same generic exec Store.Close delegate as gc-beads-k8s (br backend).
+    # Closes agent-owned beads under the controller/reaper actor, so it must bypass
+    # the cross-actor close guard, mirroring the SDK BdStore's always-force close.
+    br close --force --json "$id" > /dev/null
     ;;
 
   list)

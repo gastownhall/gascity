@@ -123,6 +123,70 @@ func TestAgentNotFoundMsg(t *testing.T) {
 	}
 }
 
+func TestImportBindingOf(t *testing.T) {
+	cases := map[string]string{
+		"gc.run-operator":          "gc",
+		"todo-app/gc.run-operator": "gc",
+		"mayor":                    "",
+		"hw/polecat-2":             "",
+		"":                         "",
+		".leading-dot":             "",
+	}
+	for in, want := range cases {
+		if got := importBindingOf(in); got != want {
+			t.Errorf("importBindingOf(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestAgentNotFoundMsgUninstalledImportHint covers gascity#3832: when a
+// not-found target names a declared-but-uninstalled pack import, the message
+// must point at `gc import install` rather than just a "did you mean?" list.
+func TestAgentNotFoundMsgUninstalledImportHint(t *testing.T) {
+	const rolesSrc = "https://github.com/gastownhall/gascity-packs/tree/main/gascity/roles"
+
+	// Declared (as a default rig import) but no agent with that binding is
+	// composed → install hint with the declared source.
+	declared := &config.City{
+		Agents:            []config.Agent{{Name: "mayor"}},
+		DefaultRigImports: map[string]config.Import{"gc": {Source: rolesSrc}},
+	}
+	msg := agentNotFoundMsg("gc sling", "gc.run-operator", declared)
+	if !strings.Contains(msg, "gc import install") {
+		t.Errorf("declared-but-uninstalled should advise install: %q", msg)
+	}
+	if !strings.Contains(msg, rolesSrc) {
+		t.Errorf("install hint should include the declared source: %q", msg)
+	}
+	if strings.Contains(msg, "did you mean") {
+		t.Errorf("install hint should replace the did-you-mean noise: %q", msg)
+	}
+
+	// Same miss, but resolved via a rig-qualified target → still hint.
+	if msg := agentNotFoundMsg("gc sling", "todo-app/gc.run-operator", declared); !strings.Contains(msg, "gc import install") {
+		t.Errorf("rig-qualified miss should advise install: %q", msg)
+	}
+
+	// Declared AND installed (an agent carries the binding) → the miss is a
+	// typo, not a missing pack, so do NOT advise install.
+	installed := &config.City{
+		Agents: []config.Agent{
+			{Name: "mayor"},
+			{Name: "gc.run-operator", Dir: "todo-app"},
+		},
+		Imports: map[string]config.Import{"gc": {Source: rolesSrc}},
+	}
+	if msg := agentNotFoundMsg("gc sling", "todo-app/gc.run-oprator", installed); strings.Contains(msg, "gc import install") {
+		t.Errorf("installed pack + typo'd name should not advise install: %q", msg)
+	}
+
+	// Unknown binding → fall back to the available-agents list (no install hint).
+	unknown := &config.City{Agents: []config.Agent{{Name: "mayor"}}}
+	if msg := agentNotFoundMsg("gc sling", "gc.run-operator", unknown); strings.Contains(msg, "gc import install") {
+		t.Errorf("unknown binding should not advise install: %q", msg)
+	}
+}
+
 func TestRigNotFoundMsg(t *testing.T) {
 	cfg := &config.City{
 		Rigs: []config.Rig{

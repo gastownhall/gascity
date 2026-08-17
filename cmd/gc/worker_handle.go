@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/materialize"
+	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -25,6 +26,16 @@ func workerSessionCatalogWithConfig(cityPath string, store beads.Store, sp runti
 }
 
 func workerFactoryWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City) (*worker.Factory, error) {
+	return workerFactoryWithStaleKeyDetectionWaiter(cityPath, store, sp, cfg, nil)
+}
+
+func workerFactoryWithStaleKeyDetectionWaiter(
+	cityPath string,
+	store beads.Store,
+	sp runtime.Provider,
+	cfg *config.City,
+	waiter session.StaleKeyDetectionWaiter,
+) (*worker.Factory, error) {
 	var (
 		resolveTransport func(template, provider string) string
 		searchPaths      []string
@@ -66,14 +77,15 @@ func workerFactoryWithConfig(cityPath string, store beads.Store, sp runtime.Prov
 		searchPaths = worker.MergeSearchPaths(cfg.Daemon.ObservePaths)
 	}
 	return worker.NewFactory(worker.FactoryConfig{
-		Store:                 store,
-		Provider:              sp,
-		CityPath:              cityPath,
-		SearchPaths:           searchPaths,
-		UsageSink:             usageSinkForCity(cfg, cityPath),
-		ResolveTransport:      resolveTransport,
-		ResolveSessionRuntime: workerSessionRuntimeResolverWithConfig(cityPath, cfg),
-		Pricing:               cfg.PricingRegistry(),
+		Store:                   store,
+		Provider:                sp,
+		CityPath:                cityPath,
+		SearchPaths:             searchPaths,
+		UsageSink:               usageSinkForCity(cfg, cityPath),
+		ResolveTransport:        resolveTransport,
+		ResolveSessionRuntime:   workerSessionRuntimeResolverWithConfig(cityPath, cfg),
+		StaleKeyDetectionWaiter: waiter,
+		Pricing:                 cfg.PricingRegistry(),
 	})
 }
 
@@ -124,6 +136,39 @@ func workerSessionCreateHints(resolved *config.ResolvedProvider) runtime.Config 
 	return hints.ToRuntimeConfig()
 }
 
+// applyWorkerOverlayHints populates the provider-overlay staging fields
+// (ProviderName/ProviderOverlayName/InstallAgentHooks/PackOverlayDirs) on a
+// worker create/resume runtime.Config, mirroring the canonical create-time
+// sourcing in cmd/gc/template_resolve.go (resolveTemplate). The worker.Factory
+// create and resume paths build runtime.Config directly and never route through
+// resolveTemplate, so without this they leave these fields empty:
+// OverlayProviderNames then falls back to ProviderName="" and the per-provider
+// overlay (e.g. core/overlay/per-provider/pi/.pi/extensions/gc-hooks.js for a
+// custom base="builtin:pi" provider) is never staged, the harness never signals
+// ready, and the controller churns into a fall-back-to-claude loop (gc-6bw8o).
+// Best-effort: a missing cfg/resolved (CLI direct-start fallback) leaves the
+// config untouched rather than failing the start.
+func applyWorkerOverlayHints(hints *runtime.Config, cfg *config.City, cityPath, template string, resolved *config.ResolvedProvider) {
+	if hints == nil || cfg == nil || resolved == nil {
+		return
+	}
+	// ProviderName is the launch family (BuiltinAncestor, e.g. "pi" for a
+	// base="builtin:pi" provider); ProviderOverlayName is the concrete provider
+	// name — identical to resolveTemplate's hint assignment.
+	hints.ProviderName = resolvedProviderLaunchFamily(resolved)
+	hints.ProviderOverlayName = strings.TrimSpace(resolved.Name)
+	agentCfg := findAgentByTemplate(cfg, template)
+	if agentCfg == nil {
+		// No agent config to resolve install-hooks/rig overlay scope against
+		// (e.g. a synthetic session). Still stage city pack overlays.
+		hints.PackOverlayDirs = effectiveOverlayDirs(cfg.PackOverlayDirs, cfg.RigOverlayDirs, "")
+		return
+	}
+	hints.InstallAgentHooks = config.ResolveInstallHooks(agentCfg, &cfg.Workspace)
+	rigName := sessionSetupContextForAgent(cityPath, cfg.EffectiveCityName(), firstNonEmptyGCString(agentCfg.QualifiedName(), template), agentCfg, cfg.Rigs).Rig
+	hints.PackOverlayDirs = effectiveOverlayDirs(cfg.PackOverlayDirs, cfg.RigOverlayDirs, rigName)
+}
+
 func resolvedRuntimeMCPServersWithConfig(
 	cityPath string,
 	cfg *config.City,
@@ -148,14 +193,14 @@ func resolvedRuntimeMCPServersWithConfig(
 		identity = strings.TrimSpace(provider)
 	}
 	if agentCfg := findAgentByTemplate(cfg, template); agentCfg != nil {
-		catalog, err := materialize.EffectiveMCPForSession(cfg, cityPath, agentCfg, identity, workDir)
+		catalog, err := materialize.EffectiveMCPForSession(cfg, cityPath, agentCfg, identity, workDir, config.QueryTopology{})
 		if err != nil {
 			return nil, fmt.Errorf("loading effective MCP: %w", err)
 		}
 		return materialize.RuntimeMCPServers(catalog.Servers), nil
 	}
 	synthetic := &config.Agent{Provider: provider}
-	catalog, err := materialize.EffectiveMCPForSession(cfg, cityPath, synthetic, identity, workDir)
+	catalog, err := materialize.EffectiveMCPForSession(cfg, cityPath, synthetic, identity, workDir, config.QueryTopology{})
 	if err != nil {
 		return nil, fmt.Errorf("loading effective MCP: %w", err)
 	}
@@ -245,6 +290,11 @@ func newWorkerSessionHandleForResolvedRuntimeWithConfig(
 	if err != nil {
 		return nil, err
 	}
+	// Stage provider-overlay hooks on the CLI create path the same way the
+	// reconciler create path does; resolvedWorkerSessionConfigWithConfig builds
+	// runtime.Config directly and never routes through resolveTemplate
+	// (gc-6bw8o).
+	applyWorkerOverlayHints(&sessionCfg.Runtime.Hints, cfg, cityPath, template, resolved)
 	return factory.SessionForResolvedRuntime(sessionCfg)
 }
 
@@ -300,7 +350,12 @@ func resolvedWorkerSessionConfigWithConfig(
 	// reseed at resolvedWorkerRuntimeWithConfigAndMetadata and the
 	// API-side seeding in internal/api/session_resolved_config.go.
 	// Regression for upstream gastownhall/gascity#101 (re-opened).
-	sessionEnv := mergeEnv(providerProcessPassthroughEnv(), resolved.Env)
+	//
+	// The controller-only overlay goes last for the same reason it does in
+	// template_resolve.go: resolved.Env is config-authored, so a provider spec
+	// naming one of those keys would otherwise overwrite the empty value the
+	// passthrough pinned. This resolver never routes through ScrubTokenEnv.
+	sessionEnv := mergeEnv(providerProcessPassthroughEnv(), resolved.Env, processenv.ControllerOnlyEnvOverlay())
 	if strings.TrimSpace(cityPath) != "" {
 		sessionEnv = mergeEnv(sessionEnv, cityIdentityAnchorsForCity(cityPath))
 	}
@@ -333,7 +388,18 @@ func resolvedWorkerSessionConfigWithConfig(
 }
 
 func workerHandleForSessionWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, id string) (worker.Handle, error) {
-	factory, err := workerFactoryWithConfig(cityPath, store, sp, cfg)
+	return workerHandleForSessionWithStaleKeyDetectionWaiter(cityPath, store, sp, cfg, id, nil)
+}
+
+func workerHandleForSessionWithStaleKeyDetectionWaiter(
+	cityPath string,
+	store beads.Store,
+	sp runtime.Provider,
+	cfg *config.City,
+	id string,
+	waiter session.StaleKeyDetectionWaiter,
+) (worker.Handle, error) {
+	factory, err := workerFactoryWithStaleKeyDetectionWaiter(cityPath, store, sp, cfg, waiter)
 	if err != nil {
 		return nil, err
 	}
@@ -354,8 +420,8 @@ func workerHandleForSessionTargetWithRuntimeHintsWithConfig(cityPath string, sto
 		return nil, err
 	}
 	if store != nil {
-		if bead, _, err := session.ResolveSessionBeadByExactID(store, target); err == nil {
-			return factory.SessionByLoadedBead(bead)
+		if info, pr, err := session.ResolveSessionRecordByExactID(store, target); err == nil {
+			return factory.SessionByRecord(info, pr)
 		}
 		if id, err := session.ResolveSessionID(store, target); err == nil {
 			return factory.SessionByID(id)
@@ -537,7 +603,7 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 	// dispatcher trace path is per-dispatcher-qualified and must not be
 	// overwritten with the city-uniform default here. template_resolve.go
 	// owns the qualified override for the CLI create path.
-	sessionEnv := mergeEnv(providerProcessPassthroughEnv(), resolved.Env, cityIdentityAnchorsForCity(cityPath))
+	sessionEnv := mergeEnv(providerProcessPassthroughEnv(), resolved.Env, cityIdentityAnchorsForCity(cityPath), processenv.ControllerOnlyEnvOverlay())
 	// Resolve session_live so resumed sessions get re-themed (status bar,
 	// keybindings) the same way reconciler-started sessions do. Without this,
 	// `gc session attach` recreates the tmux runtime with an empty
@@ -574,6 +640,10 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 	runtimeHints.WorkDir = workDir
 	runtimeHints.Env = sessionEnv
 	runtimeHints.MCPServers = mcpServers
+	// Stage provider-overlay hooks on resume the same way the reconciler create
+	// path does; this resume resolver builds runtime.Config directly and never
+	// routes through resolveTemplate (gc-6bw8o).
+	applyWorkerOverlayHints(&runtimeHints, cfg, cityPath, info.Template, resolved)
 	return &worker.ResolvedRuntime{
 		Command:    command,
 		WorkDir:    workDir,

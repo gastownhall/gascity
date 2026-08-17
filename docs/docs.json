@@ -5,7 +5,7 @@
   "logo": {
     "light": "/images/logo-wordmark.svg",
     "dark": "/images/logo-wordmark.svg",
-    "href": "https://docs.gascityhall.com"
+    "href": "https://docs.gascity.com"
   },
   "favicon": "/images/favicon.png",
   "navbar": {
@@ -150,8 +150,10 @@
           "index",
           "getting-started/installation",
           "getting-started/quickstart",
+          "getting-started/dashboard",
           "getting-started/how-gas-city-works",
           "getting-started/coming-from-gastown",
+          "getting-started/faq",
           "getting-started/troubleshooting"
         ]
       },
@@ -183,10 +185,13 @@
           {
             "group": "How-to",
             "pages": [
+              "guides/configuring-an-agent",
+              "guides/harness-recipes",
               "guides/shareable-packs",
               "guides/registry-showcase",
               "guides/gastown-config-recipes",
               "guides/using-json-from-gc",
+              "guides/connected-clients",
               "guides/multi-agent-engineering-environment"
             ]
           }
@@ -207,7 +212,9 @@
           {
             "group": "Operate",
             "pages": [
-              "runbooks/managed-city-endpoints"
+              "runbooks/managed-city-endpoints",
+              "runbooks/remote-hardened-city",
+              "runbooks/split-storage-classes"
             ]
           }
         ]
@@ -229,7 +236,8 @@
               "reference/system-packs",
               "reference/exec-session-provider",
               "reference/exec-beads-provider",
-              "reference/tmux-agent-slice"
+              "reference/tmux-agent-slice",
+              "reference/herdr-provider"
             ]
           },
           {
@@ -238,7 +246,8 @@
               "reference/specs/index",
               "reference/specs/pack-spec",
               "reference/specs/formula-spec-v1",
-              "reference/specs/formula-spec-v2"
+              "reference/specs/formula-spec-v2",
+              "reference/specs/service-protocol-v0"
             ]
           },
           {

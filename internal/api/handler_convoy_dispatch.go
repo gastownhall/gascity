@@ -8,6 +8,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/molecule"
 )
 
 var errWorkflowNotFound = errors.New("workflow not found")
@@ -30,6 +31,12 @@ func logWorkflowSQLFallback(workflowID string, err error) {
 // huma_types_convoys.go so every response-body struct has one
 // canonical home. This file contains only the dispatch helpers that
 // populate them from the bead store.
+
+// workflowGraphStoreRefPrefix tags the dedicated graph store's workflowStoreInfo
+// ref so the store-scan dedup keeps it distinct from the city store when graph is
+// relocated. It is not a scope kind (graph roots carry city/rig scope metadata of
+// their own) — only a store-identity tag for the snapshot scan and ref round-trip.
+const workflowGraphStoreRefPrefix = "graph"
 
 type workflowStoreInfo struct {
 	ref       string
@@ -126,7 +133,7 @@ func (s *Server) buildWorkflowSnapshot(workflowID, fallbackScopeKind, fallbackSc
 			}
 			roots, err := info.store.List(beads.ListQuery{
 				Metadata: map[string]string{
-					beadmeta.KindMetadataKey:       "workflow",
+					beadmeta.KindMetadataKey:       beadmeta.KindWorkflow,
 					beadmeta.WorkflowIDMetadataKey: workflowID,
 				},
 				IncludeClosed: true,
@@ -155,6 +162,28 @@ func (s *Server) buildWorkflowSnapshot(workflowID, fallbackScopeKind, fallbackSc
 	return s.snapshotFromStore(match.info, match.root, fallbackScopeKind, fallbackScopeRef, cityScopeRef, storesScanned, listPartial, snapshotIndex)
 }
 
+// snapshotFromStore builds a workflow snapshot for one store. Both of its
+// branches implement beads.MembershipDirectRootID — the root plus every bead
+// carrying gc.root_bead_id — the SQL fast path as a WHERE clause
+// (workflowSQLQueryWorkflowBeads) and the fallback inline below. Neither is a
+// dependency walk, deliberately: a gc.kind=spec sidecar has no edges, so a dep
+// walk would drop it and hand the dashboard a shorter, plausible step list.
+//
+// The fallback is spelled out here instead of calling beads.DirectMembers
+// because it reads through info.store's own handle. beads.DirectMembers reads
+// through the LIVE handle, which on a caching store bypasses the cache — a
+// correctness win for the dispatcher writing the molecule, an unwanted cost on
+// this dashboard read path. The RULE is shared; the read handle is not.
+//
+// KNOWN DIVERGENCE (ga-212sl): the fallback lists at the zero-value
+// TierMode, so it is TierIssues and drops every ephemeral row, while the SQL
+// fast path above queries the wisps table as well. A wisp molecule's beads are
+// all ephemeral, so the two branches of this one function return different
+// sets for one — and which branch runs depends only on whether the Dolt server
+// was reachable, which is exactly the coupling workflowSQLQueryWorkflowBeads's
+// doc says must not exist. Fixing it moves this read onto beads.DirectMembers
+// (or onto TierBoth), which changes what this endpoint returns for wisp
+// molecules; that is its own slice.
 func (s *Server) snapshotFromStore(info workflowStoreInfo, root beads.Bead, fallbackScopeKind, fallbackScopeRef, cityScopeRef string, storesScanned []string, listPartial bool, snapshotIndex uint64) (*workflowSnapshotResponse, error) {
 	// Try direct SQL path — ~500x faster than N+1 bd subprocess calls.
 	var (
@@ -227,18 +256,7 @@ func (s *Server) snapshotFromStore(info workflowStoreInfo, root beads.Bead, fall
 
 	beadResponses := make([]workflowBeadResponse, 0, len(workflowBeads))
 	for _, bead := range workflowBeads {
-		beadResponses = append(beadResponses, workflowBeadResponse{
-			ID:            bead.ID,
-			Title:         bead.Title,
-			Status:        workflowStatus(bead),
-			Kind:          workflowKind(bead),
-			StepRef:       strings.TrimSpace(bead.Metadata[beadmeta.StepRefMetadataKey]),
-			Attempt:       workflowAttempt(bead),
-			LogicalBeadID: strings.TrimSpace(bead.Metadata[beadmeta.LogicalBeadIDMetadataKey]),
-			ScopeRef:      strings.TrimSpace(bead.Metadata[beadmeta.ScopeRefMetadataKey]),
-			Assignee:      strings.TrimSpace(bead.Assignee),
-			Metadata:      cloneStringMap(bead.Metadata),
-		})
+		beadResponses = append(beadResponses, workflowBeadResponseFromBead(bead))
 	}
 
 	snapshot := &workflowSnapshotResponse{
@@ -264,7 +282,7 @@ func (s *Server) snapshotFromStore(info workflowStoreInfo, root beads.Bead, fall
 }
 
 func isWorkflowRoot(bead beads.Bead) bool {
-	return strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]) == "workflow"
+	return strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]) == beadmeta.KindWorkflow
 }
 
 // isGraphConvoyBead reports whether a bead is a formula-compiled graph
@@ -338,8 +356,8 @@ func workflowEventScope(info workflowStoreInfo, root beads.Bead, cityScopeRef st
 	// event scopes aligned with the snapshot API's preserved city-scope reads
 	// for those legacy workflows, while root_store_ref still exposes the
 	// physical store for callers that need it.
-	if info.scopeKind == "rig" {
-		return "city", workflowCityScopeRef(cityScopeRef)
+	if info.scopeKind == beadmeta.ScopeKindRig {
+		return beadmeta.ScopeKindCity, workflowCityScopeRef(cityScopeRef)
 	}
 	return info.scopeKind, info.scopeRef
 }
@@ -378,7 +396,7 @@ func parseWorkflowRequestScope(rawScopeKind, rawScopeRef string) (string, string
 		return "", "", "scope_kind and scope_ref must be provided together"
 	}
 	switch scopeKind {
-	case "city", "rig":
+	case beadmeta.ScopeKindCity, beadmeta.ScopeKindRig:
 		return scopeKind, scopeRef, ""
 	default:
 		return "", "", "scope_kind must be 'city' or 'rig'"
@@ -469,12 +487,7 @@ func workflowAttempt(bead beads.Bead) *int {
 }
 
 func workflowAttemptValue(bead beads.Bead) int {
-	raw := strings.TrimSpace(bead.Metadata[beadmeta.AttemptMetadataKey])
-	if raw == "" {
-		return 0
-	}
-	v, _ := strconv.Atoi(raw)
-	return v
+	return molecule.WorkflowAttempt(bead)
 }
 
 func isTerminalWorkflowStatus(status string) bool {
@@ -537,53 +550,65 @@ func cloneStringMap(src map[string]string) map[string]string {
 }
 
 func workflowKind(bead beads.Bead) string {
-	if bead.Metadata != nil {
-		if kind := strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]); kind != "" {
-			return kind
-		}
-	}
-	return strings.TrimSpace(bead.Type)
+	return molecule.WorkflowKind(bead)
 }
 
 func workflowStatus(bead beads.Bead) string {
-	outcome := strings.TrimSpace(bead.Metadata[beadmeta.OutcomeMetadataKey])
-	hasAssignment := strings.TrimSpace(bead.Assignee) != ""
-	switch strings.TrimSpace(bead.Status) {
-	case "closed":
-		switch outcome {
-		case "fail":
-			return "failed"
-		case "skipped":
-			return "skipped"
-		}
-		return "completed"
-	case "in_progress":
-		if hasAssignment {
-			return "active"
-		}
-		return "pending"
-	case "open":
-		return "pending"
-	default:
-		switch outcome {
-		case "fail":
-			return "failed"
-		case "skipped":
-			return "skipped"
-		}
-		return strings.TrimSpace(bead.Status)
+	return molecule.WorkflowStatus(bead)
+}
+
+// workflowBeadResponseFromBead maps a workflow bead onto its snapshot response
+// node through the molecule.WorkflowBead codec — the single mapping shared by the
+// snapshot, SQL-fast-path, and event-projection build loops. The codec already
+// clones the metadata map (preserving nil -> nil for the wire's "metadata":
+// null), so cloneStringMap is not called here.
+func workflowBeadResponseFromBead(bead beads.Bead) workflowBeadResponse {
+	wb := molecule.WorkflowBeadFromBead(bead)
+	var attempt *int
+	if wb.Attempt > 0 {
+		attempt = &wb.Attempt
+	}
+	return workflowBeadResponse{
+		ID:            wb.ID,
+		Title:         wb.Title,
+		Status:        wb.Status,
+		Kind:          wb.Kind,
+		StepRef:       wb.StepRef,
+		Attempt:       attempt,
+		LogicalBeadID: wb.LogicalBeadID,
+		ScopeRef:      wb.ScopeRef,
+		Assignee:      wb.Assignee,
+		Metadata:      wb.Metadata,
 	}
 }
 
 func workflowStores(state State) []workflowStoreInfo {
 	beadStores := state.BeadStores()
-	stores := make([]workflowStoreInfo, 0, len(beadStores)+1)
+	stores := make([]workflowStoreInfo, 0, len(beadStores)+2)
 	cityName := workflowCityScopeRef(state.CityName())
+	cityStore := state.CityBeadStore()
 
-	if cityStore := state.CityBeadStore(); cityStore != nil {
+	// Graph-first: when [beads.classes.graph] relocates graph beads to a dedicated
+	// store, workflow roots/steps/wisps live there, NOT on the work store, so the
+	// snapshot scan must consult it. Lead with it (graph-first) so a graph-resident
+	// root is found on the first probe. Skip it on a default (non-relocated) city —
+	// where GraphBeadStore() == CityBeadStore() — so the scan stays byte-identical
+	// there. It carries the city scope as its fallback (graph roots stamp their own
+	// scope metadata, which workflowSnapshotScope prefers) but a distinct ref so the
+	// store-scan dedup never conflates it with the city store.
+	if graphStore := state.GraphBeadStore().Store; graphStore != nil && graphStore != cityStore {
+		stores = append(stores, workflowStoreInfo{
+			ref:       workflowGraphStoreRefPrefix + ":" + cityName,
+			scopeKind: beadmeta.ScopeKindCity,
+			scopeRef:  cityName,
+			store:     graphStore,
+		})
+	}
+
+	if cityStore != nil {
 		stores = append(stores, workflowStoreInfo{
 			ref:       "city:" + cityName,
-			scopeKind: "city",
+			scopeKind: beadmeta.ScopeKindCity,
 			scopeRef:  cityName,
 			store:     cityStore,
 		})
@@ -599,7 +624,7 @@ func workflowStores(state State) []workflowStoreInfo {
 		}
 		stores = append(stores, workflowStoreInfo{
 			ref:       "rig:" + rigName,
-			scopeKind: "rig",
+			scopeKind: beadmeta.ScopeKindRig,
 			scopeRef:  rigName,
 			store:     store,
 		})
@@ -624,7 +649,7 @@ func workflowStoreByRef(state State, ref string) (workflowStoreInfo, bool) {
 	}
 
 	switch strings.TrimSpace(kind) {
-	case "city":
+	case beadmeta.ScopeKindCity:
 		cityStore := state.CityBeadStore()
 		cityName := workflowCityScopeRef(state.CityName())
 		if cityStore == nil || scopeRef != cityName {
@@ -632,18 +657,50 @@ func workflowStoreByRef(state State, ref string) (workflowStoreInfo, bool) {
 		}
 		return workflowStoreInfo{
 			ref:       "city:" + cityName,
-			scopeKind: "city",
+			scopeKind: beadmeta.ScopeKindCity,
 			scopeRef:  cityName,
 			store:     cityStore,
 		}, true
-	case "rig":
+	case workflowGraphStoreRefPrefix:
+		// Round-trip the graph-store ref minted by workflowStores when graph is
+		// relocated. On a default city (graph == city) there is no graph entry, so
+		// this resolves nothing and callers fall back to the store scan.
+		graphStore := state.GraphBeadStore().Store
+		cityName := workflowCityScopeRef(state.CityName())
+		if graphStore == nil || graphStore == state.CityBeadStore() || scopeRef != cityName {
+			return workflowStoreInfo{}, false
+		}
+		return workflowStoreInfo{
+			ref:       workflowGraphStoreRefPrefix + ":" + cityName,
+			scopeKind: beadmeta.ScopeKindCity,
+			scopeRef:  cityName,
+			store:     graphStore,
+		}, true
+	case ordersClassStoreRefPrefix:
+		// Round-trip the orders-class ref minted by appendOrdersClassStoreInfo: the
+		// order history list hands it to a client as the store_ref for every
+		// binding-resident tracking bead, and the detail endpoint takes it back. On
+		// a default city (orders == city) there is no orders entry to name, so this
+		// resolves nothing and callers fall back to the store scan.
+		ordersStore := state.OrdersBeadStore().Store
+		cityName := workflowCityScopeRef(state.CityName())
+		if ordersStore == nil || ordersStore == state.CityBeadStore() || scopeRef != cityName {
+			return workflowStoreInfo{}, false
+		}
+		return workflowStoreInfo{
+			ref:       ordersClassStoreRefPrefix + ":" + cityName,
+			scopeKind: beadmeta.ScopeKindCity,
+			scopeRef:  cityName,
+			store:     ordersStore,
+		}, true
+	case beadmeta.ScopeKindRig:
 		store := state.BeadStore(scopeRef)
 		if store == nil {
 			return workflowStoreInfo{}, false
 		}
 		return workflowStoreInfo{
 			ref:       "rig:" + scopeRef,
-			scopeKind: "rig",
+			scopeKind: beadmeta.ScopeKindRig,
 			scopeRef:  scopeRef,
 			store:     store,
 		}, true

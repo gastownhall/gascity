@@ -45,7 +45,7 @@ func TestModelAndComputeKeysDoNotCollide(t *testing.T) {
 
 func TestUsageFactJSONRoundTrip(t *testing.T) {
 	in := Fact{
-		RunID: "run-1", StepID: "bead-9", Worker: "s-bead-9", City: "demo",
+		RunID: "run-1", SessionID: "session-1", StepID: "bead-9", Worker: "s-bead-9", City: "demo",
 		Kind:     KindModel,
 		Upstream: "manifold", Model: "coder", Backing: "claude-opus-4-8", Provider: "anthropic",
 		InputTokens: 100, OutputTokens: 200, CacheReadTokens: 50, CacheCreationTokens: 10,

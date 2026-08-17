@@ -51,6 +51,65 @@ func TestDoHookFiltersDepBlockedBeads(t *testing.T) {
 	}
 }
 
+func TestDoHookFiltersIsBlockedBeads(t *testing.T) {
+	runner := func(_, _ string) (string, error) {
+		return `[
+			{"id":"blocked-head","status":"open","is_blocked":true},
+			{"id":"ready-behind","status":"open","is_blocked":false}
+		]`, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHook("bd ready", ".", false, runner, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHook() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	if strings.Contains(out, "blocked-head") {
+		t.Errorf("is_blocked bead surfaced in hook output: %s", out)
+	}
+	if !strings.Contains(out, "ready-behind") {
+		t.Errorf("ready bead behind blocked head missing from hook output: %s", out)
+	}
+}
+
+func TestDoHookFiltersStatusBlockedBeads(t *testing.T) {
+	runner := func(_, _ string) (string, error) {
+		return `[
+			{"id":"status-blocked","status":"blocked"},
+			{"id":"clear-2","status":"open"}
+		]`, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHook("bd ready", ".", false, runner, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHook() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	if strings.Contains(out, "status-blocked") {
+		t.Errorf("status=blocked bead surfaced in hook output: %s", out)
+	}
+	if !strings.Contains(out, "clear-2") {
+		t.Errorf("ready bead missing from hook output: %s", out)
+	}
+}
+
+func TestDoHookKeepsAbsentIsBlocked(t *testing.T) {
+	runner := func(_, _ string) (string, error) {
+		return `[{"id":"no-is-blocked-field","status":"open"}]`, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHook("bd ready", ".", false, runner, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHook() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "no-is-blocked-field") {
+		t.Errorf("bead with absent is_blocked treated as blocked: %s", stdout.String())
+	}
+}
+
 func TestDoHookKeepsPastDeferredAndClosedBlockers(t *testing.T) {
 	past := "2000-01-01T00:00:00Z"
 	runner := func(_, _ string) (string, error) {

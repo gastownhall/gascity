@@ -47,9 +47,18 @@ type Fake struct {
 	// about to consult configured results. Tests use this to coordinate
 	// cancellation without relying on wall-clock sleeps.
 	WaitForIdleStarted map[string]chan struct{}
+	// ExecResults configures Fake.Exec output/code/err per session name; an
+	// absent entry returns empty success.
+	ExecResults map[string]FakeExecResult
+	// RelaunchErrors configures Fake.Relaunch errors per session name; an absent
+	// entry relaunches successfully (records the call, updates the live config).
+	RelaunchErrors map[string]error
 }
 
-var _ ProcessTableScanner = (*Fake)(nil)
+var (
+	_ ProcessTableScanner = (*Fake)(nil)
+	_ RelaunchProvider    = (*Fake)(nil)
+)
 
 // Call records a single method invocation on [Fake].
 type Call struct {
@@ -64,6 +73,13 @@ type Call struct {
 	Dst       string         // only set for CopyTo calls
 	RequestID string         // only set for Respond calls
 	Action    string         // only set for Respond calls
+}
+
+// FakeExecResult configures one [Fake.Exec] outcome.
+type FakeExecResult struct {
+	Output string
+	Code   int
+	Err    error
 }
 
 // CountCalls returns the number of recorded calls matching method and name.
@@ -114,6 +130,7 @@ func NewFake() *Fake {
 		RemoveMetaErrors:        make(map[string]map[string]error),
 		WaitForIdleGates:        make(map[string]chan struct{}),
 		WaitForIdleStarted:      make(map[string]chan struct{}),
+		RelaunchErrors:          make(map[string]error),
 	}
 }
 
@@ -141,6 +158,7 @@ func NewFailFake() *Fake {
 		RemoveMetaErrors:        make(map[string]map[string]error),
 		WaitForIdleGates:        make(map[string]chan struct{}),
 		WaitForIdleStarted:      make(map[string]chan struct{}),
+		RelaunchErrors:          make(map[string]error),
 		broken:                  true,
 	}
 }
@@ -180,6 +198,28 @@ func (f *Fake) Stop(name string) error {
 		return nil
 	}
 	delete(f.sessions, name)
+	return nil
+}
+
+// Relaunch records a warm-box agent relaunch and, on success, updates the live
+// session config without a Stop+Start cycle (the box is reused). Returns
+// ErrSessionNotFound when no session exists (no warm box to relaunch into), a
+// configured RelaunchErrors entry, or — when broken — a generic error. Tests
+// assert a Relaunch call (vs Stop+Start) to verify launch-only drift handling.
+func (f *Fake) Relaunch(_ context.Context, name string, cfg Config) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "Relaunch", Name: name, Config: cfg})
+	if f.broken {
+		return fmt.Errorf("session unavailable")
+	}
+	if err, ok := f.RelaunchErrors[name]; ok && err != nil {
+		return err
+	}
+	if _, exists := f.sessions[name]; !exists {
+		return fmt.Errorf("%w: %q", ErrSessionNotFound, name)
+	}
+	f.sessions[name] = cfg
 	return nil
 }
 
@@ -666,6 +706,25 @@ func (f *Fake) SendKeys(name string, keys ...string) error {
 	return nil
 }
 
+// Fake implements the optional connection primitive.
+var _ ExecProvider = (*Fake)(nil)
+
+// Exec records the call and returns the configured result for name, or empty
+// success. Implements [ExecProvider]. Tests that need a specific output/exit
+// code set ExecResults[name]; a broken fake returns a transport error.
+func (f *Fake) Exec(_ context.Context, name string, argv []string) ([]byte, int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "Exec", Name: name, Message: strings.Join(argv, " ")})
+	if f.broken {
+		return nil, -1, fmt.Errorf("session unavailable")
+	}
+	if res, ok := f.ExecResults[name]; ok {
+		return []byte(res.Output), res.Code, res.Err
+	}
+	return nil, 0, nil
+}
+
 // Capabilities returns the fake provider's capabilities.
 // By default, reports both attachment and activity as available.
 func (f *Fake) Capabilities() ProviderCapabilities {
@@ -692,6 +751,20 @@ func (f *Fake) LastStartConfig(name string) *Config {
 	defer f.mu.Unlock()
 	for i := len(f.Calls) - 1; i >= 0; i-- {
 		if f.Calls[i].Method == "Start" && f.Calls[i].Name == name {
+			cfg := f.Calls[i].Config
+			return &cfg
+		}
+	}
+	return nil
+}
+
+// LastRelaunchConfig returns the Config used in the most recent Relaunch call
+// for the named session, or nil if no Relaunch was recorded for that name.
+func (f *Fake) LastRelaunchConfig(name string) *Config {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := len(f.Calls) - 1; i >= 0; i-- {
+		if f.Calls[i].Method == "Relaunch" && f.Calls[i].Name == name {
 			cfg := f.Calls[i].Config
 			return &cfg
 		}

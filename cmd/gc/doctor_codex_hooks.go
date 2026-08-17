@@ -16,11 +16,16 @@ import (
 )
 
 type codexHooksDriftCheck struct {
-	dirs []string
+	cityPath string
+	dirs     []string
 }
 
-func newCodexHooksDriftCheck(dirs []string) *codexHooksDriftCheck {
-	return &codexHooksDriftCheck{dirs: cleanCodexHookDirs(dirs)}
+func newCodexHooksDriftCheck(cityPath string, dirs []string) *codexHooksDriftCheck {
+	cityPath = strings.TrimSpace(cityPath)
+	if cityPath != "" {
+		cityPath = filepath.Clean(cityPath)
+	}
+	return &codexHooksDriftCheck{cityPath: cityPath, dirs: cleanCodexHookDirs(dirs)}
 }
 
 func codexHookWorkDirs(cityPath string, cfg *config.City) []string {
@@ -183,10 +188,10 @@ func (c *codexHooksDriftCheck) CanFix() bool { return true }
 
 func (c *codexHooksDriftCheck) Fix(_ *doctor.CheckContext) error {
 	for _, dir := range c.dirs {
-		if !codexHooksMissingPreCompact(filepath.Join(dir, ".codex", "hooks.json")) {
+		if !codexHooksNeedUpgrade(filepath.Join(dir, ".codex", "hooks.json"), c.cityPath) {
 			continue
 		}
-		if err := hooks.Install(fsys.OSFS{}, dir, dir, []string{"codex"}); err != nil {
+		if err := hooks.Install(fsys.OSFS{}, c.cityPath, dir, []string{"codex"}); err != nil {
 			return fmt.Errorf("upgrading Codex hooks in %s: %w", dir, err)
 		}
 	}
@@ -197,7 +202,7 @@ func (c *codexHooksDriftCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 	var stale []string
 	for _, dir := range c.dirs {
 		path := filepath.Join(dir, ".codex", "hooks.json")
-		if codexHooksMissingPreCompact(path) {
+		if codexHooksNeedUpgrade(path, c.cityPath) {
 			stale = append(stale, path)
 		}
 	}
@@ -205,9 +210,17 @@ func (c *codexHooksDriftCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 		return okCheck(c.Name(), "Codex hooks are current or user-owned")
 	}
 	return warnCheck(c.Name(),
-		fmt.Sprintf("%d managed Codex hook file(s) missing PreCompact handoff", len(stale)),
+		fmt.Sprintf("%d managed Codex hook file(s) need upgrade", len(stale)),
 		"run `gc doctor --fix` or restart the city to upgrade managed Codex hooks",
 		stale)
+}
+
+func codexHooksNeedUpgrade(path, cityPath string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	return hooks.CodexHooksNeedManagedUpgrade(data, cityPath)
 }
 
 func codexHooksMissingPreCompact(path string) bool {

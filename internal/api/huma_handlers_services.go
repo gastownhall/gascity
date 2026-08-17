@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
@@ -29,11 +29,11 @@ func (s *Server) humaHandleServiceList(_ context.Context, _ *ServiceListInput) (
 func (s *Server) humaHandleServiceGet(_ context.Context, input *ServiceGetInput) (*IndexOutput[workspacesvc.Status], error) {
 	reg := s.state.ServiceRegistry()
 	if reg == nil {
-		return nil, huma.Error404NotFound("service " + input.Name + " not found")
+		return nil, apierr.ServiceNotFound.Msg("service " + input.Name + " not found")
 	}
 	item, ok := reg.Get(input.Name)
 	if !ok {
-		return nil, huma.Error404NotFound("service " + input.Name + " not found")
+		return nil, apierr.ServiceNotFound.Msg("service " + input.Name + " not found")
 	}
 	return &IndexOutput[workspacesvc.Status]{
 		Index: s.latestIndex(),
@@ -46,13 +46,13 @@ func (s *Server) humaHandleServiceRestart(_ context.Context, input *ServiceResta
 	name := input.Name
 	reg := s.state.ServiceRegistry()
 	if reg == nil {
-		return nil, huma.Error404NotFound("service " + name + " not found")
+		return nil, apierr.ServiceNotFound.Msg("service " + name + " not found")
 	}
 	if err := reg.Restart(name); err != nil {
 		if errors.Is(err, workspacesvc.ErrServiceNotFound) {
-			return nil, huma.Error404NotFound(err.Error())
+			return nil, apierr.ServiceNotFound.Msg(err.Error())
 		}
-		return nil, huma.Error500InternalServerError(err.Error())
+		return nil, apierr.Internal.Msg(err.Error())
 	}
 	out := &ServiceRestartOutput{}
 	out.Body.Status = "ok"

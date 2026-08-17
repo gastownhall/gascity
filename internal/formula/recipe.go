@@ -132,7 +132,7 @@ func RecipeHasReadySurface(recipe *Recipe) bool {
 		return true
 	}
 	root := recipe.RootStep()
-	return root != nil && root.Metadata[beadmeta.KindMetadataKey] == "workflow"
+	return root != nil && root.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflow
 }
 
 // StepByID returns the step with the given ID, or nil if not found.

@@ -3,7 +3,7 @@ package api
 import (
 	"context"
 
-	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -36,16 +36,15 @@ func (s *Server) humaHandleAgentPatchGetQualified(_ context.Context, input *Agen
 
 func (s *Server) agentPatchByName(name string) (*IndexOutput[config.AgentPatch], error) {
 	cfg := s.state.Config()
-	dir, base := config.ParseQualifiedName(name)
 	for _, p := range cfg.Patches.Agents {
-		if p.Dir == dir && p.Name == base {
+		if p.TargetQualifiedName() == name {
 			return &IndexOutput[config.AgentPatch]{
 				Index: s.latestIndex(),
 				Body:  p,
 			}, nil
 		}
 	}
-	return nil, huma.Error404NotFound("agent patch " + name + " not found")
+	return nil, apierr.PatchNotFound.Msg("agent patch " + name + " not found")
 }
 
 // humaHandleAgentPatchSet is the Huma-typed handler for PUT /v0/patches/agents.
@@ -57,7 +56,9 @@ func (s *Server) humaHandleAgentPatchSet(_ context.Context, input *AgentPatchSet
 
 	patch := config.AgentPatch{
 		Dir:       input.Body.Dir,
+		Rig:       input.Body.Rig,
 		Name:      input.Body.Name,
+		Provider:  input.Body.Provider,
 		WorkDir:   input.Body.WorkDir,
 		TmuxAlias: input.Body.TmuxAlias,
 		Scope:     input.Body.Scope,
@@ -65,18 +66,20 @@ func (s *Server) humaHandleAgentPatchSet(_ context.Context, input *AgentPatchSet
 		Env:       input.Body.Env,
 	}
 
-	if patch.Name == "" {
-		return nil, huma.Error400BadRequest("name is required")
+	// Validate at the edge so a patch that would hard-fail the next config
+	// load — a missing name, or a mutually-exclusive dir+rig combination
+	// (including rig="*") — is rejected fail-fast rather than persisted and
+	// deferred to composition. This mirrors the guard in Editor.SetAgentPatch
+	// so the HTTP and CLI write paths reject the same invalid patches.
+	if err := patch.Validate(); err != nil {
+		return nil, apierr.InvalidRequest.Msg(err.Error())
 	}
 
 	if err := sm.SetAgentPatch(patch); err != nil {
 		return nil, mutationError(err)
 	}
 
-	qn := patch.Name
-	if patch.Dir != "" {
-		qn = patch.Dir + "/" + patch.Name
-	}
+	qn := patch.TargetQualifiedName()
 	resp := &PatchOKResponse{}
 	resp.Body.Status = "ok"
 	resp.Body.AgentPatch = qn
@@ -136,7 +139,7 @@ func (s *Server) humaHandleRigPatchGet(_ context.Context, input *RigPatchGetInpu
 			}, nil
 		}
 	}
-	return nil, huma.Error404NotFound("rig patch " + name + " not found")
+	return nil, apierr.PatchNotFound.Msg("rig patch " + name + " not found")
 }
 
 // humaHandleRigPatchSet is the Huma-typed handler for PUT /v0/patches/rigs.
@@ -155,7 +158,7 @@ func (s *Server) humaHandleRigPatchSet(_ context.Context, input *RigPatchSetInpu
 	}
 
 	if patch.Name == "" {
-		return nil, huma.Error400BadRequest("name is required")
+		return nil, apierr.InvalidRequest.Msg("name is required")
 	}
 
 	if err := sm.SetRigPatch(patch); err != nil {
@@ -211,7 +214,7 @@ func (s *Server) humaHandleProviderPatchGet(_ context.Context, input *ProviderPa
 			}, nil
 		}
 	}
-	return nil, huma.Error404NotFound("provider patch " + name + " not found")
+	return nil, apierr.PatchNotFound.Msg("provider patch " + name + " not found")
 }
 
 // humaHandleProviderPatchSet is the Huma-typed handler for PUT /v0/patches/providers.
@@ -235,7 +238,7 @@ func (s *Server) humaHandleProviderPatchSet(_ context.Context, input *ProviderPa
 	}
 
 	if patch.Name == "" {
-		return nil, huma.Error400BadRequest("name is required")
+		return nil, apierr.InvalidRequest.Msg("name is required")
 	}
 
 	if err := sm.SetProviderPatch(patch); err != nil {

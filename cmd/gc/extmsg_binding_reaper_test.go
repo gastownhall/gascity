@@ -56,7 +56,7 @@ func TestReapStaleExtmsgBindingsRepointsRespawnedSession(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	reapStaleExtmsgBindings(context.Background(), store, now, &stderr)
+	reapStaleExtmsgBindings(context.Background(), beads.SessionStore{Store: store}, now, &stderr)
 
 	got, err := svc.ResolveByConversation(context.Background(), ref)
 	if err != nil {
@@ -69,7 +69,7 @@ func TestReapStaleExtmsgBindingsRepointsRespawnedSession(t *testing.T) {
 
 func TestReapStaleExtmsgBindingsNilStoreNoPanic(_ *testing.T) {
 	// Defensive: a tick before the bead store is wired must be a no-op.
-	reapStaleExtmsgBindings(context.Background(), nil, time.Now(), nil)
+	reapStaleExtmsgBindings(context.Background(), beads.SessionStore{}, time.Now(), nil)
 }
 
 func TestReapStaleExtmsgParticipantsMigratesMembershipToRespawn(t *testing.T) {
@@ -127,7 +127,7 @@ func TestReapStaleExtmsgParticipantsMigratesMembershipToRespawn(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	reapStaleExtmsgParticipants(context.Background(), store, &stderr)
+	reapStaleExtmsgParticipants(context.Background(), beads.SessionStore{Store: store}, &stderr)
 
 	// Persistent heal: the participant now points at the respawned bead.
 	bead, err := store.Get(participant.ID)
@@ -159,5 +159,5 @@ func TestReapStaleExtmsgParticipantsMigratesMembershipToRespawn(t *testing.T) {
 
 func TestReapStaleExtmsgParticipantsNilStoreNoPanic(_ *testing.T) {
 	// Defensive: a tick before the bead store is wired must be a no-op.
-	reapStaleExtmsgParticipants(context.Background(), nil, nil)
+	reapStaleExtmsgParticipants(context.Background(), beads.SessionStore{}, nil)
 }

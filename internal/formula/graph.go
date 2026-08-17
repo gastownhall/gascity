@@ -36,24 +36,31 @@ func applyGraphControls(f *Formula, includeWorkflowFinalize bool) {
 		}
 		step.Metadata[beadmeta.OutputJSONRequiredMetadataKey] = "true"
 		controlMetadata := map[string]string{
-			beadmeta.KindMetadataKey:       "fanout",
+			beadmeta.KindMetadataKey:       beadmeta.KindFanout,
 			beadmeta.ControlForMetadataKey: step.ID,
 			beadmeta.ForEachMetadataKey:    step.OnComplete.ForEach,
 			beadmeta.BondMetadataKey:       step.OnComplete.Bond,
-			beadmeta.FanoutModeMetadataKey: "parallel",
+			beadmeta.FanoutModeMetadataKey: beadmeta.FanoutModeParallel,
 		}
 		if step.OnComplete.Sequential {
-			controlMetadata[beadmeta.FanoutModeMetadataKey] = "sequential"
+			controlMetadata[beadmeta.FanoutModeMetadataKey] = beadmeta.FanoutModeSequential
 		}
 		if len(step.OnComplete.Vars) > 0 {
 			if data, err := json.Marshal(step.OnComplete.Vars); err == nil {
 				controlMetadata[beadmeta.BondVarsMetadataKey] = string(data)
 			}
 		}
-		for _, key := range []string{beadmeta.ScopeRefMetadataKey, beadmeta.ScopeRoleMetadataKey, beadmeta.OnFailMetadataKey, beadmeta.StepIDMetadataKey, beadmeta.RalphStepIDMetadataKey, beadmeta.AttemptMetadataKey} {
+		for _, key := range []string{beadmeta.ScopeRefMetadataKey, beadmeta.OnFailMetadataKey, beadmeta.StepIDMetadataKey, beadmeta.RalphStepIDMetadataKey, beadmeta.AttemptMetadataKey} {
 			if value := step.Metadata[key]; value != "" {
 				controlMetadata[key] = value
 			}
+		}
+		// Control infrastructure is never a scope member: stamp the control
+		// role explicitly (mirroring minted scope-checks) instead of
+		// inheriting the host step's role, or the control's metadata and
+		// output_json would participate in scope finalization as work.
+		if controlMetadata[beadmeta.ScopeRefMetadataKey] != "" {
+			controlMetadata[beadmeta.ScopeRoleMetadataKey] = beadmeta.ScopeRoleControl
 		}
 		controls = append(controls, &Step{
 			ID:       step.ID + "-fanout",
@@ -71,9 +78,9 @@ func applyGraphControls(f *Formula, includeWorkflowFinalize bool) {
 		controlID := step.ID + "-scope-check"
 		scopeControlByStep[step.ID] = controlID
 		controlMetadata := map[string]string{
-			beadmeta.KindMetadataKey:       "scope-check",
+			beadmeta.KindMetadataKey:       beadmeta.KindScopeCheck,
 			beadmeta.ScopeRefMetadataKey:   step.Metadata[beadmeta.ScopeRefMetadataKey],
-			beadmeta.ScopeRoleMetadataKey:  "control",
+			beadmeta.ScopeRoleMetadataKey:  beadmeta.ScopeRoleControl,
 			beadmeta.ControlForMetadataKey: step.ID,
 		}
 		for _, key := range []string{beadmeta.StepIDMetadataKey, beadmeta.RalphStepIDMetadataKey, beadmeta.AttemptMetadataKey, beadmeta.OnFailMetadataKey} {
@@ -90,34 +97,6 @@ func applyGraphControls(f *Formula, includeWorkflowFinalize bool) {
 		})
 	}
 
-	// Tally controls: injected after fanout; downstream refs rewritten to tally.
-	tallyControlByStep := make(map[string]string)
-	for _, step := range allSteps {
-		if step == nil || step.OnComplete == nil || step.Tally == nil {
-			continue
-		}
-		tallyID := step.ID + "-tally"
-		tallyControlByStep[step.ID] = tallyID
-		mode := step.Tally.Mode
-		if mode == "" {
-			mode = "majority"
-		}
-		tallyMeta := map[string]string{
-			beadmeta.KindMetadataKey:       "tally",
-			beadmeta.ControlForMetadataKey: step.ID,
-			beadmeta.TallyModeMetadataKey:  mode,
-			beadmeta.VoteFieldMetadataKey:  step.Tally.VoteField,
-		}
-		controls = append(controls, &Step{
-			ID:       tallyID,
-			Title:    "Tally votes for " + step.Title,
-			Type:     "task",
-			Needs:    []string{step.ID + "-fanout"},
-			Metadata: tallyMeta,
-		})
-	}
-
-	rewriteGraphStepRefs(f.Steps, tallyControlByStep)
 	rewriteGraphStepRefs(f.Steps, scopeControlByStep)
 
 	f.Steps = append(f.Steps, controls...)
@@ -137,7 +116,7 @@ func applyGraphControls(f *Formula, includeWorkflowFinalize bool) {
 		Type:  "task",
 		Needs: sinks,
 		Metadata: map[string]string{
-			beadmeta.KindMetadataKey: "workflow-finalize",
+			beadmeta.KindMetadataKey: beadmeta.KindWorkflowFinalize,
 		},
 	})
 	f.Steps = sortGraphSteps(f.Steps)
@@ -150,15 +129,10 @@ func needsScopeCheck(step *Step) bool {
 	if step.Metadata[beadmeta.ScopeRefMetadataKey] == "" {
 		return false
 	}
-	if step.Metadata[beadmeta.ScopeRoleMetadataKey] == "teardown" {
+	if step.Metadata[beadmeta.ScopeRoleMetadataKey] == beadmeta.ScopeRoleTeardown {
 		return false
 	}
-	switch step.Metadata[beadmeta.KindMetadataKey] {
-	case "scope", "scope-check", "workflow-finalize", "fanout", "tally", "check", "drain", "spec":
-		return false
-	default:
-		return true
-	}
+	return !beadmeta.IsScopeCheckExemptKind(step.Metadata[beadmeta.KindMetadataKey])
 }
 
 func rewriteGraphRefs(in []string, replacements map[string]string) []string {
@@ -182,7 +156,9 @@ func graphSinkStepIDs(steps []*Step) []string {
 		return nil
 	}
 	referenced := make(map[string]struct{}, len(allSteps))
+	stepByID := make(map[string]*Step, len(allSteps))
 	for _, step := range allSteps {
+		stepByID[step.ID] = step
 		for _, id := range step.DependsOn {
 			referenced[id] = struct{}{}
 		}
@@ -192,23 +168,67 @@ func graphSinkStepIDs(steps []*Step) []string {
 	}
 
 	sinks := make([]string, 0)
+	sinkSet := make(map[string]struct{}, len(allSteps))
+	appendSink := func(id string) {
+		if _, exists := sinkSet[id]; exists {
+			return
+		}
+		sinkSet[id] = struct{}{}
+		sinks = append(sinks, id)
+	}
 	for _, step := range allSteps {
 		if step == nil {
+			continue
+		}
+		// Teardown-scoped work is post-settlement by contract: its pass
+		// condition may (and for worktree cleanup does) branch on the root
+		// outcome that only workflow-finalize produces. Sinking it here closes
+		// that loop into a settlement deadlock — finalize waits on the
+		// teardown, the teardown waits on the outcome finalize would have
+		// written. Retry/ralph controls minted from a teardown step retain
+		// gc.scope_role=teardown, so one predicate covers the raw step and
+		// every control shape derived from it.
+		if step.Metadata[beadmeta.ScopeRoleMetadataKey] == beadmeta.ScopeRoleTeardown {
 			continue
 		}
 		switch step.Metadata[beadmeta.KindMetadataKey] {
 		case "workflow-finalize", "spec":
 			continue
 		case "scope":
+			// A retry-managed scope is a physical attempt, not an
+			// authoritative workflow result. Substitute its logical control as a
+			// mandatory sink so a failed loop cannot be hidden by passing
+			// downstream work, and so iteration 1 cannot remain as a stale failed
+			// blocker after a later attempt passes.
+			control := stepByID[step.Metadata[beadmeta.ControlForMetadataKey]]
+			attemptStepID := step.Metadata[beadmeta.StepIDMetadataKey]
+			if step.Metadata[beadmeta.AttemptMetadataKey] != "" && control != nil &&
+				attemptStepID != "" && attemptStepID == control.Metadata[beadmeta.StepIDMetadataKey] &&
+				(control.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindRetry ||
+					control.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindRalph) {
+				// Nested attempt scopes roll up through their enclosing scope. Only
+				// an outermost attempt contributes its logical control directly;
+				// otherwise an inner control from an old outer attempt would become
+				// another stale workflow blocker.
+				scopeRef := step.Metadata[beadmeta.ScopeRefMetadataKey]
+				if scopeRef == "" {
+					appendSink(control.ID)
+					continue
+				}
+				enclosing := stepByID[scopeRef]
+				if enclosing != nil && enclosing.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindScope {
+					continue
+				}
+			}
 			// Scope bodies are terminal latches even when referenced by teardown
 			// steps. Workflow finalization must see their pass/fail outcome.
-			sinks = append(sinks, step.ID)
+			appendSink(step.ID)
 			continue
 		}
 		if _, ok := referenced[step.ID]; ok {
 			continue
 		}
-		sinks = append(sinks, step.ID)
+		appendSink(step.ID)
 	}
 	return sinks
 }

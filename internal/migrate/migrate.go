@@ -32,6 +32,7 @@ type packFile struct {
 	NamedSessions  []config.NamedSession          `toml:"named_session,omitempty"`
 	Services       []config.Service               `toml:"service,omitempty"`
 	Providers      map[string]config.ProviderSpec `toml:"providers,omitempty"`
+	Upstreams      map[string]config.UpstreamSpec `toml:"upstreams,omitempty"`
 	Formulas       config.FormulasConfig          `toml:"formulas,omitempty"`
 	Patches        config.Patches                 `toml:"patches,omitempty"`
 	Doctor         []config.PackDoctorEntry       `toml:"doctor,omitempty"`
@@ -65,6 +66,7 @@ type agentFile struct {
 	Nudge                  string            `toml:"nudge,omitempty"`
 	Session                string            `toml:"session,omitempty"`
 	Provider               string            `toml:"provider,omitempty"`
+	Upstream               string            `toml:"upstream,omitempty"`
 	StartCommand           string            `toml:"start_command,omitempty"`
 	Lifecycle              string            `toml:"lifecycle,omitempty"`
 	Args                   []string          `toml:"args,omitempty"`
@@ -88,6 +90,7 @@ type agentFile struct {
 	MaxSessionAge          string            `toml:"max_session_age,omitempty"`
 	MaxSessionAgeJitter    string            `toml:"max_session_age_jitter,omitempty"`
 	SleepAfterIdle         string            `toml:"sleep_after_idle,omitempty"`
+	AssignedWorkDeferLimit *int              `toml:"assigned_work_defer_limit,omitempty"`
 	InstallAgentHooks      []string          `toml:"install_agent_hooks,omitempty"`
 	HooksInstalled         *bool             `toml:"hooks_installed,omitempty"`
 	InjectAssignedSkills   *bool             `toml:"inject_assigned_skills,omitempty"`
@@ -436,6 +439,9 @@ func mergeAgentDefaultsAliasForMigration(dst *config.AgentDefaults, src config.A
 	if !meta.IsDefined("agent_defaults", "model") {
 		dst.Model = src.Model
 	}
+	if !meta.IsDefined("agent_defaults", "upstream") {
+		dst.Upstream = src.Upstream
+	}
 	if !meta.IsDefined("agent_defaults", "wake_mode") {
 		dst.WakeMode = src.WakeMode
 	}
@@ -466,6 +472,9 @@ func mergeMigratedAgentDefaults(dst *config.AgentDefaults, src config.AgentDefau
 	if dst.Model == "" {
 		dst.Model = src.Model
 	}
+	if dst.Upstream == "" {
+		dst.Upstream = src.Upstream
+	}
 	if dst.WakeMode == "" {
 		dst.WakeMode = src.WakeMode
 	}
@@ -482,6 +491,7 @@ func mergeMigratedAgentDefaults(dst *config.AgentDefaults, src config.AgentDefau
 func isZeroAgentDefaults(defaults config.AgentDefaults) bool {
 	return defaults.Provider == "" &&
 		defaults.Model == "" &&
+		defaults.Upstream == "" &&
 		defaults.WakeMode == "" &&
 		defaults.DefaultSlingFormula == "" &&
 		len(defaults.AllowOverlay) == 0 &&
@@ -912,6 +922,7 @@ func agentConfigFromAgent(agent config.Agent) agentFile {
 		Nudge:                  agent.Nudge,
 		Session:                agent.Session,
 		Provider:               agent.Provider,
+		Upstream:               agent.Upstream,
 		StartCommand:           agent.StartCommand,
 		Lifecycle:              agent.Lifecycle,
 		Args:                   agent.Args,
@@ -935,6 +946,7 @@ func agentConfigFromAgent(agent config.Agent) agentFile {
 		MaxSessionAge:          agent.MaxSessionAge,
 		MaxSessionAgeJitter:    agent.MaxSessionAgeJitter,
 		SleepAfterIdle:         agent.SleepAfterIdle,
+		AssignedWorkDeferLimit: agent.AssignedWorkDeferLimit,
 		InstallAgentHooks:      agent.InstallAgentHooks,
 		HooksInstalled:         agent.HooksInstalled,
 		InjectAssignedSkills:   agent.InjectAssignedSkills,
@@ -963,6 +975,7 @@ func isZeroAgentConfig(cfg agentFile) bool {
 		cfg.Nudge == "" &&
 		cfg.Session == "" &&
 		cfg.Provider == "" &&
+		cfg.Upstream == "" &&
 		cfg.StartCommand == "" &&
 		cfg.Lifecycle == "" &&
 		len(cfg.Args) == 0 &&
@@ -986,6 +999,7 @@ func isZeroAgentConfig(cfg agentFile) bool {
 		cfg.MaxSessionAge == "" &&
 		cfg.MaxSessionAgeJitter == "" &&
 		cfg.SleepAfterIdle == "" &&
+		cfg.AssignedWorkDeferLimit == nil &&
 		len(cfg.InstallAgentHooks) == 0 &&
 		cfg.HooksInstalled == nil &&
 		cfg.InjectAssignedSkills == nil &&

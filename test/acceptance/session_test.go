@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
@@ -96,6 +97,17 @@ func TestSessionErrors(t *testing.T) {
 func TestSessionDefaultNamedSession(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
 	c.Init("claude")
+
+	// The default named session (mayor) is created asynchronously by the
+	// reconciler. Poll until it appears before running subtests to avoid a
+	// race on slow or CPU-saturated runners.
+	if !c.WaitForCondition(func() bool {
+		out, err := c.GC("session", "list")
+		return err == nil && strings.Contains(out, "mayor")
+	}, 30*time.Second) {
+		out, _ := c.GC("session", "list")
+		t.Fatalf("timed out waiting for default named session (mayor) to appear:\n%s", out)
+	}
 
 	t.Run("List_DefaultNamedSession", func(t *testing.T) {
 		out, err := c.GC("session", "list")

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -363,6 +364,59 @@ func TestResolveAgentIdentityRejectsCanonicalSingletonPoolSuffix(t *testing.T) {
 	}
 }
 
+// TestResolveAgentIdentityResolvesBindingQualifiedPoolInstance is a
+// regression for #4843: a binding-qualified, city-scoped pool instance like
+// "testpack.worker-1" must resolve to its "testpack.worker" pool. The
+// CLI-local resolveAgentIdentity gated its Step 2b pool-instance check on
+// strings.Contains(input, "/"), so the dot-qualified form was never routed
+// to resolvePoolInstance — even though the shared resolver helper
+// (internal/agentutil/resolve.go) already handles it via ContainsAny(input, "/.").
+func TestResolveAgentIdentityResolvesBindingQualifiedPoolInstance(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", BindingName: "testpack", Dir: "", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2)},
+		},
+	}
+	a, ok := resolveAgentIdentity(cfg, "testpack.worker-1", "")
+	if !ok {
+		t.Fatalf("resolveAgentIdentity(testpack.worker-1) = (_, false), want the worker pool instance")
+	}
+	if a.Name != "worker-1" {
+		t.Fatalf("resolveAgentIdentity(testpack.worker-1) resolved Name = %q, want %q", a.Name, "worker-1")
+	}
+	if _, ok := resolveAgentIdentity(cfg, "testpack.worker-3", ""); ok {
+		t.Fatal("resolveAgentIdentity(testpack.worker-3) = true, want false: exceeds max_active_sessions=2")
+	}
+}
+
+func TestResolveAgentIdentityUsesRigContextForScopeUnqualifiedControlDispatcher(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: config.ControlDispatcherAgentName, BindingName: "core"},
+			{Name: config.ControlDispatcherAgentName, BindingName: "core", Dir: "fixture"},
+		},
+	}
+
+	for _, tc := range []struct {
+		name          string
+		currentRigDir string
+		want          string
+	}{
+		{name: "rig context prefers rig scope", currentRigDir: "fixture", want: "fixture/core.control-dispatcher"},
+		{name: "city context keeps city scope", want: "core.control-dispatcher"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := resolveAgentIdentity(cfg, "core.control-dispatcher", tc.currentRigDir)
+			if !ok {
+				t.Fatal("resolveAgentIdentity() did not find the control dispatcher")
+			}
+			if got.QualifiedName() != tc.want {
+				t.Fatalf("resolveAgentIdentity() = %q, want %q", got.QualifiedName(), tc.want)
+			}
+		})
+	}
+}
+
 func TestEmitLoadCityConfigWarningsFiltersNonMigrationWarnings(t *testing.T) {
 	var stderr bytes.Buffer
 	emitLoadCityConfigWarnings(&stderr, &config.Provenance{
@@ -616,6 +670,55 @@ name = "mayor"
 	} {
 		if !strings.Contains(packToml, want) {
 			t.Fatalf("pack.toml dropped pricing field %q after suspend:\n%s", want, packToml)
+		}
+	}
+}
+
+func TestDoAgentSuspendRootPackPreservesUpstreams(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`[workspace]
+name = "test-city"
+`)
+	// Root pack.toml carries a pack-level [upstreams] table, which config load
+	// now accepts and importing cities inherit. Suspending a root-pack agent
+	// rewrites pack.toml through a reduced struct; the rewrite must preserve the
+	// upstream table and its nested [env] block rather than refusing the write
+	// (false key-loss positive) or silently dropping it.
+	fs.Files["/city/pack.toml"] = []byte(`[pack]
+name = "test-city"
+schema = 2
+
+[upstreams.bedrock]
+description = "AWS Bedrock Anthropic"
+base_url = "https://bedrock.example.com/anthropic"
+api_key = "$AWS_BEDROCK_KEY"
+
+[upstreams.bedrock.env]
+AWS_REGION = "us-west-2"
+
+[[agent]]
+name = "mayor"
+`)
+
+	var stdout, stderr bytes.Buffer
+	code := doAgentSuspend(fs, "/city", "mayor", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	packToml := string(fs.Files["/city/pack.toml"])
+	if !strings.Contains(packToml, `suspended = true`) {
+		t.Fatalf("pack.toml missing suspended = true:\n%s", packToml)
+	}
+	for _, want := range []string{
+		"[upstreams.bedrock]",
+		`base_url = "https://bedrock.example.com/anthropic"`,
+		`api_key = "$AWS_BEDROCK_KEY"`,
+		"[upstreams.bedrock.env]",
+		`AWS_REGION = "us-west-2"`,
+	} {
+		if !strings.Contains(packToml, want) {
+			t.Fatalf("pack.toml dropped upstream field %q after suspend:\n%s", want, packToml)
 		}
 	}
 }
@@ -1485,5 +1588,17 @@ knob = "keep-me"
 	}
 	if string(data) != src {
 		t.Fatalf("pack.toml was rewritten despite refusal:\n%s", data)
+	}
+}
+
+// TestConfigWarnWriter verifies advisory config warnings are discarded in JSON
+// mode and passed to stderr otherwise (the C5 uniform-suppression rule).
+func TestConfigWarnWriter(t *testing.T) {
+	var stderr bytes.Buffer
+	if w := configWarnWriter(true, &stderr); w != io.Discard {
+		t.Fatalf("json mode: writer = %v, want io.Discard", w)
+	}
+	if w := configWarnWriter(false, &stderr); w != io.Writer(&stderr) {
+		t.Fatalf("human mode: writer must be stderr")
 	}
 }

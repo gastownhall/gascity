@@ -4,7 +4,41 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
+
+// TestPoolSessionIsLiveInfo_Matrix exercises the liveness predicate used by the
+// runningSessions counter in buildDesiredState. An asleep or drained session
+// must not count as live; everything else is treated as live so that the
+// isCold probe is never suppressed by an unknown/future state. Fed through the
+// session.Info codec, matching the production read path.
+func TestPoolSessionIsLiveInfo_Matrix(t *testing.T) {
+	cases := []struct {
+		name string
+		meta map[string]string
+		want bool
+	}{
+		{"awake", map[string]string{"state": "awake"}, true},
+		{"active", map[string]string{"state": "active"}, true},
+		{"creating", map[string]string{"state": "creating"}, true},
+		{"start-pending", map[string]string{"state": "start-pending"}, true},
+		{"no-metadata", nil, true},
+		{"empty-state", map[string]string{"state": ""}, true},
+		{"asleep-no-reason", map[string]string{"state": "asleep"}, false},
+		{"asleep-idle", map[string]string{"state": "asleep", "sleep_reason": "idle"}, false},
+		{"asleep-wait-hold", map[string]string{"state": "asleep", "sleep_reason": "wait-hold"}, false},
+		{"drained-state", map[string]string{"state": "drained"}, false},
+		{"asleep-drained-reason", map[string]string{"state": "asleep", "sleep_reason": "drained"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := poolSessionIsLiveInfo(sessionpkg.Info{MetadataState: tc.meta["state"], SleepReason: tc.meta["sleep_reason"]})
+			if got != tc.want {
+				t.Fatalf("poolSessionIsLiveInfo(%v) = %v, want %v", tc.meta, got, tc.want)
+			}
+		})
+	}
+}
 
 // TestIsPoolSessionSlotFreeable_Matrix exercises the deny-by-default contract
 // of the freeable allowlist. The allowlist is tiny, so regressions that widen
@@ -20,9 +54,10 @@ func TestIsPoolSessionSlotFreeable_Matrix(t *testing.T) {
 		{"asleep+drained-reason", map[string]string{"state": "asleep", "sleep_reason": "drained"}, true},
 		{"asleep+idle", map[string]string{"state": "asleep", "sleep_reason": "idle"}, true},
 		{"asleep+idle-timeout", map[string]string{"state": "asleep", "sleep_reason": "idle-timeout"}, true},
-		{"asleep+city-stop", map[string]string{"state": "asleep", "sleep_reason": sleepReasonCityStop}, true},
+		{"asleep+city-stop", map[string]string{"state": "asleep", "sleep_reason": string(sessionpkg.SleepReasonCityStop)}, true},
 		{"asleep+failed-create", map[string]string{"state": "asleep", "sleep_reason": "failed-create"}, true},
-		{"asleep+runtime-missing", map[string]string{"state": "asleep", "sleep_reason": sleepReasonRuntimeMissing}, true},
+		{"asleep+runtime-missing", map[string]string{"state": "asleep", "sleep_reason": string(sessionpkg.SleepReasonRuntimeMissing)}, true},
+		{"asleep+provider-terminal-error", map[string]string{"state": "asleep", "sleep_reason": string(sessionpkg.SleepReasonProviderTerminalError)}, true},
 		{"asleep+empty-reason", map[string]string{"state": "asleep", "sleep_reason": ""}, false},
 		{"asleep+missing-reason", map[string]string{"state": "asleep"}, false},
 		{"asleep+wait-hold", map[string]string{"state": "asleep", "sleep_reason": "wait-hold"}, false},

@@ -124,6 +124,12 @@ each provider's options schema, so they differ per provider — `o4-mini` is a
 Codex model, while the same key on a `claude` agent would take values like
 `sonnet` or `haiku`.
 
+An agent has five independent axes you can tune — the harness (`provider`), the
+model, who serves the model (`upstream`), the transport, and the runtime. For the
+full how-to, including running a harness against Bedrock, a proxy, or an
+OpenAI-compatible gateway, see
+[Configuring an Agent](/guides/configuring-an-agent).
+
 Now that your agent is available, it's time to sling some work to it:
 
 ```shell

@@ -51,6 +51,7 @@ func (a *testExtMsgAdapter) EnsureChildConversation(context.Context, extmsg.Conv
 func TestHandleExtMsgOutboundNotifiesPeerMembersAndMaterializesNamedSessions(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	t.Cleanup(srv.waitForBackground)
 
 	services := extmsg.NewServices(fs.cityBeadStore)
 	fs.extmsgSvc = &services
@@ -117,16 +118,9 @@ func TestHandleExtMsgOutboundNotifiesPeerMembersAndMaterializesNamedSessions(t *
 	if adapter.publishCalls[0].Text != "hello peers" {
 		t.Fatalf("publish text = %q, want hello peers", adapter.publishCalls[0].Text)
 	}
+	srv.waitForBackground()
 
-	var peerID string
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		peerID, err = session.ResolveSessionID(fs.cityBeadStore, "myrig/worker")
-		if err == nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	peerID, err := session.ResolveSessionID(fs.cityBeadStore, "myrig/worker")
 	if err != nil {
 		t.Fatalf("ResolveSessionID(myrig/worker): %v", err)
 	}
@@ -138,47 +132,25 @@ func TestHandleExtMsgOutboundNotifiesPeerMembersAndMaterializesNamedSessions(t *
 	if peerSessionName == "" {
 		t.Fatal("materialized peer session missing session_name")
 	}
-	// Materialization commits the session bead before the runtime session is
-	// started (session.Manager create path: bead first, then provider Start),
-	// so a direct store reader can observe the resolvable bead before
-	// IsRunning flips true. Poll for running instead of checking once to avoid
-	// a load-dependent race (see ga-thgf8q).
-	running := false
-	deadline = time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		if fs.sp.IsRunning(peerSessionName) {
-			running = true
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if !running {
+	if !fs.sp.IsRunning(peerSessionName) {
 		t.Fatalf("peer session %q should be running after outbound publish", peerSessionName)
 	}
 
 	peerNudges := 0
-	deadline = time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		peerNudges = 0
-		calls := fs.sp.SnapshotCalls()
-		for _, call := range calls {
-			if call.Method != "Nudge" {
-				continue
-			}
-			if call.Name == source.SessionName {
-				t.Fatalf("source session should not receive peer publish nudge; calls=%#v", calls)
-			}
-			if call.Name == peerSessionName && strings.Contains(call.Message, "hello peers") {
-				peerNudges++
-			}
+	calls := fs.sp.SnapshotCalls()
+	for _, call := range calls {
+		if call.Method != "Nudge" {
+			continue
 		}
-		if peerNudges == 1 {
-			break
+		if call.Name == source.SessionName {
+			t.Fatalf("source session should not receive peer publish nudge; calls=%#v", calls)
 		}
-		time.Sleep(10 * time.Millisecond)
+		if call.Name == peerSessionName && strings.Contains(call.Message, "hello peers") {
+			peerNudges++
+		}
 	}
 	if peerNudges != 1 {
-		t.Fatalf("peer nudge count = %d, want 1; calls=%#v", peerNudges, fs.sp.SnapshotCalls())
+		t.Fatalf("peer nudge count = %d, want 1; calls=%#v", peerNudges, calls)
 	}
 }
 
@@ -301,6 +273,7 @@ func TestExtmsgNotifyMembersSuppressesDiscriminatorForRoutedParticipant(t *testi
 func TestHandleExtMsgOutboundNotifiesDeliveredConversationMembers(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	t.Cleanup(srv.waitForBackground)
 
 	services := extmsg.NewServices(fs.cityBeadStore)
 	fs.extmsgSvc = &services
@@ -360,16 +333,9 @@ func TestHandleExtMsgOutboundNotifiesDeliveredConversationMembers(t *testing.T) 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
+	srv.waitForBackground()
 
-	var peerID string
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		peerID, err = session.ResolveSessionID(fs.cityBeadStore, "myrig/worker")
-		if err == nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	peerID, err := session.ResolveSessionID(fs.cityBeadStore, "myrig/worker")
 	if err != nil {
 		t.Fatalf("ResolveSessionID(myrig/worker): %v", err)
 	}
@@ -383,21 +349,15 @@ func TestHandleExtMsgOutboundNotifiesDeliveredConversationMembers(t *testing.T) 
 	}
 
 	found := false
-	deadline = time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		for _, call := range fs.sp.Calls {
-			if call.Method == "Nudge" && call.Name == peerSessionName && strings.Contains(call.Message, "thread-delivered") {
-				found = true
-				break
-			}
-		}
-		if found {
+	calls := fs.sp.SnapshotCalls()
+	for _, call := range calls {
+		if call.Method == "Nudge" && call.Name == peerSessionName && strings.Contains(call.Message, "thread-delivered") {
+			found = true
 			break
 		}
-		time.Sleep(10 * time.Millisecond)
 	}
 	if !found {
-		t.Fatalf("delivered conversation peer nudge not found; calls=%#v", fs.sp.Calls)
+		t.Fatalf("delivered conversation peer nudge not found; calls=%#v", calls)
 	}
 }
 
@@ -483,6 +443,33 @@ func TestHandleExtMsgInboundNormalizedInvalidConversationReturns400(t *testing.T
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("invalid conversation: status = %d, want %d; body: %s",
+			rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+// TestHandleExtMsgInboundNormalizedInvariantViolationReturns400 pins the third
+// arm of the contract: an invariant violation (e.g. duplicate active bindings
+// surfaced by ResolveByConversation, or duplicate groups/participants/transcript
+// state surfaced by the group-route and transcript steps) is permanent — the
+// same inbound message re-resolves the same corrupt state and fails identically
+// until it is repaired out-of-band. It must stay 4xx so adapters drop the poison
+// message instead of retrying a 5xx forever and wedging the account's ordered
+// inbound stream behind it.
+func TestHandleExtMsgInboundNormalizedInvariantViolationReturns400(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	services := extmsg.NewServices(fs.cityBeadStore)
+	services.Bindings = faultBindingService{err: fmt.Errorf("%w: multiple active bindings for telegram/acct-1/chat-1", extmsg.ErrInvariantViolation)}
+	fs.extmsgSvc = &services
+	fs.adapterReg = extmsg.NewAdapterRegistry()
+
+	req := newPostRequest(cityURL(fs, "/extmsg/inbound"), strings.NewReader(inboundNormalizedBody(t)))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invariant violation: status = %d, want %d; body: %s",
 			rec.Code, http.StatusBadRequest, rec.Body.String())
 	}
 }

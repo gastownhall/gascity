@@ -278,7 +278,8 @@ func TestManagedDoltStartWaitForPortFree_FullChainBindsHostPortViaProductionProb
 }
 
 // TestManagedDoltPortAvailableForHost_NormalizesEmptyHost confirms the host
-// normalization shim ("" / "*" → "0.0.0.0") is wired and does not panic.
+// normalization shim ("" → loopback bind default, "*" → "0.0.0.0") is wired
+// and does not panic.
 // Picks a fresh unused random port via net.Listen("tcp", ":0") (Linux/macOS
 // will not put a never-bound port in TIME_WAIT), so the probe must report
 // available for at least the wildcard / unspecified forms. The interface-
@@ -291,12 +292,12 @@ func TestManagedDoltPortAvailableForHost_NormalizesEmptyHost(t *testing.T) {
 	port := listener.Addr().(*net.TCPAddr).Port
 	listener.Close() //nolint:errcheck
 
-	// The wildcard host forms ("" / "*" / "0.0.0.0") all normalize to
-	// 0.0.0.0; on Linux a 127.0.0.1 listener Close()'d immediately ago can
-	// leave a SYN_RECV / TIME_WAIT slot, but a fresh 0.0.0.0 bind should
-	// succeed since wildcard bind doesn't conflict with a closed 127.0.0.1
-	// listener that was never connected to. Assert at least one wildcard
-	// form reports available — otherwise the normalization is broken.
+	// "" normalizes to the loopback bind default; "*" and "0.0.0.0" are the
+	// explicit wildcard forms. On Linux a 127.0.0.1 listener Close()'d
+	// immediately ago can leave a SYN_RECV / TIME_WAIT slot, but a fresh
+	// bind on any of these forms should succeed since the listener was
+	// never connected to. Assert at least one form reports available —
+	// otherwise the normalization is broken.
 	wildcardAvailable := false
 	for _, host := range []string{"", "*", "0.0.0.0"} {
 		if managedDoltPortAvailableForHost(host, port) {

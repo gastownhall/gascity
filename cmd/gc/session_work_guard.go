@@ -7,6 +7,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // closeSessionBeadIfUnassigned closes a session bead only when the live store
@@ -22,6 +23,7 @@ import (
 // Live-query failures fail closed: the bead stays open until assignment can be
 // re-verified.
 func closeSessionBeadIfUnassigned(
+	cityPath string,
 	store beads.Store,
 	rigStores map[string]beads.Store,
 	cfg *config.City,
@@ -33,7 +35,7 @@ func closeSessionBeadIfUnassigned(
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	hasAssignedWork, err := sessionHasOpenAssignedWorkForConfig(store, rigStores, session, cfg)
+	hasAssignedWork, err := sessionHasOpenAssignedWorkForConfig(cityPath, cfg, store, rigStores, session)
 	if err != nil {
 		fmt.Fprintf(stderr, "session work guard: checking assigned work for %s: %v\n", session.ID, err) //nolint:errcheck
 		return false
@@ -42,21 +44,24 @@ func closeSessionBeadIfUnassigned(
 		return false
 	}
 	if isFailedCreateSessionBead(session) {
-		return closeFailedCreateBead(store, session.ID, now, stderr)
+		return closeFailedCreateBead(sessionFrontDoor(store), session.ID, now, stderr)
 	}
 	return closeBead(store, session.ID, reason, now, stderr)
 }
 
-// closeSessionBeadIfReachableStoreUnassigned closes a session bead only when
-// the live store scope its configured agent can query has no open or
-// in-progress work assigned to the session. It returns whether the close
-// succeeded, matching closeSessionBeadIfUnassigned's contract.
-func closeSessionBeadIfReachableStoreUnassigned(
+// closeSessionInfoIfUnassigned is the session.Info form of
+// closeSessionBeadIfUnassigned: it closes the session identified by info only when
+// the live cross-store query confirms no open or in-progress work is assigned to
+// it. The identity/close reads route through the typed projection and the session
+// front door (closeBead / closeFailedCreateBead, which funnel writes through
+// sessionFrontDoor and run the extmsg/orphaned-work release cascade). Byte-
+// identical to the raw form for the GCSweep close op.
+func closeSessionInfoIfUnassigned(
 	cityPath string,
-	cfg *config.City,
 	store beads.Store,
 	rigStores map[string]beads.Store,
-	session beads.Bead,
+	cfg *config.City,
+	info sessionpkg.Info,
 	reason string,
 	now time.Time,
 	stderr io.Writer,
@@ -64,16 +69,65 @@ func closeSessionBeadIfReachableStoreUnassigned(
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	hasAssignedWork, err := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, session)
+	hasAssignedWork, err := sessionHasOpenAssignedWorkForConfigInfo(cityPath, cfg, store, rigStores, info)
 	if err != nil {
-		fmt.Fprintf(stderr, "session work guard: checking reachable assigned work for %s: %v\n", session.ID, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "session work guard: checking assigned work for %s: %v\n", info.ID, err) //nolint:errcheck
 		return false
 	}
 	if hasAssignedWork {
 		return false
 	}
-	if isFailedCreateSessionBead(session) {
-		return closeFailedCreateBead(store, session.ID, now, stderr)
+	if isFailedCreateSessionInfo(info) {
+		return closeFailedCreateBead(sessionFrontDoor(store), info.ID, now, stderr)
 	}
-	return closeBead(store, session.ID, reason, now, stderr)
+	return closeBead(store, info.ID, reason, now, stderr)
+}
+
+// closeSessionBeadIfReachableStoreUnassigned closes a session bead only when
+// the live store scope its configured agent can query has no open or
+// in-progress work assigned to the session. It returns whether the close
+// succeeded, matching closeSessionBeadIfUnassigned's contract.
+// The session parameter is a session.Info: the reachable-store gate reads the
+// session through the typed front door, while the close routes through closeBead
+// (which already funnels its writes through sessionFrontDoor AND runs the
+// extmsg/orphaned-work release cascade Store.Close does not — so the close stays
+// on closeBead, not Store.Close, to preserve that behavior).
+//
+// excludeOwnDrainStep selects the drain-ack close-gate form of the
+// assigned-work probe (sessionHasOpenAssignedWorkForReachableStoreForCloseGate),
+// which excludes the session's own mol-do-work "drain" step so a session that
+// has already signaled completion is not judged to still have work.
+// Pass true ONLY from the drain-ack finalize path; every
+// other caller (failed-create close, generic idle/config-drift close) passes
+// false to keep its existing behavior unchanged.
+func closeSessionBeadIfReachableStoreUnassigned(
+	cityPath string,
+	cfg *config.City,
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	info sessionpkg.Info,
+	reason string,
+	now time.Time,
+	stderr io.Writer,
+	excludeOwnDrainStep bool,
+) bool {
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	assignedWorkProbe := sessionHasOpenAssignedWorkForReachableStore
+	if excludeOwnDrainStep {
+		assignedWorkProbe = sessionHasOpenAssignedWorkForReachableStoreForCloseGate
+	}
+	hasAssignedWork, err := assignedWorkProbe(cityPath, cfg, store, rigStores, info)
+	if err != nil {
+		fmt.Fprintf(stderr, "session work guard: checking reachable assigned work for %s: %v\n", info.ID, err) //nolint:errcheck
+		return false
+	}
+	if hasAssignedWork {
+		return false
+	}
+	if isFailedCreateSessionInfo(info) {
+		return closeFailedCreateBead(sessionFrontDoor(store), info.ID, now, stderr)
+	}
+	return closeBead(store, info.ID, reason, now, stderr)
 }

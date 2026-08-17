@@ -18,20 +18,17 @@ import (
 	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
 )
 
-// staleKeyDetectDelay is how long to wait after starting a session before
-// checking if it died immediately (stale resume key detection). Tests that
-// drive the start path through a fake runtime can shorten this via
-// SetStaleKeyDetectDelayForTest to keep their wall-clock down.
-var staleKeyDetectDelay = 2 * time.Second
+// staleKeyDetectDelay is the immutable production window between a keyed
+// session start and the liveness probe that detects a stale resume key.
+const staleKeyDetectDelay = 2 * time.Second
 
-// SetStaleKeyDetectDelayForTest overrides the stale-key detection delay used
-// by ensureRunning/ensureRunningRuntimeOnly. The returned func restores the
-// previous value. Intended for tests only; production code should not call
-// this.
-func SetStaleKeyDetectDelayForTest(d time.Duration) func() {
-	prev := staleKeyDetectDelay
-	staleKeyDetectDelay = d
-	return func() { staleKeyDetectDelay = prev }
+// StaleKeyDetectionWaiter waits until a started keyed session is ready for its
+// stale-resume-key liveness probe. Implementations must return the context
+// error when the wait is canceled.
+type StaleKeyDetectionWaiter func(context.Context, string) error
+
+func waitForStaleKeyDetection(ctx context.Context, _ string) error {
+	return sleepWithContext(ctx, staleKeyDetectDelay)
 }
 
 const waitIdleNudgeTimeout = 30 * time.Second
@@ -148,12 +145,22 @@ func (m *Manager) clearStaleResumeMetadata(id string, b *beads.Bead) error {
 	if err := m.store.SetMetadata(id, "continuation_reset_pending", "true"); err != nil {
 		return fmt.Errorf("clearing stale resume metadata continuation_reset_pending: %w", err)
 	}
+	// Priming markers share started_config_hash's lifetime (S19 Stage 2): this
+	// stale-resume clear forces a fresh start, so the markers reset with it.
+	for _, k := range primingResetKeys {
+		if err := m.store.SetMetadata(id, k, ""); err != nil {
+			return fmt.Errorf("clearing stale resume metadata %s: %w", k, err)
+		}
+	}
 	if b.Metadata == nil {
 		b.Metadata = make(map[string]string)
 	}
 	b.Metadata["session_key"] = ""
 	b.Metadata["started_config_hash"] = ""
 	b.Metadata["continuation_reset_pending"] = "true"
+	for _, k := range primingResetKeys {
+		b.Metadata[k] = ""
+	}
 	return nil
 }
 
@@ -202,7 +209,16 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 		}
 	}
 	cfg.Command = freshCmd
-	m.killExistingOrphans(ctx, id)
+	// Refuse the fresh start if a prior escaped process for this session could
+	// not be confirmed dead: a survivor would race this replacement for the
+	// same work bead. This path reuses the existing bead ID, so there is no
+	// fresh-create to roll back — unroute and propagate the error before Start.
+	if orphanErr := m.killExistingOrphans(ctx, id); orphanErr != nil {
+		if unroute != nil {
+			unroute()
+		}
+		return false, fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
+	}
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 		if unroute != nil {
 			unroute()
@@ -357,11 +373,7 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 		b.Metadata["instance_token"] = instanceToken
 	}
 	cfg.Env = mergeEnv(cfg.Env, RuntimeEnvWithSessionContext(
-		id,
-		sessName,
-		strings.TrimSpace(b.Metadata["alias"]),
-		strings.TrimSpace(b.Metadata["template"]),
-		strings.TrimSpace(b.Metadata["session_origin"]),
+		infoFromPersistedBead(b),
 		generation,
 		continuationEpoch,
 		instanceToken,
@@ -371,7 +383,17 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	}
 	cfg = runtime.SyncWorkDirEnv(cfg)
 	started := false
-	m.killExistingOrphans(ctx, id)
+	// Refuse to resume if a prior escaped process for this session could not be
+	// confirmed dead: a survivor would race this replacement for the same work
+	// bead (duplicate bd close). This is the stable/reused-bead-ID path — the
+	// exact "old process survives alongside its replacement" scenario. No
+	// fresh-create to roll back, so unroute and propagate before Start.
+	if orphanErr := m.killExistingOrphans(ctx, id); orphanErr != nil {
+		if unroute != nil {
+			unroute()
+		}
+		return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
+	}
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 		if errors.Is(err, runtime.ErrSessionDiedDuringStartup) && b.Metadata["session_key"] != "" {
 			retried, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute)
@@ -397,7 +419,7 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	// invalid (e.g., "No conversation found"). Clear the key and retry
 	// with a fresh start so the user isn't stuck with a dead pane.
 	if started && b.Metadata["session_key"] != "" {
-		if err := sleepWithContext(ctx, staleKeyDetectDelay); err != nil {
+		if err := m.staleKeyDetectionWaiter(ctx, sessName); err != nil {
 			// Context canceled during stale-key sleep: the runtime session
 			// may already be running but we skip setting state="active".
 			// This is self-healing via NDI — the next ensureRunning call
@@ -466,11 +488,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 		b.Metadata["instance_token"] = instanceToken
 	}
 	cfg.Env = mergeEnv(cfg.Env, RuntimeEnvWithSessionContext(
-		id,
-		sessName,
-		strings.TrimSpace(b.Metadata["alias"]),
-		strings.TrimSpace(b.Metadata["template"]),
-		strings.TrimSpace(b.Metadata["session_origin"]),
+		infoFromPersistedBead(b),
 		generation,
 		continuationEpoch,
 		instanceToken,
@@ -482,7 +500,16 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 	}
 	cfg = runtime.SyncWorkDirEnv(cfg)
 	started := false
-	m.killExistingOrphans(ctx, id)
+	// Refuse to respawn if a prior escaped process for this session could not
+	// be confirmed dead: a survivor would race this replacement for the same
+	// work bead. This is the reconciler respawn bridge on a stable/reused bead
+	// ID. No fresh-create to roll back, so unroute and propagate before Start.
+	if orphanErr := m.killExistingOrphans(ctx, id); orphanErr != nil {
+		if unroute != nil {
+			unroute()
+		}
+		return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
+	}
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 		switch {
 		case errors.Is(err, runtime.ErrSessionDiedDuringStartup) && b.Metadata["session_key"] != "":
@@ -503,7 +530,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 		started = true
 	}
 	if started && b.Metadata["session_key"] != "" {
-		if err := sleepWithContext(ctx, staleKeyDetectDelay); err != nil {
+		if err := m.staleKeyDetectionWaiter(ctx, sessName); err != nil {
 			if unroute != nil {
 				unroute()
 			}
@@ -967,21 +994,42 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 		return path, nil
 	}
 
+	sameWorkDirSessions, err := m.sameWorkDirSessionBeads(b, provider, workDir)
+	if err != nil {
+		return "", err
+	}
+	if len(sameWorkDirSessions) > 1 {
+		sameWorkDirInfos := make([]Info, 0, len(sameWorkDirSessions))
+		for _, s := range sameWorkDirSessions {
+			sameWorkDirInfos = append(sameWorkDirInfos, infoFromPersistedBead(s))
+		}
+		if path := ResolveCodexTranscriptBySessionOrder(searchPaths, provider, workDir, b.ID, sameWorkDirInfos); path != "" {
+			return path, nil
+		}
+		// Without a stable session key, multiple sessions sharing the same
+		// workdir cannot be mapped safely to a single transcript.
+		return "", nil
+	}
+	return workertranscript.DiscoverPath(searchPaths, provider, workDir, ""), nil
+}
+
+// sameWorkDirSessionBeads returns the session beads that share workDir with the
+// target b, restricted to the same provider family when the target's provider is
+// known. For a live target, closed historical sessions are excluded; for a
+// closed target they are kept so historical same-workdir ambiguity is preserved.
+func (m *Manager) sameWorkDirSessionBeads(b beads.Bead, provider, workDir string) ([]beads.Bead, error) {
 	all, err := m.store.List(beads.ListQuery{
 		Label:         LabelSession,
 		IncludeClosed: b.Status == "closed",
 	})
 	if err != nil {
-		return "", fmt.Errorf("listing sessions: %w", err)
+		return nil, fmt.Errorf("listing sessions: %w", err)
 	}
-	matches := 0
+	var same []beads.Bead
 	for _, other := range all {
 		if !IsSessionBeadOrRepairable(other) {
 			continue
 		}
-		// For a live target, closed historical sessions should not make the
-		// lookup ambiguous. For a closed target, historical siblings sharing
-		// the same workdir are the ambiguity we need to preserve.
 		if b.Status != "closed" && other.Status == "closed" {
 			continue
 		}
@@ -993,13 +1041,28 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 			continue
 		}
 		if other.Metadata["work_dir"] == workDir {
-			matches++
-			if matches > 1 {
-				// Without a stable session key, multiple sessions sharing the
-				// same workdir cannot be mapped safely to a single transcript.
-				return "", nil
-			}
+			same = append(same, other)
 		}
 	}
-	return workertranscript.DiscoverPath(searchPaths, provider, workDir, ""), nil
+	return same, nil
+}
+
+// KeyedTranscriptPath returns the transcript path only when it resolves to a
+// single session's file by a stable per-session key — never by the ambiguous
+// workdir/newest-mtime fallback. Callers that must attribute a file to exactly
+// one session (e.g. writing a session-id sidecar next to it) use this instead
+// of TranscriptPath, which additionally serves that workdir fallback for
+// history rendering.
+//
+// Coverage is whatever has both a captured per-session id and a 1:1 lookup:
+// claude/kimi/pi/antigravity (keyed-path construction) and codex (its rollout
+// filename carries the session-id suffix; the id is captured by the SessionStart
+// hook). It returns "" for gemini/opencode/mimocode, which have a session id but
+// no 1:1 by-id lookup, so only the unsafe workdir fallback would be available.
+func (m *Manager) KeyedTranscriptPath(id string, searchPaths []string) (string, error) {
+	b, _, err := m.loadSessionBead(id, true)
+	if err != nil {
+		return "", err
+	}
+	return ResolveKeyedTranscriptPath(infoFromPersistedBead(b), searchPaths), nil
 }

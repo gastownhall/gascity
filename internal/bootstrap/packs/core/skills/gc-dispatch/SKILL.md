@@ -30,7 +30,7 @@ where work goes. Example: bead `hw-42` → rig `hello-world` → target
 `hello-world/polecat`.
 
 **Rig-scoped beads:** `gc sling` automatically resolves the rig directory
-for rig-scoped bead IDs (e.g. `hw-abc`) and runs `bd update` from there,
+for rig-scoped bead IDs (e.g. `hw-abc`) and runs `gc bd update` from there,
 so the rig's `.beads` database is found without manual intervention.
 
 **Beads must be in the agent's rig database.** Sling operates on the
@@ -194,6 +194,21 @@ the common steps (load context, preflight, implement, self-review) that
 variant formulas extend. Not typically used directly — use a variant
 like mol-polecat-commit, mol-polecat-report, or mol-polecat-work instead.
 
+**mol-prompt-synth** — Formula side of `gc prompt synth --writer-agent <name>`.
+Reads a pre-rendered meta-prompt from disk, generates an agent prompt
+template, and writes it to a destination path.
+
+**mol-review-quorum** — Graph-first review quorum scaffold. Fans out two
+read-only reviewer lanes (lane IDs, providers, models, and dispatch
+targets supplied by formula variables), then routes a synthesis agent to
+combine their durable structured outputs.
+
+**mol-scoped-work** — Graph-first worktree lifecycle; the built-in v2
+workflow prototype. Models work as an explicit DAG with a durable `body`
+scope bead, explicit worktree setup/teardown, independently routable step
+beads, and continuation metadata for same-session execution. Opt-in
+replacement for hierarchy-first single-session formulas.
+
 ### Gastown pack formulas (work variants)
 
 These require the gastown pack. They extend the built-in
@@ -201,14 +216,40 @@ These require the gastown pack. They extend the built-in
 
 **mol-polecat-work** — Feature-branch variant. Creates a worktree and
 feature branch, implements, then pushes and reassigns to the refinery
-for merge review. Production default for multi-agent setups. The polecat's
-`base_branch` comes from `metadata.target` on the work bead if present,
-otherwise from a parent convoy with `metadata.target`, otherwise from
-the rig repo's default branch.
+for merge review. Production default for multi-agent setups.
 
 ```
 gc sling <agent> <bead-id> --on mol-polecat-work
 ```
+
+The polecat cuts its branch from `origin/<base_branch>` and stamps
+`metadata.target` for the refinery, so `base_branch` decides where the
+work lands. `gc sling` resolves it in this order, first match wins:
+
+1. `metadata.target` on the work bead, or on the nearest parent convoy
+   that carries one — the per-bead override.
+2. `default_branch` recorded for the bead's rig in `city.toml`.
+3. `default_branch` recorded for the agent's rig in `city.toml`.
+4. A live probe of the rig repo's `origin/HEAD`.
+
+Tiers 2 and 3 are the knob to reach for when a repo's mainline is not
+what `origin/HEAD` advertises. A repo whose `origin/HEAD` still points at
+a mirror-only `main` while work belongs on an integration branch sets it
+once, per rig:
+
+```toml
+[[rigs]]
+name = "myrig"
+default_branch = "develop"
+```
+
+Without that, resolution falls through to the tier-4 probe and every
+polecat branch is cut from the mirror. `gc rig add` captures
+`default_branch` from the repo at add time, so a rig registered before
+its mainline moved keeps the stale value until you update it — check
+`gc rig list --json` rather than inferring the answer from
+`git symbolic-ref refs/remotes/origin/HEAD`, which only ever reports
+tier 4.
 
 **mol-idea-to-plan** — Planning workflow for a coordinator session. Turns a
 rough idea into a PRD, reviewed design doc, and beads DAG using Gas City's
@@ -249,9 +290,9 @@ gc convoy list                                        # List active convoys
 gc convoy status <id>                                 # Show convoy progress + metadata
 gc convoy add <id> <bead-ids...>                      # Add beads to convoy
 gc convoy close <id>                                  # Close convoy
-gc convoy check <id>                                  # Check if all beads done
+gc convoy check                                       # MUTATING: scans ALL open convoys city-wide and auto-closes any where all children are resolved
 gc convoy stranded                                    # Find convoys with no progress
-gc convoy autoclose                                   # Close convoys where all beads done
+gc convoy autoclose <id>                              # Internal: invoked by bd's on_close hook to auto-close a closed bead's completed convoys
 ```
 
 Migration note:
@@ -263,6 +304,6 @@ Migration note:
 gc order list                     # List order rules
 gc order show <name>              # Show order definition
 gc order run <name>               # Manually trigger an order
-gc order check <name>             # Check if trigger conditions are met
+gc order check                    # Evaluate all orders' trigger conditions and show which are due
 gc order history <name>           # Show order run history
 ```

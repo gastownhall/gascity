@@ -32,6 +32,9 @@ func loadCityConfigWithBuiltinPacks(cityPath string, includes ...string) (*confi
 		return nil, nil, err
 	}
 	warnMissingRequiredBuiltinImports(fsys.OSFS{}, cfg, tomlPath, resolveLoadCityConfigWarningWriter())
+	if err := validatePackRuntimeRegistrations(cfg); err != nil {
+		return nil, nil, err
+	}
 	return cfg, prov, nil
 }
 
@@ -121,6 +124,9 @@ func doConfigShow(validate, showProvenance, asJSON bool, stdout, stderr io.Write
 		validationErrors = append(validationErrors, err.Error())
 	}
 	if err := config.ValidateRigs(cfg.Rigs, config.EffectiveHQPrefix(cfg)); err != nil {
+		validationErrors = append(validationErrors, err.Error())
+	}
+	if err := config.ValidateWebhooks(cfg.Webhooks); err != nil {
 		validationErrors = append(validationErrors, err.Error())
 	}
 	if err := config.ValidateServices(cfg.Services); err != nil {
@@ -620,6 +626,24 @@ func explainAgent(w io.Writer, a *config.Agent, prov *config.Provenance) {
 		if a.DrainTimeout != "" {
 			explainField(w, "drain_timeout", a.DrainTimeout, source)
 		}
+	}
+
+	// Lifecycle timeouts. These resolved keys drive idle-suspend and
+	// session-age recycling but were previously omitted from explain output,
+	// forcing operators to read their provenance from the pack agent.toml
+	// directly (#3965). Only render keys that are set, matching the
+	// conditional pattern used for the fields above.
+	if a.IdleTimeout != "" {
+		explainField(w, "idle_timeout", a.IdleTimeout, source)
+	}
+	if a.SleepAfterIdle != "" {
+		explainField(w, "sleep_after_idle", a.SleepAfterIdle, source)
+	}
+	if a.MaxSessionAge != "" {
+		explainField(w, "max_session_age", a.MaxSessionAge, source)
+	}
+	if a.MaxSessionAgeJitter != "" {
+		explainField(w, "max_session_age_jitter", a.MaxSessionAgeJitter, source)
 	}
 }
 

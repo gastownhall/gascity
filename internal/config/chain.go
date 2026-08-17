@@ -403,6 +403,7 @@ func recordScalarProvenance(spec ProviderSpec, layer string, into map[string]str
 	set("resume_style", spec.ResumeStyle)
 	set("resume_command", spec.ResumeCommand)
 	set("session_id_flag", spec.SessionIDFlag)
+	set("fork_flag", spec.ForkFlag)
 	set("acp_command", spec.ACPCommand)
 	setSlice("acp_args", spec.ACPArgs)
 	set("title_model", spec.TitleModel)

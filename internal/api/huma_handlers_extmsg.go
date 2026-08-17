@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
 )
@@ -20,7 +20,7 @@ import (
 func (s *Server) humaExtmsgServices() (*extmsg.Services, error) {
 	svc := s.state.ExtMsgServices()
 	if svc == nil {
-		return nil, huma.Error503ServiceUnavailable("external messaging not enabled")
+		return nil, apierr.ServiceUnavailable.Msg("external messaging not enabled")
 	}
 	return svc, nil
 }
@@ -30,7 +30,7 @@ func (s *Server) humaExtmsgServices() (*extmsg.Services, error) {
 func (s *Server) humaExtmsgAdapterRegistry() (*extmsg.AdapterRegistry, error) {
 	reg := s.state.AdapterRegistry()
 	if reg == nil {
-		return nil, huma.Error503ServiceUnavailable("adapter registry not available")
+		return nil, apierr.ServiceUnavailable.Msg("adapter registry not available")
 	}
 	return reg, nil
 }
@@ -49,38 +49,50 @@ func (s *Server) humaHandleExtMsgInbound(ctx context.Context, input *ExtMsgInbou
 	}
 
 	deps := extmsg.InboundDeps{
-		Services:  *svc,
-		Registry:  reg,
-		EmitEvent: s.extmsgEmitEvent(),
+		Services:                    *svc,
+		Registry:                    reg,
+		EmitEvent:                   s.extmsgEmitEvent(),
+		DefaultAgentForConversation: s.extmsgDefaultAgentForConversation(),
 	}
 
 	// Pre-normalized path.
 	if input.Body.Message != nil {
 		result, handleErr := extmsg.HandleInboundNormalized(ctx, deps, *input.Body.Message)
 		if handleErr != nil {
-			// HandleInboundNormalized fails either on a deterministic input
-			// rejection (malformed/unroutable conversation — permanent, so a
-			// 4xx the adapter should drop) or on a transient binding/route/
-			// transcript store fault (retryable, so a 5xx the adapter should
-			// hold and redeliver). Out-of-process adapters treat 4xx as a
-			// permanent drop and 5xx as retryable, so a transient storage fault
-			// must not be reported as a permanent-looking 422. Mirrors the
-			// bind handler's error split.
+			// HandleInboundNormalized fails in one of two classes. Permanent
+			// rejections (a malformed/unroutable conversation, or an invariant
+			// violation such as duplicate active bindings) are a 4xx the adapter
+			// should drop: retrying re-resolves the same corrupt state and fails
+			// identically, so reporting 5xx would pin the adapter's ordered poll
+			// offset behind one poison message and wedge the whole account stream.
+			// Transient binding/route/transcript store faults are retryable, so a
+			// 5xx the adapter should hold and redeliver. Out-of-process adapters
+			// treat 4xx as a permanent drop and 5xx as retryable, so a transient
+			// fault must never surface as a permanent 4xx and a permanent fault
+			// must never surface as a retryable 5xx. This is a subset of the bind
+			// handler's split below: no ErrBindingConflict (409) arm, because the
+			// inbound path resolves existing bindings rather than creating them.
 			switch {
-			// ErrInvalidConversation is the only permanent error
-			// HandleInboundNormalized can actually surface today (a
-			// malformed/unroutable conversation). The ErrInvalidInput arm mirrors
-			// the bind handler's switch below for symmetry and future-proofing —
-			// the normalized path hard-codes Kind/Provenance so it has no live
-			// ErrInvalidInput source — and keeps the two switches identical if a
-			// later validation starts returning it.
-			case errors.Is(handleErr, extmsg.ErrInvalidInput), errors.Is(handleErr, extmsg.ErrInvalidConversation):
-				return nil, huma.Error400BadRequest(handleErr.Error())
+			// Permanent conditions the normalized path can surface: an
+			// unroutable/malformed conversation (ErrInvalidConversation), and an
+			// invariant violation (ErrInvariantViolation) from binding, group-route,
+			// or transcript resolution — corrupt state that retrying cannot repair,
+			// so it is dropped rather than allowed to wedge the stream. The
+			// ErrInvalidInput arm is the bind switch's input-validation arm carried
+			// over for symmetry; the normalized path hard-codes Kind/Provenance so
+			// it has no live ErrInvalidInput source today.
+			case errors.Is(handleErr, extmsg.ErrInvalidInput),
+				errors.Is(handleErr, extmsg.ErrInvalidConversation),
+				errors.Is(handleErr, extmsg.ErrInvariantViolation):
+				return nil, apierr.InvalidRequest.Msg(handleErr.Error())
 			default:
-				return nil, huma.Error500InternalServerError(handleErr.Error())
+				return nil, apierr.Internal.Msg(handleErr.Error())
 			}
 		}
-		go s.extmsgNotifyInboundMembers(s.backgroundCtx(), *input.Body.Message)
+		message := *input.Body.Message
+		s.runBackground(func(ctx context.Context) {
+			s.extmsgNotifyInboundMembers(ctx, message)
+		})
 		out := &ExtMsgInboundOutput{}
 		if result != nil {
 			out.Body = *result
@@ -93,7 +105,7 @@ func (s *Server) humaHandleExtMsgInbound(ctx context.Context, input *ExtMsgInbou
 	// the check stays here rather than in the schema — the schema can't
 	// express conditional-on-sibling requiredness cleanly.
 	if input.Body.Provider == "" || input.Body.AccountID == "" {
-		return nil, huma.Error400BadRequest("provider and account_id are required for raw payloads")
+		return nil, apierr.InvalidRequest.Msg("provider and account_id are required for raw payloads")
 	}
 
 	key := extmsg.AdapterKey{Provider: input.Body.Provider, AccountID: input.Body.AccountID}
@@ -112,7 +124,7 @@ func (s *Server) humaHandleExtMsgInbound(ctx context.Context, input *ExtMsgInbou
 		// future adapter that actually verifies raw payloads must apply the same
 		// errors.Is split used above (4xx for the deterministic adapter/input
 		// rejections, 5xx for transient store faults).
-		return nil, huma.Error422UnprocessableEntity(err.Error())
+		return nil, apierr.ValidationFailed.Msg(err.Error())
 	}
 	out := &ExtMsgInboundOutput{}
 	if result != nil {
@@ -150,7 +162,7 @@ func (s *Server) humaHandleExtMsgOutbound(ctx context.Context, input *ExtMsgOutb
 		IdempotencyKey:   input.Body.IdempotencyKey,
 	})
 	if err != nil {
-		return nil, huma.Error422UnprocessableEntity(err.Error())
+		return nil, apierr.ValidationFailed.Msg(err.Error())
 	}
 	if result != nil && result.Receipt.Delivered {
 		notifyConversation := input.Body.Conversation
@@ -158,7 +170,10 @@ func (s *Server) humaHandleExtMsgOutbound(ctx context.Context, input *ExtMsgOutb
 			notifyConversation = result.Receipt.Conversation
 		}
 		sourceDisplay := s.extmsgSessionHandleForSelector(input.Body.SessionID)
-		go s.extmsgNotifyMembers(s.backgroundCtx(), notifyConversation, sourceDisplay, "agent", input.Body.Text, input.Body.SessionID, "")
+		text, sessionID := input.Body.Text, input.Body.SessionID
+		s.runBackground(func(ctx context.Context) {
+			s.extmsgNotifyMembers(ctx, notifyConversation, sourceDisplay, "agent", text, sessionID, "")
+		})
 	}
 	out := &ExtMsgOutboundOutput{}
 	if result != nil {
@@ -177,12 +192,12 @@ func (s *Server) humaHandleExtMsgBindingList(ctx context.Context, input *ExtMsgB
 	}
 
 	if input.SessionID == "" {
-		return nil, huma.Error400BadRequest("session_id query parameter is required")
+		return nil, apierr.InvalidRequest.Msg("session_id query parameter is required")
 	}
 
 	bindings, err := svc.Bindings.ListBySession(ctx, input.SessionID)
 	if err != nil {
-		return nil, huma.Error500InternalServerError(err.Error())
+		return nil, apierr.Internal.Msg(err.Error())
 	}
 	if bindings == nil {
 		bindings = []extmsg.SessionBindingRecord{}
@@ -206,9 +221,9 @@ func (s *Server) humaHandleExtMsgBind(ctx context.Context, input *ExtMsgBindInpu
 	agentName := strings.TrimSpace(input.Body.AgentName)
 	switch {
 	case sessionID == "" && agentName == "":
-		return nil, huma.Error400BadRequest("session_id or agent_name is required")
+		return nil, apierr.InvalidRequest.Msg("session_id or agent_name is required")
 	case sessionID != "" && agentName != "":
-		return nil, huma.Error400BadRequest("session_id and agent_name are mutually exclusive")
+		return nil, apierr.InvalidRequest.Msg("session_id and agent_name are mutually exclusive")
 	}
 	if agentName != "" {
 		// Agent bindings are resolved at delivery time, so the name must
@@ -216,12 +231,12 @@ func (s *Server) humaHandleExtMsgBind(ctx context.Context, input *ExtMsgBindInpu
 		// the delivery layer can cold-wake a session for. Persist the
 		// configured identity so the binding stays unambiguous even when
 		// a later config change makes the bare name ambiguous.
-		spec, ok, err := s.findNamedSessionSpecForTarget(s.state.CityBeadStore(), agentName)
+		spec, ok, err := s.findNamedSessionSpecForTarget(s.state.SessionsBeadStore().Store, agentName)
 		if err != nil {
-			return nil, huma.Error400BadRequest(fmt.Sprintf("resolving agent %q: %s", agentName, err))
+			return nil, apierr.InvalidRequest.Msg(fmt.Sprintf("resolving agent %q: %s", agentName, err))
 		}
 		if !ok {
-			return nil, huma.Error400BadRequest(fmt.Sprintf("agent %q does not resolve to a configured named session; agent bindings require a named-session-backed agent", agentName))
+			return nil, apierr.InvalidRequest.Msg(fmt.Sprintf("agent %q does not resolve to a configured named session; agent bindings require a named-session-backed agent", agentName))
 		}
 		agentName = spec.Identity
 	}
@@ -231,17 +246,18 @@ func (s *Server) humaHandleExtMsgBind(ctx context.Context, input *ExtMsgBindInpu
 		Conversation: input.Body.Conversation,
 		SessionID:    sessionID,
 		AgentName:    agentName,
+		Replace:      input.Body.Replace,
 		Metadata:     input.Body.Metadata,
 		Now:          time.Now(),
 	})
 	if err != nil {
 		switch {
 		case errors.Is(err, extmsg.ErrBindingConflict):
-			return nil, huma.Error409Conflict(err.Error())
+			return nil, apierr.ConflictWrongState.Msg(err.Error())
 		case errors.Is(err, extmsg.ErrInvalidInput) || errors.Is(err, extmsg.ErrInvalidConversation):
-			return nil, huma.Error400BadRequest(err.Error())
+			return nil, apierr.InvalidRequest.Msg(err.Error())
 		default:
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 	}
 
@@ -249,6 +265,15 @@ func (s *Server) humaHandleExtMsgBind(ctx context.Context, input *ExtMsgBindInpu
 	if subject == "" {
 		subject = agentName
 	}
+	// A handoff (Replace=true) ends the displaced binding and creates the
+	// replacement atomically, but emits only ExtMsgBound — not a paired
+	// ExtMsgUnbound for the displaced binding. ExtMsgBound with an incremented
+	// binding generation is the canonical handoff lifecycle signal; the bound
+	// payload identifies the new target, and the displaced binding's end is
+	// implied by the conversation now resolving to that new binding (whose
+	// generation is greater than 1). Consumers tracking binding lifecycle should
+	// reconcile against the active binding rather than wait for an ExtMsgUnbound
+	// that handoff intentionally does not emit.
 	s.extmsgEmitEvent()(events.ExtMsgBound, subject, extmsg.BoundEventPayload{
 		Provider:       input.Body.Conversation.Provider,
 		ConversationID: input.Body.Conversation.ConversationID,
@@ -270,7 +295,7 @@ func (s *Server) humaHandleExtMsgUnbind(ctx context.Context, input *ExtMsgUnbind
 	sessionID := strings.TrimSpace(input.Body.SessionID)
 	agentName := strings.TrimSpace(input.Body.AgentName)
 	if input.Body.Conversation == nil && sessionID == "" && agentName == "" {
-		return nil, huma.Error400BadRequest("conversation, session_id, or agent_name is required")
+		return nil, apierr.InvalidRequest.Msg("conversation, session_id, or agent_name is required")
 	}
 
 	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "api"}
@@ -281,7 +306,7 @@ func (s *Server) humaHandleExtMsgUnbind(ctx context.Context, input *ExtMsgUnbind
 		Now:          time.Now(),
 	})
 	if err != nil {
-		return nil, huma.Error422UnprocessableEntity(err.Error())
+		return nil, apierr.ValidationFailed.Msg(err.Error())
 	}
 
 	subject := sessionID
@@ -318,9 +343,9 @@ func (s *Server) humaHandleExtMsgGroupLookup(ctx context.Context, input *ExtMsgG
 	group, err := svc.Groups.FindByConversation(ctx, caller, ref)
 	if err != nil {
 		if errors.Is(err, extmsg.ErrGroupNotFound) {
-			return nil, huma.Error404NotFound("group not found for conversation")
+			return nil, apierr.ExtmsgGroupNotFound.Msg("group not found for conversation")
 		}
-		return nil, huma.Error500InternalServerError(err.Error())
+		return nil, apierr.Internal.Msg(err.Error())
 	}
 	out := &ExtMsgGroupOutput{}
 	if group != nil {
@@ -349,7 +374,7 @@ func (s *Server) humaHandleExtMsgGroupEnsure(ctx context.Context, input *ExtMsgG
 		Metadata:         input.Body.Metadata,
 	})
 	if err != nil {
-		return nil, huma.Error422UnprocessableEntity(err.Error())
+		return nil, apierr.ValidationFailed.Msg(err.Error())
 	}
 
 	s.extmsgEmitEvent()(events.ExtMsgGroupCreated, group.ID, extmsg.GroupCreatedEventPayload{
@@ -380,7 +405,7 @@ func (s *Server) humaHandleExtMsgParticipantUpsert(ctx context.Context, input *E
 		Metadata:  input.Body.Metadata,
 	})
 	if err != nil {
-		return nil, huma.Error422UnprocessableEntity(err.Error())
+		return nil, apierr.ValidationFailed.Msg(err.Error())
 	}
 	out := &ExtMsgParticipantOutput{}
 	out.Body = participant
@@ -400,7 +425,7 @@ func (s *Server) humaHandleExtMsgParticipantRemove(ctx context.Context, input *E
 		Handle:  input.Body.Handle,
 	})
 	if err != nil {
-		return nil, huma.Error422UnprocessableEntity(err.Error())
+		return nil, apierr.ValidationFailed.Msg(err.Error())
 	}
 	out := &OKResponse{}
 	out.Body.Status = "removed"
@@ -434,7 +459,7 @@ func (s *Server) humaHandleExtMsgTranscriptList(ctx context.Context, input *ExtM
 		Order:         extmsg.TranscriptOrder(input.Order),
 	})
 	if err != nil {
-		return nil, huma.Error500InternalServerError(err.Error())
+		return nil, apierr.Internal.Msg(err.Error())
 	}
 	if entries == nil {
 		entries = []extmsg.ConversationTranscriptRecord{}
@@ -460,7 +485,7 @@ func (s *Server) humaHandleExtMsgTranscriptAck(ctx context.Context, input *ExtMs
 		Sequence:     input.Body.Sequence,
 	})
 	if err != nil {
-		return nil, huma.Error422UnprocessableEntity(err.Error())
+		return nil, apierr.ValidationFailed.Msg(err.Error())
 	}
 	out := &OKResponse{}
 	out.Body.Status = "acked"
@@ -511,24 +536,36 @@ func (s *Server) humaHandleExtMsgAdapterList(_ context.Context, _ *ExtMsgAdapter
 
 // humaHandleExtMsgAdapterRegister is the Huma-typed handler for POST /v0/extmsg/adapters.
 func (s *Server) humaHandleExtMsgAdapterRegister(_ context.Context, input *ExtMsgAdapterRegisterInput) (*ExtMsgAdapterRegisterOutput, error) {
-	reg, err := s.humaExtmsgAdapterRegistry()
+	// Idempotency: register at most once per Idempotency-Key. Register itself
+	// is an add-or-replace upsert; the win is suppressing a duplicate
+	// ExtMsgAdapterAdded event on retry. The cached value is the resolved
+	// adapter name — the other body fields are echoes of the input, which the
+	// body hash pins to be identical on replay.
+	name, err := withIdempotency(s.idem, "/v0/extmsg/adapters", input.IdempotencyKey, input.Body,
+		func() (string, error) {
+			reg, regErr := s.humaExtmsgAdapterRegistry()
+			if regErr != nil {
+				return "", regErr
+			}
+
+			resolved := input.Body.Name
+			if resolved == "" {
+				resolved = input.Body.Provider + "/" + input.Body.AccountID
+			}
+
+			adapter := extmsg.NewHTTPAdapter(resolved, input.Body.CallbackURL, input.Body.Capabilities)
+			key := extmsg.AdapterKey{Provider: input.Body.Provider, AccountID: input.Body.AccountID}
+			reg.Register(key, adapter)
+
+			s.extmsgEmitEvent()(events.ExtMsgAdapterAdded, resolved, extmsg.AdapterEventPayload{
+				Provider:  input.Body.Provider,
+				AccountID: input.Body.AccountID,
+			})
+			return resolved, nil
+		})
 	if err != nil {
 		return nil, err
 	}
-
-	name := input.Body.Name
-	if name == "" {
-		name = input.Body.Provider + "/" + input.Body.AccountID
-	}
-
-	adapter := extmsg.NewHTTPAdapter(name, input.Body.CallbackURL, input.Body.Capabilities)
-	key := extmsg.AdapterKey{Provider: input.Body.Provider, AccountID: input.Body.AccountID}
-	reg.Register(key, adapter)
-
-	s.extmsgEmitEvent()(events.ExtMsgAdapterAdded, name, extmsg.AdapterEventPayload{
-		Provider:  input.Body.Provider,
-		AccountID: input.Body.AccountID,
-	})
 	out := &ExtMsgAdapterRegisterOutput{}
 	out.Body.Status = "registered"
 	out.Body.Provider = input.Body.Provider

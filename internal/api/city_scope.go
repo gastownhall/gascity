@@ -7,6 +7,8 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/sse"
+
+	"github.com/gastownhall/gascity/internal/api/apierr"
 )
 
 // CityScope is the path-parameter mixin embedded by every city-scoped
@@ -72,7 +74,7 @@ func bindCity[I any, O any](
 		name := named.GetCityName()
 		srv := sm.resolveCityServer(name)
 		if srv == nil {
-			return nil, huma.Error404NotFound(CityNotFoundOrNotRunningDetail(name))
+			return nil, apierr.CityNotFound.Msg(CityNotFoundOrNotRunningDetail(name))
 		}
 		return fn(srv, ctx, input)
 	}
@@ -121,13 +123,44 @@ func addMutationCSRFParam(op *huma.Operation) {
 	})
 }
 
+// errorStatuses returns an operation handler that declares the given HTTP status
+// codes as possible error responses on the operation. Huma then documents one
+// problem+json response per status (schema ErrorModel) and — because
+// Operation.Errors is non-empty — additionally appends the auto 422 (for ops
+// with path params or a body) and 500. Passing the 4xx/503 an op can emit turns
+// its catch-all `default` error response into an enumerated, machine-branchable
+// contract. Pass only the statuses the handler actually returns; do not pass 422
+// or 500 (Huma adds those).
+func errorStatuses(codes ...int) func(o *huma.Operation) {
+	return func(o *huma.Operation) {
+		o.Errors = append(o.Errors, codes...)
+	}
+}
+
+// listOrder documents a list endpoint's total order and cursor contract in
+// its operation description. Every keyset list declares its order here so
+// consumers never have to reverse-engineer it from behavior (the pre-S4
+// audit found five endpoints with three different undocumented orders).
+func listOrder(order string) func(o *huma.Operation) {
+	return func(o *huma.Operation) {
+		text := "Results are ordered " + order + ". A truncated response always carries next_cursor; passing it back returns the next page in the same order. Invalid or legacy cursors are rejected with a typed 400 (invalid-cursor)."
+		if o.Description == "" {
+			o.Description = text
+			return
+		}
+		o.Description += "\n\n" + text
+	}
+}
+
 // cityGet registers a per-city GET op at /v0/city/{cityName}+tail.
 // The tail starts with "/" (e.g. "/agents") or is "" for the
-// city-detail base path.
+// city-detail base path. Optional opts (e.g. errorStatuses) customize the
+// generated operation.
 func cityGet[I any, O any](sm *SupervisorMux, tail string,
 	fn func(*Server, context.Context, *I) (*O, error),
+	opts ...func(o *huma.Operation),
 ) {
-	huma.Get(sm.humaAPI, cityScopePrefix+tail, bindCity(sm, fn))
+	huma.Get(sm.humaAPI, cityScopePrefix+tail, bindCity(sm, fn), opts...)
 }
 
 // cityPost is the POST sibling of cityGet. Every city-scoped POST
@@ -136,32 +169,40 @@ func cityGet[I any, O any](sm *SupervisorMux, tail string,
 // per-input-struct boilerplate.
 func cityPost[I any, O any](sm *SupervisorMux, tail string,
 	fn func(*Server, context.Context, *I) (*O, error),
+	opts ...func(o *huma.Operation),
 ) {
-	huma.Post(sm.humaAPI, cityScopePrefix+tail, bindCity(sm, fn), addMutationCSRFParam)
+	huma.Post(sm.humaAPI, cityScopePrefix+tail, bindCity(sm, fn),
+		append([]func(o *huma.Operation){addMutationCSRFParam}, opts...)...)
 }
 
 // cityPut is the PUT sibling of cityGet. See cityPost for the CSRF
 // header rationale.
 func cityPut[I any, O any](sm *SupervisorMux, tail string,
 	fn func(*Server, context.Context, *I) (*O, error),
+	opts ...func(o *huma.Operation),
 ) {
-	huma.Put(sm.humaAPI, cityScopePrefix+tail, bindCity(sm, fn), addMutationCSRFParam)
+	huma.Put(sm.humaAPI, cityScopePrefix+tail, bindCity(sm, fn),
+		append([]func(o *huma.Operation){addMutationCSRFParam}, opts...)...)
 }
 
 // cityPatch is the PATCH sibling of cityGet. See cityPost for the CSRF
 // header rationale.
 func cityPatch[I any, O any](sm *SupervisorMux, tail string,
 	fn func(*Server, context.Context, *I) (*O, error),
+	opts ...func(o *huma.Operation),
 ) {
-	huma.Patch(sm.humaAPI, cityScopePrefix+tail, bindCity(sm, fn), addMutationCSRFParam)
+	huma.Patch(sm.humaAPI, cityScopePrefix+tail, bindCity(sm, fn),
+		append([]func(o *huma.Operation){addMutationCSRFParam}, opts...)...)
 }
 
 // cityDelete is the DELETE sibling of cityGet. See cityPost for the
 // CSRF header rationale.
 func cityDelete[I any, O any](sm *SupervisorMux, tail string,
 	fn func(*Server, context.Context, *I) (*O, error),
+	opts ...func(o *huma.Operation),
 ) {
-	huma.Delete(sm.humaAPI, cityScopePrefix+tail, bindCity(sm, fn), addMutationCSRFParam)
+	huma.Delete(sm.humaAPI, cityScopePrefix+tail, bindCity(sm, fn),
+		append([]func(o *huma.Operation){addMutationCSRFParam}, opts...)...)
 }
 
 // cityRegister is the per-city analog of huma.Register. Use it when
@@ -189,7 +230,7 @@ func sseCityPrecheck[I any](sm *SupervisorMux,
 		name := cityScopeName(input)
 		srv := sm.resolveCityServer(name)
 		if srv == nil {
-			return huma.Error404NotFound(CityNotFoundOrNotRunningDetail(name))
+			return apierr.CityNotFound.Msg(CityNotFoundOrNotRunningDetail(name))
 		}
 		return fn(srv, ctx, input)
 	}
@@ -202,6 +243,19 @@ func sseCityStream[I any](sm *SupervisorMux,
 	fn func(*Server, huma.Context, *I, sse.Sender),
 ) func(huma.Context, *I, sse.Sender) {
 	return func(hctx huma.Context, input *I, send sse.Sender) {
+		srv := sm.resolveCityServer(cityScopeName(input))
+		if srv == nil {
+			return
+		}
+		fn(srv, hctx, input, send)
+	}
+}
+
+// sseCityStringIDStream is the string-cursor sibling of sseCityStream.
+func sseCityStringIDStream[I any](sm *SupervisorMux,
+	fn func(*Server, huma.Context, *I, StringIDSender),
+) func(huma.Context, *I, StringIDSender) {
+	return func(hctx huma.Context, input *I, send StringIDSender) {
 		srv := sm.resolveCityServer(cityScopeName(input))
 		if srv == nil {
 			return

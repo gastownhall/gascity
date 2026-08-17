@@ -31,6 +31,8 @@ var (
 	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
 	_ runtime.TransportCapabilityProvider   = (*Provider)(nil)
+	_ runtime.RelaunchProvider              = (*Provider)(nil)
+	_ runtime.LivenessObserver              = (*Provider)(nil)
 )
 
 // New creates a composite provider. defaultSP handles sessions not
@@ -221,6 +223,31 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 	return p.route(name).ProcessAlive(name, processNames)
 }
 
+// ObserveLiveness delegates to the routed backend through runtime.ObserveLiveness
+// so the backend's native LivenessObserver fast-path is preserved — e.g. herdr's
+// agent-status liveness. Without this, wrapping a LivenessObserver backend in an
+// auto router would silently collapse it to the generic IsRunning+ProcessAlive
+// fold (the fragile process-table walk), reintroducing the singleton
+// restart-loop for any city that also routes some sessions to ACP.
+func (p *Provider) ObserveLiveness(name string, processNames []string) runtime.Liveness {
+	primary := runtime.ObserveLiveness(p.route(name), name, processNames)
+	if primary.Running {
+		return primary
+	}
+	// Fall through: check the other backend in case routing is stale
+	// (e.g. after a controller restart clears the in-memory route table),
+	// matching IsRunning's recovery so a live ACP singleton on a
+	// herdr-default city is not misread as dead.
+	p.mu.RLock()
+	isACP := p.routes[name]
+	p.mu.RUnlock()
+	other := p.acpSP
+	if isACP {
+		other = p.defaultSP
+	}
+	return runtime.ObserveLiveness(other, name, processNames)
+}
+
 // Nudge delegates to the routed backend.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	return p.route(name).Nudge(name, content)
@@ -251,6 +278,16 @@ func (p *Provider) ResetInterruptedTurn(ctx context.Context, name string) error 
 		return rp.ResetInterruptedTurn(ctx, name)
 	}
 	return runtime.ErrInteractionUnsupported
+}
+
+// Relaunch forwards a warm-box agent relaunch to the routed backend when it
+// supports one, so the reconciler's RelaunchProvider type-assert is not masked
+// by the auto router.
+func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
+	if rp, ok := p.route(name).(runtime.RelaunchProvider); ok {
+		return rp.Relaunch(ctx, name, cfg)
+	}
+	return runtime.ErrRelaunchUnsupported
 }
 
 // WaitForInterruptBoundary delegates to the routed backend when it can confirm

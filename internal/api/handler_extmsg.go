@@ -41,13 +41,39 @@ func (s *Server) extmsgEmitEvent() func(string, string, events.Payload) {
 	}
 }
 
+// extmsgDefaultAgentForConversation builds the InboundDeps default-route
+// resolver from [[extmsg.default_route]] config: it maps an unrouted
+// inbound conversation to the qualified identity of the configured agent.
+// A route naming an agent that does not resolve to a configured named
+// session is logged and skipped — the message stays unrouted rather than
+// failing the inbound on a config error.
+func (s *Server) extmsgDefaultAgentForConversation() func(extmsg.ConversationRef) string {
+	cfg := s.state.Config()
+	if cfg == nil || len(cfg.ExtMsg.DefaultRoutes) == 0 {
+		return nil
+	}
+	store := s.state.SessionsBeadStore().Store
+	return func(ref extmsg.ConversationRef) string {
+		agent := cfg.ExtMsgDefaultRouteAgent(ref.Provider, ref.AccountID)
+		if agent == "" {
+			return ""
+		}
+		spec, ok, err := s.findNamedSessionSpecForTarget(store, agent)
+		if err != nil || !ok {
+			log.Printf("extmsg: default-route agent %q for %s/%s does not resolve to a configured named session (err=%v)", agent, ref.Provider, ref.AccountID, err)
+			return ""
+		}
+		return spec.Identity
+	}
+}
+
 // extmsgResolveSessionSelector builds the OutboundDeps session-selector
 // resolver: it maps a selector — a configured agent identity, session name,
 // alias, or concrete session bead ID — to the concrete ID of a live session,
 // without materializing one. HandleOutbound uses it to authorize publishes on
 // agent-bound conversations.
 func (s *Server) extmsgResolveSessionSelector() func(ctx context.Context, selector string) (string, error) {
-	store := s.state.CityBeadStore()
+	store := s.state.SessionsBeadStore().Store
 	if store == nil {
 		return nil
 	}
@@ -68,7 +94,7 @@ func extmsgHandleLabel(value string) string {
 }
 
 func (s *Server) extmsgSessionHandleForSelector(selector string) string {
-	store := s.state.CityBeadStore()
+	store := s.state.SessionsBeadStore().Store
 	if store == nil {
 		return extmsgHandleLabel(selector)
 	}
@@ -80,21 +106,15 @@ func (s *Server) extmsgSessionHandleForSelector(selector string) string {
 }
 
 func (s *Server) extmsgSessionHandleForResolvedID(resolvedID, fallback string) string {
-	store := s.state.CityBeadStore()
-	if store == nil {
+	store := s.state.SessionsBeadStore()
+	if store.Store == nil {
 		return extmsgHandleLabel(fallback)
 	}
-	b, err := store.Get(resolvedID)
-	if err != nil {
+	source, ok := session.NewStore(store).ExtmsgHandleSource(resolvedID)
+	if !ok || source == "" {
 		return extmsgHandleLabel(fallback)
 	}
-	if alias := strings.TrimSpace(b.Metadata["alias"]); alias != "" {
-		return extmsgHandleLabel(alias)
-	}
-	if sessionName := strings.TrimSpace(b.Metadata["session_name"]); sessionName != "" {
-		return extmsgHandleLabel(sessionName)
-	}
-	return extmsgHandleLabel(fallback)
+	return extmsgHandleLabel(source)
 }
 
 // extmsgNotifyMembers sends a peer-publication reminder to transcript members
@@ -115,7 +135,10 @@ func (s *Server) extmsgNotifyMembers(
 	explicitTarget string,
 ) {
 	svc := s.state.ExtMsgServices()
-	store := s.state.CityBeadStore()
+	// Sessions class, and a WRITE path: the member fan-out below materializes a
+	// configured named session that has no live bead yet, so through the work
+	// store on a relocated city every cold-wake mints a stranded session bead.
+	store := s.state.SessionsBeadStore().Store
 	if svc == nil || store == nil {
 		return
 	}

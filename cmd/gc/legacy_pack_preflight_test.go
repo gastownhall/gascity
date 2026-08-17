@@ -122,9 +122,11 @@ fetched = "2026-01-01T00:00:00Z"
 
 // writePreflightImportLock pins the public gastown source at commit in a
 // fresh packs.lock (every preflight scenario uses that bundled source).
-func writePreflightImportLock(t *testing.T, cityPath, commit string) {
+// It takes a testing.TB so the readiness benchmarks can build the same
+// locked-city shape the preflight tests assert on.
+func writePreflightImportLock(tb testing.TB, cityPath, commit string) {
 	source := config.PublicGastownPackSource
-	t.Helper()
+	tb.Helper()
 	lockToml := fmt.Sprintf(`schema = 1
 
 [packs.%q]
@@ -133,7 +135,7 @@ commit = %q
 fetched = "2026-01-01T00:00:00Z"
 `, source, commit)
 	if err := os.WriteFile(filepath.Join(cityPath, packman.LockfileName), []byte(lockToml), 0o644); err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
 }
 

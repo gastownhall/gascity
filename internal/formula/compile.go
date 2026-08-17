@@ -181,6 +181,14 @@ func compileFormula(name string, searchPaths []string, vars map[string]string, v
 	}
 	resolved.Steps = retrySteps
 
+	// Resolve "../assets/..." check paths whose {target}/{{var}} placeholders
+	// expansion has now substituted, before ApplyRalph freezes them into
+	// gc.check_path. Parse time defers templated asset paths; this is where the
+	// now-concrete path becomes the absolute layer asset.
+	if err := parser.resolveExpandedCheckPaths(resolved); err != nil {
+		return nil, fmt.Errorf("resolving expanded check paths in %q: %w", name, err)
+	}
+
 	// Stage 11: Expand inline Ralph steps
 	ralphSteps, err := ApplyRalph(resolved.Steps)
 	if err != nil {
@@ -342,9 +350,20 @@ func toRecipeWithGraph(f *Formula, graphWorkflow bool) (*Recipe, error) {
 	}
 	if graphWorkflow {
 		rootStep.Metadata = map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}
-		rootStep.Metadata[beadmeta.FormulaContractMetadataKey] = "graph.v2"
+		rootStep.Metadata[beadmeta.FormulaContractMetadataKey] = beadmeta.FormulaContractGraphV2
 	} else if rootOnly {
 		rootStep.Metadata = map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWisp}
+	}
+	// Stamp the canonical run-recipe identity on the run-root so it rides the
+	// root bead.created payload (city_events.formula -> Forge "Run of <formula>").
+	// This is workflowFormulaName's gc.formula_name source, made exact and
+	// run-rooted instead of derived heuristically from a step's gc.step_ref
+	// "mol-<formula>.<step>" prefix downstream.
+	if f.Formula != "" {
+		if rootStep.Metadata == nil {
+			rootStep.Metadata = map[string]string{}
+		}
+		rootStep.Metadata[beadmeta.FormulaNameMetadataKey] = f.Formula
 	}
 	defPriority := 2
 	rootStep.Priority = &defPriority
@@ -551,13 +570,27 @@ func metadataForDrainStep(step *Step) map[string]string {
 	if metadata == nil {
 		metadata = make(map[string]string)
 	}
-	spec := step.Drain
-	metadata[beadmeta.KindMetadataKey] = "drain"
+	ApplyDrainControlMetadata(metadata, step.Drain)
+	return metadata
+}
+
+// ApplyDrainControlMetadata writes the drain-owned control metadata for spec
+// into metadata: gc.kind=drain plus the gc.drain_* execution contract, with
+// the compiler's defaulting (member_access "read"; on_item_failure
+// "skip_remaining" for shared context, "continue" otherwise). It is the
+// single shape owner for drain control metadata so compile-time flattening
+// and attempt re-spawn (internal/dispatch buildAttemptRecipe) mint identical
+// drain beads. A nil spec is a no-op.
+func ApplyDrainControlMetadata(metadata map[string]string, spec *DrainSpec) {
+	if metadata == nil || spec == nil {
+		return
+	}
+	metadata[beadmeta.KindMetadataKey] = beadmeta.KindDrain
 	metadata[beadmeta.DrainContextMetadataKey] = spec.Context
 	metadata[beadmeta.DrainFormulaMetadataKey] = spec.Formula
 	memberAccess := strings.TrimSpace(spec.MemberAccess)
 	if memberAccess == "" {
-		memberAccess = "read"
+		memberAccess = beadmeta.DrainMemberAccessRead
 	}
 	metadata[beadmeta.DrainMemberAccessMetadataKey] = memberAccess
 	if spec.MaxUnits != nil {
@@ -565,10 +598,10 @@ func metadataForDrainStep(step *Step) map[string]string {
 	}
 	onItemFailure := strings.TrimSpace(spec.OnItemFailure)
 	if onItemFailure == "" {
-		if spec.Context == "shared" {
-			onItemFailure = "skip_remaining"
+		if spec.Context == beadmeta.DrainContextShared {
+			onItemFailure = beadmeta.DrainOnItemFailureSkipRemaining
 		} else {
-			onItemFailure = "continue"
+			onItemFailure = beadmeta.DrainOnItemFailureContinue
 		}
 	}
 	metadata[beadmeta.DrainOnItemFailureMetadataKey] = onItemFailure
@@ -578,7 +611,6 @@ func metadataForDrainStep(step *Step) map[string]string {
 	if spec.Item != nil && spec.Item.SingleLane {
 		metadata[beadmeta.DrainItemSingleLaneMetadataKey] = "true"
 	}
-	return metadata
 }
 
 // formulaV2Enabled controls whether formula compiler capability v2 is allowed.
@@ -622,7 +654,7 @@ func isGraphWorkflow(f *Formula, v2Enabled bool) (bool, error) {
 }
 
 func declaresGraphV2Contract(f *Formula) bool {
-	return f != nil && strings.EqualFold(strings.TrimSpace(f.Contract), "graph.v2")
+	return f != nil && strings.EqualFold(strings.TrimSpace(f.Contract), beadmeta.FormulaContractGraphV2)
 }
 
 func isDetachedGraphStep(step *Step) bool {
@@ -639,7 +671,7 @@ func isDetachedGraphStep(step *Step) bool {
 
 func addWorkflowRootDeps(rootID string, steps []*Step, idMapping map[string]string, deps *[]RecipeDep) {
 	for _, step := range steps {
-		if step != nil && step.Metadata[beadmeta.KindMetadataKey] == "workflow-finalize" {
+		if step != nil && step.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflowFinalize {
 			if issueID, ok := idMapping[step.ID]; ok {
 				*deps = append(*deps, RecipeDep{
 					StepID:      rootID,

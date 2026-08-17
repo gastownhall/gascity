@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 func TestBindingServiceBindEnforcesOwnershipAndConflict(t *testing.T) {
@@ -118,6 +119,81 @@ func TestBindingServiceExpiredBindingIsMissAndRebinds(t *testing.T) {
 	}
 	if second.BindingGeneration != 2 {
 		t.Fatalf("rebind BindingGeneration = %d, want 2", second.BindingGeneration)
+	}
+}
+
+// commitCountingExtmsgStore counts standalone writes vs Tx batches so a test
+// can assert that a bind coalesces its writes into a single commit.
+type commitCountingExtmsgStore struct {
+	beads.Store
+	txCalls          int
+	standaloneWrites int
+}
+
+func (c *commitCountingExtmsgStore) Tx(commitMsg string, fn func(beads.Tx) error) error {
+	c.txCalls++
+	return c.Store.Tx(commitMsg, fn)
+}
+
+func (c *commitCountingExtmsgStore) Create(b beads.Bead) (beads.Bead, error) {
+	c.standaloneWrites++
+	return c.Store.Create(b)
+}
+
+func (c *commitCountingExtmsgStore) Update(id string, opts beads.UpdateOpts) error {
+	c.standaloneWrites++
+	return c.Store.Update(id, opts)
+}
+
+func (c *commitCountingExtmsgStore) SetMetadata(id, key, value string) error {
+	c.standaloneWrites++
+	return c.Store.SetMetadata(id, key, value)
+}
+
+func (c *commitCountingExtmsgStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	c.standaloneWrites++
+	return c.Store.SetMetadataBatch(id, kvs)
+}
+
+func TestBindingServiceBindCoalescesWritesIntoSingleCommit(t *testing.T) {
+	freezeTestClock(t)
+	counting := &commitCountingExtmsgStore{Store: beads.NewMemStore()}
+	svc := NewServices(counting).Bindings
+	ref := testConversationRef()
+
+	// A fresh bind creates three beads (binding + transcript-state +
+	// membership). All must land in one Tx with no standalone write —
+	// gastownhall/gascity#3735 turns 2-4 DOLT_COMMITs into one.
+	if _, err := svc.Bind(context.Background(), testControllerCaller(), BindInput{
+		Conversation: ref,
+		SessionID:    "sess-a",
+		Now:          testNow(),
+	}); err != nil {
+		t.Fatalf("Bind(fresh): %v", err)
+	}
+	if counting.txCalls != 1 {
+		t.Fatalf("fresh bind used %d Tx batches, want 1", counting.txCalls)
+	}
+	if counting.standaloneWrites != 0 {
+		t.Fatalf("fresh bind issued %d standalone writes, want 0 (all coalesced)", counting.standaloneWrites)
+	}
+
+	// A rebind of the same session coalesces its binding-metadata and
+	// transcript writes into a single Tx as well.
+	counting.txCalls = 0
+	counting.standaloneWrites = 0
+	if _, err := svc.Bind(context.Background(), testControllerCaller(), BindInput{
+		Conversation: ref,
+		SessionID:    "sess-a",
+		Now:          testNow().Add(time.Minute),
+	}); err != nil {
+		t.Fatalf("Bind(rebind): %v", err)
+	}
+	if counting.txCalls != 1 {
+		t.Fatalf("rebind used %d Tx batches, want 1", counting.txCalls)
+	}
+	if counting.standaloneWrites != 0 {
+		t.Fatalf("rebind issued %d standalone writes, want 0 (all coalesced)", counting.standaloneWrites)
 	}
 }
 
@@ -2202,13 +2278,13 @@ func TestGroupServiceRemoveParticipantRetriesTranscriptCleanup(t *testing.T) {
 	}
 }
 
-// overrideResolveLiveSessionID substitutes resolveLiveSessionID for the
+// overrideResolveLiveSession substitutes resolveLiveSession for the
 // duration of the test, restoring the original in t.Cleanup (Theme 18).
-func overrideResolveLiveSessionID(t *testing.T, fn func(beads.Store, string) (string, error)) {
+func overrideResolveLiveSession(t *testing.T, fn func(session.AddressDirectory, string) (session.Info, error)) {
 	t.Helper()
-	prev := resolveLiveSessionID
-	resolveLiveSessionID = fn
-	t.Cleanup(func() { resolveLiveSessionID = prev })
+	prev := resolveLiveSession
+	resolveLiveSession = fn
+	t.Cleanup(func() { resolveLiveSession = prev })
 }
 
 // overrideReassignmentTranscript substitutes the transcript syncer used by
@@ -2289,11 +2365,15 @@ func TestGroupServiceResolveInboundFollowsRespawnedSession(t *testing.T) {
 	if err := store.Close(sessAID); err != nil {
 		t.Fatalf("close session A bead: %v", err)
 	}
-	overrideResolveLiveSessionID(t, func(_ beads.Store, name string) (string, error) {
+	overrideResolveLiveSession(t, func(_ session.AddressDirectory, name string) (session.Info, error) {
 		if name == "pl-alpha" {
-			return sessBID, nil
+			return session.Info{
+				ID:                  sessBID,
+				Type:                session.BeadType,
+				SessionNameMetadata: name,
+			}, nil
 		}
-		return "", errors.New("not found")
+		return session.Info{}, session.ErrSessionNotFound
 	})
 
 	decision, err := svc.ResolveInbound(context.Background(), ExternalInboundMessage{Conversation: ref})
@@ -2332,11 +2412,15 @@ func TestGroupServiceResolveOutboundFollowsRespawnedSession(t *testing.T) {
 	if err := store.Close(sessAID); err != nil {
 		t.Fatalf("close session A bead: %v", err)
 	}
-	overrideResolveLiveSessionID(t, func(_ beads.Store, name string) (string, error) {
+	overrideResolveLiveSession(t, func(_ session.AddressDirectory, name string) (session.Info, error) {
 		if name == "pl-alpha" {
-			return sessBID, nil
+			return session.Info{
+				ID:                  sessBID,
+				Type:                session.BeadType,
+				SessionNameMetadata: name,
+			}, nil
 		}
-		return "", errors.New("not found")
+		return session.Info{}, session.ErrSessionNotFound
 	})
 
 	// Session B should now be authorized to publish (participant overlay matched it).
@@ -2855,9 +2939,10 @@ func TestGroupServiceResolveInboundDeadSessionNameReturnsStaleID(t *testing.T) {
 		t.Fatalf("UpsertParticipant: %v", err)
 	}
 
-	// Simulate session gone: resolver returns error for any name.
-	overrideResolveLiveSessionID(t, func(_ beads.Store, _ string) (string, error) {
-		return "", errors.New("session not found")
+	// Simulate a definitive session miss: routing retains the stored ID for
+	// compatibility, while indeterminate directory errors propagate.
+	overrideResolveLiveSession(t, func(_ session.AddressDirectory, _ string) (session.Info, error) {
+		return session.Info{}, session.ErrSessionNotFound
 	})
 
 	// Overlay returns "" → routing falls back to stored (stale) session ID; no panic.
@@ -3022,6 +3107,10 @@ func (f *flakyTranscriptService) UpdateMembership(context.Context, UpdateMembers
 }
 
 func (f *flakyTranscriptService) ensureMembershipLocked(input EnsureMembershipInput) (ConversationMembershipRecord, error) {
+	return f.EnsureMembership(context.Background(), input)
+}
+
+func (f *flakyTranscriptService) ensureMembershipLockedWriter(_ membershipWriter, input EnsureMembershipInput) (ConversationMembershipRecord, error) {
 	return f.EnsureMembership(context.Background(), input)
 }
 

@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- gascity-dashboard-kb3 alert-state favicon. The single maroon
+       accent mark from DESIGN.md ($accent ~ oklch(38% 0.09 25)) carries
+       a typeset exclamation-equivalent: a heavy-weight tabular figure 1
+       on a paper surface. Peripheral vision picks up the deep maroon
+       glyph against the otherwise calm tab strip. -->
+  <rect width="32" height="32" rx="6" fill="#fbf7f3" />
+  <text
+    x="16"
+    y="22"
+    text-anchor="middle"
+    font-family="Charter, 'Iowan Old Style', 'Palatino Linotype', Palatino, 'Times New Roman', serif"
+    font-weight="700"
+    font-size="20"
+    fill="#722525"
+  >1</text>
+</svg>

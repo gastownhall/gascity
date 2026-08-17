@@ -248,6 +248,17 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 				}
 			}
 		}
+		// Merge pack.toml upstreams (pack is base, city wins).
+		if len(pc.Upstreams) > 0 {
+			if root.Upstreams == nil {
+				root.Upstreams = make(map[string]UpstreamSpec)
+			}
+			for name, spec := range pc.Upstreams {
+				if _, exists := root.Upstreams[name]; !exists {
+					root.Upstreams[name] = spec
+				}
+			}
+		}
 		// Merge pack.toml pricing (pack is base, city wins by (provider, model) key).
 		if len(pc.Pricing) > 0 {
 			root.PackPricing = mergePricingByKey(root.PackPricing, pc.Pricing)
@@ -268,6 +279,11 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 				packServices[i].SourceDir = cityRoot
 			}
 			root.Services = append(packServices, root.Services...)
+		}
+		// Merge root-pack webhooks with pack provenance stamped. The public
+		// pack-guard runs once post-composition; here we only record source.
+		if len(pc.Webhooks) > 0 {
+			root.Webhooks = append(stampWebhookSource(pc.Webhooks, cityRoot), root.Webhooks...)
 		}
 		// Merge pack agent patches (accumulated, applied later).
 		root.Patches.Agents = append(pc.Patches.Agents, root.Patches.Agents...)
@@ -404,9 +420,14 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		adjustRigOverridePaths(frag.Rigs, fragDir, cityRoot)
 
 		// Merge fragment into root.
-		mergeFragment(root, frag, fragMeta, fragPath, prov)
+		if err := mergeFragment(root, frag, fragMeta, fragPath, prov); err != nil {
+			return nil, nil, fmt.Errorf("fragment %q: %w", inc, err)
+		}
 		prov.Sources = append(prov.Sources, fragPath)
 		prov.recordSource(fragPath, fragData)
+	}
+	if err := ValidateStorageConfig(root); err != nil {
+		return nil, nil, err
 	}
 
 	// Append caller-supplied extra pack includes to Workspace.Includes,
@@ -549,9 +570,42 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	var deferredAgentPatches []AgentPatch
 	if len(root.Patches.Agents) > 0 {
 		implicitIDs := implicitAgentIdentities(root)
+		// Derive the implicit-name set once from implicitIDs so the wildcard
+		// and non-wildcard deferral branches share a single scan of
+		// agents+providers rather than recomputing it per wildcard patch.
+		implicitNames := make(map[string]bool, len(implicitIDs))
+		for key := range implicitIDs {
+			implicitNames[key.name] = true
+		}
 		var nowPatches []AgentPatch
 		for _, p := range root.Patches.Agents {
-			if !agentPatchMatchesExisting(root, &p) && implicitIDs[agentKey{p.Dir, p.Name}] {
+			if p.Rig == "*" {
+				// A wildcard patch can touch both already-present agents and
+				// not-yet-injected implicit agents. Apply it to existing
+				// matches in the normal city patch phase so it keeps the
+				// documented city-before-rig precedence (a rig patch applied
+				// below still wins); ALSO defer a second, tail-scoped pass for
+				// any implicit agent injected later. A wildcard that matches
+				// neither still routes through the normal pass so ApplyPatches
+				// hard-errors on the typo (a wildcard matching nothing is an
+				// error, not a silent no-op).
+				matchesExisting := wildcardPatchMatchesExisting(root, p.Name)
+				deferForImplicit := implicitNames[p.Name]
+				if matchesExisting || !deferForImplicit {
+					nowPatches = append(nowPatches, p)
+				}
+				if deferForImplicit {
+					deferredAgentPatches = append(deferredAgentPatches, p)
+				}
+				continue
+			}
+			deferPatch := false
+			if !agentPatchMatchesExisting(root, &p) {
+				if targetDir, err := agentPatchTargetDir(&p); err == nil {
+					deferPatch = implicitIDs[agentKey{targetDir, p.Name}]
+				}
+			}
+			if deferPatch {
 				deferredAgentPatches = append(deferredAgentPatches, p)
 			} else {
 				nowPatches = append(nowPatches, p)
@@ -610,13 +664,24 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	// Inject implicit agents for built-in providers not already defined.
 	// Must happen after all composition (fragments, packs, patches) so
 	// explicit agents always take precedence.
+	injectedFrom := len(root.Agents)
 	InjectImplicitAgents(root)
 
 	// Apply patches that targeted provider-derived implicit agents, now
 	// present after injection. A patch that still cannot be resolved is a
 	// genuine typo — surface it with the same error framing as ApplyPatches.
+	//
+	// Scope the application to ONLY the agents InjectImplicitAgents just
+	// appended (the tail). A wildcard city patch was already applied to
+	// already-present agents above, where a deferred rig patch may have
+	// overridden it (city-before-rig precedence); re-applying the wildcard
+	// against the full agent list here would clobber that higher-precedence
+	// rig patch. The tail reslice shares root.Agents' backing array and
+	// applyAgentPatch mutates matched agents in place (it never appends), so
+	// the injected agents are updated through the shared array.
 	if len(deferredAgentPatches) > 0 {
-		if err := ApplyPatches(root, Patches{Agents: deferredAgentPatches}); err != nil {
+		tail := City{Agents: root.Agents[injectedFrom:]}
+		if err := ApplyPatches(&tail, Patches{Agents: deferredAgentPatches}); err != nil {
 			return nil, nil, fmt.Errorf("applying patches: %w", err)
 		}
 	}
@@ -695,6 +760,10 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	prov.Warnings = append(prov.Warnings, ValidateSemantics(root, path)...)
 	prov.Warnings = append(prov.Warnings, DetectLegacyProviderInheritance(root, path)...)
 	prov.Warnings = append(prov.Warnings, detectLegacyWorkspaceFields(root, path, prov.Workspace)...)
+
+	// Enforce the default-closed webhook public pack-guard over the fully
+	// composed webhook set (every merge site has stamped SourceDir by now).
+	prov.Warnings = append(prov.Warnings, applyWebhookPackGuard(root, cityRoot)...)
 
 	// Build the resolved provider cache now that compose + patch have
 	// populated the full provider table. Chain resolution errors
@@ -957,7 +1026,11 @@ func validateCityRequirements(reqs []PackRequirement, agents []Agent) error {
 
 // mergeFragment merges a fragment into the base config in-place.
 // Arrays concatenate, providers deep-merge, workspace per-field merges.
-func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string, prov *Provenance) {
+func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string, prov *Provenance) error {
+	if err := mergeStorageConfig(base, fragment, fragMeta, fragPath); err != nil {
+		return err
+	}
+
 	// Agents and named sessions: concatenate.
 	trackAgents(prov, fragment.Agents, fragPath)
 	base.Agents = append(base.Agents, fragment.Agents...)
@@ -970,12 +1043,22 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 	// Services: concatenate.
 	base.Services = append(base.Services, fragment.Services...)
 
+	// Webhooks: concatenate WITH fragment provenance stamped. A fragment is not
+	// the root city.toml, so its webhooks must not read as operator-trusted
+	// (security review attack #9). Stamping SourceDir here makes the
+	// post-composition public pack-guard cap an unauthorized public fragment
+	// webhook to tenant by default.
+	base.Webhooks = append(base.Webhooks, stampWebhookSource(fragment.Webhooks, filepath.Dir(fragPath))...)
+
 	// GitHub PR monitors: concatenate. Validation rejects duplicate repo/base
 	// ownership after patches have had a chance to adjust declarations.
 	base.GitHub.PRMonitors = append(base.GitHub.PRMonitors, fragment.GitHub.PRMonitors...)
 
 	// Providers: deep-merge per-field.
 	mergeProviders(base, fragment, fragMeta, fragPath, prov)
+
+	// Upstreams: additive merge with collision warnings.
+	mergeUpstreams(base, fragment, fragPath, prov)
 
 	// Workspace: per-field merge.
 	mergeWorkspace(base, fragment, fragMeta, fragPath, prov)
@@ -998,7 +1081,21 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 
 	// Simple sections: last-writer-wins if fragment defines them.
 	if fragMeta.IsDefined("beads") {
+		// Preserve rollout-gate fields the fragment did not itself set: a
+		// fragment defining any [beads] key would otherwise reset the whole
+		// struct and silently downgrade an explicit conditional_writes /
+		// guarded_release opt-in (mirror of the daemon.formula_v2 preservation
+		// below). Capture before the overwrite; a fragment that DOES set the
+		// field still wins.
+		conditionalWrites := base.Beads.ConditionalWrites
+		guardedRelease := base.Beads.GuardedRelease
 		base.Beads = fragment.Beads
+		if !fragMeta.IsDefined("beads", "conditional_writes") {
+			base.Beads.ConditionalWrites = conditionalWrites
+		}
+		if !fragMeta.IsDefined("beads", "guarded_release") {
+			base.Beads.GuardedRelease = guardedRelease
+		}
 	}
 	if fragMeta.IsDefined("dolt") {
 		base.Dolt = fragment.Dolt
@@ -1028,6 +1125,9 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 	if fragMeta.IsDefined("orders") {
 		base.Orders = fragment.Orders
 	}
+	if fragMeta.IsDefined("extmsg", "default_route") {
+		base.ExtMsg.DefaultRoutes = append(base.ExtMsg.DefaultRoutes, fragment.ExtMsg.DefaultRoutes...)
+	}
 	if fragMeta.IsDefined("api") {
 		base.API = fragment.API
 	}
@@ -1041,6 +1141,39 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 	if fragMeta.IsDefined("agent_defaults") || fragMeta.IsDefined("agents") {
 		mergeAgentDefaults(&base.AgentDefaults, fragment.AgentDefaults, fragPath, prov)
 	}
+	return nil
+}
+
+func mergeStorageConfig(base, fragment *City, fragMeta toml.MetaData, fragPath string) error {
+	if !fragMeta.IsDefined("storage") || fragment.Storage == nil {
+		return nil
+	}
+	if base.Storage == nil {
+		base.Storage = &StorageConfig{}
+	}
+
+	for _, class := range storageConfigClassOrder() {
+		if fragMeta.IsDefined("storage", "classes", class.String()) {
+			base.Storage.Classes.setBinding(class, fragment.Storage.Classes.BindingFor(class))
+		}
+	}
+
+	names := sortedStorageBindingNames(fragment.Storage.Bindings)
+	for _, name := range names {
+		if _, exists := base.Storage.Bindings[name]; exists {
+			return fmt.Errorf("storage binding %q is defined more than once (again in %q)", name, fragPath)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	if base.Storage.Bindings == nil {
+		base.Storage.Bindings = make(map[string]StorageBindingConfig, len(names))
+	}
+	for _, name := range names {
+		base.Storage.Bindings[name] = fragment.Storage.Bindings[name]
+	}
+	return nil
 }
 
 type sessionSleepField struct {
@@ -1097,6 +1230,28 @@ func mergePacks(base, fragment *City, fragPath string, prov *Provenance) {
 				fmt.Sprintf("pack %q redefined by %q", name, fragPath))
 		}
 		base.Packs[name] = src
+	}
+}
+
+// mergeUpstreams additively merges fragment upstream presets into base.
+// New upstream names are added. Duplicate names replace the base entry and
+// generate a collision warning. Upstreams are city-level config (declared in
+// city.toml or a city fragment), so fragment composition is the only layering
+// path they take; a [upstreams.<name>] block in a fragment must reach the
+// composed City so later session resolution can find it.
+func mergeUpstreams(base, fragment *City, fragPath string, prov *Provenance) {
+	if len(fragment.Upstreams) == 0 {
+		return
+	}
+	if base.Upstreams == nil {
+		base.Upstreams = make(map[string]UpstreamSpec)
+	}
+	for name, spec := range fragment.Upstreams {
+		if _, exists := base.Upstreams[name]; exists {
+			prov.Warnings = append(prov.Warnings,
+				fmt.Sprintf("upstream %q redefined by %q", name, fragPath))
+		}
+		base.Upstreams[name] = spec
 	}
 }
 
@@ -1218,6 +1373,39 @@ func deepMergeProvider(base, frag ProviderSpec, name string, fragMeta toml.MetaD
 			cloned[k] = v
 		}
 		result.Env = cloned
+	}
+
+	// upstream_env (the harness serving-env binding) merges per sub-field so a
+	// fragment can override a single env-var name without dropping the others.
+	// Each defined sub-field overrides the base and warns on a redefine, matching
+	// the scalar provider-field behavior above.
+	if fragMeta.IsDefined("providers", name, "upstream_env") {
+		bindingFields := []scalarField{
+			{
+				"base_url",
+				func() bool { return base.UpstreamEnv.BaseURL != "" },
+				func() { result.UpstreamEnv.BaseURL = frag.UpstreamEnv.BaseURL },
+			},
+			{
+				"api_key",
+				func() bool { return base.UpstreamEnv.APIKey != "" },
+				func() { result.UpstreamEnv.APIKey = frag.UpstreamEnv.APIKey },
+			},
+			{
+				"auth_token",
+				func() bool { return base.UpstreamEnv.AuthToken != "" },
+				func() { result.UpstreamEnv.AuthToken = frag.UpstreamEnv.AuthToken },
+			},
+		}
+		for _, bf := range bindingFields {
+			if fragMeta.IsDefined("providers", name, "upstream_env", bf.key) {
+				if bf.hasBase() {
+					prov.Warnings = append(prov.Warnings,
+						fmt.Sprintf("provider %q.upstream_env.%s redefined by %q", name, bf.key, fragPath))
+				}
+				bf.apply()
+			}
+		}
 	}
 
 	return result
@@ -1511,7 +1699,7 @@ func loadImportPackGraphDirsForDoctor(fs fsys.FS, imp Import, declDir, cityRoot 
 		return nil, err
 	}
 	topoPath := filepath.Join(impDir, packFile)
-	_, _, _, _, topoDirs, _, _, err := loadPackWithCacheOptions(
+	_, _, _, _, _, topoDirs, _, _, err := loadPackWithCacheOptions(
 		fs, topoPath, impDir, cityRoot, "", nil, cache, LoadOptions{allowLegacyOrderLayouts: true})
 	if err != nil {
 		return nil, err
@@ -1760,14 +1948,38 @@ func readPackNameFromDir(dir string) string {
 
 // agentPatchMatchesExisting reports whether patch targets an agent already
 // present in cfg.Agents, using the same matching logic as applyAgentPatch.
+// Callers handle the "*" wildcard separately (its deferral keys on the
+// implicit-name set, and its application lives in applyAgentPatch), so this
+// helper only resolves the single-target dir/rig case.
 func agentPatchMatchesExisting(cfg *City, patch *AgentPatch) bool {
-	target := qualifiedNameFromPatch(patch.Dir, patch.Name)
+	targetDir, err := agentPatchTargetDir(patch)
+	if err != nil {
+		return false
+	}
+	target := qualifiedNameFromPatch(targetDir, patch.Name)
 	for i := range cfg.Agents {
 		a := &cfg.Agents[i]
 		if AgentMatchesIdentity(a, target) {
 			return true
 		}
-		if a.Dir == patch.Dir && a.Name == patch.Name {
+		if a.Dir == targetDir && a.Name == patch.Name {
+			return true
+		}
+	}
+	return false
+}
+
+// wildcardPatchMatchesExisting reports whether a rig="*" patch for the given
+// agent name matches at least one agent already present in cfg.Agents, using
+// the same name/binding match as applyAgentPatch's wildcard branch. compose
+// uses it to keep a wildcard city patch in the normal (pre-injection) patch
+// pass for already-present agents — preserving city-before-rig precedence —
+// while still deferring a second, tail-scoped pass for implicit agents that
+// InjectImplicitAgents appends later.
+func wildcardPatchMatchesExisting(cfg *City, name string) bool {
+	for i := range cfg.Agents {
+		a := &cfg.Agents[i]
+		if a.Name == name || a.BindingQualifiedName() == name {
 			return true
 		}
 	}

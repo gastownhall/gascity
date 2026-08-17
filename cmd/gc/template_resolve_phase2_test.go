@@ -65,7 +65,7 @@ func selectedPhase2ProviderCases(t *testing.T) []phase2ProviderCase {
 			wantProcessNames:      []string{"node", "claude"},
 			wantEmitsPermission:   true,
 			wantModelOverride:     "sonnet",
-			wantModelOverrideArgs: []string{"--model", "claude-sonnet-4-6"},
+			wantModelOverrideArgs: []string{"--model", "claude-sonnet-5"},
 		},
 		{
 			profileID:             "codex/tmux-cli",
@@ -73,7 +73,7 @@ func selectedPhase2ProviderCases(t *testing.T) []phase2ProviderCase {
 			wantCommand:           "codex --dangerously-bypass-approvals-and-sandbox --model gpt-5.5 -c model_reasoning_effort=xhigh",
 			wantReadyDelayMs:      3000,
 			wantReadyPromptPrefix: "› ",
-			wantProcessNames:      []string{"codex"},
+			wantProcessNames:      []string{"codex", "codex-raw"},
 			wantEmitsPermission:   false,
 			wantModelOverride:     "o3",
 			wantModelOverrideArgs: []string{"--model", "o3"},
@@ -109,13 +109,14 @@ func selectedPhase2ProviderCases(t *testing.T) []phase2ProviderCase {
 			wantPromptFlag:        "--prompt",
 			wantReadyDelayMs:      8000,
 			wantProcessNames:      []string{"opencode", "node", "bun"},
+			wantAcceptDialogs:     phase2BoolPtr(false),
 			wantModelOverride:     "opencode/deepseek-v4-flash-free",
 			wantModelOverrideArgs: []string{"--model", "opencode/deepseek-v4-flash-free"},
 		},
 		{
 			profileID:             "mimocode/tmux-cli",
 			family:                "mimocode",
-			wantCommand:           "mimo --never-ask-questions",
+			wantCommand:           "mimo --never-ask",
 			wantPromptMode:        "flag",
 			wantPromptFlag:        "--prompt",
 			wantReadyDelayMs:      8000,
@@ -235,7 +236,7 @@ func resolveMimoCodeDefaultTransportTemplate(t *testing.T, session string) Templ
 
 // TestResolveTemplateMimoCodeDefaultTransportStaysOnCLI pins the out-of-box
 // launch for `provider = "mimocode"` with no session override. The headless
-// gate suppression flag (--never-ask-questions) is a TUI-surface flag that
+// gate suppression flag (--never-ask) is a TUI-surface flag that
 // the `mimo acp` subcommand does not take, and live conformance coverage for
 // mimocode exists only on the CLI transport, so the default launch must be
 // the CLI command, not `mimo acp`.
@@ -244,8 +245,8 @@ func TestResolveTemplateMimoCodeDefaultTransportStaysOnCLI(t *testing.T) {
 	if tp.IsACP {
 		t.Fatal("IsACP = true for default mimocode session, want CLI transport")
 	}
-	if tp.Command != "mimo --never-ask-questions" {
-		t.Fatalf("Command = %q, want %q", tp.Command, "mimo --never-ask-questions")
+	if tp.Command != "mimo --never-ask" {
+		t.Fatalf("Command = %q, want %q", tp.Command, "mimo --never-ask")
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -64,9 +65,9 @@ STUB_ENV = "present"
 
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(cityDir, store, sp, cfg)
-	info, err := mgr.CreateBeadOnly("worker", "Probe", "", t.TempDir(), "stub", "", nil, session.ProviderResume{
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{BeadOnly: true, Template: "worker", Title: "Probe", Command: "", WorkDir: t.TempDir(), Provider: "stub", Transport: "", Resume: session.ProviderResume{
 		SessionIDFlag: "--old-session-id",
-	})
+	}})
 	if err != nil {
 		t.Fatalf("CreateBeadOnly: %v", err)
 	}
@@ -1244,21 +1245,12 @@ session_id_flag = "--session-id"
 
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(cityDir, store, sp, cfg)
-	info, err := mgr.Create(
-		context.Background(),
-		"worker",
-		"Probe",
-		"legacy-agent",
-		t.TempDir(),
-		"stub",
-		nil,
-		session.ProviderResume{
+	info, err := mgr.CreateSession(
+		context.Background(), session.CreateOptions{Template: "worker", Title: "Probe", Command: "legacy-agent", WorkDir: t.TempDir(), Provider: "stub", Env: nil, Resume: session.ProviderResume{
 			ResumeFlag:    "--old-resume",
 			ResumeStyle:   "flag",
 			SessionIDFlag: "--session-id",
-		},
-		runtime.Config{},
-	)
+		}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -1319,17 +1311,8 @@ session_id_flag = "--session-id"
 
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(cityDir, store, sp, cfg)
-	info, err := mgr.Create(
-		context.Background(),
-		"worker",
-		"Probe",
-		"",
-		t.TempDir(),
-		"stub",
-		nil,
-		session.ProviderResume{ResumeFlag: "--resume", ResumeStyle: "flag", SessionIDFlag: "--session-id"},
-		runtime.Config{},
-	)
+	info, err := mgr.CreateSession(
+		context.Background(), session.CreateOptions{Template: "worker", Title: "Probe", Command: "", WorkDir: t.TempDir(), Provider: "stub", Env: nil, Resume: session.ProviderResume{ResumeFlag: "--resume", ResumeStyle: "flag", SessionIDFlag: "--session-id"}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -1380,7 +1363,7 @@ command = "/bin/echo"
 	}
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(cityDir, backing, sp, cfg)
-	info, err := mgr.Create(context.Background(), "worker", "Probe", "/bin/echo", t.TempDir(), "stub", nil, session.ProviderResume{}, runtime.Config{Command: "/bin/echo"})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Probe", Command: "/bin/echo", WorkDir: t.TempDir(), Provider: "stub", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{Command: "/bin/echo"}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -1478,7 +1461,7 @@ command = "/bin/echo"
 	}
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(cityDir, store, sp, cfg)
-	info, err := mgr.Create(context.Background(), "worker", "Probe", "stub", t.TempDir(), "stub", nil, session.ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Probe", Command: "stub", WorkDir: t.TempDir(), Provider: "stub", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -2350,5 +2333,267 @@ func TestWorkerSessionCreateHintsEnablesMouse(t *testing.T) {
 	hints := workerSessionCreateHints(&config.ResolvedProvider{Name: "stub"})
 	if !hints.MouseOn {
 		t.Error("workerSessionCreateHints().MouseOn = false, want true (gc session new unmanaged-direct wheel→scrollback, ga-c4w)")
+	}
+}
+
+// piVllmRigCity builds an in-memory city with a single rig-scoped agent
+// "myrig/polecat" running a custom provider whose base = "builtin:pi", plus a
+// rig overlay dir carrying the per-provider/pi/ hooks. It mirrors the real
+// pi-vllm hybrid shape used in gc-6bw8o. The qualified template name
+// ("myrig/polecat") is the identity the resume path persists for a rig agent.
+func piVllmRigCity(t *testing.T) (cityDir, overlayDir string, cfg *config.City) {
+	t.Helper()
+	cityDir = t.TempDir()
+	gcDir := filepath.Join(cityDir, ".gc")
+	if err := os.MkdirAll(gcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gcDir, "settings.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	overlayDir = filepath.Join(cityDir, "packs", "myrig", "overlay")
+	// per-provider/pi/.pi/extensions/gc-hooks.js is the slot OverlayProviderNames
+	// must resolve to for the harness to stage its ready-signal hook.
+	if err := os.MkdirAll(filepath.Join(overlayDir, "per-provider", "pi", ".pi", "extensions"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(overlayDir, "per-provider", "pi", ".pi", "extensions", "gc-hooks.js"), []byte("// hook"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	base := "builtin:pi"
+	cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "polecat",
+			Provider:          "pi-vllm",
+			Scope:             "rig",
+			Dir:               "myrig",
+			InstallAgentHooks: []string{"pi"}, // declares the per-provider/pi/ overlay slot
+		}},
+		Providers: map[string]config.ProviderSpec{
+			// Explicit command so resolution does not depend on a real `pi`
+			// binary in the test host PATH; base still yields BuiltinAncestor=pi.
+			"pi-vllm": {Base: &base, Command: "/bin/echo"},
+		},
+		Rigs:           []config.Rig{{Name: "myrig", Path: filepath.Join(cityDir, "myrig")}},
+		RigOverlayDirs: map[string][]string{"myrig": {overlayDir}},
+	}
+	return cityDir, overlayDir, cfg
+}
+
+// TestResolvedWorkerRuntimeStagesProviderOverlayForRigBasePiProvider is the
+// regression test for gc-6bw8o. The worker resume resolver
+// (resolvedWorkerRuntimeWithConfigAndMetadata) builds runtime.Config directly
+// and never routes through resolveTemplate, so before the fix it left
+// ProviderOverlayName/PackOverlayDirs empty. OverlayProviderNames then fell back
+// to ProviderName="" and the per-provider/pi/ hooks (gc-hooks.js) never staged,
+// the harness never signaled ready, and the controller churned into a
+// fall-back-to-claude loop. The fix populates these via applyWorkerOverlayHints,
+// mirroring the reconciler create path's sourcing in template_resolve.go.
+func TestResolvedWorkerRuntimeStagesProviderOverlayForRigBasePiProvider(t *testing.T) {
+	cityDir, overlayDir, cfg := piVllmRigCity(t)
+
+	runtimeCfg, err := resolvedWorkerRuntimeWithConfig(cityDir, cfg, session.Info{
+		Template: "myrig/polecat",
+		Command:  "pi-vllm",
+		WorkDir:  cityDir,
+	}, "")
+	if err != nil {
+		t.Fatalf("resolvedWorkerRuntimeWithConfig: %v", err)
+	}
+	if runtimeCfg == nil {
+		t.Fatal("resolvedWorkerRuntimeWithConfig() = nil")
+	}
+
+	// Concrete provider name drives the per-provider overlay slot.
+	if got := strings.TrimSpace(runtimeCfg.Hints.ProviderOverlayName); got != "pi-vllm" {
+		t.Fatalf("resume Hints.ProviderOverlayName = %q, want %q (concrete provider name)", got, "pi-vllm")
+	}
+	// Launch family is the base (pi), mirroring the reconciler create path.
+	if got := strings.TrimSpace(runtimeCfg.Hints.ProviderName); got != "pi" {
+		t.Fatalf("resume Hints.ProviderName = %q, want %q (launch family)", got, "pi")
+	}
+	// Rig overlay dir must be staged so per-provider/pi/ hooks reach the workdir.
+	if len(runtimeCfg.Hints.PackOverlayDirs) == 0 {
+		t.Fatalf("resume Hints.PackOverlayDirs is empty, want the rig overlay dir %q", overlayDir)
+	}
+	foundOverlay := false
+	for _, od := range runtimeCfg.Hints.PackOverlayDirs {
+		if od == overlayDir {
+			foundOverlay = true
+		}
+	}
+	if !foundOverlay {
+		t.Fatalf("resume Hints.PackOverlayDirs = %v, want to include rig overlay dir %q", runtimeCfg.Hints.PackOverlayDirs, overlayDir)
+	}
+	// Sanity: the effective overlay slot list must be non-empty, otherwise
+	// StageProviderOverlayDir would copy no per-provider/<slot>/ content.
+	slots := runtime.OverlayProviderNames(runtimeCfg.Hints)
+	if len(slots) == 0 {
+		t.Fatal("runtime.OverlayProviderNames(resume Hints) is empty; per-provider overlay would never stage")
+	}
+
+	// End-to-end proof of the gc-6bw8o regression: actually stage the workdir
+	// and confirm the per-provider/pi/ hook lands. Stage into a fresh temp
+	// workdir rather than the city dir so the assertion is unambiguous.
+	stageCfg := runtimeCfg.Hints
+	stageCfg.WorkDir = t.TempDir()
+	if err := runtime.StageSessionWorkDir(stageCfg); err != nil {
+		t.Fatalf("StageSessionWorkDir: %v", err)
+	}
+	hookPath := filepath.Join(stageCfg.WorkDir, ".pi", "extensions", "gc-hooks.js")
+	if _, err := os.Stat(hookPath); err != nil {
+		t.Fatalf("per-provider/pi hook not staged at %s: %v", hookPath, err)
+	}
+}
+
+// TestResolvedWorkerSessionConfigStagesProviderOverlayForRigBasePiProvider
+// covers the CLI create path for the same gc-6bw8o rig pi-vllm agent. It first
+// documents the gap (resolvedWorkerSessionConfigWithConfig, which only sees
+// `resolved`, leaves the overlay fields empty), then asserts that
+// applyWorkerOverlayHints — the exact call
+// newWorkerSessionHandleForResolvedRuntimeWithConfig makes onto
+// sessionCfg.Runtime.Hints before handing the spec to the worker factory —
+// populates them so the per-provider/pi/ hooks would stage. The end-to-end
+// create wiring is hard to assert (the resulting worker.Handle does not expose
+// its Hints); the resume-path test above is the integration regression proof.
+func TestResolvedWorkerSessionConfigStagesProviderOverlayForRigBasePiProvider(t *testing.T) {
+	cityDir, overlayDir, cfg := piVllmRigCity(t)
+
+	resolved, _ := resolveWorkerRuntimeProviderWithConfigAndMetadata(cfg, session.Info{Template: "myrig/polecat"}, "", nil)
+	if resolved == nil {
+		t.Fatal("resolveWorkerRuntimeProviderWithConfigAndMetadata() = nil")
+	}
+
+	sessionCfg, err := resolvedWorkerSessionConfigWithConfig(
+		cityDir,
+		resolved.CommandString(),
+		"pi-vllm",
+		cityDir,
+		"myrig/polecat",
+		"",
+		"myrig/polecat",
+		"polecat",
+		"",
+		resolved,
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("resolvedWorkerSessionConfigWithConfig: %v", err)
+	}
+	// The bare builder must NOT set overlay fields — that is the gap the create
+	// call site closes. If this ever starts populating them on its own, the
+	// create-path applyWorkerOverlayHints call is redundant and this guard flags it.
+	if got := strings.TrimSpace(sessionCfg.Runtime.Hints.ProviderOverlayName); got != "" {
+		t.Fatalf("resolvedWorkerSessionConfigWithConfig set ProviderOverlayName = %q on its own, expected empty (overlay is caller-applied)", got)
+	}
+
+	// Apply the overlay hints exactly as
+	// newWorkerSessionHandleForResolvedRuntimeWithConfig does before the factory call.
+	applyWorkerOverlayHints(&sessionCfg.Runtime.Hints, cfg, cityDir, "myrig/polecat", resolved)
+
+	if got := strings.TrimSpace(sessionCfg.Runtime.Hints.ProviderOverlayName); got != "pi-vllm" {
+		t.Fatalf("create Hints.ProviderOverlayName = %q, want %q", got, "pi-vllm")
+	}
+	if len(sessionCfg.Runtime.Hints.PackOverlayDirs) == 0 {
+		t.Fatalf("create Hints.PackOverlayDirs is empty, want rig overlay dir %q", overlayDir)
+	}
+	if slots := runtime.OverlayProviderNames(sessionCfg.Runtime.Hints); len(slots) == 0 {
+		t.Fatal("runtime.OverlayProviderNames(create Hints) is empty; per-provider overlay would never stage")
+	}
+}
+
+// The CLI create and resume resolvers build session env from
+// providerProcessPassthroughEnv() directly — neither routes through
+// passthroughEnv() or convergence.ScrubTokenEnv, so cmd_start.go's GC_-sweep
+// guard and template_resolve.go's re-pin do not cover them. The controller
+// token must still arrive present-and-empty: the session inherits an
+// environment that already carries it, so an absent key is an inherited key.
+// resolved.Env carries a literal because it is config-authored and merges after
+// the baseline.
+func TestResolvedWorkerSessionConfigWithConfigWithholdsControllerToken(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(convergence.TokenEnvVar, "super-secret-controller-token")
+
+	cfg, err := resolvedWorkerSessionConfigWithConfig(
+		cityDir,
+		"",
+		"",
+		cityDir,
+		"worker",
+		"",
+		"worker",
+		"Worker",
+		"",
+		&config.ResolvedProvider{
+			Name: "claude",
+			Env:  map[string]string{convergence.TokenEnvVar: "provider-literal"},
+		},
+		map[string]string{"session_origin": "test"},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("resolvedWorkerSessionConfigWithConfig: %v", err)
+	}
+	for name, env := range map[string]map[string]string{
+		"Runtime.SessionEnv": cfg.Runtime.SessionEnv,
+		"Runtime.Hints.Env":  cfg.Runtime.Hints.Env,
+	} {
+		assertControllerTokenWithheld(t, name, env)
+	}
+}
+
+func TestResolvedWorkerRuntimeWithConfigWithholdsControllerToken(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(convergence.TokenEnvVar, "super-secret-controller-token")
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:     "worker",
+			Provider: "stub",
+		}},
+		Providers: map[string]config.ProviderSpec{
+			"stub": {
+				Command: "/bin/echo",
+				Env:     map[string]string{convergence.TokenEnvVar: "provider-literal"},
+			},
+		},
+	}
+
+	resolved, err := resolvedWorkerRuntimeWithConfigAndMetadata(cityDir, cfg, session.Info{
+		Template: "worker",
+		WorkDir:  cityDir,
+	}, "", nil)
+	if err != nil {
+		t.Fatalf("resolvedWorkerRuntimeWithConfigAndMetadata: %v", err)
+	}
+	if resolved == nil {
+		t.Fatal("resolvedWorkerRuntimeWithConfigAndMetadata() = nil")
+	}
+	for name, env := range map[string]map[string]string{
+		"SessionEnv": resolved.SessionEnv,
+		"Hints.Env":  resolved.Hints.Env,
+	} {
+		assertControllerTokenWithheld(t, name, env)
+	}
+}
+
+func assertControllerTokenWithheld(t *testing.T, name string, env map[string]string) {
+	t.Helper()
+	val, ok := env[convergence.TokenEnvVar]
+	if !ok {
+		t.Errorf("%s omits %s; want present and empty so the session cannot inherit the controller's value", name, convergence.TokenEnvVar)
+		return
+	}
+	if val != "" {
+		t.Errorf("%s[%s] = %q, want empty", name, convergence.TokenEnvVar, val)
 	}
 }

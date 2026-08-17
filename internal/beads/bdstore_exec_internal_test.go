@@ -41,6 +41,62 @@ func TestExecCommandRunnerTimesOut(t *testing.T) {
 	}
 }
 
+// TestExecCommandRunnerWithEnvContextHonorsParentDeadline proves the
+// context-aware runner binds each command to the caller's context: a parent
+// deadline well below bdCommandTimeout kills a long-running child promptly
+// instead of letting it run to the per-command budget. This is the seam the
+// best-effort claim-time gc.current_run_id write uses so a slow or stuck bd
+// update cannot outlast the claim's short mutation budget.
+func TestExecCommandRunnerWithEnvContextHonorsParentDeadline(t *testing.T) {
+	if _, err := exec.LookPath("sleep"); err != nil {
+		t.Skip("sleep unavailable")
+	}
+
+	// Leave bdCommandTimeout at its default so the only thing that can return
+	// the child quickly is the parent context, not the per-command timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := ExecCommandRunnerWithEnvContext(ctx, nil)(t.TempDir(), "sleep", "30")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("context-bound runner unexpectedly succeeded")
+	}
+	if elapsed > 10*time.Second {
+		t.Fatalf("runner blocked %s; the 200ms parent deadline was ignored", elapsed)
+	}
+}
+
+// TestExecCommandRunnerWithEnvContextTimeoutReportsCallerDeadline proves the
+// timeout error is attributed to the caller's parent deadline when that budget
+// wins the race, not to the much larger per-command bd timeout. The claim-time
+// gc.current_run_id writer relies on this so a short claim-budget failure is not
+// misreported as "timed out after 2m0s".
+func TestExecCommandRunnerWithEnvContextTimeoutReportsCallerDeadline(t *testing.T) {
+	if _, err := exec.LookPath("sleep"); err != nil {
+		t.Skip("sleep unavailable")
+	}
+
+	// Leave the per-command timeout at its (large) default so only the short
+	// parent deadline can fire; the message must then report the parent budget.
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	_, err := ExecCommandRunnerWithEnvContext(ctx, nil)(t.TempDir(), "sleep", "30")
+	if err == nil {
+		t.Fatal("context-bound runner unexpectedly succeeded")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "caller deadline") {
+		t.Fatalf("timeout error = %q, want it attributed to the caller deadline", msg)
+	}
+	if perCommand := bdCommandTimeout.String(); strings.Contains(msg, perCommand) {
+		t.Fatalf("timeout error = %q, must not report the %s per-command timeout when the caller deadline won", msg, perCommand)
+	}
+}
+
 func TestBDCommandTimeoutForReadCommands(t *testing.T) {
 	if got := bdCommandTimeoutFor("bd", []string{"list", "--json"}); got != bdReadCommandTimeout {
 		t.Fatalf("bd list timeout = %s, want %s", got, bdReadCommandTimeout)
@@ -122,7 +178,13 @@ func TestExecCommandRunnerStopsBDSlowTimerForFastBDCommand(t *testing.T) {
 	}
 
 	oldThreshold := bdSlowTelemetryThreshold
-	bdSlowTelemetryThreshold = 30 * time.Millisecond
+	// Use a large threshold (5 s) so a trivial shell script reliably
+	// completes before the timer fires even on a heavily-loaded parallel
+	// test runner. 30 ms was too tight and caused spurious "bd.slow" fires
+	// (ga-2dd). The sleep after the call is decoupled from the threshold:
+	// we only need to drain any in-flight timer goroutine, not wait for the
+	// timer to expire. 100 ms is ample for the exporter to flush.
+	bdSlowTelemetryThreshold = 5 * time.Second
 	t.Cleanup(func() { bdSlowTelemetryThreshold = oldThreshold })
 
 	exp := installBeadsRecordingLogExporter(t)
@@ -135,7 +197,11 @@ printf '[]\n'
 	if _, err := ExecCommandRunner()(t.TempDir(), "bd", "list"); err != nil {
 		t.Fatalf("ExecCommandRunner bd: %v", err)
 	}
-	time.Sleep(2 * bdSlowTelemetryThreshold)
+	// After ExecCommandRunner returns, defer slowTimer.Stop() has already
+	// been called. If Stop returned true the timer was defused; if false it
+	// fired and the goroutine may still be recording. 100 ms gives that
+	// goroutine time to complete before we assert.
+	time.Sleep(100 * time.Millisecond)
 	if got := exp.countByBody("bd.slow"); got != 0 {
 		t.Fatalf("bd.slow records = %d, want 0 for fast bd command", got)
 	}

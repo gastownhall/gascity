@@ -135,6 +135,40 @@ func TestStageSessionWorkDirUsesConcreteProviderOverlayName(t *testing.T) {
 	}
 }
 
+// TestStageSessionWorkDirFallsBackToFamilyOverlayWhenConcreteAbsent guards
+// gc-6bw8o: a custom provider with base="builtin:pi" resolves
+// ProviderOverlayName="pi-vllm", which has no per-provider/pi-vllm/ overlay dir.
+// The family overlay (per-provider/pi/, where gc-hooks.js lives) must still
+// stage, otherwise the harness never signals ready and the agent churns. Unlike
+// Kiro, the concrete overlay is absent, so the launch family is used.
+func TestStageSessionWorkDirFallsBackToFamilyOverlayWhenConcreteAbsent(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	packOverlay := t.TempDir()
+
+	hook := filepath.Join(packOverlay, "per-provider", "pi", ".pi", "extensions", "gc-hooks.js")
+	if err := os.MkdirAll(filepath.Dir(hook), 0o755); err != nil {
+		t.Fatalf("mkdir pi overlay: %v", err)
+	}
+	if err := os.WriteFile(hook, []byte("// gc hook"), 0o644); err != nil {
+		t.Fatalf("write pi hook: %v", err)
+	}
+
+	err := StageSessionWorkDir(Config{
+		WorkDir:             workDir,
+		ProviderName:        "pi",
+		ProviderOverlayName: "pi-vllm",
+		PackOverlayDirs:     []string{packOverlay},
+	})
+	if err != nil {
+		t.Fatalf("StageSessionWorkDir: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workDir, ".pi", "extensions", "gc-hooks.js")); err != nil {
+		t.Fatalf("family pi overlay not staged for custom pi-vllm provider (gc-6bw8o): %v", err)
+	}
+}
+
 func TestStageSessionWorkDirWithWarningsSurfacesKiroPreservationWarning(t *testing.T) {
 	t.Parallel()
 

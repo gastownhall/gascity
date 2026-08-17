@@ -13,7 +13,9 @@
 #   GC_PACK_STATE_DIR — canonical pack runtime root for dolt (optional)
 #   GC_DOLT       — set to "skip" to no-op all operations (exit 2)
 #   GC_BEADS_BACKEND — "dolt" (default) or "doltlite"
-#   GC_DOLT_HOST  — dolt server host (empty = local server)
+#   GC_DOLT_HOST  — dolt server host (empty = managed local server bound to
+#                   127.0.0.1; 0.0.0.0 = managed local server exposed on all
+#                   interfaces; anything else = remote server GC won't manage)
 #   GC_DOLT_PORT  — dolt server port (default: ephemeral, hashed from city path)
 #   GC_DOLT_USER  — dolt user (default: root)
 #   GC_DOLT_PASSWORD — dolt password (default: empty)
@@ -33,7 +35,7 @@ set -e
 # --- Configuration ---
 
 # DOLT_PORT is set after derived paths are resolved (see allocate_port below).
-DOLT_HOST="${GC_DOLT_HOST:-0.0.0.0}"
+DOLT_HOST="${GC_DOLT_HOST:-127.0.0.1}"
 DOLT_USER="${GC_DOLT_USER:-root}"
 DOLT_PASSWORD="${GC_DOLT_PASSWORD:-}"
 DOLT_LOGLEVEL="${GC_DOLT_LOGLEVEL:-warning}"
@@ -95,10 +97,15 @@ resolve_gc_bin() {
     command -v gc 2>/dev/null || true
 }
 
-# is_remote returns 0 (true) when GC_DOLT_HOST explicitly names a target.
-# Only the empty/default bind host means GC owns a local managed server.
+# is_remote returns 0 (true) when GC_DOLT_HOST explicitly names a remote
+# target. Empty, 127.0.0.1 (the default bind), and 0.0.0.0 (the explicit
+# wildcard opt-out for multi-host deployments) all mean GC owns a local
+# managed server.
 is_remote() {
-    [ -n "$GC_DOLT_HOST" ] && [ "$GC_DOLT_HOST" != "0.0.0.0" ]
+    case "${GC_DOLT_HOST:-}" in
+        ''|127.0.0.1|0.0.0.0|localhost|"::1"|"[::1]") return 1 ;;
+    esac
+    return 0
 }
 
 # connect_host returns the host to connect to (loopback IPv4 for local servers).
@@ -201,7 +208,7 @@ run_with_timeout() {
     (
         sleep "$timeout_seconds" 2>/dev/null || sleep 1
         kill "$cmd_pid" 2>/dev/null || true
-    ) &
+    ) </dev/null >/dev/null 2>&1 &
     local watchdog_pid=$!
     local status=0
     wait "$cmd_pid" || status=$?
@@ -676,65 +683,6 @@ wait_for_bd_runtime_schema() {
     done
 
     return 1
-}
-
-# ensure_types_custom_in_yaml writes types.custom to .beads/config.yaml.
-# bd reads this YAML key as a fallback when the database config table is
-# unset (see beads internal/config: GetCustomTypesFromYAML), so writing
-# here registers the types without paying bd's per-command auto-migrate
-# cost (~50s on populated databases).
-#
-# Idempotent against the desired effective set: re-running with the SAME
-# baseline is a no-op. The rewrite NEVER narrows the type set: if the YAML
-# already contains pack-defined or user-defined custom types beyond $types
-# (the GC baseline), those extensions are preserved. This matches the
-# merge semantics of internal/doctor/checks_custom_types.go:mergeCustomTypes
-# and fixes the gascity-side failure surfaced in #2154 — a stale or partial
-# line is replaced with the union of existing and required entries, never
-# overwritten with just the baseline.
-ensure_types_custom_in_yaml() {
-    local dir="$1"
-    local types="$2"
-    local config_yaml="$dir/.beads/config.yaml"
-    [ -f "$config_yaml" ] || return 0
-    [ -n "$types" ] || return 0
-
-    local current
-    current=$(sed -n 's/^types\.custom: *//p' "$config_yaml" 2>/dev/null | head -1)
-
-    local merged
-    merged=$(printf '%s,%s' "$current" "$types" | awk -F, '
-        {
-            for (i = 1; i <= NF; i++) {
-                t = $i
-                sub(/^[ \t]+/, "", t)
-                sub(/[ \t]+$/, "", t)
-                gsub(/"/, "", t)
-                sub(/^[ \t]+/, "", t)
-                sub(/[ \t]+$/, "", t)
-                if (t == "") continue
-                if (!(t in seen)) {
-                    seen[t] = 1
-                    out = (out == "" ? t : out "," t)
-                }
-            }
-            print out
-        }
-    ')
-
-    # Short-circuit when the merged set already equals what's on disk:
-    # avoids mtime churn that downstream watchers might misread as a real
-    # change. Includes the case where current is already a superset of
-    # the baseline (operator/pack types appended to the GC list).
-    if [ "$current" = "$merged" ]; then
-        return 0
-    fi
-
-    local tmp
-    tmp=$(mktemp "$config_yaml.tmp.XXXXXX") || return 0
-    sed '/^types\.custom:/d' "$config_yaml" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
-    printf 'types.custom: %s\n' "$merged" >> "$tmp"
-    mv -f "$tmp" "$config_yaml" || rm -f "$tmp"
 }
 
 # --- Robustness Helpers ---
@@ -1284,6 +1232,11 @@ graceful_stop_owned_pid() {
 # accumulate and the server enters unrecoverable read-only mode.
 write_config_yaml() {
     local archive_level auto_gc_enabled auto_gc_sysvar gc_bin raw_wait_timeout wait_timeout_line max_connections read_timeout_millis write_timeout_millis
+    # Surface the resolved managed-server bind. Since the default flipped from
+    # 0.0.0.0 to loopback, an operator who relied on the old wildcard bind would
+    # otherwise see a bare connection-refused; this line names the bind host and
+    # the override knob.
+    printf 'gc-beads-bd: managed dolt server binding %s:%s (override bind with GC_DOLT_HOST=0.0.0.0)\n' "$DOLT_HOST" "$DOLT_PORT" >&2
     archive_level=${GC_DOLT_ARCHIVE_LEVEL:-0}
     case "$archive_level" in
         ''|*[!0-9]*)
@@ -1433,7 +1386,7 @@ drain_connections_before_stop() {
 # check_read_only tests if the dolt server is in read-only mode.
 # Returns 0 if read-only, 1 if writable, 2 if the write probe is inconclusive.
 check_read_only() {
-    local host gc_bin db quoted_db probe_table sql output err_file err_text status
+    local host gc_bin db quoted_db probe_table ignore_table sql output err_file err_text status
     host=$(connect_host)
     gc_bin=$(resolve_gc_helper_bin)
     if [ -n "$gc_bin" ]; then
@@ -1475,7 +1428,20 @@ check_read_only() {
     fi
     quoted_db=$(quote_dolt_identifier "$db")
     probe_table='`__gc_read_only_probe`'
-    sql="CREATE TABLE IF NOT EXISTS ${quoted_db}.${probe_table} (k INT PRIMARY KEY); REPLACE INTO ${quoted_db}.${probe_table} VALUES (1);"
+    ignore_table='`dolt_ignore`'
+    # The probe table is registered in dolt_ignore so history flattening can
+    # never first-commit it: a non-ignored table that lives only in the working
+    # set is committed by the compaction flatten's DOLT_COMMIT -Am, which drifts
+    # the database hash and quarantines GC for that database (hq June 2026, daa
+    # 2026-08-04). INSERT IGNORE keeps an operator's explicit ignored = 0
+    # override. The probe opens with USE because dolt_ignore is a session-root
+    # backed system table: this remote connection has no default schema, and a
+    # qualified write to dolt_ignore without a current database fails with "no
+    # root value found in session". USE is read-only, so the registration stays
+    # last and a read-only server still fails on the CREATE or REPLACE, which
+    # the classification below keys on. Mirrors cmd/gc/dolt_sql_health.go
+    # managedDoltReadOnlyProbeStatementsFor.
+    sql="USE ${quoted_db}; CREATE TABLE IF NOT EXISTS ${quoted_db}.${probe_table} (k INT PRIMARY KEY); REPLACE INTO ${quoted_db}.${probe_table} VALUES (1); INSERT IGNORE INTO ${quoted_db}.${ignore_table} (pattern, ignored) VALUES ('__gc_read_only_probe', 1);"
     if output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
         sql -q "$sql" 2>&1); then
         return 1
@@ -2075,10 +2041,9 @@ log_tail_has_journal_corruption() {
 # database_journal_corrupt probes one database directory offline and reports
 # whether dolt refuses to load it with a journal-corruption error. Only safe
 # while the managed server is down — offline dolt commands contend with a
-# running server's file locks. Probe output is spooled to a temp file rather
-# than captured via command substitution: the run_with_timeout watchdog's
-# sleep child inherits a substitution pipe and would hold it open for the
-# full timeout, turning every healthy-database probe into a 30s stall.
+# running server's file locks. Probe output is spooled to a temp file so stdout
+# and stderr can be scanned together without retaining the diagnostic stream
+# in a shell variable.
 database_journal_corrupt() {
     local probe_db_dir="$1" probe_out probe_hit=1
     probe_out=$(mktemp) || {
@@ -2589,15 +2554,71 @@ doltlite_maintenance_due() {
     [ $((now - last)) -ge "$interval" ]
 }
 
+# run_doltlite_reindex rebuilds the DoltLite store's SQLite secondary indexes.
+# `bd flatten`/`bd gc` rewrite the store (like a clone/pull) and leave the
+# secondary indexes stale, so index-path reads (count/status/list) silently
+# return wrong results until a REINDEX (ga-7hei). REINDEX is SQLite-specific
+# DDL, so it must run against the physical .beads/doltlite/<db>.db file through
+# gc's in-process SQLite driver (gc dolt-config doltlite-reindex, which resolves
+# the same .db the read path opens from metadata.json). It cannot go through
+# `bd sql`: that surface speaks Dolt/MySQL and rejects REINDEX, and it is
+# refused outright in the embedded mode run_bd_doltlite forces. Best-effort and
+# non-fatal: the caller warns on non-zero exit.
+run_doltlite_reindex() {
+    local dir="$1"
+    local gc_bin
+    gc_bin=$(resolve_gc_helper_bin)
+    if [ -z "$gc_bin" ]; then
+        return 1
+    fi
+    "$gc_bin" dolt-config doltlite-reindex --dir "$dir"
+}
+
+# doltlite_reindex_supported reports whether the resolved gc helper can rebuild
+# the DoltLite SQLite indexes in process. Only a gc built with the native beads
+# SQLite driver can (gc dolt-config doltlite-reindex --check); a default build
+# returns non-zero. The maintenance path probes this BEFORE the stale-index-
+# producing flatten/gc so it never creates index corruption it cannot heal
+# (ga-7hei).
+doltlite_reindex_supported() {
+    local dir="$1"
+    local gc_bin
+    gc_bin=$(resolve_gc_helper_bin)
+    if [ -z "$gc_bin" ]; then
+        return 1
+    fi
+    "$gc_bin" dolt-config doltlite-reindex --dir "$dir" --check >/dev/null 2>&1
+}
+
 run_doltlite_existing_db_maintenance() {
     local dir="$1"
     local stamp="$dir/.beads/doltlite/.gc-maintenance.stamp"
     if ! doltlite_maintenance_due "$dir"; then
         return 0
     fi
+    # flatten/gc rewrite the store and leave its SQLite secondary indexes stale;
+    # only a reindex-capable gc build can heal that (ga-7hei). If reindex is
+    # unavailable (e.g. a default, non-native gc binary), do NOT run the
+    # stale-index-producing flatten/gc at all: creating index corruption we
+    # cannot heal and then latching the maintenance stamp "done" is worse than
+    # skipping compaction. Leave the stamp untouched so a later reindex-capable
+    # binary still runs maintenance.
+    if ! doltlite_reindex_supported "$dir"; then
+        echo "warning: skipping doltlite maintenance for $dir: no reindex-capable gc helper (build gc with -tags gascity_native_beads); leaving the store un-flattened to avoid stale indexes (ga-7hei)" >&2
+        return 0
+    fi
     echo "gc-beads-bd: running doltlite maintenance for $dir" >&2
     run_bd_doltlite "$dir" flatten --force --json >/dev/null 2>&1 || echo "warning: bd flatten failed for $dir" >&2
     run_bd_doltlite "$dir" gc --skip-decay --force --json >/dev/null 2>&1 || echo "warning: bd gc failed for $dir" >&2
+    # flatten/gc leave the SQLite secondary indexes stale; rebuild them so
+    # index-path reads don't silently return wrong data (ga-7hei). Only stamp
+    # maintenance complete when the reindex succeeds — a failed reindex (e.g. a
+    # transient SQLite lock) must stay visible and retryable on the next cycle,
+    # not be suppressed for the whole maintenance interval.
+    if ! run_doltlite_reindex "$dir"; then
+        echo "warning: doltlite reindex failed for $dir; leaving maintenance stamp unrefreshed so the next run retries (ga-7hei)" >&2
+        return 0
+    fi
     mkdir -p "$dir/.beads/doltlite" 2>/dev/null || true
     date +%s > "$stamp" 2>/dev/null || true
 }
@@ -2704,6 +2725,24 @@ op_init() {
     # beads (#1039). Must match doctor.RequiredCustomTypes.
     local custom_types="${GC_BEADS_CUSTOM_TYPES:-molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step}"
 
+    # Hosted beads-gateway: when a credential command is configured, bd
+    # authenticates to the gateway via that command (EIA-as-username over TLS) and
+    # the gateway owns database routing. The managed-local-dolt path below (raw
+    # `dolt --no-tls` reachability probes, server lifecycle, CREATE DATABASE)
+    # cannot reach a TLS+EIA gateway, so defer to bd: it connects over the gateway
+    # and inits/adopts the (provisioner-created) project database itself. Only
+    # engages for hosted scopes; managed cities have no credential command and
+    # fall through to the unchanged path.
+    if [ -n "${BEADS_DOLT_CREDENTIAL_COMMAND:-}" ]; then
+        local hosted_host
+        hosted_host=$(connect_host)
+        if ! run_bd_pinned "$dir" ready >/dev/null 2>&1; then
+            run_bd_init_pinned "$dir" "$prefix" "$dolt_database" "$hosted_host" ""
+        fi
+        ensure_beads_dir_permissions "$dir"
+        exit 0
+    fi
+
     if is_doltlite_backend; then
         local database already_ready
         database="$dolt_database"
@@ -2724,7 +2763,6 @@ op_init() {
         if [ "$already_ready" = true ]; then
             run_doltlite_existing_db_maintenance "$dir"
         fi
-        ensure_types_custom_in_yaml "$dir" "$custom_types"
         exit 0
     fi
 
@@ -2761,7 +2799,6 @@ op_init() {
                 # and bd-specific bootstrap only.
                 ensure_beads_dir_permissions "$dir"
                 normalize_scope_after_init "$dir" "$prefix" "$dolt_database"
-                ensure_types_custom_in_yaml "$dir" "$custom_types"
                 ensure_bd_runtime_custom_types "$dolt_database" "$custom_types"
                 ensure_bd_runtime_issue_prefix "$dolt_database" "$prefix"
                 ensure_project_identity "$dir"
@@ -2830,8 +2867,9 @@ op_init() {
     fi
 
     # Configure custom bead types without invoking `bd config set`, which can
-    # spend tens of seconds in auto-migrate on populated stores.
-    ensure_types_custom_in_yaml "$dir" "$custom_types"
+    # spend tens of seconds in auto-migrate on populated stores. The canonical
+    # .beads/config.yaml types.custom line is now Go-owned (EnsureCanonicalConfig);
+    # here we only register the types in bd's runtime SQL config table.
     ensure_bd_runtime_custom_types "$dolt_database" "$custom_types"
 
     # Keep bd's runtime config in sync with GC's canonical prefix. This is

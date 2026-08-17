@@ -356,7 +356,7 @@ type ConversationGroupRecord struct {
 // SessionID is the volatile session bead ID this participant currently resolves
 // to. SessionName is the stable identity the participant was registered under;
 // it survives session respawn and lets ResolveInbound/ResolveOutbound re-point
-// at the current live bead via resolveLiveSessionID.
+// at the current live bead via resolveLiveSession.
 type ConversationGroupParticipant struct {
 	ID          string
 	GroupID     string
@@ -377,8 +377,15 @@ const (
 	GroupRouteLastAddressed GroupRouteMatch = "last_addressed"
 	// GroupRouteDefault means the message was routed to the default participant.
 	GroupRouteDefault GroupRouteMatch = "default"
-	// GroupRouteNoMatch means no routing match was found.
+	// GroupRouteNoMatch means a group exists for the conversation but the
+	// message matched no routable participant (an explicit target that is not a
+	// participant, or no default/last-addressed handle). The conversation is
+	// still grouped, so callers must not fall back to a non-group route.
 	GroupRouteNoMatch GroupRouteMatch = "no_match"
+	// GroupRouteNoGroup means no group exists for the conversation, so group
+	// routing did not apply. Unlike GroupRouteNoMatch, the conversation is
+	// ungrouped and is eligible for a configured default route.
+	GroupRouteNoGroup GroupRouteMatch = "no_group"
 	// GroupRouteParticipantMatch means an outbound publish was authorized
 	// because the publishing session is a participant of the group bound
 	// to the conversation.
@@ -406,11 +413,15 @@ type GroupOutboundDecision struct {
 
 // BindInput is the input for creating a session binding. Exactly one of
 // SessionID (bind to a concrete session) or AgentName (bind to a configured
-// agent identity whose live session is resolved at delivery time) must be set.
+// agent identity whose live session is resolved at delivery time) must be
+// set. Replace rebinds a conversation whose active binding targets someone
+// else (a handoff): the active binding is ended and the new one created
+// under the same conversation lock. Without Replace such a bind conflicts.
 type BindInput struct {
 	Conversation ConversationRef
 	SessionID    string
 	AgentName    string
+	Replace      bool
 	ExpiresAt    *time.Time
 	Metadata     map[string]string
 	Now          time.Time

@@ -586,7 +586,7 @@ func (c *builtinImportDoctorCheck) Fix(_ *doctor.CheckContext) error {
 	if len(order) == 0 && !changed {
 		return nil
 	}
-	allImports, err := collectAllImportsFS(fsys.OSFS{}, c.cityPath)
+	allImports, err := collectAllImportsFS(c.cityPath)
 	if err != nil {
 		return fmt.Errorf("reading declared imports: %w", err)
 	}
@@ -615,7 +615,7 @@ func (c *builtinImportDoctorCheck) missingAfterIncludeStrip() []string {
 	if cfg, loadErr := loadCityConfigWithoutBuiltinPackRefresh(c.cityPath, io.Discard); loadErr == nil {
 		return missingRequiredBuiltinImports(fsys.OSFS{}, maskLegacySystemPacksRoutes(cfg, c.cityPath), c.cityPath)
 	}
-	declared, err := collectAllImportsFS(fsys.OSFS{}, c.cityPath)
+	declared, err := collectAllImportsFS(c.cityPath)
 	if err != nil {
 		declared = nil
 	}

@@ -1,6 +1,8 @@
 package config
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -235,6 +237,33 @@ read_timeout_millis = -1
 	}
 	if got := err.Error(); !strings.Contains(got, "[dolt] read_timeout_millis must not be negative") {
 		t.Fatalf("Load() error = %q, want read_timeout_millis rejection", got)
+	}
+}
+
+// TestLoadRejectsNegativeDoltWaitTimeoutSeconds pins wait_timeout_seconds to the
+// same non-negative rule as its sibling listener overrides. A negative value in
+// city.toml would load clean and then be discarded by the > 0 resolution guard,
+// so the operator would see the managed default with no diagnostic. The negative
+// escape hatch that suppresses the system variable entirely stays env-only, via
+// GC_DOLT_WAIT_TIMEOUT.
+func TestLoadRejectsNegativeDoltWaitTimeoutSeconds(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "city.toml")
+	if err := os.WriteFile(path, []byte(`
+[workspace]
+name = "bright-lights"
+
+[dolt]
+wait_timeout_seconds = -1
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(fsys.OSFS{}, path)
+	if err == nil {
+		t.Fatal("Load() error = nil, want negative wait_timeout_seconds rejection")
+	}
+	if got := err.Error(); !strings.Contains(got, "[dolt] wait_timeout_seconds must not be negative") {
+		t.Fatalf("Load() error = %q, want wait_timeout_seconds rejection", got)
 	}
 }
 
@@ -1197,6 +1226,38 @@ func TestGastownCity(t *testing.T) {
 	}
 }
 
+// TestGascityCitySeedsRolesDefaultRigImport pins gascity#3832: the gascity
+// template imports the formulas pack at city scope AND seeds the gc-roles pack
+// as a default rig import bound "gc", so every rig added to the city receives
+// the providerless role agents (gc.run-operator, gc.requirements-planner, ...)
+// that the built-in formulas route to. Without this, a fresh city could launch
+// a formula but failed with `agent "gc.run-operator" not found in city.toml`.
+func TestGascityCitySeedsRolesDefaultRigImport(t *testing.T) {
+	c := GascityCityWithProviders("bright-lights", "claude", []string{"claude"})
+
+	// City-scope formulas, skills, and commands use the gc binding expected by
+	// role prompts such as `gc gc claim`.
+	if len(c.Imports) != 1 || c.Imports["gc"].Source != PublicGascityPackSource || c.Imports["gc"].Version != PublicGascityPackVersion {
+		t.Errorf("Imports = %v, want gc=%s %s", c.Imports, PublicGascityPackSource, PublicGascityPackVersion)
+	}
+
+	// Roles ride along as a default rig import, bound "gc" so the formula's
+	// gc.* targets resolve, pinned to the same commit as the formulas pack.
+	roles, ok := c.DefaultRigImports["gc"]
+	if !ok || len(c.DefaultRigImports) != 1 {
+		t.Fatalf("DefaultRigImports = %v, want single gc entry", c.DefaultRigImports)
+	}
+	if roles.Source != PublicGascityRolesPackSource {
+		t.Errorf("roles import source = %q, want %q", roles.Source, PublicGascityRolesPackSource)
+	}
+	if roles.Version != PublicGascityPackVersion {
+		t.Errorf("roles import version = %q, want %q (same commit as the formulas pack)", roles.Version, PublicGascityPackVersion)
+	}
+	if len(c.DefaultRigImportOrder) != 1 || c.DefaultRigImportOrder[0] != "gc" {
+		t.Errorf("DefaultRigImportOrder = %v, want [gc]", c.DefaultRigImportOrder)
+	}
+}
+
 func TestGastownCityStartCommand(t *testing.T) {
 	c := GastownCity("test", "", "my-agent --auto")
 	if c.Workspace.StartCommand != "my-agent --auto" {
@@ -1798,13 +1859,13 @@ func TestEffectiveWorkQueryDefault(t *testing.T) {
 	if strings.Contains(got, `--include-ephemeral`) {
 		t.Errorf("EffectiveWorkQuery() default must be bd 1.0.4-compatible without --include-ephemeral: %q", got)
 	}
-	if !strings.Contains(got, `bd ready --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --json --sort oldest --limit=1`) {
+	if !strings.Contains(got, `bd ready --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json --sort oldest --limit=20`) {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 pool-demand probe: %q", got)
 	}
 	if !strings.Contains(got, "-- mayor") {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 target argument: %q", got)
 	}
-	if !strings.Contains(got, `bd ready --metadata-field "gc.run_target=$target" --metadata-field "gc.kind=workflow" --unassigned --exclude-type=epic --json --sort oldest --limit=20`) {
+	if !strings.Contains(got, `bd ready --metadata-field "gc.run_target=$target" --metadata-field "gc.kind=workflow" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json --sort oldest --limit=20`) {
 		t.Errorf("EffectiveWorkQuery() missing run_target migration fallback: %q", got)
 	}
 	for _, want := range []string{`.metadata`, `.[:1]`} {
@@ -1819,8 +1880,8 @@ func TestEffectiveWorkQueryDefault(t *testing.T) {
 
 func TestEffectiveWorkQueryBD105CompatibilityOptIn(t *testing.T) {
 	a := Agent{Name: "mayor"}
-	got := a.EffectiveWorkQueryForBeads(BeadsConfig{BDCompatibility: BeadsBDCompatibility105})
-	if !strings.Contains(got, `bd ready --include-ephemeral --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --json --sort oldest --limit=1`) {
+	got := a.EffectiveWorkQueryFor(QueryTopology{Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}})
+	if !strings.Contains(got, `bd ready --include-ephemeral --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json --sort oldest --limit=20`) {
 		t.Errorf("EffectiveWorkQueryForBeads(bd-1.0.5) missing include-ephemeral routed probe: %q", got)
 	}
 	if !strings.Contains(got, `bd ready --include-ephemeral --assignee="$id" --json --limit=1`) {
@@ -1937,7 +1998,7 @@ esac
 
 func TestEffectiveAssignedReadyQueryForBeadsBD105Compatibility(t *testing.T) {
 	a := Agent{Name: "worker", Dir: "hello-world"}
-	got := a.EffectiveAssignedReadyQueryForBeads(BeadsConfig{BDCompatibility: BeadsBDCompatibility105})
+	got := a.EffectiveAssignedReadyQueryFor(QueryTopology{Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}})
 	if !strings.Contains(got, `bd ready --include-ephemeral --assignee="$id" --json --limit=1`) {
 		t.Fatalf("EffectiveAssignedReadyQueryForBeads(bd-1.0.5) missing include-ephemeral assigned-ready tier: %q", got)
 	}
@@ -1968,8 +2029,20 @@ case "$*" in
   *) printf '[]' ;;
 esac
 `)
-	if strings.TrimSpace(out) != `[{"id":"assigned-in-progress","ephemeral":true}]` {
+	// The row is compared field-wise rather than byte-wise: the in_progress
+	// tier now attaches a blocked_by array (empty here — the fake bd reports
+	// no dependencies) so the hook-side unready filter can see readiness state
+	// that `bd list` does not compute. What matters is that unblocked assigned
+	// work is still surfaced for crash recovery.
+	var gotRows []map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &gotRows); err != nil {
+		t.Fatalf("EffectiveAssignedInProgressQuery() output is not JSON: %v (%q)", err, out)
+	}
+	if len(gotRows) != 1 || gotRows[0]["id"] != "assigned-in-progress" {
 		t.Fatalf("EffectiveAssignedInProgressQuery() output = %q, want assigned in-progress work", out)
+	}
+	if _, ok := gotRows[0]["blocked_by"]; !ok {
+		t.Errorf("EffectiveAssignedInProgressQuery() row missing blocked_by: %q", out)
 	}
 }
 
@@ -2193,13 +2266,13 @@ func TestEffectiveWorkQueryControlDispatcherClaimsLegacyUnassignedRoute(t *testi
 	out := runEffectiveWorkQuery(t, a, nil, `#!/bin/sh
 set -eu
 case "$*" in
-  *"ready --include-ephemeral"*"--metadata-field gc.routed_to=gascity/control-dispatcher"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=1"*)
+  *"ready --include-ephemeral"*"--metadata-field gc.routed_to=gascity/control-dispatcher"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=20"*)
     printf '[]'
     ;;
-  *"ready --metadata-field gc.routed_to=gascity/control-dispatcher"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=1"*)
+  *"ready --metadata-field gc.routed_to=gascity/control-dispatcher"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=20"*)
     printf '[]'
     ;;
-  *"ready --metadata-field gc.routed_to=gascity/workflow-control"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=1"*)
+  *"ready --metadata-field gc.routed_to=gascity/workflow-control"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=20"*)
     printf '[{"id":"ga-legacy-route"}]'
     ;;
   *)
@@ -2228,7 +2301,7 @@ func TestEffectiveWorkQueryRoutedQueueUsesNativeOldestSortAcrossReadyTiers(t *te
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "ready --metadata-field gc.routed_to=hello-world/worker --unassigned --exclude-type=epic --json --sort oldest --limit=1")
+  "ready --metadata-field gc.routed_to=hello-world/worker --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --json --sort oldest --limit=20")
     printf '[{"id":"older-no-history","priority":2,"created_at":"2026-05-20T06:09:30Z","no_history":true}]'
     ;;
   *)
@@ -2273,7 +2346,7 @@ func TestEffectiveWorkQueryRoutedQueueUsesOldestBeforePriority(t *testing.T) {
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  *"ready --metadata-field gc.routed_to=hello-world/worker"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=1"*)
+  *"ready --metadata-field gc.routed_to=hello-world/worker"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=20"*)
     printf '[{"id":"older-p2","priority":2,"created_at":"2026-05-20T06:09:30Z"}]'
     ;;
   *)
@@ -2296,7 +2369,7 @@ func TestEffectiveWorkQueryRoutedFallbackUsesNativeOldestSort(t *testing.T) {
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  *"ready --metadata-field gc.routed_to=hello-world/worker"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=1"*)
+  *"ready --metadata-field gc.routed_to=hello-world/worker"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=20"*)
     printf '[]'
     ;;
   *"ready --metadata-field gc.run_target=hello-world/worker"*"--metadata-field gc.kind=workflow"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=20"*)
@@ -2316,6 +2389,9 @@ esac
 }
 
 func TestEffectiveSlingQueryPoolNameOverride(t *testing.T) {
+	// Pool instance: the stamped gc.routed_to must be the collapsed PoolName
+	// (template identity), not the raw per-instance QualifiedName() — matching
+	// the PoolName-first idiom in poolDemandTarget/effectiveOnDeath/effectiveOnBoot.
 	a := Agent{
 		Name:              "dog-1",
 		Dir:               "hello-world",
@@ -2323,9 +2399,20 @@ func TestEffectiveSlingQueryPoolNameOverride(t *testing.T) {
 		PoolName: "hello-world/dog",
 	}
 	got := a.EffectiveSlingQuery()
-	want := "bd update {} --set-metadata gc.routed_to=hello-world/dog-1"
+	want := "bd update {} --set-metadata gc.routed_to=hello-world/dog"
 	if got != want {
 		t.Errorf("EffectiveSlingQuery() = %q, want %q", got, want)
+	}
+}
+
+func TestDefaultSlingQueryPoolNameCollapse(t *testing.T) {
+	// Same PoolName-collapse idiom, asserted directly against DefaultSlingQuery()
+	// rather than through the EffectiveSlingQuery() wrapper.
+	a := Agent{Name: "dog-1", Dir: "hello-world", PoolName: "hello-world/dog"}
+	got := a.DefaultSlingQuery()
+	want := "bd update {} --set-metadata gc.routed_to=hello-world/dog"
+	if got != want {
+		t.Errorf("DefaultSlingQuery() = %q, want %q", got, want)
 	}
 }
 
@@ -2344,7 +2431,7 @@ func TestEffectiveWorkQueryExcludesEpics(t *testing.T) {
 	// resume its own assigned ephemeral epic wisp (the patrol-loop pattern).
 	wantPresent := []string{
 		// routed/pool tier still excludes epics (gc-udx guard)
-		`bd ready --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --json`,
+		`bd ready --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json`,
 		// assigned tiers carry NO epic exclusion
 		`bd list --status in_progress --assignee="$id" --json`,
 		`bd ready --assignee="$id" --json`,
@@ -2370,7 +2457,7 @@ func TestEffectiveWorkQueryExcludesEpicsControlDispatcher(t *testing.T) {
 	a := Agent{Name: ControlDispatcherAgentName, Dir: "gascity"}
 	got := a.EffectiveWorkQuery()
 	wantPresent := []string{
-		`bd ready --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --json`,
+		`bd ready --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json`,
 		`bd list --status in_progress --assignee="$cand" --json`,
 		`bd ready --assignee="$cand" --json`,
 		`-- gascity/control-dispatcher gascity/workflow-control`,
@@ -2693,11 +2780,11 @@ func TestPoolDemandPredicateSharedWithWorkQuery(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			wq := tt.agent.EffectiveWorkQuery()
 			demand := tt.agent.EffectivePoolDemandQuery()
-			workPredicate := bdReadyPoolDemandShell("--sort oldest --limit=1", false)
+			workPredicate := bdReadyPoolDemandShell("--sort oldest --limit=20", QueryTopology{})
 			if !strings.Contains(wq, workPredicate) {
 				t.Errorf("EffectiveWorkQuery() missing shared predicate %q in %q", workPredicate, wq)
 			}
-			migrationWorkPredicate := bdReadyPoolDemandMigrationShell("--limit=20", false)
+			migrationWorkPredicate := bdReadyPoolDemandMigrationShell("--limit=20", QueryTopology{})
 			if !strings.Contains(wq, migrationWorkPredicate) {
 				t.Errorf("EffectiveWorkQuery() missing shared migration predicate %q in %q", migrationWorkPredicate, wq)
 			}
@@ -2706,11 +2793,11 @@ func TestPoolDemandPredicateSharedWithWorkQuery(t *testing.T) {
 					t.Errorf("EffectiveWorkQuery() missing migration filter fragment %q in %q", want, wq)
 				}
 			}
-			countPredicate := bdReadyPoolDemandShell("--limit 0", false)
+			countPredicate := bdReadyPoolDemandShell("--limit 0", QueryTopology{})
 			if !strings.Contains(demand, countPredicate) {
 				t.Errorf("EffectivePoolDemandQuery() missing shared predicate %q in %q", countPredicate, demand)
 			}
-			migrationCountPredicate := bdReadyPoolDemandMigrationShell("--limit 0", false)
+			migrationCountPredicate := bdReadyPoolDemandMigrationShell("--limit 0", QueryTopology{})
 			if !strings.Contains(demand, migrationCountPredicate) {
 				t.Errorf("EffectivePoolDemandQuery() missing shared migration predicate %q in %q", migrationCountPredicate, demand)
 			}
@@ -3621,6 +3708,56 @@ func TestDaemonAutoReapClosedBeadWorktreesExplicitFalse(t *testing.T) {
 	d := DaemonConfig{AutoReapClosedBeadWorktrees: &v}
 	if d.AutoReapClosedBeadWorktreesEnabled() {
 		t.Errorf("AutoReapClosedBeadWorktreesEnabled() = true, want false (kill switch)")
+	}
+}
+
+func TestDaemonAutoReapClosedBeadWorktreesDryRunDefault(t *testing.T) {
+	d := DaemonConfig{}
+	if d.AutoReapClosedBeadWorktreesDryRunEnabled() {
+		t.Errorf("AutoReapClosedBeadWorktreesDryRunEnabled() = true, want false (default)")
+	}
+}
+
+func TestDaemonAutoReapClosedBeadWorktreesDryRunExplicitTrue(t *testing.T) {
+	v := true
+	d := DaemonConfig{AutoReapClosedBeadWorktreesDryRun: &v}
+	if !d.AutoReapClosedBeadWorktreesDryRunEnabled() {
+		t.Errorf("AutoReapClosedBeadWorktreesDryRunEnabled() = false, want true")
+	}
+}
+
+func TestDaemonAutoReapClosedBeadWorktreesDryRunExplicitFalse(t *testing.T) {
+	v := false
+	d := DaemonConfig{AutoReapClosedBeadWorktreesDryRun: &v}
+	if d.AutoReapClosedBeadWorktreesDryRunEnabled() {
+		t.Errorf("AutoReapClosedBeadWorktreesDryRunEnabled() = true, want false (kill switch)")
+	}
+}
+
+func TestDaemonAutoReapClosedBeadWorktreesMinAgeMinutesDefault(t *testing.T) {
+	d := DaemonConfig{}
+	got := d.AutoReapClosedBeadWorktreesMinAge()
+	want := time.Duration(DefaultAutoReapClosedBeadWorktreesMinAgeMinutes) * time.Minute
+	if got != want {
+		t.Errorf("AutoReapClosedBeadWorktreesMinAge() = %v, want %v (default)", got, want)
+	}
+}
+
+func TestDaemonAutoReapClosedBeadWorktreesMinAgeMinutesExplicitValue(t *testing.T) {
+	v := 30
+	d := DaemonConfig{AutoReapClosedBeadWorktreesMinAgeMinutes: &v}
+	got := d.AutoReapClosedBeadWorktreesMinAge()
+	if got != 30*time.Minute {
+		t.Errorf("AutoReapClosedBeadWorktreesMinAge() = %v, want 30m", got)
+	}
+}
+
+func TestDaemonAutoReapClosedBeadWorktreesMinAgeMinutesExplicitZeroDisables(t *testing.T) {
+	v := 0
+	d := DaemonConfig{AutoReapClosedBeadWorktreesMinAgeMinutes: &v}
+	got := d.AutoReapClosedBeadWorktreesMinAge()
+	if got != 0 {
+		t.Errorf("AutoReapClosedBeadWorktreesMinAge() = %v, want 0 (quarantine disabled)", got)
 	}
 }
 
@@ -4723,6 +4860,104 @@ func TestValidateRigs_ExplicitPrefixAvoidsCollision(t *testing.T) {
 	}
 }
 
+// A reserved coordination-class id-prefix is no longer a fatal ValidateRigs
+// error. On a default city the relocated class stores are an identity seam, so
+// the prefix is allowed and surfaced as a non-fatal advisory (see
+// ReservedPrefixWarnings) instead. This keeps an existing city or rig that
+// already uses one able to start and reload.
+func TestValidateRigs_AllowsReservedRigPrefix(t *testing.T) {
+	rigs := []Rig{
+		{Name: "graph", Path: "/a", Prefix: "gcg"}, // reserved graph class prefix
+	}
+	if err := ValidateRigs(rigs, "mc"); err != nil {
+		t.Fatalf("ValidateRigs: reserved rig prefix must be allowed, got error: %v", err)
+	}
+}
+
+func TestValidateRigs_AllowsReservedHQPrefix(t *testing.T) {
+	if err := ValidateRigs(nil, "gco"); err != nil { // reserved orders class prefix
+		t.Fatalf("ValidateRigs: reserved HQ prefix must be allowed, got error: %v", err)
+	}
+}
+
+// An explicit reserved rig prefix is reported as an advisory warning naming the
+// rig and the reserved prefix.
+func TestReservedPrefixWarnings_ExplicitRigPrefix(t *testing.T) {
+	rigs := []Rig{
+		{Name: "graph", Path: "/a", Prefix: "gcg"}, // reserved graph class prefix
+	}
+	warnings := ReservedPrefixWarnings(rigs, "mc")
+	if len(warnings) != 1 {
+		t.Fatalf("ReservedPrefixWarnings = %v, want exactly one warning", warnings)
+	}
+	if !strings.Contains(warnings[0], "reserved") || !strings.Contains(warnings[0], "gcg") {
+		t.Errorf("warning = %q, want mention of 'reserved' and 'gcg'", warnings[0])
+	}
+	if !strings.Contains(warnings[0], "graph") {
+		t.Errorf("warning = %q, want mention of the rig name 'graph'", warnings[0])
+	}
+}
+
+// The derived prefix path also warns: "graph-class-gateway" derives to "gcg"
+// via DeriveBeadsPrefix, shadowing the reserved graph prefix.
+func TestReservedPrefixWarnings_DerivedRigPrefix(t *testing.T) {
+	rigs := []Rig{
+		{Name: "graph-class-gateway", Path: "/a"}, // derives to "gcg"
+	}
+	warnings := ReservedPrefixWarnings(rigs, "mc")
+	if len(warnings) != 1 {
+		t.Fatalf("ReservedPrefixWarnings = %v, want exactly one warning", warnings)
+	}
+	if !strings.Contains(warnings[0], "reserved") || !strings.Contains(warnings[0], "gcg") {
+		t.Errorf("warning = %q, want mention of 'reserved' and 'gcg'", warnings[0])
+	}
+}
+
+// The effective HQ prefix is warned about too; EffectiveHQPrefix already
+// resolves the site-bound value before this.
+func TestReservedPrefixWarnings_HQPrefix(t *testing.T) {
+	warnings := ReservedPrefixWarnings(nil, "gco") // reserved orders class prefix
+	if len(warnings) != 1 {
+		t.Fatalf("ReservedPrefixWarnings = %v, want exactly one warning", warnings)
+	}
+	if !strings.Contains(warnings[0], "reserved") || !strings.Contains(warnings[0], "HQ") {
+		t.Errorf("warning = %q, want mention of 'reserved' and 'HQ'", warnings[0])
+	}
+}
+
+// Site-bound HQ prefixes flow through EffectiveHQPrefix before validation, so a
+// site binding that pins a reserved class prefix is warned about through that
+// resolved path too.
+func TestReservedPrefixWarnings_SiteBoundHQPrefix(t *testing.T) {
+	cfg := &City{
+		Workspace:               Workspace{Name: "maintainer-city"},
+		ResolvedWorkspacePrefix: "gcs", // site-bound to the reserved sessions prefix
+	}
+	hqPrefix := EffectiveHQPrefix(cfg)
+	if hqPrefix != "gcs" {
+		t.Fatalf("EffectiveHQPrefix = %q, want site-bound %q", hqPrefix, "gcs")
+	}
+	warnings := ReservedPrefixWarnings(cfg.Rigs, hqPrefix)
+	if len(warnings) != 1 {
+		t.Fatalf("ReservedPrefixWarnings = %v, want exactly one warning", warnings)
+	}
+	if !strings.Contains(warnings[0], "reserved") {
+		t.Errorf("warning = %q, want mention of 'reserved'", warnings[0])
+	}
+}
+
+// A config whose effective HQ and rig prefixes are not reserved produces no
+// warnings.
+func TestReservedPrefixWarnings_NonReservedNoWarnings(t *testing.T) {
+	rigs := []Rig{
+		{Name: "my-cloud", Path: "/a"},              // derives to "mc"
+		{Name: "gascity", Path: "/b", Prefix: "ga"}, // explicit "ga"
+	}
+	if warnings := ReservedPrefixWarnings(rigs, "hq"); len(warnings) != 0 {
+		t.Errorf("ReservedPrefixWarnings = %v, want no warnings for non-reserved prefixes", warnings)
+	}
+}
+
 func TestEffectiveHQPrefix_Explicit(t *testing.T) {
 	cfg := &City{Workspace: Workspace{Name: "gascity", Prefix: "hq"}}
 	if got := EffectiveHQPrefix(cfg); got != "hq" {
@@ -5509,7 +5744,7 @@ func runEffectiveWorkQuery(t *testing.T, a Agent, env map[string]string, bdScrip
 
 func runEffectiveWorkQueryForBeads(t *testing.T, a Agent, beads BeadsConfig, env map[string]string, bdScript string) string {
 	t.Helper()
-	return runShellWithFakeBd(t, a.EffectiveWorkQueryForBeads(beads), env, bdScript)
+	return runShellWithFakeBd(t, a.EffectiveWorkQueryFor(QueryTopology{Beads: beads}), env, bdScript)
 }
 
 // runShellWithFakeBd executes shellCmd with a fake `bd` script on PATH so
@@ -5524,16 +5759,43 @@ func runShellWithFakeBd(t *testing.T, shellCmd string, env map[string]string, bd
 		t.Fatalf("write fake bd: %v", err)
 	}
 
-	cmd := exec.Command("sh", "-c", shellCmd)
-	cmd.Env = []string{"PATH=" + tmp + ":" + os.Getenv("PATH")}
+	commandEnv := []string{"PATH=" + tmp + ":" + os.Getenv("PATH")}
 	for k, v := range env {
-		cmd.Env = append(cmd.Env, k+"="+v)
+		commandEnv = append(commandEnv, k+"="+v)
 	}
-	out, err := cmd.Output()
+	stdout, stderr, exit := runShellCommandCapture(t, shellCmd, commandEnv)
+	if exit != 0 {
+		t.Fatalf("run shell with fake bd: exit %d: %s", exit, stderr)
+	}
+	return stdout
+}
+
+// runShellCommandCapture is this package's single test seam for EXECUTING a
+// generated command: it runs command through `sh -c` with exactly env and
+// reports stdout, stderr and exit status separately, failing the test only when
+// the process could not be run at all.
+//
+// Every helper in the package that has to execute a generated command routes
+// through here rather than constructing its own process, which is what keeps
+// the package at one subprocess call site per concern instead of one per helper
+// (test/test-resources.toml: "each process-owning test removes or replaces its
+// source call site").
+func runShellCommandCapture(t *testing.T, command string, env []string) (stdout, stderr string, exit int) {
+	t.Helper()
+	cmd := exec.Command("sh", "-c", command)
+	cmd.Env = env
+	var outBuf, errBuf strings.Builder
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	err := cmd.Run()
 	if err != nil {
-		t.Fatalf("run shell with fake bd: %v", err)
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("run shell command: %v", err)
+		}
+		exit = exitErr.ExitCode()
 	}
-	return string(out)
+	return outBuf.String(), errBuf.String(), exit
 }
 
 func runLifecycleHookCommand(t *testing.T, command string, bdScript string) string {
@@ -5612,6 +5874,32 @@ func TestDefaultSlingTargetRoundTrip(t *testing.T) {
 	}
 	if got.Rigs[0].DefaultSlingTarget != "hello-world/polecat" {
 		t.Errorf("DefaultSlingTarget = %q, want %q", got.Rigs[0].DefaultSlingTarget, "hello-world/polecat")
+	}
+}
+
+func TestDefaultSlingTargetsRoundTrip(t *testing.T) {
+	c := City{
+		Workspace: Workspace{Name: "test"},
+		Rigs: []Rig{
+			{Name: "hello-world", Path: "/tmp/hw", DefaultSlingTargets: []string{"hello-world/polecat-a", "hello-world/polecat-b"}},
+		},
+	}
+	data, err := c.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	got, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse(Marshal output): %v", err)
+	}
+	want := []string{"hello-world/polecat-a", "hello-world/polecat-b"}
+	if len(got.Rigs[0].DefaultSlingTargets) != len(want) {
+		t.Fatalf("DefaultSlingTargets len = %d, want %d", len(got.Rigs[0].DefaultSlingTargets), len(want))
+	}
+	for i, v := range want {
+		if got.Rigs[0].DefaultSlingTargets[i] != v {
+			t.Errorf("DefaultSlingTargets[%d] = %q, want %q", i, got.Rigs[0].DefaultSlingTargets[i], v)
+		}
 	}
 }
 
@@ -5840,6 +6128,46 @@ name = "a"
 	}
 }
 
+func TestParseSessionNudgePollInterval(t *testing.T) {
+	toml := `
+[workspace]
+name = "test"
+
+[session]
+nudge_poll_interval = "15s"
+
+[[agent]]
+name = "a"
+`
+	cfg, err := Parse([]byte(toml))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := cfg.Session.NudgePollIntervalDuration(); got != 15*time.Second {
+		t.Errorf("NudgePollIntervalDuration() = %v, want 15s", got)
+	}
+}
+
+func TestNudgePollIntervalDurationUnsetOrInvalid(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+	}{
+		{"unset", ""},
+		{"unparseable", "banana"},
+		{"zero", "0s"},
+		{"negative", "-5s"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &SessionConfig{NudgePollInterval: tc.value}
+			if got := s.NudgePollIntervalDuration(); got != 0 {
+				t.Errorf("NudgePollIntervalDuration() = %v, want 0 (unconfigured)", got)
+			}
+		})
+	}
+}
+
 func TestAPIConfigParsing(t *testing.T) {
 	toml := `
 [workspace]
@@ -6059,7 +6387,7 @@ func TestEffectiveOnDeathForBeadsBD105ReopensEphemeralInProgressWork(t *testing.
 		PoolName: "hello-world/dog",
 	}
 
-	log := runLifecycleHookCommand(t, a.EffectiveOnDeathForBeads(BeadsConfig{BDCompatibility: BeadsBDCompatibility105}), `#!/bin/sh
+	log := runLifecycleHookCommand(t, a.EffectiveOnDeathFor(QueryTopology{Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}}), `#!/bin/sh
 set -eu
 case "$1" in
   list)
@@ -6234,7 +6562,7 @@ func TestEffectiveOnBootForBeadsBD105ReopensOwnerlessEphemeralRoutedWork(t *test
 		PoolName: "hello-world/dog",
 	}
 
-	log := runLifecycleHookCommand(t, a.EffectiveOnBootForBeads(BeadsConfig{BDCompatibility: BeadsBDCompatibility105}), `#!/bin/sh
+	log := runLifecycleHookCommand(t, a.EffectiveOnBootFor(QueryTopology{Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}}), `#!/bin/sh
 set -eu
 case "$1" in
   list)
@@ -7704,6 +8032,112 @@ printf 'TRACE=%%s\nARGS=%%s\n' "$GC_WORKFLOW_TRACE" "$*" > %q
 	return tracePath, args
 }
 
+// TestPreferredDeterministicControlDispatcher locks the scope-local selection
+// shared by graphroute and dispatch. City graphs use the city dispatcher and
+// rig graphs use the dispatcher configured for that exact rig. Non-deterministic
+// control-dispatcher agents (no convoy-control StartCommand) are ignored.
+func TestPreferredDeterministicControlDispatcher(t *testing.T) {
+	deterministic := func(dir string) Agent {
+		return Agent{
+			Name:         ControlDispatcherAgentName,
+			BindingName:  "core",
+			Dir:          dir,
+			StartCommand: ControlDispatcherStartCommandFor("{{.Agent}}"),
+		}
+	}
+
+	citySingleton := deterministic("")
+	rigCopy := deterministic("fixture")
+	plain := Agent{Name: ControlDispatcherAgentName, Dir: "fixture"} // no StartCommand
+
+	tests := []struct {
+		name       string
+		agents     []Agent
+		rigContext string
+		wantQN     string
+		wantOK     bool
+	}{
+		{
+			name:       "rig copy selected for rig scope",
+			agents:     []Agent{rigCopy, citySingleton},
+			rigContext: "fixture",
+			wantQN:     "fixture/core.control-dispatcher",
+			wantOK:     true,
+		},
+		{
+			name:       "city dispatcher selected for empty scope",
+			agents:     []Agent{rigCopy, citySingleton},
+			rigContext: "",
+			wantQN:     "core.control-dispatcher",
+			wantOK:     true,
+		},
+		{
+			name:       "rig copy selected without city dispatcher",
+			agents:     []Agent{rigCopy},
+			rigContext: "fixture",
+			wantQN:     "fixture/core.control-dispatcher",
+			wantOK:     true,
+		},
+		{
+			name:       "city dispatcher does not satisfy rig scope",
+			agents:     []Agent{citySingleton},
+			rigContext: "fixture",
+			wantOK:     false,
+		},
+		{
+			name:       "no match when only a non-deterministic dispatcher exists",
+			agents:     []Agent{plain},
+			rigContext: "fixture",
+			wantOK:     false,
+		},
+		{
+			name:       "no match when rig scope has no matching rig-scoped dispatcher",
+			agents:     []Agent{rigCopy},
+			rigContext: "other",
+			wantOK:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := PreferredDeterministicControlDispatcher(&City{Agents: tt.agents}, tt.rigContext)
+			if ok != tt.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
+			}
+			if ok && got.QualifiedName() != tt.wantQN {
+				t.Fatalf("QualifiedName = %q, want %q", got.QualifiedName(), tt.wantQN)
+			}
+		})
+	}
+
+	if _, ok := PreferredDeterministicControlDispatcher(nil, ""); ok {
+		t.Fatal("nil cfg should return ok=false")
+	}
+}
+
+func TestControlDispatcherForScopeSupportsExactPlainConfig(t *testing.T) {
+	cfg := &City{Agents: []Agent{
+		{Name: ControlDispatcherAgentName},
+		{Name: ControlDispatcherAgentName, Dir: "fixture"},
+	}}
+
+	for _, tt := range []struct {
+		rigContext string
+		want       string
+	}{
+		{want: ControlDispatcherAgentName},
+		{rigContext: "fixture", want: "fixture/" + ControlDispatcherAgentName},
+	} {
+		dispatcher, ok := ControlDispatcherForScope(cfg, tt.rigContext)
+		if !ok || dispatcher.QualifiedName() != tt.want {
+			t.Fatalf("ControlDispatcherForScope(%q) = (%q, %v), want (%q, true)", tt.rigContext, dispatcher.QualifiedName(), ok, tt.want)
+		}
+	}
+	if _, ok := ControlDispatcherForScope(cfg, "other"); ok {
+		t.Fatal("city dispatcher must not satisfy another rig scope")
+	}
+}
+
 // TestAllPackDirs covers (*City).AllPackDirs() — the union of PackDirs and
 // RigPackDirs that the prompt renderer relies on. Regression: rig-imported
 // pack template fragments were silently dropped before gascity#2676.
@@ -7821,6 +8255,31 @@ func TestPackDirsForRig(t *testing.T) {
 	}
 }
 
+// TestPackDirsForRigEmptyRigNameFallsBackToAllPackDirs guards the scope="city"
+// agent fix: an empty rigName must resolve every rig's pack dirs via
+// AllPackDirs, not just the city-level ones, so city-scope agents (e.g.
+// deep-investigator, supervisor, pack-author) can see rig-imported fragments.
+func TestPackDirsForRigEmptyRigNameFallsBackToAllPackDirs(t *testing.T) {
+	c := &City{
+		PackDirs: []string{"/city/packs/a"},
+		RigPackDirs: map[string][]string{
+			"zulu":  {"/rig/zulu/packs/z"},
+			"alpha": {"/rig/alpha/packs/x"},
+		},
+	}
+
+	got := c.PackDirsForRig("")
+	want := c.AllPackDirs()
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("PackDirsForRig(\"\") = %v, want AllPackDirs() = %v", got, want)
+	}
+
+	justCityDirs := []string{"/city/packs/a"}
+	if reflect.DeepEqual(got, justCityDirs) {
+		t.Fatalf("PackDirsForRig(\"\") = %v, regressed to city-only dirs (dropped RigPackDirs)", got)
+	}
+}
+
 func TestDefaultInstallAgentHooksForProvider(t *testing.T) {
 	cases := []struct {
 		provider string
@@ -7861,6 +8320,53 @@ func TestCityWithProvidersInstallsKimiHooksByDefault(t *testing.T) {
 			want := []string{"kimi"}
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("Workspace.InstallAgentHooks = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+func TestDurationOr(t *testing.T) {
+	def := 30 * time.Second
+	cases := []struct {
+		name string
+		raw  string
+		want time.Duration
+	}{
+		{"empty falls back to default", "", def},
+		{"unparseable falls back to default", "5minutes", def},
+		{"valid parses", "2m", 2 * time.Minute},
+		{"zero parses to zero, not default", "0", 0},
+		{"negative passes through unchanged", "-5s", -5 * time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := durationOr(tc.raw, def); got != tc.want {
+				t.Errorf("durationOr(%q, %v) = %v, want %v", tc.raw, def, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDurationFloorOr(t *testing.T) {
+	const floor = ProgressStallTimeoutMinimum
+	cases := []struct {
+		name string
+		raw  string
+		def  time.Duration
+		want time.Duration
+	}{
+		{"empty returns default", "", 0, 0},
+		{"unparseable returns default", "5minutes", 0, 0},
+		{"non-positive falls back to default", "-1m", 0, 0},
+		{"explicit zero falls back to default", "0", 0, 0},
+		{"positive below floor is raised to floor", "1m", 0, floor},
+		{"at floor stays", floor.String(), 0, floor},
+		{"above floor passes through", "10m", 0, 10 * time.Minute},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := durationFloorOr(tc.raw, tc.def, floor); got != tc.want {
+				t.Errorf("durationFloorOr(%q, %v, %v) = %v, want %v", tc.raw, tc.def, floor, got, tc.want)
 			}
 		})
 	}

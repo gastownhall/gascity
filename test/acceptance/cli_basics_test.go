@@ -128,13 +128,14 @@ func TestRestart_NotInitialized_ReturnsError(t *testing.T) {
 }
 
 // TestDashboard_HelpFlag verifies that gc dashboard --help remains available
-// even though bare gc dashboard now starts the server.
+// now that bare gc dashboard prints where the supervisor serves the dashboard
+// instead of starting a static server.
 func TestDashboard_HelpFlag(t *testing.T) {
 	out, err := helpers.RunGC(testEnv, "", "dashboard", "--help")
 	if err != nil {
 		t.Fatalf("gc dashboard --help failed: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "Start the web dashboard") {
+	if !strings.Contains(out, "Print where the web dashboard is served") {
 		t.Fatalf("dashboard help missing serve description:\n%s", out)
 	}
 }

@@ -98,6 +98,42 @@ func EnsureBuiltinRuntimeAssets(cityPath string, warningWriter io.Writer) error 
 	return nil
 }
 
+// builtinRuntimeReadied reports whether EnsureBuiltinRuntimeAssets has
+// completed a fully successful readiness pass for cityPath in this process.
+// A pass that ended degraded leaves this false, so the next caller runs a
+// real one.
+func builtinRuntimeReadied(cityPath string) bool {
+	stateAny, ok := builtinRuntimeReadyCache.Load(normalizePathForCompare(cityPath))
+	if !ok {
+		return false
+	}
+	state := stateAny.(*builtinRuntimeState)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return state.ready
+}
+
+// ensureBuiltinRuntimeAssetsForSuppliedConfig runs the builtin readiness pass
+// on behalf of a caller that supplied an already-loaded city config, so that
+// reusing a config never silently skips the self-heal a config load performs.
+//
+// When this process has already completed a readiness pass for the city, the
+// supplied config came from that same pass and re-running it would repeat the
+// cache walk the reuse exists to avoid — the walk, not the parse, is what a
+// config load costs. Any other config gets a full pass.
+//
+// Scoped to short-lived invocations: unlike EnsureBuiltinRuntimeAssets, the
+// early return skips the per-call requiredBuiltinSourcesUsable /
+// lockedBundledImportsUsable revalidation, and nothing resets ready to false.
+// A long-lived process (supervisor, API server) must call
+// EnsureBuiltinRuntimeAssets directly rather than adopt a WithConfig variant.
+func ensureBuiltinRuntimeAssetsForSuppliedConfig(cityPath string, warningWriter io.Writer) error {
+	if builtinRuntimeReadied(cityPath) {
+		return nil
+	}
+	return EnsureBuiltinRuntimeAssets(cityPath, warningWriter)
+}
+
 // requiredBuiltinSources returns the bundled sources every city with this
 // configuration needs, keyed by pack name.
 //
@@ -179,7 +215,11 @@ func builtinImportsForNames(names []string) (map[string]config.Import, []string)
 	imports := make(map[string]config.Import, len(names))
 	ordered := make([]string, 0, len(names))
 	for _, name := range names {
-		source, ok := builtinpacks.Source(name)
+		// CanonicalImportSource authors the dereferenceable tree-URL form
+		// that gc init and the builtin-pack-imports doctor fix write into
+		// pack.toml; the version pin still derives from the normalized
+		// source, which both spellings share.
+		source, ok := builtinpacks.CanonicalImportSource(name)
 		if !ok {
 			continue
 		}
@@ -206,7 +246,7 @@ func ensureRequiredBuiltinSourcesCached(cityPath string) error {
 		if builtinpacks.ValidateSyntheticRepo(cachePath, commit) == nil {
 			continue
 		}
-		if _, err := packman.EnsureRepoInCache(source, commit); err != nil {
+		if _, err := packman.EnsureRepoInCache(cityPath, source, commit); err != nil {
 			return fmt.Errorf("caching bundled %s pack: %w", name, err)
 		}
 	}

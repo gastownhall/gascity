@@ -11,6 +11,77 @@ import (
 
 func intPtr(n int) *int { return &n }
 
+// TestNestedCapUsageRejectionTyped verifies that the retyped rejection producer
+// returns the typed site/reason constants for each cap kind, and that the
+// underlying string values are byte-identical to the pre-S26b literals.
+func TestNestedCapUsageRejectionTyped(t *testing.T) {
+	cases := []struct {
+		name       string
+		cfg        *config.City
+		wantSite   TraceSiteCode
+		wantReason TraceReasonCode
+		wantSiteS  string
+		wantRsnS   string
+	}{
+		{
+			name:       "agent_cap",
+			cfg:        &config.City{Agents: []config.Agent{poolAgent("claude", "rig", intPtr(1), 0)}},
+			wantSite:   TraceSitePoolAgentCap,
+			wantReason: TraceReasonAgentCap,
+			wantSiteS:  "reconciler.pool.agent_cap",
+			wantRsnS:   "agent_cap",
+		},
+		{
+			name: "rig_cap",
+			cfg: &config.City{
+				Rigs:   []config.Rig{{Name: "rig", Path: "/tmp/rig", MaxActiveSessions: intPtr(1)}},
+				Agents: []config.Agent{poolAgent("claude", "rig", intPtr(5), 0)},
+			},
+			wantSite:   TraceSitePoolRigCap,
+			wantReason: TraceReasonRigCap,
+			wantSiteS:  "reconciler.pool.rig_cap",
+			wantRsnS:   "rig_cap",
+		},
+		{
+			name: "workspace_cap",
+			cfg: &config.City{
+				Workspace: config.Workspace{MaxActiveSessions: intPtr(1)},
+				Agents:    []config.Agent{poolAgent("claude", "", intPtr(5), 0)},
+			},
+			wantSite:   TraceSitePoolWorkspaceCap,
+			wantReason: TraceReasonWorkspaceCap,
+			wantSiteS:  "reconciler.pool.workspace_cap",
+			wantRsnS:   "workspace_cap",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			limits := newNestedCapLimits(tc.cfg)
+			usage := newNestedCapUsage()
+			template := tc.cfg.Agents[0].QualifiedName()
+			// Fill to the cap so the next request is rejected.
+			usage.accept(SessionRequest{Template: template, Tier: "new"}, limits)
+
+			site, reason, _, rejected := usage.rejection(SessionRequest{Template: template, Tier: "new"}, limits)
+			if !rejected {
+				t.Fatalf("expected rejection at cap")
+			}
+			if site != tc.wantSite {
+				t.Errorf("site = %q, want %q", site, tc.wantSite)
+			}
+			if reason != tc.wantReason {
+				t.Errorf("reason = %q, want %q", reason, tc.wantReason)
+			}
+			if string(site) != tc.wantSiteS {
+				t.Errorf("string(site) = %q, want legacy literal %q", string(site), tc.wantSiteS)
+			}
+			if string(reason) != tc.wantRsnS {
+				t.Errorf("string(reason) = %q, want legacy literal %q", string(reason), tc.wantRsnS)
+			}
+		})
+	}
+}
+
 func workBead(id, routedTo, assignee, status string, priority int) beads.Bead {
 	p := priority
 	return beads.Bead{
@@ -73,6 +144,15 @@ func poolTraceFieldInt(t *testing.T, fields map[string]any, key string) int {
 	return got
 }
 
+func poolTraceFieldStrings(t *testing.T, fields map[string]any, key string) []string {
+	t.Helper()
+	got, ok := fields[key].([]string)
+	if !ok {
+		t.Fatalf("trace field %s = %#v, want []string", key, fields[key])
+	}
+	return got
+}
+
 func newPoolDesiredStateTestTrace(templates ...string) *sessionReconcilerTraceCycle {
 	detail := make(map[string]TraceSource, len(templates))
 	for _, template := range templates {
@@ -118,7 +198,7 @@ func TestComputePoolDesiredStates_ResumeBeatsNew(t *testing.T) {
 	sessions := []beads.Bead{sessionBead("sess-1", "open")}
 	scaleCheck := map[string]int{"rig/claude": 2}
 
-	result := ComputePoolDesiredStates(cfg, work, sessions, scaleCheck)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), scaleCheck)
 
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))
@@ -164,7 +244,7 @@ func TestComputePoolDesiredStates_ResumeResolvesAssigneeByAlias(t *testing.T) {
 		},
 	}}
 
-	result := ComputePoolDesiredStates(cfg, work, sessions, nil)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil)
 
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))
@@ -208,7 +288,7 @@ func TestComputePoolDesiredStates_ResumeUsesLegacyWorkflowRunTarget(t *testing.T
 		},
 	}}
 
-	result := ComputePoolDesiredStates(cfg, work, sessions, nil)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil)
 
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))
@@ -219,6 +299,59 @@ func TestComputePoolDesiredStates_ResumeUsesLegacyWorkflowRunTarget(t *testing.T
 	}
 	if reqs[0].Tier != "resume" || reqs[0].SessionBeadID != "sess-1" {
 		t.Fatalf("request = %+v, want resume for sess-1", reqs[0])
+	}
+}
+
+func TestComputePoolDesiredStates_ResumesInstanceSuffixedRouteTarget(t *testing.T) {
+	// A writer that stamps gc.routed_to with a live instance suffix directly
+	// (e.g. `bd update --set-metadata gc.routed_to=rig/claude-1`), bypassing gc
+	// sling's write-side normalization (agentutil.NormalizePoolRouteTarget,
+	// applied in doSling), must not strand the resume-tier match: the raw
+	// instance name has to resolve back to the base template before comparing
+	// against `template`, or the live session backing this work looks
+	// unrouted and never resumes.
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "rig", intPtr(3), 0)},
+	}
+	work := []beads.Bead{
+		workBead("w1", "rig/claude-1", "sess-1", "in_progress", 5),
+	}
+	sessions := []beads.Bead{sessionBead("sess-1", "open")}
+
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil)
+
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1", len(result))
+	}
+	reqs := result[0].Requests
+	if len(reqs) != 1 {
+		t.Fatalf("len(requests) = %d, want 1 resume for instance-suffixed route target", len(reqs))
+	}
+	if reqs[0].Tier != "resume" || reqs[0].SessionBeadID != "sess-1" {
+		t.Fatalf("request = %+v, want resume for sess-1", reqs[0])
+	}
+}
+
+func TestComputePoolDesiredStates_LeavesUnmatchedInstanceSuffixAlone(t *testing.T) {
+	// Guard against over-normalization: an instance number outside the
+	// agent's configured capacity is not a pool instance identity and must
+	// not be rewritten or matched against the base template.
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "rig", intPtr(3), 0)},
+	}
+	work := []beads.Bead{
+		workBead("w1", "rig/claude-99", "sess-1", "in_progress", 5),
+	}
+	sessions := []beads.Bead{sessionBead("sess-1", "open")}
+
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil)
+
+	total := 0
+	for _, ds := range result {
+		total += len(ds.Requests)
+	}
+	if total != 0 {
+		t.Errorf("total = %d, want 0 (out-of-range instance suffix must not resolve to the base template)", total)
 	}
 }
 
@@ -246,7 +379,7 @@ func TestComputePoolDesiredStates_ResumeResolvesAssigneeByAliasHistory(t *testin
 		},
 	}}
 
-	result := ComputePoolDesiredStates(cfg, work, sessions, nil)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil)
 
 	reqs := result[0].Requests
 	if len(reqs) != 1 || reqs[0].SessionBeadID != "sess-vi6hhp" {
@@ -274,7 +407,7 @@ func TestComputePoolDesiredStates_ResumeResolvesPersistedBoundTemplate(t *testin
 		},
 	}}
 
-	result := ComputePoolDesiredStates(cfg, work, sessions, nil)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil)
 
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))
@@ -336,6 +469,74 @@ func TestComputePoolDesiredStates_MaxCapsTotal(t *testing.T) {
 	}
 }
 
+func TestComputePoolDesiredStates_TerminalProviderErrorSessionsDoNotBlockNewDemand(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(1), 0)},
+	}
+	work := []beads.Bead{
+		workBead("w-stale", "claude", "sess-stale", "in_progress", 5),
+	}
+	stale := sessionBead("sess-stale", "open")
+	stale.Type = sessionBeadType
+	stale.Metadata = map[string]string{
+		"template":                              "claude",
+		"session_name":                          "claude-sess-stale",
+		sessionHealthStateMetadataKey:           "unhealthy",
+		sessionHealthReasonMetadataKey:          "model_not_found",
+		sessionDrainableMetadataKey:             boolMetadata(true),
+		sessionProviderTerminalErrorMetadataKey: "model_not_found",
+	}
+
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads([]beads.Bead{stale}), map[string]int{"claude": 1})
+
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1", len(result))
+	}
+	reqs := result[0].Requests
+	if len(reqs) != 1 {
+		t.Fatalf("len(requests) = %d, want 1 new request; got %#v", len(reqs), reqs)
+	}
+	if reqs[0].Tier != "new" || reqs[0].SessionBeadID != "" {
+		t.Fatalf("request = %+v, want anonymous new demand replacing unhealthy stale owner", reqs[0])
+	}
+}
+
+func TestComputePoolDesiredStates_TraceListsActiveCapacityBlockers(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(1), 0)},
+	}
+	work := []beads.Bead{
+		workBead("w-active", "claude", "sess-active", "in_progress", 5),
+	}
+	sessions := []beads.Bead{sessionBead("sess-active", "open")}
+	trace := newPoolDesiredStateTestTrace("claude")
+
+	result := computePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), map[string]int{"claude": 1}, nil, trace)
+
+	if len(result) != 1 || len(result[0].Requests) != 1 || result[0].Requests[0].Tier != "resume" {
+		t.Fatalf("result = %#v, want only the active resume request under max_active_sessions=1", result)
+	}
+	if got := trace.decisionCounts[string(TraceSitePoolNewDemandCap)]; got != 1 {
+		t.Fatalf("new-demand cap trace decisions = %d, want 1; records=%#v", got, trace.records)
+	}
+	rec := poolTraceDecision(t, trace, TraceSitePoolNewDemandCap)
+	for key, want := range map[string]int{
+		"scale_check":  1,
+		"accepted_new": 0,
+		"blocked_new":  1,
+	} {
+		if got := poolTraceFieldInt(t, rec.Fields, key); got != want {
+			t.Fatalf("%s = %d, want %d", key, got, want)
+		}
+	}
+	if got := poolTraceFieldStrings(t, rec.Fields, "blocking_sessions"); len(got) != 1 || got[0] != "sess-active" {
+		t.Fatalf("blocking_sessions = %#v, want [sess-active]", got)
+	}
+	if got := poolTraceFieldStrings(t, rec.Fields, "blocking_work_beads"); len(got) != 1 || got[0] != "w-active" {
+		t.Fatalf("blocking_work_beads = %#v, want [w-active]", got)
+	}
+}
+
 func TestComputePoolDesiredStates_MaxCapsResumeBeads(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{poolAgent("claude", "rig", intPtr(2), 0)},
@@ -351,7 +552,7 @@ func TestComputePoolDesiredStates_MaxCapsResumeBeads(t *testing.T) {
 		sessionBead("s3", "open"),
 	}
 
-	result := ComputePoolDesiredStates(cfg, work, sessions, nil)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil)
 
 	// Max=2: only 2 of the 3 in-progress beads get sessions.
 	if len(result) != 1 {
@@ -408,7 +609,7 @@ func TestComputePoolDesiredStates_MaxOneTemplatesStillParticipateInDemand(t *tes
 		sessionBead("worker", "open"),
 	}
 
-	result := ComputePoolDesiredStates(cfg, work, sessions, nil)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil)
 
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1 for max=1 demand", len(result))
@@ -525,7 +726,7 @@ func TestComputePoolDesiredStates_ClosedSessionNotResumed(t *testing.T) {
 	}
 	sessions := []beads.Bead{sessionBead("dead-session", "closed")}
 
-	result := ComputePoolDesiredStates(cfg, work, sessions, nil)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil)
 
 	// The session bead is closed, so this shouldn't be a resume request.
 	// It also shouldn't be a new request because it has an assignee.
@@ -549,7 +750,7 @@ func TestComputePoolDesiredStates_DedupsResumeForSameSession(t *testing.T) {
 	}
 	sessions := []beads.Bead{sessionBead("sess-1", "open")}
 
-	result := ComputePoolDesiredStates(cfg, work, sessions, nil)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil)
 
 	// Should deduplicate — only one resume request for sess-1.
 	resumeCount := 0
@@ -581,7 +782,7 @@ func TestComputePoolDesiredStates_ResumePriorityOrder(t *testing.T) {
 		sessionBead("s3", "open"),
 	}
 
-	result := ComputePoolDesiredStates(cfg, work, sessions, nil)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil)
 
 	if len(result) != 1 || len(result[0].Requests) != 2 {
 		t.Fatalf("expected 2 requests, got %d", len(result[0].Requests))
@@ -655,7 +856,7 @@ func TestComputePoolDesiredStates_ManualSessionDoesNotConsumeSingletonNewDemand(
 		},
 	}
 
-	result := ComputePoolDesiredStates(cfg, nil, []beads.Bead{manual}, map[string]int{"claude": 1})
+	result := ComputePoolDesiredStates(cfg, nil, sessionInfosFromBeads([]beads.Bead{manual}), map[string]int{"claude": 1})
 
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))
@@ -705,7 +906,7 @@ func TestComputePoolDesiredStates_NamedSessionBeadSkipsPoolResume(t *testing.T) 
 		},
 	}
 
-	result := ComputePoolDesiredStates(cfg, work, []beads.Bead{namedBead}, nil)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads([]beads.Bead{namedBead}), nil)
 
 	resumeCount := 0
 	for _, ds := range result {
@@ -717,6 +918,81 @@ func TestComputePoolDesiredStates_NamedSessionBeadSkipsPoolResume(t *testing.T) 
 	}
 	if resumeCount != 0 {
 		t.Errorf("resume count = %d, want 0 (named-session beads are materialized by the named-session loop, not pool resume)", resumeCount)
+	}
+}
+
+// TestComputePoolDesiredStates_WakeKnownIdentitySkipsConfiguredNamedSession is
+// the ga-p0u752 fix: the wake-known-identity tier (no live session bead
+// resolves the assignee) must NOT treat a bare assignee as generic pool demand
+// when that identity is structurally a configured [[named_session]] — even
+// though the resume-tier guard (namedSessionBeadIDs, lines 194-196) never
+// fires here because there is no session bead at all. Without this fix,
+// isKnownPoolTemplate has zero awareness of cfg.NamedSessions and wakes a
+// competing pool worker for a named session's own orphaned bare self-claim
+// (ga-i1d0tr Candidate B).
+func TestComputePoolDesiredStates_WakeKnownIdentitySkipsConfiguredNamedSession(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("builder", "gascity", intPtr(3), 0)},
+		NamedSessions: []config.NamedSession{
+			{Template: "builder", Dir: "gascity", Mode: "on_demand"},
+		},
+	}
+	// No live session bead at all: the named session's canonical bead is
+	// reaped/closed, but the bare-identity in-progress claim survives.
+	work := []beads.Bead{
+		workBead("w1", "gascity/builder", "gascity/builder", "in_progress", 5),
+	}
+
+	result := ComputePoolDesiredStates(cfg, work, nil, nil)
+
+	total := 0
+	for _, ds := range result {
+		total += len(ds.Requests)
+	}
+	if total != 0 {
+		t.Errorf("total pool requests = %d, want 0 (bare identity belongs to a configured named session; pool must not compete for it)", total)
+	}
+}
+
+// TestComputePoolDesiredStates_WakeKnownIdentityFiresForSuspendedNamedSession
+// covers the suspension-awareness risk the architecture review flagged
+// (ga-wfcfoe): a suspended named session must not be silently exempted from
+// pool demand, or the bead would orphan with neither side picking it up.
+// isConfiguredNamedSessionIdentity is unit-tested directly below
+// (TestIsConfiguredNamedSessionIdentity) because computePoolDesiredStates'
+// own outer loop already skips a suspended agent's entire per-template pass
+// (line ~151), so this exact scenario can't be reconstructed end-to-end
+// through ComputePoolDesiredStates for the overlapping bare-identity shape
+// this bug family targets — suspending the shared agent suspends both tiers
+// uniformly by design, which is correct (not orphaning), not a gap.
+func TestIsConfiguredNamedSessionIdentity(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			poolAgent("builder", "gascity", intPtr(3), 0),
+			{Name: "reviewer", Dir: "gascity", Suspended: true, MaxActiveSessions: intPtr(1)},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "builder", Dir: "gascity", Mode: "on_demand"},
+			{Template: "reviewer", Dir: "gascity", Mode: "on_demand"},
+		},
+	}
+
+	tests := []struct {
+		name     string
+		assignee string
+		want     bool
+	}{
+		{"matches active named session", "gascity/builder", true},
+		{"matches named session with suspended backing agent", "gascity/reviewer", false},
+		{"no matching named session", "gascity/other", false},
+		{"empty assignee", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isConfiguredNamedSessionIdentity(cfg, tt.assignee); got != tt.want {
+				t.Errorf("isConfiguredNamedSessionIdentity(%q) = %v, want %v", tt.assignee, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -768,7 +1044,7 @@ func TestComputePoolDesiredStates_CapsNewDemandBeforeMaterializingRequests(t *te
 	sessions := []beads.Bead{sessionBead("sess-1", "open")}
 	trace := newPoolDesiredStateTestTrace("claude")
 
-	result := computePoolDesiredStates(cfg, work, sessions, map[string]int{"claude": 10}, trace)
+	result := computePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), map[string]int{"claude": 10}, nil, trace)
 
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))
@@ -802,7 +1078,7 @@ func TestComputePoolDesiredStates_OpenAssignedWorkResumes(t *testing.T) {
 	}
 	sessions := []beads.Bead{sessionBead("sess-1", "open")}
 
-	result := ComputePoolDesiredStates(cfg, work, sessions, nil)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil)
 
 	if len(result) != 1 || len(result[0].Requests) != 1 {
 		t.Fatalf("expected 1 request, got %#v", result)
@@ -828,7 +1104,7 @@ func TestComputePoolDesiredStates_ResumeOverridesZeroScaleCheck(t *testing.T) {
 	sessions := []beads.Bead{sessionBead("sess-1", "open")}
 	scaleCheck := map[string]int{"claude": 0}
 
-	result := ComputePoolDesiredStates(cfg, work, sessions, scaleCheck)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), scaleCheck)
 
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))
@@ -868,7 +1144,7 @@ func TestComputePoolDesiredStates_ScaleCheckAndResumeAddUp(t *testing.T) {
 	sessions := []beads.Bead{sessionBead("sess-1", "open")}
 	scaleCheck := map[string]int{"claude": 2}
 
-	result := ComputePoolDesiredStates(cfg, work, sessions, scaleCheck)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), scaleCheck)
 
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))
@@ -904,7 +1180,7 @@ func TestComputePoolDesiredStates_AssignedSessionsDoNotConsumeNewDemand(t *testi
 		sessions = append(sessions, sessionBead(sessionID, "open"))
 	}
 
-	result := ComputePoolDesiredStates(cfg, work, sessions, map[string]int{"claude": 5})
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), map[string]int{"claude": 5})
 
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))
@@ -942,7 +1218,7 @@ func TestComputePoolDesiredStates_InFlightNewSessionsConsumeScaleDemand(t *testi
 	}
 	scaleCheck := map[string]int{"claude": 3}
 
-	result := ComputePoolDesiredStates(cfg, nil, sessions, scaleCheck)
+	result := ComputePoolDesiredStates(cfg, nil, sessionInfosFromBeads(sessions), scaleCheck)
 
 	counts := PoolDesiredCounts(result)
 	if counts["claude"] != 3 {
@@ -974,7 +1250,7 @@ func TestComputePoolDesiredStates_InFlightNewSessionsDoNotCreateZeroDemand(t *te
 	}
 	scaleCheck := map[string]int{"claude": 0}
 
-	result := ComputePoolDesiredStates(cfg, nil, sessions, scaleCheck)
+	result := ComputePoolDesiredStates(cfg, nil, sessionInfosFromBeads(sessions), scaleCheck)
 
 	counts := PoolDesiredCounts(result)
 	if counts["claude"] != 0 {
@@ -992,7 +1268,7 @@ func TestComputePoolDesiredStates_InFlightNewSessionsOnlySubtractCoveredDemand(t
 	}
 	scaleCheck := map[string]int{"claude": 5}
 
-	result := ComputePoolDesiredStates(cfg, nil, sessions, scaleCheck)
+	result := ComputePoolDesiredStates(cfg, nil, sessionInfosFromBeads(sessions), scaleCheck)
 
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))
@@ -1036,7 +1312,7 @@ func TestComputePoolDesiredStates_InFlightResumeBeadsDoNotConsumeNewDemand(t *te
 	}
 	scaleCheck := map[string]int{"claude": 3}
 
-	result := ComputePoolDesiredStates(cfg, work, sessions, scaleCheck)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), scaleCheck)
 
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))
@@ -1090,7 +1366,7 @@ func TestComputePoolDesiredStates_DoesNotResumeSessionAcrossExplicitRouteMismatc
 		workBead("w-mismatched-route", "codex-min", "workflows__codex-max-mc-codex-max", "in_progress", 5),
 	}
 
-	result := ComputePoolDesiredStates(cfg, work, []beads.Bead{session}, nil)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads([]beads.Bead{session}), nil)
 
 	for _, state := range result {
 		for _, req := range state.Requests {
@@ -1123,7 +1399,7 @@ func TestComputePoolDesiredStates_DoesNotResumeLegacySessionAcrossExplicitRouteM
 		workBead("w-mismatched-route", "codex-min", "workflows__codex-max-mc-codex-max", "in_progress", 5),
 	}
 
-	result := ComputePoolDesiredStates(cfg, work, []beads.Bead{session}, nil)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads([]beads.Bead{session}), nil)
 
 	for _, state := range result {
 		for _, req := range state.Requests {
@@ -1153,7 +1429,7 @@ func TestComputePoolDesiredStates_InFlightPredicateBranches(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := ComputePoolDesiredStates(cfg, nil, []beads.Bead{tt.session}, map[string]int{"claude": 1})
+			result := ComputePoolDesiredStates(cfg, nil, sessionInfosFromBeads([]beads.Bead{tt.session}), map[string]int{"claude": 1})
 
 			if len(result) != 1 || len(result[0].Requests) != 1 {
 				t.Fatalf("result = %#v, want one in-flight request", result)
@@ -1172,7 +1448,7 @@ func TestComputePoolDesiredStates_StaleCreatingBeadStillConsumesNewDemand(t *tes
 	stale := poolSessionBeadWithState("sess-stale", "creating", "")
 	stale.CreatedAt = time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC).Add(-2 * staleCreatingStateTimeout)
 
-	result := ComputePoolDesiredStates(cfg, nil, []beads.Bead{stale}, map[string]int{"claude": 1})
+	result := ComputePoolDesiredStates(cfg, nil, sessionInfosFromBeads([]beads.Bead{stale}), map[string]int{"claude": 1})
 
 	if len(result) != 1 || len(result[0].Requests) != 1 {
 		t.Fatalf("result = %#v, want one stale creating request preserving already-spent demand", result)
@@ -1194,7 +1470,7 @@ func TestComputePoolDesiredStates_InFlightSelectionRespectsCapsInStableOrder(t *
 		pendingPoolSessionBeadAt("sess-tie-a", base.Add(2*time.Minute)),
 	}
 
-	result := ComputePoolDesiredStates(cfg, nil, sessions, map[string]int{"claude": 10})
+	result := ComputePoolDesiredStates(cfg, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 10})
 
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))
@@ -1221,7 +1497,7 @@ func TestComputePoolDesiredStates_InFlightDemandRecordsTrace(t *testing.T) {
 	}
 	trace := newPoolDesiredStateTestTrace("claude")
 
-	result := computePoolDesiredStates(cfg, nil, sessions, map[string]int{"claude": 5}, trace)
+	result := computePoolDesiredStates(cfg, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 5}, nil, trace)
 
 	if len(result) != 1 || len(result[0].Requests) != 5 {
 		t.Fatalf("result = %#v, want five desired requests", result)
@@ -1254,7 +1530,7 @@ func TestComputePoolDesiredStates_InFlightDemandRecordsTraceWhenCapsSuppressReus
 	}
 	trace := newPoolDesiredStateTestTrace("claude")
 
-	result := computePoolDesiredStates(cfg, nil, sessions, map[string]int{"claude": 5}, trace)
+	result := computePoolDesiredStates(cfg, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 5}, nil, trace)
 
 	if len(result) != 0 {
 		t.Fatalf("result = %#v, want no desired requests when workspace cap is exhausted", result)
@@ -1285,7 +1561,7 @@ func TestApplyNestedCaps_DedupsConcreteSessionRequestsAcrossTiers(t *testing.T) 
 		{Template: "claude", Tier: "new", SessionBeadID: "sess-2"},
 	}
 
-	result := applyNestedCaps(cfg, requests, nil)
+	result := applyNestedCaps(cfg, requests, nil, nil)
 
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))
@@ -1320,7 +1596,7 @@ func TestComputePoolDesiredStates_PerRigScoping(t *testing.T) {
 	}
 	sessions := []beads.Bead{sessionBead("sess-1", "open")}
 
-	result := ComputePoolDesiredStates(cfg, work, sessions, nil)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil)
 
 	counts := PoolDesiredCounts(result)
 	if counts["claude"] != 0 {
@@ -1359,7 +1635,7 @@ func TestResumeTier_AsleepSessionWithAssignedWork(t *testing.T) {
 
 	scaleCheck := map[string]int{"hello-world/polecat": 1}
 
-	result := ComputePoolDesiredStates(cfg, work, sessions, scaleCheck)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), scaleCheck)
 
 	// Must have a resume request pointing to mc-sctve.
 	var resumeFound bool
@@ -1419,5 +1695,60 @@ func TestComputePoolDesiredStates_RoutedRigScopedDoesNotSpawnNew(t *testing.T) {
 	}
 	if total != 0 {
 		t.Fatalf("total requests = %d, want 0", total)
+	}
+}
+
+// TestCanonicalSingletonAliasHeldTemplates_ExcludesFailedCreateHolder is the
+// regression guard for the failed-create over-suppression hang found during the
+// gc-7e40y fix review (opencode+Fugu Ultra). A failed-create bead RELEASES its
+// alias (failedCreateIdentityReleased, names.go), so it must NOT count as a live
+// holder -- otherwise pool demand is suppressed while the canonical alias is
+// actually free, hanging routed work for the template.
+func TestCanonicalSingletonAliasHeldTemplates_ExcludesFailedCreateHolder(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("mayor", "", intPtr(1), 0)}, // canonical singleton
+	}
+	holder := func(state string) beads.Bead {
+		return beads.Bead{
+			ID:     "sess-" + state,
+			Status: "open",
+			Type:   sessionBeadType,
+			Metadata: map[string]string{
+				"session_name":   "mayor",
+				"template":       "mayor",
+				"alias":          "mayor",
+				"session_origin": "named",
+				"state":          state,
+			},
+		}
+	}
+
+	// A live named holder occupies the singleton's slot.
+	if _, ok := canonicalSingletonAliasHeldTemplates(cfg, sessionInfosFromBeads([]beads.Bead{holder("active")}))["mayor"]; !ok {
+		t.Fatalf("live named alias-holder should mark mayor held; got %v", canonicalSingletonAliasHeldTemplates(cfg, sessionInfosFromBeads([]beads.Bead{holder("active")})))
+	}
+
+	// A failed-create holder released the alias -> must NOT be treated as held.
+	if _, ok := canonicalSingletonAliasHeldTemplates(cfg, sessionInfosFromBeads([]beads.Bead{holder("failed-create")}))["mayor"]; ok {
+		t.Fatalf("failed-create holder released its alias and must NOT mark mayor held (over-suppression hang); got %v", canonicalSingletonAliasHeldTemplates(cfg, sessionInfosFromBeads([]beads.Bead{holder("failed-create")})))
+	}
+
+	// A closed holder no longer owns the alias.
+	closed := holder("active")
+	closed.Status = "closed"
+	if _, ok := canonicalSingletonAliasHeldTemplates(cfg, sessionInfosFromBeads([]beads.Bead{closed}))["mayor"]; ok {
+		t.Fatalf("closed holder released its alias and must NOT mark mayor held; got held")
+	}
+
+	// A pool-managed bead is the pool's own instance, not the named alias holder.
+	poolManaged := holder("active")
+	poolManaged.Metadata[poolManagedMetadataKey] = boolMetadata(true)
+	if _, ok := canonicalSingletonAliasHeldTemplates(cfg, sessionInfosFromBeads([]beads.Bead{poolManaged}))["mayor"]; ok {
+		t.Fatalf("pool-managed bead is not the named alias holder and must NOT mark mayor held; got held")
+	}
+
+	// A drained holder released its alias.
+	if _, ok := canonicalSingletonAliasHeldTemplates(cfg, sessionInfosFromBeads([]beads.Bead{holder("drained")}))["mayor"]; ok {
+		t.Fatalf("drained holder released its alias and must NOT mark mayor held; got held")
 	}
 }

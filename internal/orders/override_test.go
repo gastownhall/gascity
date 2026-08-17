@@ -3,6 +3,7 @@ package orders
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // boolPtr / strPtr are local helpers so tests stay self-contained.
@@ -18,6 +19,24 @@ func TestApplyOverridesIdempotent(t *testing.T) {
 	}
 	if !aa[0].Idempotent {
 		t.Error("override idempotent=true was not applied to the order")
+	}
+}
+
+func TestApplyOverridesCheckTimeout(t *testing.T) {
+	t.Parallel()
+
+	// A scanned shared-pack condition order (e.g. pr-merge-queue) must be
+	// tunable through a deployment override, not only by editing pack source,
+	// so a check against a slow backing store can be given a longer deadline.
+	aa := []Order{{Name: "pr-merge-queue", Trigger: "condition", Check: "queue-pending"}}
+	if err := ApplyOverrides(aa, []Override{{Name: "pr-merge-queue", CheckTimeout: strPtr("60s")}}); err != nil {
+		t.Fatalf("ApplyOverrides: %v", err)
+	}
+	if aa[0].CheckTimeout != "60s" {
+		t.Errorf("override check_timeout not applied: CheckTimeout = %q, want %q", aa[0].CheckTimeout, "60s")
+	}
+	if got := aa[0].CheckTimeoutOrDefault(); got != 60*time.Second {
+		t.Errorf("CheckTimeoutOrDefault() = %v, want %v", got, 60*time.Second)
 	}
 }
 

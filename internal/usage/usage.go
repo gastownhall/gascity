@@ -41,10 +41,11 @@ const (
 // (Provider, Model) pair is unknown, Unpriced is set and CostUSDEstimate is left
 // zero — consumers must treat that as "not measured", not "free".
 type Fact struct {
-	RunID  string `json:"run_id,omitempty"`  // groups facts of one execution
-	StepID string `json:"step_id,omitempty"` // the acting work bead id, if any
-	Worker string `json:"worker,omitempty"`  // session name
-	City   string `json:"city,omitempty"`
+	RunID     string `json:"run_id,omitempty"`     // groups facts of one execution
+	SessionID string `json:"session_id,omitempty"` // the session bead id: join key to manifold spend (EIA session_id) and recall transcripts
+	StepID    string `json:"step_id,omitempty"`    // the acting work bead id, if any
+	Worker    string `json:"worker,omitempty"`     // session name
+	City      string `json:"city,omitempty"`
 
 	Kind Kind `json:"kind"`
 

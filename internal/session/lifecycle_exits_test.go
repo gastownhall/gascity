@@ -201,6 +201,7 @@ func TestIsDeliberateSleepReason(t *testing.T) {
 	deliberate := []string{
 		"idle", "idle-timeout", "no-wake-reason", "config-drift", "drained",
 		"city-stop", "user-hold", "wait-hold", "rate_limit", "failed-create",
+		"provider-terminal-error",
 		" idle ",
 	}
 	for _, reason := range deliberate {
@@ -283,6 +284,10 @@ func TestConversationResetPatch(t *testing.T) {
 		"session_key":                "",
 		"started_config_hash":        "",
 		"continuation_reset_pending": "true",
+		// Priming markers share started_config_hash's lifetime (S19 Stage 2).
+		"primed_at":            "",
+		"priming_attempted_at": "",
+		"prompt_hash":          "",
 	})
 	assertPatch(t, ConversationResetPatch(false), MetadataPatch{
 		"session_key":                "",

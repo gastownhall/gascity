@@ -252,6 +252,8 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 misses=0
+DISPATCH_WAKE_FILE="$GC_CITY/.gc/dispatch-wake"
+DISPATCH_WAKE_LAST_MTIME=""
 
 jq_bead() {
     local filter="$1"
@@ -366,6 +368,19 @@ select_candidate_from_queue() {
 }
 
 while true; do
+    # --- dispatch-wake check ---
+    # The control dispatcher touches .gc/dispatch-wake after each successful batch.
+    # Detect mtime change and skip idle sleep so gc hook runs immediately.
+    dispatch_woke="false"
+    if [ -f "$DISPATCH_WAKE_FILE" ]; then
+        current_mtime=$(stat -c %Y "$DISPATCH_WAKE_FILE" 2>/dev/null || stat -f %m "$DISPATCH_WAKE_FILE" 2>/dev/null || echo "")
+        if [ -n "$current_mtime" ] && [ "$current_mtime" != "$DISPATCH_WAKE_LAST_MTIME" ]; then
+            DISPATCH_WAKE_LAST_MTIME="$current_mtime"
+            dispatch_woke="true"
+            trace "dispatch-wake mtime=$current_mtime"
+        fi
+    fi
+
     owned=""
     bead_json=""
     owns_bead="false"
@@ -404,7 +419,9 @@ while true; do
         elif [ $((misses % 25)) -eq 0 ]; then
             trace "idle misses=$misses assignee=$ASSIGNEE"
         fi
-        sleep 0.2
+        if [ "$dispatch_woke" != "true" ]; then
+            sleep 0.2
+        fi
         continue
     fi
     misses=0

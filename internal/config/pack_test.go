@@ -451,6 +451,83 @@ scope = "rig"
 	}
 }
 
+// TestLoadWithIncludes_WildcardPatchKeepsCityBeforeRigPrecedence is the
+// regression for the wildcard partitioning bug: a city-level rig="*" patch
+// whose Name also matches an implicit provider-derived agent used to be fully
+// deferred until AFTER rig overrides ran, so it clobbered the rig override and
+// reversed city-before-rig precedence.
+//
+// The agent is named "claude" — the same name as the provider — so it is BOTH
+// an already-present rig-pack agent (proj/gs.claude) AND an implicit-agent name.
+// The wildcard patch must apply in the normal city patch phase (so the rig
+// override, applied later, still wins on the field they share) while ALSO
+// deferring to the injected implicit-agent tail. Assertions: the wildcard ran
+// (it set Nudge, which the rig override does not touch) AND the rig override
+// won (Suspended=false, set after the wildcard's Suspended=true).
+func TestLoadWithIncludes_WildcardPatchKeepsCityBeforeRigPrecedence(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "city.toml", `
+[workspace]
+name = "test"
+
+[providers.claude]
+base = "builtin:claude"
+
+[[rigs]]
+name = "proj"
+path = "/tmp/proj"
+
+[rigs.imports.gs]
+source = "./packs/gastown"
+
+[[rigs.patches]]
+agent = "claude"
+suspended = false
+
+[[patches.agent]]
+name = "claude"
+rig = "*"
+suspended = true
+nudge = "city wildcard applied"
+`)
+	writeFile(t, dir, "packs/gastown/pack.toml", `
+[pack]
+name = "gastown"
+schema = 2
+
+[[agent]]
+name = "claude"
+provider = "claude"
+scope = "rig"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	var claude *Agent
+	for i := range cfg.Agents {
+		if cfg.Agents[i].QualifiedName() == "proj/gs.claude" {
+			claude = &cfg.Agents[i]
+			break
+		}
+	}
+	if claude == nil {
+		names := make([]string, 0, len(cfg.Agents))
+		for _, a := range cfg.Agents {
+			names = append(names, a.QualifiedName())
+		}
+		t.Fatalf("agent proj/gs.claude not found in merged config; agents: %v", names)
+	}
+	if claude.Nudge != "city wildcard applied" {
+		t.Errorf("claude.Nudge = %q, want city wildcard patch to apply in the normal city phase", claude.Nudge)
+	}
+	if claude.Suspended {
+		t.Errorf("claude.Suspended = true, want false (rig override must win after the city wildcard)")
+	}
+}
+
 func TestLoadWithIncludes_ProvenanceUsesDeferredRigPatchFinalIdentity(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "city.toml", `
@@ -2468,7 +2545,7 @@ includes = ["../maintenance"]
 name = "mayor"
 `)
 
-	agents, _, _, _, _, _, _, err := loadPack(
+	agents, _, _, _, _, _, _, _, err := loadPack(
 		fsys.OSFS{},
 		filepath.Join(dir, "packs/gastown/pack.toml"),
 		filepath.Join(dir, "packs/gastown"),
@@ -2515,7 +2592,7 @@ name = "mayor"
 scope = "city"
 `)
 
-	agents, _, _, _, _, _, _, err := loadPack(
+	agents, _, _, _, _, _, _, _, err := loadPack(
 		fsys.OSFS{},
 		filepath.Join(dir, "packs/gastown/pack.toml"),
 		filepath.Join(dir, "packs/gastown"),
@@ -2663,7 +2740,7 @@ name = "mayor"
 `)
 	writeFile(t, dir, "packs/gastown/formulas/.keep", "")
 
-	_, _, _, _, topoDirs, _, _, err := loadPack(
+	_, _, _, _, _, topoDirs, _, _, err := loadPack(
 		fsys.OSFS{},
 		filepath.Join(dir, "packs/gastown/pack.toml"),
 		filepath.Join(dir, "packs/gastown"),
@@ -2707,7 +2784,7 @@ includes = ["../a"]
 name = "beta"
 `)
 
-	_, _, _, _, _, _, _, err := loadPack(
+	_, _, _, _, _, _, _, _, err := loadPack(
 		fsys.OSFS{},
 		filepath.Join(dir, "packs/a/pack.toml"),
 		filepath.Join(dir, "packs/a"),
@@ -2733,7 +2810,7 @@ includes = ["../nonexistent"]
 name = "alpha"
 `)
 
-	_, _, _, _, _, _, _, err := loadPack(
+	_, _, _, _, _, _, _, _, err := loadPack(
 		fsys.OSFS{},
 		filepath.Join(dir, "packs/main/pack.toml"),
 		filepath.Join(dir, "packs/main"),
@@ -2776,7 +2853,7 @@ command = "main-claude"
 name = "boss"
 `)
 
-	_, _, providers, _, _, _, _, err := loadPack(
+	_, _, providers, _, _, _, _, _, err := loadPack(
 		fsys.OSFS{},
 		filepath.Join(dir, "packs/main/pack.toml"),
 		filepath.Join(dir, "packs/main"),
@@ -2919,7 +2996,7 @@ name = "polecat"
 scope = "rig"
 `)
 
-	agents, _, _, _, _, _, _, err := loadPack(
+	agents, _, _, _, _, _, _, _, err := loadPack(
 		fsys.OSFS{}, filepath.Join(dir, "packs/test/pack.toml"),
 		filepath.Join(dir, "packs/test"), dir, "myrig", nil)
 	if err != nil {
@@ -5288,5 +5365,91 @@ func TestMergeHoistedCityNamedSessions_DedupAcrossBindings(t *testing.T) {
 	}
 	if merged[0].BindingName != "gastown" {
 		t.Errorf("first-occurrence-wins: BindingName = %q, want %q", merged[0].BindingName, "gastown")
+	}
+}
+
+func TestCachedPackField(t *testing.T) {
+	dir := t.TempDir()
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := &packLoadCache{results: map[string]*packLoadResult{
+		abs: {warnings: []string{"w1", "w2"}},
+	}}
+
+	get := func(r *packLoadResult) []string { return append([]string(nil), r.warnings...) }
+
+	t.Run("nil cache returns zero value", func(t *testing.T) {
+		if got := cachedPackField(nil, dir, get); got != nil {
+			t.Errorf("cachedPackField(nil) = %v, want nil", got)
+		}
+	})
+
+	t.Run("cache miss returns zero value", func(t *testing.T) {
+		if got := cachedPackField(cache, filepath.Join(dir, "missing"), get); got != nil {
+			t.Errorf("cachedPackField(miss) = %v, want nil", got)
+		}
+	})
+
+	t.Run("cache hit resolves relative path and runs get", func(t *testing.T) {
+		got := cachedPackField(cache, dir, get)
+		if len(got) != 2 || got[0] != "w1" || got[1] != "w2" {
+			t.Errorf("cachedPackField(hit) = %v, want [w1 w2]", got)
+		}
+	})
+
+	t.Run("get closure copies on read", func(t *testing.T) {
+		got := cachedPackField(cache, dir, get)
+		got[0] = "mutated"
+		if cache.results[abs].warnings[0] != "w1" {
+			t.Errorf("get closure did not copy: cache mutated to %q", cache.results[abs].warnings[0])
+		}
+	})
+}
+
+// TestLoadPackForLint_WarnsWhenAgentDefaultsUnusedByImports is the
+// end-to-end regression for #4524: a pack's [agent_defaults] never applies
+// to agents brought in by the pack's own [imports.*]. This confirms the
+// warning actually surfaces through the real pack-load path, not just the
+// pure warnUnusedPackAgentDefaultsForImports function in isolation.
+func TestLoadPackForLint_WarnsWhenAgentDefaultsUnusedByImports(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, dir, "packs/roles/pack.toml", `
+[pack]
+name = "roles"
+schema = 2
+
+[[agent]]
+name = "requirements-planner"
+`)
+
+	writeFile(t, dir, "packs/local/pack.toml", `
+[pack]
+name = "local"
+schema = 2
+
+[agent_defaults]
+provider = "cacc-sol"
+
+[imports.roles]
+source = "../roles"
+`)
+
+	loaded, err := LoadPackForLint(fsys.OSFS{}, filepath.Join(dir, "packs", "local"))
+	if err != nil {
+		t.Fatalf("LoadPackForLint: %v", err)
+	}
+	const wantSubstring = "does not apply to a pack's own [imports.*] agents"
+	found := false
+	for _, w := range loaded.Warnings {
+		if strings.Contains(w, wantSubstring) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("warnings = %#v, want one containing %q", loaded.Warnings, wantSubstring)
 	}
 }

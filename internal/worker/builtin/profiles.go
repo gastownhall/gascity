@@ -52,13 +52,26 @@ type BuiltinProviderSpec struct {
 	ResumeStyle            string
 	ResumeCommand          string
 	SessionIDFlag          string
-	PermissionModes        map[string]string
-	OptionDefaults         map[string]string
-	OptionsSchema          []BuiltinProviderOption
-	PrintArgs              []string
-	TitleModel             string
-	ACPCommand             string
-	ACPArgs                []string
+	// ForkFlag is the CLI flag that forks a resumed conversation into a new
+	// branch. Combined with ResumeFlag + SessionIDFlag it yields the fork-launch
+	// form (resume a parent brain, fork off it, bind gc's own session id). Empty
+	// for providers with no fork verb (currently every provider except claude).
+	ForkFlag        string
+	PermissionModes map[string]string
+	OptionDefaults  map[string]string
+	OptionsSchema   []BuiltinProviderOption
+	PrintArgs       []string
+	TitleModel      string
+	ACPCommand      string
+	ACPArgs         []string
+	// Upstream serving-env binding (Phase C — the Upstream axis): the env-var
+	// NAMES this harness reads for the model-serving base URL and credential, so
+	// an abstract [upstreams.<name>] renders onto the right names for this CLI.
+	// Empty = no built-in binding (the operator declares one, or uses the raw env
+	// escape hatch). Kept as plain strings (this package cannot import config).
+	UpstreamBaseURLEnv   string
+	UpstreamAPIKeyEnv    string
+	UpstreamAuthTokenEnv string
 }
 
 func boolPtr(b bool) *bool { return &b }
@@ -90,6 +103,11 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 	"claude": {
 		DisplayName: "Claude Code",
 		Command:     "claude",
+		// Anthropic serving-env binding (Claude Code reads these for a custom
+		// endpoint + credential).
+		UpstreamBaseURLEnv:   "ANTHROPIC_BASE_URL",
+		UpstreamAPIKeyEnv:    "ANTHROPIC_API_KEY",
+		UpstreamAuthTokenEnv: "ANTHROPIC_AUTH_TOKEN",
 		OptionDefaults: map[string]string{
 			"permission_mode": "unrestricted",
 			"effort":          "max",
@@ -104,13 +122,16 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		InstructionsFile:       "CLAUDE.md",
 		ResumeFlag:             "--resume",
 		ResumeStyle:            "flag",
+		ForkFlag:               "--fork-session",
 		PrintArgs:              []string{"-p"},
 		TitleModel:             "haiku",
+		// Config-facing names map to current CLI values: Claude Code rejects the
+		// legacy "auto-edit"/"full-auto" it used to accept (GH#4602).
 		PermissionModes: map[string]string{
 			"unrestricted": "--dangerously-skip-permissions",
 			"plan":         "--permission-mode plan",
-			"auto-edit":    "--permission-mode auto-edit",
-			"full-auto":    "--permission-mode full-auto",
+			"auto-edit":    "--permission-mode acceptEdits",
+			"full-auto":    "--permission-mode dontAsk",
 		},
 		OptionsSchema: []BuiltinProviderOption{
 			{
@@ -119,8 +140,8 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 				Type:    "select",
 				Default: "auto-edit",
 				Choices: []BuiltinOptionChoice{
-					{Value: "auto-edit", Label: "Edit automatically", FlagArgs: []string{"--permission-mode", "auto-edit"}},
-					{Value: "full-auto", Label: "Full auto", FlagArgs: []string{"--permission-mode", "full-auto"}},
+					{Value: "auto-edit", Label: "Edit automatically", FlagArgs: []string{"--permission-mode", "acceptEdits"}},
+					{Value: "full-auto", Label: "Full auto", FlagArgs: []string{"--permission-mode", "dontAsk"}},
 					{Value: "plan", Label: "Plan mode", FlagArgs: []string{"--permission-mode", "plan"}},
 					{Value: "unrestricted", Label: "Bypass permissions", FlagArgs: []string{"--dangerously-skip-permissions"}},
 				},
@@ -146,9 +167,29 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 					{Value: "", Label: "Default"},
 					{Value: "fable-5", Label: "Fable 5", FlagArgs: []string{"--model", "claude-fable-5"}, FlagAliases: [][]string{{"-m", "claude-fable-5"}}},
 					{Value: "opus", Label: "Opus", FlagArgs: []string{"--model", "claude-opus-4-8"}, FlagAliases: [][]string{{"-m", "claude-opus-4-8"}}},
+					{Value: "opus-5", Label: "Opus 5", FlagArgs: []string{"--model", "claude-opus-5"}, FlagAliases: [][]string{{"-m", "claude-opus-5"}}},
 					{Value: "opus-4-7", Label: "Opus 4.7", FlagArgs: []string{"--model", "claude-opus-4-7"}, FlagAliases: [][]string{{"-m", "claude-opus-4-7"}}},
-					{Value: "sonnet", Label: "Sonnet", FlagArgs: []string{"--model", "claude-sonnet-4-6"}, FlagAliases: [][]string{{"-m", "claude-sonnet-4-6"}}},
+					{Value: "sonnet", Label: "Sonnet", FlagArgs: []string{"--model", "claude-sonnet-5"}, FlagAliases: [][]string{{"-m", "claude-sonnet-5"}}},
+					{Value: "sonnet-5", Label: "Sonnet 5", FlagArgs: []string{"--model", "claude-sonnet-5"}, FlagAliases: [][]string{{"-m", "claude-sonnet-5"}}},
+					{Value: "sonnet-4-6", Label: "Sonnet 4.6", FlagArgs: []string{"--model", "claude-sonnet-4-6"}, FlagAliases: [][]string{{"-m", "claude-sonnet-4-6"}}},
 					{Value: "haiku", Label: "Haiku", FlagArgs: []string{"--model", "claude-haiku-4-5-20251001"}, FlagAliases: [][]string{{"-m", "claude-haiku-4-5-20251001"}}},
+					// Canonical provider model IDs accepted verbatim. Operators pin the
+					// full "claude-*" id in agent.toml rather than the short alias, and
+					// before these entries existed such a value was not in this enum at
+					// all: the launch path found no FlagArgs and silently emitted NO
+					// --model, while the named-session resolution path hard-errored on
+					// the same value ("invalid value for model: claude-opus-5"). A whole
+					// city ran unpinned for hours on the launch side while four agents
+					// were unwakeable on the resolution side (ra-jbbv0).
+					{Value: "claude-opus-5", Label: "Opus 5 (canonical id)", FlagArgs: []string{"--model", "claude-opus-5"}, FlagAliases: [][]string{{"-m", "claude-opus-5"}}},
+					// The "[1m]" launch suffix is a valid Claude Code model-id form and
+					// operators pin it directly; it is emitted verbatim rather than
+					// normalized down to "claude-opus-5", because silently rewriting an
+					// explicit pin is the same class of surprise these entries exist to
+					// eliminate.
+					{Value: "claude-opus-5[1m]", Label: "Opus 5 1M (canonical id)", FlagArgs: []string{"--model", "claude-opus-5[1m]"}, FlagAliases: [][]string{{"-m", "claude-opus-5[1m]"}}},
+					{Value: "claude-sonnet-5", Label: "Sonnet 5 (canonical id)", FlagArgs: []string{"--model", "claude-sonnet-5"}, FlagAliases: [][]string{{"-m", "claude-sonnet-5"}}},
+					{Value: "claude-fable-5", Label: "Fable 5 (canonical id)", FlagArgs: []string{"--model", "claude-fable-5"}, FlagAliases: [][]string{{"-m", "claude-fable-5"}}},
 				},
 			},
 		},
@@ -156,6 +197,10 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 	"codex": {
 		DisplayName: "Codex CLI",
 		Command:     "codex",
+		// OpenAI serving-env binding (Codex reads these for a custom endpoint +
+		// API key). Codex auth is the API key; no separate auth-token var.
+		UpstreamBaseURLEnv: "OPENAI_BASE_URL",
+		UpstreamAPIKeyEnv:  "OPENAI_API_KEY",
 		OptionDefaults: map[string]string{
 			"permission_mode": "unrestricted",
 			"model":           "gpt-5.5",
@@ -164,7 +209,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		PromptMode:        "arg",
 		ReadyPromptPrefix: "\u203a ",
 		ReadyDelayMs:      3000,
-		ProcessNames:      []string{"codex"},
+		ProcessNames:      []string{"codex", "codex-raw"},
 		SupportsHooks:     true,
 		InstructionsFile:  "AGENTS.md",
 		ResumeFlag:        "resume",
@@ -194,8 +239,11 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 				Type:  "select",
 				Choices: []BuiltinOptionChoice{
 					{Value: "", Label: "Default"},
+					{Value: "gpt-5.6-sol", Label: "GPT-5.6 Sol", FlagArgs: []string{"--model", "gpt-5.6-sol"}, FlagAliases: [][]string{{"-m", "gpt-5.6-sol"}}},
+					{Value: "gpt-5.6-terra", Label: "GPT-5.6 Terra", FlagArgs: []string{"--model", "gpt-5.6-terra"}, FlagAliases: [][]string{{"-m", "gpt-5.6-terra"}}},
+					{Value: "gpt-5.6-luna", Label: "GPT-5.6 Luna", FlagArgs: []string{"--model", "gpt-5.6-luna"}, FlagAliases: [][]string{{"-m", "gpt-5.6-luna"}}},
 					{Value: "gpt-5.5", Label: "GPT-5.5", FlagArgs: []string{"--model", "gpt-5.5"}, FlagAliases: [][]string{{"-m", "gpt-5.5"}}},
-					{Value: "gpt-5.3-codex-spark", Label: "GPT-5.3 Codex Spark", FlagArgs: []string{"--model", "gpt-5.3-codex-spark"}, FlagAliases: [][]string{{"-m", "gpt-5.3-codex-spark"}}},
+					{Value: "gpt-5.3-codex", Label: "GPT-5.3 Codex", FlagArgs: []string{"--model", "gpt-5.3-codex"}, FlagAliases: [][]string{{"-m", "gpt-5.3-codex"}}},
 					{Value: "o3", Label: "o3", FlagArgs: []string{"--model", "o3"}, FlagAliases: [][]string{{"-m", "o3"}}},
 					{Value: "o4-mini", Label: "o4-mini", FlagArgs: []string{"--model", "o4-mini"}, FlagAliases: [][]string{{"-m", "o4-mini"}}},
 				},
@@ -227,6 +275,10 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 	"gemini": {
 		DisplayName: "Gemini CLI",
 		Command:     "gemini",
+		// Gemini API key path (GEMINI_API_KEY canonical; GOOGLE_API_KEY is
+		// Vertex-only). GOOGLE_GEMINI_BASE_URL overrides the endpoint.
+		UpstreamBaseURLEnv: "GOOGLE_GEMINI_BASE_URL",
+		UpstreamAPIKeyEnv:  "GEMINI_API_KEY",
 		OptionDefaults: map[string]string{
 			"permission_mode": "unrestricted",
 		},
@@ -274,6 +326,9 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 	"grok": {
 		DisplayName: "Grok Build",
 		Command:     "grok",
+		// xAI Grok Build: XAI_API_KEY for headless (login is the default). No
+		// documented base-URL override env (per-model base_url in config.toml).
+		UpstreamAPIKeyEnv: "XAI_API_KEY",
 		OptionDefaults: map[string]string{
 			"permission_mode": "unrestricted",
 			"model":           "grok-composer-2.5-fast",
@@ -348,8 +403,12 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		},
 	},
 	"kimi": {
-		DisplayName:          "Kimi Code CLI",
-		Command:              "kimi",
+		DisplayName: "Kimi Code CLI",
+		Command:     "kimi",
+		// Moonshot Kimi CLI: KIMI_API_KEY / KIMI_BASE_URL (NOT MOONSHOT_API_KEY,
+		// which is the raw Moonshot SDK var, nor OPENAI_* which is openai-type only).
+		UpstreamBaseURLEnv:   "KIMI_BASE_URL",
+		UpstreamAPIKeyEnv:    "KIMI_API_KEY",
 		Args:                 []string{"--yolo", "--no-thinking"},
 		PromptMode:           "none",
 		ReadyDelayMs:         5000,
@@ -377,12 +436,15 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		},
 	},
 	"kiro": {
-		DisplayName:  "Kiro",
-		Command:      "kiro-cli",
-		Args:         []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"},
-		PromptMode:   "arg",
-		ReadyDelayMs: 5000,
-		ProcessNames: []string{"kiro-cli", "kiro", "node"},
+		DisplayName: "Kiro",
+		Command:     "kiro-cli",
+		// AWS Kiro: KIRO_API_KEY for headless (ksk_…; login is the default). No
+		// documented serving base-URL override env.
+		UpstreamAPIKeyEnv: "KIRO_API_KEY",
+		Args:              []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"},
+		PromptMode:        "arg",
+		ReadyDelayMs:      5000,
+		ProcessNames:      []string{"kiro-cli", "kiro", "node"},
 		// kiro launches with --trust-all-tools and never shows trust/permission
 		// dialogs, so skip the 7-dialog startup polling (~56s/call, run twice).
 		AcceptStartupDialogs: boolPtr(false),
@@ -392,8 +454,11 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ACPArgs:              []string{"acp", "--agent", "gascity"},
 	},
 	"cursor": {
-		DisplayName:       "Cursor Agent",
-		Command:           "cursor-agent",
+		DisplayName: "Cursor Agent",
+		Command:     "cursor-agent",
+		// Cursor: CURSOR_API_KEY for headless (login is the default). Serving is
+		// Cursor's own backend — no base-URL override env.
+		UpstreamAPIKeyEnv: "CURSOR_API_KEY",
 		Args:              []string{"-f"},
 		PromptMode:        "arg",
 		ReadyPromptPrefix: "\u2192 ",
@@ -419,7 +484,13 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 	"copilot": {
 		DisplayName: "GitHub Copilot",
 		Command:     "copilot",
-		Args:        []string{"--yolo"},
+		// Custom model serving (COPILOT_PROVIDER_BASE_URL/_API_KEY; a custom
+		// upstream may also need COPILOT_PROVIDER_TYPE/COPILOT_MODEL via raw env).
+		// auth_token = the GitHub-account bearer for the default GitHub-hosted path.
+		UpstreamBaseURLEnv:   "COPILOT_PROVIDER_BASE_URL",
+		UpstreamAPIKeyEnv:    "COPILOT_PROVIDER_API_KEY",
+		UpstreamAuthTokenEnv: "COPILOT_GITHUB_TOKEN",
+		Args:                 []string{"--yolo"},
 		// PromptMode "none" delivers the prompt via tmux send-keys after the
 		// ready prefix is detected (Step 6 in doStartSession), instead of
 		// appending to argv. Required for copilot CLI 1.0.x which rejects
@@ -446,30 +517,40 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		// without requiring provider hooks; the remaining work is
 		// event-driven coordination (session-start priming,
 		// pre-compaction handoff).
-		DisplayName:      "Sourcegraph AMP",
-		Command:          "amp",
-		Args:             []string{"--dangerously-allow-all", "--no-ide"},
-		PromptMode:       "arg",
-		ProcessNames:     []string{"amp"},
-		InstructionsFile: "AGENTS.md",
-		ResumeFlag:       "threads continue",
-		ResumeStyle:      "subcommand",
+		DisplayName: "Sourcegraph AMP",
+		Command:     "amp",
+		// Amp connected mode: AMP_API_KEY credential, AMP_URL server/base-URL
+		// override (verified in the compiled CLI). Login is the interactive default.
+		UpstreamBaseURLEnv: "AMP_URL",
+		UpstreamAPIKeyEnv:  "AMP_API_KEY",
+		Args:               []string{"--dangerously-allow-all", "--no-ide"},
+		PromptMode:         "arg",
+		ProcessNames:       []string{"amp"},
+		InstructionsFile:   "AGENTS.md",
+		ResumeFlag:         "threads continue",
+		ResumeStyle:        "subcommand",
 	},
 	"opencode": {
-		DisplayName:      "OpenCode",
-		Command:          "opencode",
-		Args:             []string{},
-		PromptMode:       "flag",
-		PromptFlag:       "--prompt",
-		ReadyDelayMs:     8000,
-		ProcessNames:     []string{"opencode", "node", "bun"},
-		Env:              map[string]string{"OPENCODE_PERMISSION": `{"*":"allow"}`},
-		SupportsACP:      true,
-		SupportsHooks:    true,
-		InstructionsFile: "AGENTS.md",
-		ResumeFlag:       "--session",
-		ResumeStyle:      "flag",
-		ACPArgs:          []string{"acp"},
+		DisplayName:  "OpenCode",
+		Command:      "opencode",
+		Args:         []string{},
+		PromptMode:   "flag",
+		PromptFlag:   "--prompt",
+		ReadyDelayMs: 8000,
+		ProcessNames: []string{"opencode", "node", "bun"},
+		// OpenCode handles permissions through OPENCODE_PERMISSION and does not
+		// show the Claude/Codex startup dialogs. Without this override, its
+		// process-name hint enables two acceptance passes. Each pass polls
+		// multiple unsupported dialog classes with independent timeouts, so the
+		// first can exhaust the managed startup lease while OpenCode is working.
+		AcceptStartupDialogs: boolPtr(false),
+		Env:                  map[string]string{"OPENCODE_PERMISSION": `{"*":"allow"}`},
+		SupportsACP:          true,
+		SupportsHooks:        true,
+		InstructionsFile:     "AGENTS.md",
+		ResumeFlag:           "--session",
+		ResumeStyle:          "flag",
+		ACPArgs:              []string{"acp"},
 		OptionsSchema: []BuiltinProviderOption{
 			{
 				Key:   "model",
@@ -488,7 +569,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		// MiMo Code (Xiaomi's `mimo` CLI) is an OpenCode fork. Permission
 		// defaults are already permissive for bash/edit; only the
 		// question/plan interaction gates block headless runs, so
-		// --never-ask-questions is the only default arg needed. The flag is
+		// --never-ask is the only default arg needed. The flag is
 		// not taken by the `mimo acp` subcommand, so sessions default to the
 		// CLI transport (config.ProviderSessionCreateTransport) and ACP stays
 		// explicit opt-in until `mimo acp` has equivalent non-interactive
@@ -496,7 +577,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		// would clobber user config.
 		DisplayName:      "MiMo Code",
 		Command:          "mimo",
-		Args:             []string{"--never-ask-questions"},
+		Args:             []string{"--never-ask"},
 		PromptMode:       "flag",
 		PromptFlag:       "--prompt",
 		ReadyDelayMs:     8000,
@@ -656,6 +737,8 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		PrintArgs:         []string{"--print"},
 		PermissionModes: map[string]string{
 			"unrestricted": "--dangerously-skip-permissions",
+			"accept-edits": "--mode accept-edits",
+			"plan":         "--mode plan",
 		},
 		OptionsSchema: []BuiltinProviderOption{
 			{
@@ -666,6 +749,45 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 				Choices: []BuiltinOptionChoice{
 					{Value: "unrestricted", Label: "Bypass permissions", FlagArgs: []string{"--dangerously-skip-permissions"}},
 					{Value: "standard", Label: "Standard (prompt for permissions)", FlagArgs: []string{}},
+					{Value: "accept-edits", Label: "Accept edits", FlagArgs: []string{"--mode", "accept-edits"}},
+					{Value: "plan", Label: "Plan mode", FlagArgs: []string{"--mode", "plan"}},
+				},
+			},
+			// effort intentionally has no Default and no OptionDefaults entry:
+			// agy < 1.1.10 silently ignores --effort (and --model) on the
+			// --prompt-interactive launch path, so the flag must only ever be
+			// sent when a user opts in explicitly.
+			{
+				Key:   "effort",
+				Label: "Effort",
+				Type:  "select",
+				Choices: []BuiltinOptionChoice{
+					{Value: "", Label: "Default"},
+					{Value: "low", Label: "Low", FlagArgs: []string{"--effort", "low"}},
+					{Value: "medium", Label: "Medium", FlagArgs: []string{"--effort", "medium"}},
+					{Value: "high", Label: "High", FlagArgs: []string{"--effort", "high"}},
+				},
+			},
+			// Stable slugs + display names as enumerated by `agy models`; agy
+			// defines no -m short alias, so no FlagAliases. Same no-default
+			// rule as effort (agy < 1.1.10 drops --model silently at launch).
+			{
+				Key:   "model",
+				Label: "Model",
+				Type:  "select",
+				Choices: []BuiltinOptionChoice{
+					{Value: "", Label: "Default"},
+					{Value: "gemini-3.6-flash-high", Label: "Gemini 3.6 Flash (High)", FlagArgs: []string{"--model", "gemini-3.6-flash-high"}},
+					{Value: "gemini-3.6-flash-medium", Label: "Gemini 3.6 Flash (Medium)", FlagArgs: []string{"--model", "gemini-3.6-flash-medium"}},
+					{Value: "gemini-3.6-flash-low", Label: "Gemini 3.6 Flash (Low)", FlagArgs: []string{"--model", "gemini-3.6-flash-low"}},
+					{Value: "gemini-3.5-flash-high", Label: "Gemini 3.5 Flash (High)", FlagArgs: []string{"--model", "gemini-3.5-flash-high"}},
+					{Value: "gemini-3.5-flash-medium", Label: "Gemini 3.5 Flash (Medium)", FlagArgs: []string{"--model", "gemini-3.5-flash-medium"}},
+					{Value: "gemini-3.5-flash-low", Label: "Gemini 3.5 Flash (Low)", FlagArgs: []string{"--model", "gemini-3.5-flash-low"}},
+					{Value: "gemini-3.1-pro-high", Label: "Gemini 3.1 Pro (High)", FlagArgs: []string{"--model", "gemini-3.1-pro-high"}},
+					{Value: "gemini-3.1-pro-low", Label: "Gemini 3.1 Pro (Low)", FlagArgs: []string{"--model", "gemini-3.1-pro-low"}},
+					{Value: "claude-sonnet-4-6", Label: "Claude Sonnet 4.6 (Thinking)", FlagArgs: []string{"--model", "claude-sonnet-4-6"}},
+					{Value: "claude-opus-4-6-thinking", Label: "Claude Opus 4.6 (Thinking)", FlagArgs: []string{"--model", "claude-opus-4-6-thinking"}},
+					{Value: "gpt-oss-120b-medium", Label: "GPT-OSS 120B (Medium)", FlagArgs: []string{"--model", "gpt-oss-120b-medium"}},
 				},
 			},
 			{

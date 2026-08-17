@@ -26,7 +26,10 @@ func appendMetadataAttachedChildren(store beads.Store, parent beads.Bead, childr
 	for _, child := range children {
 		seen[child.ID] = struct{}{}
 	}
-	for _, key := range []string{"molecule_id", "workflow_id"} {
+	// NOTE: "workflow_id" is the bare (non-prefixed) metadata key, distinct
+	// from beadmeta.WorkflowIDMetadataKey ("gc.workflow_id") — do NOT substitute
+	// the prefixed constant here or this would surface a different key.
+	for _, key := range []string{beadmeta.MoleculeIDMetadataKey, "workflow_id"} {
 		attachedID := strings.TrimSpace(parent.Metadata[key])
 		if attachedID == "" {
 			continue
@@ -49,16 +52,46 @@ func (s *Server) beadListAssigneeTerms(ctx context.Context, assignee string) []s
 	if assignee == "" {
 		return []string{""}
 	}
-	terms := []string{assignee}
-	store := s.state.CityBeadStore()
+	// The ?assignee filter is applied to WORK beads, but the identifier it takes
+	// is resolved against SESSION beads, and the identity expansion below reads
+	// one — so this store is the sessions class even though the caller is a work
+	// query. Identity to the work store on a city that relocates nothing.
+	store := s.state.SessionsBeadStore().Store
 	if store == nil {
-		return terms
+		return []string{assignee}
 	}
 	id, err := s.resolveSessionTargetIDWithContext(ctx, store, assignee, apiSessionResolveOptions{})
-	if err != nil || id == "" || id == assignee {
-		return terms
+	if err != nil || id == "" {
+		return []string{assignee}
 	}
-	return []string{id, assignee}
+	// A work bead's stored assignee may be ANY of the resolved session's
+	// identity forms — the bead ID, session_name, alias, configured named
+	// identity, or a prior alias — so match against all of them via the confined
+	// session.AssigneeIdentities codec. Without this the session-name form
+	// written by assign/update (and the claim path) would be invisible to
+	// ?assignee=<alias|id> list filters.
+	seen := map[string]bool{}
+	var terms []string
+	add := func(v string) {
+		v = strings.TrimSpace(v)
+		if v == "" || seen[v] {
+			return
+		}
+		seen[v] = true
+		terms = append(terms, v)
+	}
+	add(assignee)
+	add(id)
+	// id is a resolved session id; read its identity forms through the session
+	// front door. A non-session or absent id (the front door rejects it) simply
+	// contributes no extra identity terms — the base assignee/id terms above still
+	// drive the ?assignee filter.
+	if info, getErr := session.NewStore(beads.SessionStore{Store: store}).Get(id); getErr == nil {
+		for _, identity := range session.AssigneeIdentities(info) {
+			add(identity)
+		}
+	}
+	return terms
 }
 
 func (s *Server) normalizeRawBeadAssignee(ctx context.Context, assignee string) (string, error) {
@@ -66,7 +99,12 @@ func (s *Server) normalizeRawBeadAssignee(ctx context.Context, assignee string) 
 	if assignee == "" {
 		return "", nil
 	}
-	store := s.state.CityBeadStore()
+	// Sessions class, and a WRITE path: the materialize arm below CREATES a
+	// session bead when the named session has no canonical one, and the
+	// RepairTypeBestEffort heal writes to it. Through the work store on a
+	// relocated city that create is a stranded infrastructure bead — the class
+	// binding never sees it and the boot containment re-check names it.
+	store := s.state.SessionsBeadStore().Store
 	if store == nil {
 		return assignee, nil
 	}
@@ -80,15 +118,29 @@ func (s *Server) normalizeRawBeadAssignee(ctx context.Context, assignee string) 
 		}
 		return "", fmt.Errorf("resolving assignee %q: %w", assignee, err)
 	}
-	b, err := store.Get(id)
+	sessFront := session.NewStore(beads.SessionStore{Store: store})
+	info, err := sessFront.Get(id)
 	if err != nil {
+		// The front door rejects a present-but-non-session bead with
+		// ErrSessionNotFound — keep the "must resolve to a session" contract; any
+		// other error surfaces as the lookup failure.
+		if errors.Is(err, session.ErrSessionNotFound) {
+			return "", fmt.Errorf("assignee must resolve to a concrete open session bead ID: %q", assignee)
+		}
 		return "", fmt.Errorf("looking up resolved assignee session %q: %w", id, err)
 	}
-	if !session.IsSessionBeadOrRepairable(b) || b.Status == "closed" {
+	if info.Closed {
 		return "", fmt.Errorf("assignee must resolve to a concrete open session bead ID: %q", assignee)
 	}
-	session.RepairEmptyType(store, &b)
-	return b.ID, nil
+	// Preserve the empty-type heal RepairEmptyType performed here: a repairable
+	// (type-lost) session bead is healed back to the canonical type as a side
+	// effect of being assigned. RepairTypeBestEffort writes only the type field
+	// and logs a failed write (as RepairEmptyType did), so this is byte-equivalent
+	// to the retired heal.
+	if info.Type == "" {
+		sessFront.RepairTypeBestEffort(id)
+	}
+	return session.AssigneeIdentifier(info), nil
 }
 
 // findStore returns the bead store for the given rig. If rig is empty, returns
@@ -107,71 +159,6 @@ func (s *Server) findStore(rig string) beads.Store {
 		return stores[names[0]]
 	}
 	return nil
-}
-
-// beadStoresForID resolves the authoritative store for a bead ID using its
-// prefix/routes mapping when possible. If there is no routed match, it falls
-// back to the legacy store scan order.
-func (s *Server) beadStoresForID(id string) []beads.Store {
-	id = strings.TrimSpace(id)
-	if store := s.resolveStoreByConfiguredIDPrefix(id); store != nil {
-		return []beads.Store{store}
-	}
-	if prefix := beadPrefix(id); prefix != "" {
-		if store := s.resolveStoreByPrefix(prefix); store != nil {
-			return []beads.Store{store}
-		}
-	}
-
-	stores := s.state.BeadStores()
-	rigNames := sortedRigNames(stores)
-	candidates := make([]beads.Store, 0, len(rigNames)+1)
-	if cityStore := s.state.CityBeadStore(); cityStore != nil {
-		candidates = append(candidates, cityStore)
-	}
-	for _, rigName := range rigNames {
-		candidates = append(candidates, stores[rigName])
-	}
-	return candidates
-}
-
-func (s *Server) resolveStoreByConfiguredIDPrefix(id string) beads.Store {
-	if id == "" {
-		return nil
-	}
-	cfg := s.state.Config()
-	if cfg == nil {
-		return nil
-	}
-
-	var bestStore beads.Store
-	bestLen := -1
-	if prefix := strings.TrimSpace(config.EffectiveHQPrefix(cfg)); beadIDHasConfiguredPrefix(id, prefix) {
-		if cityStore := s.state.CityBeadStore(); cityStore != nil {
-			bestStore = cityStore
-			bestLen = len(prefix)
-		}
-	}
-	for _, rig := range cfg.Rigs {
-		prefix := strings.TrimSpace(rig.EffectivePrefix())
-		if !beadIDHasConfiguredPrefix(id, prefix) || len(prefix) <= bestLen {
-			continue
-		}
-		store := s.state.BeadStore(rig.Name)
-		if store == nil {
-			continue
-		}
-		bestStore = store
-		bestLen = len(prefix)
-	}
-	return bestStore
-}
-
-func beadIDHasConfiguredPrefix(id, prefix string) bool {
-	if prefix == "" {
-		return false
-	}
-	return id == prefix || strings.HasPrefix(id, prefix+"-")
 }
 
 // resolveStoreByPrefix finds the store that owns a bead prefix by checking
@@ -254,9 +241,15 @@ func (s *Server) resolveStoreByPrefix(prefix string) beads.Store {
 				return store
 			}
 		}
-		// Fallback: the route pointed to the same rig.
-		if store, exists := stores[rig.Name]; exists {
-			return store
+		// Fallback: the route pointed back at this rig itself (a self-route).
+		// Only then may this rig answer. A route that resolves to some OTHER
+		// path — one that is not a registered rig, e.g. a relocated class store
+		// directory — says the prefix does NOT live here, so it must fall
+		// through to the caller's candidate scan rather than pin the wrong store.
+		if cleanPath == filepath.Clean(rigPath) {
+			if store, exists := stores[rig.Name]; exists {
+				return store
+			}
 		}
 	}
 	return nil
@@ -288,13 +281,49 @@ func sortedRigNames(stores map[string]beads.Store) []string {
 
 // BeadGraphResponse is the response shape for GET /v0/beads/graph/{rootID}.
 // Returns raw beads and deps — no status mapping, no presentation logic.
+//
+// Membership states which rule produced Beads. It is on the wire because a
+// consumer cannot tell one rule's answer from another's by looking at the
+// result: a dependency walk and a root-id scan return the same count on many
+// molecules and different counts on the next one. A client that needs
+// beads.MembershipDirectRootID should assert on this field rather than assume.
 type BeadGraphResponse struct {
-	Root  beads.Bead            `json:"root"`
-	Beads []beads.Bead          `json:"beads"`
-	Deps  []workflowDepResponse `json:"deps"`
+	Root       beads.Bead            `json:"root"`
+	Beads      []beads.Bead          `json:"beads"`
+	Deps       []workflowDepResponse `json:"deps"`
+	Membership beads.Membership      `json:"membership" enum:"direct-root-id+parent-closure,direct-root-id+parent-closure+convoy-members" doc:"Rule that decided which beads are in Beads: the root, everything carrying gc.root_bead_id == root, plus the root's convoy members when the root is a convoy, and then the transitive parent-child closure taken over all of those — a convoy member brings its own subtree. Both storage tiers are in scope, so a wisp molecule (whose beads are all ephemeral) returns its members rather than reading as empty. Never dependency reachability, which drops dependency-isolated members such as gc.kind=spec sidecars."`
 }
 
-func collectBeadGraph(store beads.Store, root beads.Bead) ([]beads.Bead, []workflowDepResponse, error) {
+// collectBeadGraph resolves the member set of the graph rooted at root and the
+// parent-child edges within it. The membership rule it applied is returned
+// alongside, so the handler reports it on the wire instead of the caller
+// inferring it: beads.MembershipRootIDAndParentClosure, widened to
+// beads.MembershipRootIDParentClosureAndConvoy when the root is a convoy.
+//
+// The root-id arm is what makes this NOT beads.MembershipDepReachable, and the
+// difference is not cosmetic — on the measured live molecule gcg-arn a
+// dependency walk returns 48 of the 61 beads this returns, dropping every
+// gc.kind=spec sidecar, because spec steps are built with no dependency edges.
+// See beads.Membership.
+//
+// Both list arms read beads.TierBoth because the declared rule has no tier
+// axis. beads.DirectMembers reads both tiers (HandlesFor(store).Live forces
+// it), so a tier-scoped read here would answer a strictly different question
+// from the one the wire names: a wisp molecule materializes with every node in
+// ephemeral storage (the wisp bead policy maps to ephemeral under bd-1.0.5
+// semantics, and molecule instantiation stamps gc.root_bead_id on every node),
+// so the default TierIssues would drop every member of one while still
+// answering 200 with an unqualified "direct-root-id+parent-closure" — an empty
+// wisp molecule is indistinguishable from a finished one. The read handle is
+// deliberately still the store's own, not the LIVE handle beads.DirectMembers
+// uses: this is a hot dashboard path and bypassing the cache is a separate
+// change (see beads.Membership's note on the duplicated implementations).
+//
+// The parent-child walk is seeded from the whole accumulated member set, so
+// the closure covers the convoy members too and a convoy member brings its own
+// subtree. That is what the "+parent-closure" half of both spellings means; it
+// is not the closure of the root alone.
+func collectBeadGraph(store beads.Store, root beads.Bead) ([]beads.Bead, []workflowDepResponse, beads.Membership, error) {
 	graphBeads := make([]beads.Bead, 0, 1)
 	beadIndex := make(map[string]beads.Bead)
 
@@ -320,21 +349,25 @@ func collectBeadGraph(store beads.Store, root beads.Bead) ([]beads.Bead, []workf
 	}
 	upsert(root)
 
+	membership := beads.MembershipRootIDAndParentClosure
+
 	metadataChildren, err := store.List(beads.ListQuery{
 		Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
 		IncludeClosed: true,
+		TierMode:      beads.TierBoth,
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("listing metadata children for bead %q: %w", root.ID, err)
+		return nil, nil, "", fmt.Errorf("listing metadata children for bead %q: %w", root.ID, err)
 	}
 	for _, child := range metadataChildren {
 		upsert(child)
 	}
 
 	if root.Type == "convoy" {
+		membership = beads.MembershipRootIDParentClosureAndConvoy
 		members, err := convoycore.Members(store, root.ID, true)
 		if err != nil {
-			return nil, nil, fmt.Errorf("listing convoy members for bead %q: %w", root.ID, err)
+			return nil, nil, "", fmt.Errorf("listing convoy members for bead %q: %w", root.ID, err)
 		}
 		for _, member := range members {
 			upsert(member)
@@ -356,26 +389,48 @@ func collectBeadGraph(store beads.Store, root beads.Bead) ([]beads.Bead, []workf
 		parentEdges = append(parentEdges, edge)
 	}
 
-	for i := 0; i < len(graphBeads); i++ {
-		parent := graphBeads[i]
+	// Discover parent-linked descendants and their parent-child edges by walking
+	// the tree one BFS level at a time, fetching each level's children with a
+	// single batched store.List(ParentIDs=...) call. This replaces the former
+	// per-bead store.List(ParentID=...) fan-out — an N+1 (one round-trip per bead)
+	// that serialized on a single read connection and dominated graph-read latency
+	// under load. The returned beads are filtered in memory against the level's
+	// parent set, so the result is correct even on a backend that does not honor
+	// ParentIDs (such a backend returns a superset, which the filter narrows).
+	frontier := make([]string, 0, len(graphBeads))
+	for _, b := range graphBeads {
+		frontier = append(frontier, b.ID)
+	}
+	for len(frontier) > 0 {
+		frontierSet := make(map[string]bool, len(frontier))
+		for _, id := range frontier {
+			frontierSet[id] = true
+		}
 		children, err := store.List(beads.ListQuery{
-			ParentID:      parent.ID,
+			ParentIDs:     frontier,
 			IncludeClosed: true,
+			AllowScan:     true,
 			Sort:          beads.SortCreatedAsc,
+			TierMode:      beads.TierBoth,
 		})
 		if err != nil {
-			return nil, nil, fmt.Errorf("listing child beads for bead %q: %w", parent.ID, err)
+			return nil, nil, "", fmt.Errorf("listing child beads for graph %q: %w", root.ID, err)
 		}
+		var next []string
 		for _, child := range children {
-			if child.ParentID == "" {
-				child.ParentID = parent.ID
+			if !frontierSet[child.ParentID] {
+				continue
 			}
-			addParentEdge(parent.ID, child.ID)
-			upsert(child)
+			addParentEdge(child.ParentID, child.ID)
+			if _, seen := beadIndex[child.ID]; !seen {
+				upsert(child)
+				next = append(next, child.ID)
+			}
 		}
+		frontier = next
 	}
 
-	return graphBeads, parentEdges, nil
+	return graphBeads, parentEdges, membership, nil
 }
 
 func mergeWorkflowDeps(primary, extra []workflowDepResponse) []workflowDepResponse {

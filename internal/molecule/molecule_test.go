@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/formulatest"
@@ -775,16 +776,23 @@ func TestIsTransientGraphApplyErrorTreatsCommandTimeoutAsTransient(t *testing.T)
 }
 
 func TestBuildRecipeApplyPlan_GraphWorkflowOwnershipUsesTracks(t *testing.T) {
+	// Multi-step workflow (two authored work nodes): every non-root node,
+	// including the generated workflow-finalize, gains a "tracks" ownership
+	// edge back to the root. Single-step workflows drop the finalize edge to
+	// avoid the finalize <-> root deadlock (su-mla5h); see
+	// TestBuildRecipeApplyPlan_SingleStepOmitsFinalizeRootTracks.
 	recipe := &formula.Recipe{
 		Name: "wf",
 		Steps: []formula.RecipeStep{
 			{ID: "wf", Title: "Workflow", Type: "task", IsRoot: true, Metadata: map[string]string{"gc.kind": "workflow"}},
 			{ID: "wf.body", Title: "Body", Type: "task", Metadata: map[string]string{"gc.kind": "scope"}},
+			{ID: "wf.body2", Title: "Body 2", Type: "task", Metadata: map[string]string{"gc.kind": "scope"}},
 			{ID: "wf.workflow-finalize", Title: "Finalize", Type: "task", Metadata: map[string]string{"gc.kind": "workflow-finalize"}},
 		},
 		Deps: []formula.RecipeDep{
 			{StepID: "wf", DependsOnID: "wf.workflow-finalize", Type: "blocks"},
 			{StepID: "wf.workflow-finalize", DependsOnID: "wf.body", Type: "blocks"},
+			{StepID: "wf.workflow-finalize", DependsOnID: "wf.body2", Type: "blocks"},
 		},
 	}
 
@@ -824,6 +832,64 @@ func TestBuildRecipeApplyPlan_GraphWorkflowOwnershipUsesTracks(t *testing.T) {
 	}
 	if !finalizeTracksRoot {
 		t.Fatal("missing workflow-finalize -> root tracks ownership edge")
+	}
+}
+
+// TestBuildRecipeApplyPlan_SingleStepOmitsFinalizeRootTracks regresses the
+// single-step graph-workflow deadlock (su-mla5h). The v2 compiler emits
+// root --blocks--> workflow-finalize for every graph workflow. When the
+// workflow also gains a workflow-finalize --tracks--> root ownership edge, the
+// two controller-managed beads form a mutual finalize <-> root cycle that
+// never resolves: neither the finalizer nor the root can close because each
+// depends on the other, so both strand open until force-closed. A single
+// authored work step is the shape that recurred in production
+// (mol-superlzy-capture). The finalizer must not gain the tracks edge here,
+// while the lone work step still tracks the root and the root still blocks on
+// the finalizer.
+func TestBuildRecipeApplyPlan_SingleStepOmitsFinalizeRootTracks(t *testing.T) {
+	recipe := &formula.Recipe{
+		Name: "wf",
+		Steps: []formula.RecipeStep{
+			{ID: "wf", Title: "Workflow", Type: "task", IsRoot: true, Metadata: map[string]string{"gc.kind": "workflow"}},
+			{ID: "wf.review", Title: "Review", Type: "task"},
+			{ID: "wf.workflow-finalize", Title: "Finalize", Type: "task", Metadata: map[string]string{"gc.kind": "workflow-finalize"}},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "wf", DependsOnID: "wf.workflow-finalize", Type: "blocks"},
+			{StepID: "wf.workflow-finalize", DependsOnID: "wf.review", Type: "blocks"},
+		},
+	}
+
+	plan, graphWorkflow, rootKey, err := buildRecipeApplyPlan(recipe, Options{})
+	if err != nil {
+		t.Fatalf("buildRecipeApplyPlan: %v", err)
+	}
+	if !graphWorkflow || rootKey != "wf" {
+		t.Fatalf("graphWorkflow=%v rootKey=%q, want true/wf", graphWorkflow, rootKey)
+	}
+
+	var rootBlocksFinalize bool
+	var reviewTracksRoot bool
+	var finalizeTracksRoot bool
+	for _, edge := range plan.Edges {
+		if edge.FromKey == "wf" && edge.ToKey == "wf.workflow-finalize" && edge.Type == "blocks" {
+			rootBlocksFinalize = true
+		}
+		if edge.FromKey == "wf.review" && edge.ToKey == "wf" && edge.Type == "tracks" {
+			reviewTracksRoot = true
+		}
+		if edge.FromKey == "wf.workflow-finalize" && edge.ToKey == "wf" && edge.Type == "tracks" {
+			finalizeTracksRoot = true
+		}
+	}
+	if !rootBlocksFinalize {
+		t.Fatal("missing root -> workflow-finalize blocks edge (workflow must still block on its finalizer)")
+	}
+	if !reviewTracksRoot {
+		t.Fatal("missing review -> root tracks ownership edge (the lone work step must still track the root)")
+	}
+	if finalizeTracksRoot {
+		t.Fatal("single-step workflow emitted a deadlocking workflow-finalize -> root tracks edge (su-mla5h)")
 	}
 }
 
@@ -2636,6 +2702,113 @@ func TestInstantiateRejectsResidualTitleVars(t *testing.T) {
 	})
 }
 
+func TestInstantiateRejectsResidualRoutingMetadataVars(t *testing.T) {
+	recipe := &formula.Recipe{
+		Name: "residual-routing-check",
+		Steps: []formula.RecipeStep{
+			{ID: "residual-routing-check", Title: "Root", Type: "molecule", IsRoot: true},
+			{
+				ID:    "residual-routing-check.review",
+				Title: "Review: {{topic}}",
+				Type:  "task",
+				Metadata: map[string]string{
+					beadmeta.RunTargetMetadataKey: "{{review_target}}",
+				},
+			},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "residual-routing-check.review", DependsOnID: "residual-routing-check", Type: "parent-child"},
+		},
+		Vars: map[string]*formula.VarDef{
+			"topic":         {Description: "Work topic"},
+			"review_target": {Description: "Reviewer role"},
+		},
+	}
+
+	t.Run("sequential path rejects unresolved routing var", func(t *testing.T) {
+		_, err := Instantiate(context.Background(), beads.NewMemStore(), recipe, Options{
+			Vars: map[string]string{"topic": "widgets"},
+		})
+		if err == nil {
+			t.Fatal("Instantiate should reject unresolved {{review_target}} in gc.run_target")
+		}
+		if !strings.Contains(err.Error(), "unresolved variable") {
+			t.Errorf("unexpected error: %v", err)
+		}
+		if !strings.Contains(err.Error(), beadmeta.RunTargetMetadataKey) || !strings.Contains(err.Error(), "review_target") {
+			t.Errorf("error should mention %s and review_target: %v", beadmeta.RunTargetMetadataKey, err)
+		}
+	})
+
+	t.Run("sequential path allows resolved routing var", func(t *testing.T) {
+		result, err := Instantiate(context.Background(), beads.NewMemStore(), recipe, Options{
+			Vars: map[string]string{"topic": "widgets", "review_target": "gc.review-synthesizer"},
+		})
+		if err != nil {
+			t.Fatalf("Instantiate should succeed: %v", err)
+		}
+		if result.Created != 2 {
+			t.Errorf("Created = %d, want 2", result.Created)
+		}
+	})
+
+	t.Run("graph-apply path rejects unresolved routing var", func(t *testing.T) {
+		gaStore := &graphApplySpyStore{MemStore: beads.NewMemStore()}
+		prev := IsGraphApplyEnabled()
+		SetGraphApplyEnabled(true)
+		t.Cleanup(func() { SetGraphApplyEnabled(prev) })
+
+		_, err := Instantiate(context.Background(), gaStore, recipe, Options{
+			Vars: map[string]string{"topic": "widgets"},
+		})
+		if err == nil {
+			t.Fatal("graph-apply Instantiate should reject unresolved {{review_target}} in gc.run_target")
+		}
+		if !strings.Contains(err.Error(), "unresolved variable") {
+			t.Errorf("unexpected error: %v", err)
+		}
+		if !strings.Contains(err.Error(), beadmeta.RunTargetMetadataKey) || !strings.Contains(err.Error(), "review_target") {
+			t.Errorf("error should mention %s and review_target: %v", beadmeta.RunTargetMetadataKey, err)
+		}
+	})
+
+	t.Run("graph-apply path rejects unresolved gc.routed_to", func(t *testing.T) {
+		routedToRecipe := &formula.Recipe{
+			Name: "residual-routed-to-check",
+			Steps: []formula.RecipeStep{
+				{ID: "residual-routed-to-check", Title: "Root", Type: "molecule", IsRoot: true},
+				{
+					ID:    "residual-routed-to-check.review",
+					Title: "Review",
+					Type:  "task",
+					Metadata: map[string]string{
+						beadmeta.RoutedToMetadataKey: "{{review_target}}",
+					},
+				},
+			},
+			Deps: []formula.RecipeDep{
+				{StepID: "residual-routed-to-check.review", DependsOnID: "residual-routed-to-check", Type: "parent-child"},
+			},
+			Vars: map[string]*formula.VarDef{
+				"review_target": {Description: "Reviewer role"},
+			},
+		}
+
+		gaStore := &graphApplySpyStore{MemStore: beads.NewMemStore()}
+		prev := IsGraphApplyEnabled()
+		SetGraphApplyEnabled(true)
+		t.Cleanup(func() { SetGraphApplyEnabled(prev) })
+
+		_, err := Instantiate(context.Background(), gaStore, routedToRecipe, Options{})
+		if err == nil {
+			t.Fatal("graph-apply Instantiate should reject unresolved {{review_target}} in gc.routed_to")
+		}
+		if !strings.Contains(err.Error(), beadmeta.RoutedToMetadataKey) || !strings.Contains(err.Error(), "review_target") {
+			t.Errorf("error should mention %s and review_target: %v", beadmeta.RoutedToMetadataKey, err)
+		}
+	})
+}
+
 func TestAttachReportsAllMissingRequiredVarsAtOnce(t *testing.T) {
 	store := beads.NewMemStore()
 	parent, err := store.Create(beads.Bead{Title: "Parent", Type: "task", Status: "open"})
@@ -2865,6 +3038,69 @@ func TestInstantiateFragmentRejectsResidualTitleVars(t *testing.T) {
 	})
 }
 
+func TestInstantiateFragmentRejectsResidualRoutingMetadataVars(t *testing.T) {
+	fragment := &formula.FragmentRecipe{
+		Name: "frag-residual-routing",
+		Steps: []formula.RecipeStep{
+			{
+				ID:    "frag-residual-routing.step-a",
+				Title: "Review",
+				Type:  "task",
+				Metadata: map[string]string{
+					beadmeta.RunTargetMetadataKey: "{{review_target}}",
+				},
+			},
+		},
+		Vars: map[string]*formula.VarDef{
+			"review_target": {Description: "Reviewer role"},
+		},
+	}
+
+	t.Run("sequential path rejects unresolved routing var", func(t *testing.T) {
+		store := beads.NewMemStore()
+		root, err := store.Create(beads.Bead{Title: "root", Type: "molecule"})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		prev := IsGraphApplyEnabled()
+		SetGraphApplyEnabled(false)
+		t.Cleanup(func() { SetGraphApplyEnabled(prev) })
+
+		_, err = InstantiateFragment(context.Background(), store, fragment, FragmentOptions{
+			RootID: root.ID,
+		})
+		if err == nil {
+			t.Fatal("InstantiateFragment should reject unresolved {{review_target}} in gc.run_target")
+		}
+		if !strings.Contains(err.Error(), beadmeta.RunTargetMetadataKey) || !strings.Contains(err.Error(), "review_target") {
+			t.Errorf("error should mention %s and review_target: %v", beadmeta.RunTargetMetadataKey, err)
+		}
+	})
+
+	t.Run("graph-apply path rejects unresolved routing var", func(t *testing.T) {
+		gaStore := &graphApplySpyStore{MemStore: beads.NewMemStore()}
+		root, err := gaStore.Create(beads.Bead{Title: "root", Type: "molecule"})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		prev := IsGraphApplyEnabled()
+		SetGraphApplyEnabled(true)
+		t.Cleanup(func() { SetGraphApplyEnabled(prev) })
+
+		_, err = InstantiateFragment(context.Background(), gaStore, fragment, FragmentOptions{
+			RootID: root.ID,
+		})
+		if err == nil {
+			t.Fatal("graph-apply InstantiateFragment should reject unresolved {{review_target}} in gc.run_target")
+		}
+		if !strings.Contains(err.Error(), beadmeta.RunTargetMetadataKey) || !strings.Contains(err.Error(), "review_target") {
+			t.Errorf("error should mention %s and review_target: %v", beadmeta.RunTargetMetadataKey, err)
+		}
+	})
+}
+
 func TestBuildRecipeApplyPlan_PreserveRootTypeKeepsTaskRoot(t *testing.T) {
 	recipe := &formula.Recipe{
 		Name: "attempt",
@@ -2885,6 +3121,71 @@ func TestBuildRecipeApplyPlan_PreserveRootTypeKeepsTaskRoot(t *testing.T) {
 	}
 	if plan.Nodes[0].Type != "task" {
 		t.Fatalf("plan root type = %q, want task", plan.Nodes[0].Type)
+	}
+}
+
+func TestBuildRecipeApplyPlanStampsFormulaHash(t *testing.T) {
+	recipe := &formula.Recipe{
+		Name:          "mol-hash-check",
+		Description:   "Test hash stamping",
+		ContentHash:   "abc123def456",
+		FormulaSource: "/path/to/mol-hash-check.toml",
+		Steps: []formula.RecipeStep{
+			{ID: "mol-hash-check", Title: "Root", Type: "molecule", IsRoot: true},
+			{ID: "mol-hash-check.step-a", Title: "Step A", Type: "task"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "mol-hash-check.step-a", DependsOnID: "mol-hash-check", Type: "parent-child"},
+		},
+	}
+
+	plan, _, rootKey, err := buildRecipeApplyPlan(recipe, Options{})
+	if err != nil {
+		t.Fatalf("buildRecipeApplyPlan: %v", err)
+	}
+	if rootKey != "mol-hash-check" {
+		t.Fatalf("rootKey = %q, want mol-hash-check", rootKey)
+	}
+
+	root := nodeByKey(plan.Nodes, "mol-hash-check")
+	if root == nil {
+		t.Fatal("root node missing")
+	}
+	if got := root.Metadata["gc.formula_hash"]; got != "abc123def456" {
+		t.Errorf("gc.formula_hash = %q, want %q", got, "abc123def456")
+	}
+	if got := root.Metadata["gc.formula_source"]; got != "/path/to/mol-hash-check.toml" {
+		t.Errorf("gc.formula_source = %q, want %q", got, "/path/to/mol-hash-check.toml")
+	}
+
+	stepA := nodeByKey(plan.Nodes, "mol-hash-check.step-a")
+	if stepA == nil {
+		t.Fatal("step-a node missing")
+	}
+	if _, ok := stepA.Metadata["gc.formula_hash"]; ok {
+		t.Error("non-root node should not have gc.formula_hash")
+	}
+}
+
+func TestBuildRecipeApplyPlanNoHashWhenEmpty(t *testing.T) {
+	recipe := &formula.Recipe{
+		Name: "mol-no-hash",
+		Steps: []formula.RecipeStep{
+			{ID: "mol-no-hash", Title: "Root", Type: "molecule", IsRoot: true},
+		},
+	}
+
+	plan, _, _, err := buildRecipeApplyPlan(recipe, Options{})
+	if err != nil {
+		t.Fatalf("buildRecipeApplyPlan: %v", err)
+	}
+
+	root := nodeByKey(plan.Nodes, "mol-no-hash")
+	if root == nil {
+		t.Fatal("root node missing")
+	}
+	if _, ok := root.Metadata["gc.formula_hash"]; ok {
+		t.Error("gc.formula_hash should not be set when ContentHash is empty")
 	}
 }
 

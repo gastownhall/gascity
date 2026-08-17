@@ -2,9 +2,12 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 
+	gcapi "github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
@@ -493,4 +496,129 @@ func TestMoleculeAutocloseSourceCloseIdempotentOnClosedRoot(t *testing.T) {
 	if out.Len() != 0 {
 		t.Fatalf("unexpected stdout for already-closed workflow root: %q", out.String())
 	}
+}
+
+// TestMoleculeAutocloseEmitsMoleculeResolvedWithSessionAttribution is the
+// headline test for the honesty-gate C.0 attribution backbone: when a
+// molecule auto-closes, an additive molecule.resolved event carries the
+// state transition (from/to status, close reason) joined to the resolving
+// session resolved from the root's stamped gc.session_* / gc.work_dir
+// metadata. The existing bead.closed emission must remain untouched.
+func TestMoleculeAutocloseEmitsMoleculeResolvedWithSessionAttribution(t *testing.T) {
+	store := beads.NewMemStore()
+	root, _ := store.Create(beads.Bead{
+		Title: "mol-focus-review",
+		Type:  "molecule",
+		Metadata: map[string]string{
+			beadmeta.SessionNameMetadataKey: "polecat-gc-42",
+			beadmeta.SessionIDMetadataKey:   "gc-42",
+			beadmeta.WorkDirMetadataKey:     "/home/ds/gascity-worktrees/polecat-1",
+		},
+	})
+	step, _ := store.Create(beads.Bead{Title: "Run tests", Type: "step", ParentID: root.ID})
+
+	_ = store.Close(step.ID)
+	rec := events.NewFake()
+	var out bytes.Buffer
+	doMoleculeAutocloseWith(store, "", rec, step.ID, &out)
+
+	r, _ := store.Get(root.ID)
+	if r.Status != "closed" {
+		t.Fatalf("root not auto-closed: status=%q", r.Status)
+	}
+
+	resolved := eventsOfType(rec.Events, events.MoleculeResolved)
+	if len(resolved) != 1 {
+		t.Fatalf("got %d molecule.resolved events, want 1: %+v", len(resolved), rec.Events)
+	}
+	ev := resolved[0]
+	if ev.Subject != root.ID {
+		t.Errorf("Subject = %q, want root %q", ev.Subject, root.ID)
+	}
+	if ev.Actor == "" {
+		t.Errorf("event Actor empty, want eventActor() identity")
+	}
+
+	p := decodeMoleculeResolvedPayload(t, ev)
+	if p.IssueID != root.ID {
+		t.Errorf("IssueID = %q, want %q", p.IssueID, root.ID)
+	}
+	if p.FromStatus != "open" {
+		t.Errorf("FromStatus = %q, want pre-close %q", p.FromStatus, "open")
+	}
+	if p.ToStatus != "closed" {
+		t.Errorf("ToStatus = %q, want closed", p.ToStatus)
+	}
+	if p.CloseReason != moleculeAutocloseReason {
+		t.Errorf("CloseReason = %q, want %q", p.CloseReason, moleculeAutocloseReason)
+	}
+	if p.SessionName != "polecat-gc-42" {
+		t.Errorf("SessionName = %q, want polecat-gc-42", p.SessionName)
+	}
+	if p.SessionID != "gc-42" {
+		t.Errorf("SessionID = %q, want gc-42", p.SessionID)
+	}
+	if p.WorkDir != "/home/ds/gascity-worktrees/polecat-1" {
+		t.Errorf("WorkDir = %q, want worktree path", p.WorkDir)
+	}
+	if p.Ts.IsZero() {
+		t.Errorf("Ts is zero, want a resolution timestamp")
+	}
+
+	// Additive, not a replacement: bead.closed must still fire exactly once.
+	if n := len(eventsOfType(rec.Events, events.BeadClosed)); n != 1 {
+		t.Errorf("got %d bead.closed events, want 1 (molecule.resolved is additive)", n)
+	}
+}
+
+// TestMoleculeAutocloseMoleculeResolvedDegradesWithoutStampedSession asserts
+// the build-time edge the spec pins: a molecule that resolves before any
+// reconcile stamped its identity emits molecule.resolved with empty session
+// fields — graceful degradation, not a crash.
+func TestMoleculeAutocloseMoleculeResolvedDegradesWithoutStampedSession(t *testing.T) {
+	store := beads.NewMemStore()
+	root, _ := store.Create(beads.Bead{Title: "mol", Type: "molecule"})
+	step, _ := store.Create(beads.Bead{Title: "step", Type: "step", ParentID: root.ID})
+
+	_ = store.Close(step.ID)
+	rec := events.NewFake()
+	var out bytes.Buffer
+	doMoleculeAutocloseWith(store, "", rec, step.ID, &out)
+
+	resolved := eventsOfType(rec.Events, events.MoleculeResolved)
+	if len(resolved) != 1 {
+		t.Fatalf("got %d molecule.resolved events, want 1 (graceful, not crash): %+v", len(resolved), rec.Events)
+	}
+	p := decodeMoleculeResolvedPayload(t, resolved[0])
+	if p.SessionName != "" || p.SessionID != "" || p.WorkDir != "" {
+		t.Errorf("unstamped root must degrade to empty session fields, got name=%q id=%q dir=%q", p.SessionName, p.SessionID, p.WorkDir)
+	}
+	if p.IssueID != root.ID {
+		t.Errorf("IssueID = %q, want %q", p.IssueID, root.ID)
+	}
+	if p.ToStatus != "closed" {
+		t.Errorf("ToStatus = %q, want closed", p.ToStatus)
+	}
+}
+
+// eventsOfType returns the subset of evs whose Type equals typ.
+func eventsOfType(evs []events.Event, typ string) []events.Event {
+	var out []events.Event
+	for _, e := range evs {
+		if e.Type == typ {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// decodeMoleculeResolvedPayload unmarshals the typed molecule.resolved payload
+// off a recorded event, failing the test on a malformed payload.
+func decodeMoleculeResolvedPayload(t *testing.T, ev events.Event) gcapi.MoleculeResolvedPayload {
+	t.Helper()
+	var p gcapi.MoleculeResolvedPayload
+	if err := json.Unmarshal(ev.Payload, &p); err != nil {
+		t.Fatalf("unmarshal molecule.resolved payload: %v", err)
+	}
+	return p
 }

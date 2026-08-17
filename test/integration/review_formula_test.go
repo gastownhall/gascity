@@ -47,7 +47,7 @@ ROOT_ID=$(printf '%s\n' "$BEAD_JSON" | jq -r 'if type == "array" then (.[0].meta
 [ -n "$ATTEMPT" ] && [ -n "$ROOT_ID" ] || exit 1
 
 VERDICT=$(
-  gc bd list --all --json --limit=0 2>/dev/null |
+  gc bd list --all --json --limit=0 --metadata-field "gc.root_bead_id=$ROOT_ID" 2>/dev/null |
     jq -r --arg attempt "$ATTEMPT" --arg root "$ROOT_ID" '
       [
         .[]
@@ -81,7 +81,7 @@ ROOT_ID=$(printf '%s\n' "$BEAD_JSON" | jq -r 'if type == "array" then (.[0].meta
 [ -n "$ATTEMPT" ] && [ -n "$ROOT_ID" ] || exit 1
 
 VERDICT=$(
-  gc bd list --all --json --limit=0 2>/dev/null |
+  gc bd list --all --json --limit=0 --metadata-field "gc.root_bead_id=$ROOT_ID" 2>/dev/null |
     jq -r --arg attempt "$ATTEMPT" --arg root "$ROOT_ID" '
       [
         .[]
@@ -115,7 +115,7 @@ ROOT_ID=$(printf '%s\n' "$BEAD_JSON" | jq -r 'if type == "array" then (.[0].meta
 [ -n "$ATTEMPT" ] && [ -n "$ROOT_ID" ] || exit 1
 
 VERDICT=$(
-  gc bd list --all --json --limit=0 2>/dev/null |
+  gc bd list --all --json --limit=0 --metadata-field "gc.root_bead_id=$ROOT_ID" 2>/dev/null |
     jq -r --arg attempt "$ATTEMPT" --arg root "$ROOT_ID" '
       [
         .[]

@@ -22,14 +22,9 @@ import (
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	mailexec "github.com/gastownhall/gascity/internal/mail/exec"
 	"github.com/gastownhall/gascity/internal/runtime"
-	sessionacp "github.com/gastownhall/gascity/internal/runtime/acp"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
-	sessioncloudflare "github.com/gastownhall/gascity/internal/runtime/cloudflare"
-	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
 	sessionhybrid "github.com/gastownhall/gascity/internal/runtime/hybrid"
 	sessionk8s "github.com/gastownhall/gascity/internal/runtime/k8s"
-	sessionsubprocess "github.com/gastownhall/gascity/internal/runtime/subprocess"
-	sessiont3bridge "github.com/gastownhall/gascity/internal/runtime/t3bridge"
 	sessiontmux "github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -79,7 +74,7 @@ func sessionProviderContextForCity(cfg *config.City, cityPath, providerOverride 
 
 var (
 	openSessionProviderStore   = openCityStoreAt
-	buildSessionProviderByName = newSessionProviderByName
+	buildSessionProviderByName = newSessionProviderForCityByName
 )
 
 // tmuxConfigFromSession converts a config.SessionConfig into a
@@ -97,6 +92,7 @@ func tmuxConfigFromSession(sc config.SessionConfig, cityName, cityPath string) s
 	}
 	return sessiontmux.Config{
 		SetupTimeout:       sc.SetupTimeoutDuration(),
+		SetupMaxTimeout:    sc.SetupMaxTimeoutDuration(),
 		NudgeReadyTimeout:  sc.NudgeReadyTimeoutDuration(),
 		NudgeRetryInterval: sc.NudgeRetryIntervalDuration(),
 		NudgeLockTimeout:   sc.NudgeLockTimeoutDuration(),
@@ -115,10 +111,16 @@ func providerStateDir(providerName, cityPath string) string {
 	return filepath.Join(supervisor.RuntimeDir(), providerName, hex.EncodeToString(sum[:4]))
 }
 
-// newSessionProviderByName constructs a runtime.Provider from a provider name.
-// cityName is used to auto-default the tmux socket when none is configured.
-// cityPath is used to isolate socket-based providers per city.
-// Returns error instead of os.Exit, making it safe for the hot-reload path.
+// newSessionProviderForCityByName resolves a selection name through the
+// city's runtime registry: the builtins plus any pack-declared runtimes
+// from cfg (RUNTIME-SEL-011). cfg may be nil (no city context), in which
+// case only builtin names resolve. A pack runtime colliding with a builtin
+// name surfaces here as a construction error.
+// See cmd/gc/runtime_registry.go for the builtin registrations and
+// internal/runtime/REQUIREMENTS.md for the selection contract:
+// cityName auto-defaults the tmux socket when none is configured,
+// cityPath isolates socket-based providers per city, and errors return
+// instead of os.Exit, making this safe for the hot-reload path.
 //
 //   - "fake" → in-memory fake (all ops succeed)
 //   - "fail" → broken fake (all ops return errors)
@@ -126,46 +128,47 @@ func providerStateDir(providerName, cityPath string) string {
 //   - "acp" → ACP (Agent Client Protocol) JSON-RPC over stdio
 //   - "exec:<script>" → user-supplied script (absolute path or PATH lookup)
 //   - "k8s" → native Kubernetes provider (client-go)
+//   - "<pack runtime>" → exec proxy bound to the pack's declared command
 //   - default → real tmux provider
-func newSessionProviderByName(name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
-	if strings.HasPrefix(name, "exec:") {
-		script := strings.TrimPrefix(name, "exec:")
-		if isLegacyT3BridgeExecScript(script) {
-			return sessiont3bridge.NewProvider(), nil
-		}
-		return sessionexec.NewProvider(script), nil
-	}
-	switch name {
-	case "fake":
-		return runtime.NewFake(), nil
-	case "fail":
-		return runtime.NewFailFake(), nil
-	case "subprocess":
-		if cityPath != "" {
-			return sessionsubprocess.NewProviderWithDir(providerStateDir("subprocess", cityPath)), nil
-		}
-		return sessionsubprocess.NewProvider(), nil
-	case "acp":
-		cfg := sessionacp.Config{
-			HandshakeTimeout:  sc.ACP.HandshakeTimeoutDuration(),
-			NudgeBusyTimeout:  sc.ACP.NudgeBusyTimeoutDuration(),
-			OutputBufferLines: sc.ACP.OutputBufferLinesOrDefault(),
-		}
-		if cityPath != "" {
-			return sessionacp.NewProviderWithDir(providerStateDir("acp", cityPath), cfg), nil
-		}
-		return sessionacp.NewProvider(cfg), nil
-	case "t3bridge":
-		return sessiont3bridge.NewProvider(), nil
-	case "cloudflare":
-		return sessioncloudflare.NewProvider()
-	case "k8s":
-		return sessionk8s.NewProvider()
-	case "hybrid":
-		return newHybridProvider(sc, cityName, cityPath)
+func newSessionProviderForCityByName(cfg *config.City, name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
+	// Selection flows through the de-conflated WorkerSpec atom and the Resolver.
+	// The Runtime axis is the selection name; Transport is populated from it
+	// (transport is bundled with the runtime today — "acp" is a whole provider,
+	// not a transport over a box — so the name determines it). Per-session
+	// Transport composition (tmux↔acp routing) lives in resolveSessionTransportProvider.
+	// Model/Upstream/Harness are carried by the session config, not this seam.
+	return resolveWorkerSpec(cfg, runtime.WorkerSpec{Runtime: name, Transport: transportForRuntimeName(name)}, sc, cityName, cityPath)
+}
+
+// transportForRuntimeName reports the Transport axis value bundled with a Runtime
+// selection name. Transport (HOW gc drives the agent: tmux vs acp) is coupled to
+// the runtime today — acp is its own provider — so the name fixes it: "acp" → acp,
+// "t3bridge" → its bespoke turn transport, everything else (tmux/exec/ssh/k8s/…)
+// → the tmux carrier. This makes WorkerSpec.Transport explicit at the Resolver
+// seam (where per-spec Transport honoring would land when runtime↔transport are
+// genuinely decoupled).
+func transportForRuntimeName(name string) string {
+	switch {
+	case name == "acp":
+		return config.SessionTransportACP
+	case name == "t3bridge" || (strings.HasPrefix(name, "exec:") && isLegacyT3BridgeExecScript(strings.TrimPrefix(name, "exec:"))):
+		return "t3"
 	default:
-		return sessiontmux.NewProviderWithConfig(tmuxConfigFromSession(sc, cityName, cityPath)), nil
+		return config.SessionTransportTmux
 	}
+}
+
+// resolveWorkerSpec resolves a [runtime.WorkerSpec] to a session provider. It is
+// the seam where axis-based selection lives: today only the Runtime axis drives
+// selection (mapping to the registry's seam-backed construction), but it is the
+// single place the Transport/Upstream axes will be honored as the de-conflation
+// completes.
+func resolveWorkerSpec(cfg *config.City, spec runtime.WorkerSpec, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
+	reg, err := runtimeRegistryForCity(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return reg.New(spec.Runtime, sc, cityName, cityPath)
 }
 
 func isLegacyT3BridgeExecScript(script string) bool {
@@ -175,27 +178,31 @@ func isLegacyT3BridgeExecScript(script string) bool {
 // newSessionProvider returns a runtime.Provider based on the session provider
 // name (env var → city.toml → default). When the city-level provider is not
 // "acp" but some agents have session = "acp", returns an auto.Provider that
-// routes per-session. Startup path — exits on error.
-func newSessionProvider() runtime.Provider {
+// routes per-session. Provider-construction failures return to the command
+// funnel so output, cleanup, and lifecycle defers remain reachable.
+func newSessionProvider() (runtime.Provider, error) {
 	ctx := loadSessionProviderContext()
 	sessionBeads := loadProviderSessionSnapshot(ctx)
-	return newSessionProviderFromContext(ctx, sessionBeads)
+	return withSessionProviderConstructionContext(newSessionProviderFromContext(ctx, sessionBeads))
 }
 
-func newSessionProviderForCity(cfg *config.City, cityPath string) runtime.Provider {
+func newSessionProviderForCity(cfg *config.City, cityPath string) (runtime.Provider, error) {
 	ctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
 	sessionBeads := loadProviderSessionSnapshot(ctx)
-	return newSessionProviderFromContext(ctx, sessionBeads)
+	return withSessionProviderConstructionContext(newSessionProviderFromContext(ctx, sessionBeads))
 }
 
-func newStatusSessionProviderForCity(cfg *config.City, cityPath string) runtime.Provider {
-	ctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
-	return newBoundedStatusProvider(newSessionProviderFromContext(ctx, nil))
+func newStatusSessionProviderForCity(cfg *config.City, cityPath string) (runtime.Provider, error) {
+	return newStatusSessionProviderForCityWithSnapshot(cfg, cityPath, nil)
 }
 
-func newStatusSessionProviderForCityWithSnapshot(cfg *config.City, cityPath string, sessionBeads *sessionBeadSnapshot) runtime.Provider {
+func newStatusSessionProviderForCityWithSnapshot(cfg *config.City, cityPath string, sessionBeads *sessionBeadSnapshot) (runtime.Provider, error) {
 	ctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
-	return newBoundedStatusProvider(newSessionProviderFromContext(ctx, sessionBeads))
+	sp, err := withSessionProviderConstructionContext(newSessionProviderFromContext(ctx, sessionBeads))
+	if err != nil {
+		return nil, err
+	}
+	return newBoundedStatusProvider(sp), nil
 }
 
 func registerStatusProviderACPRoutes(sp runtime.Provider, snapshot *sessionBeadSnapshot, cityName string, cfg *config.City) {
@@ -216,52 +223,93 @@ func loadProviderSessionSnapshot(ctx sessionProviderContext) *sessionBeadSnapsho
 	if err != nil {
 		return nil
 	}
-	all, err := store.ListByLabel(sessionBeadLabel, 0)
+	// This snapshot reads only session-class beads (the gc:session label) to
+	// drive transport/ACP routing decisions, so route through the session
+	// coordination-class store for relocation-safety. openSessionProviderStore
+	// opens its own generic store (independent of the caller), so routing here
+	// closes the gap on both the CLI and controller provider-construction paths.
+	// Identity to the opened store today (resolveClassStore is pure identity).
+	sessStore := cliSessionStore(store, ctx.cfg, ctx.cityPath)
+	// The label-only, closed-excluded, IsSessionBeadOrRepairable-UNfiltered Info
+	// lister is byte-identical to the retired newSessionBeadSnapshot(ListByLabel(
+	// gc:session)) set: same gc:session label scope, same closed exclusion, same
+	// no-narrowing (a damaged non-"session"-typed labeled bead is still surfaced).
+	infos, err := session.NewStore(beads.SessionStore{Store: sessStore}).ListLabeledSessionInfosUnfiltered()
 	if err != nil {
 		return nil
 	}
-	return newSessionBeadSnapshot(all)
+	return newSessionBeadSnapshotFromInfos(infos)
 }
 
-func newSessionProviderFromContext(ctx sessionProviderContext, sessionBeads *sessionBeadSnapshot) runtime.Provider {
-	sp, err := newSessionProviderFromContextWithError(ctx, sessionBeads)
+func newSessionProviderFromContext(ctx sessionProviderContext, sessionBeads *sessionBeadSnapshot) (runtime.Provider, error) {
+	return resolveSessionTransportProvider(ctx, sessionBeads)
+}
+
+func withSessionProviderConstructionContext(sp runtime.Provider, err error) (runtime.Provider, error) {
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "%v\n", err) //nolint:errcheck // best-effort stderr
-		os.Exit(1)
+		return nil, fmt.Errorf("constructing session provider: %w", err)
 	}
-	return sp
+	return sp, nil
 }
 
-func newSessionProviderFromContextWithError(ctx sessionProviderContext, sessionBeads *sessionBeadSnapshot) (runtime.Provider, error) {
-	sp, err := buildSessionProviderByName(ctx.providerName, ctx.sc, ctx.cityName, ctx.cityPath)
+// resolveSessionTransportProvider is the single Resolver seam that composes the
+// session Transport axis (tmux vs acp). It builds the base provider for the
+// city's session-provider name (the Runtime axis, via buildSessionProviderByName
+// → resolveWorkerSpec) and — when the base is not acp but some agents select the
+// acp transport — composes an auto.Provider that routes those sessions to an acp
+// backend. Per-session transport is the auto router's job; this is where the
+// composition is owned (construction time). Dynamically-created sessions are
+// routed at start via the same auto.Provider (build_desired_state RouteACP).
+// Behavior is identical to the prior inline composition.
+func resolveSessionTransportProvider(ctx sessionProviderContext, sessionBeads *sessionBeadSnapshot) (runtime.Provider, error) {
+	base, err := buildSessionProviderByName(ctx.cfg, ctx.providerName, ctx.sc, ctx.cityName, ctx.cityPath)
 	if err != nil {
 		return nil, err
 	}
-	// If the city-level provider is not ACP but some agents need ACP,
-	// wrap in an auto provider that routes per-session.
-	// NOTE: agents comes from loadCityConfig which applies pack overrides,
-	// so the Session field from overrides is already resolved here.
-	requireACPWrapper := requiresACPProviderWrapper(sessionBeads, ctx.cityName, ctx.cfg)
-	if ctx.providerName != "acp" && needsACPProviderWrapper(sessionBeads, ctx.cityName, ctx.cfg) {
-		acpSP, acpErr := buildSessionProviderByName("acp", ctx.sc, ctx.cityName, ctx.cityPath)
+	// If the city-level provider is not ACP but some agents need ACP, wrap in an
+	// auto provider that routes per-session.
+	// NOTE: agents comes from loadCityConfig which applies pack overrides, so the
+	// Session field from overrides is already resolved here.
+	// acpRouteNames is computed once and reused for both the requires/needs
+	// checks and the route registration below, instead of recomputing the
+	// (agent + named-session) x provider-resolution walk up to 3x per call.
+	acpRouteNames := configuredACPRouteNames(sessionBeads, ctx.cityName, ctx.cfg)
+	requireACPWrapper := len(acpRouteNames) > 0
+	needsACPWrapper := requireACPWrapper || (ctx.cfg != nil && hasACPProviderTargets(ctx.cfg))
+	if ctx.providerName != "acp" && needsACPWrapper {
+		acpSP, acpErr := buildSessionProviderByName(ctx.cfg, "acp", ctx.sc, ctx.cityName, ctx.cityPath)
 		if acpErr != nil {
 			if requireACPWrapper {
 				return nil, fmt.Errorf("acp provider: %w", acpErr)
 			}
-			return sp, nil
+			return base, nil
 		}
-		autoSP := sessionauto.New(sp, acpSP)
-		for _, sessName := range configuredACPRouteNames(sessionBeads, ctx.cityName, ctx.cfg) {
+		autoSP := sessionauto.New(base, acpSP)
+		for _, sessName := range acpRouteNames {
 			autoSP.RouteACP(sessName)
 		}
 		return autoSP, nil
 	}
-	return sp, nil
+	return base, nil
 }
 
 func agentSessionCreateTransport(cfg *config.City, agentCfg config.Agent) string {
 	if cfg == nil {
 		return strings.TrimSpace(agentCfg.Session)
+	}
+	// StartCommand is ResolveProvider's escape hatch (step 1): it bypasses
+	// provider-catalog resolution entirely, so a cache entry for
+	// agentCfg.Provider would not describe this agent's actual resolution.
+	if agentCfg.StartCommand == "" {
+		name := agentCfg.Provider
+		if name == "" {
+			name = cfg.Workspace.Provider
+		}
+		if name != "" {
+			if resolved, ok := config.ResolvedProviderCached(cfg, name); ok {
+				return config.ResolveSessionCreateTransport(agentCfg.Session, &resolved)
+			}
+		}
 	}
 	resolved, err := config.ResolveProvider(
 		&agentCfg,
@@ -295,14 +343,6 @@ func configuredACPSessionNames(snapshot *sessionBeadSnapshot, cityName, sessionT
 	return names
 }
 
-func needsACPProviderWrapper(snapshot *sessionBeadSnapshot, cityName string, cfg *config.City) bool {
-	return requiresACPProviderWrapper(snapshot, cityName, cfg) || (cfg != nil && hasACPProviderTargets(cfg))
-}
-
-func requiresACPProviderWrapper(snapshot *sessionBeadSnapshot, cityName string, cfg *config.City) bool {
-	return len(configuredACPRouteNames(snapshot, cityName, cfg)) > 0
-}
-
 func hasACPProviderTargets(cfg *config.City) bool {
 	if cfg == nil {
 		return false
@@ -333,6 +373,9 @@ func resolveProviderForACPTransport(cfg *config.City, providerName string) *conf
 	if cfg == nil || strings.TrimSpace(providerName) == "" {
 		return nil
 	}
+	if resolved, ok := config.ResolvedProviderCached(cfg, providerName); ok {
+		return &resolved
+	}
 	resolved, err := config.ResolveProvider(
 		&config.Agent{Provider: providerName},
 		&cfg.Workspace,
@@ -359,14 +402,14 @@ func observedACPSessionNames(snapshot *sessionBeadSnapshot, cfg *config.City) []
 	if snapshot == nil {
 		return nil
 	}
-	open := snapshot.Open()
+	open := snapshot.OpenInfos()
 	names := make([]string, 0, len(open))
 	seen := make(map[string]bool, len(open))
-	for _, bead := range open {
-		if !beadUsesACPTransport(bead, cfg) {
+	for _, info := range open {
+		if !infoUsesACPTransport(info, cfg) {
 			continue
 		}
-		sessionName := strings.TrimSpace(bead.Metadata["session_name"])
+		sessionName := strings.TrimSpace(info.SessionNameMetadata)
 		if sessionName == "" || seen[sessionName] {
 			continue
 		}
@@ -376,6 +419,9 @@ func observedACPSessionNames(snapshot *sessionBeadSnapshot, cfg *config.City) []
 	return names
 }
 
+// beadUsesACPTransport is the raw-bead form retained as the byte-identical
+// oracle for infoUsesACPTransport (TestSessionClassifierInfoEquivalence). No
+// production caller reads it — observedACPSessionNames consumes the Info form.
 func beadUsesACPTransport(bead beads.Bead, cfg *config.City) bool {
 	transport := strings.TrimSpace(bead.Metadata["transport"])
 	if transport != "" {
@@ -425,6 +471,55 @@ func beadUsesACPTransport(bead beads.Bead, cfg *config.City) bool {
 	return false
 }
 
+func infoUsesACPTransport(info session.Info, cfg *config.City) bool {
+	transport := strings.TrimSpace(info.Transport)
+	if transport != "" {
+		return transport == "acp"
+	}
+	providerName := strings.TrimSpace(info.Provider)
+	if providerName == "acp" {
+		return true
+	}
+	if strings.TrimSpace(info.MCPIdentity) != "" ||
+		strings.TrimSpace(info.MCPServersSnapshot) != "" {
+		return true
+	}
+	templateName := strings.TrimSpace(info.Template)
+	if cfg != nil {
+		if agentCfg, ok := resolveAgentIdentity(cfg, templateName, currentRigContext(cfg)); ok {
+			if strings.TrimSpace(agentCfg.Session) != "" && agentSessionCreateTransport(cfg, agentCfg) == "acp" {
+				return true
+			}
+			if strings.TrimSpace(info.Command) == "" &&
+				info.PendingCreateClaim &&
+				agentSessionCreateTransport(cfg, agentCfg) == "acp" {
+				return true
+			}
+			if providerName == "" {
+				providerName = strings.TrimSpace(agentCfg.Provider)
+			}
+		}
+		if providerName == "" {
+			providerName = templateName
+		}
+		resolved := resolveProviderForACPTransport(cfg, providerName)
+		if resolved != nil {
+			acpCommand := strings.TrimSpace(resolved.ACPCommandString())
+			defaultCommand := strings.TrimSpace(resolved.CommandString())
+			storedCommand := strings.TrimSpace(info.Command)
+			if acpCommand != "" && acpCommand != defaultCommand &&
+				(storedCommand == acpCommand || strings.HasPrefix(storedCommand, acpCommand+" ")) {
+				return true
+			}
+		}
+		if strings.TrimSpace(info.Command) == "" &&
+			info.PendingCreateClaim {
+			return providerLegacyDefaultsToACP(cfg, providerName)
+		}
+	}
+	return false
+}
+
 func configuredACPRouteNames(snapshot *sessionBeadSnapshot, cityName string, cfg *config.City) []string {
 	names := observedACPSessionNames(snapshot, cfg)
 	seen := make(map[string]bool, len(names))
@@ -448,8 +543,10 @@ func configuredACPRouteNames(snapshot *sessionBeadSnapshot, cityName string, cfg
 		}
 		sessionName := config.NamedSessionRuntimeName(cityName, cfg.Workspace, named.QualifiedName())
 		if snapshot != nil {
-			if snapName := snapshot.FindSessionNameByNamedIdentity(named.QualifiedName()); snapName != "" {
-				sessionName = snapName
+			if info, ok := snapshot.FindInfoByNamedIdentity(named.QualifiedName()); ok {
+				if snapName := strings.TrimSpace(info.SessionNameMetadata); snapName != "" {
+					sessionName = snapName
+				}
 			}
 		}
 		if sessionName == "" || seen[sessionName] {
@@ -561,29 +658,44 @@ func cityUsesManagedDoltBeadsLifecycle(cityPath string) bool {
 }
 
 func rawBeadsProviderForScope(scopeRoot, cityPath string) string {
+	return resolveRawBeadsProviderForScope(scopeRoot, cityPath, false)
+}
+
+// authoritativeBeadsProviderForScope resolves the provider for a store chosen
+// from an arbitrary bead ID rather than from the caller's current scope. An
+// unscoped GC_BEADS value describes the caller's command context and must not
+// mask the selected store's on-disk identity. Scope-pinned overrides and
+// custom exec providers remain deliberate selections and retain precedence.
+func authoritativeBeadsProviderForScope(scopeRoot, cityPath string) string {
+	return resolveRawBeadsProviderForScope(scopeRoot, cityPath, true)
+}
+
+func resolveRawBeadsProviderForScope(scopeRoot, cityPath string, authoritative bool) string {
 	runtimeCityPath := cityPath
 	if runtimeCityPath == "" {
 		runtimeCityPath = cityForStoreDir(scopeRoot)
 	}
 	resolvedScopeRoot := resolveStoreScopeRoot(runtimeCityPath, scopeRoot)
-	if explicit, ok := scopedBeadsProviderOverride(runtimeCityPath, resolvedScopeRoot); ok {
+	if explicit, ok := scopedBeadsProviderOverride(runtimeCityPath, resolvedScopeRoot); ok && (!authoritative || strings.TrimSpace(os.Getenv("GC_BEADS_SCOPE_ROOT")) != "") {
 		return normalizeRawBeadsProvider(runtimeCityPath, explicit)
 	}
 	provider := rawBeadsProvider(runtimeCityPath)
 	if strings.TrimSpace(os.Getenv("GC_BEADS_SCOPE_ROOT")) != "" {
 		provider = rawBeadsProviderFromConfig(runtimeCityPath)
 	}
-	if samePath(resolvedScopeRoot, runtimeCityPath) {
+	if strings.HasPrefix(provider, "exec:") && !providerUsesBdStoreContract(provider) {
 		return provider
 	}
-	if strings.HasPrefix(provider, "exec:") && !providerUsesBdStoreContract(provider) {
+	if !authoritative && samePath(resolvedScopeRoot, runtimeCityPath) {
 		return provider
 	}
 	// Mixed-provider workspaces can keep legacy bd-backed rigs under a
 	// file-backed city (and vice versa). Prefer explicit scope-local store
-	// markers over the city default so scoped commands keep talking to the
-	// rig's actual beads backend. The bd routing identity is metadata.json;
-	// config.yaml is a compatibility mirror and can survive migrations.
+	// markers over the configured default so scoped commands keep talking to
+	// the actual beads backend for that scope. Authoritative arbitrary-bead
+	// resolution also applies this check at the city root. The bd routing
+	// identity is metadata.json; config.yaml is a compatibility mirror and can
+	// survive migrations.
 	if scopeUsesBdStoreContract(resolvedScopeRoot) {
 		return "bd"
 	}
@@ -717,6 +829,16 @@ func newMailProvider(store beads.Store) mail.Provider {
 	return newMailProviderNamed(mailProviderName(), store, true)
 }
 
+// newMailProviderWithSessionStore builds the configured mail provider with
+// distinct message-persistence (messaging class) and session-addressing (session
+// class) stores. Byte-identical to newMailProvider(store) at the single-store bd
+// backend where msgStore == sessStore; once a class relocates, mail's message
+// beads and its session reads follow their respective backends instead of
+// splitting off one generic store.
+func newMailProviderWithSessionStore(msgStore, sessStore beads.Store) mail.Provider {
+	return newMailProviderNamedWithSessionStore(mailProviderName(), msgStore, sessStore, true)
+}
+
 func newCommandMailProvider(store beads.Store) mail.Provider {
 	return newMailProviderNamed(mailProviderName(), store, true)
 }
@@ -726,6 +848,10 @@ func newCommandMailProviderNamed(v string, store beads.Store) mail.Provider {
 }
 
 func newMailProviderNamed(v string, store beads.Store, cached bool) mail.Provider {
+	return newMailProviderNamedWithSessionStore(v, store, store, cached)
+}
+
+func newMailProviderNamedWithSessionStore(v string, msgStore, sessStore beads.Store, cached bool) mail.Provider {
 	if strings.HasPrefix(v, "exec:") {
 		return mailexec.NewProvider(strings.TrimPrefix(v, "exec:"))
 	}
@@ -736,14 +862,23 @@ func newMailProviderNamed(v string, store beads.Store, cached bool) mail.Provide
 		return mail.NewFailFake()
 	default:
 		if cached {
-			return beadmail.NewCached(store)
+			return beadmail.NewCachedWithStores(msgStore, sessStore)
 		}
-		return beadmail.New(store)
+		return beadmail.NewWithStores(msgStore, sessStore)
 	}
 }
 
 // openCityMailProvider opens the city's bead store and wraps it in a
 // mail.Provider. Returns (nil, exitCode) on failure.
+//
+// Relocation: the beadmail provider does messaging-class message persistence AND
+// session-class reads/writes for mail addressing/identity (session.ListAllSessionBeads
+// / ResolveSessionID / RepairEmptyType). Both are routed through their
+// coordination-class seams — messages via resolveMailMessagesStore, session reads
+// via cliSessionStore — so a [beads.classes.messaging] or [beads.classes.sessions]
+// relocation reaches CLI mail the same way it reaches the running controller
+// (newCityMailProvider, class_store.go). Byte-identical until a class backend is
+// configured (both resolvers are identity at the single-store bd backend).
 func openCityMailProvider(stderr io.Writer, cmdName string) (mail.Provider, int) {
 	// For exec: and test doubles, no store needed.
 	v := mailProviderName()
@@ -751,11 +886,19 @@ func openCityMailProvider(stderr io.Writer, cmdName string) (mail.Provider, int)
 		return newCommandMailProvider(nil), 0
 	}
 
-	store, code := openCityStore(stderr, cmdName)
+	store, cityPath, code := openCityStoreWithPath(stderr, cmdName)
 	if store == nil {
 		return nil, code
 	}
-	return newCommandMailProvider(store), 0
+	// The no-refresh cfg loader matches the other hot CLI roots (cmd_prime,
+	// completion): loadCityConfig's builtin-pack refresh is inappropriate here. A
+	// failed load yields nil cfg, which the class resolvers treat as identity —
+	// where a relocated class is SERVED from does not depend on it, because the
+	// routes come from cliStorageRoutes, which reads the city's own [storage].
+	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	msgStore := resolveMailMessagesStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)
+	sessStore := cliSessionStore(store, cfg, cityPath)
+	return newMailProviderWithSessionStore(msgStore, sessStore), 0
 }
 
 // eventsProviderName returns the events provider name.
@@ -993,8 +1136,10 @@ func openCityEventsProviderWithConfig(providerConfig func() config.EventsConfig,
 // env var controls which sessions go to k8s. If unset, all sessions route to
 // local tmux.
 func newHybridProvider(sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
-	local := sessiontmux.NewProviderWithConfig(tmuxConfigFromSession(sc, cityName, cityPath))
-	remote, err := sessionk8s.NewProvider()
+	// Cut-over: hybrid routes to the seam-backed tmux/k8s providers, so
+	// hybrid-routed sessions flow through the seams like every other path.
+	local := sessiontmux.NewSeamBackedWithConfig(tmuxConfigFromSession(sc, cityName, cityPath))
+	remote, err := sessionk8s.NewSeamBacked()
 	if err != nil {
 		return nil, fmt.Errorf("hybrid: k8s backend: %w", err)
 	}

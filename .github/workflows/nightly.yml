@@ -10,7 +10,7 @@ permissions:
 
 env:
   DOLT_VERSION: "2.1.7"
-  BD_VERSION: "v1.0.4"
+  BD_VERSION: "v1.1.0"
 
 jobs:
   tier-b:
@@ -85,7 +85,7 @@ jobs:
     timeout-minutes: 30
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.0.4"
+      BD_VERSION: "v1.1.0"
       GC_BEADS: sqlite
       GC_ACCEPTANCE_BEADS_PROVIDER: sqlite
     steps:

@@ -28,6 +28,24 @@ func UpdatedAliasMetadata(metadata map[string]string, nextAlias string) map[stri
 	}
 }
 
+// UpdatedAliasMetadataFromInfo is the Info-fed sibling of UpdatedAliasMetadata:
+// it computes the byte-identical alias/alias_history mutations from the projected
+// Info.Alias and Info.AliasHistory. Those fields equal metadata["alias"] (verbatim)
+// and AliasHistory(metadata) respectively, so a caller holding a projected Info in
+// place of the raw metadata map produces the same result the raw form would.
+func UpdatedAliasMetadataFromInfo(info Info, nextAlias string) map[string]string {
+	currentAlias := strings.TrimSpace(info.Alias)
+	history := info.AliasHistory
+	if currentAlias != "" && currentAlias != nextAlias {
+		history = append([]string{currentAlias}, history...)
+	}
+	history = normalizeAliasList(history, nextAlias)
+	return map[string]string{
+		"alias":                 strings.TrimSpace(nextAlias),
+		aliasHistoryMetadataKey: strings.Join(history, ","),
+	}
+}
+
 func normalizeAliasList(values []string, exclude string) []string {
 	exclude = strings.TrimSpace(exclude)
 	seen := map[string]bool{}

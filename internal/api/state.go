@@ -14,7 +14,9 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/orderdispatch"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/usage"
@@ -48,6 +50,13 @@ type MaintenanceProvider interface {
 
 // State provides read access to controller-managed state.
 // The controller implements this with RWMutex-protected hot-reload.
+//
+// The per-coordination-class store seam is exposed as named accessors
+// (GraphBeadStore / SessionsBeadStore / NudgesBeadStore) so a future per-class
+// backend becomes a change in the implementation rather than at every call
+// site. Callers that need the store for a specific bead class route through
+// those accessors; on a single-store city every one collapses to the same
+// concrete store CityBeadStore() returns, so they are byte-identical today.
 type State interface {
 	// Config returns the current city config snapshot.
 	Config() *config.City
@@ -99,6 +108,68 @@ type State interface {
 	// CityBeadStore returns the city-level bead store for session beads.
 	// Returns nil if no store is available.
 	CityBeadStore() beads.Store
+
+	// ScopedStoreLike returns a throwaway, ctx-bound clone of existing when
+	// existing is (or wraps) a bd-CLI-shell-backed store: cancellation kills
+	// the backend bd subprocess instead of abandoning it to run past ctx's
+	// deadline, unlike existing's own long-lived runner (fixed to
+	// context.Background() at construction). Returns (nil, nil) when
+	// existing is not bd-CLI backed (e.g. a native, file, or in-memory
+	// store) — those have no subprocess to leak, so callers should keep
+	// reading through existing directly in that case.
+	//
+	// Read paths with their own short request budget (e.g. GET /status) use
+	// this instead of reading through the shared store so a slow bd command
+	// cannot pin a Dolt connection past the caller's own deadline
+	// (gascity ga-cdmx6x). Implementations must observe ctx during resolution
+	// and finish any work they start before returning after cancellation.
+	ScopedStoreLike(ctx context.Context, existing beads.Store) (beads.Store, error)
+
+	// NudgesBeadStore returns the store backing the nudge-queue shadow beads
+	// (gc:nudge). At the default backend this is the same store as
+	// CityBeadStore; when [beads.classes.nudges] is relocated it is the
+	// per-class store, so nudge-shadow ops (e.g. withdrawing wait nudges on
+	// session close/wake) reach the relocated beads instead of orphaning them
+	// on the work store. The strongly-typed beads.NudgesStore return makes the
+	// nudges class statically visible at the call site; its embedded .Store is
+	// nil when no store is available.
+	NudgesBeadStore() beads.NudgesStore
+
+	// SessionsBeadStore returns the store backing session-class beads — session
+	// lifecycle (type=session/gc:session) and durable session waits
+	// (type=gate/gc:wait). At the default backend this is the same store as
+	// CityBeadStore; when [beads.classes.sessions] is relocated it is the
+	// per-class store, so session/wait reads and writes reach the relocated
+	// beads instead of the work store. Session handlers source their store from
+	// here (not CityBeadStore); cross-class WORK-bead reads stay on
+	// CityBeadStore. The strongly-typed beads.SessionStore return makes the
+	// session class statically visible at the call site; its embedded .Store is
+	// nil when no store is available.
+	SessionsBeadStore() beads.SessionStore
+
+	// GraphBeadStore returns the store backing graph-class beads — the formula-v2
+	// execution topology and control lane (molecules, wisps, convoys, control
+	// steps). At the default backend this is the same store as CityBeadStore;
+	// when [beads.classes.graph] is relocated it is the dedicated graph store at
+	// the legacy <cityPath>/.gc/beads.sqlite (SQLite) or the gcg Postgres schema,
+	// so graph reads and writes reach the relocated beads instead of the work
+	// store. This is the class-aware graph leg; cross-class WORK-bead reads stay
+	// on CityBeadStore. The strongly-typed beads.GraphStore return makes the graph
+	// class statically visible at the call site; its embedded .Store is nil when no
+	// store is available.
+	GraphBeadStore() beads.GraphStore
+
+	// OrdersBeadStore returns the store backing orders-class beads — the
+	// order-tracking / order-run records that gate repeat order firing. At the
+	// default backend this is the same store as CityBeadStore; when
+	// [beads.classes.orders] is relocated it is the per-class store, which is
+	// where the controller now creates every tracking bead. Without this
+	// accessor the API layer is structurally unable to route orders: the order
+	// feed and the check/history reads would scan the work store and report a
+	// split city's orders as never having run. The strongly-typed
+	// beads.OrdersStore return makes the orders class statically visible at the
+	// call site; its embedded .Store is nil when no store is available.
+	OrdersBeadStore() beads.OrdersStore
 
 	// Orders returns the current active set of scanned orders.
 	// Returns nil if orders are not configured.
@@ -174,6 +245,7 @@ type ProviderUpdate struct {
 	Env                map[string]string // nil = not set, non-nil = additive merge
 	OptionsSchemaMerge *string
 	OptionsSchema      []config.ProviderOption // nil = not set, non-nil = replace
+	OptionDefaults     map[string]string       // nil = not set, non-nil = additive merge
 }
 
 // RawConfigProvider is optionally implemented by State to provide the
@@ -181,6 +253,32 @@ type ProviderUpdate struct {
 // /v0/config/explain endpoint to distinguish inline vs pack-derived agents.
 type RawConfigProvider interface {
 	RawConfig() *config.City
+}
+
+// WebhookDispatchProvider is optionally implemented by State to expose the live
+// order dispatcher the supervisor webhook receiver (E3) fires verified+matched
+// deliveries through. It is the H1/E0.5 dispatch seam: the dispatch machine lives
+// in cmd/gc (memoryOrderDispatcher.dispatchOne), which internal/api cannot import,
+// so the city runtime implements this accessor over the same dispatchOne core the
+// tick loop uses. A State that does not implement it disables webhook dispatch —
+// the receiver returns 503 rather than firing a stub, so the perimeter/verify/
+// match guards still run but no order is launched. Modeled on the optional
+// RawConfigProvider/AgentVisibilityWaiter capability pattern rather than a core
+// State method so the two production State implementers and the test fakes are not
+// all forced to grow a dispatcher they may not have.
+type WebhookDispatchProvider interface {
+	// WebhookDispatcher returns the order dispatcher, or nil when webhook dispatch
+	// is unavailable for this city.
+	WebhookDispatcher() orderdispatch.Dispatcher
+}
+
+// RolloutFlagsProvider is optionally implemented by State to expose the
+// boot-latched rollout-gate snapshot resolved once at controller construction
+// (internal/rollout). Modeled on RawConfigProvider/WebhookDispatchProvider so
+// the test fakes are not forced to grow it: a State without it gets a
+// Resolve-from-Config() fallback at Server construction (see newServer).
+type RolloutFlagsProvider interface {
+	RolloutFlags() rollout.Flags
 }
 
 // AgentVisibilityWaiter is an optional capability for states whose Config()
@@ -234,6 +332,35 @@ type StateMutator interface {
 	// CreateRig adds a new rig to city.toml.
 	CreateRig(r config.Rig) error
 
+	// ProvisionRigFromGit clones gitURL into the rig's working tree and
+	// provisions the rig, reusing CreateRig's config-write handshake under the
+	// per-city guard. The clone runs OUTSIDE that guard (a WAN fetch must not
+	// freeze config writes); the git URL host is SSRF-fenced (fail-closed)
+	// before any clone. When r.Path is empty the server derives rigs/<name>.
+	// onStep, when non-nil, receives incremental provisioning progress (step
+	// name, human detail, warn flag) for typed-event projection. onManifest,
+	// when non-nil, is called record-then-create at each resource-creation
+	// checkpoint (before the clone with CreatedDir set; after init with any
+	// minted DoltDB) so the caller can persist the G14 rollback manifest and
+	// capture it for teardown. onManifest's error is load-bearing at the
+	// pre-clone checkpoint: if durable persistence of CreatedDir fails there,
+	// ProvisionRigFromGit MUST abort before cloning (fail closed) rather than
+	// create an unmanifested directory the boot sweep and re-clone pre-drop
+	// cannot discover — leaving it would wedge the request_id/name. It returns
+	// the provisioned rig so the caller can report its resolved prefix/branch.
+	// This is the async server-side rig-add path (C4b/C4c); the sync CreateRig
+	// stays git-blind.
+	ProvisionRigFromGit(ctx context.Context, r config.Rig, gitURL string, onStep func(step, detail string, warn bool), onManifest func(RigProvisionManifest) error) (config.Rig, error)
+
+	// TeardownPartialRig removes the created rig working tree and drops the
+	// managed Dolt database named in the manifest (best-effort), then repairs
+	// routes from the on-disk config. It is the physical half of the G14 atomic
+	// rollback the async goroutine, the re-clone poison pre-drop, and the boot
+	// sweep all share. It never removes a dir or store the manifest does not
+	// claim this request created. A non-nil return means debris may remain, so
+	// the caller must not mark the idempotency record rolled_back.
+	TeardownPartialRig(ctx context.Context, m RigProvisionManifest) error
+
 	// UpdateRig partially updates a rig in city.toml.
 	UpdateRig(name string, patch RigUpdate) error
 
@@ -276,4 +403,33 @@ type StateMutator interface {
 
 	// DisableOrder disables an order via overrides in city.toml.
 	DisableOrder(name, rig string) error
+}
+
+// FormulaMutator is an optional State extension for editing city-local formula
+// sources (separate TOML files under <cityRoot>/formulas, not city.toml). Like
+// StateMutator it is type-asserted by handlers, so a State that does not support
+// formula edits simply does not implement it.
+type FormulaMutator interface {
+	// FormulaSource returns the raw TOML of an editable city-local formula, or
+	// ok=false when no such source exists.
+	FormulaSource(name string) (content []byte, ok bool, err error)
+	// UpsertFormula creates or replaces a city-local formula source. Callers
+	// must validate the content first; the write is atomic and refreshes state.
+	UpsertFormula(name string, content []byte) error
+	// DeleteFormula removes a city-local formula source.
+	DeleteFormula(name string) error
+}
+
+// ConfigWriteSerializer is an optional State extension that runs fn under the
+// per-city config write lock. Pack import add/remove mutate city config files
+// (pack.toml, packs.lock, and sometimes city.toml) outside the
+// configedit.Editor callback shape, so running them through this seam
+// serializes them against the agent/rig/provider/formula mutations that take
+// the same Editor lock — otherwise two concurrent net/http goroutines could
+// interleave load→mutate→write and lose an update or desync manifest and
+// lockfile. Like StateMutator it is type-asserted by handlers; a State that
+// does not implement it runs the mutation without extra serialization.
+type ConfigWriteSerializer interface {
+	// SerializeConfigWrite runs fn while holding the per-city config write lock.
+	SerializeConfigWrite(fn func() error) error
 }

@@ -57,6 +57,7 @@ var (
 		"codex":       {},
 		"gemini":      {},
 		"mimocode":    {},
+		"pi":          {},
 	}
 	supportedReadiness = readinessItemSet{
 		"antigravity": {},
@@ -65,6 +66,7 @@ var (
 		"gemini":      {},
 		"github_cli":  {},
 		"mimocode":    {},
+		"pi":          {},
 	}
 	readinessProbeSpecs = map[string]readinessProbeSpec{
 		"claude": {
@@ -98,6 +100,13 @@ var (
 			kind:        probeKindProvider,
 			probe: func(_ context.Context, homeDir string) providerProbeResult {
 				return probeMimoCode(homeDir)
+			},
+		},
+		"pi": {
+			displayName: "Pi Coding Agent",
+			kind:        probeKindProvider,
+			probe: func(_ context.Context, homeDir string) providerProbeResult {
+				return probePi(homeDir)
 			},
 		},
 		"github_cli": {
@@ -520,6 +529,26 @@ func probeMimoCode(homeDir string) providerProbeResult {
 	}
 	if len(credentials) == 0 {
 		return providerProbeResult{status: probeStatusNeedsAuth, detail: fmt.Sprintf("no credentials in %s; set XIAOMI_API_KEY or run `mimo providers login`", authPath)}
+	}
+	return providerProbeResult{status: probeStatusConfigured}
+}
+
+// probePi recognizes the pi coding agent by the presence of its auth
+// credential store at ~/.pi/agent/auth.json. pi writes that file on a
+// successful login, so its existence is the single configured/not-ready
+// signal — the probe deliberately does not parse the contents, to avoid
+// coupling to pi's evolving auth.json schema.
+func probePi(homeDir string) providerProbeResult {
+	if _, ok := findProbeBinary("pi", homeDir); !ok {
+		return providerProbeResult{status: probeStatusNotInstalled, detail: "pi executable not found in probe PATH"}
+	}
+
+	authPath := filepath.Join(homeDir, ".pi", "agent", "auth.json")
+	if _, err := os.Stat(authPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return providerProbeResult{status: probeStatusNeedsAuth, detail: "missing ~/.pi/agent/auth.json"}
+		}
+		return providerProbeResult{status: probeStatusProbeError, detail: fmt.Sprintf("failed to stat %s", authPath)}
 	}
 	return providerProbeResult{status: probeStatusConfigured}
 }

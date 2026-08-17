@@ -97,6 +97,16 @@ func workflowSQLSnapshot(user, password, host string, port int, database, rootID
 	return workflowBeads, beadIndex, depMap, nil
 }
 
+// workflowSQLQueryWorkflowBeads is beads.MembershipDirectRootID expressed as a
+// WHERE clause: the root row, plus every row whose gc.root_bead_id metadata
+// equals the root id. It runs over every available table set, issues and wisps
+// alike, which is what makes it tier-complete like beads.DirectMembers.
+//
+// It must stay equivalent to beads.DirectMembers — this is the fast path for
+// the same question snapshotFromStore's fallback answers, and a divergence
+// would make the dashboard's step list depend on whether the Dolt server
+// happened to be reachable. One such divergence exists today and is recorded
+// on snapshotFromStore: the fallback is tier-scoped and this path is not.
 func workflowSQLQueryWorkflowBeads(db *sql.DB, tableSets []workflowSQLTableSet, rootID string) ([]beads.Bead, map[string]beads.Bead, error) {
 	workflowBeads := make([]beads.Bead, 0, 100)
 	beadIndex := make(map[string]beads.Bead)
@@ -108,7 +118,7 @@ func workflowSQLQueryWorkflowBeads(db *sql.DB, tableSets []workflowSQLTableSet, 
 				i.metadata
 			FROM `+tables.beads+` i
 			WHERE i.id = ?
-			   OR JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.root_bead_id"')) = ?
+			   OR JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '`+beadmeta.JSONPath(beadmeta.RootBeadIDMetadataKey)+`')) = ?
 			ORDER BY i.created_at
 		`, rootID, rootID)
 		if err != nil {
@@ -341,7 +351,7 @@ func workflowSQLWorkflowIDsSubquery(tableSets []workflowSQLTableSet) string {
 	for _, tables := range tableSets {
 		parts = append(parts, `
 			SELECT i.id FROM `+tables.beads+` i
-			WHERE i.id = ? OR JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.root_bead_id"')) = ?
+			WHERE i.id = ? OR JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '`+beadmeta.JSONPath(beadmeta.RootBeadIDMetadataKey)+`')) = ?
 		`)
 	}
 	return strings.Join(parts, " UNION ")
@@ -480,18 +490,7 @@ func (s *Server) tryFullWorkflowSQL(workflowID, fallbackScopeKind, fallbackScope
 	storeRef := chosen.info.ref
 	beadResponses := make([]workflowBeadResponse, 0, len(workflowBeads))
 	for _, bead := range workflowBeads {
-		beadResponses = append(beadResponses, workflowBeadResponse{
-			ID:            bead.ID,
-			Title:         bead.Title,
-			Status:        workflowStatus(bead),
-			Kind:          workflowKind(bead),
-			StepRef:       strings.TrimSpace(bead.Metadata[beadmeta.StepRefMetadataKey]),
-			Attempt:       workflowAttempt(bead),
-			LogicalBeadID: strings.TrimSpace(bead.Metadata[beadmeta.LogicalBeadIDMetadataKey]),
-			ScopeRef:      strings.TrimSpace(bead.Metadata[beadmeta.ScopeRefMetadataKey]),
-			Assignee:      strings.TrimSpace(bead.Assignee),
-			Metadata:      cloneStringMap(bead.Metadata),
-		})
+		beadResponses = append(beadResponses, workflowBeadResponseFromBead(bead))
 	}
 
 	snapshot := &workflowSnapshotResponse{
@@ -611,11 +610,20 @@ func workflowSQLRouteCandidate(state State, prefix string) (workflowSQLStoreCand
 }
 
 func workflowStorePath(state State, info workflowStoreInfo) (string, bool) {
+	// A class ref names a storage binding, not a scope root: the graph and orders
+	// bindings live at their own legacy .gc/ location (or a gcg Postgres schema),
+	// not at a rig/city path derivable here. They carry the city scope as their
+	// fallback, so answering the city path here would run the SQL fast path against
+	// the wrong database. Skip them; the slow store-scan reads the binding directly.
+	ref := strings.TrimSpace(info.ref)
+	if strings.HasPrefix(ref, workflowGraphStoreRefPrefix+":") || strings.HasPrefix(ref, ordersClassStoreRefPrefix+":") {
+		return "", false
+	}
 	switch strings.TrimSpace(info.scopeKind) {
-	case "city":
+	case beadmeta.ScopeKindCity:
 		cityPath := strings.TrimSpace(state.CityPath())
 		return cityPath, cityPath != ""
-	case "rig":
+	case beadmeta.ScopeKindRig:
 		cfg := state.Config()
 		if cfg == nil {
 			return "", false
@@ -699,8 +707,8 @@ func workflowSQLFindRootByWorkflowID(db *sql.DB, tableSets []workflowSQLTableSet
 				i.description, i.created_at, i.updated_at,
 				i.metadata
 			FROM `+tables.beads+` i
-			WHERE JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.kind"')) = 'workflow'
-			  AND JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.workflow_id"')) = ?
+			WHERE JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '`+beadmeta.JSONPath(beadmeta.KindMetadataKey)+`')) = '`+beadmeta.KindWorkflow+`'
+			  AND JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '`+beadmeta.JSONPath(beadmeta.WorkflowIDMetadataKey)+`')) = ?
 			ORDER BY i.created_at
 			LIMIT 1
 		`, workflowID)

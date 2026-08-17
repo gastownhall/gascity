@@ -109,10 +109,16 @@ type CleanupReapedReport struct {
 // identified for termination. Reason is set for deleted-scope targets
 // (deleted cwd, vanished --config) and empty for the classic
 // test-config-path allowlist match where the path itself is the explanation.
+// DataDir is set only when classifyDoltProcess independently allowlisted a
+// --data-dir value (see reapDataDir in dolt_cleanup_reaper.go) — it narrows
+// an already-decided reap Action, never a second classification path. A
+// non-empty DataDir alone does not trigger removal: runReapStage removes it
+// only after this target's kill is confirmed.
 type CleanupReapTarget struct {
 	PID        int    `json:"pid"`
 	ConfigPath string `json:"config_path"`
 	Reason     string `json:"reason,omitempty"`
+	DataDir    string `json:"data_dir,omitempty"`
 }
 
 // CleanupSummary aggregates totals across the three steps.
@@ -221,6 +227,10 @@ type cleanupOptions struct {
 	ActiveTestRoots   []string
 	KillProcess       func(pid int, sig syscall.Signal) error
 	ReapGracePeriod   time.Duration
+	// RemoveDataDir removes a reap target's data directory once its kill is
+	// confirmed (see runReapStage). Defaults to os.RemoveAll. Injectable for
+	// tests.
+	RemoveDataDir func(path string) error
 }
 
 // runDoltCleanup is the testable core of the `gc dolt-cleanup` command. It
@@ -384,7 +394,7 @@ func runReapStage(report *CleanupReport, opts cleanupOptions) {
 	}
 	report.Reaped.Targets = nil
 	for _, t := range plan.Reap {
-		report.Reaped.Targets = append(report.Reaped.Targets, CleanupReapTarget{PID: t.PID, ConfigPath: t.ConfigPath, Reason: t.Reason})
+		report.Reaped.Targets = append(report.Reaped.Targets, CleanupReapTarget{PID: t.PID, ConfigPath: t.ConfigPath, Reason: t.Reason, DataDir: t.DataDir})
 	}
 
 	if !opts.Force {
@@ -400,6 +410,10 @@ func runReapStage(report *CleanupReport, opts cleanupOptions) {
 	grace := opts.ReapGracePeriod
 	if grace <= 0 {
 		grace = 250 * time.Millisecond
+	}
+	removeDataDir := opts.RemoveDataDir
+	if removeDataDir == nil {
+		removeDataDir = os.RemoveAll
 	}
 
 	reaped := 0
@@ -451,8 +465,15 @@ func runReapStage(report *CleanupReport, opts cleanupOptions) {
 		gone[target.PID] = true
 	}
 	for _, target := range plan.Reap {
-		if gone[target.PID] {
-			reaped++
+		if !gone[target.PID] {
+			continue
+		}
+		reaped++
+		if target.DataDir == "" {
+			continue
+		}
+		if err := removeDataDir(target.DataDir); err != nil {
+			recordReapDataDirError(report, target.PID, target.DataDir, err)
 		}
 	}
 	report.Reaped.Count = reaped
@@ -590,6 +611,20 @@ func recordReapSignalError(report *CleanupReport, pid int, sig syscall.Signal, e
 	report.Summary.ErrorsTotal++
 }
 
+// recordReapDataDirError records a failed data-directory removal for an
+// already-confirmed-killed reap target. Mirrors recordReapSignalError; the
+// process is gone either way, so this never blocks or reverses the kill —
+// it only surfaces the removal failure for operator follow-up.
+func recordReapDataDirError(report *CleanupReport, pid int, dataDir string, err error) {
+	report.Reaped.Errors = append(report.Reaped.Errors, fmt.Sprintf("pid %d data-dir %s: %v", pid, dataDir, err))
+	report.Errors = append(report.Errors, CleanupError{
+		Stage: "reap",
+		Name:  fmt.Sprintf("pid %d data-dir", pid),
+		Error: err.Error(),
+	})
+	report.Summary.ErrorsTotal++
+}
+
 func reapSignalName(sig syscall.Signal) string {
 	switch sig {
 	case syscall.SIGTERM:
@@ -681,11 +716,15 @@ func emitOrphansSection(report CleanupReport, stdout io.Writer) {
 		if path == "" {
 			path = "(no --config flag)"
 		}
+		dataDir := ""
+		if t.DataDir != "" {
+			dataDir = fmt.Sprintf(" [data-dir %s]", t.DataDir)
+		}
 		if t.Reason != "" {
-			fmt.Fprintf(stdout, "  PID %d  %s — %s\n", t.PID, path, t.Reason) //nolint:errcheck
+			fmt.Fprintf(stdout, "  PID %d  %s — %s%s\n", t.PID, path, t.Reason, dataDir) //nolint:errcheck
 			continue
 		}
-		fmt.Fprintf(stdout, "  PID %d  %s\n", t.PID, path) //nolint:errcheck
+		fmt.Fprintf(stdout, "  PID %d  %s%s\n", t.PID, path, dataDir) //nolint:errcheck
 	}
 }
 
@@ -914,7 +953,7 @@ can still return successfully after emitting the report.`,
 				host = "127.0.0.1"
 			}
 			if fatalPortResolutionError(resolution) == nil {
-				client, openErr := newSQLCleanupDoltClient(host, strconv.Itoa(resolution.Port))
+				client, openErr := newSQLCleanupDoltClient(cityPath, host, strconv.Itoa(resolution.Port))
 				if openErr != nil {
 					opts.DoltClientOpenErr = openErr
 				} else {
@@ -948,6 +987,12 @@ func rigProtections(rigs []resolverRig, fs fsys.FS) ([]CleanupRigProtection, []r
 	var errs []rigProtectionError
 	for _, r := range orderRigsHQFirst(rigs) {
 		resolution := resolveRigDoltDatabase(r, fs)
+		if resolution.skip {
+			// Non-dolt-backed rig (e.g. mysql): not a dolt-cleanup target, so
+			// omit it from rig protections. It is then neither counted as a
+			// force_blocker nor selected for forced drop/purge (az-374).
+			continue
+		}
 		out = append(out, CleanupRigProtection{Rig: r.Name, DB: resolution.name})
 		if resolution.err != nil {
 			errs = append(errs, rigProtectionError{rig: r.Name, err: resolution.err})
@@ -1006,6 +1051,11 @@ func rigDoltDatabaseName(r resolverRig, fs fsys.FS) string {
 type rigDoltDatabaseResolution struct {
 	name string
 	err  error
+	// skip is set when the rig declares a non-dolt backend (e.g. mysql) and
+	// therefore has no dolt database for dolt-cleanup to verify, drop, or
+	// purge. Such rigs are excluded from rig protections rather than being
+	// treated as a force_blocker for a missing dolt_database (az-374).
+	skip bool
 }
 
 func resolveRigDoltDatabase(r resolverRig, fs fsys.FS) rigDoltDatabaseResolution {
@@ -1034,6 +1084,14 @@ func resolveRigDoltDatabase(r resolverRig, fs fsys.FS) rigDoltDatabaseResolution
 		return rigDoltDatabaseResolution{
 			name: r.Name,
 			err:  fmt.Errorf("parse rig metadata %s: %w", metadataPath, err),
+		}
+	}
+	// A rig that declares a non-dolt backend (e.g. mysql) has no dolt database
+	// for dolt-cleanup to act on. Skip it instead of reporting the absent
+	// dolt_database as a rig-protection force_blocker (az-374).
+	if backend, ok := meta["backend"].(string); ok {
+		if b := strings.TrimSpace(strings.ToLower(backend)); b != "" && b != "dolt" {
+			return rigDoltDatabaseResolution{name: r.Name, skip: true}
 		}
 	}
 	if db, ok := meta["dolt_database"]; ok {

@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -86,7 +87,7 @@ func newOptionSessionCandidate(t *testing.T, store beads.Store, workOptions, ses
 	}
 
 	return startCandidate{
-		session: &session,
+		info: sessiontest.SeedBead(t, session),
 		tp: TemplateParams{
 			TemplateName:     "worker",
 			SessionName:      sessionName,
@@ -129,7 +130,7 @@ func TestBuildPreparedStart_ExplicitOverrideWinsPerKey(t *testing.T) {
 		map[string]string{"model": "sonnet"},
 	)
 
-	prepared, err := buildPreparedStart(candidate, &config.City{}, store)
+	prepared, _, err := buildPreparedStart(candidate, &config.City{}, store)
 	if err != nil {
 		t.Fatalf("buildPreparedStart: %v", err)
 	}
@@ -143,7 +144,7 @@ func TestBuildPreparedStart_ExplicitOverrideWinsPerKey(t *testing.T) {
 		t.Fatalf("prepared command = %q, want work opt_effort high", prepared.cfg.Command)
 	}
 	wantPersisted := map[string]string{"model": "sonnet"}
-	if got := storedSessionOverrides(t, store, candidate.session.ID); !reflect.DeepEqual(got, wantPersisted) {
+	if got := storedSessionOverrides(t, store, candidate.info.ID); !reflect.DeepEqual(got, wantPersisted) {
 		t.Fatalf("persisted overrides = %v, want unchanged %v", got, wantPersisted)
 	}
 }
@@ -197,7 +198,7 @@ func TestBuildPreparedStartAppliesWorkBeadOptionsToCommand(t *testing.T) {
 	store := beads.NewMemStore()
 	candidate := newOptionSessionCandidate(t, store, map[string]string{"model": "opus", "effort": "high"}, nil)
 
-	prepared, err := buildPreparedStart(candidate, &config.City{}, store)
+	prepared, _, err := buildPreparedStart(candidate, &config.City{}, store)
 	if err != nil {
 		t.Fatalf("buildPreparedStart: %v", err)
 	}
@@ -207,7 +208,7 @@ func TestBuildPreparedStartAppliesWorkBeadOptionsToCommand(t *testing.T) {
 	if !strings.Contains(prepared.cfg.Command, "--effort high") {
 		t.Fatalf("prepared command = %q, want --effort high", prepared.cfg.Command)
 	}
-	metadata := storedSessionMetadata(t, store, candidate.session.ID)
+	metadata := storedSessionMetadata(t, store, candidate.info.ID)
 	if got := strings.TrimSpace(metadata["template_overrides"]); got != "" {
 		t.Fatalf("template_overrides persisted from work options: %q", got)
 	}
@@ -227,16 +228,16 @@ func TestBuildPreparedStartInitialMessageOnlyMatchesDriftHash(t *testing.T) {
 	candidate.tp.ResolvedProvider = resolved
 	candidate.tp.Command = "claude " + shellquote.Join(defaultArgs) + " --settings /tmp/city/.gc/settings.json"
 
-	prepared, err := buildPreparedStart(candidate, &config.City{}, store)
+	prepared, _, err := buildPreparedStart(candidate, &config.City{}, store)
 	if err != nil {
 		t.Fatalf("buildPreparedStart: %v", err)
 	}
-	want := runtime.CoreFingerprint(sessionCoreConfigForHash(candidate.tp, *candidate.session))
+	want := runtime.CoreFingerprint(sessionCoreConfigForHashInfo(candidate.tp, candidate.info))
 	if prepared.coreHash != want {
 		t.Fatalf("prepared coreHash = %s, want drift hash %s\nprepared command: %q\ndrift command:    %q",
 			prepared.coreHash,
 			want,
 			prepared.cfg.Command,
-			sessionCoreConfigForHash(candidate.tp, *candidate.session).Command)
+			sessionCoreConfigForHashInfo(candidate.tp, candidate.info).Command)
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // Formula file extensions. Canonical TOML is preferred, infixed TOML remains
@@ -134,22 +135,47 @@ func (p *Parser) ParseFile(path string) (*Formula, error) {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 
+	return p.parseResolvedAt(data, absPath, path)
+}
+
+// ParseTOMLAt parses formula content as though it had been read from srcPath,
+// resolving description_file references relative to srcPath's directory (the
+// documented ../assets/ form is still shadowed through the parser's layer order)
+// and caching the result under srcPath and the formula name. Authoring and
+// validation paths that hold draft bytes not yet written to disk use this so a
+// relative description_file such as "../prompts/x.md" resolves against the
+// draft's eventual on-disk location instead of an unrelated temporary directory.
+func (p *Parser) ParseTOMLAt(content []byte, srcPath string) (*Formula, error) {
+	absPath, err := filepath.Abs(srcPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve path: %w", err)
+	}
+	return p.parseResolvedAt(content, absPath, srcPath)
+}
+
+// parseResolvedAt parses formula bytes destined for absPath: it selects the
+// decoder from absPath's extension, stamps Source and ContentHash, resolves
+// description_file references relative to absPath's directory, and caches the
+// formula by absPath and name. label is the caller-facing path used in error
+// messages (the pre-Abs path the caller supplied).
+func (p *Parser) parseResolvedAt(data []byte, absPath, label string) (*Formula, error) {
 	// Detect format from extension
-	var formula *Formula
-	if IsTOMLFilename(path) {
-		formula, err = p.ParseTOML(data)
+	var f *Formula
+	var err error
+	if IsTOMLFilename(absPath) {
+		f, err = p.ParseTOML(data)
 	} else {
-		formula, err = p.Parse(data)
+		f, err = p.Parse(data)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
+		return nil, fmt.Errorf("parse %s: %w", label, err)
 	}
 
-	formula.Source = absPath
-	formula.ContentHash = contentHash(data)
+	f.Source = absPath
+	f.ContentHash = contentHash(data)
 
 	// Set source tracing info on all steps (gt-8tmz.18)
-	SetSourceInfo(formula)
+	SetSourceInfo(f)
 
 	// Resolve description_file references relative to the real formula file's
 	// directory, with asset references shadowed through formula layer order.
@@ -158,27 +184,30 @@ func (p *Parser) ParseFile(path string) (*Formula, error) {
 	// formulas fail fast on missing files; legacy formulas keep the historical
 	// best-effort behavior.
 	formulaDir := descriptionFileBaseDir(absPath)
-	strictDescriptionFiles := UsesGraphCompiler(formula)
-	if err := p.resolveDescriptionFiles(formula.Steps, formulaDir, strictDescriptionFiles, formula.Vars); err != nil {
-		return nil, fmt.Errorf("resolve description_file in %s: %w", path, err)
+	strictDescriptionFiles := UsesGraphCompiler(f)
+	if err := p.resolveDescriptionFiles(f.Steps, formulaDir, strictDescriptionFiles, f.Vars); err != nil {
+		return nil, fmt.Errorf("resolve description_file in %s: %w", label, err)
 	}
-	if err := p.resolveDescriptionFiles(formula.Template, formulaDir, strictDescriptionFiles, formula.Vars); err != nil {
-		return nil, fmt.Errorf("resolve description_file in %s: %w", path, err)
+	if err := p.resolveDescriptionFiles(f.Template, formulaDir, strictDescriptionFiles, f.Vars); err != nil {
+		return nil, fmt.Errorf("resolve description_file in %s: %w", label, err)
+	}
+	if err := p.resolveCheckPaths(f.Steps, formulaDir, strictDescriptionFiles); err != nil {
+		return nil, fmt.Errorf("resolve check path in %s: %w", label, err)
+	}
+	if err := p.resolveCheckPaths(f.Template, formulaDir, strictDescriptionFiles); err != nil {
+		return nil, fmt.Errorf("resolve check path in %s: %w", label, err)
 	}
 
-	p.cache[absPath] = formula
+	p.cache[absPath] = f
 
 	// Also cache by name for extends resolution
-	p.cache[formula.Formula] = formula
+	p.cache[f.Formula] = f
 
-	return formula, nil
+	return f, nil
 }
 
 func descriptionFileBaseDir(path string) string {
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		return filepath.Dir(resolved)
-	}
-	return filepath.Dir(path)
+	return filepath.Dir(pathutil.NormalizePathForCompare(path))
 }
 
 // Parse parses a formula from JSON bytes.
@@ -788,8 +817,14 @@ func (p *Parser) resolveDescriptionFiles(steps []*Step, baseDir string, strict b
 			} else {
 				if len(data) > descriptionFileInlineMaxBytes {
 					step.Description = descriptionFileReferenceDescription(step.DescriptionFile, path, len(data), vars)
+					// Record the resolved path out-of-band so a later
+					// substitution pass over Description (expansion
+					// templates, loop bodies) can recognize this stub and
+					// leave its embedded path untouched (gastownhall/gascity#4860).
+					step.DescriptionFileResolvedPath = path
 				} else {
 					step.Description = string(data)
+					step.DescriptionFileResolvedPath = ""
 				}
 				step.DescriptionFile = "" // consumed; don't serialize
 			}
@@ -807,18 +842,9 @@ func (p *Parser) resolveDescriptionFiles(steps []*Step, baseDir string, strict b
 }
 
 func (p *Parser) readDescriptionFile(rawPath, baseDir string) ([]byte, string, error) {
-	if assetRel, ok := descriptionAssetRelPath(rawPath); ok {
-		var winner string
-		for _, layer := range p.searchPaths {
-			candidate := filepath.Join(filepath.Dir(layer), "assets", filepath.FromSlash(assetRel))
-			if p.source.Stat(candidate) {
-				winner = candidate
-			}
-		}
-		if winner != "" {
-			data, err := p.source.ReadFile(winner)
-			return data, winner, err
-		}
+	if winner, ok := p.winningAssetPath(rawPath); ok {
+		data, err := p.source.ReadFile(winner)
+		return data, winner, err
 	}
 
 	path := rawPath
@@ -827,6 +853,116 @@ func (p *Parser) readDescriptionFile(rawPath, baseDir string) ([]byte, string, e
 	}
 	data, err := p.source.ReadFile(path)
 	return data, path, err
+}
+
+// winningAssetPath resolves a documented "../assets/<rel>" reference to the
+// highest-priority formula layer that ships the asset. searchPaths are ordered
+// lowest→highest priority, so the last matching layer wins — the same
+// shadowing rule description_file assets use. Returns ("", false) when rawPath
+// is not in the ../assets/ form or no layer ships the asset.
+func (p *Parser) winningAssetPath(rawPath string) (string, bool) {
+	assetRel, ok := descriptionAssetRelPath(rawPath)
+	if !ok {
+		return "", false
+	}
+	var winner string
+	for _, layer := range p.searchPaths {
+		candidate := filepath.Join(filepath.Dir(layer), "assets", filepath.FromSlash(assetRel))
+		if p.source.Stat(candidate) {
+			winner = candidate
+		}
+	}
+	if winner == "" {
+		return "", false
+	}
+	return winner, true
+}
+
+// resolveCheckPaths walks steps (and their children and loop bodies) and
+// rewrites each ralph check path written in the documented
+// "../assets/scripts/checks/<name>" form to the absolute path of the
+// highest-priority formula layer that ships the script, mirroring how
+// description_file assets shadow. Legacy/non-asset paths (e.g. ".gc/..." or
+// an absolute path) are left untouched. In strict (graph.v2) mode an
+// ../assets/ check that resolves to nothing is a compile error, surfacing a
+// missing or misspelled check script at cook time instead of as a confusing
+// runtime "escapes trusted roots" failure.
+func (p *Parser) resolveCheckPaths(steps []*Step, baseDir string, strict bool) error {
+	for _, step := range steps {
+		if step == nil {
+			continue
+		}
+		if err := p.resolveStepCheckPath(step, baseDir, strict); err != nil {
+			return err
+		}
+		if err := p.resolveCheckPaths(step.Children, baseDir, strict); err != nil {
+			return err
+		}
+		if step.Loop != nil {
+			if err := p.resolveCheckPaths(step.Loop.Body, baseDir, strict); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// resolveStepCheckPath rewrites a single step's "../assets/..." ralph check
+// path to its absolute layer asset. A path that still carries a template
+// placeholder (e.g. "../assets/scripts/checks/{target}.sh") is deferred: the
+// placeholder is substituted at expand time, so it cannot be matched against
+// on-disk files here. resolveExpandedCheckPaths re-runs this resolution once
+// expansion has substituted the placeholder. In strict (graph.v2) mode a
+// non-templated ../assets path that no formula layer ships is a compile error.
+func (p *Parser) resolveStepCheckPath(step *Step, baseDir string, strict bool) error {
+	if step.Ralph == nil || step.Ralph.Check == nil {
+		return nil
+	}
+	raw := step.Ralph.Check.Path
+	if strings.Contains(raw, "{") {
+		return nil
+	}
+	if resolved, ok := p.resolveCheckAssetPath(raw, baseDir); ok {
+		step.Ralph.Check.Path = resolved
+		return nil
+	}
+	if strict {
+		if _, isAsset := descriptionAssetRelPath(raw); isAsset {
+			return fmt.Errorf("step %q: check path %q not found in any formula layer", step.ID, raw)
+		}
+	}
+	return nil
+}
+
+// resolveExpandedCheckPaths re-resolves "../assets/..." ralph check paths after
+// expansion substitutes {target}/{{var}} placeholders into them. A templated
+// check path is deferred at parse time (see resolveStepCheckPath); once
+// expansion makes it concrete the path must be resolved to its absolute layer
+// asset before ApplyRalph stamps it into gc.check_path, otherwise the runtime
+// receives a relative "../assets/..." path, resolves it against the store/work
+// dir, and the check fails instead of running the shipped script. Idempotent
+// for paths that are already absolute, non-asset, or still templated.
+func (p *Parser) resolveExpandedCheckPaths(f *Formula) error {
+	return p.resolveCheckPaths(f.Steps, descriptionFileBaseDir(f.Source), UsesGraphCompiler(f))
+}
+
+// resolveCheckAssetPath resolves a "../assets/<rel>" check path to an absolute
+// script path: the highest-priority layer that ships it, falling back to the
+// formula's own pack asset (baseDir-relative) so a formula parsed outside its
+// layer set still resolves its shipped script. Returns ("", false) for
+// non-asset paths or when nothing ships the script.
+func (p *Parser) resolveCheckAssetPath(rawPath, baseDir string) (string, bool) {
+	if _, ok := descriptionAssetRelPath(rawPath); !ok {
+		return "", false
+	}
+	if winner, ok := p.winningAssetPath(rawPath); ok {
+		return winner, true
+	}
+	candidate := filepath.Clean(filepath.Join(baseDir, filepath.FromSlash(rawPath)))
+	if p.source.Stat(candidate) {
+		return candidate, true
+	}
+	return "", false
 }
 
 func descriptionAssetRelPath(rawPath string) (string, bool) {

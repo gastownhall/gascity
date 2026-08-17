@@ -5,7 +5,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
@@ -164,6 +167,58 @@ func TestEdit_SetsAgentSuspended(t *testing.T) {
 	t.Error("mayor not found after edit")
 }
 
+// TestDo_SerializesConcurrentCalls proves Editor.Do runs its callbacks under
+// the same mutex as Edit, so a config-write surface that runs outside the
+// load→mutate→write shape (pack import add/remove) never overlaps another
+// mutation of the same city. If Do did not lock, the concurrent callbacks would
+// observe more than one in-flight at once.
+func TestDo_SerializesConcurrentCalls(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, minimalCity())
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	var inFlight, overlaps, ran int32
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = ed.Do(func() error {
+				if atomic.AddInt32(&inFlight, 1) != 1 {
+					atomic.StoreInt32(&overlaps, 1)
+				}
+				time.Sleep(time.Millisecond)
+				atomic.AddInt32(&ran, 1)
+				atomic.AddInt32(&inFlight, -1)
+				return nil
+			})
+		}()
+	}
+	wg.Wait()
+
+	if overlaps != 0 {
+		t.Fatal("Editor.Do allowed concurrent callbacks to overlap; the lock did not serialize")
+	}
+	if ran != 32 {
+		t.Fatalf("ran = %d, want 32", ran)
+	}
+}
+
+// TestDo_PropagatesResult confirms Do surfaces the callback's error unchanged.
+func TestDo_PropagatesResult(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, minimalCity())
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	sentinel := errors.New("boom")
+	if err := ed.Do(func() error { return sentinel }); !errors.Is(err, sentinel) {
+		t.Fatalf("Do error = %v, want %v", err, sentinel)
+	}
+	if err := ed.Do(func() error { return nil }); err != nil {
+		t.Fatalf("Do(nil) = %v, want nil", err)
+	}
+}
+
 func TestEdit_ValidationFailure(t *testing.T) {
 	dir := t.TempDir()
 	path := writeTOML(t, dir, minimalCity())
@@ -298,6 +353,33 @@ func TestAgentOrigin_Inline(t *testing.T) {
 	}
 }
 
+// TestLoadRaw_MatchesGateBasis verifies Editor.LoadRaw returns the same raw
+// (pre-expansion, site-bound) config the mutation gate uses. The read path's
+// provenance must be computed from this exact basis so pack_derived agrees
+// with the ErrPackDerived/409 gate (Editor.UpdateAgent → AgentOrigin).
+func TestLoadRaw_MatchesGateBasis(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, minimalCity())
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	raw, err := ed.LoadRaw()
+	if err != nil {
+		t.Fatalf("LoadRaw: %v", err)
+	}
+	if raw == nil {
+		t.Fatal("LoadRaw returned nil config")
+	}
+	// minimalCity declares "mayor" inline. AgentOrigin computed against the
+	// LoadRaw basis must agree it is inline (not pack-derived), which is the
+	// exact decision the 409 gate makes.
+	if got := configedit.AgentOrigin(raw, raw, "mayor"); got != configedit.OriginInline {
+		t.Errorf("AgentOrigin(LoadRaw) = %v, want OriginInline", got)
+	}
+	if len(raw.Agents) != 1 || raw.Agents[0].Name != "mayor" {
+		t.Errorf("LoadRaw agents = %+v, want single inline mayor", raw.Agents)
+	}
+}
+
 func TestAgentOrigin_Derived(t *testing.T) {
 	raw := &config.City{
 		Agents: []config.Agent{{Name: "mayor"}},
@@ -375,6 +457,38 @@ func TestAddOrUpdateAgentPatch_Existing(t *testing.T) {
 	}
 	if len(cfg.Patches.Agents) != 1 {
 		t.Fatalf("expected 1 patch (updated), got %d", len(cfg.Patches.Agents))
+	}
+	if cfg.Patches.Agents[0].Suspended == nil || !*cfg.Patches.Agents[0].Suspended {
+		t.Error("expected suspended=true after update")
+	}
+}
+
+// TestAddOrUpdateAgentPatch_ExistingRigKeyed verifies an existing patch
+// authored with the new rig= key is updated in place when addressed by its
+// qualified identity, rather than shadowed by a new dir-keyed duplicate. The
+// pre-fix match keyed on Dir only, so a rig-keyed patch (Dir empty) never
+// matched "my-rig/polecat" and a second, conflicting block was appended.
+func TestAddOrUpdateAgentPatch_ExistingRigKeyed(t *testing.T) {
+	suspended := false
+	cfg := &config.City{
+		Patches: config.Patches{
+			Agents: []config.AgentPatch{
+				{Rig: "my-rig", Name: "polecat", Suspended: &suspended},
+			},
+		},
+	}
+	err := configedit.AddOrUpdateAgentPatch(cfg, "my-rig/polecat", func(p *config.AgentPatch) {
+		s := true
+		p.Suspended = &s
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Patches.Agents) != 1 {
+		t.Fatalf("expected 1 patch (updated in place), got %d: %#v", len(cfg.Patches.Agents), cfg.Patches.Agents)
+	}
+	if cfg.Patches.Agents[0].Rig != "my-rig" || cfg.Patches.Agents[0].Dir != "" {
+		t.Errorf("patch identity = {Dir:%q Rig:%q}, want the rig-keyed patch updated in place, not a dir-keyed duplicate", cfg.Patches.Agents[0].Dir, cfg.Patches.Agents[0].Rig)
 	}
 	if cfg.Patches.Agents[0].Suspended == nil || !*cfg.Patches.Agents[0].Suspended {
 		t.Error("expected suspended=true after update")
@@ -1847,39 +1961,6 @@ func TestDeleteAgent_NotFound(t *testing.T) {
 	}
 }
 
-func TestCreateRig(t *testing.T) {
-	dir := t.TempDir()
-	path := writeTOML(t, dir, minimalCity())
-	ed := configedit.NewEditor(fsys.OSFS{}, path)
-
-	err := ed.CreateRig(config.Rig{Name: "new-rig", Path: "/tmp/new-rig"})
-	if err != nil {
-		t.Fatalf("CreateRig: %v", err)
-	}
-
-	cfg := readTOML(t, path)
-	found := false
-	for _, r := range cfg.Rigs {
-		if r.Name == "new-rig" {
-			found = true
-		}
-	}
-	if !found {
-		t.Error("rig 'new-rig' not found after create")
-	}
-}
-
-func TestCreateRig_Duplicate(t *testing.T) {
-	dir := t.TempDir()
-	path := writeTOML(t, dir, cityWithRig())
-	ed := configedit.NewEditor(fsys.OSFS{}, path)
-
-	err := ed.CreateRig(config.Rig{Name: "my-rig", Path: "/tmp/x"})
-	if err == nil {
-		t.Error("expected error for duplicate rig")
-	}
-}
-
 func TestUpdateRig(t *testing.T) {
 	dir := t.TempDir()
 	path := writeTOML(t, dir, cityWithRig())
@@ -2290,6 +2371,118 @@ func TestUpdateProvider_PreservesUnchangedFields(t *testing.T) {
 	}
 }
 
+// cityWithModelProvider returns a city.toml with a custom provider whose
+// options_schema declares model + permission_mode, so option_defaults for
+// those keys pass schema validation.
+func cityWithModelProvider() string {
+	return `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "mayor"
+provider = "custom"
+
+[providers.custom]
+command = "custom-cli"
+
+[[providers.custom.options_schema]]
+key = "model"
+label = "Model"
+type = "select"
+default = "x"
+
+  [[providers.custom.options_schema.choices]]
+  value = "x"
+  label = "X"
+  flag_args = ["--model", "x"]
+
+  [[providers.custom.options_schema.choices]]
+  value = "y"
+  label = "Y"
+  flag_args = ["--model", "y"]
+
+[[providers.custom.options_schema]]
+key = "permission_mode"
+label = "Permission Mode"
+type = "select"
+default = "plan"
+
+  [[providers.custom.options_schema.choices]]
+  value = "plan"
+  label = "Plan"
+  flag_args = ["--permission-mode", "plan"]
+
+  [[providers.custom.options_schema.choices]]
+  value = "unrestricted"
+  label = "Unrestricted"
+  flag_args = ["--dangerously-skip-permissions"]
+`
+}
+
+// TestCreateProvider_OptionDefaults verifies a create with an option_defaults
+// map (e.g. model) round-trips to the provider's TOML.
+func TestCreateProvider_OptionDefaults(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, minimalCity())
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	spec := config.ProviderSpec{
+		Command: "custom-cli",
+		OptionsSchema: []config.ProviderOption{{
+			Key:   "model",
+			Label: "Model",
+			Type:  "select",
+			Choices: []config.OptionChoice{
+				{Value: "x", Label: "X", FlagArgs: []string{"--model", "x"}},
+				{Value: "y", Label: "Y", FlagArgs: []string{"--model", "y"}},
+			},
+		}},
+		OptionDefaults: map[string]string{"model": "x"},
+	}
+	if err := ed.CreateProvider("myprov", spec); err != nil {
+		t.Fatalf("CreateProvider: %v", err)
+	}
+
+	cfg := readTOML(t, path)
+	got := cfg.Providers["myprov"]
+	if got.OptionDefaults["model"] != "x" {
+		t.Errorf("OptionDefaults[model] = %q, want %q", got.OptionDefaults["model"], "x")
+	}
+}
+
+// TestUpdateProvider_OptionDefaultsMergeNotReplace verifies that updating
+// option_defaults merges keys: a model-only edit changes model while leaving
+// a pre-existing unrelated option-default key untouched.
+func TestUpdateProvider_OptionDefaultsMergeNotReplace(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, cityWithModelProvider())
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	// Seed a provider with two option defaults.
+	if err := ed.UpdateProvider("custom", configedit.ProviderUpdate{
+		OptionDefaults: map[string]string{"model": "x", "permission_mode": "unrestricted"},
+	}); err != nil {
+		t.Fatalf("seed UpdateProvider: %v", err)
+	}
+
+	// Edit only model; permission_mode must survive.
+	if err := ed.UpdateProvider("custom", configedit.ProviderUpdate{
+		OptionDefaults: map[string]string{"model": "y"},
+	}); err != nil {
+		t.Fatalf("UpdateProvider: %v", err)
+	}
+
+	cfg := readTOML(t, path)
+	got := cfg.Providers["custom"]
+	if got.OptionDefaults["model"] != "y" {
+		t.Errorf("OptionDefaults[model] = %q, want %q", got.OptionDefaults["model"], "y")
+	}
+	if got.OptionDefaults["permission_mode"] != "unrestricted" {
+		t.Errorf("OptionDefaults[permission_mode] = %q, want %q (merge, not replace)",
+			got.OptionDefaults["permission_mode"], "unrestricted")
+	}
+}
+
 func TestDeleteProvider(t *testing.T) {
 	dir := t.TempDir()
 	path := writeTOML(t, dir, cityWithProvider())
@@ -2386,6 +2579,122 @@ func TestDeleteAgentPatch_NotFound(t *testing.T) {
 
 	if err := ed.DeleteAgentPatch("nonexistent"); err == nil {
 		t.Error("expected error for nonexistent agent patch")
+	}
+}
+
+// TestSetAndDeleteAgentPatch_Rig verifies the editor stores, upserts, and
+// deletes rig-targeted patches (including the "*" wildcard) by their resolved
+// qualified identity rather than by Dir alone — which is empty for rig-keyed
+// patches. Two distinct rig-only patches sharing a name must not collide on
+// their empty Dir, and each must be deletable by its rig-qualified name.
+func TestSetAndDeleteAgentPatch_Rig(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, minimalCity())
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	suspended := true
+	if err := ed.SetAgentPatch(config.AgentPatch{Rig: "rigA", Name: "worker", Suspended: &suspended}); err != nil {
+		t.Fatalf("SetAgentPatch rigA: %v", err)
+	}
+	if err := ed.SetAgentPatch(config.AgentPatch{Rig: "*", Name: "worker", Suspended: &suspended}); err != nil {
+		t.Fatalf("SetAgentPatch wildcard: %v", err)
+	}
+	cfg := readTOML(t, path)
+	if len(cfg.Patches.Agents) != 2 {
+		t.Fatalf("patches.agent count = %d, want 2 (rig-only patches must not collide on empty Dir)", len(cfg.Patches.Agents))
+	}
+
+	// Upsert on the same identity replaces in place; it must not append a
+	// third block nor disturb the other rig's patch.
+	suspended = false
+	if err := ed.SetAgentPatch(config.AgentPatch{Rig: "rigA", Name: "worker", Suspended: &suspended}); err != nil {
+		t.Fatalf("SetAgentPatch rigA replace: %v", err)
+	}
+	cfg = readTOML(t, path)
+	if len(cfg.Patches.Agents) != 2 {
+		t.Fatalf("patches.agent count after upsert = %d, want 2 (should replace, not append)", len(cfg.Patches.Agents))
+	}
+
+	// Each patch deletes by its rig-qualified identity.
+	if err := ed.DeleteAgentPatch("rigA/worker"); err != nil {
+		t.Fatalf("DeleteAgentPatch rigA/worker: %v", err)
+	}
+	if err := ed.DeleteAgentPatch("*/worker"); err != nil {
+		t.Fatalf("DeleteAgentPatch */worker: %v", err)
+	}
+	cfg = readTOML(t, path)
+	if len(cfg.Patches.Agents) != 0 {
+		t.Errorf("patches.agent count after deletes = %d, want 0", len(cfg.Patches.Agents))
+	}
+}
+
+// TestSetAgentPatch_RejectsDirPlusRig verifies the editor write boundary
+// rejects a patch that sets both the legacy dir key and the new rig key
+// (including the "*" wildcard) — a mutually-exclusive combination that would
+// hard-fail the next config load. Rejection happens inside Edit before the
+// write step, so city.toml is left untouched and carries no invalid patch.
+func TestSetAgentPatch_RejectsDirPlusRig(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		rig  string
+	}{
+		{name: "dir and specific rig", rig: "rigB"},
+		{name: "dir and wildcard rig", rig: "*"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := writeTOML(t, dir, minimalCity())
+			ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+			err := ed.SetAgentPatch(config.AgentPatch{Dir: "rigA", Rig: tc.rig, Name: "worker"})
+			if err == nil {
+				t.Fatal("SetAgentPatch(dir+rig) = nil, want error")
+			}
+			if !strings.Contains(err.Error(), "use only one of dir or rig") {
+				t.Fatalf("error = %q, want 'use only one of dir or rig'", err)
+			}
+			cfg := readTOML(t, path)
+			if len(cfg.Patches.Agents) != 0 {
+				t.Errorf("patches.agent count = %d, want 0 (invalid patch must not be written)", len(cfg.Patches.Agents))
+			}
+		})
+	}
+}
+
+// TestStripAgentPatchSuspended_RigKeyedIdentity verifies the suspend-strip
+// cleanup keys on the canonical patch identity for rig= and rig="*" patches,
+// not on Dir alone. A patch authored with the new rig key must be reachable by
+// its rig-qualified identity ("rigA/worker", "*/worker") so a durable
+// agent.toml write can clear a stale suspend override without leaving a
+// shadowing [[patches.agent]] block behind.
+func TestStripAgentPatchSuspended_RigKeyedIdentity(t *testing.T) {
+	cfg := &config.City{
+		Patches: config.Patches{
+			Agents: []config.AgentPatch{
+				{Rig: "rigA", Name: "worker", Suspended: boolPtrTest(true)},
+				{Rig: "*", Name: "worker", Suspended: boolPtrTest(true)},
+				{Dir: "", Name: "worker", Suspended: boolPtrTest(true)},
+			},
+		},
+	}
+	// Strip the rig="*" wildcard patch by its "*/worker" identity only.
+	if !configedit.StripAgentPatchSuspended(cfg, "*/worker") {
+		t.Fatal("StripAgentPatchSuspended should report a change for */worker")
+	}
+	if got := len(cfg.Patches.Agents); got != 2 {
+		t.Fatalf("Patches.Agents len = %d, want 2; got %#v", got, cfg.Patches.Agents)
+	}
+	for _, p := range cfg.Patches.Agents {
+		if p.Rig == "*" {
+			t.Errorf("wildcard patch should be removed; remaining: %#v", p)
+		}
+	}
+	// Strip the rig="rigA" patch by its "rigA/worker" identity.
+	if !configedit.StripAgentPatchSuspended(cfg, "rigA/worker") {
+		t.Fatal("StripAgentPatchSuspended should report a change for rigA/worker")
+	}
+	if got := len(cfg.Patches.Agents); got != 1 || cfg.Patches.Agents[0].Dir != "" || cfg.Patches.Agents[0].Rig != "" {
+		t.Fatalf("after stripping rigA, expected only the city-scoped patch, got %#v", cfg.Patches.Agents)
 	}
 }
 
@@ -2660,6 +2969,37 @@ func TestMergeOrderOverrideMergesIdempotent(t *testing.T) {
 	cfg = readTOML(t, path)
 	if got := cfg.Orders.Overrides[0].Idempotent; got == nil || *got {
 		t.Fatalf("idempotent=false should be applied through merge, got %v", got)
+	}
+}
+
+func TestMergeOrderOverrideMergesCheckTimeout(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, minimalCity())
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	sixty := "60s"
+	if err := ed.SetOrderOverride(config.OrderOverride{Name: "unrouted-feeder", CheckTimeout: &sixty}); err != nil {
+		t.Fatalf("SetOrderOverride: %v", err)
+	}
+
+	// A partial merge that does not mention check_timeout must PRESERVE it.
+	trig := "cooldown"
+	if err := ed.MergeOrderOverride(config.OrderOverride{Name: "unrouted-feeder", Trigger: &trig}); err != nil {
+		t.Fatalf("MergeOrderOverride: %v", err)
+	}
+	cfg := readTOML(t, path)
+	if got := cfg.Orders.Overrides[0].CheckTimeout; got == nil || *got != "60s" {
+		t.Fatalf("check_timeout should be preserved through a partial merge, got %v", got)
+	}
+
+	// An explicit check_timeout must be APPLIED through the merge.
+	ninety := "90s"
+	if err := ed.MergeOrderOverride(config.OrderOverride{Name: "unrouted-feeder", CheckTimeout: &ninety}); err != nil {
+		t.Fatalf("MergeOrderOverride: %v", err)
+	}
+	cfg = readTOML(t, path)
+	if got := cfg.Orders.Overrides[0].CheckTimeout; got == nil || *got != "90s" {
+		t.Fatalf("check_timeout=90s should be applied through merge, got %v", got)
 	}
 }
 

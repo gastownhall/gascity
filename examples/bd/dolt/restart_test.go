@@ -233,6 +233,43 @@ func TestRestartRefusesRecentENOSPCUnlessForced(t *testing.T) {
 	}
 }
 
+// TestRestartTreatsLoopbackAndWildcardHostsAsLocalManaged pins the P0.5
+// host-classification contract: the managed-server bind default is
+// 127.0.0.1, and 0.0.0.0 remains the explicit wildcard opt-out — both must
+// be treated as a GC-managed local server (restart proceeds), exactly like
+// an unset GC_DOLT_HOST. Without 127.0.0.1 in the local set, adopting the
+// loopback bind default would break managed-server detection.
+func TestRestartTreatsLoopbackAndWildcardHostsAsLocalManaged(t *testing.T) {
+	root := repoRoot(t)
+
+	for _, host := range []string{"127.0.0.1", "0.0.0.0", "localhost", "::1"} {
+		t.Run(host, func(t *testing.T) {
+			port, cleanup := startReachableTCPListener(t)
+			defer cleanup()
+
+			cityPath := t.TempDir()
+			bdLog := writeFakeBeadsBDForRestart(t, cityPath, map[string]int{"stop": 0, "start": 0})
+
+			out, err := runRestartWithEnv(t, cityPath, root, []string{
+				fmt.Sprintf("GC_DOLT_PORT=%d", port),
+				"GC_DOLT_HOST=" + host,
+			})
+			if err != nil {
+				t.Fatalf("gc dolt restart refused GC_DOLT_HOST=%s as if remote: %v\n%s", host, err, out)
+			}
+
+			data, err := os.ReadFile(bdLog)
+			if err != nil {
+				t.Fatalf("read fake bd log: %v", err)
+			}
+			got := strings.Join(strings.Fields(string(data)), " ")
+			if got != "stop start" {
+				t.Fatalf("expected ops in order 'stop start' for local host %s, got %q\noutput:\n%s", host, got, out)
+			}
+		})
+	}
+}
+
 func TestRestartRejectsRemoteHostWithDiagnostic(t *testing.T) {
 	root := repoRoot(t)
 	port, cleanup := startReachableTCPListener(t)

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 )
@@ -202,9 +203,8 @@ func TestLifecycleCoordination_InitRigAddStart(t *testing.T) {
 	assertHooksAbsent(t, rigPath, "after start")
 }
 
-// TestLifecycleCoordination_StartOrder verifies that start precedes any
-// init call when using startBeadsLifecycle. This catches bugs where init
-// runs before the backing service is ready.
+// TestLifecycleCoordination_StartOrder verifies that start runs exactly once
+// before city initialization and each configured rig initialization.
 func TestLifecycleCoordination_StartOrder(t *testing.T) {
 	cityPath := t.TempDir()
 	cityName := "ordertest"
@@ -229,19 +229,17 @@ func TestLifecycleCoordination_StartOrder(t *testing.T) {
 	}
 
 	ops := readOpLog(t, logFile)
-	if len(ops) < 2 {
-		t.Fatalf("expected at least 2 ops, got %d: %v", len(ops), ops)
+	want := []string{
+		"start",
+		"init " + cityPath + " or hq",
+		"init " + rigPath + " mr mr",
 	}
-
-	// First op must be start.
-	if !strings.HasPrefix(ops[0], "start") {
-		t.Fatalf("first op should be start, got: %s", ops[0])
+	if len(ops) != len(want) {
+		t.Fatalf("expected exactly %d lifecycle ops, got %d: %v", len(want), len(ops), ops)
 	}
-
-	// All subsequent ops must be init.
-	for i := 1; i < len(ops); i++ {
-		if !strings.HasPrefix(ops[i], "init ") {
-			t.Fatalf("op[%d] should be init, got: %s", i, ops[i])
+	for i := range want {
+		if ops[i] != want[i] {
+			t.Fatalf("op[%d] = %q, want %q; all ops: %v", i, ops[i], want[i], ops)
 		}
 	}
 }
@@ -362,7 +360,7 @@ func TestLifecycleCoordination_InitDirIfReadySkipsProviderForPostgresCityAndRig(
 	}
 }
 
-func TestLifecycleCoordination_InitDirIfReady_RetriesTransientManagedDoltFailure(t *testing.T) {
+func TestLifecycleCoordination_InitDirIfReady_PropagatesManagedDoltInitFailure(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -372,14 +370,15 @@ func TestLifecycleCoordination_InitDirIfReady_RetriesTransientManagedDoltFailure
 
 	originalEnsure := initDirIfReadyEnsureBeadsProvider
 	originalInitAndHook := initDirIfReadyInitAndHookDir
-	originalDelay := initDirIfReadyRetryDelay
+	originalWait := initDirIfReadyWaitForManagedDolt
 	t.Cleanup(func() {
 		initDirIfReadyEnsureBeadsProvider = originalEnsure
 		initDirIfReadyInitAndHookDir = originalInitAndHook
-		initDirIfReadyRetryDelay = originalDelay
+		initDirIfReadyWaitForManagedDolt = originalWait
 	})
 
-	initDirIfReadyRetryDelay = 0
+	// Bypass the pre-flight wait; we're testing initAndHookDir error propagation.
+	initDirIfReadyWaitForManagedDolt = func(_ string, _ time.Duration) error { return nil }
 
 	var ensureCalls int
 	initDirIfReadyEnsureBeadsProvider = func(_ string) error {
@@ -390,28 +389,25 @@ func TestLifecycleCoordination_InitDirIfReady_RetriesTransientManagedDoltFailure
 	var initCalls int
 	initDirIfReadyInitAndHookDir = func(_, _, _ string) error {
 		initCalls++
-		if initCalls == 1 {
-			return fmt.Errorf("exec beads init: signal: terminated")
-		}
-		return nil
+		return fmt.Errorf("exec beads init: signal: terminated")
 	}
 
 	deferred, err := initDirIfReady(dir, dir, "gc")
-	if err != nil {
-		t.Fatalf("initDirIfReady() error = %v, want nil after retry", err)
+	if err == nil {
+		t.Fatal("initDirIfReady() error = nil, want propagated initAndHookDir failure")
 	}
 	if deferred {
 		t.Fatal("initDirIfReady() deferred = true, want false")
 	}
-	if ensureCalls != 2 {
-		t.Fatalf("ensureBeadsProvider calls = %d, want 2", ensureCalls)
+	if ensureCalls != 1 {
+		t.Fatalf("ensureBeadsProvider calls = %d, want 1", ensureCalls)
 	}
-	if initCalls != 2 {
-		t.Fatalf("initAndHookDir calls = %d, want 2", initCalls)
+	if initCalls != 1 {
+		t.Fatalf("initAndHookDir calls = %d, want 1 (no retry)", initCalls)
 	}
 }
 
-func TestLifecycleCoordination_InitDirIfReady_RetriesManagedDoltSchemaNotReady(t *testing.T) {
+func TestLifecycleCoordination_InitDirIfReady_PropagatesManagedDoltSchemaError(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -421,34 +417,32 @@ func TestLifecycleCoordination_InitDirIfReady_RetriesManagedDoltSchemaNotReady(t
 
 	originalEnsure := initDirIfReadyEnsureBeadsProvider
 	originalInitAndHook := initDirIfReadyInitAndHookDir
-	originalDelay := initDirIfReadyRetryDelay
+	originalWait := initDirIfReadyWaitForManagedDolt
 	t.Cleanup(func() {
 		initDirIfReadyEnsureBeadsProvider = originalEnsure
 		initDirIfReadyInitAndHookDir = originalInitAndHook
-		initDirIfReadyRetryDelay = originalDelay
+		initDirIfReadyWaitForManagedDolt = originalWait
 	})
 
-	initDirIfReadyRetryDelay = 0
+	// Bypass the pre-flight wait; we're testing initAndHookDir error propagation.
+	initDirIfReadyWaitForManagedDolt = func(_ string, _ time.Duration) error { return nil }
 	initDirIfReadyEnsureBeadsProvider = func(_ string) error { return nil }
 
 	var initCalls int
 	initDirIfReadyInitAndHookDir = func(_, _, _ string) error {
 		initCalls++
-		if initCalls == 1 {
-			return fmt.Errorf("bd list: exit status 1: table not found: issues")
-		}
-		return nil
+		return fmt.Errorf("bd list: exit status 1: table not found: issues")
 	}
 
 	deferred, err := initDirIfReady(dir, dir, "gc")
-	if err != nil {
-		t.Fatalf("initDirIfReady() error = %v, want nil after retry", err)
+	if err == nil {
+		t.Fatal("initDirIfReady() error = nil, want propagated schema error")
 	}
 	if deferred {
 		t.Fatal("initDirIfReady() deferred = true, want false")
 	}
-	if initCalls != 2 {
-		t.Fatalf("initAndHookDir calls = %d, want 2", initCalls)
+	if initCalls != 1 {
+		t.Fatalf("initAndHookDir calls = %d, want 1 (no retry)", initCalls)
 	}
 }
 
@@ -466,14 +460,10 @@ func TestLifecycleCoordination_InitDirIfReady_DoesNotRetryNonManagedProviderFail
 
 	originalEnsure := initDirIfReadyEnsureBeadsProvider
 	originalInitAndHook := initDirIfReadyInitAndHookDir
-	originalDelay := initDirIfReadyRetryDelay
 	t.Cleanup(func() {
 		initDirIfReadyEnsureBeadsProvider = originalEnsure
 		initDirIfReadyInitAndHookDir = originalInitAndHook
-		initDirIfReadyRetryDelay = originalDelay
 	})
-
-	initDirIfReadyRetryDelay = 0
 
 	var ensureCalls int
 	initDirIfReadyEnsureBeadsProvider = func(_ string) error {

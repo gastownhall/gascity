@@ -150,7 +150,7 @@ func cmdConvoyCreateWithOptionsJSON(args []string, opts convoyCreateOptions, jso
 		fmt.Fprintf(stderr, "gc convoy create: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	emitLoadCityConfigWarnings(stderr, prov)
+	emitLoadCityConfigWarnings(configWarnWriter(jsonOut, stderr), prov)
 
 	issueIDs := []string(nil)
 	if len(args) > 1 {
@@ -306,13 +306,9 @@ child issues.`,
 
 // cmdConvoyList is the CLI entry point for listing convoys.
 func cmdConvoyList(jsonOut bool, stdout, stderr io.Writer) int {
-	cityPath, err := resolveCity()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc convoy list: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	c, reason := convoyListAPIClient(cityPath)
-	return routeConvoyList(cityPath, c, reason, jsonOut, stdout, stderr)
+	return routeReadCmd("convoy list", stderr, convoyListAPIClient, func(cityPath string, c *api.Client, nilReason string) int {
+		return routeConvoyList(cityPath, c, nilReason, jsonOut, stdout, stderr)
+	})
 }
 
 // convoyListAPIClient returns (client, "") when the API path is available,
@@ -335,33 +331,20 @@ var convoyListAPIClient = func(cityPath string) (*api.Client, string) {
 // fallbackable error, the whole operation falls back to local reads so
 // output is consistent (partial failure would produce surprising gaps).
 func routeConvoyList(cityPath string, c *api.Client, nilReason string, jsonOut bool, stdout, stderr io.Writer) int {
-	const cmdName = "convoy list"
-	if c != nil {
-		cr, err := c.ListConvoys()
-		switch {
-		case err == nil:
-			progress, progErr := fetchConvoyProgress(c, cr.Body)
-			if progErr == nil {
-				logRoute(stderr, cmdName, "api", "")
-				return renderConvoyListFromAPI(cr, progress, jsonOut, stdout, stderr)
+	var cr api.CachedRead[[]beads.Bead]
+	var progress []api.ConvoyCheckView
+	return routeRead(c, "convoy list", nilReason, stderr,
+		func() error {
+			var err error
+			if cr, err = c.ListConvoys(); err != nil {
+				return err
 			}
-			if !api.ShouldFallbackForRead(progErr) {
-				logRoute(stderr, cmdName, "api", "error")
-				fmt.Fprintf(stderr, "gc convoy list: %v\n", progErr) //nolint:errcheck // best-effort stderr
-				return 1
-			}
-			logRoute(stderr, cmdName, "fallback", api.FallbackReason(progErr))
-		case !api.ShouldFallbackForRead(err):
-			logRoute(stderr, cmdName, "api", "error")
-			fmt.Fprintf(stderr, "gc convoy list: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		default:
-			logRoute(stderr, cmdName, "fallback", api.FallbackReason(err))
-		}
-	} else {
-		logRoute(stderr, cmdName, "fallback", nilReason)
-	}
-	return doConvoyListFallback(cityPath, jsonOut, stdout, stderr)
+			progress, err = fetchConvoyProgress(c, cr.Body)
+			return err
+		},
+		func() int { return renderConvoyListFromAPI(cr, progress, jsonOut, stdout, stderr) },
+		func() int { return doConvoyListFallback(cityPath, jsonOut, stdout, stderr) },
+	)
 }
 
 // fetchConvoyProgress calls /convoy/{id}/check for each convoy in list and
@@ -442,7 +425,13 @@ func doConvoyListFallback(cityPath string, jsonOut bool, stdout, stderr io.Write
 }
 
 func convoyStoreCandidates(cfg *config.City, cityPath, beadID string) []string {
-	if rawBeadsProviderForScope(cityPath, cityPath) == "file" && !fileStoreUsesScopedRoots(cityPath) {
+	return convoyStoreCandidatesWithProvider(cfg, cityPath, beadID, func(scopeRoot string) string {
+		return rawBeadsProviderForScope(scopeRoot, cityPath)
+	})
+}
+
+func convoyStoreCandidatesWithProvider(cfg *config.City, cityPath, beadID string, providerForScope func(string) string) []string {
+	if providerForScope(cityPath) == "file" && !fileStoreUsesScopedRoots(cityPath) {
 		legacyCityOnly := true
 		if cfg != nil {
 			for _, rig := range cfg.Rigs {
@@ -450,7 +439,7 @@ func convoyStoreCandidates(cfg *config.City, cityPath, beadID string) []string {
 					continue
 				}
 				scopeRoot := resolveStoreScopeRoot(cityPath, rig.Path)
-				if rawBeadsProviderForScope(scopeRoot, cityPath) != "file" || (!samePath(scopeRoot, cityPath) && scopeUsesFileStoreContract(scopeRoot)) {
+				if providerForScope(scopeRoot) != "file" || (!samePath(scopeRoot, cityPath) && scopeUsesFileStoreContract(scopeRoot)) {
 					legacyCityOnly = false
 					break
 				}
@@ -523,30 +512,53 @@ func openConvoyStores(cfg *config.City, cityPath, beadID string, openStore func(
 }
 
 func resolveConvoyStore(convoyID string, cfg *config.City, cityPath string, openStore func(string) (beads.Store, error)) (beads.Store, error) {
-	stores, err := openConvoyStores(cfg, cityPath, convoyID, openStore)
+	store, _, err := resolveOwningStoreDir(convoyID, cfg, cityPath, openStore)
+	return store, err
+}
+
+// resolveOwningStoreDir resolves the store that owns beadID and the candidate
+// store directory it was found in, probing each prefix-aware convoy store
+// candidate rooted at cityPath. It returns an error when beadID resolves in
+// more than one store (ambiguous) and beads.ErrNotFound when no candidate
+// holds it.
+//
+// The candidate set is the convoy class-store ordering (the graph store the
+// convoy bead lives in, plus the per-rig work stores its members may live in).
+// The scan does not stop at the first hit: it probes every candidate so a bead
+// present in more than one store is rejected rather than silently resolved to
+// one, enforcing the "resolution requires a uniquely addressable bead id"
+// contract. A candidate's not-found probe is skipped; any other error is
+// returned immediately. The returned directory maps back to the owning
+// candidate.
+func resolveOwningStoreDir(beadID string, cfg *config.City, cityPath string, openStore func(string) (beads.Store, error)) (beads.Store, string, error) {
+	candidates, err := openConvoyStores(cfg, cityPath, beadID, openStore)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	var foundStore beads.Store
-	foundDir := ""
-	for _, candidate := range stores {
-		store := candidate.store
-		if _, err := store.Get(convoyID); err != nil {
+	var (
+		foundStore beads.Store
+		foundDir   string
+	)
+	for _, candidate := range candidates {
+		if candidate.store == nil {
+			continue
+		}
+		if _, err := candidate.store.Get(beadID); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, err
+			return nil, "", err
 		}
 		if foundStore != nil {
-			return nil, fmt.Errorf("convoy %s exists in multiple stores (%s and %s); direct convoy commands require a uniquely resolvable convoy id", convoyID, foundDir, candidate.path)
+			return nil, "", fmt.Errorf("bead %s exists in multiple stores (%s and %s); resolution requires a uniquely addressable bead id", beadID, foundDir, candidate.path)
 		}
-		foundStore = store
+		foundStore = candidate.store
 		foundDir = candidate.path
 	}
-	if foundStore != nil {
-		return foundStore, nil
+	if foundStore == nil {
+		return nil, "", beads.ErrNotFound
 	}
-	return nil, beads.ErrNotFound
+	return foundStore, foundDir, nil
 }
 
 func openAllConvoyStores(stderr io.Writer, cmdName string) ([]convoyStoreView, int) {
@@ -832,13 +844,9 @@ func cmdConvoyStatus(args []string, jsonOut bool, stdout, stderr io.Writer) int 
 		return doConvoyStatusWithJSON(nil, args, jsonOut, stdout, stderr)
 	}
 	convoyID := args[0]
-	cityPath, err := resolveCity()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc convoy status: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	c, reason := convoyStatusAPIClient(cityPath)
-	return routeConvoyStatus(cityPath, convoyID, c, reason, jsonOut, stdout, stderr)
+	return routeReadCmd("convoy status", stderr, convoyStatusAPIClient, func(cityPath string, c *api.Client, nilReason string) int {
+		return routeConvoyStatus(cityPath, convoyID, c, nilReason, jsonOut, stdout, stderr)
+	})
 }
 
 // convoyStatusAPIClient returns (client, "") when the API path is available,
@@ -854,30 +862,23 @@ var convoyStatusAPIClient = func(cityPath string) (*api.Client, string) {
 // controller is up; otherwise falls back to the local store resolver.
 // Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
 func routeConvoyStatus(cityPath, convoyID string, c *api.Client, nilReason string, jsonOut bool, stdout, stderr io.Writer) int {
-	const cmdName = "convoy status"
-	if c != nil {
-		cr, err := c.GetConvoy(convoyID)
-		if err == nil {
-			// Graph/workflow convoys return an empty Convoy.ID — treat as
-			// "not a simple convoy" and fall back so the workflow-aware
-			// local path can render it.
-			if cr.Body.Convoy.ID == "" {
-				logRoute(stderr, cmdName, "fallback", "workflow-convoy")
-				return doConvoyStatusFallback(cityPath, convoyID, jsonOut, stdout, stderr)
+	var cr api.CachedRead[api.ConvoyStatusView]
+	return routeRead(c, "convoy status", nilReason, stderr,
+		func() error {
+			var err error
+			if cr, err = c.GetConvoy(convoyID); err != nil {
+				return err
 			}
-			logRoute(stderr, cmdName, "api", "")
-			return renderConvoyStatusFromAPI(cr, jsonOut, stdout, stderr)
-		}
-		if !api.ShouldFallbackForRead(err) {
-			logRoute(stderr, cmdName, "api", "error")
-			fmt.Fprintf(stderr, "gc convoy status: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		logRoute(stderr, cmdName, "fallback", api.FallbackReason(err))
-	} else {
-		logRoute(stderr, cmdName, "fallback", nilReason)
-	}
-	return doConvoyStatusFallback(cityPath, convoyID, jsonOut, stdout, stderr)
+			// Graph/workflow convoys return an empty Convoy.ID — force a fallback
+			// so the workflow-aware local path can render it.
+			if cr.Body.Convoy.ID == "" {
+				return fallbackAfterFetch{Reason: "workflow-convoy"}
+			}
+			return nil
+		},
+		func() int { return renderConvoyStatusFromAPI(cr, jsonOut, stdout, stderr) },
+		func() int { return doConvoyStatusFallback(cityPath, convoyID, jsonOut, stdout, stderr) },
+	)
 }
 
 // renderConvoyStatusFromAPI formats the API-sourced convoy detail to match
@@ -1756,8 +1757,8 @@ func newConvoyAutocloseCmd(stdout, stderr io.Writer) *cobra.Command {
 }
 
 // doConvoyAutoclose is the CLI entry point for convoy autoclose.
-// It opens the cwd-rooted store through the provider-aware resolver and
-// delegates to the testable core.
+// It resolves the store that owns the closed bead and delegates to the
+// testable core.
 func doConvoyAutoclose(beadID string, stdout, stderr io.Writer) {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -1765,12 +1766,48 @@ func doConvoyAutoclose(beadID string, stdout, stderr io.Writer) {
 	}
 	storeRoot := convoyAutocloseStoreRoot(cwd)
 	cityPath := autocloseCityPathForStoreRoot(storeRoot)
+	rec := openCityRecorderAt(cityPath, stderr)
+
+	// The bd on_close hook is spawned from the supervisor and inherits its
+	// cwd/env, so storeRoot resolves to the supervisor's (city) store even
+	// when the closed bead lives in a rig store. Resolve the store that
+	// actually owns the bead — prefix-aware, across the city and every rig —
+	// so rig-store closes autoclose their convoys instead of silently
+	// no-op'ing (#3411).
+	if store, _, ok := autocloseOwningStore(beadID, cityPath); ok {
+		doConvoyAutocloseWith(store, rec, beadID, stdout, stderr)
+		return
+	}
+
+	// Fallback: a standalone store reachable only via cwd/BEADS_DIR/
+	// GC_STORE_ROOT (e.g. an external rig checkout with no city.toml), or a
+	// city whose config could not be loaded. Preserve the original
+	// single-store resolution.
 	store, err := openStoreAtForCity(storeRoot, cityPath)
 	if err != nil {
 		return
 	}
-	rec := openCityRecorderAt(cityPath, stderr)
 	doConvoyAutocloseWith(store, rec, beadID, stdout, stderr)
+}
+
+// autocloseOwningStore resolves the store that owns beadID, and the store
+// directory it was found in, by probing each prefix-aware convoy store
+// candidate (city + rigs) rooted at cityPath. It returns ok=false when the
+// city config cannot be loaded or no candidate store holds the bead, so the
+// caller can fall back to cwd-rooted resolution. The store directory lets
+// molecule autoclose derive the matching store-ref label.
+func autocloseOwningStore(beadID, cityPath string) (beads.Store, string, bool) {
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		return nil, "", false
+	}
+	store, dir, err := resolveOwningStoreDir(beadID, cfg, cityPath, func(storeDir string) (beads.Store, error) {
+		return openStoreAtForCity(storeDir, cityPath)
+	})
+	if err != nil {
+		return nil, "", false
+	}
+	return store, dir, true
 }
 
 func convoyAutocloseStoreRoot(cwd string) string {

@@ -36,6 +36,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/test/dolttest"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
@@ -83,6 +84,10 @@ const (
 	doltIdentityModeSkip       = "skip"
 )
 
+// tmuxSocketAliveSentinel pins the alive-sentinel flock on this process's
+// tmux socket parent dir for the binary's lifetime; see TestMain.
+var tmuxSocketAliveSentinel *os.File
+
 // TestMain builds the gc binary and runs pre/post sweeps of orphan sessions.
 func TestMain(m *testing.M) {
 	if os.Getenv("GC_INTEGRATION_SUPERVISOR_STOP_HELPER") == "1" {
@@ -91,8 +96,9 @@ func TestMain(m *testing.M) {
 
 	subprocess := os.Getenv("GC_SESSION") == "subprocess"
 
-	// Build gc binary to a temp directory.
-	tmpDir, err := os.MkdirTemp("", "gc-integration-*")
+	// Build gc binary to a temp directory. The pid in the dir name lets a later
+	// run reap this run's dolt orphans if it dies abnormally (issue #3640).
+	tmpDir, err := os.MkdirTemp("", fmt.Sprintf("gc-integration-%d-*", os.Getpid()))
 	if err != nil {
 		panic("integration: creating temp dir: " + err.Error())
 	}
@@ -102,16 +108,34 @@ func TestMain(m *testing.M) {
 	// On macOS, $TMPDIR is ~80 chars (/private/var/folders/…/T/); nesting
 	// tmux sockets inside it pushes socket paths past macOS's 104-byte limit.
 	// /tmp is world-writable on macOS, Linux, and CI runners.
-	tmuxSocketParent, tmuxParentErr := os.MkdirTemp("/tmp", "gct-")
+	//
+	// NewSocketParentDir sweeps orphaned siblings left by a prior SIGKILL'd
+	// run before creating this run's own dir. tmuxSocketAliveSentinel must
+	// stay referenced for the process lifetime: the runtime finalizes
+	// unreachable os.Files, which would close the descriptor and release
+	// the lock, letting a concurrent sibling's sweep reclaim this still-
+	// active directory (ga-djbcqt). Normal and skip exits call os.Exit, which
+	// skips defers, so those paths remove the parent explicitly below; the
+	// deferred removal here additionally covers a setup panic (which unwinds
+	// through defers) so it cannot leak the parent until a later aged sweep.
+	tmuxSocketParent, tmuxSentinel, tmuxParentErr := tmuxtest.NewSocketParentDir("/tmp", io.Discard)
+	tmuxSocketAliveSentinel = tmuxSentinel
+	defer func() {
+		// Re-read tmuxSocketParent so the MkdirAll-failure path that clears it
+		// below is honored and this never double-removes on a normal exit.
+		if tmuxSocketParent != "" {
+			_ = os.RemoveAll(tmuxSocketParent)
+		}
+	}()
 	tmuxSocketRoot := filepath.Join(tmpDir, "tmux")
 	if tmuxParentErr == nil {
 		tmuxSocketRoot = filepath.Join(tmuxSocketParent, "tmux")
 		if err := os.MkdirAll(tmuxSocketRoot, 0o700); err != nil {
+			_ = tmuxSocketAliveSentinel.Close()
+			tmuxSocketAliveSentinel = nil
 			os.RemoveAll(tmuxSocketParent)
 			tmuxSocketParent = ""
 			tmuxSocketRoot = filepath.Join(tmpDir, "tmux")
-		} else {
-			defer os.RemoveAll(tmuxSocketParent)
 		}
 	}
 	if err := tmuxtest.ConfigureProcessEnv(tmuxSocketRoot); err != nil {
@@ -134,6 +158,10 @@ func TestMain(m *testing.M) {
 		// their descendant pollers from prior interrupted runs.
 		sweepSubprocessTestProcesses()
 	}
+	// Reap dolt sql-server orphans left by prior crashed runs (SIGKILL /
+	// timeout bypasses in-process cleanup); scoped by owner-pid liveness so
+	// concurrent runs are spared (issue #3640).
+	dolttest.SweepStale(filepath.Dir(tmpDir), "gc-integration-")
 	stopSignalSweeper := installIntegrationSignalSweeper(subprocess)
 	defer stopSignalSweeper()
 
@@ -173,14 +201,9 @@ func TestMain(m *testing.M) {
 		realBDBinary = override
 	} else {
 		var err error
-		realBDBinary, err = exec.LookPath("bd")
+		realBDBinary, err = buildPinnedIntegrationBDBinary(tmpDir)
 		if err != nil {
-			// bd not available — skip all integration tests.
-			_ = os.RemoveAll(tmpDir)
-			if tmuxSocketParent != "" {
-				_ = os.RemoveAll(tmuxSocketParent)
-			}
-			os.Exit(0)
+			panic("integration: building pinned bd binary: " + err.Error())
 		}
 	}
 	bdBinary = filepath.Join(integrationToolBinDir, "bd")
@@ -246,7 +269,9 @@ func TestMain(m *testing.M) {
 func installIntegrationSignalSweeper(subprocess bool) func() {
 	signals := make(chan os.Signal, 2)
 	done := make(chan struct{})
-	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	// SIGQUIT is what `go test -timeout` raises; without it a timed-out run
+	// would leak its dolt sql-server (issue #3640).
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 	go func() {
 		select {
 		case sig := <-signals:
@@ -267,6 +292,11 @@ func installIntegrationSignalSweeper(subprocess bool) func() {
 
 func sweepIntegrationProcesses(subprocess bool) {
 	stopIntegrationSupervisorWithTimeout(integrationSupervisorStopTimeout)
+	// Reap dolt orphans under this run's home too — the per-test t.Cleanup that
+	// normally does this is bypassed on a signal (issue #3640).
+	if testGCHome != "" {
+		cleanupIntegrationDoltSQLServersUnderRoot(testGCHome)
+	}
 	if !subprocess {
 		tmuxtest.KillAllTestSessions(&mainTB{})
 		return
@@ -356,6 +386,70 @@ func binaryOverride(envName string) (string, bool, error) {
 	return path, true, nil
 }
 
+// buildPinnedIntegrationBDBinary builds bd from the exact Beads module that
+// the integration test binary and gc both import. Resolving PATH here lets an
+// older host bd open the database after gc has migrated it, producing a schema
+// skew that obscures the workflow under test.
+func buildPinnedIntegrationBDBinary(tmpDir string) (string, error) {
+	version, err := pinnedIntegrationBeadsModuleVersion()
+	if err != nil {
+		return "", err
+	}
+	binDir := filepath.Join(tmpDir, "pinned-bd")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		return "", fmt.Errorf("create pinned bd directory: %w", err)
+	}
+	// CGO_ENABLED=1 + gms_pure_go is the embedded-capable bd build (per beads
+	// INSTALLING.md): the pinned bd's `bd init` defaults to embedded Dolt,
+	// which a CGO_ENABLED=0 binary refuses at runtime.
+	cmd := exec.Command("go", "install", "-tags", "gms_pure_go", "github.com/steveyegge/beads/cmd/bd@"+version)
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=1", "GOBIN="+binDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("go install github.com/steveyegge/beads/cmd/bd@%s: %w\n%s", version, err, out)
+	}
+	return filepath.Join(binDir, "bd"), nil
+}
+
+// pinnedBdStoreCommandRunner keeps direct BdStore integration tests on the
+// same bd shim used by their setup commands. The default runner resolves the
+// ambient process PATH before its per-command environment applies, so using it
+// directly could select a host bd whose schema knowledge predates the pinned
+// Beads module that created the test database.
+func pinnedBdStoreCommandRunner() beads.CommandRunner {
+	runner := beads.ExecCommandRunner()
+	return func(dir, name string, args ...string) ([]byte, error) {
+		if name == "bd" {
+			name = bdBinary
+		}
+		return runner(dir, name, args...)
+	}
+}
+
+func pinnedIntegrationBeadsModuleVersion() (string, error) {
+	cmd := exec.Command("go", "list", "-m", "-f", "{{.Version}}", "github.com/steveyegge/beads")
+	cmd.Dir = findModuleRoot()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("resolve github.com/steveyegge/beads module version: %w\n%s", err, out)
+	}
+	version := strings.TrimSpace(string(out))
+	if version == "" {
+		return "", errors.New("github.com/steveyegge/beads module version is empty")
+	}
+	return version, nil
+}
+
+func TestPinnedIntegrationBeadsModuleVersion(t *testing.T) {
+	version, err := pinnedIntegrationBeadsModuleVersion()
+	if err != nil {
+		t.Fatalf("pinnedIntegrationBeadsModuleVersion() error = %v", err)
+	}
+	const want = "v1.1.1-0.20260805093327-bf97b73749ac"
+	if version != want {
+		t.Errorf("pinnedIntegrationBeadsModuleVersion() = %q, want %q", version, want)
+	}
+}
+
 func writeExecShim(path, target string) error {
 	script := "#!/bin/sh\nexec " + singleQuoteShell(target) + ` "$@"` + "\n"
 	return os.WriteFile(path, []byte(script), 0o755)
@@ -395,6 +489,7 @@ func sweepSubprocessTestProcesses() {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
 	}
+	waitForPIDsReaped(killSet)
 }
 
 func configureIntegrationSupervisorCommand(cmd *exec.Cmd) {
@@ -486,6 +581,32 @@ func terminateIntegrationPIDs(killSet map[int]bool) {
 		if err := syscall.Kill(pid, syscall.Signal(0)); err == nil {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
+	}
+	waitForPIDsReaped(killSet)
+}
+
+// waitForPIDsReaped blocks until every PID in killSet is gone (signal-0 errors)
+// or a bounded deadline elapses. Without it, a SIGKILL returns before the
+// kernel has torn the process down and released its open files: a following
+// t.TempDir() RemoveAll then races a dying managed Dolt server under
+// cityDir/.beads/dolt ("directory not empty"), and a following test can
+// re-bind the just-freed managed Dolt port and adopt a half-dead server whose
+// DB still has prior tables ("alter pre-existing dirty tables"). The deadline
+// guarantees a wedged process can never hang the suite.
+func waitForPIDsReaped(killSet map[int]bool) {
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		alive := false
+		for pid := range killSet {
+			if err := syscall.Kill(pid, syscall.Signal(0)); err == nil {
+				alive = true
+				break
+			}
+		}
+		if !alive {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 

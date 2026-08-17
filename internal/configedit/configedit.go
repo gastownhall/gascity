@@ -143,6 +143,19 @@ func (e *Editor) EditExpanded(fn func(raw, expanded *config.City) error) error {
 	return e.write(raw)
 }
 
+// Do runs fn while holding the Editor's mutation lock, serializing it against
+// every other Editor mutation of this city. Use it for city-config writes that
+// do not fit the load → mutate → validate → write callback shape — for example
+// a multi-file pack import that writes pack.toml, packs.lock, and sometimes
+// city.toml — so they still pass through the single per-city serialization
+// boundary the [Editor] provides. The Editor does not load, validate, or write
+// city.toml for a Do call; fn owns its own I/O.
+func (e *Editor) Do(fn func() error) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return fn()
+}
+
 func validateCityForEdit(cfg *config.City) error {
 	if err := config.ValidateAgents(cfg.Agents); err != nil {
 		return fmt.Errorf("%w: agents: %w", ErrValidation, err)
@@ -152,6 +165,9 @@ func validateCityForEdit(cfg *config.City) error {
 	}
 	if err := config.ValidateServices(cfg.Services); err != nil {
 		return fmt.Errorf("%w: services: %w", ErrValidation, err)
+	}
+	if err := config.ValidateWebhooks(cfg.Webhooks); err != nil {
+		return fmt.Errorf("%w: webhooks: %w", ErrValidation, err)
 	}
 	if err := workspacesvc.ValidateRuntimeSupport(cfg.Services); err != nil {
 		return fmt.Errorf("%w: services: %w", ErrValidation, err)
@@ -171,6 +187,17 @@ func (e *Editor) loadForEdit() (*config.City, error) {
 		return nil, fmt.Errorf("loading site binding: %w", err)
 	}
 	return cfg, nil
+}
+
+// LoadRaw returns the raw (pre-expansion, site-bound) city config — the exact
+// basis the mutation gate uses for provenance. UpdateAgent/DeleteAgent decide
+// pack-derived-ness via AgentOrigin(raw, expanded, name) where raw comes from
+// loadForEdit; read paths that surface provenance (e.g. pack_derived on
+// GET /agents) call this so the read agrees with the 409 gate instead of
+// re-parsing city.toml independently. The returned config is a fresh snapshot
+// the caller owns; it carries no pack-expanded agents.
+func (e *Editor) LoadRaw() (*config.City, error) {
+	return e.loadForEdit()
 }
 
 // write persists city.toml first, then .gc/site.toml. A crash between the
@@ -253,8 +280,12 @@ func SetRigSuspendedOnStart(cfg *config.City, name string, suspended bool) error
 // exists, fn is called on it. Otherwise a new patch is created.
 func AddOrUpdateAgentPatch(cfg *config.City, name string, fn func(p *config.AgentPatch)) error {
 	dir, base := config.ParseQualifiedName(name)
+	// Match on the canonical target identity so an existing rig-keyed patch
+	// (Rig set, Dir empty) is updated in place rather than shadowed by a new
+	// Dir-keyed duplicate. Creation stays on the legacy Dir key, the shape the
+	// suspend/resume path has always produced.
 	for i := range cfg.Patches.Agents {
-		if cfg.Patches.Agents[i].Dir == dir && cfg.Patches.Agents[i].Name == base {
+		if cfg.Patches.Agents[i].TargetQualifiedName() == name {
 			fn(&cfg.Patches.Agents[i])
 			return nil
 		}
@@ -454,11 +485,10 @@ func agentDeclaredInCityPack(fs fsys.FS, cityRoot, dir, name string) (bool, erro
 // leaving an identity-only [[patches.agent]] block in city.toml.
 // Returns true if any patch was modified.
 func StripAgentPatchSuspended(cfg *config.City, name string) bool {
-	dir, base := config.ParseQualifiedName(name)
 	modified := false
 	kept := cfg.Patches.Agents[:0:0]
 	for _, p := range cfg.Patches.Agents {
-		if p.Dir == dir && p.Name == base && p.Suspended != nil {
+		if p.TargetQualifiedName() == name && p.Suspended != nil {
 			p.Suspended = nil
 			modified = true
 			if isAgentPatchOnlyIdentity(p) {
@@ -474,12 +504,11 @@ func StripAgentPatchSuspended(cfg *config.City, name string) bool {
 }
 
 func stripAgentPatchUpdate(cfg *config.City, name string, patch AgentUpdate) bool {
-	dir, base := config.ParseQualifiedName(name)
 	modified := false
 	kept := cfg.Patches.Agents[:0:0]
 	for _, p := range cfg.Patches.Agents {
 		patchModified := false
-		if p.Dir == dir && p.Name == base {
+		if p.TargetQualifiedName() == name {
 			if patch.Provider != "" && p.Provider != nil {
 				p.Provider = nil
 				patchModified = true
@@ -508,11 +537,10 @@ func stripAgentPatchUpdate(cfg *config.City, name string, patch AgentUpdate) boo
 }
 
 func removeAgentPatch(cfg *config.City, name string) bool {
-	dir, base := config.ParseQualifiedName(name)
 	modified := false
 	kept := cfg.Patches.Agents[:0:0]
 	for _, p := range cfg.Patches.Agents {
-		if p.Dir == dir && p.Name == base {
+		if p.TargetQualifiedName() == name {
 			modified = true
 			continue
 		}
@@ -525,14 +553,15 @@ func removeAgentPatch(cfg *config.City, name string) bool {
 }
 
 // isAgentPatchOnlyIdentity reports whether every field of p other than
-// Dir and Name is the zero value — i.e., the patch carries no overrides.
-// Reflection avoids drift as new fields are added to AgentPatch.
+// the targeting keys (Dir, Rig, Name) is the zero value — i.e., the patch
+// carries no overrides. Reflection avoids drift as new fields are added to
+// AgentPatch.
 func isAgentPatchOnlyIdentity(p config.AgentPatch) bool {
 	v := reflect.ValueOf(p)
 	t := v.Type()
 	for i := 0; i < v.NumField(); i++ {
 		switch t.Field(i).Name {
-		case "Dir", "Name":
+		case "Dir", "Rig", "Name":
 			continue
 		}
 		if !v.Field(i).IsZero() {
@@ -1117,20 +1146,6 @@ func (e *Editor) DeleteAgent(name string) error {
 	return fmt.Errorf("%w: agent %q", ErrNotFound, name)
 }
 
-// CreateRig adds a new rig to the config. Returns an error if a rig with
-// the same name already exists.
-func (e *Editor) CreateRig(r config.Rig) error {
-	return e.Edit(func(cfg *config.City) error {
-		for _, existing := range cfg.Rigs {
-			if existing.Name == r.Name {
-				return fmt.Errorf("%w: rig %q", ErrAlreadyExists, r.Name)
-			}
-		}
-		cfg.Rigs = append(cfg.Rigs, r)
-		return nil
-	})
-}
-
 // RigUpdate holds optional fields for a partial rig update. Pointer fields
 // distinguish "not set" from "set to zero value" to avoid the PATCH
 // zero-value trap (e.g., omitting suspended must not reset it to false).
@@ -1240,6 +1255,7 @@ type ProviderUpdate struct {
 	Env                map[string]string // nil = not set, non-nil = additive merge
 	OptionsSchemaMerge *string
 	OptionsSchema      []config.ProviderOption // nil = not set, non-nil = replace
+	OptionDefaults     map[string]string       // nil = not set, non-nil = additive merge
 }
 
 // CreateProvider adds a new city-level provider to the config.
@@ -1255,6 +1271,23 @@ func (e *Editor) CreateProvider(name string, spec config.ProviderSpec) error {
 		cfg.Providers[name] = spec
 		return nil
 	})
+}
+
+// mergeStringMapInto additively merges src into dst, lazily allocating dst
+// when it is nil. Keys present in src overwrite those in dst; an empty src
+// leaves dst unchanged. It returns the (possibly newly allocated) destination
+// so callers can assign it back onto the target field.
+func mergeStringMapInto(dst, src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return dst
+	}
+	if dst == nil {
+		dst = make(map[string]string, len(src))
+	}
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
 }
 
 // UpdateProvider partially updates an existing city-level provider.
@@ -1305,20 +1338,14 @@ func (e *Editor) UpdateProvider(name string, patch ProviderUpdate) error {
 		if patch.ReadyDelayMs != nil {
 			spec.ReadyDelayMs = *patch.ReadyDelayMs
 		}
-		if len(patch.Env) > 0 {
-			if spec.Env == nil {
-				spec.Env = make(map[string]string, len(patch.Env))
-			}
-			for k, v := range patch.Env {
-				spec.Env[k] = v
-			}
-		}
+		spec.Env = mergeStringMapInto(spec.Env, patch.Env)
 		if patch.OptionsSchemaMerge != nil {
 			spec.OptionsSchemaMerge = *patch.OptionsSchemaMerge
 		}
 		if patch.OptionsSchema != nil {
 			spec.OptionsSchema = append([]config.ProviderOption(nil), patch.OptionsSchema...)
 		}
+		spec.OptionDefaults = mergeStringMapInto(spec.OptionDefaults, patch.OptionDefaults)
 		cfg.Providers[name] = spec
 		return nil
 	})
@@ -1344,11 +1371,12 @@ func (e *Editor) DeleteProvider(name string) error {
 // SetAgentPatch creates or replaces an agent patch in [[patches.agent]].
 func (e *Editor) SetAgentPatch(patch config.AgentPatch) error {
 	return e.Edit(func(cfg *config.City) error {
-		if patch.Name == "" {
-			return fmt.Errorf("agent patch: name is required")
+		if err := patch.Validate(); err != nil {
+			return err
 		}
+		target := patch.TargetQualifiedName()
 		for i := range cfg.Patches.Agents {
-			if cfg.Patches.Agents[i].Dir == patch.Dir && cfg.Patches.Agents[i].Name == patch.Name {
+			if cfg.Patches.Agents[i].TargetQualifiedName() == target {
 				cfg.Patches.Agents[i] = patch
 				return nil
 			}
@@ -1358,12 +1386,13 @@ func (e *Editor) SetAgentPatch(patch config.AgentPatch) error {
 	})
 }
 
-// DeleteAgentPatch removes an agent patch from [[patches.agent]].
+// DeleteAgentPatch removes an agent patch from [[patches.agent]]. The name is
+// the patch's qualified target identity ("name", "rig/name", or "*/name"), the
+// same form SetAgentPatch and the HTTP API resolve patches by.
 func (e *Editor) DeleteAgentPatch(name string) error {
 	return e.Edit(func(cfg *config.City) error {
-		dir, base := config.ParseQualifiedName(name)
 		for i := range cfg.Patches.Agents {
-			if cfg.Patches.Agents[i].Dir == dir && cfg.Patches.Agents[i].Name == base {
+			if cfg.Patches.Agents[i].TargetQualifiedName() == name {
 				cfg.Patches.Agents = append(cfg.Patches.Agents[:i], cfg.Patches.Agents[i+1:]...)
 				return nil
 			}
@@ -1503,6 +1532,9 @@ func mergeOrderOverride(dst *config.OrderOverride, src config.OrderOverride) {
 	}
 	if src.Timeout != nil {
 		dst.Timeout = src.Timeout
+	}
+	if src.CheckTimeout != nil {
+		dst.CheckTimeout = src.CheckTimeout
 	}
 	if src.Idempotent != nil {
 		dst.Idempotent = src.Idempotent

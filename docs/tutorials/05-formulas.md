@@ -513,6 +513,12 @@ one of `count`, `until`, or `range`; `range = "1..3"` with `var = "n"` is a
 compile-time cousin of `count` that exposes `{n}` for substitution in the body.
 When you mean "keep trying until it works," use **Check** below.
 
+<Note>
+`count` accepts an integer literal only — template variables such as `{{var}}` are
+not supported in `count`. For a variable-driven iteration count, use
+`range = "1..{n}"` with `var = "n"` instead.
+</Note>
+
 <Accordion title="The `until` loop and its caveat">
 An `until` loop expands one iteration at compile time and stamps the condition
 (plus a required `max` budget) on it:
@@ -529,6 +535,16 @@ max = 5
 [[steps.loop.body]]
 id = "probe"
 title = "Probe the endpoint"
+```
+
+```shell
+~/my-city
+$ gc formula show poll-until
+Formula: poll-until
+
+Steps (2):
+  ├── poll-until.poll.iter1.probe: Probe the endpoint
+  └── poll-until.workflow-finalize: Finalize workflow [needs: poll-until.poll.iter1.probe]
 ```
 
 The caveat: nothing re-runs the body yet. Cooking validates the condition, but no

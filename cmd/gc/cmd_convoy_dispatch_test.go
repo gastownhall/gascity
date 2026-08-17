@@ -131,6 +131,210 @@ func TestOpenSourceWorkflowStoresFailsOnlyWhenEverythingBroken(t *testing.T) {
 	}
 }
 
+type sourceWorkflowScanFailStore struct {
+	beads.Store
+	err error
+}
+
+func (s sourceWorkflowScanFailStore) List(beads.ListQuery) ([]beads.Bead, error) {
+	return nil, s.err
+}
+
+type sourceWorkflowDescendantScanFailStore struct {
+	beads.Store
+	err error
+}
+
+func (s sourceWorkflowDescendantScanFailStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Metadata[beadmeta.RootBeadIDMetadataKey] != "" {
+		return nil, s.err
+	}
+	return s.Store.List(query)
+}
+
+func TestCollectSourceWorkflowMatchesSkipsNonSourceListFailure(t *testing.T) {
+	cityPath := "/city"
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs: []config.Rig{
+			{Name: "healthy", Path: "rigs/healthy"},
+			{Name: "stale", Path: "rigs/stale"},
+		},
+	}
+	cityStore := beads.NewMemStore()
+	healthyStore := beads.NewMemStore()
+	root, err := healthyStore.Create(beads.Bead{
+		ID:     "wf-existing",
+		Title:  "existing workflow",
+		Type:   "task",
+		Status: "in_progress",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:           beadmeta.KindWorkflow,
+			beadmeta.SourceBeadIDMetadataKey:   "mc-source",
+			beadmeta.SourceStoreRefMetadataKey: "city:test",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	staleErr := errors.New("issues.revision is missing")
+	stores := []convoyStoreView{
+		{path: cityPath, store: cityStore},
+		{path: filepath.Join(cityPath, "rigs/stale"), store: sourceWorkflowScanFailStore{Store: beads.NewMemStore(), err: staleErr}},
+		{path: filepath.Join(cityPath, "rigs/healthy"), store: healthyStore},
+	}
+
+	matches, skips, err := collectSourceWorkflowMatchesFromStores(cfg, cityPath, "mc-source", "city:test", stores, nil)
+	if err != nil {
+		t.Fatalf("collectSourceWorkflowMatchesFromStores: %v", err)
+	}
+	if len(matches) != 1 || len(matches[0].roots) != 1 || matches[0].roots[0].ID != root.ID {
+		t.Fatalf("matches = %#v, want healthy root %s", matches, root.ID)
+	}
+	if len(skips) != 1 || !strings.Contains(skips[0].path, "rigs/stale") || !errors.Is(skips[0].err, staleErr) {
+		t.Fatalf("skips = %#v, want stale rig list failure", skips)
+	}
+	if warning := formatSourceWorkflowStoreSkips(skips); !strings.Contains(warning, "revision") || !strings.Contains(warning, "invisible") {
+		t.Fatalf("warning = %q, want scan failure and degraded-coverage context", warning)
+	}
+}
+
+func TestCollectSourceWorkflowMatchesSurfacesDescendantScanFailure(t *testing.T) {
+	cityPath := "/city"
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs:      []config.Rig{{Name: "stale", Path: "rigs/stale"}},
+	}
+	staleBacking := beads.NewMemStore()
+	root, err := staleBacking.Create(beads.Bead{
+		ID:     "wf-stale",
+		Title:  "stale workflow",
+		Type:   "task",
+		Status: "in_progress",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:           beadmeta.KindWorkflow,
+			beadmeta.SourceBeadIDMetadataKey:   "mc-source",
+			beadmeta.SourceStoreRefMetadataKey: "city:test",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	descendantErr := errors.New("descendant query failed")
+	stores := []convoyStoreView{
+		{path: cityPath, store: beads.NewMemStore()},
+		{path: filepath.Join(cityPath, "rigs/stale"), store: sourceWorkflowDescendantScanFailStore{Store: staleBacking, err: descendantErr}},
+	}
+
+	matches, skips, err := collectSourceWorkflowMatchesFromStores(cfg, cityPath, "mc-source", "city:test", stores, nil)
+	if err != nil {
+		t.Fatalf("collectSourceWorkflowMatchesFromStores: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("matches = %#v, want incomplete store %s excluded", matches, root.ID)
+	}
+	if len(skips) != 1 || !errors.Is(skips[0].err, descendantErr) {
+		t.Fatalf("skips = %#v, want descendant query failure", skips)
+	}
+}
+
+func TestCollectSourceWorkflowMatchesKeepsSelectedStoreListFailureStrict(t *testing.T) {
+	cityPath := "/city"
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	selectedErr := errors.New("selected store read failed")
+	stores := []convoyStoreView{
+		{path: cityPath, store: sourceWorkflowScanFailStore{Store: beads.NewMemStore(), err: selectedErr}},
+		{path: filepath.Join(cityPath, "rigs/healthy"), store: beads.NewMemStore()},
+	}
+
+	_, skips, err := collectSourceWorkflowMatchesFromStores(cfg, cityPath, "mc-source", "city:test", stores, nil)
+	if !errors.Is(err, selectedErr) {
+		t.Fatalf("collectSourceWorkflowMatchesFromStores error = %v, want selected store error %v", err, selectedErr)
+	}
+	if len(skips) != 1 || !errors.Is(skips[0].err, selectedErr) {
+		t.Fatalf("skips = %#v, want selected store failure recorded", skips)
+	}
+}
+
+func TestCollectSourceWorkflowMatchesFailsWhenSelectedStoreIsMissing(t *testing.T) {
+	cityPath := "/city"
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs:      []config.Rig{{Name: "healthy", Path: "rigs/healthy"}},
+	}
+	stores := []convoyStoreView{
+		{path: filepath.Join(cityPath, "rigs/healthy"), store: beads.NewMemStore()},
+	}
+	selectedErr := errors.New("selected store reopen failed")
+	skips := []sourceWorkflowStoreSkip{{path: cityPath, err: selectedErr}}
+
+	_, _, err := collectSourceWorkflowMatchesFromStores(cfg, cityPath, "mc-source", "city:test", stores, skips)
+	if err == nil || !strings.Contains(err.Error(), "city:test") {
+		t.Fatalf("collectSourceWorkflowMatchesFromStores error = %v, want missing selected-store failure", err)
+	}
+	if !errors.Is(err, selectedErr) {
+		t.Fatalf("collectSourceWorkflowMatchesFromStores error = %v, want wrapped selected open error %v", err, selectedErr)
+	}
+}
+
+func TestUnscannedSourceWorkflowStoreSkipsExcludesRecoveredSelectedStore(t *testing.T) {
+	cityPath := "/city"
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs:      []config.Rig{{Name: "stale", Path: "rigs/stale"}},
+	}
+	skips := []sourceWorkflowStoreSkip{
+		{path: cityPath, err: errors.New("selected reopen failed")},
+		{path: filepath.Join(cityPath, "rigs/stale"), err: errors.New("stale rig failed")},
+	}
+
+	unscanned, selectedRecovered := unscannedSourceWorkflowStoreSkips(cfg, cityPath, "city:test", skips)
+	if !selectedRecovered {
+		t.Fatal("selectedRecovered = false, want already-open selected store to repair its reopen skip")
+	}
+	if len(unscanned) != 1 || !strings.Contains(unscanned[0].path, "rigs/stale") {
+		t.Fatalf("unscanned skips = %#v, want only stale non-selected rig", unscanned)
+	}
+}
+
+func TestCollectSourceWorkflowMatchesFailsWhenNoStoreCanBeScanned(t *testing.T) {
+	cityPath := "/city"
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs: []config.Rig{
+			{Name: "stale-a", Path: "rigs/stale-a"},
+			{Name: "stale-b", Path: "rigs/stale-b"},
+		},
+	}
+	firstErr := errors.New("first store failed")
+	stores := []convoyStoreView{
+		{path: filepath.Join(cityPath, "rigs/stale-a"), store: sourceWorkflowScanFailStore{Store: beads.NewMemStore(), err: firstErr}},
+		{path: filepath.Join(cityPath, "rigs/stale-b"), store: sourceWorkflowScanFailStore{Store: beads.NewMemStore(), err: errors.New("second store failed")}},
+	}
+
+	_, skips, err := collectSourceWorkflowMatchesFromStores(cfg, cityPath, "mc-source", "", stores, nil)
+	if !errors.Is(err, firstErr) {
+		t.Fatalf("collectSourceWorkflowMatchesFromStores error = %v, want first scan error %v", err, firstErr)
+	}
+	if len(skips) != 2 {
+		t.Fatalf("len(skips) = %d, want both failed stores recorded: %#v", len(skips), skips)
+	}
+}
+
+func TestCollectSourceWorkflowMatchesFailsWhenNoStoreIsAvailable(t *testing.T) {
+	_, _, err := collectSourceWorkflowMatchesFromStores(
+		&config.City{Workspace: config.Workspace{Name: "test"}},
+		"/city",
+		"mc-source",
+		"",
+		[]convoyStoreView{{path: "/city/rigs/nil"}},
+		nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), "no source workflow stores") {
+		t.Fatalf("collectSourceWorkflowMatchesFromStores error = %v, want no-usable-store failure", err)
+	}
+}
+
 func TestWorkflowFinalizeRetriesWhenSourceWorkflowStoreScanSkipsLiveRoot(t *testing.T) {
 	cityPath := "/city"
 	cfg := &config.City{
@@ -1091,12 +1295,20 @@ func TestCmdWorkflowDeleteSourceClosesGraphV2OnlyRoot(t *testing.T) {
 	}
 }
 
-func TestCmdWorkflowReopenSourceClearsRoutedToForResling(t *testing.T) {
-	// Backward-compat: when gc.run_target is not set on the source bead
-	// (legacy beads stamped before the field existed), reopen-source clears
-	// gc.routed_to so the caller's explicit re-sling can write the correct
-	// route.  A blank gc.routed_to is not ideal (route-reclaim skips it) but
-	// is no worse than the pre-FR-C0.1 behavior for this legacy class.
+func TestCmdWorkflowReopenSourcePreservesRouteWithoutRunTarget(t *testing.T) {
+	// ga-20zd: when gc.run_target is absent, reopen-source must fall back to
+	// the route the bead already carries instead of blanking it. Blanking made
+	// the reopen destructive and order-dependent: the refinery's rejection path
+	// writes the pool route with `gc bd update` and calls reopen-source as a
+	// separate command, so a reopen that landed after the metadata write
+	// silently erased the route. The bead then looked correctly re-pooled
+	// (rejection_reason set, branch intact) but was invisible to pool-demand
+	// dispatch, which filters on gc.routed_to.
+	//
+	// Preserving is safe for the caller's follow-up re-sling: a re-sling to a
+	// different target overwrites the route, and a re-sling to the same target
+	// hits resolveConvoyRecovery, which detects the just-deleted workflow and
+	// re-runs finalize rather than short-circuiting as idempotent.
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
@@ -1121,7 +1333,7 @@ func TestCmdWorkflowReopenSourceClearsRoutedToForResling(t *testing.T) {
 	if err := store.SetMetadata(source.ID, "workflow_id", "wf-gone"); err != nil {
 		t.Fatalf("SetMetadata(workflow_id): %v", err)
 	}
-	if err := store.SetMetadata(source.ID, "gc.routed_to", "mayor"); err != nil {
+	if err := store.SetMetadata(source.ID, "gc.routed_to", "myrig/voxist.executor"); err != nil {
 		t.Fatalf("SetMetadata(gc.routed_to): %v", err)
 	}
 	if err := store.SetMetadata(source.ID, "gc.session_affinity", "require"); err != nil {
@@ -1150,14 +1362,66 @@ func TestCmdWorkflowReopenSourceClearsRoutedToForResling(t *testing.T) {
 	if got := strings.TrimSpace(updated.Metadata["workflow_id"]); got != "" {
 		t.Fatalf("workflow_id = %q, want cleared", got)
 	}
-	if got := strings.TrimSpace(updated.Metadata["gc.routed_to"]); got != "" {
-		t.Fatalf("gc.routed_to = %q, want cleared (no gc.run_target → legacy blank)", got)
+	const wantRoute = "myrig/voxist.executor"
+	if got := strings.TrimSpace(updated.Metadata["gc.routed_to"]); got != wantRoute {
+		t.Fatalf("gc.routed_to = %q, want %q preserved (no gc.run_target → keep existing route)", got, wantRoute)
 	}
 	if got := strings.TrimSpace(updated.Metadata["gc.session_affinity"]); got != "" {
 		t.Fatalf("gc.session_affinity = %q, want cleared with unassigned reopen", got)
 	}
 	if got := strings.TrimSpace(updated.Metadata["gc.continuation_group"]); got != "" {
 		t.Fatalf("gc.continuation_group = %q, want cleared with unassigned reopen", got)
+	}
+	if updated.Status != "open" {
+		t.Fatalf("status = %q, want open", updated.Status)
+	}
+	if updated.Assignee != "" {
+		t.Fatalf("assignee = %q, want empty", updated.Assignee)
+	}
+}
+
+func TestCmdWorkflowReopenSourceLeavesRouteBlankWhenNoRouteAvailable(t *testing.T) {
+	// ga-20zd: preserving an existing route must not invent one. A bead
+	// carrying neither gc.run_target nor gc.routed_to still reopens blank —
+	// the pre-existing behavior for that class is unchanged.
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	prevCityFlag := cityFlag
+	cityFlag = ""
+	t.Cleanup(func() { cityFlag = prevCityFlag })
+
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity: %v", err)
+	}
+	source, err := store.Create(beads.Bead{Title: "Source", Type: "task", Status: "closed"})
+	if err != nil {
+		t.Fatalf("Create(source): %v", err)
+	}
+	if err := store.SetMetadata(source.ID, "workflow_id", "wf-gone"); err != nil {
+		t.Fatalf("SetMetadata(workflow_id): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdWorkflowReopenSource(source.ID, sourceWorkflowStoreSelector{}, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdWorkflowReopenSource returned %d; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+
+	reloaded, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(reload): %v", err)
+	}
+	updated, err := reloaded.Get(source.ID)
+	if err != nil {
+		t.Fatalf("Get(source): %v", err)
+	}
+	if got := strings.TrimSpace(updated.Metadata["gc.routed_to"]); got != "" {
+		t.Fatalf("gc.routed_to = %q, want blank (no run_target, no prior route)", got)
 	}
 	if updated.Status != "open" {
 		t.Fatalf("status = %q, want open", updated.Status)
@@ -1503,6 +1767,134 @@ func TestDecorateDynamicFragmentRecipePreservesPoolFallbackAndScopeMetadata(t *t
 	if control.Metadata[graphroute.GraphExecutionRouteMetaKey] != "frontend/reviewer" {
 		t.Fatalf("control execution route = %q, want frontend/reviewer", control.Metadata[graphroute.GraphExecutionRouteMetaKey])
 	}
+}
+
+func TestDecorateDynamicFragmentRecipeControlRouteUsesOwningStoreScope(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Daemon:    config.DaemonConfig{FormulaV2: boolPtr(true)},
+		Rigs:      []config.Rig{{Name: "frontend", Path: "frontend"}},
+		Agents:    []config.Agent{{Name: "reviewer", Scope: "city", MaxActiveSessions: intPtr(1)}},
+	}
+	addTestControlDispatcherAgents(cfg, "", "frontend")
+	source := beads.Bead{
+		ID: "gc-source",
+		Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey:     "reviewer",
+			beadmeta.RootStoreRefMetadataKey: "rig:frontend",
+		},
+	}
+	fragment := &formula.FragmentRecipe{
+		Name: "expansion-review",
+		Steps: []formula.RecipeStep{
+			{ID: "expansion-review.review", Title: "Review"},
+			{ID: "expansion-review.check", Title: "Check", Metadata: map[string]string{
+				beadmeta.KindMetadataKey:         beadmeta.KindCheck,
+				beadmeta.RootStoreRefMetadataKey: "rig:stale",
+			}},
+		},
+		Deps: []formula.RecipeDep{{
+			StepID: "expansion-review.check", DependsOnID: "expansion-review.review", Type: "blocks",
+		}},
+	}
+
+	if err := decorateDynamicFragmentRecipe(fragment, source, store, cfg.Workspace.Name, "", cfg); err != nil {
+		t.Fatalf("decorateDynamicFragmentRecipe: %v", err)
+	}
+	check := fragment.Steps[1]
+	if got := check.Metadata[beadmeta.RoutedToMetadataKey]; got != "frontend/control-dispatcher" {
+		t.Fatalf("check gc.routed_to = %q, want owning-store route frontend/control-dispatcher", got)
+	}
+	if got := check.Metadata[graphroute.GraphExecutionRouteMetaKey]; got != "reviewer" {
+		t.Fatalf("check gc.execution_routed_to = %q, want reviewer", got)
+	}
+	if got := check.Metadata[beadmeta.RootStoreRefMetadataKey]; got != "rig:frontend" {
+		t.Fatalf("check gc.root_store_ref = %q, want authoritative source store rig:frontend", got)
+	}
+}
+
+func TestPropagateDynamicScopeMetadataClassifiesEveryControlKind(t *testing.T) {
+	source := beads.Bead{
+		ID: "gc-source",
+		Metadata: map[string]string{
+			beadmeta.ScopeRefMetadataKey: "body",
+		},
+	}
+	for _, kind := range beadmeta.ControlKinds {
+		t.Run(kind, func(t *testing.T) {
+			step := &formula.RecipeStep{
+				ID: "frag.step",
+				Metadata: map[string]string{
+					beadmeta.KindMetadataKey: kind,
+				},
+			}
+			propagateDynamicScopeMetadata(step, source)
+			if got := step.Metadata[beadmeta.ScopeRefMetadataKey]; got != "body" {
+				t.Fatalf("kind %q: gc.scope_ref = %q, want body", kind, got)
+			}
+			if got := step.Metadata[beadmeta.ScopeRoleMetadataKey]; got != beadmeta.ScopeRoleControl {
+				t.Fatalf("kind %q: gc.scope_role = %q, want %q", kind, got, beadmeta.ScopeRoleControl)
+			}
+		})
+	}
+}
+
+func TestPropagateDynamicScopeMetadataNonControlRoles(t *testing.T) {
+	source := beads.Bead{
+		ID: "gc-source",
+		Metadata: map[string]string{
+			beadmeta.ScopeRefMetadataKey: "body",
+		},
+	}
+
+	t.Run("plain work defaults to member", func(t *testing.T) {
+		step := &formula.RecipeStep{ID: "frag.step"}
+		propagateDynamicScopeMetadata(step, source)
+		if got := step.Metadata[beadmeta.ScopeRoleMetadataKey]; got != beadmeta.ScopeRoleMember {
+			t.Fatalf("gc.scope_role = %q, want %q", got, beadmeta.ScopeRoleMember)
+		}
+	})
+
+	t.Run("scope kind gets no role", func(t *testing.T) {
+		step := &formula.RecipeStep{
+			ID: "frag.step",
+			Metadata: map[string]string{
+				beadmeta.KindMetadataKey: beadmeta.KindScope,
+			},
+		}
+		propagateDynamicScopeMetadata(step, source)
+		if got := step.Metadata[beadmeta.ScopeRoleMetadataKey]; got != "" {
+			t.Fatalf("gc.scope_role = %q, want empty for scope kind", got)
+		}
+	})
+
+	t.Run("explicit role is preserved", func(t *testing.T) {
+		step := &formula.RecipeStep{
+			ID: "frag.step",
+			Metadata: map[string]string{
+				beadmeta.KindMetadataKey:      beadmeta.KindDrain,
+				beadmeta.ScopeRoleMetadataKey: beadmeta.ScopeRoleTeardown,
+			},
+		}
+		propagateDynamicScopeMetadata(step, source)
+		if got := step.Metadata[beadmeta.ScopeRoleMetadataKey]; got != beadmeta.ScopeRoleTeardown {
+			t.Fatalf("gc.scope_role = %q, want preserved %q", got, beadmeta.ScopeRoleTeardown)
+		}
+	})
+
+	t.Run("no scope_ref means no role", func(t *testing.T) {
+		step := &formula.RecipeStep{
+			ID: "frag.step",
+			Metadata: map[string]string{
+				beadmeta.KindMetadataKey: beadmeta.KindDrain,
+			},
+		}
+		propagateDynamicScopeMetadata(step, beads.Bead{ID: "gc-source"})
+		if got := step.Metadata[beadmeta.ScopeRoleMetadataKey]; got != "" {
+			t.Fatalf("gc.scope_role = %q, want empty without scope_ref", got)
+		}
+	})
 }
 
 func TestDecorateDynamicFragmentRecipeUsesDirectExecutionRoute(t *testing.T) {
@@ -2036,7 +2428,7 @@ func TestRunControlDispatcherReturnsTransientControlErrorWithoutQuarantine(t *te
 
 	var stderr bytes.Buffer
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	err = runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, control, control.ID, cfg, io.Discard, &stderr)
+	err = runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, control.ID, cfg, io.Discard, &stderr)
 	if err == nil {
 		t.Fatal("runControlDispatcherWithStoreAndConfig error = nil, want transient error")
 	}
@@ -2060,6 +2452,195 @@ func TestRunControlDispatcherReturnsTransientControlErrorWithoutQuarantine(t *te
 	if slices.Contains(after.Labels, "gc:control-quarantined") {
 		t.Fatalf("labels = %#v, want no gc:control-quarantined", after.Labels)
 	}
+}
+
+func TestRunControlDispatcherReprojectsCurrentExecutionFactsAfterControl(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
+		t.Fatalf("write city config: %v", err)
+	}
+	formulaDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(formulaDir, "expand.formula.toml"), []byte(`
+formula = "expand"
+type = "expansion"
+version = 2
+contract = "graph.v2"
+
+[vars.reviewer]
+required = true
+
+[[template]]
+id = "{target}.review"
+title = "Review {reviewer}"
+`), 0o644); err != nil {
+		t.Fatalf("write expansion formula: %v", err)
+	}
+	store := beads.NewMemStore()
+	root, source, control := createFanoutControl(t, store)
+	before, err := store.ListByMetadata(map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID}, 0, beads.WithBothTiers)
+	if err != nil {
+		t.Fatalf("list workflow beads before fanout: %v", err)
+	}
+	for _, workflowBead := range before {
+		if workflowBead.Metadata[beadmeta.StepIDMetadataKey] != "" {
+			t.Fatalf("pre-control workflow bead %s already has a step id", workflowBead.ID)
+		}
+	}
+
+	var stderr bytes.Buffer
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		FormulaLayers: config.FormulaLayers{City: []string{formulaDir}},
+	}
+	if err := runControlDispatcherWithStoreAndConfig(cityPath, cityPath, store, control.ID, cfg, io.Discard, &stderr); err != nil {
+		t.Fatalf("runControlDispatcherWithStoreAndConfig: %v", err)
+	}
+
+	after, err := store.Get(control.ID)
+	if err != nil {
+		t.Fatalf("get control: %v", err)
+	}
+	if after.Metadata[beadmeta.FanoutStateMetadataKey] != beadmeta.SpawnStateSpawned {
+		t.Fatalf("fanout state = %q, want spawned", after.Metadata[beadmeta.FanoutStateMetadataKey])
+	}
+	recorded, err := events.ReadAll(filepath.Join(cityPath, ".gc", "events.jsonl"))
+	if err != nil {
+		t.Fatalf("read execution events: %v", err)
+	}
+	childIDs := map[string]struct{}{}
+	workflowBeads, err := store.ListByMetadata(map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID}, 0, beads.WithBothTiers)
+	if err != nil {
+		t.Fatalf("list workflow beads: %v", err)
+	}
+	for _, workflowBead := range workflowBeads {
+		if workflowBead.ID != source.ID && workflowBead.Metadata[beadmeta.StepIDMetadataKey] != "" {
+			childIDs[workflowBead.ID] = struct{}{}
+		}
+	}
+	if len(childIDs) == 0 {
+		t.Fatal("fanout did not create a graph step")
+	}
+	if len(recorded) == 0 {
+		t.Fatal("no execution facts recorded after fanout")
+	}
+	foundNewStep := false
+	for _, event := range recorded {
+		if event.Type == events.ExecutionStepDefined && event.RunID == root.ID {
+			if _, ok := childIDs[event.Subject]; ok {
+				foundNewStep = true
+			}
+		}
+	}
+	if !foundNewStep {
+		t.Fatalf("execution events = %#v, want a fact for post-control graph steps %v", recorded, childIDs)
+	}
+}
+
+func TestRunControlDispatcherPreservesSuccessfulControlWhenReprojectionFails(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	_, _, control := createProcessedScopeCheckControl(t, store, false)
+
+	var stderr bytes.Buffer
+	if err := runControlDispatcherWithStoreAndConfig(cityPath, cityPath, store, control.ID, &config.City{Workspace: config.Workspace{Name: "test-city"}}, io.Discard, &stderr); err != nil {
+		t.Fatalf("runControlDispatcherWithStoreAndConfig: %v", err)
+	}
+
+	after, err := store.Get(control.ID)
+	if err != nil {
+		t.Fatalf("get control: %v", err)
+	}
+	if after.Status != "closed" {
+		t.Fatalf("control status = %q, want closed despite projection failure", after.Status)
+	}
+	if !strings.Contains(stderr.String(), "projecting execution facts") {
+		t.Fatalf("stderr = %q, want observable projection failure", stderr.String())
+	}
+}
+
+func createProcessedScopeCheckControl(t *testing.T, store beads.Store, graphV2 bool) (beads.Bead, beads.Bead, beads.Bead) {
+	t.Helper()
+	rootMetadata := map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}
+	if graphV2 {
+		rootMetadata[beadmeta.FormulaContractMetadataKey] = beadmeta.FormulaContractGraphV2
+	}
+	root, err := store.Create(beads.Bead{Title: "workflow", Type: "task", Metadata: rootMetadata})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	body, err := store.Create(beads.Bead{Title: "scope body", Type: "task", Metadata: map[string]string{
+		beadmeta.KindMetadataKey:       beadmeta.KindScope,
+		beadmeta.RootBeadIDMetadataKey: root.ID,
+		beadmeta.ScopeRefMetadataKey:   "scope",
+		beadmeta.ScopeRoleMetadataKey:  beadmeta.ScopeRoleBody,
+	}})
+	if err != nil {
+		t.Fatalf("create body: %v", err)
+	}
+	subject, err := store.Create(beads.Bead{Title: "subject", Type: "task", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: root.ID,
+		beadmeta.ScopeRefMetadataKey:   "scope",
+		beadmeta.ScopeRoleMetadataKey:  "member",
+		beadmeta.StepIDMetadataKey:     "workflow.subject",
+	}})
+	if err != nil {
+		t.Fatalf("create subject: %v", err)
+	}
+	if err := store.Close(subject.ID); err != nil {
+		t.Fatalf("close subject: %v", err)
+	}
+	control, err := store.Create(beads.Bead{Title: "scope check", Type: "task", Metadata: map[string]string{
+		beadmeta.KindMetadataKey:       beadmeta.KindScopeCheck,
+		beadmeta.RootBeadIDMetadataKey: root.ID,
+		beadmeta.ScopeRefMetadataKey:   "scope",
+		beadmeta.ScopeRoleMetadataKey:  "control",
+	}})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+	if err := store.DepAdd(control.ID, subject.ID, "blocks"); err != nil {
+		t.Fatalf("add control dependency: %v", err)
+	}
+	if err := store.DepAdd(body.ID, control.ID, "blocks"); err != nil {
+		t.Fatalf("add body dependency: %v", err)
+	}
+	return root, subject, control
+}
+
+func createFanoutControl(t *testing.T, store beads.Store) (beads.Bead, beads.Bead, beads.Bead) {
+	t.Helper()
+	root, err := store.Create(beads.Bead{Title: "workflow", Type: "task", Metadata: map[string]string{
+		beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+		beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+	}})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	source, err := store.Create(beads.Bead{Title: "prepare items", Type: "task", Status: "closed", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: root.ID,
+		beadmeta.StepRefMetadataKey:    "source",
+		beadmeta.OutcomeMetadataKey:    beadmeta.OutcomePass,
+		beadmeta.OutputJSONMetadataKey: `{"items":[{"name":"reviewer"}]}`,
+	}})
+	if err != nil {
+		t.Fatalf("create source: %v", err)
+	}
+	control, err := store.Create(beads.Bead{Title: "fan out items", Type: "task", Metadata: map[string]string{
+		beadmeta.KindMetadataKey:       beadmeta.KindFanout,
+		beadmeta.RootBeadIDMetadataKey: root.ID,
+		beadmeta.ControlForMetadataKey: "source",
+		beadmeta.ForEachMetadataKey:    "output.items",
+		beadmeta.BondMetadataKey:       "expand",
+		beadmeta.BondVarsMetadataKey:   `{"reviewer":"{item.name}"}`,
+		beadmeta.FanoutModeMetadataKey: "parallel",
+	}})
+	if err != nil {
+		t.Fatalf("create fanout: %v", err)
+	}
+	if err := store.DepAdd(control.ID, source.ID, "blocks"); err != nil {
+		t.Fatalf("add fanout dependency: %v", err)
+	}
+	return root, source, control
 }
 
 type transientGetStore struct {
@@ -2119,7 +2700,7 @@ func TestRunControlDispatcherQuarantineReconcilesScopedControlFailure(t *testing
 
 	var stderr bytes.Buffer
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	if err := runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, control, control.ID, cfg, io.Discard, &stderr); err != nil {
+	if err := runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, control.ID, cfg, io.Discard, &stderr); err != nil {
 		t.Fatalf("runControlDispatcherWithStoreAndConfig: %v", err)
 	}
 
@@ -2469,7 +3050,7 @@ func TestRunControlDispatcherWithStoreRoutesRalphTraceWarningToStderr(t *testing
 	}
 
 	var stdout, stderr bytes.Buffer
-	if err := runControlDispatcherWithStore(cityDir, cityDir, store, check1, check1.ID, &stdout, &stderr); err != nil {
+	if err := runControlDispatcherWithStore(cityDir, cityDir, store, check1.ID, &stdout, &stderr); err != nil {
 		t.Fatalf("runControlDispatcherWithStore: %v", err)
 	}
 
@@ -2573,7 +3154,7 @@ func TestRunControlDispatcherWithStoreWarnsOnLegacyTracePath(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if err := runControlDispatcherWithStore(cityDir, cityDir, store, check1, check1.ID, &stdout, &stderr); err != nil {
+	if err := runControlDispatcherWithStore(cityDir, cityDir, store, check1.ID, &stdout, &stderr); err != nil {
 		t.Fatalf("runControlDispatcherWithStore: %v", err)
 	}
 
@@ -2704,11 +3285,7 @@ func TestRunWorkflowServeDedupsTraceWarningsAcrossNestedControlDispatch(t *testi
 		return next, nil
 	}
 	controlDispatcherServe = func(cityPath, storePath, beadID string, stdout, stderr io.Writer) error {
-		bead, err := store.Get(beadID)
-		if err != nil {
-			return err
-		}
-		return runControlDispatcherWithStore(cityPath, storePath, store, bead, beadID, stdout, stderr)
+		return runControlDispatcherWithStore(cityPath, storePath, store, beadID, stdout, stderr)
 	}
 
 	var stderr bytes.Buffer
@@ -2840,11 +3417,7 @@ func TestRunWorkflowServeDedupsLegacyTraceWarningsAcrossNestedControlDispatch(t 
 		return next, nil
 	}
 	controlDispatcherServe = func(cityPath, storePath, beadID string, stdout, stderr io.Writer) error {
-		bead, err := store.Get(beadID)
-		if err != nil {
-			return err
-		}
-		return runControlDispatcherWithStore(cityPath, storePath, store, bead, beadID, stdout, stderr)
+		return runControlDispatcherWithStore(cityPath, storePath, store, beadID, stdout, stderr)
 	}
 
 	var stderr bytes.Buffer
@@ -2871,8 +3444,8 @@ func TestWorkflowServeControlReadyQueryUsesControlTiers(t *testing.T) {
 	}
 	for _, want := range []string{
 		`bd --readonly --sandbox ready --assignee="$cand" --exclude-type=epic --json --limit=20`,
-		`bd --readonly --sandbox ready --metadata-field "gc.run_target=$route" --unassigned --exclude-type=epic --json --sort oldest --limit=20`,
-		`bd --readonly --sandbox ready --metadata-field "gc.routed_to=$route" --unassigned --exclude-type=epic --json --sort oldest --limit=20`,
+		`bd --readonly --sandbox ready --metadata-field "gc.run_target=$route" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json --sort oldest --limit=20`,
+		`bd --readonly --sandbox ready --metadata-field "gc.routed_to=$route" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json --sort oldest --limit=20`,
 		`routed_ready "$GC_CONTROL_TARGET"`,
 		`routed_ready "${GC_CONTROL_LEGACY_TARGET:-}"`,
 	} {
@@ -2885,6 +3458,137 @@ func TestWorkflowServeControlReadyQueryUsesControlTiers(t *testing.T) {
 	}
 	if strings.Contains(query, "--include-ephemeral") {
 		t.Fatalf("workflowServeControlReadyQuery default must stay bd 1.0.4-compatible: %q", query)
+	}
+}
+
+// TestWorkflowServeControlReadyQueryPassesThroughAmbientDoltPort guards
+// against gc-74rxa: the ready-query subprocess env is otherwise rebuilt via
+// mergeRuntimeEnv/controllerWorkQueryEnv, which can transiently resolve
+// without a Dolt port and silently drop GC_DOLT_PORT/BEADS_DOLT_SERVER_PORT,
+// causing `bd --sandbox` to fall back to port 0. The dispatcher process's own
+// environment already carries the correct connection coordinates it was
+// spawned with, so the query string must carry them through explicitly.
+func TestWorkflowServeControlReadyQueryPassesThroughAmbientDoltPort(t *testing.T) {
+	t.Setenv("GC_DOLT_HOST", "127.0.0.1")
+	t.Setenv("GC_DOLT_PORT", "29620")
+	unsetTestEnv(t, "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT")
+
+	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName})
+
+	for _, want := range []string{
+		"GC_DOLT_HOST='127.0.0.1'",
+		"BEADS_DOLT_SERVER_HOST='127.0.0.1'",
+		"GC_DOLT_PORT='29620'",
+		"BEADS_DOLT_SERVER_PORT='29620'",
+	} {
+		if !strings.Contains(query, want) {
+			t.Fatalf("workflowServeControlReadyQuery missing %q in %q", want, query)
+		}
+	}
+}
+
+// TestWorkflowServeControlReadyQueryOmitsDoltEnvWhenAmbientUnset ensures the
+// query stays clean (no bare "KEY=" assignments) when the current process has
+// no Dolt connection env at all (e.g. a doltlite-backed scope).
+func TestWorkflowServeControlReadyQueryOmitsDoltEnvWhenAmbientUnset(t *testing.T) {
+	unsetTestEnv(t, "GC_DOLT_HOST", "GC_DOLT_PORT", "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT")
+
+	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName})
+
+	for _, unwanted := range []string{"GC_DOLT_HOST=", "GC_DOLT_PORT=", "BEADS_DOLT_SERVER_HOST=", "BEADS_DOLT_SERVER_PORT="} {
+		if strings.Contains(query, unwanted) {
+			t.Fatalf("workflowServeControlReadyQuery should omit %q when ambient env is unset: %q", unwanted, query)
+		}
+	}
+}
+
+// TestWorkflowServeControlReadyQueryDoesNotMixDoltNamespaces guards against a
+// correctness gap found in cross-provider review of gc-74rxa: host and port
+// must resolve as a matched pair from one env-var namespace, never as a host
+// from GC_DOLT_* combined with a port from BEADS_DOLT_SERVER_* (or vice
+// versa) -- a combination that may never have described the same server.
+// Here GC_DOLT_PORT is set (so the GC_DOLT_* namespace is "in use" for this
+// process) while only BEADS_DOLT_SERVER_HOST carries a value; the stale
+// BEADS host must NOT leak into the query paired with the GC port.
+func TestWorkflowServeControlReadyQueryDoesNotMixDoltNamespaces(t *testing.T) {
+	unsetTestEnv(t, "GC_DOLT_HOST")
+	t.Setenv("GC_DOLT_PORT", "29999")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "9.9.9.9")
+	unsetTestEnv(t, "BEADS_DOLT_SERVER_PORT")
+
+	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName})
+
+	for _, want := range []string{"GC_DOLT_PORT='29999'", "BEADS_DOLT_SERVER_PORT='29999'"} {
+		if !strings.Contains(query, want) {
+			t.Fatalf("workflowServeControlReadyQuery missing %q in %q", want, query)
+		}
+	}
+	if strings.Contains(query, "9.9.9.9") {
+		t.Fatalf("workflowServeControlReadyQuery must not mix BEADS_DOLT_SERVER_HOST from a different namespace than the resolved port: %q", query)
+	}
+}
+
+// unsetTestEnv unsets the given env vars for the duration of the test,
+// restoring the original values (or absence) afterward.
+func unsetTestEnv(t *testing.T, keys ...string) {
+	t.Helper()
+	for _, key := range keys {
+		t.Setenv(key, "")
+		_ = os.Unsetenv(key)
+	}
+}
+
+// TestWorkflowServeControlReadyQueryDeliversAmbientDoltPortAtExecution is the
+// execution-level companion to TestWorkflowServeControlReadyQueryPassesThroughAmbientDoltPort:
+// cross-provider review of gc-74rxa noted that a pure string-assertion test
+// can pass while the real runtime path (shellWorkQueryWithEnv running the
+// query via `sh -c`, cmd/gc/cmd_hook.go:555) stays broken, since it never
+// crosses the process boundary. This test runs the built query through a
+// fake `bd` with an OUTER env that deliberately carries no Dolt connection
+// vars at all -- reproducing the exact failure mode (mergeRuntimeEnv having
+// stripped them) -- and asserts bd still receives the ambient port via the
+// query string's own shell-prefix assignment.
+func TestWorkflowServeControlReadyQueryDeliversAmbientDoltPortAtExecution(t *testing.T) {
+	t.Setenv("GC_DOLT_HOST", "127.0.0.1")
+	t.Setenv("GC_DOLT_PORT", "29620")
+	unsetTestEnv(t, "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT")
+
+	query := workflowServeControlReadyQuery(
+		config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"},
+		"gascity--control-dispatcher",
+	)
+
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "bd.log")
+	bdPath := filepath.Join(tmp, "bd")
+	if err := os.WriteFile(bdPath, []byte(`#!/bin/sh
+set -eu
+printf 'GC_DOLT_PORT=%s BEADS_DOLT_SERVER_PORT=%s\n' "${GC_DOLT_PORT:-}" "${BEADS_DOLT_SERVER_PORT:-}" >> "$BD_LOG"
+printf '[]'
+`), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+
+	// The outer env passed to shellWorkQueryWithEnv has no GC_DOLT_*/
+	// BEADS_DOLT_SERVER_* at all -- simulating mergeRuntimeEnv/
+	// controllerWorkQueryEnv having dropped them. Without the fix, bd would
+	// see an empty port here and resolve :0.
+	_, err := shellWorkQueryWithEnv(query, t.TempDir(), []string{
+		"PATH=" + tmp + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"BD_LOG=" + logPath,
+		"GC_SESSION_NAME=gascity--control-dispatcher",
+		"GC_ALIAS=gascity/control-dispatcher",
+	})
+	if err != nil {
+		t.Fatalf("run workflow serve query: %v", err)
+	}
+
+	logData, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatalf("read bd log: %v", readErr)
+	}
+	if !strings.Contains(string(logData), "GC_DOLT_PORT=29620") || !strings.Contains(string(logData), "BEADS_DOLT_SERVER_PORT=29620") {
+		t.Fatalf("bd did not see the ambient Dolt port despite a stripped outer env; log:\n%s", string(logData))
 	}
 }
 
@@ -2902,6 +3606,32 @@ func TestWorkflowServeWorkQueryRecognizesCoreControlDispatcher(t *testing.T) {
 	}
 }
 
+func TestWorkflowServeControlReadyQueryDoesNotCrossScope(t *testing.T) {
+	query := workflowServeControlReadyQuery(config.Agent{
+		Name:        config.ControlDispatcherAgentName,
+		BindingName: "core",
+		Dir:         "fixture",
+	})
+
+	for _, want := range []string{
+		"GC_CONTROL_TARGET='fixture/core.control-dispatcher'",
+		"GC_CONTROL_BARE_TARGET='fixture/control-dispatcher'",
+	} {
+		if !strings.Contains(query, want) {
+			t.Fatalf("rig control query missing %q: %q", want, query)
+		}
+	}
+	for _, forbidden := range []string{
+		"GC_CONTROL_CITY_TARGET=",
+		"GC_CONTROL_TARGET='core.control-dispatcher'",
+		"GC_CONTROL_BARE_TARGET='control-dispatcher'",
+	} {
+		if strings.Contains(query, forbidden) {
+			t.Fatalf("rig control query contains cross-scope target %q: %q", forbidden, query)
+		}
+	}
+}
+
 func TestWorkflowServeControlReadyQueryBD105IncludesEphemeral(t *testing.T) {
 	query := workflowServeControlReadyQueryForBeads(
 		config.Agent{Name: config.ControlDispatcherAgentName},
@@ -2909,8 +3639,8 @@ func TestWorkflowServeControlReadyQueryBD105IncludesEphemeral(t *testing.T) {
 	)
 	for _, want := range []string{
 		`bd --readonly --sandbox ready --include-ephemeral --assignee="$cand" --exclude-type=epic --json --limit=20`,
-		`bd --readonly --sandbox ready --include-ephemeral --metadata-field "gc.run_target=$route" --unassigned --exclude-type=epic --json --sort oldest --limit=20`,
-		`bd --readonly --sandbox ready --include-ephemeral --metadata-field "gc.routed_to=$route" --unassigned --exclude-type=epic --json --sort oldest --limit=20`,
+		`bd --readonly --sandbox ready --include-ephemeral --metadata-field "gc.run_target=$route" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json --sort oldest --limit=20`,
+		`bd --readonly --sandbox ready --include-ephemeral --metadata-field "gc.routed_to=$route" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json --sort oldest --limit=20`,
 	} {
 		if !strings.Contains(query, want) {
 			t.Fatalf("workflowServeControlReadyQueryForBeads(bd-1.0.5) missing %q in %q", want, query)
@@ -2971,7 +3701,7 @@ case "$*" in
   "--readonly --sandbox ready --assignee=gascity--control-dispatcher --exclude-type=epic --json --limit=20")
     printf '[{"id":"ga-ready"}]'
     ;;
-  "--readonly --sandbox ready --metadata-field gc.run_target=gascity/control-dispatcher --unassigned --exclude-type=epic --json --sort oldest --limit=20")
+  "--readonly --sandbox ready --metadata-field gc.run_target=gascity/control-dispatcher --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --json --sort oldest --limit=20")
     printf '[{"id":"ga-routed"}]'
     ;;
   *)
@@ -2993,7 +3723,7 @@ case "$*" in
   "--readonly --sandbox ready --assignee=gascity--control-dispatcher --exclude-type=epic --json --limit=20")
     printf '[{"id":"ga-pending","metadata":{"gc.kind":"retry"}}]'
     ;;
-  "--readonly --sandbox ready --metadata-field gc.run_target=gascity/control-dispatcher --unassigned --exclude-type=epic --json --sort oldest --limit=20")
+  "--readonly --sandbox ready --metadata-field gc.run_target=gascity/control-dispatcher --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --json --sort oldest --limit=20")
     printf '[{"id":"ga-ready","metadata":{"gc.kind":"scope-check"}}]'
     ;;
   *)
@@ -3012,7 +3742,7 @@ func TestWorkflowServeControlReadyQueryIncludesCanonicalRoutedControlWork(t *tes
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "--readonly --sandbox ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --exclude-type=epic --json --sort oldest --limit=20")
+  "--readonly --sandbox ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --json --sort oldest --limit=20")
     printf '[{"id":"ga-control-routed","metadata":{"gc.routed_to":"gascity/control-dispatcher","gc.kind":"workflow-finalize"}}]'
     ;;
   *)
@@ -3034,7 +3764,7 @@ case "$*" in
   "--readonly --sandbox ready --assignee=gascity--control-dispatcher --exclude-type=epic --json --limit=20")
     printf '[{"id":"ga-instantiating-assigned","metadata":{"%s":"true"}},{"id":"ga-assigned","metadata":{"gc.kind":"retry"}}]'
     ;;
-  "--readonly --sandbox ready --metadata-field gc.run_target=gascity/control-dispatcher --unassigned --exclude-type=epic --json --sort oldest --limit=20")
+  "--readonly --sandbox ready --metadata-field gc.run_target=gascity/control-dispatcher --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --json --sort oldest --limit=20")
     printf '[{"id":"ga-instantiating-routed","metadata":{"%s":"true"}},{"id":"ga-routed","metadata":{"gc.kind":"scope-check"}}]'
     ;;
   *)
@@ -3056,10 +3786,10 @@ case "$*" in
   "--readonly --sandbox ready --assignee=gascity--control-dispatcher --exclude-type=epic --json --limit=20")
     printf '[{"id":"ga-z-assigned"},{"id":"ga-dup","source":"assigned"}]'
     ;;
-  "--readonly --sandbox ready --metadata-field gc.run_target=gascity/control-dispatcher --unassigned --exclude-type=epic --json --sort oldest --limit=20")
+  "--readonly --sandbox ready --metadata-field gc.run_target=gascity/control-dispatcher --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --json --sort oldest --limit=20")
     printf '[{"id":"ga-a-routed"},{"id":"ga-route-dup","source":"run-target"}]'
     ;;
-  "--readonly --sandbox ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --exclude-type=epic --json --sort oldest --limit=20")
+  "--readonly --sandbox ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --json --sort oldest --limit=20")
     printf '[{"id":"ga-route-dup","source":"routed-to"}]'
     ;;
   *)
@@ -3301,7 +4031,7 @@ func TestWorkflowServeControlReadyQueryQuotesMetadataFallbackTarget(t *testing.T
 		"BD_MATCHED_ARGS": argsPath,
 	}, `#!/bin/sh
 set -eu
-if [ "$#" -eq 11 ] &&
+if [ "$#" -eq 15 ] &&
    [ "$1" = "--readonly" ] &&
    [ "$2" = "--sandbox" ] &&
    [ "$3" = "ready" ] &&
@@ -3309,10 +4039,14 @@ if [ "$#" -eq 11 ] &&
    [ "$5" = "gc.run_target=my rig/control-dispatcher" ] &&
    [ "$6" = "--unassigned" ] &&
    [ "$7" = "--exclude-type=epic" ] &&
-   [ "$8" = "--json" ] &&
-   [ "$9" = "--sort" ] &&
-   [ "${10}" = "oldest" ] &&
-   [ "${11}" = "--limit=20" ]; then
+   [ "$8" = "--exclude-label" ] &&
+   [ "$9" = "hold:mayor" ] &&
+   [ "${10}" = "--exclude-label" ] &&
+   [ "${11}" = "hold:external" ] &&
+   [ "${12}" = "--json" ] &&
+   [ "${13}" = "--sort" ] &&
+   [ "${14}" = "oldest" ] &&
+   [ "${15}" = "--limit=20" ]; then
   printf '%s\n' "$@" > "$BD_MATCHED_ARGS"
   printf '[{"id":"ga-routed"}]'
   exit 0
@@ -3325,7 +4059,7 @@ printf '[]'
 		t.Fatalf("read matched args: %v", err)
 	}
 	gotArgs := strings.Split(strings.TrimSpace(string(argsData)), "\n")
-	wantArgs := []string{"--readonly", "--sandbox", "ready", "--metadata-field", "gc.run_target=my rig/control-dispatcher", "--unassigned", "--exclude-type=epic", "--json", "--sort", "oldest", "--limit=20"}
+	wantArgs := []string{"--readonly", "--sandbox", "ready", "--metadata-field", "gc.run_target=my rig/control-dispatcher", "--unassigned", "--exclude-type=epic", "--exclude-label", "hold:mayor", "--exclude-label", "hold:external", "--json", "--sort", "oldest", "--limit=20"}
 	if !slices.Equal(gotArgs, wantArgs) {
 		t.Fatalf("matched bd args = %#v, want %#v", gotArgs, wantArgs)
 	}
@@ -3340,7 +4074,7 @@ func TestWorkflowServeControlReadyQueryUsesLegacyRouteForNamedSessions(t *testin
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "--readonly --sandbox ready --metadata-field gc.run_target=gascity/workflow-control --unassigned --exclude-type=epic --json --sort oldest --limit=20")
+  "--readonly --sandbox ready --metadata-field gc.run_target=gascity/workflow-control --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --json --sort oldest --limit=20")
     printf '[{"id":"ga-legacy-route"}]'
     ;;
   *)
@@ -3978,7 +4712,7 @@ func TestRunControlDispatcherReturnsPendingForOpenScopeSubject(t *testing.T) {
 
 	var stderr bytes.Buffer
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	err = runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, control, control.ID, cfg, io.Discard, &stderr)
+	err = runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, control.ID, cfg, io.Discard, &stderr)
 	if !errors.Is(err, dispatch.ErrControlPending) {
 		t.Fatalf("runControlDispatcherWithStoreAndConfig error = %v, want ErrControlPending", err)
 	}
@@ -4162,12 +4896,8 @@ func TestRunWorkflowServeQuarantinesUnexpectedNonControlBead(t *testing.T) {
 		return []hookBead{{ID: nonControl.ID, Metadata: map[string]string{"gc.kind": "workflow"}}}, nil
 	}
 	controlDispatcherServe = func(cityPath, storePath, beadID string, stdout, stderr io.Writer) error {
-		bead, err := store.Get(beadID)
-		if err != nil {
-			return err
-		}
 		cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-		return runControlDispatcherWithStoreAndConfig(cityPath, storePath, store, bead, beadID, cfg, stdout, stderr)
+		return runControlDispatcherWithStoreAndConfig(cityPath, storePath, store, beadID, cfg, stdout, stderr)
 	}
 
 	var stderr bytes.Buffer
@@ -4349,7 +5079,7 @@ func TestRunControlDispatcherQuarantinesMalformedControlGraph(t *testing.T) {
 
 	var stderr bytes.Buffer
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	if err := runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, control, control.ID, cfg, io.Discard, &stderr); err != nil {
+	if err := runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, control.ID, cfg, io.Discard, &stderr); err != nil {
 		t.Fatalf("runControlDispatcherWithStoreAndConfig: %v", err)
 	}
 
@@ -4415,7 +5145,7 @@ func TestRunControlDispatcherQuarantinesMalformedFanoutScopeBody(t *testing.T) {
 
 	var stderr bytes.Buffer
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	if err := runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, fanout, fanout.ID, cfg, io.Discard, &stderr); err != nil {
+	if err := runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, fanout.ID, cfg, io.Discard, &stderr); err != nil {
 		t.Fatalf("runControlDispatcherWithStoreAndConfig: %v", err)
 	}
 
@@ -4481,7 +5211,7 @@ func TestRunControlDispatcherQuarantinesRalphControlMissingIteration(t *testing.
 
 	var stderr bytes.Buffer
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	if err := runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, control, control.ID, cfg, io.Discard, &stderr); err != nil {
+	if err := runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, control.ID, cfg, io.Discard, &stderr); err != nil {
 		t.Fatalf("runControlDispatcherWithStoreAndConfig: %v", err)
 	}
 
@@ -4529,7 +5259,7 @@ func TestRunControlDispatcherQuarantinesGenericControlFailure(t *testing.T) {
 
 	var stderr bytes.Buffer
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	if err := runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, control, control.ID, cfg, io.Discard, &stderr); err != nil {
+	if err := runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, control.ID, cfg, io.Discard, &stderr); err != nil {
 		t.Fatalf("runControlDispatcherWithStoreAndConfig: %v", err)
 	}
 
@@ -5047,6 +5777,50 @@ func TestRunWorkflowServeFollowSurvivesTransientWorkQueryTimeout(t *testing.T) {
 	}
 }
 
+func TestRunWorkflowServeFollowSurvivesDoltCircuitBreakerOutage(t *testing.T) {
+	eventsDir := t.TempDir()
+	ep := newTestProvider(t, eventsDir)
+
+	prevList := workflowServeList
+	prevProvider := workflowServeOpenEventsProvider
+	prevWait := workflowServeWaitForWake
+	t.Cleanup(func() {
+		workflowServeList = prevList
+		workflowServeOpenEventsProvider = prevProvider
+		workflowServeWaitForWake = prevWait
+	})
+
+	workflowServeOpenEventsProvider = func(io.Writer) (events.Provider, error) { return ep, nil }
+	workflowServeWaitForWake = func(_ <-chan workflowWatchResult, _ time.Duration, _ int) (bool, error) {
+		return false, nil
+	}
+
+	trippedErr := fmt.Errorf(`querying control work: running work query %q: exit status 1: begin read tx: dial tcp 127.0.0.1:52022: connect: connection refused (circuit breaker tripped)`, "bd ready")
+	breakerOpenErr := fmt.Errorf(`querying control work: running work query %q: exit status 1: Error: failed to open database: dolt circuit breaker is open: server appears down, failing fast (cooldown 5s)`, "bd ready")
+	fatalErr := errors.New("malformed work query: jq: command not found")
+	calls := 0
+	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+		calls++
+		switch calls {
+		case 1:
+			return nil, trippedErr
+		case 2:
+			return nil, breakerOpenErr
+		default:
+			return nil, fatalErr
+		}
+	}
+
+	agent := config.Agent{Name: config.ControlDispatcherAgentName}
+	err := runWorkflowServeFollow(agent, t.TempDir(), t.TempDir(), agent.EffectiveWorkQuery(), nil, io.Discard)
+	if !errors.Is(err, fatalErr) {
+		t.Fatalf("runWorkflowServeFollow err = %v, want fatal error after surviving the breaker outage", err)
+	}
+	if calls != 3 {
+		t.Fatalf("workflowServeList calls = %d, want 3 (survive tripped and open breaker errors, then exit on fatal)", calls)
+	}
+}
+
 func TestWorkflowEventRelevantAcceptsBeadLifecycleEvents(t *testing.T) {
 	for _, evt := range []events.Event{
 		{Type: events.BeadCreated},
@@ -5400,7 +6174,7 @@ provider = "file"
 
 	fakeProvider := runtime.NewFake()
 	oldProvider := dispatchControlSessionProvider
-	dispatchControlSessionProvider = func() runtime.Provider { return fakeProvider }
+	dispatchControlSessionProvider = func() (runtime.Provider, error) { return fakeProvider, nil }
 	t.Cleanup(func() { dispatchControlSessionProvider = oldProvider })
 
 	var stdout bytes.Buffer
@@ -5440,15 +6214,15 @@ name = "test-city"
 	}
 	t.Setenv("GC_BEADS", "exec:/definitely/missing/provider")
 
-	_, _, _, err := findBeadAcrossStores(cityPath, "gc-missing", io.Discard)
+	_, _, err := findBeadScopeAcrossStores(cityPath, "gc-missing", io.Discard)
 	if err == nil {
-		t.Fatal("findBeadAcrossStores() error = nil, want provider failure")
+		t.Fatal("findBeadScopeAcrossStores() error = nil, want provider failure")
 	}
 	if !strings.Contains(err.Error(), "getting bead \"gc-missing\" from "+cityPath) {
-		t.Fatalf("findBeadAcrossStores() error = %v, want city store path context", err)
+		t.Fatalf("findBeadScopeAcrossStores() error = %v, want city store path context", err)
 	}
 	if strings.Contains(err.Error(), "bead not found") {
-		t.Fatalf("findBeadAcrossStores() error = %v, want provider failure instead of masked not-found", err)
+		t.Fatalf("findBeadScopeAcrossStores() error = %v, want provider failure instead of masked not-found", err)
 	}
 }
 

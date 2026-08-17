@@ -49,6 +49,18 @@ type agentResponse struct {
 	Provider    string `json:"provider,omitempty"`
 	DisplayName string `json:"display_name,omitempty"`
 
+	// PackDerived reports whether this agent originates from an imported
+	// pack. When true, the agent cannot be mutated directly (a direct
+	// PATCH/DELETE returns ErrPackDerived / 409); edits must go through the
+	// patch overlay (PUT /patches/agents). When false, the agent is declared
+	// inline in city.toml and is editable via the direct PATCH /agent/{name}
+	// route.
+	PackDerived bool `json:"pack_derived"`
+	// Pack is the import binding name (the [imports.<name>] key) that brought
+	// this agent into scope. Populated only when PackDerived is true; empty
+	// for city-native agents.
+	Pack string `json:"pack,omitempty"`
+
 	State string `json:"state"`
 
 	Available         bool   `json:"available"`
@@ -361,7 +373,7 @@ func providerPathCheck(providerName string, cfg *config.City) string {
 			return spec.PathCheck
 		}
 		if resolved.Command != "" {
-			return resolved.Command
+			return config.BinaryName(resolved.Command)
 		}
 	}
 	if spec, ok := cfg.Providers[providerName]; ok {
@@ -369,7 +381,7 @@ func providerPathCheck(providerName string, cfg *config.City) string {
 			return spec.PathCheck
 		}
 		if spec.Command != "" {
-			return spec.Command
+			return config.BinaryName(spec.Command)
 		}
 	}
 	builtins := config.BuiltinProviders()
@@ -377,7 +389,7 @@ func providerPathCheck(providerName string, cfg *config.City) string {
 		if spec.PathCheck != "" {
 			return spec.PathCheck
 		}
-		return spec.Command
+		return config.BinaryName(spec.Command)
 	}
 	return providerName
 }
@@ -445,7 +457,7 @@ func computeAgentState(suspended, quarantined, running bool, activeBead string, 
 // enrichSessionMeta populates model and context usage fields on the agent
 // response by reading the tail of the agent's session JSONL file.
 func (s *Server) enrichSessionMeta(resp *agentResponse, agentCfg config.Agent, qualifiedName string) {
-	factory, err := s.workerFactory(s.state.CityBeadStore())
+	factory, err := s.workerFactory(s.state.SessionsBeadStore().Store)
 	if err != nil {
 		return
 	}

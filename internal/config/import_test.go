@@ -2415,7 +2415,7 @@ session_live = ["echo global"]
 	cache := &packLoadCache{results: map[string]*packLoadResult{}}
 	topoPath := filepath.Join(packDir, "pack.toml")
 
-	agents, namedSessions, providers, services, topoDirs, requires, globals, err := loadPackWithCache(
+	agents, namedSessions, providers, _, services, topoDirs, requires, globals, err := loadPackWithCache(
 		fsys.OSFS{}, topoPath, packDir, cityRoot, "", nil, cache)
 	if err != nil {
 		t.Fatalf("loadPackWithCache first pass: %v", err)
@@ -2435,7 +2435,7 @@ session_live = ["echo global"]
 	services[0].Process.Command[0] = "mutated"
 	globals[0].SessionLive[0] = "mutated"
 
-	agents2, namedSessions2, providers2, services2, topoDirs2, requires2, globals2, err := loadPackWithCache(
+	agents2, namedSessions2, providers2, _, services2, topoDirs2, requires2, globals2, err := loadPackWithCache(
 		fsys.OSFS{}, topoPath, packDir, cityRoot, "", nil, cache)
 	if err != nil {
 		t.Fatalf("loadPackWithCache second pass: %v", err)

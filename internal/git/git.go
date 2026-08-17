@@ -169,6 +169,38 @@ func (g *Git) HasUnpushedCommitsResult() (bool, error) {
 	return strings.TrimSpace(out) != "", nil
 }
 
+// HasUnreachableCommits reports whether HEAD has commits that no ref reaches.
+// If the probe fails, it returns true to fail closed.
+func (g *Git) HasUnreachableCommits() bool {
+	has, err := g.HasUnreachableCommitsResult()
+	if err != nil {
+		return true
+	}
+	return has
+}
+
+// HasUnreachableCommitsResult reports whether HEAD has commits reachable from
+// no branch, tag, or remote-tracking ref — that is, commits that removing this
+// worktree would orphan. It is the question a caller deleting a worktree needs
+// answered, and it is deliberately narrower than HasUnpushedCommitsResult:
+// `git worktree remove` deletes the checkout, not refs/heads, so commits a
+// local branch still reaches survive the removal.
+//
+// The distinction is load-bearing for merge workflows that delete the branch
+// from the remote after merging. Once the remote branch is gone — and once a
+// squash-merge has given the merged change a different SHA on the target branch
+// — no remote-tracking ref reaches the worktree's HEAD ever again, so
+// HasUnpushedCommitsResult reports true permanently even though nothing is at
+// risk. Callers gating destructive cleanup on that answer never clean anything
+// up. Probe errors are returned as-is so callers can fail closed with a reason.
+func (g *Git) HasUnreachableCommitsResult() (bool, error) {
+	out, err := g.run("log", "HEAD", "--oneline", "--not", "--branches", "--remotes", "--tags")
+	if err != nil {
+		return false, fmt.Errorf("checking unreachable commits: %w", err)
+	}
+	return strings.TrimSpace(out) != "", nil
+}
+
 // HasStashes reports whether the repository has stashed work.
 // If the probe fails, it returns true to fail closed.
 func (g *Git) HasStashes() bool {
@@ -357,6 +389,41 @@ func HermeticEnv() []string {
 	}
 	cleaned = append(cleaned, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
 	return cleaned
+}
+
+// UntrustedRemoteGitConfigArgs returns leading `git -c` overrides that harden a
+// network git invocation (ls-remote, fetch, clone) whose remote URL may be
+// attacker-influenced — the pack-import add path, where an API caller supplies
+// the source string. Callers prepend it to the git arguments, before the
+// subcommand.
+//
+// It closes the two classic ways a resolve-then-fetch SSRF host fence is
+// bypassed at the git subprocess:
+//
+//   - http.followRedirects=false stops git from following a 30x redirect, so a
+//     fenced public host cannot bounce the fetch to an internal target (e.g.
+//     169.254.169.254) after the host check has already passed.
+//   - protocol.allow=never plus an explicit allowlist constrains the transports
+//     git will use to the schemes pack sources legitimately need (https, http,
+//     ssh, git, and file for CLI-local packs), so a crafted URL, redirect, or
+//     submodule cannot escalate to a dangerous transport such as ext:: (which
+//     runs an arbitrary command).
+//
+// It does NOT close a DNS-rebinding TOCTOU window: git re-resolves the host at
+// fetch time, so a name that resolved to a public address during the fence can
+// still resolve to an internal one here. That residual is documented at the
+// pack SSRF fence (internal/api/pack_source_policy.go); pinning the resolved IP
+// is out of scope for this hardening.
+func UntrustedRemoteGitConfigArgs() []string {
+	return []string{
+		"-c", "http.followRedirects=false",
+		"-c", "protocol.allow=never",
+		"-c", "protocol.https.allow=always",
+		"-c", "protocol.http.allow=always",
+		"-c", "protocol.ssh.allow=always",
+		"-c", "protocol.git.allow=always",
+		"-c", "protocol.file.allow=always",
+	}
 }
 
 // sanitizeGitEnv returns environ with git-specific variables removed. It is the

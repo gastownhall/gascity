@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -155,39 +156,6 @@ func TestSessionExplicitNameForNewSessionAliasKeepsGeneratedNameOff(t *testing.T
 	}
 }
 
-func TestCmdSessionList_ManagedExecLifecycleProviderReadsSessions(t *testing.T) {
-	cityDir, _ := setupManagedBdWaitTestCity(t)
-
-	store, err := openCityStoreAt(cityDir)
-	if err != nil {
-		t.Fatalf("openCityStoreAt(%q): %v", cityDir, err)
-	}
-	if _, err := store.Create(beads.Bead{
-		Title:  "managed exec session",
-		Type:   session.BeadType,
-		Labels: []string{session.LabelSession},
-		Metadata: map[string]string{
-			"session_name": "mayor",
-			"template":     "worker",
-			"state":        "asleep",
-		},
-	}); err != nil {
-		t.Fatalf("store.Create(session bead): %v", err)
-	}
-
-	t.Setenv("GC_BEADS", "exec:"+gcBeadsBdScriptPath(cityDir))
-	t.Setenv("GC_CITY", cityDir)
-	t.Setenv("GC_CITY_PATH", cityDir)
-
-	var stdout, stderr bytes.Buffer
-	if code := cmdSessionList("", "", false, &stdout, &stderr); code != 0 {
-		t.Fatalf("cmdSessionList() = %d, want 0; stderr=%s", code, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "mayor") {
-		t.Fatalf("stdout missing session name %q:\n%s", "mayor", stdout.String())
-	}
-}
-
 func TestParsePruneDuration(t *testing.T) {
 	tests := []struct {
 		input   string
@@ -223,7 +191,7 @@ func TestParsePruneDuration(t *testing.T) {
 
 func TestSessionNewJSONRequiresNoAttach(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := cmdSessionNew([]string{"worker"}, "", "", "", false, true, &stdout, &stderr)
+	code := cmdSessionNew([]string{"worker"}, "", "", "", false, true, 0, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("cmdSessionNew --json without --no-attach = %d, want 1", code)
 	}
@@ -437,7 +405,7 @@ func TestCmdSessionNew_PoolTemplateUsesAliasBackedWorkDirIdentity(t *testing.T) 
 	for _, alias := range []string{"demo/ant-fenrir", "demo/ant-grendel"} {
 		stdout.Reset()
 		stderr.Reset()
-		if code := cmdSessionNew([]string{"demo/ant"}, alias, "", "", true, false, &stdout, &stderr); code != 0 {
+		if code := cmdSessionNew([]string{"demo/ant"}, alias, "", "", true, false, 0, &stdout, &stderr); code != 0 {
 			t.Fatalf("cmdSessionNew(%q) = %d, want 0; stderr=%s", alias, code, stderr.String())
 		}
 	}
@@ -477,13 +445,13 @@ func TestCmdSessionNew_PoolTemplateCanonicalizesQualifiedAliasCollisions(t *test
 	writePoolSessionCityTOML(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionNew([]string{"demo/ant"}, "ant-fenrir", "", "", true, false, &stdout, &stderr); code != 0 {
+	if code := cmdSessionNew([]string{"demo/ant"}, "ant-fenrir", "", "", true, false, 0, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionNew(first) = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
 	stdout.Reset()
 	stderr.Reset()
-	if code := cmdSessionNew([]string{"demo/ant"}, "demo/ant-fenrir", "", "", true, false, &stdout, &stderr); code == 0 {
+	if code := cmdSessionNew([]string{"demo/ant"}, "demo/ant-fenrir", "", "", true, false, 0, &stdout, &stderr); code == 0 {
 		t.Fatal("cmdSessionNew(second) = 0, want alias conflict")
 	}
 	if !strings.Contains(stderr.String(), session.ErrSessionAliasExists.Error()) {
@@ -508,7 +476,7 @@ func TestCmdSessionNew_PoolTemplateBareAliasStillResolves(t *testing.T) {
 	writePoolSessionCityTOML(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionNew([]string{"demo/ant"}, "ant-fenrir", "", "", true, false, &stdout, &stderr); code != 0 {
+	if code := cmdSessionNew([]string{"demo/ant"}, "ant-fenrir", "", "", true, false, 0, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionNew = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
@@ -546,7 +514,7 @@ func TestCmdSessionNew_PoolTemplateWithoutAliasUsesGeneratedWorkDirIdentity(t *t
 	for i := 0; i < 2; i++ {
 		stdout.Reset()
 		stderr.Reset()
-		if code := cmdSessionNew([]string{"demo/ant"}, "", "", "", true, false, &stdout, &stderr); code != 0 {
+		if code := cmdSessionNew([]string{"demo/ant"}, "", "", "", true, false, 0, &stdout, &stderr); code != 0 {
 			t.Fatalf("cmdSessionNew(aliasless #%d) = %d, want 0; stderr=%s", i+1, code, stderr.String())
 		}
 	}
@@ -650,7 +618,7 @@ args = ["{{.AgentName}}", "{{.WorkDir}}", "{{.TemplateName}}"]
 	}()
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionNew([]string{"demo/ant"}, "", "", "", true, false, &stdout, &stderr); code != 0 {
+	if code := cmdSessionNew([]string{"demo/ant"}, "", "", "", true, false, 0, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionNew(acp) = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
@@ -710,11 +678,11 @@ func TestCmdSessionNew_CustomACPProviderDefaultsAgentSessionToACP(t *testing.T) 
 
 	oldBuild := buildSessionProviderByName
 	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
-	buildSessionProviderByName = func(name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
+	buildSessionProviderByName = func(cfg *config.City, name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
 		if name == "acp" {
 			return &transportCapableSessionProvider{Fake: runtime.NewFake()}, nil
 		}
-		return oldBuild(name, sc, cityName, cityPath)
+		return oldBuild(cfg, name, sc, cityName, cityPath)
 	}
 
 	cityDir := t.TempDir()
@@ -727,7 +695,7 @@ args = ["{{.AgentName}}", "{{.WorkDir}}", "{{.TemplateName}}"]
 `)
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionNew([]string{"demo/ant"}, "", "", "", true, false, &stdout, &stderr); code != 0 {
+	if code := cmdSessionNew([]string{"demo/ant"}, "", "", "", true, false, 0, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionNew(custom provider acp default) = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
@@ -745,11 +713,11 @@ func TestCmdSessionNewRejectsExplicitTmuxAgentWhenCitySessionProviderIsACP(t *te
 
 	oldBuild := buildSessionProviderByName
 	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
-	buildSessionProviderByName = func(name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
+	buildSessionProviderByName = func(cfg *config.City, name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
 		if name == "acp" {
 			return &transportCapableSessionProvider{Fake: runtime.NewFake()}, nil
 		}
-		return oldBuild(name, sc, cityName, cityPath)
+		return oldBuild(cfg, name, sc, cityName, cityPath)
 	}
 
 	cityDir := t.TempDir()
@@ -757,7 +725,7 @@ func TestCmdSessionNewRejectsExplicitTmuxAgentWhenCitySessionProviderIsACP(t *te
 	writePoolACPCityExplicitTmuxAgentTOML(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionNew([]string{"demo/ant"}, "", "", "", true, false, &stdout, &stderr); code == 0 {
+	if code := cmdSessionNew([]string{"demo/ant"}, "", "", "", true, false, 0, &stdout, &stderr); code == 0 {
 		t.Fatalf("cmdSessionNew(explicit tmux on ACP city) = %d, want failure", code)
 	}
 	if !strings.Contains(stderr.String(), "requires tmux transport") {
@@ -777,7 +745,7 @@ func TestCmdSessionNew_PoolTemplateRejectsAliasMatchingConcreteIdentity(t *testi
 	writePoolSessionCityTOML(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionNew([]string{"demo/ant"}, "", "", "", true, false, &stdout, &stderr); code != 0 {
+	if code := cmdSessionNew([]string{"demo/ant"}, "", "", "", true, false, 0, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionNew(aliasless) = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
@@ -792,7 +760,7 @@ func TestCmdSessionNew_PoolTemplateRejectsAliasMatchingConcreteIdentity(t *testi
 
 	stdout.Reset()
 	stderr.Reset()
-	if code := cmdSessionNew([]string{"demo/ant"}, "demo/"+sessionName, "", "", true, false, &stdout, &stderr); code == 0 {
+	if code := cmdSessionNew([]string{"demo/ant"}, "demo/"+sessionName, "", "", true, false, 0, &stdout, &stderr); code == 0 {
 		t.Fatal("cmdSessionNew(alias collision) = 0, want conflict")
 	}
 	if !strings.Contains(stderr.String(), session.ErrSessionAliasExists.Error()) {
@@ -1098,11 +1066,11 @@ func TestBuildResumeCommandIncludesWrappedCodexResumeDefaults(t *testing.T) {
 				Args: []string{
 					"run", "codex", "--",
 					"--dangerously-bypass-approvals-and-sandbox",
-					"-m", "gpt-5.3-codex-spark",
+					"-m", "gpt-5.3-codex",
 					"-c", "model_reasoning_effort=\"medium\"",
 				},
 				PathCheck:     "true",
-				ResumeCommand: "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex-spark resume {{.SessionKey}}",
+				ResumeCommand: "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex resume {{.SessionKey}}",
 			},
 		},
 	}
@@ -1115,7 +1083,7 @@ func TestBuildResumeCommandIncludesWrappedCodexResumeDefaults(t *testing.T) {
 	}
 
 	cmd, _ := buildResumeCommand(cityDir, cfg, info, "", nil, io.Discard)
-	want := "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex-spark resume -c model_reasoning_effort=medium abc-123"
+	want := "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex resume -c model_reasoning_effort=medium abc-123"
 	if cmd != want {
 		t.Fatalf("resume command = %q, want %q", cmd, want)
 	}
@@ -1370,7 +1338,7 @@ func TestSessionReason_FallsThroughToProviderForSleepingAttachment(t *testing.T)
 
 	reason := sessionReason(
 		info,
-		map[string]beads.Bead{bead.ID: bead},
+		map[string]session.Info{bead.ID: seedSessionInfo(bead)},
 		cfg,
 		wrapped,
 		nil,
@@ -1378,6 +1346,43 @@ func TestSessionReason_FallsThroughToProviderForSleepingAttachment(t *testing.T)
 	)
 	if reason != string(WakeAttached) {
 		t.Fatalf("sessionReason = %q, want %q", reason, WakeAttached)
+	}
+}
+
+// TestSessionReason_IndexMissReturnsDash pins the miss-path guard: a session
+// missing from the reason-projection index (infoIndex) must render "-", never a
+// zero-value session.Info fed to wakeReasonsInfo (which would silently emit a
+// wrong REASON cell). WI-6 R5: the projection reads only the typed Info snapshot
+// (the raw beadIndex is gone — Info.SessionCircuitState carries the last field
+// the display reason needed), so infoIndex is the single guarded index.
+func TestSessionReason_IndexMissReturnsDash(t *testing.T) {
+	bead := beads.Bead{
+		ID:     "gc-miss",
+		Status: "open",
+		Metadata: map[string]string{
+			"template":     "worker",
+			"session_name": "worker-miss",
+			"state":        "asleep",
+			"sleep_reason": "user-hold",
+		},
+	}
+	s := session.Info{
+		ID:          "gc-miss",
+		Template:    "worker",
+		State:       session.StateAsleep,
+		SessionName: "worker-miss",
+	}
+	full := seedSessionInfo(bead)
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+
+	// Missing from infoIndex → "-".
+	if got := sessionReason(s, map[string]session.Info{}, cfg, nil, nil, nil); got != "-" {
+		t.Fatalf("sessionReason(missing from infoIndex) = %q, want -", got)
+	}
+	// Sanity: present renders the real reason, so the guard above is not trivially
+	// returning "-" for a resolvable session.
+	if got := sessionReason(s, map[string]session.Info{s.ID: full}, cfg, nil, nil, nil); got != "user-hold" {
+		t.Fatalf("sessionReason(present) = %q, want user-hold", got)
 	}
 }
 
@@ -1413,7 +1418,7 @@ func TestSessionReason_SleepReasonOverridesWakeReason(t *testing.T) {
 
 	reason := sessionReason(
 		info,
-		map[string]beads.Bead{bead.ID: bead},
+		map[string]session.Info{bead.ID: seedSessionInfo(bead)},
 		cfg,
 		wrapped,
 		nil,
@@ -1458,7 +1463,7 @@ func TestSessionReason_ResetPendingLiveRuntimeOverridesOtherReasons(t *testing.T
 
 	reason := sessionReason(
 		info,
-		map[string]beads.Bead{bead.ID: bead},
+		map[string]session.Info{bead.ID: seedSessionInfo(bead)},
 		cfg,
 		provider,
 		nil,
@@ -1493,7 +1498,7 @@ func TestSessionReason_ResetPendingNotLiveFallsBack(t *testing.T) {
 
 	reason := sessionReason(
 		info,
-		map[string]beads.Bead{bead.ID: bead},
+		map[string]session.Info{bead.ID: seedSessionInfo(bead)},
 		nil,
 		provider,
 		nil,
@@ -1528,7 +1533,7 @@ func TestSessionReason_CircuitOpenMetadataVisible(t *testing.T) {
 
 	reason := sessionReason(
 		info,
-		map[string]beads.Bead{bead.ID: bead},
+		map[string]session.Info{bead.ID: seedSessionInfo(bead)},
 		nil,
 		runtime.NewFake(),
 		nil,
@@ -1562,7 +1567,7 @@ func TestSessionReason_CircuitOpenNonMatchingMetadataFallsBack(t *testing.T) {
 
 	reason := sessionReason(
 		info,
-		map[string]beads.Bead{bead.ID: bead},
+		map[string]session.Info{bead.ID: seedSessionInfo(bead)},
 		nil,
 		runtime.NewFake(),
 		nil,
@@ -1683,7 +1688,7 @@ func TestSessionReason_PriorityMatrix(t *testing.T) {
 
 			reason := sessionReason(
 				newInfo(sessionName),
-				map[string]beads.Bead{bead.ID: bead},
+				map[string]session.Info{bead.ID: seedSessionInfo(bead)},
 				tt.cfg,
 				provider,
 				tt.poolDesired,
@@ -1737,7 +1742,7 @@ func TestSessionReason_OmitsExpiredLifecycleHold(t *testing.T) {
 
 	reason := sessionReason(
 		info,
-		map[string]beads.Bead{bead.ID: bead},
+		map[string]session.Info{bead.ID: seedSessionInfo(bead)},
 		nil,
 		runtime.NewFake(),
 		nil,
@@ -1774,7 +1779,7 @@ func TestSessionReason_SuppressesWakeReasonsForHistoricalArchivedBead(t *testing
 
 	reason := sessionReason(
 		info,
-		map[string]beads.Bead{bead.ID: bead},
+		map[string]session.Info{bead.ID: seedSessionInfo(bead)},
 		cfg,
 		runtime.NewFake(),
 		nil,
@@ -1782,6 +1787,131 @@ func TestSessionReason_SuppressesWakeReasonsForHistoricalArchivedBead(t *testing
 	)
 	if reason != "-" {
 		t.Fatalf("sessionReason = %q, want - for historical archived bead", reason)
+	}
+}
+
+// TestSessionReason_MultiReasonColumnCharacterization pins the exact
+// comma-joined REASON cell that `gc session` emits today. It is a
+// byte-identical gate: the wake-helper cleanup (ga-6aaj6q) retires the legacy
+// drain/dependency wake path but must not change what the CLI displays, which
+// still runs through evaluateWakeReasonsInfo. If a literal ever drifts, this test
+// fails and forces a deliberate decision rather than a silent regression.
+func TestSessionReason_MultiReasonColumnCharacterization(t *testing.T) {
+	const agentName = "worker"
+	const sessionName = "reason-worker"
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: agentName}},
+	}
+
+	newBead := func(state string, extra map[string]string) beads.Bead {
+		md := map[string]string{
+			"template":     agentName,
+			"session_name": sessionName,
+			"state":        state,
+		}
+		for k, v := range extra {
+			md[k] = v
+		}
+		return beads.Bead{ID: "gc-1", Status: "open", Metadata: md}
+	}
+	newInfo := func(state session.State) session.Info {
+		return session.Info{
+			ID:          "gc-1",
+			Template:    agentName,
+			State:       state,
+			SessionName: sessionName,
+		}
+	}
+	attachingProvider := func(attached bool) runtime.Provider {
+		return &attachmentCachingProvider{
+			Provider: runtime.NewFake(),
+			cache: buildAttachmentCache([]session.Info{newInfo(session.StateActive)}, func(session.Info) (bool, error) {
+				return attached, nil
+			}),
+		}
+	}
+
+	type matchMode int
+	const (
+		matchExact matchMode = iota
+		matchContains
+		matchSuffix
+	)
+
+	tests := []struct {
+		name        string
+		bead        beads.Bead
+		info        session.Info
+		provider    runtime.Provider
+		poolDesired map[string]int
+		readyWait   map[string]bool
+		mode        matchMode
+		want        string
+	}{
+		{
+			name:        "active pool session attached emits ordered multi-reason cell",
+			bead:        newBead("active", nil),
+			info:        newInfo(session.StateActive),
+			provider:    attachingProvider(true),
+			poolDesired: map[string]int{agentName: 1},
+			mode:        matchExact,
+			want:        "session,config,attached",
+		},
+		{
+			name:      "asleep session with ready wait shows wait reason",
+			bead:      newBead("asleep", nil),
+			info:      newInfo(session.StateAsleep),
+			provider:  runtime.NewFake(),
+			readyWait: map[string]bool{"gc-1": true},
+			mode:      matchContains,
+			want:      string(WakeWait),
+		},
+		{
+			name:        "pin_awake appends pin as the final reason",
+			bead:        newBead("active", map[string]string{"pin_awake": "true"}),
+			info:        newInfo(session.StateActive),
+			provider:    attachingProvider(false),
+			poolDesired: map[string]int{agentName: 1},
+			mode:        matchSuffix,
+			want:        "," + string(WakePin),
+		},
+		{
+			name:     "no reasons collapses to dash",
+			bead:     newBead("asleep", nil),
+			info:     newInfo(session.StateAsleep),
+			provider: runtime.NewFake(),
+			mode:     matchExact,
+			want:     "-",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			before := cloneSessionReasonMetadata(tt.bead.Metadata)
+			got := sessionReason(
+				tt.info,
+				map[string]session.Info{tt.bead.ID: seedSessionInfo(tt.bead)},
+				cfg,
+				tt.provider,
+				tt.poolDesired,
+				tt.readyWait,
+			)
+			switch tt.mode {
+			case matchExact:
+				if got != tt.want {
+					t.Fatalf("sessionReason = %q, want %q", got, tt.want)
+				}
+			case matchContains:
+				if !strings.Contains(got, tt.want) {
+					t.Fatalf("sessionReason = %q, want it to contain %q", got, tt.want)
+				}
+			case matchSuffix:
+				if !strings.HasSuffix(got, tt.want) {
+					t.Fatalf("sessionReason = %q, want it to end with %q", got, tt.want)
+				}
+			}
+			assertStringMapEqual(t, tt.bead.Metadata, before)
+		})
 	}
 }
 
@@ -1900,6 +2030,7 @@ func TestRenderSessionListFromAPIJSONUsesSnakeCaseSessionFields(t *testing.T) {
 				Title:       "Worker session",
 				Alias:       "worker-1",
 				SessionName: "worker-gc-abc",
+				WorkDir:     "/tmp/gc/workspaces/worker",
 				CreatedAt:   "2026-04-23T10:00:00Z",
 				LastActive:  "2026-04-23T12:00:00Z",
 				Attached:    true,
@@ -1912,7 +2043,7 @@ func TestRenderSessionListFromAPIJSONUsesSnakeCaseSessionFields(t *testing.T) {
 		t.Fatalf("renderSessionListFromAPI(--json) = %d, want 0", code)
 	}
 	out := stdout.String()
-	for _, want := range []string{`"id"`, `"session_name"`, `"created_at"`, `"last_active"`, `"last_output"`} {
+	for _, want := range []string{`"id"`, `"session_name"`, `"work_dir"`, `"created_at"`, `"last_active"`, `"last_output"`} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("API JSON output missing %s:\n%s", want, out)
 		}
@@ -1934,6 +2065,38 @@ func TestRenderSessionListFromAPIJSONUsesSnakeCaseSessionFields(t *testing.T) {
 	}
 	if got.Sessions[0]["session_name"] != "worker-gc-abc" {
 		t.Fatalf("session_name = %#v, want worker-gc-abc; row=%#v", got.Sessions[0]["session_name"], got.Sessions[0])
+	}
+	if got.Sessions[0]["work_dir"] != "/tmp/gc/workspaces/worker" {
+		t.Fatalf("work_dir = %#v, want /tmp/gc/workspaces/worker; row=%#v", got.Sessions[0]["work_dir"], got.Sessions[0])
+	}
+}
+
+func TestRenderSessionListFromAPIHumanIncludesTitleAndWorkDir(t *testing.T) {
+	var stdout bytes.Buffer
+	code := renderSessionListFromAPI(api.CachedRead[[]SessionView]{
+		Body: []SessionView{
+			{
+				ID:          "gc-abc",
+				Template:    "gascity-packs/packer.packsmith",
+				State:       "active",
+				Reason:      "assigned",
+				Title:       "jjw: update workspace docs",
+				Alias:       "worker-1",
+				SessionName: "worker-gc-abc",
+				WorkDir:     "/tmp/gc/.gc/workspaces/gascity-packs/packs/jjw",
+				CreatedAt:   "2026-04-23T10:00:00Z",
+				LastActive:  "2026-04-23T12:00:00Z",
+			},
+		},
+	}, false, &stdout)
+	if code != 0 {
+		t.Fatalf("renderSessionListFromAPI() = %d, want 0", code)
+	}
+	out := stdout.String()
+	for _, want := range []string{"TITLE", "WORKDIR", "jjw: update workspace docs", "/tmp/gc/.gc/workspaces/gascity-packs/packs/jjw"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("API human output missing %q:\n%s", want, out)
+		}
 	}
 }
 
@@ -1965,6 +2128,7 @@ func TestCmdSessionList_RendersLastNudgeColumn(t *testing.T) {
 			"session_name":                       "nudged-session",
 			"template":                           "worker",
 			"state":                              "asleep",
+			"work_dir":                           "/tmp/gc/workspaces/nudged",
 			session.MetadataLastNudgeDeliveredAt: nudgeStamp,
 		},
 	}); err != nil {
@@ -1979,6 +2143,7 @@ func TestCmdSessionList_RendersLastNudgeColumn(t *testing.T) {
 			"session_name": "quiet-session",
 			"template":     "worker",
 			"state":        "asleep",
+			"work_dir":     "/tmp/gc/workspaces/quiet",
 		},
 	}); err != nil {
 		t.Fatalf("store.Create(quiet session bead): %v", err)
@@ -1993,6 +2158,12 @@ func TestCmdSessionList_RendersLastNudgeColumn(t *testing.T) {
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
 	if len(lines) < 1 || !strings.Contains(lines[0], "LAST NUDGE") {
 		t.Fatalf("missing LAST NUDGE column header; first line = %q\nfull output:\n%s", firstLine(lines), out)
+	}
+	if !strings.Contains(lines[0], "WORKDIR") {
+		t.Fatalf("missing WORKDIR column header; first line = %q\nfull output:\n%s", firstLine(lines), out)
+	}
+	if !strings.Contains(out, "/tmp/gc/workspaces/nudged") || !strings.Contains(out, "/tmp/gc/workspaces/quiet") {
+		t.Fatalf("output missing session work dirs:\n%s", out)
 	}
 	if !strings.Contains(out, "2h ago") {
 		t.Fatalf("output missing formatted LAST NUDGE (want %q) for nudged session:\n%s", "2h ago", out)
@@ -2103,7 +2274,7 @@ func TestCmdSessionPeekJSONSuccessIsJSONOnly(t *testing.T) {
 	fakeProvider := runtime.NewFake()
 	fakeProvider.SetPeekOutput("runtime-session", "hello\nworld\n")
 	oldBuild := buildSessionProviderByName
-	buildSessionProviderByName = func(string, config.SessionConfig, string, string) (runtime.Provider, error) {
+	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
 		return fakeProvider, nil
 	}
 	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
@@ -2231,7 +2402,7 @@ func TestCmdSessionNew_AllowsReservedNamedAliasWithController(t *testing.T) {
 	}()
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionNew([]string{"mayor"}, "mayor", "", "", true, false, &stdout, &stderr); code != 0 {
+	if code := cmdSessionNew([]string{"mayor"}, "mayor", "", "", true, false, 0, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionNew(controller) = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
@@ -2280,7 +2451,7 @@ func TestCmdSessionNew_AllowsReservedNamedAliasWithoutController(t *testing.T) {
 	writeNamedSessionCityTOML(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionNew([]string{"mayor"}, "mayor", "", "", true, false, &stdout, &stderr); code != 0 {
+	if code := cmdSessionNew([]string{"mayor"}, "mayor", "", "", true, false, 0, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionNew(fallback) = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
@@ -2331,7 +2502,7 @@ func TestCmdSessionNew_IgnoresUnmanagedSupervisorSocket(t *testing.T) {
 	}()
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionNew([]string{"mayor"}, "mayor", "", "", true, false, &stdout, &stderr); code != 0 {
+	if code := cmdSessionNew([]string{"mayor"}, "mayor", "", "", true, false, 0, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionNew(unmanaged supervisor) = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
@@ -2573,7 +2744,7 @@ func TestCmdSessionNew_AutoTitleFromMessage(t *testing.T) {
 	writeNamedSessionCityTOML(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdSessionNew([]string{"mayor"}, "mayor", "", "fix the login redirect loop", true, false, &stdout, &stderr)
+	code := cmdSessionNew([]string{"mayor"}, "mayor", "", "fix the login redirect loop", true, false, 0, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdSessionNew = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -2598,7 +2769,7 @@ func TestCmdSessionNew_ExplicitTitlePreserved(t *testing.T) {
 	writeNamedSessionCityTOML(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdSessionNew([]string{"mayor"}, "mayor", "my explicit title", "some message", true, false, &stdout, &stderr)
+	code := cmdSessionNew([]string{"mayor"}, "mayor", "my explicit title", "some message", true, false, 0, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdSessionNew = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -2619,7 +2790,7 @@ func TestCmdSessionNew_NoMessageKeepsTemplateName(t *testing.T) {
 	writeNamedSessionCityTOML(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdSessionNew([]string{"mayor"}, "mayor", "", "", true, false, &stdout, &stderr)
+	code := cmdSessionNew([]string{"mayor"}, "mayor", "", "", true, false, 0, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdSessionNew = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -2639,7 +2810,7 @@ func TestMaybeAutoTitle_NilProviderFallsBackToTruncation(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	maybeAutoTitle(store, b.ID, "", "fix the login redirect loop", nil, "", &stderr)
+	maybeAutoTitle(sessionFrontDoor(store), b.ID, "", "fix the login redirect loop", nil, "", &stderr)
 
 	// MaybeGenerateTitleAsync sets the truncated title synchronously before
 	// starting the goroutine, and generateTitle(provider=nil) falls back to
@@ -2664,7 +2835,7 @@ func TestMaybeAutoTitle_ExplicitTitleSkipsGeneration(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	maybeAutoTitle(store, b.ID, "explicit", "some message", nil, "", &stderr)
+	maybeAutoTitle(sessionFrontDoor(store), b.ID, "explicit", "some message", nil, "", &stderr)
 
 	got, err := store.Get(b.ID)
 	if err != nil {
@@ -2683,7 +2854,7 @@ func TestMaybeAutoTitle_EmptyMessageSkipsGeneration(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	maybeAutoTitle(store, b.ID, "", "", nil, "", &stderr)
+	maybeAutoTitle(sessionFrontDoor(store), b.ID, "", "", nil, "", &stderr)
 
 	got, err := store.Get(b.ID)
 	if err != nil {
@@ -2851,6 +3022,153 @@ func writeSessionListTestCity(t *testing.T) string {
 	t.Setenv("GC_CITY", cityDir)
 	t.Setenv("GC_CITY_PATH", cityDir)
 	return cityDir
+}
+
+func TestSessionListProviderConstructionFailureReturnsThroughRun(t *testing.T) {
+	if scenario, markerPath, stdoutPath, stderrPath, ok := sessionListProviderFailureHelperArgs(os.Args); ok {
+		runSessionListProviderFailureHelper(t, scenario, markerPath, stdoutPath, stderrPath)
+		return
+	}
+
+	for _, tc := range []struct {
+		name       string
+		scenario   string
+		wantJSON   bool
+		wantStdout string
+		wantStderr string
+	}{
+		{
+			name:       "text",
+			scenario:   "text",
+			wantStderr: "gc session list: constructing session provider: injected provider failure\n",
+		},
+		{
+			name:       "json",
+			scenario:   "json",
+			wantJSON:   true,
+			wantStderr: "gc session list: constructing session provider: injected provider failure",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			helperRoot := t.TempDir()
+			cityDir := filepath.Join(helperRoot, "city")
+			writeNamedSessionCityTOML(t, cityDir)
+			markerPath := filepath.Join(helperRoot, "returned-through-run")
+			stdoutPath := filepath.Join(helperRoot, "run-stdout")
+			stderrPath := filepath.Join(helperRoot, "run-stderr")
+			cmd := exec.Command(
+				os.Args[0],
+				"-test.run=^TestSessionListProviderConstructionFailureReturnsThroughRun$",
+				"--",
+				"session-list-provider-failure-helper",
+				tc.scenario,
+				markerPath,
+				stdoutPath,
+				stderrPath,
+			)
+			cmd.Dir = cityDir
+			cmd.Env = sanitizedBaseEnv(
+				"GC_BEADS=file",
+				"GC_BEADS_SCOPE_ROOT=",
+				"GC_CITY="+cityDir,
+				"GC_CITY_PATH="+cityDir,
+				"GC_CEILING_DIRECTORIES="+helperRoot,
+				"GC_HOME="+filepath.Join(helperRoot, "gc-home"),
+				"GC_SESSION=broken",
+				"OTEL_SDK_DISABLED=true",
+			)
+			var processStdout, processStderr bytes.Buffer
+			cmd.Stdout = &processStdout
+			cmd.Stderr = &processStderr
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("helper did not return through run: %v; stdout=%q stderr=%q", err, processStdout.String(), processStderr.String())
+			}
+			if marker, err := os.ReadFile(markerPath); err != nil {
+				t.Fatalf("run-return marker missing: %v", err)
+			} else if got, want := string(marker), "returned\n"; got != want {
+				t.Fatalf("run-return marker = %q, want %q", got, want)
+			}
+			stdout, err := os.ReadFile(stdoutPath)
+			if err != nil {
+				t.Fatalf("read run stdout: %v", err)
+			}
+			stderr, err := os.ReadFile(stderrPath)
+			if err != nil {
+				t.Fatalf("read run stderr: %v", err)
+			}
+
+			if !tc.wantJSON {
+				if got := string(stdout); got != tc.wantStdout {
+					t.Fatalf("stdout = %q, want %q", got, tc.wantStdout)
+				}
+				if got := string(stderr); got != tc.wantStderr {
+					t.Fatalf("stderr = %q, want %q", got, tc.wantStderr)
+				}
+				return
+			}
+
+			var output cliJSONErrorOutput
+			if err := json.Unmarshal(stdout, &output); err != nil {
+				t.Fatalf("stdout is not a JSON error: %v; stdout=%q", err, stdout)
+			}
+			if got, want := output.Error.Code, "session_provider_failed"; got != want {
+				t.Fatalf("JSON error code = %q, want %q", got, want)
+			}
+			if got := output.Error.Message; got != tc.wantStderr {
+				t.Fatalf("JSON error message = %q, want %q", got, tc.wantStderr)
+			}
+			if output.OK || output.Error.ExitCode != 1 {
+				t.Fatalf("JSON error = %#v, want ok=false exit_code=1", output)
+			}
+			var diagnostic cliJSONDiagnostic
+			if err := json.Unmarshal(stderr, &diagnostic); err != nil {
+				t.Fatalf("stderr is not a JSON diagnostic: %v; stderr=%q", err, stderr)
+			}
+			if got, want := diagnostic.Code, "session_provider_failed"; got != want {
+				t.Fatalf("JSON diagnostic code = %q, want %q", got, want)
+			}
+			if got := diagnostic.Message; got != tc.wantStderr {
+				t.Fatalf("JSON diagnostic message = %q, want %q", got, tc.wantStderr)
+			}
+		})
+	}
+}
+
+func sessionListProviderFailureHelperArgs(args []string) (string, string, string, string, bool) {
+	for index, arg := range args {
+		if arg == "--" && index+6 == len(args) && args[index+1] == "session-list-provider-failure-helper" {
+			return args[index+2], args[index+3], args[index+4], args[index+5], true
+		}
+	}
+	return "", "", "", "", false
+}
+
+func runSessionListProviderFailureHelper(t *testing.T, scenario, markerPath, stdoutPath, stderrPath string) {
+	t.Helper()
+	defer func() {
+		if err := os.WriteFile(markerPath, []byte("returned\n"), 0o600); err != nil {
+			t.Errorf("write run-return marker: %v", err)
+		}
+	}()
+	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		return nil, errors.New("injected provider failure")
+	}
+	args := []string{"--city", ".", "session", "list"}
+	if scenario == "json" {
+		args = append(args, "--json")
+	} else if scenario != "text" {
+		t.Fatalf("unknown helper scenario %q", scenario)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run(args, &stdout, &stderr); code != 1 {
+		t.Fatalf("run exit code = %d, want 1", code)
+	}
+	if err := os.WriteFile(stdoutPath, stdout.Bytes(), 0o600); err != nil {
+		t.Fatalf("write run stdout: %v", err)
+	}
+	if err := os.WriteFile(stderrPath, stderr.Bytes(), 0o600); err != nil {
+		t.Fatalf("write run stderr: %v", err)
+	}
 }
 
 // okSessionsHandler serves a session list with one entry matching the test

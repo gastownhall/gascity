@@ -14,6 +14,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/cityinit"
+	"github.com/gastownhall/gascity/internal/citywriteauth"
 	"github.com/gastownhall/gascity/internal/events"
 )
 
@@ -99,21 +100,26 @@ type cachedCityServer struct {
 //   - Per-city (registerCityRoutes): every operation at
 //     /v0/city/{cityName}/..., resolved at request time via bindCity.
 //
-// The only non-Huma registration on humaMux is serveCitySvcProxy at
-// "/v0/city/{cityName}/svc/", which forwards workspace-service traffic
-// to per-city Server.mux. Workspace services own their own HTTP
-// contracts and are explicitly excluded from the typed control plane.
+// The non-Huma registrations on humaMux are the three sanctioned non-typed
+// surfaces (api-control-plane.md §3.9): serveCitySvcProxy at
+// "/v0/city/{cityName}/svc/" (workspace-service pass-through), and — when the
+// dashboard is attached — the embedded SPA at "/" and the host-side dashboard
+// plane at "/api/". Everything else is a typed Huma operation.
 type SupervisorMux struct {
-	resolver       CityResolver
-	initializer    cityInitializer
-	readOnly       bool
-	version        string
-	buildID        string
-	startedAt      time.Time
-	allowedOrigins []string
-	allowedHosts   []string
-	allowAnyHost   bool
-	server         *http.Server
+	resolver        CityResolver
+	initializer     cityInitializer
+	readOnly        bool
+	version         string
+	buildID         string
+	startedAt       time.Time
+	allowedOrigins  []string
+	allowedHosts    []string
+	allowAnyHost    bool
+	writeAuth       *citywriteauth.Verifier
+	readAuth        *citywriteauth.Verifier
+	dashboardBase   func() string
+	runCensusSource RunCensusSource
+	server          *http.Server
 
 	// Single Huma API (Phase 3.5 — Topology 1). Owns every typed
 	// operation: supervisor-scope (/v0/cities, /health, /v0/readiness,
@@ -129,6 +135,11 @@ type SupervisorMux struct {
 	// the State pointer changes (city restarted → new controllerState).
 	cacheMu sync.RWMutex
 	cache   map[string]cachedCityServer
+
+	// idem caches responses for Idempotency-Key replay on supervisor-scope
+	// create endpoints (POST /v0/city). Per-city creates use the per-city
+	// Server's own cache instead.
+	idem *idempotencyCache
 }
 
 // NewSupervisorMux creates a SupervisorMux that routes requests to cities
@@ -151,6 +162,7 @@ func NewSupervisorMux(resolver CityResolver, initializer cityInitializer, readOn
 		humaMux:     humaMux,
 		humaAPI:     newSupervisorHumaAPI(humaMux, readOnly),
 		cache:       make(map[string]cachedCityServer),
+		idem:        newIdempotencyCache(30 * time.Minute),
 	}
 	sm.registerSupervisorRoutes()
 	sm.registerCityRoutes()
@@ -160,13 +172,20 @@ func NewSupervisorMux(resolver CityResolver, initializer cityInitializer, readOn
 	// the header at runtime; the spec describes the contract. Must run
 	// after all routes are registered.
 	registerFrameworkHeaders(sm.humaAPI)
-	// /svc/* workspace-service pass-through. This is the single remaining
-	// non-Huma registration on the supervisor — untyped by design (the
-	// proxy passes bodies through to external service processes, which
-	// own their own HTTP contracts). Go 1.22+ mux: "/v0/city/{cityName}/svc/"
-	// as a prefix pattern only matches that subtree; everything else is
-	// a typed Huma operation registered at its real scoped path.
+	// /svc/* workspace-service pass-through — one of the sanctioned non-Huma
+	// surfaces (api-control-plane.md §3.9), untyped by design (the proxy passes
+	// bodies through to external service processes, which own their own HTTP
+	// contracts). The dashboard SPA ("/") and host-side plane ("/api/") are the
+	// other two, attached later via WithStaticHandler/WithAPIPlane. Go 1.22+
+	// mux: "/v0/city/{cityName}/svc/" as a prefix pattern only matches that
+	// subtree; everything else is a typed Huma operation at its real scoped path.
 	humaMux.HandleFunc("/v0/city/{cityName}/svc/", sm.serveCitySvcProxy)
+	// /hook/* webhook receiver — a fourth sanctioned non-Huma surface next to
+	// /svc/*. Same raw-body pass-through pattern (the HMAC/ed25519 verifiers need
+	// the exact bytes); the R2 perimeter + E4 verification gate it, and — unlike
+	// /svc/* — it is NOT exempt from the mux-level write-auth grant (see
+	// cityScopedObjectMutation; the deliberate H2 reversal).
+	humaMux.HandleFunc("/v0/city/{cityName}/hook/", sm.serveCityHookProxy)
 	sm.server = &http.Server{Handler: sm.Handler()}
 	return sm
 }
@@ -188,6 +207,20 @@ func (sm *SupervisorMux) serveCitySvcProxy(w http.ResponseWriter, r *http.Reques
 	sm.serveCityRequest(w, r, cityName, svcPath)
 }
 
+// serveCityHookProxy forwards /v0/city/{cityName}/hook/... to the per-city
+// Server's mux at /hook/... (where handleHookProxy is registered). Like
+// serveCitySvcProxy it is a raw pass-through excluded from the typed Huma control
+// plane so the signature verifiers see the exact raw body.
+func (sm *SupervisorMux) serveCityHookProxy(w http.ResponseWriter, r *http.Request) {
+	cityName := r.PathValue("cityName")
+	if cityName == "" {
+		problemCityNameRequired.writeTo(w)
+		return
+	}
+	hookPath := strings.TrimPrefix(r.URL.Path, "/v0/city/"+cityName)
+	sm.serveCityRequest(w, r, cityName, hookPath)
+}
+
 // Handler returns an http.Handler with the standard middleware chain applied.
 //
 // Middleware layering (Phase 3 Fix 3b + 3d):
@@ -200,7 +233,20 @@ func (sm *SupervisorMux) serveCitySvcProxy(w http.ResponseWriter, r *http.Reques
 //   - /svc/* paths bypass CSRF/read-only entirely (workspace services apply
 //     their own publication rules).
 func (sm *SupervisorMux) Handler() http.Handler {
-	root := http.HandlerFunc(sm.ServeHTTP)
+	var root http.Handler = http.HandlerFunc(sm.ServeHTTP)
+	// When a verifying key is configured, gate city-scoped mutations on a
+	// signed grant. Wrapping root (innermost, after host/CORS checks) gives the
+	// middleware the request body to bind the grant to, just before dispatch.
+	if sm.writeAuth != nil {
+		root = writeAuthMiddleware(sm.writeAuth, sm.readOnly, root)
+	}
+	// When a verifying key is configured, gate city-scoped reads on a signed
+	// grant. Disjoint from the write gate by method (GET/HEAD vs mutations), so
+	// the relative wrap order is correctness-irrelevant; both stay innermost
+	// (after host/CORS) so preflight and host rejection never need a grant.
+	if sm.readAuth != nil {
+		root = readAuthMiddleware(sm.readAuth, root)
+	}
 	audit := requestAuditConfig{
 		recorder:       sm.supervisorEventRecorder(),
 		allowedOrigins: sm.allowedOrigins,
@@ -221,6 +267,95 @@ func (sm *SupervisorMux) WithAllowedOrigins(origins []string) *SupervisorMux {
 // Serve.
 func (sm *SupervisorMux) WithAllowedHosts(hosts []string) *SupervisorMux {
 	sm.allowedHosts = hosts
+	sm.server = &http.Server{Handler: sm.Handler()}
+	return sm
+}
+
+// WithStaticHandler registers the embedded dashboard SPA as the "/" catch-all
+// and rebuilds the internal http.Server handler. This is one of the sanctioned
+// non-Huma surfaces (api-control-plane.md §3.9): it serves the SPA shell and
+// static assets, not domain JSON. Go 1.22 mux specificity keeps the typed /v0
+// operations, /health, the OpenAPI document, and the /svc/ proxy winning over
+// "/", so only unmatched paths reach the SPA. Must be called before Serve.
+// Passing nil is a no-op.
+func (sm *SupervisorMux) WithStaticHandler(h http.Handler) *SupervisorMux {
+	if h == nil {
+		return sm
+	}
+	sm.humaMux.Handle("/", h)
+	sm.server = &http.Server{Handler: sm.Handler()}
+	return sm
+}
+
+// WithAPIPlane registers the host-side dashboard "/api/" plane and rebuilds the
+// internal http.Server handler. Like serveCitySvcProxy, this is a sanctioned
+// non-Huma surface (api-control-plane.md §3.9): it is intentionally excluded
+// from the typed OpenAPI contract, so it adds no operations to the spec. The
+// plane self-enforces CSRF and the read-only posture (it does not inherit
+// Huma's middleware). Must be called before Serve. Passing nil is a no-op.
+func (sm *SupervisorMux) WithAPIPlane(h http.Handler) *SupervisorMux {
+	if h == nil {
+		return sm
+	}
+	sm.humaMux.Handle("/api/", h)
+	sm.server = &http.Server{Handler: sm.Handler()}
+	return sm
+}
+
+// WithRunCensusSource supplies the incremental projection used by typed run
+// reads. The required contract serves the row-free census; a source that also
+// implements RunProjectionSource and RunProjectionGraceSource supplies the
+// warm list/detail/steps snapshots and point-read warming grace. It must be
+// called before Serve.
+func (sm *SupervisorMux) WithRunCensusSource(source RunCensusSource) *SupervisorMux {
+	sm.runCensusSource = source
+	return sm
+}
+
+// WithDashboardBase records where the embedded dashboard is served so
+// per-city handlers can mint dashboard deep links (e.g. the sling response's
+// dashboard_url). The provider returns the browser-reachable base URL of THIS
+// listener (scheme://host:port; a trailing slash is tolerated), or "" when no
+// link should be emitted. Leave unset on API-only processes — the standalone
+// controller's [api] port serves /v0 without the SPA — so responses omit
+// dashboard links. Callers must also leave it unset on wildcard binds
+// (0.0.0.0, ::): there is no single static origin that is browser-reachable
+// for every /v0 caller, and deriving one from request Host headers would
+// trust a spoofable value, so responses omit dashboard_url instead. Must be
+// called before Serve. Passing nil is a no-op.
+func (sm *SupervisorMux) WithDashboardBase(provider func() string) *SupervisorMux {
+	if provider == nil {
+		return sm
+	}
+	sm.dashboardBase = provider
+	return sm
+}
+
+// DashboardBaseURL returns the dashboard base URL installed via
+// WithDashboardBase, or "" when none is set. Exposed so wiring tests can
+// assert the dashboard-attach path installed a link base without reaching
+// into unexported state.
+func (sm *SupervisorMux) DashboardBaseURL() string {
+	if sm.dashboardBase == nil {
+		return ""
+	}
+	return sm.dashboardBase()
+}
+
+// WithWriteAuth installs the write-auth verifier so city-scoped mutations are
+// gated on a signed grant, and rebuilds the internal http.Server handler. A nil
+// verifier leaves write-auth disabled. Must be called before Serve.
+func (sm *SupervisorMux) WithWriteAuth(v *citywriteauth.Verifier) *SupervisorMux {
+	sm.writeAuth = v
+	sm.server = &http.Server{Handler: sm.Handler()}
+	return sm
+}
+
+// WithReadAuth installs the read-auth verifier so city-scoped reads (GET/HEAD)
+// are gated on a signed grant, and rebuilds the internal http.Server handler. A
+// nil verifier leaves read-auth disabled. Must be called before Serve.
+func (sm *SupervisorMux) WithReadAuth(v *citywriteauth.Verifier) *SupervisorMux {
+	sm.readAuth = v
 	sm.server = &http.Server{Handler: sm.Handler()}
 	return sm
 }
@@ -284,11 +419,12 @@ func (sm *SupervisorMux) Shutdown(ctx context.Context) error {
 
 // ServeHTTP delegates every request to humaMux. Every typed
 // operation — supervisor-scope and city-scoped — is registered on the
-// supervisor's single Huma API. The only non-Huma registration is
-// serveCitySvcProxy at "/v0/city/{cityName}/svc/" for the
-// workspace-service pass-through; Go 1.22+ mux specificity routes
+// supervisor's single Huma API. The non-Huma registrations are the
+// sanctioned §3.9 surfaces: serveCitySvcProxy at "/v0/city/{cityName}/svc/"
+// and, when the dashboard is attached, the SPA at "/" and the host-side
+// plane at "/api/". Go 1.22+ mux specificity routes
 // /v0/city/{cityName}/<typed-op> requests to the matching Huma
-// operation rather than the prefix handler.
+// operation rather than a prefix handler.
 func (sm *SupervisorMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sm.humaMux.ServeHTTP(w, r)
 }
@@ -336,11 +472,22 @@ func (sm *SupervisorMux) getCityServer(name string, state State) *Server {
 	if sm.readOnly {
 		srv = NewReadOnly(state)
 	}
+	// Thread the dashboard link base (if the dashboard is mounted on this
+	// process) into the per-city handler host. WithDashboardBase runs before
+	// Serve, and per-city servers are built lazily per request, so every
+	// cached server observes the final provider.
+	srv.dashboardBase = sm.dashboardBase
+	srv.runCensusSource = sm.runCensusSource
 
 	sm.cacheMu.Lock()
+	defer sm.cacheMu.Unlock()
+	// A concurrent miss may have installed a Server for this State while this
+	// candidate was being built. Return the published instance so per-city
+	// caches and refresh coalescing remain process-unique.
+	if cached, ok := sm.cache[name]; ok && cached.state == state {
+		return cached.srv
+	}
 	sm.cache[name] = cachedCityServer{state: state, srv: srv}
-	sm.cacheMu.Unlock()
-
 	return srv
 }
 
@@ -353,28 +500,8 @@ func (sm *SupervisorMux) getCityServer(name string, state State) *Server {
 // exists from Scaffold onward, but the city isn't in Running=true yet.
 func (sm *SupervisorMux) buildMultiplexer() *events.Multiplexer {
 	mux := events.NewMultiplexer()
-	cities := sm.resolver.ListCities()
-	for _, c := range cities {
-		if !c.Running {
-			continue
-		}
-		state := sm.resolver.CityState(c.Name)
-		if state == nil {
-			continue
-		}
-		ep := state.EventProvider()
-		if ep == nil {
-			continue
-		}
-		mux.Add(c.Name, ep)
-	}
-	if transient, ok := sm.resolver.(TransientCityEventSource); ok {
-		for name, ep := range transient.TransientCityEventProviders() {
-			if ep == nil {
-				continue
-			}
-			mux.Add(name, ep)
-		}
+	for name, ep := range sm.EventProviders() {
+		mux.Add(name, ep)
 	}
 	if supSrc, ok := sm.resolver.(SupervisorEventSource); ok {
 		if rec := supSrc.SupervisorEventRecorder(); rec != nil {
@@ -384,6 +511,35 @@ func (sm *SupervisorMux) buildMultiplexer() *events.Multiplexer {
 		}
 	}
 	return mux
+}
+
+// EventProviders returns the live per-city event providers (running cities plus
+// any transient-city providers), keyed by city name. It is the city-scoped
+// enumeration buildMultiplexer uses, exposed so an in-process consumer (e.g. the
+// event exporter) can watch the same providers without the supervisor-scope
+// recorder.
+func (sm *SupervisorMux) EventProviders() map[string]events.Provider {
+	out := make(map[string]events.Provider)
+	for _, c := range sm.resolver.ListCities() {
+		if !c.Running {
+			continue
+		}
+		state := sm.resolver.CityState(c.Name)
+		if state == nil {
+			continue
+		}
+		if ep := state.EventProvider(); ep != nil {
+			out[c.Name] = ep
+		}
+	}
+	if transient, ok := sm.resolver.(TransientCityEventSource); ok {
+		for name, ep := range transient.TransientCityEventProviders() {
+			if ep != nil {
+				out[name] = ep
+			}
+		}
+	}
+	return out
 }
 
 // allStartupPhases returns the ordered list of all startup phases.

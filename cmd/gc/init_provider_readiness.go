@@ -238,7 +238,7 @@ func runInitProviderPreflightForConfig(cityPath string, cfg *config.City, stdout
 }
 
 func initHasRemoteImports(cityPath string) (bool, error) {
-	allImports, err := collectAllImportsFS(fsys.OSFS{}, cityPath)
+	allImports, err := collectAllImportsFS(cityPath)
 	if err != nil {
 		return false, err
 	}
@@ -431,6 +431,15 @@ func providerStatusFixHint(probeName, status string) string {
 			return "use Gemini CLI personal OAuth; API-key and ADC modes are not supported here"
 		case api.ProbeStatusProbeError:
 			return "check ~/.gemini/settings.json and oauth_creds.json"
+		}
+	case "pi":
+		switch status {
+		case api.ProbeStatusNeedsAuth:
+			return "authenticate pi so it writes ~/.pi/agent/auth.json"
+		case api.ProbeStatusNotInstalled:
+			return "install the pi coding agent"
+		case api.ProbeStatusProbeError:
+			return "check ~/.pi/agent/auth.json and the local pi installation"
 		}
 	}
 	return ""
@@ -728,11 +737,11 @@ func initNeedsLocalDoltIdentity(cityPath string) bool {
 }
 
 func initScopeNeedsLocalDoltIdentity(cityPath, scopeRoot string, cfg *config.City) bool {
-	_, usesPostgres, err := postgresMetadataForScope(cityPath, scopeRoot)
+	bound, err := scopeStoreIsExternallyBound(cityPath, scopeRoot)
 	if err != nil {
 		return true
 	}
-	if usesPostgres {
+	if bound {
 		return false
 	}
 	return !initScopeUsesExternalDolt(cityPath, scopeRoot, cfg)

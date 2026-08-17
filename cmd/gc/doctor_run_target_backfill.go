@@ -68,7 +68,7 @@ func (c *runTargetRoutedToBackfillCheck) collect() (targets []backfillTarget, sk
 		// topology beads can also carry bare gc.run_target, but they are not
 		// claimed through the pool-demand gc.routed_to path. A targeted metadata
 		// query avoids a full-store scan.
-		items, err := store.List(beads.ListQuery{Metadata: map[string]string{beadmeta.KindMetadataKey: "workflow"}})
+		items, err := store.List(beads.ListQuery{Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}})
 		if err != nil {
 			skipped = append(skipped, fmt.Sprintf("%s skipped: listing beads: %v", sc.label, err))
 			continue

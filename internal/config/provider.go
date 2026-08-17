@@ -10,10 +10,16 @@ import (
 // ProviderOption declares a single configurable option for a provider.
 // Options are rendered as UI controls in a dashboard's session creation form.
 type ProviderOption struct {
-	Key     string         `toml:"key"     json:"key"`
-	Label   string         `toml:"label"   json:"label"`
-	Type    string         `toml:"type"    json:"type"` // "select" only (v1)
-	Default string         `toml:"default" json:"default"`
+	// Key is the option identifier (e.g. "model"); also the merge key for
+	// options_schema_merge = "by_key".
+	Key string `toml:"key"     json:"key"`
+	// Label is the human-readable option name shown in tooling.
+	Label string `toml:"label"   json:"label"`
+	Type  string `toml:"type"    json:"type"` // "select" only (v1)
+	// Default is the Value of the choice selected when the user makes none.
+	Default string `toml:"default" json:"default"`
+	// Choices are the allowed values; selecting one injects its FlagArgs into the
+	// agent command line (how the Model axis renders to a harness CLI flag).
 	Choices []OptionChoice `toml:"choices" json:"choices"`
 	// Omit is the removal sentinel for options_schema_merge = "by_key".
 	// When set on a child layer's entry, the matching Key inherited from
@@ -23,7 +29,10 @@ type ProviderOption struct {
 
 // OptionChoice is one allowed value for a "select" option.
 type OptionChoice struct {
+	// Value is the choice identifier matched against ProviderOption.Default and
+	// the user's selection (e.g. "opus-4.8").
 	Value string `toml:"value"     json:"value"`
+	// Label is the human-readable choice name shown in tooling.
 	Label string `toml:"label"     json:"label"`
 	// FlagArgs are the CLI arguments injected when this choice is selected.
 	// json:"-" is intentional: FlagArgs must never appear in the public API DTO
@@ -118,6 +127,13 @@ type ProviderSpec struct {
 	// receive a preselected provider session ID; resume metadata must come from
 	// the provider after startup.
 	SessionIDFlag string `toml:"session_id_flag,omitempty"`
+	// ForkFlag is the CLI flag that forks a resumed conversation into a new
+	// branch (claude's "--fork-session"). With ResumeFlag + SessionIDFlag it
+	// forms the fork-launch command (resume a parent brain session, fork off it,
+	// bind gc's own session id). Empty means the provider has no fork verb, in
+	// which case a launch carrying a parent sid fails loud rather than silently
+	// degrading to a fresh session.
+	ForkFlag string `toml:"fork_flag,omitempty"`
 	// PermissionModes maps permission mode names to CLI flags.
 	// Example: {"unrestricted": "--dangerously-skip-permissions", "plan": "--permission-mode plan"}
 	// This is a config-only lookup table consumed by external clients
@@ -135,6 +151,12 @@ type ProviderSpec struct {
 	// Each option maps to CLI args via its Choices[].FlagArgs field.
 	// Serialized via a dedicated DTO (not directly to JSON) so FlagArgs stays server-side.
 	OptionsSchema []ProviderOption `toml:"options_schema,omitempty" json:"-"`
+	// UpstreamEnv is this harness's serving-env contract (Phase C — the Upstream
+	// axis): the env-var NAMES this CLI reads for the model-serving base URL and
+	// credential. It lets the resolver render an abstract [upstreams.<name>] onto
+	// the right names for this harness, so an upstream preset is portable across
+	// harnesses (claude → ANTHROPIC_*, codex → OPENAI_*).
+	UpstreamEnv UpstreamEnvBinding `toml:"upstream_env,omitempty"`
 	// PrintArgs are CLI arguments that enable one-shot non-interactive mode.
 	// The provider prints its response to stdout and exits. When empty, the
 	// provider does not support one-shot invocation.
@@ -209,8 +231,10 @@ type ResolvedProvider struct {
 	ResumeStyle            string
 	ResumeCommand          string
 	SessionIDFlag          string
+	ForkFlag               string
 	PermissionModes        map[string]string
 	OptionsSchema          []ProviderOption
+	UpstreamEnv            UpstreamEnvBinding
 	PrintArgs              []string
 	TitleModel             string
 	ACPCommand             string
@@ -307,7 +331,7 @@ func (rp *ResolvedProvider) ProviderSessionCreateTransport() string {
 		return ""
 	}
 	if family == "mimocode" {
-		// MiMo Code supports explicit ACP sessions, but --never-ask-questions
+		// MiMo Code supports explicit ACP sessions, but --never-ask
 		// — the flag that suppresses the question/plan gates headless runs
 		// require — is not taken by the `mimo acp` subcommand, and ACPArgs
 		// replaces Args, so an ACP default would compose a launch without it.
@@ -379,13 +403,23 @@ func (rp *ResolvedProvider) ResolveDefaultArgs() []string {
 	return args
 }
 
+// BinaryName returns the executable token of a command string, stripping
+// any arguments (everything from the first space onward). Used for PATH
+// detection so a command like "my-agent --flag" checks "my-agent".
+func BinaryName(cmd string) string {
+	if i := strings.IndexByte(cmd, ' '); i > 0 {
+		return cmd[:i]
+	}
+	return cmd
+}
+
 // pathCheckBinary returns the binary name to use for PATH detection.
 // If PathCheck is set, it is used; otherwise Command is used directly.
 func (ps *ProviderSpec) pathCheckBinary() string {
 	if ps.PathCheck != "" {
 		return ps.PathCheck
 	}
-	return ps.Command
+	return BinaryName(ps.Command)
 }
 
 // boolPtr returns a pointer to the given bool for tri-state capability fields.
@@ -446,13 +480,19 @@ func providerSpecFromWorker(spec workerbuiltin.BuiltinProviderSpec) ProviderSpec
 		ResumeStyle:            spec.ResumeStyle,
 		ResumeCommand:          spec.ResumeCommand,
 		SessionIDFlag:          spec.SessionIDFlag,
+		ForkFlag:               spec.ForkFlag,
 		PermissionModes:        cloneStringMap(spec.PermissionModes),
 		OptionDefaults:         cloneStringMap(spec.OptionDefaults),
 		OptionsSchema:          providerOptionsFromWorker(spec.OptionsSchema),
-		PrintArgs:              cloneStrings(spec.PrintArgs),
-		TitleModel:             spec.TitleModel,
-		ACPCommand:             spec.ACPCommand,
-		ACPArgs:                cloneStrings(spec.ACPArgs),
+		UpstreamEnv: UpstreamEnvBinding{
+			BaseURL:   spec.UpstreamBaseURLEnv,
+			APIKey:    spec.UpstreamAPIKeyEnv,
+			AuthToken: spec.UpstreamAuthTokenEnv,
+		},
+		PrintArgs:  cloneStrings(spec.PrintArgs),
+		TitleModel: spec.TitleModel,
+		ACPCommand: spec.ACPCommand,
+		ACPArgs:    cloneStrings(spec.ACPArgs),
 	}
 }
 

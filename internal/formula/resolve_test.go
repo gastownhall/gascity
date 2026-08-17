@@ -211,6 +211,60 @@ func TestResolveAndResolveAll_AgreeOnPath(t *testing.T) {
 	}
 }
 
+// TestResolve_ExtensionPassThrough guards that Resolve accepts formula names
+// supplied with their file extension already attached (e.g. "mol-a.toml",
+// "mol-a.formula.toml", "mol-a.formula.json"). All three must resolve to the
+// same path as the bare name "mol-a". This covers the CLI pattern
+// `gc formula show loop-flow.toml` (GitHub #3704).
+func TestResolve_ExtensionPassThrough(t *testing.T) {
+	dir := t.TempDir()
+
+	t.Run("canonical_toml", func(t *testing.T) {
+		want := writeLayerFile(t, dir, "mol-a.toml", "")
+		bare, okBare := Resolve([]string{dir}, "mol-a")
+		withExt, okExt := Resolve([]string{dir}, "mol-a.toml")
+		if !okBare {
+			t.Fatal("Resolve(mol-a): not found")
+		}
+		if !okExt {
+			t.Fatal("Resolve(mol-a.toml): not found")
+		}
+		if bare != want || withExt != want {
+			t.Errorf("Resolve(bare)=%q Resolve(.toml)=%q want %q", bare, withExt, want)
+		}
+	})
+
+	t.Run("legacy_toml", func(t *testing.T) {
+		want := writeLayerFile(t, dir, "mol-b.formula.toml", "")
+		bare, okBare := Resolve([]string{dir}, "mol-b")
+		withExt, okExt := Resolve([]string{dir}, "mol-b.formula.toml")
+		if !okBare {
+			t.Fatal("Resolve(mol-b): not found")
+		}
+		if !okExt {
+			t.Fatal("Resolve(mol-b.formula.toml): not found")
+		}
+		if bare != want || withExt != want {
+			t.Errorf("Resolve(bare)=%q Resolve(.formula.toml)=%q want %q", bare, withExt, want)
+		}
+	})
+
+	t.Run("formula_json", func(t *testing.T) {
+		want := writeLayerFile(t, dir, "mol-c.formula.json", "")
+		bare, okBare := Resolve([]string{dir}, "mol-c")
+		withExt, okExt := Resolve([]string{dir}, "mol-c.formula.json")
+		if !okBare {
+			t.Fatal("Resolve(mol-c): not found")
+		}
+		if !okExt {
+			t.Fatal("Resolve(mol-c.formula.json): not found")
+		}
+		if bare != want || withExt != want {
+			t.Errorf("Resolve(bare)=%q Resolve(.formula.json)=%q want %q", bare, withExt, want)
+		}
+	})
+}
+
 // TestLoadByName_LastWinsAcrossLayers is the parser-level regression test
 // for the bug Resolve fixes: parser.loadFormula previously iterated layers
 // first-wins, inverting the lowest→highest priority contract that the

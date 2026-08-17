@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
@@ -87,7 +85,7 @@ func cmdSessionLogs(args []string, follow bool, tail int, jsonOutput bool, stdou
 	)
 	if err == nil && store != nil {
 		var diagnostic string
-		path, provider, ok, diagnostic = resolveStoredSessionLogSource(cityPath, cfg, store, identifier, searchPaths)
+		path, provider, ok, diagnostic = resolveStoredSessionLogSource(cityPath, cfg, cliSessionFrontDoor(store, cfg, cityPath), identifier, searchPaths)
 		if ok && path == "" && diagnostic != "" {
 			fmt.Fprintf(stderr, "gc session logs: %s\n", diagnostic) //nolint:errcheck // best-effort stderr
 			return 1
@@ -120,47 +118,6 @@ func resolveSessionLogPath(searchPaths []string, logCtx sessionLogContext) strin
 	return factory.DiscoverTranscript(logCtx.provider, logCtx.workDir, logCtx.sessionKey)
 }
 
-func resolveStoredSessionLogSource(cityPath string, cfg *config.City, store beads.Store, identifier string, searchPaths []string) (string, string, bool, string) {
-	logCtx, ok := resolveSessionLogContext(cityPath, cfg, store, identifier)
-	if !ok {
-		return "", "", false, ""
-	}
-	if logCtx.sessionID != "" {
-		handle, err := workerHandleForSessionWithConfig(cityPath, store, newSessionProvider(), cfg, logCtx.sessionID)
-		if err == nil {
-			if path, pathErr := handle.TranscriptPath(context.Background()); pathErr == nil && strings.TrimSpace(path) != "" {
-				return path, logCtx.provider, true, ""
-			}
-		}
-	}
-	path := ""
-	fallbackAllowed := canFallbackStoredSessionLogByWorkDir(store, logCtx)
-	if strings.TrimSpace(logCtx.sessionKey) != "" {
-		path = resolveSessionKeyedLogPath(searchPaths, logCtx)
-		if path == "" && fallbackAllowed {
-			path = resolveSessionLogPath(searchPaths, logCtx)
-		}
-	} else if fallbackAllowed {
-		path = resolveSessionLogPath(searchPaths, logCtx)
-	}
-	if !sessionLogPathFreshEnough(path, logCtx.createdAt) {
-		path = ""
-	}
-	if path == "" && fallbackAllowed {
-		factory, err := worker.NewFactory(worker.FactoryConfig{SearchPaths: searchPaths})
-		if err == nil {
-			path = factory.DiscoverWorkDirTranscript(logCtx.provider, logCtx.workDir)
-		}
-	}
-	if !sessionLogPathFreshEnough(path, logCtx.createdAt) {
-		path = ""
-	}
-	if path == "" && !fallbackAllowed {
-		return "", logCtx.provider, true, ambiguousSessionLogDiagnostic(logCtx)
-	}
-	return path, logCtx.provider, true, ""
-}
-
 func resolveSessionKeyedLogPath(searchPaths []string, logCtx sessionLogContext) string {
 	return workertranscript.DiscoverKeyedPath(searchPaths, logCtx.provider, logCtx.workDir, logCtx.sessionKey)
 }
@@ -171,35 +128,6 @@ type sessionLogContext struct {
 	sessionKey string
 	provider   string
 	createdAt  time.Time
-}
-
-func resolveSessionLogContext(cityPath string, cfg *config.City, store beads.Store, identifier string) (sessionLogContext, bool) {
-	if store == nil {
-		return sessionLogContext{}, false
-	}
-	sessionID, err := resolveSessionIDAllowClosedWithConfig(cityPath, cfg, store, identifier)
-	if err != nil {
-		return sessionLogContext{}, false
-	}
-	b, err := store.Get(sessionID)
-	if err != nil {
-		return sessionLogContext{}, false
-	}
-	workDir := strings.TrimSpace(b.Metadata["work_dir"])
-	if workDir == "" {
-		return sessionLogContext{}, false
-	}
-	provider := strings.TrimSpace(b.Metadata["provider_kind"])
-	if provider == "" {
-		provider = strings.TrimSpace(b.Metadata["provider"])
-	}
-	return sessionLogContext{
-		sessionID:  sessionID,
-		workDir:    workDir,
-		sessionKey: strings.TrimSpace(b.Metadata["session_key"]),
-		provider:   provider,
-		createdAt:  b.CreatedAt,
-	}, true
 }
 
 func sessionLogPathFreshEnough(path string, sessionCreatedAt time.Time) bool {
@@ -216,83 +144,11 @@ func sessionLogPathFreshEnough(path string, sessionCreatedAt time.Time) bool {
 	return !info.ModTime().Before(sessionCreatedAt.Add(-2 * time.Second))
 }
 
-func canFallbackStoredSessionLogByWorkDir(store beads.Store, logCtx sessionLogContext) bool {
-	if store == nil || strings.TrimSpace(logCtx.sessionID) == "" || strings.TrimSpace(logCtx.workDir) == "" {
+func sessionLogFallbackCandidateLive(info sessionpkg.Info) bool {
+	if info.Closed {
 		return false
 	}
-	all, err := sessionLogFallbackCandidates(store, logCtx.workDir, logCtx.provider)
-	if err != nil {
-		return false
-	}
-	targetLive := false
-	for _, b := range all {
-		if b.ID == logCtx.sessionID {
-			targetLive = sessionLogFallbackCandidateLive(b)
-			break
-		}
-	}
-	matches := 0
-	for _, b := range all {
-		if !sessionpkg.IsSessionBeadOrRepairable(b) {
-			continue
-		}
-		if strings.TrimSpace(b.Metadata["work_dir"]) != logCtx.workDir {
-			continue
-		}
-		provider := strings.TrimSpace(b.Metadata["provider_kind"])
-		if provider == "" {
-			provider = strings.TrimSpace(b.Metadata["provider"])
-		}
-		if logCtx.provider != "" && provider != "" && provider != logCtx.provider {
-			continue
-		}
-		if targetLive && b.ID != logCtx.sessionID && !sessionLogFallbackCandidateLive(b) {
-			continue
-		}
-		matches++
-		if matches > 1 {
-			return false
-		}
-	}
-	return matches == 1
-}
-
-func sessionLogFallbackCandidates(store beads.Store, workDir, provider string) ([]beads.Bead, error) {
-	candidates := make(map[string]beads.Bead)
-	add := func(filters map[string]string) error {
-		found, err := store.ListByMetadata(filters, 0)
-		if err != nil {
-			return err
-		}
-		for _, b := range found {
-			candidates[b.ID] = b
-		}
-		return nil
-	}
-	if strings.TrimSpace(provider) == "" {
-		if err := add(map[string]string{"work_dir": workDir}); err != nil {
-			return nil, err
-		}
-	} else {
-		if err := add(map[string]string{"work_dir": workDir, "provider": provider}); err != nil {
-			return nil, err
-		}
-		if err := add(map[string]string{"work_dir": workDir, "provider_kind": provider}); err != nil {
-			return nil, err
-		}
-	}
-	out := make([]beads.Bead, 0, len(candidates))
-	for _, b := range candidates {
-		out = append(out, b)
-	}
-	return out, nil
-}
-
-func sessionLogFallbackCandidateLive(b beads.Bead) bool {
-	if b.Status == "closed" {
-		return false
-	}
-	switch sessionpkg.State(strings.TrimSpace(b.Metadata["state"])) {
+	switch sessionpkg.State(strings.TrimSpace(info.MetadataState)) {
 	case sessionpkg.StateActive, sessionpkg.StateAwake, sessionpkg.StateStartPending, sessionpkg.StateCreating, sessionpkg.StateDraining:
 		return true
 	default:

@@ -6,6 +6,8 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
 // These tests cover the min_active_sessions-aware wake path added for #2739:
@@ -155,7 +157,7 @@ func TestBuildAwakeInputPropagatesMinActiveSessions(t *testing.T) {
 	input := buildAwakeInputFromReconciler(
 		&config.City{Agents: []config.Agent{{Name: "pl", MinActiveSessions: &minSess}}},
 		"", // cityPath: empty exercises zero suspension state
-		nil, nil, nil, nil, nil, nil, nil, nil,
+		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
 		time.Now().UTC(),
 	)
 	var found bool
@@ -186,7 +188,7 @@ func TestMinActive_LegacyBoundTemplateRevivedThroughBridge(t *testing.T) {
 	input := buildAwakeInputFromReconciler(
 		cfg,
 		"", // cityPath: empty exercises zero suspension state
-		[]beads.Bead{{
+		[]session.Info{sessiontest.SeedBead(t, beads.Bead{
 			ID:     "s-1",
 			Status: "open",
 			Type:   "session",
@@ -196,8 +198,8 @@ func TestMinActive_LegacyBoundTemplateRevivedThroughBridge(t *testing.T) {
 				"session_name": "rig--pl-legacy",
 				"template":     "rig/gc.pl",
 			},
-		}},
-		nil, nil, nil, nil, nil, nil, nil,
+		})},
+		nil, nil, nil, nil, nil, nil, nil, nil, nil,
 		time.Now().UTC(),
 	)
 	result := ComputeAwakeSet(input)

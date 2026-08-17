@@ -13,6 +13,34 @@ import (
 
 var _ runtime.Provider = (*Provider)(nil)
 
+// Relaunch must reach the routed backend (default vs ACP), or the reconciler's
+// RelaunchProvider type-assert would be masked by the auto router and fall back
+// to Stop+Start.
+func TestProvider_ForwardsRelaunchToRoutedBackend(t *testing.T) {
+	def, acp := runtime.NewFake(), runtime.NewFake()
+	p := New(def, acp)
+	if err := def.Start(context.Background(), "plain", runtime.Config{Command: "c"}); err != nil {
+		t.Fatalf("Start(plain): %v", err)
+	}
+	if err := acp.Start(context.Background(), "acpsess", runtime.Config{Command: "c"}); err != nil {
+		t.Fatalf("Start(acpsess): %v", err)
+	}
+	p.RouteACP("acpsess")
+
+	if err := p.Relaunch(context.Background(), "plain", runtime.Config{Command: "c2"}); err != nil {
+		t.Fatalf("Relaunch(plain): %v", err)
+	}
+	if got := def.CountCalls("Relaunch", "plain"); got != 1 {
+		t.Errorf("default backend Relaunch calls = %d, want 1", got)
+	}
+	if err := p.Relaunch(context.Background(), "acpsess", runtime.Config{Command: "c2"}); err != nil {
+		t.Fatalf("Relaunch(acpsess): %v", err)
+	}
+	if got := acp.CountCalls("Relaunch", "acpsess"); got != 1 {
+		t.Errorf("acp backend Relaunch calls = %d, want 1", got)
+	}
+}
+
 type falseNegativeStopProvider struct {
 	*runtime.Fake
 	stopErr error

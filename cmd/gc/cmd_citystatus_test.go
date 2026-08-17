@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -722,6 +723,11 @@ func TestControllerStatusLine(t *testing.T) {
 			ctrl: ControllerJSON{Mode: "supervisor", PID: 4321, Running: true},
 			want: "supervisor-managed (PID 4321)",
 		},
+		{
+			name: "legacy hosting unknown",
+			ctrl: ControllerJSON{PID: 2468, Running: true},
+			want: "controller running (PID 2468, hosting mode unknown)",
+		},
 	}
 
 	for _, tt := range tests {
@@ -817,7 +823,7 @@ func TestControllerStatusForCityFallsBackToStandaloneWhenRegisteredSupervisorDow
 		t.Fatalf("register city: %v", err)
 	}
 
-	startFakeControllerSocket(t, cityPath, "2468\n")
+	startFakeControllerSocket(t, cityPath, `{"pid":2468,"hosting_mode":"standalone"}`+"\n")
 
 	oldAlive := supervisorAliveHook
 	oldRunning := supervisorCityRunningHook
@@ -834,6 +840,25 @@ func TestControllerStatusForCityFallsBackToStandaloneWhenRegisteredSupervisorDow
 	got := controllerStatusForCity(cityPath)
 	if got.Mode != "standalone" || !got.Running || got.PID != 2468 {
 		t.Fatalf("controllerStatusForCity = %+v, want running standalone PID 2468", got)
+	}
+}
+
+func TestControllerStatusForCityLeavesLegacyHostingUnknown(t *testing.T) {
+	t.Setenv("GC_HOME", filepath.Join(t.TempDir(), "gc-home"))
+	cityPath := filepath.Join(shortSocketTempDir(t, "gc-status-"), "bright-lights")
+	startFakeControllerSocket(t, cityPath, "2468\n")
+
+	oldAlive := supervisorAliveHook
+	supervisorAliveHook = func() int { return 0 }
+	t.Cleanup(func() { supervisorAliveHook = oldAlive })
+
+	identity := probeControllerIdentity(cityPath)
+	if identity.PID != 2468 || identity.HostingMode != controllerHostingUnknown {
+		t.Fatalf("probeControllerIdentity = %+v, want detectable legacy PID 2468 with unknown hosting", identity)
+	}
+	got := controllerStatusForCity(cityPath)
+	if got.Mode != "" || !got.Running || got.PID != 2468 {
+		t.Fatalf("controllerStatusForCity = %+v, want running PID 2468 with unknown legacy hosting", got)
 	}
 }
 
@@ -876,42 +901,54 @@ func TestControllerStatusForCityReusesSupervisorPIDWhenCityStateUnknown(t *testi
 	}
 }
 
-func TestControllerStatusForCityReturnsSupervisorModeWhenProbeSucceedsAfterUnknownRetry(t *testing.T) {
-	t.Setenv("GC_HOME", filepath.Join(t.TempDir(), "gc-home"))
-
-	root := shortSocketTempDir(t, "gc-status-")
-	cityPath := filepath.Join(root, "bright-lights")
-	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
-		t.Fatal(err)
+func TestControllerStatusForCityRequiresMatchingPIDForLegacySupervisorInference(t *testing.T) {
+	tests := []struct {
+		name          string
+		controllerPID int
+		wantMode      string
+	}{
+		{name: "same process", controllerPID: 4321, wantMode: "supervisor"},
+		{name: "different process", controllerPID: 2468, wantMode: ""},
 	}
-	if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(cityPath, "bright-lights"); err != nil {
-		t.Fatalf("register city: %v", err)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GC_HOME", filepath.Join(t.TempDir(), "gc-home"))
 
-	startFakeControllerSocket(t, cityPath, "2468\n")
+			root := shortSocketTempDir(t, "gc-status-")
+			cityPath := filepath.Join(root, "bright-lights")
+			if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(cityPath, "bright-lights"); err != nil {
+				t.Fatalf("register city: %v", err)
+			}
 
-	oldAlive := supervisorAliveHook
-	oldRunning := supervisorCityRunningHook
-	calls := 0
-	supervisorAliveHook = func() int {
-		calls++
-		if calls == 1 {
-			return 4321
-		}
-		return 0
-	}
-	supervisorCityRunningHook = func(string) (bool, string, bool) { return false, "", false }
-	t.Cleanup(func() {
-		supervisorAliveHook = oldAlive
-		supervisorCityRunningHook = oldRunning
-	})
+			startFakeControllerSocket(t, cityPath, fmt.Sprintf("%d\n", tt.controllerPID))
 
-	got := controllerStatusForCity(cityPath)
-	if got.Mode != "supervisor" || !got.Running || got.PID != 2468 {
-		t.Fatalf("controllerStatusForCity = %+v, want running supervisor-mode PID 2468", got)
-	}
-	if calls != 2 {
-		t.Fatalf("supervisorAliveHook calls = %d, want 2", calls)
+			oldAlive := supervisorAliveHook
+			oldRunning := supervisorCityRunningHook
+			calls := 0
+			supervisorAliveHook = func() int {
+				calls++
+				if calls == 1 {
+					return 4321
+				}
+				return 0
+			}
+			supervisorCityRunningHook = func(string) (bool, string, bool) { return false, "", false }
+			t.Cleanup(func() {
+				supervisorAliveHook = oldAlive
+				supervisorCityRunningHook = oldRunning
+			})
+
+			got := controllerStatusForCity(cityPath)
+			if got.Mode != tt.wantMode || !got.Running || got.PID != tt.controllerPID {
+				t.Fatalf("controllerStatusForCity = %+v, want running PID %d with mode %q", got, tt.controllerPID, tt.wantMode)
+			}
+			if calls != 2 {
+				t.Fatalf("supervisorAliveHook calls = %d, want 2", calls)
+			}
+		})
 	}
 }
 
@@ -1258,6 +1295,14 @@ func TestControllerStatusGuidance(t *testing.T) {
 			},
 		},
 		{
+			name: "legacy hosting unknown",
+			ctrl: ControllerJSON{PID: 2468, Running: true},
+			want: []string{
+				"Authority: controller PID 2468; hosting mode unknown",
+				"Next: upgrade or restart the running controller to restore authoritative hosting information",
+			},
+		},
+		{
 			name: "unmanaged stopped",
 			ctrl: ControllerJSON{},
 			want: nil,
@@ -1276,5 +1321,97 @@ func TestControllerStatusGuidance(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+type blockingStatusRunningProvider struct {
+	runtime.Provider
+	entered chan<- struct{}
+	release <-chan struct{}
+	running bool
+}
+
+func (p blockingStatusRunningProvider) IsRunning(string) bool {
+	select {
+	case p.entered <- struct{}{}:
+	default:
+	}
+	<-p.release
+	return p.running
+}
+
+func TestCityStatusPartialRuntimeProbeDoesNotRenderAuthoritativeStopped(t *testing.T) {
+	origTimeout := statusProviderCallTimeout
+	origWarn := statusProviderTimeoutWarning
+	t.Cleanup(func() {
+		statusProviderCallTimeout = origTimeout
+		statusProviderTimeoutWarning = origWarn
+	})
+	statusProviderCallTimeout = 10 * time.Millisecond
+	statusProviderTimeoutWarning = func() {}
+
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	base := blockingStatusRunningProvider{Provider: runtime.NewFake(), entered: entered, release: release, running: true}
+	sp := newBoundedStatusProvider(base)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"},
+		Agents:    []config.Agent{{Name: "worker", MaxActiveSessions: intPtr(1)}},
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doCityStatusWithStoreAndSnapshot(sp, newFakeDrainOps(), cfg, "", nil, newSessionBeadSnapshot(nil), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "worker") || !strings.Contains(out, "unknown  (partial status)") {
+		t.Fatalf("stdout = %q, want worker rendered as unknown partial", out)
+	}
+	if strings.Contains(out, "worker                  stopped") || strings.Contains(out, "worker\tstopped") {
+		t.Fatalf("stdout = %q, must not render timeout fallback as authoritative stopped", out)
+	}
+}
+
+func TestRenderCityStatusFromAPIPartialRendersUnknownNotStopped(t *testing.T) {
+	view := api.StatusView{
+		CityName:      "city",
+		CityPath:      "/home/user/city",
+		Partial:       true,
+		PartialErrors: []string{"runtime status probe incomplete; non-running agent rows are unknown"},
+		Agents: []api.StatusAgentView{
+			{Name: "worker", QualifiedName: "worker", Scope: "city", Running: false},
+		},
+		Summary: api.StatusSummaryView{TotalAgents: 1, RunningAgents: 0},
+	}
+	cr := api.CachedRead[api.StatusView]{Body: view}
+
+	var stdout bytes.Buffer
+	if code := renderCityStatusFromAPI(view.CityPath, cr, newFakeDrainOps(), false, &stdout); code != 0 {
+		t.Fatalf("code = %d, want 0", code)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "worker") || !strings.Contains(out, "unknown  (partial status)") {
+		t.Fatalf("stdout = %q, want worker rendered as unknown partial on the API render path", out)
+	}
+	if strings.Contains(out, "worker                  stopped") || strings.Contains(out, "worker\tstopped") {
+		t.Fatalf("stdout = %q, must not render partial status as authoritative stopped", out)
+	}
+
+	// The JSON projection off the same view must also carry the partial flags.
+	var jsonOut bytes.Buffer
+	if code := renderCityStatusFromAPI(view.CityPath, cr, newFakeDrainOps(), true, &jsonOut); code != 0 {
+		t.Fatalf("json code = %d, want 0", code)
+	}
+	var status StatusJSON
+	if err := json.Unmarshal(jsonOut.Bytes(), &status); err != nil {
+		t.Fatalf("unmarshal: %v; output: %s", err, jsonOut.String())
+	}
+	if !status.Partial {
+		t.Fatalf("status.Partial = false, want true carried through the API JSON projection")
+	}
+	if len(status.PartialErrors) == 0 {
+		t.Fatalf("status.PartialErrors = empty, want runtime partial diagnostic")
 	}
 }

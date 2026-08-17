@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,6 +42,25 @@ source_kind = "git"
   commit = "89abcdef0123456789abcdef0123456789abcdef"
   hash = "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
   description = "Other release."
+`
+
+const packRegistryAttributionCatalog = `schema = 1
+
+[[pack]]
+name = "maintained"
+tier = "maintained"
+publisher = "Gas City"
+description = "Maintained pack."
+source = "https://packages.example/maintained.git"
+source_kind = "git"
+
+[[pack]]
+name = "malformed"
+tier = "maintained"
+publisher = 42
+description = "Malformed attribution."
+source = "https://packages.example/malformed.git"
+source_kind = "git"
 `
 
 const packRegistryUnsortedCatalog = `schema = 1
@@ -137,6 +157,128 @@ func TestPackRegistryAddListSearchShowRemove(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(home, "registry-cache", "local")); !os.IsNotExist(err) {
 		t.Fatalf("registry cache not pruned by refresh, stat err=%v", err)
+	}
+}
+
+func TestPackRegistrySearchAndShowExposeAttribution(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("GC_HOME", home)
+	writeEmptyRegistryConfig(t, home)
+	catalogDir := writeRegistryCatalog(t, packRegistryAttributionCatalog)
+
+	var stdout, stderr bytes.Buffer
+	if code := doPackRegistryAdd("local", catalogDir, false, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("add code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := doPackRegistrySearch("", "", false, 50, false, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("search code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{
+		"Tier",
+		"Publisher",
+		"maintained",
+		"Gas City",
+		"community",
+		packregistry.UnknownPublisher,
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("search output missing %q:\n%s", want, stdout.String())
+		}
+	}
+
+	for _, tc := range []struct {
+		name      string
+		tier      string
+		publisher string
+	}{
+		{name: "maintained", tier: packregistry.CatalogTierMaintained, publisher: "Gas City"},
+		{name: "malformed", tier: packregistry.CatalogTierCommunity, publisher: packregistry.UnknownPublisher},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stdout.Reset()
+			stderr.Reset()
+			if code := doPackRegistryShow(tc.name, false, false, &stdout, &stderr); code != 0 {
+				t.Fatalf("show code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stdout.String(), "Tier:        "+tc.tier) {
+				t.Errorf("show output missing tier %q:\n%s", tc.tier, stdout.String())
+			}
+			if !strings.Contains(stdout.String(), "Publisher:   "+tc.publisher) {
+				t.Errorf("show output missing publisher %q:\n%s", tc.publisher, stdout.String())
+			}
+		})
+	}
+}
+
+func TestPackRegistrySearchAndShowJSONExposeAttribution(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("GC_HOME", home)
+	writeEmptyRegistryConfig(t, home)
+	catalogDir := writeRegistryCatalog(t, packRegistryAttributionCatalog)
+
+	var stdout, stderr bytes.Buffer
+	if code := doPackRegistryAdd("local", catalogDir, false, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("add code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := doPackRegistrySearch("", "", false, 50, false, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("search code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	var searchResult packRegistrySearchJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &searchResult); err != nil {
+		t.Fatalf("decode search JSON: %v\n%s", err, stdout.String())
+	}
+	if searchResult.SchemaVersion != "1" {
+		t.Errorf("search schema_version = %q, want 1", searchResult.SchemaVersion)
+	}
+	got := make(map[string][2]string, len(searchResult.Results))
+	for _, pack := range searchResult.Results {
+		got[pack.Name] = [2]string{pack.Tier, pack.Publisher}
+	}
+	want := map[string][2]string{
+		"maintained": {packregistry.CatalogTierMaintained, "Gas City"},
+		"malformed":  {packregistry.CatalogTierCommunity, packregistry.UnknownPublisher},
+	}
+	for name, wantAttribution := range want {
+		if gotAttribution := got[name]; gotAttribution != wantAttribution {
+			t.Errorf("%s search attribution = %q/%q, want %q/%q",
+				name,
+				gotAttribution[0],
+				gotAttribution[1],
+				wantAttribution[0],
+				wantAttribution[1],
+			)
+		}
+	}
+
+	for name, wantAttribution := range want {
+		t.Run(name, func(t *testing.T) {
+			stdout.Reset()
+			stderr.Reset()
+			if code := doPackRegistryShow(name, false, true, &stdout, &stderr); code != 0 {
+				t.Fatalf("show code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			var showResult packRegistryShowJSONResult
+			if err := json.Unmarshal(stdout.Bytes(), &showResult); err != nil {
+				t.Fatalf("decode show JSON: %v\n%s", err, stdout.String())
+			}
+			if showResult.SchemaVersion != "1" {
+				t.Errorf("show schema_version = %q, want 1", showResult.SchemaVersion)
+			}
+			if gotAttribution := [2]string{showResult.Tier, showResult.Publisher}; gotAttribution != wantAttribution {
+				t.Errorf("show attribution = %q/%q, want %q/%q",
+					gotAttribution[0],
+					gotAttribution[1],
+					wantAttribution[0],
+					wantAttribution[1],
+				)
+			}
+		})
 	}
 }
 
@@ -519,7 +661,7 @@ func TestPackRegistrySearchWarnsOnStaleCache(t *testing.T) {
 	}
 }
 
-func TestPackCommandTreeKeepsRegistryAndLegacySurfacesSeparate(t *testing.T) {
+func TestRegistryCommandTreeUsesPackNamespace(t *testing.T) {
 	cmd := newPackCmd(&bytes.Buffer{}, &bytes.Buffer{})
 	for _, args := range [][]string{{"registry", "list"}, {"fetch"}, {"list"}} {
 		found, remaining, err := cmd.Find(args)
@@ -541,8 +683,10 @@ func TestPackCommandTreeKeepsRegistryAndLegacySurfacesSeparate(t *testing.T) {
 	}
 
 	root := newRootCmd(&bytes.Buffer{}, &bytes.Buffer{})
-	if found, _, err := root.Find([]string{"registry"}); err == nil && found != root {
-		t.Fatalf("gc registry should not be a root command; found=%s", found.CommandPath())
+	for _, child := range root.Commands() {
+		if child.Name() == "registry" {
+			t.Fatal("unexpected top-level gc registry command; use gc pack registry")
+		}
 	}
 }
 

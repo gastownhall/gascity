@@ -10,8 +10,31 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
+
+func TestCachingStoreReadyContextRejectsIncompleteDependencyProjection(t *testing.T) {
+	cache := NewCachingStoreForTest(NewMemStore(), nil)
+	cache.mu.Lock()
+	cache.state = cacheLive
+	cache.beads = map[string]Bead{
+		"work": {ID: "work", Type: "task", Status: "open", Title: "possibly blocked work"},
+	}
+	cache.deps = map[string][]Dep{
+		"work": {{IssueID: "work", DependsOnID: "missing-blocker", Type: "blocks"}},
+	}
+	cache.depsComplete = false
+	cache.mu.Unlock()
+
+	rows, err := cache.ReadyContext(context.Background())
+	if !errors.Is(err, ErrCacheUnavailable) {
+		t.Fatalf("ReadyContext error = %v, want ErrCacheUnavailable", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("ReadyContext rows = %+v, want no result from incomplete dependency projection", rows)
+	}
+}
 
 func TestCachingStoreRunReconciliationDetectsLabelContentChanges(t *testing.T) {
 	t.Parallel()
@@ -447,51 +470,69 @@ func TestCachingStoreHandlesCachedListUsesActiveSnapshotAfterPrimeActive(t *test
 func TestCachingStoreHandlesCachedReadUsesActiveSnapshotDuringRunningFullPrimeAfterPrimeActive(t *testing.T) {
 	t.Parallel()
 
-	mem := NewMemStore()
-	if _, err := mem.Create(Bead{Title: "cached work"}); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	backing := &blockingPrimeListStore{
-		Store:   mem,
-		started: make(chan struct{}),
-		release: make(chan struct{}),
-	}
-	cache := NewCachingStoreForTest(backing, nil)
-	if err := cache.PrimeActive(); err != nil {
-		t.Fatalf("PrimeActive: %v", err)
-	}
-
-	primeDone := make(chan error, 1)
-	go func() {
-		primeDone <- cache.Prime(context.Background())
-	}()
-	select {
-	case <-backing.started:
-	case <-time.After(time.Second):
-		t.Fatal("full prime did not start")
-	}
-
-	readDone := make(chan error, 1)
-	go func() {
-		_, err := cache.Handles().Cached.List(ListQuery{Status: "open"})
-		readDone <- err
-	}()
-	select {
-	case err := <-readDone:
+	synctest.Test(t, func(t *testing.T) {
+		mem := NewMemStore()
+		cachedBead, err := mem.Create(Bead{Title: "cached work"})
 		if err != nil {
-			t.Fatalf("Cached.List error = %v, want active snapshot result", err)
+			t.Fatalf("Create: %v", err)
 		}
-	case <-time.After(25 * time.Millisecond):
-		t.Fatal("Cached.List waited for the running full prime")
-	}
-	if got := backing.primeListCalls.Load(); got != 1 {
-		t.Fatalf("prime list calls = %d, want only the running full prime", got)
-	}
+		backing := &blockingPrimeListStore{
+			Store:   mem,
+			started: make(chan struct{}),
+			release: make(chan struct{}),
+		}
+		var releaseOnce sync.Once
+		releasePrime := func() {
+			releaseOnce.Do(func() { close(backing.release) })
+		}
+		t.Cleanup(releasePrime)
 
-	close(backing.release)
-	if err := <-primeDone; err != nil {
-		t.Fatalf("Prime: %v", err)
-	}
+		cache := NewCachingStoreForTest(backing, nil)
+		if err := cache.PrimeActive(); err != nil {
+			t.Fatalf("PrimeActive: %v", err)
+		}
+
+		primeDone := make(chan error, 1)
+		go func() {
+			primeDone <- cache.Prime(t.Context())
+		}()
+		synctest.Wait()
+		select {
+		case <-backing.started:
+		default:
+			t.Fatal("full prime did not reach its backing List gate")
+		}
+
+		type listResult struct {
+			rows []Bead
+			err  error
+		}
+		readDone := make(chan listResult, 1)
+		go func() {
+			rows, err := cache.Handles().Cached.List(ListQuery{Status: "open"})
+			readDone <- listResult{rows: rows, err: err}
+		}()
+		synctest.Wait()
+		select {
+		case result := <-readDone:
+			if result.err != nil {
+				t.Fatalf("Cached.List error = %v, want active snapshot result", result.err)
+			}
+			if len(result.rows) != 1 || result.rows[0].ID != cachedBead.ID {
+				t.Fatalf("Cached.List rows = %#v, want active snapshot bead %q", result.rows, cachedBead.ID)
+			}
+		default:
+			t.Fatal("Cached.List remained blocked while the full prime was held at its backing List gate")
+		}
+		if got := backing.primeListCalls.Load(); got != 1 {
+			t.Fatalf("prime list calls = %d, want only the running full prime", got)
+		}
+
+		releasePrime()
+		if err := <-primeDone; err != nil {
+			t.Fatalf("Prime: %v", err)
+		}
+	})
 }
 
 func TestCachingStoreHandlesCachedReadDoesNotPrimeWhenDegraded(t *testing.T) {
@@ -1964,8 +2005,19 @@ func TestCachingStoreRunReconciliationSuppressesDuplicateProblemLogs(t *testing.
 	if stats.ProblemCount != int64(maxCacheSyncFailures) {
 		t.Fatalf("ProblemCount = %d, want %d", stats.ProblemCount, maxCacheSyncFailures)
 	}
-	if len(logs) != 1 {
-		t.Fatalf("logged %d problem lines, want 1: %#v", len(logs), logs)
+	// Expect 2 logs: the deduplicated reconcile-cache problem (run 1) and the
+	// one-shot circuit-breaker trip (emitted when syncFailures reaches maxCacheSyncFailures).
+	if len(logs) != 2 {
+		t.Fatalf("logged %d problem lines, want 2 (1 reconcile problem + 1 circuit-breaker trip): %#v", len(logs), logs)
+	}
+	hasTrip := false
+	for _, l := range logs {
+		if strings.Contains(l, "circuit-breaker tripped") {
+			hasTrip = true
+		}
+	}
+	if !hasTrip {
+		t.Fatalf("circuit-breaker trip not found in logs: %#v", logs)
 	}
 	if delay := cache.nextReconcileDelay(time.Now()); delay <= cacheReconcilePollInterval {
 		t.Fatalf("nextReconcileDelay = %v, want sustained-failure backoff above poll interval", delay)
@@ -1978,11 +2030,12 @@ func TestCachingStoreRunReconciliationSuppressesDuplicateProblemLogs(t *testing.
 	cache.mu.Unlock()
 
 	cache.runReconciliation()
-	if len(logs) != 2 {
-		t.Fatalf("logged %d problem lines after window expiry, want 2: %#v", len(logs), logs)
+	// After window expiry: 1 new reconcile-cache problem log (with suppressed count) → total 3.
+	if len(logs) != 3 {
+		t.Fatalf("logged %d problem lines after window expiry, want 3: %#v", len(logs), logs)
 	}
-	if !strings.Contains(logs[1], "suppressed 4 duplicate logs") {
-		t.Fatalf("second problem log = %q, want suppressed duplicate count", logs[1])
+	if !strings.Contains(logs[2], "suppressed 4 duplicate logs") {
+		t.Fatalf("third problem log = %q, want suppressed duplicate count", logs[2])
 	}
 }
 
@@ -2929,7 +2982,16 @@ func TestCachingStoreBdPrimeAndReconcileSkipFullDepScan(t *testing.T) {
 	}
 }
 
-func TestCachingStoreBdPrimeActiveUsesListDependenciesForCachedReady(t *testing.T) {
+// TestCachingStoreBdPrimeActiveUsesListDependenciesFromTheListJSON pins that
+// PrimeActive takes each bead's "down" edges from the dependencies bd carried
+// inline on the list row, spending no `bd dep` fan-out to get them.
+//
+// It asserts the dep map rather than a readiness read. Under a bd with no
+// is_blocked column readiness is not the cache's to answer at all — the
+// dependency-derived predicate is weaker than bd's, so every readiness handle
+// declines and takes the live backing (ErrReadyProjectionUnsupported, #3218) —
+// and pinning this through CachedReady would pin that hole instead of the deps.
+func TestCachingStoreBdPrimeActiveUsesListDependenciesFromTheListJSON(t *testing.T) {
 	t.Parallel()
 
 	var depListCalls int
@@ -2966,19 +3028,23 @@ func TestCachingStoreBdPrimeActiveUsesListDependenciesForCachedReady(t *testing.
 		t.Fatalf("PrimeActive: %v", err)
 	}
 
-	ready, ok := cache.CachedReady()
-	if !ok {
-		t.Fatal("CachedReady reported cache unavailable")
+	cache.mu.RLock()
+	blockerDeps := cloneDeps(cache.deps["bd-blocker"])
+	blockedDeps := cloneDeps(cache.deps["bd-blocked"])
+	cache.mu.RUnlock()
+
+	if len(blockerDeps) != 0 {
+		t.Fatalf("cached deps for bd-blocker = %+v, want none", blockerDeps)
 	}
-	ids := map[string]bool{}
-	for _, b := range ready {
-		ids[b.ID] = true
-	}
-	if !ids["bd-blocker"] || ids["bd-blocked"] {
-		t.Fatalf("CachedReady ids = %v, want blocker ready and blocked excluded", ids)
+	want := Dep{IssueID: "bd-blocked", DependsOnID: "bd-blocker", Type: "blocks"}
+	if len(blockedDeps) != 1 || blockedDeps[0] != want {
+		t.Fatalf("cached deps for bd-blocked = %+v, want the inline edge %+v", blockedDeps, want)
 	}
 	if depListCalls != 0 {
 		t.Fatalf("dep list calls = %d, want 0", depListCalls)
+	}
+	if _, ok := cache.CachedReady(); ok {
+		t.Fatal("CachedReady answered from a cache with no is_blocked column; the control dispatcher reads this handle")
 	}
 }
 
@@ -3603,6 +3669,78 @@ func TestCachingStoreBdReconcileDropsPreservedReadyProjectionWhenDepTargetStatus
 	}
 }
 
+// TestCachingStoreBdReconcilePreservesReadyProjectionForRacedClosedRowBD105 is
+// the reconcile-level regression for the race the bounded projection cannot see
+// directly: a bead that is still open in the list snapshot but closes before the
+// active-row projection query runs drops out of the projection entirely. The
+// reconciler must preserve its last cached is_blocked rather than flip it to nil
+// and emit a spurious bead.updated.
+func TestCachingStoreBdReconcilePreservesReadyProjectionForRacedClosedRowBD105(t *testing.T) {
+	t.Parallel()
+
+	racedClosed := false
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			t.Fatalf("command name = %q, want bd", name)
+		}
+		if len(args) == 0 {
+			t.Fatal("empty bd command")
+		}
+		switch args[0] {
+		case "version":
+			return []byte("bd version 1.0.5 (test)\n"), nil
+		case "sql":
+			// The bounded active-row projection stops returning the bead once it
+			// closes, exactly as the production status<>'closed' SQL would.
+			if racedClosed {
+				return []byte(`[]`), nil
+			}
+			return []byte(`[{"id":"bd-raced","is_blocked":0}]`), nil
+		case "list":
+			// The list snapshot is taken before the close lands, so the bead is
+			// still reported open on the racing reconcile cycle.
+			return []byte(`[
+				{"id":"bd-raced","title":"raced","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z","labels":["task"],"metadata":{}}
+			]`), nil
+		case "query":
+			return []byte(`[]`), nil
+		case "dep":
+			t.Fatalf("unexpected dep scan command: %v", args)
+		}
+		return []byte(`[]`), nil
+	}
+
+	var events []string
+	cache := NewCachingStoreForTest(NewBdStore("/city", runner), func(eventType, beadID string, _ json.RawMessage) {
+		events = append(events, eventType+":"+beadID)
+	})
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	initial, err := cache.Get("bd-raced")
+	if err != nil {
+		t.Fatalf("Get initial: %v", err)
+	}
+	if initial.IsBlocked == nil || *initial.IsBlocked {
+		t.Fatalf("initial IsBlocked = %v, want false projection", initial.IsBlocked)
+	}
+
+	events = nil
+	racedClosed = true
+	cache.runReconciliation()
+
+	if len(events) != 0 {
+		t.Fatalf("events after raced-closed projection reconcile = %v, want none (cached IsBlocked preserved)", events)
+	}
+	got, err := cache.Get("bd-raced")
+	if err != nil {
+		t.Fatalf("Get after reconcile: %v", err)
+	}
+	if got.IsBlocked == nil || *got.IsBlocked {
+		t.Fatalf("IsBlocked after raced-closed projection reconcile = %v, want preserved false", got.IsBlocked)
+	}
+}
+
 func TestCachingStoreBdPrimeActiveToleratesMissingReadyProjectionRowsBD105(t *testing.T) {
 	t.Parallel()
 
@@ -3620,7 +3758,7 @@ func TestCachingStoreBdPrimeActiveToleratesMissingReadyProjectionRowsBD105(t *te
 		case "sql":
 			sqlCalls++
 			query := args[1]
-			if !strings.Contains(query, "status <> 'closed'") {
+			if !strings.Contains(query, "status <> 'closed'") || !strings.Contains(query, "from issues where") || !strings.Contains(query, "from wisps where") {
 				t.Fatalf("ready projection SQL = %q, want active row filter", query)
 			}
 			return []byte(`[
@@ -3699,7 +3837,7 @@ func TestCachingStoreBdPrimeProjectsIsBlockedForAllBDRowsBD105(t *testing.T) {
 			return []byte(`[
 					{"id":"bd-ready","is_blocked":0},
 					{"id":"bd-blocked-status","is_blocked":0},
-				{"id":"bd-deferred-status","is_blocked":1}
+					{"id":"bd-deferred-status","is_blocked":1}
 			]`), nil
 		case "list":
 			return []byte(`[
@@ -3780,7 +3918,16 @@ func TestCachingStoreReadySkipsEphemeralOpenTasks(t *testing.T) {
 	}
 }
 
-func TestCachingStoreBdReconcileRefreshesListDependenciesForCachedReady(t *testing.T) {
+// cachedDownDeps reads one bead's cached "down" edges without going through a
+// public reader, so a test can pin the dep map itself rather than a readiness
+// answer that depends on bd's is_blocked column as well.
+func cachedDownDeps(c *CachingStore, id string) []Dep {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return cloneDeps(c.deps[id])
+}
+
+func TestCachingStoreBdReconcileRefreshesListDependencies(t *testing.T) {
 	t.Parallel()
 
 	runner := newCachingStoreBdDepRunner(t)
@@ -3789,30 +3936,29 @@ func TestCachingStoreBdReconcileRefreshesListDependenciesForCachedReady(t *testi
 		t.Fatalf("Prime: %v", err)
 	}
 
-	assertCachedReadyContains := func(wantReady bool) {
+	edge := Dep{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks"}
+	assertCachedDeps := func(want []Dep) {
 		t.Helper()
-		ready, ok := cache.CachedReady()
-		if !ok {
-			t.Fatal("CachedReady reported cache unavailable")
+		got := cachedDownDeps(cache, "bd-1")
+		if len(got) != len(want) {
+			t.Fatalf("cached deps for bd-1 = %+v, want %+v", got, want)
 		}
-		readyByID := make(map[string]bool, len(ready))
-		for _, bead := range ready {
-			readyByID[bead.ID] = true
-		}
-		if readyByID["bd-1"] != wantReady {
-			t.Fatalf("CachedReady includes bd-1 = %v, want %v; ready=%v", readyByID["bd-1"], wantReady, readyByID)
+		for i := range got {
+			if got[i] != want[i] {
+				t.Fatalf("cached deps for bd-1 = %+v, want %+v", got, want)
+			}
 		}
 	}
 
-	assertCachedReadyContains(true)
+	assertCachedDeps(nil)
 
-	runner.deps["bd-1"] = []Dep{{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks"}}
+	runner.deps["bd-1"] = []Dep{edge}
 	cache.runReconciliation()
-	assertCachedReadyContains(false)
+	assertCachedDeps([]Dep{edge})
 
 	runner.deps["bd-1"] = nil
 	cache.runReconciliation()
-	assertCachedReadyContains(true)
+	assertCachedDeps(nil)
 
 	if runner.depScanCalls != 0 {
 		t.Fatalf("dep scan calls = %d, want 0", runner.depScanCalls)
@@ -3832,16 +3978,8 @@ func TestCachingStoreBdReconcileClearsCachedDepsWhenListOmitsDependencies(t *tes
 	runner.deps["bd-1"] = nil
 	cache.runReconciliation()
 
-	ready, ok := cache.CachedReady()
-	if !ok {
-		t.Fatal("CachedReady reported cache unavailable")
-	}
-	readyByID := make(map[string]bool, len(ready))
-	for _, bead := range ready {
-		readyByID[bead.ID] = true
-	}
-	if !readyByID["bd-1"] {
-		t.Fatalf("CachedReady excludes bd-1 after omitted deps, ready=%v", readyByID)
+	if got := cachedDownDeps(cache, "bd-1"); len(got) != 0 {
+		t.Fatalf("cached deps for bd-1 = %+v after the list omitted them, want none", got)
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"text/template"
 
+	"github.com/gastownhall/gascity/internal/bdflags"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -186,6 +187,7 @@ func lintPack(packDir string) lintPackReport {
 	for _, warning := range loaded.Warnings {
 		out.Diagnostics = append(out.Diagnostics, diagnosticFromWarning(filepath.Join(packDir, "pack.toml"), warning))
 	}
+	out.Diagnostics = append(out.Diagnostics, lintNamedSessionPoolConflicts(filepath.Join(packDir, "pack.toml"), loaded)...)
 	out.Diagnostics = append(out.Diagnostics, lintFormulaFiles(packDir)...)
 	targets, diagnostics := collectLintPromptTargets(packDir, loaded)
 	out.Diagnostics = append(out.Diagnostics, diagnostics...)
@@ -195,6 +197,52 @@ func lintPack(packDir string) lintPackReport {
 	out.Diagnostics = append(out.Diagnostics, lintClaudeOverlayHookShape(packDir)...)
 	out.OK = lintErrorCount(out.Diagnostics) == 0
 	return out
+}
+
+func lintNamedSessionPoolConflicts(packPath string, loaded *config.LintPackLoad) []lintDiagnostic {
+	if loaded == nil || len(loaded.NamedSessions) == 0 || len(loaded.Agents) == 0 {
+		return nil
+	}
+	agentsByName := make(map[string]config.Agent, len(loaded.Agents))
+	for _, agentCfg := range loaded.Agents {
+		agentsByName[agentCfg.QualifiedName()] = agentCfg
+	}
+	var diagnostics []lintDiagnostic
+	for _, named := range loaded.NamedSessions {
+		agentCfg, ok := agentsByName[named.TemplateQualifiedName()]
+		if !ok || !agentHasPoolControls(agentCfg) {
+			continue
+		}
+		diagnostics = append(diagnostics, newLintDiagnostic(packPath, 0,
+			fmt.Sprintf("named_session %q targets pool-controlled agent %q; remove pool settings from named-session templates or remove [[named_session]] for pool agents",
+				named.QualifiedName(), agentCfg.QualifiedName())))
+	}
+	return diagnostics
+}
+
+func agentHasPoolControls(agentCfg config.Agent) bool {
+	if agentPoolExplicitlyDisabled(agentCfg) {
+		return false
+	}
+	return agentCfg.MinActiveSessions != nil ||
+		agentCfg.MaxActiveSessions != nil ||
+		strings.TrimSpace(agentCfg.ScaleCheck) != "" ||
+		strings.TrimSpace(agentCfg.Namepool) != "" ||
+		len(agentCfg.NamepoolNames) > 0
+}
+
+// agentPoolExplicitlyDisabled reports whether agentCfg uses the documented
+// min_active_sessions=0 + max_active_sessions=0 form to intentionally
+// disable pooling (TestValidateAgentsPoolMaxZeroIsValid in
+// internal/config), as opposed to an actual pool configuration. That form
+// genuinely suppresses pool spawns, so it is not a pool/named-session
+// conflict.
+func agentPoolExplicitlyDisabled(agentCfg config.Agent) bool {
+	return agentCfg.MinActiveSessions != nil && *agentCfg.MinActiveSessions == 0 &&
+		agentCfg.MaxActiveSessions != nil && *agentCfg.MaxActiveSessions == 0 &&
+		strings.TrimSpace(agentCfg.ScaleCheck) == "" &&
+		strings.TrimSpace(agentCfg.Namepool) == "" &&
+		len(agentCfg.NamepoolNames) == 0
 }
 
 func collectLintPromptTargets(packDir string, loaded *config.LintPackLoad) ([]lintPromptTarget, []lintDiagnostic) {
@@ -286,12 +334,18 @@ func lintPrompt(packDir string, packDirs []string, providers map[string]config.P
 	if err != nil {
 		return []lintDiagnostic{diagnosticFromError(sourcePath, err)}
 	}
-	_, body := promptmeta.Parse(string(data))
-	if !isPromptTemplatePath(target.templatePath) {
-		return nil
-	}
 
 	var diagnostics []lintDiagnostic
+	for _, finding := range bdflags.ScanUnknownFlags(data) {
+		diagnostics = append(diagnostics, newLintDiagnostic(sourcePath, finding.Line,
+			fmt.Sprintf("bd-unknown-flag: bd %s uses unrecognized flag %q", finding.Subcommand, finding.Flag)))
+	}
+
+	_, body := promptmeta.Parse(string(data))
+	if !isPromptTemplatePath(target.templatePath) {
+		return diagnostics
+	}
+
 	var tmpl *template.Template
 	tmpl = template.New("prompt").
 		Funcs(promptFuncMap("lint-city", "", nil, func() *template.Template { return tmpl })).
@@ -363,6 +417,9 @@ func lintPromptContext(packDir string, agentCfg config.Agent, providers map[stri
 		qualifiedName = "lint-agent"
 	}
 	providerKey := agentCfg.Provider
+	// The zero query topology is right and not a shortcut: `gc lint` renders a
+	// PACK, which is not deployed to any city, so there is no storage
+	// arrangement to read. It lints the command's SHAPE.
 	return PromptContext{
 		CityRoot:                packDir,
 		AgentName:               qualifiedName,
@@ -375,10 +432,10 @@ func lintPromptContext(packDir string, agentCfg config.Agent, providers map[stri
 		IssuePrefix:             "lint",
 		Branch:                  "feature/lint",
 		DefaultBranch:           "main",
-		AssignedInProgressQuery: agentCfg.EffectiveAssignedInProgressQueryForBeads(config.BeadsConfig{}),
-		AssignedReadyQuery:      agentCfg.EffectiveAssignedReadyQueryForBeads(config.BeadsConfig{}),
-		RoutedPoolQuery:         agentCfg.EffectiveRoutedPoolQueryForBeads(config.BeadsConfig{}),
-		WorkQuery:               agentCfg.EffectiveWorkQueryForBeads(config.BeadsConfig{}),
+		AssignedInProgressQuery: agentCfg.EffectiveAssignedInProgressQueryFor(config.QueryTopology{}),
+		AssignedReadyQuery:      agentCfg.EffectiveAssignedReadyQueryFor(config.QueryTopology{}),
+		RoutedPoolQuery:         agentCfg.EffectiveRoutedPoolQueryFor(config.QueryTopology{}),
+		WorkQuery:               agentCfg.EffectiveWorkQueryFor(config.QueryTopology{}),
 		SlingQuery:              agentCfg.EffectiveSlingQuery(),
 		ProviderKey:             providerKey,
 		ProviderDisplayName:     providerDisplayNameFor(providerKey, providers),

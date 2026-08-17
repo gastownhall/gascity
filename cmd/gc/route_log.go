@@ -30,6 +30,14 @@ func classifyGCNoAPI(val string) (disabled bool, warn string) {
 // Routing logs are opt-in via GC_DEBUG so the default CLI experience stays quiet;
 // per-file test suites and operators debugging fallback behavior enable it.
 func routeLogEnabled() bool {
+	return gcDebugEnabled()
+}
+
+// gcDebugEnabled reports whether GC_DEBUG is set to a truthy value (1/true/yes,
+// case-insensitive, surrounding whitespace stripped). It gates opt-in operator
+// diagnostics — route audit lines and managed-dolt cleanup skips — so the
+// default CLI experience stays quiet.
+func gcDebugEnabled() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("GC_DEBUG"))) {
 	case "1", "true", "yes":
 		return true

@@ -150,21 +150,28 @@ location is load-bearing.
 
 ### The dashboard projection
 
-The dashboard is a static TypeScript SPA served by a tiny Go
-binary (`cmd/gc/dashboard/`) whose only jobs are to embed the
-compiled bundle and inject the supervisor URL into `index.html`.
-The SPA talks directly to the supervisor's typed OpenAPI endpoints
-from the browser — the dashboard server is NOT an API proxy. The
-dashboard server also hosts one narrow operational debug endpoint
-(`/__client-log`) that accepts browser error logs for centralized
-debugging; this endpoint is intentionally outside the typed HTTP +
-SSE control plane and may use standard `encoding/json` for body
-decoding.
+The dashboard is a compiled Vite/React SPA embedded in
+`internal/api/dashboardspa` and served same-origin by the supervisor
+itself as the `/` catch-all — there is no separate dashboard binary
+or API proxy. For domain data the SPA calls the supervisor's typed
+`/v0` OpenAPI endpoints directly from the browser.
+
+A small host-side `/api/*` plane (`internal/api/dashboardbff`) serves
+the handful of host-local reads that are not GC domain resources —
+the runtime-config projection, git log / builds, run diffs, health
+probes, the slow-status samplers, and a `/api/client-errors`
+telemetry sink for browser error logs. Like `/svc/*`, this plane and
+the SPA shell are intentionally outside the typed HTTP + SSE control
+plane (see §3.9); the plane uses standard `encoding/json` and may
+decode bodies and pass through the already-typed supervisor-status
+payload without Huma registration.
 
 ## 3. The typed-wire principle
 
 The invariants below apply to every operation under `internal/api/`
-except the `/svc/*` workspace-service proxy (see §5).
+except three deliberately non-typed surfaces — the `/svc/*`
+workspace-service proxy, the embedded dashboard SPA at `/`, and the
+host-side dashboard `/api/*` plane (see §3.9).
 
 ### 3.1 Annotations drive the live implementation
 
@@ -268,7 +275,10 @@ with two narrow, documented exceptions:
 Every response field, every SSE event payload, every input body is
 a named Go struct with real fields and Huma tags. No
 `json.RawMessage` or `map[string]any` in the typed control plane,
-with exactly one class of exception (§3.6).
+with exactly one class of exception (§3.6). This governs the typed
+control plane only; the non-typed carve-out surfaces in §3.9
+(`/svc/*`, the dashboard SPA, and the host-side `/api/*` plane) are
+outside it by definition.
 
 "Heterogeneous", "opaque", "clients render it generically", "we'll
 figure out the union later", and "it's just internal" are not
@@ -390,8 +400,12 @@ Session transcript streaming and query endpoints forward
 provider-native frames with full fidelity. Each response/envelope
 identifies the producing provider via a `provider` field whose
 value is one of the known provider keys (`claude`, `codex`,
-`gemini`, `open-code`, etc.); each frame's JSON is emitted verbatim
-as the provider wrote it, with no GC-side interpretation.
+`gemini`, `opencode`, etc.); each valid frame's JSON is emitted
+verbatim as the provider wrote it, with no GC-side interpretation.
+If a provider wrote malformed JSON string data containing literal
+control characters, `SessionRawMessageFrame` escapes those control
+characters before emission so the API never sends invalid JSON. That
+is a transport-validity repair, not provider-frame interpretation.
 Consumers parse frames using provider-specific logic on their side,
 keyed by the provider identifier on the envelope.
 
@@ -426,12 +440,85 @@ Huma enters the stack), error bodies are pre-serialized
 per well-known error, no runtime `json.Marshal`. The constants
 live in `internal/api/middleware.go` as `problemBody` values.
 
-### 3.9 `/svc/*` is the only exclusion
+**Machine-readable codes: the `apierr` registry.** Every error carries a
+stable machine identity — an RFC 9457 `type` URN (`urn:gascity:error:<code>`)
+plus a convenience `code` member — so an autonomous consumer branches on a
+registered identifier instead of parsing `detail` prose. `internal/api/apierr`
+is the single source of truth, mirroring the typed-events registry
+(`events.RegisterPayload`): a central catalog (`apierr/catalog.go`) of
+`ProblemType{Code,Status,Title}` values, minted through the constructors
+(`apierr.BeadNotFound.Msg(...)`, `.With(...)`) so the URN can never drift from a
+registered code. `apierr.ErrorModel` embeds `huma.ErrorModel` and adds
+`code,omitempty`; the Go type is named `ErrorModel` so the OpenAPI schema keeps
+that name (no genclient/TS churn).
 
-`/svc/*` is a raw pass-through to external service processes that
-own their own contracts. It is explicitly not a typed API
-surface. This is the single carved-out path inside `internal/api/`.
-If `/svc/*` ever becomes typed, it gets its own migration.
+`errors_install.go` overrides `huma.NewError` at package-init so *every* error —
+including Huma's own request-validation failures — becomes an
+`*apierr.ErrorModel`. Huma's built-in 422 (`"validation failed"`) is the one
+auto-stamped fallback (`validation-failed`); every other error Huma constructs
+is wrapped verbatim with an empty (omitted) `code`, byte-identical on the wire,
+where absence of a code marks an as-yet-unconverted legacy path. Because
+`defineErrors` derives the error schema from `NewError`, `apierr.ErrorModel` is
+the sole error schema for the whole API; `documentProblemTypes` publishes the
+catalog as `x-gascity-problem-types` on `ErrorModel.type`.
+
+Operations opt into an enumerated error contract with `errorStatuses(...)` (or
+`Operation.Errors`), which turns their catch-all `default` response into one
+problem+json response per status (Huma auto-appends 422/500). The bead and sling
+endpoints are the first such pilot. Two CI guards keep it honest:
+`TestEveryEmittedErrorCodeIsRegistered` (no `urn:gascity:error:` literal outside
+`apierr/`; every emitted URN resolves in the registry — the analog of
+`TestEveryKnownEventTypeHasRegisteredPayload`) and `TestErrorModelSpecProjection`
+(the published `x-gascity-problem-types` equals the sorted registry).
+
+### 3.9 The carved-out non-typed paths
+
+Four surfaces inside `internal/api/` are deliberately outside the
+typed-wire principle. Every other path is a typed Huma operation.
+
+- **`/svc/*`** — a raw pass-through to external workspace-service
+  processes that own their own HTTP contracts. If `/svc/*` ever
+  becomes typed, it gets its own migration.
+- **`/hook/*` (the webhook receiver, E3)** — a raw pass-through for
+  inbound provider webhooks (`/v0/city/{cityName}/hook/{name}`). It is
+  non-typed because the HMAC/ed25519 verifiers sign the exact raw body,
+  so the receiver must read the unparsed bytes rather than a
+  Huma-decoded struct. Unlike `/svc/*` it is **not** exempt from the
+  mux-level write-auth grant (`cityScopedObjectMutation` keeps `/hook/`
+  gated — the H2 reversal): signature verification is an additional gate
+  for public webhooks, never a replacement for the operator's grant. It
+  self-enforces the R2 perimeter (`webhookRequestAllowed`: private/tenant
+  hooks require loopback-or-`X-GC-Request`; read-only refuses dispatch;
+  unknown names 404) and R1 operator-owned verifier secrets before it
+  parses or dispatches anything. The typed operator sibling
+  `POST /v0/city/{cityName}/order/{name}/run` stays a normal Huma
+  operation (write-auth/CSRF/read-only apply).
+- **`/` (the embedded dashboard SPA)** — the compiled Vite/React
+  bundle in `internal/api/dashboardspa`, served same-origin by the
+  supervisor as the `/` catch-all. It serves static assets and the
+  SPA shell, not domain JSON, so the typed-struct rules do not apply.
+- **`/api/*` (the host-side dashboard BFF plane)** — the host-local
+  reads in `internal/api/dashboardbff` (runtime-config projection,
+  git log / builds, run diffs, health probes, slow-status samplers,
+  and the `/api/client-errors` telemetry sink) that are
+  dashboard-local rather than GC domain resources. The SPA reads all
+  GC domain data from the typed `/v0` API directly; the `/api/*`
+  plane exists only for the handful of host-side reads that have no
+  `/v0` home. It is registered as a non-Huma handler, so it adds
+  nothing to the OpenAPI contract, and it self-enforces the
+  read-only posture and the same-origin + `X-GC-Request` CSRF
+  convention through one shared guard. Its responses use named Go
+  structs for every knowable shape; the one exception is the
+  supervisor-status field it passes through verbatim from the
+  already-typed `/v0/.../status` payload (a `json.RawMessage`, the
+  same honest-opacity pattern as the provider raw frames in §3.6).
+  A source guard (`TestSupervisorNonHumaSurfacesAreSanctioned`) pins
+  this exception set (now `/svc/*`, `/hook/*`, `/`, `/api/*`) so a new
+  untyped carve-out cannot be added silently.
+
+These are the only carved-out paths inside `internal/api/`. If a new
+surface needs to join them, it updates this section and the source
+guard in the same change.
 
 ## 4. Event typing (the registry)
 
@@ -542,9 +629,12 @@ else.
    the `cityGet` / `cityPost` / `cityPatch` / etc. helpers in
    `internal/api/city_scope.go` for per-city scoped operations).
 3. Commit. Pre-commit regenerates `internal/api/openapi.json`,
-   `docs/reference/schema/openapi.json`, `internal/api/genclient/`, and the
-   TS types under `cmd/gc/dashboard/web/src/generated/`. Mintlify
-   publishes the spec on the next docs build.
+   `docs/reference/schema/openapi.json`, and the generated Go client under
+   `internal/api/genclient/`. The dashboard's generated TypeScript supervisor
+   client lives under
+   `internal/api/dashboardspa/web/shared/src/generated/gc-supervisor-client/`;
+   it is not regenerated by this spec pre-commit step. Mintlify publishes the
+   spec on the next docs build.
 
 ### Adding or changing an event type
 

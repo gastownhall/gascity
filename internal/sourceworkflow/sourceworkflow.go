@@ -27,6 +27,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/closeorder"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // ConflictError is returned when a graph workflow launch is blocked by one
@@ -71,8 +72,8 @@ const WorkflowSkippedCloseReason = "workflow cleanup: subtree bead force-closed 
 // Queries that only match one label miss graph.v2-only roots and allow
 // --force to spawn duplicates.
 func IsWorkflowRoot(b beads.Bead) bool {
-	return strings.EqualFold(strings.TrimSpace(b.Metadata[beadmeta.KindMetadataKey]), "workflow") ||
-		strings.EqualFold(strings.TrimSpace(b.Metadata[beadmeta.FormulaContractMetadataKey]), "graph.v2")
+	return strings.EqualFold(strings.TrimSpace(b.Metadata[beadmeta.KindMetadataKey]), beadmeta.KindWorkflow) ||
+		strings.EqualFold(strings.TrimSpace(b.Metadata[beadmeta.FormulaContractMetadataKey]), beadmeta.FormulaContractGraphV2)
 }
 
 func (e *ConflictError) Error() string {
@@ -350,11 +351,25 @@ func canonicalScopeRef(scopeRef string) string {
 	if scopeRef == "" {
 		return ""
 	}
-	scopeRef = filepath.Clean(scopeRef)
-	if resolved, err := filepath.EvalSymlinks(scopeRef); err == nil && strings.TrimSpace(resolved) != "" {
-		return resolved
+	if isStoreScopeSentinel(scopeRef) {
+		return scopeRef
 	}
-	return scopeRef
+	return pathutil.NormalizePathForCompare(scopeRef)
+}
+
+// isStoreScopeSentinel reports whether ref is a logical store reference such
+// as "rig:alpha" or "city:main" rather than a filesystem path.
+// LockScopeForStoreRef falls through to the literal ref when a rig name cannot
+// be resolved to a path; absolutizing that sentinel would make the derived
+// lock key and lock filename depend on the caller's working directory and
+// silently weaken mutual exclusion. A single-character scheme (a Windows drive
+// letter) is a path, not a sentinel.
+func isStoreScopeSentinel(ref string) bool {
+	i := strings.IndexByte(ref, ':')
+	if i < 2 {
+		return false
+	}
+	return !strings.ContainsAny(ref[:i], `/\`)
 }
 
 // ListWorkflowBeads returns the root and all descendant beads tagged with
@@ -401,9 +416,115 @@ func ListWorkflowBeads(store beads.Store, rootID string) ([]beads.Bead, error) {
 // workflow step chains without rejecting blocked-before-blocker order. Returns
 // the count of newly closed beads.
 func CloseWorkflowSubtree(store beads.Store, rootID string) (int, error) {
-	matched, err := ListWorkflowBeads(store, rootID)
+	return CloseWorkflowSubtreeAs(store, rootID, beadmeta.OutcomeSkipped, WorkflowSubtreeClosedReason, nil)
+}
+
+// CloseWorkflowSubtreeAs closes the root and every open descendant of a workflow
+// with gc.outcome=outcome and the given close_reason, using the same
+// descendant-before-root + blocker-first ordering as CloseWorkflowSubtree so a
+// strict store accepts the batch. When rootExtra is non-empty its entries are
+// stamped ONLY on the root's close (never smeared onto member beads, e.g. run
+// cancel's gc.cancel_requested intent) and the root is closed last, in its own
+// batch. On a store whose Tx commits atomically (beads.StoreSupportsAtomicTx),
+// that root metadata write and close share one transaction, so a failed close
+// persists NEITHER and the root never lingers open carrying a half-set marker.
+// On a non-atomic store the write falls back to a set-then-close batch that
+// durably records the marker, so the caller's returned error is a retryable
+// signal that completes the wind-down rather than losing the intent. Returns
+// the count of newly closed beads.
+func CloseWorkflowSubtreeAs(store beads.Store, rootID, outcome, reason string, rootExtra map[string]string) (int, error) {
+	ordered, err := orderedOpenWorkflowSubtree(store, rootID)
 	if err != nil {
 		return 0, err
+	}
+	if len(ordered) == 0 {
+		return 0, nil
+	}
+	base := map[string]string{
+		beadmeta.OutcomeMetadataKey: outcome,
+		"close_reason":              reason,
+	}
+	if len(rootExtra) == 0 {
+		return store.CloseAll(ordered, base)
+	}
+
+	rootID = strings.TrimSpace(rootID)
+	descendants := make([]string, 0, len(ordered))
+	rootOpen := false
+	for _, id := range ordered {
+		if id == rootID {
+			rootOpen = true
+			continue
+		}
+		descendants = append(descendants, id)
+	}
+	total := 0
+	if len(descendants) > 0 {
+		n, err := store.CloseAll(descendants, base)
+		if err != nil {
+			return total, err
+		}
+		total += n
+	}
+	if rootOpen {
+		rootMeta := map[string]string{
+			beadmeta.OutcomeMetadataKey: outcome,
+			"close_reason":              reason,
+		}
+		for k, v := range rootExtra {
+			rootMeta[k] = v
+		}
+		n, err := closeRootWithMarker(store, rootID, rootMeta)
+		if err != nil {
+			return total, err
+		}
+		total += n
+	}
+	return total, nil
+}
+
+// closeRootWithMarker closes the workflow root and stamps its close-only metadata
+// (e.g. run cancel's gc.cancel_requested intent). On a store whose Tx commits
+// atomically it writes the metadata and closes the root in one transaction, so a
+// failed close rolls the marker back and the root never lingers open half-marked;
+// on a non-atomic store it falls back to CloseAll's set-then-close, which durably
+// records the marker so a retry can complete the wind-down. Returns 1 if the root
+// was newly closed, 0 if it was already closed — matching CloseAll's count of
+// newly closed beads.
+func closeRootWithMarker(store beads.Store, rootID string, rootMeta map[string]string) (int, error) {
+	if !beads.StoreSupportsAtomicTx(store) {
+		return store.CloseAll([]string{rootID}, rootMeta)
+	}
+	// Re-read as close to the write as possible and skip an already-closed root,
+	// so a concurrently finalized root is not re-stamped — the same guard CloseAll
+	// applies per id before it writes.
+	current, err := store.Get(rootID)
+	if err != nil {
+		return 0, err
+	}
+	if current.Status == "closed" {
+		return 0, nil
+	}
+	if err := store.Tx("gc: close workflow root "+rootID, func(tx beads.Tx) error {
+		if err := tx.SetMetadataBatch(rootID, rootMeta); err != nil {
+			return err
+		}
+		return tx.Close(rootID)
+	}); err != nil {
+		return 0, err
+	}
+	return 1, nil
+}
+
+// orderedOpenWorkflowSubtree returns the open beads of the workflow rooted at
+// rootID (root included) ordered deepest-descendant-first and then blocker-first
+// via closeorder.Order, so a strict store accepts the close batch and the root
+// sorts last. Closed beads are excluded so an already-terminal member keeps its
+// recorded outcome.
+func orderedOpenWorkflowSubtree(store beads.Store, rootID string) ([]string, error) {
+	matched, err := ListWorkflowBeads(store, rootID)
+	if err != nil {
+		return nil, err
 	}
 	byID := make(map[string]beads.Bead, len(matched))
 	for _, bead := range matched {
@@ -452,16 +573,9 @@ func CloseWorkflowSubtree(store beads.Store, rootID string) (int, error) {
 		ids = append(ids, bead.ID)
 	}
 	if len(ids) == 0 {
-		return 0, nil
+		return nil, nil
 	}
-	ordered, err := closeorder.Order(store, ids)
-	if err != nil {
-		return 0, err
-	}
-	return store.CloseAll(ordered, map[string]string{
-		beadmeta.OutcomeMetadataKey: "skipped",
-		"close_reason":              WorkflowSubtreeClosedReason,
-	})
+	return closeorder.Order(store, ids)
 }
 
 // CloseSpecSidecarsForRoot closes open generated spec sidecars owned by the
@@ -505,7 +619,7 @@ func CloseSpecSidecarsForRoot(store beads.Store, rootID, reason string) (int, er
 		return 0, fmt.Errorf("ordering workflow spec sidecars for %s: %w", rootID, err)
 	}
 	return store.CloseAll(ordered, map[string]string{
-		beadmeta.OutcomeMetadataKey: "pass",
+		beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass,
 		"close_reason":              reason,
 	})
 }
@@ -600,7 +714,7 @@ func generatedSpecSidecarCandidates(store beads.Store) ([]beads.Bead, error) {
 // IsGeneratedSpecSidecar reports whether a bead is a generated workflow spec
 // sidecar rather than executable work.
 func IsGeneratedSpecSidecar(bead beads.Bead) bool {
-	return strings.EqualFold(strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]), "spec") ||
+	return strings.EqualFold(strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]), beadmeta.KindSpec) ||
 		strings.EqualFold(strings.TrimSpace(bead.Type), "spec")
 }
 
@@ -677,12 +791,5 @@ func canonicalCityPath(cityPath string) (string, error) {
 	if cleaned == "" || cleaned == "." {
 		return "", fmt.Errorf("source workflow lock requires city path")
 	}
-	abs, err := filepath.Abs(cleaned)
-	if err != nil {
-		return "", fmt.Errorf("canonicalize city path: %w", err)
-	}
-	if resolved, err := filepath.EvalSymlinks(abs); err == nil && strings.TrimSpace(resolved) != "" {
-		return resolved, nil
-	}
-	return abs, nil
+	return pathutil.NormalizePathForCompare(cleaned), nil
 }

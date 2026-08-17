@@ -33,14 +33,6 @@ func cliGraphrouteDeps(cityPath string) graphroute.Deps {
 	}
 }
 
-// controlDispatcherBinding resolves the control-dispatcher route binding
-// with CLI dependencies. Only Resolver is supplied —
-// graphroute.ControlDispatcherBinding reads no other Deps fields, matching
-// the projection the retired sling alias layer forwarded.
-func controlDispatcherBinding(store beads.Store, cityName string, cfg *config.City, rigContext string) (graphroute.GraphRouteBinding, error) {
-	return graphroute.ControlDispatcherBinding(store, cityName, cfg, rigContext, graphroute.Deps{Resolver: cliAgentResolver{}})
-}
-
 // applyGraphRouting delegates to graphroute.ApplyGraphRouting with CLI
 // dependencies.
 func applyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string, vars map[string]string, scopeKind, scopeRef, storeRef string, store beads.Store, cityName, cityPath string, cfg *config.City) error {
@@ -60,7 +52,17 @@ var (
 	workflowServeIdlePollInterval  = 100 * time.Millisecond
 	workflowServeIdlePollAttempts  = 3
 	workflowServeWakeSweepInterval = 1 * time.Second
-	workflowServeMaxIdleSleep      = 30 * time.Second
+	// Cap the --follow idle backoff at 5s. A worker that closes a step bead
+	// with a raw bd write does not publish a city BeadClosed event, so the
+	// control-dispatcher only notices the next ready step on its idle re-poll.
+	// At the former 30s cap each graph hop could wait up to ~30s, so a
+	// multi-step workflow accumulated minutes of pure wake latency (the bulk of
+	// the TestGraphWorkflowSuccessPath flake). 5s keeps the loop responsive
+	// across hops while still backing off from the 1s base; the cost is one
+	// serve loop polling every 5s rather than 30s when a city is fully idle.
+	// (Complementary to the wake-debounce coalescing below, which only helps
+	// the event-arrival path; a raw-bd-write close publishes no event.)
+	workflowServeMaxIdleSleep = 5 * time.Second
 	// workflowServeWakeDebounce is the coalescing window opened once the first
 	// relevant event wakes the --follow loop. Additional buffered events that
 	// arrive during the window are drained and folded into the same wake so a
@@ -68,7 +70,7 @@ var (
 	// single work/ready re-scan instead of N heavy per-event Dolt scans. This is
 	// a fixed (max-wait) window, so a lone relevant wake also waits out the
 	// window before its drain; the delay is intentional and small relative to
-	// the 1–30s idle sleeps it replaces. Set it to 0 to disable coalescing and
+	// the 1–5s idle sleeps it replaces. Set it to 0 to disable coalescing and
 	// restore one-event-one-drain. Injectable so tests can shrink it. Fixes
 	// gastownhall/gascity#3206.
 	workflowServeWakeDebounce = 250 * time.Millisecond
@@ -316,7 +318,7 @@ func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writ
 	// Expand {{.Rig}}/{{.AgentBase}} once so the long-poll drain reuses the
 	// rig-scoped command instead of passing the literal template to the shell
 	// on every iteration. #793.
-	workQuery := expandAgentCommandTemplate(cityPath, cityName, &agentCfg, cfg.Rigs, "work_query", agentCfg.EffectiveWorkQueryForBeads(cfg.Beads), stderr)
+	workQuery := expandAgentCommandTemplate(cityPath, cityName, &agentCfg, cfg.Rigs, "work_query", agentCfg.EffectiveWorkQueryFor(cityQueryTopology(cityPath, cfg)), stderr)
 	if agentCfg.WorkQuery == "" && isWorkflowServeControlDispatcherAgent(agentCfg) {
 		workQuery = workflowServeControlReadyQueryForBeads(agentCfg, cfg.Beads, config.NamedSessionRuntimeName(cityName, cfg.Workspace, agentCfg.QualifiedName()))
 	}
@@ -486,6 +488,8 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 			processedThisCycle = true
 		}
 		if processedThisCycle {
+			// Signal workers to skip their poll sleep: new step beads may be ready.
+			writeDispatchWakeFile(cityPath)
 			continue
 		}
 		if pendingCount > 0 {
@@ -606,9 +610,25 @@ func waitForRelevantWorkflowWake(eventCh <-chan workflowWatchResult, sleepDur ti
 	return waitForRelevantWorkflowWakeWithTrace(eventCh, sleepDur, -1)
 }
 
+// workflowServeSelfActor names this process in the event log, and says whether
+// that name is usable as an identity.
+//
+// The serve loop's own control-bead writes append bead.* events now that a
+// relocated class store emits (class_store_emit.go), and waking on those buys
+// an extra heavy ready re-scan and a controller poke per dispatch burst.
+// eventActor's terminal fallback is "human", which every foreign CLI writer
+// shares, so filtering on it would suppress legitimate wakes: an identity is
+// usable only when it is neither empty nor that fallback. It is a variable so a
+// test can pin both arms.
+var workflowServeSelfActor = func() (string, bool) {
+	actor := eventActor()
+	return actor, actor != "" && actor != "human"
+}
+
 func waitForRelevantWorkflowWakeWithTrace(eventCh <-chan workflowWatchResult, sleepDur time.Duration, idleSweeps int) (bool, error) {
 	timer := time.NewTimer(sleepDur)
 	defer timer.Stop()
+	selfActor, selfUsable := workflowServeSelfActor()
 
 	for {
 		select {
@@ -617,6 +637,16 @@ func waitForRelevantWorkflowWakeWithTrace(eventCh <-chan workflowWatchResult, sl
 				return false, res.err
 			}
 			if workflowEventRelevant(res.evt) {
+				if selfUsable && res.evt.Actor == selfActor {
+					// Our own emission. drainWorkflowServeWork already loops
+					// until no control bead is processed, so nothing
+					// discoverable from this loop's own writes can be missed by
+					// ignoring them — while a foreign bead.* event (the worker
+					// close this emission exists to make visible) still wakes
+					// the loop immediately.
+					workflowTracef("serve ignore-self-event type=%s subject=%s", res.evt.Type, res.evt.Subject)
+					continue
+				}
 				if idleSweeps >= 0 {
 					workflowTracef("serve wake-event type=%s subject=%s idle_sweeps=%d sleep=%s", res.evt.Type, res.evt.Subject, idleSweeps, sleepDur)
 				} else {
@@ -722,6 +752,19 @@ func workflowServeControlReadyQuery(agentCfg config.Agent, controlSessionNames .
 	return workflowServeControlReadyQueryForBeads(agentCfg, config.BeadsConfig{}, controlSessionNames...)
 }
 
+// controlReadyRoutedDemandArgs renders the flag set routed_ready()'s
+// route-scoped, unassigned bd-ready calls carry: unassigned, no epics, and no
+// bead parked on a dispatch hold (ga-x9kptu / ga-5736js).
+//
+// It renders from config.PoolDemandServeRules — the same value the worker's
+// generated Tier-3 query and the controller's demand predicate are built from —
+// so this probe cannot come to serve a different set than the one the pool
+// counts and the workers claim. assignee_ready() (Tier 1/2) must stay
+// hold-transparent by design and must never call this.
+func controlReadyRoutedDemandArgs() string {
+	return config.PoolDemandServeRulesForQuery().ShellArgs()
+}
+
 func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg config.BeadsConfig, controlSessionNames ...string) string {
 	target := strings.TrimSpace(agentCfg.QualifiedName())
 	if target == "" {
@@ -739,7 +782,7 @@ func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg conf
 	jqFilter = strings.ReplaceAll(jqFilter, `\`, `\\`)
 	jqFilter = strings.ReplaceAll(jqFilter, `"`, `\"`)
 	jqFilter = strings.ReplaceAll(jqFilter, `$`, `\$`)
-	queryPrefix := `BD_EXPORT_AUTO=false GC_CONTROL_TARGET=` + shellquote.Quote(target)
+	queryPrefix := `BD_EXPORT_AUTO=false GC_CONTROL_TARGET=` + shellquote.Quote(target) + ambientDoltConnectionQueryPrefix()
 	for _, name := range controlSessionNames {
 		name = strings.TrimSpace(name)
 		if name == "" {
@@ -761,8 +804,8 @@ func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg conf
 		`assignee_ready() { cand="$1"; [ -z "$cand" ] && return 0; if grep -Fxq "$cand" "$seen"; then return 0; fi; printf "%s\n" "$cand" >> "$seen"; ` +
 		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --assignee="$cand" --exclude-type=epic --json --limit=` + limit + `; }; ` +
 		`routed_ready() { route="$1"; [ -z "$route" ] && return 0; ` +
-		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --metadata-field "gc.run_target=$route" --unassigned --exclude-type=epic --json --sort oldest --limit=` + limit + `; ` +
-		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --metadata-field "gc.routed_to=$route" --unassigned --exclude-type=epic --json --sort oldest --limit=` + limit + `; ` +
+		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$route"` + controlReadyRoutedDemandArgs() + ` --json --sort oldest --limit=` + limit + `; ` +
+		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$route"` + controlReadyRoutedDemandArgs() + ` --json --sort oldest --limit=` + limit + `; ` +
 		`}; ` +
 		`for id in "$GC_CONTROL_SESSION_NAME" "$GC_SESSION_NAME" "$GC_ALIAS" "$GC_CONTROL_TARGET" "$GC_SESSION_ID"; do ` +
 		`[ -z "$id" ] && continue; ` +
@@ -777,6 +820,58 @@ func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg conf
 		`routed_ready "${GC_CONTROL_BARE_TARGET:-}"; ` +
 		`if [ -s "$tmp" ]; then jq -s "` + jqFilter + `" "$tmp"; else printf "[]"; fi` + `'`
 	return query
+}
+
+// ambientDoltConnectionQueryPrefix returns a shell-prefix env fragment
+// (leading space + "KEY=value" pairs, or "") carrying the CURRENT process's
+// Dolt connection coordinates under both the GC_DOLT_* and BEADS_DOLT_SERVER_*
+// names bd recognizes.
+//
+// Without this, the ready-query subprocess env is built by stripping the
+// parent's inherited Dolt vars and re-projecting them from a freshly resolved
+// scope lookup (mergeRuntimeEnv + controllerWorkQueryEnv). That resolution
+// runs its own managed-runtime-availability probe and can transiently come
+// back without a port, silently dropping GC_DOLT_PORT/BEADS_DOLT_SERVER_PORT
+// from the subprocess env and causing `bd --sandbox` to resolve port 0
+// ("Dolt server unreachable at 127.0.0.1:0") — the recurring fleet-wide
+// graph.v2 wedge (gascity gc-74rxa). The running control-dispatcher process's
+// own environment already carries the connection coordinates it was spawned
+// with, so pass them through explicitly as a shell-prefix assignment (which
+// takes effect for the inner `sh -c` and its `bd` children regardless of what
+// the outer subprocess's cmd.Env resolved to) rather than depending on that
+// re-resolution succeeding on every poll.
+func ambientDoltConnectionQueryPrefix() string {
+	host, port := ambientDoltHostPort()
+	var pairs []string
+	if host != "" {
+		quotedHost := shellquote.Quote(host)
+		pairs = append(pairs, `GC_DOLT_HOST=`+quotedHost, `BEADS_DOLT_SERVER_HOST=`+quotedHost)
+	}
+	if port != "" {
+		quotedPort := shellquote.Quote(port)
+		pairs = append(pairs, `GC_DOLT_PORT=`+quotedPort, `BEADS_DOLT_SERVER_PORT=`+quotedPort)
+	}
+	if len(pairs) == 0 {
+		workflowTracef("ambient dolt env unset; ready-query passthrough disabled")
+		return ""
+	}
+	return " " + strings.Join(pairs, " ")
+}
+
+// ambientDoltHostPort resolves the ambient Dolt host and port as a matched
+// pair from a single env-var namespace instead of choosing each field
+// independently. GC_DOLT_* is authoritative when present (even partially);
+// BEADS_DOLT_SERVER_* is only consulted as a whole-pair fallback when
+// GC_DOLT_* carries neither value. Resolving fields independently risked
+// pairing a host from one namespace with a port from the other -- a
+// combination that may never have described the same server.
+func ambientDoltHostPort() (host, port string) {
+	host = strings.TrimSpace(os.Getenv("GC_DOLT_HOST"))
+	port = strings.TrimSpace(os.Getenv("GC_DOLT_PORT"))
+	if host != "" || port != "" {
+		return host, port
+	}
+	return strings.TrimSpace(os.Getenv("BEADS_DOLT_SERVER_HOST")), strings.TrimSpace(os.Getenv("BEADS_DOLT_SERVER_PORT"))
 }
 
 func workflowServeLegacyControlRoute(target string) string {
@@ -821,6 +916,9 @@ func nextWorkflowServeBeads(workQuery, dir string, env map[string]string) ([]hoo
 	if workQuery == "" {
 		return nil, nil
 	}
+	if queue, handled, err := tryControlReadyFromCacheOrFallback(workQuery, dir, env); handled {
+		return queue, err
+	}
 	output, err := shellWorkQueryWithEnv(workQuery, dir, mergeRuntimeEnv(os.Environ(), env))
 	if err != nil {
 		return nil, err
@@ -838,4 +936,23 @@ func nextWorkflowServeBeads(workQuery, dir string, env map[string]string) ([]hoo
 		return []hookBead{bead}, nil
 	}
 	return nil, fmt.Errorf("unexpected work query output: %s", trimmed)
+}
+
+// dispatchWakeFile returns the path of the dispatch-wake sentinel file.
+// The control dispatcher touches it after each successful batch so workers
+// can skip their poll sleep and call gc hook immediately.
+func dispatchWakeFile(cityPath string) string {
+	return filepath.Join(cityPath, ".gc", "dispatch-wake")
+}
+
+// writeDispatchWakeFile updates the mtime of the dispatch-wake sentinel file.
+// Best-effort: if the write fails the dispatch cycle continues normally;
+// workers fall back to their standard poll interval.
+func writeDispatchWakeFile(cityPath string) {
+	path := dispatchWakeFile(cityPath)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	_ = f.Close()
 }

@@ -165,9 +165,9 @@ func nextAvailableManagedDoltPort(seed int) int {
 // port that probes free on 127.0.0.1 but is actually busy on the bind host
 // (e.g. another process holds 192.168.1.5:X while leaving 127.0.0.1:X free,
 // and dolt is binding 0.0.0.0:X, which would fail). Blank host normalizes
-// to "0.0.0.0" inside managedDoltPortAvailableFn (the indirection over
-// managedDoltPortAvailableForHost) to match the bind default in
-// startManagedDoltProcessWithOptions.
+// to the loopback bind default inside managedDoltPortAvailableFn (the
+// indirection over managedDoltPortAvailableForHost) to match the bind
+// default in startManagedDoltProcessWithOptions.
 func nextAvailableManagedDoltPortForHost(host string, seed int) int {
 	port := seed
 	for attempts := 0; attempts < 100; attempts++ {

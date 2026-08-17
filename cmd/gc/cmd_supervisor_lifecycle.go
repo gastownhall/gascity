@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/processgroup"
 	"github.com/gastownhall/gascity/internal/searchpath"
@@ -78,6 +79,24 @@ var (
 	// available.
 	supervisorSystemctlUserAvailable = func() bool {
 		return supervisorSystemctlRun("--user", "show-environment") == nil
+	}
+	// supervisorLoginctlRun enables systemd user lingering via loginctl.
+	// Exposed as a package var so tests stub it instead of spawning
+	// loginctl. Enabling linger for one's own account is permitted without
+	// root on default polkit configurations.
+	supervisorLoginctlRun = func(args ...string) error {
+		return exec.Command("loginctl", args...).Run()
+	}
+	// supervisorLingerEnabled reports whether systemd lingering is already
+	// enabled for the given user, so a reinstall does not re-run
+	// enable-linger or warn spuriously. Returns false when loginctl is
+	// unavailable or the user manager cannot be queried.
+	supervisorLingerEnabled = func(user string) bool {
+		out, err := exec.Command("loginctl", "show-user", user, "--property=Linger", "--value").Output()
+		if err != nil {
+			return false
+		}
+		return strings.TrimSpace(string(out)) == "yes"
 	}
 	supervisorRunningPreserveSignalReady                = runningSupervisorPreserveSignalReady
 	supervisorProcRoot                                  = "/proc"
@@ -522,6 +541,7 @@ func doSupervisorStartJSON(stdout, stderr io.Writer, jsonOut bool) int {
 	child.Stdout = logFile
 	child.Stderr = logFile
 	child.Env = os.Environ()
+	disableProductMetricsForChild(child)
 
 	if err := child.Start(); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor start: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -540,6 +560,7 @@ func doSupervisorStartJSON(stdout, stderr io.Writer, jsonOut bool) int {
 				})
 			}
 			fmt.Fprintf(stdout, "Supervisor started (PID %d)\n", pid) //nolint:errcheck // best-effort stdout
+			printDashboardStartHint(stdout)
 			return 0
 		}
 		time.Sleep(supervisorReadyPollInterval)
@@ -977,6 +998,10 @@ type supervisorServiceData struct {
 	SafeName      string
 	Path          string
 	ExtraEnv      []supervisorServiceEnvVar
+	// PortInUseExitCode is the exit code the supervisor returns on a duplicate
+	// API-port collision; the systemd unit lists it in RestartPreventExitStatus
+	// so a duplicate install does not crash-loop on the shared port.
+	PortInUseExitCode int
 }
 
 type supervisorServiceEnvVar struct {
@@ -997,14 +1022,15 @@ func buildSupervisorServiceData() (*supervisorServiceData, error) {
 		xdgRuntimeDir = ""
 	}
 	return &supervisorServiceData{
-		GCPath:        gcPath,
-		LogPath:       supervisorLogPath(),
-		GCHome:        home,
-		XDGRuntimeDir: xdgRuntimeDir,
-		LaunchdLabel:  supervisorLaunchdLabel(),
-		SafeName:      sanitizeServiceName(filepath.Base(home)),
-		Path:          searchpath.ExpandPath(homeDir, goruntime.GOOS, os.Getenv("PATH")),
-		ExtraEnv:      supervisorServiceExtraEnv(),
+		GCPath:            gcPath,
+		LogPath:           supervisorLogPath(),
+		GCHome:            home,
+		XDGRuntimeDir:     xdgRuntimeDir,
+		LaunchdLabel:      supervisorLaunchdLabel(),
+		SafeName:          sanitizeServiceName(filepath.Base(home)),
+		Path:              searchpath.ExpandPath(homeDir, goruntime.GOOS, os.Getenv("PATH")),
+		ExtraEnv:          supervisorServiceExtraEnv(),
+		PortInUseExitCode: supervisorExitCodePortInUse,
 	}, nil
 }
 
@@ -1104,6 +1130,7 @@ var supervisorServiceEnvKeys = map[string]bool{
 
 var supervisorServiceFixedEnvKeys = map[string]bool{
 	"GC_HOME":                             true,
+	execenv.UsageMetricsDisableEnv:        true,
 	supervisorPreserveSessionsOnSignalEnv: true,
 	"PATH":                                true,
 	"XDG_RUNTIME_DIR":                     true,
@@ -1179,6 +1206,10 @@ func supervisorServiceExtraEnv() []supervisorServiceEnvVar {
 			env[key] = val
 		}
 	}
+	// This process is a Gas City-owned recursive child. Assign the canonical
+	// fixed value after every inherited, explicit, secrets-file, and launchctl
+	// tier so none can re-enable product metrics in the service process.
+	env[execenv.UsageMetricsDisableEnv] = execenv.UsageMetricsDisableValue
 
 	keys := make([]string, 0, len(env))
 	for key := range env {
@@ -1287,11 +1318,20 @@ func supervisorLaunchdLabel() string {
 
 func supervisorSystemdServiceName() string {
 	if suffix := supervisorServiceSuffix(); suffix != "" {
-		return "gascity-supervisor-" + suffix + ".service"
+		return supervisorSystemdUnitPrefix + suffix + ".service"
 	}
 	return defaultSupervisorSystemdUnit
 }
 
+// supervisorLaunchdTemplate has no equivalent of systemd's
+// RestartPreventExitStatus: launchd's KeepAlive dict below has no
+// per-exit-code / LastExitStatus key, so a duplicate supervisor that exits
+// with supervisorExitCodePortInUse (see cmd_supervisor.go) is still
+// "Crashed" (any nonzero exit) and gets restarted regardless of exit code.
+// The port-in-use message is worded accordingly on darwin (see
+// supervisorPortInUseMessage) instead of falsely claiming "without restart".
+// Real macOS duplicate-instance suppression is a different mechanism and is
+// tracked separately: gc-s53wv.
 const supervisorLaunchdTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -1351,6 +1391,9 @@ KillMode=process
 ExecStart={{systemdpath .GCPath}} supervisor run
 Restart=always
 RestartSec=5s
+# A duplicate supervisor that loses the shared API port exits with this code.
+# Restarting it would just crash-loop forever (see ga-ceq), so don't.
+RestartPreventExitStatus={{.PortInUseExitCode}}
 StandardOutput=append:{{.LogPath}}
 StandardError=append:{{.LogPath}}
 Environment=GC_HOME="{{.GCHome}}"
@@ -1725,6 +1768,7 @@ func warnSupervisorSystemdWarmRefreshPreservedUnit(stderr io.Writer, service str
 }
 
 func installSupervisorLaunchd(data *supervisorServiceData, stdout, stderr io.Writer) int {
+	sweepStaleIsolatedSupervisorServices(stderr)
 	content, err := renderSupervisorTemplate(supervisorLaunchdTemplate, data)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor install: rendering plist: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1795,6 +1839,7 @@ func installSupervisorLaunchd(data *supervisorServiceData, stdout, stderr io.Wri
 }
 
 func uninstallSupervisorLaunchd(_ *supervisorServiceData, stdout, stderr io.Writer) int {
+	sweepStaleIsolatedSupervisorServices(stderr)
 	path := supervisorLaunchdPlistPath()
 	active := supervisorLaunchdActive(supervisorLaunchdLabel())
 	if sockPath, _ := runningSupervisorSocket(); sockPath != "" {
@@ -1871,8 +1916,10 @@ func stopSupervisorSystemdForWarmRefresh(service string) ([]string, error) {
 }
 
 func installSupervisorSystemd(data *supervisorServiceData, stdout, stderr io.Writer) int {
+	sweepStaleIsolatedSupervisorServices(stderr)
 	// Check the binary guard before probing systemd so a refused install
-	// emits no systemctl calls.
+	// emits no systemctl calls for the install itself (the stale-service
+	// sweep above may still have issued best-effort systemctl calls).
 	path := supervisorSystemdServicePath()
 	existing, err := os.ReadFile(path)
 	hadCurrent := err == nil
@@ -2016,8 +2063,36 @@ func installSupervisorSystemd(data *supervisorServiceData, stdout, stderr io.Wri
 		_ = supervisorSystemctlRun("--user", "daemon-reload")
 	}
 
+	ensureSupervisorLinger(stdout, stderr)
+
 	fmt.Fprintf(stdout, "Installed systemd service: %s\n", path) //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+// ensureSupervisorLinger enables systemd user lingering for the current
+// account so the installed --user supervisor unit (WantedBy=default.target)
+// survives logout and starts at boot without an interactive login. Without
+// linger, systemd-logind tears down the user manager on the last logout and
+// stops the supervisor, freezing all claimed work until the next login
+// (gascity#3683). Linger is an enhancement layered on an already-successful
+// install: when it cannot be enabled (e.g. restrictive polkit, unresolved
+// user) this loudly warns with the sudo remediation rather than failing the
+// install.
+func ensureSupervisorLinger(stdout, stderr io.Writer) {
+	u, err := currentUserForSystemdHint()
+	if err != nil || strings.TrimSpace(u.Username) == "" {
+		fmt.Fprintf(stderr, "gc supervisor install: warning: could not resolve the current user to enable systemd lingering; the supervisor will stop on logout and freeze claimed work until next login. Enable it manually: 'sudo loginctl enable-linger <your-user>'.\n") //nolint:errcheck // best-effort stderr
+		return
+	}
+	user := u.Username
+	if supervisorLingerEnabled(user) {
+		return
+	}
+	if err := supervisorLoginctlRun("enable-linger", user); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor install: warning: could not enable systemd lingering for %s (%v); the supervisor will stop on logout and freeze claimed work until next login. Enable it manually: 'sudo loginctl enable-linger %s'.\n", user, err, user) //nolint:errcheck // best-effort stderr
+		return
+	}
+	fmt.Fprintf(stdout, "Enabled systemd lingering for %s so the supervisor survives logout.\n", user) //nolint:errcheck // best-effort stdout
 }
 
 // currentUsernameForSystemdHint returns the current username for use in the
@@ -2036,6 +2111,7 @@ func currentUsernameForSystemdHint() string {
 var currentUserForSystemdHint = osuser.Current
 
 func uninstallSupervisorSystemd(_ *supervisorServiceData, stdout, stderr io.Writer) int {
+	sweepStaleIsolatedSupervisorServices(stderr)
 	path := supervisorSystemdServicePath()
 	service := supervisorSystemdServiceName()
 	active := supervisorSystemctlActive(service)

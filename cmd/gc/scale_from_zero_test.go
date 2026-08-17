@@ -518,3 +518,94 @@ func TestBuildDesiredState_ScaleFromZero_LegacyBoundUnassignedRoutedWorkWakesCan
 		t.Errorf("gc.routed_to = %q, want %q (re-homed to canonical)", routed, canonical)
 	}
 }
+
+// TestBuildDesiredState_ScaleFromZero_LegacyBoundUnassignedRoutedWorkWakesCanonicalPoolCachingStore
+// pins BC-1: within one reconcile pass, canonicalizeLegacyBoundUnassignedRoutedWork
+// rewrites gc.routed_to on open ready work between the assigned-work ready probe
+// and the later scale-check probe. On a production-style CachingStore (explicit
+// cached/live handles) the scale-check must read the POST-rewrite route, not a
+// live snapshot memoized before the write, or the canonical cold pool never
+// wakes. The MemStore sibling test above cannot catch this: a plain store has no
+// cached/live handle split, so its controller-demand read re-reads current state
+// instead of returning the pre-write live memo.
+func TestBuildDesiredState_ScaleFromZero_LegacyBoundUnassignedRoutedWorkWakesCanonicalPoolCachingStore(t *testing.T) {
+	tmpDir := t.TempDir()
+	rigPath := tmpDir + "/rigs/rig-A"
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	maxSess := 5
+	minSess := 0
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{
+				Name:              "planner",
+				MaxActiveSessions: &maxSess,
+				MinActiveSessions: &minSess,
+				ScaleCheck:        "printf 0", // custom check returns 0
+				Dir:               "rig-A",
+				Provider:          "mock",
+			},
+		},
+		Rigs: []config.Rig{
+			{Name: "rig-A", Path: rigPath},
+		},
+		Providers: map[string]config.ProviderSpec{
+			"mock": {
+				Command: "true",
+			},
+		},
+	}
+
+	const legacyRoute = "rig-A/gc.planner"
+	const canonical = "rig-A/planner"
+
+	// City store is a production-style CachingStore with explicit cached/live
+	// handles. Seed the open, unassigned, legacy-routed demand into the backing
+	// store and prime the cache, mirroring a live city where the bead predates
+	// this tick. No live session owns it, so it is pure migration-era ready work.
+	backing := beads.NewMemStore()
+	created, err := backing.Create(beads.Bead{
+		Status: "open",
+		Type:   "task",
+		Metadata: map[string]string{
+			"gc.routed_to": legacyRoute,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cityStore := beads.NewCachingStoreForTest(backing, nil)
+	if err := cityStore.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	rigStores := map[string]beads.Store{
+		"rig-A": beads.NewMemStore(),
+	}
+
+	sessionBeads := &sessionBeadSnapshot{} // cold pool: no running sessions
+
+	result := buildDesiredStateWithSessionBeads(
+		"test-city", tmpDir, time.Now(), cfg, &localMockProvider{},
+		cityStore, rigStores, sessionBeads, nil, os.Stderr,
+	)
+
+	// The scale-check probe runs after the same-pass canonicalization write, so
+	// it must observe the canonical route through the CachingStore and wake the
+	// cold pool (clamped to 1). A stale pre-write live snapshot would bucket the
+	// demand under the legacy route and leave this at 0.
+	if demand := result.ScaleCheckCounts[canonical]; demand != 1 {
+		t.Errorf("expected demand 1 (canonicalized legacy route wakes cold pool via CachingStore), got %d", demand)
+	}
+
+	// The persisted route is canonical.
+	got, err := cityStore.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", created.ID, err)
+	}
+	if routed := got.Metadata["gc.routed_to"]; routed != canonical {
+		t.Errorf("gc.routed_to = %q, want %q (re-homed to canonical)", routed, canonical)
+	}
+}

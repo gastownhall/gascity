@@ -6,6 +6,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 func assignedWorkStoreRefForAgent(cityPath string, cfg *config.City, agentCfg *config.Agent) string {
@@ -44,26 +45,63 @@ func sessionAgentConfig(cfg *config.City, session beads.Bead) *config.Agent {
 	return findAgentByTemplate(cfg, template)
 }
 
-// openSessionReachableStoreRef returns the store-ref under which an open session
-// bead owns assigned work, for makeOpenSessionStoreRefIndex. A cross-store
-// eligible (city-scoped) session federates across every store (vp-kvp), so it is
-// indexed under crossStoreOpenSessionStoreRef — a wildcard openSessionOwnsWork
-// matches against any work store-ref. This mirrors the cross-store ownership the
-// demand and session-wake filters already grant (filterAssignedWorkBeadsForSessionWake);
-// without it the release path strands a live city-scoped holder's rig-routed
-// work and a backup worker is minted on the same bead (#3453). A session whose
-// template/agent cannot be resolved falls back to unresolvedOpenSessionStoreRef
-// (also a wildcard), preserving the legacy keep-on-match fail-safe; every other
-// session stays scoped to its configured rig's store-ref.
-func openSessionReachableStoreRef(cityPath string, cfg *config.City, session beads.Bead) string {
-	agentCfg := sessionAgentConfig(cfg, session)
+// sessionAgentConfigInfo is the session.Info form of sessionAgentConfig: it
+// resolves the backing agent from the typed template/common_name Info fields
+// instead of cracking the raw bead, staying byte-identical to the raw form
+// (TestSessionClassifierInfoEquivalence pins it).
+func sessionAgentConfigInfo(cfg *config.City, info sessionpkg.Info) *config.Agent {
+	if cfg == nil {
+		return nil
+	}
+	template := normalizedSessionTemplateInfo(info, cfg)
+	if template == "" {
+		template = strings.TrimSpace(info.Template)
+	}
+	if template == "" {
+		template = strings.TrimSpace(info.CommonName)
+	}
+	if template == "" {
+		return nil
+	}
+	return findAgentByTemplate(cfg, template)
+}
+
+// openSessionReachableStoreRefInfo returns the store-refs under which an open
+// session bead owns assigned work, for makeOpenSessionStoreRefIndex. The SESSION
+// side reads typed session.Info (WI-5 W3 per-parameter split); the refs come
+// from the residency resolver.
+//
+// A cross-store eligible (city-scoped) session federates across every store
+// (vp-kvp), so it is indexed under crossStoreOpenSessionStoreRef — a wildcard
+// openSessionOwnsWork matches against any work store-ref. This mirrors the
+// cross-store ownership the demand and session-wake filters already grant
+// (filterAssignedWorkBeadsForSessionWake); without it the release path strands a
+// live city-scoped holder's rig-routed work and a backup worker is minted on the
+// same bead (#3453). A session whose template/agent cannot be resolved falls back
+// to unresolvedOpenSessionStoreRef (also a wildcard), preserving the legacy
+// keep-on-match fail-safe.
+//
+// Every other session is its configured rig's store-ref PLUS the refs a claim
+// can be recorded under whatever the holder's rig scope (assignedWorkClaimRefs:
+// the leading work arm and every relocated class binding). That addition is the
+// counterweight to this slice widening what the release path can SEE: claim-time
+// class routing writes a rig-scoped agent's claim into the binding, the
+// orphan-release scan now reads that leg, and an index that still answered
+// "this holder owns only its rig" would let the scan reap a LIVE worker's claim
+// — claim loss, not a missed wake. It is the same widening the wake filter
+// already applies to the same identities (ga-whzrt), which is what makes the two
+// mechanisms answer one question instead of two.
+// claimRefs is the city-level answer from assignedWorkClaimRefs, resolved once
+// by the caller because it is a property of the CITY and this runs per session.
+func openSessionReachableStoreRefInfo(cityPath string, cfg *config.City, claimRefs []string, info sessionpkg.Info) []string {
+	agentCfg := sessionAgentConfigInfo(cfg, info)
 	if agentCfg == nil {
-		return unresolvedOpenSessionStoreRef
+		return []string{unresolvedOpenSessionStoreRef}
 	}
 	if agentIsCrossStoreEligible(agentCfg) {
-		return crossStoreOpenSessionStoreRef
+		return []string{crossStoreOpenSessionStoreRef}
 	}
-	return assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg)
+	return append([]string{assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg)}, claimRefs...)
 }
 
 func assignedWorkIndexReachableFromAgent(cityPath string, cfg *config.City, agentCfg *config.Agent, storeRefs []string, index int) bool {
@@ -87,7 +125,7 @@ func assignedWorkIndexReachableFromAgent(cityPath string, cfg *config.City, agen
 func filterAssignedWorkBeadsForPoolDemand(
 	cfg *config.City,
 	cityPath string,
-	sessionBeads []beads.Bead,
+	sessionInfos []sessionpkg.Info,
 	assignedWorkBeads []beads.Bead,
 	assignedWorkStoreRefs []string,
 ) []beads.Bead {
@@ -99,18 +137,18 @@ func filterAssignedWorkBeadsForPoolDemand(
 	}
 	assigneeToSessionBeadID := make(map[string]string)
 	sessionBeadTemplate := make(map[string]string)
-	for _, sb := range sessionBeads {
-		if sb.Status == "closed" {
+	for _, sb := range sessionInfos {
+		if sb.Closed {
 			continue
 		}
-		template := normalizedSessionTemplate(sb, cfg)
+		template := normalizedSessionTemplateInfo(sb, cfg)
 		if template == "" {
-			template = strings.TrimSpace(sb.Metadata["template"])
+			template = strings.TrimSpace(sb.Template)
 		}
 		if template != "" {
 			sessionBeadTemplate[sb.ID] = template
 		}
-		for _, id := range sessionBeadAssigneeIdentities(sb) {
+		for _, id := range sessionBeadAssigneeIdentitiesInfo(sb) {
 			assigneeToSessionBeadID[id] = sb.ID
 		}
 	}
@@ -128,6 +166,7 @@ func filterAssignedWorkBeadsForPoolDemand(
 		if template == "" {
 			continue
 		}
+		template = agentutil.NormalizePoolRouteTarget(cfg, template)
 		agentCfg := findAgentByTemplate(cfg, template)
 		if agentCfg == nil {
 			continue
@@ -140,20 +179,25 @@ func filterAssignedWorkBeadsForPoolDemand(
 }
 
 // filterAssignedWorkBeadsForSessionWake resolves work through assignment
-// identities because session wake decisions are per concrete session owner.
+// identities because session wake decisions are per concrete session owner. It
+// returns the filtered beads plus their store refs, index-aligned, so callers
+// can resolve store-scoped wake-demand readiness (storeScopedBeadKey) for the
+// surviving beads without re-deriving each bead's originating store.
 func filterAssignedWorkBeadsForSessionWake(
 	cfg *config.City,
 	cityPath string,
-	sessionBeads []beads.Bead,
+	leading beads.Store,
+	sessionInfos []sessionpkg.Info,
 	assignedWorkBeads []beads.Bead,
 	assignedWorkStoreRefs []string,
-) []beads.Bead {
+) ([]beads.Bead, []string) {
 	if len(assignedWorkBeads) == 0 || len(assignedWorkStoreRefs) == 0 {
-		return assignedWorkBeads
+		return assignedWorkBeads, assignedWorkStoreRefs
 	}
 	if cfg == nil {
-		return assignedWorkBeads
+		return assignedWorkBeads, assignedWorkStoreRefs
 	}
+	claimRefs := assignedWorkClaimRefs(cityPath, cfg, leading)
 	reachableRefsByAssignee := make(map[string]map[string]struct{})
 	// crossStore identities belong to city-scoped (cross-store-eligible) agents
 	// and are reachable from ANY store (vp-kvp). They bypass the per-ref match.
@@ -183,33 +227,59 @@ func filterAssignedWorkBeadsForSessionWake(
 		}
 		add(identity, assignedWorkStoreRefForAgent(cityPath, cfg, spec.Agent))
 	}
-	for _, sb := range sessionBeads {
-		if sb.Status == "closed" {
+	for _, sb := range sessionInfos {
+		if sb.Closed {
 			continue
 		}
-		template := normalizedSessionTemplate(sb, cfg)
+		template := normalizedSessionTemplateInfo(sb, cfg)
 		if template == "" {
-			template = strings.TrimSpace(sb.Metadata["template"])
+			template = strings.TrimSpace(sb.Template)
 		}
 		agentCfg := findAgentByTemplate(cfg, template)
 		if agentCfg == nil {
 			continue
 		}
 		if agentIsCrossStoreEligible(agentCfg) {
-			for _, id := range sessionBeadAssigneeIdentities(sb) {
+			for _, id := range sessionBeadAssigneeIdentitiesInfo(sb) {
 				crossStore[strings.TrimSpace(id)] = struct{}{}
 			}
 			crossStore[strings.TrimSpace(template)] = struct{}{}
 			continue
 		}
 		storeRef := assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg)
-		for _, id := range sessionBeadAssigneeIdentities(sb) {
+		for _, id := range sessionBeadAssigneeIdentitiesInfo(sb) {
 			add(id, storeRef)
+			// A claim this session HOLDS can also live on the leading work arm
+			// or in a relocated class binding, whatever the owning agent's rig
+			// scope: on a split city the binding is where claim-time class
+			// routing writes the assignee (claim_class_route.go), and even on a
+			// single-store city the agent's own hook fan-out reaches the city
+			// store (appendCityHookStore) — so a bead it can claim was being
+			// dropped here for a store it demonstrably reads. Dropping it is
+			// what left a claim-holder with AwakeDecision{Reason:""} and drained
+			// it down the no-wake-reason arm while it owned in-progress work
+			// (ga-whzrt).
+			//
+			// The refs come from the resolver rather than from a constant, so a
+			// city mid-rollout is readable by ONE filter: the census records a
+			// binding-resident claim under "" while the reconciler's leading arm
+			// is the binding, and under the binding's own "class:*" ref once it
+			// is a distinct census leg. Both are in the set.
+			//
+			// This widens COLLECTION only. The match is still this session's own
+			// exact assignee identity, so no bead belonging to anyone else
+			// becomes visible; the template key below deliberately does NOT get
+			// the extra arms, because a template match is a scope statement
+			// rather than an ownership one.
+			for _, ref := range claimRefs {
+				add(id, ref)
+			}
 		}
 		add(template, storeRef)
 	}
 
 	filtered := make([]beads.Bead, 0, len(assignedWorkBeads))
+	filteredRefs := make([]string, 0, len(assignedWorkBeads))
 	for i, wb := range assignedWorkBeads {
 		if i >= len(assignedWorkStoreRefs) {
 			continue
@@ -221,13 +291,38 @@ func filterAssignedWorkBeadsForSessionWake(
 		if _, ok := crossStore[assignee]; ok {
 			// City-scoped assignee: reachable from any store (vp-kvp).
 			filtered = append(filtered, wb)
+			filteredRefs = append(filteredRefs, assignedWorkStoreRefs[i])
 			continue
 		}
 		if refs := reachableRefsByAssignee[assignee]; refs != nil {
 			if _, ok := refs[assignedWorkStoreRefs[i]]; ok {
 				filtered = append(filtered, wb)
+				filteredRefs = append(filteredRefs, assignedWorkStoreRefs[i])
 			}
 		}
 	}
-	return filtered
+	return filtered, filteredRefs
+}
+
+// readyAssignedFlagsForBeads resolves the store-scoped wake-demand readiness of
+// each assigned-work bead into a slice index-aligned with beadList. Readiness is
+// keyed by (store ref, bead ID) because AssignedWorkBeads can carry the same
+// bead ID from independent city and rig stores; a plain ID lookup would let a
+// ready bead in one store mark a blocked open bead with the same ID in another
+// store as ready and reintroduce the awake-demand hang. storeRefs must be the
+// refs returned alongside beadList by filterAssignedWorkBeadsForSessionWake. A
+// bead whose store ref is unavailable resolves to not-ready, matching the
+// nil-map default the awake bridge applied before readiness was store-scoped.
+func readyAssignedFlagsForBeads(readyAssigned map[storeScopedBeadKey]bool, beadList []beads.Bead, storeRefs []string) []bool {
+	if len(beadList) == 0 {
+		return nil
+	}
+	flags := make([]bool, len(beadList))
+	for i := range beadList {
+		if i >= len(storeRefs) {
+			continue
+		}
+		flags[i] = readyAssigned[storeScopedBeadKey{StoreRef: storeRefs[i], ID: beadList[i].ID}]
+	}
+	return flags
 }

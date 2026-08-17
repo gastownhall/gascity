@@ -409,32 +409,6 @@ func TestFakeLatestSeq(t *testing.T) {
 	}
 }
 
-func TestFakeWatch(t *testing.T) {
-	f := NewFake()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	w, err := f.Watch(ctx, 0)
-	if err != nil {
-		t.Fatalf("Watch: %v", err)
-	}
-	defer w.Close() //nolint:errcheck // test cleanup
-
-	// Record in a goroutine.
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		f.Record(Event{Type: BeadCreated, Actor: "human", Subject: "gc-1"})
-	}()
-
-	e, err := w.Next()
-	if err != nil {
-		t.Fatalf("Next: %v", err)
-	}
-	if e.Subject != "gc-1" {
-		t.Errorf("Subject = %q, want %q", e.Subject, "gc-1")
-	}
-}
-
 func TestFailFakeErrors(t *testing.T) {
 	f := NewFailFake()
 
@@ -774,6 +748,114 @@ func TestReadFilteredTailScansBackwardsAcrossChunks(t *testing.T) {
 	}
 	if got[0].Subject != "cross-chunk" || got[1].Subject != "tail-match" {
 		t.Fatalf("subjects = [%s %s], want [cross-chunk tail-match]", got[0].Subject, got[1].Subject)
+	}
+}
+
+// TestReadFilteredTailMaxScanBytesBoundsBackwardWalk is the regression for
+// #4418: a Filter.Type that never matches near EOF (the common case for a
+// rare/optional event type) otherwise forces readFilteredTailFromFile to
+// walk the entire file backward, at the same cost as an unfiltered forward
+// scan. MaxScanBytes caps that walk; "not found within the window" must be
+// the result rather than an unbounded scan.
+func TestReadFilteredTailMaxScanBytesBoundsBackwardWalk(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	base := time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC)
+	var buf bytes.Buffer
+	appendEvent := func(e Event) {
+		t.Helper()
+		raw, err := json.Marshal(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		buf.Write(raw)
+		buf.WriteString("\n")
+	}
+
+	// The only matching event sits near the start of the file.
+	appendEvent(Event{Seq: 1, Type: "target.type", Actor: "api", Ts: base})
+	// Pad well past a 64KB scan window with non-matching events before EOF —
+	// this is what a rare/optional Type filter looks like against a long,
+	// otherwise-unrelated event stream.
+	padding := string(bytes.Repeat([]byte("x"), 4*1024))
+	for i := 0; i < 40; i++ { // ~160KB of padding, several chunks past 64KB
+		appendEvent(Event{Seq: uint64(i + 2), Type: "other.type", Actor: "api", Ts: base.Add(time.Duration(i) * time.Second), Message: padding})
+	}
+
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	bounded, err := ReadFilteredTail(path, Filter{Type: "target.type", MaxScanBytes: 64 * 1024}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bounded) != 0 {
+		t.Fatalf("bounded scan got %d events, want 0 (match sits outside the 64KB window)", len(bounded))
+	}
+
+	unbounded, err := ReadFilteredTail(path, Filter{Type: "target.type"}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unbounded) != 1 || unbounded[0].Seq != 1 {
+		t.Fatalf("unbounded scan got %+v, want the seq-1 match (proves the bound, not the filter, caused the empty result)", unbounded)
+	}
+}
+
+// TestReadFilteredTailMaxScanBytesNonAlignedLimit pins the per-chunk clamp:
+// a MaxScanBytes that is not a multiple of the 64KB chunk size must stop the
+// backward walk at exactly that byte, not at the next chunk boundary. The
+// file is sized so the only match sits in the dead zone between the two —
+// past the 100KB window, but inside the 128KB an unclamped walk would read
+// as two whole chunks — so a bound checked only between chunks returns the
+// match and fails this test.
+func TestReadFilteredTailMaxScanBytesNonAlignedLimit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	base := time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC)
+	var buf bytes.Buffer
+	appendEvent := func(e Event) {
+		t.Helper()
+		raw, err := json.Marshal(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		buf.Write(raw)
+		buf.WriteString("\n")
+	}
+
+	const window = 100 * 1024 // deliberately not a multiple of the 64KB chunk
+
+	// The only matching event is the first line in the file, so its distance
+	// from EOF is simply the file size.
+	appendEvent(Event{Seq: 1, Type: "target.type", Actor: "api", Ts: base})
+	padding := string(bytes.Repeat([]byte("x"), 4*1024))
+	for i := 0; buf.Len() < 108*1024; i++ {
+		appendEvent(Event{Seq: uint64(i + 2), Type: "other.type", Actor: "api", Ts: base.Add(time.Duration(i) * time.Second), Message: padding})
+	}
+	if size := int64(buf.Len()); size <= window || size >= 128*1024 {
+		t.Fatalf("file is %d bytes, want in (%d, %d) so the match lands between the window and the next chunk boundary", size, window, 128*1024)
+	}
+
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	bounded, err := ReadFilteredTail(path, Filter{Type: "target.type", MaxScanBytes: window}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bounded) != 0 {
+		t.Fatalf("bounded scan got %d events, want 0 (match sits outside the %d-byte window; the chunk read must be clamped to it)", len(bounded), window)
+	}
+
+	unbounded, err := ReadFilteredTail(path, Filter{Type: "target.type"}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unbounded) != 1 || unbounded[0].Seq != 1 {
+		t.Fatalf("unbounded scan got %+v, want the seq-1 match (proves the bound, not the filter, caused the empty result)", unbounded)
 	}
 }
 
@@ -1258,6 +1340,84 @@ func TestFileRecorderWatchContextCancel(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("Next after cancel = %v, want context.Canceled", err)
 	}
+}
+
+// TestWatchNextBlockedThenContextEndsReturnsContextErr pins the watcher
+// cancellation contract for a Next that is already blocked waiting for new
+// events (the steady state of an idle SSE stream). When the context ends while
+// Next sleeps it must return the context cause — context.Canceled or
+// context.DeadlineExceeded — not errWatcherClosed, so callers that classify the
+// context error can tell a real cancellation/deadline from a closed watcher.
+func TestWatchNextBlockedThenContextEndsReturnsContextErr(t *testing.T) {
+	newBlockedWatcher := func(t *testing.T, ctx context.Context) (Watcher, func()) {
+		t.Helper()
+		dir := t.TempDir()
+		path := filepath.Join(dir, "events.jsonl")
+		var stderr bytes.Buffer
+		rec, err := NewFileRecorder(path, &stderr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec.Record(Event{Type: BeadCreated, Actor: "human", Subject: "seed"})
+		w, err := rec.Watch(ctx, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Consume the seed so the next Next has nothing to return and blocks in
+		// the poll sleep.
+		if _, err := w.Next(); err != nil {
+			t.Fatalf("draining seed: %v", err)
+		}
+		return w, func() {
+			_ = w.Close()
+			_ = rec.Close()
+		}
+	}
+
+	t.Run("canceled", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		w, cleanup := newBlockedWatcher(t, ctx)
+		defer cleanup()
+
+		errCh := make(chan error, 1)
+		go func() {
+			_, err := w.Next()
+			errCh <- err
+		}()
+		// End the context from a timer so Next is already parked in its poll
+		// sleep when cancellation lands, exercising the blocked-Next path
+		// without a wall-clock time.Sleep (mirrors the deadline subtest below).
+		time.AfterFunc(50*time.Millisecond, cancel)
+		select {
+		case err := <-errCh:
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("Next after cancel-while-blocked = %v, want context.Canceled", err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("Next did not observe cancellation while blocked")
+		}
+	})
+
+	t.Run("deadline", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+		defer cancel()
+		w, cleanup := newBlockedWatcher(t, ctx)
+		defer cleanup()
+
+		errCh := make(chan error, 1)
+		go func() {
+			_, err := w.Next()
+			errCh <- err
+		}()
+		select {
+		case err := <-errCh:
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("Next after deadline-while-blocked = %v, want context.DeadlineExceeded", err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("Next did not observe deadline while blocked")
+		}
+	})
 }
 
 // writeEmpty creates an empty file at path.

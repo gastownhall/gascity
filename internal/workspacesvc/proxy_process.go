@@ -19,6 +19,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/execenv"
 )
 
 const (
@@ -219,9 +220,10 @@ func (p *proxyProcessInstance) start(now time.Time) error {
 		"GC_PUBLISHED_SERVICES_DIR="+citylayout.PublishedServicesDir(p.rt.CityPath()),
 	)
 	cmd.Env = append(cmd.Env, extraHelperEnv...)
+	cmd.Env = execenv.WithUsageMetricsDisabled(cmd.Env)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = proxyProcessSysProcAttr()
 	if err := cmd.Start(); err != nil {
 		_ = logFile.Close()
 		return fmt.Errorf("start process: %w", err)

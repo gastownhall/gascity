@@ -18,7 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/pricing"
 	"github.com/gastownhall/gascity/internal/remotesource"
-	"github.com/gastownhall/gascity/internal/shellquote"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
 
 // validAgentName matches names safe for use in session identifiers.
@@ -89,6 +89,49 @@ func IsDeterministicControlDispatcher(agent *Agent) bool {
 		strings.TrimSpace(agent.StartCommand) != "" &&
 		strings.TrimSpace(agent.Provider) == "" &&
 		strings.Contains(agent.StartCommand, "convoy control --serve")
+}
+
+// PreferredDeterministicControlDispatcher returns the deterministic control-
+// dispatcher for a scope, binding-agnostic. A city graph (empty rigContext)
+// selects the city dispatcher; a rig graph selects only the dispatcher expanded
+// for that rig. This keeps the route identity aligned with the store that owns
+// the graph. It is the canonical selection shared by graph.v2 decoration and
+// attempt-time control re-routing; keep those paths in lockstep.
+func PreferredDeterministicControlDispatcher(cfg *City, rigContext string) (Agent, bool) {
+	if cfg == nil {
+		return Agent{}, false
+	}
+	rigContext = strings.TrimSpace(rigContext)
+	for _, a := range cfg.Agents {
+		if !IsDeterministicControlDispatcher(&a) {
+			continue
+		}
+		if strings.TrimSpace(a.Dir) == rigContext {
+			return a, true
+		}
+	}
+	return Agent{}, false
+}
+
+// ControlDispatcherForScope returns the configured control dispatcher whose
+// directory exactly matches rigContext. Deterministic dispatchers are preferred,
+// while an exact-scope plain dispatcher remains supported for minimal/custom
+// configs. It never substitutes a city dispatcher for a rig scope (or vice
+// versa), because those dispatchers read different bead stores.
+func ControlDispatcherForScope(cfg *City, rigContext string) (Agent, bool) {
+	if dispatcher, ok := PreferredDeterministicControlDispatcher(cfg, rigContext); ok {
+		return dispatcher, true
+	}
+	if cfg == nil {
+		return Agent{}, false
+	}
+	rigContext = strings.TrimSpace(rigContext)
+	for _, agent := range cfg.Agents {
+		if agent.Name == ControlDispatcherAgentName && strings.TrimSpace(agent.Dir) == rigContext {
+			return agent, true
+		}
+	}
+	return Agent{}, false
 }
 
 // BindingQualifiedName returns the binding-qualified agent identity without a
@@ -180,6 +223,10 @@ type City struct {
 	Workspace Workspace `toml:"workspace"`
 	// Providers defines named provider presets for agent startup.
 	Providers map[string]ProviderSpec `toml:"providers,omitempty"`
+	// Upstreams defines named model-serving endpoint presets selectable per
+	// agent via the Upstream axis (Phase C). Each maps a name → serving env
+	// (base URL + credential refs); see UpstreamSpec.
+	Upstreams map[string]UpstreamSpec `toml:"upstreams,omitempty"`
 	// Packs defines named remote pack sources fetched via git (V1 mechanism).
 	//
 	// Legacy pack source map, accepted for migration and fetch/list
@@ -205,6 +252,9 @@ type City struct {
 	Rigs []Rig `toml:"rigs,omitempty"`
 	// Patches holds targeted modifications applied after fragment merge.
 	Patches Patches `toml:"patches,omitempty"`
+	// Storage assigns the six semantic storage classes to immutable named
+	// bindings. Nil preserves the existing all-Work storage topology.
+	Storage *StorageConfig `toml:"storage,omitempty"`
 	// Beads configures the bead store backend.
 	Beads BeadsConfig `toml:"beads,omitempty"`
 	// Session configures the session provider backend.
@@ -242,8 +292,19 @@ type City struct {
 	// Services declares workspace-owned HTTP services mounted on the
 	// controller edge under /svc/{name}.
 	Services []Service `toml:"service,omitempty"`
+	// Webhooks declares inbound HTTP receivers mounted on the supervisor edge
+	// under /hook/{name}. Composed like Services (pack concatenation + SourceDir
+	// provenance + the default-closed public pack-guard).
+	Webhooks []Webhook `toml:"webhook,omitempty"`
+	// WebhookPolicy holds city-level webhook governance (the [webhooks] table,
+	// notably allow_public grants). Authored only in the root city.toml; never
+	// merged from packs or fragments so a pack cannot grant itself exposure.
+	WebhookPolicy WebhookPolicyConfig `toml:"webhooks,omitempty"`
 	// GitHub configures GitHub-facing repository monitors.
 	GitHub GitHubConfig `toml:"github,omitempty"`
+	// ExtMsg configures the external-messaging fabric (default routes
+	// for inbound conversations with no binding).
+	ExtMsg ExtMsgConfig `toml:"extmsg,omitempty"`
 	// AgentDefaults provides root city defaults for agents that don't override
 	// them (canonical TOML key: agent_defaults). Pack-local defaults use the
 	// same table shape in pack.toml. The runtime currently applies provider,
@@ -323,6 +384,12 @@ type City struct {
 	// PackDoctors holds convention-discovered pack doctor checks composed
 	// during city and rig expansion. Runtime-only.
 	PackDoctors []DiscoveredDoctor `toml:"-" json:"-"`
+	// Runtimes maps pack-declared runtime selection names ([runtimes.<name>]
+	// in pack.toml) to their resolved declarations, composed during city and
+	// rig expansion. Selection is city-wide, so rig-imported runtime packs
+	// land here too; conflicting re-declarations are composition errors.
+	// Runtime-only.
+	Runtimes map[string]DiscoveredRuntime `toml:"-" json:"-"`
 	// PackSkills holds binding-qualified shared skill catalogs composed
 	// from city-level imported packs. Runtime-only.
 	PackSkills []DiscoveredSkillCatalog `toml:"-" json:"-"`
@@ -567,6 +634,12 @@ type Rig struct {
 	// invoked with only a bead ID (no explicit target). Resolved via
 	// resolveAgentIdentity. Example: "rig/polecat"
 	DefaultSlingTarget string `toml:"default_sling_target,omitempty"`
+	// DefaultSlingTargets is the plural form of DefaultSlingTarget.
+	// When set, targetless gc sling picks one entry at random each dispatch.
+	// Takes precedence over DefaultSlingTarget when non-empty. Each entry is
+	// resolved the same way as DefaultSlingTarget. Example:
+	//   default_sling_targets = ["rig/polecat-a", "rig/polecat-b"]
+	DefaultSlingTargets []string `toml:"default_sling_targets,omitempty"`
 	// SessionSleep overrides workspace-level idle sleep defaults for agents in
 	// this rig.
 	SessionSleep SessionSleepConfig `toml:"session_sleep,omitempty"`
@@ -620,6 +693,8 @@ type AgentOverride struct {
 	Session *string `toml:"session,omitempty"`
 	// Provider overrides the provider name.
 	Provider *string `toml:"provider,omitempty"`
+	// Upstream overrides the model-serving endpoint selection (Phase C).
+	Upstream *string `toml:"upstream,omitempty"`
 	// Args overrides the provider's default arguments. Leave unset to keep
 	// the pack-defined args; set to an empty list to clear them; set to a
 	// populated list to replace them entirely (full replace, not append).
@@ -638,6 +713,9 @@ type AgentOverride struct {
 	// MaxSessionAgeJitter overrides the jitter added on top of MaxSessionAge.
 	// Duration string (e.g., "15m"). Empty disables jitter.
 	MaxSessionAgeJitter *string `toml:"max_session_age_jitter,omitempty"`
+	// AssignedWorkDeferLimit overrides Agent.AssignedWorkDeferLimit (see that
+	// field for semantics).
+	AssignedWorkDeferLimit *int `toml:"assigned_work_defer_limit,omitempty"`
 	// SleepAfterIdle overrides idle sleep policy for this agent. Accepts a
 	// duration string (e.g., "30s") or "off".
 	SleepAfterIdle *string `toml:"sleep_after_idle,omitempty"`
@@ -1027,6 +1105,24 @@ type PackDoctorEntry struct {
 	Warmup bool `toml:"warmup,omitempty"`
 }
 
+// PackRuntimeEntry declares a pack-shipped runtime provider executable
+// under [runtimes.<name>] in pack.toml. The executable speaks the Runtime
+// Provider Protocol (docs/reference/exec-session-provider.md); city
+// composition registers the name into the runtime selection registry so
+// `[session] provider = "<name>"` resolves to it. Name collisions with
+// builtin runtimes (or other packs) are composition errors — see the
+// RUNTIME-SEL rows in internal/runtime/REQUIREMENTS.md.
+type PackRuntimeEntry struct {
+	// Command is the runtime executable: a path relative to the pack
+	// directory (anything containing a path separator) or a bare name
+	// resolved on PATH at session start.
+	Command string `toml:"command" jsonschema:"required"`
+	// Protocol is the RPP version the executable speaks. Version 0 is
+	// the only version today; the declaration exists so future protocol
+	// bumps fail at composition instead of at session start.
+	Protocol int `toml:"protocol,omitempty"`
+}
+
 // PackCommandEntry declares a CLI subcommand provided by a pack.
 // Pack commands appear as gc <pack-name> <command-name> and let packs
 // ship operational tooling alongside orchestration config.
@@ -1065,6 +1161,18 @@ func (r *Rig) EffectivePrefix() string {
 	}
 	return DeriveBeadsPrefix(r.Name)
 }
+
+// Coordination class names, mirroring coordclass.Class.String(). They are part of
+// the [beads.classes.<name>] config contract and must not change without a
+// migration.
+const (
+	BeadClassWork      = "work"
+	BeadClassGraph     = "graph"
+	BeadClassMessaging = "messaging"
+	BeadClassSessions  = "sessions"
+	BeadClassOrders    = "orders"
+	BeadClassNudges    = "nudges"
+)
 
 // EffectiveDefaultBranch returns the rig's recorded default branch, or the
 // empty string if none is set. Callers should fall back to a runtime probe
@@ -1173,6 +1281,11 @@ type Workspace struct {
 	Prefix string `toml:"prefix,omitempty"`
 	// Provider is the default provider name used by agents that don't specify one.
 	Provider string `toml:"provider,omitempty"`
+	// Timezone is the city-default IANA time zone (e.g. "America/New_York")
+	// in which cron order schedules are evaluated when an order does not set
+	// its own tz. Empty means the controller's process-local zone. Invalid
+	// names fail order discovery loudly rather than falling back silently.
+	Timezone string `toml:"timezone,omitempty"`
 	// StartCommand overrides the provider's command for all agents.
 	StartCommand string `toml:"start_command,omitempty"`
 	// Suspended is the deprecated pre-runtime-state city suspension
@@ -1282,6 +1395,17 @@ type BeadsConfig struct {
 	// and avoids bd ready/list flags that are unavailable or incomplete in bd
 	// 1.0.4.
 	BDCompatibility string `toml:"bd_compatibility,omitempty" jsonschema:"enum=bd-1.0.4,enum=bd-1.0.5"`
+	// ConditionalWrites selects the bead-write discipline: "off" (legacy,
+	// byte-identical), "auto" (compare-and-swap where the store is capable,
+	// loud degrade otherwise), or "require" (CAS or a typed refusal). Empty
+	// defaults to "off". Any other value fails config load.
+	ConditionalWrites string `toml:"conditional_writes,omitempty" jsonschema:"enum=off,enum=auto,enum=require"`
+	// GuardedRelease selects the ownership-release discipline for work beads:
+	// "off" (legacy, owner-blind bd update/unclaim), "auto" (fence-guarded
+	// release verbs where the bd binary is capable, loud degrade otherwise), or
+	// "require" (guarded release or a typed refusal). Empty defaults to "off".
+	// Any other value fails config load.
+	GuardedRelease string `toml:"guarded_release,omitempty" jsonschema:"enum=off,enum=auto,enum=require"`
 	// Policies defines per-bead-use storage and garbage-collection defaults.
 	// Policy names are interpreted by higher-level systems; unknown names are
 	// preserved so packs can stage future policy classes without breaking load.
@@ -1314,6 +1438,32 @@ func (b BeadsConfig) NormalizedBDCompatibility() string {
 	default:
 		return BeadsBDCompatibility104
 	}
+}
+
+// NormalizedConditionalWrites returns the configured conditional-writes value,
+// mapping ONLY the empty string to the built-in default "off". Unlike
+// NormalizedBDCompatibility, an unknown non-empty value passes through verbatim
+// rather than collapsing to the default: it is rejected upstream (by
+// internal/rollout on resolve), because a typo must never silently mean "off".
+// The string→rollout.Mode mapping deliberately lives in internal/rollout to keep
+// config free of a rollout import (cycle).
+func (b BeadsConfig) NormalizedConditionalWrites() string {
+	if b.ConditionalWrites == "" {
+		return "off"
+	}
+	return b.ConditionalWrites
+}
+
+// NormalizedGuardedRelease returns the configured guarded-release value,
+// mapping ONLY the empty string to the built-in default "off". Like
+// NormalizedConditionalWrites, an unknown non-empty value passes through
+// verbatim rather than collapsing to the default: it is rejected upstream (by
+// internal/rollout on resolve), because a typo must never silently mean "off".
+func (b BeadsConfig) NormalizedGuardedRelease() string {
+	if b.GuardedRelease == "" {
+		return "off"
+	}
+	return b.GuardedRelease
 }
 
 // UsesBD105CLISemantics reports whether bd-backed code may rely on bd 1.0.5
@@ -1405,12 +1555,28 @@ type SessionConfig struct {
 	// SetupTimeout is the per-command/script timeout for session setup and
 	// pre_start commands. Duration string (e.g., "10s", "30s"). Defaults to "10s".
 	SetupTimeout string `toml:"setup_timeout,omitempty" jsonschema:"default=10s"`
+	// SetupMaxTimeout enables an activity-aware budget for session setup and
+	// pre_start commands. When set (e.g. "10m"), a setup command is no longer
+	// killed after setup_timeout of wall clock; instead setup_timeout bounds
+	// how long it may run without producing output (idle budget) and
+	// setup_max_timeout bounds its total runtime regardless of output (the
+	// runaway ceiling). A slow but healthy command — a large worktree checkout
+	// streaming progress — survives, while a hung one still dies after
+	// setup_timeout of silence. Duration string. Empty (the default) keeps
+	// the fixed setup_timeout deadline.
+	SetupMaxTimeout string `toml:"setup_max_timeout,omitempty"`
 	// NudgeReadyTimeout is how long to wait for the agent to be ready before
 	// sending nudge text. Duration string. Defaults to "10s".
 	NudgeReadyTimeout string `toml:"nudge_ready_timeout,omitempty" jsonschema:"default=10s"`
 	// NudgeRetryInterval is the retry interval between nudge readiness polls.
 	// Duration string. Defaults to "500ms".
 	NudgeRetryInterval string `toml:"nudge_retry_interval,omitempty" jsonschema:"default=500ms"`
+	// NudgePollInterval is the cycle interval for the per-session nudge
+	// poller sidecar (`gc nudge poll`). Each cycle observes the session and
+	// checks the queued-nudge state, so on hosts running many sessions a
+	// longer interval trades nudge-delivery latency for less standing load.
+	// Duration string. Unset means the poller's built-in default (2s).
+	NudgePollInterval string `toml:"nudge_poll_interval,omitempty" jsonschema:"default=2s"`
 	// NudgeLockTimeout is how long to wait to acquire the per-session nudge lock.
 	// Duration string. Defaults to "30s".
 	NudgeLockTimeout string `toml:"nudge_lock_timeout,omitempty" jsonschema:"default=30s"`
@@ -1431,6 +1597,12 @@ type SessionConfig struct {
 	// alive-idle period for the city; values below 5m are clamped to 5m.
 	// Duration string (e.g. "30m"). Unset/zero disables it.
 	ProgressStallTimeout string `toml:"progress_stall_timeout,omitempty"`
+	// ClaimHolderStallTimeout, when set, enables progress-aware recycling of a
+	// desired, alive session that holds in-progress work but has stopped making
+	// progress. Because recycling a claim-holder interrupts work, set this above
+	// the longest legitimate quiet period. Values below 5m are clamped to 5m.
+	// Duration string (e.g. "20m"). Unset/zero disables it.
+	ClaimHolderStallTimeout string `toml:"claim_holder_stall_timeout,omitempty"`
 	// Socket specifies the tmux socket name for per-city isolation.
 	// When set, all tmux commands use "tmux -L <socket>" to connect to
 	// a dedicated server. When empty, defaults to the city name
@@ -1444,41 +1616,72 @@ type SessionConfig struct {
 	RemoteMatch string `toml:"remote_match,omitempty"`
 }
 
+// durationOr parses raw as a Go duration, returning def when raw is empty or
+// unparseable. Durations that parse cleanly — including zero and negative
+// values — pass through unchanged; accessors that clamp them layer their own
+// policy on top. This is the single owner of the parse-error fallback that the
+// duration accessors below share.
+func durationOr(raw string, def time.Duration) time.Duration {
+	if raw == "" {
+		return def
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return def
+	}
+	return d
+}
+
+// durationFloorOr parses raw like durationOr, then clamps the result: a
+// non-positive duration falls back to def, and a positive duration below floor
+// is raised to floor. Used for opt-in timeouts that must not spin below a
+// storm-protection minimum.
+func durationFloorOr(raw string, def, floor time.Duration) time.Duration {
+	d := durationOr(raw, def)
+	if d <= 0 {
+		return def
+	}
+	if d < floor {
+		return floor
+	}
+	return d
+}
+
 // SetupTimeoutDuration returns the setup timeout as a time.Duration.
 // Defaults to 10s if empty or unparseable.
 func (s *SessionConfig) SetupTimeoutDuration() time.Duration {
-	if s.SetupTimeout == "" {
-		return 10 * time.Second
-	}
-	d, err := time.ParseDuration(s.SetupTimeout)
-	if err != nil {
-		return 10 * time.Second
-	}
-	return d
+	return durationOr(s.SetupTimeout, 10*time.Second)
+}
+
+// SetupMaxTimeoutDuration returns the activity-aware setup ceiling as a
+// time.Duration. Zero — the feature disabled, keeping the fixed
+// setup_timeout deadline — if empty or unparseable.
+func (s *SessionConfig) SetupMaxTimeoutDuration() time.Duration {
+	return durationOr(s.SetupMaxTimeout, 0)
 }
 
 // NudgeReadyTimeoutDuration returns the nudge ready timeout as a time.Duration.
 // Defaults to 10s if empty or unparseable.
 func (s *SessionConfig) NudgeReadyTimeoutDuration() time.Duration {
-	if s.NudgeReadyTimeout == "" {
-		return 10 * time.Second
-	}
-	d, err := time.ParseDuration(s.NudgeReadyTimeout)
-	if err != nil {
-		return 10 * time.Second
-	}
-	return d
+	return durationOr(s.NudgeReadyTimeout, 10*time.Second)
 }
 
 // NudgeRetryIntervalDuration returns the nudge retry interval as a time.Duration.
 // Defaults to 500ms if empty or unparseable.
 func (s *SessionConfig) NudgeRetryIntervalDuration() time.Duration {
-	if s.NudgeRetryInterval == "" {
-		return 500 * time.Millisecond
+	return durationOr(s.NudgeRetryInterval, 500*time.Millisecond)
+}
+
+// NudgePollIntervalDuration returns the configured nudge poller cycle
+// interval, or 0 when unset, unparseable, or non-positive — 0 means "not
+// configured" and callers fall back to their built-in default.
+func (s *SessionConfig) NudgePollIntervalDuration() time.Duration {
+	if s.NudgePollInterval == "" {
+		return 0
 	}
-	d, err := time.ParseDuration(s.NudgeRetryInterval)
-	if err != nil {
-		return 500 * time.Millisecond
+	d, err := time.ParseDuration(s.NudgePollInterval)
+	if err != nil || d <= 0 {
+		return 0
 	}
 	return d
 }
@@ -1486,27 +1689,13 @@ func (s *SessionConfig) NudgeRetryIntervalDuration() time.Duration {
 // NudgeLockTimeoutDuration returns the nudge lock timeout as a time.Duration.
 // Defaults to 30s if empty or unparseable.
 func (s *SessionConfig) NudgeLockTimeoutDuration() time.Duration {
-	if s.NudgeLockTimeout == "" {
-		return 30 * time.Second
-	}
-	d, err := time.ParseDuration(s.NudgeLockTimeout)
-	if err != nil {
-		return 30 * time.Second
-	}
-	return d
+	return durationOr(s.NudgeLockTimeout, 30*time.Second)
 }
 
 // StartupTimeoutDuration returns the startup timeout as a time.Duration.
 // Defaults to 60s if empty or unparseable.
 func (s *SessionConfig) StartupTimeoutDuration() time.Duration {
-	if s.StartupTimeout == "" {
-		return 60 * time.Second
-	}
-	d, err := time.ParseDuration(s.StartupTimeout)
-	if err != nil {
-		return 60 * time.Second
-	}
-	return d
+	return durationOr(s.StartupTimeout, 60*time.Second)
 }
 
 // ProgressStallTimeoutDuration returns the progress-stall recycle timeout, or
@@ -1516,20 +1705,14 @@ func (s *SessionConfig) StartupTimeoutDuration() time.Duration {
 // by setting a duration above its agents' longest legitimate quiet period gets
 // the behavior.
 func (s *SessionConfig) ProgressStallTimeoutDuration() time.Duration {
-	if s.ProgressStallTimeout == "" {
-		return 0
-	}
-	d, err := time.ParseDuration(s.ProgressStallTimeout)
-	if err != nil {
-		return 0
-	}
-	if d <= 0 {
-		return 0
-	}
-	if d < ProgressStallTimeoutMinimum {
-		return ProgressStallTimeoutMinimum
-	}
-	return d
+	return durationFloorOr(s.ProgressStallTimeout, 0, ProgressStallTimeoutMinimum)
+}
+
+// ClaimHolderStallTimeoutDuration returns the claim-holder stall recycle
+// timeout, or 0 when unset, non-positive, or unparseable. Positive values
+// below ProgressStallTimeoutMinimum are clamped to that safety floor.
+func (s *SessionConfig) ClaimHolderStallTimeoutDuration() time.Duration {
+	return durationFloorOr(s.ClaimHolderStallTimeout, 0, ProgressStallTimeoutMinimum)
 }
 
 // DebounceMsOrDefault returns the debounce interval in milliseconds.
@@ -1566,27 +1749,13 @@ type ACPSessionConfig struct {
 // HandshakeTimeoutDuration returns the handshake timeout as a time.Duration.
 // Defaults to 30s if empty or unparseable.
 func (a *ACPSessionConfig) HandshakeTimeoutDuration() time.Duration {
-	if a.HandshakeTimeout == "" {
-		return 30 * time.Second
-	}
-	d, err := time.ParseDuration(a.HandshakeTimeout)
-	if err != nil {
-		return 30 * time.Second
-	}
-	return d
+	return durationOr(a.HandshakeTimeout, 30*time.Second)
 }
 
 // NudgeBusyTimeoutDuration returns the nudge busy timeout as a time.Duration.
 // Defaults to 60s if empty or unparseable.
 func (a *ACPSessionConfig) NudgeBusyTimeoutDuration() time.Duration {
-	if a.NudgeBusyTimeout == "" {
-		return 60 * time.Second
-	}
-	d, err := time.ParseDuration(a.NudgeBusyTimeout)
-	if err != nil {
-		return 60 * time.Second
-	}
-	return d
+	return durationOr(a.NudgeBusyTimeout, 60*time.Second)
 }
 
 // OutputBufferLinesOrDefault returns the output buffer line count.
@@ -1733,14 +1902,7 @@ func (c EventsRotationConfig) CheckIntervalDurationOrDefault() time.Duration {
 // ArchiveRetainAgeDuration parses ArchiveRetainAge. Empty or invalid values
 // return zero, which keeps all archives.
 func (c EventsRotationConfig) ArchiveRetainAgeDuration() time.Duration {
-	if strings.TrimSpace(c.ArchiveRetainAge) == "" {
-		return 0
-	}
-	d, err := time.ParseDuration(c.ArchiveRetainAge)
-	if err != nil {
-		return 0
-	}
-	return d
+	return durationOr(c.ArchiveRetainAge, 0)
 }
 
 const (
@@ -1793,6 +1955,16 @@ type DoltConfig struct {
 	// WriteTimeoutMillis overrides the managed Dolt listener write_timeout_millis.
 	// 0 means use the managed default.
 	WriteTimeoutMillis int `toml:"write_timeout_millis,omitempty" jsonschema:"default=300000"`
+	// WaitTimeoutSeconds overrides the managed server's wait_timeout system
+	// variable, which is how long Dolt keeps an idle connection before reaping
+	// it. Cities that raise ReadTimeoutMillis above the reconcile tick gap
+	// generally need this raised with it, or the controller's long-lived
+	// dispatch-pool connections are still reaped between ticks. Before this
+	// field existed the only way to set it was GC_DOLT_WAIT_TIMEOUT in the
+	// supervisor's process environment, which no city.toml could express and
+	// no shell-invoked restart inherited — so a restart from an operator shell
+	// silently rewrote the value. 0 (omitted) means use the managed default.
+	WaitTimeoutSeconds int `toml:"wait_timeout_seconds,omitempty" jsonschema:"default=30"`
 	// DoltLockReleaseTimeout is how long managed-dolt lifecycle operations
 	// wait for dolt's on-disk exclusive store locks (the root-level
 	// `<data_dir>/.dolt/noms/LOCK` and per-database
@@ -1865,6 +2037,16 @@ func (d DoltConfig) EffectiveWriteTimeoutMillis() int {
 	return DefaultDoltWriteTimeoutMillis
 }
 
+// DefaultDoltWaitTimeoutSeconds is the managed server's idle-connection reap
+// window when neither city.toml nor the environment configures one.
+//
+// Deliberately not paired with an Effective* accessor like the other [dolt]
+// fields: wait_timeout resolves three ways, not two. An unset field must fall
+// through to GC_DOLT_WAIT_TIMEOUT, which can itself select "omit the system
+// variable entirely" with a negative value, so collapsing unset to this default
+// would silently discard the env layer.
+const DefaultDoltWaitTimeoutSeconds = 30
+
 // DefaultDoltLockReleaseTimeout is the wait window for dolt's on-disk
 // exclusive store lock to be released when no value is configured. 1m covers
 // the longest observed clean-shutdown flush of a multi-GB chunk journal on
@@ -1880,14 +2062,7 @@ const DefaultDoltLockReleaseTimeout = time.Minute
 // through loadCityConfig already reject them via
 // ValidateNonNegativeDurations. Mirrors DoltStopTimeoutDuration's policy.
 func (d *DoltConfig) DoltLockReleaseTimeoutDuration() time.Duration {
-	if d.DoltLockReleaseTimeout == "" {
-		return DefaultDoltLockReleaseTimeout
-	}
-	dur, err := time.ParseDuration(d.DoltLockReleaseTimeout)
-	if err != nil {
-		return DefaultDoltLockReleaseTimeout
-	}
-	return dur
+	return durationOr(d.DoltLockReleaseTimeout, DefaultDoltLockReleaseTimeout)
 }
 
 // FormulasConfig is the legacy [formulas] table with no supported fields:
@@ -1907,10 +2082,22 @@ type FormulasConfig struct {
 type OrdersConfig struct {
 	// Skip lists order names to exclude from scanning.
 	Skip []string `toml:"skip,omitempty"`
-	// MaxTimeout is an operator hard cap on per-order timeouts.
-	// No order gets more than this duration. Go duration string (e.g., "60s").
-	// Empty means uncapped (no override).
+	// MaxTimeout is an operator hard cap on the per-order dispatch timeout: no
+	// order's dispatched exec/formula runs longer than this. Go duration string
+	// (e.g., "60s"). Empty means uncapped (no override). This bounds the dispatch
+	// timeout only; a condition trigger's check_timeout is a separate probe
+	// deadline and is not capped here.
 	MaxTimeout string `toml:"max_timeout,omitempty"`
+
+	// *int rather than int so an unset value stays out of marshaled config:
+	// BurntSushi's omitempty does not drop a zero int, so a plain int would
+	// emit max_dispatches_per_tick = 0 into every marshaled city.toml.
+
+	// MaxDispatchesPerTick caps how many orders the supervisor dispatches
+	// per tick. Unset keeps the built-in default of 4; set to 1 to drain
+	// overdue cooldown orders one-per-tick at cold start instead of firing
+	// several concurrent goroutines at once.
+	MaxDispatchesPerTick *int `toml:"max_dispatches_per_tick,omitempty"`
 	// Overrides apply per-order field overrides after scanning.
 	// Each override targets an order by name and optionally by rig.
 	Overrides []OrderOverride `toml:"overrides,omitempty"`
@@ -1943,6 +2130,11 @@ type OrderOverride struct {
 	Pool *string `toml:"pool,omitempty"`
 	// Timeout overrides the per-order timeout. Go duration string.
 	Timeout *string `toml:"timeout,omitempty"`
+	// CheckTimeout overrides the condition trigger's check-command deadline.
+	// Go duration string. Lets a deployment tune check_timeout for a scanned
+	// shared-pack order (e.g. a slow-store queue check) without editing the
+	// pack source.
+	CheckTimeout *string `toml:"check_timeout,omitempty"`
 	// Idempotent overrides whether the order's dispatch is safe to repeat.
 	// Idempotent orders fail open when the open-work gate times out (#2893).
 	Idempotent *bool `toml:"idempotent,omitempty"`
@@ -1967,14 +2159,7 @@ func normalizeLegacyOrderOverrideAliases(cfg *City) {
 // MaxTimeoutDuration parses MaxTimeout as a Go duration.
 // Returns 0 if unset or unparseable (meaning no cap).
 func (c OrdersConfig) MaxTimeoutDuration() time.Duration {
-	if c.MaxTimeout == "" {
-		return 0
-	}
-	d, err := time.ParseDuration(c.MaxTimeout)
-	if err != nil {
-		return 0
-	}
-	return d
+	return durationOr(c.MaxTimeout, 0)
 }
 
 // DefaultAPIPort is the default TCP port for the API server.
@@ -1991,6 +2176,76 @@ type APIConfig struct {
 	// non-localhost. Set to true in containerized environments where the API
 	// must bind to 0.0.0.0 for health probes but mutations are still safe.
 	AllowMutations bool `toml:"allow_mutations,omitempty"`
+	// WriteAuthVerifyKey, when set, requires every mutating request to an
+	// already-registered city — the per-city routes under /v0/city/{cityName} —
+	// to carry a signed write grant from a configured trusted authority. It
+	// gates all per-city writes (beads, mail, sessions, agents, and config), not
+	// only config edits. City registry creation (POST /v0/city) is not covered:
+	// a grant binds a path-resident city name, which a not-yet-created city
+	// lacks, so creation stays governed by the supervisor-registry guards.
+	// Built-in callers (the bundled gc API client and dashboard SPA) send only
+	// the CSRF header and mint no grant, so enabling this gate turns their direct
+	// city mutations away with a clear 401; such deployments front mutations
+	// through the trusted authority that mints grants instead. The value is one
+	// or more "kid:base64-ed25519-pubkey" entries, comma separated.
+	// The GC_CITY_WRITE_PUBKEY env var overrides this. Grant revocation via an
+	// epoch floor is an ops-plane control set only through the
+	// GC_CITY_WRITE_EPOCH_FLOOR env var; it has no config field. On hosted
+	// multi-tenant deployments the GC_CITY_WRITE_CID env var (ops-plane only,
+	// no config field) additionally binds the gate to the controller's own
+	// city id: every grant must then carry that exact cid claim, failing
+	// closed on a mismatching or missing cid.
+	WriteAuthVerifyKey string `toml:"write_auth_verify_key,omitempty"`
+	// WriteAuthRequired makes a missing or empty WriteAuthVerifyKey a startup
+	// error instead of silently disabling the gate, so a config that intends to
+	// gate writes fails closed if the key is ever dropped. The
+	// GC_CITY_WRITE_REQUIRED=1 env var has the same effect.
+	WriteAuthRequired bool `toml:"write_auth_required,omitempty"`
+	// WriteAuthAllowUnverified acknowledges running a non-loopback bind with
+	// allow_mutations and NO write-auth verify key — an unauthenticated write
+	// plane fronted only by the network. Without it, that combination is a
+	// fail-closed startup error (gate G10) so a hardened deployment cannot boot
+	// wide open by omission. Set it (or GC_CITY_WRITE_ALLOW_UNVERIFIED=1) only for
+	// a network-fronted deployment that intentionally trusts its perimeter.
+	WriteAuthAllowUnverified bool `toml:"write_auth_allow_unverified,omitempty"`
+	// ReadAuthVerifyKey, when set, requires every read (GET/HEAD) of an
+	// already-registered city on the typed per-city API — the routes under
+	// /v0/city/{cityName} — to carry a signed read grant from a configured
+	// trusted authority. It is the read-side twin of WriteAuthVerifyKey, adding
+	// in-process, grant-based admission control to the typed city read surface
+	// (beads, mail, sessions, agent transcripts) instead of trusting network
+	// position.
+	//
+	// Scope boundary: this gate covers ONLY the typed /v0/city/{cityName} read
+	// routes. It does NOT cover other surfaces on the same listener that can also
+	// expose per-city data: the supervisor-scope aggregate event feed (/v0/events
+	// and /v0/events/stream, which multiplex every running city's events), the
+	// default-on dashboard host plane (/api/*, including its /api/city/{cityName}/*
+	// samplers, run detail, run diff, and config reads), and the supervisor-scope
+	// routes /v0/cities, /health, /v0/readiness, /v0/provider-readiness, the
+	// OpenAPI document, and the dashboard SPA shell. On a non-localhost bind, the
+	// only complete mitigation is to front the whole listener with the
+	// grant-minting authority/edge (the intended deployment), which protects
+	// every surface above. Disabling the dashboard host plane with
+	// GC_SUPERVISOR_DASHBOARD=0 is additive, not a substitute: it closes /api/*
+	// only, while the supervisor-scope event feed /v0/events and
+	// /v0/events/stream stays readable by network position until the follow-up
+	// supervisor-scope grant lands. Gating those feeds is tracked as that
+	// follow-up work.
+	//
+	// Built-in callers (the bundled gc API client and dashboard SPA) mint no
+	// grant, so enabling this gate turns their direct /v0/city reads away with a
+	// clear 401; such deployments front reads through the authority that mints
+	// grants. The value is one or more "kid:base64-ed25519-pubkey" entries, comma
+	// separated. The GC_CITY_READ_PUBKEY env var overrides this. Grant revocation
+	// via an epoch floor is an ops-plane control set only through the
+	// GC_CITY_READ_EPOCH_FLOOR env var; it has no config field.
+	ReadAuthVerifyKey string `toml:"read_auth_verify_key,omitempty"`
+	// ReadAuthRequired makes a missing or empty ReadAuthVerifyKey a startup error
+	// instead of silently disabling the gate, so a config that intends to gate
+	// reads fails closed if the key is ever dropped. The GC_CITY_READ_REQUIRED=1
+	// env var has the same effect.
+	ReadAuthRequired bool `toml:"read_auth_required,omitempty"`
 }
 
 // BindOrDefault returns the bind address, defaulting to "127.0.0.1".
@@ -2028,14 +2283,7 @@ type SessionSleepConfig struct {
 
 // IdleTimeoutDuration parses IdleTimeout, returning 0 if unset or invalid.
 func (c ChatSessionsConfig) IdleTimeoutDuration() time.Duration {
-	if c.IdleTimeout == "" {
-		return 0
-	}
-	d, err := time.ParseDuration(c.IdleTimeout)
-	if err != nil {
-		return 0
-	}
-	return d
+	return durationOr(c.IdleTimeout, 0)
 }
 
 // DefaultManualGracePeriod is the grace period for manual sessions when
@@ -2046,17 +2294,7 @@ const DefaultManualGracePeriod = 10 * time.Minute
 // GracePeriodDuration parses GracePeriod, returning DefaultManualGracePeriod
 // if unset, 0 if explicitly set to "0", or the parsed duration.
 func (c ChatSessionsConfig) GracePeriodDuration() time.Duration {
-	switch c.GracePeriod {
-	case "":
-		return DefaultManualGracePeriod
-	case "0", "0s":
-		return 0
-	}
-	d, err := time.ParseDuration(c.GracePeriod)
-	if err != nil {
-		return DefaultManualGracePeriod
-	}
-	return d
+	return durationOr(c.GracePeriod, DefaultManualGracePeriod)
 }
 
 // LocalDoctorCheck is a city-local doctor check declared inline in city.toml
@@ -2226,27 +2464,13 @@ type DoltMaintenance struct {
 // (weekly) when unset or unparseable. Invalid values should already have
 // surfaced as warnings from ValidateDurations at load time.
 func (d DoltMaintenance) IntervalOrDefault() time.Duration {
-	if d.Interval == "" {
-		return 168 * time.Hour
-	}
-	v, err := time.ParseDuration(d.Interval)
-	if err != nil {
-		return 168 * time.Hour
-	}
-	return v
+	return durationOr(d.Interval, 168*time.Hour)
 }
 
 // GCTimeoutOrDefault returns the parsed GCTimeout, falling back to 10m
 // when unset or unparseable.
 func (d DoltMaintenance) GCTimeoutOrDefault() time.Duration {
-	if d.GCTimeout == "" {
-		return 10 * time.Minute
-	}
-	v, err := time.ParseDuration(d.GCTimeout)
-	if err != nil {
-		return 10 * time.Minute
-	}
-	return v
+	return durationOr(d.GCTimeout, 10*time.Minute)
 }
 
 // DaemonConfig holds controller daemon settings.
@@ -2372,11 +2596,41 @@ type DaemonConfig struct {
 	// AutoReapClosedBeadWorktrees controls whether the reconciler patrol
 	// automatically removes per-bead git worktrees once their associated
 	// work bead reaches closed status. Only worktrees with a clean working
-	// tree, no unpushed commits, and no stashes are removed; unsafe worktrees
-	// are logged as warnings and left in place for operator review. Session
+	// tree, no stashes, and no commits that removal would orphan — commits
+	// reachable from no branch, tag, or remote-tracking ref — are removed;
+	// push state is deliberately not the test, since `git worktree remove`
+	// deletes the checkout and not refs/heads. Unsafe worktrees are logged
+	// as warnings and left in place for operator review. Session
 	// home directories (agent template directories) are never touched.
 	// Defaults to false. Set to true to enable automated worktree cleanup.
 	AutoReapClosedBeadWorktrees *bool `toml:"auto_reap_closed_bead_worktrees,omitempty" jsonschema:"default=false"`
+	// AutoReapClosedBeadWorktreesDryRun makes the reconciler patrol run the
+	// full worktree-reap classification each tick — discovery, closed-bead
+	// match, liveness gate, and git-safety probes — but emit
+	// bead.worktree.reap_skipped events describing what it WOULD reap and
+	// what it protected, without removing anything. This is the safe
+	// staged-rollout surface: an operator enables dry-run first, confirms via
+	// `gc events` that no live worktree appears in the would-reap set, then
+	// enables AutoReapClosedBeadWorktrees for real removal. Those events are
+	// edge-triggered: each worktree is reported when the patrol first
+	// classifies it and again whenever its verdict changes, not once per
+	// tick, so the would-reap set is complete right after dry-run is enabled
+	// rather than reprinted every sweep. Dry-run has no effect when
+	// AutoReapClosedBeadWorktrees is already true (real removal supersedes
+	// it). Defaults to false.
+	AutoReapClosedBeadWorktreesDryRun *bool `toml:"auto_reap_closed_bead_worktrees_dry_run,omitempty" jsonschema:"default=false"`
+	// AutoReapClosedBeadWorktreesMinAgeMinutes is the minimum worktree age,
+	// in minutes, before a closed-bead worktree becomes eligible for reap
+	// classification at all (borrow-veto scan and beyond). This quarantines
+	// a worktree against the race between its creation and its owning
+	// bead's gc.work_dir/work_dir metadata being stamped by the next
+	// reconcile pass — without it, a just-created worktree could look
+	// unclaimed to the borrow-veto scan before the metadata that would
+	// protect it has been written. Nil (unset) defaults to
+	// DefaultAutoReapClosedBeadWorktreesMinAgeMinutes. Zero disables the
+	// quarantine entirely (every closed-bead worktree is immediately
+	// eligible for the rest of the gate chain, regardless of age).
+	AutoReapClosedBeadWorktreesMinAgeMinutes *int `toml:"auto_reap_closed_bead_worktrees_min_age_minutes,omitempty" jsonschema:"default=10"`
 	// StartReadyTimeout is how long `gc start` and `gc register` wait for
 	// the supervisor to report the city as Running. Cities with many
 	// registered or adopted sessions take longer to start because the
@@ -2430,6 +2684,34 @@ func (d *DaemonConfig) AutoReapClosedBeadWorktreesEnabled() bool {
 	return *d.AutoReapClosedBeadWorktrees
 }
 
+// AutoReapClosedBeadWorktreesDryRunEnabled reports whether the patrol should
+// run the worktree-reap classification and emit would-reap/protected events
+// without removing anything. Defaults to false when the field is unset (nil).
+// Real removal (AutoReapClosedBeadWorktreesEnabled) supersedes dry-run: when
+// both are set, the reaper deletes for real, so callers should treat dry-run
+// as active only when this is true AND real reaping is off.
+func (d *DaemonConfig) AutoReapClosedBeadWorktreesDryRunEnabled() bool {
+	if d.AutoReapClosedBeadWorktreesDryRun == nil {
+		return false
+	}
+	return *d.AutoReapClosedBeadWorktreesDryRun
+}
+
+// DefaultAutoReapClosedBeadWorktreesMinAgeMinutes is the quarantine window
+// applied when AutoReapClosedBeadWorktreesMinAgeMinutes is unset.
+const DefaultAutoReapClosedBeadWorktreesMinAgeMinutes = 10
+
+// AutoReapClosedBeadWorktreesMinAge returns the minimum worktree age before a
+// closed-bead worktree is eligible for reap classification. Defaults to
+// DefaultAutoReapClosedBeadWorktreesMinAgeMinutes when unset; an explicit
+// zero disables the quarantine.
+func (d *DaemonConfig) AutoReapClosedBeadWorktreesMinAge() time.Duration {
+	if d.AutoReapClosedBeadWorktreesMinAgeMinutes == nil {
+		return time.Duration(DefaultAutoReapClosedBeadWorktreesMinAgeMinutes) * time.Minute
+	}
+	return time.Duration(*d.AutoReapClosedBeadWorktreesMinAgeMinutes) * time.Minute
+}
+
 // AutoPruneWorkerDirEnabled reports whether the reconciler should remove a
 // pool-managed session's worker_dir after the session bead is closed. The
 // default is true: pool worktrees are transient by design and accumulate
@@ -2445,14 +2727,7 @@ func (d *DaemonConfig) AutoPruneWorkerDirEnabled() bool {
 // PatrolIntervalDuration returns the patrol interval as a time.Duration.
 // Defaults to 30s if empty or unparseable.
 func (d *DaemonConfig) PatrolIntervalDuration() time.Duration {
-	if d.PatrolInterval == "" {
-		return 30 * time.Second
-	}
-	dur, err := time.ParseDuration(d.PatrolInterval)
-	if err != nil {
-		return 30 * time.Second
-	}
-	return dur
+	return durationOr(d.PatrolInterval, 30*time.Second)
 }
 
 // TickDebounceDuration returns the tick-debounce window as a
@@ -2481,14 +2756,7 @@ func (d *DaemonConfig) MaxRestartsOrDefault() int {
 // RestartWindowDuration returns the restart window as a time.Duration.
 // Defaults to 1h if empty or unparseable.
 func (d *DaemonConfig) RestartWindowDuration() time.Duration {
-	if d.RestartWindow == "" {
-		return time.Hour
-	}
-	dur, err := time.ParseDuration(d.RestartWindow)
-	if err != nil {
-		return time.Hour
-	}
-	return dur
+	return durationOr(d.RestartWindow, time.Hour)
 }
 
 // SessionCircuitBreakerMaxRestartsOrDefault returns the named-session respawn
@@ -2503,28 +2771,13 @@ func (d *DaemonConfig) SessionCircuitBreakerMaxRestartsOrDefault() int {
 // SessionCircuitBreakerWindowDuration returns the named-session respawn
 // circuit-breaker rolling window. Empty reuses RestartWindowDuration.
 func (d *DaemonConfig) SessionCircuitBreakerWindowDuration() time.Duration {
-	if d.SessionCircuitBreakerWindow == "" {
-		return d.RestartWindowDuration()
-	}
-	dur, err := time.ParseDuration(d.SessionCircuitBreakerWindow)
-	if err != nil {
-		return d.RestartWindowDuration()
-	}
-	return dur
+	return durationOr(d.SessionCircuitBreakerWindow, d.RestartWindowDuration())
 }
 
 // SessionCircuitBreakerResetAfterDuration returns the named-session respawn
 // circuit-breaker cooldown. Empty or invalid values default to 2 * window.
 func (d *DaemonConfig) SessionCircuitBreakerResetAfterDuration() time.Duration {
-	window := d.SessionCircuitBreakerWindowDuration()
-	if d.SessionCircuitBreakerResetAfter == "" {
-		return 2 * window
-	}
-	dur, err := time.ParseDuration(d.SessionCircuitBreakerResetAfter)
-	if err != nil {
-		return 2 * window
-	}
-	return dur
+	return durationOr(d.SessionCircuitBreakerResetAfter, 2*d.SessionCircuitBreakerWindowDuration())
 }
 
 // NudgeDispatcherMode returns the nudge dispatcher mode, defaulting to
@@ -2542,14 +2795,7 @@ func (d *DaemonConfig) NudgeDispatcherMode() string {
 // ShutdownTimeoutDuration returns the shutdown timeout as a time.Duration.
 // Defaults to 5s if empty or unparseable. Zero means immediate kill.
 func (d *DaemonConfig) ShutdownTimeoutDuration() time.Duration {
-	if d.ShutdownTimeout == "" {
-		return 5 * time.Second
-	}
-	dur, err := time.ParseDuration(d.ShutdownTimeout)
-	if err != nil {
-		return 5 * time.Second
-	}
-	return dur
+	return durationOr(d.ShutdownTimeout, 5*time.Second)
 }
 
 // DefaultDoltStopTimeout is the SIGTERM→SIGKILL grace for the managed dolt
@@ -2564,14 +2810,7 @@ const DefaultDoltStopTimeout = 30 * time.Second
 // must guarantee a flush window should treat zero as a misconfiguration
 // upstream rather than silently overriding it here.
 func (d *DaemonConfig) DoltStopTimeoutDuration() time.Duration {
-	if d.DoltStopTimeout == "" {
-		return DefaultDoltStopTimeout
-	}
-	dur, err := time.ParseDuration(d.DoltStopTimeout)
-	if err != nil {
-		return DefaultDoltStopTimeout
-	}
-	return dur
+	return durationOr(d.DoltStopTimeout, DefaultDoltStopTimeout)
 }
 
 // DefaultDoltStartAddressInUseRetryWindow is the per-port retry window used
@@ -2595,14 +2834,7 @@ const DefaultDoltStartAddressInUseRetryWindow = 30 * time.Second
 // as a misconfiguration upstream rather than silently overriding it here.
 // Mirrors DoltStopTimeoutDuration's policy.
 func (d *DaemonConfig) DoltStartAddressInUseRetryWindowDuration() time.Duration {
-	if d.DoltStartAddressInUseRetryWindow == "" {
-		return DefaultDoltStartAddressInUseRetryWindow
-	}
-	dur, err := time.ParseDuration(d.DoltStartAddressInUseRetryWindow)
-	if err != nil {
-		return DefaultDoltStartAddressInUseRetryWindow
-	}
-	return dur
+	return durationOr(d.DoltStartAddressInUseRetryWindow, DefaultDoltStartAddressInUseRetryWindow)
 }
 
 // DefaultProbeConcurrency is the default bd probe concurrency limit.
@@ -2639,14 +2871,7 @@ func (d *DaemonConfig) MaxWakesPerTickOrDefault() int {
 // DriftDrainTimeoutDuration returns the drift drain timeout as a time.Duration.
 // Defaults to 2m if empty or unparseable.
 func (d *DaemonConfig) DriftDrainTimeoutDuration() time.Duration {
-	if d.DriftDrainTimeout == "" {
-		return 2 * time.Minute
-	}
-	dur, err := time.ParseDuration(d.DriftDrainTimeout)
-	if err != nil {
-		return 2 * time.Minute
-	}
-	return dur
+	return durationOr(d.DriftDrainTimeout, 2*time.Minute)
 }
 
 // DefaultStartReadyTimeout is the default wall-clock budget `gc start` and
@@ -2660,40 +2885,19 @@ const DefaultStartReadyTimeout = 5 * time.Minute
 // time.Duration. Defaults to DefaultStartReadyTimeout when empty or
 // unparseable.
 func (d *DaemonConfig) StartReadyTimeoutDuration() time.Duration {
-	if d.StartReadyTimeout == "" {
-		return DefaultStartReadyTimeout
-	}
-	dur, err := time.ParseDuration(d.StartReadyTimeout)
-	if err != nil {
-		return DefaultStartReadyTimeout
-	}
-	return dur
+	return durationOr(d.StartReadyTimeout, DefaultStartReadyTimeout)
 }
 
 // WispGCIntervalDuration returns the wisp GC interval as a time.Duration.
 // Returns 0 if empty or unparseable.
 func (d *DaemonConfig) WispGCIntervalDuration() time.Duration {
-	if d.WispGCInterval == "" {
-		return 0
-	}
-	dur, err := time.ParseDuration(d.WispGCInterval)
-	if err != nil {
-		return 0
-	}
-	return dur
+	return durationOr(d.WispGCInterval, 0)
 }
 
 // WispTTLDuration returns the wisp TTL as a time.Duration.
 // Returns 0 if empty or unparseable.
 func (d *DaemonConfig) WispTTLDuration() time.Duration {
-	if d.WispTTL == "" {
-		return 0
-	}
-	dur, err := time.ParseDuration(d.WispTTL)
-	if err != nil {
-		return 0
-	}
-	return dur
+	return durationOr(d.WispTTL, 0)
 }
 
 // WispGCEnabled reports whether wisp GC is configured. Both wisp_gc_interval
@@ -2774,9 +2978,11 @@ func (c *City) FormulasDir() string {
 
 // AllPackDirs returns the union of city-level and all rig-level pack directories
 // (city dirs first, then sorted-by-rig-name dirs), deduplicated. Use this for
-// global scans that intentionally need the full pack-fragment universe. Prompt
-// rendering for a specific rig should use PackDirsForRig so one rig's fragments
-// cannot override another rig's same-named fragments.
+// global scans that intentionally need the full pack-fragment universe, and as
+// the fallback PackDirsForRig("") uses for rig-less (scope="city") agents, which
+// have no single rig to scope to. Prompt rendering for a specific rig should use
+// PackDirsForRig so one rig's fragments cannot override another rig's
+// same-named fragments.
 func (c *City) AllPackDirs() []string {
 	var dirs []string
 	dirs = appendUnique(dirs, c.PackDirs...)
@@ -2795,12 +3001,27 @@ func (c *City) AllPackDirs() []string {
 // directories imported by rigName, deduplicated with city-level dirs kept first.
 // Use this when rendering prompts for one agent so rig-imported template
 // fragments are available without exposing fragments imported by other rigs.
+//
+// rigName == "" means a rig-less (scope="city") agent — e.g. deep-investigator,
+// supervisor, pack-author — which has no single rig to scope to. Those agents
+// fall back to AllPackDirs(): the union across every rig, sorted by rig name for
+// determinism. A fragment name defined identically in more than one rig's pack
+// resolves fine (that's the common case: a shared vocabulary like
+// handoff-routing, meant to render identically everywhere). A name defined with
+// DIFFERENT content in two rigs' packs silently picks whichever rig sorts LAST
+// alphabetically: renderPrompt parses pack dirs in order and a later
+// {{ define }} replaces an earlier one. For the same reason, a rig-imported
+// fragment can shadow a same-named city-level imported-pack fragment (city
+// dirs are parsed first) — city-ROOT fragments still win, they load last.
+// This is a pack-authoring collision this function does not detect.
+// See ga-bmjqvb.
 func (c *City) PackDirsForRig(rigName string) []string {
+	if rigName == "" {
+		return c.AllPackDirs()
+	}
 	var dirs []string
 	dirs = appendUnique(dirs, c.PackDirs...)
-	if rigName != "" {
-		dirs = appendUnique(dirs, c.RigPackDirs[rigName]...)
-	}
+	dirs = appendUnique(dirs, c.RigPackDirs[rigName]...)
 	return dirs
 }
 
@@ -2817,6 +3038,10 @@ type AgentDefaults struct {
 	// (e.g., "claude-sonnet-4-6"), but it is not yet auto-applied at
 	// runtime. Agents with their own model override would take precedence.
 	Model string `toml:"model,omitempty"`
+	// Upstream is the default model-serving endpoint (a key in [upstreams])
+	// for agents that do not set their own upstream (Phase C — the Upstream
+	// axis). Applied to agents with an empty Upstream by ApplyAgentDefaults.
+	Upstream string `toml:"upstream,omitempty"`
 	// WakeMode is the parsed/composed default wake mode ("resume" or
 	// "fresh"), but it is not yet auto-applied at runtime.
 	WakeMode string `toml:"wake_mode,omitempty" jsonschema:"enum=resume,enum=fresh"`
@@ -2856,6 +3081,9 @@ func mergeAgentDefaultsAliasPreferCanonical(dst *AgentDefaults, src AgentDefault
 	}
 	if !meta.IsDefined("agent_defaults", "model") {
 		dst.Model = src.Model
+	}
+	if !meta.IsDefined("agent_defaults", "upstream") {
+		dst.Upstream = src.Upstream
 	}
 	if !meta.IsDefined("agent_defaults", "wake_mode") {
 		dst.WakeMode = src.WakeMode
@@ -2964,6 +3192,11 @@ type Agent struct {
 	Session string `toml:"session,omitempty" jsonschema:"enum=acp"`
 	// Provider names the provider preset to use for this agent.
 	Provider string `toml:"provider,omitempty"`
+	// Upstream selects the model-serving endpoint (a key in [upstreams]) for
+	// this agent — WHO serves the model. "" (default) falls back to
+	// agent_defaults.upstream; if still empty, no upstream env is injected
+	// (ambient behavior). Switching it relaunches the agent in the warm box.
+	Upstream string `toml:"upstream,omitempty"`
 	// InheritedProvider records the pack-scoped default provider for agents
 	// loaded from imported packs. Runtime-only.
 	InheritedProvider string `toml:"-" json:"-"`
@@ -3082,6 +3315,19 @@ type Agent struct {
 	// disables jitter (every session restarts at exactly MaxSessionAge).
 	// Ignored when MaxSessionAge is unset.
 	MaxSessionAgeJitter string `toml:"max_session_age_jitter,omitempty"`
+	// AssignedWorkDeferLimit bounds how many consecutive reconciler ticks the
+	// idle-timeout ladder may defer on the same assigned-work bead
+	// (DecideIdleTimeout's AssignedWorkHas rung) before the reconciler
+	// overrides the defer and forces a stop via DecideAssignedWorkExhausted.
+	// Nil means use the built-in default. Without this backstop a session
+	// anchored to a bead that never clears assigned-work (e.g. a bead stuck
+	// open due to an upstream status-mapping bug) would defer indefinitely,
+	// reproducing the unbounded wake/idle-kill treadmill ga-3ox7rk fixed at
+	// the single-tick level. The counter resets whenever the anchor bead
+	// changes or the session is not idle-kill-eligible; see
+	// sessionHasAwakeAssignedWorkForReachableStore's caller in
+	// session_reconciler.go.
+	AssignedWorkDeferLimit *int `toml:"assigned_work_defer_limit,omitempty"`
 	// SleepAfterIdle overrides idle sleep policy for this agent. Accepts a
 	// duration string (e.g., "30s") or "off".
 	SleepAfterIdle string `toml:"sleep_after_idle,omitempty"`
@@ -3243,6 +3489,48 @@ type Agent struct {
 	layout agentLayout
 }
 
+// Clone returns a deep copy of the agent. Every slice, map, and pointer field
+// is independently allocated so that mutating the clone never affects the
+// original (and vice versa) — the guarantee the pack-load cache and pool
+// expansion both rely on. Scalar and unexported value fields (including the
+// source/layout provenance enums) are carried over by the initial struct copy.
+//
+// This is the single deep-copy source for Agent: deepCopyAgents (pack cache)
+// and cmd/gc's pool deepCopyAgent both call through here. TestAgentCloneIsDeep
+// enforces completeness — any new reference-type field must be cloned here or
+// the build fails.
+func (a Agent) Clone() Agent {
+	out := a
+	out.PreStart = append([]string(nil), a.PreStart...)
+	out.Args = append([]string(nil), a.Args...)
+	out.ProcessNames = append([]string(nil), a.ProcessNames...)
+	out.NamepoolNames = append([]string(nil), a.NamepoolNames...)
+	out.InstallAgentHooks = append([]string(nil), a.InstallAgentHooks...)
+	out.Skills = append([]string(nil), a.Skills...)
+	out.MCP = append([]string(nil), a.MCP...)
+	out.SessionSetup = append([]string(nil), a.SessionSetup...)
+	out.SessionLive = append([]string(nil), a.SessionLive...)
+	out.InjectFragments = append([]string(nil), a.InjectFragments...)
+	out.AppendFragments = append([]string(nil), a.AppendFragments...)
+	out.InheritedAppendFragments = append([]string(nil), a.InheritedAppendFragments...)
+	out.DependsOn = append([]string(nil), a.DependsOn...)
+	out.SharedSkills = append([]string(nil), a.SharedSkills...)
+	out.SharedMCP = append([]string(nil), a.SharedMCP...)
+	out.Env = deepCopyStringMap(a.Env)
+	out.OptionDefaults = deepCopyStringMap(a.OptionDefaults)
+	out.ReadyDelayMs = copyIntPtr(a.ReadyDelayMs)
+	out.MaxActiveSessions = copyIntPtr(a.MaxActiveSessions)
+	out.MinActiveSessions = copyIntPtr(a.MinActiveSessions)
+	out.AssignedWorkDeferLimit = copyIntPtr(a.AssignedWorkDeferLimit)
+	out.EmitsPermissionWarning = copyBoolPtr(a.EmitsPermissionWarning)
+	out.HooksInstalled = copyBoolPtr(a.HooksInstalled)
+	out.InjectAssignedSkills = copyBoolPtr(a.InjectAssignedSkills)
+	out.Attach = copyBoolPtr(a.Attach)
+	out.DefaultSlingFormula = copyStringPtr(a.DefaultSlingFormula)
+	out.InheritedDefaultSlingFormula = copyStringPtr(a.InheritedDefaultSlingFormula)
+	return out
+}
+
 // agentSource enumerates the configuration origins recognized by
 // describeSource. Discovery sites stamp exactly one value per agent.
 type agentSource uint8
@@ -3301,27 +3589,13 @@ func (l agentLayout) String() string {
 // IdleTimeoutDuration returns the idle timeout as a time.Duration.
 // Returns 0 if empty or unparseable (disabled).
 func (a *Agent) IdleTimeoutDuration() time.Duration {
-	if a.IdleTimeout == "" {
-		return 0
-	}
-	d, err := time.ParseDuration(a.IdleTimeout)
-	if err != nil {
-		return 0
-	}
-	return d
+	return durationOr(a.IdleTimeout, 0)
 }
 
 // MaxSessionAgeDuration returns the maximum session age as a time.Duration.
 // Returns 0 if empty or unparseable (disabled: no preemptive restart).
 func (a *Agent) MaxSessionAgeDuration() time.Duration {
-	if a.MaxSessionAge == "" {
-		return 0
-	}
-	d, err := time.ParseDuration(a.MaxSessionAge)
-	if err != nil {
-		return 0
-	}
-	return d
+	return durationOr(a.MaxSessionAge, 0)
 }
 
 // MaxSessionAgeJitterDuration returns the jitter bound for max session age
@@ -3359,416 +3633,6 @@ func (a *Agent) AttachEnabled() bool {
 	return a.Attach == nil || *a.Attach
 }
 
-// bdReadyPoolDemandShell returns the canonical bd ready predicate for
-// unassigned, non-epic pool demand routed to target. gc.routed_to is the
-// canonical persisted routing key: the graph.v2 stamper and the legacy stamper
-// both stamp it on every routable bead, including the workflow root (ga-eld2x
-// retired the short-lived gc.run_target wire field). This predicate is the main
-// source of truth for "is there work on this routed queue?" that both the
-// worker (via EffectiveWorkQuery Tier 3) and the reconciler (via
-// EffectivePoolDemandQuery, count-form) ask; diverging the two re-introduces
-// the protocol-mismatch class (see the "scale_check ↔ work_query
-// correspondence" note in engdocs/architecture/dispatch.md).
-//
-// target is passed as a positional argument to the outer sh -c command, not
-// interpolated into the nested shell body. That keeps routes containing shell
-// metacharacters as data instead of executable syntax.
-func bdReadyIncludeEphemeralArg(includeEphemeralReady bool) string {
-	if includeEphemeralReady {
-		return " --include-ephemeral"
-	}
-	return ""
-}
-
-func bdReadyPoolDemandShell(limitFlag string, includeEphemeralReady bool) string {
-	return `bd ready` + bdReadyIncludeEphemeralArg(includeEphemeralReady) + ` --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --json ` + limitFlag
-}
-
-// bdReadyPoolDemandMigrationShell is a temporary raw compatibility probe for
-// graph.v2 workflow roots created before gc.routed_to root stamping shipped.
-// It is scoped to workflow roots so gc.run_target remains an authoring hint
-// everywhere else. Callers must pass its output through
-// poolDemandMigrationFilterJQ so a stale divergent gc.run_target cannot remain
-// visible once a root carries gc.routed_to. This retirement-window fallback
-// requires jq in the default worker/reconciler environment; remove it with the
-// Go-side legacy candidates after the backfill completion tracked by ga-dhf44.
-func bdReadyPoolDemandMigrationShell(limitFlag string, includeEphemeralReady bool) string {
-	return `bd ready` + bdReadyIncludeEphemeralArg(includeEphemeralReady) + ` --metadata-field "gc.run_target=$target" --metadata-field "gc.kind=workflow" --unassigned --exclude-type=epic --json --sort oldest ` + limitFlag
-}
-
-func poolDemandMigrationFilterJQ(limit int) string {
-	filter := `[.[] | select((.metadata["gc.routed_to"] // "") == "")]`
-	if limit > 0 {
-		filter += ` | .[:` + strconv.Itoa(limit) + `]`
-	}
-	return shellquote.Join([]string{"jq", filter})
-}
-
-func bdQueryEphemeralStatusShell(status string) string {
-	return `bd query --json ` + shellquote.Quote("ephemeral=true AND status="+status) + ` --limit=0`
-}
-
-func bdQueryEphemeralStatusQuietShell(status string) string {
-	return bdQueryEphemeralStatusShell(status) + ` 2>/dev/null`
-}
-
-func legacyEphemeralReadyFilterJQ(selector string, limit int) string {
-	filter := `[.[] | ` + selector +
-		` | select(((.issue_type // .type // "") != "epic"))` +
-		` | select(([ (.dependencies // [])[]` +
-		` | select((.type // .dep_type // "") as $t | ($t == "blocks" or $t == "waits-for" or $t == "conditional-blocks"))` +
-		` | select((.status // .depends_on_status // "") != "closed") ] | length) == 0)]` +
-		` | sort_by(.created_at // "")`
-	if limit > 0 {
-		filter += ` | .[:` + strconv.Itoa(limit) + `]`
-	}
-	return filter
-}
-
-func legacyEphemeralPoolDemandShell(limit int, includeEphemeralReady, quiet bool) string {
-	if includeEphemeralReady {
-		return `printf "[]"`
-	}
-	filter := legacyEphemeralReadyFilterJQ(
-		`select((.assignee // "") == "")`+
-			` | select(((.metadata["gc.routed_to"] // "") == $target) or (((.metadata["gc.routed_to"] // "") == "") and ((.metadata["gc.run_target"] // "") == $target) and ((.metadata["gc.kind"] // "") == "workflow")))`,
-		limit,
-	)
-	query := bdQueryEphemeralStatusShell("open")
-	if quiet {
-		query = bdQueryEphemeralStatusQuietShell("open")
-	}
-	jqStderr := ""
-	if quiet {
-		jqStderr = ` 2>/dev/null`
-	}
-	return `{ ` + query + ` | jq --arg target "$target" ` + shellquote.Quote(filter) + jqStderr + `; } || printf "[]"`
-}
-
-// poolDemandFirstRowFunctionScript emits the work_query Tier 3 function: it
-// reads the first ready, unassigned, routed bead for the supplied target,
-// prints it, and exits 0. The caller appends a terminal fallthrough
-// (printf "[]") for the empty case.
-func poolDemandFirstRowFunctionScript(includeEphemeralReady bool) string {
-	return `probe_pool_demand() { ` +
-		`target="$1"; ` +
-		`[ -z "$target" ] && return 1; ` +
-		`r=$(` + routedReadyTierCommand(includeEphemeralReady) + `); ` +
-		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit=20", includeEphemeralReady) + ` 2>/dev/null); ` +
-		`r=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(1) + ` 2>/dev/null); ` +
-		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		`legacy_ephemeral_candidates=$(` + legacyEphemeralPoolDemandShell(20, includeEphemeralReady, true) + `); ` +
-		`r=$(printf "%s" "$legacy_ephemeral_candidates" | jq '.[0:1]' 2>/dev/null); ` +
-		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		`return 1; ` +
-		`}; `
-}
-
-func routedReadyTierCommand(includeEphemeralReady bool) string {
-	// The shared predicate stays order-free so the count-form does no wasted
-	// sorting; the worker first-row path asks bd for the oldest candidate.
-	return bdReadyPoolDemandShell("--sort oldest --limit=1", includeEphemeralReady) + ` 2>/dev/null`
-}
-
-// poolDemandCountShell emits the reconciler count-form for target: it counts
-// ready, unassigned, routed demand and prints the array length. It shares the
-// canonical and migration predicates with poolDemandFirstRowFunctionScript so
-// the reconciler's spawn decision and the worker's claim decision read the
-// same demand shape.
-//
-// Unlike the work_query probe, this form must NOT redirect bd stderr or default
-// to zero: a failed `bd ready` has to surface as an error rather than
-// masquerade as "no demand", which would silently stop the pool from spawning.
-// The && chain ensures any non-zero bd exit short-circuits the whole expression
-// (TestEffectiveScaleCheckUsesReadyOnly).
-func poolDemandCountShell(target string, includeEphemeralReady bool) string {
-	script := `target="$1"; ` +
-		`ready_json=$(` + bdReadyPoolDemandShell("--limit 0", includeEphemeralReady) + `) || exit $?; ` +
-		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit 0", includeEphemeralReady) + `) || exit $?; ` +
-		`legacy_json=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(0) + `) || exit $?; ` +
-		`legacy_ephemeral_json=$(` + legacyEphemeralPoolDemandShell(0, includeEphemeralReady, false) + `); ` +
-		`printf "%s\n%s\n%s\n" "$ready_json" "$legacy_json" "$legacy_ephemeral_json" | jq -s "(add // []) | unique_by(.id) | length"`
-	return shellquote.Join([]string{"sh", "-c", script, "--", target})
-}
-
-func (a *Agent) poolDemandTarget() string {
-	target := a.QualifiedName()
-	if a.PoolName != "" {
-		target = a.PoolName
-	}
-	return target
-}
-
-func standardAssignedWorkQueryScript(includeEphemeralReady bool) string {
-	return standardAssignedInProgressWorkQueryScript(includeEphemeralReady) +
-		standardAssignedReadyWorkQueryScript(includeEphemeralReady)
-}
-
-func standardAssignedInProgressWorkQueryScript(includeEphemeralReady bool) string {
-	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
-		`[ -z "$id" ] && continue; ` +
-		`r=$(bd list --status in_progress --assignee="$id" --json --limit=1 2>/dev/null); ` +
-		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		ephemeralAssignedInProgressProbeScript("id", includeEphemeralReady) +
-		`done; `
-}
-
-func standardAssignedReadyWorkQueryScript(includeEphemeralReady bool) string {
-	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
-		`[ -z "$id" ] && continue; ` +
-		`r=$(bd ready` + bdReadyIncludeEphemeralArg(includeEphemeralReady) + ` --assignee="$id" --json --limit=1 2>/dev/null); ` +
-		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		ephemeralAssignedReadyProbeScript("id", includeEphemeralReady) +
-		`done; `
-}
-
-func legacyControlAssignedWorkQueryScript(includeEphemeralReady bool) string {
-	return legacyControlAssignedInProgressWorkQueryScript(includeEphemeralReady) +
-		legacyControlAssignedReadyWorkQueryScript(includeEphemeralReady)
-}
-
-func legacyControlAssignedInProgressWorkQueryScript(includeEphemeralReady bool) string {
-	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
-		`[ -z "$id" ] && continue; ` +
-		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
-		`for cand in "$id" "$legacy"; do ` +
-		`[ -z "$cand" ] && continue; ` +
-		`r=$(bd list --status in_progress --assignee="$cand" --json --limit=1 2>/dev/null); ` +
-		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		ephemeralAssignedInProgressProbeScript("cand", includeEphemeralReady) +
-		`done; ` +
-		`done; `
-}
-
-func legacyControlAssignedReadyWorkQueryScript(includeEphemeralReady bool) string {
-	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
-		`[ -z "$id" ] && continue; ` +
-		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
-		`for cand in "$id" "$legacy"; do ` +
-		`[ -z "$cand" ] && continue; ` +
-		`r=$(bd ready` + bdReadyIncludeEphemeralArg(includeEphemeralReady) + ` --assignee="$cand" --json --limit=1 2>/dev/null); ` +
-		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		ephemeralAssignedReadyProbeScript("cand", includeEphemeralReady) +
-		`done; ` +
-		`done; `
-}
-
-func ephemeralAssignedInProgressProbeScript(shellVar string, includeEphemeralReady bool) string {
-	_ = includeEphemeralReady
-	return `r=$(` + bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
-		`jq --arg id "$` + shellVar + `" '[.[] | select((.assignee // "") == $id)] | .[:1]' 2>/dev/null); ` +
-		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; `
-}
-
-func ephemeralAssignedReadyProbeScript(shellVar string, includeEphemeralReady bool) string {
-	if includeEphemeralReady {
-		return ""
-	}
-	filter := legacyEphemeralReadyFilterJQ(`select((.assignee // "") == $id)`, 1)
-	return `r=$(` + bdQueryEphemeralStatusQuietShell("open") + ` | ` +
-		`jq --arg id "$` + shellVar + `" ` + shellquote.Quote(filter) + ` 2>/dev/null); ` +
-		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; `
-}
-
-func poolDemandOriginGateScript() string {
-	return `case "$GC_SESSION_ORIGIN" in ` +
-		`ephemeral|"") ;; ` +
-		`*) exit 0 ;; ` +
-		`esac; `
-}
-
-func routedPoolWorkQueryProbeScript(includeEphemeralReady bool, targetCount int) string {
-	script := poolDemandOriginGateScript() + poolDemandFirstRowFunctionScript(includeEphemeralReady)
-	for i := 1; i <= targetCount; i++ {
-		script += fmt.Sprintf(`probe_pool_demand "$%d"; `, i)
-	}
-	return script + `printf "[]"`
-}
-
-func routedPoolWorkQueryCommand(includeEphemeralReady bool, targets ...string) string {
-	args := []string{"sh", "-c", routedPoolWorkQueryProbeScript(includeEphemeralReady, len(targets)), "--"}
-	args = append(args, targets...)
-	return shellquote.Join(args)
-}
-
-// EffectiveWorkQuery returns the work query command for this agent.
-// If WorkQuery is set, returns it as-is. Otherwise returns the default
-// three-tier query with multi-identifier assignee resolution.
-//
-// Assignee resolution order: $GC_SESSION_ID (bead ID) > $GC_SESSION_NAME
-// (tmux session name) > $GC_ALIAS (named identity / qualified name).
-// All three are checked so work is found regardless of which identifier
-// was used when assigning.
-//
-// State priority: in_progress+assigned (crash recovery) >
-// ready+assigned (pre-assigned) > ready+unassigned+routed_to (pool).
-// Executable formula roots can be epic-typed; the bead storage policy decides
-// whether those roots are history-backed, no-history, or ephemeral for the
-// configured bd compatibility mode. Molecule containers are not routable
-// demand.
-//
-// Parent epics are excluded from the routed (pool) tier only
-// (--exclude-type=epic). An unassigned parent epic has no executable spec —
-// its semantic is "all children done" — so a pool worker claiming one does
-// undefined work (gc-udx; the repro is a routed parent epic, see
-// TestEffectiveWorkQuerySkipsEpicLeafScenario). The assigned tiers do NOT
-// exclude epics: work already assigned to this agent is owned, and the
-// patrol-loop pattern (gastown witness/refinery/deacon) can self-assign an
-// epic wisp that the agent must resume after a session restart. Excluding
-// epics there silently stranded those wisps (gc hook exited 1 with empty
-// output). Roles that need different behavior still opt in via an explicit
-// work_query in their agent config; that custom query is returned unchanged
-// above.
-//
-// When the reconciler runs the query for demand detection (no session
-// context), all identity vars are empty → assignee tiers skip → only
-// the routed_to tier fires to detect new demand.
-//
-// Tier 3's canonical and migration predicates are shared with
-// EffectivePoolDemandQuery so reconciler spawn decisions and worker claim
-// decisions stay symmetric.
-func (a *Agent) EffectiveWorkQuery() string {
-	return a.effectiveWorkQuery(false)
-}
-
-// EffectiveWorkQueryForBeads returns the default work query using the bd
-// compatibility semantics configured for the city.
-func (a *Agent) EffectiveWorkQueryForBeads(beads BeadsConfig) string {
-	return a.effectiveWorkQuery(beads.UsesBD105ReadySemantics())
-}
-
-func (a *Agent) effectiveWorkQuery(includeEphemeralReady bool) string {
-	if a.WorkQuery != "" {
-		return a.WorkQuery
-	}
-	target := a.poolDemandTarget()
-	legacyTarget := legacyWorkflowControlQualifiedName(target)
-	if legacyTarget == "" {
-		script := standardAssignedWorkQueryScript(includeEphemeralReady) +
-			poolDemandOriginGateScript() +
-			poolDemandFirstRowFunctionScript(includeEphemeralReady) +
-			`probe_pool_demand "$1"; ` +
-			`printf "[]"`
-		return shellquote.Join([]string{"sh", "-c", script, "--", target})
-	}
-	script := legacyControlAssignedWorkQueryScript(includeEphemeralReady) +
-		poolDemandOriginGateScript() +
-		poolDemandFirstRowFunctionScript(includeEphemeralReady) +
-		`probe_pool_demand "$1"; ` +
-		`probe_pool_demand "$2"; ` +
-		`printf "[]"`
-	return shellquote.Join([]string{"sh", "-c", script, "--", target, legacyTarget})
-}
-
-// EffectiveAssignedInProgressQuery returns the assigned-in-progress-only command
-// for prompt templates that spell out crash recovery as a separate startup tier.
-// A custom WorkQuery is treated as the caller-owned full discovery contract, so
-// split-tier prompts may run that same custom command in each query slot.
-func (a *Agent) EffectiveAssignedInProgressQuery() string {
-	return a.effectiveAssignedInProgressQuery(false)
-}
-
-// EffectiveAssignedInProgressQueryForBeads returns the assigned-in-progress
-// query using the bd compatibility semantics configured for the city.
-func (a *Agent) EffectiveAssignedInProgressQueryForBeads(beads BeadsConfig) string {
-	return a.effectiveAssignedInProgressQuery(beads.UsesBD105ReadySemantics())
-}
-
-func (a *Agent) effectiveAssignedInProgressQuery(includeEphemeralReady bool) string {
-	if a.WorkQuery != "" {
-		return a.WorkQuery
-	}
-	target := a.poolDemandTarget()
-	if legacyWorkflowControlQualifiedName(target) != "" {
-		return shellquote.Join([]string{"sh", "-c", legacyControlAssignedInProgressWorkQueryScript(includeEphemeralReady) + `printf "[]"`})
-	}
-	return shellquote.Join([]string{"sh", "-c", standardAssignedInProgressWorkQueryScript(includeEphemeralReady) + `printf "[]"`})
-}
-
-// EffectiveAssignedReadyQuery returns the assigned-ready-only command for
-// prompt templates that spell out claim-first startup in separate tiers. A
-// custom WorkQuery is treated as the caller-owned full discovery contract, so
-// split-tier prompts may run that same custom command in each query slot.
-func (a *Agent) EffectiveAssignedReadyQuery() string {
-	return a.effectiveAssignedReadyQuery(false)
-}
-
-// EffectiveAssignedReadyQueryForBeads returns the assigned-ready-only query
-// using the bd compatibility semantics configured for the city.
-func (a *Agent) EffectiveAssignedReadyQueryForBeads(beads BeadsConfig) string {
-	return a.effectiveAssignedReadyQuery(beads.UsesBD105ReadySemantics())
-}
-
-func (a *Agent) effectiveAssignedReadyQuery(includeEphemeralReady bool) string {
-	if a.WorkQuery != "" {
-		return a.WorkQuery
-	}
-	target := a.poolDemandTarget()
-	if legacyWorkflowControlQualifiedName(target) != "" {
-		return shellquote.Join([]string{"sh", "-c", legacyControlAssignedReadyWorkQueryScript(includeEphemeralReady) + `printf "[]"`})
-	}
-	return shellquote.Join([]string{"sh", "-c", standardAssignedReadyWorkQueryScript(includeEphemeralReady) + `printf "[]"`})
-}
-
-// EffectiveRoutedPoolQuery returns the routed-pool-only command for prompt
-// templates that spell out claim-first startup in separate tiers. It is the
-// prompt-side counterpart to EffectiveWorkQuery's routed pool tier.
-func (a *Agent) EffectiveRoutedPoolQuery() string {
-	return a.effectiveRoutedPoolQuery(false)
-}
-
-// EffectiveRoutedPoolQueryForBeads returns the routed-pool-only command using
-// the bd compatibility semantics configured for the city.
-func (a *Agent) EffectiveRoutedPoolQueryForBeads(beads BeadsConfig) string {
-	return a.effectiveRoutedPoolQuery(beads.UsesBD105ReadySemantics())
-}
-
-func (a *Agent) effectiveRoutedPoolQuery(includeEphemeralReady bool) string {
-	if a.WorkQuery != "" {
-		return a.WorkQuery
-	}
-	target := a.poolDemandTarget()
-	legacyTarget := legacyWorkflowControlQualifiedName(target)
-	if legacyTarget == "" {
-		return routedPoolWorkQueryCommand(includeEphemeralReady, target)
-	}
-	return routedPoolWorkQueryCommand(includeEphemeralReady, target, legacyTarget)
-}
-
-func legacyWorkflowControlQualifiedName(target string) string {
-	target = strings.TrimSpace(target)
-	if target == ControlDispatcherAgentName {
-		return "workflow-control"
-	}
-	const suffix = "/" + ControlDispatcherAgentName
-	if strings.HasSuffix(target, suffix) {
-		return strings.TrimSuffix(target, suffix) + "/workflow-control"
-	}
-	return ""
-}
-
-// EffectiveSlingQuery returns the sling query command template for this agent.
-// The template uses {} as a placeholder for the bead ID.
-// If SlingQuery is set, returns it as-is. Otherwise returns the default:
-// "bd update {} --set-metadata gc.routed_to=<template>"
-//
-// All agents use metadata-based routing. The reconciler and scale_check
-// handle session creation; sling just stamps the target template.
-func (a *Agent) EffectiveSlingQuery() string {
-	if a.SlingQuery != "" {
-		return a.SlingQuery
-	}
-	return a.DefaultSlingQuery()
-}
-
-// DefaultSlingQuery returns the built-in metadata-routing sling query for
-// this agent. Callers outside config should prefer this helper over rebuilding
-// the command string to preserve the bd boundary invariant.
-func (a *Agent) DefaultSlingQuery() string {
-	return "bd update {} --set-metadata gc.routed_to=" + a.QualifiedName()
-}
-
 // EffectiveDefaultSlingFormula returns the default sling formula for
 // this agent, or "" if none is set.
 func (a *Agent) EffectiveDefaultSlingFormula() string {
@@ -3779,280 +3643,6 @@ func (a *Agent) EffectiveDefaultSlingFormula() string {
 		return *a.InheritedDefaultSlingFormula
 	}
 	return ""
-}
-
-// DrainTimeoutDuration returns the drain timeout as a time.Duration.
-// Defaults to 5m if empty or unparseable.
-func (a *Agent) DrainTimeoutDuration() time.Duration {
-	if a.DrainTimeout == "" {
-		return 5 * time.Minute
-	}
-	dur, err := time.ParseDuration(a.DrainTimeout)
-	if err != nil {
-		return 5 * time.Minute
-	}
-	return dur
-}
-
-// EffectivePoolDemandQuery returns the count-form pool-demand query the
-// reconciler runs to detect new unassigned routed work. It is the
-// reconciler-side counterpart to EffectiveWorkQuery's Tier 3 (the worker
-// claim path): both derive their predicates from the same helpers so
-// any future change to the pool-demand shape flows to both paths
-// simultaneously.
-//
-// If ScaleCheck is set (user override), it takes precedence and is
-// returned as-is. Otherwise the default count-form is returned.
-//
-// Assigned in-progress work is resumed from session beads, so it must
-// not create additional generic pool demand here.
-//
-// See engdocs/architecture/dispatch.md "scale_check ↔ work_query
-// correspondence" and the protocol-mismatch class regression addressed
-// by PR #1516.
-func (a *Agent) EffectivePoolDemandQuery() string {
-	return a.effectivePoolDemandQuery(false)
-}
-
-// EffectivePoolDemandQueryForBeads returns the count-form demand query using
-// the bd compatibility semantics configured for the city.
-func (a *Agent) EffectivePoolDemandQueryForBeads(beads BeadsConfig) string {
-	return a.effectivePoolDemandQuery(beads.UsesBD105ReadySemantics())
-}
-
-func (a *Agent) effectivePoolDemandQuery(includeEphemeralReady bool) string {
-	if a.ScaleCheck != "" {
-		return a.ScaleCheck
-	}
-	target := a.poolDemandTarget()
-	return poolDemandCountShell(target, includeEphemeralReady)
-}
-
-// EffectiveScaleCheck returns the scale check command for this agent.
-// Pass-through to EffectivePoolDemandQuery for back-compat with code and
-// configs that name the predicate "scale_check"; new call sites should
-// prefer EffectivePoolDemandQuery to make the dependency on the
-// work_query predicate explicit.
-func (a *Agent) EffectiveScaleCheck() string {
-	return a.EffectivePoolDemandQuery()
-}
-
-// EffectiveMaxActiveSessions returns the agent's max active sessions.
-// Priority: agent.MaxActiveSessions > pool.Max > nil (unlimited).
-func (a *Agent) EffectiveMaxActiveSessions() *int {
-	return a.MaxActiveSessions // nil = unlimited (default)
-}
-
-// EffectiveMinActiveSessions returns the agent's min active sessions.
-func (a *Agent) EffectiveMinActiveSessions() int {
-	if a.MinActiveSessions != nil && *a.MinActiveSessions > 0 {
-		return *a.MinActiveSessions
-	}
-	return 0
-}
-
-// SupportsGenericEphemeralSessions reports whether the template may satisfy
-// generic controller demand with ephemeral sessions.
-func (a *Agent) SupportsGenericEphemeralSessions() bool {
-	if a == nil {
-		return false
-	}
-	if m := a.EffectiveMaxActiveSessions(); m != nil && *m == 0 {
-		return false
-	}
-	return true
-}
-
-// SupportsMultipleSessions reports whether the template may materialize more
-// than one distinct concrete session identity. Unlike
-// SupportsGenericEphemeralSessions, max_active_sessions = 0 still represents a
-// multi-session template shape even though generic ephemeral session creation
-// is disabled.
-func (a *Agent) SupportsMultipleSessions() bool {
-	if a == nil {
-		return false
-	}
-	if strings.TrimSpace(a.Namepool) != "" || len(a.NamepoolNames) > 0 {
-		return true
-	}
-	maxSessions := a.EffectiveMaxActiveSessions()
-	return maxSessions == nil || *maxSessions != 1
-}
-
-// UsesCanonicalSingletonPoolIdentity reports whether singleton pool-shaped
-// surfaces should use the configured agent identity instead of synthesizing a
-// slot identity such as "{name}-1".
-func (a *Agent) UsesCanonicalSingletonPoolIdentity() bool {
-	if a == nil {
-		return false
-	}
-	if strings.TrimSpace(a.Namepool) != "" || len(a.NamepoolNames) > 0 {
-		return false
-	}
-	maxSessions := a.EffectiveMaxActiveSessions()
-	return maxSessions != nil && *maxSessions == 1
-}
-
-// SupportsExpandedSessionIdentities reports whether callers should expose or
-// discover concrete member identities instead of only the configured identity.
-func (a *Agent) SupportsExpandedSessionIdentities() bool {
-	if a == nil {
-		return false
-	}
-	if m := a.EffectiveMaxActiveSessions(); m != nil && *m == 0 {
-		return false
-	}
-	return a.SupportsInstanceExpansion() && !a.UsesCanonicalSingletonPoolIdentity()
-}
-
-// SupportsInstanceExpansion reports whether the template may have multiple
-// simultaneously addressable concrete instances and therefore needs instance
-// discovery / synthetic member naming.
-//
-// max_active_sessions=1 has two distinct flavors:
-//
-//   - Pool agents (MinActiveSessions or ScaleCheck set) keep pool controller
-//     semantics. Non-namepool singleton pools still use the canonical
-//     configured identity; see UsesCanonicalSingletonPoolIdentity.
-//   - Named-session agents (MaxActiveSessions=1 with a [[named_session]]
-//     entry, no Min/ScaleCheck) addressed as just "{name}" — they have a
-//     stable canonical identity and a phantom "-1" suffix breaks tools that
-//     resolve by qualified name.
-//
-// We keep instance expansion on for the pool flavor so controller paths still
-// run pool reconciliation, and turn it off for the named-session flavor so the
-// bare name resolves correctly.
-func (a *Agent) SupportsInstanceExpansion() bool {
-	if a == nil {
-		return false
-	}
-	if strings.TrimSpace(a.Namepool) != "" || len(a.NamepoolNames) > 0 {
-		return true
-	}
-	m := a.EffectiveMaxActiveSessions()
-	if m == nil {
-		return true
-	}
-	if *m < 0 || *m > 1 {
-		return true
-	}
-	// *m == 1: distinguish pool agents (keep numbered instances) from
-	// named-session agents (collapse to base identity). Pool agents are
-	// identified by an explicit MinActiveSessions or a ScaleCheck override.
-	if a.MinActiveSessions != nil || strings.TrimSpace(a.ScaleCheck) != "" {
-		return true
-	}
-	return false
-}
-
-// HasUnlimitedSessionCapacity reports whether max_active_sessions is unbounded.
-func (a *Agent) HasUnlimitedSessionCapacity() bool {
-	if a == nil {
-		return false
-	}
-	m := a.EffectiveMaxActiveSessions()
-	return m == nil || *m < 0
-}
-
-// ResolvedMaxActiveSessions returns the effective max for this agent,
-// inheriting from rig then workspace if not set on the agent directly.
-func (a *Agent) ResolvedMaxActiveSessions(cfg *City) *int {
-	if m := a.EffectiveMaxActiveSessions(); m != nil {
-		return m
-	}
-	// Inherit from rig.
-	if a.Dir != "" && cfg != nil {
-		for _, rig := range cfg.Rigs {
-			if rig.Name == a.Dir && rig.MaxActiveSessions != nil {
-				return rig.MaxActiveSessions
-			}
-		}
-	}
-	// Inherit from workspace.
-	if cfg != nil && cfg.Workspace.MaxActiveSessions != nil {
-		return cfg.Workspace.MaxActiveSessions
-	}
-	return nil // unlimited
-}
-
-// EffectiveOnDeath returns the on_death command for this agent.
-// If OnDeath is set, returns it. Otherwise returns the default recovery hook
-// that unclaims in-progress work assigned to this concrete agent identity.
-func (a *Agent) EffectiveOnDeath() string {
-	return a.effectiveOnDeath(false)
-}
-
-// EffectiveOnDeathForBeads returns the default on_death command using the bd
-// compatibility semantics configured for the city.
-func (a *Agent) EffectiveOnDeathForBeads(beads BeadsConfig) string {
-	return a.effectiveOnDeath(beads.UsesBD105ReadySemantics())
-}
-
-func (a *Agent) effectiveOnDeath(includeEphemeralInProgress bool) string {
-	if a.OnDeath != "" {
-		return a.OnDeath
-	}
-	route := a.QualifiedName()
-	if a.PoolName != "" {
-		route = a.PoolName
-	}
-	_ = includeEphemeralInProgress
-	ephemeralRead := bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
-		`jq -r --arg assignee ` + shellquote.Quote(a.QualifiedName()) + ` '.[] | select((.assignee // "") == $assignee) | [.id, (.metadata["gc.run_target"] // ""), (.metadata["gc.routed_to"] // "")] | @tsv' 2>/dev/null; `
-	// Reset both assignee and status: clearing assignee alone leaves the bead
-	// invisible to every work_query tier (Tier 1 needs assignee match, Tiers
-	// 2/3 only match "ready" status). The next worker re-claims via Tier 3.
-	// If routed metadata is missing entirely, backfill the canonical
-	// gc.run_target route so reopened direct-assigned work does not stay
-	// invisible.
-	return `{ ` +
-		`bd list --assignee=` + a.QualifiedName() +
-		` --status=in_progress --json 2>/dev/null | ` +
-		`jq -r '.[] | [.id, (.metadata["gc.run_target"] // ""), (.metadata["gc.routed_to"] // "")] | @tsv' 2>/dev/null; ` +
-		ephemeralRead +
-		`} | ` +
-		`while IFS="$(printf '\t')" read -r id run_target routed_to; do ` +
-		`[ -z "$id" ] && continue; ` +
-		`if [ -n "$run_target" ] || [ -n "$routed_to" ]; then ` +
-		`bd update "$id" --assignee "" --status open 2>/dev/null; ` +
-		`else bd update "$id" --assignee "" --status open --set-metadata ` + shellquote.Quote("gc.run_target="+route) + ` 2>/dev/null; ` +
-		`fi; ` +
-		`done`
-}
-
-// EffectiveOnBoot returns the on_boot command for this agent.
-// If OnBoot is set, returns it. Otherwise returns the default recovery hook
-// that unclaims in-progress work routed to this backing config.
-func (a *Agent) EffectiveOnBoot() string {
-	return a.effectiveOnBoot(false)
-}
-
-// EffectiveOnBootForBeads returns the default on_boot command using the bd
-// compatibility semantics configured for the city.
-func (a *Agent) EffectiveOnBootForBeads(beads BeadsConfig) string {
-	return a.effectiveOnBoot(beads.UsesBD105ReadySemantics())
-}
-
-func (a *Agent) effectiveOnBoot(includeEphemeralInProgress bool) string {
-	if a.OnBoot != "" {
-		return a.OnBoot
-	}
-	template := a.QualifiedName()
-	if a.PoolName != "" {
-		template = a.PoolName
-	}
-	_ = includeEphemeralInProgress
-	ephemeralRead := bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
-		`jq -r --arg template "$template" '.[] | select((.assignee // "") == "") | select(((.metadata["gc.routed_to"] // "") == $template) or (((.metadata["gc.routed_to"] // "") == "") and ((.metadata["gc.run_target"] // "") == $template) and ((.metadata["gc.kind"] // "") == "workflow"))) | .id' 2>/dev/null; `
-	return `template=` + shellquote.Quote(template) + `; ` +
-		`{ ` +
-		`bd list --metadata-field "gc.routed_to=$template" --status=in_progress --no-assignee --json 2>/dev/null | ` +
-		`jq -r '.[].id' 2>/dev/null; ` +
-		`bd list --metadata-field "gc.run_target=$template" --metadata-field "gc.kind=workflow" --status=in_progress --no-assignee --json 2>/dev/null | ` +
-		`jq -r '.[] | select((.metadata["gc.routed_to"] // "") == "") | .id' 2>/dev/null; ` +
-		ephemeralRead +
-		`} | awk 'NF && !seen[$0]++' | ` +
-		`xargs -rI{} bd update {} --status open 2>/dev/null`
 }
 
 // InjectImplicitAgents adds on-demand agents for each explicitly configured
@@ -4208,6 +3798,19 @@ func ApplyAgentDefaults(cfg *City) {
 			}
 		}
 	}
+
+	// Upstream axis (Phase C): agents with no explicit upstream inherit the
+	// city-level default so model-serving selection can be set once city-wide.
+	if upstream := cfg.AgentDefaults.Upstream; upstream != "" {
+		for i := range cfg.Agents {
+			if cfg.Agents[i].Name == ControlDispatcherAgentName {
+				continue
+			}
+			if cfg.Agents[i].Upstream == "" {
+				cfg.Agents[i].Upstream = upstream
+			}
+		}
+	}
 }
 
 // DefaultOrderTrackingDeleteAfterClose is the canonical default closed-bead
@@ -4321,6 +3924,12 @@ func mergeAgentDefaults(dst *AgentDefaults, src AgentDefaults, label string, pro
 			prov.Warnings = append(prov.Warnings, fmt.Sprintf("agent_defaults.model redefined by %q", label))
 		}
 		dst.Model = src.Model
+	}
+	if src.Upstream != "" {
+		if prov != nil && dst.Upstream != "" && dst.Upstream != src.Upstream {
+			prov.Warnings = append(prov.Warnings, fmt.Sprintf("agent_defaults.upstream redefined by %q", label))
+		}
+		dst.Upstream = src.Upstream
 	}
 	if src.WakeMode != "" {
 		if prov != nil && dst.WakeMode != "" && dst.WakeMode != src.WakeMode {
@@ -4565,6 +4174,13 @@ func validateNamedSessions(cfg *City, requireBackingTemplate bool) (warnings []s
 		reservedSessionNames[sessionName] = identity
 		if s.ModeOrDefault() == "always" && agent != nil {
 			alwaysByTemplate[agent.QualifiedName()]++
+			if agent.EffectiveWakeMode() == "fresh" {
+				warnings = append(warnings, fmt.Sprintf(
+					"named_session %q: mode %q with wake_mode %q on template %q %s; use only for a deliberate restart-per-cycle actor",
+					s.QualifiedName(), s.ModeOrDefault(), agent.EffectiveWakeMode(), agent.QualifiedName(),
+					alwaysFreshWakeModeMarker,
+				))
+			}
 			if maxActive := agent.EffectiveMaxActiveSessions(); maxActive != nil && *maxActive < alwaysByTemplate[agent.QualifiedName()] {
 				return nil, fmt.Errorf(
 					"named_session %q: mode %q exceeds max_active_sessions capacity %d on template %q",
@@ -4581,6 +4197,20 @@ func validateNamedSessions(cfg *City, requireBackingTemplate bool) (warnings []s
 		}
 	}
 	return warnings, nil
+}
+
+// alwaysFreshWakeModeMarker is a stable substring on the warning emitted when a
+// mode="always" named session backs a wake_mode="fresh" template. CLI warning
+// classification keys off this marker, so keep it in sync with
+// IsAlwaysFreshWakeModeWarning.
+const alwaysFreshWakeModeMarker = "starts a fresh provider session after every drain"
+
+// IsAlwaysFreshWakeModeWarning reports whether a load warning is the non-fatal
+// always+fresh advisory. CLI warning filters use this to print the notice and
+// keep it non-fatal in strict mode. Keep in sync with
+// alwaysFreshWakeModeMarker.
+func IsAlwaysFreshWakeModeWarning(warning string) bool {
+	return strings.Contains(warning, alwaysFreshWakeModeMarker)
 }
 
 // disabledNamedSessionMarker is a stable suffix on the warning emitted when a
@@ -4673,6 +4303,16 @@ func validateDependsOn(agents []Agent) error {
 // ValidateRigs checks rig configurations for errors. It returns an error if
 // any rig is missing required fields, has duplicate names, or has colliding
 // prefixes. The hqPrefix is the city's HQ prefix for collision checks.
+//
+// Reserved coordination-class id-prefixes (gcg/gcm/gcs/gco/gcn) are not rejected
+// here. On a default city the relocated SQLite class stores are an identity
+// seam — every class store resolves to the work store and the by-id class-prefix
+// routing arm never fires — so a work prefix that shadows one is harmless until
+// the multi-backend fork makes per-class stores independently routable. Making
+// the prefix fatal would break gc start and config reload for an existing city
+// that already uses one, so ReservedPrefixWarnings surfaces it as a non-fatal
+// advisory instead. Promote it back into a hard error here once per-class
+// routing activates.
 func ValidateRigs(rigs []Rig, hqPrefix string) error {
 	seenNames := make(map[string]bool, len(rigs))
 	seenPrefixes := make(map[string]string) // lowercase prefix → rig name (for error messages)
@@ -4705,6 +4345,29 @@ func ValidateRigs(rigs []Rig, hqPrefix string) error {
 		seenPrefixes[prefix] = r.Name
 	}
 	return nil
+}
+
+// ReservedPrefixWarnings returns advisory warnings for any effective HQ or rig
+// work-store prefix that shadows a reserved coordination-class id-prefix
+// (gcg/gcm/gcs/gco/gcn). The relocated SQLite class stores that mint these
+// prefixes are an identity seam on a default city, so such a prefix is allowed
+// today (see ValidateRigs) and only becomes ambiguous once the multi-backend
+// fork activates per-class routing. Callers should surface these as non-fatal
+// operator warnings so an existing city or rig that already uses one keeps
+// starting and reloading while it still has time to rename. The hqPrefix must
+// already be site-bound resolved (e.g. via EffectiveHQPrefix).
+func ReservedPrefixWarnings(rigs []Rig, hqPrefix string) []string {
+	var warnings []string
+	if IsReservedClassPrefix(hqPrefix) {
+		warnings = append(warnings, fmt.Sprintf("HQ prefix %q is a reserved coordination-class id-prefix (%s); it is allowed today because class-store relocation is inert, but rename it before per-class stores activate or class ids will be ambiguous", strings.ToLower(strings.TrimSpace(hqPrefix)), reservedClassPrefixListText()))
+	}
+	for _, r := range rigs {
+		prefix := strings.ToLower(r.EffectivePrefix())
+		if IsReservedClassPrefix(prefix) {
+			warnings = append(warnings, fmt.Sprintf("rig %q prefix %q is a reserved coordination-class id-prefix (%s); it is allowed today because class-store relocation is inert, but rename it before per-class stores activate or class ids will be ambiguous", r.Name, prefix, reservedClassPrefixListText()))
+		}
+	}
+	return warnings
 }
 
 // DefaultCity returns a City with the given name and a single default
@@ -4818,17 +4481,28 @@ func GastownCity(name, provider, startCommand string) City {
 
 // GascityCityWithProviders returns a minimal managed city that imports the
 // public gascity planning/implementation skills pack: a single mayor agent
-// plus [imports.gascity] pinned to the registry release. The pack ships
-// skills and formulas only (no agents), so the city shape matches the
-// minimal template with the pack layered on top.
+// plus [imports.gc] (skills, formulas, and commands) pinned to the registry release.
+// The gascity formulas route their steps to role agents (gc.run-operator,
+// gc.requirements-planner, ...) that ship in the separate gc-roles subpack, so
+// the template also seeds that pack as a default rig import bound "gc" — every
+// rig added to the city then inherits the providerless, rig-scoped roles the
+// formulas coordinate. Without it a fresh city can discover a formula but fails
+// to launch with `agent "gc.run-operator" not found in city.toml` (gascity#3832).
 func GascityCityWithProviders(name, defaultProvider string, providers []string) City {
 	city := WizardCityWithProviders(name, defaultProvider, providers)
 	city.Imports = map[string]Import{
-		"gascity": {
+		"gc": {
 			Source:  PublicGascityPackSource,
 			Version: PublicGascityPackVersion,
 		},
 	}
+	city.DefaultRigImports = map[string]Import{
+		"gc": {
+			Source:  PublicGascityRolesPackSource,
+			Version: PublicGascityPackVersion,
+		},
+	}
+	city.DefaultRigImportOrder = []string{"gc"}
 	return city
 }
 
@@ -4936,6 +4610,9 @@ func Parse(data []byte) (*City, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
+	if err := validateStorageAuthoringSurface(md); err != nil {
+		return nil, fmt.Errorf("parsing config: %w", err)
+	}
 	normalizeAgentDefaultsAlias(&cfg, md)
 	applyDaemonFormulaV2Default(&cfg, md)
 	normalizeLegacyOrderOverrideAliases(&cfg)
@@ -4948,7 +4625,50 @@ func Parse(data []byte) (*City, error) {
 	for i := range cfg.Agents {
 		cfg.Agents[i].source = sourceInline
 	}
+	if err := validateConditionalWrites(cfg.Beads.ConditionalWrites); err != nil {
+		return nil, err
+	}
+	if err := validateGuardedRelease(cfg.Beads.GuardedRelease); err != nil {
+		return nil, err
+	}
+	// Parse sees one layer. Cross-layer storage invariants (six-class
+	// completeness, binding resolution) are checked on the composed root in
+	// LoadWithIncludesOptions, because a fragment may supply either half.
+	if err := validateStorageLayer(&cfg); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
+}
+
+// validateConditionalWrites rejects an out-of-enum beads.conditional_writes
+// value at load time. This gate selects a correctness discipline: a typo like
+// "requre" silently meaning "off" would leave an operator believing the epoch
+// fence is enforced while every write runs unfenced, so the config fails to
+// load instead. The empty string (unset) is valid and defaults to off.
+func validateConditionalWrites(raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	if _, err := gate.ParseMode(raw); err != nil {
+		return fmt.Errorf("beads.conditional_writes: %w", err)
+	}
+	return nil
+}
+
+// validateGuardedRelease rejects an out-of-enum beads.guarded_release value at
+// load time. Like conditional_writes, this gate selects a correctness
+// discipline: a typo silently meaning "off" would leave an operator believing
+// ownership-fenced release is enforced while every release runs owner-blind, so
+// the config fails to load instead. The empty string (unset) is valid and
+// defaults to off.
+func validateGuardedRelease(raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	if _, err := gate.ParseMode(raw); err != nil {
+		return fmt.Errorf("beads.guarded_release: %w", err)
+	}
+	return nil
 }
 
 // FormulaV2Enabled reports the effective formula-v2 setting. It is ENABLED by

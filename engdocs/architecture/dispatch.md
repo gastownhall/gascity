@@ -2,7 +2,7 @@
 title: "Dispatch (Sling)"
 ---
 
-> Last verified against code: 2026-05-21
+> Last verified against code: 2026-07-11
 
 ## Summary
 
@@ -275,6 +275,38 @@ regressions.
     gc-udx change added `--exclude-type=epic` to the worker path; this
     refactor adds that filter to the default count form and makes the
     equivalence structural rather than coincidental.
+
+## Store-scoped control-dispatcher ownership
+
+Every formulas v2 graph gets an auto-injected
+`gc.kind=workflow-finalize` sink and may contain other `gc.kind` control steps.
+The graph and its control beads live in the store selected for the launch:
+city graphs use the city store; rig graphs use the owning rig store.
+`graphroute.ControlDispatcherBinding` therefore selects the dispatcher from the
+same scope and stamps its canonical qualified route:
+
+| Graph store | Control route | Claiming dispatcher |
+|---|---|---|
+| City | `core.control-dispatcher` | City dispatcher |
+| Rig `fixture` | `fixture/core.control-dispatcher` | `fixture` dispatcher |
+
+The core pack declares an unscoped control-dispatcher agent. City import
+expansion materializes one city config and one config per rig.
+`max_active_sessions = 1` applies independently to each qualified config; it is
+not a fleet-wide singleton cap.
+
+Dispatcher startup follows the same route identity. The control-dispatcher tick
+keeps every configured copy in scope, scans city and rig stores for open routed
+control work, and keys desired-state demand by the canonical route. A missing or
+`runtime-missing` rig process is recovered by normal desired-state reconciliation
+without changing the bead's route. If no dispatcher is configured for the graph
+scope, graph decoration fails instead of creating unreachable work.
+
+Each dispatcher serve loop opens only its own store and claims its qualified
+route plus the binding-stripped alias from pre-1.3 builds. A rig dispatcher never
+accepts a city route, and a city dispatcher never stands in for a rig route.
+This keeps `gc.routed_to`, physical storage, demand, and the eventual executor
+in agreement.
 
 ## Interactions
 
