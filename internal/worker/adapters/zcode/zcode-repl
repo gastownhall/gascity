@@ -312,6 +312,7 @@ run_turn() {
     # the whole subtree and the pane's ^C reaches only this shell — we forward
     # it deliberately instead of hoping the CLI honors it.
     set -m
+
     if [[ -n "$2" ]]; then
         "$NODE_BIN" "$ZCODE_CJS" --json "--resume=$2" "--prompt=$1" \
             >"$turn_json" 2>"$turn_err" </dev/null &
@@ -321,6 +322,13 @@ run_turn() {
     fi
     turn_pid=$!
     set +m
+
+    # Announce only once the child exists. Announcing first is observably
+    # racy: an observer that interrupts the moment the pane says "busy" would
+    # arrive while turn_pid is still empty, stop_turn would have nothing to
+    # kill, and the turn would run to completion anyway (that is exactly how
+    # live WI-INT recorded a completed "interrupted" turn).
+    printf '%s\n' "$BUSY"
 
     # A trapped signal interrupts wait and yields 128+signo, which is not the
     # child's status. Re-wait until the child is genuinely reaped.
@@ -369,10 +377,28 @@ while :; do
     fi
 
     # Coalesce the rest of a pasted burst: gc sends the body, waits, then
-    # Enter, so a 1s idle window closes the paste without splitting it.
-    while IFS= read -r -t "$DRAIN_TIMEOUT" more; do
-        line+=$'\n'"$more"
+    # Enter, so a 1s idle window closes the paste without splitting it. A
+    # timed-out read still assigns whatever partial line arrived, so take it
+    # before breaking — otherwise the tail of the last line is silently lost.
+    while :; do
+        IFS= read -r -t "$DRAIN_TIMEOUT" more
+        drain_rc=$?
+        if (( drain_rc == 0 )); then
+            # A blank interior line reads as empty and must be kept: paragraph
+            # breaks are part of the prompt.
+            line+=$'\n'"$more"
+            continue
+        fi
+        if [[ -n "$more" ]]; then line+=$'\n'"$more"; fi
+        break
     done
+
+    # Prompts over tmux's send-keys literal limit arrive as a bracketed paste
+    # (paste-buffer -p), which wraps the body in ESC[200~ ... ESC[201~. Strip
+    # the whole sequences before the blanket ESC removal below, or their "[200~"
+    # tails survive inside the prompt text.
+    line="${line//$'\x1b'\[200~/}"
+    line="${line//$'\x1b'\[201~/}"
 
     # gc's pre-Enter Escape lands inside the prompt; drop it and any trailing
     # control bytes (which also trims the blank lines a drain can pick up).
@@ -392,12 +418,10 @@ while :; do
 
     printf '%s' "$line" >"$prompt_file"
 
-    # A headless turn prints nothing until it finishes, which leaves the pane
-    # showing the previous turn's ready marker as its last line — visually and
-    # programmatically indistinguishable from idle. Announce the turn so the
-    # pane's tail says "busy" for as long as it is.
-    printf '%s\n' "$BUSY"
-
+    # run_turn announces the turn once its child is live: a headless turn
+    # prints nothing until it finishes, so without that line the pane's last
+    # line stays the previous turn's ready marker — indistinguishable from idle
+    # to an operator and to gc.
     run_turn "$line" "$sid"
     rc=$?
 

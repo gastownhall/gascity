@@ -269,7 +269,13 @@ func (h *harness) start() *session {
 
 func (s *session) send(line string) {
 	s.t.Helper()
-	if _, err := io.WriteString(s.in, line+"\n"); err != nil && !strings.Contains(err.Error(), "broken pipe") {
+	s.sendRaw(line + "\n")
+}
+
+// sendRaw writes exactly what it is given, newlines included (or not).
+func (s *session) sendRaw(text string) {
+	s.t.Helper()
+	if _, err := io.WriteString(s.in, text); err != nil && !strings.Contains(err.Error(), "broken pipe") {
 		s.t.Fatalf("write prompt: %v", err)
 	}
 }
@@ -278,6 +284,18 @@ func (s *session) signal(sig syscall.Signal) {
 	s.t.Helper()
 	if err := syscall.Kill(-s.cmd.Process.Pid, sig); err != nil {
 		s.t.Fatalf("signal %v: %v", sig, err)
+	}
+}
+
+// waitForOutput blocks until needle appears in the adapter's stdout.
+func (s *session) waitForOutput(needle string, timeout time.Duration) {
+	s.t.Helper()
+	deadline := time.Now().Add(timeout)
+	for !strings.Contains(s.output(), needle) {
+		if time.Now().After(deadline) {
+			s.t.Fatalf("%q never appeared within %s:\n%s", needle, timeout, s.output())
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
@@ -489,6 +507,45 @@ func TestControlBytesAreStripped(t *testing.T) {
 	}
 }
 
+// tmux delivers prompts over its send-keys literal limit as a bracketed paste,
+// so the body arrives wrapped in ESC[200~ ... ESC[201~.
+func TestBracketedPasteWrappersAreStripped(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, nil)
+	body := "first paragraph\n\nsecond paragraph with a path: /tmp/out.txt"
+	_, code := h.run("\x1b[200~" + body + "\x1b[201~\x1b\n")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if got := h.prompts(); !equalStrings(got, []string{body}) {
+		t.Fatalf("prompts = %q, want the body verbatim %q", got, body)
+	}
+}
+
+// A drain read that times out still holds whatever partial line arrived; losing
+// it silently truncates the prompt's last line.
+func TestDrainKeepsPartialTrailingLine(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, nil)
+	s := h.start()
+	s.sendRaw("first line\n")
+	// No trailing newline, and a gap longer than the drain window.
+	s.sendRaw("trailing line without a newline")
+	time.Sleep(2500 * time.Millisecond)
+	s.sendRaw("\n")
+	time.Sleep(2500 * time.Millisecond)
+	if _, code := s.closeAndWait(); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+
+	joined := strings.Join(h.prompts(), "|")
+	if !strings.Contains(joined, "trailing line without a newline") {
+		t.Fatalf("partial trailing line was dropped; prompts = %q", h.prompts())
+	}
+}
+
 // Behavior 4: only the adapter emits the ready marker at column 0.
 func TestModelOutputCannotSpoofTheReadyMarker(t *testing.T) {
 	t.Parallel()
@@ -670,7 +727,10 @@ func TestInterruptKillsASigintIgnoringTurn(t *testing.T) {
 
 	s := h.start()
 	s.send("a turn that ignores interrupts")
-	time.Sleep(3 * time.Second) // well inside the stub's sleep
+	// Interrupt the instant the pane says busy. That is what an observer
+	// watching for the in-flight line does, so the announcement must not
+	// precede the child it describes.
+	s.waitForOutput("zcode-repl turn in flight", 20*time.Second)
 	s.signal(syscall.SIGINT)
 
 	// The adapter must report the turn as failed rather than block until the
