@@ -10,32 +10,53 @@
         "sessionID": "sess_zcode_phase1_reset",
         "role": "user",
         "parentID": "",
-        "time": {"created": 1770000100000}
+        "time": {
+          "created": 1770000000000
+        }
       },
       "parts": [
-        {"id": "part_msg_user_1", "type": "text", "text": "Repeat the exact ZCode phase-1 summary from earlier before answering."}
+        {
+          "id": "part_msg_user_1",
+          "type": "text",
+          "text": "Repeat the exact ZCode phase-1 summary from earlier before answering."
+        }
       ]
     },
     {
       "info": {
-        "id": "msg_assistant_1",
+        "id": "msg_assistant_2",
         "sessionID": "sess_zcode_phase1_reset",
         "role": "assistant",
         "parentID": "msg_user_1",
-        "time": {"created": 1770000101000},
+        "time": {
+          "created": 1770000000000
+        },
         "usage": {
           "source": "provider",
           "modelRequestCount": 1,
-          "inputTokens": 9820,
-          "outputTokens": 16,
-          "totalTokens": 9836,
-          "cacheReadTokens": 0,
-          "cacheWriteTokens": 0
+          "inputTokens": 11721,
+          "outputTokens": 12,
+          "totalTokens": 11733,
+          "cacheReadTokens": 2368,
+          "cacheWriteTokens": 0,
+          "reasoningTokens": 0,
+          "webFetchRequests": 0,
+          "webSearchRequests": 0
         },
-        "projection": {"status": "idle", "turnCount": 1, "totalTokenCount": 9836}
+        "projection": {
+          "status": "idle",
+          "turnCount": 1,
+          "totalTokenCount": 11733,
+          "contextUsed": 11733,
+          "contextWindow": 1000000
+        }
       },
       "parts": [
-        {"id": "part_msg_assistant_1", "type": "text", "text": "I cannot repeat the earlier ZCode summary because this session started fresh."}
+        {
+          "id": "part_msg_assistant_2",
+          "type": "text",
+          "text": "I cannot repeat the earlier ZCode summary because this session started fresh."
+        }
       ]
     }
   ]
