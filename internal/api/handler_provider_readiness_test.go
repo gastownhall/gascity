@@ -46,11 +46,13 @@ func TestReadinessRegistrySync(t *testing.T) {
 		}
 	}
 
-	wantProviderKeys := []string{"antigravity", "claude", "codex", "gemini", "mimocode", "pi"}
+	wantProviderKeys := []string{"antigravity", "claude", "codex", "gemini", "mimocode", "pi", "zcode"}
 	if got := slices.Sorted(maps.Keys(supportedProviderReadiness)); !slices.Equal(got, wantProviderKeys) {
 		t.Fatalf("supportedProviderReadiness keys = %v, want %v", got, wantProviderKeys)
 	}
-	wantProviderOrder := []string{"claude", "codex", "gemini", "mimocode", "pi", "antigravity"}
+	// Order follows BuiltinProviderOrder, where zcode sits after mimocode and
+	// before pi.
+	wantProviderOrder := []string{"claude", "codex", "gemini", "mimocode", "zcode", "pi", "antigravity"}
 	if got := ProviderReadinessNames(); !slices.Equal(got, wantProviderOrder) {
 		t.Fatalf("ProviderReadinessNames() = %v, want %v", got, wantProviderOrder)
 	}
@@ -90,6 +92,58 @@ func stagePiProbeBinary(t *testing.T, homeDir string) {
 		t.Fatalf("mkdir user bin: %v", err)
 	}
 	writeExecutable(t, userBin, "pi", "#!/bin/sh\nexit 0\n")
+}
+
+// stageZCodeProbeBinary installs a stub zcode-repl adapter into homeDir's
+// ~/.local/bin so findProbeBinary resolves it.
+func stageZCodeProbeBinary(t *testing.T, homeDir string) {
+	t.Helper()
+	userBin := filepath.Join(homeDir, ".local", "bin")
+	if err := os.MkdirAll(userBin, 0o755); err != nil {
+		t.Fatalf("mkdir user bin: %v", err)
+	}
+	writeExecutable(t, userBin, "zcode-repl", "#!/bin/sh\nexit 0\n")
+}
+
+func TestProbeZCodeNotInstalled(t *testing.T) {
+	homeDir := t.TempDir()
+	pinProbeSearchPath(t, homeDir)
+
+	result := probeZCode(homeDir)
+	if result.status != probeStatusNotInstalled {
+		t.Fatalf("probeZCode status = %q, want %q (detail %q)", result.status, probeStatusNotInstalled, result.detail)
+	}
+}
+
+func TestProbeZCodeNeedsBundleAndKey(t *testing.T) {
+	homeDir := t.TempDir()
+	pinProbeSearchPath(t, homeDir)
+	stageZCodeProbeBinary(t, homeDir)
+
+	t.Setenv("ZCODE_CJS", "")
+	t.Setenv("ZCODE_API_KEY", "")
+	if result := probeZCode(homeDir); result.status != probeStatusInvalidConfiguration {
+		t.Fatalf("missing bundle status = %q, want %q", result.status, probeStatusInvalidConfiguration)
+	}
+
+	t.Setenv("ZCODE_CJS", filepath.Join(homeDir, "absent.cjs"))
+	if result := probeZCode(homeDir); result.status != probeStatusInvalidConfiguration {
+		t.Fatalf("absent bundle status = %q, want %q", result.status, probeStatusInvalidConfiguration)
+	}
+
+	bundle := filepath.Join(homeDir, "zcode.cjs")
+	if err := os.WriteFile(bundle, []byte("// bundle\n"), 0o644); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	t.Setenv("ZCODE_CJS", bundle)
+	if result := probeZCode(homeDir); result.status != probeStatusNeedsAuth {
+		t.Fatalf("missing key status = %q, want %q", result.status, probeStatusNeedsAuth)
+	}
+
+	t.Setenv("ZCODE_API_KEY", "not-a-real-key")
+	if result := probeZCode(homeDir); result.status != probeStatusConfigured {
+		t.Fatalf("configured status = %q, want %q (detail %q)", result.status, probeStatusConfigured, result.detail)
+	}
 }
 
 func TestProbeMimoCodeNotInstalled(t *testing.T) {

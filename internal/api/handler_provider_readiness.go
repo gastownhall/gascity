@@ -16,6 +16,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/searchpath"
+	zcodeadapter "github.com/gastownhall/gascity/internal/worker/adapters/zcode"
 	"gopkg.in/yaml.v3"
 )
 
@@ -58,6 +59,7 @@ var (
 		"gemini":      {},
 		"mimocode":    {},
 		"pi":          {},
+		"zcode":       {},
 	}
 	supportedReadiness = readinessItemSet{
 		"antigravity": {},
@@ -67,6 +69,7 @@ var (
 		"github_cli":  {},
 		"mimocode":    {},
 		"pi":          {},
+		"zcode":       {},
 	}
 	readinessProbeSpecs = map[string]readinessProbeSpec{
 		"claude": {
@@ -107,6 +110,13 @@ var (
 			kind:        probeKindProvider,
 			probe: func(_ context.Context, homeDir string) providerProbeResult {
 				return probePi(homeDir)
+			},
+		},
+		"zcode": {
+			displayName: "ZCode (Z.ai GLM harness)",
+			kind:        probeKindProvider,
+			probe: func(_ context.Context, homeDir string) providerProbeResult {
+				return probeZCode(homeDir)
 			},
 		},
 		"github_cli": {
@@ -549,6 +559,36 @@ func probePi(homeDir string) providerProbeResult {
 			return providerProbeResult{status: probeStatusNeedsAuth, detail: "missing ~/.pi/agent/auth.json"}
 		}
 		return providerProbeResult{status: probeStatusProbeError, detail: fmt.Sprintf("failed to stat %s", authPath)}
+	}
+	return providerProbeResult{status: probeStatusConfigured}
+}
+
+// probeZCode reports readiness for the ZCode harness. ZCode ships no
+// launchable CLI of its own, so "installed" means the engine's adapter is on
+// the probe path (see internal/worker/adapters/zcode) and the adapter's two
+// hard preconditions are satisfied: a readable CLI bundle at ZCODE_CJS, and a
+// credential in ZCODE_API_KEY. There is no on-disk credential store to fall
+// back to — ZCode reads its key from the environment.
+func probeZCode(homeDir string) providerProbeResult {
+	if _, ok := findProbeBinary(zcodeadapter.ExecutableName, homeDir); !ok {
+		return providerProbeResult{
+			status: probeStatusNotInstalled,
+			detail: fmt.Sprintf("%s adapter not found in probe PATH", zcodeadapter.ExecutableName),
+		}
+	}
+
+	bundle := strings.TrimSpace(os.Getenv("ZCODE_CJS"))
+	if bundle == "" {
+		return providerProbeResult{status: probeStatusInvalidConfiguration, detail: "set ZCODE_CJS to the ZCode CLI bundle"}
+	}
+	if _, err := os.Stat(bundle); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return providerProbeResult{status: probeStatusInvalidConfiguration, detail: fmt.Sprintf("ZCODE_CJS %s does not exist", bundle)}
+		}
+		return providerProbeResult{status: probeStatusProbeError, detail: fmt.Sprintf("failed to read ZCODE_CJS %s", bundle)}
+	}
+	if strings.TrimSpace(os.Getenv("ZCODE_API_KEY")) == "" {
+		return providerProbeResult{status: probeStatusNeedsAuth, detail: "set ZCODE_API_KEY"}
 	}
 	return providerProbeResult{status: probeStatusConfigured}
 }
