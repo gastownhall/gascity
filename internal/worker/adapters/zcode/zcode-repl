@@ -123,6 +123,36 @@ done
 # zcode-transcripts, so the default mirrors there; the env var overrides it.
 transcript_dir="${GC_ZCODE_TRANSCRIPT_DIR:-$HOME/.local/share/gascity/zcode-transcripts}"
 
+# A conversation reset has to orphan the prior conversation's PLAINTEXT too,
+# not just the sid. Two copies survive an epoch bump otherwise, and the model
+# will read either of them:
+#
+#   - this adapter's own export mirror of the pre-reset turns, which sits in
+#     the same directory as the fresh one (observed live: after a correct reset
+#     into a genuinely fresh session, GLM reproduced the pre-reset anchor
+#     byte-exact out of the mirror file);
+#   - the ZCode CLI's session sqlite, which lives under $HOME/.zcode and which
+#     ZCODE_STORAGE_DIR does not relocate.
+#
+# So the mirror is epoch-scoped exactly like the sid, superseded epochs are
+# swept, and the CLI child gets a per-epoch HOME so its own history cannot
+# outlive the conversation it belongs to.
+mirror_root="$transcript_dir"
+transcript_dir="$transcript_dir/$sid_name#$continuation_epoch"
+for stale in "$mirror_root/$sid_name"#*; do
+    if [[ -d "$stale" && "$stale" != "$transcript_dir" ]]; then rm -rf "$stale"; fi
+done
+mkdir -p "$transcript_dir"
+
+# Per-epoch HOME for the CLI child only; this shell keeps the real HOME so the
+# sid and mirror paths above are unaffected.
+zcode_home_root="$state_home/gascity/zcode/homes"
+zcode_home="$zcode_home_root/$sid_name#$continuation_epoch"
+for stale in "$zcode_home_root/$sid_name"#*; do
+    if [[ -d "$stale" && "$stale" != "$zcode_home" ]]; then rm -rf "$stale"; fi
+done
+mkdir -p "$zcode_home"
+
 sid=""
 sid_unvalidated=0
 if [[ -r "$sid_path" ]]; then
@@ -396,10 +426,10 @@ run_turn() {
     set -m
 
     if [[ -n "$2" ]]; then
-        "$NODE_BIN" "$ZCODE_CJS" --json "--resume=$2" "--prompt=$1" \
+        HOME="$zcode_home" "$NODE_BIN" "$ZCODE_CJS" --json "--resume=$2" "--prompt=$1" \
             >"$turn_json" 2>"$turn_err" </dev/null &
     else
-        "$NODE_BIN" "$ZCODE_CJS" --json "--prompt=$1" \
+        HOME="$zcode_home" "$NODE_BIN" "$ZCODE_CJS" --json "--prompt=$1" \
             >"$turn_json" 2>"$turn_err" </dev/null &
     fi
     turn_pid=$!

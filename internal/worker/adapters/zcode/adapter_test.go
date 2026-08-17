@@ -33,6 +33,12 @@ args = sys.argv[2:]
 with open(os.environ["STUB_LOG"], "a", encoding="utf-8") as fh:
     fh.write(json.dumps(args) + "\n")
 
+home = os.environ.get("HOME", "")
+if home:
+    os.makedirs(home, exist_ok=True)
+    with open(os.path.join(home, "child-home"), "w", encoding="utf-8") as fh:
+        fh.write(home + "\n")
+
 # A control file lets a test flip behavior between turns of a running adapter,
 # which the parent's environment cannot do once the child is launched.
 ctl = os.environ.get("STUB_CTL")
@@ -995,6 +1001,58 @@ func TestExportMirrorPublishesTheUserTurnBeforeTheReply(t *testing.T) {
 	}
 }
 
+// A conversation reset must orphan the prior conversation's plaintext, not just
+// its sid: the model can read a stale mirror straight off disk (observed live —
+// GLM reproduced a pre-reset anchor byte-exact out of one).
+func TestResetSweepsTheSupersededEpochsState(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, map[string]string{"STUB_SID": "sess_epoch_one"})
+	h.env["GC_CONTINUATION_EPOCH"] = "1"
+	h.run("first conversation\n")
+
+	oldMirror := filepath.Join(h.mirrorDir, h.epochScope(), "sess_epoch_one.json")
+	if _, err := os.Stat(oldMirror); err != nil {
+		t.Fatalf("epoch 1 mirror missing: %v", err)
+	}
+	oldHome := filepath.Join(h.home, ".local", "state", "gascity", "zcode", "homes", h.epochScope())
+	if _, err := os.Stat(oldHome); err != nil {
+		t.Fatalf("epoch 1 CLI home missing: %v", err)
+	}
+
+	h.env["GC_CONTINUATION_EPOCH"] = "2"
+	h.env["STUB_SID"] = "sess_epoch_two"
+	h.run("fresh conversation\n")
+
+	if _, err := os.Stat(oldMirror); !os.IsNotExist(err) {
+		t.Fatalf("superseded epoch's transcript survived the reset: %v", err)
+	}
+	if _, err := os.Stat(oldHome); !os.IsNotExist(err) {
+		t.Fatalf("superseded epoch's CLI state survived the reset: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(h.mirrorDir, h.epochScope(), "sess_epoch_two.json")); err != nil {
+		t.Fatalf("epoch 2 mirror missing: %v", err)
+	}
+}
+
+// The CLI child must not write its session database into the pane's HOME, or a
+// reset cannot orphan it.
+func TestCLIChildGetsAPerEpochHome(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, map[string]string{"STUB_SID": "sess_home"})
+	h.run("a turn\n")
+
+	want := filepath.Join(h.home, ".local", "state", "gascity", "zcode", "homes", h.epochScope())
+	data, err := os.ReadFile(filepath.Join(want, "child-home"))
+	if err != nil {
+		t.Fatalf("CLI child did not run with the per-epoch HOME: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != want {
+		t.Fatalf("child HOME = %q, want %q", got, want)
+	}
+}
+
 // Config preconditions fail closed with EX_CONFIG, never a half-live pane.
 func TestMissingConfigExitsSeventyEight(t *testing.T) {
 	t.Parallel()
@@ -1043,9 +1101,19 @@ type mirrorExport struct {
 	} `json:"messages"`
 }
 
+// epochScope mirrors the adapter's per-epoch mirror directory, which is how a
+// conversation reset orphans the prior conversation's plaintext.
+func (h *harness) epochScope() string {
+	epoch := h.env["GC_CONTINUATION_EPOCH"]
+	if epoch == "" {
+		epoch = "1"
+	}
+	return h.env["GC_SESSION"] + "#" + epoch
+}
+
 func (h *harness) readExport(sessionID string) mirrorExport {
 	h.t.Helper()
-	data, err := os.ReadFile(filepath.Join(h.mirrorDir, sessionID+".json"))
+	data, err := os.ReadFile(filepath.Join(h.mirrorDir, h.epochScope(), sessionID+".json"))
 	if err != nil {
 		h.t.Fatalf("read export mirror: %v", err)
 	}
