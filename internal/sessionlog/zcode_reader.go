@@ -1,8 +1,11 @@
 package sessionlog
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 )
 
 // ZCode (Z.ai's GLM harness) keeps its sessions in a sqlite database under
@@ -38,4 +41,44 @@ func DefaultZCodeSearchPaths() []string {
 		return nil
 	}
 	return []string{filepath.Join(home, ".local", "share", "gascity", "zcode-transcripts")}
+}
+
+// FindZCodeSessionFileByID resolves a ZCode mirror by provider session id. The
+// adapter names each mirror "<session-id>.json", so the id keys the file
+// exactly; the embedded info.directory is still checked so an id from another
+// work dir can never match. Returns "" when the id is empty or unsafe as a
+// path component.
+func FindZCodeSessionFileByID(searchPaths []string, workDir, sessionID string) string {
+	sessionID = strings.TrimSpace(sessionID)
+	workDir = cleanOpenCodeWorkDir(workDir)
+	if sessionID == "" || workDir == "" {
+		return ""
+	}
+	if strings.Contains(sessionID, "..") || strings.ContainsAny(sessionID, `/\`) {
+		return ""
+	}
+	var (
+		bestPath string
+		bestTime time.Time
+	)
+	for _, root := range mergeZCodeSearchPaths(searchPaths) {
+		_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil || entry.IsDir() || entry.Name() != sessionID+".json" {
+				return nil //nolint:nilerr // a missing root is simply no match
+			}
+			if cleanOpenCodeWorkDir(openCodeExportDirectory(path)) != workDir {
+				return nil
+			}
+			info, err := entry.Info()
+			if err != nil {
+				return nil
+			}
+			if bestPath == "" || info.ModTime().After(bestTime) {
+				bestPath = path
+				bestTime = info.ModTime()
+			}
+			return nil
+		})
+	}
+	return bestPath
 }

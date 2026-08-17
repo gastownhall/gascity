@@ -158,3 +158,42 @@ func TestDefaultZCodeSearchPaths(t *testing.T) {
 		t.Fatalf("DefaultZCodeSearchPaths()[0] = %q, want %q", paths[0], want)
 	}
 }
+
+func TestFindZCodeSessionFileByIDIsExact(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "project")
+	scoped := filepath.Join(root, "worker#1")
+	if err := os.MkdirAll(scoped, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	write := func(dir, id, directory string) string {
+		path := filepath.Join(dir, id+".json")
+		body := `{"info":{"id":"` + id + `","directory":"` + filepath.ToSlash(directory) + `"},"messages":[]}`
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+		return path
+	}
+	wanted := write(scoped, "sess_wanted", workDir)
+	other := write(scoped, "sess_other", workDir)
+
+	// A newer sibling must not win an identity lookup.
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(other, future, future); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	if got := FindZCodeSessionFileByID([]string{root}, workDir, "sess_wanted"); got != wanted {
+		t.Fatalf("FindZCodeSessionFileByID() = %q, want %q", got, wanted)
+	}
+
+	// An id from a different work dir never matches.
+	if got := FindZCodeSessionFileByID([]string{root}, filepath.Join(t.TempDir(), "elsewhere"), "sess_wanted"); got != "" {
+		t.Fatalf("cross-workdir match = %q, want empty", got)
+	}
+	// Path traversal is refused.
+	for _, unsafe := range []string{"../escape", "a/b", ".."} {
+		if got := FindZCodeSessionFileByID([]string{root}, workDir, unsafe); got != "" {
+			t.Fatalf("unsafe id %q resolved to %q", unsafe, got)
+		}
+	}
+}

@@ -1537,6 +1537,24 @@ func mergePaths(defaults, extras []string) []string {
 	return result
 }
 
+// WholeFileJSONFamily reports whether a provider family stores each session as
+// one whole-file JSON document (an OpenCode-shaped `{info, messages}` export or
+// a mirror of one) rather than as append-only JSONL.
+//
+// Two tail heuristics are meaningless for these families and must not be
+// applied: a tail chunk of a pretty-printed JSON document always "starts mid
+// line", so the malformed-tail heuristic fires on every healthy file; and
+// activity cannot be read from a trailing record, because the document is
+// rewritten whole on each turn.
+func WholeFileJSONFamily(provider string) bool {
+	switch ProviderFamily(provider) {
+	case "opencode", "mimocode", "zcode":
+		return true
+	default:
+		return false
+	}
+}
+
 // ProviderFamily returns the canonical transcript provider family for provider.
 func ProviderFamily(provider string) string {
 	p := strings.ToLower(strings.TrimSpace(provider))

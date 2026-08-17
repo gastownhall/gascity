@@ -235,7 +235,7 @@ func (h *SessionHandle) State(ctx context.Context) (State, error) {
 			return state, nil
 		}
 		if path, pathErr := h.manager.TranscriptPath(id, h.adapter.SearchPaths); pathErr == nil && strings.TrimSpace(path) != "" {
-			if activity, actErr := h.adapter.TailActivity(path); actErr == nil && activity == TailActivityInTurn {
+			if activity, actErr := h.adapter.TailActivityForProvider(h.historyProvider(info), path); actErr == nil && activity == TailActivityInTurn {
 				state.Phase = PhaseBusy
 			}
 		}

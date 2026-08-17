@@ -62,6 +62,13 @@ func DiscoverKeyedPath(searchPaths []string, provider, workDir, gcSessionID stri
 		return sessionlog.FindPiSessionFileByID(searchPaths, workDir, gcSessionID)
 	case "antigravity":
 		return sessionlog.FindAntigravitySessionFileByID(searchPaths, workDir, gcSessionID)
+	case "zcode":
+		// The zcode mirror filename IS the provider session id, so an identity
+		// lookup is exact. It is not keyed by gc's session id, which is why
+		// SupportsIDLookup stays false: without an identity the family still
+		// discovers by cwd. Preferring the keyed hit removes the newest-wins
+		// ambiguity when several sessions share a work dir.
+		return sessionlog.FindZCodeSessionFileByID(searchPaths, workDir, gcSessionID)
 	}
 	if !SupportsIDLookup(provider) {
 		return ""
