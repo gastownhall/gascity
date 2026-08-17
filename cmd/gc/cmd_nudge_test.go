@@ -1779,14 +1779,17 @@ func TestSendMailNotifyWithWorkerManagedQueueFailureDoesNotWake(t *testing.T) {
 	}
 }
 
-// TestSendMailNotifyQueuesIndependentRemindersForEachMail is a regression
-// guard for the deferred-reminder race in gc-ub7: every `gc mail send --notify`
-// to a non-live recipient must queue its own reminder, even when an earlier
-// mail reminder for the same recipient is still pending (unread). The
-// queued-nudge layer must not collapse distinct mail arrivals — neither by ID
-// dedup nor by supersession — so the recipient learns about each mail rather
-// than only the first that crossed the no-unread -> has-unread boundary.
-func TestSendMailNotifyQueuesIndependentRemindersForEachMail(t *testing.T) {
+// TestSendMailNotifyCollapsesSameSenderKeepsSendersIndependent pins the
+// sender-stamped reminder shape (dip-kiflqd, revising gc-ub7's per-mail pin):
+// a second PENDING "You have mail from X" is byte-identical to the first and
+// delivering both is exactly the echo class the mail-state gate exists to
+// kill, so same-sender pending reminders collapse to the newest via reference
+// supersession — while reminders for DIFFERENT senders stay independent.
+// gc-ub7's underlying race stays covered without per-mail pending items:
+// supersession touches only pending/in-flight entries, so a reminder that
+// already delivered (or terminalized any other way) never blocks the next
+// mail's fresh reminder from queueing.
+func TestSendMailNotifyCollapsesSameSenderKeepsSendersIndependent(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
 	store := openNudgeBeadStore(dir)
@@ -1824,14 +1827,32 @@ func TestSendMailNotifyQueuesIndependentRemindersForEachMail(t *testing.T) {
 			t.Fatalf("sendMailNotifyWithWorker(call %d): %v", i+1, err)
 		}
 	}
+	// A third mail from a DIFFERENT sender queues its own reminder.
+	if err := sendMailNotifyWithWorker(target, store, fake, "mayor"); err != nil {
+		t.Fatalf("sendMailNotifyWithWorker(other sender): %v", err)
+	}
 
 	pending, inFlight, dead, err := listQueuedNudgesForTarget(dir, target, time.Now())
 	if err != nil {
 		t.Fatalf("listQueuedNudgesForTarget: %v", err)
 	}
 	if len(pending) != 2 {
-		t.Fatalf("pending reminders = %d, want 2 (the second mail must not be deduped against the still-unread first); pending=%#v inFlight=%#v dead=%#v", len(pending), pending, inFlight, dead)
+		t.Fatalf("pending reminders = %d, want 2 (same-sender pair collapsed to the newest + the other sender's own reminder); pending=%#v inFlight=%#v dead=%#v", len(pending), pending, inFlight, dead)
 	}
+	senders := map[string]int{}
+	for _, item := range pending {
+		if item.Reference == nil || item.Reference.Kind != "mail-sender" {
+			t.Fatalf("pending item %q lacks the mail-sender reference stamp: %#v", item.ID, item.Reference)
+		}
+		senders[item.Reference.ID]++
+	}
+	if senders["human"] != 1 || senders["mayor"] != 1 {
+		t.Fatalf("pending senders = %v, want exactly one reminder per sender", senders)
+	}
+	if len(dead) != 1 || dead[0].LastError != "superseded" {
+		t.Fatalf("dead = %#v, want exactly the older same-sender reminder retired as superseded", dead)
+	}
+	_ = inFlight
 }
 
 // TestSendMailNotifyWithWorkerLiveBusySessionDoesNotDoubleDeliver is a
@@ -2634,9 +2655,9 @@ func TestTryDeliverQueuedNudgesByPollerTerminalizesReadMailReminders(t *testing.
 	idleSince := time.Now().Add(-10 * time.Second)
 	fake.Activity = map[string]time.Time{info.SessionName: idleSince}
 
-	prevUnread := mailReminderUnreadCount
-	t.Cleanup(func() { mailReminderUnreadCount = prevUnread })
-	mailReminderUnreadCount = func(nudgeTarget, beads.Store) (int, error) { return 0, nil }
+	prevUnread := mailReminderUnreadSenders
+	t.Cleanup(func() { mailReminderUnreadSenders = prevUnread })
+	mailReminderUnreadSenders = func(nudgeTarget, beads.Store) (map[string]int, error) { return nil, nil }
 
 	target := nudgeTarget{
 		cityPath:    dir,
@@ -2673,6 +2694,57 @@ func TestTryDeliverQueuedNudgesByPollerTerminalizesReadMailReminders(t *testing.
 	}
 }
 
+// TestSplitSatisfiedMailRemindersIsPerSender is the falsifier for the
+// dip-kiflqd 17:57Z specimen: reminders for two read+archived mails re-fired
+// because ONE unrelated mail was legitimately unread — the inbox-empty proxy
+// kept every stale reminder alive on any busy inbox. The gate must judge each
+// reminder against ITS sender's unread state: stale senders retire, the
+// unread sender's reminder stays deliverable, and a reference-stamped item is
+// judged by its stamp even when the message text disagrees.
+func TestSplitSatisfiedMailRemindersIsPerSender(t *testing.T) {
+	prevUnread := mailReminderUnreadSenders
+	t.Cleanup(func() { mailReminderUnreadSenders = prevUnread })
+	mailReminderUnreadSenders = func(nudgeTarget, beads.Store) (map[string]int, error) {
+		return map[string]int{"reviewer-c": 1}, nil
+	}
+	now := time.Now()
+	staleA := newQueuedNudgeWithOptions("pl", "You have mail from reviewer-a", "mail", now, queuedNudgeOptions{})
+	staleB := newQueuedNudgeWithOptions("pl", "You have mail from reviewer-b", "mail", now, queuedNudgeOptions{})
+	liveC := newQueuedNudgeWithOptions("pl", "You have mail from reviewer-c", "mail", now, queuedNudgeOptions{})
+	// Reference stamp wins over message text: stamped sender is unread even
+	// though the text names a stale sender.
+	stampedLive := newQueuedNudgeWithOptions("pl", "You have mail from reviewer-a", "mail", now, queuedNudgeOptions{
+		Reference: &nudgeReference{Kind: "mail-sender", ID: "reviewer-c"},
+	})
+	other := newQueuedNudgeWithOptions("pl", "review the deploy logs", "session", now, queuedNudgeOptions{})
+
+	deliverable, satisfied := splitSatisfiedMailReminders(nudgeTarget{}, nil, []queuedNudge{staleA, staleB, liveC, stampedLive, other})
+	if len(satisfied) != 2 {
+		t.Fatalf("satisfied = %d items, want exactly the two stale-sender reminders", len(satisfied))
+	}
+	for _, item := range satisfied {
+		if item.ID != staleA.ID && item.ID != staleB.ID {
+			t.Fatalf("retired %q (%s), want only the stale-sender reminders", item.Message, item.ID)
+		}
+	}
+	if len(deliverable) != 3 {
+		t.Fatalf("deliverable = %d items, want live sender + stamped item + non-mail item", len(deliverable))
+	}
+
+	// Legacy shape with an unrecoverable sender: retires only on a fully
+	// empty inbox, exactly the pre-stamp behavior.
+	legacy := newQueuedNudgeWithOptions("pl", "mail arrived", "mail", now, queuedNudgeOptions{})
+	deliverable, satisfied = splitSatisfiedMailReminders(nudgeTarget{}, nil, []queuedNudge{legacy})
+	if len(deliverable) != 1 || len(satisfied) != 0 {
+		t.Fatalf("unrecoverable sender with unread mail present: deliverable=%d satisfied=%d, want 1/0", len(deliverable), len(satisfied))
+	}
+	mailReminderUnreadSenders = func(nudgeTarget, beads.Store) (map[string]int, error) { return nil, nil }
+	deliverable, satisfied = splitSatisfiedMailReminders(nudgeTarget{}, nil, []queuedNudge{legacy})
+	if len(deliverable) != 0 || len(satisfied) != 1 {
+		t.Fatalf("unrecoverable sender with empty inbox: deliverable=%d satisfied=%d, want 0/1", len(deliverable), len(satisfied))
+	}
+}
+
 // TestTryDeliverQueuedNudgesByPollerKeepsUnreadMailReminders pins the other
 // half of the mail-state gate: while the recipient still HAS unread mail, the
 // reminder is live and must deliver normally.
@@ -2697,9 +2769,11 @@ func TestTryDeliverQueuedNudgesByPollerKeepsUnreadMailReminders(t *testing.T) {
 	idleSince := time.Now().Add(-10 * time.Second)
 	fake.Activity = map[string]time.Time{info.SessionName: idleSince}
 
-	prevUnread := mailReminderUnreadCount
-	t.Cleanup(func() { mailReminderUnreadCount = prevUnread })
-	mailReminderUnreadCount = func(nudgeTarget, beads.Store) (int, error) { return 2, nil }
+	prevUnread := mailReminderUnreadSenders
+	t.Cleanup(func() { mailReminderUnreadSenders = prevUnread })
+	mailReminderUnreadSenders = func(nudgeTarget, beads.Store) (map[string]int, error) {
+		return map[string]int{"human": 2}, nil
+	}
 
 	target := nudgeTarget{
 		cityPath:    dir,

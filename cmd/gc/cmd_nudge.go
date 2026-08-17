@@ -1330,8 +1330,13 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 			}
 		}
 	}
+	// Stamp the sender on the queued item so the mail-state supersession gate
+	// can retire this reminder the moment the recipient has no unread mail
+	// from that sender — exact truth instead of the inbox-empty proxy.
+	mailOpts := queuedNudgeOptionsFromTarget(target)
+	mailOpts.Reference = &nudgeReference{Kind: "mail-sender", ID: sender}
 	if !obs.Running && canRequestManagedNudgeWake(target, store) {
-		item := newQueuedNudgeWithOptions(target.agentKey(), msg, "mail", now, queuedNudgeOptionsFromTarget(target))
+		item := newQueuedNudgeWithOptions(target.agentKey(), msg, "mail", now, mailOpts)
 		if err := enqueueManagedNudgeThenWake(target, store, item); err != nil {
 			return err
 		}
@@ -1342,7 +1347,7 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 		}
 		return nil
 	}
-	if err := enqueueQueuedNudge(target.cityPath, newQueuedNudgeWithOptions(target.agentKey(), msg, "mail", now, queuedNudgeOptionsFromTarget(target))); err != nil {
+	if err := enqueueQueuedNudge(target.cityPath, newQueuedNudgeWithOptions(target.agentKey(), msg, "mail", now, mailOpts)); err != nil {
 		return err
 	}
 	if obs.Running {
@@ -1826,29 +1831,52 @@ func blockedQueuedNudgeReason(sessFront *session.Store, item queuedNudge) (strin
 	}
 }
 
-// mailReminderUnreadCount reports the recipient's current unread mail count
-// for the mail-state supersession gate below. It is a package var so tests can
-// pin the mailbox state without a live mail store. The production reader mirrors
-// `gc mail check <agent>`: the same message-store class resolution and the same
-// recipient identity the notify path enqueued the reminder under.
-var mailReminderUnreadCount = func(target nudgeTarget, store beads.Store) (int, error) {
+// mailReminderUnreadSenders reports the recipient's current unread mail keyed
+// by sender, for the mail-state supersession gate below. It is a package var so
+// tests can pin the mailbox state without a live mail store. The production
+// reader mirrors `gc mail check <agent>`: the same message-store class
+// resolution and the same recipient identity the notify path enqueued the
+// reminder under.
+var mailReminderUnreadSenders = func(target nudgeTarget, store beads.Store) (map[string]int, error) {
 	msgStore := resolveMailMessagesStore(cliStorageRoutes(target.cityPath), store, target.cfg, target.cityPath, nil)
 	mp := newMailProviderWithSessionStore(msgStore, cliSessionStore(store, target.cfg, target.cityPath))
 	msgs, err := mp.Inbox(target.agentKey())
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	return len(msgs), nil
+	senders := make(map[string]int, len(msgs))
+	for _, m := range msgs {
+		senders[m.From]++
+	}
+	return senders, nil
+}
+
+// mailReminderSender recovers the sender a "You have mail" reminder is about:
+// the enqueue-stamped mail-sender reference when present, else parsed from
+// gc's own notify format for items enqueued before the stamp existed. Empty
+// means the sender is unrecoverable and only a fully empty inbox can prove the
+// reminder extinct.
+func mailReminderSender(item queuedNudge) string {
+	if item.Reference != nil && item.Reference.Kind == "mail-sender" {
+		return strings.TrimSpace(item.Reference.ID)
+	}
+	if rest, ok := strings.CutPrefix(item.Message, "You have mail from "); ok {
+		return strings.TrimSpace(rest)
+	}
+	return ""
 }
 
 // splitSatisfiedMailReminders separates source:mail reminders whose purpose is
-// extinct — the recipient has NO unread mail, so "You have mail" is a stale
-// echo — from still-live items (dip-lvsq3c). The mail store is the truth for a
-// mail reminder; delivery confirmation is a transport proxy that fails exactly
-// on busy sessions, which is what let the same reminder re-inject at every
-// safe boundary. A read error or any unread mail keeps EVERY item deliverable
-// (fail-closed toward delivery: a live reminder must never be dropped on a
-// store hiccup).
+// extinct from still-live items (dip-lvsq3c). The mail store is the truth for
+// a mail reminder; delivery confirmation is a transport proxy that fails
+// exactly on busy sessions, which is what let the same reminder re-inject at
+// every safe boundary. The check is PER SENDER, not inbox-empty: "You have
+// mail from X" is extinct exactly when the recipient has no unread mail from
+// X — one unrelated unread message must not keep every stale reminder alive
+// (the dip-kiflqd 17:57Z specimen: two read+archived mails re-reminded because
+// a third, unrelated mail was legitimately unread). A read error keeps EVERY
+// item deliverable (fail-closed toward delivery: a live reminder must never be
+// dropped on a store hiccup).
 func splitSatisfiedMailReminders(target nudgeTarget, store beads.Store, items []queuedNudge) (deliverable, satisfied []queuedNudge) {
 	hasMail := false
 	for _, item := range items {
@@ -1860,12 +1888,22 @@ func splitSatisfiedMailReminders(target nudgeTarget, store beads.Store, items []
 	if !hasMail {
 		return items, nil
 	}
-	unread, err := mailReminderUnreadCount(target, store)
-	if err != nil || unread > 0 {
+	senders, err := mailReminderUnreadSenders(target, store)
+	if err != nil {
 		return items, nil
 	}
 	for _, item := range items {
-		if item.Source == "mail" {
+		if item.Source != "mail" {
+			deliverable = append(deliverable, item)
+			continue
+		}
+		sender := mailReminderSender(item)
+		extinct := senders[sender] == 0
+		if sender == "" {
+			// Unrecoverable sender: only the pre-stamp criterion applies.
+			extinct = len(senders) == 0
+		}
+		if extinct {
 			satisfied = append(satisfied, item)
 			continue
 		}
