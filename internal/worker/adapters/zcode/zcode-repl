@@ -352,21 +352,30 @@ except OSError as exc:
     print(f"zcode-repl: transcript mirror failed: {exc}", file=sys.stderr)
 PY
 
-# A headless turn prints nothing until it finishes, so without an announcement
-# the pane's last line stays the previous turn's ready marker — indistinguishable
-# from idle to an operator and to anything watching the pane.
+# A headless turn prints nothing until it finishes, so the pane needs an
+# explicit busy/idle signal — and it has to be exact in BOTH directions.
 #
-# The announcement must be transient, not just present. A busy line that
-# survives into the next idle period is worse than none: gc's interrupt path
-# watches the pane to decide the turn is really in flight, and a leftover line
-# from the previous turn made it fire while this shell was still reading stdin,
-# so there was no child to kill and the "interrupted" turn ran to completion
-# (observed live, twice). On a tty the line is therefore written without a
-# newline and erased when the turn ends, so it exists exactly while the turn
-# does. Off a tty (piped, as in tests) it is a plain line.
+# Busy must be visible: without an announcement the pane's last line stays the
+# previous turn's ready marker for the whole turn, which reads as idle.
+#
+# Idle must be absent: the announcement has to replace the ready marker rather
+# than follow it. gc decides readiness by scanning the pane tail for a line
+# starting with ready_prompt_prefix, so a marker still sitting above a busy
+# line means gc reads a busy pane as idle and delivers (or interrupts) into a
+# turn already in flight. A busy indicator that merely coexists with the
+# marker also let the live interrupt leg fire before this shell had even read
+# the prompt, so there was no child to kill and the "interrupted" turn ran to
+# completion (observed live, twice).
+#
+# So on a tty the announcement overwrites the marker line in place and is
+# erased when the turn ends, leaving the pane's tail carrying exactly one of
+# the two states at any moment. Off a tty (piped, as in tests) both are plain
+# lines and ordering carries the same information.
 announce_turn() {
     if [[ -t 1 ]]; then
-        printf '%s' "$BUSY"
+        # Up one line, to column 0, erase: the ready marker was the last thing
+        # printed, and it must not read as idle while this turn runs.
+        printf '\033[1A\r\033[2K%s' "$BUSY"
     else
         printf '%s\n' "$BUSY"
     fi
