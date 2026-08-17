@@ -765,6 +765,20 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 		if delivered {
 			continue
 		}
+		// Mirror dispatchAllQueuedNudges' skip accounting (nudge_dispatcher.go):
+		// a live, running target that didn't get a delivery this tick is the
+		// same "not-delivered" class the supervisor dispatcher already counts
+		// into State.DispatchSkips -- most commonly tryDeliverQueuedNudgesByPoller's
+		// quiescence gate rejecting a continuously busy session. Without this,
+		// the legacy per-session poll loop (the common deployment shape) left
+		// that skip with no trace at all; see #5317.
+		skipReason := "not-delivered"
+		if pollErr != nil {
+			skipReason = "not-delivered-error"
+		}
+		if recErr := recordNudgeDispatchSkips(target.cityPath, map[string]int64{skipReason: 1}); recErr != nil {
+			fmt.Fprintf(stderr, "gc nudge poll: recording dispatch skip counter: %v\n", recErr) //nolint:errcheck
+		}
 		time.Sleep(interval)
 	}
 }

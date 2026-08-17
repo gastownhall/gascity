@@ -3074,6 +3074,95 @@ func TestCmdNudgePollSurvivesTransientObserveErrors(t *testing.T) {
 	}
 }
 
+// TestCmdNudgePollRecordsDispatchSkipForBusyTarget verifies the legacy
+// per-session poll loop (cmdNudgePoll) records the same "not-delivered"
+// skip counter the supervisor dispatcher already records for a matched,
+// live, running target that didn't get a delivery this tick (see
+// dispatchAllQueuedNudges in nudge_dispatcher.go and
+// TestCmdNudgeStatusSurfacesDispatchSkips above). Before the fix, a
+// continuously busy target failing tryDeliverQueuedNudgesByPoller's
+// quiescence gate left zero trace in a city running per-session pollers --
+// the deployment shape #5317 reports against.
+func TestCmdNudgePollRecordsDispatchSkipForBusyTarget(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := t.TempDir()
+	writeNamedSessionCityTOML(t, cityDir)
+	t.Setenv("GC_CITY", cityDir)
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	created, err := store.Create(beads.Bead{
+		Title:  "Session: worker",
+		Type:   session.BeadType,
+		Status: "open",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "worker-session",
+			"agent_name":   "worker",
+			"template":     "worker",
+			"state":        string(session.StateActive),
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create session: %v", err)
+	}
+	item := newQueuedNudgeWithOptions("worker", "stop and re-read the plan", "human", time.Now().Add(-time.Minute), queuedNudgeOptions{
+		SessionID: created.ID,
+	})
+	if err := enqueueQueuedNudgeWithStore(cityDir, beads.NudgesStore{Store: store}, item); err != nil {
+		t.Fatalf("enqueueQueuedNudgeWithStore: %v", err)
+	}
+
+	const busyTicks = 3
+	observeCalls := 0
+	origObserve := nudgeObserveTarget
+	nudgeObserveTarget = func(_ nudgeTarget, _ beads.Store, _ runtime.Provider) (worker.LiveObservation, error) {
+		observeCalls++
+		if observeCalls <= busyTicks {
+			// Continuously busy: LastActivity is always "just now", so
+			// pollerSessionIdleEnough never clears the quiescence gate and
+			// tryDeliverQueuedNudgesByPoller returns (false, nil) before it
+			// ever reaches claimDueQueuedNudgesForTarget -- the #5317 root
+			// cause.
+			last := time.Now()
+			return worker.LiveObservation{Running: true, LastActivity: &last}, nil
+		}
+		// End the busy window under test and let the poller exit cleanly.
+		if err := ackQueuedNudges(cityDir, []string{item.ID}); err != nil {
+			t.Errorf("ackQueuedNudges: %v", err)
+		}
+		return worker.LiveObservation{Running: false}, nil
+	}
+	defer func() { nudgeObserveTarget = origObserve }()
+
+	var stdout, stderr bytes.Buffer
+	code := cmdNudgePoll([]string{created.ID}, "worker-session", time.Millisecond, time.Hour, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdNudgePoll = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if observeCalls <= busyTicks {
+		t.Fatalf("observe calls = %d, want more than %d busy ticks", observeCalls, busyTicks)
+	}
+
+	var jsonOut, jsonErr bytes.Buffer
+	if code := cmdNudgeStatus([]string{created.ID}, true, &jsonOut, &jsonErr); code != 0 {
+		t.Fatalf("cmdNudgeStatus --json = %d, want 0; stderr=%s", code, jsonErr.String())
+	}
+	var result nudgeStatusJSON
+	if err := json.Unmarshal(jsonOut.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, jsonOut.String())
+	}
+	if result.DispatchSkips["not-delivered"] < busyTicks {
+		t.Fatalf("dispatch_skips[not-delivered] = %d, want at least %d (one per busy poll tick, mirroring dispatchAllQueuedNudges' accounting)", result.DispatchSkips["not-delivered"], busyTicks)
+	}
+}
+
 func TestCmdNudgeDrainStampsLastNudgeDeliveredAt(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
