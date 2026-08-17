@@ -351,6 +351,13 @@ test('leaf-owned runtime exports stay available through the barrel', () => {
   assert.equal(leafMakeNodeKey, makeNodeKey);
   assert.equal(SCOPE_REF_RE.test('rig:demo-app'), true);
   assert.equal(CITY_NAME_RE.test('demo-city'), true);
+  // Grammar mirrors the supervisor registry (internal/supervisor/registry.go's
+  // validCityName): dotted/underscored names are reachable, but a name must
+  // still start with an alphanumeric character (gascity#5316).
+  assert.equal(CITY_NAME_RE.test('demo.city'), true);
+  assert.equal(CITY_NAME_RE.test('demo_city'), true);
+  assert.equal(CITY_NAME_RE.test('.demo-city'), false);
+  assert.equal(CITY_NAME_RE.test('demo/city'), false);
   assert.equal(makeNodeKey('bead', 'b-1', 'rig:demo-app'), 'bead:rig:demo-app:b-1');
 });
 
