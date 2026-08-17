@@ -179,6 +179,8 @@ func ReadProviderFile(provider, path string, tailCompactions int) (*Session, err
 		sess, err = ReadMimoCodeFile(path, tailCompactions)
 	case "opencode":
 		sess, err = ReadOpenCodeFile(path, tailCompactions)
+	case "zcode":
+		sess, err = ReadZCodeFile(path, tailCompactions)
 	case "pi":
 		sess, err = ReadPiFile(path, tailCompactions)
 	case "antigravity":
@@ -259,6 +261,8 @@ func ReadProviderFileRaw(provider, path string, tailCompactions int) (*Session, 
 		sess, err = ReadMimoCodeFile(path, tailCompactions)
 	case "opencode":
 		sess, err = ReadOpenCodeFile(path, tailCompactions)
+	case "zcode":
+		sess, err = ReadZCodeFile(path, tailCompactions)
 	case "pi":
 		sess, err = ReadPiFile(path, tailCompactions)
 	case "antigravity":
@@ -572,6 +576,8 @@ func FindSessionFileForProvider(searchPaths []string, provider, workDir string) 
 		return FindMimoCodeSessionFile(searchPaths, workDir)
 	case "opencode":
 		return FindOpenCodeSessionFile(searchPaths, workDir)
+	case "zcode":
+		return FindZCodeSessionFile(searchPaths, workDir)
 	case "pi":
 		return FindPiSessionFile(searchPaths, workDir)
 	case "antigravity":
@@ -611,6 +617,8 @@ func FindProviderFallbackSessionFile(searchPaths []string, provider, workDir str
 		return FindMimoCodeSessionFile(searchPaths, workDir)
 	case "opencode":
 		return FindOpenCodeSessionFile(searchPaths, workDir)
+	case "zcode":
+		return FindZCodeSessionFile(searchPaths, workDir)
 	case "pi":
 		return FindPiSessionFile(searchPaths, workDir)
 	case "antigravity":
@@ -1555,6 +1563,8 @@ func ProviderFamily(provider string) string {
 		return "mimocode"
 	case strings.Contains(p, "opencode") || providerComponent(p, "groq") || providerComponent(p, "cerebras"):
 		return "opencode"
+	case strings.Contains(p, "zcode"):
+		return "zcode"
 	case strings.Contains(p, "antigravity"):
 		return "antigravity"
 	case p == "pi" || strings.HasPrefix(p, "pi/") || strings.HasSuffix(p, "/pi") || strings.HasSuffix(p, "-pi") || strings.Contains(p, "-pi/") ||
