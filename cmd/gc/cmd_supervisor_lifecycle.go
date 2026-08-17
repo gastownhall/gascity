@@ -42,6 +42,8 @@ var (
 	supervisorReadyPollInterval              = 100 * time.Millisecond
 	supervisorSystemdWarmRefreshStopTimeout  = 5 * time.Second
 	supervisorSystemdWarmRefreshPollInterval = 100 * time.Millisecond
+	supervisorLaunchdStopTimeout             = 45 * time.Second
+	supervisorLaunchdStopPollInterval        = 250 * time.Millisecond
 	supervisorLaunchctlRun                   = func(args ...string) error {
 		return exec.Command("launchctl", args...).Run()
 	}
@@ -802,14 +804,32 @@ func durablyStopSupervisorLaunchd(label, plistPath string) []error {
 			errs = append(errs, fmt.Errorf("launchctl unload %s: %w", plistPath, unloadErr))
 		}
 	}
-	if loaded, detail := supervisorLaunchdLoaded(label); loaded {
-		err := fmt.Errorf("launchd target %s is still loaded after stop", target)
-		if detail != "" {
-			err = fmt.Errorf("%w: %s", err, detail)
-		}
+	if err := waitForSupervisorLaunchdAbsent(label, target); err != nil {
 		errs = append(errs, err)
 	}
 	return errs
+}
+
+func waitForSupervisorLaunchdAbsent(label, target string) error {
+	deadline := time.Now().Add(supervisorLaunchdStopTimeout)
+	var lastDetail string
+	for {
+		loaded, detail := supervisorLaunchdLoaded(label)
+		if !loaded {
+			return nil
+		}
+		if detail != "" {
+			lastDetail = detail
+		}
+		if !time.Now().Before(deadline) {
+			err := fmt.Errorf("launchd target %s is still loaded after stop", target)
+			if lastDetail != "" {
+				err = fmt.Errorf("%w: %s", err, lastDetail)
+			}
+			return err
+		}
+		time.Sleep(supervisorLaunchdStopPollInterval)
+	}
 }
 
 func newSupervisorLogsCmd(stdout, stderr io.Writer) *cobra.Command {

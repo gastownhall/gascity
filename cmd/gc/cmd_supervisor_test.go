@@ -2479,6 +2479,65 @@ func TestUnloadSupervisorServiceDarwinDisablesBootsOutAndVerifiesAbsent(t *testi
 	}
 }
 
+func TestUnloadSupervisorServiceDarwinWaitsThroughSIGTERMedUntilAbsent(t *testing.T) {
+	if goruntime.GOOS != "darwin" {
+		t.Skip("launchd path only applies on darwin")
+	}
+	homeDir := t.TempDir()
+	gcHome := filepath.Join(t.TempDir(), "isolated-home")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", gcHome)
+
+	path := supervisorLaunchdPlistPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("<plist/>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	oldRun := supervisorLaunchctlRun
+	oldLoaded := supervisorLaunchdLoaded
+	oldTimeout := supervisorLaunchdStopTimeout
+	oldPoll := supervisorLaunchdStopPollInterval
+	var calls []string
+	var checks int
+	supervisorLaunchctlRun = func(args ...string) error {
+		calls = append(calls, strings.Join(args, " "))
+		return nil
+	}
+	supervisorLaunchdLoaded = func(label string) (bool, string) {
+		checks++
+		if checks < 3 {
+			return true, "state = SIGTERMed\npid = 4242\nlabel = " + label
+		}
+		return false, ""
+	}
+	supervisorLaunchdStopTimeout = time.Second
+	supervisorLaunchdStopPollInterval = time.Millisecond
+	t.Cleanup(func() {
+		supervisorLaunchctlRun = oldRun
+		supervisorLaunchdLoaded = oldLoaded
+		supervisorLaunchdStopTimeout = oldTimeout
+		supervisorLaunchdStopPollInterval = oldPoll
+	})
+
+	if err := unloadSupervisorService(); err != nil {
+		t.Fatalf("unloadSupervisorService returned error: %v", err)
+	}
+	if checks < 3 {
+		t.Fatalf("launchd loaded checks = %d, want polling through SIGTERMed", checks)
+	}
+	target := supervisorLaunchdServiceTarget(supervisorLaunchdLabel())
+	wantCalls := []string{
+		"disable " + target,
+		"bootout " + target,
+	}
+	if strings.Join(calls, "|") != strings.Join(wantCalls, "|") {
+		t.Fatalf("launchctl calls = %v, want %v", calls, wantCalls)
+	}
+}
+
 func TestUnloadSupervisorServiceDarwinFailsWhenTargetStillLoaded(t *testing.T) {
 	if goruntime.GOOS != "darwin" {
 		t.Skip("launchd path only applies on darwin")
@@ -2498,13 +2557,19 @@ func TestUnloadSupervisorServiceDarwinFailsWhenTargetStillLoaded(t *testing.T) {
 
 	oldRun := supervisorLaunchctlRun
 	oldLoaded := supervisorLaunchdLoaded
+	oldTimeout := supervisorLaunchdStopTimeout
+	oldPoll := supervisorLaunchdStopPollInterval
 	supervisorLaunchctlRun = func(_ ...string) error { return nil }
 	supervisorLaunchdLoaded = func(label string) (bool, string) {
 		return true, "state = running\npid = 4242\nlabel = " + label
 	}
+	supervisorLaunchdStopTimeout = 5 * time.Millisecond
+	supervisorLaunchdStopPollInterval = time.Millisecond
 	t.Cleanup(func() {
 		supervisorLaunchctlRun = oldRun
 		supervisorLaunchdLoaded = oldLoaded
+		supervisorLaunchdStopTimeout = oldTimeout
+		supervisorLaunchdStopPollInterval = oldPoll
 	})
 
 	err := unloadSupervisorService()
