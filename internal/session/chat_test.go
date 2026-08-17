@@ -46,6 +46,81 @@ func TestSessionMutationLocksArePerSession(t *testing.T) {
 	close(releaseFirst)
 }
 
+// TestStripSessionIDFlag pins the first-start counterpart of stripResumeFlag.
+// Without it, a dead "claude ... --session-id <key>" first start retried
+// byte-identically, and claude rejects a reused id ("Session ID <uuid> is
+// already in use", exit 1), so the retry could never succeed.
+func TestStripSessionIDFlag(t *testing.T) {
+	tests := []struct {
+		name          string
+		cmd           string
+		sessionIDFlag string
+		sessionKey    string
+		want          string
+	}{
+		{
+			name:          "removes session id flag and key at end",
+			cmd:           "claude --dangerously-skip-permissions --session-id abc-123",
+			sessionIDFlag: "--session-id",
+			sessionKey:    "abc-123",
+			want:          "claude --dangerously-skip-permissions",
+		},
+		{
+			name:          "removes session id flag mid-command",
+			cmd:           "claude --session-id abc-123 --effort max",
+			sessionIDFlag: "--session-id",
+			sessionKey:    "abc-123",
+			want:          "claude --effort max",
+		},
+		{
+			name:          "removes equals form",
+			cmd:           "claude --session-id=abc-123 --effort max",
+			sessionIDFlag: "--session-id",
+			sessionKey:    "abc-123",
+			want:          "claude --effort max",
+		},
+		{
+			name:          "different key is left alone",
+			cmd:           "claude --session-id other-key",
+			sessionIDFlag: "--session-id",
+			sessionKey:    "abc-123",
+			want:          "claude --session-id other-key",
+		},
+		{
+			name:          "empty session id flag",
+			cmd:           "claude --session-id abc-123",
+			sessionIDFlag: "",
+			sessionKey:    "abc-123",
+			want:          "claude --session-id abc-123",
+		},
+		{
+			name:          "empty session key",
+			cmd:           "claude --session-id abc-123",
+			sessionIDFlag: "--session-id",
+			sessionKey:    "",
+			want:          "claude --session-id abc-123",
+		},
+		{
+			// Same no-op contract as stripResumeFlag: callers detect a no-op by
+			// exact equality, so a non-replacement path must not trim.
+			name:          "no strip preserves surrounding whitespace",
+			cmd:           "  claude --effort max  ",
+			sessionIDFlag: "--session-id",
+			sessionKey:    "abc-123",
+			want:          "  claude --effort max  ",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := stripSessionIDFlag(tt.cmd, tt.sessionIDFlag, tt.sessionKey)
+			if got != tt.want {
+				t.Errorf("stripSessionIDFlag(%q, %q, %q) = %q, want %q",
+					tt.cmd, tt.sessionIDFlag, tt.sessionKey, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestStripResumeFlag(t *testing.T) {
 	tests := []struct {
 		name       string

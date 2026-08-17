@@ -62,6 +62,36 @@ func stripResumeFlag(cmd, resumeFlag, sessionKey string) string {
 	return strings.TrimSpace(result)
 }
 
+// stripSessionIDFlag removes the fresh-start session-id flag and its key from a
+// command string. It is the first-start counterpart to stripResumeFlag: a
+// session launched with "claude ... --session-id <key>" never carries the resume
+// flag, so the resume strip is a no-op on it and the retry would otherwise
+// respawn the command byte-identically. That replay is worse than useless —
+// claude 2.1.233 rejects a reused id outright ("Error: Session ID <uuid> is
+// already in use.", exit 1), so every retry dies the same way.
+//
+// Both the space form ("--session-id <key>") and the equals form
+// ("--session-id=<key>") are handled. Like stripResumeFlag, a no-op returns cmd
+// exactly so callers can detect it by equality.
+func stripSessionIDFlag(cmd, sessionIDFlag, sessionKey string) string {
+	if sessionIDFlag == "" || sessionKey == "" {
+		return cmd
+	}
+	for _, target := range []string{
+		sessionIDFlag + " " + sessionKey,
+		sessionIDFlag + "=" + sessionKey,
+	} {
+		result := strings.Replace(cmd, " "+target, "", 1)
+		if result == cmd {
+			result = strings.Replace(cmd, target+" ", "", 1)
+		}
+		if result != cmd {
+			return strings.TrimSpace(result)
+		}
+	}
+	return cmd
+}
+
 // stripResumeFlagArg removes the generated resume flag/key pair from cmd,
 // regardless of the key's value. It is the value-agnostic fallback for
 // stripResumeFlag: when the session_key embedded in the resume command at build
@@ -178,6 +208,10 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 	}
 	resumeFlag := b.Metadata["resume_flag"]
 	freshCmd := stripResumeFlag(resumeCommand, resumeFlag, b.Metadata["session_key"])
+	// A first start carries "<session_id_flag> <key>", not the resume flag, so
+	// the strip above cannot touch it. Remove it here or the retry replays the
+	// dead command verbatim against an id the provider now considers taken.
+	freshCmd = stripSessionIDFlag(freshCmd, b.Metadata["session_id_flag"], b.Metadata["session_key"])
 	if err := m.clearStaleResumeMetadata(id, b); err != nil {
 		if unroute != nil {
 			unroute()
