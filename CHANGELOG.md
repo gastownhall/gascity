@@ -91,7 +91,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that fights gc's own managed server for the same data directory. `gc bd`
   now detects that suggestion in bd's stderr and appends a corrective hint
   pointing at the actual remedy (`gc start` / `gc dolt restart`) alongside
-  bd's original output, without altering bd's own exit code
+  bd's original output, without altering bd's own exit code. The hint fires
+  only for gc-managed Dolt endpoints, whose lifecycle gc owns; externally
+  bound or explicitly configured endpoints keep bd's own output unchanged
   (gastownhall/gascity#1374).
 
 - **ACP activity is now available across process boundaries.** ACP

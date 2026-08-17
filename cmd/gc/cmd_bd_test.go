@@ -1791,6 +1791,54 @@ name = "demo"
 	t.Setenv("GC_DOLT_PORT", port)
 }
 
+// managedDoltTestSetup is silentFallbackTestSetup for a Dolt endpoint gc
+// actually manages. The difference is the scope config: managed_city origin
+// with no explicit dolt.host/dolt.port, so the endpoint resolves from the
+// managed runtime state writeReachableManagedDoltState wrote and reports
+// External=false. silentFallbackTestSetup's city_canonical + explicit
+// host/port shape resolves External=true even on 127.0.0.1, which is a
+// server gc does not own.
+func managedDoltTestSetup(t *testing.T, fakeBdScript string) {
+	t.Helper()
+
+	origCityFlag := cityFlag
+	origRigFlag := rigFlag
+	t.Cleanup(func() {
+		cityFlag = origCityFlag
+		rigFlag = origRigFlag
+	})
+	cityFlag = ""
+	rigFlag = ""
+
+	cityDir := t.TempDir()
+	port := strconv.Itoa(writeReachableManagedDoltState(t, cityDir))
+
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := "issue_prefix: demo\n" +
+		"gc.endpoint_origin: managed_city\n" +
+		"gc.endpoint_status: verified\n" +
+		"dolt.auto-start: false\n"
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(fakeBdScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	origPath := os.Getenv("PATH")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+origPath)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_DOLT_PORT", port)
+}
+
 // TestGcBdSurfacesSilentFallbackAsLoudError_UpdatePath pins the #2080 fix:
 // when bd's update path silently falls back to the on-disk store, gc bd must
 // convert that into a non-zero exit with an operator-facing message instead
@@ -1933,9 +1981,11 @@ exit 1
 // append a corrective hint pointing at the gc-managed remedy instead,
 // because following bd's own suggestion starts a second, unmanaged Dolt
 // server that conflicts with gc's on the same data directory. bd's original
-// output and exit code must still pass through unchanged.
+// output and exit code must still pass through unchanged. The scope is a
+// gc-managed endpoint — the only topology where gc's own lifecycle commands
+// are the remedy.
 func TestGcBdSurfacesDoltStartConflictHint(t *testing.T) {
-	silentFallbackTestSetup(t, doltStartConflictFakeBdScript)
+	managedDoltTestSetup(t, doltStartConflictFakeBdScript)
 
 	var stdout, stderr bytes.Buffer
 	got := doBd([]string{"list"}, &stdout, &stderr)
@@ -1947,6 +1997,30 @@ func TestGcBdSurfacesDoltStartConflictHint(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "gc start") {
 		t.Fatalf("stderr missing corrective hint toward the gc-managed remedy; stderr=%q", stderr.String())
+	}
+}
+
+// TestGcBdNoDoltStartConflictHintOnExternalEndpoint pins the ownership gate:
+// gc bd disables bd's auto-start for every endpoint, so an unreachable
+// external endpoint emits the same "run bd dolt start" banner. gc does not
+// own that server, so `gc start` / `gc dolt restart` cannot recover it and
+// the hint must stay silent — bd's own output and exit code are the whole
+// answer there. silentFallbackTestSetup's city_canonical + explicit
+// host/port config is exactly that topology (External=true even though the
+// host is 127.0.0.1).
+func TestGcBdNoDoltStartConflictHintOnExternalEndpoint(t *testing.T) {
+	silentFallbackTestSetup(t, doltStartConflictFakeBdScript)
+
+	var stdout, stderr bytes.Buffer
+	got := doBd([]string{"list"}, &stdout, &stderr)
+	if got != 1 {
+		t.Fatalf("doBd(list) = %d, want 1 (bd's own exit code preserved); stderr=%q", got, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "bd dolt start") {
+		t.Fatalf("original bd stderr not passed through; stderr=%q", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "gc start") {
+		t.Fatalf("corrective hint fired for an endpoint gc does not manage; stderr=%q", stderr.String())
 	}
 }
 

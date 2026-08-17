@@ -1127,6 +1127,28 @@ func bdOutputSuggestsConflictingDoltStart(s string) bool {
 		strings.Contains(lower, bdDoltStartSuggestionMarkerCommand)
 }
 
+// bdScopeDoltIsGcManaged reports whether the corrective `gc start` /
+// `gc dolt restart` hint applies to this scope. gc owns the Dolt
+// lifecycle only for a managed, local endpoint: an externally-bound
+// store, or an explicit/city-canonical endpoint (which resolves
+// External even on 127.0.0.1), is not gc's to restart, and pointing the
+// operator at gc lifecycle commands there sends them at the wrong
+// remedy. Mirrors the ownership predicate managedBDRecoveryAllowed
+// applies. Fails closed — no hint — when ownership cannot be resolved.
+func bdScopeDoltIsGcManaged(cityPath, scopeRoot string) bool {
+	if scopeRoot == "" {
+		scopeRoot = cityPath
+	}
+	if bound, err := scopeStoreIsExternallyBound(cityPath, scopeRoot); err != nil || bound {
+		return false
+	}
+	target, ok, err := canonicalScopeDoltTarget(cityPath, scopeRoot)
+	if err != nil || !ok {
+		return false
+	}
+	return !target.External && managedLocalDoltHost(target.Host)
+}
+
 func bdCommandRunnerWithManagedRetry(cityPath string, envFn func(dir string) map[string]string) beads.CommandRunner {
 	return bdCommandRunnerWithManagedRetryErr(cityPath, func(dir string) (map[string]string, error) {
 		return envFn(dir), nil

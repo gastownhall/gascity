@@ -430,7 +430,8 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 
 	if runErr != nil {
 		if traceExit > 0 {
-			if bdOutputSuggestsConflictingDoltStart(stderrScan.String()) {
+			if bdOutputSuggestsConflictingDoltStart(stderrScan.String()) &&
+				bdScopeDoltIsGcManaged(cityPath, target.ScopeRoot) {
 				fmt.Fprintln(stderr, bdDoltStartConflictUserMessage) //nolint:errcheck // best-effort stderr
 			}
 			return traceExit
