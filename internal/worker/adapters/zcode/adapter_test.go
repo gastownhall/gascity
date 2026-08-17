@@ -81,6 +81,31 @@ print(json.dumps({
 }))
 `
 
+// installedAdapter materializes the adapter once per test binary. Installing
+// per-test raced the parallel tests' own fork/exec: a sibling goroutine forking
+// while the script's write fd is still open makes the exec fail ETXTBSY.
+var (
+	adapterOnce sync.Once
+	adapterPath string
+	adapterErr  error
+)
+
+func installedAdapter(t *testing.T) string {
+	t.Helper()
+	adapterOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "zcode-adapter-*")
+		if err != nil {
+			adapterErr = err
+			return
+		}
+		adapterPath, adapterErr = zcodeadapter.Install(dir)
+	})
+	if adapterErr != nil {
+		t.Fatalf("install adapter: %v", adapterErr)
+	}
+	return adapterPath
+}
+
 type harness struct {
 	t         *testing.T
 	home      string
@@ -105,10 +130,7 @@ func newHarness(t *testing.T, stubEnv map[string]string) *harness {
 		}
 	}
 
-	adapter, err := zcodeadapter.Install(filepath.Join(root, "bin"))
-	if err != nil {
-		t.Fatalf("install adapter: %v", err)
-	}
+	adapter := installedAdapter(t)
 
 	stub := filepath.Join(root, "stub-node")
 	if err := os.WriteFile(stub, []byte(nodeStub), 0o755); err != nil {
