@@ -571,6 +571,11 @@ func supervisorRetryCommand(commandName, cityPath string) string {
 }
 
 func keepRegisteredCity(entry supervisor.CityEntry, stderr io.Writer, commandName, reason string) {
+	if _, registered, err := registeredCityEntry(entry.Path); err == nil && !registered {
+		fmt.Fprintf(stderr, "%s: %s; registration for '%s' is already removed, so the supervisor will not retry automatically\n", //nolint:errcheck // best-effort stderr
+			commandName, reason, entry.EffectiveName())
+		return
+	}
 	fmt.Fprintf(stderr, "%s: %s; keeping registration for '%s' so the supervisor can retry automatically\n", //nolint:errcheck // best-effort stderr
 		commandName, reason, entry.EffectiveName())
 }
@@ -581,9 +586,11 @@ func waitForSupervisorCity(cityPath string, wantRunning bool, timeout time.Durat
 	for {
 		running, status, known := supervisorCityRunningHook(cityPath)
 		switch {
-		case known && running == wantRunning:
+		case known && running == wantRunning && wantRunning:
 			return nil
-		case known && !wantRunning:
+		case known && running == wantRunning && !wantRunning && status == "":
+			return nil
+		case known && running && !wantRunning:
 			return fmt.Errorf("city is still running under supervisor")
 		case known && wantRunning && status == "init_failed":
 			// If the supervisor reports an init failure, surface the
@@ -653,6 +660,35 @@ func statusDisplayText(status string) string {
 	}
 }
 
+type supervisorReloadResult uint8
+
+const (
+	supervisorReloadOK supervisorReloadResult = iota
+	supervisorReloadTimedOut
+	supervisorReloadBusy
+	supervisorReloadFailed
+)
+
+func reloadSupervisorClassified(stdout, stderr io.Writer) (int, supervisorReloadResult) {
+	var captured strings.Builder
+	reloadStderr := io.Writer(&captured)
+	if stderr != nil {
+		reloadStderr = io.MultiWriter(stderr, &captured)
+	}
+	code := reloadSupervisorHook(stdout, reloadStderr)
+	if code == 0 {
+		return 0, supervisorReloadOK
+	}
+	switch text := captured.String(); {
+	case strings.Contains(text, supervisorReloadReconcileTimeoutMessage):
+		return code, supervisorReloadTimedOut
+	case strings.Contains(text, supervisorReloadQueueBusyMessage):
+		return code, supervisorReloadBusy
+	default:
+		return code, supervisorReloadFailed
+	}
+}
+
 type supervisorUnregisterOptions struct {
 	Force bool
 }
@@ -710,28 +746,24 @@ func unregisterCityFromSupervisorWithOptions(cityPath string, stdout, stderr io.
 	}
 
 	if supervisorAliveHook() != 0 {
-		if reloadSupervisorHook(stdout, stderr) != 0 {
-			if reErr := reg.Register(entry.Path, entry.EffectiveName()); reErr != nil {
-				fmt.Fprintf(stderr, "%s: reconcile failed and restore failed for '%s': %v\n", commandName, entry.EffectiveName(), reErr) //nolint:errcheck
+		if _, reloadResult := reloadSupervisorClassified(stdout, stderr); reloadResult != supervisorReloadOK {
+			if reloadResult == supervisorReloadBusy || reloadResult == supervisorReloadTimedOut {
+				fmt.Fprintf(stderr, "%s: supervisor reconcile is already in progress; waiting for it to observe unregistration for '%s'\n", commandName, entry.EffectiveName()) //nolint:errcheck
 			} else {
-				fmt.Fprintf(stderr, "%s: no stop request was accepted; restored registration for '%s'; city may still be running; retry after supervisor reconcile completes\n", commandName, entry.EffectiveName()) //nolint:errcheck
+				if reErr := reg.Register(entry.Path, entry.EffectiveName()); reErr != nil {
+					fmt.Fprintf(stderr, "%s: reconcile failed and restore failed for '%s': %v\n", commandName, entry.EffectiveName(), reErr) //nolint:errcheck
+				} else {
+					fmt.Fprintf(stderr, "%s: no stop request was accepted; restored registration for '%s'; city may still be running; retry after supervisor reconcile completes\n", commandName, entry.EffectiveName()) //nolint:errcheck
+				}
+				return true, 1
 			}
-			return true, 1
 		}
 		if err := waitForSupervisorCityHook(cityPath, false, supervisorCityStopTimeout(cityPath), nil); err != nil {
-			if reErr := reg.Register(entry.Path, entry.EffectiveName()); reErr != nil {
-				fmt.Fprintf(stderr, "%s: %v; restore failed for '%s': %v\n", commandName, err, entry.EffectiveName(), reErr) //nolint:errcheck
-			} else {
-				fmt.Fprintf(stderr, "%s: %v; restored registration for '%s'\n", commandName, err, entry.EffectiveName()) //nolint:errcheck
-			}
+			fmt.Fprintf(stderr, "%s: %v; left '%s' unregistered so the supervisor will not restart it automatically\n", commandName, err, entry.EffectiveName()) //nolint:errcheck
 			return true, 1
 		}
 		if err := waitForSupervisorControllerStopHook(cityPath, supervisorCityStopTimeout(cityPath)); err != nil {
-			if reErr := reg.Register(entry.Path, entry.EffectiveName()); reErr != nil {
-				fmt.Fprintf(stderr, "%s: %v; restore failed for '%s': %v\n", commandName, err, entry.EffectiveName(), reErr) //nolint:errcheck
-			} else {
-				fmt.Fprintf(stderr, "%s: %v; restored registration for '%s'\n", commandName, err, entry.EffectiveName()) //nolint:errcheck
-			}
+			fmt.Fprintf(stderr, "%s: %v; left '%s' unregistered so the supervisor will not restart it automatically\n", commandName, err, entry.EffectiveName()) //nolint:errcheck
 			return true, 1
 		}
 	}
