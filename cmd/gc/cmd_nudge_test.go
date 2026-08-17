@@ -15,6 +15,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/nudgepoller"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/pidutil"
@@ -1565,7 +1566,7 @@ func TestSendMailNotifyWithWorkerManagedNonRunningQueuesWakeForController(t *tes
 	}
 	beforeCalls := len(fake.Calls)
 
-	if err := sendMailNotifyWithWorker(target, store, fake, "human"); err != nil {
+	if err := sendMailNotifyWithWorker(target, store, fake, "human", ""); err != nil {
 		t.Fatalf("sendMailNotifyWithWorker: %v", err)
 	}
 	if pokes != 1 {
@@ -1602,6 +1603,57 @@ func TestSendMailNotifyWithWorkerManagedNonRunningQueuesWakeForController(t *tes
 		case "Start", "Nudge", "NudgeNow":
 			t.Fatalf("managed non-running mail notify must not start or deliver from caller env; saw call %+v", call)
 		}
+	}
+}
+
+// TestSendMailNotifyWithWorkerCarriesMessageIDAsReference is the threading
+// half of the gastownhall/gascity#5321 fix: sendMailNotifyWithWorker must
+// stamp the queued mail nudge with a {kind: "mail", id: <messageID>}
+// reference when the caller supplies one, so blockedQueuedNudgeReason has
+// something to re-read at delivery time. A queued nudge with no reference
+// (the empty-messageID case, e.g. the store-less human-sender path) is
+// delivered unconditionally, matching pre-fix behavior.
+func TestSendMailNotifyWithWorkerCarriesMessageIDAsReference(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "mayor", Title: "Mayor", Command: "claude", WorkDir: dir, Provider: "claude", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	prevManaged := nudgeCityUsesManagedReconciler
+	nudgeCityUsesManagedReconciler = func(string) bool { return false }
+	t.Cleanup(func() { nudgeCityUsesManagedReconciler = prevManaged })
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		cfg:         &config.City{Agents: []config.Agent{{Name: "mayor", Provider: "claude"}}},
+		sessionID:   info.ID,
+		sessionName: info.SessionName,
+		identity:    "mayor",
+		agent:       config.Agent{Name: "mayor", Provider: "claude"},
+	}
+
+	if err := sendMailNotifyWithWorker(target, store, fake, "human", "gc-mail-42"); err != nil {
+		t.Fatalf("sendMailNotifyWithWorker: %v", err)
+	}
+
+	pending, _, _, err := listQueuedNudgesForTarget(dir, target, time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudgesForTarget: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("pending = %d, want 1", len(pending))
+	}
+	if ref := pending[0].Reference; ref == nil || ref.Kind != "mail" || ref.ID != "gc-mail-42" {
+		t.Fatalf("Reference = %#v, want {Kind: mail, ID: gc-mail-42}", ref)
 	}
 }
 
@@ -1644,7 +1696,7 @@ func TestSendMailNotifyWithWorkerManagedQueueFailureDoesNotWake(t *testing.T) {
 		agent:       config.Agent{Name: "worker", Provider: "claude"},
 	}
 
-	err = sendMailNotifyWithWorker(target, store, fake, "human")
+	err = sendMailNotifyWithWorker(target, store, fake, "human", "")
 	if err == nil {
 		t.Fatal("sendMailNotifyWithWorker: expected queue error")
 	}
@@ -1718,7 +1770,7 @@ func TestSendMailNotifyQueuesIndependentRemindersForEachMail(t *testing.T) {
 	// Two mails arrive back to back; the first reminder is still pending
 	// (unread) when the second arrives.
 	for i := 0; i < 2; i++ {
-		if err := sendMailNotifyWithWorker(target, store, fake, "human"); err != nil {
+		if err := sendMailNotifyWithWorker(target, store, fake, "human", ""); err != nil {
 			t.Fatalf("sendMailNotifyWithWorker(call %d): %v", i+1, err)
 		}
 	}
@@ -1777,7 +1829,7 @@ func TestSendMailNotifyWithWorkerManagedWakeFailureRollsBackQueuedNudge(t *testi
 		agent:       config.Agent{Name: "worker", Provider: "claude"},
 	}
 
-	err = sendMailNotifyWithWorker(target, store, fake, "human")
+	err = sendMailNotifyWithWorker(target, store, fake, "human", "")
 	if err == nil {
 		t.Fatal("sendMailNotifyWithWorker: expected wake conflict")
 	}
@@ -1871,7 +1923,7 @@ func TestSendMailNotifyWithWorkerManagedWaitNudgeWithdrawFailureKeepsQueuedNudge
 		agent:       config.Agent{Name: "worker", Provider: "claude"},
 	}
 
-	if err := sendMailNotifyWithWorker(target, store, fake, "human"); err != nil {
+	if err := sendMailNotifyWithWorker(target, store, fake, "human", ""); err != nil {
 		t.Fatalf("sendMailNotifyWithWorker: %v", err)
 	}
 	if withdraws != 1 {
@@ -1963,7 +2015,7 @@ func TestSendMailNotifyWithWorkerManagedWakePokeFailureIsNonFatal(t *testing.T) 
 	}
 	beforeCalls := len(fake.Calls)
 
-	if err := sendMailNotifyWithWorker(target, store, fake, "human"); err != nil {
+	if err := sendMailNotifyWithWorker(target, store, fake, "human", ""); err != nil {
 		t.Fatalf("sendMailNotifyWithWorker: %v", err)
 	}
 	if pokes != 1 {
@@ -2109,7 +2161,7 @@ func TestSendMailNotifyWithWorkerStartsPollerBySessionIDForAliasedTarget(t *test
 	}
 	t.Cleanup(func() { startNudgePoller = prev })
 
-	if err := sendMailNotifyWithWorker(target, store, fake, "human"); err != nil {
+	if err := sendMailNotifyWithWorker(target, store, fake, "human", ""); err != nil {
 		t.Fatalf("sendMailNotifyWithWorker: %v", err)
 	}
 	if !called {
@@ -2208,7 +2260,7 @@ func TestSendMailNotifyWithWorkerWaitIdlePreservesMailSource(t *testing.T) {
 		sessionName: info.SessionName,
 	}
 
-	if err := sendMailNotifyWithWorker(target, store, fake, "human"); err != nil {
+	if err := sendMailNotifyWithWorker(target, store, fake, "human", ""); err != nil {
 		t.Fatalf("sendMailNotifyWithWorker: %v", err)
 	}
 
@@ -2254,7 +2306,7 @@ func TestSendMailNotifyWithWorkerQueuesWhenRuntimeIsGone(t *testing.T) {
 	}
 
 	startCalls := len(fake.Calls)
-	if err := sendMailNotifyWithWorker(target, store, fake, "human"); err != nil {
+	if err := sendMailNotifyWithWorker(target, store, fake, "human", ""); err != nil {
 		t.Fatalf("sendMailNotifyWithWorker: %v", err)
 	}
 	for _, call := range fake.Calls[startCalls:] {
@@ -2303,7 +2355,7 @@ func TestSendMailNotifyWithWorkerQueuesWhenDirectProviderMisses(t *testing.T) {
 		sessionName: info.SessionName,
 	}
 
-	if err := sendMailNotifyWithWorker(target, store, fake, "human"); err != nil {
+	if err := sendMailNotifyWithWorker(target, store, fake, "human", ""); err != nil {
 		t.Fatalf("sendMailNotifyWithWorker: %v", err)
 	}
 
@@ -4051,7 +4103,7 @@ func TestSplitQueuedNudgesForDelivery_BlocksCanceledWaitNudge(t *testing.T) {
 		t.Fatalf("create wait bead: %v", err)
 	}
 
-	deliverable, blocked, err := splitQueuedNudgesForDelivery(sessionFrontDoor(store), []queuedNudge{{
+	deliverable, blocked, err := splitQueuedNudgesForDelivery(sessionFrontDoor(store), nil, []queuedNudge{{
 		ID:        "n1",
 		Agent:     "worker",
 		Source:    "wait",
@@ -4082,7 +4134,7 @@ func TestSplitQueuedNudgesForDelivery_AllowsReadyLegacyWaitNudge(t *testing.T) {
 		t.Fatalf("create legacy wait bead: %v", err)
 	}
 
-	deliverable, blocked, err := splitQueuedNudgesForDelivery(sessionFrontDoor(store), []queuedNudge{{
+	deliverable, blocked, err := splitQueuedNudgesForDelivery(sessionFrontDoor(store), nil, []queuedNudge{{
 		ID:        "n1",
 		Agent:     "worker",
 		Source:    "wait",
@@ -5324,7 +5376,7 @@ func TestBlockedQueuedNudgeReason_GetWaitErrorMapping(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			reason, block, err := blockedQueuedNudgeReason(sessFront, tc.item)
+			reason, block, err := blockedQueuedNudgeReason(sessFront, nil, tc.item)
 			if err != nil {
 				t.Fatalf("blockedQueuedNudgeReason: %v", err)
 			}
@@ -5332,6 +5384,105 @@ func TestBlockedQueuedNudgeReason_GetWaitErrorMapping(t *testing.T) {
 				t.Fatalf("got (%q, %v), want (%q, %v)", reason, block, tc.wantReason, tc.wantBlock)
 			}
 		})
+	}
+}
+
+// TestBlockedQueuedMailNudgeReason_ReReadsMessageAtDelivery is the mail-side
+// counterpart to TestBlockedQueuedNudgeReason_GetWaitErrorMapping, for
+// gastownhall/gascity#5321: a mail-sourced nudge is re-validated against the
+// message it announces at delivery time, the same way a wait-sourced nudge
+// already was. An unread message still delivers (regression guard); a
+// message read in the meantime is withdrawn as "mail-already-read"; a
+// message that has vanished (archived — #4422 deletes the bead) is
+// withdrawn as "mail-missing" rather than surfaced as an error.
+func TestBlockedQueuedMailNudgeReason_ReReadsMessageAtDelivery(t *testing.T) {
+	mp := mail.NewFake()
+	unread, err := mp.Send("alice", "bob", "subject", "body")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	readMsg, err := mp.Send("alice", "bob", "subject", "body")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if _, err := mp.Read(readMsg.ID); err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	archived, err := mp.Send("alice", "bob", "subject", "body")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if err := mp.Archive(archived.ID); err != nil {
+		t.Fatalf("Archive: %v", err)
+	}
+
+	mailItem := func(refID string) queuedNudge {
+		return queuedNudge{Source: "mail", Reference: &nudgeReference{Kind: "mail", ID: refID}}
+	}
+
+	cases := []struct {
+		name       string
+		mp         mail.Provider
+		item       queuedNudge
+		wantReason string
+		wantBlock  bool
+	}{
+		{"unread-delivers", mp, mailItem(unread.ID), "", false},
+		{"already-read-withdrawn", mp, mailItem(readMsg.ID), "mail-already-read", true},
+		{"missing-withdrawn", mp, mailItem("gc-nope"), "mail-missing", true},
+		{"archived-withdrawn-as-missing", mp, mailItem(archived.ID), "mail-missing", true},
+		{"non-mail-source-ignored", mp, queuedNudge{Source: "wait", Reference: &nudgeReference{Kind: "mail", ID: unread.ID}}, "", false},
+		{"nil-reference-ignored", mp, queuedNudge{Source: "mail"}, "", false},
+		{"nil-provider-ignored", nil, mailItem(unread.ID), "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reason, block, err := blockedQueuedNudgeReason(nil, tc.mp, tc.item)
+			if err != nil {
+				t.Fatalf("blockedQueuedNudgeReason: %v", err)
+			}
+			if reason != tc.wantReason || block != tc.wantBlock {
+				t.Fatalf("got (%q, %v), want (%q, %v)", reason, block, tc.wantReason, tc.wantBlock)
+			}
+		})
+	}
+}
+
+// TestSplitQueuedNudgesForDelivery_MailNudges exercises the same
+// re-validation through the delivery-splitting entry point the drain and
+// poller paths actually call, rather than the leaf predicate directly.
+func TestSplitQueuedNudgesForDelivery_MailNudges(t *testing.T) {
+	mp := mail.NewFake()
+	unread, err := mp.Send("alice", "bob", "subject", "body")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	readMsg, err := mp.Send("alice", "bob", "subject", "body")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if _, err := mp.Read(readMsg.ID); err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+
+	items := []queuedNudge{
+		{ID: "n-unread", Agent: "worker", Source: "mail", Reference: &nudgeReference{Kind: "mail", ID: unread.ID}},
+		{ID: "n-read", Agent: "worker", Source: "mail", Reference: &nudgeReference{Kind: "mail", ID: readMsg.ID}},
+		{ID: "n-missing", Agent: "worker", Source: "mail", Reference: &nudgeReference{Kind: "mail", ID: "gc-nope"}},
+	}
+
+	deliverable, blocked, err := splitQueuedNudgesForDelivery(nil, mp, items)
+	if err != nil {
+		t.Fatalf("splitQueuedNudgesForDelivery: %v", err)
+	}
+	if len(deliverable) != 1 || deliverable[0].ID != "n-unread" {
+		t.Fatalf("deliverable = %#v, want only n-unread", deliverable)
+	}
+	if got := blocked["mail-already-read"]; len(got) != 1 || got[0].ID != "n-read" {
+		t.Fatalf("blocked[mail-already-read] = %#v, want n-read", blocked["mail-already-read"])
+	}
+	if got := blocked["mail-missing"]; len(got) != 1 || got[0].ID != "n-missing" {
+		t.Fatalf("blocked[mail-missing] = %#v, want n-missing", blocked["mail-missing"])
 	}
 }
 
