@@ -108,7 +108,7 @@ func cmdStopJSONSequence(args []string, stdout, stderr io.Writer, force bool, js
 	}
 
 	unregisteredFromSupervisor := false
-	if handled, code := unregisterCityFromSupervisorWithForce(cityPath, stopStdout, stderr, "gc stop", force); handled {
+	if handled, code := unregisterCityFromSupervisorWithForce(cityPath, stopStdout, stderr, force); handled {
 		if code != 0 {
 			return stopCommandOutcome{code: code, cityPath: cityPath}
 		}

@@ -661,8 +661,8 @@ func unregisterCityFromSupervisor(cityPath string, stdout, stderr io.Writer) (bo
 	return unregisterCityFromSupervisorWithOptions(cityPath, stdout, stderr, "gc unregister", supervisorUnregisterOptions{})
 }
 
-func unregisterCityFromSupervisorWithForce(cityPath string, stdout, stderr io.Writer, commandName string, force bool) (bool, int) {
-	return unregisterCityFromSupervisorWithOptions(cityPath, stdout, stderr, commandName, supervisorUnregisterOptions{
+func unregisterCityFromSupervisorWithForce(cityPath string, stdout, stderr io.Writer, force bool) (bool, int) {
+	return unregisterCityFromSupervisorWithOptions(cityPath, stdout, stderr, "gc stop", supervisorUnregisterOptions{
 		Force: force,
 	})
 }
@@ -696,8 +696,6 @@ func unregisterCityFromSupervisorWithOptions(cityPath string, stdout, stderr io.
 		return true, 1
 	}
 
-	fmt.Fprintf(stdout, "Unregistered city '%s' (%s)\n", entry.EffectiveName(), entry.Path) //nolint:errcheck // best-effort stdout
-
 	// If the city directory is gone, there's nothing to wait on or restore.
 	// Skip the supervisor-side probes that would otherwise spew
 	// "probing standalone controller" + "restore failed" on a missing path
@@ -707,6 +705,7 @@ func unregisterCityFromSupervisorWithOptions(cityPath string, stdout, stderr io.
 		if supervisorAliveHook() != 0 && reloadSupervisorHook(stdout, stderr) != 0 {
 			return true, 1
 		}
+		fmt.Fprintf(stdout, "Unregistered city '%s' (%s)\n", entry.EffectiveName(), entry.Path) //nolint:errcheck // best-effort stdout
 		return true, 0
 	}
 
@@ -715,7 +714,7 @@ func unregisterCityFromSupervisorWithOptions(cityPath string, stdout, stderr io.
 			if reErr := reg.Register(entry.Path, entry.EffectiveName()); reErr != nil {
 				fmt.Fprintf(stderr, "%s: reconcile failed and restore failed for '%s': %v\n", commandName, entry.EffectiveName(), reErr) //nolint:errcheck
 			} else {
-				fmt.Fprintf(stderr, "%s: reconcile failed; restored registration for '%s'\n", commandName, entry.EffectiveName()) //nolint:errcheck
+				fmt.Fprintf(stderr, "%s: no stop request was accepted; restored registration for '%s'; city may still be running; retry after supervisor reconcile completes\n", commandName, entry.EffectiveName()) //nolint:errcheck
 			}
 			return true, 1
 		}
@@ -736,6 +735,7 @@ func unregisterCityFromSupervisorWithOptions(cityPath string, stdout, stderr io.
 			return true, 1
 		}
 	}
+	fmt.Fprintf(stdout, "Unregistered city '%s' (%s)\n", entry.EffectiveName(), entry.Path) //nolint:errcheck // best-effort stdout
 	return true, 0
 }
 

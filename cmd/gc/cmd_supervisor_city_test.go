@@ -1119,6 +1119,61 @@ func TestUnregisterCityFromSupervisorRestoresRegistrationOnReloadFailure(t *test
 	}
 }
 
+func TestUnregisterCityFromSupervisorBusyReloadSaysNoStopWasAccepted(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"bright-lights\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(cityPath, "bright-lights"); err != nil {
+		t.Fatal(err)
+	}
+
+	withSupervisorTestHooks(
+		t,
+		func(_, _ io.Writer) int { return 0 },
+		func(_, stderr io.Writer) int {
+			_, _ = io.WriteString(stderr, "gc supervisor reload: reconcile queue is busy; try again shortly\n")
+			return 1
+		},
+		func() int { return 4242 },
+		func(string) (bool, string, bool) { return false, "", false },
+		20*time.Millisecond,
+		time.Millisecond,
+	)
+
+	var stdout, stderr bytes.Buffer
+	handled, code := unregisterCityFromSupervisorWithForce(cityPath, &stdout, &stderr, false)
+	if !handled || code != 1 {
+		t.Fatalf("unregisterCityFromSupervisorWithForce = (%t, %d), want (true, 1)", handled, code)
+	}
+	if strings.Contains(stdout.String(), "Unregistered city") {
+		t.Fatalf("stdout = %q, should not claim unregister before stop is accepted", stdout.String())
+	}
+	got := stderr.String()
+	for _, want := range []string{"reconcile queue is busy", "no stop request was accepted", "restored registration", "city may still be running"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stderr = %q, want %q", got, want)
+		}
+	}
+
+	entries, err := reg.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedCityPath := canonicalTestPath(cityPath)
+	if len(entries) != 1 || entries[0].Path != resolvedCityPath {
+		t.Fatalf("expected restored registry entry for %s, got %v", resolvedCityPath, entries)
+	}
+}
+
 func TestUnregisterCityFromSupervisorWaitsForControllerStop(t *testing.T) {
 	gcHome := t.TempDir()
 	t.Setenv("GC_HOME", gcHome)
@@ -1290,7 +1345,7 @@ func TestUnregisterCityFromSupervisorWithForceSendsForceStop(t *testing.T) {
 	waitForSupervisorControllerStopHook = func(string, time.Duration) error { return nil }
 
 	var stdout, stderr bytes.Buffer
-	handled, code := unregisterCityFromSupervisorWithForce(cityPath, &stdout, &stderr, "gc stop", true)
+	handled, code := unregisterCityFromSupervisorWithForce(cityPath, &stdout, &stderr, true)
 	if !handled || code != 0 {
 		t.Fatalf("unregisterCityFromSupervisorWithForce = (%t, %d), want (true, 0); stderr=%q", handled, code, stderr.String())
 	}
@@ -1335,7 +1390,7 @@ func TestUnregisterCityFromSupervisorWithForceKeepsRegistrationAfterAmbiguousSto
 	)
 
 	var stdout, stderr bytes.Buffer
-	handled, code := unregisterCityFromSupervisorWithForce(cityPath, &stdout, &stderr, "gc stop", true)
+	handled, code := unregisterCityFromSupervisorWithForce(cityPath, &stdout, &stderr, true)
 	if !handled || code != 1 {
 		t.Fatalf("unregisterCityFromSupervisorWithForce = (%t, %d), want (true, 1); stderr=%q", handled, code, stderr.String())
 	}
