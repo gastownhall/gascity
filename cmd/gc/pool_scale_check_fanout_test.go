@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -118,38 +120,53 @@ func TestEvaluatePoolFanOutSumBestEffortOnProbeError(t *testing.T) {
 	}
 }
 
-// TestEvaluatePoolFanOutSumRunsProbesConcurrently is AC6's timing proof: a
-// city-scoped agent's fan-out across N stores must run those N probes
-// concurrently, so wall-clock is bounded by the SLOWEST single probe, not
-// the sum of all of them. A sequential (loop-and-call) implementation would
-// take ~N times as long and fail the bound below.
+// TestEvaluatePoolFanOutSumRunsProbesConcurrently is AC6's concurrency proof:
+// a city-scoped agent's fan-out across N stores must run those N probes
+// concurrently, not one at a time. Proven with a WaitGroup barrier rather
+// than a wall-clock sleep: every runner blocks until all N have started, so
+// a sequential (loop-and-call) implementation deadlocks here — a
+// deterministic failure instead of a timing-based one.
+//
+// No time.Sleep: internal/testpolicy/resourcecensus ratchets fixed-sleep
+// test calls down, never up (TestRepositoryLedgerMatchesCensusAndDocumentation).
 func TestEvaluatePoolFanOutSumRunsProbesConcurrently(t *testing.T) {
-	const sleep = 80 * time.Millisecond
 	const n = 4
 	probes := make([]poolStoreProbe, n)
 	for i := range probes {
 		probes[i] = fanOutProbe(fmt.Sprintf("store-%d", i), fmt.Sprintf("dir-%d", i))
 	}
-	runner := func(_, _ string, _ map[string]string) (string, error) {
-		time.Sleep(sleep)
+	var wg sync.WaitGroup
+	wg.Add(n)
+	runner := func(_, _ string, _ map[string]string) (string, error) { //nolint:unparam // the runner seam returns an error every barrier-synced probe never produces
+		wg.Done()
+		wg.Wait() // every probe must have started before any of them may finish
 		return "1", nil
 	}
 	sem := make(chan struct{}, n) // large enough for full concurrency
 	sp := scaleParams{Min: 0, Max: 100, Check: "check"}
 
-	start := time.Now()
-	got, errs := evaluatePoolFanOutSum("agent", sp, probes, runner, sem, true)
-	elapsed := time.Since(start)
+	type fanOutResult struct {
+		got  int
+		errs []error
+	}
+	resultCh := make(chan fanOutResult, 1)
+	go func() {
+		got, errs := evaluatePoolFanOutSum("agent", sp, probes, runner, sem, true)
+		resultCh <- fanOutResult{got, errs}
+	}()
 
-	if len(errs) != 0 {
-		t.Fatalf("errs = %v, want none", errs)
-	}
-	if got != n {
-		t.Fatalf("sum = %d, want %d", got, n)
-	}
-	if elapsed >= sleep*time.Duration(n) {
-		t.Fatalf("elapsed = %v, want well under %v (%d × %v sequential) — probes must run "+
-			"concurrently, not one at a time", elapsed, sleep*time.Duration(n), n, sleep)
+	select {
+	case res := <-resultCh:
+		if len(res.errs) != 0 {
+			t.Fatalf("errs = %v, want none", res.errs)
+		}
+		if res.got != n {
+			t.Fatalf("sum = %d, want %d", res.got, n)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("evaluatePoolFanOutSum did not return — probes are not running concurrently " +
+			"(a sequential implementation deadlocks on the barrier: probe 1 waits for probes " +
+			"2..N to start, but they are never invoked until probe 1 returns)")
 	}
 }
 
@@ -160,35 +177,75 @@ func TestEvaluatePoolFanOutSumRunsProbesConcurrently(t *testing.T) {
 // caller-level semaphore already saturated by other pools, this agent's own
 // N probes must still serialize through it — proving no hidden/nested
 // semaphore silently grants this call extra concurrency the caller never
-// authorized.
+// authorized. Proven by tracking peak concurrently-active runners through a
+// rendezvous handshake rather than a wall-clock sleep, so an over-concurrent
+// implementation is caught deterministically instead of by timing
+// proportion (see the sibling test above for why no time.Sleep).
 func TestEvaluatePoolFanOutSumSharesCallerSemaphoreNotNested(t *testing.T) {
-	const sleep = 40 * time.Millisecond
 	const n = 3
 	probes := make([]poolStoreProbe, n)
 	for i := range probes {
 		probes[i] = fanOutProbe(fmt.Sprintf("store-%d", i), fmt.Sprintf("dir-%d", i))
 	}
-	runner := func(_, _ string, _ map[string]string) (string, error) {
-		time.Sleep(sleep)
+
+	var active, peak int32
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	runner := func(_, _ string, _ map[string]string) (string, error) { //nolint:unparam // the runner seam returns an error every rendezvous-synced probe never produces
+		cur := atomic.AddInt32(&active, 1)
+		for {
+			p := atomic.LoadInt32(&peak)
+			if cur <= p || atomic.CompareAndSwapInt32(&peak, p, cur) {
+				break
+			}
+		}
+		entered <- struct{}{}
+		<-release
+		atomic.AddInt32(&active, -1)
 		return "1", nil
 	}
 	sem := make(chan struct{}, 1) // caller-level capacity of 1: already saturated
 	sp := scaleParams{Min: 0, Max: 100, Check: "check"}
 
-	start := time.Now()
-	got, errs := evaluatePoolFanOutSum("agent", sp, probes, runner, sem, true)
-	elapsed := time.Since(start)
+	type fanOutResult struct {
+		got  int
+		errs []error
+	}
+	resultCh := make(chan fanOutResult, 1)
+	go func() {
+		got, errs := evaluatePoolFanOutSum("agent", sp, probes, runner, sem, true)
+		resultCh <- fanOutResult{got, errs}
+	}()
 
-	if len(errs) != 0 {
-		t.Fatalf("errs = %v, want none", errs)
+	// Release probes one at a time. If a nested/separate semaphore lets a
+	// second probe become active before this loop releases the first, its
+	// entry (above) already bumped peak > 1 before it could reach `entered`.
+	for i := 0; i < n; i++ {
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for probe %d of %d to start", i+1, n)
+		}
+		release <- struct{}{}
 	}
-	if got != n {
-		t.Fatalf("sum = %d, want %d", got, n)
+
+	var res fanOutResult
+	select {
+	case res = <-resultCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("evaluatePoolFanOutSum did not return after all probes were released")
 	}
-	if elapsed < sleep*time.Duration(n) {
-		t.Fatalf("elapsed = %v, want at least %v (%d × %v serialized through a size-1 shared "+
-			"semaphore) — a nested/separate semaphore would run these probes fully concurrently "+
-			"instead of honoring the caller's own concurrency bound", elapsed, sleep*time.Duration(n), n, sleep)
+
+	if len(res.errs) != 0 {
+		t.Fatalf("errs = %v, want none", res.errs)
+	}
+	if res.got != n {
+		t.Fatalf("sum = %d, want %d", res.got, n)
+	}
+	if got := atomic.LoadInt32(&peak); got > 1 {
+		t.Fatalf("peak concurrently-active probes = %d, want 1 — a nested/separate semaphore let "+
+			"more than one probe run at once instead of serializing through the caller's size-1 "+
+			"shared semaphore", got)
 	}
 }
 
