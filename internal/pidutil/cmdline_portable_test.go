@@ -129,16 +129,42 @@ func TestCmdline_FailsClosedWhenUnreadable(t *testing.T) {
 		t.Skip("on linux /proc answers directly, so the ps stub cannot make argv unreadable")
 	}
 
+	pid := unreadableArgvPID(t)
+
+	if AliveWithCmdline(pid, func([]string) bool { return true }) {
+		t.Fatal("AliveWithCmdline = true with no readable argv; must fail closed so the caller starts its poller")
+	}
+}
+
+// unreadableArgvPID returns a live PID whose argv Cmdline cannot read, using
+// whichever mechanism the platform's Cmdline actually consults.
+//
+// Darwin reads argv through kern.procargs2 and never shells out to ps, so a
+// stub ps on PATH cannot make argv unreadable there. The sysctl does refuse a
+// process the caller does not own, so PID 1 (launchd, root-owned, always
+// alive) is unreadable to an unprivileged caller and exercises the same
+// fail-closed path the ps stub covers elsewhere.
+func unreadableArgvPID(t *testing.T) int {
+	t.Helper()
+
+	if runtime.GOOS == "darwin" {
+		const launchdPID = 1
+		if !Alive(launchdPID) {
+			t.Skipf("PID %d is not alive; no root-owned process to probe", launchdPID)
+		}
+		if _, err := Cmdline(launchdPID); err == nil {
+			t.Skipf("kern.procargs2 readable for PID %d; test needs an unprivileged caller", launchdPID)
+		}
+		return launchdPID
+	}
+
 	binDir := t.TempDir()
 	// A ps that produces nothing, so the non-/proc path has no argv to offer.
 	if err := os.WriteFile(filepath.Join(binDir, "ps"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
 		t.Fatalf("WriteFile(ps): %v", err)
 	}
 	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
-
-	if AliveWithCmdline(os.Getpid(), func([]string) bool { return true }) {
-		t.Fatal("AliveWithCmdline = true with no readable argv; must fail closed so the caller starts its poller")
-	}
+	return os.Getpid()
 }
 
 // TestPSCmdlineParsesOwnArgv exercises the ps parse path directly. Calling
