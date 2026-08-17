@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -32,6 +34,25 @@ import (
 //     PROVEN able to observe an event, so "zero" cannot pass by accident;
 //  3. what lands is readable by a journal CURSOR consumer — the shape the
 //     event-delta lanes read (TestClassStoreEmissionIsVisibleToACursorConsumer).
+//
+// # Those three prove the WRAPPER; two more prove the WIRING
+//
+// The three above hand the funnel routes the TEST has already wrapped. That is
+// the right shape for asserting emission SEMANTICS — it isolates them from
+// migration, providers and plan resolution — but it means the shipped injection
+// never runs, and a review caught exactly what that costs: rewriting the one
+// production call as withCLIEmission("") left all three green while emission was
+// entirely dead in production, because an empty city path early-returns
+// unwrapped.
+//
+// So the two gates at the bottom of this file never say withCLIEmission at all.
+// They stand up a city that has really converged onto a binding and enter
+// through the real constructors — resolveCLIStorageRoutes for the one-shot side
+// (TestOneShotCLIWritesEmitBeadEventsOnAMigratedCity) and openStorageRoutes for
+// the controller's (TestControllerRoutesFromOpenStorageRoutesCarryNoEmitTarget)
+// — so a mutation at either injection point reddens a DIFFERENT one of them.
+// The lesson generalizes: a gate that constructs the thing under test cannot
+// also be the gate that proves it is constructed.
 
 // splitClassRoutes builds the routes a split city resolves: every
 // infrastructure class served by one binding store, work left alone. It is the
@@ -259,9 +280,17 @@ func TestControllerClassRoutesStayEventSilentUnderReconcileShapedWrites(t *testi
 }
 
 // The structural half of gate 2: the emit target is injected in exactly one
-// place. "The controller never emits" is a claim about the call graph, and a
-// second injection site is how a claim like that stops being true without
-// anybody noticing.
+// place, ON the resolved routes, WITH the city path. "The controller never
+// emits" is a claim about the call graph, and a second injection site is how a
+// claim like that stops being true without anybody noticing.
+//
+// It checks the argument and the receiver, not just the name, because the first
+// cut of this guard checked neither and a mutant survived it: rewriting the
+// shipped call as withCLIEmission("") kept it green while production emission
+// was entirely dead (the empty path early-returns unwrapped). A syntactic guard
+// a semantic mutant walks past is worse than none, since it reads as coverage.
+// The gates that actually prove the wiring are the two production-seam tests
+// below; this one keeps the SHAPE from drifting.
 func TestClassStoreEmitTargetHasExactlyOneInjectionSite(t *testing.T) {
 	entries, err := os.ReadDir(".")
 	if err != nil {
@@ -269,6 +298,7 @@ func TestClassStoreEmitTargetHasExactlyOneInjectionSite(t *testing.T) {
 	}
 	fset := token.NewFileSet()
 	sites := map[string]int{}
+	var shape []string
 	for _, entry := range entries {
 		name := entry.Name()
 		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
@@ -284,14 +314,37 @@ func TestClassStoreEmitTargetHasExactlyOneInjectionSite(t *testing.T) {
 				return true
 			}
 			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if ok && sel.Sel != nil && sel.Sel.Name == "withCLIEmission" {
-				sites[name]++
+			if !ok || sel.Sel == nil || sel.Sel.Name != "withCLIEmission" {
+				return true
+			}
+			sites[name]++
+			// The receiver must be the routes value the gate just resolved,
+			// and the argument must be the city path the funnel was asked
+			// about — never a literal, which is how an injection gets
+			// silently neutered while still reading as one.
+			if _, ok := sel.X.(*ast.Ident); !ok {
+				shape = append(shape, fmt.Sprintf("%s: receiver is %T, want the resolved routes identifier", name, sel.X))
+			}
+			if len(call.Args) != 1 {
+				shape = append(shape, fmt.Sprintf("%s: %d argument(s), want exactly the city path", name, len(call.Args)))
+				return true
+			}
+			arg, ok := call.Args[0].(*ast.Ident)
+			if !ok {
+				shape = append(shape, fmt.Sprintf("%s: argument is %T, want the cityPath identifier (a literal cannot be the city the funnel was asked about)", name, call.Args[0]))
+				return true
+			}
+			if arg.Name != "cityPath" {
+				shape = append(shape, fmt.Sprintf("%s: argument is %q, want cityPath", name, arg.Name))
 			}
 			return true
 		})
 	}
 	if len(sites) != 1 || sites["cli_storage_routes.go"] != 1 {
 		t.Fatalf("withCLIEmission is called from %v, want exactly one call in cli_storage_routes.go: the controller path is untouched only while the one-shot funnel is the sole injector", sites)
+	}
+	if len(shape) > 0 {
+		t.Fatalf("the injection does not have the shape that makes it one:\n  %s", strings.Join(shape, "\n  "))
 	}
 }
 
@@ -747,5 +800,133 @@ func TestEmittingClassStoreStillSatisfiesTheHookClaimRoute(t *testing.T) {
 	wrapped := splitClassRoutes(beads.NewMemStore()).withCLIEmission(cityPath).stores[coordclass.ClassGraph]
 	if _, err := newHookClaimClassRoute(wrapped); err != nil {
 		t.Fatalf("the hook claim route refused the emitting class store: %v", err)
+	}
+}
+
+// PRODUCTION SEAM, gate 1. The gates above seed the funnel memo with routes the
+// TEST already wrapped, which proves the wrapper and proves nothing about the
+// wiring: replacing the shipped injection with withCLIEmission("") leaves them
+// all green while production emission is entirely dead.
+//
+// This one never says withCLIEmission. It stands up a city that has converged
+// onto its binding and enters through the same doors a one-shot command enters
+// through — the `gc mail` provider root and the by-id class front door — so the
+// only thing that can put an emit target on the store is resolveCLIStorageRoutes
+// itself. It is red against a neutered injection, and red against no injection.
+func TestOneShotCLIWritesEmitBeadEventsOnAMigratedCity(t *testing.T) {
+	t.Run("mail send through the gc mail provider root", func(t *testing.T) {
+		cityPath, _ := migratedOneShotCLICity(t)
+		captureCLIStorageStderr(t)
+
+		sender, code := openCityMailProvider(io.Discard, "gc mail send")
+		if sender == nil {
+			t.Fatalf("openCityMailProvider returned no provider (code=%d)", code)
+		}
+		sent, err := sender.Send("worker", "mayor", "PR ready", "please review the auth PR")
+		if err != nil {
+			t.Fatalf("gc mail send: %v", err)
+		}
+
+		created := 0
+		for _, evt := range beadEvents(readCityJournal(t, cityPath)) {
+			if evt.Subject == sent.ID && evt.Type == events.BeadCreated {
+				created++
+			}
+		}
+		if created != 1 {
+			t.Fatalf("a one-shot mail send on a migrated city appended %d bead.created row(s) for %s, want exactly 1: the shipped injection at resolveCLIStorageRoutes is what puts the emit target on the messaging class store",
+				created, sent.ID)
+		}
+	})
+
+	t.Run("graph close through the by-id class front door", func(t *testing.T) {
+		cityPath, _ := migratedOneShotCLICity(t)
+		captureCLIStorageStderr(t)
+
+		door, routed, err := openBdByIDClassFrontDoor(cityPath)
+		if err != nil {
+			t.Fatalf("opening the class front door: %v", err)
+		}
+		if !routed {
+			t.Fatal("a migrated city reported no relocated class at the by-id front door")
+		}
+		step, err := door.Graph.Create(beads.Bead{
+			Title:  "implement",
+			Type:   "task",
+			Status: "open",
+			Metadata: map[string]string{
+				beadmeta.KindMetadataKey:       "check",
+				beadmeta.RootBeadIDMetadataKey: "gcg-root-e2e",
+				beadmeta.StepIDMetadataKey:     "implement",
+			},
+		})
+		if err != nil {
+			t.Fatalf("creating a graph-class step through the front door: %v", err)
+		}
+		if err := door.Graph.Close(step.ID); err != nil {
+			t.Fatalf("closing %s through the front door: %v", step.ID, err)
+		}
+
+		var got []string
+		for _, evt := range beadEvents(readCityJournal(t, cityPath)) {
+			if evt.Subject == step.ID {
+				got = append(got, evt.Type)
+			}
+		}
+		want := []string{events.BeadCreated, events.BeadClosed}
+		if !slices.Equal(got, want) {
+			t.Fatalf("the one-shot graph lifecycle of %s appended %v, want %v: without the shipped injection the run projection never sees the step begin or end",
+				step.ID, got, want)
+		}
+	})
+}
+
+// PRODUCTION SEAM, gate 2 (the control). Routes built by the REAL
+// openStorageRoutes — the controller's constructor — carry no emit target and
+// serve no emitting store, so a wrap added there is caught here rather than
+// discovered as a double row in a city's log.
+//
+// The type assertion is the load-bearing half. A behavioral "the city journal
+// stayed empty" would pass a mutant that wrapped with the BINDING root instead
+// of the city path, because those events land somewhere this test never looks.
+func TestControllerRoutesFromOpenStorageRoutesCarryNoEmitTarget(t *testing.T) {
+	cityPath, cfg := migratedOneShotCLICity(t)
+	captureCLIStorageStderr(t)
+
+	plan, err := resolveCityStoragePlan(cityPath, cfg)
+	if err != nil {
+		t.Fatalf("resolving the storage plan: %v", err)
+	}
+	routes, err := openStorageRoutes(plan, mustResolveInfraTarget(t, cityPath, cfg))
+	if err != nil {
+		t.Fatalf("opening the controller's storage routes: %v", err)
+	}
+	defer routes.close() //nolint:errcheck // the test asserts on the routes, not on the close
+
+	if routes.emitCityPath != "" {
+		t.Errorf("openStorageRoutes set an emit target %q; only the one-shot funnel may set one", routes.emitCityPath)
+	}
+	served := 0
+	for class, store := range routes.stores {
+		served++
+		if _, emitting := store.(*emittingClassStore); emitting {
+			t.Errorf("the controller's %s store is an emitting wrapper; the controller emits through its own CachingStore and a second emitter is a double row in the log", class)
+		}
+	}
+	if served == 0 {
+		t.Fatal("the controller's routes serve no class; this gate has lost its subject")
+	}
+
+	// And behaviorally, for the emit target this file would use.
+	store := resolveGraphStore(routes, beads.NewMemStore(), cfg, cityPath, nil)
+	step, err := store.Create(beads.Bead{Title: "controller write", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatalf("creating through the controller's class store: %v", err)
+	}
+	if err := store.Close(step.ID); err != nil {
+		t.Fatalf("closing through the controller's class store: %v", err)
+	}
+	if got := beadEvents(readCityJournal(t, cityPath)); len(got) != 0 {
+		t.Fatalf("the controller's class routes appended %d bead event(s), want 0: %s", len(got), eventSummary(got))
 	}
 }

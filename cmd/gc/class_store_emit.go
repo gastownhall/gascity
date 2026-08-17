@@ -146,8 +146,10 @@ type classStoreEmission struct {
 //
 // events.WithoutStartupSweep is what makes a per-mutation open safe: the sweep
 // exists to recover rotating-* files a crash stranded, it belongs to the
-// supervisor's long-lived recorder, and running it here would both scan the log
-// directory on every mutation and race that recorder mid-rotation.
+// supervisor's long-lived recorder, and running it here would race that
+// recorder mid-rotation. It does not make the open free — NewFileRecorder reads
+// the log directory either way, to continue the sequence past the archives —
+// only unraced.
 func (s *emittingClassStore) emit(emissions ...classStoreEmission) {
 	if len(emissions) == 0 {
 		return
