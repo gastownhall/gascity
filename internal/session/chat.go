@@ -366,6 +366,44 @@ func (m *Manager) sessionBead(id string) (beads.Bead, string, error) {
 	return m.loadSessionBead(id, false)
 }
 
+// commitPendingContinuationReset resolves the continuation epoch a runtime
+// start should publish, consuming a pending conversation reset on the way.
+//
+// The controller's pre-wake commit (cmd/gc: preWakeCommit /
+// shouldBumpContinuationEpoch) bumps the epoch when continuation_reset_pending
+// is set, but every start that does not route through it — Submit, Send,
+// Attach, Start — rebuilt GC_CONTINUATION_EPOCH verbatim from metadata and
+// never consumed the marker. A message arriving inside the reconciler's
+// kill-to-wake window therefore restarted the pane on the PRE-reset epoch and
+// silently defeated the reset. Providers that carry conversation identity
+// themselves (zcode keys its persisted provider session on this epoch) then
+// resume the conversation the operator just reset.
+//
+// The bump and the marker clear are persisted together so a crash between them
+// cannot leave the reset half-applied; the instance-token mint below is the
+// same write-through precedent.
+func (m *Manager) commitPendingContinuationReset(id string, b beads.Bead) (int, error) {
+	epoch, err := strconv.Atoi(b.Metadata["continuation_epoch"])
+	if err != nil || epoch <= 0 {
+		epoch = DefaultContinuationEpoch
+	}
+	if strings.TrimSpace(b.Metadata["continuation_reset_pending"]) == "" {
+		return epoch, nil
+	}
+	epoch++
+	if err := m.store.SetMetadataBatch(id, map[string]string{
+		"continuation_epoch":         strconv.Itoa(epoch),
+		"continuation_reset_pending": "",
+	}); err != nil {
+		return 0, fmt.Errorf("committing pending continuation reset: %w", err)
+	}
+	if b.Metadata != nil {
+		b.Metadata["continuation_epoch"] = strconv.Itoa(epoch)
+		b.Metadata["continuation_reset_pending"] = ""
+	}
+	return epoch, nil
+}
+
 func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
 	transport, transportVerified := m.transportForBead(b, sessName)
 	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
@@ -391,9 +429,9 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	if err != nil || generation <= 0 {
 		generation = DefaultGeneration
 	}
-	continuationEpoch, err := strconv.Atoi(b.Metadata["continuation_epoch"])
-	if err != nil || continuationEpoch <= 0 {
-		continuationEpoch = DefaultContinuationEpoch
+	continuationEpoch, err := m.commitPendingContinuationReset(id, b)
+	if err != nil {
+		return err
 	}
 	instanceToken := b.Metadata["instance_token"]
 	if instanceToken == "" {
@@ -506,9 +544,9 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 	if err != nil || generation <= 0 {
 		generation = DefaultGeneration
 	}
-	continuationEpoch, err := strconv.Atoi(b.Metadata["continuation_epoch"])
-	if err != nil || continuationEpoch <= 0 {
-		continuationEpoch = DefaultContinuationEpoch
+	continuationEpoch, err := m.commitPendingContinuationReset(id, b)
+	if err != nil {
+		return err
 	}
 	instanceToken := b.Metadata["instance_token"]
 	if instanceToken == "" {

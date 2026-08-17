@@ -3,6 +3,9 @@ package session
 import (
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 func TestSessionMutationLocksArePerSession(t *testing.T) {
@@ -299,5 +302,49 @@ func TestSessionMutationLocksSerializeSameSession(t *testing.T) {
 	case <-secondEntered:
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("same-session lock did not unblock after release")
+	}
+}
+
+// A conversation reset committed while the runtime is restarted outside the
+// controller's pre-wake path must still rotate the continuation epoch: the
+// marker is the only record that a reset is owed, and a start that ignores it
+// republishes the pre-reset conversation identity.
+func TestCommitPendingContinuationResetBumpsAndClears(t *testing.T) {
+	store := beads.NewMemStore()
+	m := NewManagerWithOptions(store, runtime.NewFake())
+	b, err := store.Create(beads.Bead{Title: "session", Metadata: map[string]string{
+		"continuation_epoch":         "3",
+		"continuation_reset_pending": "true",
+	}})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	id := b.ID
+
+	epoch, err := m.commitPendingContinuationReset(id, b)
+	if err != nil {
+		t.Fatalf("commitPendingContinuationReset: %v", err)
+	}
+	if epoch != 4 {
+		t.Fatalf("epoch = %d, want 4", epoch)
+	}
+	after, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("get after: %v", err)
+	}
+	if got := after.Metadata["continuation_epoch"]; got != "4" {
+		t.Fatalf("persisted epoch = %q, want 4", got)
+	}
+	if got := after.Metadata["continuation_reset_pending"]; got != "" {
+		t.Fatalf("reset marker = %q, want cleared", got)
+	}
+
+	// Idempotent: a plain restart must not keep bumping.
+	again, err := m.commitPendingContinuationReset(id, after)
+	if err != nil {
+		t.Fatalf("second commit: %v", err)
+	}
+	if again != 4 {
+		t.Fatalf("epoch after a plain restart = %d, want 4", again)
 	}
 }
