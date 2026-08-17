@@ -45,6 +45,7 @@ set -uo pipefail   # deliberately no -e: a failed turn must not kill the loop
 
 readonly PROG="zcode-repl"
 readonly MARKER="zcode-repl ready"
+readonly BUSY="zcode-repl turn in flight (C-c to interrupt)"
 readonly GUARD_TOKEN="zcode-repl "
 readonly MAX_CONSECUTIVE_FAILURES=5
 readonly DRAIN_TIMEOUT=1
@@ -291,11 +292,15 @@ run_turn() {
     fi
 }
 
-report_failure() {
-    printf 'zcode-repl error rc=%s\n' "$1"
+report_stderr() {
     if [[ -s "$turn_err" ]]; then
         printf 'zcode-repl stderr: %s\n' "$(tr '\n' ' ' <"$turn_err" | cut -c1-300)"
     fi
+}
+
+report_failure() {
+    printf 'zcode-repl error rc=%s\n' "$1"
+    report_stderr
 }
 
 note_failure_and_maybe_bail() {
@@ -344,6 +349,12 @@ while :; do
 
     printf '%s' "$line" >"$prompt_file"
 
+    # A headless turn prints nothing until it finishes, which leaves the pane
+    # showing the previous turn's ready marker as its last line — visually and
+    # programmatically indistinguishable from idle. Announce the turn so the
+    # pane's tail says "busy" for as long as it is.
+    printf '%s\n' "$BUSY"
+
     run_turn "$line" "$sid"
     rc=$?
 
@@ -377,7 +388,10 @@ while :; do
             printf '%s\n' "$sid" >"$sid_path"
         fi
     else
+        # rc was 0, so report_failure never ran: surface the CLI's stderr here
+        # or an empty/!JSON stdout is an unattributable dead end.
         printf 'zcode-repl error rc=0 (unparsable response)\n'
+        report_stderr
         note_failure_and_maybe_bail
     fi
     printf '%s\n' "$MARKER"

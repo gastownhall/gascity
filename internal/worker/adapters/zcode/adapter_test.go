@@ -47,6 +47,7 @@ if sleep_for:
     time.sleep(sleep_for)
 
 if os.environ.get("STUB_BAD_JSON"):
+    sys.stderr.write("the cli complained\n")
     sys.stdout.write("this is not json{{{")
     sys.exit(0)
 
@@ -540,6 +541,33 @@ func TestUnparsableResponseIsReported(t *testing.T) {
 	}
 	if !strings.Contains(out, "zcode-repl error rc=0 (unparsable response)") {
 		t.Fatalf("missing unparsable-response report:\n%s", out)
+	}
+	// rc was 0, so the failure branch never ran: the CLI's stderr is the only
+	// evidence of why the turn produced nothing usable.
+	if !strings.Contains(out, "zcode-repl stderr: the cli complained") {
+		t.Fatalf("unparsable response did not surface the CLI stderr:\n%s", out)
+	}
+}
+
+// A headless turn is silent until it completes, so the pane would otherwise
+// still show the previous turn's ready marker as its last line while busy.
+func TestTurnInFlightIsAnnouncedBeforeTheReadyMarker(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, nil)
+	out, _ := h.run("do some work\n")
+
+	busy := strings.Index(out, "zcode-repl turn in flight")
+	if busy < 0 {
+		t.Fatalf("no in-flight announcement:\n%s", out)
+	}
+	if last := strings.LastIndex(out, "zcode-repl ready"); last < busy {
+		t.Fatalf("in-flight line must precede the turn's ready marker:\n%s", out)
+	}
+	// The startup marker still comes first, so a pane that has never run a turn
+	// reads as ready, not busy.
+	if first := strings.Index(out, "zcode-repl ready"); first > busy {
+		t.Fatalf("startup marker must precede the first in-flight line:\n%s", out)
 	}
 }
 
