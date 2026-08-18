@@ -233,8 +233,9 @@ func TestReapClosedBeadWorktrees_FailsClosedOnBorrowVetoQueryError(t *testing.T)
 }
 
 // TestReapClosedBeadWorktrees_BorrowVetoScanIsBatchedPerRig proves FR-3: with
-// multiple reap-eligible candidates in the same rig and tick, the borrow-veto
-// scan issues exactly one List call for that rig, not one per candidate.
+// multiple reap-eligible candidates in the same rig and tick, discovery issues
+// one closed-bead ownership query and the borrow-veto scan issues one active
+// reference query, never one query per candidate.
 func TestReapClosedBeadWorktrees_BorrowVetoScanIsBatchedPerRig(t *testing.T) {
 	cityPath, rigRoot := initReapRig(t)
 	addClosedWorktree(t, rigRoot, cityPath, "builder", "ga-batchA1")
@@ -255,14 +256,17 @@ func TestReapClosedBeadWorktrees_BorrowVetoScanIsBatchedPerRig(t *testing.T) {
 	if len(report.Reaped) != 3 {
 		t.Fatalf("Reaped = %+v, want all 3 candidates reaped\nstderr:\n%s", report.Reaped, stderr.String())
 	}
-	if store.calls != 1 {
-		t.Fatalf("List calls = %d, want exactly 1 batched call for 3 candidates in one rig", store.calls)
+	if store.calls != 2 {
+		t.Fatalf("List calls = %d, want one ownership query plus one batched borrow-veto query", store.calls)
 	}
-	q := store.queries[0]
-	if q.TierMode != beads.TierBoth {
-		t.Errorf("TierMode = %v, want beads.TierBoth: the scan must see ephemeral (wisp-tier) borrowers without relying on a wrapping store to expand the default tier", q.TierMode)
+	discovery, borrow := store.queries[0], store.queries[1]
+	if !discovery.AllowScan || !discovery.IncludeClosed || discovery.TierMode != beads.TierBoth {
+		t.Errorf("discovery query = %+v, want all closed beads across both tiers for exact external ownership metadata", discovery)
 	}
-	if q.IncludeClosed {
-		t.Errorf("IncludeClosed = true, want false: closed beads are discarded by IsTerminalStatus anyway, so pulling each rig's full closed history every tick is pure cost")
+	if borrow.TierMode != beads.TierBoth {
+		t.Errorf("TierMode = %v, want beads.TierBoth: the scan must see ephemeral (wisp-tier) borrowers without relying on a wrapping store to expand the default tier", borrow.TierMode)
+	}
+	if borrow.IncludeClosed {
+		t.Errorf("borrow query IncludeClosed = true, want false: terminal references cannot veto")
 	}
 }
