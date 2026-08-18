@@ -83,3 +83,18 @@ stdout-contract violation caused only when legacy closed circuit-breaker files
 exist for cleanup. The clean `origin/main` run lacked that machine state, so it
 could not reproduce or disprove the defect. The ruling authorizes attribution
 for this signature only and explicitly forbids quarantining the test.
+
+The pre-push hook also encountered one teardown-only failure after the test
+body passed:
+
+- `failure_attribution: TestCustomTypesCheck_TableDrift -> ga-t33q83 + mayor
+  ruling gm-wisp-xnkthw (teardown-only race; test body passed; clause 3 absent,
+  attributed by ruling)`
+
+The diff does not own or overlap this test. Its assertions passed, then
+`t.TempDir` cleanup reported a lingering eventkit-store lock. The exact
+`make test-fast-parallel` lane on
+`origin/main@0b10e4e4d9648cdaf913193b3eed207e71bbdbb9` passed all 10 jobs, so a
+same-signature base failure was absent. The merge authority authorized this
+narrow attribution because the cleanup race carries no information about the
+ctime fingerprint change; `ga-t33q83` tracks the underlying fix.
