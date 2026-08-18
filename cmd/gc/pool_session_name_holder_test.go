@@ -171,3 +171,74 @@ func TestPoolSessionCreate_FailedCreateHolderReleasesItsName(t *testing.T) {
 type discardWriter struct{}
 
 func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
+
+// degradedQueryStore answers writes and Get normally but fails every metadata
+// query — the shape of a store whose backend is reachable enough to have
+// written this tick's beads but cannot serve the reservation scan.
+type degradedQueryStore struct {
+	beads.Store
+	err error
+}
+
+func (s degradedQueryStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if len(q.Metadata) > 0 {
+		return nil, s.err
+	}
+	return s.Store.List(q)
+}
+
+// TestPoolSessionCreate_LiveHolderBlocksEvenWhenTheStoreScanCannotAnswer is the
+// case only the in-tick snapshot check can catch, and the reason that check
+// exists as a separate layer rather than as a duplicate of the store scan.
+//
+// derivePoolSessionName deliberately proceeds on the identity-derived name when
+// the reservation scan errors: the name is idempotent per slot, so an
+// unverified claim re-addresses the slot's own box, and refusing would stall
+// every unaliased pool create for as long as the store is unhappy. That
+// tolerance is only safe because the snapshot of this tick's open beads is
+// consulted FIRST. Lose the ordering, or lose the snapshot check, and a
+// degraded store becomes a licence to point a second agent at a live session's
+// box — the one outcome worse than the leak.
+func TestPoolSessionCreate_LiveHolderBlocksEvenWhenTheStoreScanCannotAnswer(t *testing.T) {
+	mem := beads.NewMemStore()
+	identity := poolChurnIdentity()
+
+	live, err := createPoolSessionBeadWithAlias(mem, poolChurnTemplate, nil, nil, time.Now().UTC(), identity, "")
+	if err != nil {
+		t.Fatalf("live create: %v", err)
+	}
+	open, err := loadSessionBeads(mem)
+	if err != nil {
+		t.Fatalf("loadSessionBeads: %v", err)
+	}
+	snapshot := newSessionBeadSnapshot(open)
+
+	degraded := degradedQueryStore{Store: mem, err: errors.New("gateway unreachable")}
+	second, err := createPoolSessionBeadWithAlias(degraded, poolChurnTemplate, nil, snapshot, time.Now().UTC(), identity, "")
+	if err == nil {
+		t.Fatalf("create handed %q to a second bead while %s holds it live, because the store scan could not answer", second.SessionNameMetadata, live.ID)
+	}
+	if !errors.Is(err, errPoolSessionNameUnavailable) {
+		t.Fatalf("create error = %v, want errPoolSessionNameUnavailable", err)
+	}
+}
+
+// TestPoolSessionCreate_DegradedStoreStillCreatesWithoutALiveHolder is the
+// discriminating control for the test above: the tolerance it guards must
+// actually be there. With the same unanswerable store and no live holder in the
+// snapshot, the create proceeds — otherwise a degraded store would stall every
+// pool in the city, which is the failure mode the fail-closed derive was
+// specifically designed not to have.
+func TestPoolSessionCreate_DegradedStoreStillCreatesWithoutALiveHolder(t *testing.T) {
+	mem := beads.NewMemStore()
+	identity := poolChurnIdentity()
+
+	degraded := degradedQueryStore{Store: mem, err: errors.New("gateway unreachable")}
+	info, err := createPoolSessionBeadWithAlias(degraded, poolChurnTemplate, nil, newSessionBeadSnapshot(nil), time.Now().UTC(), identity, "")
+	if err != nil {
+		t.Fatalf("create refused on a degraded store with nothing holding the name: %v", err)
+	}
+	if want := poolIdentitySessionName(identity.AgentName, poolChurnTemplate); strings.TrimSpace(info.SessionNameMetadata) != want {
+		t.Fatalf("session_name = %q, want %q", info.SessionNameMetadata, want)
+	}
+}
