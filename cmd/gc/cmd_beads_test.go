@@ -701,6 +701,85 @@ func TestRun_BeadsListRejectsUnknownFlag(t *testing.T) {
 	}
 }
 
+// TestRun_UsageErrorsPrintShortPointerNotFullUsage locks issue #5359: every
+// flag/arg/command error path funnels through printCommandUsage, which used
+// to dump cmd.UsageString() in full (30+ lines, burying the actual error).
+// It now prints a single `Run "<path> --help" for usage.` pointer instead.
+func TestRun_UsageErrorsPrintShortPointerNotFullUsage(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		wantStderr  []string
+		notWantSubs []string
+	}{
+		{
+			name:       "unknown flag",
+			args:       []string{"mail", "list", "--definitely-invalid"},
+			wantStderr: []string{"gc: unknown flag: --definitely-invalid", `Run "gc mail --help" for usage.`},
+		},
+		{
+			name:       "unknown command",
+			args:       []string{"totally-bogus-command"},
+			wantStderr: []string{`gc: unknown command "totally-bogus-command"`, `Run "gc --help" for usage.`},
+		},
+		{
+			name:       "flag group validation error",
+			args:       []string{"mail", "send", "--to", "mayor", "--all", "hi"},
+			wantStderr: []string{"if any flags in the group", `Run "gc mail send --help" for usage.`},
+		},
+		{
+			name:       "--city empty value",
+			args:       []string{"--city="},
+			wantStderr: []string{"gc: --city and --rig require non-empty values", `Run "gc --help" for usage.`},
+		},
+		{
+			name:       "--rig empty value",
+			args:       []string{"--rig="},
+			wantStderr: []string{"gc: --city and --rig require non-empty values", `Run "gc --help" for usage.`},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			clearGCEnv(t)
+			var out, errb bytes.Buffer
+			code := run(test.args, &out, &errb)
+			if code == 0 {
+				t.Fatalf("exit = 0, want non-zero; stderr = %q", errb.String())
+			}
+			for _, want := range test.wantStderr {
+				if !strings.Contains(errb.String(), want) {
+					t.Fatalf("stderr = %q, want it to contain %q", errb.String(), want)
+				}
+			}
+			// The full cobra usage block (flag listings, "Available Commands:",
+			// child command names) must no longer appear on error paths.
+			for _, notWant := range append([]string{"Available Commands:", "Flags:"}, test.notWantSubs...) {
+				if strings.Contains(errb.String(), notWant) {
+					t.Fatalf("stderr = %q, want it to NOT contain %q (full usage leaked)", errb.String(), notWant)
+				}
+			}
+		})
+	}
+}
+
+// TestRun_HelpStillPrintsFullUsage locks that --help (unlike error paths) is
+// untouched by #5359: it calls cmd.Help() directly and must keep showing the
+// full usage block, including the command's available flags and children.
+func TestRun_HelpStillPrintsFullUsage(t *testing.T) {
+	clearGCEnv(t)
+	var out, errb bytes.Buffer
+	code := run([]string{"mail", "--help"}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("--help exit = %d, want 0; stderr = %q", code, errb.String())
+	}
+	combined := out.String() + errb.String()
+	for _, want := range []string{"Usage:", "Available Commands:", "gc mail"} {
+		if !strings.Contains(combined, want) {
+			t.Fatalf("--help output = %q, want it to still contain %q", combined, want)
+		}
+	}
+}
+
 // TestRun_BeadsListHelpNotSwallowed locks that `gc beads list --help` now prints
 // help. DisableFlagParsing used to swallow --help (and `beads show --help` even
 // tried to resolve a bead literally named "--help").
