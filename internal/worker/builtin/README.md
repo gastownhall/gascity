@@ -131,6 +131,18 @@ production worker stack (tmux transport, hook plugins, transcript mirrors).
 
 ## Regenerating the grid
 
+Refreshing one provider without disturbing the others:
+
+```bash
+python3 scripts/worker_conformance_grid.py \
+  --report-dir /tmp/grid/phase1 --report-dir /tmp/grid/phase2 \
+  --report-dir /tmp/grid/live \
+  --provider <provider> \
+  --readme internal/worker/builtin/README.md
+```
+
+Full regeneration (only correct when the report dirs cover every provider):
+
 ```bash
 GC_WORKER_REPORT_DIR=/tmp/grid/phase1 make test-worker-core
 GC_WORKER_REPORT_DIR=/tmp/grid/phase2 make test-worker-core-phase2
@@ -172,3 +184,16 @@ python3 scripts/worker_conformance_grid.py \
   cancels the turn itself — the ZCode CLI installs a SIGINT handler and works
   straight through a pane `^C`. Usage extraction is unregistered for the family,
   so `WC-TX-USAGE-001` / `WC-USAGE-COST-001` record Unsupported.
+- `zcode`'s phase-2 Tool events and Interactions cells certify that the
+  NORMALIZER handles those shapes, not that the family produces them. Its
+  transcripts are an export mirror this repo writes, and the adapter emits text
+  parts only — no tool or interaction parts — because each turn is a headless
+  call whose structured events ZCode does not expose. The scenarios feed
+  hand-built mirrors carrying those parts, which is a real reader contract and
+  worth keeping, but a green cell here is not evidence that a live zcode worker
+  surfaces tool calls or permission prompts. Wiring real tool-part extraction is
+  a follow-up, not something these cells already cover.
+- The zcode row is refreshed with `--provider zcode`, which rewrites only that
+  provider's rows. A full regeneration writes every provider from the reports it
+  is handed, so running it on a host that holds one provider's reports would
+  silently downgrade every other provider's recorded cells to "not verified".
