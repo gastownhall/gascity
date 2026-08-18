@@ -313,7 +313,14 @@ def last_user_text(export):
     return None
 
 
-PENDING_SESSION = "pending"
+def pending_session_id(mirror_dir):
+    """Placeholder id for turns cancelled before a session id existed.
+
+    Derived from the mirror scope (<session-name>#<epoch>) so two workers
+    sharing a transcript root cannot collide on a literal "pending".
+    """
+    scope = os.path.basename(os.path.normpath(mirror_dir)) or "default"
+    return "pending-" + re.sub(r"[^A-Za-z0-9._-]", "_", scope)
 
 
 def mode_prompt(argv):
@@ -328,26 +335,30 @@ def mode_prompt(argv):
 
 
 def mode_cancelled(argv):
-    """Record a turn that never produced a reply.
+    """Close out a turn that never produced a reply.
 
-    With a session id the user message is already published (mode_prompt) and
-    simply stays unpaired. Without one — the first turn of a session, which is
-    the boot/priming turn — nothing exists yet, so write a placeholder export
-    that the next successful turn adopts.
+    With a session id the user message is already published (mode_prompt), so
+    append the outcome as its reply: a trailing user message means "in turn" to
+    every consumer of this mirror, and a turn that failed or was interrupted is
+    emphatically not still running.
+
+    Without a session id — the first turn of a session — nothing exists yet, so
+    write the pair into a placeholder export the next successful turn adopts.
     """
-    mirror_dir, cwd, session_id, prompt_file = argv
-    if session_id:
-        return
-    dst, export = load_export(mirror_dir, PENDING_SESSION, cwd)
+    mirror_dir, cwd, session_id, prompt_file, note = argv
+    target = session_id or pending_session_id(mirror_dir)
+    dst, export = load_export(mirror_dir, target, cwd)
     if dst is None:
         return
-    append_message(export, PENDING_SESSION, "user", read_text(prompt_file))
+    if not session_id:
+        append_message(export, target, "user", read_text(prompt_file))
+    append_message(export, target, "assistant", note)
     save_export(dst, export)
 
 
 def adopt_pending(mirror_dir, cwd, session_id):
     """Fold a placeholder export into the session that finally established."""
-    pending_path, pending = load_export(mirror_dir, PENDING_SESSION, cwd)
+    pending_path, pending = load_export(mirror_dir, pending_session_id(mirror_dir), cwd)
     if pending_path is None or not pending["messages"]:
         return None
     try:
@@ -574,6 +585,10 @@ while :; do
     # session id is the mirror's key, so this only works from the second turn
     # of a session on; the first turn's pair lands together at completion.
     pre_sid="$sid"
+    # published_sid is the export the prompt was written into. It must survive
+    # the stale-sid retry below, which abandons pre_sid: whichever export holds
+    # the unpaired user message is the one that has to be closed out.
+    published_sid="$sid"
     python3 "$helper" prompt "$transcript_dir" "$PWD" "$pre_sid" "$prompt_file" || true
 
     run_turn "$line" "$sid"
@@ -592,19 +607,31 @@ while :; do
         sid=""
         sid_unvalidated=0
         rm -f "$sid_path"
+        # The abandoned session keeps the prompt we published into it; close it
+        # so it does not read as a turn still in flight forever.
+        python3 "$helper" cancelled "$transcript_dir" "$PWD" "$published_sid" "$prompt_file" \
+            "zcode-repl resume failed, restarted fresh" || true
         pre_sid=""
+        published_sid=""
         run_turn "$line" ""
         rc=$?
     fi
 
     if (( rc != 0 )); then
-        # A cancelled turn still has to be visible. Publishing at turn start
-        # needs the session id that keys the mirror, so the FIRST turn of a
-        # session — the boot/priming turn gc is most likely to interrupt — left
-        # no trace at all when it was cancelled. Record it against the session
-        # if one exists, otherwise against a placeholder the next successful
-        # turn adopts, so an interrupted boot is never silently invisible.
-        python3 "$helper" cancelled "$transcript_dir" "$PWD" "$pre_sid" "$prompt_file" || true
+        # A cancelled turn still has to be visible, and it has to CLOSE. The
+        # user message was published when the turn started, so leaving it
+        # unpaired reads as "a turn is in flight" for as long as the mirror
+        # lives, while the pane sits idle at its marker. Record the outcome as
+        # the turn's reply. Without a session id yet — the first turn of a
+        # session, the boot/priming turn gc is most likely to interrupt —
+        # write a placeholder export the next successful turn adopts, so an
+        # interrupted boot is never silently invisible either.
+        if (( interrupted )); then
+            cancel_note="zcode-repl turn interrupted"
+        else
+            cancel_note="zcode-repl error rc=$rc"
+        fi
+        python3 "$helper" cancelled "$transcript_dir" "$PWD" "$published_sid" "$prompt_file" "$cancel_note" || true
         report_failure "$rc"
         note_failure_and_maybe_bail
         printf '%s\n' "$MARKER"

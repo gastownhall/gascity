@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -992,12 +993,17 @@ func TestExportMirrorPublishesTheUserTurnBeforeTheReply(t *testing.T) {
 	if _, code := s.wait(); code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
+	// The interrupted turn is closed out, not left dangling: a trailing user
+	// message would read as "still in flight" to every consumer of the mirror.
 	export := h.readExport("sess_pending")
-	if len(export.Messages) != 3 {
-		t.Fatalf("messages = %d, want the interrupted turn left unpaired at 3", len(export.Messages))
+	if len(export.Messages) != 4 {
+		t.Fatalf("messages = %d, want the interrupted turn recorded and closed", len(export.Messages))
 	}
 	if got := export.Messages[2].Info.ParentID; got != export.Messages[1].Info.ID {
 		t.Fatalf("pending user parentID = %q, want %q", got, export.Messages[1].Info.ID)
+	}
+	if got := export.Messages[3].Info.Role; got != "assistant" {
+		t.Fatalf("interrupted turn tail role = %q, want assistant", got)
 	}
 }
 
@@ -1066,9 +1072,12 @@ func TestCancelledFirstTurnStaysVisibleAndIsAdopted(t *testing.T) {
 	s.signal(syscall.SIGINT)
 	s.waitForOutput("zcode-repl error rc=", 15*time.Second)
 
-	pending := h.readExport("pending")
-	if len(pending.Messages) != 1 || pending.Messages[0].Parts[0].Text != "the boot prompt" {
+	pending := h.readExport(h.pendingSessionID())
+	if len(pending.Messages) != 2 || pending.Messages[0].Parts[0].Text != "the boot prompt" {
 		t.Fatalf("canceled first turn left no usable trace: %+v", pending.Messages)
+	}
+	if got := pending.Messages[1].Info.Role; got != "assistant" {
+		t.Fatalf("canceled first turn was left open (tail role %q)", got)
 	}
 
 	// The next successful turn adopts it, so the conversation reads in order.
@@ -1091,8 +1100,8 @@ func TestCancelledFirstTurnStaysVisibleAndIsAdopted(t *testing.T) {
 	}
 
 	export := h.readExport("sess_after_cancel")
-	if len(export.Messages) < 3 {
-		t.Fatalf("adopted history = %d messages, want the canceled turn plus the pair", len(export.Messages))
+	if len(export.Messages) < 4 {
+		t.Fatalf("adopted history = %d messages, want the closed canceled turn plus the pair", len(export.Messages))
 	}
 	if got := export.Messages[0].Parts[0].Text; got != "the boot prompt" {
 		t.Fatalf("first message = %q, want the canceled boot prompt carried forward", got)
@@ -1100,8 +1109,68 @@ func TestCancelledFirstTurnStaysVisibleAndIsAdopted(t *testing.T) {
 	if got := export.Messages[0].Info.SessionID; got != "sess_after_cancel" {
 		t.Fatalf("adopted message sessionID = %q, want sess_after_cancel", got)
 	}
-	if _, err := os.Stat(filepath.Join(h.mirrorDir, h.epochScope(), "pending.json")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(h.mirrorDir, h.epochScope(), h.pendingSessionID()+".json")); !os.IsNotExist(err) {
 		t.Fatalf("placeholder export survived adoption: %v", err)
+	}
+}
+
+// A turn that fails or is interrupted must CLOSE in the mirror. The user
+// message was published when the turn started, so leaving it unpaired reads as
+// "a turn is in flight" forever while the pane sits idle at its marker.
+func TestFailedTurnClosesTheMirrorEntry(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, map[string]string{"STUB_SID": "sess_closes"})
+	// One process: the first turn validates the sid, so the failing turn takes
+	// the plain failure path rather than the stale-sid recovery path.
+	s := h.start()
+	s.send("establish the session")
+	time.Sleep(2500 * time.Millisecond)
+	h.control(map[string]string{"STUB_RC": "1"})
+	s.send("a turn that fails")
+	time.Sleep(2500 * time.Millisecond)
+	if _, code := s.closeAndWait(); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+
+	export := h.readExport("sess_closes")
+	last := export.Messages[len(export.Messages)-1]
+	if last.Info.Role != "assistant" {
+		t.Fatalf("mirror tail role = %q, want assistant so the turn reads as finished", last.Info.Role)
+	}
+	if !strings.Contains(last.Parts[0].Text, "rc=1") {
+		t.Fatalf("closing entry = %q, want the failure outcome", last.Parts[0].Text)
+	}
+	if prev := export.Messages[len(export.Messages)-2]; prev.Info.Role != "user" {
+		t.Fatalf("failed turn's prompt was not recorded: %+v", prev)
+	}
+}
+
+// The same invariant for an interrupt, which takes the identical path.
+func TestInterruptedTurnClosesTheMirrorEntry(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, map[string]string{"STUB_SID": "sess_int_closes"})
+	h.run("establish the session\n")
+
+	h.env["STUB_SLEEP"] = "30"
+	s := h.start()
+	s.send("a turn to interrupt")
+	s.waitForOutput("zcode-repl turn in flight", 20*time.Second)
+	s.signal(syscall.SIGINT)
+	s.waitForOutput("zcode-repl error rc=", 15*time.Second)
+	s.signal(syscall.SIGTERM)
+	if _, code := s.wait(); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+
+	export := h.readExport("sess_int_closes")
+	last := export.Messages[len(export.Messages)-1]
+	if last.Info.Role != "assistant" {
+		t.Fatalf("mirror tail role = %q, want assistant after an interrupt", last.Info.Role)
+	}
+	if !strings.Contains(last.Parts[0].Text, "interrupted") {
+		t.Fatalf("closing entry = %q, want the interrupt outcome", last.Parts[0].Text)
 	}
 }
 
@@ -1151,6 +1220,12 @@ type mirrorExport struct {
 			Text string `json:"text"`
 		} `json:"parts"`
 	} `json:"messages"`
+}
+
+// pendingSessionID mirrors the adapter's scope-derived placeholder id for turns
+// canceled before a session id existed.
+func (h *harness) pendingSessionID() string {
+	return "pending-" + regexp.MustCompile(`[^A-Za-z0-9._-]`).ReplaceAllString(h.epochScope(), "_")
 }
 
 // epochScope mirrors the adapter's per-epoch mirror directory, which is how a

@@ -57,6 +57,10 @@ func FindZCodeSessionFileByID(searchPaths []string, workDir, sessionID string) s
 	if strings.Contains(sessionID, "..") || strings.ContainsAny(sessionID, `/\`) {
 		return ""
 	}
+	// The adapter sanitizes the id before using it as a filename, so compare
+	// against the same form or a legal id containing, say, a colon never
+	// resolves.
+	sessionID = sanitizeZCodeComponent(sessionID)
 	var (
 		bestPath string
 		bestTime time.Time
@@ -81,4 +85,94 @@ func FindZCodeSessionFileByID(searchPaths []string, workDir, sessionID string) s
 		})
 	}
 	return bestPath
+}
+
+// ZCodeMirrorScope is the per-session, per-conversation subdirectory the zcode
+// adapter writes its mirrors into: "<session-name>#<continuation-epoch>",
+// sanitized the same way the adapter sanitizes it. Returns "" when either part
+// is missing.
+func ZCodeMirrorScope(sessionName, continuationEpoch string) string {
+	sessionName = strings.TrimSpace(sessionName)
+	if sessionName == "" {
+		return ""
+	}
+	epoch := strings.TrimSpace(continuationEpoch)
+	if epoch == "" {
+		epoch = "1"
+	}
+	for _, r := range epoch {
+		if r < '0' || r > '9' {
+			return ""
+		}
+	}
+	return sanitizeZCodeComponent(sessionName) + "#" + epoch
+}
+
+// FindZCodeSessionFileByScope resolves the mirror for a session by the identity
+// the adapter actually persists.
+//
+// gc never learns zcode's provider session id — the family has no session-id
+// flag and no hook plugin, so session_key stays empty and every id-keyed lookup
+// misses. But the adapter names its mirror directory
+// "<session-name>#<continuation-epoch>", and both values live on the session
+// bead, so this resolves a specific session's transcript exactly: two workers
+// sharing a work dir each find their own, and a mirror left behind by a dead
+// session in a reused work dir is not surfaced for a fresh one.
+func FindZCodeSessionFileByScope(searchPaths []string, workDir, sessionName, continuationEpoch string) string {
+	scope := ZCodeMirrorScope(sessionName, continuationEpoch)
+	workDir = cleanOpenCodeWorkDir(workDir)
+	if scope == "" || workDir == "" {
+		return ""
+	}
+	var (
+		bestPath string
+		bestTime time.Time
+	)
+	for _, root := range mergeZCodeSearchPaths(searchPaths) {
+		dir := filepath.Join(root, scope)
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			name := entry.Name()
+			if entry.IsDir() || !strings.HasSuffix(name, ".json") {
+				continue
+			}
+			// The placeholder holds turns canceled before a session existed;
+			// it is adopted by the first real mirror and is never the answer.
+			if strings.HasPrefix(name, "pending-") {
+				continue
+			}
+			path := filepath.Join(dir, name)
+			if cleanOpenCodeWorkDir(openCodeExportDirectory(path)) != workDir {
+				continue
+			}
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+			if bestPath == "" || info.ModTime().After(bestTime) {
+				bestPath = path
+				bestTime = info.ModTime()
+			}
+		}
+	}
+	return bestPath
+}
+
+// sanitizeZCodeComponent mirrors the adapter's path-component sanitization
+// (tr -c 'A-Za-z0-9._-' '_'), so a lookup and the writer agree on the name.
+func sanitizeZCodeComponent(value string) string {
+	var b strings.Builder
+	for _, r := range value {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r >= '0' && r <= '9',
+			r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+	}
+	return b.String()
 }
