@@ -46,12 +46,19 @@ func TestCleanInstallTutorialPath(t *testing.T) {
 	registerIntegrationDoltSQLServerCleanup(t, cityDir)
 
 	// --- Step 1: gc init (clean install, no --file) ---
-	out, err := runGCDoltWithEnv(env, "", "init",
-		"--skip-provider-readiness",
-		"--providers", "codex",
-		"--default-provider", "codex",
-		cityDir,
-	)
+	// Wrapped in retryOnDoltDirtyTableMigrationRace: under the full parallel
+	// sweep, bd's schema-migration bootstrap can transiently race a
+	// still-settling prior schema state (gastownhall/beads#4566, ga-38xsx4).
+	// The retry is narrowly scoped to that one known signature — see the
+	// predicate's doc comment — so it never masks a real gc-init failure.
+	out, err := retryOnDoltDirtyTableMigrationRace(func() (string, error) {
+		return runGCDoltWithEnv(env, "", "init",
+			"--skip-provider-readiness",
+			"--providers", "codex",
+			"--default-provider", "codex",
+			cityDir,
+		)
+	})
 	if err != nil {
 		t.Fatalf("gc init failed: %v\noutput: %s", err, out)
 	}
@@ -70,7 +77,11 @@ func TestCleanInstallTutorialPath(t *testing.T) {
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatalf("creating rig dir: %v", err)
 	}
-	out, err = gcDolt(cityDir, "rig", "add", rigDir)
+	// Same beads#4566 exposure as Step 1: gc rig add seeds a second, separate
+	// Dolt DB (the rig's own) and can hit the identical transient race.
+	out, err = retryOnDoltDirtyTableMigrationRace(func() (string, error) {
+		return gcDolt(cityDir, "rig", "add", rigDir)
+	})
 	if err != nil {
 		t.Fatalf("gc rig add failed: %v\noutput: %s", err, out)
 	}

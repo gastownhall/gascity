@@ -1461,6 +1461,16 @@ func TestManagedDoltTransportRetryableIncludesCircuitBreaker(t *testing.T) {
 	}
 }
 
+// doltDirtyTableMigrationRaceRetryable reports whether out is the known
+// transient beads#4566 signature: a bd Dolt schema-migration bootstrap
+// racing a still-settling prior schema state under concurrent test load
+// (ga-38xsx4). Narrowly scoped to that one signature only — any other gc
+// init / bd init failure, including the stdout-contract regression this
+// suite exists to catch (ga-rsktma), must never be retried away here.
+func doltDirtyTableMigrationRaceRetryable(out string) bool {
+	return strings.Contains(strings.ToLower(out), "pending schema migrations alter pre-existing dirty tables")
+}
+
 func TestDoltDirtyTableMigrationRaceRetryableMatchesKnownSignatureOnly(t *testing.T) {
 	known := "Error: failed to open Dolt store: failed to initialize schema: schema migration: pending schema migrations alter pre-existing dirty tables: dependencies; run 'bd dolt commit' to commit the working set at the current schema, then re-run the migration (gastownhall/beads#4566)"
 	if !doltDirtyTableMigrationRaceRetryable(known) {
@@ -1480,6 +1490,27 @@ func TestDoltDirtyTableMigrationRaceRetryableMatchesKnownSignatureOnly(t *testin
 	if doltDirtyTableMigrationRaceRetryable(stdoutRegression) {
 		t.Fatalf("doltDirtyTableMigrationRaceRetryable(%q) = true, want false (must not mask the stdout-contract regression this test exists to catch)", stdoutRegression)
 	}
+}
+
+// retryOnDoltDirtyTableMigrationRace runs cmd, retrying up to a small bound
+// ONLY when the result matches the known-transient beads#4566 dirty-table
+// migration race (ga-38xsx4). Any other outcome — success or a different
+// failure — returns immediately on the first attempt, so a real regression
+// (e.g. ga-rsktma's stdout contract) still fails the test instead of being
+// retried away. Bounded, not a blind retry-until-green.
+func retryOnDoltDirtyTableMigrationRace(cmd func() (string, error)) (string, error) {
+	const maxAttempts = 3
+	const retryDelay = 2 * time.Second
+	var out string
+	var err error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		out, err = cmd()
+		if err == nil || !doltDirtyTableMigrationRaceRetryable(out) || attempt == maxAttempts {
+			return out, err
+		}
+		time.Sleep(retryDelay)
+	}
+	return out, err
 }
 
 func TestRetryOnDoltDirtyTableMigrationRaceRetriesOnlyKnownSignature(t *testing.T) {
