@@ -11,7 +11,7 @@ passing result for that provider.
 ## Compatibility grid
 
 <!-- BEGIN GENERATED: worker-conformance-grid (scripts/worker_conformance_grid.py) -->
-_Generated 2026-06-12 from 19 conformance report(s)._
+_Generated 2026-06-12 from 19 conformance report(s); `zcode` row added 2026-08-18 from its own phase-1/2/3 reports._
 
 ### Phase 1 — transcript & continuation contract (deterministic fixtures)
 
@@ -23,6 +23,7 @@ _Generated 2026-06-12 from 19 conformance report(s)._
 | `kimi` | ✅ | ✅ | ✅ | ✅ |
 | `opencode` | ✅ | ✅ | ✅ | ✅ |
 | `mimocode` | ✅ | ✅ | ✅ | ✅ |
+| `zcode` | ✅ | ✅ | ✅ | ✅ |
 | `pi` | ✅ | ✅ | ✅ | ✅ |
 | `antigravity` | ✅ | ✅ | ✅ | ✅ |
 
@@ -36,6 +37,7 @@ _Generated 2026-06-12 from 19 conformance report(s)._
 | `kimi` | ✅ | ✅ | ✅ | ✅ |
 | `opencode` | ✅ | ✅ | ✅ | ✅ |
 | `mimocode` | ✅ | ✅ | ✅ | ✅ |
+| `zcode` | ✅ | ✅ | ✅ | ✅ |
 | `pi` | ✅ | ✅ | ✅ | ✅ |
 | `antigravity` | ✅ | ✅ | ✅ | ✅ |
 
@@ -49,6 +51,7 @@ _Generated 2026-06-12 from 19 conformance report(s)._
 | `kimi` | 🔒 | ✅ | 🔒 | 🔒 | 🔒 | 🔒 |
 | `opencode` | 🔒 | 🔒 | 🔒 | 🔒 | 🔒 | 🔒 |
 | `mimocode` | ✅ | ✅ | ✅ | ✅ | ✅ | ➖ |
+| `zcode` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `pi` | 🔒 | 🔒 | 🔒 | 🔒 | 🔒 | 🔒 |
 | `antigravity` | 🔒 | ✅ | 🔒 | 🔒 | 🔒 | 🔒 |
 <!-- END GENERATED: worker-conformance-grid -->
@@ -162,3 +165,10 @@ python3 scripts/worker_conformance_grid.py \
 - `antigravity` and `mimocode` cannot cancel an in-flight turn
   (`WI-INT-001` ➖) — documented CLI limitations, both discovered live by
   this same conformance program.
+- `zcode` rows are from a full live run on glm-5.3 via the Z.ai coding plan
+  (`make test-worker-inference PROFILE=zcode/tmux-cli`). It has no launchable
+  TUI, so the pane runs the engine's own adapter
+  (`internal/worker/adapters/zcode`); `WI-INT-001` passes because the adapter
+  cancels the turn itself — the ZCode CLI installs a SIGINT handler and works
+  straight through a pane `^C`. Usage extraction is unregistered for the family,
+  so `WC-TX-USAGE-001` / `WC-USAGE-COST-001` record Unsupported.
