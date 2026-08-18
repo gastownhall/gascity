@@ -1146,13 +1146,10 @@ func buildPreparedStartWithWorkDirResolver(
 		// recoverRunningPendingCreate / direct-call paths where it was empty.
 		candidate.info = candidate.info.ApplyPatch(sessionpkg.MetadataPatch{"instance_token": instanceToken})
 	}
-	beadAlias := strings.TrimSpace(candidate.info.Alias)
+	runtimeInfo := candidate.info
+	runtimeInfo.SessionName = candidate.name()
 	runtimeEnv := sessionpkg.RuntimeEnvWithSessionContext(
-		candidate.info.ID,
-		candidate.name(),
-		beadAlias,
-		strings.TrimSpace(candidate.info.Template),
-		strings.TrimSpace(candidate.info.SessionOrigin),
+		runtimeInfo,
 		generation,
 		continuationEpoch,
 		instanceToken,

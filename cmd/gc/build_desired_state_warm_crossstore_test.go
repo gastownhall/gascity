@@ -64,7 +64,7 @@ func createWarmSessionBead(t *testing.T, store beads.Store) {
 // tests could silently pin the cold path and pass for the wrong reason.
 func requireWarm(t *testing.T, cfg *config.City, cityStore beads.Store, rigStores map[string]beads.Store) {
 	t.Helper()
-	infos, err := collectAllOpenSessionInfos(cfg, cityStore, rigStores, nil)
+	infos, err := collectAllOpenSessionInfos("", cfg, cityStore, rigStores, nil)
 	if err != nil {
 		t.Fatalf("collectAllOpenSessionInfos: %v", err)
 	}

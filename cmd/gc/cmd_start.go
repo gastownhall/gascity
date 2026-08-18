@@ -155,7 +155,7 @@ func computePoolDeathHandlers(cfg *config.City, cityName, cityPath string, sp ru
 		for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, st, sp) {
 			_, instanceName := config.ParseQualifiedName(qualifiedInstance)
 			instance := deepCopyAgent(&a, instanceName, a.Dir)
-			cmd := instance.EffectiveOnDeathForBeads(cfg.Beads)
+			cmd := instance.EffectiveOnDeathFor(config.QueryTopology{Beads: cfg.Beads})
 			if cmd == "" {
 				continue
 			}
@@ -884,7 +884,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		}
 	}
 
-	sp, err := newSessionProvider()
+	sp, err := newSessionProviderForCity(cfg, cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1025,13 +1025,13 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		PoolDesiredCounts(ComputePoolDesiredStates(
 			cfg, poolWorkBeads, openInfos, dsResult.ScaleCheckCounts)),
 		sessionBeads,
-		dsResult.PoolScaleCheckPartialTemplates,
+		effectivePoolPartialRetentionTemplates(dsResult),
 	)
 	if poolDesired == nil {
 		poolDesired = make(map[string]int)
 	}
 	mergeNamedSessionDemand(poolDesired, dsResult.NamedSessionDemand, cfg)
-	awakeAssignedWorkBeads, awakeAssignedStoreRefs := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, openInfos, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
+	awakeAssignedWorkBeads, awakeAssignedStoreRefs := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, oneShotStore, openInfos, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
 	reconcileSessionBeadsAtPathWithNamedDemand(
 		sigCtx, cityPath, sessionBeads.OpenForReconcile(), sessionBeads, ds, cfgNames, cfg, sp, sessStore,
 		nil, awakeAssignedWorkBeads, rigStores, nil, dt, nil, poolDesired,
@@ -1238,7 +1238,7 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string, hoo
 			if _, err := os.Stat(abs); err == nil {
 				copyFiles = append(copyFiles, runtime.CopyEntry{
 					Src: abs, RelDst: path.Join(relWorkDir, rel),
-					Probed: true, ContentHash: runtime.HashPathContent(abs),
+					Probed: true, ContentHash: runtime.HashHookSettingsContent(abs, rel),
 				})
 			}
 		}
@@ -1439,17 +1439,41 @@ func providerProcessPassthroughEnv() map[string]string {
 	return processenv.ProviderProcessPassthroughEnv()
 }
 
+// controllerOnlyEnvKeys is processenv.ControllerOnlyEnvKeys in set form, so the
+// GC_ sweep below can skip them by exact name. Derived rather than re-spelled:
+// two hand-written lists of the same secret names drift, and a drift here is
+// silent.
+//
+// The skip is what keeps the sweep from undoing the pin.
+// providerProcessPassthroughEnv already sets each of these to the empty string,
+// and the pin — not an omission — is what withholds them, because the map is an
+// overlay on an environment the session already inherits (see
+// processenv.ControllerOnlyEnvKeys). These keys are GC_-prefixed, so without the
+// skip the sweep would read the controller's real value out of os.Environ() and
+// write it straight back over that pin. Unlike GC_DOLT_*, which the comment
+// below names as deliberately forwarded so agents reach the same bead store as
+// the parent, nothing an agent runs may hold the controller token.
+var controllerOnlyEnvKeys = func() map[string]bool {
+	keys := make(map[string]bool, len(processenv.ControllerOnlyEnvKeys))
+	for _, key := range processenv.ControllerOnlyEnvKeys {
+		keys[key] = true
+	}
+	return keys
+}()
+
 // passthroughEnv returns environment variables from the parent process that
 // agent sessions should inherit. Agents need PATH to find tools (including gc),
 // GC_BEADS/GC_DOLT so they use the same bead store as the parent,
 // GC_DOLT_HOST/PORT/USER/PASSWORD so agents can connect to remote Dolt servers,
 // and Claude auth/home context so managed sessions can launch reliably under
-// shell and supervisor-driven flows.
+// shell and supervisor-driven flows. The GC_ sweep is otherwise complete;
+// controllerOnlyEnvKeys is the one exclusion it applies, and those keys come
+// back pinned to the empty string rather than absent.
 func passthroughEnv() map[string]string {
 	m := providerProcessPassthroughEnv()
 	for _, entry := range os.Environ() {
 		key, val, ok := strings.Cut(entry, "=")
-		if !ok || val == "" || !strings.HasPrefix(key, "GC_") {
+		if !ok || val == "" || !strings.HasPrefix(key, "GC_") || controllerOnlyEnvKeys[key] {
 			continue
 		}
 		m[key] = val
@@ -1457,16 +1481,18 @@ func passthroughEnv() map[string]string {
 	return m
 }
 
-// expandEnvMap returns a copy of m with os.ExpandEnv applied to each value.
-// This allows TOML-sourced env blocks to reference the controller's environment,
-// e.g. DOLTHUB_TOKEN = "$DOLTHUB_TOKEN".
+// expandEnvMap returns a copy of m with $VAR references expanded against the
+// controller's environment. This allows TOML-sourced env blocks to reference it,
+// e.g. DOLTHUB_TOKEN = "$DOLTHUB_TOKEN". The controller-only keys read as empty
+// here, so no config-authored value can copy one into a session under another
+// name.
 func expandEnvMap(m map[string]string) map[string]string {
 	if m == nil {
 		return nil
 	}
 	out := make(map[string]string, len(m))
 	for k, v := range m {
-		out[k] = os.ExpandEnv(v)
+		out[k] = processenv.ExpandSessionEnvValue(v)
 	}
 	return out
 }

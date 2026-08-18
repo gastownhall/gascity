@@ -124,7 +124,7 @@ func healStateInfo(session *beads.Bead, alive bool, sessFront *sessionpkg.Store,
 	if session == nil {
 		return
 	}
-	batch, err := healStateWithRollbackInfo(seedSessionInfo(*session), alive, sessFront, clk, 0, true)
+	batch, err := healStateWithRollbackInfo(seedSessionInfo(*session), alive, true, sessFront, clk, 0, true)
 	if err != nil {
 		panic("healStateInfo: " + err.Error())
 	}
@@ -139,7 +139,7 @@ func healStateInfo(session *beads.Bead, alive bool, sessFront *sessionpkg.Store,
 // healStatePatchFromBead is the test shim for the retired raw healStatePatch /
 // healStatePatchWithRollback: it projects the bead to Info and calls the Info form.
 func healStatePatchFromBead(session beads.Bead, alive bool, clk clock.Clock, startupTimeout time.Duration) map[string]string {
-	return healStatePatchWithRollbackInfo(seedSessionInfo(session), alive, clk, startupTimeout, true)
+	return healStatePatchWithRollbackInfo(seedSessionInfo(session), alive, true, clk, startupTimeout, true)
 }
 
 // syncBeadFromStore mirrors the persisted metadata writes for session.ID back
@@ -1136,11 +1136,10 @@ func TestComputeWorkSet_SkipsAgentsOnSuspendedRig(t *testing.T) {
 // a city scope that resolves to an authoritative postgres backend with
 // no resolvable password makes controllerQueryRuntimeEnv return an error.
 func TestComputeWorkSet_NilStderrToleratesProbeEnvError(t *testing.T) {
-	clearAmbientPostgresEnv(t)
 	t.Setenv("GC_BEADS", "bd")
 
 	cityPath := t.TempDir()
-	writePGScopeFixture(t, cityPath, "")
+	writeUnregisteredBackendMetadata(t, cityPath)
 	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: city
 gc.endpoint_origin: managed_city
 gc.endpoint_status: verified
@@ -1827,6 +1826,40 @@ func TestHealState_NeverStartedPendingCreateMigratesToStartPendingUntilRollbackL
 	}
 	if got := len(store.metadata["b1"]); got != 1 {
 		t.Fatalf("healState wrote %d metadata entries for active pending-create lease; want state migration only", got)
+	}
+}
+
+// gcf-ru0 regression: once a bead has migrated to state=start-pending (see
+// TestHealState_NeverStartedPendingCreateMigratesToStartPendingUntilRollbackLeaseExpires),
+// the rollback gate in healStatePatchWithRollbackInfo only fired for
+// info.MetadataState == "creating" — never for "start-pending", even though
+// pendingCreateLeaseExpiredForRollbackInfo itself already understands
+// start-pending via pendingCreateRollbackState. A never-started pending-create
+// lease that aged past pendingCreateNeverStartedTimeout (10m) while sitting in
+// start-pending was therefore never rolled back: projectRuntimeProjection's
+// BaseStateStartPending branch has no staleness check of its own and just
+// keeps re-projecting start-pending forever, so the bead wedged indefinitely
+// with no self-heal.
+func TestHealState_StartPendingNeverStartedRollsBackToAsleep(t *testing.T) {
+	store := newTestStore()
+	clk := &clock.Fake{Time: time.Date(2026, 5, 18, 20, 0, 0, 0, time.UTC)}
+
+	// Past pendingCreateNeverStartedTimeout (10m) with no last_woke_at ever
+	// recorded — this create attempt never even reached a provider Start call.
+	startedAt := clk.Now().Add(-(pendingCreateNeverStartedTimeout + time.Minute))
+	session := makeBead("b1", map[string]string{
+		"state":                     string(sessionpkg.StateStartPending),
+		"pending_create_claim":      "true",
+		"pending_create_started_at": pendingCreateStartedAtNow(startedAt),
+	})
+	session.CreatedAt = startedAt
+
+	healStateInfo(&session, false, sessionFrontDoor(store), clk)
+	if got := session.Metadata["state"]; got != "asleep" {
+		t.Fatalf("state = %q, want asleep (expired start-pending lease must roll back)", got)
+	}
+	if got := session.Metadata["pending_create_claim"]; got != "" {
+		t.Fatalf("pending_create_claim = %q, want empty after rollback", got)
 	}
 }
 

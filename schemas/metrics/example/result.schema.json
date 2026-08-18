@@ -206,7 +206,13 @@
               "logout",
               "whoami",
               "runtime-heartbeat",
-              "pack-registry-requests"
+              "pack-registry-requests",
+              "events-reemit-execution",
+              "storage-migrate",
+              "storage-status",
+              "ready",
+              "storage-recover-stranded",
+              "beads-metadata-cas"
             ]
           },
           "event_id": {

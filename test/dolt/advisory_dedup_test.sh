@@ -106,6 +106,51 @@ if [ -f "$NESTED" ]; then pass "record creates missing parent directories"; else
 got=$(cat "$NESTED" 2>/dev/null || true)
 if [ "$got" = "orphan " ]; then pass "recorded signature round-trips"; else bad "recorded signature mismatch: got '$got'"; fi
 
+# --- advisory_archive_superseded: the mailbox half of the lifecycle ---
+
+command -v advisory_archive_superseded >/dev/null 2>&1 || { echo "FAIL: advisory_archive_superseded not defined"; exit 1; }
+
+# Fake gc on PATH records each invocation; the helper must go through it.
+GC_CALL_LOG="$WORK/gc-calls.log"
+mkdir -p "$WORK/bin"
+cat > "$WORK/bin/gc" <<EOF
+#!/bin/sh
+printf 'gc %s\n' "\$*" >> "$GC_CALL_LOG"
+exit "\${FAKE_GC_EXIT:-0}"
+EOF
+chmod +x "$WORK/bin/gc"
+PATH="$WORK/bin:$PATH"
+
+# Subject + recipient -> one bounded, recipient-scoped archive invocation.
+advisory_archive_superseded "Dolt health advisory" "human"
+got=$(cat "$GC_CALL_LOG" 2>/dev/null || true)
+want="gc mail archive --to human --subject-prefix Dolt health advisory --limit 100"
+if [ "$got" = "$want" ]; then pass "sweep invokes bounded recipient-scoped archive"; else bad "sweep invocation mismatch: got '$got'"; fi
+
+# A caller-supplied limit propagates.
+: > "$GC_CALL_LOG"
+advisory_archive_superseded "Dolt health advisory" "human" 7
+got=$(cat "$GC_CALL_LOG" 2>/dev/null || true)
+case "$got" in
+  *"--limit 7") pass "sweep propagates a caller-supplied limit" ;;
+  *) bad "caller-supplied limit not propagated: got '$got'" ;;
+esac
+
+# Missing subject or recipient -> no-op, no gc invocation.
+: > "$GC_CALL_LOG"
+advisory_archive_superseded "" "human"
+advisory_archive_superseded "Dolt health advisory" ""
+got=$(cat "$GC_CALL_LOG" 2>/dev/null || true)
+if [ -z "$got" ]; then pass "missing subject/recipient -> no gc invocation"; else bad "no-op case invoked gc: '$got'"; fi
+
+# A failing gc is swallowed (fail open): the doctor run must not break because
+# archiving did.
+if (export FAKE_GC_EXIT=1; advisory_archive_superseded "Dolt health advisory" "human"); then
+  pass "failing gc mail archive is swallowed"
+else
+  bad "failing gc mail archive leaked a non-zero exit"
+fi
+
 echo "----"
 if [ "$fail" -eq 0 ]; then echo "ALL PASS"; else echo "FAILURES PRESENT"; fi
 exit "$fail"

@@ -972,16 +972,9 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 		cfg := hints
 		cfg.Command = startCommand
 		cfg.WorkDir = workDir
-		runtimeAlias := alias
-		if runtimeAlias == "" {
-			runtimeAlias = strings.TrimSpace(extraMeta["agent_name"])
-		}
+		runtimeInfo := m.infoFromBead(b)
 		cfg.Env = mergeEnv(mergeEnv(cfg.Env, env), RuntimeEnvWithSessionContext(
-			b.ID,
-			sessName,
-			runtimeAlias,
-			template,
-			meta["session_origin"],
+			runtimeInfo,
 			DefaultGeneration,
 			DefaultContinuationEpoch,
 			meta["instance_token"],
@@ -1576,15 +1569,19 @@ func (m *Manager) UpdatePresentation(id string, title *string, alias *string) er
 					}
 				}
 				update.Metadata = UpdatedAliasMetadata(b.Metadata, nextAlias)
+				runtimeInfo := m.infoFromBead(b)
+				runtimeInfo.SessionName = sessName
+				nextRuntimeInfo := runtimeInfo
+				nextRuntimeInfo.Alias = nextAlias
 				runtimeRunning := sessName != "" && m.sp != nil && m.sp.IsRunning(sessName)
 				if runtimeRunning {
-					if err := SyncRuntimeAlias(m.sp, sessName, nextAlias); err != nil {
+					if err := SyncRuntimeAlias(m.sp, nextRuntimeInfo); err != nil {
 						return fmt.Errorf("updating runtime alias: %w", err)
 					}
 				}
 				if err := m.store.Update(id, update); err != nil {
 					if runtimeRunning {
-						if rollbackErr := SyncRuntimeAlias(m.sp, sessName, currentAlias); rollbackErr != nil {
+						if rollbackErr := SyncRuntimeAlias(m.sp, runtimeInfo); rollbackErr != nil {
 							log.Printf("session %s: restoring runtime alias %q on %s failed: %v", id, currentAlias, sessName, rollbackErr)
 						}
 					}

@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func TestParse_BasicFormula(t *testing.T) {
@@ -3628,10 +3630,13 @@ func TestDescriptionFileBaseDirResolvesSymlinkedParentWithMissingLeaf(t *testing
 	missing := filepath.Join(aliasDir, "not-yet-created.toml")
 	got := descriptionFileBaseDir(missing)
 
-	want, err := filepath.EvalSymlinks(aliasDir)
-	if err != nil {
-		t.Fatalf("EvalSymlinks(aliasDir): %v", err)
-	}
+	// Canonicalize the expectation the same way the code under test does.
+	// Bare EvalSymlinks is a different canonical form than the production
+	// normalizer on macOS, where it reports /private/var/... while
+	// pathutil collapses the equivalent /var alias — see pathutil's
+	// TestNormalizePathForCompareCollapsesDarwinPrivateVarAlias. The
+	// assertion stays exact, so failing to resolve the alias still fails.
+	want := testutil.CanonicalPath(aliasDir)
 	if got != want {
 		t.Errorf("descriptionFileBaseDir(%q) = %q, want %q (resolved through symlinked parent)", missing, got, want)
 	}

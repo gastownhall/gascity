@@ -179,14 +179,13 @@ func ArgvHasFlagValue(argv []string, flag, value string) bool {
 }
 
 // Cmdline returns a PID's command line, normalized through NormalizeArgv.
-// It reads /proc/<pid>/cmdline where available and otherwise falls back to ps,
-// which is how the rest of this repo already reads another process's argv
-// (see the ps -o args= call sites in cmd/gc and internal/runtime/tmux).
-// It returns an error when no mechanism can read the process record.
+// It reads /proc/<pid>/cmdline where available, kern.procargs2 on Darwin, and
+// otherwise falls back to ps. It returns an error when no mechanism can read
+// the process record.
 func Cmdline(pid int) ([]string, error) {
 	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
 	if err != nil {
-		return psCmdline(pid)
+		return platformCmdline(pid)
 	}
 	trimmed := strings.TrimRight(string(data), "\x00")
 	if trimmed == "" {
@@ -289,15 +288,9 @@ func psStartTime(pid int) (string, error) {
 	return identity, nil
 }
 
-// psCmdline reads a PID's argv with ps, for hosts without /proc.
-//
-// One accepted limitation: ps renders argv as a single space-joined string, so
-// an argument containing a space is split into two. The matchers in this package
-// compare flags and their values (ArgvContainsSequence, ArgvHasFlagValue), and
-// the identifiers they match on — session names, targets — do not contain
-// spaces. Reading argv exactly on darwin needs KERN_PROCARGS2 via cgo, which is
-// not worth it for that gap. A mis-split argv fails the match, and failing the
-// match is the safe direction for every caller.
+// psCmdline reads a PID's argv with ps on non-Darwin hosts without /proc.
+// ps renders argv as a single space-joined string, so it cannot preserve an
+// argument containing spaces. Darwin uses kern.procargs2 instead.
 //
 // -ww asks ps for full width, since a truncated argv fails the match on BSD ps.
 func psCmdline(pid int) ([]string, error) {

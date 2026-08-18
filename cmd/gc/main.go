@@ -9,7 +9,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -33,7 +32,14 @@ func main() {
 	os.Exit(mainExitCode(os.Args[1:], os.Stdout, os.Stderr))
 }
 
+// mainExitCode is the central process-entry funnel. main's body is required by
+// the exit-bypass census to be nothing but the os.Exit around this call, so any
+// work that must happen before dispatch belongs here rather than there.
 func mainExitCode(args []string, stdout, stderr io.Writer) int {
+	// Before any dispatch: a closed stdout/stderr must surface as an EPIPE the
+	// command can handle, not as a signal that kills gc mid-write. The claim
+	// path's delivery unwind depends on surviving that write.
+	ignoreSIGPIPE()
 	if handled, code := privateProductMetricsEntrypoint(args); handled {
 		return code
 	}
@@ -169,6 +175,10 @@ func runWithRootCommandOptions(args []string, stdout, stderr io.Writer, options 
 }
 
 func runWithRootCommandOptionsAndLifecycle(args []string, stdout, stderr io.Writer, options rootCommandOptions, lifecycle *productMetricsInvocationLifecycle) int {
+	// Whatever this invocation opened for one-shot storage routing closes here,
+	// after the command has run and before the process reports its code.
+	defer func() { _ = closeCLIStorageRoutes() }()
+
 	prevCityFlag, prevRigFlag := cityFlag, rigFlag
 	prevContextFlag, prevCityURLFlag, prevCityNameFlag := contextFlag, cityURLFlag, cityNameFlag
 	cityFlag, rigFlag = "", ""
@@ -319,6 +329,7 @@ func newRootCmdWithOptions(stdout, stderr io.Writer, options rootCommandOptions)
 		newStopCmd(stdout, stderr),
 		newRestartCmd(stdout, stderr),
 		newStatusCmd(stdout, stderr),
+		newStorageCmd(stdout, stderr),
 		newServiceCmd(stdout, stderr),
 		newSuspendCmd(stdout, stderr),
 		newResumeCmd(stdout, stderr),
@@ -341,6 +352,7 @@ func newRootCmdWithOptions(stdout, stderr io.Writer, options rootCommandOptions)
 		newLintCmd(stdout, stderr),
 		newDoctorCmd(stdout, stderr),
 		newHookCmd(stdout, stderr),
+		newReadyCmd(stdout, stderr),
 		newSlingCmd(stdout, stderr),
 		newConvoyCmd(stdout, stderr),
 		newWispCmd(stdout, stderr),
@@ -735,10 +747,7 @@ func resolveCity() (string, error) {
 }
 
 func resolveContextFromPath(path string) (resolvedContext, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return resolvedContext{}, err
-	}
+	abs := normalizePathForCompare(path)
 	// Validate the explicit target directly before scanning the registry for
 	// rig bindings. An unrelated registered city with a broken/stale config
 	// must not abort resolution of a perfectly healthy explicit target
@@ -778,10 +787,7 @@ func resolveContextFromPath(path string) (resolvedContext, error) {
 
 // validateCityPath resolves and validates a path as a city directory.
 func validateCityPath(p string) (string, error) {
-	abs, err := filepath.Abs(p)
-	if err != nil {
-		return "", err
-	}
+	abs := normalizePathForCompare(p)
 	if citylayout.HasCityConfig(abs) || citylayout.HasRuntimeRoot(abs) {
 		return abs, nil
 	}
@@ -1445,8 +1451,8 @@ func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.
 			return openCompatibleFileStore(scopeRoot, runtimeCityPath)
 		},
 		OpenBdStore: func() (beads.Store, error) {
-			if _, err := exec.LookPath("bd"); err != nil {
-				return nil, fmt.Errorf("bd not found in PATH (install beads or set GC_BEADS=file)")
+			if err := requireBdBinaryForCity(runtimeCityPath); err != nil {
+				return nil, err
 			}
 			return openBdStoreAtWithConfig(scopeRoot, runtimeCityPath, cfg)
 		},
@@ -1487,6 +1493,18 @@ func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.
 	}
 	result.Store = wrapStoreWithBeadPolicies(result.Store, cfg)
 	return result, nil
+}
+
+// requireBdBinaryForCity verifies that the logical bd command has either an
+// ambient executable or the city-configured, absolute workspace pin. The
+// runner keeps the logical command name as "bd" so its timeout, telemetry,
+// and backup policy still apply while executing that pin.
+func requireBdBinaryForCity(cityPath string) error {
+	_, err := resolveBdBinaryForScope(cityPath, cityPath)
+	if errors.Is(err, errBdNotOnPath) {
+		return fmt.Errorf("bd not found in PATH (install beads or set GC_BEADS=file)")
+	}
+	return err
 }
 
 // openExecStoreAtForCityWithConfig opens the exec-provider store for a city.

@@ -71,8 +71,15 @@ func Provision(deps Deps, req ProvisionRequest) (config.Rig, ProvisionResult, er
 	hasGit, defaultBranchOverride, resolvedDefaultBranch := resolveGitDefaultBranch(deps, req, rigPath)
 
 	// Step 4: canonicalize --include tokens that name a pack (builtin or
-	// registry) rather than a path.
-	includes = canonicalizePackIncludes(fs, cityPath, includes, cfg.Packs, deps.ResolveRegistryPack)
+	// registry) rather than a path, and reject any token that resolves to no
+	// pack at all. Validation runs after the registry rewrite so a valid
+	// registry pack name is not rejected before it becomes a remote source.
+	// This runs before every mutation so an unresolvable include leaves the
+	// city untouched instead of bricking pack expansion citywide.
+	includes, err = resolveIncludeSources(fs, cityPath, includes, cfg.Packs, deps.ResolveRegistryPack)
+	if err != nil {
+		return config.Rig{}, result, err
+	}
 
 	// Steps 5-9: resolve imports, detect re-add, derive the prefix, build the next
 	// config, and validate it before any filesystem mutation.

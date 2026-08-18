@@ -1,6 +1,7 @@
 package events
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -69,6 +70,16 @@ type FileRecorder struct {
 	archiveRetainAge      time.Duration
 	recordCount           uint64
 	lastSizeCheck         time.Time
+
+	// skipSweep suppresses the one-shot startup sweep of orphaned rotating-*
+	// files (WithoutStartupSweep). Transient per-open recorders — the
+	// per-mutation class-store emitter is the one in tree — set it so they do
+	// not race the supervisor's long-lived recorder, which owns rotation
+	// recovery. It does NOT make the open scan-free: ReadLatestSeq consults
+	// the archives to continue the sequence, so every open reads the
+	// directory regardless. Crash recovery of orphaned rotating files is
+	// unchanged: the long-lived recorder still sweeps.
+	skipSweep bool
 }
 
 // FileRecorderOption customizes a FileRecorder at construction time.
@@ -104,6 +115,23 @@ func WithRotationCheckInterval(d time.Duration) FileRecorderOption {
 // all archives forever.
 func WithArchiveRetainAge(d time.Duration) FileRecorderOption {
 	return func(r *FileRecorder) { r.archiveRetainAge = d }
+}
+
+// WithoutStartupSweep suppresses the one-shot orphaned-rotating-file sweep that
+// NewFileRecorder otherwise runs on open. Transient per-open recorders — one
+// that opens, writes and closes inside a single mutation — pass it so they do
+// not race the supervisor's long-lived recorder mid-rotation: a concurrent
+// sweep can double-gzip the same in-flight rotating-* file through a shared
+// .tmp path. What it skips is the sweep's RECOVERY WORK — a directory pass that
+// gzips and renames the files a crash stranded — not the open's directory read,
+// which happens either way because ReadLatestSeq consults the archives to
+// continue the sequence.
+//
+// The long-lived recorder keeps the sweep, so crash recovery of orphaned
+// rotating files is unaffected, and stranded rotating files stay readable
+// through the in-flight read path meanwhile.
+func WithoutStartupSweep() FileRecorderOption {
+	return func(r *FileRecorder) { r.skipSweep = true }
 }
 
 // RotationResult is returned by ForceRotate (and B-3's API endpoint)
@@ -163,8 +191,24 @@ func NewFileRecorder(path string, stderr io.Writer, opts ...FileRecorderOption) 
 		return nil, fmt.Errorf("creating event log directory: %w", err)
 	}
 
-	if err := reapOrphanedRotatingFiles(filepath.Dir(path), stderr); err != nil {
-		fmt.Fprintf(stderr, "events: rotation: orphan sweep: %v\n", err) //nolint:errcheck // best-effort stderr
+	// Options are applied before the sweep so WithoutStartupSweep can suppress
+	// it; file and seq are filled in after the (optional) sweep and the open.
+	r := &FileRecorder{
+		path:                  path,
+		stderr:                stderr,
+		maxSize:               0,
+		rotationCheckRecords:  defaultRotationCheckRecords,
+		rotationCheckInterval: defaultRotationCheckInterval,
+		lastSizeCheck:         time.Now(),
+	}
+	for _, opt := range opts {
+		opt(r)
+	}
+
+	if !r.skipSweep {
+		if err := reapOrphanedRotatingFiles(filepath.Dir(path), stderr); err != nil {
+			fmt.Fprintf(stderr, "events: rotation: orphan sweep: %v\n", err) //nolint:errcheck // best-effort stderr
+		}
 	}
 
 	maxSeq, err := ReadLatestSeq(path)
@@ -177,19 +221,8 @@ func NewFileRecorder(path string, stderr io.Writer, opts ...FileRecorderOption) 
 		return nil, fmt.Errorf("opening event log: %w", err)
 	}
 
-	r := &FileRecorder{
-		path:                  path,
-		file:                  file,
-		seq:                   maxSeq,
-		stderr:                stderr,
-		maxSize:               0,
-		rotationCheckRecords:  defaultRotationCheckRecords,
-		rotationCheckInterval: defaultRotationCheckInterval,
-		lastSizeCheck:         time.Now(),
-	}
-	for _, opt := range opts {
-		opt(r)
-	}
+	r.file = file
+	r.seq = maxSeq
 	return r, nil
 }
 
@@ -215,21 +248,9 @@ func (r *FileRecorder) Record(e Event) {
 	// The bounded wait drops the recorder if a dead writer is holding the
 	// lock instead of blocking forever and piling up processes.
 	fd := int(r.file.Fd())
-	deadline := time.Now().Add(recordFlockTimeout)
-	for {
-		err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB)
-		if err == nil {
-			break
-		}
-		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
-			fmt.Fprintf(r.stderr, "events: lock: %v\n", err) //nolint:errcheck // best-effort stderr
-			return
-		}
-		if time.Now().After(deadline) {
-			fmt.Fprintf(r.stderr, "events: lock: timed out after %dms waiting on flock at %s\n", recordFlockTimeout.Milliseconds(), r.path) //nolint:errcheck // best-effort stderr
-			return
-		}
-		time.Sleep(recordFlockRetryInterval)
+	if err := lockRecorderFile(fd, r.path); err != nil {
+		fmt.Fprintf(r.stderr, "events: lock: %v\n", err) //nolint:errcheck // best-effort stderr
+		return
 	}
 	defer func() {
 		if err := syscall.Flock(fd, syscall.LOCK_UN); err != nil {
@@ -240,6 +261,112 @@ func (r *FileRecorder) Record(e Event) {
 	if err := r.writeRecordLocked(&e); err != nil {
 		fmt.Fprintf(r.stderr, "events: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
+}
+
+// AppendBatch strictly appends a complete event batch under one mutex and one
+// cross-process file lock. It assigns contiguous sequence numbers, prepares the
+// complete JSONL payload before writing, performs exactly one write, and
+// returns every lock, marshal, write, or unlock failure to the caller.
+//
+// Unlike Record, AppendBatch is not best-effort and does not auto-rotate. It is
+// intended for bounded operator-authored snapshots whose caller must know
+// whether the complete append succeeded.
+func (r *FileRecorder) AppendBatch(batch []Event) (resultErr error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.closed {
+		return fmt.Errorf("recorder is closed")
+	}
+	if r.file == nil {
+		return fmt.Errorf("recorder file is unavailable")
+	}
+	if len(batch) == 0 {
+		return nil
+	}
+
+	fd := int(r.file.Fd())
+	if err := lockRecorderFile(fd, r.path); err != nil {
+		return fmt.Errorf("lock: %w", err)
+	}
+	unlockPending := true
+	defer func() {
+		if !unlockPending {
+			return
+		}
+		if err := syscall.Flock(fd, syscall.LOCK_UN); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("unlock: %w", err))
+		}
+	}()
+
+	latest, err := readLatestActiveSeq(r.path)
+	if err != nil {
+		return fmt.Errorf("latest seq: %w", err)
+	}
+	if r.seq > latest {
+		latest = r.seq
+	}
+	if uint64(len(batch)) > ^uint64(0)-latest {
+		return fmt.Errorf("allocating %d event sequences after %d: sequence overflow", len(batch), latest)
+	}
+
+	data, lastSeq, err := marshalBatch(batch, latest, time.Now())
+	if err != nil {
+		return err
+	}
+	if err := writeBatch(r.file, data); err != nil {
+		return fmt.Errorf("write: %w", err)
+	}
+	r.seq = lastSeq
+	r.recordCount += uint64(len(batch))
+
+	unlockPending = false
+	if err := syscall.Flock(fd, syscall.LOCK_UN); err != nil {
+		return fmt.Errorf("unlock: %w", err)
+	}
+	return nil
+}
+
+func lockRecorderFile(fd int, path string) error {
+	deadline := time.Now().Add(recordFlockTimeout)
+	for {
+		err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
+			return err
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out after %dms waiting on flock at %s", recordFlockTimeout.Milliseconds(), path)
+		}
+		time.Sleep(recordFlockRetryInterval)
+	}
+}
+
+func marshalBatch(batch []Event, startingSeq uint64, now time.Time) ([]byte, uint64, error) {
+	var data bytes.Buffer
+	for i, event := range batch {
+		event.Seq = startingSeq + uint64(i) + 1
+		if event.Ts.IsZero() {
+			event.Ts = now
+		}
+		encoded, err := json.Marshal(event)
+		if err != nil {
+			return nil, 0, fmt.Errorf("marshal event %d: %w", i, err)
+		}
+		data.Write(encoded)
+		data.WriteByte('\n')
+	}
+	return data.Bytes(), startingSeq + uint64(len(batch)), nil
+}
+
+func writeBatch(writer io.Writer, data []byte) error {
+	written, err := writer.Write(data)
+	if written != len(data) {
+		return errors.Join(err, io.ErrShortWrite)
+	}
+	return err
 }
 
 // writeRecordLocked appends e to the active log under the recorder

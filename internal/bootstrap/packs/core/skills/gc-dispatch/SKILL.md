@@ -14,8 +14,8 @@ You do NOT need to find or create an individual session first.
 ```
 gc sling <bead-id>                     # Auto-target via rig's default_sling_target
 gc sling <session-config> <bead-id>     # Route to a specific session config
-gc sling <session-config> -f <formula>  # Instantiate formula, route wisp root
-gc sling <session-config> <bead-id> --on <formula>  # Attach wisp to existing bead
+gc sling <session-config> -f <formula>  # Instantiate formula, route its root (v2 → workflow)
+gc sling <session-config> <bead-id> --on <formula>  # Attach formula to existing bead (v2 → workflow)
 ```
 
 ## Targeting
@@ -56,21 +56,49 @@ gc sling <bead-id>                     # Use rig's default_sling_target
 
 The agent receives the bead on its hook and runs it per GUPP.
 
-## Formula dispatch (formula on agent)
+## Formula dispatch (`-f`, formula creates its own root bead)
 
 ```
-gc sling <agent> -f <formula>          # Run a formula, creating a molecule
+gc sling <agent> -f <formula>          # Instantiate a formula, route its root bead
 ```
 
-Creates a molecule from the formula and hooks the root bead to the agent.
+Instantiates the formula and routes its **root bead** to the target. What the
+instantiation produces depends on the formula's compiler contract: a **v2**
+formula (one declaring `[requires] formula_compiler = ">=2.0.0"`) starts a
+**workflow**; a **v1** formula instantiates a **wisp** (an ephemeral molecule).
+Use `-f` when the formula defines the work itself — when you already have a work
+bead, use `--on` (below). A formula that references `{{convoy_id}}` or contains
+a drain step cannot be launched bare with `-f`; route it onto a bead with `--on`
+so a target convoy is created.
 
-## Wisp dispatch (formula + existing bead)
+## Formula-on-bead dispatch (`--on`, formula runs against an existing bead)
 
 ```
-gc sling <agent> <bead-id> --on <formula>  # Attach formula wisp to bead
+gc sling <agent> <bead-id> --on <formula>  # Attach a formula to an existing bead
 ```
 
-Creates a molecule wisp on the bead and routes to the agent.
+`--on` attaches a formula to a bead that **already exists** — the bead is the
+work; the formula supplies the method. What gets created depends on the
+formula's compiler contract:
+
+- **v2 formula** (`[requires] formula_compiler = ">=2.0.0"`) — starts a
+  **workflow**. The sling creates a workflow-root bead **and** an auto-convoy,
+  with your bead tracked as the work member (root + convoy + work bead). The
+  step DAG and handoff metadata (`branch`, `target`, …) are persisted as beads,
+  so they survive a session recycle — a recycled agent resumes the same branch
+  instead of stranding it.
+- **v1 formula** — instantiates a **wisp** (an ephemeral molecule) in place on
+  the bead.
+
+**Convoy-referencing formulas require a target convoy.** A v2 formula that
+references `{{convoy_id}}` or contains a drain step must launch onto a convoy —
+routing with `--on` satisfies that, because the sling normalizes the target into
+an **input convoy**, creating a one-item convoy that tracks your bead when the
+target is not already a convoy. That input convoy is not optional: `--no-convoy`
+suppresses only the ordinary routing auto-convoy, not the v2 input convoy. To run
+the workflow against a convoy you already have, pass that convoy as the target
+(`gc formula cook <formula> --attach <convoy-id>`). Launching such a formula bare
+with `-f` is rejected.
 
 ## Formulas
 
@@ -78,6 +106,53 @@ Creates a molecule wisp on the bead and routes to the agent.
 gc formula list                        # List available formulas
 gc formula show <name>                 # Show formula definition
 ```
+
+### Choosing a work formula
+
+Work formulas differ by **isolation** (does the agent get its own worktree and
+branch?) and **handoff** (does the agent land the change itself, or hand off to
+a separate merge-review step?). Reach for the lightest one that fits:
+
+| Formula | Isolation | Lands the change | Use when |
+|---------|-----------|------------------|----------|
+| `mol-do-work` | none — works in the CWD | agent commits, then **closes** the bead | demos, throwaway, or a trivial single-agent fix where isolation and review are overkill |
+| `mol-scoped-work` | worktree + explicit setup/teardown | agent-managed, no refinery — work modeled as a routable **step-bead DAG** | multi-step work you want decomposed into independently-routable steps under one owner, without a merge-review gate |
+| `mol-polecat-work` | worktree + feature branch | pushes the branch and **reassigns to the refinery** for merge review | production multi-agent work that must be reviewed before landing on a shared branch — the default for pooled polecats |
+
+Two narrower siblings trade a stage away from `mol-polecat-work`:
+
+- **`mol-polecat-commit`** — worktree + quality gates, but commits directly to
+  the base branch (no feature branch, no refinery). For small installs where
+  merge review is unnecessary.
+- **`mol-polecat-report`** — no checkout; the agent investigates and writes
+  findings to bead notes. For analysis/investigation beads whose output is a
+  report, not a code change.
+
+Rule of thumb: choose **`mol-polecat-work` for anything that must land through
+review or survive a session recycle** — its workflow state and branch/target
+metadata live in beads, so a recycled agent resumes the branch instead of
+stranding it. Use **`mol-scoped-work`** when you want worktree isolation and
+step-level routing but own the work end-to-end and need no merge-review handoff.
+Drop to **`mol-do-work`** only for the trivial single-agent case.
+
+**When the refinery handoff doesn't apply.** `mol-polecat-work` ends by pushing a
+feature branch and reassigning the bead to the refinery, which merges it into the
+rig's own repo. Two kinds of work break that contract — model them as **plain
+beads** with a coordinator/mayor handoff instead of attaching this formula:
+
+- **Cross-repo / GitHub deliverables.** When the change must land in a *different*
+  repo than the one the rig's refinery merges (e.g. a change to a GitHub fork PR
+  rather than the rig's own repo), the refinery has nothing to merge and the
+  `branch`/`target` metadata points at the wrong remote. Diverge from the formula:
+  edit the fork clone, push, open the PR yourself, and hand the bead to the
+  coordinator — not the refinery (gas-city precedent: gci-7ti).
+- **Mayor-publish-rail beads.** When a bead is shipped-and-closed by a mayor
+  publish step (not by the formula's own submit step), an attached v2 workflow
+  leaves its `submit-and-exit`/`finalize` steps live and routable *after* the bead
+  closes — an unrelated pool agent then claims the moot step (churn + manual
+  cleanup). Until `mol-port-review` (packs#260), whose stage 3 *is* the mayor
+  publish, lands, use plain beads for mayor-rail work; interim, the mayor drains
+  the attached workflow at publish time.
 
 ### Built-in formulas
 
@@ -88,6 +163,16 @@ demos and simple single-agent workflows.
 
 ```
 gc sling <agent> <bead-id> --on mol-do-work
+```
+
+**mol-scoped-work** — Graph-first worktree lifecycle (v2 workflow). Models the
+work as an explicit DAG — a durable scope bead, explicit worktree setup and
+teardown, and first-class step beads that can be routed independently, with
+continuation metadata for same-session execution. The opt-in replacement for
+hierarchy-first single-session formulas; agent-managed, with no refinery handoff.
+
+```
+gc sling <agent> <bead-id> --on mol-scoped-work
 ```
 
 **mol-polecat-commit** — Direct-commit variant. Creates a worktree but
@@ -135,14 +220,40 @@ These require the gastown pack. They extend the built-in
 
 **mol-polecat-work** — Feature-branch variant. Creates a worktree and
 feature branch, implements, then pushes and reassigns to the refinery
-for merge review. Production default for multi-agent setups. The polecat's
-`base_branch` comes from `metadata.target` on the work bead if present,
-otherwise from a parent convoy with `metadata.target`, otherwise from
-the rig repo's default branch.
+for merge review. Production default for multi-agent setups.
 
 ```
 gc sling <agent> <bead-id> --on mol-polecat-work
 ```
+
+The polecat cuts its branch from `origin/<base_branch>` and stamps
+`metadata.target` for the refinery, so `base_branch` decides where the
+work lands. `gc sling` resolves it in this order, first match wins:
+
+1. `metadata.target` on the work bead, or on the nearest parent convoy
+   that carries one — the per-bead override.
+2. `default_branch` recorded for the bead's rig in `city.toml`.
+3. `default_branch` recorded for the agent's rig in `city.toml`.
+4. A live probe of the rig repo's `origin/HEAD`.
+
+Tiers 2 and 3 are the knob to reach for when a repo's mainline is not
+what `origin/HEAD` advertises. A repo whose `origin/HEAD` still points at
+a mirror-only `main` while work belongs on an integration branch sets it
+once, per rig:
+
+```toml
+[[rigs]]
+name = "myrig"
+default_branch = "develop"
+```
+
+Without that, resolution falls through to the tier-4 probe and every
+polecat branch is cut from the mirror. `gc rig add` captures
+`default_branch` from the repo at add time, so a rig registered before
+its mainline moved keeps the stale value until you update it — check
+`gc rig list --json` rather than inferring the answer from
+`git symbolic-ref refs/remotes/origin/HEAD`, which only ever reports
+tier 4.
 
 **mol-idea-to-plan** — Planning workflow for a coordinator session. Turns a
 rough idea into a PRD, reviewed design doc, and beads DAG using Gas City's
@@ -165,8 +276,13 @@ don't sling these manually:
 - **mol-refinery-patrol** — Refinery merge loop (check for work, merge one branch, repeat)
 - **mol-witness-patrol** — Rig work-health monitor (orphan recovery, stuck polecats, help mail)
 - **mol-deacon-patrol** — Controller sidekick (work-layer health, system diagnostics)
-- **mol-digest-generate** — Periodic activity digest mailed to the mayor
 - **mol-shutdown-dance** — Due process for stuck agents (interrogate → execute → epitaph)
+
+`mol-digest-generate` (the periodic activity digest mailed to the mayor) is
+**not** a startup patrol pour: it is driven by an `order` on a schedule (the
+`digest-generate` order — a 24h cooldown trigger). Run or inspect it through
+its order (`gc order run digest-generate`, `gc order show digest-generate`), not
+as a manual sling or a patrol pour.
 
 ## Convoys (grouped work)
 

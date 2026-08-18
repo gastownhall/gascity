@@ -28,6 +28,32 @@ type MemStore struct {
 	// wrapper — see the class_store optional-capability lesson).
 	DisableConditionalWrites bool
 
+	// IDPrefix replaces the "gc" prefix this store mints ids under. Two real
+	// bead databases mint under different prefixes, which is how an operator
+	// tells which store a bead came from; a test that stands two MemStores up
+	// as different coordination-class bindings needs the same distinction.
+	// Empty keeps the default, so every existing caller mints "gc-<n>".
+	IDPrefix string
+
+	// HonorExplicitIDs keeps a caller-supplied bead ID on Create instead of
+	// clobbering it with the sequence id, matching SQLiteStore.Create (an
+	// explicit id is honored verbatim) and bd's `--id`. It is the companion of
+	// IDPrefix: IDPrefix decides what this store MINTS, HonorExplicitIDs
+	// decides whether it also ACCEPTS. Without it no MemStore can model a
+	// store that round-trips a pinned id — production wisps carry pinned
+	// <prefix>-wisp-<suffix> ids, so a double that clobbers them cannot
+	// express the wisp tier at all.
+	//
+	// Off by default, so every existing caller keeps minting over the id it
+	// passed. A duplicate id is a hard error rather than a silent fallback to
+	// the sequence id: SQLiteStore rejects it, and a double that quietly
+	// renamed the bead would hide exactly the id collision the caller asked
+	// about. A pinned "<prefix>-<n>" also consumes that suffix so a later mint
+	// cannot re-issue it — the second half of SQLiteStore's contract, pinned
+	// against SQLiteStore itself by
+	// TestMemStoreHonorExplicitIDsMatchesSQLiteStore.
+	HonorExplicitIDs bool
+
 	// localStrings holds clone-local key-value data set via SetLocalString,
 	// keyed by bead ID then key. Deliberately excluded from
 	// restoreFrom/snapshot so FileStore's disk persistence never touches it.
@@ -87,13 +113,27 @@ func cloneBead(b Bead) Bead {
 	return b
 }
 
-// Create persists a new bead in memory with a sequential ID.
+// Create persists a new bead in memory with a sequential ID, or with the
+// caller's own ID when HonorExplicitIDs is set and the ID is free.
 func (m *MemStore) Create(b Bead) (Bead, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.seq++
-	b.ID = fmt.Sprintf("gc-%d", m.seq)
+	explicit := strings.TrimSpace(b.ID)
+	if m.HonorExplicitIDs && explicit != "" {
+		if m.beadExistsLocked(explicit) {
+			return Bead{}, fmt.Errorf("creating bead %q: duplicate id", explicit)
+		}
+		// Honoring a pinned "<prefix>-<n>" consumes that suffix, exactly as
+		// SQLiteStore.normalizeCreate's ensureSequenceAtLeast does: without it
+		// the very next store-minted id re-issues the pinned one.
+		if n := numericIDSuffix(explicit); n > m.seq {
+			m.seq = n
+		}
+		b.ID = explicit
+	} else {
+		b.ID = m.mintIDLocked()
+	}
 	b.Status = "open"
 	if b.Type == "" {
 		b.Type = "task"
@@ -122,6 +162,27 @@ func (m *MemStore) Create(b Bead) (Bead, error) {
 		})
 	}
 	return cloneBead(stored), nil
+}
+
+// mintIDLocked returns a store-generated ID that is free in this store,
+// advancing past any suffix already taken. SQLiteStore's mintUniqueIDTx does the
+// same re-check on every auto-minted id, because a sequence that lags the rows
+// actually present — a store seeded by NewMemStoreFrom, or one that honored a
+// pinned id — would otherwise re-issue an id that is already there, and MemStore
+// is slice-backed, so a duplicate aliases rather than conflicts. The caller must
+// hold m.mu.
+func (m *MemStore) mintIDLocked() string {
+	prefix := m.IDPrefix
+	if prefix == "" {
+		prefix = "gc"
+	}
+	for {
+		m.seq++
+		candidate := fmt.Sprintf("%s-%d", prefix, m.seq)
+		if !m.beadExistsLocked(candidate) {
+			return candidate
+		}
+	}
 }
 
 // indexOfLocked returns the slice index of the bead with the given ID, or -1 if

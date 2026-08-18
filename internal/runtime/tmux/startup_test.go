@@ -92,12 +92,13 @@ func (f *fakeStartOps) createSession(name, workDir, command string, env map[stri
 	return nil
 }
 
-func (f *fakeStartOps) respawnAgent(name, workDir, command string) error {
+func (f *fakeStartOps) respawnAgent(name, workDir, command string, env map[string]string) error {
 	f.calls = append(f.calls, startCall{
 		method:  "respawnAgent",
 		name:    name,
 		workDir: workDir,
 		command: command,
+		env:     env,
 	})
 	return f.respawnErr
 }
@@ -906,34 +907,59 @@ func TestDoStartSession_KimiSkipsStartupDialogAcceptance(t *testing.T) {
 }
 
 func TestDoStartSessionReturnsNudgeDeliveryError(t *testing.T) {
-	ops := &fakeStartOps{
-		hasSessionResult: true,
-		sendKeysErr:      errors.New("command too long"),
-	}
-
-	cfg := runtime.Config{
-		Command: "kimi",
-		Nudge:   strings.Repeat("startup prompt\n", 100),
-	}
-
-	err := doStartSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout)
-	if err == nil {
-		t.Fatal("expected startup nudge delivery error, got nil")
-	}
-	if !strings.Contains(err.Error(), "sending startup nudge") {
-		t.Fatalf("error = %v, want startup nudge context", err)
-	}
-	if !strings.Contains(err.Error(), "command too long") {
-		t.Fatalf("error = %v, want original nudge error", err)
-	}
-
-	assertCallSequence(t, ops, []string{
+	wantCalls := []string{
 		"createSession",
 		"setRemainOnExit",
 		"disableMouseAndActivity",
 		"hasSession",
 		"isSessionRunning",
 		"sendKeys",
+	}
+
+	t.Run("generic delivery error is fatal", func(t *testing.T) {
+		ops := &fakeStartOps{
+			hasSessionResult: true,
+			sendKeysErr:      errors.New("command too long"),
+		}
+
+		cfg := runtime.Config{
+			Command: "kimi",
+			Nudge:   strings.Repeat("startup prompt\n", 100),
+		}
+
+		err := doStartSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout)
+		if err == nil {
+			t.Fatal("expected startup nudge delivery error, got nil")
+		}
+		if !strings.Contains(err.Error(), "sending startup nudge") {
+			t.Fatalf("error = %v, want startup nudge context", err)
+		}
+		if !strings.Contains(err.Error(), "command too long") {
+			t.Fatalf("error = %v, want original nudge error", err)
+		}
+
+		assertCallSequence(t, ops, wantCalls)
+	})
+
+	// The startup nudge has no retry-capable caller, so an unconfirmed submit
+	// must not fail the start: the keystrokes reached tmux and the session is
+	// already verified alive. Only genuine delivery errors are fatal (above).
+	t.Run("unconfirmed submit is not fatal", func(t *testing.T) {
+		ops := &fakeStartOps{
+			hasSessionResult: true,
+			sendKeysErr:      fmt.Errorf("%w: session %q", ErrNudgeSubmitUnconfirmed, "test"),
+		}
+
+		cfg := runtime.Config{
+			Command: "claude",
+			Nudge:   "startup prompt",
+		}
+
+		if err := doStartSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout); err != nil {
+			t.Fatalf("doStartSession = %v, want nil for an unconfirmed startup nudge", err)
+		}
+
+		assertCallSequence(t, ops, wantCalls)
 	})
 }
 

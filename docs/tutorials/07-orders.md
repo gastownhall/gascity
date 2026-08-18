@@ -391,6 +391,18 @@ closed. Orders whose dispatch is safe to repeat (sweeps and feeders where a
 duplicate run is a no-op) can set `idempotent = true` to fail open instead:
 on a gate timeout they dispatch anyway rather than starve.
 
+A third option exists for orders that consume **no bead work at all** — pure
+probes and sweeps that track nothing. `no_work_gate = true` skips the open-work
+gate *entirely*; the dispatcher never issues the store read, so a slow store
+cannot time it out and skip the order. The canonical case is
+`provider-health-probe`, a cooldown probe whose only job is to refresh a health
+cache; under store contention its gate timed out every cycle and the cache went
+stale (#2893). `no_work_gate` and `idempotent` are distinct: `idempotent`
+*enters* the gate but fails open on timeout, while `no_work_gate` never enters
+it. Use `no_work_gate` only when the order genuinely tracks no beads — it
+disables single-flight protection, so the order must be self-idempotent or
+interval-bounded to guard against overlapping re-runs.
+
 ## Rig-scoped orders
 
 When a pack is applied to a rig, that pack's orders come along and run scoped to

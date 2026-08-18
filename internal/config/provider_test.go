@@ -313,6 +313,9 @@ func TestBuiltinProvidersOpenCode(t *testing.T) {
 	if p.ReadyDelayMs != 8000 {
 		t.Errorf("ReadyDelayMs = %d, want 8000", p.ReadyDelayMs)
 	}
+	if p.AcceptStartupDialogs == nil || *p.AcceptStartupDialogs {
+		t.Errorf("AcceptStartupDialogs = %v, want false (OpenCode permissions are non-interactive)", p.AcceptStartupDialogs)
+	}
 }
 
 func TestBuiltinProvidersKiro(t *testing.T) {

@@ -71,6 +71,24 @@ exhaustion; bead az-405 has the full evidence trail). The adapter was rewritten 
 - **Delivery**: `deliverNudge` targets the pane id via native `agent prompt`
   (registered agents), falling back to paste+Enter for unregistered panes.
   `WaitForIdle` uses `agent wait --until idle`. `Peek` reads via `pane read`.
+- **Startup delivery** (`deliverStartupTurn`, gas-90h): the FIRST turn opts into
+  submission confirmation — `agent prompt --wait --until working/done/blocked`
+  — because a freshly-booted TUI can swallow the submit CR while the un-waited
+  prompt reports ok (text typed-but-unsubmitted, agent stranded idle). The two
+  failure verdicts are handled differently, because herdr's `--wait` only
+  reports `timeout` once its 5000ms observed-state-change gate has already
+  passed: `agent_prompt_stalled` (no state change at all) recovers with one
+  explicit `send-keys Enter` plus a confirming wait, never a re-prompt — but
+  only after `agent get` confirms the agent really is `idle`, since an agent
+  already parked on a dialog is equally unchanging and would take the Enter as
+  an answer; `timeout` (submitted, but no confirming
+  state inside the bound) sends no keys, since the agent may be mid-turn or
+  `blocked` on a dialog an Enter would answer. Either way an unconfirmed
+  delivery is recorded on the sidecar
+  (`GC_HERDR_STARTUP_DELIVERY_UNCONFIRMED`, cleared unconditionally by the next
+  `Start`) and stderr. Every bound here is the shared boot budget
+  (`startupBootBudgetMS`, 60s), not the 15s shell-prompt bounds. Mid-session
+  nudges keep the fast un-waited form.
 
 ### Operational gotchas (learned in production, 2026-07-26)
 

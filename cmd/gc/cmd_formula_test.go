@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
@@ -1172,6 +1173,28 @@ title = "Do work for {{convoy_id}}"
 			t.Fatalf("source deps = %+v, want blocks dep to graph root %s", deps, root.ID)
 		}
 	}
+	recorded, err := events.ReadAll(filepath.Join(cityDir, ".gc", "events.jsonl"))
+	if err != nil {
+		t.Fatalf("read execution events: %v", err)
+	}
+	for _, root := range roots {
+		seenAssociation := false
+		seenStep := false
+		for _, event := range recorded {
+			if event.RunID != root.ID {
+				continue
+			}
+			if event.Type == events.ExecutionWorkAssociated && event.Subject == source.ID {
+				seenAssociation = true
+			}
+			if event.Type == events.ExecutionStepDefined && event.Subject != root.ID {
+				seenStep = true
+			}
+		}
+		if !seenAssociation || !seenStep {
+			t.Fatalf("execution events for root %s missing attached work or graph step: %#v", root.ID, recorded)
+		}
+	}
 	sourceAfter, err := store.Get(source.ID)
 	if err != nil {
 		t.Fatalf("get source: %v", err)
@@ -1250,6 +1273,13 @@ title = "Do work"
 	}
 	if got := root.Metadata[beadmeta.ScopeKindMetadataKey]; got != "formula-cook" {
 		t.Fatalf("root %s: gc.scope_kind = %q, want %q", res.RootID, got, "formula-cook")
+	}
+	recorded, err := events.ReadAll(filepath.Join(cityDir, ".gc", "events.jsonl"))
+	if err != nil {
+		t.Fatalf("read execution events: %v", err)
+	}
+	if len(recorded) == 0 || recorded[0].Type != events.ExecutionStepDefined || recorded[0].RunID != res.RootID {
+		t.Fatalf("execution events = %#v, want initial step-definition snapshot for %s", recorded, res.RootID)
 	}
 }
 
@@ -1555,5 +1585,30 @@ title = "Do work for {{convoy_id}}"
 		if c.Metadata["gc.synthetic"] == "true" {
 			t.Fatalf("synthetic input convoy %s left open after post-prepare failure (status=%q); want it closed", c.ID, c.Status)
 		}
+	}
+}
+
+// TestFormulaCookAttachHelpDoesNotClaimParentChild pins the #2392 fix:
+// --attach only ever creates a "blocks" dependency back to the attached
+// bead (ensureFormulaCookAttachDep / molecule.Attach both call
+// store.DepAdd(attachBeadID, rootID, "blocks"), never setting ParentID) —
+// the sub-DAG root never becomes a child of the attached bead. The help
+// text previously claimed otherwise ("created as children of the given
+// bead"), which is actionably wrong: convoy auto-close watches
+// parent-child children, not blocks dependents, so a user following the
+// old description would wrongly expect an attached sub-DAG's completion
+// to trigger the attached convoy's auto-close.
+func TestFormulaCookAttachHelpDoesNotClaimParentChild(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cmd := newFormulaCookCmd(&stdout, &stderr)
+	long := strings.ToLower(cmd.Long)
+	if strings.Contains(long, "created as children") {
+		t.Fatalf("gc formula cook --help still claims --attach creates a parent-child relationship; Long=%q", cmd.Long)
+	}
+	if !strings.Contains(long, "blocking dependency") && !strings.Contains(long, "blocks") {
+		t.Fatalf("gc formula cook --help no longer describes the actual blocks-only relationship; Long=%q", cmd.Long)
+	}
+	if !strings.Contains(long, "not") || !strings.Contains(long, "parent") {
+		t.Fatalf("gc formula cook --help does not clarify that --attach is not a parent-child relationship; Long=%q", cmd.Long)
 	}
 }
