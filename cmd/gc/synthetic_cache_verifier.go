@@ -1,6 +1,14 @@
 package main
 
-import "github.com/gastownhall/gascity/internal/builtinpacks"
+import (
+	"fmt"
+	"hash/fnv"
+	"io/fs"
+	"path/filepath"
+	"sync"
+
+	"github.com/gastownhall/gascity/internal/builtinpacks"
+)
 
 // syntheticCacheVerifier deduplicates builtinpacks.ValidateSyntheticRepo
 // within ONE builtin readiness pass.
@@ -25,13 +33,84 @@ import "github.com/gastownhall/gascity/internal/builtinpacks"
 // pass still runs the full validator at least once, which is what detects and
 // repairs a corrupted cache.
 type syntheticCacheVerifier struct {
-	valid map[string]struct{}
+	valid    map[string]struct{}
+	validate func(cachePath, repository, commit string) error
 }
 
 // newSyntheticCacheVerifier returns a verifier scoped to a single readiness
 // pass.
 func newSyntheticCacheVerifier() *syntheticCacheVerifier {
-	return &syntheticCacheVerifier{valid: make(map[string]struct{})}
+	return &syntheticCacheVerifier{
+		valid:    make(map[string]struct{}),
+		validate: builtinpacks.ValidateSyntheticRepo,
+	}
+}
+
+// warmSyntheticCacheVerdicts memoizes POSITIVE full-validation verdicts across
+// readiness passes in this process, gated by a cheap stat fingerprint of the
+// materialized cache tree (per-file size+mtime, no content reads).
+//
+// The ready fast path must still notice a cached pack file that was corrupted
+// in place after the city was readied. Re-reading and comparing every cached
+// file on every config load is what made that guarantee cost O(pack files) per
+// gc command. Any ordinary write to a cached file changes its size or mtime and
+// therefore the fingerprint, which forces the full validator to run again and
+// repair the cache — the same invalidation contract packContentHashCache uses.
+var warmSyntheticCacheVerdicts sync.Map // key(string) -> uint64 fingerprint
+
+// newWarmSyntheticCacheVerifier returns a verifier for the ALREADY-READY fast
+// path. It runs the same full validation as the cold path, but reuses a
+// positive verdict from an earlier pass while the cache tree's stat fingerprint
+// is unchanged.
+func newWarmSyntheticCacheVerifier() *syntheticCacheVerifier {
+	return &syntheticCacheVerifier{
+		valid: make(map[string]struct{}),
+		validate: func(cachePath, repository, commit string) error {
+			key := cachePath + "\x00" + repository + "\x00" + commit
+			fp, err := syntheticCacheStatFingerprint(cachePath)
+			if err == nil {
+				if prev, ok := warmSyntheticCacheVerdicts.Load(key); ok && prev.(uint64) == fp {
+					return nil
+				}
+			}
+			if vErr := builtinpacks.ValidateSyntheticRepo(cachePath, repository, commit); vErr != nil {
+				warmSyntheticCacheVerdicts.Delete(key)
+				return vErr
+			}
+			if err == nil {
+				warmSyntheticCacheVerdicts.Store(key, fp)
+			}
+			return nil
+		},
+	}
+}
+
+// syntheticCacheStatFingerprint hashes every file path under dir with its size
+// and modification time, reading no file contents.
+func syntheticCacheStatFingerprint(dir string) (uint64, error) {
+	h := fnv.New64a()
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(dir, path)
+		if relErr != nil {
+			return relErr
+		}
+		info, infoErr := d.Info()
+		if infoErr != nil {
+			return infoErr
+		}
+		fmt.Fprintf(h, "%s\x00%d\x00%d\x00", filepath.ToSlash(rel), info.Size(), info.ModTime().UnixNano()) //nolint:errcheck
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return h.Sum64(), nil
 }
 
 // Valid reports whether the synthetic pack cache at cachePath validates as
@@ -48,7 +127,7 @@ func (v *syntheticCacheVerifier) Valid(cachePath, repository, commit string) boo
 	if _, ok := v.valid[key]; ok {
 		return true
 	}
-	if builtinpacks.ValidateSyntheticRepo(cachePath, repository, commit) != nil {
+	if v.validate(cachePath, repository, commit) != nil {
 		return false
 	}
 	v.valid[key] = struct{}{}
