@@ -1461,6 +1461,80 @@ func TestManagedDoltTransportRetryableIncludesCircuitBreaker(t *testing.T) {
 	}
 }
 
+func TestDoltDirtyTableMigrationRaceRetryableMatchesKnownSignatureOnly(t *testing.T) {
+	known := "Error: failed to open Dolt store: failed to initialize schema: schema migration: pending schema migrations alter pre-existing dirty tables: dependencies; run 'bd dolt commit' to commit the working set at the current schema, then re-run the migration (gastownhall/beads#4566)"
+	if !doltDirtyTableMigrationRaceRetryable(known) {
+		t.Fatalf("doltDirtyTableMigrationRaceRetryable(%q) = false, want true", known)
+	}
+	for _, table := range []string{"issues", "events", "dolt_schemas"} {
+		variant := strings.Replace(known, "dependencies", table, 1)
+		if !doltDirtyTableMigrationRaceRetryable(variant) {
+			t.Fatalf("doltDirtyTableMigrationRaceRetryable(%q) = false, want true", variant)
+		}
+	}
+	other := "Error: failed to open Dolt store: dial tcp 127.0.0.1:3306: connect: connection refused"
+	if doltDirtyTableMigrationRaceRetryable(other) {
+		t.Fatalf("doltDirtyTableMigrationRaceRetryable(%q) = true, want false (must not swallow unrelated errors)", other)
+	}
+	stdoutRegression := "unexpected extra stdout: circuit-breaker cleanup log leaked onto stdout"
+	if doltDirtyTableMigrationRaceRetryable(stdoutRegression) {
+		t.Fatalf("doltDirtyTableMigrationRaceRetryable(%q) = true, want false (must not mask the stdout-contract regression this test exists to catch)", stdoutRegression)
+	}
+}
+
+func TestRetryOnDoltDirtyTableMigrationRaceRetriesOnlyKnownSignature(t *testing.T) {
+	const raceOutput = "schema migration: pending schema migrations alter pre-existing dirty tables: issues (gastownhall/beads#4566)"
+
+	t.Run("retries until success", func(t *testing.T) {
+		calls := 0
+		out, err := retryOnDoltDirtyTableMigrationRace(func() (string, error) {
+			calls++
+			if calls < 3 {
+				return raceOutput, errors.New("exit status 1")
+			}
+			return "ok", nil
+		})
+		if err != nil {
+			t.Fatalf("err = %v, want nil after eventual success", err)
+		}
+		if out != "ok" {
+			t.Fatalf("out = %q, want %q", out, "ok")
+		}
+		if calls != 3 {
+			t.Fatalf("calls = %d, want 3", calls)
+		}
+	})
+
+	t.Run("does not retry unrelated errors", func(t *testing.T) {
+		calls := 0
+		wantErr := errors.New("boom")
+		_, err := retryOnDoltDirtyTableMigrationRace(func() (string, error) {
+			calls++
+			return "unrelated failure", wantErr
+		})
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("err = %v, want %v", err, wantErr)
+		}
+		if calls != 1 {
+			t.Fatalf("calls = %d, want 1 (must not retry a non-4566 failure)", calls)
+		}
+	})
+
+	t.Run("gives up after bounded attempts", func(t *testing.T) {
+		calls := 0
+		_, err := retryOnDoltDirtyTableMigrationRace(func() (string, error) {
+			calls++
+			return raceOutput, errors.New("exit status 1")
+		})
+		if err == nil {
+			t.Fatalf("err = nil, want non-nil after exhausting retries on a persistent race")
+		}
+		if calls != 3 {
+			t.Fatalf("calls = %d, want 3 (bounded, not unbounded retry-until-green)", calls)
+		}
+	})
+}
+
 func testPortReachable(port string) bool {
 	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", port), 250*time.Millisecond)
 	if err != nil {
