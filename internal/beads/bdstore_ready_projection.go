@@ -71,6 +71,17 @@ type readyProjectionScopeGuard struct {
 	// rather than sync.Once for the reason verdictClaimed is: the winner writes
 	// to a sink an operator owns, and no other caller should wait behind it.
 	announced atomic.Bool
+	// blockedDoor latches that some store over this scope proved `bd sql`
+	// refused at runtime while `bd blocked` answered, so every later store
+	// starts on the blocked door instead of re-deriving the SQL door from
+	// metadata and re-spending the failing 6-16s `bd sql`. It is orthogonal to
+	// degrade: degrade means "this scope cannot serve the projection at all"
+	// (both doors gone), while blockedDoor means "the SQL door is proven
+	// refused, use `bd blocked`" — a scope answering through the blocked door
+	// has NOT reached the degrade verdict. Set once, never cleared, for the same
+	// reason degrade is: the backend in front of the process does not regain
+	// `bd sql` mid-run, and re-probing costs the very subprocess this saves.
+	blockedDoor atomic.Bool
 }
 
 // readyProjectionGuards memoizes one guard per resolved scope path. It grows by
@@ -214,9 +225,13 @@ func (s *BdStore) bdReadyProjectionEnabled() (readyProjectionDoor, bool, error) 
 	// that gc cannot assume an unknown backend's SCHEMA carries gc's
 	// issues/wisps projection — and that reason does not reach `bd blocked`,
 	// which is bd's own verb over bd's own role, answered by whatever storage
-	// bd opened.
+	// bd opened. The second reason a fresh store starts on the blocked door is
+	// the scope-latched runtime refusal: a metadata-registered backend bd
+	// nevertheless opened embedded (isBdSQLUnsupportedInEmbeddedMode) had its
+	// `bd sql` proven refused by an earlier store, and switchToBlockedDoor
+	// recorded that on the shared guard so this rebuild does not re-spend it.
 	door := readyProjectionDoorSQL
-	if s.readyProjectionBackendRefusal() != nil {
+	if s.readyProjectionBackendRefusal() != nil || s.readyProjectionBlockedDoorLatched() {
 		door = readyProjectionDoorBlocked
 	}
 	s.readyProjectionDoorValue = door
@@ -256,17 +271,39 @@ func (s *BdStore) bdReadyProjectionEnabled() (readyProjectionDoor, bool, error) 
 	return door, true, nil
 }
 
-// switchToBlockedDoor records that this scope's `bd sql` was refused at
-// runtime, so every later fetch — and every store built later over the same
-// scope object — goes straight to the blocked door.
+// switchToBlockedDoor records that this scope's `bd sql` was refused at runtime
+// while `bd blocked` answers, so this store and every store built later over the
+// same scope go straight to the blocked door.
 //
-// It is deliberately NOT latched in the scope guard: the guard's verdict is
-// "this scope cannot serve the projection at all", and a scope that can serve
-// it through `bd blocked` has not reached that verdict.
+// The choice is latched in the scope guard, not just on this store object,
+// because cmd/gc builds a store per request and the control-ready scan rebuilds
+// one per scope every controlReadyCacheTTL: a store-local flag would let the
+// next store re-derive the SQL door from metadata and re-spend the failing
+// 6-16s `bd sql` a few times a minute, forever. It is a DISTINCT verdict from
+// the degrade the guard also carries — "SQL door proven refused, use `bd
+// blocked`", not "this scope is out of doors at all" — so it rides its own
+// field (readyProjectionScopeGuard.blockedDoor), which bdReadyProjectionEnabled
+// consults before the metadata-derived door.
 func (s *BdStore) switchToBlockedDoor() {
 	s.readyProjectionMu.Lock()
 	defer s.readyProjectionMu.Unlock()
 	s.readyProjectionDoorValue = readyProjectionDoorBlocked
+	if g := s.readyProjectionGuard(); g != nil {
+		g.blockedDoor.Store(true)
+	}
+}
+
+// readyProjectionBlockedDoorLatched reports whether some store over this scope
+// already proved `bd sql` refused at runtime and switched to the blocked door.
+// A fresh store consults it before deriving the door from metadata, so the
+// proven refusal survives the per-request / per-controlReadyCacheTTL store
+// rebuilds instead of re-spending the failing `bd sql` on each one.
+func (s *BdStore) readyProjectionBlockedDoorLatched() bool {
+	g := s.readyProjectionGuard()
+	if g == nil {
+		return false
+	}
+	return g.blockedDoor.Load()
 }
 
 // readyProjectionBackendRefusal reports why this scope's backend cannot answer
@@ -410,10 +447,15 @@ func (s *BdStore) fetchReadyProjection(door readyProjectionDoor, ids []string) (
 			// Belt-and-braces to the backend gate: a scope whose metadata does
 			// not name its backend, or names one gc implements while bd opened
 			// it some other way, only learns this from bd's own answer. It is a
-			// permanent property of the ledger, so the door is switched rather
-			// than re-discovered — the unswitched version of this call cost
-			// maintainer-city a failing 6-16s subprocess on every prime and
-			// every reconcile, indefinitely.
+			// permanent property of the ledger, so switchToBlockedDoor latches
+			// the choice in the scope guard — shared by every store rooted here
+			// — and every later rebuild consults it before the metadata-derived
+			// door. Without that scope latch the switch lived only on this store
+			// object, and cmd/gc rebuilds the store per request while the
+			// control-ready scan rebuilds one per scope every
+			// controlReadyCacheTTL: the next store re-picked the SQL door and
+			// re-spent this failing 6-16s subprocess on every prime and every
+			// reconcile, indefinitely.
 			s.switchToBlockedDoor()
 			return s.projectViaBlockedDoor(wanted, err)
 		}

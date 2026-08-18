@@ -315,6 +315,74 @@ func TestReadyProjectionVerdictIsPerScopeAcrossStoreRebuilds(t *testing.T) {
 	})
 }
 
+// TestReadyProjectionRuntimeBlockedDoorSurvivesStoreRebuilds bounds the OTHER
+// runtime verdict: not "this scope is out of doors" (the latch above), but "this
+// scope's `bd sql` is refused while `bd blocked` answers", which must persist
+// per scope exactly as the degrade does.
+//
+// The metadata names a backend this build registers (dolt), so the capability
+// gate returns the SQL door — `bd sql` is not withheld up front. Only bd's
+// runtime refusal ("not yet supported in embedded mode") reveals the backend was
+// opened embedded, and `bd blocked` answers in its place. A choice recorded only
+// on the store object is re-derived on every rebuild: cmd/gc builds a store per
+// request and the control-ready scan rebuilds one per scope every
+// controlReadyCacheTTL (3s), so the SQL door would be re-picked and the failing
+// 6-16s `bd sql` re-spent a few times a minute, forever — the exact pathology
+// this door was added to remove. Latching the choice in the scope guard lets a
+// fresh store start on the blocked door with no `bd sql` spent, while still
+// serving the column on every rebuild.
+func TestReadyProjectionRuntimeBlockedDoorSurvivesStoreRebuilds(t *testing.T) {
+	scope := t.TempDir()
+	// A registered backend: the gate returns the SQL door, so `bd sql` is
+	// attempted and only bd's runtime refusal routes to the blocked door.
+	writeScopeMetadata(t, scope, map[string]any{"database": "dolt", "backend": "dolt", "dolt_mode": "server"})
+	notices := &bytes.Buffer{}
+
+	var calls [][]string
+	for i := 1; i <= 5; i++ {
+		runner := blockedDoorRunner(`[{"id":"mc-2","blocked_by_count":1,"blocked_by":["mc-1"]}]`)
+		s := NewBdStore(scope, runner.run, WithBdStoreNoticeSink(notices))
+		out, err := s.enrichReadyProjectionForCache(activeWorkBeads())
+		if err != nil {
+			t.Fatalf("rebuild #%d enrich = %v, want the blocked door to serve the column", i, err)
+		}
+		byID := make(map[string]Bead, len(out))
+		for _, b := range out {
+			byID[b.ID] = b
+		}
+		for id, wantBlocked := range map[string]bool{"mc-1": false, "mc-2": true} {
+			got := byID[id].IsBlocked
+			if got == nil || *got != wantBlocked {
+				t.Errorf("rebuild #%d bead %s is_blocked = %v, want &%v", i, id, got, wantBlocked)
+			}
+		}
+		calls = append(calls, runner.calls...)
+	}
+
+	sqlCalls, blockedCalls := 0, 0
+	for _, call := range calls {
+		if len(call) > 1 && call[1] == "sql" {
+			sqlCalls++
+		}
+		if len(call) > 1 && call[1] == "blocked" {
+			blockedCalls++
+		}
+	}
+	// Exactly one: the runtime refusal is proven once on the first store, then
+	// the blocked-door choice persists across rebuilds. More than one is the
+	// re-spend defect; zero would mean the runtime-refusal path was never
+	// exercised (a vacuous pass).
+	if sqlCalls != 1 {
+		t.Fatalf("bd sql ran %d times across 5 stores over one scope (calls=%v); want exactly 1 — the refused `bd sql` must be spent once and the blocked-door choice must survive the rebuild", sqlCalls, calls)
+	}
+	if blockedCalls != 5 {
+		t.Fatalf("bd blocked ran %d times across 5 stores over one scope (calls=%v); every rebuild must still serve the column through the blocked door", blockedCalls, calls)
+	}
+	if notices.Len() != 0 {
+		t.Errorf("a scope that answers through the blocked door printed a degrade notice:\n%s", notices.String())
+	}
+}
+
 // TestReadyProjectionNoticeDoesNotClaimReadinessIsUnaffected pins the operator
 // line to what actually happens. An earlier draft said "no work is lost", which
 // named the wrong risk: the degraded predicate is permissive, not lossy, so the
