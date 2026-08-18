@@ -369,19 +369,17 @@ func (m *Manager) sessionBead(id string) (beads.Bead, string, error) {
 // commitPendingContinuationReset resolves the continuation epoch a runtime
 // start should publish, consuming a pending conversation reset on the way.
 //
-// The controller's pre-wake commit (cmd/gc: preWakeCommit /
-// shouldBumpContinuationEpoch) bumps the epoch when continuation_reset_pending
-// is set, but every start that does not route through it — Submit, Send,
-// Attach, Start — rebuilt GC_CONTINUATION_EPOCH verbatim from metadata and
-// never consumed the marker. A message arriving inside the reconciler's
-// kill-to-wake window therefore restarted the pane on the PRE-reset epoch and
-// silently defeated the reset. Providers that carry conversation identity
-// themselves (zcode keys its persisted provider session on this epoch) then
-// resume the conversation the operator just reset.
+// Starts that do not route through the controller's pre-wake commit — Submit,
+// Send, Attach, Start — rebuilt GC_CONTINUATION_EPOCH verbatim from metadata
+// and never consumed the marker, so a message arriving inside the reconciler's
+// kill-to-wake window restarted the pane on the pre-reset epoch and silently
+// defeated the reset. Providers that carry conversation identity themselves
+// (zcode keys its persisted provider session on this epoch) then resumed the
+// conversation the operator had just reset.
 //
-// The bump and the marker clear are persisted together so a crash between them
-// cannot leave the reset half-applied; the instance-token mint below is the
-// same write-through precedent.
+// Rotation itself belongs to RequestFreshRestart, so the new epoch is durable
+// from the moment the reset is recorded regardless of which path restarts the
+// session; every consumer here is a marker clear and is therefore idempotent.
 func (m *Manager) commitPendingContinuationReset(id string, b beads.Bead) (int, error) {
 	epoch, err := strconv.Atoi(b.Metadata["continuation_epoch"])
 	if err != nil || epoch <= 0 {
@@ -390,15 +388,16 @@ func (m *Manager) commitPendingContinuationReset(id string, b beads.Bead) (int, 
 	if strings.TrimSpace(b.Metadata["continuation_reset_pending"]) == "" {
 		return epoch, nil
 	}
-	epoch++
+	// The epoch is rotated once, by RequestFreshRestart, when the reset is
+	// recorded — so a pending marker means the epoch read above is ALREADY the
+	// post-reset one. This path only consumes the marker. Rotating again here
+	// would orphan the conversation the reset just created.
 	if err := m.store.SetMetadataBatch(id, map[string]string{
-		"continuation_epoch":         strconv.Itoa(epoch),
 		"continuation_reset_pending": "",
 	}); err != nil {
 		return 0, fmt.Errorf("committing pending continuation reset: %w", err)
 	}
 	if b.Metadata != nil {
-		b.Metadata["continuation_epoch"] = strconv.Itoa(epoch)
 		b.Metadata["continuation_reset_pending"] = ""
 	}
 	return epoch, nil
@@ -1063,6 +1062,19 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 		searchPaths = sessionlog.DefaultSearchPaths()
 	}
 	if path := workertranscript.DiscoverKeyedPath(searchPaths, provider, workDir, b.Metadata["session_key"]); path != "" {
+		return path, nil
+	}
+	// zcode carries no session_key — no session-id flag, no hook plugin — so
+	// the keyed lookup above can never hit for it and the ambiguity guard below
+	// would leave every pooled worker transcript-dark. Its mirror is keyed by
+	// the identity the bead does hold.
+	if path := workertranscript.DiscoverScopedPath(
+		searchPaths,
+		provider,
+		workDir,
+		b.Metadata["session_name"],
+		b.Metadata["continuation_epoch"],
+	); path != "" {
 		return path, nil
 	}
 

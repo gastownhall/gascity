@@ -172,3 +172,19 @@ func providerHasKeyedTranscript(provider string) bool {
 	// by name since both store keyed JSONL under ~/.claude/projects.
 	return strings.Contains(strings.ToLower(strings.TrimSpace(provider)), "claude")
 }
+
+// DiscoverScopedPath resolves a transcript for families whose on-disk layout is
+// keyed by the session's own name and conversation epoch rather than by any
+// session id gc holds.
+//
+// Only zcode qualifies today: gc never learns its provider session id, so
+// DiscoverKeyedPath cannot hit, but the adapter names its mirror directory
+// from GC_SESSION_NAME and GC_CONTINUATION_EPOCH — both persisted on the
+// session bead. Returns "" for every other family, so callers can try it
+// unconditionally.
+func DiscoverScopedPath(searchPaths []string, provider, workDir, sessionName, continuationEpoch string) string {
+	if sessionlog.ProviderFamily(provider) != "zcode" {
+		return ""
+	}
+	return sessionlog.FindZCodeSessionFileByScope(searchPaths, workDir, sessionName, continuationEpoch)
+}

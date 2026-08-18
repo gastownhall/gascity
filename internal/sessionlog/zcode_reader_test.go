@@ -197,3 +197,48 @@ func TestFindZCodeSessionFileByIDIsExact(t *testing.T) {
 		}
 	}
 }
+
+// gc never learns zcode's provider session id, so the mirror has to be
+// resolvable from the identity the session bead does hold.
+func TestFindZCodeSessionFileByScopeSeparatesSameWorkDirSessions(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "shared-workdir")
+	write := func(scope, id string) string {
+		dir := filepath.Join(root, scope)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+		path := filepath.Join(dir, id+".json")
+		body := `{"info":{"id":"` + id + `","directory":"` + filepath.ToSlash(workDir) + `"},"messages":[]}`
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+		return path
+	}
+	// Two pooled workers in one work dir.
+	first := write("s-gc-1#1", "sess_first")
+	second := write("s-gc-2#1", "sess_second")
+
+	if got := FindZCodeSessionFileByScope([]string{root}, workDir, "s-gc-1", "1"); got != first {
+		t.Fatalf("s-gc-1 resolved %q, want %q", got, first)
+	}
+	if got := FindZCodeSessionFileByScope([]string{root}, workDir, "s-gc-2", "1"); got != second {
+		t.Fatalf("s-gc-2 resolved %q, want %q", got, second)
+	}
+
+	// A dead session's mirror in a reused work dir must not surface for a fresh
+	// session — different epoch, different scope.
+	if got := FindZCodeSessionFileByScope([]string{root}, workDir, "s-gc-1", "2"); got != "" {
+		t.Fatalf("fresh conversation resolved a superseded mirror: %q", got)
+	}
+	// The canceled-boot placeholder is never the answer.
+	write("s-gc-3#1", "pending-s-gc-3_1")
+	if got := FindZCodeSessionFileByScope([]string{root}, workDir, "s-gc-3", "1"); got != "" {
+		t.Fatalf("placeholder surfaced as a transcript: %q", got)
+	}
+	// A name needing sanitization resolves the same way the adapter wrote it.
+	slashed := write("gascity_gc.worker-9#1", "sess_slashed")
+	if got := FindZCodeSessionFileByScope([]string{root}, workDir, "gascity/gc.worker-9", "1"); got != slashed {
+		t.Fatalf("sanitized scope resolved %q, want %q", got, slashed)
+	}
+}
