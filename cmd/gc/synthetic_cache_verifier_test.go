@@ -189,3 +189,86 @@ fetched = "2026-01-01T00:00:00Z"
 		t.Fatalf("writing packs.lock: %v", err)
 	}
 }
+
+// TestWarmSyntheticCacheVerifierReusesPositiveVerdictsAcrossPasses pins the
+// ready fast path's two halves, and like the pass-scoped test above the
+// assertions are deliberately opposed: with no cross-pass memo the first
+// fails, and with a memo that never re-validates the second fails.
+//
+// Half one is the performance contract. Re-reading every cached pack file on
+// every config load — and a config load happens on every gc command — is what
+// made the ready path cost O(bundled pack files) per command. The only
+// corruption the stat fingerprint cannot see is one that preserves BOTH size
+// and mtime, so that is what proves the memo was consulted rather than the
+// tree re-read. It is also the contract's documented blind spot, stated here
+// as a test rather than left to a comment: packContentHashCache makes the same
+// trade, and no pack tooling rewrites a file to the same size and then
+// restores its mtime.
+//
+// Half two is the self-healing contract that blind spot must not swallow. Any
+// ordinary write moves size or mtime, so a later pass still re-runs the full
+// validator and reports the corruption for repair.
+func TestWarmSyntheticCacheVerifierReusesPositiveVerdictsAcrossPasses(t *testing.T) {
+	clearGCEnv(t) // isolated GC_HOME, so this cache path is unique to this test
+	source, ok := builtinpacks.Source("core")
+	if !ok {
+		t.Fatal(`builtinpacks.Source("core") is not registered`)
+	}
+	pack, ok := builtinpacks.ByName("core")
+	if !ok {
+		t.Fatal(`builtinpacks.ByName("core") is not registered`)
+	}
+	commit := bundledPackImportCommit()
+	cacheDir := materializeSyntheticCacheForTest(t, source, commit)
+
+	if !newWarmSyntheticCacheVerifier().Valid(cacheDir, builtinpacks.Repository, commit) {
+		t.Fatal("freshly materialized cache reported invalid by the warm verifier")
+	}
+
+	target := filepath.Join(cacheDir, filepath.FromSlash(pack.Subpath), "pack.toml")
+	original, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("reading cached core pack.toml: %v", err)
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("stat cached core pack.toml: %v", err)
+	}
+
+	// Same length as the original, so only the bytes differ. Flip a bit rather
+	// than splice in a chosen byte: the first byte of this file is already "#",
+	// so an "overwrite byte 0 with #" corruption reproduces the original
+	// exactly and asserts nothing.
+	invisible := make([]byte, len(original))
+	copy(invisible, original)
+	invisible[len(invisible)-1] ^= 0x20
+	if len(invisible) != len(original) || string(invisible) == string(original) {
+		t.Fatalf("invisible corruption must preserve length (%d vs %d) and change content", len(invisible), len(original))
+	}
+	if err := os.WriteFile(target, invisible, 0o644); err != nil {
+		t.Fatalf("writing size-preserving corruption: %v", err)
+	}
+	if err := os.Chtimes(target, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatalf("restoring mtime: %v", err)
+	}
+
+	if !newWarmSyntheticCacheVerifier().Valid(cacheDir, builtinpacks.Repository, commit) {
+		t.Error("a later pass re-read the cached tree instead of reusing the memoized verdict; the per-command re-read of every pack file is back")
+	}
+
+	// Now an ordinary corruption. Keep it a different length from the original
+	// so the fingerprint moves at any timestamp resolution — the same
+	// discipline the revision tests apply, and the reason this assertion
+	// cannot flake on a coarse-granularity runner.
+	visible := append([]byte("[pack]\nname = \"tampered\"\n"), original...)
+	if len(visible) == len(original) {
+		t.Fatalf("visible corruption must differ in length from the %d-byte original", len(original))
+	}
+	if err := os.WriteFile(target, visible, 0o644); err != nil {
+		t.Fatalf("writing size-changing corruption: %v", err)
+	}
+
+	if newWarmSyntheticCacheVerifier().Valid(cacheDir, builtinpacks.Repository, commit) {
+		t.Error("a corrupted cache reported valid; the ready path would never repair it")
+	}
+}
