@@ -2091,6 +2091,50 @@ func TestRunCommandDoesNotHangOnInheritedStdoutFromBackgroundChild(t *testing.T)
 	})
 }
 
+// TestRunCommandStdoutExcludesStderr guards against ga-rsktma: a value-bearing
+// caller (e.g. bdDoltInRig's `bd config get`) must never observe stderr
+// diagnostics mixed into the value it parses. Regression trigger: any
+// legitimate stderr output from the subprocess (e.g. bd's own diagnostic
+// logging) corrupted assertions that only expected the clean value on stdout.
+func TestRunCommandStdoutExcludesStderr(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "split-streams.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf 'clean-value'\nprintf 'diagnostic-noise' 1>&2\n"), 0o755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	out, err := runCommandStdout("", nil, 5*time.Second, script)
+	if err != nil {
+		t.Fatalf("runCommandStdout: %v\n%s", err, out)
+	}
+	if out != "clean-value" {
+		t.Fatalf("output = %q, want %q (stderr must not be mixed into a value-bearing capture)", out, "clean-value")
+	}
+}
+
+// TestRunCommandStdoutIncludesStderrInErrorOnFailure verifies that excluding
+// stderr from the returned value does not lose it for diagnosis: on failure
+// the stderr content must still surface, via the returned error, so callers'
+// %v-based failure messages remain informative.
+func TestRunCommandStdoutIncludesStderrInErrorOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fail-with-diagnostic.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf 'partial-value'\nprintf 'boom-diagnostic' 1>&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	out, err := runCommandStdout("", nil, 5*time.Second, script)
+	if err == nil {
+		t.Fatalf("runCommandStdout: want error for non-zero exit, got nil (output %q)", out)
+	}
+	if out != "partial-value" {
+		t.Fatalf("output = %q, want %q", out, "partial-value")
+	}
+	if !strings.Contains(err.Error(), "boom-diagnostic") {
+		t.Fatalf("err = %q, want it to contain stderr diagnostic %q", err.Error(), "boom-diagnostic")
+	}
+}
+
 func parseEnvList(env []string) map[string]string {
 	out := make(map[string]string, len(env))
 	for _, entry := range env {
