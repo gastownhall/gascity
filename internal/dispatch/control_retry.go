@@ -19,9 +19,13 @@ import (
 // retries a single stuck bead actually burned before this bound existed.
 const DefaultSemanticRetryBudget = 15 * time.Minute
 
-// maxControllerRetryErrorMetadata caps the recorded refusal text. It matches
-// the quarantine-reason cap so the two records of the same failure truncate
-// identically and the repeat comparison below stays stable.
+// maxControllerRetryErrorMetadata caps the recorded refusal text. Repeat
+// detection survives truncation because truncateControllerRetryReason re-trims
+// after cutting and RecordSemanticControlRetry reads the stored reason back
+// through strings.TrimSpace, so a cut that lands on trailing whitespace is
+// normalized on both the write and the read side. It does not depend on this
+// value matching controlQuarantineReason's cap: that helper does not re-trim,
+// and its quarantine record is terminal (never re-read for repeat detection).
 const maxControllerRetryErrorMetadata = 512
 
 // SemanticRetryState is the outcome of recording one Tier-B control failure.
