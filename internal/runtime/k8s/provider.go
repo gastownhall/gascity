@@ -178,7 +178,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		pod := &existing[0]
 		if pod.Status.Phase == corev1.PodRunning {
 			// Stale-pod detection: is the session's tmux server alive?
-			alive, definitive, probeErr := p.probeTmuxLiveness(ctx, pod.Name)
+			alive, definitive, probeErr := p.probeTmuxLiveness(ctx, pod)
 			if alive {
 				return fmt.Errorf("%w: session %q (pod: %s)", runtime.ErrSessionExists, name, pod.Name)
 			}
@@ -708,15 +708,28 @@ const livenessProbeAttempts = 2
 // probeTmuxLiveness asks whether the session's tmux server is alive inside pod.
 //
 // It returns three-valued, not two: alive, and whether the answer is
-// definitive. A definitive answer means the probe actually ran inside the
-// container — `tmux has-session` exited, zero or non-zero. An indefinite
-// answer means the exec never got there (SPDY dial failure, apiserver error,
-// stream timeout, canceled context), which says nothing at all about tmux.
+// definitive. A definitive answer means something actually established the
+// fact — either the pod's own status says the agent container is not running,
+// or `tmux has-session` ran inside it and exited. An indefinite answer means
+// the exec never got there (SPDY dial failure, apiserver error, stream timeout,
+// canceled context), which says nothing at all about tmux.
 //
 // Collapsing those two into "not alive" is how a transport flake becomes a
 // deleted pod. Callers that act destructively on a negative must require
 // definitive; callers that only defer may ignore it.
-func (p *Provider) probeTmuxLiveness(ctx context.Context, podName string) (alive, definitive bool, err error) {
+func (p *Provider) probeTmuxLiveness(ctx context.Context, pod *corev1.Pod) (alive, definitive bool, err error) {
+	// The pod's status is a second, independent channel, and it settles the
+	// case the exec cannot: a pod whose phase is Running but whose agent
+	// container is not (crash loop, OOM, terminated) answers every exec with an
+	// apiserver-level error that is indistinguishable from a flake. Reading
+	// that as "I could not tell" would leave a genuinely broken pod in place
+	// forever. The container not running IS a definitive tmux negative, and it
+	// comes from the list we already did rather than from the connection that
+	// is in doubt.
+	if running, known := agentContainerRunning(pod); known && !running {
+		return false, true, fmt.Errorf("agent container in pod %s is not running", pod.Name)
+	}
+	podName := pod.Name
 	for attempt := 0; attempt < livenessProbeAttempts; attempt++ {
 		_, err = p.ops.execInPod(ctx, podName, "agent",
 			[]string{"tmux", "has-session", "-t", tmuxSession}, nil)
@@ -735,6 +748,21 @@ func (p *Provider) probeTmuxLiveness(ctx context.Context, podName string) (alive
 		}
 	}
 	return false, false, err
+}
+
+// agentContainerRunning reports whether the pod's agent container is running,
+// and whether the pod status said anything about it at all. A status that has
+// not been populated yet is not evidence either way.
+func agentContainerRunning(pod *corev1.Pod) (running, known bool) {
+	if pod == nil {
+		return false, false
+	}
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name == "agent" {
+			return cs.State.Running != nil, true
+		}
+	}
+	return false, false
 }
 
 // findRunningPod finds a running pod by session label.

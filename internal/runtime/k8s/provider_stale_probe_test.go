@@ -127,6 +127,45 @@ func TestStartDeletesStalePodOnDefinitiveTmuxNegative(t *testing.T) {
 	}
 }
 
+// TestStartRecreatesAPodWhoseAgentContainerIsNotRunning closes the gap the
+// probe guard would otherwise open. A pod can be phase Running while its agent
+// container is crash-looping or terminated, and every exec into it then fails
+// at the apiserver with an error shaped exactly like a transport flake. If that
+// read as "I could not tell", a genuinely broken pod would never be replaced —
+// the guard would trade one stall for another.
+//
+// The pod's own status settles it. That is a second observation channel,
+// independent of the connection in doubt, so a not-running container is a
+// definitive tmux negative and the pod is recreated.
+func TestStartRecreatesAPodWhoseAgentContainerIsNotRunning(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	addAgedRunningPod(fake, "gc-test-agent", "gc-test-agent")
+	fake.pods["gc-test-agent"].Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name:  "agent",
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137}},
+	}}
+	// Every exec fails the way the apiserver fails for a dead container —
+	// deliberately not an ExitError, so only the pod status can decide.
+	fake.execFunc = func(pod string, cmd []string) (string, error) {
+		if len(cmd) > 1 && cmd[0] == "tmux" && cmd[1] == "has-session" {
+			return "", errors.New("error executing command in container: container is not running")
+		}
+		return "", nil
+	}
+	// Block the recreate so the test ends at the decision it is about, the
+	// same way TestStartDeletesOldPodWithDeadTmux does.
+	fake.createErr = errors.New("intentional: verify deletion only")
+
+	err := p.Start(context.Background(), "gc-test-agent", staleProbeConfig())
+	if errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("Start deferred on a pod whose agent container is dead: %v — a broken pod would never be replaced", err)
+	}
+	if got := deletedPods(fake); len(got) == 0 {
+		t.Fatal("a pod whose agent container is not running must be recreated, not deferred forever")
+	}
+}
+
 // TestStartRetriesAnUnansweredLivenessProbeBeforeGivingUp keeps the guard from
 // converting every transient blip into a stalled slot: one flake followed by a
 // definitive answer must be resolved on the answer, not on the flake.
