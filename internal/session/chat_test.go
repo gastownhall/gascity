@@ -321,19 +321,21 @@ func TestCommitPendingContinuationResetBumpsAndClears(t *testing.T) {
 	}
 	id := b.ID
 
+	// The epoch arrives already rotated (RequestFreshRestart owns that), so this
+	// path publishes it as-is and only consumes the marker.
 	epoch, err := m.commitPendingContinuationReset(id, b)
 	if err != nil {
 		t.Fatalf("commitPendingContinuationReset: %v", err)
 	}
-	if epoch != 4 {
-		t.Fatalf("epoch = %d, want 4", epoch)
+	if epoch != 3 {
+		t.Fatalf("epoch = %d, want the already-rotated 3", epoch)
 	}
 	after, err := store.Get(id)
 	if err != nil {
 		t.Fatalf("get after: %v", err)
 	}
-	if got := after.Metadata["continuation_epoch"]; got != "4" {
-		t.Fatalf("persisted epoch = %q, want 4", got)
+	if got := after.Metadata["continuation_epoch"]; got != "3" {
+		t.Fatalf("persisted epoch = %q, want 3", got)
 	}
 	if got := after.Metadata["continuation_reset_pending"]; got != "" {
 		t.Fatalf("reset marker = %q, want cleared", got)
@@ -344,7 +346,61 @@ func TestCommitPendingContinuationResetBumpsAndClears(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second commit: %v", err)
 	}
-	if again != 4 {
-		t.Fatalf("epoch after a plain restart = %d, want 4", again)
+	if again != 3 {
+		t.Fatalf("epoch after a plain restart = %d, want 3", again)
+	}
+}
+
+// The rotation itself happens when the reset is RECORDED, so it is durable
+// whichever path restarts the session — including one that never reaches the
+// controller's pre-wake commit.
+func TestRequestFreshRestartRotatesTheContinuationEpoch(t *testing.T) {
+	store := beads.NewMemStore()
+	m := NewManagerWithOptions(store, runtime.NewFake())
+	b, err := store.Create(beads.Bead{Title: "session", Type: BeadType, Metadata: map[string]string{
+		"state":              string(StateActive),
+		"continuation_epoch": "2",
+	}})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	if err := m.RequestFreshRestart(b.ID); err != nil {
+		t.Fatalf("RequestFreshRestart: %v", err)
+	}
+	after, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got := after.Metadata["continuation_epoch"]; got != "3" {
+		t.Fatalf("epoch = %q, want 3 rotated at request time", got)
+	}
+	if got := after.Metadata["continuation_reset_pending"]; got != "true" {
+		t.Fatalf("reset marker = %q, want true", got)
+	}
+
+	// A start then publishes that epoch unchanged and clears the marker.
+	epoch, err := m.commitPendingContinuationReset(b.ID, after)
+	if err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if epoch != 3 {
+		t.Fatalf("published epoch = %d, want 3 (no second rotation)", epoch)
+	}
+}
+
+// A message arriving after a reset is recorded, but before the replacement
+// runtime is up, must be queued for the incoming incarnation — not delivered
+// into a conversation the operator already discarded.
+func TestPendingConversationRestartDefersDelivery(t *testing.T) {
+	for name, meta := range map[string]map[string]string{
+		"reset pending":     {"continuation_reset_pending": "true"},
+		"restart requested": {"restart_requested": "true"},
+		"neither":           {},
+	} {
+		want := len(meta) > 0
+		if got := pendingConversationRestart(beads.Bead{Metadata: meta}); got != want {
+			t.Errorf("%s: pendingConversationRestart = %v, want %v", name, got, want)
+		}
 	}
 }
