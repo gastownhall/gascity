@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -587,10 +588,62 @@ func probeZCode(homeDir string) providerProbeResult {
 		}
 		return providerProbeResult{status: probeStatusProbeError, detail: fmt.Sprintf("failed to read ZCODE_CJS %s", bundle)}
 	}
+	// Same order the adapter checks in, so readiness and a real launch fail on
+	// the same thing first.
 	if strings.TrimSpace(os.Getenv("ZCODE_API_KEY")) == "" {
 		return providerProbeResult{status: probeStatusNeedsAuth, detail: "set ZCODE_API_KEY"}
 	}
+	if detail := zcodeNodeFloorDetail(homeDir); detail != "" {
+		return providerProbeResult{status: probeStatusInvalidConfiguration, detail: detail}
+	}
 	return providerProbeResult{status: probeStatusConfigured}
+}
+
+// zcodeNodeFloorDetail reports why node is unusable for the ZCode bundle, or ""
+// when it is fine. The bundle imports node:sqlite, so the floor is 22.5 — a
+// distro node 18 on PATH dies with a bare "No such built-in module:
+// node:sqlite" at the first turn. The adapter enforces the same floor at
+// launch; checking it here turns a mid-run pane death into a readiness answer.
+func zcodeNodeFloorDetail(homeDir string) string {
+	const guidance = "the ZCode bundle needs node >= 22.5 (it imports node:sqlite) — set ZCODE_NODE_BIN"
+	node := strings.TrimSpace(os.Getenv("ZCODE_NODE_BIN"))
+	if node == "" {
+		found, ok := findProbeBinary("node", homeDir)
+		if !ok {
+			return "no node found in probe PATH; " + guidance
+		}
+		node = found
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := providerProbeCommandContext(ctx, node, "--version").Output()
+	if err != nil {
+		return fmt.Sprintf("%s could not report a version; %s", node, guidance)
+	}
+	major, minor, ok := parseNodeVersion(string(out))
+	if !ok {
+		return fmt.Sprintf("%s reported an unparsable version; %s", node, guidance)
+	}
+	if major > 22 || (major == 22 && minor >= 5) {
+		return ""
+	}
+	return fmt.Sprintf("%s is v%d.%d; %s", node, major, minor, guidance)
+}
+
+func parseNodeVersion(raw string) (major, minor int, ok bool) {
+	fields := strings.SplitN(strings.TrimPrefix(strings.TrimSpace(raw), "v"), ".", 3)
+	if len(fields) < 2 {
+		return 0, 0, false
+	}
+	major, err := strconv.Atoi(fields[0])
+	if err != nil {
+		return 0, 0, false
+	}
+	minor, err = strconv.Atoi(fields[1])
+	if err != nil {
+		return 0, 0, false
+	}
+	return major, minor, true
 }
 
 // mimoCodeAuthPath resolves the credential store written by

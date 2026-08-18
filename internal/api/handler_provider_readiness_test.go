@@ -141,8 +141,49 @@ func TestProbeZCodeNeedsBundleAndKey(t *testing.T) {
 	}
 
 	t.Setenv("ZCODE_API_KEY", "not-a-real-key")
+	writeExecutable(t, filepath.Join(homeDir, ".local", "bin"), "node", "#!/bin/sh\necho v22.5.0\n")
 	if result := probeZCode(homeDir); result.status != probeStatusConfigured {
 		t.Fatalf("configured status = %q, want %q (detail %q)", result.status, probeStatusConfigured, result.detail)
+	}
+}
+
+// The bundle imports node:sqlite, so a node below 22.5 kills the pane at the
+// first turn. Readiness should say so instead.
+func TestProbeZCodeChecksTheNodeFloor(t *testing.T) {
+	homeDir := t.TempDir()
+	pinProbeSearchPath(t, homeDir)
+	stageZCodeProbeBinary(t, homeDir)
+	bundle := filepath.Join(homeDir, "zcode.cjs")
+	if err := os.WriteFile(bundle, []byte("// bundle\n"), 0o644); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	t.Setenv("ZCODE_CJS", bundle)
+	t.Setenv("ZCODE_API_KEY", "not-a-real-key")
+
+	userBin := filepath.Join(homeDir, ".local", "bin")
+	for _, tc := range []struct {
+		version string
+		want    string
+	}{
+		{"v18.20.4", probeStatusInvalidConfiguration},
+		{"v22.4.0", probeStatusInvalidConfiguration},
+		{"v22.5.0", probeStatusConfigured},
+		{"v25.9.0", probeStatusConfigured},
+	} {
+		writeExecutable(t, userBin, "node", "#!/bin/sh\necho "+tc.version+"\n")
+		t.Setenv("ZCODE_NODE_BIN", filepath.Join(userBin, "node"))
+		if got := probeZCode(homeDir); got.status != tc.want {
+			t.Fatalf("node %s status = %q, want %q (detail %q)", tc.version, got.status, tc.want, got.detail)
+		}
+	}
+
+	// No node at all is a configuration answer, not a crash.
+	t.Setenv("ZCODE_NODE_BIN", "")
+	if err := os.Remove(filepath.Join(userBin, "node")); err != nil {
+		t.Fatalf("remove node stub: %v", err)
+	}
+	if got := probeZCode(homeDir); got.status != probeStatusInvalidConfiguration {
+		t.Fatalf("missing node status = %q, want %q", got.status, probeStatusInvalidConfiguration)
 	}
 }
 
