@@ -15,6 +15,7 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -903,6 +904,40 @@ func runCommand(dir string, env []string, timeout time.Duration, binary string, 
 	}
 	if errors.Is(err, exec.ErrWaitDelay) {
 		return output, nil
+	}
+	return output, err
+}
+
+// runCommandStdout runs the command like runCommand, but captures stdout and
+// stderr into separate buffers so a value-bearing caller only ever observes
+// stdout -- diagnostics the subprocess writes to stderr (e.g. bd's own
+// logging) must never contaminate a parsed value. On failure the stderr
+// content is folded into the returned error so it remains available for
+// diagnosis; only the clean value is lost from the returned string, and only
+// when there is no clean value to report (the command failed).
+func runCommandStdout(dir string, env []string, timeout time.Duration, binary string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, binary, args...)
+	cmd.WaitDelay = 2 * time.Second
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	cmd.Env = env
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	output := stdout.String()
+	if ctx.Err() == context.DeadlineExceeded {
+		return output, fmt.Errorf("timed out after %s running %s", timeout, renderCommand(binary, args...))
+	}
+	if errors.Is(err, exec.ErrWaitDelay) {
+		return output, nil
+	}
+	if err != nil && stderr.Len() > 0 {
+		return output, fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	return output, err
 }

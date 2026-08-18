@@ -25,12 +25,16 @@ import (
 // bdDoltInRig runs the bd binary in rigDir using the managed Dolt endpoint
 // from cityDir. The rig and the city share the same Dolt server; the database
 // name is read from the rig's .beads/metadata.json by bd.
+//
+// Uses runCommandStdout, not runCommand: callers parse the returned string as
+// a value (an issue prefix, a bead ID), and bd's own stderr diagnostics must
+// not be able to corrupt that value (ga-rsktma).
 func bdDoltInRig(cityDir, rigDir string, args ...string) (string, error) {
 	env := commandEnvForDir(cityDir, true)
 	if port, ok := ensureManagedDoltPortForTest(cityDir); ok {
 		env = appendManagedDoltEndpointEnv(env, port)
 	}
-	return runCommand(rigDir, env, integrationBDCommandTimeout, bdBinary, args...)
+	return runCommandStdout(rigDir, env, integrationBDCommandTimeout, bdBinary, args...)
 }
 
 func TestCleanInstallTutorialPath(t *testing.T) {
