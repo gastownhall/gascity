@@ -10944,7 +10944,7 @@ func TestReconcileSessionBeads_RecordsResetStallDiagnostic(t *testing.T) {
 	}
 
 	env.stderr.Reset()
-	recordResetStallIfDue(sessiontest.SeedBead(t, session), "worker", "worker", false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
+	recordResetStallIfDue("", env.store, env.sp, env.cfg, sessiontest.SeedBead(t, session), "worker", "worker", false, false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
 	if got := strings.TrimSpace(env.stderr.String()); got != "" {
 		t.Fatalf("second stalled pass stderr = %q, want debounce silence", got)
 	}
@@ -10956,18 +10956,194 @@ func TestReconcileSessionBeads_RecordsResetStallDiagnostic(t *testing.T) {
 		"continuation_reset_pending":   "",
 		sessionpkg.ResetCommittedAtKey: "",
 	})
-	recordResetStallIfDue(sessiontest.SeedBead(t, session), "worker", "worker", false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
+	recordResetStallIfDue("", env.store, env.sp, env.cfg, sessiontest.SeedBead(t, session), "worker", "worker", false, false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
 	env.setSessionMetadata(&session, map[string]string{
 		"continuation_reset_pending":   "true",
 		sessionpkg.ResetCommittedAtKey: committedAt,
 	})
 	env.stderr.Reset()
-	recordResetStallIfDue(sessiontest.SeedBead(t, session), "worker", "worker", false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
+	recordResetStallIfDue("", env.store, env.sp, env.cfg, sessiontest.SeedBead(t, session), "worker", "worker", false, false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
 	if got := strings.TrimSpace(env.stderr.String()); got != wantMessage {
 		t.Fatalf("re-stalled pass stderr = %q, want %q", got, wantMessage)
 	}
 	if len(rec.Events) != 2 {
 		t.Fatalf("recorded events after reset clear = %d, want 2", len(rec.Events))
+	}
+}
+
+// TestReconcileSessionBeads_ResetStallEvictsStaleRuntime verifies the
+// reconciler evicts a stale tmux runtime once a continuation reset has been
+// pending longer than the startup timeout, instead of only re-recording the
+// stall diagnostic and leaving the session wedged forever. Regression test
+// for gastownhall/gascity#5355: a provider-profile flip left an old runtime's
+// tmux session alive (process dead) while continuation_reset_pending stayed
+// true — reset-pending never evicted the stale occupant, so the config
+// change never took effect.
+func TestReconcileSessionBeads_ResetStallEvictsStaleRuntime(t *testing.T) {
+	env := newReconcilerTestEnv()
+	rec := events.NewFake()
+	env.rec = rec
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
+		Session:   config.SessionConfig{StartupTimeout: "60s"},
+	}
+	tp := TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  "worker",
+		TemplateName: "worker",
+		Hints:        agent.StartupHints{ProcessNames: []string{"test-cmd"}},
+	}
+	env.desiredState["worker"] = tp
+
+	// Simulate the wedge: the OLD runtime's tmux session is still alive
+	// (running), but its process is dead (Zombies), so alive=false while
+	// running=true — exactly the "stale runtime still occupies the tmux
+	// session" condition #5355 describes.
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("starting fake session: %v", err)
+	}
+	env.sp.Zombies["worker"] = true
+
+	session := env.createSessionBead("worker", "worker")
+	committedAt := env.clk.Now().Add(-75 * time.Second).UTC().Format(time.RFC3339)
+	env.setSessionMetadata(&session, map[string]string{
+		"continuation_reset_pending":   "true",
+		sessionpkg.ResetCommittedAtKey: committedAt,
+	})
+
+	reconcileSessionBeads(
+		context.Background(), []beads.Bead{session}, env.desiredState, configuredSessionNames(env.cfg, "", env.store),
+		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{"worker": 0}, false, nil, "test-city",
+		nil, env.clk, rec, env.cfg.Session.StartupTimeoutDuration(), 0, &env.stdout, &env.stderr,
+	)
+
+	// The stale runtime must actually be evicted (Stop issued against the
+	// wedged tmux session), not just re-recorded. The normal spawn path may
+	// then respawn it fresh within the same tick (desired state still wants
+	// "worker" running) — that respawn is the whole point of the fix, so
+	// this asserts on the Stop call rather than on IsRunning at tick end.
+	evicted := false
+	for _, c := range env.sp.SnapshotCalls() {
+		if c.Method == "Stop" && c.Name == "worker" {
+			evicted = true
+			break
+		}
+	}
+	if !evicted {
+		t.Fatalf("expected the stale reset-pending runtime to be evicted (Stop called for %q), calls: %#v", "worker", env.sp.SnapshotCalls())
+	}
+
+	foundStall := false
+	for _, e := range rec.Events {
+		if e.Type == events.SessionResetStalled {
+			foundStall = true
+		}
+	}
+	if !foundStall {
+		t.Fatalf("expected a session.reset_stalled event, got: %#v", rec.Events)
+	}
+}
+
+// TestReconcileSessionBeads_ZombieCrashDedupesAcrossTicks verifies that
+// repeated zombie detection (tmux session alive, expected process dead) on
+// the same session dedupes the session.crashed event instead of re-firing on
+// every reconciler tick. Regression test for gastownhall/gascity#5355: the
+// zombie branch fired session.crashed unconditionally on every ~30s tick with
+// zero dedup, producing 299 identical events over 5.3 hours for one wedged
+// session.
+func TestReconcileSessionBeads_ZombieCrashDedupesAcrossTicks(t *testing.T) {
+	env := newReconcilerTestEnv()
+	rec := events.NewFake()
+	env.rec = rec
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+
+	tp := TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  "worker",
+		TemplateName: "worker",
+		Hints:        agent.StartupHints{ProcessNames: []string{"test-cmd"}},
+	}
+	env.desiredState["worker"] = tp
+	_ = env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"})
+	env.sp.Zombies["worker"] = true
+	env.sp.SetPeekOutput("worker", "panic: nil pointer dereference\ngoroutine 1 [running]:")
+
+	session := env.createSessionBead("worker", "worker")
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+
+	for tick := 0; tick < 3; tick++ {
+		reconcileSessionBeads(
+			context.Background(), []beads.Bead{session}, env.desiredState, cfgNames,
+			env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
+			nil, env.clk, rec, 0, 0, &env.stdout, &env.stderr,
+		)
+	}
+
+	got := 0
+	for _, e := range rec.Events {
+		if e.Type == events.SessionCrashed {
+			got++
+		}
+	}
+	if got != 1 {
+		t.Fatalf("session.crashed events after 3 ticks of the same zombie condition = %d, want 1 (deduped)", got)
+	}
+}
+
+// TestReconcileSessionBeads_ZombieCrashPayloadTruncated verifies the
+// session.crashed event's Message is bounded regardless of pane size, so a
+// zombie detection cannot bloat the events log with a full raw pane capture.
+// Regression test for gastownhall/gascity#5355: each of the 299 flood events
+// carried the full ~6.6KB pane dump.
+func TestReconcileSessionBeads_ZombieCrashPayloadTruncated(t *testing.T) {
+	env := newReconcilerTestEnv()
+	rec := events.NewFake()
+	env.rec = rec
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+
+	tp := TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  "worker",
+		TemplateName: "worker",
+		Hints:        agent.StartupHints{ProcessNames: []string{"test-cmd"}},
+	}
+	env.desiredState["worker"] = tp
+	_ = env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"})
+	env.sp.Zombies["worker"] = true
+
+	// Build a pane capture far larger than crashEventPaneOutputMaxLines.
+	lines := make([]string, 0, rateLimitPeekLines)
+	for i := 0; i < rateLimitPeekLines; i++ {
+		lines = append(lines, fmt.Sprintf("line %d: some pane output that is not empty", i))
+	}
+	bigOutput := strings.Join(lines, "\n")
+	env.sp.SetPeekOutput("worker", bigOutput)
+
+	session := env.createSessionBead("worker", "worker")
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+
+	reconcileSessionBeads(
+		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames,
+		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
+		nil, env.clk, rec, 0, 0, &env.stdout, &env.stderr,
+	)
+
+	var gotEvent *events.Event
+	for i := range rec.Events {
+		if rec.Events[i].Type == events.SessionCrashed {
+			gotEvent = &rec.Events[i]
+			break
+		}
+	}
+	if gotEvent == nil {
+		t.Fatalf("expected a session.crashed event, got: %#v", rec.Events)
+	}
+	if got := len(strings.Split(gotEvent.Message, "\n")); got > crashEventPaneOutputMaxLines+1 {
+		t.Fatalf("session.crashed message has %d lines, want <= %d (plus the elision marker line)", got, crashEventPaneOutputMaxLines+1)
+	}
+	if len(gotEvent.Message) >= len(bigOutput) {
+		t.Fatalf("session.crashed message (%d bytes) was not truncated relative to the raw pane capture (%d bytes)", len(gotEvent.Message), len(bigOutput))
 	}
 }
 
