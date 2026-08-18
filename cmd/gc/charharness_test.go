@@ -86,7 +86,7 @@ func newCharCity(t *testing.T, cityToml string, seed func(t *testing.T, store be
 	if err != nil {
 		t.Fatalf("load cfg: %v", err)
 	}
-	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), charCityName, cityPath)
+	cs, _ := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), charCityName, cityPath)
 	return &charHarness{cityPath: cityPath, cs: cs}
 }
 

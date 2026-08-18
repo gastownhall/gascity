@@ -23,7 +23,7 @@ func writeSplitCityConfig(t *testing.T, tomlPath, bindingPath, extra string) {
 	clearInheritedBeadsEnv(t)
 	var buf strings.Builder
 	buf.WriteString("[workspace]\nname = \"test-city\"\n\n")
-	buf.WriteString("[beads]\nprovider = \"file\"\n\n")
+	buf.WriteString("[beads]\nprovider = \"file\"\nconditional_writes = \"require\"\n\n")
 	buf.WriteString("[session]\nprovider = \"fake\"\n\n")
 	buf.WriteString("[storage.classes]\nwork = \"work\"\ngraph = \"infra\"\nsessions = \"infra\"\nmessaging = \"infra\"\norders = \"infra\"\nnudges = \"infra\"\n\n")
 	fmt.Fprintf(&buf, "[storage.bindings.infra]\nprovider = %q\npath = %q\n", config.StorageProviderSQLiteBeads, bindingPath)

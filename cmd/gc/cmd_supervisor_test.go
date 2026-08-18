@@ -4606,6 +4606,7 @@ func TestRunSupervisorSIGTERMPreservesSessionsEndToEnd(t *testing.T) {
 	t.Setenv("GC_HOME", gcHome)
 	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_CONDITIONAL_WRITES", "require")
 	t.Setenv(supervisorPreserveSessionsOnSignalEnv, "1")
 
 	if err := os.WriteFile(supervisor.ConfigPath(), []byte("[supervisor]\nport = "+freeLoopbackPort(t)+"\npatrol_interval = \"10m\"\n"), 0o644); err != nil {

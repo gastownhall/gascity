@@ -44,7 +44,8 @@ func newRoutedControllerStateForTest(t *testing.T, routes *storageRoutes, work b
 	stubControllerCityStore(t, work)
 	cityPath := t.TempDir()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	return newControllerStateWithRoutes(context.Background(), routes, cfg, nil, nil, "test-city", cityPath)
+	cs, _ := newControllerStateWithRoutes(context.Background(), routes, cfg, nil, nil, "test-city", cityPath)
+	return cs
 }
 
 func appendTestTranscript(t *testing.T, svc *extmsg.Services) extmsg.ConversationTranscriptRecord {
@@ -152,7 +153,7 @@ func TestSetControllerStateDoesNotRaceClassAccessors(t *testing.T) {
 	stubControllerCityStore(t, store)
 	cityPath := t.TempDir()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	cs := newControllerState(context.Background(), cfg, nil, nil, "test-city", cityPath)
+	cs, _ := newControllerState(context.Background(), cfg, nil, nil, "test-city", cityPath)
 	cr := &CityRuntime{storageRoutes: messagingSplitRoutes(beads.NewMemStore())}
 
 	var wg sync.WaitGroup

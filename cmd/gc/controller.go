@@ -1393,7 +1393,11 @@ func runController(
 	// Install controller-managed bead stores even when the HTTP API is
 	// disabled. Standalone runtime still needs cached city/rig stores for
 	// session-bead sync and rig-scoped wake decisions.
-	cs := newControllerStateWithRoutes(ctx, cr.storageRoutes, cfg, sp, eventProv, cityName, cityPath)
+	cs, err := newControllerStateWithRoutes(ctx, cr.storageRoutes, cfg, sp, eventProv, cityName, cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	cs.ct = cr.crashTrack()
 	cs.pokeCh = pokeCh
 	cs.configDirty = configDirty
