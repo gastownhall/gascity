@@ -140,7 +140,7 @@ func (a SessionLogAdapter) InvocationUsage(provider, path string) ([]sessionlog.
 // tail cannot be read from a trailing record. Whole-file-JSON mirror families
 // need the normalized history; everything else keeps the cheap tail path.
 func (a SessionLogAdapter) TailActivityForProvider(provider, path string) (TailActivity, error) {
-	if !sessionlog.WholeFileJSONFamily(provider) {
+	if !sessionlog.DerivesActivityFromHistory(provider) {
 		return a.TailActivity(path)
 	}
 	snapshot, err := a.LoadHistory(LoadRequest{Provider: provider, TranscriptPath: path, TailCompactions: 1})
@@ -892,15 +892,15 @@ func normalizeBlockKind(kind string) BlockKind {
 
 // snapshotTailActivity resolves tail activity for the provider family.
 //
-// The tail-chunk extractor only understands Claude's JSONL, so every
-// whole-file-JSON mirror family reported Unknown forever and PhaseBusy was
-// unreachable for them. For those families the normalized history is the
-// authority and is lossless by construction: the mirror carries a user message
-// from the moment a turn starts and its assistant reply when the turn lands, so
-// a trailing user message means a turn is in flight and a trailing assistant
-// message means idle.
+// The tail-chunk extractor only understands Claude's JSONL, so a whole-file
+// mirror reported Unknown forever and PhaseBusy was unreachable. Where this
+// repo owns the writer (zcode) the normalized history is the authority and is
+// lossless by construction: the mirror carries a user message from the moment a
+// turn starts, and every turn is closed out — with its reply, or with the
+// failure/interrupt outcome — so a trailing user message means a turn is in
+// flight and a trailing assistant message means idle.
 func snapshotTailActivity(provider string, meta *sessionlog.TailMeta, entries []HistoryEntry) TailActivity {
-	if sessionlog.WholeFileJSONFamily(provider) {
+	if sessionlog.DerivesActivityFromHistory(provider) {
 		return wholeFileJSONActivity(entries)
 	}
 	return tailActivity(meta)

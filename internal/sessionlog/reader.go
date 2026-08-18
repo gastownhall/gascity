@@ -1541,11 +1541,12 @@ func mergePaths(defaults, extras []string) []string {
 // one whole-file JSON document (an OpenCode-shaped `{info, messages}` export or
 // a mirror of one) rather than as append-only JSONL.
 //
-// Two tail heuristics are meaningless for these families and must not be
-// applied: a tail chunk of a pretty-printed JSON document always "starts mid
-// line", so the malformed-tail heuristic fires on every healthy file; and
-// activity cannot be read from a trailing record, because the document is
-// rewritten whole on each turn.
+// The tail-chunk malformed heuristic is meaningless for these families: a tail
+// chunk of a pretty-printed JSON document always "starts mid line", so the flag
+// fires on every healthy file. Suppressing it is behavior-neutral — the flag is
+// documented as a heuristic that full-file parser diagnostics override, and
+// these families' readers set no tail diagnostics of their own, so nothing
+// downstream loses a signal it previously acted on.
 func WholeFileJSONFamily(provider string) bool {
 	switch ProviderFamily(provider) {
 	case "opencode", "mimocode", "zcode":
@@ -1553,6 +1554,21 @@ func WholeFileJSONFamily(provider string) bool {
 	default:
 		return false
 	}
+}
+
+// DerivesActivityFromHistory reports whether tail activity for a family must be
+// derived from normalized history rather than read from a trailing record.
+//
+// Deliberately narrower than WholeFileJSONFamily. The derivation is only sound
+// where the mirror is known to record a user message at turn START and close it
+// out when the turn ends — an invariant this repo owns for zcode, because it
+// owns the writer (internal/worker/adapters/zcode). OpenCode and MiMo Code
+// share the file SHAPE but their exports are written by upstream plugins on
+// their own schedule, so the same inference is not established for them and
+// enabling it would silently change their production activity reporting.
+// Extending this set is a per-family exercise, not a shape check.
+func DerivesActivityFromHistory(provider string) bool {
+	return ProviderFamily(provider) == "zcode"
 }
 
 // ProviderFamily returns the canonical transcript provider family for provider.
