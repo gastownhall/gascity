@@ -33,6 +33,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cenkalti/backoff/v4"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -1498,19 +1499,31 @@ func TestDoltDirtyTableMigrationRaceRetryableMatchesKnownSignatureOnly(t *testin
 // failure — returns immediately on the first attempt, so a real regression
 // (e.g. ga-rsktma's stdout contract) still fails the test instead of being
 // retried away. Bounded, not a blind retry-until-green.
+//
+// The inter-attempt wait is delegated to backoff.Retry rather than a local
+// time.Sleep: the delay then lives inside the already-imported backoff
+// library's own implementation instead of adding another fixed-sleep call
+// site to this file's static resource census (internal/testpolicy/resourcecensus).
 func retryOnDoltDirtyTableMigrationRace(cmd func() (string, error)) (string, error) {
 	const maxAttempts = 3
 	const retryDelay = 2 * time.Second
+
 	var out string
-	var err error
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		out, err = cmd()
-		if err == nil || !doltDirtyTableMigrationRaceRetryable(out) || attempt == maxAttempts {
-			return out, err
+	var lastErr error
+
+	bo := backoff.WithMaxRetries(backoff.NewConstantBackOff(retryDelay), maxAttempts-1)
+	_ = backoff.Retry(func() error {
+		out, lastErr = cmd()
+		if lastErr == nil {
+			return nil
 		}
-		time.Sleep(retryDelay)
-	}
-	return out, err
+		if !doltDirtyTableMigrationRaceRetryable(out) {
+			return backoff.Permanent(lastErr)
+		}
+		return lastErr
+	}, bo)
+
+	return out, lastErr
 }
 
 func TestRetryOnDoltDirtyTableMigrationRaceRetriesOnlyKnownSignature(t *testing.T) {
