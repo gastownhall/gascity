@@ -236,7 +236,7 @@ func rewriteBdHeartbeatArgs(bdArgs []string) ([]string, error) {
 // preflight cannot interpret exactly are refused before bd can mutate state.
 func bdRigQualifiedMetadataRefusal(cfg *config.City, bdArgs []string) (string, bool) {
 	verb, args := bdflags.SplitGlobalFlags(bdArgs)
-	if verb != "update" {
+	if verb != "create" && verb != "update" {
 		return "", false
 	}
 	valueFlags := bdflags.ValueFlags(verb)

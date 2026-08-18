@@ -1489,21 +1489,29 @@ printf '{"id":"scratch-1","metadata":{"written":true}}\n' > "$SCRATCH_BEAD"
 
 	for _, tc := range []struct {
 		name  string
+		verb  string
 		args  []string
 		actor string
 	}{
-		{"lease owner", []string{"--set-metadata", "gc.lease_owner=ghostrig/polecat-01"}, "ghostrig/polecat-01"},
-		{"inline lease owner", []string{"--set-metadata=gc.lease_owner=ghostrig/polecat-01"}, "ghostrig/polecat-01"},
-		{"route target", []string{"--set-metadata", "gc.routed_to=desktop3080saitoc/polecat-01"}, "desktop3080saitoc/polecat-01"},
-		{"whole metadata object", []string{"--metadata", `{"gc.routed_to":"ghostrig/polecat-01"}`}, "ghostrig/polecat-01"},
-		{"inline metadata object", []string{`--metadata={"gc.routed_to":"ghostrig/polecat-01"}`}, "ghostrig/polecat-01"},
+		{"lease owner", "update", []string{"--set-metadata", "gc.lease_owner=ghostrig/polecat-01"}, "ghostrig/polecat-01"},
+		{"inline lease owner", "update", []string{"--set-metadata=gc.lease_owner=ghostrig/polecat-01"}, "ghostrig/polecat-01"},
+		{"route target", "update", []string{"--set-metadata", "gc.routed_to=desktop3080saitoc/polecat-01"}, "desktop3080saitoc/polecat-01"},
+		{"whole metadata object", "update", []string{"--metadata", `{"gc.routed_to":"ghostrig/polecat-01"}`}, "ghostrig/polecat-01"},
+		{"inline metadata object", "update", []string{`--metadata={"gc.routed_to":"ghostrig/polecat-01"}`}, "ghostrig/polecat-01"},
+		{"create route target", "create", []string{"--metadata", `{"gc.routed_to":"ghostrig/polecat-01"}`}, "ghostrig/polecat-01"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := os.WriteFile(scratchBead, []byte(original), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			var stdout, stderr bytes.Buffer
-			args := append([]string{"--city", cityDir, "update", "scratch-1"}, tc.args...)
+			args := []string{"--city", cityDir, tc.verb}
+			if tc.verb == "update" {
+				args = append(args, "scratch-1")
+			} else {
+				args = append(args, "scratch")
+			}
+			args = append(args, tc.args...)
 			if got := doBd(args, &stdout, &stderr); got == 0 {
 				t.Fatalf("doBd() = 0, want refusal; stdout=%q stderr=%q", stdout.String(), stderr.String())
 			}
