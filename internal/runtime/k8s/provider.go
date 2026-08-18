@@ -177,19 +177,29 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	if err == nil && len(existing) > 0 {
 		pod := &existing[0]
 		if pod.Status.Phase == corev1.PodRunning {
-			// Check if tmux is alive — stale pod detection.
-			_, tmuxErr := p.ops.execInPod(ctx, pod.Name, "agent",
-				[]string{"tmux", "has-session", "-t", tmuxSession}, nil)
-			if tmuxErr == nil {
+			// Stale-pod detection: is the session's tmux server alive?
+			alive, definitive, probeErr := p.probeTmuxLiveness(ctx, pod.Name)
+			if alive {
 				return fmt.Errorf("%w: session %q (pod: %s)", runtime.ErrSessionExists, name, pod.Name)
 			}
-			// tmux dead — but if the pod is young, workspace init may still
-			// be blocking the tmux server from starting. Don't delete pods
-			// that are still within the startup window.
+			// tmux not answering — but if the pod is young, workspace init may
+			// still be blocking the tmux server from starting. Don't delete
+			// pods that are still within the startup window.
 			if time.Since(pod.CreationTimestamp.Time) < startupGracePeriod {
 				return fmt.Errorf("%w: session %q (pod: %s)", runtime.ErrSessionInitializing, name, pod.Name)
 			}
-			// Stale pod — tmux dead and past grace period, recreate.
+			if !definitive {
+				// Past the grace period the next statement deletes this pod.
+				// Only a probe that actually ran inside the container may
+				// authorize that: an apiserver or kubelet transport failure
+				// says nothing about tmux, and treating it as a negative
+				// destroys a live agent's box and the work in it. Report the
+				// established "I could not tell" signal so the caller defers
+				// instead of recreating.
+				return fmt.Errorf("%w: tmux liveness probe for session %q (pod: %s) could not answer: %w",
+					runtime.ErrRuntimeUnavailable, name, pod.Name, probeErr)
+			}
+			// Stale pod — tmux definitively dead and past grace period, recreate.
 		}
 		// Clean up existing pod.
 		_ = p.ops.deletePod(ctx, pod.Name, 5)
@@ -688,6 +698,44 @@ func (p *Provider) CopyTo(name, src, relDst string) error {
 }
 
 // --- Internal helpers ---
+
+// livenessProbeAttempts is how many times probeTmuxLiveness will ask before
+// reporting that it could not tell. The exec path through the apiserver and
+// kubelet flakes independently of the pod, and a single blip is not evidence
+// about tmux; two unanswered attempts in a row are at least a pattern.
+const livenessProbeAttempts = 2
+
+// probeTmuxLiveness asks whether the session's tmux server is alive inside pod.
+//
+// It returns three-valued, not two: alive, and whether the answer is
+// definitive. A definitive answer means the probe actually ran inside the
+// container — `tmux has-session` exited, zero or non-zero. An indefinite
+// answer means the exec never got there (SPDY dial failure, apiserver error,
+// stream timeout, canceled context), which says nothing at all about tmux.
+//
+// Collapsing those two into "not alive" is how a transport flake becomes a
+// deleted pod. Callers that act destructively on a negative must require
+// definitive; callers that only defer may ignore it.
+func (p *Provider) probeTmuxLiveness(ctx context.Context, podName string) (alive, definitive bool, err error) {
+	for attempt := 0; attempt < livenessProbeAttempts; attempt++ {
+		_, err = p.ops.execInPod(ctx, podName, "agent",
+			[]string{"tmux", "has-session", "-t", tmuxSession}, nil)
+		if err == nil {
+			return true, true, nil
+		}
+		var exitErr execerr.ExitError
+		if errors.As(err, &exitErr) && exitErr.Exited() {
+			// The command ran in the container and reported no session. That
+			// is a real tmux negative — the same discrimination Provider.Exec
+			// already draws between an exit status and a transport failure.
+			return false, true, err
+		}
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return false, false, err
+}
 
 // findRunningPod finds a running pod by session label.
 // carrier returns the tmux carrier that drives this provider's sessions over
