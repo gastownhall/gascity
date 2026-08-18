@@ -154,9 +154,10 @@ func TestSlingDashboardURLSuppressed(t *testing.T) {
 	})
 
 	t.Run("dashboard-invalid city name", func(t *testing.T) {
-		// Valid per the supervisor registry grammar (dots allowed) but
-		// invalid per the stricter BFF grammar — dashboard-unreachable.
-		cityPath := registerSlingDashboardCity(t, "bright.lights")
+		// The registry has no length cap, but dashboardbff.ValidCityName
+		// caps names at 64 chars — a registry-valid name can still exceed
+		// the BFF's own limit and be dashboard-unreachable.
+		cityPath := registerSlingDashboardCity(t, strings.Repeat("a", 65))
 		srv := slingDashboardHealthServer(t, http.StatusOK)
 		stubSlingDashboardSupervisor(t, 4242, srv.URL, nil)
 		if got, _ := slingDashboardURL(cityPath, workflowResult); got != "" {
