@@ -127,7 +127,7 @@ func TestStartStillTearsDownAVacantBoxItFailedToFill(t *testing.T) {
 // TestStartPreCheckDoesNotChangeBehaviourForPacksThatCannotReportOccupancy
 // bounds the blast radius. A pack with no `is-running` op answers exit 2
 // (unknown op), which is not an occupancy answer in either direction. Such a
-// pack must keep exactly today's behaviour — attempt the start, tear down on
+// pack must keep exactly today's behavior — attempt the start, tear down on
 // failure, and fall back to the stderr phrase detector for collisions — rather
 // than losing the teardown that stopped the original ga-vcjr9 pod leak.
 func TestStartPreCheckDoesNotChangeBehaviourForPacksThatCannotReportOccupancy(t *testing.T) {

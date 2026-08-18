@@ -197,7 +197,7 @@ func (s degradedQueryStore) List(q beads.ListQuery) ([]beads.Bead, error) {
 // every unaliased pool create for as long as the store is unhappy. That
 // tolerance is only safe because the snapshot of this tick's open beads is
 // consulted FIRST. Lose the ordering, or lose the snapshot check, and a
-// degraded store becomes a licence to point a second agent at a live session's
+// degraded store becomes a license to point a second agent at a live session's
 // box — the one outcome worse than the leak.
 func TestPoolSessionCreate_LiveHolderBlocksEvenWhenTheStoreScanCannotAnswer(t *testing.T) {
 	mem := beads.NewMemStore()

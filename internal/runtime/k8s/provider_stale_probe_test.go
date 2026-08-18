@@ -16,7 +16,7 @@ import (
 // addAgedRunningPod adds a Running pod created far enough in the past that the
 // startup grace period has expired — the window in which Start is willing to
 // delete a same-name pod it judges stale.
-func addAgedRunningPod(fake *fakeK8sOps, name, sessionLabel string) {
+func addAgedRunningPod(fake *fakeK8sOps, name, sessionLabel string) { //nolint:unparam // name varies with the session under test
 	fake.pods[name] = &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              name,
@@ -106,7 +106,7 @@ func TestStartDeletesStalePodOnDefinitiveTmuxNegative(t *testing.T) {
 	// execInPod surfaces this as a client-go ExitError, the same shape
 	// Provider.Exec already dispatches on.
 	probed := 0
-	fake.execFunc = func(pod string, cmd []string) (string, error) {
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
 		if len(cmd) > 1 && cmd[0] == "tmux" && cmd[1] == "has-session" {
 			probed++
 			if probed == 1 {
@@ -147,7 +147,7 @@ func TestStartRecreatesAPodWhoseAgentContainerIsNotRunning(t *testing.T) {
 	}}
 	// Every exec fails the way the apiserver fails for a dead container —
 	// deliberately not an ExitError, so only the pod status can decide.
-	fake.execFunc = func(pod string, cmd []string) (string, error) {
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
 		if len(cmd) > 1 && cmd[0] == "tmux" && cmd[1] == "has-session" {
 			return "", errors.New("error executing command in container: container is not running")
 		}
@@ -175,7 +175,7 @@ func TestStartRetriesAnUnansweredLivenessProbeBeforeGivingUp(t *testing.T) {
 	addAgedRunningPod(fake, "gc-test-agent", "gc-test-agent")
 
 	probes := 0
-	fake.execFunc = func(pod string, cmd []string) (string, error) {
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
 		if len(cmd) > 1 && cmd[0] == "tmux" && cmd[1] == "has-session" {
 			probes++
 			if probes == 1 {

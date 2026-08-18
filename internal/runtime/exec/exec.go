@@ -233,7 +233,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 //     phrasing this package has never seen would otherwise tear down a live
 //     agent's box on an ordinary retry (ga-vcjr9). A pack that cannot answer
 //     `is-running` reports neither occupancy nor vacancy and keeps the previous
-//     behaviour exactly — the gate only ever withholds a teardown, never adds
+//     behavior exactly — the gate only ever withholds a teardown, never adds
 //     one.
 //
 // Stop deliberately runs on its own background context (see run), so cleanup
