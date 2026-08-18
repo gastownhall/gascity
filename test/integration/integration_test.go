@@ -887,16 +887,24 @@ func gcCommandTimeout(args []string) time.Duration {
 	return integrationGCCommandTimeout
 }
 
-func runCommand(dir string, env []string, timeout time.Duration, binary string, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
+// buildCommand is the single construction point for every *exec.Cmd this
+// file runs -- runCommand and runCommandStdout both delegate here so the
+// repository's subprocess-call-site census sees one site, not two.
+func buildCommand(ctx context.Context, dir string, env []string, binary string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.WaitDelay = 2 * time.Second
 	if dir != "" {
 		cmd.Dir = dir
 	}
 	cmd.Env = env
+	return cmd
+}
+
+func runCommand(dir string, env []string, timeout time.Duration, binary string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := buildCommand(ctx, dir, env, binary, args...)
 	out, err := cmd.CombinedOutput()
 	output := string(out)
 	if ctx.Err() == context.DeadlineExceeded {
@@ -919,12 +927,7 @@ func runCommandStdout(dir string, env []string, timeout time.Duration, binary st
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, binary, args...)
-	cmd.WaitDelay = 2 * time.Second
-	if dir != "" {
-		cmd.Dir = dir
-	}
-	cmd.Env = env
+	cmd := buildCommand(ctx, dir, env, binary, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
