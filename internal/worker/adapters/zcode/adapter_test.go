@@ -294,6 +294,40 @@ func (s *session) signal(sig syscall.Signal) {
 	}
 }
 
+// adapterWaitBudget bounds every lifecycle wait in this suite. Generous on
+// purpose: it is a deadlock guard, not a timing assertion, and a loaded machine
+// must not turn a slow turn into a failure.
+const adapterWaitBudget = 20 * time.Second
+
+// waitForTurns blocks until the adapter has completed n turns, counted by its
+// ready markers (startup prints one, then one per finished turn). This is the
+// lifecycle signal that replaces sleeping for "long enough" — it is both faster
+// and immune to a loaded machine stretching a turn past a fixed delay.
+func (s *session) waitForTurns(n int) {
+	s.t.Helper()
+	deadline := time.Now().Add(adapterWaitBudget)
+	for strings.Count(s.output(), "zcode-repl ready") < n+1 {
+		if time.Now().After(deadline) {
+			s.t.Fatalf("only %d/%d turns completed within %s:\n%s",
+				strings.Count(s.output(), "zcode-repl ready")-1, n, adapterWaitBudget, s.output())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// waitForFailures blocks until the adapter has reported n failed turns, or the
+// shell has exited — the bail path exits without printing anything further.
+func (s *session) waitForFailures(n int) {
+	s.t.Helper()
+	deadline := time.Now().Add(adapterWaitBudget)
+	for strings.Count(s.output(), "zcode-repl error rc=") < n {
+		if !s.alive() || time.Now().After(deadline) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // waitForOutput blocks until needle appears in the adapter's stdout.
 func (s *session) waitForOutput(needle string, timeout time.Duration) {
 	s.t.Helper()
@@ -582,15 +616,15 @@ func TestFailedTurnKeepsLoopingAndPreservesSid(t *testing.T) {
 	h := newHarness(t, map[string]string{"STUB_SID": "sess_keep"})
 	s := h.start()
 	s.send("good one")
-	time.Sleep(2500 * time.Millisecond)
+	s.waitForTurns(1)
 
 	h.control(map[string]string{"STUB_RC": "7"})
 	s.send("this one fails")
-	time.Sleep(2500 * time.Millisecond)
+	s.waitForTurns(2)
 
 	h.control(map[string]string{"STUB_RC": "0"})
 	s.send("this one works again")
-	time.Sleep(2500 * time.Millisecond)
+	s.waitForTurns(3)
 	out, _ := s.closeAndWait()
 
 	if !strings.Contains(out, "zcode-repl error rc=7") {
@@ -681,7 +715,9 @@ func TestFiveConsecutiveFailuresBailWithoutMarker(t *testing.T) {
 			break
 		}
 		s.send(fmt.Sprintf("failing prompt %d", i))
-		time.Sleep(1600 * time.Millisecond)
+		// The fifth failure bails without a trailing marker, so count reported
+		// failures rather than completed turns and stop once the shell is gone.
+		s.waitForFailures(i + 1)
 	}
 	out, code := s.wait()
 
@@ -709,7 +745,7 @@ func TestInterruptMidTurnContinuesTheLoop(t *testing.T) {
 	}
 	h.control(map[string]string{"STUB_SLEEP": "0"})
 	s.send("after the interrupt")
-	time.Sleep(3 * time.Second)
+	s.waitForTurns(2)
 	out, _ := s.closeAndWait()
 
 	if !strings.Contains(out, "zcode-repl error rc=") {
@@ -782,7 +818,7 @@ func TestInterruptWhileIdleDoesNotExit(t *testing.T) {
 		t.Fatalf("adapter exited on an idle SIGINT:\n%s", s.output())
 	}
 	s.send("still working")
-	time.Sleep(3 * time.Second)
+	s.waitForTurns(1)
 	if _, code := s.closeAndWait(); code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
@@ -797,7 +833,7 @@ func TestTerminateExitsCleanly(t *testing.T) {
 
 	h := newHarness(t, nil)
 	s := h.start()
-	time.Sleep(2 * time.Second)
+	s.waitForOutput("zcode-repl ready", 20*time.Second)
 	s.signal(syscall.SIGTERM)
 	if _, code := s.wait(); code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
@@ -1148,10 +1184,10 @@ func TestFailedTurnClosesTheMirrorEntry(t *testing.T) {
 	// the plain failure path rather than the stale-sid recovery path.
 	s := h.start()
 	s.send("establish the session")
-	time.Sleep(2500 * time.Millisecond)
+	s.waitForTurns(1)
 	h.control(map[string]string{"STUB_RC": "1"})
 	s.send("a turn that fails")
-	time.Sleep(2500 * time.Millisecond)
+	s.waitForTurns(2)
 	if _, code := s.closeAndWait(); code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
