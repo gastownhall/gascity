@@ -164,6 +164,7 @@ go_test(
         "tmpdir_default_test.go",
         "worker_inference_make_test.go",
         "workflow_go_twins_test.go",
+        "workflow_permissions_test.go",
         "workflow_pr_branch_filter_test.go",
     ],
     data = glob(
