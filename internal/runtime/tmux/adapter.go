@@ -1485,6 +1485,7 @@ const startupNudgeRetryBudgetFraction = 0.5
 // time.Sleep call sites, and a fake clock also makes the bound deterministic
 // rather than scheduler-dependent.
 var startupNudgeNow = time.Now
+
 func sendStartupNudgeWithRetry(ctx context.Context, send func() error, sleep func(time.Duration)) error {
 	start := startupNudgeNow()
 	budget := time.Duration(-1)
