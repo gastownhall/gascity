@@ -1024,6 +1024,55 @@ case "$query" in
     print_cell beads
     exit 0
     ;;
+  *"DOLT_DIFF("*"'__gc_read_only_probe')"*)
+    # Must stay ordered before the generic "SELECT COUNT(*) FROM"*"beads"*
+    # arm below: this query's text also contains "SELECT COUNT(*) FROM" and,
+    # once the table argument is 'beads' (see next arm), also "beads" — case
+    # is first-match-wins, so the DOLT_DIFF arms have to come first or the
+    # generic row-count arm silently swallows them.
+    # Content diff of the table the flatten first-committed. A table absent
+    # from the pre-flatten committed root reports every row as added.
+    case "$mode" in
+      first_commit_probe_table_db_hash_drift|absorbed_ws_plus_first_commit_drift)
+        print_cell 0
+        ;;
+      first_commit_table_nonadditive_diff)
+        print_cell 1
+        ;;
+      first_commit_table_diff_probe_failure)
+        printf 'probe table diff unavailable\n' >&2
+        exit 55
+        ;;
+      *)
+        printf 'unexpected DOLT_DIFF query: %%s\n' "$query" >&2
+        exit 64
+        ;;
+    esac
+    exit 0
+    ;;
+  *"DOLT_DIFF("*"'beads')"*)
+    # Same ordering requirement as the probe-table arm above: this query's
+    # text also matches "SELECT COUNT(*) FROM"*"beads"*, so it must be
+    # dispatched before that generic arm.
+    # Content diff of table "beads" between the pre-flight snapshot HEAD and
+    # the flatten's own commit, used to prove same-count value-hash drift is
+    # a concurrent writer's UPDATE rather than corruption (gastownhall/gascity
+    # same-count-hash-drift defer). A zero count means the flatten commit
+    # itself never touched the table's rows.
+    case "$mode" in
+      writer_race_same_count_hash_drift_only)
+        print_cell 0
+        ;;
+      writer_race_same_count_hash_drift_diff_fails)
+        print_cell 1
+        ;;
+      *)
+        printf 'unexpected DOLT_DIFF query: %%s\n' "$query" >&2
+        exit 64
+        ;;
+    esac
+    exit 0
+    ;;
   *"SELECT COUNT(*) FROM"*"blocked_issues"*)
     if [ "$db" = "blocked_issues" ]; then
       printf 'database not found: blocked_issues\n' >&2
@@ -1068,47 +1117,6 @@ case "$query" in
     else
       print_cell 10
     fi
-    exit 0
-    ;;
-  *"DOLT_DIFF("*"'__gc_read_only_probe')"*)
-    # Content diff of the table the flatten first-committed. A table absent
-    # from the pre-flatten committed root reports every row as added.
-    case "$mode" in
-      first_commit_probe_table_db_hash_drift|absorbed_ws_plus_first_commit_drift)
-        print_cell 0
-        ;;
-      first_commit_table_nonadditive_diff)
-        print_cell 1
-        ;;
-      first_commit_table_diff_probe_failure)
-        printf 'probe table diff unavailable\n' >&2
-        exit 55
-        ;;
-      *)
-        printf 'unexpected DOLT_DIFF query: %%s\n' "$query" >&2
-        exit 64
-        ;;
-    esac
-    exit 0
-    ;;
-  *"DOLT_DIFF("*"'beads')"*)
-    # Content diff of table "beads" between the pre-flight snapshot HEAD and
-    # the flatten's own commit, used to prove same-count value-hash drift is
-    # a concurrent writer's UPDATE rather than corruption (gastownhall/gascity
-    # same-count-hash-drift defer). A zero count means the flatten commit
-    # itself never touched the table's rows.
-    case "$mode" in
-      writer_race_same_count_hash_drift_only)
-        print_cell 0
-        ;;
-      writer_race_same_count_hash_drift_diff_fails)
-        print_cell 1
-        ;;
-      *)
-        printf 'unexpected DOLT_DIFF query: %%s\n' "$query" >&2
-        exit 64
-        ;;
-    esac
     exit 0
     ;;
   *"DOLT_DIFF_STAT"*)
