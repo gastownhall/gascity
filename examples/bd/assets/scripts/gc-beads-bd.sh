@@ -1299,10 +1299,14 @@ write_config_yaml() {
             max_connections=256
             ;;
     esac
-    read_timeout_millis=${GC_DOLT_READ_TIMEOUT_MILLIS:-15000}
+    # Must track config.DefaultDoltReadTimeoutMillis (internal/config/config.go).
+    # Raised from 15000 to 120000 after #5383 (the Reaper's own maintenance
+    # query was killed mid-production by the old 15s bound) -- see that
+    # constant's comment for the full rationale.
+    read_timeout_millis=${GC_DOLT_READ_TIMEOUT_MILLIS:-120000}
     case "$read_timeout_millis" in
         ''|*[!0-9]*|0)
-            read_timeout_millis=15000
+            read_timeout_millis=120000
             ;;
     esac
     write_timeout_millis=${GC_DOLT_WRITE_TIMEOUT_MILLIS:-300000}
