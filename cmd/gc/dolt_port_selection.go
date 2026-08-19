@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
-	"time"
 )
 
 func chooseManagedDoltPort(cityPath, stateFile string) (string, error) {
@@ -111,9 +110,6 @@ func repairedManagedDoltRuntimeState(_ string, layout managedDoltRuntimeLayout, 
 	repaired.Running = true
 	repaired.PID = holderPID
 	repaired.DataDir = layout.DataDir
-	if strings.TrimSpace(repaired.StartedAt) == "" {
-		repaired.StartedAt = time.Now().UTC().Format(time.RFC3339)
-	}
 	return repaired, true
 }
 

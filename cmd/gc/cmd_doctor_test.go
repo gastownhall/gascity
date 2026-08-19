@@ -414,6 +414,112 @@ prefix = "ma"
 	}
 }
 
+func TestBuildDoctorChecksRegistersRigStoreBindingCheck(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "managed")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "managed"
+path = "managed"
+prefix = "ma"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := contract.EnsureCanonicalMetadata(fsys.OSFS{}, filepath.Join(rigDir, ".beads", "metadata.json"), contract.MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "server",
+		DoltDatabase: "managed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	oldBindingCheck := newDoctorRigStoreBindingCheck
+	var bindingSkip *bool
+	newDoctorRigStoreBindingCheck = func(cityPath string, rig config.Rig, skip bool) *doctor.RigStoreBindingCheck {
+		bindingSkip = &skip
+		return doctor.NewRigStoreBindingCheck(cityPath, rig, skip)
+	}
+	t.Cleanup(func() {
+		newDoctorRigStoreBindingCheck = oldBindingCheck
+	})
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo"},
+		Rigs:      []config.Rig{{Name: "managed", Path: "managed", Prefix: "ma"}},
+	}
+	checks := buildDoctorChecks(cityDir, cfg, nil, buildDoctorChecksOpts{
+		ControllerRunning:    true,
+		SkipCityDoltCheck:    true,
+		SkipManagedDoltCheck: true,
+	})
+
+	if bindingSkip == nil {
+		t.Fatal("rig store-binding check was not registered")
+	} else if *bindingSkip {
+		t.Error("rig store-binding check skip = true, want false for a managed dolt rig")
+	}
+	names := doctorCheckNames(checks)
+	if doctorCheckIndex(names, "rig:managed:store-binding") < 0 {
+		t.Errorf("check %q not registered; names=%v", "rig:managed:store-binding", names)
+	}
+}
+
+func TestBuildDoctorChecksSkipsRigStoreBindingCheckWithSkipRigDoltChecks(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "managed")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := contract.EnsureCanonicalMetadata(fsys.OSFS{}, filepath.Join(rigDir, ".beads", "metadata.json"), contract.MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "server",
+		DoltDatabase: "managed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	oldBindingCheck := newDoctorRigStoreBindingCheck
+	var bindingSkip *bool
+	newDoctorRigStoreBindingCheck = func(cityPath string, rig config.Rig, skip bool) *doctor.RigStoreBindingCheck {
+		bindingSkip = &skip
+		return doctor.NewRigStoreBindingCheck(cityPath, rig, skip)
+	}
+	t.Cleanup(func() {
+		newDoctorRigStoreBindingCheck = oldBindingCheck
+	})
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo"},
+		Rigs:      []config.Rig{{Name: "managed", Path: "managed", Prefix: "ma"}},
+	}
+	buildDoctorChecks(cityDir, cfg, nil, buildDoctorChecksOpts{
+		ControllerRunning:    true,
+		SkipCityDoltCheck:    true,
+		SkipManagedDoltCheck: true,
+		SkipRigDoltChecks:    true,
+	})
+
+	if bindingSkip == nil {
+		t.Fatal("rig store-binding check was not registered")
+	} else if !*bindingSkip {
+		t.Error("rig store-binding check skip = false, want true when SkipRigDoltChecks=true")
+	}
+}
+
 func TestDoDoctorRunsDoltTopologyForBdRigUnderFileBackedCity(t *testing.T) {
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "frontend")

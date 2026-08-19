@@ -23,10 +23,11 @@ import (
 )
 
 var (
-	newDoctorDoltServerCheck    = doctor.NewDoltServerCheck
-	newDoctorRigDoltServerCheck = doctor.NewRigDoltServerCheck
-	newDoctorDoltBackupCheck    = doctor.NewDoltBackupCheck
-	newDoctorDoltLocalOnlyCheck = doctor.NewDoltLocalOnlyRemoteCheck
+	newDoctorDoltServerCheck      = doctor.NewDoltServerCheck
+	newDoctorRigDoltServerCheck   = doctor.NewRigDoltServerCheck
+	newDoctorRigStoreBindingCheck = doctor.NewRigStoreBindingCheck
+	newDoctorDoltBackupCheck      = doctor.NewDoltBackupCheck
+	newDoctorDoltLocalOnlyCheck   = doctor.NewDoltLocalOnlyRemoteCheck
 )
 
 func newDoctorCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -351,6 +352,14 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			register(doctor.NewRigBDSplitStoreCheck(cityPath, rig))
 			register(doctor.NewRigBeadsCheck(cityPath, rig, storeFactory))
 			register(newDoctorRigDoltServerCheck(cityPath, rig, !rigUsesManagedBdStoreContract(cityPath, rig) || opts.SkipRigDoltChecks))
+			// Store-binding check: unlike the dolt-server check above, this
+			// never skips based on endpoint origin (explicit vs inherited).
+			// It always queries the rig's configured database directly, which
+			// is what catches a database missing from an otherwise-reachable
+			// shared endpoint (the 2026-08-10 incident's undetected failure
+			// mode). Same managed-bd-store-contract/SkipRigDoltChecks gate as
+			// the dolt-server check, since it needs the same connection setup.
+			register(newDoctorRigStoreBindingCheck(cityPath, rig, !rigUsesManagedBdStoreContract(cityPath, rig) || opts.SkipRigDoltChecks))
 			// Custom types check — rig store.
 			register(doctor.NewCustomTypesCheck(rig.Path, rig.Name))
 			register(newHoldLabelConventionsCheck(rig.Path, rig.Name, storeFactory))

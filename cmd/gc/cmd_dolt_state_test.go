@@ -224,9 +224,6 @@ func TestRepairedManagedDoltRuntimeStateAcceptsSymlinkEquivalentDataDir(t *testi
 			if repaired.DataDir != layout.DataDir {
 				t.Fatalf("repaired state DataDir = %q, want %q", repaired.DataDir, layout.DataDir)
 			}
-			if strings.TrimSpace(repaired.StartedAt) == "" {
-				t.Fatal("repaired state StartedAt is empty")
-			}
 		})
 	}
 }
