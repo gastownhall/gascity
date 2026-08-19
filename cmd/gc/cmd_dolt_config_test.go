@@ -106,13 +106,16 @@ func TestWriteManagedDoltConfigFile_UsesCityDoltListenerOverrides(t *testing.T) 
 	}
 }
 
-// TestWriteManagedDoltConfigFile_ReadTimeoutCommentAttributesIdleReapToWaitTimeout
+// TestWriteManagedDoltConfigFile_ReadTimeoutCommentAttributesIdleReapToReadTimeout
 // is the ga-lfcx72 golden-file guard: the emitted listener comment must
-// attribute idle/abandoned socket reaping to wait_timeout, not read_timeout
-// (#5053 moved that responsibility), so the constant and its explanatory
-// comment cannot silently drift apart again the way they did before this
-// fix (#5383).
-func TestWriteManagedDoltConfigFile_ReadTimeoutCommentAttributesIdleReapToWaitTimeout(t *testing.T) {
+// correctly attribute idle/abandoned-connection reaping to read_timeout, not
+// wait_timeout -- wait_timeout is accepted, stored, and reported by the
+// server but reaps nothing on dolt 2.2.3 (measured for #5383). An earlier
+// revision of this fix had the attribution backwards (wait_timeout does the
+// reaping); this guards against that regressing, and against silently
+// drifting apart from the constant again the way comment and behavior did
+// before this fix.
+func TestWriteManagedDoltConfigFile_ReadTimeoutCommentAttributesIdleReapToReadTimeout(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "packs", "dolt", "dolt-config.yaml")
 	if err := writeManagedDoltConfigFile(configPath, "127.0.0.1", "3311", "/tmp/dolt-data", "warning", config.DoltConfig{}); err != nil {
 		t.Fatalf("writeManagedDoltConfigFile: %v", err)
@@ -126,11 +129,14 @@ func TestWriteManagedDoltConfigFile_ReadTimeoutCommentAttributesIdleReapToWaitTi
 	if !strings.Contains(text, "read_timeout_millis: 120000") {
 		t.Fatalf("config default read_timeout_millis not raised to 120000:\n%s", text)
 	}
-	if !strings.Contains(text, "reaped by wait_timeout") {
-		t.Fatalf("listener comment no longer attributes idle/abandoned socket reaping to wait_timeout:\n%s", text)
+	if !strings.Contains(text, "ONLY idle-connection reaper") {
+		t.Fatalf("listener comment no longer attributes idle-connection reaping to read_timeout:\n%s", text)
 	}
 	if strings.Contains(text, "The managed default reaps idle sockets promptly") {
-		t.Fatalf("listener comment still contains the stale claim that read_timeout reaps idle sockets:\n%s", text)
+		t.Fatalf("listener comment still contains the stale pre-#5383 claim that read_timeout alone reaps sockets promptly at the old 15s bound:\n%s", text)
+	}
+	if strings.Contains(text, "reaped by wait_timeout") {
+		t.Fatalf("listener comment still contains the corrected-then-reintroduced false claim that wait_timeout reaps idle connections:\n%s", text)
 	}
 }
 
