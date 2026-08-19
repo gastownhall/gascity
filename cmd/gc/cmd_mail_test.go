@@ -3309,6 +3309,57 @@ func TestMailSendSubjectAndMessage(t *testing.T) {
 	}
 }
 
+// TestMailSendSubjectOnlyKeepsBody covers `gc mail send <to> -s "text"` with no
+// -m and no positional body. The flag path hands doMailSend [to, subject, ""],
+// and the empty body used to be stored verbatim: the message arrived as a
+// subject line with its content silently gone. The subject IS the message here,
+// exactly as in the positional form.
+func TestMailSendSubjectOnlyKeepsBody(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	recipients := map[string]bool{"human": true, "mayor": true}
+
+	var stdout bytes.Buffer
+	code := doMailSend(mp, events.Discard, recipients, "human", []string{"mayor", "Build is green", ""}, nil, &stdout, &bytes.Buffer{})
+	if code != 0 {
+		t.Fatalf("doMailSend = %d, want 0", code)
+	}
+
+	b, err := store.Get("gc-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Title != "Build is green" {
+		t.Errorf("bead Title = %q, want %q", b.Title, "Build is green")
+	}
+	if b.Description != "Build is green" {
+		t.Errorf("bead Description = %q, want %q (subject-only mail must not arrive empty)", b.Description, "Build is green")
+	}
+}
+
+// TestMailSendAllSubjectOnlyKeepsBody covers the same defect on the broadcast
+// path: `gc mail send --all -s "text"` reaches doMailSendAllJSON as
+// [subject, ""].
+func TestMailSendAllSubjectOnlyKeepsBody(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	recipients := map[string]bool{"mayor": true}
+
+	var stdout bytes.Buffer
+	code := doMailSendAllJSON(mp, events.Discard, recipients, "human", []string{"Fleet is green", ""}, nil, false, &stdout, &bytes.Buffer{})
+	if code != 0 {
+		t.Fatalf("doMailSendAllJSON = %d, want 0", code)
+	}
+
+	b, err := store.Get("gc-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Description != "Fleet is green" {
+		t.Errorf("bead Description = %q, want %q (subject-only broadcast must not arrive empty)", b.Description, "Fleet is green")
+	}
+}
+
 // --- gc mail send --from ---
 
 func TestMailSendFromFlag(t *testing.T) {
@@ -4948,7 +4999,11 @@ func TestCmdMailSendFlagBodyWinsOverPositional(t *testing.T) {
 }
 
 func TestCmdMailSendNoBodyStillWorks(t *testing.T) {
-	// No positional body and no -m flag: empty body is valid.
+	// No positional body and no -m flag: the send still succeeds, and the
+	// subject is carried into the body rather than stored empty. Completes the
+	// #3331 family (positional body dropped when -s set): the remaining arm was
+	// "no body from any source", which used to persist an empty description and
+	// deliver a subject line with nothing behind it (ga-6eukj0).
 	cityPath := mailSendTestCity(t, "mayor")
 
 	var stdout, stderr bytes.Buffer
@@ -4961,8 +5016,8 @@ func TestCmdMailSendNoBodyStillWorks(t *testing.T) {
 	if msg.Title != "subject" {
 		t.Errorf("Title = %q, want %q", msg.Title, "subject")
 	}
-	if msg.Description != "" {
-		t.Errorf("Description = %q, want empty", msg.Description)
+	if msg.Description != "subject" {
+		t.Errorf("Description = %q, want %q (subject-only mail must not arrive empty)", msg.Description, "subject")
 	}
 }
 

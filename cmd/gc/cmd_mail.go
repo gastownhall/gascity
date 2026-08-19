@@ -1865,6 +1865,15 @@ func doMailSendJSON(mp mail.Provider, rec events.Recorder, validRecipients map[s
 		// [to, body] — positional arg, no subject.
 		body = strings.Join(args[1:], " ")
 	}
+	// `-s "text"` with neither -m nor a positional body: the subject IS the
+	// message. Storing the empty body verbatim delivers a subject line with its
+	// content missing — and a bodyless mail does not read as broken, so the
+	// recipient acts on the subject and never learns anything was lost
+	// (ga-6eukj0). The positional form already behaves this way: beadmail.Send
+	// backfills an empty title from the body, and this is the mirror of it.
+	if body == "" {
+		body = subject
+	}
 
 	if validRecipients != nil && !validRecipients[to] {
 		fmt.Fprintf(stderr, "gc mail send: unknown recipient %q\n", to) //nolint:errcheck // best-effort stderr
@@ -1922,6 +1931,11 @@ func doMailSendAllJSON(mp mail.Provider, rec events.Recorder, validRecipients ma
 		body = args[1]
 	} else {
 		body = args[0]
+	}
+	// Same subject-only backfill as doMailSendJSON: `--all -s "text"` arrives
+	// here as [subject, ""] and must not broadcast an empty body (ga-6eukj0).
+	if body == "" {
+		body = subject
 	}
 
 	// Collect recipients in sorted order for deterministic output.
