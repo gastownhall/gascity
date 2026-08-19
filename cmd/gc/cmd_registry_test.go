@@ -1749,44 +1749,27 @@ func TestDoRegistryPublishBareNameFailsBeforeNetwork(t *testing.T) {
 	}
 }
 
-func TestDoRegistryPublishAllowUnscopedNameWarnsAndSubmits(t *testing.T) {
+// The grandfathered lane: --allow-unscoped-name suppresses the refusal, the bare name survives
+// into the request unrewritten, and the warning still fires. Asserted through --dry-run rather
+// than a loopback server, because the warning is deliberately emitted BEFORE the dry-run early
+// return and the request is fully built by then, so a server would only re-cover the submit path
+// TestSubmitRegistryPublishRequestSendsAuthenticatedPayload already owns — at the cost of one more
+// untagged HTTP test server, which internal/testpolicy/resourcecensus caps.
+func TestDoRegistryPublishAllowUnscopedNameWarnsAndKeepsBareName(t *testing.T) {
 	_, packDir := setupRegistryPublishRepoManifest(t, registryPublishManifestNamed("cacc-twin-team"))
 	clearRegistryEnv(t)
-	oldClient := registryPublishHTTPClient
-	defer func() { registryPublishHTTPClient = oldClient }()
-
-	var got registryPublishRequest
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
-			t.Fatalf("Decode request: %v", err)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{
-			"publishRequest": {
-				"id": "prq_grandfathered",
-				"status": "pending_review",
-				"requestedName": "cacc-twin-team",
-				"requestedVersion": "0.2.0"
-			}
-		}`))
-	}))
-	defer server.Close()
-	registryPublishHTTPClient = server.Client()
-	if err := writeRegistryConfiguredToken(server.URL, "gcr_stored_token"); err != nil {
-		t.Fatalf("writeRegistryConfiguredToken: %v", err)
-	}
 
 	var stdout, stderr bytes.Buffer
 	code := doRegistryPublish(t.Context(), packDir, registryPublishOptions{
-		RegistryURL:       server.URL,
+		RegistryURL:       "https://registry.example.com",
 		AllowUnscopedName: true,
-		Validate:          true,
+		DryRun:            true,
 	}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doRegistryPublish = %d, stderr=%q", code, stderr.String())
 	}
-	if got.RequestedName != "cacc-twin-team" {
-		t.Fatalf("submitted requestedName = %q, want the bare name", got.RequestedName)
+	if want := "Pack: cacc-twin-team 0.2.0"; !strings.Contains(stdout.String(), want) {
+		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
 	}
 	want := `gc pack registry publish: warning: submitting unscoped name "cacc-twin-team"; ` +
 		"the registry accepts it only when it already holds a claim for that name"
