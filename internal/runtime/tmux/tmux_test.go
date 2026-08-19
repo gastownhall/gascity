@@ -2297,12 +2297,46 @@ func TestNudgeSession_WithRetry(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// NudgeSession should succeed on a ready session. A plain shell pane has
-	// no busy-state indicator, so the fallback path reports
-	// ErrNudgeSubmitUnconfirmed even on a successful send (see
-	// tmux.go:NudgeSession) — any other error is still a real failure.
+	// no busy-state indicator, so this exercises the fallback path, which
+	// reports nil on a successful send regardless (see tmux.go:NudgeSession).
 	err := tm.NudgeSession(sessionName, "test message")
-	if err != nil && !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
-		t.Errorf("NudgeSession() = %v, want nil or ErrNudgeSubmitUnconfirmed", err)
+	if err != nil {
+		t.Errorf("NudgeSession() = %v, want nil", err)
+	}
+}
+
+func TestNudgeSessionFallbackRecordsUnconfirmedDiagnostic(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	runtimeDir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.RuntimeDir = runtimeDir
+	tm := NewTmuxWithConfig(cfg)
+	sessionName := "gt-test-nudge-unconfirmed-diag-" + fmt.Sprintf("%d", time.Now().UnixNano()%10000)
+
+	if err := tm.NewSession(sessionName, os.TempDir()); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer func() { _ = tm.KillSession(sessionName) }()
+	time.Sleep(200 * time.Millisecond)
+
+	// A plain shell pane (no GC_PROVIDER) takes the fallback path, which can
+	// never confirm delivery. The send must still report success...
+	if err := tm.NudgeSession(sessionName, "test message"); err != nil {
+		t.Fatalf("NudgeSession() = %v, want nil", err)
+	}
+
+	// ...while recording a best-effort diagnostic so the gap stays
+	// observable (bead dr-6siig DoD option (b)).
+	path := filepath.Join(runtimeDir, "sessions", sessionName, "nudge-unconfirmed.log")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("expected diagnostic file at %s: %v", path, err)
+	}
+	if !strings.Contains(string(data), "test message") {
+		t.Errorf("diagnostic file = %q, want it to contain the nudge text", string(data))
 	}
 }
 
@@ -2478,7 +2512,7 @@ func TestNudgeSessionSkipsEscapeForOpenCode(t *testing.T) {
 	defer func() { _ = tm.KillSession(sessionName) }()
 	time.Sleep(300 * time.Millisecond)
 
-	if err := tm.NudgeSession(sessionName, "hello"); err != nil && !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+	if err := tm.NudgeSession(sessionName, "hello"); err != nil {
 		t.Fatalf("NudgeSession: %v", err)
 	}
 	time.Sleep(300 * time.Millisecond)
@@ -2514,7 +2548,7 @@ func TestNudgeSessionSkipsEscapeForGeminiWithoutProviderEnv(t *testing.T) {
 	defer func() { _ = tm.KillSession(sessionName) }()
 	time.Sleep(300 * time.Millisecond)
 
-	if err := tm.NudgeSession(sessionName, "hello"); err != nil && !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+	if err := tm.NudgeSession(sessionName, "hello"); err != nil {
 		t.Fatalf("NudgeSession: %v", err)
 	}
 	time.Sleep(300 * time.Millisecond)
@@ -2543,7 +2577,7 @@ func TestNudgeSessionSendsEscapeForUnknownProvider(t *testing.T) {
 	defer func() { _ = tm.KillSession(sessionName) }()
 	time.Sleep(300 * time.Millisecond)
 
-	if err := tm.NudgeSession(sessionName, "hello"); err != nil && !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+	if err := tm.NudgeSession(sessionName, "hello"); err != nil {
 		t.Fatalf("NudgeSession: %v", err)
 	}
 	time.Sleep(300 * time.Millisecond)

@@ -2373,14 +2373,18 @@ func (t *Tmux) NudgeSession(session, message string) error {
 		}
 		return nil
 	}
-	// Fallback: best-effort delivery for providers with no reliable busy
-	// indicator (unchanged historical send behavior). Unlike the verified
-	// path above, this family can never confirm the submit landed — so a
-	// successful send is reported the same way as an unconfirmed one on the
-	// verified path, not as a clean nil: collapsing it to nil would ack a
-	// nudge that may still be drafted-but-unsubmitted, permanently losing it
-	// on the first send instead of leaving it to requeue and retry like every
-	// other delivery outcome (see ErrNudgeSubmitUnconfirmed above).
+	// Fallback: best-effort single delivery (unchanged historical behavior).
+	// This family has no busy-state indicator AT ALL — confirmation is
+	// structurally impossible, not merely unobserved. Reporting every
+	// successful send as ErrNudgeSubmitUnconfirmed (the verified path's
+	// signal for "the submit MAY have failed, please retry") was tried and
+	// reverted here: this branch's callers (the queue drain in
+	// cmd/gc/cmd_nudge.go, mail-notify dedup) treat that error as a genuine
+	// delivery failure and re-enqueue/resend, so a family that can never
+	// confirm would have every successful nudge duplicated and eventually
+	// dead-lettered. Instead, keep reporting success on send and record a
+	// best-effort diagnostic (see recordUnconfirmedSubmit) so the gap is
+	// observable without corrupting the retry contract.
 	var lastErr error
 	for attempt := 0; attempt < submitEnterMaxSends; attempt++ {
 		if attempt > 0 {
@@ -2393,9 +2397,39 @@ func (t *Tmux) NudgeSession(session, message string) error {
 		// 7. Wake again so the submitted turn is processed promptly.
 		wake()
 		delivered = true
-		return fmt.Errorf("%w: session %q (no busy-state confirmation available)", ErrNudgeSubmitUnconfirmed, session)
+		t.recordUnconfirmedSubmit(session, message)
+		return nil
 	}
 	return fmt.Errorf("failed to send submit sequence after %d attempts: %w", submitEnterMaxSends, lastErr)
+}
+
+// recordUnconfirmedSubmit persists a best-effort diagnostic artifact when a
+// nudge submit was sent on a provider family with no busy-state indicator,
+// so delivery could not be confirmed (see the fallback branch of
+// NudgeSession above). This is deliberately separate from the retry/error
+// contract: the send is still reported as successful to the caller, since
+// treating it as a retryable failure would duplicate every delivery for
+// these provider families (see the comment above the call site). Disabled
+// (no-op) when RuntimeDir is unset; any I/O error is swallowed, matching
+// the tmuxStartOps.recordStartCrash / recordUnconfirmedNudge precedent.
+func (t *Tmux) recordUnconfirmedSubmit(session, message string) {
+	if t.cfg.RuntimeDir == "" {
+		return
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "session: %s\n", session)
+	b.WriteString("cause: submit delivered but not confirmed (no busy-state indicator for this provider family)\n")
+	b.WriteString("--- nudge text ---\n")
+	b.WriteString(message)
+	if message != "" && !strings.HasSuffix(message, "\n") {
+		b.WriteByte('\n')
+	}
+	dir := filepath.Join(t.cfg.RuntimeDir, "sessions", session)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return
+	}
+	path := filepath.Join(dir, "nudge-unconfirmed.log")
+	_ = os.WriteFile(path, []byte(b.String()), 0o644)
 }
 
 // NudgePane sends a message to a specific pane reliably.

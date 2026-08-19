@@ -3,7 +3,6 @@
 package tmux
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -82,7 +81,7 @@ func TestNudgeSessionUsesDeclaredSequenceForProviderFamily(t *testing.T) {
 	defer func() { _ = tm.KillSession(sessionName) }()
 	time.Sleep(300 * time.Millisecond)
 
-	if err := tm.NudgeSession(sessionName, "hello"); err != nil && !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+	if err := tm.NudgeSession(sessionName, "hello"); err != nil {
 		t.Fatalf("NudgeSession: %v", err)
 	}
 	time.Sleep(300 * time.Millisecond)
