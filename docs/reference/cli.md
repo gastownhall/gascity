@@ -3005,6 +3005,12 @@ The command requires a clean Git checkout whose current HEAD matches its
 configured upstream branch, then submits the GitHub repository, commit, pack
 path, pack name, and version to the registry API.
 
+Registry pack names are scoped as &lt;github-owner&gt;/&lt;pack&gt;, where &lt;github-owner&gt;
+is the lowercased GitHub owner of the source repository. [pack].name must
+already carry that scoped name: the registry compares it byte-for-byte with the
+requested name, and reserves unscoped names for packs it already holds a claim
+for. --allow-unscoped-name submits such a legacy unscoped name anyway.
+
 --dev-auth (localhost only) replaces all other credentials. Otherwise,
 authentication precedence is --token, GC_REGISTRY_TOKEN, a complete session
 cookie and CSRF-token pair from flags or the environment, a stored native
@@ -3018,12 +3024,13 @@ gc pack registry publish <path-to-pack-root> [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--allow-unscoped-name` | bool |  | submit an unscoped (bare) pack name; the registry accepts these only for names it already holds a claim for |
 | `--csrf-token` | string |  | registry CSRF token; defaults to GC_REGISTRY_CSRF_TOKEN |
 | `--description` | string |  | release description; defaults to [pack].description |
 | `--dev-auth` | bool |  | create a local dev-auth session before submitting; localhost only |
 | `--dev-auth-handle` | string | `local-cli` | dev-auth handle when --dev-auth is used |
 | `--dry-run` | bool |  | print the publish request without submitting |
-| `--name` | string |  | registry pack name; defaults to [pack].name |
+| `--name` | string |  | registry pack name; must equal [pack].name (the registry rejects a mismatch) |
 | `--ref` | string |  | release ref label; defaults to the upstream branch name |
 | `--registry-url` | string |  | registry app base URL; defaults to GC_REGISTRY_URL, the stored login default, then https://registry.gascity.com |
 | `--session-cookie` | string |  | registry_session cookie value or Cookie header; defaults to GC_REGISTRY_SESSION |
