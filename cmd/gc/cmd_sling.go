@@ -498,15 +498,16 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 		eventRecorder = openCityRecorderAt(cityPath, stderr)
 	}
 	deps := slingDeps{
-		CityName:   cityName,
-		CityPath:   cityPath,
-		Cfg:        cfg,
-		SP:         sp,
-		Runner:     runner,
-		Store:      store,
-		GraphStore: resolveGraphStore(cliStorageRoutes(cityPath), store, cfg, cityPath, eventRecorder),
-		Events:     eventRecorder,
-		StoreRef:   storeRef,
+		CityName:           cityName,
+		CityPath:           cityPath,
+		Cfg:                cfg,
+		SP:                 sp,
+		Runner:             runner,
+		Store:              store,
+		GraphStore:         resolveGraphStore(cliStorageRoutes(cityPath), store, cfg, cityPath, eventRecorder),
+		Events:             eventRecorder,
+		ExecutionWorkStore: executionEmitStore(store, cityPath),
+		StoreRef:           storeRef,
 		SourceWorkflowStores: func() ([]sling.SourceWorkflowStore, error) {
 			stores, skips, err := openSourceWorkflowStoresWithProvider(cfg, cityPath, "", func(scopeRoot string) string {
 				return authoritativeBeadsProviderForScope(scopeRoot, cityPath)

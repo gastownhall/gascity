@@ -2067,8 +2067,10 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		// Two classes, two stores: the graph store owns the root and its steps,
 		// the work store owns the tracks edges of any input convoy the root
 		// names. Wrapping one store as both legs reads the convoy out of the
-		// ledger it does not live in.
-		if err := executionevent.EmitCurrent(m.rec, beads.GraphStore{Store: graphStore}, beads.WorkStore{Store: store}, rootID, "order-dispatch"); err != nil {
+		// ledger it does not live in. The tracked launch beads themselves may
+		// be resident in a per-rig store, so the work leg routes launch reads
+		// to the owning convoy store.
+		if err := executionevent.EmitCurrent(m.rec, beads.GraphStore{Store: graphStore}, beads.WorkStore{Store: executionEmitStore(store, cityPath)}, rootID, "order-dispatch"); err != nil {
 			logDispatchError(m.stderr, "gc: order %s: projecting execution facts for %s: %v", scoped, rootID, err)
 		}
 	}
