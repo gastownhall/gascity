@@ -2614,6 +2614,9 @@ func TestBdStoreStatusMapping(t *testing.T) {
 			if b.Status != tt.wantStatus {
 				t.Errorf("status %q → %q, want %q", tt.bdStatus, b.Status, tt.wantStatus)
 			}
+			if b.StatusDetail != tt.bdStatus {
+				t.Errorf("status detail = %q, want exact backend status %q", b.StatusDetail, tt.bdStatus)
+			}
 		})
 	}
 }

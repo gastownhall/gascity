@@ -40,6 +40,9 @@ func beadFromGen(g genclient.Bead) beads.Bead {
 		Type:      g.IssueType,
 		CreatedAt: g.CreatedAt,
 	}
+	if g.StatusDetail != nil {
+		out.StatusDetail = *g.StatusDetail
+	}
 	if g.UpdatedAt != nil {
 		out.UpdatedAt = *g.UpdatedAt
 	}

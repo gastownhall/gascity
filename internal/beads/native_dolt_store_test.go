@@ -256,6 +256,9 @@ func TestNativeDoltStoreMapsUpstreamStatusesToGasCityContract(t *testing.T) {
 			if bead.Status != tt.want {
 				t.Fatalf("Status = %q, want %q", bead.Status, tt.want)
 			}
+			if bead.StatusDetail != string(tt.upstream) {
+				t.Fatalf("StatusDetail = %q, want exact upstream status %q", bead.StatusDetail, tt.upstream)
+			}
 		})
 	}
 }

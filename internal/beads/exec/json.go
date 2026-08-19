@@ -52,24 +52,25 @@ type updateRequest struct {
 // return non-string types (numbers, booleans). The controller's domain model
 // is map[string]string, so toBead coerces all values via [coerceMetadata].
 type beadWire struct {
-	ID          string                     `json:"id"`
-	Title       string                     `json:"title"`
-	Status      string                     `json:"status"`
-	Type        string                     `json:"type"`
-	Priority    *int                       `json:"priority,omitempty"`
-	CreatedAt   time.Time                  `json:"created_at"`
-	UpdatedAt   time.Time                  `json:"updated_at"`
-	Assignee    string                     `json:"assignee"`
-	From        string                     `json:"from"`
-	ParentID    string                     `json:"parent_id"`
-	Ref         string                     `json:"ref"`
-	Needs       []string                   `json:"needs"`
-	Description string                     `json:"description"`
-	Labels      []string                   `json:"labels"`
-	Metadata    map[string]json.RawMessage `json:"metadata,omitempty"`
-	Ephemeral   bool                       `json:"ephemeral,omitempty"`
-	NoHistory   bool                       `json:"no_history,omitempty"`
-	DeferUntil  *time.Time                 `json:"defer_until,omitempty"`
+	ID           string                     `json:"id"`
+	Title        string                     `json:"title"`
+	Status       string                     `json:"status"`
+	StatusDetail string                     `json:"status_detail,omitempty"`
+	Type         string                     `json:"type"`
+	Priority     *int                       `json:"priority,omitempty"`
+	CreatedAt    time.Time                  `json:"created_at"`
+	UpdatedAt    time.Time                  `json:"updated_at"`
+	Assignee     string                     `json:"assignee"`
+	From         string                     `json:"from"`
+	ParentID     string                     `json:"parent_id"`
+	Ref          string                     `json:"ref"`
+	Needs        []string                   `json:"needs"`
+	Description  string                     `json:"description"`
+	Labels       []string                   `json:"labels"`
+	Metadata     map[string]json.RawMessage `json:"metadata,omitempty"`
+	Ephemeral    bool                       `json:"ephemeral,omitempty"`
+	NoHistory    bool                       `json:"no_history,omitempty"`
+	DeferUntil   *time.Time                 `json:"defer_until,omitempty"`
 }
 
 // marshalCreate converts a Bead to JSON for the exec script's create operation.

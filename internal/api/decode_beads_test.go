@@ -16,20 +16,22 @@ func TestBeadsFromGenList_Valid(t *testing.T) {
 	updatedAt := createdAt.Add(5 * time.Minute)
 	deferUntil := createdAt.Add(2 * time.Hour)
 	ephemeral := true
+	statusDetail := "blocked"
 	items := []genclient.Bead{
 		{
-			Id:          "gc-1",
-			Title:       "first",
-			IssueType:   "task",
-			Status:      "open",
-			CreatedAt:   createdAt,
-			UpdatedAt:   &updatedAt,
-			Assignee:    &assignee,
-			Priority:    &priority,
-			Description: &desc,
-			Labels:      &labels,
-			DeferUntil:  &deferUntil,
-			Ephemeral:   &ephemeral,
+			Id:           "gc-1",
+			Title:        "first",
+			IssueType:    "task",
+			Status:       "open",
+			StatusDetail: &statusDetail,
+			CreatedAt:    createdAt,
+			UpdatedAt:    &updatedAt,
+			Assignee:     &assignee,
+			Priority:     &priority,
+			Description:  &desc,
+			Labels:       &labels,
+			DeferUntil:   &deferUntil,
+			Ephemeral:    &ephemeral,
 		},
 		{Id: "gc-2", Title: "second", IssueType: "task", Status: "closed"},
 	}
@@ -42,6 +44,9 @@ func TestBeadsFromGenList_Valid(t *testing.T) {
 	}
 	if got[0].ID != "gc-1" || got[0].Title != "first" || got[0].Type != "task" || got[0].Status != "open" {
 		t.Errorf("got[0] = %+v", got[0])
+	}
+	if got[0].StatusDetail != "blocked" {
+		t.Errorf("got[0].StatusDetail = %q, want blocked", got[0].StatusDetail)
 	}
 	if got[0].Assignee != "builder-1" {
 		t.Errorf("got[0].Assignee = %q, want builder-1", got[0].Assignee)

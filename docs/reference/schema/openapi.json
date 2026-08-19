@@ -968,6 +968,9 @@
           "status": {
             "type": "string"
           },
+          "status_detail": {
+            "type": "string"
+          },
           "title": {
             "type": "string"
           },

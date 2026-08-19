@@ -357,7 +357,9 @@ beads per order.
 blocked, review, testing, closed), but the `beads.Store` contract stays
 three-state: open, in_progress, closed. `BdStore` therefore maps bd's
 blocked/review/testing values to open. An empty status from a backend is
-also normalized to open.
+also normalized to open. The additive `Bead.StatusDetail` wire field preserves
+the exact backend status; consumers should prefer it when present and fall back
+to `Status`.
 
 ## Code Map
 
