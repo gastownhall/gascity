@@ -311,7 +311,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// than requested) blocks the write. ErrNotFound and store-unavailable are
 	// non-fatal — the write falls through to bd, which will produce its own
 	// error if the bead truly does not exist. This preserves correctness for
-	// legitimate flows (heartbeat metadata writes, silent-fallback paths,
+	// legitimate flows (native heartbeat lease refresh, silent-fallback paths,
 	// ephemeral/wisp rows, projection-lag writes) that proceed even when the
 	// bead isn't yet visible through the read seam.
 	//
@@ -459,8 +459,8 @@ func invalidBdReleaseIfCurrentArg(value string) bool {
 }
 
 // bdMutationWriteIDs extracts all positional bead IDs from a bd write-mutation
-// command (update, close, reopen, delete) and reports whether the scan was
-// unambiguous.
+// command (update, close, reopen, delete, heartbeat) and reports whether the
+// scan was unambiguous.
 //
 // Returns:
 //   - ids: all positional (non-flag) tokens after the subcommand; may be empty.
@@ -475,6 +475,9 @@ func invalidBdReleaseIfCurrentArg(value string) bool {
 // "-" and do not contain "=" are treated as potentially value-consuming, which
 // triggers ambiguous=true. Boolean flags (no value) are fine to ignore.
 // The "--" terminator is respected: everything after it is positional.
+// heartbeat is positional-only — rewriteBdHeartbeatArgs has already reduced its
+// argv to a single pre-validated id with no flags, so its flag sets are empty
+// by design and the lone id is scanned as positional.
 //
 // All returned IDs must be verified via BdStore.Get (exact-ID guard) before
 // the mutation is forwarded to the bd subprocess.
@@ -484,7 +487,7 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 	}
 	sub := args[0]
 	switch sub {
-	case "update", "close", "reopen", "delete":
+	case "update", "close", "reopen", "delete", "heartbeat":
 	default:
 		return nil, false, false
 	}

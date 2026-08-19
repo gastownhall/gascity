@@ -2222,6 +2222,8 @@ func TestBdMutationWriteID(t *testing.T) {
 			{[]string{"reopen", "gcy-dv7"}, "gcy-dv7"},
 			{[]string{"delete", "--force", "gcy-dv7"}, "gcy-dv7"},
 			{[]string{"delete", "--force", "--json", "gcy-dv7"}, "gcy-dv7"},
+			// heartbeat: native lease refresh, guarded like the other writes
+			{[]string{"heartbeat", "gcy-dv7"}, "gcy-dv7"},
 			// double-dash separator
 			{[]string{"update", "--", "gcy-dv7"}, "gcy-dv7"},
 		}
@@ -2399,6 +2401,26 @@ func TestBdMutationWriteIDs(t *testing.T) {
 			name: "unknown short flag triggers fail-closed",
 			args: []string{"update", "-z", "something", "gcy-dv7"},
 			want: result{ok: true, ambiguous: true},
+		},
+
+		// --- heartbeat: native lease refresh under the exact-ID guard ---
+		// gc bd heartbeat forwards to bd's native owner-only lease refresh — a
+		// lease-mutating write — so it must take the same exact-ID collision
+		// preflight as update/close/reopen/delete (synthesis New Findings:
+		// Contract & Interface Fidelity). rewriteBdHeartbeatArgs has already
+		// reduced the argv to exactly ["heartbeat", "<id>"] (a single
+		// pre-validated positional id, no flags) before this scanner runs, so
+		// the id is scanned as a lone positional and returns ok=true, routing it
+		// through the store.Get guard instead of forwarding unguarded (ok=false).
+		{
+			name: "heartbeat is a guarded write with a positional id",
+			args: []string{"heartbeat", "gcy-dv7"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+		{
+			name: "heartbeat returns the exact supplied token (gcy-g4o regression)",
+			args: []string{"heartbeat", "gcy-wisp-abc9"},
+			want: result{ids: []string{"gcy-wisp-abc9"}, ok: true},
 		},
 
 		// --- Non-write subcommands ---

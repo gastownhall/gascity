@@ -786,6 +786,15 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 			fmt.Fprintf(stderr, "gc hook --claim: %s\n", cause) //nolint:errcheck
 			return 1
 		}
+		// stampHookSessionCurrentClaim above advertised this bead as the session's
+		// current claim before the result write; a minted claim is now being given
+		// back, so clear the stamp as part of the same rollback surface as
+		// ops.Release. Clear BEFORE the release (matching the session_beads.go
+		// cascade order) so `gc hook current` can never hand a later formula step a
+		// bead this session no longer owns — the "close somebody else's bead" hazard
+		// this back-channel exists to prevent. The straddle path (F-B) needs no clear
+		// because it returns before the stamp.
+		clearHookSessionCurrentClaim(opts, ops, stderr)
 		return unwindUndeliveredHookClaim(hookClaimReleaseReasonUndelivered, cause, bead, opts, ops, dir, stderr)
 	}
 	return 0
@@ -1179,6 +1188,32 @@ func stampHookSessionCurrentClaim(bead beads.Bead, opts hookClaimOptions, ops ho
 	}
 	if err := ops.StampSessionClaim(sessionID, beadID); err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: recording current claim %s on session %s: %v\n", beadID, sessionID, err) //nolint:errcheck
+	}
+}
+
+// clearHookSessionCurrentClaim removes the session-side current-claim stamp when
+// a claim this invocation recorded is being given back, so a released bead is
+// never left advertised as the session's current claim. It is the inverse of
+// stampHookSessionCurrentClaim and deliberately routes the clear through the same
+// ops.StampSessionClaim seam — an empty bead id, which session.Store.SetCurrentClaim
+// treats as a clear — so it reaches the SAME relocation-aware session front door the
+// stamp used. Clearing through the store-cascade helper instead
+// (clearSessionCurrentClaim, sessionFrontDoor(store)) would risk missing a relocated
+// session binding the stamp wrote to.
+//
+// Best-effort with the stamp's own error handling: a failure is reported on stderr
+// but changes no exit code, because on this path the compensating action is
+// ops.Release and the stamp clear is part of that same rollback surface — the caller
+// clears BEFORE releasing so a freed bead is never simultaneously claimable by
+// another seat and still named by this session (the ordering session_beads.go's
+// cascade already relies on).
+func clearHookSessionCurrentClaim(opts hookClaimOptions, ops hookClaimOps, stderr io.Writer) {
+	sessionID := hookClaimSessionID(opts.Env)
+	if sessionID == "" {
+		return
+	}
+	if err := ops.StampSessionClaim(sessionID, ""); err != nil {
+		fmt.Fprintf(stderr, "gc hook --claim: clearing current claim on session %s: %v\n", sessionID, err) //nolint:errcheck
 	}
 }
 

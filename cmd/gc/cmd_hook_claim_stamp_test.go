@@ -46,12 +46,17 @@ type sessionClaimSpy struct {
 	calls     int
 	sessionID string
 	beadID    string
-	err       error
+	// beadIDs records every bead id written through the seam in order, so a test
+	// can assert a stamp is followed by a clear (empty id) rather than only seeing
+	// the last write.
+	beadIDs []string
+	err     error
 }
 
 func (s *sessionClaimSpy) fn(sessionID, beadID string) error {
 	s.calls++
 	s.sessionID, s.beadID = sessionID, beadID
+	s.beadIDs = append(s.beadIDs, beadID)
 	return s.err
 }
 
