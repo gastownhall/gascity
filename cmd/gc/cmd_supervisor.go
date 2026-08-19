@@ -581,6 +581,10 @@ func managedCityStopTimeout(mc *managedCity) time.Duration {
 // when the city did not exit cleanly within the budget. Stderr still
 // receives a trace line for operability; the returned error is for
 // callers (runSupervisor) that need to aggregate shutdown status.
+//
+// The forced shutdown runs asynchronously so an in-flight CityRuntime.shutdown
+// that is wedged on an unresponsive backend (bd list / ListRunning) cannot
+// block the forced-stop timeout select inside shutdownOnce (#5256).
 func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) error {
 	if mc == nil {
 		return nil
@@ -603,11 +607,9 @@ func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) error {
 			stopErr = fmt.Errorf("city %q did not exit within %s after cancel", mc.name, timeout)
 		}
 	}
+	var forced <-chan struct{}
 	if mc.cr != nil {
-		func() {
-			defer func() { recover() }() //nolint:errcheck
-			mc.cr.shutdown()
-		}()
+		forced = mc.cr.forceShutdownAsync()
 	}
 	if timeout > 0 {
 		select {
@@ -619,6 +621,11 @@ func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) error {
 			fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after forced shutdown\n", mc.name, timeout) //nolint:errcheck
 			stopErr = fmt.Errorf("city %q did not exit within %s after forced shutdown", mc.name, timeout)
 		}
+	} else if forced != nil {
+		// Non-positive timeout: still wait for the async force path to
+		// finish so existing callers that rely on synchronous cleanup keep
+		// their postconditions when no deadline applies.
+		<-forced
 	}
 	if err := shutdownBeadsProvider(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: city '%s': bead store: %v\n", mc.name, err) //nolint:errcheck

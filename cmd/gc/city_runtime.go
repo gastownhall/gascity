@@ -1890,3 +1890,23 @@ func (cr *CityRuntime) shutdown() {
 		gracefulStopAll(running, cr.sp, timeout, cr.rec, cr.cfg, store, cr.stdout, cr.stderr)
 	})
 }
+
+// forceShutdownAsync starts or joins CityRuntime.shutdown on a goroutine and
+// returns a channel closed when that call returns. Calling shutdown
+// synchronously from stopManagedCity can hang forever when an in-flight
+// shutdown is already wedged inside shutdownOnce (e.g. a blocking ListRunning
+// or bd list against an unresponsive Dolt); the async path lets the forced-
+// stop timeout fire while that work continues in the background.
+func (cr *CityRuntime) forceShutdownAsync() <-chan struct{} {
+	done := make(chan struct{})
+	if cr == nil {
+		close(done)
+		return done
+	}
+	go func() {
+		defer close(done)
+		defer func() { recover() }() //nolint:errcheck
+		cr.shutdown()
+	}()
+	return done
+}
