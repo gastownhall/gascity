@@ -1923,20 +1923,44 @@ func (cs *controllerState) DeleteAgent(name string) error {
 // staying byte-identical. The error wraps configedit.ErrValidation so the async
 // failure mapper renders invalid_request and the sync mapper renders a 4xx rather
 // than a 500.
+// The two passes are separate functions so each can be pinned on its own: a
+// test that only ever calls assertRigPathWithinCity cannot tell which pass
+// rejected, so a pass could rot to a no-op without reddening anything (ga-qe7qm).
 func assertRigPathWithinCity(cityPath, resolved string) error {
-	// Lexical check first: rejects "../" escapes and absolute paths that resolve
-	// to a sibling/parent of the city. Normalize both sides so a symlinked city
-	// ancestor (cityPath raw, resolved already resolveStoreScopeRoot-resolved)
-	// doesn't register as a false-positive escape.
-	normalizedCity := pathutil.NormalizePathForCompare(cityPath)
-	normalizedTarget := pathutil.NormalizePathForCompare(resolved)
-	if err := relWithinCity(normalizedCity, normalizedTarget); err != nil {
+	if err := lexicalContainment(cityPath, resolved); err != nil {
 		return err
 	}
-	// Symlink-aware check: a "../"-free lexical path can still escape through a
-	// symlinked ancestor (e.g. <city>/link -> /outside, then a clone into
-	// link/rig). Canonicalize the city root and the nearest EXISTING ancestor of
-	// the (not-yet-created) target and re-check containment on the real paths.
+	return symlinkAwareContainment(cityPath, resolved)
+}
+
+// lexicalContainment is the first containment pass: it rejects "../" escapes and
+// absolute paths that resolve to a sibling/parent of the city. Both sides are
+// normalized so a symlinked city ancestor (cityPath raw, resolved already
+// resolveStoreScopeRoot-resolved) doesn't register as a false-positive escape.
+//
+// pathutil.NormalizePathForCompare resolves symlinks, so this pass already
+// rejects a symlinked-ancestor escape on its own; it is not purely lexical in
+// effect. What it does NOT do is fail closed when a component cannot be
+// canonicalized — NormalizePathForCompare swallows every EvalSymlinks error and
+// falls back to the lexical form. symlinkAwareContainment covers that gap.
+func lexicalContainment(cityPath, resolved string) error {
+	return relWithinCity(
+		pathutil.NormalizePathForCompare(cityPath),
+		pathutil.NormalizePathForCompare(resolved),
+	)
+}
+
+// symlinkAwareContainment is the second containment pass. It canonicalizes the
+// city root and the nearest EXISTING ancestor of the (not-yet-created) target
+// and re-checks containment on the real paths.
+//
+// It is a genuine second opinion, not decoration: unlike lexicalContainment it
+// fails CLOSED when a path component cannot be canonicalized at all (a symlink
+// loop, a non-directory component, an unsearchable ancestor). In those cases
+// NormalizePathForCompare silently synthesizes an in-city-looking path and the
+// first pass accepts; this pass refuses. TestSymlinkAwareContainmentIsLoadBearing
+// pins exactly those inputs.
+func symlinkAwareContainment(cityPath, resolved string) error {
 	realCity, err := filepath.EvalSymlinks(cityPath)
 	if err != nil {
 		realCity = filepath.Clean(cityPath)
