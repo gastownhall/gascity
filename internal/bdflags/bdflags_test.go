@@ -1,10 +1,90 @@
 package bdflags
 
 import (
+	"errors"
 	"reflect"
 	"sort"
+	"sync"
 	"testing"
 )
+
+func TestParseHelpFlagsToSets(t *testing.T) {
+	helpText := `Flags:
+      -a, --assignee string   Assignee
+      --help                  help for update
+      --if-assignee string    Apply only if assignee matches
+  Global Flags:
+      --json                  Output in JSON format`
+
+	parsed := discoveredFlags{
+		value: map[string]bool{},
+		bool:  map[string]bool{},
+	}
+	parseHelpFlagsToSets(helpText, &parsed)
+	if !parsed.value["--assignee"] {
+		t.Fatalf("--assignee expected as value flag")
+	}
+	if !parsed.bool["--help"] {
+		t.Fatalf("--help expected as bool flag")
+	}
+	if !parsed.value["--if-assignee"] {
+		t.Fatalf("--if-assignee expected as value flag")
+	}
+	if !parsed.bool["--json"] {
+		t.Fatalf("--json expected as bool flag")
+	}
+}
+
+func TestValueFlagsIncorporatesDiscovered(t *testing.T) {
+	orig := runBdHelpForSubcommand
+	runBdHelpForSubcommand = func(sub string) ([]byte, error) {
+		if sub != "update" {
+			return nil, errors.New("unexpected subcommand")
+		}
+		return []byte(`Flags:
+  -h, --help                     help for update
+  -s, --status string            New status
+  --if-assignee string           Apply the update only if assignee matches
+Global Flags:
+  --json                          Output in JSON format`), nil
+	}
+	defer func() {
+		runBdHelpForSubcommand = orig
+		parseDiscoveredOnce = sync.Map{}
+	}()
+
+	flags := ValueFlags("update")
+	if !flags["--if-assignee"] {
+		t.Fatalf("ValueFlags(update)[--if-assignee] = false, want true")
+	}
+	if !flags["--status"] {
+		t.Fatalf("ValueFlags(update)[--status] = false, want true")
+	}
+}
+
+func TestBoolFlagsIncorporatesDiscovered(t *testing.T) {
+	orig := runBdHelpForSubcommand
+	runBdHelpForSubcommand = func(sub string) ([]byte, error) {
+		if sub != "update" {
+			return nil, errors.New("unexpected subcommand")
+		}
+		return []byte(`Flags:
+  --allow-empty-description      Allow empty description
+  --if-assignee string           Apply only if assignee matches`), nil
+	}
+	defer func() {
+		runBdHelpForSubcommand = orig
+		parseDiscoveredOnce = sync.Map{}
+	}()
+
+	flags := BoolFlags("update")
+	if !flags["--allow-empty-description"] {
+		t.Fatalf("BoolFlags(update)[--allow-empty-description] = false, want true")
+	}
+	if !flags["--no-history"] {
+		t.Fatalf("BoolFlags(update)[--no-history] = false, want true")
+	}
+}
 
 func TestSubcommandsListsAllKnownKeys(t *testing.T) {
 	want := []string{

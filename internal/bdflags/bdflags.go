@@ -2,11 +2,16 @@
 // subcommand. It backs both the write-mutation ID guard in cmd/gc/cmd_bd.go
 // and the gc lint check that validates bd invocations embedded in prompt
 // templates, so the two call sites cannot drift apart from each other.
-//
-// Sourced from bd <sub> --help output (2026-07-13, bd v1.1.0).
 package bdflags
 
-import "sort"
+import (
+	"sort"
+	"strings"
+	"sync"
+	"unicode"
+
+	"github.com/gastownhall/gascity/internal/beads"
+)
 
 // globalValueFlags are accepted by every bd subcommand and consume the next
 // argument as their value.
@@ -211,7 +216,9 @@ func ValueFlags(sub string) map[string]bool {
 	if !ok {
 		return nil
 	}
-	return mergeFlagSets(globalValueFlags, subFlags)
+	base := mergeFlagSets(globalValueFlags, subFlags)
+	discovered := parseDiscoveredFlags(sub)
+	return mergeFlagSets(base, discovered.value)
 }
 
 // BoolFlags returns the set of boolean flag names for sub, merged with the
@@ -222,7 +229,140 @@ func BoolFlags(sub string) map[string]bool {
 	if !ok {
 		return nil
 	}
-	return mergeFlagSets(globalBoolFlags, subFlags)
+	base := mergeFlagSets(globalBoolFlags, subFlags)
+	discovered := parseDiscoveredFlags(sub)
+	return mergeFlagSets(base, discovered.bool)
+}
+
+type discoveredFlags struct {
+	value map[string]bool
+	bool  map[string]bool
+}
+
+var (
+	parseDiscoveredOnce sync.Map
+
+	runBdHelpForSubcommand = func(sub string) ([]byte, error) {
+		parts := strings.Split(sub, " ")
+		args := append(parts, "--help")
+		runner := beads.ExecCommandRunner()
+		return runner(".", "bd", args...)
+	}
+)
+
+func parseDiscoveredFlags(sub string) discoveredFlags {
+	if cached, ok := parseDiscoveredOnce.Load(sub); ok {
+		if parsed, ok := cached.(discoveredFlags); ok {
+			return parsed
+		}
+	}
+
+	parsed := discoveredFlags{
+		value: make(map[string]bool),
+		bool:  make(map[string]bool),
+	}
+
+	if out, err := runBdHelpForSubcommand(sub); err == nil {
+		parseHelpFlagsToSets(string(out), &parsed)
+	}
+
+	parseDiscoveredOnce.Store(sub, parsed)
+	return parsed
+}
+
+// parseHelpFlagsToSets reads cobra-style help output and classifies flags as
+// value-consuming vs. boolean across both local and global flag sections.
+func parseHelpFlagsToSets(helpText string, dst *discoveredFlags) {
+	inFlags := false
+	for _, rawLine := range strings.Split(helpText, "\n") {
+		line := strings.TrimSpace(rawLine)
+		if line == "" {
+			continue
+		}
+
+		switch {
+		case strings.HasPrefix(line, "Flags:"):
+			inFlags = true
+			continue
+		case strings.HasPrefix(line, "Global Flags:"):
+			inFlags = true
+			continue
+		case !strings.HasPrefix(line, "-"):
+			inFlags = false
+			continue
+		}
+
+		if !inFlags {
+			continue
+		}
+
+		tokens := strings.Fields(line)
+		if len(tokens) < 1 {
+			continue
+		}
+
+		var (
+			isValue bool
+			flags   []string
+		)
+
+		for i, token := range tokens {
+			flag := strings.TrimSuffix(token, ",")
+			if !strings.HasPrefix(flag, "-") {
+				if i > 0 && isValueToken(flag) {
+					isValue = true
+				}
+				break
+			}
+			if flag != "-" && flag != "--" {
+				flags = append(flags, flag)
+			}
+		}
+
+		for _, flag := range flags {
+			if isValue {
+				dst.value[flag] = true
+			} else {
+				dst.bool[flag] = true
+			}
+		}
+	}
+}
+
+func isValueToken(token string) bool {
+	t := strings.Trim(token, "[]")
+	t = strings.TrimSuffix(strings.TrimPrefix(t, "<"), ">")
+	if t == "" {
+		return false
+	}
+
+	if strings.ContainsAny(t, "\\") {
+		return false
+	}
+
+	// Type annotations that are not boolean.
+	switch t {
+	case "string", "stringArray", "stringSlice", "duration", "int", "int64", "uint", "uint64", "float64", "float32", "time.Duration", "path", "file", "type", "id", "ids", "args", "name", "keys", "value":
+		return true
+	case "bool", "boolean":
+		return false
+	}
+
+	if strings.Contains(t, "[") || strings.Contains(t, "]") {
+		return true
+	}
+
+	if strings.ContainsRune(token, '<') && strings.ContainsRune(token, '>') {
+		return true
+	}
+
+	for _, r := range t {
+		if unicode.IsUpper(r) {
+			return false
+		}
+	}
+
+	return false
 }
 
 func mergeFlagSets(sets ...map[string]bool) map[string]bool {
