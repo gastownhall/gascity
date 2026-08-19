@@ -116,8 +116,18 @@ func (s *NativeDoltStore) UpdateIfMatch(id string, expectedRevision int64, opts 
 	if err != nil {
 		return err
 	}
-	err = storage.UpdateIssueChecked(ctx, id, updates, s.actor, beadslib.UpdateIssueOptions{
-		ExpectedVersion: &expectedRevision,
+	// Retry a transient native-Dolt serialization conflict rather than letting
+	// it escape raw: embedded-Dolt has no internal withRetryTx, and the
+	// nudge-queue CAS loop only re-drives PreconditionFailedError, so an
+	// un-retried conflict would hard-fail to an API 500. The fence is
+	// unaffected — ExpectedVersion is re-checked every attempt and a genuine
+	// mismatch returns ErrVersionMismatch, which is not a serialization
+	// conflict, so precondition failures still propagate immediately (never
+	// retried). Mirrors DeleteIfMatch/CloseWithMetadataIfMatch.
+	err = retryOnNativeDoltSerializationConflict(func() error {
+		return storage.UpdateIssueChecked(ctx, id, updates, s.actor, beadslib.UpdateIssueOptions{
+			ExpectedVersion: &expectedRevision,
+		})
 	})
 	return s.conditionalWriteError(ctx, storage, id, expectedRevision, err)
 }
@@ -139,9 +149,16 @@ func (s *NativeDoltStore) CloseIfMatch(id string, expectedRevision int64) error 
 	if current == nil {
 		return fmt.Errorf("bead %q: %w", id, ErrNotFound)
 	}
-	_, err = storage.CloseIssueChecked(ctx, id, s.actor, beadslib.CloseIssueOptions{
-		Reason:          nativeCloseReasonFromIssue(current),
-		ExpectedVersion: &expectedRevision,
+	// See UpdateIfMatch: wrap only the checked write so a transient
+	// serialization conflict is retried while a version mismatch still
+	// short-circuits through conditionalWriteError. The pre-read close reason is
+	// a deterministic function of the issue and stays valid across attempts.
+	err = retryOnNativeDoltSerializationConflict(func() error {
+		_, closeErr := storage.CloseIssueChecked(ctx, id, s.actor, beadslib.CloseIssueOptions{
+			Reason:          nativeCloseReasonFromIssue(current),
+			ExpectedVersion: &expectedRevision,
+		})
+		return closeErr
 	})
 	return s.conditionalWriteError(ctx, storage, id, expectedRevision, err)
 }
@@ -153,30 +170,31 @@ func (s *NativeDoltStore) DeleteIfMatch(id string, expectedRevision int64) error
 		return err
 	}
 	defer release()
-	ctx, cancel := nativeDoltOperationContext(context.TODO())
-	defer cancel()
-
 	commitMsg := fmt.Sprintf("gc: delete bead %s at revision %d", id, expectedRevision)
-	err = storage.RunInTransaction(ctx, commitMsg, func(tx beadslib.Transaction) error {
-		issue, err := tx.GetIssue(ctx, id)
-		if err != nil {
-			return nativeStoreError(id, err)
-		}
-		if issue == nil {
-			return fmt.Errorf("bead %q: %w", id, ErrNotFound)
-		}
-		if issue.RowVersion != expectedRevision {
-			return &PreconditionFailedError{
-				ID:       id,
-				Expected: expectedRevision,
-				Current:  issue.RowVersion,
-				Raw:      "native row-version mismatch",
+	err = retryOnNativeDoltSerializationConflict(func() error {
+		ctx, cancel := nativeDoltOperationContext(context.TODO())
+		defer cancel()
+		return storage.RunInTransaction(ctx, commitMsg, func(tx beadslib.Transaction) error {
+			issue, err := tx.GetIssue(ctx, id)
+			if err != nil {
+				return nativeStoreError(id, err)
 			}
-		}
-		if err := tx.DeleteIssue(ctx, id); err != nil {
-			return nativeStoreError(id, err)
-		}
-		return nil
+			if issue == nil {
+				return fmt.Errorf("bead %q: %w", id, ErrNotFound)
+			}
+			if issue.RowVersion != expectedRevision {
+				return &PreconditionFailedError{
+					ID:       id,
+					Expected: expectedRevision,
+					Current:  issue.RowVersion,
+					Raw:      "native row-version mismatch",
+				}
+			}
+			if err := tx.DeleteIssue(ctx, id); err != nil {
+				return nativeStoreError(id, err)
+			}
+			return nil
+		})
 	})
 	if err != nil {
 		return err

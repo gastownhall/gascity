@@ -433,6 +433,7 @@ func TestBdIssueDecodesRevision(t *testing.T) {
 		{name: "maximum signed decimal string", raw: `"9223372036854775807"`, want: math.MaxInt64},
 		{name: "minimum signed decimal string", raw: `"-9223372036854775808"`, want: math.MinInt64},
 		{name: "legacy integer", raw: `7`, want: 7},
+		{name: "json null is the no-revision sentinel", raw: `null`, want: 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -460,7 +461,6 @@ func TestBdIssueRejectsInvalidRevision(t *testing.T) {
 		`"not-a-revision"`,
 		`"1.5"`,
 		`1.5`,
-		`null`,
 		`"9223372036854775808"`,
 		`"-9223372036854775809"`,
 	} {

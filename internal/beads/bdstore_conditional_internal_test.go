@@ -1328,3 +1328,54 @@ func TestCompareAndSetMetadataKeyExhaustionWithoutValueLossStaysTyped(t *testing
 		t.Fatalf("CompareAndSetMetadataKey = (%v, %v), want (false, *CASRetriesExhaustedError)", swapped, err)
 	}
 }
+
+// TestBdRevisionUnmarshalJSON pins the revision token decode across the forms bd
+// emits: a current decimal string, a legacy JSON integer, a signed value, and —
+// the case that regressed — a JSON null, which means "no token recorded yet" and
+// must decode to the zero token rather than hard-failing the whole issue decode.
+func TestBdRevisionUnmarshalJSON(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    bdRevision
+		wantErr bool
+	}{
+		{name: "decimal string", input: `"5"`, want: 5},
+		{name: "legacy integer", input: `7`, want: 7},
+		{name: "signed string", input: `"-3"`, want: -3},
+		{name: "null is the zero token", input: `null`, want: 0},
+		{name: "empty string value is invalid", input: `""`, wantErr: true},
+		{name: "non-numeric is invalid", input: `"abc"`, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got bdRevision
+			err := json.Unmarshal([]byte(tt.input), &got)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("Unmarshal(%s) = %d, nil; want error", tt.input, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Unmarshal(%s): %v", tt.input, err)
+			}
+			if got != tt.want {
+				t.Fatalf("Unmarshal(%s) = %d, want %d", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBdIssueDecodesNullRevisionAsZero guards the real path: a bd issue whose
+// revision column is null must decode into a Bead carrying the zero token, not
+// fail the whole issue decode.
+func TestBdIssueDecodesNullRevisionAsZero(t *testing.T) {
+	var issue bdIssue
+	if err := json.Unmarshal([]byte(`{"id":"ga-1","title":"t","revision":null}`), &issue); err != nil {
+		t.Fatalf("decoding issue with null revision: %v", err)
+	}
+	if got := issue.toBead().Revision; got != 0 {
+		t.Fatalf("Bead.Revision = %d, want 0 for a null revision column", got)
+	}
+}

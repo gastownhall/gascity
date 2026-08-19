@@ -1277,6 +1277,62 @@ func TestNativeDoltStoreCloseWithMetadataIfMatchReturnsZeroAfterRetryExhaustion(
 	}
 }
 
+// DeleteIfMatch runs its fence check and delete inside one transaction, so a
+// serialization conflict must replay the WHOLE transaction — re-reading the row
+// version each attempt — exactly like the close path. Retrying only the delete
+// would fence against a RowVersion the rolled-back read already invalidated.
+func TestNativeDoltStoreDeleteIfMatchRetriesWholeTransaction(t *testing.T) {
+	for _, conflict := range []error{
+		errors.New("Error 1213 (40001): deadlock"),
+		errors.New("Error 1205 (HY000): lock wait timeout exceeded"),
+	} {
+		t.Run(conflict.Error(), func(t *testing.T) {
+			storage := &retryingNativeDoltStorage{
+				nativeDoltMemStorage: newNativeDoltMemStorage(),
+				txErrors:             []error{conflict},
+			}
+			store := newNativeDoltStoreForTest(storage)
+			created, err := store.Create(Bead{Title: "retry whole delete transaction"})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+
+			if err := store.DeleteIfMatch(created.ID, created.Revision); err != nil {
+				t.Fatalf("DeleteIfMatch: %v", err)
+			}
+			if storage.txCalls != 2 {
+				t.Fatalf("RunInTransaction calls = %d, want 2", storage.txCalls)
+			}
+			if _, err := store.Get(created.ID); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("Get after replayed delete = %v, want ErrNotFound", err)
+			}
+		})
+	}
+}
+
+// An ambiguous failure — one that may have committed — must NOT replay a delete,
+// or a delete that already applied would run again against a moved fence. This
+// pins the same transient/ambiguous split the close path draws.
+func TestNativeDoltStoreDeleteIfMatchDoesNotRetryAmbiguousFailure(t *testing.T) {
+	sentinel := errors.New("connection reset by peer")
+	storage := &retryingNativeDoltStorage{
+		nativeDoltMemStorage: newNativeDoltMemStorage(),
+		txErrors:             []error{sentinel},
+	}
+	store := newNativeDoltStoreForTest(storage)
+	created, err := store.Create(Bead{Title: "ambiguous delete"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := store.DeleteIfMatch(created.ID, created.Revision); !errors.Is(err, sentinel) {
+		t.Fatalf("DeleteIfMatch error = %v, want %v", err, sentinel)
+	}
+	if storage.txCalls != 1 {
+		t.Fatalf("RunInTransaction calls = %d, want 1", storage.txCalls)
+	}
+}
+
 func TestNativeDoltStoreReadyFiltersGasCityExcludedTypesBeforeLimit(t *testing.T) {
 	storage := &nativeDoltStorageSpy{
 		getReadyWork: func(_ context.Context, filter beadslib.WorkFilter) ([]*beadslib.Issue, error) {
@@ -2452,9 +2508,11 @@ type nativeDoltStorageSpy struct {
 	createIssues                func(context.Context, []*beadslib.Issue, string) error
 	getIssue                    func(context.Context, string) (*beadslib.Issue, error)
 	updateIssue                 func(context.Context, string, map[string]interface{}, string) error
+	updateIssueChecked          func(context.Context, string, map[string]interface{}, string, beadslib.UpdateIssueOptions) error
 	runInTransaction            func(context.Context, string, func(beadslib.Transaction) error) error
 	reopenIssue                 func(context.Context, string, string, string) error
 	closeIssue                  func(context.Context, string, string, string, string) error
+	closeIssueChecked           func(context.Context, string, string, beadslib.CloseIssueOptions) (beadslib.CloseIssueResult, error)
 	deleteIssue                 func(context.Context, string) error
 	searchIssues                func(context.Context, string, beadslib.IssueFilter) ([]*beadslib.Issue, error)
 	countIssues                 func(context.Context, string, beadslib.IssueFilter) (int64, error)
@@ -2503,6 +2561,13 @@ func (s *nativeDoltStorageSpy) UpdateIssue(ctx context.Context, id string, updat
 	return s.updateIssue(ctx, id, updates, actor)
 }
 
+func (s *nativeDoltStorageSpy) UpdateIssueChecked(ctx context.Context, id string, updates map[string]interface{}, actor string, opts beadslib.UpdateIssueOptions) error {
+	if s.updateIssueChecked == nil {
+		return nil
+	}
+	return s.updateIssueChecked(ctx, id, updates, actor, opts)
+}
+
 func (s *nativeDoltStorageSpy) RunInTransaction(ctx context.Context, commitMsg string, fn func(beadslib.Transaction) error) error {
 	if s.runInTransaction != nil {
 		return s.runInTransaction(ctx, commitMsg, fn)
@@ -2522,6 +2587,13 @@ func (s *nativeDoltStorageSpy) CloseIssue(ctx context.Context, id string, reason
 		return nil
 	}
 	return s.closeIssue(ctx, id, reason, actor, session)
+}
+
+func (s *nativeDoltStorageSpy) CloseIssueChecked(ctx context.Context, id string, actor string, opts beadslib.CloseIssueOptions) (beadslib.CloseIssueResult, error) {
+	if s.closeIssueChecked == nil {
+		return beadslib.CloseIssueResult{}, nil
+	}
+	return s.closeIssueChecked(ctx, id, actor, opts)
 }
 
 func (s *nativeDoltStorageSpy) DeleteIssue(ctx context.Context, id string) error {

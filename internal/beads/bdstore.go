@@ -779,6 +779,14 @@ func (r *bdRevision) UnmarshalJSON(data []byte) error {
 	if len(token) == 0 {
 		return errors.New("bd revision is empty")
 	}
+	// A JSON null revision means the row has no recorded token yet (legacy rows,
+	// or a backend that has not minted one). Decode it as the zero token — the
+	// same "no revision" sentinel a never-mutated bead carries — rather than
+	// failing the whole issue decode on strconv.ParseInt("null").
+	if string(token) == "null" {
+		*r = 0
+		return nil
+	}
 
 	decimal := string(token)
 	if token[0] == '"' {
@@ -1408,15 +1416,20 @@ func (s *BdStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
 		" WHERE id = " + bdSQLStringLiteral(id) +
 		" AND status = 'in_progress'" +
 		" AND assignee = " + bdSQLStringLiteral(expectedAssignee)
-	args := s.bdTransientWriteArgs([]string{"sql", "--json", query})
-	out, err := s.runner(s.dir, "bd", args...)
-	if err != nil && !isBdTransientWriteError(err) {
+	// Retry ordinary serialization conflicts, but never replay an ambiguous
+	// write: a revision-aware release mints a fresh token and matches on
+	// status+assignee, so replaying one that may already have committed could
+	// stomp a same-assignee reclaim that landed in between — reinstating the
+	// release token over the reclaim's. runBDTransientReleaseOutput draws that
+	// line; a single-attempt raw runner would instead surface every transient
+	// blip as a spurious release failure.
+	out, err := s.runBDTransientReleaseOutput("sql", "--json", query)
+	if err != nil {
 		if isBdSQLUnsupportedInEmbeddedMode(err) {
 			return s.releaseIfCurrentViaEmbeddedDoltSQL(id, expectedAssignee, revision)
 		}
 		if isMissingRevisionColumn(err) {
-			args = s.bdTransientWriteArgs([]string{"sql", "--json", legacyQuery})
-			out, err = s.runner(s.dir, "bd", args...)
+			out, err = s.runBDTransientReleaseOutput("sql", "--json", legacyQuery)
 		}
 	}
 	if err != nil {
@@ -2175,6 +2188,19 @@ func (s *BdStore) runBDTransientCreateOutput(hasStableID bool, args ...string) (
 			return false
 		}
 		return hasStableID || !isBdAmbiguousWriteError(err)
+	}, args...)
+}
+
+// runBDTransientReleaseOutput runs a revision-aware release UPDATE, retrying
+// ordinary serialization conflicts but never replaying an ambiguous write.
+// Unlike a create there is no stable id to make the write idempotent: the
+// release matches on status+assignee and installs a fresh token, so replaying
+// one that may already have committed could stomp a same-assignee reclaim that
+// landed in between. Same ambiguity guard as an id-less create, named for the
+// release path it protects.
+func (s *BdStore) runBDTransientReleaseOutput(args ...string) ([]byte, error) {
+	return s.runBDTransientWriteOutputWhen(func(err error) bool {
+		return isBdTransientWriteError(err) && !isBdAmbiguousWriteError(err)
 	}, args...)
 }
 

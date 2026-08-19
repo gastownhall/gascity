@@ -3630,6 +3630,38 @@ func TestBdStoreReleaseIfCurrentDoesNotReplayAmbiguousLegacyFallback(t *testing.
 	}
 }
 
+// A clean serialization conflict — the backend rolled the write back atomically,
+// leaving nothing applied — is safe to replay, and ReleaseIfCurrent must, or a
+// merge-queue release loses a race it should have won on retry. This pins the
+// transient-but-unambiguous branch that the ambiguous-write tests above exclude:
+// the release retry predicate is isBdTransientWriteError && !isBdAmbiguousWriteError.
+func TestBdStoreReleaseIfCurrentRetriesACleanSerializationConflict(t *testing.T) {
+	var calls int
+	cleanConflict := errors.New("Error 1213 (40001): serialization failure")
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" || len(args) != 3 || args[0] != "sql" || args[1] != "--json" {
+			return nil, fmt.Errorf("unexpected command %s %q", name, args)
+		}
+		calls++
+		if calls == 1 {
+			return nil, cleanConflict
+		}
+		return []byte(`{"rows_affected":1,"schema_version":1}`), nil
+	}
+	s := beads.NewBdStore("/city", legacyBdReleaseRunner(runner))
+
+	released, err := s.ReleaseIfCurrent("bd-42", "worker-1")
+	if err != nil {
+		t.Fatalf("ReleaseIfCurrent: %v", err)
+	}
+	if !released {
+		t.Fatal("ReleaseIfCurrent released = false, want true after a clean conflict is replayed")
+	}
+	if calls != 2 {
+		t.Fatalf("release attempts = %d, want the clean conflict retried once then applied", calls)
+	}
+}
+
 func TestBdStoreReleaseIfCurrentFallsBackWhenEmbeddedBdSQLUnsupported(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
