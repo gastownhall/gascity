@@ -2856,6 +2856,7 @@ flatten_database() {
     # unproven HEAD movement fails closed and falls through to quarantine.
     if [ "$writer_race_detected" = "1" ] && \
        [ "${verify_counts_saw_same_count_hash_drift:-0}" = "1" ] && \
+       [ "${verify_counts_saw_gain:-0}" != "1" ] && \
        [ "${verify_counts_saw_gain_hash_drift:-0}" != "1" ] && \
        [ "${verify_counts_saw_row_decrease:-0}" != "1" ] && \
        [ "${verify_counts_saw_table_list_change:-0}" != "1" ] && \
