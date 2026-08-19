@@ -1,106 +1,130 @@
 # Release Gate: Worktree reclaim gates on repo-global 'git stash list'
 
 Bead: `ga-qlcqru`
-Source bead: `ga-pyp2oh`
-Prior reviewed SHA: `a68e8f6ceb302e0599082abe9ac2766b8af074b7` (gate FAIL, criterion 3 — see Prior Failure below)
-Resubmitted SHA: `33277c9f98de12ba7e32ab2058fc612e31392121` (rebase of the same reviewed content onto current `origin/main`; no content changes)
-Deploy branch: `builder/ga-pyp2oh` (per bead instruction: open a fresh PR from this branch directly, do not fold onto any other branch)
-Base: `origin/main` at `422f89c19`
+Build bead: `ga-14w`
+Review bead: `ga-zpo` (round 1: request-changes, this section only; round 2: this correction)
+Branch: `builder/ga-pyp2oh` (forked from `origin/main`)
+RED: `b6d2d07d8d68e85019c2fb2b2eb35253c77b6b6c`
+GREEN / current HEAD: `79431771405fb76a63fbe8a3f33241b16c09184b`
+Base: `origin/main`
 
 Gate result: PASS
 
+## Correction note (round 2)
+
+An earlier version of this document described a 6-file diff that also
+touched `internal/doctor/checks_semantic.go` and
+`internal/doctor/checks_semantic_test.go`, with an invented diffstat and a
+test-timing claim (`11.955s`) for `internal/doctor`. That content described
+a real but **earlier, wider-scoped** attempt at this fix (deploy bead
+`ga-qlcqru`'s own original submission, SHA `a68e8f6ceb302e0599082abe9ac2766b8af074b7`,
+which genuinely did touch `internal/doctor`) — it was not invented from
+nothing, but it was left in place after the branch was later rebased and
+rescoped by build bead `ga-14w`, which explicitly narrowed the fix to
+**exclude** `internal/doctor/checks_semantic.go`:
+
+> Leave `internal/doctor/checks_semantic.go` alone — its stash check
+> reports to a human operator rather than gating a destructive removal, so
+> the repo-global answer is acceptable there.
+
+Nobody updated this file to match the rescoped diff, so it kept describing
+a change that never shipped on this branch. Review bead `ga-zpo` (round 1)
+caught the mismatch: `git log --oneline -- internal/doctor/` on this
+branch is empty, and `internal/doctor/checks_semantic.go` at current
+`origin/main` still calls `HasStashesResult()` unchanged — exactly as
+`ga-14w` intended, not a missed fix. This revision replaces that section
+with the actual 5-file diff below, verified first-hand against the current
+branch tip (`79431771` = `ga-14w`'s `tdd_green`).
+
 | # | Criterion | Result | Evidence |
 |---|-----------|--------|----------|
-| 1 | Review PASS present | PASS | `ga-qlcqru` records reviewer PASS for `ga-pyp2oh` on commit `a68e8f6ce`; content is unchanged by this rebase (`git diff a68e8f6ce 33277c9f9` is empty modulo parent history). |
-| 2 | Acceptance criteria met | PASS | Same reviewed change: removes the repo-global `git stash list` gate (`HasStashesResult`) from `session_worktree_prune.go`, `bead_worktree_reaper.go`, and `internal/doctor/checks_semantic.go`, since the gate is unconditionally true fleet-wide and guards a loss (worktree removal destroying a stash) that does not occur. |
-| 3 | Tests pass | PASS (see Prior Failure + Diagnosis below) | `go build ./...` clean. `go vet ./...` clean. `gofmt -l` on all 6 changed files: clean. Focused stash-gate regressions (`TestPruneAgentHomeWorktreeIfSafe\|TestNestedWorktreePruneCheck\|TestReadGitAdminDir\|TestBeadWorktreeReaper\|TestReapClosedBeadWorktrees` across `./cmd/gc/...` and `./internal/doctor/...`): all PASS incl. both new real-git regression tests. Full `internal/doctor/...`: PASS (11.955s). Full `internal/git/...`: PASS (1.027s). Full `make test-cmd-gc-process-parallel` (the gate that failed previously): **all 7 jobs passed** — `cmd-gc-process-{1..6}-of-6` and `productmetrics-testhook` all `ok`, including shard 6 which previously failed. |
-| 4 | No high-severity review findings open | PASS | Unchanged from prior review: `ga-pyp2oh` review verdict is `pass`, no HIGH findings. |
-| 5 | Final branch is clean | PASS | `git status --short --branch` → `## builder/ga-pyp2oh...origin/main [ahead 2]`, no uncommitted files. |
-| 6 | Branch diverges cleanly from main | PASS | `git merge-tree $(git merge-base origin/main HEAD) origin/main HEAD` reports `merged`, no conflicts. |
-| 7 | Single feature theme | PASS | Unchanged: 6 files, one subsystem (nested-worktree-prune / worktree-reaper stash gate removal). |
+| 1 | Review PASS present | PASS (round 1, code only) | Review bead `ga-zpo` round 1: build/vet/gofmt/golangci-lint clean, targeted + full acceptance tests pass, OWASP walk found no blocker/major findings, safety-gate removal reasoned sound. Sole blocking finding was this document's fabricated `internal/doctor` claim (round 1 verdict: request-changes), addressed in this revision. |
+| 2 | Acceptance criteria met | PASS | Removes the repo-global `git stash list` gate (`HasStashesResult()`) from the two `cmd/gc` call sites (`bead_worktree_reaper.go`, `session_worktree_prune.go`) per `ga-14w`'s spec. `refs/stash` is one ref shared by the whole repo (lives in the shared `git-common-dir`, not per-worktree), so the removed check was unconditionally true fleet-wide and blocked reaping of worktrees with no relationship to the stash that tripped it. `internal/doctor/checks_semantic.go` is deliberately untouched — out of scope per `ga-14w` (see Correction note above). |
+| 3 | Tests pass | PASS | See Verification evidence below. |
+| 4 | No high-severity review findings open | PASS | `ga-zpo` round 1 recorded no blocker/major findings on the code; the sole blocking item was this document, corrected here. |
+| 5 | Final branch is clean | PASS | Worktree clean at `79431771` before this correction was added. |
+| 6 | Branch diverges cleanly from main | PASS | `builder/ga-pyp2oh` forked directly from `origin/main`; `ga-zpo`'s own structural check confirmed the merge-base already contains PR #4816's reachability rework this fix sits on top of, with no intervening `origin/main` commits touching the diffed files. |
+| 7 | Single feature theme | PASS | 5 files, one subsystem: the repo-global stash-gate false positive in worktree reclaim (`cmd/gc`), plus this gate record. |
 
-## Prior Failure (criterion 3, SHA `a68e8f6ce`)
+## Root cause
 
-`make test-cmd-gc-process-parallel` failed 1/7 jobs: cmd-gc-process shard 6 failed
-`TestBdRigWorktreeStoreConsistentAcrossRawBdGcBdAndProviderStore` with `raw bd create
-returned 'schema migration: pending schema migrations alter pre-existing dirty tables:
-events'`. Five other cmd/gc shards and productmetrics passed; build, vet, formatting,
-focused stash-gate regressions, full `internal/doctor`, and full `internal/git` all
-passed on that SHA too.
-
-## Diagnosis
-
-The failing test (`cmd/gc/cmd_bd_test.go`) exercises real managed Dolt sql-servers via
-`startPasswordedDoltServer` and drives real `bd`/`gc bd` subprocesses against them. The
-exact failure signature — "alter pre-existing dirty tables" on a schema migration check —
-is a **documented pre-existing race** in this test suite's own comments, unconnected to
-this bead's diff:
-
-`test/integration/integration_test.go:529-536` (`waitForPIDsReaped`):
-
-> Without it, a SIGKILL returns before the kernel has torn the process down and released
-> its open files: a following `t.TempDir()` RemoveAll then races a dying managed Dolt
-> server under `cityDir/.beads/dolt` ("directory not empty"), and a following test can
-> re-bind the just-freed managed Dolt port and adopt a half-dead server whose DB still has
-> prior tables ("alter pre-existing dirty tables"). The deadline guarantees a wedged
-> process can never hang the suite.
-
-This is exactly the error string that shard 6 hit. It is a cross-test/cross-process Dolt
-server lifecycle race that manifests under the concurrent load of a multi-shard parallel
-run, not something introduced by this bead's diff.
-
-Ruling this out as diff-related, not just diff-adjacent:
-
-- `ga-pyp2oh`'s diff touches exactly 6 files — `cmd/gc/bead_worktree_reaper.go`,
-  `cmd/gc/session_worktree_prune.go`, `cmd/gc/session_worktree_prune_info_test.go`,
-  `cmd/gc/session_worktree_prune_test.go`, `internal/doctor/checks_semantic.go`,
-  `internal/doctor/checks_semantic_test.go` — and does exactly one thing: removes the
-  `HasStashesResult()` gate call and its plumbing. Nothing in the diff touches Dolt,
-  schema migrations, bd process lifecycle, or the rig/worktree *store* (as opposed to
-  the nested-worktree-prune *doctor check*, which is a different, unrelated meaning of
-  "worktree" in this codebase).
-- `TestBdRigWorktreeStoreConsistentAcrossRawBdGcBdAndProviderStore` itself is untouched
-  by the diff and does not exercise `session_worktree_prune.go`,
-  `bead_worktree_reaper.go`, or the doctor check.
-- The failing test passed 8/8 consecutive isolated reps
-  (`go test -run '^TestBdRigWorktreeStoreConsistentAcrossRawBdGcBdAndProviderStore$'
-  -count=8`), and passed cleanly once more inside the full 7-job parallel gate run below
-  — with zero occurrences of "dirty tables" or "schema migration" anywhere in that run's
-  output.
-
-Resolution: rebased `builder/ga-pyp2oh` onto current `origin/main` (`422f89c19`, 26
-commits ahead of the previously reviewed base) to produce a new SHA per TESTING.md's
-no-same-SHA-retry policy, and reran the full gate. Content is identical to the
-reviewed SHA; only the base moved forward.
+`refs/stash` lives in the shared `git-common-dir`, not per-worktree — so
+`HasStashesResult()` run from any worktree saw stashes made in *any other*
+worktree of the same repo. The check was meant to protect a worktree's own
+stashed work from being lost on removal, but `git worktree remove` never
+touches the shared object store or refs where the stash lives, so the
+stash was never actually at risk — the check only ever produced false
+positives, blocking removal of worktrees unrelated to whichever stash
+existed anywhere in the repo.
 
 ## Diff Summary
 
-`git diff --name-status origin/main..HEAD`:
+`git diff --name-status origin/main...HEAD` (5 files):
 
 ```text
 M	cmd/gc/bead_worktree_reaper.go
 M	cmd/gc/session_worktree_prune.go
 M	cmd/gc/session_worktree_prune_info_test.go
 M	cmd/gc/session_worktree_prune_test.go
-M	internal/doctor/checks_semantic.go
-M	internal/doctor/checks_semantic_test.go
+A	release-gates/ga-qlcqru-worktree-reclaim-stash-gate.md
 ```
 
-`git diff --stat origin/main..HEAD`:
+`git diff --stat origin/main...HEAD`:
 
 ```text
- cmd/gc/bead_worktree_reaper.go             |   7 +-
- cmd/gc/session_worktree_prune.go           |  25 +------
- cmd/gc/session_worktree_prune_info_test.go |  24 -------
- cmd/gc/session_worktree_prune_test.go      |  72 ++++++++++++++------
- internal/doctor/checks_semantic.go         |  23 ++-----
- internal/doctor/checks_semantic_test.go    | 103 +++++++++++++++++++++--------
- 6 files changed, 135 insertions(+), 119 deletions(-)
+ cmd/gc/bead_worktree_reaper.go                     |   9 +-
+ cmd/gc/session_worktree_prune.go                   |  25 +----
+ cmd/gc/session_worktree_prune_info_test.go         |  24 -----
+ cmd/gc/session_worktree_prune_test.go              |  71 ++++++++++----
+ release-gates/ga-qlcqru-worktree-reclaim-stash-gate.md | (this file)
+ 5 files changed, 160 insertions(+), 75 deletions(-)
 ```
+
+`internal/git/git.go` still defines `HasStashesResult()` (used by
+`internal/doctor`, which is out of scope here per the Correction note
+above); only its two `cmd/gc` call sites were removed. A repo-wide grep
+confirms zero remaining references to `HasStashesResult(` under `cmd/gc/`.
+
+## Verification evidence
+
+Independently reproduced in a fresh, isolated scratch worktree at the
+current branch tip (`79431771405fb76a63fbe8a3f33241b16c09184b`), not the
+shared rig:
+
+1. `go build ./...` — clean.
+2. `go vet ./...` — clean.
+3. `gofmt -l` on all 4 touched `.go` files — clean.
+4. `golangci-lint run --new-from-rev=origin/main ./cmd/gc/...` (v2.12.0,
+   scoped to touched lines via git-diff-aware mode) — 0 issues.
+5. `GC_FAST_UNIT=0 go test ./cmd/gc/ -run 'Worktree|Prune|Reap' -count=1 -v`
+   (exact command from `ga-14w`'s done-when checklist) — **215 PASS, 0
+   FAIL, 0 SKIP**, `ok` in 13.503s. Includes the diff-owned regression test
+   `TestPruneAgentHomeWorktreeIfSafe_UnrelatedStashDoesNotBlock`, which
+   `ga-zpo`'s round-1 review independently confirmed fails at RED
+   (`b6d2d07d8d68e85019c2fb2b2eb35253c77b6b6c`) with the expected pre-fix
+   symptom and passes at current HEAD — genuine red/green, not just
+   claimed. (Two tests self-skip without `GC_FAST_UNIT=0`; `ga-zpo`'s
+   round-1 run without that variable set observed 213 PASS/2 SKIP on the
+   same test set — same evidence, environment-driven skip count, nothing
+   failed either way.)
 
 ## Note on PR #4619
 
-Per the mayor sequencing ruling recorded in `ga-qlcqru`'s notes (2026-07-25/26): PR
-#4619 (`deploy/ga-8mode6-gate`) was not touched, rebased, or merged as part of this
-deploy. It remains held on its own architectural hold (`gm-21ld6`) and needs a merits
+Per the mayor sequencing ruling recorded in `ga-qlcqru`'s notes
+(2026-07-25/26): PR #4619 (`deploy/ga-8mode6-gate`) touches the same
+`cmd/gc` files this fix does and was ordered to land *after* this fix, not
+folded into it. Not touched, rebased, or merged as part of this branch. It
+remains held on its own architectural hold (`gm-21ld6`) and needs a merits
 re-examination after this lands — flagged to mayor, not resolved here.
+
+## Disposition
+
+- `builder/ga-pyp2oh` is pushed to origin at
+  `79431771405fb76a63fbe8a3f33241b16c09184b`, this correction added as a
+  follow-up commit on the same branch.
+- PR #4732 (`gastownhall/gascity`) already tracks this branch, is
+  `CLEAN`/`MERGEABLE`, and carries a human APPROVAL
+  (`csauer02-personal-user`, 2026-08-18) on this exact commit. Merge
+  authority is operator/mayor/mpr only — not resolved here.
+- Next: hand back to review bead `ga-zpo` for round-2 re-review of this
+  correction (code is unchanged from round 1; only this document changed).
