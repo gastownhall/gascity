@@ -761,7 +761,7 @@ case "$query" in
     # probe, which reports writercommit so HEAD has moved past the flatten's own
     # commit. verify_counts still sees compactcommit (gain+drift) because it does
     # not probe HEAD and the "$(current_head)" gates read the real state.
-    if { [ "$mode" = "writer_race_during_verify" ] || [ "$mode" = "writer_race_db_hash_during_verify" ] || [ "$mode" = "writer_race_with_mixed_same_count_hash_drift" ] || [ "$mode" = "row_count_decreases_with_writer_race" ] || [ "$mode" = "same_count_hash_drift_with_writer_race" ]; } && [ "$(current_head)" = "compactcommit" ]; then
+    if { [ "$mode" = "writer_race_during_verify" ] || [ "$mode" = "writer_race_db_hash_during_verify" ] || [ "$mode" = "writer_race_with_mixed_same_count_hash_drift" ] || [ "$mode" = "row_count_decreases_with_writer_race" ] || [ "$mode" = "same_count_hash_drift_with_writer_race" ] || [ "$mode" = "writer_race_same_count_hash_drift_only" ] || [ "$mode" = "writer_race_same_count_hash_drift_diff_fails" ]; } && [ "$(current_head)" = "compactcommit" ]; then
       calls_file="$state_file.postverify-head-calls"
       calls=0
       if [ -f "$calls_file" ]; then
@@ -863,7 +863,7 @@ case "$query" in
       print_cell hash-beads-after-writer
       exit 0
     fi
-    if [ "$mode" = "same_row_count_writer" ] && [ "$(current_head)" = "compactcommit" ]; then
+    if { [ "$mode" = "same_row_count_writer" ] || [ "$mode" = "writer_race_same_count_hash_drift_only" ] || [ "$mode" = "writer_race_same_count_hash_drift_diff_fails" ]; } && [ "$(current_head)" = "compactcommit" ]; then
       print_cell hash-beads-after-writer
       exit 0
     fi
@@ -1083,6 +1083,26 @@ case "$query" in
       first_commit_table_diff_probe_failure)
         printf 'probe table diff unavailable\n' >&2
         exit 55
+        ;;
+      *)
+        printf 'unexpected DOLT_DIFF query: %%s\n' "$query" >&2
+        exit 64
+        ;;
+    esac
+    exit 0
+    ;;
+  *"DOLT_DIFF("*"'beads')"*)
+    # Content diff of table "beads" between the pre-flight snapshot HEAD and
+    # the flatten's own commit, used to prove same-count value-hash drift is
+    # a concurrent writer's UPDATE rather than corruption (gastownhall/gascity
+    # same-count-hash-drift defer). A zero count means the flatten commit
+    # itself never touched the table's rows.
+    case "$mode" in
+      writer_race_same_count_hash_drift_only)
+        print_cell 0
+        ;;
+      writer_race_same_count_hash_drift_diff_fails)
+        print_cell 1
         ;;
       *)
         printf 'unexpected DOLT_DIFF query: %%s\n' "$query" >&2
@@ -2516,6 +2536,64 @@ func TestCompactScriptDefersWhenDatabaseHashPreHeadProbeIsEmptyButPostProbeProve
 		t.Fatalf("defer message should report empty pre-probe HEAD and writer post-probe HEAD:\n%s", out)
 	}
 	assertCompactWriterRaceDeferred(t, fixture, out, err)
+}
+
+// A concurrent UPDATE that lands during the post-flatten verify leaves the
+// row count unchanged but drifts the table's value hash — the same signal as
+// corruption. HEAD moving past the flatten's own commit proves a writer, and
+// diffing the pre-flight snapshot against the flatten commit shows the
+// flatten itself never touched the table's rows (zero non-added rows), so
+// the drift is entirely the writer's UPDATE. That combination downgrades the
+// same-count-hash-drift quarantine to a defer.
+func TestCompactScriptDefersProvenWriterRaceSameCountHashDrift(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "writer_race_same_count_hash_drift_only", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if !strings.Contains(out, "table=beads value hash changed after flatten without row-count increase") {
+		t.Fatalf("output missing the same-count hash-drift signal that the gate downgrades:\n%s", out)
+	}
+	if !strings.Contains(out, "post_verify_HEAD=writercommit") {
+		t.Fatalf("defer message should report HEAD moving past the flatten commit:\n%s", out)
+	}
+	assertCompactWriterRaceDeferred(t, fixture, out, err)
+}
+
+// Same proven writer race (HEAD moves past the flatten commit) but the
+// preflight-to-flatten diff proof itself fails — the flatten commit shows a
+// removed/modified row for the drifted table, so the drift cannot be
+// attributed entirely to the writer. The defer downgrade must not apply and
+// the run quarantines exactly as an unproven same-count drift would.
+func TestCompactScriptQuarantinesSameCountDriftWhenDiffProofFails(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "writer_race_same_count_hash_drift_diff_fails", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("compact succeeded despite a failed additive-only diff proof:\n%s", out)
+	}
+	if !strings.Contains(out, "table=beads value hash changed after flatten without row-count increase") {
+		t.Fatalf("output missing value-hash drift warning:\n%s", out)
+	}
+	logData, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read dolt log: %v", readErr)
+	}
+	if strings.Contains(string(logData), "DOLT_GC") {
+		t.Fatalf("same-count value-hash drift with a failed diff proof must block full GC:\n%s", logData)
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Fatalf("failed diff proof should still write quarantine marker: %v", statErr)
+	}
+	assertCompactMarkerHasEvidence(t, marker,
+		"reason=post-flatten table value hash changed without row-count increase",
+		"integrity_table_drift=table=beads,before_rows=10,after_rows=10,before_hash=hash-beads-before,after_hash=hash-beads-after-writer,category=same_row_count_hash_drift",
+		"flatten_pre_reset_head=headcommit",
+		"flatten_head=compactcommit",
+		"flatten_post_verify_head=writercommit",
+		"decision=preserve_marker_manual_review_required",
+	)
+	pendingGC := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
+	if _, statErr := os.Stat(pendingGC); !os.IsNotExist(statErr) {
+		t.Fatalf("failed diff proof must not write a pending-GC retry marker; stat=%v", statErr)
+	}
 }
 
 func TestCompactScriptRetriesPendingGCAfterWriterRaceDefer(t *testing.T) {
