@@ -216,27 +216,63 @@ func Known(sub string) bool {
 // ValueFlags returns the set of value-consuming flag names (long and short
 // form) for sub, merged with the global flags shared by every bd
 // subcommand. Returns nil if sub is not a known subcommand key.
+//
+// This is the static, pinned-table lookup: it never shells out to `bd`.
+// Callers that gate whether bd gets invoked at all (the write-mutation ID
+// guard in cmd_bd.go, the by-id door in cmd_bd_by_id.go, the split-city
+// class-projection refusal in bd_relocated_classes.go) depend on that —
+// TestGcBdListRefusesAGraphClassProjectionOnASplitCity asserts bd is never
+// invoked on a refused path, and a live discovery probe here would violate
+// that invariant as a side effect of a flag-name lookup. Use
+// ValueFlagsWithDiscovery for text-analysis contexts (the `gc lint` bd-flag
+// check) that may legitimately shell out.
 func ValueFlags(sub string) map[string]bool {
 	subFlags, ok := valueFlagsBySub[sub]
 	if !ok {
 		return nil
 	}
-	base := mergeFlagSets(globalValueFlags, subFlags)
-	discovered := parseDiscoveredFlags(sub)
-	return mergeFlagSets(base, discovered.value)
+	return mergeFlagSets(globalValueFlags, subFlags)
 }
 
 // BoolFlags returns the set of boolean flag names for sub, merged with the
 // global boolean flags shared by every bd subcommand. Returns nil if sub is
-// not a known subcommand key.
+// not a known subcommand key. See ValueFlags: this is the static, pinned-
+// table lookup and never shells out to `bd`.
 func BoolFlags(sub string) map[string]bool {
 	subFlags, ok := boolFlagsBySub[sub]
 	if !ok {
 		return nil
 	}
-	base := mergeFlagSets(globalBoolFlags, subFlags)
-	discovered := parseDiscoveredFlags(sub)
-	return mergeFlagSets(base, discovered.bool)
+	return mergeFlagSets(globalBoolFlags, subFlags)
+}
+
+// ValueFlagsWithDiscovery returns ValueFlags(sub) augmented with flags
+// discovered by shelling out to `bd <sub> --help`, so the flag table can
+// stay current without a manual re-transcription each time bd adds a flag.
+// Discovery failure (bd missing, renamed, slow) silently falls back to the
+// static table, which is why the compare-and-set flags are pinned there
+// too rather than relying on discovery alone.
+//
+// Only for contexts where invoking bd as a side effect is acceptable — the
+// `gc lint` check that validates bd invocations embedded in prompt
+// templates (ScanUnknownFlags) is pure text analysis, not a guard deciding
+// whether to invoke bd, so a live probe there is safe.
+func ValueFlagsWithDiscovery(sub string) map[string]bool {
+	base := ValueFlags(sub)
+	if base == nil {
+		return nil
+	}
+	return mergeFlagSets(base, parseDiscoveredFlags(sub).value)
+}
+
+// BoolFlagsWithDiscovery is BoolFlags augmented with live discovery. See
+// ValueFlagsWithDiscovery.
+func BoolFlagsWithDiscovery(sub string) map[string]bool {
+	base := BoolFlags(sub)
+	if base == nil {
+		return nil
+	}
+	return mergeFlagSets(base, parseDiscoveredFlags(sub).bool)
 }
 
 type discoveredFlags struct {

@@ -53,12 +53,12 @@ Global Flags:
 		parseDiscoveredOnce = sync.Map{}
 	}()
 
-	flags := ValueFlags("update")
+	flags := ValueFlagsWithDiscovery("update")
 	if !flags["--if-assignee"] {
-		t.Fatalf("ValueFlags(update)[--if-assignee] = false, want true")
+		t.Fatalf("ValueFlagsWithDiscovery(update)[--if-assignee] = false, want true")
 	}
 	if !flags["--status"] {
-		t.Fatalf("ValueFlags(update)[--status] = false, want true")
+		t.Fatalf("ValueFlagsWithDiscovery(update)[--status] = false, want true")
 	}
 }
 
@@ -77,12 +77,12 @@ func TestBoolFlagsIncorporatesDiscovered(t *testing.T) {
 		parseDiscoveredOnce = sync.Map{}
 	}()
 
-	flags := BoolFlags("update")
+	flags := BoolFlagsWithDiscovery("update")
 	if !flags["--allow-empty-description"] {
-		t.Fatalf("BoolFlags(update)[--allow-empty-description] = false, want true")
+		t.Fatalf("BoolFlagsWithDiscovery(update)[--allow-empty-description] = false, want true")
 	}
 	if !flags["--no-history"] {
-		t.Fatalf("BoolFlags(update)[--no-history] = false, want true")
+		t.Fatalf("BoolFlagsWithDiscovery(update)[--no-history] = false, want true")
 	}
 }
 
