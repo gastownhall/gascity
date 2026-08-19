@@ -47,6 +47,7 @@ func TestDoltConfigWriteManagedCmd(t *testing.T) {
 		`dolt_stats_memory_only: "ON"`,
 		`dolt_stats_paused: "ON"`,
 		`wait_timeout: "30"`,
+		"read_timeout_millis: 120000",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("config missing %q:\n%s", want, text)
@@ -102,6 +103,34 @@ func TestWriteManagedDoltConfigFile_UsesCityDoltListenerOverrides(t *testing.T) 
 		if !strings.Contains(text, want) {
 			t.Fatalf("config missing %q:\n%s", want, text)
 		}
+	}
+}
+
+// TestWriteManagedDoltConfigFile_ReadTimeoutCommentAttributesIdleReapToWaitTimeout
+// is the ga-lfcx72 golden-file guard: the emitted listener comment must
+// attribute idle/abandoned socket reaping to wait_timeout, not read_timeout
+// (#5053 moved that responsibility), so the constant and its explanatory
+// comment cannot silently drift apart again the way they did before this
+// fix (#5383).
+func TestWriteManagedDoltConfigFile_ReadTimeoutCommentAttributesIdleReapToWaitTimeout(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "packs", "dolt", "dolt-config.yaml")
+	if err := writeManagedDoltConfigFile(configPath, "127.0.0.1", "3311", "/tmp/dolt-data", "warning", config.DoltConfig{}); err != nil {
+		t.Fatalf("writeManagedDoltConfigFile: %v", err)
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	text := string(data)
+
+	if !strings.Contains(text, "read_timeout_millis: 120000") {
+		t.Fatalf("config default read_timeout_millis not raised to 120000:\n%s", text)
+	}
+	if !strings.Contains(text, "reaped by wait_timeout") {
+		t.Fatalf("listener comment no longer attributes idle/abandoned socket reaping to wait_timeout:\n%s", text)
+	}
+	if strings.Contains(text, "The managed default reaps idle sockets promptly") {
+		t.Fatalf("listener comment still contains the stale claim that read_timeout reaps idle sockets:\n%s", text)
 	}
 }
 
@@ -242,7 +271,7 @@ func TestWriteManagedDoltConfigFile_WaitTimeoutCanBeDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
-	if strings.Contains(string(data), "wait_timeout") {
+	if strings.Contains(string(data), "wait_timeout:") {
 		t.Fatalf("negative GC_DOLT_WAIT_TIMEOUT should disable wait_timeout override:\n%s", data)
 	}
 }
