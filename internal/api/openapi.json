@@ -12103,6 +12103,7 @@
             "emergency.signaled": "#/components/schemas/TypedEventStreamEnvelopeEmergencySignaled",
             "events.rotated": "#/components/schemas/TypedEventStreamEnvelopeEventsRotated",
             "execution.claim_window_expired": "#/components/schemas/TypedEventStreamEnvelopeExecutionClaimWindowExpired",
+            "execution.run_anchored": "#/components/schemas/TypedEventStreamEnvelopeExecutionRunAnchored",
             "execution.step_completed": "#/components/schemas/TypedEventStreamEnvelopeExecutionStepCompleted",
             "execution.step_defined": "#/components/schemas/TypedEventStreamEnvelopeExecutionStepDefined",
             "execution.step_stalled": "#/components/schemas/TypedEventStreamEnvelopeExecutionStepStalled",
@@ -12244,6 +12245,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeExecutionClaimWindowExpired"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeExecutionRunAnchored"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeExecutionStepCompleted"
@@ -13656,6 +13660,7 @@
                 "bead.claim_released",
                 "bead.dead_assignee_reopened",
                 "execution.work_associated",
+                "execution.run_anchored",
                 "execution.step_defined",
                 "execution.step_started",
                 "execution.step_completed",
@@ -13963,6 +13968,63 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope execution.claim_window_expired",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeExecutionRunAnchored": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/NoPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "execution.run_anchored",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope execution.run_anchored",
         "type": "object"
       },
       "TypedEventStreamEnvelopeExecutionStepCompleted": {
@@ -17755,6 +17817,7 @@
             "emergency.signaled": "#/components/schemas/TypedTaggedEventStreamEnvelopeEmergencySignaled",
             "events.rotated": "#/components/schemas/TypedTaggedEventStreamEnvelopeEventsRotated",
             "execution.claim_window_expired": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired",
+            "execution.run_anchored": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionRunAnchored",
             "execution.step_completed": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionStepCompleted",
             "execution.step_defined": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionStepDefined",
             "execution.step_stalled": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionStepStalled",
@@ -17896,6 +17959,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionRunAnchored"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionStepCompleted"
@@ -19391,6 +19457,7 @@
                 "bead.claim_released",
                 "bead.dead_assignee_reopened",
                 "execution.work_associated",
+                "execution.run_anchored",
                 "execution.step_defined",
                 "execution.step_started",
                 "execution.step_completed",
@@ -19715,6 +19782,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope execution.claim_window_expired",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeExecutionRunAnchored": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/NoPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "execution.run_anchored",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope execution.run_anchored",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeExecutionStepCompleted": {

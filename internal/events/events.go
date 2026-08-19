@@ -64,6 +64,11 @@ const (
 	// graph.v2 workflow run and one physical input work bead. Subject carries
 	// the work bead and RunID carries the workflow root.
 	ExecutionWorkAssociated = "execution.work_associated"
+	// ExecutionRunAnchored records an authoritative relation between a graph.v2
+	// workflow run and a source work bead. Subject carries the source bead
+	// and RunID carries the workflow root; it does not replace the physical
+	// launch carried by ExecutionWorkAssociated.
+	ExecutionRunAnchored = "execution.run_anchored"
 	// ExecutionStepDefined records one physical native execution-step
 	// occurrence. Subject carries the physical step bead, RunID the workflow
 	// root, and StepID/DependsOnStepIDs the semantic topology.
@@ -342,7 +347,7 @@ var KnownEventTypes = []string{
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
 	BeadClaimRejected, BeadClaimReleased,
 	BeadDeadAssigneeReopened,
-	ExecutionWorkAssociated, ExecutionStepDefined, ExecutionStepStarted, ExecutionStepCompleted,
+	ExecutionWorkAssociated, ExecutionRunAnchored, ExecutionStepDefined, ExecutionStepStarted, ExecutionStepCompleted,
 	ExecutionClaimWindowExpired,
 	ExecutionStepStalled,
 	MailSent, MailRead, MailArchived, MailMarkedRead, MailMarkedUnread,

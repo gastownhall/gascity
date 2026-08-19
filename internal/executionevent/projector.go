@@ -36,6 +36,15 @@ type WorkAssociation struct {
 	ExecutionRunID string
 }
 
+// RunAnchor relates a source work bead to an execution run through the
+// authoritative generic source chain. It is distinct from WorkAssociation:
+// the latter continues to identify the physical rig launch that entered the
+// input convoy.
+type RunAnchor struct {
+	SourceBeadID   string
+	ExecutionRunID string
+}
+
 // StepDefinition describes one physical execution-step occurrence. A nil
 // DependsOnStepIDs means topology is unknown; a present empty slice identifies
 // an authoritative root step.
@@ -50,6 +59,7 @@ type StepDefinition struct {
 // graph.v2 workflow root.
 type Projection struct {
 	WorkAssociations []WorkAssociation
+	RunAnchors       []RunAnchor
 	Steps            []StepDefinition
 }
 
@@ -70,16 +80,25 @@ func EmitCurrent(recorder events.Recorder, graphStore beads.GraphStore, convoySt
 }
 
 // Events converts the projection to repeatable snapshot facts. Work
-// associations precede step definitions, preserving each slice's deterministic
-// order. Topology is copied so later graph reads cannot mutate emitted facts.
+// associations precede source anchors and step definitions, preserving each
+// slice's deterministic order. Topology is copied so later graph reads cannot
+// mutate emitted facts.
 func (p Projection) Events(actor string) []events.Event {
-	result := make([]events.Event, 0, len(p.WorkAssociations)+len(p.Steps))
+	result := make([]events.Event, 0, len(p.WorkAssociations)+len(p.RunAnchors)+len(p.Steps))
 	for _, association := range p.WorkAssociations {
 		result = append(result, events.Event{
 			Type:    events.ExecutionWorkAssociated,
 			Actor:   actor,
 			Subject: association.WorkBeadID,
 			RunID:   association.ExecutionRunID,
+		})
+	}
+	for _, anchor := range p.RunAnchors {
+		result = append(result, events.Event{
+			Type:    events.ExecutionRunAnchored,
+			Actor:   actor,
+			Subject: anchor.SourceBeadID,
+			RunID:   anchor.ExecutionRunID,
 		})
 	}
 	for _, step := range p.Steps {
@@ -130,7 +149,55 @@ func ProjectCurrent(graphStore beads.GraphStore, convoyStore beads.WorkStore, ro
 	if err != nil {
 		return Projection{}, err
 	}
-	return Projection{WorkAssociations: work, Steps: steps}, nil
+	anchors := currentRunAnchors(convoyStore, root, work)
+	return Projection{WorkAssociations: work, RunAnchors: anchors, Steps: steps}, nil
+}
+
+// currentRunAnchors follows the exact generic source chain from each
+// authoritative input work association to its launch bead and then to that
+// launch's source work bead. A root source link, when present, must identify
+// one of those launches. It deliberately does not infer identity from other
+// work, sessions, provider identifiers, or wrapper metadata. Missing,
+// unreadable, non-exact, or ambiguous links produce no anchor while preserving
+// the rest of the execution snapshot.
+func currentRunAnchors(store beads.WorkStore, root beads.Bead, work []WorkAssociation) []RunAnchor {
+	if len(work) == 0 || store.Store == nil {
+		return nil
+	}
+	declaredLaunchID := root.Metadata[beadmeta.SourceBeadIDMetadataKey]
+	if declaredLaunchID != "" && !eventexport.IsOpaqueRef(declaredLaunchID) {
+		return nil
+	}
+	anchors := make([]RunAnchor, 0, len(work))
+	seenSources := make(map[string]string, len(work))
+	declaredMatched := false
+	for _, association := range work {
+		launchID := association.WorkBeadID
+		if !eventexport.IsOpaqueRef(launchID) {
+			continue
+		}
+		launch, err := store.Get(launchID)
+		if err != nil || launch.ID != launchID {
+			continue
+		}
+		if launchID == declaredLaunchID {
+			declaredMatched = true
+		}
+		sourceID := launch.Metadata[beadmeta.SourceBeadIDMetadataKey]
+		if !eventexport.IsOpaqueRef(sourceID) {
+			continue
+		}
+		if prior, ok := seenSources[sourceID]; ok && prior != launchID {
+			return nil
+		}
+		seenSources[sourceID] = launchID
+		anchors = append(anchors, RunAnchor{SourceBeadID: sourceID, ExecutionRunID: root.ID})
+	}
+	if (declaredLaunchID != "" && !declaredMatched) || len(anchors) == 0 {
+		return nil
+	}
+	sort.Slice(anchors, func(i, j int) bool { return anchors[i].SourceBeadID < anchors[j].SourceBeadID })
+	return anchors
 }
 
 func currentWorkAssociations(store beads.WorkStore, rootID, convoyID string) ([]WorkAssociation, error) {
