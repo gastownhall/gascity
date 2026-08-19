@@ -31,6 +31,7 @@ duration-range
 provider-parity
 formula-requirements
 named-always-min-conflict
+nudge-unconfirmed
 instructions-file
 service-secrets-perms
 skill-collision
