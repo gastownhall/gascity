@@ -237,7 +237,7 @@ func TestReleaseOrphanedPoolAssignments_NilSessionsStoreFallsBackToWorkStore(t *
 
 	released := releaseOrphanedPoolAssignments(
 		store,
-		nil, // no session-class store: the work store has to answer the liveness re-read
+		beads.SessionStore{}, // unset session-class store: the work store has to answer the liveness re-read
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		"",
 		nil, // empty snapshot: the two snapshot gates miss, so the live re-read decides
