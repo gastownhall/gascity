@@ -169,6 +169,15 @@ func canonicalPauseMessage(unsigned pauseUnsigned) ([]byte, error) {
 	return message, nil
 }
 
+// canonicalPauseMessageCapacity is completed by the GREEN step (ga-n6gvg8.1):
+// it does not yet guard the sum itself against overflow.
+func canonicalPauseMessageCapacity(prefixLen, encodedLen int) (int, error) {
+	if prefixLen < 0 || encodedLen < 0 {
+		return 0, fmt.Errorf("productmetrics: canonical pause message length is negative")
+	}
+	return prefixLen + encodedLen, nil
+}
+
 func validatePauseUnsigned(unsigned pauseUnsigned) error {
 	if unsigned.SchemaVersion != SchemaVersionV1 {
 		return fmt.Errorf("productmetrics: signed pause schema version must be %d", SchemaVersionV1)
