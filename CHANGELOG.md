@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **ACP provider processes no longer leak across reconciler process boundaries.**
+  `session/update` activity is published to a durable sidecar so a separate
+  `gc` process (controller/reconciler) can observe `last_active`, declare
+  ACP's activity capability, and terminate idle or drain-acked sessions
+  instead of leaving provider OS processes resident.
+
 ### Changed
 
 - Managed Dolt config now emits listener backlog and connection-timeout keys.
