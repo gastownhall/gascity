@@ -1007,10 +1007,12 @@ func TestExportMirrorPublishesTheUserTurnBeforeTheReply(t *testing.T) {
 	}
 }
 
-// A conversation reset must orphan the prior conversation's plaintext, not just
-// its sid: the model can read a stale mirror straight off disk (observed live —
-// GLM reproduced a pre-reset anchor byte-exact out of one).
-func TestResetSweepsTheSupersededEpochsState(t *testing.T) {
+// A conversation reset must move the prior conversation out of the directory the
+// model browses — that adjacency is the leak that was actually observed (GLM
+// reproduced a pre-reset anchor byte-exact out of a stale mirror sitting beside
+// the fresh one). It must NOT destroy it: gc reads the pre-reset transcript
+// after the reset is issued, so the record has to survive somewhere resolvable.
+func TestResetArchivesTheSupersededEpochsState(t *testing.T) {
 	t.Parallel()
 
 	h := newHarness(t, map[string]string{"STUB_SID": "sess_epoch_one"})
@@ -1030,14 +1032,35 @@ func TestResetSweepsTheSupersededEpochsState(t *testing.T) {
 	h.env["STUB_SID"] = "sess_epoch_two"
 	h.run("fresh conversation\n")
 
+	// Gone from the live tree the model reads...
 	if _, err := os.Stat(oldMirror); !os.IsNotExist(err) {
-		t.Fatalf("superseded epoch's transcript survived the reset: %v", err)
+		t.Fatalf("superseded epoch's transcript stayed adjacent to the fresh one: %v", err)
 	}
+	// ...but preserved in the archive, still keyed by its own scope.
+	archived := filepath.Join(h.home, ".local", "state", "gascity", "zcode",
+		"archived-transcripts", "test-session#1", "sess_epoch_one.json")
+	if _, err := os.Stat(archived); err != nil {
+		t.Fatalf("superseded epoch's transcript was destroyed rather than archived: %v", err)
+	}
+	// The CLI's own database has no preservation contract and is the copy the
+	// CLI itself would reattach to, so it is still deleted.
 	if _, err := os.Stat(oldHome); !os.IsNotExist(err) {
 		t.Fatalf("superseded epoch's CLI state survived the reset: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(h.mirrorDir, h.epochScope(), "sess_epoch_two.json")); err != nil {
 		t.Fatalf("epoch 2 mirror missing: %v", err)
+	}
+	// The live tree carries exactly one scope: the current one.
+	entries, err := os.ReadDir(h.mirrorDir)
+	if err != nil {
+		t.Fatalf("read live mirror root: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != h.epochScope() {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("live mirror root = %v, want only the current scope %q", names, h.epochScope())
 	}
 }
 

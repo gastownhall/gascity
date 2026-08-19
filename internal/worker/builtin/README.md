@@ -193,6 +193,17 @@ python3 scripts/worker_conformance_grid.py \
   worth keeping, but a green cell here is not evidence that a live zcode worker
   surfaces tool calls or permission prompts. Wiring real tool-part extraction is
   a follow-up, not something these cells already cover.
+- A `zcode` conversation reset ARCHIVES the superseded conversation rather than
+  deleting it: gc's reset contract issues the reset and then reads the pre-reset
+  transcript, so the record has to stay resolvable by its own scope. Superseded
+  scopes move to `$XDG_STATE_HOME/gascity/zcode/archived-transcripts/`, a
+  different tree from the live mirror root the model browses, and discovery
+  unions both. The anti-leak guarantee is therefore "the prior conversation is
+  not adjacent", not "not present" — adjacency is the leak that was observed
+  (GLM read a stale mirror sitting beside the fresh one in the same directory).
+  Enforcement is the behavioral no-recall proof plus the per-epoch CLI HOME,
+  which IS deleted because ZCode's own session database has no preservation
+  contract and is the copy the CLI itself would reattach to.
 - The zcode row is refreshed with `--provider zcode`, which rewrites only that
   provider's rows. A full regeneration writes every provider from the reports it
   is handed, so running it on a host that holds one provider's reports would

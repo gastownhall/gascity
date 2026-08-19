@@ -139,8 +139,28 @@ transcript_dir="${GC_ZCODE_TRANSCRIPT_DIR:-$HOME/.local/share/gascity/zcode-tran
 # outlive the conversation it belongs to.
 mirror_root="$transcript_dir"
 transcript_dir="$transcript_dir/$sid_name#$continuation_epoch"
+
+# A superseded conversation is ARCHIVED, not deleted. gc's reset contract is
+# record rotation, not record destruction: `gc session reset` is issued and the
+# pre-reset transcript is read afterwards, so deleting it made the old and new
+# scopes resolve to the same file and the conversation appear preserved. It also
+# made the outcome a race between this restart and that read.
+#
+# The archive lives under XDG_STATE_HOME, a different tree from the live mirror
+# root the model browses. That downgrades the anti-leak guarantee from "the
+# prior conversation is not present" to "it is not adjacent" — which is the
+# leak that was actually observed: GLM read a stale mirror sitting beside the
+# fresh one in the same directory. Enforcement stays the behavioral no-recall
+# proof plus the per-epoch CLI HOME below, which does still get deleted because
+# ZCode's own session database has no preservation contract and is the one copy
+# the CLI itself would reattach to.
+archive_root="$state_home/gascity/zcode/archived-transcripts"
 for stale in "$mirror_root/$sid_name"#*; do
-    if [[ -d "$stale" && "$stale" != "$transcript_dir" ]]; then rm -rf "$stale"; fi
+    if [[ -d "$stale" && "$stale" != "$transcript_dir" ]]; then
+        mkdir -p "$archive_root"
+        rm -rf "$archive_root/$(basename "$stale")"
+        mv "$stale" "$archive_root/" 2>/dev/null || rm -rf "$stale"
+    fi
 done
 mkdir -p "$transcript_dir"
 

@@ -30,7 +30,27 @@ func FindZCodeSessionFile(searchPaths []string, workDir string) string {
 }
 
 func mergeZCodeSearchPaths(extraPaths []string) []string {
-	return mergePaths(DefaultZCodeSearchPaths(), extraPaths)
+	return mergePaths(append(DefaultZCodeSearchPaths(), DefaultZCodeArchiveSearchPaths()...), extraPaths)
+}
+
+// DefaultZCodeArchiveSearchPaths returns the archive root the zcode adapter
+// moves superseded conversation scopes into on a reset.
+//
+// It is deliberately a different tree from the live mirror root: the live root
+// is what the model browses, so a stale conversation sitting beside the fresh
+// one there is the leak that was actually observed. Discovery still unions the
+// archive, because gc's reset contract reads the pre-reset transcript AFTER the
+// reset is issued — a rotated conversation has to stay resolvable by its own
+// scope even though it is no longer the current one.
+func DefaultZCodeArchiveSearchPaths() []string {
+	if state := strings.TrimSpace(os.Getenv("XDG_STATE_HOME")); state != "" {
+		return []string{filepath.Join(state, "gascity", "zcode", "archived-transcripts")}
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	return []string{filepath.Join(home, ".local", "state", "gascity", "zcode", "archived-transcripts")}
 }
 
 // DefaultZCodeSearchPaths returns Gas City's default ZCode transcript mirror

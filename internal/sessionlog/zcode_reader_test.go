@@ -3,6 +3,7 @@ package sessionlog
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -240,5 +241,49 @@ func TestFindZCodeSessionFileByScopeSeparatesSameWorkDirSessions(t *testing.T) {
 	slashed := write("gascity_gc.worker-9#1", "sess_slashed")
 	if got := FindZCodeSessionFileByScope([]string{root}, workDir, "gascity/gc.worker-9", "1"); got != slashed {
 		t.Fatalf("sanitized scope resolved %q, want %q", got, slashed)
+	}
+}
+
+// The reset contract reads the PRE-reset transcript after the reset is issued,
+// so a rotated conversation has to stay resolvable by its own scope from the
+// archive while the live tree carries only the current one. Deleting it instead
+// made both scopes resolve to the same file — the conversation then looked
+// preserved, and whether it did was a race against the pane restart.
+func TestFindZCodeSessionFileByScopeResolvesArchivedConversations(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, "state"))
+	live := filepath.Join(home, "live")
+	archive := filepath.Join(home, "state", "gascity", "zcode", "archived-transcripts")
+	workDir := filepath.Join(t.TempDir(), "project")
+
+	write := func(root, scope, id string) string {
+		dir := filepath.Join(root, scope)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+		path := filepath.Join(dir, id+".json")
+		body := `{"info":{"id":"` + id + `","directory":"` + filepath.ToSlash(workDir) + `"},"messages":[]}`
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+		return path
+	}
+	// Post-reset layout: epoch 1 archived, epoch 2 live.
+	archived := write(archive, "probe#1", "sess_before")
+	current := write(live, "probe#2", "sess_after")
+
+	if got := FindZCodeSessionFileByScope([]string{live}, workDir, "probe", "1"); got != archived {
+		t.Fatalf("pre-reset scope resolved %q, want the archived %q", got, archived)
+	}
+	if got := FindZCodeSessionFileByScope([]string{live}, workDir, "probe", "2"); got != current {
+		t.Fatalf("post-reset scope resolved %q, want the live %q", got, current)
+	}
+	// The two scopes must not collapse onto one file — that is exactly what
+	// made a reset look like a preserved conversation.
+	if archived == current {
+		t.Fatal("pre- and post-reset scopes resolved to the same transcript")
+	}
+	if !strings.Contains(archived, "archived-transcripts") {
+		t.Fatalf("archived path %q is not under the archive root", archived)
 	}
 }
