@@ -10,7 +10,7 @@ import (
 )
 
 // nonResidentBeadStore hides one bead from Get while serving everything else,
-// modelling a split-store city where a convoy's tracks edges are readable from
+// modeling a split-store city where a convoy's tracks edges are readable from
 // the store that materialized the molecule while the launch bead they name is
 // resident in another store.
 type nonResidentBeadStore struct {
