@@ -2373,7 +2373,14 @@ func (t *Tmux) NudgeSession(session, message string) error {
 		}
 		return nil
 	}
-	// Fallback: best-effort single delivery (unchanged historical behavior).
+	// Fallback: best-effort delivery for providers with no reliable busy
+	// indicator (unchanged historical send behavior). Unlike the verified
+	// path above, this family can never confirm the submit landed — so a
+	// successful send is reported the same way as an unconfirmed one on the
+	// verified path, not as a clean nil: collapsing it to nil would ack a
+	// nudge that may still be drafted-but-unsubmitted, permanently losing it
+	// on the first send instead of leaving it to requeue and retry like every
+	// other delivery outcome (see ErrNudgeSubmitUnconfirmed above).
 	var lastErr error
 	for attempt := 0; attempt < submitEnterMaxSends; attempt++ {
 		if attempt > 0 {
@@ -2386,7 +2393,7 @@ func (t *Tmux) NudgeSession(session, message string) error {
 		// 7. Wake again so the submitted turn is processed promptly.
 		wake()
 		delivered = true
-		return nil
+		return fmt.Errorf("%w: session %q (no busy-state confirmation available)", ErrNudgeSubmitUnconfirmed, session)
 	}
 	return fmt.Errorf("failed to send submit sequence after %d attempts: %w", submitEnterMaxSends, lastErr)
 }

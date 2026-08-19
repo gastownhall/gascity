@@ -108,7 +108,7 @@ func TestNudgePokeRealTmux(t *testing.T) {
 		// No GC_PROVIDER set and a plain shell pane: submitVerifyEligible is
 		// false, so this exercises the fallback best-effort delivery path
 		// (the "forgot the second return" footgun the bead calls out).
-		if err := tm.NudgeSession(sess, "# gc-nudge-plain"); err != nil {
+		if err := tm.NudgeSession(sess, "# gc-nudge-plain"); err != nil && !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
 			t.Fatalf("NudgeSession: %v", err)
 		}
 
@@ -130,7 +130,7 @@ func TestNudgePokeRealTmux(t *testing.T) {
 		}
 		time.Sleep(200 * time.Millisecond)
 
-		if err := tm.NudgeSession(sess, "# gc-nudge-turn"); err != nil {
+		if err := tm.NudgeSession(sess, "# gc-nudge-turn"); err != nil && !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
 			t.Fatalf("NudgeSession: %v", err)
 		}
 		tm.pokeMu.Lock()

@@ -68,11 +68,12 @@ type fakeStartOps struct {
 	// sendKeysErrs, if non-empty, is consumed sequentially across calls
 	// (like createErrs) and takes priority over sendKeysErr — used to
 	// simulate a startup nudge that confirms on a later retry attempt.
-	sendKeysErrs         []error
-	sendKeysIdx          int
-	capturePaneText      string
-	capturePaneErr       error
-	recordStartCrashPath string
+	sendKeysErrs               []error
+	sendKeysIdx                int
+	capturePaneText            string
+	capturePaneErr             error
+	recordStartCrashPath       string
+	recordUnconfirmedNudgePath string
 
 	paneBusyResult bool
 	paneBusyErr    error
@@ -213,6 +214,11 @@ func (f *fakeStartOps) capturePane(name string, _ int) (string, error) {
 func (f *fakeStartOps) recordStartCrash(name, _ string) string {
 	f.calls = append(f.calls, startCall{method: "recordStartCrash", name: name})
 	return f.recordStartCrashPath
+}
+
+func (f *fakeStartOps) recordUnconfirmedNudge(name, _ string, _ error) string {
+	f.calls = append(f.calls, startCall{method: "recordUnconfirmedNudge", name: name})
+	return f.recordUnconfirmedNudgePath
 }
 
 func (f *fakeStartOps) runSetupCommand(_ context.Context, cmd string, env map[string]string, timeout time.Duration) error {
@@ -964,14 +970,14 @@ func TestDoStartSessionReturnsNudgeDeliveryError(t *testing.T) {
 	// submit that never clears — even after exhausting every backoff — must
 	// not fail the start: the keystrokes reached tmux and the session is
 	// already verified alive. Only genuine delivery errors are fatal (above).
-	t.Run("unconfirmed submit is not fatal even after exhausting retries", func(t *testing.T) {
+	t.Run("unconfirmed submit is not fatal but is durably recorded after exhausting retries", func(t *testing.T) {
 		origBackoffs := startupNudgeRetryBackoffs
 		startupNudgeRetryBackoffs = []time.Duration{time.Millisecond, time.Millisecond}
 		defer func() { startupNudgeRetryBackoffs = origBackoffs }()
-
 		ops := &fakeStartOps{
-			hasSessionResult: true,
-			sendKeysErr:      fmt.Errorf("%w: session %q", ErrNudgeSubmitUnconfirmed, "test"),
+			hasSessionResult:           true,
+			sendKeysErr:                fmt.Errorf("%w: session %q", ErrNudgeSubmitUnconfirmed, "test"),
+			recordUnconfirmedNudgePath: "/city/.gc/runtime/sessions/test/startup-nudge-unconfirmed.log",
 		}
 
 		cfg := runtime.Config{
@@ -985,6 +991,11 @@ func TestDoStartSessionReturnsNudgeDeliveryError(t *testing.T) {
 
 		// One initial attempt plus one retry per shrunk backoff.
 		callsByMethod(t, ops, "sendKeys", len(startupNudgeRetryBackoffs)+1)
+		// dr-6siig: an unconfirmed startup nudge has no retry-capable caller
+		// (Start returns nil, so nothing requeues it), so it must leave a
+		// durable artifact for a later observer instead of only a stderr
+		// line that vanishes with the process.
+		callsByMethod(t, ops, "recordUnconfirmedNudge", 1)
 	})
 }
 

@@ -829,6 +829,7 @@ type startOps interface {
 	hasSession(name string) (bool, error)
 	capturePane(name string, lines int) (string, error)
 	recordStartCrash(name, paneContent string) string
+	recordUnconfirmedNudge(name, message string, cause error) string
 	sendKeys(name, text string) error
 	paneBusy(name string) (bool, error)
 	setRemainOnExit(name string) error
@@ -992,6 +993,39 @@ func (o *tmuxStartOps) recordStartCrash(name, paneContent string) string {
 	}
 	path := filepath.Join(dir, "start-stderr.log")
 	if err := runtime.WritePrivateFile(path, []byte(b.String())); err != nil {
+		return ""
+	}
+	return path
+}
+
+// recordUnconfirmedNudge persists a durable diagnostic artifact when the
+// startup nudge is delivered but not confirmed ([ErrNudgeSubmitUnconfirmed]).
+// The startup nudge has no retry-capable caller (see launchOrchestration), so
+// unlike the queue-path nudge — which requeues on this error and gets a
+// bounded number of fresh attempts — a lost startup nudge would otherwise be
+// invisible with no other record. This mirrors recordStartCrash's diagnostic
+// capture (same runtimeDir/sessions/<name>/ location, same best-effort
+// semantics): a disabled capture (empty runtimeDir) or any I/O error returns
+// "" without affecting startup. Returns the artifact path when written.
+func (o *tmuxStartOps) recordUnconfirmedNudge(name, message string, cause error) string {
+	if o.runtimeDir == "" {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "session: %s\n", name)
+	fmt.Fprintf(&b, "cause: %v\n", cause)
+	b.WriteString("--- startup nudge text ---\n")
+	b.WriteString(message)
+	if message != "" && !strings.HasSuffix(message, "\n") {
+		b.WriteByte('\n')
+	}
+
+	dir := filepath.Join(o.runtimeDir, "sessions", name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return ""
+	}
+	path := filepath.Join(dir, "startup-nudge-unconfirmed.log")
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
 		return ""
 	}
 	return path
@@ -1434,7 +1468,14 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 			if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
 				return fmt.Errorf("sending startup nudge: %w", err)
 			}
+			// The stderr warning alone is not a durable record (Layer 0
+			// session output is not retained), so an unconfirmed startup
+			// nudge would otherwise vanish with nothing to reconcile against
+			// afterward. Persist a diagnostic artifact alongside the
+			// warning so a later observer (gc trace, a human, or an
+			// automated sweep) can find and act on it.
 			fmt.Fprintf(os.Stderr, "warning: startup nudge to %q delivered but not confirmed after retries: %v\n", name, err)
+			ops.recordUnconfirmedNudge(name, cfg.Nudge, err)
 		}
 	}
 
