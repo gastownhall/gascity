@@ -23,8 +23,8 @@ expires = "2026-10-31"
 [[audit_baseline]]
 scope = "all"
 resource = "fixed_sleep"
-baseline_calls = 488
-baseline_files = 177
+baseline_calls = 487
+baseline_files = 176
 reported_calls = 447
 reported_files = 157
 owner_bead = "ga-cp3hwi"

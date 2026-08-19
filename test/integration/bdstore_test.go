@@ -22,7 +22,7 @@ import (
 
 const (
 	bdInitTimeout          = 60 * time.Second
-	doltServerStartupLimit = 10 * time.Second
+	doltServerStartupLimit = 30 * time.Second
 	// doltServerReadyTimeout budgets startDoltServerOnAllInterfaces's
 	// TCP-dial readiness wait (dolt_config_test.go). Kept separate from
 	// doltServerStartupLimit — same shape of wait, but a distinct call
@@ -95,6 +95,86 @@ func TestBdStoreConformance(t *testing.T) {
 	beadstest.RunMetadataTests(t, newStore)
 }
 
+// TestPollUntilReady_SucceedsWithinTimeout confirms the poll loop returns
+// true as soon as check() succeeds, without waiting out the full budget.
+func TestPollUntilReady_SucceedsWithinTimeout(t *testing.T) {
+	var elapsed time.Duration
+	now := func() time.Time { return time.Unix(0, 0).Add(elapsed) }
+	sleep := func(d time.Duration) { elapsed += d }
+
+	attempts := 0
+	ready := pollUntilReady(now, sleep, 10*time.Second, time.Second, func() bool {
+		attempts++
+		return elapsed >= 3*time.Second
+	})
+
+	if !ready {
+		t.Fatalf("pollUntilReady() = false, want true (check succeeds at elapsed=3s within a 10s budget)")
+	}
+	if attempts == 0 {
+		t.Fatal("check was never called")
+	}
+}
+
+// TestPollUntilReady_TimesOutWhenNeverReady confirms the poll loop still
+// gives up when check() never succeeds -- the timeout is a real bound, not
+// removed by this change.
+func TestPollUntilReady_TimesOutWhenNeverReady(t *testing.T) {
+	var elapsed time.Duration
+	now := func() time.Time { return time.Unix(0, 0).Add(elapsed) }
+	sleep := func(d time.Duration) { elapsed += d }
+
+	ready := pollUntilReady(now, sleep, 2*time.Second, time.Second, func() bool {
+		return false
+	})
+
+	if ready {
+		t.Fatal("pollUntilReady() = true, want false (check never succeeds)")
+	}
+	if elapsed < 2*time.Second {
+		t.Fatalf("elapsed = %s before giving up, want >= timeout 2s", elapsed)
+	}
+}
+
+// TestPollUntilReady_ToleratesReadinessPastOldTenSecondBudget is a
+// regression test for ga-sxtkmu: under parallel shard load, the shared dolt
+// sql-server this test starts did not accept a TCP connection within the
+// old 10-second doltServerStartupLimit, though the same test passed
+// comfortably (23.55s total, including setup after the port opened) when
+// run in isolation. Simulating readiness at 15s -- past the old 10s budget
+// -- would have failed under the old limit; it must succeed under the
+// raised doltServerStartupLimit without weakening the check itself (see the
+// sibling timeout test for that half of the contract).
+func TestPollUntilReady_ToleratesReadinessPastOldTenSecondBudget(t *testing.T) {
+	var elapsed time.Duration
+	now := func() time.Time { return time.Unix(0, 0).Add(elapsed) }
+	sleep := func(d time.Duration) { elapsed += d }
+
+	const simulatedReadyAt = 15 * time.Second
+	ready := pollUntilReady(now, sleep, doltServerStartupLimit, 100*time.Millisecond, func() bool {
+		return elapsed >= simulatedReadyAt
+	})
+
+	if !ready {
+		t.Fatalf("pollUntilReady() = false, want true: doltServerStartupLimit=%s must tolerate a dependency ready at %s (exceeds the old 10s budget that caused ga-sxtkmu)", doltServerStartupLimit, simulatedReadyAt)
+	}
+}
+
+// pollUntilReady polls check on interval-spaced calls to sleep, stopping as
+// soon as check reports ready or now reaches the deadline. now and sleep
+// are injectable so callers can either use a real clock (production/test
+// fixtures) or a virtual one (fast, deterministic unit tests).
+func pollUntilReady(now func() time.Time, sleep func(time.Duration), timeout, interval time.Duration, check func() bool) bool {
+	deadline := now().Add(timeout)
+	for now().Before(deadline) {
+		if check() {
+			return true
+		}
+		sleep(interval)
+	}
+	return false
+}
+
 // startSharedDoltServer starts one explicit Dolt SQL server for the test and
 // returns its port. Using a shared server keeps bd commands fast and avoids
 // the embedded local-server shutdown delays seen in CI.
@@ -135,20 +215,22 @@ func startSharedDoltServer(t *testing.T, env []string, dataDir string) string {
 		waitCh <- cmd.Wait()
 	}()
 
-	deadline := time.Now().Add(doltServerStartupLimit)
 	addr := net.JoinHostPort("127.0.0.1", port)
-	for time.Now().Before(deadline) {
+	ready := pollUntilReady(time.Now, time.Sleep, doltServerStartupLimit, 100*time.Millisecond, func() bool {
 		conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
-		if err == nil {
-			_ = conn.Close()
-			t.Cleanup(func() {
-				cancel()
-				<-waitCh
-				_ = logFile.Close()
-			})
-			return port
+		if err != nil {
+			return false
 		}
-		time.Sleep(100 * time.Millisecond)
+		_ = conn.Close()
+		return true
+	})
+	if ready {
+		t.Cleanup(func() {
+			cancel()
+			<-waitCh
+			_ = logFile.Close()
+		})
+		return port
 	}
 
 	cancel()
