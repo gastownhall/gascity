@@ -13,7 +13,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"strconv"
 	"strings"
 	"time"
 
@@ -1285,28 +1284,22 @@ func (m *Manager) Suspend(id string) error {
 // RequestFreshRestart asks the controller to restart a session with fresh
 // provider conversation state.
 //
-// The continuation epoch is rotated HERE, at request time, not deferred to
-// whichever start path happens to pick the session up. Deferring it made the
-// reset's durability depend on the restart route: the controller's pre-wake
-// commit rotated it, other start paths did not, and a provider that carries
-// conversation identity itself (zcode keys its persisted provider session on
-// this epoch) resumed the conversation the operator had just reset. Rotating on
-// request makes the new epoch true the moment the reset is recorded, and the
-// consuming paths stay idempotent because they clear the pending marker.
+// It records the intent only. Rotation belongs to whichever start path picks
+// the session up, because this is NOT the only way a reset is requested: the
+// reconciler writes the same continuation_reset_pending marker directly when it
+// processes restart_requested, never routing through here. Rotating at request
+// time would therefore rotate on this path and not on that one. Every start
+// path consumes the marker exactly once instead (preWakeCommit for the
+// controller, commitPendingContinuationReset for Submit/Send/Attach/Start), so
+// the epoch advances once per reset however the reset was asked for.
 func (m *Manager) RequestFreshRestart(id string) error {
 	return withSessionMutationLock(id, func() error {
-		b, _, err := m.sessionBead(id)
-		if err != nil {
+		if _, _, err := m.sessionBead(id); err != nil {
 			return err
-		}
-		epoch, err := strconv.Atoi(b.Metadata["continuation_epoch"])
-		if err != nil || epoch <= 0 {
-			epoch = DefaultContinuationEpoch
 		}
 		return m.store.SetMetadataBatch(id, map[string]string{
 			"restart_requested":          "true",
 			"continuation_reset_pending": "true",
-			"continuation_epoch":         strconv.Itoa(epoch + 1),
 		})
 	})
 }

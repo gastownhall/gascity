@@ -123,12 +123,9 @@ func traceFreshWakeMetadataReset(name string, before map[string]string, batch se
 }
 
 func shouldBumpContinuationEpoch(info sessions.Info) bool {
-	// A pending conversation reset arrives with its epoch already rotated —
-	// sessions.Manager.RequestFreshRestart rotates when it records the reset,
-	// so the new epoch is durable no matter which path restarts the session.
-	// Bumping again here would rotate twice and orphan the conversation the
-	// reset just created. A fresh-wake-mode session has no such request-time
-	// rotation, so it still bumps here.
+	if info.ContinuationResetPending != "" {
+		return true
+	}
 	return info.WakeMode == "fresh" && info.LastWokeAt != ""
 }
 

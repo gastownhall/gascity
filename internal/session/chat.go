@@ -377,9 +377,11 @@ func (m *Manager) sessionBead(id string) (beads.Bead, string, error) {
 // (zcode keys its persisted provider session on this epoch) then resumed the
 // conversation the operator had just reset.
 //
-// Rotation itself belongs to RequestFreshRestart, so the new epoch is durable
-// from the moment the reset is recorded regardless of which path restarts the
-// session; every consumer here is a marker clear and is therefore idempotent.
+// Rotation belongs to the consumer, not to the request: the reconciler records
+// the same marker directly without routing through Manager.RequestFreshRestart,
+// so rotating at request time would rotate on one path and not the other. Every
+// start path bumps-and-clears in one batch instead, which keeps the total at
+// exactly one rotation per reset however the reset arrived.
 func (m *Manager) commitPendingContinuationReset(id string, b beads.Bead) (int, error) {
 	epoch, err := strconv.Atoi(b.Metadata["continuation_epoch"])
 	if err != nil || epoch <= 0 {
@@ -388,16 +390,19 @@ func (m *Manager) commitPendingContinuationReset(id string, b beads.Bead) (int, 
 	if strings.TrimSpace(b.Metadata["continuation_reset_pending"]) == "" {
 		return epoch, nil
 	}
-	// The epoch is rotated once, by RequestFreshRestart, when the reset is
-	// recorded — so a pending marker means the epoch read above is ALREADY the
-	// post-reset one. This path only consumes the marker. Rotating again here
-	// would orphan the conversation the reset just created.
+	// Consume the marker and rotate together: whichever start path gets here
+	// first clears it, so the epoch advances exactly once per reset even though
+	// several paths can service one. This mirrors preWakeCommit, which does the
+	// same for the controller wake.
+	epoch++
 	if err := m.store.SetMetadataBatch(id, map[string]string{
+		"continuation_epoch":         strconv.Itoa(epoch),
 		"continuation_reset_pending": "",
 	}); err != nil {
 		return 0, fmt.Errorf("committing pending continuation reset: %w", err)
 	}
 	if b.Metadata != nil {
+		b.Metadata["continuation_epoch"] = strconv.Itoa(epoch)
 		b.Metadata["continuation_reset_pending"] = ""
 	}
 	return epoch, nil

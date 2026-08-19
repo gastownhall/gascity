@@ -321,21 +321,22 @@ func TestCommitPendingContinuationResetBumpsAndClears(t *testing.T) {
 	}
 	id := b.ID
 
-	// The epoch arrives already rotated (RequestFreshRestart owns that), so this
-	// path publishes it as-is and only consumes the marker.
+	// The consumer rotates: it bumps and clears the marker in one batch, so the
+	// epoch advances exactly once per reset no matter which start path services
+	// it.
 	epoch, err := m.commitPendingContinuationReset(id, b)
 	if err != nil {
 		t.Fatalf("commitPendingContinuationReset: %v", err)
 	}
-	if epoch != 3 {
-		t.Fatalf("epoch = %d, want the already-rotated 3", epoch)
+	if epoch != 4 {
+		t.Fatalf("epoch = %d, want 4", epoch)
 	}
 	after, err := store.Get(id)
 	if err != nil {
 		t.Fatalf("get after: %v", err)
 	}
-	if got := after.Metadata["continuation_epoch"]; got != "3" {
-		t.Fatalf("persisted epoch = %q, want 3", got)
+	if got := after.Metadata["continuation_epoch"]; got != "4" {
+		t.Fatalf("persisted epoch = %q, want 4", got)
 	}
 	if got := after.Metadata["continuation_reset_pending"]; got != "" {
 		t.Fatalf("reset marker = %q, want cleared", got)
@@ -346,15 +347,16 @@ func TestCommitPendingContinuationResetBumpsAndClears(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second commit: %v", err)
 	}
-	if again != 3 {
-		t.Fatalf("epoch after a plain restart = %d, want 3", again)
+	if again != 4 {
+		t.Fatalf("epoch after a plain restart = %d, want 4 (no second rotation)", again)
 	}
 }
 
-// The rotation itself happens when the reset is RECORDED, so it is durable
-// whichever path restarts the session — including one that never reaches the
-// controller's pre-wake commit.
-func TestRequestFreshRestartRotatesTheContinuationEpoch(t *testing.T) {
+// Rotation happens exactly once per reset, and it belongs to the consumer.
+// RequestFreshRestart only records the intent, because the reconciler writes
+// the same marker directly without ever calling it — rotating at request time
+// would rotate on one entry path and not the other.
+func TestRequestFreshRestartRecordsIntentAndConsumerRotatesOnce(t *testing.T) {
 	store := beads.NewMemStore()
 	m := NewManagerWithOptions(store, runtime.NewFake())
 	b, err := store.Create(beads.Bead{Title: "session", Type: BeadType, Metadata: map[string]string{
@@ -368,24 +370,34 @@ func TestRequestFreshRestartRotatesTheContinuationEpoch(t *testing.T) {
 	if err := m.RequestFreshRestart(b.ID); err != nil {
 		t.Fatalf("RequestFreshRestart: %v", err)
 	}
-	after, err := store.Get(b.ID)
+	recorded, err := store.Get(b.ID)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if got := after.Metadata["continuation_epoch"]; got != "3" {
-		t.Fatalf("epoch = %q, want 3 rotated at request time", got)
+	if got := recorded.Metadata["continuation_epoch"]; got != "2" {
+		t.Fatalf("epoch = %q, want 2 — the request records intent, it does not rotate", got)
 	}
-	if got := after.Metadata["continuation_reset_pending"]; got != "true" {
+	if got := recorded.Metadata["continuation_reset_pending"]; got != "true" {
 		t.Fatalf("reset marker = %q, want true", got)
 	}
 
-	// A start then publishes that epoch unchanged and clears the marker.
-	epoch, err := m.commitPendingContinuationReset(b.ID, after)
+	// The start path that services the reset rotates it, once.
+	epoch, err := m.commitPendingContinuationReset(b.ID, recorded)
 	if err != nil {
 		t.Fatalf("commit: %v", err)
 	}
 	if epoch != 3 {
-		t.Fatalf("published epoch = %d, want 3 (no second rotation)", epoch)
+		t.Fatalf("published epoch = %d, want 3", epoch)
+	}
+	serviced, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("get after: %v", err)
+	}
+	if got := serviced.Metadata["continuation_reset_pending"]; got != "" {
+		t.Fatalf("marker = %q, want cleared so a second path cannot rotate again", got)
+	}
+	if again, err := m.commitPendingContinuationReset(b.ID, serviced); err != nil || again != 3 {
+		t.Fatalf("second start path rotated again: epoch=%d err=%v", again, err)
 	}
 }
 
