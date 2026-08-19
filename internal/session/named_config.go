@@ -557,10 +557,52 @@ func lookupConfiguredNamedSession(store beads.Store, spec NamedSessionSpec, incl
 
 	conflictCandidates := append([]beads.Bead{}, runtimeSessionNameMatches...)
 	conflictCandidates = appendUniqueNamedSessionCandidates(conflictCandidates, make(map[string]bool, len(conflictCandidates)+len(aliasMatches)), aliasMatches)
+	for _, candidate := range conflictCandidates {
+		if namedSessionCandidateIsSelf(candidate, spec) {
+			return ConfiguredNamedSessionLookup{Canonical: candidate, HasCanonical: true}, nil
+		}
+	}
 	if bead, conflict := FindNamedSessionConflict(conflictCandidates, spec); conflict {
 		return ConfiguredNamedSessionLookup{Conflict: bead, HasConflict: true}, nil
 	}
 	return ConfiguredNamedSessionLookup{}, nil
+}
+
+// namedSessionCandidateIsSelf reports whether a bead reached only through
+// conflict-scoped queries (session_name/alias) actually denotes spec's own
+// identity rather than a foreign claimant. It defers to
+// FindCanonicalNamedSessionBead for every signal that function already
+// treats as authoritative, then adds exactly one narrower fallback: a live,
+// continuity-eligible session bead whose alias exactly equals spec.Identity
+// is that identity's own self-claimed session (see alias.go), even when it
+// carries no configured_named_session/configured_named_identity flag and no
+// corroborating template/agent_name match. Canonical detection never queries
+// the store by alias, so such a bead was previously visible only to conflict
+// detection — surfacing as "X conflicts with configured named session X"
+// (ga-t3a0fv, corroborated by ga-1ycmli).
+//
+// The fallback requires the candidate's session_name to be empty. By the
+// time a candidate reaches this point, the earlier canonical rounds have
+// already failed to match its session_name against spec.SessionName and
+// spec.Identity — so a candidate with a *non-empty* session_name here is
+// declaring a runtime session name that provably differs from spec's own,
+// which is real evidence of a genuinely distinct session squatting on a
+// reused alias, not spec's own bead under a different label. Only the
+// absence of any competing session_name claim makes the alias trustworthy.
+func namedSessionCandidateIsSelf(b beads.Bead, spec NamedSessionSpec) bool {
+	if spec.Identity == "" {
+		return false
+	}
+	if _, ok := FindCanonicalNamedSessionBead([]beads.Bead{b}, spec); ok {
+		return true
+	}
+	if !IsSessionBeadOrRepairable(b) || b.Status == "closed" || !NamedSessionContinuityEligible(b) {
+		return false
+	}
+	if strings.TrimSpace(b.Metadata["session_name"]) != "" {
+		return false
+	}
+	return strings.TrimSpace(b.Metadata["alias"]) == spec.Identity
 }
 
 func listConfiguredNamedSessionBeadsByMetadata(store beads.Store, key, value string) ([]beads.Bead, error) {

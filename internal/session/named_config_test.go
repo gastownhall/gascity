@@ -522,26 +522,71 @@ func TestLookupConfiguredNamedSession_AcceptsTypeOnlyCanonicalBead(t *testing.T)
 	}
 }
 
-func TestLookupConfiguredNamedSession_ReportsSessionNameConflictBeforeAliasConflict(t *testing.T) {
+// TestLookupConfiguredNamedSession_LiveSessionOnlyTaggedByAliasResolvesCanonical
+// is the regression test for ga-t3a0fv / ga-1ycmli: a live session bead that
+// denotes spec's identity only through its self-claimed alias (no
+// configured_named_session flag, no configured_named_identity, no matching
+// session_name, template, or agent_name) must resolve as the caller's own
+// canonical session, not as a foreign bead conflicting with itself. This was
+// the reported "'X' conflicts with configured named session 'X'" shape.
+func TestLookupConfiguredNamedSession_LiveSessionOnlyTaggedByAliasResolvesCanonical(t *testing.T) {
+	store := beads.NewMemStore()
+	spec := NamedSessionSpec{
+		Identity:    "pack-author.pack-author",
+		SessionName: "test-city--pack-author",
+	}
+	live, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Status: "open",
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"alias": spec.Identity,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(live): %v", err)
+	}
+
+	lookup, err := LookupConfiguredNamedSession(store, spec)
+	if err != nil {
+		t.Fatalf("LookupConfiguredNamedSession: %v", err)
+	}
+	if lookup.HasConflict {
+		t.Fatalf("HasConflict = true (conflict bead %q), want the live alias-tagged bead recognized as canonical, not a conflict", lookup.Conflict.ID)
+	}
+	if !lookup.HasCanonical {
+		t.Fatal("HasCanonical = false, want true")
+	}
+	if lookup.Canonical.ID != live.ID {
+		t.Fatalf("Canonical.ID = %q, want %q", lookup.Canonical.ID, live.ID)
+	}
+}
+
+// TestLookupConfiguredNamedSession_DifferentIdentitySimilarAliasStillConflicts
+// guards ga-t3a0fv's second acceptance criterion: the self-match fix stays
+// keyed on exact identity equivalence, not substring/prefix similarity. A
+// bead whose alias merely resembles spec's identity is never fetched as a
+// self candidate (the store query itself is an exact-value filter) and must
+// not suppress a genuine, unrelated session_name collision.
+func TestLookupConfiguredNamedSession_DifferentIdentitySimilarAliasStillConflicts(t *testing.T) {
 	store := beads.NewMemStore()
 	spec := NamedSessionSpec{
 		Identity:    "mayor",
 		SessionName: "test-city--mayor",
 	}
-	aliasConflict, err := store.Create(beads.Bead{
+	if _, err := store.Create(beads.Bead{
 		Type:   BeadType,
+		Status: "open",
 		Labels: []string{LabelSession},
 		Metadata: map[string]string{
-			"alias":      spec.Identity,
-			"template":   "other",
-			"agent_name": "other",
+			"alias": "mayor-backup",
 		},
-	})
-	if err != nil {
-		t.Fatalf("Create(alias conflict): %v", err)
+	}); err != nil {
+		t.Fatalf("Create(similar but different identity): %v", err)
 	}
-	sessionNameConflict, err := store.Create(beads.Bead{
+	conflict, err := store.Create(beads.Bead{
 		Type:   BeadType,
+		Status: "open",
 		Labels: []string{LabelSession},
 		Metadata: map[string]string{
 			"session_name": spec.SessionName,
@@ -550,7 +595,7 @@ func TestLookupConfiguredNamedSession_ReportsSessionNameConflictBeforeAliasConfl
 		},
 	})
 	if err != nil {
-		t.Fatalf("Create(session_name conflict): %v", err)
+		t.Fatalf("Create(conflict): %v", err)
 	}
 
 	lookup, err := LookupConfiguredNamedSession(store, spec)
@@ -558,10 +603,106 @@ func TestLookupConfiguredNamedSession_ReportsSessionNameConflictBeforeAliasConfl
 		t.Fatalf("LookupConfiguredNamedSession: %v", err)
 	}
 	if !lookup.HasConflict {
+		t.Fatal("HasConflict = false, want true — a similarly-named but distinct alias must not suppress a genuine session_name collision")
+	}
+	if lookup.Conflict.ID != conflict.ID {
+		t.Fatalf("Conflict.ID = %q, want %q", lookup.Conflict.ID, conflict.ID)
+	}
+}
+
+// TestLookupConfiguredNamedSession_AliasMatchWithMismatchedSessionNameStillConflicts
+// guards the boundary of the ga-t3a0fv self-match fix: the alias fallback in
+// namedSessionCandidateIsSelf only trusts an exact alias match when the
+// candidate declares no session_name at all. A bead that reused spec's alias
+// while running under a visibly different session_name (a "squatter") is
+// real evidence of a distinct live session, not spec's own bead under a
+// different label, and must still be reported as a conflict — mirroring
+// cmd/gc's TestResolveSessionIDWithConfig_ReservedNamedTargetConflictsWithLiveAlias.
+func TestLookupConfiguredNamedSession_AliasMatchWithMismatchedSessionNameStillConflicts(t *testing.T) {
+	store := beads.NewMemStore()
+	spec := NamedSessionSpec{
+		Identity:    "mayor",
+		SessionName: "test-city--mayor",
+	}
+	squatter, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Status: "open",
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name": "s-gc-squatter",
+			"alias":        spec.Identity,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(squatter): %v", err)
+	}
+
+	lookup, err := LookupConfiguredNamedSession(store, spec)
+	if err != nil {
+		t.Fatalf("LookupConfiguredNamedSession: %v", err)
+	}
+	if lookup.HasCanonical {
+		t.Fatalf("HasCanonical = true (bead %q), want the mismatched-session_name squatter treated as a conflict, not self", lookup.Canonical.ID)
+	}
+	if !lookup.HasConflict {
 		t.Fatal("HasConflict = false, want true")
 	}
-	if lookup.Conflict.ID != sessionNameConflict.ID {
-		t.Fatalf("Conflict.ID = %q, want session_name conflict %q before alias conflict %q", lookup.Conflict.ID, sessionNameConflict.ID, aliasConflict.ID)
+	if lookup.Conflict.ID != squatter.ID {
+		t.Fatalf("Conflict.ID = %q, want %q", lookup.Conflict.ID, squatter.ID)
+	}
+}
+
+// TestLookupConfiguredNamedSession_AliasSelfMatchResolvesCanonicalOverSessionNameConflict
+// used to assert that a session_name conflict is reported ahead of an alias
+// conflict when both are present. Post ga-t3a0fv, an exact alias match to
+// spec.Identity is no longer a conflict candidate at all — it denotes spec's
+// own live session — so resolution must short-circuit to that bead as
+// canonical rather than falling through to the unrelated session_name
+// collision.
+func TestLookupConfiguredNamedSession_AliasSelfMatchResolvesCanonicalOverSessionNameConflict(t *testing.T) {
+	store := beads.NewMemStore()
+	spec := NamedSessionSpec{
+		Identity:    "mayor",
+		SessionName: "test-city--mayor",
+	}
+	live, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Status: "open",
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"alias":      spec.Identity,
+			"template":   "other",
+			"agent_name": "other",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(live self bead): %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Status: "open",
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name": spec.SessionName,
+			"template":     "other",
+			"agent_name":   "other",
+		},
+	}); err != nil {
+		t.Fatalf("Create(session_name conflict): %v", err)
+	}
+
+	lookup, err := LookupConfiguredNamedSession(store, spec)
+	if err != nil {
+		t.Fatalf("LookupConfiguredNamedSession: %v", err)
+	}
+	if lookup.HasConflict {
+		t.Fatalf("HasConflict = true (conflict bead %q), want the live self bead recognized as canonical", lookup.Conflict.ID)
+	}
+	if !lookup.HasCanonical {
+		t.Fatal("HasCanonical = false, want true")
+	}
+	if lookup.Canonical.ID != live.ID {
+		t.Fatalf("Canonical.ID = %q, want %q", lookup.Canonical.ID, live.ID)
 	}
 }
 
