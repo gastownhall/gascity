@@ -2,6 +2,7 @@ package orders
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,6 +13,10 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/execenv"
 )
+
+// labelOrderTracking is applied to order bookkeeping beads by the dispatcher.
+// Event orders must not self-fire on lifecycle events emitted by these beads.
+const labelOrderTracking = "order-tracking"
 
 // TriggerResult holds the outcome of a trigger check.
 type TriggerResult struct {
@@ -173,6 +178,8 @@ func mergeConditionEnv(environ, extra []string) []string {
 }
 
 // checkEvent checks if matching events exist after the last cursor position.
+// Events emitted by order-tracking beads (controller bookkeeping) are excluded
+// to prevent event orders from self-firing on their own tracking-bead lifecycle.
 func checkEvent(a Order, ep events.Provider, cursorFn CursorFunc) TriggerResult {
 	if ep == nil {
 		return TriggerResult{Due: false, Reason: "event: no events provider"}
@@ -189,10 +196,50 @@ func checkEvent(a Order, ep events.Provider, cursorFn CursorFunc) TriggerResult 
 	if err != nil {
 		return TriggerResult{Due: false, Reason: fmt.Sprintf("event: read error: %v", err)}
 	}
-	if len(matched) == 0 {
+	var count int
+	for _, e := range matched {
+		// Exclude the dispatcher's own order-tracking bookkeeping beads so an
+		// event order never self-fires on lifecycle events emitted by those
+		// beads (upstream #3720; idle CPU storm #2463/#4133).
+		if !payloadHasLabel(e.Payload, labelOrderTracking) {
+			count++
+		}
+	}
+	if count == 0 {
 		return TriggerResult{Due: false, Reason: "event: no matching events"}
 	}
-	return TriggerResult{Due: true, Reason: fmt.Sprintf("event: %d %s event(s)", len(matched), a.On)}
+	return TriggerResult{Due: true, Reason: fmt.Sprintf("event: %d %s event(s)", count, a.On)}
+}
+
+// payloadHasLabel reports whether a JSON bead payload contains the given label.
+// Accepts both the flat bead snapshot CachingStore emits and the wrapped
+// {"bead": ...} form used by BeadEventPayload.
+func payloadHasLabel(payload json.RawMessage, label string) bool {
+	if len(payload) == 0 {
+		return false
+	}
+	var p struct {
+		Labels []string `json:"labels"`
+		Bead   *struct {
+			Labels []string `json:"labels"`
+		} `json:"bead"`
+	}
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return false
+	}
+	for _, l := range p.Labels {
+		if l == label {
+			return true
+		}
+	}
+	if p.Bead != nil {
+		for _, l := range p.Bead.Labels {
+			if l == label {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // MaxSeqFromLabels extracts the highest seq:<N> value from bead labels.

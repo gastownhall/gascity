@@ -2,6 +2,7 @@ package orders
 
 import (
 	"bytes"
+	"encoding/json"
 	"path/filepath"
 	"testing"
 	"time"
@@ -296,6 +297,95 @@ func TestCheckTriggerEventRigScoped(t *testing.T) {
 	if queriedName != "convoy-check:rig:my-rig" {
 		t.Errorf("event cursor query = %q, want %q", queriedName, "convoy-check:rig:my-rig")
 	}
+}
+
+func TestCheckTriggerEventOrderTrackingBeadsFiltered(t *testing.T) {
+	// Regression (#3720 / idle bd-Dolt storm): event orders must not self-fire on
+	// bead lifecycle events emitted by order-tracking beads. Those bookkeeping
+	// beads are created by dispatch itself; counting them re-arms the order and
+	// saturates idle cities with bd/gc subprocess churn.
+	trackingPayload := mustMarshalLabels(t, []string{"order-run:nudge-on-route", "order-tracking"})
+	regularPayload := mustMarshalLabels(t, []string{"work:some-bead"})
+
+	ep := newEventsProvider(t, []events.Event{
+		{Type: "bead.updated", Payload: trackingPayload},
+		{Type: "bead.updated", Payload: regularPayload},
+		{Type: "bead.updated", Payload: trackingPayload},
+	})
+	a := Order{Name: "nudge-on-route", Trigger: "event", On: "bead.updated"}
+	result := CheckTrigger(a, time.Time{}, neverRan, ep, nil)
+	if !result.Due {
+		t.Errorf("Due = false, want true (one non-tracking bead.updated exists); reason: %s", result.Reason)
+	}
+	if result.Reason != "event: 1 bead.updated event(s)" {
+		t.Errorf("Reason = %q, want %q", result.Reason, "event: 1 bead.updated event(s)")
+	}
+}
+
+func TestCheckTriggerEventAllOrderTrackingFiltered(t *testing.T) {
+	trackingPayload := mustMarshalLabels(t, []string{"order-run:nudge-on-route", "order-tracking"})
+
+	ep := newEventsProvider(t, []events.Event{
+		{Type: "bead.updated", Payload: trackingPayload},
+		{Type: "bead.closed", Payload: trackingPayload},
+	})
+	a := Order{Name: "nudge-on-route", Trigger: "event", On: "bead.updated"}
+	result := CheckTrigger(a, time.Time{}, neverRan, ep, nil)
+	if result.Due {
+		t.Errorf("Due = true, want false (all events from order-tracking beads); reason: %s", result.Reason)
+	}
+}
+
+func TestCheckTriggerEventWrappedBeadPayloadOrderTrackingFiltered(t *testing.T) {
+	// BeadEventPayload / some emitters wrap the bead as {"bead": {...}}.
+	trackingPayload := mustMarshalWrappedBeadLabels(t, []string{"order-run:cascade", "order-tracking"})
+	ep := newEventsProvider(t, []events.Event{
+		{Type: "bead.closed", Payload: trackingPayload},
+	})
+	a := Order{Name: "cascade-nudge-on-blocker-close", Trigger: "event", On: "bead.closed"}
+	result := CheckTrigger(a, time.Time{}, neverRan, ep, nil)
+	if result.Due {
+		t.Errorf("Due = true, want false (wrapped order-tracking payload); reason: %s", result.Reason)
+	}
+}
+
+func TestCheckTriggerEventNoPayloadNotFiltered(t *testing.T) {
+	// Events with no payload (legacy or non-bead events) must pass through —
+	// absence of a label is not the same as having the order-tracking label.
+	ep := newEventsProvider(t, []events.Event{
+		{Type: "bead.closed"},
+	})
+	a := Order{Name: "convoy-check", Trigger: "event", On: "bead.closed"}
+	result := CheckTrigger(a, time.Time{}, neverRan, ep, nil)
+	if !result.Due {
+		t.Errorf("Due = false, want true (no-payload events must not be filtered); reason: %s", result.Reason)
+	}
+}
+
+func mustMarshalLabels(t *testing.T, labels []string) json.RawMessage {
+	t.Helper()
+	b, err := json.Marshal(struct {
+		Labels []string `json:"labels"`
+	}{Labels: labels})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func mustMarshalWrappedBeadLabels(t *testing.T, labels []string) json.RawMessage {
+	t.Helper()
+	b, err := json.Marshal(struct {
+		Bead struct {
+			Labels []string `json:"labels"`
+		} `json:"bead"`
+	}{Bead: struct {
+		Labels []string `json:"labels"`
+	}{Labels: labels}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
 func TestMaxSeqFromLabels(t *testing.T) {
