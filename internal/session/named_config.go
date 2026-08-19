@@ -570,39 +570,45 @@ func lookupConfiguredNamedSession(store beads.Store, spec NamedSessionSpec, incl
 
 // namedSessionCandidateIsSelf reports whether a bead reached only through
 // conflict-scoped queries (session_name/alias) actually denotes spec's own
-// identity rather than a foreign claimant. It defers to
-// FindCanonicalNamedSessionBead for every signal that function already
-// treats as authoritative, then adds exactly one narrower fallback: a live,
-// continuity-eligible session bead whose alias exactly equals spec.Identity
-// is that identity's own self-claimed session (see alias.go), even when it
-// carries no configured_named_session/configured_named_identity flag and no
-// corroborating template/agent_name match. Canonical detection never queries
-// the store by alias, so such a bead was previously visible only to conflict
-// detection — surfacing as "X conflicts with configured named session X"
-// (ga-t3a0fv, corroborated by ga-1ycmli).
+// identity rather than a foreign claimant. It defers entirely to
+// FindCanonicalNamedSessionBead, the same signal canonical detection itself
+// treats as authoritative.
 //
-// The fallback requires the candidate's session_name to be empty. By the
-// time a candidate reaches this point, the earlier canonical rounds have
-// already failed to match its session_name against spec.SessionName and
-// spec.Identity — so a candidate with a *non-empty* session_name here is
-// declaring a runtime session name that provably differs from spec's own,
-// which is real evidence of a genuinely distinct session squatting on a
-// reused alias, not spec's own bead under a different label. Only the
-// absence of any competing session_name claim makes the alias trustworthy.
+// This previously also trusted a narrower fallback: a live,
+// continuity-eligible session bead whose alias exactly equals spec.Identity
+// and whose session_name is empty, even with no
+// configured_named_session/configured_named_identity flag and no
+// corroborating template/agent_name match (ga-t3a0fv round 1). Review
+// (ga-t3a0fv round 2) showed that fallback is unsafe: on (bead, spec) alone,
+// a genuine not-yet-named self bead is byte-for-byte indistinguishable from
+// an unrelated bead that merely claims the same alias with nothing else set
+// — see TestLookupConfiguredNamedSession_UnrelatedAliasOnlyBeadNotTrustedAsSelf.
+// A bead with empty session_name costs nothing to create, so trusting bare
+// alias+empty-session_name let a decoy silently resolve as canonical self
+// instead of surfacing as a conflict: a fail-safe-to-fail-unsafe regression.
+// The fallback was removed rather than narrowed further, because every
+// signal tried (template/agent_name match, creation recency, city/rig
+// scope) either broke existing intentionally-bare test fixtures or failed
+// to actually distinguish the two cases the reviewer's PoC turned on.
+//
+// The underlying problem the fallback was trying to solve is real and still
+// open (ga-1ycmli): a live singleton named-session bead that never got
+// configured_named_identity stamped at creation is unmailable while
+// running, because canonical detection can't see it and conflict detection
+// is all that's left. The fix needs either eager identity-metadata stamping
+// at bead-creation time in the wisp/molecule dispatch path, or a
+// caller-supplied runtime-liveness assertion threaded in from the worker
+// boundary — internal/session may not import internal/worker directly (see
+// AGENTS.md layering invariants), so that check can only be injected from a
+// caller that already has worker.Handle access. Both directions need
+// scoping beyond this function; see the follow-up bead linked from
+// ga-t3a0fv's notes.
 func namedSessionCandidateIsSelf(b beads.Bead, spec NamedSessionSpec) bool {
 	if spec.Identity == "" {
 		return false
 	}
-	if _, ok := FindCanonicalNamedSessionBead([]beads.Bead{b}, spec); ok {
-		return true
-	}
-	if !IsSessionBeadOrRepairable(b) || b.Status == "closed" || !NamedSessionContinuityEligible(b) {
-		return false
-	}
-	if strings.TrimSpace(b.Metadata["session_name"]) != "" {
-		return false
-	}
-	return strings.TrimSpace(b.Metadata["alias"]) == spec.Identity
+	_, ok := FindCanonicalNamedSessionBead([]beads.Bead{b}, spec)
+	return ok
 }
 
 func listConfiguredNamedSessionBeadsByMetadata(store beads.Store, key, value string) ([]beads.Bead, error) {
