@@ -2413,23 +2413,12 @@ func (t *Tmux) NudgeSession(session, message string) error {
 // (no-op) when RuntimeDir is unset; any I/O error is swallowed, matching
 // the tmuxStartOps.recordStartCrash / recordUnconfirmedNudge precedent.
 func (t *Tmux) recordUnconfirmedSubmit(session, message string) {
-	if t.cfg.RuntimeDir == "" {
-		return
-	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "session: %s\n", session)
 	b.WriteString("cause: submit delivered but not confirmed (no busy-state indicator for this provider family)\n")
-	b.WriteString("--- nudge text ---\n")
-	b.WriteString(message)
-	if message != "" && !strings.HasSuffix(message, "\n") {
-		b.WriteByte('\n')
-	}
-	dir := filepath.Join(t.cfg.RuntimeDir, "sessions", session)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return
-	}
-	path := filepath.Join(dir, "nudge-unconfirmed.log")
-	_ = os.WriteFile(path, []byte(b.String()), 0o644)
+	writeDiagnosticTextBlock(&b, "--- nudge text ---\n", message)
+
+	writeSessionDiagnosticFile(t.cfg.RuntimeDir, session, "nudge-unconfirmed.log", b.String())
 }
 
 // NudgePane sends a message to a specific pane reliably.
