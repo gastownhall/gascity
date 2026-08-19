@@ -55,6 +55,11 @@ var valueFlagsBySub = map[string]map[string]bool{
 		"--session": true, "--set-labels": true, "--set-metadata": true,
 		"-s": true, "--status": true, "-t": true, "--type": true,
 		"--title": true, "--spec-id": true, "--unset-metadata": true,
+		// The compare-and-set guards. Pinned as well as discovered: help
+		// discovery swallows its own errors, so a bd that is missing, renamed
+		// or slow leaves the pinned table as the only answer, and these two
+		// are the flags whose absence broke fenced dispatch in every rig.
+		"--if-assignee": true, "--if-status": true,
 	},
 	"close": {
 		"-r": true, "--reason": true, "--reason-file": true, "--session": true,

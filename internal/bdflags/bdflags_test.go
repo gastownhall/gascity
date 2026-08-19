@@ -452,3 +452,21 @@ func TestScanUnknownFlagsMarkdownTableCellIsolatesInvocations(t *testing.T) {
 		t.Errorf("ScanUnknownFlags(%q) = %v, want no findings", line, findings)
 	}
 }
+
+// TestUpdateCompareAndSetFlagsArePinned fails on the unfixed build and passes on
+// the fixed one with nothing else changed. It deliberately does NOT rely on help
+// discovery: discovery ignores its own errors, so a build where `bd` cannot be
+// run falls back to the pinned table, and the pinned table is what broke fenced
+// dispatch. gc-sling works around the gap by writing --if-assignee=VALUE, which
+// the argv scanner skips entirely; this is the fix that workaround points at.
+func TestUpdateCompareAndSetFlagsArePinned(t *testing.T) {
+	for _, flag := range []string{"--if-assignee", "--if-status"} {
+		if !updateValueFlags()[flag] {
+			t.Errorf("update value flags missing %s", flag)
+		}
+	}
+}
+
+func updateValueFlags() map[string]bool {
+	return valueFlagsBySub["update"]
+}
