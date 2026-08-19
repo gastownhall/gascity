@@ -4618,10 +4618,10 @@ esac
 	}
 }
 
-// TestGcBeadsBdInitFastPathRepairsRuntimeConfigDirectly guards the fix for
-// bd v1.0.3 rejecting DB-backed config writes during the managed fast path
-// after the schema already exists. In that state, the script should repair
-// issue_prefix and types.custom directly without falling back to bd init.
+// TestGcBeadsBdInitFastPathRepairsRuntimeConfigDirectly guards gastownhall/gascity#1436:
+// bd rejects `bd config set issue_prefix`, so after seedDeferredManagedBeads writes
+// metadata (schema already present on a later init), the managed script must repair
+// issue_prefix and types.custom via SQL without falling back to bd init.
 func TestGcBeadsBdInitFastPathRepairsRuntimeConfigDirectly(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {

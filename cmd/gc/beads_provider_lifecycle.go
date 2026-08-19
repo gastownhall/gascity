@@ -579,7 +579,25 @@ func finalizeCanonicalBdScopeInit(cityPath, dir, prefix, doltDatabase string) er
 	if err != nil {
 		return err
 	}
-	return verifyCanonicalBdScopeStoreReady(store)
+	if err := verifyCanonicalBdScopeStoreReady(store); err != nil {
+		return err
+	}
+	// bd rejects `bd config set issue_prefix` (gastownhall/gascity#1436). The
+	// managed provider script seeds the DB row via SQL; fail closed when that
+	// script is the active provider so a missing row cannot look like success.
+	if shouldVerifyRuntimeIssuePrefix(cityPath) {
+		return verifyRuntimeIssuePrefix(dir, prefix)
+	}
+	return nil
+}
+
+func shouldVerifyRuntimeIssuePrefix(cityPath string) bool {
+	provider := beadsProvider(cityPath)
+	if !strings.HasPrefix(provider, "exec:") {
+		return false
+	}
+	script := strings.TrimPrefix(provider, "exec:")
+	return samePath(script, gcBeadsBdScriptPath(cityPath))
 }
 
 func verifyCanonicalBdScopeStoreReady(store beads.Store) error {
@@ -596,6 +614,55 @@ func verifyCanonicalBdScopeStoreReady(store beads.Store) error {
 		lastErr = fmt.Errorf("store verification failed")
 	}
 	return lastErr
+}
+
+// verifyRuntimeIssuePrefix confirms the Dolt-backed issue_prefix config row
+// matches the canonical GC prefix. Plain `bd config get` (without --json) can
+// print a "(not set)" sentinel; --json returns an empty value instead.
+func verifyRuntimeIssuePrefix(dir, want string) error {
+	want = strings.TrimSpace(want)
+	if want == "" {
+		return nil
+	}
+	var lastErr error
+	for attempt := 0; attempt < 10; attempt++ {
+		got, err := readRuntimeIssuePrefix(dir)
+		if err == nil {
+			if got == want {
+				return nil
+			}
+			lastErr = fmt.Errorf("issue_prefix = %q, want %q", got, want)
+		} else {
+			lastErr = err
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("issue_prefix verification failed")
+	}
+	return fmt.Errorf("beads runtime issue_prefix not ready in %s: %w", dir, lastErr)
+}
+
+func readRuntimeIssuePrefix(dir string) (string, error) {
+	cmd := exec.Command("bd", "config", "get", "--json", "issue_prefix")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "BEADS_DIR="+filepath.Join(dir, ".beads"))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("bd config get issue_prefix: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	var parsed struct {
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		// Some bd builds still print a bare string for --json on this key.
+		got := strings.TrimSpace(string(out))
+		if got != "" && !strings.Contains(got, "{") {
+			return got, nil
+		}
+		return "", fmt.Errorf("parsing bd config get issue_prefix: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return strings.TrimSpace(parsed.Value), nil
 }
 
 //nolint:unparam // error slot preserves the resolver-shaped contract

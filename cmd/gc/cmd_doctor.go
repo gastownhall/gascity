@@ -218,6 +218,9 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 
 	// Custom types check — city store.
 	d.Register(doctor.NewCustomTypesCheck(cityPath, "city"))
+	// Runtime issue_prefix must be present in the Dolt config table; YAML alone
+	// is not enough (gastownhall/gascity#1436).
+	d.Register(doctor.NewIssuePrefixCheck(cityPath, "city"))
 
 	// Per-rig checks. Skip suspended rigs — opening their bead store
 	// triggers bd auto-start of orphan Dolt servers (ga-wzk).
@@ -236,6 +239,7 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 			d.Register(newDoctorRigDoltServerCheck(cityPath, rig, !rigUsesManagedBdStoreContract(cityPath, rig) || os.Getenv("GC_DOLT") == "skip"))
 			// Custom types check — rig store.
 			d.Register(doctor.NewCustomTypesCheck(rig.Path, rig.Name))
+			d.Register(doctor.NewIssuePrefixCheck(rig.Path, rig.Name))
 		}
 	}
 

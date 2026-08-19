@@ -1067,6 +1067,13 @@ func TestFreshManagedBdCityInitSeedsPinnedHQDatabaseAndKeepsGCPrefix(t *testing.
 		t.Fatalf("hq database missing bead schema tables:\n%s", out)
 	}
 
+	// gastownhall/gascity#1436: YAML issue_prefix is not enough — the Dolt
+	// config row must be present or bd create fails with "database not initialized".
+	prefixOut := strings.TrimSpace(runRawBDFromDir(t, bdPath, cityPath, "config", "get", "issue_prefix"))
+	if prefixOut != "gc" {
+		t.Fatalf("bd config get issue_prefix = %q, want gc", prefixOut)
+	}
+
 	rawDir := filepath.Join(cityPath, "fresh-nested")
 	if err := os.MkdirAll(rawDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(rawDir): %v", err)
