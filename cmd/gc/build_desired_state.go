@@ -4049,10 +4049,16 @@ func createPoolSessionBeadWithGuardedAlias(
 	if err != nil {
 		return session.Info{}, err
 	}
+	// A transient slot is a rebinding chair, not an occupant identity. It drives
+	// two decisions here: its runtime session_name must step aside from the bare
+	// slot (TransientSlot, consumed in derivePoolSessionName), and it is never
+	// persisted as an alias (persistAlias below).
+	transientSlot := usesTransientPoolSlotIdentity(cfgAgent)
 	identity := poolSessionCreateIdentity{
-		AgentName: qualifiedInstance,
-		Slot:      slot,
-		Metadata:  metadata,
+		AgentName:     qualifiedInstance,
+		Slot:          slot,
+		Metadata:      metadata,
+		TransientSlot: transientSlot,
 	}
 	// A transient slot is never reserved as an alias: it is not an identity, so
 	// there is nothing to guard against collision and nothing to persist. The
@@ -4066,7 +4072,7 @@ func createPoolSessionBeadWithGuardedAlias(
 	// the exclusion still applies and the persistence does not.
 	alias := strings.TrimSpace(qualifiedInstance)
 	persistAlias := alias
-	if usesTransientPoolSlotIdentity(cfgAgent) {
+	if transientSlot {
 		persistAlias = ""
 	}
 	if bp.beadStore == nil {

@@ -11778,7 +11778,14 @@ func TestReconcileSessionBeads_FailedCreatePoolSlotIsReplacedUnderTheSameRuntime
 				Type:   sessionBeadType,
 				Labels: []string{sessionBeadLabel, "agent:worker-1"},
 				Metadata: map[string]string{
-					"session_name":              "worker-1",
+					// A transient pool slot's runtime session_name steps aside from
+					// the bare slot identity ("worker-1") onto "worker-1-pool" so the
+					// slot never reaches GC_AGENT (#5241). agent_name/pool_slot stay
+					// the identity, exactly as the create path (derivePoolSessionName
+					// with TransientSlot) persists it; the replacement re-derives the
+					// same "worker-1-pool" and fails closed on the open lease, so the
+					// slot still holds its identity for one tick.
+					"session_name":              "worker-1-pool",
 					"agent_name":                "worker-1",
 					"template":                  "worker",
 					"state":                     string(sessionpkg.StateFailedCreate),

@@ -573,3 +573,128 @@ func TestPoolIdentitySessionNameShortensDeterministically(t *testing.T) {
 		t.Fatalf("two distinct long identities shortened to the same name %q", first)
 	}
 }
+
+// TestDerivePoolSessionNameBoundsAliasedSlotSuffix pins the length-limit
+// boundary on the aliased multi-slot lane: a tmux_alias valid at exactly the
+// explicit-name limit must not be locked out of creation once
+// derivePoolSessionName appends "-<slot>" for a higher slot. Before the suffix
+// was folded into the deterministic shortening, alias+"-2" overflowed
+// MaxExplicitSessionNameLen and failed ValidateExplicitName, so the slot could
+// never create. The final name must shorten to a valid explicit name, and
+// distinct slots must still map to distinct boxes.
+func TestDerivePoolSessionNameBoundsAliasedSlotSuffix(t *testing.T) {
+	alias := strings.Repeat("a", session.MaxExplicitSessionNameLen) // valid exactly at the limit
+	if _, err := session.ValidateExplicitName(alias); err != nil {
+		t.Fatalf("precondition: %d-char alias should be a valid explicit name: %v", len(alias), err)
+	}
+
+	slot2, err := derivePoolSessionName(nil, nil, "claude", poolSessionCreateIdentity{AgentName: "claude-2", Slot: 2}, alias, nil)
+	if err != nil {
+		t.Fatalf("derivePoolSessionName(slot 2): %v", err)
+	}
+	if len(slot2) > session.MaxExplicitSessionNameLen {
+		t.Fatalf("slot-2 name %q is %d chars, max %d", slot2, len(slot2), session.MaxExplicitSessionNameLen)
+	}
+	if _, err := session.ValidateExplicitName(slot2); err != nil {
+		t.Fatalf("slot-2 name %q is not a valid explicit session name: %v", slot2, err)
+	}
+
+	again, err := derivePoolSessionName(nil, nil, "claude", poolSessionCreateIdentity{AgentName: "claude-2", Slot: 2}, alias, nil)
+	if err != nil {
+		t.Fatalf("derivePoolSessionName(slot 2 again): %v", err)
+	}
+	if again != slot2 {
+		t.Fatalf("derivePoolSessionName is not deterministic for a shortened aliased slot: %q vs %q", slot2, again)
+	}
+
+	slot3, err := derivePoolSessionName(nil, nil, "claude", poolSessionCreateIdentity{AgentName: "claude-3", Slot: 3}, alias, nil)
+	if err != nil {
+		t.Fatalf("derivePoolSessionName(slot 3): %v", err)
+	}
+	if slot3 == slot2 {
+		t.Fatalf("boundary-length slots 2 and 3 collapsed onto the same name %q", slot2)
+	}
+}
+
+// TestPoolRuntimeSessionNameStepsAsideForTransientSlot pins the #5241 identity
+// invariant at the derivation boundary. A transient pool slot ("pooled-1") is a
+// rebinding chair, not an occupant, so it must never become the runtime session
+// name: clearPoolTemplateRuntimeIdentity puts GC_AGENT on the session name, and
+// if that name is the bare slot the transient slot leaks straight into the
+// identity channel — the sibling of the ga-vcjr9 pod churn, guarded end-to-end
+// by TestE2E_MultiAgent_PoolAndFixed. The transient step-aside reuses the
+// existing "-pool" suffix: stable per slot, distinct from the slot, distinct per
+// slot, non-empty. A non-transient slot keeps the bare identity-derived name, so
+// namepool and canonical-singleton pools are unaffected.
+func TestPoolRuntimeSessionNameStepsAsideForTransientSlot(t *testing.T) {
+	const slot1 = "pooled-1"
+	got := poolRuntimeSessionName(nil, slot1, "pooled", true)
+	if got == slot1 {
+		t.Fatalf("transient slot runtime name %q must differ from the bare slot %q", got, slot1)
+	}
+	if got == "" {
+		t.Fatal("transient slot runtime name must be non-empty")
+	}
+	if want := slot1 + poolRuntimeNameSuffix; got != want {
+		t.Fatalf("poolRuntimeSessionName(transient) = %q, want %q", got, want)
+	}
+	if again := poolRuntimeSessionName(nil, slot1, "pooled", true); again != got {
+		t.Fatalf("poolRuntimeSessionName(transient) is not deterministic: %q vs %q", got, again)
+	}
+	if slot2 := poolRuntimeSessionName(nil, "pooled-2", "pooled", true); slot2 == got {
+		t.Fatalf("distinct transient slots collapsed onto the same runtime name %q", got)
+	}
+	if plain := poolRuntimeSessionName(nil, slot1, "pooled", false); plain != slot1 {
+		t.Fatalf("non-transient slot runtime name = %q, want bare identity %q", plain, slot1)
+	}
+}
+
+// TestDerivePoolSessionNameStepsAsideForTransientSlot pins the create-path end of
+// the same invariant: derivePoolSessionName must carry the identity's
+// TransientSlot flag into poolRuntimeSessionName so the persisted session_name
+// (and therefore GC_AGENT) is never the bare slot.
+func TestDerivePoolSessionNameStepsAsideForTransientSlot(t *testing.T) {
+	got, err := derivePoolSessionName(nil, nil, "pooled", poolSessionCreateIdentity{AgentName: "pooled-1", Slot: 1, TransientSlot: true}, "", nil)
+	if err != nil {
+		t.Fatalf("derivePoolSessionName: %v", err)
+	}
+	if got == "pooled-1" {
+		t.Fatalf("transient slot session_name %q must differ from the bare slot", got)
+	}
+	if want := "pooled-1" + poolRuntimeNameSuffix; got != want {
+		t.Fatalf("derivePoolSessionName(transient) = %q, want %q", got, want)
+	}
+}
+
+// TestPoolRuntimeSessionNameBoundsPoolSuffix pins the length-limit boundary on
+// the named-session step-aside lane: when a pool instance's identity name is
+// valid at exactly the explicit-name limit AND collides with a configured named
+// session's reserved runtime name, poolRuntimeSessionName appends "-pool" to
+// step aside. Before the suffix was folded into the deterministic shortening,
+// name+"-pool" overflowed MaxExplicitSessionNameLen and the unaliased pool
+// create then failed ValidateExplicitName. The stepped-aside name must shorten
+// to a valid explicit name and must not land back on the reserved name.
+func TestPoolRuntimeSessionNameBoundsPoolSuffix(t *testing.T) {
+	identity := strings.Repeat("a", session.MaxExplicitSessionNameLen) // valid exactly at the limit
+	cfg := &config.City{
+		NamedSessions: []config.NamedSession{{Name: identity, Template: "claude"}},
+	}
+	base := poolIdentitySessionName(identity, "claude")
+	if !configuredNamedSessionReservesRuntimeName(cfg, base) {
+		t.Fatalf("precondition: expected named session to reserve pool identity name %q", base)
+	}
+
+	got := poolRuntimeSessionName(cfg, identity, "claude", false)
+	if len(got) > session.MaxExplicitSessionNameLen {
+		t.Fatalf("stepped-aside name %q is %d chars, max %d", got, len(got), session.MaxExplicitSessionNameLen)
+	}
+	if _, err := session.ValidateExplicitName(got); err != nil {
+		t.Fatalf("stepped-aside name %q is not a valid explicit session name: %v", got, err)
+	}
+	if got == base {
+		t.Fatalf("poolRuntimeSessionName did not step aside from reserved name %q", base)
+	}
+	if again := poolRuntimeSessionName(cfg, identity, "claude", false); again != got {
+		t.Fatalf("poolRuntimeSessionName is not deterministic: %q vs %q", got, again)
+	}
+}

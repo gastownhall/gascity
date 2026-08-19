@@ -39,6 +39,15 @@ type poolSessionCreateIdentity struct {
 	Alias     string
 	Slot      int
 	Metadata  map[string]string
+	// TransientSlot marks a pool slot that is a rebinding chair, not an
+	// occupant identity (an expanding pool with no namepool and no canonical
+	// singleton — usesTransientPoolSlotIdentity). The runtime session name for
+	// such a slot must step aside from the bare slot string so the slot never
+	// reaches the identity channel via GC_AGENT (#5241; the transient sibling
+	// of the ga-vcjr9 leak). It threads through the create path without a
+	// signature change so the many zero-value create-path callers are
+	// unaffected.
+	TransientSlot bool
 }
 
 func isPoolManagedSessionBead(bead beads.Bead) bool {
@@ -335,14 +344,25 @@ func derivePoolSessionName(store beads.Store, cfg *config.City, template string,
 		return "", err
 	}
 	sessionName := resolvedTmuxAlias
+	// identityName is the bare identity-derived name before any transient
+	// step-aside. A transient slot's runtime name steps aside from it (…-pool),
+	// so the runtime-name availability check below no longer covers the identity
+	// itself; the guard after it re-asserts the identity on this unaliased lane.
+	identityName := ""
 	switch {
 	case sessionName == "":
-		sessionName = poolRuntimeSessionName(cfg, identity.AgentName, template)
+		identityName = poolIdentitySessionName(identity.AgentName, template)
+		sessionName = poolRuntimeSessionName(cfg, identity.AgentName, template, identity.TransientSlot)
 	case identity.Slot > 1:
 		// Slot 1 keeps the bare alias; higher slots carry their slot number so
 		// a multi-instance pool sharing one configured alias still maps each
-		// slot onto its own stable box.
-		sessionName += "-" + strconv.Itoa(identity.Slot)
+		// slot onto its own stable box. Assemble the full logical name including
+		// the "-<slot>" suffix, then shorten the whole thing: a tmux_alias valid
+		// exactly at MaxExplicitSessionNameLen would otherwise overflow once the
+		// suffix is appended and fail ValidateExplicitName below, locking that
+		// slot out of creation forever. boundSessionNameLength is a no-op for the
+		// common short alias, so ordinary names keep their exact form.
+		sessionName = boundSessionNameLength(sessionName + "-" + strconv.Itoa(identity.Slot))
 	}
 	if _, err := sessionpkg.ValidateExplicitName(sessionName); err != nil {
 		return "", fmt.Errorf("derived pool session_name for template %q: %w", template, err)
@@ -364,6 +384,27 @@ func derivePoolSessionName(store beads.Store, cfg *config.City, template string,
 		// fail-closed behavior.
 		log.Printf("pool session_name check for template %q could not answer; proceeding on identity-derived %q: %v", template, sessionName, err)
 	}
+	// A transient slot's runtime name stepped aside from its bare identity, so
+	// the check above validated "<identity>-pool", not the identity itself. Re-
+	// assert the identity: another live session already holding this concrete
+	// identity must fail the slot closed, not mint a sibling box next to it
+	// (ga-vcjr9 — the loser of a race for one identity is refused, guarded by
+	// TestSelectOrCreateDependencyPoolSessionBead_BlocksWhenConcreteAliasTaken).
+	// The config-reserved step-aside is deliberately exempt: there the pool is
+	// meant to coexist with its configured named-session peer, which owns the
+	// bare name by design.
+	if identity.TransientSlot && identityName != "" && identityName != sessionName &&
+		!configuredNamedSessionReservesRuntimeName(cfg, identityName) {
+		if err := ensurePoolSessionNameAvailable(store, cfg, snapshot, identityName, identity.AgentName); err != nil {
+			if errors.Is(err, sessionpkg.ErrSessionNameExists) {
+				return "", fmt.Errorf("%w: template %q identity %q already held: %w", errPoolSessionNameUnavailable, template, identity.AgentName, err)
+			}
+			// Degraded store: the identity guard is best-effort. The runtime name
+			// already validated as available and is idempotent per slot, so
+			// proceed rather than stall the create — same posture as above.
+			log.Printf("pool identity availability check for template %q could not answer; proceeding on identity-derived %q: %v", template, sessionName, err)
+		}
+	}
 	return sessionName, nil
 }
 
@@ -381,16 +422,30 @@ func ensurePoolSessionNameAvailable(store beads.Store, cfg *config.City, snapsho
 }
 
 // poolRuntimeSessionName is the runtime session name for a pool instance with
-// no configured tmux_alias. It is poolIdentitySessionName, except that a pool
-// instance of an agent that is ALSO a configured named session's template
-// shares that agent's identity and would otherwise land on the name config
-// reserves for the named session. The pool is a different runtime box, so it
-// steps aside onto a distinct name — still identity-derived, still free of the
-// bead ID.
-func poolRuntimeSessionName(cfg *config.City, identityName, template string) string {
+// no configured tmux_alias. It is poolIdentitySessionName, except that it steps
+// aside onto a distinct "<name>-pool" name — still identity-derived, still free
+// of the bead ID — in two cases:
+//
+//   - the pool instance shares an agent that is ALSO a configured named
+//     session's template, so poolIdentitySessionName would land on the name
+//     config reserves for the named session; or
+//   - transientSlot is true, meaning identityName is a transient pool slot
+//     ("pooled-1") rather than an occupant identity. clearPoolTemplateRuntimeIdentity
+//     puts GC_AGENT on the session name, so the name must not BE the slot or the
+//     slot leaks into the identity channel (#5241; the transient sibling of the
+//     ga-vcjr9 pod leak). Namepool and canonical-singleton pools are not
+//     transient, so they keep the bare identity-derived name.
+func poolRuntimeSessionName(cfg *config.City, identityName, template string, transientSlot bool) string {
 	name := poolIdentitySessionName(identityName, template)
-	if configuredNamedSessionReservesRuntimeName(cfg, name) {
-		name += poolRuntimeNameSuffix
+	if transientSlot || configuredNamedSessionReservesRuntimeName(cfg, name) {
+		// Fold the suffix into the length bound: poolIdentitySessionName already
+		// clamped name to MaxExplicitSessionNameLen, so appending the suffix to a
+		// boundary-length identity would overflow and fail ValidateExplicitName on
+		// the create path. boundSessionNameLength is a no-op for the common short
+		// name, so ordinary pools keep the exact "<name>-pool" step-aside form; a
+		// boundary-length identity shortens deterministically to a distinct, valid
+		// name that still steps aside from the reserved runtime name.
+		name = boundSessionNameLength(name + poolRuntimeNameSuffix)
 	}
 	return name
 }

@@ -3307,9 +3307,12 @@ func TestBuildDesiredState_NewPoolSessionBeadCreatedWithConcreteIdentity(t *test
 		t.Fatalf("labels = %#v, want concrete slot agent label", got.Labels)
 	}
 	// The runtime name is derived from the slot identity, never from the bead
-	// ID — that derivation is the ga-vcjr9 leak.
-	if want := poolIdentitySessionName("rig/claude-1", "rig/claude"); got.Metadata["session_name"] != want {
-		t.Fatalf("session_name = %q, want the slot's identity-derived runtime name %q", got.Metadata["session_name"], want)
+	// ID — that derivation is the ga-vcjr9 leak. A transient slot then steps
+	// aside onto "<identity>-pool" so the rebinding slot never becomes the
+	// runtime name (and therefore GC_AGENT), guarded by
+	// TestE2E_MultiAgent_PoolAndFixed (#5241).
+	if want := poolRuntimeSessionName(nil, "rig/claude-1", "rig/claude", true); got.Metadata["session_name"] != want {
+		t.Fatalf("session_name = %q, want the transient slot's identity-derived runtime name %q", got.Metadata["session_name"], want)
 	}
 	if beadOwnsPoolSessionName(got) {
 		t.Fatalf("session_name = %q is still bead-ID derived", got.Metadata["session_name"])
@@ -5746,9 +5749,9 @@ func TestCreatePoolSessionBeadWithGuardedAliasDropsTmuxAliasWhenIdentifierLockFa
 		t.Fatalf("createPoolSessionBeadWithGuardedAlias: %v", err)
 	}
 
-	want := poolIdentitySessionName("worker-1", "worker")
+	want := poolRuntimeSessionName(nil, "worker-1", "worker", true)
 	if got := info.SessionNameMetadata; got != want {
-		t.Fatalf("session_name = %q, want pool identity fallback %q when tmux_alias lock fails", got, want)
+		t.Fatalf("session_name = %q, want transient pool identity fallback %q when tmux_alias lock fails", got, want)
 	}
 	if strings.Contains(stderr.String(), "creating without alias") && strings.Contains(info.SessionNameMetadata, "crew--test-city") {
 		t.Fatalf("lock failure warning emitted but session_name still used tmux_alias: %q", info.SessionNameMetadata)
@@ -8576,8 +8579,8 @@ func TestBuildDesiredState_UsesBeadNamedPoolSessionsForScaleCheckDemand(t *testi
 	if tp.TemplateName != "worker" {
 		t.Fatalf("TemplateName = %q, want worker", tp.TemplateName)
 	}
-	if got := poolIdentitySessionName("worker-1", "worker"); sessionName != got {
-		t.Fatalf("session name = %q, want the slot's identity-derived runtime name %q", sessionName, got)
+	if got := poolRuntimeSessionName(nil, "worker-1", "worker", true); sessionName != got {
+		t.Fatalf("session name = %q, want the transient slot's identity-derived runtime name %q", sessionName, got)
 	}
 
 	sessionBeads, err := store.ListByLabel(sessionBeadLabel, 0)
