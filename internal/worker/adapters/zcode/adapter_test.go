@@ -1233,6 +1233,47 @@ func TestInterruptedTurnClosesTheMirrorEntry(t *testing.T) {
 	}
 }
 
+// Entry ids are identities to gc: HistorySnapshot.Cursor.AfterEntryID is one,
+// and history comparison short-circuits on id equality. Positional ids alone
+// made every conversation emit the same sequence, so two unrelated
+// conversations compared as the same history and a cursor from one addressed a
+// position in the other.
+func TestMirrorEntryIDsAreUniqueAcrossConversations(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, map[string]string{"STUB_SID": "sess_first"})
+	h.run("turn one\n")
+	h.run("turn two\n")
+	first := h.readExport("sess_first")
+
+	// A second conversation, same length, same prompts, same scope.
+	h.env["GC_CONTINUATION_EPOCH"] = "2"
+	h.env["STUB_SID"] = "sess_second"
+	h.run("turn one\n")
+	h.run("turn two\n")
+	second := h.readExport("sess_second")
+
+	if len(first.Messages) == 0 || len(first.Messages) != len(second.Messages) {
+		t.Fatalf("expected two equal-length conversations, got %d and %d",
+			len(first.Messages), len(second.Messages))
+	}
+	seen := map[string]string{}
+	for _, m := range first.Messages {
+		seen[m.Info.ID] = "first"
+	}
+	for _, m := range second.Messages {
+		if owner, clash := seen[m.Info.ID]; clash {
+			t.Fatalf("entry id %q appears in both the %s and second conversation", m.Info.ID, owner)
+		}
+	}
+	// And each id still names its own session, so an id is self-describing.
+	for _, m := range first.Messages {
+		if !strings.HasPrefix(m.Info.ID, "sess_first-") {
+			t.Fatalf("entry id %q is not namespaced by its session", m.Info.ID)
+		}
+	}
+}
+
 // Config preconditions fail closed with EX_CONFIG, never a half-live pane.
 func TestMissingConfigExitsSeventyEight(t *testing.T) {
 	t.Parallel()

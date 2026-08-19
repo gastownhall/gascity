@@ -6,7 +6,7 @@
   "messages": [
     {
       "info": {
-        "id": "msg_user_1",
+        "id": "sess_zcode_phase1-msg_user_1",
         "sessionID": "sess_zcode_phase1",
         "role": "user",
         "parentID": "",
@@ -16,7 +16,7 @@
       },
       "parts": [
         {
-          "id": "part_msg_user_1",
+          "id": "part_sess_zcode_phase1-msg_user_1",
           "type": "text",
           "text": "Summarize the ZCode worker transcript contract."
         }
@@ -24,10 +24,10 @@
     },
     {
       "info": {
-        "id": "msg_assistant_2",
+        "id": "sess_zcode_phase1-msg_assistant_2",
         "sessionID": "sess_zcode_phase1",
         "role": "assistant",
-        "parentID": "msg_user_1",
+        "parentID": "sess_zcode_phase1-msg_user_1",
         "time": {
           "created": 1770000000000
         },
@@ -53,7 +53,7 @@
       },
       "parts": [
         {
-          "id": "part_msg_assistant_2",
+          "id": "part_sess_zcode_phase1-msg_assistant_2",
           "type": "text",
           "text": "ZCode phase 1 validates the tmux CLI transcript contract."
         }

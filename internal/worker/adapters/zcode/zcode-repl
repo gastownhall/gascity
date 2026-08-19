@@ -300,7 +300,13 @@ def append_message(export, session_id, role, text, extra=None):
     messages = export["messages"]
     # Sequence by message count, not by turn pairs: an interrupted turn leaves
     # an unpaired user message and must not collide with the next one.
-    ident = f"msg_{role}_{len(messages) + 1}"
+    #
+    # Namespaced by the owning session, because the position alone is NOT
+    # unique: every conversation would otherwise emit msg_user_1, msg_assistant_2,
+    # ... and gc treats entry ids as identities. Two unrelated conversations then
+    # compare as the same history, and a cursor (HistorySnapshot.Cursor
+    # .AfterEntryID) minted in one silently addresses a position in another.
+    ident = f"{session_id}-msg_{role}_{len(messages) + 1}"
     info = {
         "id": ident,
         "sessionID": session_id,
@@ -385,6 +391,9 @@ def adopt_pending(mirror_dir, cwd, session_id):
         os.remove(pending_path)
     except OSError:
         pass
+    # The ids keep their placeholder namespace: they are already unique, and
+    # rewriting them would have to remap every parentID in the chain. Only the
+    # session they now belong to changes.
     for message in pending["messages"]:
         message["info"]["sessionID"] = session_id
     return pending["messages"]
