@@ -196,6 +196,18 @@ func ProcessControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (Co
 // teardown or a missing-root orphan close.
 const controlRootCanceledCloseReason = "control closed: workflow root canceled via run cancel"
 
+// controlRootSettledCloseReason is stamped on a control bead closed because its
+// workflow root had already settled, distinguishing terminal-root residue from
+// a cancellation, a skip teardown, or a missing-root orphan close.
+const controlRootSettledCloseReason = "control closed: workflow root already settled"
+
+// closeOrphanedControl is the root-state gate every control bead passes through
+// before its kind-specific processing: it reports handled=true when the bead's
+// workflow root is in a state that makes further work invalid. Three states
+// qualify — the root is gone (orphan), the root was canceled, or the root has
+// already settled. The finalizer is exempt because it is the bead that settles
+// the root, and the teardown tail is exempt because it runs after settlement by
+// contract.
 func closeOrphanedControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (ControlResult, bool, error) {
 	if bead.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflowFinalize {
 		return ControlResult{}, false, nil
@@ -216,6 +228,27 @@ func closeOrphanedControl(store beads.Store, bead beads.Bead, opts ProcessOption
 		// teeth.
 		if rootCanceled(root) {
 			return closeCanceledControl(store, bead, opts, rootID, rootStoreRef)
+		}
+		// A settled (closed) root is equally durable a stop signal. The
+		// finalizer closes the root BEFORE its bulk
+		// CloseSubtreeWithMetadataExcept sweep so a crash leaves the finalizer
+		// open to retry, but that sweep is all-or-nothing: when it fails —
+		// store contention is the reported trigger — the finalizer returns
+		// early and every control under the now-terminal root stays open and
+		// keeps minting attempts. gastownhall/gascity#5389 measured a
+		// downstream step still retrying almost 5 hours after its root
+		// recorded gc.outcome=fail and closed_at, which understates the run's
+		// true wall-clock and cost for anything reading the root alone.
+		// Gating per control makes settlement converge incrementally instead
+		// of depending on one bulk write succeeding.
+		if rootSettled(root) {
+			teardown, err := isTeardownTailControl(store, bead, rootID)
+			if err != nil {
+				return ControlResult{}, false, fmt.Errorf("%s: resolving teardown tail under settled root %s: %w", bead.ID, rootID, err)
+			}
+			if !teardown {
+				return closeSettledControl(store, bead, opts, rootID, rootStoreRef)
+			}
 		}
 		return ControlResult{}, false, nil
 	} else if !errors.Is(err, beads.ErrNotFound) {
@@ -248,6 +281,62 @@ func rootCanceled(root beads.Bead) bool {
 		return true
 	}
 	return strings.TrimSpace(root.Metadata[beadmeta.CancelRequestedMetadataKey]) != ""
+}
+
+// rootSettled reports whether a workflow root has reached a terminal state.
+// Closure is the signal, not any particular gc.outcome: the finalizer closes a
+// root with pass/fail/skipped, and an operator hand-close is just as terminal.
+// rootCanceled is checked first by the caller, so cancellation keeps its own
+// distinct close path.
+func rootSettled(root beads.Bead) bool {
+	return root.Status == "closed"
+}
+
+// isTeardownTailControl reports whether a control belongs to the teardown tail,
+// which runs AFTER the root settles by contract — its pass condition may branch
+// on ROOT_OUTCOME, which only finalize produces (#5271). teardownTailExclusion
+// keeps that tail out of the finalizer's own terminal sweep for the same
+// reason, and it is the authoritative definition, so the settled-root gate
+// defers to it rather than restating the rule.
+//
+// The cheap arm answers for retry and ralph controls, which expandRetry /
+// expandRalph mint with cloneStep and so inherit the host step's
+// gc.scope_role; only the first attempt strips it. Fanout and scope-check
+// controls are stamped gc.scope_role=control instead and keep only gc.step_id
+// as their link back to a teardown step, so they need the subtree read. That
+// read happens only under an already-terminal root, at most once per control
+// before the gate closes it, never on the live dispatch path.
+func isTeardownTailControl(store beads.Store, bead beads.Bead, rootID string) (bool, error) {
+	if bead.Metadata[beadmeta.ScopeRoleMetadataKey] == beadmeta.ScopeRoleTeardown {
+		return true, nil
+	}
+	if strings.TrimSpace(bead.Metadata[beadmeta.StepIDMetadataKey]) == "" {
+		return false, nil
+	}
+	exclude, err := teardownTailExclusion(store, rootID)
+	if err != nil {
+		return false, err
+	}
+	return exclude(bead), nil
+}
+
+// closeSettledControl closes a control bead whose workflow root has already
+// settled, stamping gc.outcome=skipped so the residue is indistinguishable from
+// the residue the finalizer's own sweep closes. It is deliberately not a
+// failure: the control never ran to a verdict, and stamping fail would pollute
+// outcome aggregation with beads that never executed.
+func closeSettledControl(store beads.Store, bead beads.Bead, opts ProcessOptions, rootID, rootStoreRef string) (ControlResult, bool, error) {
+	opts.tracef("process-control bead=%s kind=%s close reason=root_settled root=%s store_ref=%s",
+		bead.ID, bead.Metadata[beadmeta.KindMetadataKey], rootID, rootStoreRef)
+	closeMetadata := map[string]string{
+		beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
+		"close_reason":              controlRootSettledCloseReason,
+	}
+	clearControllerSpawnErrorMetadata(closeMetadata)
+	if err := updateMetadataAndClose(store, bead.ID, closeMetadata); err != nil {
+		return ControlResult{}, true, fmt.Errorf("%s: closing settled control: %w", bead.ID, err)
+	}
+	return ControlResult{Processed: true, Action: "settled-workflow"}, true, nil
 }
 
 // closeCanceledControl closes a control bead whose workflow root was canceled,
