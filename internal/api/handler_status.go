@@ -169,6 +169,10 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	}
 	perRigAgentTotals := make(map[string]int, len(cfg.Rigs))
 	perRigAgentsSuspended := make(map[string]int, len(cfg.Rigs))
+	// Active graph-resident work, indexed once per request by agent session
+	// name. On a single-store city this is nil, so every lookup below misses
+	// and the counts stay byte-identical to the provider-only behavior.
+	graphWork := s.graphActiveWorkBySession()
 	for _, a := range cfg.Agents {
 		rigName := workdirutil.ConfiguredRigName(s.state.CityPath(), a, cfg.Rigs)
 		scope := "city"
@@ -188,7 +192,12 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 			sessName := agentSessionName(cityName, ea.qualifiedName, sessTmpl)
 			info, hasInfo := sessionSnapshot.bySessionName[sessName]
 			running := statusProviderRunning(sp, sessName)
-			if running {
+			// An agent whose work runs under a relocated-graph wisp session is
+			// effectively running even when its named provider session is down.
+			// hasGraphWork is always false on a single-store city.
+			_, hasGraphWork := graphWork[sessName]
+			effectiveRunning := running || hasGraphWork
+			if effectiveRunning {
 				rawRunning++
 			}
 			suspended := ea.suspended || a.Suspended || (rigName != "" && suspendedRigs[rigName]) || (hasInfo && info.state == session.StateSuspended)
@@ -200,14 +209,14 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 				ac.Suspended++
 			case s.state.IsQuarantined(sessName):
 				ac.Quarantined++
-			case running:
+			case effectiveRunning:
 				ac.Running++
 			}
 
 			detail := StatusAgentDetail{
 				QualifiedName: ea.qualifiedName,
 				Scope:         scope,
-				Running:       running,
+				Running:       effectiveRunning,
 				Suspended:     suspended,
 				SessionName:   sessName,
 				GroupName:     groupName,
