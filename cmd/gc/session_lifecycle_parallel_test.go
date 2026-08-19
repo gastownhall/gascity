@@ -4114,9 +4114,14 @@ func TestPrepareStartCandidate_EmptyBeadAliasPreservesTemplateGCAlias(t *testing
 
 	tp := TemplateParams{
 		Command: "claude",
-		// Shape matches setTemplateEnvIdentity output (GC_ALIAS+GC_AGENT stamped)
+		// Shape matches setTemplateEnvIdentity output (GC_ALIAS+GC_AGENT+BEADS_ACTOR stamped)
 		// plus an unrelated template key to verify the merge preserves it.
-		Env:                map[string]string{"GC_ALIAS": "ants-ant-1", "GC_AGENT": "ants-ant-1", "TEMPLATE_KEY": "keep"},
+		Env: map[string]string{
+			"GC_ALIAS":     "ants-ant-1",
+			"GC_AGENT":     "ants-ant-1",
+			"BEADS_ACTOR":  "ants-ant-1",
+			"TEMPLATE_KEY": "keep",
+		},
 		WorkDir:            t.TempDir(),
 		SessionName:        "ants-ant-1",
 		InstanceName:       "ants-ant-1",
@@ -4142,8 +4147,72 @@ func TestPrepareStartCandidate_EmptyBeadAliasPreservesTemplateGCAlias(t *testing
 	if got := prepared.cfg.Env["GC_AGENT"]; got != "ants-ant-1" {
 		t.Fatalf("GC_AGENT = %q, want %q (companion identity key must also survive)", got, "ants-ant-1")
 	}
+	if got := prepared.cfg.Env["BEADS_ACTOR"]; got != "ants-ant-1" {
+		t.Fatalf("BEADS_ACTOR = %q, want %q (claim identity must survive with GC_ALIAS)", got, "ants-ant-1")
+	}
 	if got := prepared.cfg.Env["TEMPLATE_KEY"]; got != "keep" {
 		t.Fatalf("TEMPLATE_KEY = %q, want %q (unrelated template env must survive merge)", got, "keep")
+	}
+}
+
+// TestPrepareStartCandidate_PreservesStampedIdentityWhenItDiffersFromSessionName
+// is the #5048 start-merge control: a pool slot identity (bd.dog-1) stamped onto
+// the template must not be overwritten by RuntimeEnv's session-name fallback
+// (bd__dog-<beadID>) when the bead has not yet persisted an alias.
+func TestPrepareStartCandidate_PreservesStampedIdentityWhenItDiffersFromSessionName(t *testing.T) {
+	store := beads.NewMemStore()
+	const (
+		sessionName     = "bd__dog-ma-wisp-dw8d64"
+		runtimeIdentity = "bd.dog-1"
+	)
+	bead, err := store.Create(beads.Bead{
+		Title: "dog",
+		Type:  "task",
+		Metadata: map[string]string{
+			"session_name": sessionName,
+			"provider":     "claude",
+			"state":        "creating",
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create: %v", err)
+	}
+
+	tp := TemplateParams{
+		Command: "claude",
+		Env: map[string]string{
+			"GC_SESSION_NAME": sessionName,
+			"GC_ALIAS":        runtimeIdentity,
+			"GC_AGENT":        runtimeIdentity,
+			"BEADS_ACTOR":     runtimeIdentity,
+		},
+		WorkDir:            t.TempDir(),
+		SessionName:        sessionName,
+		InstanceName:       runtimeIdentity,
+		PoolSlot:           1,
+		EnvIdentityStamped: true,
+		ResolvedProvider:   &config.ResolvedProvider{Name: "claude", PromptMode: "none"},
+		TemplateName:       "bd.dog",
+	}
+
+	prepared, err := prepareStartCandidate(
+		startCandidate{session: &bead, tp: tp},
+		&config.City{},
+		store,
+		clock.Real{},
+	)
+	if err != nil {
+		t.Fatalf("prepareStartCandidate: %v", err)
+	}
+
+	for _, key := range []string{"GC_ALIAS", "GC_AGENT", "BEADS_ACTOR"} {
+		if got := prepared.cfg.Env[key]; got != runtimeIdentity {
+			t.Fatalf("%s = %q, want stamped runtime identity %q (must not fall back to sanitized session name %q)",
+				key, got, runtimeIdentity, sessionName)
+		}
+	}
+	if got := prepared.cfg.Env["GC_SESSION_NAME"]; got != sessionName {
+		t.Fatalf("GC_SESSION_NAME = %q, want %q", got, sessionName)
 	}
 }
 

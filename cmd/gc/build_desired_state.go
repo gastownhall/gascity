@@ -332,17 +332,18 @@ func buildDesiredStateWithSessionBeads(
 	// on-demand session only materializes from that path once the work is
 	// actually actionable. This keeps blocked or merely routed work from
 	// waking/materializing the named session prematurely.
-	for identity := range namedSpecs {
+	for identity, spec := range namedSpecs {
 		for _, wb := range assignedWorkBeads {
 			if wb.Status != "open" && wb.Status != "in_progress" {
 				continue
 			}
 			assignee := strings.TrimSpace(wb.Assignee)
-			if assignee == identity {
-				fmt.Fprintf(stderr, "namedWorkReady: %s matched by bead %s (assignee=%s status=%s)\n", identity, wb.ID, assignee, wb.Status) //nolint:errcheck
-				namedWorkReady[identity] = true
-				break
+			if !namedSessionAssigneeMatchesSpec(spec, identity, assignee) {
+				continue
 			}
+			fmt.Fprintf(stderr, "namedWorkReady: %s matched by bead %s (assignee=%s status=%s)\n", identity, wb.ID, assignee, wb.Status) //nolint:errcheck
+			namedWorkReady[identity] = true
+			break
 		}
 	}
 	if len(assignedWorkBeads) > 0 {
@@ -979,8 +980,14 @@ func setTemplateEnvIdentity(tp *TemplateParams, identity string) {
 	if tp.Env == nil {
 		tp.Env = make(map[string]string)
 	}
+	// Stamp every agent-facing ownership channel with the same runtime identity.
+	// BEADS_ACTOR is what `bd update --claim` writes into work.Assignee; leaving
+	// it on the sanitized tmux session name (bd__dog-<beadID>) while GC_ALIAS
+	// carries the stable pool identity (bd.dog-1) is the #5048 stranding:
+	// claims land under a form later respawns no longer export.
 	tp.Env["GC_AGENT"] = identity
 	tp.Env["GC_ALIAS"] = identity
+	tp.Env["BEADS_ACTOR"] = identity
 	tp.EnvIdentityStamped = true
 }
 

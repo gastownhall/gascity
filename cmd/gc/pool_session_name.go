@@ -186,7 +186,7 @@ func assigneePreservesNamedSessionRoute(cfg *config.City, template, assignee str
 	if cfg == nil {
 		return false
 	}
-	spec, ok := findNamedSessionSpec(cfg, cfg.EffectiveCityName(), assignee)
+	spec, ok := findNamedSessionSpecForAssignee(cfg, cfg.EffectiveCityName(), assignee)
 	if !ok {
 		return false
 	}

@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"strconv"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -50,6 +51,12 @@ func RuntimeEnvWithAlias(sessionID, sessionName, alias string, generation, conti
 
 // RuntimeEnvWithSessionContext extends RuntimeEnvWithAlias with the
 // session-model context shared by controller, CLI, and API starts.
+//
+// GC_AGENT and BEADS_ACTOR share the same alias-first ownership identity so
+// `bd update --claim` stamps work.Assignee with a form the session's work
+// query already polls via $GC_ALIAS / $GC_SESSION_NAME. A sanitized-only
+// BEADS_ACTOR (e.g. bd__dog-<beadID>) was the #5048 stranding: claims under a
+// form later pool respawns no longer export.
 func RuntimeEnvWithSessionContext(sessionID, sessionName, alias, template, origin string, generation, continuationEpoch int, instanceToken string) map[string]string {
 	env := RuntimeEnvWithAlias(sessionID, sessionName, alias, generation, continuationEpoch, instanceToken)
 	if template != "" {
@@ -58,10 +65,13 @@ func RuntimeEnvWithSessionContext(sessionID, sessionName, alias, template, origi
 	if origin != "" {
 		env["GC_SESSION_ORIGIN"] = origin
 	}
-	if alias != "" {
-		env["GC_AGENT"] = alias
-	} else if sessionName != "" {
-		env["GC_AGENT"] = sessionName
+	identity := strings.TrimSpace(alias)
+	if identity == "" {
+		identity = strings.TrimSpace(sessionName)
+	}
+	if identity != "" {
+		env["GC_AGENT"] = identity
+		env["BEADS_ACTOR"] = identity
 	}
 	return env
 }
