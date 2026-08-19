@@ -4144,6 +4144,46 @@ func TestInjectImplicitAgents_RigInjection(t *testing.T) {
 	}
 }
 
+func TestInjectImplicitAgents_RigScopedGetIsolatedWorkDir(t *testing.T) {
+	// Regression for #1181: rig-scoped implicit pools must not cwd into the
+	// shared rig root. Per-instance {{.AgentBase}} keeps parallel dispatches apart.
+	cfg := &City{
+		Daemon:    DaemonConfig{FormulaV2: true},
+		Providers: map[string]ProviderSpec{"claude": {}},
+		Rigs:      []Rig{{Name: "demo", Path: "/tmp/demo"}},
+	}
+	InjectImplicitAgents(cfg)
+
+	var agent *Agent
+	for i := range cfg.Agents {
+		a := &cfg.Agents[i]
+		if a.Implicit && a.Dir == "demo" && a.Name == "claude" {
+			agent = a
+			break
+		}
+	}
+	if agent == nil {
+		t.Fatal("missing implicit rig-scoped claude agent")
+	}
+	if agent.WorkDir != ImplicitRigPoolWorkDir {
+		t.Fatalf("WorkDir = %q, want %q", agent.WorkDir, ImplicitRigPoolWorkDir)
+	}
+	if len(agent.PreStart) != 1 || agent.PreStart[0] != ImplicitEnsureWorktreePreStart {
+		t.Fatalf("PreStart = %v, want [%q]", agent.PreStart, ImplicitEnsureWorktreePreStart)
+	}
+
+	// City-scoped implicit agents stay at city root (no rig git tree to isolate).
+	for _, a := range cfg.Agents {
+		if a.Implicit && a.Dir == "" && a.Name == "claude" {
+			if a.WorkDir != "" {
+				t.Fatalf("city-scoped implicit WorkDir = %q, want empty", a.WorkDir)
+			}
+			return
+		}
+	}
+	t.Fatal("missing city-scoped implicit claude")
+}
+
 // ---------------------------------------------------------------------------
 // agent_defaults.default_sling_formula
 // ---------------------------------------------------------------------------

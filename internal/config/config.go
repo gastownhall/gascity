@@ -2075,6 +2075,15 @@ func (a *Agent) EffectiveOnBoot() string {
 // agentKey identifies an agent by its rig directory and name.
 type agentKey struct{ dir, name string }
 
+// ImplicitRigPoolWorkDir is the default work_dir template for rig-scoped
+// implicit pool agents. {{.AgentBase}} expands per pool instance so parallel
+// dispatches never share one mutable working tree.
+const ImplicitRigPoolWorkDir = ".gc/worktrees/{{.Rig}}/{{.AgentBase}}"
+
+// ImplicitEnsureWorktreePreStart provisions the isolated worktree before the
+// session starts. gc must be on PATH (inherited by agent sessions).
+const ImplicitEnsureWorktreePreStart = "gc internal ensure-worktree {{.RigRoot}} {{.WorkDir}} {{.AgentBase}}"
+
 // InjectImplicitAgents adds implicit agent entries for configured providers
 // that lack an explicit [[agent]] entry, enabling auto-materialization of
 // sling targets without requiring manual agent declarations.
@@ -2116,7 +2125,9 @@ func InjectImplicitAgents(cfg *City) {
 		})
 	}
 
-	// Rig-scoped implicit agents.
+	// Rig-scoped implicit agents. Each pool instance gets its own worktree
+	// under .gc/worktrees/<rig>/<instance> so parallel slings cannot clobber
+	// each other's uncommitted edits (#1181).
 	for _, rig := range cfg.Rigs {
 		for _, name := range providers {
 			if existing[agentKey{rig.Name, name}] {
@@ -2128,6 +2139,8 @@ func InjectImplicitAgents(cfg *City) {
 				Provider:            name,
 				PromptTemplate:      promptTemplate,
 				DefaultSlingFormula: &slingFormula,
+				WorkDir:             ImplicitRigPoolWorkDir,
+				PreStart:            []string{ImplicitEnsureWorktreePreStart},
 				Implicit:            true,
 			})
 		}
