@@ -2025,7 +2025,10 @@ func TestNudgeSessionSkipsEscapeForCodex(t *testing.T) {
 	defer func() { _ = tm.KillSession(sessionName) }()
 	time.Sleep(300 * time.Millisecond)
 
-	if err := tm.NudgeSession(sessionName, "hello"); err != nil {
+	// Codex is submit-verify-eligible; cat -v never emits a busy indicator, so
+	// ErrNudgeSubmitUnconfirmed is the correct outcome. This test only cares
+	// whether Escape was sent.
+	if err := tm.NudgeSession(sessionName, "hello"); err != nil && !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
 		t.Fatalf("NudgeSession: %v", err)
 	}
 	time.Sleep(300 * time.Millisecond)
@@ -2086,7 +2089,9 @@ func main() {
 	defer func() { _ = tm.KillSession(sessionName) }()
 	time.Sleep(300 * time.Millisecond)
 
-	if err := tm.NudgeSession(sessionName, "hello"); err != nil {
+	// Process-name sniff marks this as codex (verify-eligible); fake binary
+	// never goes busy, so unconfirmed is expected.
+	if err := tm.NudgeSession(sessionName, "hello"); err != nil && !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
 		t.Fatalf("NudgeSession: %v", err)
 	}
 	time.Sleep(300 * time.Millisecond)
@@ -2117,7 +2122,11 @@ func TestNudgeSessionSkipsEscapeForClaude(t *testing.T) {
 	defer func() { _ = tm.KillSession(sessionName) }()
 	time.Sleep(300 * time.Millisecond)
 
-	if err := tm.NudgeSession(sessionName, "hello"); err != nil {
+	// The "claude" provider is submit-verify-eligible, so NudgeSession waits to
+	// observe a busy indicator — but plain `cat -v` can never produce one.
+	// ErrNudgeSubmitUnconfirmed is the correct, expected outcome. This test
+	// only cares whether Escape was sent before the paste.
+	if err := tm.NudgeSession(sessionName, "hello"); err != nil && !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
 		t.Fatalf("NudgeSession: %v", err)
 	}
 	time.Sleep(300 * time.Millisecond)
