@@ -104,24 +104,36 @@ func TestBothContainmentPassesRejectSymlinkEscapeIndependently(t *testing.T) {
 func TestSymlinkAwareContainmentIsLoadBearing(t *testing.T) {
 	cityDir := t.TempDir()
 
-	// A symlink loop: EvalSymlinks returns ELOOP, which is not os.IsNotExist.
-	loop := filepath.Join(cityDir, "loop")
-	if err := os.Symlink(loop, loop); err != nil {
-		t.Skipf("symlinks unsupported on this platform: %v", err)
+	type loadBearingCase struct {
+		name string
+		path string
 	}
-	// A regular file used as a directory component: ENOTDIR, also not IsNotExist.
+
+	// A regular file used as a directory component: EvalSymlinks returns ENOTDIR,
+	// which is not os.IsNotExist. This arm needs no symlink, so keep it out from
+	// under the symlink-support skip below — it exercises a distinct EvalSymlinks
+	// error class and must run on every platform.
 	if err := os.WriteFile(filepath.Join(cityDir, "plainfile"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-
-	for _, tc := range []struct {
-		name string
-		path string
-	}{
-		{"symlink loop", filepath.Join(cityDir, "loop")},
-		{"path under a symlink loop", filepath.Join(cityDir, "loop", "rig")},
+	cases := []loadBearingCase{
 		{"path under a regular file", filepath.Join(cityDir, "plainfile", "rig")},
-	} {
+	}
+
+	// A symlink loop: EvalSymlinks returns ELOOP, also not os.IsNotExist. These
+	// arms need symlink support, so add them only when it is available instead of
+	// skipping the whole test (which would also drop the ENOTDIR arm above).
+	loop := filepath.Join(cityDir, "loop")
+	if err := os.Symlink(loop, loop); err != nil {
+		t.Logf("symlinks unsupported on this platform, exercising only the ENOTDIR arm: %v", err)
+	} else {
+		cases = append(cases,
+			loadBearingCase{"symlink loop", loop},
+			loadBearingCase{"path under a symlink loop", filepath.Join(cityDir, "loop", "rig")},
+		)
+	}
+
+	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := lexicalContainment(cityDir, tc.path); err != nil {
 				t.Fatalf("precondition: lexicalContainment(%q) = %v, want nil. "+
@@ -245,5 +257,60 @@ func TestProvisionRigFromGitRejectsSymlinkEscape(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(outsideDir, "absent")); !os.IsNotExist(err) {
 		t.Fatalf("ProvisionRigFromGit created %s outside the city: stat err = %v",
 			filepath.Join(outsideDir, "absent"), err)
+	}
+}
+
+// TestTeardownPartialRigRefusesUncanonicalizablePathThroughGlue pins the second
+// containment pass through the production glue on a LOAD-BEARING input — one the
+// first (lexical) pass accepts and only symlinkAwareContainment refuses. The
+// isolation tests above call the two passes directly, and the escape tests above
+// use symlink-escape inputs the FIRST pass already rejects, so none of them would
+// redden if symlinkAwareContainment were dropped from assertRigPathWithinCity.
+// This drives the highest-value destructive caller (TeardownPartialRig fences
+// os.RemoveAll on a CreatedDir read back from a durable, attacker-influenceable-
+// over-time record) with a path-under-a-regular-file target: EvalSymlinks returns
+// ENOTDIR, so NormalizePathForCompare synthesizes an in-city path (first pass
+// accepts) while realPathForContainment fails closed (second pass rejects).
+// Deleting or reordering the symlinkAwareContainment call in assertRigPathWithinCity
+// lets the RemoveAll proceed and reddens this test. No symlink is needed, so it
+// runs on every platform.
+func TestTeardownPartialRigRefusesUncanonicalizablePathThroughGlue(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"city1\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	// A regular file used as a directory component yields ENOTDIR, which is not
+	// os.IsNotExist, so the first pass accepts the synthesized in-city path and
+	// only the fail-closed second pass rejects it.
+	plainfile := filepath.Join(cityDir, "plainfile")
+	if err := os.WriteFile(plainfile, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	createdDir := filepath.Join(cityDir, "plainfile", "rig")
+
+	// Precondition: this pins the second pass only where the FIRST pass accepts.
+	// If normalization ever changed so the lexical pass rejects this input, the
+	// test no longer proves the second pass is load-bearing through the glue.
+	if err := lexicalContainment(cityDir, createdDir); err != nil {
+		t.Fatalf("precondition: lexicalContainment(%q) = %v, want nil", createdDir, err)
+	}
+
+	cs := newControllerState(context.Background(), &config.City{Workspace: config.Workspace{Name: "city1"}},
+		runtime.NewFake(), events.NewFake(), "city1", cityDir)
+
+	err := cs.TeardownPartialRig(context.Background(),
+		api.RigProvisionManifest{RigName: "evil", CreatedDir: createdDir})
+	if !errors.Is(err, configedit.ErrValidation) {
+		t.Fatalf("TeardownPartialRig(CreatedDir=%q) err = %v, want ErrValidation: the second "+
+			"containment pass must refuse the RemoveAll on an uncanonicalizable path through the glue", createdDir, err)
+	}
+	// The RemoveAll must have been refused before any side effect: the regular
+	// file the rejected path tunnels through is still present and unmodified.
+	if b, err := os.ReadFile(plainfile); err != nil || string(b) != "x" {
+		t.Fatalf("TeardownPartialRig disturbed the escape target: ReadFile(%q) = %q, %v; want %q, nil",
+			plainfile, b, err, "x")
 	}
 }
