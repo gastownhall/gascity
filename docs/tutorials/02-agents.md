@@ -119,6 +119,14 @@ provider = "codex"
 option_defaults = { model = "o4-mini", permission_mode = "suggest" }
 ```
 
+<Note>
+`suggest` requires interactive approval for each action, so an agent set to it
+can't complete unattended work like the `gc sling` walkthrough below. Reach for
+`suggest` on an agent you'll attach to and approve step-by-step; for
+fire-and-forget slung work, use a mode that doesn't block on approval, such as
+`auto-edit` or `unrestricted`.
+</Note>
+
 That file would live at `agents/reviewer/agent.toml`. Valid values come from
 each provider's options schema, so they differ per provider — `o4-mini` is a
 Codex model, while the same key on a `claude` agent would take values like
