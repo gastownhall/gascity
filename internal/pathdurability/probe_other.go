@@ -10,4 +10,4 @@ var errUnsupported = errors.New("pathdurability: unsupported platform")
 
 func deviceID(_ string) (uint64, error) { return 0, errUnsupported }
 
-func filesystemType(_ string) (int64, error) { return 0, errUnsupported }
+func filesystemType(_ string) (uint32, error) { return 0, errUnsupported }

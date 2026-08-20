@@ -66,7 +66,7 @@ const (
 // overlayfs covers the container rootfs, which is what makes an in-pod path
 // like /var/tmp ephemeral even though it is not /tmp — the reason a prefix
 // denylist cannot do this job.
-var ephemeralFilesystems = map[int64]string{
+var ephemeralFilesystems = map[uint32]string{
 	magicTmpfs:     "tmpfs",
 	magicRamfs:     "ramfs",
 	magicOverlayfs: "overlayfs",

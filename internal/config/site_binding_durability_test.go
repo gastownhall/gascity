@@ -76,6 +76,51 @@ func TestApplySiteBindingsWarnsOnNonPersistentRigPath(t *testing.T) {
 	}
 }
 
+// TestNonPersistentRigPathWarningIsExemptFromStrictMode is the control for the
+// audit's warn-only contract, at the seam where that contract is actually
+// decided.
+//
+// The warning rides Provenance.Warnings into `gc start`, where strict mode (on
+// by default) promotes every warning it does not recognize into a fatal error.
+// Without the IsNonFatalSiteBindingWarning exemption the audit does the exact
+// opposite of what its doc comment promises: a city with one doomed rig path —
+// including one `gc rig add --allow-ephemeral` just created on purpose — stops
+// booting entirely, with `--no-strict` hidden and refused outside the legacy
+// standalone path.
+//
+// The text is taken from the real producer rather than a literal, so this
+// cannot pass against a message the audit no longer emits.
+func TestNonPersistentRigPathWarningIsExemptFromStrictMode(t *testing.T) {
+	stubDurability(t, map[string]pathdurability.Result{
+		"/tmp/adopt": {Class: pathdurability.Ephemeral, Filesystem: "tmpfs", Probed: "/tmp"},
+	})
+
+	cityRoot := t.TempDir()
+	cfg := bindRigs(t, cityRoot, map[string]string{"adopt": "/tmp/adopt"})
+
+	warnings, err := ApplySiteBindings(fsys.OSFS{}, cityRoot, cfg)
+	if err != nil {
+		t.Fatalf("ApplySiteBindings: %v", err)
+	}
+
+	// Control for the control: a run that produced no durability warning would
+	// otherwise satisfy the loop below vacuously.
+	var durability []string
+	for _, w := range warnings {
+		if strings.Contains(w, "/tmp/adopt") {
+			durability = append(durability, w)
+		}
+	}
+	if len(durability) != 1 {
+		t.Fatalf("want exactly one durability warning to classify, got %d: %q", len(durability), warnings)
+	}
+
+	if !IsNonFatalSiteBindingWarning(durability[0]) {
+		t.Fatalf("the boot audit's warning is fatal in strict mode, so a city carrying a doomed rig "+
+			"path refuses to start instead of warning: %q", durability[0])
+	}
+}
+
 // TestApplySiteBindingsIsSilentForDurableRigPaths is the regression direction:
 // the bindings a healthy hosted city carries must produce no warning at all.
 func TestApplySiteBindingsIsSilentForDurableRigPaths(t *testing.T) {

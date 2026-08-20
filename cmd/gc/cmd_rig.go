@@ -133,6 +133,23 @@ check remains informational.`,
 				return errExit
 			}
 			if isRemote {
+				// --allow-ephemeral has no remote surface: ProvisionRequest
+				// carries it, but the remote add never populates it, so honoring
+				// it silently would be a lie — the server would refuse anyway
+				// while telling the user to pass the flag they just passed.
+				// Refuse loudly instead, symmetric with the --git-url and
+				// --request-id guards on the local path below.
+				if allowEphemeralFlag {
+					msg := "gc rig add: --allow-ephemeral applies only to a local city; a rig provisioned on a remote city must live somewhere that survives a controller replacement"
+					if jsonOutput {
+						if writeJSONError(stdout, stderr, "unsupported_remote", msg, 1) != 0 {
+							return errExit
+						}
+						return nil
+					}
+					fmt.Fprintln(stderr, msg) //nolint:errcheck // best-effort stderr
+					return errExit
+				}
 				if cmdRigAddRemote(remoteC, target, args, gitURLFlag, requestIDFlag, nameFlag, prefixFlag, defaultBranchFlag, includes, startSuspended, adoptFlag, jsonOutput, stdout, stderr) != 0 {
 					return errExit
 				}

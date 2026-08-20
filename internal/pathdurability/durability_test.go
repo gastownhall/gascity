@@ -14,13 +14,13 @@ type fakeMounts struct {
 	// wins, mirroring how the kernel resolves a path to a superblock.
 	mounts map[string]struct {
 		dev   uint64
-		magic int64
+		magic uint32
 	}
 	// missing lists paths that do not exist, so the ancestor walk is exercised.
 	missing map[string]bool
 }
 
-func (f *fakeMounts) lookup(path string) (dev uint64, magic int64, err error) {
+func (f *fakeMounts) lookup(path string) (dev uint64, magic uint32, err error) {
 	if f.missing[path] {
 		return 0, 0, os.ErrNotExist
 	}
@@ -58,7 +58,7 @@ func (f *fakeMounts) install(t *testing.T) {
 		dev, _, err := f.lookup(p)
 		return dev, err
 	}
-	filesystemTypeFunc = func(p string) (int64, error) {
+	filesystemTypeFunc = func(p string) (uint32, error) {
 		_, magic, err := f.lookup(p)
 		return magic, err
 	}
@@ -81,7 +81,7 @@ func hostedPodMounts() *fakeMounts {
 	return &fakeMounts{
 		mounts: map[string]struct {
 			dev   uint64
-			magic int64
+			magic uint32
 		}{
 			"/":        {devRoot, magicOverlayfs},
 			"/city":    {devPVC, magicExt4},
@@ -166,7 +166,7 @@ func TestClassifyReportsOtherDeviceWithoutCondemningIt(t *testing.T) {
 	mounts := hostedPodMounts()
 	mounts.mounts["/data"] = struct {
 		dev   uint64
-		magic int64
+		magic uint32
 	}{devData, magicExt4}
 	mounts.install(t)
 
@@ -214,7 +214,7 @@ func TestClassifyFailsOpen(t *testing.T) {
 
 	t.Run("no probe on this platform", func(t *testing.T) {
 		deviceIDFunc = func(string) (uint64, error) { return 0, errors.New("unsupported platform") }
-		filesystemTypeFunc = func(string) (int64, error) { return 0, errors.New("unsupported platform") }
+		filesystemTypeFunc = func(string) (uint32, error) { return 0, errors.New("unsupported platform") }
 		if got := Classify("/city", "/tmp/adopt"); got.Class != Unknown {
 			t.Fatalf("Class = %q, want %q", got.Class, Unknown)
 		}
@@ -227,7 +227,7 @@ func TestClassifyFailsOpen(t *testing.T) {
 			}
 			return devTmp, nil
 		}
-		filesystemTypeFunc = func(string) (int64, error) { return 0, errors.New("statfs refused") }
+		filesystemTypeFunc = func(string) (uint32, error) { return 0, errors.New("statfs refused") }
 		if got := Classify("/city", "/tmp/adopt"); got.Class != Unknown {
 			t.Fatalf("Class = %q, want %q", got.Class, Unknown)
 		}
@@ -275,4 +275,38 @@ func sameDevice(t *testing.T, a, b string) bool {
 		t.Skipf("deviceID(%q): %v", b, err)
 	}
 	return devA == devB
+}
+
+// TestEphemeralMagicsSurviveSignedStatfsType pins the conversion filesystemType
+// performs. Statfs_t.Type is signed and its width is arch-dependent (int64 on
+// amd64/arm64, int32 on 386/arm), while superblock magics are 32-bit unsigned.
+// Converting straight to a signed type sign-extends every magic with the high
+// bit set, so ramfs (0x858458f6) arrives as a negative number on 386/arm and
+// matches nothing in ephemeralFilesystems — the guard silently stops
+// recognizing ramfs on exactly those arches. Routing through uint32 truncates
+// to the low 32 bits on every arch instead.
+func TestEphemeralMagicsSurviveSignedStatfsType(t *testing.T) {
+	for magic, name := range ephemeralFilesystems {
+		// The two shapes the kernel hands back, per arch.
+		wide := int64(magic)
+		narrow := int32(magic)
+
+		if got := uint32(wide); got != magic {
+			t.Errorf("%s: uint32(int64(%#x)) = %#x, want %#x", name, magic, got, magic)
+		}
+		if got := uint32(narrow); got != magic {
+			t.Errorf("%s: uint32(int32(%#x)) = %#x, want %#x", name, magic, got, magic)
+		}
+		if _, ok := ephemeralFilesystems[uint32(narrow)]; !ok {
+			t.Errorf("%s (%#x) is unreachable from a 32-bit Statfs_t.Type", name, magic)
+		}
+	}
+
+	// Control: the bug this pins is not hypothetical for every magic — it only
+	// bites the ones with the high bit set, and ramfs is one of them. If this
+	// stops being true the loop above has lost its teeth.
+	var ramfs uint32 = magicRamfs
+	if int32(ramfs) >= 0 {
+		t.Fatalf("magicRamfs %#x no longer has the high bit set, so the sign-extension control proves nothing", ramfs)
+	}
 }

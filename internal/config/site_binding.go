@@ -23,10 +23,17 @@ const (
 
 // IsNonFatalSiteBindingWarning reports whether warning is migration guidance
 // that should stay non-fatal in strict mode.
+//
+// The non-persistent rig path audit belongs here for a different reason than
+// the migration warnings around it: it is a durability advisory about a binding
+// that is already in place. Making it fatal would refuse to boot the very
+// cities it exists to warn — including one `gc rig add --allow-ephemeral`
+// deliberately created — so the audit's warn-only contract is enforced here.
 func IsNonFatalSiteBindingWarning(warning string) bool {
 	return strings.Contains(warning, legacyRigPathSiteBindingWarningFragment) ||
 		strings.Contains(warning, legacyWorkspaceIdentityWarningFragment) ||
 		strings.Contains(warning, legacyRigPathSurfaceWarningFragment) ||
+		strings.Contains(warning, nonPersistentRigPathWarningFragment) ||
 		strings.HasPrefix(warning, unknownRigSiteBindingWarningPrefix)
 }
 

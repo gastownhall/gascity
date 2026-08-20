@@ -1,3 +1,5 @@
+//go:build linux
+
 package main
 
 import (
@@ -5,25 +7,64 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/pathdurability"
 )
 
+// deviceOf returns the filesystem device path lives on, read straight from the
+// kernel. It is deliberately not routed through internal/pathdurability: these
+// tests use it to establish their own precondition, and a precondition proved
+// with the code under test cannot detect that code breaking.
+func deviceOf(t *testing.T, path string) uint64 {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %q: %v", path, err)
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatalf("stat %q: no syscall.Stat_t available", path)
+	}
+	return st.Dev
+}
+
 // ephemeralRigPath returns a path on a filesystem that cannot survive a restart,
 // on a different device from cityPath. /dev/shm is tmpfs on every Linux host and
-// needs no privilege. The test skips when the host cannot provide that shape.
+// needs no privilege.
+//
+// The precondition is established from the kernel (does /dev/shm exist, is it a
+// different device from the city) rather than from pathdurability.Classify. An
+// earlier version asked Classify itself and skipped when it disagreed, which
+// meant gutting Classify retired this whole file silently and turned the package
+// green. Once the precondition holds, a Classify that does not say Ephemeral is
+// the bug these tests exist to catch, so it fails loudly instead.
 func ephemeralRigPath(t *testing.T, cityPath string) string {
 	t.Helper()
 	if _, err := os.Stat("/dev/shm"); err != nil {
-		t.Skip("no /dev/shm on this host")
+		t.Skipf("no /dev/shm on this host: %v", err)
 	}
-	rigPath := filepath.Join("/dev/shm", "gc-rig-durability-"+t.Name())
+	shmDev, cityDev := deviceOf(t, "/dev/shm"), deviceOf(t, cityPath)
+	if shmDev == cityDev {
+		t.Skipf("/dev/shm and the city dir are the same device (%d); this host cannot express a rig on a separate ephemeral device", shmDev)
+	}
+
+	// A unique parent per test run: the rig path itself must not exist (the
+	// refusal test asserts nothing was created), and a fixed name collides
+	// across concurrent `go test` runs on one host.
+	base, err := os.MkdirTemp("/dev/shm", "gc-rig-durability-")
+	if err != nil {
+		t.Fatalf("creating scratch dir under /dev/shm: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	rigPath := filepath.Join(base, "rig")
+
 	if got := pathdurability.Classify(cityPath, rigPath); got.Class != pathdurability.Ephemeral {
-		t.Skipf("host does not present /dev/shm as a separate ephemeral device (got %q)", got.Class)
+		t.Fatalf("Classify(%q, %q).Class = %q, want %q: /dev/shm is a separate device from the city, so the durability probe must see it as ephemeral",
+			cityPath, rigPath, got.Class, pathdurability.Ephemeral)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(rigPath) })
 	return rigPath
 }
 
@@ -62,7 +103,7 @@ func TestRigAddRefusesNonPersistentPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading city.toml: %v", err)
 	}
-	if strings.Contains(string(cityToml), "gc-rig-durability") {
+	if strings.Contains(string(cityToml), filepath.Base(filepath.Dir(rigPath))) {
 		t.Fatalf("city.toml records the refused rig:\n%s", cityToml)
 	}
 }
@@ -105,5 +146,63 @@ func TestRigAddAllowEphemeralOptsIn(t *testing.T) {
 	combined := stdout.String() + stderr.String()
 	if !strings.Contains(combined, "will not survive") {
 		t.Fatalf("--allow-ephemeral suppressed the warning entirely:\n%s", combined)
+	}
+}
+
+// TestStartBootsCityWithAllowedEphemeralRig is the end-to-end control for the
+// audit's warn-only contract, over real config text rather than a literal.
+//
+// `gc rig add --allow-ephemeral` and `gc start` are the two halves of one
+// workflow, and nothing in either half's own tests notices when they disagree.
+// They did: the boot audit's warning rides Provenance.Warnings into
+// splitStrictConfigWarnings, which treats any warning it does not recognize as
+// fatal under strict mode (on by default), so `gc rig add --allow-ephemeral`
+// exited 0 and the very next `gc start` exited 1 on the city it had just
+// created — with --no-strict hidden and refused outside the legacy standalone
+// path.
+func TestStartBootsCityWithAllowedEphemeralRig(t *testing.T) {
+	cityPath := newRigAddCity(t)
+	rigPath := ephemeralRigPath(t, cityPath)
+
+	var stdout, stderr bytes.Buffer
+	if code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", "", false, false, &stdout, &stderr,
+		withAllowEphemeralPath(true)); code != 0 {
+		t.Fatalf("gc rig add --allow-ephemeral failed: %s", stderr.String())
+	}
+
+	_, prov, err := loadStartCityConfig(cityPath)
+	if err != nil {
+		t.Fatalf("loadStartCityConfig: %v", err)
+	}
+
+	// Non-vacuous: if the audit produced no warning at all, the split below
+	// would pass while proving nothing.
+	var durability []string
+	for _, w := range prov.Warnings {
+		if strings.Contains(w, rigPath) {
+			durability = append(durability, w)
+		}
+	}
+	if len(durability) == 0 {
+		t.Fatalf("the boot audit said nothing about %s; warnings = %q", rigPath, prov.Warnings)
+	}
+
+	fatal, nonFatal := splitStrictConfigWarnings(prov.Warnings)
+	for _, w := range fatal {
+		if strings.Contains(w, rigPath) {
+			t.Fatalf("gc start refuses to boot the city gc rig add --allow-ephemeral just created: %q", w)
+		}
+	}
+	for _, w := range durability {
+		found := false
+		for _, n := range nonFatal {
+			if n == w {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("durability warning went missing from the strict split instead of staying a warning: %q", w)
+		}
 	}
 }
