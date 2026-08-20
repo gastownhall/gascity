@@ -2972,18 +2972,20 @@ func reachableSelectedDependencies(
 // executeTargetWave runs each target's run() under a bounded-parallelism
 // semaphore and returns a stopResult per target. perTargetTimeout caps the
 // wall-clock each goroutine waits for run() to return; on expiry, that
-// target's outcome is "timed_out" and the inner goroutine is intentionally
-// leaked. Callers must only pass run functions that are wall-clock bounded by
-// their provider implementation; tmux satisfies this with its subprocess
-// timeout. Non-tmux providers must enforce an equivalent bound before using
-// this helper on long-lived controller paths. perTargetTimeout <= 0 means no
-// timeout (legacy behavior; useful only for tests that bypass the timeout).
+// target's outcome is "timed_out" and the inner goroutine may continue
+// running. Callers that must wait for those inner goroutines to finish
+// before releasing shared resources can call the returned wait function.
+// Callers must only pass run functions that are wall-clock bounded by their
+// provider implementation; tmux satisfies this with its subprocess timeout.
+// Non-tmux providers must enforce an equivalent bound before using this helper
+// on long-lived controller paths. perTargetTimeout <= 0 means no timeout
+// (legacy behavior; useful only for tests that bypass the timeout).
 func executeTargetWave(
 	targets []stopTarget,
 	maxParallel int,
 	perTargetTimeout time.Duration,
 	run func(stopTarget) error,
-) []stopResult {
+) ([]stopResult, func()) {
 	return executeTargetWaveUntil(targets, maxParallel, perTargetTimeout, nil, run)
 }
 
@@ -2993,14 +2995,15 @@ func executeTargetWaveUntil(
 	perTargetTimeout time.Duration,
 	shouldStop func() bool,
 	run func(stopTarget) error,
-) []stopResult {
+) ([]stopResult, func()) {
 	if len(targets) == 0 {
-		return nil
+		return nil, func() {}
 	}
 	if maxParallel <= 0 {
 		maxParallel = 1
 	}
 	results := make([]stopResult, len(targets))
+	var innerWg sync.WaitGroup
 	sem := make(chan struct{}, maxParallel)
 	done := make(chan int, len(targets))
 	stopCh, stopWatchDone := lifecycleStopSignal(shouldStop)
@@ -3053,7 +3056,9 @@ launchLoop:
 				outcome  string
 			}
 			inner := make(chan runResult, 1)
+			innerWg.Add(1)
 			go func() {
+				defer innerWg.Done()
 				defer func() {
 					if recovered := recover(); recovered != nil {
 						stack := debug.Stack()
@@ -3113,7 +3118,7 @@ launchLoop:
 	for completed := 0; completed < launched; completed++ {
 		<-done
 	}
-	return results
+	return results, innerWg.Wait
 }
 
 func lifecycleStopSignal(shouldStop func() bool) (<-chan struct{}, func()) {
@@ -3308,11 +3313,16 @@ func hydrateStopTargets(targets []stopTarget, cfg *config.City, store beads.Stor
 	return merged
 }
 
-func stopTargetThroughWorkerBoundary(target stopTarget, store beads.Store, sp runtime.Provider, cfg *config.City) error {
+func stopTargetCanonicalID(target stopTarget) string {
 	targetID := strings.TrimSpace(target.sessionID)
 	if targetID == "" {
 		targetID = strings.TrimSpace(target.name)
 	}
+	return targetID
+}
+
+func stopTargetThroughWorkerBoundary(target stopTarget, store beads.Store, sp runtime.Provider, cfg *config.City) error {
+	targetID := stopTargetCanonicalID(target)
 	if cityStopSessionMarked(store, target.sessionID) {
 		if err := workerKillSessionTargetWithConfig("", store, sp, cfg, targetID); err != nil {
 			return err
@@ -3380,7 +3390,7 @@ func interruptTargetsBoundedWithForceSignal(targets []stopTarget, cfg *config.Ci
 
 	if len(poolManaged) > 0 {
 		waveStarted := time.Now()
-		results := executeTargetWave(poolManaged, defaultMaxParallelStopsPerWave, stopPerTargetTimeoutDefault, func(target stopTarget) error {
+		results, _ := executeTargetWave(poolManaged, defaultMaxParallelStopsPerWave, stopPerTargetTimeoutDefault, func(target stopTarget) error {
 			return stopTargetThroughWorkerBoundary(target, store, sp, cfg)
 		})
 		for _, result := range results {
@@ -3398,12 +3408,8 @@ func interruptTargetsBoundedWithForceSignal(targets []stopTarget, cfg *config.Ci
 		return sent
 	}
 	waveStarted := time.Now()
-	results := executeTargetWaveUntil(interruptable, min(len(interruptable), defaultMaxParallelInterrupts), interruptPerTargetTimeout(cfg), shouldStop, func(target stopTarget) error {
-		targetID := strings.TrimSpace(target.sessionID)
-		if targetID == "" {
-			targetID = strings.TrimSpace(target.name)
-		}
-		return workerInterruptSessionTargetWithConfig("", store, sp, cfg, targetID)
+	results, _ := executeTargetWaveUntil(interruptable, min(len(interruptable), defaultMaxParallelInterrupts), interruptPerTargetTimeout(cfg), shouldStop, func(target stopTarget) error {
+		return workerInterruptSessionTargetWithConfig("", store, sp, cfg, stopTargetCanonicalID(target))
 	})
 	for _, result := range results {
 		logLifecycleOutcome(stderr, "interrupt", 0, result.target.name, result.target.template, result.outcome, result.started, result.finished, result.err)
@@ -3428,6 +3434,43 @@ func stopTargetsBounded(
 	actor string,
 	stdout, stderr io.Writer,
 ) int {
+	return stopTargetsBoundedWithTimeout(targets, cfg, store, sp, rec, actor, stdout, stderr, stopPerTargetTimeoutDefault)
+}
+
+func stopTargetsBoundedWithTimeout(
+	targets []stopTarget,
+	cfg *config.City,
+	store beads.Store,
+	sp runtime.Provider,
+	rec events.Recorder,
+	actor string,
+	stdout, stderr io.Writer,
+	perTargetTimeout time.Duration,
+) int {
+	var drains []func()
+	defer func() {
+		if perTargetTimeout != cleanupMaxWait || len(drains) == 0 {
+			return
+		}
+		// Wait up to cleanupMaxWait for the inner provider goroutines (which
+		// were abandoned after perTargetTimeout fired) to finish, so forced-stop
+		// teardown does not race still-running Stop/Kill calls.
+		done := make(chan struct{})
+		var drainWg sync.WaitGroup
+		for _, d := range drains {
+			drainWg.Add(1)
+			go func(drain func()) {
+				defer drainWg.Done()
+				drain()
+			}(d)
+		}
+		go func() { drainWg.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(cleanupMaxWait):
+			fmt.Fprintf(stderr, "session lifecycle: forced-stop wave drain did not finish within %s; proceeding with teardown\n", cleanupMaxWait) //nolint:errcheck
+		}
+	}()
 	targets = hydrateStopTargets(targets, cfg, store, stderr)
 	for _, target := range targets {
 		if !target.resolved {
@@ -3437,9 +3480,10 @@ func stopTargetsBounded(
 			stopped := 0
 			for wave, target := range targets {
 				waveStarted := time.Now()
-				results := executeTargetWave([]stopTarget{target}, 1, stopPerTargetTimeoutDefault, func(target stopTarget) error {
+				results, drainFn := executeTargetWave([]stopTarget{target}, 1, perTargetTimeout, func(target stopTarget) error {
 					return stopTargetThroughWorkerBoundary(target, store, sp, cfg)
 				})
+				drains = append(drains, drainFn)
 				for _, result := range results {
 					if shouldLogStopOutcome(result.target, cfg) {
 						logLifecycleOutcome(stderr, "stop", wave, result.target.name, result.target.template, result.outcome, result.started, result.finished, result.err)
@@ -3482,9 +3526,10 @@ func stopTargetsBounded(
 				waveTargets = append(waveTargets, target)
 			}
 		}
-		results := executeTargetWave(waveTargets, defaultMaxParallelStopsPerWave, stopPerTargetTimeoutDefault, func(target stopTarget) error {
+		results, drainFn := executeTargetWave(waveTargets, defaultMaxParallelStopsPerWave, perTargetTimeout, func(target stopTarget) error {
 			return stopTargetThroughWorkerBoundary(target, store, sp, cfg)
 		})
+		drains = append(drains, drainFn)
 		for _, result := range results {
 			if shouldLogStopOutcome(result.target, cfg) {
 				logLifecycleOutcome(stderr, "stop", wave, result.target.name, result.target.template, result.outcome, result.started, result.finished, result.err)

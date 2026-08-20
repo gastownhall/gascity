@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -408,30 +410,118 @@ func teardownServerForStop(sp runtime.Provider, stderr io.Writer, logPrefix stri
 }
 
 func markCityStopSessionSleepReason(sessFront *session.Store, stderr io.Writer) {
+	_ = markCityStopSessionSleepReasonWithAbort(sessFront, stderr, nil, 0)
+}
+
+func markCityStopSessionSleepReasonWithAbort(sessFront *session.Store, stderr io.Writer, shouldAbort func() bool, timeout time.Duration) *sync.WaitGroup {
 	if !sessFront.Backed() {
-		return
+		return nil
 	}
+
+	ctx := context.Background()
+	var cancel context.CancelFunc
+	if timeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+	} else {
+		ctx, cancel = context.WithCancel(ctx)
+	}
+	defer cancel()
+
+	var deadline time.Time
+	if timeout > 0 {
+		deadline = time.Now().Add(timeout)
+	}
+
+	if shouldAbort != nil {
+		go func() {
+			ticker := time.NewTicker(50 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if shouldAbort() {
+						cancel()
+						return
+					}
+				}
+			}
+		}()
+	}
+
 	// The label-only, closed-excluded, IsSessionBeadOrRepairable-UNfiltered Info
 	// lister is byte-identical to the former ListByLabel("gc:session") + closed-skip
 	// sweep: it keeps damaged gc:session-labeled beads with a non-"session" type (which
 	// the narrowing Store.List would drop) and reads each row's classifier through the
 	// typed twin (sessionMetadataStateInfo) + the Info.SleepReason mirror.
-	sessions, err := sessFront.ListLabeledSessionInfosUnfiltered()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc stop: marking sessions: %v\n", err) //nolint:errcheck // best-effort warning
-		return
+	type listRes struct {
+		sessions []session.Info
+		err      error
 	}
-	for _, info := range sessions {
+	listCh := make(chan listRes, 1)
+	go func() {
+		sessions, err := sessFront.ListLabeledSessionInfosUnfiltered()
+		listCh <- listRes{sessions, err}
+	}()
+
+	var res listRes
+	select {
+	case res = <-listCh:
+	case <-ctx.Done():
+		return nil
+	}
+
+	if res.err != nil {
+		fmt.Fprintf(stderr, "gc stop: marking sessions: %v\n", res.err) //nolint:errcheck // best-effort warning
+		return nil
+	}
+
+	var setWg sync.WaitGroup
+	for _, info := range res.sessions {
+		select {
+		case <-ctx.Done():
+			goto waitSetters
+		default:
+		}
 		if sessionMetadataStateInfo(info) != "active" {
 			continue
 		}
 		if strings.TrimSpace(info.SleepReason) != "" {
 			continue
 		}
-		if err := sessFront.SetMarker(info.ID, "sleep_reason", string(session.SleepReasonCityStop)); err != nil {
-			fmt.Fprintf(stderr, "gc stop: marking session %s: %v\n", info.ID, err) //nolint:errcheck // best-effort warning
+
+		setWg.Add(1)
+		setCh := make(chan error, 1)
+		go func(info session.Info) {
+			defer setWg.Done()
+			setCh <- sessFront.SetMarker(info.ID, "sleep_reason", string(session.SleepReasonCityStop))
+		}(info)
+
+		select {
+		case err := <-setCh:
+			if err != nil {
+				fmt.Fprintf(stderr, "gc stop: marking session %s: %v\n", info.ID, err) //nolint:errcheck // best-effort warning
+			}
+		case <-ctx.Done():
+			goto waitSetters
 		}
 	}
+
+waitSetters:
+	setDone := make(chan struct{})
+	go func() { setWg.Wait(); close(setDone) }()
+	if !deadline.IsZero() {
+		if remaining := time.Until(deadline); remaining > 0 {
+			select {
+			case <-setDone:
+			case <-time.After(remaining):
+			}
+		}
+	} else {
+		<-setDone
+	}
+	return &setWg
 }
 
 func stopCityManagedBeadsProviderAfterSuccessfulStop(cityPath string, stderr io.Writer) bool {

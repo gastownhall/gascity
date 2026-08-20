@@ -1044,11 +1044,22 @@ func gracefulStopAllWithForceSignal(
 	forceStopRequested func() bool,
 ) {
 	if timeout <= 0 || len(names) == 0 || stopForceRequested(forceStopRequested) {
-		// Immediate kill (no grace period).
-		stopTargetsBounded(stopTargetsForNames(names, cfg, store.Store, stderr), cfg, store.Store, sp, rec, "gc", stdout, stderr)
+		// Immediate kill (no grace period). When a force stop is in flight,
+		// cap the per-target stop budget so doShutdown cannot outrun the
+		// forced-stop timeout and leave cleanup racing the runtime.
+		perTargetTimeout := stopPerTargetTimeoutDefault
+		if stopForceRequested(forceStopRequested) {
+			perTargetTimeout = cleanupMaxWait
+		}
+		stopTargetsBoundedWithTimeout(stopTargetsForNames(names, cfg, store.Store, stderr), cfg, store.Store, sp, rec, "gc", stdout, stderr, perTargetTimeout)
 		return
 	}
 	targets := stopTargetsForNames(names, cfg, store.Store, stderr)
+	stopCh, stopDone := lifecycleStopSignal(forceStopRequested)
+	defer stopDone()
+	killAll := func() {
+		stopTargetsBoundedWithTimeout(targets, cfg, store.Store, sp, rec, "gc", stdout, stderr, cleanupMaxWait)
+	}
 	targetByName := make(map[string]stopTarget, len(targets))
 	for _, target := range targets {
 		targetByName[target.name] = target
@@ -1075,10 +1086,16 @@ func gracefulStopAllWithForceSignal(
 			break
 		}
 		allExited := true
-		if runningSet, ok := runningSessionSet(sp, names); ok {
+		if runningSet, ok := runningSessionSetWithTimeout(sp, names, 0, stopCh); ok {
 			allExited = len(runningSet) == 0
 		} else {
+			if stopForceRequested(forceStopRequested) {
+				break
+			}
 			for _, name := range names {
+				if stopForceRequested(forceStopRequested) {
+					break
+				}
 				running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, name)
 				if err == nil && running {
 					allExited = false
@@ -1101,9 +1118,28 @@ func gracefulStopAllWithForceSignal(
 	}
 
 	// Pass 2: kill survivors.
+	if stopForceRequested(forceStopRequested) {
+		killAll()
+		return
+	}
 	var survivors []string
-	runningSet, listed := runningSessionSet(sp, names)
+	runningSet, listed := runningSessionSetWithTimeout(sp, names, cleanupMaxWait, stopCh)
+	if !listed {
+		// ListRunning failed after the graceful window. We cannot safely
+		// determine survivors without a deadline, so fall back to bounded
+		// forced cleanup for every name rather than block on per-session
+		// observation.
+		if !stopForceRequested(forceStopRequested) {
+			fmt.Fprintf(stdout, "Could not list running agents; forcing cleanup of all %d name(s) with a %s per-target bound.\n", len(names), cleanupMaxWait) //nolint:errcheck
+		}
+		killAll()
+		return
+	}
 	for _, name := range names {
+		if stopForceRequested(forceStopRequested) {
+			killAll()
+			return
+		}
 		running := false
 		if listed {
 			running = runningSet[name]
@@ -1145,6 +1181,10 @@ func gracefulStopAllWithForceSignal(
 		}
 		survivors = append(survivors, name)
 	}
+	if stopForceRequested(forceStopRequested) {
+		killAll()
+		return
+	}
 	stopTargetsBounded(filterStopTargets(targets, survivors), cfg, store.Store, sp, rec, "gc", stdout, stderr)
 }
 
@@ -1153,27 +1193,52 @@ func stopForceRequested(forceStopRequested func() bool) bool {
 }
 
 func runningSessionSet(sp runtime.Provider, names []string) (map[string]bool, bool) {
-	running, err := sp.ListRunning("")
-	if runtime.IsPartialListError(err) {
-		return nil, false
+	return runningSessionSetWithTimeout(sp, names, 0, nil)
+}
+
+func runningSessionSetWithTimeout(sp runtime.Provider, names []string, timeout time.Duration, stopCh <-chan struct{}) (map[string]bool, bool) {
+	type listRes struct {
+		running []string
+		err     error
 	}
-	if err != nil {
-		return nil, false
+	listCh := make(chan listRes, 1)
+	go func() {
+		running, err := sp.ListRunning("")
+		listCh <- listRes{running, err}
+	}()
+
+	var timeoutCh <-chan time.Time
+	if timeout > 0 {
+		timeoutCh = time.After(timeout)
 	}
-	if len(names) == 0 {
-		return map[string]bool{}, true
-	}
-	wanted := make(map[string]bool, len(names))
-	for _, name := range names {
-		wanted[name] = true
-	}
-	result := make(map[string]bool, len(names))
-	for _, name := range running {
-		if wanted[name] {
-			result[name] = true
+
+	select {
+	case lr := <-listCh:
+		if runtime.IsPartialListError(lr.err) {
+			return nil, false
 		}
+		if lr.err != nil {
+			return nil, false
+		}
+		if len(names) == 0 {
+			return map[string]bool{}, true
+		}
+		wanted := make(map[string]bool, len(names))
+		for _, name := range names {
+			wanted[name] = true
+		}
+		result := make(map[string]bool, len(names))
+		for _, name := range lr.running {
+			if wanted[name] {
+				result[name] = true
+			}
+		}
+		return result, true
+	case <-timeoutCh:
+		return nil, false
+	case <-stopCh:
+		return nil, false
 	}
-	return result, true
 }
 
 // controllerLoop is a compatibility shim that wraps CityRuntime.run().

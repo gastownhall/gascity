@@ -171,6 +171,15 @@ type CityRuntime struct {
 	// reloadConfigTraced rather than swapping a live handle.
 	storageRoutes *storageRoutes
 
+	// setterWgs holds in-flight sleep_reason marker goroutines started by
+	// markCityStopSessionSleepReasonWithAbort. closeStorageRoutes waits for them
+	// before tearing down the storage binding so a slow/blocked SetMarker does
+	// not race storage teardown.
+	setterWgsMu      sync.Mutex
+	setterWgs        []*sync.WaitGroup
+	setterWgsRegOnce sync.Once
+	setterWgsRegDone chan struct{}
+
 	// Bead-driven reconciler state (Phase 2f).
 	sessionDrains      *drainTracker       // in-memory drain tracker; nil when bead reconciler disabled
 	providerHealthGate *providerHealthGate // ADR-0013 A1 M3a; nil until bead reconciler initialized
@@ -218,7 +227,11 @@ type CityRuntime struct {
 	managedDoltOwned    func(string) (bool, error)
 	managedDoltPort     func(string) string
 
-	shutdownOnce             sync.Once
+	// shutdownInProgress/ shutdownDone ensure doShutdown runs exactly once and
+	// that callers of shutdown() block until it returns.
+	shutdownInProgress       atomic.Bool
+	shutdownDone             chan struct{}
+	shutdownDoneOnce         sync.Once
 	preserveSessionsShutdown atomic.Bool
 	// ownedCity is set true once run() begins, i.e. once this runtime has
 	// passed every init-failure/discard point and is the process actually
@@ -412,6 +425,8 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 
 	cr := &CityRuntime{
 		storageRoutes:           routes,
+		shutdownDone:            make(chan struct{}),
+		setterWgsRegDone:        make(chan struct{}),
 		cityPath:                p.CityPath,
 		cityName:                p.CityName,
 		configName:              configName,
@@ -3939,128 +3954,165 @@ func (cr *CityRuntime) recordPreservedShutdownTrace() {
 	})
 }
 
+// getShutdownDone lazily initializes the one-shot shutdown completion
+// channel. It is created once so callers of shutdown() can wait for the
+// first shutdown to finish without racing the goroutine that runs it.
+func (cr *CityRuntime) getShutdownDone() chan struct{} {
+	if cr == nil {
+		return nil
+	}
+	cr.shutdownDoneOnce.Do(func() {
+		if cr.shutdownDone == nil {
+			cr.shutdownDone = make(chan struct{})
+		}
+	})
+	return cr.shutdownDone
+}
+
 // shutdown performs graceful two-pass agent shutdown for this city.
 // Safe to call multiple times (e.g., from both panic recovery and
 // normal shutdown) — only the first call takes effect.
 func (cr *CityRuntime) shutdown() {
-	cr.shutdownOnce.Do(func() {
-		// The storage binding's engine is opened once per process and closed
-		// once, at the very end of this one — deferred first so it runs last.
-		//
-		// Everything below still writes: the order drain, the city-stop sleep
-		// reason, and the two-pass session stop all go through the session and
-		// order classes, which on a split city are served from this binding.
-		// Closing it any earlier turns those writes into errors against a closed
-		// store, and the sleep reason an operator reads after `gc stop` is the
-		// one that never lands. The defer is also what makes the close reach
-		// BOTH exits: a shutdown that hands its sessions to the next supervisor
-		// returns early, and it still has to hand over the database file — a
-		// process that exits holding it leaves the successor's open racing this
-		// one's.
-		defer func() {
-			// Stop naming these routes before closing them: a sweep that
-			// resolved its bindings from a closed handle would answer every leg
-			// with an error instead of falling back to the one-shot funnel.
-			// Passing our OWN routes is what keeps this from dropping a
-			// registration a live replacement already installed.
-			unregisterResidencyRoutes(cr.cityPath, cr.storageRoutes)
-			if err := cr.storageRoutes.close(); err != nil {
-				fmt.Fprintf(cr.stderr, "%s: closing the storage binding: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
-			}
-		}()
-		asyncStartsDrained := cr.waitForAsyncStarts()
-		cr.waitForAsyncStops()
-		preserveSessions := cr.preserveSessionsShutdown.Load()
-		if preserveSessions {
-			cr.recordPreservedShutdownTrace()
+	if cr == nil {
+		return
+	}
+	if cr.shutdownInProgress.CompareAndSwap(false, true) {
+		defer close(cr.getShutdownDone())
+		cr.doShutdown()
+		return
+	}
+	<-cr.getShutdownDone()
+}
+
+// doShutdown contains the body of shutdown(). It must only be executed once,
+// under the protection of shutdownInProgress.
+func (cr *CityRuntime) doShutdown() {
+	// The storage binding's engine is opened once per process and closed
+	// once, at the very end of this one — deferred first so it runs last.
+	//
+	// Everything below still writes: the order drain, the city-stop sleep
+	// reason, and the two-pass session stop all go through the session and
+	// order classes, which on a split city are served from this binding.
+	// Closing it any earlier turns those writes into errors against a closed
+	// store, and the sleep reason an operator reads after `gc stop` is the
+	// one that never lands. The defer is also what makes the close reach
+	// BOTH exits: a shutdown that hands its sessions to the next supervisor
+	// returns early, and it still has to hand over the database file — a
+	// process that exits holding it leaves the successor's open racing this
+	// one's.
+	defer func() {
+		// Stop naming these routes before closing them: a sweep that
+		// resolved its bindings from a closed handle would answer every leg
+		// with an error instead of falling back to the one-shot funnel.
+		// Passing our OWN routes is what keeps this from dropping a
+		// registration a live replacement already installed.
+		unregisterResidencyRoutes(cr.cityPath, cr.storageRoutes)
+		cr.closeStorageRoutes()
+	}()
+	asyncStartsDrained := cr.waitForAsyncStarts()
+	cr.waitForAsyncStops()
+	preserveSessions := cr.preserveSessionsShutdown.Load()
+	if preserveSessions {
+		cr.recordPreservedShutdownTrace()
+	}
+	if cr.trace != nil {
+		_ = cr.trace.Close()
+	}
+	if cr.svc != nil {
+		// Workspace-service proxies are process-group-bound, not preserved
+		// agent sessions. Close them so the next supervisor can reacquire
+		// their sockets and ports during re-adoption.
+		if err := cr.svc.Close(); err != nil {
+			fmt.Fprintf(cr.stderr, "%s: service shutdown: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 		}
-		if cr.trace != nil {
-			_ = cr.trace.Close()
-		}
-		if cr.svc != nil {
-			// Workspace-service proxies are process-group-bound, not preserved
-			// agent sessions. Close them so the next supervisor can reacquire
-			// their sockets and ports during re-adoption.
-			if err := cr.svc.Close(); err != nil {
-				fmt.Fprintf(cr.stderr, "%s: service shutdown: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
-			}
-		}
-		if preserveSessions {
-			fmt.Fprintf(cr.stdout, "Preserving agent sessions for supervisor re-adoption.\n") //nolint:errcheck // best-effort stdout
-			return
-		}
-		// Drain order dispatchers with a small cap before stopping sessions.
-		// Use a fresh context because the tick ctx is already canceled at this
-		// point, which would make drain a no-op. shutdown_timeout remains the
-		// graceful session-stop budget; order drain does not silently halve it.
-		// Orphaned tracking beads (if drain times out) are closed by
-		// sweepOrphanedOrderTrackingRetry on next start.
-		total := cr.cfg.Daemon.ShutdownTimeoutDuration()
-		gracefulTimeout := total
+	}
+	if preserveSessions {
+		fmt.Fprintf(cr.stdout, "Preserving agent sessions for supervisor re-adoption.\n") //nolint:errcheck // best-effort stdout
+		return
+	}
+	// Drain order dispatchers with a small cap before stopping sessions.
+	// Use a fresh context because the tick ctx is already canceled at this
+	// point, which would make drain a no-op. shutdown_timeout remains the
+	// graceful session-stop budget; order drain does not silently halve it.
+	// Orphaned tracking beads (if drain times out) are closed by
+	// sweepOrphanedOrderTrackingRetry on next start.
+	total := cr.cfg.Daemon.ShutdownTimeoutDuration()
+	gracefulTimeout := total
+	if cr.forceStopRequested() {
+		gracefulTimeout = 0
+	}
+	if cr.od != nil || len(cr.retiredOrderDispatchers) > 0 {
+		drainTimeout := orderShutdownDrainTimeout(total)
 		if cr.forceStopRequested() {
-			gracefulTimeout = 0
+			drainTimeout = 0
 		}
-		if cr.od != nil || len(cr.retiredOrderDispatchers) > 0 {
-			drainTimeout := orderShutdownDrainTimeout(total)
-			if cr.forceStopRequested() {
-				drainTimeout = 0
-			}
-			drainCtx, drainCancel := context.WithTimeout(context.Background(), drainTimeout)
-			cr.drainOrderDispatchers(drainCtx)
-			drainCancel()
+		drainCtx, drainCancel := context.WithTimeout(context.Background(), drainTimeout)
+		cr.drainOrderDispatchers(drainCtx)
+		drainCancel()
+	}
+	running, listErr := cr.listRunningWithTimeout("")
+	if listErr != nil {
+		if runtime.IsPartialListError(listErr) {
+			fmt.Fprintf(cr.stderr, "%s: shutdown session listing partially failed; stopping %d visible agent(s): %v\n", cr.logPrefix, len(running), listErr) //nolint:errcheck // best-effort stderr
+		} else {
+			fmt.Fprintf(cr.stderr, "%s: shutdown session listing failed: %v\n", cr.logPrefix, listErr) //nolint:errcheck // best-effort stderr
 		}
-		running, listErr := cr.sp.ListRunning("")
-		if listErr != nil {
-			if runtime.IsPartialListError(listErr) {
-				fmt.Fprintf(cr.stderr, "%s: shutdown session listing partially failed; stopping %d visible agent(s): %v\n", cr.logPrefix, len(running), listErr) //nolint:errcheck // best-effort stderr
+	}
+	// sweepEnumerated tracks whether every stop pass this shutdown ran
+	// actually listed the fleet. A failed ListRunning yields an empty
+	// slice, so gracefulStopAll stops nothing — tearing the server down
+	// after that would turn a transient listing error into an ungraceful
+	// mass kill of sessions we never enumerated. Partial failures count
+	// as not-enumerated too: we did not see the whole fleet, so we must
+	// not kill-server on the strength of a subset. Force stop overrides
+	// this guard: the whole point is to finish teardown even when the
+	// fleet cannot be enumerated.
+	sweepEnumerated := listErr == nil || cr.forceStopRequested()
+	store := cr.sessionsBeadStore()
+	if wg := markCityStopSessionSleepReasonWithAbort(sessionFrontDoor(store.Store), cr.stderr, cr.forceStopRequested, cleanupMaxWait); wg != nil {
+		cr.addSetterWg(wg)
+	}
+	gracefulStopAllWithForceSignal(running, cr.sp, gracefulTimeout, cr.rec, cr.cfg, store, cr.stdout, cr.stderr, cr.forceStopRequested)
+	if !asyncStartsDrained && cr.forceStopRequested() {
+		lateRunning, lateListErr := cr.listRunningWithTimeout("")
+		if lateListErr != nil {
+			// sweepEnumerated is already true on the force-stop path, so a late
+			// async-start listing error does not change it.
+			if runtime.IsPartialListError(lateListErr) {
+				fmt.Fprintf(cr.stderr, "%s: force shutdown late async-start listing partially failed; stopping %d visible agent(s): %v\n", cr.logPrefix, len(lateRunning), lateListErr) //nolint:errcheck // best-effort stderr
 			} else {
-				fmt.Fprintf(cr.stderr, "%s: shutdown session listing failed: %v\n", cr.logPrefix, listErr) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(cr.stderr, "%s: force shutdown late async-start listing failed: %v\n", cr.logPrefix, lateListErr) //nolint:errcheck // best-effort stderr
 			}
 		}
-		// sweepEnumerated tracks whether every stop pass this shutdown ran
-		// actually listed the fleet. A failed ListRunning yields an empty
-		// slice, so gracefulStopAll stops nothing — tearing the server down
-		// after that would turn a transient listing error into an ungraceful
-		// mass kill of sessions we never enumerated. Partial failures count
-		// as not-enumerated too: we did not see the whole fleet, so we must
-		// not kill-server on the strength of a subset.
-		sweepEnumerated := listErr == nil
-		store := cr.sessionsBeadStore()
-		markCityStopSessionSleepReason(sessionFrontDoor(store.Store), cr.stderr)
-		gracefulStopAllWithForceSignal(running, cr.sp, gracefulTimeout, cr.rec, cr.cfg, store, cr.stdout, cr.stderr, cr.forceStopRequested)
-		if !asyncStartsDrained && cr.forceStopRequested() {
-			lateRunning, lateListErr := cr.sp.ListRunning("")
-			if lateListErr != nil {
-				sweepEnumerated = false
-				if runtime.IsPartialListError(lateListErr) {
-					fmt.Fprintf(cr.stderr, "%s: force shutdown late async-start listing partially failed; stopping %d visible agent(s): %v\n", cr.logPrefix, len(lateRunning), lateListErr) //nolint:errcheck // best-effort stderr
-				} else {
-					fmt.Fprintf(cr.stderr, "%s: force shutdown late async-start listing failed: %v\n", cr.logPrefix, lateListErr) //nolint:errcheck // best-effort stderr
-				}
+		if len(lateRunning) > 0 {
+			if wg := markCityStopSessionSleepReasonWithAbort(sessionFrontDoor(store.Store), cr.stderr, cr.forceStopRequested, cleanupMaxWait); wg != nil {
+				cr.addSetterWg(wg)
 			}
-			if len(lateRunning) > 0 {
-				markCityStopSessionSleepReason(sessionFrontDoor(store.Store), cr.stderr)
-				gracefulStopAllWithForceSignal(lateRunning, cr.sp, 0, cr.rec, cr.cfg, store, cr.stdout, cr.stderr, cr.forceStopRequested)
-			}
+			gracefulStopAllWithForceSignal(lateRunning, cr.sp, 0, cr.rec, cr.cfg, store, cr.stdout, cr.stderr, cr.forceStopRequested)
 		}
-		// With every enumerated session stopped, tear down the provider's
-		// shared server, exactly like the standalone stop path (cmdStopBody
-		// -> teardownServerForStop). Without this, a supervisor-managed stop
-		// leaks the city's tmux server until someone kills it by hand
-		// (#5175). Two guards keep the kill-server narrow:
-		//   - ownedCity: only a runtime that reached run() owns this city.
-		//     A discarded half-built runtime (adoption of an already-running
-		//     city; a controller-lock/socket/token failure) calls shutdown()
-		//     too, and must never kill the live owner's server.
-		//   - sweepEnumerated: only tear down after a stop that actually
-		//     listed the fleet, never on the empty slice a failed list leaves.
-		// The preserve-sessions shutdown returned above, before the session
-		// stops — preserved sessions live inside this server, so keeping it
-		// up there is by design, not an omission.
-		if cr.ownedCity.Load() && sweepEnumerated {
-			teardownServerForStop(cr.sp, cr.stderr, fmt.Sprintf("%s: city '%s'", cr.logPrefix, cr.cityName))
-		}
-	})
+	}
+	// All sleep_reason marker wait groups that this shutdown will create are
+	// now registered. Signal the barrier before the long graceful stop work so
+	// cleanup can coordinate provider teardown without racing late
+	// registrations or dropping a WaitGroup that has not yet been appended.
+	cr.signalSetterWgsRegistered()
+	// With every enumerated session stopped, tear down the provider's
+	// shared server, exactly like the standalone stop path (cmdStopBody
+	// -> teardownServerForStop). Without this, a supervisor-managed stop
+	// leaks the city's tmux server until someone kills it by hand
+	// (#5175). Two guards keep the kill-server narrow:
+	//   - ownedCity: only a runtime that reached run() owns this city.
+	//     A discarded half-built runtime (adoption of an already-running
+	//     city; a controller-lock/socket/token failure) calls shutdown()
+	//     too, and must never kill the live owner's server.
+	//   - sweepEnumerated: only tear down after a stop that actually
+	//     listed the fleet, never on the empty slice a failed list leaves.
+	// The preserve-sessions shutdown returned above, before the session
+	// stops — preserved sessions live inside this server, so keeping it
+	// up there is by design, not an omission.
+	if cr.ownedCity.Load() && sweepEnumerated {
+		cr.teardownServerForStop(sweepEnumerated)
+	}
 }
 
 func (cr *CityRuntime) preserveSessionsOnShutdown() {
@@ -4069,4 +4121,202 @@ func (cr *CityRuntime) preserveSessionsOnShutdown() {
 
 func (cr *CityRuntime) forceStopRequested() bool {
 	return cr != nil && cr.forceStopShutdown != nil && cr.forceStopShutdown.Load()
+}
+
+// listRunningWithTimeout calls cr.sp.ListRunning in a goroutine. During a
+// graceful shutdown it waits until the call returns. Once a force stop is
+// requested it gives the call cleanupMaxWait to finish before abandoning it.
+func (cr *CityRuntime) listRunningWithTimeout(prefix string) ([]string, error) {
+	type result struct {
+		names []string
+		err   error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		names, err := cr.sp.ListRunning(prefix)
+		ch <- result{names: names, err: err}
+	}()
+
+	forceDeadline := time.Time{}
+	for {
+		d := 100 * time.Millisecond
+		if !forceDeadline.IsZero() {
+			d = time.Until(forceDeadline)
+			if d <= 0 {
+				return nil, fmt.Errorf("list-running did not finish within %s after force stop", cleanupMaxWait)
+			}
+		}
+		select {
+		case r := <-ch:
+			return r.names, r.err
+		case <-time.After(d):
+			if forceDeadline.IsZero() && cr.forceStopRequested() {
+				forceDeadline = time.Now().Add(cleanupMaxWait)
+			}
+		}
+	}
+}
+
+// forceShutdownAsync starts or joins the existing shutdown of cr and returns a
+// channel that is closed when the shutdown body returns. If a shutdown is
+// already in progress, this avoids spawning a second doShutdown goroutine.
+func (cr *CityRuntime) forceShutdownAsync() <-chan struct{} {
+	done := make(chan struct{})
+	if cr == nil {
+		close(done)
+		return done
+	}
+	if cr.forceStopShutdown != nil {
+		cr.forceStopShutdown.Store(true)
+	}
+	if cr.shutdownInProgress.CompareAndSwap(false, true) {
+		go func() {
+			defer close(done)
+			defer func() { recover() }() //nolint:errcheck
+			defer close(cr.getShutdownDone())
+			cr.doShutdown()
+		}()
+		return done
+	}
+	go func() {
+		defer close(done)
+		<-cr.getShutdownDone()
+	}()
+	return done
+}
+
+func (cr *CityRuntime) addSetterWg(wg *sync.WaitGroup) {
+	if wg == nil {
+		return
+	}
+	cr.setterWgsMu.Lock()
+	defer cr.setterWgsMu.Unlock()
+	cr.setterWgs = append(cr.setterWgs, wg)
+}
+
+func (cr *CityRuntime) snapshotSetterWgs() []*sync.WaitGroup {
+	cr.setterWgsMu.Lock()
+	defer cr.setterWgsMu.Unlock()
+	out := make([]*sync.WaitGroup, len(cr.setterWgs))
+	copy(out, cr.setterWgs)
+	return out
+}
+
+func (cr *CityRuntime) clearSetterWgs() {
+	cr.setterWgsMu.Lock()
+	defer cr.setterWgsMu.Unlock()
+	cr.setterWgs = nil
+}
+
+func (cr *CityRuntime) waitSetterWgs(timeout time.Duration) bool {
+	wgs := cr.snapshotSetterWgs()
+	if len(wgs) == 0 {
+		return true
+	}
+	var all sync.WaitGroup
+	for _, wg := range wgs {
+		if wg == nil {
+			continue
+		}
+		all.Add(1)
+		go func(w *sync.WaitGroup) {
+			defer all.Done()
+			w.Wait()
+		}(wg)
+	}
+	done := make(chan struct{})
+	go func() { all.Wait(); close(done) }()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		fmt.Fprintf(cr.stderr, "%s: sleep_reason marker writes did not finish within %s; continuing with storage teardown\n", cr.logPrefix, timeout) //nolint:errcheck
+		return false
+	}
+}
+
+func (cr *CityRuntime) initSetterWgsRegDone() {
+	if cr.setterWgsRegDone == nil {
+		cr.setterWgsRegDone = make(chan struct{})
+	}
+}
+
+func (cr *CityRuntime) signalSetterWgsRegistered() {
+	if cr == nil {
+		return
+	}
+	cr.setterWgsMu.Lock()
+	cr.initSetterWgsRegDone()
+	ch := cr.setterWgsRegDone
+	cr.setterWgsMu.Unlock()
+	cr.setterWgsRegOnce.Do(func() { close(ch) })
+}
+
+func (cr *CityRuntime) waitSetterWgsRegistered(timeout time.Duration) bool {
+	if cr == nil {
+		return true
+	}
+	cr.setterWgsMu.Lock()
+	cr.initSetterWgsRegDone()
+	ch := cr.setterWgsRegDone
+	cr.setterWgsMu.Unlock()
+	select {
+	case <-ch:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
+
+func (cr *CityRuntime) closeStorageRoutes() {
+	cr.waitSetterWgs(cleanupMaxWait)
+	if cr.storageRoutes == nil {
+		return
+	}
+	// During a force stop an unresponsive backend can hang close() indefinitely.
+	// Run it in a goroutine and continue shutdown after a bounded wait; the
+	// goroutine is left to finish or fail on its own so the forced-stop timeout
+	// is never blocked again.
+	if cr.forceStopRequested() {
+		done := make(chan struct{})
+		var closeErr error
+		go func() {
+			defer close(done)
+			closeErr = cr.storageRoutes.close()
+		}()
+		select {
+		case <-done:
+		case <-time.After(cleanupMaxWait):
+			fmt.Fprintf(cr.stderr, "%s: storage close did not finish within %s; continuing shutdown\n", cr.logPrefix, cleanupMaxWait) //nolint:errcheck
+			return
+		}
+		if closeErr != nil {
+			fmt.Fprintf(cr.stderr, "%s: closing the storage binding: %v\n", cr.logPrefix, closeErr) //nolint:errcheck
+		}
+		return
+	}
+	if err := cr.storageRoutes.close(); err != nil {
+		fmt.Fprintf(cr.stderr, "%s: closing the storage binding: %v\n", cr.logPrefix, err) //nolint:errcheck
+	}
+}
+
+func (cr *CityRuntime) teardownServerForStop(sweepEnumerated bool) {
+	if !cr.ownedCity.Load() || !sweepEnumerated {
+		return
+	}
+	label := fmt.Sprintf("%s: city '%s'", cr.logPrefix, cr.cityName)
+	if !cr.forceStopRequested() {
+		teardownServerForStop(cr.sp, cr.stderr, label)
+		return
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		teardownServerForStop(cr.sp, cr.stderr, label)
+	}()
+	select {
+	case <-done:
+	case <-time.After(cleanupMaxWait):
+		fmt.Fprintf(cr.stderr, "%s: server teardown did not finish within %s; continuing shutdown\n", cr.logPrefix, cleanupMaxWait) //nolint:errcheck
+	}
 }

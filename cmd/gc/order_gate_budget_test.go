@@ -218,11 +218,12 @@ func TestConditionChecksRunConcurrentlyWithinTheirCap(t *testing.T) {
 			cityPath, cfg, _ := newExecOrderFixture(t)
 			liveDir := filepath.Join(t.TempDir(), "live")
 			ranMarker := filepath.Join(t.TempDir(), "ran")
-			// Register, then wait up to ~1s to see a sibling registration. Exit
-			// 0 only on overlap; always exit normally so the trap unregisters.
+			// Register, then wait up to ~1s to see every sibling registration.
+			// Exit 0 only when all wave checks are present at once (real overlap);
+			// the temp dir cleans the registration files afterwards.
 			check := fmt.Sprintf(
-				`mkdir -p %[1]s; echo . >> %[3]s; f=$(mktemp %[1]s/w.XXXXXX); trap 'rm -f "$f"' EXIT; `+
-					`i=0; while [ $i -lt 50 ]; do if [ "$(ls %[1]s | wc -l)" -ge 2 ]; then exit 0; fi; sleep 0.02; i=$((i+1)); done; exit 1`,
+				`mkdir -p %[1]s; echo . >> %[3]s; f=$(mktemp %[1]s/w.XXXXXX); trap 'sleep 0.1; rm -f "$f"' EXIT; `+
+					`i=0; while [ $i -lt 50 ]; do if [ "$(ls %[1]s | wc -l)" -ge %[2]d ]; then exit 0; fi; sleep 0.02; i=$((i+1)); done; exit 1`,
 				liveDir, wave, ranMarker)
 
 			aa := make([]orders.Order, 0, wave)

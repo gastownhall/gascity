@@ -84,12 +84,13 @@ func TestExecuteTargetWave_BoundedByPerTargetTimeout(t *testing.T) {
 
 	done := make(chan []stopResult, 1)
 	go func() {
-		done <- executeTargetWave(targets, 2, 100*time.Millisecond, func(target stopTarget) error {
+		results, _ := executeTargetWave(targets, 2, 100*time.Millisecond, func(target stopTarget) error {
 			if target.name == "blocked" {
 				<-block
 			}
 			return nil
 		})
+		done <- results
 	}()
 
 	select {

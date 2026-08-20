@@ -1082,6 +1082,7 @@ type managedCity struct {
 	done       chan struct{} // closed when the city goroutine exits
 	closer     io.Closer     // FileRecorder (or nil); closed on city stop
 	tombstoned atomic.Bool   // set before Remove() in shutdown paths for teardown safety
+	gen        uint64        // cityRegistry generation assigned at publication; used by cleanup
 }
 
 // deleteManagedCityIfCurrent prevents a stale city goroutine from removing
@@ -1108,20 +1109,36 @@ func managedCityStopTimeout(mc *managedCity) time.Duration {
 func managedCityForcedStopTimeout(mc *managedCity) time.Duration {
 	timeout := managedCityStopTimeout(mc)
 	if timeout <= 0 {
-		return timeout
+		// A non-positive shutdown timeout means immediate kill, but the forced
+		// stop still needs a finite budget so the supervisor does not block
+		// forever waiting for the forced-shutdown goroutine.
+		return 5 * time.Second
 	}
 	return timeout * 5
 }
 
-// stopManagedCity cancels a city's context, waits up to its configured
-// grace period for it to exit, forces shutdown if it doesn't, and then
-// closes the bead provider and file recorder. It returns a non-nil error
-// when the city did not exit cleanly within the budget. Stderr still
-// receives a trace line for operability; the returned error is for
-// callers (runSupervisor) that need to aggregate shutdown status.
+// cleanupMaxWait caps how long a force-stop waits for ListRunning and other
+// forced-shutdown operations to finish before abandoning them.
+const cleanupMaxWait = 5 * time.Second
+
+// stopManagedCity is the test-facing wrapper that runs without a city registry.
+// It exists so existing tests do not need to construct a registry.
 func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) error {
+	return stopManagedCityWithRegistry(mc, cityPath, stderr, nil)
+}
+
+// stopManagedCityWithRegistry cancels a city's context, waits up to its
+// configured grace period for it to exit, forces shutdown if it doesn't, and
+// then closes the bead provider and file recorder. It returns a non-nil error
+// when the city did not exit cleanly within the budget. cr is used to make
+// cleanup generation-aware so a replacement city at the same path is not started
+// while the old city's backend is still being torn down.
+func stopManagedCityWithRegistry(mc *managedCity, cityPath string, stderr io.Writer, cr *cityRegistry) error {
 	if mc == nil {
 		return nil
+	}
+	if cr != nil {
+		cr.BeginStop(cityPath, mc.gen)
 	}
 	mc.cancel()
 	timeout := managedCityStopTimeout(mc)
@@ -1129,46 +1146,97 @@ func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) error {
 	if timeout > 0 {
 		select {
 		case <-mc.done:
-			if err := shutdownBeadsProvider(cityPath); err != nil {
-				fmt.Fprintf(stderr, "gc supervisor: city '%s': bead store: %v\n", mc.name, err) //nolint:errcheck
-			}
-			if mc.closer != nil {
-				mc.closer.Close() //nolint:errcheck
-			}
+			cleanupAfterStop(mc, cityPath, stderr, nil, cr)
 			return nil
 		case <-time.After(timeout):
 			fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after cancel; forcing shutdown\n", mc.name, timeout) //nolint:errcheck
-			stopErr = fmt.Errorf("city %q did not exit within %s after cancel", mc.name, timeout)
+		}
+	} else {
+		// A non-positive shutdown timeout means skip the grace period and
+		// proceed straight to forced shutdown.
+		fmt.Fprintf(stderr, "gc supervisor: city '%s' shutdown timeout is non-positive; forcing shutdown immediately\n", mc.name) //nolint:errcheck
+	}
+	var forced <-chan struct{}
+	if mc.cr != nil {
+		forced = mc.cr.forceShutdownAsync()
+	}
+	forceTimeout := managedCityForcedStopTimeout(mc)
+	select {
+	case <-mc.done:
+		// Forced shutdown completed before the second timeout — the
+		// city is out. Clear the pending error so we report success.
+		stopErr = nil
+	case <-time.After(forceTimeout):
+		fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after forced shutdown\n", mc.name, forceTimeout) //nolint:errcheck
+		stopErr = fmt.Errorf("city %q did not exit within %s after forced shutdown", mc.name, forceTimeout)
+	}
+	// Cleanup must not extend the forced-stop budget: it is detached for
+	// registry-backed stops so stopManagedCity returns on time. The test path
+	// (no registry) runs synchronously when the forced shutdown is already done
+	// so the existing tests can assert the recorder is closed before returning.
+	switch {
+	case cr != nil:
+		cr.cleanupWg.Add(1)
+		go func() {
+			defer cr.cleanupWg.Done()
+			cleanupAfterStop(mc, cityPath, stderr, forced, cr)
+		}()
+	case forced != nil:
+		select {
+		case <-forced:
+			cleanupAfterStop(mc, cityPath, stderr, forced, cr)
+		default:
+			go cleanupAfterStop(mc, cityPath, stderr, forced, cr)
+		}
+	default:
+		cleanupAfterStop(mc, cityPath, stderr, forced, cr)
+	}
+	return stopErr
+}
+
+// cleanupAfterStop releases the bead provider and the city's file recorder. It
+// waits for the forced shutdown goroutine to finish so cleanup does not race
+// the runtime that is still stopping, then runs the registry-aware EndStop and
+// closes the recorder. Each individual blocking force-stop operation inside
+// doShutdown is bounded by cleanupMaxWait, but the total sequence may exceed it.
+func cleanupAfterStop(mc *managedCity, cityPath string, stderr io.Writer, forced <-chan struct{}, cr *cityRegistry) {
+	if forced != nil {
+		// Give doShutdown a bounded chance to finish its work before we tear
+		// down the bead provider. If it does not finish in time, we proceed with
+		// cleanup; the forced-stop budget has already expired.
+		select {
+		case <-forced:
+		case <-time.After(cleanupMaxWait):
+			fmt.Fprintf(stderr, "gc supervisor: city '%s': forced shutdown did not complete within %s; proceeding with cleanup\n", mc.name, cleanupMaxWait) //nolint:errcheck
 		}
 	}
 	if mc.cr != nil {
-		if mc.cr.forceStopShutdown != nil {
-			mc.cr.forceStopShutdown.Store(true)
+		// Wait for the registration barrier before clearing the marker wait
+		// group list. doShutdown appends setter WaitGroups in its listing/marker
+		// phase and only signals the barrier once every expected WaitGroup is
+		// registered. Without the barrier, a late addSetterWg could be dropped
+		// by clearSetterWgs and race bead-provider teardown.
+		if !mc.cr.waitSetterWgsRegistered(cleanupMaxWait) {
+			fmt.Fprintf(stderr, "gc supervisor: city '%s': sleep_reason marker registration did not finish within %s; proceeding with marker cleanup\n", mc.name, cleanupMaxWait) //nolint:errcheck
 		}
-		func() {
-			defer func() { recover() }() //nolint:errcheck
-			mc.cr.shutdown()
-		}()
-	}
-	forceTimeout := managedCityForcedStopTimeout(mc)
-	if forceTimeout > 0 {
-		select {
-		case <-mc.done:
-			// Forced shutdown completed before the second timeout — the
-			// city is out. Clear the pending error so we report success.
-			stopErr = nil
-		case <-time.After(forceTimeout):
-			fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after forced shutdown\n", mc.name, forceTimeout) //nolint:errcheck
-			stopErr = fmt.Errorf("city %q did not exit within %s after forced shutdown", mc.name, forceTimeout)
+		// Coordinate provider teardown with any in-flight sleep_reason marker
+		// writes so the bead store is not stopped while SetMarker goroutines
+		// are still using it.
+		if !mc.cr.waitSetterWgs(cleanupMaxWait) {
+			fmt.Fprintf(stderr, "gc supervisor: city '%s': sleep_reason marker writes did not finish within %s; proceeding with bead store cleanup\n", mc.name, cleanupMaxWait) //nolint:errcheck
 		}
+		mc.cr.clearSetterWgs()
 	}
-	if err := shutdownBeadsProvider(cityPath); err != nil {
+	if cr != nil {
+		if err := cr.EndStop(cityPath, mc.gen, func() error { return shutdownBeadsProvider(cityPath) }); err != nil {
+			fmt.Fprintf(stderr, "gc supervisor: city '%s': bead store: %v\n", mc.name, err) //nolint:errcheck
+		}
+	} else if err := shutdownBeadsProvider(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: city '%s': bead store: %v\n", mc.name, err) //nolint:errcheck
 	}
 	if mc.closer != nil {
 		mc.closer.Close() //nolint:errcheck
 	}
-	return stopErr
 }
 
 func stopManagedCityPreservingSessions(mc *managedCity, _ string, stderr io.Writer) error {
@@ -1192,6 +1260,9 @@ func stopManagedCityPreservingSessions(mc *managedCity, _ string, stderr io.Writ
 		}
 	}
 	if waitForRuntimeShutdown && mc.cr != nil {
+		// Preserve mode deliberately waits for the runtime shutdown to finish
+		// before returning, so services and the tmux server are really torn
+		// down (#5175); it must not be made asynchronous.
 		func() {
 			defer func() { recover() }() //nolint:errcheck
 			mc.cr.shutdown()
@@ -1581,11 +1652,13 @@ func runSupervisor(stdout, stderr io.Writer) int {
 				} else {
 					fmt.Fprintf(stdout, "Stopping city '%s'...\n", name) //nolint:errcheck
 				}
-				stopFn := stopManagedCity
+				var err error
 				if preserveSessions {
-					stopFn = stopManagedCityPreservingSessions
+					err = stopManagedCityPreservingSessions(mc, name, stderr)
+				} else {
+					err = stopManagedCityWithRegistry(mc, name, stderr, registry)
 				}
-				if err := stopFn(mc, name, stderr); err != nil {
+				if err != nil {
 					stopFailures = append(stopFailures, fmt.Sprintf("%s: %s", name, err.Error()))
 					fmt.Fprintf(stdout, "City '%s' stop reported error (see stderr).\n", name) //nolint:errcheck
 				} else {
@@ -1595,6 +1668,17 @@ func runSupervisor(stdout, stderr io.Writer) int {
 						fmt.Fprintf(stdout, "City '%s' stopped.\n", name) //nolint:errcheck
 					}
 				}
+			}
+			cleanupTimeout := cleanupMaxWait
+			if n := len(toStop); n > 1 {
+				cleanupTimeout = cleanupMaxWait * time.Duration(n)
+			}
+			cleanupDone := make(chan struct{})
+			go func() { registry.cleanupWg.Wait(); close(cleanupDone) }()
+			select {
+			case <-cleanupDone:
+			case <-time.After(cleanupTimeout):
+				fmt.Fprintf(stderr, "gc supervisor: city cleanup did not finish within %s; continuing shutdown\n", cleanupTimeout) //nolint:errcheck
 			}
 			var shutErr error
 			if len(stopFailures) > 0 {
@@ -1718,7 +1802,7 @@ func reconcileCities(
 			cityName = filepath.Base(path)
 		}
 		fmt.Fprintf(stdout, "Unregistered city '%s', stopping...\n", cityName) //nolint:errcheck
-		stopErr := stopManagedCity(mc, path, stderr)
+		stopErr := stopManagedCityWithRegistry(mc, path, stderr, cr)
 		// Clear backoff so re-registering starts immediately.
 		cr.BatchUpdate(func(
 			_ map[string]*managedCity,
@@ -1798,13 +1882,13 @@ func reconcileCities(
 	})
 	for i, mc := range nameDriftCities {
 		fmt.Fprintf(stdout, "City name changed at '%s', restarting...\n", nameDriftPaths[i]) //nolint:errcheck
-		_ = stopManagedCity(mc, nameDriftPaths[i], stderr)
+		_ = stopManagedCityWithRegistry(mc, nameDriftPaths[i], stderr, cr)
 	}
 
 	// Start new cities (and name-drifted restarts). Build list under lock,
 	// then release lock for I/O-heavy initialization (config loading, bead
 	// lifecycle, formula materialization, etc.).
-	var toStart []supervisor.CityEntry
+	var toStartCandidates []supervisor.CityEntry
 	cr.ReadCallback(func(
 		cities map[string]*managedCity,
 		initStatus map[string]cityInitProgress,
@@ -1816,10 +1900,18 @@ func reconcileCities(
 				if _, initializing := initStatus[path]; initializing {
 					continue
 				}
-				toStart = append(toStart, entry)
+				toStartCandidates = append(toStartCandidates, entry)
 			}
 		}
 	})
+
+	var toStart []supervisor.CityEntry
+	for _, entry := range toStartCandidates {
+		if cr.IsStopping(entry.Path) {
+			continue
+		}
+		toStart = append(toStart, entry)
+	}
 
 	for _, entry := range toStart {
 		path := entry.Path
@@ -1997,7 +2089,7 @@ func reconcileCities(
 			_ map[string]*initFailRecord,
 			_ map[string]*panicRecord,
 		) {
-			initStatus[path] = cityInitProgress{name: cityName, status: "loading_config"}
+			initStatus[path] = initProgressFor(cr, initStatus[path], cityName, "loading_config")
 		})
 
 		// Run critical city initialization (same steps as cmd_start.go).
@@ -2008,7 +2100,7 @@ func reconcileCities(
 				_ map[string]*initFailRecord,
 				_ map[string]*panicRecord,
 			) {
-				initStatus[path] = cityInitProgress{name: cityName, status: status}
+				initStatus[path] = initProgressFor(cr, initStatus[path], cityName, status)
 			})
 		}); err != nil {
 			emitPendingCityCreateFailure(cr, path, cityName, "city_init_failed", err, stderr)
@@ -2023,7 +2115,7 @@ func reconcileCities(
 				_ map[string]*initFailRecord,
 				_ map[string]*panicRecord,
 			) {
-				initStatus[path] = cityInitProgress{name: cityName, status: status}
+				initStatus[path] = initProgressFor(cr, initStatus[path], cityName, status)
 			})
 			started := time.Now()
 			err := fn()
@@ -2540,6 +2632,22 @@ func publishManagedCity(cr *cityRegistry, path string, mc *managedCity) bool {
 			alreadyRunning = true
 			return
 		}
+		// Re-check: a stop for this path may be in flight; do not publish a
+		// replacement over a city whose cleanup has not finished. Use the same
+		// predicate as reconcileCities so the two gates agree on when the path
+		// is startable again.
+		if cr.isStoppingLocked(path) {
+			alreadyRunning = true
+			return
+		}
+		// Preserve the generation assigned when init started so cleanup can
+		// detect replacements, even if the city hasn't been published yet.
+		if ip := initStatus[path]; ip.gen != 0 {
+			mc.gen = ip.gen
+		} else {
+			cr.nextCityGen++
+			mc.gen = cr.nextCityGen
+		}
 		// The controller state and per-city API are wired at this point, but
 		// initial reconciliation has not yet materialized startup session
 		// beads. Keep the city in startup status until CityRuntime.OnStarted
@@ -2734,6 +2842,20 @@ func supervisorBuildAgentsFnWithSessionBeads(cityPath, cityName string, stderr i
 type cityInitProgress struct {
 	name   string
 	status string
+	gen    uint64 // cityRegistry generation assigned when init starts
+}
+
+// initProgressFor returns a cityInitProgress for the given path, preserving
+// any generation already assigned while under the registry lock. It mutates
+// cr.nextCityGen directly; callers must hold citiesMu.
+func initProgressFor(cr *cityRegistry, existing cityInitProgress, name, status string) cityInitProgress {
+	if existing.gen == 0 {
+		cr.nextCityGen++
+		existing.gen = cr.nextCityGen
+	}
+	existing.name = name
+	existing.status = status
+	return existing
 }
 
 // Compile-time check that *cityRegistry satisfies api.CityResolver.
