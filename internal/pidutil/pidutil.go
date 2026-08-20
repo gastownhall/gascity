@@ -35,6 +35,14 @@ const (
 // psTimeout returns the deadline for a ps probe, honoring
 // GC_PIDUTIL_PS_TIMEOUT and refusing anything below the floor so a
 // misconfiguration cannot reintroduce the truncation this replaced.
+//
+// This is an operator escape hatch in the same family as GC_HOOK_CLAIM_WINDOW
+// (cmd/gc/cmd_hook_claim.go): a Go duration read straight from the environment,
+// where an unparseable or out-of-range value falls back to the default rather
+// than weakening the guard — the direction that stays safe. It is deliberately
+// NOT an internal/rollout gate: a rollout Spec selects between two mechanical
+// code paths and carries a ConfigPath, Expires and VersionAnchor for its
+// graduation, and this knob has none of those. It tunes one permanent bound.
 func psTimeout() time.Duration {
 	raw := strings.TrimSpace(os.Getenv("GC_PIDUTIL_PS_TIMEOUT"))
 	if raw == "" {
