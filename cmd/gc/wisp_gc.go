@@ -327,9 +327,12 @@ func closedWispGCEntries(store beads.Store) ([]beads.Bead, error) {
 // (unreadable) Get error, causes the descendant to be SKIPPED so an in-flight
 // workflow is never stripped of its closed steps. The per-root Get decision
 // is cached so many siblings sharing one dead root cost a single Get. A
-// rootless row needs no such check when it is a plain task: its own closed
-// status is the entire collectibility fence. A rootless row that is not a
-// plain task is an unrecognized shape and stays SKIPPED.
+// rootless row needs no such check when it is a plain-task LEAF — no ParentID
+// and no children — because its own closed status is then the entire
+// collectibility fence; deleteWorkflowBead removes a single bead, not a
+// closure, so a rootless row that owns a subtree stays SKIPPED rather than
+// stranding descendants no GC path could reach again. A rootless row that is
+// not a plain task is an unrecognized shape and also stays SKIPPED.
 //
 // With reapOrphansEnforced() false (the dry-run default, GC_WISP_GC_REAP_ORPHANS
 // unset) the function mutates nothing: it counts the would-be reaps and logs a
@@ -383,10 +386,26 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 
 		var decision bool
 		if rootID == "" {
-			// A rootless plain-task wisp has no owning root to check for
-			// collectibility — its own closed status (guaranteed by the
-			// candidates query above) is the only fence needed
-			// (gastownhall/gascity#3780).
+			// A rootless plain-task wisp is collectible only when it is a
+			// LEAF. deleteWorkflowBead removes a single bead, not a closure
+			// (unlike the root-rooted purge, which deletes the whole
+			// ownership tree), so reaping a row that owns a parent-child
+			// subtree would strand descendants that neither GC path can
+			// reach again. Its own closed status is then the entire
+			// collectibility fence (gastownhall/gascity#3780).
+			if strings.TrimSpace(c.ParentID) != "" {
+				continue
+			}
+			children, childErr := store.Children(c.ID, beads.IncludeClosed, beads.WithBothTiers)
+			if childErr != nil {
+				// Cannot prove safe — skip, matching the unreadable-Get
+				// posture on the rooted branch.
+				collectErr = errors.Join(collectErr, fmt.Errorf("listing children for rootless orphan %q: %w", c.ID, childErr))
+				continue
+			}
+			if len(children) > 0 {
+				continue
+			}
 			decision = true
 		} else {
 			cached, ok := rootCollectible[rootID]
