@@ -62,6 +62,7 @@ With --claim: runs the standard startup claim protocol for one work item.
 		flag.Hidden = true
 	}
 	cmd.AddCommand(newHookRunCmd(stdout, stderr))
+	cmd.AddCommand(newHookCurrentCmd(stdout, stderr))
 	return cmd
 }
 

@@ -30,6 +30,39 @@ func isTmux(sub string) func([]string) bool {
 	return func(argv []string) bool { return len(argv) >= 2 && argv[0] == "tmux" && argv[1] == sub }
 }
 
+// isStagingScript matches the secret-env staging call: execScript runs a bare
+// `sh` and feeds the script on stdin.
+func isStagingScript(argv []string) bool { return len(argv) == 1 && argv[0] == "sh" }
+
+// stagedDir is the remote directory the fake staging script reports creating.
+const stagedDir = "/tmp/gc-session-test"
+
+// answerStaging makes a fake runner reply to the staging script with a
+// directory (as the real script does, on stdout), deferring everything else to
+// next. Any test whose Config carries a secret env value needs this.
+func answerStaging(next func([]string) ([]byte, int, error)) func([]string) ([]byte, int, error) {
+	return func(argv []string) ([]byte, int, error) {
+		if isStagingScript(argv) {
+			return []byte(stagedDir + "\n"), 0, nil
+		}
+		if next == nil {
+			return nil, 0, nil
+		}
+		return next(argv)
+	}
+}
+
+// stdinFor returns the stdin the fake runner saw for the first call matching
+// predicate.
+func stdinFor(f *fakeRunner, predicate func([]string) bool) string {
+	for i, c := range f.calls {
+		if predicate(c) {
+			return string(f.stdins[i])
+		}
+	}
+	return ""
+}
+
 func TestProvider_StartLaunchesTmuxSession(t *testing.T) {
 	f := &fakeRunner{respond: func(argv []string) ([]byte, int, error) {
 		if isTmux("has-session")(argv) {
@@ -38,14 +71,185 @@ func TestProvider_StartLaunchesTmuxSession(t *testing.T) {
 		return nil, 0, nil // new-session ok
 	}}
 	p := providerWith(f)
-	cfg := runtime.Config{Command: "agent --serve", WorkDir: "/w", Env: map[string]string{"B": "2", "A": "1"}}
+	// Inert env only (see runtime.ArgvSafeEnvKey): values that cannot
+	// authenticate anything still ride -e, so no temp file is needed on a box
+	// whose sessions carry no credentials.
+	cfg := runtime.Config{Command: "agent --serve", WorkDir: "/w", Env: map[string]string{"GC_RIG": "2", "GC_AGENT": "1"}}
 	if err := p.Start(context.Background(), "s", cfg); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	got := firstCall(f, isTmux("new-session"))
-	want := []string{"tmux", "new-session", "-d", "-s", "s", "-c", "/w", "-e", "A=1", "-e", "B=2", "agent --serve"}
+	want := []string{"tmux", "new-session", "-d", "-s", "s", "-c", "/w", "-e", "GC_AGENT=1", "-e", "GC_RIG=2", "agent --serve"}
 	if !slices.Equal(got, want) {
 		t.Errorf("new-session argv =\n  %v\nwant\n  %v", got, want)
+	}
+	if firstCall(f, isStagingScript) != nil {
+		t.Error("an all-inert environment must not stage a file on the box")
+	}
+}
+
+// TestProvider_StartKeepsSecretEnvOutOfArgv is the guard for the ssh provider:
+// a credential must not reach any command line, on either end of the
+// connection. The new-session command moves into a staged tmux command file and
+// only its path is named.
+func TestProvider_StartKeepsSecretEnvOutOfArgv(t *testing.T) {
+	const secret = "sk-test-not-a-real-credential"
+	created := false
+	f := &fakeRunner{respond: answerStaging(func(argv []string) ([]byte, int, error) {
+		switch {
+		case isTmux("has-session")(argv):
+			if created {
+				return nil, 0, nil
+			}
+			return nil, 1, nil
+		case isTmux("start-server")(argv):
+			created = true
+		}
+		return nil, 0, nil
+	})}
+	cfg := runtime.Config{
+		Command:  "agent",
+		WorkDir:  "/w",
+		Env:      map[string]string{"ANTHROPIC_AUTH_TOKEN": secret, "GC_RIG": "r"},
+		PreStart: []string{"prep"},
+	}
+	if err := providerWith(f).Start(context.Background(), "s", cfg); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	for _, c := range f.calls {
+		for _, a := range c {
+			if strings.Contains(a, secret) {
+				t.Fatalf("secret value reached remote argv: %v", c)
+			}
+		}
+	}
+	if firstCall(f, isTmux("new-session")) != nil {
+		t.Error("new-session must not be issued as argv when the env holds a secret")
+	}
+	got := firstCall(f, isTmux("start-server"))
+	want := []string{"tmux", "start-server", ";", "source-file", stagedDir + "/session.tmux"}
+	if !slices.Equal(got, want) {
+		t.Errorf("launch argv =\n  %v\nwant\n  %v", got, want)
+	}
+
+	// The values travel on stdin instead, in both staged files.
+	script := stdinFor(f, isStagingScript)
+	if !strings.Contains(script, "ANTHROPIC_AUTH_TOKEN="+shellQuote([]string{secret})) {
+		t.Error("staged sh env file does not export the secret")
+	}
+	if !strings.Contains(script, tmuxQuote("ANTHROPIC_AUTH_TOKEN="+secret)) {
+		t.Error("staged tmux command file does not set the secret in the session env")
+	}
+	if !strings.Contains(script, "umask 077") {
+		t.Error("staging script does not restrict the umask")
+	}
+	if !strings.Contains(script, `chmod 600 "$d"/*`) {
+		t.Error("staging script does not chmod the staged files")
+	}
+
+	// GC_RIG is inert, so it stays inline in the prelude rather than the file.
+	pre := firstCall(f, func(argv []string) bool {
+		return len(argv) >= 3 && argv[0] == "sh" && argv[1] == "-c" && strings.HasSuffix(argv[2], "prep")
+	})
+	if pre == nil {
+		t.Fatal("PreStart sh -c was not issued")
+	}
+	if !strings.Contains(pre[2], ". '"+stagedDir+"/env.sh'") {
+		t.Errorf("prelude does not source the staged env file:\n%s", pre[2])
+	}
+	if !strings.Contains(pre[2], "export GC_RIG='r'") {
+		t.Errorf("prelude dropped the inert env var:\n%s", pre[2])
+	}
+
+	// The staged directory is removed once the session is up.
+	if firstCall(f, func(argv []string) bool {
+		return slices.Equal(argv, []string{"rm", "-rf", stagedDir})
+	}) == nil {
+		t.Error("staged directory was not cleaned up")
+	}
+}
+
+// TestProvider_StartFailsClosedWhenStagingFails proves the fix cannot degrade
+// into the leak it replaces: if the box cannot hold the file, the session does
+// not start with the credential on a command line instead.
+func TestProvider_StartFailsClosedWhenStagingFails(t *testing.T) {
+	f := &fakeRunner{respond: func(argv []string) ([]byte, int, error) {
+		if isStagingScript(argv) {
+			return nil, 1, nil // e.g. read-only /tmp, or a short write
+		}
+		if isTmux("has-session")(argv) {
+			return nil, 1, nil
+		}
+		return nil, 0, nil
+	}}
+	cfg := runtime.Config{Command: "agent", Env: map[string]string{"OPENAI_API_KEY": "sk-test-not-a-real-credential"}}
+	err := providerWith(f).Start(context.Background(), "s", cfg)
+	if err == nil {
+		t.Fatal("Start must fail when the secret env cannot be staged")
+	}
+	if firstCall(f, isTmux("new-session")) != nil || firstCall(f, isTmux("start-server")) != nil {
+		t.Error("no session may be launched once staging has failed")
+	}
+}
+
+// TestProvider_RelaunchKeepsSecretEnvOutOfArgv covers the warm-box path: no -e
+// is re-applied, but the setup prelude still has to export the credentials, and
+// it must do it from the staged file rather than inline in `sh -c`.
+func TestProvider_RelaunchKeepsSecretEnvOutOfArgv(t *testing.T) {
+	const secret = "sk-test-not-a-real-credential"
+	f := &fakeRunner{respond: answerStaging(nil)}
+	cfg := runtime.Config{
+		Command:      "agent --resumed",
+		WorkDir:      "/w",
+		Env:          map[string]string{"ANTHROPIC_AUTH_TOKEN": secret, "GC_RIG": "r"},
+		SessionSetup: []string{"setup"},
+	}
+	if err := providerWith(f).Relaunch(context.Background(), "s", cfg); err != nil {
+		t.Fatalf("Relaunch: %v", err)
+	}
+	for _, c := range f.calls {
+		for _, a := range c {
+			if strings.Contains(a, secret) {
+				t.Fatalf("secret value reached remote argv: %v", c)
+			}
+		}
+	}
+	setup := firstCall(f, func(argv []string) bool {
+		return len(argv) >= 3 && argv[0] == "sh" && argv[1] == "-c" && strings.HasSuffix(argv[2], "setup")
+	})
+	if setup == nil {
+		t.Fatal("SessionSetup sh -c was not issued")
+	}
+	if !strings.Contains(setup[2], ". '"+stagedDir+"/env.sh'") {
+		t.Errorf("prelude does not source the staged env file:\n%s", setup[2])
+	}
+	// Relaunch creates no session, so it stages no tmux command file.
+	if strings.Contains(stdinFor(f, isStagingScript), "session.tmux") {
+		t.Error("relaunch must not stage a tmux command file")
+	}
+	if firstCall(f, func(argv []string) bool {
+		return slices.Equal(argv, []string{"rm", "-rf", stagedDir})
+	}) == nil {
+		t.Error("staged directory was not cleaned up")
+	}
+}
+
+// TestProvider_RelaunchFailsClosedWhenStagingFails is Relaunch's half of the
+// fail-closed contract.
+func TestProvider_RelaunchFailsClosedWhenStagingFails(t *testing.T) {
+	f := &fakeRunner{respond: func(argv []string) ([]byte, int, error) {
+		if isStagingScript(argv) {
+			return nil, 1, nil
+		}
+		return nil, 0, nil
+	}}
+	cfg := runtime.Config{Command: "agent", Env: map[string]string{"OPENAI_API_KEY": "sk-test-not-a-real-credential"}}
+	if err := providerWith(f).Relaunch(context.Background(), "s", cfg); err == nil {
+		t.Fatal("Relaunch must fail when the secret env cannot be staged")
+	}
+	if firstCall(f, isTmux("respawn-pane")) != nil {
+		t.Error("no agent may be relaunched once staging has failed")
 	}
 }
 
@@ -68,7 +272,7 @@ func TestProvider_StartDuplicateIsErrSessionExists(t *testing.T) {
 
 func TestProvider_RelaunchRespawnsAgentInWarmSession(t *testing.T) {
 	// Session exists (has-session → 0) and respawn-pane succeeds (default 0).
-	f := &fakeRunner{}
+	f := &fakeRunner{respond: answerStaging(nil)}
 	p := providerWith(f)
 	cfg := runtime.Config{Command: "agent --resumed", WorkDir: "/w", Env: map[string]string{"A": "1"}}
 	if err := p.Relaunch(context.Background(), "s", cfg); err != nil {
@@ -247,7 +451,7 @@ func TestProvider_StartQuotesNameWorkdirEnvCommand(t *testing.T) {
 	cfg := runtime.Config{
 		Command: `agent --flag "a b"`,
 		WorkDir: "/path with space",
-		Env:     map[string]string{"MSG": "hello world", "Q": `a'b"c`},
+		Env:     map[string]string{"GC_ALIAS": "hello world", "GC_TEMPLATE": `a'b"c`},
 	}
 	if err := providerWith(f).Start(context.Background(), "sess-one", cfg); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -256,12 +460,46 @@ func TestProvider_StartQuotesNameWorkdirEnvCommand(t *testing.T) {
 	want := []string{
 		"tmux", "new-session", "-d", "-s", "sess-one",
 		"-c", "/path with space",
-		"-e", "MSG=hello world",
-		"-e", `Q=a'b"c`,
+		"-e", "GC_ALIAS=hello world",
+		"-e", `GC_TEMPLATE=a'b"c`,
 		`agent --flag "a b"`,
 	}
 	if !slices.Equal(got, want) {
 		t.Errorf("new-session argv =\n  %#v\nwant\n  %#v", got, want)
+	}
+}
+
+// TestProvider_StartQuotesStagedSecretEnv is the staged-file twin of
+// TestProvider_StartQuotesNameWorkdirEnvCommand: the same awkward values must
+// survive the trip through the tmux command file byte for byte.
+func TestProvider_StartQuotesStagedSecretEnv(t *testing.T) {
+	f := &fakeRunner{respond: answerStaging(func(argv []string) ([]byte, int, error) {
+		if isTmux("has-session")(argv) {
+			return nil, 1, nil
+		}
+		return nil, 0, nil
+	})}
+	cfg := runtime.Config{
+		Command: `agent --flag "a b"`,
+		WorkDir: "/path with space",
+		Env:     map[string]string{"MSG": "hello world", "Q": "a'b\"c$d#e;f\\g\nh"},
+	}
+	if err := providerWith(f).Start(context.Background(), "sess-one", cfg); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	script := stdinFor(f, isStagingScript)
+	wantLine := tmuxCommandLine([]string{
+		"new-session", "-d", "-s", "sess-one",
+		"-c", "/path with space",
+		"-e", "MSG=hello world",
+		"-e", "Q=a'b\"c$d#e;f\\g\nh",
+		`agent --flag "a b"`,
+	})
+	if !strings.Contains(script, wantLine) {
+		t.Errorf("staged tmux command file missing the quoted new-session line:\n%s\nwant:\n%s", script, wantLine)
+	}
+	if !strings.Contains(script, "Q="+shellQuote([]string{"a'b\"c$d#e;f\\g\nh"})) {
+		t.Errorf("staged sh env file missing the quoted value:\n%s", script)
 	}
 }
 
@@ -379,14 +617,16 @@ func TestProvider_StartSetupCarriesWorkdirAndEnv(t *testing.T) {
 		}
 		return nil, 0, nil
 	}}
-	cfg := runtime.Config{Command: "agent", WorkDir: "/w space", Env: map[string]string{"FOO": "bar baz"}, PreStart: []string{"prep"}}
+	// Inert env stays inline in the prelude; the staged-file path for secret
+	// values is covered by TestProvider_StartKeepsSecretEnvOutOfArgv.
+	cfg := runtime.Config{Command: "agent", WorkDir: "/w space", Env: map[string]string{"GC_CITY": "bar baz"}, PreStart: []string{"prep"}}
 	if err := providerWith(f).Start(context.Background(), "s", cfg); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if pre == nil {
 		t.Fatal("PreStart sh -c was not issued")
 	}
-	for _, want := range []string{`cd '/w space' || exit 1`, `export FOO='bar baz'`, `export GC_SESSION='s'`, "prep"} {
+	for _, want := range []string{`cd '/w space' || exit 1`, `export GC_CITY='bar baz'`, `export GC_SESSION='s'`, "prep"} {
 		if !strings.Contains(pre[2], want) {
 			t.Errorf("PreStart sh -c arg missing %q:\n%s", want, pre[2])
 		}

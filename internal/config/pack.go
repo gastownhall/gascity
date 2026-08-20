@@ -2921,6 +2921,14 @@ func ResetPackContentHashCache() {
 // by a cheap stat fingerprint, so an unchanged tree is hashed once and reused
 // across calls and reconcile ticks; see packContentHashCache.
 func PackContentHashRecursive(fs fsys.FS, topoDir string) string {
+	return packContentHashRecursive(fs, topoDir, true)
+}
+
+// packContentHashRecursive computes a pack hash, optionally using the
+// stat-fingerprint cache. Revision snapshots must use fresh content reads so
+// edits that preserve file size and coarse-grained mtimes cannot return a
+// stale revision.
+func packContentHashRecursive(fs fsys.FS, topoDir string, useCache bool) string {
 	var paths []string
 	collectFiles(fs, topoDir, "", &paths)
 	sort.Strings(paths)
@@ -2939,9 +2947,11 @@ func PackContentHashRecursive(fs fsys.FS, topoDir string) string {
 		}
 	}
 	fpSum := fp.Sum64()
-	if v, ok := packContentHashCache.Load(absDir); ok {
-		if entry := v.(packContentHashEntry); entry.fingerprint == fpSum {
-			return entry.hash
+	if useCache {
+		if v, ok := packContentHashCache.Load(absDir); ok {
+			if entry := v.(packContentHashEntry); entry.fingerprint == fpSum {
+				return entry.hash
+			}
 		}
 	}
 
@@ -2957,7 +2967,9 @@ func PackContentHashRecursive(fs fsys.FS, topoDir string) string {
 		h.Write([]byte{0})       //nolint:errcheck // hash.Write never errors
 	}
 	result := fmt.Sprintf("%x", h.Sum(nil))
-	packContentHashCache.Store(absDir, packContentHashEntry{fingerprint: fpSum, hash: result})
+	if useCache {
+		packContentHashCache.Store(absDir, packContentHashEntry{fingerprint: fpSum, hash: result})
+	}
 	return result
 }
 

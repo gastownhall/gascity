@@ -923,6 +923,17 @@ workspace on fail" expressible. Its own outcome never re-grades the root;
 a teardown that fails after settlement is a relic to sweep, not a failed
 run.
 
+**Close-ownership invariant.** A compiled graph never blocks a node on the
+control bead that closes it. A scope body is not blocked by any of its
+scope-checks (the body's authored `needs` keep naming the raw members), and
+a workflow root is not blocked by its `workflow-finalize` (the root reaches
+its finalizer through an informational `tracks` edge instead). Such an edge
+is a permanent deadlock — the store refuses to close a blocked issue, and
+the only bead that could clear the blocker is the one being refused. The
+compiler rejects any recipe that contains one. Downstream ordering is
+unaffected: the scope-check still blocks on its member, and the finalizer
+still blocks on every graph sink including the scope body.
+
 ## 4. Accepted But Inert
 
 This specification is normative for implemented behavior. The constructs

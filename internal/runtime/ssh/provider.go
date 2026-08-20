@@ -86,7 +86,9 @@ const defaultRemoteShell = "/bin/sh"
 //   - new-session creates the tmux session. A name that already exists fails
 //     with [runtime.ErrSessionExists] (has-session precheck, and re-checked if
 //     new-session fails, since the connection drops tmux's stderr on a non-zero
-//     exit). Env is injected via tmux -e (requires remote tmux >= 3.2).
+//     exit). Inert env is injected via tmux -e (requires remote tmux >= 3.2);
+//     secret env is staged into private files on the box first, so no value
+//     reaches a command line on either end (see [stagedEnv]).
 //   - SessionSetup, SessionSetupScript (piped to a remote sh), and SessionLive
 //     run on the box after creation, best-effort. Every setup step runs with the
 //     session WorkDir as cwd and the session env (cfg.Env + GC_SESSION) exported,
@@ -111,10 +113,30 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		return fmt.Errorf("%w: ssh session %q", runtime.ErrSessionExists, name)
 	}
 
+	args := []string{"new-session", "-d", "-s", name}
+	if cfg.WorkDir != "" {
+		args = append(args, "-c", cfg.WorkDir)
+	}
+	for _, k := range sortedKeys(cfg.Env) {
+		args = append(args, "-e", k+"="+cfg.Env[k])
+	}
+	args = append(args, resolveCommand(cfg))
+
+	// Secret env values never travel in a command line — not the box's, not this
+	// ssh client's. They are staged into private files on the box and referenced
+	// by path (see [stagedEnv]). Staging runs before PreStart because the prelude
+	// PreStart carries is what names the staged file.
+	_, secretEnv := runtime.SplitEnvByArgvSafety(cfg.Env)
+	staged, err := p.stageSecretEnv(ctx, secretEnv, args)
+	if err != nil {
+		return fmt.Errorf("ssh start %q: %w", name, err)
+	}
+	defer p.cleanupStagedEnv(ctx, name, staged)
+
 	// Setup steps run on the box with the session WorkDir as cwd and the session
 	// env (cfg.Env + GC_SESSION) exported — matching the local tmux adapter's
 	// runSetupCommand and the k8s in-pod environment.
-	prelude := setupPrelude(cfg, name)
+	prelude := setupPrelude(cfg, name, staged.envPath)
 
 	// PreStart prepares the target filesystem; a failure aborts startup.
 	for _, cmd := range cfg.PreStart {
@@ -130,15 +152,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		}
 	}
 
-	args := []string{"new-session", "-d", "-s", name}
-	if cfg.WorkDir != "" {
-		args = append(args, "-c", cfg.WorkDir)
-	}
-	for _, k := range sortedKeys(cfg.Env) {
-		args = append(args, "-e", k+"="+cfg.Env[k])
-	}
-	args = append(args, resolveCommand(cfg))
-	if _, code, err := p.tmux(ctx, name, args...); err != nil {
+	if _, code, err := p.launchSession(ctx, name, args, staged); err != nil {
 		return fmt.Errorf("ssh start %q: %w", name, err)
 	} else if code != 0 {
 		// Tighten the sentinel under the precheck TOCTOU: if the session now
@@ -233,7 +247,17 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 		return fmt.Errorf("%w: ssh session %q (box must be provisioned first)", runtime.ErrSessionNotFound, name)
 	}
 
-	prelude := setupPrelude(cfg, name)
+	// respawn-pane takes no -e, so nothing is re-injected into the session
+	// environment; the staged file exists only so the setup prelude can export
+	// secrets without putting them on a command line.
+	_, secretEnv := runtime.SplitEnvByArgvSafety(cfg.Env)
+	staged, err := p.stageSecretEnv(ctx, secretEnv, nil)
+	if err != nil {
+		return fmt.Errorf("ssh relaunch %q: %w", name, err)
+	}
+	defer p.cleanupStagedEnv(ctx, name, staged)
+
+	prelude := setupPrelude(cfg, name, staged.envPath)
 
 	args := []string{"respawn-pane", "-k", "-t", name}
 	if cfg.WorkDir != "" {
@@ -482,12 +506,24 @@ func attachArgs(ep Endpoint, name string) []string {
 // provide. The remote command or script body is appended after this prefix; a
 // failed cd aborts with exit 1 (which fails PreStart and is discarded by the
 // best-effort steps).
-func setupPrelude(cfg runtime.Config, name string) string {
+//
+// Most of this prelude ends up inside an `sh -c ...` argument, so it is
+// command-line-visible on both ends of the connection. Secret values are
+// therefore not written into it: envPath names the 0600 file staged on the box
+// (see [stagedEnv]) and the prelude only sources it. envPath is empty when the
+// session carries no secrets, in which case every value is inert and inlined.
+func setupPrelude(cfg runtime.Config, name, envPath string) string {
 	var b strings.Builder
 	if cfg.WorkDir != "" {
 		b.WriteString("cd " + shellQuote([]string{cfg.WorkDir}) + " || exit 1\n")
 	}
+	if envPath != "" {
+		b.WriteString(". " + shellQuote([]string{envPath}) + "\n")
+	}
 	for _, k := range sortedKeys(cfg.Env) {
+		if envPath != "" && runtime.ArgvSecretEnvValue(k, cfg.Env[k]) {
+			continue // sourced from envPath instead
+		}
 		b.WriteString("export " + k + "=" + shellQuote([]string{cfg.Env[k]}) + "\n")
 	}
 	b.WriteString("export GC_SESSION=" + shellQuote([]string{name}) + "\n")

@@ -37,6 +37,7 @@ import (
 //	VERTEX_      Vertex AI direct
 //	XAI_         xAI / Grok
 //	XIAOMI_      Xiaomi MiMo
+//	ZCODE_       Z.ai ZCode (GLM harness)
 var providerCredentialEnvPrefixes = []string{
 	"ANTHROPIC_",
 	"AZURE_",
@@ -55,6 +56,7 @@ var providerCredentialEnvPrefixes = []string{
 	"VERTEX_",
 	"XAI_",
 	"XIAOMI_",
+	"ZCODE_",
 }
 
 // providerCredentialEnvKeys lists exact provider credential/config env vars for

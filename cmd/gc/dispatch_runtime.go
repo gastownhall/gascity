@@ -477,6 +477,17 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 				workflowTracef("serve process-error bead=%s kind=%s err=%v", beadID, kind, err)
 				if dispatch.IsTransientControllerError(err) {
 					pendingCount++
+					// A quiet retry is a verbatim repeat of the failure this
+					// bead already reported. It still gets retried on every
+					// sweep, but it must not count as pending: pendingAny
+					// resets idleSweeps, and a permanently-stuck bead that
+					// resets the backoff every sweep holds the whole loop at
+					// its 1s floor forever. Two such beads consumed 95% of one
+					// city's control dispatches.
+					if dispatch.IsQuietControllerRetry(err) {
+						workflowTracef("serve transient-error-quiet bead=%s kind=%s err=%v", beadID, kind, err)
+						continue
+					}
 					result.pendingAny = true
 					workflowTracef("serve transient-error-pending bead=%s kind=%s err=%v", beadID, kind, err)
 					continue

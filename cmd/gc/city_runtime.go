@@ -2415,10 +2415,11 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	if store == nil {
 		return
 	}
-	// Session-class ops (pool-session sweep, wait-wake state, reconcile) route
-	// through the typed session store (gastownhall/gascity#3773); it wraps the
-	// same underlying store value as the work store today, so behavior is
-	// unchanged.
+	// Session-class ops (pool-session sweep, wait-wake state, reconcile, and the
+	// orphan-release liveness read) route through the typed session store
+	// (gastownhall/gascity#3773). On a city whose [storage.classes] relocates
+	// sessions this is a different store than the work store, so the two must
+	// not be used interchangeably (ga-g3pf0).
 	sessStore := cr.sessionsBeadStore()
 	recordPhase := func(site TraceSiteCode, name string, start time.Time, fields map[string]any) {
 		if trace != nil {
@@ -2450,7 +2451,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	assignedWorkBeads := result.AssignedWorkBeads
 	assignedWorkStoreRefs := result.AssignedWorkStoreRefs
 	phaseStart := time.Now()
-	released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(store, cr.cfg, cr.cityPath, sessionBeads.OpenInfos(), result, rigStores)
+	released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(store, sessStore, cr.cfg, cr.cityPath, sessionBeads.OpenInfos(), result, rigStores)
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.release_orphaned_pool_assignments", phaseStart, map[string]any{
 		"released_count": len(released),
 	})

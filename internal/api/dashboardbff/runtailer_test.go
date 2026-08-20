@@ -52,13 +52,17 @@ func (f fakeResolver) Cities() []CityRef {
 // the markers isRunGroup recognizes plus an active assignee for session joins.
 func runMoleculeEvent(seq uint64, id, formula, assignee string) events.Event {
 	b := beads.Bead{
-		ID:        id,
-		Title:     formula,
-		Status:    "open",
-		Type:      "molecule",
-		Assignee:  assignee,
-		CreatedAt: time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC),
-		UpdatedAt: time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC),
+		ID:       id,
+		Title:    formula,
+		Status:   "open",
+		Type:     "molecule",
+		Assignee: assignee,
+		// Recent so the run is fresh against the summary endpoint's real
+		// time.Now(): EnrichRunSummary marks in-flight runs silent past
+		// staleRunSilenceMs (72h) as stale and drops them from the active count,
+		// so a fixed months-old date would read every fixture run as stale.
+		CreatedAt: time.Now().Add(-2 * time.Hour),
+		UpdatedAt: time.Now().Add(-1 * time.Hour),
 		Metadata: map[string]string{
 			"gc.formula_contract": "graph.v2",
 			"gc.kind":             "run",

@@ -33,6 +33,25 @@ type listFailStore struct {
 	beads.Store
 }
 
+// failingSessionBeadCreateStore refuses to create session beads so create-error
+// paths can be exercised.
+type failingSessionBeadCreateStore struct {
+	*beads.MemStore
+}
+
+func (s *failingSessionBeadCreateStore) Create(bead beads.Bead) (beads.Bead, error) {
+	if bead.Type == sessionBeadType {
+		return beads.Bead{}, errors.New("session bead create failed")
+	}
+	return s.MemStore.Create(bead)
+}
+
+// Tx forwards fn(s) rather than delegating to the promoted MemStore.Tx, which
+// would pass the embedded *MemStore into fn and bypass the Create override.
+func (s *failingSessionBeadCreateStore) Tx(msg string, fn func(beads.Tx) error) error {
+	return s.MemStore.Tx(msg, func(beads.Tx) error { return fn(s) })
+}
+
 func (s listFailStore) List(_ beads.ListQuery) ([]beads.Bead, error) {
 	return nil, errors.New("list failed")
 }
@@ -3287,8 +3306,16 @@ func TestBuildDesiredState_NewPoolSessionBeadCreatedWithConcreteIdentity(t *test
 	if !containsString(got.Labels, "agent:rig/claude-1") {
 		t.Fatalf("labels = %#v, want concrete slot agent label", got.Labels)
 	}
-	if !beadOwnsPoolSessionName(got) {
-		t.Fatalf("session_name = %q should be the bead-owned pool runtime name", got.Metadata["session_name"])
+	// The runtime name is derived from the slot identity, never from the bead
+	// ID — that derivation is the ga-vcjr9 leak. A transient slot then steps
+	// aside onto "<identity>-pool" so the rebinding slot never becomes the
+	// runtime name (and therefore GC_AGENT), guarded by
+	// TestE2E_MultiAgent_PoolAndFixed (#5241).
+	if want := poolRuntimeSessionName(nil, "rig/claude-1", "rig/claude", true); got.Metadata["session_name"] != want {
+		t.Fatalf("session_name = %q, want the transient slot's identity-derived runtime name %q", got.Metadata["session_name"], want)
+	}
+	if beadOwnsPoolSessionName(got) {
+		t.Fatalf("session_name = %q is still bead-ID derived", got.Metadata["session_name"])
 	}
 }
 
@@ -5495,45 +5522,51 @@ func TestSelectOrCreatePoolSessionBead_SerializesAliasCheckAndCreate(t *testing.
 		t.Fatal("first pool create did not start")
 	}
 
+	// The loser is still blocked on the identifier lock, so it can neither
+	// reach the store nor return.
 	select {
 	case <-store.secondCreateStarted:
 		close(store.releaseFirstCreate)
-		close(store.releaseSecondCreate)
 		t.Fatal("second pool create reached the store before first create finished; alias lock did not serialize create")
-	case <-time.After(150 * time.Millisecond):
+	case r := <-results:
 		close(store.releaseFirstCreate)
-		select {
-		case <-store.secondCreateStarted:
-			close(store.releaseSecondCreate)
-		case <-time.After(time.Second):
-			t.Fatal("second pool create did not start after first create completed")
-		}
+		t.Fatalf("a create returned while the first still held the lock: %#v", r)
+	case <-time.After(150 * time.Millisecond):
 	}
+	close(store.releaseFirstCreate)
 
+	// Exactly one racer may own the slot. The loser is refused rather than
+	// handed a second runtime name for the same identity — that second name was
+	// a second sandbox box nothing would address again (ga-vcjr9).
+	winners, losers := 0, 0
 	for i := 0; i < 2; i++ {
 		result := <-results
-		if result.err != nil {
-			t.Fatalf("selectOrCreatePoolSessionBead result %d: %v", i+1, result.err)
+		switch {
+		case result.err == nil:
+			winners++
+			if result.info.ID == "" {
+				t.Fatalf("winning create returned an empty session: %#v", result)
+			}
+			if result.slot != 1 {
+				t.Fatalf("winning create slot = %d, want 1", result.slot)
+			}
+		case errors.Is(result.err, errPoolSessionNameUnavailable):
+			losers++
+		default:
+			t.Fatalf("selectOrCreatePoolSessionBead: %v", result.err)
 		}
-		if result.info.ID == "" {
-			t.Fatalf("selectOrCreatePoolSessionBead result %d returned empty session", i+1)
-		}
-		if result.slot != 1 {
-			t.Fatalf("selectOrCreatePoolSessionBead result %d slot = %d, want 1", i+1, result.slot)
-		}
+	}
+	if winners != 1 || losers != 1 {
+		t.Fatalf("winners=%d losers=%d, want exactly one of each", winners, losers)
 	}
 
 	sessionBeads, err := loadSessionBeads(store)
 	if err != nil {
 		t.Fatalf("load session beads: %v", err)
 	}
-	// The race still produces one bead per goroutine — it did before this change
-	// too, where the loser's EnsureAliasAvailable probe failed and it was created
-	// without an alias. What changed is the discriminator: a transient slot is
-	// never persisted as an alias, so BOTH beads are unaliased and the slot lives
-	// only in agent_name / pool_slot. That is the pair claimPoolSlotWithConfigInfo's
-	// used-slot map and the duplicate-repair lanes already resolve the loser by,
-	// so nothing that resolved the duplicate before depends on the alias.
+	if len(sessionBeads) != 1 {
+		t.Fatalf("session beads = %d, want 1 for a single slot; beads=%#v", len(sessionBeads), sessionBeads)
+	}
 	for _, bead := range sessionBeads {
 		if got := bead.Metadata["alias"]; got != "" {
 			t.Fatalf("pool bead %s alias = %q, want empty for a transient slot; beads=%#v", bead.ID, got, sessionBeads)
@@ -5586,17 +5619,13 @@ func TestSelectOrCreatePoolSessionBead_AliasedPoolStillCASesTheSlot(t *testing.T
 	select {
 	case <-store.secondCreateStarted:
 		close(store.releaseFirstCreate)
-		close(store.releaseSecondCreate)
 		t.Fatal("second pool create reached the store before the first finished; alias lock did not serialize create")
-	case <-time.After(150 * time.Millisecond):
+	case <-done:
 		close(store.releaseFirstCreate)
-		select {
-		case <-store.secondCreateStarted:
-			close(store.releaseSecondCreate)
-		case <-time.After(time.Second):
-			t.Fatal("second pool create did not start after the first completed")
-		}
+		t.Fatal("a create returned while the first still held the lock")
+	case <-time.After(150 * time.Millisecond):
 	}
+	close(store.releaseFirstCreate)
 	for i := 0; i < 2; i++ {
 		<-done
 	}
@@ -5720,9 +5749,9 @@ func TestCreatePoolSessionBeadWithGuardedAliasDropsTmuxAliasWhenIdentifierLockFa
 		t.Fatalf("createPoolSessionBeadWithGuardedAlias: %v", err)
 	}
 
-	want := PoolSessionName("worker", info.ID)
+	want := poolRuntimeSessionName(nil, "worker-1", "worker", true)
 	if got := info.SessionNameMetadata; got != want {
-		t.Fatalf("session_name = %q, want unique pool fallback %q when tmux_alias lock fails", got, want)
+		t.Fatalf("session_name = %q, want transient pool identity fallback %q when tmux_alias lock fails", got, want)
 	}
 	if strings.Contains(stderr.String(), "creating without alias") && strings.Contains(info.SessionNameMetadata, "crew--test-city") {
 		t.Fatalf("lock failure warning emitted but session_name still used tmux_alias: %q", info.SessionNameMetadata)
@@ -8550,11 +8579,8 @@ func TestBuildDesiredState_UsesBeadNamedPoolSessionsForScaleCheckDemand(t *testi
 	if tp.TemplateName != "worker" {
 		t.Fatalf("TemplateName = %q, want worker", tp.TemplateName)
 	}
-	if !strings.HasPrefix(sessionName, "worker-") {
-		t.Fatalf("session name = %q, want worker-<beadID>", sessionName)
-	}
-	if strings.HasSuffix(sessionName, "-1") {
-		t.Fatalf("session name = %q, want bead-derived name instead of slot alias", sessionName)
+	if got := poolRuntimeSessionName(nil, "worker-1", "worker", true); sessionName != got {
+		t.Fatalf("session name = %q, want the transient slot's identity-derived runtime name %q", sessionName, got)
 	}
 
 	sessionBeads, err := store.ListByLabel(sessionBeadLabel, 0)
@@ -10363,7 +10389,7 @@ func TestSelectOrCreatePoolSessionBead_DoesNotRetagDuplicateConcreteSlot(t *test
 }
 
 func TestSelectOrCreatePoolSessionBead_DoesNotReserveFreshSlotOnCreateError(t *testing.T) {
-	store := &failingPoolSessionNameStore{MemStore: beads.NewMemStore()}
+	store := &failingSessionBeadCreateStore{MemStore: beads.NewMemStore()}
 	snapshot := &sessionBeadSnapshot{}
 	cfgAgent := config.Agent{Name: "claude", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}
 	usedSlots := map[int]bool{}
@@ -10831,7 +10857,13 @@ func TestSelectOrCreatePoolSessionBeadPicksEarliestReusableSingletonCandidate(t 
 	}
 }
 
-func TestSelectOrCreateDependencyPoolSessionBead_DefersAliasWhenConcreteAliasTaken(t *testing.T) {
+// TestSelectOrCreateDependencyPoolSessionBead_BlocksWhenConcreteAliasTaken:
+// a manual session holding "claude-1" as its alias owns that handle, so the
+// pool slot whose identity derives the same runtime name cannot have it. The
+// create fails closed and retries next tick against the same name rather than
+// minting a bead-ID-scoped sibling box (ga-vcjr9). The operator sees the
+// holder named in the error.
+func TestSelectOrCreateDependencyPoolSessionBead_BlocksWhenConcreteAliasTaken(t *testing.T) {
 	store := beads.NewMemStore()
 	if _, err := store.Create(beads.Bead{
 		Title:  "manual session",
@@ -10857,18 +10889,16 @@ func TestSelectOrCreateDependencyPoolSessionBead_DefersAliasWhenConcreteAliasTak
 		agents:       []config.Agent{cfgAgent},
 	}
 
-	result, err := selectOrCreateDependencyPoolSessionBead(bp, &cfgAgent, "claude")
-	if err != nil {
-		t.Fatalf("selectOrCreateDependencyPoolSessionBead: %v", err)
+	_, err := selectOrCreateDependencyPoolSessionBead(bp, &cfgAgent, "claude")
+	if !errors.Is(err, errPoolSessionNameUnavailable) {
+		t.Fatalf("selectOrCreateDependencyPoolSessionBead error = %v, want errPoolSessionNameUnavailable", err)
 	}
-	if got := result.AgentName; got != "claude-1" {
-		t.Fatalf("dependency agent_name = %q, want claude-1", got)
+	sessions, listErr := store.ListByLabel(sessionBeadLabel, 0)
+	if listErr != nil {
+		t.Fatalf("ListByLabel(%q): %v", sessionBeadLabel, listErr)
 	}
-	if got := result.Alias; got != "" {
-		t.Fatalf("dependency alias = %q, want deferred until alias guard accepts it", got)
-	}
-	if got := result.PoolSlot; got != "1" {
-		t.Fatalf("dependency pool_slot = %q, want 1", got)
+	if len(sessions) != 1 {
+		t.Fatalf("session beads = %d, want only the manual holder; a blocked slot must not mint a sibling", len(sessions))
 	}
 }
 

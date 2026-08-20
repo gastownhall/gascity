@@ -733,6 +733,42 @@ func TestGcBdListOnAnIDValuedFlagRefusesByOwnership(t *testing.T) {
 	}
 }
 
+// TestGcBdHeartbeatOnARelocatedClassIDRefusesByOwnership pins the second half of
+// PR #5213's honest-claim contract. `gc bd heartbeat` now forwards to bd's native
+// owner-only lease-refresh verb (commit 80aad8c), a literal spelling the by-id door
+// does not serve. On a split city where a reserved class is relocated, that
+// unserved verb addressed at a class-owned id must NOT fall through to the work
+// store — where the bead does not live and bd answers a misleading substring
+// not-found. Instead the ownership gate (bdArgsNameClassOwnedBead) catches the
+// reserved-prefix positional and refuseClassOwnedTarget names the routing cause.
+// This is the regression the scorecard's required change #2 asks for: an explicit
+// unsupported-routing diagnostic in place of bd not-found.
+func TestGcBdHeartbeatOnARelocatedClassIDRefusesByOwnership(t *testing.T) {
+	args := []string{"heartbeat", "gcg-abc123"}
+	capture := bdSQLRefusalCity(t, bdSQLRefusalSplitStorage)
+	t.Setenv("BD_STUB_STDOUT", "[]")
+	resetCLIStorageRoutes(t)
+	captureCLIStorageStderr(t)
+
+	var stdout, stderr bytes.Buffer
+	if code := doBd(args, &stdout, &stderr); code == 0 {
+		t.Fatalf("doBd(%v) exited 0; a heartbeat against a relocated-class id must not run against the work store; stdout=%q", args, stdout.String())
+	}
+	// The refusal must be the by-id OWNERSHIP one, naming the bead, its binding
+	// and heartbeat as the unserved verb — the routing cause — not bd's substring
+	// not-found from the one ledger that holds no gcg- row.
+	for _, want := range []string{"gcg-abc123 is owned by", "heartbeat", "is not served in process"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("refusal does not name the routing cause (missing %q); stderr=%q", want, stderr.String())
+		}
+	}
+	// Whatever the by-id door censused while resolving the class binding, the
+	// REFUSED heartbeat argv must never have been forwarded to bd.
+	if data, err := os.ReadFile(capture); err == nil && strings.Contains(string(data), strings.Join(args, " ")) {
+		t.Fatalf("the refused heartbeat invocation was forwarded to bd: %q", data)
+	}
+}
+
 // TestGcBdReadyRefusesAGraphClassProjectionOnASplitCity closes the asymmetry
 // the `list` fix would otherwise have moved one verb over.
 //

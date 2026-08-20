@@ -639,6 +639,22 @@ func sessionHasProviderTerminalErrorInfo(info sessionpkg.Info) bool {
 // that write (ApplyPatchInfo folds only on success), so the returned Info matches
 // what the raw bead carries. agentIdentity is the start-path-joinable agent label
 // for gc.agent.quarantines.total.
+// wakeFailureKeepsConversation reports whether a wake failure should leave
+// session_key / started_config_hash alone because the conversation the key
+// points at is provably still on disk. Only a probeable provider with a present
+// keyed transcript qualifies; everything else (no key, no work dir, provider we
+// cannot probe, transcript gone) returns false and keeps the unconditional
+// reset that recovery depends on.
+func wakeFailureKeepsConversation(info sessionpkg.Info) bool {
+	sessionKey := strings.TrimSpace(info.SessionKey)
+	workDir := strings.TrimSpace(info.WorkDir)
+	if sessionKey == "" || workDir == "" {
+		return false
+	}
+	present, probeable := staleResumeKeyProbe(sessionTranscriptProvider(nil, info), workDir, sessionKey)
+	return probeable && present
+}
+
 func recordWakeFailure(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock, agentIdentity string) sessionpkg.Info {
 	// Parse the raw wake_attempts mirror (not the pre-parsed info.WakeAttempts,
 	// which zeroes on strconv.ErrRange) so an out-of-range counter yields the
@@ -658,10 +674,21 @@ func recordWakeFailure(info sessionpkg.Info, sessFront *sessionpkg.Store, clk cl
 	// recovery remains correct in that call order and for any skewed state
 	// left behind by older builds. The store write is best-effort (its error is
 	// intentionally ignored, as before) while the Info fold is unconditional.
+	//
+	// Exception: keep a conversation that provably still exists on disk. The
+	// reset is recovery for an unresumable key, but any single wake failure
+	// lands here — a transient tmux/spawn flake included — and for providers
+	// that persist a keyed transcript the reset would permanently orphan a
+	// perfectly resumable conversation. Probe first and skip the clear when the
+	// transcript is there; unprobeable providers and absent transcripts keep the
+	// existing unconditional behavior. Attempt accrual and quarantine below are
+	// untouched either way, so a genuinely broken session still escalates.
 	if info.SessionKey != "" || info.StartedConfigHash != "" {
-		reset := sessionpkg.ConversationResetPatch(true)
-		_ = sessFront.ApplyPatch(info.ID, reset)
-		info = info.ApplyPatch(reset)
+		if !wakeFailureKeepsConversation(info) {
+			reset := sessionpkg.ConversationResetPatch(true)
+			_ = sessFront.ApplyPatch(info.ID, reset)
+			info = info.ApplyPatch(reset)
+		}
 	}
 	accrual := sessionpkg.WakeFailureAccrualPatch(attempts, defaultMaxWakeAttempts, clk.Now().Add(defaultQuarantineDuration))
 	if accrual.Quarantined {
@@ -928,8 +955,21 @@ func healStatePatchWithRollbackInfo(info sessionpkg.Info, alive bool, observed b
 	// re-projecting start-pending forever — pendingCreateLeaseExpiredForRollbackInfo
 	// already understands start-pending via pendingCreateRollbackState, so widen
 	// the gate to match instead of restricting it to "creating".
-	if rollbackAvailable && !alive && pendingCreateQueuedOrCreatingState(info.MetadataState) {
-		if pendingCreateLeaseExpiredForRollbackInfo(info, clk, startupTimeout) {
+	if !alive && pendingCreateQueuedOrCreatingState(info.MetadataState) && info.PendingCreateClaim {
+		leaseExpired := pendingCreateLeaseExpiredForRollbackInfo(info, clk, startupTimeout)
+		switch {
+		case !leaseExpired || !rollbackAvailable:
+			// ProjectLifecycle uses the generic one-minute creating timeout.
+			// An active configured provider Start lease is authoritative here:
+			// preserve both state and claim until the one rollback decision says
+			// they may move together. rollbackAvailable=false likewise defers
+			// the complete transition rather than applying half of it. Preserve
+			// a legitimate start-pending projection for a never-started queued
+			// create; only suppress the premature terminal asleep projection.
+			if target == string(sessionpkg.StateAsleep) {
+				target = info.MetadataState
+			}
+		default:
 			target = string(sessionpkg.StateAsleep)
 			stalePendingCreateRollback = true
 			clearPendingCreateLeaseInfo(info.PendingCreateClaim, batch)

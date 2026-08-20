@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -2139,19 +2140,13 @@ func TestHeadLimitedWriter(t *testing.T) {
 	})
 }
 
-// TestGcBdHeartbeatRewritesToMetadataUpdate pins the gastownhall/gascity#1855
-// worker-heartbeat write half: `gc bd heartbeat <id>` must forward to bd as
-// `update <id> --set-metadata gc.last_heartbeat_at=<RFC3339 UTC>`. The exact
-// key (with the _at suffix) is what the gas-city-dashboard will read
-// (dashboard #324) to tell a live worker from a dead one, and the stamp must
-// be valid RFC3339 in UTC even when the local clock is in another zone.
-func TestGcBdHeartbeatRewritesToMetadataUpdate(t *testing.T) {
-	origNow := bdHeartbeatNow
-	t.Cleanup(func() { bdHeartbeatNow = origNow })
-	// Pin the clock to a non-UTC zone to prove the rewrite normalizes to UTC.
-	fixed := time.Date(2026, 5, 31, 12, 0, 0, 0, time.FixedZone("PST", -8*3600))
-	bdHeartbeatNow = func() time.Time { return fixed }
-
+// TestGcBdHeartbeatForwardsNativeLeaseRefresh pins the dip-wdt5aq fix:
+// `gc bd heartbeat <id>` must forward to bd's NATIVE heartbeat subcommand,
+// which refreshes lease_expires_at and fails loudly when the caller no longer
+// owns the claim. The old rewrite to `update --set-metadata` reported success
+// while leaving the lease untouched, so a reviewer's claim could be reclaimed
+// mid-review by a command that had just printed success.
+func TestGcBdHeartbeatForwardsNativeLeaseRefresh(t *testing.T) {
 	// The fake bd captures its forwarded args so the assertion can inspect them.
 	capture := filepath.Join(t.TempDir(), "gc-bd-args.txt")
 	silentFallbackTestSetup(t, "#!/bin/sh\nprintf '%s' \"$*\" > \"${CAPTURE_PATH}\"\n")
@@ -2166,21 +2161,8 @@ func TestGcBdHeartbeatRewritesToMetadataUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const prefix = "update demo-abc --set-metadata " + heartbeatMetadataKey + "="
-	gotArgs := string(data)
-	stamp, ok := strings.CutPrefix(gotArgs, prefix)
-	if !ok {
-		t.Fatalf("forwarded args = %q, want prefix %q", gotArgs, prefix)
-	}
-	parsed, err := time.Parse(time.RFC3339, stamp)
-	if err != nil {
-		t.Fatalf("heartbeat stamp %q is not valid RFC3339: %v", stamp, err)
-	}
-	if _, offset := parsed.Zone(); offset != 0 {
-		t.Fatalf("heartbeat stamp %q is not UTC (zone offset %d)", stamp, offset)
-	}
-	if want := fixed.UTC().Format(time.RFC3339); stamp != want {
-		t.Fatalf("heartbeat stamp = %q, want %q", stamp, want)
+	if gotArgs := string(data); gotArgs != "heartbeat demo-abc" {
+		t.Fatalf("forwarded args = %q, want native %q", gotArgs, "heartbeat demo-abc")
 	}
 }
 
@@ -2205,13 +2187,13 @@ func TestRewriteBdHeartbeatArgs(t *testing.T) {
 			}
 		}
 	})
-	t.Run("rewrites a clean id to a set-metadata update", func(t *testing.T) {
+	t.Run("forwards a clean id to bd's native heartbeat", func(t *testing.T) {
 		out, err := rewriteBdHeartbeatArgs([]string{"heartbeat", "demo-abc"})
 		if err != nil {
 			t.Fatalf("rewriteBdHeartbeatArgs unexpected error: %v", err)
 		}
-		if len(out) != 4 || out[0] != "update" || out[1] != "demo-abc" || out[2] != "--set-metadata" {
-			t.Fatalf("rewriteBdHeartbeatArgs = %q, want [update demo-abc --set-metadata ...]", out)
+		if len(out) != 2 || out[0] != "heartbeat" || out[1] != "demo-abc" {
+			t.Fatalf("rewriteBdHeartbeatArgs = %q, want native [heartbeat demo-abc]", out)
 		}
 	})
 	t.Run("passes non-heartbeat args through unchanged", func(t *testing.T) {
@@ -2241,6 +2223,8 @@ func TestBdMutationWriteID(t *testing.T) {
 			{[]string{"reopen", "gcy-dv7"}, "gcy-dv7"},
 			{[]string{"delete", "--force", "gcy-dv7"}, "gcy-dv7"},
 			{[]string{"delete", "--force", "--json", "gcy-dv7"}, "gcy-dv7"},
+			// heartbeat: native lease refresh, guarded like the other writes
+			{[]string{"heartbeat", "gcy-dv7"}, "gcy-dv7"},
 			// double-dash separator
 			{[]string{"update", "--", "gcy-dv7"}, "gcy-dv7"},
 		}
@@ -2418,6 +2402,26 @@ func TestBdMutationWriteIDs(t *testing.T) {
 			name: "unknown short flag triggers fail-closed",
 			args: []string{"update", "-z", "something", "gcy-dv7"},
 			want: result{ok: true, ambiguous: true},
+		},
+
+		// --- heartbeat: native lease refresh under the exact-ID guard ---
+		// gc bd heartbeat forwards to bd's native owner-only lease refresh — a
+		// lease-mutating write — so it must take the same exact-ID collision
+		// preflight as update/close/reopen/delete (synthesis New Findings:
+		// Contract & Interface Fidelity). rewriteBdHeartbeatArgs has already
+		// reduced the argv to exactly ["heartbeat", "<id>"] (a single
+		// pre-validated positional id, no flags) before this scanner runs, so
+		// the id is scanned as a lone positional and returns ok=true, routing it
+		// through the store.Get guard instead of forwarding unguarded (ok=false).
+		{
+			name: "heartbeat is a guarded write with a positional id",
+			args: []string{"heartbeat", "gcy-dv7"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+		{
+			name: "heartbeat returns the exact supplied token (gcy-g4o regression)",
+			args: []string{"heartbeat", "gcy-wisp-abc9"},
+			want: result{ids: []string{"gcy-wisp-abc9"}, ok: true},
 		},
 
 		// --- Non-write subcommands ---
@@ -2630,9 +2634,12 @@ prefix = "fe"
 	if err != nil {
 		t.Fatalf("read SQL log: %v", err)
 	}
-	wantQuery := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP WHERE id = 'fe-abc' AND status = 'in_progress' AND assignee = 'worker-1'"
-	if strings.TrimSpace(string(query)) != wantQuery {
-		t.Fatalf("SQL query = %q, want %q", strings.TrimSpace(string(query)), wantQuery)
+	// The release mints a fresh revision so the pre-release token is stale, so
+	// the token itself is not pinnable — everything around it is.
+	gotQuery := strings.TrimSpace(string(query))
+	wantQuery := regexp.MustCompile(`^UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP, revision = -?\d+ WHERE id = 'fe-abc' AND status = 'in_progress' AND assignee = 'worker-1'$`)
+	if !wantQuery.MatchString(gotQuery) {
+		t.Fatalf("SQL query = %q, want match for %s", gotQuery, wantQuery)
 	}
 }
 

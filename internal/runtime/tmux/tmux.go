@@ -638,6 +638,11 @@ func (t *Tmux) markSessionEnvRemoved(session string, keys []string) error {
 // keys and each was falsified against a real tmux 3.4: new-session starts the
 // command before any follow-up can land, so the marker alone leaves the CREATED
 // pane exposed; the prefix alone leaves the RESPAWNED pane exposed.
+//
+// Non-empty values that are not argv-safe (see [runtime.ArgvSafeEnvKey]) never
+// reach the command line: the whole new-session command is staged through a
+// private file instead — see [Tmux.runNewSession]. The session environment tmux
+// ends up holding is identical either way.
 func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env map[string]string) error {
 	if err := validateSessionName(name); err != nil {
 		return err
@@ -669,8 +674,7 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 	command = withEnvUnsetPrefix(command, unsetKeys)
 	// Add the command as the last argument
 	args = append(args, t.wrapPaneCommand(command))
-	_, err := t.run(args...)
-	if err != nil {
+	if err := t.runNewSession(args, env); err != nil {
 		return err
 	}
 	// Carry the CREDENTIAL withholding into the session environment, so it

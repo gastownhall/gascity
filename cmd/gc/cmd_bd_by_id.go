@@ -75,10 +75,15 @@ package main
 //     resolve.
 //
 // Served here: show, update (fields and metadata, including --claim), close,
-// reopen, release-if-current, and dep list. `gc bd heartbeat` is not — it is
-// rewritten to a metadata update before this hook runs — and neither is the
-// general query surface, which bd_relocated_classes.go refuses on its own
-// terms.
+// reopen, release-if-current, and dep list. `gc bd heartbeat` is not — it
+// forwards to bd's native owner-only lease-refresh verb (commit 80aad8c), a
+// literal spelling parseBdByIDOp does not recognize, and it is no longer
+// rewritten to a metadata update the way it once was. On a city that relocates
+// the owning class this is not a fall-through: a reserved-prefix heartbeat is
+// caught by the ownership gate below (bdArgsNameClassOwnedBead) and refused by
+// refuseClassOwnedTarget, which names the routing cause rather than letting the
+// work store answer with bd's not-found. The general query surface is likewise
+// unserved, and bd_relocated_classes.go refuses it on its own terms.
 //
 // close and reopen are here for the same reason update is, one lifecycle step
 // further on. A class store MINTS ids from its binding workspace's own prefix,
