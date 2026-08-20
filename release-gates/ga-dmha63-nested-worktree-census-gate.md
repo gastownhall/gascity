@@ -13,7 +13,11 @@ Base checked: origin/main @ 75b12a0461254034effb319db9b1509258a899f6
 Merge base: 7c817e0640fae801631043005f1d54b17ce3e97c
 Clean merge tree: 60b479ed10aecdda538c2879f5f7df46142d6488
 
-Overall result: **PASS — 7/7 criteria**.
+Overall result: **FAIL — criterion 3**. The direct re-gate passed, but the
+mandatory guarded push re-ran the fast lane and failed a repeatedly tracked
+live-herdr test. The deployer may not retry-to-green or self-authorize a
+`--no-verify` push for a signature that has already blocked multiple pushes.
+Nothing was pushed and no PR was opened.
 
 `docs/PROJECT_MANIFEST.md` and `PROJECT_MANIFEST.md` are not present in this
 checkout. This gate applies the seven release criteria from the active deployer
@@ -39,7 +43,7 @@ resource-census ledger and test documentation.
 |---|-----------|--------|----------|
 | 1 | Review PASS present | PASS | `ga-d3h2oo` is closed with `verdict: pass` and pins reviewed commit `442ece82560dbe93df789a2632598cb0acf1a13b`. |
 | 2 | Acceptance criteria met | PASS | Both synthetic nested-worktree regressions pass; all census and storage-boundary acceptance tests pass; the live resource-census ledger agrees with the repository; `go vet ./...` is clean. |
-| 3 | Tests pass | PASS | Re-gate: `make test-fast-parallel` passed 10/10 jobs; `make test-cmd-gc-process-parallel` passed 7/7 jobs; 43/43 focused acceptance and diff-owned test events passed; policy passed; 0 FAIL and 0 SKIP throughout. |
+| 3 | Tests pass | FAIL | Direct re-gate: `make test-fast-parallel` passed 10/10 jobs; `make test-cmd-gc-process-parallel` passed 7/7 jobs; 43/43 focused acceptance and diff-owned test events passed; policy passed. The guarded push then failed `internal/runtime/herdr/TestProviderLiveClaudeKindPath` with `agent_pane_busy` on shared pane `w1:p1`. The failure is not diff-owned and has no dependency/path overlap, but it is a repeatedly tracked signature with an unmerged fix chain; protocol requires escalation instead of retry-to-green. |
 | 4 | No high-severity review findings open | PASS | Review notes contain no HIGH finding; unresolved HIGH count is 0. The only review observation is a non-blocking six-line helper duplication across two test packages. |
 | 5 | Final branch is clean | PASS | Before this checklist edit, `git status --short`, `git diff --check`, and `gofmt -d` on every changed Go file produced no output. The checklist is the only deployer-authored change and is committed separately below. |
 | 6 | Branch diverges cleanly from main | PASS | After `git fetch origin main`, `git merge-tree --write-tree origin/main b0dda74dd7477cdc9b5f2c324e3a4e7a45d65d52` exited 0 and produced `60b479ed10aecdda538c2879f5f7df46142d6488`. The candidate is 3 commits ahead and 1 behind with no conflicts; no bounded self-rebase was needed. |
@@ -126,7 +130,7 @@ Additional acceptance coverage:
 for the prior occurrence of
 `TestCityRuntimeForceShutdownTearsDownAfterLateAsyncSweep` on candidate
 `b0dda74dd7477cdc9b5f2c324e3a4e7a45d65d52`. The re-gate itself passed that
-test, so the waiver did not mask a failure in the PASS evidence above.
+test. It does not cover the later `TestProviderLiveClaudeKindPath` failure.
 
 ## Prior blocked attempt
 
@@ -138,3 +142,36 @@ could not satisfy the no-package-overlap clause and did not self-attribute or
 bypass the failure. The mayor reviewed the evidence, recorded the external
 waiver above, lifted `hold:mayor`, and directed this clean re-gate. No branch or
 PR was created remotely during the blocked attempt.
+
+The re-gate passed locally, but the subsequent guarded fork push stopped on a
+different pre-existing failure:
+
+```text
+make test-fast-parallel (pre-push)
+9 PASS jobs, 1 FAIL job, 0 SKIP jobs
+FAIL: unit-core
+internal/runtime/herdr/TestProviderLiveClaudeKindPath:
+  agent target pane w1:p1 is not an available shell (agent_pane_busy)
+```
+
+`failure_attribution` evidence:
+
+- Not diff-owned: the reviewed range changes no file under
+  `internal/runtime/herdr`.
+- Tracked before this run: `ga-fh1flg` records this exact live-pane failure;
+  `ga-nqlb8q` root-causes the server/socket mismatch that can cascade into a
+  redundant server and `agent_pane_busy`.
+- Structurally pre-existing: `go list -deps ./internal/runtime/herdr` contains
+  none of the candidate's changed production package
+  `internal/testpolicy/resourcecensus`; the remaining changed Go files are
+  tests in other packages.
+- No path overlap: the candidate changes `cmd/gc`, `internal/storebinding`,
+  `internal/testpolicy/resourcecensus`, `TESTING.md`, and the test-resource
+  ledger, not `internal/runtime/herdr`.
+
+All four attribution facts are present, but the same signature has blocked
+multiple pushes after tracking. The standing no-retry rule therefore requires
+mayor escalation rather than another push attempt. The corrective chain is
+already in flight: PR #5437 is open for the name-isolation fix, and deploy bead
+`ga-nsaq0t` carries the reviewed socket-path fix. This branch remains local at
+the recorded gate commit; the fork has no `deploy/ga-dmha63-gate` ref.
