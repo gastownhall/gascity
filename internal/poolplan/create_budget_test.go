@@ -27,6 +27,76 @@ func TestCreateBudgetClaimsOnlyAssignedShares(t *testing.T) {
 	}
 }
 
+func TestCreateBudgetPrioritizesUrgentElasticDemandWithinFairShare(t *testing.T) {
+	budget := NewCreateBudget(1)
+	budget.ConfigureFairShare([]Demand{
+		{Template: "alpha", FreshCreates: 1, FreshPriorities: []int{2}},
+		{Template: "zulu", FreshCreates: 1, FreshPriorities: []int{0}},
+	}, 0)
+
+	if budget.TryClaim("alpha") {
+		t.Fatal("P2 alpha claimed the sole elastic token ahead of P0 zulu")
+	}
+	if !budget.TryClaim("zulu") {
+		t.Fatal("P0 zulu did not receive the sole elastic token")
+	}
+}
+
+func TestCreateBudgetKeepsSeedFairnessWithinPriorityBand(t *testing.T) {
+	winners := map[string]bool{}
+	for seed := uint64(0); seed < 2; seed++ {
+		budget := NewCreateBudget(1)
+		budget.ConfigureFairShare([]Demand{
+			{Template: "alpha", FreshCreates: 1, FreshPriorities: []int{1}},
+			{Template: "zulu", FreshCreates: 1, FreshPriorities: []int{1}},
+		}, seed)
+		for _, template := range []string{"alpha", "zulu"} {
+			if budget.TryClaim(template) {
+				winners[template] = true
+			}
+		}
+	}
+	if len(winners) != 2 {
+		t.Fatalf("same-band winners = %v, want seed rotation to preserve both", winners)
+	}
+}
+
+func TestCreateBudgetReservesRecoveryBeforeUrgentFresh(t *testing.T) {
+	budget := NewCreateBudget(1)
+	budget.ConfigureFairShare([]Demand{
+		{Template: "alpha", FreshCreates: 1, FreshPriorities: []int{0}},
+		{Template: "zulu", RecoveryCreates: 1},
+	}, 0)
+
+	if budget.TryClaim("alpha") {
+		t.Fatal("fresh P0 bypassed the recovery reservation")
+	}
+	if !budget.TryClaim("zulu") {
+		t.Fatal("recovery did not receive the sole token")
+	}
+}
+
+func TestCreateBudgetPreservesFloorInPostRecoveryBudget(t *testing.T) {
+	budget := NewCreateBudget(4)
+	budget.ConfigureFairShare([]Demand{
+		{Template: "recovery", RecoveryCreates: 3},
+		{Template: "floor", FreshCreates: 1, FreshPriorities: []int{2}, HasFloor: true},
+		{Template: "elastic", FreshCreates: 1, FreshPriorities: []int{0}},
+	}, 0)
+
+	for claim := 1; claim <= 3; claim++ {
+		if !budget.TryClaim("recovery") {
+			t.Fatalf("recovery claim %d = false, want three committed tokens", claim)
+		}
+	}
+	if !budget.TryClaim("floor") {
+		t.Fatal("floor lost the sole post-recovery token to elastic demand")
+	}
+	if budget.TryClaim("elastic") {
+		t.Fatal("elastic demand displaced the post-recovery floor reservation")
+	}
+}
+
 func TestCreateBudgetUsesUnassignedSpareTokens(t *testing.T) {
 	budget := NewCreateBudget(3)
 	budget.ConfigureFairShare([]Demand{

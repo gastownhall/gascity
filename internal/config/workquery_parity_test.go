@@ -382,8 +382,8 @@ func renormalizeFederatedCommand(federated string) string {
 	}
 	federated = strings.ReplaceAll(federated, gcReadyCommand, bdReadyCommand)
 	federated = strings.ReplaceAll(federated, `--json --limit=1) || exit $?`, `--json --limit=1 2>/dev/null)`)
-	federated = strings.ReplaceAll(federated, `--sort oldest --limit=20) || exit $?`, `--sort oldest --limit=20 2>/dev/null)`)
-	federated = strings.ReplaceAll(federated, `--sort oldest --limit=20 2>/dev/null) || exit $?`, `--sort oldest --limit=20 2>/dev/null)`)
+	federated = strings.ReplaceAll(federated, `--sort priority --limit=20) || exit $?`, `--sort priority --limit=20 2>/dev/null)`)
+	federated = strings.ReplaceAll(federated, `--sort priority --limit=20 2>/dev/null) || exit $?`, `--sort priority --limit=20 2>/dev/null)`)
 	return federated
 }
 

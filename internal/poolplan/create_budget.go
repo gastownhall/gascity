@@ -8,6 +8,12 @@ import "sync"
 type Demand struct {
 	Template     string
 	FreshCreates int
+	// FreshPriorities carries one priority band per fresh create. Missing
+	// entries default to P2; callers should preserve request order.
+	FreshPriorities []int
+	// RecoveryCreates preserves already-committed capacity ahead of fresh
+	// admission. Recovery still participates in seed rotation with peers.
+	RecoveryCreates int
 	// HasFloor reports that at least one fresh create satisfies a configured
 	// floor. It reserves at most one floor token; remaining demand participates
 	// in the general round-robin rather than the elastic reserve.
@@ -91,7 +97,7 @@ func fairShares(demands []Demand, limit int, seed uint64) (map[string]int, int) 
 	}
 	active := make([]Demand, 0, len(demands))
 	for _, demand := range demands {
-		if demand.FreshCreates > 0 {
+		if demand.FreshCreates > 0 || demand.RecoveryCreates > 0 {
 			active = append(active, demand)
 		}
 	}
@@ -100,25 +106,48 @@ func fairShares(demands []Demand, limit int, seed uint64) (map[string]int, int) 
 	}
 
 	shares := make(map[string]int, len(active))
+	freshGiven := make(map[string]int, len(active))
 	remaining := limit
 	start := int(seed % uint64(len(active)))
 
-	// Reserve one quarter of the limit for non-floor demand. Floor-bearing
-	// templates retain priority while large floor sets cannot starve elastic
-	// pools. Limits below four preserve strict floor-first behavior.
+	// Preserve committed capacity first. This is the existing recovery-before-
+	// fresh invariant; priority bands never compete with this reservation.
+	for remaining > 0 {
+		progressed := false
+		for offset := 0; offset < len(active) && remaining > 0; offset++ {
+			demand := active[(start+offset)%len(active)]
+			if shares[demand.Template]-freshGiven[demand.Template] >= demand.RecoveryCreates {
+				continue
+			}
+			shares[demand.Template]++
+			remaining--
+			progressed = true
+		}
+		if !progressed {
+			break
+		}
+	}
+
+	// Reserve one quarter of the post-recovery budget for non-floor demand.
+	// Floor-bearing templates retain priority while large floor sets cannot
+	// starve elastic pools. Fresh budgets below four preserve strict floor-first
+	// behavior.
 	elasticDemand := 0
 	for _, demand := range active {
 		if !demand.HasFloor {
 			elasticDemand += demand.FreshCreates
 		}
 	}
-	elasticReserve := limit / 4
+	elasticReserve := remaining / 4
 	if elasticReserve > elasticDemand {
 		elasticReserve = elasticDemand
 	}
 
 	// Reserve one token per floor-bearing template in seed-rotated order.
-	floorBudget := limit - elasticReserve
+	floorBudget := remaining - elasticReserve
+	if floorBudget < 0 {
+		floorBudget = 0
+	}
 	floorUsed := 0
 	for offset := 0; offset < len(active); offset++ {
 		if floorUsed >= floorBudget {
@@ -127,46 +156,59 @@ func fairShares(demands []Demand, limit int, seed uint64) (map[string]int, int) 
 		demand := active[(start+offset)%len(active)]
 		if demand.HasFloor {
 			shares[demand.Template]++
+			freshGiven[demand.Template]++
 			remaining--
 			floorUsed++
 		}
 	}
 
-	// Give the reserved elastic slice only to non-floor demand before the
-	// general round-robin can consume it.
-	elasticGiven := 0
-	for elasticGiven < elasticReserve && remaining > 0 {
-		progressed := false
-		for offset := 0; offset < len(active) && remaining > 0 && elasticGiven < elasticReserve; offset++ {
-			demand := active[(start+offset)%len(active)]
-			if demand.HasFloor || shares[demand.Template] >= demand.FreshCreates {
-				continue
-			}
-			shares[demand.Template]++
-			remaining--
-			elasticGiven++
-			progressed = true
-		}
-		if !progressed {
-			break
-		}
-	}
-
-	// Distribute the rest round-robin, capped by each template's demand.
-	for remaining > 0 {
-		progressed := false
-		for offset := 0; offset < len(active) && remaining > 0; offset++ {
-			demand := active[(start+offset)%len(active)]
-			if shares[demand.Template] >= demand.FreshCreates {
-				continue
-			}
-			shares[demand.Template]++
-			remaining--
-			progressed = true
-		}
-		if !progressed {
-			break
-		}
-	}
+	// Preserve the existing non-floor elastic reserve, then distribute the
+	// remainder. Within each quota, the lowest active priority band wins;
+	// seed rotation remains the tie-break among templates in the same band.
+	elasticGiven := allocateFreshByPriority(active, shares, freshGiven, remaining, elasticReserve, start, func(d Demand) bool {
+		return !d.HasFloor
+	})
+	remaining -= elasticGiven
+	remaining -= allocateFreshByPriority(active, shares, freshGiven, remaining, remaining, start, func(Demand) bool { return true })
 	return shares, remaining
+}
+
+func allocateFreshByPriority(active []Demand, shares, freshGiven map[string]int, remaining, quota, start int, eligible func(Demand) bool) int {
+	allocated := 0
+	for remaining > 0 && allocated < quota {
+		bestPriority := int(^uint(0) >> 1)
+		for _, demand := range active {
+			if !eligible(demand) || freshGiven[demand.Template] >= demand.FreshCreates {
+				continue
+			}
+			priority := freshPriorityAt(demand, freshGiven[demand.Template])
+			if priority < bestPriority {
+				bestPriority = priority
+			}
+		}
+		progressed := false
+		for offset := 0; offset < len(active) && remaining > 0 && allocated < quota; offset++ {
+			demand := active[(start+offset)%len(active)]
+			if !eligible(demand) || freshGiven[demand.Template] >= demand.FreshCreates ||
+				freshPriorityAt(demand, freshGiven[demand.Template]) != bestPriority {
+				continue
+			}
+			shares[demand.Template]++
+			freshGiven[demand.Template]++
+			remaining--
+			allocated++
+			progressed = true
+		}
+		if !progressed {
+			break
+		}
+	}
+	return allocated
+}
+
+func freshPriorityAt(demand Demand, index int) int {
+	if index < len(demand.FreshPriorities) {
+		return demand.FreshPriorities[index]
+	}
+	return 2
 }

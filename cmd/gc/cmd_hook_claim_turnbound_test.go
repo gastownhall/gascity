@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -232,6 +233,47 @@ func TestHookClaimWindowExpiredRefusesFreshClaim(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "claim window") {
 		t.Fatalf("stderr = %q, want a named claim-window diagnostic", stderr.String())
+	}
+}
+
+func TestHookClaimWindowExpiryWinsAtPriorityBandBoundary(t *testing.T) {
+	const work = `[
+		{"id":"p0","status":"open","priority":0,"metadata":{"gc.routed_to":"worker"}},
+		{"id":"p2","status":"open","priority":2,"metadata":{"gc.routed_to":"worker"}}
+	]`
+	base := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
+	now := base
+	rec := &turnBoundClaimRecorder{}
+	ops := rec.ops(t, work)
+	ops.InvokedAt = base
+	ops.ClaimWindow = time.Second
+	ops.Now = func() time.Time { return now }
+	ops.Claim = func(ctx context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, bool, error) {
+		rec.claims = append(rec.claims, beadID)
+		rec.claimCtx = append(rec.claimCtx, ctx)
+		now = base.Add(2 * time.Second)
+		return beads.Bead{}, false, errors.New("write failed")
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("query", "/rig", hookClaimOptions{
+		Assignee:     "worker-1",
+		RouteTargets: []string{"worker"},
+		DrainAck:     true,
+		JSON:         true,
+	}, ops, &stdout, &stderr)
+
+	if code != 1 {
+		t.Fatalf("code = %d, want 1; stdout=%q stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if got, want := rec.claims, []string{"p0"}; !slices.Equal(got, want) {
+		t.Fatalf("claims = %v, want %v", got, want)
+	}
+	if len(rec.windowExpired) != 1 || rec.windowExpired[0].BeadID != "p2" {
+		t.Fatalf("claim_window_expired events = %+v, want one for p2", rec.windowExpired)
+	}
+	if stdout.Len() != 0 || rec.drainAcked {
+		t.Fatalf("expiry was laundered into a drain: stdout=%q drainAcked=%t", stdout.String(), rec.drainAcked)
 	}
 }
 

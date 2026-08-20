@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -312,6 +313,7 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 	if len(candidates) == 0 {
 		return hookClaimResult{}
 	}
+	orderHookCandidates(candidates)
 
 	if result, bead, ok := hookClaimExistingAssignment(candidates, *opts); ok {
 		// minted=false: adoption returns work this session already owned.
@@ -613,14 +615,30 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 	ctx, cancel := ops.claimMutationContext()
 	defer cancel()
 	claimsErrored := false
+	activePriority := 0
+	haveActivePriority := false
 	for _, candidate := range candidates {
 		if !hookCandidateClaimable(candidate, opts.RouteTargets) {
 			continue
 		}
-		// F-B. The fresh-claim CAS is the mutation that mints a new obligation,
-		// so it is the one the turn-binding window most directly guards.
+		// Window expiry is a terminal refusal, not a claim error. Check it before
+		// the priority-band boundary so an earlier write error cannot turn a
+		// mid-loop expiry into a claims_errored drain.
 		if ops.claimWindowSpent() {
 			return refuseExpiredHookClaimWindow(candidate.ID, ops, stderr)
+		}
+		candidatePriority := beads.PriorityValue(candidate.Priority)
+		if !haveActivePriority {
+			activePriority = candidatePriority
+			haveActivePriority = true
+		} else if candidatePriority != activePriority {
+			// A write error stays visible as claims_errored instead of being
+			// laundered into lower-priority work. Lost races are different: the
+			// higher-band rows are already owned, so continue to the next band.
+			if claimsErrored {
+				break
+			}
+			activePriority = candidatePriority
 		}
 		if ctx.Err() != nil {
 			// The shared claim budget is spent (an earlier slow-failing claim
@@ -674,6 +692,28 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 	}
 
 	return hookClaimResult{claimsErrored: claimsErrored}
+}
+
+func orderHookCandidates(candidates []beads.Bead) {
+	sort.SliceStable(candidates, func(i, j int) bool {
+		left, right := candidates[i], candidates[j]
+		leftPriority := beads.PriorityValue(left.Priority)
+		rightPriority := beads.PriorityValue(right.Priority)
+		if leftPriority != rightPriority {
+			return leftPriority < rightPriority
+		}
+		// Some custom projections omit created_at. Preserve their reader order
+		// within a band instead of replacing it with alphabetical ID order.
+		leftMissing := left.CreatedAt.IsZero()
+		rightMissing := right.CreatedAt.IsZero()
+		if leftMissing != rightMissing {
+			return !leftMissing
+		}
+		if leftMissing {
+			return false
+		}
+		return beads.ReadyLess(left, right)
+	})
 }
 
 // mergeHookClaimCandidateMetadata retains work-query metadata when bd update
@@ -982,6 +1022,7 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 			sibling.ID == bead.ID ||
 			strings.TrimSpace(sibling.Assignee) != "" ||
 			!strings.EqualFold(strings.TrimSpace(sibling.Status), "open") ||
+			beads.PriorityValue(sibling.Priority) != beads.PriorityValue(bead.Priority) ||
 			!hookClaimMatchesRoute(sibling, opts.RouteTargets) {
 			continue
 		}

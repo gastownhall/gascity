@@ -4,6 +4,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -245,32 +246,33 @@ func TestBestStoreWithWorkDegradesToFirstHitOnUnrankableOutput(t *testing.T) {
 }
 
 // TestBestHookCandidateRank exercises the ranking primitive directly, including
-// the wire-shape distinction that motivates hookDefaultCandidatePriority: bd's
+// the wire-shape distinction in bd's
 // priority is *int with omitempty, so an ABSENT priority must not be read as P0.
 func TestBestHookCandidateRank(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		ready string
-		want  hookCandidateRank
-		ok    bool
+		name         string
+		ready        string
+		wantTier     int
+		wantPriority int
+		ok           bool
 	}{
-		{"routed with priority", `[{"id":"a","priority":1}]`, hookCandidateRank{hookTierRouted, 1}, true},
-		{"absent priority is not P0", `[{"id":"a"}]`, hookCandidateRank{hookTierRouted, hookDefaultCandidatePriority}, true},
-		{"assignee lifts the tier", `[{"id":"a","assignee":"me","priority":3}]`, hookCandidateRank{hookTierAssigned, 3}, true},
-		{"in_progress is the top tier", `[{"id":"a","assignee":"me","status":"in_progress","priority":3}]`, hookCandidateRank{hookTierInProgress, 3}, true},
-		{"blank assignee stays routed", `[{"id":"a","assignee":"  ","priority":1}]`, hookCandidateRank{hookTierRouted, 1}, true},
-		{"best of several rows wins", `[{"id":"a","priority":3},{"id":"b","priority":0}]`, hookCandidateRank{hookTierRouted, 0}, true},
-		{"empty array is unrankable", `[]`, hookCandidateRank{}, false},
-		{"non-JSON is unrankable", `not json`, hookCandidateRank{}, false},
-		{"array of non-objects is unrankable", `["a"]`, hookCandidateRank{}, false},
+		{"routed with priority", `[{"id":"a","priority":1}]`, hookTierRouted, 1, true},
+		{"absent priority is not P0", `[{"id":"a"}]`, hookTierRouted, beads.DefaultPriority, true},
+		{"assignee lifts the tier", `[{"id":"a","assignee":"me","priority":3}]`, hookTierAssigned, 3, true},
+		{"in_progress is the top tier", `[{"id":"a","assignee":"me","status":"in_progress","priority":3}]`, hookTierInProgress, 3, true},
+		{"blank assignee stays routed", `[{"id":"a","assignee":"  ","priority":1}]`, hookTierRouted, 1, true},
+		{"best of several rows wins", `[{"id":"a","priority":3},{"id":"b","priority":0}]`, hookTierRouted, 0, true},
+		{"empty array is unrankable", `[]`, 0, 0, false},
+		{"non-JSON is unrankable", `not json`, 0, 0, false},
+		{"array of non-objects is unrankable", `["a"]`, 0, 0, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, ok := bestHookCandidateRank(tc.ready)
 			if ok != tc.ok {
 				t.Fatalf("ok = %v, want %v", ok, tc.ok)
 			}
-			if ok && got != tc.want {
-				t.Fatalf("rank = %+v, want %+v", got, tc.want)
+			if ok && (got.tier != tc.wantTier || beads.PriorityValue(got.bead.Priority) != tc.wantPriority) {
+				t.Fatalf("rank = %+v, want tier=%d priority=%d", got, tc.wantTier, tc.wantPriority)
 			}
 		})
 	}

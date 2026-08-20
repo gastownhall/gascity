@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -437,18 +438,12 @@ const (
 	hookTierRouted
 )
 
-// hookDefaultCandidatePriority is the priority assumed for a row whose priority
-// field is absent. bd's priority is a *int and omitempty, so "no priority" and
-// "priority 0" are different states on the wire; treating an absent priority as
-// P0 would let a field that simply was not serialized outrank a real P0.
-const hookDefaultCandidatePriority = 2
-
 // hookCandidateRank orders one ready work-query candidate: lower is more urgent,
 // tier first and priority second. Comparing this across stores is the whole
 // point — within a single store bd already applies the same ordering.
 type hookCandidateRank struct {
-	tier     int
-	priority int
+	tier int
+	bead beads.Bead
 }
 
 // less reports whether r should be picked ahead of other. Equal ranks report
@@ -458,7 +453,7 @@ func (r hookCandidateRank) less(other hookCandidateRank) bool {
 	if r.tier != other.tier {
 		return r.tier < other.tier
 	}
-	return r.priority < other.priority
+	return beads.ReadyLess(r.bead, other.bead)
 }
 
 // bestHookCandidateRank returns the rank of the most urgent candidate in one
@@ -467,7 +462,7 @@ func (r hookCandidateRank) less(other hookCandidateRank) bool {
 // caller treats as "do not reorder on a comparison that was not made" rather
 // than as an absence of work.
 func bestHookCandidateRank(ready string) (hookCandidateRank, bool) {
-	var rows []map[string]any
+	var rows []beads.Bead
 	if err := json.Unmarshal([]byte(strings.TrimSpace(ready)), &rows); err != nil {
 		return hookCandidateRank{}, false
 	}
@@ -485,15 +480,12 @@ func bestHookCandidateRank(ready string) (hookCandidateRank, bool) {
 // hookRankCandidate reads one row's tier and priority. An unrecognized status or
 // a missing priority falls back to the least-urgent defensible reading, so a row
 // gc cannot classify never preempts one it can.
-func hookRankCandidate(row map[string]any) hookCandidateRank {
-	rank := hookCandidateRank{tier: hookTierRouted, priority: hookDefaultCandidatePriority}
-	if status, ok := row["status"].(string); ok && strings.EqualFold(strings.TrimSpace(status), "in_progress") {
+func hookRankCandidate(row beads.Bead) hookCandidateRank {
+	rank := hookCandidateRank{tier: hookTierRouted, bead: row}
+	if strings.EqualFold(strings.TrimSpace(row.Status), "in_progress") {
 		rank.tier = hookTierInProgress
-	} else if assignee, ok := row["assignee"].(string); ok && strings.TrimSpace(assignee) != "" {
+	} else if strings.TrimSpace(row.Assignee) != "" {
 		rank.tier = hookTierAssigned
-	}
-	if p, ok := row["priority"].(float64); ok {
-		rank.priority = int(p)
 	}
 	return rank
 }
