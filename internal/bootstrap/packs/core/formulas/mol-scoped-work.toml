@@ -207,9 +207,15 @@ if [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ]; then
   # cwd is not guaranteed to be inside the repo at this step, so resolve REPO
   # off the worktree itself rather than off `pwd`.
   REPO=$(git -C "$WORKTREE" rev-parse --path-format=absolute --git-common-dir)
-  if ! git -C "$REPO" worktree remove --force "$WORKTREE"; then
-    rm -rf "$WORKTREE"
-    git -C "$REPO" worktree prune
+  if [ -z "$REPO" ]; then
+    echo "cleanup: could not resolve the owning repo for $WORKTREE; leaving it registered" >&2
+  elif ! git -C "$REPO" worktree remove --force "$WORKTREE"; then
+    if [ -f "$WORKTREE/.git" ]; then
+      rm -rf "$WORKTREE"
+      git -C "$REPO" worktree prune
+    else
+      echo "cleanup: refusing to rm -rf $WORKTREE: not a linked worktree" >&2
+    fi
   fi
 fi
 gc bd update "$WORK_BEAD_ID" --unset-metadata work_dir

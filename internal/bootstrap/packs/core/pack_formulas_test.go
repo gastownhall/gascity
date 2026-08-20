@@ -227,6 +227,29 @@ func TestMolPolecatCommitResolvesRepoBeforeRemovingWorktree(t *testing.T) {
 	if !strings.Contains(step, `git -C "$REPO" worktree remove`) {
 		t.Error(`commit-and-push must remove the worktree via git -C "$REPO" worktree remove, not a bare invocation`)
 	}
+
+	// `git -C ""` is a no-op that silently resolves the repo from cwd, and this
+	// step has already `cd ..`'d away from the worktree by then. An unresolved
+	// REPO must short-circuit rather than degrade back to cwd-dependent removal.
+	if !strings.Contains(step, `[ -z "$REPO" ]`) {
+		t.Error(`commit-and-push must bail on an empty $REPO; git -C "" silently resolves from cwd, which is exactly the bug this step fixes`)
+	}
+
+	// WORKTREE_PATH is $(pwd), and `git worktree remove` exits 128 on a main
+	// working tree. Without the guard the failure path rm -rf's the whole repo.
+	guardAt := strings.Index(step, `[ -f "$WORKTREE_PATH/.git" ]`)
+	if guardAt < 0 {
+		t.Fatal(`commit-and-push must guard the rm -rf fallback with [ -f "$WORKTREE_PATH/.git" ]; a linked worktree's .git is a file, a main checkout's is a directory`)
+	}
+	// Match the delete command itself, not the word: the surrounding comment and
+	// the refusal message both mention `rm -rf` and would otherwise be found first.
+	if got := strings.Count(step, `rm -rf "$WORKTREE_PATH"`); got != 1 {
+		t.Fatalf(`commit-and-push must delete the worktree exactly once behind the guard; found %d occurrences of rm -rf "$WORKTREE_PATH"`, got)
+	}
+	removeAt := strings.Index(step, `rm -rf "$WORKTREE_PATH"`)
+	if guardAt > removeAt {
+		t.Error("commit-and-push runs rm -rf before the linked-worktree check; the check must gate the delete, not follow it")
+	}
 }
 
 // TestMolScopedWorkResolvesRepoBeforeRemovingWorktree pins the same fix for
@@ -244,5 +267,24 @@ func TestMolScopedWorkResolvesRepoBeforeRemovingWorktree(t *testing.T) {
 	}
 	if !strings.Contains(step, `git -C "$REPO" worktree remove`) {
 		t.Error(`cleanup-worktree must remove the worktree via git -C "$REPO" worktree remove, not a bare invocation`)
+	}
+
+	// A stale directory that still passes [ -d ], or a git too old for
+	// --path-format, leaves REPO empty; `git -C ""` then resolves from a cwd
+	// this step explicitly does not guarantee is inside the repo.
+	if !strings.Contains(step, `[ -z "$REPO" ]`) {
+		t.Error(`cleanup-worktree must bail on an empty $REPO; git -C "" silently resolves from cwd, which this step cannot assume`)
+	}
+
+	guardAt := strings.Index(step, `[ -f "$WORKTREE/.git" ]`)
+	if guardAt < 0 {
+		t.Fatal(`cleanup-worktree must guard the rm -rf fallback with [ -f "$WORKTREE/.git" ]; a linked worktree's .git is a file, a main checkout's is a directory`)
+	}
+	if got := strings.Count(step, `rm -rf "$WORKTREE"`); got != 1 {
+		t.Fatalf(`cleanup-worktree must delete the worktree exactly once behind the guard; found %d occurrences of rm -rf "$WORKTREE"`, got)
+	}
+	removeAt := strings.Index(step, `rm -rf "$WORKTREE"`)
+	if guardAt > removeAt {
+		t.Error("cleanup-worktree runs rm -rf before the linked-worktree check; the check must gate the delete, not follow it")
 	}
 }
