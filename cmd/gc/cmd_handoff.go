@@ -27,6 +27,7 @@ func newHandoffCmd(stdout, stderr io.Writer) *cobra.Command {
 	var auto bool
 	var hookFormat string
 	var jsonOut bool
+	var force bool
 	cmd := &cobra.Command{
 		Use:   "handoff [subject] [message]",
 		Short: "Send handoff mail and restart controller-managed sessions",
@@ -79,7 +80,7 @@ or ID. Subject is required unless --auto is set.`,
 			if jsonOut {
 				out = io.Discard
 			}
-			if cmdHandoff(args, target, auto, hookFormat, out, stderr) != 0 {
+			if cmdHandoffWithForce(args, target, auto, hookFormat, force, out, stderr) != 0 {
 				return errExit
 			}
 			if jsonOut {
@@ -99,6 +100,7 @@ or ID. Subject is required unless --auto is set.`,
 	cmd.Flags().BoolVar(&auto, "auto", false, "Send handoff mail without requesting restart (for PreCompact hooks)")
 	cmd.Flags().StringVar(&hookFormat, "hook-format", "", "format hook output for a provider")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSON summary")
+	cmd.Flags().BoolVar(&force, "force", false, "destroy a target even when it has live background subagents")
 	return cmd
 }
 
@@ -132,12 +134,16 @@ func handoffJSONSubject(args []string, auto bool) string {
 }
 
 func cmdHandoff(args []string, target string, auto bool, hookFormat string, stdout, stderr io.Writer) int {
+	return cmdHandoffWithForce(args, target, auto, hookFormat, false, stdout, stderr)
+}
+
+func cmdHandoffWithForce(args []string, target string, auto bool, hookFormat string, force bool, stdout, stderr io.Writer) int {
 	if target != "" {
 		if auto {
 			fmt.Fprintln(stderr, "gc handoff: --auto cannot be used with --target") //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		return cmdHandoffRemote(args, target, stdout, stderr)
+		return cmdHandoffRemoteWithForce(args, target, force, stdout, stderr)
 	}
 
 	current, err := currentSessionRuntimeTarget()
@@ -191,6 +197,10 @@ func cmdHandoff(args []string, target string, auto bool, hookFormat string, stdo
 // cmdHandoffRemote sends handoff mail to a remote session and kills its runtime.
 // Returns immediately (non-blocking). The reconciler restarts the target.
 func cmdHandoffRemote(args []string, target string, stdout, stderr io.Writer) int {
+	return cmdHandoffRemoteWithForce(args, target, false, stdout, stderr)
+}
+
+func cmdHandoffRemoteWithForce(args []string, target string, force bool, stdout, stderr io.Writer) int {
 	targetInfo, err := resolveSessionRuntimeTarget(target, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc handoff: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -222,7 +232,7 @@ func cmdHandoffRemote(args []string, target string, stdout, stderr io.Writer) in
 		return 1
 	}
 	rec := openCityRecorder(stderr)
-	return doHandoffRemote(store, sessStore, rec, sp, targetInfo.sessionName, targetInfo.display, sender, args, stdout, stderr)
+	return doHandoffRemoteWithForce(store, sessStore, rec, sp, targetInfo.sessionName, targetInfo.display, sender, args, force, stdout, stderr)
 }
 
 func sessionRestartPersister(cityPath string, sessStore beads.Store, sp runtime.Provider, cfg *config.City, target string) func() error {
@@ -438,6 +448,12 @@ func clearRestartRequest(sessStore beads.Store, dops drainOps, sessionName strin
 func doHandoffRemote(store, sessStore beads.Store, rec events.Recorder, sp runtime.Provider,
 	sessionName, targetAddress, sender string, args []string, stdout, stderr io.Writer,
 ) int {
+	return doHandoffRemoteWithForce(store, sessStore, rec, sp, sessionName, targetAddress, sender, args, false, stdout, stderr)
+}
+
+func doHandoffRemoteWithForce(store, sessStore beads.Store, rec events.Recorder, sp runtime.Provider,
+	sessionName, targetAddress, sender string, args []string, force bool, stdout, stderr io.Writer,
+) int {
 	b, ok := createHandoffMail(store, sessStore, rec, sender, targetAddress, args, "HANDOFF: context cycle", []string{"priority:1"}, stderr)
 	if !ok {
 		return 1
@@ -466,6 +482,9 @@ func doHandoffRemote(store, sessStore beads.Store, rec events.Recorder, sp runti
 	if !running {
 		fmt.Fprintf(stdout, "Handoff: sent mail %s to %s (session not running; will be delivered on next start)\n", b.ID, targetAddress) //nolint:errcheck // best-effort stdout
 		return 0
+	}
+	if !force && refuseKillForLiveSubagents("gc handoff", workerHandleForSessionTargetWithConfig, "", sessStore, sp, nil, sessionName, stderr) {
+		return 1
 	}
 	// Resolve the agent identity before the kill, while the session bead is
 	// still live. The metric label uses the agent identity (not the sanitized

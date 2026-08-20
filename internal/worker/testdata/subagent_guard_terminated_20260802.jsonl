@@ -1,0 +1,2 @@
+{"type": "assistant", "timestamp": "2026-08-02T09:36:08.502Z", "message": {"content": [{"type": "tool_use", "id": "toolu_01PZBkd8PXepPohikCUVXLAx", "name": "Agent", "input": {"description": "Research auto-close lifecycle states", "run_in_background": true}}]}}
+{"type": "queue-operation", "operation": "enqueue", "timestamp": "2026-08-02T09:38:48.579Z", "content": "<task-notification>\n<task-id>aed702808d93d9228</task-id>\n<status>completed</status>\n</task-notification>"}

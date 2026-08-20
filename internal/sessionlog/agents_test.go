@@ -187,6 +187,23 @@ func TestFindAgentMappings(t *testing.T) {
 	}
 }
 
+func TestFindAgentMappings_MetaMappingIsAuthoritativeAndDeduplicated(t *testing.T) {
+	dir := t.TempDir()
+	parentPath, subDir := makeSessionDir(t, dir, "session-abc")
+	writeTestFile(t, filepath.Join(subDir, "agent-helper.jsonl"), `{"uuid":"a1","type":"system","parentToolUseId":""}`+"\n")
+	writeTestFile(t, filepath.Join(subDir, "agent-helper.meta.json"), `{"toolUseId":"toolu_real"}`)
+	mappings, err := FindAgentMappings(parentPath)
+	if err != nil {
+		t.Fatalf("FindAgentMappings: %v", err)
+	}
+	if len(mappings) != 1 {
+		t.Fatalf("len(mappings) = %d, want exactly one", len(mappings))
+	}
+	if got := mappings[0]; got.AgentID != "helper" || got.ParentToolUseID != "toolu_real" {
+		t.Fatalf("mapping = %#v", got)
+	}
+}
+
 func TestFindAgentMappings_PropagatesReadErrors(t *testing.T) {
 	dir := t.TempDir()
 	parentPath, subDir := makeSessionDir(t, dir, "session-abc")
