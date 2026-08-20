@@ -241,6 +241,11 @@ func applySiteBindings(fs fsys.FS, cityRoot string, cfg *City, keepLegacy bool) 
 		}
 		warnings = append(warnings, unknownRigSiteBindingWarning(name))
 	}
+	if !keepLegacy {
+		// Audit the resolved paths, not the declared ones: this is the first
+		// point where the effective rig path for this machine is known.
+		warnings = append(warnings, nonPersistentRigPathWarnings(fs, cityRoot, cfg.Rigs)...)
+	}
 	sort.Strings(warnings)
 	return warnings, nil
 }

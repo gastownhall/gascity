@@ -3559,6 +3559,7 @@ gc rig add /path/to/existing --adopt
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--adopt` | bool |  | adopt existing .beads/ directory (skip init) |
+| `--allow-ephemeral` | bool |  | register the rig even though its path is on a filesystem that does not survive a restart |
 | `--default-branch` | string |  | mainline branch (default: auto-detect from origin/HEAD or current branch) |
 | `--git-url` | string |  | git URL to clone into a new rig on a REMOTE city (server-side provisioning) |
 | `--include` | stringArray |  | pack source or pack name for rig agents (repeatable; writes canonical rig imports) |
