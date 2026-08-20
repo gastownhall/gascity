@@ -436,11 +436,30 @@ func suppressPresetModelEffortForProfile(builtinAncestor string, city, merged Pr
 	if builtinAncestor != "codex" || !argsRouteThroughProfile(merged.Args) {
 		return merged
 	}
+	// Copy-on-write: when the merging layer declared no option_defaults of
+	// its own, MergeProviderOverBuiltin leaves result.OptionDefaults ALIASING
+	// the base layer's map — the very case this gate exists for. Deleting in
+	// place would reach back into the recorded chain layer (visible in
+	// provider provenance) and, worse, into the built-in spec itself the day
+	// anyone memoizes BuiltinProviders(). Rebuild instead.
+	var gated map[string]string
 	for _, key := range []string{"model", "effort"} {
+		if _, present := merged.OptionDefaults[key]; !present {
+			continue
+		}
 		if _, explicit := city.OptionDefaults[key]; explicit {
 			continue
 		}
-		delete(merged.OptionDefaults, key)
+		if gated == nil {
+			gated = make(map[string]string, len(merged.OptionDefaults))
+			for k, v := range merged.OptionDefaults {
+				gated[k] = v
+			}
+		}
+		delete(gated, key)
+	}
+	if gated != nil {
+		merged.OptionDefaults = gated
 	}
 	return merged
 }
