@@ -82,8 +82,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   identity/routing once the field was removed — reported after one
   deployment lost inbound Discord messages for ~2 days with zero alarms
   before anyone checked delivery receipts. The warning now says so
-  explicitly, so operators check pack compatibility before acting on it.
-  (#3887)
+  explicitly, naming `gc doctor --fix` (which performs the removal) so
+  operators check pack compatibility before running it. (#3887)
 
 - **The dolt pack's `run_bounded` python3 fallback now sends SIGTERM before
   SIGKILL, matching its documented contract.** The fallback (used when

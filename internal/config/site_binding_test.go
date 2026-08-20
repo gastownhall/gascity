@@ -512,6 +512,9 @@ func TestLegacyWorkspaceIdentityWarningCaveatsPackCompatibility(t *testing.T) {
 	if !strings.Contains(warnings[0], "pinned to an older revision may still read") {
 		t.Fatalf("warning = %q, want a pack-compatibility caveat", warnings[0])
 	}
+	if !strings.Contains(warnings[0], "confirm pack compatibility before running `gc doctor --fix`") {
+		t.Fatalf("warning = %q, want the caveat to name `gc doctor --fix`, which itself removes the fields", warnings[0])
+	}
 }
 
 func TestLoadWithIncludes_RejectsLegacyRigPathInSchema2City(t *testing.T) {

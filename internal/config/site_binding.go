@@ -84,7 +84,8 @@ func legacyWorkspaceIdentitySurfaceWarnings(cfg *City, source string) []string {
 		warnings = append(warnings, fmt.Sprintf(
 			"%s: %s (%s); move them to .gc/site.toml (run `gc doctor --fix` if this is the root city.toml; fragments must be updated by hand). "+
 				"Some installed packs pinned to an older revision may still read these fields directly instead of .gc/site.toml -- confirm pack "+
-				"compatibility before removing them, or routing/identity that depends on workspace identity may silently stop working",
+				"compatibility before running `gc doctor --fix` or removing these fields by hand, or routing/identity that depends on "+
+				"workspace identity may silently stop working",
 			source,
 			legacyWorkspaceIdentityWarningFragment,
 			strings.Join(workspaceFields, ", "),
