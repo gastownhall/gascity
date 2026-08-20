@@ -200,12 +200,14 @@ func lookupProvider(name string, cityProviders map[string]ProviderSpec, lookPath
 				base = normalizeProviderLayerArgsForSchema(base, base.OptionsSchema)
 				child := normalizeProviderLayerArgsForSchema(spec, providerSchemaForLayerArgs(base, spec))
 				merged := MergeProviderOverBuiltin(base, child)
+				merged = suppressPresetModelEffortForProfile(name, child, merged)
 				return &merged, nil
 			}
 			if base, ok := builtins[spec.Command]; ok {
 				base = normalizeProviderLayerArgsForSchema(base, base.OptionsSchema)
 				child := normalizeProviderLayerArgsForSchema(spec, providerSchemaForLayerArgs(base, spec))
 				merged := MergeProviderOverBuiltin(base, child)
+				merged = suppressPresetModelEffortForProfile(spec.Command, child, merged)
 				return &merged, nil
 			}
 			standalone := normalizeProviderLayerArgsForSchema(spec, spec.OptionsSchema)
@@ -394,6 +396,74 @@ func MergeProviderOverBuiltin(base, city ProviderSpec) ProviderSpec {
 	}
 
 	return result
+}
+
+// suppressPresetModelEffortForProfile is the #5441 profile-aware
+// OptionDefaults gate. It lives at the caller level of
+// MergeProviderOverBuiltin - one shared implementation applied at the
+// chain-walk merge (chain.go) and at each Phase A legacy merge in this
+// file - so both resolution paths are covered by the single gate.
+//
+// When the merged provider's effective args route the command through a
+// codex profile ("--profile <name>" / "--profile=<name>") and the
+// built-in base is codex, the preset-sourced "model" and "effort"
+// OptionDefaults are deleted from the merged result: CLI flags outrank
+// the profile's own config and would silently clobber the profile's pins
+// (hard failure on strict upstreams).
+//
+// The gate is unconditional with respect to the OptionDefaults
+// merge/prune blocks in MergeProviderOverBuiltin: it inspects the merged
+// result even when the merging layer declared no option_defaults of its
+// own - the common case for profile-routed providers, where the preset
+// defaults ride on `result := base` and only a gate on the merged result
+// sees them.
+//
+// "preset-sourced" means inherited from the base rather than explicitly
+// set by the merging provider layer (city.OptionDefaults, which also
+// covers schema-managed args that normalization folded into that layer's
+// defaults): explicit wins.
+//
+// Known caveat (accepted): in a leaf -> custom -> builtin:codex chain the
+// gate runs on the leaf-most merge, so an intermediate layer's explicit
+// model pin is already folded into the merged map by the time the
+// profile-carrying leaf merges over it, and that pin is suppressed as
+// well - the profile owns model/effort for the whole chain.
+//
+// Only model and effort are suppressed: their schema entries carry no
+// `Default`, so ComputeEffectiveDefaults cannot resurrect them.
+// permission_mode is deliberately left alone.
+func suppressPresetModelEffortForProfile(builtinAncestor string, city, merged ProviderSpec) ProviderSpec {
+	if builtinAncestor != "codex" || !argsRouteThroughProfile(merged.Args) {
+		return merged
+	}
+	for _, key := range []string{"model", "effort"} {
+		if _, explicit := city.OptionDefaults[key]; explicit {
+			continue
+		}
+		delete(merged.OptionDefaults, key)
+	}
+	return merged
+}
+
+// argsRouteThroughProfile reports whether args route the command through a
+// profile: "--profile" followed by a non-empty value, or a single
+// "--profile=<name>" token with a non-empty name. A bare "--profile" with
+// no value (or an empty "--profile=") is not treated as profile-routed —
+// such a command is malformed — and short/other flag forms are out of
+// scope.
+func argsRouteThroughProfile(args []string) bool {
+	for i, a := range args {
+		if a == "--profile" {
+			if i+1 < len(args) && args[i+1] != "" {
+				return true
+			}
+			continue
+		}
+		if name, ok := strings.CutPrefix(a, "--profile="); ok && name != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func mergeOptionsSchemaByKey(base, city []ProviderOption) ([]ProviderOption, map[string]bool) {
