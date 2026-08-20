@@ -2714,7 +2714,18 @@ func TestInstantiateGraphFormulaPreservesMaterializationWhenProjectionFails(t *t
 	}
 }
 
-func TestSlingAttachGraphFormulaCreatesFreshRootForBareBeadTarget(t *testing.T) {
+// TestSlingAttachGraphFormulaSecondBareBeadTargetLaunchBlocksAsDuplicate
+// documents the #5420 fix: relaunching the SAME formula against the SAME
+// bare bead target while its first launch's root is still live is a
+// duplicate and must be blocked, not silently given a second fresh root.
+// Before the fix this scenario was named
+// "TestSlingAttachGraphFormulaCreatesFreshRootForBareBeadTarget" and
+// asserted the opposite (a second, distinct live root) -- that assertion
+// was pinning the bug itself: every bare-bead-target `--on` launch mints its
+// own synthetic input convoy (graphv2.PrepareInvocation's Targeted branch),
+// so nothing before this fix ever compared a new launch against a prior
+// live one for the same (formula, bead) pair.
+func TestSlingAttachGraphFormulaSecondBareBeadTargetLaunchBlocksAsDuplicate(t *testing.T) {
 	formulaDir := t.TempDir()
 	writeGraphV2ConvoyFormula(t, formulaDir)
 	cfg := graphV2SlingTestConfig(t, formulaDir)
@@ -2732,12 +2743,36 @@ func TestSlingAttachGraphFormulaCreatesFreshRootForBareBeadTarget(t *testing.T) 
 	if err != nil {
 		t.Fatalf("first AttachFormula: %v", err)
 	}
-	second, err := s.AttachFormula(context.Background(), "graph-work", source.ID, a, FormulaOpts{})
-	if err != nil {
-		t.Fatalf("second AttachFormula: %v", err)
+	if first.WorkflowID == "" {
+		t.Fatal("first launch: WorkflowID empty, want a live workflow root")
 	}
-	if second.WorkflowID == first.WorkflowID {
-		t.Fatalf("WorkflowID = %q, want fresh root for fresh input convoy", second.WorkflowID)
+	root, err := deps.Store.Get(first.WorkflowID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := root.Metadata[beadmeta.SourceBeadIDMetadataKey]; got != "" {
+		t.Fatalf("root %s = %q, want empty -- convoy-first launches never stamp it", beadmeta.SourceBeadIDMetadataKey, got)
+	}
+	if got := root.Metadata[beadmeta.InputConvoyIDMetadataKey]; got == "" {
+		t.Fatal("root gc.input_convoy_id = empty, want the launch's synthetic input convoy")
+	}
+
+	_, err = s.AttachFormula(context.Background(), "graph-work", source.ID, a, FormulaOpts{})
+	if err == nil {
+		t.Fatal("second AttachFormula error = nil, want conflict with the first launch's still-live root")
+	}
+	var conflictErr *sourceworkflow.ConflictError
+	if !errors.As(err, &conflictErr) {
+		t.Fatalf("second AttachFormula error = %v, want ConflictError", err)
+	}
+	if conflictErr.SourceBeadID != source.ID {
+		t.Fatalf("ConflictError.SourceBeadID = %q, want %q", conflictErr.SourceBeadID, source.ID)
+	}
+	if !slices.Contains(conflictErr.WorkflowIDs, first.WorkflowID) {
+		t.Fatalf("ConflictError.WorkflowIDs = %v, want to include %q", conflictErr.WorkflowIDs, first.WorkflowID)
+	}
+	if live := liveGraphV2Roots(t, deps.Store); len(live) != 1 {
+		t.Fatalf("live graph roots = %d, want exactly 1 (no duplicate launched); roots=%+v", len(live), live)
 	}
 }
 
@@ -3109,6 +3144,113 @@ func TestSlingAttachNonGraphFormulaAllowsExistingLiveWorkflow(t *testing.T) {
 	}
 }
 
+// graphV2ConvoyFirstSlingTestConfig builds a city config plus a plain (no
+// {{convoy_id}} template reference) graph.v2 formula, matching the fixture
+// TestSlingAttachGraphFormulaRejectsExistingLiveRoot uses for the legacy
+// gc.source_bead_id-stamped scenario. A convoy-first `--on` launch mints its
+// input convoy purely from being given a concrete target bead ID
+// (graphv2.PrepareInvocation's Targeted branch) -- the formula need not
+// reference convoy_id at all for that to happen.
+func graphV2ConvoyFirstSlingTestConfig(t *testing.T) (*config.City, SlingDeps) {
+	t.Helper()
+	formulaDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.toml"), []byte(`
+formula = "graph-work"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "step"
+title = "Do work"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := graphV2SlingTestConfig(t, formulaDir)
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	deps.CityPath = t.TempDir()
+	return cfg, deps
+}
+
+// TestSlingAttachGraphFormulaConvoyFirstNoExistingRootProceeds is the
+// no-false-positive counterpart of
+// TestSlingAttachGraphFormulaSecondBareBeadTargetLaunchBlocksAsDuplicate: a
+// convoy-first `--on` launch against a bead with no prior workflow must
+// launch normally. The new convoy-tracking lookup must not treat the launch's
+// own freshly-minted (still rootless) input convoy, or an unrelated convoy
+// that merely tracks the bead for other reasons, as a conflict.
+func TestSlingAttachGraphFormulaConvoyFirstNoExistingRootProceeds(t *testing.T) {
+	_, deps := graphV2ConvoyFirstSlingTestConfig(t)
+	source, err := deps.Store.Create(beads.Bead{ID: "BL-42", Title: "work", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An unrelated (non-synthetic) convoy already tracks the source bead --
+	// e.g. an epic/auto-convoy grouping -- and tracks no workflow root. It
+	// must not be mistaken for a blocking attachment.
+	unrelated, err := deps.Store.Create(beads.Bead{Title: "grouping convoy", Type: "convoy", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := convoycore.TrackItem(deps.Store, unrelated.ID, source.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.AttachFormula(context.Background(), "graph-work", source.ID, config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}, FormulaOpts{})
+	if err != nil {
+		t.Fatalf("AttachFormula: %v", err)
+	}
+	if result.WorkflowID == "" {
+		t.Fatal("WorkflowID = empty, want a live workflow root")
+	}
+	if live := liveGraphV2Roots(t, deps.Store); len(live) != 1 {
+		t.Fatalf("live graph roots = %d, want exactly 1; roots=%+v", len(live), live)
+	}
+}
+
+// TestCheckNoMoleculeChildrenConvoyLookupDoesNotShadowV1Children guards the
+// v1 (legacy) molecule/wisp-child dedup path: a bead with a direct DB-child
+// molecule attachment (the pre-#5420 detection route) must still be found
+// exactly the same way when the new convoy-tracking lookup runs alongside it
+// and has nothing to contribute (no convoy tracks the bead at all). The
+// convoy-based addition to CollectAttachedBeads must be purely additive.
+func TestCheckNoMoleculeChildrenConvoyLookupDoesNotShadowV1Children(t *testing.T) {
+	store := beads.NewMemStore()
+	// Assigned, so checkNoMoleculeChildren's auto-burn branch (reserved for an
+	// unassigned parent's stale attachment) does not apply and the existing
+	// molecule child must block instead.
+	source, err := store.Create(beads.Bead{Title: "source", Type: "task", Status: "open", Assignee: "mayor"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	molBead, err := store.Create(beads.Bead{
+		Title:    "molecule",
+		Type:     "molecule",
+		Status:   "open",
+		ParentID: source.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var result SlingResult
+	err = CheckNoMoleculeChildren(store, source.ID, store, &result)
+	if err == nil {
+		t.Fatal("CheckNoMoleculeChildren error = nil, want blocking molecule child")
+	}
+	if want := fmt.Sprintf("bead %s already has attached molecule %s", source.ID, molBead.ID); err.Error() != want {
+		t.Fatalf("CheckNoMoleculeChildren error = %q, want %q", err.Error(), want)
+	}
+
+	label, id := FindBlockingMolecule(store, source.ID, store)
+	if label != "molecule" || id != molBead.ID {
+		t.Fatalf("FindBlockingMolecule = (%q, %q), want (\"molecule\", %q)", label, id, molBead.ID)
+	}
+}
+
 func TestSourceWorkflowLockScopeUsesStorePath(t *testing.T) {
 	cfg := &config.City{
 		Rigs: []config.Rig{
@@ -3187,7 +3329,7 @@ func TestListSourceWorkflowRootsSkipsNonSourceListFailureAndKeepsSingletonGuard(
 		},
 	}
 
-	err = checkLegacySourceWorkflowConflict(deps, "mc-source")
+	err = checkLegacySourceWorkflowConflict(deps, "mc-source", "")
 	var conflictErr *sourceworkflow.ConflictError
 	if !errors.As(err, &conflictErr) {
 		t.Fatalf("checkLegacySourceWorkflowConflict error = %v, want ConflictError", err)
@@ -3249,7 +3391,7 @@ func TestListSourceWorkflowRootsScansAlreadyOpenSourceStoreWhenListerOmitsIt(t *
 		SourceWorkflowStoreScanWarning: func(string, error) {},
 	}
 
-	err = checkLegacySourceWorkflowConflict(deps, "mc-source")
+	err = checkLegacySourceWorkflowConflict(deps, "mc-source", "")
 	var conflictErr *sourceworkflow.ConflictError
 	if !errors.As(err, &conflictErr) {
 		t.Fatalf("checkLegacySourceWorkflowConflict error = %v, want ConflictError from already-open source store", err)

@@ -551,7 +551,7 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 				}
 				return result, fmt.Errorf("%w", err)
 			}
-			if err := checkLegacySourceWorkflowConflict(deps, beadID); err != nil {
+			if err := checkLegacySourceWorkflowConflict(deps, beadID, formulaName); err != nil {
 				return result, fmt.Errorf("%w", err)
 			}
 			// The replaced root is a graph.v2 workflow root, and every root
@@ -1479,17 +1479,39 @@ func validateSlingFormulaRuntimeVars(ctx context.Context, formulaName string, se
 	return molecule.ValidateRecipeRuntimeVars(recipe, opts)
 }
 
-func checkLegacySourceWorkflowConflict(deps SlingDeps, beadID string) error {
+func checkLegacySourceWorkflowConflict(deps SlingDeps, beadID, formulaName string) error {
 	roots, err := listSourceWorkflowRoots(deps, beadID)
 	if err != nil {
 		return fmt.Errorf("list live workflows for %s: %w", beadID, err)
 	}
-	if len(roots) == 0 {
+	ids := blockingWorkflowIDs(roots)
+
+	// listSourceWorkflowRoots resolves live workflows via gc.source_bead_id,
+	// which a convoy-first `--on` launch never stamps on the root -- the
+	// source is tracked through the input convoy instead (see
+	// attachFormulaToBead's isGraph branch above). That makes the check
+	// above structurally vacuous for every formulas-v2 `--on` launch, so
+	// resolve the convoy-tracking edge here too, scoped to the SAME formula
+	// being attached -- distinct formulas concurrently targeting one bead
+	// are legitimate, only relaunching the same one while its root is still
+	// live is the duplicate (#5420).
+	convoyRoots, err := liveConvoyTrackedWorkflowRoots(deps.Store, deps.graphStore(), beadID, formulaName)
+	if err != nil {
+		return fmt.Errorf("list convoy-tracked live workflows for %s: %w", beadID, err)
+	}
+	for _, root := range convoyRoots {
+		if !slices.Contains(ids, root.ID) {
+			ids = append(ids, root.ID)
+		}
+	}
+
+	if len(ids) == 0 {
 		return nil
 	}
+	slices.Sort(ids)
 	return &sourceworkflow.ConflictError{
 		SourceBeadID: beadID,
-		WorkflowIDs:  blockingWorkflowIDs(roots),
+		WorkflowIDs:  ids,
 	}
 }
 
