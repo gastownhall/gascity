@@ -412,7 +412,7 @@ func (errWriter) Write([]byte) (int, error) {
 
 func TestCmdHandoffAutoRejectsTarget(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	if code := cmdHandoff([]string{"context cycle"}, "mayor", true, "", &stdout, &stderr); code == 0 {
+	if code := cmdHandoffWithForce([]string{"context cycle"}, "mayor", true, "", false, &stdout, &stderr); code == 0 {
 		t.Fatal("cmdHandoff returned 0 for --auto with --target")
 	}
 	if !strings.Contains(stderr.String(), "--auto cannot be used with --target") {
@@ -715,7 +715,7 @@ func TestCmdHandoff_Regression744_NamedSessionReturnsWithoutBlocking(t *testing.
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- cmdHandoff([]string{"HANDOFF: context full"}, "", false, "", &stdout, &stderr)
+		done <- cmdHandoffWithForce([]string{"HANDOFF: context full"}, "", false, "", false, &stdout, &stderr)
 	}()
 
 	select {
@@ -1022,7 +1022,7 @@ func TestHandoffMailWritesTheBindingOnAMigratedCity(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	// --auto: the send without the restart request, so the assertion is about
 	// the message bead and nothing else.
-	if code := cmdHandoff([]string{"context cycle"}, "", true, "", &stdout, &stderr); code != 0 {
+	if code := cmdHandoffWithForce([]string{"context cycle"}, "", true, "", false, &stdout, &stderr); code != 0 {
 		t.Fatalf("gc handoff --auto exited %d: %s", code, stderr.String())
 	}
 	match := handoffMailIDPattern.FindStringSubmatch(stdout.String())
@@ -1068,7 +1068,7 @@ func TestHandoffLocalArmMailLandsInTheBindingOnAMigratedCity(t *testing.T) {
 	seedNamedOnDemandSession(t, cityPath, cfg, "mayor")
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdHandoff([]string{"context cycle"}, "", false, "", &stdout, &stderr); code != 0 {
+	if code := cmdHandoffWithForce([]string{"context cycle"}, "", false, "", false, &stdout, &stderr); code != 0 {
 		t.Fatalf("gc handoff exited %d: %s", code, stderr.String())
 	}
 	id := handoffMailIDFromOutput(t, stdout.String(), "sent mail ")
