@@ -15,7 +15,12 @@ import (
 
 // nativeStorageOpenTimeout bounds beads.OpenNativeStorage's schema-open call
 // in process-backed cmd/gc fixtures that open native Dolt storage directly.
-const nativeStorageOpenTimeout = 15 * time.Second
+// 90s matches nativeReadRetryBudget (internal/beads/native_dolt_store.go),
+// this codebase's existing budget for Dolt operations under fleet-level
+// contention. The prior per-call-site 15s budget was sized for an unloaded
+// host and timed out under make test-local-full-parallel's documented
+// 40-job Dolt contention (ga-227zz7).
+const nativeStorageOpenTimeout = 90 * time.Second
 
 // nativeStorageOpenContext returns a context bounded by
 // nativeStorageOpenTimeout, for fixtures calling beads.OpenNativeStorage.

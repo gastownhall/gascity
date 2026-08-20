@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1514,6 +1513,7 @@ func TestCmdMailInbox_NormalizesCanonicalManagedProviderEnvAndReadsInbox(t *test
 		t.Fatalf("nativeDoltOpenEnvForScope(): %v", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), nativeStorageFixtureBootTimeout)
+	ctx, cancel := nativeStorageOpenContext()
 	defer cancel()
 	nativeStorage, err := beads.OpenNativeStorage(ctx, cityDir, nativeEnv)
 	if err != nil {

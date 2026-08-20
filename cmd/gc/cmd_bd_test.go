@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -1305,6 +1304,7 @@ func TestBdRigWorktreeStoreConsistentAcrossRawBdGcBdAndProviderStore(t *testing.
 		t.Fatalf("nativeDoltOpenEnvForScope(rig): %v", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), nativeStorageFixtureBootTimeout)
+	ctx, cancel := nativeStorageOpenContext()
 	defer cancel()
 	nativeStorage, err := beads.OpenNativeStorage(ctx, rigPath, nativeEnv)
 	if err != nil {
