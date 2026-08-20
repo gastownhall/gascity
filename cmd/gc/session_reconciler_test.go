@@ -8480,6 +8480,116 @@ func TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError(t *testing.
 	}
 }
 
+// A pool member that dies during startup on every attempt must accrue the
+// ordinary wake-failure budget on its OWN bead instead of being rolled back and
+// re-minted every tick (#5442). Rolling it back closes the bead and the fresh
+// replacement starts at wake_attempts=0, so the reconciler spins forever with no
+// quarantine ever engaging — the reported incident was 84 cycles in ~22s. The
+// sibling TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError pins
+// the unchanged half: a non-startup start failure still rolls the pending create
+// back and still records no wake failure.
+func TestReconcileSessionBeads_StartupDeathAccruesWakeFailuresUntilQuarantine(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	sp.StartErrors = map[string]error{
+		"sky": fmt.Errorf("%w: session %q", runtime.ErrSessionDiedDuringStartup, "sky"),
+	}
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	cfg := &config.City{Agents: []config.Agent{{Name: "helper"}}}
+	desired := map[string]TemplateParams{
+		"sky": {
+			Command:      "test-cmd",
+			SessionName:  "sky",
+			TemplateName: "helper",
+		},
+	}
+
+	bead, err := store.Create(beads.Bead{
+		Title:  "helper",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:helper"},
+		Metadata: map[string]string{
+			"session_name":         "sky",
+			"pool_slot":            "1",
+			"pending_create_claim": "true",
+			"template":             "helper",
+			"state":                "creating",
+			"generation":           "1",
+			"continuation_epoch":   "1",
+			"instance_token":       "test-token",
+			"session_key":          "key-abc",
+			"started_config_hash":  "hash-abc",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(bead): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	cfgNames := configuredSessionNames(cfg, "", store)
+	tick := func() beads.Bead {
+		t.Helper()
+		current, err := store.Get(bead.ID)
+		if err != nil {
+			t.Fatalf("Get(bead): %v", err)
+		}
+		reconcileSessionBeads(
+			context.Background(), []beads.Bead{current}, desired, cfgNames,
+			cfg, sp, store, nil, nil, nil, newDrainTracker(), map[string]int{"helper": 1}, false, nil, "",
+			nil, clk, events.Discard, 0, 0, &stdout, &stderr,
+		)
+		updated, err := store.Get(bead.ID)
+		if err != nil {
+			t.Fatalf("Get(bead) after tick: %v", err)
+		}
+		return updated
+	}
+
+	for attempt := 1; attempt <= defaultMaxWakeAttempts; attempt++ {
+		got := tick()
+		if got.Status == "closed" {
+			t.Fatalf("attempt %d: startup-dead pending create was closed; a re-minted bead resets wake_attempts and the retry budget can never be reached", attempt)
+		}
+		if want := fmt.Sprintf("%d", attempt); got.Metadata["wake_attempts"] != want {
+			t.Fatalf("attempt %d: wake_attempts = %q, want %q", attempt, got.Metadata["wake_attempts"], want)
+		}
+		if got.Metadata["last_woke_at"] != "" {
+			t.Fatalf("attempt %d: last_woke_at = %q, want cleared so the next tick retries", attempt, got.Metadata["last_woke_at"])
+		}
+	}
+
+	final, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get(bead) final: %v", err)
+	}
+	if final.Metadata["quarantined_until"] == "" {
+		t.Fatal("quarantined_until empty after the wake budget was spent; the startup-death loop is still unbounded")
+	}
+	quarantinedUntil, err := time.Parse(time.RFC3339, final.Metadata["quarantined_until"])
+	if err != nil {
+		t.Fatalf("parse quarantined_until %q: %v", final.Metadata["quarantined_until"], err)
+	}
+	if !quarantinedUntil.After(clk.Now()) {
+		t.Fatalf("quarantined_until = %v, want a future hold from %v", quarantinedUntil, clk.Now())
+	}
+	// The conversation reset recordWakeFailure performs is what makes the next
+	// attempt a first start rather than a resume of a conversation that no
+	// longer exists.
+	if final.Metadata["session_key"] != "" {
+		t.Fatalf("session_key = %q, want cleared by the wake-failure conversation reset", final.Metadata["session_key"])
+	}
+	if final.Metadata["started_config_hash"] != "" {
+		t.Fatalf("started_config_hash = %q, want cleared by the wake-failure conversation reset", final.Metadata["started_config_hash"])
+	}
+
+	// One more tick while quarantined must not spend another attempt: the
+	// budget is what stops the spin.
+	after := tick()
+	if after.Metadata["wake_attempts"] != fmt.Sprintf("%d", defaultMaxWakeAttempts) {
+		t.Fatalf("wake_attempts = %q after a quarantined tick, want the budget to hold at %d", after.Metadata["wake_attempts"], defaultMaxWakeAttempts)
+	}
+}
+
 func TestReconcileSessionBeads_PoolScaleDownOrphansExcess(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{

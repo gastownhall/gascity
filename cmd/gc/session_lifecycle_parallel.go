@@ -1465,7 +1465,12 @@ func runPreparedStartCandidate(
 				alive = obs.Alive
 			}
 			if err != nil || !running || !alive {
-				err = fmt.Errorf("session %q died during startup", item.candidate.name())
+				// Wrap the shared sentinel so this locally detected death is
+				// indistinguishable from a provider-reported one downstream
+				// (commitStartFailure's startup-death exception, #5442). The
+				// sentinel's own text is "session died during startup", so the
+				// rendered message keeps the substring existing tests pin.
+				err = fmt.Errorf("%w: session %q", runtime.ErrSessionDiedDuringStartup, item.candidate.name())
 			}
 		}
 		phases.PostStartObserve = time.Since(postStartBegin)
@@ -2254,7 +2259,7 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.err, result.phases)
 		return
 	}
-	if result.rollbackPending {
+	if result.rollbackPending && !errors.Is(result.err, runtime.ErrSessionDiedDuringStartup) {
 		if errors.Is(result.err, context.DeadlineExceeded) {
 			rec.Record(events.Event{
 				Type:    events.SessionColdStartTimeout,
@@ -2268,6 +2273,18 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 		// TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError).
 		// Genuine wake-failure accounting happens on the non-rollback path
 		// below via recordWakeFailure.
+		//
+		// EXCEPTION — startup death (#5442): the recreate-fresh loop only
+		// converges when the next attempt can succeed. A session that dies
+		// during startup on every attempt is discarded and re-minted every
+		// tick, and each fresh bead carries a zero wake_attempts counter, so
+		// the retry budget is never reached and the pool spins forever (the
+		// reported incident: 84 rollback/recreate cycles in ~22s with no
+		// quarantine). Startup deaths therefore skip this arm and fall
+		// through to the wake-failure tail below, where the SAME bead accrues
+		// across ticks until defaultMaxWakeAttempts trips the quarantine and
+		// the conversation reset. Post-startup rollbacks (provider errors,
+		// cold-start deadlines, session-exists mismatches) are unchanged.
 		if trace != nil {
 			trace.RecordOperation(TraceSiteLifecycleStartRollback, TraceReasonStart, result.outcome, "", tp.TemplateName, name, 0, traceRecordPayload{
 				"error": formatLifecycleError(result.err),

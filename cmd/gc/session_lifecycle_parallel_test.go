@@ -6238,6 +6238,51 @@ func TestExecutePreparedStartWave_StaleSessionKeyDetected(t *testing.T) {
 	}
 }
 
+// The post-start liveness probe's own "died during startup" verdict must carry
+// runtime.ErrSessionDiedDuringStartup, exactly as a provider-reported death
+// does: commitStartFailure's startup-death exception (#5442) keys off the
+// sentinel, and this locally detected form is the shape the pool spin was
+// reported in.
+func TestExecutePreparedStartWave_StaleSessionKeyDeathWrapsStartupSentinel(t *testing.T) {
+	sp := &zombieAfterStartProvider{Fake: runtime.NewFake()}
+	item := preparedStart{
+		candidate: startCandidate{
+			info: sessionpkg.Info{
+				ID:                  "gc-99",
+				SessionName:         "test-agent",
+				SessionNameMetadata: "test-agent",
+				SessionKey:          "stale-key-abc",
+				Template:            "worker",
+			},
+			tp: TemplateParams{
+				Command:      "claude --resume stale-key-abc",
+				SessionName:  "test-agent",
+				TemplateName: "worker",
+			},
+		},
+		cfg: runtime.Config{
+			Command:      "claude --resume stale-key-abc",
+			ProcessNames: []string{"claude"},
+		},
+	}
+
+	results := executePreparedStartWave(
+		context.Background(),
+		[]preparedStart{item},
+		sp,
+		nil,
+		10*time.Second,
+		withStartStabilityWaiter(immediateStartStabilityWaiter),
+	)
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if !errors.Is(results[0].err, runtime.ErrSessionDiedDuringStartup) {
+		t.Fatalf("err = %v, want it to wrap runtime.ErrSessionDiedDuringStartup", results[0].err)
+	}
+}
+
 func TestExecutePreparedStartWave_StaleSessionKeyDetectedWhenPaneSurvives(t *testing.T) {
 	sp := &zombieAfterStartProvider{Fake: runtime.NewFake()}
 	item := preparedStart{
