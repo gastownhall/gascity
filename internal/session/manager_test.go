@@ -4767,18 +4767,6 @@ func TestEnsureRunning_RetriesWithoutStaleSessionKey(t *testing.T) {
 	}
 }
 
-// lastStartCommand returns the command of the most recent Start call recorded
-// for name.
-func lastStartCommand(f *runtime.Fake, name string) (string, bool) {
-	calls := f.SnapshotCalls()
-	for i := len(calls) - 1; i >= 0; i-- {
-		if calls[i].Method == "Start" && calls[i].Name == name {
-			return calls[i].Config.Command, true
-		}
-	}
-	return "", false
-}
-
 // TestEnsureRunning_StaleKeyRetryAlsoFails verifies that when the stale-key
 // resume detects death and the fresh retry also fails, the error propagates.
 func TestEnsureRunning_StaleKeyRetryAlsoFails(t *testing.T) {
