@@ -36,6 +36,7 @@ City is the top-level configuration for a Gas City instance.
 | `daemon` | DaemonConfig |  |  | Daemon configures controller daemon settings. |
 | `orders` | OrdersConfig |  |  | Orders configures order settings: skip list, max_timeout cap, and per-order overrides. |
 | `api` | APIConfig |  |  | API configures the optional HTTP API server. |
+| `extmsg` | ExtMsgConfig |  |  | ExtMsg configures the external messaging subsystem. |
 | `chat_sessions` | ChatSessionsConfig |  |  | ChatSessions configures chat session behavior (auto-suspend). |
 | `session_sleep` | SessionSleepConfig |  |  | SessionSleep configures idle sleep policy defaults for managed sessions. |
 | `convergence` | ConvergenceConfig |  |  | Convergence configures convergence loop limits. |
@@ -45,7 +46,6 @@ City is the top-level configuration for a Gas City instance.
 | `webhook` | []Webhook |  |  | Webhooks declares inbound HTTP receivers mounted on the supervisor edge under /hook/&#123;name&#125;. Composed like Services (pack concatenation + SourceDir provenance + the default-closed public pack-guard). |
 | `webhooks` | WebhookPolicyConfig |  |  | WebhookPolicy holds city-level webhook governance (the [webhooks] table, notably allow_public grants). Authored only in the root city.toml; never merged from packs or fragments so a pack cannot grant itself exposure. |
 | `github` | GitHubConfig |  |  | GitHub configures GitHub-facing repository monitors. |
-| `extmsg` | ExtMsgConfig |  |  | ExtMsg configures the external-messaging fabric (default routes for inbound conversations with no binding). |
 | `agent_defaults` | AgentDefaults |  |  | AgentDefaults provides root city defaults for agents that don't override them (canonical TOML key: agent_defaults). Pack-local defaults use the same table shape in pack.toml. The runtime currently applies provider, default_sling_formula, and append_fragments; the attachment-list fields remain tombstones, and the other fields are parsed/composed but not yet inherited automatically. |
 | `pricing` | []ModelPricing |  |  | Pricing holds per-model cost rate overrides keyed by (provider, model). City-level entries override pack-level entries which override the defaults shipped with the pricing package. See internal/pricing for the estimation seam introduced by issue #1255 (1d). |
 
@@ -302,6 +302,16 @@ ChatSessionsConfig configures chat session behavior.
 | `idle_timeout` | string |  |  | IdleTimeout is the duration after which a detached chat session is auto-suspended. Duration string (e.g., "30m", "1h"). 0 = disabled. |
 | `grace_period` | string |  |  | GracePeriod is the duration after creation during which a manual session is protected from idle-sleep scale-to-zero. Duration string (e.g., "10m"). Empty = use default (10m). "0" = disabled. |
 
+## ConnectedClientsConfig
+
+ConnectedClientsConfig configures the connected-client SSE subscribe path.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `allow_no_credential` | boolean |  |  | AllowNoCredential permits client registration without a credential when true. Defaults to false (credential required). |
+| `heartbeat_interval` | string |  |  | HeartbeatInterval is the SSE keepalive interval for connected-client streams. Duration string (e.g., "30s"). Defaults to "30s". |
+| `subscriber_buffer_size` | integer |  |  | SubscriberBufferSize is the channel buffer depth per SSE subscriber. Defaults to 64. |
+
 ## ConvergenceConfig
 
 ConvergenceConfig holds convergence loop limits.
@@ -410,6 +420,7 @@ ExtMsgConfig configures the external-messaging fabric.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `default_route` | []ExtMsgDefaultRoute |  |  | DefaultRoutes map inbound conversations that have no binding and no group route to a configured agent, keyed by provider and optionally narrowed to one adapter account. The first matching inbound message binds the conversation to the agent (an agent-name binding), so the route is sticky until rebound or unbound. |
+| `connected_clients` | ConnectedClientsConfig |  |  | ConnectedClients configures the connected-client SSE token and subscription subsystem. |
 
 ## ExtMsgDefaultRoute
 

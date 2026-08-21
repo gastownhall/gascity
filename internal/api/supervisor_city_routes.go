@@ -446,6 +446,14 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		sseCityStream(sm, (*Server).streamEvents))
 
 	// ExtMsg.
+	cityRegister(sm, huma.Operation{
+		OperationID:   "register-extmsg-client",
+		Method:        http.MethodPost,
+		Path:          "/extmsg/clients",
+		Summary:       "Register an external messaging client and issue a token",
+		DefaultStatus: http.StatusOK,
+		Errors:        []int{http.StatusBadRequest, http.StatusServiceUnavailable},
+	}, (*Server).humaHandleExtMsgClientRegister)
 	cityPost(sm, "/extmsg/inbound", (*Server).humaHandleExtMsgInbound, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable))
 	cityPost(sm, "/extmsg/outbound", (*Server).humaHandleExtMsgOutbound, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable))
 	cityGet(sm, "/extmsg/bindings", (*Server).humaHandleExtMsgBindingList, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable))
@@ -475,4 +483,17 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Errors: []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable},
 	}, (*Server).humaHandleExtMsgAdapterRegister)
 	cityDelete(sm, "/extmsg/adapters", (*Server).humaHandleExtMsgAdapterUnregister, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable))
+
+	// Connected-client SSE subscribe stream.
+	registerSSEStringID(sm.humaAPI, huma.Operation{
+		OperationID: "subscribe-extmsg-client",
+		Method:      http.MethodGet,
+		Path:        cityScopePrefix + "/extmsg/clients/{client_id}/conversations/{conversation_id}/subscribe",
+		Summary:     "Subscribe to external messaging events via SSE",
+		Description: "Opens a Server-Sent Events stream delivering replies for the given conversation. " +
+			"The stream emits message events when a session replies, heartbeat events on idle, " +
+			"and error events on terminal failures. Reconnect with Last-Event-ID to replay missed messages.",
+	}, extmsgSubscribeEventMap(),
+		sseCityPrecheck(sm, (*Server).checkExtmsgSubscribe),
+		sseCityStringIDStream(sm, (*Server).streamExtmsgSubscribe))
 }

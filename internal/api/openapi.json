@@ -2913,6 +2913,52 @@
         },
         "type": "object"
       },
+      "ExtMsgClientRegisterInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "allowed_sessions": {
+            "description": "Session names this client is permitted to subscribe to.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "credential": {
+            "description": "Opaque credential string (required unless allow_no_credential=true in city.toml).",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ExtMsgClientRegisterOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "client_id": {
+            "description": "Stable client identifier (bead ID). Use as account_id in the subscribe URL.",
+            "type": "string"
+          },
+          "created": {
+            "description": "True when a new token was issued; false when re-issued for the same credential.",
+            "type": "boolean"
+          },
+          "note": {
+            "description": "One-time advisory message. Only present when created=true.",
+            "type": "string"
+          },
+          "token": {
+            "description": "Raw base64url token. Only present when created=true; store it securely.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "client_id",
+          "created"
+        ],
+        "type": "object"
+      },
       "ExtMsgGroupEnsureInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -7139,6 +7185,97 @@
         "required": [
           "runs",
           "status_counts"
+        ],
+        "type": "object"
+      },
+      "SSEErrorEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "event": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "retry_after_ms": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "retryable": {
+            "type": "boolean"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "event",
+          "code",
+          "message",
+          "retryable"
+        ],
+        "type": "object"
+      },
+      "SSEHeartbeatEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "event": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "event",
+          "ts"
+        ],
+        "type": "object"
+      },
+      "SSEMessageEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "conversation": {
+            "$ref": "#/components/schemas/ConversationRef"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "event": {
+            "type": "string"
+          },
+          "sequence": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "event",
+          "text",
+          "session_id",
+          "conversation",
+          "sequence",
+          "created_at"
         ],
         "type": "object"
       },
@@ -32298,6 +32435,298 @@
           }
         },
         "summary": "Get v0 city by city name extmsg bindings"
+      }
+    },
+    "/v0/city/{cityName}/extmsg/clients": {
+      "post": {
+        "operationId": "register-extmsg-client",
+        "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExtMsgClientRegisterInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExtMsgClientRegisterOutputBody"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Register an external messaging client and issue a token"
+      }
+    },
+    "/v0/city/{cityName}/extmsg/clients/{client_id}/conversations/{conversation_id}/subscribe": {
+      "get": {
+        "description": "Opens a Server-Sent Events stream delivering replies for the given conversation. The stream emits message events when a session replies, heartbeat events on idle, and error events on terminal failures. Reconnect with Last-Event-ID to replay missed messages.",
+        "operationId": "subscribe-extmsg-client",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Client identifier from POST /v0/extmsg/clients.",
+            "in": "path",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "description": "Client identifier from POST /v0/extmsg/clients.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Opaque conversation identifier.",
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "description": "Opaque conversation identifier.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Bearer token from client registration.",
+            "in": "header",
+            "name": "X-GC-Client-Token",
+            "schema": {
+              "description": "Bearer token from client registration.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Decimal sequence number for reconnect replay.",
+            "in": "header",
+            "name": "Last-Event-ID",
+            "schema": {
+              "description": "Decimal sequence number for reconnect replay.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "description": "Each oneOf object represents one possible SSE message.",
+                  "items": {
+                    "oneOf": [
+                      {
+                        "properties": {
+                          "data": {
+                            "$ref": "#/components/schemas/SSEErrorEvent"
+                          },
+                          "event": {
+                            "const": "error",
+                            "description": "The event name.",
+                            "type": "string"
+                          },
+                          "id": {
+                            "description": "The event resume cursor.",
+                            "type": "string"
+                          },
+                          "retry": {
+                            "description": "The retry time in milliseconds.",
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "data",
+                          "event"
+                        ],
+                        "title": "Event error",
+                        "type": "object"
+                      },
+                      {
+                        "properties": {
+                          "data": {
+                            "$ref": "#/components/schemas/SSEHeartbeatEvent"
+                          },
+                          "event": {
+                            "const": "heartbeat",
+                            "description": "The event name.",
+                            "type": "string"
+                          },
+                          "id": {
+                            "description": "The event resume cursor.",
+                            "type": "string"
+                          },
+                          "retry": {
+                            "description": "The retry time in milliseconds.",
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "data",
+                          "event"
+                        ],
+                        "title": "Event heartbeat",
+                        "type": "object"
+                      },
+                      {
+                        "properties": {
+                          "data": {
+                            "$ref": "#/components/schemas/SSEMessageEvent"
+                          },
+                          "event": {
+                            "const": "message",
+                            "description": "The event name.",
+                            "type": "string"
+                          },
+                          "id": {
+                            "description": "The event resume cursor.",
+                            "type": "string"
+                          },
+                          "retry": {
+                            "description": "The retry time in milliseconds.",
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "data"
+                        ],
+                        "title": "Event message",
+                        "type": "object"
+                      }
+                    ]
+                  },
+                  "title": "Server Sent Events",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Subscribe to external messaging events via SSE"
       }
     },
     "/v0/city/{cityName}/extmsg/groups": {

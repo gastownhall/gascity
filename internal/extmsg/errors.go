@@ -21,6 +21,7 @@ var (
 	ErrHydrationPending     = errors.New("extmsg hydration pending")
 	ErrHydrationFailed      = errors.New("extmsg hydration failed")
 	ErrTranscriptSyncFailed = errors.New("extmsg transcript sync failed")
+	ErrClientTokenNotFound  = errors.New("extmsg client token not found")
 )
 
 func wrapTranscriptSyncError(action string, err error) error {

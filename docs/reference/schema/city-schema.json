@@ -1195,6 +1195,10 @@
           "$ref": "#/$defs/APIConfig",
           "description": "API configures the optional HTTP API server."
         },
+        "extmsg": {
+          "$ref": "#/$defs/ExtMsgConfig",
+          "description": "ExtMsg configures the external messaging subsystem."
+        },
         "chat_sessions": {
           "$ref": "#/$defs/ChatSessionsConfig",
           "description": "ChatSessions configures chat session behavior (auto-suspend)."
@@ -1237,10 +1241,6 @@
           "$ref": "#/$defs/GitHubConfig",
           "description": "GitHub configures GitHub-facing repository monitors."
         },
-        "extmsg": {
-          "$ref": "#/$defs/ExtMsgConfig",
-          "description": "ExtMsg configures the external-messaging fabric (default routes\nfor inbound conversations with no binding)."
-        },
         "agent_defaults": {
           "$ref": "#/$defs/AgentDefaults",
           "description": "AgentDefaults provides root city defaults for agents that don't override\nthem (canonical TOML key: agent_defaults). Pack-local defaults use the\nsame table shape in pack.toml. The runtime currently applies provider,\ndefault_sling_formula, and append_fragments; the attachment-list fields\nremain tombstones, and the other fields are parsed/composed but not yet\ninherited automatically."
@@ -1259,6 +1259,25 @@
         "workspace"
       ],
       "description": "City is the top-level configuration for a Gas City instance."
+    },
+    "ConnectedClientsConfig": {
+      "properties": {
+        "allow_no_credential": {
+          "type": "boolean",
+          "description": "AllowNoCredential permits client registration without a credential when\ntrue. Defaults to false (credential required)."
+        },
+        "heartbeat_interval": {
+          "type": "string",
+          "description": "HeartbeatInterval is the SSE keepalive interval for connected-client streams.\nDuration string (e.g., \"30s\"). Defaults to \"30s\"."
+        },
+        "subscriber_buffer_size": {
+          "type": "integer",
+          "description": "SubscriberBufferSize is the channel buffer depth per SSE subscriber.\nDefaults to 64."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "ConnectedClientsConfig configures the connected-client SSE subscribe path."
     },
     "ConvergenceConfig": {
       "properties": {
@@ -1574,6 +1593,10 @@
           },
           "type": "array",
           "description": "DefaultRoutes map inbound conversations that have no binding and no\ngroup route to a configured agent, keyed by provider and optionally\nnarrowed to one adapter account. The first matching inbound message\nbinds the conversation to the agent (an agent-name binding), so the\nroute is sticky until rebound or unbound."
+        },
+        "connected_clients": {
+          "$ref": "#/$defs/ConnectedClientsConfig",
+          "description": "ConnectedClients configures the connected-client SSE token and subscription subsystem."
         }
       },
       "additionalProperties": false,

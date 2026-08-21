@@ -278,6 +278,8 @@ type City struct {
 	Orders OrdersConfig `toml:"orders,omitempty"`
 	// API configures the optional HTTP API server.
 	API APIConfig `toml:"api,omitempty"`
+	// ExtMsg configures the external messaging subsystem.
+	ExtMsg ExtMsgConfig `toml:"extmsg,omitempty"`
 	// ChatSessions configures chat session behavior (auto-suspend).
 	ChatSessions ChatSessionsConfig `toml:"chat_sessions,omitempty"`
 	// SessionSleep configures idle sleep policy defaults for managed sessions.
@@ -302,9 +304,6 @@ type City struct {
 	WebhookPolicy WebhookPolicyConfig `toml:"webhooks,omitempty"`
 	// GitHub configures GitHub-facing repository monitors.
 	GitHub GitHubConfig `toml:"github,omitempty"`
-	// ExtMsg configures the external-messaging fabric (default routes
-	// for inbound conversations with no binding).
-	ExtMsg ExtMsgConfig `toml:"extmsg,omitempty"`
 	// AgentDefaults provides root city defaults for agents that don't override
 	// them (canonical TOML key: agent_defaults). Pack-local defaults use the
 	// same table shape in pack.toml. The runtime currently applies provider,

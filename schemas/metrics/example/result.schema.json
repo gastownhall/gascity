@@ -212,7 +212,8 @@
               "storage-status",
               "ready",
               "storage-recover-stranded",
-              "beads-metadata-cas"
+              "beads-metadata-cas",
+              "extmsg-reply"
             ]
           },
           "event_id": {

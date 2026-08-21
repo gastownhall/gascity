@@ -4,14 +4,56 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
 )
+
+// --- Client token registration ---
+
+const extmsgClientTokenNote = "Store this token securely. It cannot be retrieved again. Re-register with a new credential to obtain a new token."
+
+// humaHandleExtMsgClientRegister is the Huma-typed handler for POST /v0/extmsg/clients.
+func (s *Server) humaHandleExtMsgClientRegister(ctx context.Context, input *ExtMsgClientRegisterInput) (*ExtMsgClientRegisterOutput, error) {
+	store := s.state.CityBeadStore()
+	if store == nil {
+		return nil, huma.Error503ServiceUnavailable("bead store not available")
+	}
+	cfg := s.state.Config()
+	connCfg := cfg.ExtMsg.ConnectedClients
+
+	result, err := extmsg.RegisterClient(ctx, store, extmsg.RegisterClientInput{
+		Credential:        input.Body.Credential,
+		AllowedSessions:   input.Body.AllowedSessions,
+		AllowNoCredential: connCfg.AllowNoCredential,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, extmsg.ErrInvalidInput):
+			return nil, huma.Error400BadRequest(err.Error())
+		default:
+			return nil, huma.Error500InternalServerError(err.Error())
+		}
+	}
+
+	body := ExtMsgClientRegisterOutputBody{
+		ClientID: result.ClientID,
+		Token:    result.Token,
+		Created:  result.Created,
+	}
+	if result.Created {
+		body.Note = extmsgClientTokenNote
+	}
+	return &ExtMsgClientRegisterOutput{Body: body}, nil
+}
 
 // --- Huma helpers for extmsg ---
 
@@ -591,4 +633,224 @@ func (s *Server) humaHandleExtMsgAdapterUnregister(_ context.Context, input *Ext
 	out := &OKResponse{}
 	out.Body.Status = "unregistered"
 	return out, nil
+}
+
+// --- Connected-client SSE subscribe ---
+
+// checkExtmsgSubscribe is the precheck for
+// GET /v0/extmsg/clients/{client_id}/conversations/{conversation_id}/subscribe.
+// Runs before response headers are committed so errors produce standard HTTP error responses.
+func (s *Server) checkExtmsgSubscribe(ctx context.Context, input *ExtMsgSubscribeInput) error {
+	svc, err := s.humaExtmsgServices()
+	if err != nil {
+		return err
+	}
+	if _, err := s.humaExtmsgAdapterRegistry(); err != nil {
+		return err
+	}
+
+	if input.XGCClientToken == "" {
+		return huma.Error401Unauthorized("unauthorized")
+	}
+	store := s.state.CityBeadStore()
+	if store == nil {
+		return huma.Error503ServiceUnavailable("bead store not available")
+	}
+	clientID, allowedSessions, err := extmsg.ResolveClientToken(ctx, store, input.XGCClientToken)
+	if err != nil {
+		if errors.Is(err, extmsg.ErrClientTokenNotFound) || errors.Is(err, extmsg.ErrInvalidInput) {
+			return huma.Error401Unauthorized("unauthorized")
+		}
+		// Log the underlying cause server-side; return a generic message so a
+		// store error detail does not leak to the caller.
+		slog.ErrorContext(ctx, "extmsg: client token resolution failed", "error", err)
+		return huma.Error503ServiceUnavailable("token resolution unavailable")
+	}
+
+	if input.ClientID != clientID {
+		return huma.Error403Forbidden("account_mismatch: client_id does not match token")
+	}
+
+	cfg := s.state.Config()
+	heartbeatStr := cfg.ExtMsg.ConnectedClients.HeartbeatIntervalOrDefault()
+	heartbeat, err := time.ParseDuration(heartbeatStr)
+	if err != nil || heartbeat <= 0 {
+		if err != nil {
+			// Surface an invalid operator value instead of silently dropping it.
+			slog.WarnContext(ctx, "extmsg: invalid connected_clients.heartbeat_interval; falling back to 30s", "value", heartbeatStr, "error", err)
+		}
+		heartbeat = 30 * time.Second
+	}
+
+	input.resolved = &extmsgSubscribeState{
+		clientID:        clientID,
+		allowedSessions: allowedSessions,
+		convRef: extmsg.ConversationRef{
+			ScopeID:        clientID,
+			Provider:       extmsg.ProviderLLMClient,
+			AccountID:      clientID,
+			ConversationID: input.ConversationID,
+			Kind:           extmsg.ConversationDM,
+		},
+		heartbeat:  heartbeat,
+		bufferSize: cfg.ExtMsg.ConnectedClients.SubscriberBufferSizeOrDefault(),
+	}
+
+	if len(allowedSessions) > 0 {
+		binding, bindErr := svc.Bindings.ResolveByConversation(ctx, input.resolved.convRef)
+		if bindErr != nil {
+			// Fail closed: a transient binding-store fault must not bypass the
+			// allow-list. A missing binding (nil, nil) still proceeds — the
+			// allow-list is re-checked at stream time once a binding resolves.
+			slog.ErrorContext(ctx, "extmsg: binding lookup failed during subscribe precheck", "error", bindErr)
+			return huma.Error503ServiceUnavailable("binding lookup unavailable")
+		}
+		if binding != nil && !slices.Contains(allowedSessions, binding.SessionID) {
+			return huma.Error403Forbidden("session_forbidden: session is not permitted by this client token")
+		}
+	}
+
+	return nil
+}
+
+// extmsgSubscribeEventMap returns the SSE event-type map for the subscribe stream.
+func extmsgSubscribeEventMap() map[string]any {
+	return map[string]any{
+		extmsg.SSEEventTypeMessage:   extmsg.SSEMessageEvent{},
+		extmsg.SSEEventTypeHeartbeat: extmsg.SSEHeartbeatEvent{},
+		extmsg.SSEEventTypeError:     extmsg.SSEErrorEvent{},
+	}
+}
+
+// streamExtmsgSubscribe is the SSE streaming body for
+// GET /v0/extmsg/clients/{client_id}/conversations/{conversation_id}/subscribe.
+func (s *Server) streamExtmsgSubscribe(hctx huma.Context, input *ExtMsgSubscribeInput, send StringIDSender) {
+	reqCtx := hctx.Context()
+	state := input.resolved
+	if state == nil {
+		return
+	}
+
+	reg, err := s.humaExtmsgAdapterRegistry()
+	if err != nil {
+		return
+	}
+	svc, err := s.humaExtmsgServices()
+	if err != nil {
+		return
+	}
+
+	// Step a: Subscribe to the per-connection registry for this ConversationRef
+	// FIRST, so the subscriber channel exists before the adapter becomes
+	// discoverable. If the adapter were registered first, an outbound publish
+	// that resolves it in the window before Subscribe runs would find no
+	// subscriber and be dropped from live delivery (the subscribe contract
+	// requires subscriber-channel-first).
+	registry := extmsg.NewSubscriberRegistry()
+	eventChan, cancelSub := registry.Subscribe(state.convRef, state.bufferSize)
+	defer cancelSub()
+
+	// Step b: Register an LLMClientAdapter keyed by ("llm-client", client_id);
+	// the SubscriberRegistry above bridges it to the event channel.
+	adapter := extmsg.NewLLMClientAdapter(state.clientID, registry)
+	adapterKey := extmsg.AdapterKey{Provider: extmsg.ProviderLLMClient, AccountID: state.clientID}
+	reg.Register(adapterKey, adapter)
+	defer reg.Unregister(adapterKey)
+
+	// Steps c + d (conditional on binding existence): EnsureMembership + backfill replay.
+	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "api-subscribe"}
+	binding, lookupErr := svc.Bindings.ResolveByConversation(reqCtx, state.convRef)
+	if lookupErr != nil && len(state.allowedSessions) > 0 {
+		// Fail closed: with an active allow-list we cannot confirm the bound
+		// session is permitted, so disconnect rather than stream past it.
+		slog.ErrorContext(reqCtx, "extmsg: stream-time binding lookup failed with active allow-list; disconnecting", "client", state.clientID, "error", lookupErr)
+		return
+	}
+	if lookupErr != nil {
+		// No allow-list in play: a binding lookup error only costs membership
+		// and backfill, so log and fall through to live delivery.
+		slog.WarnContext(reqCtx, "extmsg: stream-time binding lookup failed; streaming without backfill", "client", state.clientID, "error", lookupErr)
+	}
+	if lookupErr == nil && binding != nil {
+		if len(state.allowedSessions) > 0 && !slices.Contains(state.allowedSessions, binding.SessionID) {
+			slog.WarnContext(reqCtx, "extmsg: stream-time session_forbidden; disconnecting", "client", state.clientID)
+			return
+		}
+		svc.Transcript.EnsureMembership(reqCtx, extmsg.EnsureMembershipInput{ //nolint:errcheck
+			Caller:         caller,
+			Conversation:   state.convRef,
+			SessionID:      binding.SessionID,
+			BackfillPolicy: extmsg.MembershipBackfillSinceJoin,
+		})
+
+		if input.LastEventID != "" {
+			if afterSeq, parseErr := strconv.ParseInt(input.LastEventID, 10, 64); parseErr == nil {
+				// List (cursor-based) is deliberate over ListBackfill
+				// (membership/ack-based): Last-Event-ID replay must resume from
+				// the client's own cursor, not the membership's last-read
+				// sequence.
+				records, listErr := svc.Transcript.List(reqCtx, extmsg.ListTranscriptInput{
+					Caller:        caller,
+					Conversation:  state.convRef,
+					AfterSequence: afterSeq,
+				})
+				if listErr != nil {
+					// Don't fail the stream on a backfill read error: log and
+					// fall through to live delivery (the client keeps its
+					// Last-Event-ID and can retry).
+					slog.WarnContext(reqCtx, "extmsg: transcript backfill read failed", "client", state.clientID, "error", listErr)
+				}
+				for _, r := range records {
+					ev := extmsg.NewSSEMessageEvent(r.Text, binding.SessionID, state.convRef, r.Sequence, r.CreatedAt)
+					if sendErr := send(StringIDMessage{ID: strconv.FormatInt(r.Sequence, 10), Data: ev}); sendErr != nil {
+						return
+					}
+				}
+			}
+		}
+	}
+
+	// Step e: Drain any events buffered during backfill replay.
+	// Step f: Enter the goroutine select loop.
+	flushSSEHeaders(hctx)
+
+	ctx, cancel := context.WithCancel(reqCtx)
+	defer cancel()
+	safeSend := func(msg StringIDMessage) error {
+		if err := send(msg); err != nil {
+			cancel()
+			return err
+		}
+		return nil
+	}
+	heartbeatTicker := time.NewTicker(state.heartbeat)
+	defer heartbeatTicker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-heartbeatTicker.C:
+			hb := extmsg.NewSSEHeartbeatEvent(time.Now())
+			if err := safeSend(StringIDMessage{Data: hb}); err != nil {
+				return
+			}
+		case event, ok := <-eventChan:
+			if !ok {
+				return
+			}
+			// Only message events are published to the per-connection registry
+			// today. Error events (SSEErrorEvent) remain in the wire contract
+			// (§4.3/§5.2) and the OpenAPI schema for clients, but have no
+			// in-stream producer yet: a server_shutdown emitter needs a server
+			// shutdown context (see internal/api/server.go), so the dispatch
+			// branch is omitted until a real producer exists rather than left
+			// dead.
+			if msg, ok := event.(extmsg.SSEMessageEvent); ok {
+				if err := safeSend(StringIDMessage{ID: strconv.FormatInt(msg.Sequence, 10), Data: msg}); err != nil {
+					return
+				}
+			}
+		}
+	}
 }

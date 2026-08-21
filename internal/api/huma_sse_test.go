@@ -59,12 +59,13 @@ func TestSSEEndpointsHaveSchemasInSpec(t *testing.T) {
 	spec := readCommittedOpenAPISpec(t)
 	paths, _ := spec["paths"].(map[string]any)
 
-	// All 3 SSE endpoints (+2 agent output variants = 4 streams total).
+	// All SSE endpoints (4 streams + extmsg subscribe = 5 total).
 	sseEndpoints := []string{
 		"/v0/events/stream",
 		"/v0/city/{cityName}/session/{id}/stream",
 		"/v0/city/{cityName}/agent/{base}/output/stream",
 		"/v0/city/{cityName}/agent/{dir}/{base}/output/stream",
+		"/v0/city/{cityName}/extmsg/clients/{client_id}/conversations/{conversation_id}/subscribe",
 	}
 
 	for _, path := range sseEndpoints {

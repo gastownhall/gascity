@@ -1043,6 +1043,36 @@ export type ExtMsgBindInputBody = {
     session_id?: string;
 };
 
+export type ExtMsgClientRegisterInputBody = {
+    /**
+     * Session names this client is permitted to subscribe to.
+     */
+    allowed_sessions?: Array<string> | null;
+    /**
+     * Opaque credential string (required unless allow_no_credential=true in city.toml).
+     */
+    credential?: string;
+};
+
+export type ExtMsgClientRegisterOutputBody = {
+    /**
+     * Stable client identifier (bead ID). Use as account_id in the subscribe URL.
+     */
+    client_id: string;
+    /**
+     * True when a new token was issued; false when re-issued for the same credential.
+     */
+    created: boolean;
+    /**
+     * One-time advisory message. Only present when created=true.
+     */
+    note?: string;
+    /**
+     * Raw base64url token. Only present when created=true; store it securely.
+     */
+    token?: string;
+};
+
 export type ExtMsgGroupEnsureInputBody = {
     /**
      * Default handle for the group.
@@ -3015,6 +3045,31 @@ export type RunsListOutputBody = {
      * All projected runs by canonical lifecycle state; not truncated by the row limit.
      */
     status_counts: RunStatusCounts;
+};
+
+export type SseErrorEvent = {
+    code: string;
+    event: string;
+    message: string;
+    retry_after_ms?: number;
+    retryable: boolean;
+    version: string;
+};
+
+export type SseHeartbeatEvent = {
+    event: string;
+    ts: string;
+    version: string;
+};
+
+export type SseMessageEvent = {
+    conversation: ConversationRef;
+    created_at: string;
+    event: string;
+    sequence: number;
+    session_id: string;
+    text: string;
+    version: string;
 };
 
 export type ScopeGroup = {
@@ -12365,6 +12420,146 @@ export type GetV0CityByCityNameExtmsgBindingsResponses = {
 };
 
 export type GetV0CityByCityNameExtmsgBindingsResponse = GetV0CityByCityNameExtmsgBindingsResponses[keyof GetV0CityByCityNameExtmsgBindingsResponses];
+
+export type RegisterExtmsgClientData = {
+    body: ExtMsgClientRegisterInputBody;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/extmsg/clients';
+};
+
+export type RegisterExtmsgClientErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type RegisterExtmsgClientError = RegisterExtmsgClientErrors[keyof RegisterExtmsgClientErrors];
+
+export type RegisterExtmsgClientResponses = {
+    /**
+     * OK
+     */
+    200: ExtMsgClientRegisterOutputBody;
+};
+
+export type RegisterExtmsgClientResponse = RegisterExtmsgClientResponses[keyof RegisterExtmsgClientResponses];
+
+export type SubscribeExtmsgClientData = {
+    body?: never;
+    headers?: {
+        /**
+         * Bearer token from client registration.
+         */
+        'X-GC-Client-Token'?: string;
+        /**
+         * Decimal sequence number for reconnect replay.
+         */
+        'Last-Event-ID'?: string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Client identifier from POST /v0/extmsg/clients.
+         */
+        client_id: string;
+        /**
+         * Opaque conversation identifier.
+         */
+        conversation_id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/extmsg/clients/{client_id}/conversations/{conversation_id}/subscribe';
+};
+
+export type SubscribeExtmsgClientErrors = {
+    /**
+     * Error
+     */
+    default: ErrorModel;
+};
+
+export type SubscribeExtmsgClientError = SubscribeExtmsgClientErrors[keyof SubscribeExtmsgClientErrors];
+
+export type SubscribeExtmsgClientResponses = {
+    /**
+     * Server Sent Events
+     *
+     * Each oneOf object represents one possible SSE message.
+     */
+    200: Array<{
+        data: SseErrorEvent;
+        /**
+         * The event name.
+         */
+        event: 'error';
+        /**
+         * The event resume cursor.
+         */
+        id?: string;
+        /**
+         * The retry time in milliseconds.
+         */
+        retry?: number;
+    } | {
+        data: SseHeartbeatEvent;
+        /**
+         * The event name.
+         */
+        event: 'heartbeat';
+        /**
+         * The event resume cursor.
+         */
+        id?: string;
+        /**
+         * The retry time in milliseconds.
+         */
+        retry?: number;
+    } | {
+        data: SseMessageEvent;
+        /**
+         * The event name.
+         */
+        event?: 'message';
+        /**
+         * The event resume cursor.
+         */
+        id?: string;
+        /**
+         * The retry time in milliseconds.
+         */
+        retry?: number;
+    }>;
+};
+
+export type SubscribeExtmsgClientResponse = SubscribeExtmsgClientResponses[keyof SubscribeExtmsgClientResponses];
 
 export type GetV0CityByCityNameExtmsgGroupsData = {
     body?: never;

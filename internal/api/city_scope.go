@@ -251,7 +251,9 @@ func sseCityStream[I any](sm *SupervisorMux,
 	}
 }
 
-// sseCityStringIDStream is the string-cursor sibling of sseCityStream.
+// sseCityStringIDStream is the string-ID sibling of sseCityStream for streams
+// registered via registerSSEStringID (e.g. extmsg subscribe, which uses
+// composite SSE IDs: decimal sequences for messages, "error" for error events).
 func sseCityStringIDStream[I any](sm *SupervisorMux,
 	fn func(*Server, huma.Context, *I, StringIDSender),
 ) func(huma.Context, *I, StringIDSender) {

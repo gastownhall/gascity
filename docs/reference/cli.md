@@ -1585,6 +1585,7 @@ gc extmsg
 |------------|-------------|
 | [gc extmsg bind](#gc-extmsg-bind) | Bind a conversation to a session or configured agent |
 | [gc extmsg handoff](#gc-extmsg-handoff) | Rebind a conversation to another configured agent |
+| [gc extmsg reply](#gc-extmsg-reply) | Reply to an external client over the outbound SSE channel |
 | [gc extmsg unbind](#gc-extmsg-unbind) | Remove active conversation bindings |
 
 ## gc extmsg bind
@@ -1632,6 +1633,34 @@ gc extmsg handoff [flags]
 | `--provider` | string |  | External messaging provider (required) |
 | `--scope-id` | string |  | Conversation scope (default: the city name) |
 | `--to` | string |  | Configured agent identity to hand the conversation to (required) |
+
+## gc extmsg reply
+
+Reply to an external client over the outbound SSE channel.
+
+When no --ref is given, the ConversationRef is read from GC_EXTERNAL_ORIGIN,
+which the controller sets when nudging a session for an externally-originated
+message. If GC_EXTERNAL_ORIGIN is not set, the command exits non-zero.
+
+```
+gc extmsg reply [flags] [text]
+```
+
+**Example:**
+
+```
+gc extmsg reply "one-liner response"
+gc extmsg reply --stdin <<'EOF'
+multi-line response
+EOF
+gc extmsg reply --ref '{"provider":"llm-client","account_id":"c1","conversation_id":"cv1","kind":"direct"}' "hello"
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | Output delivery status as JSON |
+| `--ref` | string |  | Explicit ConversationRef JSON; overrides session context |
+| `--stdin` | bool |  | Read reply text from stdin instead of text argument |
 
 ## gc extmsg unbind
 

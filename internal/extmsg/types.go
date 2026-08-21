@@ -173,12 +173,20 @@ type AdapterCapabilities struct {
 // the session id under `Metadata["source_session_id"]` instead;
 // adapters may still honor that key as a legacy fallback for old gc
 // binaries, but new code should rely on SessionID.
+//
+// Sequence is the monotonic transcript sequence assigned to this message
+// by HandleOutbound before the publish. The connected-client SSE adapter
+// stamps it onto the live `message` event so the wire `id:` (and the
+// client's Last-Event-ID cursor) match the durable transcript sequence
+// (wire contract §4.1). Out-of-process adapters that do not use it may
+// ignore the field; it is zero only when the transcript append failed.
 type PublishRequest struct {
 	SessionID        string            `json:"session_id,omitempty"`
 	Conversation     ConversationRef   `json:"conversation"`
 	Text             string            `json:"text"`
 	ReplyToMessageID string            `json:"reply_to_message_id,omitempty"`
 	IdempotencyKey   string            `json:"idempotency_key,omitempty"`
+	Sequence         int64             `json:"sequence,omitempty"`
 	Metadata         map[string]string `json:"metadata,omitempty"`
 }
 

@@ -497,6 +497,18 @@ export const zExtMsgBindInputBody = z.object({
     session_id: z.string().optional()
 });
 
+export const zExtMsgClientRegisterInputBody = z.object({
+    allowed_sessions: z.array(z.string()).nullish(),
+    credential: z.string().optional()
+});
+
+export const zExtMsgClientRegisterOutputBody = z.object({
+    client_id: z.string(),
+    created: z.boolean(),
+    note: z.string().optional(),
+    token: z.string().optional()
+});
+
 export const zExtMsgGroupEnsureInputBody = z.object({
     default_handle: z.string().optional(),
     metadata: z.record(z.string(), z.string()).optional(),
@@ -1527,6 +1539,31 @@ export const zRunsListOutputBody = z.object({
     partial_errors: z.array(z.string()).nullish(),
     runs: z.array(zRun).nullable(),
     status_counts: zRunStatusCounts
+});
+
+export const zSseErrorEvent = z.object({
+    code: z.string(),
+    event: z.string(),
+    message: z.string(),
+    retry_after_ms: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    retryable: z.boolean(),
+    version: z.string()
+});
+
+export const zSseHeartbeatEvent = z.object({
+    event: z.string(),
+    ts: z.iso.datetime(),
+    version: z.string()
+});
+
+export const zSseMessageEvent = z.object({
+    conversation: zConversationRef,
+    created_at: z.iso.datetime(),
+    event: z.string(),
+    sequence: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string(),
+    text: z.string(),
+    version: z.string()
 });
 
 export const zScopeGroup = z.record(z.string(), z.never());
@@ -7790,6 +7827,58 @@ export const zGetV0CityByCityNameExtmsgBindingsQuery = z.object({
  * OK
  */
 export const zGetV0CityByCityNameExtmsgBindingsResponse = zListBodySessionBindingRecord;
+
+export const zRegisterExtmsgClientBody = zExtMsgClientRegisterInputBody;
+
+export const zRegisterExtmsgClientHeaders = z.object({
+    'X-GC-Request': z.string().min(1)
+});
+
+export const zRegisterExtmsgClientPath = z.object({
+    cityName: z.string().min(1).regex(/\S/)
+});
+
+/**
+ * OK
+ */
+export const zRegisterExtmsgClientResponse = zExtMsgClientRegisterOutputBody;
+
+export const zSubscribeExtmsgClientHeaders = z.object({
+    'X-GC-Client-Token': z.string().optional(),
+    'Last-Event-ID': z.string().optional()
+});
+
+export const zSubscribeExtmsgClientPath = z.object({
+    cityName: z.string().min(1).regex(/\S/),
+    client_id: z.string(),
+    conversation_id: z.string()
+});
+
+/**
+ * Server Sent Events
+ *
+ * Each oneOf object represents one possible SSE message.
+ */
+export const zSubscribeExtmsgClientResponse = z.array(z.union([
+    z.object({
+        data: zSseErrorEvent,
+        event: z.literal('error'),
+        id: z.string().optional(),
+        retry: z.int().optional()
+    }),
+    z.object({
+        data: zSseHeartbeatEvent,
+        event: z.literal('heartbeat'),
+        id: z.string().optional(),
+        retry: z.int().optional()
+    }),
+    z.object({
+        data: zSseMessageEvent,
+        event: z.literal('message').optional(),
+        id: z.string().optional(),
+        retry: z.int().optional()
+    })
+]));
 
 export const zGetV0CityByCityNameExtmsgGroupsPath = z.object({
     cityName: z.string().min(1).regex(/\S/)
