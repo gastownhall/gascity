@@ -2420,11 +2420,15 @@ func TestSlingAttachFormula(t *testing.T) {
 
 // TestSlingAttachFormulaWarnsWhenBeadDescriptionDropped is the regression
 // for #3681: --on/AttachFormula never carries the target bead's own
-// description into the formula's rendered context — the wisp root's
-// description is always the formula's own boilerplate, and no formula var
-// exposes the bead's text either. A caller relying on the bead's
-// description as the actual build instructions silently gets a brainstorm
-// that never saw them. Warn instead of changing routing/materialization.
+// description into the formula's rendered context via the wisp root (its
+// description is always the formula's own boilerplate). A caller relying
+// on the bead's description as the actual build instructions silently gets
+// a brainstorm that never saw them — unless some other route carries it
+// in. Since 2026-08-02 the legacy path auto-stamps gc.var.issue = beadID,
+// and every route-table formula resolves it back via `bd show` (Route B),
+// so this test must explicitly void that route (issue=) to exercise the
+// genuinely-silent case; see ga-tj5jbm. Warn instead of changing
+// routing/materialization.
 func TestSlingAttachFormulaWarnsWhenBeadDescriptionDropped(t *testing.T) {
 	runner := newFakeRunner()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
@@ -2436,7 +2440,7 @@ func TestSlingAttachFormulaWarnsWhenBeadDescriptionDropped(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
-	result, err := s.AttachFormula(context.Background(), "code-review", b.ID, a, FormulaOpts{})
+	result, err := s.AttachFormula(context.Background(), "code-review", b.ID, a, FormulaOpts{Vars: []string{"issue="}})
 	if err != nil {
 		t.Fatalf("AttachFormula: %v", err)
 	}

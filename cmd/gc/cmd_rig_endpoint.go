@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doltauth"
+	"github.com/gastownhall/gascity/internal/doltpool"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/rig"
 	"github.com/go-sql-driver/mysql"
@@ -595,22 +596,11 @@ func verifyExternalDoltEndpoint(state contract.ConfigState, databaseScopeRoot, a
 	}
 	password := canonicalValidationPassword(host, port, authScopeRoot)
 
-	cfg := mysql.NewConfig()
-	cfg.User = user
-	cfg.Passwd = password
-	cfg.Net = "tcp"
-	cfg.Addr = net.JoinHostPort(host, port)
-	cfg.DBName = strings.TrimSpace(database)
-	cfg.Timeout = 5 * time.Second
-	cfg.ReadTimeout = 5 * time.Second
-	cfg.WriteTimeout = 5 * time.Second
-	cfg.AllowNativePasswords = true
-
-	db, err := sql.Open("mysql", cfg.FormatDSN())
+	// Pooled handle owned by internal/doltpool; do not Close.
+	db, err := doltpool.Open(host, port, user, password, strings.TrimSpace(database))
 	if err != nil {
 		return err
 	}
-	defer db.Close() //nolint:errcheck // best-effort cleanup
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

@@ -249,31 +249,10 @@ type NativeDoltStore struct {
 	// tests set it (to exercise budget exhaustion without a real 90s wait).
 	readRetryBudgetOverride time.Duration
 
-	// condWritesStamp carries the factory-stamped conditional-writes mode.
-	// NativeDoltStore implements the NARROW metadata value-CAS
-	// (MetadataCASWriter, see native_dolt_store_conditional.go) but NOT
-	// ConditionalWriter, so the stamp's effect at the seam is unchanged:
-	// require→typed refusal / auto→loud degrade, never a silent legacy write
-	// under require.
-	//
-	// The gap is the revision-CAS trio, and it is a BACKEND gap, not an
-	// unwritten method. UpdateIfMatch/CloseIfMatch/DeleteIfMatch need a fence
-	// token that advances on every mutation and is never reused; beads v1.1.0
-	// has none. types.Issue carries no revision, the issues DDL has no version
-	// column, updated_at is second-granularity — so two same-second writes
-	// compare EQUAL and a stale fence silently succeeds, which is the lost
-	// update the fence exists to prevent — and label mutations never touch
-	// updated_at at all. A counter this store maintained itself would fence
-	// nothing, because the Dolt database is multi-writer (bd CLI, other
-	// gascity processes, graph-apply). Upstream beads #4697 (claim_fence) is
-	// the missing primitive; when it lands the trio becomes implementable and
-	// this store can declare ConditionalWriter.
-	//
-	// Declaring ConditionalWriter early to expose the CAS method would make
-	// ResolveConditionalWriter resolve under require and hand the trio's
-	// callers a wrong fence — the precise silent-write failure this refusal
-	// currently makes impossible. internal/beads/metadata_cas.go carries the
-	// full reasoning and the narrow interface's own resolution path.
+	// condWritesStamp carries the factory-stamped conditional-writes mode. The
+	// pinned upstream Storage contract requires row-version checked update and
+	// close plus transactions; DeleteIfMatch composes the matching transaction
+	// from GetIssue, RowVersion equality, and DeleteIssue.
 	condWritesStamp
 
 	localStrings *localSidecar // clone-local data; see Store.SetLocalString
@@ -1546,6 +1525,7 @@ func isNativeDoltSerializationConflict(err error) bool {
 	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "error 1213") ||
+		strings.Contains(msg, "error 1205") ||
 		(strings.Contains(msg, "sqlstate") && strings.Contains(msg, "40001")) ||
 		strings.Contains(msg, "(40001)") ||
 		strings.Contains(msg, "this transaction conflicts with a committed transaction")
@@ -2010,6 +1990,7 @@ func nativeIssueFromBead(b Bead) (*beadslib.Issue, error) {
 		Ephemeral:   b.Ephemeral,
 		NoHistory:   b.NoHistory,
 		DeferUntil:  cloneTimePtr(b.DeferUntil),
+		RowVersion:  b.Revision,
 	}
 	if b.Priority != nil {
 		issue.Priority = *b.Priority
@@ -2074,6 +2055,7 @@ func beadFromNativeIssue(issue *beadslib.Issue) (Bead, error) {
 		Ephemeral:   issue.Ephemeral,
 		NoHistory:   issue.NoHistory,
 		DeferUntil:  cloneTimePtr(issue.DeferUntil),
+		Revision:    issue.RowVersion,
 	}
 	for _, dep := range issue.Dependencies {
 		if dep == nil {

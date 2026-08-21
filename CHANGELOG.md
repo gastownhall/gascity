@@ -42,6 +42,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   always locks to `sha:<HEAD commit>`, matching the documented behavior;
   registry/remote sources are unaffected. Fixes #3659.
 
+- **`gc doctor`'s `order-firing-current` check no longer hard-fails
+  `gc doctor` (exit code, `BlockingFailed`) when its own order-history
+  lookup times out.** The check races a Dolt-backed order-history query
+  against a 15s budget; on timeout it returned `StatusError` with no
+  `Severity` set, silently defaulting to `SeverityBlocking` (the zero
+  value of `CheckSeverity`) — turning a slow-but-healthy city's doctor run
+  red even when scheduled orders were firing normally, since a timed-out
+  lookup proves nothing about actual order staleness. The timeout branch
+  now explicitly sets `Severity: SeverityAdvisory` and `TimedOut: true`,
+  matching how `Doctor.boundedRun`'s own per-check timeout is already
+  reported, so callers (including `--json` output) can distinguish
+  "confirmed stale" from "the query didn't finish in time." (#4895)
+
 - **The dolt pack's `run_bounded` python3 fallback now sends SIGTERM before
   SIGKILL, matching its documented contract.** The fallback (used when
   neither `timeout` nor `gtimeout` is on `PATH`, the default on stock macOS)

@@ -445,6 +445,16 @@ print_cells() {
   done
   printf '+-------+\n'
 }
+print_remote_rows() {
+  printf '+------+-----+\n'
+  printf '| name | url |\n'
+  printf '+------+-----+\n'
+  while [ "$#" -ge 2 ]; do
+    printf '| %%s | %%s |\n' "$1" "$2"
+    shift 2
+  done
+  printf '+------+-----+\n'
+}
 current_head() {
   if [ "$mode" = "head_changes_before_flatten" ]; then
     calls_file="$state_file.head-calls"
@@ -497,7 +507,7 @@ set_hash() {
 case "$query" in
   *"SELECT COUNT(*) FROM dolt_remotes WHERE name = 'origin'"*)
     case "$mode" in
-      remote_success|remote_active_branch|remote_invalid_active_branch|remote_ahead|remote_ahead_reconciled|remote_fetch_failure|remote_fetch_failure_once|remote_push_failure|remote_advances_before_push|remote_gc_failure_once|remote_empty_head_push_failure|remote_ancestry_probe_failure|remote_writer_race_before_flatten|multiple_remotes_with_origin)
+      remote_success|remote_active_branch|remote_invalid_active_branch|remote_ahead|remote_ahead_reconciled|remote_fetch_failure|remote_fetch_failure_once|remote_push_failure|remote_advances_before_push|remote_gc_failure_once|remote_empty_head_push_failure|remote_ancestry_probe_failure|remote_writer_race_before_flatten|multiple_remotes_with_origin|backup_remote_reconcile|backup_remote_push_failure|backup_remote_filters_non_file_and_authoritative)
         print_cell 1
         ;;
       *)
@@ -528,6 +538,12 @@ case "$query" in
       explicit_backup_remote)
         print_cell 1
         ;;
+      backup_remote_reconcile|backup_remote_push_failure)
+        print_cell 2
+        ;;
+      backup_remote_filters_non_file_and_authoritative)
+        print_cell 3
+        ;;
       *)
         print_cell 0
         ;;
@@ -544,6 +560,20 @@ case "$query" in
         ;;
       *)
         print_cell ""
+        ;;
+    esac
+    exit 0
+    ;;
+  *"SELECT name, url FROM dolt_remotes ORDER BY name"*)
+    case "$mode" in
+      backup_remote_reconcile|backup_remote_push_failure)
+        print_remote_rows origin "https://example.test/beads" backup "file:///data/backup/beads"
+        ;;
+      backup_remote_filters_non_file_and_authoritative)
+        print_remote_rows backup "file:///data/backup/beads" mirror "https://mirror.test/beads" origin "https://example.test/beads"
+        ;;
+      *)
+        print_remote_rows
         ;;
     esac
     exit 0
@@ -1146,6 +1176,10 @@ case "$query" in
     exit 0
     ;;
   *"DOLT_PUSH('--force', '--set-upstream', 'backup', 'main')"*)
+    if [ "$mode" = "backup_remote_push_failure" ]; then
+      printf 'push unavailable\n' >&2
+      exit 53
+    fi
     exit 0
     ;;
 esac
