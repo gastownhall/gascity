@@ -62,10 +62,12 @@ const (
 
 // ephemeralFilesystems maps a superblock magic to the name shown to operators.
 //
-// tmpfs covers /tmp on a systemd host, /dev/shm, and every Kubernetes emptyDir.
-// overlayfs covers the container rootfs, which is what makes an in-pod path
-// like /var/tmp ephemeral even though it is not /tmp — the reason a prefix
-// denylist cannot do this job.
+// tmpfs covers /tmp on a systemd host, /dev/shm, and a Kubernetes emptyDir
+// declared with medium: Memory. A default emptyDir is a kubelet-host directory
+// bind-mounted into the pod, so statfs reports the host filesystem instead and
+// it lands in OtherDevice — warned about, not refused. overlayfs covers the
+// container rootfs, which is what makes an in-pod path like /var/tmp ephemeral
+// even though it is not /tmp — the reason a prefix denylist cannot do this job.
 var ephemeralFilesystems = map[uint32]string{
 	magicTmpfs:     "tmpfs",
 	magicRamfs:     "ramfs",
