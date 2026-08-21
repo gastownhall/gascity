@@ -97,6 +97,58 @@ path = "../assets/scripts/checks/review-approved.sh"
 	}
 }
 
+func TestRunRalphCheckAcceptsHistoricalRootResolvedByPackTrust(t *testing.T) {
+	tmp := t.TempDir()
+	cityPath := filepath.Join(tmp, "city")
+	storePath := filepath.Join(tmp, "store")
+	historicalAssets := filepath.Join(tmp, "cache", "historical", "assets")
+	for _, dir := range []string{cityPath, storePath, filepath.Join(historicalAssets, "scripts", "checks")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	checkPath := filepath.Join(historicalAssets, "scripts", "checks", "unit-fast.sh")
+	if err := os.WriteFile(checkPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write check: %v", err)
+	}
+	activeFormulas := filepath.Join(tmp, "cache", "active", "formulas")
+	resolverCalled := false
+	store := beads.NewMemStore()
+	check := beads.Bead{
+		ID:   "check-historical-pack",
+		Type: "task",
+		Metadata: map[string]string{
+			"gc.check_path":    checkPath,
+			"gc.check_timeout": "30s",
+		},
+	}
+
+	result, err := runRalphCheck(store, check, beads.Bead{ID: "run-historical-pack", Type: "task"}, 1, ProcessOptions{
+		CityPath:           cityPath,
+		StorePath:          storePath,
+		FormulaSearchPaths: []string{activeFormulas},
+		historicalFormulaCacheRoots: func(gotCity, gotCandidate string, gotFormulaPaths []string) []string {
+			resolverCalled = true
+			if gotCity != cityPath || gotCandidate != checkPath {
+				t.Fatalf("resolver args city=%q candidate=%q, want %q and %q", gotCity, gotCandidate, cityPath, checkPath)
+			}
+			if len(gotFormulaPaths) != 1 || gotFormulaPaths[0] != activeFormulas {
+				t.Fatalf("resolver formula paths=%v, want [%s]", gotFormulaPaths, activeFormulas)
+			}
+			return []string{historicalAssets}
+		},
+	})
+	if err != nil {
+		t.Fatalf("historical same-pack check path should be accepted: %v", err)
+	}
+	if !resolverCalled {
+		t.Fatal("historical cache trust resolver was not called")
+	}
+	if result.Outcome != convergence.GatePass {
+		t.Fatalf("outcome = %q, want %q; stderr=%q", result.Outcome, convergence.GatePass, result.Stderr)
+	}
+}
+
 // A resolved asset path must still be rejected when its layer is NOT among the
 // trusted FormulaSearchPaths — confirming the feature widens trust only to the
 // formula layers actually in play, not to arbitrary absolute paths.

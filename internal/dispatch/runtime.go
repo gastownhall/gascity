@@ -41,9 +41,13 @@ type ProcessOptions struct {
 	CityPath           string
 	StorePath          string
 	FormulaSearchPaths []string
-	PrepareFragment    func(*formula.FragmentRecipe, beads.Bead) error
-	PrepareRecipe      func(*formula.Recipe, beads.Bead) error
-	RecycleSession     func(beads.Bead) error
+	// historicalFormulaCacheRoots is the test seam for resolving cache roots
+	// retained by in-flight workflows across pack upgrades. Production callers
+	// use config.TrustedHistoricalFormulaCacheRoots.
+	historicalFormulaCacheRoots func(cityRoot, candidatePath string, formulaSearchPaths []string) []string
+	PrepareFragment             func(*formula.FragmentRecipe, beads.Bead) error
+	PrepareRecipe               func(*formula.Recipe, beads.Bead) error
+	RecycleSession              func(beads.Bead) error
 	// RequiredArtifactStat checks required-artifact files. When nil, the
 	// dispatcher uses os.Stat.
 	RequiredArtifactStat func(path string) (os.FileInfo, error)

@@ -261,6 +261,13 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 	// tree even when the script lives in the city tree.
 	trustedAbsRoots := ralphCheckTrustedAbsoluteRoots(cityPath, storePath, opts.FormulaSearchPaths)
 	if filepath.IsAbs(checkPath) && !pathWithinAny(checkPath, trustedAbsRoots) {
+		resolveHistoricalRoots := opts.historicalFormulaCacheRoots
+		if resolveHistoricalRoots == nil {
+			resolveHistoricalRoots = config.TrustedHistoricalFormulaCacheRoots
+		}
+		trustedAbsRoots = append(trustedAbsRoots, resolveHistoricalRoots(cityPath, checkPath, opts.FormulaSearchPaths)...)
+	}
+	if filepath.IsAbs(checkPath) && !pathWithinAny(checkPath, trustedAbsRoots) {
 		return convergence.GateResult{}, fmt.Errorf("%s: absolute gc.check_path %q escapes trusted roots", bead.ID, checkPath)
 	}
 	scriptPath, err := convergence.ResolveConditionPath(cityPath, scriptBase, checkPath)
