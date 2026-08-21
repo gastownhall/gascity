@@ -2875,6 +2875,7 @@ export const zStatusStoreHealth = z.object({
     live_rows: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
     path: z.string(),
     ratio_mb_per_row: z.number(),
+    rows_measured: z.boolean(),
     size_bytes: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
     threshold_mb_per_row: z.number(),
     warning: z.boolean()

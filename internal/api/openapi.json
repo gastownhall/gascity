@@ -11503,7 +11503,7 @@
             "type": "string"
           },
           "live_rows": {
-            "description": "Retained bead row count used as the denominator, including open and closed beads.",
+            "description": "Retained bead row count used as the denominator, including open and closed beads. Meaningless unless rows_measured is true.",
             "format": "int64",
             "type": "integer"
           },
@@ -11512,9 +11512,13 @@
             "type": "string"
           },
           "ratio_mb_per_row": {
-            "description": "Derived megabytes per retained row, including open and closed beads.",
+            "description": "Derived megabytes per retained row, including open and closed beads. Zero and meaningless unless rows_measured is true.",
             "format": "double",
             "type": "number"
+          },
+          "rows_measured": {
+            "description": "True when live_rows is a real count. False means the count failed, timed out, or was never taken, and both live_rows and ratio_mb_per_row are meaningless.",
+            "type": "boolean"
           },
           "size_bytes": {
             "description": "Total bytes of the store directory.",
@@ -11527,7 +11531,7 @@
             "type": "number"
           },
           "warning": {
-            "description": "True when maintenance is overdue.",
+            "description": "True when maintenance is overdue. Meaningless unless rows_measured is true.",
             "type": "boolean"
           }
         },
@@ -11535,6 +11539,7 @@
           "path",
           "size_bytes",
           "live_rows",
+          "rows_measured",
           "ratio_mb_per_row",
           "warning",
           "threshold_mb_per_row"

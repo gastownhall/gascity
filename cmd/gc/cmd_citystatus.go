@@ -326,14 +326,22 @@ func snapshotFromStatusView(cityPath string, v api.StatusView) cityStatusSnapsho
 	}
 	if v.StoreHealth != nil {
 		snapshot.Summary.StoreHealth = &StoreHealth{
-			Path:         v.StoreHealth.Path,
-			SizeBytes:    v.StoreHealth.SizeBytes,
-			LiveRows:     v.StoreHealth.LiveRows,
-			RatioMB:      v.StoreHealth.RatioMB,
-			Warning:      v.StoreHealth.Warning,
-			ThresholdMB:  v.StoreHealth.ThresholdMB,
-			LastGCAt:     v.StoreHealth.LastGCAt,
-			LastGCStatus: v.StoreHealth.LastGCStatus,
+			Path:      v.StoreHealth.Path,
+			SizeBytes: v.StoreHealth.SizeBytes,
+			LiveRows:  v.StoreHealth.LiveRows,
+			// Inverted from the view's positive flag, never inferred from
+			// LiveRows == 0: that would report a genuinely empty store as
+			// unmeasured and reintroduce the conflation the flag removes.
+			// Before the view carried RowsMeasured this field had no source
+			// here at all, so it zero-filled to false and told the renderer
+			// every API-path count was real — including the ones that were
+			// never taken.
+			LiveRowsUnknown: !v.StoreHealth.RowsMeasured,
+			RatioMB:         v.StoreHealth.RatioMB,
+			Warning:         v.StoreHealth.Warning,
+			ThresholdMB:     v.StoreHealth.ThresholdMB,
+			LastGCAt:        v.StoreHealth.LastGCAt,
+			LastGCStatus:    v.StoreHealth.LastGCStatus,
 		}
 	}
 	return snapshot
