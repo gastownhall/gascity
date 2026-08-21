@@ -14,15 +14,17 @@ Reviewed-source merge base: `cdb5328a2f2e570fd56d017b98171cfa7b58f522`
 
 Gate date: 2026-08-21
 
-**Verdict: FAIL.** The mayor-directed base control clears the original
+**Verdict: PENDING MAYOR ADJUDICATION.** The mayor-directed base control clears the original
 beads#4566 blocker under `waiver_ref=ga-soa96t-mayor-waiver-20260821`, but the
 normal pre-push fast matrix then exposed a distinct failure:
 `TestCmdStopSupervisorManagedInvalidCityTomlFailsWhenShutdownFails` timed out
-after five seconds on the gated head. The exact current-base matrix passed that
-test under the same topology, and the failure shares the candidate's `cmd/gc`
-package. Attribution clauses 3 and 4 are therefore unsatisfied. No
-`--no-verify` push is authorized, and nothing was pushed or proposed as a pull
-request.
+after five seconds on the gated head. Mayor correction `gm-wisp-giaqmv`
+rejected a one-run base comparison for wall-clock timeouts and required five
+base repetitions plus repeatability on the candidate. The target passed 5/5
+base repetitions and passed a second candidate run, yielding candidate 1 FAIL /
+1 PASS. Neither the base-failure waiver condition nor the repeatably-failing
+candidate condition is established. No `--no-verify` push is authorized, and
+nothing was pushed or proposed as a pull request while adjudication is pending.
 
 ## Gate Results
 
@@ -30,8 +32,8 @@ request.
 |---|---|---|---|
 | 1 | Review PASS present | PASS | Re-review bead `ga-7i08d1` records PASS for the exact reviewed source. It independently inspected the reconciled hunk and reran build, vet, and the relevant tests. |
 | 2 | Acceptance criteria met | PASS | The `cap-admits-the-wave` fixture waits for the declared four-check wave, preserves successful registrations until all polling checks can observe the cohort, and removes timed-out registrations before the serial control arm. All eight tests in the modified file pass by name. |
-| 3 | Tests pass | **FAIL** | The documented CI-equivalent 40-job candidate union's raw failures are attributed or waived as recorded below, and the eight candidate-owned tests report 8 PASS / 0 FAIL / 0 SKIP. However, the later mandatory pre-push `make test-fast-parallel` matrix reported 9 PASS jobs / 1 FAIL job / 0 job-level SKIP: `TestCmdStopSupervisorManagedInvalidCityTomlFailsWhenShutdownFails` failed in `unit-cmd-gc-5-of-6`. The exact current-base matrix passed that test, so the new red result remains blocking. |
-| 3a | Pre-existing failures attributed | **FAIL** | The original beads#4566 blocker and the other 40-job-union failures are attributed or waived below. The new stop-timeout failure has tracker `ga-tvgyen` and is not diff-owned, but exact current base passed it and both the failure and candidate are in `cmd/gc`. Clauses 3 (base reproduction) and 4 (no package-path overlap) are unsatisfied; no waiver exists. |
+| 3 | Tests pass | **PENDING** | The documented CI-equivalent 40-job candidate union's raw failures are attributed or waived as recorded below, and the eight candidate-owned tests report 8 PASS / 0 FAIL / 0 SKIP. The later mandatory pre-push `make test-fast-parallel` matrix exposed the stop timeout once. Under mayor correction `gm-wisp-giaqmv`, the target then passed 5/5 exact-base repetitions and passed one candidate repetition, for candidate 1 FAIL / 1 PASS. The corrected timeout-attribution rule does not yet classify that split as waived or diff-attributable. |
+| 3a | Pre-existing failures attributed | **PENDING** | The original beads#4566 blocker and the other 40-job-union failures are attributed or waived below. The stop-timeout failure has tracker `ga-tvgyen` and is not diff-owned. It did not reproduce in five base repetitions, but it also did not reproduce in the second candidate run. Mayor adjudication is required because neither decision branch in `gm-wisp-giaqmv` is satisfied. |
 | 3b | Policy/lint lane | PASS | `make test-ci-policy`, `go build ./...`, `go vet ./...`, `LINT_CHANGED_SCOPE=tracked LINT_CHANGED_REF=origin/main LINT_FLAGS=--allow-parallel-runners make lint-affected`, `LINT_CHANGED_REF=origin/main make fmt-check-changed`, and `git diff --check` all pass on the unchanged reviewed source. |
 | 4 | No high-severity review findings open | PASS | The re-review records no unresolved HIGH finding. Unresolved HIGH count: 0. |
 | 5 | Final branch is clean | PASS | `git status --porcelain` was empty at the reviewed source before this checklist was written. The checklist is committed separately on the isolated deploy branch. |
@@ -149,7 +151,7 @@ the sample sizes differ. Mayor recorded that narrow conclusion and granted
 `waiver_ref=ga-soa96t-mayor-waiver-20260821` in message `gm-wisp-kub0v1` and
 on the deploy bead.
 
-## Pre-push finding that supersedes the PASS
+## Pre-push timeout attribution control
 
 The isolated deploy branch was committed at
 `01514e68fbf9daf3646451b297d4467ee807d638` and pushed normally so the
@@ -171,14 +173,38 @@ base_logs: /var/tmp/gc-local-tests.6CJgLy
 ```
 
 The new target is not diff-owned (`cmd/gc/cmd_stop_test.go` is unchanged), and
-tracker `ga-tvgyen` was filed and verified. It nevertheless fails the full
-attribution rule: it did not reproduce on the exact current base, and the
-candidate changes another test file in the same `cmd/gc` package. This is a
-technical gate failure, not an attributed host failure.
+tracker `ga-tvgyen` was filed and verified. Mayor correction
+`gm-wisp-giaqmv` distinguished this wall-clock timeout from a deterministic
+assertion failure and required repetition under the same topology.
+
+```text
+base_control_ref: origin/main@187e53828754894096fc295cea4baca909fe9a96
+base_control_cmd: DOCKER_HOST=unix:///run/user/1000/podman/podman.sock TESTCONTAINERS_RYUK_DISABLED=true LOCAL_TEST_JOBS=15 make test-fast-parallel
+base_target_tally: 5 PASS / 0 FAIL
+base_run_1: 10 PASS jobs / 0 FAIL jobs
+base_run_2: target PASS; 9 PASS jobs / 1 unrelated FAIL job (TestCustomTypesCheck_TableDrift)
+base_run_3: 10 PASS jobs / 0 FAIL jobs
+base_run_4: 10 PASS jobs / 0 FAIL jobs
+base_run_5: target PASS; 9 PASS jobs / 1 unrelated FAIL job (TestCompactScriptRetriesPendingPushWithRefspecRemoteBranch)
+base_transcripts: /var/tmp/ga-soa96t-base5.Mpet1q/results/run-{1,2,3,4,5}.out
+base_failure_logs: /var/tmp/gc-local-tests.1AlBK7; /var/tmp/gc-local-tests.iS60Eq
+
+candidate_repeat_ref: 01514e68fbf9daf3646451b297d4467ee807d638
+candidate_repeat_cmd: DOCKER_HOST=unix:///run/user/1000/podman/podman.sock TESTCONTAINERS_RYUK_DISABLED=true LOCAL_TEST_JOBS=15 make test-fast-parallel
+candidate_target_tally_across_attempts: 1 PASS / 1 FAIL
+candidate_repeat_result: target PASS; shard failed on TestSessionReconcilerTraceGH1654WorkRequestedStartCandidates
+candidate_repeat_log: /var/tmp/gc-local-tests.LmGARG
+candidate_repeat_transcript: /var/tmp/ga-soa96t-base5.Mpet1q/results/candidate-repeat.out
+```
+
+This evidence satisfies neither branch of the mayor's corrected rule. There is
+no base sighting to support a timeout waiver, and the candidate has not failed
+repeatably. The gate is held for mayor adjudication rather than being routed to
+builder or pushed.
 
 ## Disposition
 
-Criterion 3 fails. The deploy branch remains local and unpushed, no pull
-request exists, and no merge request or deploy-clearance status is permitted.
-The bead returns to builder with the candidate/base logs and the unsatisfied
-attribution clauses named explicitly.
+Criterion 3 remains unresolved under correction `gm-wisp-giaqmv`. The deploy
+branch remains local and unpushed, no pull request exists, and no merge request
+or deploy-clearance status is permitted. The bead remains open on
+`hold:mayor` until the measured 5/5-base and 1/2-candidate split is adjudicated.
