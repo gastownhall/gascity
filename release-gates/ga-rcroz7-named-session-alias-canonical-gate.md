@@ -119,6 +119,43 @@ failure_attribution: TestHumaBinary_CityCreateAsync -> ga-lpfjhc + ga-6bnc42 + e
 waiver_ref: ga-cqq3hs standing tracked-failure authorization; ga-6bnc42 beads#4566 authorization; mayor-2026-08-20-herdr-pane-standing
 ```
 
+## Pre-push Hook Evidence
+
+The first guarded push of gate commit
+`a28611688cadbb697fa8b14baf691f3f94f72497` ran the repository's 10-job fast
+matrix. Nine jobs passed; `unit-core` failed on two tracked tests outside the
+candidate subsystem. The push itself was rejected and nothing reached the
+remote on that attempt.
+
+- FAIL — WAIVED: `TestProviderLiveClaudeKindPath` repeated the exact
+  `agent_pane_busy` / startup-delivery timeout signature already tracked on
+  `ga-fh1flg` and covered by `mayor-2026-08-20-herdr-pane-standing`. The
+  specific pre-push occurrence was logged and read back.
+- FAIL — WAIVED: `TestDoStartSession_TreatsDeadlineAfterPostReadyAsSuccessWhenSessionAlive`
+  returned `context deadline exceeded` instead of success under the fast
+  matrix. This first recorded post-ready recurrence is tracked by
+  `ga-vve1ws`; its exact failure, log, and candidate head were verified in the
+  ledger. `go list -deps ./internal/runtime/tmux` confirms the failing package
+  does not depend on `internal/session`, so the named-session lookup diff
+  cannot affect `doStartSession`, `fakeStartOps`, context timing, or tmux
+  startup behavior.
+
+Under the standing tracked-failure authorization on `ga-cqq3hs`, these two
+specific-head failures permit `git push --no-verify`: both have exact trackers,
+neither is diff-owned or reachable from the candidate, both are preserved as
+FAIL — WAIVED, and both occurrences were recorded before bypassing the hook.
+The bypass authorizes only the push; merge authority and all remote CI checks
+remain unchanged.
+
+```text
+pre_push_cmd: LOCAL_TEST_JOBS=5 CMD_GC_PROCESS_TOTAL=6 ./scripts/test-local-parallel fast
+pre_push_counts: 9 PASS jobs, 1 FAIL job, 0 SKIP jobs (10 total); 2 top-level test failures
+pre_push_logs: /var/tmp/gc-local-tests.tD3CWw
+failure_attribution: TestProviderLiveClaudeKindPath -> ga-fh1flg + mayor-2026-08-20-herdr-pane-standing + separate-subsystem no-mechanism proof
+failure_attribution: TestDoStartSession_TreatsDeadlineAfterPostReadyAsSuccessWhenSessionAlive -> ga-vve1ws + dependency-graph no-mechanism proof
+push_disposition: authorized --no-verify under ga-cqq3hs standing tracked-failure rule
+```
+
 ## Pre-flight
 
 GitHub's commit-to-PR lookup returned no PR for the reviewed source after the
