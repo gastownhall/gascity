@@ -3,10 +3,11 @@
 #
 # Replaces the deacon patrol town-orphan-sweep step. Cross-references
 # in-progress beads against all known agents. Beads assigned to agents
-# that don't exist in ANY rig get reset to open/unassigned so the rig's
-# witness picks them up on its next patrol.
+# that don't exist in ANY rig get reset to open/unassigned so they are
+# routable again.
 #
-# Does NOT do worktree salvage — that's the witness's job.
+# Does NOT do worktree salvage — cities that staff a work-health patrol role
+# (e.g. the gastown pack's witness) handle that separately.
 #
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
