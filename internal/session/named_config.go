@@ -419,10 +419,58 @@ func lookupConfiguredNamedSession(store beads.Store, spec NamedSessionSpec, incl
 		}
 		conflictCandidates = appendUniqueNamedSessionCandidates(conflictCandidates, make(map[string]bool, len(conflictCandidates)+len(matches)), matches)
 	}
+	for _, candidate := range conflictCandidates {
+		if namedSessionCandidateIsSelf(candidate, spec) {
+			return ConfiguredNamedSessionLookup{Canonical: candidate, HasCanonical: true}, nil
+		}
+	}
 	if bead, conflict := FindNamedSessionConflict(conflictCandidates, spec); conflict {
 		return ConfiguredNamedSessionLookup{Conflict: bead, HasConflict: true}, nil
 	}
 	return ConfiguredNamedSessionLookup{}, nil
+}
+
+// namedSessionCandidateIsSelf reports whether a bead reached only through
+// conflict-scoped queries (session_name/alias) actually denotes spec's own
+// identity rather than a foreign claimant. It defers entirely to
+// FindCanonicalNamedSessionBead, the same signal canonical detection itself
+// treats as authoritative.
+//
+// This previously also trusted a narrower fallback: a live,
+// continuity-eligible session bead whose alias exactly equals spec.Identity
+// and whose session_name is empty, even with no
+// configured_named_session/configured_named_identity flag and no
+// corroborating template/agent_name match (ga-t3a0fv round 1). Review
+// (ga-t3a0fv round 2) showed that fallback is unsafe: on (bead, spec) alone,
+// a genuine not-yet-named self bead is byte-for-byte indistinguishable from
+// an unrelated bead that merely claims the same alias with nothing else set
+// — see TestLookupConfiguredNamedSession_UnrelatedAliasOnlyBeadNotTrustedAsSelf.
+// A bead with empty session_name costs nothing to create, so trusting bare
+// alias+empty-session_name let a decoy silently resolve as canonical self
+// instead of surfacing as a conflict: a fail-safe-to-fail-unsafe regression.
+// The fallback was removed rather than narrowed further, because every
+// signal tried (template/agent_name match, creation recency, city/rig
+// scope) either broke existing intentionally-bare test fixtures or failed
+// to actually distinguish the two cases the reviewer's PoC turned on.
+//
+// The underlying problem the fallback was trying to solve is real and still
+// open (ga-1ycmli): a live singleton named-session bead that never got
+// configured_named_identity stamped at creation is unmailable while
+// running, because canonical detection can't see it and conflict detection
+// is all that's left. The fix needs either eager identity-metadata stamping
+// at bead-creation time in the wisp/molecule dispatch path, or a
+// caller-supplied runtime-liveness assertion threaded in from the worker
+// boundary — internal/session may not import internal/worker directly (see
+// AGENTS.md layering invariants), so that check can only be injected from a
+// caller that already has worker.Handle access. Both directions need
+// scoping beyond this function; see the follow-up bead linked from
+// ga-t3a0fv's notes.
+func namedSessionCandidateIsSelf(b beads.Bead, spec NamedSessionSpec) bool {
+	if spec.Identity == "" {
+		return false
+	}
+	_, ok := FindCanonicalNamedSessionBead([]beads.Bead{b}, spec)
+	return ok
 }
 
 func listConfiguredNamedSessionBeadsByMetadata(store beads.Store, key, value string) ([]beads.Bead, error) {
