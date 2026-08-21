@@ -308,7 +308,10 @@ func (g *doltLeakGuardedTestingM) waitForFinalScanToClear(
 func (g *doltLeakGuardedTestingM) installSignalHandler() func() {
 	signals := make(chan os.Signal, 2)
 	done := make(chan struct{})
-	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	// SIGQUIT is what `go test -timeout` raises on a hung shard (see
+	// dolttest.Guard, which handles it for the same reason): without it the
+	// binary dies before reaping and every managed dolt server leaks.
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 	go func() {
 		select {
 		case sig := <-signals:
@@ -438,9 +441,23 @@ func isStaleCmdGCTestConfigPathWithPIDCheck(configPath string, activeRoots []str
 	}
 	ownerPID, ok := cmdGCTestConfigOwnerPID(configPath, tempParent)
 	if !ok {
-		return false
+		return isAbandonedGoTempDirConfigPath(configPath, tempParent)
 	}
 	return !pidAliveFn(ownerPID)
+}
+
+// isAbandonedGoTempDirConfigPath classifies configs under a Go t.TempDir()
+// root (Test<Name><rand>/...) that carry no gct<pid>-/gctshard<pid>- owner
+// component. Those appear when a run dies uncleanly (timeout, panic,
+// SIGKILL): TestMain's temp-root cleanup removes the config from disk while
+// the dolt server lives on. The missing config file is the stale signal —
+// a concurrent live run keeps its config on disk until its servers stop.
+func isAbandonedGoTempDirConfigPath(configPath, tempParent string) bool {
+	if _, ok := activeTestRootUnder(filepath.Clean(configPath), filepath.Clean(tempParent), []string{"Test"}); !ok {
+		return false
+	}
+	_, err := os.Stat(configPath)
+	return errors.Is(err, os.ErrNotExist)
 }
 
 func cmdGCTestConfigOwnerPID(configPath string, tempParent string) (int, bool) {
