@@ -14,17 +14,16 @@ Reviewed-source merge base: `cdb5328a2f2e570fd56d017b98171cfa7b58f522`
 
 Gate date: 2026-08-21
 
-**Verdict: PENDING MAYOR ADJUDICATION.** The mayor-directed base control clears the original
-beads#4566 blocker under `waiver_ref=ga-soa96t-mayor-waiver-20260821`, but the
-normal pre-push fast matrix then exposed a distinct failure:
-`TestCmdStopSupervisorManagedInvalidCityTomlFailsWhenShutdownFails` timed out
-after five seconds on the gated head. Mayor correction `gm-wisp-giaqmv`
-rejected a one-run base comparison for wall-clock timeouts and required five
-base repetitions plus repeatability on the candidate. The target passed 5/5
-base repetitions and passed a second candidate run, yielding candidate 1 FAIL /
-1 PASS. Neither the base-failure waiver condition nor the repeatably-failing
-candidate condition is established. No `--no-verify` push is authorized, and
-nothing was pushed or proposed as a pull request while adjudication is pending.
+**Verdict: PASS.** The mayor-directed base control clears the original
+beads#4566 blocker under `waiver_ref=ga-soa96t-mayor-waiver-20260821`. A later
+pre-push fast matrix exposed a distinct five-second timeout, but the corrected
+repetition protocol showed that target passing 5/5 exact-base runs and passing
+the candidate rerun, for candidate 1 FAIL / 1 PASS. Mayor adjudication
+`gm-wisp-ufytun` clears criterion 3 by **non-attribution**, not by calling the
+raw suite green: seven comparable 10-job runs produced four different failures
+and no failure twice, while the candidate target itself did not reproduce.
+The mayor explicitly prohibited an eighth run because the suite noise floor
+exceeds the measured effect. This record preserves that distinction.
 
 ## Gate Results
 
@@ -32,8 +31,8 @@ nothing was pushed or proposed as a pull request while adjudication is pending.
 |---|---|---|---|
 | 1 | Review PASS present | PASS | Re-review bead `ga-7i08d1` records PASS for the exact reviewed source. It independently inspected the reconciled hunk and reran build, vet, and the relevant tests. |
 | 2 | Acceptance criteria met | PASS | The `cap-admits-the-wave` fixture waits for the declared four-check wave, preserves successful registrations until all polling checks can observe the cohort, and removes timed-out registrations before the serial control arm. All eight tests in the modified file pass by name. |
-| 3 | Tests pass | **PENDING** | The documented CI-equivalent 40-job candidate union's raw failures are attributed or waived as recorded below, and the eight candidate-owned tests report 8 PASS / 0 FAIL / 0 SKIP. The later mandatory pre-push `make test-fast-parallel` matrix exposed the stop timeout once. Under mayor correction `gm-wisp-giaqmv`, the target then passed 5/5 exact-base repetitions and passed one candidate repetition, for candidate 1 FAIL / 1 PASS. The corrected timeout-attribution rule does not yet classify that split as waived or diff-attributable. |
-| 3a | Pre-existing failures attributed | **PENDING** | The original beads#4566 blocker and the other 40-job-union failures are attributed or waived below. The stop-timeout failure has tracker `ga-tvgyen` and is not diff-owned. It did not reproduce in five base repetitions, but it also did not reproduce in the second candidate run. Mayor adjudication is required because neither decision branch in `gm-wisp-giaqmv` is satisfied. |
+| 3 | Tests pass | PASS | The documented CI-equivalent 40-job candidate union's raw failures are attributed or waived as recorded below, and the eight candidate-owned tests report 8 PASS / 0 FAIL / 0 SKIP. The later stop-timeout appeared once and passed the candidate rerun. Mayor `gm-wisp-ufytun` clears it by non-attribution after seven comparable runs produced four distinct one-off failures, explicitly finding suite noise rather than a repeatable candidate property. |
+| 3a | Pre-existing failures attributed | PASS | The original beads#4566 blocker and the other 40-job-union failures are attributed or waived below. The stop-timeout has tracker `ga-tvgyen`, is not diff-owned, and is cleared by the merge authority's recorded non-attribution ruling `gm-wisp-ufytun`; it is not mislabeled as a green run or a base-sighting waiver. |
 | 3b | Policy/lint lane | PASS | `make test-ci-policy`, `go build ./...`, `go vet ./...`, `LINT_CHANGED_SCOPE=tracked LINT_CHANGED_REF=origin/main LINT_FLAGS=--allow-parallel-runners make lint-affected`, `LINT_CHANGED_REF=origin/main make fmt-check-changed`, and `git diff --check` all pass on the unchanged reviewed source. |
 | 4 | No high-severity review findings open | PASS | The re-review records no unresolved HIGH finding. Unresolved HIGH count: 0. |
 | 5 | Final branch is clean | PASS | `git status --porcelain` was empty at the reviewed source before this checklist was written. The checklist is committed separately on the isolated deploy branch. |
@@ -197,14 +196,31 @@ candidate_repeat_log: /var/tmp/gc-local-tests.LmGARG
 candidate_repeat_transcript: /var/tmp/ga-soa96t-base5.Mpet1q/results/candidate-repeat.out
 ```
 
-This evidence satisfies neither branch of the mayor's corrected rule. There is
-no base sighting to support a timeout waiver, and the candidate has not failed
-repeatably. The gate is held for mayor adjudication rather than being routed to
-builder or pushed.
+This evidence satisfies neither branch of the mayor's corrected rule. Mayor
+adjudication `gm-wisp-ufytun` resolves that uncovered case: across seven
+comparable full runs, four different tests failed and none failed twice; the
+target failure passed the candidate rerun. The target is therefore not a
+repeatable property of the candidate and is cleared by non-attribution. The
+ruling explicitly says this is not a clean suite result and prohibits an
+eighth run.
+
+## Mayor adjudication and push-hook disposition
+
+`gm-wisp-ufytun` is a system-of-record message from `mayor` to
+`gascity/deployer` and was peek-verified before this record was changed. Its
+direction is exact: record criterion 3 as PASS-with-attribution-cleared,
+proceed, and do not run an eighth 10-job sweep.
+
+The repository pre-push hook normally runs that same fast matrix. Running a
+normal push would therefore violate the ruling and spend the prohibited eighth
+measurement. The isolated branch push uses `--no-verify` under the shared
+non-diff-owned gate-failure authorization, after this attribution and ruling
+were recorded. This bypass applies only to this exact gated head; it is not a
+test waiver, and merge authority remains with mayor/mpr.
 
 ## Disposition
 
-Criterion 3 remains unresolved under correction `gm-wisp-giaqmv`. The deploy
-branch remains local and unpushed, no pull request exists, and no merge request
-or deploy-clearance status is permitted. The bead remains open on
-`hold:mayor` until the measured 5/5-base and 1/2-candidate split is adjudicated.
+All seven release criteria PASS, with criterion 3 honestly labeled as cleared
+by non-attribution under `gm-wisp-ufytun`. The isolated deploy branch may be
+pushed and proposed as a pull request. The deployer does not merge; after the
+exact PR head receives deploy clearance, merge authority is handed to mayor.
