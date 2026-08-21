@@ -8,20 +8,17 @@ Build bead: `ga-kbbg9a`
 
 Reviewed source: `b8626685d1778b24eee014ec7be9c1e6ba770d47`
 
-Base: `origin/main@187e53828754894096fc295cea4baca909fe9a96`
+Base: `origin/main@5ba4d6e653f0b0c4241a565399ea558cd98c1e1d`
 
 Gate date: 2026-08-21
 
-**Verdict: PENDING MAYOR ADJUDICATION.** The reviewed behavior and every
-diff-owned test pass, but the documented 40-job candidate sweep contains three
-candidate-only wall-clock failures that one exact-base control did not
-reproduce. Two failures are in the changed `cmd/gc` package, so the no-path-
-overlap attribution clause is not satisfied; the third is a tracked Dolt
-fixture timeout outside the diff, but this control did not prove it
-pre-existing. Under mayor correction `gm-wisp-giaqmv`, a single clean base
-observation is not enough to classify a wall-clock timeout as caused by the
-candidate. No waiver has been self-granted. Nothing is pushed and no pull
-request exists while criterion 3 is unresolved.
+**Verdict: PASS.** The reviewed behavior and every diff-owned test pass. The
+documented candidate and exact-base 40-job unions each report 34 PASS / 6 FAIL
+/ 0 SKIP, with different failure membership. Mayor ruling `gm-wisp-cwndyl`
+clears criterion 3 as PASS-with-attribution: this equal-count, disjoint-set
+result is two samples from the suite's documented timing-noise distribution,
+not evidence that the candidate added failures. The ruling explicitly directs
+the deployer not to spend another repetition sweep. No waiver was self-granted.
 
 `docs/PROJECT_MANIFEST.md` is absent from this repository. This record uses the
 seven release criteria in the deployer contract and the documented commands in
@@ -34,12 +31,12 @@ seven release criteria in the deployer contract and the documented commands in
 |---|---|---|---|
 | 1 | Review PASS present | PASS | Closed review bead `ga-rdex4v` records `verdict: pass` for the exact reviewed source. |
 | 2 | Acceptance criteria met | PASS | Exact ties rotate across distinct bead IDs; co-resident duplicate IDs remain deduplicated; strict rank improvements, primary-store in-progress short-circuiting, and class-escalation behavior remain intact. All focused and repetition checks pass. |
-| 3 | Tests pass | **PENDING** | The candidate 40-job union reports 34 PASS jobs, 6 FAIL jobs, 0 job-level SKIP. Three deterministic failures reproduce on the exact base and are attributable below. `TestTutorial01`, `TestFreshManagedBdCityInitSeedsPinnedHQDatabaseAndKeepsGCPrefix`, and `TestDoltConfigWiringExternalHost` fail only on the candidate in this A/B sample. They are not diff-owned, but their wall-clock nature and the two `cmd/gc` path overlaps prevent either a branch-regression verdict or a deployer-authored waiver from this single comparison. |
-| 3a | Pre-existing failures attributed | **PENDING** | `TestBdFlagManifestCurrent` and both tmux key-binding tests reproduce on the exact base with active trackers and no path overlap. The other three candidate failures do not satisfy every attribution clause. Mayor adjudication is required; no builder bounce is justified from one timing observation. |
+| 3 | Tests pass | PASS | Candidate and exact-base full unions each report 34 PASS jobs, 6 FAIL jobs, 0 job-level SKIP, with disjoint failure membership. Every diff-owned and acceptance test passes, including 60/60 class-escalation controls. Mayor ruling `gm-wisp-cwndyl` clears the three candidate-only wall-clock failures by non-attribution and directs no further resampling. Raw failures remain recorded below. |
+| 3a | Pre-existing failures attributed | PASS | `TestBdFlagManifestCurrent` and both tmux key-binding tests reproduce on the exact base with active trackers and no path overlap. The remaining timing-only failures carry documented flake lineage (`ga-qyh9cb`, `ga-gajll3`/`ga-thuouz`, and tutorial-path beads `ga-hrdd3h`/`ga-io7xwr`) and are covered by the mayor's explicit non-attribution ruling `gm-wisp-cwndyl`; this is a merge-authority decision, not a deployer-authored waiver. |
 | 3b | Policy/lint lane | PASS | Required policy lane `make test-ci-policy` passes. `go build ./...`, `go vet ./...`, changed formatting, and `git diff --check` pass. An auxiliary affected-lint run selected the full repository because the reviewed source predates a base-only release-gate file and failed on 182 unrelated repository/cache diagnostics; no diagnostic names either changed `cmd/gc` file. |
 | 4 | No high-severity review findings open | PASS | The reviewer recorded PASS and no open HIGH finding. Unresolved HIGH count: 0. |
 | 5 | Final branch is clean | PASS | `git status --porcelain` was empty at the exact reviewed source before this checklist was written. |
-| 6 | Branch diverges cleanly from main | PASS | `git merge-tree --write-tree --messages origin/main b8626685...` exited 0 against current `origin/main`, producing tree `bd3b73056d40beaab7c6d7374fe040f14895a599`. `assert_deploy_ancestry_scope` passed for `ga-hgtxtq`, `ga-kbbg9a`, and `ga-rdex4v`. No self-rebase was needed. |
+| 6 | Branch diverges cleanly from main | PASS | After the mayor ruling, `git merge-tree --write-tree origin/main b8626685d1778b24eee014ec7be9c1e6ba770d47` exited 0 against `origin/main@5ba4d6e653f0b0c4241a565399ea558cd98c1e1d`, producing tree `8c32de4c915504ff1b374a5062bde8c4bd21cb29`. The newer main changes do not touch `cmd/gc/hook_cross_store.go` or its test. `assert_deploy_ancestry_scope` passed for `ga-hgtxtq`, `ga-kbbg9a`, and `ga-rdex4v`. No self-rebase was needed. |
 | 7 | Single feature theme | PASS | Three commits modify only cross-store hook selection and its tests in `cmd/gc`; all changes serve one starvation fix. |
 
 ## Acceptance Evidence
@@ -112,9 +109,9 @@ diff_check: git diff --check origin/main...HEAD -- PASS
 | `TestBdFlagManifestCurrent` | `integration-packages-core-1-of-4` | FAIL with the same signature in `integration-packages-core-4-of-4` | Attributed to `ga-f0uceo`; not diff-owned and no path overlap. |
 | `TestGetKeyBinding_CapturesDefaultBinding` | `integration-packages-runtime-tmux-2-of-3` | FAIL with the same empty-default signature | Attributed to `ga-afqddr`; not diff-owned and no path overlap. |
 | `TestGetKeyBinding_CapturesDefaultBindingWithArgs` | `integration-packages-runtime-tmux-3-of-3` | FAIL with the same empty-default signature | Attributed to `ga-afqddr`; not diff-owned and no path overlap. |
-| `TestTutorial01/controller` | `cmd-gc-process-3-of-6` | PASS job | **UNRESOLVED**: controller socket wall-clock timeout; not diff-owned, but package overlaps the diff and one clean base run cannot establish causation. |
-| `TestFreshManagedBdCityInitSeedsPinnedHQDatabaseAndKeepsGCPrefix` | `cmd-gc-process-4-of-6` | PASS job | **UNRESOLVED**: dirty-schema / init timing signature tracked by `ga-qyh9cb`; not diff-owned, but package overlaps the diff and did not reproduce in this base run. |
-| `TestDoltConfigWiringExternalHost` | `integration-rest-full-2-of-8` | PASS job | **UNRESOLVED**: 36-second `bd init` timeout with fix lineage `ga-gajll3` / `ga-thuouz`; no path overlap, but this control did not prove the failure pre-existing. |
+| `TestTutorial01/controller` | `cmd-gc-process-3-of-6` | PASS job | FAIL — ATTRIBUTION CLEARED by `gm-wisp-cwndyl`: wall-clock controller timeout with tutorial-path flake lineage `ga-hrdd3h` / `ga-io7xwr`; weaker tracker link is recorded as such. |
+| `TestFreshManagedBdCityInitSeedsPinnedHQDatabaseAndKeepsGCPrefix` | `cmd-gc-process-4-of-6` | PASS job | FAIL — ATTRIBUTION CLEARED by `gm-wisp-cwndyl`: same tracked wall-clock failure previously adjudicated on another gate; tracker `ga-qyh9cb`. |
+| `TestDoltConfigWiringExternalHost` | `integration-rest-full-2-of-8` | PASS job | FAIL — ATTRIBUTION CLEARED by `gm-wisp-cwndyl`: hardcoded 15-second `bd init` timeout lineage `ga-gajll3` / `ga-thuouz`; no path overlap. |
 
 The exact base has its own six failing jobs, all outside this diff:
 `TestFileRecorderWatchAfterLatestStartsAtEOF`,
@@ -133,7 +130,8 @@ Deploy mode is remote. `origin` is the base/fetch remote and its dry-run push
 is unavailable, so a future PASS would push the isolated branch to `fork`.
 GitHub authentication is active.
 
-Criterion 3 remains unresolved under correction `gm-wisp-giaqmv`. This gate
-record stays local and unpushed; no PR, deploy-clearance status, or merge
-request is permitted until mayor adjudication supplies a waiver or directs
-the corrected repeat protocol.
+Mayor ruling `gm-wisp-cwndyl` clears criterion 3 by non-attribution and directs
+the deployer to push and proceed without another repetition sweep. The ruling
+is based on identical 34/6/0 candidate and base counts with disjoint failure
+sets, documented timing-flake history for the candidate-only failures, and a
+fully green diff-owned surface. Normal isolated-branch deployment now applies.
