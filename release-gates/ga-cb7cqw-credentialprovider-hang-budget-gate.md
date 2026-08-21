@@ -111,6 +111,32 @@ failure_attribution: TestCleanInstallTutorialPath -> ga-lpfjhc + ga-6bnc42 + exa
 waiver_ref: ga-cqq3hs standing tracked-failure authorization; ga-6bnc42 beads#4566 authorization; mayor-2026-08-20-herdr-pane-standing
 ```
 
+## Pre-push Hook Evidence
+
+The first guarded push of gate commit
+`e8df0e81895bbfc9b8b9682dc9ae3f27ce3f6ee1` ran the repository's 10-job fast
+matrix. Nine jobs passed. `unit-core` failed only on
+`TestProviderLiveClaudeKindPath`, with the exact `agent_pane_busy` /
+startup-delivery timeout signature already tracked on `ga-fh1flg` and covered
+by `mayor-2026-08-20-herdr-pane-standing`. The specific-head occurrence was
+logged and read back before bypassing the hook. The candidate changes only
+`internal/credentialprovider` test files and cannot affect the herdr provider or
+pane allocation.
+
+Under the standing tracked-failure authorization on `ga-cqq3hs`, this
+specific-head failure permits `git push --no-verify`: it has an exact tracker,
+is outside and unreachable from the candidate, is preserved here as FAIL —
+WAIVED, and was recorded before bypass. The bypass authorizes only the push;
+merge authority and remote CI remain unchanged.
+
+```text
+pre_push_cmd: LOCAL_TEST_JOBS=2 CMD_GC_PROCESS_TOTAL=6 ./scripts/test-local-parallel fast
+pre_push_counts: 9 PASS jobs, 1 FAIL job, 0 SKIP jobs (10 total); 1 top-level test failure
+pre_push_logs: /var/tmp/gc-local-tests.lkz0HX
+failure_attribution: TestProviderLiveClaudeKindPath -> ga-fh1flg + mayor-2026-08-20-herdr-pane-standing + separate-subsystem no-mechanism proof
+push_disposition: authorized --no-verify under ga-cqq3hs standing tracked-failure rule
+```
+
 ## Pre-flight
 
 GitHub's commit-to-PR lookup returned no PR for the reviewed source after the
