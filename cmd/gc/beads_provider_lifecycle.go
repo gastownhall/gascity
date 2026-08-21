@@ -739,11 +739,11 @@ var verifyManagedDoltDatabaseExistsAfterInit = func(cityPath, dir, dbName string
 
 var managedDoltListUserDatabasesAfterInit = func(port string) ([]string, error) {
 	host, user := managedDoltConnectHost(""), "root"
+	// Pooled handle owned by internal/doltpool; do not Close.
 	db, err := managedDoltOpenDB(host, port, user)
 	if err != nil {
 		return nil, fmt.Errorf("connect to managed Dolt at %s:%s: %w", host, port, err)
 	}
-	defer db.Close() //nolint:errcheck
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
