@@ -41,7 +41,9 @@ describe('BeadsPage supervisor reads', () => {
 
     expect(screen.queryByText('supervisor noise bead')).toBeNull();
     expect(fetchCalls.some((call) => call.path === '/api/city/test-city/beads')).toBe(false);
-    expect(beadFetches()).toHaveLength(1);
+    // The windowed read plus the dedicated in-progress leg (gp-6xd F1) —
+    // neither is the slow closed-history (all=true) path.
+    expect(beadFetches()).toHaveLength(2);
     expect(beadFetches().every((call) => call.query.has('all'))).toBe(false);
     expect(beadFetches().every((call) => call.query.has('type'))).toBe(false);
   });

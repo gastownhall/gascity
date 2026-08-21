@@ -144,9 +144,10 @@ export async function fetchBeadsAttention(
   signal?: AbortSignal,
 ): Promise<BeadsAttentionFacts> {
   if (cityName === null) return { decisionLabel };
-  // Three independent reads: the general bead list (capped) and two dedicated
+  // Four independent reads: the general bead list (capped), two dedicated
   // label+status-filtered queues — the mayor-decision queue and the escalation
-  // queue. Both queues bypass the general list's gc:-label filter and are always
+  // queue — and the session list for the stalled-in-progress check (gp-6xd).
+  // The queues bypass the general list's gc:-label filter and are always
   // complete. Settled separately so one failing does not blank the others — the
   // decision queue, the escalation queue, and generic bead alerts are distinct
   // signals (gascity-dashboard-2j8e.3).
@@ -159,6 +160,7 @@ export async function fetchBeadsAttention(
       }),
       listDecisionBeads(cityName, decisionLabel, signal),
       listEscalationBeads(cityName, signal),
+      supervisorApi().listSessions(cityName),
     ] as const);
   throwIfAborted(signal);
   let reads = await read();
@@ -170,7 +172,7 @@ export async function fetchBeadsAttention(
     reads = await read();
     throwIfAborted(signal);
   }
-  const [list, decisions, escalations] = reads;
+  const [list, decisions, escalations, sessions] = reads;
   const facts: BeadsAttentionFacts = { nowMs: Date.now(), decisionLabel };
   const cityUnavailable = reads.find(isCityUnavailableRead);
   if (cityUnavailable !== undefined && cityUnavailable.status === 'rejected') {
@@ -198,6 +200,13 @@ export async function fetchBeadsAttention(
     facts.escalations = escalations.value.items ?? [];
   } else {
     facts.escalationsError = formatApiError(escalations.reason, 'escalation queue unavailable');
+  }
+  // Session-read failure — including a partial list, where a missing shard's
+  // workers would read as sessionless — degrades silently: the selector then
+  // skips the session-dependent stall checks (waiting-human still works)
+  // rather than raising false stalled alerts or a fourth error identity.
+  if (sessions.status === 'fulfilled' && sessions.value.partial !== true) {
+    facts.sessions = sessions.value.items ?? [];
   }
   return facts;
 }
@@ -235,11 +244,7 @@ function abortReason(signal: AbortSignal): unknown {
   return signal.reason ?? new DOMException('The operation was aborted', 'AbortError');
 }
 
-async function listDecisionBeads(
-  cityName: string,
-  decisionLabel: string,
-  signal?: AbortSignal,
-) {
+async function listDecisionBeads(cityName: string, decisionLabel: string, signal?: AbortSignal) {
   return supervisorApi().listBeads(
     cityName,
     {

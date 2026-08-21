@@ -59,11 +59,26 @@ export async function listSupervisorBeads(
     ...(includeClosed ? { all: true } : {}),
     ...(rigFilter.length === 0 ? {} : { rig: rigFilter }),
   };
-  const list =
+  // The windowed list is newest-created-first, so long-running in-progress work
+  // ages out of it — exactly the beads an operator most needs to see (gp-6xd
+  // F1: 7 of 9 in-progress beads sat past the window). A second, dedicated
+  // status=in_progress leg fetches that set whole — it is tiny by definition —
+  // and merges into the window. Best-effort: if the leg fails, the board
+  // degrades to the window (with its truncation notice) instead of blanking.
+  const inProgressQuery: NonNullable<GetV0CityByCityNameBeadsData['query']> = {
+    limit,
+    status: 'in_progress',
+    ...(rigFilter.length === 0 ? {} : { rig: rigFilter }),
+  };
+  const listWith = (query: NonNullable<GetV0CityByCityNameBeadsData['query']>) =>
     options.signal === undefined
-      ? await supervisorApi().listBeads(cityName, baseQuery)
-      : await supervisorApi().listBeads(cityName, baseQuery, options.signal);
-  const items = uniqueById(list.items ?? []);
+      ? supervisorApi().listBeads(cityName, query)
+      : supervisorApi().listBeads(cityName, query, options.signal);
+  const [list, inProgress] = await Promise.all([
+    listWith(baseQuery),
+    listWith(inProgressQuery).catch(() => null),
+  ]);
+  const items = uniqueById([...(list.items ?? []), ...(inProgress?.items ?? [])]);
   const statusFiltered = includeClosed ? items : items.filter((bead) => bead.status !== 'closed');
   const filtered = includeBookkeeping ? statusFiltered : statusFiltered.filter(defaultBeadFilter);
   const upstreamTotal = countAsNumber(list.total);
