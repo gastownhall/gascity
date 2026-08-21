@@ -35,7 +35,7 @@ func TestLoadSessionModelDoctorBeadsAvoidsBroadOpenWorkScan(t *testing.T) {
 		t.Fatalf("Update(session closed): %v", err)
 	}
 
-	got, err := loadSessionModelDoctorBeads(store)
+	got, err := loadSessionModelDoctorBeads(store, store)
 	if err != nil {
 		t.Fatalf("loadSessionModelDoctorBeads: %v", err)
 	}
@@ -56,6 +56,45 @@ func TestLoadSessionModelDoctorBeadsAvoidsBroadOpenWorkScan(t *testing.T) {
 	}
 	if !store.sawStatus["open"] || !store.sawStatus["in_progress"] {
 		t.Fatalf("status queries = %+v, want open and in_progress", store.sawStatus)
+	}
+}
+
+// TestLoadSessionModelDoctorBeadsReadsSessionUnionFromSessionStore pins the
+// two-class split: under a [beads.classes.sessions] relocation the session beads
+// live in a different store from the work beads. Reading both legs from the work
+// store returned an empty session union and the check reported "session ownership
+// is consistent" on a city whose session model was broken.
+func TestLoadSessionModelDoctorBeadsReadsSessionUnionFromSessionStore(t *testing.T) {
+	workStore := beads.NewMemStore()
+	sessStore := beads.NewMemStore()
+
+	work, err := workStore.Create(beads.Bead{Title: "open work", Status: "open"})
+	if err != nil {
+		t.Fatalf("Create(open work): %v", err)
+	}
+	sessionBead, err := sessStore.Create(beads.Bead{
+		Title:  "session",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Status: "open",
+	})
+	if err != nil {
+		t.Fatalf("Create(session): %v", err)
+	}
+
+	got, err := loadSessionModelDoctorBeads(workStore, sessStore)
+	if err != nil {
+		t.Fatalf("loadSessionModelDoctorBeads: %v", err)
+	}
+	ids := make(map[string]bool, len(got))
+	for _, bead := range got {
+		ids[bead.ID] = true
+	}
+	if !ids[sessionBead.ID] {
+		t.Fatalf("session bead %s missing from relocated-sessions read; got IDs %+v", sessionBead.ID, ids)
+	}
+	if !ids[work.ID] {
+		t.Fatalf("work bead %s missing; got IDs %+v", work.ID, ids)
 	}
 }
 

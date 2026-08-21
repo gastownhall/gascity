@@ -2358,7 +2358,15 @@ scope = "city"
 	}
 }
 
-func TestDoImportAddLocalGitRepoWithTagsWritesDefaultConstraint(t *testing.T) {
+// TestDoImportAddLocalGitRepoWithTagsStillLocksToHEAD confirms a local-in-git
+// import locks to the worktree's HEAD commit even when the repo also has a
+// semver tag that happens to point at the same commit -- a local worktree
+// source locks to HEAD unconditionally, per gc import add --help ("local
+// paths inside git worktrees at HEAD: ... locked to the current commit") and
+// the gastownhall/gascity#3659 fix; the tag's presence is incidental, not a
+// signal to prefer semver-constraint resolution over the worktree the user
+// actually pointed at.
+func TestDoImportAddLocalGitRepoWithTagsStillLocksToHEAD(t *testing.T) {
 	clearGCEnv(t)
 	dir := t.TempDir()
 	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
@@ -2395,8 +2403,82 @@ scope = "city"
 	if imp.Source != wantSource {
 		t.Fatalf("Source = %q, want %q", imp.Source, wantSource)
 	}
-	if got, want := imp.Version, "^1.2"; got != want {
+	headCommit := gitOutputImport(t, packDir, "rev-parse", "HEAD")
+	if got, want := imp.Version, "sha:"+headCommit; got != want {
 		t.Fatalf("Version = %q, want %q", got, want)
+	}
+}
+
+// TestDoImportAddLocalGitRepoWithStaleTagLocksToHEADNotTag is the regression
+// for gastownhall/gascity#3659: a local-in-git import locked to the repo's
+// latest semver tag instead of HEAD, so a pack added to the worktree after
+// the last tag was cut resolved to a checkout that lacks pack.toml at all
+// (the tagged tree predates the pack), failing with a misleading "missing
+// pack.toml" error even though the pack exists at HEAD. Per gc import add
+// --help, a local path inside a git worktree at HEAD must lock to the
+// current commit, not to whatever the repo's git tags happen to say.
+func TestDoImportAddLocalGitRepoWithStaleTagLocksToHEADNotTag(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+
+	workDir := t.TempDir()
+	packDir := filepath.Join(workDir, "stale-tag-pack")
+	mustGitImport(t, "", "init", packDir)
+	writePlaceholder := filepath.Join(packDir, "README.md")
+	if err := os.WriteFile(writePlaceholder, []byte("placeholder\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustGitImport(t, packDir, "add", "-A")
+	mustGitImport(t, packDir, "commit", "-m", "initial, no pack yet")
+	mustGitImport(t, packDir, "tag", "-a", "v0.1.0", "-m", "release v0.1.0")
+
+	// pack.toml lands AFTER the only tag, so v0.1.0's tree does not contain it.
+	packToml := filepath.Join(packDir, "pack.toml")
+	if err := os.WriteFile(packToml, []byte(`[pack]
+name = "stale-tag-pack"
+schema = 1
+
+[[agent]]
+name = "sentinel"
+scope = "city"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustGitImport(t, packDir, "add", "-A")
+	mustGitImport(t, packDir, "commit", "-m", "add pack.toml")
+	headCommit := gitOutputImport(t, packDir, "rev-parse", "HEAD")
+
+	relSource, err := filepath.Rel(dir, packDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doImportAdd(fsys.OSFS{}, dir, relSource, "", "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+
+	cfgFile, err := config.Load(fsys.OSFS{}, filepath.Join(dir, "pack.toml"))
+	if err != nil {
+		t.Fatalf("Load(pack.toml): %v", err)
+	}
+	resolvedPackDir, err := filepath.EvalSymlinks(packDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSource := "file://" + filepath.ToSlash(resolvedPackDir)
+	imp := cfgFile.Imports["stale-tag-pack"]
+	if got, want := imp.Version, "sha:"+headCommit; got != want {
+		t.Fatalf("Version = %q, want %q (must lock to HEAD, not the stale tag v0.1.0)", got, want)
+	}
+	lock, err := packman.ReadLockfile(fsys.OSFS{}, dir)
+	if err != nil {
+		t.Fatalf("ReadLockfile: %v", err)
+	}
+	if got := lock.Packs[wantSource].Commit; got != headCommit {
+		t.Fatalf("Commit = %q, want %q", got, headCommit)
 	}
 }
 

@@ -126,6 +126,11 @@ type ProvisionRequest struct {
 	// Off by default: a submodule URL is a second untrusted-URL surface the
 	// pre-clone SSRF host fence never saw.
 	RecurseSubmodules bool
+	// AllowEphemeralPath downgrades the non-persistent-rig-path refusal to a
+	// warning, for a city that is deliberately disposable. It is off by default
+	// and has no remote/API surface: a rig registered through the control plane
+	// must live somewhere that survives a controller replacement.
+	AllowEphemeralPath bool
 }
 
 // ProvisionResult carries the structured outcome the caller renders (CLI

@@ -70,7 +70,11 @@ func EnsureRepoInCache(cityRoot, source, commit string) (string, error) {
 }
 
 func ensureBundledRepoInCacheLocked(source, commit, cachePath string) (string, error) {
-	validationErr := builtinpacks.ValidateSyntheticRepo(cachePath, commit)
+	repository, ok := builtinpacks.RepositoryForSource(source)
+	if !ok {
+		return "", fmt.Errorf("resolving bundled repository for %q", source)
+	}
+	validationErr := builtinpacks.ValidateSyntheticRepo(cachePath, repository, commit)
 	if validationErr == nil {
 		if err := validateCachedPackRoot(source, cachePath); err != nil {
 			return "", err
@@ -156,7 +160,11 @@ func materializeBundledRepoInCacheLocked(source, commit, cachePath string) error
 	if cachePath != expected {
 		return fmt.Errorf("refusing to materialize bundled repo cache at non-canonical path %q, expected %q", cachePath, expected)
 	}
-	return materializeSyntheticRepo(cachePath, commit)
+	repository, ok := builtinpacks.RepositoryForSource(source)
+	if !ok {
+		return fmt.Errorf("resolving bundled repository for %q", source)
+	}
+	return materializeSyntheticRepo(cachePath, repository, commit)
 }
 
 func withRepoCacheReadLock(fn func() error) error {

@@ -57,19 +57,38 @@ func setPoolTemplateRuntimeIdentityInfo(tp *TemplateParams, desiredAlias string,
 		return
 	}
 	if strings.TrimSpace(info.Alias) != strings.TrimSpace(desiredAlias) && poolRuntimeAliasIsDeferredInfo(info) {
-		tp.Alias = ""
-		if tp.Env == nil {
-			tp.Env = make(map[string]string)
-		}
-		tp.Env["GC_ALIAS"] = ""
-		if tp.SessionName != "" {
-			tp.Env["GC_AGENT"] = tp.SessionName
-		}
-		tp.EnvIdentityStamped = false
+		clearPoolTemplateRuntimeIdentity(tp)
 		return
 	}
 	tp.Alias = desiredAlias
 	setTemplateEnvIdentity(tp, desiredAlias)
+}
+
+// clearPoolTemplateRuntimeIdentity leaves a pool spawn with no public identity:
+// no alias, an explicitly BLANK GC_ALIAS, and GC_AGENT on the session name.
+//
+// Blanking GC_ALIAS rather than skipping the stamp is load-bearing.
+// resolveTemplate seeds GC_ALIAS with the agent's bare qualified name for every
+// session (template_resolve.go), so a skipped stamp would leave every member of
+// a pool advertising the SAME identity — worse than per-slot names, because
+// then two live workers claim under one string. The empty value is also what
+// tmux session creation reads as "unset this key" (`env -u`).
+//
+// This was already the deferred-alias behavior for a slot whose name was
+// unavailable; unaliased pools make it the ordinary case.
+func clearPoolTemplateRuntimeIdentity(tp *TemplateParams) {
+	if tp == nil {
+		return
+	}
+	tp.Alias = ""
+	if tp.Env == nil {
+		tp.Env = make(map[string]string)
+	}
+	tp.Env["GC_ALIAS"] = ""
+	if tp.SessionName != "" {
+		tp.Env["GC_AGENT"] = tp.SessionName
+	}
+	tp.EnvIdentityStamped = false
 }
 
 // claimPoolSlotWithConfigInfo is the session.Info sibling of

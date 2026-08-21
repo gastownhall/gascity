@@ -384,6 +384,9 @@
               "null"
             ]
           },
+          "Rig": {
+            "type": "string"
+          },
           "ScaleCheck": {
             "type": [
               "string",
@@ -507,6 +510,7 @@
         },
         "required": [
           "Dir",
+          "Rig",
           "Name",
           "WorkDir",
           "TmuxAlias",
@@ -564,7 +568,7 @@
         "additionalProperties": false,
         "properties": {
           "dir": {
-            "description": "Agent directory scope.",
+            "description": "Agent directory scope (legacy targeting key; prefer rig).",
             "type": "string"
           },
           "env": {
@@ -580,6 +584,10 @@
           },
           "provider": {
             "description": "Override the agent's provider.",
+            "type": "string"
+          },
+          "rig": {
+            "description": "Rig targeting key. \"*\" matches the agent name across all rigs and city. Mutually exclusive with dir.",
             "type": "string"
           },
           "scope": {
@@ -1004,6 +1012,26 @@
           "bead_id",
           "existing_claimant",
           "attempted_claimant"
+        ],
+        "type": "object"
+      },
+      "BeadClaimReleasedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "assignee": {
+            "type": "string"
+          },
+          "bead_id": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "bead_id",
+          "assignee",
+          "reason"
         ],
         "type": "object"
       },
@@ -1769,6 +1797,47 @@
         ],
         "type": "object"
       },
+      "ControlStalledPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "attempts": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "bead_id": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          },
+          "error_class": {
+            "type": "string"
+          },
+          "first_seen": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "order_name": {
+            "type": "string"
+          },
+          "root_bead_id": {
+            "type": "string"
+          },
+          "store_path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "bead_id",
+          "error_class",
+          "first_seen",
+          "attempts",
+          "error"
+        ],
+        "type": "object"
+      },
       "ConversationGroupParticipant": {
         "additionalProperties": false,
         "properties": {
@@ -2398,6 +2467,9 @@
             "$ref": "#/components/schemas/BeadClaimRejectedPayload"
           },
           {
+            "$ref": "#/components/schemas/BeadClaimReleasedPayload"
+          },
+          {
             "$ref": "#/components/schemas/BeadDeadAssigneeReopenedPayload"
           },
           {
@@ -2423,6 +2495,15 @@
           },
           {
             "$ref": "#/components/schemas/ConditionalWritesDegradedPayload"
+          },
+          {
+            "$ref": "#/components/schemas/ControlStalledPayload"
+          },
+          {
+            "$ref": "#/components/schemas/ExecutionClaimWindowExpiredPayload"
+          },
+          {
+            "$ref": "#/components/schemas/ExecutionStepStalledPayload"
           },
           {
             "$ref": "#/components/schemas/GroupCreatedEventPayload"
@@ -2465,6 +2546,9 @@
           },
           {
             "$ref": "#/components/schemas/SessionCreateSucceededPayload"
+          },
+          {
+            "$ref": "#/components/schemas/SessionDemandClaimDivergencePayload"
           },
           {
             "$ref": "#/components/schemas/SessionDrainAckedWithAssignedWorkPayload"
@@ -2669,6 +2753,51 @@
           "type",
           "ts",
           "actor"
+        ],
+        "type": "object"
+      },
+      "ExecutionClaimWindowExpiredPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "bead_id": {
+            "type": "string"
+          },
+          "invocation_age_ms": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "parent_alive": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "bead_id",
+          "invocation_age_ms",
+          "parent_alive"
+        ],
+        "type": "object"
+      },
+      "ExecutionStepStalledPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "attempts": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "bead_id": {
+            "type": "string"
+          },
+          "root_bead_id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "bead_id",
+          "session_id",
+          "attempts"
         ],
         "type": "object"
       },
@@ -7221,6 +7350,36 @@
         "required": [
           "request_id",
           "session"
+        ],
+        "type": "object"
+      },
+      "SessionDemandClaimDivergencePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "classification": {
+            "type": "string"
+          },
+          "drain_reason": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "template": {
+            "type": "string"
+          },
+          "trigger_bead_id": {
+            "type": "string"
+          },
+          "trigger_status_at_drain": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "template",
+          "drain_reason",
+          "classification"
         ],
         "type": "object"
       },
@@ -11922,6 +12081,7 @@
           "mapping": {
             "backend.credential_resolved": "#/components/schemas/TypedEventStreamEnvelopeBackendCredentialResolved",
             "bead.claim_rejected": "#/components/schemas/TypedEventStreamEnvelopeBeadClaimRejected",
+            "bead.claim_released": "#/components/schemas/TypedEventStreamEnvelopeBeadClaimReleased",
             "bead.closed": "#/components/schemas/TypedEventStreamEnvelopeBeadClosed",
             "bead.created": "#/components/schemas/TypedEventStreamEnvelopeBeadCreated",
             "bead.dead_assignee_reopened": "#/components/schemas/TypedEventStreamEnvelopeBeadDeadAssigneeReopened",
@@ -11934,6 +12094,7 @@
             "city.resumed": "#/components/schemas/TypedEventStreamEnvelopeCityResumed",
             "city.suspended": "#/components/schemas/TypedEventStreamEnvelopeCitySuspended",
             "city.unregister_requested": "#/components/schemas/TypedEventStreamEnvelopeCityUnregisterRequested",
+            "control.stalled": "#/components/schemas/TypedEventStreamEnvelopeControlStalled",
             "controller.started": "#/components/schemas/TypedEventStreamEnvelopeControllerStarted",
             "controller.stopped": "#/components/schemas/TypedEventStreamEnvelopeControllerStopped",
             "convoy.closed": "#/components/schemas/TypedEventStreamEnvelopeConvoyClosed",
@@ -11941,8 +12102,11 @@
             "emergency.acked": "#/components/schemas/TypedEventStreamEnvelopeEmergencyAcked",
             "emergency.signaled": "#/components/schemas/TypedEventStreamEnvelopeEmergencySignaled",
             "events.rotated": "#/components/schemas/TypedEventStreamEnvelopeEventsRotated",
+            "execution.claim_window_expired": "#/components/schemas/TypedEventStreamEnvelopeExecutionClaimWindowExpired",
+            "execution.run_anchored": "#/components/schemas/TypedEventStreamEnvelopeExecutionRunAnchored",
             "execution.step_completed": "#/components/schemas/TypedEventStreamEnvelopeExecutionStepCompleted",
             "execution.step_defined": "#/components/schemas/TypedEventStreamEnvelopeExecutionStepDefined",
+            "execution.step_stalled": "#/components/schemas/TypedEventStreamEnvelopeExecutionStepStalled",
             "execution.step_started": "#/components/schemas/TypedEventStreamEnvelopeExecutionStepStarted",
             "execution.work_associated": "#/components/schemas/TypedEventStreamEnvelopeExecutionWorkAssociated",
             "extmsg.adapter_added": "#/components/schemas/TypedEventStreamEnvelopeExtmsgAdapterAdded",
@@ -11980,6 +12144,7 @@
             "rig.provision.progress": "#/components/schemas/TypedEventStreamEnvelopeRigProvisionProgress",
             "session.cold_start_timeout": "#/components/schemas/TypedEventStreamEnvelopeSessionColdStartTimeout",
             "session.crashed": "#/components/schemas/TypedEventStreamEnvelopeSessionCrashed",
+            "session.demand_claim_divergence": "#/components/schemas/TypedEventStreamEnvelopeSessionDemandClaimDivergence",
             "session.drain_acked_with_assigned_work": "#/components/schemas/TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork",
             "session.draining": "#/components/schemas/TypedEventStreamEnvelopeSessionDraining",
             "session.idle_killed": "#/components/schemas/TypedEventStreamEnvelopeSessionIdleKilled",
@@ -12014,6 +12179,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadClaimRejected"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadClaimReleased"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadClosed"
@@ -12052,6 +12220,9 @@
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeCityUnregisterRequested"
           },
           {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeControlStalled"
+          },
+          {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeControllerStarted"
           },
           {
@@ -12073,10 +12244,19 @@
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeEventsRotated"
           },
           {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeExecutionClaimWindowExpired"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeExecutionRunAnchored"
+          },
+          {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeExecutionStepCompleted"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeExecutionStepDefined"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeExecutionStepStalled"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeExecutionStepStarted"
@@ -12188,6 +12368,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionCrashed"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionDemandClaimDivergence"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork"
@@ -12382,6 +12565,63 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope bead.claim_rejected",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeBeadClaimReleased": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/BeadClaimReleasedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "bead.claim_released",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope bead.claim_released",
         "type": "object"
       },
       "TypedEventStreamEnvelopeBeadClosed": {
@@ -13068,6 +13308,63 @@
         "title": "TypedEventStreamEnvelope city.unregister_requested",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeControlStalled": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ControlStalledPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "control.stalled",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope control.stalled",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeControllerStarted": {
         "additionalProperties": false,
         "properties": {
@@ -13351,6 +13648,7 @@
                 "session.unknown_state",
                 "session.reset_stalled",
                 "session.work_query_failed",
+                "session.demand_claim_divergence",
                 "session.cold_start_timeout",
                 "bead.created",
                 "bead.closed",
@@ -13359,11 +13657,15 @@
                 "bead.worktree.reaped",
                 "bead.worktree.reap_skipped",
                 "bead.claim_rejected",
+                "bead.claim_released",
                 "bead.dead_assignee_reopened",
                 "execution.work_associated",
+                "execution.run_anchored",
                 "execution.step_defined",
                 "execution.step_started",
                 "execution.step_completed",
+                "execution.claim_window_expired",
+                "execution.step_stalled",
                 "mail.sent",
                 "mail.read",
                 "mail.archived",
@@ -13375,6 +13677,7 @@
                 "convoy.closed",
                 "controller.started",
                 "controller.stopped",
+                "control.stalled",
                 "city.suspended",
                 "city.resumed",
                 "request.result.city.create",
@@ -13610,6 +13913,120 @@
         "title": "TypedEventStreamEnvelope events.rotated",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeExecutionClaimWindowExpired": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ExecutionClaimWindowExpiredPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "execution.claim_window_expired",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope execution.claim_window_expired",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeExecutionRunAnchored": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/NoPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "execution.run_anchored",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope execution.run_anchored",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeExecutionStepCompleted": {
         "additionalProperties": false,
         "properties": {
@@ -13722,6 +14139,63 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope execution.step_defined",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeExecutionStepStalled": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ExecutionStepStalledPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "execution.step_stalled",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope execution.step_stalled",
         "type": "object"
       },
       "TypedEventStreamEnvelopeExecutionStepStarted": {
@@ -15833,6 +16307,63 @@
         "title": "TypedEventStreamEnvelope session.crashed",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeSessionDemandClaimDivergence": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionDemandClaimDivergencePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.demand_claim_divergence",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.demand_claim_divergence",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork": {
         "additionalProperties": false,
         "properties": {
@@ -17264,6 +17795,7 @@
           "mapping": {
             "backend.credential_resolved": "#/components/schemas/TypedTaggedEventStreamEnvelopeBackendCredentialResolved",
             "bead.claim_rejected": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadClaimRejected",
+            "bead.claim_released": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadClaimReleased",
             "bead.closed": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadClosed",
             "bead.created": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadCreated",
             "bead.dead_assignee_reopened": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadDeadAssigneeReopened",
@@ -17276,6 +17808,7 @@
             "city.resumed": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityResumed",
             "city.suspended": "#/components/schemas/TypedTaggedEventStreamEnvelopeCitySuspended",
             "city.unregister_requested": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityUnregisterRequested",
+            "control.stalled": "#/components/schemas/TypedTaggedEventStreamEnvelopeControlStalled",
             "controller.started": "#/components/schemas/TypedTaggedEventStreamEnvelopeControllerStarted",
             "controller.stopped": "#/components/schemas/TypedTaggedEventStreamEnvelopeControllerStopped",
             "convoy.closed": "#/components/schemas/TypedTaggedEventStreamEnvelopeConvoyClosed",
@@ -17283,8 +17816,11 @@
             "emergency.acked": "#/components/schemas/TypedTaggedEventStreamEnvelopeEmergencyAcked",
             "emergency.signaled": "#/components/schemas/TypedTaggedEventStreamEnvelopeEmergencySignaled",
             "events.rotated": "#/components/schemas/TypedTaggedEventStreamEnvelopeEventsRotated",
+            "execution.claim_window_expired": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired",
+            "execution.run_anchored": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionRunAnchored",
             "execution.step_completed": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionStepCompleted",
             "execution.step_defined": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionStepDefined",
+            "execution.step_stalled": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionStepStalled",
             "execution.step_started": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionStepStarted",
             "execution.work_associated": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionWorkAssociated",
             "extmsg.adapter_added": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgAdapterAdded",
@@ -17322,6 +17858,7 @@
             "rig.provision.progress": "#/components/schemas/TypedTaggedEventStreamEnvelopeRigProvisionProgress",
             "session.cold_start_timeout": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionColdStartTimeout",
             "session.crashed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionCrashed",
+            "session.demand_claim_divergence": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence",
             "session.drain_acked_with_assigned_work": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork",
             "session.draining": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDraining",
             "session.idle_killed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionIdleKilled",
@@ -17356,6 +17893,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadClaimRejected"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadClaimReleased"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadClosed"
@@ -17394,6 +17934,9 @@
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityUnregisterRequested"
           },
           {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeControlStalled"
+          },
+          {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeControllerStarted"
           },
           {
@@ -17415,10 +17958,19 @@
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeEventsRotated"
           },
           {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionRunAnchored"
+          },
+          {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionStepCompleted"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionStepDefined"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionStepStalled"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionStepStarted"
@@ -17530,6 +18082,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionCrashed"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork"
@@ -17732,6 +18287,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope bead.claim_rejected",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeBeadClaimReleased": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/BeadClaimReleasedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "bead.claim_released",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope bead.claim_released",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeBeadClosed": {
@@ -18466,6 +19082,67 @@
         "title": "TypedTaggedEventStreamEnvelope city.unregister_requested",
         "type": "object"
       },
+      "TypedTaggedEventStreamEnvelopeControlStalled": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ControlStalledPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "control.stalled",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope control.stalled",
+        "type": "object"
+      },
       "TypedTaggedEventStreamEnvelopeControllerStarted": {
         "additionalProperties": false,
         "properties": {
@@ -18768,6 +19445,7 @@
                 "session.unknown_state",
                 "session.reset_stalled",
                 "session.work_query_failed",
+                "session.demand_claim_divergence",
                 "session.cold_start_timeout",
                 "bead.created",
                 "bead.closed",
@@ -18776,11 +19454,15 @@
                 "bead.worktree.reaped",
                 "bead.worktree.reap_skipped",
                 "bead.claim_rejected",
+                "bead.claim_released",
                 "bead.dead_assignee_reopened",
                 "execution.work_associated",
+                "execution.run_anchored",
                 "execution.step_defined",
                 "execution.step_started",
                 "execution.step_completed",
+                "execution.claim_window_expired",
+                "execution.step_stalled",
                 "mail.sent",
                 "mail.read",
                 "mail.archived",
@@ -18792,6 +19474,7 @@
                 "convoy.closed",
                 "controller.started",
                 "controller.stopped",
+                "control.stalled",
                 "city.suspended",
                 "city.resumed",
                 "request.result.city.create",
@@ -19040,6 +19723,128 @@
         "title": "TypedTaggedEventStreamEnvelope events.rotated",
         "type": "object"
       },
+      "TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ExecutionClaimWindowExpiredPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "execution.claim_window_expired",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope execution.claim_window_expired",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeExecutionRunAnchored": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/NoPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "execution.run_anchored",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope execution.run_anchored",
+        "type": "object"
+      },
       "TypedTaggedEventStreamEnvelopeExecutionStepCompleted": {
         "additionalProperties": false,
         "properties": {
@@ -19160,6 +19965,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope execution.step_defined",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeExecutionStepStalled": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ExecutionStepStalledPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "execution.step_stalled",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope execution.step_stalled",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeExecutionStepStarted": {
@@ -21417,6 +22283,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope session.crashed",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionDemandClaimDivergencePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.demand_claim_divergence",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.demand_claim_divergence",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork": {

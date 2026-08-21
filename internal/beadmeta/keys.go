@@ -61,6 +61,18 @@ const (
 	ControllerErrorClassMetadataKey      = "gc.controller_error_class"
 	ControllerErrorMetadataKey           = "gc.controller_error"
 	ControllerRetryableMetadataKey       = "gc.controller_retryable"
+	// ControllerRetryFirstSeenMetadataKey is the RFC3339 instant of the FIRST
+	// semantic-refusal retry recorded for a control bead. It is the persisted
+	// deadline anchor for the bounded Tier-B retry budget: it lives on the bead
+	// rather than in dispatcher memory precisely so a control-dispatcher restart
+	// cannot reset the clock. Written once and never re-stamped while the bead
+	// keeps failing; cleared with the other controller-error keys on recovery.
+	ControllerRetryFirstSeenMetadataKey = "gc.controller_retry_first_seen"
+	// ControllerRetryCountMetadataKey counts the semantic-refusal retries
+	// recorded for a control bead. Diagnostics only — the budget is a deadline,
+	// not a count, because per-attempt cost varies by two orders of magnitude
+	// between a healthy and a saturated store.
+	ControllerRetryCountMetadataKey = "gc.controller_retry_count"
 	// CoordinatorOutcomeProducerDispositionMetadataKey holds the typed-close JSON
 	// envelope written by gc-outcome-close.
 	CoordinatorOutcomeProducerDispositionMetadataKey = "gc.coordinator_outcome.producer_disposition"
@@ -131,7 +143,6 @@ const (
 	KindMetadataKey                      = "gc.kind"
 	LastFailureClassMetadataKey          = "gc.last_failure_class"
 	LastFinalizeErrorMetadataKey         = "gc.last_finalize_error"
-	LastHeartbeatAtMetadataKey           = "gc.last_heartbeat_at"
 	LogicalBeadIDMetadataKey             = "gc.logical_bead_id"
 	MaxAttemptsMetadataKey               = "gc.max_attempts"
 	MissingRootBeadIDMetadataKey         = "gc.missing_root_bead_id"
@@ -165,6 +176,8 @@ const (
 	RigRootMetadataKey                   = "gc.rig_root"
 	RootBeadIDMetadataKey                = "gc.root_bead_id"
 	RootStoreRefMetadataKey              = "gc.root_store_ref"
+	RouteQuarantineMetadataKey           = "gc.route_recovery_quarantined"
+	RouteQuarantineReasonMetadataKey     = "gc.route_recovery_quarantine_reason"
 	RoutedToMetadataKey                  = "gc.routed_to"
 	RunTargetMetadataKey                 = "gc.run_target"
 	RuntimeVarsMetadataKey               = "gc.graphv2_vars.v1"
@@ -269,6 +282,37 @@ const (
 	LegacyWorkDirMetadataKey = "work_dir"
 )
 
+// Session-attribute keys: the non-"gc."-prefixed family written onto SESSION
+// beads (the sibling of the directory keys above; session beads spell their
+// attributes bare — "state", "session_name", "currently_processing_bead_id" —
+// and those live with their owner in internal/session). Only the keys a second
+// package must agree on are declared here, so the vocabulary has one home. Like
+// the directory keys they are intentionally NOT in KnownMetadataKeys, whose
+// drift guard only covers the gc. namespace.
+const (
+	// CurrentClaimBeadIDMetadataKey records, on the CLAIMING SESSION's bead, the
+	// id of the work bead that session most recently claimed through
+	// `gc hook --claim`. It is the durable back-channel that makes the claimed
+	// step id readable from the step's own shell: a pool session's shell has no
+	// GC_BEAD_ID / GC_TRIGGER_BEAD_ID (those exist only in the dispatch
+	// condition-script environment, internal/convergence/condition.go), so
+	// without this stamp a formula step cannot name the bead it is running and
+	// silently skips its own close. `gc hook current` reads it back.
+	//
+	// It is deliberately distinct from internal/session.CurrentBeadIDKey
+	// ("currently_processing_bead_id"), which the session RECONCILER stamps when
+	// it wakes a session with an already-assigned work bead. That key describes
+	// a controller-side assignment; this one describes a claim the session made
+	// for itself, and the two lanes must not clobber each other's value.
+	//
+	// A stale stamp is dangerous for the same reason a stale session-affinity
+	// key is (see SessionAffinityMetadataKeys): a session that has released its
+	// work would otherwise keep naming a bead it no longer owns, and the next
+	// step to ask `gc hook current` would close somebody else's bead. Every path
+	// that takes work off a session clears it.
+	CurrentClaimBeadIDMetadataKey = "current_claim_bead_id"
+)
+
 // Dispatch metadata keys: a non-"gc."-prefixed family that sling writes onto
 // work and source beads to wire molecules together and record the merge
 // strategy. They predate the gc. namespace convention and their on-store
@@ -325,6 +369,8 @@ var KnownMetadataKeys = []string{
 	ControllerErrorClassMetadataKey,
 	ControllerErrorMetadataKey,
 	ControllerRetryableMetadataKey,
+	ControllerRetryFirstSeenMetadataKey,
+	ControllerRetryCountMetadataKey,
 	CoordinatorOutcomeProducerDispositionMetadataKey,
 	CurrentRunIDMetadataKey,
 	CwdMetadataKey,
@@ -381,7 +427,6 @@ var KnownMetadataKeys = []string{
 	KindMetadataKey,
 	LastFailureClassMetadataKey,
 	LastFinalizeErrorMetadataKey,
-	LastHeartbeatAtMetadataKey,
 	LogicalBeadIDMetadataKey,
 	MaxAttemptsMetadataKey,
 	MissingRootBeadIDMetadataKey,
@@ -415,6 +460,8 @@ var KnownMetadataKeys = []string{
 	RigRootMetadataKey,
 	RootBeadIDMetadataKey,
 	RootStoreRefMetadataKey,
+	RouteQuarantineMetadataKey,
+	RouteQuarantineReasonMetadataKey,
 	RoutedToMetadataKey,
 	RunTargetMetadataKey,
 	RuntimeVarsMetadataKey,

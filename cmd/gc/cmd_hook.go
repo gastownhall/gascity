@@ -62,6 +62,7 @@ With --claim: runs the standard startup claim protocol for one work item.
 		flag.Hidden = true
 	}
 	cmd.AddCommand(newHookRunCmd(stdout, stderr))
+	cmd.AddCommand(newHookCurrentCmd(stdout, stderr))
 	return cmd
 }
 
@@ -119,6 +120,15 @@ func cmdHookRun(args []string, opts hookRunOptions, stdin io.Reader, stdout, std
 		return 1
 	}
 	cmd := exec.CommandContext(ctx, exe, args...)
+	// Mark the child as a provider CALLBACK lane. gc hook run is the managed
+	// wrapper every rendered provider hook command flows through, and it runs
+	// arbitrary gc argv verbatim — nothing stops `hook --claim` appearing there,
+	// today by operator edit and tomorrow by a new overlay. A callback's stdout
+	// goes to the hook runner, never to a model, so a claim minted in one is
+	// parked the instant it is won; the claim path refuses on this marker (F-A,
+	// hookClaimNonTurnMarker). Every other hook use of a callback lane —
+	// --inject, nudge drain, mail check — is read-only and unaffected.
+	cmd.Env = append(os.Environ(), "GC_HOOK_CALLBACK_LANE=1")
 	// Read the provider's hook stdin FULLY into a buffer before running the
 	// wrapped command, then hand it that buffer. Forwarding the live stdin
 	// (cmd.Stdin = stdin) let the wrapped command exit — on its fast path or on
@@ -299,6 +309,17 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	// transient session-store fault, so a healthy worker still falls through to the
 	// suspension and config checks below.
 	if opts.Claim {
+		// F-A, at the earliest point that can answer it. tryHookClaim carries the
+		// same fence over the same predicate — it is the seam every ops-level
+		// caller funnels through — but by the time it runs, the federated store
+		// selection has already spent a work query bounded by hookWorkQueryTimeout
+		// (150s), and a provider callback's whole budget is 15s
+		// (defaultHookRunTimeout). Refusing here keeps a callback lane cheap and
+		// makes its refusal something the provider actually receives rather than
+		// something its timeout truncates.
+		if marker := hookClaimNonTurnMarker(os.Environ()); marker != "" {
+			return writeHookClaimNonTurnDrain(marker, hookClaimOptions{JSON: opts.JSON}, stdout, stderr)
+		}
 		if code, handled := fenceHookClaimSession(cityPath, cfg, strings.TrimSpace(os.Getenv("GC_SESSION_ID")), opts, stdout, stderr); handled {
 			return code
 		}
@@ -648,16 +669,22 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 	// report claims_errored instead of laundering a write failure into no_work.
 	claimsErrored := false
 	for len(remaining) > 0 {
-		_, selected, err := bestStoreWithWork(workQuery, remaining, primary, run)
+		discovered, selected, err := selectStoreWithWorkRetrying(workQuery, remaining, primary, run)
 		if err != nil {
 			emitFailure(workQuery, err)
 			fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck // best-effort stderr
+			// Deliberately NO drain result and NO drain-ack. A failed read is not
+			// an idle store: the controller counted demand for this seat, so
+			// draining here would convert a transport failure into a false idle,
+			// reap the seat, and leave the work for the next tick to rediscover.
+			// Exit non-zero, keep the seat, and let the event above carry the
+			// cause; the idle-claim backstop re-drives the hook.
 			return 1
 		}
 		if isZeroHookStore(selected) {
 			break // no remaining store has ready work
 		}
-		claimOutput, claimStore, err := claimStoreWithFallback(workQuery, remaining, selected, primary, run)
+		claimOutput, claimStore, err := claimStoreWithFallback(workQuery, remaining, selected, primary, discovered, run)
 		if err != nil {
 			emitFailure(workQuery, err)
 			fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -692,7 +719,32 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		// signal to the shared drain.
 		remaining = removeHookStore(remaining, claimStore)
 	}
-	return writeHookClaimNoWork(claimOpts, ops, claimsErrored, stdout, stderr)
+	return writeHookClaimNoWork(claimOpts, ops, claimsErrored, workDir, stdout, stderr)
+}
+
+// Claim-read retry pacing. A work-query ERROR is a failed read, and the failures
+// this bounds are transport-shaped: a contended SQLite leg, a store mid-write, a
+// binding whose engine is briefly refusing. Those clear in seconds, and the
+// alternative — exiting 1 and parking a seat the controller minted demand for
+// until the 90s backstop re-drives it — is strictly worse. Emptiness is NOT
+// retried: an empty read is an answer, and a seat that lost the sibling race must
+// drain promptly. Package vars follow hookWorkQueryTimeout's convention so tests
+// drive the loop without sleeping.
+var (
+	hookClaimQueryRetryAttempts = 3
+	hookClaimQueryRetryInterval = 5 * time.Second
+)
+
+// selectStoreWithWorkRetrying is bestStoreWithWork with a bounded retry around
+// the ERROR case only. It returns the first successful selection, or the last
+// error once the budget is spent.
+func selectStoreWithWorkRetrying(workQuery string, stores []hookStore, primary hookStore, run hookStoreRunner) (string, hookStore, error) {
+	out, selected, err := bestStoreWithWork(workQuery, stores, primary, run)
+	for attempt := 0; err != nil && attempt < hookClaimQueryRetryAttempts; attempt++ {
+		time.Sleep(hookClaimQueryRetryInterval)
+		out, selected, err = bestStoreWithWork(workQuery, stores, primary, run)
+	}
+	return out, selected, err
 }
 
 func hookClaimPrimaryRouteTarget(a *config.Agent) string {
@@ -787,7 +839,15 @@ type WorkQueryRunner func(command, dir string) (string, error)
 // check) and does not enclose this work query. The package-level var lets us
 // lower it again once the probe's round-trip count is reduced and the slow
 // per-rig `bd ready`/`gc ready` paths are optimized.
-var hookWorkQueryTimeout = 60 * time.Second
+//
+// 2026-08-14: raised 60s -> 150s. Measured on a loaded six-rig city: each
+// `gc ready` leg of the default probe costs 10-14s (~4s process start + a
+// 6-leg federated read), and the five sequential reads put the pool-demand
+// payoff call at t=60s exactly — 850+ session.work_query_failed events with
+// every hook starved while `gc ready` run standalone returned the routed
+// rows. 150s covers the measured worst case (~70s) with margin for load;
+// the real cure remains ga-4qdfn (fewer round-trips, faster reader).
+var hookWorkQueryTimeout = 150 * time.Second
 
 // shellWorkQueryWithEnv runs a work query command via sh -c and returns
 // stdout. If env is non-nil it is used as the subprocess environment

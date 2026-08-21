@@ -582,7 +582,10 @@ func livePaneShowsBusyIndicator(lines []string) bool {
 	for _, line := range lines {
 		if strings.Contains(line, "esc to interrupt") ||
 			strings.Contains(line, "Press Esc or Ctrl+C to cancel") ||
-			strings.Contains(line, "[current working directory ") {
+			strings.Contains(line, "[current working directory ") ||
+			// The zcode adapter runs each turn as a headless call, so its pane
+			// has no TUI spinner; it announces the in-flight turn instead.
+			strings.Contains(line, "zcode-repl turn in flight") {
 			return true
 		}
 	}

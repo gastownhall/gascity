@@ -125,6 +125,16 @@ func selectedPhase2ProviderCases(t *testing.T) []phase2ProviderCase {
 			wantModelOverrideArgs: []string{"--model", "xiaomi-token-plan-sgp/mimo-v2.5-pro"},
 		},
 		{
+			profileID:             "zcode/tmux-cli",
+			family:                "zcode",
+			wantCommand:           "zcode-repl",
+			wantPromptMode:        "none",
+			wantReadyDelayMs:      3000,
+			wantReadyPromptPrefix: "zcode-repl ready",
+			wantProcessNames:      []string{"bash", "node"},
+			wantAcceptDialogs:     phase2BoolPtr(false),
+		},
+		{
 			profileID:             "antigravity/tmux-cli",
 			family:                "antigravity",
 			wantCommand:           "agy --dangerously-skip-permissions",

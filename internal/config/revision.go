@@ -124,7 +124,7 @@ func (p *Provenance) captureRevisionSnapshot(fs fsys.FS, cfg *City, cityRoot str
 		fileKnown:    make(map[string]bool),
 	}
 	recordDir := func(label, dir string) {
-		snap.dirHashes[label] = PackContentHashRecursive(fs, dir)
+		snap.dirHashes[label] = packContentHashRecursive(fs, dir, false)
 	}
 
 	for _, r := range cfg.Rigs {
@@ -189,7 +189,7 @@ func (p *Provenance) recordMissingSourceContents(fs fsys.FS) {
 func writeRevisionDirHash(h hash.Hash, prov *Provenance, label string, fs fsys.FS, dir string) {
 	topoHash, ok := revisionSnapshotDirHash(prov, label)
 	if !ok {
-		topoHash = PackContentHashRecursive(fs, dir)
+		topoHash = packContentHashRecursive(fs, dir, false)
 	}
 	writeRevisionBytes(h, label, []byte(topoHash))
 }

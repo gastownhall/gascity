@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -1791,6 +1792,54 @@ name = "demo"
 	t.Setenv("GC_DOLT_PORT", port)
 }
 
+// managedDoltTestSetup is silentFallbackTestSetup for a Dolt endpoint gc
+// actually manages. The difference is the scope config: managed_city origin
+// with no explicit dolt.host/dolt.port, so the endpoint resolves from the
+// managed runtime state writeReachableManagedDoltState wrote and reports
+// External=false. silentFallbackTestSetup's city_canonical + explicit
+// host/port shape resolves External=true even on 127.0.0.1, which is a
+// server gc does not own.
+func managedDoltTestSetup(t *testing.T, fakeBdScript string) {
+	t.Helper()
+
+	origCityFlag := cityFlag
+	origRigFlag := rigFlag
+	t.Cleanup(func() {
+		cityFlag = origCityFlag
+		rigFlag = origRigFlag
+	})
+	cityFlag = ""
+	rigFlag = ""
+
+	cityDir := t.TempDir()
+	port := strconv.Itoa(writeReachableManagedDoltState(t, cityDir))
+
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := "issue_prefix: demo\n" +
+		"gc.endpoint_origin: managed_city\n" +
+		"gc.endpoint_status: verified\n" +
+		"dolt.auto-start: false\n"
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(fakeBdScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	origPath := os.Getenv("PATH")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+origPath)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_DOLT_PORT", port)
+}
+
 // TestGcBdSurfacesSilentFallbackAsLoudError_UpdatePath pins the #2080 fix:
 // when bd's update path silently falls back to the on-disk store, gc bd must
 // convert that into a non-zero exit with an operator-facing message instead
@@ -1915,6 +1964,115 @@ exit 3
 	}
 }
 
+// doltStartConflictFakeBdScript emits bd's real "managed Dolt unreachable,
+// start it yourself" banner (gastownhall/gascity#1374) and exits 1, the way
+// bd behaves when dolt.auto-start is disabled (as gc always sets it in a
+// managed city) and the managed server has gone down.
+const doltStartConflictFakeBdScript = `#!/bin/sh
+echo "Dolt server unreachable at 127.0.0.1:0: dial tcp 127.0.0.1:0: connect: can't assign requested address" >&2
+echo "" >&2
+echo "Dolt server auto-start is disabled (dolt.auto-start: false)." >&2
+echo "Start the server manually:" >&2
+echo "  bd dolt start" >&2
+exit 1
+`
+
+// TestGcBdSurfacesDoltStartConflictHint pins the #1374 fix: when bd's own
+// error output suggests running "bd dolt start" to recover, gc bd must
+// append a corrective hint pointing at the gc-managed remedy instead,
+// because following bd's own suggestion starts a second, unmanaged Dolt
+// server that conflicts with gc's on the same data directory. bd's original
+// output and exit code must still pass through unchanged. The scope is a
+// gc-managed endpoint — the only topology where gc's own lifecycle commands
+// are the remedy.
+func TestGcBdSurfacesDoltStartConflictHint(t *testing.T) {
+	managedDoltTestSetup(t, doltStartConflictFakeBdScript)
+
+	var stdout, stderr bytes.Buffer
+	got := doBd([]string{"list"}, &stdout, &stderr)
+	if got != 1 {
+		t.Fatalf("doBd(list) = %d, want 1 (bd's own exit code preserved); stderr=%q", got, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "bd dolt start") {
+		t.Fatalf("original bd stderr not passed through; stderr=%q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "gc start") {
+		t.Fatalf("stderr missing corrective hint toward the gc-managed remedy; stderr=%q", stderr.String())
+	}
+}
+
+// TestGcBdNoDoltStartConflictHintOnExternalEndpoint pins the ownership gate:
+// gc bd disables bd's auto-start for every endpoint, so an unreachable
+// external endpoint emits the same "run bd dolt start" banner. gc does not
+// own that server, so `gc start` / `gc dolt restart` cannot recover it and
+// the hint must stay silent — bd's own output and exit code are the whole
+// answer there. silentFallbackTestSetup's city_canonical + explicit
+// host/port config is exactly that topology (External=true even though the
+// host is 127.0.0.1).
+func TestGcBdNoDoltStartConflictHintOnExternalEndpoint(t *testing.T) {
+	silentFallbackTestSetup(t, doltStartConflictFakeBdScript)
+
+	var stdout, stderr bytes.Buffer
+	got := doBd([]string{"list"}, &stdout, &stderr)
+	if got != 1 {
+		t.Fatalf("doBd(list) = %d, want 1 (bd's own exit code preserved); stderr=%q", got, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "bd dolt start") {
+		t.Fatalf("original bd stderr not passed through; stderr=%q", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "gc start") {
+		t.Fatalf("corrective hint fired for an endpoint gc does not manage; stderr=%q", stderr.String())
+	}
+}
+
+// TestGcBdNoDoltStartConflictHintOnUnrelatedError guards against a false
+// positive: a plain bd usage error that happens to share no wording with
+// the "bd dolt start" banner must not trigger the corrective hint.
+func TestGcBdNoDoltStartConflictHintOnUnrelatedError(t *testing.T) {
+	const bdRejectsScript = `#!/bin/sh
+echo "bd: simulated usage error" >&2
+exit 3
+`
+	silentFallbackTestSetup(t, bdRejectsScript)
+
+	var stdout, stderr bytes.Buffer
+	got := doBd([]string{"list"}, &stdout, &stderr)
+	if got != 3 {
+		t.Fatalf("doBd(list) = %d, want 3 (bd's own exit code preserved); stderr=%q", got, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "gc start") {
+		t.Fatalf("corrective hint fired on an unrelated bd error; stderr=%q", stderr.String())
+	}
+}
+
+// TestBdOutputSuggestsConflictingDoltStart covers the marker-detection
+// helper directly with table-driven cases so the source-of-truth for what
+// counts as "bd suggested a conflicting bd dolt start" is unit-pinned.
+func TestBdOutputSuggestsConflictingDoltStart(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{"empty", "", false},
+		{"single marker only auto-start-disabled", "Dolt server auto-start is disabled (dolt.auto-start: false).", false},
+		{"single marker only bd dolt start", "  bd dolt start", false},
+		{"both markers, real bd banner", "Dolt server unreachable at 127.0.0.1:0: dial tcp 127.0.0.1:0: connect: can't assign requested address\n\nDolt server auto-start is disabled (dolt.auto-start: false).\nStart the server manually:\n  bd dolt start\n", true},
+		{"both markers same line", "auto-start is disabled, run bd dolt start", true},
+		{"case insensitive", "DOLT SERVER AUTO-START IS DISABLED. RUN: BD DOLT START", true},
+		{"unrelated transport error", "dial tcp 127.0.0.1:3306: connect: connection refused", false},
+		{"unrelated usage error", "bd: simulated usage error", false},
+		{"bd dolt start mentioned without disabled marker", "see 'bd dolt start --help' for standalone usage", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := bdOutputSuggestsConflictingDoltStart(tt.input); got != tt.want {
+				t.Errorf("bdOutputSuggestsConflictingDoltStart(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestBdOutputIndicatesSilentFallback covers the marker-detection helper
 // directly with table-driven cases so the source-of-truth for what counts
 // as "silent fallback" is unit-pinned.
@@ -1982,19 +2140,13 @@ func TestHeadLimitedWriter(t *testing.T) {
 	})
 }
 
-// TestGcBdHeartbeatRewritesToMetadataUpdate pins the gastownhall/gascity#1855
-// worker-heartbeat write half: `gc bd heartbeat <id>` must forward to bd as
-// `update <id> --set-metadata gc.last_heartbeat_at=<RFC3339 UTC>`. The exact
-// key (with the _at suffix) is what the gas-city-dashboard will read
-// (dashboard #324) to tell a live worker from a dead one, and the stamp must
-// be valid RFC3339 in UTC even when the local clock is in another zone.
-func TestGcBdHeartbeatRewritesToMetadataUpdate(t *testing.T) {
-	origNow := bdHeartbeatNow
-	t.Cleanup(func() { bdHeartbeatNow = origNow })
-	// Pin the clock to a non-UTC zone to prove the rewrite normalizes to UTC.
-	fixed := time.Date(2026, 5, 31, 12, 0, 0, 0, time.FixedZone("PST", -8*3600))
-	bdHeartbeatNow = func() time.Time { return fixed }
-
+// TestGcBdHeartbeatForwardsNativeLeaseRefresh pins the dip-wdt5aq fix:
+// `gc bd heartbeat <id>` must forward to bd's NATIVE heartbeat subcommand,
+// which refreshes lease_expires_at and fails loudly when the caller no longer
+// owns the claim. The old rewrite to `update --set-metadata` reported success
+// while leaving the lease untouched, so a reviewer's claim could be reclaimed
+// mid-review by a command that had just printed success.
+func TestGcBdHeartbeatForwardsNativeLeaseRefresh(t *testing.T) {
 	// The fake bd captures its forwarded args so the assertion can inspect them.
 	capture := filepath.Join(t.TempDir(), "gc-bd-args.txt")
 	silentFallbackTestSetup(t, "#!/bin/sh\nprintf '%s' \"$*\" > \"${CAPTURE_PATH}\"\n")
@@ -2009,21 +2161,8 @@ func TestGcBdHeartbeatRewritesToMetadataUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const prefix = "update demo-abc --set-metadata " + heartbeatMetadataKey + "="
-	gotArgs := string(data)
-	stamp, ok := strings.CutPrefix(gotArgs, prefix)
-	if !ok {
-		t.Fatalf("forwarded args = %q, want prefix %q", gotArgs, prefix)
-	}
-	parsed, err := time.Parse(time.RFC3339, stamp)
-	if err != nil {
-		t.Fatalf("heartbeat stamp %q is not valid RFC3339: %v", stamp, err)
-	}
-	if _, offset := parsed.Zone(); offset != 0 {
-		t.Fatalf("heartbeat stamp %q is not UTC (zone offset %d)", stamp, offset)
-	}
-	if want := fixed.UTC().Format(time.RFC3339); stamp != want {
-		t.Fatalf("heartbeat stamp = %q, want %q", stamp, want)
+	if gotArgs := string(data); gotArgs != "heartbeat demo-abc" {
+		t.Fatalf("forwarded args = %q, want native %q", gotArgs, "heartbeat demo-abc")
 	}
 }
 
@@ -2048,13 +2187,13 @@ func TestRewriteBdHeartbeatArgs(t *testing.T) {
 			}
 		}
 	})
-	t.Run("rewrites a clean id to a set-metadata update", func(t *testing.T) {
+	t.Run("forwards a clean id to bd's native heartbeat", func(t *testing.T) {
 		out, err := rewriteBdHeartbeatArgs([]string{"heartbeat", "demo-abc"})
 		if err != nil {
 			t.Fatalf("rewriteBdHeartbeatArgs unexpected error: %v", err)
 		}
-		if len(out) != 4 || out[0] != "update" || out[1] != "demo-abc" || out[2] != "--set-metadata" {
-			t.Fatalf("rewriteBdHeartbeatArgs = %q, want [update demo-abc --set-metadata ...]", out)
+		if len(out) != 2 || out[0] != "heartbeat" || out[1] != "demo-abc" {
+			t.Fatalf("rewriteBdHeartbeatArgs = %q, want native [heartbeat demo-abc]", out)
 		}
 	})
 	t.Run("passes non-heartbeat args through unchanged", func(t *testing.T) {
@@ -2084,6 +2223,8 @@ func TestBdMutationWriteID(t *testing.T) {
 			{[]string{"reopen", "gcy-dv7"}, "gcy-dv7"},
 			{[]string{"delete", "--force", "gcy-dv7"}, "gcy-dv7"},
 			{[]string{"delete", "--force", "--json", "gcy-dv7"}, "gcy-dv7"},
+			// heartbeat: native lease refresh, guarded like the other writes
+			{[]string{"heartbeat", "gcy-dv7"}, "gcy-dv7"},
 			// double-dash separator
 			{[]string{"update", "--", "gcy-dv7"}, "gcy-dv7"},
 		}
@@ -2261,6 +2402,26 @@ func TestBdMutationWriteIDs(t *testing.T) {
 			name: "unknown short flag triggers fail-closed",
 			args: []string{"update", "-z", "something", "gcy-dv7"},
 			want: result{ok: true, ambiguous: true},
+		},
+
+		// --- heartbeat: native lease refresh under the exact-ID guard ---
+		// gc bd heartbeat forwards to bd's native owner-only lease refresh — a
+		// lease-mutating write — so it must take the same exact-ID collision
+		// preflight as update/close/reopen/delete (synthesis New Findings:
+		// Contract & Interface Fidelity). rewriteBdHeartbeatArgs has already
+		// reduced the argv to exactly ["heartbeat", "<id>"] (a single
+		// pre-validated positional id, no flags) before this scanner runs, so
+		// the id is scanned as a lone positional and returns ok=true, routing it
+		// through the store.Get guard instead of forwarding unguarded (ok=false).
+		{
+			name: "heartbeat is a guarded write with a positional id",
+			args: []string{"heartbeat", "gcy-dv7"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+		{
+			name: "heartbeat returns the exact supplied token (gcy-g4o regression)",
+			args: []string{"heartbeat", "gcy-wisp-abc9"},
+			want: result{ids: []string{"gcy-wisp-abc9"}, ok: true},
 		},
 
 		// --- Non-write subcommands ---
@@ -2473,9 +2634,12 @@ prefix = "fe"
 	if err != nil {
 		t.Fatalf("read SQL log: %v", err)
 	}
-	wantQuery := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP WHERE id = 'fe-abc' AND status = 'in_progress' AND assignee = 'worker-1'"
-	if strings.TrimSpace(string(query)) != wantQuery {
-		t.Fatalf("SQL query = %q, want %q", strings.TrimSpace(string(query)), wantQuery)
+	// The release mints a fresh revision so the pre-release token is stale, so
+	// the token itself is not pinnable — everything around it is.
+	gotQuery := strings.TrimSpace(string(query))
+	wantQuery := regexp.MustCompile(`^UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP, revision = -?\d+ WHERE id = 'fe-abc' AND status = 'in_progress' AND assignee = 'worker-1'$`)
+	if !wantQuery.MatchString(gotQuery) {
+		t.Fatalf("SQL query = %q, want match for %s", gotQuery, wantQuery)
 	}
 }
 

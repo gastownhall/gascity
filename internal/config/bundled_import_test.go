@@ -17,7 +17,7 @@ func TestResolveLockedRemoteImportAcceptsBundledSyntheticCache(t *testing.T) {
 	commit := canonicalBundledCommit(source)
 	writeBundledImportLock(t, cityDir, source, commit)
 	cacheDir := bundledRepoCacheDir(home, source, commit)
-	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
+	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, builtinpacks.Repository, commit); err != nil {
 		t.Fatalf("materialize synthetic repo: %v", err)
 	}
 
@@ -44,7 +44,7 @@ func TestResolveLockedRemoteImportFastPathToleratesBundledSyntheticContentDrift(
 	commit := canonicalBundledCommit(source)
 	writeBundledImportLock(t, cityDir, source, commit)
 	cacheDir := bundledRepoCacheDir(home, source, commit)
-	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
+	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, builtinpacks.Repository, commit); err != nil {
 		t.Fatalf("materialize synthetic repo: %v", err)
 	}
 	writeTestFile(t, cacheDir, "internal/bootstrap/packs/core/pack.toml", `
@@ -73,7 +73,7 @@ func TestResolveLockedRemoteImportFastPathToleratesBundledSyntheticExtraFile(t *
 	commit := canonicalBundledCommit(source)
 	writeBundledImportLock(t, cityDir, source, commit)
 	cacheDir := bundledRepoCacheDir(home, source, commit)
-	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
+	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, builtinpacks.Repository, commit); err != nil {
 		t.Fatalf("materialize synthetic repo: %v", err)
 	}
 	writeTestFile(t, cacheDir, "internal/bootstrap/packs/core/agents/injected/prompt.md", "extra file")
@@ -93,7 +93,7 @@ func TestResolveInstalledRemoteImportAcceptsBundledSyntheticCache(t *testing.T) 
 	commit := canonicalBundledCommit(source)
 	writeBundledImportLock(t, cityDir, source, commit)
 	cacheDir := bundledRepoCacheDir(home, source, commit)
-	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
+	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, builtinpacks.Repository, commit); err != nil {
 		t.Fatalf("materialize synthetic repo: %v", err)
 	}
 
@@ -112,7 +112,7 @@ func TestResolveImportPackRefAcceptsPublicGastownSyntheticCache(t *testing.T) {
 	commit := strings.TrimPrefix(PublicGastownPackVersion, "sha:")
 	writeBundledImportLock(t, cityDir, source, commit)
 	cacheDir := bundledRepoCacheDir(home, source, commit)
-	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
+	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, builtinpacks.PublicRepository, commit); err != nil {
 		t.Fatalf("materialize synthetic repo: %v", err)
 	}
 
@@ -139,7 +139,7 @@ func TestLoadWithIncludes_RigBundledImportSelfHealsOfflineWithoutLock(t *testing
 	source := PublicGastownPackSource
 	commit := strings.TrimPrefix(PublicGastownPackVersion, "sha:")
 	cacheDir := bundledRepoCacheDir(home, source, commit)
-	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
+	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, builtinpacks.PublicRepository, commit); err != nil {
 		t.Fatalf("materialize synthetic repo: %v", err)
 	}
 
@@ -488,7 +488,7 @@ func TestResolveInstalledRemoteImportBundledFallbackWithoutLock(t *testing.T) {
 	if got != want {
 		t.Fatalf("cacheDir = %q, want %q", got, want)
 	}
-	if err := builtinpacks.ValidateSyntheticRepo(got, commit); err != nil {
+	if err := builtinpacks.ValidateSyntheticRepo(got, builtinpacks.Repository, commit); err != nil {
 		t.Fatalf("fallback did not hydrate a valid synthetic cache: %v", err)
 	}
 }
@@ -532,7 +532,7 @@ func TestResolveInstalledRemoteImportLockedBundledSelfHealsWhenCacheAbsent(t *te
 	if got != cacheDir {
 		t.Fatalf("cacheDir = %q, want %q", got, cacheDir)
 	}
-	if err := builtinpacks.ValidateSyntheticRepo(got, commit); err != nil {
+	if err := builtinpacks.ValidateSyntheticRepo(got, builtinpacks.Repository, commit); err != nil {
 		t.Fatalf("self-heal did not produce a valid synthetic cache: %v", err)
 	}
 }

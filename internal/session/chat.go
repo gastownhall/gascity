@@ -62,6 +62,36 @@ func stripResumeFlag(cmd, resumeFlag, sessionKey string) string {
 	return strings.TrimSpace(result)
 }
 
+// stripSessionIDFlag removes the fresh-start session-id flag and its key from a
+// command string. It is the first-start counterpart to stripResumeFlag: a
+// session launched with "claude ... --session-id <key>" never carries the resume
+// flag, so the resume strip is a no-op on it and the retry would otherwise
+// respawn the command byte-identically. That replay is worse than useless —
+// claude 2.1.233 rejects a reused id outright ("Error: Session ID <uuid> is
+// already in use.", exit 1), so every retry dies the same way.
+//
+// Both the space form ("--session-id <key>") and the equals form
+// ("--session-id=<key>") are handled. Like stripResumeFlag, a no-op returns cmd
+// exactly so callers can detect it by equality.
+func stripSessionIDFlag(cmd, sessionIDFlag, sessionKey string) string {
+	if sessionIDFlag == "" || sessionKey == "" {
+		return cmd
+	}
+	for _, target := range []string{
+		sessionIDFlag + " " + sessionKey,
+		sessionIDFlag + "=" + sessionKey,
+	} {
+		result := strings.Replace(cmd, " "+target, "", 1)
+		if result == cmd {
+			result = strings.Replace(cmd, target+" ", "", 1)
+		}
+		if result != cmd {
+			return strings.TrimSpace(result)
+		}
+	}
+	return cmd
+}
+
 // stripResumeFlagArg removes the generated resume flag/key pair from cmd,
 // regardless of the key's value. It is the value-agnostic fallback for
 // stripResumeFlag: when the session_key embedded in the resume command at build
@@ -178,6 +208,10 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 	}
 	resumeFlag := b.Metadata["resume_flag"]
 	freshCmd := stripResumeFlag(resumeCommand, resumeFlag, b.Metadata["session_key"])
+	// A first start carries "<session_id_flag> <key>", not the resume flag, so
+	// the strip above cannot touch it. Remove it here or the retry replays the
+	// dead command verbatim against an id the provider now considers taken.
+	freshCmd = stripSessionIDFlag(freshCmd, b.Metadata["session_id_flag"], b.Metadata["session_key"])
 	if err := m.clearStaleResumeMetadata(id, b); err != nil {
 		if unroute != nil {
 			unroute()
@@ -332,6 +366,48 @@ func (m *Manager) sessionBead(id string) (beads.Bead, string, error) {
 	return m.loadSessionBead(id, false)
 }
 
+// commitPendingContinuationReset resolves the continuation epoch a runtime
+// start should publish, consuming a pending conversation reset on the way.
+//
+// Starts that do not route through the controller's pre-wake commit — Submit,
+// Send, Attach, Start — rebuilt GC_CONTINUATION_EPOCH verbatim from metadata
+// and never consumed the marker, so a message arriving inside the reconciler's
+// kill-to-wake window restarted the pane on the pre-reset epoch and silently
+// defeated the reset. Providers that carry conversation identity themselves
+// (zcode keys its persisted provider session on this epoch) then resumed the
+// conversation the operator had just reset.
+//
+// Rotation belongs to the consumer, not to the request: the reconciler records
+// the same marker directly without routing through Manager.RequestFreshRestart,
+// so rotating at request time would rotate on one path and not the other. Every
+// start path bumps-and-clears in one batch instead, which keeps the total at
+// exactly one rotation per reset however the reset arrived.
+func (m *Manager) commitPendingContinuationReset(id string, b beads.Bead) (int, error) {
+	epoch, err := strconv.Atoi(b.Metadata["continuation_epoch"])
+	if err != nil || epoch <= 0 {
+		epoch = DefaultContinuationEpoch
+	}
+	if strings.TrimSpace(b.Metadata["continuation_reset_pending"]) == "" {
+		return epoch, nil
+	}
+	// Consume the marker and rotate together: whichever start path gets here
+	// first clears it, so the epoch advances exactly once per reset even though
+	// several paths can service one. This mirrors preWakeCommit, which does the
+	// same for the controller wake.
+	epoch++
+	if err := m.store.SetMetadataBatch(id, map[string]string{
+		"continuation_epoch":         strconv.Itoa(epoch),
+		"continuation_reset_pending": "",
+	}); err != nil {
+		return 0, fmt.Errorf("committing pending continuation reset: %w", err)
+	}
+	if b.Metadata != nil {
+		b.Metadata["continuation_epoch"] = strconv.Itoa(epoch)
+		b.Metadata["continuation_reset_pending"] = ""
+	}
+	return epoch, nil
+}
+
 func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
 	transport, transportVerified := m.transportForBead(b, sessName)
 	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
@@ -357,9 +433,9 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	if err != nil || generation <= 0 {
 		generation = DefaultGeneration
 	}
-	continuationEpoch, err := strconv.Atoi(b.Metadata["continuation_epoch"])
-	if err != nil || continuationEpoch <= 0 {
-		continuationEpoch = DefaultContinuationEpoch
+	continuationEpoch, err := m.commitPendingContinuationReset(id, b)
+	if err != nil {
+		return err
 	}
 	instanceToken := b.Metadata["instance_token"]
 	if instanceToken == "" {
@@ -472,9 +548,9 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 	if err != nil || generation <= 0 {
 		generation = DefaultGeneration
 	}
-	continuationEpoch, err := strconv.Atoi(b.Metadata["continuation_epoch"])
-	if err != nil || continuationEpoch <= 0 {
-		continuationEpoch = DefaultContinuationEpoch
+	continuationEpoch, err := m.commitPendingContinuationReset(id, b)
+	if err != nil {
+		return err
 	}
 	instanceToken := b.Metadata["instance_token"]
 	if instanceToken == "" {
@@ -991,6 +1067,19 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 		searchPaths = sessionlog.DefaultSearchPaths()
 	}
 	if path := workertranscript.DiscoverKeyedPath(searchPaths, provider, workDir, b.Metadata["session_key"]); path != "" {
+		return path, nil
+	}
+	// zcode carries no session_key — no session-id flag, no hook plugin — so
+	// the keyed lookup above can never hit for it and the ambiguity guard below
+	// would leave every pooled worker transcript-dark. Its mirror is keyed by
+	// the identity the bead does hold.
+	if path := workertranscript.DiscoverScopedPath(
+		searchPaths,
+		provider,
+		workDir,
+		b.Metadata["session_name"],
+		b.Metadata["continuation_epoch"],
+	); path != "" {
 		return path, nil
 	}
 

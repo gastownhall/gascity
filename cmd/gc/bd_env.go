@@ -1101,6 +1101,54 @@ func bdOutputIndicatesSilentFallback(s string) bool {
 		strings.Contains(lower, bdSilentFallbackMarkerEmptyDB)
 }
 
+// bdDoltStartSuggestionMarkerAutoStart and bdDoltStartSuggestionMarkerCommand
+// are the substring pair bd emits when the managed Dolt server is
+// unreachable and dolt.auto-start is disabled: bd suggests running
+// `bd dolt start` to recover. In a gc-managed city (gc always sets
+// dolt.auto-start: false) that suggestion is actively harmful — it starts a
+// second, unmanaged Dolt server that fights gc's own server for the same
+// data directory (gastownhall/gascity#1374). Load-bearing only in
+// bdOutputSuggestsConflictingDoltStart; if bd's banner wording ever
+// changes, this is the only edit site.
+const (
+	bdDoltStartSuggestionMarkerAutoStart = "auto-start is disabled"
+	bdDoltStartSuggestionMarkerCommand   = "bd dolt start"
+)
+
+// bdOutputSuggestsConflictingDoltStart reports whether the given bd output
+// (typically captured stderr) contains the marker pair bd emits when it
+// tells the operator to run `bd dolt start` because managed auto-start is
+// disabled. Requiring both markers (rather than the command substring
+// alone) avoids a false positive on unrelated mentions of "bd dolt start",
+// e.g. in bd's own --help text.
+func bdOutputSuggestsConflictingDoltStart(s string) bool {
+	lower := strings.ToLower(s)
+	return strings.Contains(lower, bdDoltStartSuggestionMarkerAutoStart) &&
+		strings.Contains(lower, bdDoltStartSuggestionMarkerCommand)
+}
+
+// bdScopeDoltIsGcManaged reports whether the corrective `gc start` /
+// `gc dolt restart` hint applies to this scope. gc owns the Dolt
+// lifecycle only for a managed, local endpoint: an externally-bound
+// store, or an explicit/city-canonical endpoint (which resolves
+// External even on 127.0.0.1), is not gc's to restart, and pointing the
+// operator at gc lifecycle commands there sends them at the wrong
+// remedy. Mirrors the ownership predicate managedBDRecoveryAllowed
+// applies. Fails closed — no hint — when ownership cannot be resolved.
+func bdScopeDoltIsGcManaged(cityPath, scopeRoot string) bool {
+	if scopeRoot == "" {
+		scopeRoot = cityPath
+	}
+	if bound, err := scopeStoreIsExternallyBound(cityPath, scopeRoot); err != nil || bound {
+		return false
+	}
+	target, ok, err := canonicalScopeDoltTarget(cityPath, scopeRoot)
+	if err != nil || !ok {
+		return false
+	}
+	return !target.External && managedLocalDoltHost(target.Host)
+}
+
 func bdCommandRunnerWithManagedRetry(cityPath string, envFn func(dir string) map[string]string) beads.CommandRunner {
 	return bdCommandRunnerWithManagedRetryErr(cityPath, func(dir string) (map[string]string, error) {
 		return envFn(dir), nil

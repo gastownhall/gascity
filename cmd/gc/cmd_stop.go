@@ -31,6 +31,12 @@ shutdown timeout, then force-kills any remaining sessions. Also stops
 the Dolt server and cleans up orphan sessions. If a controller is
 running, delegates shutdown to it.
 
+If the city is registered with the machine-wide supervisor, stop also
+unregisters it (equivalent to a following "gc unregister") — the city
+will not be found by name or auto-started again until it is re-registered
+with "gc register". Use "gc unregister" directly to remove a registration
+without stopping sessions.
+
 Use --timeout=DURATION to cap the wall-clock time gc stop will spend
 before giving up; the default budgets configured session interrupt and
 stop waves, the configured shutdown grace wait, and a second orphan
@@ -65,8 +71,9 @@ func cmdStop(args []string, stdout, stderr io.Writer, wallClockTimeout time.Dura
 }
 
 type stopCommandOutcome struct {
-	code     int
-	cityPath string
+	code         int
+	cityPath     string
+	unregistered bool
 }
 
 func cmdStopJSON(args []string, stdout, stderr io.Writer, wallClockTimeout time.Duration, force bool, jsonOut bool) int {
@@ -82,7 +89,7 @@ func cmdStopJSON(args []string, stdout, stderr io.Writer, wallClockTimeout time.
 		return outcome.code
 	}
 	if jsonOut {
-		return writeCityStopSuccess(stdout, stderr, outcome.cityPath, force)
+		return writeCityStopSuccess(stdout, stderr, outcome.cityPath, force, outcome.unregistered)
 	}
 	fmt.Fprintln(stdout, "City stopped.") //nolint:errcheck // best-effort stdout
 	return 0
@@ -100,23 +107,25 @@ func cmdStopJSONSequence(args []string, stdout, stderr io.Writer, force bool, js
 		stopStdout = io.Discard
 	}
 
+	unregisteredFromSupervisor := false
 	if handled, code := unregisterCityFromSupervisorWithForce(cityPath, stopStdout, stderr, "gc stop", force); handled {
 		if code != 0 {
 			return stopCommandOutcome{code: code, cityPath: cityPath}
 		}
+		unregisteredFromSupervisor = true
 		if supervisorAliveHook() != 0 {
 			if !stopCityManagedBeadsProviderAfterSuccessfulStop(cityPath, stderr) {
 				return stopCommandOutcome{code: 1, cityPath: cityPath}
 			}
 			warnInvalidConfigAfterSuccessfulStop(cityPath, stderr)
-			return stopCommandOutcome{cityPath: cityPath}
+			return stopCommandOutcome{cityPath: cityPath, unregistered: unregisteredFromSupervisor}
 		}
 	}
 
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		if handled, code := stopManagedRuntimeWithoutConfig(cityPath, err, stopStdout, stderr, force); handled {
-			return stopCommandOutcome{code: code, cityPath: cityPath}
+			return stopCommandOutcome{code: code, cityPath: cityPath, unregistered: unregisteredFromSupervisor}
 		}
 		fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
 		return stopCommandOutcome{code: 1, cityPath: cityPath}
@@ -124,8 +133,9 @@ func cmdStopJSONSequence(args []string, stdout, stderr io.Writer, force bool, js
 
 	stopLoadedCity := func() stopCommandOutcome {
 		return stopCommandOutcome{
-			code:     cmdStopBodyWithoutSuccess(cityPath, cfg, force, stopStdout, stderr),
-			cityPath: cityPath,
+			code:         cmdStopBodyWithoutSuccess(cityPath, cfg, force, stopStdout, stderr),
+			cityPath:     cityPath,
+			unregistered: unregisteredFromSupervisor,
 		}
 	}
 	if wallClockCapApplied {
@@ -163,13 +173,14 @@ func runStopWithWallClockCap(wallClockCap time.Duration, stderr io.Writer, stop 
 // against a later test.
 var stopBodyLifecycleHook func(<-chan struct{})
 
-func writeCityStopSuccess(stdout, stderr io.Writer, cityPath string, force bool) int {
+func writeCityStopSuccess(stdout, stderr io.Writer, cityPath string, force, unregistered bool) int {
 	return writeLifecycleActionJSONOrExit(stdout, stderr, "gc stop", lifecycleActionJSON{
-		Command:  "stop",
-		Action:   "stop",
-		Message:  "City stopped.",
-		CityPath: cityPath,
-		Force:    lifecycleBoolPtr(force),
+		Command:      "stop",
+		Action:       "stop",
+		Message:      "City stopped.",
+		CityPath:     cityPath,
+		Force:        lifecycleBoolPtr(force),
+		Unregistered: lifecycleBoolPtr(unregistered),
 	})
 }
 

@@ -2386,27 +2386,37 @@ func adjustPackPatchPaths(patches *PackPatches, topoDir, cityRoot string) {
 // run). When Dir is set, both Dir and Name must match.
 // Returns an error if a patch targets a nonexistent agent.
 func applyPackAgentPatches(agents []Agent, patches []AgentPatch) error {
-	for i, p := range patches {
-		target := qualifiedNameFromPatch(p.Dir, p.Name)
+	for i := range patches {
+		p := &patches[i]
+		// Resolve the effective target dir through the shared helper so a
+		// rig-keyed pack patch (Rig set, Dir empty) targets its rig instead of
+		// silently degrading to a name-only match, and a dir+rig combination is
+		// rejected here rather than deferred to compose. A "*" wildcard resolves
+		// to the empty (name-only) dir — pack-scope patches don't know rig names.
+		targetDir, err := agentPatchTargetDir(p)
+		if err != nil {
+			return fmt.Errorf("patches.agent[%d]: %w", i, err)
+		}
+		target := qualifiedNameFromPatch(targetDir, p.Name)
 		found := false
 		for j := range agents {
-			if p.Dir == "" {
+			if targetDir == "" {
 				// Name-only match: pack patches don't know the rig name.
 				if agents[j].Name == p.Name {
-					applyAgentPatchFields(&agents[j], &patches[i])
+					applyAgentPatchFields(&agents[j], p)
 					found = true
 					break
 				}
 			} else {
-				if agents[j].Dir == p.Dir && agents[j].Name == p.Name {
-					applyAgentPatchFields(&agents[j], &patches[i])
+				if agents[j].Dir == targetDir && agents[j].Name == p.Name {
+					applyAgentPatchFields(&agents[j], p)
 					found = true
 					break
 				}
 			}
 		}
 		if !found {
-			if p.Dir == "" {
+			if targetDir == "" {
 				for j := range agents {
 					if agents[j].BindingQualifiedName() == p.Name {
 						return fmt.Errorf("patches.agent[%d]: agent %q not found in pack (patches match local names — did you mean %q?)", i, target, agents[j].Name)
@@ -2911,6 +2921,14 @@ func ResetPackContentHashCache() {
 // by a cheap stat fingerprint, so an unchanged tree is hashed once and reused
 // across calls and reconcile ticks; see packContentHashCache.
 func PackContentHashRecursive(fs fsys.FS, topoDir string) string {
+	return packContentHashRecursive(fs, topoDir, true)
+}
+
+// packContentHashRecursive computes a pack hash, optionally using the
+// stat-fingerprint cache. Revision snapshots must use fresh content reads so
+// edits that preserve file size and coarse-grained mtimes cannot return a
+// stale revision.
+func packContentHashRecursive(fs fsys.FS, topoDir string, useCache bool) string {
 	var paths []string
 	collectFiles(fs, topoDir, "", &paths)
 	sort.Strings(paths)
@@ -2929,9 +2947,11 @@ func PackContentHashRecursive(fs fsys.FS, topoDir string) string {
 		}
 	}
 	fpSum := fp.Sum64()
-	if v, ok := packContentHashCache.Load(absDir); ok {
-		if entry := v.(packContentHashEntry); entry.fingerprint == fpSum {
-			return entry.hash
+	if useCache {
+		if v, ok := packContentHashCache.Load(absDir); ok {
+			if entry := v.(packContentHashEntry); entry.fingerprint == fpSum {
+				return entry.hash
+			}
 		}
 	}
 
@@ -2947,7 +2967,9 @@ func PackContentHashRecursive(fs fsys.FS, topoDir string) string {
 		h.Write([]byte{0})       //nolint:errcheck // hash.Write never errors
 	}
 	result := fmt.Sprintf("%x", h.Sum(nil))
-	packContentHashCache.Store(absDir, packContentHashEntry{fingerprint: fpSum, hash: result})
+	if useCache {
+		packContentHashCache.Store(absDir, packContentHashEntry{fingerprint: fpSum, hash: result})
+	}
 	return result
 }
 

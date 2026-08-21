@@ -1294,6 +1294,15 @@ func sqliteListSQL(q ListQuery, projection string) (string, []any) {
 		// parent_id IN (...) drives off idx_beads_parent — O(matches) per id.
 		where = append(where, "b.parent_id IN ("+strings.Join(placeholders, ",")+")")
 	}
+	if len(q.IDs) > 0 {
+		placeholders := make([]string, len(q.IDs))
+		for i, id := range q.IDs {
+			placeholders[i] = "?"
+			args = append(args, id)
+		}
+		// id IN (...) drives off the primary key — the batched form of a Get.
+		where = append(where, "b.id IN ("+strings.Join(placeholders, ",")+")")
+	}
 	if !q.CreatedBefore.IsZero() {
 		where = append(where, "b.created_at < ?")
 		args = append(args, q.CreatedBefore.UnixNano())

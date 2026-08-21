@@ -3,6 +3,9 @@ package session
 import (
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 func TestSessionMutationLocksArePerSession(t *testing.T) {
@@ -44,6 +47,81 @@ func TestSessionMutationLocksArePerSession(t *testing.T) {
 	}
 
 	close(releaseFirst)
+}
+
+// TestStripSessionIDFlag pins the first-start counterpart of stripResumeFlag.
+// Without it, a dead "claude ... --session-id <key>" first start retried
+// byte-identically, and claude rejects a reused id ("Session ID <uuid> is
+// already in use", exit 1), so the retry could never succeed.
+func TestStripSessionIDFlag(t *testing.T) {
+	tests := []struct {
+		name          string
+		cmd           string
+		sessionIDFlag string
+		sessionKey    string
+		want          string
+	}{
+		{
+			name:          "removes session id flag and key at end",
+			cmd:           "claude --dangerously-skip-permissions --session-id abc-123",
+			sessionIDFlag: "--session-id",
+			sessionKey:    "abc-123",
+			want:          "claude --dangerously-skip-permissions",
+		},
+		{
+			name:          "removes session id flag mid-command",
+			cmd:           "claude --session-id abc-123 --effort max",
+			sessionIDFlag: "--session-id",
+			sessionKey:    "abc-123",
+			want:          "claude --effort max",
+		},
+		{
+			name:          "removes equals form",
+			cmd:           "claude --session-id=abc-123 --effort max",
+			sessionIDFlag: "--session-id",
+			sessionKey:    "abc-123",
+			want:          "claude --effort max",
+		},
+		{
+			name:          "different key is left alone",
+			cmd:           "claude --session-id other-key",
+			sessionIDFlag: "--session-id",
+			sessionKey:    "abc-123",
+			want:          "claude --session-id other-key",
+		},
+		{
+			name:          "empty session id flag",
+			cmd:           "claude --session-id abc-123",
+			sessionIDFlag: "",
+			sessionKey:    "abc-123",
+			want:          "claude --session-id abc-123",
+		},
+		{
+			name:          "empty session key",
+			cmd:           "claude --session-id abc-123",
+			sessionIDFlag: "--session-id",
+			sessionKey:    "",
+			want:          "claude --session-id abc-123",
+		},
+		{
+			// Same no-op contract as stripResumeFlag: callers detect a no-op by
+			// exact equality, so a non-replacement path must not trim.
+			name:          "no strip preserves surrounding whitespace",
+			cmd:           "  claude --effort max  ",
+			sessionIDFlag: "--session-id",
+			sessionKey:    "abc-123",
+			want:          "  claude --effort max  ",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := stripSessionIDFlag(tt.cmd, tt.sessionIDFlag, tt.sessionKey)
+			if got != tt.want {
+				t.Errorf("stripSessionIDFlag(%q, %q, %q) = %q, want %q",
+					tt.cmd, tt.sessionIDFlag, tt.sessionKey, got, tt.want)
+			}
+		})
+	}
 }
 
 func TestStripResumeFlag(t *testing.T) {
@@ -224,5 +302,117 @@ func TestSessionMutationLocksSerializeSameSession(t *testing.T) {
 	case <-secondEntered:
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("same-session lock did not unblock after release")
+	}
+}
+
+// A conversation reset committed while the runtime is restarted outside the
+// controller's pre-wake path must still rotate the continuation epoch: the
+// marker is the only record that a reset is owed, and a start that ignores it
+// republishes the pre-reset conversation identity.
+func TestCommitPendingContinuationResetBumpsAndClears(t *testing.T) {
+	store := beads.NewMemStore()
+	m := NewManagerWithOptions(store, runtime.NewFake())
+	b, err := store.Create(beads.Bead{Title: "session", Metadata: map[string]string{
+		"continuation_epoch":         "3",
+		"continuation_reset_pending": "true",
+	}})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	id := b.ID
+
+	// The consumer rotates: it bumps and clears the marker in one batch, so the
+	// epoch advances exactly once per reset no matter which start path services
+	// it.
+	epoch, err := m.commitPendingContinuationReset(id, b)
+	if err != nil {
+		t.Fatalf("commitPendingContinuationReset: %v", err)
+	}
+	if epoch != 4 {
+		t.Fatalf("epoch = %d, want 4", epoch)
+	}
+	after, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("get after: %v", err)
+	}
+	if got := after.Metadata["continuation_epoch"]; got != "4" {
+		t.Fatalf("persisted epoch = %q, want 4", got)
+	}
+	if got := after.Metadata["continuation_reset_pending"]; got != "" {
+		t.Fatalf("reset marker = %q, want cleared", got)
+	}
+
+	// Idempotent: a plain restart must not keep bumping.
+	again, err := m.commitPendingContinuationReset(id, after)
+	if err != nil {
+		t.Fatalf("second commit: %v", err)
+	}
+	if again != 4 {
+		t.Fatalf("epoch after a plain restart = %d, want 4 (no second rotation)", again)
+	}
+}
+
+// Rotation happens exactly once per reset, and it belongs to the consumer.
+// RequestFreshRestart only records the intent, because the reconciler writes
+// the same marker directly without ever calling it — rotating at request time
+// would rotate on one entry path and not the other.
+func TestRequestFreshRestartRecordsIntentAndConsumerRotatesOnce(t *testing.T) {
+	store := beads.NewMemStore()
+	m := NewManagerWithOptions(store, runtime.NewFake())
+	b, err := store.Create(beads.Bead{Title: "session", Type: BeadType, Metadata: map[string]string{
+		"state":              string(StateActive),
+		"continuation_epoch": "2",
+	}})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	if err := m.RequestFreshRestart(b.ID); err != nil {
+		t.Fatalf("RequestFreshRestart: %v", err)
+	}
+	recorded, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got := recorded.Metadata["continuation_epoch"]; got != "2" {
+		t.Fatalf("epoch = %q, want 2 — the request records intent, it does not rotate", got)
+	}
+	if got := recorded.Metadata["continuation_reset_pending"]; got != "true" {
+		t.Fatalf("reset marker = %q, want true", got)
+	}
+
+	// The start path that services the reset rotates it, once.
+	epoch, err := m.commitPendingContinuationReset(b.ID, recorded)
+	if err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if epoch != 3 {
+		t.Fatalf("published epoch = %d, want 3", epoch)
+	}
+	serviced, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("get after: %v", err)
+	}
+	if got := serviced.Metadata["continuation_reset_pending"]; got != "" {
+		t.Fatalf("marker = %q, want cleared so a second path cannot rotate again", got)
+	}
+	if again, err := m.commitPendingContinuationReset(b.ID, serviced); err != nil || again != 3 {
+		t.Fatalf("second start path rotated again: epoch=%d err=%v", again, err)
+	}
+}
+
+// A message arriving after a reset is recorded, but before the replacement
+// runtime is up, must be queued for the incoming incarnation — not delivered
+// into a conversation the operator already discarded.
+func TestPendingConversationRestartDefersDelivery(t *testing.T) {
+	for name, meta := range map[string]map[string]string{
+		"reset pending":     {"continuation_reset_pending": "true"},
+		"restart requested": {"restart_requested": "true"},
+		"neither":           {},
+	} {
+		want := len(meta) > 0
+		if got := pendingConversationRestart(beads.Bead{Metadata: meta}); got != want {
+			t.Errorf("%s: pendingConversationRestart = %v, want %v", name, got, want)
+		}
 	}
 }
