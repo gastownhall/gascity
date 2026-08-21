@@ -122,6 +122,9 @@ type harness struct {
 	mirrorDir string
 	workDir   string
 	env       map[string]string
+	// stderr holds the last run's stderr. The adapter's die_config sites all
+	// exit 78 and only stderr says which precondition tripped (ga-xx7x9).
+	stderr string
 }
 
 func newHarness(t *testing.T, stubEnv map[string]string) *harness {
@@ -199,17 +202,21 @@ func (h *harness) run(stdin string) (string, int) {
 
 	cmd := h.command()
 	cmd.Stdin = strings.NewReader(stdin)
-	var out strings.Builder
+	var out, errOut strings.Builder
 	cmd.Stdout = &out
-	cmd.Stderr = io.Discard
+	cmd.Stderr = &errOut
 	err := cmd.Run()
+	h.stderr = errOut.String()
 	code := 0
 	if err != nil {
 		var exitErr *exec.ExitError
 		if !asExitError(err, &exitErr) {
-			h.t.Fatalf("run adapter: %v (stdout=%s)", err, out.String())
+			h.t.Fatalf("run adapter: %v (stdout=%s, stderr=%s)", err, out.String(), h.stderr)
 		}
 		code = exitErr.ExitCode()
+	}
+	if code != 0 && h.stderr != "" {
+		h.t.Logf("adapter exited %d: %s", code, strings.TrimSpace(h.stderr))
 	}
 	return out.String(), code
 }
@@ -226,12 +233,13 @@ func asExitError(err error, target **exec.ExitError) bool {
 // session starts the adapter with a live stdin pipe so a test can drive turns
 // and signals independently.
 type session struct {
-	t    *testing.T
-	cmd  *exec.Cmd
-	in   io.WriteCloser
-	mu   sync.Mutex
-	out  strings.Builder
-	done chan struct{}
+	t      *testing.T
+	cmd    *exec.Cmd
+	in     io.WriteCloser
+	mu     sync.Mutex
+	out    strings.Builder
+	errOut strings.Builder
+	done   chan struct{}
 }
 
 func (h *harness) start() *session {
@@ -246,11 +254,11 @@ func (h *harness) start() *session {
 	if err != nil {
 		h.t.Fatalf("stdout pipe: %v", err)
 	}
-	cmd.Stderr = io.Discard
+	s := &session{t: h.t, cmd: cmd, in: in, done: make(chan struct{})}
+	cmd.Stderr = &s.errOut
 	if err := cmd.Start(); err != nil {
 		h.t.Fatalf("start adapter: %v", err)
 	}
-	s := &session{t: h.t, cmd: cmd, in: in, done: make(chan struct{})}
 	go func() {
 		defer close(s.done)
 		buf := make([]byte, 4096)
@@ -368,6 +376,10 @@ func (s *session) wait() (string, int) {
 		code = exitErr.ExitCode()
 	}
 	<-s.done
+	// errOut is only safe to read once Wait has joined exec's copier.
+	if code != 0 && s.errOut.Len() > 0 {
+		s.t.Logf("adapter exited %d: %s", code, strings.TrimSpace(s.errOut.String()))
+	}
 	return s.output(), code
 }
 
@@ -519,6 +531,24 @@ func TestResumeUsesSingleArgvForm(t *testing.T) {
 	}
 }
 
+// The adapter's six die_config sites all exit 78, so a bare exit code cannot
+// say which precondition tripped. TestControlBytesAreStripped flaked at 78
+// under a saturated parallel sweep and blocked a push with nothing to go on,
+// because the harness discarded stderr (ga-xx7x9).
+func TestHarnessKeepsTheAdapterStderrThatNamesAFailure(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, nil)
+	delete(h.env, "ZCODE_API_KEY")
+
+	if _, code := h.run("hello\n"); code != 78 {
+		t.Fatalf("exit code = %d, want 78 (EX_CONFIG)", code)
+	}
+	if !strings.Contains(h.stderr, "ZCODE_API_KEY is unset") {
+		t.Fatalf("harness dropped the reason for exit 78; stderr = %q", h.stderr)
+	}
+}
+
 // Behavior 3: gc's pre-Enter Escape and stray control bytes never reach the
 // model.
 func TestControlBytesAreStripped(t *testing.T) {
@@ -539,7 +569,7 @@ func TestControlBytesAreStripped(t *testing.T) {
 			h := newHarness(t, nil)
 			_, code := h.run(tc.stdin)
 			if code != 0 {
-				t.Fatalf("exit code = %d, want 0", code)
+				t.Fatalf("exit code = %d, want 0 (stderr: %s)", code, strings.TrimSpace(h.stderr))
 			}
 			if got := h.prompts(); !equalStrings(got, tc.want) {
 				t.Fatalf("prompts = %q, want %q", got, tc.want)
