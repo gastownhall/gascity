@@ -8,7 +8,7 @@ Build bead: `ga-kbbg9a`
 
 Reviewed source: `b8626685d1778b24eee014ec7be9c1e6ba770d47`
 
-Base: `origin/main@5ba4d6e653f0b0c4241a565399ea558cd98c1e1d`
+Base: `origin/main@08461bb390c8720cde505ae769638c8ccbcb2e53`
 
 Gate date: 2026-08-21
 
@@ -36,7 +36,7 @@ seven release criteria in the deployer contract and the documented commands in
 | 3b | Policy/lint lane | PASS | Required policy lane `make test-ci-policy` passes. `go build ./...`, `go vet ./...`, changed formatting, and `git diff --check` pass. An auxiliary affected-lint run selected the full repository because the reviewed source predates a base-only release-gate file and failed on 182 unrelated repository/cache diagnostics; no diagnostic names either changed `cmd/gc` file. |
 | 4 | No high-severity review findings open | PASS | The reviewer recorded PASS and no open HIGH finding. Unresolved HIGH count: 0. |
 | 5 | Final branch is clean | PASS | `git status --porcelain` was empty at the exact reviewed source before this checklist was written. |
-| 6 | Branch diverges cleanly from main | PASS | After the mayor ruling, `git merge-tree --write-tree origin/main b8626685d1778b24eee014ec7be9c1e6ba770d47` exited 0 against `origin/main@5ba4d6e653f0b0c4241a565399ea558cd98c1e1d`, producing tree `8c32de4c915504ff1b374a5062bde8c4bd21cb29`. The newer main changes do not touch `cmd/gc/hook_cross_store.go` or its test. `assert_deploy_ancestry_scope` passed for `ga-hgtxtq`, `ga-kbbg9a`, and `ga-rdex4v`. No self-rebase was needed. |
+| 6 | Branch diverges cleanly from main | PASS | After the guarded push, `git merge-tree --write-tree origin/main b8626685d1778b24eee014ec7be9c1e6ba770d47` exited 0 against `origin/main@08461bb390c8720cde505ae769638c8ccbcb2e53`, producing tree `bf32180957642c3e9e826cce0eccfb7b654f3394`. The newer main changes are confined to credential-provider tests, named-session alias handling, and their gate records; they do not touch `cmd/gc/hook_cross_store.go` or its test. `assert_deploy_ancestry_scope` passed for `ga-hgtxtq`, `ga-kbbg9a`, and `ga-rdex4v`. No self-rebase was needed. |
 | 7 | Single feature theme | PASS | Three commits modify only cross-store hook selection and its tests in `cmd/gc`; all changes serve one starvation fix. |
 
 ## Acceptance Evidence
@@ -100,6 +100,7 @@ build_lane: go build ./... -- PASS
 static_lane: go vet ./... -- PASS
 format_lane: LINT_CHANGED_REF=origin/main make fmt-check-changed -- PASS
 diff_check: git diff --check origin/main...HEAD -- PASS
+pre_push_lane: LOCAL_TEST_JOBS=2 CMD_GC_PROCESS_TOTAL=6 ./scripts/test-local-parallel fast -- 10 PASS jobs, 0 FAIL, 0 SKIP
 ```
 
 ### Candidate failures and disposition
