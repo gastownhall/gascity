@@ -3772,6 +3772,44 @@ func TestCompactScriptQuarantineMailFailureIsRetriedNextCycle(t *testing.T) {
 	}
 }
 
+func TestCompactScriptUndeliverableQuarantineAlertRecordsWhyInMarker(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	if err := os.WriteFile(fixture.mailFailFile, nil, 0o644); err != nil {
+		t.Fatalf("arm mail-failure sentinel: %v", err)
+	}
+
+	firstOut, err := fixture.run(t, "row_count_decreases", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", "GC_DOLT_COMPACT_ALERT_TO=nobody")
+	if err == nil {
+		t.Fatalf("first compact succeeded despite row-count decrease:\n%s", firstOut)
+	}
+
+	// An alert that never lands is how five cities stayed fail-closed for a
+	// month: notify_count=0, and nothing anywhere saying why.
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if got := compactMarkerValue(t, marker, "last_notify_error"); !strings.Contains(got, "mail send failed") {
+		t.Fatalf("marker must record why the alert did not land, got %q", got)
+	}
+	if !strings.Contains(firstOut, "quarantine alert did not reach recipient") || !strings.Contains(firstOut, "nobody") {
+		t.Fatalf("compact must name the unreachable recipient:\n%s", firstOut)
+	}
+
+	// The field describes the CURRENT alerting state, so a delivered alert
+	// has to clear it rather than leave a stale cause behind.
+	if err := os.Remove(fixture.mailFailFile); err != nil {
+		t.Fatalf("disarm mail-failure sentinel: %v", err)
+	}
+	secondOut, err := fixture.run(t, "below_threshold", "GC_DOLT_COMPACT_ALERT_TO=nobody")
+	if err == nil {
+		t.Fatalf("second compact succeeded despite quarantine:\n%s", secondOut)
+	}
+	if got := compactMarkerValue(t, marker, "last_notify_error"); got != "" {
+		t.Fatalf("a delivered alert must clear last_notify_error, got %q", got)
+	}
+	if got := compactMarkerValue(t, marker, "notify_count"); got != "1" {
+		t.Fatalf("delivered alert should count once, got %q", got)
+	}
+}
+
 func TestCompactScriptQuarantineReasonChangeReMails(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	firstOut, err := fixture.run(t, "row_count_decreases", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
