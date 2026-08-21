@@ -4379,6 +4379,35 @@ func TestCompactScriptGCOnlyFlagReclaimsBelowThresholdWithFullGC(t *testing.T) {
 	}
 }
 
+func TestCompactScriptGCOnlyQuarantineRefusalStillReports(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	firstOut, err := fixture.run(t, "row_count_decreases", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("first compact succeeded despite row-count decrease:\n%s", firstOut)
+	}
+	before := len(compactGCLogLinesWithPrefix(readCompactGCLog(t, fixture), "gc event emit dolt.compact.quarantine"))
+
+	out, err := fixture.runWithArgs(t, "below_threshold", []string{"--gc-only"})
+	if err == nil {
+		t.Fatalf("gc-only reclaim succeeded despite quarantine:\n%s", out)
+	}
+	if !strings.Contains(out, "integrity quarantine marker exists") {
+		t.Fatalf("gc-only must explain the quarantine:\n%s", out)
+	}
+
+	// A gc-only refusal is the same operator-visible state as a scheduled
+	// one. Reporting it to stdout alone is how four cities held a quarantine
+	// for weeks with zero events on the bus (ga-u2wiy).
+	log := readCompactGCLog(t, fixture)
+	if after := len(compactGCLogLinesWithPrefix(log, "gc event emit dolt.compact.quarantine")); after != before+1 {
+		t.Fatalf("gc-only refusal must emit a dolt.compact.quarantine event, want %d got %d\nlog:\n%s", before+1, after, log)
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if got := compactMarkerValue(t, marker, "seen_count"); got != "2" {
+		t.Fatalf("gc-only refusal must count as a sighting, got seen_count=%q", got)
+	}
+}
+
 func TestCompactScriptGCOnlyFlagHonorsOnlyDBFlag(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	if err := os.MkdirAll(filepath.Join(fixture.dataDir, "cache", ".dolt"), 0o755); err != nil {

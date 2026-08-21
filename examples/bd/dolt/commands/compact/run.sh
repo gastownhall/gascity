@@ -3101,10 +3101,9 @@ gc_only_database() {
   fi
 
   if has_compact_marker "$quarantine_dir" "$db"; then
-    quarantine_marker=$(compact_marker_path "$quarantine_dir" "$db")
-    quarantine_reason=$(compact_marker_value "$quarantine_dir" "$db" reason || true)
-    quarantine_created_at=$(compact_marker_value "$quarantine_dir" "$db" created_at || true)
-    print_existing_quarantine_marker "$db" "$quarantine_marker" "$quarantine_reason" "$quarantine_created_at"
+    # Same operator-visible state as a scheduled refusal, so it reports the
+    # same way: stdout alone leaves the quarantine off the bus entirely.
+    report_existing_quarantine "$db"
     return 1
   fi
 
