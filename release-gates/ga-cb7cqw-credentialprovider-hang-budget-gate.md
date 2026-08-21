@@ -4,7 +4,7 @@ Deploy bead: `ga-cb7cqw`
 Review bead: `ga-3olsjg`  
 Build bead: `ga-42mt5x.3`  
 Reviewed source: `c13b1b5fba1fc1eb8e4cecfbfe4c27f548a0bbbc`  
-Base: `origin/main@cd14e26b558d413779ae3dba2f5e47563a708b2b`  
+Base: `origin/main@5d3a8378474c4f2bcbc46323efbc40b31ea783ab`
 Gate date: 2026-08-21
 
 `docs/PROJECT_MANIFEST.md` is not present in this worktree. This record uses
@@ -21,7 +21,7 @@ documented test requirements in
 | 3 | Tests pass | PASS | The race-enabled credential-provider suite reports 79 PASS, 0 FAIL, 0 SKIP by default and 87 PASS, 0 FAIL, 0 SKIP with integration tags. Every runnable test in the modified Linux files passes by name; Windows-tagged tests cross-build and vet clean. The documented 40-job union reports 34 PASS jobs, 6 FAIL jobs, 0 job-level SKIP. Its six raw failures are tracked, outside this test-only package, logged on their trackers, and preserved below as FAIL — WAIVED under standing dispositions. Policy, build, full vet, targeted lint, lint-new, formatting, and diff checks pass. |
 | 4 | No high-severity review findings open | PASS | The reviewer independently verified all converted sites are pure hang detectors, found no production-code or security surface, and reported no correctness or style defect. Unresolved HIGH findings: 0. |
 | 5 | Final branch is clean | PASS | `git status --porcelain` was empty before adding this gate record; `git diff --check origin/main...HEAD` passes. |
-| 6 | Branch diverges cleanly from main | PASS | After a final refresh, `git merge-tree --write-tree origin/main c13b1b5fba1fc1eb8e4cecfbfe4c27f548a0bbbc` succeeded against `origin/main@cd14e26b558d413779ae3dba2f5e47563a708b2b` and produced `e7f7dee424cb8ea6a950cf23fb82aa1d8896d519`. The intervening main commit changes only `internal/config/revision_test.go`, outside this candidate. `assert_deploy_ancestry_scope` passed for the deploy, review, and build bead IDs. No self-rebase was required. |
+| 6 | Branch diverges cleanly from main | PASS | After a final refresh, `git merge-tree --write-tree origin/main HEAD` succeeded against `origin/main@5d3a8378474c4f2bcbc46323efbc40b31ea783ab` and produced `37679d73346c104a8f9d239ca94d5e3573edd6ac`. The new main commit changes only beads endpoint/path-durability code and tests, outside this candidate's credential-provider test package. `assert_deploy_ancestry_scope` passed for the deploy, review, and build bead IDs. No self-rebase was required. |
 | 7 | Single feature theme | PASS | One commit changes four `_test.go` files in `internal/credentialprovider` to apply one package-level hang-budget convention. No production file changes. |
 
 ## Acceptance Evidence
