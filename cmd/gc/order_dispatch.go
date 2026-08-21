@@ -309,6 +309,7 @@ type memoryOrderDispatcher struct {
 	cacheMu              sync.Mutex
 	lastRunCache         map[string]time.Time
 	gateBackoffUntil     map[string]time.Time
+	openWorkSuppression  map[string]orderOpenWorkSuppression
 
 	dispatchCtx    context.Context
 	dispatchCancel context.CancelFunc
@@ -844,8 +845,25 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 				}
 			}
 			if hasOpenWork {
+				// This skip is the one that can last forever: a wisp subtree
+				// stalled in a store the recovery sweep does not search holds the
+				// gate shut on every tick with nothing emitted (see
+				// sweepStaleOrderTrackingAcrossStoresLimitMode). Counting the
+				// streak and reporting it past a threshold makes that visible
+				// without changing what the gate decides (ga-a6zy9).
+				if payload, alert := m.noteOpenWorkSuppressed(scoped, now); alert {
+					m.rec.Record(events.Event{
+						Type:    events.OrderSuppressed,
+						Actor:   "controller",
+						Subject: scoped,
+						Message: fmt.Sprintf("open-work gate has suppressed this order for %d consecutive dispatch checks since %s",
+							payload.Consecutive, payload.FirstSuppressed),
+						Payload: events.OrderSuppressedPayloadJSON(payload),
+					})
+				}
 				continue
 			}
+			m.clearOpenWorkSuppression(scoped)
 		}
 
 		// Create the tracking bead (which suppresses re-fire on the next tick)
@@ -1396,6 +1414,96 @@ func (m *memoryOrderDispatcher) carryGateBackoffFrom(prev *memoryOrderDispatcher
 			if existing, ok := m.gateBackoffUntil[key]; !ok || until.After(existing) {
 				m.gateBackoffUntil[key] = until
 			}
+		}
+	}
+}
+
+// orderOpenWorkSuppression is one scoped order's run of consecutive open-work
+// gate refusals. since anchors the run; lastAlert is what the repeat bound in
+// noteOpenWorkSuppressed measures against.
+type orderOpenWorkSuppression struct {
+	consecutive int
+	since       time.Time
+	lastAlert   time.Time
+}
+
+// noteOpenWorkSuppressed advances the named order's consecutive open-work
+// suppression streak and reports the streak plus whether it is time to emit an
+// order.suppressed event.
+//
+// The emission is rate-bounded two ways, and both bounds matter. The FIRST
+// alert waits for orderOpenWorkSuppressionAlertAfter consecutive refusals,
+// because a gate that is shut for a few ticks is the gate doing its job — an
+// order whose previous run is still in flight. Every alert AFTER that is bounded
+// by wall clock, not by tick count: the next one waits
+// orderOpenWorkSuppressionRepeat past the last. That is what keeps a
+// permanently wedged order (suppressed on every tick, forever, by construction)
+// from becoming an unbounded event stream, and it holds no matter how fast the
+// controller ticks — a count-based repeat would tighten into a flood the moment
+// the patrol interval or a poke-driven tick shortened the cycle.
+//
+// This OBSERVES; it never acts. Nothing here unsticks, force-closes, or
+// re-dispatches the order — the streak is evidence for whoever reads the event
+// bus, and recovery stays a human/agent decision.
+func (m *memoryOrderDispatcher) noteOpenWorkSuppressed(scoped string, now time.Time) (events.OrderSuppressedPayload, bool) {
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	if m.openWorkSuppression == nil {
+		m.openWorkSuppression = make(map[string]orderOpenWorkSuppression)
+	}
+	state, ok := m.openWorkSuppression[scoped]
+	if !ok || state.since.IsZero() {
+		state = orderOpenWorkSuppression{since: now}
+	}
+	state.consecutive++
+
+	alert := state.consecutive >= orderOpenWorkSuppressionAlertAfter &&
+		(state.lastAlert.IsZero() || !now.Before(state.lastAlert.Add(orderOpenWorkSuppressionRepeat)))
+	if alert {
+		state.lastAlert = now
+	}
+	m.openWorkSuppression[scoped] = state
+
+	return events.OrderSuppressedPayload{
+		OrderName:       scoped,
+		Consecutive:     state.consecutive,
+		FirstSuppressed: state.since.UTC().Format(time.RFC3339),
+		SuppressedForMS: now.Sub(state.since).Milliseconds(),
+	}, alert
+}
+
+// clearOpenWorkSuppression drops the named order's suppression streak. Called
+// whenever the open-work gate lets the order through, so the count is of
+// CONSECUTIVE refusals and a later stall alerts on its own merits rather than
+// inheriting an old streak.
+func (m *memoryOrderDispatcher) clearOpenWorkSuppression(scoped string) {
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	delete(m.openWorkSuppression, scoped)
+}
+
+// carryOpenWorkSuppressionFrom copies open-work suppression streaks from a
+// previous dispatcher so a reload/rescan-triggered rebuild does not restart
+// them at zero — which would re-hide a permanently stalled order behind a city
+// that rescans more often than the alert threshold. Only call after draining
+// the previous dispatcher.
+func (m *memoryOrderDispatcher) carryOpenWorkSuppressionFrom(prev *memoryOrderDispatcher) {
+	if m == nil || prev == nil {
+		return
+	}
+	prev.cacheMu.Lock()
+	defer prev.cacheMu.Unlock()
+	if len(prev.openWorkSuppression) == 0 {
+		return
+	}
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	if m.openWorkSuppression == nil {
+		m.openWorkSuppression = make(map[string]orderOpenWorkSuppression, len(prev.openWorkSuppression))
+	}
+	for key, state := range prev.openWorkSuppression {
+		if _, ok := m.openWorkSuppression[key]; !ok {
+			m.openWorkSuppression[key] = state
 		}
 	}
 }
@@ -2474,6 +2582,21 @@ var orderGateTimeout = 8 * time.Second
 // the expensive gate query is genuinely skipped for a bounded span; an equal
 // window would be consumed by the gate itself, yielding no real suppression.
 var orderGateBackoffDuration = 24 * time.Second
+
+const (
+	// orderOpenWorkSuppressionAlertAfter is how many CONSECUTIVE open-work gate
+	// refusals an order must accumulate before the first order.suppressed event.
+	// At the default 30s patrol interval that is ten minutes of an order not
+	// running — far past any legitimate in-flight run, and short enough that a
+	// wedged order surfaces within one working attention span.
+	orderOpenWorkSuppressionAlertAfter = 20
+
+	// orderOpenWorkSuppressionRepeat is the minimum wall-clock gap between
+	// order.suppressed events for the same order. A stalled order is suppressed
+	// on every tick forever, so this — not the tick count — is what caps the
+	// event rate at one per order per hour.
+	orderOpenWorkSuppressionRepeat = time.Hour
+)
 
 // errGateTimeout marks an open-work gate error caused by the per-order
 // bound elapsing (the #2893 contention case), as opposed to ctx cancel or a
