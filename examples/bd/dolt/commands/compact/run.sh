@@ -253,6 +253,8 @@ PACK_DIR="${GC_PACK_DIR:-$(unset CDPATH; cd -- "$(dirname "$0")/.." && pwd)}"
 . "$PACK_DIR/assets/scripts/runtime.sh"
 # shellcheck disable=SC1091
 . "$PACK_DIR/assets/scripts/compact-gain-drift-proof.sh"
+# shellcheck disable=SC1091
+. "$PACK_DIR/assets/scripts/compact-same-count-drift-proof.sh"
 
 if [ "${GC_DOLT_MANAGED_LOCAL:-}" = "1" ]; then
   managed_port=$(managed_runtime_port "$DOLT_STATE_FILE" "$DOLT_DATA_DIR" || true)
@@ -1154,6 +1156,7 @@ verify_counts() {
   verify_counts_saw_row_decrease=0
   verify_counts_saw_decrease_hash_drift=0
   verify_counts_saw_same_count_hash_drift=0
+  verify_counts_same_count_drift_tables=""
   verify_counts_saw_table_list_change=0
   verify_counts_saw_probe_failure=0
   verify_counts_failure_reason=""
@@ -1252,6 +1255,7 @@ verify_counts() {
         printf 'compact: db=%s table=%s value hash changed after flatten without row-count increase before=%s after=%s — quarantine and investigate before GC\n' \
           "$db" "$t" "$expected_hash" "$actual_hash" >&2
         verify_counts_saw_same_count_hash_drift=1
+        verify_counts_same_count_drift_tables="$verify_counts_same_count_drift_tables $t"
         if [ "$fail" -ne 1 ]; then
           fail=1
           verify_counts_failure_reason="post-flatten table value hash changed without row-count increase"
@@ -2182,6 +2186,7 @@ flatten_database() {
   verify_counts_saw_row_decrease=0
   verify_counts_saw_decrease_hash_drift=0
   verify_counts_saw_same_count_hash_drift=0
+  verify_counts_same_count_drift_tables=""
   verify_counts_saw_table_list_change=0
   verify_counts_saw_probe_failure=0
   verify_counts_failure_reason=""
@@ -2729,6 +2734,58 @@ flatten_database() {
       fi
       rm -f "$preflight_tmp"
       return 0
+    fi
+    # Downgrade quarantine -> defer for a concurrent-writer in-place UPDATE
+    # (ga-ewo6j). A same-count table value-hash drift is an in-place row
+    # modification: the row count is unchanged but the value hash moved. On a
+    # high-write DB the beads/mail workload commits such UPDATEs (mail
+    # read/archive, bead close/status change) every few seconds, so one lands in
+    # the flatten verify window on ~every run; hard-quarantining it blocks all
+    # future GC of the DB and is the production memory-exhaustion failure this
+    # compactor guards against. Defer ONLY when BOTH hold, else fail closed and
+    # quarantine below:
+    #   * a concurrent writer is HEAD-proven (writer_race_detected=1). A stable
+    #     HEAD means no writer, which is the corruption signal — unlike gain+drift
+    #     there is NO absorbed-writer DOLT_DIFF fallback here, because a same-count
+    #     in-place modification has no unchanged-row anchor and is byte-for-byte
+    #     indistinguishable from corruption without an independent writer signal.
+    #   * the drift has the shape of a benign in-place UPDATE:
+    #     same_count_drift_is_writer_explained diffs the pre-flight snapshot HEAD
+    #     against the flatten commit for every same-count-drifted table and proves
+    #     rows were MODIFIED with NONE of the pre-flight rows removed. Any removed
+    #     row, an unexplained/empty diff, or a probe failure fails closed.
+    # same_count_hash_drift is the ONLY failure category here; a mix with gain,
+    # decrease, table-list drift, or a probe failure still quarantines below.
+    if [ "$writer_race_detected" = "1" ] && \
+       [ "${verify_counts_saw_same_count_hash_drift:-0}" = "1" ] && \
+       [ "${verify_counts_saw_gain:-0}" != "1" ] && \
+       [ "${verify_counts_saw_gain_hash_drift:-0}" != "1" ] && \
+       [ "${verify_counts_saw_row_decrease:-0}" != "1" ] && \
+       [ "${verify_counts_saw_table_list_change:-0}" != "1" ] && \
+       [ "${verify_counts_saw_probe_failure:-0}" != "1" ] && \
+       same_count_drift_is_writer_explained "$db" "$head" "$flatten_head" "$verify_counts_same_count_drift_tables"; then
+      printf 'compact: db=%s writer race detected during flatten (snapshot_HEAD=%s pre_reset_HEAD=%s flatten_HEAD=%s post_verify_HEAD=%s) — same-count table value hash drift proven concurrent-writer in-place UPDATE via DOLT_DIFF(%s..%s) for tables [%s] (rows modified, none removed), not corruption; deferring, will retry next run\n' \
+        "$db" "$head" "${head_before_reset:-<empty>}" "$flatten_head" "${post_verify_head:-<empty>}" "$head" "$flatten_head" "${verify_counts_same_count_drift_tables# }" >&2
+      if ! defer_writer_race_after_flatten "$db" "$flatten_head" \
+        "$remote" "$expected_remote_head" "$expected_remote_head_verified" \
+        "$compacted_from_head" "$local_branch" "$remote_branch"; then
+        rm -f "$preflight_tmp"
+        return 1
+      fi
+      rm -f "$preflight_tmp"
+      return 0
+    fi
+    # A proven writer plus a same-count drift that the DOLT_DIFF proof could NOT
+    # clear (a pre-flight row was removed, the drift was unexplained, or a probe
+    # failed) fails closed here: the writer proof alone cannot license an
+    # unprovable in-place mutation, so quarantine stands. Emitted only when
+    # same-count drift is the sole hard category (a mix is reported just below).
+    if [ "$writer_race_detected" = "1" ] && \
+       [ "${verify_counts_saw_same_count_hash_drift:-0}" = "1" ] && \
+       [ "${verify_counts_saw_gain_hash_drift:-0}" != "1" ] && \
+       [ "${verify_counts_saw_row_decrease:-0}" != "1" ]; then
+      printf 'compact: db=%s writer race detected during flatten (snapshot_HEAD=%s pre_reset_HEAD=%s flatten_HEAD=%s post_verify_HEAD=%s), but same-count value hash drift could not be proven a benign in-place UPDATE (row removed, drift unexplained, or diff probe failed); failing closed, quarantine unchanged\n' \
+        "$db" "$head" "${head_before_reset:-<empty>}" "$flatten_head" "${post_verify_head:-<empty>}" >&2
     fi
     if [ "$writer_race_detected" = "1" ] && \
        { [ "${verify_counts_saw_gain_hash_drift:-0}" = "1" ] || \

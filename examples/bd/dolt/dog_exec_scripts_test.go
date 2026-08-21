@@ -754,7 +754,7 @@ case "$query" in
     # probe, which reports writercommit so HEAD has moved past the flatten's own
     # commit. verify_counts still sees compactcommit (gain+drift) because it does
     # not probe HEAD and the "$(current_head)" gates read the real state.
-    if { [ "$mode" = "writer_race_during_verify" ] || [ "$mode" = "writer_race_db_hash_during_verify" ] || [ "$mode" = "writer_race_with_mixed_same_count_hash_drift" ] || [ "$mode" = "row_count_decreases_with_writer_race" ]; } && [ "$(current_head)" = "compactcommit" ]; then
+    if { [ "$mode" = "writer_race_during_verify" ] || [ "$mode" = "writer_race_db_hash_during_verify" ] || [ "$mode" = "writer_race_with_mixed_same_count_hash_drift" ] || [ "$mode" = "row_count_decreases_with_writer_race" ] || [ "$mode" = "writer_race_same_count_hash_drift" ] || [ "$mode" = "same_count_hash_drift_writer_removed_row" ] || [ "$mode" = "same_count_hash_drift_writer_diff_probe_fails" ]; } && [ "$(current_head)" = "compactcommit" ]; then
       calls_file="$state_file.postverify-head-calls"
       calls=0
       if [ -f "$calls_file" ]; then
@@ -852,7 +852,7 @@ case "$query" in
       print_cell ""
       exit 0
     fi
-    if { [ "$mode" = "row_count_and_hash_diverges" ] || [ "$mode" = "same_table_replacement_with_row_gain" ] || [ "$mode" = "mixed_row_count_gain_and_same_count_hash_drift" ] || [ "$mode" = "writer_race_before_flatten" ] || [ "$mode" = "remote_writer_race_before_flatten" ] || [ "$mode" = "writer_race_during_verify" ] || [ "$mode" = "writer_race_with_mixed_same_count_hash_drift" ] || [ "$mode" = "row_count_decreases_with_writer_race" ] || [ "$mode" = "row_count_decreases_with_hash_change" ]; } && [ "$(current_head)" = "compactcommit" ]; then
+    if { [ "$mode" = "row_count_and_hash_diverges" ] || [ "$mode" = "same_table_replacement_with_row_gain" ] || [ "$mode" = "mixed_row_count_gain_and_same_count_hash_drift" ] || [ "$mode" = "writer_race_before_flatten" ] || [ "$mode" = "remote_writer_race_before_flatten" ] || [ "$mode" = "writer_race_during_verify" ] || [ "$mode" = "writer_race_with_mixed_same_count_hash_drift" ] || [ "$mode" = "row_count_decreases_with_writer_race" ] || [ "$mode" = "row_count_decreases_with_hash_change" ] || [ "$mode" = "writer_race_same_count_hash_drift" ] || [ "$mode" = "same_count_hash_drift_writer_removed_row" ] || [ "$mode" = "same_count_hash_drift_writer_diff_probe_fails" ]; } && [ "$(current_head)" = "compactcommit" ]; then
       print_cell hash-beads-after-writer
       exit 0
     fi
@@ -1036,6 +1036,40 @@ case "$query" in
     fi
     print_cell 10
     exit 0
+    ;;
+  *"DOLT_DIFF("*"diff_type = 'removed'"*|*"DOLT_DIFF("*"diff_type = 'modified'"*)
+    # Content diff probe for the same-count in-place-UPDATE proof (ga-ewo6j).
+    # Keyed on the "diff_type = 'removed'"/"'modified'" clauses, which are unique
+    # to same_count_drift_is_writer_explained — the gain-drift and first-commit
+    # probes use "diff_type <> 'added'" — so this arm never shadows them. It MUST
+    # precede the generic *"SELECT COUNT(*) FROM"*"beads"* arm below (these are
+    # SELECT COUNT(*) FROM DOLT_DIFF(...) queries) or that arm would answer with
+    # a table row count. removed must be 0 and modified > 0 to prove a benign
+    # in-place UPDATE; data-loss/probe-failure variants fail the proof closed.
+    case "$mode" in
+      writer_race_same_count_hash_drift)
+        case "$query" in
+          *"diff_type = 'removed'"*) print_cell 0 ;;
+          *"diff_type = 'modified'"*) print_cell 3 ;;
+          *) print_cell 0 ;;
+        esac
+        exit 0
+        ;;
+      same_count_hash_drift_writer_removed_row)
+        case "$query" in
+          *"diff_type = 'removed'"*) print_cell 1 ;;
+          *"diff_type = 'modified'"*) print_cell 2 ;;
+          *) print_cell 0 ;;
+        esac
+        exit 0
+        ;;
+      same_count_hash_drift_writer_diff_probe_fails)
+        printf 'diff probe unavailable\n' >&2
+        exit 55
+        ;;
+    esac
+    printf 'unexpected DOLT_DIFF query: %%s\n' "$query" >&2
+    exit 64
     ;;
   *"SELECT COUNT(*) FROM"*"beads"*)
     if [ "$mode" = "row_count_failure" ]; then
@@ -3221,6 +3255,87 @@ func TestCompactScriptIntegrityReasonOutranksEarlierProbeFailure(t *testing.T) {
 	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
 	if reason := compactMarkerValue(t, marker, "reason"); reason != "post-flatten table value hash changed without row-count increase" {
 		t.Fatalf("quarantine reason should prefer integrity failure over earlier probe failure, got %q", reason)
+	}
+}
+
+// A concurrent in-place UPDATE (mail read/archive, bead close/status change on a
+// high-write DB) commits inside the flatten verify window, leaving the row count
+// unchanged but drifting the table value hash. HEAD moves past the flatten's own
+// commit, so the writer is proven, and a DOLT_DIFF of the pre-flight snapshot
+// against the flatten commit shows the drifted rows were modified with none
+// removed — a benign in-place UPDATE, not corruption. The run must defer
+// (skip-and-retry) instead of writing the blocking quarantine marker that
+// chronically re-quarantined high-write DBs and starved GC (ga-ewo6j).
+func TestCompactScriptDefersSameCountHashDriftWithProvenWriter(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "writer_race_same_count_hash_drift", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	assertCompactWriterRaceDeferred(t, fixture, out, err)
+	if !strings.Contains(out, "table=beads value hash changed after flatten without row-count increase") {
+		t.Fatalf("output missing same-count hash drift evidence:\n%s", out)
+	}
+	if !strings.Contains(out, "in-place UPDATE") {
+		t.Fatalf("output missing same-count in-place UPDATE defer message:\n%s", out)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if !strings.Contains(string(logData), "DOLT_DIFF(") {
+		t.Fatalf("same-count drift defer should probe DOLT_DIFF for row preservation:\n%s", logData)
+	}
+}
+
+// Fail closed: even with a proven writer, a DOLT_DIFF that shows a pre-flight row
+// was REMOVED (not merely modified) is not a benign in-place UPDATE — a removed
+// row is data loss — so the same-count drift must still quarantine.
+func TestCompactScriptQuarantinesSameCountHashDriftWhenPreflightRowRemoved(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "same_count_hash_drift_writer_removed_row", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("compact succeeded despite a removed pre-flight row during same-count drift:\n%s", out)
+	}
+	if !strings.Contains(out, "post-flatten INTEGRITY check failed") {
+		t.Fatalf("output missing integrity quarantine notice:\n%s", out)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if strings.Contains(string(logData), "DOLT_GC") {
+		t.Fatalf("removed pre-flight row must block full GC:\n%s", logData)
+	}
+	quarantine := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if _, statErr := os.Stat(quarantine); statErr != nil {
+		t.Fatalf("removed pre-flight row should write quarantine marker: %v", statErr)
+	}
+	pendingGC := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
+	if _, statErr := os.Stat(pendingGC); !os.IsNotExist(statErr) {
+		t.Fatalf("removed pre-flight row must not write pending-GC marker; stat=%v", statErr)
+	}
+}
+
+// Fail closed: if the DOLT_DIFF preservation probe itself fails, the same-count
+// drift cannot be proven a benign in-place UPDATE and must still quarantine,
+// even with a proven writer.
+func TestCompactScriptQuarantinesSameCountHashDriftWhenDiffProbeFails(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "same_count_hash_drift_writer_diff_probe_fails", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("compact succeeded despite same-count drift diff-probe failure:\n%s", out)
+	}
+	if !strings.Contains(out, "post-flatten INTEGRITY check failed") {
+		t.Fatalf("output missing integrity quarantine notice:\n%s", out)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if strings.Contains(string(logData), "DOLT_GC") {
+		t.Fatalf("same-count drift diff-probe failure must block full GC:\n%s", logData)
+	}
+	quarantine := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if _, statErr := os.Stat(quarantine); statErr != nil {
+		t.Fatalf("same-count drift diff-probe failure should write quarantine marker: %v", statErr)
 	}
 }
 
