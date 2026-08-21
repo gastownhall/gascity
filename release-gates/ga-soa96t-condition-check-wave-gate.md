@@ -14,16 +14,15 @@ Reviewed-source merge base: `cdb5328a2f2e570fd56d017b98171cfa7b58f522`
 
 Gate date: 2026-08-21
 
-**Verdict: PASS.** The candidate-owned tests, required policy lane, build,
-vet, affected lint, formatting, conflict check, and scope check pass. The
-required 40-job candidate union retains its raw failures in this record. Every
-failure is either attributed to a tracked pre-existing failure with no path or
-mechanism overlap, or is explicitly marked FAIL-WAIVED under a recorded mayor
-authorization. In particular,
-`TestFreshManagedBdCityInitSeedsPinnedHQDatabaseAndKeepsGCPrefix` remains
-FAIL-WAIVED under `waiver_ref=ga-soa96t-mayor-waiver-20260821`; the exact
-failure reproduced on the reviewed source's base under the same 40-job
-topology. Nothing in this record rewrites a raw failure to green.
+**Verdict: FAIL.** The mayor-directed base control clears the original
+beads#4566 blocker under `waiver_ref=ga-soa96t-mayor-waiver-20260821`, but the
+normal pre-push fast matrix then exposed a distinct failure:
+`TestCmdStopSupervisorManagedInvalidCityTomlFailsWhenShutdownFails` timed out
+after five seconds on the gated head. The exact current-base matrix passed that
+test under the same topology, and the failure shares the candidate's `cmd/gc`
+package. Attribution clauses 3 and 4 are therefore unsatisfied. No
+`--no-verify` push is authorized, and nothing was pushed or proposed as a pull
+request.
 
 ## Gate Results
 
@@ -31,8 +30,8 @@ topology. Nothing in this record rewrites a raw failure to green.
 |---|---|---|---|
 | 1 | Review PASS present | PASS | Re-review bead `ga-7i08d1` records PASS for the exact reviewed source. It independently inspected the reconciled hunk and reran build, vet, and the relevant tests. |
 | 2 | Acceptance criteria met | PASS | The `cap-admits-the-wave` fixture waits for the declared four-check wave, preserves successful registrations until all polling checks can observe the cohort, and removes timed-out registrations before the serial control arm. All eight tests in the modified file pass by name. |
-| 3 | Tests pass | PASS | The documented CI-equivalent 40-job candidate union ran with the process-backed `cmd/gc` lane enabled and reported 33 PASS jobs / 7 FAIL jobs / 0 job-level SKIP. The six failing test names are preserved below: three are attributed with tracker plus base/no-overlap evidence, one uses prior exact candidate/base A/B evidence, and two failure classes are explicitly FAIL-WAIVED. The eight candidate-owned tests report 8 PASS / 0 FAIL / 0 SKIP. |
-| 3a | Pre-existing failures attributed | PASS | The beads#4566 blocker reproduced on the exact base under identical load and is covered for this gate by mayor waiver `ga-soa96t-mayor-waiver-20260821`. `TestBdFlagManifestCurrent` and both tmux binding tests reproduced on the exact base with matching signatures. `TestE2E_SuspendResume_City` is tracked with prior exact candidate/base A/B evidence and cannot be reached from the candidate's package-local `_test.go` file. `TestProviderLiveClaudeKindPath` is covered by `waiver_ref=mayor-2026-08-20-herdr-pane-standing`. |
+| 3 | Tests pass | **FAIL** | The documented CI-equivalent 40-job candidate union's raw failures are attributed or waived as recorded below, and the eight candidate-owned tests report 8 PASS / 0 FAIL / 0 SKIP. However, the later mandatory pre-push `make test-fast-parallel` matrix reported 9 PASS jobs / 1 FAIL job / 0 job-level SKIP: `TestCmdStopSupervisorManagedInvalidCityTomlFailsWhenShutdownFails` failed in `unit-cmd-gc-5-of-6`. The exact current-base matrix passed that test, so the new red result remains blocking. |
+| 3a | Pre-existing failures attributed | **FAIL** | The original beads#4566 blocker and the other 40-job-union failures are attributed or waived below. The new stop-timeout failure has tracker `ga-tvgyen` and is not diff-owned, but exact current base passed it and both the failure and candidate are in `cmd/gc`. Clauses 3 (base reproduction) and 4 (no package-path overlap) are unsatisfied; no waiver exists. |
 | 3b | Policy/lint lane | PASS | `make test-ci-policy`, `go build ./...`, `go vet ./...`, `LINT_CHANGED_SCOPE=tracked LINT_CHANGED_REF=origin/main LINT_FLAGS=--allow-parallel-runners make lint-affected`, `LINT_CHANGED_REF=origin/main make fmt-check-changed`, and `git diff --check` all pass on the unchanged reviewed source. |
 | 4 | No high-severity review findings open | PASS | The re-review records no unresolved HIGH finding. Unresolved HIGH count: 0. |
 | 5 | Final branch is clean | PASS | `git status --porcelain` was empty at the reviewed source before this checklist was written. The checklist is committed separately on the isolated deploy branch. |
@@ -150,9 +149,36 @@ the sample sizes differ. Mayor recorded that narrow conclusion and granted
 `waiver_ref=ga-soa96t-mayor-waiver-20260821` in message `gm-wisp-kub0v1` and
 on the deploy bead.
 
+## Pre-push finding that supersedes the PASS
+
+The isolated deploy branch was committed at
+`01514e68fbf9daf3646451b297d4467ee807d638` and pushed normally so the
+repository pre-push hook could run. The hook stopped the push before any remote
+update:
+
+```text
+candidate_cmd: LOCAL_TEST_JOBS=15 CMD_GC_PROCESS_TOTAL=6 make test-fast-parallel
+candidate_counts: 9 PASS jobs, 1 FAIL job, 0 job-level SKIP (10 total)
+candidate_failure: TestCmdStopSupervisorManagedInvalidCityTomlFailsWhenShutdownFails — FAIL in unit-cmd-gc-5-of-6 after 8.38s
+candidate_log: /var/tmp/gc-local-tests.D474gF/unit-cmd-gc-5-of-6.log
+
+base_ref: origin/main@187e53828754894096fc295cea4baca909fe9a96
+base_cmd: LOCAL_TEST_JOBS=15 CMD_GC_PROCESS_TOTAL=6 make test-fast-parallel
+base_counts: 9 PASS jobs, 1 FAIL job, 0 job-level SKIP (10 total)
+base_target_result: TestCmdStopSupervisorManagedInvalidCityTomlFailsWhenShutdownFails — PASS in unit-cmd-gc-5-of-6
+base_failure: TestProviderLiveClaudeKindPath — FAIL-WAIVED under mayor-2026-08-20-herdr-pane-standing
+base_logs: /var/tmp/gc-local-tests.6CJgLy
+```
+
+The new target is not diff-owned (`cmd/gc/cmd_stop_test.go` is unchanged), and
+tracker `ga-tvgyen` was filed and verified. It nevertheless fails the full
+attribution rule: it did not reproduce on the exact current base, and the
+candidate changes another test file in the same `cmd/gc` package. This is a
+technical gate failure, not an attributed host failure.
+
 ## Disposition
 
-The gate passes with all raw failures visible, tracked, and attributed or
-explicitly waived. No failure was retried into green. The isolated deploy
-branch may be pushed and proposed for review; merge authority remains with
-mayor/mpr.
+Criterion 3 fails. The deploy branch remains local and unpushed, no pull
+request exists, and no merge request or deploy-clearance status is permitted.
+The bead returns to builder with the candidate/base logs and the unsatisfied
+attribution clauses named explicitly.
