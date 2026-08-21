@@ -42,7 +42,7 @@ func newFakeIdleTracker() *fakeIdleTracker {
 	}
 }
 
-func (f *fakeIdleTracker) checkIdle(sessionName, template string, _ runtime.Provider, _ time.Time) bool {
+func (f *fakeIdleTracker) checkIdle(sessionName, template, _, _ string, _ runtime.Provider, _ time.Time) bool {
 	if f.idle[sessionName] {
 		return true
 	}
