@@ -64,9 +64,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   uncollected in the wisp tier indefinitely. Such a row now reaps on its
   own closed status when it is a leaf — no parent and no children — since
   it then has no root to check for collectibility and the single-bead
-  delete strands nothing. A rootless row that owns a subtree, or that is
+  delete strands nothing. Leaf-ness is tested over both ownership links a
+  bead can carry — the `parent_id` column and a `parent-child` dep row —
+  since some step beads are joined to their parent by the dep row alone.
+  A rootless row that owns a subtree, is itself a subtree member, or is
   not a plain task, remains out of scope, preserving the original safety
-  boundary. Fixes #3780.
+  boundary. The leaf-ness probes are bounded per sweep (including in the
+  dry-run default, where they are the only backend cost) so the scan never
+  does unbounded reads per tick. Fixes #3780.
 
 - **The dolt pack's `run_bounded` python3 fallback now sends SIGTERM before
   SIGKILL, matching its documented contract.** The fallback (used when

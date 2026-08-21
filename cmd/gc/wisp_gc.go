@@ -61,6 +61,14 @@ var closeAbandonedEnforced = func() bool {
 // unbounded amount of deletion work. Package var so tests can shrink it.
 var wispGCReapOrphanBatchCap = 500
 
+// wispGCReapOrphanProbeCap bounds how many rootless candidates one sweep will
+// probe for leaf-ness (Children/DepList). Unlike wispGCReapOrphanBatchCap it
+// applies in DRY-RUN TOO: the dry run performs no deletes but still pays one
+// backend read per aged rootless candidate, so without this bound the default
+// config does unbounded reads per tick against the very backlog this reaps.
+// Package var so tests can shrink it.
+var wispGCReapOrphanProbeCap = 500
+
 // wispGCClosurePurgeBatchCap bounds how many closed-root ownership closures a
 // single sweep will purge. Like wispGCReapOrphanBatchCap it caps DELETE
 // ATTEMPTS per tick — counting failures, not just successful purges — so the
@@ -327,12 +335,17 @@ func closedWispGCEntries(store beads.Store) ([]beads.Bead, error) {
 // (unreadable) Get error, causes the descendant to be SKIPPED so an in-flight
 // workflow is never stripped of its closed steps. The per-root Get decision
 // is cached so many siblings sharing one dead root cost a single Get. A
-// rootless row needs no such check when it is a plain-task LEAF — no ParentID
-// and no children — because its own closed status is then the entire
-// collectibility fence; deleteWorkflowBead removes a single bead, not a
-// closure, so a rootless row that owns a subtree stays SKIPPED rather than
-// stranding descendants no GC path could reach again. A rootless row that is
-// not a plain task is an unrecognized shape and also stays SKIPPED.
+// rootless row needs no such check when it is a plain-task LEAF — no parent and
+// no children by either the parent_id COLUMN or a parent-child DEP ROW, since
+// ownership travels over both (collectExpiredBeadClosure walks both too) —
+// because its own closed status is then the entire collectibility fence;
+// deleteWorkflowBead removes a single bead, not a closure, so a rootless row
+// that owns a subtree stays SKIPPED rather than stranding descendants no GC
+// path could reach again, and one that is a subtree MEMBER stays SKIPPED rather
+// than being stripped from a live parent. A rootless row that is not a plain
+// task is an unrecognized shape and also stays SKIPPED. The leaf-ness probes
+// cost backend reads even in dry-run, so wispGCReapOrphanProbeCap bounds how
+// many of them one sweep performs regardless of enforcement.
 //
 // With reapOrphansEnforced() false (the dry-run default, GC_WISP_GC_REAP_ORPHANS
 // unset) the function mutates nothing: it counts the would-be reaps and logs a
@@ -360,6 +373,11 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 
 	reaped := 0
 	attempted := 0
+	// probed bounds the rootless leaf-ness probes (Children + DepList) for the
+	// sweep. It advances in DRY-RUN TOO, unlike attempted: the dry run performs
+	// no deletes but still pays those backend reads per aged rootless candidate.
+	probed := 0
+	probeTruncated := false
 	var deleteErr error
 	for _, c := range candidates {
 		// The batch cap bounds DELETION ATTEMPTS per sweep — counting failed
@@ -391,11 +409,22 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 			// (unlike the root-rooted purge, which deletes the whole
 			// ownership tree), so reaping a row that owns a parent-child
 			// subtree would strand descendants that neither GC path can
-			// reach again. Its own closed status is then the entire
-			// collectibility fence (gastownhall/gascity#3780).
+			// reach again, and reaping a subtree member would strip a step
+			// from a live parent. Its own closed status is the entire
+			// collectibility fence only once both directions of ownership —
+			// column and dep row — come back empty (gastownhall/gascity#3780).
 			if strings.TrimSpace(c.ParentID) != "" {
 				continue
 			}
+			// Every remaining rootless candidate costs backend reads whether or
+			// not this sweep enforces, so the probe budget is checked before the
+			// first of them. break, not continue: the rest of the candidate
+			// slice cannot be probed either, so walking it buys nothing.
+			if wispGCReapOrphanProbeCap > 0 && probed >= wispGCReapOrphanProbeCap {
+				probeTruncated = true
+				break
+			}
+			probed++
 			children, childErr := store.Children(c.ID, beads.IncludeClosed, beads.WithBothTiers)
 			if childErr != nil {
 				// Cannot prove safe — skip, matching the unreadable-Get
@@ -404,6 +433,21 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 				continue
 			}
 			if len(children) > 0 {
+				continue
+			}
+			// Mirror collectExpiredBeadClosure: ownership is carried by the
+			// parent_id COLUMN or by a parent-child DEP ROW, and some step
+			// beads have only the dep row. A column-only fence would reap such
+			// a row out from under a live parent ("down": rows where this bead
+			// depends on another), or out from under its own dep-linked
+			// children ("up": rows where another bead depends on this one).
+			// Both reads sit inside the single probe budget charged above.
+			linked, linkErr := hasParentChildDepEdge(store, c.ID)
+			if linkErr != nil {
+				collectErr = errors.Join(collectErr, fmt.Errorf("listing parent-child deps for rootless orphan %q: %w", c.ID, linkErr))
+				continue
+			}
+			if linked {
 				continue
 			}
 			decision = true
@@ -457,6 +501,10 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 		}
 	}
 
+	if probeTruncated {
+		log.Printf("wisp gc: rootless-orphan scan stopped after %d probes (cap); the reported count is a floor, not the full eligible backlog", probed)
+	}
+
 	if !enforce {
 		// Dry-run never mutates: report would-be count via log only, return 0
 		// purged so callers don't over-count deletions that did not happen.
@@ -464,6 +512,31 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 	}
 
 	return reaped, errors.Join(collectErr, deleteErr)
+}
+
+// hasParentChildDepEdge reports whether id sits on either end of a parent-child
+// dependency row. The parent_id column is not the only ownership link: some
+// molecule step beads are joined to their parent purely by a dep row (see
+// collectExpiredBeadClosure, which walks both). "down" deps answer "does this
+// bead have a dep-linked parent", "up" deps answer "does it have dep-linked
+// children" — either makes it a subtree member rather than a free-standing
+// leaf, so the orphan reaper must leave it to the owning root's closure purge.
+func hasParentChildDepEdge(store beads.Store, id string) (bool, error) {
+	for _, direction := range []string{"down", "up"} {
+		deps, err := store.DepList(id, direction)
+		if err != nil {
+			return false, fmt.Errorf("listing %q deps: %w", direction, err)
+		}
+		for _, dep := range deps {
+			if dep.Type != "parent-child" {
+				continue
+			}
+			if dep.IssueID != "" && dep.DependsOnID != "" {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 // closeAbandonedRoots closes OPEN workflow and v1 molecule roots whose entire
