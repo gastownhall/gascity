@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/sling"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // fireRootCooker cooks one ready fire-root's declared formula with its declared
@@ -118,6 +119,23 @@ type fireRootCookFunc func(store beads.Store, storeRef, rigName string, fireRoot
 // It is the judgment-free sibling of recoverUnroutedWorkRoutes and runs at the
 // same patrol-tick and startup call sites. Best-effort: a per-store failure is
 // logged and the remaining stores still run.
+//
+// Scopes are resolved through storeref's ready-work federation — the same
+// storeref.RoutedWork intent `gc ready` itself resolves — rather than a raw
+// rig-store enumeration, mirroring readyLegsForTopology/censusLegCandidates:
+// storeref.EachLeg is a pure, cannot-fail enumeration of the resolved plan,
+// collected into a local slice below; the cook and the per-scope
+// log-and-continue error handling stay this method's own plain loop, exactly
+// as before, so one scope's error still never blocks another. storeref.Walk
+// is deliberately NOT used here — it aborts a plan on its first Fatal-policy
+// leg error, and the work/city leg is exactly the leg storeref marks Fatal,
+// so a Walk-based rewrite would stop the sweep at the city scope instead of
+// continuing on to every rig.
+//
+// This also means a fire-root sitting in a relocated class-binding store is
+// now scanned too — storeref.RoutedWork's plan includes binding legs that the
+// old raw rigBeadStores() sweep never saw. Previously such a fire-root would
+// never have been promoted at all; it now fires like any other ready one.
 func (cr *CityRuntime) promoteReadyFireRoots() {
 	cook := cr.fireRootCook
 	if cook == nil {
@@ -129,10 +147,21 @@ func (cr *CityRuntime) promoteReadyFireRoots() {
 		rigName  string
 		store    beads.Store
 	}
-	scopes := []fireScope{{label: "city", storeRef: "city:" + cr.cityName, store: cr.cityBeadStore()}}
-	for name, store := range cr.rigBeadStores() {
-		scopes = append(scopes, fireScope{label: "rig " + name, storeRef: "rig:" + name, rigName: name, store: store})
+	rigs := cr.rigBeadStores() // residency:allow — constructor input to residencyTopology, not a residency answer
+	plan, err := storeref.Plan(storeref.RoutedWork{}, cr.residencyTopology(rigs))
+	if err != nil {
+		fmt.Fprintf(cr.stderr, "%s: fire-root promotion: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+		return
 	}
+	var scopes []fireScope
+	storeref.EachLeg(plan, func(leg storeref.Leg, _ storeref.Role, _ storeref.ErrPolicy) {
+		storeRef := string(leg.Ref)
+		if leg.Ref == storeref.WorkRef {
+			storeRef = "city:" + cr.cityName
+		}
+		rigName, _ := storeref.ScopeRigContext(string(leg.Ref))
+		scopes = append(scopes, fireScope{label: fireScopeLabel(leg.Ref), storeRef: storeRef, rigName: rigName, store: leg.Store})
+	})
 	for _, sc := range scopes {
 		if sc.store == nil {
 			continue
@@ -149,6 +178,25 @@ func (cr *CityRuntime) promoteReadyFireRoots() {
 			fmt.Fprintf(cr.stderr, "%s: fire-root promotion (%s): cooked %d ready fire-root(s)\n", cr.logPrefix, sc.label, fired) //nolint:errcheck // best-effort stderr
 		}
 	}
+}
+
+// fireScopeLabel spells a plan leg for this promotion's log lines: "city" for
+// the work ledger, "rig <name>" for a rig, and the class ref itself (e.g.
+// "class:cmsw") for a relocated binding. Mirrors the IsClassRef-then-
+// ScopeRigContext idiom readyLegLabel, censusRef and planeLegLabel each
+// already use (grep for those three) — written locally rather than shared
+// because none of the three is a general-purpose export, and their
+// binding-leg wording itself differs between them (readyLegLabel substitutes
+// "graph" for its own API-parity reason; this matches the more common
+// census/route-recovery choice of the raw class ref instead).
+func fireScopeLabel(ref storeref.StoreRef) string {
+	if storeref.IsClassRef(string(ref)) {
+		return string(ref)
+	}
+	if rig, ok := storeref.ScopeRigContext(string(ref)); ok && rig != "" {
+		return "rig " + rig
+	}
+	return "city"
 }
 
 // firedRootIdempotencyKey derives the fire-root's cook idempotency key from its

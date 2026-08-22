@@ -304,6 +304,49 @@ func TestCityRuntimePromoteReadyFireRoots(t *testing.T) {
 	}
 }
 
+// TestCityRuntimePromoteReadyFireRootsScopeErrorIsolation pins the other half
+// of the sibling-independence promise TestCityRuntimePromoteReadyFireRoots
+// checks: a cook failure in one scope must not stop any OTHER scope from being
+// attempted. This specifically guards against a future refactor that resolves
+// scopes via storeref.Walk instead of storeref.EachLeg plus a caller-owned
+// loop — Walk aborts a Union plan on its first Fatal-policy leg error, and the
+// work (city) leg is exactly the leg storeref marks Fatal, so a Walk-based
+// implementation would silently stop at the city scope and never reach the
+// rig below it.
+func TestCityRuntimePromoteReadyFireRootsScopeErrorIsolation(t *testing.T) {
+	cityStore := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "CFR-1", Type: "task", Status: "open", Metadata: map[string]string{
+			beadmeta.FireFormulaMetadataKey: "city-formula",
+		}},
+	}, nil)
+	rigStore := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "RFR-1", Type: "task", Status: "open", Metadata: map[string]string{
+			beadmeta.FireFormulaMetadataKey: testFireFormula,
+		}},
+	}, nil)
+
+	var cooked []string
+	cr := &CityRuntime{
+		cityName:            "city",
+		standaloneCityStore: cityStore,
+		standaloneRigStores: map[string]beads.Store{"dip": rigStore},
+		stderr:              io.Discard,
+		fireRootCook: func(_ beads.Store, storeRef, _ string, fireRoot beads.Bead, _ string, _ map[string]string) error {
+			if storeRef == "city:city" {
+				return fmt.Errorf("simulated cook failure for %s", fireRoot.ID)
+			}
+			cooked = append(cooked, fireRoot.ID)
+			return nil
+		},
+	}
+
+	cr.promoteReadyFireRoots()
+
+	if len(cooked) != 1 || cooked[0] != "RFR-1" {
+		t.Fatalf("cooked=%v, want [RFR-1] (the city scope's cook error must not stop the rig scope from being attempted)", cooked)
+	}
+}
+
 // TestLinkFiredRootGraphWorkflow proves the linkage cookFireRoot applies after a
 // graph.v2 cook closes the idempotency loop that molecule.Cook alone cannot:
 // molecule.Cook does not set Options.ParentID on a gc.kind=workflow root and
