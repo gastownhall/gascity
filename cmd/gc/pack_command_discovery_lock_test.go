@@ -180,23 +180,18 @@ func TestCompletionCandidatesDoNotWaitOnHeldRepoCacheLock(t *testing.T) {
 // `gc <cmd> --rig <TAB>` resolves the rig before it can list anything, which
 // reaches the registry scan rather than the city load the other completion
 // paths take.
+//
+// It asserts the busy error rather than only the timing. Returning promptly is
+// half the contract; the other half is refusing to answer, and a resolution
+// that swallowed the busy error would return promptly too — from whichever
+// city it could still reach.
 func TestCompletionRigFlagResolutionDoesNotWaitOnHeldRepoCacheLock(t *testing.T) {
 	cityPath, cacheRoot := setupDiscoveryLockCity(t)
 	registerRigInSiteBinding(t, cityPath, "hauler")
 	rigFlag = "hauler"
 	holdExclusiveRepoCacheLock(t, cacheRoot)
 
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		resolveCityForCompletion() //nolint:errcheck // only the timing matters
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("completion rig-flag resolution blocked on a held repo-cache lock")
-	}
+	assertFailsClosedPromptly(t, "completion rig-flag resolution", resolveCityForCompletion)
 }
 
 // Running gc from inside a rig directory is the ordinary way to use it, and it
@@ -209,16 +204,31 @@ func TestCwdRigDiscoveryDoesNotWaitOnHeldRepoCacheLock(t *testing.T) {
 	t.Chdir(rigDir)
 	holdExclusiveRepoCacheLock(t, cacheRoot)
 
-	done := make(chan struct{})
+	assertFailsClosedPromptly(t, "cwd rig discovery", resolveCityForDiscovery)
+}
+
+// assertFailsClosedPromptly runs resolve off the test goroutine — the point is
+// that it might block — and requires it to both return quickly and report the
+// busy cache rather than an answer it reached by skipping the busy city.
+func assertFailsClosedPromptly(t *testing.T, what string, resolve func() (string, error)) {
+	t.Helper()
+	type result struct {
+		city string
+		err  error
+	}
+	done := make(chan result, 1)
 	go func() {
-		defer close(done)
-		resolveCityForDiscovery() //nolint:errcheck // only the timing matters
+		city, err := resolve()
+		done <- result{city, err}
 	}()
 
 	select {
-	case <-done:
+	case got := <-done:
+		if !errors.Is(got.err, config.ErrRepoCacheBusy) {
+			t.Fatalf("%s: err = %v, want config.ErrRepoCacheBusy (city %q)", what, got.err, got.city)
+		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("cwd rig discovery blocked on a held repo-cache lock")
+		t.Fatalf("%s blocked on a held repo-cache lock", what)
 	}
 }
 
@@ -290,6 +300,113 @@ func TestAdvisoryRigLookupPrunesSiteOnlyBindingsLikeAuthoritative(t *testing.T) 
 				}
 			})
 		}
+	}
+}
+
+// The sticky default is the tier below local discovery, so a local discovery
+// that could not look is the one case where falling through changes the answer
+// rather than supplying a missing one: the same cwd resolves to a remote city
+// while another terminal happens to be cloning, and to the local one a moment
+// later.
+func TestBusyRepoCacheDoesNotFallThroughToTheStickyDefault(t *testing.T) {
+	cityPath, cacheRoot := setupDiscoveryLockCity(t)
+	rigDir := registerRigInSiteBinding(t, cityPath, "hauler")
+	declareRigInCityTOML(t, cityPath, "hauler")
+	t.Setenv("GC_CITY", "")
+	t.Chdir(rigDir)
+	writeStickyDefaultContext(t)
+
+	// The control: without contention this resolves locally, so the assertion
+	// below is about the busy cache and not about an unreachable sticky tier.
+	if ctx, err := resolveContextAllowRemoteMode(authoritativeResolution); err != nil || ctx.Remote != nil {
+		t.Fatalf("uncontended resolve = %+v, err %v; want the local city", ctx, err)
+	}
+
+	release := holdExclusiveRepoCacheLock(t, cacheRoot)
+	defer release()
+
+	ctx, err := resolveContextAllowRemoteMode(completionResolutionMode)
+	if !errors.Is(err, config.ErrRepoCacheBusy) {
+		t.Fatalf("err = %v, want config.ErrRepoCacheBusy (resolved %+v)", err, ctx)
+	}
+	if ctx.Remote != nil {
+		t.Fatalf("busy local discovery fell through to remote %+v", ctx.Remote)
+	}
+}
+
+// writeStickyDefaultContext registers a remote context and makes it the sticky
+// default, so a local resolution that gives up has somewhere else to land.
+func writeStickyDefaultContext(t *testing.T) {
+	t.Helper()
+	body := "default = \"prod\"\n\n[[context]]\nname = \"prod\"\nurl = \"https://box.internal:9443\"\ncity = \"example-city\"\n"
+	if err := os.WriteFile(DefaultPath(), []byte(body), 0o600); err != nil {
+		t.Fatalf("writing contexts.toml: %v", err)
+	}
+}
+
+// Whether a registered city that cannot contribute a match still affects the
+// scan is settled by failOnLoadError alone. It must never depend on the
+// resolution mode: eager discovery captures the city it picks into the
+// pack-command closures the user later runs, so an advisory answer that
+// differs from the authoritative one is a wrong city, not a stale one.
+//
+// The unmatchable city is broken rather than merely irrelevant because that is
+// the only way its presence is observable at all: a healthy city that cannot
+// match contributes nothing to any scan. Broken, it makes the two axes visible
+// — a match-only scan skips it before loading, and a scan asked to report load
+// errors loads it and fails — and this asserts both modes agree on which.
+func TestRigLookupTreatsUnmatchableBrokenCityTheSameInBothModes(t *testing.T) {
+	cityPath, _ := setupDiscoveryLockCity(t)
+	registerRigInSiteBinding(t, cityPath, "hauler")
+	declareRigInCityTOML(t, cityPath, "hauler")
+	registerUnloadableCity(t, filepath.Join(filepath.Dir(cityPath), "broken"))
+
+	for _, scan := range []struct {
+		name            string
+		failOnLoadError bool
+		wantMatches     int
+		wantErr         bool
+	}{
+		// Match-only: the broken city cannot match, so it is skipped unread.
+		{name: "match-only", failOnLoadError: false, wantMatches: 1},
+		// Diagnostics requested: the broken city is exactly what was asked
+		// about, so it is loaded and its failure is the answer.
+		{name: "report-load-errors", failOnLoadError: true, wantErr: true},
+	} {
+		for _, mode := range []struct {
+			name string
+			mode contextResolutionMode
+		}{
+			{"advisory", completionResolutionMode},
+			{"authoritative", authoritativeResolution},
+		} {
+			t.Run(scan.name+"/"+mode.name, func(t *testing.T) {
+				matches, _, err := registeredRigBindingsByName("hauler", scan.failOnLoadError, mode.mode)
+				if gotErr := err != nil; gotErr != scan.wantErr {
+					t.Fatalf("rig lookup err = %v, want error: %v", err, scan.wantErr)
+				}
+				if len(matches) != scan.wantMatches {
+					t.Fatalf("rig %q resolved to %d bindings, want %d", "hauler", len(matches), scan.wantMatches)
+				}
+			})
+		}
+	}
+}
+
+// registerUnloadableCity registers a city whose city.toml is present but
+// unparseable, and which binds no rigs at all. Present-but-broken matters:
+// a missing city.toml is reported as a stale registry entry instead, which the
+// scan tolerates.
+func registerUnloadableCity(t *testing.T, cityPath string) {
+	t.Helper()
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace\nname = \n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(cityPath, "discovery-lock-broken"); err != nil {
+		t.Fatalf("registering broken city: %v", err)
 	}
 }
 

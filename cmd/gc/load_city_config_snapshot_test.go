@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"unicode"
 )
 
 // TestCityConfigLoadersDeclineTheRevisionSnapshot pins a file-level invariant:
@@ -52,7 +53,10 @@ import (
 func TestCityConfigLoadersDeclineTheRevisionSnapshot(t *testing.T) {
 	const guarded = "cmd_agent.go"
 	const capturingCall = "config.LoadWithIncludes("
-	const optionsLiteral = "config.LoadOptions{"
+	// optionsType, not "config.LoadOptions{": a zero value declared without a
+	// literal (`var opts config.LoadOptions`) captures the snapshot just as
+	// surely, and matching on the brace would not see it.
+	const optionsType = "config.LoadOptions"
 	const option = "SkipRevisionSnapshot: true"
 	// sharedBodyParam is the parameter the shared loader body forwards. It is
 	// safe only because every call that supplies it is checked below.
@@ -88,13 +92,24 @@ func TestCityConfigLoadersDeclineTheRevisionSnapshot(t *testing.T) {
 	declining := map[string]bool{sharedBodyParam: true}
 	optionsFound := 0
 	for i, line := range lines {
-		if !strings.Contains(line, optionsLiteral) {
+		trimmed := strings.TrimSpace(line)
+		if !strings.Contains(line, optionsType) {
+			continue
+		}
+		// A comment naming the type declares nothing.
+		if strings.HasPrefix(trimmed, "//") {
+			continue
+		}
+		// The shared body's signature declares the parameter itself. It is
+		// checked indirectly instead: every call that supplies it is required
+		// below to pass one of the values verified here.
+		if strings.HasPrefix(trimmed, "func ") {
 			continue
 		}
 		optionsFound++
 		if !strings.Contains(line, option) {
 			t.Errorf("%s:%d declares options that capture the revision snapshot: %s",
-				guarded, i+1, strings.TrimSpace(line))
+				guarded, i+1, trimmed)
 			continue
 		}
 		if name, ok := declaredVarName(line); ok {
@@ -102,7 +117,7 @@ func TestCityConfigLoadersDeclineTheRevisionSnapshot(t *testing.T) {
 		}
 	}
 	if optionsFound == 0 {
-		t.Fatalf("no %s literal in %s; this guard is no longer watching anything", optionsLiteral, guarded)
+		t.Fatalf("no %s declaration in %s; this guard is no longer watching anything", optionsType, guarded)
 	}
 
 	// Second half: every load call must be handed one of those values. Without
@@ -120,7 +135,7 @@ func TestCityConfigLoadersDeclineTheRevisionSnapshot(t *testing.T) {
 			continue
 		}
 		callsFound++
-		if !containsAnyKey(line, declining) {
+		if !hasIdentifierIn(line, declining) {
 			t.Errorf("%s:%d loads config without passing one of this file's named declining options values %s: %s",
 				guarded, i+1, sortedKeys(declining), trimmed)
 		}
@@ -153,11 +168,44 @@ func containsAny(line string, needles []string) bool {
 	return false
 }
 
-func containsAnyKey(line string, needles map[string]bool) bool {
-	for n := range needles {
-		if strings.Contains(line, n) {
+// hasIdentifierIn reports whether the line uses any of the named values as a
+// whole identifier.
+//
+// Whole identifier, not substring: a substring test for the parameter name
+// "opts" also accepts "sneakyopts", so declaring `var sneakyopts
+// config.LoadOptions` and passing it would satisfy this half of the guard
+// while capturing the snapshot — which is precisely the evasion the two halves
+// exist to close.
+func hasIdentifierIn(line string, names map[string]bool) bool {
+	for _, ident := range identifiers(line) {
+		if names[ident] {
 			return true
 		}
 	}
 	return false
+}
+
+// identifiers splits a source line into its Go identifier tokens. It does not
+// distinguish identifiers from keywords or from the digits of a numeric
+// literal; the guard only ever looks up names it declared itself, so the extra
+// tokens cannot produce a false match.
+func identifiers(line string) []string {
+	var out []string
+	start := -1
+	for i, r := range line {
+		if r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r) {
+			if start < 0 {
+				start = i
+			}
+			continue
+		}
+		if start >= 0 {
+			out = append(out, line[start:i])
+			start = -1
+		}
+	}
+	if start >= 0 {
+		out = append(out, line[start:])
+	}
+	return out
 }

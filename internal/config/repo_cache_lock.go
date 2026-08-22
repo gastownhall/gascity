@@ -10,7 +10,7 @@ import (
 const repoCacheLockName = ".packman-cache.lock"
 
 // ErrRepoCacheBusy reports that another process holds a conflicting repo-cache
-// lock. Only the Try* helpers return it; the blocking helpers wait instead.
+// lock. Only a non-blocking acquisition returns it; the rest wait instead.
 var ErrRepoCacheBusy = errors.New("repo cache is busy")
 
 // repoCacheLockOptions selects which repo-cache lock an acquisition takes and
@@ -41,29 +41,19 @@ func TryWithRepoCacheReadLock(root string, fn func() error) error {
 	return withRepoCacheLock(root, repoCacheLockOptions{mode: repoCacheLockShared, nonBlocking: true}, fn)
 }
 
-// WithRepoCacheWriteLock runs fn while holding the exclusive repo-cache lock.
+// WithRepoCacheWriteLock runs fn while holding the exclusive repo-cache lock,
+// waiting for whoever holds it. Callers whose answer must be correct —
+// installers, prune, bootstrap — want this.
 func WithRepoCacheWriteLock(root string, fn func() (string, error)) (string, error) {
-	return writeLock(root, false, fn)
+	return withRepoCacheWriteLock(root, false, fn)
 }
 
-// TryWithRepoCacheWriteLock is WithRepoCacheWriteLock for advisory callers: it
-// returns ErrRepoCacheBusy immediately rather than waiting for a writer that
-// may be doing a network clone. Cache repair reached from an advisory load is
-// better skipped than waited on; the next authoritative command repairs it.
-func TryWithRepoCacheWriteLock(root string, fn func() (string, error)) (string, error) {
-	return writeLock(root, true, fn)
-}
-
-// repoCacheWriteLock picks the exclusive-lock helper matching a load's
-// blocking policy, so call sites read the same either way.
-func repoCacheWriteLock(nonBlocking bool) func(string, func() (string, error)) (string, error) {
-	if nonBlocking {
-		return TryWithRepoCacheWriteLock
-	}
-	return WithRepoCacheWriteLock
-}
-
-func writeLock(root string, nonBlocking bool, fn func() (string, error)) (string, error) {
+// withRepoCacheWriteLock runs fn under the exclusive repo-cache lock. With
+// nonBlocking it returns ErrRepoCacheBusy immediately rather than waiting for
+// a writer that may be doing a network clone: cache repair reached from an
+// advisory load is better skipped than waited on, and the next authoritative
+// command repairs it.
+func withRepoCacheWriteLock(root string, nonBlocking bool, fn func() (string, error)) (string, error) {
 	var result string
 	err := withRepoCacheLock(root, repoCacheLockOptions{
 		mode:        repoCacheLockExclusive,

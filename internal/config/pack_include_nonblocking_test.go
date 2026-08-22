@@ -6,25 +6,39 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 )
 
-// lockRepoCacheRoot takes mode on an existing cache root's lock file and
-// releases it when the test ends. Unlike holdRepoCacheLock it locks a root the
-// caller already owns, so a fixture's real cache root can be contended.
-func lockRepoCacheRoot(t *testing.T, root string, mode int) {
+// lockRepoCacheRoot takes mode on an existing cache root's lock file. Unlike
+// holdRepoCacheLock it locks a root the caller already owns, so a fixture's
+// real cache root can be contended.
+//
+// The returned release is idempotent, so a test that has to release early —
+// any test that parks a goroutine on the lock and must join it before
+// returning — can call it and still let the t.Cleanup backstop cover the
+// paths that don't.
+func lockRepoCacheRoot(t *testing.T, root string, mode int) (release func()) {
 	t.Helper()
 	lockFile, err := os.OpenFile(filepath.Join(root, repoCacheLockName), os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		t.Fatalf("open lock file: %v", err)
 	}
-	t.Cleanup(func() { lockFile.Close() }) //nolint:errcheck
 	if err := syscall.Flock(int(lockFile.Fd()), mode); err != nil {
+		lockFile.Close() //nolint:errcheck
 		t.Fatalf("Flock(%d): %v", mode, err)
 	}
-	t.Cleanup(func() { syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) }) //nolint:errcheck
+	var once sync.Once
+	release = func() {
+		once.Do(func() {
+			syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) //nolint:errcheck
+			lockFile.Close()                                   //nolint:errcheck
+		})
+	}
+	t.Cleanup(release)
+	return release
 }
 
 // The non-blocking flag has to reach the lock, not just the signature: an
@@ -57,7 +71,7 @@ func TestResolvePackRefNonBlockingRefusesBusyCache(t *testing.T) {
 func TestResolvePackRefBlockingWaitsOnBusyCache(t *testing.T) {
 	const ref = "https://github.com/example/packs/tree/main/gastown"
 	cityDir, cacheDir := setupLockedPackRefTest(t, ref)
-	lockRepoCacheRoot(t, filepath.Dir(cacheDir), syscall.LOCK_EX)
+	release := lockRepoCacheRoot(t, filepath.Dir(cacheDir), syscall.LOCK_EX)
 
 	done := make(chan error, 1)
 	go func() {
@@ -70,5 +84,13 @@ func TestResolvePackRefBlockingWaitsOnBusyCache(t *testing.T) {
 		t.Fatalf("blocking resolvePackRef returned %v while the cache lock was held", err)
 	case <-time.After(500 * time.Millisecond):
 	}
-	// The goroutine unblocks when t.Cleanup releases the flock.
+
+	// Release and join here rather than leaving the goroutine parked for
+	// t.Cleanup. Cleanups run LIFO, so the flock release would fire first and
+	// wake the goroutine into the rest of this test's teardown: it goes on to
+	// read runRepoCacheGit, which setupLockedPackRefTest's own cleanup is
+	// restoring, and to walk a t.TempDir that is being removed. That is a real
+	// ~7% failure under -race, not a theoretical one.
+	release()
+	<-done
 }

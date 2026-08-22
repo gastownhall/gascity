@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -669,6 +670,13 @@ func resolveContextAllowRemoteMode(mode contextResolutionMode) (resolvedContext,
 	if err == nil {
 		return ctx, nil
 	}
+	// A busy repo cache means local discovery could not look, not that it
+	// looked and found nothing. Falling through would answer with a remote
+	// sticky default because a clone happened to be running in another
+	// terminal — a different city for the same cwd, decided by timing.
+	if errors.Is(err, config.ErrRepoCacheBusy) {
+		return resolvedContext{}, err
+	}
 	// Step 4: no local city discoverable — fall back to the sticky default
 	// context, if any (subordinate to local discovery, per Decision 4).
 	if target, ok, derr := resolveStickyDefaultTarget(); derr != nil {
@@ -999,14 +1007,9 @@ func localCityRigBindings(cityPath string, mode contextResolutionMode) ([]regist
 }
 
 func siteBoundRigBindings(city supervisor.CityEntry, cfg *config.City, siteBinding *config.SiteBinding) []registeredRigBinding {
-	siteRigPaths := make(map[string]string, len(siteBinding.Rigs))
-	for _, rig := range siteBinding.Rigs {
-		name := strings.TrimSpace(rig.Name)
-		path := strings.TrimSpace(rig.Path)
-		if name == "" || path == "" {
-			continue
-		}
-		siteRigPaths[name] = path
+	candidates := make(map[string]rigCandidate, len(siteBinding.Rigs))
+	for _, candidate := range siteRigCandidates(city, siteBinding) {
+		candidates[candidate.Name] = candidate
 	}
 
 	var bindings []registeredRigBinding
@@ -1014,18 +1017,43 @@ func siteBoundRigBindings(city supervisor.CityEntry, cfg *config.City, siteBindi
 		if strings.TrimSpace(rig.Name) == "" {
 			continue
 		}
-		sitePath := strings.TrimSpace(siteRigPaths[rig.Name])
-		if sitePath == "" {
+		candidate, ok := candidates[rig.Name]
+		if !ok {
 			continue
 		}
-		rig.Path = sitePath
+		rig.Path = candidate.Path
 		bindings = append(bindings, registeredRigBinding{
 			City: city,
 			Rig:  rig,
-			Path: resolveStoreScopeRoot(city.Path, sitePath),
+			Path: candidate.ScopeRoot,
 		})
 	}
 	return bindings
+}
+
+// siteRigCandidates enumerates the machine-local rig bindings a city's
+// .gc/site.toml declares.
+//
+// This is the single derivation both siteBoundRigBindings and the pre-filter
+// in registeredRigBindings run, which is what makes the pre-filter's superset
+// property structural rather than a claim two functions have to keep agreeing
+// on independently.
+func siteRigCandidates(city supervisor.CityEntry, siteBinding *config.SiteBinding) []rigCandidate {
+	candidates := make([]rigCandidate, 0, len(siteBinding.Rigs))
+	for _, rig := range siteBinding.Rigs {
+		name := strings.TrimSpace(rig.Name)
+		path := strings.TrimSpace(rig.Path)
+		if name == "" || path == "" {
+			continue
+		}
+		candidates = append(candidates, rigCandidate{
+			City:      city,
+			Name:      name,
+			Path:      path,
+			ScopeRoot: resolveStoreScopeRoot(city.Path, path),
+		})
+	}
+	return candidates
 }
 
 // resolveRigPathToContext resolves an explicit path argument to a registered
@@ -1108,14 +1136,36 @@ type registeredRigBinding struct {
 	Path string
 }
 
+// rigCandidate is the part of a registered rig binding that a city's
+// .gc/site.toml alone determines — everything siteRigCandidates can produce
+// without loading city.toml.
+//
+// Match predicates take this rather than a whole registeredRigBinding so the
+// compiler forbids a predicate from reading a field the pre-filter cannot
+// populate. That failure would be silent: the pre-filter would stop admitting
+// a city the real scan would have matched, and the scan would just return
+// fewer bindings.
+type rigCandidate struct {
+	City      supervisor.CityEntry
+	Name      string // rig name as recorded in site.toml
+	Path      string // machine-local rig path as recorded in site.toml
+	ScopeRoot string // resolveStoreScopeRoot(City.Path, Path)
+}
+
+// candidate projects a fully resolved binding back onto the fields the
+// pre-filter can see, so both sides hand the predicate the same shape.
+func (b registeredRigBinding) candidate() rigCandidate {
+	return rigCandidate{City: b.City, Name: b.Rig.Name, Path: b.Rig.Path, ScopeRoot: b.Path}
+}
+
 func registeredRigBindingsByName(name string, failOnLoadError bool, mode contextResolutionMode) (matches []registeredRigBinding, stale []staleRegisteredCity, err error) {
 	matches, stale, err, _ = registeredRigBindingsByNameWithDeferredLoadError(name, failOnLoadError, mode)
 	return matches, stale, err
 }
 
 func registeredRigBindingsByNameWithDeferredLoadError(name string, failOnLoadError bool, mode contextResolutionMode) (matches []registeredRigBinding, stale []staleRegisteredCity, err error, deferredLoadErr error) {
-	return registeredRigBindings(failOnLoadError, mode, func(binding registeredRigBinding) bool {
-		return binding.Rig.Name == name
+	return registeredRigBindings(failOnLoadError, mode, func(c rigCandidate) bool {
+		return c.Name == name
 	})
 }
 
@@ -1126,9 +1176,8 @@ func registeredRigBindingsByPath(dir string, failOnLoadError bool, mode contextR
 
 func registeredRigBindingsByPathWithDeferredLoadError(dir string, failOnLoadError bool, mode contextResolutionMode) (matches []registeredRigBinding, stale []staleRegisteredCity, err error, deferredLoadErr error) {
 	dir = normalizePathForCompare(dir)
-	matches, stale, err, deferredLoadErr = registeredRigBindings(failOnLoadError, mode, func(binding registeredRigBinding) bool {
-		rigPath := normalizePathForCompare(binding.Path)
-		return pathWithinScope(dir, rigPath)
+	matches, stale, err, deferredLoadErr = registeredRigBindings(failOnLoadError, mode, func(c rigCandidate) bool {
+		return pathWithinScope(dir, normalizePathForCompare(c.ScopeRoot))
 	})
 	if err != nil {
 		return nil, stale, err, nil
@@ -1164,7 +1213,7 @@ func emitStaleRegisteredCityWarnings(w io.Writer, stale []staleRegisteredCity) {
 	}
 }
 
-func registeredRigBindings(failOnLoadError bool, mode contextResolutionMode, match func(registeredRigBinding) bool) (_ []registeredRigBinding, stale []staleRegisteredCity, _ error, deferredLoadErr error) {
+func registeredRigBindings(failOnLoadError bool, mode contextResolutionMode, match func(rigCandidate) bool) (_ []registeredRigBinding, stale []staleRegisteredCity, _ error, deferredLoadErr error) {
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
 	cities, err := reg.List()
 	if err != nil {
@@ -1174,15 +1223,41 @@ func registeredRigBindings(failOnLoadError bool, mode contextResolutionMode, mat
 	var loadErrors []string
 	for _, c := range cities {
 		siteBinding, siteErr := config.LoadSiteBinding(fsys.OSFS{}, c.Path)
-		// An advisory scan skips the config load for cities that cannot
-		// contribute an answer. site.toml names a superset of the rigs
-		// siteBoundRigBindings keeps — it records where a rig lives, not
-		// whether city.toml still declares it — so a city with no candidate
-		// here has none after pruning either. Cities that do have a candidate
-		// are loaded and pruned exactly as an authoritative scan would, which
-		// is what keeps advisory resolution from ever selecting a city an
-		// authoritative resolution would have rejected.
-		if mode.advisory && siteErr == nil && !siteBindingHasCandidate(c, siteBinding, match) {
+		// A match-only scan skips the config load for cities that cannot
+		// contribute a match.
+		//
+		// This is what keeps the fail-closed behavior above from turning one
+		// clone into a machine-wide outage. Every registered city's load is a
+		// chance to hit a busy repo cache, and a busy cache now aborts the whole
+		// scan — so without this, `gc import install` in any one city would
+		// break rig resolution in all of them. Filtering first narrows that
+		// exposure to the cities that could actually answer the question.
+		//
+		// site.toml names a superset of the rigs siteBoundRigBindings keeps —
+		// it records where a rig lives, not whether city.toml still declares
+		// it — so a city with no candidate here has none after pruning either.
+		// Cities that do have one are loaded and pruned exactly as before.
+		//
+		// The condition deliberately does not mention mode. It once read
+		// `mode.advisory && ...`, which left the two modes disagreeing about a
+		// city that cannot match but can still fail to load: the unfiltered
+		// scan collected that load error, and one load error fails any scan
+		// that also matched something (below). Same registry, same rig, a
+		// different answer depending on who asked — which is what the advisory
+		// contract forbids, and eager discovery captures the city it picks into
+		// pack-command closures the user later runs. With mode out of the
+		// condition the two traversals are identical by construction.
+		//
+		// failOnLoadError is a different request: report everything wrong with
+		// the registry, not just what matched. A caller asking for that is
+		// asking about the cities this filter would skip — a vanished city.toml
+		// or an unloadable include is exactly the diagnostic they came for — so
+		// it turns the filter off and pays the full scan for it.
+		//
+		// A malformed site.toml also disables the filter for that city: it is
+		// not evidence of anything, so the city is loaded and its error
+		// reported below.
+		if !failOnLoadError && siteErr == nil && !siteBindingHasCandidate(c, siteBinding, match) {
 			continue
 		}
 		cfg, err := loadRegisteredCityConfig(c.Path, mode)
@@ -1208,7 +1283,7 @@ func registeredRigBindings(failOnLoadError bool, mode contextResolutionMode, mat
 			continue
 		}
 		for _, binding := range siteBoundRigBindings(c, cfg, siteBinding) {
-			if match(binding) {
+			if match(binding.candidate()) {
 				matched = append(matched, binding)
 			}
 		}
@@ -1226,22 +1301,11 @@ func registeredRigBindings(failOnLoadError bool, mode contextResolutionMode, mat
 // city's .gc/site.toml could satisfy match. It is a pre-filter, not an answer:
 // site.toml records where a rig lives, not whether city.toml still declares it,
 // so a candidate here is only a reason to load the config and check properly.
-func siteBindingHasCandidate(city supervisor.CityEntry, siteBinding *config.SiteBinding, match func(registeredRigBinding) bool) bool {
-	for _, rig := range siteBinding.Rigs {
-		name := strings.TrimSpace(rig.Name)
-		path := strings.TrimSpace(rig.Path)
-		if name == "" || path == "" {
-			continue
-		}
-		if match(registeredRigBinding{
-			City: city,
-			Rig:  config.Rig{Name: name, Path: path},
-			Path: resolveStoreScopeRoot(city.Path, path),
-		}) {
-			return true
-		}
-	}
-	return false
+//
+// It runs match over exactly the candidates siteBoundRigBindings prunes from,
+// so "no candidate here" implies "no binding after pruning" by construction.
+func siteBindingHasCandidate(city supervisor.CityEntry, siteBinding *config.SiteBinding, match func(rigCandidate) bool) bool {
+	return slices.ContainsFunc(siteRigCandidates(city, siteBinding), match)
 }
 
 // loadRegisteredCityConfig loads one registered city's config for a rig-binding

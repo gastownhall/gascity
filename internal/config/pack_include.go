@@ -306,7 +306,7 @@ func resolveBundledSourceWithoutLock(source, declaredVersion string, nonBlocking
 	if builtinpacks.ValidateSyntheticRepoFast(cacheDir, repository, commit) == nil {
 		return cacheDir, true, nil
 	}
-	if _, err := repoCacheWriteLock(nonBlocking)(cacheRoot, func() (string, error) {
+	if _, err := withRepoCacheWriteLock(cacheRoot, nonBlocking, func() (string, error) {
 		if builtinpacks.ValidateSyntheticRepo(cacheDir, repository, commit) == nil {
 			return cacheDir, nil
 		}
@@ -460,7 +460,7 @@ func rematerializeAbsentBundledCache(source, cacheRoot, cacheDir, commit string,
 	if !ok {
 		return false
 	}
-	if _, err := repoCacheWriteLock(nonBlocking)(cacheRoot, func() (string, error) {
+	if _, err := withRepoCacheWriteLock(cacheRoot, nonBlocking, func() (string, error) {
 		// Re-check under the lock: another writer may have materialized it.
 		if builtinpacks.ValidateSyntheticRepo(cacheDir, repository, commit) == nil {
 			return cacheDir, nil
