@@ -531,8 +531,24 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 			graphv2.CloseSyntheticInputConvoy(deps.Store, graphInv.InputConvoy, beadID)
 			return result, fmt.Errorf("instantiating %s %q on %s: %w", errLabel, formulaName, beadID, err)
 		}
+		var fellBackToPlainRoute bool
 		lockedResult, lockedErr := withGraphV2SourceWorkflowLock(context.Background(), deps, beadID, func() (SlingResult, error) {
 			if err := CheckNoMoleculeChildrenAllowLiveWorkflow(querier, beadID, deps.Store, &result); err != nil {
+				var molErr *MoleculeAttachedError
+				if fallbackToPlainOnMoleculeConflict && errors.As(err, &molErr) {
+					// Mirrors the legacy branch's fallback below: the caller
+					// never asked for this formula attach -- it was only
+					// implied by the target's default_sling_formula config --
+					// so an unrelated live molecule/wisp is not a reason to
+					// block the sling. Warn and route as a plain bead instead.
+					// fellBackToPlainRoute keeps the synthetic input convoy
+					// cleanup (after this lock releases) firing on this
+					// success path too, since prepareGraphV2FormulaInvocation
+					// already minted that convoy before this check ran.
+					result.BeadWarnings = append(result.BeadWarnings, fmt.Sprintf("skipped attaching %s %q on %s: %v; routed as a plain bead instead", errLabel, formulaName, beadID, molErr))
+					fellBackToPlainRoute = true
+					return finalize(opts, deps, beadID, "bead", result)
+				}
 				return result, fmt.Errorf("%w", err)
 			}
 			if err := checkLegacySourceWorkflowConflict(deps, beadID); err != nil {
@@ -577,12 +593,14 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 			restampWorkBeadRouting(deps, beadID, a, &wfResult)
 			return wfResult, wfErr
 		})
-		if lockedErr != nil {
+		if lockedErr != nil || fellBackToPlainRoute {
 			// The pour failed after minting its synthetic input convoy
 			// (children-conflict, snapshot, instantiate, or start failure —
-			// the started-workflow path returns nil error). Close the pour's
-			// own artifact so repeated failures do not accumulate open
-			// claim-attracting convoys.
+			// the started-workflow path returns nil error), or it fell back
+			// to plain routing on an unrelated molecule/wisp conflict (also
+			// nil error). Either way the convoy was never handed to a live
+			// graph workflow, so close it here — otherwise it leaks as an
+			// open, claim-attracting convoy.
 			graphv2.CloseSyntheticInputConvoy(deps.Store, graphInv.InputConvoy, beadID)
 		}
 		return lockedResult, lockedErr
