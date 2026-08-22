@@ -77,19 +77,19 @@ func (c *client) run(ctx context.Context, args ...string) (json.RawMessage, erro
 	if err != nil {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
-			return nil, fmt.Errorf("herdr %v: %s", args, ee.Stderr)
+			return nil, fmt.Errorf("herdr %v: %s", redactArgs(args), ee.Stderr)
 		}
-		return nil, fmt.Errorf("herdr %v: %w", args, err)
+		return nil, fmt.Errorf("herdr %v: %w", redactArgs(args), err)
 	}
 	if len(strings.TrimSpace(string(out))) == 0 {
 		return nil, nil // success with no payload (e.g. pane send-keys / pane run)
 	}
 	var env envelope
 	if err := json.Unmarshal(out, &env); err != nil {
-		return nil, fmt.Errorf("herdr %v: decode response: %w", args, err)
+		return nil, fmt.Errorf("herdr %v: decode response: %w", redactArgs(args), err)
 	}
 	if env.Error != nil {
-		return nil, fmt.Errorf("herdr %v: %w", args, env.Error)
+		return nil, fmt.Errorf("herdr %v: %w", redactArgs(args), env.Error)
 	}
 	return env.Result, nil
 }
@@ -201,15 +201,15 @@ func (c *client) runRaw(ctx context.Context, args ...string) (string, error) {
 	if err != nil {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
-			return "", fmt.Errorf("herdr %v: %s", args, ee.Stderr)
+			return "", fmt.Errorf("herdr %v: %s", redactArgs(args), ee.Stderr)
 		}
-		return "", fmt.Errorf("herdr %v: %w", args, err)
+		return "", fmt.Errorf("herdr %v: %w", redactArgs(args), err)
 	}
 	trimmed := strings.TrimSpace(string(out))
 	if strings.HasPrefix(trimmed, "{") {
 		var env envelope
 		if jerr := json.Unmarshal([]byte(trimmed), &env); jerr == nil && env.Error != nil {
-			return "", fmt.Errorf("herdr %v: %w", args, env.Error)
+			return "", fmt.Errorf("herdr %v: %w", redactArgs(args), env.Error)
 		}
 	}
 	return string(out), nil
