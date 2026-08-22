@@ -3,7 +3,6 @@ package testutil
 
 import (
 	"os"
-	"runtime"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/pathutil"
@@ -26,17 +25,15 @@ func AssertSamePath(t *testing.T, got, want string) {
 	}
 }
 
-// ShortTempDir returns a test-owned temporary directory rooted at a short path
-// on macOS so Unix socket paths stay under the platform limit.
+// ShortTempDir returns a test-owned temporary directory rooted at /tmp so
+// Unix socket paths stay under the 108-byte platform limit. It ignores TMPDIR
+// deliberately: a long TMPDIR (e.g. /home/user/tmp/gascity-ga-XXXXX set by
+// the deployer for test isolation) would push socket paths over the limit.
 func ShortTempDir(t *testing.T, prefix string) string {
 	t.Helper()
-	root := os.TempDir()
-	if runtime.GOOS == "darwin" {
-		root = "/tmp"
-	}
-	dir, err := os.MkdirTemp(root, prefix)
+	dir, err := os.MkdirTemp("/tmp", prefix)
 	if err != nil {
-		t.Fatalf("MkdirTemp(%q, %q): %v", root, prefix, err)
+		t.Fatalf("MkdirTemp(/tmp, %q): %v", prefix, err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	return dir

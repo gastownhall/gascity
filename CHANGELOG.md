@@ -29,6 +29,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   publish time: the registry byte-compares it with `[pack].name`, so it can
   only restate the name `pack.toml` already declares.
 
+### Removed
+
+- **BREAKING: `[maintenance.dolt]` subsystem and its two API endpoints are
+  removed.** `GET /v0/city/{city}/maintenance/status` and
+  `POST /v0/city/{city}/maintenance/dolt-gc` return 404 on upgraded
+  deployments. No known deployments had `[maintenance.dolt] enabled=true`.
+
 ### Fixed
 
 - **A control bead served by a relocated class binding is routed to the

@@ -297,22 +297,6 @@ const (
 	// across rotations.
 	EventsRotated = "events.rotated"
 
-	// Dolt store maintenance events. Emitted by the supervisor's
-	// StoreMaintenanceLoop (internal/supervisor/maintenance.go) after
-	// each scheduled maintenance cycle completes or fails.
-	StoreMaintenanceDone   = "gc.store.maintenance.done"
-	StoreMaintenanceFailed = "gc.store.maintenance.failed"
-
-	// Dolt disk pre-flight events. Emitted by the supervisor's
-	// StoreMaintenanceLoop before CALL DOLT_GC when the container free
-	// space is below a configured threshold.
-	// StoreDiskWarn fires when free space is below GC_DOLT_WARN_FREE_BYTES
-	// but still above GC_DOLT_MIN_FREE_BYTES; the GC proceeds.
-	// StoreDiskCritical fires when free space is below GC_DOLT_MIN_FREE_BYTES;
-	// the GC is skipped to avoid growing the store further.
-	StoreDiskWarn     = "gc.store.disk_warn"
-	StoreDiskCritical = "gc.store.disk_critical"
-
 	// BackendCredentialResolved records that a credential for a storage
 	// backend was resolved for one scope. The payload names the backend,
 	// the scope and the resolution tier that supplied the value; it MUST
@@ -402,8 +386,6 @@ var KnownEventTypes = []string{
 	ExtMsgOutboundChannelMismatch,
 	WebhookReceived, WebhookRejected,
 	EventsRotated,
-	StoreMaintenanceDone, StoreMaintenanceFailed,
-	StoreDiskWarn, StoreDiskCritical,
 	BackendCredentialResolved,
 	EmergencySignaled, EmergencyAcked,
 	BeadsConditionalWritesDegraded,

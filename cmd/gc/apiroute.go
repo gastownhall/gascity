@@ -35,12 +35,13 @@ var (
 // controller in-process. When the socket is alive, apiClient routes to the
 // standalone HTTP endpoint if the city configures an [api] port, otherwise
 // returns nil so the caller uses its local fallback; when the socket is not
-// alive it returns the supervisor-managed client. Callers whose local fallback
-// is missing or prohibitively expensive use supervisorFallthroughAPIClient
-// instead, which additionally routes a supervisor-managed city (alive socket,
-// no standalone [api] port) to the supervisor client rather than reporting
-// controller-down: maintenance (no local fallback at all) and gc status (local
-// fallback re-opens the bead/dolt store). (gascity ga-tp7, ra-r9hm6v)
+// alive it returns the supervisor-managed client. Callers whose local
+// fallback is missing or prohibitively expensive use
+// supervisorFallthroughAPIClient instead, which additionally routes a
+// supervisor-managed city (alive socket, no standalone [api] port) to the
+// supervisor client rather than reporting controller-down: `gc status`,
+// whose local fallback re-opens the bead/dolt store. (gascity ga-tp7,
+// ra-r9hm6v)
 func apiClient(cityPath string) *api.Client {
 	// Remote routing is NOT handled here. A remote target is refused upstream by
 	// the capability gate in resolveContext (Phase 1) and, once enabled, will be
@@ -63,7 +64,7 @@ func apiClient(cityPath string) *api.Client {
 		// Alive socket: use the standalone HTTP endpoint when configured, else
 		// return nil so the caller takes its local fallback. A supervisor-managed
 		// city (no standalone [api] port) reaches the supervisor client only via
-		// supervisorFallthroughAPIClient (maintenance and gc status).
+		// supervisorFallthroughAPIClient (gc status).
 		return standaloneControllerClient(cityPath)
 	}
 	return apiRouteSupervisorClientHook(cityPath)
@@ -108,10 +109,9 @@ func standaloneControllerCityName(cfg *config.City, cityPath string) string {
 // apiClient intentionally stops at nil in that case for general commands
 // (see TestAPIClientRouting), on the assumption that those commands' local
 // fallback is cheap. That assumption doesn't hold for every caller:
-// maintenance commands have no local fallback at all, and `gc status`'s local
-// fallback re-opens the full local bead/dolt store and rescans event
-// archives to rebuild store health — far more expensive than the
-// supervisor's already-cached response (ra-r9hm6v: ~9.5s local CPU vs
+// `gc status`'s local fallback re-opens the full local bead/dolt store and
+// rescans event archives to rebuild store health — far more expensive than
+// the supervisor's already-cached response (ra-r9hm6v: ~9.5s local CPU vs
 // ~0.35s warm API). Callers whose local path is missing or prohibitively
 // expensive should route through here instead of apiClient directly.
 func supervisorFallthroughAPIClient(cityPath string) (*api.Client, string) {

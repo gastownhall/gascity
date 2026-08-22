@@ -2384,52 +2384,6 @@
       "id": 87
     },
     {
-      "path": "gc maintenance",
-      "aliases": [],
-      "conditional_modes": [],
-      "hidden": false,
-      "effective_hidden": false,
-      "disable_flag_parsing": false,
-      "shape": "structural",
-      "recording_policy": "recordable",
-      "mode": "standard",
-      "notice_policy": "eligible",
-      "classification": "help",
-      "canonical_target": "@help",
-      "owner": "structural",
-      "id": 1
-    },
-    {
-      "path": "gc maintenance dolt-gc",
-      "aliases": [],
-      "conditional_modes": [],
-      "hidden": false,
-      "effective_hidden": false,
-      "disable_flag_parsing": false,
-      "shape": "runnable",
-      "recording_policy": "recordable",
-      "mode": "standard",
-      "notice_policy": "eligible",
-      "classification": "maintenance-dolt-gc",
-      "owner": "immediate",
-      "id": 88
-    },
-    {
-      "path": "gc maintenance status",
-      "aliases": [],
-      "conditional_modes": [],
-      "hidden": false,
-      "effective_hidden": false,
-      "disable_flag_parsing": false,
-      "shape": "runnable",
-      "recording_policy": "recordable",
-      "mode": "standard",
-      "notice_policy": "eligible",
-      "classification": "maintenance-status",
-      "owner": "immediate",
-      "id": 89
-    },
-    {
       "path": "gc mcp",
       "aliases": [],
       "conditional_modes": [],
@@ -4677,5 +4631,16 @@
       "exclusion": "private-completion"
     }
   ],
-  "tombstones": []
+  "tombstones": [
+    {
+      "name": "maintenance-dolt-gc",
+      "id": 88,
+      "wire": "maintenance-dolt-gc"
+    },
+    {
+      "name": "maintenance-status",
+      "id": 89,
+      "wire": "maintenance-status"
+    }
+  ]
 }

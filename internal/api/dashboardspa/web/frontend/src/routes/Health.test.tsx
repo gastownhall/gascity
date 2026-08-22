@@ -703,7 +703,6 @@ function baseStatus(): StatusBody {
       size_bytes: 1_000_000,
       threshold_mb_per_row: 1,
       warning: false,
-      last_gc_status: 'success',
     },
     suspended: false,
     uptime_sec: 4200,

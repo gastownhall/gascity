@@ -287,8 +287,6 @@ type City struct {
 	// Doctor configures gc doctor thresholds and policy toggles
 	// (worktree size warnings, nested-worktree auto-prune).
 	Doctor DoctorConfig `toml:"doctor,omitempty"`
-	// Maintenance configures periodic store-maintenance loops.
-	Maintenance MaintenanceConfig `toml:"maintenance,omitempty"`
 	// Services declares workspace-owned HTTP services mounted on the
 	// controller edge under /svc/{name}.
 	Services []Service `toml:"service,omitempty"`
@@ -2462,42 +2460,6 @@ func (c ConvergenceConfig) MaxTotalOrDefault() int {
 		return 10
 	}
 	return c.MaxTotal
-}
-
-// MaintenanceConfig groups periodic store-maintenance subsections.
-type MaintenanceConfig struct {
-	// Dolt configures the weekly Dolt store maintenance loop
-	// (CALL DOLT_GC + backup snapshot).
-	Dolt DoltMaintenance `toml:"dolt,omitempty"`
-}
-
-// DoltMaintenance configures the periodic Dolt store maintenance loop.
-// Opt-in for v1: omission or enabled=false leaves the loop disabled.
-type DoltMaintenance struct {
-	// Enabled toggles the maintenance loop. Defaults to false (opt-in).
-	Enabled bool `toml:"enabled,omitempty"`
-	// Interval is the cadence between maintenance runs as a duration
-	// string (e.g., "168h"). Defaults to 168h (weekly).
-	Interval string `toml:"interval,omitempty" jsonschema:"default=168h"`
-	// AlertTo is the agent identity to mail on failure (e.g.,
-	// "gascity/mayor"). Empty disables alert mail.
-	AlertTo string `toml:"alert_to,omitempty"`
-	// GCTimeout is the ceiling for CALL DOLT_GC() as a duration string.
-	// Defaults to 10m.
-	GCTimeout string `toml:"gc_timeout,omitempty" jsonschema:"default=10m"`
-}
-
-// IntervalOrDefault returns the parsed Interval, falling back to 168h
-// (weekly) when unset or unparseable. Invalid values should already have
-// surfaced as warnings from ValidateDurations at load time.
-func (d DoltMaintenance) IntervalOrDefault() time.Duration {
-	return durationOr(d.Interval, 168*time.Hour)
-}
-
-// GCTimeoutOrDefault returns the parsed GCTimeout, falling back to 10m
-// when unset or unparseable.
-func (d DoltMaintenance) GCTimeoutOrDefault() time.Duration {
-	return durationOr(d.GCTimeout, 10*time.Minute)
 }
 
 // DaemonConfig holds controller daemon settings.

@@ -543,39 +543,6 @@ describe('<CockpitHomePage>', () => {
     expect(screen.queryByRole('link', { name: 'active sessions: 99' })).toBeNull();
   });
 
-  it('reports failed store maintenance when the size ratio is within threshold', async () => {
-    const current = await mocks.cityStatus();
-    mocks.cityStatus.mockResolvedValue({
-      ...current,
-      store_health: { ...current.store_health, last_gc_status: 'failed', warning: false },
-    });
-
-    render(router(<CockpitHomePage />));
-
-    expect(
-      await screen.findByRole('link', {
-        name: 'dolt store: warning, maintenance failed',
-      }),
-    ).toBeTruthy();
-  });
-
-  it('marks partial status lamps unknown and reports failed store maintenance', async () => {
-    const current = await mocks.cityStatus();
-    mocks.cityStatus.mockResolvedValue({
-      ...current,
-      partial: true,
-      store_health: { ...current.store_health, last_gc_status: 'failed' },
-    });
-
-    render(router(<CockpitHomePage />));
-
-    expect(
-      await screen.findByRole('link', {
-        name: 'dolt store: unknown, partial · last reported maintenance failed',
-      }),
-    ).toBeTruthy();
-  });
-
   it('freezes live instrument projections while paused', async () => {
     vi.useFakeTimers();
     const view = render(router(<CockpitHomePage />));

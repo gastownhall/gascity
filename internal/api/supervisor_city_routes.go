@@ -342,18 +342,6 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	// so it also declares 403 for the CSRF/read-only middleware.
 	cityPost(sm, "/sling", (*Server).humaHandleSling, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict))
 
-	// Maintenance (Dolt store gc + snapshot).
-	cityGet(sm, "/maintenance/status", (*Server).humaHandleMaintenanceStatus, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
-	cityRegister(sm, huma.Operation{
-		OperationID:   "trigger-maintenance-dolt-gc",
-		Method:        http.MethodPost,
-		Path:          "/maintenance/dolt-gc",
-		Summary:       "Trigger a Dolt store maintenance run",
-		Description:   "Trigger a one-off maintenance cycle (dolt backup + CALL DOLT_GC + smoke test). Default async (202); ?wait=true blocks until completion (200). Returns 409 when a run is already in flight.",
-		DefaultStatus: http.StatusAccepted,
-		Errors:        []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable},
-	}, (*Server).humaHandleMaintenanceTriggerDoltGC)
-
 	// Services (workspace services).
 	cityGet(sm, "/services", (*Server).humaHandleServiceList, errorStatuses(http.StatusNotFound))
 	cityGet(sm, "/service/{name}", (*Server).humaHandleServiceGet, errorStatuses(http.StatusNotFound))

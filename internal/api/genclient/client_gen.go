@@ -2499,65 +2499,6 @@ type MailSendInputBody struct {
 	To string `json:"to"`
 }
 
-// MaintenanceRunBody defines model for MaintenanceRunBody.
-type MaintenanceRunBody struct {
-	// AfterBytes Store size in bytes after the run (0 when not measured).
-	AfterBytes int64 `json:"after_bytes"`
-
-	// BeforeBytes Store size in bytes before the run (0 when not measured).
-	BeforeBytes int64 `json:"before_bytes"`
-
-	// DurationS Elapsed wall-clock seconds between started_at and finished_at.
-	DurationS float64 `json:"duration_s"`
-
-	// Err Error message when Stage names a failing phase; empty on success.
-	Err *string `json:"err,omitempty"`
-
-	// FinishedAt RFC3339 timestamp when the run completed.
-	FinishedAt string `json:"finished_at"`
-
-	// SnapshotPath Absolute path to the snapshot directory created for this run.
-	SnapshotPath *string `json:"snapshot_path,omitempty"`
-
-	// Stage Outcome stage: 'done' on success or 'backup'/'gc'/'smoke-test'/'prune' on failure.
-	Stage string `json:"stage"`
-
-	// StartedAt RFC3339 timestamp when the run began.
-	StartedAt string `json:"started_at"`
-}
-
-// MaintenanceStatusBody defines model for MaintenanceStatusBody.
-type MaintenanceStatusBody struct {
-	// Enabled Whether [maintenance.dolt] enabled=true in city.toml.
-	Enabled bool `json:"enabled"`
-
-	// History Bounded ring of recent run outcomes (oldest first).
-	History *[]MaintenanceRunBody `json:"history"`
-
-	// InFlight True when a maintenance cycle is currently running.
-	InFlight bool `json:"in_flight"`
-
-	// InFlightStart RFC3339 start time of the in-flight run.
-	InFlightStart *string `json:"in_flight_start,omitempty"`
-
-	// IntervalSeconds Configured scheduling interval in seconds (0 when disabled).
-	IntervalSeconds int64               `json:"interval_seconds"`
-	LastRun         *MaintenanceRunBody `json:"last_run,omitempty"`
-
-	// NextScheduled RFC3339 approximate next scheduled run time.
-	NextScheduled *string `json:"next_scheduled,omitempty"`
-}
-
-// MaintenanceTriggerBody defines model for MaintenanceTriggerBody.
-type MaintenanceTriggerBody struct {
-	// Accepted True when the supervisor accepted the trigger (202) or completed it (200).
-	Accepted bool                `json:"accepted"`
-	Run      *MaintenanceRunBody `json:"run,omitempty"`
-
-	// StartedAt RFC3339 start time of the triggered run; doubles as a run identifier for async callers.
-	StartedAt *string `json:"started_at,omitempty"`
-}
-
 // Message defines model for Message.
 type Message struct {
 	Body      string    `json:"body"`
@@ -5046,12 +4987,6 @@ type StatusSessionCountsDetail struct {
 
 // StatusStoreHealth defines model for StatusStoreHealth.
 type StatusStoreHealth struct {
-	// LastGcAt RFC3339 timestamp of last maintenance run.
-	LastGcAt *string `json:"last_gc_at,omitempty"`
-
-	// LastGcStatus Status of last maintenance run ('success' or 'failed').
-	LastGcStatus *string `json:"last_gc_status,omitempty"`
-
 	// LiveRows Retained bead row count used as the denominator, including open and closed beads.
 	LiveRows int64 `json:"live_rows"`
 
@@ -5067,7 +5002,7 @@ type StatusStoreHealth struct {
 	// ThresholdMbPerRow Ratio threshold; a ratio above this trips warning.
 	ThresholdMbPerRow float64 `json:"threshold_mb_per_row"`
 
-	// Warning True when maintenance is overdue.
+	// Warning True when the size-to-row ratio exceeds the threshold.
 	Warning bool `json:"warning"`
 }
 
@@ -5089,37 +5024,6 @@ type StorageBindingOutcomePayload struct {
 	Database  string `json:"database"`
 	Invariant string `json:"invariant"`
 	Outcome   string `json:"outcome"`
-}
-
-// StoreDiskCriticalPayload defines model for StoreDiskCriticalPayload.
-type StoreDiskCriticalPayload struct {
-	DataDir    string `json:"data_dir"`
-	FloorBytes int64  `json:"floor_bytes"`
-	FreeBytes  int64  `json:"free_bytes"`
-}
-
-// StoreDiskWarnPayload defines model for StoreDiskWarnPayload.
-type StoreDiskWarnPayload struct {
-	DataDir    string `json:"data_dir"`
-	FloorBytes int64  `json:"floor_bytes"`
-	FreeBytes  int64  `json:"free_bytes"`
-	WarnBytes  int64  `json:"warn_bytes"`
-}
-
-// StoreMaintenanceDonePayload defines model for StoreMaintenanceDonePayload.
-type StoreMaintenanceDonePayload struct {
-	AfterBytes   int64   `json:"after_bytes"`
-	BeforeBytes  int64   `json:"before_bytes"`
-	DurationS    float64 `json:"duration_s"`
-	SnapshotPath string  `json:"snapshot_path"`
-}
-
-// StoreMaintenanceFailedPayload defines model for StoreMaintenanceFailedPayload.
-type StoreMaintenanceFailedPayload struct {
-	DurationS    float64 `json:"duration_s"`
-	ErrorMsg     string  `json:"error_msg"`
-	SnapshotPath *string `json:"snapshot_path,omitempty"`
-	Stage        string  `json:"stage"`
 }
 
 // SubmissionCapabilities defines model for SubmissionCapabilities.
@@ -5922,70 +5826,6 @@ type TypedEventStreamEnvelopeExtmsgUnbound struct {
 	Ts               time.Time                `json:"ts"`
 	Type             string                   `json:"type"`
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
-}
-
-// TypedEventStreamEnvelopeGcStoreDiskCritical defines model for TypedEventStreamEnvelopeGcStoreDiskCritical.
-type TypedEventStreamEnvelopeGcStoreDiskCritical struct {
-	Actor            string                   `json:"actor"`
-	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
-	Message          *string                  `json:"message,omitempty"`
-	Payload          StoreDiskCriticalPayload `json:"payload"`
-	RunId            *string                  `json:"run_id,omitempty"`
-	Seq              int64                    `json:"seq"`
-	SessionId        *string                  `json:"session_id,omitempty"`
-	StepId           *string                  `json:"step_id,omitempty"`
-	Subject          *string                  `json:"subject,omitempty"`
-	Ts               time.Time                `json:"ts"`
-	Type             string                   `json:"type"`
-	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
-}
-
-// TypedEventStreamEnvelopeGcStoreDiskWarn defines model for TypedEventStreamEnvelopeGcStoreDiskWarn.
-type TypedEventStreamEnvelopeGcStoreDiskWarn struct {
-	Actor            string                   `json:"actor"`
-	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
-	Message          *string                  `json:"message,omitempty"`
-	Payload          StoreDiskWarnPayload     `json:"payload"`
-	RunId            *string                  `json:"run_id,omitempty"`
-	Seq              int64                    `json:"seq"`
-	SessionId        *string                  `json:"session_id,omitempty"`
-	StepId           *string                  `json:"step_id,omitempty"`
-	Subject          *string                  `json:"subject,omitempty"`
-	Ts               time.Time                `json:"ts"`
-	Type             string                   `json:"type"`
-	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
-}
-
-// TypedEventStreamEnvelopeGcStoreMaintenanceDone defines model for TypedEventStreamEnvelopeGcStoreMaintenanceDone.
-type TypedEventStreamEnvelopeGcStoreMaintenanceDone struct {
-	Actor            string                      `json:"actor"`
-	DependsOnStepIds *[]string                   `json:"depends_on_step_ids,omitempty"`
-	Message          *string                     `json:"message,omitempty"`
-	Payload          StoreMaintenanceDonePayload `json:"payload"`
-	RunId            *string                     `json:"run_id,omitempty"`
-	Seq              int64                       `json:"seq"`
-	SessionId        *string                     `json:"session_id,omitempty"`
-	StepId           *string                     `json:"step_id,omitempty"`
-	Subject          *string                     `json:"subject,omitempty"`
-	Ts               time.Time                   `json:"ts"`
-	Type             string                      `json:"type"`
-	Workflow         *WorkflowEventProjection    `json:"workflow,omitempty"`
-}
-
-// TypedEventStreamEnvelopeGcStoreMaintenanceFailed defines model for TypedEventStreamEnvelopeGcStoreMaintenanceFailed.
-type TypedEventStreamEnvelopeGcStoreMaintenanceFailed struct {
-	Actor            string                        `json:"actor"`
-	DependsOnStepIds *[]string                     `json:"depends_on_step_ids,omitempty"`
-	Message          *string                       `json:"message,omitempty"`
-	Payload          StoreMaintenanceFailedPayload `json:"payload"`
-	RunId            *string                       `json:"run_id,omitempty"`
-	Seq              int64                         `json:"seq"`
-	SessionId        *string                       `json:"session_id,omitempty"`
-	StepId           *string                       `json:"step_id,omitempty"`
-	Subject          *string                       `json:"subject,omitempty"`
-	Ts               time.Time                     `json:"ts"`
-	Type             string                        `json:"type"`
-	Workflow         *WorkflowEventProjection      `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeMailArchived defines model for TypedEventStreamEnvelopeMailArchived.
@@ -7486,74 +7326,6 @@ type TypedTaggedEventStreamEnvelopeExtmsgUnbound struct {
 	Ts               time.Time                `json:"ts"`
 	Type             string                   `json:"type"`
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
-}
-
-// TypedTaggedEventStreamEnvelopeGcStoreDiskCritical defines model for TypedTaggedEventStreamEnvelopeGcStoreDiskCritical.
-type TypedTaggedEventStreamEnvelopeGcStoreDiskCritical struct {
-	Actor            string                   `json:"actor"`
-	City             string                   `json:"city"`
-	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
-	Message          *string                  `json:"message,omitempty"`
-	Payload          StoreDiskCriticalPayload `json:"payload"`
-	RunId            *string                  `json:"run_id,omitempty"`
-	Seq              int64                    `json:"seq"`
-	SessionId        *string                  `json:"session_id,omitempty"`
-	StepId           *string                  `json:"step_id,omitempty"`
-	Subject          *string                  `json:"subject,omitempty"`
-	Ts               time.Time                `json:"ts"`
-	Type             string                   `json:"type"`
-	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
-}
-
-// TypedTaggedEventStreamEnvelopeGcStoreDiskWarn defines model for TypedTaggedEventStreamEnvelopeGcStoreDiskWarn.
-type TypedTaggedEventStreamEnvelopeGcStoreDiskWarn struct {
-	Actor            string                   `json:"actor"`
-	City             string                   `json:"city"`
-	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
-	Message          *string                  `json:"message,omitempty"`
-	Payload          StoreDiskWarnPayload     `json:"payload"`
-	RunId            *string                  `json:"run_id,omitempty"`
-	Seq              int64                    `json:"seq"`
-	SessionId        *string                  `json:"session_id,omitempty"`
-	StepId           *string                  `json:"step_id,omitempty"`
-	Subject          *string                  `json:"subject,omitempty"`
-	Ts               time.Time                `json:"ts"`
-	Type             string                   `json:"type"`
-	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
-}
-
-// TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone defines model for TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone.
-type TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone struct {
-	Actor            string                      `json:"actor"`
-	City             string                      `json:"city"`
-	DependsOnStepIds *[]string                   `json:"depends_on_step_ids,omitempty"`
-	Message          *string                     `json:"message,omitempty"`
-	Payload          StoreMaintenanceDonePayload `json:"payload"`
-	RunId            *string                     `json:"run_id,omitempty"`
-	Seq              int64                       `json:"seq"`
-	SessionId        *string                     `json:"session_id,omitempty"`
-	StepId           *string                     `json:"step_id,omitempty"`
-	Subject          *string                     `json:"subject,omitempty"`
-	Ts               time.Time                   `json:"ts"`
-	Type             string                      `json:"type"`
-	Workflow         *WorkflowEventProjection    `json:"workflow,omitempty"`
-}
-
-// TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed defines model for TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed.
-type TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed struct {
-	Actor            string                        `json:"actor"`
-	City             string                        `json:"city"`
-	DependsOnStepIds *[]string                     `json:"depends_on_step_ids,omitempty"`
-	Message          *string                       `json:"message,omitempty"`
-	Payload          StoreMaintenanceFailedPayload `json:"payload"`
-	RunId            *string                       `json:"run_id,omitempty"`
-	Seq              int64                         `json:"seq"`
-	SessionId        *string                       `json:"session_id,omitempty"`
-	StepId           *string                       `json:"step_id,omitempty"`
-	Subject          *string                       `json:"subject,omitempty"`
-	Ts               time.Time                     `json:"ts"`
-	Type             string                        `json:"type"`
-	Workflow         *WorkflowEventProjection      `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeMailArchived defines model for TypedTaggedEventStreamEnvelopeMailArchived.
@@ -9418,15 +9190,6 @@ type ReplyMailParams struct {
 	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
-// TriggerMaintenanceDoltGcParams defines parameters for TriggerMaintenanceDoltGc.
-type TriggerMaintenanceDoltGcParams struct {
-	// Wait When true, the handler blocks until the run completes and returns 200 with the full Run. When false (default), the handler returns 202 Accepted immediately.
-	Wait *bool `form:"wait,omitempty" json:"wait,omitempty"`
-
-	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
-	XGCRequest string `json:"X-GC-Request"`
-}
-
 // GetV0CityByCityNameOrderHistoryByBeadIdParams defines parameters for GetV0CityByCityNameOrderHistoryByBeadId.
 type GetV0CityByCityNameOrderHistoryByBeadIdParams struct {
 	// StoreRef Store reference for disambiguating store-local bead IDs.
@@ -11074,110 +10837,6 @@ func (t *EventPayload) FromStorageBindingOutcomePayload(v StorageBindingOutcomeP
 
 // MergeStorageBindingOutcomePayload performs a merge with any union data inside the EventPayload, using the provided StorageBindingOutcomePayload
 func (t *EventPayload) MergeStorageBindingOutcomePayload(v StorageBindingOutcomePayload) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
-// AsStoreDiskCriticalPayload returns the union data inside the EventPayload as a StoreDiskCriticalPayload
-func (t EventPayload) AsStoreDiskCriticalPayload() (StoreDiskCriticalPayload, error) {
-	var body StoreDiskCriticalPayload
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromStoreDiskCriticalPayload overwrites any union data inside the EventPayload as the provided StoreDiskCriticalPayload
-func (t *EventPayload) FromStoreDiskCriticalPayload(v StoreDiskCriticalPayload) error {
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeStoreDiskCriticalPayload performs a merge with any union data inside the EventPayload, using the provided StoreDiskCriticalPayload
-func (t *EventPayload) MergeStoreDiskCriticalPayload(v StoreDiskCriticalPayload) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
-// AsStoreDiskWarnPayload returns the union data inside the EventPayload as a StoreDiskWarnPayload
-func (t EventPayload) AsStoreDiskWarnPayload() (StoreDiskWarnPayload, error) {
-	var body StoreDiskWarnPayload
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromStoreDiskWarnPayload overwrites any union data inside the EventPayload as the provided StoreDiskWarnPayload
-func (t *EventPayload) FromStoreDiskWarnPayload(v StoreDiskWarnPayload) error {
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeStoreDiskWarnPayload performs a merge with any union data inside the EventPayload, using the provided StoreDiskWarnPayload
-func (t *EventPayload) MergeStoreDiskWarnPayload(v StoreDiskWarnPayload) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
-// AsStoreMaintenanceDonePayload returns the union data inside the EventPayload as a StoreMaintenanceDonePayload
-func (t EventPayload) AsStoreMaintenanceDonePayload() (StoreMaintenanceDonePayload, error) {
-	var body StoreMaintenanceDonePayload
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromStoreMaintenanceDonePayload overwrites any union data inside the EventPayload as the provided StoreMaintenanceDonePayload
-func (t *EventPayload) FromStoreMaintenanceDonePayload(v StoreMaintenanceDonePayload) error {
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeStoreMaintenanceDonePayload performs a merge with any union data inside the EventPayload, using the provided StoreMaintenanceDonePayload
-func (t *EventPayload) MergeStoreMaintenanceDonePayload(v StoreMaintenanceDonePayload) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
-// AsStoreMaintenanceFailedPayload returns the union data inside the EventPayload as a StoreMaintenanceFailedPayload
-func (t EventPayload) AsStoreMaintenanceFailedPayload() (StoreMaintenanceFailedPayload, error) {
-	var body StoreMaintenanceFailedPayload
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromStoreMaintenanceFailedPayload overwrites any union data inside the EventPayload as the provided StoreMaintenanceFailedPayload
-func (t *EventPayload) FromStoreMaintenanceFailedPayload(v StoreMaintenanceFailedPayload) error {
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeStoreMaintenanceFailedPayload performs a merge with any union data inside the EventPayload, using the provided StoreMaintenanceFailedPayload
-func (t *EventPayload) MergeStoreMaintenanceFailedPayload(v StoreMaintenanceFailedPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -14135,118 +13794,6 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeExtmsgUnbound(v 
 	return err
 }
 
-// AsTypedEventStreamEnvelopeGcStoreDiskCritical returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeGcStoreDiskCritical
-func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeGcStoreDiskCritical() (TypedEventStreamEnvelopeGcStoreDiskCritical, error) {
-	var body TypedEventStreamEnvelopeGcStoreDiskCritical
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromTypedEventStreamEnvelopeGcStoreDiskCritical overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeGcStoreDiskCritical
-func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeGcStoreDiskCritical(v TypedEventStreamEnvelopeGcStoreDiskCritical) error {
-	v.Type = "gc.store.disk_critical"
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeTypedEventStreamEnvelopeGcStoreDiskCritical performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeGcStoreDiskCritical
-func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeGcStoreDiskCritical(v TypedEventStreamEnvelopeGcStoreDiskCritical) error {
-	v.Type = "gc.store.disk_critical"
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
-// AsTypedEventStreamEnvelopeGcStoreDiskWarn returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeGcStoreDiskWarn
-func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeGcStoreDiskWarn() (TypedEventStreamEnvelopeGcStoreDiskWarn, error) {
-	var body TypedEventStreamEnvelopeGcStoreDiskWarn
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromTypedEventStreamEnvelopeGcStoreDiskWarn overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeGcStoreDiskWarn
-func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeGcStoreDiskWarn(v TypedEventStreamEnvelopeGcStoreDiskWarn) error {
-	v.Type = "gc.store.disk_warn"
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeTypedEventStreamEnvelopeGcStoreDiskWarn performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeGcStoreDiskWarn
-func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeGcStoreDiskWarn(v TypedEventStreamEnvelopeGcStoreDiskWarn) error {
-	v.Type = "gc.store.disk_warn"
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
-// AsTypedEventStreamEnvelopeGcStoreMaintenanceDone returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeGcStoreMaintenanceDone
-func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeGcStoreMaintenanceDone() (TypedEventStreamEnvelopeGcStoreMaintenanceDone, error) {
-	var body TypedEventStreamEnvelopeGcStoreMaintenanceDone
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromTypedEventStreamEnvelopeGcStoreMaintenanceDone overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeGcStoreMaintenanceDone
-func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeGcStoreMaintenanceDone(v TypedEventStreamEnvelopeGcStoreMaintenanceDone) error {
-	v.Type = "gc.store.maintenance.done"
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeTypedEventStreamEnvelopeGcStoreMaintenanceDone performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeGcStoreMaintenanceDone
-func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeGcStoreMaintenanceDone(v TypedEventStreamEnvelopeGcStoreMaintenanceDone) error {
-	v.Type = "gc.store.maintenance.done"
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
-// AsTypedEventStreamEnvelopeGcStoreMaintenanceFailed returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeGcStoreMaintenanceFailed
-func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeGcStoreMaintenanceFailed() (TypedEventStreamEnvelopeGcStoreMaintenanceFailed, error) {
-	var body TypedEventStreamEnvelopeGcStoreMaintenanceFailed
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromTypedEventStreamEnvelopeGcStoreMaintenanceFailed overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeGcStoreMaintenanceFailed
-func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeGcStoreMaintenanceFailed(v TypedEventStreamEnvelopeGcStoreMaintenanceFailed) error {
-	v.Type = "gc.store.maintenance.failed"
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeTypedEventStreamEnvelopeGcStoreMaintenanceFailed performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeGcStoreMaintenanceFailed
-func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeGcStoreMaintenanceFailed(v TypedEventStreamEnvelopeGcStoreMaintenanceFailed) error {
-	v.Type = "gc.store.maintenance.failed"
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
 // AsTypedEventStreamEnvelopeMailArchived returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeMailArchived
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeMailArchived() (TypedEventStreamEnvelopeMailArchived, error) {
 	var body TypedEventStreamEnvelopeMailArchived
@@ -15823,14 +15370,6 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeExtmsgOutboundChannelMismatch()
 	case "extmsg.unbound":
 		return t.AsTypedEventStreamEnvelopeExtmsgUnbound()
-	case "gc.store.disk_critical":
-		return t.AsTypedEventStreamEnvelopeGcStoreDiskCritical()
-	case "gc.store.disk_warn":
-		return t.AsTypedEventStreamEnvelopeGcStoreDiskWarn()
-	case "gc.store.maintenance.done":
-		return t.AsTypedEventStreamEnvelopeGcStoreMaintenanceDone()
-	case "gc.store.maintenance.failed":
-		return t.AsTypedEventStreamEnvelopeGcStoreMaintenanceFailed()
 	case "mail.archived":
 		return t.AsTypedEventStreamEnvelopeMailArchived()
 	case "mail.deleted":
@@ -17004,118 +16543,6 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeExtms
 // MergeTypedTaggedEventStreamEnvelopeExtmsgUnbound performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeExtmsgUnbound
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeExtmsgUnbound(v TypedTaggedEventStreamEnvelopeExtmsgUnbound) error {
 	v.Type = "extmsg.unbound"
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
-// AsTypedTaggedEventStreamEnvelopeGcStoreDiskCritical returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeGcStoreDiskCritical
-func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeGcStoreDiskCritical() (TypedTaggedEventStreamEnvelopeGcStoreDiskCritical, error) {
-	var body TypedTaggedEventStreamEnvelopeGcStoreDiskCritical
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromTypedTaggedEventStreamEnvelopeGcStoreDiskCritical overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeGcStoreDiskCritical
-func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeGcStoreDiskCritical(v TypedTaggedEventStreamEnvelopeGcStoreDiskCritical) error {
-	v.Type = "gc.store.disk_critical"
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeTypedTaggedEventStreamEnvelopeGcStoreDiskCritical performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeGcStoreDiskCritical
-func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeGcStoreDiskCritical(v TypedTaggedEventStreamEnvelopeGcStoreDiskCritical) error {
-	v.Type = "gc.store.disk_critical"
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
-// AsTypedTaggedEventStreamEnvelopeGcStoreDiskWarn returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeGcStoreDiskWarn
-func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeGcStoreDiskWarn() (TypedTaggedEventStreamEnvelopeGcStoreDiskWarn, error) {
-	var body TypedTaggedEventStreamEnvelopeGcStoreDiskWarn
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromTypedTaggedEventStreamEnvelopeGcStoreDiskWarn overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeGcStoreDiskWarn
-func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeGcStoreDiskWarn(v TypedTaggedEventStreamEnvelopeGcStoreDiskWarn) error {
-	v.Type = "gc.store.disk_warn"
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeTypedTaggedEventStreamEnvelopeGcStoreDiskWarn performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeGcStoreDiskWarn
-func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeGcStoreDiskWarn(v TypedTaggedEventStreamEnvelopeGcStoreDiskWarn) error {
-	v.Type = "gc.store.disk_warn"
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
-// AsTypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone
-func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone() (TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone, error) {
-	var body TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromTypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone
-func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone(v TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone) error {
-	v.Type = "gc.store.maintenance.done"
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeTypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone
-func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone(v TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone) error {
-	v.Type = "gc.store.maintenance.done"
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
-// AsTypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed
-func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed() (TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed, error) {
-	var body TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromTypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed
-func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed(v TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed) error {
-	v.Type = "gc.store.maintenance.failed"
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeTypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed
-func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed(v TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed) error {
-	v.Type = "gc.store.maintenance.failed"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -18702,14 +18129,6 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch()
 	case "extmsg.unbound":
 		return t.AsTypedTaggedEventStreamEnvelopeExtmsgUnbound()
-	case "gc.store.disk_critical":
-		return t.AsTypedTaggedEventStreamEnvelopeGcStoreDiskCritical()
-	case "gc.store.disk_warn":
-		return t.AsTypedTaggedEventStreamEnvelopeGcStoreDiskWarn()
-	case "gc.store.maintenance.done":
-		return t.AsTypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone()
-	case "gc.store.maintenance.failed":
-		return t.AsTypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed()
 	case "mail.archived":
 		return t.AsTypedTaggedEventStreamEnvelopeMailArchived()
 	case "mail.deleted":
@@ -19199,12 +18618,6 @@ type ClientInterface interface {
 	ReplyMailWithBody(ctx context.Context, cityName string, id string, params *ReplyMailParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	ReplyMail(ctx context.Context, cityName string, id string, params *ReplyMailParams, body ReplyMailJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	// TriggerMaintenanceDoltGc request
-	TriggerMaintenanceDoltGc(ctx context.Context, cityName string, params *TriggerMaintenanceDoltGcParams, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	// GetV0CityByCityNameMaintenanceStatus request
-	GetV0CityByCityNameMaintenanceStatus(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameOrderHistoryByBeadId request
 	GetV0CityByCityNameOrderHistoryByBeadId(ctx context.Context, cityName string, beadId string, params *GetV0CityByCityNameOrderHistoryByBeadIdParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -20767,30 +20180,6 @@ func (c *Client) ReplyMailWithBody(ctx context.Context, cityName string, id stri
 
 func (c *Client) ReplyMail(ctx context.Context, cityName string, id string, params *ReplyMailParams, body ReplyMailJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewReplyMailRequest(c.Server, cityName, id, params, body)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) TriggerMaintenanceDoltGc(ctx context.Context, cityName string, params *TriggerMaintenanceDoltGcParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewTriggerMaintenanceDoltGcRequest(c.Server, cityName, params)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) GetV0CityByCityNameMaintenanceStatus(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewGetV0CityByCityNameMaintenanceStatusRequest(c.Server, cityName)
 	if err != nil {
 		return nil, err
 	}
@@ -27514,109 +26903,6 @@ func NewReplyMailRequestWithBody(server string, cityName string, id string, para
 	return req, nil
 }
 
-// NewTriggerMaintenanceDoltGcRequest generates requests for TriggerMaintenanceDoltGc
-func NewTriggerMaintenanceDoltGcRequest(server string, cityName string, params *TriggerMaintenanceDoltGcParams) (*http.Request, error) {
-	var err error
-
-	var pathParam0 string
-
-	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
-	if err != nil {
-		return nil, err
-	}
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/v0/city/%s/maintenance/dolt-gc", pathParam0)
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	if params != nil {
-		queryValues := queryURL.Query()
-
-		if params.Wait != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "wait", *params.Wait, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		queryURL.RawQuery = queryValues.Encode()
-	}
-
-	req, err := http.NewRequest("POST", queryURL.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-
-	if params != nil {
-
-		var headerParam0 string
-
-		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
-		if err != nil {
-			return nil, err
-		}
-
-		req.Header.Set("X-GC-Request", headerParam0)
-
-	}
-
-	return req, nil
-}
-
-// NewGetV0CityByCityNameMaintenanceStatusRequest generates requests for GetV0CityByCityNameMaintenanceStatus
-func NewGetV0CityByCityNameMaintenanceStatusRequest(server string, cityName string) (*http.Request, error) {
-	var err error
-
-	var pathParam0 string
-
-	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
-	if err != nil {
-		return nil, err
-	}
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/v0/city/%s/maintenance/status", pathParam0)
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("GET", queryURL.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-
-	return req, nil
-}
-
 // NewGetV0CityByCityNameOrderHistoryByBeadIdRequest generates requests for GetV0CityByCityNameOrderHistoryByBeadId
 func NewGetV0CityByCityNameOrderHistoryByBeadIdRequest(server string, cityName string, beadId string, params *GetV0CityByCityNameOrderHistoryByBeadIdParams) (*http.Request, error) {
 	var err error
@@ -32734,12 +32020,6 @@ type ClientWithResponsesInterface interface {
 
 	ReplyMailWithResponse(ctx context.Context, cityName string, id string, params *ReplyMailParams, body ReplyMailJSONRequestBody, reqEditors ...RequestEditorFn) (*ReplyMailResponse, error)
 
-	// TriggerMaintenanceDoltGcWithResponse request
-	TriggerMaintenanceDoltGcWithResponse(ctx context.Context, cityName string, params *TriggerMaintenanceDoltGcParams, reqEditors ...RequestEditorFn) (*TriggerMaintenanceDoltGcResponse, error)
-
-	// GetV0CityByCityNameMaintenanceStatusWithResponse request
-	GetV0CityByCityNameMaintenanceStatusWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameMaintenanceStatusResponse, error)
-
 	// GetV0CityByCityNameOrderHistoryByBeadIdWithResponse request
 	GetV0CityByCityNameOrderHistoryByBeadIdWithResponse(ctx context.Context, cityName string, beadId string, params *GetV0CityByCityNameOrderHistoryByBeadIdParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameOrderHistoryByBeadIdResponse, error)
 
@@ -35234,61 +34514,6 @@ func (r ReplyMailResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r ReplyMailResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
-type TriggerMaintenanceDoltGcResponse struct {
-	Body                      []byte
-	HTTPResponse              *http.Response
-	JSON202                   *MaintenanceTriggerBody
-	ApplicationproblemJSON401 *ErrorModel
-	ApplicationproblemJSON403 *ErrorModel
-	ApplicationproblemJSON404 *ErrorModel
-	ApplicationproblemJSON409 *ErrorModel
-	ApplicationproblemJSON422 *ErrorModel
-	ApplicationproblemJSON500 *ErrorModel
-	ApplicationproblemJSON503 *ErrorModel
-}
-
-// Status returns HTTPResponse.Status
-func (r TriggerMaintenanceDoltGcResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r TriggerMaintenanceDoltGcResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
-type GetV0CityByCityNameMaintenanceStatusResponse struct {
-	Body                      []byte
-	HTTPResponse              *http.Response
-	JSON200                   *MaintenanceStatusBody
-	ApplicationproblemJSON404 *ErrorModel
-	ApplicationproblemJSON422 *ErrorModel
-	ApplicationproblemJSON500 *ErrorModel
-	ApplicationproblemJSON503 *ErrorModel
-}
-
-// Status returns HTTPResponse.Status
-func (r GetV0CityByCityNameMaintenanceStatusResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r GetV0CityByCityNameMaintenanceStatusResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -38395,24 +37620,6 @@ func (c *ClientWithResponses) ReplyMailWithResponse(ctx context.Context, cityNam
 		return nil, err
 	}
 	return ParseReplyMailResponse(rsp)
-}
-
-// TriggerMaintenanceDoltGcWithResponse request returning *TriggerMaintenanceDoltGcResponse
-func (c *ClientWithResponses) TriggerMaintenanceDoltGcWithResponse(ctx context.Context, cityName string, params *TriggerMaintenanceDoltGcParams, reqEditors ...RequestEditorFn) (*TriggerMaintenanceDoltGcResponse, error) {
-	rsp, err := c.TriggerMaintenanceDoltGc(ctx, cityName, params, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseTriggerMaintenanceDoltGcResponse(rsp)
-}
-
-// GetV0CityByCityNameMaintenanceStatusWithResponse request returning *GetV0CityByCityNameMaintenanceStatusResponse
-func (c *ClientWithResponses) GetV0CityByCityNameMaintenanceStatusWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameMaintenanceStatusResponse, error) {
-	rsp, err := c.GetV0CityByCityNameMaintenanceStatus(ctx, cityName, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseGetV0CityByCityNameMaintenanceStatusResponse(rsp)
 }
 
 // GetV0CityByCityNameOrderHistoryByBeadIdWithResponse request returning *GetV0CityByCityNameOrderHistoryByBeadIdResponse
@@ -44344,135 +43551,6 @@ func ParseReplyMailResponse(rsp *http.Response) (*ReplyMailResponse, error) {
 			return nil, err
 		}
 		response.ApplicationproblemJSON500 = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParseTriggerMaintenanceDoltGcResponse parses an HTTP response from a TriggerMaintenanceDoltGcWithResponse call
-func ParseTriggerMaintenanceDoltGcResponse(rsp *http.Response) (*TriggerMaintenanceDoltGcResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &TriggerMaintenanceDoltGcResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
-		var dest MaintenanceTriggerBody
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON202 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON401 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON403 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON404 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON409 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON422 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON500 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON503 = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParseGetV0CityByCityNameMaintenanceStatusResponse parses an HTTP response from a GetV0CityByCityNameMaintenanceStatusWithResponse call
-func ParseGetV0CityByCityNameMaintenanceStatusResponse(rsp *http.Response) (*GetV0CityByCityNameMaintenanceStatusResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &GetV0CityByCityNameMaintenanceStatusResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest MaintenanceStatusBody
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON404 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON422 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON500 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON503 = &dest
 
 	}
 

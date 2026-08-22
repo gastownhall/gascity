@@ -102,7 +102,7 @@ type StatusSummaryJSON struct {
 }
 
 // StoreHealth is the JSON shape of the Dolt bead store health block
-// surfaced by gc status. See ADR 0002 / bead ga-d5y design D9.
+// surfaced by gc status.
 type StoreHealth struct {
 	Path      string `json:"path"`
 	SizeBytes int64  `json:"size_bytes"`
@@ -115,8 +115,6 @@ type StoreHealth struct {
 	RatioMB         float64 `json:"ratio_mb_per_row"`
 	Warning         bool    `json:"warning"`
 	ThresholdMB     float64 `json:"threshold_mb_per_row"`
-	LastGCAt        string  `json:"last_gc_at,omitempty"`
-	LastGCStatus    string  `json:"last_gc_status,omitempty"`
 }
 
 var (
@@ -339,14 +337,12 @@ func snapshotFromStatusView(cityPath string, v api.StatusView) cityStatusSnapsho
 	}
 	if v.StoreHealth != nil {
 		snapshot.Summary.StoreHealth = &StoreHealth{
-			Path:         v.StoreHealth.Path,
-			SizeBytes:    v.StoreHealth.SizeBytes,
-			LiveRows:     v.StoreHealth.LiveRows,
-			RatioMB:      v.StoreHealth.RatioMB,
-			Warning:      v.StoreHealth.Warning,
-			ThresholdMB:  v.StoreHealth.ThresholdMB,
-			LastGCAt:     v.StoreHealth.LastGCAt,
-			LastGCStatus: v.StoreHealth.LastGCStatus,
+			Path:        v.StoreHealth.Path,
+			SizeBytes:   v.StoreHealth.SizeBytes,
+			LiveRows:    v.StoreHealth.LiveRows,
+			RatioMB:     v.StoreHealth.RatioMB,
+			Warning:     v.StoreHealth.Warning,
+			ThresholdMB: v.StoreHealth.ThresholdMB,
 		}
 	}
 	return snapshot

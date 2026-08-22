@@ -283,7 +283,6 @@ func (s *seededState) Poke()                     {}
 func (s *seededState) ServiceRegistry() workspacesvc.Registry   { return nil }
 func (s *seededState) ExtMsgServices() *extmsg.Services         { return s.extmsgSvc }
 func (s *seededState) AdapterRegistry() *extmsg.AdapterRegistry { return s.adapterReg }
-func (s *seededState) MaintenanceLoop() MaintenanceProvider     { return nil }
 
 // RawConfig returns the same snapshot as Config: a seeded city has no separate
 // raw (pre-expansion) config, so provenance reads see the expanded config.

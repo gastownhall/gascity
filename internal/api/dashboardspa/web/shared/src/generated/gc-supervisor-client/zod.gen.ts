@@ -772,33 +772,6 @@ export const zMailSendInputBody = z.object({
     to: z.string().min(1)
 });
 
-export const zMaintenanceRunBody = z.object({
-    after_bytes: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
-    before_bytes: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
-    duration_s: z.number(),
-    err: z.string().optional(),
-    finished_at: z.string(),
-    snapshot_path: z.string().optional(),
-    stage: z.string(),
-    started_at: z.string()
-});
-
-export const zMaintenanceStatusBody = z.object({
-    enabled: z.boolean(),
-    history: z.array(zMaintenanceRunBody).nullable(),
-    in_flight: z.boolean(),
-    in_flight_start: z.string().optional(),
-    interval_seconds: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
-    last_run: zMaintenanceRunBody.optional(),
-    next_scheduled: z.string().optional()
-});
-
-export const zMaintenanceTriggerBody = z.object({
-    accepted: z.boolean(),
-    run: zMaintenanceRunBody.optional(),
-    started_at: z.string().optional()
-});
-
 export const zMessage = z.object({
     body: z.string(),
     cc: z.array(z.string()).nullish(),
@@ -2886,8 +2859,6 @@ export const zStatusSessionCountsDetail = z.object({
 });
 
 export const zStatusStoreHealth = z.object({
-    last_gc_at: z.string().optional(),
-    last_gc_status: z.string().optional(),
     live_rows: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
     path: z.string(),
     ratio_mb_per_row: z.number(),
@@ -2933,33 +2904,6 @@ export const zStorageBindingOutcomePayload = z.object({
     database: z.string(),
     invariant: z.string(),
     outcome: z.string()
-});
-
-export const zStoreDiskCriticalPayload = z.object({
-    data_dir: z.string(),
-    floor_bytes: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
-    free_bytes: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
-});
-
-export const zStoreDiskWarnPayload = z.object({
-    data_dir: z.string(),
-    floor_bytes: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
-    free_bytes: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
-    warn_bytes: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
-});
-
-export const zStoreMaintenanceDonePayload = z.object({
-    after_bytes: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
-    before_bytes: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
-    duration_s: z.number(),
-    snapshot_path: z.string()
-});
-
-export const zStoreMaintenanceFailedPayload = z.object({
-    duration_s: z.number(),
-    error_msg: z.string(),
-    snapshot_path: z.string().optional(),
-    stage: z.string()
 });
 
 export const zSubmissionCapabilities = z.object({
@@ -3310,10 +3254,6 @@ export const zEventPayload = z.union([
     zSessionUnknownStatePayload,
     zSessionWakeRefusedPayload,
     zStorageBindingOutcomePayload,
-    zStoreDiskCriticalPayload,
-    zStoreDiskWarnPayload,
-    zStoreMaintenanceDonePayload,
-    zStoreMaintenanceFailedPayload,
     zSupervisorFsPressureSkippedTickPayload,
     zSupervisorRequestPayload,
     zSupervisorShutdownPayload,
@@ -4113,78 +4053,6 @@ export const zTypedEventStreamEnvelopeExtmsgUnbound = z.object({
     subject: z.string().optional(),
     ts: z.iso.datetime(),
     type: z.literal('extmsg.unbound'),
-    workflow: zWorkflowEventProjection.optional()
-});
-
-/**
- * TypedEventStreamEnvelope gc.store.disk_critical
- */
-export const zTypedEventStreamEnvelopeGcStoreDiskCritical = z.object({
-    actor: z.string(),
-    depends_on_step_ids: z.array(z.string()).optional(),
-    message: z.string().optional(),
-    payload: zStoreDiskCriticalPayload,
-    run_id: z.string().optional(),
-    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
-    session_id: z.string().optional(),
-    step_id: z.string().optional(),
-    subject: z.string().optional(),
-    ts: z.iso.datetime(),
-    type: z.literal('gc.store.disk_critical'),
-    workflow: zWorkflowEventProjection.optional()
-});
-
-/**
- * TypedEventStreamEnvelope gc.store.disk_warn
- */
-export const zTypedEventStreamEnvelopeGcStoreDiskWarn = z.object({
-    actor: z.string(),
-    depends_on_step_ids: z.array(z.string()).optional(),
-    message: z.string().optional(),
-    payload: zStoreDiskWarnPayload,
-    run_id: z.string().optional(),
-    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
-    session_id: z.string().optional(),
-    step_id: z.string().optional(),
-    subject: z.string().optional(),
-    ts: z.iso.datetime(),
-    type: z.literal('gc.store.disk_warn'),
-    workflow: zWorkflowEventProjection.optional()
-});
-
-/**
- * TypedEventStreamEnvelope gc.store.maintenance.done
- */
-export const zTypedEventStreamEnvelopeGcStoreMaintenanceDone = z.object({
-    actor: z.string(),
-    depends_on_step_ids: z.array(z.string()).optional(),
-    message: z.string().optional(),
-    payload: zStoreMaintenanceDonePayload,
-    run_id: z.string().optional(),
-    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
-    session_id: z.string().optional(),
-    step_id: z.string().optional(),
-    subject: z.string().optional(),
-    ts: z.iso.datetime(),
-    type: z.literal('gc.store.maintenance.done'),
-    workflow: zWorkflowEventProjection.optional()
-});
-
-/**
- * TypedEventStreamEnvelope gc.store.maintenance.failed
- */
-export const zTypedEventStreamEnvelopeGcStoreMaintenanceFailed = z.object({
-    actor: z.string(),
-    depends_on_step_ids: z.array(z.string()).optional(),
-    message: z.string().optional(),
-    payload: zStoreMaintenanceFailedPayload,
-    run_id: z.string().optional(),
-    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
-    session_id: z.string().optional(),
-    step_id: z.string().optional(),
-    subject: z.string().optional(),
-    ts: z.iso.datetime(),
-    type: z.literal('gc.store.maintenance.failed'),
     workflow: zWorkflowEventProjection.optional()
 });
 
@@ -5168,10 +5036,6 @@ export const zTypedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedEventStreamEnvelopeExtmsgOutbound.extend({ type: z.literal('extmsg.outbound') }),
     zTypedEventStreamEnvelopeExtmsgOutboundChannelMismatch.extend({ type: z.literal('extmsg.outbound_channel_mismatch') }),
     zTypedEventStreamEnvelopeExtmsgUnbound.extend({ type: z.literal('extmsg.unbound') }),
-    zTypedEventStreamEnvelopeGcStoreDiskCritical.extend({ type: z.literal('gc.store.disk_critical') }),
-    zTypedEventStreamEnvelopeGcStoreDiskWarn.extend({ type: z.literal('gc.store.disk_warn') }),
-    zTypedEventStreamEnvelopeGcStoreMaintenanceDone.extend({ type: z.literal('gc.store.maintenance.done') }),
-    zTypedEventStreamEnvelopeGcStoreMaintenanceFailed.extend({ type: z.literal('gc.store.maintenance.failed') }),
     zTypedEventStreamEnvelopeMailArchived.extend({ type: z.literal('mail.archived') }),
     zTypedEventStreamEnvelopeMailDeleted.extend({ type: z.literal('mail.deleted') }),
     zTypedEventStreamEnvelopeMailMarkedRead.extend({ type: z.literal('mail.marked_read') }),
@@ -5973,82 +5837,6 @@ export const zTypedTaggedEventStreamEnvelopeExtmsgUnbound = z.object({
     subject: z.string().optional(),
     ts: z.iso.datetime(),
     type: z.literal('extmsg.unbound'),
-    workflow: zWorkflowEventProjection.optional()
-});
-
-/**
- * TypedTaggedEventStreamEnvelope gc.store.disk_critical
- */
-export const zTypedTaggedEventStreamEnvelopeGcStoreDiskCritical = z.object({
-    actor: z.string(),
-    city: z.string(),
-    depends_on_step_ids: z.array(z.string()).optional(),
-    message: z.string().optional(),
-    payload: zStoreDiskCriticalPayload,
-    run_id: z.string().optional(),
-    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
-    session_id: z.string().optional(),
-    step_id: z.string().optional(),
-    subject: z.string().optional(),
-    ts: z.iso.datetime(),
-    type: z.literal('gc.store.disk_critical'),
-    workflow: zWorkflowEventProjection.optional()
-});
-
-/**
- * TypedTaggedEventStreamEnvelope gc.store.disk_warn
- */
-export const zTypedTaggedEventStreamEnvelopeGcStoreDiskWarn = z.object({
-    actor: z.string(),
-    city: z.string(),
-    depends_on_step_ids: z.array(z.string()).optional(),
-    message: z.string().optional(),
-    payload: zStoreDiskWarnPayload,
-    run_id: z.string().optional(),
-    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
-    session_id: z.string().optional(),
-    step_id: z.string().optional(),
-    subject: z.string().optional(),
-    ts: z.iso.datetime(),
-    type: z.literal('gc.store.disk_warn'),
-    workflow: zWorkflowEventProjection.optional()
-});
-
-/**
- * TypedTaggedEventStreamEnvelope gc.store.maintenance.done
- */
-export const zTypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone = z.object({
-    actor: z.string(),
-    city: z.string(),
-    depends_on_step_ids: z.array(z.string()).optional(),
-    message: z.string().optional(),
-    payload: zStoreMaintenanceDonePayload,
-    run_id: z.string().optional(),
-    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
-    session_id: z.string().optional(),
-    step_id: z.string().optional(),
-    subject: z.string().optional(),
-    ts: z.iso.datetime(),
-    type: z.literal('gc.store.maintenance.done'),
-    workflow: zWorkflowEventProjection.optional()
-});
-
-/**
- * TypedTaggedEventStreamEnvelope gc.store.maintenance.failed
- */
-export const zTypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed = z.object({
-    actor: z.string(),
-    city: z.string(),
-    depends_on_step_ids: z.array(z.string()).optional(),
-    message: z.string().optional(),
-    payload: zStoreMaintenanceFailedPayload,
-    run_id: z.string().optional(),
-    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
-    session_id: z.string().optional(),
-    step_id: z.string().optional(),
-    subject: z.string().optional(),
-    ts: z.iso.datetime(),
-    type: z.literal('gc.store.maintenance.failed'),
     workflow: zWorkflowEventProjection.optional()
 });
 
@@ -7084,10 +6872,6 @@ export const zTypedTaggedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedTaggedEventStreamEnvelopeExtmsgOutbound.extend({ type: z.literal('extmsg.outbound') }),
     zTypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch.extend({ type: z.literal('extmsg.outbound_channel_mismatch') }),
     zTypedTaggedEventStreamEnvelopeExtmsgUnbound.extend({ type: z.literal('extmsg.unbound') }),
-    zTypedTaggedEventStreamEnvelopeGcStoreDiskCritical.extend({ type: z.literal('gc.store.disk_critical') }),
-    zTypedTaggedEventStreamEnvelopeGcStoreDiskWarn.extend({ type: z.literal('gc.store.disk_warn') }),
-    zTypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone.extend({ type: z.literal('gc.store.maintenance.done') }),
-    zTypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed.extend({ type: z.literal('gc.store.maintenance.failed') }),
     zTypedTaggedEventStreamEnvelopeMailArchived.extend({ type: z.literal('mail.archived') }),
     zTypedTaggedEventStreamEnvelopeMailDeleted.extend({ type: z.literal('mail.deleted') }),
     zTypedTaggedEventStreamEnvelopeMailMarkedRead.extend({ type: z.literal('mail.marked_read') }),
@@ -8396,32 +8180,6 @@ export const zReplyMailQuery = z.object({
  * Created
  */
 export const zReplyMailResponse = zMessage;
-
-export const zTriggerMaintenanceDoltGcHeaders = z.object({
-    'X-GC-Request': z.string().min(1)
-});
-
-export const zTriggerMaintenanceDoltGcPath = z.object({
-    cityName: z.string().min(1).regex(/\S/)
-});
-
-export const zTriggerMaintenanceDoltGcQuery = z.object({
-    wait: z.boolean().optional()
-});
-
-/**
- * Accepted
- */
-export const zTriggerMaintenanceDoltGcResponse = zMaintenanceTriggerBody;
-
-export const zGetV0CityByCityNameMaintenanceStatusPath = z.object({
-    cityName: z.string().min(1).regex(/\S/)
-});
-
-/**
- * OK
- */
-export const zGetV0CityByCityNameMaintenanceStatusResponse = zMaintenanceStatusBody;
 
 export const zGetV0CityByCityNameOrderHistoryByBeadIdPath = z.object({
     cityName: z.string().min(1).regex(/\S/),
