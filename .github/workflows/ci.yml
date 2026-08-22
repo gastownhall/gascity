@@ -1533,6 +1533,39 @@ jobs:
           GC_K8S_AVAILABLE: ${{ secrets.GC_K8S_AVAILABLE }}
         run: make test-k8s
 
+  # Aggregates whether every critical-path category that `changes` matched
+  # actually produced a successful result from its mapped gate job.
+  # ci-required's allow_skipped list exists so genuinely path-gated jobs can
+  # report "skipped" without failing the merge when their category did not
+  # match -- correct behavior this job leaves untouched. It is silently
+  # wrong when the category *did* match: a matched-but-skipped (or failed,
+  # cancelled, or altogether absent) result means the suite never actually
+  # ran, and allow_skipped cannot tell the difference. This job can. It
+  # always runs (if: always()) so it can never itself be skipped past, and
+  # ci-required depends on it unconditionally.
+  critical-path-evidence:
+    name: Critical path evidence
+    needs:
+      - runner-policy
+      - changes
+      - cmd-gc-process
+      - integration-shards
+      - worker-core-summary
+      - worker-core-phase2-summary
+      - pack-gate
+      - docker-session
+      - k8s-session
+      - openclaw-bridge
+    if: ${{ always() }}
+    runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
+    env:
+      CHANGES_JSON: ${{ toJSON(needs.changes.outputs) }}
+      NEEDS_JSON: ${{ toJSON(needs) }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Evaluate critical-path evidence
+        run: python3 .github/workflows/scripts/critical_path_evidence.py
+
   ci-preflight:
     name: CI / preflight
     needs:
@@ -1628,6 +1661,7 @@ jobs:
       - docker-session
       - k8s-session
       - openclaw-bridge
+      - critical-path-evidence
     if: ${{ always() }}
     runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
     env:
