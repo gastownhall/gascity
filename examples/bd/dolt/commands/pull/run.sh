@@ -72,11 +72,9 @@ remote_allow_env_value() {
   eval "printf '%s' \"\${GC_DOLT_SYNC_ALLOW_REMOTE_$key:-}\""
 }
 
-# select_remote picks one remote from a comma/newline candidate list, refusing
-# ambiguity unless GC_DOLT_REMOTE_<DB> names one of the candidates. A non-file://
-# pick additionally requires GC_DOLT_SYNC_ALLOW_REMOTE_<DB>=1. Mirrors sync's
-# select_remote exactly (examples/bd/dolt/commands/sync/run.sh) — same policy,
-# same env var names, so a future shared-helper extraction needs no renaming.
+# Mirrors sync's select_remote exactly (examples/bd/dolt/commands/sync/run.sh)
+# — same policy, same env var names — so the two must be kept behaviorally
+# identical until a shared helper replaces both copies.
 select_remote() {
   sel_db="$1"; sel_candidates="$2"
   [ -z "$sel_candidates" ] && return 0

@@ -1,18 +1,16 @@
 package dolt_test
 
-// Remote-selection determinism (ga-fe5cva, pull side of ga-fqi7kq). `gc dolt
-// pull` must not guess which remote to pull FROM when a database has more
-// than one configured: an unordered pick risks silently reconciling from a
-// public/network remote (or a stale mirror) instead of the fleet-private
-// source of truth. This mirrors sync's select_remote policy exactly (see
-// sync_remote_selection_test.go): refuses outright unless
-// GC_DOLT_REMOTE_<DB> names one of the candidates; a non-file:// pick
-// additionally requires GC_DOLT_SYNC_ALLOW_REMOTE_<DB>=1 (the override
-// variable names are intentionally identical to sync's — same per-database
-// policy, not a pull-specific concept — so a future shared-helper extraction
-// doesn't have to reconcile two naming schemes). These tests cover both the
-// SQL-mode (dolt_remotes table) and CLI-mode (.dolt/remotes.json) candidate
-// sources.
+// Remote-selection determinism: `gc dolt pull` must not guess which remote
+// to pull FROM when a database has more than one configured — an unordered
+// pick risks silently reconciling from a public/network remote (or a stale
+// mirror) instead of the fleet-private source of truth. This mirrors sync's
+// select_remote policy exactly: refuses outright unless GC_DOLT_REMOTE_<DB>
+// names one of the candidates; a non-file:// pick additionally requires
+// GC_DOLT_SYNC_ALLOW_REMOTE_<DB>=1 (the override variable names are
+// intentionally identical to sync's — same per-database policy, not a
+// pull-specific concept — so a future shared-helper extraction doesn't have
+// to reconcile two naming schemes). These tests cover both the SQL-mode
+// (dolt_remotes table) and CLI-mode (.dolt/remotes.json) candidate sources.
 
 import (
 	"fmt"
@@ -25,14 +23,10 @@ import (
 
 // writePullFakeDoltMultiRemote installs a fake dolt reporting three configured
 // remotes for the SQL-mode remote-lookup query: "alpha" (a decoy file://
-// remote, listed first — pre-fix code's unordered LIMIT-1 pick lands on
-// whichever row comes first, so a decoy in that slot proves any test that
-// selects "internal" or "public" is doing so via the override, not by
-// accidentally matching a naive first-row default), "internal" (a file://
-// remote) and "public" (a non-file:// remote). The case match is agnostic to
-// the query's trailing clause (LIMIT 1 today, ORDER BY name once fixed) so
-// this fixture works unchanged across the RED and GREEN steps. CALL
-// DOLT_PULL falls through to the default success path.
+// remote, listed first, so a test selecting "internal" or "public" proves
+// selection went through the override rather than an accidental first-row
+// pick), "internal" (a file:// remote), and "public" (a non-file:// remote).
+// CALL DOLT_PULL falls through to the default success path.
 func writePullFakeDoltMultiRemote(t *testing.T, dir string) string {
 	t.Helper()
 	logPath := filepath.Join(dir, "dolt.log")
@@ -255,10 +249,9 @@ func TestPullCLIMultipleRemotesRefusesWithoutOverride(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dbDir, ".dolt"), 0o755); err != nil {
 		t.Fatalf("mkdir db: %v", err)
 	}
-	// "alpha" is a decoy listed first: pre-fix code's unordered head-style
-	// pick lands on whichever candidate comes first, so a decoy in that slot
-	// proves any override test below selects "internal" via the override,
-	// not by accidentally matching a naive first-candidate default.
+	// "alpha" is a decoy listed first: proves any override test below
+	// selects "internal" via the override, not by accidentally matching a
+	// naive first-candidate default.
 	remotes := `{"remotes":[{"name":"alpha","url":"file:///data/remotes/alpha"},{"name":"internal","url":"file:///data/remotes/internal"},{"name":"public","url":"https://public.example.invalid/repo"}]}`
 	if err := os.WriteFile(filepath.Join(dbDir, ".dolt", "remotes.json"), []byte(remotes), 0o644); err != nil {
 		t.Fatalf("write remotes: %v", err)
