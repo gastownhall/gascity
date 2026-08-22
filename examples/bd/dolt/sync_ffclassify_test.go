@@ -58,7 +58,7 @@ func fakeDoltHeader(logPath, branch string) string {
 	return "#!/bin/sh\n" +
 		"printf '%s\\n' \"$*\" >> \"" + logPath + "\"\n" +
 		"case \"$*\" in\n" +
-		"  *\"SELECT name, url FROM dolt_remotes LIMIT 1\"*)\n" +
+		"  *\"SELECT name, url FROM dolt_remotes ORDER BY name\"*)\n" +
 		"    printf 'name,url\\norigin,https://example.invalid/repo\\n' ; exit 0 ;;\n" +
 		"  *\"SELECT active_branch()\"*)\n" +
 		"    printf 'active_branch()\\n" + branch + "\\n' ; exit 0 ;;\n"
@@ -222,6 +222,147 @@ func TestSyncEmptyRemoteFirstPushPushes(t *testing.T) {
 	out := runFFSync(t, binDir, "--db", "app")
 	if !strings.Contains(readLog(t, logPath), "CALL DOLT_PUSH('origin', 'main')") {
 		t.Fatalf("first push to an empty remote must push.\nout:\n%s\nlog:\n%s", out, readLog(t, logPath))
+	}
+}
+
+// --- gc-fqi7kq: deterministic, opt-in-gated remote selection ---
+//
+// find_remote_sql (and the CLI-mode equivalent) must resolve the SAME remote
+// for a given database regardless of what order dolt_remotes rows arrive in;
+// must never auto-select a non-file:// remote when a file:// alternative
+// exists, or when no local alternative exists at all (skip with a stated
+// reason instead); and must honor an explicit GC_DOLT_REMOTE_<DB> override —
+// even over a non-local remote. These tests run --force --dry-run so the
+// fake dolt only needs to answer the remote-lookup + active_branch queries;
+// ff-classification is already covered by the tests above.
+
+// writeSyncFakeDoltMultiRemote installs a fake dolt that answers the
+// remote-lookup query with remoteRows ("name,url" pairs) in exactly the
+// order given, and active_branch() with "main". Callers only need the
+// installed binary (they assert on gc dolt sync's stdout), not the log
+// path, so unlike the other fixture builders in this file this one returns
+// nothing.
+func writeSyncFakeDoltMultiRemote(t *testing.T, dir string, remoteRows []string) {
+	t.Helper()
+	logPath := filepath.Join(dir, "dolt.log")
+	reply := "name,url\\n" + strings.Join(remoteRows, "\\n") + "\\n"
+	body := `#!/bin/sh
+printf '%s\n' "$*" >> "` + logPath + `"
+case "$*" in
+  *"SELECT name, url FROM dolt_remotes ORDER BY name"*)
+    printf '` + reply + `'
+    ;;
+  *"SELECT active_branch()"*)
+    printf 'active_branch()\nmain\n'
+    ;;
+esac
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(dir, "dolt"), []byte(body), 0o755); err != nil {
+		t.Fatalf("write fake dolt: %v", err)
+	}
+}
+
+// TestSyncRemoteSelectionIsOrderIndependent is the RED test from gc-fqi7kq: a
+// db whose dolt_remotes returns rows in varying order must resolve the same
+// remote every time. Mirrors the real incident's remote set (a git+https
+// upstream plus two file:// backups) across three distinct row orderings.
+func TestSyncRemoteSelectionIsOrderIndependent(t *testing.T) {
+	origin := "origin,git+https://github.com/gastownhall/beads"
+	usb := "usb,file:///mnt/usb/beads"
+	usbSnap := "usb_snap_20260820,file:///mnt/usb/beads_snap"
+	orders := [][]string{
+		{origin, usb, usbSnap},
+		{usbSnap, usb, origin},
+		{usb, origin, usbSnap},
+	}
+	const want = "-> usb:main (file:///mnt/usb/beads)"
+	for i, rows := range orders {
+		binDir := t.TempDir()
+		writeSyncFakeDoltMultiRemote(t, binDir, rows)
+		out := runFFSync(t, binDir, "--db", "app", "--force", "--dry-run")
+		if !strings.Contains(out, want) {
+			t.Fatalf("order %d: expected remote 'usb' selected regardless of row order.\nrows: %v\nout:\n%s", i, rows, out)
+		}
+	}
+}
+
+// TestSyncMultiRemoteAmbiguousNonLocalSkipsAndNeverPushes covers the case
+// where every configured remote is non-local: a default (non-opt-in) sync
+// must report the database as skipped, with a stated reason, and never
+// select or push to either remote.
+func TestSyncMultiRemoteAmbiguousNonLocalSkipsAndNeverPushes(t *testing.T) {
+	binDir := t.TempDir()
+	writeSyncFakeDoltMultiRemote(t, binDir, []string{
+		"mirror,git+https://example.invalid/mirror",
+		"origin,git+https://github.com/gastownhall/beads",
+	})
+	out := runFFSync(t, binDir, "--db", "app", "--force", "--dry-run")
+	if !strings.Contains(out, "skipped") || !strings.Contains(out, "none local") {
+		t.Fatalf("expected an ambiguous-remote skip with a stated reason.\nout:\n%s", out)
+	}
+	if strings.Contains(out, "would") {
+		t.Fatalf("ambiguous remotes must never be auto-selected.\nout:\n%s", out)
+	}
+}
+
+// TestSyncMultiRemotePrefersLocalOverGitHttpsRemote covers the case where a
+// git+https remote is configured alongside a file:// alternative: the
+// git+https remote must never be the one selected/pushed.
+func TestSyncMultiRemotePrefersLocalOverGitHttpsRemote(t *testing.T) {
+	binDir := t.TempDir()
+	writeSyncFakeDoltMultiRemote(t, binDir, []string{
+		"origin,git+https://github.com/gastownhall/beads",
+		"usb,file:///mnt/usb/beads",
+	})
+	out := runFFSync(t, binDir, "--db", "app", "--force", "--dry-run")
+	if !strings.Contains(out, "-> usb:main (file:///mnt/usb/beads)") {
+		t.Fatalf("expected the local (file://) remote to be preferred over git+https.\nout:\n%s", out)
+	}
+	if strings.Contains(out, "-> origin:") {
+		t.Fatalf("git+https remote must never be auto-selected when a local alternative exists.\nout:\n%s", out)
+	}
+}
+
+// TestSyncRemoteEnvOverridePinsNonLocalRemote verifies that GC_DOLT_REMOTE_<DB>
+// pins remote selection even to a non-local (git+https) remote that the
+// default policy would otherwise skip past in favor of a file:// alternative.
+func TestSyncRemoteEnvOverridePinsNonLocalRemote(t *testing.T) {
+	root := repoRoot(t)
+	script := filepath.Join(root, syncScript)
+	port, cleanup := startReachableTCPListener(t)
+	defer cleanup()
+
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "data")
+	if err := os.MkdirAll(filepath.Join(dataDir, "app", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir db: %v", err)
+	}
+	writeSyncFakeBeadsBD(t, cityPath)
+
+	binDir := t.TempDir()
+	writeSyncFakeDoltMultiRemote(t, binDir, []string{
+		"origin,git+https://github.com/gastownhall/beads",
+		"usb,file:///mnt/usb/beads",
+	})
+
+	cmd := exec.Command("sh", script, "--db", "app", "--force", "--dry-run")
+	cmd.Env = append(syncFilteredEnv(),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_DATA_DIR="+dataDir,
+		fmt.Sprintf("GC_DOLT_PORT=%d", port),
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"GC_DOLT_REMOTE_APP=origin",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("gc dolt sync failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "-> origin:main (git+https://github.com/gastownhall/beads)") {
+		t.Fatalf("GC_DOLT_REMOTE_APP=origin should pin selection to origin even though usb (file://) is available.\nout:\n%s", out)
 	}
 }
 

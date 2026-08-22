@@ -83,6 +83,11 @@ func startReachableTCPListener(t *testing.T) (int, func()) {
 	return listener.Addr().(*net.TCPAddr).Port, cleanup
 }
 
+// writeSyncFakeDolt is shared with pull_test.go (writeSyncFakeDolt is called
+// from TestPull* there too) — its remote-lookup arm intentionally matches on
+// the query prefix only ("...FROM dolt_remotes", no trailing clause) so it
+// answers both sync's "ORDER BY name" query and pull's unchanged "LIMIT 1"
+// query identically.
 func writeSyncFakeDolt(t *testing.T, dir string) string {
 	t.Helper()
 	logPath := filepath.Join(dir, "dolt.log")
@@ -116,7 +121,7 @@ func writeSyncFakeDoltActiveBranch(t *testing.T, dir, activeBranch string) strin
 	body := `#!/bin/sh
 printf '%s\n' "$*" >> "` + logPath + `"
 case "$*" in
-  *"SELECT name, url FROM dolt_remotes LIMIT 1"*)
+  *"SELECT name, url FROM dolt_remotes ORDER BY name"*)
     printf 'name,url\norigin,https://example.invalid/repo\n'
     ;;
   *"CALL DOLT_FETCH("*)
@@ -146,7 +151,7 @@ func writeSyncFakeDoltInvalidActiveBranch(t *testing.T, dir string) string {
 	body := `#!/bin/sh
 printf '%s\n' "$*" >> "` + logPath + `"
 case "$*" in
-  *"SELECT name, url FROM dolt_remotes LIMIT 1"*)
+  *"SELECT name, url FROM dolt_remotes ORDER BY name"*)
     printf 'name,url\norigin,https://example.invalid/repo\n'
     ;;
   *"CALL DOLT_FETCH("*)
@@ -170,6 +175,8 @@ exit 0
 	return logPath
 }
 
+// writeSyncFakeDoltRemoteLookupFailure is shared with pull_test.go — see the
+// writeSyncFakeDolt comment for why the match is prefix-only.
 func writeSyncFakeDoltRemoteLookupFailure(t *testing.T, dir string) string {
 	t.Helper()
 	logPath := filepath.Join(dir, "dolt.log")
@@ -209,7 +216,7 @@ func writeSyncFakeDoltPushFails(t *testing.T, dir string, exitCode int, stderr s
 	body := `#!/bin/sh
 printf '%s\n' "$*" >> "` + logPath + `"
 case "$*" in
-  *"SELECT name, url FROM dolt_remotes LIMIT 1"*)
+  *"SELECT name, url FROM dolt_remotes ORDER BY name"*)
     printf 'name,url\norigin,https://example.invalid/repo\n'
     exit 0
     ;;
@@ -251,7 +258,7 @@ func writeSyncFakeDoltPushFailsNoTrailingNewline(t *testing.T, dir string, exitC
 	body := `#!/bin/sh
 printf '%s\n' "$*" >> "` + logPath + `"
 case "$*" in
-  *"SELECT name, url FROM dolt_remotes LIMIT 1"*)
+  *"SELECT name, url FROM dolt_remotes ORDER BY name"*)
     printf 'name,url\norigin,https://example.invalid/repo\n'
     exit 0
     ;;
@@ -342,7 +349,7 @@ func writeSyncFakeDoltPushEchoesArgs(t *testing.T, dir string) {
 	body := `#!/bin/sh
 printf '%s\n' "$*" >> "` + logPath + `"
 case "$*" in
-  *"SELECT name, url FROM dolt_remotes LIMIT 1"*)
+  *"SELECT name, url FROM dolt_remotes ORDER BY name"*)
     printf 'name,url\norigin,https://example.invalid/repo\n'
     exit 0
     ;;
@@ -452,7 +459,7 @@ func TestSyncUsesLiveSQLWhenManagedServerReachable(t *testing.T) {
 	}
 	log := string(data)
 	for _, want := range []string{
-		"SELECT name, url FROM dolt_remotes LIMIT 1",
+		"SELECT name, url FROM dolt_remotes ORDER BY name",
 		"CALL DOLT_PUSH('origin', 'main')",
 	} {
 		if !strings.Contains(log, want) {
@@ -723,7 +730,7 @@ func TestSyncReportsLiveSQLRemoteLookupFailure(t *testing.T) {
 		t.Fatalf("read fake dolt log: %v", err)
 	}
 	log := string(data)
-	if !strings.Contains(log, "SELECT name, url FROM dolt_remotes LIMIT 1") {
+	if !strings.Contains(log, "SELECT name, url FROM dolt_remotes ORDER BY name") {
 		t.Fatalf("dolt log missing remote lookup:\n%s", log)
 	}
 	if strings.Contains(log, "DOLT_PUSH") {
