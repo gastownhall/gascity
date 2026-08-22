@@ -3462,7 +3462,7 @@ transitive = false
 
 	names := resolvedPackNames([]string{"packs/wrapper"}, map[string]Import{
 		"shared": {Source: "packs/shared"},
-	}, fsys.OSFS{}, dir)
+	}, fsys.OSFS{}, dir, false)
 
 	if !names["maintenance"] {
 		t.Fatalf("maintenance missing after mixed shallow/deep visits: names=%v", names)
@@ -3489,7 +3489,7 @@ source = "../maintenance"
 	transitiveFalse := false
 	names := resolvedPackNames(nil, map[string]Import{
 		"shared": {Source: "packs/shared", Transitive: &transitiveFalse},
-	}, fsys.OSFS{}, dir)
+	}, fsys.OSFS{}, dir, false)
 
 	if !names["shared"] {
 		t.Fatalf("shared missing from non-transitive visit: names=%v", names)
@@ -3525,7 +3525,7 @@ source = "../middle"
 transitive = false
 `)
 
-	names := resolvedPackNames([]string{"packs/root"}, nil, fsys.OSFS{}, dir)
+	names := resolvedPackNames([]string{"packs/root"}, nil, fsys.OSFS{}, dir, false)
 	if !names["middle"] {
 		t.Fatalf("middle pack was not recorded: names=%v", names)
 	}
@@ -3572,7 +3572,7 @@ source = "../middle"
 		{"packs/shallow", "packs/deep"},
 		{"packs/deep", "packs/shallow"},
 	} {
-		names := resolvedPackNames(includes, nil, fsys.OSFS{}, dir)
+		names := resolvedPackNames(includes, nil, fsys.OSFS{}, dir, false)
 		if !names["maintenance"] {
 			t.Fatalf("includes %v did not resolve transitive maintenance after shallow visit: names=%v", includes, names)
 		}
@@ -3594,7 +3594,7 @@ schema = 2
 		names := resolvedPackNames(nil, map[string]Import{
 			"shared_a": {Source: "packs/shared", Transitive: &transitiveFalse},
 			"shared_b": {Source: "packs/shared", Transitive: &transitiveFalse},
-		}, countingFS, dir)
+		}, countingFS, dir, false)
 
 		if !names["shared"] {
 			t.Fatalf("shared missing from repeated shallow imports: names=%v", names)
@@ -3641,7 +3641,7 @@ source = "../right"
 `)
 
 		countingFS := newReadCountingFS()
-		names := resolvedPackNames([]string{"packs/root"}, nil, countingFS, dir)
+		names := resolvedPackNames([]string{"packs/root"}, nil, countingFS, dir, false)
 
 		for _, name := range []string{"root", "left", "right", "shared"} {
 			if !names[name] {

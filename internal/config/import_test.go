@@ -1374,7 +1374,7 @@ schema = 2
 
 	names := resolvedPackNames(nil, map[string]Import{
 		"gastown": {Source: source, Version: "^1.2"},
-	}, fsys.OSFS{}, cityDir)
+	}, fsys.OSFS{}, cityDir, false)
 
 	for _, name := range []string{"gastown", "maintenance"} {
 		if !names[name] {

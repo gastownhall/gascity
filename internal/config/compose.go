@@ -114,7 +114,17 @@ type LoadOptions struct {
 	// load time. That only matters to a caller holding a Provenance across a
 	// window in which the config may change, which is exactly the long-running
 	// case that should leave this false.
-	SkipRevisionSnapshot    bool
+	SkipRevisionSnapshot bool
+	// RepoCacheNonBlocking makes every repo-cache lock this load takes fail
+	// fast with ErrRepoCacheBusy instead of waiting for the holder.
+	//
+	// The repo-cache lock is machine-wide and a writer holds it for as long as
+	// its git clone takes, so a blocking load can stall for minutes on work
+	// that has nothing to do with the caller. Advisory loads — command
+	// discovery, shell completion — set this and degrade to "no pack state
+	// right now"; a load whose result the caller acts on must leave it false
+	// and wait, because a busy cache would otherwise read as an empty one.
+	RepoCacheNonBlocking    bool
 	deferRigPatches         bool
 	deferredRigPatches      *[]deferredRigPatches
 	allowLegacyOrderLayouts bool
@@ -397,7 +407,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	for _, inc := range includes {
 		var fragPath string
 		if isRemoteInclude(inc) || isGitHubTreeURL(inc) {
-			resolved, err := resolvePackRef(inc, cityRoot, cityRoot)
+			resolved, err := resolvePackRef(inc, cityRoot, cityRoot, opts.RepoCacheNonBlocking)
 			if err != nil {
 				return nil, nil, fmt.Errorf("resolving include %q: %w", inc, err)
 			}
@@ -462,7 +472,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	resolveNamedPacks(root, cityRoot)
 	rootIncludes = root.Workspace.LegacyIncludes()
 
-	existingPacks := resolvedConfigPackNames(root, fs, cityRoot)
+	existingPacks := resolvedConfigPackNames(root, fs, cityRoot, opts.RepoCacheNonBlocking)
 	for _, inc := range packIncludes {
 		name := readPackNameFromDir(inc)
 		if name != "" && existingPacks[name] {
@@ -545,7 +555,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	}
 	// Track city pack agents in provenance.
 	for _, ref := range root.Workspace.LegacyIncludes() {
-		topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot)
+		topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot, opts.RepoCacheNonBlocking)
 		topoPath := filepath.Join(topoDir, packFile)
 		for _, a := range root.Agents {
 			if a.Dir == "" {
@@ -1715,7 +1725,7 @@ func LoadPackGraphDirsForDoctor(fs fsys.FS, cityTomlPath string) ([]string, erro
 }
 
 func loadImportPackGraphDirsForDoctor(fs fsys.FS, imp Import, declDir, cityRoot string, cache *packLoadCache) ([]string, error) {
-	impDir, err := resolveImportPackRef(imp.Source, imp.Version, declDir, cityRoot)
+	impDir, err := resolveImportPackRef(imp.Source, imp.Version, declDir, cityRoot, false)
 	if err != nil {
 		return nil, err
 	}
@@ -1831,7 +1841,7 @@ func trackWorkspace(prov *Provenance, meta toml.MetaData, source string) {
 // [imports] according to each import's transitive setting so builtin system-pack
 // injection can be skipped when a user pack already brings the same pack into
 // the city closure.
-func resolvedPackNames(includes []string, imports map[string]Import, sysFS fsys.FS, cityRoot string) map[string]bool {
+func resolvedPackNames(includes []string, imports map[string]Import, sysFS fsys.FS, cityRoot string, nonBlocking bool) map[string]bool {
 	names := make(map[string]bool, len(includes)+len(imports))
 	seenShallowDirs := make(map[string]bool)
 	expandedDirs := make(map[string]bool)
@@ -1887,7 +1897,7 @@ func resolvedPackNames(includes []string, imports map[string]Import, sysFS fsys.
 	}
 
 	visitInclude = func(ref, declDir string, transitive bool) {
-		dir, err := resolvePackRef(ref, declDir, cityRoot)
+		dir, err := resolvePackRef(ref, declDir, cityRoot, nonBlocking)
 		if err != nil {
 			return
 		}
@@ -1895,7 +1905,7 @@ func resolvedPackNames(includes []string, imports map[string]Import, sysFS fsys.
 	}
 
 	visitImport = func(ref, declDir string, transitive bool) {
-		dir, err := resolveImportPackRef(ref, "", declDir, cityRoot)
+		dir, err := resolveImportPackRef(ref, "", declDir, cityRoot, nonBlocking)
 		if err != nil {
 			return
 		}
@@ -1927,13 +1937,13 @@ func (c *City) PackDirByName(name string) string {
 // The gc binary uses it after composition to verify that required builtin
 // packs (core, and bd for bd-provider cities) are explicitly included.
 func ReachablePackNames(cfg *City, sysFS fsys.FS, cityRoot string) map[string]bool {
-	return resolvedConfigPackNames(cfg, sysFS, cityRoot)
+	return resolvedConfigPackNames(cfg, sysFS, cityRoot, false)
 }
 
 // resolvedConfigPackNames collects all pack names reachable from the city,
 // rig, and default-rig pack graphs before builtin extra includes are injected.
-func resolvedConfigPackNames(cfg *City, sysFS fsys.FS, cityRoot string) map[string]bool {
-	names := resolvedPackNames(cfg.Workspace.LegacyIncludes(), cfg.Imports, sysFS, cityRoot)
+func resolvedConfigPackNames(cfg *City, sysFS fsys.FS, cityRoot string, nonBlocking bool) map[string]bool {
+	names := resolvedPackNames(cfg.Workspace.LegacyIncludes(), cfg.Imports, sysFS, cityRoot, nonBlocking)
 	add := func(more map[string]bool) {
 		for name := range more {
 			names[name] = true
@@ -1941,11 +1951,11 @@ func resolvedConfigPackNames(cfg *City, sysFS fsys.FS, cityRoot string) map[stri
 	}
 
 	for _, rig := range cfg.Rigs {
-		add(resolvedPackNames(rig.Includes, rig.Imports, sysFS, cityRoot))
+		add(resolvedPackNames(rig.Includes, rig.Imports, sysFS, cityRoot, nonBlocking))
 	}
 
-	add(resolvedPackNames(cfg.Workspace.LegacyDefaultRigIncludes(), nil, sysFS, cityRoot))
-	add(resolvedPackNames(nil, cfg.DefaultRigImports, sysFS, cityRoot))
+	add(resolvedPackNames(cfg.Workspace.LegacyDefaultRigIncludes(), nil, sysFS, cityRoot, nonBlocking))
+	add(resolvedPackNames(nil, cfg.DefaultRigImports, sysFS, cityRoot, nonBlocking))
 
 	return names
 }

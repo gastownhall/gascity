@@ -43,8 +43,33 @@ func TryWithRepoCacheReadLock(root string, fn func() error) error {
 
 // WithRepoCacheWriteLock runs fn while holding the exclusive repo-cache lock.
 func WithRepoCacheWriteLock(root string, fn func() (string, error)) (string, error) {
+	return writeLock(root, false, fn)
+}
+
+// TryWithRepoCacheWriteLock is WithRepoCacheWriteLock for advisory callers: it
+// returns ErrRepoCacheBusy immediately rather than waiting for a writer that
+// may be doing a network clone. Cache repair reached from an advisory load is
+// better skipped than waited on; the next authoritative command repairs it.
+func TryWithRepoCacheWriteLock(root string, fn func() (string, error)) (string, error) {
+	return writeLock(root, true, fn)
+}
+
+// repoCacheWriteLock picks the exclusive-lock helper matching a load's
+// blocking policy, so call sites read the same either way.
+func repoCacheWriteLock(nonBlocking bool) func(string, func() (string, error)) (string, error) {
+	if nonBlocking {
+		return TryWithRepoCacheWriteLock
+	}
+	return WithRepoCacheWriteLock
+}
+
+func writeLock(root string, nonBlocking bool, fn func() (string, error)) (string, error) {
 	var result string
-	err := withRepoCacheLock(root, repoCacheLockOptions{mode: repoCacheLockExclusive, createRoot: true}, func() error {
+	err := withRepoCacheLock(root, repoCacheLockOptions{
+		mode:        repoCacheLockExclusive,
+		createRoot:  true,
+		nonBlocking: nonBlocking,
+	}, func() error {
 		var fnErr error
 		result, fnErr = fn()
 		return fnErr
@@ -52,10 +77,13 @@ func WithRepoCacheWriteLock(root string, fn func() (string, error)) (string, err
 	return result, err
 }
 
-func withRepoCacheReadLockForPath(path string, fn func() error) error {
+func withRepoCacheReadLockForPath(path string, nonBlocking bool, fn func() error) error {
 	root, ok := repoCacheRootForPath(path)
 	if !ok {
 		return fn()
+	}
+	if nonBlocking {
+		return TryWithRepoCacheReadLock(root, fn)
 	}
 	return WithRepoCacheReadLock(root, fn)
 }
