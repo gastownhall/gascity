@@ -48,7 +48,13 @@ const (
 	// only job that stands up the proxied shapes and ci-required accepted the
 	// skip. `go list -deps ./test/acceptance/... ./cmd/gc` names 139 of 166
 	// internal packages, so the filter is now the graph itself.
-	expectedCIExecutionHash      = "c74219f009d94965f5172398ad5d0cf9ad3215ab2621b8604076afdf02b19674"
+	//
+	// Bumped again on the merge with main (2026-09-22), which carried the new
+	// critical-path-evidence job (fails CI when a matched critical-path suite
+	// has no successful evidence, ga-oaz41a.1) onto the beads-topology-acceptance
+	// job above: the merged workflow holds both, so neither side's pre-merge
+	// digest describes it.
+	expectedCIExecutionHash      = "dbe01ac22d95e51f84eff1679a0b8d2977faf5764f1eecbbc4effb073bf3d70b"
 	expectedNightlyTriggersHash  = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	expectedNightlyExecutionHash = "9cc6663eacb2279f8d98b6e0acc72de7b8907b0f58ef85c2f8dc684791c2a823" // reviewed delta: Beads v1.3.0-rc.2 -> v1.3.0
 	expectedSetupActionHash      = "8f2d6b3a57f11d4f33a41211b1d3d5362d1437ba40c7b6db068abb98e731e5ac"
@@ -213,6 +219,9 @@ func validate(ci, nightly, action map[string]any) error {
 		return err
 	}
 	if err := validateChangesJob(ci); err != nil {
+		return err
+	}
+	if err := validateCriticalPathEvidenceJob(ci); err != nil {
 		return err
 	}
 	if err := validatePolicyWiring(ci); err != nil {
