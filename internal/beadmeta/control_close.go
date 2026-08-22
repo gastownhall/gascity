@@ -2,10 +2,11 @@ package beadmeta
 
 import "strings"
 
-// SelfClosingControlKinds lists the control kinds whose completion closes a
-// graph node OTHER than the control bead itself. Every other member of
-// ControlKinds closes only itself, so only these kinds can create the
-// "blocked by my own closer" cycle that ControlClosesNode detects.
+// SelfClosingControlKinds lists the control kinds that close a graph node OTHER
+// than the control bead itself, where that node is identified by the compiler
+// and so can carry a declared dependency edge back onto the control. Those are
+// the kinds that can mint the "blocked by my own closer" cycle ControlClosesNode
+// detects, and the only ones the compiler can rule out statically.
 //
 // Behavior owners (internal/dispatch/runtime.go):
 //
@@ -14,9 +15,19 @@ import "strings"
 //   - KindWorkflowFinalize — processWorkflowFinalize closes the workflow root
 //     named by the control's gc.root_bead_id.
 //
+// Other control kinds are NOT limited to closing themselves: a retry-eval closes
+// the logical bead named by its gc.logical_bead_id, and a ralph iteration
+// control closes its own logical bead, in both cases while the logical bead
+// holds a blocks edge onto the control. Those pairs are safe only because
+// internal/dispatch/retry.go closes the control before the logical bead in every
+// terminal branch — safety by ordering, enforced at runtime by the strict-close
+// test double rather than statically here. They are excluded from this set
+// because the edge is minted at dispatch time from runtime metadata, not
+// declared by the compiler, so ControlClosesNode cannot see it.
+//
 // TestControlClosesNodeOnlyForSelfClosingKinds pins this set against
-// ControlClosesNode, so adding a control kind that closes a foreign node
-// forces the question here instead of silently minting a new cycle.
+// ControlClosesNode, so adding a control kind that closes a compiler-identified
+// foreign node forces the question here instead of silently minting a new cycle.
 var SelfClosingControlKinds = []string{
 	KindScopeCheck,
 	KindWorkflowFinalize,
