@@ -274,13 +274,13 @@ func installIntegrationSignalSweeper(subprocess bool) func() {
 	done := make(chan struct{})
 	// Catches an external interrupt (Ctrl-C, `kill`, a CI job cancellation)
 	// so the run's supervisor/dolt/tmux state gets swept before the process
-	// exits. NOTE: `go test -timeout` does NOT deliver SIGQUIT (or any other
-	// signal) to this process — it fires a panic() from an internal timer
-	// goroutine and the runtime calls os.Exit(2) directly, so this handler
-	// never runs on a timeout (verified: a SIGQUIT/SIGTERM/SIGINT listener
-	// registered in a test process does not fire when that same process is
-	// run under `-timeout` and the deadline elapses). A timed-out run's
-	// orphans are only caught by the next run's pre-sweep in TestMain.
+	// exits.
+	// NOTE: `go test -timeout` does not normally reach this handler — the
+	// in-binary deadline fires a panic() from an internal timer goroutine and
+	// the runtime calls os.Exit(2) directly, so a timed-out run's orphans are
+	// caught only by the next run's pre-sweep in TestMain. The handler still
+	// has to stay registered: cmd/go sends SIGQUIT as a backstop once the
+	// binary blows past testTimeout + WaitDelay (issue #3640).
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 	go func() {
 		select {
