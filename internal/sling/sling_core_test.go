@@ -8,7 +8,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -151,8 +150,6 @@ func TestDoSlingDefaultFormulaFallsBackToPlainRouteWhenMoleculeAttached(t *testi
 // gets closed on the fallback path rather than leaked as an open,
 // claim-attracting convoy (refs ga-9azvzg).
 func TestDoSlingDefaultFormulaFallsBackToPlainRouteWhenMoleculeAttachedGraphV2Formula(t *testing.T) {
-	formulatest.EnableV2ForTest(t)
-
 	dir := t.TempDir()
 	content := "formula = \"graph-review\"\nversion = 1\ncontract = \"graph.v2\"\ntype = \"workflow\"\n\n[[steps]]\nid = \"work\"\ntitle = \"Work\"\n"
 	if err := os.WriteFile(filepath.Join(dir, "graph-review.toml"), []byte(content), 0o644); err != nil {
