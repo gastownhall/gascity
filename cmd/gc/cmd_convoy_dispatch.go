@@ -818,7 +818,7 @@ func controlStoreDescription(cityPath, storePath string) string {
 // every rig scope — this returns the exact store value it was handed, so those
 // callers dispatch against the very store they always did: same bd command
 // runner, same scope issue prefix, same instance for the optional-capability
-// assertions (DepListBatch, UpdateAll) the scope-skip paths make against it.
+// assertion (DepListBatch) the scope-skip paths make against it.
 func controlGraphStore(cityPath, storePath string, cfg *config.City, scopeStore beads.Store) beads.Store {
 	return scopeGraphStore(cityPath, storePath, cfg, scopeStore)
 }
