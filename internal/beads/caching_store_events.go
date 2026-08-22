@@ -235,6 +235,9 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 		}
 	case "bead.updated":
 		existing, cached := c.beads[b.ID]
+		// Read before absorb: dependents' readiness turns on this row's status,
+		// so only a real transition may invalidate their projection.
+		statusChanged := !cached || existing.Status != b.Status
 		if !cached || beadChanged(existing, b, false) {
 			c.noteMutationLocked(b.ID)
 			c.absorbFreshLocked(b.ID, b, time.Now(), absorbOpts{
@@ -248,7 +251,10 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 			c.noteMutationLocked(b.ID)
 			mutated = true
 		}
-		if hasCacheEventField(fields, "status") && c.clearDependentReadyProjectionsLocked(b.ID) {
+		// Gating on the field's PRESENCE re-entered the reconcile loop: the
+		// emitter always carries status, and clearing nils is_blocked (ga-fnmb5).
+		if statusChanged && hasCacheEventField(fields, "status") &&
+			c.clearDependentReadyProjectionsLocked(b.ID) {
 			mutated = true
 		}
 	case "bead.closed":

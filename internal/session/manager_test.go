@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,7 +17,6 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/sessionlog"
-	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func immediateStaleKeyDetectionWaiter(context.Context, string) error { return nil }
@@ -62,7 +62,7 @@ func awaitStaleKeyWaiterEntry(t *testing.T, waiter *manualStaleKeyDetectionWaite
 		if got != want {
 			t.Fatalf("stale-key waiter entered for %q, want %q", got, want)
 		}
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(goroutineHangBudget):
 		t.Fatalf("timed out waiting for stale-key waiter entry for %q", want)
 	}
 }
@@ -72,7 +72,7 @@ func awaitSessionOperation(t *testing.T, result <-chan error, description string
 	select {
 	case err := <-result:
 		return err
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(goroutineHangBudget):
 		t.Fatalf("timed out waiting for %s", description)
 		return nil
 	}
@@ -2426,6 +2426,78 @@ func TestBuildResumeCommand(t *testing.T) {
 			got := BuildResumeCommand(tt.info)
 			if got != tt.want {
 				t.Errorf("BuildResumeCommand() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBuildResumeCommandWarnsOnMissingSessionKey pins the observability half of
+// the silent-fresh-restart fix: a resume-capable provider with no session key
+// still falls back to the plain command (behavior unchanged), but that fallback
+// must now say so. A provider with no resume flag at all is not a degraded
+// resume and must stay silent.
+func TestBuildResumeCommandWarnsOnMissingSessionKey(t *testing.T) {
+	tests := []struct {
+		name     string
+		info     Info
+		wantWarn bool
+	}{
+		{
+			name: "resume capable but no key warns",
+			info: Info{
+				ID:         "gc-7",
+				Command:    "claude --dangerously-skip-permissions",
+				Provider:   "claude",
+				ResumeFlag: "--resume",
+			},
+			wantWarn: true,
+		},
+		{
+			name: "no resume flag stays silent",
+			info: Info{
+				ID:       "gc-8",
+				Command:  "amp",
+				Provider: "amp",
+			},
+			wantWarn: false,
+		},
+		{
+			name: "resume flag with key stays silent",
+			info: Info{
+				ID:         "gc-9",
+				Command:    "claude --dangerously-skip-permissions",
+				Provider:   "claude",
+				ResumeFlag: "--resume",
+				SessionKey: "5f0d9c1e-6a2b-4c3d-8e4f-1a2b3c4d5e6f",
+			},
+			wantWarn: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf strings.Builder
+			prevOut := log.Writer()
+			prevFlags := log.Flags()
+			log.SetOutput(&buf)
+			log.SetFlags(0)
+			t.Cleanup(func() {
+				log.SetOutput(prevOut)
+				log.SetFlags(prevFlags)
+			})
+
+			BuildResumeCommand(tt.info)
+
+			logged := buf.String()
+			gotWarn := strings.Contains(logged, "resume requested but no session key")
+			if gotWarn != tt.wantWarn {
+				t.Fatalf("warning logged = %v, want %v (log: %q)", gotWarn, tt.wantWarn, logged)
+			}
+			if tt.wantWarn {
+				for _, want := range []string{tt.info.ID, tt.info.Provider, tt.info.ResumeFlag} {
+					if !strings.Contains(logged, want) {
+						t.Errorf("warning %q missing context %q", logged, want)
+					}
+				}
 			}
 		})
 	}

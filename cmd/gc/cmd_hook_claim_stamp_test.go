@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -73,6 +74,33 @@ func noopStampWorkMeta(context.Context, string, []string, string, string, map[st
 // the city and opens the session store, which a test binary deliberately refuses.
 func noopStampSessionClaim(string, string) error { return nil }
 
+// popClaimedAt extracts and validates the write-once gc.claimed_at entry from
+// a fresh-claim patch, returning the remaining keys so the caller can assert
+// them by exact equality without hardcoding the dynamic clock value. It fails
+// the test if the key is absent, unparseable, or not recent — every claim in
+// this file's fresh-claim tests is expected to carry one.
+func popClaimedAt(t *testing.T, patch map[string]string) map[string]string {
+	t.Helper()
+	raw, ok := patch[beadmeta.ClaimedAtMetadataKey]
+	if !ok {
+		t.Fatalf("patch = %v, want gc.claimed_at present on a fresh claim", patch)
+	}
+	ts, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		t.Fatalf("gc.claimed_at = %q is not RFC3339: %v", raw, err)
+	}
+	if age := time.Since(ts); age < 0 || age > 10*time.Second {
+		t.Fatalf("gc.claimed_at = %q is not a recent timestamp (age %s)", raw, age)
+	}
+	rest := make(map[string]string, len(patch)-1)
+	for k, v := range patch {
+		if k != beadmeta.ClaimedAtMetadataKey {
+			rest[k] = v
+		}
+	}
+	return rest
+}
+
 // poolClaimOps builds the seam for a pool slot claiming an unassigned,
 // route-matched candidate: the runner yields it, Claim returns it owned by us,
 // the branch resolver returns branch, and StampWorkMeta is captured by spy.
@@ -136,8 +164,9 @@ func TestDoHookClaimStampsSessionIdentity(t *testing.T) {
 		beadmeta.SessionIDMetadataKey:   "mc-sess1",
 		beadmeta.SessionNameMetadataKey: "gc__role-mc-sess1",
 	}
-	if !reflect.DeepEqual(spy.patch, want) {
-		t.Fatalf("patch = %v, want %v", spy.patch, want)
+	rest := popClaimedAt(t, spy.patch)
+	if !reflect.DeepEqual(rest, want) {
+		t.Fatalf("patch (minus gc.claimed_at) = %v, want %v", rest, want)
 	}
 	if spy.beadID != "hw-pool" || spy.assignee != "gc__role-mc-sess1" {
 		t.Fatalf("stamp target = bead %q assignee %q, want hw-pool / gc__role-mc-sess1", spy.beadID, spy.assignee)
@@ -172,8 +201,12 @@ func TestDoHookClaimStampsSessionIdentityOnAdoption(t *testing.T) {
 		beadmeta.SessionIDMetadataKey:   "mc-sess1",
 		beadmeta.SessionNameMetadataKey: "gc__role-mc-sess1",
 	}
-	if spy.calls != 1 || !reflect.DeepEqual(spy.patch, want) {
-		t.Fatalf("stamp = {calls:%d patch:%v}, want {1 %v}", spy.calls, spy.patch, want)
+	if spy.calls != 1 {
+		t.Fatalf("stamp calls = %d, want 1", spy.calls)
+	}
+	rest := popClaimedAt(t, spy.patch)
+	if !reflect.DeepEqual(rest, want) {
+		t.Fatalf("patch (minus gc.claimed_at) = %v, want %v", rest, want)
 	}
 }
 
@@ -198,15 +231,22 @@ func TestDoHookClaimStampsSessionIdentityWithoutWorktree(t *testing.T) {
 		beadmeta.SessionIDMetadataKey:   "mc-sess1",
 		beadmeta.SessionNameMetadataKey: "gc__role-mc-sess1",
 	}
-	if spy.calls != 1 || !reflect.DeepEqual(spy.patch, want) {
-		t.Fatalf("stamp = {calls:%d patch:%v}, want {1 %v} (session id/name even with no worktree)", spy.calls, spy.patch, want)
+	if spy.calls != 1 {
+		t.Fatalf("stamp calls = %d, want 1", spy.calls)
+	}
+	rest := popClaimedAt(t, spy.patch)
+	if !reflect.DeepEqual(rest, want) {
+		t.Fatalf("patch (minus gc.claimed_at) = %v, want %v (session id/name even with no worktree)", rest, want)
 	}
 }
 
 // TestDoHookClaimSkipsStampWhenIdentityUnchanged pins the mandatory idempotence
-// guard (sessionVerify #2): a candidate already carrying the current branch AND
-// session identity produces NO write, so the per-tick adoption re-run does not
-// flood bead.updated events.
+// guard (sessionVerify #2): a candidate already carrying the current branch,
+// session identity, AND a prior gc.claimed_at produces NO write, so the per-tick
+// adoption re-run does not flood bead.updated events. gc.claimed_at must be
+// preset here too (write-once): without it, this "everything unchanged"
+// candidate would still get a fresh claimed_at added to its patch, falsely
+// failing the "no write" assertion.
 func TestDoHookClaimSkipsStampWhenIdentityUnchanged(t *testing.T) {
 	spy := &stampMetaSpy{}
 	current := map[string]string{
@@ -214,9 +254,10 @@ func TestDoHookClaimSkipsStampWhenIdentityUnchanged(t *testing.T) {
 		"gc.work_branch":  "bd-hw-idem",
 		"gc.session_id":   "mc-sess1",
 		"gc.session_name": "gc__role-mc-sess1",
+		"gc.claimed_at":   "2026-01-01T00:00:00Z",
 	}
 	ops := poolClaimOps(
-		`[{"id":"hw-idem","status":"open","metadata":{"gc.routed_to":"worker","gc.work_branch":"bd-hw-idem","gc.session_id":"mc-sess1","gc.session_name":"gc__role-mc-sess1"}}]`,
+		`[{"id":"hw-idem","status":"open","metadata":{"gc.routed_to":"worker","gc.work_branch":"bd-hw-idem","gc.session_id":"mc-sess1","gc.session_name":"gc__role-mc-sess1","gc.claimed_at":"2026-01-01T00:00:00Z"}}]`,
 		current,
 		"bd-hw-idem",
 		spy,
@@ -232,8 +273,9 @@ func TestDoHookClaimSkipsStampWhenIdentityUnchanged(t *testing.T) {
 }
 
 // TestDoHookClaimStampsOnlyChangedIdentityKeys proves the patch is minimal: a
-// candidate whose session identity is current but whose branch changed writes ONLY
-// the branch, leaving the unchanged session keys out of the patch.
+// candidate whose session identity and gc.claimed_at are current but whose branch
+// changed writes ONLY the branch, leaving the unchanged keys (including
+// gc.claimed_at, preset here since it is write-once) out of the patch.
 func TestDoHookClaimStampsOnlyChangedIdentityKeys(t *testing.T) {
 	spy := &stampMetaSpy{}
 	current := map[string]string{
@@ -241,9 +283,10 @@ func TestDoHookClaimStampsOnlyChangedIdentityKeys(t *testing.T) {
 		"gc.work_branch":  "bd-old",
 		"gc.session_id":   "mc-sess1",
 		"gc.session_name": "gc__role-mc-sess1",
+		"gc.claimed_at":   "2026-01-01T00:00:00Z",
 	}
 	ops := poolClaimOps(
-		`[{"id":"hw-partial","status":"open","metadata":{"gc.routed_to":"worker","gc.work_branch":"bd-old","gc.session_id":"mc-sess1","gc.session_name":"gc__role-mc-sess1"}}]`,
+		`[{"id":"hw-partial","status":"open","metadata":{"gc.routed_to":"worker","gc.work_branch":"bd-old","gc.session_id":"mc-sess1","gc.session_name":"gc__role-mc-sess1","gc.claimed_at":"2026-01-01T00:00:00Z"}}]`,
 		current,
 		"bd-new",
 		spy,
@@ -263,7 +306,11 @@ func TestDoHookClaimStampsOnlyChangedIdentityKeys(t *testing.T) {
 // policy (sessionVerify #3): a control-dispatcher session claiming a control bead
 // (gc.kind in ControlKinds) must NOT acquire a session back-reference — control
 // steps stay session-free by graphroute's design — while gc.work_branch is still
-// stamped as before.
+// stamped as before. gc.claimed_at, unlike the session keys, is UNCONDITIONAL: a
+// claim timestamp is meaningful for every claimed bead regardless of kind, so a
+// control bead's first claim still stamps it (OBS-001; see also
+// TestHookClaimIdentityPatchClaimedAtForControlBead for the direct-patch unit
+// test pinning this same decision).
 func TestDoHookClaimSkipsSessionIdentityForControlBead(t *testing.T) {
 	spy := &stampMetaSpy{}
 	ops := poolClaimOps(
@@ -278,14 +325,19 @@ func TestDoHookClaimSkipsSessionIdentityForControlBead(t *testing.T) {
 		t.Fatalf("doHookClaim = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	want := map[string]string{beadmeta.WorkBranchMetadataKey: "bd-hc-check"}
-	if spy.calls != 1 || !reflect.DeepEqual(spy.patch, want) {
-		t.Fatalf("stamp = {calls:%d patch:%v}, want {1 %v} (no session keys on a control bead)", spy.calls, spy.patch, want)
+	if spy.calls != 1 {
+		t.Fatalf("stamp calls = %d, want 1", spy.calls)
+	}
+	rest := popClaimedAt(t, spy.patch)
+	if !reflect.DeepEqual(rest, want) {
+		t.Fatalf("patch (minus gc.claimed_at) = %v, want %v (no session keys on a control bead, but claimed_at IS stamped)", rest, want)
 	}
 }
 
 // TestDoHookClaimSkipsSessionIdentityWhenNoSessionID: a non-session run (no
 // GC_SESSION_ID) has no session bead to reference, so neither session key is
-// stamped even when GC_SESSION_NAME happens to be set.
+// stamped even when GC_SESSION_NAME happens to be set. gc.claimed_at is still
+// stamped: it is not gated on session identity.
 func TestDoHookClaimSkipsSessionIdentityWhenNoSessionID(t *testing.T) {
 	spy := &stampMetaSpy{}
 	ops := poolClaimOps(
@@ -302,8 +354,12 @@ func TestDoHookClaimSkipsSessionIdentityWhenNoSessionID(t *testing.T) {
 		t.Fatalf("doHookClaim = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	want := map[string]string{beadmeta.WorkBranchMetadataKey: "bd-hw-nosess"}
-	if spy.calls != 1 || !reflect.DeepEqual(spy.patch, want) {
-		t.Fatalf("stamp = {calls:%d patch:%v}, want {1 %v} (no session id ⇒ no session keys)", spy.calls, spy.patch, want)
+	if spy.calls != 1 {
+		t.Fatalf("stamp calls = %d, want 1", spy.calls)
+	}
+	rest := popClaimedAt(t, spy.patch)
+	if !reflect.DeepEqual(rest, want) {
+		t.Fatalf("patch (minus gc.claimed_at) = %v, want %v (no session id ⇒ no session keys, but claimed_at IS stamped)", rest, want)
 	}
 }
 
@@ -363,17 +419,19 @@ func TestDoHookClaimEmitsStartedOnlyAfterDurableSessionReadback(t *testing.T) {
 // between a durable claim-time identity stamp and event recording. A later hook
 // tick adopts the same in-progress assignment, verifies its durable identity,
 // and must re-emit the idempotent started fact rather than leave a permanent
-// lifecycle gap.
+// lifecycle gap. The adopted bead already carries gc.claimed_at from its
+// original claim (write-once), so the adoption tick must not re-stamp it.
 func TestDoHookClaimAdoptionReconcilesDurableStartedFact(t *testing.T) {
 	spy := &stampMetaSpy{}
 	meta := map[string]string{
 		"gc.routed_to": "worker", beadmeta.RootBeadIDMetadataKey: "gcg-run",
 		beadmeta.StepIDMetadataKey: "build", beadmeta.SessionIDMetadataKey: "mc-sess1",
 		beadmeta.SessionNameMetadataKey: "gc__role-mc-sess1",
+		beadmeta.ClaimedAtMetadataKey:   "2026-01-01T00:00:00Z",
 	}
 	ops := hookClaimOps{
 		Runner: func(string, string) (string, error) {
-			return `[{"id":"gcg-attempt","status":"in_progress","assignee":"gc__role-mc-sess1","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"gcg-run","gc.step_id":"build","gc.session_id":"mc-sess1","gc.session_name":"gc__role-mc-sess1"}}]`, nil
+			return `[{"id":"gcg-attempt","status":"in_progress","assignee":"gc__role-mc-sess1","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"gcg-run","gc.step_id":"build","gc.session_id":"mc-sess1","gc.session_name":"gc__role-mc-sess1","gc.claimed_at":"2026-01-01T00:00:00Z"}}]`, nil
 		},
 		ResolveWorkBranch: func(string) string { return "" },
 		StampWorkMeta:     spy.fn,

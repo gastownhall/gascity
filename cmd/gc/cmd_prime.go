@@ -718,10 +718,13 @@ func persistPrimeHookProviderSessionKey(hookProviderSessionID string, stderr io.
 // their own session id there, so it is the authoritative resume key. Other CLI
 // providers surface it via env instead (GC_PROVIDER_SESSION_ID for the
 // JS-plugin providers, GEMINI_SESSION_ID for gemini) and are handled above,
-// before this stdin gate. Claude cannot be handed an id up front
-// (`--session-id` is unsupported, so the builtin profile sets no
-// session_id_flag); capturing the hook-delivered id is the only way its
-// wake_mode=resume ever has a conversation to resume.
+// before this stdin gate.
+//
+// Claude is belt and braces: `claude --session-id <uuid>` IS accepted by the
+// current CLI, so the builtin profile now sets session_id_flag and gc mints the
+// durable key up front. The empty-key guard below means this stdin capture then
+// no-ops for a session that was minted normally — it stays as the fallback for
+// any session that reached the hook without one.
 func providerAcceptsHookStdinSessionID(family string) bool {
 	switch family {
 	case "codex", "claude":

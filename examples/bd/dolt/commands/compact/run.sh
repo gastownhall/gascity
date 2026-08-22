@@ -428,6 +428,7 @@ lock_pid_path="$lock_dir/pid"
 lock_cmd_path="$lock_dir/cmd"
 pending_gc_dir="$PACK_STATE_DIR/compact-pending-gc"
 pending_push_dir="$PACK_STATE_DIR/compact-pending-push"
+pending_push_backup_dir="$PACK_STATE_DIR/compact-pending-push-backup"
 quarantine_dir="$PACK_STATE_DIR/compact-quarantine"
 
 # DB discovery uses rig metadata.json files first (authoritative), with a
@@ -875,6 +876,28 @@ single_remote_name() {
     "SELECT name FROM dolt_remotes ORDER BY name LIMIT 1"
 }
 
+# list_remotes emits one "name<TAB>url" line per configured remote, sorted by
+# name. The only current consumer is backup_remotes' scheme filter.
+list_remotes() {
+  db="$1"
+  out_tmp=$(mktemp)
+  err_tmp=$(mktemp)
+  if ! dolt_query "$db" "SELECT name, url FROM dolt_remotes ORDER BY name" > "$out_tmp" 2>"$err_tmp"; then
+    printf 'compact: db=%s remote listing probe failed\n' "$db" >&2
+    emit_error_file "$db" "$err_tmp"
+    rm -f "$out_tmp" "$err_tmp"
+    return 1
+  fi
+  awk 'NR>2 && /^\|/ {
+    line=$0
+    gsub(/^\| */, "", line)
+    gsub(/ *\|$/, "", line)
+    n=split(line, parts, /[ \t]*\|[ \t]*/)
+    if (n>=2) print parts[1] "\t" parts[2]
+  }' "$out_tmp"
+  rm -f "$out_tmp" "$err_tmp"
+}
+
 select_remote() {
   db="$1"
 
@@ -915,6 +938,31 @@ select_remote() {
   printf 'compact: db=%s multiple remotes found without origin; set GC_DOLT_COMPACT_REMOTE — fail\n' \
     "$db" >&2
   return 1
+}
+
+# backup_remotes emits the name of every configured remote that is a local
+# file:// path other than the authoritative remote — the set that
+# reconcile_backup_remotes fetches and pushes alongside the authoritative
+# push. Never matches by literal remote name; a remote qualifies purely by
+# scheme and by not being the authoritative pick.
+backup_remotes() {
+  db="$1"
+  authoritative="$2"
+  remotes_tmp=$(mktemp)
+  if ! list_remotes "$db" > "$remotes_tmp"; then
+    rm -f "$remotes_tmp"
+    return 1
+  fi
+  while read -r name url; do
+    [ -n "$name" ] || continue
+    [ "$name" = "$authoritative" ] && continue
+    case "$url" in
+      file://*)
+        printf '%s\n' "$name"
+        ;;
+    esac
+  done < "$remotes_tmp"
+  rm -f "$remotes_tmp"
 }
 
 fetch_remote() {
@@ -1624,7 +1672,7 @@ write_pending_push_marker() {
   local_branch="${7:-main}"
   remote_branch="${8:-$local_branch}"
 
-  write_compact_marker "$pending_push_dir" "$db" "$reason" \
+  write_compact_marker "${push_marker_dir:-$pending_push_dir}" "${push_marker_key:-$db}" "$reason" \
     "remote=$remote" \
     "expected_remote_head=$expected_remote_head" \
     "expected_remote_head_verified=$expected_remote_head_verified" \
@@ -1853,6 +1901,8 @@ push_remote_after_compaction() {
   compacted_from_head="${6:-}"
   local_branch="${7:-main}"
   remote_branch="${8:-$local_branch}"
+  push_marker_dir="${9:-$pending_push_dir}"
+  push_marker_key="${10:-$db}"
   [ -n "$remote" ] || return 0
   valid_branch_name "$local_branch" || {
     printf 'compact: db=%s invalid local branch=%s before remote push\n' "$db" "$local_branch" >&2
@@ -1990,8 +2040,41 @@ push_remote_after_compaction() {
     return 0
   fi
   rm -f "$push_err_tmp"
-  clear_compact_marker "$pending_push_dir" "$db"
+  clear_compact_marker "${push_marker_dir:-$pending_push_dir}" "${push_marker_key:-$db}"
   printf 'compact: db=%s remote=%s pushed compacted %s\n' "$db" "$remote" "$remote_branch"
+  return 0
+}
+
+# reconcile_backup_remotes pushes the compacted database to every file://
+# backup remote (backup_remotes), reusing push_remote_after_compaction's
+# fetch/verify/push protocol unchanged for each. Each backup remote gets its
+# own compact-pending-push-backup marker, namespaced by "$db.$name" so a
+# failure on one backup remote never collides with the authoritative push's
+# marker or another backup remote's marker. Always returns success: a backup
+# remote is a redundancy measure, never a condition the authoritative push
+# depends on.
+reconcile_backup_remotes() {
+  db="$1"
+  authoritative="$2"
+  compacted_from_head="$3"
+  local_branch="${4:-main}"
+  remote_branch="${5:-$local_branch}"
+
+  backup_tmp=$(mktemp)
+  if ! backup_remotes "$db" "$authoritative" > "$backup_tmp"; then
+    rm -f "$backup_tmp"
+    return 0
+  fi
+  while read -r name; do
+    [ -n "$name" ] || continue
+    if ! valid_remote_name "$name"; then
+      printf 'compact: db=%s backup remote name=%s invalid — skipping\n' "$db" "$name" >&2
+      continue
+    fi
+    push_remote_after_compaction "$db" "$name" "" 0 "initial" "$compacted_from_head" "$local_branch" "$remote_branch" \
+      "$pending_push_backup_dir" "$db.$name" || true
+  done < "$backup_tmp"
+  rm -f "$backup_tmp"
   return 0
 }
 
@@ -2811,8 +2894,12 @@ flatten_database() {
   if run_full_gc "$db" "flatten ok commits=$count->${after_count:-?} but" \
     "commits=$count->${after_count:-?}" "$start"; then
     clear_compact_marker "$pending_gc_dir" "$db"
-    push_remote_after_compaction "$db" "$remote" "$expected_remote_head" "$expected_remote_head_verified" "initial" "$compacted_from_head" "$local_branch" "$remote_branch"
-    return $?
+    primary_push_rc=0
+    push_remote_after_compaction "$db" "$remote" "$expected_remote_head" "$expected_remote_head_verified" "initial" "$compacted_from_head" "$local_branch" "$remote_branch" || primary_push_rc=$?
+    if [ -n "$remote" ]; then
+      reconcile_backup_remotes "$db" "$remote" "$compacted_from_head" "$local_branch" "$remote_branch" || true
+    fi
+    return "$primary_push_rc"
   fi
   write_compact_marker "$pending_gc_dir" "$db" "flatten succeeded but full GC failed" \
     "remote=$remote" "expected_remote_head=$expected_remote_head" \

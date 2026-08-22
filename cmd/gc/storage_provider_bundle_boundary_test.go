@@ -411,7 +411,7 @@ func anyGoWorkFile(t *testing.T, root string) bool {
 		}
 		if entry.IsDir() {
 			switch entry.Name() {
-			case ".git", "node_modules", "vendor", "testdata", ".claude":
+			case ".git", "node_modules", "vendor", "testdata", ".claude", "worktrees":
 				return filepath.SkipDir
 			}
 			return nil
@@ -458,7 +458,7 @@ func moduleGoFiles(t *testing.T, root string) []string {
 		}
 		if entry.IsDir() {
 			switch entry.Name() {
-			case ".git", "node_modules", "vendor", "testdata", ".claude":
+			case ".git", "node_modules", "vendor", "testdata", ".claude", "worktrees":
 				return filepath.SkipDir
 			}
 			return nil

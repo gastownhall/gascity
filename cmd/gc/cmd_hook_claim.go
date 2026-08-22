@@ -1052,15 +1052,21 @@ func hookClaimThroughStore(beadID, assignee string, claim func() (beads.Bead, bo
 // bead to its work that the close gate later reads, ADR-0009) plus the durable
 // session back-reference gc.session_id / gc.session_name (#2843) so the dashboard
 // run-detail can resolve which session executed a pool step after the transient
-// Assignee is cleared on close. graphroute leaves pool steps unbound at route time,
-// deferring the session binding to this claim (graphroute.go:200-203).
+// Assignee is cleared on close, plus gc.claimed_at (OBS-001), the write-once claim
+// timestamp that feeds the created→claimed and claimed→started latency-watch
+// transitions. graphroute leaves pool steps unbound at route time, deferring the
+// session binding to this claim (graphroute.go:200-203).
 //
 // The patch is compare-and-skipped against the bead's current metadata and the
 // write is issued only when at least one key actually changes: this runs again on
 // every hook tick via the existing_assignment / ready_assignment adoption paths, so
 // an unconditional write would emit a bead.updated per tick per in-progress bead
-// (the cache-reconcile flood class). Best-effort: a missing repo, detached HEAD,
-// absent session, or write error never blocks the claim.
+// (the cache-reconcile flood class). gc.claimed_at is the one key in this patch
+// that cannot use "differs from current → overwrite" — time.Now() differs from any
+// stored value on every tick by construction, so it would defeat the compare-and-
+// skip guard by itself. hookClaimIdentityPatch instead treats it as write-once:
+// stamped only when absent, never touched again once set. Best-effort: a missing
+// repo, detached HEAD, absent session, or write error never blocks the claim.
 func stampHookClaimIdentity(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) (beads.Bead, bool) {
 	patch := hookClaimIdentityPatch(bead, opts, ops, dir)
 	sessionID := hookClaimSessionID(opts.Env)
@@ -1119,8 +1125,21 @@ func hookClaimLifecycleCandidate(bead beads.Bead, opts hookClaimOptions) bool {
 // session with no worktree still needs its back-reference — but never on control
 // beads, which stay session-free by graphroute's design
 // (ApplyGraphControlRouteBinding), even when a control-dispatcher session claims one
-// through this same hook path. An empty result means every key is already current,
-// so the caller issues no write.
+// through this same hook path.
+//
+// gc.claimed_at (OBS-001) is a fourth, differently-shaped entry: unlike the three
+// keys above, it is WRITE-ONCE, stamped only when absent from the bead's current
+// metadata and never touched again. A naive claimed_at = now() would differ from
+// the stored value on every tick by construction and defeat the compare-and-skip
+// protection the rest of this function relies on (see stampHookClaimIdentity's doc
+// comment on the flood-class risk). It is also unconditional across control and
+// non-control beads alike: a claim timestamp answers "when was this claimed",
+// which is meaningful regardless of session identity, so it is not gated on
+// IsControlKind, GC_SESSION_ID, or a resolvable worktree branch the way the other
+// three keys are.
+//
+// An empty result means every key is already current, so the caller issues no
+// write.
 func hookClaimIdentityPatch(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string) map[string]string {
 	patch := map[string]string{}
 	if branch := strings.TrimSpace(ops.ResolveWorkBranch(dir)); branch != "" &&
@@ -1136,6 +1155,9 @@ func hookClaimIdentityPatch(bead beads.Bead, opts hookClaimOptions, ops hookClai
 			strings.TrimSpace(bead.Metadata[beadmeta.SessionNameMetadataKey]) != sessionName {
 			patch[beadmeta.SessionNameMetadataKey] = sessionName
 		}
+	}
+	if strings.TrimSpace(bead.Metadata[beadmeta.ClaimedAtMetadataKey]) == "" {
+		patch[beadmeta.ClaimedAtMetadataKey] = time.Now().UTC().Format(time.RFC3339)
 	}
 	return patch
 }

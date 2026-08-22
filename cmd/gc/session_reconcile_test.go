@@ -1448,6 +1448,93 @@ func TestCheckStability_SubprocessProviderSkipsCrashCounting(t *testing.T) {
 	}
 }
 
+// TestRecordWakeFailure_KeepsResumableConversation pins that a wake failure no
+// longer discards a conversation that is provably still on disk. Any single
+// wake failure reaches recordWakeFailure — a transient spawn flake included —
+// and the conversation reset is permanent, so it must require evidence that the
+// conversation is actually unresumable. Attempt accrual is unaffected.
+func TestRecordWakeFailure_KeepsResumableConversation(t *testing.T) {
+	prevProbe := staleResumeKeyProbe
+	staleResumeKeyProbe = func(_, _, _ string) (present, probeable bool) { return true, true }
+	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
+
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	store := newTestStore()
+	session := makeBead("b1", map[string]string{
+		"wake_attempts":       "1",
+		"session_key":         "live-key",
+		"started_config_hash": "hash-1",
+		"provider":            "claude",
+		"work_dir":            "/work",
+	})
+
+	recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	syncBeadFromStore(&session, store)
+
+	if got := session.Metadata["session_key"]; got != "live-key" {
+		t.Errorf("session_key = %q, want it preserved — the transcript is still there", got)
+	}
+	if got := session.Metadata["started_config_hash"]; got != "hash-1" {
+		t.Errorf("started_config_hash = %q, want hash-1 preserved", got)
+	}
+	if got := session.Metadata["wake_attempts"]; got != "2" {
+		t.Errorf("wake_attempts = %q, want 2 (accrual must be unchanged)", got)
+	}
+}
+
+// TestRecordWakeFailure_ClearsUnresumableConversation is the other half: an
+// absent transcript keeps the existing unconditional reset.
+func TestRecordWakeFailure_ClearsUnresumableConversation(t *testing.T) {
+	prevProbe := staleResumeKeyProbe
+	staleResumeKeyProbe = func(_, _, _ string) (present, probeable bool) { return false, true }
+	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
+
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	store := newTestStore()
+	session := makeBead("b1", map[string]string{
+		"wake_attempts":       "1",
+		"session_key":         "dead-key",
+		"started_config_hash": "hash-1",
+		"provider":            "claude",
+		"work_dir":            "/work",
+	})
+
+	recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	syncBeadFromStore(&session, store)
+
+	if got := session.Metadata["session_key"]; got != "" {
+		t.Errorf("session_key = %q, want cleared when the transcript is gone", got)
+	}
+	if got := session.Metadata["started_config_hash"]; got != "" {
+		t.Errorf("started_config_hash = %q, want cleared", got)
+	}
+}
+
+// TestRecordWakeFailure_ClearsWhenProviderUnprobeable pins that a provider we
+// cannot inspect keeps the legacy unconditional reset rather than silently
+// gaining the new keep-the-conversation behavior.
+func TestRecordWakeFailure_ClearsWhenProviderUnprobeable(t *testing.T) {
+	prevProbe := staleResumeKeyProbe
+	staleResumeKeyProbe = func(_, _, _ string) (present, probeable bool) { return false, false }
+	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
+
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	store := newTestStore()
+	session := makeBead("b1", map[string]string{
+		"wake_attempts": "1",
+		"session_key":   "codex-key",
+		"provider":      "codex",
+		"work_dir":      "/work",
+	})
+
+	recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	syncBeadFromStore(&session, store)
+
+	if got := session.Metadata["session_key"]; got != "" {
+		t.Errorf("session_key = %q, want cleared for an unprobeable provider", got)
+	}
+}
+
 func TestRecordWakeFailure_Quarantine(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}

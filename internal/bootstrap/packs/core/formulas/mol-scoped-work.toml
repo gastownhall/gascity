@@ -204,7 +204,19 @@ if [ -z "$WORK_BEAD_ID" ]; then
 fi
 WORKTREE=$(gc bd show "$WORK_BEAD_ID" --json | jq -r '.[0].metadata.work_dir // empty')
 if [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ]; then
-  git worktree remove --force "$WORKTREE" || rm -rf "$WORKTREE"
+  # cwd is not guaranteed to be inside the repo at this step, so resolve REPO
+  # off the worktree itself rather than off `pwd`.
+  REPO=$(git -C "$WORKTREE" rev-parse --path-format=absolute --git-common-dir)
+  if [ -z "$REPO" ]; then
+    echo "cleanup: could not resolve the owning repo for $WORKTREE; leaving it registered" >&2
+  elif ! git -C "$REPO" worktree remove --force "$WORKTREE"; then
+    if [ -f "$WORKTREE/.git" ]; then
+      rm -rf "$WORKTREE"
+      git -C "$REPO" worktree prune
+    else
+      echo "cleanup: refusing to rm -rf $WORKTREE: not a linked worktree" >&2
+    fi
+  fi
 fi
 gc bd update "$WORK_BEAD_ID" --unset-metadata work_dir
 ```
