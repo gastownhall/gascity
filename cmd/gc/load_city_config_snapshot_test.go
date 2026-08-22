@@ -29,6 +29,19 @@ import (
 // runtime.Caller-derived directory rather than the process working directory,
 // and match with substring needles.
 //
+// The loaders no longer each spell the option out at their own call site: they
+// share a body that takes the options as a parameter, since which options to
+// pass is what separates a blocking load from an advisory one. So the guard
+// checks the two halves that together still forbid a default-options load —
+// every config.LoadOptions value this file declares declines the snapshot, and
+// every load call is handed one of those values rather than something else.
+//
+// That second half deliberately requires a *named* value: an inline
+// config.LoadOptions{SkipRevisionSnapshot: true} at a call site would be
+// correct today but leaves the reasoning above attached to nothing, and the
+// next option added beside it has no comment to inherit. Declare a var with a
+// rationale and pass that.
+//
 // Scope is deliberately narrow. Only cmd_agent.go's loaders are known to discard
 // the Provenance; roughly a dozen other call sites elsewhere in the tree do the
 // same thing and are out of scope for this change and this guard.
@@ -39,8 +52,14 @@ import (
 func TestCityConfigLoadersDeclineTheRevisionSnapshot(t *testing.T) {
 	const guarded = "cmd_agent.go"
 	const capturingCall = "config.LoadWithIncludes("
-	const decliningCall = "config.LoadWithIncludesOptions("
-	const option = "skipRevisionSnapshot"
+	const optionsLiteral = "config.LoadOptions{"
+	const option = "SkipRevisionSnapshot: true"
+	// sharedBodyParam is the parameter the shared loader body forwards. It is
+	// safe only because every call that supplies it is checked below.
+	const sharedBodyParam = "opts"
+
+	// Calls that must be handed a declining options value.
+	loadCalls := []string{"config.LoadWithIncludesOptions(", "loadPrematerializedCityConfig("}
 
 	_, currentFile, _, ok := runtime.Caller(0)
 	if !ok {
@@ -52,28 +71,93 @@ func TestCityConfigLoadersDeclineTheRevisionSnapshot(t *testing.T) {
 	}
 	text := string(src)
 
-	// capturingCall ends in '(' so it does not also match decliningCall, whose
-	// next character is 'O'.
+	// capturingCall ends in '(' so it does not also match
+	// config.LoadWithIncludesOptions(, whose next character is 'O'.
 	if strings.Contains(text, capturingCall) {
-		t.Errorf("%s calls %s — that form always captures the revision snapshot; use %s..., %s)",
-			guarded, capturingCall, decliningCall, option)
+		t.Errorf("%s calls %s — that form always captures the revision snapshot; use %sOptions(..., <declining options>)",
+			guarded, capturingCall, capturingCall)
 	}
 
 	// Scan line by line rather than with a bracket-matching regex: a pattern
 	// like `\([^)]*\)` truncates at the first ')', so a future call containing a
 	// nested call expression would fail spuriously with a misleading message.
-	found := 0
-	for i, line := range strings.Split(text, "\n") {
-		if !strings.Contains(line, decliningCall) {
+	lines := strings.Split(text, "\n")
+
+	// First half: every options value this file declares must decline the
+	// snapshot, and record its name so the call scan below can recognize it.
+	declining := map[string]bool{sharedBodyParam: true}
+	optionsFound := 0
+	for i, line := range lines {
+		if !strings.Contains(line, optionsLiteral) {
 			continue
 		}
-		found++
+		optionsFound++
 		if !strings.Contains(line, option) {
-			t.Errorf("%s:%d does not decline the revision snapshot: %s",
+			t.Errorf("%s:%d declares options that capture the revision snapshot: %s",
 				guarded, i+1, strings.TrimSpace(line))
+			continue
+		}
+		if name, ok := declaredVarName(line); ok {
+			declining[name] = true
 		}
 	}
-	if found == 0 {
-		t.Fatalf("no %s call in %s; this guard is no longer watching anything", decliningCall, guarded)
+	if optionsFound == 0 {
+		t.Fatalf("no %s literal in %s; this guard is no longer watching anything", optionsLiteral, guarded)
 	}
+
+	// Second half: every load call must be handed one of those values. Without
+	// this, the first half could pass while a loader was quietly switched to a
+	// default config.LoadOptions{} declared elsewhere.
+	callsFound := 0
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		// The shared body's own signature names the parameter; it is a
+		// declaration, not a call.
+		if strings.HasPrefix(trimmed, "func ") {
+			continue
+		}
+		if !containsAny(line, loadCalls) {
+			continue
+		}
+		callsFound++
+		if !containsAnyKey(line, declining) {
+			t.Errorf("%s:%d loads config without passing one of this file's named declining options values %s: %s",
+				guarded, i+1, sortedKeys(declining), trimmed)
+		}
+	}
+	if callsFound == 0 {
+		t.Fatalf("no config load call in %s; this guard is no longer watching anything", guarded)
+	}
+}
+
+// declaredVarName returns the identifier bound by a `var NAME = ...` line.
+func declaredVarName(line string) (string, bool) {
+	trimmed := strings.TrimSpace(line)
+	rest, ok := strings.CutPrefix(trimmed, "var ")
+	if !ok {
+		return "", false
+	}
+	name, _, ok := strings.Cut(rest, " ")
+	if !ok || name == "" {
+		return "", false
+	}
+	return name, true
+}
+
+func containsAny(line string, needles []string) bool {
+	for _, n := range needles {
+		if strings.Contains(line, n) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsAnyKey(line string, needles map[string]bool) bool {
+	for n := range needles {
+		if strings.Contains(line, n) {
+			return true
+		}
+	}
+	return false
 }

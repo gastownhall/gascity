@@ -525,6 +525,31 @@ func cliSessionName(cityPath, cityName, agentName, sessionTemplate string) strin
 	return sessionName(store, cityName, agentName, sessionTemplate)
 }
 
+// contextResolutionMode distinguishes the two kinds of caller the resolution
+// chain serves. The zero value is the authoritative one, so every caller that
+// does not opt in keeps waiting for whatever it needs.
+type contextResolutionMode struct {
+	// advisory marks a resolution nobody asked for: eager pack-command
+	// discovery and shell completion, which run on every gc invocation
+	// whatever the user typed. Such a caller would rather have no answer than
+	// wait out another process's network clone, so an advisory resolution
+	// never blocks on the machine-wide repo-cache lock, skips the rig
+	// decoration its caller discards anyway, and stays off the terminal.
+	//
+	// It does not trade accuracy for speed. An advisory resolution either
+	// names the same city an authoritative one would, or fails: whatever it
+	// declines to wait for it reports as an error rather than resolving
+	// around. Eager discovery captures the city it picks into the
+	// pack-command closures the user later runs, so a cheaper-but-different
+	// answer would end up executing pack code against the wrong city.
+	advisory bool
+}
+
+// authoritativeResolution is the mode for anything the user actually typed: it
+// waits for whatever it needs. Named rather than spelled as a bare
+// contextResolutionMode{} so the choice reads as deliberate at the call site.
+var authoritativeResolution contextResolutionMode
+
 // resolvedContext holds the result of city+rig resolution.
 type resolvedContext struct {
 	CityPath string        // absolute path to city root (empty when Remote is set)
@@ -589,7 +614,11 @@ func resolveCommandCity(args []string) (string, error) {
 // local store. Remote-capable READ commands call resolveContextAllowRemote
 // directly and route through the remote transport (resolveReadRoute).
 func resolveContext() (resolvedContext, error) {
-	ctx, err := resolveContextAllowRemote()
+	return resolveContextMode(authoritativeResolution)
+}
+
+func resolveContextMode(mode contextResolutionMode) (resolvedContext, error) {
+	ctx, err := resolveContextAllowRemoteMode(mode)
 	if err != nil {
 		return resolvedContext{}, err
 	}
@@ -599,11 +628,30 @@ func resolveContext() (resolvedContext, error) {
 	return ctx, nil
 }
 
+// resolveCityForDiscovery returns the city root for a resolution nobody asked
+// for — eager pack-command discovery, shell completion. It is resolveCity that
+// refuses to wait on the machine-wide repo-cache lock: a single `gc import
+// install` holds that lock for the whole of its network clone, and blocking
+// discovery would make every unrelated gc command on the host hang for the
+// duration. Callers get "no city right now" and degrade; anything the user
+// actually typed still resolves through resolveCity and waits.
+func resolveCityForDiscovery() (string, error) {
+	ctx, err := resolveContextMode(contextResolutionMode{advisory: true})
+	if err != nil {
+		return "", err
+	}
+	return ctx.CityPath, nil
+}
+
 // resolveContextAllowRemote is the raw priority-chain resolver. It returns a
 // remote target (resolvedContext.Remote) when one is selected, WITHOUT the
 // capability gate — so only a remote-aware caller that routes through the remote
 // transport should use it. Every other caller uses resolveContext, which gates.
 func resolveContextAllowRemote() (resolvedContext, error) {
+	return resolveContextAllowRemoteMode(authoritativeResolution)
+}
+
+func resolveContextAllowRemoteMode(mode contextResolutionMode) (resolvedContext, error) {
 	// Step 0: explicit remote target. A conflict (remote+local or remote+remote)
 	// surfaces here regardless.
 	if target, handled, err := resolveRemoteTarget(); err != nil {
@@ -611,13 +659,13 @@ func resolveContextAllowRemote() (resolvedContext, error) {
 	} else if handled {
 		return resolvedContext{Remote: target}, nil
 	}
-	if ctx, handled, err := resolveContextFromFlags(); handled {
+	if ctx, handled, err := resolveContextFromFlags(mode); handled {
 		return ctx, err
 	}
-	if ctx, handled, err := resolveContextFromCityEnv(); handled {
+	if ctx, handled, err := resolveContextFromCityEnv(mode); handled {
 		return ctx, err
 	}
-	ctx, err := resolveContextFromDir()
+	ctx, err := resolveContextFromDir(mode)
 	if err == nil {
 		return ctx, nil
 	}
@@ -641,7 +689,7 @@ func resolveContextAllowRemote() (resolvedContext, error) {
 // resolveContextFromFlags resolves context from the explicit --city and --rig
 // flags (priority steps 1-3). handled is false with a nil error when neither
 // flag is set, so the caller falls through to env/cwd resolution.
-func resolveContextFromFlags() (resolvedContext, bool, error) {
+func resolveContextFromFlags(mode contextResolutionMode) (resolvedContext, bool, error) {
 	city := cityFlag
 	rig := rigFlag
 	switch {
@@ -656,9 +704,9 @@ func resolveContextFromFlags() (resolvedContext, bool, error) {
 		if err != nil {
 			return resolvedContext{}, true, err
 		}
-		return resolvedContext{CityPath: cp, RigName: rigFromCwd(cp)}, true, nil
+		return resolvedContext{CityPath: cp, RigName: rigFromCwd(cp, mode)}, true, nil
 	case rig != "": // Step 3: --rig only
-		ctx, err := resolveRigToContext(rig)
+		ctx, err := resolveRigToContext(rig, mode)
 		return ctx, true, err
 	default:
 		return resolvedContext{}, false, nil
@@ -668,16 +716,16 @@ func resolveContextFromFlags() (resolvedContext, bool, error) {
 // resolveContextFromCityEnv resolves context from the explicit city env
 // (GC_CITY / GC_CITY_PATH / GC_CITY_ROOT) and GC_RIG (priority steps 4-6).
 // handled is false with a nil error when neither resolves.
-func resolveContextFromCityEnv() (resolvedContext, bool, error) {
+func resolveContextFromCityEnv(mode contextResolutionMode) (resolvedContext, bool, error) {
 	gcRig := os.Getenv("GC_RIG")
 	gcCity, ok := resolveExplicitCityPathEnv()
 	switch {
 	case ok && gcRig != "": // Step 4: explicit city env + GC_RIG
 		return resolvedContext{CityPath: gcCity, RigName: gcRig}, true, nil
 	case ok: // Step 5: explicit city env only
-		return resolvedContext{CityPath: gcCity, RigName: rigFromGCDirOrCwd(gcCity)}, true, nil
+		return resolvedContext{CityPath: gcCity, RigName: rigFromGCDirOrCwd(gcCity, mode)}, true, nil
 	case gcRig != "": // Step 6: GC_RIG only
-		ctx, err := resolveRigToContext(gcRig)
+		ctx, err := resolveRigToContext(gcRig, mode)
 		return ctx, true, err
 	default:
 		return resolvedContext{}, false, nil
@@ -688,7 +736,7 @@ func resolveContextFromCityEnv() (resolvedContext, bool, error) {
 // steps 7-11): a GC_DIR rig binding, a GC_DIR-derived city, a cwd rig binding,
 // and finally a walk up from cwd for city.toml. This is the terminal stage, so
 // it always returns a result or an error.
-func resolveContextFromDir() (resolvedContext, error) {
+func resolveContextFromDir(mode contextResolutionMode) (resolvedContext, error) {
 	// Step 7: Registered rig binding lookup using GC_DIR. Must run before
 	// the GC_DIR walkup (step 8) so that a rig dir with a leftover ".gc/"
 	// runtime artifact does not get mistaken for a legacy city via
@@ -706,14 +754,18 @@ func resolveContextFromDir() (resolvedContext, error) {
 	// rig lookup) covers it.
 	if gcDir := strings.TrimSpace(os.Getenv("GC_DIR")); gcDir != "" &&
 		citylayout.HasRuntimeRoot(gcDir) && !citylayout.HasCityConfig(gcDir) {
-		if ctx, ok := lookupRigFromCwd(gcDir); ok {
+		ctx, ok, err := lookupRigFromCwd(gcDir, mode)
+		if err != nil {
+			return resolvedContext{}, err
+		}
+		if ok {
 			return ctx, nil
 		}
 	}
 
 	// Step 8: GC_DIR-derived city path.
 	if gcDirCity, ok := resolveCityPathFromGCDir(); ok {
-		rn := rigFromCwdDir(gcDirCity, strings.TrimSpace(os.Getenv("GC_DIR")))
+		rn := rigFromCwdDir(gcDirCity, strings.TrimSpace(os.Getenv("GC_DIR")), mode)
 		return resolvedContext{CityPath: gcDirCity, RigName: rn}, nil
 	}
 
@@ -722,7 +774,11 @@ func resolveContextFromDir() (resolvedContext, error) {
 	if err != nil {
 		return resolvedContext{}, err
 	}
-	if ctx, ok := lookupRigFromCwd(cwd); ok {
+	ctx, ok, err := lookupRigFromCwd(cwd, mode)
+	if err != nil {
+		return resolvedContext{}, err
+	}
+	if ok {
 		return ctx, nil
 	}
 
@@ -737,7 +793,7 @@ func resolveContextFromDir() (resolvedContext, error) {
 	if err != nil {
 		return resolvedContext{}, err
 	}
-	return resolvedContext{CityPath: cityPath, RigName: rigFromCwdDir(cityPath, cwd)}, nil
+	return resolvedContext{CityPath: cityPath, RigName: rigFromCwdDir(cityPath, cwd, mode)}, nil
 }
 
 // resolveCity returns the city root path. Thin wrapper over resolveContext
@@ -765,7 +821,7 @@ func resolveContextFromPath(path string) (resolvedContext, error) {
 	if citylayout.HasCityConfig(abs) {
 		return resolvedContext{
 			CityPath: abs,
-			RigName:  rigFromCwdDir(abs, abs),
+			RigName:  rigFromCwdDir(abs, abs, authoritativeResolution),
 		}, nil
 	}
 	ctx, ok, err := resolveRigPathToContext(abs)
@@ -781,7 +837,7 @@ func resolveContextFromPath(path string) (resolvedContext, error) {
 	}
 	return resolvedContext{
 		CityPath: cityPath,
-		RigName:  rigFromCwdDir(cityPath, abs),
+		RigName:  rigFromCwdDir(cityPath, abs, authoritativeResolution),
 	}, nil
 }
 
@@ -798,12 +854,12 @@ func validateCityPath(p string) (string, error) {
 // registered cities and their machine-local .gc/site.toml rig bindings. This
 // is an explicit rig-resolution path, so stale-sibling warnings are emitted
 // to os.Stderr (deduped across the two registry scans below).
-func resolveRigToContext(nameOrPath string) (resolvedContext, error) {
+func resolveRigToContext(nameOrPath string, mode contextResolutionMode) (resolvedContext, error) {
 	var allStale []staleRegisteredCity
 	defer func() { emitStaleRegisteredCityWarnings(os.Stderr, allStale) }()
 
 	var deferredRegisteredLoadErr error
-	matches, stale, err, loadErr := registeredRigBindingsByNameWithDeferredLoadError(nameOrPath, false)
+	matches, stale, err, loadErr := registeredRigBindingsByNameWithDeferredLoadError(nameOrPath, false, mode)
 	allStale = append(allStale, stale...)
 	if err != nil {
 		return resolvedContext{}, err
@@ -817,7 +873,7 @@ func resolveRigToContext(nameOrPath string) (resolvedContext, error) {
 	if err != nil {
 		return resolvedContext{}, fmt.Errorf("rig %q: %w", nameOrPath, err)
 	}
-	matches, stale, err, loadErr = registeredRigBindingsByPathWithDeferredLoadError(abs, false)
+	matches, stale, err, loadErr = registeredRigBindingsByPathWithDeferredLoadError(abs, false, mode)
 	allStale = append(allStale, stale...)
 	if err != nil {
 		return resolvedContext{}, err
@@ -835,7 +891,7 @@ func resolveRigToContext(nameOrPath string) (resolvedContext, error) {
 	// the resolved city for a site-bound rig of this name. Site binding is
 	// required: legacy city.toml-only paths remain rejected so the existing
 	// legacy_city_toml_path_is_not_registered_binding test continues to pass.
-	if ctx, ok, err := lookupRigFromLocalCity(nameOrPath); err != nil {
+	if ctx, ok, err := lookupRigFromLocalCity(nameOrPath, mode); err != nil {
 		return resolvedContext{}, err
 	} else if ok {
 		return ctx, nil
@@ -886,7 +942,7 @@ func isCityDiscoveryNotFound(err error) bool {
 // .gc/site.toml, matching the registered resolver's binding semantics.
 // Legacy city.toml-only paths are still rejected so this fallback preserves
 // the invariant pinned by legacy_city_toml_path_is_not_registered_binding.
-func lookupRigFromLocalCity(nameOrPath string) (resolvedContext, bool, error) {
+func lookupRigFromLocalCity(nameOrPath string, mode contextResolutionMode) (resolvedContext, bool, error) {
 	cityPath, err := resolveLocalCityForRigFallback()
 	if err != nil {
 		return resolvedContext{}, false, err
@@ -894,7 +950,7 @@ func lookupRigFromLocalCity(nameOrPath string) (resolvedContext, bool, error) {
 	if cityPath == "" {
 		return resolvedContext{}, false, nil
 	}
-	bindings, err := localCityRigBindings(cityPath)
+	bindings, err := localCityRigBindings(cityPath, mode)
 	if err != nil {
 		return resolvedContext{}, false, err
 	}
@@ -926,8 +982,8 @@ func lookupRigFromLocalCity(nameOrPath string) (resolvedContext, bool, error) {
 	return resolvedContext{}, false, nil
 }
 
-func localCityRigBindings(cityPath string) ([]registeredRigBinding, error) {
-	cfg, err := loadCityConfig(cityPath, io.Discard)
+func localCityRigBindings(cityPath string, mode contextResolutionMode) ([]registeredRigBinding, error) {
+	cfg, err := loadRegisteredCityConfig(cityPath, mode)
 	if err != nil {
 		if _, ok := missingRootCityTOML(err, cityPath); ok {
 			return nil, nil
@@ -976,7 +1032,7 @@ func siteBoundRigBindings(city supervisor.CityEntry, cfg *config.City, siteBindi
 // rig context. Stale-sibling warnings are emitted to os.Stderr because the
 // caller is explicitly depending on the registry.
 func resolveRigPathToContext(dir string) (resolvedContext, bool, error) {
-	matches, stale, err := registeredRigBindingsByPath(dir, true)
+	matches, stale, err := registeredRigBindingsByPath(dir, true, authoritativeResolution)
 	emitStaleRegisteredCityWarnings(os.Stderr, stale)
 	if err != nil {
 		return resolvedContext{}, false, err
@@ -995,25 +1051,46 @@ func resolveRigPathToContext(dir string) (resolvedContext, bool, error) {
 // Ambiguous bindings deliberately fall through to the city walk-up fallback.
 // This is an opportunistic probe (failOnLoadError=false): stale-sibling
 // warnings are intentionally dropped so unrelated commands stay quiet.
-func lookupRigFromCwd(cwd string) (resolvedContext, bool) {
-	matches, _, err := registeredRigBindingsByPath(cwd, false)
-	if err != nil || len(matches) != 1 {
-		return resolvedContext{}, false
+// lookupRigFromCwd maps cwd onto the single registered rig that contains it.
+//
+// A scan error normally means "no answer from the registry", and the caller
+// falls back to walking up from cwd. A busy repo cache is different: the
+// registry might well have named a city, and falling back could settle on a
+// different one just because an unrelated clone was running. That case is
+// returned as an error so the caller fails closed instead.
+func lookupRigFromCwd(cwd string, mode contextResolutionMode) (resolvedContext, bool, error) {
+	matches, _, err := registeredRigBindingsByPath(cwd, false, mode)
+	if err != nil {
+		if errors.Is(err, config.ErrRepoCacheBusy) {
+			return resolvedContext{}, false, err
+		}
+		return resolvedContext{}, false, nil
 	}
-	return resolvedContext{CityPath: matches[0].City.Path, RigName: matches[0].Rig.Name}, true
+	if len(matches) != 1 {
+		return resolvedContext{}, false, nil
+	}
+	return resolvedContext{CityPath: matches[0].City.Path, RigName: matches[0].Rig.Name}, true, nil
 }
 
 // rigFromCwd attempts to derive a rig name from cwd when the city is known.
-func rigFromCwd(cityPath string) string {
+func rigFromCwd(cityPath string, mode contextResolutionMode) string {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return ""
 	}
-	return rigFromCwdDir(cityPath, cwd)
+	return rigFromCwdDir(cityPath, cwd, mode)
 }
 
 // rigFromCwdDir matches cwd against registered rigs in a city's config.
-func rigFromCwdDir(cityPath, cwd string) string {
+//
+// This is pure decoration: it loads the whole city config to produce a rig
+// name, and an advisory resolution's caller only wants the city path. Skipping
+// it there is what keeps discovery off the repo-cache lock entirely, rather
+// than merely making its acquisition non-blocking.
+func rigFromCwdDir(cityPath, cwd string, mode contextResolutionMode) string {
+	if mode.advisory {
+		return ""
+	}
 	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil {
 		return ""
@@ -1031,25 +1108,25 @@ type registeredRigBinding struct {
 	Path string
 }
 
-func registeredRigBindingsByName(name string, failOnLoadError bool) (matches []registeredRigBinding, stale []staleRegisteredCity, err error) {
-	matches, stale, err, _ = registeredRigBindingsByNameWithDeferredLoadError(name, failOnLoadError)
+func registeredRigBindingsByName(name string, failOnLoadError bool, mode contextResolutionMode) (matches []registeredRigBinding, stale []staleRegisteredCity, err error) {
+	matches, stale, err, _ = registeredRigBindingsByNameWithDeferredLoadError(name, failOnLoadError, mode)
 	return matches, stale, err
 }
 
-func registeredRigBindingsByNameWithDeferredLoadError(name string, failOnLoadError bool) (matches []registeredRigBinding, stale []staleRegisteredCity, err error, deferredLoadErr error) {
-	return registeredRigBindings(failOnLoadError, func(binding registeredRigBinding) bool {
+func registeredRigBindingsByNameWithDeferredLoadError(name string, failOnLoadError bool, mode contextResolutionMode) (matches []registeredRigBinding, stale []staleRegisteredCity, err error, deferredLoadErr error) {
+	return registeredRigBindings(failOnLoadError, mode, func(binding registeredRigBinding) bool {
 		return binding.Rig.Name == name
 	})
 }
 
-func registeredRigBindingsByPath(dir string, failOnLoadError bool) (matches []registeredRigBinding, stale []staleRegisteredCity, err error) {
-	matches, stale, err, _ = registeredRigBindingsByPathWithDeferredLoadError(dir, failOnLoadError)
+func registeredRigBindingsByPath(dir string, failOnLoadError bool, mode contextResolutionMode) (matches []registeredRigBinding, stale []staleRegisteredCity, err error) {
+	matches, stale, err, _ = registeredRigBindingsByPathWithDeferredLoadError(dir, failOnLoadError, mode)
 	return matches, stale, err
 }
 
-func registeredRigBindingsByPathWithDeferredLoadError(dir string, failOnLoadError bool) (matches []registeredRigBinding, stale []staleRegisteredCity, err error, deferredLoadErr error) {
+func registeredRigBindingsByPathWithDeferredLoadError(dir string, failOnLoadError bool, mode contextResolutionMode) (matches []registeredRigBinding, stale []staleRegisteredCity, err error, deferredLoadErr error) {
 	dir = normalizePathForCompare(dir)
-	matches, stale, err, deferredLoadErr = registeredRigBindings(failOnLoadError, func(binding registeredRigBinding) bool {
+	matches, stale, err, deferredLoadErr = registeredRigBindings(failOnLoadError, mode, func(binding registeredRigBinding) bool {
 		rigPath := normalizePathForCompare(binding.Path)
 		return pathWithinScope(dir, rigPath)
 	})
@@ -1087,7 +1164,7 @@ func emitStaleRegisteredCityWarnings(w io.Writer, stale []staleRegisteredCity) {
 	}
 }
 
-func registeredRigBindings(failOnLoadError bool, match func(registeredRigBinding) bool) (_ []registeredRigBinding, stale []staleRegisteredCity, _ error, deferredLoadErr error) {
+func registeredRigBindings(failOnLoadError bool, mode contextResolutionMode, match func(registeredRigBinding) bool) (_ []registeredRigBinding, stale []staleRegisteredCity, _ error, deferredLoadErr error) {
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
 	cities, err := reg.List()
 	if err != nil {
@@ -1096,8 +1173,26 @@ func registeredRigBindings(failOnLoadError bool, match func(registeredRigBinding
 	var matched []registeredRigBinding
 	var loadErrors []string
 	for _, c := range cities {
-		cfg, err := loadCityConfig(c.Path, io.Discard)
+		siteBinding, siteErr := config.LoadSiteBinding(fsys.OSFS{}, c.Path)
+		// An advisory scan skips the config load for cities that cannot
+		// contribute an answer. site.toml names a superset of the rigs
+		// siteBoundRigBindings keeps — it records where a rig lives, not
+		// whether city.toml still declares it — so a city with no candidate
+		// here has none after pruning either. Cities that do have a candidate
+		// are loaded and pruned exactly as an authoritative scan would, which
+		// is what keeps advisory resolution from ever selecting a city an
+		// authoritative resolution would have rejected.
+		if mode.advisory && siteErr == nil && !siteBindingHasCandidate(c, siteBinding, match) {
+			continue
+		}
+		cfg, err := loadRegisteredCityConfig(c.Path, mode)
 		if err != nil {
+			// A busy repo cache is the one failure an advisory scan must not
+			// absorb: quietly skipping the city would let resolution settle on
+			// a different one purely because a clone happened to be running.
+			if errors.Is(err, config.ErrRepoCacheBusy) {
+				return nil, stale, fmt.Errorf("loading registered city rig bindings: %s: %w", registeredCityLabel(c), err), nil
+			}
 			// Tolerate stale registry entries whose city.toml has been
 			// deleted out from under the registry, but keep missing includes
 			// or other config dependencies as load errors.
@@ -1108,9 +1203,8 @@ func registeredRigBindings(failOnLoadError bool, match func(registeredRigBinding
 			loadErrors = append(loadErrors, registeredCityLoadError(c, err))
 			continue
 		}
-		siteBinding, err := config.LoadSiteBinding(fsys.OSFS{}, c.Path)
-		if err != nil {
-			loadErrors = append(loadErrors, registeredCityLoadError(c, err))
+		if siteErr != nil {
+			loadErrors = append(loadErrors, registeredCityLoadError(c, siteErr))
 			continue
 		}
 		for _, binding := range siteBoundRigBindings(c, cfg, siteBinding) {
@@ -1126,6 +1220,39 @@ func registeredRigBindings(failOnLoadError bool, match func(registeredRigBinding
 		return matched, stale, nil, fmt.Errorf("loading registered city rig bindings: %s", strings.Join(loadErrors, "; "))
 	}
 	return matched, stale, nil, nil
+}
+
+// siteBindingHasCandidate reports whether any machine-local binding in the
+// city's .gc/site.toml could satisfy match. It is a pre-filter, not an answer:
+// site.toml records where a rig lives, not whether city.toml still declares it,
+// so a candidate here is only a reason to load the config and check properly.
+func siteBindingHasCandidate(city supervisor.CityEntry, siteBinding *config.SiteBinding, match func(registeredRigBinding) bool) bool {
+	for _, rig := range siteBinding.Rigs {
+		name := strings.TrimSpace(rig.Name)
+		path := strings.TrimSpace(rig.Path)
+		if name == "" || path == "" {
+			continue
+		}
+		if match(registeredRigBinding{
+			City: city,
+			Rig:  config.Rig{Name: name, Path: path},
+			Path: resolveStoreScopeRoot(city.Path, path),
+		}) {
+			return true
+		}
+	}
+	return false
+}
+
+// loadRegisteredCityConfig loads one registered city's config for a rig-binding
+// scan. An advisory scan refuses to wait on the repo-cache lock, and takes
+// builtin packs as they already are on disk — the same staleness window shell
+// completion has always accepted.
+func loadRegisteredCityConfig(cityPath string, mode contextResolutionMode) (*config.City, error) {
+	if mode.advisory {
+		return loadCityConfigAdvisory(cityPath)
+	}
+	return loadCityConfig(cityPath, io.Discard)
 }
 
 func registeredCityLoadError(city supervisor.CityEntry, err error) string {
