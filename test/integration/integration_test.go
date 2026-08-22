@@ -484,7 +484,7 @@ func sweepSubprocessTestProcesses() {
 	}
 
 	agentScript := filepath.Join(findModuleRoot(), "test", "agents", "graph-dispatch.sh")
-	killSet := subprocessTestKillSet(procs, agentScript)
+	killSet := subprocessTestKillSet(procs, agentScript, integrationPIDAlive)
 	if len(killSet) == 0 {
 		return
 	}
@@ -765,11 +765,58 @@ func isSubprocessTestLeaf(cmd, agentScript string) bool {
 	}
 }
 
-func subprocessTestKillSet(procs map[int]procSnapshot, agentScript string) map[int]bool {
+// integrationOwnerPIDFromCmd parses the owning test-run pid out of a cmdline
+// that references a "gc-integration-<pid>-<rand>" run root, mirroring
+// dolttest's ownerPIDFromRunDir so both sweeps scope stale state the same way.
+func integrationOwnerPIDFromCmd(cmd string) (int, bool) {
+	const marker = "gc-integration-"
+	i := strings.Index(cmd, marker)
+	if i < 0 {
+		return 0, false
+	}
+	tok := cmd[i+len(marker):]
+	end := 0
+	for end < len(tok) && tok[end] >= '0' && tok[end] <= '9' {
+		end++
+	}
+	pid, err := strconv.Atoi(tok[:end])
+	if err != nil || pid <= 0 {
+		return 0, false
+	}
+	return pid, true
+}
+
+// integrationPIDAlive reports whether pid still exists. Signal 0 probes
+// existence without delivering a signal; EPERM means the process exists but
+// is not ours to signal — treat as alive (don't reap).
+func integrationPIDAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	err := syscall.Kill(pid, 0)
+	return err == nil || err == syscall.EPERM
+}
+
+// subprocessTestRootIsReapable reports whether a matched root belongs to a
+// dead run or to this one. Roots matched by their run root in argv carry an
+// owner pid ("gc-integration-<pid>-<rand>"): reap only when that owner is gone
+// (a stale orphan) or is us (our own leftovers during the post-sweep), so a
+// live concurrent run's supervisor — and its descendant subtree — is spared
+// (issue #3640). Roots matched via agentScript carry no run root in argv, so
+// they keep the prior unscoped behavior.
+func subprocessTestRootIsReapable(cmd string, alive func(int) bool) bool {
+	owner, ok := integrationOwnerPIDFromCmd(cmd)
+	if !ok {
+		return true
+	}
+	return !alive(owner) || owner == os.Getpid()
+}
+
+func subprocessTestKillSet(procs map[int]procSnapshot, agentScript string, alive func(int) bool) map[int]bool {
 	roots := make(map[int]bool)
 	children := make(map[int][]int, len(procs))
 	for pid, info := range procs {
-		if isSubprocessTestRoot(info.cmd, agentScript) {
+		if isSubprocessTestRoot(info.cmd, agentScript) && subprocessTestRootIsReapable(info.cmd, alive) {
 			roots[pid] = true
 		}
 		children[info.ppid] = append(children[info.ppid], pid)
@@ -2241,7 +2288,10 @@ func TestSubprocessTestKillSetIncludesRootsDescendantsAndLeaves(t *testing.T) {
 		40: {pid: 40, ppid: 1, cmd: "ordinary unrelated process"},
 	}
 
-	got := subprocessTestKillSet(procs, agentScript)
+	// Owner pid 123 is reported dead so the stale root is reapable; injecting
+	// the predicate keeps the fixture deterministic instead of depending on
+	// whether pid 123 happens to exist on the host.
+	got := subprocessTestKillSet(procs, agentScript, func(int) bool { return false })
 
 	for _, pid := range []int{10, 11, 12, 20, 21, 30} {
 		if !got[pid] {
@@ -2250,6 +2300,37 @@ func TestSubprocessTestKillSetIncludesRootsDescendantsAndLeaves(t *testing.T) {
 	}
 	if got[40] {
 		t.Fatalf("kill set unexpectedly included unrelated pid 40: %#v", got)
+	}
+}
+
+// TestSubprocessTestKillSetSparesLiveForeignIntegrationRun pins the ownership
+// scoping that makes the ungated sweep safe: the sweep now runs for both
+// providers, so a starting run's pre-sweep must not SIGTERM/SIGKILL the
+// supervisor of a live concurrent run. A root is reapable only when its owner
+// pid is dead (a stale orphan) or is this process (our own leftovers).
+func TestSubprocessTestKillSetSparesLiveForeignIntegrationRun(t *testing.T) {
+	agentScript := "/tmp/test/agents/graph-dispatch.sh"
+	self := os.Getpid()
+	procs := map[int]procSnapshot{
+		10: {pid: 10, ppid: 1, cmd: "/tmp/gc-integration-123-abc/bin/gc supervisor run"},
+		11: {pid: 11, ppid: 10, cmd: "child of stale supervisor"},
+		20: {pid: 20, ppid: 1, cmd: fmt.Sprintf("/tmp/gc-integration-%d-xyz/bin/gc supervisor run", self)},
+		30: {pid: 30, ppid: 1, cmd: "/tmp/gc-integration-999-def/bin/gc supervisor run"},
+		31: {pid: 31, ppid: 30, cmd: "child of live foreign supervisor"},
+	}
+	alive := func(pid int) bool { return pid == 999 || pid == self }
+
+	got := subprocessTestKillSet(procs, agentScript, alive)
+
+	for _, pid := range []int{10, 11, 20} {
+		if !got[pid] {
+			t.Fatalf("kill set missing pid %d (stale orphan or own run): %#v", pid, got)
+		}
+	}
+	for _, pid := range []int{30, 31} {
+		if got[pid] {
+			t.Fatalf("kill set included pid %d from a live concurrent run: %#v", pid, got)
+		}
 	}
 }
 
@@ -2303,6 +2384,22 @@ func TestParsePSLineSurvivesInternalWhitespaceAndRejectsMalformedInput(t *testin
 					c.line, pid, ppid, cmd, c.wantPID, c.wantPPID, c.wantCmd)
 			}
 		})
+	}
+}
+
+// TestReadProcessSnapshotPSFindsRealProcesses exercises the ps(1) query
+// itself on every host, including Linux CI, so a future flag or output-format
+// change fails here instead of leaving the macOS sweep silently blind — the
+// exact failure mode this fallback exists to fix. `ps -axwwo
+// pid=,ppid=,command=` is accepted by both BSD ps and procps-ng.
+func TestReadProcessSnapshotPSFindsRealProcesses(t *testing.T) {
+	procs := readProcessSnapshotPS()
+	if len(procs) == 0 {
+		t.Fatal("readProcessSnapshotPS() returned no processes; known-positive control failed")
+	}
+	self := os.Getpid()
+	if _, ok := procs[self]; !ok {
+		t.Fatalf("readProcessSnapshotPS() did not include this process's own pid %d among %d entries", self, len(procs))
 	}
 }
 
