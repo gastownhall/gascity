@@ -549,6 +549,44 @@ func TestHarnessKeepsTheAdapterStderrThatNamesAFailure(t *testing.T) {
 	}
 }
 
+// Five of the six preconditions are pure env/filesystem tests; only the node
+// floor check forks, and a fork that fails under load is not a version verdict.
+func TestNodeProbeSpawnFailureIsNotReportedAsAnOldNode(t *testing.T) {
+	t.Parallel()
+
+	killed := filepath.Join(t.TempDir(), "killed-node")
+	if err := os.WriteFile(killed, []byte("#!/bin/sh\nkill -9 $$\n"), 0o755); err != nil {
+		t.Fatalf("write killed-node: %v", err)
+	}
+	h := newHarness(t, map[string]string{"ZCODE_NODE_BIN": killed})
+
+	if _, code := h.run("hello\n"); code != 78 {
+		t.Fatalf("exit code = %d, want 78 (EX_CONFIG)", code)
+	}
+	if !strings.Contains(h.stderr, "could not run") {
+		t.Fatalf("a killed probe was not named as a spawn failure; stderr = %q", h.stderr)
+	}
+	// 137 = 128+SIGKILL, the OOM signature the saturated-box flake would carry.
+	if !strings.Contains(h.stderr, "exit 137") {
+		t.Fatalf("stderr lost the probe's exit status; stderr = %q", h.stderr)
+	}
+
+	// The other half: a node that really is too old must still be a config error,
+	// or the guard above would wave through the case the floor check exists for.
+	old := filepath.Join(t.TempDir(), "old-node")
+	if err := os.WriteFile(old, []byte("#!/bin/sh\necho v18.0.0\n"), 0o755); err != nil {
+		t.Fatalf("write old-node: %v", err)
+	}
+	h = newHarness(t, map[string]string{"ZCODE_NODE_BIN": old})
+
+	if _, code := h.run("hello\n"); code != 78 {
+		t.Fatalf("exit code = %d, want 78 (EX_CONFIG)", code)
+	}
+	if !strings.Contains(h.stderr, "is v18.0.0") {
+		t.Fatalf("a genuinely old node was not reported as a version problem; stderr = %q", h.stderr)
+	}
+}
+
 // Behavior 3: gc's pre-Enter Escape and stray control bytes never reach the
 // model.
 func TestControlBytesAreStripped(t *testing.T) {
