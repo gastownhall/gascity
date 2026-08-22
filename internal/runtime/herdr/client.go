@@ -74,11 +74,14 @@ type envelope struct {
 func (c *client) run(ctx context.Context, args ...string) (json.RawMessage, error) {
 	full := append([]string{"--session", c.session}, args...)
 	out, err := exec.CommandContext(ctx, c.bin, full...).Output()
+	secrets := argvSecretValues(args)
 	if err != nil {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
-			return nil, fmt.Errorf("herdr %v: %s", redactArgs(args), ee.Stderr)
+			return nil, fmt.Errorf("herdr %v: %s", redactArgs(args), redactText(string(ee.Stderr), secrets))
 		}
+		// err here is exec's own (*exec.Error, *exec.ExitError): it carries the
+		// binary name and a status, never anything from args.
 		return nil, fmt.Errorf("herdr %v: %w", redactArgs(args), err)
 	}
 	if len(strings.TrimSpace(string(out))) == 0 {
@@ -89,7 +92,7 @@ func (c *client) run(ctx context.Context, args ...string) (json.RawMessage, erro
 		return nil, fmt.Errorf("herdr %v: decode response: %w", redactArgs(args), err)
 	}
 	if env.Error != nil {
-		return nil, fmt.Errorf("herdr %v: %w", redactArgs(args), env.Error)
+		return nil, fmt.Errorf("herdr %v: %w", redactArgs(args), env.Error.redacted(secrets))
 	}
 	return env.Result, nil
 }
@@ -198,18 +201,20 @@ func (c *client) paneRead(ctx context.Context, paneID, source string, lines int)
 func (c *client) runRaw(ctx context.Context, args ...string) (string, error) {
 	full := append([]string{"--session", c.session}, args...)
 	out, err := exec.CommandContext(ctx, c.bin, full...).Output()
+	secrets := argvSecretValues(args)
 	if err != nil {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
-			return "", fmt.Errorf("herdr %v: %s", redactArgs(args), ee.Stderr)
+			return "", fmt.Errorf("herdr %v: %s", redactArgs(args), redactText(string(ee.Stderr), secrets))
 		}
+		// See run: exec's own error carries the binary name and a status only.
 		return "", fmt.Errorf("herdr %v: %w", redactArgs(args), err)
 	}
 	trimmed := strings.TrimSpace(string(out))
 	if strings.HasPrefix(trimmed, "{") {
 		var env envelope
 		if jerr := json.Unmarshal([]byte(trimmed), &env); jerr == nil && env.Error != nil {
-			return "", fmt.Errorf("herdr %v: %w", redactArgs(args), env.Error)
+			return "", fmt.Errorf("herdr %v: %w", redactArgs(args), env.Error.redacted(secrets))
 		}
 	}
 	return string(out), nil
