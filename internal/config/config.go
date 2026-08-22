@@ -2088,6 +2088,16 @@ type OrdersConfig struct {
 	// timeout only; a condition trigger's check_timeout is a separate probe
 	// deadline and is not capped here.
 	MaxTimeout string `toml:"max_timeout,omitempty"`
+
+	// *int rather than int so an unset value stays out of marshaled config:
+	// BurntSushi's omitempty does not drop a zero int, so a plain int would
+	// emit max_dispatches_per_tick = 0 into every marshaled city.toml.
+
+	// MaxDispatchesPerTick caps how many orders the supervisor dispatches
+	// per tick. Unset keeps the built-in default of 4; set to 1 to drain
+	// overdue cooldown orders one-per-tick at cold start instead of firing
+	// several concurrent goroutines at once.
+	MaxDispatchesPerTick *int `toml:"max_dispatches_per_tick,omitempty"`
 	// Overrides apply per-order field overrides after scanning.
 	// Each override targets an order by name and optionally by rig.
 	Overrides []OrderOverride `toml:"overrides,omitempty"`

@@ -73,6 +73,13 @@ type StatusInput struct {
 // snapshot instead of rendering partial/empty data. CacheAgeS surfaces the
 // age of the latest fresh observation so `gc status` can append a staleness
 // banner when the supervisor is lagging.
+//
+// The gate and the age both read the WORK store, which is the class the body's
+// expensive legs come from (work counts, store health). It deliberately does
+// not gate the session-class store: a CachingStore that cannot serve a read
+// from cache falls through to its backing store rather than answering empty,
+// so a priming sessions binding surfaces as a "sessions:" partial error from
+// statusSessionSnapshot, never as a silent zero-session fleet.
 func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*IndexOutput[StatusBody], error) {
 	store := s.state.CityBeadStore()
 	if err := cacheLiveOr503(store); err != nil {
@@ -162,6 +169,10 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	}
 	perRigAgentTotals := make(map[string]int, len(cfg.Rigs))
 	perRigAgentsSuspended := make(map[string]int, len(cfg.Rigs))
+	// Active graph-resident work, indexed once per request by agent session
+	// name. On a single-store city this is nil, so every lookup below misses
+	// and the counts stay byte-identical to the provider-only behavior.
+	graphWork := s.graphActiveWorkBySession()
 	for _, a := range cfg.Agents {
 		rigName := workdirutil.ConfiguredRigName(s.state.CityPath(), a, cfg.Rigs)
 		scope := "city"
@@ -181,7 +192,12 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 			sessName := agentSessionName(cityName, ea.qualifiedName, sessTmpl)
 			info, hasInfo := sessionSnapshot.bySessionName[sessName]
 			running := statusProviderRunning(sp, sessName)
-			if running {
+			// An agent whose work runs under a relocated-graph wisp session is
+			// effectively running even when its named provider session is down.
+			// hasGraphWork is always false on a single-store city.
+			_, hasGraphWork := graphWork[sessName]
+			effectiveRunning := running || hasGraphWork
+			if effectiveRunning {
 				rawRunning++
 			}
 			suspended := ea.suspended || a.Suspended || (rigName != "" && suspendedRigs[rigName]) || (hasInfo && info.state == session.StateSuspended)
@@ -193,14 +209,14 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 				ac.Suspended++
 			case s.state.IsQuarantined(sessName):
 				ac.Quarantined++
-			case running:
+			case effectiveRunning:
 				ac.Running++
 			}
 
 			detail := StatusAgentDetail{
 				QualifiedName: ea.qualifiedName,
 				Scope:         scope,
-				Running:       running,
+				Running:       effectiveRunning,
 				Suspended:     suspended,
 				SessionName:   sessName,
 				GroupName:     groupName,
@@ -290,7 +306,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 		})
 	}
 
-	// Session counts: walk the city bead store for session beads. Omitted in
+	// Session counts: derived from the session-class snapshot. Omitted in
 	// lite mode (detail block, not needed for the high-frequency overview).
 	var sessionCounts *StatusSessionCountsDetail
 	if !lite && len(sessionSnapshot.bySessionName) > 0 {
@@ -479,13 +495,35 @@ type statusSessionInfo struct {
 	state       session.State
 }
 
+// statusSessionSnapshot reads the session-class beads every session-derived
+// field of the status body is built from: per-agent running/suspended state,
+// named-session status, the unlimited-pool expansion, and the session counts.
+//
+// It reads SessionsBeadStore(), not CityBeadStore(). Those are the same store
+// on a city that relocates nothing, so this is byte-identical there; on a city
+// with [beads.classes.sessions] relocated the session beads live in the class
+// binding, and reading them off the work ledger returned an empty fleet at
+// whatever the work ledger costs — on a cross-region hosted work store that is
+// seconds, so the read blew statusStoreReadTimeout and /status reported
+// "sessions: loading session snapshot timed out after 1s" for data sitting in a
+// local store.
 func (s *Server) statusSessionSnapshot(ctx context.Context) statusSessionSnapshot {
 	snapshot := statusSessionSnapshot{
 		bySessionName: make(map[string]statusSessionInfo),
 		byTemplate:    make(map[string][]statusSessionInfo),
 	}
-	store := s.state.CityBeadStore()
+	sessions := s.state.SessionsBeadStore()
+	store := sessions.Store
 	if store == nil {
+		// A nil session-class store is benign only when the city has no bead
+		// store at all. When the work store IS present, the sessions binding
+		// failed to resolve and this projection cannot see the class: say so
+		// rather than reporting an empty fleet, and do NOT fall back to the
+		// work store. Reading session beads off the work ledger is precisely
+		// what kept this mis-routing invisible.
+		if s.state.CityBeadStore() != nil {
+			snapshot.partialErrors = []string{"sessions: session-class bead store unavailable"}
+		}
 		return snapshot
 	}
 
@@ -512,14 +550,14 @@ func (s *Server) statusSessionSnapshot(ctx context.Context) statusSessionSnapsho
 		// it hung the whole handler past its read budget, dragging the
 		// supervisor loop (gc-08qgn). Under the goroutine the same time.After
 		// as the read bounds it.
-		readStore := store
+		readSessions := sessions
 		if scoped, err := s.state.ScopedStoreLike(reqCtx, store); err != nil {
 			done <- snapshotResult{err: fmt.Errorf("resolving scoped store: %w", err)}
 			return
 		} else if scoped != nil {
-			readStore = scoped
+			readSessions = beads.SessionStore{Store: scoped}
 		}
-		infos, partialErrors, err := sessionReadModelInfos(session.NewStore(beads.SessionStore{Store: readStore}))
+		infos, partialErrors, err := sessionReadModelInfos(session.NewStore(readSessions))
 		done <- snapshotResult{infos: infos, partialErrors: partialErrors, err: err}
 	}()
 

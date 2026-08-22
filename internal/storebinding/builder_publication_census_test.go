@@ -911,7 +911,7 @@ func censusSources(t *testing.T) []censusSource {
 		}
 		if entry.IsDir() {
 			switch entry.Name() {
-			case ".git", ".claude", "node_modules", "vendor", "testdata":
+			case ".git", ".claude", "node_modules", "vendor", "testdata", "worktrees":
 				return fs.SkipDir
 			}
 			return nil

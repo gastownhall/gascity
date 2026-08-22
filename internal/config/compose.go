@@ -98,9 +98,26 @@ type LoadOptions struct {
 	// AllowMissingProviderReferences leaves provider-reference catalog errors
 	// non-fatal for repair tools that need to inspect broken configs.
 	AllowMissingProviderReferences bool
-	deferRigPatches                bool
-	deferredRigPatches             *[]deferredRigPatches
-	allowLegacyOrderLayouts        bool
+	// SkipRevisionSnapshot declines the load-time revision snapshot, which
+	// content-hashes every pack directory so that a later Revision() call can
+	// compare against the config as it was loaded.
+	//
+	// Only long-running processes ever compute a Revision; a one-shot command
+	// loads config, uses it and exits. Set this on those callers to skip work
+	// nothing will read.
+	//
+	// Declining the snapshot cannot change a revision VALUE: every read of it
+	// already falls back to reading from disk (writeRevisionDirHash,
+	// revisionSnapshotFile, revisionConventionDirs), so it is a prefetch, not
+	// an input. What it does give up is load-time faithfulness — a revision
+	// computed without it reflects the tree at Revision() time rather than at
+	// load time. That only matters to a caller holding a Provenance across a
+	// window in which the config may change, which is exactly the long-running
+	// case that should leave this false.
+	SkipRevisionSnapshot    bool
+	deferRigPatches         bool
+	deferredRigPatches      *[]deferredRigPatches
+	allowLegacyOrderLayouts bool
 }
 
 // LoadWithIncludes loads a city.toml and merges all included fragments.
@@ -570,9 +587,42 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	var deferredAgentPatches []AgentPatch
 	if len(root.Patches.Agents) > 0 {
 		implicitIDs := implicitAgentIdentities(root)
+		// Derive the implicit-name set once from implicitIDs so the wildcard
+		// and non-wildcard deferral branches share a single scan of
+		// agents+providers rather than recomputing it per wildcard patch.
+		implicitNames := make(map[string]bool, len(implicitIDs))
+		for key := range implicitIDs {
+			implicitNames[key.name] = true
+		}
 		var nowPatches []AgentPatch
 		for _, p := range root.Patches.Agents {
-			if !agentPatchMatchesExisting(root, &p) && implicitIDs[agentKey{p.Dir, p.Name}] {
+			if p.Rig == "*" {
+				// A wildcard patch can touch both already-present agents and
+				// not-yet-injected implicit agents. Apply it to existing
+				// matches in the normal city patch phase so it keeps the
+				// documented city-before-rig precedence (a rig patch applied
+				// below still wins); ALSO defer a second, tail-scoped pass for
+				// any implicit agent injected later. A wildcard that matches
+				// neither still routes through the normal pass so ApplyPatches
+				// hard-errors on the typo (a wildcard matching nothing is an
+				// error, not a silent no-op).
+				matchesExisting := wildcardPatchMatchesExisting(root, p.Name)
+				deferForImplicit := implicitNames[p.Name]
+				if matchesExisting || !deferForImplicit {
+					nowPatches = append(nowPatches, p)
+				}
+				if deferForImplicit {
+					deferredAgentPatches = append(deferredAgentPatches, p)
+				}
+				continue
+			}
+			deferPatch := false
+			if !agentPatchMatchesExisting(root, &p) {
+				if targetDir, err := agentPatchTargetDir(&p); err == nil {
+					deferPatch = implicitIDs[agentKey{targetDir, p.Name}]
+				}
+			}
+			if deferPatch {
 				deferredAgentPatches = append(deferredAgentPatches, p)
 			} else {
 				nowPatches = append(nowPatches, p)
@@ -631,13 +681,24 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	// Inject implicit agents for built-in providers not already defined.
 	// Must happen after all composition (fragments, packs, patches) so
 	// explicit agents always take precedence.
+	injectedFrom := len(root.Agents)
 	InjectImplicitAgents(root)
 
 	// Apply patches that targeted provider-derived implicit agents, now
 	// present after injection. A patch that still cannot be resolved is a
 	// genuine typo — surface it with the same error framing as ApplyPatches.
+	//
+	// Scope the application to ONLY the agents InjectImplicitAgents just
+	// appended (the tail). A wildcard city patch was already applied to
+	// already-present agents above, where a deferred rig patch may have
+	// overridden it (city-before-rig precedence); re-applying the wildcard
+	// against the full agent list here would clobber that higher-precedence
+	// rig patch. The tail reslice shares root.Agents' backing array and
+	// applyAgentPatch mutates matched agents in place (it never appends), so
+	// the injected agents are updated through the shared array.
 	if len(deferredAgentPatches) > 0 {
-		if err := ApplyPatches(root, Patches{Agents: deferredAgentPatches}); err != nil {
+		tail := City{Agents: root.Agents[injectedFrom:]}
+		if err := ApplyPatches(&tail, Patches{Agents: deferredAgentPatches}); err != nil {
 			return nil, nil, fmt.Errorf("applying patches: %w", err)
 		}
 	}
@@ -778,8 +839,12 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 
 	// Capture revision inputs after all config and pack discovery so callers
 	// can compare the loaded snapshot to future reloads without re-reading
-	// mutable files from disk.
-	prov.captureRevisionSnapshot(fs, root, cityRoot)
+	// mutable files from disk. Callers that never compute a Revision opt out
+	// via SkipRevisionSnapshot; Revision falls back to reading from disk, so
+	// the value is the same either way.
+	if !opts.SkipRevisionSnapshot {
+		prov.captureRevisionSnapshot(fs, root, cityRoot)
+	}
 
 	return root, prov, nil
 }
@@ -1904,14 +1969,38 @@ func readPackNameFromDir(dir string) string {
 
 // agentPatchMatchesExisting reports whether patch targets an agent already
 // present in cfg.Agents, using the same matching logic as applyAgentPatch.
+// Callers handle the "*" wildcard separately (its deferral keys on the
+// implicit-name set, and its application lives in applyAgentPatch), so this
+// helper only resolves the single-target dir/rig case.
 func agentPatchMatchesExisting(cfg *City, patch *AgentPatch) bool {
-	target := qualifiedNameFromPatch(patch.Dir, patch.Name)
+	targetDir, err := agentPatchTargetDir(patch)
+	if err != nil {
+		return false
+	}
+	target := qualifiedNameFromPatch(targetDir, patch.Name)
 	for i := range cfg.Agents {
 		a := &cfg.Agents[i]
 		if AgentMatchesIdentity(a, target) {
 			return true
 		}
-		if a.Dir == patch.Dir && a.Name == patch.Name {
+		if a.Dir == targetDir && a.Name == patch.Name {
+			return true
+		}
+	}
+	return false
+}
+
+// wildcardPatchMatchesExisting reports whether a rig="*" patch for the given
+// agent name matches at least one agent already present in cfg.Agents, using
+// the same name/binding match as applyAgentPatch's wildcard branch. compose
+// uses it to keep a wildcard city patch in the normal (pre-injection) patch
+// pass for already-present agents — preserving city-before-rig precedence —
+// while still deferring a second, tail-scoped pass for implicit agents that
+// InjectImplicitAgents appends later.
+func wildcardPatchMatchesExisting(cfg *City, name string) bool {
+	for i := range cfg.Agents {
+		a := &cfg.Agents[i]
+		if a.Name == name || a.BindingQualifiedName() == name {
 			return true
 		}
 	}

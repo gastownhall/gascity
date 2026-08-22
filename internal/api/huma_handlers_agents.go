@@ -49,6 +49,11 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 		}
 	}
 
+	// Active graph-resident work, indexed once per request by agent session
+	// name (nil on a single-store city). Computed after the cache-hit return
+	// so a cached response never pays for the graph-store list.
+	graphWork := s.graphActiveWorkBySession()
+
 	var agents []agentResponse
 	for _, a := range cfg.Agents {
 		// Provenance is a property of the declared agent, shared by every
@@ -65,11 +70,17 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 
 			sessionName := agentSessionName(cityName, ea.qualifiedName, sessTmpl)
 			running := sp.IsRunning(sessionName)
+			// Fold active graph-resident (wisp) work into the running signal so
+			// an agent whose work executes under an agent-agnostic wisp session
+			// is reported running even when its named provider session is down.
+			// hasGraphWork is always false on a single-store city.
+			gw, hasGraphWork := graphWork[sessionName]
+			effectiveRunning := running || hasGraphWork
 
-			if input.Running == "true" && !running {
+			if input.Running == "true" && !effectiveRunning {
 				continue
 			}
-			if input.Running == "false" && running {
+			if input.Running == "false" && effectiveRunning {
 				continue
 			}
 
@@ -95,7 +106,7 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 			resp := agentResponse{
 				Name:              ea.qualifiedName,
 				Description:       ea.description,
-				Running:           running,
+				Running:           effectiveRunning,
 				Suspended:         suspended,
 				Rig:               ea.rig,
 				Pool:              ea.pool,
@@ -123,8 +134,21 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 			}
 
 			resp.ActiveBead = s.findActiveBeadForAssignees(ea.rig, sessionID, sessionName, ea.qualifiedName)
+			// A relocated-graph wisp names its assignee after the session, not
+			// the work store, so the work-store lookup above misses it. Fall
+			// back to the graph bead and use its timestamp as the activity
+			// signal so the state reads "working", not "stopped".
+			if hasGraphWork {
+				if resp.ActiveBead == "" {
+					resp.ActiveBead = gw.beadID
+				}
+				if lastActivity == nil {
+					la := gw.lastActivity
+					lastActivity = &la
+				}
+			}
 			quarantined := s.state.IsQuarantined(sessionName)
-			resp.State = computeAgentState(suspended, quarantined, running, resp.ActiveBead, lastActivity)
+			resp.State = computeAgentState(suspended, quarantined, effectiveRunning, resp.ActiveBead, lastActivity)
 
 			if wantPeek && running {
 				if output, err := sp.Peek(sessionName, 5); err == nil {
@@ -186,6 +210,11 @@ func (s *Server) agentByName(name string) (*IndexOutput[agentResponse], error) {
 
 	sessionName := agentSessionName(cityName, name, cfg.Workspace.SessionTemplate)
 	running := sp.IsRunning(sessionName)
+	// Fold active graph-resident (wisp) work into the running signal so a
+	// graph-working agent reports running even when its named provider session
+	// is down. hasGraphWork is always false on a single-store city.
+	gw, hasGraphWork := s.graphActiveWorkBySession()[sessionName]
+	effectiveRunning := running || hasGraphWork
 
 	suspended := agentCfg.Suspended
 	if v, err := sp.GetMeta(sessionName, "suspended"); err == nil && v == "true" {
@@ -215,7 +244,7 @@ func (s *Server) agentByName(name string) (*IndexOutput[agentResponse], error) {
 	resp := agentResponse{
 		Name:              name,
 		Description:       agentCfg.Description,
-		Running:           running,
+		Running:           effectiveRunning,
 		Suspended:         suspended,
 		Rig:               agentCfg.Dir,
 		Provider:          provider,
@@ -245,8 +274,21 @@ func (s *Server) agentByName(name string) (*IndexOutput[agentResponse], error) {
 	}
 
 	resp.ActiveBead = s.findLiveActiveBeadForAssignees(agentCfg.Dir, sessionID, sessionName, name)
+	// A relocated-graph wisp names its assignee after the session, not the work
+	// store, so the work-store lookup above misses it. Fall back to the graph
+	// bead and use its timestamp as the activity signal so the state reads
+	// "working", not "stopped".
+	if hasGraphWork {
+		if resp.ActiveBead == "" {
+			resp.ActiveBead = gw.beadID
+		}
+		if lastActivity == nil {
+			la := gw.lastActivity
+			lastActivity = &la
+		}
+	}
 	quarantined := s.state.IsQuarantined(sessionName)
-	resp.State = computeAgentState(suspended, quarantined, running, resp.ActiveBead, lastActivity)
+	resp.State = computeAgentState(suspended, quarantined, effectiveRunning, resp.ActiveBead, lastActivity)
 
 	if running && provider == "claude" && canAttributeSession(agentCfg, name, cfg, s.state.CityPath()) {
 		s.enrichSessionMeta(&resp, agentCfg, name)

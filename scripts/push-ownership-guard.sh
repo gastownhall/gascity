@@ -115,6 +115,24 @@ _pog_read_with_retry() {
     return 1
 }
 
+# _pog_branch_id_bead_inactive <id>: true (rc 0) only if a FRESH bd show
+# confirms <id>'s status is neither in_progress nor open -- i.e. the branch-
+# derived bead is no longer the live claim. Fails safe: any read/parse
+# failure returns 1 (treat as still-active / not confirmed inactive), so an
+# unreachable bd never triggers the branch-reuse override below -- it just
+# falls through to the existing branch-id-wins path, which itself blocks
+# safely on the same failure via assert_bead_still_claimed's own read.
+_pog_branch_id_bead_inactive() {
+    local id="$1"
+    local json
+    json="$(_pog_read_with_retry bd show "$id" --json)" || return 1
+    [[ -n "$json" ]] || return 1
+    jq -e '.' <<<"$json" >/dev/null 2>&1 || return 1
+    local st
+    st="$(jq -r '.[0].status // empty' <<<"$json" 2>/dev/null || true)"
+    [[ "$st" != "in_progress" && "$st" != "open" && -n "$st" ]]
+}
+
 # _pog_resolve_bead_id: prints the bead id this push should be checked
 # against; prints nothing if none can be resolved. Resolution order:
 #   1. The current branch name, matched against ga-[0-9a-z]{6}(\.[0-9]+)* —
@@ -137,6 +155,18 @@ _pog_read_with_retry() {
 # legitimately drift from bd's bookkeeping. EXCEPTION: deploy/*-gate
 # branches (see below) embed the id of the bead being gated, not the bead
 # this push is for, so for that branch shape the live assignee wins instead.
+# EXCEPTION (branch reuse, ga-bf39j8): a branch name can be reused across a
+# sequence of beads — a predecessor bead closes and a live successor bead
+# continues the identical work on the identical branch name. When the
+# branch-derived bead is confirmed no longer live (a fresh bd show shows it's
+# not in_progress/open) AND a DIFFERENT in-progress bead in this session's
+# own assignment list declares itself that bead's continuation via
+# metadata.branch (matching the literal branch name) or metadata.build_bead
+# (matching the branch-derived id), that successor id wins instead. This is
+# an explicit declared-link check, not a blind "first in-progress bead"
+# pick — a session identity routinely holds several unrelated in-progress
+# beads at once, so picking one without a relational check would validate
+# this push against a totally unrelated concurrent task.
 #
 # KNOWN LIMITATION of path 2 (confirmed by manual repro, not yet filed as
 # its own bead): the fallback query itself filters on --status=in_progress,
@@ -207,6 +237,24 @@ _pog_resolve_bead_id() {
             return
         fi
         printf '%s' "$assignee_id"
+        return
+    fi
+
+    # BRANCH REUSE (ga-bf39j8): see the EXCEPTION note above the function
+    # doc comment. Look for a live in-progress bead that explicitly declares
+    # itself the branch-derived bead's continuation, but only act on it once
+    # the branch-derived bead is confirmed no longer live — an explicit link
+    # to a still-active bead is not this guard's problem to resolve, it just
+    # falls through to the ordinary disagreement warning below.
+    local successor_id=""
+    if [[ -n "$branch_id" ]]; then
+        successor_id="$(jq -r --arg br "$branch" --arg bid "$branch_id" \
+            '[.[] | select(.metadata.branch == $br or .metadata.build_bead == $bid)][0].id // empty' \
+            <<<"${list_json:-[]}" 2>/dev/null || true)"
+    fi
+    if [[ -n "$successor_id" && "$successor_id" != "$branch_id" ]] && _pog_branch_id_bead_inactive "$branch_id"; then
+        echo "push-ownership-guard: NOTE branch $branch was reused after $branch_id closed; this session's in-progress $successor_id declares itself that bead's continuation (metadata.branch/build_bead), using $successor_id instead" >&2
+        printf '%s' "$successor_id"
         return
     fi
 

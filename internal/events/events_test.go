@@ -751,6 +751,114 @@ func TestReadFilteredTailScansBackwardsAcrossChunks(t *testing.T) {
 	}
 }
 
+// TestReadFilteredTailMaxScanBytesBoundsBackwardWalk is the regression for
+// #4418: a Filter.Type that never matches near EOF (the common case for a
+// rare/optional event type) otherwise forces readFilteredTailFromFile to
+// walk the entire file backward, at the same cost as an unfiltered forward
+// scan. MaxScanBytes caps that walk; "not found within the window" must be
+// the result rather than an unbounded scan.
+func TestReadFilteredTailMaxScanBytesBoundsBackwardWalk(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	base := time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC)
+	var buf bytes.Buffer
+	appendEvent := func(e Event) {
+		t.Helper()
+		raw, err := json.Marshal(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		buf.Write(raw)
+		buf.WriteString("\n")
+	}
+
+	// The only matching event sits near the start of the file.
+	appendEvent(Event{Seq: 1, Type: "target.type", Actor: "api", Ts: base})
+	// Pad well past a 64KB scan window with non-matching events before EOF —
+	// this is what a rare/optional Type filter looks like against a long,
+	// otherwise-unrelated event stream.
+	padding := string(bytes.Repeat([]byte("x"), 4*1024))
+	for i := 0; i < 40; i++ { // ~160KB of padding, several chunks past 64KB
+		appendEvent(Event{Seq: uint64(i + 2), Type: "other.type", Actor: "api", Ts: base.Add(time.Duration(i) * time.Second), Message: padding})
+	}
+
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	bounded, err := ReadFilteredTail(path, Filter{Type: "target.type", MaxScanBytes: 64 * 1024}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bounded) != 0 {
+		t.Fatalf("bounded scan got %d events, want 0 (match sits outside the 64KB window)", len(bounded))
+	}
+
+	unbounded, err := ReadFilteredTail(path, Filter{Type: "target.type"}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unbounded) != 1 || unbounded[0].Seq != 1 {
+		t.Fatalf("unbounded scan got %+v, want the seq-1 match (proves the bound, not the filter, caused the empty result)", unbounded)
+	}
+}
+
+// TestReadFilteredTailMaxScanBytesNonAlignedLimit pins the per-chunk clamp:
+// a MaxScanBytes that is not a multiple of the 64KB chunk size must stop the
+// backward walk at exactly that byte, not at the next chunk boundary. The
+// file is sized so the only match sits in the dead zone between the two —
+// past the 100KB window, but inside the 128KB an unclamped walk would read
+// as two whole chunks — so a bound checked only between chunks returns the
+// match and fails this test.
+func TestReadFilteredTailMaxScanBytesNonAlignedLimit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	base := time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC)
+	var buf bytes.Buffer
+	appendEvent := func(e Event) {
+		t.Helper()
+		raw, err := json.Marshal(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		buf.Write(raw)
+		buf.WriteString("\n")
+	}
+
+	const window = 100 * 1024 // deliberately not a multiple of the 64KB chunk
+
+	// The only matching event is the first line in the file, so its distance
+	// from EOF is simply the file size.
+	appendEvent(Event{Seq: 1, Type: "target.type", Actor: "api", Ts: base})
+	padding := string(bytes.Repeat([]byte("x"), 4*1024))
+	for i := 0; buf.Len() < 108*1024; i++ {
+		appendEvent(Event{Seq: uint64(i + 2), Type: "other.type", Actor: "api", Ts: base.Add(time.Duration(i) * time.Second), Message: padding})
+	}
+	if size := int64(buf.Len()); size <= window || size >= 128*1024 {
+		t.Fatalf("file is %d bytes, want in (%d, %d) so the match lands between the window and the next chunk boundary", size, window, 128*1024)
+	}
+
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	bounded, err := ReadFilteredTail(path, Filter{Type: "target.type", MaxScanBytes: window}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bounded) != 0 {
+		t.Fatalf("bounded scan got %d events, want 0 (match sits outside the %d-byte window; the chunk read must be clamped to it)", len(bounded), window)
+	}
+
+	unbounded, err := ReadFilteredTail(path, Filter{Type: "target.type"}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unbounded) != 1 || unbounded[0].Seq != 1 {
+		t.Fatalf("unbounded scan got %+v, want the seq-1 match (proves the bound, not the filter, caused the empty result)", unbounded)
+	}
+}
+
 func TestReadFilteredTailLimitModesAndMissingFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "events.jsonl")

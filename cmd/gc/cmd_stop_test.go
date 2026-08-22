@@ -534,7 +534,7 @@ func TestCmdStopSupervisorManagedInvalidCityTomlWaitsForControllerStop(t *testin
 	}
 
 	var stdout, stderr lockedBuffer
-	code := cmdStop([]string{cityDir}, &stdout, &stderr, time.Second, false)
+	code := cmdStop([]string{cityDir}, &stdout, &stderr, 0, false)
 	if code != 0 {
 		t.Fatalf("cmdStop() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
@@ -687,6 +687,123 @@ func TestControllerStopTimeoutUsesHostingMode(t *testing.T) {
 				t.Fatalf("controllerStopTimeoutError = %v, legacy unknown must not be labeled standalone", err)
 			}
 		})
+	}
+}
+
+// TestCmdStopJSONReportsUnregisteredTrueForSupervisorManagedCity pins the
+// #4366 fix: gc stop --json must report that a supervisor-managed city was
+// unregistered from the registry as part of the stop, not just that
+// sessions stopped. Reuses the invalid-city-toml scaffolding from
+// TestCmdStopSupervisorManagedInvalidCityTomlWaitsForControllerStop, the
+// simplest existing setup that reaches the supervisor-managed success path.
+func TestCmdStopJSONReportsUnregisteredTrueForSupervisorManagedCity(t *testing.T) {
+	resetFlags(t)
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityDir := filepath.Join(t.TempDir(), "invalid-supervisor-city")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace\nname = \"broken\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg := registryAt(t, gcHome)
+	if err := reg.Register(cityDir, "invalid-supervisor-city"); err != nil {
+		t.Fatal(err)
+	}
+
+	withSupervisorTestHooks(
+		t,
+		func(_, _ io.Writer) int { return 0 },
+		func(_, _ io.Writer) int { return 0 },
+		func() int { return 4242 },
+		func(string) (bool, string, bool) { return false, "", true },
+		20*time.Millisecond,
+		time.Millisecond,
+	)
+	waitForSupervisorControllerStopHook = func(string, time.Duration) error { return nil }
+
+	var stdout, stderr lockedBuffer
+	code := cmdStopJSON([]string{cityDir}, &stdout, &stderr, 0, false, true)
+	if code != 0 {
+		t.Fatalf("cmdStopJSON() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	var got lifecycleActionJSON
+	if err := json.Unmarshal([]byte(stdout.String()), &got); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if got.Unregistered == nil || !*got.Unregistered {
+		t.Fatalf("payload.Unregistered = %v, want pointer to true; payload=%+v", got.Unregistered, got)
+	}
+}
+
+// TestCmdStopJSONReportsUnregisteredTrueWhenSupervisorNotRunning closes the
+// remaining #4366 branch: a registered city whose supervisor is not alive
+// falls through to the ordinary loaded-config stop, so the unregister the
+// command just performed must still be reported. The sibling
+// TestCmdStopJSONReportsUnregisteredTrueForSupervisorManagedCity only covers
+// the alive-supervisor early return and never reaches this path, because it
+// stubs the alive hook to a live PID and writes an invalid city.toml. Here
+// the alive hook returns 0 and city.toml is valid, so cmdStopJSONSequence
+// runs stopLoadedCity.
+func TestCmdStopJSONReportsUnregisteredTrueWhenSupervisorNotRunning(t *testing.T) {
+	resetFlags(t)
+	gcHome := shortSocketTempDir(t, "gc-home-")
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityDir := shortSocketTempDir(t, "gc-stop-city-")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "unregistered-on-stop"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Session:   config.SessionConfig{Provider: "subprocess"},
+	}
+	data, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg := registryAt(t, gcHome)
+	if err := reg.Register(cityDir, "unregistered-on-stop"); err != nil {
+		t.Fatal(err)
+	}
+
+	withSupervisorTestHooks(
+		t,
+		func(_, _ io.Writer) int { return 0 },
+		func(_, _ io.Writer) int { return 0 },
+		func() int { return 0 },
+		func(string) (bool, string, bool) { return false, "", true },
+		20*time.Millisecond,
+		time.Millisecond,
+	)
+
+	oldFactory := sessionProviderForStopCity
+	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+	sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) {
+		return runtime.NewFake(), nil
+	}
+
+	var stdout, stderr lockedBuffer
+	code := cmdStopJSON([]string{cityDir}, &stdout, &stderr, 0, false, true)
+	if code != 0 {
+		t.Fatalf("cmdStopJSON() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	var got lifecycleActionJSON
+	if err := json.Unmarshal([]byte(stdout.String()), &got); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if got.Unregistered == nil || !*got.Unregistered {
+		t.Fatalf("payload.Unregistered = %v, want pointer to true; payload=%+v", got.Unregistered, got)
 	}
 }
 
@@ -1314,4 +1431,42 @@ func controllerAcceptsPing(dir string, timeout time.Duration) bool {
 	buf := make([]byte, 64)
 	n, err := conn.Read(buf)
 	return err == nil && strings.TrimSpace(string(buf[:n])) != ""
+}
+
+// TestWriteCityStopSuccessReportsUnregisteredFlag pins the #4366 JSON
+// envelope contract at the unit level: the unregistered bool passed to
+// writeCityStopSuccess must come through verbatim (not omitted, not
+// defaulted), so gc stop --json can distinguish an unmanaged-city stop from
+// one that also removed a supervisor registration.
+func TestWriteCityStopSuccessReportsUnregisteredFlag(t *testing.T) {
+	for _, unregistered := range []bool{true, false} {
+		t.Run(fmt.Sprintf("unregistered=%v", unregistered), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := writeCityStopSuccess(&stdout, &stderr, "/city", false, unregistered)
+			if code != 0 {
+				t.Fatalf("writeCityStopSuccess() = %d, want 0; stderr=%q", code, stderr.String())
+			}
+			var got lifecycleActionJSON
+			if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+				t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+			}
+			if got.Unregistered == nil || *got.Unregistered != unregistered {
+				t.Fatalf("payload.Unregistered = %v, want pointer to %v; payload=%+v", got.Unregistered, unregistered, got)
+			}
+		})
+	}
+}
+
+// TestStopHelpDocumentsSupervisorUnregisterBehavior pins the #4366
+// help/behavior parity fix: gc stop's long help must state that it
+// unregisters a supervisor-managed city, since cmdStopJSON actually does
+// that (via unregisterCityFromSupervisorWithForce) before help readers would
+// otherwise expect from "Stop all agent sessions in the city".
+func TestStopHelpDocumentsSupervisorUnregisterBehavior(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cmd := newStopCmd(&stdout, &stderr)
+	long := strings.ToLower(cmd.Long)
+	if !strings.Contains(long, "unregister") {
+		t.Fatalf("gc stop --help does not mention unregistering a supervisor-managed city; Long=%q", cmd.Long)
+	}
 }

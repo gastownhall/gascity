@@ -132,6 +132,17 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	if err := p.bindPlacement(name, info, mode); err != nil {
 		return fmt.Errorf("herdr: persist pane binding for %q: %w", name, err)
 	}
+	// Clear any unconfirmed-delivery marker a prior life left behind, here
+	// rather than beside the delivery below: Stop wipes the whole sidecar but a
+	// crash does not, and the delivery is guarded (skipped on adoption and on a
+	// session with no startup text), so a clear hanging off it inherits that
+	// guard and lets a dead life's marker outlive the life it described. This
+	// Start is past the ErrSessionExists check, so a new life owns the sidecar
+	// from here; the marker is re-set below only if THIS life's delivery fails.
+	// Unconditional and idempotent — RemoveMeta tolerates a missing key.
+	if err := p.RemoveMeta(name, metaStartupUnconfirmed); err != nil {
+		fmt.Fprintf(os.Stderr, "herdr: clearing prior-life startup marker for %q failed: %v\n", name, err) //nolint:errcheck // best-effort diagnostic
+	}
 	// Launch. herdr ≥0.7.5's `agent start` launches a supported agent kind's
 	// canonical executable into the shell pane and blocks until the TUI is
 	// detected (native claude-detection); commands that aren't a clean kind
@@ -216,15 +227,50 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		// Bounded and best-effort: on a boot that never idles we deliver anyway (no
 		// worse than the prior unconditional send), and the reconciler tolerates a
 		// slow Start (pendingCreateNeverStartedTimeout = 10m).
-		_ = p.WaitForIdle(ctx, name, startupNudgeIdleTimeout)
-		if err := p.c.deliverNudge(ctx, info.PaneID, startupText); err != nil {
-			// Best-effort: the submit didn't confirm (TUI race under boot load).
-			// Surface it rather than silently leaving a stranded startup turn;
-			// nudgeStalledPoolClaims is the reconcile-tick backstop of last resort.
-			fmt.Fprintf(os.Stderr, "herdr: startup delivery for %q not confirmed: %v\n", name, err) //nolint:errcheck // best-effort diagnostic
+		idleOutcome := p.waitForIdleOutcome(ctx, name, startupNudgeIdleTimeout)
+		// Deliver with submission confirmation: the swallowed-CR strand is
+		// detected (agent_prompt_stalled) and recovered in-band with an explicit
+		// Enter (deliverStartupTurn). An error here means even recovery could not
+		// confirm the first turn started — the session is live, so failing Start
+		// would only trigger a respawn storm; record the strand durably instead
+		// so it is machine-visible and countable. nudgeStalledPoolClaims remains
+		// the reconcile-tick backstop of last resort for pool slots.
+		if err := p.c.deliverStartupTurn(ctx, info.PaneID, startupText); err != nil {
+			p.recordStartupDeliveryUnconfirmed(name, info.PaneID, idleOutcome, err)
 		}
 	}
 	return nil
+}
+
+// metaStartupUnconfirmed is the sidecar key recording that this life's startup
+// first-turn delivery was never confirmed submitted — either the swallowed-CR
+// recovery did not confirm, or the submit landed but never settled into a
+// confirming state. The value carries when, the pane, the readiness-guard
+// verdict, and herdr's error, so a reader can tell those cases apart rather
+// than treating every marker as a stranded turn.
+//
+// The key means "the CURRENT life", which takes two writes to hold: Stop's
+// clearMeta wipes it with the session, and Start clears it unconditionally
+// before launching, covering the crash that skips Stop. Start's clear is
+// deliberately blind to adoption — an adopted holder is one Start has just
+// declared live and already primed, so leaving a prior marker standing would
+// hand the reader below a strand report about a session nobody is going to
+// re-deliver to. herdr-server.log keeps the historical count (agent.prompt
+// outcomes). Consumers: operators (`gc` sidecar inspection) and a future
+// named-session delivery backstop (gas-90h fix 3).
+const metaStartupUnconfirmed = "GC_HERDR_STARTUP_DELIVERY_UNCONFIRMED"
+
+// recordStartupDeliveryUnconfirmed persists an unconfirmed startup delivery on
+// the session's sidecar and mirrors it to stderr for interactive runs. stderr
+// alone is not enough: daemonized controllers devnull it, which is how this
+// failure stayed invisible for 20h of live operation (gas-90h).
+func (p *Provider) recordStartupDeliveryUnconfirmed(name, paneID string, idleOutcome idleWaitOutcome, derr error) {
+	detail := fmt.Sprintf("%s pane=%s idle_wait=%s: %v",
+		time.Now().UTC().Format(time.RFC3339), paneID, idleOutcome, derr)
+	if err := p.SetMeta(name, metaStartupUnconfirmed, detail); err != nil {
+		fmt.Fprintf(os.Stderr, "herdr: recording unconfirmed startup delivery for %q failed: %v\n", name, err) //nolint:errcheck // best-effort diagnostic
+	}
+	fmt.Fprintf(os.Stderr, "herdr: startup delivery for %q not confirmed: %v\n", name, derr) //nolint:errcheck // best-effort diagnostic
 }
 
 // startupDeliveryText resolves the first-turn text Start delivers to a freshly
@@ -273,9 +319,9 @@ func startupPrimeText(cfg runtime.Config) string {
 // startupNudgeIdleTimeout bounds how long Start waits for a freshly-spawned
 // agent to reach its idle input prompt before delivering the startup nudge. The
 // wait returns as soon as the agent idles (typically a few seconds); the bound
-// only bites on a boot that never idles, after which the nudge is sent
-// best-effort. Sized generously to cover cold, concurrent boots during a
-// town-wide restart.
+// only bites on a boot that never idles, after which delivery proceeds anyway —
+// deliverStartupTurn confirms (or recovers) the submit either way. Sized
+// generously to cover cold, concurrent boots during a town-wide restart.
 const startupNudgeIdleTimeout = 60 * time.Second
 
 const (

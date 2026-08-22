@@ -2420,11 +2420,15 @@ func TestSlingAttachFormula(t *testing.T) {
 
 // TestSlingAttachFormulaWarnsWhenBeadDescriptionDropped is the regression
 // for #3681: --on/AttachFormula never carries the target bead's own
-// description into the formula's rendered context — the wisp root's
-// description is always the formula's own boilerplate, and no formula var
-// exposes the bead's text either. A caller relying on the bead's
-// description as the actual build instructions silently gets a brainstorm
-// that never saw them. Warn instead of changing routing/materialization.
+// description into the formula's rendered context via the wisp root (its
+// description is always the formula's own boilerplate). A caller relying
+// on the bead's description as the actual build instructions silently gets
+// a brainstorm that never saw them — unless some other route carries it
+// in. Since 2026-08-02 the legacy path auto-stamps gc.var.issue = beadID,
+// and every route-table formula resolves it back via `bd show` (Route B),
+// so this test must explicitly void that route (issue=) to exercise the
+// genuinely-silent case; see ga-tj5jbm. Warn instead of changing
+// routing/materialization.
 func TestSlingAttachFormulaWarnsWhenBeadDescriptionDropped(t *testing.T) {
 	runner := newFakeRunner()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
@@ -2436,7 +2440,7 @@ func TestSlingAttachFormulaWarnsWhenBeadDescriptionDropped(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
-	result, err := s.AttachFormula(context.Background(), "code-review", b.ID, a, FormulaOpts{})
+	result, err := s.AttachFormula(context.Background(), "code-review", b.ID, a, FormulaOpts{Vars: []string{"issue="}})
 	if err != nil {
 		t.Fatalf("AttachFormula: %v", err)
 	}
@@ -4514,5 +4518,68 @@ func TestSlingFormulaTargetBranch_FallsBackToProbeWhenUnset(t *testing.T) {
 	got := SlingFormulaTargetBranch("SC-1", deps, a)
 	if got != "trunk" {
 		t.Errorf("SlingFormulaTargetBranch = %q, want %q (fallback to live probe)", got, "trunk")
+	}
+}
+
+// TestBuildSlingFormulaVarsInjectsBaseBranchFromRigDefault covers a repo
+// whose mainline differs from origin/HEAD: the live probe points at a
+// mirror-only "main" while city.toml records default_branch = "develop".
+// The recorded branch must reach the formula as base_branch.
+//
+// The tiers themselves are covered by the SlingFormulaTargetBranch tests
+// above; what this locks is the wiring in buildSlingFormulaVars. If the
+// injection stops firing, base_branch falls through to the formula's own
+// "main" default and every polecat worktree is cut from the wrong branch
+// silently, because a missing var is indistinguishable from an authored
+// default at render time.
+func TestBuildSlingFormulaVarsInjectsBaseBranchFromRigDefault(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs: []config.Rig{
+			{Name: "scamper", Path: "/scamper", Prefix: "SC", DefaultBranch: "develop"},
+		},
+	}
+	deps := SlingDeps{
+		Cfg:      cfg,
+		Store:    beads.NewMemStore(),
+		Branches: fixedBranchResolver{branch: "main"},
+	}
+	a := config.Agent{Name: "polecat", Dir: "scamper"}
+
+	vars := BuildSlingFormulaVars("mol-polecat-work", "SC-1", nil, a, deps)
+
+	if got := vars["base_branch"]; got != "develop" {
+		t.Fatalf("base_branch var = %q, want %q (rig default_branch beats the origin/HEAD probe)", got, "develop")
+	}
+}
+
+// TestBuildSlingFormulaVarsBaseBranchPrefersBeadTarget locks tier 1 at the
+// wiring layer: an explicit metadata.target on the work bead overrides the
+// rig's recorded default_branch. This is the per-bead escape hatch callers
+// use to retarget a single piece of work (a release branch, an integration
+// branch) without editing city.toml.
+func TestBuildSlingFormulaVarsBaseBranchPrefersBeadTarget(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs: []config.Rig{
+			{Name: "scamper", Path: "/scamper", Prefix: "SC", DefaultBranch: "develop"},
+		},
+	}
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{Metadata: map[string]string{"target": "release/v2"}})
+	if err != nil {
+		t.Fatalf("seeding bead: %v", err)
+	}
+	deps := SlingDeps{
+		Cfg:      cfg,
+		Store:    store,
+		Branches: fixedBranchResolver{branch: "main"},
+	}
+	a := config.Agent{Name: "polecat", Dir: "scamper"}
+
+	vars := BuildSlingFormulaVars("mol-polecat-work", bead.ID, nil, a, deps)
+
+	if got := vars["base_branch"]; got != "release/v2" {
+		t.Fatalf("base_branch var = %q, want %q (bead metadata.target wins)", got, "release/v2")
 	}
 }

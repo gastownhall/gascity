@@ -805,3 +805,73 @@ func TestPrimeFailureThenReconcileConverges(t *testing.T) {
 		t.Fatalf("cachedReadyOnly = %#v, want to include %s", got, missed.ID)
 	}
 }
+
+// The controller feeds every bead event on the bus — including the cache's own
+// cache-reconcile emissions — straight back into ApplyEvent on the same store.
+func TestUnchangedStatusEventDoesNotReopenTheReconcileLoop(t *testing.T) {
+	mem := NewMemStore()
+	blocker, err := mem.Create(Bead{Title: "blocker"})
+	if err != nil {
+		t.Fatalf("Create blocker: %v", err)
+	}
+	blocked := true
+	dependent, err := mem.Create(Bead{Title: "dependent", IsBlocked: &blocked})
+	if err != nil {
+		t.Fatalf("Create dependent: %v", err)
+	}
+	if err := mem.DepAdd(dependent.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+
+	var emitted []string
+	cs := NewCachingStoreForTest(mem, func(eventType, beadID string, _ json.RawMessage) {
+		emitted = append(emitted, eventType+":"+beadID)
+	})
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	cs.runReconciliation()
+	emitted = nil
+
+	// The reconcile emitter always carries status, whether or not it changed.
+	payload, err := json.Marshal(blocker)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	cs.ApplyEvent("bead.updated", payload)
+
+	cs.mu.RLock()
+	cachedDependent, ok := cs.beads[dependent.ID]
+	cs.mu.RUnlock()
+	if !ok {
+		t.Fatalf("dependent %s dropped from cache", dependent.ID)
+	}
+	if cachedDependent.IsBlocked == nil {
+		t.Fatalf("an event that changed nothing invalidated %s's ready projection", dependent.ID)
+	}
+
+	cs.runReconciliation()
+	if len(emitted) != 0 {
+		t.Fatalf("reconcile re-emitted after a no-op event: %v", emitted)
+	}
+
+	// The other half: a real transition must still invalidate the dependent, or
+	// the guard above would silently pin a stale ready projection.
+	inProgress := "in_progress"
+	if err := mem.Update(blocker.ID, UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("Update blocker: %v", err)
+	}
+	moved := cloneBead(blocker)
+	moved.Status = inProgress
+	if payload, err = json.Marshal(moved); err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	cs.ApplyEvent("bead.updated", payload)
+
+	cs.mu.RLock()
+	cachedDependent = cs.beads[dependent.ID]
+	cs.mu.RUnlock()
+	if cachedDependent.IsBlocked != nil {
+		t.Fatalf("a real status change left %s's ready projection stale", dependent.ID)
+	}
+}

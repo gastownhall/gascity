@@ -240,6 +240,25 @@ func trackingTitle(scoped string) string { return labelOrderTitlePrefix + scoped
 // graph roots for scoped.
 func RunLabel(scoped string) string { return labelOrderRunPrefix + scoped }
 
+// ScopedFromRunLabel returns the scoped order name a run label names, and
+// reports whether label is a run label at all.
+//
+// It is RunLabel read backwards, and it exists so a caller that indexes a whole
+// store's order-run evidence in one read — rather than one label-filtered query
+// per order — parses the label with the function that wrote it. The prefix is
+// otherwise spelled as a literal at a dozen call sites, and an index that
+// disagreed with the writer about where the name starts would gate on nothing.
+func ScopedFromRunLabel(label string) (string, bool) {
+	if !strings.HasPrefix(label, labelOrderRunPrefix) {
+		return "", false
+	}
+	scoped := strings.TrimPrefix(label, labelOrderRunPrefix)
+	if scoped == "" {
+		return "", false
+	}
+	return scoped, true
+}
+
 // IsTrackingBead reports whether b is an order tracking record.
 func IsTrackingBead(b beads.Bead) bool { return beadLabelsContain(b.Labels, labelOrderTracking) }
 

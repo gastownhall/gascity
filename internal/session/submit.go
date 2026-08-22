@@ -121,6 +121,20 @@ func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string,
 			return m.interruptAndSubmitLocked(ctx, id, b, sessName, message, resumeCommand, hints)
 		default:
 			running := m.sp.IsRunning(sessName)
+			if pendingConversationRestart(b) && !running {
+				// A reset or restart is recorded but the replacement runtime is
+				// not up yet. Delivering now would start the pane just to carry
+				// this message and, for a provider that keys its own
+				// conversation identity off the session's epoch, would do it
+				// against a conversation the operator has already discarded.
+				// Queue it for the incarnation the controller is about to bring
+				// up instead.
+				if err := m.enqueueDeferredSubmitLocked(b, sessName, message); err != nil {
+					return err
+				}
+				outcome.Queued = true
+				return nil
+			}
 			if (State(b.Metadata["state"]) == StateStartPending || State(b.Metadata["state"]) == StateCreating) && !running {
 				if err := m.enqueueDeferredSubmitLocked(b, sessName, message); err != nil {
 					return err
@@ -133,6 +147,14 @@ func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string,
 		}
 	})
 	return outcome, err
+}
+
+// pendingConversationRestart reports whether a fresh restart has been recorded
+// for this session but not yet carried out, so its live runtime — if any — is
+// the outgoing incarnation.
+func pendingConversationRestart(b beads.Bead) bool {
+	return strings.TrimSpace(b.Metadata["continuation_reset_pending"]) != "" ||
+		strings.TrimSpace(b.Metadata["restart_requested"]) != ""
 }
 
 func (m *Manager) supportsFollowUpLocked(b beads.Bead) bool {

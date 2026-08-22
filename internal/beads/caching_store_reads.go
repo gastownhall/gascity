@@ -195,6 +195,59 @@ func (c *CachingStore) CachedList(query ListQuery) ([]Bead, bool) {
 	if c.primePartialErr != nil || len(c.dirty) > 0 {
 		return nil, false
 	}
+	return c.collectCachedListLocked(query), true
+}
+
+// ObservedList returns a detached active-only cache census and an opaque stamp
+// that may be conditionally consumed with WithCurrentObservation. It never
+// performs backing-store I/O. The stamp fences only this process's cache
+// projection; it does not certify durable-store lineage or event delivery.
+func (c *CachingStore) ObservedList(query ListQuery) ([]Bead, CacheObservation, bool) {
+	if query.Validate() != nil ||
+		(!query.HasFilter() && !query.AllowScan) ||
+		query.Live ||
+		query.IncludesClosed() ||
+		query.ParentID != "" ||
+		len(query.ParentIDs) > 0 {
+		return nil, CacheObservation{}, false
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if !c.observationAdmissibleLocked() {
+		return nil, CacheObservation{}, false
+	}
+	return c.collectCachedListLocked(query), CacheObservation{owner: c, revision: c.observationRevision}, true
+}
+
+// WithCurrentObservation runs publish while holding the originating cache's
+// read lock only when observation still describes a clean active cache. The
+// callback must perform bounded in-memory work and must not call the cache,
+// backing store, or wait for other work.
+func (c *CachingStore) WithCurrentObservation(observation CacheObservation, publish func() error) (bool, error) {
+	if publish == nil {
+		return false, fmt.Errorf("using cache observation: nil callback")
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if observation.owner != c || observation.revision == 0 || observation.revision != c.observationRevision ||
+		!c.observationAdmissibleLocked() {
+		return false, nil
+	}
+	return true, publish()
+}
+
+// observationAdmissibleLocked reports whether an active-only cache census can
+// be observed and conditionally used. Caller must hold c.mu.
+func (c *CachingStore) observationAdmissibleLocked() bool {
+	return (c.state == cacheLive || c.state == cachePartial) &&
+		c.primePartialErr == nil &&
+		len(c.dirty) == 0 &&
+		c.observationRevision != 0
+}
+
+// collectCachedListLocked materializes CachedList and ObservedList results.
+// Caller must hold c.mu for reading or writing.
+func (c *CachingStore) collectCachedListLocked(query ListQuery) []Bead {
 	cached := make([]Bead, 0, len(c.beads))
 	for _, b := range c.beads {
 		if !query.Matches(b) {
@@ -206,7 +259,7 @@ func (c *CachingStore) CachedList(query ListQuery) ([]Bead, bool) {
 	if query.Limit > 0 && len(cached) > query.Limit {
 		cached = cached[:query.Limit]
 	}
-	return cached, true
+	return cached
 }
 
 func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, items []Bead) []Bead {
@@ -466,15 +519,20 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 		return c.backing.Ready(query...)
 	}
 	var (
-		statusByID map[string]string
-		depsByID   map[string][]Dep
-		openBeads  []Bead
+		statusByID   map[string]string
+		depsByID     map[string][]Dep
+		openBeads    []Bead
+		unanswerable bool
 	)
-	// Ready requires a fully live cache with complete dependency coverage; the
-	// overlay refreshes any dirty rows first, then computes readiness from the
-	// cache. On overlay error the read takes the old full backing.Ready scan.
+	// Ready requires a fully live cache with complete dependency coverage and a
+	// ready projection the backing store can actually serve; the overlay
+	// refreshes any dirty rows first, then computes readiness from the cache.
+	// On overlay error the read takes the old full backing.Ready scan.
 	if err := c.readCacheWithOverlay(
-		func() bool { return c.state == cacheLive && c.depsComplete && c.primePartialErr == nil },
+		func() bool {
+			return c.state == cacheLive && c.depsComplete && c.primePartialErr == nil &&
+				!c.readyReadsMustGoLive()
+		},
 		func(suppressed map[string]struct{}) {
 			statusByID = make(map[string]string, len(c.beads))
 			openBeads = make([]Bead, 0, len(c.beads))
@@ -485,6 +543,10 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 				}
 				statusByID[b.ID] = b.Status
 				if IsReadyCandidate(b, now) {
+					if c.readyProjectionUnknownLocked(b.ID) {
+						unanswerable = true
+						return
+					}
 					openBeads = append(openBeads, cloneBead(b))
 				}
 			}
@@ -494,6 +556,11 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 			}
 		},
 	); err != nil {
+		return c.backing.Ready(query...)
+	}
+	if unanswerable {
+		// One candidate whose verdict the cache cannot vouch for costs this
+		// read the cache, not correctness: the live scan is slower and right.
 		return c.backing.Ready(query...)
 	}
 
@@ -542,7 +609,7 @@ func (c *CachingStore) CachedReady() ([]Bead, bool) {
 	if c.state != cacheLive && c.state != cachePartial {
 		return nil, false
 	}
-	if c.primePartialErr != nil || len(c.dirty) > 0 {
+	if c.primePartialErr != nil || len(c.dirty) > 0 || c.readyReadsMustGoLive() {
 		return nil, false
 	}
 
@@ -552,6 +619,9 @@ func (c *CachingStore) CachedReady() ([]Bead, bool) {
 	for _, b := range c.beads {
 		statusByID[b.ID] = b.Status
 		if IsReadyCandidate(b, now) {
+			if c.readyProjectionUnknownLocked(b.ID) {
+				return nil, false
+			}
 			openBeads = append(openBeads, cloneBead(b))
 		}
 	}

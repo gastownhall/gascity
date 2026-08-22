@@ -559,6 +559,19 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 		}
 	}
 
+	// The release of an undelivered claim (F-C) must run against the ledger the
+	// claim landed in, or it would clear an assignee in a store that never held
+	// one and leave the real claim parked. Like the lifecycle emission below it
+	// routes on the MEMO alone and never probes: a bead this invocation did not
+	// route is one the work store claimed, and the release is a consequence of
+	// that claim rather than a second opinion about where the bead lives.
+	ops.Release = func(ctx context.Context, dir string, env []string, beadID, assignee string) (bool, error) {
+		if route.knownResident(beadID) {
+			return route.graph.ReleaseIfCurrent(beadID, assignee)
+		}
+		return base.Release(ctx, dir, env, beadID, assignee)
+	}
+
 	// The lifecycle-start emission reads the step's workflow root, so it belongs
 	// in the store the claim landed in. It routes on the MEMO alone and never
 	// probes: a step this invocation did not route is one the work store

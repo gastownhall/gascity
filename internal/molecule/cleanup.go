@@ -101,6 +101,17 @@ func CloseSubtree(store beads.Store, rootID string) (int, error) {
 // descendant-first, blocker-first ordering and is idempotent for an already
 // closed subtree.
 func CloseSubtreeWithMetadata(store beads.Store, rootID string, metadata map[string]string) (int, error) {
+	return CloseSubtreeWithMetadataExcept(store, rootID, metadata, nil)
+}
+
+// CloseSubtreeWithMetadataExcept is CloseSubtreeWithMetadata with an exclusion
+// predicate: any member for which exclude reports true is left untouched. A nil
+// predicate closes the whole subtree.
+//
+// The exclusion exists for members that stay executable after their molecule
+// reaches a terminal state — teardown work, which by contract runs after the
+// root settles. Callers own the policy; this function only skips.
+func CloseSubtreeWithMetadataExcept(store beads.Store, rootID string, metadata map[string]string, exclude func(beads.Bead) bool) (int, error) {
 	matched, err := ListSubtree(store, rootID)
 	if err != nil {
 		return 0, err
@@ -148,6 +159,9 @@ func CloseSubtreeWithMetadata(store beads.Store, rootID string, metadata map[str
 	ids := make([]string, 0, len(matched))
 	for _, bead := range matched {
 		if bead.ID == "" || bead.Status == "closed" {
+			continue
+		}
+		if exclude != nil && exclude(bead) {
 			continue
 		}
 		ids = append(ids, bead.ID)

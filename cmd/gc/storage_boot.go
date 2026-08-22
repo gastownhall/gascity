@@ -87,6 +87,13 @@ type storageRoutes struct {
 	// binding names the non-work binding these routes were opened from, for
 	// diagnostics.
 	binding string
+	// emitCityPath is the city whose event log these routes' class stores
+	// append bead.* events to, and it is set on exactly one construction:
+	// the one-shot CLI funnel's (cli_storage_routes.go). openStorageRoutes
+	// leaves it empty, so the controller's routes carry no emit target and
+	// its CachingStore stays the only emitter on that side — see
+	// class_store_emit.go for why the two must not both emit.
+	emitCityPath string
 }
 
 // storeFor returns the store serving a class and whether these routes relocate
@@ -694,15 +701,20 @@ func resolveCityStoragePlan(cityPath string, cfg *config.City) (*storebinding.St
 // a description must not be able to trip the drift refusal that exists to
 // protect recorded pins.
 func cityStorageWorkPins(cityPath string, cfg *config.City) storebinding.WorkPinInputs {
-	hqPrefix := ""
-	if cfg != nil {
-		hqPrefix = cfg.ResolvedWorkspacePrefix
-	}
+	// The pin has to state the prefix HQ actually mints under, which is the
+	// full three-step resolution and not the resolved field alone: no default
+	// city.toml declares [workspace] prefix, so an ordinary city derives its
+	// prefix from its name. Reading the field alone sent every such city to
+	// the fallback, and a fallback that repeats a rig's prefix collides with
+	// it. The rig arm below already resolves through Rig.EffectivePrefix.
+	//
+	// The fallback now stands only where the city resolves no prefix at all,
+	// rather than standing in for every city that leaves the field unset.
 	pins := storebinding.WorkPinInputs{
 		ConfigContext: storageWorkConfigContext(cityPath, cfg),
 		HQ: storebinding.WorkScopePin{
 			Scope:       storebinding.HQScope(),
-			Prefix:      storageWorkPrefix(hqPrefix, "gc"),
+			Prefix:      storageWorkPrefix(config.EffectiveHQPrefix(cfg), "gc"),
 			OpenerID:    storageWorkOpenerID(cfg),
 			ComponentID: "hq",
 			PhysicalID:  storageWorkPhysicalID(cityPath),
@@ -733,11 +745,17 @@ func cityStorageWorkPins(cityPath string, cfg *config.City) storebinding.WorkPin
 
 // storageWorkConfigContext digests the configuration the pins were derived
 // from, so a plan carries a canonical reference to the inputs that produced it.
+//
+// It digests the same resolved values the pins carry, not the raw fields they
+// were resolved from. Hashing a field the pin no longer reads would let two
+// cities whose HQ pins genuinely differ share one digest, and the digest exists
+// precisely to tell those two apart. The rig line already digests the resolved
+// prefix for the same reason.
 func storageWorkConfigContext(cityPath string, cfg *config.City) storebinding.ConfigRefDigest {
 	sum := sha256.New()
 	fmt.Fprintln(sum, cityPath) //nolint:errcheck // hashing a writer that cannot fail
 	if cfg != nil {
-		fmt.Fprintln(sum, cfg.ResolvedWorkspacePrefix) //nolint:errcheck // hashing a writer that cannot fail
+		fmt.Fprintln(sum, config.EffectiveHQPrefix(cfg)) //nolint:errcheck // hashing a writer that cannot fail
 		for _, rig := range cfg.Rigs {
 			fmt.Fprintf(sum, "%s\x00%s\x00%s\x00%t\n", rig.Name, rig.EffectivePrefix(), rig.Path, rig.Suspended) //nolint:errcheck // hashing a writer that cannot fail
 		}

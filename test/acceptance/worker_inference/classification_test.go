@@ -417,6 +417,11 @@ func TestStageClaudeAuthPrefersSourceConfigDir(t *testing.T) {
 
 	t.Setenv("HOME", homeDir)
 	t.Setenv("CLAUDE_CONFIG_DIR", sourceDir)
+	// stageClaudeAuth prefers a bearer/API key over CLAUDE_CONFIG_DIR, and the
+	// live-suite env allowlist forwards both. On a host that exports either,
+	// this test asserted a branch it never reached.
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("ANTHROPIC_API_KEY", "")
 
 	source, err := stageClaudeAuth(gcHome, env)
 	require.NoError(t, err)

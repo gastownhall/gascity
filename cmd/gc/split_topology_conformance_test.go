@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -21,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/session"
@@ -57,13 +59,25 @@ import (
 //
 // Others pin behavior main HAS but should not keep. Those carry a KNOWN GAP
 // paragraph naming the divergence, the assertions that move when it closes, and
-// the slice that closes it — I1 and I2 (the HQ work store is in neither arm of
-// the controller's cross-store scan on a split city), I5 (the RELEASE tier does
-// not follow the now class-routed claim: crash recovery, on_death/on_boot and
-// the retired-session sweep are all still work-only) and I10 (the wake filter
-// has no coordination-class reachability arm). Leaving such a leg UNSEEDED is the
-// failure mode this convention exists to prevent: the invariant then reads as
-// coverage of a path it never touches.
+// the slice that closes it. Leaving such a leg UNSEEDED is the failure mode this
+// convention exists to prevent: the invariant then reads as coverage of a path
+// it never touches.
+//
+// The list, current as of the residency resolver's S2 slice:
+//
+//   - OPEN — I1 and I2: the HQ work store is in neither arm of the controller's
+//     cross-store scan on a split city. That is the census/demand side, and S3
+//     closes it (the D6 flip: the binding becomes a leg BESIDE the city work
+//     store instead of replacing it).
+//   - CLOSED by S2 — I5's release-tier gap. Crash recovery, the retired-session
+//     sweep, `gc session close` and drain-ack all resolve the same leg set from
+//     the city's routes (assignedWorkSweepPlan), so a class-routed claim is
+//     released by the same pass that releases a work-store one. What remains
+//     open there is ga-zp3uj, named in I5's own text: the AGENT-SIDE recovery
+//     tiers are raw bd commands in a work directory and stay topology-blind.
+//   - CLOSED — I10's wake-filter gap (ga-whzrt, #5250) and its ownership-index
+//     half (ga-j4ob9, S2). Both mechanisms now resolve their refs from the
+//     city's residency topology, and I10 asserts they agree.
 //
 // # Which authority an invariant is pinning
 //
@@ -95,6 +109,8 @@ func TestSplitTopologyConformance(t *testing.T) {
 	t.Run("I13-cli-ready-federation", func(t *testing.T) { forEachTopologyWithRig(t, conformanceCLIReadyFederation) })
 	t.Run("I14-projection-coherence", func(t *testing.T) { forEachTopology(t, conformanceProjectionCoherence) })
 	t.Run("I15-work-query-federation", func(t *testing.T) { forEachTopologyWithRig(t, conformanceWorkQueryFederation) })
+	t.Run("I16-federated-read-tier", func(t *testing.T) { forEachTopology(t, conformanceFederatedReadTier) })
+	t.Run("I17-convergence-scope-residence", func(t *testing.T) { forEachTopologyWithRig(t, conformanceConvergenceResidence) })
 }
 
 // conformanceReadyFederation (I1) guards the "no work" fail-open: a worker
@@ -109,19 +125,42 @@ func TestSplitTopologyConformance(t *testing.T) {
 // rig store's own routed work alongside it. A leading store resolved to the WORK
 // class instead would read zero and drain the fleet.
 //
-// KNOWN GAP, pinned rather than asserted as desirable — the HQ WORK store leg.
-// The scan's arms are the leading store plus the RIG stores, and production
-// builds the rig arm as rigBeadStores(), which deletes the city entry
-// (city_runtime.go). On a split city the leading store is the class store, so
-// the HQ work store is in NEITHER arm and a city-scope routed WORK bead is
-// invisible to controller-tick demand — the same "no work" fail-open this
-// invariant is named for, live today. cmd_start.go already names the dual role
-// as a shared E2 two-store split. `gc session close` still reaches the HQ store
-// through unclaimWorkAssignedToRetiredSessionBead, so the bead is not lost
-// forever; the controller tick is what is blind. The hqWork row below asserts
-// today's asymmetric answer on both topologies. When the coordination-class /
-// HQ-work arm lands, that row's expectation flips to found-on-both and this
-// paragraph goes with it.
+// THE TWO LEG SETS AGREE, and that is what this row now pins. The CLAIM read's
+// legs are enumerated in ready_federation.go's contract header: city work store,
+// then rigs by name ascending, then the relocated binding LAST. The DEMAND
+// read's legs are the same set, because both are now Plan(RoutedWork)/
+// Plan(Census) over one topology (S3) rather than two hand-maintained lists.
+//
+// The HQ WORK store was the last leg-set divergence, and it is closed here. The
+// scan used to take the store it was HANDED as its city leg — the sessions-class
+// store, which on a converged split IS the binding — while the rig arm is
+// rigBeadStores(), which deletes the city entry. So the HQ work store was in
+// NEITHER arm and a city-scope routed WORK bead was invisible to controller-tick
+// demand: the "no work" fail-open this invariant is named for (D6, ga-88mxz).
+// Now the work store and the binding are DISTINCT ref'd legs.
+//
+// # The PLANE split, and why the split row's answer changed (tick-S3, ga-l7jdg)
+//
+// The demand read is now Plan(RoutedWork) narrowed to the RUNTIME plane. On a
+// split city that is the binding alone, because the operator ruling is that
+// routed work lives only in the graph store — "gc ready work will never be in
+// the work db" (ga-4qdfn) — and reading the remote work ledger on the tick is a
+// misrouting bug by definition, not a cost to amortize (bd memory
+// gascity-runtime-infra-store-invariant). It was 8.1s of a 24.2s demand leg.
+//
+// So this row asserts the plane, not a single answer: on a LEGACY city every
+// routed bead is still found (the work store IS the infra store there, and the
+// D6 assertion is unchanged), while on a SPLIT city the work-leg rows are
+// deliberately absent and the invariant they used to carry moves to two other
+// places, both asserted below:
+//
+//   - the rows that ARE demandable must still be complete and correctly
+//     attributed — the same fail-open, restated for the plane; and
+//   - a routed bead left on a work leg must not vanish silently. The
+//     route-recovery convergence lane reads every leg on its own cadence and
+//     counts them as off_plane_routed, loudly, with `gc storage migrate` as the
+//     named remedy (route_recovery_lane.go). "No reader sees it" would be D6
+//     again; "the tick does not, and the hourly lane says so" is the plane.
 func conformanceReadyFederation(t *testing.T, e splitEnv) {
 	durable := mintDurableGraphBead(t, e, "routed ready control bead", e.qualified)
 	wisp := e.mintWispWith(t, wispOpts{title: "routed ready wisp", routedTo: e.qualified})
@@ -148,7 +187,7 @@ func conformanceReadyFederation(t *testing.T, e splitEnv) {
 		t.Fatalf("HQ bead %s classifies as infrastructure; this leg is about the WORK class specifically", hqWork.ID)
 	}
 
-	found, stores, refs, partial := collectOpenUnassignedRoutedWork(e.cfg, e.sessionsStore(), e.rigStores, nil, os.Stderr)
+	found, stores, refs, partial := collectOpenUnassignedRoutedWork(e.cityPath, e.cfg, e.sessionsStore(), e.rigStores, nil, os.Stderr)
 	if partial {
 		t.Fatal("collectOpenUnassignedRoutedWork reported a partial scan; the demand read must be complete for this invariant to mean anything")
 	}
@@ -157,20 +196,46 @@ func conformanceReadyFederation(t *testing.T, e splitEnv) {
 	}
 
 	leadingOwner, ownerName := e.owner()
-	leadingRef, rigRef := "city:"+e.cfg.Workspace.Name, "rig:"+e.rigName
-	for _, tc := range []struct {
-		name    string
-		id      string
-		store   beads.Store
-		wantRef string
+	cityRef, rigRef := "city:"+e.cfg.Workspace.Name, "rig:"+e.rigName
+	// The graph-class rows answer from the leg that HOLDS them, under that leg's
+	// own ref: the binding's on a split city, the city work store's otherwise.
+	// Before S3 both spelled themselves "city:<name>", because the binding was
+	// the city leg.
+	leadingRef := cityRef
+	if e.split {
+		leadingRef = string(storeref.ClassRef(wholeSplitClasses()))
+	}
+	// The graph-class rows are demandable on BOTH topologies: they live on the
+	// leading leg, which is the binding on a split city and the work store on a
+	// legacy one. The work-leg rows are demandable only where the work store is
+	// also the infra store.
+	rows := []struct {
+		name      string
+		id        string
+		store     beads.Store
+		wantRef   string
+		onRuntime bool
 	}{
-		{"durable routed control bead", durable.ID, leadingOwner, leadingRef},
-		{"routed wisp", wisp.ID, leadingOwner, leadingRef},
-		{"routed rig work bead", rigWork.ID, e.rig, rigRef},
-	} {
+		{"durable routed control bead", durable.ID, leadingOwner, leadingRef, true},
+		{"routed wisp", wisp.ID, leadingOwner, leadingRef, true},
+		{"routed rig work bead", rigWork.ID, e.rig, rigRef, !e.split},
+		// The D6 subject. On a legacy city the HQ work store IS the infra store
+		// and this row is found exactly as before; on a split city it is a work
+		// ledger the runtime plane refuses, and the convergence lane owns it.
+		{"routed HQ work bead", hqWork.ID, e.work, cityRef, !e.split},
+	}
+	demandable := 0
+	for _, tc := range rows {
 		i := beadIndexOf(found, tc.id)
+		if !tc.onRuntime {
+			if i >= 0 {
+				t.Errorf("%s %s surfaced in the runtime-plane demand scan; on a split city a work-leg read is a misrouting bug by definition (bd memory gascity-runtime-infra-store-invariant)", tc.name, tc.id)
+			}
+			continue
+		}
+		demandable++
 		if i < 0 {
-			t.Errorf("%s %s is missing from the cross-store demand scan — this is the exact \"no work\" fail-open: a pool spawns for work its demand read cannot see, then drains", tc.name, tc.id)
+			t.Errorf("%s %s is missing from the demand scan — this is the exact \"no work\" fail-open: a pool spawns for work its demand read cannot see, then drains (D6/ga-88mxz)", tc.name, tc.id)
 			continue
 		}
 		if !sameStorePtr(stores[i], tc.store) {
@@ -180,48 +245,41 @@ func conformanceReadyFederation(t *testing.T, e splitEnv) {
 			t.Errorf("%s %s captured under store-ref %q, want %q", tc.name, tc.id, refs[i], tc.wantRef)
 		}
 	}
+	// Control: the plane narrowed something on a split city and nothing on a
+	// legacy one, so neither arm of the row above is vacuous.
+	switch {
+	case e.split && demandable == len(rows):
+		t.Fatal("the split topology demanded every leg's routed work; the runtime plane narrowed nothing and this row is pinning the pre-invariant behavior")
+	case !e.split && demandable != len(rows):
+		t.Fatalf("the legacy topology demanded %d of %d rows; there is no ledger to refuse when the work store IS the infra store", demandable, len(rows))
+	}
 
-	// The HQ work leg, stated per topology because the answer really differs.
-	// See the KNOWN GAP paragraph above: this pins what main does, not what it
-	// should do.
-	hqIndex := beadIndexOf(found, hqWork.ID)
+	// The work-leg rows must not vanish silently: the convergence lane reads
+	// every leg and counts them, which is what makes "the tick cannot see it"
+	// different from "nothing can".
 	if e.split {
-		if hqIndex >= 0 {
-			t.Errorf("routed HQ work bead %s IS in the split-city demand scan (store-ref %q). Two things produce this and they need opposite responses: the HQ-work arm landed (flip this row to expect it on both topologies, drop this invariant's KNOWN GAP paragraph, and update I2's hq leg with it) — or the LEADING store regressed to the work class, which is the #5127/#5125 bug and shows up as the durable/wisp rows going missing above", hqWork.ID, refs[hqIndex])
+		report := newRouteRecoveryLane().backstopLeg(planeLeg{label: "city", store: e.work})
+		if report.offPlaneRouted == 0 {
+			t.Errorf("the convergence lane reported no off-plane routed work for %s, which the runtime plane just refused; a bead no reader counts is D6 with extra steps", hqWork.ID)
 		}
-		return
-	}
-	if hqIndex < 0 {
-		t.Errorf("routed HQ work bead %s is missing from the single-store demand scan — on a legacy city the HQ work store IS the leading store, so this is the \"no work\" fail-open with nothing topological to blame", hqWork.ID)
-		return
-	}
-	if !sameStorePtr(stores[hqIndex], e.work) {
-		t.Errorf("routed HQ work bead %s was captured under a store that does not hold it", hqWork.ID)
-	}
-	if refs[hqIndex] != leadingRef {
-		t.Errorf("routed HQ work bead %s captured under store-ref %q, want %q", hqWork.ID, refs[hqIndex], leadingRef)
 	}
 }
 
 // conformanceAssignedWorkCapture (I2) guards the post-claim half of the
 // spawn/drain treadmill and the orphan-release TOCTOU class. A claimed
 // (in_progress) routed bead whose assignee is a DEAD session must be captured by
-// collectAssignedWorkBeadsWithStores under the leading store's arm (owner store
-// aligned, store-ref "") so orphan release can recover it; a claimed bead held
-// by a LIVE open session must NOT be released. Both topologies expect the same
-// outcome — release exactly the dead claim — which on a split city means the
-// capture and the release both have to reach the CLASS store, because that is
-// the leading store the reconciler is handed.
+// collectAssignedWorkBeadsWithStores under the leg that HOLDS it — owner store
+// aligned, and labeled with that leg's ref — so orphan release can recover it; a
+// claimed bead held by a LIVE open session must NOT be released. Both topologies
+// expect the same outcome: release exactly the dead claims.
 //
-// KNOWN GAP, pinned rather than asserted as desirable — the HQ WORK store leg,
-// the same one I1 names. The capture arms are the leading store plus the rig
-// stores, and rigBeadStores() deletes the city entry, so on a split city a dead
-// claim on a city-scope WORK bead is captured by nothing and released by
-// nothing: the bead stays in_progress against a session that is gone until some
-// other path (`gc session close`'s unclaimWorkAssignedToRetiredSessionBead)
-// happens to reach it. The hqDead leg below asserts that asymmetry on both
-// topologies. When the HQ-work arm lands, it flips to released-on-both, together
-// with I1's hqWork row.
+// The HQ WORK store leg, the same one I1 names, is the D6 half. Before S3 the
+// capture arms were the leading store (the binding, on a split city) plus the
+// rig stores, and rigBeadStores() deletes the city entry — so a dead claim on a
+// city-scope WORK bead was captured by nothing and released by nothing, staying
+// in_progress against a session that is gone until `gc session close` happened
+// to reach it. Plan(Census) names the work store and the binding as distinct
+// legs, so hqDead recovers on both topologies.
 func conformanceAssignedWorkCapture(t *testing.T, e splitEnv) {
 	sess, err := e.sessionsStore().Create(splitEnvPoolSessionBead(e.qualified, "executor-1"))
 	if err != nil {
@@ -231,9 +289,16 @@ func conformanceAssignedWorkCapture(t *testing.T, e splitEnv) {
 	dead := e.mintWispWith(t, wispOpts{title: "dead-held claimed wisp", routedTo: e.qualified, status: "in_progress", assignee: splitEnvDeadAssignee})
 	hqDead := splitEnvDeadClaimedWorkBead(t, e.work, e.qualified)
 
-	got, stores, refs, _, partial := collectAssignedWorkBeadsWithStores(e.cfg, e.sessionsStore(), e.rigStores, nil, nil)
+	got, stores, refs, _, partial := collectAssignedWorkBeadsWithStores(e.cityPath, e.cfg, e.sessionsStore(), e.rigStores, nil, nil)
 	if partial {
 		t.Fatal("collectAssignedWorkBeadsWithStores reported partial results")
+	}
+	// The graph-class wisps answer from the leg that holds them, under that
+	// leg's own ref: the binding's on a split city, the work store's ("") on a
+	// legacy one.
+	wispRef := ""
+	if e.split {
+		wispRef = string(storeref.ClassRef(wholeSplitClasses()))
 	}
 	for _, want := range []beads.Bead{live, dead} {
 		i := beadIndexOf(got, want.ID)
@@ -243,34 +308,36 @@ func conformanceAssignedWorkCapture(t *testing.T, e splitEnv) {
 		if !sameStorePtr(stores[i], e.sessionsStore()) {
 			t.Errorf("wisp %s captured with the wrong owner store — release would mutate a store that does not hold it", want.ID)
 		}
-		if refs[i] != "" {
-			t.Errorf("wisp %s captured under store-ref %q, want \"\" (the leading-store arm)", want.ID, refs[i])
+		if refs[i] != wispRef {
+			t.Errorf("wisp %s captured under store-ref %q, want %q", want.ID, refs[i], wispRef)
 		}
 	}
 
-	// The HQ leg's capture half, per topology. See the KNOWN GAP paragraph.
-	hqCaptured := beadIndexOf(got, hqDead.ID) >= 0
-	if hqCaptured != !e.split {
-		if e.split {
-			t.Errorf("dead-claimed HQ work bead %s IS captured on a split city. Either the HQ-work arm landed (flip this leg and I1's hqWork row to expect capture and release on both topologies, and drop both KNOWN GAP paragraphs) or the LEADING store regressed to the work class, which is the #5127/#5125 bug and shows up as the wisp rows above failing too", hqDead.ID)
-		} else {
-			t.Errorf("dead-claimed HQ work bead %s is NOT captured on a legacy city, where the HQ work store IS the leading store — post-claim HQ work has gone invisible to the reconciler", hqDead.ID)
-		}
+	// The HQ leg's capture half — the same answer on both topologies now.
+	hqIndex := beadIndexOf(got, hqDead.ID)
+	if hqIndex < 0 {
+		t.Fatalf("dead-claimed HQ work bead %s is NOT captured. The city work store is a Plan(Census) leg on both topologies; if this fails on the split arm the work leg has collapsed back onto the binding (D6 regression), and if it fails on both the leading store regressed (#5127/#5125, which also shows up as the wisp rows above)", hqDead.ID)
+	}
+	if !sameStorePtr(stores[hqIndex], e.work) {
+		t.Errorf("dead-claimed HQ work bead %s captured under a store that does not hold it", hqDead.ID)
+	}
+	if refs[hqIndex] != "" {
+		t.Errorf("dead-claimed HQ work bead %s captured under store-ref %q, want \"\" (the work leg)", hqDead.ID, refs[hqIndex])
 	}
 
+	// Wired the way the controller wires it: the WORK store as the owner
+	// fallback, the SESSIONS store for the liveness read. Passing the sessions
+	// store for both — which this leg used to do — hid ga-g3pf0, because the
+	// liveness query happened to land on the one store that serves session
+	// beads. Production passed the work store, whose session-label List returns
+	// empty-success, and every live claim read as dead.
 	released := releaseOrphanedPoolAssignments(
-		e.sessionsStore(), e.cfg, e.cityPath,
+		e.work, beads.SessionStore{Store: e.sessionsStore()}, e.cfg, e.cityPath,
 		sessionInfosFromBeads([]beads.Bead{sess}),
 		got, stores, refs,
 		e.rigStores,
 	)
-	// On a legacy city the HQ work store IS the leading store, so the dead HQ
-	// claim recovers alongside the dead wisp. On a split city it is in neither
-	// arm, so only the wisp does.
-	wantReleased := []string{dead.ID}
-	if !e.split {
-		wantReleased = append(wantReleased, hqDead.ID)
-	}
+	wantReleased := []string{dead.ID, hqDead.ID}
 	releasedIDs := make(map[string]bool, len(released))
 	for _, b := range released {
 		releasedIDs[b.ID] = true
@@ -283,16 +350,12 @@ func conformanceAssignedWorkCapture(t *testing.T, e splitEnv) {
 			t.Errorf("dead claim %s was not released; it stays assigned to a session that is gone", want)
 		}
 	}
-	if e.split {
-		// The gap, asserted rather than assumed: the HQ dead claim is still
-		// stranded after the release pass a split-city controller tick runs.
-		stranded, err := e.work.Get(hqDead.ID)
-		if err != nil {
-			t.Fatalf("reload HQ dead-claimed work bead: %v", err)
-		}
-		if stranded.Status != "in_progress" || stranded.Assignee != splitEnvDeadAssignee {
-			t.Errorf("HQ dead claim %s = status %q assignee %q, want it still stranded at in_progress/%s. If a controller-tick path now recovers it, the HQ-work arm has landed: update this leg, the capture check above and I1's hqWork row together", hqDead.ID, stranded.Status, stranded.Assignee, splitEnvDeadAssignee)
-		}
+	recovered, err := e.work.Get(hqDead.ID)
+	if err != nil {
+		t.Fatalf("reload HQ dead-claimed work bead: %v", err)
+	}
+	if recovered.Assignee != "" {
+		t.Errorf("HQ dead claim %s is still assigned to %q after the release pass a controller tick runs", hqDead.ID, recovered.Assignee)
 	}
 
 	reloaded, err := e.graphStore().Get(live.ID)
@@ -302,6 +365,252 @@ func conformanceAssignedWorkCapture(t *testing.T, e splitEnv) {
 	if reloaded.Status != "in_progress" || reloaded.Assignee != sess.ID {
 		t.Errorf("live holder's wisp = status %q assignee %q, want in_progress/%s (claim wrongfully released — the orphan-release TOCTOU class)", reloaded.Status, reloaded.Assignee, sess.ID)
 	}
+}
+
+// conformanceConvergenceResidence (I17) pins which store each convergence scope
+// is served from, and what that scope is allowed to pour into it.
+//
+// A convergence root is graph class — coordclass.Classify has an explicit
+// typeConvergence arm — and so are the wisps the loop pours. The city scope
+// minted them through the CITY store anyway, which is self-consistent right up
+// until the city splits: `gc storage migrate` copies every root into the graph
+// binding, the engine keeps reading and writing the retained work-store copies,
+// and the city then has two divergent convergence ledgers with every root minted
+// after cutover a strand the per-boot containment re-check names. That re-check
+// is what made maintainer-city boot-fatal at ~42 strands/hour, and it is #5127's
+// bug class exactly: infrastructure beads born in the work store on a split city.
+//
+// RIG scopes keeping their rig work store is not a symmetry violation. Class
+// routing is CITY-keyed — one graph binding per city, not one per rig — so
+// routing rig scopes to it would merge every rig's loops into a single ledger
+// keyed by nothing, and the scopes would stop being scopes. It is the same
+// city-only rule controlScopeTakesGraphClass already applies to control beads,
+// which are ClassGraph too.
+//
+// The pour arm is what that asymmetry costs. "Convergence pours a wisp" names
+// the operation, not what the formula compiles to: a v1 POURED formula compiles
+// to a molecule whose every bead is ClassWork, and work does not belong in the
+// infrastructure binding. On a relocated city scope that pour must be REFUSED,
+// because landing it strands work-class beads in the binding and landing it
+// anywhere else orphans children from their parent across a store boundary —
+// neither recoverable by the loop itself. Everywhere the store IS the scope's
+// own work ledger (every rig scope, and the city scope of a single-store city)
+// the identical pour must still succeed, or the fix broke every legacy loop.
+func conformanceConvergenceResidence(t *testing.T, e splitEnv) {
+	e.cfg.FormulaLayers = config.FormulaLayers{City: []string{convergenceResidenceFormulaDir(t)}}
+	cr := &CityRuntime{
+		cityPath:            e.cityPath,
+		cityName:            e.cfg.Workspace.Name,
+		cfg:                 e.cfg,
+		rec:                 events.Discard,
+		storageRoutes:       e.routes,
+		standaloneCityStore: e.work,
+		standaloneRigStores: e.rigStores,
+	}
+	scopes := cr.buildConvergenceScopes()
+	city, rigScope := scopes[""], scopes[e.rigName]
+	if city == nil {
+		t.Fatal("buildConvergenceScopes returned no city scope")
+	}
+	if rigScope == nil {
+		t.Fatalf("buildConvergenceScopes returned no scope for rig %q; the rig arm of this invariant would be vacuous", e.rigName)
+	}
+
+	if !sameStorePtr(city.store, e.graphStore()) {
+		t.Errorf("the city convergence scope is not served from the graph-class store; on a split city every root it mints is a strand the per-boot containment re-check makes boot-fatal")
+	}
+	if city.adapter.relocated != e.split {
+		t.Errorf("city scope adapter relocated = %v, want %v; the adapter cannot refuse a work-class pour it does not know it would be stranding", city.adapter.relocated, e.split)
+	}
+	// storePath stays the scope's ROOT DIRECTORY even when the store moved: it is
+	// the working directory the handler hands to gate commands, not a database
+	// locator, and following the store into the binding would run every gate in
+	// the wrong tree.
+	if city.storePath != e.cityPath {
+		t.Errorf("city scope storePath = %q, want the city root %q — it is the gate command's cwd, not a store locator", city.storePath, e.cityPath)
+	}
+
+	if !sameStorePtr(rigScope.store, e.rig) {
+		t.Errorf("the %q convergence scope is not served from that rig's work store; class routing is city-keyed, so pointing rig scopes at the one graph binding merges every rig's loops into a single ledger", e.rigName)
+	}
+	if rigScope.adapter.relocated {
+		t.Error("rig scope adapter reports relocated=true; a rig scope's store IS its work ledger, so a work-class pour belongs there and must not be refused")
+	}
+	if want := resolveStoreScopeRoot(e.cityPath, e.cfg.Rigs[0].Path); rigScope.storePath != want {
+		t.Errorf("rig scope storePath = %q, want the rig root %q", rigScope.storePath, want)
+	}
+
+	// A root created through the scope's own adapter — the call the engine makes
+	// — must be resident in that scope's store and in NO other leg. Two ledgers
+	// holding the same loop is the divergence, not a failed write.
+	cityRoot := convergenceRootIn(t, city, "city convergence loop")
+	assertConvergenceRootResident(t, e, cityRoot, e.graphStore(), "city")
+	rigRoot := convergenceRootIn(t, rigScope, "rig convergence loop")
+	assertConvergenceRootResident(t, e, rigRoot, e.rig, "rig "+e.rigName)
+
+	// vapor compiles root-only, so its one bead carries gc.kind=wisp and is graph
+	// class: it belongs wherever the scope is served from, on both topologies.
+	assertConvergencePours(t, city, cityRoot, convergenceVaporFormula, 1, e.graphStore(), "city")
+	assertConvergencePours(t, rigScope, rigRoot, convergenceVaporFormula, 1, e.rig, "rig "+e.rigName)
+
+	// poured compiles to a molecule root plus a child step, every bead ClassWork.
+	// A scope serving its own work ledger must still run it — that is every rig
+	// scope, and the city scope of a single-store city.
+	assertConvergencePours(t, rigScope, rigRoot, convergencePouredFormula, 2, e.rig, "rig "+e.rigName)
+	if !e.split {
+		assertConvergencePours(t, city, cityRoot, convergencePouredFormula, 2, e.work, "city")
+		return
+	}
+	assertConvergenceRefusesWorkClassPour(t, e, city, cityRoot)
+}
+
+// convergenceRootIn creates a convergence loop root through a scope's own
+// adapter and pins that it classifies as graph class — without which every
+// residence assertion built on it is about nothing.
+func convergenceRootIn(t *testing.T, scope *convergenceScope, title string) beads.Bead {
+	t.Helper()
+	id, err := scope.adapter.CreateConvergenceBead(title)
+	if err != nil {
+		t.Fatalf("creating a convergence root through the %q scope: %v", scope.rig, err)
+	}
+	root, err := scope.store.Get(id)
+	if err != nil {
+		t.Fatalf("convergence root %s is not readable from the store its own scope just wrote it to: %v", id, err)
+	}
+	if got := coordclass.Classify(root); got != coordclass.ClassGraph {
+		t.Fatalf("convergence root %s classifies as %v, want ClassGraph; the residence assertions below it would be vacuous", id, got)
+	}
+	return root
+}
+
+// assertConvergenceRootResident pins that a convergence root lives in want and
+// leaves no copy in any other leg of the fixture.
+func assertConvergenceRootResident(t *testing.T, e splitEnv, root beads.Bead, want beads.Store, scopeName string) {
+	t.Helper()
+	if _, err := want.Get(root.ID); err != nil {
+		t.Fatalf("the %s scope's convergence root %s is not resident in the store that scope is served from: %v", scopeName, root.ID, err)
+	}
+	legs := map[string]beads.Store{"work": e.work, "rig": e.rig}
+	if e.split {
+		legs["class"] = e.class
+	}
+	for legName, leg := range legs {
+		if sameStorePtr(leg, want) {
+			continue
+		}
+		if _, err := leg.Get(root.ID); !errors.Is(err, beads.ErrNotFound) {
+			t.Errorf("the %s scope's convergence root %s also resolves in the %s store (err=%v); a loop with a copy in two ledgers is what the containment re-check reports as a strand", scopeName, root.ID, legName, err)
+		}
+	}
+}
+
+// assertConvergencePours pins that a scope can instantiate formulaName into the
+// store it was handed, that the result is parented on the loop root, and that
+// re-pouring under the same idempotency key returns the same bead — which is
+// also how the crash-retry lookup is pinned to the store the pour wrote to.
+func assertConvergencePours(t *testing.T, scope *convergenceScope, parent beads.Bead, formulaName string, iter int, want beads.Store, scopeName string) {
+	t.Helper()
+	key := fmt.Sprintf("converge:%s:iter:%d", parent.ID, iter)
+	id, err := scope.adapter.PourWisp(parent.ID, formulaName, key, nil, "")
+	if err != nil {
+		t.Fatalf("the %s scope could not pour %q: %v", scopeName, formulaName, err)
+	}
+	poured, err := want.Get(id)
+	if err != nil {
+		t.Fatalf("the %s scope poured %q as %s, which is not resident in the store that scope is served from: %v", scopeName, formulaName, id, err)
+	}
+	if poured.ParentID != parent.ID {
+		t.Errorf("the %s scope poured %s with parent %q, want the convergence root %s", scopeName, id, poured.ParentID, parent.ID)
+	}
+	again, err := scope.adapter.PourWisp(parent.ID, formulaName, key, nil, "")
+	if err != nil {
+		t.Fatalf("the %s scope could not re-pour %q under the same idempotency key: %v", scopeName, formulaName, err)
+	}
+	if again != id {
+		t.Errorf("the %s scope re-poured %q as %s under the key that already produced %s; the idempotency lookup is reading a different store than the pour writes to, so every crash-retry pours a second molecule", scopeName, formulaName, again, id)
+	}
+}
+
+// assertConvergenceRefusesWorkClassPour is the split-only arm: a work-class
+// formula must be refused by a relocated city scope, and refused BEFORE
+// anything is written. A partial molecule in the binding is the same strand
+// minus the error.
+func assertConvergenceRefusesWorkClassPour(t *testing.T, e splitEnv, scope *convergenceScope, parent beads.Bead) {
+	t.Helper()
+	beforeClass, beforeWork := countBeads(t, scope.store), countBeads(t, e.work)
+	id, err := scope.adapter.PourWisp(parent.ID, convergencePouredFormula, fmt.Sprintf("converge:%s:iter:2", parent.ID), nil, "")
+	if err == nil {
+		t.Fatalf("the relocated city scope poured work-class formula %q as %s into the graph binding; those beads are exactly the strand the per-boot containment re-check makes boot-fatal", convergencePouredFormula, id)
+	}
+	if !strings.Contains(err.Error(), "work-class") {
+		t.Errorf("refusal for %q = %v, want a message naming the work-class compile and the remedy", convergencePouredFormula, err)
+	}
+	if after := countBeads(t, scope.store); after != beforeClass {
+		t.Errorf("the refused pour still wrote to the graph binding: %d -> %d beads", beforeClass, after)
+	}
+	if after := countBeads(t, e.work); after != beforeWork {
+		t.Errorf("the refused pour fell back to the WORK store: %d -> %d beads. Pouring elsewhere orphans the molecule from the convergence root it is parented on, across a store boundary", beforeWork, after)
+	}
+}
+
+// Formula names for I17's pour arm.
+const (
+	convergenceVaporFormula  = "conv-residence-vapor"
+	convergencePouredFormula = "conv-residence-poured"
+)
+
+// convergenceResidenceFormulaDir writes the two formula shapes I17's pour arm
+// discriminates between, rather than borrowing a shared fixture whose phase
+// could change under it:
+//
+//   - vapor: phase = "vapor" with no pour, which compile.go turns into a
+//     RootOnly recipe whose single root is a task carrying gc.kind=wisp — graph
+//     class.
+//   - poured: a plain v1 formula, whose root is a "molecule" container and whose
+//     step is a bare task — every bead ClassWork.
+//
+// The compile outcome is ASSERTED here, not assumed. If a compiler change made
+// both shapes graph class, the refusal arm would pass while testing nothing.
+func convergenceResidenceFormulaDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name+".toml"), []byte(body), 0o644); err != nil {
+			t.Fatalf("writing formula %s: %v", name, err)
+		}
+	}
+	write(convergenceVaporFormula, fmt.Sprintf("formula = %q\nversion = 1\nphase = \"vapor\"\n\n[[steps]]\nid = \"probe\"\ntitle = \"Probe\"\n", convergenceVaporFormula))
+	write(convergencePouredFormula, fmt.Sprintf("formula = %q\nversion = 1\n\n[[steps]]\nid = \"work\"\ntitle = \"Work\"\n", convergencePouredFormula))
+
+	for _, tt := range []struct {
+		name string
+		want coordclass.Class
+	}{
+		{convergenceVaporFormula, coordclass.ClassGraph},
+		{convergencePouredFormula, coordclass.ClassWork},
+	} {
+		recipe, err := formula.CompileWithoutRuntimeVarValidation(context.Background(), tt.name, []string{dir}, nil)
+		if err != nil {
+			t.Fatalf("compiling formula %s: %v", tt.name, err)
+		}
+		if got := recipeCoordClass(recipe); got != tt.want {
+			t.Fatalf("formula %s compiles to %v, want %v; I17's pour arm discriminates on exactly this and would be vacuous", tt.name, got, tt.want)
+		}
+	}
+	return dir
+}
+
+// countBeads is the total-row oracle for the "nothing was written" half of a
+// refusal. countGraphClassBeads cannot serve it: the molecule a work-class pour
+// would leave behind classifies as ClassWork and would not be counted.
+func countBeads(t *testing.T, store beads.Store) int {
+	t.Helper()
+	list, err := store.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
+	if err != nil {
+		t.Fatalf("listing beads for the total-row count: %v", err)
+	}
+	return len(list)
 }
 
 // conformanceByIDWriteResidence (I3) guards the by-id WRITE-residence class,
@@ -739,7 +1048,15 @@ func conformanceHookClaimClassRouting(t *testing.T, e splitEnv, workBeadID strin
 //     binding. That is a property of the topology rather than of any call site,
 //     which is exactly why it is asserted rather than assumed.
 //   - `gc session close` leads with the WORK store (openCityStore), so it cannot
-//     see the binding on its own and is handed the graph binding as a class leg.
+//     see the binding on its own.
+//
+// S2 UPDATE (ga-j4ob9): the second scan is no longer HANDED the binding by its
+// call site. Both rows now resolve the same leg set from the city's own routes
+// (assignedWorkSweepPlan), which is what closes the case the hand-threading
+// never covered — the Info-form retired-session sweep, which took no class leg
+// at all, so a dead session's binding-resident claim had no automatic reopen
+// lane. The rows below are unchanged in what they assert; only the mechanism
+// that puts the binding in the scan moved.
 //
 // What is NOT closed here, and is ga-zp3uj: the agent-side recovery tiers
 // (`bd list --status in_progress`, on_death, on_boot) are raw bd commands in the
@@ -752,20 +1069,22 @@ func assertClassRoutedClaimIsReleasable(t *testing.T, e splitEnv) {
 	for _, tt := range []struct {
 		name    string
 		leading beads.Store
-		class   []beads.Store
 	}{
 		{
 			name:    "reconciler scan — leads with the sessions-class store, which IS the binding",
 			leading: e.sessionsStore(),
 		},
 		{
-			name:    "gc session close — leads with the work store and is handed the binding",
+			name:    "gc session close — leads with the work store and resolves the binding from the routes",
 			leading: e.work,
-			class:   []beads.Store{e.class},
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if !workAssignmentStoresReach(workAssignmentStores(tt.leading, e.rigStores, tt.class...), e.class) {
+			plan, err := assignedWorkSweepPlan(e.cityPath, e.cfg, tt.leading, e.rigStores, nil)
+			if err != nil {
+				t.Fatalf("resolving the release scan's leg set: %v", err)
+			}
+			if !workAssignmentStoresReach(planStores(t, plan), e.class) {
 				t.Fatalf("no leg of the release scan is the class binding; a claim routed there is released by nothing")
 			}
 			sessionBead := beads.Bead{ID: "gcg-retired-session", Metadata: map[string]string{"session_name": "worker-1"}}
@@ -774,7 +1093,7 @@ func assertClassRoutedClaimIsReleasable(t *testing.T, e splitEnv) {
 				status:   "in_progress",
 				assignee: sessionBead.ID,
 			})
-			unclaimWorkAssignedToRetiredSessionBead(tt.leading, e.rigStores, sessionBead, "", io.Discard, tt.class...)
+			unclaimWorkAssignedToRetiredSessionBead(e.cityPath, e.cfg, tt.leading, e.rigStores, sessionBead, "", io.Discard)
 			released, err := e.class.Get(step.ID)
 			if err != nil {
 				t.Fatalf("reading the claimed graph step back from the binding: %v", err)
@@ -1139,21 +1458,34 @@ func conformanceWarmTickDemand(t *testing.T, e splitEnv) {
 	}
 }
 
-// conformanceWakeOwnershipFastPath (I10) pins the reachability model the wake
-// filter and the orphan-release ownership index share: it is resolved from CFG —
-// the holder's configured rig — and never from which physical store the bead came
-// out of. The consequence is the conformance property: the answer is IDENTICAL on
-// both topologies. A rig-bound pool holder owns the rig-store leg and does not own
-// the leading-store leg, on a legacy city and on a split city alike.
+// conformanceWakeOwnershipFastPath (I10) pins the conformance property of the
+// wake filter and the orphan-release ownership index: whatever each answers, it
+// answers IDENTICALLY on both topologies. Neither reads which physical store a
+// bead came out of; both resolve from cfg plus the holder's own identities, so a
+// legacy city and a split city cannot diverge.
 //
-// KNOWN GAP, pinned rather than asserted as desirable: on a split city the
-// leading store IS the class store, so a rig-bound holder's CLAIMED
-// class-resident bead has no wake reason and is not ownership-matched — the
-// reachability model has no coordination-class arm. Orphan release still spares
-// it through the last-resort live-session probe (I2 proves that), but the wake
-// filter drops it every tick. Closing that gap is a later slice; when it lands,
-// the two assertions below are the ones to update, and they must be updated
-// TOGETHER or the topologies stop agreeing.
+// The two mechanisms now answer the SAME question, which is the S2 flip this
+// row's own note asked for ("if you widen the ownership index, update its
+// assertion here and re-check that both sub-topologies still agree").
+//
+//   - The WAKE filter keeps a claim on the LEADING arm when the assignee is one
+//     of the holder's own exact identities, whatever the holder's rig scope.
+//     That arm is the relocated class binding on a split city — where claim-time
+//     class routing writes the assignee — and the city store on a legacy one,
+//     which a rig-scoped agent's hook fan-out reaches anyway
+//     (appendCityHookStore). Dropping the claim left a live holder with
+//     AwakeDecision{Reason:""} and the no-wake-reason drain recycled it mid-step
+//     (ga-whzrt).
+//   - The ownership INDEX now grants the same arm to the same identities. It had
+//     to move WITH the release path's own widening, not after it: the
+//     orphan-release scan reads the binding as a leg now, so an index that still
+//     answered "this holder owns only its rig" would let the scan reap a LIVE
+//     worker's binding-resident claim. A missed wake costs a cycle; a false
+//     release is claim loss (ga-j4ob9).
+//
+// Both sub-topologies answer identically, which is the conformance property:
+// neither mechanism reads which physical store a bead came out of, and the refs
+// they compare come from the city's own residency topology.
 func conformanceWakeOwnershipFastPath(t *testing.T, e splitEnv) {
 	sess, err := e.sessionsStore().Create(splitEnvPoolSessionBead(e.qualified, "executor-1"))
 	if err != nil {
@@ -1177,20 +1509,29 @@ func conformanceWakeOwnershipFastPath(t *testing.T, e splitEnv) {
 	}
 
 	infos := sessionInfosFromBeads([]beads.Bead{sess})
+	leading := e.sessionsStore()
 	kept, keptRefs := filterAssignedWorkBeadsForSessionWake(
-		e.cfg, e.cityPath, infos,
+		e.cfg, e.cityPath, leading, infos,
 		[]beads.Bead{wisp, rigWork}, []string{"", e.rigName},
 	)
-	index := makeOpenSessionStoreRefIndex(e.cityPath, e.cfg, infos, true)
+	index := makeOpenSessionStoreRefIndex(e.cityPath, e.cfg, leading, infos, true)
 
-	if len(kept) != 1 || kept[0].ID != rigWork.ID || len(keptRefs) != 1 || keptRefs[0] != e.rigName {
-		t.Fatalf("wake filter kept %d beads (refs %v), want exactly the rig-store claim %s under ref %q", len(kept), keptRefs, rigWork.ID, e.rigName)
+	if len(kept) != 2 || kept[0].ID != wisp.ID || kept[1].ID != rigWork.ID ||
+		len(keptRefs) != 2 || keptRefs[0] != "" || keptRefs[1] != e.rigName {
+		t.Fatalf("wake filter kept %d beads (ids %v refs %v), want the leading-arm claim %s under ref %q AND the rig-store claim %s under ref %q",
+			len(kept), assignedWorkIDs(kept), keptRefs, wisp.ID, "", rigWork.ID, e.rigName)
 	}
 	if !openSessionOwnsWork(nil, index, sess.ID, e.rigName, true) {
 		t.Error("the ownership index does not own the rig-store leg for its own rig-bound holder — orphan release would fall to the per-bead live probe every tick")
 	}
-	if openSessionOwnsWork(nil, index, sess.ID, "", true) {
-		t.Error("the ownership index owns the leading-store leg for a rig-bound holder; reachability is cfg-derived and must answer the same on both topologies. If you are landing the coordination-class reachability arm, update this assertion and the single-store one together.")
+	if !openSessionOwnsWork(nil, index, sess.ID, "", true) {
+		t.Error("the ownership index does not own the leading-store leg for its own rig-bound holder; the orphan-release scan reads that leg now, so a LIVE worker's claim written there is reaped — claim loss, not a missed wake (ga-j4ob9)")
+	}
+	// The widening is per-identity ownership, not a blanket keep of the leading
+	// arm: a foreign assignee on the same leg is still not owned, which is what
+	// keeps orphan release able to recover a genuinely dead holder's claim.
+	if openSessionOwnsWork(nil, index, "some-other-session", "", true) {
+		t.Error("the ownership index owns the leading-store leg for a FOREIGN identity; that would make every binding-resident claim unreleasable")
 	}
 }
 
@@ -1227,9 +1568,13 @@ func conformanceReadPathConsistency(t *testing.T, e splitEnv) {
 
 	leaf, _, wrapped := unwrapBeadPolicyStore(front)
 	if !wrapped {
-		// Relocated class store: no policy layer, so no tier expansion and no
-		// ephemeral tier to be blind to. Everything the store holds is on the
-		// main tier and every read path sees it.
+		// Relocated class store: no policy layer, so no tier EXPANSION and no
+		// tier for these two beads to hide behind — mintWisp's create lands a
+		// plain row here. That is a statement about what this front door
+		// CREATES, not about what the store can hold: a create that names the
+		// tier itself still lands an ephemeral row in this store (see
+		// mintEphemeralGraphBead), and reading it back is exactly what the
+		// federated readers were failing to do. I16 owns that half.
 		//
 		// Which branch runs is decided by the fixture's model of the class
 		// store, so it cannot police that model. The pin that does is
@@ -1299,11 +1644,13 @@ func conformanceReadPathConsistency(t *testing.T, e splitEnv) {
 
 // conformanceGraphRecipe is the durable graph.v2 workflow shape a compiled v2
 // formula actually produces: a root plus one finalize step, wired with the ONE
-// root -> finalize `blocks` edge and no parent-child edge at all.
+// root -> finalize `tracks` edge and no parent-child edge at all. The edge is
+// informational because the finalizer is what closes the root; a blocking edge
+// there is the ga-a6zy9 deadlock.
 //
 // The missing parent-child edge is the point. internal/formula/compile.go gates
 // both of its parent-child emitters on `!graphWorkflow`, and addWorkflowRootDeps
-// emits only the blocks edge, so a graph.v2 recipe carries zero parent-child
+// emits only that one edge, so a graph.v2 recipe carries zero parent-child
 // deps — measured over the core pack's v2 formulas. This recipe used to add one
 // by hand, which is the only reason materializing it on the real SQLite backend
 // tripped sqlite_store_graph_apply.go's reverse-of-a-parent-child guard: that
@@ -1333,7 +1680,7 @@ func conformanceGraphRecipe() *formula.Recipe {
 			},
 		},
 		Deps: []formula.RecipeDep{
-			{StepID: "conformance-graph", DependsOnID: "conformance-graph.workflow-finalize", Type: "blocks"},
+			{StepID: "conformance-graph", DependsOnID: "conformance-graph.workflow-finalize", Type: "tracks"},
 		},
 	}
 }
@@ -1555,6 +1902,16 @@ func beadIDsOf(list []beads.Bead) []string {
 // The single-store row is not a formality: it is the byte-identity claim. There
 // the graph class is not relocated, both surfaces federate the same two work
 // legs, and the answer must be exactly the one a legacy city already got.
+//
+// # What an equality oracle cannot see, and what covers it
+//
+// CLI == API is blind by construction to a defect BOTH surfaces have. ga-8lyxc
+// was exactly that: the CLI defaulted its ready read to the zero-value tier and
+// the API passed no ready query at all, so both dropped the relocated store's
+// ephemeral rows and this row stayed green while both surfaces were short. I16
+// is the complement — its oracle is the LEG, not the other surface — and the two
+// rows have to be read together: this one pins that the surfaces agree, that one
+// pins that what they agree on is everything the stores hold.
 func conformanceCLIReadyFederation(t *testing.T, e splitEnv) {
 	cityWork, err := e.work.Create(beads.Bead{Title: "city work bead", Type: "task"})
 	if err != nil {
@@ -1634,7 +1991,7 @@ func conformanceCLIReadyDeadRigLeg(t *testing.T, e splitEnv) {
 		t.Fatalf("API partial_errors = %v, want the dead rig %q named", body.PartialErrors, deadRig)
 	}
 
-	legs := readyFederationLegs(loadedCityName(dead.cfg, dead.cityPath), dead.work, dead.rigStores, fixtureGraphLeg(dead))
+	legs := mustReadyLegs(t, loadedCityName(dead.cfg, dead.cityPath), dead.work, dead.rigStores, fixtureGraphLeg(dead))
 	rows, err := readyBeadsForOpts(legs, readyOpts{})
 	if err == nil {
 		t.Fatalf("gc ready served %d beads over the same dead %q leg; the API said that read was PARTIAL, and a bare array has nowhere to say so — the CLI's equivalent of Partial 200 is a non-zero exit", len(rows), deadRig)
@@ -1662,7 +2019,7 @@ func containsSubstring(list []string, want string) bool {
 // gate, so this exercises the leg-selection decision rather than restating it.
 func cliReadyIDs(t *testing.T, e splitEnv) []string {
 	t.Helper()
-	legs := readyFederationLegs(
+	legs := mustReadyLegs(t,
 		loadedCityName(e.cfg, e.cityPath),
 		e.work,
 		e.rigStores,
@@ -1718,6 +2075,18 @@ type apiReadyListBody struct {
 // rows.
 func apiReadyBody(t *testing.T, e splitEnv) apiReadyListBody {
 	t.Helper()
+	return apiGetBeadListBody(t, e, "/beads/ready")
+}
+
+// apiGetBeadListBody serves one of the city-scoped bead read endpoints through
+// the REAL handler stack over the fixture's stores and decodes the list body.
+//
+// The state is a controllerState — the production api.State — so BeadStores(),
+// CityBeadStore() and GraphBeadStore() resolve through exactly the dispatch the
+// running controller uses. suffix is the city-scoped path with its query string,
+// e.g. "/beads/ready" or "/beads?status=in_progress".
+func apiGetBeadListBody(t *testing.T, e splitEnv, suffix string) apiReadyListBody {
+	t.Helper()
 	cityName := loadedCityName(e.cfg, e.cityPath)
 	state := &controllerState{
 		cfg:           e.cfg,
@@ -1728,17 +2097,159 @@ func apiReadyBody(t *testing.T, e splitEnv) apiReadyListBody {
 		storageRoutes: e.routes,
 	}
 	mux := api.NewSupervisorMux(&singleCityStateResolver{state: state}, nil, false, "test", "", time.Now()).WithAnyHostAllowed()
-	req := httptest.NewRequest(http.MethodGet, "/v0/city/"+cityName+"/beads/ready", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v0/city/"+cityName+suffix, nil)
 	rec := httptest.NewRecorder()
 	mux.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("GET /beads/ready = %d, want 200 (body=%q)", rec.Code, rec.Body.String())
+		t.Fatalf("GET %s = %d, want 200 (body=%q)", suffix, rec.Code, rec.Body.String())
 	}
 	var body apiReadyListBody
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode /beads/ready: %v (body=%q)", err, rec.Body.String())
+		t.Fatalf("decode %s: %v (body=%q)", suffix, err, rec.Body.String())
 	}
+	// The partial tier is deliberately NOT asserted here: the dead-rig row
+	// (conformanceCLIReadyDeadRigLeg) reads this endpoint expecting Partial
+	// exactly, and a helper that failed on it would make that row unwritable.
+	// Callers over healthy stores assert it themselves.
 	return body
+}
+
+// conformanceFederatedReadTier (I16) pins that a city-wide federated read asks
+// EVERY leg the same question about storage tiers.
+//
+// # The defect, measured on a live split city
+//
+// The legs are not wrapped alike. A work store sits behind cmd/gc's bead-policy
+// layer, whose expandPolicyReadTier / expandPolicyReadyQuery rewrite a
+// TierIssues read to TierBoth before it reaches the backend. A relocated class
+// store has no such layer — openStorageRoutes keys the class map straight to the
+// engine value the provider returned. So a query that left TierMode at its zero
+// value asked the work legs one question and the class leg a narrower one, and
+// merged the two answers as if they were the same question.
+//
+// win-mc-forge measured it, and the arithmetic is exact: against the relocated
+// graph database `bd ready --include-ephemeral --limit 0` returned 17 claimable
+// beads, three of them wisps; the federated reader over the same store returned
+// exactly the other 14, while still serving the work stores' own ephemeral rows.
+// No leg errored. No flag was rejected. The wisps were simply not there — and
+// ephemeral wisps are how orchestration steps run, so a molecule mid-execution
+// reads as having no runnable frontier and is diagnosed as stalled when it is
+// fine.
+//
+// # Why the CLI == API row (I13) could not catch it
+//
+// I13's oracle is the OTHER surface, and both surfaces had the same hole: the
+// CLI defaulted to TierIssues and the API passed no ready query at all. Two
+// surfaces agreeing about a short answer is what an equality oracle is blind to
+// by construction. So this row's oracle is the LEG ITSELF — everything the store
+// holds must reach the merged answer — which is the same arithmetic
+// win-mc-forge ran by hand and cannot be satisfied by two wrong surfaces
+// agreeing.
+//
+// # Both topologies, and the single-store row is the byte-identity claim
+//
+// The single-store row is not a formality. Its owning leg is the policy-wrapped
+// work store, which has ALWAYS answered at TierBoth, so this row passes before
+// and after the fix and fails the moment the fix narrows a legacy city's answer.
+func conformanceFederatedReadTier(t *testing.T, e splitEnv) {
+	durable := mintDurableGraphBead(t, e, "federated-tier durable graph bead", "")
+	wisp := mintEphemeralGraphBead(t, e, "federated-tier graph wisp")
+
+	owner, ownerName := e.owner()
+	legIDs := legReadyIDsAcrossTiers(t, owner)
+	if !containsString(legIDs, wisp.ID) || !containsString(legIDs, durable.ID) {
+		t.Fatalf("the %s store's own ready read = %v, missing durable=%s or wisp=%s; the fixture is not staging the two tiers this row is about", ownerName, legIDs, durable.ID, wisp.ID)
+	}
+
+	assertFederationServesWholeLeg(t, "gc ready", ownerName, legIDs, cliReadyIDs(t, e))
+	assertFederationServesWholeLeg(t, "GET /v0/beads/ready", ownerName, legIDs, apiReadyIDs(t, e))
+
+	conformanceFederatedInFlightTier(t, e, ownerName)
+}
+
+// conformanceFederatedInFlightTier is the in-flight arm of I16, and it is the
+// symptom the incident was reported as: an adopt-pr step running as an ephemeral
+// wisp is invisible in the mid-flight listing, so a molecule that is executing
+// normally reads as having nothing in progress.
+//
+// It covers the other two federated readers — `gc ready --status in_progress`
+// (federateListBeads) and GET /v0/beads?status=in_progress (the API's list
+// fan-out) — which take a ListQuery rather than a ReadyQuery and had the same
+// unstated tier.
+func conformanceFederatedInFlightTier(t *testing.T, e splitEnv, ownerName string) {
+	t.Helper()
+	const holder = "executor-1"
+	claimed := mintEphemeralGraphBead(t, e, "federated-tier in-flight graph wisp")
+	inProgress := "in_progress"
+	if err := e.graphStore().Update(claimed.ID, beads.UpdateOpts{Status: &inProgress, Assignee: stringPtr(holder)}); err != nil {
+		t.Fatalf("claiming the in-flight graph wisp %s: %v", claimed.ID, err)
+	}
+
+	legs := mustReadyLegs(t, loadedCityName(e.cfg, e.cityPath), e.work, e.rigStores, fixtureGraphLeg(e))
+	rows, err := readyBeadsForOpts(legs, readyOpts{status: readyStatusInProgress})
+	if err != nil {
+		t.Fatalf("gc ready --status in_progress over the fixture stores: %v", err)
+	}
+	cli := make([]string, 0, len(rows))
+	for _, row := range rows {
+		cli = append(cli, row.ID)
+	}
+	if !containsString(cli, claimed.ID) {
+		t.Errorf("`gc ready --status in_progress` = %v, missing the claimed ephemeral %s-store wisp %s. This is the reported symptom verbatim: a step running as a wisp is invisible mid-flight, so the molecule reads as having no runnable frontier and is diagnosed as stalled while it is executing", cli, ownerName, claimed.ID)
+	}
+
+	body := apiGetBeadListBody(t, e, "/beads?status=in_progress")
+	if body.Partial {
+		t.Fatalf("GET /v0/beads?status=in_progress reported a partial read over healthy stores: %v", body.PartialErrors)
+	}
+	apiIDs := make([]string, 0, len(body.Items))
+	for _, b := range body.Items {
+		apiIDs = append(apiIDs, b.ID)
+	}
+	if !containsString(apiIDs, claimed.ID) {
+		t.Errorf("GET /v0/beads?status=in_progress = %v, missing the claimed ephemeral %s-store wisp %s; the CLI and the API fan out over the same legs and must not disagree about which tiers those legs span", apiIDs, ownerName, claimed.ID)
+	}
+}
+
+// legReadyIDsAcrossTiers is the ORACLE for I16: everything one leg holds as
+// claimable work across both storage tiers, read from that store directly.
+//
+// The tier is spelled beads.TierBoth literally rather than through
+// beads.FederatedReadTier, which is the constant under test. Taking the oracle
+// from the same constant would make this row pass by construction the day
+// somebody narrows it.
+func legReadyIDsAcrossTiers(t *testing.T, store beads.Store) []string {
+	t.Helper()
+	rows, err := beads.HandlesFor(store).Live.Ready(beads.ReadyQuery{TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatalf("reading the leg's own ready set across both tiers: %v", err)
+	}
+	ids := make([]string, 0, len(rows))
+	for _, b := range rows {
+		ids = append(ids, b.ID)
+	}
+	return ids
+}
+
+// assertFederationServesWholeLeg asserts that every id a leg holds reached the
+// merged answer, and reports the miss in the arithmetic shape the live report
+// used: leg total, merged∩leg total, and the difference by id.
+func assertFederationServesWholeLeg(t *testing.T, surface, legName string, legIDs, merged []string) {
+	t.Helper()
+	var missing []string
+	served := 0
+	for _, id := range legIDs {
+		if containsString(merged, id) {
+			served++
+			continue
+		}
+		missing = append(missing, id)
+	}
+	if len(missing) == 0 {
+		return
+	}
+	t.Errorf("%s dropped %d of the %s store's %d claimable beads: the leg holds %d, the merged answer carries %d of them, %d - %d = %d missing %v. Nothing failed and nothing was rejected — the rows are simply not there, which is indistinguishable from work that does not exist",
+		surface, len(missing), legName, len(legIDs), len(legIDs), served, len(legIDs), len(missing), served, missing)
 }
 
 // conformanceProjectionCoherence (I14) pins that the two `gc bd` PROJECTIONS
@@ -1877,7 +2388,7 @@ func conformanceProjectionCoherence(t *testing.T, e splitEnv) {
 	}
 
 	// The way out the refusal names, on both topologies.
-	legs := readyFederationLegs(loadedCityName(e.cfg, e.cityPath), e.work, e.rigStores, fixtureGraphLeg(e))
+	legs := mustReadyLegs(t, loadedCityName(e.cfg, e.cityPath), e.work, e.rigStores, fixtureGraphLeg(e))
 	readyIDs := func(status string) []string {
 		t.Helper()
 		rows, err := readyBeadsForOpts(legs, readyOpts{status: status, metadataFields: []string{selector}})
@@ -2040,7 +2551,7 @@ func conformanceWorkQueryFederation(t *testing.T, e splitEnv) {
 	}
 
 	routed := e.mintWispWith(t, wispOpts{title: "routed graph step", routedTo: e.qualified})
-	legs := readyFederationLegs(loadedCityName(e.cfg, e.cityPath), e.work, e.rigStores, fixtureGraphLeg(e))
+	legs := mustReadyLegs(t, loadedCityName(e.cfg, e.cityPath), e.work, e.rigStores, fixtureGraphLeg(e))
 	rows, err := readyBeadsForOpts(legs, readyOpts{
 		unassigned:     true,
 		metadataFields: []string{beadmeta.RoutedToMetadataKey + "=" + e.qualified},
@@ -2123,7 +2634,7 @@ func conformanceWorkQueryClaimsWhatItSees(t *testing.T, e splitEnv) {
 // command.
 func assertFederatedReaderServes(t *testing.T, e splitEnv, graphBeadID, tier string, opts readyOpts) {
 	t.Helper()
-	legs := readyFederationLegs(loadedCityName(e.cfg, e.cityPath), e.work, e.rigStores, fixtureGraphLeg(e))
+	legs := mustReadyLegs(t, loadedCityName(e.cfg, e.cityPath), e.work, e.rigStores, fixtureGraphLeg(e))
 	rows, err := readyBeadsForOpts(legs, opts)
 	if err != nil {
 		t.Fatalf("the reader the split work_query's %s tier names failed over healthy stores: %v", tier, err)

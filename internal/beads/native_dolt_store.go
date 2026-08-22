@@ -249,31 +249,10 @@ type NativeDoltStore struct {
 	// tests set it (to exercise budget exhaustion without a real 90s wait).
 	readRetryBudgetOverride time.Duration
 
-	// condWritesStamp carries the factory-stamped conditional-writes mode.
-	// NativeDoltStore implements the NARROW metadata value-CAS
-	// (MetadataCASWriter, see native_dolt_store_conditional.go) but NOT
-	// ConditionalWriter, so the stamp's effect at the seam is unchanged:
-	// require→typed refusal / auto→loud degrade, never a silent legacy write
-	// under require.
-	//
-	// The gap is the revision-CAS trio, and it is a BACKEND gap, not an
-	// unwritten method. UpdateIfMatch/CloseIfMatch/DeleteIfMatch need a fence
-	// token that advances on every mutation and is never reused; beads v1.1.0
-	// has none. types.Issue carries no revision, the issues DDL has no version
-	// column, updated_at is second-granularity — so two same-second writes
-	// compare EQUAL and a stale fence silently succeeds, which is the lost
-	// update the fence exists to prevent — and label mutations never touch
-	// updated_at at all. A counter this store maintained itself would fence
-	// nothing, because the Dolt database is multi-writer (bd CLI, other
-	// gascity processes, graph-apply). Upstream beads #4697 (claim_fence) is
-	// the missing primitive; when it lands the trio becomes implementable and
-	// this store can declare ConditionalWriter.
-	//
-	// Declaring ConditionalWriter early to expose the CAS method would make
-	// ResolveConditionalWriter resolve under require and hand the trio's
-	// callers a wrong fence — the precise silent-write failure this refusal
-	// currently makes impossible. internal/beads/metadata_cas.go carries the
-	// full reasoning and the narrow interface's own resolution path.
+	// condWritesStamp carries the factory-stamped conditional-writes mode. The
+	// pinned upstream Storage contract requires row-version checked update and
+	// close plus transactions; DeleteIfMatch composes the matching transaction
+	// from GetIssue, RowVersion equality, and DeleteIssue.
 	condWritesStamp
 
 	localStrings *localSidecar // clone-local data; see Store.SetLocalString
@@ -942,10 +921,17 @@ func (s *NativeDoltStore) Update(id string, opts UpdateOpts) error {
 		return err
 	}
 	defer release()
-	ctx, cancel := nativeDoltOperationContext(context.TODO())
-	defer cancel()
-	err = storage.RunInTransaction(ctx, fmt.Sprintf("gc: update bead %s", id), func(tx beadslib.Transaction) error {
-		return s.applyUpdateInTx(ctx, tx, id, opts)
+	// Retry a lost serialization race rather than surfacing it to the caller:
+	// a concurrent writer to the same bead store is normal (the supervisor,
+	// the reconciler and an operator request all write during city startup),
+	// and without this an ordinary conflict fails the write permanently and
+	// reaches the API as a 500.
+	err = retryOnNativeDoltSerializationConflict(func() error {
+		ctx, cancel := nativeDoltOperationContext(context.TODO())
+		defer cancel()
+		return storage.RunInTransaction(ctx, fmt.Sprintf("gc: update bead %s", id), func(tx beadslib.Transaction) error {
+			return s.applyUpdateInTx(ctx, tx, id, opts)
+		})
 	})
 	if err != nil {
 		return nativeStoreError(id, err)
@@ -1111,8 +1097,47 @@ func (s *NativeDoltStore) Close(id string) error {
 		return err
 	}
 	defer release()
-	ctx, cancel := nativeDoltOperationContext(context.TODO())
-	defer cancel()
+
+	return retryOnNativeDoltSerializationConflict(func() error {
+		ctx, cancel := nativeDoltOperationContext(context.TODO())
+		defer cancel()
+		return s.closeOnce(ctx, storage, id)
+	})
+}
+
+// closeOnce performs one complete close attempt, read included. A retry calls
+// this whole operation rather than just the write, so every attempt decides
+// from freshly read state.
+//
+// Replaying the write is safe because a serialization conflict guarantees the
+// write did not land, and because every CloseIssue path commits exactly once.
+// There are three such paths and they do not share a mechanism, so the property
+// is stated per branch rather than asserted for "both backends":
+//
+//   - dolt.DoltStore, permanent bead: withRetryTx/withWriteTx (issues.go
+//     CloseIssue).
+//   - dolt.DoltStore, active wisp: CloseIssue branches to closeWisp, which uses
+//     a bare BeginTx/Commit with a deferred Rollback and deliberately no
+//     withRetryTx. Its own comment says not to add one, which is precisely why
+//     the retry belongs out here: that path has no internal retry at all.
+//   - embeddeddolt.EmbeddedDoltStore: one withConn transaction.
+//
+// Single-commit is the whole argument, so contrast it with a real two-commit
+// caller rather than a guessed one: beadslib's RunInTransaction commits the
+// regular tx and the ignored tx separately and can fail after the first landed,
+// which is why its callers cannot simply replay. SetMetadataBatch is NOT such a
+// caller despite the shape of its name; it calls storage.UpdateIssue directly,
+// which branches the same three ways Close does: permanent Dolt under
+// withRetryTx, active wisps through updateWisp's bare BeginTx/Commit, and
+// embedded under withConn. Close has no two-commit window on any branch.
+//
+// The re-read is what makes an attempt correct in the presence of OTHER
+// writers, which is a live case rather than a hypothetical: the retry sleeps
+// between attempts, so a concurrent actor can close the bead in that gap. The
+// short-circuit returns nil instead of issuing a redundant CloseIssue, and
+// recomputing the reason per attempt keeps it consistent with the state the
+// attempt actually observed.
+func (s *NativeDoltStore) closeOnce(ctx context.Context, storage beadslib.Storage, id string) error {
 	current, err := storage.GetIssue(ctx, id)
 	if err != nil {
 		return nativeStoreError(id, err)
@@ -1137,8 +1162,29 @@ func (s *NativeDoltStore) Reopen(id string) error {
 		return err
 	}
 	defer release()
-	ctx, cancel := nativeDoltOperationContext(context.TODO())
-	defer cancel()
+
+	return retryOnNativeDoltSerializationConflict(func() error {
+		ctx, cancel := nativeDoltOperationContext(context.TODO())
+		defer cancel()
+		return s.reopenOnce(ctx, storage, id)
+	})
+}
+
+// reopenOnce is closeOnce's mirror and is safe to replay for the same reason:
+// a serialization conflict means the write did not land, and the re-read
+// short-circuits an already-open bead. The two short-circuits are separate
+// lines testing separate statuses, so each is proven by its own test rather
+// than by symmetry with the other.
+//
+// The empty reason below is load-bearing, not incidental. beadslib's
+// ReopenIssue performs UpdateIssue and then, ONLY when reason is non-empty, a
+// separate AddComment in its own transaction. Passing a real reason would
+// therefore split this into two independent writes and reintroduce exactly the
+// window this function does not otherwise have: if the update commits and the
+// comment conflicts, the replay re-reads, sees StatusOpen, short-circuits, and
+// the comment is silently dropped. Anything that starts passing a reason has to
+// move the comment inside the retried unit or make its loss explicit.
+func (s *NativeDoltStore) reopenOnce(ctx context.Context, storage beadslib.Storage, id string) error {
 	current, err := storage.GetIssue(ctx, id)
 	if err != nil {
 		return nativeStoreError(id, err)
@@ -1228,43 +1274,51 @@ func (s *NativeDoltStore) Ready(queries ...ReadyQuery) ([]Bead, error) {
 		var beads []Bead
 		seen := make(map[string]bool)
 		now := time.Now().UTC()
-	statusLoop:
-		for _, status := range nativeDoltOpenReadyStatuses {
-			filter := beadslib.WorkFilter{Status: status}
-			if q.TierMode == TierBoth || q.TierMode == TierWisps {
-				filter.IncludeEphemeral = true
+		// One GetReadyWork call covers every open-class backing status via
+		// WorkFilter.Statuses. The previous one-call-per-status loop re-paid
+		// the deferred-parents pre-query, the wisp arm, and the transaction
+		// round trips seven times per Ready() (sr-5rz: ~30-70ms per call on
+		// a live server-mode store). The backing Limit stays 0 because the
+		// gc-side post-filter below (tier, excluded types/labels, defer)
+		// discards rows the store cannot, so a server-side limit could
+		// under-fill the result.
+		filter := beadslib.WorkFilter{Statuses: nativeDoltOpenReadyStatuses}
+		if q.TierMode == TierBoth || q.TierMode == TierWisps {
+			filter.IncludeEphemeral = true
+		}
+		if q.Assignee != "" {
+			filter.Assignee = &q.Assignee
+		}
+		issues, err := storage.GetReadyWork(ctx, filter)
+		if err != nil {
+			return err
+		}
+		for _, issue := range issues {
+			// The StatusDeferred branch exists so an expired time-bound
+			// deferral (defer_until in the past) can resurface. An issue
+			// with no defer_until at all was never time-bound — it's bd
+			// defer's status-based indefinite deferral — and must stay
+			// hidden. mapBdStatus collapses status to "open" and
+			// IsDeferred only inspects DeferUntil, so both would
+			// otherwise look identical to an ordinary open bead once
+			// beadFromNativeIssue erases the raw status. The per-status
+			// loop keyed this on the filter status it was querying for;
+			// with the whole set in one call the row's own raw status is
+			// the equivalent discriminator.
+			if issue.Status == beadslib.StatusDeferred && issue.DeferUntil == nil {
+				continue
 			}
-			if q.Assignee != "" {
-				filter.Assignee = &q.Assignee
-			}
-			issues, err := storage.GetReadyWork(ctx, filter)
+			bead, err := beadFromNativeIssue(issue)
 			if err != nil {
 				return err
 			}
-			for _, issue := range issues {
-				// The StatusDeferred branch exists so an expired time-bound
-				// deferral (defer_until in the past) can resurface. An issue
-				// with no defer_until at all was never time-bound — it's bd
-				// defer's status-based indefinite deferral — and must stay
-				// hidden. mapBdStatus collapses status to "open" and
-				// IsDeferred only inspects DeferUntil, so both would
-				// otherwise look identical to an ordinary open bead once
-				// beadFromNativeIssue erases the raw status.
-				if status == beadslib.StatusDeferred && issue.DeferUntil == nil {
-					continue
-				}
-				bead, err := beadFromNativeIssue(issue)
-				if err != nil {
-					return err
-				}
-				if !IsReadyCandidateForTier(bead, now, q.TierMode) || seen[bead.ID] {
-					continue
-				}
-				seen[bead.ID] = true
-				beads = append(beads, bead)
-				if q.Limit > 0 && len(beads) >= q.Limit {
-					break statusLoop
-				}
+			if !IsReadyCandidateForTier(bead, now, q.TierMode) || seen[bead.ID] {
+				continue
+			}
+			seen[bead.ID] = true
+			beads = append(beads, bead)
+			if q.Limit > 0 && len(beads) >= q.Limit {
+				break
 			}
 		}
 		out = beads
@@ -1377,9 +1431,47 @@ func (s *NativeDoltStore) SetMetadata(id, key, value string) error {
 }
 
 const (
-	nativeMetadataWriteAttempts     = 3
-	nativeMetadataWriteRetryBackoff = 25 * time.Millisecond
+	nativeWriteAttempts     = 3
+	nativeWriteRetryBackoff = 25 * time.Millisecond
 )
+
+// retryOnNativeDoltSerializationConflict runs attempt until it succeeds, fails
+// with something other than a Dolt serialization conflict, or exhausts
+// nativeWriteAttempts.
+//
+// Re-running the whole attempt is safe: it re-reads inside a fresh transaction
+// and therefore builds on the competing transaction's committed rows rather
+// than overwriting them from a stale read. In the conflict this guards against,
+// the regular-table commit is the one that loses the race and nothing lands.
+// isNativeDoltSerializationConflict classifies on error text and cannot tell
+// which of beadslib's commit points failed, so a conflict reported after the
+// regular commit already succeeded would replay the attempt; callers must
+// therefore keep each attempt idempotent under replay, which the metadata
+// merge, label add/remove and reparent operations are.
+//
+// Each attempt gets its own operation context, so an earlier attempt's deadline
+// cannot doom the retries.
+//
+// Every other error is returned on the first try. Retrying a genuine fault only
+// multiplies write load and hides the cause behind a slower failure.
+//
+// Callers hold the storage read lock across every attempt, so the backoff sleeps
+// inside this loop delay anything waiting to take s.mu for writing (store close
+// and the reconnect handle swap) by at most the total backoff. Holding it is
+// deliberate: releasing between attempts would let the handle be swapped
+// mid-retry, so a retry could run against a different storage than the one whose
+// transaction it is repeating.
+func retryOnNativeDoltSerializationConflict(attempt func() error) error {
+	var err error
+	for n := 1; n <= nativeWriteAttempts; n++ {
+		err = attempt()
+		if err == nil || !isNativeDoltSerializationConflict(err) || n == nativeWriteAttempts {
+			return err
+		}
+		time.Sleep(time.Duration(n) * nativeWriteRetryBackoff)
+	}
+	return err
+}
 
 // SetMetadataBatch sets multiple metadata keys on a bead.
 func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) error {
@@ -1389,16 +1481,11 @@ func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) err
 	}
 	defer release()
 
-	for attempt := 1; attempt <= nativeMetadataWriteAttempts; attempt++ {
+	return retryOnNativeDoltSerializationConflict(func() error {
 		ctx, cancel := nativeDoltOperationContext(context.TODO())
-		err = s.setMetadataBatchOnce(ctx, storage, id, kvs)
-		cancel()
-		if err == nil || !isNativeDoltSerializationConflict(err) || attempt == nativeMetadataWriteAttempts {
-			return err
-		}
-		time.Sleep(time.Duration(attempt) * nativeMetadataWriteRetryBackoff)
-	}
-	return err
+		defer cancel()
+		return s.setMetadataBatchOnce(ctx, storage, id, kvs)
+	})
 }
 
 // setMetadataBatchOnce performs one complete metadata read-merge-write attempt.
@@ -1438,6 +1525,7 @@ func isNativeDoltSerializationConflict(err error) bool {
 	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "error 1213") ||
+		strings.Contains(msg, "error 1205") ||
 		(strings.Contains(msg, "sqlstate") && strings.Contains(msg, "40001")) ||
 		strings.Contains(msg, "(40001)") ||
 		strings.Contains(msg, "this transaction conflicts with a committed transaction")
@@ -1902,6 +1990,7 @@ func nativeIssueFromBead(b Bead) (*beadslib.Issue, error) {
 		Ephemeral:   b.Ephemeral,
 		NoHistory:   b.NoHistory,
 		DeferUntil:  cloneTimePtr(b.DeferUntil),
+		RowVersion:  b.Revision,
 	}
 	if b.Priority != nil {
 		issue.Priority = *b.Priority
@@ -1966,6 +2055,7 @@ func beadFromNativeIssue(issue *beadslib.Issue) (Bead, error) {
 		Ephemeral:   issue.Ephemeral,
 		NoHistory:   issue.NoHistory,
 		DeferUntil:  cloneTimePtr(issue.DeferUntil),
+		Revision:    issue.RowVersion,
 	}
 	for _, dep := range issue.Dependencies {
 		if dep == nil {

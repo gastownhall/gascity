@@ -427,12 +427,25 @@ func infraMigrationOperatorAdvice(report infraMigrationReport, logPrefix string)
 				logPrefix, infraMigrationClassList(), report.Target.Binding, report.Target.MarkerPath(), storageMigrationCommand)
 		}
 	case infraMigrationStranded:
-		situation = fmt.Sprintf("%s: this city converged on binding %q, and the retained work store holds %d infrastructure bead(s) the binding cannot read: %s. The named beads are intact in the retained work store. Stop every writer, recover them into the binding's database, and re-check with `gc storage status`, which exits zero once the binding contains them.",
-			logPrefix, report.Target.Binding, len(report.Stranded), infraStrandedIDList(report.Stranded))
+		// The remedy names a command rather than describing one. It used to
+		// describe one — "recover them into the binding's database" — and a
+		// city that acquired strands was then permanently alarmed with no
+		// documented way out, because the migration refuses to re-run and
+		// nothing else moved a bead. See infra_class_recover.go for why the
+		// repair is a separate, additive verb and not the migration again.
+		situation = fmt.Sprintf("%s: this city converged on binding %q, and the retained work store holds %d infrastructure bead(s) the binding cannot read: %s. The named beads are intact in the retained work store. Stop every writer and copy them into the binding with:  %s. Re-check with `gc storage status`, which exits zero once the binding contains them.",
+			logPrefix, report.Target.Binding, len(report.Stranded), infraStrandedIDList(report.Stranded), storageRecoveryInstruction())
 	case infraMigrationUncheckable:
 		situation = fmt.Sprintf("%s: this city's infrastructure binding %q could NOT be verified (reason above), so nothing here proved it is safe to serve from.", logPrefix, report.Target.Binding)
 	case infraMigrationBornSplitBlocked:
-		situation = fmt.Sprintf("%s: binding %q is served by a provider this build cannot migrate onto, so it serves only while the work store holds no infrastructure bead — and the work store holds %d: %s. Either an earlier configuration wrote them before this city moved to the split, or a writer without this [storage] configuration is still writing. The named beads are intact in the work store. Recover them into the binding's database with every writer stopped, then delete them from the work store — the work store was never this split's infrastructure source, and the next boot serves once it holds none.",
+		// This arm deliberately does NOT name the recovery command. That verb
+		// resolves its destination through resolveInfraBindingTarget, which
+		// answers only for a binding backed by this build's own bead engine —
+		// and this outcome exists precisely because the binding is served by a
+		// provider this build carries no migration discipline for. Naming it
+		// here would send the operator to a command that refuses.
+		// TestBornSplitAdviceDoesNotNameARepairItCannotRun pins that.
+		situation = fmt.Sprintf("%s: binding %q is served by a provider this build cannot migrate onto, so it serves only while the work store holds no infrastructure bead — and the work store holds %d: %s. Either an earlier configuration wrote them before this city moved to the split, or a writer without this [storage] configuration is still writing. The named beads are intact in the work store. Recover them into the binding's database with every writer stopped, then delete them from the work store — the work store was never this split's infrastructure source, and the next boot serves once it holds none. This build carries no repair command for that provider; the one it does carry serves only a binding backed by its own bead engine.",
 			logPrefix, report.Target.Binding, len(report.Stranded), infraStrandedIDList(report.Stranded))
 	case infraMigrationGenesisBlocked:
 		if report.ServedProvider == "" {
@@ -1099,8 +1112,8 @@ func confirmInfraConvergence(cityPath string, target infraBindingTarget, logPref
 	// What to DO about it is not decided here. This names the defect; the single
 	// revert decision (infraMigrationOperatorAdvice, on evidence read from the
 	// binding) is what follows it.
-	fmt.Fprintf(stderr, "%s: %d infrastructure bead(s) in the retained work store were never carried by the proven copy and are NOT in the converged binding %s: %s%s. A writer this migration could not fence wrote them to the source during or after the cutover. They are intact in the work store. Stop every writer and recover the listed beads into the binding.\n", //nolint:errcheck // best-effort stderr
-		logPrefix, len(gap.Stranded), target.Database, infraStrandedIDList(gap.Stranded), residue)
+	fmt.Fprintf(stderr, "%s: %d infrastructure bead(s) in the retained work store were never carried by the proven copy and are NOT in the converged binding %s: %s%s. A writer this migration could not fence wrote them to the source during or after the cutover. They are intact in the work store. Stop every writer and copy the listed beads into the binding with:  %s\n", //nolint:errcheck // best-effort stderr
+		logPrefix, len(gap.Stranded), target.Database, infraStrandedIDList(gap.Stranded), residue, storageRecoveryInstruction())
 	return infraMigrationReport{Outcome: infraMigrationStranded, Stranded: gap.Stranded}
 }
 

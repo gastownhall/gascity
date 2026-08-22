@@ -117,6 +117,13 @@ type TemplateParams struct {
 	// pool_slot metadata without reverse-engineering the slot from the name
 	// (which fails for namepool-themed instances like "fenrir").
 	PoolSlot int
+	// BoundStepID is the work-step bead ID bound to this named/direct
+	// session, resolved during buildDesiredState from the assigned-work-bead
+	// match (namedWorkBeadID). Empty when a named session has no concrete
+	// bound step (e.g. always-mode sessions awake on default demand alone).
+	// syncSessionBeads uses this to seed gc.bound_step_id and the startup
+	// kickoff progress-binding metadata.
+	BoundStepID string
 	// EnvIdentityStamped reports whether setTemplateEnvIdentity has written
 	// an authoritative GC_ALIAS/GC_AGENT identity into Env. resolveTemplate
 	// always seeds GC_ALIAS=qualifiedName, so "Env has GC_ALIAS" is not a

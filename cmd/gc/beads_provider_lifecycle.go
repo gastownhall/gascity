@@ -739,11 +739,11 @@ var verifyManagedDoltDatabaseExistsAfterInit = func(cityPath, dir, dbName string
 
 var managedDoltListUserDatabasesAfterInit = func(port string) ([]string, error) {
 	host, user := managedDoltConnectHost(""), "root"
+	// Pooled handle owned by internal/doltpool; do not Close.
 	db, err := managedDoltOpenDB(host, port, user)
 	if err != nil {
 		return nil, fmt.Errorf("connect to managed Dolt at %s:%s: %w", host, port, err)
 	}
-	defer db.Close() //nolint:errcheck
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -1655,6 +1655,7 @@ func ensureCanonicalScopeMetadata(fs fsys.FS, scopeRoot, doltDatabase string, pr
 	if err := ensureBeadsDir(fs, filepath.Dir(path)); err != nil {
 		return err
 	}
+	announceStorageModeChange(fs, path, "server", doltDatabase)
 	_, err = contract.EnsureCanonicalMetadata(fs, path, contract.MetadataState{
 		Database:     "dolt",
 		Backend:      "dolt",
@@ -1662,6 +1663,88 @@ func ensureCanonicalScopeMetadata(fs fsys.FS, scopeRoot, doltDatabase string, pr
 		DoltDatabase: doltDatabase,
 	})
 	return err
+}
+
+// storageModeChangeSink is where a canonicalization announces that it changed a
+// scope's storage mode. os.Stderr by default so the operator running the
+// command sees it and the controller's log captures it; tests redirect it.
+//
+// It is a package sink rather than a threaded io.Writer because the flip has
+// SIX entry points — `gc init`, `gc start`, `gc supervisor run`, `gc rig add`,
+// the controller's rig-create handler, and `gc dolt config write-managed` — and
+// three of them reach ensureCanonicalScopeMetadata through initAndHookDir,
+// whose signature is the rig.Deps.InitAndHook contract. Threading a writer
+// through that boundary to carry one warning would have been a wider change
+// than the warning itself, and a sink that some callers pass io.Discard to is
+// how this went unseen in the first place: normalizeCanonicalBdScopeFiles
+// already takes a warn writer, and `gc rig add` passes io.Discard to it.
+// defaultV2MigrationWarnSink and cliStorageStderr are the in-tree precedents
+// for the shape.
+var storageModeChangeSink io.Writer = os.Stderr
+
+// announceStorageModeChange reports a canonicalization that is about to change
+// which bead database a scope reads, before it happens.
+//
+// The rewrite itself is deliberate and load-bearing: gc's managed bead store is
+// a Dolt SERVER that many processes — the controller, every agent's bd, the
+// dashboard — open concurrently, and an embedded scope opens the Dolt directory
+// in-process, which those concurrent readers cannot share. Canonicalising to
+// server mode is what makes a scope usable by a running city at all, so this
+// does not refuse it. What it stops being is SILENT: metadata.json is the only
+// thing that says which database holds a scope's beads, and rewriting it moves
+// the ledger a workspace reads without moving a single row.
+//
+// The consequence is named when it is knowable. If the mode being replaced
+// still has a Dolt repository on disk, that repository is what the scope will
+// stop reading, and the line says so with its path — which is the difference
+// between an operator seeing "my beads are gone" and seeing where they are.
+// When the previous mode has no database on disk there is nothing to leave
+// behind and the line reports only the change.
+//
+// What it does NOT claim is that the directory holds rows. `bd init` creates
+// the embedded repository whether or not a bead is ever filed in it, so a
+// freshly initialized workspace and a year-old one are the same directory shape
+// (beads.BeadDatabaseDirForDoltMode) and telling them apart requires opening the
+// database. The line names the path and the remediation and leaves the count to
+// `gc doctor`, which enumerates both stores.
+//
+// The remediation is the durable one, and it is `gc doctor`'s own
+// (splitStoreFixHint): export, review with `bd import --dry-run`, import, keep
+// both directories until reconciled. Editing dolt_mode back is deliberately not
+// offered — every lifecycle command re-canonicalizes the scope to server mode,
+// so that edit is undone by the next `gc start`, and a recovery gc itself
+// reverts sends an operator round a loop.
+//
+// Nothing is announced when the mode is unchanged, absent, or unreadable: a
+// scope gc initialized is already canonical and re-canonicalizing it every boot
+// must stay quiet, or the signal is worth nothing.
+func announceStorageModeChange(fs fsys.FS, metadataPath, want, doltDatabase string) {
+	previous, ok, err := contract.ReadDoltMode(fs, metadataPath)
+	if err != nil || !ok {
+		return
+	}
+	if strings.EqualFold(strings.TrimSpace(previous), strings.TrimSpace(want)) {
+		return
+	}
+	scopeRoot := filepath.Dir(filepath.Dir(filepath.Clean(metadataPath)))
+	if recorded, ok, err := contract.ReadDoltDatabase(fs, metadataPath); err == nil && ok {
+		doltDatabase = recorded
+	}
+	left, leftBehind := beads.BeadDatabaseDirForDoltMode(scopeRoot, previous, doltDatabase)
+	if leftBehind {
+		_, _ = fmt.Fprintf(storageModeChangeSink, "gc: changing the bead storage mode of %s from %q to %q; %s is a Dolt "+
+			"bead database that this scope will STOP reading, and no rows are copied out of it. Reads answer from the %q "+
+			"store from now on, so if beads you expect stop appearing, that directory is still where they are. Run `gc "+
+			"doctor` (check bd-split-store) to see what each store holds, then export from a copy of the inactive one, review with "+
+			"`bd import --dry-run`, and import into the active one; keep both directories until reconciled. Editing "+
+			"dolt_mode back does not hold — every `gc start`, `gc rig add` and `gc supervisor run` re-canonicalizes this "+
+			"scope to %q.\n",
+			scopeRoot, strings.TrimSpace(previous), want, left, want, want)
+		return
+	}
+	_, _ = fmt.Fprintf(storageModeChangeSink, "gc: changing the bead storage mode of %s from %q to %q; no %q bead database is "+
+		"present, so nothing is left behind.\n",
+		scopeRoot, strings.TrimSpace(previous), want, strings.TrimSpace(previous))
 }
 
 func ensureCanonicalDoltliteScopeMetadata(fs fsys.FS, scopeRoot, doltDatabase string, preserveExisting bool) error {

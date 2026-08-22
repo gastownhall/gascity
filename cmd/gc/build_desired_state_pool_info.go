@@ -57,19 +57,38 @@ func setPoolTemplateRuntimeIdentityInfo(tp *TemplateParams, desiredAlias string,
 		return
 	}
 	if strings.TrimSpace(info.Alias) != strings.TrimSpace(desiredAlias) && poolRuntimeAliasIsDeferredInfo(info) {
-		tp.Alias = ""
-		if tp.Env == nil {
-			tp.Env = make(map[string]string)
-		}
-		tp.Env["GC_ALIAS"] = ""
-		if tp.SessionName != "" {
-			tp.Env["GC_AGENT"] = tp.SessionName
-		}
-		tp.EnvIdentityStamped = false
+		clearPoolTemplateRuntimeIdentity(tp)
 		return
 	}
 	tp.Alias = desiredAlias
 	setTemplateEnvIdentity(tp, desiredAlias)
+}
+
+// clearPoolTemplateRuntimeIdentity leaves a pool spawn with no public identity:
+// no alias, an explicitly BLANK GC_ALIAS, and GC_AGENT on the session name.
+//
+// Blanking GC_ALIAS rather than skipping the stamp is load-bearing.
+// resolveTemplate seeds GC_ALIAS with the agent's bare qualified name for every
+// session (template_resolve.go), so a skipped stamp would leave every member of
+// a pool advertising the SAME identity — worse than per-slot names, because
+// then two live workers claim under one string. The empty value is also what
+// tmux session creation reads as "unset this key" (`env -u`).
+//
+// This was already the deferred-alias behavior for a slot whose name was
+// unavailable; unaliased pools make it the ordinary case.
+func clearPoolTemplateRuntimeIdentity(tp *TemplateParams) {
+	if tp == nil {
+		return
+	}
+	tp.Alias = ""
+	if tp.Env == nil {
+		tp.Env = make(map[string]string)
+	}
+	tp.Env["GC_ALIAS"] = ""
+	if tp.SessionName != "" {
+		tp.Env["GC_AGENT"] = tp.SessionName
+	}
+	tp.EnvIdentityStamped = false
 }
 
 // claimPoolSlotWithConfigInfo is the session.Info sibling of
@@ -444,7 +463,11 @@ func normalizeNonExpandingPoolSessionInfo(
 // recordDeferredNonExpandingPoolAliasConflictInfo is the session.Info sibling of
 // recordDeferredNonExpandingPoolAliasConflict. It records the deferred-alias
 // bookkeeping via the SAME bp.beadStore.Update and folds the batch onto the
-// returned Info (ApplyPatch), the authoritative post-write value.
+// returned Info (ApplyPatch), the authoritative post-write value. Writes are
+// throttled by the shared deferredSingletonAliasRetryDue backoff gate (see
+// session_beads.go) keyed off the same pool_alias_conflict_at field the
+// sync-time path reads, so this call site cannot reset that path's clock
+// without also being subject to it.
 func recordDeferredNonExpandingPoolAliasConflictInfo(
 	bp *agentBuildParams,
 	cfgAgent *config.Agent,
@@ -454,6 +477,16 @@ func recordDeferredNonExpandingPoolAliasConflictInfo(
 	count := 0
 	if existing, err := strconv.Atoi(strings.TrimSpace(info.PoolAliasConflictCount)); err == nil && existing > 0 {
 		count = existing
+	}
+	// Canonical singleton pool identity retries share the same unresolvable-
+	// conflict shape as the sync-time path in session_beads.go (a
+	// max_active_sessions=1 agent with two live sessions never releases the
+	// alias), so it must go through the SAME deferredSingletonAliasRetryDue
+	// gate rather than writing on every buildDesiredState call. Do not
+	// duplicate the backoff predicate here -- that duplication is exactly how
+	// this call site went unguarded the first time.
+	if !deferredSingletonAliasRetryDue(info.PoolAliasConflictAt, count, time.Now().UTC()) {
+		return info, nil
 	}
 	metadata := session.UpdatedAliasMetadataFromInfo(info, "")
 	metadata[poolAliasConflictMetadataKey] = canonical
