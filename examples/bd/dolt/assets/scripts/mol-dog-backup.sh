@@ -188,15 +188,23 @@ OFFSITE_STATUS="skipped"
 
 # --- Step 3: Rsync backup artifacts to offsite storage ---
 
+# The bound is configurable because 300s is a guess about someone else's disk.
+# A large artifact set going to a network mount, a userspace file provider
+# (OneDrive/Dropbox/iCloud), or a host under load can exceed it while being
+# perfectly healthy — and because rsync transfers in lexical order, the SAME
+# trailing databases get truncated every run, so the offsite copy silently
+# stops tracking part of the city while the earlier entries keep updating.
+OFFSITE_TIMEOUT="${GC_BACKUP_OFFSITE_TIMEOUT:-300}"
+
 if [ -n "$OFFSITE_PATH" ]; then
     if [ ! -d "$BACKUP_ARTIFACT_DIR" ]; then
         OFFSITE_STATUS="missing-artifacts"
     elif same_path "$BACKUP_ARTIFACT_DIR" "$DOLT_DATA_DIR"; then
         OFFSITE_STATUS="invalid-source"
-    elif run_bounded 300 rsync -a --delete "$BACKUP_ARTIFACT_DIR/" "$OFFSITE_PATH/" 2>/dev/null; then
+    elif run_bounded "$OFFSITE_TIMEOUT" rsync -a --delete "$BACKUP_ARTIFACT_DIR/" "$OFFSITE_PATH/" 2>/dev/null; then
         OFFSITE_STATUS="ok"
     else
-        OFFSITE_STATUS="failed (non-fatal)"
+        OFFSITE_STATUS="failed"
     fi
 fi
 
@@ -208,6 +216,25 @@ if [ "$FAILED_COUNT" -gt 0 ]; then
         "Failed databases:$FAILED_DBS" \
         2>/dev/null || true
 fi
+
+# An offsite step that fails without telling anyone is worse than one that is
+# switched off: the operator believes there is a remote copy, and finds out
+# otherwise only when they need it. This was previously labelled "non-fatal"
+# and reported nowhere but the summary line — an installation lost three days
+# of offsite coverage on part of its city before a human noticed by accident.
+# Non-fatal it is (the local backup did succeed, so the run does not fail);
+# silent it must not be.
+case "$OFFSITE_STATUS" in
+    ok|skipped) ;;
+    *)
+        dolt_escalate \
+            "Dolt backup: offsite publication $OFFSITE_STATUS [MEDIUM]" \
+            "Local backup succeeded ($SYNCED/$TOTAL databases) but publication to $OFFSITE_PATH did not.
+Status: $OFFSITE_STATUS. Bound: ${OFFSITE_TIMEOUT}s (raise with GC_BACKUP_OFFSITE_TIMEOUT).
+Until this clears, the only copy of these databases is on this host." \
+            2>/dev/null || true
+        ;;
+esac
 
 SUMMARY="backup — synced: $SYNCED/$TOTAL, offsite: $OFFSITE_STATUS"
 dolt_notify_done "$SUMMARY"
