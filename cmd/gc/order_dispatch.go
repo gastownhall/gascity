@@ -798,6 +798,18 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			continue
 		}
 		if !result.Due {
+			// The streak counts consecutive refusals of a DUE order, so an
+			// undue tick ends the episode. Without this a condition order that
+			// wedges and then goes false freezes its streak forever: the next
+			// refusal — possibly an unrelated incident weeks later — alerts on
+			// its first tick, carrying a first_suppressed and a
+			// suppressed_for_ms that span both episodes.
+			//
+			// Error and suspension exits deliberately do NOT clear. Those ticks
+			// never consulted the gate, so they are not evidence it opened, and
+			// resetting on them would let a flapping store hide a permanently
+			// shut gate.
+			m.clearOpenWorkSuppression(scoped)
 			// A condition check killed by its deadline never proves its
 			// condition, so the order silently never fires. Surface that
 			// distinctly (normal "condition false" is not logged) so a check
@@ -821,6 +833,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 				}
 				result = orders.CheckTriggerWithOptions(a, now, refreshedLastRunFn, m.ep, cursorFn, triggerOpts)
 				if !result.Due {
+					m.clearOpenWorkSuppression(scoped)
 					continue
 				}
 			}
@@ -1487,6 +1500,13 @@ func (m *memoryOrderDispatcher) clearOpenWorkSuppression(scoped string) {
 // them at zero — which would re-hide a permanently stalled order behind a city
 // that rescans more often than the alert threshold. Only call after draining
 // the previous dispatcher.
+//
+// Only streaks for orders THIS dispatcher still carries survive the copy, which
+// is what bounds the map. clearOpenWorkSuppression is the sole delete site and
+// it only ever names a live order, so an order that is removed, renamed,
+// rescoped, disabled, or switched to no_work_gate while suppressed would
+// otherwise leave an entry that no code path can reach again — carried forward
+// unconditionally for the life of the process.
 func (m *memoryOrderDispatcher) carryOpenWorkSuppressionFrom(prev *memoryOrderDispatcher) {
 	if m == nil || prev == nil {
 		return
@@ -1496,12 +1516,19 @@ func (m *memoryOrderDispatcher) carryOpenWorkSuppressionFrom(prev *memoryOrderDi
 	if len(prev.openWorkSuppression) == 0 {
 		return
 	}
+	live := make(map[string]struct{}, len(m.aa))
+	for i := range m.aa {
+		live[m.aa[i].ScopedName()] = struct{}{}
+	}
 	m.cacheMu.Lock()
 	defer m.cacheMu.Unlock()
 	if m.openWorkSuppression == nil {
 		m.openWorkSuppression = make(map[string]orderOpenWorkSuppression, len(prev.openWorkSuppression))
 	}
 	for key, state := range prev.openWorkSuppression {
+		if _, ok := live[key]; !ok {
+			continue
+		}
 		if _, ok := m.openWorkSuppression[key]; !ok {
 			m.openWorkSuppression[key] = state
 		}
@@ -2586,15 +2613,25 @@ var orderGateBackoffDuration = 24 * time.Second
 const (
 	// orderOpenWorkSuppressionAlertAfter is how many CONSECUTIVE open-work gate
 	// refusals an order must accumulate before the first order.suppressed event.
-	// At the default 30s patrol interval that is ten minutes of an order not
-	// running — far past any legitimate in-flight run, and short enough that a
-	// wedged order surfaces within one working attention span.
+	//
+	// It is a tick count, not a duration, so the wall-clock grace it buys scales
+	// with patrol_interval: ten minutes at the 30s default, and proportionally
+	// more or less wherever that is tuned. A count is the right unit for the
+	// thing being reported — twenty refusals is twenty pieces of evidence that
+	// the gate is not opening, whatever the cadence — where a duration could
+	// alert off two or three samples on a slow city.
 	orderOpenWorkSuppressionAlertAfter = 20
 
 	// orderOpenWorkSuppressionRepeat is the minimum wall-clock gap between
-	// order.suppressed events for the same order. A stalled order is suppressed
-	// on every tick forever, so this — not the tick count — is what caps the
-	// event rate at one per order per hour.
+	// order.suppressed events for the same order WITHIN ONE STREAK. A stalled
+	// order is suppressed on every tick forever, so this — not the tick count —
+	// is what keeps a permanent stall from emitting per-tick.
+	//
+	// It is not a flat one-per-order-per-hour cap: clearing the streak drops
+	// lastAlert with it, so a gate that cycles shut-for-20-ticks/open/shut can
+	// alert once per cycle. That is the intended reading — each such alert
+	// describes a genuine fresh streak — and the rate is still bounded below
+	// one event per orderOpenWorkSuppressionAlertAfter ticks per order.
 	orderOpenWorkSuppressionRepeat = time.Hour
 )
 

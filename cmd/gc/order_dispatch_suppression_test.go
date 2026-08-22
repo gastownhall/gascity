@@ -3,11 +3,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/orders"
 )
@@ -50,6 +53,17 @@ func (s *gateBlockingStore) setBlocked(blocked bool) {
 	s.blocked = blocked
 }
 
+// setCreatedAt moves the tracking bead forward in time, which is what the
+// dispatcher reads as the order's last run. A test uses it to make a warm
+// last-run cache stale on purpose.
+func (s *gateBlockingStore) setCreatedAt(at time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.corpus {
+		s.corpus[i].CreatedAt = at
+	}
+}
+
 func (s *gateBlockingStore) List(beads.ListQuery) ([]beads.Bead, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -86,12 +100,16 @@ func decodeSuppressedPayload(t *testing.T, e events.Event) events.OrderSuppresse
 
 func suppressedOrderDispatcher(t *testing.T, scoped string, store beads.Store, rec events.Recorder) *memoryOrderDispatcher {
 	t.Helper()
-	aa := []orders.Order{{
+	return suppressedOrderDispatcherFor(t, []orders.Order{{
 		Name:     scoped,
 		Trigger:  "cooldown",
 		Interval: "1s",
 		Exec:     "true",
-	}}
+	}}, store, rec)
+}
+
+func suppressedOrderDispatcherFor(t *testing.T, aa []orders.Order, store beads.Store, rec events.Recorder) *memoryOrderDispatcher {
+	t.Helper()
 	ad := buildOrderDispatcherFromListExec(aa, store, nil, successfulExec, rec)
 	if ad == nil {
 		t.Fatal("expected non-nil dispatcher")
@@ -238,6 +256,175 @@ func TestOrderDispatchOpenWorkSuppressionStreakResetsWhenGateOpens(t *testing.T)
 	}
 }
 
+// TestOrderDispatchOpenWorkSuppressionStreaksAreIndependentPerOrder pins that a
+// streak belongs to one order. Keying the state by anything coarser — or
+// clearing more than the one order that just passed its gate — hands a busy
+// city a healthy order that wipes its wedged neighbour's streak on every tick,
+// which is the ga-a6zy9 silence this event exists to end.
+func TestOrderDispatchOpenWorkSuppressionStreaksAreIndependentPerOrder(t *testing.T) {
+	const wedged, healthy = "wedged-neighbor", "healthy-neighbor"
+	start := time.Date(2030, 8, 21, 9, 0, 0, 0, time.UTC)
+	// The corpus carries only the wedged order's order-run label, so the same
+	// store holds one gate shut and leaves the other open on every tick.
+	store := newGateBlockingStore(wedged, start.Add(-24*time.Hour))
+	rec := &memRecorder{}
+	m := suppressedOrderDispatcherFor(t, []orders.Order{
+		{Name: wedged, Trigger: "cooldown", Interval: "1s", Exec: "true"},
+		{Name: healthy, Trigger: "cooldown", Interval: "1s", Exec: "true"},
+	}, store, rec)
+	cityPath := t.TempDir()
+
+	now := start
+	for i := 0; i < orderOpenWorkSuppressionAlertAfter; i++ {
+		m.dispatch(context.Background(), cityPath, now)
+		m.drain(context.Background())
+		now = now.Add(time.Minute)
+	}
+
+	got := rec.suppressedEvents()
+	if len(got) != 1 {
+		t.Fatalf("order.suppressed events with a healthy order dispatching alongside = %d, want 1", len(got))
+	}
+	if got[0].Subject != wedged {
+		t.Errorf("event subject = %q, want %q", got[0].Subject, wedged)
+	}
+	if p := decodeSuppressedPayload(t, got[0]); p.Consecutive != orderOpenWorkSuppressionAlertAfter {
+		t.Errorf("payload consecutive = %d, want %d (the neighbour's clears must not touch this streak)",
+			p.Consecutive, orderOpenWorkSuppressionAlertAfter)
+	}
+}
+
+// TestOrderDispatchOpenWorkSuppressionStreakResetsWhenTheOrderStopsBeingDue
+// covers the other episode boundary. A gate that is never consulted is no
+// evidence it is shut, so an undue tick ends the run. Without that, a condition
+// order that wedges and then goes false freezes its streak, and the next
+// incident — here ten days later — alerts on its first refusal carrying a
+// first_suppressed that spans both.
+func TestOrderDispatchOpenWorkSuppressionStreakResetsWhenTheOrderStopsBeingDue(t *testing.T) {
+	const scoped = "conditional-order"
+	start := time.Date(2030, 8, 21, 9, 0, 0, 0, time.UTC)
+	store := newGateBlockingStore(scoped, start.Add(-24*time.Hour))
+	rec := &memRecorder{}
+	flag := filepath.Join(t.TempDir(), "due")
+	if err := os.WriteFile(flag, nil, 0o600); err != nil {
+		t.Fatalf("writing the condition flag: %v", err)
+	}
+	m := suppressedOrderDispatcherFor(t, []orders.Order{{
+		Name:    scoped,
+		Trigger: "condition",
+		Check:   "test -f " + flag,
+		Exec:    "true",
+	}}, store, rec)
+	cityPath := t.TempDir()
+
+	now := start
+	tick := func() {
+		m.dispatch(context.Background(), cityPath, now)
+		m.drain(context.Background())
+		now = now.Add(time.Minute)
+	}
+
+	for i := 0; i < orderOpenWorkSuppressionAlertAfter-1; i++ {
+		tick()
+	}
+	if got := len(rec.suppressedEvents()); got != 0 {
+		t.Fatalf("order.suppressed events below the threshold = %d, want 0", got)
+	}
+
+	if err := os.Remove(flag); err != nil {
+		t.Fatalf("clearing the condition flag: %v", err)
+	}
+	tick() // the condition goes false: not due, so the episode ends here.
+
+	now = now.Add(10 * 24 * time.Hour)
+	if err := os.WriteFile(flag, nil, 0o600); err != nil {
+		t.Fatalf("re-arming the condition flag: %v", err)
+	}
+	secondEpisode := now
+	for i := 0; i < orderOpenWorkSuppressionAlertAfter-1; i++ {
+		tick()
+	}
+	if got := len(rec.suppressedEvents()); got != 0 {
+		t.Fatalf("order.suppressed events in a second episode short of the threshold = %d, want 0 "+
+			"(the first episode's streak must not resume)", got)
+	}
+
+	tick()
+	got := rec.suppressedEvents()
+	if len(got) != 1 {
+		t.Fatalf("order.suppressed events once the second episode reaches the threshold = %d, want 1", len(got))
+	}
+	p := decodeSuppressedPayload(t, got[0])
+	if p.Consecutive != orderOpenWorkSuppressionAlertAfter {
+		t.Errorf("payload consecutive = %d, want %d", p.Consecutive, orderOpenWorkSuppressionAlertAfter)
+	}
+	wantSince := secondEpisode.UTC().Format(time.RFC3339)
+	if p.FirstSuppressed != wantSince {
+		t.Errorf("payload first_suppressed = %q, want the second episode's start %q — an alert anchored to "+
+			"the first episode reports a ten-day stall that never happened", p.FirstSuppressed, wantSince)
+	}
+}
+
+// TestOrderDispatchOpenWorkSuppressionStreakResetsWhenTheRefreshedLastRunUndoesDue
+// covers the second undue exit. An order can pass the trigger check against a
+// warm last-run cache and then fail it against the refreshed value read from
+// the store; that tick is just as undue as the first kind, and skipping the
+// reset there would leave a cooldown order — the common case — merging episodes
+// exactly as before.
+func TestOrderDispatchOpenWorkSuppressionStreakResetsWhenTheRefreshedLastRunUndoesDue(t *testing.T) {
+	const scoped = "cooldown-order"
+	start := time.Date(2030, 8, 21, 9, 0, 0, 0, time.UTC)
+	store := newGateBlockingStore(scoped, start.Add(-24*time.Hour))
+	rec := &memRecorder{}
+	m := suppressedOrderDispatcherFor(t, []orders.Order{{
+		Name:     scoped,
+		Trigger:  "cooldown",
+		Interval: "10m",
+		Exec:     "true",
+	}}, store, rec)
+	cityPath := t.TempDir()
+
+	now := start
+	tick := func() {
+		m.dispatch(context.Background(), cityPath, now)
+		m.drain(context.Background())
+		now = now.Add(time.Minute)
+	}
+
+	for i := 0; i < orderOpenWorkSuppressionAlertAfter-1; i++ {
+		tick()
+	}
+	if got := len(rec.suppressedEvents()); got != 0 {
+		t.Fatalf("order.suppressed events below the threshold = %d, want 0", got)
+	}
+
+	// Something else ran the order: the store's last run jumps inside the
+	// cooldown while the cache still holds the old one, so this tick is due on
+	// the cached value and undue on the refreshed one.
+	store.setCreatedAt(now)
+	tick()
+
+	now = now.Add(10 * 24 * time.Hour)
+	secondEpisode := now
+	for i := 0; i < orderOpenWorkSuppressionAlertAfter-1; i++ {
+		tick()
+	}
+	if got := len(rec.suppressedEvents()); got != 0 {
+		t.Fatalf("order.suppressed events in a second episode short of the threshold = %d, want 0 "+
+			"(the refreshed-last-run exit must end the first episode)", got)
+	}
+
+	tick()
+	got := rec.suppressedEvents()
+	if len(got) != 1 {
+		t.Fatalf("order.suppressed events once the second episode reaches the threshold = %d, want 1", len(got))
+	}
+	if p := decodeSuppressedPayload(t, got[0]); p.FirstSuppressed != secondEpisode.UTC().Format(time.RFC3339) {
+		t.Errorf("payload first_suppressed = %q, want the second episode's start %q",
+			p.FirstSuppressed, secondEpisode.UTC().Format(time.RFC3339))
+	}
+}
+
 // TestCarryOpenWorkSuppressionFromKeepsStreakAcrossDispatcherRebuild pins that
 // an order-set rescan does not erase the evidence. Rebuilding the dispatcher
 // resets in-memory state, and a stalled order would restart its streak from
@@ -251,7 +438,9 @@ func TestCarryOpenWorkSuppressionFromKeepsStreakAcrossDispatcherRebuild(t *testi
 		prev.noteOpenWorkSuppressed(scoped, start.Add(time.Duration(i)*time.Minute))
 	}
 
-	next := &memoryOrderDispatcher{}
+	next := &memoryOrderDispatcher{aa: []orders.Order{
+		{Name: scoped, Trigger: "cooldown", Interval: "1s", Exec: "true"},
+	}}
 	next.carryOpenWorkSuppressionFrom(prev)
 
 	payload, alert := next.noteOpenWorkSuppressed(scoped, start.Add(5*time.Minute))
@@ -278,7 +467,9 @@ func TestReplaceOrderDispatcherCarriesOpenWorkSuppression(t *testing.T) {
 		prev.noteOpenWorkSuppressed(scoped, start.Add(time.Duration(i)*time.Minute))
 	}
 
-	next := &memoryOrderDispatcher{}
+	next := &memoryOrderDispatcher{aa: []orders.Order{
+		{Name: scoped, Trigger: "cooldown", Interval: "1s", Exec: "true"},
+	}}
 	cr := &CityRuntime{od: prev}
 	cr.replaceOrderDispatcher(next)
 
@@ -291,5 +482,50 @@ func TestReplaceOrderDispatcherCarriesOpenWorkSuppression(t *testing.T) {
 	}
 	if payload.Consecutive != orderOpenWorkSuppressionAlertAfter {
 		t.Fatalf("consecutive after rebuild = %d, want %d", payload.Consecutive, orderOpenWorkSuppressionAlertAfter)
+	}
+}
+
+// TestCarryOpenWorkSuppressionFromDropsOrdersTheRebuildNoLongerHas bounds the
+// map. clearOpenWorkSuppression is the only delete site and it only ever names
+// a live order, so an order removed, renamed, rescoped, disabled or switched to
+// no_work_gate while suppressed leaves an entry nothing can reach — carried
+// forward across every rebuild for the life of the process.
+func TestCarryOpenWorkSuppressionFromDropsOrdersTheRebuildNoLongerHas(t *testing.T) {
+	const kept, dropped = "kept-order", "deleted-order"
+	start := time.Date(2030, 8, 21, 9, 0, 0, 0, time.UTC)
+	prev := &memoryOrderDispatcher{}
+	for i := 0; i < 5; i++ {
+		at := start.Add(time.Duration(i) * time.Minute)
+		prev.noteOpenWorkSuppressed(kept, at)
+		prev.noteOpenWorkSuppressed(dropped, at)
+	}
+
+	next := &memoryOrderDispatcher{aa: []orders.Order{
+		{Name: kept, Trigger: "cooldown", Interval: "1s", Exec: "true"},
+	}}
+	next.carryOpenWorkSuppressionFrom(prev)
+
+	at := start.Add(5 * time.Minute)
+	if p, _ := next.noteOpenWorkSuppressed(kept, at); p.Consecutive != 6 {
+		t.Errorf("consecutive for an order the rebuild still carries = %d, want 6", p.Consecutive)
+	}
+	if p, _ := next.noteOpenWorkSuppressed(dropped, at); p.Consecutive != 1 {
+		t.Errorf("consecutive for an order the rebuild dropped = %d, want 1 — its stale streak survived the carry",
+			p.Consecutive)
+	}
+}
+
+// TestOrderOpenWorkSuppressionConstantsMatchTheirDocumentedContract pins the two
+// numbers themselves. Every other test here loops on the constants, so they pin
+// the relationships and not the values: a retune to 200 refusals or a weekly
+// repeat would ship green while quietly voiding what the doc comments promise
+// operators.
+func TestOrderOpenWorkSuppressionConstantsMatchTheirDocumentedContract(t *testing.T) {
+	patrol := (&config.DaemonConfig{}).PatrolIntervalDuration()
+	if got := time.Duration(orderOpenWorkSuppressionAlertAfter) * patrol; got != 10*time.Minute {
+		t.Errorf("grace before the first alert at the default %s patrol interval = %s, want 10m", patrol, got)
+	}
+	if orderOpenWorkSuppressionRepeat != time.Hour {
+		t.Errorf("repeat window = %s, want 1h", orderOpenWorkSuppressionRepeat)
 	}
 }
