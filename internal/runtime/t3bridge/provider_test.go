@@ -132,6 +132,41 @@ func TestResolveWsURLCandidates_PrefersRuntimeStateOverStaleWSURL(t *testing.T) 
 	}
 }
 
+func TestResolveWsURLCandidates_DiscoversDesktopUserdataRuntimeState(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+	t.Setenv("T3_HOME", "")
+	t.Setenv("T3_BASE_DIR", "")
+	t.Setenv("T3CODE_HOME", "")
+	t.Setenv("T3_WS_URL", "")
+	userdataDir := filepath.Join(tempHome, ".t3", "userdata")
+	if err := os.MkdirAll(userdataDir, 0o755); err != nil {
+		t.Fatalf("mkdir userdata dir: %v", err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(tempHome, ".t3", "server-runtime.json"),
+		[]byte(`{"origin":"http://127.0.0.1:4999"}`),
+		0o644,
+	); err != nil {
+		t.Fatalf("write stale root server-runtime.json: %v", err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(userdataDir, "server-runtime.json"),
+		[]byte(`{"origin":"http://127.0.0.1:4888"}`),
+		0o644,
+	); err != nil {
+		t.Fatalf("write userdata server-runtime.json: %v", err)
+	}
+
+	candidates := resolveWsURLCandidates()
+	if len(candidates) == 0 {
+		t.Fatal("resolveWsURLCandidates returned no candidates")
+	}
+	if candidates[0] != "ws://127.0.0.1:4888/ws" {
+		t.Fatalf("first candidate = %q, want ws://127.0.0.1:4888/ws", candidates[0])
+	}
+}
+
 func TestProcessAlive_ReadyCountsAsAlive(t *testing.T) {
 	server := newT3BridgeTestServer(t, map[string]interface{}{
 		"threads": []interface{}{
@@ -233,24 +268,188 @@ func TestIsRunning_UsesCachedSnapshotWithinTTL(t *testing.T) {
 	if !p.IsRunning("mayor") {
 		t.Fatal("IsRunning(second) = false, want true")
 	}
-	if calls := server.wsCalls(); calls != 1 {
-		t.Fatalf("ws calls = %d, want 1", calls)
+	if calls := server.snapshotCalls(); calls != 1 {
+		t.Fatalf("snapshot HTTP calls = %d, want 1", calls)
 	}
 }
 
-func TestAuthenticatedWsURL_UsesBearerTokenForNonLoopback(t *testing.T) {
+func TestAuthenticatedWsURL_ExchangesBearerForShortLivedLoopbackWebSocketTicket(t *testing.T) {
 	resetBridgeAuthCacheForTest(t)
+	server := newT3BridgeTestServer(t, map[string]interface{}{})
+	defer server.Close()
 	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
 	t.Setenv("GC_T3BRIDGE_STATE_DIR", t.TempDir())
-	wsURL, headers, err := authenticatedWsURL("wss://remote.example/ws")
+	wsURL, headers, err := authenticatedWsURL(server.wsURL())
 	if err != nil {
 		t.Fatalf("authenticatedWsURL: %v", err)
 	}
-	if wsURL != "wss://remote.example/ws" {
-		t.Fatalf("wsURL = %q, want wss://remote.example/ws", wsURL)
+	if !strings.Contains(wsURL, "wsTicket=test-ws-ticket") {
+		t.Fatalf("wsURL = %q, want short-lived wsTicket", wsURL)
+	}
+	if got := headers.Get("Authorization"); got != "" {
+		t.Fatalf("websocket authorization = %q, want ticket-only upgrade", got)
+	}
+	if got := server.lastAuthAuthorization(); got != "Bearer test-bearer" {
+		t.Fatalf("ticket authorization = %q, want Bearer test-bearer", got)
+	}
+}
+
+func TestAuthenticatedWsURL_RedactsBearerEchoedByTicketEndpoint(t *testing.T) {
+	resetBridgeAuthCacheForTest(t)
+	server := newT3BridgeTestServer(t, map[string]interface{}{})
+	server.setAuthFailures(1, http.StatusUnauthorized, "rejected test-bearer")
+	defer server.Close()
+	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
+	t.Setenv("GC_T3BRIDGE_STATE_DIR", t.TempDir())
+
+	_, _, err := authenticatedWsURL(server.wsURL())
+	if err == nil {
+		t.Fatal("authenticatedWsURL error = nil, want ticket rejection")
+	}
+	if strings.Contains(err.Error(), "test-bearer") {
+		t.Fatalf("authenticatedWsURL leaked bearer in error: %v", err)
+	}
+}
+
+func TestAuthenticatedWsURL_FallsBackToBearerHeaderWhenTicketEndpointUnsupported(t *testing.T) {
+	resetBridgeAuthCacheForTest(t)
+	server := newT3BridgeTestServer(t, map[string]interface{}{})
+	server.setAuthFailures(1, http.StatusNotFound, "not found")
+	defer server.Close()
+	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
+	t.Setenv("GC_T3BRIDGE_STATE_DIR", t.TempDir())
+
+	wsURL, headers, err := authenticatedWsURL(server.wsURL())
+	if err != nil {
+		t.Fatalf("authenticatedWsURL: %v", err)
+	}
+	if wsURL != server.wsURL() {
+		t.Fatalf("wsURL = %q, want legacy URL %q", wsURL, server.wsURL())
 	}
 	if got := headers.Get("Authorization"); got != "Bearer test-bearer" {
 		t.Fatalf("authorization = %q, want Bearer test-bearer", got)
+	}
+}
+
+func TestRPCSnapshot_UsesAuthenticatedHTTPForStockT3(t *testing.T) {
+	resetBridgeAuthCacheForTest(t)
+	server := newT3BridgeTestServer(t, map[string]interface{}{
+		"threads": []interface{}{},
+	})
+	defer server.Close()
+	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
+	t.Setenv("T3_WS_URL", server.wsURL())
+	t.Setenv("T3_HOME", t.TempDir())
+	t.Setenv("GC_T3BRIDGE_STATE_DIR", t.TempDir())
+
+	p := &Provider{
+		watchers:     make(map[string]context.CancelFunc),
+		recentStarts: make(map[string]time.Time),
+	}
+	if _, err := p.rpcSnapshot(); err != nil {
+		t.Fatalf("rpcSnapshot: %v", err)
+	}
+	if calls := server.snapshotCalls(); calls != 1 {
+		t.Fatalf("snapshot HTTP calls = %d, want 1", calls)
+	}
+	if got := server.lastSnapshotAuthorization(); got != "Bearer test-bearer" {
+		t.Fatalf("snapshot authorization = %q, want Bearer test-bearer", got)
+	}
+	if calls := server.wsCalls(); calls != 0 {
+		t.Fatalf("snapshot websocket calls = %d, want 0", calls)
+	}
+}
+
+func TestRPCSnapshot_RedactsBearerEchoedByHTTP(t *testing.T) {
+	resetBridgeAuthCacheForTest(t)
+	server := newT3BridgeTestServer(t, map[string]interface{}{})
+	server.setSnapshotFailure(http.StatusUnauthorized, "rejected test-bearer")
+	defer server.Close()
+	oldDefaults := defaultWSURLCandidates
+	defaultWSURLCandidates = nil
+	t.Cleanup(func() { defaultWSURLCandidates = oldDefaults })
+	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
+	t.Setenv("T3_WS_URL", server.wsURL())
+	t.Setenv("T3_HOME", t.TempDir())
+	t.Setenv("GC_T3BRIDGE_STATE_DIR", t.TempDir())
+
+	p := &Provider{
+		watchers:     make(map[string]context.CancelFunc),
+		recentStarts: make(map[string]time.Time),
+	}
+	_, err := p.rpcSnapshot()
+	if err == nil {
+		t.Fatal("rpcSnapshot error = nil, want HTTP rejection")
+	}
+	if strings.Contains(err.Error(), "test-bearer") {
+		t.Fatalf("rpcSnapshot leaked bearer in error: %v", err)
+	}
+}
+
+func TestRPCSnapshot_FallsBackToLegacyWebSocketWhenHTTPEndpointUnsupported(t *testing.T) {
+	resetBridgeAuthCacheForTest(t)
+	server := newT3BridgeTestServer(t, map[string]interface{}{
+		"threads": []interface{}{},
+	})
+	server.setSnapshotFailure(http.StatusNotFound, "not found")
+	server.setAuthFailures(1, http.StatusNotFound, "not found")
+	defer server.Close()
+	oldDefaults := defaultWSURLCandidates
+	defaultWSURLCandidates = nil
+	t.Cleanup(func() { defaultWSURLCandidates = oldDefaults })
+	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
+	t.Setenv("T3_WS_URL", server.wsURL())
+	t.Setenv("T3_HOME", t.TempDir())
+	t.Setenv("GC_T3BRIDGE_STATE_DIR", t.TempDir())
+
+	p := &Provider{
+		watchers:     make(map[string]context.CancelFunc),
+		recentStarts: make(map[string]time.Time),
+	}
+	if _, err := p.rpcSnapshot(); err != nil {
+		t.Fatalf("rpcSnapshot legacy fallback: %v", err)
+	}
+	if calls := server.wsCalls(); calls != 1 {
+		t.Fatalf("legacy snapshot websocket calls = %d, want 1", calls)
+	}
+}
+
+func TestRPCSnapshot_TriesNextCandidateBeforeLegacyFallback(t *testing.T) {
+	resetBridgeAuthCacheForTest(t)
+	stale := newT3BridgeTestServer(t, map[string]interface{}{})
+	stale.setSnapshotFailure(http.StatusNotFound, "not found")
+	defer stale.Close()
+	current := newT3BridgeTestServer(t, map[string]interface{}{
+		"threads": []interface{}{},
+	})
+	defer current.Close()
+	oldDefaults := defaultWSURLCandidates
+	defaultWSURLCandidates = nil
+	t.Cleanup(func() { defaultWSURLCandidates = oldDefaults })
+	t3Home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(t3Home, "ws-url"), []byte(current.wsURL()), 0o644); err != nil {
+		t.Fatalf("write ws-url: %v", err)
+	}
+	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
+	t.Setenv("T3_WS_URL", stale.wsURL())
+	t.Setenv("T3_HOME", t3Home)
+	t.Setenv("GC_T3BRIDGE_STATE_DIR", t.TempDir())
+
+	p := &Provider{
+		watchers:     make(map[string]context.CancelFunc),
+		recentStarts: make(map[string]time.Time),
+	}
+	if _, err := p.rpcSnapshot(); err != nil {
+		t.Fatalf("rpcSnapshot current candidate: %v", err)
+	}
+	if calls := stale.snapshotCalls(); calls != 1 {
+		t.Fatalf("stale snapshot HTTP calls = %d, want 1", calls)
+	}
+	if calls := stale.wsCalls(); calls != 0 {
+		t.Fatalf("stale snapshot websocket calls = %d, want 0", calls)
+	}
+	if calls := current.snapshotCalls(); calls != 1 {
+		t.Fatalf("current snapshot HTTP calls = %d, want 1", calls)
 	}
 }
 
@@ -674,17 +873,22 @@ func TestCopyTo_RejectsRelDstEscapingWorkDir(t *testing.T) {
 }
 
 type t3BridgeTestServer struct {
-	t                 *testing.T
-	server            *httptest.Server
-	mu                sync.Mutex
-	commands          []string
-	snapshot          map[string]interface{}
-	authFailures      int
-	authFailureStatus int
-	authFailureBody   string
-	authRequestCount  int
-	wsAuthorization   []string
-	wsRequestCount    int
+	t                  *testing.T
+	server             *httptest.Server
+	mu                 sync.Mutex
+	commands           []string
+	snapshot           map[string]interface{}
+	authFailures       int
+	authFailureStatus  int
+	authFailureBody    string
+	authRequestCount   int
+	authAuthorization  []string
+	snapshotRequests   int
+	snapshotAuth       []string
+	snapshotFailStatus int
+	snapshotFailBody   string
+	wsAuthorization    []string
+	wsRequestCount     int
 }
 
 func newT3BridgeTestServer(t *testing.T, snapshot map[string]interface{}) *t3BridgeTestServer {
@@ -692,9 +896,10 @@ func newT3BridgeTestServer(t *testing.T, snapshot map[string]interface{}) *t3Bri
 	ts := &t3BridgeTestServer{t: t, snapshot: snapshot}
 	upgrader := websocket.Upgrader{}
 	ts.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/auth/ws-token" || r.URL.Path == "/api/auth/bridge-ws-token" {
+		if r.URL.Path == "/api/auth/ws-token" || r.URL.Path == "/api/auth/bridge-ws-token" || r.URL.Path == "/api/auth/websocket-ticket" {
 			ts.mu.Lock()
 			ts.authRequestCount++
+			ts.authAuthorization = append(ts.authAuthorization, r.Header.Get("Authorization"))
 			failuresRemaining := ts.authFailures
 			if ts.authFailures > 0 {
 				ts.authFailures--
@@ -713,7 +918,29 @@ func newT3BridgeTestServer(t *testing.T, snapshot map[string]interface{}) *t3Bri
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
+			if r.URL.Path == "/api/auth/websocket-ticket" {
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"ticket":    "test-ws-ticket",
+					"expiresAt": "2099-01-01T00:00:00Z",
+				})
+				return
+			}
 			_ = json.NewEncoder(w).Encode(map[string]string{"token": "test-ws-token"})
+			return
+		}
+		if r.URL.Path == "/api/orchestration/snapshot" {
+			ts.mu.Lock()
+			ts.snapshotRequests++
+			ts.snapshotAuth = append(ts.snapshotAuth, r.Header.Get("Authorization"))
+			failureStatus := ts.snapshotFailStatus
+			failureBody := ts.snapshotFailBody
+			ts.mu.Unlock()
+			if failureStatus != 0 {
+				http.Error(w, failureBody, failureStatus)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(ts.snapshot)
 			return
 		}
 		ts.mu.Lock()
@@ -793,10 +1020,41 @@ func (ts *t3BridgeTestServer) setAuthFailures(count, status int, body string) {
 	ts.authFailureBody = body
 }
 
+func (ts *t3BridgeTestServer) setSnapshotFailure(status int, body string) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	ts.snapshotFailStatus = status
+	ts.snapshotFailBody = body
+}
+
 func (ts *t3BridgeTestServer) authCalls() int {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	return ts.authRequestCount
+}
+
+func (ts *t3BridgeTestServer) lastAuthAuthorization() string {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if len(ts.authAuthorization) == 0 {
+		return ""
+	}
+	return ts.authAuthorization[len(ts.authAuthorization)-1]
+}
+
+func (ts *t3BridgeTestServer) snapshotCalls() int {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	return ts.snapshotRequests
+}
+
+func (ts *t3BridgeTestServer) lastSnapshotAuthorization() string {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if len(ts.snapshotAuth) == 0 {
+		return ""
+	}
+	return ts.snapshotAuth[len(ts.snapshotAuth)-1]
 }
 
 func (ts *t3BridgeTestServer) wsCalls() int {
