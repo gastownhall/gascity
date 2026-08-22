@@ -41,11 +41,11 @@ func TestDefaultRunNetworkGitKillsDescendants(t *testing.T) {
 		t.Fatal("cloning a wedged remote succeeded, want a timeout error")
 	}
 
-	// Non-empty proves the child ran at all; without this the stability check
-	// below would pass vacuously against a shim that never started one.
 	size := processgrouptest.WaitForFileSize(t, wedged.HeartbeatPath)
-	// The child writes about once a second, so 1.5s of no growth cannot be a
-	// gap between its writes. AssertFileSizeStable fails with "kept growing
-	// after timeout cleanup" when the orphan survived, which is the leak.
-	processgrouptest.AssertFileSizeStable(t, wedged.HeartbeatPath, size, 1500*time.Millisecond)
+	// The window has to be a comfortable multiple of the shim's 50ms write
+	// cadence, because the failure mode of getting it wrong is silent: a live
+	// orphan that happens to be descheduled for one window reads as a dead one
+	// and the test goes green having stopped guarding. 300ms is 6x, and is what
+	// the other users of this helper pair with the same cadence.
+	processgrouptest.AssertFileSizeStable(t, wedged.HeartbeatPath, size, 300*time.Millisecond)
 }

@@ -67,8 +67,21 @@ func wedgedGit(t *testing.T) wedgedRemote {
 		PIDPath:       filepath.Join(dir, "child.pid"),
 		HeartbeatPath: filepath.Join(dir, "child.heartbeat"),
 	}
+	// The first heartbeat is written by the foreground shim, before the loop is
+	// backgrounded. Left to the child, it races the deadline: the tests shrink
+	// networkGitTimeout to a few hundred milliseconds, and on a loaded host a
+	// fork/exec can lose that race, so *correct* code would kill the group
+	// before any byte landed and the test would fail waiting for a file that is
+	// never coming. Writing it here removes the race without weakening the
+	// assertion — a shim whose child never starts exits immediately, which
+	// makes the clone succeed, which every caller already fails on.
+	//
+	// The 50ms cadence is the convention the other users of these helpers use
+	// (internal/orders, cmd/gc): it has to be well under the caller's stability
+	// window, or a live child idling between writes reads as a dead one.
 	script := "#!/bin/sh\n" +
-		"{ while : ; do echo . >> " + w.HeartbeatPath + " ; " + sleep + " 1 ; done ; } &\n" +
+		"echo . >> " + w.HeartbeatPath + "\n" +
+		"{ while : ; do echo . >> " + w.HeartbeatPath + " ; " + sleep + " 0.05 ; done ; } &\n" +
 		"echo $! > " + w.PIDPath + "\n" +
 		"wait\n"
 	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755); err != nil {
@@ -79,6 +92,44 @@ func wedgedGit(t *testing.T) wedgedRemote {
 	// child running for the rest of the package.
 	t.Cleanup(func() { processgrouptest.KillFromPIDFile(t, w.PIDPath) })
 	return w
+}
+
+// TestDefaultRunNetworkGitErrorsCarryNoCredential pins that a credential
+// embedded in a source URL never reaches the error string.
+//
+// There are two independent routes for it to leak and both are live: git's argv
+// carries the remote verbatim, and git itself echoes the remote back in
+// transport failures. The callers' own wraps redact the URL they interpolate,
+// which is what makes this easy to miss — the outer label reads
+// "cloning ***@host/repo" while the inner string still holds the raw token.
+//
+// The shim stands in for git failing the way it does against a bad remote:
+// echoing the URL it was handed and exiting 128. That exercises the output
+// route, and passing the credentialed URL as an argument exercises the argv one.
+func TestDefaultRunNetworkGitErrorsCarryNoCredential(t *testing.T) {
+	const token = "s3cr3t-token-value"
+	remote := "https://gituser:" + token + "@packman.invalid/repo.git"
+
+	dir := t.TempDir()
+	// Echo the remote back the way git does, then fail as git does.
+	script := "#!/bin/sh\necho \"fatal: could not read from remote repository $*\" >&2\nexit 128\n"
+	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatalf("writing git shim: %v", err)
+	}
+	t.Setenv("PATH", dir)
+
+	_, err := defaultRunNetworkGit("", remote, "", "clone", "--quiet", remote, filepath.Join(t.TempDir(), "dest"))
+	if err == nil {
+		t.Fatal("cloning from the failing shim succeeded, want an error")
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatalf("error leaks the credential: %v", err)
+	}
+	// The error still has to be usable: masking the token must not cost the
+	// operator the host and repo they need to act on.
+	if !strings.Contains(err.Error(), "packman.invalid/repo.git") {
+		t.Fatalf("err = %v, want the redacted remote to remain identifiable", err)
+	}
 }
 
 // TestDefaultRunNetworkGitIsBounded is the ga-r0epd regression test.
@@ -165,9 +216,17 @@ func TestDefaultRunNetworkGitRealFailuresAreNotTimeouts(t *testing.T) {
 	}
 	// Asserting only "some error" would let this pass vacuously on an image
 	// with no git at all — where the bounded test supplies its own shim and
-	// this one would go green having executed no git at all. Naming git's own
-	// diagnosis is what keeps the control honest.
-	if !strings.Contains(err.Error(), "does not appear to be a git repository") {
-		t.Fatalf("err = %v, want git's own no-such-repository diagnosis", err)
+	// this one would go green having executed no git. Exit 128 is what closes
+	// that hole: it proves a real git ran and exited on its own diagnosis. A
+	// missing git yields *exec.Error rather than *exec.ExitError, and a killed
+	// one exits -1, so neither can reach here.
+	//
+	// The exit code rather than git's message text, because that text is in
+	// git's translation catalogs and HermeticEnv passes LANG/LC_ALL through
+	// (it strips only git's own variables) — so asserting the English wording
+	// would fail loudly on a localized image for no good reason.
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 128 {
+		t.Fatalf("err = %v, want git's own failure as an *exec.ExitError with code 128", err)
 	}
 }
