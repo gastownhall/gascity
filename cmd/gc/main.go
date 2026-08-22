@@ -927,7 +927,9 @@ func lookupRigFromLocalCity(nameOrPath string) (resolvedContext, bool, error) {
 }
 
 func localCityRigBindings(cityPath string) ([]registeredRigBinding, error) {
-	cfg, err := loadCityConfig(cityPath, io.Discard)
+	// Rig binding enumeration reads only cfg.Rigs; skip the builtin-pack
+	// refresh (see registeredRigBindings, sys-s3pd).
+	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 	if err != nil {
 		if _, ok := missingRootCityTOML(err, cityPath); ok {
 			return nil, nil
@@ -1014,7 +1016,10 @@ func rigFromCwd(cityPath string) string {
 
 // rigFromCwdDir matches cwd against registered rigs in a city's config.
 func rigFromCwdDir(cityPath, cwd string) string {
-	cfg, err := loadCityConfig(cityPath, io.Discard)
+	// Rig resolution only reads cfg.Rigs; it never needs builtin packs
+	// materialized on disk. Skip the ~400ms per-city builtin-pack refresh
+	// (see registeredRigBindings for the full rationale, sys-s3pd).
+	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 	if err != nil {
 		return ""
 	}
@@ -1096,7 +1101,17 @@ func registeredRigBindings(failOnLoadError bool, match func(registeredRigBinding
 	var matched []registeredRigBinding
 	var loadErrors []string
 	for _, c := range cities {
-		cfg, err := loadCityConfig(c.Path, io.Discard)
+		// Enumerating rig bindings only reads cfg.Rigs (via
+		// siteBoundRigBindings). It does NOT need each registered city's
+		// builtin packs materialized on disk — that runtime-asset prep
+		// (ensureBuiltinPacksForConfigLoad) is ~400ms per city and is the
+		// dominant cost of resolveContext's registry scan on every
+		// city-needing gc invocation (sys-s3pd, follow-up to sys-ro2a).
+		// The command that actually resolves to and operates a city still
+		// performs its own full loadCityConfig (with refresh) via its RunE,
+		// so skipping it here never skips it where it is needed. LoadWithIncludes
+		// is retained, so fragment/include-declared rigs are still enumerated.
+		cfg, err := loadCityConfigWithoutBuiltinPackRefresh(c.Path, io.Discard)
 		if err != nil {
 			// Tolerate stale registry entries whose city.toml has been
 			// deleted out from under the registry, but keep missing includes
