@@ -39,7 +39,7 @@ func TestIsBeadStoreUnreachable(t *testing.T) {
 		{errors.New("database not initialized"), false},
 		{errors.New("no beads directory"), false},
 		{errors.New("dolt circuit breaker is open: server appears down, failing fast"), true},
-		{errors.New("max waiting connections reached. Client rejected."), true},
+		{errors.New("max waiting connections reached. Client rejected."), true}, //nolint:revive // error-strings: verbatim upstream pool message; the trailing period is part of the string isBeadStoreUnreachable must match
 		{errors.New("dial tcp 127.0.0.1:3307: connect: connection refused"), true},
 		{errors.New("dolt server unreachable: bead store preflight timed out after 5s"), true},
 		{errors.New("bd list: timed out after 5s"), true},
