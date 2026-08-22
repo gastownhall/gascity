@@ -69,12 +69,15 @@ remote_env_value() {
 remote_allow_env_value() {
   key=$(printf '%s' "$1" | tr 'a-z-' 'A-Z_')
   case "$key" in *[!A-Z0-9_]*) return 0 ;; esac
-  eval "printf '%s' \"\${GC_DOLT_SYNC_ALLOW_REMOTE_$key:-}\""
+  eval "printf '%s' \"\${GC_DOLT_PULL_ALLOW_REMOTE_$key:-}\""
 }
 
-# Mirrors sync's select_remote exactly (examples/bd/dolt/commands/sync/run.sh)
-# — same policy, same env var names — so the two must be kept behaviorally
-# identical until a shared helper replaces both copies.
+# Pull's own remote-selection policy: refuse an ambiguous multi-remote db
+# unless GC_DOLT_REMOTE_<DB> names one explicitly, and additionally require
+# GC_DOLT_PULL_ALLOW_REMOTE_<DB>=1 before honoring an override that points at
+# a non-local (non-file://) remote. This is not currently identical to
+# sync's remote-selection fix (ga-fqi7kq, not yet on main) — consolidating
+# the two into a shared helper is a future intent, not current behavior.
 select_remote() {
   sel_db="$1"; sel_candidates="$2"
   [ -z "$sel_candidates" ] && return 0
@@ -101,7 +104,7 @@ select_remote() {
     *)
       sel_allowed=$(remote_allow_env_value "$sel_db") || return 1
       if [ "$sel_allowed" != "1" ]; then
-        echo "  $sel_db: ERROR: GC_DOLT_REMOTE names non-local remote '$sel_override' ($sel_url) — set GC_DOLT_SYNC_ALLOW_REMOTE_<DB>=1 to allow syncing to it" >&2
+        echo "  $sel_db: ERROR: GC_DOLT_REMOTE names non-local remote '$sel_override' ($sel_url) — set GC_DOLT_PULL_ALLOW_REMOTE_<DB>=1 to allow pulling from it" >&2
         return 1
       fi ;;
   esac

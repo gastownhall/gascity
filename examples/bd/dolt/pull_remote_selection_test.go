@@ -3,14 +3,14 @@ package dolt_test
 // Remote-selection determinism: `gc dolt pull` must not guess which remote
 // to pull FROM when a database has more than one configured — an unordered
 // pick risks silently reconciling from a public/network remote (or a stale
-// mirror) instead of the fleet-private source of truth. This mirrors sync's
-// select_remote policy exactly: refuses outright unless GC_DOLT_REMOTE_<DB>
-// names one of the candidates; a non-file:// pick additionally requires
-// GC_DOLT_SYNC_ALLOW_REMOTE_<DB>=1 (the override variable names are
-// intentionally identical to sync's — same per-database policy, not a
-// pull-specific concept — so a future shared-helper extraction doesn't have
-// to reconcile two naming schemes). These tests cover both the SQL-mode
-// (dolt_remotes table) and CLI-mode (.dolt/remotes.json) candidate sources.
+// mirror) instead of the fleet-private source of truth. This is pull's own
+// policy: refuses outright unless GC_DOLT_REMOTE_<DB> names one of the
+// candidates; a non-file:// pick additionally requires
+// GC_DOLT_PULL_ALLOW_REMOTE_<DB>=1. It is not currently identical to sync's
+// remote-selection fix (ga-fqi7kq, not yet on main) — consolidating the two
+// into a shared helper is a future intent, not current behavior. These
+// tests cover both the SQL-mode (dolt_remotes table) and CLI-mode
+// (.dolt/remotes.json) candidate sources.
 
 import (
 	"fmt"
@@ -75,7 +75,7 @@ func TestPullSQLMultipleRemotesRefusesWithoutOverride(t *testing.T) {
 		"GC_DOLT_USER=root",
 		"GC_DOLT_PASSWORD=",
 		"GC_DOLT_REMOTE_APP=",
-		"GC_DOLT_SYNC_ALLOW_REMOTE_APP=",
+		"GC_DOLT_PULL_ALLOW_REMOTE_APP=",
 	)
 	out, err := cmd.CombinedOutput()
 	if err == nil {
@@ -174,7 +174,7 @@ func TestPullSQLMultipleRemotesNonFileOverrideRequiresAllowFlag(t *testing.T) {
 		"GC_DOLT_USER=root",
 		"GC_DOLT_PASSWORD=",
 		"GC_DOLT_REMOTE_APP=public",
-		"GC_DOLT_SYNC_ALLOW_REMOTE_APP=",
+		"GC_DOLT_PULL_ALLOW_REMOTE_APP=",
 	)
 	out, err := cmd.CombinedOutput()
 	if err == nil {
@@ -185,7 +185,7 @@ func TestPullSQLMultipleRemotesNonFileOverrideRequiresAllowFlag(t *testing.T) {
 	if !strings.Contains(output, "non-local remote 'public'") {
 		t.Fatalf("expected a non-local-remote refusal naming 'public':\n%s", output)
 	}
-	if !strings.Contains(output, "GC_DOLT_SYNC_ALLOW_REMOTE") {
+	if !strings.Contains(output, "GC_DOLT_PULL_ALLOW_REMOTE") {
 		t.Fatalf("expected the refusal to name the allow-flag escape hatch:\n%s", output)
 	}
 
@@ -225,7 +225,7 @@ func TestPullSQLMultipleRemotesNonFileOverrideWithAllowFlagProceeds(t *testing.T
 		"GC_DOLT_USER=root",
 		"GC_DOLT_PASSWORD=",
 		"GC_DOLT_REMOTE_APP=public",
-		"GC_DOLT_SYNC_ALLOW_REMOTE_APP=1",
+		"GC_DOLT_PULL_ALLOW_REMOTE_APP=1",
 	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -274,7 +274,7 @@ func TestPullCLIMultipleRemotesRefusesWithoutOverride(t *testing.T) {
 		"GC_DOLT_USER=root",
 		"GC_DOLT_PASSWORD=",
 		"GC_DOLT_REMOTE_APP=",
-		"GC_DOLT_SYNC_ALLOW_REMOTE_APP=",
+		"GC_DOLT_PULL_ALLOW_REMOTE_APP=",
 	)
 	out, err := cmd.CombinedOutput()
 	if err == nil {
