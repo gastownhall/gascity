@@ -2146,6 +2146,19 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	// below remains for the submit Enter.
 	t.WakePaneIfDetached(session)
 
+	// 0. Dismiss any blocking mid-session dialog first. The token-ceiling
+	// resume selector, the periodic feedback prompt, and the provider
+	// session-limit chooser all absorb the next text input instead of
+	// passing it to the prompt, so a nudge sent into one is lost. Single
+	// peek, so a mid-turn session costs one capture-pane and no delay. This
+	// step is best-effort and never aborts the nudge on a peek/dismiss error
+	// (see dismissMidSessionDialogBeforeNudge).
+	if t.dismissMidSessionDialogBeforeNudge(target) {
+		// Give the TUI a beat to retire the dialog before pasting, so the
+		// message lands at the prompt rather than in a closing overlay.
+		time.Sleep(midSessionDialogSettleDelay)
+	}
+
 	// 1. Send text in literal mode with retry on transient errors
 	if err := t.sendKeysLiteralWithRetry(target, message, t.cfg.NudgeReadyTimeout); err != nil {
 		return err
@@ -2391,11 +2404,52 @@ func dismissModelSwitchModal(content string, sendKeys func(keys ...string) error
 	return true, sendKeys("Enter")
 }
 
+// midSessionDialogSettleDelay lets a just-dismissed mid-session dialog retire
+// from the pane before the nudge text is pasted, so the message lands at the
+// prompt rather than in a closing overlay.
+const midSessionDialogSettleDelay = 500 * time.Millisecond
+
+// dismissMidSessionDialogBeforeNudge clears a blocking mid-session dialog (the
+// token-ceiling resume selector, the periodic feedback prompt, or the provider
+// session-limit chooser) on target so an imminent nudge lands at the prompt
+// instead of being absorbed by the dialog. It reports whether a dialog was
+// dismissed so the caller can let the UI settle before delivering text.
+//
+// Best-effort: a capture (peek) failure or a dismissal send-keys failure is
+// swallowed and reported as "no dialog dismissed" so the nudge still proceeds
+// to its own retry-wrapped delivery path. NudgeSession previously did not
+// depend on CapturePane for delivery; gating it on this pre-step would regress
+// load-bearing nudges (health-patrol restarts, mail, sling work delivery) on a
+// transient capture-pane error even though the message could still be
+// delivered. Mirrors DismissModelSwitchModalIfPresent, which swallows the
+// identical errors.
+func (t *Tmux) dismissMidSessionDialogBeforeNudge(target string) bool {
+	dismissed, err := runtime.DismissMidSessionDialogs(
+		context.Background(),
+		func() (string, error) { return t.CaptureVisiblePane(target) },
+		func(keys ...string) error {
+			for _, k := range keys {
+				if _, err := t.run("send-keys", "-t", target, k); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		return false
+	}
+	return dismissed
+}
+
 // DismissModelSwitchModalIfPresent clears a mid-session Codex/GPT model-switch
 // modal on the session's agent pane (keeping the current model — no downgrade,
 // no spend change) so a session that would otherwise hang on it can proceed.
 // No-op when the modal is absent. Best-effort: capture/send failures are
-// swallowed (the caller retries on the next wake).
+// swallowed (the caller retries on the next wake). The resume, feedback, and
+// session-limit mid-session dialogs are handled separately by
+// runtime.DismissMidSessionDialogs (see midSessionDialogs) via
+// dismissMidSessionDialogBeforeNudge.
 func (t *Tmux) DismissModelSwitchModalIfPresent(session string) {
 	target := session
 	if agentPane, err := t.FindAgentPane(session); err == nil && agentPane != "" {
@@ -2957,10 +3011,22 @@ func (t *Tmux) FindSessionByWorkDir(targetDir string, processNames []string) ([]
 	return matches, nil
 }
 
-// CapturePane captures the visible content of a pane.
+// CapturePane captures the visible screen plus the last `lines` rows of
+// scrollback history of a pane.
 func (t *Tmux) CapturePane(session string, lines int) (string, error) {
 	content, err := t.run("capture-pane", "-p", "-t", session, "-S", fmt.Sprintf("-%d", lines))
 	return content, err
+}
+
+// CaptureVisiblePane captures only the current visible screen of a pane, with
+// no scrollback history (no "-S"). The mid-session dialog dismissal
+// (dismissMidSessionDialogBeforeNudge) uses this instead of CapturePane so an
+// already-dismissed dialog sitting in scrollback cannot satisfy the
+// contains-based matchers and inject dismissal keys into a live prompt before
+// the intended nudge. A live blocking dialog occupies the visible footer, so
+// the visible screen is the correct and sufficient window for that check.
+func (t *Tmux) CaptureVisiblePane(session string) (string, error) {
+	return t.run("capture-pane", "-p", "-t", session)
 }
 
 // CapturePaneAll captures all scrollback history.
