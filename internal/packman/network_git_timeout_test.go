@@ -9,10 +9,25 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
 )
 
-// wedgedGit puts a `git` on PATH that hangs the way a wedged remote does, and
-// returns a remote URL it will ignore.
+// wedgedRemote is what wedgedGit hands back: the remote URL the shim ignores,
+// plus the two artifacts its backgrounded child produces so a test can observe
+// the child's lifecycle without polling it.
+type wedgedRemote struct {
+	// URL is a syntactically valid remote the shim never actually contacts.
+	URL string
+	// PIDPath receives the backgrounded child's pid, for cleanup.
+	PIDPath string
+	// HeartbeatPath grows for as long as that child is alive. Its size is the
+	// direct measurement of the thing the bound has to stop: not "did the call
+	// return" but "did the work stop".
+	HeartbeatPath string
+}
+
+// wedgedGit puts a `git` on PATH that hangs the way a wedged remote does.
 //
 // A loopback listener that accepts and never answers is the more literal
 // reproduction, but it is not the more faithful one. What has to be exercised
@@ -23,10 +38,14 @@ import (
 // stderr, then waits — instead of hoping a real git happens to do it. It also
 // needs no port, no listener and no network, so it cannot flake on a busy host.
 //
+// The child appends to a heartbeat file rather than merely sleeping, so its
+// liveness is observable as a file that stops growing. That is what lets these
+// tests assert on the descendants with no polling loop of their own.
+//
 // exec.Command resolves the binary against the parent process PATH rather than
 // cmd.Env, so t.Setenv is enough to intercept even though defaultRunNetworkGit
 // hands the child a hermetic environment.
-func wedgedGit(t *testing.T) (remote, childPIDPath string) {
+func wedgedGit(t *testing.T) wedgedRemote {
 	t.Helper()
 	dir := t.TempDir()
 	// The shim runs with the hermetic environment defaultRunNetworkGit builds,
@@ -43,13 +62,23 @@ func wedgedGit(t *testing.T) (remote, childPIDPath string) {
 		}
 		t.Skipf("no sleep binary on %s: %v", runtime.GOOS, err)
 	}
-	childPIDPath = filepath.Join(dir, "child.pid")
-	script := "#!/bin/sh\n" + sleep + " 300 &\necho $! > " + childPIDPath + "\nwait\n"
+	w := wedgedRemote{
+		URL:           "http://packman.invalid/wedged.git",
+		PIDPath:       filepath.Join(dir, "child.pid"),
+		HeartbeatPath: filepath.Join(dir, "child.heartbeat"),
+	}
+	script := "#!/bin/sh\n" +
+		"{ while : ; do echo . >> " + w.HeartbeatPath + " ; " + sleep + " 1 ; done ; } &\n" +
+		"echo $! > " + w.PIDPath + "\n" +
+		"wait\n"
 	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755); err != nil {
 		t.Fatalf("writing git shim: %v", err)
 	}
 	t.Setenv("PATH", dir)
-	return "http://packman.invalid/wedged.git", childPIDPath
+	// A test that fails before the bound kills the group must not leave the
+	// child running for the rest of the package.
+	t.Cleanup(func() { processgrouptest.KillFromPIDFile(t, w.PIDPath) })
+	return w
 }
 
 // TestDefaultRunNetworkGitIsBounded is the ga-r0epd regression test.
@@ -64,7 +93,7 @@ func wedgedGit(t *testing.T) (remote, childPIDPath string) {
 // The assertion is deliberately about the deadline, not the error text: what
 // matters is that the call RETURNS.
 func TestDefaultRunNetworkGitIsBounded(t *testing.T) {
-	remote, _ := wedgedGit(t)
+	remote := wedgedGit(t).URL
 
 	restore := networkGitTimeout
 	networkGitTimeout = 300 * time.Millisecond
