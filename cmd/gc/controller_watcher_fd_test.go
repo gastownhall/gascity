@@ -9,7 +9,6 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 )
@@ -53,7 +52,7 @@ func TestWatchConfigTargets_CloseReturnsFDsToBaseline(t *testing.T) {
 	}
 
 	cleanup()
-	afterClose := waitForFDCountNear(t, baseline)
+	afterClose := countProcessFDs(t)
 	residual := afterClose - baseline
 	if residual > fdCountNoise {
 		t.Fatalf("FD count did not return to baseline after Watcher.Close(): baseline=%d afterAdd=%d afterClose=%d held=%d residual=%d; stderr=%q",
@@ -72,7 +71,7 @@ func TestWatchConfigTargets_CloseReturnsFDsToBaseline(t *testing.T) {
 			restartBaseline, afterAdd2, held2, stderr.String())
 	}
 	cleanup2()
-	afterClose2 := waitForFDCountNear(t, restartBaseline)
+	afterClose2 := countProcessFDs(t)
 	residual2 := afterClose2 - restartBaseline
 	if residual2 > fdCountNoise {
 		t.Fatalf("FD count did not return to baseline after watcher restart: restartBaseline=%d afterAdd2=%d afterClose2=%d held2=%d residual2=%d; stderr=%q",
@@ -84,23 +83,18 @@ func TestWatchConfigTargets_CloseReturnsFDsToBaseline(t *testing.T) {
 // while the test runs (not a leak threshold on the watch set). The
 // assertion is still return-to-baseline: residual must stay far below
 // the watcher's own held-while-open count.
+//
+// It also absorbs the two descriptors fsnotify tears down asynchronously.
+// The cleanup returned by watchConfigTargets is synchronous for everything
+// this test measures: it closes done, waits on registrationWG, calls
+// watcher.Close(), then blocks on <-eventLoopDone. fsnotify v1.10.1's
+// kqueue Close() unix.Close()es every watch descriptor inline before
+// returning (fsnotify#740) -- those are the ~nDirs FDs the leak was about,
+// so they are already released when cleanup() returns and the count needs
+// no settling wait. Only w.kq and w.closepipe[0] are closed later, in the
+// readEvents goroutine's defer, and that is at most 2 FDs against this
+// slack of 8.
 const fdCountNoise = 8
-
-func waitForFDCountNear(t *testing.T, baseline int) int {
-	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	var n int
-	for {
-		n = countProcessFDs(t)
-		if n-baseline <= fdCountNoise {
-			return n
-		}
-		if time.Now().After(deadline) {
-			return n
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-}
 
 func countProcessFDs(t *testing.T) int {
 	t.Helper()
