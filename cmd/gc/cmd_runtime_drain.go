@@ -739,21 +739,37 @@ func releaseUnexecutedClaimsForSession(cityPath, sessionName string, stderr io.W
 		return
 	}
 	cfg, _ := loadCityConfig(cityPath, io.Discard)
-	sessionBead, err := cliSessionStore(store, cfg, cityPath).Get(sessionName)
-	if err != nil {
-		// A session that cannot be resolved holds nothing this pass can find, so
-		// there is nothing to report. Both arms above are deliberately silent for
-		// the same reason: the ack is the signal the controller is waiting on, and
-		// a release that could not even begin must not decorate a successful ack
-		// with a warning an operator can do nothing about. A claim genuinely left
-		// behind here is still caught by the dead-assignee release lane.
-		return
-	}
 	var rigStores map[string]beads.Store
 	if cfg != nil {
 		rigStores = buildStandaloneRigStores(cfg, cityPath, io.Discard)
 	}
-	releaseUnexecutedClaimsOnDrainAck(cityPath, cfg, store, rigStores, sessionBead, drainAckReleaseBudget, stderr)
+	releaseUnexecutedClaimsForSessionStore(cityPath, cfg, store, rigStores, sessionName, drainAckReleaseBudget, stderr)
+}
+
+func releaseUnexecutedClaimsForSessionStore(
+	cityPath string,
+	cfg *config.City,
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	sessionName string,
+	budget time.Duration,
+	stderr io.Writer,
+) {
+	sessStore := cliSessionStore(store, cfg, cityPath)
+	sessionID, err := resolveSessionID(sessStore, sessionName)
+	if err != nil {
+		// A session that cannot be resolved holds nothing this pass can find, so
+		// there is nothing to report. The ack is the signal the controller is
+		// waiting on, and a release that could not begin must not decorate a
+		// successful ack with a warning an operator can do nothing about. A claim
+		// genuinely left behind here is still caught by the dead-assignee lane.
+		return
+	}
+	sessionBead, err := sessStore.Get(sessionID)
+	if err != nil {
+		return
+	}
+	releaseUnexecutedClaimsOnDrainAck(cityPath, cfg, store, rigStores, sessionBead, budget, stderr)
 }
 
 // drainAckReleaseBudget bounds the whole held-claim release pass.
