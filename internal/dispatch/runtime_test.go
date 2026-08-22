@@ -539,6 +539,11 @@ func TestProcessScopeCheckAbortSkipsMemberBlockedOnInFlightControl(t *testing.T)
 	if got := memberAfter.Metadata["gc.outcome"]; got != "skipped" {
 		t.Fatalf("futureMember outcome = %q, want skipped", got)
 	}
+	// close_reason is not decoration. BdStore.CloseAll forwards it as --reason,
+	// and a city running validation.on-close=error rejects a close whose reason
+	// is under 20 characters — so a skip that carries no reason trades one
+	// failure mode for another in exactly the cities that validate hardest.
+	assertScopeSkipCloseReason(t, memberAfter)
 
 	// The member's edge onto the control must survive. Deleting the dep is the
 	// other obvious way to make this abort succeed, and it would destroy the
@@ -565,6 +570,130 @@ func TestProcessScopeCheckAbortSkipsMemberBlockedOnInFlightControl(t *testing.T)
 	wantOrder := []string{futureMember.ID, body.ID, control.ID}
 	if !slices.Equal(store.closeOrder, wantOrder) {
 		t.Fatalf("close order = %v, want %v", store.closeOrder, wantOrder)
+	}
+}
+
+// TestProcessScopeCheckAbortSkipsMemberBlockedOnOutOfScopeOpenBead pins the one
+// behavior this fix genuinely widened, so that narrowing it later is a decision
+// rather than an accident.
+//
+// canSkipScopeMemberWithDeps only refuses blockers that are in the pending set,
+// so it is blind to an open blocker outside the aborting scope. Under the old
+// unforced write that blindness was covered by accident: bd's own guard refused
+// the close, and the abort failed loudly. Closing with --force removes that
+// backstop, and this member now closes over its out-of-scope blocker.
+//
+// That is the intended reading of a skip — "this work will never run" is true
+// regardless of what else was blocking it, and an aborted scope has no business
+// waiting on anything. But it is a real change in what gc will do without
+// complaint, so it gets a test that says so out loud. If someone later decides
+// the skip judgment should consult blockers outside the pending set, this test
+// is the one that should fail and force the conversation.
+func TestProcessScopeCheckAbortSkipsMemberBlockedOnOutOfScopeOpenBead(t *testing.T) {
+	t.Parallel()
+
+	store := newStrictCloseStore()
+	body := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "body",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": "wf-1",
+			"gc.step_ref":     "demo.body",
+		},
+	})
+	failed := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "preflight",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": "wf-1",
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+			"gc.outcome":      "fail",
+		},
+	})
+	control := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize scope for preflight",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope-check",
+			"gc.root_bead_id": "wf-1",
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "control",
+		},
+	})
+	control = mustGetBead(t, store, control.ID)
+	member := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "implement",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.root_bead_id": "wf-1",
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+		},
+	})
+	// Deliberately carries no gc.root_bead_id: it is not a member of this scope,
+	// so it never enters the pending set and the skip judgment cannot see it.
+	outsider := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "unrelated open work",
+		Type:  "task",
+	})
+
+	mustDepAdd(t, store, control.ID, failed.ID, "blocks")
+	mustDepAdd(t, store, member.ID, control.ID, "blocks")
+	mustDepAdd(t, store, member.ID, outsider.ID, "blocks")
+
+	result, err := ProcessControl(store, control, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(scope-check fail): %v", err)
+	}
+	if result.Action != "scope-fail" || result.Skipped != 1 {
+		t.Fatalf("result = %+v, want action scope-fail with Skipped 1", result)
+	}
+
+	memberAfter := mustGetBead(t, store, member.ID)
+	if memberAfter.Status != "closed" {
+		t.Fatalf("member status = %q, want closed — the skip closes over the out-of-scope blocker", memberAfter.Status)
+	}
+	if got := memberAfter.Metadata["gc.outcome"]; got != "skipped" {
+		t.Fatalf("member outcome = %q, want skipped", got)
+	}
+	assertScopeSkipCloseReason(t, memberAfter)
+
+	// The outsider is untouched. Force-closing over a blocker must not be
+	// mistaken for permission to touch the blocker itself.
+	if outsiderAfter := mustGetBead(t, store, outsider.ID); outsiderAfter.Status != "open" {
+		t.Fatalf("outsider status = %q, want open — it is not part of this scope", outsiderAfter.Status)
+	}
+	deps, err := store.DepList(member.ID, "down")
+	if err != nil {
+		t.Fatalf("dep list member: %v", err)
+	}
+	if len(deps) != 2 {
+		t.Fatalf("member deps = %+v, want both blocks edges intact", deps)
+	}
+
+	if bodyAfter := mustGetBead(t, store, body.ID); bodyAfter.Status != "closed" {
+		t.Fatalf("body status = %q, want closed", bodyAfter.Status)
+	}
+}
+
+// assertScopeSkipCloseReason pins the reason stamped on a member closed by a
+// scope abort. The length check is the part that matters and is not redundant
+// with the equality check: bd's validation.on-close=error validator rejects a
+// close whose reason is under 20 characters, so if someone later shortens
+// scopeAbortSkippedCloseReason to a terse token, equality alone would happily
+// follow them into a city where every skip fails validation.
+func assertScopeSkipCloseReason(t *testing.T, b beads.Bead) {
+	t.Helper()
+	got := b.Metadata["close_reason"]
+	if got != scopeAbortSkippedCloseReason {
+		t.Fatalf("%s close_reason = %q, want %q", b.ID, got, scopeAbortSkippedCloseReason)
+	}
+	if len(got) < 20 {
+		t.Fatalf("%s close_reason %q is %d chars; bd's on-close validator rejects reasons under 20", b.ID, got, len(got))
 	}
 }
 
@@ -655,6 +784,7 @@ func TestReconcileTerminalScopedMemberSkipsSiblingBlockedOnPreservedControl(t *t
 	if got := siblingAfter.Metadata["gc.outcome"]; got != "skipped" {
 		t.Fatalf("sibling outcome = %q, want skipped", got)
 	}
+	assertScopeSkipCloseReason(t, siblingAfter)
 
 	deps, err := store.DepList(sibling.ID, "down")
 	if err != nil {
@@ -2892,8 +3022,11 @@ func TestStrictCloseStoreMirrorsBdClosePolicy(t *testing.T) {
 				t.Fatalf("Update(%s, closed) = %v, want refusal containing %q", subjectID, err, tc.wantErr)
 			}
 
-			// UpdateAll is the batch path skipScopeMembers prefers; it must
-			// agree with Update or the guard is only half-armed.
+			// UpdateAll must agree with Update or the guard is only half-armed.
+			// No dispatch path routes a close through it today — the scope-skip
+			// path closes via CloseAll — but BdStore.UpdateAll still exists, and
+			// the day something reaches for it the batch verb has to refuse the
+			// same shapes the single verb refuses.
 			store2 := newStrictCloseStore()
 			subjectID2 := tc.build(t, store2)
 			_, batchErr := store2.UpdateAll([]string{subjectID2}, beads.UpdateOpts{Status: &closed})
