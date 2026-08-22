@@ -2,11 +2,14 @@
 package packman
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/config"
@@ -20,6 +23,34 @@ var (
 	runNetworkGit            = defaultRunNetworkGit
 	materializeSyntheticRepo = builtinpacks.MaterializeSyntheticRepo
 )
+
+// networkGitTimeout bounds every network git invocation.
+//
+// The bound belongs here rather than at the callers because the invariant it
+// protects is packman-local: EnsureRepoInCache clones while holding
+// WithRepoCacheWriteLock, so a git that never returns holds the machine-wide
+// repo-cache lock forever and every other gc process on the host that touches
+// pack state queues behind it. That is ga-r0epd — one wedged remote taking out
+// `gc help`, `make test` and the pre-push hook for every agent on the machine.
+//
+// Ten minutes is deliberately generous: it is far longer than any healthy pack
+// clone and short enough that a wedge resolves itself within one coffee break
+// instead of never. It is a var so tests can shrink it.
+var networkGitTimeout = 10 * time.Minute
+
+// networkGitWaitDelay caps how long a killed git's surviving children may keep
+// the output pipes open before they are SIGKILLed. This is not defensive
+// padding: a blackholed clone leaves git-remote-http holding the pipe, so
+// killing git alone leaves the call blocked in CombinedOutput and the deadline
+// buys nothing. It is a var so tests can shrink it; the real bound on a call is
+// networkGitTimeout + networkGitWaitDelay.
+var networkGitWaitDelay = 10 * time.Second
+
+// errNetworkGitTimeout marks a network git call killed by networkGitTimeout.
+// It is a distinct sentinel because "the deadline fired" and "the remote said
+// no" call for opposite responses, and callers that cannot tell them apart
+// tend to retry the wrong one.
+var errNetworkGitTimeout = errors.New("network git call timed out")
 
 // RepoCacheRoot returns the shared machine-local repo cache root,
 // honoring the GC_HOME override via config.GlobalRepoCacheRoot so the
@@ -319,13 +350,27 @@ func defaultRunNetworkGit(cityRoot, remoteURL, dir string, args ...string) (stri
 		return "", fmt.Errorf("loading git credentials for %s: %w", gitcred.RedactUserinfo(remoteURL), err)
 	}
 	cmdArgs := buildNetworkGitArgs(inj, args...)
-	cmd := exec.Command("git", cmdArgs...)
+	ctx, cancel := context.WithTimeout(context.Background(), networkGitTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
 	cmd.Env = append(gitutil.HermeticEnv(), inj.Env...)
+	// git spawns helpers (git-remote-http, credential helpers) that inherit the
+	// output pipes, so killing git alone can leave CombinedOutput waiting on a
+	// pipe a child still holds. WaitDelay caps that second wait and SIGKILLs
+	// whatever is left, which is the difference between a bounded call and a
+	// bound that only looks like one.
+	cmd.WaitDelay = networkGitWaitDelay
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		// Check the deadline before classifying: a killed git produces little
+		// or no output, and auth classification reads output, so asking it
+		// first invites a confident wrong answer about why the call failed.
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("git %s: %w after %s: %s", strings.Join(args, " "), errNetworkGitTimeout, networkGitTimeout, strings.TrimSpace(string(out)))
+		}
 		if authErr := gitcred.ClassifyAuthError(remoteURL, inj, string(out), err); authErr != nil {
 			return "", authErr
 		}
