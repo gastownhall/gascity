@@ -60,7 +60,6 @@ type fakeState struct {
 	pokeCount         int
 	extmsgSvc         *extmsg.Services
 	adapterReg        *extmsg.AdapterRegistry
-	maintenance       MaintenanceProvider
 	usageSink         usage.Sink
 	// scopedStoreFn backs ScopedStoreLike. Nil (the default) returns
 	// (nil, nil) — "existing isn't bd-CLI backed, keep using it directly" —
@@ -188,7 +187,6 @@ func (f *fakeState) WebhookDispatcher() orderdispatch.Dispatcher { return f.webh
 
 func (f *fakeState) ExtMsgServices() *extmsg.Services         { return f.extmsgSvc }
 func (f *fakeState) AdapterRegistry() *extmsg.AdapterRegistry { return f.adapterReg }
-func (f *fakeState) MaintenanceLoop() MaintenanceProvider     { return f.maintenance }
 
 func (f *fakeState) RawConfig() *config.City {
 	if f.rawCfg != nil {

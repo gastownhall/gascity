@@ -117,7 +117,7 @@ func TestAllowlistPolicyGolden(t *testing.T) {
 	wantAllowed := []string{
 		"bead.closed", "bead.created", "controller.started", "convoy.closed",
 		"events.rotated", "execution.run_anchored", "execution.step_completed", "execution.step_defined", "execution.step_started", "execution.work_associated",
-		"gc.store.maintenance.done", "mail.sent",
+		"mail.sent",
 		"order.completed", "order.failed", "order.fired",
 		"project.identity.stamped", "session.drain_acked_with_assigned_work",
 		"session.draining", "session.reset_stalled", "session.stopped",

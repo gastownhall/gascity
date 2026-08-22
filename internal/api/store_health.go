@@ -70,8 +70,7 @@ func (s *Server) cachedStoreHealthEntry(now time.Time) *StatusStoreHealth {
 	return nil
 }
 
-// computeStoreHealth measures the Dolt store on disk and the latest
-// gc.store.maintenance event via the server's State. Returns nil when
+// computeStoreHealth measures the Dolt store on disk. Returns nil when
 // the city path is empty (no state to measure against).
 func (s *Server) computeStoreHealth(ctx context.Context) (*StatusStoreHealth, error) {
 	cityPath := s.state.CityPath()
@@ -87,18 +86,16 @@ func (s *Server) computeStoreHealth(ctx context.Context) (*StatusStoreHealth, er
 	if err != nil {
 		return nil, err
 	}
-	lastAt, lastStatus := storehealth.LastMaintenance(s.state.EventProvider())
 	// countBeadStoreRows returns an error (handled above) rather than a
 	// fabricated count on every failure path, so rows here is always a
 	// real measurement.
-	h := storehealth.Compute(cityPath, size, rows, true, lastAt, lastStatus)
+	h := storehealth.Compute(cityPath, size, rows, true)
 	return statusStoreHealthFromDomain(h), nil
 }
 
-// statusStoreHealthFromDomain adapts storehealth.Health to the wire
-// type StatusStoreHealth, serializing LastGCAt to RFC3339 UTC.
+// statusStoreHealthFromDomain adapts storehealth.Health to the wire type.
 func statusStoreHealthFromDomain(h storehealth.Health) *StatusStoreHealth {
-	out := &StatusStoreHealth{
+	return &StatusStoreHealth{
 		Path:        h.Path,
 		SizeBytes:   h.SizeBytes,
 		LiveRows:    h.LiveRows,
@@ -106,11 +103,6 @@ func statusStoreHealthFromDomain(h storehealth.Health) *StatusStoreHealth {
 		Warning:     h.Warning,
 		ThresholdMB: h.ThresholdMB,
 	}
-	if !h.LastGCAt.IsZero() {
-		out.LastGCAt = h.LastGCAt.UTC().Format(time.RFC3339)
-		out.LastGCStatus = h.LastGCStatus
-	}
-	return out
 }
 
 // countBeadStoreRows returns the number of retained beads in store, including

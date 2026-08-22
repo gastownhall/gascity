@@ -1417,7 +1417,6 @@ func runController(
 
 	cs.startBeadEventWatcher(ctx)
 	cs.startEmergencyEventRelay(ctx)
-	cs.startMaintenanceLoop(ctx)
 
 	// G13 §6 sweep-before-serve: reconcile orphan in_flight rig-create idem
 	// records (their goroutines did not survive this restart) BEFORE the API mux

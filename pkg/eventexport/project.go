@@ -129,7 +129,6 @@ var allowedTypes = map[string]bool{
 	"session.drain_acked_with_assigned_work": true,
 	"session.reset_stalled":                  true,
 	"project.identity.stamped":               true,
-	"gc.store.maintenance.done":              true,
 	"mail.sent":                              true, // reduced to {type, ts}; see ProjectEvent
 }
 
