@@ -126,25 +126,34 @@ func (s *CredentialSource) Token() (string, error) {
 	if s.token != "" && s.now().Add(expirySkew).Before(s.expiresAt) {
 		return s.token, nil
 	}
-	return s.mintLocked()
+	return s.mintLocked(context.Background())
 }
 
 // Refresh mints a fresh token regardless of cache state. Use it to re-invoke the
 // credential command after a 401 (the server rejected the presented token).
 func (s *CredentialSource) Refresh() (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.mintLocked()
+	return s.RefreshContext(context.Background())
 }
 
-func (s *CredentialSource) mintLocked() (string, error) {
+// RefreshContext mints a fresh token regardless of cache state and bounds the
+// credential command by ctx as well as the source's helper timeout.
+func (s *CredentialSource) RefreshContext(ctx context.Context) (string, error) {
+	if ctx == nil {
+		return "", errors.New("clientauth: credential context is nil")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.mintLocked(ctx)
+}
+
+func (s *CredentialSource) mintLocked(ctx context.Context) (string, error) {
 	info := ExecInfo{
 		Version: Version,
 		Spec:    ExecSpec{ServerURL: s.serverURL, City: s.city, Interactive: s.interactive},
 	}
 	// Bound the exec so a hung helper is canceled instead of blocking the caller
 	// (and every remote request behind this lock) indefinitely.
-	ctx, cancel := context.WithTimeout(context.Background(), s.helperTimeout)
+	ctx, cancel := context.WithTimeout(ctx, s.helperTimeout)
 	defer cancel()
 	res, err := s.runner(ctx, s.command, info)
 	if err != nil {

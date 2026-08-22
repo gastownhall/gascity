@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -38,12 +39,15 @@ func remoteClientOptions(target *remoteTarget) (api.RemoteOptions, error) {
 			opts.Token = cs.Token
 			// Force-mint on a 401 so a token rejected before its expiry (edge key
 			// rotation / early revocation) recovers without a fresh gc invocation.
-			opts.RefreshToken = cs.Refresh
+			opts.RefreshToken = func(ctx context.Context) (string, error) {
+				return cs.RefreshContext(ctx)
+			}
 		}
 	}
 	if target.Token != "" {
 		tok := target.Token
 		opts.Token = func() (string, error) { return tok, nil }
+		opts.RefreshToken = nil
 	}
 	return opts, nil
 }

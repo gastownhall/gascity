@@ -2,6 +2,7 @@ package clientauth
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -209,6 +210,23 @@ func TestCredentialSource_BoundsHelperContext(t *testing.T) {
 	}
 	if tokErr == nil {
 		t.Error("Token = nil error, want the canceled-helper error")
+	}
+}
+
+func TestCredentialSource_RefreshContextPropagatesCancellation(t *testing.T) {
+	s, err := NewCredentialSource("cred-helper", "https://box:9443", "mc", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.runner = func(ctx context.Context, _ string, _ ExecInfo) (ExecResult, error) {
+		<-ctx.Done()
+		return ExecResult{}, ctx.Err()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = s.RefreshContext(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("RefreshContext error = %v, want context.Canceled", err)
 	}
 }
 

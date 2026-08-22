@@ -39,6 +39,11 @@ const (
 // a grant rather than a bearer).
 type TokenSource func() (string, error)
 
+// TokenRefreshSource force-mints a fresh transport bearer after the peer
+// rejects the currently presented bearer. The request context bounds the
+// refresh operation. A nil source disables automatic refresh and retry.
+type TokenRefreshSource func(context.Context) (string, error)
+
 // GrantBinding is the request binding a city-write grant is bound to. The
 // transport computes it from the FINAL outgoing request and hands it to a
 // GrantSource, which mints a grant covering exactly this method/path/query/body.
@@ -65,11 +70,10 @@ type RemoteOptions struct {
 	// (consumed by an edge/proxy; the controller ignores Authorization).
 	Token TokenSource
 	// RefreshToken, when non-nil, force-mints a fresh bearer (bypassing any
-	// expiry cache). The transport calls it once on a 401 and retries the request
-	// with the new bearer, so an edge that rejects a still-unexpired token (key
-	// rotation, early revocation) recovers without a fresh gc invocation. Only
-	// applied to requests that carry no single-use X-GC-City-Write grant.
-	RefreshToken TokenSource
+	// expiry cache). The transport calls it once on a 401 and retries only a
+	// bearer-authenticated, replayable non-SSE request without a single-use
+	// city-write grant.
+	RefreshToken TokenRefreshSource
 	// Grant, when non-nil, mints an X-GC-City-Write grant for each mutating
 	// request (a direct hardened self-host). Reads never carry a grant.
 	Grant GrantSource
@@ -290,46 +294,67 @@ func newRemoteHTTPClients(opts RemoteOptions) (rest, stream *http.Client, err er
 	return rest, stream, nil
 }
 
-// reauthRoundTripper retries a request ONCE on a 401 after force-minting a fresh
-// bearer, so an edge that rejects a still-unexpired token (key rotation, early
-// revocation) recovers transparently. It deliberately does NOT retry a request
-// carrying an X-GC-City-Write grant: that grant is single-use and bound to the
-// exact bytes, and the request editors (which mint it) do not re-run at the
-// transport layer — a fresh grant needs a fresh gc invocation. A body without
-// GetBody (non-replayable) is also left alone.
+// reauthRoundTripper retries one bearer-authenticated, replayable non-SSE
+// request after a 401 by force-minting a fresh bearer. It calls the underlying
+// transport directly for the retry, so a second 401 is returned without another
+// refresh. Redirect follow-ups and requests with single-use city-write grants
+// are deliberately never retried.
 type reauthRoundTripper struct {
 	base    http.RoundTripper
-	refresh TokenSource
+	refresh TokenRefreshSource
 }
 
 func (rt *reauthRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	resp, err := rt.base.RoundTrip(req)
-	if err != nil || resp.StatusCode != http.StatusUnauthorized || rt.refresh == nil {
+	if err != nil || resp == nil || resp.StatusCode != http.StatusUnauthorized || rt.refresh == nil {
 		return resp, err
 	}
-	if req.Header.Get("X-GC-City-Write") != "" {
-		return resp, err // single-use grant; cannot re-mint here
+	if !hasBearerAuthorization(req.Header.Get("Authorization")) ||
+		req.Header.Get("X-GC-City-Write") != "" ||
+		isSSERequest(req) ||
+		req.Response != nil ||
+		(req.Body != nil && req.Body != http.NoBody && req.GetBody == nil) {
+		return resp, nil
 	}
-	if req.Body != nil && req.Body != http.NoBody && req.GetBody == nil {
-		return resp, err // non-replayable body
+	tok, rerr := rt.refresh(req.Context())
+	tok = strings.TrimSpace(tok)
+	if rerr != nil {
+		_ = resp.Body.Close()
+		return nil, fmt.Errorf("refreshing bearer after 401: %w", rerr)
 	}
-	tok, rerr := rt.refresh()
-	if rerr != nil || strings.TrimSpace(tok) == "" {
-		return resp, err // keep the original 401
+	if tok == "" {
+		_ = resp.Body.Close()
+		return nil, fmt.Errorf("refreshing bearer after 401: credential source returned an empty token")
 	}
 	retry := req.Clone(req.Context())
 	if req.GetBody != nil {
 		body, gerr := req.GetBody()
 		if gerr != nil {
-			return resp, err // cannot replay; keep the original 401 (untouched)
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("replaying request after bearer refresh: %w", gerr)
 		}
 		retry.Body = body
 	}
 	retry.Header.Set("Authorization", "Bearer "+tok)
-	// Committed to the retry: drain + close the first response, then re-send.
-	_, _ = io.Copy(io.Discard, resp.Body)
+	// Committed to the retry: close the first response before re-sending.
 	_ = resp.Body.Close()
 	return rt.base.RoundTrip(retry)
+}
+
+func hasBearerAuthorization(value string) bool {
+	value = strings.TrimSpace(value)
+	return strings.HasPrefix(value, "Bearer ") && strings.TrimSpace(strings.TrimPrefix(value, "Bearer ")) != ""
+}
+
+func isSSERequest(req *http.Request) bool {
+	for _, value := range req.Header.Values("Accept") {
+		for _, mediaType := range strings.Split(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(strings.SplitN(mediaType, ";", 2)[0]), "text/event-stream") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // remoteTLSConfig builds the client TLS config from the options: a custom CA

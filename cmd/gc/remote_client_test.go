@@ -48,6 +48,22 @@ func TestBuildRemoteClient_CredentialCommandWired(t *testing.T) {
 	}
 }
 
+func TestRemoteClientOptionsStaticTokenDoesNotWireRefresh(t *testing.T) {
+	opts, err := remoteClientOptions(&remoteTarget{
+		BaseURL: "https://box:9443", CityName: "mc", Token: "static",
+		Ctx: &clientcontext.Context{Name: "c", URL: "https://box:9443", City: "mc", CredentialCommand: "echo x"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.Token == nil {
+		t.Fatal("static token was not wired")
+	}
+	if opts.RefreshToken != nil {
+		t.Fatal("static token must not gain a refresh source")
+	}
+}
+
 func TestResolveReadTarget_Remote(t *testing.T) {
 	t.Setenv("GC_HOME", t.TempDir())
 	var out, errb bytes.Buffer
