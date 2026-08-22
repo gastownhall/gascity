@@ -2964,3 +2964,41 @@ func mustCreateSessionBead(t *testing.T, store beads.Store, metadata map[string]
 	}
 	return b
 }
+
+// TestArchiveMatchingStampsCloseReason pins the bulk selection path to the
+// same retained-body contract as [Provider.Archive]: `gc mail archive` with
+// filters closes candidates directly, and without the stamp every one of them
+// classified as user-removed — so a never-read message selected by a bulk
+// cleanup became irrecoverable through the mail layer.
+func TestArchiveMatchingStampsCloseReason(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("alice", "bob", "GO: ship the release", "the handoff body")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Never read.
+	if _, _, err := p.ArchiveMatching(ArchiveFilter{Recipients: []string{"bob"}}); err != nil {
+		t.Fatalf("ArchiveMatching: %v", err)
+	}
+	raw, err := store.Get(sent.ID)
+	if err != nil {
+		t.Fatalf("store.Get after bulk archive: %v", err)
+	}
+	if got := raw.Metadata["close_reason"]; got != ArchiveCloseReason {
+		t.Errorf("close_reason after ArchiveMatching = %q, want %q", got, ArchiveCloseReason)
+	}
+	// Hidden from the mail views, per the removes-from-every-view contract.
+	if _, err := p.Get(sent.ID); !errors.Is(err, mail.ErrNotFound) {
+		t.Errorf("Get after ArchiveMatching err = %v, want ErrNotFound", err)
+	}
+	// Still recoverable through the archeology verb.
+	got, err := p.Peek(sent.ID)
+	if err != nil {
+		t.Fatalf("Peek after ArchiveMatching: %v (contract: body stays readable)", err)
+	}
+	if got.Body != "the handoff body" {
+		t.Errorf("Peek body = %q, want %q", got.Body, "the handoff body")
+	}
+}

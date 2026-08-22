@@ -452,6 +452,11 @@ func (p *Provider) ArchiveCandidates(filter ArchiveFilter) ([]mail.Message, erro
 // ArchiveMatching archives open messages selected by filter without per-message
 // lookups after the candidate list has already verified them. Matched beads are
 // closed rather than deleted, so their bodies stay readable.
+//
+// Like [Provider.Archive] it stamps [ArchiveCloseReason] before closing: the
+// stamp is what makes "bodies stay readable" true, since isRemovedMessageBead
+// classifies a closed message with no recognized reason as user-removed and
+// every read path — Peek included — then answers ErrNotFound.
 func (p *Provider) ArchiveMatching(filter ArchiveFilter) ([]mail.Message, []mail.ArchiveResult, error) {
 	candidates, err := p.ArchiveCandidates(filter)
 	if err != nil {
@@ -467,6 +472,14 @@ func (p *Provider) ArchiveMatching(filter ArchiveFilter) ([]mail.Message, []mail
 		return candidates, results, nil
 	}
 	for i, id := range ids {
+		if err := p.store.SetMetadata(id, "close_reason", ArchiveCloseReason); err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				results[i].Err = mail.ErrAlreadyArchived
+				continue
+			}
+			results[i].Err = fmt.Errorf("beadmail archive: stamping close_reason: %w", err)
+			continue
+		}
 		if err := p.store.Close(id); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				results[i].Err = mail.ErrAlreadyArchived
