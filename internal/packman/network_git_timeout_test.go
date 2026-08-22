@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -25,7 +26,7 @@ import (
 // exec.Command resolves the binary against the parent process PATH rather than
 // cmd.Env, so t.Setenv is enough to intercept even though defaultRunNetworkGit
 // hands the child a hermetic environment.
-func wedgedGit(t *testing.T) string {
+func wedgedGit(t *testing.T) (remote, childPIDPath string) {
 	t.Helper()
 	dir := t.TempDir()
 	// The shim runs with the hermetic environment defaultRunNetworkGit builds,
@@ -34,14 +35,21 @@ func wedgedGit(t *testing.T) string {
 	// exits instantly — which looks exactly like a bound that fired early.
 	sleep, err := exec.LookPath("sleep")
 	if err != nil {
-		t.Skipf("no sleep binary to build a wedged git shim: %v", err)
+		// Skipping here would delete exactly the coverage this file exists for,
+		// silently. sleep is POSIX-required, so on the platforms we test it is
+		// a broken image, not an unsupported one.
+		if runtime.GOOS != "windows" {
+			t.Fatalf("no sleep binary to build a wedged git shim: %v", err)
+		}
+		t.Skipf("no sleep binary on %s: %v", runtime.GOOS, err)
 	}
-	script := "#!/bin/sh\n" + sleep + " 300 &\nwait\n"
+	childPIDPath = filepath.Join(dir, "child.pid")
+	script := "#!/bin/sh\n" + sleep + " 300 &\necho $! > " + childPIDPath + "\nwait\n"
 	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755); err != nil {
 		t.Fatalf("writing git shim: %v", err)
 	}
 	t.Setenv("PATH", dir)
-	return "http://packman.invalid/wedged.git"
+	return "http://packman.invalid/wedged.git", childPIDPath
 }
 
 // TestDefaultRunNetworkGitIsBounded is the ga-r0epd regression test.
@@ -56,7 +64,7 @@ func wedgedGit(t *testing.T) string {
 // The assertion is deliberately about the deadline, not the error text: what
 // matters is that the call RETURNS.
 func TestDefaultRunNetworkGitIsBounded(t *testing.T) {
-	remote := wedgedGit(t)
+	remote, _ := wedgedGit(t)
 
 	restore := networkGitTimeout
 	networkGitTimeout = 300 * time.Millisecond
@@ -125,5 +133,12 @@ func TestDefaultRunNetworkGitRealFailuresAreNotTimeouts(t *testing.T) {
 	}
 	if errors.Is(err, errNetworkGitTimeout) {
 		t.Fatalf("err = %v, want a real git failure rather than a timeout classification", err)
+	}
+	// Asserting only "some error" would let this pass vacuously on an image
+	// with no git at all — where the bounded test supplies its own shim and
+	// this one would go green having executed no git at all. Naming git's own
+	// diagnosis is what keeps the control honest.
+	if !strings.Contains(err.Error(), "does not appear to be a git repository") {
+		t.Fatalf("err = %v, want git's own no-such-repository diagnosis", err)
 	}
 }

@@ -38,13 +38,25 @@ var (
 // instead of never. It is a var so tests can shrink it.
 var networkGitTimeout = 10 * time.Minute
 
-// networkGitWaitDelay caps how long a killed git's surviving children may keep
-// the output pipes open before they are SIGKILLed. This is not defensive
-// padding: a blackholed clone leaves git-remote-http holding the pipe, so
-// killing git alone leaves the call blocked in CombinedOutput and the deadline
-// buys nothing. It is a var so tests can shrink it; the real bound on a call is
-// networkGitTimeout + networkGitWaitDelay.
+// networkGitWaitDelay caps how long the call may stay blocked in CombinedOutput
+// after the deadline fires. This is not defensive padding: git's helpers
+// (git-remote-http, credential helpers) inherit the output pipes, so a read on
+// those pipes can outlive git itself and the deadline alone buys nothing.
+//
+// WaitDelay closes the parent's ends of those pipes; it does not signal anything
+// but the command's own process. Killing the descendants is
+// terminateNetworkGitGroup's job, and both are needed: the group kill stops the
+// writers, WaitDelay unblocks the reader if one slips through anyway. It is a
+// var so tests can shrink it; the real bound on a call is networkGitTimeout +
+// networkGitWaitDelay.
 var networkGitWaitDelay = 10 * time.Second
+
+// networkGitTerminateGrace is how long git's process group gets to exit on
+// SIGTERM before it is SIGKILLed. git removes a partially cloned directory when
+// it is interrupted, so asking politely first is what keeps a timed-out clone
+// from leaving debris in the repo cache; the escalation is what makes the bound
+// hold when it ignores us.
+const networkGitTerminateGrace = 2 * time.Second
 
 // errNetworkGitTimeout marks a network git call killed by networkGitTimeout.
 // It is a distinct sentinel because "the deadline fired" and "the remote said
@@ -357,22 +369,31 @@ func defaultRunNetworkGit(cityRoot, remoteURL, dir string, args ...string) (stri
 		cmd.Dir = dir
 	}
 	cmd.Env = append(gitutil.HermeticEnv(), inj.Env...)
-	// git spawns helpers (git-remote-http, credential helpers) that inherit the
-	// output pipes, so killing git alone can leave CombinedOutput waiting on a
-	// pipe a child still holds. WaitDelay caps that second wait and SIGKILLs
-	// whatever is left, which is the difference between a bounded call and a
-	// bound that only looks like one.
+	// The deadline has to reach git's descendants, not just git. exec's default
+	// cancel kills the command's own process, which leaves git-remote-http and
+	// index-pack alive — still writing into the cache directory this call is
+	// holding the write lock over. The next process to take that lock can then
+	// RemoveAll a tree a live orphan is repopulating. Starting git as its own
+	// group leader makes the whole tree addressable in one signal.
+	startNetworkGitInOwnGroup(cmd)
+	cmd.Cancel = func() error { return terminateNetworkGitGroup(cmd) }
 	cmd.WaitDelay = networkGitWaitDelay
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		// Check the deadline before classifying: a killed git produces little
-		// or no output, and auth classification reads output, so asking it
-		// first invites a confident wrong answer about why the call failed.
-		if ctx.Err() != nil {
-			return "", fmt.Errorf("git %s: %w after %s: %s", strings.Join(args, " "), errNetworkGitTimeout, networkGitTimeout, strings.TrimSpace(string(out)))
-		}
+		// Auth classification runs first, and the deadline is the fallback.
+		// ClassifyAuthError gates on an *exec.ExitError with code 128, which a
+		// killed process (exit -1) can never satisfy, so a wedge cannot be
+		// mistaken for an auth failure no matter what partial output it left
+		// behind. Asking the deadline first would be the lossy order: a real
+		// rejection landing in the last milliseconds before the deadline lapses
+		// would be reported as a wedge, and the credential hint the user needs
+		// suppressed. So the timeout branch means what it should — the failure
+		// was not diagnosable and the clock had run out.
 		if authErr := gitcred.ClassifyAuthError(remoteURL, inj, string(out), err); authErr != nil {
 			return "", authErr
+		}
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("git %s: %w after %s: %s", strings.Join(args, " "), errNetworkGitTimeout, networkGitTimeout, strings.TrimSpace(string(out)))
 		}
 		return "", fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
 	}
