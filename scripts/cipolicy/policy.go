@@ -119,7 +119,14 @@ const (
 	// proof of gc start's is_blocked repair (about 4 minutes, inside that
 	// step's 15m -timeout). Reviewed delta: one -run alternative, no new job,
 	// step, trigger or permission.
-	expectedCIExecutionHash     = "5ce8f7a7966b71d98581b13c44907a05d7a3152c895b2efdd782594d18dc470f"
+	//
+	// Bumped again for the critical-path-evidence job (ga-oaz41a.1), which
+	// fails CI when a matched critical-path suite has no successful evidence
+	// (a matched-but-skipped, failed, canceled or absent gate job). Reviewed
+	// delta: one new always() job on the 2-vCPU runner (a pinned checkout and
+	// one python3 step) and one ci-required needs entry. No new trigger and no
+	// new permission.
+	expectedCIExecutionHash     = "0e6761a4caa31b95096e267f06d2b6cf81754be8e2ba66cff0056046da50e9d5"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -303,6 +310,9 @@ func validate(ci, nightly, action map[string]any) error {
 		return err
 	}
 	if err := validateChangesJob(ci); err != nil {
+		return err
+	}
+	if err := validateCriticalPathEvidenceJob(ci); err != nil {
 		return err
 	}
 	if err := validatePolicyWiring(ci); err != nil {
