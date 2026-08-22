@@ -137,6 +137,24 @@ type orderDispatcher interface {
 // *exec.ExitError, and the returned output may be partial.
 type ExecRunner func(ctx context.Context, command, dir string, env []string) ([]byte, error)
 
+// maxOrderFailureOutputBytes bounds how much of a failing order's output rides
+// the event bus. The tail is where the error is; the full text stays in the log.
+const maxOrderFailureOutputBytes = 2048
+
+// tailForOrderFailureEvent trims output to the last maxOrderFailureOutputBytes,
+// cutting at a line boundary so the excerpt starts mid-nothing.
+func tailForOrderFailureEvent(output string) string {
+	trimmed := strings.TrimRight(output, "\n")
+	if len(trimmed) <= maxOrderFailureOutputBytes {
+		return trimmed
+	}
+	tail := trimmed[len(trimmed)-maxOrderFailureOutputBytes:]
+	if idx := strings.IndexByte(tail, '\n'); idx >= 0 {
+		tail = tail[idx+1:]
+	}
+	return "[output truncated] " + tail
+}
+
 // shellExecRunner is the production ExecRunner using os/exec.
 func shellExecRunner(ctx context.Context, command, dir string, env []string) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
@@ -1647,7 +1665,11 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 			outcome = orders.RunOutcomeExecFailed
 			logDispatchError(m.stderr, "gc: order exec %s failed: %s", scoped, execErrMsg)
 			if len(output) > 0 {
-				logDispatchError(m.stderr, "gc: order exec %s output: %s", scoped, execenv.RedactText(string(output), redactionEnv))
+				redactedOutput := execenv.RedactText(string(output), redactionEnv)
+				logDispatchError(m.stderr, "gc: order exec %s output: %s", scoped, redactedOutput)
+				// "exit status 1" alone tells nobody why. The command's own
+				// diagnostic is the answer, so put it on the event too.
+				execErrMsg += ": " + tailForOrderFailureEvent(redactedOutput)
 			}
 		}
 	}
