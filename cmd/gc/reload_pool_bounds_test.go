@@ -37,8 +37,8 @@ func TestFormatResolvedMaxActiveSessions(t *testing.T) {
 func TestPoolMaxActiveSessionChanges_Table(t *testing.T) {
 	t.Parallel()
 
-	agent := func(name, dir string, max *int) config.Agent {
-		return config.Agent{Name: name, Dir: dir, MaxActiveSessions: max}
+	agent := func(name, dir string, maxActive *int) config.Agent {
+		return config.Agent{Name: name, Dir: dir, MaxActiveSessions: maxActive}
 	}
 
 	tests := []struct {
