@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worktree"
 )
@@ -227,7 +228,7 @@ func ComputePoolDesiredStates(
 	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
 ) []PoolDesiredState {
-	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, nil)
+	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, nil, nil)
 }
 
 // ComputePoolDesiredStatesAt computes pool demand at a caller-supplied
@@ -240,7 +241,7 @@ func ComputePoolDesiredStatesAt(
 	scaleCheckCounts map[string]int,
 	decisionTime time.Time,
 ) []PoolDesiredState {
-	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, decisionTime, nil)
+	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, decisionTime, nil, nil)
 }
 
 func ComputePoolDesiredStatesTraced(
@@ -250,7 +251,7 @@ func ComputePoolDesiredStatesTraced(
 	scaleCheckCounts map[string]int,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, trace)
+	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, trace, nil)
 }
 
 // ComputePoolDesiredStatesTracedAt is ComputePoolDesiredStatesAt with
@@ -263,7 +264,7 @@ func ComputePoolDesiredStatesTracedAt(
 	decisionTime time.Time,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, decisionTime, trace)
+	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, decisionTime, trace, nil)
 }
 
 func ComputePoolDesiredStatesWithDemandTraced(
@@ -274,7 +275,28 @@ func ComputePoolDesiredStatesWithDemandTraced(
 	scaleCheckDemand map[string]scaleCheckDemand,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, trace)
+	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, trace, nil)
+}
+
+// ComputePoolDesiredStatesWithLiveness is ComputePoolDesiredStatesWithDemandTraced
+// plus liveExternalWorkDirs: normalized paths (pathutil.NormalizePathForCompare)
+// of Git worktrees proven live right now but not spawned by gc, as gathered by
+// liveExternalWorkDirSet from cause-A's discoverWorktreeLiveness. A work bead
+// whose gc.work_dir/work_dir metadata names one of these paths counts toward
+// capacity even when its assignee resolves to neither a live session bead nor
+// a known pool identity, closing the duplicate-spawn gap described in
+// ga-1xaqgo.3. Pass nil when liveness was not gathered this cycle — capacity
+// accounting then behaves exactly as ComputePoolDesiredStatesWithDemandTraced.
+func ComputePoolDesiredStatesWithLiveness(
+	cfg *config.City,
+	assignedWorkBeads []beads.Bead,
+	sessionInfos []sessionpkg.Info,
+	scaleCheckCounts map[string]int,
+	scaleCheckDemand map[string]scaleCheckDemand,
+	trace *sessionReconcilerTraceCycle,
+	liveExternalWorkDirs map[string]bool,
+) []PoolDesiredState {
+	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, trace, liveExternalWorkDirs)
 }
 
 // ComputePoolDesiredStatesWithDemandTracedAt computes traced pool demand at a
@@ -288,7 +310,26 @@ func ComputePoolDesiredStatesWithDemandTracedAt(
 	decisionTime time.Time,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, decisionTime, trace)
+	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, decisionTime, trace, nil)
+}
+
+// ComputePoolDesiredStatesWithLivenessTracedAt is
+// ComputePoolDesiredStatesWithDemandTracedAt plus liveExternalWorkDirs — the
+// decision-time-aware counterpart of ComputePoolDesiredStatesWithLiveness.
+// Pass nil for liveExternalWorkDirs when liveness was not gathered this
+// cycle — capacity accounting then behaves exactly as
+// ComputePoolDesiredStatesWithDemandTracedAt.
+func ComputePoolDesiredStatesWithLivenessTracedAt(
+	cfg *config.City,
+	assignedWorkBeads []beads.Bead,
+	sessionInfos []sessionpkg.Info,
+	scaleCheckCounts map[string]int,
+	scaleCheckDemand map[string]scaleCheckDemand,
+	decisionTime time.Time,
+	trace *sessionReconcilerTraceCycle,
+	liveExternalWorkDirs map[string]bool,
+) []PoolDesiredState {
+	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, decisionTime, trace, liveExternalWorkDirs)
 }
 
 func computePoolDesiredStates(
@@ -298,8 +339,9 @@ func computePoolDesiredStates(
 	scaleCheckCounts map[string]int,
 	scaleCheckDemand map[string]scaleCheckDemand,
 	trace *sessionReconcilerTraceCycle,
+	liveExternalWorkDirs map[string]bool,
 ) []PoolDesiredState {
-	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, time.Time{}, trace)
+	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, time.Time{}, trace, liveExternalWorkDirs)
 }
 
 func computePoolDesiredStatesAt(
@@ -310,6 +352,7 @@ func computePoolDesiredStatesAt(
 	scaleCheckDemand map[string]scaleCheckDemand,
 	decisionTime time.Time,
 	trace *sessionReconcilerTraceCycle,
+	liveExternalWorkDirs map[string]bool,
 ) []PoolDesiredState {
 	// Build reverse lookup: any identifier → session bead ID.
 	// Assignee on work beads may be a bead ID, session name, alias, or
@@ -524,6 +567,7 @@ func computePoolDesiredStatesAt(
 		protectedNewRequests[req.Template] = candidates[1:]
 	}
 	usage := acceptedNestedCapUsage(limits, resumeRequests)
+	seedExternalLiveWorkOccupancy(cfg, assignedWorkBeads, resumeRequests, liveExternalWorkDirs, limits, &usage, trace)
 	floorUsage := acceptedNestedCapUsage(limits, concreteNestedCapRequests(cfg, resumeRequests, protectedNewRequests, inFlightNewRequests))
 	floorReservations := newNestedCapFloorReservations(cfg, aliasHeldTemplates, limits, floorUsage)
 	allRequests := append([]SessionRequest(nil), resumeRequests...)
@@ -734,6 +778,125 @@ func requestWithScaleDemandProvenance(request SessionRequest, demand scaleCheckD
 		request.WorktreeError = strings.TrimSpace(demand.WorktreeErrors[workBeadID])
 	}
 	return request
+}
+
+// seedExternalLiveWorkOccupancy adds capacity usage for assigned work beads
+// that the resume/wake-known-identity dispatch above does not already claim,
+// but whose gc.work_dir (or legacy work_dir) metadata names a Git worktree
+// that liveExternalWorkDirs proves is live right now. Without this, work
+// actively underway in a worktree gc did not spawn (e.g. a Claude-Code
+// EnterWorktree checkout) is invisible to capacity accounting, and a
+// max_active_sessions cap admits a duplicate "new" request for the same work
+// (ga-1xaqgo.3, cause C).
+//
+// Correlation is strictly by work-dir metadata against liveExternalWorkDirs —
+// matching the reconciler's dual-write contract (beadmeta.WorkDirMetadataKey /
+// LegacyWorkDirMetadataKey) — never by re-deriving assignee or claim
+// resolution. That path already ran above: any work bead already present in
+// resumeRequests is skipped here so it is never seeded twice.
+//
+// Template attribution mirrors the resume-tier fallback exactly: the bead's
+// own routing metadata (routedToOrLegacyWorkflowTarget), falling back to the
+// sole configured agent when cfg has exactly one. A bead whose routing
+// resolves to no known pool template contributes no usage.
+//
+// Seeded requests are never appended to allRequests — there is no real
+// session to realize for external work — and they run through the same
+// usage.canAccept/accept cap cascade as any other demand, so genuine
+// resume-tier and wake-known-identity demand (real gc-managed sessions)
+// always wins a contested slot over this accounting fiction.
+func seedExternalLiveWorkOccupancy(
+	cfg *config.City,
+	assignedWorkBeads []beads.Bead,
+	resumeRequests []SessionRequest,
+	liveExternalWorkDirs map[string]bool,
+	limits nestedCapLimits,
+	usage *nestedCapUsage,
+	trace *sessionReconcilerTraceCycle,
+) {
+	if len(liveExternalWorkDirs) == 0 {
+		return
+	}
+	alreadyClaimed := make(map[string]struct{}, len(resumeRequests))
+	for _, req := range resumeRequests {
+		if req.WorkBeadID != "" {
+			alreadyClaimed[req.WorkBeadID] = struct{}{}
+		}
+	}
+
+	var candidates []SessionRequest
+	workDirByBead := make(map[string]string)
+	for _, wb := range assignedWorkBeads {
+		if wb.Status != "in_progress" && wb.Status != "open" {
+			continue
+		}
+		if _, ok := alreadyClaimed[wb.ID]; ok {
+			continue
+		}
+		workDir := externalWorkBeadDir(wb, liveExternalWorkDirs)
+		if workDir == "" {
+			continue
+		}
+		template := routedToOrLegacyWorkflowTarget(wb)
+		if template == "" && len(cfg.Agents) == 1 {
+			template = cfg.Agents[0].QualifiedName()
+		}
+		template = normalizeAgentTemplateIdentity(cfg, agentutil.NormalizePoolRouteTarget(cfg, template))
+		if template == "" || !isKnownPoolTemplate(template, cfg) {
+			continue
+		}
+		candidates = append(candidates, SessionRequest{
+			Template:      template,
+			BeadPriority:  beadPriority(wb),
+			Tier:          "external-live-occupancy",
+			WorkBeadID:    wb.ID,
+			WorkBeadTitle: strings.TrimSpace(wb.Title),
+			WorkPack:      strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
+			WorkWorkspace: strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
+		})
+		workDirByBead[wb.ID] = workDir
+	}
+	if len(candidates) == 0 {
+		return
+	}
+
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return candidates[i].BeadPriority > candidates[j].BeadPriority
+	})
+	for _, req := range candidates {
+		if !usage.canAccept(req, limits) {
+			continue
+		}
+		usage.accept(req, limits)
+		if trace != nil {
+			trace.RecordDecision(TraceSitePoolExternalLiveOccupancy, TraceReasonExternalLiveWorktree, TraceOutcomeAccepted, req.Template, "", traceRecordPayload{
+				"tier":      "external-live-occupancy",
+				"work_bead": req.WorkBeadID,
+				"work_dir":  workDirByBead[req.WorkBeadID],
+			})
+		}
+	}
+}
+
+// externalWorkBeadDir returns the normalized live-worktree path referenced by
+// wb's gc.work_dir (preferred) or legacy work_dir metadata, when that path is
+// present in liveExternalWorkDirs. Empty when neither key is set or neither
+// value names a live worktree.
+func externalWorkBeadDir(wb beads.Bead, liveExternalWorkDirs map[string]bool) string {
+	for _, key := range [...]string{beadmeta.WorkDirMetadataKey, beadmeta.LegacyWorkDirMetadataKey} {
+		p := strings.TrimSpace(wb.Metadata[key])
+		if p == "" {
+			continue
+		}
+		canon := pathutil.NormalizePathForCompare(p)
+		if canon == "" {
+			continue
+		}
+		if liveExternalWorkDirs[canon] {
+			return canon
+		}
+	}
+	return ""
 }
 
 func canonicalSingletonAliasHeldTemplates(cfg *config.City, sessionInfos []sessionpkg.Info) map[string]struct{} {

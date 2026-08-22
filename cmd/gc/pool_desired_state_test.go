@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worktree"
@@ -165,6 +166,15 @@ func poolTraceFieldStrings(t *testing.T, fields map[string]any, key string) []st
 	got, ok := fields[key].([]string)
 	if !ok {
 		t.Fatalf("trace field %s = %#v, want []string", key, fields[key])
+	}
+	return got
+}
+
+func poolTraceFieldString(t *testing.T, fields map[string]any, key string) string {
+	t.Helper()
+	got, ok := fields[key].(string)
+	if !ok {
+		t.Fatalf("trace field %s = %#v, want string", key, fields[key])
 	}
 	return got
 }
@@ -527,7 +537,7 @@ func TestComputePoolDesiredStates_TraceListsActiveCapacityBlockers(t *testing.T)
 	sessions := []beads.Bead{sessionBead("sess-active", "open")}
 	trace := newPoolDesiredStateTestTrace("claude")
 
-	result := computePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), map[string]int{"claude": 1}, nil, trace)
+	result := computePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), map[string]int{"claude": 1}, nil, trace, nil)
 
 	if len(result) != 1 || len(result[0].Requests) != 1 || result[0].Requests[0].Tier != "resume" {
 		t.Fatalf("result = %#v, want only the active resume request under max_active_sessions=1", result)
@@ -1096,7 +1106,7 @@ func TestComputePoolDesiredStates_CapsNewDemandBeforeMaterializingRequests(t *te
 	sessions := []beads.Bead{sessionBead("sess-1", "open")}
 	trace := newPoolDesiredStateTestTrace("claude")
 
-	result := computePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), map[string]int{"claude": 10}, nil, trace)
+	result := computePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), map[string]int{"claude": 10}, nil, trace, nil)
 
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))
@@ -2715,7 +2725,7 @@ func TestComputePoolDesiredStates_InFlightDemandRecordsTrace(t *testing.T) {
 	}
 	trace := newPoolDesiredStateTestTrace("claude")
 
-	result := computePoolDesiredStates(cfg, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 5}, nil, trace)
+	result := computePoolDesiredStates(cfg, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 5}, nil, trace, nil)
 
 	if len(result) != 1 || len(result[0].Requests) != 5 {
 		t.Fatalf("result = %#v, want five desired requests", result)
@@ -2748,7 +2758,7 @@ func TestComputePoolDesiredStates_InFlightDemandRecordsTraceWhenCapsSuppressReus
 	}
 	trace := newPoolDesiredStateTestTrace("claude")
 
-	result := computePoolDesiredStates(cfg, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 5}, nil, trace)
+	result := computePoolDesiredStates(cfg, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 5}, nil, trace, nil)
 
 	if len(result) != 0 {
 		t.Fatalf("result = %#v, want no desired requests when workspace cap is exhausted", result)
@@ -3155,5 +3165,114 @@ func TestVerifiedPoolTriggerWorkDirAcceptsCanonicalStoreRefSpelling(t *testing.T
 	_, err = verifiedPoolTriggerWorkDir(nil, nil, "rig/pool", req)
 	if err == nil || !strings.Contains(err.Error(), mismatch) {
 		t.Errorf("rig:a vs rig:b err = %v, want a store mismatch", err)
+	}
+}
+
+// TestComputePoolDesiredStates_ExternalLiveWorktreeSuppressesDuplicateNewSpawn
+// is the RED regression for ga-1xaqgo.3 cause C: work actively underway in a
+// Git worktree gc did not spawn (e.g. a Claude-Code EnterWorktree checkout)
+// was invisible to capacity accounting, so a max_active_sessions=1 cap still
+// admitted a duplicate "new" request for the very same work. Feeding
+// liveExternalWorkDirs -- as liveExternalWorkDirSet gathers it from cause-A's
+// discoverWorktreeLiveness -- must occupy the sole slot and suppress the
+// scale_check-driven "new" spawn entirely. The work bead is intentionally
+// unclaimed (assignee "") and has no session bead at all: gc never spawned
+// anything for it, which is exactly the gap this bead closes.
+func TestComputePoolDesiredStates_ExternalLiveWorktreeSuppressesDuplicateNewSpawn(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "rig", intPtr(1), 0)},
+	}
+	externalDir := t.TempDir()
+	work := workBead("w1", "rig/claude", "", "in_progress", 5)
+	work.Metadata[beadmeta.WorkDirMetadataKey] = externalDir
+	liveExternalWorkDirs := map[string]bool{pathutil.NormalizePathForCompare(externalDir): true}
+	scaleCheck := map[string]int{"rig/claude": 1}
+	trace := newPoolDesiredStateTestTrace("rig/claude")
+
+	result := ComputePoolDesiredStatesWithLiveness(cfg, []beads.Bead{work}, nil, scaleCheck, nil, trace, liveExternalWorkDirs)
+
+	if len(result) != 0 {
+		t.Fatalf("result = %+v, want no desired sessions -- the live external worktree should occupy the sole max=1 slot and suppress the duplicate new spawn", result)
+	}
+	rec := poolTraceDecision(t, trace, TraceSitePoolExternalLiveOccupancy)
+	if got := poolTraceFieldString(t, rec.Fields, "work_bead"); got != "w1" {
+		t.Fatalf("work_bead = %q, want w1", got)
+	}
+}
+
+// TestComputePoolDesiredStates_ExternalLiveWorktreeLegacyKeySuppressesDuplicate
+// proves the legacy work_dir metadata key alone -- without gc.work_dir set --
+// is sufficient to correlate a work bead against a live external worktree,
+// matching the reconciler's dual-write contract (beadmeta.WorkDirMetadataKey /
+// LegacyWorkDirMetadataKey) rather than only its current form.
+func TestComputePoolDesiredStates_ExternalLiveWorktreeLegacyKeySuppressesDuplicate(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "rig", intPtr(1), 0)},
+	}
+	externalDir := t.TempDir()
+	work := workBead("w1", "rig/claude", "", "in_progress", 5)
+	work.Metadata[beadmeta.LegacyWorkDirMetadataKey] = externalDir
+	liveExternalWorkDirs := map[string]bool{pathutil.NormalizePathForCompare(externalDir): true}
+	scaleCheck := map[string]int{"rig/claude": 1}
+
+	result := ComputePoolDesiredStatesWithLiveness(cfg, []beads.Bead{work}, nil, scaleCheck, nil, nil, liveExternalWorkDirs)
+
+	if len(result) != 0 {
+		t.Fatalf("result = %+v, want no desired sessions -- the legacy work_dir key must correlate against the live external worktree same as gc.work_dir", result)
+	}
+}
+
+// TestComputePoolDesiredStates_InactiveExternalWorktreeDoesNotSuppressDemand
+// proves a work bead's recorded work-dir must not suppress capacity when that
+// specific worktree is not in liveExternalWorkDirs -- i.e. stale/inactive, as
+// liveExternalWorkDirSet reports it after a scan finds no live process or
+// session there. Only genuinely live external work may occupy a slot;
+// otherwise legitimate new demand would hang forever behind a dead worktree.
+func TestComputePoolDesiredStates_InactiveExternalWorktreeDoesNotSuppressDemand(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "rig", intPtr(1), 0)},
+	}
+	staleDir := t.TempDir()
+	otherLiveDir := t.TempDir()
+	work := workBead("w1", "rig/claude", "", "in_progress", 5)
+	work.Metadata[beadmeta.WorkDirMetadataKey] = staleDir
+	// liveExternalWorkDirs is non-empty (some unrelated worktree is genuinely
+	// live) but does not include staleDir.
+	liveExternalWorkDirs := map[string]bool{pathutil.NormalizePathForCompare(otherLiveDir): true}
+	scaleCheck := map[string]int{"rig/claude": 1}
+
+	result := ComputePoolDesiredStatesWithLiveness(cfg, []beads.Bead{work}, nil, scaleCheck, nil, nil, liveExternalWorkDirs)
+
+	if len(result) != 1 || len(result[0].Requests) != 1 || result[0].Requests[0].Tier != "new" {
+		t.Fatalf("result = %+v, want the normal scale_check-driven new request since this bead's worktree is stale, not live", result)
+	}
+}
+
+// TestComputePoolDesiredStates_ExternalLiveOccupancyDoesNotAffectUnrelatedTemplate
+// proves external-live-occupancy accounting for one template's cap leaves an
+// unrelated template's cap and demand completely independent.
+func TestComputePoolDesiredStates_ExternalLiveOccupancyDoesNotAffectUnrelatedTemplate(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			poolAgent("claude", "rig", intPtr(1), 0),
+			poolAgent("other", "rig", intPtr(1), 0),
+		},
+	}
+	externalDir := t.TempDir()
+	work := workBead("w1", "rig/claude", "", "in_progress", 5)
+	work.Metadata[beadmeta.WorkDirMetadataKey] = externalDir
+	liveExternalWorkDirs := map[string]bool{pathutil.NormalizePathForCompare(externalDir): true}
+	scaleCheck := map[string]int{"rig/claude": 1, "rig/other": 1}
+
+	result := ComputePoolDesiredStatesWithLiveness(cfg, []beads.Bead{work}, nil, scaleCheck, nil, nil, liveExternalWorkDirs)
+
+	if len(result) != 1 {
+		t.Fatalf("result = %+v, want exactly 1 desired-state entry (rig/other only; rig/claude suppressed by its live external worktree)", result)
+	}
+	if result[0].Template != "rig/other" {
+		t.Fatalf("result[0].Template = %q, want rig/other", result[0].Template)
+	}
+	if len(result[0].Requests) != 1 || result[0].Requests[0].Tier != "new" {
+		t.Fatalf("rig/other requests = %+v, want exactly 1 new request, unaffected by rig/claude's external-live occupancy", result[0].Requests)
 	}
 }

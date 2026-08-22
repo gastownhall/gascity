@@ -2,11 +2,13 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -249,4 +251,57 @@ func discoverWorktreeLiveness(rigRoot string, live liveWorktreeState, sessionDir
 		results = append(results, wl)
 	}
 	return results, nil
+}
+
+// liveExternalWorkDirSet returns the canonicalized paths of every live
+// worktree across cfg's rigs, for reconciler capacity accounting
+// (ga-1xaqgo.3) to cross-reference against a work bead's gc.work_dir /
+// work_dir metadata. It shares discoverWorktreeLiveness with the reaper
+// (see worktreeLiveness's doc comment) instead of running its own
+// git-worktree-list plus liveness cross-product.
+//
+// Liveness is gathered once per call via collectLiveWorktreeStateFn,
+// mirroring the reaper's per-pass convention (bead_worktree_reaper.go). When
+// the scan is indeterminate (live.scanned is false) every worktree in scope
+// is treated as live: the fail-closed contract documented on
+// liveWorktreeState.scanned and discoverWorktreeLiveness applies here exactly
+// as it does for the reaper — an unobservable worktree must not be treated as
+// free capacity, or capacity accounting would admit the very duplicate spawn
+// this bead exists to prevent.
+//
+// A per-rig scan error is logged to stderr and that rig's worktrees are
+// skipped rather than aborting the whole pass, matching
+// reapClosedBeadWorktrees's own posture.
+func liveExternalWorkDirSet(cfg *config.City, snapshot *sessionBeadSnapshot, stderr io.Writer) map[string]bool {
+	result := make(map[string]bool)
+	if cfg == nil {
+		return result
+	}
+	live := collectLiveWorktreeStateFn()
+	sessionDirs := liveSessionWorktreeDirs(snapshot)
+
+	for i := range cfg.Rigs {
+		rigName := cfg.Rigs[i].Name
+		rigRoot := strings.TrimSpace(cfg.Rigs[i].Path)
+		if rigRoot == "" {
+			continue
+		}
+		worktrees, err := discoverWorktreeLiveness(rigRoot, live, sessionDirs)
+		if err != nil {
+			if stderr != nil {
+				fmt.Fprintf(stderr, "liveExternalWorkDirSet: listing worktrees for rig %s (%s): %v\n", rigName, rigRoot, err) //nolint:errcheck // best-effort stderr
+			}
+			continue
+		}
+		for _, wl := range worktrees {
+			if !live.scanned || wl.Live {
+				canon := pathutil.NormalizePathForCompare(wl.Path)
+				if canon == "" {
+					continue
+				}
+				result[canon] = true
+			}
+		}
+	}
+	return result
 }

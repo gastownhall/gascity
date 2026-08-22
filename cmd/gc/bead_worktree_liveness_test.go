@@ -1,11 +1,13 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -134,5 +136,89 @@ func TestLiveSessionWorktreeDirs_CollectsAndDedups(t *testing.T) {
 func TestLiveSessionWorktreeDirs_NilSnapshot(t *testing.T) {
 	if got := liveSessionWorktreeDirs(nil); got != nil {
 		t.Fatalf("liveSessionWorktreeDirs(nil) = %v, want nil", got)
+	}
+}
+
+// TestLiveExternalWorkDirSet_IncludesLiveExcludesNotLive is focused coverage
+// for ga-1xaqgo.3 cause C: liveExternalWorkDirSet must report a worktree with
+// a live process cwd, and must not report a sibling worktree with none, so
+// reconciler capacity accounting only treats genuinely active external work
+// as occupying a slot.
+func TestLiveExternalWorkDirSet_IncludesLiveExcludesNotLive(t *testing.T) {
+	_, rigRoot := initReapRig(t)
+	live := filepath.Join(t.TempDir(), ".claude", "worktrees", "live-session")
+	idle := filepath.Join(t.TempDir(), ".claude", "worktrees", "idle-session")
+	if err := os.MkdirAll(filepath.Dir(live), 0o755); err != nil {
+		t.Fatalf("mkdir live worktree parent: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(idle), 0o755); err != nil {
+		t.Fatalf("mkdir idle worktree parent: %v", err)
+	}
+	mustGit(t, rigRoot, "worktree", "add", "-b", "live-branch", live)
+	mustGit(t, rigRoot, "worktree", "add", "-b", "idle-branch", idle)
+
+	injectLiveness(t, liveWorktreeState{scanned: true, cwds: []string{pathutil.NormalizePathForCompare(live)}})
+	cfg := reapTestConfig(rigRoot)
+
+	got := liveExternalWorkDirSet(cfg, nil, io.Discard)
+
+	if !got[pathutil.NormalizePathForCompare(live)] {
+		t.Fatalf("liveExternalWorkDirSet omitted the live worktree %s; got %v", live, got)
+	}
+	if got[pathutil.NormalizePathForCompare(idle)] {
+		t.Fatalf("liveExternalWorkDirSet wrongly included the idle worktree %s; got %v", idle, got)
+	}
+}
+
+// TestLiveExternalWorkDirSet_FailsClosedWhenScanIndeterminate pins the
+// fail-closed contract documented on liveExternalWorkDirSet: when the
+// process-table scan itself is indeterminate (scanned=false), every worktree
+// in scope must be treated as live. An unobservable worktree must not read as
+// free capacity -- that would admit the very duplicate spawn ga-1xaqgo.3
+// exists to prevent.
+func TestLiveExternalWorkDirSet_FailsClosedWhenScanIndeterminate(t *testing.T) {
+	_, rigRoot := initReapRig(t)
+	foreign := filepath.Join(t.TempDir(), ".claude", "worktrees", "some-session")
+	if err := os.MkdirAll(filepath.Dir(foreign), 0o755); err != nil {
+		t.Fatalf("mkdir foreign worktree parent: %v", err)
+	}
+	mustGit(t, rigRoot, "worktree", "add", "-b", "foreign-branch", foreign)
+
+	injectLiveness(t, liveWorktreeState{scanned: false})
+	cfg := reapTestConfig(rigRoot)
+
+	got := liveExternalWorkDirSet(cfg, nil, io.Discard)
+
+	if !got[pathutil.NormalizePathForCompare(foreign)] {
+		t.Fatalf("liveExternalWorkDirSet must fail closed (treat every in-scope worktree as live) when the scan is indeterminate; got %v for %s", got, foreign)
+	}
+}
+
+// TestLiveExternalWorkDirSet_SkipsRigOnScanErrorContinuesOthers proves a
+// per-rig discovery error (e.g. a misconfigured rig path) is logged and
+// skipped rather than aborting the whole pass, matching
+// reapClosedBeadWorktrees's own posture -- one broken rig must not blind
+// capacity accounting to every other rig's live external work.
+func TestLiveExternalWorkDirSet_SkipsRigOnScanErrorContinuesOthers(t *testing.T) {
+	_, rigRoot := initReapRig(t)
+	live := filepath.Join(t.TempDir(), ".claude", "worktrees", "live-session")
+	if err := os.MkdirAll(filepath.Dir(live), 0o755); err != nil {
+		t.Fatalf("mkdir live worktree parent: %v", err)
+	}
+	mustGit(t, rigRoot, "worktree", "add", "-b", "live-branch", live)
+
+	injectLiveness(t, liveWorktreeState{scanned: true, cwds: []string{pathutil.NormalizePathForCompare(live)}})
+	notARepo := t.TempDir()
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "broken", Path: notARepo},
+			{Name: reapTestRigName, Path: rigRoot},
+		},
+	}
+
+	got := liveExternalWorkDirSet(cfg, nil, io.Discard)
+
+	if !got[pathutil.NormalizePathForCompare(live)] {
+		t.Fatalf("liveExternalWorkDirSet should still report the healthy rig's live worktree despite the other rig's scan error; got %v", got)
 	}
 }
