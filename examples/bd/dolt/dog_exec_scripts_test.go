@@ -6324,6 +6324,28 @@ func TestCompactScriptBackupSyncSuccessBeforeFlatten(t *testing.T) {
 	}
 }
 
+func TestCompactScriptBackupSkippedInDryRun(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(
+		t, "success",
+		"GC_DOLT_COMPACT_BACKUP_REMOTE=prod-backup",
+		"GC_DOLT_COMPACT_DRY_RUN=1",
+	)
+	if err != nil {
+		t.Fatalf("dry-run with backup remote should succeed: %v\nout=%s", err, out)
+	}
+	if !strings.Contains(out, "dry-run (would sync backup to remote=prod-backup)") {
+		t.Fatalf("expected dry-run backup log:\n%s", out)
+	}
+	doltLog, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read dolt log: %v", readErr)
+	}
+	if strings.Contains(string(doltLog), "backup sync") {
+		t.Fatalf("dry-run must not invoke a real backup sync:\n%s", doltLog)
+	}
+}
+
 func TestCompactScriptBackupSyncFailureBeforeFlattenExitsOne(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	out, err := fixture.run(t, "backup_sync_failure", "GC_DOLT_COMPACT_BACKUP_REMOTE=prod-backup")

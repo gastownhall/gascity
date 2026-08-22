@@ -3755,6 +3755,11 @@ backup_sync_database() {
   local remote="$compact_backup_remote"
   [ -n "$remote" ] || return 0
 
+  if [ -n "$dry_run" ]; then
+    printf 'compact: db=%s — dry-run (would sync backup to remote=%s)\n' "$db" "$remote"
+    return 0
+  fi
+
   local db_dir="$DOLT_DATA_DIR/$db"
   if [ ! -d "$db_dir/.dolt" ]; then
     printf 'compact: db=%s backup sync skipped — no .dolt directory at %s\n' "$db" "$db_dir" >&2
