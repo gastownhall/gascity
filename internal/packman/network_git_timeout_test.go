@@ -2,44 +2,46 @@ package packman
 
 import (
 	"errors"
-	"fmt"
-	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
 
-// blackholeGitServer returns an http:// URL whose TCP listener accepts
-// connections and then never writes a byte. git connects, sends its request,
-// and waits forever — the same shape as a remote that is reachable but wedged,
-// which is what ga-r0epd is really about. Nothing leaves loopback.
-func blackholeGitServer(t *testing.T) string {
+// wedgedGit puts a `git` on PATH that hangs the way a wedged remote does, and
+// returns a remote URL it will ignore.
+//
+// A loopback listener that accepts and never answers is the more literal
+// reproduction, but it is not the more faithful one. What has to be exercised
+// is the shape that makes the bound hard: git spawns helpers (git-remote-http,
+// credential helpers) that inherit the output pipes, so killing git alone
+// leaves CombinedOutput blocked on a pipe a child still holds. This shim
+// reproduces that on purpose — it backgrounds a child that inherits stdout and
+// stderr, then waits — instead of hoping a real git happens to do it. It also
+// needs no port, no listener and no network, so it cannot flake on a busy host.
+//
+// exec.Command resolves the binary against the parent process PATH rather than
+// cmd.Env, so t.Setenv is enough to intercept even though defaultRunNetworkGit
+// hands the child a hermetic environment.
+func wedgedGit(t *testing.T) string {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	dir := t.TempDir()
+	// The shim runs with the hermetic environment defaultRunNetworkGit builds,
+	// whose PATH is not this machine's, so sleep is resolved here and embedded
+	// absolute. Left as a bare name it silently fails to start and the shim
+	// exits instantly — which looks exactly like a bound that fired early.
+	sleep, err := exec.LookPath("sleep")
 	if err != nil {
-		t.Fatalf("listen: %v", err)
+		t.Skipf("no sleep binary to build a wedged git shim: %v", err)
 	}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			// Hold the connection open and answer nothing. Closing on
-			// listener shutdown is what releases git if the bound never fires.
-			go func() {
-				<-done
-				_ = conn.Close()
-			}()
-		}
-	}()
-	t.Cleanup(func() {
-		_ = ln.Close()
-		<-done
-	})
-	return fmt.Sprintf("http://%s/blackhole.git", ln.Addr().String())
+	script := "#!/bin/sh\n" + sleep + " 300 &\nwait\n"
+	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatalf("writing git shim: %v", err)
+	}
+	t.Setenv("PATH", dir)
+	return "http://packman.invalid/wedged.git"
 }
 
 // TestDefaultRunNetworkGitIsBounded is the ga-r0epd regression test.
@@ -54,7 +56,7 @@ func blackholeGitServer(t *testing.T) string {
 // The assertion is deliberately about the deadline, not the error text: what
 // matters is that the call RETURNS.
 func TestDefaultRunNetworkGitIsBounded(t *testing.T) {
-	remote := blackholeGitServer(t)
+	remote := wedgedGit(t)
 
 	restore := networkGitTimeout
 	networkGitTimeout = 300 * time.Millisecond
@@ -78,7 +80,7 @@ func TestDefaultRunNetworkGitIsBounded(t *testing.T) {
 	case got := <-done:
 		elapsed := time.Since(start)
 		if got.err == nil {
-			t.Fatalf("cloning a blackholed remote succeeded after %s, want a timeout error", elapsed)
+			t.Fatalf("cloning a wedged remote succeeded after %s, want a timeout error", elapsed)
 		}
 		if !errors.Is(got.err, errNetworkGitTimeout) {
 			t.Fatalf("err = %v, want it to wrap errNetworkGitTimeout (elapsed %s)", got.err, elapsed)
@@ -105,26 +107,21 @@ func TestDefaultRunNetworkGitIsBounded(t *testing.T) {
 // deadline assertion while destroying the diagnosis of ordinary failures —
 // connection refused, no such repo, auth rejected. This pins that the new error
 // path is reached only when the deadline actually fires.
+//
+// The remote is a file:// URL for a path that does not exist, so real git fails
+// immediately with "does not appear to be a git repository" — a real failure
+// with no shim, no listener and no network, which is what keeps this control
+// honest.
 func TestDefaultRunNetworkGitRealFailuresAreNotTimeouts(t *testing.T) {
-	// Bind and immediately release, so the port is almost certainly closed:
-	// git fails fast with "connection refused" rather than hanging.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	addr := ln.Addr().String()
-	if err := ln.Close(); err != nil {
-		t.Fatalf("close listener: %v", err)
-	}
-	remote := fmt.Sprintf("http://%s/refused.git", addr)
+	remote := "file://" + filepath.Join(t.TempDir(), "nonexistent.git")
 
 	restore := networkGitTimeout
 	networkGitTimeout = 20 * time.Second
 	t.Cleanup(func() { networkGitTimeout = restore })
 
-	_, err = defaultRunNetworkGit("", remote, "", "clone", "--quiet", remote, t.TempDir()+"/dest")
+	_, err := defaultRunNetworkGit("", remote, "", "clone", "--quiet", remote, t.TempDir()+"/dest")
 	if err == nil {
-		t.Fatal("cloning a closed port succeeded, want a connection error")
+		t.Fatal("cloning a nonexistent repository succeeded, want a git failure")
 	}
 	if errors.Is(err, errNetworkGitTimeout) {
 		t.Fatalf("err = %v, want a real git failure rather than a timeout classification", err)
