@@ -292,6 +292,106 @@ func TestPullCLIMultipleRemotesRefusesWithoutOverride(t *testing.T) {
 	}
 }
 
+func TestPullSQLMultipleRemotesInvalidOverrideSyntaxRefuses(t *testing.T) {
+	root := repoRoot(t)
+	script := filepath.Join(root, pullScript)
+
+	port, cleanup := startReachableTCPListener(t)
+	defer cleanup()
+
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "data")
+	if err := os.MkdirAll(filepath.Join(dataDir, "app", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir db: %v", err)
+	}
+
+	binDir := t.TempDir()
+	doltLog := writePullFakeDoltMultiRemote(t, binDir)
+	_ = writeSyncFakeBeadsBD(t, cityPath)
+
+	cmd := exec.Command("sh", script, "--db", "app")
+	cmd.Env = append(filteredEnv(
+		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
+		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
+	),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_DATA_DIR="+dataDir,
+		fmt.Sprintf("GC_DOLT_PORT=%d", port),
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"GC_DOLT_REMOTE_APP=has spaces",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("an override with characters outside [A-Za-z0-9_.-] should be refused:\n%s", out)
+	}
+
+	output := string(out)
+	if !strings.Contains(output, "invalid GC_DOLT_REMOTE override") {
+		t.Fatalf("expected an 'invalid GC_DOLT_REMOTE override' refusal:\n%s", output)
+	}
+	if !strings.Contains(output, "has spaces") {
+		t.Fatalf("expected the refusal to echo back the bad override value:\n%s", output)
+	}
+
+	log := readLog(t, doltLog)
+	if strings.Contains(log, "DOLT_PULL") {
+		t.Fatalf("a syntactically invalid override must NOT be pulled:\nlog:\n%s", log)
+	}
+}
+
+func TestPullSQLMultipleRemotesUnknownOverrideRefuses(t *testing.T) {
+	root := repoRoot(t)
+	script := filepath.Join(root, pullScript)
+
+	port, cleanup := startReachableTCPListener(t)
+	defer cleanup()
+
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "data")
+	if err := os.MkdirAll(filepath.Join(dataDir, "app", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir db: %v", err)
+	}
+
+	binDir := t.TempDir()
+	doltLog := writePullFakeDoltMultiRemote(t, binDir)
+	_ = writeSyncFakeBeadsBD(t, cityPath)
+
+	cmd := exec.Command("sh", script, "--db", "app")
+	cmd.Env = append(filteredEnv(
+		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
+		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
+	),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_DATA_DIR="+dataDir,
+		fmt.Sprintf("GC_DOLT_PORT=%d", port),
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"GC_DOLT_REMOTE_APP=missing",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("an override naming a remote absent from the candidate list should be refused:\n%s", out)
+	}
+
+	output := string(out)
+	if !strings.Contains(output, "GC_DOLT_REMOTE names unknown remote 'missing'") {
+		t.Fatalf("expected an 'unknown remote' refusal naming 'missing':\n%s", output)
+	}
+	if !strings.Contains(output, "alpha") || !strings.Contains(output, "internal") || !strings.Contains(output, "public") {
+		t.Fatalf("expected the refusal to list all available candidate remotes:\n%s", output)
+	}
+
+	log := readLog(t, doltLog)
+	if strings.Contains(log, "DOLT_PULL") {
+		t.Fatalf("an override naming an unknown remote must NOT be pulled:\nlog:\n%s", log)
+	}
+}
+
 func TestPullCLIMultipleRemotesOverrideSelectsNamed(t *testing.T) {
 	root := repoRoot(t)
 	script := filepath.Join(root, pullScript)
