@@ -12,19 +12,42 @@ import (
 // a test, a log, or a bead.
 const sentinel = "sk-test-NOT-A-REAL-CREDENTIAL-8f3a21"
 
+// TestSecretEnvValuesFollowsTheAllowList pins which of a pane's env values are
+// withheld from error text. The predicate is an allow list, so an unrecognized
+// name is assumed to carry credential material; argv-safe values stay legible,
+// since they are already readable in /proc/<pid>/cmdline and hiding them costs
+// diagnostics for nothing.
+func TestSecretEnvValuesFollowsTheAllowList(t *testing.T) {
+	got := secretEnvValues(map[string]string{
+		"ANTHROPIC_AUTH_TOKEN": sentinel,
+		"SOME_NEW_TOKEN":       "unknown-name-so-assumed-secret",
+		"GC_RIG":               "hauler",
+		"ANTHROPIC_API_KEY":    "", // withheld variable: no value, nothing to hide
+	})
+	want := map[string]bool{sentinel: true, "unknown-name-so-assumed-secret": true}
+	if len(got) != len(want) {
+		t.Fatalf("secretEnvValues = %q, want the two secret values", got)
+	}
+	for _, v := range got {
+		if !want[v] {
+			t.Errorf("secretEnvValues included %q, which is not a credential", v)
+		}
+	}
+}
+
 // TestRedactArgsKeepsKeysAndDropsSecretValues pins what an error message may say
 // about a herdr argv. The key has to survive — "which variable did herdr choke
 // on" is the whole diagnostic value of printing the argv — while the value must
-// not, unless it is one the argv-safety allow list already lets travel in a
-// command line.
+// not.
 func TestRedactArgsKeepsKeysAndDropsSecretValues(t *testing.T) {
+	env := map[string]string{"GC_RIG": "hauler", "ANTHROPIC_AUTH_TOKEN": sentinel}
 	args := []string{
 		"workspace", "create", "--label", "rig-a", "--cwd", "/data/projects/x",
 		"--env", "GC_RIG=hauler",
 		"--env", "ANTHROPIC_AUTH_TOKEN=" + sentinel,
 		"--no-focus",
 	}
-	got := strings.Join(redactArgs(args), " ")
+	got := strings.Join(redactArgs(args, secretEnvValues(env)), " ")
 
 	if strings.Contains(got, sentinel) {
 		t.Errorf("redacted argv still carries the credential value: %s", got)
@@ -35,13 +58,9 @@ func TestRedactArgsKeepsKeysAndDropsSecretValues(t *testing.T) {
 	if !strings.Contains(got, "ANTHROPIC_AUTH_TOKEN="+redactedValue) {
 		t.Errorf("redacted argv dropped the variable name, losing the diagnostic: %s", got)
 	}
-	// GC_RIG is on the argv-safe allow list, so it was already legible in
-	// /proc/<pid>/cmdline; redacting it would cost diagnostic value and buy
-	// nothing.
 	if !strings.Contains(got, "GC_RIG=hauler") {
 		t.Errorf("redacted argv dropped an argv-safe value: %s", got)
 	}
-	// Non-env arguments are not secrets and must survive intact.
 	for _, want := range []string{"workspace", "create", "--label", "rig-a", "--cwd", "/data/projects/x", "--no-focus"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("redacted argv dropped non-env argument %q: %s", want, got)
@@ -56,75 +75,105 @@ func TestRedactArgsKeepsKeysAndDropsSecretValues(t *testing.T) {
 func TestRedactArgsDoesNotMutateItsInput(t *testing.T) {
 	secret := "ANTHROPIC_AUTH_TOKEN=" + sentinel
 	args := []string{"workspace", "create", "--env", secret}
-	redactArgs(args)
+	redactArgs(args, []string{sentinel})
 	if args[3] != secret {
 		t.Errorf("redactArgs rewrote the caller's argv: %q", args[3])
 	}
 }
 
-// TestRedactArgsRedactsEnvPrefixInsideACommandString covers the shape a raw
-// launch takes. `pane run` carries an entire shell command as a single argv
-// element, so an env-prefix assignment there is a token inside one element
-// rather than an element of its own — and launchSpecFor sends every command
-// containing "=" down exactly that path. A redactor that only understood the
-// `--env KEY=VALUE` flag pair would render this one verbatim.
-func TestRedactArgsRedactsEnvPrefixInsideACommandString(t *testing.T) {
-	args := []string{"pane", "run", "%12", "exec /bin/sh -c 'ANTHROPIC_API_KEY=" + sentinel + " claude'"}
-	got := strings.Join(redactArgs(args), " ")
-	if strings.Contains(got, sentinel) {
-		t.Errorf("env-prefix assignment in a command string leaked the credential: %s", got)
-	}
-	if !strings.Contains(got, "ANTHROPIC_API_KEY="+redactedValue) {
-		t.Errorf("env-prefix redaction dropped the variable name: %s", got)
-	}
-	// The rest of the command has to stay readable, or the error stops naming
-	// what failed to launch.
-	if !strings.Contains(got, "claude") {
-		t.Errorf("env-prefix redaction swallowed the command: %s", got)
+// TestPaneRunCommandWithholdsTheWholeCommand pins the raw-launch contract. A
+// session's configured command is a user-authored shell string, so a credential
+// in it can sit anywhere a shell would still honor: after an `env` wrapper,
+// past a `&&`, inside a nested `sh -c`, or spelled with quotes that keep the
+// value from matching its own rendering. Any of those defeats a scanner, so the
+// operand is withheld whole.
+func TestPaneRunCommandWithholdsTheWholeCommand(t *testing.T) {
+	for _, command := range []string{
+		"exec /bin/sh -c 'ANTHROPIC_API_KEY=" + sentinel + " claude'",
+		"exec /bin/sh -c 'env ANTHROPIC_API_KEY=" + sentinel + " claude'",
+		"exec /bin/sh -c 'cd /data && ANTHROPIC_API_KEY=" + sentinel + " ./run.sh'",
+		"exec /bin/sh -c 'sh -c '\\''ANTHROPIC_API_KEY=" + sentinel + " claude'\\'''",
+	} {
+		c := &client{session: "gc-test", bin: writeFakeHerdr(t, echoArgvScript)}
+		err := c.paneRunCommand(context.Background(), "%12", command)
+		if err == nil {
+			t.Fatal("paneRunCommand against a failing herdr returned no error")
+		}
+		if strings.Contains(err.Error(), sentinel) {
+			t.Errorf("raw launch leaked a credential from %q: %v", command, err)
+		}
+		// The control: herdr's own text reached the message, so redaction is
+		// what removed the credential rather than the credential never arriving.
+		if !strings.Contains(err.Error(), "unexpected argument") {
+			t.Fatalf("herdr's own output never reached the error, so this proves nothing: %v", err)
+		}
+		// The error still has to say what failed and where.
+		if !strings.Contains(err.Error(), "pane run") || !strings.Contains(err.Error(), "%12") {
+			t.Errorf("raw-launch error stopped naming the verb and pane: %v", err)
+		}
 	}
 }
 
-// TestRedactArgsKeepsArgvSafeAssignmentsInCommandStrings is the other half:
-// scanning inside a command string must still defer to the allow list, or every
-// inert assignment in a failing command turns into <redacted> and the error
-// stops being worth printing.
+// TestPaneRunLeavesPastedTextAlone pins the other side of that split. The same
+// verb delivers an agent's prompt or nudge through pasteAndSubmit, and prose is
+// not a command: treating any word containing "=" as an assignment would make
+// its tail a secret, and redaction substitutes values, so that string would then
+// vanish from every error the client renders.
+func TestPaneRunLeavesPastedTextAlone(t *testing.T) {
+	c := &client{session: "gc-test", bin: writeFakeHerdr(t, echoArgvScript)}
+	text := "Rerun the drain with mode=no so nothing merges, then report."
+
+	err := c.paneRun(context.Background(), "%12", text)
+	if err == nil {
+		t.Fatal("paneRun against a failing herdr returned no error")
+	}
+	if !strings.Contains(err.Error(), text) {
+		t.Errorf("pasted prose was rewritten in the error: %v", err)
+	}
+}
+
+// TestPromptRedactionDoesNotBreakNotFoundMatching is why that matters.
+// deliverNudge and deliverStartupTurn degrade to the paste+Enter path when
+// herdr reports the agent is not registered, and isAgentNotFound decides that by
+// matching the message text; runtime.IsSessionGone matches "not found" the same
+// way to tell a benign missing session from a real failure. Redacting "no" out
+// of a nudge would take the "no" in "not found" with it and flip both verdicts —
+// a redactor breaking control-flow branches it has no business touching.
 //
-// A key the allow list does not know is redacted even here. That is deliberate
-// — envArgvSafe is an allow list precisely so an unrecognized name is assumed
-// to carry credential material — and it is the direction to err in: over-
-// redaction costs a line of diagnostics, under-redaction is the bug.
-func TestRedactArgsKeepsArgvSafeAssignmentsInCommandStrings(t *testing.T) {
-	args := []string{"pane", "run", "%12", "exec /bin/sh -c 'GC_RIG=hauler make all'"}
-	got := strings.Join(redactArgs(args), " ")
-	if !strings.Contains(got, "GC_RIG=hauler") {
-		t.Errorf("redacted an argv-safe assignment inside a command string: %s", got)
+// Both delivery verbs are covered: the prompt operand of `agent prompt` and the
+// pasted operand of `pane run`.
+func TestPromptRedactionDoesNotBreakNotFoundMatching(t *testing.T) {
+	const text = "Rerun the drain with mode=no so nothing merges."
+	script := "#!/bin/sh\necho 'agent not found: %12' >&2\nexit 1\n"
+
+	for _, tc := range []struct {
+		name string
+		call func(c *client) error
+	}{
+		{"agent prompt", func(c *client) error {
+			return c.agentPrompt(context.Background(), "%12", text)
+		}},
+		{"pane run paste", func(c *client) error {
+			return c.paneRun(context.Background(), "%12", text)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.call(&client{session: "gc-test", bin: writeFakeHerdr(t, script)})
+			if err == nil {
+				t.Fatal("call against a failing herdr returned no error")
+			}
+			if !isAgentNotFound(err) {
+				t.Errorf("redaction mangled the message isAgentNotFound reads, so the fallback is dead: %v", err)
+			}
+		})
 	}
 }
 
-// TestRedactArgsHandlesTrailingEnvFlag pins the boundary case: a dangling
-// --env with no operand must not panic or eat past the end of the slice.
-func TestRedactArgsHandlesTrailingEnvFlag(t *testing.T) {
-	got := strings.Join(redactArgs([]string{"tab", "create", "--env"}), " ")
-	if got != "tab create --env" {
-		t.Errorf("trailing --env mangled: %q", got)
-	}
-}
-
-// TestRedactArgsHandlesEnvOperandWithoutAnAssignment pins the malformed case:
-// an --env operand that is not KEY=VALUE carries nothing to redact and must
-// come through untouched rather than being mangled into one.
-func TestRedactArgsHandlesEnvOperandWithoutAnAssignment(t *testing.T) {
-	got := strings.Join(redactArgs([]string{"tab", "create", "--env", "JUST_A_NAME", "--no-focus"}), " ")
-	if got != "tab create --env JUST_A_NAME --no-focus" {
-		t.Errorf("malformed --env operand mangled: %q", got)
-	}
-}
-
-// TestClientRunErrorsOmitCredentials is the end-to-end assertion behind the
-// unit tests above: a herdr invocation that fails must not put the credential
-// into the error it returns. Errors from this client reach logs, events and
-// bead notes, so a value here outlives the process it leaked from — which makes
-// it a worse exposure than argv, not a lesser one.
+// TestClientRunErrorsOmitCredentials is the end-to-end assertion behind the unit
+// tests above: a herdr invocation that fails must not put the credential into
+// the error it returns. Errors from this client reach logs, events and bead
+// notes, so a value here outlives the process it leaked from — which makes it a
+// worse exposure than argv, not a lesser one.
 //
 // A binary name that cannot exist drives the transport-failure branch without
 // needing herdr installed.
@@ -137,16 +186,54 @@ func TestClientRunErrorsOmitCredentials(t *testing.T) {
 	c := &client{session: "gc-test", bin: "herdr-does-not-exist-" + t.Name()}
 	args := []string{"workspace", "create", "--env", "ANTHROPIC_AUTH_TOKEN=" + sentinel}
 
-	if _, err := c.run(context.Background(), args...); err == nil {
+	if _, err := c.runWithSecrets(context.Background(), []string{sentinel}, args...); err == nil {
 		t.Fatal("run against a missing binary returned no error")
 	} else {
 		assertRedactedArgvError(t, "run", err)
 	}
 
-	if _, err := c.runRaw(context.Background(), args...); err == nil {
+	if _, err := c.runRawWithSecrets(context.Background(), []string{sentinel}, args...); err == nil {
 		t.Fatal("runRaw against a missing binary returned no error")
 	} else {
 		assertRedactedArgvError(t, "runRaw", err)
+	}
+}
+
+// TestWorkspaceAndTabCreateOmitCredentials pins that the two verbs which
+// actually put credentials in a herdr argv declare them. They are the reason
+// this file exists: the pane's environment is how ANTHROPIC_API_KEY,
+// ANTHROPIC_AUTH_TOKEN and GC_INSTANCE_TOKEN reach an agent.
+func TestWorkspaceAndTabCreateOmitCredentials(t *testing.T) {
+	env := map[string]string{"ANTHROPIC_AUTH_TOKEN": sentinel, "GC_RIG": "hauler"}
+
+	for _, tc := range []struct {
+		name string
+		call func(c *client) error
+	}{
+		{"workspace create", func(c *client) error {
+			_, _, err := c.workspaceCreate(context.Background(), "rig-a", "/data/projects/x", env)
+			return err
+		}},
+		{"tab create", func(c *client) error {
+			_, _, err := c.tabCreate(context.Background(), "ws-1", "agent-a", "/data/projects/x", env)
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.call(&client{session: "gc-test", bin: writeFakeHerdr(t, echoArgvScript)})
+			if err == nil {
+				t.Fatal("create against a failing herdr returned no error")
+			}
+			if strings.Contains(err.Error(), sentinel) {
+				t.Errorf("leaks the credential: %v", err)
+			}
+			if !strings.Contains(err.Error(), "ANTHROPIC_AUTH_TOKEN="+redactedValue) {
+				t.Errorf("does not name the redacted assignment, so this test proves nothing: %v", err)
+			}
+			if !strings.Contains(err.Error(), "GC_RIG=hauler") {
+				t.Errorf("redacted an argv-safe value: %v", err)
+			}
+		})
 	}
 }
 
@@ -162,6 +249,7 @@ func TestClientRunErrorsOmitCredentials(t *testing.T) {
 // a JSON error envelope from a clean one.
 func TestClientErrorsRedactCredentialsHerdrEchoedBack(t *testing.T) {
 	args := []string{"workspace", "create", "--env", "ANTHROPIC_AUTH_TOKEN=" + sentinel}
+	secrets := []string{sentinel}
 
 	for _, tc := range []struct {
 		name string
@@ -172,11 +260,7 @@ func TestClientErrorsRedactCredentialsHerdrEchoedBack(t *testing.T) {
 		// credential from it — rather than the credential never arriving.
 		echoed string
 	}{
-		{
-			name:   "stderr",
-			script: "#!/bin/sh\necho \"error: unexpected argument '$*' found\" >&2\nexit 2\n",
-			echoed: "unexpected argument",
-		},
+		{name: "stderr", script: echoArgvScript, echoed: "unexpected argument"},
 		{
 			name:   "error envelope",
 			script: "#!/bin/sh\nprintf '{\"error\":{\"code\":\"invalid_argument\",\"message\":\"invalid value in %s\"}}' \"$*\"\n",
@@ -186,13 +270,13 @@ func TestClientErrorsRedactCredentialsHerdrEchoedBack(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			c := &client{session: "gc-test", bin: writeFakeHerdr(t, tc.script)}
 
-			_, runErr := c.run(context.Background(), args...)
+			_, runErr := c.runWithSecrets(context.Background(), secrets, args...)
 			if runErr == nil {
 				t.Fatal("run against a failing herdr returned no error")
 			}
 			assertEchoRedacted(t, "run", runErr, tc.echoed)
 
-			_, rawErr := c.runRaw(context.Background(), args...)
+			_, rawErr := c.runRawWithSecrets(context.Background(), secrets, args...)
 			if rawErr == nil {
 				t.Fatal("runRaw against a failing herdr returned no error")
 			}
@@ -209,7 +293,8 @@ func TestHerdrErrorCodeSurvivesRedaction(t *testing.T) {
 	script := "#!/bin/sh\nprintf '{\"error\":{\"code\":\"agent_name_taken\",\"message\":\"rejected %s\"}}' \"$*\"\n"
 	c := &client{session: "gc-test", bin: writeFakeHerdr(t, script)}
 
-	_, err := c.run(context.Background(), "agent", "start", "--env", "ANTHROPIC_AUTH_TOKEN="+sentinel)
+	_, err := c.runWithSecrets(context.Background(), []string{sentinel},
+		"agent", "start", "--env", "ANTHROPIC_AUTH_TOKEN="+sentinel)
 	if err == nil {
 		t.Fatal("run against a failing herdr returned no error")
 	}
@@ -220,6 +305,27 @@ func TestHerdrErrorCodeSurvivesRedaction(t *testing.T) {
 		t.Errorf("redacted envelope error leaks the credential: %v", err)
 	}
 }
+
+// TestClientDecodeErrorsOmitCredentials covers the remaining error path in run:
+// herdr exits clean but hands back something that is not an envelope. It
+// renders the argv like every other path and so needs the same scrub.
+func TestClientDecodeErrorsOmitCredentials(t *testing.T) {
+	c := &client{session: "gc-test", bin: writeFakeHerdr(t, "#!/bin/sh\necho 'not json at all'\n")}
+
+	_, err := c.runWithSecrets(context.Background(), []string{sentinel},
+		"workspace", "create", "--env", "ANTHROPIC_AUTH_TOKEN="+sentinel)
+	if err == nil {
+		t.Fatal("run against a herdr returning garbage succeeded")
+	}
+	if !strings.Contains(err.Error(), "decode response") {
+		t.Fatalf("expected the decode branch, got: %v", err)
+	}
+	assertRedactedArgvError(t, "run decode", err)
+}
+
+// echoArgvScript is a herdr that rejects its argv the way a CLI reports a bad
+// operand: by quoting it back.
+const echoArgvScript = "#!/bin/sh\necho \"error: unexpected argument '$*' found\" >&2\nexit 2\n"
 
 // assertRedactedArgvError requires both halves of the contract: the credential
 // is gone, and the assignment it came from is still named.

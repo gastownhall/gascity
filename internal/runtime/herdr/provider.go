@@ -184,7 +184,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		// command executes only after the fresh pane's shell finishes
 		// initializing, so wait (bounded) for the launch to actually land —
 		// otherwise callers probing right after Start see a bare shell.
-		if err = p.c.paneRun(ctx, paneID, "exec /bin/sh -c "+shellquote.Quote(spec.Raw)); err == nil {
+		if err = p.c.paneRunCommand(ctx, paneID, "exec /bin/sh -c "+shellquote.Quote(spec.Raw)); err == nil {
 			p.waitPaneLaunched(ctx, paneID, spec.Raw)
 		}
 	default:
