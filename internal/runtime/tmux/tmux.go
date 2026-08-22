@@ -3954,18 +3954,48 @@ func (t *Tmux) SetTownCycleBindings(session string) error {
 	return t.SetCycleBindings(session)
 }
 
+// selectBindingLine returns the line of `tmux list-keys -T <table>` output that
+// binds key, or "" if the key is not bound in that table.
+//
+// The single-key query form (list-keys -T <table> <key>) is not usable: on tmux
+// 3.7b it returns zero bytes with exit code 0 for a binding that demonstrably
+// exists, so an empty result can't be distinguished from "no binding".
+func selectBindingLine(output, key string) string {
+	for _, l := range strings.Split(output, "\n") {
+		fields := strings.Fields(l)
+		for i, f := range fields {
+			if f == "-T" && i+2 < len(fields) {
+				// Skip the table name; the next field is the key.
+				if fields[i+2] == key {
+					return l
+				}
+				break
+			}
+		}
+	}
+	return ""
+}
+
 // isGTBinding checks if the given key already has a Gas Town if-shell binding.
 // Used to skip redundant re-binding on repeated ConfigureGasTownSession calls,
 // preserving the user's original fallback captured on the first call.
 func (t *Tmux) isGTBinding(table, key string) bool {
-	output, err := t.run("list-keys", "-T", table, key)
+	// Table form, not the single-key form — see selectBindingLine.
+	output, err := t.run("list-keys", "-T", table)
 	if err != nil || output == "" {
+		return false
+	}
+	// Scope the check to the row for this key. Against the whole table it would
+	// report "already a Gas Town binding" for every key as soon as any GT
+	// binding existed — do not "simplify" this back to output.
+	line := selectBindingLine(output, key)
+	if line == "" {
 		return false
 	}
 	// GT bindings use if-shell with a run-shell/display-popup invoking "gt ".
 	// Require both "if-shell" and "gt " to avoid false positives on user
 	// bindings that happen to contain "gt " without the if-shell guard.
-	return strings.Contains(output, "if-shell") && strings.Contains(output, "gt ")
+	return strings.Contains(line, "if-shell") && strings.Contains(line, "gt ")
 }
 
 // getKeyBinding returns the current tmux command bound to the given key in the
@@ -4001,22 +4031,7 @@ func (t *Tmux) getKeyBinding(table, key string) string {
 		return ""
 	}
 
-	var line string
-	for _, l := range strings.Split(output, "\n") {
-		fields := strings.Fields(l)
-		keyIdx := -1
-		for i, f := range fields {
-			if f == "-T" && i+2 < len(fields) {
-				// Skip table name, the next field is the key
-				keyIdx = i + 2
-				break
-			}
-		}
-		if keyIdx >= 0 && keyIdx < len(fields) && fields[keyIdx] == key {
-			line = l
-			break
-		}
-	}
+	line := selectBindingLine(output, key)
 	if line == "" {
 		return ""
 	}
