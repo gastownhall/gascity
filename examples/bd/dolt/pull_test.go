@@ -56,7 +56,7 @@ func TestPullUsesLiveSQLWhenManagedServerReachable(t *testing.T) {
 	}
 	log := string(data)
 	for _, want := range []string{
-		"SELECT name, url FROM dolt_remotes LIMIT 1",
+		"SELECT name, url FROM dolt_remotes ORDER BY name",
 		"CALL DOLT_PULL('origin', 'main')",
 	} {
 		if !strings.Contains(log, want) {
@@ -111,7 +111,7 @@ func TestPullReportsLiveSQLRemoteLookupFailure(t *testing.T) {
 		t.Fatalf("read fake dolt log: %v", err)
 	}
 	log := string(data)
-	if !strings.Contains(log, "SELECT name, url FROM dolt_remotes LIMIT 1") {
+	if !strings.Contains(log, "SELECT name, url FROM dolt_remotes ORDER BY name") {
 		t.Fatalf("dolt log missing remote lookup:\n%s", log)
 	}
 	if strings.Contains(log, "DOLT_PULL") {

@@ -60,6 +60,56 @@ valid_remote_name() {
   esac
 }
 
+remote_env_value() {
+  key=$(printf '%s' "$1" | tr 'a-z-' 'A-Z_')
+  case "$key" in *[!A-Z0-9_]*) return 0 ;; esac
+  eval "printf '%s' \"\${GC_DOLT_REMOTE_$key:-}\""
+}
+
+remote_allow_env_value() {
+  key=$(printf '%s' "$1" | tr 'a-z-' 'A-Z_')
+  case "$key" in *[!A-Z0-9_]*) return 0 ;; esac
+  eval "printf '%s' \"\${GC_DOLT_SYNC_ALLOW_REMOTE_$key:-}\""
+}
+
+# select_remote picks one remote from a comma/newline candidate list, refusing
+# ambiguity unless GC_DOLT_REMOTE_<DB> names one of the candidates. A non-file://
+# pick additionally requires GC_DOLT_SYNC_ALLOW_REMOTE_<DB>=1. Mirrors sync's
+# select_remote exactly (examples/bd/dolt/commands/sync/run.sh) — same policy,
+# same env var names, so a future shared-helper extraction needs no renaming.
+select_remote() {
+  sel_db="$1"; sel_candidates="$2"
+  [ -z "$sel_candidates" ] && return 0
+  sel_count=$(printf '%s\n' "$sel_candidates" | grep -c '.')
+  if [ "$sel_count" -le 1 ]; then printf '%s\n' "$sel_candidates"; return 0; fi
+  sel_names=$(printf '%s\n' "$sel_candidates" | awk -F, '{ if (o=="") o=$1; else o=o","$1 } END{print o}')
+  sel_override=$(remote_env_value "$sel_db") || return 1
+  if [ -z "$sel_override" ]; then
+    echo "  $sel_db: ERROR: multiple remotes configured ($sel_names) — set GC_DOLT_REMOTE_<DB> to disambiguate" >&2
+    return 1
+  fi
+  if ! valid_remote_name "$sel_override"; then
+    echo "  $sel_db: ERROR: invalid GC_DOLT_REMOTE override: $sel_override" >&2
+    return 1
+  fi
+  sel_match=$(printf '%s\n' "$sel_candidates" | awk -F, -v want="$sel_override" '$1 == want {print; exit}')
+  if [ -z "$sel_match" ]; then
+    echo "  $sel_db: ERROR: GC_DOLT_REMOTE names unknown remote '$sel_override' (available: $sel_names)" >&2
+    return 1
+  fi
+  sel_url=${sel_match#*,}
+  case "$sel_url" in
+    file://*) ;;
+    *)
+      sel_allowed=$(remote_allow_env_value "$sel_db") || return 1
+      if [ "$sel_allowed" != "1" ]; then
+        echo "  $sel_db: ERROR: GC_DOLT_REMOTE names non-local remote '$sel_override' ($sel_url) — set GC_DOLT_SYNC_ALLOW_REMOTE_<DB>=1 to allow syncing to it" >&2
+        return 1
+      fi ;;
+  esac
+  printf '%s\n' "$sel_match"; return 0
+}
+
 dolt_sql() {
   query="$1"
   host="${GC_DOLT_HOST:-127.0.0.1}"
@@ -70,8 +120,11 @@ dolt_sql() {
 
 find_remote_sql() {
   db="$1"
-  remote_csv=$(dolt_sql "USE \`$db\`; SELECT name, url FROM dolt_remotes LIMIT 1") || return 1
-  printf '%s\n' "$remote_csv" | awk -F, 'NR > 1 && $1 != "" {print $1 "|" $2; exit}'
+  remote_csv=$(dolt_sql "USE \`$db\`; SELECT name, url FROM dolt_remotes ORDER BY name") || return 1
+  candidates=$(printf '%s\n' "$remote_csv" | awk -F, 'NR > 1 && $1 != "" {print $1 "," $2}')
+  chosen=$(select_remote "$db" "$candidates") || return 1
+  [ -z "$chosen" ] && return 0
+  printf '%s\n' "$chosen" | awk -F, '{print $1 "|" $2}'
 }
 
 pull_database_sql() {
@@ -112,10 +165,15 @@ pull_database_cli() {
   remote_name=""
   remote_url=""
   if [ -f "$d/.dolt/remotes.json" ]; then
-    remote_name=$(grep -o '"name":"[^"]*"' "$d/.dolt/remotes.json" 2>/dev/null | head -1 | sed 's/"name":"//;s/"//' || true)
-    remote_url=$(grep -o '"url":"[^"]*"' "$d/.dolt/remotes.json" 2>/dev/null | head -1 | sed 's/"url":"//;s/"//' || true)
+    candidates=$(grep -o '"name":"[^"]*","url":"[^"]*"' "$d/.dolt/remotes.json" 2>/dev/null \
+      | sed 's/"name":"//;s/","url":"/,/;s/"$//' \
+      | sort)
+    if [ -n "$candidates" ]; then
+      chosen=$(select_remote "$name" "$candidates") || return 1
+      remote_name=${chosen%%,*}
+      remote_url=${chosen#*,}
+    fi
   fi
-  [ -z "$remote_name" ] && remote_name="origin"
 
   if [ -z "$remote_url" ]; then
     echo "  $name: skipped (no remote)"
