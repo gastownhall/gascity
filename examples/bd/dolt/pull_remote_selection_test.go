@@ -46,6 +46,8 @@ exit 0
 }
 
 func TestPullSQLMultipleRemotesRefusesWithoutOverride(t *testing.T) {
+	t.Parallel()
+
 	root := repoRoot(t)
 	script := filepath.Join(root, pullScript)
 
@@ -97,6 +99,8 @@ func TestPullSQLMultipleRemotesRefusesWithoutOverride(t *testing.T) {
 }
 
 func TestPullSQLMultipleRemotesOverrideSelectsFileRemote(t *testing.T) {
+	t.Parallel()
+
 	root := repoRoot(t)
 	script := filepath.Join(root, pullScript)
 
@@ -145,6 +149,8 @@ func TestPullSQLMultipleRemotesOverrideSelectsFileRemote(t *testing.T) {
 }
 
 func TestPullSQLMultipleRemotesNonFileOverrideRequiresAllowFlag(t *testing.T) {
+	t.Parallel()
+
 	root := repoRoot(t)
 	script := filepath.Join(root, pullScript)
 
@@ -196,6 +202,8 @@ func TestPullSQLMultipleRemotesNonFileOverrideRequiresAllowFlag(t *testing.T) {
 }
 
 func TestPullSQLMultipleRemotesNonFileOverrideWithAllowFlagProceeds(t *testing.T) {
+	t.Parallel()
+
 	root := repoRoot(t)
 	script := filepath.Join(root, pullScript)
 
@@ -240,6 +248,8 @@ func TestPullSQLMultipleRemotesNonFileOverrideWithAllowFlagProceeds(t *testing.T
 }
 
 func TestPullCLIMultipleRemotesRefusesWithoutOverride(t *testing.T) {
+	t.Parallel()
+
 	root := repoRoot(t)
 	script := filepath.Join(root, pullScript)
 
@@ -293,6 +303,8 @@ func TestPullCLIMultipleRemotesRefusesWithoutOverride(t *testing.T) {
 }
 
 func TestPullSQLMultipleRemotesInvalidOverrideSyntaxRefuses(t *testing.T) {
+	t.Parallel()
+
 	root := repoRoot(t)
 	script := filepath.Join(root, pullScript)
 
@@ -343,6 +355,8 @@ func TestPullSQLMultipleRemotesInvalidOverrideSyntaxRefuses(t *testing.T) {
 }
 
 func TestPullSQLMultipleRemotesUnknownOverrideRefuses(t *testing.T) {
+	t.Parallel()
+
 	root := repoRoot(t)
 	script := filepath.Join(root, pullScript)
 
@@ -393,6 +407,8 @@ func TestPullSQLMultipleRemotesUnknownOverrideRefuses(t *testing.T) {
 }
 
 func TestPullCLIMultipleRemotesOverrideSelectsNamed(t *testing.T) {
+	t.Parallel()
+
 	root := repoRoot(t)
 	script := filepath.Join(root, pullScript)
 
