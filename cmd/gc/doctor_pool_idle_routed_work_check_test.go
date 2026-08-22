@@ -234,3 +234,93 @@ func TestPoolIdleRoutedWorkCheckFixIsNoop(t *testing.T) {
 		t.Fatalf("status after no-op Fix = %v, want still warning: %#v", result.Status, result)
 	}
 }
+
+// poolIdleRoutedWorkBlockedStore models the production routed-work read for a
+// bead that is blocked in the BACKING store. mapBdStatus collapses bd's blocked
+// status into Gas City's "open", so a non-Live read returns it (routedCollapsed)
+// while a Live read reaches bd's raw --status=open filter and excludes it
+// (routedLive). Only the routed-work query carries a metadata filter; the
+// session enumeration is label-only and delegates to the embedded store, as do
+// Get and every write. Mirrors blockedDemandStore.
+type poolIdleRoutedWorkBlockedStore struct {
+	beads.Store
+	routedCollapsed []beads.Bead // metadata-filtered, non-Live: blocked row present, collapsed to "open"
+	routedLive      []beads.Bead // metadata-filtered, Live: bd's raw filter excluded it
+}
+
+func (s poolIdleRoutedWorkBlockedStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if len(q.Metadata) == 0 {
+		return s.Store.List(q)
+	}
+	if q.Live {
+		return append([]beads.Bead(nil), s.routedLive...), nil
+	}
+	return append([]beads.Bead(nil), s.routedCollapsed...), nil
+}
+
+func TestPoolIdleRoutedWorkCheckOKWhenRoutedWorkIsBlockedInBackingStore(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "builder", Dir: "gascity"}},
+	}
+	// The bead is blocked in bd. The idle instance is correct to leave it alone,
+	// so the check must not tell the operator to nudge for it.
+	store := poolIdleRoutedWorkBlockedStore{
+		Store: beads.NewMemStoreFrom(0, []beads.Bead{
+			poolIdleWorkSessionBead("gascity/builder", "active", ""),
+		}, nil),
+		routedCollapsed: []beads.Bead{poolIdleWorkRoutedBead("gascity/builder", "")},
+		routedLive:      nil,
+	}
+
+	result := newPoolIdleRoutedWorkCheck(cfg, cityDir, func(_ string) (beads.Store, error) {
+		return store, nil
+	}).Run(&doctor.CheckContext{})
+
+	if result.Status != doctor.StatusOK {
+		t.Fatalf("status = %v, want ok (blocked routed work is not claimable; the read must reach bd's raw status filter): %#v", result.Status, result)
+	}
+}
+
+// poolIdleRoutedWorkTierStore serves routed work that lives on the wisp tier: it
+// answers the routed-work query only when the caller asks for both tiers, the
+// way a relocated coordination-class store does (see beads.FederatedReadTier).
+// A read left at the TierIssues zero value gets nothing back.
+type poolIdleRoutedWorkTierStore struct {
+	beads.Store
+	wispRouted []beads.Bead
+}
+
+func (s poolIdleRoutedWorkTierStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if len(q.Metadata) == 0 {
+		return s.Store.List(q)
+	}
+	if q.TierMode != beads.TierBoth {
+		return nil, nil
+	}
+	return append([]beads.Bead(nil), s.wispRouted...), nil
+}
+
+func TestPoolIdleRoutedWorkCheckReadsBothTiers(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "builder", Dir: "gascity"}},
+	}
+	store := poolIdleRoutedWorkTierStore{
+		Store: beads.NewMemStoreFrom(0, []beads.Bead{
+			poolIdleWorkSessionBead("gascity/builder", "active", ""),
+		}, nil),
+		wispRouted: []beads.Bead{poolIdleWorkRoutedBead("gascity/builder", "")},
+	}
+
+	result := newPoolIdleRoutedWorkCheck(cfg, cityDir, func(_ string) (beads.Store, error) {
+		return store, nil
+	}).Run(&doctor.CheckContext{})
+
+	if result.Status != doctor.StatusWarning {
+		t.Fatalf("status = %v, want warning (routed work on the wisp tier must be read; a TierIssues read drops it silently): %#v", result.Status, result)
+	}
+	if details := strings.Join(result.Details, "\n"); !strings.Contains(details, "GA-1") {
+		t.Fatalf("details missing wisp-tier routed bead:\n%s", details)
+	}
+}

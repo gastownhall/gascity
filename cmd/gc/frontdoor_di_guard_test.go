@@ -400,6 +400,11 @@ var sessionRelocationRoutedFiles = []string{
 	// work store while the session bead lives in the relocated sessions store —
 	// and every `gc hook current` would then report "nothing claimed".
 	"hook_session_claim.go",
+	// The pool-idle-routed-work doctor check enumerates session beads per pool
+	// template. Unrouted, it would find zero sessions under a relocated sessions
+	// class and degrade to a silent no-op — a green result that reads as "no
+	// stranded work" when the check simply looked in the wrong store.
+	"doctor_pool_idle_routed_work_check.go",
 }
 
 // sessionRelocationForbidden are the UNROUTED session-front-door constructions a

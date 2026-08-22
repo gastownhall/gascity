@@ -10,7 +10,6 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
-	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
@@ -118,11 +117,11 @@ func (c *poolIdleRoutedWorkCheck) collect() (findings []poolIdleRoutedWorkFindin
 }
 
 // collectStoreFindings checks every generic-ephemeral pool template in cfg
-// against one store: a targeted session-store list for idle live instances,
+// against one store: a targeted session-class list for idle live instances,
 // and (only when at least one is idle) a targeted gc.routed_to metadata
 // lookup for unclaimed work — never a full-store scan.
 func (c *poolIdleRoutedWorkCheck) collectStoreFindings(store beads.Store, label string) ([]poolIdleRoutedWorkFinding, error) {
-	sessStore := sessionpkg.NewStore(beads.SessionStore{Store: store})
+	sessStore := cliSessionFrontDoor(store, c.cfg, c.cityPath)
 
 	var findings []poolIdleRoutedWorkFinding
 	for i := range c.cfg.Agents {
@@ -154,7 +153,16 @@ func (c *poolIdleRoutedWorkCheck) collectStoreFindings(store beads.Store, label 
 			continue
 		}
 
-		items, err := store.List(beads.ListQuery{Metadata: map[string]string{beadmeta.RoutedToMetadataKey: template}})
+		// Live so bd's raw --status=open filter drops blocked/deferred rows
+		// before mapBdStatus collapses them into "open" and the check reports
+		// work the instance is correct to leave alone (same tradeoff as
+		// listOpenForControllerDemandLive). FederatedReadTier because a
+		// relocated class leg answers at exactly the tier asked.
+		items, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
+			Status:   "open",
+			TierMode: beads.FederatedReadTier,
+			Metadata: map[string]string{beadmeta.RoutedToMetadataKey: template},
+		})
 		if err != nil {
 			return findings, fmt.Errorf("listing routed work for %s: %w", template, err)
 		}
