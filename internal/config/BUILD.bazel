@@ -201,6 +201,7 @@ go_test(
         "workquery_inprogress_hold_test.go",
         "workquery_named_routed_gate_test.go",
         "workquery_parity_test.go",
+        "workquery_pool_template_ready_test.go",
         "workquery_recovery_test.go",
         "workquery_single_session_routed_test.go",
         "workquery_whitespace_identity_test.go",
