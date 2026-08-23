@@ -52,6 +52,7 @@ var canonicalProviderAliasBindings = map[string]int{
 // forwarding shapes below are the only reviewed multi-result pass-throughs.
 var canonicalProviderCalls = map[string]int{
 	"cmd_citystatus.go:cmdCityStatus:newStatusSessionProviderForCityWithSnapshot:bind-error":                                                   1,
+	"cmd_prime.go:hookSessionProviderFailOpen:newSessionProviderFromContext:bind-error":                                                        1,
 	"cmd_convoy_dispatch.go:runControlDispatcherWithStoreAndConfig:dispatchControlSessionProvider:bind-error":                                  2,
 	"cmd_doctor.go:buildDoctorChecks:newSessionProvider:bind-error":                                                                            1,
 	"cmd_handoff.go:cmdHandoff:newSessionProvider:bind-error":                                                                                  1,

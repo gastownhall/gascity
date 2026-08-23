@@ -325,7 +325,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			// (nil provider → today's spawn) — a hook must not start
 			// failing because the provider config is momentarily broken.
 			spctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
-			hookSP, _ := newSessionProviderFromContext(spctx, nil)
+			hookSP := hookSessionProviderFailOpen(spctx)
 			maybeStartNudgePoller(withNudgeTargetFence(openNudgeBeadStore(cityPath).Store, nudgeTarget{
 				cityPath:          cityPath,
 				cityName:          cityName,
@@ -558,6 +558,19 @@ func primeHookHasLiveManagedSession(cityPath string) bool {
 	default:
 		return false
 	}
+}
+
+// hookSessionProviderFailOpen resolves the session provider for the prime
+// hook's nudge-poller sidecar decision, failing OPEN: the hook must not start
+// failing because the provider config is momentarily unresolvable, so a
+// construction error yields a nil provider — which callers treat as "today's
+// sidecar spawn", exactly the pre-event-dispatcher behavior.
+func hookSessionProviderFailOpen(spctx sessionProviderContext) runtime.Provider {
+	sp, err := newSessionProviderFromContext(spctx, nil)
+	if err != nil {
+		return nil
+	}
+	return sp
 }
 
 // startupPromptDeliveredMarkerStale reports whether the pane-stamped
