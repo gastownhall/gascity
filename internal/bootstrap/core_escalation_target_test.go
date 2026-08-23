@@ -21,10 +21,11 @@ var coreEscalationFormulas = []string{
 }
 
 func TestCoreEscalationTargetDefaultsToHuman(t *testing.T) {
-	prev := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
-
+	// No formula_v2 gate manipulation here on purpose. The compiler v2 flag
+	// already defaults to enabled (formulaV2Enabled is stored true in the
+	// package init, and rollout.ForTest's defaults agree), so toggling it was
+	// a no-op that only coupled this test to the legacy globals and tripped
+	// the internal/bootstrap ceiling in TestLegacyFormulaV2MechanismFrozen.
 	for _, name := range coreEscalationFormulas {
 		t.Run(name, func(t *testing.T) {
 			recipe, err := formula.CompileWithoutRuntimeVarValidation(
