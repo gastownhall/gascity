@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
@@ -1430,6 +1431,167 @@ func TestBdCloseUnopenableBindingSurfacesNotAbsence(t *testing.T) {
 	}
 	if strings.Contains(stderr.String(), "no issue found") {
 		t.Errorf("a failing read was reported as an absent bead: %q", stderr.String())
+	}
+}
+
+// TestBdCloseClassResidentEnforcesWorkRecordGate proves the class-door close
+// runs the ADR-0009 work-record gate against the class copy it is about to
+// write. A class-resident work step (a plain task bead, no gc.kind) that lacks a
+// typed gc.work_outcome must be BLOCKED under enforcement rather than retired
+// with no outcome — and the block must land BEFORE the write, so the class row
+// stays open. This is the codex major finding: the routed close returned before
+// the gate at cmd_bd.go:372 could run.
+func TestBdCloseClassResidentEnforcesWorkRecordGate(t *testing.T) {
+	cityPath, classStore := foreignProviderCity(t)
+	// Set enforcement AFTER foreignProviderCity: clearGCEnv wipes live GC_* keys.
+	t.Setenv(workRecordEnforceEnvVar, "1")
+	relic := classResidentWorkShapedBead(t, classStore, "gc-nooutcome1", "closed without a work outcome")
+
+	var stdout, stderr bytes.Buffer
+	code, handled := maybeRouteBdByID(cityPath, "", []string{"close", relic.ID}, &stdout, &stderr)
+	if !handled {
+		t.Fatalf("a class-resident close fell through to the bd subprocess: %q", stderr.String())
+	}
+	if code != 1 {
+		t.Fatalf("close of an outcome-less work step exited %d, want 1 (blocked): %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "work-record gate (enforced)") {
+		t.Errorf("the block does not carry the enforced-gate marker: %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "missing "+beadmeta.WorkOutcomeMetadataKey) {
+		t.Errorf("the block does not name the missing outcome: %q", stderr.String())
+	}
+	after, err := classStore.Get(relic.ID)
+	if err != nil {
+		t.Fatalf("re-reading %s: %v", relic.ID, err)
+	}
+	if after.Status == "closed" {
+		t.Errorf("the blocked close wrote to the class binding anyway; status=%q", after.Status)
+	}
+}
+
+// TestBdUpdateStatusClosedClassResidentEnforcesWorkRecordGate is the same gate
+// on the other close spelling — `gc bd update <id> --status closed`, the form
+// the worker formulas use to stamp metadata and close in one call. It must be
+// gated identically: an outcome-less update-close is blocked and does not write.
+func TestBdUpdateStatusClosedClassResidentEnforcesWorkRecordGate(t *testing.T) {
+	cityPath, classStore := foreignProviderCity(t)
+	t.Setenv(workRecordEnforceEnvVar, "1")
+	relic := classResidentWorkShapedBead(t, classStore, "gc-nooutcome2", "update-closed without an outcome")
+
+	var stdout, stderr bytes.Buffer
+	code, handled := maybeRouteBdByID(cityPath, "", []string{"update", relic.ID, "--status", "closed"}, &stdout, &stderr)
+	if !handled {
+		t.Fatalf("a class-resident update-close fell through to the bd subprocess: %q", stderr.String())
+	}
+	if code != 1 {
+		t.Fatalf("update --status closed on an outcome-less work step exited %d, want 1 (blocked): %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "missing "+beadmeta.WorkOutcomeMetadataKey) {
+		t.Errorf("the block does not name the missing outcome: %q", stderr.String())
+	}
+	after, err := classStore.Get(relic.ID)
+	if err != nil {
+		t.Fatalf("re-reading %s: %v", relic.ID, err)
+	}
+	if after.Status == "closed" {
+		t.Errorf("the blocked update-close wrote to the class binding anyway; status=%q", after.Status)
+	}
+}
+
+// TestBdUpdateAtomicNoOpClassResidentPassesWorkRecordGate proves the gate does
+// not over-block: the documented worker close — stamp the typed outcome and
+// close in one atomic update — is ALLOWED under enforcement, and the class row
+// is retired with the outcome persisted. Validating the pre-update bead alone
+// would wrongly reject this, so the gate must project the submitted metadata.
+func TestBdUpdateAtomicNoOpClassResidentPassesWorkRecordGate(t *testing.T) {
+	cityPath, classStore := foreignProviderCity(t)
+	t.Setenv(workRecordEnforceEnvVar, "1")
+	relic := classResidentWorkShapedBead(t, classStore, "gc-outcome1", "closed with a no-op outcome")
+
+	args := []string{
+		"update", relic.ID,
+		"--set-metadata", beadmeta.WorkOutcomeMetadataKey + "=" + beadmeta.WorkOutcomeNoOp,
+		"--status", "closed",
+	}
+	var stdout, stderr bytes.Buffer
+	code, handled := maybeRouteBdByID(cityPath, "", args, &stdout, &stderr)
+	if !handled {
+		t.Fatalf("a class-resident atomic close fell through to the bd subprocess: %q", stderr.String())
+	}
+	if code != 0 {
+		t.Fatalf("a compliant atomic close was blocked (exit %d): %s", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "work-record gate") {
+		t.Errorf("a compliant close still tripped the gate: %q", stderr.String())
+	}
+	after, err := classStore.Get(relic.ID)
+	if err != nil {
+		t.Fatalf("re-reading %s: %v", relic.ID, err)
+	}
+	if after.Status != "closed" {
+		t.Errorf("the compliant close did not retire the class row; status=%q", after.Status)
+	}
+	if got := after.Metadata[beadmeta.WorkOutcomeMetadataKey]; got != beadmeta.WorkOutcomeNoOp {
+		t.Errorf("the atomic close did not stamp the outcome; %s=%q", beadmeta.WorkOutcomeMetadataKey, got)
+	}
+}
+
+// TestBdCloseClassResidentWarnsOnlyByDefault keeps the migration default: with
+// enforcement OFF, an outcome-less close WARNS but still proceeds, so the open
+// work steps a migrated city already holds drain without breakage.
+func TestBdCloseClassResidentWarnsOnlyByDefault(t *testing.T) {
+	cityPath, classStore := foreignProviderCity(t)
+	// Enforcement deliberately unset (foreignProviderCity's clearGCEnv left it so).
+	relic := classResidentWorkShapedBead(t, classStore, "gc-warnonly1", "closed without an outcome, warn-only")
+
+	var stdout, stderr bytes.Buffer
+	code, handled := maybeRouteBdByID(cityPath, "", []string{"close", relic.ID}, &stdout, &stderr)
+	if !handled || code != 0 {
+		t.Fatalf("warn-only close = (%d, %t): %s", code, handled, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "work-record gate (warn-only)") {
+		t.Errorf("the warn-only close did not warn: %q", stderr.String())
+	}
+	after, err := classStore.Get(relic.ID)
+	if err != nil {
+		t.Fatalf("re-reading %s: %v", relic.ID, err)
+	}
+	if after.Status != "closed" {
+		t.Errorf("warn-only did not proceed with the close; status=%q", after.Status)
+	}
+}
+
+// TestBdUpdateUnservedWorkResidentFailsLoudOnClassProbeFault pins, deliberately,
+// the blast-radius minor: an ordinary WORK-bead unserved mutation fails loud
+// when the class-store residence probe faults with a NON-refusal read error,
+// rather than silently falling through to bd. It is the unserved-path mirror of
+// TestBdCloseUnopenableBindingSurfacesNotAbsence — a mid-query fault is a failure
+// to DECIDE ownership, and treating it as absence is the root-loss shape this
+// lane exists to prevent. A standing refusal is the one error treated as a miss;
+// a fault is not, so the command surfaces it instead of guessing the ledger.
+func TestBdUpdateUnservedWorkResidentFailsLoudOnClassProbeFault(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	resident, err := workStoreFor(t, cityPath).Create(beads.Bead{Title: "an ordinary work bead", Type: "task"})
+	if err != nil {
+		t.Fatalf("seeding the work store: %v", err)
+	}
+	failure := errors.New("the class binding faulted mid-probe")
+	failClassBindingReads(t, cityPath, failure)
+
+	var stdout, stderr bytes.Buffer
+	code, handled := maybeRouteBdByID(cityPath, "", []string{"update", resident.ID, "--notes", "x"}, &stdout, &stderr)
+	if !handled {
+		t.Fatal("a class-probe fault let an unserved work mutation fall through to the bd subprocess")
+	}
+	if code == 0 {
+		t.Errorf("a class-probe fault exited 0 with stdout %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), failure.Error()) {
+		t.Errorf("the failure does not carry the store's cause: %q", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "no issue found") {
+		t.Errorf("a class-probe fault was reported as an absent bead: %q", stderr.String())
 	}
 }
 
