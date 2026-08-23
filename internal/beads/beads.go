@@ -69,14 +69,31 @@ type Bead struct {
 	Priority  *int      `json:"priority,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	// UpdatedAt is zero for legacy beads; UpdatedBefore falls back to CreatedAt.
-	UpdatedAt   time.Time `json:"updated_at,omitempty,omitzero"`
-	Assignee    string    `json:"assignee,omitempty"`
-	From        string    `json:"from,omitempty"`
-	ParentID    string    `json:"parent,omitempty"`      // step → molecule; matches bd wire format
-	Ref         string    `json:"ref,omitempty"`         // formula step ID or formula name
-	Needs       []string  `json:"needs,omitempty"`       // dependency step refs
-	Description string    `json:"description,omitempty"` // step instructions
-	Labels      []string  `json:"labels,omitempty"`
+	UpdatedAt time.Time `json:"updated_at,omitempty,omitzero"`
+	Assignee  string    `json:"assignee,omitempty"`
+	From      string    `json:"from,omitempty"`
+	// ParentID is a CITY-SCOPED bead id held as a WEAK reference: step →
+	// molecule, matching bd's wire format.
+	//
+	// City-scoped, not store-scoped. A split city routes by CLASS, so a parent
+	// and its child are co-resident only when they classify the same way, and
+	// the cases where they do not are ordinary: a graph.v2 workflow whose root
+	// is a graph-class molecule in the binding hangs its steps off a work-class
+	// bead in a rig ledger. Nothing reconciles the two ledgers, and nothing
+	// should — a create that moved the child to reach its parent would mint it
+	// under the wrong prefix, which is unfixable afterwards.
+	//
+	// Weak, therefore, is the contract and not an admission: a store persists
+	// and filters this verbatim (Children and ListQuery.ParentID are string
+	// matches), and NEVER resolves it, validates it, or places a bead to
+	// co-locate with it. A store that started rejecting an id it cannot see
+	// would break every cross-store molecule at once, and a store that started
+	// placing by it would strand the child in the parent's namespace.
+	ParentID    string   `json:"parent,omitempty"`
+	Ref         string   `json:"ref,omitempty"`         // formula step ID or formula name
+	Needs       []string `json:"needs,omitempty"`       // dependency step refs
+	Description string   `json:"description,omitempty"` // step instructions
+	Labels      []string `json:"labels,omitempty"`
 	// Metadata uses StringMap (not map[string]string) so decode tolerates the
 	// non-string JSON values the external bd CLI emits — `--set-metadata
 	// key=true` is type-inferred to a JSON boolean, and a strict decode of a
@@ -672,6 +689,16 @@ type Store interface {
 	// Legacy helper; prefer List with ListQuery in new code.
 	// Children returns all beads whose ParentID matches the given ID,
 	// in creation order. Pass IncludeClosed to include closed children.
+	//
+	// The match is a string comparison against THIS store's rows, and
+	// parentID's own row is never read. A parent that lives in another store
+	// is neither an error nor an empty answer: its children here still come
+	// back, because ParentID is a weak city-scoped reference (see Bead.ParentID)
+	// and the alternative — resolving the parent first — would make every
+	// cross-store molecule's step list depend on a lookup the store cannot do.
+	// The corollary is that a caller wanting EVERY child of a city-scoped
+	// parent must ask every store, which is the residency resolver's job, not
+	// this method's.
 	Children(parentID string, opts ...QueryOpt) ([]Bead, error)
 
 	// Legacy helper; prefer List with ListQuery in new code.

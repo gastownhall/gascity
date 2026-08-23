@@ -15,12 +15,17 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
-// The retirement condition's two halves, as the CLI plane reports them. Same
-// rule as the API plane's, asserted separately because the two constructors are
-// separate code and a plane that disagreed with the other about whether a probe
-// may retire would resolve the same id to two different stores.
+// The retirement condition's two halves, as the CLI plane reports them.
+//
+// The rule itself is now one function (storeref.BuildBindings), so this is no
+// longer a second derivation of it — it is a pin on what this plane ASKS FOR.
+// The options are the drift surface that survives sharing the body: a plane
+// that started supplying a census where it holds none, or stopped, would report
+// a different retirement verdict for the same store without either package
+// changing the rule.
 func TestCLIBindingReportsBothHalvesOfTheRetirementCondition(t *testing.T) {
 	graphPrefix, ok := config.ReservedClassPrefix(config.BeadClassGraph)
 	if !ok {
@@ -70,7 +75,7 @@ func (s prefixDeclaringStore) IDPrefix() string { return s.prefix }
 
 func TestReservedPrefixesForDeclaresHeldNamespaces(t *testing.T) {
 	got := map[string]bool{}
-	for _, p := range reservedPrefixesFor([]coordclass.Class{coordclass.ClassNudges}) {
+	for _, p := range storeref.ReservedPrefixesFor([]coordclass.Class{coordclass.ClassNudges}) {
 		got[p] = true
 	}
 	for _, want := range config.ReservedClassPrefixesFor(config.BeadClassNudges) {

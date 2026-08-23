@@ -679,6 +679,49 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		}
 	})
 
+	// ParentID is a WEAK, CITY-SCOPED reference (see beads.Bead.ParentID), and
+	// on a split city the parent routinely lives in another store: a graph-class
+	// molecule in the binding hangs its steps off a work-class bead in a rig
+	// ledger, and vice versa. Every backend has to behave the same way about an
+	// id it cannot see, because the alternatives are silent — a store that
+	// validated would refuse the create with an error that reads like a bad
+	// request, and a store that filtered on resolvability would return an empty
+	// step list for a molecule that exists.
+	t.Run("ParentIDNamesARowThisStoreDoesNotHave", func(t *testing.T) {
+		s := newStore()
+		// Not merely absent: an id in a reserved namespace this store could not
+		// have minted, which is the actual cross-store shape.
+		const foreign = "gcg-70b1e5f2-a"
+
+		child, err := s.Create(beads.Bead{Title: "step", ParentID: foreign})
+		if err != nil {
+			t.Fatalf("Create with an unresolvable parent was refused: %v — a store must not validate ParentID, and this breaks every cross-store molecule", err)
+		}
+		got, err := s.Get(child.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.ParentID != foreign {
+			t.Errorf("ParentID round-tripped as %q, want %q verbatim — a store must not rewrite or namespace it", got.ParentID, foreign)
+		}
+
+		children, err := s.Children(foreign)
+		if err != nil {
+			t.Fatalf("Children on an unresolvable parent errored: %v — the match is against this store's rows, not the parent's", err)
+		}
+		if len(children) != 1 || children[0].ID != child.ID {
+			t.Errorf("Children(%q) returned %d beads, want the one child stored here; a molecule's steps would read as missing", foreign, len(children))
+		}
+
+		listed, err := s.List(beads.ListQuery{ParentID: foreign})
+		if err != nil {
+			t.Fatalf("List{ParentID} on an unresolvable parent errored: %v", err)
+		}
+		if len(listed) != 1 || listed[0].ID != child.ID {
+			t.Errorf("List{ParentID: %q} returned %d beads, want 1 — it must agree with Children", foreign, len(listed))
+		}
+	})
+
 	t.Run("ReadyEmptyStore", func(t *testing.T) {
 		s := newStore()
 		got, err := s.Ready()

@@ -37,8 +37,24 @@ var reservedClassPrefixes = map[string]string{
 // configured with it collides with real ids, and an id carrying it belongs to
 // the class binding and nowhere else.
 var reservedAuxiliaryPrefixes = map[string][]string{
-	BeadClassNudges: {"gcnq"},
+	BeadClassNudges: {NudgeQueueIDPrefix},
 }
+
+// NudgeQueueIDPrefix is the prefix the nudge queue mints its records under.
+//
+// It is exported and lives HERE, in the package that owns what "reserved" means,
+// because two packages have to agree on it and only one of them can own it. The
+// queue in internal/storebinding mints ids with it; the reserved-prefix table
+// above routes ids carrying it to the nudges binding. A copy in each package
+// would let one change alone, and that split is silent in the worst way: the
+// minter writes ids under a prefix the router no longer reserves, so queue
+// records land in the work ledger, the queue reads its own binding, finds
+// nothing, and stops draining without an error anywhere.
+//
+// The trailing separator is NOT part of it. A reserved prefix is matched against
+// the segment before the first "-" (see bdIDIsClassReserved), so carrying the
+// dash here would make the table's entry match nothing at all.
+const NudgeQueueIDPrefix = "gcnq"
 
 // ReservedClassPrefix returns the id-prefix a SQLite-relocated coordination
 // class MINTS under (e.g. BeadClassOrders -> "gco"), and whether the class has

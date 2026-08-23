@@ -78,6 +78,18 @@ c:storeref.EachLeg	(^|[^A-Za-z0-9_])storeref\.EachLeg\(
 c:WorkAxisRouter	(^|[^A-Za-z0-9_])WorkLegsForID\(
 # (d) bespoke residence probes. The namespace gate is the resolver's, and a site
 #     that re-derives it is one `gc storage migrate` away from ga-axin6.
+#
+#     The reserved-prefix table has FIVE accessors, and the family names all of
+#     them. It named one, and the gap was not theoretical: a site counted here
+#     retired by switching from ReservedClassPrefix( to the plural
+#     ReservedClassPrefixesFor(, which asks the same question about more
+#     namespaces. The baseline shrank and nothing moved. A pattern that sees one
+#     spelling of a question does not guard the question, it guards the spelling
+#     — and the spelling is the cheapest thing in the file to change.
 d:IDInNamespace	(^|[^A-Za-z0-9_])IDInNamespace\(
 d:bdIDIsClassReserved	(^|[^A-Za-z0-9_])bdIDIsClassReserved\(
 d:ReservedClassPrefix	(^|[^A-Za-z0-9_])ReservedClassPrefix\(
+d:ReservedClassPrefixesFor	(^|[^A-Za-z0-9_])ReservedClassPrefixesFor\(
+d:AllReservedClassPrefixes	(^|[^A-Za-z0-9_])AllReservedClassPrefixes\(
+d:IsReservedClassPrefix	(^|[^A-Za-z0-9_])IsReservedClassPrefix\(
+d:ReservedPrefixesFor	(^|[^A-Za-z0-9_])ReservedPrefixesFor\(

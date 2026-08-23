@@ -1963,6 +1963,22 @@ func (s *NativeDoltStore) validateCreatedDependencies(ctx context.Context, stora
 		if targetID == "" {
 			return fmt.Errorf("validating native create dependency for %q: depends_on_id is empty", issueID)
 		}
+		// A parent-child edge is nativeIssueFromBead's rendering of
+		// Bead.ParentID, which is a WEAK city-scoped reference: a split city
+		// routinely hangs a graph-class molecule's steps off a work-class bead
+		// in another ledger, and this store cannot see that row. Resolving it
+		// refuses the create with a not-found naming a bead that exists.
+		//
+		// The prefix hatch below already declined to enforce this whenever the
+		// two ids carried different prefixes, so parent existence was never
+		// actually guaranteed — it was enforced on same-prefix cities and
+		// skipped on split ones, which is the worst of both. Declaring the
+		// reference weak (beads.Bead.ParentID) and enforcing that uniformly is
+		// what the conformance suite pins. Every other dependency type stays
+		// strong and is still resolved.
+		if dep.Type == beadslib.DepParentChild {
+			continue
+		}
 		if !shouldPrevalidateNativeDependency(issueID, targetID, s.idPrefix) {
 			continue
 		}
