@@ -5841,15 +5841,19 @@ func configuredControlDispatcherRouteForScope(cfg *config.City, rigContext strin
 
 func controlDispatcherRigContextForStoreRef(storeRef string) string {
 	storeRef = strings.TrimSpace(storeRef)
-	if storeRef == "" || storeRef == "city" || strings.HasPrefix(storeRef, "city:") {
+	if storeRef == "" || storeRef == "city" {
 		return ""
 	}
+	if rigContext, ok := storeref.ScopeRigContext(storeRef); ok {
+		return rigContext
+	}
+	// Keep accepting the pre-canonical bare rig label used by older census
+	// snapshots while canonical refs are interpreted by storeref above.
 	return strings.TrimPrefix(storeRef, "rig:")
 }
 
 func controlDispatcherStoreRefLabel(storeRef string) string {
-	storeRef = strings.TrimSpace(storeRef)
-	if storeRef == "" || storeRef == "city" || strings.HasPrefix(storeRef, "city:") {
+	if controlDispatcherRigContextForStoreRef(storeRef) == "" {
 		return "the city store"
 	}
 	return fmt.Sprintf("rig store %q", controlDispatcherRigContextForStoreRef(storeRef))
