@@ -145,11 +145,13 @@ func apiResidencyBindings(order []beads.Store, byStore map[beads.Store][]coordcl
 	bindings := make([]storeref.ClassBinding, 0, len(order))
 	for _, store := range order {
 		classes := completeObservedClasses(byStore[store])
+		// Every namespace the store HOLDS, not only the one each class mints
+		// under: a namespace the binding does not declare is one the resolver
+		// gives it no authority over, and the id falls through to the work
+		// ledger that never had it.
 		prefixes := make([]string, 0, len(classes))
 		for _, class := range classes {
-			if prefix, ok := config.ReservedClassPrefix(class.String()); ok {
-				prefixes = append(prefixes, prefix)
-			}
+			prefixes = append(prefixes, config.ReservedClassPrefixesFor(class.String())...)
 		}
 		bindings = append(bindings, storeref.ClassBinding{
 			Classes:  classes,

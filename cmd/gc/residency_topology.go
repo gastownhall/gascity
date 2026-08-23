@@ -451,13 +451,15 @@ func infrastructureClasses() []coordclass.Class {
 	return classes
 }
 
-// reservedPrefixesFor returns the reserved id prefixes a class set mints.
+// reservedPrefixesFor returns the reserved id namespaces a class set holds —
+// the prefix each class mints under plus any its store holds without minting,
+// such as the nudge queue's. A namespace the binding does not declare is one
+// the resolver gives it no authority over, so an id carrying it falls through
+// to the work ledger that never had it.
 func reservedPrefixesFor(classes []coordclass.Class) []string {
 	prefixes := make([]string, 0, len(classes))
 	for _, class := range classes {
-		if prefix, ok := config.ReservedClassPrefix(class.String()); ok {
-			prefixes = append(prefixes, prefix)
-		}
+		prefixes = append(prefixes, config.ReservedClassPrefixesFor(class.String())...)
 	}
 	return prefixes
 }
