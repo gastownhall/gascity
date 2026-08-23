@@ -55,7 +55,14 @@ var (
 // defaultSetupTimeout.
 func New(herdrSession, metaDir, cityRoot string, setupTimeout, setupMaxTimeout time.Duration) *Provider {
 	if metaDir == "" {
-		metaDir = filepath.Join(os.TempDir(), "gc-herdr-meta", sanitize(herdrSession))
+		// Per-euid, because the fallback path is otherwise identical for every
+		// user on the host and os.MkdirAll succeeds on a directory someone else
+		// created first. The euid does not make the directory private on its
+		// own — SetMeta validates ownership of this root and of the session
+		// directory under it before writing — but it keeps two legitimate users
+		// off one path so that validation is a real check rather than a
+		// permanent outage for whoever logs in second.
+		metaDir = filepath.Join(os.TempDir(), fmt.Sprintf("gc-herdr-meta-%d", os.Geteuid()), sanitize(herdrSession))
 	}
 	if setupTimeout <= 0 {
 		setupTimeout = defaultSetupTimeout
@@ -122,10 +129,10 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// rolls it back mid-boot — and liveness reads the pane binding. tmux gets
 	// the env half for free (its GetMeta reads the session environment, which
 	// new-session initializes from cfg.Env); herdr's sidecar is populated
-	// only by SetMeta. Seeding the whole env also persists GC_SESSION_ID for
-	// ProcessAlive's session-scoped tree-walk widening (process env survives
-	// reparenting). Stop clears the whole meta dir, so teardown is covered,
-	// including a launch that fails below.
+	// only by SetMeta. The seed also persists GC_SESSION_ID for ProcessAlive's
+	// session-scoped tree-walk widening (process env survives reparenting).
+	// Stop clears the whole meta dir, so teardown is covered, including a
+	// launch that fails below.
 	if err := p.seedMetaFromEnv(name, cfg.Env); err != nil {
 		return fmt.Errorf("herdr: seed session metadata for %q: %w", name, err)
 	}
@@ -850,8 +857,16 @@ func (p *Provider) CopyTo(name, src, relDst string) error {
 // GC_SESSION_ID and GC_INSTANCE_TOKEN must be readable via GetMeta from the
 // moment the runtime is alive. Later SetMeta calls override individual keys,
 // exactly as tmux setenv does.
+//
+// It seeds the classified half of the environment rather than all of it. tmux's
+// store is the session environment, which dies with the server; herdr's is a
+// directory of files that outlives every session it describes, so seeding
+// cfg.Env wholesale writes the agent's API keys to disk with no reader that
+// ever wants them back. [runtime.SplitEnvForMetaSeed] keeps exactly the keys a
+// GetMeta consumer reads and withholds the rest.
 func (p *Provider) seedMetaFromEnv(name string, env map[string]string) error {
-	for k, v := range env {
+	seed, _ := runtime.SplitEnvForMetaSeed(env)
+	for k, v := range seed {
 		if err := p.SetMeta(name, k, v); err != nil {
 			return fmt.Errorf("meta %q: %w", k, err)
 		}
@@ -861,12 +876,29 @@ func (p *Provider) seedMetaFromEnv(name string, env map[string]string) error {
 
 // SetMeta writes a per-session metadata value to the sidecar store (herdr has
 // no per-session KV).
+//
+// The value is written owner-only under an owner-only directory: even filtered,
+// the sidecar holds the incarnation fence token, and a forged or read fence is
+// how a stale process talks its way past drain. Modes are applied explicitly
+// rather than through MkdirAll/WriteFile's perm argument, which is consulted
+// only when the path is created — a host that already ran an older binary keeps
+// its 0755 directory and 0644 files otherwise, which is exactly the host that
+// has credentials on disk already.
+//
+// The root is checked as well as the per-session leaf. EnsurePrivateDir only
+// inspects the path it is handed, and MkdirAll walks through pre-existing
+// ancestors without looking at them — so validating the leaf alone would leave
+// an attacker-owned root holding the victim's session directory, and the owner
+// of a directory can replace what is inside it between the check and the write.
 func (p *Provider) SetMeta(name, key, value string) error {
-	dir := filepath.Join(p.metaDir, sanitize(name))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := runtime.EnsurePrivateDir(p.metaDir); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, sanitize(key)), []byte(value), 0o644)
+	dir := filepath.Join(p.metaDir, sanitize(name))
+	if err := runtime.EnsurePrivateDir(dir); err != nil {
+		return err
+	}
+	return runtime.WritePrivateFile(filepath.Join(dir, sanitize(key)), []byte(value))
 }
 
 // GetMeta reads a per-session metadata value from the sidecar store; a missing

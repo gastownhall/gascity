@@ -86,7 +86,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		return err
 	}
 
-	err = doStartSession(ctx, &tmuxStartOps{tm: p.tm, runtimeDir: p.cfg.RuntimeDir, setupMaxTimeout: p.cfg.SetupMaxTimeout}, name, cfg, p.cfg.SetupTimeout)
+	err = doStartSession(ctx, newTmuxStartOps(p.tm, p.cfg.RuntimeDir, p.cfg.SetupMaxTimeout, cfg), name, cfg, p.cfg.SetupTimeout)
 	if err == nil {
 		p.cache.Invalidate()
 		return nil
@@ -221,7 +221,7 @@ func (p *Provider) cleanupFailedStart(name string, cfg runtime.Config) {
 // RunLive re-applies session_live commands to a running session.
 // Called by the reconciler when only session_live config has changed.
 func (p *Provider) RunLive(name string, cfg runtime.Config) error {
-	runSessionLive(context.Background(), &tmuxStartOps{tm: p.tm, setupMaxTimeout: p.cfg.SetupMaxTimeout}, name, cfg, os.Stderr, p.cfg.SetupTimeout)
+	runSessionLive(context.Background(), newTmuxStartOps(p.tm, "", p.cfg.SetupMaxTimeout, cfg), name, cfg, os.Stderr, p.cfg.SetupTimeout)
 	return nil
 }
 
@@ -235,7 +235,7 @@ func (p *Provider) RunLive(name string, cfg runtime.Config) error {
 // re-stage files (those are provision-half and unchanged on a launch-only change),
 // and on failure it leaves the warm box in place rather than tearing it down.
 func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
-	if err := doRelaunchSession(ctx, &tmuxStartOps{tm: p.tm, setupMaxTimeout: p.cfg.SetupMaxTimeout}, name, cfg, p.cfg.SetupTimeout); err != nil {
+	if err := doRelaunchSession(ctx, newTmuxStartOps(p.tm, "", p.cfg.SetupMaxTimeout, cfg), name, cfg, p.cfg.SetupTimeout); err != nil {
 		return err
 	}
 	p.cache.Invalidate()
@@ -825,6 +825,28 @@ type tmuxStartOps struct {
 	// runSetupCommand replaces its fixed wall-clock deadline with
 	// "no output for `timeout`" (idle) plus this absolute ceiling.
 	setupMaxTimeout time.Duration
+	// secrets are the session's credential values, redacted out of every
+	// pane capture and crash artifact this startup produces. Built by
+	// newTmuxStartOps; a zero value simply redacts nothing.
+	secrets []string
+}
+
+// newTmuxStartOps builds the startup adapter for one session, deriving the
+// redaction secret list from that session's environment.
+//
+// The secrets have to come from the session config rather than the provider,
+// because the credentials differ per agent and the pane is where they surface.
+// Production code must use this constructor rather than a struct literal — a
+// literal compiles fine and produces output that still looks like a diagnostic,
+// so a forgotten field is invisible. TestProductionStartOpsUseTheConstructor
+// enforces that.
+func newTmuxStartOps(tm *Tmux, runtimeDir string, setupMaxTimeout time.Duration, cfg runtime.Config) *tmuxStartOps {
+	return &tmuxStartOps{
+		tm:              tm,
+		runtimeDir:      runtimeDir,
+		setupMaxTimeout: setupMaxTimeout,
+		secrets:         runtime.SetupCommandSecrets(cfg.Env),
+	}
 }
 
 const (
@@ -896,8 +918,17 @@ func (o *tmuxStartOps) hasSession(name string) (bool, error) {
 	return o.tm.HasSession(name)
 }
 
+// capturePane returns the dead pane's output with credentials removed.
+//
+// This is the redaction chokepoint for the whole startup-failure path: the one
+// caller folds the result into a returned error AND writes it to disk, so
+// redacting here covers both without either site having to remember. The
+// capture is joined (-J) because tmux otherwise breaks the text at the pane
+// width, and a credential split across two lines by a newline tmux inserted is
+// a credential substring matching cannot find.
 func (o *tmuxStartOps) capturePane(name string, lines int) (string, error) {
-	return o.tm.CapturePane(name, lines)
+	content, err := o.tm.CapturePaneJoined(name, lines)
+	return runtime.RedactSecrets(content, o.secrets), err
 }
 
 // recordStartCrash persists a per-session start-crash diagnostic so an
@@ -906,10 +937,17 @@ func (o *tmuxStartOps) capturePane(name string, lines int) (string, error) {
 // terminating signal alongside the captured pane output. Best-effort: a
 // disabled capture (empty runtimeDir) or any I/O error returns "" without
 // affecting startup. Returns the artifact path when written.
+//
+// The artifact is redacted again here and written owner-only. Redacting twice
+// is deliberate: capturePane already cleans the text this caller passes, but
+// this is the copy that outlives the session, and a future caller reaching for
+// a durable crash record should not have to know which of its arguments were
+// pre-sanitized.
 func (o *tmuxStartOps) recordStartCrash(name, paneContent string) string {
 	if o.runtimeDir == "" {
 		return ""
 	}
+	paneContent = runtime.RedactSecrets(paneContent, o.secrets)
 	status, signal := o.tm.PaneDeadInfo(name)
 
 	var b strings.Builder
@@ -927,11 +965,11 @@ func (o *tmuxStartOps) recordStartCrash(name, paneContent string) string {
 	}
 
 	dir := filepath.Join(o.runtimeDir, "sessions", name)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := runtime.EnsurePrivateDir(dir); err != nil {
 		return ""
 	}
 	path := filepath.Join(dir, "start-stderr.log")
-	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+	if err := runtime.WritePrivateFile(path, []byte(b.String())); err != nil {
 		return ""
 	}
 	return path
