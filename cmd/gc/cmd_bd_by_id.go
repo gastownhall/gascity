@@ -75,7 +75,7 @@ package main
 //     resolve.
 //
 // Served here: show, update (fields and metadata, including --claim), close,
-// reopen, release-if-current, and dep list. `gc bd heartbeat` is not — it
+// reopen, release-if-current, dep list, and dep tree. `gc bd heartbeat` is not — it
 // forwards to bd's native owner-only lease-refresh verb (commit 80aad8c), a
 // literal spelling parseBdByIDOp does not recognize, and it is no longer
 // rewritten to a metadata update the way it once was. On a city that relocates
@@ -194,6 +194,21 @@ const (
 	// every closed blocker, and on a split city it is the operation whose
 	// subprocess never returned.
 	bdByIDDepList bdByIDVerb = "dep-list"
+	// bdByIDDepTree is `gc bd dep tree <id> [--direction=up|down] [--reverse]
+	// [--max-depth=N] [--json]`, the recursive form of the same read.
+	//
+	// It is the one federated read that resolves a whole relocated molecule, and
+	// every status summary asks for exactly that: pr_review.py's
+	// city_dep_subtree walks a root plus its descendants in one call, because
+	// the selector projections (`list`, `ready`, `sql`) cannot see the class at
+	// all. While this was unserved, the ownership gate refused it on every
+	// class-owned root — correctly, since bd would have answered from the ledger
+	// that does not hold the bead — and the pr-review label poller failed on
+	// every tick for every labeled PR (ga-pxppl).
+	//
+	// Serving it asks nothing new of the store: the walk is DepList to a level
+	// and Get for each related bead, which is what dep list already does once.
+	bdByIDDepTree bdByIDVerb = "dep-tree"
 	// bdByIDUpdate is `gc bd update <id>` carrying field and metadata writes.
 	//
 	// It is here because it is the step-completion write the core pack makes on
@@ -231,8 +246,11 @@ type bdByIDOp struct {
 	Assignee string
 	// Direction and DepType carry `dep list`'s two selectors. Direction is
 	// always populated for that verb; an empty DepType means every edge type.
+	// Direction is populated for `dep tree` too, which takes the same axis.
 	Direction string
 	DepType   string
+	// MaxDepth is `dep tree`'s safety limit, always populated for that verb.
+	MaxDepth int
 	// Update carries the field and metadata writes of the update verb, already
 	// translated into the object model's own shape.
 	Update beads.UpdateOpts
@@ -269,10 +287,16 @@ func parseBdByIDOp(bdArgs []string) (bdByIDOp, bool) {
 		}
 		return bdByIDOp{Verb: bdByIDRelease, ID: id, Assignee: assignee}, true
 	case "dep":
-		if len(bdArgs) < 2 || bdArgs[1] != "list" {
+		if len(bdArgs) < 2 {
 			return bdByIDOp{}, false
 		}
-		return parseBdDepListArgs(bdArgs[2:])
+		switch bdArgs[1] {
+		case "list":
+			return parseBdDepListArgs(bdArgs[2:])
+		case "tree":
+			return parseBdDepTreeArgs(bdArgs[2:])
+		}
+		return bdByIDOp{}, false
 	}
 	return bdByIDOp{}, false
 }
@@ -529,6 +553,86 @@ func parseBdDepListArgs(args []string) (bdByIDOp, bool) {
 	}
 	if op.ID == "" {
 		return bdByIDOp{}, false
+	}
+	if op.Direction != bdByIDDepDirectionUp && op.Direction != bdByIDDepDirectionDown {
+		return bdByIDOp{}, false
+	}
+	return op, true
+}
+
+// bdByIDDepTreeDefaultMaxDepth is bd's own default tree depth (dep.go registers
+// --max-depth with it), carried here so an unflagged walk cuts in the same place
+// on both arms.
+const bdByIDDepTreeDefaultMaxDepth = 50
+
+// parseBdDepTreeArgs parses the tail of `gc bd dep tree`.
+//
+// It serves the flags whose meaning this walk implements — --direction, its
+// deprecated --reverse spelling, --max-depth (with bd's -d short form) and
+// --json — and rejects the rest rather than accepting them as no-ops.
+// --show-all-paths, --status and --format all change what bd prints, so
+// answering them with the plain walk would report a different question as
+// executed; unrecognized here means the ownership gate refuses them loudly on a
+// class-owned id, which is the honest answer until they are implemented.
+//
+// --direction=both is rejected for the same reason and not because it is hard:
+// bd merges two walks for it, and this arm walks one.
+func parseBdDepTreeArgs(args []string) (bdByIDOp, bool) {
+	op := bdByIDOp{Verb: bdByIDDepTree, MaxDepth: bdByIDDepTreeDefaultMaxDepth}
+	reverse := false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		name, inline, hasInline := strings.Cut(arg, "=")
+		switch name {
+		case "--json":
+			if hasInline {
+				return bdByIDOp{}, false
+			}
+			op.JSON = true
+			continue
+		case "--reverse":
+			if hasInline {
+				return bdByIDOp{}, false
+			}
+			reverse = true
+			continue
+		case "--direction", "--max-depth", "-d":
+			if !hasInline {
+				if i+1 >= len(args) {
+					return bdByIDOp{}, false
+				}
+				i++
+				inline = args[i]
+			}
+			if name == "--direction" {
+				op.Direction = inline
+				continue
+			}
+			depth, err := strconv.Atoi(strings.TrimSpace(inline))
+			if err != nil || depth < 1 {
+				return bdByIDOp{}, false
+			}
+			op.MaxDepth = depth
+			continue
+		}
+		if strings.HasPrefix(arg, "-") {
+			return bdByIDOp{}, false
+		}
+		if op.ID != "" || arg == "" {
+			return bdByIDOp{}, false
+		}
+		op.ID = arg
+	}
+	if op.ID == "" {
+		return bdByIDOp{}, false
+	}
+	// bd's own precedence: an explicit --direction wins, and bare --reverse is
+	// the deprecated spelling of --direction=up.
+	if op.Direction == "" {
+		op.Direction = bdByIDDepDirectionDown
+		if reverse {
+			op.Direction = bdByIDDepDirectionUp
+		}
 	}
 	if op.Direction != bdByIDDepDirectionUp && op.Direction != bdByIDDepDirectionDown {
 		return bdByIDOp{}, false
@@ -824,6 +928,8 @@ func maybeRouteBdByID(cityPath, rigName string, bdArgs []string, stdout, stderr 
 		return doBdByIDReleaseIfCurrent(resolution.Graph, op.ID, op.Assignee, stdout, stderr), true
 	case bdByIDDepList:
 		return doBdByIDDepList(resolution.Graph, op, stdout, stderr), true
+	case bdByIDDepTree:
+		return doBdByIDDepTree(resolution.Graph, resolution.Bead, op, stdout, stderr), true
 	case bdByIDUpdate:
 		return doBdByIDUpdate(resolution.Graph, op, door.bindingName(), stdout, stderr), true
 	case bdByIDClose:
@@ -1245,6 +1351,126 @@ func doBdByIDDepList(graph storebinding.GraphStore, op bdByIDOp, stdout, stderr 
 	}
 	return 0
 }
+
+// bdByIDTreeRow is one node of `bd dep tree --json`: the bead, plus where the
+// walk found it. bd emits a FLAT array in pre-order rather than a nested tree —
+// TreeNode has no children field — and the consumers read it that way, so the
+// shape is kept rather than improved on.
+//
+// TreeParentID is the edge the walk arrived by and is a different fact from the
+// bead's own `parent`, which the embedded record still carries under that name.
+type bdByIDTreeRow struct {
+	beads.Bead
+	Depth          int    `json:"depth"`
+	TreeParentID   string `json:"parent_id"`
+	EdgeFromParent string `json:"edge_from_parent,omitempty"`
+	// Truncated marks a node whose children were cut by --max-depth. bd's own
+	// walker declares the field and never sets it, which reports a silently
+	// shortened subtree as complete; this arm answers it, because a summary that
+	// reads a cut tree as the whole molecule is the wrong-answer class this
+	// surface exists to close.
+	Truncated bool `json:"truncated"`
+	// External marks an edge whose other end is not resident in this class
+	// store, exactly as dep list reports it. Such a node is named but not
+	// walked: crossing to the work store here would be a federated cross-store
+	// read, and dropping the edge would misreport a declared reference.
+	External bool `json:"external,omitempty"`
+}
+
+// doBdByIDDepTree answers the recursive dependency read from the owning class
+// store, walking the same contract dep list reads once.
+//
+// The walk reproduces bd's own semantics deliberately, because the two arms
+// answer the same command and a consumer cannot tell which one served it:
+// pre-order with the root at depth 0, one visit per bead however many paths
+// reach it, `relates-to` edges excluded as loose knowledge-graph links rather
+// than structure, and --max-depth cutting at depth >= max.
+func doBdByIDDepTree(graph storebinding.GraphStore, root beads.Bead, op bdByIDOp, stdout, stderr io.Writer) int {
+	visited := map[string]bool{}
+	rows := []bdByIDTreeRow{}
+
+	// Recursion depth is bounded by op.MaxDepth, which the parser floors at 1.
+	var walk func(bead beads.Bead, depth int, parentID, edge string) error
+	walk = func(bead beads.Bead, depth int, parentID, edge string) error {
+		row := bdByIDTreeRow{Bead: bead, Depth: depth, TreeParentID: parentID, EdgeFromParent: edge}
+		visited[bead.ID] = true
+		deps, err := graph.DepList(bead.ID, op.Direction)
+		if err != nil {
+			return fmt.Errorf("listing %s dependencies of %s: %w", op.Direction, bead.ID, err)
+		}
+		children := make([]beads.Dep, 0, len(deps))
+		for _, dep := range deps {
+			if dep.Type == bdByIDDepTreeLooseEdge {
+				continue
+			}
+			children = append(children, dep)
+		}
+		row.Truncated = len(children) > 0 && depth+1 >= op.MaxDepth
+		rows = append(rows, row)
+		if row.Truncated {
+			return nil
+		}
+		for _, dep := range children {
+			related := dep.DependsOnID
+			if op.Direction == bdByIDDepDirectionUp {
+				related = dep.IssueID
+			}
+			if visited[related] {
+				continue
+			}
+			child, err := graph.Get(related)
+			switch {
+			case err == nil:
+				if err := walk(child, depth+1, bead.ID, dep.Type); err != nil {
+					return err
+				}
+			case errors.Is(err, beads.ErrNotFound):
+				visited[related] = true
+				rows = append(rows, bdByIDTreeRow{
+					Bead:           beads.Bead{ID: related},
+					Depth:          depth + 1,
+					TreeParentID:   bead.ID,
+					EdgeFromParent: dep.Type,
+					External:       true,
+				})
+			default:
+				return fmt.Errorf("reading %s: %w", related, err)
+			}
+		}
+		return nil
+	}
+
+	if err := walk(root, 0, "", ""); err != nil {
+		fmt.Fprintf(stderr, "gc bd dep tree: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if op.JSON {
+		out, err := json.MarshalIndent(rows, "", "  ")
+		if err != nil {
+			fmt.Fprintf(stderr, "gc bd dep tree: rendering %s: %v\n", op.ID, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		fmt.Fprintln(stdout, string(out)) //nolint:errcheck // best-effort stdout
+		return 0
+	}
+	fmt.Fprintf(stderr, "gc bd dep tree: served in process from the class binding\n") //nolint:errcheck // best-effort stderr
+	for _, row := range rows {
+		title := row.Title
+		switch {
+		case row.External:
+			title = "(not resident in this class binding)"
+		case row.Truncated:
+			title += " (children cut by --max-depth)"
+		}
+		fmt.Fprintf(stdout, "%s%s\t%s\t%s\n", strings.Repeat("  ", row.Depth), row.ID, row.Status, title) //nolint:errcheck // best-effort stdout
+	}
+	return 0
+}
+
+// bdByIDDepTreeLooseEdge is the one edge kind bd's tree walker skips: a
+// knowledge-graph link rather than structure, so following it would pull an
+// unrelated bead into a molecule's subtree.
+const bdByIDDepTreeLooseEdge = "relates-to"
 
 // printBdByIDBead renders a routed bead.
 //

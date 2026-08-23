@@ -546,28 +546,31 @@ func TestGcBdListRefusesAGraphClassProjectionOnASplitCity(t *testing.T) {
 // TestGcBdProjectionsAgreeOnAClassTheyCannotSee is the coherence assertion, and
 // it is the reason this fix is not just "one more guarded verb".
 //
-// `gc bd dep tree <gcg id>` and `gc bd list --metadata-field <k>=<gcg id>` are
-// two projections over the same data, asked through the same command, on the
-// same city. Before this change they disagreed about what happens when the class
-// cannot be seen: dep tree refused with exit 1 while list answered `[]` with exit
-// 0. Two failure semantics for one fact is worse than either one alone, because
-// an operator who learned the loud one trusts the quiet one.
+// `gc bd list` and `gc bd search`, both carrying `--metadata-field
+// <k>=<gcg id>`, are two projections over the same data, asked through the same
+// command, on the same city. The failure this pins is disagreement about what
+// happens when the class cannot be seen — one refusing with exit 1 while the
+// other answers `[]` with exit 0. Two failure semantics for one fact is worse
+// than either one alone, because an operator who learned the loud one trusts the
+// quiet one.
 //
 // The assertion is the correspondence, not the wording: BOTH exit non-zero,
 // BOTH name the id namespace that cannot be seen AND the binding it is served
 // from, and NEITHER reaches the ledger that cannot answer. Those three are what
 // an operator needs and what a script can rely on.
 //
-// The two messages are deliberately not compared verbatim, because they are
-// produced by different arms answering different questions and the difference
-// is real: `dep tree` is refused by the by-id door, which knows the exact bead
-// and reports OWNERSHIP of it, while `list` is refused by the dialect guard,
-// which knows only that the query names the namespace and reports that. Pinning
-// identical wording would force one arm to say something it does not know.
+// This pin used to pair `list` against `gc bd dep tree <gcg id>`, whose refusal
+// was the loud arm the quiet one had to be squared with. ga-pxppl squared it the
+// other way: dep tree is now ANSWERED in process from the binding the class is
+// served from, so it is no longer a projection that cannot see the class and has
+// no place in this correspondence. `search` takes its row because it is blind for
+// the same reason `list` is and shares its scan. The coherence claim that spans
+// both outcomes — answer from the owning store, or refuse; never a quiet `[]` —
+// is conformanceProjectionCoherence (I14).
 func TestGcBdProjectionsAgreeOnAClassTheyCannotSee(t *testing.T) {
 	for name, args := range map[string][]string{
-		"dep tree": {"dep", "tree", "gcg-abc123"},
-		"list":     bdListGraphProjection,
+		"list":   bdListGraphProjection,
+		"search": {"search", "--metadata-field", "gc.root_bead_id=gcg-abc123", "--json"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			capture := bdSQLRefusalCity(t, bdSQLRefusalSplitStorage)
@@ -1142,13 +1145,19 @@ func TestBdRelocatedClassGuardCoversEveryFrontierSurface(t *testing.T) {
 // routing anywhere on the path, so following the advice ran the blind read the
 // refusal had just prevented.
 //
-// `dep tree` is still not served in process — this surface implements no tree
-// walk — but servability is no longer what decides where it goes. On a
-// class-owned id it is refused before the subprocess, because bd would answer
-// from the one ledger that cannot hold the bead; on a work id it is forwarded
-// verbatim, because that ledger is exactly the right answerer. Both halves are
-// asserted together: either alone is satisfied by a surface that stopped
-// discriminating.
+// Servability is not what decides where `dep tree` goes, and ga-pxppl is why
+// that distinction had to survive the verb becoming servable. On a class-owned
+// id the walk is now answered in process from the class binding, because bd
+// would answer from the one ledger that cannot hold the bead; on a work id it is
+// still forwarded verbatim, because that ledger is exactly the right answerer.
+// Both halves are asserted together: either alone is satisfied by a surface that
+// stopped discriminating.
+//
+// The class-owned leg's binding is empty, so the routed answer is a genuine
+// absence reported in bd's own shape — the same claim
+// TestGcBdShowNeverReachesBdForAClassOwnedIDOnASplitCity makes for `show`. That
+// the walk itself is correct is pinned separately, against a populated binding,
+// by TestBdByIDServesDepTreeFromTheClassBinding.
 func TestGcBdDepTreeSplitsOnOwnershipNotOnServability(t *testing.T) {
 	t.Run("work id is forwarded verbatim", func(t *testing.T) {
 		args := []string{"dep", "tree", "demo-abc123"}
@@ -1169,7 +1178,7 @@ func TestGcBdDepTreeSplitsOnOwnershipNotOnServability(t *testing.T) {
 		}
 	})
 
-	t.Run("class-owned id is refused", func(t *testing.T) {
+	t.Run("class-owned id is answered in process", func(t *testing.T) {
 		args := []string{"dep", "tree", "gcg-abc123"}
 		capture := bdSQLRefusalCity(t, bdSQLRefusalSplitStorage)
 		resetCLIStorageRoutes(t)
@@ -1177,13 +1186,13 @@ func TestGcBdDepTreeSplitsOnOwnershipNotOnServability(t *testing.T) {
 
 		var stdout, stderr bytes.Buffer
 		if code := doBd(args, &stdout, &stderr); code == 0 {
-			t.Fatalf("doBd(%v) exited 0 for a class-owned id; stdout=%q", args, stdout.String())
+			t.Fatalf("doBd(%v) exited 0 for a class-owned id the binding does not hold; stdout=%q", args, stdout.String())
 		}
 		if data, err := os.ReadFile(capture); err == nil && strings.Contains(string(data), strings.Join(args, " ")) {
 			t.Fatalf("the class-owned dep tree was forwarded to bd: %q", data)
 		}
-		if !strings.Contains(stderr.String(), "gc bd dep tree") {
-			t.Errorf("the refusal does not name the command the operator ran; stderr=%q", stderr.String())
+		if !strings.Contains(stderr.String(), "gcg-abc123") {
+			t.Errorf("the answer does not name the bead; stderr=%q", stderr.String())
 		}
 	})
 }
