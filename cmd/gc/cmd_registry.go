@@ -733,6 +733,12 @@ func (rt *registryProviderReauthRoundTripper) RoundTrip(req *http.Request) (*htt
 		if ctxErr := req.Context().Err(); ctxErr != nil {
 			return nil, fmt.Errorf("refreshing registry credential after 401: %w", ctxErr)
 		}
+		if errors.Is(err, context.Canceled) {
+			return nil, fmt.Errorf("refreshing registry credential after 401: %w", context.Canceled)
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, fmt.Errorf("refreshing registry credential after 401: %w", context.DeadlineExceeded)
+		}
 		return nil, errors.New("refreshing registry credential after 401: credential refresh failed")
 	}
 	token = strings.TrimSpace(token)

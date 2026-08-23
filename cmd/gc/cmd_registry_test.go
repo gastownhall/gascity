@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1038,6 +1039,50 @@ func TestRegistryProviderReauthRoundTripperRefreshHonorsCancellation(t *testing.
 			}
 			if requests != 1 {
 				t.Fatalf("requests = %d, want no replay after cancellation", requests)
+			}
+		})
+	}
+}
+
+func TestRegistryProviderReauthRoundTripperRefreshPreservesHelperContext(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		want error
+	}{
+		{name: "canceled", want: context.Canceled},
+		{name: "deadline exceeded", want: context.DeadlineExceeded},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			requests := 0
+			rt := &registryProviderReauthRoundTripper{
+				base: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+					requests++
+					return &http.Response{
+						StatusCode: http.StatusUnauthorized,
+						Header:     make(http.Header),
+						Body:       io.NopCloser(strings.NewReader(`{}`)),
+						Request:    r,
+					}, nil
+				}),
+				refresh: func(context.Context, bool) (string, error) {
+					return "", fmt.Errorf("credential helper stderr bearer=super-secret: %w", tt.want)
+				},
+			}
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://registry.example/api/publish-requests", bytes.NewReader([]byte("payload")))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Authorization", "Bearer initial")
+
+			resp, err := rt.RoundTrip(req)
+			if resp != nil || !errors.Is(err, tt.want) {
+				t.Fatalf("response=%v error=%v, want nil response and %v", resp, err, tt.want)
+			}
+			if strings.Contains(err.Error(), "super-secret") || strings.Contains(err.Error(), "stderr") {
+				t.Fatalf("refresh error leaked credential-helper output: %q", err)
+			}
+			if requests != 1 {
+				t.Fatalf("requests = %d, want no replay after helper cancellation", requests)
 			}
 		})
 	}

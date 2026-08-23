@@ -15,7 +15,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -86,7 +85,7 @@ type CredentialSource struct {
 	now    func() time.Time
 	runner runFunc
 
-	mu        sync.Mutex
+	gate      chan struct{}
 	token     string
 	expiresAt time.Time
 }
@@ -106,6 +105,8 @@ func NewCredentialSource(command, serverURL, city string, interactive bool) (*Cr
 	if interactive {
 		timeout = interactiveCredentialHelperTimeout
 	}
+	gate := make(chan struct{}, 1)
+	gate <- struct{}{}
 	return &CredentialSource{
 		command:       command,
 		serverURL:     serverURL,
@@ -114,6 +115,7 @@ func NewCredentialSource(command, serverURL, city string, interactive bool) (*Cr
 		helperTimeout: timeout,
 		now:           time.Now,
 		runner:        runCredentialCommand,
+		gate:          gate,
 	}, nil
 }
 
@@ -121,8 +123,8 @@ func NewCredentialSource(command, serverURL, city string, interactive bool) (*Cr
 // otherwise mints a fresh one. Call it before every request and every SSE
 // (re)connect.
 func (s *CredentialSource) Token() (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.lock()
+	defer s.unlock()
 	if s.token != "" && s.now().Add(expirySkew).Before(s.expiresAt) {
 		return s.token, nil
 	}
@@ -132,7 +134,9 @@ func (s *CredentialSource) Token() (string, error) {
 // Refresh mints a fresh token regardless of cache state. Use it to re-invoke the
 // credential command after a 401 (the server rejected the presented token).
 func (s *CredentialSource) Refresh() (string, error) {
-	return s.RefreshContext(context.Background())
+	s.lock()
+	defer s.unlock()
+	return s.mintLocked(context.Background())
 }
 
 // RefreshContext mints a fresh token regardless of cache state and bounds the
@@ -141,9 +145,35 @@ func (s *CredentialSource) RefreshContext(ctx context.Context) (string, error) {
 	if ctx == nil {
 		return "", errors.New("clientauth: credential context is nil")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if err := s.lockContext(ctx); err != nil {
+		return "", err
+	}
+	defer s.unlock()
 	return s.mintLocked(ctx)
+}
+
+func (s *CredentialSource) lock() {
+	<-s.gate
+}
+
+func (s *CredentialSource) lockContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.gate:
+		if err := ctx.Err(); err != nil {
+			s.unlock()
+			return err
+		}
+		return nil
+	}
+}
+
+func (s *CredentialSource) unlock() {
+	s.gate <- struct{}{}
 }
 
 func (s *CredentialSource) mintLocked(ctx context.Context) (string, error) {

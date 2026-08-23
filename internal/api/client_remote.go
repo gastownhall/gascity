@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -323,6 +324,12 @@ func (rt *reauthRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 		if ctxErr := req.Context().Err(); ctxErr != nil {
 			return nil, fmt.Errorf("refreshing bearer after 401: %w", ctxErr)
 		}
+		if errors.Is(rerr, context.Canceled) {
+			return nil, fmt.Errorf("refreshing bearer after 401: %w", context.Canceled)
+		}
+		if errors.Is(rerr, context.DeadlineExceeded) {
+			return nil, fmt.Errorf("refreshing bearer after 401: %w", context.DeadlineExceeded)
+		}
 		// Refresh sources may execute credential helpers whose errors include
 		// stderr. Keep helper diagnostics out of this public transport error.
 		return nil, fmt.Errorf("refreshing bearer after 401: credential refresh failed")
@@ -352,19 +359,11 @@ func hasBearerAuthorization(value string) bool {
 }
 
 func isSSERequest(req *http.Request) bool {
-	// The generated StreamEvents request intentionally has no Accept header.
-	// Keep its exact route non-replayable even when a 401 arrives before a
-	// server can establish the SSE response.
-	if req.Method == http.MethodGet && req.URL != nil {
-		const prefix = "/v0/city/"
-		const suffix = "/events/stream"
-		path := req.URL.Path
-		if strings.HasPrefix(path, prefix) && strings.HasSuffix(path, suffix) {
-			cityName := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
-			if cityName != "" && !strings.Contains(cityName, "/") {
-				return true
-			}
-		}
+	// Generated SSE requests intentionally have no Accept header. Keep only
+	// their exact route shapes non-replayable; generic "stream" paths remain
+	// eligible for the normal safe-REST retry policy.
+	if req.Method == http.MethodGet && req.URL != nil && isGeneratedSSEPath(req.URL.EscapedPath()) {
+		return true
 	}
 	for _, value := range req.Header.Values("Accept") {
 		for _, mediaType := range strings.Split(value, ",") {
@@ -374,6 +373,37 @@ func isSSERequest(req *http.Request) bool {
 		}
 	}
 	return false
+}
+
+func isGeneratedSSEPath(path string) bool {
+	segments := strings.Split(path, "/")
+	nonEmpty := func(indexes ...int) bool {
+		for _, index := range indexes {
+			if segments[index] == "" {
+				return false
+			}
+		}
+		return true
+	}
+
+	switch len(segments) {
+	case 4: // /v0/events/stream
+		return segments[0] == "" && segments[1] == "v0" && segments[2] == "events" && segments[3] == "stream"
+	case 6: // /v0/city/{city}/events/stream
+		return segments[0] == "" && segments[1] == "v0" && segments[2] == "city" &&
+			nonEmpty(3) && segments[4] == "events" && segments[5] == "stream"
+	case 7: // /v0/city/{city}/session/{id}/stream
+		return segments[0] == "" && segments[1] == "v0" && segments[2] == "city" &&
+			nonEmpty(3, 5) && segments[4] == "session" && segments[6] == "stream"
+	case 8: // /v0/city/{city}/agent/{base}/output/stream
+		return segments[0] == "" && segments[1] == "v0" && segments[2] == "city" &&
+			nonEmpty(3, 5) && segments[4] == "agent" && segments[6] == "output" && segments[7] == "stream"
+	case 9: // /v0/city/{city}/agent/{dir}/{base}/output/stream
+		return segments[0] == "" && segments[1] == "v0" && segments[2] == "city" &&
+			nonEmpty(3, 5, 6) && segments[4] == "agent" && segments[7] == "output" && segments[8] == "stream"
+	default:
+		return false
+	}
 }
 
 // remoteTLSConfig builds the client TLS config from the options: a custom CA
