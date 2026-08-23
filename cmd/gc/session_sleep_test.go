@@ -205,7 +205,9 @@ func TestReconcileDetachedAtUsesRoutedSleepCapability(t *testing.T) {
 		t.Fatalf("policy capability = %q, want %q", policy.Capability, runtime.SessionSleepCapabilityFull)
 	}
 
-	reconcileDetachedAtInfo(sessiontest.SeedBead(t, session), store, policy, true, provider, &clock.Fake{Time: now})
+	if _, err := reconcileDetachedAtInfo(sessiontest.SeedBead(t, session), store, policy, true, provider, &clock.Fake{Time: now}); err != nil {
+		t.Fatalf("reconcileDetachedAtInfo: %v", err)
+	}
 
 	got, err := store.Get(session.ID)
 	if err != nil {

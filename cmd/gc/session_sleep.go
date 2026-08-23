@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -166,70 +168,83 @@ func reconcileDetachedAtInfo(
 	alive bool,
 	sp runtime.Provider,
 	clk clock.Clock,
-) map[string]string {
+) (map[string]string, error) {
 	if store == nil {
-		return nil
+		return nil, nil
 	}
 	if policy.Class == config.SessionSleepNonInteractive || !policy.enabled() || sp == nil || !alive || policy.Capability != runtime.SessionSleepCapabilityFull {
 		if info.DetachedAt != "" {
 			if err := sessionFrontDoor(store).SetMarker(info.ID, "detached_at", ""); err != nil {
 				log.Printf("session sleep: clearing detached_at for %s: %v", info.ID, err)
 			} else {
-				return map[string]string{"detached_at": ""}
+				return map[string]string{"detached_at": ""}, nil
 			}
 		}
-		return nil
+		return nil, nil
 	}
 	name := info.SessionNameMetadata
 	if name == "" {
-		return nil
+		return nil, nil
 	}
 	attached, err := workerSessionTargetAttachedWithConfig("", store, sp, nil, info.ID)
-	if err == nil && attached {
+	if errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		return nil, fmt.Errorf("observe attachment for %q: %w", name, err)
+	}
+	attached = attached && err == nil
+	if attached {
 		if info.DetachedAt != "" {
 			if err := sessionFrontDoor(store).SetMarker(info.ID, "detached_at", ""); err != nil {
 				log.Printf("session sleep: clearing detached_at for %s: %v", info.ID, err)
 			} else {
-				return map[string]string{"detached_at": ""}
+				return map[string]string{"detached_at": ""}, nil
 			}
 		}
-		return nil
+		return nil, nil
 	}
 	if info.DetachedAt == "" {
 		ts := clk.Now().UTC().Format(time.RFC3339)
 		if err := sessionFrontDoor(store).SetMarker(info.ID, "detached_at", ts); err != nil {
 			log.Printf("session sleep: setting detached_at for %s: %v", info.ID, err)
 		} else {
-			return map[string]string{"detached_at": ts}
+			return map[string]string{"detached_at": ts}, nil
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 // sessionIdleReferenceInfo reads detached_at off Info.DetachedAt (raw RFC3339)
 // and the session name off Info.SessionNameMetadata (raw), and keeps the runtime
 // last-activity probe (workerSessionTargetLastActivityWithConfig) as-is (§7 live edge).
-func sessionIdleReferenceInfo(info sessionpkg.Info, sp runtime.Provider) time.Time {
+func sessionIdleReferenceInfoWithError(info sessionpkg.Info, sp runtime.Provider) (time.Time, error) {
 	var detachedAt time.Time
 	if raw := info.DetachedAt; raw != "" {
 		detachedAt, _ = time.Parse(time.RFC3339, raw)
 	}
 	lastActivity := time.Time{}
 	if sp != nil {
-		if activity, err := workerSessionTargetLastActivityWithConfig("", nil, sp, nil, info.SessionNameMetadata); err == nil {
+		activity, err := workerSessionTargetLastActivityWithConfig("", nil, sp, nil, info.SessionNameMetadata)
+		if errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			return time.Time{}, fmt.Errorf("observe last activity for %q: %w", info.SessionNameMetadata, err)
+		}
+		if err == nil {
 			lastActivity = activity
 		}
 	}
 	switch {
 	case detachedAt.IsZero():
-		return lastActivity
+		return lastActivity, nil
 	case lastActivity.IsZero():
-		return detachedAt
+		return detachedAt, nil
 	case lastActivity.After(detachedAt):
-		return lastActivity
+		return lastActivity, nil
 	default:
-		return detachedAt
+		return detachedAt, nil
 	}
+}
+
+func sessionIdleReferenceInfo(info sessionpkg.Info, sp runtime.Provider) time.Time {
+	idleReference, _ := sessionIdleReferenceInfoWithError(info, sp)
+	return idleReference
 }
 
 // configWakeSuppressedInfo is the session.Info sibling of configWakeSuppressed.
@@ -243,25 +258,38 @@ func configWakeSuppressedInfo(
 	sp runtime.Provider,
 	clk clock.Clock,
 ) bool {
+	suppressed, _ := configWakeSuppressedInfoWithError(info, policy, sp, clk)
+	return suppressed
+}
+
+func configWakeSuppressedInfoWithError(
+	info sessionpkg.Info,
+	policy resolvedSessionSleepPolicy,
+	sp runtime.Provider,
+	clk clock.Clock,
+) (bool, error) {
 	if !policy.enabled() {
-		return false
+		return false, nil
 	}
 	if info.SleepReason == string(sessionpkg.SleepReasonIdleTimeout) {
-		return false
+		return false, nil
 	}
 	if info.SleepReason == string(sessionpkg.SleepReasonIdle) &&
 		info.SleepPolicyFingerprint != "" &&
 		info.SleepPolicyFingerprint == policy.Fingerprint {
-		return true
+		return true, nil
 	}
 	if policy.Duration == 0 {
-		return true
+		return true, nil
 	}
-	idleReference := sessionIdleReferenceInfo(info, sp)
+	idleReference, err := sessionIdleReferenceInfoWithError(info, sp)
+	if err != nil {
+		return false, err
+	}
 	if idleReference.IsZero() {
-		return false
+		return false, nil
 	}
-	return !clk.Now().Before(idleReference.Add(policy.Duration))
+	return !clk.Now().Before(idleReference.Add(policy.Duration)), nil
 }
 
 // sessionKeepWarmEligibleInfo routes the idle-reference read through
