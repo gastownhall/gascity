@@ -26,7 +26,19 @@ a:openSourceWorkflowStores	(^|[^A-Za-z0-9_])openSourceWorkflowStores\(
 a:convoyStoreCandidates	(^|[^A-Za-z0-9_])convoyStoreCandidates\(
 # (b) direct binding-gate re-derivation. Asking "is this class relocated" a
 #     second time is how the split-store bug class reproduces (#5125, #5127).
+#
+#     cliSoleClassBinding is the SANCTIONED accessor for the callers that answer
+#     every reserved prefix out of one store, and it is ratcheted for the same
+#     reason storeref.EachLeg is: sanctioned is not free. Each call site is a
+#     surface asserting "this city serves all five infrastructure classes from
+#     one binding, and I am about to act on that" — the condition the accessor
+#     checks and refuses a fan-out for. Two are baselined today (the `gc bd`
+#     by-id front door and the claim-time class route). A third is a reviewed
+#     baseline change, because the review that matters is not whether the
+#     accessor was called correctly but whether that surface should be routing
+#     class-reserved ids at all.
 b:graphClassBinding	(^|[^A-Za-z0-9_])graphClassBinding\(
+b:cliSoleClassBinding	(^|[^A-Za-z0-9_])cliSoleClassBinding\(
 b:routes.storeFor	(^|[^A-Za-z0-9_])routes\.storeFor\(
 b:storeref.ClassCandidates	(^|[^A-Za-z0-9_])storeref\.ClassCandidates\(
 # (c) hand-rolled probe lists and plan disassembly. The executor
