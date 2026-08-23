@@ -783,6 +783,8 @@ func TestReauthRoundTripperRejectsEmptyRefreshedCredential(t *testing.T) {
 }
 
 func TestReauthRoundTripperReturnsBodyRecreationFailure(t *testing.T) {
+	const secretMarker = "body-recreation-super-secret"
+
 	firstBody := &closeTrackingBody{Reader: strings.NewReader("rejected")}
 	baseCalls, refreshes := 0, 0
 	rt := &reauthRoundTripper{
@@ -796,11 +798,14 @@ func TestReauthRoundTripperReturnsBodyRecreationFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.GetBody = func() (io.ReadCloser, error) { return nil, errors.New("body recreation failed") }
+	req.GetBody = func() (io.ReadCloser, error) { return nil, errors.New("body recreation failed: " + secretMarker) }
 	req.Header.Set("Authorization", "Bearer stale")
 	resp, err := rt.RoundTrip(req)
-	if resp != nil || err == nil || !strings.Contains(err.Error(), "body recreation failed") {
-		t.Fatalf("response=%v error=%v, want body recreation failure", resp, err)
+	if resp != nil || err == nil || err.Error() != "replaying request after bearer refresh: request body recreation failed" {
+		t.Fatalf("response=%v error=%v, want sanitized body recreation failure", resp, err)
+	}
+	if strings.Contains(err.Error(), secretMarker) {
+		t.Fatalf("body recreation error leaked request material: %q", err)
 	}
 	if baseCalls != 1 || refreshes != 1 || !firstBody.closed {
 		t.Fatalf("calls=%d refreshes=%d body closed=%v, want 1, 1, true", baseCalls, refreshes, firstBody.closed)

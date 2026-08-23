@@ -346,7 +346,7 @@ func (rt *reauthRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 		body, gerr := req.GetBody()
 		if gerr != nil {
 			_ = resp.Body.Close()
-			return nil, fmt.Errorf("replaying request after bearer refresh: %w", gerr)
+			return nil, errors.New("replaying request after bearer refresh: request body recreation failed")
 		}
 		retry.Body = body
 	}
