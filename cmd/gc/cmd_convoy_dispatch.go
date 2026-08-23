@@ -700,17 +700,19 @@ func controlGraphRelocated(cityPath, storePath string) bool {
 // the standing refusal — so federating it would turn a city-level storage
 // misconfiguration into a hard scan error on EVERY rig dispatcher, and a scan
 // error is fatal to the drain loop, so all rig control dispatch would crash-loop
-// on a city that is otherwise still serving work. classRoutedStoreForID states
-// the governing rule for exactly this error: a standing refusal "is a fact about
-// the city and none about a particular bead — and a refused city still serves
-// WORK from its work ledger." A rig's own control beads are that case, so the
-// refusal establishes nothing about them and its own store still answers. The
+// on a city that is otherwise still serving work. cliByIDOwner states the
+// governing rule for exactly this error: the standing refusal "is a verdict
+// about a CITY's storage configuration and says nothing about a bead, and a
+// refused city still serves WORK from its work ledger." A rig's own control
+// beads are that case, so the refusal establishes nothing about them and its
+// own store still answers. The
 // beads the skipped leg would have carried belong to a graph plane that is down
 // by this build's own verdict, already reported by the boot gate, and equally
 // unreachable to the CITY dispatcher.
 //
-// The identity gate the sibling surfaces apply (relocatedGraphLegFrom, and
-// classRoutedStoreForID's `class == work`) is deliberately not restated here:
+// The identity gate the sibling surfaces apply (relocatedGraphLegFrom's
+// `binding == cityStore`, and storeref's own dedupeLegs, which folds a binding
+// that IS the caller's work store into one probed leg) is not restated here:
 // this arm runs only for a RIG scope, whose store is that rig's own bd/Dolt
 // handle and never the city's binding, and the scan-side caller holds no store
 // handle to compare against at all — it shells `bd` for its scope leg.

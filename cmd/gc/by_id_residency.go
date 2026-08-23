@@ -111,7 +111,7 @@ func cliByIDPlan(cityPath, id string, work beads.Store) (storeref.ResolvedPlan, 
 // row it already read; ok=false is "no binding answered, run your own scan",
 // and the caller then does exactly what it did before.
 func cliByIDBindingOwner(cityPath, id string) (storeref.Owner, bool, error) {
-	owner, err := cliByIDOwner(cityPath, id, unprobedWorkResidual{})
+	owner, err := cliByIDOwner(cityPath, id, newUnprobedWorkResidual())
 	if err != nil {
 		return storeref.Owner{}, false, err
 	}
@@ -139,9 +139,32 @@ func beadForOwner(owner storeref.Owner, id string) (beads.Bead, error) {
 // resolver that started probing the residual would otherwise turn "the caller
 // runs its own scan" into "the bead is absent", silently, on every convoy
 // command of every relocated city.
-type unprobedWorkResidual struct{ beads.Store }
+//
+// It refuses through a WHOLE beads.Store rather than an embedded nil one, for
+// the reason refusedClassStore already carries: a nil embedded interface makes
+// every method this file does not override a nil-pointer panic naming a line of
+// runtime.go, and the one method that must never be reached is exactly the one
+// least likely to be the first a future leg role calls. Get is overridden only
+// to name the id in the message; every other operation reports the same
+// violation.
+type unprobedWorkResidual struct{ refusedClassStore }
 
-// Get reports the contract violation described on the type.
+// errWorkResidualProbed is what every residual operation but Get reports.
+var errWorkResidualProbed = errors.New("internal: the by-id work residual was operated on; it is a placeholder for a work axis this surface runs itself")
+
+// newUnprobedWorkResidual builds the sentinel with its refusal armed.
+//
+// The zero value would embed a refusedClassStore with a nil error, and a
+// refusing store that returns nil is worse than one that panics: List would
+// answer "no beads" and the caller would read the residual as absence, which is
+// the exact confusion this type exists to prevent. Both construction sites go
+// through here so no zero value is ever in play.
+func newUnprobedWorkResidual() unprobedWorkResidual {
+	return unprobedWorkResidual{refusedClassStore{err: errWorkResidualProbed}}
+}
+
+// Get reports the contract violation described on the type, naming the id the
+// resolver reached for.
 func (unprobedWorkResidual) Get(id string) (beads.Bead, error) {
-	return beads.Bead{}, fmt.Errorf("internal: the by-id work residual was probed for %s; it is a placeholder for a work axis this surface runs itself", id)
+	return beads.Bead{}, fmt.Errorf("%w: probed for %s", errWorkResidualProbed, id)
 }

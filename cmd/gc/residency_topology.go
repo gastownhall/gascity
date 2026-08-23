@@ -267,6 +267,17 @@ func cliResidencyBindings(cityPath string) ([]storeref.ClassBinding, error) {
 	if existing, raced := cliResidencyBindingsByCity[key]; raced {
 		return existing.bindings, existing.refused
 	}
+	// A nil map HERE is not the cold start the first section handles — that
+	// section made it non-nil before this goroutine ever left the lock. It means
+	// resetCLIResidencyBindings ran while this derivation was in flight, which
+	// happens on the shutdown path of a long-lived `gc start`. Storing anyway
+	// would do two wrong things at once: assign into a nil map, which panics the
+	// process during its own teardown, and re-populate a retired memo with
+	// bindings over stores closeCLIStorageRoutes has already closed. The answer
+	// is still correct for THIS caller, so it is returned unmemoized.
+	if cliResidencyBindingsByCity == nil {
+		return bindings, refused
+	}
 	cliResidencyBindingsByCity[key] = &cliResidencyBindingsEntry{bindings: bindings, refused: refused}
 	return bindings, refused
 }
@@ -363,14 +374,25 @@ func dropCLIResidencyBindings(key string) {
 // # Why a map keyed by beads.Store is safe HERE and is not in the resolver
 //
 // storeref.dedupeLegs cannot key a map on a store — beads.Store is an interface,
-// and an implementation whose dynamic type carries a slice is neither hashable
-// nor ==-able, so a caller's store panics it. This map is confined to the
-// CONSTRUCTORS: every value in it comes from routes.storeFor, which returns what
-// storage boot opened — a *SQLiteStore, a *BdStore, a *CachingStore or a
-// refusedClassStore, all pointer-typed and therefore reference-identified. Same
-// confinement for relocatedGraphLegFrom's `binding == cityStore`. A route that
-// ever yields a value-typed store makes both of these the resolver's bug, one
-// file over; reuse storeref's identity-based set at that point.
+// and an implementation whose dynamic type carries a slice, a map or a func is
+// neither hashable nor ==-able, so a caller's store panics it. This map is
+// confined to the CONSTRUCTORS: every value in it comes from routes.storeFor,
+// which returns what storage boot opened — *SQLiteStore, *BdStore and
+// *CachingStore, all pointer-typed and so reference-identified, plus
+// refusedClassStore, which is a value carrying one error field.
+//
+// That last one is comparable rather than reference-identified, and the
+// difference is visible: two refusedClassStore values built from the SAME error
+// compare equal, so a refused city's five classes group into one binding even
+// though storeFor handed back five separate values. That is the answer this
+// build wants — a refused city is refused as a whole, and cliSoleClassBinding
+// reports one binding for it rather than a five-way fan-out — but it is a
+// property of the type being comparable, not of the map being identity-keyed,
+// and a second value-typed route with a differing field would group differently
+// for the same reason. Same confinement for relocatedGraphLegFrom's
+// `binding == cityStore`. A route that ever yields a NON-comparable store makes
+// both of these the resolver's bug, one file over; reuse storeref's
+// identity-based set at that point.
 func residencyBindingsFromRoutes(routes *storageRoutes) ([]storeref.ClassBinding, error) {
 	byStore := map[beads.Store][]coordclass.Class{}
 	var order []beads.Store
