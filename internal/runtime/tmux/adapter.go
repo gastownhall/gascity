@@ -1007,52 +1007,67 @@ func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[
 		if ctxErr := context.Cause(runCtx); ctxErr != nil && runCtx.Err() != nil {
 			err = fmt.Errorf("%w: %w", ctxErr, err)
 		}
-		return setupCommandFailure(err, stdout, stderr)
+		return setupCommandFailure(err, stdout, stderr, runtime.SetupCommandSecrets(env))
 	}
 	return nil
 }
 
+// commandOutputTail reports only the last limit bytes written, but retains
+// [runtime.OutputTailRetention] bytes, so redaction sees a whole value before
+// the reported window is cut out of it.
 type commandOutputTail struct {
 	limit   int
+	retain  int
 	written int
 	buf     []byte
 }
 
 func newCommandOutputTail(limit int) *commandOutputTail {
-	return &commandOutputTail{limit: limit}
+	return &commandOutputTail{limit: limit, retain: runtime.OutputTailRetention(limit)}
 }
 
 func (b *commandOutputTail) Write(p []byte) (int, error) {
 	b.written += len(p)
-	if b.limit <= 0 {
+	if b.retain <= 0 {
 		return len(p), nil
 	}
-	if len(p) >= b.limit {
-		b.buf = append(b.buf[:0], p[len(p)-b.limit:]...)
+	if len(p) >= b.retain {
+		b.buf = append(b.buf[:0], p[len(p)-b.retain:]...)
 		return len(p), nil
 	}
 	b.buf = append(b.buf, p...)
-	if len(b.buf) > b.limit {
-		copy(b.buf, b.buf[len(b.buf)-b.limit:])
-		b.buf = b.buf[:b.limit]
+	if len(b.buf) > b.retain {
+		copy(b.buf, b.buf[len(b.buf)-b.retain:])
+		b.buf = b.buf[:b.retain]
 	}
 	return len(p), nil
 }
 
-func (b *commandOutputTail) Detail(label string) string {
-	text := strings.TrimSpace(string(b.buf))
+// Detail renders the tail with secrets scrubbed. Redaction is this type's job
+// rather than the caller's because only it knows the retained buffer is wider
+// than the window it reports, and [runtime.RedactSecretsTail] has to see the
+// wider one.
+func (b *commandOutputTail) Detail(label string, secrets []string) string {
+	text, trimmed := runtime.RedactSecretsTail(string(b.buf), b.limit, secrets)
+	text = strings.TrimSpace(text)
 	if text == "" {
 		return ""
 	}
-	if b.written > len(b.buf) {
+	if trimmed || b.written > len(b.buf) {
 		text = "... " + text
 	}
 	return label + ": " + text
 }
 
-func setupCommandFailure(err error, stdout, stderr *commandOutputTail) error {
-	stderrDetail := stderr.Detail("stderr")
-	stdoutDetail := stdout.Detail("stdout")
+// setupCommandFailure folds a bounded tail of both streams into the failure.
+// The tails are scrubbed against [runtime.SetupCommandSecrets] because this
+// error is durable — it reaches logs, the event bus and bead notes — and a
+// setup command echoing a credential it was handed (a `set -x` trace, a failing
+// curl printing its header) would otherwise park that credential there
+// permanently.
+func setupCommandFailure(err error, stdout, stderr *commandOutputTail, secrets []string) error {
+	stderrDetail := stderr.Detail("stderr", secrets)
+	stdoutDetail := stdout.Detail("stdout", secrets)
 	switch {
 	case stderrDetail != "" && stdoutDetail != "":
 		return fmt.Errorf("%w; %s; %s", err, stderrDetail, stdoutDetail)

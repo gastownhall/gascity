@@ -33,7 +33,12 @@ var envArgvSafe = map[string]bool{
 	"TERM":        true,
 	"TZ":          true,
 
-	// City, rig, and agent identity.
+	// City, rig, and agent identity. BEADS_ACTOR carries the same identity
+	// string as GC_AGENT (session.RuntimeEnvWithSessionContext sets both from
+	// AssigneeIdentifier), so listing one and not the other would route an
+	// already-public value through the private-file path and blank it out of
+	// diagnostics for nothing.
+	"BEADS_ACTOR":      true,
 	"GC_AGENT":         true,
 	"GC_ALIAS":         true,
 	"GC_CITY":          true,

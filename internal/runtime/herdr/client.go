@@ -72,36 +72,43 @@ type envelope struct {
 // run executes `herdr --session <session> <args…>` and returns the result
 // payload, or an error (transport failure or herdr-reported error).
 //
-// It carries no secrets: verbs that put credential material in their argv use
-// [client.runWithSecrets] and name what they put there.
+// Its errors are scrubbed of anything this client's flag grammar can identify;
+// see redaction.go. An argv carrying a credential anywhere else needs
+// [client.runWithSecrets].
 func (c *client) run(ctx context.Context, args ...string) (json.RawMessage, error) {
 	return c.runWithSecrets(ctx, nil, args...)
 }
 
-// runWithSecrets is run for an argv carrying values that must not reach error
-// text. secrets comes from whoever built the argv — see argv_redaction.go for
-// why it is never recovered from args.
-func (c *client) runWithSecrets(ctx context.Context, secrets []string, args ...string) (json.RawMessage, error) {
+// runWithSecrets is run for an argv carrying a credential the grammar cannot
+// find. declared comes from whoever built the argv; see redaction.go.
+func (c *client) runWithSecrets(ctx context.Context, declared []string, args ...string) (json.RawMessage, error) {
 	full := append([]string{"--session", c.session}, args...)
 	out, err := exec.CommandContext(ctx, c.bin, full...).Output()
 	if err != nil {
+		safe, secrets := redactedArgv(args, declared)
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
-			return nil, fmt.Errorf("herdr %v: %s", redactArgs(args, secrets), redactText(string(ee.Stderr), secrets))
+			return nil, fmt.Errorf("herdr %v: %s", safe, redactText(string(ee.Stderr), secrets))
 		}
 		// err here is exec's own (*exec.Error, *exec.ExitError): it carries the
 		// binary name and a status, never anything from args.
-		return nil, fmt.Errorf("herdr %v: %w", redactArgs(args, secrets), err)
+		return nil, fmt.Errorf("herdr %v: %w", safe, err)
 	}
 	if len(strings.TrimSpace(string(out))) == 0 {
 		return nil, nil // success with no payload (e.g. pane send-keys / pane run)
 	}
 	var env envelope
 	if err := json.Unmarshal(out, &env); err != nil {
-		return nil, fmt.Errorf("herdr %v: decode response: %w", redactArgs(args, secrets), err)
+		// The secrets are dropped deliberately: a json.SyntaxError carries an
+		// offset and at most one byte of herdr's stdout, and an
+		// UnmarshalTypeError carries type names, so there is nothing here to
+		// scrub. Do not "fix" this either direction without changing that.
+		safe, _ := redactedArgv(args, declared)
+		return nil, fmt.Errorf("herdr %v: decode response: %w", safe, err)
 	}
 	if env.Error != nil {
-		return nil, fmt.Errorf("herdr %v: %w", redactArgs(args, secrets), env.Error.redacted(secrets))
+		safe, secrets := redactedArgv(args, declared)
+		return nil, fmt.Errorf("herdr %v: %w", safe, env.Error.redacted(secrets))
 	}
 	return env.Result, nil
 }
@@ -207,28 +214,28 @@ func (c *client) paneRead(ctx context.Context, paneID, source string, lines int)
 // JSON envelope (0.7.5 `pane read`). Failures still arrive as an envelope on
 // stdout or as stderr text, so an output that decodes to an envelope carrying
 // an error is surfaced as that error; anything else is returned verbatim.
+//
+// It takes no declared secrets: no raw verb carries one outside an `--env`
+// pair, which redaction.go finds on its own. Give it one and this needs the
+// [client.runWithSecrets] treatment.
 func (c *client) runRaw(ctx context.Context, args ...string) (string, error) {
-	return c.runRawWithSecrets(ctx, nil, args...)
-}
-
-// runRawWithSecrets is runRaw for an argv carrying values that must not reach
-// error text. See [client.runWithSecrets].
-func (c *client) runRawWithSecrets(ctx context.Context, secrets []string, args ...string) (string, error) {
 	full := append([]string{"--session", c.session}, args...)
 	out, err := exec.CommandContext(ctx, c.bin, full...).Output()
 	if err != nil {
+		safe, secrets := redactedArgv(args, nil)
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
-			return "", fmt.Errorf("herdr %v: %s", redactArgs(args, secrets), redactText(string(ee.Stderr), secrets))
+			return "", fmt.Errorf("herdr %v: %s", safe, redactText(string(ee.Stderr), secrets))
 		}
 		// See run: exec's own error carries the binary name and a status only.
-		return "", fmt.Errorf("herdr %v: %w", redactArgs(args, secrets), err)
+		return "", fmt.Errorf("herdr %v: %w", safe, err)
 	}
 	trimmed := strings.TrimSpace(string(out))
 	if strings.HasPrefix(trimmed, "{") {
 		var env envelope
 		if jerr := json.Unmarshal([]byte(trimmed), &env); jerr == nil && env.Error != nil {
-			return "", fmt.Errorf("herdr %v: %w", redactArgs(args, secrets), env.Error.redacted(secrets))
+			safe, secrets := redactedArgv(args, nil)
+			return "", fmt.Errorf("herdr %v: %w", safe, env.Error.redacted(secrets))
 		}
 	}
 	return string(out), nil
@@ -285,9 +292,11 @@ func (c *client) paneRun(ctx context.Context, paneID, command string) error {
 // sits somewhere only a shell parser could find — after an `env` wrapper, past
 // a `&&`, inside a nested `sh -c`, spelled with quotes that keep the value from
 // matching its own rendering. Rather than guess at that structure, the whole
-// operand is withheld from error text. The error still names the verb, the
-// pane and herdr's own complaint; the command it was asked to run is in the
-// session's config.
+// operand is declared and so withheld from error text — down to the floor
+// [runtime.RedactSecrets] substitutes above, below which a shell command is too
+// short to hold a credential. The error still names the verb, the pane and
+// herdr's own complaint; the command it was asked to run is in the session's
+// config.
 func (c *client) paneRunCommand(ctx context.Context, paneID, command string) error {
 	_, err := c.runWithSecrets(ctx, []string{command}, "pane", "run", paneID, command)
 	return err
@@ -529,7 +538,7 @@ func (c *client) workspaceCreate(ctx context.Context, label, cwd string, env map
 	for k, v := range env {
 		args = append(args, "--env", k+"="+v)
 	}
-	res, err := c.runWithSecrets(ctx, secretEnvValues(env), args...)
+	res, err := c.run(ctx, args...)
 	if err != nil {
 		return "", "", err
 	}
@@ -573,7 +582,7 @@ func (c *client) tabCreate(ctx context.Context, wsID, label, cwd string, env map
 	for k, v := range env {
 		args = append(args, "--env", k+"="+v)
 	}
-	res, err := c.runWithSecrets(ctx, secretEnvValues(env), args...)
+	res, err := c.run(ctx, args...)
 	if err != nil {
 		return "", "", err
 	}
