@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/materialize"
+	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -25,6 +26,16 @@ func workerSessionCatalogWithConfig(cityPath string, store beads.Store, sp runti
 }
 
 func workerFactoryWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City) (*worker.Factory, error) {
+	return workerFactoryWithStaleKeyDetectionWaiter(cityPath, store, sp, cfg, nil)
+}
+
+func workerFactoryWithStaleKeyDetectionWaiter(
+	cityPath string,
+	store beads.Store,
+	sp runtime.Provider,
+	cfg *config.City,
+	waiter session.StaleKeyDetectionWaiter,
+) (*worker.Factory, error) {
 	var (
 		resolveTransport func(template, provider string) string
 		searchPaths      []string
@@ -66,14 +77,15 @@ func workerFactoryWithConfig(cityPath string, store beads.Store, sp runtime.Prov
 		searchPaths = worker.MergeSearchPaths(cfg.Daemon.ObservePaths)
 	}
 	return worker.NewFactory(worker.FactoryConfig{
-		Store:                 store,
-		Provider:              sp,
-		CityPath:              cityPath,
-		SearchPaths:           searchPaths,
-		UsageSink:             usageSinkForCity(cfg, cityPath),
-		ResolveTransport:      resolveTransport,
-		ResolveSessionRuntime: workerSessionRuntimeResolverWithConfig(cityPath, cfg),
-		Pricing:               cfg.PricingRegistry(),
+		Store:                   store,
+		Provider:                sp,
+		CityPath:                cityPath,
+		SearchPaths:             searchPaths,
+		UsageSink:               usageSinkForCity(cfg, cityPath),
+		ResolveTransport:        resolveTransport,
+		ResolveSessionRuntime:   workerSessionRuntimeResolverWithConfig(cityPath, cfg),
+		StaleKeyDetectionWaiter: waiter,
+		Pricing:                 cfg.PricingRegistry(),
 	})
 }
 
@@ -181,14 +193,14 @@ func resolvedRuntimeMCPServersWithConfig(
 		identity = strings.TrimSpace(provider)
 	}
 	if agentCfg := findAgentByTemplate(cfg, template); agentCfg != nil {
-		catalog, err := materialize.EffectiveMCPForSession(cfg, cityPath, agentCfg, identity, workDir)
+		catalog, err := materialize.EffectiveMCPForSession(cfg, cityPath, agentCfg, identity, workDir, config.QueryTopology{})
 		if err != nil {
 			return nil, fmt.Errorf("loading effective MCP: %w", err)
 		}
 		return materialize.RuntimeMCPServers(catalog.Servers), nil
 	}
 	synthetic := &config.Agent{Provider: provider}
-	catalog, err := materialize.EffectiveMCPForSession(cfg, cityPath, synthetic, identity, workDir)
+	catalog, err := materialize.EffectiveMCPForSession(cfg, cityPath, synthetic, identity, workDir, config.QueryTopology{})
 	if err != nil {
 		return nil, fmt.Errorf("loading effective MCP: %w", err)
 	}
@@ -338,7 +350,12 @@ func resolvedWorkerSessionConfigWithConfig(
 	// reseed at resolvedWorkerRuntimeWithConfigAndMetadata and the
 	// API-side seeding in internal/api/session_resolved_config.go.
 	// Regression for upstream gastownhall/gascity#101 (re-opened).
-	sessionEnv := mergeEnv(providerProcessPassthroughEnv(), resolved.Env)
+	//
+	// The controller-only overlay goes last for the same reason it does in
+	// template_resolve.go: resolved.Env is config-authored, so a provider spec
+	// naming one of those keys would otherwise overwrite the empty value the
+	// passthrough pinned. This resolver never routes through ScrubTokenEnv.
+	sessionEnv := mergeEnv(providerProcessPassthroughEnv(), resolved.Env, processenv.ControllerOnlyEnvOverlay())
 	if strings.TrimSpace(cityPath) != "" {
 		sessionEnv = mergeEnv(sessionEnv, cityIdentityAnchorsForCity(cityPath))
 	}
@@ -371,7 +388,18 @@ func resolvedWorkerSessionConfigWithConfig(
 }
 
 func workerHandleForSessionWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, id string) (worker.Handle, error) {
-	factory, err := workerFactoryWithConfig(cityPath, store, sp, cfg)
+	return workerHandleForSessionWithStaleKeyDetectionWaiter(cityPath, store, sp, cfg, id, nil)
+}
+
+func workerHandleForSessionWithStaleKeyDetectionWaiter(
+	cityPath string,
+	store beads.Store,
+	sp runtime.Provider,
+	cfg *config.City,
+	id string,
+	waiter session.StaleKeyDetectionWaiter,
+) (worker.Handle, error) {
+	factory, err := workerFactoryWithStaleKeyDetectionWaiter(cityPath, store, sp, cfg, waiter)
 	if err != nil {
 		return nil, err
 	}
@@ -575,7 +603,7 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 	// dispatcher trace path is per-dispatcher-qualified and must not be
 	// overwritten with the city-uniform default here. template_resolve.go
 	// owns the qualified override for the CLI create path.
-	sessionEnv := mergeEnv(providerProcessPassthroughEnv(), resolved.Env, cityIdentityAnchorsForCity(cityPath))
+	sessionEnv := mergeEnv(providerProcessPassthroughEnv(), resolved.Env, cityIdentityAnchorsForCity(cityPath), processenv.ControllerOnlyEnvOverlay())
 	// Resolve session_live so resumed sessions get re-themed (status bar,
 	// keybindings) the same way reconciler-started sessions do. Without this,
 	// `gc session attach` recreates the tmux runtime with an empty

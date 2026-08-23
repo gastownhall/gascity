@@ -1,9 +1,12 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,10 +15,33 @@ import (
 	"testing"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runproj"
 )
+
+func TestRunProjectionUnavailableSanitizesPublicDetailAndLogsCause(t *testing.T) {
+	var logs bytes.Buffer
+	previousLog := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(previousLog) })
+
+	err := runProjectionUnavailable(errors.New("read /private/city/.gc/events.jsonl: permission denied"))
+	var statusErr huma.StatusError
+	if !errors.As(err, &statusErr) || statusErr.GetStatus() != http.StatusServiceUnavailable {
+		t.Fatalf("error = %T %v, want Huma 503", err, err)
+	}
+	if got := err.Error(); got != "run projection unavailable" {
+		t.Fatalf("public detail = %q, want sanitized projection-unavailable message", got)
+	}
+	if strings.Contains(err.Error(), "/private/") || strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("public detail leaked filesystem cause: %q", err.Error())
+	}
+	if got := logs.String(); !strings.Contains(got, "/private/city/.gc/events.jsonl") || !strings.Contains(got, "permission denied") {
+		t.Fatalf("internal log omitted raw projection failure: %q", got)
+	}
+}
 
 // runFixtureID gives a stable, zero-padded run id for cap/ordering fixtures.
 func runFixtureID(i int) string { return fmt.Sprintf("run-%02d", i) }
@@ -201,6 +227,546 @@ func TestRunsListEndpoint(t *testing.T) {
 	if run.StartedAt == "" {
 		t.Errorf("started_at empty, want RFC3339 timestamp")
 	}
+	if out.Body.StatusCounts.Active != 1 {
+		t.Errorf("status_counts.active = %d, want 1", out.Body.StatusCounts.Active)
+	}
+}
+
+type fakeRunCensusSource struct {
+	value runproj.CanonicalRunCensus
+	ok    bool
+}
+
+func (f fakeRunCensusSource) RunCensus(context.Context, string) (runproj.CanonicalRunCensus, bool) {
+	return f.value, f.ok
+}
+
+type fakeRunProjectionSource struct {
+	fakeRunCensusSource
+	projection      runproj.RunProjectionSnapshot
+	projectionOK    bool
+	projectionCalls int
+	missInGrace     bool
+	graceCalls      int
+	forgottenRuns   []string
+}
+
+func (f *fakeRunProjectionSource) RunProjection(context.Context, string) (runproj.RunProjectionSnapshot, bool) {
+	f.projectionCalls++
+	return f.projection, f.projectionOK
+}
+
+func (f *fakeRunProjectionSource) RunProjectionMissInGrace(context.Context, string, string) bool {
+	f.graceCalls++
+	return f.missInGrace
+}
+
+func (f *fakeRunProjectionSource) ForgetRunProjectionMiss(_ context.Context, _, runID string) {
+	f.forgottenRuns = append(f.forgottenRuns, runID)
+}
+
+func TestRunsListEndpointUsesInjectedWarmProjectionInsteadOfDiskReplay(t *testing.T) {
+	s := newRunServer(t,
+		beadCreatedEvent(1, runRootBead("disk-run", "disk-formula", "open")),
+	)
+	// A directory at the active-log path makes any attempted disk replay fail.
+	// The injected warm source must make this path entirely irrelevant.
+	eventsPath := filepath.Join(s.state.CityPath(), ".gc", "events.jsonl")
+	if err := os.Remove(eventsPath); err != nil {
+		t.Fatalf("remove event log: %v", err)
+	}
+	if err := os.Mkdir(eventsPath, 0o755); err != nil {
+		t.Fatalf("replace event log with directory: %v", err)
+	}
+	source := &fakeRunProjectionSource{
+		fakeRunCensusSource: fakeRunCensusSource{ok: true},
+		projectionOK:        true,
+		projection: runproj.RunProjectionSnapshot{
+			Ready: true,
+			Beads: []beads.Bead{
+				runRootBead("warm-run", "warm-formula", "open"),
+			},
+		},
+	}
+	s.runCensusSource = source
+
+	out, err := s.humaHandleRunsList(context.Background(), &RunsListInput{
+		CityScope: CityScope{CityName: "test-city"},
+	})
+	if err != nil {
+		t.Fatalf("humaHandleRunsList error: %v", err)
+	}
+	if source.projectionCalls != 1 {
+		t.Fatalf("RunProjection calls = %d, want 1", source.projectionCalls)
+	}
+	if len(out.Body.Runs) != 1 || out.Body.Runs[0].RunID != "warm-run" {
+		t.Fatalf("runs = %+v, want only warm-run from the injected projection", out.Body.Runs)
+	}
+	if out.Body.Partial {
+		t.Fatalf("ready complete projection reported partial: %+v", out.Body)
+	}
+}
+
+func TestRunsListEndpointReportsWarmProjectionStartupAsPartial(t *testing.T) {
+	s := newRunServer(t)
+	s.runCensusSource = &fakeRunProjectionSource{
+		fakeRunCensusSource: fakeRunCensusSource{ok: true},
+		projectionOK:        true,
+		projection:          runproj.RunProjectionSnapshot{},
+	}
+
+	out, err := s.humaHandleRunsList(context.Background(), &RunsListInput{
+		CityScope: CityScope{CityName: "test-city"},
+	})
+	if err != nil {
+		t.Fatalf("humaHandleRunsList error: %v", err)
+	}
+	if len(out.Body.Runs) != 0 || !out.Body.Partial {
+		t.Fatalf("warming list = %+v, want empty partial response", out.Body)
+	}
+	if len(out.Body.PartialErrors) != 1 || out.Body.PartialErrors[0] != "run projection is warming" {
+		t.Fatalf("partial_errors = %q, want one sanitized warming reason", out.Body.PartialErrors)
+	}
+}
+
+func TestRunsListEndpointTreatsReadyEmptyWarmProjectionAsComplete(t *testing.T) {
+	s := newRunServer(t)
+	s.runCensusSource = &fakeRunProjectionSource{
+		fakeRunCensusSource: fakeRunCensusSource{ok: true},
+		projectionOK:        true,
+		projection:          runproj.RunProjectionSnapshot{Ready: true},
+	}
+
+	out, err := s.humaHandleRunsList(context.Background(), &RunsListInput{
+		CityScope: CityScope{CityName: "test-city"},
+	})
+	if err != nil {
+		t.Fatalf("humaHandleRunsList error: %v", err)
+	}
+	if len(out.Body.Runs) != 0 || out.Body.Partial || len(out.Body.PartialErrors) != 0 {
+		t.Fatalf("ready empty list = %+v, want complete empty response", out.Body)
+	}
+}
+
+func TestRunPointReadsReturnServiceUnavailableWhileWarmProjectionStarts(t *testing.T) {
+	s := newRunServer(t)
+	s.runCensusSource = &fakeRunProjectionSource{
+		fakeRunCensusSource: fakeRunCensusSource{ok: true},
+		projectionOK:        true,
+		projection: runproj.RunProjectionSnapshot{
+			Partial: true,
+		},
+	}
+
+	tests := []struct {
+		name string
+		call func() error
+	}{
+		{
+			name: "run",
+			call: func() error {
+				_, err := s.humaHandleRunGet(context.Background(), &RunGetInput{
+					CityScope: CityScope{CityName: "test-city"}, RunID: "run-unknown",
+				})
+				return err
+			},
+		},
+		{
+			name: "steps",
+			call: func() error {
+				_, err := s.humaHandleRunSteps(context.Background(), &RunStepsInput{
+					CityScope: CityScope{CityName: "test-city"}, RunID: "run-unknown",
+				})
+				return err
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.call()
+			if err == nil {
+				t.Fatal("error = nil, want warming 503")
+			}
+			var statusErr huma.StatusError
+			if !errors.As(err, &statusErr) || statusErr.GetStatus() != http.StatusServiceUnavailable {
+				t.Fatalf("error = %T %v, want Huma 503", err, err)
+			}
+			if !strings.Contains(err.Error(), "warming") || strings.Contains(err.Error(), s.state.CityPath()) {
+				t.Fatalf("error = %q, want sanitized warming detail", err.Error())
+			}
+		})
+	}
+}
+
+func TestRunPointReadsDoNotReturnNotFoundFromReadyPartialProjection(t *testing.T) {
+	s := newRunServer(t)
+	s.runCensusSource = &fakeRunProjectionSource{
+		fakeRunCensusSource: fakeRunCensusSource{ok: true},
+		projectionOK:        true,
+		projection: runproj.RunProjectionSnapshot{
+			Ready:   true,
+			Partial: true,
+		},
+	}
+
+	tests := []struct {
+		name string
+		call func() error
+	}{
+		{
+			name: "run",
+			call: func() error {
+				_, err := s.humaHandleRunGet(context.Background(), &RunGetInput{
+					CityScope: CityScope{CityName: "test-city"}, RunID: "possibly-missing",
+				})
+				return err
+			},
+		},
+		{
+			name: "steps",
+			call: func() error {
+				_, err := s.humaHandleRunSteps(context.Background(), &RunStepsInput{
+					CityScope: CityScope{CityName: "test-city"}, RunID: "possibly-missing",
+				})
+				return err
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.call()
+			var statusErr huma.StatusError
+			if !errors.As(err, &statusErr) || statusErr.GetStatus() != http.StatusServiceUnavailable {
+				t.Fatalf("error = %T %v, want Huma 503 for an incomplete projection", err, err)
+			}
+			if !strings.Contains(err.Error(), "incomplete") || strings.Contains(err.Error(), "possibly-missing") {
+				t.Fatalf("error = %q, want sanitized incomplete-projection detail", err.Error())
+			}
+		})
+	}
+}
+
+func TestRunPointReadsGraceWarmProjectionMissThenResolveOrExpire(t *testing.T) {
+	tests := []struct {
+		name  string
+		beads []beads.Bead
+		call  func(*Server) error
+	}{
+		{
+			name:  "run",
+			beads: []beads.Bead{runRootBead("run-new", "formula", "open")},
+			call: func(s *Server) error {
+				_, err := s.humaHandleRunGet(context.Background(), &RunGetInput{
+					CityScope: CityScope{CityName: "test-city"}, RunID: "run-new",
+				})
+				return err
+			},
+		},
+		{
+			name: "steps",
+			beads: []beads.Bead{
+				runRootBead("run-new", "formula", "open"),
+				runChildBead("run-new.step", "run-new", "open", nil),
+			},
+			call: func(s *Server) error {
+				_, err := s.humaHandleRunSteps(context.Background(), &RunStepsInput{
+					CityScope: CityScope{CityName: "test-city"}, RunID: "run-new",
+				})
+				return err
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newRunServer(t)
+			source := &fakeRunProjectionSource{
+				fakeRunCensusSource: fakeRunCensusSource{ok: true},
+				projectionOK:        true,
+				projection:          runproj.RunProjectionSnapshot{Ready: true},
+				missInGrace:         true,
+			}
+			s.runCensusSource = source
+
+			err := tt.call(s)
+			var statusErr huma.StatusError
+			if !errors.As(err, &statusErr) || statusErr.GetStatus() != http.StatusServiceUnavailable {
+				t.Fatalf("initial miss error = %T %v, want warming 503", err, err)
+			}
+			if !strings.Contains(err.Error(), "warming") || source.graceCalls != 1 {
+				t.Fatalf("initial miss = %v, grace calls = %d; want warming via one grace lookup", err, source.graceCalls)
+			}
+
+			source.projection.Beads = tt.beads
+			if err := tt.call(s); err != nil {
+				t.Fatalf("resolved run error: %v", err)
+			}
+			if len(source.forgottenRuns) != 1 || source.forgottenRuns[0] != "run-new" {
+				t.Fatalf("forgotten runs = %q, want run-new after projection resolves", source.forgottenRuns)
+			}
+
+			source.projection.Beads = nil
+			source.missInGrace = false
+			err = tt.call(s)
+			if !errors.As(err, &statusErr) || statusErr.GetStatus() != http.StatusNotFound {
+				t.Fatalf("expired miss error = %T %v, want definitive 404", err, err)
+			}
+		})
+	}
+}
+
+func TestRunsListEndpointReportsWarmProjectionReadFailureAsPartial(t *testing.T) {
+	s := newRunServer(t)
+	s.runCensusSource = &fakeRunProjectionSource{
+		fakeRunCensusSource: fakeRunCensusSource{ok: true},
+		projectionOK:        true,
+		projection: runproj.RunProjectionSnapshot{
+			Ready:   true,
+			Partial: true,
+		},
+	}
+
+	out, err := s.humaHandleRunsList(context.Background(), &RunsListInput{
+		CityScope: CityScope{CityName: "test-city"},
+	})
+	if err != nil {
+		t.Fatalf("humaHandleRunsList error: %v", err)
+	}
+	if !out.Body.Partial || len(out.Body.PartialErrors) != 1 || out.Body.PartialErrors[0] != runCensusPartialReason {
+		t.Fatalf("partial response = %+v, want one sanitized incomplete reason", out.Body)
+	}
+}
+
+func TestRunsListEndpointPreservesWarmProjectionDecodeMissPartial(t *testing.T) {
+	s := newRunServer(t)
+	s.runCensusSource = &fakeRunProjectionSource{
+		fakeRunCensusSource: fakeRunCensusSource{ok: true},
+		projectionOK:        true,
+		projection: runproj.RunProjectionSnapshot{
+			Ready:        true,
+			Beads:        []beads.Bead{runRootBead("run-one", "formula", "open")},
+			DecodeMisses: 1,
+			Partial:      true,
+		},
+	}
+
+	out, err := s.humaHandleRunsList(context.Background(), &RunsListInput{
+		CityScope: CityScope{CityName: "test-city"},
+	})
+	if err != nil {
+		t.Fatalf("humaHandleRunsList error: %v", err)
+	}
+	if !out.Body.Partial {
+		t.Fatalf("decode-miss projection reported complete: %+v", out.Body)
+	}
+	want := "some run events could not be decoded; the list may be incomplete"
+	if len(out.Body.PartialErrors) != 1 || out.Body.PartialErrors[0] != want {
+		t.Fatalf("partial_errors = %q, want %q", out.Body.PartialErrors, want)
+	}
+}
+
+func TestRunsCensusEndpointUsesWarmProjectionWithoutRows(t *testing.T) {
+	s := newRunServer(t)
+	s.runCensusSource = fakeRunCensusSource{
+		ok: true,
+		value: runproj.CanonicalRunCensus{
+			Ready:        true,
+			StatusCounts: runproj.CanonicalRunStatusCounts{Active: 2, Waiting: 1},
+		},
+	}
+
+	out, err := s.humaHandleRunsCensus(context.Background(), &RunsCensusInput{
+		CityScope: CityScope{CityName: "test-city"},
+	})
+	if err != nil {
+		t.Fatalf("humaHandleRunsCensus error: %v", err)
+	}
+	want := RunStatusCounts{Active: 2, Waiting: 1}
+	if out.Body.StatusCounts != want {
+		t.Fatalf("status_counts = %+v, want %+v", out.Body.StatusCounts, want)
+	}
+	if out.Body.Partial || len(out.Body.PartialErrors) != 0 {
+		t.Fatalf("complete census reported partial: %+v", out.Body)
+	}
+}
+
+func TestRunsCensusEndpointReportsWarmingWithoutInternalDetails(t *testing.T) {
+	s := newRunServer(t)
+	s.runCensusSource = fakeRunCensusSource{
+		ok: true,
+		value: runproj.CanonicalRunCensus{
+			Partial:        true,
+			PartialReasons: []string{"read /private/path/events.jsonl: permission denied"},
+		},
+	}
+
+	_, err := s.humaHandleRunsCensus(context.Background(), &RunsCensusInput{
+		CityScope: CityScope{CityName: "test-city"},
+	})
+	if err == nil {
+		t.Fatal("humaHandleRunsCensus error = nil, want warming 503")
+	}
+	var statusErr huma.StatusError
+	if !errors.As(err, &statusErr) || statusErr.GetStatus() != http.StatusServiceUnavailable {
+		t.Fatalf("error = %T %v, want Huma 503", err, err)
+	}
+	if strings.Contains(err.Error(), "/private/path") || strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("warming error leaked internal detail: %v", err)
+	}
+}
+
+func TestRunsCensusWireContainsOnlyCountsAndPartialProvenance(t *testing.T) {
+	s := newRunServer(t)
+	s.runCensusSource = fakeRunCensusSource{
+		ok: true,
+		value: runproj.CanonicalRunCensus{
+			Ready:        true,
+			StatusCounts: runproj.CanonicalRunStatusCounts{Pending: 1, Active: 2},
+		},
+	}
+	h := newTestCityHandlerWith(t, s.state, s)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(s.state, "/runs/census"), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &fields); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(fields) != 1 || fields["status_counts"] == nil {
+		t.Fatalf("response keys = %v, want only status_counts", fields)
+	}
+	for _, forbidden := range []string{"runs", "title", "target", "scope", "last_error", "assignee"} {
+		if strings.Contains(rec.Body.String(), `"`+forbidden+`"`) {
+			t.Fatalf("census response contains forbidden field %q: %s", forbidden, rec.Body.String())
+		}
+	}
+}
+
+func TestRunsCensusWireReturnsSanitized503WhileWarming(t *testing.T) {
+	s := newRunServer(t)
+	s.runCensusSource = fakeRunCensusSource{
+		ok: true,
+		value: runproj.CanonicalRunCensus{
+			Partial:        true,
+			PartialReasons: []string{"read /private/path/events.jsonl: permission denied"},
+		},
+	}
+	h := newTestCityHandlerWith(t, s.state, s)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(s.state, "/runs/census"), nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "/private/path") || strings.Contains(rec.Body.String(), "permission denied") {
+		t.Fatalf("warming response leaked internal detail: %s", rec.Body.String())
+	}
+}
+
+func TestRunsCensusWireSanitizesReadyPartialReasons(t *testing.T) {
+	s := newRunServer(t)
+	s.runCensusSource = fakeRunCensusSource{
+		ok: true,
+		value: runproj.CanonicalRunCensus{
+			Ready:          true,
+			Partial:        true,
+			PartialReasons: []string{"read /private/path/events.jsonl: permission denied"},
+		},
+	}
+	h := newTestCityHandlerWith(t, s.state, s)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(s.state, "/runs/census"), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "/private/path") || strings.Contains(rec.Body.String(), "permission denied") {
+		t.Fatalf("partial response leaked internal detail: %s", rec.Body.String())
+	}
+	var body RunsCensusOutput
+	if err := json.Unmarshal(rec.Body.Bytes(), &body.Body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !body.Body.Partial || len(body.Body.PartialErrors) != 1 || body.Body.PartialErrors[0] != "run projection is incomplete" {
+		t.Fatalf("partial response = %+v, want one sanitized incomplete reason", body.Body)
+	}
+}
+
+func TestSupervisorMuxThreadsRunCensusSourceIntoLazyCityServer(t *testing.T) {
+	state := newFakeState(t)
+	mux := NewSupervisorMux(&stateCityResolver{state: state}, nil, false, "test", "", time.Now())
+	mux.WithRunCensusSource(fakeRunCensusSource{
+		ok: true,
+		value: runproj.CanonicalRunCensus{
+			Ready:        true,
+			StatusCounts: runproj.CanonicalRunStatusCounts{Waiting: 3},
+		},
+	})
+	h := wrapTestSupervisorMiddleware(mux)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(state, "/runs/census"), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var body RunsCensusOutput
+	if err := json.Unmarshal(rec.Body.Bytes(), &body.Body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.Body.StatusCounts.Waiting != 3 {
+		t.Fatalf("status_counts = %+v, want waiting=3", body.Body.StatusCounts)
+	}
+}
+
+func TestRunsListStatusCountsAreNotTruncatedByLimit(t *testing.T) {
+	completed := runRootBead("run-complete", "mol-adopt-pr-v2", "closed")
+	completed.Metadata["gc.outcome"] = "pass"
+	s := newRunServer(t,
+		beadCreatedEvent(1, runRootBead("run-active", "mol-adopt-pr-v2", "open")),
+		beadCreatedEvent(2, runChildBead("run-active.step", "run-active", "in_progress", nil)),
+		beadCreatedEvent(3, completed),
+	)
+
+	out, err := s.humaHandleRunsList(context.Background(), &RunsListInput{
+		CityScope: CityScope{CityName: "test-city"},
+		Limit:     1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Body.Runs) != 1 {
+		t.Fatalf("len(runs) = %d, want limit 1", len(out.Body.Runs))
+	}
+	if out.Body.StatusCounts.Active != 1 || out.Body.StatusCounts.Completed != 1 {
+		t.Fatalf("status_counts = %+v, want active=1 completed=1", out.Body.StatusCounts)
+	}
+	if !out.Body.Partial {
+		t.Fatal("Partial = false, want true when the row list is limited")
+	}
+}
+
+func TestRunsListStatusCountsIncludeHistoryBeyondTheLaneCap(t *testing.T) {
+	const completedRuns = 55
+	events := make([]events.Event, 0, completedRuns)
+	for i := range completedRuns {
+		root := runRootBead(runFixtureID(i), "mol-adopt-pr-v2", "closed")
+		root.Metadata["gc.outcome"] = "pass"
+		events = append(events, beadCreatedEvent(uint64(i+1), root))
+	}
+	s := newRunServer(t, events...)
+
+	out, err := s.humaHandleRunsList(context.Background(), &RunsListInput{
+		CityScope: CityScope{CityName: "test-city"},
+		Limit:     maxRunsListLimit,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Body.StatusCounts.Completed != completedRuns {
+		t.Fatalf("status_counts.completed = %d, want %d", out.Body.StatusCounts.Completed, completedRuns)
+	}
+	if len(out.Body.Runs) != 50 || !out.Body.Partial {
+		t.Fatalf("rows/partial = %d/%v, want capped 50/true", len(out.Body.Runs), out.Body.Partial)
+	}
 }
 
 func TestRunsListEmptyCity(t *testing.T) {
@@ -279,6 +845,133 @@ func TestRunStepsEndpoint(t *testing.T) {
 	}
 	if byID["run1.step2"].Status != RunStepStatusActive {
 		t.Errorf("step2 status = %q, want active", byID["run1.step2"].Status)
+	}
+}
+
+// TestRunStepsClampsCompletedRun proves the typed /steps endpoint honors run
+// terminality: a completed run whose steps lost their close events must report each
+// lingering step terminal (completed / skipped), never eternally active.
+func TestRunStepsClampsCompletedRun(t *testing.T) {
+	root := runRootBead("runc", "mol-adopt-pr-v2", "closed")
+	root.Metadata["gc.outcome"] = "pass"
+	s := newRunServer(t,
+		beadCreatedEvent(1, root),
+		beadCreatedEvent(2, runChildBead("runc.step1", "runc", "closed", map[string]string{"gc.outcome": "pass"})),
+		beadCreatedEvent(3, runChildBead("runc.step2", "runc", "in_progress", nil)), // lost close event
+		beadCreatedEvent(4, runChildBead("runc.step3", "runc", "open", nil)),        // never started
+	)
+	out, err := s.humaHandleRunSteps(context.Background(), &RunStepsInput{
+		CityScope: CityScope{CityName: "test-city"},
+		RunID:     "runc",
+	})
+	if err != nil {
+		t.Fatalf("humaHandleRunSteps error: %v", err)
+	}
+	byID := map[string]RunStep{}
+	for _, st := range out.Body.Steps {
+		byID[st.ID] = st
+	}
+	if byID["runc.step1"].Status != RunStepStatusCompleted {
+		t.Errorf("step1 = %q, want completed", byID["runc.step1"].Status)
+	}
+	if byID["runc.step2"].Status != RunStepStatusCompleted {
+		t.Errorf("lost-close step2 = %q, want completed (run is completed)", byID["runc.step2"].Status)
+	}
+	if byID["runc.step3"].Status != RunStepStatusSkipped {
+		t.Errorf("never-started step3 = %q, want skipped (never started under a completed run)", byID["runc.step3"].Status)
+	}
+}
+
+// TestRunStepsClampsFailedRunToCanceled proves the failure family: a failed run
+// cancels its lingering active steps (rather than completing them) and skips its
+// never-started ones, while a recorded step outcome is preserved.
+func TestRunStepsClampsFailedRunToCanceled(t *testing.T) {
+	root := runRootBead("runx", "mol-adopt-pr-v2", "closed")
+	root.Metadata["gc.outcome"] = "fail"
+	s := newRunServer(t,
+		beadCreatedEvent(1, root),
+		beadCreatedEvent(2, runChildBead("runx.step1", "runx", "in_progress", nil)),                                // lost close
+		beadCreatedEvent(3, runChildBead("runx.step2", "runx", "open", nil)),                                       // never started
+		beadCreatedEvent(4, runChildBead("runx.step3", "runx", "closed", map[string]string{"gc.outcome": "fail"})), // real failure
+	)
+	out, err := s.humaHandleRunSteps(context.Background(), &RunStepsInput{
+		CityScope: CityScope{CityName: "test-city"},
+		RunID:     "runx",
+	})
+	if err != nil {
+		t.Fatalf("humaHandleRunSteps error: %v", err)
+	}
+	byID := map[string]RunStep{}
+	for _, st := range out.Body.Steps {
+		byID[st.ID] = st
+	}
+	if byID["runx.step1"].Status != RunStepStatusCanceled {
+		t.Errorf("lost-close step1 = %q, want canceled (run failed)", byID["runx.step1"].Status)
+	}
+	if byID["runx.step2"].Status != RunStepStatusSkipped {
+		t.Errorf("never-started step2 = %q, want skipped", byID["runx.step2"].Status)
+	}
+	if byID["runx.step3"].Status != RunStepStatusFailed {
+		t.Errorf("recorded-failure step3 = %q, want failed (real outcome preserved)", byID["runx.step3"].Status)
+	}
+}
+
+// runChildBeadWithNeeds is runChildBead plus a Needs list, scoped to root
+// "sps-1p12" and status "open" (the only fixture that needs step-order data
+// today — ordering is independent of step status). Kept separate from
+// runChildBead (used by many status-focused tests) so adding Needs support
+// here can't perturb their fixtures.
+func runChildBeadWithNeeds(id string, needs ...string) beads.Bead {
+	b := runChildBead(id, "sps-1p12", "open", nil)
+	b.Needs = needs
+	return b
+}
+
+// TestRunStepsEndpointReturnsTopologicalOrder is the end-to-end regression
+// guard for gascity#4699: GET /runs/{id}/steps returned steps in arbitrary
+// fold order, not the pipeline's actual dependency order. This reproduces
+// the issue's own 9-step repro (declared prep -> author-en -> translate-ro
+// -> feature-pr -> review -> gate-merge-feature -> archive-materialize ->
+// merge-archive -> land) with bead-creation (and therefore fold) order
+// scrambled relative to declaration order, matching what the issue observed
+// on a real graph.v2 run.
+func TestRunStepsEndpointReturnsTopologicalOrder(t *testing.T) {
+	root := runRootBead("sps-1p12", "sps-baseline", "open")
+	s := newRunServer(t,
+		beadCreatedEvent(1, root),
+		beadCreatedEvent(2, runChildBeadWithNeeds("sps-1p12.merge-archive", "sps-1p12.archive-materialize")),
+		beadCreatedEvent(3, runChildBeadWithNeeds("sps-1p12.author-en", "sps-1p12.prep")),
+		beadCreatedEvent(4, runChildBeadWithNeeds("sps-1p12.translate-ro", "sps-1p12.author-en")),
+		beadCreatedEvent(5, runChildBeadWithNeeds("sps-1p12.gate-merge-feature", "sps-1p12.review")),
+		beadCreatedEvent(6, runChildBeadWithNeeds("sps-1p12.archive-materialize", "sps-1p12.gate-merge-feature")),
+		beadCreatedEvent(7, runChildBeadWithNeeds("sps-1p12.feature-pr", "sps-1p12.translate-ro")),
+		beadCreatedEvent(8, runChildBeadWithNeeds("sps-1p12.land", "sps-1p12.merge-archive")),
+		beadCreatedEvent(9, runChildBeadWithNeeds("sps-1p12.review", "sps-1p12.feature-pr")),
+		beadCreatedEvent(10, runChildBeadWithNeeds("sps-1p12.prep")),
+	)
+	out, err := s.humaHandleRunSteps(context.Background(), &RunStepsInput{
+		CityScope: CityScope{CityName: "test-city"},
+		RunID:     "sps-1p12",
+	})
+	if err != nil {
+		t.Fatalf("humaHandleRunSteps error: %v", err)
+	}
+	got := make([]string, len(out.Body.Steps))
+	for i, st := range out.Body.Steps {
+		got[i] = st.ID
+	}
+	want := []string{
+		"sps-1p12.prep", "sps-1p12.author-en", "sps-1p12.translate-ro", "sps-1p12.feature-pr",
+		"sps-1p12.review", "sps-1p12.gate-merge-feature", "sps-1p12.archive-materialize",
+		"sps-1p12.merge-archive", "sps-1p12.land",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("steps = %v, want %v (length mismatch)", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("steps = %v, want %v (diverges at index %d)", got, want, i)
+		}
 	}
 }
 

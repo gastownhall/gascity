@@ -2,6 +2,7 @@ package main
 
 import (
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -19,15 +20,15 @@ import (
 // sessionAgentConfig -> sessionAgentConfigInfo swap differs between the two; the
 // cross-store / store-ref resolution is identical, so byte-identity here is the
 // per-parameter split's proof.
-func rawOpenSessionReachableStoreRefRef(cityPath string, cfg *config.City, sb beads.Bead) string {
+func rawOpenSessionReachableStoreRefRef(cityPath string, cfg *config.City, claimRefs []string, sb beads.Bead) []string {
 	agentCfg := sessionAgentConfig(cfg, sb)
 	if agentCfg == nil {
-		return unresolvedOpenSessionStoreRef
+		return []string{unresolvedOpenSessionStoreRef}
 	}
 	if agentIsCrossStoreEligible(agentCfg) {
-		return crossStoreOpenSessionStoreRef
+		return []string{crossStoreOpenSessionStoreRef}
 	}
-	return assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg)
+	return append([]string{assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg)}, claimRefs...)
 }
 
 // TestOpenSessionReachableStoreRefInfoMatchesRaw pins the §4 split site the
@@ -37,8 +38,11 @@ func TestOpenSessionReachableStoreRefInfoMatchesRaw(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}, {Name: "mayor"}}}
 	for _, sb := range oracleSessionBeadShapes() {
 		info := sessiontest.SeedBead(t, sb)
-		if got, want := openSessionReachableStoreRefInfo("", cfg, info), rawOpenSessionReachableStoreRefRef("", cfg, sb); got != want {
-			t.Errorf("openSessionReachableStoreRef(%s): info=%q raw=%q", sb.ID, got, want)
+		claimRefs := assignedWorkClaimRefs("", cfg, beads.NewMemStore())
+		got := openSessionReachableStoreRefInfo("", cfg, claimRefs, info)
+		want := rawOpenSessionReachableStoreRefRef("", cfg, claimRefs, sb)
+		if !slices.Equal(got, want) {
+			t.Errorf("openSessionReachableStoreRef(%s): info=%v raw=%v", sb.ID, got, want)
 		}
 	}
 }
@@ -211,7 +215,6 @@ func rawPoolTriggerBindingPatchRef(sb beads.Bead, request SessionRequest, workDi
 		if existingWorkDir == "" {
 			existingWorkDir = strings.TrimSpace(sb.Metadata[beadmeta.LegacyWorkDirMetadataKey])
 		}
-		currentWorkBeadID := strings.TrimSpace(sb.Metadata[session.CurrentBeadIDKey])
 		rawState := session.State(sb.Metadata["state"])
 		if rawState == session.StateAwake {
 			rawState = session.StateActive
@@ -223,9 +226,7 @@ func rawPoolTriggerBindingPatchRef(sb beads.Bead, request SessionRequest, workDi
 			request.Tier == "resume" &&
 			request.SessionBeadID == sb.ID &&
 			rawState == session.StateActive &&
-			sb.Metadata["wake_mode"] != "fresh" &&
-			currentWorkBeadID != "" &&
-			(currentWorkBeadID == oldWorkBeadID || currentWorkBeadID == workBeadID)
+			sb.Metadata["wake_mode"] != "fresh"
 		if existingWorkDir != "" && (oldWorkBeadID == workBeadID || liveResumeContinuation) {
 			targetWorkDir = existingWorkDir
 		}
@@ -396,17 +397,17 @@ func TestComputePoolTriggerBindingPatchPreservesLiveRetryWorkDir(t *testing.T) {
 			wantDir:   "/work/wb-old-with-title",
 		},
 		{
-			name:    "missing current-bead marker derives",
+			name:    "missing current-bead marker preserves active cwd",
 			state:   session.StateActive,
 			request: SessionRequest{Tier: "resume", SessionBeadID: "session-1", WorkBeadID: "wb-new"},
-			wantDir: "/work/wb-new-with-title",
+			wantDir: "/work/wb-old-with-title",
 		},
 		{
-			name:      "unrelated current-bead marker derives",
+			name:      "lagging unrelated current-bead marker preserves active cwd",
 			state:     session.StateActive,
 			currentID: "wb-unrelated",
 			request:   SessionRequest{Tier: "resume", SessionBeadID: "session-1", WorkBeadID: "wb-new"},
-			wantDir:   "/work/wb-new-with-title",
+			wantDir:   "/work/wb-old-with-title",
 		},
 		{
 			name:      "anonymous resume request derives",

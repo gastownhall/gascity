@@ -28,6 +28,9 @@ const sharedSkillCatalogSnapshotEnvVar = "GC_SHARED_SKILL_CATALOG_SNAPSHOT"
 //	                   session-server — host processes reading the
 //	                   same host filesystem as tmux panes.
 //	""               → eligible (workspace default is tmux).
+//	herdr            → eligible. Agents run on the host with the same
+//	                   filesystem view as tmux, so scope-root files are
+//	                   exactly what they read.
 //	acp              → ineligible. In-process agent; scope-root files
 //	                   aren't what it reads from.
 //	k8s              → ineligible. Agent runs in a pod that doesn't
@@ -67,6 +70,11 @@ func canStage1Materialize(citySessionProvider string, agent *config.Agent) bool 
 //	        runPreStart before the agent is spawned (same shared
 //	        runtime.RunSetupCommand semantics as tmux).
 //	""    → eligible (workspace default maps to tmux).
+//	herdr → eligible. PreStart runs on the host via the herdr
+//	        provider's runPreStart before the agent is created
+//	        (internal/runtime/herdr/provider.go), mirroring tmux.
+//	        herdr agents run on the host with the same filesystem
+//	        view, so host-materialized skills/MCP are what they read.
 //	acp   → ineligible. Session runs in-process; out of scope v0.15.1.
 //	k8s   → ineligible. PreStart runs inside the pod; gc binary and
 //	        host skill paths aren't available there.

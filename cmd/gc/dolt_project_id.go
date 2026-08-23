@@ -16,9 +16,9 @@ import (
 
 	gcapi "github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/doltpool"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
-	mysql "github.com/go-sql-driver/mysql"
 	"github.com/spf13/cobra"
 )
 
@@ -110,10 +110,6 @@ func newEnsureProjectIDCmd(stdout, stderr io.Writer) *cobra.Command {
 	return cmd
 }
 
-func ensureManagedDoltProjectID(metadataPath, port string) (managedDoltProjectIDReport, error) {
-	return ensureManagedDoltProjectIDWithRecorder(metadataPath, "127.0.0.1", port, "root", "hq", "", events.Discard)
-}
-
 func openProjectIdentityEventRecorder(cityPath string, stderr io.Writer) (events.Recorder, func()) {
 	rec, err := events.NewFileRecorder(filepath.Join(cityPath, ".gc", "events.jsonl"), io.Discard)
 	if err != nil {
@@ -151,11 +147,11 @@ func ensureManagedDoltProjectIDWithRecorder(metadataPath, host, port, user, data
 	}
 	metadataOK := metadataProjectID != ""
 
+	// Pooled handle owned by internal/doltpool; do not Close.
 	db, err := managedDoltOpenDatabase(host, port, user, database)
 	if err != nil {
 		return managedDoltProjectIDReport{}, err
 	}
-	defer db.Close() //nolint:errcheck
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -169,7 +165,10 @@ func ensureManagedDoltProjectIDWithRecorder(metadataPath, host, port, user, data
 	}
 
 	decision := decideReconcile(identityProjectID, identityOK, metadataProjectID, metadataOK, databaseProjectID, ok)
-	return applyReconcileDecision(ctx, fs, scopeRoot, metadataPath, db, decision, cityPath, rec)
+	seedL3 := func(ctx context.Context, projectID string) (bool, error) {
+		return seedDatabaseProjectID(ctx, db, projectID)
+	}
+	return applyReconcileDecision(ctx, fs, scopeRoot, metadataPath, decision, cityPath, rec, seedL3)
 }
 
 func managedDoltProjectIDFields(report managedDoltProjectIDReport) []string {
@@ -235,7 +234,7 @@ func decideReconcile(l1 string, l1ok bool, l2 string, l2ok bool, l3 string, l3ok
 	}
 }
 
-func applyReconcileDecision(ctx context.Context, fs fsys.FS, scopeRoot string, metadataPath string, db *sql.DB, decision reconcileDecision, cityPath string, rec events.Recorder) (managedDoltProjectIDReport, error) {
+func applyReconcileDecision(ctx context.Context, fs fsys.FS, scopeRoot string, metadataPath string, decision reconcileDecision, cityPath string, rec events.Recorder, seedL3 func(context.Context, string) (bool, error)) (managedDoltProjectIDReport, error) {
 	report := managedDoltProjectIDReport{
 		ProjectID: decision.ResolvedID,
 		Source:    decision.Source,
@@ -260,7 +259,7 @@ func applyReconcileDecision(ctx context.Context, fs fsys.FS, scopeRoot string, m
 		}
 		return report, nil
 	case actionSeedL3:
-		updated, err := seedDatabaseProjectID(ctx, db, decision.ResolvedID)
+		updated, err := seedL3(ctx, decision.ResolvedID)
 		if err != nil {
 			return managedDoltProjectIDReport{}, err
 		}
@@ -277,7 +276,7 @@ func applyReconcileDecision(ctx context.Context, fs fsys.FS, scopeRoot string, m
 		if metaUpdated {
 			emitProjectIdentityStampedEvent(rec, cityPath, scopeRoot, "cache_repair", "L2", decision.L2ID, decision.ResolvedID)
 		}
-		dbUpdated, err := seedDatabaseProjectID(ctx, db, decision.ResolvedID)
+		dbUpdated, err := seedL3(ctx, decision.ResolvedID)
 		if err != nil {
 			return managedDoltProjectIDReport{}, err
 		}
@@ -305,7 +304,7 @@ func applyReconcileDecision(ctx context.Context, fs fsys.FS, scopeRoot string, m
 		if metaUpdated {
 			emitProjectIdentityStampedEvent(rec, cityPath, scopeRoot, "cache_repair", "L2", "", decision.ResolvedID)
 		}
-		dbUpdated, err := seedDatabaseProjectID(ctx, db, decision.ResolvedID)
+		dbUpdated, err := seedL3(ctx, decision.ResolvedID)
 		if err != nil {
 			return managedDoltProjectIDReport{}, err
 		}
@@ -333,7 +332,7 @@ func applyReconcileDecision(ctx context.Context, fs fsys.FS, scopeRoot string, m
 		if identityUpdated {
 			emitProjectIdentityStampedEvent(rec, cityPath, scopeRoot, "migrated_from_metadata", "L1", "", decision.ResolvedID)
 		}
-		dbUpdated, err := seedDatabaseProjectID(ctx, db, decision.ResolvedID)
+		dbUpdated, err := seedL3(ctx, decision.ResolvedID)
 		if err != nil {
 			return managedDoltProjectIDReport{}, err
 		}
@@ -366,7 +365,7 @@ func applyReconcileDecision(ctx context.Context, fs fsys.FS, scopeRoot string, m
 		if err != nil {
 			return managedDoltProjectIDReport{}, err
 		}
-		identityUpdated, metaUpdated, dbUpdated, err := writeProjectIdentityToAllLayers(ctx, fs, scopeRoot, db, projectID)
+		identityUpdated, metaUpdated, dbUpdated, err := writeProjectIdentityToAllLayers(ctx, fs, scopeRoot, projectID, seedL3)
 		if err != nil {
 			return managedDoltProjectIDReport{}, err
 		}
@@ -445,7 +444,7 @@ func writeProjectIdentityIfNeeded(fs fsys.FS, scopeRoot string, id string) (bool
 	return true, nil
 }
 
-func writeProjectIdentityToAllLayers(ctx context.Context, fs fsys.FS, scopeRoot string, db *sql.DB, id string) (l1Updated, l2Updated, l3Updated bool, err error) {
+func writeProjectIdentityToAllLayers(ctx context.Context, fs fsys.FS, scopeRoot string, id string, seedL3 func(context.Context, string) (bool, error)) (l1Updated, l2Updated, l3Updated bool, err error) {
 	l1Updated, err = writeProjectIdentityIfNeeded(fs, scopeRoot, id)
 	if err != nil {
 		return false, false, false, err
@@ -455,7 +454,7 @@ func writeProjectIdentityToAllLayers(ctx context.Context, fs fsys.FS, scopeRoot 
 	if err != nil {
 		return l1Updated, false, false, err
 	}
-	l3Updated, err = seedDatabaseProjectID(ctx, db, id)
+	l3Updated, err = seedL3(ctx, id)
 	if err != nil {
 		return l1Updated, l2Updated, false, err
 	}
@@ -491,6 +490,10 @@ func formatLegacyL2L3MismatchError(l2, l3 string) error {
 	)
 }
 
+// managedDoltOpenDatabase returns the shared pooled *sql.DB for a managed
+// Dolt database. The handle is owned by internal/doltpool — callers must
+// NOT Close it. The previous per-call sql.Open+Close pattern here was the
+// 2,618-TIME_WAIT hotspot (city-scale plan item 1.2).
 func managedDoltOpenDatabase(host, port, user, database string) (*sql.DB, error) {
 	host = managedDoltConnectHost(host)
 	port = strings.TrimSpace(port)
@@ -505,17 +508,7 @@ func managedDoltOpenDatabase(host, port, user, database string) (*sql.DB, error)
 	if database == "" {
 		return nil, fmt.Errorf("missing database")
 	}
-	cfg := mysql.NewConfig()
-	cfg.User = user
-	cfg.Passwd = managedDoltPassword()
-	cfg.Net = "tcp"
-	cfg.Addr = host + ":" + port
-	cfg.DBName = database
-	cfg.Timeout = 5 * time.Second
-	cfg.ReadTimeout = 5 * time.Second
-	cfg.WriteTimeout = 5 * time.Second
-	cfg.AllowNativePasswords = true
-	return sql.Open("mysql", cfg.FormatDSN())
+	return doltpool.Open(host, port, user, managedDoltPassword(), database)
 }
 
 func readManagedMetadataProjectID(metadataPath string) (string, error) {

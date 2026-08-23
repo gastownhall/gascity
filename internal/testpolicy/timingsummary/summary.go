@@ -12,12 +12,34 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"sort"
+	"strconv"
 	"strings"
 )
 
-const summaryLimit = 10
+const (
+	timingArtifactSchema = 1
+	summaryLimit         = 10
+)
+
+type outputFormat uint8
+
+const (
+	formatMarkdown outputFormat = iota
+	formatJSON
+)
+
+type runOptions struct {
+	format          outputFormat
+	roots           []string
+	historyPath     string
+	runEnvelopePath string
+	retainRuns      int
+	formatSet       bool
+	historySet      bool
+	envelopeSet     bool
+	retentionSet    bool
+}
 
 type artifact struct {
 	Schema     int            `json:"schema"`
@@ -50,74 +72,142 @@ type artifactUnit struct {
 	DurationSeconds float64 `json:"duration_seconds"`
 }
 
-type artifactIdentity struct {
-	Workflow   string
-	RunID      string
-	RunAttempt string
-	Job        string
-	ShardID    string
-	Variant    string
-}
-
-type profileKey struct {
-	Job      string
-	Variant  string
-	Label    string
-	OS       string
-	Arch     string
-	CPUCount int
-}
-
-type unitAccumulator struct {
-	passes   []float64
-	failures int
-	skips    int
-}
-
-type unitSummary struct {
-	unitID   string
-	passes   int
-	failures int
-	skips    int
-	p50      float64
-	p75      float64
-	p95      float64
-	variance float64
-}
-
-type profileSummary struct {
-	profile  profileKey
-	units    []unitSummary
-	passes   int
-	failures int
-	skips    int
-}
-
-// Run loads timing artifacts from args, writes a deterministic Markdown
-// summary to stdout, and returns a process-style exit code.
+// Run loads timing artifacts from args, writes a deterministic Markdown or
+// JSON summary to stdout, and returns a process-style exit code.
 func Run(args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 {
-		_, _ = fmt.Fprintln(stderr, "usage: test-timing-summary <artifact-root> [<artifact-root> ...]")
+	options, err := parseRunArgs(args)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "timing summary: %v\n", err)
+		return 2
+	}
+	if len(options.roots) == 0 {
+		_, _ = fmt.Fprintln(stderr, "usage: test-timing-summary [options] <artifact-root> [<artifact-root> ...]")
 		return 2
 	}
 
-	artifacts, duplicateCount, err := loadArtifacts(args)
+	var snapshot Snapshot
+	if options.historySet {
+		envelope, decodeErr := decodeRunEnvelope(options.runEnvelopePath)
+		if decodeErr != nil {
+			err = decodeErr
+		} else {
+			snapshot, err = UpdateHistory(options.historyPath, envelope, options.retainRuns, options.roots)
+		}
+	} else {
+		snapshot, err = BuildSnapshot(options.roots)
+	}
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "timing summary: %v\n", err)
 		return 1
 	}
 
-	profiles, err := aggregate(artifacts)
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "timing summary: %v\n", err)
-		return 1
+	if options.format == formatJSON {
+		if err := json.NewEncoder(stdout).Encode(snapshot); err != nil {
+			_, _ = fmt.Fprintf(stderr, "timing summary: write output: %v\n", err)
+			return 1
+		}
+		return 0
 	}
-	output := renderMarkdown(profiles, len(artifacts), duplicateCount)
-	if _, err := io.WriteString(stdout, output); err != nil {
+	if _, err := io.WriteString(stdout, renderMarkdown(snapshot)); err != nil {
 		_, _ = fmt.Fprintf(stderr, "timing summary: write output: %v\n", err)
 		return 1
 	}
 	return 0
+}
+
+func parseRunArgs(args []string) (runOptions, error) {
+	options := runOptions{format: formatMarkdown, roots: make([]string, 0, len(args))}
+	for index := 0; index < len(args); index++ {
+		argument := args[index]
+		name, value, recognized, consumedNext, err := parseRunFlag(args, index)
+		if err != nil {
+			return runOptions{}, err
+		}
+		if !recognized {
+			options.roots = append(options.roots, argument)
+			continue
+		}
+		if consumedNext {
+			index++
+		}
+		switch name {
+		case "--format":
+			if options.formatSet {
+				return runOptions{}, errors.New("--format may be specified only once")
+			}
+			options.formatSet = true
+			switch value {
+			case "markdown":
+				options.format = formatMarkdown
+			case "json":
+				options.format = formatJSON
+			default:
+				return runOptions{}, fmt.Errorf("unsupported format %q", value)
+			}
+		case "--update-history":
+			if options.historySet {
+				return runOptions{}, errors.New("--update-history may be specified only once")
+			}
+			options.historySet = true
+			options.historyPath = value
+		case "--run-envelope":
+			if options.envelopeSet {
+				return runOptions{}, errors.New("--run-envelope may be specified only once")
+			}
+			options.envelopeSet = true
+			options.runEnvelopePath = value
+		case "--retain-runs":
+			if options.retentionSet {
+				return runOptions{}, errors.New("--retain-runs may be specified only once")
+			}
+			options.retentionSet = true
+			retainRuns, parseErr := strconv.Atoi(value)
+			if parseErr != nil || retainRuns <= 0 {
+				return runOptions{}, errors.New("--retain-runs must be a positive integer")
+			}
+			options.retainRuns = retainRuns
+		}
+	}
+	mutationFlags := 0
+	for _, set := range []bool{options.historySet, options.envelopeSet, options.retentionSet} {
+		if set {
+			mutationFlags++
+		}
+	}
+	if mutationFlags != 0 && mutationFlags != 3 {
+		return runOptions{}, errors.New("--update-history, --run-envelope, and --retain-runs must be specified together")
+	}
+	return options, nil
+}
+
+func parseRunFlag(args []string, index int) (name, value string, recognized, consumedNext bool, err error) {
+	argument := args[index]
+	for _, candidate := range []string{"--format", "--update-history", "--run-envelope", "--retain-runs"} {
+		if argument == candidate {
+			if index+1 >= len(args) || args[index+1] == "" || isRunFlag(args[index+1]) {
+				return "", "", true, false, fmt.Errorf("%s requires a value", candidate)
+			}
+			return candidate, args[index+1], true, true, nil
+		}
+		prefix := candidate + "="
+		if strings.HasPrefix(argument, prefix) {
+			value := strings.TrimPrefix(argument, prefix)
+			if value == "" {
+				return "", "", true, false, fmt.Errorf("%s requires a value", candidate)
+			}
+			return candidate, value, true, false, nil
+		}
+	}
+	return "", "", false, false, nil
+}
+
+func isRunFlag(argument string) bool {
+	for _, candidate := range []string{"--format", "--update-history", "--run-envelope", "--retain-runs"} {
+		if argument == candidate || strings.HasPrefix(argument, candidate+"=") {
+			return true
+		}
+	}
+	return false
 }
 
 func loadArtifacts(roots []string) ([]artifact, int, error) {
@@ -129,8 +219,8 @@ func loadArtifacts(roots []string) ([]artifact, int, error) {
 		return nil, 0, errors.New("no JSON timing artifacts found")
 	}
 
-	seen := make(map[artifactIdentity]artifact, len(paths))
-	seenPath := make(map[artifactIdentity]string, len(paths))
+	seen := make(map[ArtifactIdentity]artifact, len(paths))
+	seenPath := make(map[ArtifactIdentity]string, len(paths))
 	artifacts := make([]artifact, 0, len(paths))
 	duplicateCount := 0
 	for _, path := range paths {
@@ -138,7 +228,7 @@ func loadArtifacts(roots []string) ([]artifact, int, error) {
 		if err != nil {
 			return nil, 0, err
 		}
-		identity := artifactIdentity{
+		identity := ArtifactIdentity{
 			Workflow: item.Workflow, RunID: item.RunID, RunAttempt: item.RunAttempt,
 			Job: item.Job, ShardID: item.ShardID, Variant: item.Variant,
 		}
@@ -198,7 +288,7 @@ func decodeArtifact(path string) (artifact, error) {
 	if envelope.Schema == nil {
 		return artifact{}, fmt.Errorf("validate %s: schema is required", path)
 	}
-	if *envelope.Schema != 1 {
+	if *envelope.Schema != timingArtifactSchema {
 		return artifact{}, fmt.Errorf("validate %s: unsupported schema %d", path, *envelope.Schema)
 	}
 
@@ -293,85 +383,9 @@ func validateUnit(unit artifactUnit) error {
 	return nil
 }
 
-func formatIdentity(identity artifactIdentity) string {
+func formatIdentity(identity ArtifactIdentity) string {
 	return fmt.Sprintf("workflow=%q run=%q attempt=%q job=%q shard=%q variant=%q",
 		identity.Workflow, identity.RunID, identity.RunAttempt, identity.Job, identity.ShardID, identity.Variant)
-}
-
-func aggregate(artifacts []artifact) ([]profileSummary, error) {
-	byProfile := make(map[profileKey]map[string]*unitAccumulator)
-	for _, item := range artifacts {
-		profile := profileKey{
-			Job: item.Job, Variant: item.Variant, Label: item.Runner.Label,
-			OS: item.Runner.OS, Arch: item.Runner.Arch, CPUCount: item.Runner.CPUCount,
-		}
-		units := byProfile[profile]
-		if units == nil {
-			units = make(map[string]*unitAccumulator)
-			byProfile[profile] = units
-		}
-		for _, unit := range item.Units {
-			if unit.Kind != "test" || unit.Subtest != "" {
-				continue
-			}
-			stats := units[unit.UnitID]
-			if stats == nil {
-				stats = &unitAccumulator{}
-				units[unit.UnitID] = stats
-			}
-			switch unit.Outcome {
-			case "pass":
-				stats.passes = append(stats.passes, unit.DurationSeconds)
-			case "fail":
-				stats.failures++
-			case "skip":
-				stats.skips++
-			}
-		}
-	}
-
-	profileKeys := make([]profileKey, 0, len(byProfile))
-	for profile := range byProfile {
-		profileKeys = append(profileKeys, profile)
-	}
-	sort.Slice(profileKeys, func(i, j int) bool { return compareProfile(profileKeys[i], profileKeys[j]) < 0 })
-
-	profiles := make([]profileSummary, 0, len(profileKeys))
-	for _, profile := range profileKeys {
-		accumulated := byProfile[profile]
-		units := make([]unitSummary, 0, len(accumulated))
-		var totalPasses, totalFailures, totalSkips int
-		unitIDs := make([]string, 0, len(accumulated))
-		for unitID := range accumulated {
-			unitIDs = append(unitIDs, unitID)
-		}
-		sort.Strings(unitIDs)
-		for _, unitID := range unitIDs {
-			stats := accumulated[unitID]
-			totalPasses += len(stats.passes)
-			totalFailures += stats.failures
-			totalSkips += stats.skips
-			if len(stats.passes) == 0 {
-				units = append(units, unitSummary{unitID: unitID, failures: stats.failures, skips: stats.skips})
-				continue
-			}
-			passes := slices.Clone(stats.passes)
-			sort.Float64s(passes)
-			variance, err := populationVariance(passes)
-			if err != nil {
-				return nil, fmt.Errorf("aggregate %q: %w", unitID, err)
-			}
-			units = append(units, unitSummary{
-				unitID: unitID, passes: len(passes), failures: stats.failures, skips: stats.skips,
-				p50: nearestRank(passes, 0.50), p75: nearestRank(passes, 0.75),
-				p95: nearestRank(passes, 0.95), variance: variance,
-			})
-		}
-		profiles = append(profiles, profileSummary{
-			profile: profile, units: units, passes: totalPasses, failures: totalFailures, skips: totalSkips,
-		})
-	}
-	return profiles, nil
 }
 
 func nearestRank(sortedSamples []float64, percentile float64) float64 {
@@ -418,56 +432,56 @@ func finite(value float64) bool {
 	return !math.IsNaN(value) && !math.IsInf(value, 0)
 }
 
-func compareProfile(left, right profileKey) int {
-	leftFields := []string{left.Job, left.Variant, left.Label, left.OS, left.Arch}
-	rightFields := []string{right.Job, right.Variant, right.Label, right.OS, right.Arch}
-	for index := range leftFields {
-		if result := strings.Compare(leftFields[index], rightFields[index]); result != 0 {
-			return result
-		}
-	}
-	return left.CPUCount - right.CPUCount
-}
-
-func renderMarkdown(profiles []profileSummary, artifactCount, duplicateCount int) string {
+func renderMarkdown(snapshot Snapshot) string {
 	var output strings.Builder
 	output.WriteString("# Go test timing summary\n\n")
 	fmt.Fprintf(&output, "Analyzed %d unique schema-v1 %s; %d duplicate %s ignored.\n\n",
-		artifactCount, plural(artifactCount, "artifact", "artifacts"), duplicateCount,
-		plural(duplicateCount, "download", "downloads"))
+		snapshot.UniqueArtifactCount, plural(snapshot.UniqueArtifactCount, "artifact", "artifacts"), snapshot.DuplicateArtifactCount,
+		plural(snapshot.DuplicateArtifactCount, "download", "downloads"))
 	output.WriteString("Rankings use successful durations from top-level tests only. Package totals and nested subtests are excluded. Profiles are never mixed.\n\n")
 
-	for index, summary := range profiles {
+	for index, profile := range snapshot.Profiles {
 		fmt.Fprintf(&output, "## Profile %d\n\n", index+1)
 		output.WriteString("| Job | Variant | Runner label | OS | Arch | CPUs |\n")
 		output.WriteString("| --- | --- | --- | --- | --- | ---: |\n")
 		fmt.Fprintf(&output, "| %s | %s | %s | %s | %s | %d |\n\n",
-			codeCell(summary.profile.Job), codeCell(summary.profile.Variant), codeCell(summary.profile.Label),
-			codeCell(summary.profile.OS), codeCell(summary.profile.Arch), summary.profile.CPUCount)
+			codeCell(profile.Job), codeCell(profile.Variant), codeCell(profile.Runner.Label),
+			codeCell(profile.Runner.OS), codeCell(profile.Runner.Arch), profile.Runner.CPUCount)
+		passes, failures, skips := profileOutcomeCounts(profile.Units)
 		fmt.Fprintf(&output, "Top-level outcomes: %d pass, %d fail, %d skip.\n\n",
-			summary.passes, summary.failures, summary.skips)
+			passes, failures, skips)
 
-		writeSlowestTable(&output, summary.units)
-		writeVarianceTable(&output, summary.units)
+		writeSlowestTable(&output, profile.Units)
+		writeVarianceTable(&output, profile.Units)
 	}
 	return output.String()
 }
 
-func writeSlowestTable(output *strings.Builder, units []unitSummary) {
+func profileOutcomeCounts(units []UnitHistory) (int, int, int) {
+	var passes, failures, skips int
+	for _, unit := range units {
+		passes += unit.Passes
+		failures += unit.Failures
+		skips += unit.Skips
+	}
+	return passes, failures, skips
+}
+
+func writeSlowestTable(output *strings.Builder, units []UnitHistory) {
 	output.WriteString("### Ten slowest top-level tests\n\n")
 	output.WriteString("| Runnable unit | Pass | Fail | Skip | p50 | p75 | p95 |\n")
 	output.WriteString("| --- | ---: | ---: | ---: | ---: | ---: | ---: |\n")
-	ordered := make([]unitSummary, 0, len(units))
+	ordered := make([]UnitHistory, 0, len(units))
 	for _, unit := range units {
-		if unit.passes > 0 {
+		if unit.Passes > 0 {
 			ordered = append(ordered, unit)
 		}
 	}
 	sort.Slice(ordered, func(i, j int) bool {
-		if ordered[i].p95 != ordered[j].p95 {
-			return ordered[i].p95 > ordered[j].p95
+		if *ordered[i].DurationSecondsP95 != *ordered[j].DurationSecondsP95 {
+			return *ordered[i].DurationSecondsP95 > *ordered[j].DurationSecondsP95
 		}
-		return ordered[i].unitID < ordered[j].unitID
+		return ordered[i].UnitID < ordered[j].UnitID
 	})
 	if len(ordered) == 0 {
 		output.WriteString("| _No top-level tests with successful samples_ | 0 | 0 | 0 | — | — | — |\n\n")
@@ -475,26 +489,27 @@ func writeSlowestTable(output *strings.Builder, units []unitSummary) {
 	}
 	for _, unit := range ordered[:min(summaryLimit, len(ordered))] {
 		fmt.Fprintf(output, "| `%s` | %d | %d | %d | %.3fs | %.3fs | %.3fs |\n",
-			escapeCode(unit.unitID), unit.passes, unit.failures, unit.skips, unit.p50, unit.p75, unit.p95)
+			escapeCode(unit.UnitID), unit.Passes, unit.Failures, unit.Skips,
+			*unit.DurationSecondsP50, *unit.DurationSecondsP75, *unit.DurationSecondsP95)
 	}
 	output.WriteByte('\n')
 }
 
-func writeVarianceTable(output *strings.Builder, units []unitSummary) {
+func writeVarianceTable(output *strings.Builder, units []UnitHistory) {
 	output.WriteString("### Ten highest-variance top-level tests\n\n")
 	output.WriteString("| Runnable unit | Pass | Fail | Skip | Population variance (s²) | p95 |\n")
 	output.WriteString("| --- | ---: | ---: | ---: | ---: | ---: |\n")
-	eligible := make([]unitSummary, 0, len(units))
+	eligible := make([]UnitHistory, 0, len(units))
 	for _, unit := range units {
-		if unit.passes >= 2 {
+		if unit.Passes >= 2 {
 			eligible = append(eligible, unit)
 		}
 	}
 	sort.Slice(eligible, func(i, j int) bool {
-		if eligible[i].variance != eligible[j].variance {
-			return eligible[i].variance > eligible[j].variance
+		if *eligible[i].DurationSecondsPopulationVariance != *eligible[j].DurationSecondsPopulationVariance {
+			return *eligible[i].DurationSecondsPopulationVariance > *eligible[j].DurationSecondsPopulationVariance
 		}
-		return eligible[i].unitID < eligible[j].unitID
+		return eligible[i].UnitID < eligible[j].UnitID
 	})
 	if len(eligible) == 0 {
 		output.WriteString("| _At least two successful samples are required_ | 0 | 0 | 0 | — | — |\n\n")
@@ -502,7 +517,8 @@ func writeVarianceTable(output *strings.Builder, units []unitSummary) {
 	}
 	for _, unit := range eligible[:min(summaryLimit, len(eligible))] {
 		fmt.Fprintf(output, "| `%s` | %d | %d | %d | %.6f | %.3fs |\n",
-			escapeCode(unit.unitID), unit.passes, unit.failures, unit.skips, unit.variance, unit.p95)
+			escapeCode(unit.UnitID), unit.Passes, unit.Failures, unit.Skips,
+			*unit.DurationSecondsPopulationVariance, *unit.DurationSecondsP95)
 	}
 	output.WriteByte('\n')
 }

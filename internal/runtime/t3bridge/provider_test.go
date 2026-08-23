@@ -391,6 +391,37 @@ func TestBuildThreadEnv_MirrorsDoltEndpointForNonDoltliteSessions(t *testing.T) 
 	}
 }
 
+// TestBuildThreadEnv_PreservesHolderTokenAlignedToInstanceToken proves the GC_
+// allowlist does not strip the incarnation credential: BEADS_HOLDER_TOKEN
+// (BEADS_-prefixed, so dropped by the allowlist) is realigned to the surviving
+// GC_INSTANCE_TOKEN on BOTH the doltlite and normal return paths, so the visible
+// T3 thread presents the same holder token bd would see from any other provider.
+func TestBuildThreadEnv_PreservesHolderTokenAlignedToInstanceToken(t *testing.T) {
+	for _, backend := range []string{"doltlite", "dolt"} {
+		env := buildThreadEnv(map[string]string{
+			"GC_BEADS_BACKEND":   backend,
+			"GC_INSTANCE_TOKEN":  "tok-abc",
+			"BEADS_HOLDER_TOKEN": "stale-mismatch", // BEADS_-prefixed: stripped, then realigned
+			"GC_SESSION_NAME":    "gc--worker",
+		})
+		if env["BEADS_HOLDER_TOKEN"] != "tok-abc" {
+			t.Errorf("backend=%s: BEADS_HOLDER_TOKEN = %q, want realigned to GC_INSTANCE_TOKEN tok-abc", backend, env["BEADS_HOLDER_TOKEN"])
+		}
+		if env["GC_INSTANCE_TOKEN"] != "tok-abc" {
+			t.Errorf("backend=%s: GC_INSTANCE_TOKEN = %q, want tok-abc", backend, env["GC_INSTANCE_TOKEN"])
+		}
+	}
+}
+
+// TestBuildThreadEnv_NoHolderTokenWithoutInstanceToken proves the holder token is
+// not fabricated when there is no incarnation to align to.
+func TestBuildThreadEnv_NoHolderTokenWithoutInstanceToken(t *testing.T) {
+	env := buildThreadEnv(map[string]string{"GC_SESSION_NAME": "gc--worker"})
+	if _, ok := env["BEADS_HOLDER_TOKEN"]; ok {
+		t.Errorf("BEADS_HOLDER_TOKEN set without a GC_INSTANCE_TOKEN: %q", env["BEADS_HOLDER_TOKEN"])
+	}
+}
+
 func TestBuildGCMetadata_UsesFirstClassT3BridgeProviderName(t *testing.T) {
 	meta := buildGCMetadata(StartupEnvelope{}, "codex", nil)
 	if got := meta["gc.provider"]; got != "t3bridge" {
@@ -970,5 +1001,40 @@ func TestResolveConfigProviderModel_PrefersStoredEnvelopeIntent(t *testing.T) {
 	}
 	if model != "gpt-5.4-mini" {
 		t.Fatalf("model = %q, want gpt-5.4-mini", model)
+	}
+}
+
+// A transiently unreachable bridge is a failed observation, not an
+// authoritative claim that no T3 sessions are running.
+func TestListRunningSoftUnavailableIsRuntimeUnavailable(t *testing.T) {
+	resetBridgeAuthCacheForTest(t)
+	oldDefaults := defaultWSURLCandidates
+	defaultWSURLCandidates = nil
+	t.Cleanup(func() {
+		defaultWSURLCandidates = oldDefaults
+	})
+
+	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
+	t.Setenv("T3_HOME", t.TempDir())
+	t.Setenv("T3_WS_URL", "ws://127.0.0.1:1/ws")
+	t.Setenv("GC_T3BRIDGE_STATE_DIR", t.TempDir())
+
+	p := &Provider{
+		watchers:     make(map[string]context.CancelFunc),
+		recentStarts: make(map[string]time.Time),
+	}
+
+	names, err := p.ListRunning("")
+	if err == nil {
+		t.Fatalf("ListRunning during bridge outage returned (%v, nil); empty success would be read as authoritative absence", names)
+	}
+	if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("ListRunning error = %v, want errors.Is(runtime.ErrRuntimeUnavailable)", err)
+	}
+	if runtime.IsPartialListError(err) {
+		t.Fatalf("ListRunning error = %v, want total observation failure rather than partial usable results", err)
+	}
+	if len(names) != 0 {
+		t.Fatalf("ListRunning names = %v, want none alongside total observation failure", names)
 	}
 }

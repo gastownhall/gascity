@@ -36,7 +36,7 @@ func TestDoltliteCountUnsupportedForSeek(t *testing.T) {
 	}
 }
 
-func TestFilterDoltliteBeforeTimesAppliesSeek(t *testing.T) {
+func TestDoltliteFilterBeforeTimesAppliesSeek(t *testing.T) {
 	ts := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	rows := []Bead{
 		{ID: "gc-3", CreatedAt: ts.Add(2 * time.Second)}, // newer than boundary — drop

@@ -354,7 +354,7 @@ func (d *nudgeEventDispatcher) runPass(sessionFilter string, retriesLeft int) {
 		}
 		return false, nil
 	}
-	if _, err := deliverPendingQueuedNudges(d.cityPath, cfg, sessStore, sp, sessionBeads, sessionFilter, deliver); err != nil {
+	if _, err := deliverPendingQueuedNudges(d.cityPath, cfg, sessStore, sp, sessionBeads, sessionFilter, nil, deliver); err != nil {
 		fmt.Fprintf(d.stderr, "%s: nudge event dispatch: %v\n", d.logPrefix, err) //nolint:errcheck // best-effort stderr
 	}
 }

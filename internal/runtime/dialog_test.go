@@ -56,6 +56,11 @@ func TestContainsWorkspaceTrustDialog(t *testing.T) {
 			want:    true,
 		},
 		{
+			name:    "pi trust dialog",
+			content: "Trust project folder?\n/home/user/project\n\nThis allows pi to load .pi settings and resources, install missing project packages, and execute project extensions.\n\n\u2192 Trust\n  Trust parent folder (/home/user)\n  Trust (this session only)\n  Do not trust\n  Do not trust (this session only)",
+			want:    true,
+		},
+		{
 			name:    "normal prompt text",
 			content: "> waiting for input",
 			want:    false,
@@ -112,6 +117,32 @@ func TestAcceptStartupDialogsAcceptsGeminiTrustDialog(t *testing.T) {
 				return "Do you trust the files in this folder?\n● 1. Trust folder (city)\n  2. Trust parent folder\n  3. Don't trust", nil
 			}
 			return "Type your message or @path/to/file", nil
+		},
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogs() error = %v", err)
+	}
+	if !reflect.DeepEqual(sent, []string{"Enter"}) {
+		t.Fatalf("sent keys = %v, want [Enter]", sent)
+	}
+}
+
+func TestAcceptStartupDialogsAcceptsPiTrustDialog(t *testing.T) {
+	withZeroDialogTimings(t)
+	dialogPollTimeout = time.Second
+
+	var sent []string
+	err := AcceptStartupDialogs(
+		context.Background(),
+		func(_ int) (string, error) {
+			if len(sent) == 0 {
+				return "Trust project folder?\n/home/user/project\n\nThis allows pi to load .pi settings and resources, install missing project packages, and execute project extensions.\n\n\u2192 Trust\n  Trust parent folder (/home/user)\n  Trust (this session only)\n  Do not trust\n  Do not trust (this session only)", nil
+			}
+			return "\u276f ", nil
 		},
 		func(keys ...string) error {
 			sent = append(sent, keys...)
@@ -310,6 +341,47 @@ func TestAcceptStartupDialogsTrustsCodexHookReviewDialog(t *testing.T) {
 	}
 	if got, want := strings.Join(sent, ","), "Down,Enter"; got != want {
 		t.Fatalf("sent keys = %q, want %q", got, want)
+	}
+}
+
+func TestAcceptStartupDialogsTrustsCompactCodexHookReviewDialog(t *testing.T) {
+	withZeroDialogTimings(t)
+	dialogPollTimeout = time.Second
+
+	var sent []string
+	err := AcceptStartupDialogs(
+		context.Background(),
+		func(_ int) (string, error) {
+			if len(sent) == 0 {
+				return "⚠ 8 hooks need review before they can run.\nPress t to trust all; enter to review hooks; esc to skip", nil
+			}
+			return "› Implement {feature}", nil
+		},
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogs returned error: %v", err)
+	}
+	if got, want := strings.Join(sent, ","), "Down,Enter"; got != want {
+		t.Fatalf("sent keys = %q, want %q", got, want)
+	}
+}
+
+func TestContainsCodexHookReviewDialogRequiresAllCompactSignals(t *testing.T) {
+	for name, content := range map[string]string{
+		"missing title":  "Press t to trust all; enter to review hooks; esc to skip",
+		"missing trust":  "8 hooks need review before they can run; enter to review hooks; esc to skip",
+		"missing review": "8 hooks need review before they can run; press t to trust all; esc to skip",
+		"unrelated":      "trust all configured hooks after entering review mode",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if containsCodexHookReviewDialog(content) {
+				t.Fatalf("containsCodexHookReviewDialog(%q) = true, want false", content)
+			}
+		})
 	}
 }
 
@@ -1335,6 +1407,221 @@ func TestAcceptStartupDialogsDismissesRateLimitDialog(t *testing.T) {
 	// Should select "Stop" (Down + Enter).
 	if !reflect.DeepEqual(sent, []string{"Down", "Enter"}) {
 		t.Fatalf("sent keys = %v, want [Down Enter]", sent)
+	}
+}
+
+// claudeThemePickerPane is the first screen Claude Code v2.1.197 draws in a box
+// with no ~/.claude config, captured from a Crucible sandbox. Container runtimes
+// hand every session a fresh box, so this is not a once-per-machine prompt — it
+// blocks EVERY start until something answers it.
+const claudeThemePickerPane = `Welcome to Claude Code v2.1.197
+
+ Let's get started.
+
+ Choose the text style that looks best with your terminal
+ To change this later, run /theme
+
+   1. Auto (match terminal)
+ ❯ 2. Dark mode ✔
+   3. Light mode
+   4. Dark mode (colorblind-friendly)
+   5. Light mode (colorblind-friendly)
+   6. Dark mode (ANSI colors only)
+   7. Light mode (ANSI colors only)
+`
+
+func TestAcceptStartupDialogsAcceptsClaudeThemePicker(t *testing.T) {
+	withZeroDialogTimings(t)
+	dialogPollTimeout = time.Second
+
+	var sent []string
+	err := AcceptStartupDialogs(
+		context.Background(),
+		func(_ int) (string, error) {
+			if len(sent) == 0 {
+				return claudeThemePickerPane, nil
+			}
+			return "user@host $", nil
+		},
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogs() error = %v", err)
+	}
+	if !reflect.DeepEqual(sent, []string{"Enter"}) {
+		t.Fatalf("sent keys = %v, want [Enter] to accept the pre-selected theme", sent)
+	}
+}
+
+// TestAcceptStartupDialogsFromStreamAcceptsClaudeThemePicker covers the theme
+// picker on the production stream path
+// (AcceptStartupDialogsFromStreamWithStatus, dialog.go:150), which the
+// polling-path twin TestAcceptStartupDialogsAcceptsClaudeThemePicker does not
+// exercise. It proves the picker is accepted with Enter and — because the
+// picker must not be mistaken for readiness — the next startup dialog in the
+// same stream (here the Claude resume selector) still advances afterward.
+func TestAcceptStartupDialogsFromStreamAcceptsClaudeThemePicker(t *testing.T) {
+	withZeroDialogTimings(t)
+
+	snapshots := make(chan string, 2)
+	snapshots <- claudeThemePickerPane
+	snapshots <- strings.Join([]string{
+		"This session is 1h 55m old and 212.7k tokens.",
+		"",
+		"❯ 1. Resume from summary (recommended)",
+		"  2. Resume full session as-is",
+		"  3. Don't ask me again",
+		"",
+		"Enter to confirm · Esc to cancel",
+	}, "\n")
+	close(snapshots)
+
+	var sent []string
+	err := AcceptStartupDialogsFromStream(
+		context.Background(),
+		time.Second,
+		snapshots,
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogsFromStream() error = %v", err)
+	}
+	if !reflect.DeepEqual(sent, []string{"Enter", "Down", "Enter"}) {
+		t.Fatalf("sent keys = %v, want [Enter Down Enter] (accept theme, then advance the resume dialog)", sent)
+	}
+}
+
+func TestContainsThemeSelectionDialog(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{name: "captured first-run picker", content: claudeThemePickerPane, want: true},
+		{
+			name:    "prose mentioning a text style is not the picker",
+			content: "I'll choose the text style used by the docs theme.",
+			want:    false,
+		},
+		{
+			name:    "slash-command help is not the picker",
+			content: "  /theme    Change the color theme",
+			want:    false,
+		},
+		{name: "ordinary prompt", content: "user@host $", want: false},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := containsThemeSelectionDialog(tt.content); got != tt.want {
+				t.Fatalf("containsThemeSelectionDialog(%q) = %v, want %v", tt.content, got, tt.want)
+			}
+		})
+	}
+}
+
+// The theme picker's cursor row ("❯ 2. Dark mode ✔") wears the same glyph as a
+// ready input prompt. If readiness detection accepted it, every phase would
+// early-return on a session that is still blocked and the picker would never be
+// answered.
+func TestClaudeThemePickerIsNotMistakenForAReadyPrompt(t *testing.T) {
+	t.Parallel()
+	if containsPromptIndicator(claudeThemePickerPane) {
+		t.Fatal("theme picker pane reads as a ready prompt; the session is still blocked")
+	}
+}
+
+// TestAcceptStartupDialogsWithTimeoutBoundsBlankPaneToOneTimeout pins the whole
+// sequence to a single timeout when the pane never renders anything
+// recognizable — the shape an agent that exits at launch leaves behind, where
+// the in-box tmux server is gone and every capture comes back empty.
+//
+// Per-dialog timeouts made that cost timeout x the number of dialog classes.
+// With the 8s default that is 72s, past the 60s default [session]
+// startup_timeout, so the caller's context expired mid-sequence and a session
+// whose agent had simply died failed as "<some dialog>: context deadline
+// exceeded" — naming whichever dialog the wall-clock landed in.
+func TestAcceptStartupDialogsWithTimeoutBoundsBlankPaneToOneTimeout(t *testing.T) {
+	withZeroDialogTimings(t)
+	dialogPollInterval = 5 * time.Millisecond
+
+	const timeout = 150 * time.Millisecond
+	var sent []string
+	start := time.Now()
+	err := AcceptStartupDialogsWithTimeout(
+		context.Background(),
+		timeout,
+		func(_ int) (string, error) { return "", nil },
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogsWithTimeout() error = %v, want nil", err)
+	}
+	if len(sent) != 0 {
+		t.Fatalf("sent keys = %v, want none on a blank pane", sent)
+	}
+	if elapsed >= 2*timeout {
+		t.Fatalf("blank pane took %v with a %v budget; the sequence is still spending a timeout per dialog class", elapsed, timeout)
+	}
+}
+
+// TestAcceptStartupDialogsWithTimeoutRefreshesBudgetOnProgress guards the other
+// half of the budget: a dialog that only renders after the sequence has already
+// dismissed an earlier one must still be handled. Every dismissal grants a fresh
+// timeout, so a chain of slow-rendering dialogs is not cut off by the bound that
+// stops a dead pane.
+func TestAcceptStartupDialogsWithTimeoutRefreshesBudgetOnProgress(t *testing.T) {
+	withZeroDialogTimings(t)
+	dialogPollInterval = 5 * time.Millisecond
+
+	const timeout = 500 * time.Millisecond
+	const renderDelay = 300 * time.Millisecond
+
+	var sent []string
+	start := time.Now()
+	var trustAccepted time.Time
+	err := AcceptStartupDialogsWithTimeout(
+		context.Background(),
+		timeout,
+		func(_ int) (string, error) {
+			if trustAccepted.IsZero() {
+				if time.Since(start) < renderDelay {
+					return "", nil // agent still booting: nothing on screen yet
+				}
+				return "Quick safety check", nil
+			}
+			if time.Since(trustAccepted) < renderDelay {
+				return "", nil // next dialog has not rendered yet
+			}
+			return "Bypass Permissions mode", nil
+		},
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			if keys[0] == "Enter" && trustAccepted.IsZero() {
+				trustAccepted = time.Now()
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogsWithTimeout() error = %v, want nil", err)
+	}
+	if !reflect.DeepEqual(sent, []string{"Enter", "Down", "Enter"}) {
+		t.Fatalf("sent keys = %v, want [Enter Down Enter] (trust accepted, then bypass warning)", sent)
 	}
 }
 

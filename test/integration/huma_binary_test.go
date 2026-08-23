@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/testutil"
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
 
@@ -258,11 +259,7 @@ func writeSupervisorConfig(t *testing.T, gcHome string, port int) {
 // ~104 chars.
 func shortTempDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", "gcit-")
-	if err != nil {
-		t.Fatalf("short tmp dir: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	dir := testutil.ShortTempDir(t, "gcit-")
 	registerIntegrationDoltSQLServerCleanup(t, dir)
 	return dir
 }
@@ -906,9 +903,13 @@ func TestHumaBinary_SessionMessageAsync(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST /suspend: %v", err)
 	}
+	// Read the body before asserting: a bare status number is not diagnosable
+	// from a CI log, and this assertion has failed in CI with a 500 whose cause
+	// was unrecoverable afterwards.
+	suspBody, _ := io.ReadAll(io.LimitReader(suspResp.Body, 4096))
 	_ = suspResp.Body.Close()
 	if suspResp.StatusCode != http.StatusOK {
-		t.Fatalf("POST /suspend status = %d, want 200", suspResp.StatusCode)
+		t.Fatalf("POST /suspend status = %d, want 200; body=%s", suspResp.StatusCode, strings.TrimSpace(string(suspBody)))
 	}
 	t.Logf("suspended session %q", sessionID)
 

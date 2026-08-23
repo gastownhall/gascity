@@ -637,3 +637,42 @@ func TestLatestOrderFiredAt_StaleEventConsultsLastRun(t *testing.T) {
 		t.Fatalf("latest = %v, want %v (newer order-run history)", got, freshRun)
 	}
 }
+
+func TestOrderFiringCurrent_TimesOutStalledOrderHistory(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, cityPath, "mol-dog-stalled-history", "cron", "0 */4 * * *")
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)},
+		events.Event{Type: events.OrderFired, Subject: "mol-dog-stalled-history", Ts: now.Add(-13 * time.Hour)},
+	)
+
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	check := NewOrderFiringCurrentCheck(cfg, cityPath)
+	check.clock = func() time.Time { return now }
+	check.historyTimeout = 20 * time.Millisecond
+	check.lastRun = func(orders.Order) (time.Time, error) {
+		<-release
+		return time.Time{}, nil
+	}
+
+	result := check.Run(&CheckContext{CityPath: cityPath})
+	if result.Status != StatusError {
+		t.Fatalf("status = %v, want error; msg = %s", result.Status, result.Message)
+	}
+	if !strings.Contains(result.Message, "order history lookup timed out after 20ms") {
+		t.Fatalf("message = %q, want timeout diagnostic", result.Message)
+	}
+	// A slow-but-inconclusive lookup must not gate gc doctor red the same way a
+	// confirmed stale/never-fired order does (#4895): the query timing out proves
+	// nothing about whether orders are actually firing, so it must not report as
+	// SeverityBlocking (the CheckSeverity zero value, which this branch silently
+	// fell into before it explicitly set Severity).
+	if result.Severity != SeverityAdvisory {
+		t.Fatalf("severity = %v, want SeverityAdvisory (a timed-out lookup is inconclusive, not proof of a stale order)", result.Severity)
+	}
+	if !result.TimedOut {
+		t.Fatalf("TimedOut = false, want true so callers (JSON output, doctor summary) can distinguish this from a confirmed failure")
+	}
+}

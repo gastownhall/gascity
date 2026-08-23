@@ -95,17 +95,34 @@ func (m *runTailerManager) ensure(name, eventsPath string) *cityRunTailer {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	t, ok := m.cities[name]
+	if ok && t.eventsPath != eventsPath {
+		// A city name may be unregistered and later registered at another root.
+		// The fold cursor, projector, and all per-run memos are path-bound, so
+		// mutating eventsPath in place would mix two logs. Cancel the old loop and
+		// atomically replace the map entry with a completely fresh tailer.
+		if t.cancel != nil {
+			t.cancel()
+		}
+		m.sessionsCache.discard(name)
+		m.formulaCache.discardMatching(func(key formulaCacheKey) bool {
+			return key.name == name
+		})
+		ok = false
+	}
 	if !ok {
-		t = &cityRunTailer{name: name, eventsPath: eventsPath, mgr: m, readyCh: make(chan struct{}), snapshotCache: newRunSnapshotCache(), detailMemo: newRunDetailMemo(), unknownRuns: newUnknownRunGrace()}
+		t = &cityRunTailer{name: name, eventsPath: eventsPath, mgr: m, readyCh: make(chan struct{}), doneCh: make(chan struct{}), snapshotCache: newRunSnapshotCache(), detailMemo: newRunDetailMemo(), unknownRuns: newUnknownRunGrace()}
 		m.cities[name] = t
 	}
 	if m.enabled && m.ctx != nil && !t.started {
+		ctx, cancel := context.WithCancel(m.ctx)
 		t.started = true
+		t.cancel = cancel
 		m.wg.Add(1)
-		go func() {
+		go func(tailer *cityRunTailer) {
 			defer m.wg.Done()
-			t.loop(m.ctx, m.wg)
-		}()
+			defer close(tailer.doneCh)
+			tailer.loop(ctx, m.wg)
+		}(t)
 	}
 	return t
 }
@@ -119,6 +136,8 @@ type cityRunTailer struct {
 
 	started bool
 	readyCh chan struct{} // closed once the cold replay attempt completes
+	doneCh  chan struct{} // closed after the path-bound loop exits
+	cancel  context.CancelFunc
 
 	// snapshotCache caches the folded run snapshot (and the formula target
 	// derived from it) per fold generation so a same-generation repeat request
@@ -129,16 +148,26 @@ type cityRunTailer struct {
 	detailMemo    *runDetailMemo
 
 	// unknownRuns grants a truly-unknown runId (a run slung but not yet folded
-	// into this projection) a warming-grace window on the detail endpoints
+	// into this projection) a warming-grace window on point-read endpoints
 	// before the terminal 404. See rundetail_grace.go.
 	unknownRuns *unknownRunGrace
 
 	mu      sync.RWMutex
 	summary runproj.RunSummary
+	census  runproj.CanonicalRunStatusCounts
 	marks   map[string]runproj.LaneProgressMark
 	beads   []beads.Bead
 	lastSeq uint64
-	ready   bool
+	// decodeMisses is published with beads and lastSeq so every warm consumer
+	// observes one coherent projection generation.
+	decodeMisses int
+	// coldReplayIncomplete is sticky for this path-bound tailer's lifetime: a
+	// failed full replay cannot be repaired by reading only the active cursor.
+	// incrementalReadIncomplete is recoverable because its cursor is preserved;
+	// one complete successful poll proves that failed interval was replayed.
+	coldReplayIncomplete      bool
+	incrementalReadIncomplete bool
+	ready                     bool
 
 	// subMu guards the per-run detail-stream subscriber registry. It is a distinct
 	// lock from mu so a stream broadcast never contends with the hot fold-publish
@@ -159,6 +188,11 @@ type tailState struct {
 	// loggedDecodeMisses is the projector's cumulative bead.* decode-miss count
 	// already surfaced to the log, so logDecodeMisses only warns on the delta.
 	loggedDecodeMisses int
+	// Failure latches are loop-owned and suppress one-second log floods. Each is
+	// cleared only after the corresponding read succeeds, so a later recurrence
+	// is logged as a new transition.
+	catchUpReadFailed bool
+	tailReadFailed    bool
 }
 
 // captureTailCursor snapshots the active log's byte size and identity from a
@@ -182,6 +216,12 @@ func captureTailCursor(path string) *tailState {
 // loop cold-replays the event log, publishes the bead-derived summary, then
 // tails newly appended events and republishes on each change. All folding and
 // summary-building happens on loop-owned locals; only the publish takes the lock.
+// readRunColdLoad is indirected so a test can hold the cold replay in flight and
+// prove RunProjection serves a non-blocking warming snapshot.
+var readRunColdLoad = func(proj *runproj.Projector, path string) error {
+	return proj.ColdLoad(path)
+}
+
 func (t *cityRunTailer) loop(ctx context.Context, wg *sync.WaitGroup) {
 	proj := runproj.NewProjector()
 
@@ -194,7 +234,10 @@ func (t *cityRunTailer) loop(ctx context.Context, wg *sync.WaitGroup) {
 	// captureTailCursor reads the size and identity from one stat so a rotation
 	// cannot pair the old file's offset with the fresh file's identity.
 	st := captureTailCursor(t.eventsPath)
-	loadErr := proj.ColdLoad(t.eventsPath)
+	loadErr := readRunColdLoad(proj, t.eventsPath)
+	if loadErr != nil {
+		log.Printf("run-tailer: city %q cold replay failed: %v", t.name, loadErr)
+	}
 	st.marks = t.build(proj, nil, loadErr)
 	t.logDecodeMisses(proj, st)
 	close(t.readyCh)
@@ -272,6 +315,10 @@ func (t *cityRunTailer) logDecodeMisses(proj *runproj.Projector, st *tailState) 
 // events. Production always uses events.ReadFilteredWithInFlight.
 var readRotationCatchUp = events.ReadFilteredWithInFlight
 
+// readTailEvents is the active-log incremental read, indirected so a test can
+// prove a transient failure preserves the cursor and marks the snapshot partial.
+var readTailEvents = events.ReadFrom
+
 // foldNext performs one tail poll: it folds newly appended events into the
 // projector and republishes when a bead snapshot changed. It handles active-log
 // rotation by file identity: when the recorder renames the active file to an
@@ -284,6 +331,15 @@ var readRotationCatchUp = events.ReadFilteredWithInFlight
 // drops the overlap the catch-up already folded.
 func (t *cityRunTailer) foldNext(proj *runproj.Projector, st *tailState) {
 	info, statErr := os.Stat(t.eventsPath)
+	if statErr != nil && st.activeInfo != nil {
+		// Once an active file has existed, an unavailable path can be the
+		// rename/recreate seam of a rotation. ReadFrom intentionally treats
+		// ENOENT as an empty read for fresh cities, but doing that here would
+		// falsely clear a prior tail failure before the path and cursor are
+		// verifiably readable again.
+		t.markIncrementalReadFailure(&st.tailReadFailed, "active-log stat", statErr)
+		return
+	}
 	rotated := statErr == nil && st.activeInfo != nil && !os.SameFile(st.activeInfo, info)
 	if rotated {
 		// ReadFilteredWithInFlight walks the sibling .gz archives (skipping any
@@ -304,10 +360,16 @@ func (t *cityRunTailer) foldNext(proj *runproj.Projector, st *tailState) {
 		// poll see no rotation (SameFile) and lose that window until restart.
 		catchUp, err := readRotationCatchUp(t.eventsPath, events.Filter{AfterSeq: proj.LastSeq()})
 		if err != nil {
+			t.markIncrementalReadFailure(&st.catchUpReadFailed, "rotation catch-up", err)
 			return
 		}
-		if fresh := eventsAfter(catchUp, proj.LastSeq()); len(fresh) > 0 && proj.Apply(fresh) {
-			st.marks = t.build(proj, st.marks, nil)
+		st.catchUpReadFailed = false
+		if fresh := eventsAfter(catchUp, proj.LastSeq()); len(fresh) > 0 {
+			decodeMisses := proj.DecodeMisses()
+			changed := proj.Apply(fresh)
+			if changed || proj.DecodeMisses() > decodeMisses {
+				st.marks = t.build(proj, st.marks, nil)
+			}
 		}
 		st.activeInfo = info
 		st.offset = 0
@@ -325,19 +387,37 @@ func (t *cityRunTailer) foldNext(proj *runproj.Projector, st *tailState) {
 		}
 	}
 
-	evts, newOffset, err := events.ReadFrom(t.eventsPath, st.offset)
+	evts, newOffset, err := readTailEvents(t.eventsPath, st.offset)
 	if err != nil {
+		t.markIncrementalReadFailure(&st.tailReadFailed, "active-log tail", err)
 		return
 	}
+	if statErr == nil {
+		verifiedInfo, verifyErr := os.Stat(t.eventsPath)
+		if verifyErr != nil {
+			t.markIncrementalReadFailure(&st.tailReadFailed, "active-log verification", verifyErr)
+			return
+		}
+		if !os.SameFile(info, verifiedInfo) {
+			t.markIncrementalReadFailure(&st.tailReadFailed, "active-log verification", errors.New("active log identity changed during read"))
+			return
+		}
+		st.activeInfo = verifiedInfo
+	}
+	st.tailReadFailed = false
 	st.offset = newOffset
 	fresh := eventsAfter(evts, proj.LastSeq())
 	if len(fresh) == 0 {
+		t.clearIncrementalReadFailure(st)
 		return
 	}
 	sessionChanged := containsSessionEvent(fresh)
-	if proj.Apply(fresh) {
+	decodeMisses := proj.DecodeMisses()
+	changed := proj.Apply(fresh)
+	if changed || proj.DecodeMisses() > decodeMisses {
 		st.marks = t.build(proj, st.marks, nil)
 	}
+	t.clearIncrementalReadFailure(st)
 	if sessionChanged {
 		// Session lifecycle events don't change the bead fold (proj.Apply ignores
 		// them), so build() — and its subscriber notify — may not have fired. But
@@ -413,12 +493,8 @@ func (t *cityRunTailer) build(proj *runproj.Projector, prevMarks map[string]runp
 	// a fresh first-seen-ordered slice of the immutable-after-decode bead values,
 	// so the published snapshot is safe to read concurrently.
 	beadSlice := runproj.FilterRunBeads(proj.Beads())
-	summary := runproj.BuildRunSummary(beadSlice)
-	if loadErr != nil {
-		// A read failure must surface as a partial snapshot, not a silently empty
-		// "no runs" view.
-		summary.LanesPartial = true
-	}
+	summary, censusLanes := runproj.BuildRunSummaryWithAllLanes(beadSlice)
+	census := runproj.CountCanonicalRunStatuses(beadSlice, censusLanes)
 
 	inFlight := make([]runproj.RunLane, 0, len(summary.Lanes)+len(summary.BlockedLanes))
 	inFlight = append(inFlight, summary.Lanes...)
@@ -431,7 +507,13 @@ func (t *cityRunTailer) build(proj *runproj.Projector, prevMarks map[string]runp
 	lastSeq := proj.LastSeq()
 
 	t.mu.Lock()
+	if loadErr != nil {
+		t.coldReplayIncomplete = true
+	}
+	t.decodeMisses = proj.DecodeMisses()
+	summary.LanesPartial = t.projectionIncompleteLocked()
 	t.summary = summary
+	t.census = census
 	t.marks = marks
 	t.beads = beadSlice
 	t.lastSeq = lastSeq
@@ -446,6 +528,48 @@ func (t *cityRunTailer) build(proj *runproj.Projector, prevMarks map[string]runp
 	// frame per real change.
 	t.notifySubscribers()
 	return marks
+}
+
+// markIncrementalReadFailure publishes a retryable incomplete state and logs
+// only the healthy-to-failed transition for this read phase. The cursor is not
+// advanced, so a later successful poll can prove the interval complete again.
+func (t *cityRunTailer) markIncrementalReadFailure(failed *bool, phase string, err error) {
+	if !*failed {
+		log.Printf("run-tailer: city %q %s failed: %v", t.name, phase, err)
+		*failed = true
+	}
+	t.mu.Lock()
+	changed := !t.incrementalReadIncomplete
+	t.incrementalReadIncomplete = true
+	t.summary.LanesPartial = true
+	t.mu.Unlock()
+	if changed {
+		t.notifySubscribers()
+	}
+}
+
+// clearIncrementalReadFailure clears only recoverable read incompleteness after
+// a whole poll succeeds. Sticky cold-replay failure and decode misses continue
+// to keep the projection partial.
+func (t *cityRunTailer) clearIncrementalReadFailure(st *tailState) {
+	if st.catchUpReadFailed || st.tailReadFailed {
+		return
+	}
+	t.mu.Lock()
+	if !t.incrementalReadIncomplete {
+		t.mu.Unlock()
+		return
+	}
+	t.incrementalReadIncomplete = false
+	t.summary.LanesPartial = t.projectionIncompleteLocked()
+	t.mu.Unlock()
+	t.notifySubscribers()
+}
+
+// projectionIncompleteLocked reports all reasons the published projection
+// cannot prove complete coverage. The caller holds t.mu.
+func (t *cityRunTailer) projectionIncompleteLocked() bool {
+	return t.coldReplayIncomplete || t.incrementalReadIncomplete || t.decodeMisses > 0
 }
 
 // runDetailSnapshotVersion is the synthesized run-snapshot shape version the
@@ -645,33 +769,55 @@ func (m *runTailerManager) fetchSessionsUpstream(ctx context.Context, name strin
 	if base == "" {
 		return nil, false
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/v0/city/"+name+"/sessions", nil)
-	if err != nil {
-		return nil, false
+	// This enrichment wants every session. Walk the keyset pages until the
+	// server stops minting next_cursor and merge them, so a fleet larger than
+	// one server-cap page is fully covered instead of silently truncated at the
+	// first page. Each page requests the 1000-row server cap.
+	var all []runproj.DashboardSession
+	cursor := ""
+	for {
+		u := base + "/v0/city/" + name + "/sessions?limit=1000"
+		if cursor != "" {
+			u += "&cursor=" + url.QueryEscape(cursor)
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+		if err != nil {
+			return nil, false
+		}
+		req.Header.Set("Accept", "application/json")
+		resp, err := m.httpc.Do(req)
+		if err != nil {
+			return nil, false
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close() //nolint:errcheck
+			return nil, false
+		}
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+		resp.Body.Close() //nolint:errcheck
+		if err != nil {
+			return nil, false
+		}
+		var env struct {
+			Items      []runproj.DashboardSession `json:"items"`
+			NextCursor string                     `json:"next_cursor"`
+		}
+		if err := json.Unmarshal(body, &env); err != nil {
+			return nil, false
+		}
+		all = append(all, env.Items...)
+		// Stop at the last page. The equal-cursor guard is a safety net against
+		// a server that fails to advance the cursor, so the walk can never spin
+		// forever on a degenerate response.
+		if env.NextCursor == "" || env.NextCursor == cursor {
+			break
+		}
+		cursor = env.NextCursor
 	}
-	req.Header.Set("Accept", "application/json")
-	resp, err := m.httpc.Do(req)
-	if err != nil {
-		return nil, false
+	if all == nil {
+		all = []runproj.DashboardSession{}
 	}
-	defer resp.Body.Close() //nolint:errcheck
-	if resp.StatusCode != http.StatusOK {
-		return nil, false
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
-	if err != nil {
-		return nil, false
-	}
-	var env struct {
-		Items []runproj.DashboardSession `json:"items"`
-	}
-	if err := json.Unmarshal(body, &env); err != nil {
-		return nil, false
-	}
-	if env.Items == nil {
-		env.Items = []runproj.DashboardSession{}
-	}
-	return env.Items, true
+	return all, true
 }
 
 // formulaNodeRef decodes the ordering-relevant id of a compiled-formula preview
@@ -926,10 +1072,16 @@ func (t *cityRunTailer) writeRunDetailReadError(w http.ResponseWriter, runID str
 	writeError(w, http.StatusNotFound, "unknown run")
 }
 
-// cityRunTailer resolves the city to its run tailer, returning false for an
-// unknown city (so the handler can 404). Starting the fold loop is lazy.
+// cityRunTailer resolves the exact registered city name to its run tailer,
+// returning false for an unknown city. The resolver is authoritative and
+// returns the path directly, so registry-valid dots and underscores are safe
+// here even though the narrower dashboard deep-link grammar rejects them.
+// Starting the fold loop is lazy.
 func (p *Plane) cityRunTailer(name string) (*cityRunTailer, bool) {
-	path, ok := p.resolveCityPath(name)
+	if name == "" || p.deps.Resolver == nil {
+		return nil, false
+	}
+	path, ok := p.deps.Resolver.CityPath(name)
 	if !ok {
 		return nil, false
 	}
@@ -965,7 +1117,7 @@ func (p *Plane) eagerWarmTailers() {
 		return
 	}
 	for _, c := range p.deps.Resolver.Cities() {
-		if !ValidCityName(c.Name) || c.Path == "" {
+		if c.Name == "" || c.Path == "" {
 			continue
 		}
 		p.runTailers.ensure(c.Name, cityEventsPath(c.Path))

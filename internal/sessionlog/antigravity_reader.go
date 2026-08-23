@@ -71,16 +71,14 @@ func ReadAntigravityFile(path string, tailCompactions int) (*Session, error) {
 }
 
 // ReadAntigravityFilePage parses an agy trajectory JSONL log and applies
-// message-ID pagination using the stable agy-N entry IDs emitted by the reader.
+// message-ID pagination using the stable content-derived IDs emitted by the
+// reader.
 func ReadAntigravityFilePage(path string, tailCompactions int, beforeMessageID, afterMessageID string) (*Session, error) {
 	sess, err := readAntigravityFile(path, false)
 	if err != nil {
 		return nil, err
 	}
-	paginated, info := sliceAtCompactBoundaries(sess.Messages, tailCompactions, beforeMessageID, afterMessageID)
-	sess.Messages = paginated
-	sess.Pagination = info
-	return sess, nil
+	return paginateSession(sess, tailCompactions, beforeMessageID, afterMessageID)
 }
 
 // ReadAntigravityFileRaw parses an agy trajectory JSONL log without display type filtering.
@@ -104,10 +102,7 @@ func ReadAntigravityFileRawPage(path string, tailCompactions int, beforeMessageI
 	if err != nil {
 		return nil, err
 	}
-	paginated, info := sliceAtCompactBoundaries(sess.Messages, tailCompactions, beforeMessageID, afterMessageID)
-	sess.Messages = paginated
-	sess.Pagination = info
-	return sess, nil
+	return paginateSession(sess, tailCompactions, beforeMessageID, afterMessageID)
 }
 
 func readAntigravityFile(path string, rawMode bool) (*Session, error) {
@@ -126,6 +121,7 @@ func readAntigravityFile(path string, rawMode bool) (*Session, error) {
 	var lastNonEmptyLineMalformed bool
 	var lastUUID string
 	var pendingCallIDs []string
+	syntheticIDs := newStableSyntheticEntryIDSequence("agy")
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -140,7 +136,7 @@ func readAntigravityFile(path string, rawMode bool) (*Session, error) {
 		}
 		lastNonEmptyLineMalformed = false
 
-		entry := convertAgyEntry(raw, line, &pendingCallIDs)
+		entry := convertAgyEntry(raw, line, &pendingCallIDs, syntheticIDs.ForRecord(line))
 		if entry == nil {
 			continue
 		}
@@ -173,9 +169,9 @@ func readAntigravityFile(path string, rawMode bool) (*Session, error) {
 	}, nil
 }
 
-func convertAgyEntry(raw agyLogEntry, rawLine []byte, pendingCallIDs *[]string) *Entry {
+func convertAgyEntry(raw agyLogEntry, rawLine []byte, pendingCallIDs *[]string, syntheticID stableSyntheticEntryIDSource) *Entry {
 	ts, _ := time.Parse(time.RFC3339, raw.CreatedAt)
-	uuid := fmt.Sprintf("agy-%d", raw.StepIndex)
+	uuid := syntheticID.ID(raw.Type)
 
 	switch raw.Type {
 	case "USER_INPUT":
@@ -223,7 +219,7 @@ func convertAgyEntry(raw agyLogEntry, rawLine []byte, pendingCallIDs *[]string) 
 				Type:  "tool_use",
 				ID:    callID,
 				Name:  tc.Name,
-				Input: tc.Args,
+				Input: agyToolInputContent(tc.Args),
 			})
 		}
 		blocks = append(blocks, agyInteractionBlocks(raw.Interactions)...)
@@ -246,7 +242,8 @@ func convertAgyEntry(raw agyLogEntry, rawLine []byte, pendingCallIDs *[]string) 
 		block := ContentBlock{
 			Type:      "tool_result",
 			ToolUseID: callID,
-			Content:   mustMarshal(raw.Content),
+			Content:   agyToolResultContent(raw.Content),
+			IsError:   antigravityStatusIsError(raw.Status),
 		}
 		return &Entry{
 			UUID:      uuid,
@@ -283,6 +280,93 @@ func agyToolCallID(tc agyToolCall, fallback string) string {
 
 func agyResultCallID(raw agyLogEntry) string {
 	return firstTrimmedNonEmpty(raw.ToolCallID, raw.ToolCallIDJS, raw.CallID)
+}
+
+func agyToolInputContent(raw json.RawMessage) json.RawMessage {
+	return agyNeutralToolObject(raw)
+}
+
+func agyToolResultContent(content string) json.RawMessage {
+	if content == "" {
+		return mustMarshal("")
+	}
+	if !json.Valid([]byte(content)) {
+		return mustMarshal(content)
+	}
+	return agyNeutralToolObject(json.RawMessage(content))
+}
+
+func agyNeutralToolObject(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var encoded string
+	if err := json.Unmarshal(raw, &encoded); err == nil {
+		encoded = strings.TrimSpace(encoded)
+		if encoded != "" && json.Valid([]byte(encoded)) {
+			return agyNeutralToolObject(json.RawMessage(encoded))
+		}
+		return mustMarshal(encoded)
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil || len(object) == 0 {
+		return cloneRawJSON(raw)
+	}
+	neutral := make(map[string]json.RawMessage, len(object))
+	for key, value := range object {
+		neutral[agyNeutralToolKey(key)] = cloneRawJSON(value)
+	}
+	return mustMarshal(neutral)
+}
+
+func agyNeutralToolKey(key string) string {
+	switch strings.TrimSpace(key) {
+	case "filePath", "filepath", "path", "file":
+		return "file_path"
+	case "oldString", "oldStr":
+		return "old_string"
+	case "newString", "newStr":
+		return "new_string"
+	case "diff", "fileDiff":
+		return "patch"
+	case "exitCode":
+		return "exit_code"
+	case "statusCode", "code":
+		return "status_code"
+	case "codeText", "statusText":
+		return "status_text"
+	case "durationMs":
+		return "duration_ms"
+	case "numFiles":
+		return "num_files"
+	case "numResults":
+		return "num_results"
+	case "isImage":
+		return "is_image"
+	case "taskId", "backgroundTaskId", "bashId", "agentId":
+		return "task_id"
+	case "taskType", "taskKind", "subagentType", "agentType":
+		return "task_type"
+	case "taskStatus":
+		return "task_status"
+	case "oldTodos":
+		return "old_todos"
+	case "newTodos":
+		return "new_todos"
+	case "answerMap":
+		return "answer_map"
+	default:
+		return key
+	}
+}
+
+func antigravityStatusIsError(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "error", "failed", "failure", "canceled", "interrupted", "rejected", "denied":
+		return true
+	default:
+		return false
+	}
 }
 
 func consumeAgyPendingCallID(pendingCallIDs *[]string, preferred string) string {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -20,9 +21,25 @@ var (
 type statusProvider struct {
 	base     runtime.Provider
 	warnOnce sync.Once
+	partial  atomic.Bool
 }
 
 var _ runtime.RelaunchProvider = (*statusProvider)(nil)
+
+func statusProviderPartial(sp any) bool {
+	p, ok := sp.(*statusProvider)
+	return ok && p.partial.Load()
+}
+
+func markStatusProviderPartial(sp any) {
+	if p, ok := sp.(*statusProvider); ok {
+		p.partial.Store(true)
+	}
+}
+
+func (p *statusProvider) StatusPartial() bool {
+	return p.partial.Load()
+}
 
 func newBoundedStatusProvider(base runtime.Provider) runtime.Provider {
 	if sp, ok := base.(*statusProvider); ok {
@@ -43,6 +60,7 @@ func boundedStatusCall[T any](p *statusProvider, fallback T, fn func() T) T {
 	case result := <-resultCh:
 		return result
 	case <-time.After(statusProviderCallTimeout):
+		p.partial.Store(true)
 		p.warnOnce.Do(statusProviderTimeoutWarning)
 		return fallback
 	}

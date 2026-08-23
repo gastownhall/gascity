@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -58,11 +59,12 @@ func (c *Config) outputBufferLines() int {
 
 // Provider manages agent sessions using the Agent Client Protocol.
 type Provider struct {
-	mu       sync.Mutex
-	dir      string                  // socket/meta file directory
-	conns    map[string]*sessionConn // in-process tracking
-	workDirs map[string]string       // session name → workDir (for CopyTo)
-	cfg      Config
+	mu            sync.Mutex
+	dir           string                  // socket/meta file directory
+	conns         map[string]*sessionConn // in-process tracking
+	workDirs      map[string]string       // session name → workDir (for CopyTo)
+	cfg           Config
+	activityWrite func(path string, data []byte) error // test seam
 }
 
 // Compile-time check.
@@ -75,20 +77,26 @@ var (
 // NewProvider returns an ACP [Provider] that stores socket files in
 // a default temporary directory.
 func NewProvider(cfg Config) *Provider {
-	dir := filepath.Join(os.TempDir(), "gc-acp")
-	_ = os.MkdirAll(dir, 0o755)
-	return &Provider{
-		dir:      dir,
-		conns:    make(map[string]*sessionConn),
-		workDirs: make(map[string]string),
-		cfg:      cfg,
-	}
+	return NewProviderWithDir(defaultProviderDir(), cfg)
+}
+
+// defaultProviderDir is the city-less state directory: one per user, because
+// the path is otherwise identical for everyone on the host and [os.MkdirAll]
+// succeeds on a directory someone else created first. The euid does not make
+// the directory private on its own — [runtime.EnsurePrivateDir] validates
+// ownership — but it keeps two legitimate users off one path so that validation
+// is a real check rather than a permanent outage for whoever logs in second.
+func defaultProviderDir() string {
+	return filepath.Join(os.TempDir(), fmt.Sprintf("gc-acp-%d", os.Geteuid()))
 }
 
 // NewProviderWithDir returns an ACP [Provider] that stores socket files
 // in the given directory. Useful for tests that need isolated state.
 func NewProviderWithDir(dir string, cfg Config) *Provider {
-	_ = os.MkdirAll(dir, 0o755)
+	// Best-effort here and verified at the write path: a constructor cannot
+	// report a squatted directory, and failing silently at construction would
+	// hand back a Provider that writes anyway.
+	_ = runtime.EnsurePrivateDir(dir)
 	return &Provider{
 		dir:      dir,
 		conns:    make(map[string]*sessionConn),
@@ -256,7 +264,14 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// IsRunning falls through to socketAlive and returns true.
 	go func() {
 		_ = cmd.Wait()
+		// Order the read loop's exit ahead of the publisher's final flush so a
+		// session/update the loop did dispatch cannot race publication
+		// shutdown. This is ordering, not a drain guarantee: cmd.Wait closes
+		// the stdout read end itself, so bytes still unread at that point are
+		// not guaranteed to be dispatched.
+		<-sc.readDone
 		sc.drainPending()
+		sc.closeActivityPublisher()
 		lis.Close()                 //nolint:errcheck
 		os.Remove(p.sockPath(name)) //nolint:errcheck
 		_ = os.Remove(p.sockNamePath(name))
@@ -295,7 +310,61 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		return fmt.Errorf("session %q was stopped during startup", name)
 	}
 
+	// Seed the sidecar synchronously at handshake completion. Start must not
+	// advertise a cross-process activity-capable session until the first
+	// durable value exists. Later updates use the non-blocking publisher.
+	seed := time.Now()
+	if err := p.publishActivity(name, seed); err != nil {
+		_ = stdinPipe.Close()
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		<-sc.done
+		p.mu.Lock()
+		if p.conns[name] == sentinel {
+			delete(p.conns, name)
+			delete(p.workDirs, name)
+			p.cleanupMeta(name)
+		}
+		p.mu.Unlock()
+		return fmt.Errorf("publishing initial activity for %q: %w", name, err)
+	}
+	publisher := newActivityPublisher(
+		activityPublishInterval,
+		time.Now(),
+		func(stamp time.Time) error { return p.publishActivity(name, stamp) },
+		func(err error) {
+			fmt.Fprintf(os.Stderr, "acp: publishing activity for %q: %v\n", name, err)
+		},
+	)
+	if err := sc.installActivityPublisher(publisher, seed); err != nil {
+		_ = stdinPipe.Close()
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		<-sc.done
+		p.mu.Lock()
+		if p.conns[name] == sentinel {
+			delete(p.conns, name)
+			delete(p.workDirs, name)
+			p.cleanupMeta(name)
+		}
+		p.mu.Unlock()
+		return fmt.Errorf("starting activity publication for %q: %w", name, err)
+	}
+
+	// Commit the real connection only if the startup sentinel still owns the
+	// name. Stop may have removed it while the initial atomic write was in
+	// progress.
 	p.mu.Lock()
+	if p.conns[name] != sentinel {
+		p.mu.Unlock()
+		_ = stdinPipe.Close()
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		<-sc.done
+		p.mu.Lock()
+		if _, replaced := p.conns[name]; !replaced {
+			p.cleanupMeta(name)
+		}
+		p.mu.Unlock()
+		return fmt.Errorf("session %q was stopped during startup", name)
+	}
 	p.conns[name] = sc
 	p.mu.Unlock()
 
@@ -582,8 +651,17 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 }
 
 // SetMeta stores a key-value pair for the named session in a sidecar file.
+//
+// The sidecar carries session identity and drain state, which a reader can use
+// to impersonate the session and a writer can use to forge a drain
+// acknowledgement, so it is owner-only. The directory is re-checked on every
+// write rather than trusted from construction: a squatted directory is not
+// something a constructor can report.
 func (p *Provider) SetMeta(name, key, value string) error {
-	return os.WriteFile(p.metaPath(name, key), []byte(value), 0o644)
+	if err := runtime.EnsurePrivateDir(p.dir); err != nil {
+		return err
+	}
+	return runtime.WritePrivateFile(p.metaPath(name, key), []byte(value))
 }
 
 // GetMeta retrieves a metadata value from a sidecar file.
@@ -608,15 +686,70 @@ func (p *Provider) RemoveMeta(name, key string) error {
 	return err
 }
 
-// GetLastActivity returns the time of the last session/update notification.
+// lastActivityMetaKey names the sidecar holding the durable last-activity
+// stamp. Keeping it in the meta namespace means Stop's cleanupMeta already
+// removes it along with the rest of the session's sidecar state.
+const lastActivityMetaKey = "gc_last_activity"
+
+// publishActivity atomically replaces the durable last-activity stamp. Atomic
+// replacement prevents cross-process readers from observing a truncated or
+// partially-written timestamp.
+func (p *Provider) publishActivity(name string, t time.Time) error {
+	path := p.metaPath(name, lastActivityMetaKey)
+	data := []byte(t.UTC().Format(time.RFC3339Nano))
+	var err error
+	if p.activityWrite != nil {
+		err = p.activityWrite(path, data)
+	} else {
+		err = fsys.WriteFileAtomic(fsys.OSFS{}, path, data, 0o600)
+	}
+	if err != nil {
+		return fmt.Errorf("writing activity sidecar: %w", err)
+	}
+	return nil
+}
+
+// GetLastActivity returns the time of the last observed session/update, or the
+// Start-time seed if none has been observed.
+//
+// It reads the in-process connection when this process owns it, and otherwise
+// falls back to the durable stamp on disk — the same
+// in-memory-then-cross-process shape that Stop, Interrupt and IsRunning
+// already use for the control socket.
+//
+// The connection and in-memory stamp live only in the process that ran Start.
+// The sidecar gives other processes the same last-observed protocol timestamp.
 func (p *Provider) GetLastActivity(name string) (time.Time, error) {
 	p.mu.Lock()
 	sc, ok := p.conns[name]
 	p.mu.Unlock()
-	if !ok {
+	if ok {
+		if t := sc.getLastActivity(); !t.IsZero() {
+			return t, nil
+		}
+	}
+	return p.persistedActivity(name)
+}
+
+// persistedActivity reads the durable last-activity stamp.
+//
+// A missing stamp is "unknown" (zero, nil) — the pre-existing contract for a
+// session this provider knows nothing about. An unreadable or malformed stamp
+// is an error rather than a silent zero.
+func (p *Provider) persistedActivity(name string) (time.Time, error) {
+	raw, err := p.GetMeta(name, lastActivityMetaKey)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("reading last activity for %q: %w", name, err)
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
 		return time.Time{}, nil
 	}
-	return sc.getLastActivity(), nil
+	t, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parsing last activity for %q: %w", name, err)
+	}
+	return t, nil
 }
 
 // ClearScrollback clears the output buffer.
@@ -734,7 +867,7 @@ func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, done <-chan st
 	namePath := p.sockNamePath(name)
 	os.Remove(sp) //nolint:errcheck
 	_ = os.Remove(namePath)
-	if err := os.WriteFile(namePath, []byte(name), 0o644); err != nil {
+	if err := runtime.WritePrivateFile(namePath, []byte(name)); err != nil {
 		return nil, err
 	}
 	lis, err := net.Listen("unix", sp)
@@ -852,10 +985,16 @@ func isUnavailableSocketError(err error) bool {
 		errors.Is(err, syscall.ECONNREFUSED)
 }
 
-// Capabilities reports ACP provider capabilities. The ACP provider has
-// no terminal and does not natively support attachment or activity detection.
+// Capabilities reports ACP provider capabilities. ACP sessions are headless,
+// so attachment is never reportable — but session/update notifications are a
+// real activity signal, durably stamped by GetLastActivity's sidecar so it
+// survives the process boundary.
+//
+// Declaring the capability allows activity-aware policies to use the signal.
+// Those policies remain independently configured; activity age alone does not
+// diagnose the reason updates stopped.
 func (p *Provider) Capabilities() runtime.ProviderCapabilities {
-	return runtime.ProviderCapabilities{}
+	return runtime.ProviderCapabilities{CanReportActivity: true}
 }
 
 // SleepCapability reports that ACP sessions support timed-only idle sleep.

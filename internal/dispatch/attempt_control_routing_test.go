@@ -1,6 +1,8 @@
 package dispatch
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -150,5 +152,79 @@ func TestLatestAttemptCandidateSkipsAllControlKinds(t *testing.T) {
 		if latestAttemptCandidateIsControlInfrastructure(kind) {
 			t.Errorf("latestAttemptCandidateIsControlInfrastructure(%q) = true, want false", kind)
 		}
+	}
+}
+
+// TestRouteFanoutFragmentStepsRouteConfigLoadFailureIsTransient is the post-merge
+// remediation of PR #4175: a route-config load/parse failure on the fanout path
+// must be classified as a transient controller-boundary error so the dispatcher
+// retries the control bead as pending, instead of a hard failure that
+// quarantines an in-flight molecule. A momentary city.toml read/parse blip is
+// environmental, not a permanent defect in the workflow.
+func TestRouteFanoutFragmentStepsRouteConfigLoadFailureIsTransient(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("this = = not valid toml ["), 0o644); err != nil {
+		t.Fatalf("write malformed city.toml: %v", err)
+	}
+	fragment := &formula.FragmentRecipe{
+		Name: "frag",
+		Steps: []formula.RecipeStep{{
+			ID: "frag.item.drain",
+			Metadata: map[string]string{
+				beadmeta.KindMetadataKey:         beadmeta.KindDrain,
+				beadmeta.RootStoreRefMetadataKey: "rig:gascity",
+			},
+		}},
+	}
+	control := beads.Bead{Metadata: map[string]string{
+		beadmeta.ExecutionRoutedToMetadataKey: "gascity/worker",
+		beadmeta.RootStoreRefMetadataKey:      "rig:gascity",
+	}}
+	// routeCfg unset so routeConfig() performs a fresh load from CityPath and
+	// surfaces the malformed-config error the dispatcher must tolerate.
+	opts := ProcessOptions{CityPath: cityPath}
+
+	err := routeFanoutFragmentSteps(fragment, control, opts, beads.NewMemStore())
+	if err == nil {
+		t.Fatal("routeFanoutFragmentSteps: want error on malformed route config, got nil")
+	}
+	if !IsTransientControllerError(err) {
+		t.Fatalf("route-config load failure classified hard (%v); want transient so the molecule retries as pending", err)
+	}
+}
+
+// TestRouteFanoutFragmentStepsMissingDispatcherStaysTerminal pins the reserved
+// fail-closed semantics of the same fix: when the route config loads
+// successfully but lacks the required store-scoped control dispatcher, the error
+// must stay terminal (not transient), so a genuine misconfiguration fails closed
+// rather than spinning forever on retry.
+func TestRouteFanoutFragmentStepsMissingDispatcherStaysTerminal(t *testing.T) {
+	fragment := &formula.FragmentRecipe{
+		Name: "frag",
+		Steps: []formula.RecipeStep{{
+			ID: "frag.item.drain",
+			Metadata: map[string]string{
+				beadmeta.KindMetadataKey:         beadmeta.KindDrain,
+				beadmeta.RootStoreRefMetadataKey: "rig:gascity",
+			},
+		}},
+	}
+	control := beads.Bead{Metadata: map[string]string{
+		beadmeta.ExecutionRoutedToMetadataKey: "gascity/worker",
+		beadmeta.RootStoreRefMetadataKey:      "rig:gascity",
+	}}
+	// Config loads fine but has no control-dispatcher agent scoped to rig gascity.
+	routeCfg := &routeConfigCache{}
+	routeCfg.once.Do(func() {
+		routeCfg.cfg = &config.City{Agents: []config.Agent{{Name: "worker", Dir: "gascity"}}}
+	})
+	opts := ProcessOptions{routeCfg: routeCfg}
+
+	err := routeFanoutFragmentSteps(fragment, control, opts, beads.NewMemStore())
+	if err == nil {
+		t.Fatal("routeFanoutFragmentSteps: want terminal error when store-scoped dispatcher is absent, got nil")
+	}
+	if IsTransientControllerError(err) {
+		t.Fatalf("missing store-scoped dispatcher classified transient (%v); want terminal fail-closed", err)
 	}
 }

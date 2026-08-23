@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
@@ -187,6 +188,56 @@ func TestMailListInvalidCursorReturns400(t *testing.T) {
 }
 
 // --- Sessions ---
+
+// tiedCreatedAtSessionStore forces every bead it lists to share one
+// whole-second created_at, so a keyset walk over the sessions endpoint
+// exercises the (created_at DESC, id DESC) id tie-break end to end. The
+// sessions handler is the only keyset list that does not sort its own result —
+// it trusts the read model's total order — so the id tie-break surviving
+// ListAllWithResponses -> enrichment is load-bearing whenever same-second
+// sessions exist (bd-backed stores stamp whole-second created_at, so they are
+// the norm). Only List is overridden; CachedList is deliberately absent so the
+// CacheFirst read-model peek misses and the walk drives the real direct-union
+// SortBeads path rather than a cache shortcut.
+type tiedCreatedAtSessionStore struct {
+	beads.Store
+	tied time.Time
+}
+
+func (s tiedCreatedAtSessionStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	rows, err := s.Store.List(query)
+	for i := range rows {
+		rows[i].CreatedAt = s.tied
+	}
+	return rows, err
+}
+
+// TestSessionListKeysetWalkNoSkipNoDup pins the sessions keyset walk against a
+// dropped id tie-break: N > page-size sessions sharing one created_at must page
+// to exhaustion returning every session exactly once. Convoys and mail already
+// have this shape; sessions did not, so a regression that reordered the
+// read-model union or dropped SortBeads' id tie-break would silently
+// skip/duplicate same-second sessions with no failing sessions-handler test.
+func TestSessionListKeysetWalkNoSkipNoDup(t *testing.T) {
+	fs := newSessionFakeState(t)
+
+	const n = 9
+	for i := 0; i < n; i++ {
+		createTestSession(t, fs.cityBeadStore, fs.sp, "s")
+	}
+	// Route the read path through a store that collapses every session onto one
+	// whole-second created_at, so the page order rests entirely on the id
+	// tie-break the sessions handler's index-keyed comment relies on.
+	fs.sessionsBeadStore = tiedCreatedAtSessionStore{
+		Store: fs.cityBeadStore,
+		tied:  time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC),
+	}
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	seen := walkKeysetList(t, h, cityURL(fs, "/sessions?limit=4"), "&", n)
+	assertExactlyOnce(t, seen, n)
+}
 
 func TestSessionListTruncationMintsCursor(t *testing.T) {
 	fs := newSessionFakeState(t)

@@ -185,6 +185,7 @@ func TestEventPayloadForEmitFallsBackToStoreBead(t *testing.T) {
 	}
 
 	t.Chdir(dir)
+	t.Setenv("GC_CITY_PATH", dir)
 	var stderr bytes.Buffer
 	payload := eventPayloadForEmit(`{"bead":}`, created.ID, &stderr)
 	if stderr.Len() != 0 {
@@ -289,6 +290,7 @@ func TestEventEmitViaCLI(t *testing.T) {
 	t.Setenv("GC_DOLT", "skip")
 	t.Setenv("GC_SESSION", "fake")
 	configureIsolatedRuntimeEnv(t)
+	stubInitRemoteImports(t)
 
 	dir := t.TempDir()
 	var stdout, stderr bytes.Buffer

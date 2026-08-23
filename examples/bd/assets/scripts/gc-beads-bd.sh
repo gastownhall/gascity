@@ -208,7 +208,7 @@ run_with_timeout() {
     (
         sleep "$timeout_seconds" 2>/dev/null || sleep 1
         kill "$cmd_pid" 2>/dev/null || true
-    ) &
+    ) </dev/null >/dev/null 2>&1 &
     local watchdog_pid=$!
     local status=0
     wait "$cmd_pid" || status=$?
@@ -1386,7 +1386,7 @@ drain_connections_before_stop() {
 # check_read_only tests if the dolt server is in read-only mode.
 # Returns 0 if read-only, 1 if writable, 2 if the write probe is inconclusive.
 check_read_only() {
-    local host gc_bin db quoted_db probe_table sql output err_file err_text status
+    local host gc_bin db quoted_db probe_table ignore_table sql output err_file err_text status
     host=$(connect_host)
     gc_bin=$(resolve_gc_helper_bin)
     if [ -n "$gc_bin" ]; then
@@ -1428,7 +1428,20 @@ check_read_only() {
     fi
     quoted_db=$(quote_dolt_identifier "$db")
     probe_table='`__gc_read_only_probe`'
-    sql="CREATE TABLE IF NOT EXISTS ${quoted_db}.${probe_table} (k INT PRIMARY KEY); REPLACE INTO ${quoted_db}.${probe_table} VALUES (1);"
+    ignore_table='`dolt_ignore`'
+    # The probe table is registered in dolt_ignore so history flattening can
+    # never first-commit it: a non-ignored table that lives only in the working
+    # set is committed by the compaction flatten's DOLT_COMMIT -Am, which drifts
+    # the database hash and quarantines GC for that database (hq June 2026, daa
+    # 2026-08-04). INSERT IGNORE keeps an operator's explicit ignored = 0
+    # override. The probe opens with USE because dolt_ignore is a session-root
+    # backed system table: this remote connection has no default schema, and a
+    # qualified write to dolt_ignore without a current database fails with "no
+    # root value found in session". USE is read-only, so the registration stays
+    # last and a read-only server still fails on the CREATE or REPLACE, which
+    # the classification below keys on. Mirrors cmd/gc/dolt_sql_health.go
+    # managedDoltReadOnlyProbeStatementsFor.
+    sql="USE ${quoted_db}; CREATE TABLE IF NOT EXISTS ${quoted_db}.${probe_table} (k INT PRIMARY KEY); REPLACE INTO ${quoted_db}.${probe_table} VALUES (1); INSERT IGNORE INTO ${quoted_db}.${ignore_table} (pattern, ignored) VALUES ('__gc_read_only_probe', 1);"
     if output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
         sql -q "$sql" 2>&1); then
         return 1
@@ -2028,10 +2041,9 @@ log_tail_has_journal_corruption() {
 # database_journal_corrupt probes one database directory offline and reports
 # whether dolt refuses to load it with a journal-corruption error. Only safe
 # while the managed server is down — offline dolt commands contend with a
-# running server's file locks. Probe output is spooled to a temp file rather
-# than captured via command substitution: the run_with_timeout watchdog's
-# sleep child inherits a substitution pipe and would hold it open for the
-# full timeout, turning every healthy-database probe into a 30s stall.
+# running server's file locks. Probe output is spooled to a temp file so stdout
+# and stderr can be scanned together without retaining the diagnostic stream
+# in a shell variable.
 database_journal_corrupt() {
     local probe_db_dir="$1" probe_out probe_hit=1
     probe_out=$(mktemp) || {
@@ -2542,15 +2554,71 @@ doltlite_maintenance_due() {
     [ $((now - last)) -ge "$interval" ]
 }
 
+# run_doltlite_reindex rebuilds the DoltLite store's SQLite secondary indexes.
+# `bd flatten`/`bd gc` rewrite the store (like a clone/pull) and leave the
+# secondary indexes stale, so index-path reads (count/status/list) silently
+# return wrong results until a REINDEX (ga-7hei). REINDEX is SQLite-specific
+# DDL, so it must run against the physical .beads/doltlite/<db>.db file through
+# gc's in-process SQLite driver (gc dolt-config doltlite-reindex, which resolves
+# the same .db the read path opens from metadata.json). It cannot go through
+# `bd sql`: that surface speaks Dolt/MySQL and rejects REINDEX, and it is
+# refused outright in the embedded mode run_bd_doltlite forces. Best-effort and
+# non-fatal: the caller warns on non-zero exit.
+run_doltlite_reindex() {
+    local dir="$1"
+    local gc_bin
+    gc_bin=$(resolve_gc_helper_bin)
+    if [ -z "$gc_bin" ]; then
+        return 1
+    fi
+    "$gc_bin" dolt-config doltlite-reindex --dir "$dir"
+}
+
+# doltlite_reindex_supported reports whether the resolved gc helper can rebuild
+# the DoltLite SQLite indexes in process. Only a gc built with the native beads
+# SQLite driver can (gc dolt-config doltlite-reindex --check); a default build
+# returns non-zero. The maintenance path probes this BEFORE the stale-index-
+# producing flatten/gc so it never creates index corruption it cannot heal
+# (ga-7hei).
+doltlite_reindex_supported() {
+    local dir="$1"
+    local gc_bin
+    gc_bin=$(resolve_gc_helper_bin)
+    if [ -z "$gc_bin" ]; then
+        return 1
+    fi
+    "$gc_bin" dolt-config doltlite-reindex --dir "$dir" --check >/dev/null 2>&1
+}
+
 run_doltlite_existing_db_maintenance() {
     local dir="$1"
     local stamp="$dir/.beads/doltlite/.gc-maintenance.stamp"
     if ! doltlite_maintenance_due "$dir"; then
         return 0
     fi
+    # flatten/gc rewrite the store and leave its SQLite secondary indexes stale;
+    # only a reindex-capable gc build can heal that (ga-7hei). If reindex is
+    # unavailable (e.g. a default, non-native gc binary), do NOT run the
+    # stale-index-producing flatten/gc at all: creating index corruption we
+    # cannot heal and then latching the maintenance stamp "done" is worse than
+    # skipping compaction. Leave the stamp untouched so a later reindex-capable
+    # binary still runs maintenance.
+    if ! doltlite_reindex_supported "$dir"; then
+        echo "warning: skipping doltlite maintenance for $dir: no reindex-capable gc helper (build gc with -tags gascity_native_beads); leaving the store un-flattened to avoid stale indexes (ga-7hei)" >&2
+        return 0
+    fi
     echo "gc-beads-bd: running doltlite maintenance for $dir" >&2
     run_bd_doltlite "$dir" flatten --force --json >/dev/null 2>&1 || echo "warning: bd flatten failed for $dir" >&2
     run_bd_doltlite "$dir" gc --skip-decay --force --json >/dev/null 2>&1 || echo "warning: bd gc failed for $dir" >&2
+    # flatten/gc leave the SQLite secondary indexes stale; rebuild them so
+    # index-path reads don't silently return wrong data (ga-7hei). Only stamp
+    # maintenance complete when the reindex succeeds — a failed reindex (e.g. a
+    # transient SQLite lock) must stay visible and retryable on the next cycle,
+    # not be suppressed for the whole maintenance interval.
+    if ! run_doltlite_reindex "$dir"; then
+        echo "warning: doltlite reindex failed for $dir; leaving maintenance stamp unrefreshed so the next run retries (ga-7hei)" >&2
+        return 0
+    fi
     mkdir -p "$dir/.beads/doltlite" 2>/dev/null || true
     date +%s > "$stamp" 2>/dev/null || true
 }

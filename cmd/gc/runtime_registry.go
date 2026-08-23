@@ -86,7 +86,7 @@ func buildRuntimeRegistry() *registry.Registry {
 		if session == "" {
 			session = "default"
 		}
-		return sessionherdr.New(session, providerStateDir("herdr", cityPath), cityPath, sc.SetupTimeoutDuration()), nil
+		return sessionherdr.New(session, providerStateDir("herdr", cityPath), cityPath, sc.SetupTimeoutDuration(), sc.SetupMaxTimeoutDuration()), nil
 	}))
 	must(r.Register("hybrid", func(_ string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
 		return newHybridProvider(sc, cityName, cityPath)

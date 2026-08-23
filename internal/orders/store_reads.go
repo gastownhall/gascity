@@ -98,6 +98,11 @@ func (s *Store) RecentRunsAll(limit int) ([]OrderRun, error) {
 		Limit:         limit,
 		IncludeClosed: true,
 		Sort:          beads.SortCreatedDesc,
+		// Aggregate read: the rows fold into entries[order] = max(CreatedAt), so
+		// the backing's created-desc tie-break at the limit boundary is
+		// irrelevant. Opt into the bounded backing limit to keep the fetch off
+		// the full retained corpus (sr-dp9o).
+		AllowBackingCreatedLimit: true,
 	})
 	return decodeTrackingRuns(list), err
 }
@@ -265,6 +270,51 @@ func (s *Store) CloseRuns(ctx context.Context, ids []string, reason string) (int
 	return closed, lastErr
 }
 
+// CloseRunsSwept closes tracking runs with the stale-sweep audit metadata.
+func (s *Store) CloseRunsSwept(ctx context.Context, ids []string, reason, sweptBy string) (int, error) {
+	ids = uniqueNonEmptyIDs(ids)
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if s.store.Store == nil {
+		return 0, fmt.Errorf("order-tracking close: nil store")
+	}
+	metadata := map[string]string{"close_reason": reason, "order_tracking_sweep": reason}
+	if sweptBy != "" {
+		metadata["order_tracking_sweep_by"] = sweptBy
+	}
+	closed := 0
+	var lastErr error
+	for attempt := 1; attempt <= closeVerifyAttempts; attempt++ {
+		n, err := s.store.CloseAll(ids, metadata)
+		closed += n
+		if closed > len(ids) {
+			closed = len(ids)
+		}
+		if err == nil {
+			openIDs, openErr := s.openIDs(ids)
+			if openErr == nil && len(openIDs) == 0 {
+				return closed, nil
+			}
+			if openErr != nil {
+				err = openErr
+			} else {
+				err = fmt.Errorf("still open: %s", strings.Join(openIDs, ", "))
+			}
+		}
+		lastErr = fmt.Errorf("closing swept order-tracking beads %s: %w", strings.Join(ids, ", "), err)
+		if attempt < closeVerifyAttempts {
+			if waitErr := s.waitCloseRetry(ctx); waitErr != nil {
+				return closed, errors.Join(lastErr, waitErr)
+			}
+		}
+	}
+	return closed, lastErr
+}
+
 func (s *Store) waitCloseRetry(ctx context.Context) error {
 	timer := time.NewTimer(closeVerifyRetryDelay)
 	defer timer.Stop()
@@ -353,6 +403,9 @@ func (s *Store) LastRun(name string) (time.Time, error) {
 			IncludeClosed: true,
 			Sort:          beads.SortCreatedDesc,
 			TierMode:      beads.TierBoth,
+			// Aggregate read: reduces to max(CreatedAt), so the backing tie-break
+			// at the boundary is irrelevant. Opt into the bounded backing limit.
+			AllowBackingCreatedLimit: true,
 		})
 		if err != nil {
 			if len(results) == 0 {
@@ -385,6 +438,16 @@ func (s *Store) Cursor(name string) EventCursor {
 			IncludeClosed: true,
 			Sort:          beads.SortCreatedDesc,
 			TierMode:      beads.TierBoth,
+			// Deliberately NOT an AllowBackingCreatedLimit caller. This read reduces
+			// to MaxSeqFromLabels — a max over seq, a DIFFERENT column than the
+			// created_at sort key. The backing breaks created_at ties by id ASC, so a
+			// bounded backing created-desc read keeps the smaller-id members of the
+			// newest second and drops the larger ids; because seq is forward-only the
+			// max-seq run is exactly that newest largest-id row, so a bounded backing
+			// read could omit it and regress the event cursor into replaying consumed
+			// events. Fetch the full candidate set so ApplyListQuery cuts the canonical
+			// (created_at DESC, id DESC) prefix, which keeps the max-seq run at the
+			// front (the Limit above is an exact client-side cap).
 		})
 		if err != nil {
 			if len(results) == 0 {

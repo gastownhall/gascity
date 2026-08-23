@@ -82,11 +82,16 @@ type mergeEndState struct {
 	beadSeq      map[string]uint64
 	localBeadAt  map[string]time.Time
 	deletedSeq   map[string]uint64
-	state        cacheState
-	lastFreshAt  time.Time
-	mutationSeq  uint64
-	primeErr     string
-	syncFailures int
+	// readyLost is the set of rows whose is_blocked verdict the merge dropped
+	// without preserving, so readiness declines for them unless their own edges
+	// can reproduce it (ga-cfhgr).
+	readyLost      map[string]struct{}
+	state          cacheState
+	lastFreshAt    time.Time
+	mutationSeq    uint64
+	primeErr       string
+	syncFailures   int
+	circuitTripped bool
 	// stats fields the seam writes.
 	statsAdds            int64
 	statsRemoves         int64
@@ -214,6 +219,11 @@ func (b *countingBacking) List(q ListQuery) ([]Bead, error) {
 // type assertion (no call), so a stray call would panic — a louder failure
 // than a count mismatch. The store starts cacheLive (promoteLiveLocked
 // overwrites it regardless).
+//
+// circuitTripped starts true — the one pre-merge value the seam must clear.
+// Seeding the zero value instead would make the end-state comparison of that
+// field vacuous (false on every implementation, every case), so a branch that
+// stopped re-arming the breaker would slip through the differential.
 func newMergeHarnessStore(st storeState) (*CachingStore, *countingBacking) {
 	var counter *countingBacking
 	var backing Store
@@ -235,6 +245,8 @@ func newMergeHarnessStore(st storeState) (*CachingStore, *countingBacking) {
 		deletedSeq:   cloneU64Map(st.deletedSeq),
 		mutationSeq:  st.mutationSeq,
 		state:        cacheLive,
+
+		circuitTripped: true,
 	}
 	ensureMaps(c)
 	return c, counter
@@ -261,6 +273,11 @@ func ensureMaps(c *CachingStore) {
 	if c.deletedSeq == nil {
 		c.deletedSeq = make(map[string]uint64)
 	}
+	// The generated states never seed ready-projection marks, so every mark in
+	// a captured end state was produced by the merge under test — which is what
+	// lets buildExpectedNewEnd derive the expected set from the end beads map
+	// alone.
+	c.readyProjectionLost = make(map[string]struct{})
 }
 
 func captureEndState(c *CachingStore) mergeEndState {
@@ -276,11 +293,13 @@ func captureEndState(c *CachingStore) mergeEndState {
 		beadSeq:              cloneU64Map(c.beadSeq),
 		localBeadAt:          cloneTimeMap(c.localBeadAt),
 		deletedSeq:           cloneU64Map(c.deletedSeq),
+		readyLost:            cloneDirty(c.readyProjectionLost),
 		state:                c.state,
 		lastFreshAt:          c.lastFreshAt,
 		mutationSeq:          c.mutationSeq,
 		primeErr:             primeErr,
 		syncFailures:         c.syncFailures,
+		circuitTripped:       c.circuitTripped,
 		statsAdds:            c.stats.Adds,
 		statsRemoves:         c.stats.Removes,
 		statsUpdates:         c.stats.Updates,

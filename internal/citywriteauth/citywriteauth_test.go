@@ -444,7 +444,7 @@ func TestReqDigest(t *testing.T) {
 
 	// The query-less preimage must stay byte-identical to the original
 	// method"\n"path"\n"hex(sha256(body)) contract, so grants minted by the
-	// cross-repo crucible (which computes the query-less digest) and the pinned
+	// external minter (which computes the query-less digest) and the pinned
 	// golden vector keep verifying. Pin the exact preimage independently.
 	bodyHash := sha256.Sum256(body)
 	want := sha256.Sum256([]byte("POST\n" + path + "\n" + hex.EncodeToString(bodyHash[:])))
@@ -467,6 +467,49 @@ func TestReqDigest(t *testing.T) {
 	// A semantically-empty query collapses back to the query-less digest.
 	if ReqDigest("POST", path, "&", body) != base {
 		t.Fatal("semantically-empty query must equal the query-less digest")
+	}
+}
+
+// ReqDigestFromBodyHash is the body-hash-first entry point a minter uses: it
+// receives the hex sha256 of the body (never the body itself) and MUST produce
+// the identical digest ReqDigest computes from the raw body. Every case
+// ReqDigest binds — method, path, query canonicalization, empty vs non-empty
+// body, percent-encoded path — must round-trip through it byte-for-byte, or a
+// client-computed grant would never match the server's ReqDigest.
+func TestReqDigestFromBodyHash(t *testing.T) {
+	hexBody := func(b []byte) string {
+		h := sha256.Sum256(b)
+		return hex.EncodeToString(h[:])
+	}
+	cases := []struct {
+		name, method, path, rawQuery string
+		body                         []byte
+	}{
+		{"query-less", "POST", "/v0/city/acme/agents", "", []byte(`{"a":1}`)},
+		{"empty-body", "POST", "/v0/city/acme/agents", "", nil},
+		{"nil-vs-empty", "POST", "/v0/city/acme/agents", "", []byte{}},
+		{"query-bearing", "DELETE", "/v0/city/acme/workflow/x", "delete=true", []byte(`{}`)},
+		{"unordered-query", "DELETE", "/v0/city/acme/workflow/x", "b=2&a=1", []byte(`{}`)},
+		{"semantically-empty-query", "POST", "/v0/city/acme/agents", "&", []byte(`{"a":1}`)},
+		{"percent-encoded-path", "POST", "/v0/city/my%20city/agents", "", []byte(`{"a":1}`)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			want := ReqDigest(tc.method, tc.path, tc.rawQuery, tc.body)
+			got := ReqDigestFromBodyHash(tc.method, tc.path, tc.rawQuery, hexBody(tc.body))
+			if got != want {
+				t.Fatalf("ReqDigestFromBodyHash = %s, want ReqDigest = %s", got, want)
+			}
+		})
+	}
+
+	// The two entry points must diverge only on how the body reaches them: a
+	// different body hash must change the digest, proving the hash is actually
+	// folded into the preimage rather than ignored.
+	same := ReqDigestFromBodyHash("POST", "/x", "", hexBody([]byte("one")))
+	diff := ReqDigestFromBodyHash("POST", "/x", "", hexBody([]byte("two")))
+	if same == diff {
+		t.Fatal("ReqDigestFromBodyHash insensitive to the body hash")
 	}
 }
 

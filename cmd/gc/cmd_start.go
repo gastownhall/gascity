@@ -20,12 +20,14 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
+	"github.com/gastownhall/gascity/internal/warmup"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 	"github.com/spf13/cobra"
@@ -153,7 +155,7 @@ func computePoolDeathHandlers(cfg *config.City, cityName, cityPath string, sp ru
 		for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, st, sp) {
 			_, instanceName := config.ParseQualifiedName(qualifiedInstance)
 			instance := deepCopyAgent(&a, instanceName, a.Dir)
-			cmd := instance.EffectiveOnDeathForBeads(cfg.Beads)
+			cmd := instance.EffectiveOnDeathFor(config.QueryTopology{Beads: cfg.Beads})
 			if cmd == "" {
 				continue
 			}
@@ -342,6 +344,55 @@ func buildMaxSessionAgeTracker(cfg *config.City, cityName string, sp runtime.Pro
 	}
 	if !registeredAny {
 		return nil
+	}
+	return tr
+}
+
+// buildAssignedWorkDeferTracker creates an assignedWorkDeferTracker from the
+// config, registering a consecutive-defer limit override for every agent
+// that has assigned_work_defer_limit set. Unlike buildIdleTracker /
+// buildMaxSessionAgeTracker, this always returns a non-nil tracker: the
+// backstop (ga-nllza6) must stay live even when no agent configures an
+// override, falling back to defaultAssignedWorkDeferLimit for any session
+// with no direct or template registration. Mirrors buildIdleTracker's
+// registration-loop shape so the set of session names registered matches
+// what the reconciler observes.
+func buildAssignedWorkDeferTracker(cfg *config.City, cityName string, sp runtime.Provider) assignedWorkDeferTracker {
+	tr := newAssignedWorkDeferTracker()
+	st := cfg.Workspace.SessionTemplate
+	for _, a := range cfg.Agents {
+		if a.AssignedWorkDeferLimit == nil {
+			continue
+		}
+		limit := *a.AssignedWorkDeferLimit
+		named := config.FindNamedSession(cfg, a.QualifiedName())
+		namedAlways := named != nil && named.ModeOrDefault() == "always"
+		if named != nil {
+			namedSessionName := config.NamedSessionRuntimeName(cityName, cfg.Workspace, named.QualifiedName())
+			if !namedAlways {
+				tr.setLimit(namedSessionName, limit)
+			} else {
+				tr.exemptTemplateFallbackForSession(namedSessionName)
+			}
+			if !a.SupportsInstanceExpansion() {
+				continue
+			}
+		}
+		if a.SupportsInstanceExpansion() {
+			sp0 := scaleParamsFor(&a)
+			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, st, sp) {
+				sn := startupSessionName(cityName, qualifiedInstance, st)
+				tr.setLimit(sn, limit)
+			}
+			if a.SupportsGenericEphemeralSessions() {
+				template := lifecycleTemplateFallbackKey(a)
+				tr.setLimitForTemplate(template, limit)
+				exemptAlwaysNamedTemplateFallbacks(cfg, cityName, template, tr.exemptTemplateFallbackForSession)
+			}
+			continue
+		}
+		sn := startupSessionName(cityName, a.QualifiedName(), st)
+		tr.setLimit(sn, limit)
 	}
 	return tr
 }
@@ -564,6 +615,14 @@ func doStartWithNameOverrideJSON(args []string, controllerMode bool, stdout, std
 	return 0
 }
 
+// resolveStartDir resolves the city directory for start/restart. The
+// no-argument case deliberately keeps the plain cwd fallback rather than
+// routing through resolveImplicitCWD: start and restart cannot bootstrap
+// anything. Every caller feeds this into requireBootstrappedCity, which walks
+// up for an existing city.toml/.gc and errors before any side effect when
+// there is none, so an unattended no-path invocation in an arbitrary checkout
+// fails loudly instead of leaving state behind. The implicit-cwd guard is for
+// the entry points that create state — see resolveImplicitCWD.
 func resolveStartDir(args []string) (string, error) {
 	switch {
 	case len(args) > 0:
@@ -733,11 +792,24 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 
 	// Warm-up doctor scan. Fail-open: startup continues regardless of check,
 	// mail, or runner failures.
-	warmupOpts := WarmupOpts{
+	warmupCityPath := cityPath
+	if absCityPath, pathErr := filepath.Abs(warmupCityPath); pathErr == nil {
+		warmupCityPath = absCityPath
+	}
+	skipRigDoltChecks := gcDoltSkip()
+	warmupChecks := buildDoctorChecks(warmupCityPath, cfg, nil, buildDoctorChecksOpts{
+		Stderr:               io.Discard,
+		ControllerRunning:    doctor.IsControllerRunning(warmupCityPath),
+		SkipCityDoltCheck:    skipRigDoltChecks || (!scopeUsesManagedBdStoreContract(warmupCityPath, warmupCityPath) && !workspaceNeedsCityDoltCheck(warmupCityPath, cfg)),
+		SkipManagedDoltCheck: managedDoltOpsCheckSkip(warmupCityPath, cfg, nil),
+		SkipRigDoltChecks:    skipRigDoltChecks,
+	})
+	warmupOpts := warmup.WarmupOpts{
+		Checks: warmupChecks,
 		Mailer: defaultMailProvider(cityPath),
 		Stderr: stderr,
 	}
-	_, _ = RunWarmupChecks(context.Background(), cityPath, cfg, warmupOpts)
+	_, _ = warmup.RunWarmupChecks(context.Background(), warmupCityPath, cfg, warmupOpts)
 
 	// Materialize formula symlinks before agent startup.
 	// System formulas/orders now arrive via the core bootstrap pack.
@@ -812,7 +884,11 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		}
 	}
 
-	sp := newSessionProvider()
+	sp, err := newSessionProviderForCity(cfg, cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	// beaconTime is captured once so the beacon timestamp remains stable
 	// across reconcile ticks. Without this, FormatBeacon(time.Now()) would
@@ -904,10 +980,9 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// arm (collectAssignedWorkBeadsWithStores / cold-wake scale-check probes) — a dual
 	// role the daemon routes to the session store today too, tracked as a shared E2
 	// two-store split. Identity to oneShotStore at the single-store backend, so
-	// byte-identical today. releaseOrphanedPoolAssignmentsWhenSnapshotsComplete keeps
-	// the plain oneShotStore, matching the daemon's cityBeadStore() there (its lone
-	// liveOpenSessionAssignmentExists session read is a shared work-release-boundary
-	// follow-up).
+	// byte-identical today. releaseOrphanedPoolAssignmentsWhenSnapshotsComplete takes
+	// both: oneShotStore as the work-class owner fallback and sessStore for its lone
+	// liveOpenSessionAssignmentExists session read (ga-g3pf0).
 	sessStore := cliSessionStore(oneShotStore, cfg, cityPath)
 
 	// One-shot bead reconciliation: same code path as the daemon.
@@ -926,7 +1001,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		cityPath, beads.SessionStore{Store: sessStore}, rigStores, ds, sp, cfgNames, cfg, clock.Real{}, stderr, true, sessionBeads,
 	)
 
-	if released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(oneShotStore, cfg, cityPath, sessionBeads.OpenInfos(), dsResult, rigStores); len(released) > 0 {
+	if released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(oneShotStore, beads.SessionStore{Store: sessStore}, cfg, cityPath, sessionBeads.OpenInfos(), dsResult, rigStores); len(released) > 0 {
 		for _, r := range released {
 			fmt.Fprintf(stderr, "released orphaned pool work: %s\n", r.ID) //nolint:errcheck
 		}
@@ -949,17 +1024,18 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		PoolDesiredCounts(ComputePoolDesiredStates(
 			cfg, poolWorkBeads, openInfos, dsResult.ScaleCheckCounts)),
 		sessionBeads,
-		dsResult.PoolScaleCheckPartialTemplates,
+		effectivePoolPartialRetentionTemplates(dsResult),
 	)
 	if poolDesired == nil {
 		poolDesired = make(map[string]int)
 	}
 	mergeNamedSessionDemand(poolDesired, dsResult.NamedSessionDemand, cfg)
-	awakeAssignedWorkBeads, awakeAssignedStoreRefs := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, openInfos, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
+	awakeAssignedWorkBeads, awakeAssignedStoreRefs := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, oneShotStore, openInfos, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
 	reconcileSessionBeadsAtPathWithNamedDemand(
 		sigCtx, cityPath, sessionBeads.OpenForReconcile(), sessionBeads, ds, cfgNames, cfg, sp, sessStore,
 		nil, awakeAssignedWorkBeads, rigStores, nil, dt, nil, poolDesired,
 		dsResult.NamedSessionDemand,
+		dsResult.NamedSessionRoutedDemand,
 		dsResult.snapshotQueryPartial(),
 		nil, cityName,
 		nil, clock.Real{}, recorder, cfg.Session.StartupTimeoutDuration(), 0,
@@ -1161,7 +1237,7 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string, hoo
 			if _, err := os.Stat(abs); err == nil {
 				copyFiles = append(copyFiles, runtime.CopyEntry{
 					Src: abs, RelDst: path.Join(relWorkDir, rel),
-					Probed: true, ContentHash: runtime.HashPathContent(abs),
+					Probed: true, ContentHash: runtime.HashHookSettingsContent(abs, rel),
 				})
 			}
 		}
@@ -1362,17 +1438,41 @@ func providerProcessPassthroughEnv() map[string]string {
 	return processenv.ProviderProcessPassthroughEnv()
 }
 
+// controllerOnlyEnvKeys is processenv.ControllerOnlyEnvKeys in set form, so the
+// GC_ sweep below can skip them by exact name. Derived rather than re-spelled:
+// two hand-written lists of the same secret names drift, and a drift here is
+// silent.
+//
+// The skip is what keeps the sweep from undoing the pin.
+// providerProcessPassthroughEnv already sets each of these to the empty string,
+// and the pin — not an omission — is what withholds them, because the map is an
+// overlay on an environment the session already inherits (see
+// processenv.ControllerOnlyEnvKeys). These keys are GC_-prefixed, so without the
+// skip the sweep would read the controller's real value out of os.Environ() and
+// write it straight back over that pin. Unlike GC_DOLT_*, which the comment
+// below names as deliberately forwarded so agents reach the same bead store as
+// the parent, nothing an agent runs may hold the controller token.
+var controllerOnlyEnvKeys = func() map[string]bool {
+	keys := make(map[string]bool, len(processenv.ControllerOnlyEnvKeys))
+	for _, key := range processenv.ControllerOnlyEnvKeys {
+		keys[key] = true
+	}
+	return keys
+}()
+
 // passthroughEnv returns environment variables from the parent process that
 // agent sessions should inherit. Agents need PATH to find tools (including gc),
 // GC_BEADS/GC_DOLT so they use the same bead store as the parent,
 // GC_DOLT_HOST/PORT/USER/PASSWORD so agents can connect to remote Dolt servers,
 // and Claude auth/home context so managed sessions can launch reliably under
-// shell and supervisor-driven flows.
+// shell and supervisor-driven flows. The GC_ sweep is otherwise complete;
+// controllerOnlyEnvKeys is the one exclusion it applies, and those keys come
+// back pinned to the empty string rather than absent.
 func passthroughEnv() map[string]string {
 	m := providerProcessPassthroughEnv()
 	for _, entry := range os.Environ() {
 		key, val, ok := strings.Cut(entry, "=")
-		if !ok || val == "" || !strings.HasPrefix(key, "GC_") {
+		if !ok || val == "" || !strings.HasPrefix(key, "GC_") || controllerOnlyEnvKeys[key] {
 			continue
 		}
 		m[key] = val
@@ -1380,16 +1480,18 @@ func passthroughEnv() map[string]string {
 	return m
 }
 
-// expandEnvMap returns a copy of m with os.ExpandEnv applied to each value.
-// This allows TOML-sourced env blocks to reference the controller's environment,
-// e.g. DOLTHUB_TOKEN = "$DOLTHUB_TOKEN".
+// expandEnvMap returns a copy of m with $VAR references expanded against the
+// controller's environment. This allows TOML-sourced env blocks to reference it,
+// e.g. DOLTHUB_TOKEN = "$DOLTHUB_TOKEN". The controller-only keys read as empty
+// here, so no config-authored value can copy one into a session under another
+// name.
 func expandEnvMap(m map[string]string) map[string]string {
 	if m == nil {
 		return nil
 	}
 	out := make(map[string]string, len(m))
 	for k, v := range m {
-		out[k] = os.ExpandEnv(v)
+		out[k] = processenv.ExpandSessionEnvValue(v)
 	}
 	return out
 }

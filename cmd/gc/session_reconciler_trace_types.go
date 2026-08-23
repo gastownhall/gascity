@@ -191,9 +191,11 @@ const (
 	TraceReasonScaleCheck                    TraceReasonCode = "scale_check"
 	TraceReasonStart                         TraceReasonCode = "start"
 
-	TraceReasonMaxSessionAge TraceReasonCode = "max_session_age"
-	TraceReasonUserHold      TraceReasonCode = "user_hold"
-	TraceReasonQuarantine    TraceReasonCode = "quarantine"
+	TraceReasonMaxSessionAge         TraceReasonCode = "max_session_age"
+	TraceReasonUserHold              TraceReasonCode = "user_hold"
+	TraceReasonQuarantine            TraceReasonCode = "quarantine"
+	TraceReasonPinned                TraceReasonCode = "pinned"
+	TraceReasonAssignedWorkExhausted TraceReasonCode = "assigned_work_exhausted"
 )
 
 type TraceOutcomeCode string
@@ -248,6 +250,7 @@ const (
 	TraceOutcomeStopPending         TraceOutcomeCode = "stop_pending"
 	TraceOutcomeDeferredConfirm     TraceOutcomeCode = "deferred_confirm"
 	TraceOutcomeExempt              TraceOutcomeCode = "exempt"
+	TraceOutcomeDeferredMinFloor    TraceOutcomeCode = "deferred_min_floor"
 	TraceOutcomeRestartInPlace      TraceOutcomeCode = "restart_in_place"
 	TraceOutcomeDeferredPending     TraceOutcomeCode = "deferred_pending"
 	TraceOutcomeRepairInPlace       TraceOutcomeCode = "repair_in_place"
@@ -269,7 +272,9 @@ const (
 	TraceOutcomeStartEnqueued       TraceOutcomeCode = "start_enqueued"
 	TraceOutcomeDeferredUserHold    TraceOutcomeCode = "deferred_user_hold"
 	TraceOutcomeDeferredQuarantine  TraceOutcomeCode = "deferred_quarantine"
+	TraceOutcomeDeferredPinned      TraceOutcomeCode = "deferred_pinned"
 	TraceOutcomeDeferredBusy        TraceOutcomeCode = "deferred_busy"
+	TraceOutcomeStopDeferExhausted  TraceOutcomeCode = "stop_defer_exhausted"
 
 	// TraceOutcomeSkippedLivenessError marks a destructive reconciler action
 	// (pending-create rollback, failed-create close, drain-ack finalize, or

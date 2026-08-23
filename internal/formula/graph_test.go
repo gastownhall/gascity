@@ -161,6 +161,179 @@ func TestApplyGraphControlsRalphOnCompleteOnlyControlsLogicalStep(t *testing.T) 
 	}
 }
 
+func TestApplyGraphControlsFinalizerExcludesRalphIterationScope(t *testing.T) {
+	t.Parallel()
+
+	f := &Formula{
+		Steps: []*Step{
+			{
+				ID:    "review-loop",
+				Title: "Review loop",
+				Ralph: &RalphSpec{
+					MaxAttempts: 3,
+					Check: &RalphCheckSpec{
+						Mode: "exec",
+						Path: ".gascity/checks/review.sh",
+					},
+				},
+				Children: []*Step{
+					{ID: "review", Title: "Review", Type: "task"},
+					{ID: "synthesize", Title: "Synthesize", Type: "task", Needs: []string{"review"}},
+				},
+			},
+			{
+				ID:    "publish",
+				Title: "Publish",
+				Type:  "task",
+				Needs: []string{"review-loop"},
+			},
+		},
+	}
+
+	expanded, err := ApplyRalph(f.Steps)
+	if err != nil {
+		t.Fatalf("ApplyRalph failed: %v", err)
+	}
+	f.Steps = expanded
+	ApplyGraphControls(f)
+
+	finalizer := findGraphStepByID(collectGraphSteps(f.Steps), "workflow-finalize")
+	if finalizer == nil {
+		t.Fatal("missing workflow-finalize")
+	}
+	if !containsString(finalizer.Needs, "review-loop") {
+		t.Fatalf("workflow-finalize needs = %v, want logical Ralph control even when referenced downstream", finalizer.Needs)
+	}
+	if !containsString(finalizer.Needs, "publish") {
+		t.Fatalf("workflow-finalize needs = %v, want downstream sink", finalizer.Needs)
+	}
+	if containsString(finalizer.Needs, "review-loop.iteration.1") {
+		t.Fatalf("workflow-finalize needs = %v, must not include physical Ralph iteration", finalizer.Needs)
+	}
+	logicalCount := 0
+	for _, id := range finalizer.Needs {
+		if id == "review-loop" {
+			logicalCount++
+		}
+	}
+	if logicalCount != 1 {
+		t.Fatalf("workflow-finalize needs = %v, want logical Ralph control exactly once", finalizer.Needs)
+	}
+}
+
+func TestApplyGraphControlsFinalizerExcludesNestedRalphAttemptLineage(t *testing.T) {
+	t.Parallel()
+
+	f := &Formula{
+		Steps: []*Step{
+			{
+				ID:    "outer-loop",
+				Title: "Outer loop",
+				Ralph: &RalphSpec{
+					MaxAttempts: 3,
+					Check:       &RalphCheckSpec{Mode: "exec", Path: ".gascity/checks/outer.sh"},
+				},
+				Children: []*Step{
+					{
+						ID:    "inner-loop",
+						Title: "Inner loop",
+						Ralph: &RalphSpec{
+							MaxAttempts: 2,
+							Check:       &RalphCheckSpec{Mode: "exec", Path: ".gascity/checks/inner.sh"},
+						},
+						Children: []*Step{{ID: "review", Title: "Review", Type: "task"}},
+					},
+				},
+			},
+			{ID: "publish", Title: "Publish", Type: "task", Needs: []string{"outer-loop"}},
+		},
+	}
+
+	expanded, err := ApplyRalph(f.Steps)
+	if err != nil {
+		t.Fatalf("ApplyRalph failed: %v", err)
+	}
+	f.Steps = expanded
+	ApplyGraphControls(f)
+
+	finalizer := findGraphStepByID(collectGraphSteps(f.Steps), "workflow-finalize")
+	if finalizer == nil {
+		t.Fatal("missing workflow-finalize")
+	}
+	for _, required := range []string{"outer-loop", "publish"} {
+		if !containsString(finalizer.Needs, required) {
+			t.Fatalf("workflow-finalize needs = %v, want %q", finalizer.Needs, required)
+		}
+	}
+	for _, stale := range []string{
+		"outer-loop.iteration.1",
+		"outer-loop.iteration.1.inner-loop",
+		"outer-loop.iteration.1.inner-loop.iteration.1",
+	} {
+		if containsString(finalizer.Needs, stale) {
+			t.Fatalf("workflow-finalize needs = %v, must not include nested physical lineage %q", finalizer.Needs, stale)
+		}
+	}
+}
+
+func TestGraphSinkStepIDsFailsClosedForInvalidAttemptControl(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name             string
+		includeControl   bool
+		controlKind      string
+		attemptStepID    string
+		controlStepID    string
+		scopeRef         string
+		includeEnclosing bool
+		enclosingKind    string
+	}{
+		{name: "missing control", attemptStepID: "loop"},
+		{name: "non-control target", includeControl: true, controlKind: beadmeta.KindTask, attemptStepID: "loop", controlStepID: "loop"},
+		{name: "missing attempt step ID", includeControl: true, controlKind: beadmeta.KindRalph, controlStepID: "loop"},
+		{name: "missing control step ID", includeControl: true, controlKind: beadmeta.KindRalph, attemptStepID: "loop"},
+		{name: "mismatched step IDs", includeControl: true, controlKind: beadmeta.KindRalph, attemptStepID: "loop", controlStepID: "other-loop"},
+		{name: "dangling enclosing scope", includeControl: true, controlKind: beadmeta.KindRalph, attemptStepID: "loop", controlStepID: "loop", scopeRef: "missing"},
+		{name: "wrong-kind enclosing scope", includeControl: true, controlKind: beadmeta.KindRalph, attemptStepID: "loop", controlStepID: "loop", scopeRef: "enclosing", includeEnclosing: true, enclosingKind: beadmeta.KindTask},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			steps := []*Step{
+				{
+					ID: "iteration",
+					Metadata: map[string]string{
+						beadmeta.KindMetadataKey:       beadmeta.KindScope,
+						beadmeta.AttemptMetadataKey:    "1",
+						beadmeta.ControlForMetadataKey: "logical",
+						beadmeta.StepIDMetadataKey:     tc.attemptStepID,
+						beadmeta.ScopeRefMetadataKey:   tc.scopeRef,
+					},
+				},
+			}
+			if tc.includeControl {
+				steps = append(steps, &Step{
+					ID:    "logical",
+					Needs: []string{"iteration"},
+					Metadata: map[string]string{
+						beadmeta.KindMetadataKey:   tc.controlKind,
+						beadmeta.StepIDMetadataKey: tc.controlStepID,
+					},
+				})
+			}
+			if tc.includeEnclosing {
+				steps = append(steps, &Step{
+					ID:       "enclosing",
+					Metadata: map[string]string{beadmeta.KindMetadataKey: tc.enclosingKind},
+				})
+			}
+
+			if sinks := graphSinkStepIDs(steps); !containsString(sinks, "iteration") {
+				t.Fatalf("graphSinkStepIDs = %v, want physical scope retained for invalid lineage", sinks)
+			}
+		})
+	}
+}
+
 func TestApplyGraphControlsSimpleRalphInsideScopeDoesNotCreateRunScopeCheck(t *testing.T) {
 	t.Parallel()
 
@@ -261,6 +434,158 @@ func TestNeedsScopeCheckTracksBeadmetaExemptKinds(t *testing.T) {
 	if needsScopeCheck(&Step{ID: "no-scope"}) {
 		t.Error("needsScopeCheck(no scope_ref) = true, want false")
 	}
+}
+
+// teardownSinkFormula builds the mol-adopt-pr-v2 / mol-scoped-work shape: a
+// body scope over one member step, plus a cleanup step that needs the body.
+// role is the cleanup step's gc.scope_role, which is the only variable under
+// test.
+func teardownSinkFormula(role string) *Formula {
+	return &Formula{
+		Steps: []*Step{
+			{
+				ID:    "work",
+				Title: "Work",
+				Type:  "task",
+				Metadata: map[string]string{
+					beadmeta.ScopeRefMetadataKey:  "body",
+					beadmeta.ScopeRoleMetadataKey: beadmeta.ScopeRoleMember,
+					beadmeta.OnFailMetadataKey:    "abort_scope",
+				},
+				Retry: &RetrySpec{MaxAttempts: 3, OnExhausted: "hard_fail"},
+			},
+			{
+				ID:    "body",
+				Title: "Body",
+				Type:  "task",
+				Needs: []string{"work"},
+				Metadata: map[string]string{
+					beadmeta.KindMetadataKey:      beadmeta.KindScope,
+					beadmeta.ScopeRoleMetadataKey: beadmeta.ScopeRoleBody,
+					beadmeta.ScopeNameMetadataKey: "worktree",
+				},
+			},
+			{
+				ID:    "cleanup-worktree",
+				Title: "Clean up the worktree",
+				Type:  "task",
+				Needs: []string{"body"},
+				Metadata: map[string]string{
+					beadmeta.KindMetadataKey:      beadmeta.KindCleanup,
+					beadmeta.ScopeRefMetadataKey:  "body",
+					beadmeta.ScopeRoleMetadataKey: role,
+				},
+				Retry: &RetrySpec{MaxAttempts: 3, OnExhausted: "hard_fail"},
+			},
+		},
+	}
+}
+
+func compileGraphSteps(t *testing.T, f *Formula) []*Step {
+	t.Helper()
+	expanded, err := ApplyRetries(f.Steps)
+	if err != nil {
+		t.Fatalf("ApplyRetries: %v", err)
+	}
+	f.Steps = expanded
+	ApplyGraphControls(f)
+	return collectGraphSteps(f.Steps)
+}
+
+// TestWorkflowFinalizeExcludesTeardownSinks pins the settlement contract for
+// teardown-scoped work (ga-99u0u): teardown runs AFTER the root settles, so it
+// must never be a workflow-finalize sink. Sinking it deadlocks settlement —
+// finalize blocks on the teardown retry control, the control blocks on its
+// attempt, and the attempt's own pass condition waits for the root outcome
+// only finalize can produce.
+func TestWorkflowFinalizeExcludesTeardownSinks(t *testing.T) {
+	t.Parallel()
+
+	t.Run("teardown role never gates finalize", func(t *testing.T) {
+		t.Parallel()
+
+		steps := compileGraphSteps(t, teardownSinkFormula(beadmeta.ScopeRoleTeardown))
+		finalizer := findGraphStepByID(steps, "workflow-finalize")
+		if finalizer == nil {
+			t.Fatal("missing workflow-finalize")
+		}
+		if !containsString(finalizer.Needs, "body") {
+			t.Fatalf("workflow-finalize needs = %v, want the body scope latch", finalizer.Needs)
+		}
+		for _, excluded := range []string{
+			"cleanup-worktree",
+			"cleanup-worktree.attempt.1",
+			"cleanup-worktree-scope-check",
+		} {
+			if containsString(finalizer.Needs, excluded) {
+				t.Fatalf("workflow-finalize needs = %v, must not include teardown step %q", finalizer.Needs, excluded)
+			}
+		}
+	})
+
+	// Control: the same cleanup step differing only in gc.scope_role still
+	// reaches finalize through its minted scope-check. Proves the exclusion
+	// keys on the teardown role, not on gc.kind=cleanup and not on retry
+	// controls in general.
+	t.Run("member role still gates finalize", func(t *testing.T) {
+		t.Parallel()
+
+		steps := compileGraphSteps(t, teardownSinkFormula(beadmeta.ScopeRoleMember))
+		finalizer := findGraphStepByID(steps, "workflow-finalize")
+		if finalizer == nil {
+			t.Fatal("missing workflow-finalize")
+		}
+		if !containsString(finalizer.Needs, "cleanup-worktree-scope-check") {
+			t.Fatalf("workflow-finalize needs = %v, want the member-role cleanup's scope-check", finalizer.Needs)
+		}
+	})
+
+	// Control: an unscoped retry-managed step keeps its control as a sink, so
+	// the exclusion cannot be silently swallowing every retry control.
+	t.Run("unscoped retry control still gates finalize", func(t *testing.T) {
+		t.Parallel()
+
+		f := teardownSinkFormula(beadmeta.ScopeRoleTeardown)
+		f.Steps = append(f.Steps, &Step{
+			ID:    "notify",
+			Title: "Notify",
+			Type:  "task",
+			Retry: &RetrySpec{MaxAttempts: 2, OnExhausted: "hard_fail"},
+		})
+		steps := compileGraphSteps(t, f)
+		finalizer := findGraphStepByID(steps, "workflow-finalize")
+		if finalizer == nil {
+			t.Fatal("missing workflow-finalize")
+		}
+		if !containsString(finalizer.Needs, "notify") {
+			t.Fatalf("workflow-finalize needs = %v, want the unscoped retry control", finalizer.Needs)
+		}
+	})
+
+	// Control: a bare (non-retry) teardown step is excluded too — the sink
+	// rule is about the teardown role, not about the control shapes retry
+	// expansion happens to mint.
+	t.Run("bare teardown step never gates finalize", func(t *testing.T) {
+		t.Parallel()
+
+		f := teardownSinkFormula(beadmeta.ScopeRoleTeardown)
+		cleanup := findGraphStepByID(f.Steps, "cleanup-worktree")
+		if cleanup == nil {
+			t.Fatal("missing cleanup-worktree in fixture")
+		}
+		cleanup.Retry = nil
+		steps := compileGraphSteps(t, f)
+		finalizer := findGraphStepByID(steps, "workflow-finalize")
+		if finalizer == nil {
+			t.Fatal("missing workflow-finalize")
+		}
+		if containsString(finalizer.Needs, "cleanup-worktree") {
+			t.Fatalf("workflow-finalize needs = %v, must not include the bare teardown step", finalizer.Needs)
+		}
+		if !containsString(finalizer.Needs, "body") {
+			t.Fatalf("workflow-finalize needs = %v, want the body scope latch", finalizer.Needs)
+		}
+	})
 }
 
 func findGraphStepByID(steps []*Step, id string) *Step {

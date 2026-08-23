@@ -7,28 +7,289 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Upgrading Notes
+### Changed
 
-- **Every graph-owning store scope needs a `Dir`-matched `control-dispatcher`
-  agent.** Control beads now route to the dispatcher that owns their store scope
-  (city vs. rig) rather than falling back to the city dispatcher, and that
-  routing is fail-closed: a graph owned by `rig:X` whose scope has no exactly
-  `Dir`-matched `control-dispatcher` agent now fails before instantiation with an
-  `OrderFailed` event instead of silently stranding its control lane on a
-  dispatcher that cannot read the rig store. Deployments that previously limped
-  along through shared-store mis-routing must add a matching rig-scoped
-  `control-dispatcher` agent; the reconciler logs `control bead <id> in rig
-  store "X" has no configured control-dispatcher for its store scope` to name
-  the missing scope.
+- **`gc pack registry publish` now refuses an unscoped pack name unless you
+  pass `--allow-unscoped-name`.** Registry pack names are scoped as
+  `<github-owner>/<pack>`, and the registry has always reserved bare names for
+  packs it already holds a claim for — but the CLI submitted one anyway, so the
+  refusal arrived only after the request had been created and parked in the
+  review queue as an unapprovable pending row. Publish now checks the name
+  locally, before any credential or publish traffic, and names the exact
+  `[pack].name` edit that fixes it. It also refuses a scope that is not the
+  lowercased GitHub owner of the source repository, which the registry rejects
+  with no override.
+
+  Upgrading: a publisher of a grandfathered bare name must add
+  `--allow-unscoped-name` to keep publishing under it — the registry still
+  accepts a bare name it already holds a claim for, and a local preflight
+  cannot see the claim table. New packs must set
+  `[pack].name = "<github-owner>/<pack>"` in `pack.toml`. `--name` no longer
+  stands in for a missing `[pack].name`, and it can no longer rename a pack at
+  publish time: the registry byte-compares it with `[pack].name`, so it can
+  only restate the name `pack.toml` already declares.
 
 ### Fixed
 
-- **Pin the `beads` dependency to the stable v1.0.4.** v1.3.0 built against
-  `beads v1.0.5`, which was subsequently withdrawn (demoted to a pre-release;
-  `v1.0.4` is the current stable release). v1.3.1 repins the `beads` Go module
-  and the CI `bd` toolchain (`BD_VERSION`) to `v1.0.4`. No behavior change is
-  expected — Gas City already defaults to `bd_compatibility = "bd-1.0.4"`
-  semantics, and the config still accepts both `bd-1.0.4` and `bd-1.0.5`.
+- **`gc import add` of a local in-git pack now locks to HEAD, not the repo's
+  latest tag.** Per `gc import add --help`, a local path inside a git
+  worktree is documented to be "locked to the current commit," but the
+  default version resolution (absent an explicit `--version`) preferred the
+  repo's latest semver tag whenever one existed. A pack added to the
+  worktree after the last tag was cut resolved to a checkout whose tree
+  predates the pack, failing with a misleading "missing pack.toml" error
+  even though the pack exists at HEAD. A local-worktree-promoted source now
+  always locks to `sha:<HEAD commit>`, matching the documented behavior;
+  registry/remote sources are unaffected. Fixes #3659.
+
+- **`gc doctor`'s `order-firing-current` check no longer hard-fails
+  `gc doctor` (exit code, `BlockingFailed`) when its own order-history
+  lookup times out.** The check races a Dolt-backed order-history query
+  against a 15s budget; on timeout it returned `StatusError` with no
+  `Severity` set, silently defaulting to `SeverityBlocking` (the zero
+  value of `CheckSeverity`) — turning a slow-but-healthy city's doctor run
+  red even when scheduled orders were firing normally, since a timed-out
+  lookup proves nothing about actual order staleness. The timeout branch
+  now explicitly sets `Severity: SeverityAdvisory` and `TimedOut: true`,
+  matching how `Doctor.boundedRun`'s own per-check timeout is already
+  reported, so callers (including `--json` output) can distinguish
+  "confirmed stale" from "the query didn't finish in time." (#4895)
+
+- **Wisp GC now reaps rootless leaf plain-task wisps.** The orphan reaper
+  (`reapOrphanedClosedWisps`) previously skipped any closed wisp-tier row
+  with no `gc.root_bead_id` pointer outright, and the root-rooted closure
+  purge never enumerated it either (it matches none of the root selectors:
+  not a molecule, not `gc.kind=wisp`, not a graph.v2 workflow). A closed
+  plain-task wisp that never had an owning root therefore accumulated
+  uncollected in the wisp tier indefinitely. Such a row now reaps on its
+  own closed status when it is a leaf — no parent and no children — since
+  it then has no root to check for collectibility and the single-bead
+  delete strands nothing. Leaf-ness is tested over both ownership links a
+  bead can carry — the `parent_id` column and a `parent-child` dep row —
+  since some step beads are joined to their parent by the dep row alone.
+  A rootless row that owns a subtree, is itself a subtree member, or is
+  not a plain task, remains out of scope, preserving the original safety
+  boundary. The leaf-ness probes are bounded per sweep (including in the
+  dry-run default, where they are the only backend cost) so the scan never
+  does unbounded reads per tick. Fixes #3780.
+
+- **The legacy workspace-identity deprecation warning now caveats that
+  following it can silently break packs pinned to an older revision.**
+  `city.toml`'s `workspace.name`/`workspace.prefix` deprecation hint told
+  operators to move those fields to `.gc/site.toml`, but any installed pack
+  still pinned to a revision that reads `workspace.name` directly (rather
+  than the newer site-binding-aware resolution) would silently lose its
+  identity/routing once the field was removed — reported after one
+  deployment lost inbound Discord messages for ~2 days with zero alarms
+  before anyone checked delivery receipts. The warning now says so
+  explicitly, naming `gc doctor --fix` (which performs the removal) so
+  operators check pack compatibility before running it. (#3887)
+
+- **The dolt pack's `run_bounded` python3 fallback now sends SIGTERM before
+  SIGKILL, matching its documented contract.** The fallback (used when
+  neither `timeout` nor `gtimeout` is on `PATH`, the default on stock macOS)
+  previously called `subprocess.run(..., timeout=...)`, which kills the
+  child with SIGKILL immediately on expiry — giving it no chance to run its
+  own signal handler, unlike the `timeout --kill-after=2` path it's meant to
+  match. `mol-dog-backup.sh` wraps `dolt backup sync` in this helper, and
+  `dolt` publishes a backup archive under its final name before writing the
+  manifest that references it; a SIGKILL mid-sync left the archive
+  permanently unreferenced (`dolt backup` has no prune verb). The fallback
+  now uses `Popen` + `terminate()` + a 2s grace `wait()` + `kill()`,
+  streaming output instead of buffering it. (gascity#4823)
+
+- **`GET /runs/{id}/steps` returns steps in topological (pipeline) order, not
+  arbitrary fold order.** No level of the read chain — the handler, the
+  member-bead projection, or the run projection fold — applied any sort, so
+  the Runs dashboard's Formula Graph rendered a run's steps in whatever order
+  the projection happened to yield, unreadable as a pipeline. Steps are now
+  topologically sorted on each member's real dependency edges (`Dependencies`
+  and `Needs`), with a deterministic bead-ID tiebreak for independent steps
+  and steps carrying no dependency data. (gascity#4699)
+
+- **`check-core-boundary.sh` no longer false-positives on an in-tree Go
+  build cache.** The `org_` boundary scan walked the whole working tree
+  (`grep -r --exclude-dir=vendor --exclude-dir=testdata`), so any untracked
+  in-tree Go module cache tripped false violations on third-party module
+  sources — the common case is GitLab CI's canonical
+  `$CI_PROJECT_DIR/.cache/go-mod` layout. The scan now runs over
+  `git ls-files` instead, so an untracked cache or build-artifact directory
+  is invisible to it regardless of name, while vendor/testdata (tracked or
+  not) stay excluded as before. (gascity#4479)
+
+- **`gc status` no longer pays a full event-log scan for a cosmetic field.**
+  `storehealth.LastMaintenance` now prefers the `TailProvider` backward-scan
+  fast path over an unbounded forward `List` when the provider supports it,
+  and a new `Filter.MaxScanBytes` bounds that backward scan so a rare or
+  never-emitted event type (the common case: a city that has never run store
+  maintenance) can no longer force a full-file walk just to populate the
+  `Last GC:` status line. Previously this cost two full scans of
+  `events.jsonl` on every `gc status` call, dominating latency on large event
+  logs and surfacing as a spurious "runtime status probe timed out" warning.
+
+  Operator note: `Last GC:` may now be absent on a busy city even though
+  maintenance has run. The tail scan looks back a bounded 8 MiB, and it reads
+  only the active `events.jsonl` — never the rotated `.gz` archives — so a
+  maintenance event that has aged out of the window, or out of the active file
+  entirely, is reported as absent rather than stale. The field is display-only
+  and nothing gates on it. `gc maintenance status` is the fallback, with one
+  caveat: it reads the supervisor's in-memory run history, so it requires a
+  running supervisor and resets when the supervisor restarts. It is a live
+  view, not an equivalent durable source; for durable history, query the event
+  log for `store.maintenance.*` directly. (gascity#4418)
+
+- **`gc formula cook --attach`'s help text no longer claims a parent-child
+  relationship it never creates.** `--attach=<bead-id>` has only ever added
+  a `blocks` dependency from the attached bead to the sub-DAG root
+  (`ensureFormulaCookAttachDep` / `molecule.Attach` both call
+  `store.DepAdd(..., "blocks")`, never setting `ParentID`), but the long
+  help described it as creating the sub-DAG "as children of the given
+  bead." Since convoy auto-close watches parent-child children, not
+  `blocks` dependents, a user following the old description would wrongly
+  expect an attached sub-DAG's completion to trigger the attached convoy's
+  auto-close — it never does. Help text now describes the actual `blocks`
+  -only relationship and says so explicitly (gastownhall/gascity#2392).
+
+- **`gc stop --help` and `gc stop --json` now state what actually happens to
+  a supervisor-managed city's registration.** `gc stop` has always
+  unregistered a supervisor-managed city as part of stopping it, but neither
+  the CLI help nor the `--json` output said so — a user reading "Stop all
+  agent sessions in the city" reasonably expected `gc start` to find the
+  city again later. Help text now documents the unregister behavior and
+  points at `gc register`/`gc unregister` for the split operations; the
+  `--json` envelope gained an `unregistered` field reporting whether this
+  stop also removed the supervisor registration (gastownhall/gascity#4366).
+
+- **`gc bd` no longer lets bd's own error message steer operators into a
+  Dolt-server conflict.** When the managed Dolt server is unreachable, bd
+  (with `dolt.auto-start: false`, which gc always sets) tells the operator
+  to run `bd dolt start` — but that starts a second, unmanaged Dolt server
+  that fights gc's own managed server for the same data directory. `gc bd`
+  now detects that suggestion in bd's stderr and appends a corrective hint
+  pointing at the actual remedy (`gc start` / `gc dolt restart`) alongside
+  bd's original output, without altering bd's own exit code. The hint fires
+  only for gc-managed Dolt endpoints, whose lifecycle gc owns; externally
+  bound or explicitly configured endpoints keep bd's own output unchanged
+  (gastownhall/gascity#1374).
+
+- **ACP activity is now available across process boundaries.** ACP
+  `session/update` timestamps are published through an atomic, coalesced
+  sidecar, allowing a process other than the session owner to report
+  `last_active`. Sidecar I/O runs off the JSON-RPC dispatch loop, and transient
+  publication failures are reported and retried. ACP now declares the matching
+  activity capability, enabling timed idle policies and the existing opt-in
+  `[session] progress_stall_timeout` policy. The declaration also engages two
+  paths that are on by default for ACP: a configured named ACP session whose
+  config has drifted is no longer deferred as `activity_unknown`, so a
+  config-drift tick can now reset it once its last observed activity is older
+  than the two-minute named-session activity threshold; and nudge delivery now
+  applies the configured quiescence window to ACP instead of taking the
+  deliver-without-an-activity-signal fast path. Activity age records only the last
+  observed protocol update; it does not by itself diagnose why updates stopped
+  or prove that a session is dead. `progress_stall_timeout` remains disabled by
+  default.
+
+## [1.4.0] - 2026-07-24
+
+### Upgrading Notes
+
+- **Configure one store-scoped `control-dispatcher` for every graph-owning
+  scope.** Formula control beads now route to the dispatcher whose `Dir`
+  matches the city or rig store that owns the graph. A rig-owned graph with no
+  matching dispatcher fails before instantiation instead of falling back to a
+  dispatcher that cannot read its work.
+- **Run `gc doctor --fix` after upgrading an existing city.** The current
+  doctor converges pack imports, provider catalogs, project identity, retired
+  hold labels, and managed beads/Dolt metadata before the orchestrator starts.
+- **Upgrading over an older install at a different path may need a manual
+  reseed.** If a machine already ran an older `gc` (for example a Homebrew
+  binary now replaced by a source build at a new path), `gc start` can keep the
+  stale supervisor running and can fail closed on a present-but-invalid
+  bundled-pack cache — only an *absent* cache self-heals. Run `gc import
+  install` to repopulate the cache, then let `gc start` auto-restart the
+  supervisor (or on Linux `systemctl --user restart gascity-supervisor`).
+- **An unrelated stale registered city can block `gc start`; fix or unregister
+  that city — not the one you are starting.** A pre-1.3 city still registered
+  with un-migrated provider config (for example `workspace.provider = "claude"`
+  with no `[providers.claude]` block) can fail the registry scan and abort
+  startup, with a misleading hint to `gc init` the healthy city you were
+  actually starting. Run `gc doctor --fix` inside the offending stale city, or
+  `gc unregister <stale-city>` to drop it.
+- **macOS: a supervisor left running from a prior version may need a manual
+  restart.** macOS cannot resolve a direct (non-launchd) supervisor's
+  executable for binary-drift detection, so the automatic post-upgrade restart
+  may not complete. Run `gc supervisor stop --wait`, then `gc start`.
+
+### Added
+
+- **A run-centered dashboard and API.** Run detail now combines the formula
+  stage ladder, structured transcripts, token rate, and estimated burn rate.
+  Session and run reads use typed, paginated API surfaces backed by warm
+  projections instead of ad hoc wire shapes.
+- **Durable usage and lifecycle observability.** Model, compute, and lifecycle
+  facts feed local usage history and OpenTelemetry metrics. End-of-interval
+  transcript sweeps keep live pool sessions' token and cost rates current even
+  when agents self-drive after their initial claim.
+- **Privacy-scoped command-usage metrics in release artifacts.** Before the
+  first eligible interactive command is recorded, `gc` shows the complete
+  disclosure. Events contain only a canonical command ID, the `gc` release,
+  operating system, and an anonymous installation ID—never arguments, paths,
+  file contents, or environment values. `gc metrics status`, `example`, `on`,
+  and `off` expose the local controls; `DO_NOT_TRACK=1` and
+  `GC_DISABLE_USAGE_METRICS=1` provide environment-level opt-outs.
+- **Broader runtime composition.** Provider routing, ACP/automatic runtime
+  selection, Herdr-backed sessions, and Kubernetes/subprocess/tmux execution
+  share the same session lifecycle and worker boundary.
+- **Production workflow controls.** Formulas v2 gained stronger retry,
+  fan-out, drain, scope, artifact, and finalization behavior, plus better live
+  status and event evidence for operators.
+- **An experimental OpenClaw bridge proof of concept.** The private package
+  under `contrib/openclaw-bridge` explores iMessage and Telegram connectors; it
+  is not a supported provider pack or a shipped connector artifact.
+
+### Changed
+
+- **Session lifecycle operations converge through the worker boundary.** Pool
+  demand, wake, resume, drain, close, and orphan recovery now reason from
+  persisted session/work identity rather than provider-specific shortcuts.
+- **Beads remains the persistence boundary while storage becomes more
+  resilient.** Native and CLI-backed stores share transactional lifecycle
+  semantics, bounded cached reads, store-aware routing, and explicit degraded
+  results across city and rig scopes.
+- **CI and local verification are sharded and event-driven.** The release gate
+  includes fast units, process tests, integration packages, tutorials, real
+  inference acceptance, and macOS regressions without one monolithic test
+  process.
+
+### Fixed
+
+- **Pool sessions no longer lose or strand work while draining, restarting, or
+  reusing capacity.** Claim ownership, wake budgets, slot selection, and
+  confirmed-dead cleanup are now fenced against stale or partial observations.
+- **Formula control routing retries transient configuration reads.** Attempt
+  spawn and fan-out no longer quarantine an in-flight run because of a
+  momentary config/include read failure; a successfully loaded configuration
+  that lacks the required scoped dispatcher still fails closed.
+- **Managed beads and Dolt paths fail more honestly.** Provider health,
+  endpoint ownership, lock release, compaction, reindexing, stale data-dir
+  cleanup, and partial-store reads now preserve errors instead of silently
+  reporting complete state.
+- **Events, nudges, waits, and session output remain bounded under load.** The
+  CLI drains paginated event windows, request paths avoid unbounded scans, tmux
+  sessions keep their shared server, and structured transcripts preserve tool
+  and error frames.
+- **Live run cost fields populate for long-lived pool sessions.**
+  End-of-interval model-usage sweeps account for each transcript window once,
+  restoring `tokens/min` and `burn/hr` in run detail (PR #4436).
+- **Customer Zero dashboard and claim regressions are closed.** Cross-city
+  attention reads now cancel stale requests and recover after startup; Health
+  reports per-metric availability with cross-platform sampling instead of
+  false zero/NaN values; and hook claims no longer fuzzy-update a vanished
+  session record (#4354, #4356, #4361).
+- **Release-candidate gates are portable and reproducible.** Bash 3 scripts,
+  deep metrics fixtures, reusable pool slots, Tier C pack compatibility, and
+  container-tool vulnerability checks now exercise the same bounded behavior
+  expected from the shipped artifacts.
 
 ## [1.3.0] - 2026-06-18
 
@@ -648,7 +909,8 @@ community contributors. See the GitHub release page for the full narrative.
   semantics, watchdog reconciliation cadence, dirty-cache fallback reads.
 - Long tail of session lifecycle, wake-budget, and pool identity fixes.
 
-[Unreleased]: https://github.com/gastownhall/gascity/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/gastownhall/gascity/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/gastownhall/gascity/releases/tag/v1.4.0
 [1.3.0]: https://github.com/gastownhall/gascity/compare/v1.2.1...v1.3.0
 [1.2.1]: https://github.com/gastownhall/gascity/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/gastownhall/gascity/releases/tag/v1.2.0

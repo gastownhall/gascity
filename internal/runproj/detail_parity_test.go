@@ -19,7 +19,7 @@ import (
 // stage — the kind of error the narrow golden cannot see — fails here.
 func TestStagesForFormulaCoversEverySupportedFormula(t *testing.T) {
 	want := map[string][]string{
-		"mol-adopt-pr-v2":                  {"preflight", "rebase", "review", "ci", "approval", "finalize", "cleanup"},
+		"mol-adopt-pr-v2":                  {"preflight", "rebase", "pre-review-ci", "review", "ci", "approval", "finalize", "cleanup"},
 		"mol-design-review-v2":             {"setup", "personas", "fanout", "synthesis", "apply", "finalize"},
 		"mol-bug-report-flow-v2":           {"intake", "repro", "audit", "classify", "approval", "publish", "dispatch"},
 		"mol-bug-report-implementation-v2": {"plan", "design", "implement", "review", "pr", "ci", "merge"},
@@ -63,7 +63,9 @@ func TestFormulaStageProgressMarksCompleteActivePending(t *testing.T) {
 	}
 
 	got := formulaStageProgress(stages, issues)
-	want := []string{"complete", "complete", "active", "pending", "pending", "pending", "pending"}
+	// pre-review-ci sits before the active review stage, so it reads complete
+	// even with no issues of its own (stage status is positional).
+	want := []string{"complete", "complete", "complete", "active", "pending", "pending", "pending", "pending"}
 	if len(got) != len(want) {
 		t.Fatalf("got %d stages, want %d", len(got), len(want))
 	}

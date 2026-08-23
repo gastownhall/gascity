@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"context"
 	"errors"
 	"sort"
 	"time"
@@ -46,6 +47,34 @@ const (
 	TierBoth
 )
 
+// FederatedReadTier is the tier every leg of a CITY-WIDE FEDERATED read must be
+// asked for explicitly, and it exists because the zero value cannot be trusted
+// across a federation whose legs are wrapped differently.
+//
+// A city's work stores are wrapped in a bead-policy layer that rewrites a
+// TierIssues read to TierBoth before it reaches the backend, so a work leg has
+// always answered across both tiers no matter what the caller asked for. A
+// relocated coordination-class store carries no such layer — the storage routes
+// key the class map straight to the value the provider's engine opener returned
+// — so it answers at exactly the tier in the query. A federation that leaves
+// TierMode at its zero value therefore asks the work legs one question and the
+// class leg a narrower one, and merges the two answers as if they were the same
+// question. The class store's whole ephemeral tier drops out, silently: no leg
+// errored, no flag was rejected, the rows are simply not there.
+//
+// That is not hypothetical. On a live split city `bd ready --include-ephemeral`
+// against the relocated graph database returned 17 claimable beads, three of
+// them wisps; the federated reader over the same store returned exactly the
+// other 14, while still serving the work stores' own ephemeral rows. Ephemeral
+// wisps are how orchestration steps run, so a molecule mid-execution reads as
+// having no runnable frontier and is diagnosed as stalled when it is fine.
+//
+// Every federated reader therefore states this tier on every leg. It is TierBoth
+// because that is the question the policy-wrapped legs have always answered, so
+// stating it changes nothing for a city that relocates no class and makes the
+// relocated leg answer the same question as its peers.
+const FederatedReadTier = TierBoth
+
 // TierModeFromOpts returns the tier mode implied by a slice of QueryOpts.
 // WithBothTiers takes precedence over WithEphemeral.
 func TierModeFromOpts(opts []QueryOpt) TierMode {
@@ -76,7 +105,19 @@ type ListQuery struct {
 	// batched form of ParentID for graph/subtree walks. Backends that do not
 	// recognize it should ignore it (returning a superset); callers that need
 	// exact results must filter the returned beads by parent in memory.
-	ParentIDs     []string
+	ParentIDs []string
+	// IDs matches beads whose id is any of the listed ids — the IN-list form of
+	// a batch of Gets. It exists so a lane that already knows WHICH beads it
+	// needs pays one store round trip instead of one per bead: on a city whose
+	// work ledger is remote, N sequential Gets is N x the round-trip latency and
+	// is how the controller tick's route-repair leg came to cost minutes
+	// (ga-l7jdg).
+	//
+	// Same backend contract as ParentIDs: a store that cannot push the IN-list
+	// into its backend returns a superset, which ApplyListQuery/Matches then cut
+	// exactly — so the RESULT is always exact and only the pushdown is
+	// best-effort. It counts as a filter, so an IDs query needs no AllowScan.
+	IDs           []string
 	Metadata      map[string]string
 	CreatedBefore time.Time
 	// UpdatedBefore matches beads whose UpdatedAt is before this timestamp.
@@ -95,6 +136,27 @@ type ListQuery struct {
 	// observe external mutations immediately.
 	Live bool
 	Sort SortOrder
+	// AllowBackingCreatedLimit lets a backing store satisfy a bounded
+	// SortCreatedDesc read with its own native row limit even though the backing
+	// breaks created_at ties by id ASC while Gas City's canonical order
+	// (sortBeadsForQuery) and cursor continuation (SeekBoundary.After) break them
+	// by id DESC. A native desc limit can therefore keep the smaller-id tie
+	// members at the boundary and drop the larger-id ties an exact or
+	// cursor-paginated caller needs, so it is OFF by default: exact/paginated
+	// reads fetch the full candidate set and let ApplyListQuery cut the exact
+	// (created_at DESC, id DESC) prefix. Only a caller that folds the bounded rows
+	// into a max over the created_at sort key ITSELF may set it true — every
+	// dropped boundary tie shares the surviving rows' created_at, so the max is
+	// unchanged (e.g. the order dispatcher's RecentRunsAll/LastRun, which reduce to
+	// max(created_at)). A caller that reduces over a DIFFERENT column must NOT set
+	// it: the order dispatcher's event cursor (Cursor/bdCursor) reduces to max(seq)
+	// via MaxSeqFromLabels, and because seq is forward-only the max-seq run is the
+	// newest largest-id row — exactly the tie member a bounded id-ASC read drops —
+	// so a bounded backing read there would regress the cursor and replay events. It
+	// has no effect on SortCreatedAsc (whose backing id ASC tie-break already
+	// matches the canonical order, so bounded asc reads are exact) or on stores that
+	// always resolve the limit Go-side.
+	AllowBackingCreatedLimit bool
 	// TierMode selects the storage tier(s) to read from. Zero value
 	// (TierIssues) preserves the legacy single-tier behavior.
 	TierMode TierMode
@@ -158,6 +220,7 @@ func (q ListQuery) HasFilter() bool {
 		q.Assignee != "" ||
 		len(q.Assignees) > 0 ||
 		q.ParentID != "" ||
+		len(q.IDs) > 0 ||
 		len(q.Metadata) > 0 ||
 		!q.CreatedBefore.IsZero() ||
 		!q.UpdatedBefore.IsZero() ||
@@ -218,6 +281,18 @@ func (q ListQuery) Matches(b Bead) bool {
 	}
 	if q.ParentID != "" && b.ParentID != q.ParentID {
 		return false
+	}
+	if len(q.IDs) > 0 {
+		matched := false
+		for _, id := range q.IDs {
+			if b.ID == id {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
 	}
 	if len(q.Metadata) > 0 && !matchesMetadata(b, q.Metadata) {
 		return false
@@ -300,6 +375,15 @@ func SortBeads(items []Bead, order SortOrder) {
 	sortBeadsForQuery(items, order)
 }
 
+// SortBeadsReadyOrder sorts ready results into the canonical
+// (priority, created_at, id) ascending order used by the SQL-backed ready
+// readers, matching CachedReady's own ordering (#3208). Callers that assemble
+// a ready-shaped result from a source other than CachedReady/Ready (e.g. a
+// single batched bd ready fallback) use this to match that canonical order.
+func SortBeadsReadyOrder(items []Bead) {
+	sortBeadsReadyOrder(items)
+}
+
 // sortBeadsReadyOrder sorts ready results into the canonical
 // (priority, created_at, id) ascending order used by the SQL-backed ready
 // readers (a nil priority sorts as 2, matching their COALESCE(i.priority, 2)),
@@ -307,15 +391,83 @@ func SortBeads(items []Bead, order SortOrder) {
 // which store path served it (#3208).
 func sortBeadsReadyOrder(items []Bead) {
 	sort.Slice(items, func(i, j int) bool {
-		pi, pj := readySortPriority(items[i]), readySortPriority(items[j])
-		if pi != pj {
-			return pi < pj
-		}
-		if !items[i].CreatedAt.Equal(items[j].CreatedAt) {
-			return items[i].CreatedAt.Before(items[j].CreatedAt)
-		}
-		return items[i].ID < items[j].ID
+		return beadReadyLess(items[i], items[j])
 	})
+}
+
+// sortBeadsReadyOrderContext is the cancellation-aware form used by
+// deadline-sensitive cache projections. A local merge sort keeps cancellation
+// checks inside both comparison and copy work instead of abandoning an
+// uninterruptible sort goroutine when ctx expires.
+func sortBeadsReadyOrderContext(ctx context.Context, items []Bead) error {
+	if ctx == nil || ctx.Done() == nil {
+		sortBeadsReadyOrder(items)
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(items) < 2 {
+		return nil
+	}
+
+	scratch := make([]Bead, len(items))
+	var mergeSort func(int, int) error
+	mergeSort = func(lo, hi int) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if hi-lo < 2 {
+			return nil
+		}
+		mid := lo + (hi-lo)/2
+		if err := mergeSort(lo, mid); err != nil {
+			return err
+		}
+		if err := mergeSort(mid, hi); err != nil {
+			return err
+		}
+
+		i, j := lo, mid
+		for k := lo; k < hi; k++ {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			switch {
+			case i == mid:
+				scratch[k] = items[j]
+				j++
+			case j == hi:
+				scratch[k] = items[i]
+				i++
+			case beadReadyLess(items[j], items[i]):
+				scratch[k] = items[j]
+				j++
+			default:
+				scratch[k] = items[i]
+				i++
+			}
+		}
+		for k := lo; k < hi; k++ {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			items[k] = scratch[k]
+		}
+		return nil
+	}
+	return mergeSort(0, len(items))
+}
+
+func beadReadyLess(a, b Bead) bool {
+	pa, pb := readySortPriority(a), readySortPriority(b)
+	if pa != pb {
+		return pa < pb
+	}
+	if !a.CreatedAt.Equal(b.CreatedAt) {
+		return a.CreatedAt.Before(b.CreatedAt)
+	}
+	return a.ID < b.ID
 }
 
 func readySortPriority(b Bead) int {

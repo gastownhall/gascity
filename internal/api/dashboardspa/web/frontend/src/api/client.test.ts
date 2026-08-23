@@ -146,6 +146,109 @@ describe('api client error handling', () => {
     });
   });
 
+  it('rejects system health metrics missing their availability discriminant', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              admin: {
+                pid: 42,
+                uptime_sec: 60,
+                rss: { value: 1024 },
+                heap_used_bytes: 512,
+                node_version: 'go1.26',
+              },
+              host: {
+                cpu_count: 8,
+                load: { status: 'unavailable', reason: 'sample_failed' },
+                memory: { status: 'unavailable', reason: 'sample_failed' },
+                uptime: { status: 'unavailable', reason: 'sample_failed' },
+              },
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          ),
+      ),
+    );
+
+    await expect(api.systemHealth()).rejects.toMatchObject({
+      name: 'ApiResponseDecodeError',
+      message: expect.stringContaining('system health.admin.rss.status must be a string'),
+    });
+  });
+
+  it('rejects non-numeric system health values at the API edge', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              admin: {
+                pid: 42,
+                uptime_sec: null,
+                rss: { status: 'available', value: 1024 },
+                heap_used_bytes: 512,
+                node_version: 'go1.26',
+              },
+              host: {
+                cpu_count: 8,
+                load: {
+                  status: 'available',
+                  value: { load_avg_1: null, load_avg_5: 0.2, load_avg_15: 0.3 },
+                },
+                memory: {
+                  status: 'available',
+                  value: { total_mem_bytes: 4096, free_mem_bytes: 2048 },
+                },
+                uptime: { status: 'available', value: 3600 },
+              },
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          ),
+      ),
+    );
+
+    await expect(api.systemHealth()).rejects.toMatchObject({
+      name: 'ApiResponseDecodeError',
+      message: expect.stringContaining('system health.admin.uptime_sec must be a number'),
+    });
+  });
+
+  it('decodes independent available and unavailable system health metrics', async () => {
+    const health = {
+      admin: {
+        pid: 42,
+        uptime_sec: 60,
+        rss: { status: 'unavailable', reason: 'sample_failed' },
+        heap_used_bytes: 512,
+        node_version: 'go1.26',
+      },
+      host: {
+        cpu_count: 8,
+        load: {
+          status: 'available',
+          value: { load_avg_1: 0.1, load_avg_5: 0.2, load_avg_15: 0.3 },
+        },
+        memory: { status: 'unavailable', reason: 'invalid_sample' },
+        uptime: { status: 'available', value: 3600 },
+      },
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify(health), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }),
+      ),
+    );
+
+    await expect(api.systemHealth()).resolves.toEqual(health);
+  });
+
   it('decodes a cached supervisor-status report at the edge', async () => {
     // gascity-dashboard-4bol: the Health status widgets read the dashboard
     // backend's cached /supervisor-status snapshot; the report envelope is
@@ -352,10 +455,13 @@ describe('run projection endpoints', () => {
       'fetch',
       vi.fn(
         async () =>
-          new Response(JSON.stringify({ error: 'run is not a graph.v2 run', reason: 'not_run_view' }), {
-            status: 422,
-            headers: { 'content-type': 'application/json' },
-          }),
+          new Response(
+            JSON.stringify({ error: 'run is not a graph.v2 run', reason: 'not_run_view' }),
+            {
+              status: 422,
+              headers: { 'content-type': 'application/json' },
+            },
+          ),
       ),
     );
 

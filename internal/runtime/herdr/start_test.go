@@ -21,7 +21,8 @@ import (
 // needed — mirroring how the tmux package tests doStartSession, not Start.
 
 // fakeHerdr is a stand-in herdr CLI. Each invocation appends its argv (minus
-// the --session pair) to log; `agent start` additionally records whether
+// the --session pair) to log; `workspace create` (the placement step, the
+// first CLI call after staging/pre_start) additionally records whether
 // probe existed at launch time, which is how tests observe pre_start-vs-launch
 // ordering on disk.
 type fakeHerdr struct {
@@ -47,15 +48,22 @@ printf '%s\n' "$*" >> '` + f.log + `'
 case "$1 $2" in
 "agent list") printf '{"result":{"agents":[]}}' ;;
 "agent start")
-	if [ -e '` + f.probe + `' ]; then
-		printf 'probe-at-agent-start: present\n' >> '` + f.log + `'
-	else
-		printf 'probe-at-agent-start: absent\n' >> '` + f.log + `'
-	fi
+	: > '` + f.log + `.started'
 	printf '{"result":{"agent":{"name":"%s","pane_id":"p1"}}}' "$3" ;;
-"agent get") printf '{"result":{"agent":{"name":"%s","pane_id":"p1","agent_status":"idle"}}}' "$3" ;;
+"agent get")
+	if [ -e '` + f.log + `.started' ]; then
+		printf '{"result":{"agent":{"name":"%s","pane_id":"p1","agent_status":"idle"}}}' "$3"
+	else
+		printf '{"error":{"code":"agent_not_found","message":"no such agent"}}'
+	fi ;;
 "workspace list") printf '{"result":{"workspaces":[]}}' ;;
-"workspace create") printf '{"result":{"workspace":{"workspace_id":"w1"},"tab":{"tab_id":"t1"},"root_pane":{"pane_id":"stray"}}}' ;;
+"workspace create")
+	if [ -e '` + f.probe + `' ]; then
+		printf 'probe-at-placement: present\n' >> '` + f.log + `'
+	else
+		printf 'probe-at-placement: absent\n' >> '` + f.log + `'
+	fi
+	printf '{"result":{"workspace":{"workspace_id":"w1"},"tab":{"tab_id":"t1"},"root_pane":{"pane_id":"p1"}}}' ;;
 "tab list") printf '{"result":{"tabs":[]}}' ;;
 "tab create") printf '{"result":{"tab":{"tab_id":"t1"},"root_pane":{"pane_id":"stray"}}}' ;;
 *) printf '{"result":{}}' ;;
@@ -94,7 +102,7 @@ func logIndex(lines []string, substr string) int {
 // herdr CLI instead of a real one.
 func newFakeStartProvider(t *testing.T, f *fakeHerdr) *Provider {
 	t.Helper()
-	p := New("teststart", t.TempDir(), "/city/root", 0)
+	p := New("teststart", t.TempDir(), "/city/root", 0, 0)
 	p.c.bin = f.bin
 	return p
 }
@@ -127,18 +135,18 @@ func TestStartRunsPreStartBeforeAgentLaunch(t *testing.T) {
 	}
 
 	lines := f.logLines(t)
-	startIdx := logIndex(lines, "agent start")
-	if startIdx < 0 {
-		t.Fatalf("agent was never started; log:\n%s", strings.Join(lines, "\n"))
+	placeIdx := logIndex(lines, "workspace create")
+	if placeIdx < 0 {
+		t.Fatalf("agent was never placed; log:\n%s", strings.Join(lines, "\n"))
 	}
-	// The probe (created by pre_start) must already exist when `agent start`
-	// runs: pre_start strictly precedes the launch.
-	if probeIdx := logIndex(lines, "probe-at-agent-start: present"); probeIdx != startIdx+1 {
-		t.Errorf("pre_start effects not visible at agent launch; log:\n%s", strings.Join(lines, "\n"))
+	// The probe (created by pre_start) must already exist when the placement
+	// runs: pre_start strictly precedes it (and everything after it).
+	if probeIdx := logIndex(lines, "probe-at-placement: present"); probeIdx != placeIdx+1 {
+		t.Errorf("pre_start effects not visible at placement; log:\n%s", strings.Join(lines, "\n"))
 	}
-	// The prepared workdir — not the city root — is the launch cwd.
-	if !strings.Contains(lines[startIdx], "--cwd "+work) {
-		t.Errorf("agent start line missing --cwd %s: %q", work, lines[startIdx])
+	// The prepared workdir — not the city root — is the pane cwd.
+	if !strings.Contains(lines[placeIdx], "--cwd "+work) {
+		t.Errorf("workspace create line missing --cwd %s: %q", work, lines[placeIdx])
 	}
 }
 
@@ -164,8 +172,8 @@ func TestStartFailsWhenPreStartFails(t *testing.T) {
 			t.Errorf("error = %q, want it to contain %q", err, want)
 		}
 	}
-	if idx := logIndex(f.logLines(t), "agent start"); idx >= 0 {
-		t.Errorf("agent must not launch after a pre_start failure; log:\n%s", strings.Join(f.logLines(t), "\n"))
+	if idx := logIndex(f.logLines(t), "workspace create"); idx >= 0 {
+		t.Errorf("agent must not be placed after a pre_start failure; log:\n%s", strings.Join(f.logLines(t), "\n"))
 	}
 }
 
@@ -196,12 +204,12 @@ func TestStartStagesWorkDirBeforePreStart(t *testing.T) {
 		t.Fatalf("staged file = %q, %v; want payload", b, err)
 	}
 	lines := f.logLines(t)
-	startIdx := logIndex(lines, "agent start")
-	if startIdx < 0 {
-		t.Fatal("agent was never started")
+	placeIdx := logIndex(lines, "workspace create")
+	if placeIdx < 0 {
+		t.Fatal("agent was never placed")
 	}
-	if !strings.Contains(lines[startIdx], "--cwd "+work) {
-		t.Errorf("agent start line missing --cwd %s: %q", work, lines[startIdx])
+	if !strings.Contains(lines[placeIdx], "--cwd "+work) {
+		t.Errorf("workspace create line missing --cwd %s: %q", work, lines[placeIdx])
 	}
 }
 
@@ -220,8 +228,8 @@ func TestStartFailsOnAbsentWorkDir(t *testing.T) {
 	if !strings.Contains(err.Error(), "unavailable after staging/pre_start") {
 		t.Errorf("error = %q, want workdir-unavailable detail", err)
 	}
-	if idx := logIndex(f.logLines(t), "agent start"); idx >= 0 {
-		t.Errorf("agent must not launch in a fallback dir; log:\n%s", strings.Join(f.logLines(t), "\n"))
+	if idx := logIndex(f.logLines(t), "workspace create"); idx >= 0 {
+		t.Errorf("agent must not be placed in a fallback dir; log:\n%s", strings.Join(f.logLines(t), "\n"))
 	}
 }
 
@@ -251,14 +259,14 @@ func TestStartRunsSessionSetupAfterLaunch(t *testing.T) {
 		t.Errorf("GC_SESSION seen by session_setup = %q, %v; want gastown__worker", b, err)
 	}
 	lines := f.logLines(t)
-	startIdx := logIndex(lines, "agent start")
+	placeIdx := logIndex(lines, "workspace create")
 	waitIdx := logIndex(lines, "agent wait")
 	setupIdx := logIndex(lines, "session_setup-ran")
 	scriptIdx := logIndex(lines, "session_setup_script-ran")
-	if startIdx < 0 || setupIdx < 0 || scriptIdx < 0 {
+	if placeIdx < 0 || setupIdx < 0 || scriptIdx < 0 {
 		t.Fatalf("missing expected log entries; log:\n%s", strings.Join(lines, "\n"))
 	}
-	if startIdx >= setupIdx || setupIdx >= scriptIdx {
+	if placeIdx >= setupIdx || setupIdx >= scriptIdx {
 		t.Errorf("session_setup must run after launch, script after commands; log:\n%s", strings.Join(lines, "\n"))
 	}
 	// The readiness wait precedes setup, mirroring tmux's ready→setup→nudge.

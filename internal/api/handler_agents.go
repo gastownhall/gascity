@@ -373,7 +373,7 @@ func providerPathCheck(providerName string, cfg *config.City) string {
 			return spec.PathCheck
 		}
 		if resolved.Command != "" {
-			return resolved.Command
+			return config.BinaryName(resolved.Command)
 		}
 	}
 	if spec, ok := cfg.Providers[providerName]; ok {
@@ -381,7 +381,7 @@ func providerPathCheck(providerName string, cfg *config.City) string {
 			return spec.PathCheck
 		}
 		if spec.Command != "" {
-			return spec.Command
+			return config.BinaryName(spec.Command)
 		}
 	}
 	builtins := config.BuiltinProviders()
@@ -389,7 +389,7 @@ func providerPathCheck(providerName string, cfg *config.City) string {
 		if spec.PathCheck != "" {
 			return spec.PathCheck
 		}
-		return spec.Command
+		return config.BinaryName(spec.Command)
 	}
 	return providerName
 }
@@ -457,7 +457,7 @@ func computeAgentState(suspended, quarantined, running bool, activeBead string, 
 // enrichSessionMeta populates model and context usage fields on the agent
 // response by reading the tail of the agent's session JSONL file.
 func (s *Server) enrichSessionMeta(resp *agentResponse, agentCfg config.Agent, qualifiedName string) {
-	factory, err := s.workerFactory(s.state.CityBeadStore())
+	factory, err := s.workerFactory(s.state.SessionsBeadStore().Store)
 	if err != nil {
 		return
 	}

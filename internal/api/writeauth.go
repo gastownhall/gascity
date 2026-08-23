@@ -124,6 +124,39 @@ func cityScopedObjectMutation(path string) (city string, ok bool) {
 	return cityScopedObjectPath(path)
 }
 
+// isServiceSubresourcePath reports whether path targets the /svc/* workspace-
+// service pass-through under a city (/v0/city/{name}/svc or /v0/city/{name}/svc/…).
+// It is the G11 companion to cityScopedObjectMutation's /svc exclusion:
+// cityScopedObjectMutation stays untouched (golden vector), and this separately
+// identifies the same paths so the write-auth gate can refuse a /svc mutation on
+// a hardened city rather than pass it through unauthenticated.
+func isServiceSubresourcePath(path string) bool {
+	const prefix = "/v0/city/"
+	if !strings.HasPrefix(path, prefix) {
+		return false
+	}
+	rest := path[len(prefix):]
+	slash := strings.IndexByte(rest, '/')
+	if slash <= 0 {
+		return false
+	}
+	sub := rest[slash:]
+	return sub == "/svc" || strings.HasPrefix(sub, "/svc/")
+}
+
+// isSafeReadMethod reports whether method is a definite safe (non-mutating) HTTP
+// read. It is the complement the G11 /svc gate uses to refuse everything else —
+// including non-standard mutating verbs the mutation allowlist omits — so a
+// hardened city cannot be mutated through the grant-exempt /svc path.
+func isSafeReadMethod(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	default:
+		return false
+	}
+}
+
 // writeAuthMiddleware enforces a valid X-GC-City-Write grant on every
 // city-scoped mutation. Non-mutations and non-city-scoped routes pass through
 // untouched. It buffers and resets the body so the downstream handler still
@@ -137,6 +170,25 @@ func cityScopedObjectMutation(path string) (city string, ok bool) {
 // request that never mutates and the legitimate retry is misread as a replay.
 func writeAuthMiddleware(v *citywriteauth.Verifier, readOnly bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// G11: /svc/* is excluded from the grant gate (a service call is not a
+		// gc-config object mutation and can't bind a grant), so on a
+		// write-auth-hardened city a /svc mutation would be an unauthenticated
+		// write path bypassing the gate. This middleware is only installed on a
+		// hardened city, so refuse any /svc request that is not a definite safe
+		// read. Checking "not a safe read" rather than "is a known mutation"
+		// closes non-standard verbs (MKCOL/COPY/… and case-variants) that the
+		// mutation allowlist would let slip through — the /svc proxy forwards the
+		// verb verbatim. A safe read passes through untouched. Left as a separate
+		// mux-layer gate; cityScopedObjectMutation and its golden vector are
+		// untouched.
+		if isServiceSubresourcePath(r.URL.Path) {
+			if !isSafeReadMethod(r.Method) {
+				problemWriteAuthServiceGated.writeTo(w)
+				return
+			}
+			next.ServeHTTP(w, r)
+			return
+		}
 		if !isMutationMethod(r.Method) {
 			next.ServeHTTP(w, r)
 			return
@@ -233,6 +285,13 @@ var (
 	problemWriteAuthBadPath = problemBody{
 		status: http.StatusBadRequest,
 		body:   []byte(`{"status":400,"title":"Bad Request","detail":"invalid characters in request path"}`),
+	}
+	// problemWriteAuthServiceGated refuses a /svc/* mutation on a write-auth-
+	// hardened city (gate G11): the workspace-service path bypasses the grant
+	// gate, so it must not be an unauthenticated write path.
+	problemWriteAuthServiceGated = problemBody{
+		status: http.StatusForbidden,
+		body:   []byte(`{"status":403,"title":"Forbidden","detail":"workspace-service mutations are disabled on a write-auth-hardened city"}`),
 	}
 	// problemWriteAuthCSRF and problemWriteAuthReadOnly are emitted by the
 	// write-auth gate for the front-door checks it evaluates ahead of grant
@@ -337,14 +396,47 @@ func ResolveWriteAuthVerifier(configKey string, configRequired bool) (*citywrite
 	})
 }
 
+// WriteAuthBindContext carries the bind-time facts the fail-closed boot gate
+// (G10) needs beyond the key config: whether the server binds to a non-loopback
+// address, whether it allows mutations, and whether the operator has explicitly
+// acknowledged running an unverified (grant-less) write plane behind a network
+// front.
+type WriteAuthBindContext struct {
+	NonLocal        bool
+	AllowMutations  bool
+	AllowUnverified bool // config field; OR'd with GC_CITY_WRITE_ALLOW_UNVERIFIED=1
+}
+
+// writeAuthBootGate implements the fail-closed boot check (G10). With no
+// verifier resolved, mutations are unguarded; a non-loopback bind that allows
+// mutations then exposes an unauthenticated write plane, so refuse to boot
+// unless the operator explicitly acknowledges it (relying on a network/TLS
+// front). A loopback bind, a read-only bind, or a bind with a verifier is safe.
+func writeAuthBootGate(haveVerifier bool, bind WriteAuthBindContext) error {
+	if haveVerifier {
+		return nil
+	}
+	allowUnverified := bind.AllowUnverified || os.Getenv("GC_CITY_WRITE_ALLOW_UNVERIFIED") == "1"
+	if bind.NonLocal && bind.AllowMutations && !allowUnverified {
+		return errors.New("refusing to boot: a non-loopback bind with allow_mutations and no write-auth verify key exposes an unauthenticated write plane; " +
+			"set write_auth_verify_key (or GC_CITY_WRITE_PUBKEY) to require signed grants, " +
+			"or acknowledge an unverified write plane behind a network front with write_auth_allow_unverified=true (or GC_CITY_WRITE_ALLOW_UNVERIFIED=1)")
+	}
+	return nil
+}
+
 // InstallWriteAuth resolves the write-auth verifier from config + env and, when
 // configured, installs it on sm — the single seam every serve path uses so none
-// can forget to gate writes. It fails closed: if write-auth is required
-// (configRequired or GC_CITY_WRITE_REQUIRED=1) but no usable key is configured,
-// it returns an error so the caller can refuse to start.
-func InstallWriteAuth(sm *SupervisorMux, configKey string, configRequired bool) error {
+// can forget to gate writes. It fails closed on two conditions: if write-auth is
+// required (configRequired or GC_CITY_WRITE_REQUIRED=1) but no usable key is
+// configured, and (gate G10) if a non-loopback + allow_mutations bind resolves
+// no verify key and the operator has not acknowledged an unverified write plane.
+func InstallWriteAuth(sm *SupervisorMux, configKey string, configRequired bool, bind WriteAuthBindContext) error {
 	v, err := ResolveWriteAuthVerifier(configKey, configRequired)
 	if err != nil {
+		return err
+	}
+	if err := writeAuthBootGate(v != nil, bind); err != nil {
 		return err
 	}
 	if v != nil {

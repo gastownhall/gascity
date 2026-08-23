@@ -9,6 +9,7 @@
 package dolttest
 
 import (
+	"fmt"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -16,10 +17,15 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/doltorphan"
 )
 
 // reap sends SIGTERM, then SIGKILL to survivors, to every `dolt sql-server`
-// whose --config path is within root.
+// whose --config or --data-dir path is within root. Both flags are checked
+// because a bare `dolt sql-server --data-dir X` (no --config at all, the
+// shape the real-dolt integration suite uses) has no --config path for
+// doltConfigPath to find.
 func reap(root string) {
 	if root == "" {
 		return
@@ -27,7 +33,7 @@ func reap(root string) {
 	root = filepath.Clean(root)
 	var pids []int
 	for pid, cmd := range scanDoltSQLServers() {
-		if pathWithin(root, doltConfigPath(cmd)) {
+		if pathWithin(root, doltConfigPath(cmd)) || pathWithin(root, doltDataDirPath(cmd)) {
 			pids = append(pids, pid)
 		}
 	}
@@ -36,11 +42,12 @@ func reap(root string) {
 
 // SweepStale reaps `dolt sql-server` orphans left by *prior* runs whose per-run
 // temp dir is named "<parent>/<prefix><pid>-<rand>". For each dolt process whose
-// --config path lives under such a run dir, the owner pid is parsed from the
-// run-dir name and the process is reaped only if that pid is no longer alive —
-// sparing live concurrent runs. Because SIGKILL is uncatchable in-process, a
-// next-run startup sweep is the only reaper for those orphans; call this at
-// suite startup, before the run spawns any dolt of its own.
+// --config or --data-dir path lives under such a run dir (see reap's doc for
+// why both are checked), the owner pid is parsed from the run-dir name and the
+// process is reaped only if that pid is no longer alive — sparing live
+// concurrent runs. Because SIGKILL is uncatchable in-process, a next-run
+// startup sweep is the only reaper for those orphans; call this at suite
+// startup, before the run spawns any dolt of its own.
 func SweepStale(parent, prefix string) {
 	if parent == "" || prefix == "" {
 		return
@@ -49,6 +56,9 @@ func SweepStale(parent, prefix string) {
 	var stale []int
 	for pid, cmd := range scanDoltSQLServers() {
 		runDir, ok := runDirUnder(doltConfigPath(cmd), parent, prefix)
+		if !ok {
+			runDir, ok = runDirUnder(doltDataDirPath(cmd), parent, prefix)
+		}
 		if !ok {
 			continue
 		}
@@ -59,6 +69,26 @@ func SweepStale(parent, prefix string) {
 		stale = append(stale, pid)
 	}
 	reapPIDs(stale)
+}
+
+// SweepOrphanStoreDirs runs the symptom-based fallback sweep
+// (internal/doltorphan.Sweep) over root, removing stray dolt store
+// directories regardless of what created them: age > 60m, a .dolt marker
+// present, and not held open by any live process. It composes with, but
+// does not replace, SweepStale and Guard above — those reap live or
+// recently-dead *processes* via a specific run-root naming convention;
+// this catches the *directory* left behind in cases those miss (a killed
+// test binary whose pid was later reused, an ad-hoc dolt invocation
+// outside any tracked run-root, etc). Call at suite startup, alongside
+// SweepStale, before the run spawns any dolt of its own.
+func SweepOrphanStoreDirs(root string) {
+	result := doltorphan.Sweep(doltorphan.SweepConfig{Root: root})
+	for _, dir := range result.Removed {
+		fmt.Fprintf(os.Stderr, "dolttest: startup sweep removed orphaned dolt store dir %s\n", dir)
+	}
+	for _, err := range result.Errors {
+		fmt.Fprintf(os.Stderr, "dolttest: startup sweep error: %v\n", err)
+	}
 }
 
 // Guard installs a signal handler for SIGINT, SIGTERM, and SIGQUIT (the signal
@@ -138,20 +168,37 @@ func looksLikeDoltSQLServer(fields []string) bool {
 	return false
 }
 
-func doltConfigPath(cmd string) string {
+// flagValue returns the value of a space-separated ("name value") or
+// equals-form ("name=value") occurrence of name in cmd's argv, or "" if
+// name isn't present.
+func flagValue(cmd, name string) string {
 	fields := strings.Fields(cmd)
+	prefix := name + "="
 	for i, f := range fields {
-		if f == "--config" {
+		if f == name {
 			if i+1 < len(fields) {
 				return fields[i+1]
 			}
 			return ""
 		}
-		if strings.HasPrefix(f, "--config=") {
-			return strings.TrimPrefix(f, "--config=")
+		if strings.HasPrefix(f, prefix) {
+			return strings.TrimPrefix(f, prefix)
 		}
 	}
 	return ""
+}
+
+func doltConfigPath(cmd string) string {
+	return flagValue(cmd, "--config")
+}
+
+// doltDataDirPath returns cmd's --data-dir value, if present. Checked
+// alongside doltConfigPath throughout this file because a bare
+// `dolt sql-server --data-dir X` (no --config at all) is the exact shape
+// the real-dolt integration suite uses, and doltConfigPath alone can never
+// match it.
+func doltDataDirPath(cmd string) string {
+	return flagValue(cmd, "--data-dir")
 }
 
 func pathWithin(root, p string) bool {

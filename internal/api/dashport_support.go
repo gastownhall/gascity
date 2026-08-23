@@ -121,7 +121,7 @@ func ServeSeededCity(ctx context.Context, deps SeededCityDeps, baseURL string) (
 		SupervisorBaseURL: baseURL,
 	})
 	plane.Start(ctx)
-	mux.WithAPIPlane(plane.Handler()).WithStaticHandler(spa)
+	mux.WithRunCensusSource(plane).WithAPIPlane(plane.Handler()).WithStaticHandler(spa)
 
 	return mux.Handler(), plane.Stop, nil
 }
@@ -246,9 +246,9 @@ func (s *seededState) ScopedStoreLike(context.Context, beads.Store) (beads.Store
 	return nil, nil
 }
 
-// NudgesBeadStore, SessionsBeadStore, and GraphBeadStore all collapse to the
-// city store on a seeded single-store city, exactly as they do on a default
-// (non-relocated) controller city.
+// NudgesBeadStore, SessionsBeadStore, GraphBeadStore and OrdersBeadStore all
+// collapse to the city store on a seeded single-store city, exactly as they do
+// on a default (non-relocated) controller city.
 func (s *seededState) NudgesBeadStore() beads.NudgesStore {
 	return beads.NudgesStore{Store: s.cityStore}
 }
@@ -259,6 +259,10 @@ func (s *seededState) SessionsBeadStore() beads.SessionStore {
 
 func (s *seededState) GraphBeadStore() beads.GraphStore {
 	return beads.GraphStore{Store: s.cityStore}
+}
+
+func (s *seededState) OrdersBeadStore() beads.OrdersStore {
+	return beads.OrdersStore{Store: s.cityStore}
 }
 
 func (s *seededState) Orders() []orders.Order    { return nil }

@@ -330,7 +330,11 @@ print-cgo-flags:
 }
 
 func makeCommand(args ...string) *exec.Cmd {
-	return exec.Command("make", args...)
+	return testCommand("make", args...)
+}
+
+func testCommand(name string, args ...string) *exec.Cmd {
+	return exec.Command(name, args...)
 }
 
 func filteredMakefileCGOTestEnv() []string {

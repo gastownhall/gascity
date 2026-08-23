@@ -14,6 +14,8 @@ const baseApi: SupervisorApi = {
   health: vi.fn(),
   cityHealth: vi.fn(),
   cityStatus: vi.fn(),
+  cityUsage: vi.fn(),
+  runCensus: vi.fn(),
   listCities: vi.fn(),
   listAgents: vi.fn(),
   listRigs: vi.fn(),

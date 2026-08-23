@@ -5,8 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -207,7 +210,11 @@ func cmdRuntimeDrain(args []string, jsonOutput bool, stdout, stderr io.Writer) i
 		fmt.Fprintf(stderr, "gc runtime drain: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	sp := newSessionProvider()
+	sp, err := newSessionProvider()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc runtime drain: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	dops := newDrainOps(sp)
 	rec := openCityRecorder(stderr)
 	return doRuntimeDrain(dops, sp, rec, target.display, target.sessionName, jsonOutput, stdout, stderr)
@@ -289,7 +296,11 @@ func cmdRuntimeUndrain(args []string, jsonOutput bool, stdout, stderr io.Writer)
 		fmt.Fprintf(stderr, "gc runtime undrain: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	sp := newSessionProvider()
+	sp, err := newSessionProvider()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc runtime undrain: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	dops := newDrainOps(sp)
 	rec := openCityRecorder(stderr)
 	return doRuntimeUndrain(dops, sp, rec, target.display, target.sessionName, jsonOutput, stdout, stderr)
@@ -369,7 +380,11 @@ func cmdRuntimeDrainCheck(args []string, jsonOutput bool, stdout, stderr io.Writ
 			fmt.Fprintf(stderr, "gc runtime drain-check: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1                                                 // silent — same as current "not draining" behavior
 		}
-		sp := newSessionProvider()
+		sp, err := newSessionProvider()
+		if err != nil {
+			fmt.Fprintf(stderr, "gc runtime drain-check: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		dops := newDrainOps(sp)
 		return doRuntimeDrainCheck(dops, target.display, target.sessionName, jsonOutput, stdout, stderr)
 	}
@@ -378,7 +393,11 @@ func cmdRuntimeDrainCheck(args []string, jsonOutput bool, stdout, stderr io.Writ
 	if err != nil {
 		return 1 // not in agent context → not draining
 	}
-	sp := newSessionProvider()
+	sp, err := newSessionProvider()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc runtime drain-check: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	dops := newDrainOps(sp)
 	return doRuntimeDrainCheck(dops, current.display, current.sessionName, jsonOutput, stdout, stderr)
 }
@@ -456,7 +475,11 @@ func cmdRuntimeDrainAck(args []string, jsonOutput bool, stdout, stderr io.Writer
 			fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		sp := newSessionProvider()
+		sp, err := newSessionProvider()
+		if err != nil {
+			fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		dops := newDrainOps(sp)
 		return doRuntimeDrainAck(dops, target.cityPath, target.display, target.sessionName, jsonOutput, stdout, stderr)
 	}
@@ -466,7 +489,11 @@ func cmdRuntimeDrainAck(args []string, jsonOutput bool, stdout, stderr io.Writer
 		fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	sp := newSessionProvider()
+	sp, err := newSessionProvider()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	dops := newDrainOps(sp)
 	return doRuntimeDrainAck(dops, current.cityPath, current.display, current.sessionName, jsonOutput, stdout, stderr)
 }
@@ -493,11 +520,6 @@ exits 0 cleanly. If the controller has not acted within a bounded
 timeout (max(5*PatrolInterval, 5min), capped at 30min) the command exits
 1 with a diagnostic pointing at controller health.
 
-For on-demand configured named sessions, the controller cannot restart
-the user-attended process. In that case this command reports that
-restart was skipped and returns immediately. No session.draining event
-is emitted when restart is skipped.
-
 This command is designed to be called from within a session context.
 It emits a session.draining event before waiting.`,
 		Args: cobra.NoArgs,
@@ -517,37 +539,25 @@ func cmdRuntimeRequestRestart(stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	sp := newSessionProvider()
+	sp, err := newSessionProvider()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc runtime request-restart: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	dops := newDrainOps(sp)
 	store, storeErr := openCityStoreAt(current.cityPath)
 	if storeErr != nil {
 		fmt.Fprintf(stderr, "gc runtime request-restart: opening store: %v\n", storeErr) //nolint:errcheck // best-effort stderr
 	}
-	// Route the SESSION-class access (restartability check, restart-request
-	// clear, restart persist through the worker boundary) to the session
-	// coordination-class store so a [beads.classes.sessions] relocation reaches
-	// gc runtime request-restart. The routing cfg is loaded refresh-free (the
-	// full cfg loads later, for timeout/template resolution). Identity today, so
-	// byte-identical.
+	// Route the SESSION-class access (restart persist through the worker
+	// boundary) to the session coordination-class store so a
+	// [beads.classes.sessions] relocation reaches gc runtime request-restart.
+	// The routing cfg is loaded refresh-free (the full cfg loads later, for
+	// timeout/template resolution). Identity today, so byte-identical.
 	var sessStore beads.Store
 	if store != nil {
 		routeCfg, _ := loadCityConfigWithoutBuiltinPackRefresh(current.cityPath, io.Discard)
 		sessStore = cliSessionStore(store, routeCfg, current.cityPath)
-	}
-	if store != nil {
-		restartable, err := sessionRestartableByController(sessStore, current.sessionName)
-		if err != nil {
-			fmt.Fprintf(stderr, "gc runtime request-restart: checking session type: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		if !restartable {
-			if err := clearRestartRequest(sessStore, dops, current.sessionName); err != nil {
-				fmt.Fprintf(stderr, "gc runtime request-restart: clearing stale restart request: %v\n", err) //nolint:errcheck // best-effort stderr
-				return 1
-			}
-			fmt.Fprintln(stdout, "Restart skipped for named session; controller cannot restart on-demand named sessions.") //nolint:errcheck // best-effort stdout
-			return 0
-		}
 	}
 	rec := openCityRecorderAt(current.cityPath, stderr)
 	cfg, _ := loadCityConfig(current.cityPath, stderr)
@@ -561,9 +571,14 @@ func cmdRuntimeRequestRestart(stdout, stderr io.Writer) int {
 			return handle.Reset(context.Background())
 		}
 	}
+	_, pinned, err := sessionRestartableByController(sessStore, current.sessionName)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc runtime request-restart: checking session type: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	return doRuntimeRequestRestart(sigCtx, dops, persistRestart, rec, current.display, current.sessionName,
+	return doRuntimeRequestRestart(sigCtx, dops, sp, persistRestart, pinned, rec, current.display, current.sessionName,
 		controllerRestartPollInterval, controllerRestartTimeout(cfg), stdout, stderr)
 }
 
@@ -591,16 +606,31 @@ func controllerRestartTimeout(cfg *config.City) time.Duration {
 // doRuntimeRequestRestart sets the restart-requested flag then polls until the
 // controller accepts the stop handoff (exit 0), the context is canceled by a
 // signal (exit 0), or the bounded timeout expires (exit 1 with diagnostic).
-func doRuntimeRequestRestart(ctx context.Context, dops drainOps, persistRestart func() error, rec events.Recorder,
+//
+// pinned marks a kill-protected named session (pin_awake == "true"): the
+// reconciler refuses to collaterally kill such a session on a bare runtime
+// restart-requested flag, so for pinned sessions persistRestart (which lands
+// continuation_reset_pending, the explicit-reset escape hatch) is mandatory
+// rather than best-effort. See sessionRestartableByController.
+func doRuntimeRequestRestart(ctx context.Context, dops drainOps, sp runtime.Provider, persistRestart func() error, pinned bool, rec events.Recorder,
 	targetName, sn string, pollInterval, timeout time.Duration, stdout, stderr io.Writer,
 ) int {
 	if err := dops.setRestartRequested(sn); err != nil {
 		fmt.Fprintf(stderr, "gc runtime request-restart: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	// Also persist the request through the worker boundary so it survives
-	// tmux session death. Non-fatal: the runtime flag above is primary.
-	if persistRestart != nil {
+	if pinned {
+		if persistRestart == nil {
+			fmt.Fprintf(stderr, "gc runtime request-restart: pinned session %q has no restart persistence available; not requesting restart\n", sn) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if err := persistRestart(); err != nil {
+			fmt.Fprintf(stderr, "gc runtime request-restart: could not persist restart marker for pinned session %q; not requesting restart: %v\n", sn, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	} else if persistRestart != nil {
+		// Also persist the request through the worker boundary so it survives
+		// tmux session death. Non-fatal here: the runtime flag above is primary.
 		if err := persistRestart(); err != nil {
 			fmt.Fprintf(stderr, "gc runtime request-restart: setting bead restart flag: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
@@ -613,10 +643,20 @@ func doRuntimeRequestRestart(ctx context.Context, dops drainOps, persistRestart 
 	})
 	fmt.Fprintf(stdout, "Restart requested. Waiting up to %s for controller to stop this session...\n", timeout) //nolint:errcheck // best-effort stdout
 
-	return waitForControllerRestart(ctx, dops, sn, "gc runtime request-restart", pollInterval, timeout, stderr)
+	return waitForControllerRestart(ctx, dops, sp, sn, "gc runtime request-restart", pollInterval, timeout, stderr)
 }
 
-func waitForControllerRestart(ctx context.Context, dops drainOps, sn, command string, pollInterval, timeout time.Duration, stderr io.Writer) int {
+// waitForControllerRestart polls until the controller accepts the stop
+// handoff (exit 0), the context is canceled by a signal (exit 0), or the
+// bounded timeout expires (exit 1 with diagnostic).
+//
+// A cleared GC_RESTART_REQUESTED flag alone is not proof the controller acted:
+// the reconciler's pinned-session collateral-skip clears the very same flag
+// without killing the session (see pinnedConfiguredNamedSessionKillProtected
+// in session_reconciler.go). sp confirms the session actually stopped before
+// this reports success; while the flag is clear but the session is still
+// running, polling continues until the deadline instead of returning early.
+func waitForControllerRestart(ctx context.Context, dops drainOps, sp runtime.Provider, sn, command string, pollInterval, timeout time.Duration, stderr io.Writer) int {
 	deadline := time.Now().Add(timeout)
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
@@ -633,7 +673,7 @@ func waitForControllerRestart(ctx context.Context, dops drainOps, sn, command st
 			switch {
 			case err != nil:
 				lastPollErr = err
-			case !requested:
+			case !requested && !sp.IsRunning(sn):
 				// The controller accepted the stop handoff or the runtime is already gone.
 				return 0
 			default:
@@ -655,10 +695,88 @@ func waitForControllerRestart(ctx context.Context, dops drainOps, sn, command st
 // Tests that swap it MUST NOT call t.Parallel().
 var drainAckPokeController = pokeController
 
-// doRuntimeDrainAck sets the drain-ack flag on the session, then pokes the
-// controller so the reconciler observes the drained state immediately instead
-// of waiting for its next patrol tick.
+// drainAckReleaseHeldClaims is a mutable global test seam over
+// releaseUnexecutedClaimsForSession, matching drainAckPokeController above.
+// Tests that swap it MUST NOT call t.Parallel().
+var drainAckReleaseHeldClaims = releaseUnexecutedClaimsForSession
+
+// releaseUnexecutedClaimsForSession resolves this city's residency-correct work
+// legs and gives back every in_progress claim the draining session still holds.
+//
+// The leg set mirrors `gc session close`, which leads with the WORK store and
+// hands in the relocated graph binding as a class leg: a claim that claim-time
+// routing left in the binding is invisible to a work-led scan, and would be
+// released by nothing. Best-effort throughout — a city that cannot be resolved
+// or a store that cannot be opened must never block the ack itself, which is the
+// signal the controller is waiting on.
+func releaseUnexecutedClaimsForSession(cityPath, sessionName string, stderr io.Writer) {
+	if strings.TrimSpace(cityPath) == "" || strings.TrimSpace(sessionName) == "" {
+		return
+	}
+	// Only read a real city. A city is a directory holding city.toml, and
+	// opening a store somewhere that is not one does not find claims — it
+	// PROVISIONS a store (a managed Dolt server included) in whatever directory
+	// the caller happened to resolve. Drain-ack is reachable from contexts with
+	// no city at all (a bare `gc hook --claim --drain-ack`, a test harness), and
+	// before this release step it did no store I/O whatsoever, so the cost of
+	// getting that wrong is a data directory and a server process where neither
+	// belongs.
+	if _, err := os.Stat(filepath.Join(cityPath, "city.toml")); err != nil {
+		// A runtime root carrying .gc/ but no city.toml is the legacy shape, and
+		// it is the one skip worth naming: it looks like a city to a human, a
+		// session really can hold claims there, and staying silent would make a
+		// release that never ran indistinguishable from one that found nothing.
+		// It is NOT auto-upgraded here — provisioning a store against a layout
+		// this function does not understand is the failure the city.toml gate
+		// exists to prevent.
+		if _, gcErr := os.Stat(filepath.Join(cityPath, ".gc")); gcErr == nil {
+			fmt.Fprintf(stderr, "gc runtime drain-ack: %s has .gc/ but no city.toml; skipping the held-claim release for this legacy runtime root (run `gc doctor` to check the layout)\n", cityPath) //nolint:errcheck
+		}
+		return
+	}
+	store, err := openCityStoreAt(cityPath)
+	if err != nil || store == nil {
+		return
+	}
+	cfg, _ := loadCityConfig(cityPath, io.Discard)
+	sessionBead, err := cliSessionStore(store, cfg, cityPath).Get(sessionName)
+	if err != nil {
+		// A session that cannot be resolved holds nothing this pass can find, so
+		// there is nothing to report. Both arms above are deliberately silent for
+		// the same reason: the ack is the signal the controller is waiting on, and
+		// a release that could not even begin must not decorate a successful ack
+		// with a warning an operator can do nothing about. A claim genuinely left
+		// behind here is still caught by the dead-assignee release lane.
+		return
+	}
+	var rigStores map[string]beads.Store
+	if cfg != nil {
+		rigStores = buildStandaloneRigStores(cfg, cityPath, io.Discard)
+	}
+	releaseUnexecutedClaimsOnDrainAck(cityPath, cfg, store, rigStores, sessionBead, drainAckReleaseBudget, stderr)
+}
+
+// drainAckReleaseBudget bounds the whole held-claim release pass.
+//
+// The pass runs BEFORE the ack, which is the signal the controller waits on to
+// stop this session, and it fans out over every work leg × every identity with
+// only per-command ceilings underneath it. A slow or contended store would
+// therefore make drain-ack hang for the product of those, turning a safety net
+// into a stall on the exact path a draining worker needs to be fast. Releasing
+// SOME claims and acking is strictly better than releasing all of them late:
+// whatever this budget leaves behind is the dead-assignee lane's to collect.
+const drainAckReleaseBudget = 15 * time.Second
+
+// doRuntimeDrainAck releases any unexecuted claim the session still holds, sets
+// the drain-ack flag, then pokes the controller so the reconciler observes the
+// drained state immediately instead of waiting for its next patrol tick.
+//
+// The release runs BEFORE the ack, and the order is load-bearing: the ack is what
+// tells the controller it may stop this session, so acknowledging first opens a
+// window in which the session dies still holding exactly the claim this release
+// exists to clear.
 func doRuntimeDrainAck(dops drainOps, cityPath, targetName, sn string, jsonOutput bool, stdout, stderr io.Writer) int {
+	drainAckReleaseHeldClaims(cityPath, sn, stderr)
 	if err := dops.setDrainAck(sn); err != nil {
 		fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

@@ -65,3 +65,17 @@ gc pack registry publish .
 `gc pack registry publish <path>` submits a pack to the configured registry
 service. The hosted registry reviews and lands the change before others see it;
 refresh local caches afterward.
+
+## Publish Request Updates
+
+After a successful publish, follow the printed request command to check its
+status and any Registry feedback:
+
+```bash
+gc pack registry requests prq_example
+```
+
+List your recent requests with `gc pack registry requests`. This read-only
+status report uses your personal Registry login; run `gc pack registry login`
+if you have not logged in yet. A withdrawn request tells you to address the
+decision and submit a new request.

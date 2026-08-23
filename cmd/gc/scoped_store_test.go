@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +20,155 @@ func noopBdRunner() beads.CommandRunner {
 	return func(string, string, ...string) ([]byte, error) {
 		return nil, nil
 	}
+}
+
+// TestScopedBdStoreForCityResolvesWorkspacePinnedBdBinary is the controller-path
+// regression for an authoritative external beads binding. The long-lived
+// city store replaces its bd command with the workspace-pinned executable,
+// but the short-lived, context-bound store used by controller reads must make
+// the same selection. BD_BIN alone is not a contract of the bd CLI: unless
+// the runner resolves it, exec still finds the ambient `bd` on PATH.
+//
+// The unconfigured subtest protects the opposite boundary: ordinary cities
+// continue to invoke the ambient command named exactly "bd".
+func TestScopedBdStoreForCityResolvesWorkspacePinnedBdBinary(t *testing.T) {
+	makeCity := func(t *testing.T, workspacePath string) string {
+		t.Helper()
+		cityDir := t.TempDir()
+		cityTOML := "[workspace]\nname = \"demo\"\n"
+		if workspacePath != "" {
+			cityTOML += "[workspace.env]\nPATH = " + strconv.Quote(workspacePath) + "\n"
+		}
+		if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityTOML), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(scopeMetadataJSONPath(cityDir), []byte(`{"backend":"postgres","storage_endpoint":"opaque-remote","storage_database":"work","dolt_mode":"server"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return cityDir
+	}
+
+	t.Run("workspace-pinned", func(t *testing.T) {
+		pinnedDir := t.TempDir()
+		writeExecutable(t, filepath.Join(pinnedDir, "bd"), "#!/bin/sh\nprintf '[]\\n'\n")
+
+		ambientDir := t.TempDir()
+		writeExecutable(t, filepath.Join(ambientDir, "bd"), "#!/bin/sh\necho ambient-bd-was-used >&2\nexit 23\n")
+		t.Setenv("PATH", ambientDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+		store, err := scopedBdStoreForCity(context.Background(), makeCity(t, pinnedDir))
+		if err != nil {
+			t.Fatalf("scopedBdStoreForCity: %v", err)
+		}
+		if _, err := store.List(beads.ListQuery{AllowScan: true}); err != nil {
+			t.Fatalf("List used ambient bd instead of workspace-pinned bd: %v", err)
+		}
+	})
+
+	t.Run("unconfigured", func(t *testing.T) {
+		ambientDir := t.TempDir()
+		writeExecutable(t, filepath.Join(ambientDir, "bd"), "#!/bin/sh\nprintf '[]\\n'\n")
+		t.Setenv("PATH", ambientDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+		store, err := scopedBdStoreForCity(context.Background(), makeCity(t, ""))
+		if err != nil {
+			t.Fatalf("scopedBdStoreForCity: %v", err)
+		}
+		if _, err := store.List(beads.ListQuery{AllowScan: true}); err != nil {
+			t.Fatalf("List with default bd command: %v", err)
+		}
+	})
+}
+
+func TestRequireBdBinaryForCityAcceptsAbsoluteBDBinForCompleteBinding(t *testing.T) {
+	pinnedDir := t.TempDir()
+	writeExecutable(t, filepath.Join(pinnedDir, "bd"), "#!/bin/sh\nexit 0\n")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n[workspace.env]\nPATH = "+strconv.Quote(pinnedDir)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(scopeMetadataJSONPath(cityDir), []byte(`{"backend":"postgres","storage_endpoint":"opaque-remote","storage_database":"work","dolt_mode":"server"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	noBdDir := t.TempDir()
+	t.Setenv("PATH", noBdDir)
+
+	if err := requireBdBinaryForCity(cityDir); err != nil {
+		t.Fatalf("workspace-pinned bd preflight: %v", err)
+	}
+}
+
+func TestRequireBdBinaryForCityRejectsWorkspacePinWithoutCompleteBinding(t *testing.T) {
+	pinnedDir := t.TempDir()
+	writeExecutable(t, filepath.Join(pinnedDir, "bd"), "#!/bin/sh\nexit 0\n")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n[workspace.env]\nPATH = "+strconv.Quote(pinnedDir)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", t.TempDir())
+
+	if err := requireBdBinaryForCity(cityDir); err == nil {
+		t.Fatal("workspace pin without complete binding passed preflight, want ambient bd failure")
+	}
+}
+
+// TestRequireBdBinaryForCityErrorText pins the three messages the preflight
+// produces. They are the whole reason errBdNotOnPath is a sentinel rather
+// than a formatted string: an ambient miss gets the remediation hint, while
+// a pin or binding fault the operator can actually act on is returned
+// verbatim instead of being flattened into "bd not found in PATH".
+func TestRequireBdBinaryForCityErrorText(t *testing.T) {
+	newCity := func(t *testing.T, cityTOML, metadata string) string {
+		t.Helper()
+		cityDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityTOML), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if metadata != "" {
+			if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(scopeMetadataJSONPath(cityDir), []byte(metadata), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		t.Setenv("PATH", t.TempDir())
+		return cityDir
+	}
+
+	t.Run("ambient miss keeps the remediation hint", func(t *testing.T) {
+		cityDir := newCity(t, "[workspace]\nname = \"demo\"\n", "")
+		err := requireBdBinaryForCity(cityDir)
+		if err == nil || err.Error() != "bd not found in PATH (install beads or set GC_BEADS=file)" {
+			t.Fatalf("requireBdBinaryForCity() = %v, want the ambient-miss message with its remediation", err)
+		}
+	})
+
+	t.Run("unresolvable pin is returned verbatim", func(t *testing.T) {
+		pinDir := t.TempDir() // configured, but holds no bd
+		cityTOML := "[workspace]\nname = \"demo\"\n[workspace.env]\nPATH = " + strconv.Quote(pinDir) + "\n"
+		cityDir := newCity(t, cityTOML, `{"backend":"postgres","storage_endpoint":"opaque-remote","storage_database":"work"}`)
+		err := requireBdBinaryForCity(cityDir)
+		if err == nil || err.Error() != "workspace.env PATH is configured but contains no executable bd at an absolute path" {
+			t.Fatalf("requireBdBinaryForCity() = %v, want the unresolvable-pin message verbatim", err)
+		}
+	})
+
+	t.Run("partial binding is returned verbatim", func(t *testing.T) {
+		cityDir := newCity(t, "[workspace]\nname = \"demo\"\n", `{"backend":"postgres","storage_endpoint":"opaque-remote"}`)
+		err := requireBdBinaryForCity(cityDir)
+		if err == nil || !strings.Contains(err.Error(), "partial beads storage binding") {
+			t.Fatalf("requireBdBinaryForCity() = %v, want the partial-binding message verbatim", err)
+		}
+	})
 }
 
 func TestBdStoreBackingFindsDirectBdStore(t *testing.T) {
@@ -37,11 +188,10 @@ func TestBdStoreBackingUnwrapsCachingStore(t *testing.T) {
 	}
 }
 
-// TestBdStoreBackingUnwrapsCachingAndPolicyLayers mirrors the real
-// production nesting order: openRigStore/openStoreResultAtForCity wrap the
-// raw store with wrapStoreWithBeadPolicies, then buildStores/newControllerState
-// wrap that again with CachingStore. bdStoreBacking must see through both
-// layers to reach the *beads.BdStore whose subprocess ga-cdmx6x is about.
+// TestBdStoreBackingUnwrapsCachingAndPolicyLayers proves unwrapping is
+// order-independent. Production re-applies policy outside the cache, while
+// this inverse stack can still arise in tests and adapters; both must expose
+// the *beads.BdStore whose subprocess ga-cdmx6x is about.
 func TestBdStoreBackingUnwrapsCachingAndPolicyLayers(t *testing.T) {
 	inner := beads.NewBdStore("/city", noopBdRunner())
 	policyWrapped := wrapStoreWithBeadPolicies(inner, &config.City{})
@@ -124,6 +274,45 @@ func TestScopedStoreLikeSelectsRigScopeWhenDirIsARig(t *testing.T) {
 	}
 	if got := bs.Dir(); got != rigDir {
 		t.Fatalf("scoped store Dir() = %q, want rig dir %q", got, rigDir)
+	}
+}
+
+// TestScopedStoreLikePreservesBeadPolicyWrapper pins behavioral equivalence,
+// not just the backing directory. Production stores are policy-wrapped outside
+// the cache; dropping that wrapper from a scoped clone changes zero-value List
+// and Ready reads from TierBoth to TierIssues.
+func TestScopedStoreLikePreservesBeadPolicyWrapper(t *testing.T) {
+	cityDir := t.TempDir()
+	writeMinimalCityToml(t, cityDir)
+	cfg := &config.City{}
+	backing := beads.NewBdStore(cityDir, noopBdRunner())
+	cached := beads.NewCachingStoreForTest(backing, nil)
+	existing := wrapStoreWithBeadPolicies(cached, cfg)
+
+	scoped, err := scopedStoreLike(context.Background(), cityDir, cfg, existing)
+	if err != nil {
+		t.Fatalf("scopedStoreLike: %v", err)
+	}
+	inner, policy, ok := unwrapBeadPolicyStore(scoped)
+	if !ok {
+		t.Fatalf("scopedStoreLike() = %T, want a policy-wrapped clone", scoped)
+	}
+	if policy.cfg != cfg {
+		t.Fatalf("scoped policy config = %p, want original %p", policy.cfg, cfg)
+	}
+	if _, ok := inner.(*beads.BdStore); !ok {
+		t.Fatalf("scoped policy backing = %T, want *beads.BdStore", inner)
+	}
+}
+
+func TestScopedStoreLikeHonorsCanceledResolutionContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	existing := beads.NewBdStore(t.TempDir(), noopBdRunner())
+
+	_, err := scopedStoreLike(ctx, t.TempDir(), &config.City{}, existing)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("scopedStoreLike error = %v, want context.Canceled", err)
 	}
 }
 

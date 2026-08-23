@@ -1,0 +1,55 @@
+# Residency-boundary vocabulary: name <TAB> extended regex.
+#
+# ONE source of truth, read by both halves of the guard —
+# scripts/check-residency-boundary.sh (the shell census, wired into `make
+# check`) and TestResidencyBoundaryGrepRatchet in scripts/ (the CI-visible
+# half). Two hand-kept copies of "what is forbidden" would be the very bug this
+# guard exists to prevent, one level up.
+#
+# PORTABLE ERE ONLY. These strings are evaluated by three engines — grep -E,
+# awk, and Go's regexp — and they must mean the same thing in all three. In
+# particular `\b` is NOT usable: gawk reads it as a backspace, not a word
+# boundary. Identifier patterns therefore spell the boundary out as
+# (^|[^A-Za-z0-9_]) / ($|[^A-Za-z0-9_]), which is what keeps rigBeadStores()
+# counted once, under its own name, and not a second time as a substring of
+# BeadStores().
+#
+# (a) base-enumerator consumption. None of these ever contains a class binding,
+#     so every list built from one is binding-blind by construction.
+a:BeadStores	(^|[^A-Za-z0-9_])BeadStores\(\)
+a:rigBeadStores	(^|[^A-Za-z0-9_])rigBeadStores\(\)
+a:coordClassStoreCandidates	(^|[^A-Za-z0-9_])coordClassStoreCandidates\(
+a:workAssignmentStores	(^|[^A-Za-z0-9_])workAssignmentStores\(
+a:openAllConvoyStoresAt	(^|[^A-Za-z0-9_])openAllConvoyStoresAt\(
+a:openConvoyStores	(^|[^A-Za-z0-9_])openConvoyStores\(
+a:openSourceWorkflowStores	(^|[^A-Za-z0-9_])openSourceWorkflowStores\(
+a:convoyStoreCandidates	(^|[^A-Za-z0-9_])convoyStoreCandidates\(
+# (b) direct binding-gate re-derivation. Asking "is this class relocated" a
+#     second time is how the split-store bug class reproduces (#5125, #5127).
+b:graphClassBinding	(^|[^A-Za-z0-9_])graphClassBinding\(
+b:routes.storeFor	(^|[^A-Za-z0-9_])routes\.storeFor\(
+b:storeref.ClassCandidates	(^|[^A-Za-z0-9_])storeref\.ClassCandidates\(
+# (c) hand-rolled probe lists and plan disassembly. The executor
+#     (ResolveOwner/Union) is the only place leg order and per-leg error policy
+#     are applied; a literal list skips both, and so does a consumer that runs a
+#     resolved plan's legs itself. plan-leg-store-access has zero hits today, so
+#     the first one is a violation.
+#
+#     storeref.EachLeg is the SANCTIONED enumeration seam — it hands over the
+#     order and the policy, which is what a hand-rolled list loses — but it is
+#     still a way to get the stores out of a plan and read them yourself, so it
+#     is ratcheted rather than free. Two consumers are baselined (the census
+#     arms, which fan out concurrently; the `gc ready` reader, whose three arms
+#     share one leg set) and a third is a reviewed baseline change, not a
+#     silent one. Without this row a consumer could take the legs, read them in
+#     its own order with its own error handling, and pass both halves of the
+#     guard — which is the whole failure this file exists to prevent, wearing
+#     the resolver's name.
+c:beads.Store-literal	\[\]beads\.Store\{
+c:plan-leg-store-access	\.Leg\.Store($|[^A-Za-z0-9_])
+c:storeref.EachLeg	(^|[^A-Za-z0-9_])storeref\.EachLeg\(
+# (d) bespoke residence probes. The namespace gate is the resolver's, and a site
+#     that re-derives it is one `gc storage migrate` away from ga-axin6.
+d:IDInNamespace	(^|[^A-Za-z0-9_])IDInNamespace\(
+d:bdIDIsClassReserved	(^|[^A-Za-z0-9_])bdIDIsClassReserved\(
+d:ReservedClassPrefix	(^|[^A-Za-z0-9_])ReservedClassPrefix\(

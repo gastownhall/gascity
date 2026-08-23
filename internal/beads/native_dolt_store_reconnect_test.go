@@ -45,22 +45,38 @@ func storeWithReopen(dead beadslib.Storage, fresh beadslib.Storage, reopens *int
 	return store
 }
 
-func TestNativeDoltStoreGetReconnectsAfterTransientConnError(t *testing.T) {
-	healthy := healthySearchStorage(&beadslib.Issue{
-		ID: "gc-1", Title: "recovered", Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 2,
+func TestNativeDoltStoreGetReconnectsAndInstallsFreshStorage(t *testing.T) {
+	fresh := healthySearchStorage(&beadslib.Issue{
+		ID: "gc-existing", Title: "recovered", Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 2,
 	})
-	var reopens int32
-	store := storeWithReopen(deadSearchStorage(errors.New("begin read tx: dial tcp 127.0.0.1:58216: i/o timeout")), healthy, &reopens)
+	fresh.createIssue = func(_ context.Context, issue *beadslib.Issue, _ string) error {
+		issue.ID = "gc-created"
+		return nil
+	}
+	errDeadCreate := errors.New("create reached dead storage")
+	dead := deadSearchStorage(errors.New("begin read tx: dial tcp 127.0.0.1:58216: i/o timeout"))
+	dead.createIssue = func(context.Context, *beadslib.Issue, string) error {
+		return errDeadCreate
+	}
+	store := newNativeDoltStoreForTest(dead)
+	store.reopen = func(context.Context) (beadslib.Storage, error) {
+		return fresh, nil
+	}
 
-	got, err := store.Get("gc-1")
+	got, err := store.Get("gc-existing")
 	if err != nil {
 		t.Fatalf("Get after transient conn error: %v", err)
 	}
-	if got.ID != "gc-1" {
-		t.Fatalf("Get.ID = %q, want gc-1", got.ID)
+	if got.ID != "gc-existing" {
+		t.Fatalf("Get.ID = %q, want gc-existing", got.ID)
 	}
-	if n := atomic.LoadInt32(&reopens); n == 0 {
-		t.Fatalf("expected the reopen hook to fire; got %d", n)
+
+	created, err := store.Create(Bead{Title: "created after reconnect", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create after reconnect: %v", err)
+	}
+	if created.ID != "gc-created" {
+		t.Fatalf("Create.ID = %q, want gc-created", created.ID)
 	}
 }
 

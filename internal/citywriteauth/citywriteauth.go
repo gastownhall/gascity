@@ -13,6 +13,13 @@ import (
 	"time"
 )
 
+// AudienceCityWrite is the well-known audience for X-GC-City-Write grants. A
+// Verifier is still configured with its own Options.Aud (an operator may choose
+// a different value), but this is the canonical audience the reference minter
+// stamps and the direct-hardened capstone client expects, so both sides can
+// single-source it rather than repeating the literal.
+const AudienceCityWrite = "gc-city-write"
+
 // Grant is the claim set carried by an X-GC-City-Write token: a single-use,
 // request-bound authorization for exactly one city mutation, minted by a
 // configured trusted authority and verified here.
@@ -338,11 +345,21 @@ func splitToken(token string) (payload, sig []byte, err error) {
 // captured grant cannot be repurposed for a different mutation.
 func ReqDigest(method, path, rawQuery string, body []byte) string {
 	bodyHash := sha256.Sum256(body)
+	return ReqDigestFromBodyHash(method, path, rawQuery, hex.EncodeToString(bodyHash[:]))
+}
+
+// ReqDigestFromBodyHash computes the same request binding as [ReqDigest] but
+// takes the body as its lowercase hex SHA-256 rather than the raw bytes. It
+// exists for a minter that is handed the body hash only (never the body), so it
+// can recompute and re-validate the request binding without seeing the payload.
+// bodyHashHex must be the exact value hex(sha256(body)) the client folded in;
+// [ReqDigest] delegates here, so the two are byte-identical by construction.
+func ReqDigestFromBodyHash(method, path, rawQuery, bodyHashHex string) string {
 	preimage := method + "\n" + path
 	if canonical := canonicalizeQuery(rawQuery); canonical != "" {
 		preimage += "\n" + canonical
 	}
-	preimage += "\n" + hex.EncodeToString(bodyHash[:])
+	preimage += "\n" + bodyHashHex
 	sum := sha256.Sum256([]byte(preimage))
 	return hex.EncodeToString(sum[:])
 }

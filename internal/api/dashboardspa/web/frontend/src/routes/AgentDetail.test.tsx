@@ -38,6 +38,10 @@ vi.mock('../supervisor/sessionReads', () => ({
     captured_at: '2026-06-01T00:00:00Z',
     truncated: false,
   })),
+  // The live peek now attempts a structured transcript first; null routes it to
+  // the conversation fallback above (this suite asserts the page chrome, not the
+  // transcript body).
+  fetchStructuredTranscript: vi.fn(async () => null),
 }));
 
 vi.mock('../supervisor/beadReads', () => ({

@@ -63,13 +63,14 @@ func TestSeamsAcpLifecycle(t *testing.T) {
 	}
 }
 
-// TestSeamsAcpTransportAndCaps pins the bespoke "acp" transport identity and the
-// (empty) capability mapping.
+// TestSeamsAcpTransportAndCaps pins the bespoke "acp" transport identity and
+// the capability mapping: acp reports activity (session/update notifications,
+// durably stamped) but never attachment (headless, no terminal).
 func TestSeamsAcpTransportAndCaps(t *testing.T) {
 	rt, tp := newTestProvider(t).Seams()
 
-	if caps := rt.Capabilities(); caps.ReportActivity {
-		t.Fatalf("PlaceCapabilities = %+v; want ReportActivity false (acp declares none)", caps)
+	if caps := rt.Capabilities(); !caps.ReportActivity {
+		t.Fatalf("PlaceCapabilities = %+v; want ReportActivity true (acp stamps session/update activity)", caps)
 	}
 	if tp.Capabilities().ReportAttachment {
 		t.Fatal("TransportCapabilities.ReportAttachment should be false for acp")

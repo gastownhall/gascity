@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	goruntime "runtime"
 	"strings"
 	"testing"
 	"time"
@@ -2423,6 +2422,46 @@ func TestCmdNudgeStatusJSON(t *testing.T) {
 	}
 }
 
+// TestCmdNudgeStatusSurfacesDispatchSkips verifies `gc nudge status` reads
+// back the dispatch tick's persisted skip-reason counters (recorded by
+// recordNudgeDispatchSkips, called from dispatchAllQueuedNudges) in both
+// --json and text output. Status is city-wide, not agent-scoped — the
+// point is to give an operator a fast signal that the dispatcher IS
+// silently skipping something, before they go digging through GC_DEBUG
+// logs for which agent and why.
+func TestCmdNudgeStatusSurfacesDispatchSkips(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	cityDir := t.TempDir()
+	writeNamedSessionCityTOML(t, cityDir)
+	t.Setenv("GC_CITY", cityDir)
+
+	if err := recordNudgeDispatchSkips(cityDir, map[string]int64{"not-running": 3, "observe-error": 1}); err != nil {
+		t.Fatalf("recordNudgeDispatchSkips: %v", err)
+	}
+
+	var jsonOut, jsonErr bytes.Buffer
+	code := cmdNudgeStatus([]string{"mayor"}, true, &jsonOut, &jsonErr)
+	if code != 0 {
+		t.Fatalf("cmdNudgeStatus --json = %d, want 0; stderr=%s", code, jsonErr.String())
+	}
+	var result nudgeStatusJSON
+	if err := json.Unmarshal(jsonOut.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, jsonOut.String())
+	}
+	if result.DispatchSkips["not-running"] != 3 || result.DispatchSkips["observe-error"] != 1 {
+		t.Fatalf("dispatch_skips = %#v, want not-running=3 observe-error=1", result.DispatchSkips)
+	}
+
+	var textOut, textErr bytes.Buffer
+	code = cmdNudgeStatus([]string{"mayor"}, false, &textOut, &textErr)
+	if code != 0 {
+		t.Fatalf("cmdNudgeStatus = %d, want 0; stderr=%s", code, textErr.String())
+	}
+	if !strings.Contains(textOut.String(), "not-running=3") || !strings.Contains(textOut.String(), "observe-error=1") {
+		t.Fatalf("text status missing skip-reason lines, got: %s", textOut.String())
+	}
+}
+
 func TestTryDeliverQueuedNudgesByPollerDeliversAndAcks(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
@@ -3026,7 +3065,7 @@ func TestCmdNudgePollSurvivesTransientObserveErrors(t *testing.T) {
 	defer func() { nudgeObserveTarget = origObserve }()
 
 	var stdout, stderr bytes.Buffer
-	code := cmdNudgePoll([]string{created.ID}, "worker-session", time.Millisecond, 0, &stdout, &stderr)
+	code := cmdNudgePoll([]string{created.ID}, "worker-session", time.Millisecond, 0, true, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdNudgePoll = %d, want 0 (transient observe error with queued work pending must not kill the poller); stderr=%s", code, stderr.String())
 	}
@@ -3539,9 +3578,6 @@ func TestAcquireNudgePollerLeaseAllowsBootstrapPID(t *testing.T) {
 }
 
 func TestExistingPollerPIDRejectsUnrelatedLivePID(t *testing.T) {
-	if goruntime.GOOS != "linux" {
-		t.Skip("poller ownership check uses /proc on linux")
-	}
 	dir := t.TempDir()
 	pidPath := nudgePollerPIDPath(dir, "sess-worker", "session-id")
 	if err := os.MkdirAll(filepath.Dir(pidPath), 0o755); err != nil {
@@ -3561,10 +3597,7 @@ func TestExistingPollerPIDRejectsUnrelatedLivePID(t *testing.T) {
 }
 
 func TestExistingPollerPIDAcceptsMatchingCitySession(t *testing.T) {
-	if goruntime.GOOS != "linux" {
-		t.Skip("poller ownership check uses /proc on linux")
-	}
-	cityPath := t.TempDir()
+	cityPath := filepath.Join(t.TempDir(), "city with spaces")
 	sessionName := "sess-worker"
 	pidPath := nudgePollerPIDPath(cityPath, sessionName, "session-id")
 	cmd := startPollerLikeProcess(t, cityPath, "session-id")
@@ -3585,9 +3618,6 @@ func TestExistingPollerPIDAcceptsMatchingCitySession(t *testing.T) {
 }
 
 func TestExistingPollerPIDRejectsDifferentCitySameSession(t *testing.T) {
-	if goruntime.GOOS != "linux" {
-		t.Skip("poller ownership check uses /proc on linux")
-	}
 	cityPath := t.TempDir()
 	otherCityPath := t.TempDir()
 	sessionName := "sess-worker"
@@ -3610,9 +3640,6 @@ func TestExistingPollerPIDRejectsDifferentCitySameSession(t *testing.T) {
 }
 
 func TestExistingPollerPIDRejectsDifferentTargetSameCitySession(t *testing.T) {
-	if goruntime.GOOS != "linux" {
-		t.Skip("poller ownership check uses /proc on linux")
-	}
 	cityPath := t.TempDir()
 	sessionName := "sess-worker"
 	pidPath := nudgePollerPIDPath(cityPath, sessionName, "session-id")
@@ -3634,9 +3661,6 @@ func TestExistingPollerPIDRejectsDifferentTargetSameCitySession(t *testing.T) {
 }
 
 func TestExistingPollerPIDPreservesSameTargetAfterDifferentTarget(t *testing.T) {
-	if goruntime.GOOS != "linux" {
-		t.Skip("poller ownership check uses /proc on linux")
-	}
 	cityPath := t.TempDir()
 	sessionName := "sess-worker"
 	targetA := "session-a"
@@ -4179,6 +4203,7 @@ start_command = "echo"
 		t.Fatalf("WriteFile(city.toml): %v", err)
 	}
 	t.Chdir(cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
 
 	store, err := openCityStoreAt(cityDir)
 	if err != nil {
@@ -4763,6 +4788,100 @@ func TestNudgePollHelpersCloseEveryStoreTheyOpen(t *testing.T) {
 	}
 }
 
+// TestNudgePollHelpersSkipDoltOpenOnEmptyQueue pins the connection-churn fix:
+// on the common idle tick the flock'd state.json queue is empty, so the per-tick
+// poll helpers must NOT open the Dolt-backed front-door store at all. Every open
+// dials ~2 sql-server connections (main pool + a SHOW DATABASES init probe); N
+// idle `gc nudge poll` sidecars each opening once per 2s tick is the measured
+// churn that pins the server. Pre-fix these helpers opened unconditionally
+// (opens == N calls); post-fix an empty queue yields opens == 0.
+func TestNudgePollHelpersSkipDoltOpenOnEmptyQueue(t *testing.T) {
+	opens, closes := installCountingNudgeStoreSeam(t)
+	dir := t.TempDir()
+	now := time.Now()
+
+	// No enqueue: the state.json queue is empty (the idle-session steady state).
+	const ticks = 5
+	for i := 0; i < ticks; i++ {
+		if _, err := claimDueQueuedNudgesMatching(dir, now, func(queuedNudge) bool { return true }); err != nil {
+			t.Fatalf("claimDueQueuedNudgesMatching: %v", err)
+		}
+		if _, _, _, err := listQueuedNudges(dir, "worker", now); err != nil {
+			t.Fatalf("listQueuedNudges: %v", err)
+		}
+		target := nudgeTarget{cityPath: dir}
+		if _, _, _, err := listQueuedNudgesForTarget(dir, target, now); err != nil {
+			t.Fatalf("listQueuedNudgesForTarget: %v", err)
+		}
+		if err := releaseQueuedNudgeClaims(dir, []string{"absent"}); err != nil {
+			t.Fatalf("releaseQueuedNudgeClaims: %v", err)
+		}
+		if err := ackQueuedNudgesWithOutcome(dir, []string{"absent"}, "injected", "", "test"); err != nil {
+			t.Fatalf("ackQueuedNudgesWithOutcome: %v", err)
+		}
+	}
+
+	if *opens != 0 {
+		t.Fatalf("empty-queue poll opened the Dolt store %d times, want 0 (idle ticks must not dial the sql-server)", *opens)
+	}
+	if *closes != 0 {
+		t.Fatalf("empty-queue poll closed a store %d times, want 0 (nothing should have been opened)", *closes)
+	}
+}
+
+// TestNudgePollHelpersOpenOnceWhenQueueHasWork pins the no-regression edge: when
+// the queue is non-empty the maintenance passes (recover/prune/terminalize) must
+// still run against Dolt, so each helper opens the front-door store exactly once
+// per call and releases it (open == close, no leak, no double-open).
+func TestNudgePollHelpersOpenOnceWhenQueueHasWork(t *testing.T) {
+	now := time.Now()
+
+	assertOneOpenOneClose := func(t *testing.T, name string, run func(dir string)) {
+		t.Helper()
+		opens, closes := installCountingNudgeStoreSeam(t)
+		dir := t.TempDir()
+		item := newQueuedNudgeWithOptions("worker", "do work", "session", now, queuedNudgeOptions{ID: "n-work"})
+		if err := enqueueQueuedNudge(dir, item); err != nil {
+			t.Fatalf("%s: enqueueQueuedNudge: %v", name, err)
+		}
+		// enqueue opened+closed its own store; measure deltas around the helper.
+		opensBefore, closesBefore := *opens, *closes
+		run(dir)
+		if got := *opens - opensBefore; got != 1 {
+			t.Fatalf("%s: opens delta=%d, want 1 (non-empty queue must open the front door exactly once)", name, got)
+		}
+		if got := *closes - closesBefore; got != 1 {
+			t.Fatalf("%s: closes delta=%d, want 1 (the opened store must be released)", name, got)
+		}
+	}
+
+	assertOneOpenOneClose(t, "claim", func(dir string) {
+		if _, err := claimDueQueuedNudgesMatching(dir, now, func(queuedNudge) bool { return false }); err != nil {
+			t.Fatalf("claimDueQueuedNudgesMatching: %v", err)
+		}
+	})
+	assertOneOpenOneClose(t, "list", func(dir string) {
+		if _, _, _, err := listQueuedNudges(dir, "worker", now); err != nil {
+			t.Fatalf("listQueuedNudges: %v", err)
+		}
+	})
+	assertOneOpenOneClose(t, "listForTarget", func(dir string) {
+		if _, _, _, err := listQueuedNudgesForTarget(dir, nudgeTarget{cityPath: dir}, now); err != nil {
+			t.Fatalf("listQueuedNudgesForTarget: %v", err)
+		}
+	})
+	assertOneOpenOneClose(t, "release", func(dir string) {
+		if err := releaseQueuedNudgeClaims(dir, []string{"absent"}); err != nil {
+			t.Fatalf("releaseQueuedNudgeClaims: %v", err)
+		}
+	})
+	assertOneOpenOneClose(t, "ack", func(dir string) {
+		if err := ackQueuedNudgesWithOutcome(dir, []string{"n-work"}, "injected", "", "test-boundary"); err != nil {
+			t.Fatalf("ackQueuedNudgesWithOutcome: %v", err)
+		}
+	})
+}
+
 // TestEnqueueQueuedNudgeWithStoreClosesOnlyOwnedStore pins the ownStore guard:
 // enqueueQueuedNudgeWithStore must close the store it opens itself (store==nil
 // path) but must NOT close a store passed in by the caller, since the caller
@@ -4996,4 +5115,50 @@ func TestBlockedQueuedNudgeReason_GetWaitErrorMapping(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestResolveNudgePollInterval(t *testing.T) {
+	writeCity := func(t *testing.T, sessionBlock string) string {
+		t.Helper()
+		dir := t.TempDir()
+		toml := "[workspace]\nname = \"test\"\n" + sessionBlock + "\n[[agent]]\nname = \"a\"\n"
+		if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
+			t.Fatalf("write city.toml: %v", err)
+		}
+		return dir
+	}
+
+	t.Run("config knob applies when flag not explicit", func(t *testing.T) {
+		dir := writeCity(t, "[session]\nnudge_poll_interval = \"15s\"\n")
+		if got := resolveNudgePollInterval(dir, defaultNudgePollInterval, false); got != 15*time.Second {
+			t.Fatalf("resolveNudgePollInterval = %v, want 15s", got)
+		}
+	})
+
+	t.Run("explicit flag wins over config", func(t *testing.T) {
+		dir := writeCity(t, "[session]\nnudge_poll_interval = \"15s\"\n")
+		if got := resolveNudgePollInterval(dir, 7*time.Second, true); got != 7*time.Second {
+			t.Fatalf("resolveNudgePollInterval = %v, want 7s (explicit flag)", got)
+		}
+	})
+
+	t.Run("default when config unset", func(t *testing.T) {
+		dir := writeCity(t, "")
+		if got := resolveNudgePollInterval(dir, defaultNudgePollInterval, false); got != defaultNudgePollInterval {
+			t.Fatalf("resolveNudgePollInterval = %v, want default %v", got, defaultNudgePollInterval)
+		}
+	})
+
+	t.Run("default when config invalid", func(t *testing.T) {
+		dir := writeCity(t, "[session]\nnudge_poll_interval = \"banana\"\n")
+		if got := resolveNudgePollInterval(dir, defaultNudgePollInterval, false); got != defaultNudgePollInterval {
+			t.Fatalf("resolveNudgePollInterval = %v, want default %v", got, defaultNudgePollInterval)
+		}
+	})
+
+	t.Run("default when city config unloadable", func(t *testing.T) {
+		if got := resolveNudgePollInterval(t.TempDir(), defaultNudgePollInterval, false); got != defaultNudgePollInterval {
+			t.Fatalf("resolveNudgePollInterval = %v, want default %v", got, defaultNudgePollInterval)
+		}
+	})
 }

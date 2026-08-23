@@ -187,6 +187,112 @@ mode = "on_demand"
 	}
 }
 
+// TestLintAllowsNamedSessionOnExplicitlyDisabledPoolAgent is a regression
+// guard for #4184 problem 2: min_active_sessions=0 + max_active_sessions=0
+// is documented (TestValidateAgentsPoolMaxZeroIsValid) as the intentional
+// way to disable an agent's pool — it is not a pool. The lint rule must not
+// re-flag it as "pool-controlled" the same way it flags a real pool
+// (e.g. min=0/max=3 in TestLintRejectsNamedSessionBackedByPoolControlledAgent
+// above).
+func TestLintAllowsNamedSessionOnExplicitlyDisabledPoolAgent(t *testing.T) {
+	packDir := t.TempDir()
+	writeLintFile(t, filepath.Join(packDir, "pack.toml"), `[pack]
+name = "disabled-pool-named"
+version = "0.1.0"
+schema = 2
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.template.md"
+min_active_sessions = 0
+max_active_sessions = 0
+
+[[named_session]]
+template = "worker"
+scope = "rig"
+mode = "on_demand"
+`)
+	writeLintFile(t, filepath.Join(packDir, "prompts", "worker.template.md"), "hello {{.AgentName}}\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc lint failed on an explicitly disabled pool agent, want pass\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+	}
+	if strings.Contains(stderr.String(), "pool-controlled agent") {
+		t.Fatalf("stderr wrongly flagged the documented max=0 disable form as pool-controlled:\n%s", stderr.String())
+	}
+}
+
+// TestLintAllowsNamedSessionSingletonAgent is a regression guard for the
+// max_active_sessions=1 named-session flavor documented by
+// (*config.Agent).SupportsInstanceExpansion: max=1 with no min/scale_check/
+// namepool is a singleton with a stable canonical identity, not a pool.
+// A [[named_session]] targeting that shape is the supported way to declare a
+// persistent seat and must lint clean.
+func TestLintAllowsNamedSessionSingletonAgent(t *testing.T) {
+	packDir := t.TempDir()
+	writeLintFile(t, filepath.Join(packDir, "pack.toml"), `[pack]
+name = "singleton-named"
+version = "0.1.0"
+schema = 2
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.template.md"
+max_active_sessions = 1
+
+[[named_session]]
+template = "worker"
+scope = "rig"
+mode = "on_demand"
+`)
+	writeLintFile(t, filepath.Join(packDir, "prompts", "worker.template.md"), "hello {{.AgentName}}\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc lint failed on a named-session singleton agent, want pass\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+	}
+	if strings.Contains(stderr.String(), "pool-controlled agent") {
+		t.Fatalf("stderr wrongly flagged the max=1 named-session flavor as pool-controlled:\n%s", stderr.String())
+	}
+}
+
+// TestLintStillRejectsSingletonPoolWithMin pins the boundary of the max=1
+// exemption: an explicit min_active_sessions keeps pool semantics
+// (SupportsInstanceExpansion's pool flavor), so a named_session targeting
+// min=1/max=1 remains a conflict.
+func TestLintStillRejectsSingletonPoolWithMin(t *testing.T) {
+	packDir := t.TempDir()
+	writeLintFile(t, filepath.Join(packDir, "pack.toml"), `[pack]
+name = "singleton-pool-named"
+version = "0.1.0"
+schema = 2
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.template.md"
+min_active_sessions = 1
+max_active_sessions = 1
+
+[[named_session]]
+template = "worker"
+scope = "rig"
+mode = "on_demand"
+`)
+	writeLintFile(t, filepath.Join(packDir, "prompts", "worker.template.md"), "hello {{.AgentName}}\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("gc lint succeeded, want pool conflict for min=1/max=1\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `named_session "worker" targets pool-controlled agent "worker"`) {
+		t.Fatalf("stderr missing named-session pool conflict:\n%s", stderr.String())
+	}
+}
+
 func TestLintPromptDiscoverySkipsIgnoredDirs(t *testing.T) {
 	packDir := t.TempDir()
 	writeLintPack(t, packDir, "skip-dirs", "worker", "prompts/worker.template.md")

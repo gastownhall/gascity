@@ -72,3 +72,43 @@ type OrdersStore struct {
 type NudgesStore struct {
 	Store
 }
+
+// The typed class wrappers declare their embedded store as the
+// conditional-writes resolution target, so ResolveConditionalWriter works on
+// a typed handle without the caller remembering to unwrap — the one optional
+// capability where forgetting the unwrap would not fail loudly but silently
+// resolve unset→legacy (fatal under require). All other optional capabilities
+// keep the assert-on-.Store convention above.
+
+// ConditionalWritesResolveTarget declares the wrapped store as the
+// conditional-writes resolution target.
+func (s WorkStore) ConditionalWritesResolveTarget() Store { return s.Store }
+
+// ConditionalWritesResolveTarget declares the wrapped store as the
+// conditional-writes resolution target.
+func (s GraphStore) ConditionalWritesResolveTarget() Store { return s.Store }
+
+// ConditionalWritesResolveTarget declares the wrapped store as the
+// conditional-writes resolution target.
+func (s SessionStore) ConditionalWritesResolveTarget() Store { return s.Store }
+
+// ConditionalWritesResolveTarget declares the wrapped store as the
+// conditional-writes resolution target.
+func (s MailStore) ConditionalWritesResolveTarget() Store { return s.Store }
+
+// ConditionalWritesResolveTarget declares the wrapped store as the
+// conditional-writes resolution target.
+func (s OrdersStore) ConditionalWritesResolveTarget() Store { return s.Store }
+
+// ConditionalWritesResolveTarget declares the wrapped store as the
+// conditional-writes resolution target.
+func (s NudgesStore) ConditionalWritesResolveTarget() Store { return s.Store }
+
+var (
+	_ ConditionalWritesResolveTargeter = WorkStore{}
+	_ ConditionalWritesResolveTargeter = GraphStore{}
+	_ ConditionalWritesResolveTargeter = SessionStore{}
+	_ ConditionalWritesResolveTargeter = MailStore{}
+	_ ConditionalWritesResolveTargeter = OrdersStore{}
+	_ ConditionalWritesResolveTargeter = NudgesStore{}
+)

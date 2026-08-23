@@ -448,7 +448,7 @@ func appendRalphRetry(store beads.Store, logicalID string, prevSubject, prevChec
 	rootID := prevSubject.Metadata[beadmeta.RootBeadIDMetadataKey]
 	if rootID != "" {
 		var err error
-		rootBeads, err = listByWorkflowRoot(store, rootID)
+		rootBeads, err = beads.DirectMembers(store, rootID)
 		if err != nil {
 			return nil, err
 		}
@@ -481,8 +481,10 @@ func appendRalphRetry(store beads.Store, logicalID string, prevSubject, prevChec
 	// A routeConfig error is intentionally tolerated here: Ralph retry preserves
 	// the prior attempt's already-stamped routes rather than scope-routing, so a
 	// nil cfg degrades to metadata-only instead of mis-routing. Spawn/fanout
-	// (control.go, fanout.go) fail closed on this error because they scope-route
-	// through applyAttemptControlStepRoute.
+	// (control.go, fanout.go) cannot degrade to metadata-only because they
+	// scope-route fresh through applyAttemptControlStepRoute, so they instead
+	// classify a load/parse failure as a transient controller-boundary error and
+	// retry it as pending.
 	cfg, _ := opts.routeConfig()
 	if molecule.IsGraphApplyEnabled() {
 		if applier, ok := beads.GraphApplyFor(store); ok {
@@ -842,7 +844,7 @@ func collectRalphAttemptBeads(store beads.Store, subject beads.Bead) (map[string
 	if rootID == "" {
 		return nil, fmt.Errorf("%s: missing gc.root_bead_id", subject.ID)
 	}
-	all, err := listByWorkflowRoot(store, rootID)
+	all, err := beads.DirectMembers(store, rootID)
 	if err != nil {
 		return nil, err
 	}
@@ -958,7 +960,7 @@ func resolveLogicalBeadID(store beads.Store, bead beads.Bead) string {
 			}
 		}
 		if len(candidates) > 0 {
-			all, listErr := listByWorkflowRoot(store, rootID)
+			all, listErr := beads.DirectMembers(store, rootID)
 			if listErr == nil {
 				for _, ref := range candidates {
 					for _, candidate := range all {

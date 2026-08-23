@@ -27,6 +27,35 @@ type sseFrame struct {
 	comment string
 }
 
+type mutableStreamResolver struct {
+	mu   sync.RWMutex
+	path string
+}
+
+func (r *mutableStreamResolver) CityPath(name string) (string, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if name != "alpha" || r.path == "" {
+		return "", false
+	}
+	return r.path, true
+}
+
+func (r *mutableStreamResolver) Cities() []CityRef {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.path == "" {
+		return nil
+	}
+	return []CityRef{{Name: "alpha", Path: r.path}}
+}
+
+func (r *mutableStreamResolver) setPath(path string) {
+	r.mu.Lock()
+	r.path = path
+	r.mu.Unlock()
+}
+
 // readSSEFrame reads one whole SSE frame (up to the blank-line terminator) from
 // the scanner, returning false at EOF. It coalesces multi-line data per the SSE
 // grammar and captures a leading comment line as a heartbeat marker.
@@ -88,16 +117,23 @@ func startDetailStream(t *testing.T, srv *httptest.Server) (*http.Response, *buf
 }
 
 // TestRunDetailStreamFirstFrame connects and asserts exactly one detail frame
-// arrives immediately, its id equals the tailer's lastSeq, and its data decodes
-// to the run's FormulaRunDetail.
+// arrives immediately, then proves a same-name city path rebind closes the old
+// path-bound stream so the client can reconnect to the replacement tailer.
 func TestRunDetailStreamFirstFrame(t *testing.T) {
+	previousHeartbeat := runDetailStreamHeartbeat
+	runDetailStreamHeartbeat = 15 * time.Millisecond
+	t.Cleanup(func() { runDetailStreamHeartbeat = previousHeartbeat })
+
 	dir := t.TempDir()
 	writeEventLog(
 		t, filepath.Join(dir, ".gc", "events.jsonl"),
 		runDetailRootEvent(),
 		runDetailStepEvent(2, "run1.1", "run1", "preflight", "in_progress"),
 	)
-	p := New(Deps{Resolver: fakeResolver{paths: map[string]string{"alpha": dir}}})
+	reboundDir := t.TempDir()
+	writeEventLog(t, cityEventsPath(reboundDir), runDetailRootEvent())
+	resolver := &mutableStreamResolver{path: dir}
+	p := New(Deps{Resolver: resolver})
 	p.Start(t.Context())
 	defer p.Stop()
 
@@ -130,6 +166,39 @@ func TestRunDetailStreamFirstFrame(t *testing.T) {
 	}
 	if len(detail.Nodes) != 2 {
 		t.Errorf("detail nodes = %d, want 2 (root + preflight)", len(detail.Nodes))
+	}
+
+	oldTailer, ok := p.cityRunTailer("alpha")
+	if !ok {
+		t.Fatal("initial tailer not found")
+	}
+	resolver.setPath(reboundDir)
+
+	readDone := make(chan bool, 1)
+	go func() {
+		readDone <- sc.Scan()
+	}()
+	select {
+	case frameOK := <-readDone:
+		if frameOK {
+			t.Fatal("old path-bound detail stream emitted another frame instead of closing")
+		}
+	case <-time.After(hangBudget):
+		t.Fatal("old path-bound detail stream stayed open after city rebind")
+	}
+	select {
+	case <-oldTailer.doneCh:
+	case <-time.After(hangBudget):
+		t.Fatal("old path-bound tailer did not stop")
+	}
+	p.runTailers.mu.Lock()
+	replacement := p.runTailers.cities["alpha"]
+	p.runTailers.mu.Unlock()
+	if replacement == nil || replacement == oldTailer {
+		t.Fatal("stream ownership check did not install the rebound path tailer")
+	}
+	if got := oldTailer.subscriberCount(); got != 0 {
+		t.Fatalf("old tailer subscriber count = %d, want 0 after stream close", got)
 	}
 }
 

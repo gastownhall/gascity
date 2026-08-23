@@ -23,10 +23,17 @@ const (
 
 // IsNonFatalSiteBindingWarning reports whether warning is migration guidance
 // that should stay non-fatal in strict mode.
+//
+// The non-persistent rig path audit belongs here for a different reason than
+// the migration warnings around it: it is a durability advisory about a binding
+// that is already in place. Making it fatal would refuse to boot the very
+// cities it exists to warn — including one `gc rig add --allow-ephemeral`
+// deliberately created — so the audit's warn-only contract is enforced here.
 func IsNonFatalSiteBindingWarning(warning string) bool {
 	return strings.Contains(warning, legacyRigPathSiteBindingWarningFragment) ||
 		strings.Contains(warning, legacyWorkspaceIdentityWarningFragment) ||
 		strings.Contains(warning, legacyRigPathSurfaceWarningFragment) ||
+		strings.Contains(warning, nonPersistentRigPathWarningFragment) ||
 		strings.HasPrefix(warning, unknownRigSiteBindingWarningPrefix)
 }
 
@@ -75,7 +82,10 @@ func legacyWorkspaceIdentitySurfaceWarnings(cfg *City, source string) []string {
 	}
 	if len(workspaceFields) > 0 {
 		warnings = append(warnings, fmt.Sprintf(
-			"%s: %s (%s); move them to .gc/site.toml (run `gc doctor --fix` if this is the root city.toml; fragments must be updated by hand)",
+			"%s: %s (%s); move them to .gc/site.toml (run `gc doctor --fix` if this is the root city.toml; fragments must be updated by hand). "+
+				"Some installed packs pinned to an older revision may still read these fields directly instead of .gc/site.toml — confirm pack "+
+				"compatibility before running `gc doctor --fix` or removing these fields by hand, or routing/identity that depends on "+
+				"workspace identity may silently stop working",
 			source,
 			legacyWorkspaceIdentityWarningFragment,
 			strings.Join(workspaceFields, ", "),
@@ -240,6 +250,11 @@ func applySiteBindings(fs fsys.FS, cityRoot string, cfg *City, keepLegacy bool) 
 			continue
 		}
 		warnings = append(warnings, unknownRigSiteBindingWarning(name))
+	}
+	if !keepLegacy {
+		// Audit the resolved paths, not the declared ones: this is the first
+		// point where the effective rig path for this machine is known.
+		warnings = append(warnings, nonPersistentRigPathWarnings(fs, cityRoot, cfg.Rigs)...)
 	}
 	sort.Strings(warnings)
 	return warnings, nil

@@ -87,7 +87,7 @@ func testControlDispatcherAgentTOML(dir string) string {
 	b.WriteString("\n[[agent]]\n")
 	b.WriteString("name = \"control-dispatcher\"\n")
 	if dir != "" {
-		b.WriteString(fmt.Sprintf("dir = %q\n", dir))
+		fmt.Fprintf(&b, "dir = %q\n", dir)
 	}
 	b.WriteString("start_command = \"gc convoy control --serve --follow {{.Agent}}\"\n")
 	b.WriteString("prompt_mode = \"none\"\n")

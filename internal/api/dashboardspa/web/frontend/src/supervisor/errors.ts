@@ -11,6 +11,7 @@ export class SupervisorApiError extends Error {
     public readonly status: number | undefined,
     message: string,
     public readonly requestId: string | undefined,
+    public readonly code?: string,
   ) {
     super(message);
   }
@@ -29,13 +30,19 @@ export async function unwrapSupervisorResult<T>(
 
   const { response } = result;
   if (response === undefined) {
-    throw new SupervisorApiError(undefined, messageFromUnknown(result.error), undefined);
+    throw new SupervisorApiError(
+      undefined,
+      messageFromUnknown(result.error),
+      undefined,
+      codeFromUnknown(result.error),
+    );
   }
   if (!response.ok || result.error !== undefined) {
     throw new SupervisorApiError(
       response.status,
       messageFromUnknown(result.error, response.statusText),
       response.headers.get('x-gc-request-id') ?? undefined,
+      codeFromUnknown(result.error),
     );
   }
   const data = result.data;
@@ -51,7 +58,18 @@ export async function unwrapSupervisorResult<T>(
 
 function normalizeThrownSupervisorError(err: unknown): SupervisorApiError {
   if (err instanceof SupervisorApiError) return err;
-  return new SupervisorApiError(undefined, messageFromUnknown(err), undefined);
+  return new SupervisorApiError(
+    undefined,
+    messageFromUnknown(err),
+    undefined,
+    codeFromUnknown(err),
+  );
+}
+
+function codeFromUnknown(value: unknown): string | undefined {
+  if (!isRecord(value)) return undefined;
+  const code = value.code;
+  return typeof code === 'string' && code.trim().length > 0 ? code.trim() : undefined;
 }
 
 function messageFromUnknown(

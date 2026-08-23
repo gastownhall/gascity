@@ -27,6 +27,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/closeorder"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // ConflictError is returned when a graph workflow launch is blocked by one
@@ -350,11 +351,25 @@ func canonicalScopeRef(scopeRef string) string {
 	if scopeRef == "" {
 		return ""
 	}
-	scopeRef = filepath.Clean(scopeRef)
-	if resolved, err := filepath.EvalSymlinks(scopeRef); err == nil && strings.TrimSpace(resolved) != "" {
-		return resolved
+	if isStoreScopeSentinel(scopeRef) {
+		return scopeRef
 	}
-	return scopeRef
+	return pathutil.NormalizePathForCompare(scopeRef)
+}
+
+// isStoreScopeSentinel reports whether ref is a logical store reference such
+// as "rig:alpha" or "city:main" rather than a filesystem path.
+// LockScopeForStoreRef falls through to the literal ref when a rig name cannot
+// be resolved to a path; absolutizing that sentinel would make the derived
+// lock key and lock filename depend on the caller's working directory and
+// silently weaken mutual exclusion. A single-character scheme (a Windows drive
+// letter) is a path, not a sentinel.
+func isStoreScopeSentinel(ref string) bool {
+	i := strings.IndexByte(ref, ':')
+	if i < 2 {
+		return false
+	}
+	return !strings.ContainsAny(ref[:i], `/\`)
 }
 
 // ListWorkflowBeads returns the root and all descendant beads tagged with
@@ -776,12 +791,5 @@ func canonicalCityPath(cityPath string) (string, error) {
 	if cleaned == "" || cleaned == "." {
 		return "", fmt.Errorf("source workflow lock requires city path")
 	}
-	abs, err := filepath.Abs(cleaned)
-	if err != nil {
-		return "", fmt.Errorf("canonicalize city path: %w", err)
-	}
-	if resolved, err := filepath.EvalSymlinks(abs); err == nil && strings.TrimSpace(resolved) != "" {
-		return resolved, nil
-	}
-	return abs, nil
+	return pathutil.NormalizePathForCompare(cleaned), nil
 }

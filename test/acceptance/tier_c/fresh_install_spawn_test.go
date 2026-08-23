@@ -78,6 +78,7 @@ func runFreshInitSlingClaudeWork(t *testing.T, prompt, outputRel string) freshIn
 	// The built-in maintenance dog pool is auto-included; this fixture needs
 	// a generic claude pool target for mol-do-work.
 	configureFreshInitClaudePool(t, c)
+	installFreshInitGitBaseline(t, c.Dir)
 
 	initialSessionBeadsOut, err := bdCmd(testEnvC, c.Dir, "list", "--include-infra", "--label", "gc:session", "--json", "--limit=20")
 	require.NoError(t, err, "bd list session beads before sling: %s", initialSessionBeadsOut)
@@ -225,6 +226,16 @@ func runFreshInitSlingClaudeWork(t *testing.T, prompt, outputRel string) freshIn
 		t.Fatalf("fresh gc init city spawned a claude worker but did not complete routed work within 4m\nwork bead:\n%+v\nsession bead:\n%+v\noutput file (%s):\n%s\nstatus:\n%s\nsessions:\n%s\nsession logs:\n%s\nsession peek:\n%s\nsupervisor logs:\n%s",
 			lastWorkBead, spawnedSessionBead, outputRel, outputDiag, lastStatus, sessionOut, sessionLogsOut, sessionPeekOut, supervisorOut)
 	}
+	workOutcome := metaString(lastWorkBead.Metadata, "gc.work_outcome")
+	workCommit := metaString(lastWorkBead.Metadata, "gc.work_commit")
+	workBranch := metaString(lastWorkBead.Metadata, "gc.work_branch")
+	require.Equal(t, "shipped", workOutcome, "completed fresh-init work should have a shipped work record")
+	require.NotEmpty(t, workCommit, "shipped fresh-init work should record its integrating commit")
+	require.NotEmpty(t, workBranch, "shipped fresh-init work should record its integrating branch")
+	resolvedWorkCommit := requireResolvedGitCommit(t, c.Dir, workCommit)
+	resolvedWorkBranch := requireResolvedGitCommit(t, c.Dir, workBranch)
+	require.Equal(t, resolvedWorkCommit, resolvedWorkBranch, "recorded branch should resolve to the integrating commit")
+	require.Equal(t, outputRel, gitCmd(t, c.Dir, "show", "--format=", "--name-only", resolvedWorkCommit, "--", outputRel), "integrating commit should contain the requested city-root artifact")
 
 	return freshInstallSlingResult{
 		CityDir:            c.Dir,
@@ -234,6 +245,14 @@ func runFreshInitSlingClaudeWork(t *testing.T, prompt, outputRel string) freshIn
 		OutputPath:         outputPath,
 		OutputContents:     strings.TrimSpace(string(outputContents)),
 	}
+}
+
+func requireResolvedGitCommit(t *testing.T, dir, revision string) string {
+	t.Helper()
+	require.False(t, strings.HasPrefix(revision, "-"), "Git commit revision must not be option-like: %q", revision)
+	resolved := gitCmd(t, dir, "rev-parse", "--verify", revision+"^{commit}")
+	require.Regexp(t, `^[0-9a-f]{40}$`, resolved, "resolved Git commit %q", revision)
+	return resolved
 }
 
 func configureFreshInitClaudePool(t *testing.T, c *helpers.City) {
@@ -247,9 +266,25 @@ func configureFreshInitClaudePool(t *testing.T, c *helpers.City) {
 	promptPath := filepath.Join(helpers.FindModuleRoot(), "internal", "bootstrap", "packs", "core", "assets", "prompts", "pool-worker.md")
 	prompt, err := os.ReadFile(promptPath)
 	require.NoError(t, err, "read canonical pool-worker prompt")
-	prompt = append(prompt, []byte("\n## Acceptance Fixture\n\nFor file-writing tasks in this acceptance test, create or update the requested file in the city directory before closing the work bead.\n")...)
+	prompt = append(prompt, []byte("\n## Acceptance Fixture\n\n"+
+		"For file-writing tasks in this acceptance test:\n\n"+
+		"1. Do not change directories; the current working directory is the integration root under test.\n"+
+		"2. Create or update the requested file using its relative path in that current directory.\n"+
+		"3. Verify the file and commit it on the current branch.\n"+
+		"4. Close the work bead as shipped only with the resulting commit and branch metadata.\n")...)
 	err = os.WriteFile(filepath.Join(c.Dir, "agents", "claude", "prompt.template.md"), []byte(prompt), 0o644)
 	require.NoError(t, err, "write claude test prompt")
+}
+
+func installFreshInitGitBaseline(t *testing.T, cityDir string) {
+	t.Helper()
+	gitCmd(t, cityDir, "init", "--initial-branch=main")
+	gitCmd(t, cityDir, "config", "user.name", "Gas City Test")
+	gitCmd(t, cityDir, "config", "user.email", "gc-test@test.local")
+	gitCmd(t, cityDir, "add", ".gitignore", "city.toml", "agents/claude")
+	gitCmd(t, cityDir, "commit", "-m", "test: baseline fresh-init city")
+	head := gitCmd(t, cityDir, "rev-parse", "HEAD")
+	require.Regexp(t, `^[0-9a-f]{40}$`, head, "fresh-init fixture should have a committed Git baseline")
 }
 
 func runGCWithTimeout(timeout time.Duration, env *helpers.Env, dir string, args ...string) (string, error) {

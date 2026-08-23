@@ -400,8 +400,12 @@ Session transcript streaming and query endpoints forward
 provider-native frames with full fidelity. Each response/envelope
 identifies the producing provider via a `provider` field whose
 value is one of the known provider keys (`claude`, `codex`,
-`gemini`, `open-code`, etc.); each frame's JSON is emitted verbatim
-as the provider wrote it, with no GC-side interpretation.
+`gemini`, `opencode`, etc.); each valid frame's JSON is emitted
+verbatim as the provider wrote it, with no GC-side interpretation.
+If a provider wrote malformed JSON string data containing literal
+control characters, `SessionRawMessageFrame` escapes those control
+characters before emission so the API never sends invalid JSON. That
+is a transport-validity repair, not provider-frame interpretation.
 Consumers parse frames using provider-specific logic on their side,
 keyed by the provider identifier on the envelope.
 

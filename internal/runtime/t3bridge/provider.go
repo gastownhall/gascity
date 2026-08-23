@@ -475,8 +475,14 @@ func resolveNativeStateDir() string {
 	return filepath.Join(home, ".t3", "gc-bridge-native")
 }
 
+// ensureNativeStateDir creates the bridge state directory owner-only.
+//
+// It holds session meta sidecars and the cached auth bearer session token that
+// [readCachedBearerSessionToken] reads back. Gas City is often the process that
+// creates the directory, so the mode chosen here is the one the token lands in
+// even though T3 writes the token itself.
 func ensureNativeStateDir() error {
-	return os.MkdirAll(resolveNativeStateDir(), 0o755)
+	return runtime.EnsurePrivateDir(resolveNativeStateDir())
 }
 
 func safeMetaPathComponent(value string) string {
@@ -532,7 +538,7 @@ func writeMetaValue(name, key, value string) error {
 	if err := ensureNativeStateDir(); err != nil {
 		return err
 	}
-	return os.WriteFile(metaFilePath(name, key), []byte(value), 0o644)
+	return runtime.WritePrivateFile(metaFilePath(name, key), []byte(value))
 }
 
 func readMetaValue(name, key string) (string, error) {
@@ -1398,6 +1404,15 @@ func buildThreadEnv(env map[string]string) map[string]string {
 			threadEnv[key] = value
 		}
 	}
+	// Realign BEADS_HOLDER_TOKEN to the surviving GC_INSTANCE_TOKEN. The GC_
+	// allowlist above strips the BEADS_-prefixed holder token that RuntimeEnv
+	// wired in, which would leave the visible T3 thread carrying an instance
+	// token but no matching holder token — the silent actor-only downgrade the
+	// tmux backstop also guards against. Placed before the doltlite branch so it
+	// applies to both return paths.
+	if tok := threadEnv["GC_INSTANCE_TOKEN"]; tok != "" {
+		threadEnv["BEADS_HOLDER_TOKEN"] = tok
+	}
 	if strings.EqualFold(threadEnv["GC_BEADS_BACKEND"], "doltlite") || strings.EqualFold(env["BEADS_BACKEND"], "doltlite") {
 		for _, key := range []string{
 			"GC_DOLT_HOST",
@@ -1974,12 +1989,17 @@ func (p *Provider) IsRunning(name string) bool {
 }
 
 // ListRunning enumerates live GC-managed session names from the T3 snapshot.
+//
+// A soft-unavailable snapshot is a total observation failure, not proof that
+// no sessions are running. Report ErrRuntimeUnavailable so absence-consuming
+// callers defer instead of treating a transient bridge outage (or an
+// initializing session) as an authoritative empty list.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	snapshot, err := p.rpcSnapshot()
 	if err != nil {
 		if isSoftBridgeUnavailable(err) {
 			fmt.Fprintf(os.Stderr, "t3bridge: ListRunning(%s) — soft-unavailable: %v\n", prefix, err)
-			return nil, nil
+			return nil, fmt.Errorf("%w: t3bridge snapshot unavailable: %w", runtime.ErrRuntimeUnavailable, err)
 		}
 		return nil, err
 	}

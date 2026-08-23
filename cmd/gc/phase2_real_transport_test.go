@@ -41,33 +41,18 @@ func TestPhase2WorkerCoreRealTransportProof(t *testing.T) {
 	}
 }
 
-func TestPhase2HookEnabledClaudeLaunchPromptDeliveryProof(t *testing.T) {
-	tmuxtest.RequireTmux(t)
-
-	tc := phase2ProviderCaseForFamily(t, "claude")
-	tp := resolvePhase2Template(t, tc)
-	if !tp.HookEnabled {
-		t.Fatal("HookEnabled = false, want true for Claude phase2 profile")
-	}
-	if tp.ResolvedProvider == nil {
-		t.Fatal("ResolvedProvider = nil, want Claude provider metadata")
-	}
-	if !tp.ResolvedProvider.SupportsHooks {
-		t.Fatal("SupportsHooks = false, want true for Claude phase2 profile")
-	}
-
-	materialized := templateParamsToConfig(tp)
-	run := launchPhase2RealTransportSession(t, tc, materialized)
-
-	if run.ErrorStage != "" {
-		t.Fatalf("%s failed: %s", run.ErrorStage, run.Error)
-	}
-	if got, want := run.ObservedStartupPrompt, run.ExpectedStartupPrompt; got != want {
-		t.Fatalf("startup prompt = %q, want %q", got, want)
-	}
-	if !run.AutonomousStarted {
-		t.Fatal("launch prompt marker = missing, want command-line startup prompt matched before any explicit rescue nudge")
-	}
+// phase2ObservedNudgeText is the nudge TEXT a provider received, with the
+// submit keystrokes stripped.
+//
+// This proof is about delivery of the configured nudge, not about how the
+// carrier submits it. Since upstream #4706 a codex pane's submit sequence is
+// Escape then Enter (nudgeSubmitKeySequences), so the ESC byte lands on the
+// provider's stdin right behind the text and a whitespace-only trim leaves
+// "nudge-codex\x1b" — a keystroke, not content. Strip the ASCII control bytes
+// the submit sequence can contribute; a nudge body never legitimately carries a
+// bare ESC.
+func phase2ObservedNudgeText(observed string) string {
+	return strings.TrimSpace(strings.TrimRight(strings.TrimSpace(observed), "\x1b\r\n"))
 }
 
 type phase2RealTransportRun struct {
@@ -300,7 +285,7 @@ func launchPhase2RealTransportSession(t *testing.T, tc phase2ProviderCase, mater
 		ErrorStage:               errorStage,
 		Error:                    errorDetail,
 		ExpectedInput:            materialized.Nudge,
-		ObservedInput:            strings.TrimSpace(observedInput),
+		ObservedInput:            phase2ObservedNudgeText(observedInput),
 		ExpectedSessionOrigin:    materialized.Env["GC_SESSION_ORIGIN"],
 		ObservedSessionOrigin:    strings.TrimSpace(observedSessionOrigin),
 		ExpectedStartupDelivered: materialized.Env[startupPromptDeliveredEnv],

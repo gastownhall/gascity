@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
@@ -16,7 +17,89 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const docgenSkipAnnotation = "gc.docgen.skip"
+const (
+	docgenSkipAnnotation           = "gc.docgen.skip"
+	productMetricsClassAnnotation  = "gc.productmetrics.class"
+	packCommandClassificationValue = "pack-command"
+)
+
+type commandClassification string
+
+const (
+	unknownCommandClassification commandClassification = "unknown"
+	packCommandClassification    commandClassification = packCommandClassificationValue
+)
+
+// packCommandOutcome is the privacy-minimized lifecycle result shared by
+// eager and lazy pack dispatch. It deliberately cannot carry a binding, pack
+// name, command path, or arguments.
+type packCommandOutcome struct {
+	handled        bool
+	classification commandClassification
+	exitCode       int
+}
+
+// packCommandAction separates private command resolution from execution. The
+// lifecycle may inspect outcome before invoking the closure; only the minimized
+// outcome is eligible to cross into command classification or recording.
+type packCommandAction struct {
+	selected bool
+	outcome  packCommandOutcome
+	invoke   func() int
+}
+
+func unresolvedPackCommandAction() packCommandAction {
+	return packCommandAction{outcome: packCommandOutcome{
+		classification: unknownCommandClassification,
+		exitCode:       1,
+	}}
+}
+
+func resolvedPackCommandAction(invoke func() int) packCommandAction {
+	return packCommandAction{
+		selected: true,
+		outcome: packCommandOutcome{
+			handled:        true,
+			classification: packCommandClassification,
+		},
+		invoke: invoke,
+	}
+}
+
+// selectedUnknownPackCommandAction represents an invocation that selected a
+// discovered namespace but did not resolve to one of its children. selected
+// stays private to dispatch: the minimized lifecycle outcome remains the same
+// unknown outcome used when no pack namespace matched at all.
+func selectedUnknownPackCommandAction(invoke func() int) packCommandAction {
+	return packCommandAction{
+		selected: true,
+		outcome: packCommandOutcome{
+			classification: unknownCommandClassification,
+			exitCode:       1,
+		},
+		invoke: invoke,
+	}
+}
+
+func (action packCommandAction) execute() packCommandOutcome {
+	return action.executeReporting(nil)
+}
+
+func (action packCommandAction) executeReporting(report func(packCommandOutcome)) packCommandOutcome {
+	outcome := action.outcome
+	if report != nil {
+		report(outcome)
+	}
+	if !action.selected || action.invoke == nil {
+		return outcome
+	}
+	outcome.exitCode = action.invoke()
+	return outcome
+}
+
+func (outcome packCommandOutcome) err() error {
+	return exitForCode(outcome.exitCode)
+}
 
 func addDiscoveredCommandsToRoot(root *cobra.Command, entries []config.DiscoveredCommand, cityPath, cityName string, stdout, stderr io.Writer, warnOnCollision bool) {
 	core := coreCommandNames(root)
@@ -43,14 +126,18 @@ func addDiscoveredCommandsToRoot(root *cobra.Command, entries []config.Discovere
 		}
 		nsCmd := newDiscoveredNamespaceCmd(binding, grouped[binding], cityPath, cityName, stdout, stderr)
 		root.AddCommand(nsCmd)
+		configureDiscoveredGroups(nsCmd)
 	}
 }
 
 func newDiscoveredNamespaceCmd(binding string, entries []config.DiscoveredCommand, cityPath, cityName string, stdout, stderr io.Writer) *cobra.Command {
 	ns := &cobra.Command{
-		Use:         binding,
-		Short:       fmt.Sprintf("Commands from the %s import", binding),
-		Annotations: map[string]string{docgenSkipAnnotation: "true"},
+		Use:   binding,
+		Short: fmt.Sprintf("Commands from the %s import", binding),
+		Annotations: map[string]string{
+			docgenSkipAnnotation:          "true",
+			productMetricsClassAnnotation: packCommandClassificationValue,
+		},
 		// NoArgs makes an unknown subcommand ("gc <binding> bogus") fail with
 		// "unknown command" and a non-zero exit, matching native command groups.
 		// A bare invocation ("gc <binding>") passes NoArgs and falls through to
@@ -60,7 +147,6 @@ func newDiscoveredNamespaceCmd(binding string, entries []config.DiscoveredComman
 			return c.Help()
 		},
 	}
-
 	for _, entry := range sortCommandsForTree(entries) {
 		addDiscoveredLeaf(ns, entry, cityPath, cityName, stdout, stderr)
 	}
@@ -81,6 +167,9 @@ func addDiscoveredLeaf(root *cobra.Command, entry config.DiscoveredCommand, city
 		}
 		next := &cobra.Command{
 			Use: word,
+			Annotations: map[string]string{
+				productMetricsClassAnnotation: packCommandClassificationValue,
+			},
 			// Intermediate namespace nodes reject unknown subcommands too, so a
 			// deep "gc <binding> repo bogus" fails non-zero like a native group
 			// rather than printing help and exiting 0. See gastownhall/gascity#3966.
@@ -99,6 +188,7 @@ func addDiscoveredLeaf(root *cobra.Command, entry config.DiscoveredCommand, city
 	}
 
 	annotations := map[string]string{}
+	annotations[productMetricsClassAnnotation] = packCommandClassificationValue
 	if strings.TrimSpace(entry.SourceDir) != "" {
 		annotations[jsonSchemaDirAnnotation] = filepath.Join(entry.SourceDir, "schemas")
 	}
@@ -110,17 +200,68 @@ func addDiscoveredLeaf(root *cobra.Command, entry config.DiscoveredCommand, city
 		Annotations:        annotations,
 		DisableFlagParsing: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if discoveredHelpRequested(args) {
-				return cmd.Help()
-			}
-			code := runDiscoveredCommand(entry, cityPath, cityName, args, stdin(), stdout, stderr)
-			if code != 0 {
-				os.Exit(code)
-			}
-			return nil
+			action := resolveDiscoveredLeafAction(cmd, args, func() int {
+				return runDiscoveredCommand(entry, cityPath, cityName, args, stdin(), stdout, stderr)
+			})
+			return executeProductMetricsPackAction(cmd, action).err()
 		},
 	}
 	parent.AddCommand(leaf)
+}
+
+func configureDiscoveredGroups(cmd *cobra.Command) {
+	if cmd.DisableFlagParsing {
+		return
+	}
+	configureDiscoveredGroup(cmd)
+	for _, child := range cmd.Commands() {
+		configureDiscoveredGroups(child)
+	}
+}
+
+// configureDiscoveredGroup gives namespaces and intermediate nodes the same
+// typed lifecycle behavior as leaves without changing Cobra's canonical help
+// rendering. The help wrapper only owns this exact node; descendant leaves
+// inherit the renderer without creating a second pack action.
+func configureDiscoveredGroup(cmd *cobra.Command) {
+	renderHelp := cmd.HelpFunc()
+	helpAction := func(helpCmd *cobra.Command, args []string) packCommandAction {
+		return resolvedPackCommandAction(func() int {
+			renderHelp(helpCmd, args)
+			return 0
+		})
+	}
+	cmd.SetHelpFunc(func(helpCmd *cobra.Command, args []string) {
+		if helpCmd != cmd {
+			renderHelp(helpCmd, args)
+			return
+		}
+		_ = executeProductMetricsPackAction(helpCmd, helpAction(helpCmd, args))
+	})
+	cmd.RunE = func(runCmd *cobra.Command, args []string) error {
+		return executeProductMetricsPackAction(runCmd, helpAction(runCmd, args)).err()
+	}
+}
+
+func resolvedPackCommandUnknownAction(cmd *cobra.Command, arg string, stderr io.Writer) packCommandAction {
+	return selectedUnknownPackCommandAction(func() int {
+		fmt.Fprintf(stderr, "gc: unknown command %q\n\n", arg) //nolint:errcheck // best-effort stderr
+		printCommandUsage(stderr, cmd)
+		return 1
+	})
+}
+
+func resolvedPackCommandHelpAction(cmd *cobra.Command) packCommandAction {
+	return resolvedPackCommandAction(func() int {
+		return commandExitCode(cmd.Help())
+	})
+}
+
+func resolveDiscoveredLeafAction(cmd *cobra.Command, args []string, invoke func() int) packCommandAction {
+	if discoveredHelpRequested(args) {
+		return resolvedPackCommandHelpAction(cmd)
+	}
+	return resolvedPackCommandAction(invoke)
 }
 
 func findSubcommand(cmd *cobra.Command, name string) *cobra.Command {
@@ -142,6 +283,8 @@ func readDiscoveredHelp(entry config.DiscoveredCommand) string {
 	}
 	return strings.TrimSpace(string(data))
 }
+
+var resolveInvokingExecutable = os.Executable
 
 func discoveredHelpRequested(args []string) bool {
 	for _, arg := range args {
@@ -175,7 +318,18 @@ func runDiscoveredCommand(entry config.DiscoveredCommand, cityPath, cityName str
 		"GC_PACK_NAME="+entry.PackName,
 		"GC_CITY_NAME="+cityName,
 	)
+	// Pack commands are extensions of this exact gc process. Pin recursive
+	// calls to the invoking executable instead of inheriting an ambient GC_BIN
+	// (or falling back to a different `gc` on PATH).
+	exe, err := resolveInvokingExecutable()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc %s %s: resolving invoking gc executable: %v\n", entry.BindingName, strings.Join(entry.Command, " "), err) //nolint:errcheck
+		return 1
+	}
+	cmd.Env = pinInvokingGCBinary(cmd.Env, exe)
 	cmd.Env = mergeCanonicalScopeDoltEnv(cmd.Env, cityPath)
+	cmd.Env = applyCityDoltSettingsEnv(cmd.Env, cityPath)
+	disableProductMetricsForChild(cmd)
 
 	if err := cmd.Run(); err != nil {
 		var exitErr *exec.ExitError
@@ -186,6 +340,14 @@ func runDiscoveredCommand(entry config.DiscoveredCommand, cityPath, cityName str
 		return 1
 	}
 	return 0
+}
+
+func pinInvokingGCBinary(env []string, executable string) []string {
+	env = removeEnvKey(env, "GC_BIN")
+	if executable == "" {
+		return env
+	}
+	return append(env, "GC_BIN="+executable)
 }
 
 // mergeCanonicalScopeDoltEnv projects the city's canonical Dolt
@@ -254,9 +416,72 @@ func mergeCanonicalScopeDoltEnv(environ []string, cityPath string) []string {
 	return out
 }
 
-func tryDiscoveredCommandFallback(args []string, cfg *config.City, cityPath string, stdout, stderr io.Writer) bool {
-	if len(args) == 0 {
-		return false
+// applyCityDoltSettingsEnv projects the city's [dolt] block into a pack
+// command's environment, the same set the provider-lifecycle path projects when
+// it starts the managed server (providerLifecycleProcessEnvFromBase).
+//
+// mergeCanonicalScopeDoltEnv above carries the canonical Dolt *connection* so a
+// directly invoked pack command talks to the same server as its scheduled order.
+// The rest of the [dolt] block was never carried, and for the managed-server
+// commands that is not cosmetic: gc-beads-bd.sh rebuilds dolt-config.yaml purely
+// from GC_DOLT_* and defaults auto-GC ON and read_timeout to 15000 when they are
+// absent. So `gc dolt restart` run from an operator shell wrote a *different*
+// server config than the supervisor writes from the same city.toml — silently
+// reverting a city's configured read/write timeouts and auto-GC state as a side
+// effect of a restart.
+//
+// Resolution is delegated to resolveManagedDoltConfigForStart so precedence
+// matches the start path exactly rather than being reimplemented: city.toml wins
+// wherever it speaks, and ambient GC_DOLT_* fills only the gaps it leaves.
+//
+// Nil/zero fields are left unprojected so an unset city value keeps inheriting
+// whatever the caller's environment already carries; doltlite cities are skipped
+// entirely, mirroring the lifecycle path's clearProjectedDoltEnv.
+func applyCityDoltSettingsEnv(environ []string, cityPath string) []string {
+	if strings.TrimSpace(cityPath) == "" {
+		return environ
+	}
+	if cityUsesDoltliteBeadsBackend(cityPath) {
+		return environ
+	}
+	doltConfig, err := resolveManagedDoltConfigForStart(cityPath, -1)
+	if err != nil {
+		// A city whose config cannot be read is the start path's problem to
+		// report; degrade to the previous behavior rather than blocking the
+		// command here.
+		return environ
+	}
+	set := func(env []string, key, value string) []string {
+		return append(removeEnvKey(env, key), key+"="+value)
+	}
+	if doltConfig.ArchiveLevel != nil {
+		environ = set(environ, "GC_DOLT_ARCHIVE_LEVEL", strconv.Itoa(*doltConfig.ArchiveLevel))
+	}
+	if doltConfig.AutoGCEnabled != nil {
+		environ = set(environ, "GC_DOLT_AUTO_GC_ENABLED", strconv.FormatBool(*doltConfig.AutoGCEnabled))
+	}
+	if doltConfig.MaxConnections > 0 {
+		environ = set(environ, "GC_DOLT_MAX_CONNECTIONS", strconv.Itoa(doltConfig.MaxConnections))
+	}
+	if doltConfig.ReadTimeoutMillis > 0 {
+		environ = set(environ, "GC_DOLT_READ_TIMEOUT_MILLIS", strconv.Itoa(doltConfig.ReadTimeoutMillis))
+	}
+	if doltConfig.WriteTimeoutMillis > 0 {
+		environ = set(environ, "GC_DOLT_WRITE_TIMEOUT_MILLIS", strconv.Itoa(doltConfig.WriteTimeoutMillis))
+	}
+	if doltConfig.WaitTimeoutSeconds > 0 {
+		environ = set(environ, "GC_DOLT_WAIT_TIMEOUT", strconv.Itoa(doltConfig.WaitTimeoutSeconds))
+	}
+	if strings.TrimSpace(doltConfig.DoltLockReleaseTimeout) != "" {
+		ms := doltConfig.DoltLockReleaseTimeoutDuration().Milliseconds()
+		environ = set(environ, "GC_DOLT_LOCK_RELEASE_TIMEOUT_MS", strconv.FormatInt(ms, 10))
+	}
+	return environ
+}
+
+func resolveDiscoveredCommandFallback(args []string, cfg *config.City, cityPath string, stdout, stderr io.Writer) packCommandAction {
+	if len(args) == 0 || cfg == nil {
+		return unresolvedPackCommandAction()
 	}
 
 	binding := args[0]
@@ -267,12 +492,14 @@ func tryDiscoveredCommandFallback(args []string, cfg *config.City, cityPath stri
 		}
 	}
 	if len(matching) == 0 {
-		return false
+		return unresolvedPackCommandAction()
 	}
 
 	if len(args) == 1 {
-		printDiscoveredCommandList(stdout, binding, nil, matching)
-		return true
+		return resolvedPackCommandAction(func() int {
+			printDiscoveredCommandList(stdout, binding, nil, matching)
+			return 0
+		})
 	}
 
 	cityName := loadedCityName(cfg, cityPath)
@@ -282,13 +509,17 @@ func tryDiscoveredCommandFallback(args []string, cfg *config.City, cityPath stri
 	if prefix, ok := discoveredHelpPrefix(args[1:]); ok {
 		for _, entry := range matching {
 			if slices.Equal(prefix, entry.Command) {
-				printDiscoveredCommandHelp(stdout, entry)
-				return true
+				return resolvedPackCommandAction(func() int {
+					printDiscoveredCommandHelp(stdout, entry)
+					return 0
+				})
 			}
 		}
 		if discoveredCommandPrefixExists(matching, prefix) {
-			printDiscoveredCommandList(stdout, binding, prefix, matching)
-			return true
+			return resolvedPackCommandAction(func() int {
+				printDiscoveredCommandList(stdout, binding, prefix, matching)
+				return 0
+			})
 		}
 	}
 	for _, entry := range matching {
@@ -296,20 +527,59 @@ func tryDiscoveredCommandFallback(args []string, cfg *config.City, cityPath stri
 			continue
 		}
 		if slices.Equal(args[1:1+len(entry.Command)], entry.Command) {
-			commandArgs := args[1+len(entry.Command):]
+			commandArgs := slices.Clone(args[1+len(entry.Command):])
 			if discoveredHelpRequested(commandArgs) {
-				printDiscoveredCommandHelp(stdout, entry)
-				return true
+				return resolvedPackCommandAction(func() int {
+					printDiscoveredCommandHelp(stdout, entry)
+					return 0
+				})
 			}
-			code := runDiscoveredCommand(entry, cityPath, cityName, commandArgs, stdin(), stdout, stderr)
-			if code != 0 {
-				os.Exit(code)
-			}
-			return true
+			return resolvedPackCommandAction(func() int {
+				return runDiscoveredCommand(entry, cityPath, cityName, commandArgs, stdin(), stdout, stderr)
+			})
 		}
 	}
 
-	return false
+	knownPrefix := make([]string, 0, len(args)-1)
+	for _, word := range args[1:] {
+		candidate := append(slices.Clone(knownPrefix), word)
+		if !discoveredCommandPrefixExists(matching, candidate) {
+			return resolvedDiscoveredCommandUnknownAction(binding, knownPrefix, word, matching, cityPath, cityName, stdout, stderr)
+		}
+		knownPrefix = candidate
+	}
+	if len(knownPrefix) > 0 {
+		prefix := slices.Clone(knownPrefix)
+		return resolvedPackCommandAction(func() int {
+			printDiscoveredCommandList(stdout, binding, prefix, matching)
+			return 0
+		})
+	}
+
+	return unresolvedPackCommandAction()
+}
+
+func resolvedDiscoveredCommandUnknownAction(binding string, prefix []string, unknown string, entries []config.DiscoveredCommand, cityPath, cityName string, stdout, stderr io.Writer) packCommandAction {
+	root := &cobra.Command{Use: "gc"}
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+	namespace := newDiscoveredNamespaceCmd(binding, entries, cityPath, cityName, stdout, stderr)
+	root.AddCommand(namespace)
+	configureDiscoveredGroups(namespace)
+
+	target := namespace
+	for _, word := range prefix {
+		next := findSubcommand(target, word)
+		if next == nil {
+			break
+		}
+		target = next
+	}
+	return resolvedPackCommandUnknownAction(target, unknown, stderr)
+}
+
+func tryDiscoveredCommandFallback(args []string, cfg *config.City, cityPath string, stdout, stderr io.Writer) packCommandOutcome {
+	return resolveDiscoveredCommandFallback(args, cfg, cityPath, stdout, stderr).execute()
 }
 
 func discoveredHelpPrefix(args []string) ([]string, bool) {

@@ -64,16 +64,20 @@ func EnsureBuiltinRuntimeAssets(cityPath string, warningWriter io.Writer) error 
 		pruneRetiredSystemPacks(cityPath, warningWriter)
 		return nil
 	}
-	if state.ready && requiredBuiltinSourcesUsable(cityPath) && lockedBundledImportsUsable(cityPath) {
+	// One verifier for the whole pass: the ready fast path and the repair path
+	// both validate the shared synthetic cache directory, and within a single
+	// pass that is the same question asked repeatedly.
+	verifier := newSyntheticCacheVerifier()
+	if state.ready && requiredBuiltinSourcesUsable(cityPath, verifier) && lockedBundledImportsUsable(cityPath, verifier) {
 		return nil
 	}
 	state.ready = false
 
 	var problems []error
-	if err := ensureBundledLockedRemoteImportsCached(cityPath); err != nil {
+	if err := ensureBundledLockedRemoteImportsCached(cityPath, verifier); err != nil {
 		problems = append(problems, err)
 	}
-	if err := ensureRequiredBuiltinSourcesCached(cityPath); err != nil {
+	if err := ensureRequiredBuiltinSourcesCached(cityPath, verifier); err != nil {
 		problems = append(problems, err)
 	}
 	if err := ensureGcBeadsBdShim(cityPath); err != nil {
@@ -82,7 +86,9 @@ func EnsureBuiltinRuntimeAssets(cityPath string, warningWriter io.Writer) error 
 	pruneRetiredSystemPacks(cityPath, warningWriter)
 
 	if len(problems) > 0 {
-		if !requiredBuiltinSourcesUsable(cityPath) {
+		// A fresh verifier: the repairs above just rewrote caches, so this
+		// last-resort check must not reuse anything decided before them.
+		if !requiredBuiltinSourcesUsable(cityPath, newSyntheticCacheVerifier()) {
 			state.lastWarning = ""
 			return fmt.Errorf("preparing builtin pack caches: %w", problems[0])
 		}
@@ -96,6 +102,42 @@ func EnsureBuiltinRuntimeAssets(cityPath string, warningWriter io.Writer) error 
 	state.ready = true
 	state.lastWarning = ""
 	return nil
+}
+
+// builtinRuntimeReadied reports whether EnsureBuiltinRuntimeAssets has
+// completed a fully successful readiness pass for cityPath in this process.
+// A pass that ended degraded leaves this false, so the next caller runs a
+// real one.
+func builtinRuntimeReadied(cityPath string) bool {
+	stateAny, ok := builtinRuntimeReadyCache.Load(normalizePathForCompare(cityPath))
+	if !ok {
+		return false
+	}
+	state := stateAny.(*builtinRuntimeState)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return state.ready
+}
+
+// ensureBuiltinRuntimeAssetsForSuppliedConfig runs the builtin readiness pass
+// on behalf of a caller that supplied an already-loaded city config, so that
+// reusing a config never silently skips the self-heal a config load performs.
+//
+// When this process has already completed a readiness pass for the city, the
+// supplied config came from that same pass and re-running it would repeat the
+// cache walk the reuse exists to avoid — the walk, not the parse, is what a
+// config load costs. Any other config gets a full pass.
+//
+// Scoped to short-lived invocations: unlike EnsureBuiltinRuntimeAssets, the
+// early return skips the per-call requiredBuiltinSourcesUsable /
+// lockedBundledImportsUsable revalidation, and nothing resets ready to false.
+// A long-lived process (supervisor, API server) must call
+// EnsureBuiltinRuntimeAssets directly rather than adopt a WithConfig variant.
+func ensureBuiltinRuntimeAssetsForSuppliedConfig(cityPath string, warningWriter io.Writer) error {
+	if builtinRuntimeReadied(cityPath) {
+		return nil
+	}
+	return EnsureBuiltinRuntimeAssets(cityPath, warningWriter)
 }
 
 // requiredBuiltinSources returns the bundled sources every city with this
@@ -200,14 +242,21 @@ func builtinImportsForNames(names []string) (map[string]config.Import, []string)
 // required bundled sources at the canonical pin, independent of packs.lock,
 // so the stable shim target and pre-migration cities always have the
 // current binary's content available.
-func ensureRequiredBuiltinSourcesCached(cityPath string) error {
+// The verifier scopes cache validation to the calling readiness pass; every
+// required source of a repository shares one synthetic cache directory, so
+// without it the same directory is walked once per source.
+func ensureRequiredBuiltinSourcesCached(cityPath string, verifier *syntheticCacheVerifier) error {
 	commit := bundledPackImportCommit()
 	for name, source := range requiredBuiltinSources(cityPath) {
 		cachePath, err := packman.RepoCachePath(source, commit)
 		if err != nil {
 			return fmt.Errorf("resolving cache path for bundled %s pack: %w", name, err)
 		}
-		if builtinpacks.ValidateSyntheticRepo(cachePath, commit) == nil {
+		repository, known := builtinpacks.RepositoryForSource(source)
+		if !known {
+			return fmt.Errorf("resolving bundled repository for %s pack source %q", name, source)
+		}
+		if verifier.Valid(cachePath, repository, commit) {
 			continue
 		}
 		if _, err := packman.EnsureRepoInCache(cityPath, source, commit); err != nil {
@@ -217,14 +266,15 @@ func ensureRequiredBuiltinSourcesCached(cityPath string) error {
 	return nil
 }
 
-func requiredBuiltinSourcesUsable(cityPath string) bool {
+func requiredBuiltinSourcesUsable(cityPath string, verifier *syntheticCacheVerifier) bool {
 	commit := bundledPackImportCommit()
 	for _, source := range requiredBuiltinSources(cityPath) {
 		cachePath, err := packman.RepoCachePath(source, commit)
 		if err != nil {
 			return false
 		}
-		if builtinpacks.ValidateSyntheticRepo(cachePath, commit) != nil {
+		repository, known := builtinpacks.RepositoryForSource(source)
+		if !known || !verifier.Valid(cachePath, repository, commit) {
 			return false
 		}
 	}

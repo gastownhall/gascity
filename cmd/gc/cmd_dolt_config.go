@@ -102,6 +102,10 @@ func newDoltConfigCmd(_ io.Writer, stderr io.Writer) *cobra.Command {
 				fmt.Fprintf(stderr, "gc dolt-config normalize-scope: %v\n", err) //nolint:errcheck
 				return errExit
 			}
+			if err := syncManagedDoltPortMirrors(cityPath); err != nil {
+				fmt.Fprintf(stderr, "gc dolt-config normalize-scope: %v\n", err) //nolint:errcheck
+				return errExit
+			}
 			return nil
 		},
 	}
@@ -113,6 +117,40 @@ func newDoltConfigCmd(_ io.Writer, stderr io.Writer) *cobra.Command {
 	_ = normalizeScope.MarkFlagRequired("dir")
 	_ = normalizeScope.MarkFlagRequired("prefix")
 	cmd.AddCommand(normalizeScope)
+
+	var reindexCheck bool
+	reindex := &cobra.Command{
+		Use:    "doltlite-reindex",
+		Short:  "Rebuild a DoltLite store's SQLite secondary indexes after flatten/gc",
+		Hidden: true,
+		Args:   cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			// --check reports whether this build can reindex in process, without
+			// touching the store. The maintenance path probes this before
+			// running the stale-index-producing flatten/gc so it never creates
+			// index corruption a non-native build cannot heal (ga-7hei).
+			if reindexCheck {
+				if !doltliteReindexSupported() {
+					fmt.Fprintln(stderr, "gc dolt-config doltlite-reindex: in-process reindex unavailable in this build (needs -tags gascity_native_beads)") //nolint:errcheck
+					return errExit
+				}
+				return nil
+			}
+			if scopeDir == "" {
+				fmt.Fprintln(stderr, "gc dolt-config doltlite-reindex: missing --dir") //nolint:errcheck
+				return errExit
+			}
+			if err := runDoltliteReindex(scopeDir); err != nil {
+				fmt.Fprintf(stderr, "gc dolt-config doltlite-reindex: %v\n", err) //nolint:errcheck
+				return errExit
+			}
+			return nil
+		},
+	}
+	reindex.Flags().StringVar(&scopeDir, "dir", "", "DoltLite store root to reindex")
+	reindex.Flags().BoolVar(&reindexCheck, "check", false, "report whether this build can reindex in process, then exit without reindexing")
+	_ = reindex.MarkFlagRequired("dir")
+	cmd.AddCommand(reindex)
 	return cmd
 }
 
@@ -141,7 +179,7 @@ func writeManagedDoltConfigFile(path, host, port, dataDir, logLevel string, dolt
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
-	waitTimeout := managedDoltWaitTimeout()
+	waitTimeout := managedDoltWaitTimeoutForConfig(doltConfig, os.Getenv)
 	waitTimeoutLine := ""
 	if waitTimeout > 0 {
 		waitTimeoutLine = fmt.Sprintf("  wait_timeout: %q\n", strconv.Itoa(waitTimeout))
@@ -201,15 +239,33 @@ system_variables:
 	return nil
 }
 
-func managedDoltWaitTimeout() int {
-	const defaultWaitTimeout = 30
-	raw := os.Getenv("GC_DOLT_WAIT_TIMEOUT")
+// managedDoltWaitTimeoutForConfig resolves the managed wait_timeout with
+// city.toml winning over the ambient GC_DOLT_WAIT_TIMEOUT, matching how every
+// other [dolt] field resolves. The env path is kept as the fallback because it
+// carries an escape hatch city.toml cannot express: a negative value suppresses
+// the wait_timeout line entirely, whereas an omitted or zero config field means
+// "use the managed default".
+func managedDoltWaitTimeoutForConfig(doltConfig config.DoltConfig, getenv func(string) string) int {
+	if doltConfig.WaitTimeoutSeconds > 0 {
+		return doltConfig.WaitTimeoutSeconds
+	}
+	return managedDoltWaitTimeoutFromEnv(getenv)
+}
+
+// managedDoltWaitTimeoutFromEnv takes its lookup as a parameter so the
+// resolution order can be tested without mutating the process environment,
+// which the cmd/gc environment debt ratchet forbids growing (see TESTING.md).
+func managedDoltWaitTimeoutFromEnv(getenv func(string) string) int {
+	if getenv == nil {
+		return config.DefaultDoltWaitTimeoutSeconds
+	}
+	raw := getenv("GC_DOLT_WAIT_TIMEOUT")
 	if raw == "" {
-		return defaultWaitTimeout
+		return config.DefaultDoltWaitTimeoutSeconds
 	}
 	n, err := strconv.Atoi(raw)
 	if err != nil {
-		return defaultWaitTimeout
+		return config.DefaultDoltWaitTimeoutSeconds
 	}
 	if n < 0 {
 		return 0

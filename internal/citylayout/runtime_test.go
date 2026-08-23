@@ -235,6 +235,12 @@ func TestSessionNameLocksDir(t *testing.T) {
 	}
 }
 
+func TestGateSlotsDir(t *testing.T) {
+	if got := GateSlotsDir("/city"); got != "/city/.gc/gate-slots" {
+		t.Fatalf("GateSlotsDir = %q, want %q", got, "/city/.gc/gate-slots")
+	}
+}
+
 func TestPublicServiceMountPath(t *testing.T) {
 	tests := []struct {
 		name        string

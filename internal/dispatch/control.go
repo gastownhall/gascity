@@ -334,7 +334,40 @@ func syncControlEpochToAttempt(store beads.Store, control, attempt beads.Bead) e
 	if err != nil || attemptNum <= current {
 		return nil
 	}
-	return store.SetMetadata(control.ID, beadmeta.ControlEpochMetadataKey, strconv.Itoa(attemptNum))
+	writer, _, resolveErr := beads.ResolveConditionalWriter(store)
+	if resolveErr != nil {
+		return fmt.Errorf("syncing control epoch on %s: %w", control.ID, resolveErr)
+	}
+	if writer == nil {
+		return store.SetMetadata(control.ID, beadmeta.ControlEpochMetadataKey, strconv.Itoa(attemptNum))
+	}
+	// Bounded to one re-issue from a fresh read: losing the CAS is benign
+	// (another processor advanced the epoch first), but a conflict that keeps
+	// recurring with a still-stale epoch is cross-key revision interference
+	// and must surface as transient rather than loop (level-triggered passes
+	// re-enter).
+	const syncAttempts = 2
+	expected := current
+	for attempt := 1; attempt <= syncAttempts; attempt++ {
+		ok, casErr := writer.CompareAndSetMetadataKey(control.ID, beadmeta.ControlEpochMetadataKey,
+			strconv.Itoa(expected), strconv.Itoa(attemptNum))
+		if ok {
+			return nil
+		}
+		if casErr != nil && !beads.IsPreconditionFailed(casErr) {
+			return fmt.Errorf("syncing control epoch on %s: %w", control.ID, casErr)
+		}
+		refreshed, getErr := store.Get(control.ID)
+		if getErr != nil {
+			return getErr
+		}
+		refreshedEpoch, err := strconv.Atoi(strings.TrimSpace(refreshed.Metadata[beadmeta.ControlEpochMetadataKey]))
+		if err != nil || refreshedEpoch >= attemptNum {
+			return nil
+		}
+		expected = refreshedEpoch
+	}
+	return fmt.Errorf("syncing control epoch on %s: conditional advance kept conflicting below attempt %d", control.ID, attemptNum)
 }
 
 func markControllerSpawnError(store beads.Store, beadID string, err error, opts ProcessOptions) bool {
@@ -371,6 +404,11 @@ func clearControllerSpawnErrorMetadata(metadata map[string]string) {
 	metadata[beadmeta.ControllerErrorMetadataKey] = ""
 	metadata[beadmeta.ControllerErrorClassMetadataKey] = ""
 	metadata[beadmeta.ControllerRetryableMetadataKey] = ""
+	// The Tier-B budget anchor rides with the error it bounds: a bead that
+	// reached a clean disposition must not carry an expired deadline into a
+	// later life (re-mint, reopen) and quarantine itself on its first refusal.
+	metadata[beadmeta.ControllerRetryFirstSeenMetadataKey] = ""
+	metadata[beadmeta.ControllerRetryCountMetadataKey] = ""
 }
 
 func isPartialAttemptAttachError(err error) bool {
@@ -387,52 +425,160 @@ func markTransientControllerBoundaryError(err error) error {
 	return fmt.Errorf("%w: %w", errTransientControllerBoundary, err)
 }
 
-// IsTransientControllerError is the dispatch/store transient classifier for
+// ControllerErrorTier classifies a control-dispatch failure by what the bead
+// store DID, which is the only distinction that decides whether retrying may be
+// unbounded.
+//
+// Before this split, "transient" answered one question — retry? — and every yes
+// meant retry forever. That is how a control bead and the bead it must close
+// blocked each other for three days across six cities while every health metric
+// stayed green: the store was answering, and answering "no", 353 times an hour.
+//
+// The tier boundary is also exactly the line where a persisted retry budget is
+// implementable. A store that never answered cannot be asked to record how long
+// we have been asking it, so Tier A must stay unbounded and stateless. A store
+// that answered and refused is by construction available to hold the deadline.
+type ControllerErrorTier int
+
+const (
+	// TierUndeclared is the zero value and is never a valid classification of a
+	// real error. It exists so that an entry appended to transientNeedles
+	// without a tier is an INVALID state rather than a silent default into the
+	// unbounded tier: the classifier refuses to match such an entry, and
+	// TestEveryTransientNeedleDeclaresATier fails the build. Adding a needle is
+	// how this class of outage gets reintroduced, so adding one must not be
+	// possible without answering "bounded or not?".
+	TierUndeclared ControllerErrorTier = iota
+	// TierNone means the error is not transient at all: the caller takes its
+	// terminal path (quarantine).
+	TierNone
+	// TierAvailability is Tier A: the store never answered — timeouts, refused
+	// or reset connections, lock contention, a tripped Dolt breaker. These
+	// self-clear when the outage does, so retry is unbounded, exactly as it was
+	// before the tier split.
+	TierAvailability
+	// TierSemantic is Tier B: the store answered and REFUSED on the current
+	// graph state. Repeating the question cannot change the answer, so a
+	// refusal that outlives its budget is a graph bug, not weather, and the
+	// caller escalates it loudly instead of retrying forever.
+	TierSemantic
+)
+
+// String renders the tier for trace lines and bead metadata.
+func (t ControllerErrorTier) String() string {
+	switch t {
+	case TierNone:
+		return "none"
+	case TierAvailability:
+		return "availability"
+	case TierSemantic:
+		return "semantic"
+	default:
+		return "undeclared"
+	}
+}
+
+// transientNeedle pairs a lowercased error-message substring with the tier it
+// classifies into. The tier is a required field in practice: its zero value
+// (TierUndeclared) is rejected by both the classifier and
+// TestEveryTransientNeedleDeclaresATier.
+type transientNeedle struct {
+	needle string
+	tier   ControllerErrorTier
+}
+
+// transientNeedles is the string fallback for wrapped Dolt/MySQL/sqlite/bd
+// messages that arrive through the bead store CLI boundary with no typed error
+// to match on.
+var transientNeedles = []transientNeedle{
+	{needle: "i/o timeout", tier: TierAvailability},
+	{needle: "context deadline exceeded", tier: TierAvailability},
+	{needle: "invalid connection", tier: TierAvailability},
+	{needle: "connection refused", tier: TierAvailability},
+	{needle: "connection reset by peer", tier: TierAvailability},
+	{needle: "broken pipe", tier: TierAvailability},
+	{needle: "bad connection", tier: TierAvailability},
+	{needle: "server has gone away", tier: TierAvailability},
+	{needle: "too many connections", tier: TierAvailability},
+	{needle: "lock wait timeout", tier: TierAvailability},
+	{needle: "deadlock found", tier: TierAvailability},
+	{needle: "database is locked", tier: TierAvailability},
+	{needle: "database table is locked", tier: TierAvailability},
+	{needle: "sqlite_busy", tier: TierAvailability},
+	// The store answered and refused: the target's blocker set is non-empty
+	// right now. #5020 classified this as transient on the premise that "a
+	// workflow root may remain blocked briefly while sibling work closes" —
+	// but in all seven pairs of its own motivating evidence
+	// (gastownhall/gascity#4975) the bead being quarantined IS the bead named
+	// as the blocker, so no sibling was ever going to close it. The premise
+	// holds for a genuine sibling race, which is why the classification stays;
+	// what it must never imply again is UNBOUNDED, which is why it is Tier B.
+	{needle: "cannot close blocked issue", tier: TierSemantic},
+	// bd's client-side Dolt breaker fails fast while the server is down.
+	// These errors are recoverable, so a long-running control dispatcher
+	// must keep sweeping rather than exit permanently during the outage.
+	{needle: "dolt circuit breaker is open", tier: TierAvailability},
+	{needle: "server appears down, failing fast", tier: TierAvailability},
+	{needle: "dolt server unreachable", tier: TierAvailability},
+}
+
+// ClassifyControllerError is the dispatch/store transient classifier for
 // control spawn and spawn-state update boundaries. Prefer typed checks when
 // callers expose them; the string fallback covers wrapped Dolt/MySQL/tmux
 // messages that arrive through the bead store CLI boundary.
-func IsTransientControllerError(err error) bool {
+//
+// When an error matches needles from both tiers, Tier A wins: a store that is
+// also unreachable must never have a semantic budget burned against it.
+func ClassifyControllerError(err error) ControllerErrorTier {
 	if err == nil {
-		return false
+		return TierNone
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return true
+		return TierAvailability
 	}
 	if errors.Is(err, errTransientControllerBoundary) {
-		return true
+		return TierAvailability
+	}
+	// Conditional-write contention and capability loss are level-triggered
+	// re-entry classes, never terminal dispositions: exhaustion means the
+	// store could not get a clean shot (re-enter and retry), and a runtime
+	// unsupported latch means the next resolve degrades (auto) or refuses
+	// (require) — neither is a broken control. A require refusal
+	// (ConditionalWritesRequiredError) is deliberately NOT here: it is a
+	// persistent policy refusal and stays hard/fail-closed.
+	if beads.IsCASRetriesExhausted(err) || beads.IsConditionalWriteUnsupported(err) {
+		return TierAvailability
 	}
 	msg := strings.ToLower(err.Error())
 	if isTransientWorkQueryFailure(msg) {
-		return true
+		return TierAvailability
 	}
-	transientNeedles := []string{
-		"i/o timeout",
-		"context deadline exceeded",
-		"invalid connection",
-		"connection refused",
-		"connection reset by peer",
-		"broken pipe",
-		"bad connection",
-		"server has gone away",
-		"too many connections",
-		"lock wait timeout",
-		"deadlock found",
-		"database is locked",
-		"database table is locked",
-		"sqlite_busy",
-		// bd's client-side Dolt breaker fails fast while the server is down.
-		// These errors are recoverable, so a long-running control dispatcher
-		// must keep sweeping rather than exit permanently during the outage.
-		"dolt circuit breaker is open",
-		"server appears down, failing fast",
-		"dolt server unreachable",
-	}
-	for _, needle := range transientNeedles {
-		if strings.Contains(msg, needle) {
-			return true
+	tier := TierNone
+	for _, entry := range transientNeedles {
+		// An undeclared tier fails closed: the needle stops matching, so the
+		// error escalates on its own instead of inheriting unbounded retry.
+		if entry.tier == TierUndeclared || !strings.Contains(msg, entry.needle) {
+			continue
 		}
+		if entry.tier == TierAvailability {
+			return TierAvailability
+		}
+		tier = entry.tier
 	}
-	return false
+	return tier
+}
+
+// IsTransientControllerError reports whether the controller should retry rather
+// than quarantine. It is tier-blind on purpose: callers that only need "retry?"
+// keep using it, and callers that must bound the retry ask
+// ClassifyControllerError for the tier.
+func IsTransientControllerError(err error) bool {
+	switch ClassifyControllerError(err) {
+	case TierAvailability, TierSemantic:
+		return true
+	default:
+		return false
+	}
 }
 
 func isTransientWorkQueryFailure(msg string) bool {
@@ -513,7 +659,14 @@ func spawnNextAttempt(ctx context.Context, store beads.Store, control beads.Bead
 	executionRigContext := strings.TrimSpace(control.Metadata[beadmeta.ExecutionRigContextMetadataKey])
 	routeCfg, err := opts.routeConfig()
 	if err != nil {
-		return fmt.Errorf("loading attempt route config: %w", err)
+		// A route-config load/parse failure is environmental and transient (a
+		// momentary city.toml read or include-resolution blip), not a permanent
+		// defect in this molecule. Classify it as a transient controller-boundary
+		// error so the spawn boundary retries it as pending instead of
+		// quarantining an in-flight molecule. Terminal fail-closed stays reserved
+		// for a config that loads successfully but lacks the required
+		// store-scoped dispatcher (controlDispatcherTargetForExecutionTarget).
+		return markTransientControllerBoundaryError(fmt.Errorf("loading attempt route config: %w", err))
 	}
 	rootStoreRef := strings.TrimSpace(control.Metadata[beadmeta.RootStoreRefMetadataKey])
 	for i := range recipe.Steps {
@@ -568,6 +721,16 @@ func spawnNextAttempt(ctx context.Context, store beads.Store, control beads.Bead
 		ExpectedEpoch:  epoch,
 	})
 	if err != nil {
+		// An epoch conflict is a ROUTINE convergence signal under the CAS-last
+		// fence: another processor won this attempt, and the next
+		// level-triggered pass re-enters and converges on the winner through
+		// findExistingAttach. It must classify transient — the partial-attach
+		// hard path below exists for genuinely broken (crash-partial)
+		// attempts, and routing a normal fence loser there terminally closes
+		// the shared control, making the promised convergence impossible.
+		if errors.Is(err, molecule.ErrEpochConflict) {
+			return markTransientControllerBoundaryError(fmt.Errorf("attach epoch conflict on %s attempt %d (fence lost; converging next pass): %w", control.ID, attemptNum, err))
+		}
 		failedRootID, lookupErr := failedAttemptAttachRootID(store, control, attemptNum)
 		if lookupErr != nil {
 			return &failedAttemptAttachLookupError{lookupErr: lookupErr, err: err}
@@ -702,13 +865,14 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 		rootMeta[beadmeta.RalphStepIDMetadataKey] = stepID
 	}
 	rootStep := formula.RecipeStep{
-		ID:       attemptPrefix,
-		Title:    step.Title,
-		Type:     step.Type,
-		IsRoot:   true,
-		Labels:   append([]string{}, step.Labels...),
-		Assignee: step.Assignee,
-		Metadata: rootMeta,
+		ID:          attemptPrefix,
+		Title:       step.Title,
+		Description: step.Description,
+		Type:        step.Type,
+		IsRoot:      true,
+		Labels:      append([]string{}, step.Labels...),
+		Assignee:    step.Assignee,
+		Metadata:    rootMeta,
 	}
 	if step.Type == "" {
 		rootStep.Type = "task"
@@ -948,7 +1112,8 @@ func buildAttemptRecipeFanoutControl(source formula.RecipeStep, onComplete *form
 // scoped steps of a re-spawned attempt recipe, mirroring the compile-time
 // shape injected by formula.ApplyGraphControls: each scope-check blocks on
 // its subject step, and deps that waited on the subject are rewritten to
-// wait on the scope-check instead.
+// wait on the scope-check instead — except the one edge that would leave a
+// node blocked by the control that closes it (formula.RewriteRecipeDepsToControls).
 func applyAttemptRecipeScopeChecks(recipe *formula.Recipe) {
 	if recipe == nil || len(recipe.Steps) == 0 {
 		return
@@ -1000,11 +1165,7 @@ func applyAttemptRecipeScopeChecks(recipe *formula.Recipe) {
 		return
 	}
 
-	for i := range recipe.Deps {
-		if replacement, ok := replacements[recipe.Deps[i].DependsOnID]; ok {
-			recipe.Deps[i].DependsOnID = replacement
-		}
-	}
+	formula.RewriteRecipeDepsToControls(recipe.Deps, recipe.Steps, controls, replacements)
 	recipe.Steps = append(recipe.Steps, controls...)
 	recipe.Deps = append(recipe.Deps, controlDeps...)
 }
@@ -1259,7 +1420,7 @@ func findSpecBead(store beads.Store, control beads.Bead) (beads.Bead, error) {
 	}
 	stepRef := control.Metadata[beadmeta.StepRefMetadataKey]
 
-	all, err := listByWorkflowRoot(store, rootID)
+	all, err := beads.DirectMembers(store, rootID)
 	if err != nil {
 		return beads.Bead{}, err
 	}
@@ -1339,7 +1500,7 @@ func closeGeneratedSpecBeadsForAttempt(store beads.Store, control, attempt beads
 	if rootID == "" {
 		rootID = control.ID
 	}
-	all, err := listByWorkflowRoot(store, rootID)
+	all, err := beads.DirectMembers(store, rootID)
 	if err != nil {
 		return err
 	}
@@ -1371,7 +1532,7 @@ func closeSpecBeadsByRefs(store beads.Store, rootID string, refs []string) error
 	if len(wanted) == 0 {
 		return nil
 	}
-	all, err := listByWorkflowRoot(store, rootID)
+	all, err := beads.DirectMembers(store, rootID)
 	if err != nil {
 		return err
 	}
@@ -1415,7 +1576,7 @@ func findLatestAttempt(store beads.Store, control beads.Bead) (beads.Bead, error
 		rootID = control.ID
 	}
 
-	all, err := listByWorkflowRoot(store, rootID)
+	all, err := beads.DirectMembers(store, rootID)
 	if err == nil {
 		latest := latestAttemptFromCandidates(control, all)
 		if latest.ID != "" {
@@ -1712,6 +1873,6 @@ func updateMetadataAndClose(store beads.Store, beadID string, metadata map[strin
 	return store.Close(beadID)
 }
 
-// Note: listByWorkflowRoot, setOutcomeAndClose, propagateRetrySubjectMetadata,
+// Note: setOutcomeAndClose, propagateRetrySubjectMetadata,
 // classifyRetryAttempt, retryPreservedAssigneeWithConfig, and runRalphCheck are
 // defined in runtime.go, retry.go, and ralph.go respectively.

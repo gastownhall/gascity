@@ -107,10 +107,11 @@ func runStage1SkillMaterialization(cityPath string, cfg *config.City, stderr io.
 		}
 
 		res, merr := materialize.Run(materialize.Request{
-			SinkDir:     sinkDir,
-			Desired:     desired,
-			OwnedRoots:  owned,
-			LegacyNames: materialize.LegacyStubNames(),
+			SinkDir:          sinkDir,
+			Desired:          desired,
+			OwnedRoots:       owned,
+			LegacyNames:      materialize.LegacyStubNames(),
+			LegacyOwnedRoots: materialize.LegacyOwnedRootsFor(cityPath),
 		})
 		if merr != nil {
 			fmt.Fprintf(stderr, "gc: stage-1 materialize-skills for agent %q at %s: %v\n", //nolint:errcheck // best-effort stderr

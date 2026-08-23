@@ -326,6 +326,30 @@ func (c *singleFlightCache[K, V]) invalidate(key K) {
 	c.mu.Unlock()
 }
 
+// discard removes one ownership generation from the cache. Unlike invalidate,
+// an already-running compute may still finish for callers that joined it, but
+// it publishes only to the detached entry and cannot repopulate this key. A
+// subsequent get creates a fresh entry and compute. Version reset is deliberate:
+// discard is reserved for identity changes whose downstream memos are replaced
+// at the same boundary, not ordinary same-identity refreshes.
+func (c *singleFlightCache[K, V]) discard(key K) {
+	c.mu.Lock()
+	delete(c.entries, key)
+	c.mu.Unlock()
+}
+
+// discardMatching applies discard semantics to every matching key. It is used
+// for formula entries whose composite keys share a rebound city name.
+func (c *singleFlightCache[K, V]) discardMatching(match func(K) bool) {
+	c.mu.Lock()
+	for key := range c.entries {
+		if match(key) {
+			delete(c.entries, key)
+		}
+	}
+	c.mu.Unlock()
+}
+
 // ── Cached payload shapes ─────────────────────────────────────────────────
 
 // cachedSessions is the value stored in the sessions cache: the projected

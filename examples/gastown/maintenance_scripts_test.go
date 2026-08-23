@@ -3620,6 +3620,7 @@ func TestReaperPrunesClosedSessionBeadsWithBdPrune(t *testing.T) {
 		cityDir = resolved
 	}
 	writeCityBeadsMetadata(t, cityDir, "beads")
+	writeFreshBackupState(t, cityDir)
 	canonicalCityDir, err := filepath.EvalSymlinks(cityDir)
 	if err != nil {
 		t.Fatalf("EvalSymlinks(city dir): %v", err)
@@ -3691,6 +3692,7 @@ func TestReaperPrunesTerminalSessionStatesWithGcSessionPrune(t *testing.T) {
 		cityDir = resolved
 	}
 	writeCityBeadsMetadata(t, cityDir, "beads")
+	writeFreshBackupState(t, cityDir)
 	binDir := t.TempDir()
 	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
 	bdLog := filepath.Join(t.TempDir(), "bd.log")
@@ -3795,6 +3797,7 @@ exit 0
 func TestReaperSessionPruneDryRunOmitsForce(t *testing.T) {
 	cityDir := t.TempDir()
 	writeCityBeadsMetadata(t, cityDir, "beads")
+	writeFreshBackupState(t, cityDir)
 	binDir := t.TempDir()
 	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
 	bdLog := filepath.Join(t.TempDir(), "bd.log")
@@ -3855,6 +3858,7 @@ exit 0
 func TestReaperSessionPruneAnomalyEscalates(t *testing.T) {
 	cityDir := t.TempDir()
 	writeCityBeadsMetadata(t, cityDir, "beads")
+	writeFreshBackupState(t, cityDir)
 	binDir := t.TempDir()
 	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
 	bdLog := filepath.Join(t.TempDir(), "bd.log")
@@ -3903,6 +3907,7 @@ exit 0
 func TestReaperSessionPruneMissingBdDegradesToZero(t *testing.T) {
 	cityDir := t.TempDir()
 	writeCityBeadsMetadata(t, cityDir, "beads")
+	writeFreshBackupState(t, cityDir)
 	binDir := t.TempDir()
 	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
 	gcLog := filepath.Join(t.TempDir(), "gc.log")
@@ -3944,6 +3949,7 @@ exit 0
 func TestReaperSessionPruneRunsWhenNoDoltDatabases(t *testing.T) {
 	cityDir := t.TempDir()
 	writeCityBeadsMetadata(t, cityDir, "beads")
+	writeFreshBackupState(t, cityDir)
 	binDir := t.TempDir()
 	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
 	bdLog := filepath.Join(t.TempDir(), "bd.log")
@@ -4238,6 +4244,7 @@ exit 0
 func TestReaperRowQueriesIgnoreSuccessfulStderrWarnings(t *testing.T) {
 	cityDir := t.TempDir()
 	writeCityBeadsMetadata(t, cityDir, "beads")
+	writeFreshBackupState(t, cityDir)
 	binDir := t.TempDir()
 	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
 	bdLog := filepath.Join(t.TempDir(), "bd.log")
@@ -5068,6 +5075,78 @@ exit 0
 	}
 }
 
+// TestReaperFailureAnomalyPreservesDoltErrorTailForLongQuery covers the
+// regression reported in #4161: dolt sql embeds the full failing query in
+// its stderr ("error on line 1 for query <query>: <error>"), so once the
+// query text alone exceeds sanitize_output's window the trailing error
+// message is silently dropped. TestReaperFailureAnomalyPreservesDoltErrorTail
+// above only exercises a short (~90 char) stderr and cannot catch this.
+func TestReaperFailureAnomalyPreservesDoltErrorTailForLongQuery(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\nbeads\n'
+    ;;
+  *"DELETE FROM "*"wisps"*)
+    printf 'error on line 1 for query ' >&2
+    i=0
+    while [ "$i" -lt 4200 ]; do
+      printf 'x' >&2
+      i=$((i + 1))
+    done
+    printf ': WITH RECURSIVE iteration limit exceeded\n' >&2
+    exit 42
+    ;;
+  *"status = 'closed'"*"closed_at <"*)
+    printf 'COUNT(*)\n1\n'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"SELECT id"*)
+    printf 'id\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"GC_CALL_LOG":      gcLog,
+		"GC_CITY":          cityDir,
+		"GC_CITY_PATH":     cityDir,
+		"GC_DOLT_HOST":     "127.0.0.1",
+		"GC_DOLT_PORT":     "3307",
+		"GC_DOLT_USER":     "root",
+		"GC_DOLT_PASSWORD": "",
+		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, coreScriptPath("reaper.sh"), env)
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if !strings.Contains(gcLogText, "purging closed wisps failed for beads") {
+		t.Fatalf("reaper did not escalate failed purge:\n%s", gcLogText)
+	}
+	if !strings.Contains(gcLogText, "WITH RECURSIVE iteration limit exceeded") {
+		t.Fatalf("reaper escalation lost Dolt error tail for a long query:\n%s", gcLogText)
+	}
+}
+
 func TestReaperCommitReportsOnlySuccessfulPurgeRows(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
@@ -5236,6 +5315,7 @@ exit 0
 func TestReaperAutoClosesIssuesOnlyInCityDatabase(t *testing.T) {
 	cityDir := t.TempDir()
 	writeCityBeadsMetadata(t, cityDir, "citydb")
+	writeFreshBackupState(t, cityDir)
 	binDir := t.TempDir()
 	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
 	bdLog := filepath.Join(t.TempDir(), "bd.log")
@@ -6005,8 +6085,9 @@ exit 0
 func TestReaperCityDatabaseUsesShellFallbackWhenJSONParsersUnavailable(t *testing.T) {
 	cityDir := t.TempDir()
 	writeCityBeadsMetadata(t, cityDir, "citydb")
+	writeFreshBackupState(t, cityDir)
 	binDir := t.TempDir()
-	for _, tool := range []string{"bash", "dirname", "tail", "grep", "cut", "tr", "mktemp", "rm", "sed", "wc", "cat", "head"} {
+	for _, tool := range []string{"bash", "date", "dirname", "tail", "grep", "cut", "tr", "mktemp", "rm", "sed", "wc", "cat", "head"} {
 		linkTestPathTool(t, binDir, tool)
 	}
 	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
@@ -6882,6 +6963,19 @@ func writeCityBeadsMetadata(t *testing.T, cityDir, db string) {
 	metadata := fmt.Sprintf("{\n  \"dolt_database\": %q\n}\n", db)
 	if err := os.WriteFile(filepath.Join(metadataDir, "metadata.json"), []byte(metadata), 0o644); err != nil {
 		t.Fatalf("WriteFile(metadata.json): %v", err)
+	}
+}
+
+func writeFreshBackupState(t *testing.T, cityDir string) {
+	t.Helper()
+	backupDir := filepath.Join(cityDir, ".beads", "backup")
+	if err := os.MkdirAll(backupDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(backup dir): %v", err)
+	}
+	ts := time.Now().UTC().Format(time.RFC3339)
+	content := fmt.Sprintf(`{"timestamp":%q}`, ts)
+	if err := os.WriteFile(filepath.Join(backupDir, "backup_state.json"), []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile(backup_state.json): %v", err)
 	}
 }
 

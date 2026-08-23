@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -367,6 +368,54 @@ func TestBdStoreGet(t *testing.T) {
 	}
 	if b.Assignee != "alice" {
 		t.Errorf("Assignee = %q, want %q", b.Assignee, "alice")
+	}
+}
+
+func TestBdStoreGetFallsBackToEphemeralForWisps(t *testing.T) {
+	// bd show does not query the wisps table, so Get for a wisp ID returns
+	// ErrNotFound from bd show. Get must fall back to bd query with
+	// ephemeral=true so that wisp-tier beads (e.g. auto-handoff mail created
+	// by gc handoff --auto) are retrievable.
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd show --json gc-wisp-abc`: {
+			err: fmt.Errorf("issue gc-wisp-abc not found"),
+		},
+		`bd query --json ephemeral=true AND id=gc-wisp-abc --all --limit 1`: {
+			out: []byte(`[{"id":"gc-wisp-abc","title":"context cycle","status":"open","issue_type":"message","assignee":"claude","ephemeral":true}]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	b, err := s.Get("gc-wisp-abc")
+	if err != nil {
+		t.Fatalf("Get wisp: %v", err)
+	}
+	if b.ID != "gc-wisp-abc" {
+		t.Errorf("ID = %q, want %q", b.ID, "gc-wisp-abc")
+	}
+	if !b.Ephemeral {
+		t.Error("Ephemeral = false, want true")
+	}
+}
+
+func TestBdStoreGetEphemeralFallbackReturnsErrNotFoundWhenMissing(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd show --json gc-wisp-missing`: {
+			err: fmt.Errorf("issue gc-wisp-missing not found"),
+		},
+		`bd query --json ephemeral=true AND id=gc-wisp-missing --all --limit 1`: {
+			out: []byte(`[]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	_, err := s.Get("gc-wisp-missing")
+	if !errors.Is(err, beads.ErrNotFound) {
+		t.Errorf("err = %v, want ErrNotFound", err)
 	}
 }
 
@@ -3120,6 +3169,127 @@ func TestBdStoreSetMetadataError(t *testing.T) {
 	}
 }
 
+// --- SetLocalString / GetLocalString ---
+
+func TestBdStoreSetLocalStringRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		t.Fatalf("unexpected bd invocation: %s %s", name, strings.Join(args, " "))
+		return nil, nil
+	}
+	s := beads.NewBdStore(dir, runner)
+
+	if err := s.SetLocalString("bd-1", "last_woke_at", "2026-07-14T00:00:00Z"); err != nil {
+		t.Fatalf("SetLocalString: %v", err)
+	}
+	got, err := s.GetLocalString("bd-1", "last_woke_at")
+	if err != nil {
+		t.Fatalf("GetLocalString: %v", err)
+	}
+	if got != "2026-07-14T00:00:00Z" {
+		t.Errorf("GetLocalString = %q, want persisted value", got)
+	}
+}
+
+func TestBdStoreGetLocalStringUnsetReturnsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		t.Fatalf("unexpected bd invocation: %s %s", name, strings.Join(args, " "))
+		return nil, nil
+	}
+	s := beads.NewBdStore(dir, runner)
+
+	got, err := s.GetLocalString("bd-1", "never_set")
+	if err != nil {
+		t.Fatalf("GetLocalString: %v", err)
+	}
+	if got != "" {
+		t.Errorf("GetLocalString unset = %q, want empty", got)
+	}
+}
+
+// TestBdStoreLocalStringNeverInvokesCommandRunner asserts the property
+// documented on BdStore.SetLocalString: clone-local writes are persisted to
+// a sidecar JSON file and never shell out to bd, so they never touch Dolt
+// sync or bd's on_update hook. The runner fails the test immediately if
+// invoked at all.
+func TestBdStoreLocalStringNeverInvokesCommandRunner(t *testing.T) {
+	dir := t.TempDir()
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		t.Fatalf("SetLocalString/GetLocalString must never invoke bd, got: %s %s", name, strings.Join(args, " "))
+		return nil, nil
+	}
+	s := beads.NewBdStore(dir, runner)
+
+	if err := s.SetLocalString("bd-1", "k1", "v1"); err != nil {
+		t.Fatalf("SetLocalString k1: %v", err)
+	}
+	if err := s.SetLocalString("bd-1", "k2", "v2"); err != nil {
+		t.Fatalf("SetLocalString k2: %v", err)
+	}
+	if _, err := s.GetLocalString("bd-1", "k1"); err != nil {
+		t.Fatalf("GetLocalString k1: %v", err)
+	}
+	if _, err := s.GetLocalString("bd-1", "k2"); err != nil {
+		t.Fatalf("GetLocalString k2: %v", err)
+	}
+	if err := s.SetLocalString("bd-1", "k1", ""); err != nil {
+		t.Fatalf("SetLocalString clear k1: %v", err)
+	}
+}
+
+func TestBdStoreSetLocalStringPersistsAcrossNewInstanceSameDir(t *testing.T) {
+	dir := t.TempDir()
+	failRunner := func(_, name string, args ...string) ([]byte, error) {
+		t.Fatalf("unexpected bd invocation: %s %s", name, strings.Join(args, " "))
+		return nil, nil
+	}
+
+	first := beads.NewBdStore(dir, failRunner)
+	if err := first.SetLocalString("bd-1", "last_woke_at", "2026-07-14T00:00:00Z"); err != nil {
+		t.Fatalf("SetLocalString: %v", err)
+	}
+
+	// A fresh *BdStore at the same dir simulates a new process/session
+	// opening the same clone; clone-local data must survive that restart.
+	second := beads.NewBdStore(dir, failRunner)
+	got, err := second.GetLocalString("bd-1", "last_woke_at")
+	if err != nil {
+		t.Fatalf("GetLocalString from fresh instance: %v", err)
+	}
+	if got != "2026-07-14T00:00:00Z" {
+		t.Errorf("GetLocalString from fresh instance at same dir = %q, want persisted value", got)
+	}
+}
+
+func TestBdStoreDeleteRemovesLocalStrings(t *testing.T) {
+	dir := t.TempDir()
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			return nil, fmt.Errorf("unexpected command name %q", name)
+		}
+		if len(args) == 0 || args[0] != "delete" {
+			return nil, fmt.Errorf("unexpected command: bd %s", strings.Join(args, " "))
+		}
+		return nil, nil
+	}
+	s := beads.NewBdStore(dir, runner)
+
+	if err := s.SetLocalString("bd-1", "k", "v"); err != nil {
+		t.Fatalf("SetLocalString: %v", err)
+	}
+	if err := s.Delete("bd-1"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	got, err := s.GetLocalString("bd-1", "k")
+	if err != nil {
+		t.Fatalf("GetLocalString after Delete: %v", err)
+	}
+	if got != "" {
+		t.Errorf("GetLocalString after Delete = %q, want empty (sidecar entry removed)", got)
+	}
+}
+
 func TestBdStoreSetMetadataBatchRetriesDoltSerializationFailure(t *testing.T) {
 	calls := 0
 	runner := func(_, _ string, _ ...string) ([]byte, error) {
@@ -3241,6 +3411,32 @@ esac
 	}
 }
 
+// legacyBdReleaseRunner adapts a runner that only understands the raw-SQL
+// release path to bd 1.0.4 semantics: the native conditional-release verb is
+// rejected as an unknown flag, exactly as a bd predating gastownhall/beads#5008
+// rejects it, so the store latches its fallback. It also answers the verb path's
+// exact-ID preflight by resolving the id to itself, so a test that pins the
+// generated SQL still sees only the SQL. Every test that pins the generated SQL
+// is a FALLBACK-path test — and not only the minimum supported bd
+// (deps.env BD_PREV_VERSION=v1.0.4) takes it: so does the installable default
+// (deps.env BD_VERSION), which is what CI and operators actually install, so
+// this is the shape of production today, not of a floor nobody runs.
+func legacyBdReleaseRunner(inner beads.CommandRunner) beads.CommandRunner {
+	return func(dir, name string, args ...string) ([]byte, error) {
+		if len(args) == 3 && args[0] == "show" && args[1] == "--json" {
+			return []byte(`[{"id":"` + args[2] + `"}]`), nil
+		}
+		if len(args) > 0 && args[0] == "update" {
+			for _, arg := range args {
+				if arg == "--if-assignee" {
+					return nil, errors.New("unknown flag: --if-assignee")
+				}
+			}
+		}
+		return inner(dir, name, args...)
+	}
+}
+
 func TestBdStoreReleaseIfCurrentUsesGuardedSQL(t *testing.T) {
 	var gotName string
 	var gotArgs []string
@@ -3249,7 +3445,7 @@ func TestBdStoreReleaseIfCurrentUsesGuardedSQL(t *testing.T) {
 		gotArgs = append([]string(nil), args...)
 		return []byte(`{"rows_affected":1,"schema_version":1}`), nil
 	}
-	s := beads.NewBdStore("/city", runner)
+	s := beads.NewBdStore("/city", legacyBdReleaseRunner(runner))
 
 	released, err := s.ReleaseIfCurrent("bd-42", "worker-'1")
 	if err != nil {
@@ -3264,8 +3460,8 @@ func TestBdStoreReleaseIfCurrentUsesGuardedSQL(t *testing.T) {
 	if len(gotArgs) != 3 || gotArgs[0] != "sql" || gotArgs[1] != "--json" {
 		t.Fatalf("args = %q, want bd sql --json <query>", gotArgs)
 	}
-	wantQuery := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP WHERE id = 'bd-42' AND status = 'in_progress' AND assignee = 'worker-''1'"
-	if gotArgs[2] != wantQuery {
+	wantQuery := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP, revision = <revision> WHERE id = 'bd-42' AND status = 'in_progress' AND assignee = 'worker-''1'"
+	if got := normalizeReleaseRevisionQuery(t, gotArgs[2]); got != wantQuery {
 		t.Fatalf("SQL query = %q, want %q", gotArgs[2], wantQuery)
 	}
 }
@@ -3276,14 +3472,193 @@ func TestBdStoreReleaseIfCurrentSQLLiteralEscapesBackslash(t *testing.T) {
 		gotArgs = append([]string(nil), args...)
 		return []byte(`{"rows_affected":1,"schema_version":1}`), nil
 	}
-	s := beads.NewBdStore("/city", runner)
+	s := beads.NewBdStore("/city", legacyBdReleaseRunner(runner))
 
 	if _, err := s.ReleaseIfCurrent("bd-\\42", "worker-\\1"); err != nil {
 		t.Fatalf("ReleaseIfCurrent: %v", err)
 	}
-	wantQuery := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP WHERE id = 'bd-\\\\42' AND status = 'in_progress' AND assignee = 'worker-\\\\1'"
-	if gotArgs[2] != wantQuery {
+	wantQuery := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP, revision = <revision> WHERE id = 'bd-\\\\42' AND status = 'in_progress' AND assignee = 'worker-\\\\1'"
+	if got := normalizeReleaseRevisionQuery(t, gotArgs[2]); got != wantQuery {
 		t.Fatalf("SQL query = %q, want %q", gotArgs[2], wantQuery)
+	}
+}
+
+func TestBdStoreReleaseIfCurrentFallsBackOnlyWhenRevisionColumnMissing(t *testing.T) {
+	var queries []string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" || len(args) != 3 || args[0] != "sql" || args[1] != "--json" {
+			return nil, fmt.Errorf("unexpected command %s %q", name, args)
+		}
+		queries = append(queries, args[2])
+		if strings.Contains(args[2], ", revision = ") {
+			return nil, errors.New("Error 1054 (42S22): Unknown column 'revision' in 'field list'")
+		}
+		return []byte(`{"rows_affected":1,"schema_version":1}`), nil
+	}
+	s := beads.NewBdStore("/city", legacyBdReleaseRunner(runner))
+
+	released, err := s.ReleaseIfCurrent("bd-42", "worker-1")
+	if err != nil {
+		t.Fatalf("ReleaseIfCurrent: %v", err)
+	}
+	if !released {
+		t.Fatal("ReleaseIfCurrent released = false, want true")
+	}
+	if len(queries) != 2 {
+		t.Fatalf("release queries = %d, want revision-aware attempt then legacy fallback: %q", len(queries), queries)
+	}
+	if got := normalizeReleaseRevisionQuery(t, queries[0]); !strings.Contains(got, "revision = <revision>") {
+		t.Fatalf("first query = %q, want revision-aware release", queries[0])
+	}
+	if strings.Contains(queries[1], "revision") {
+		t.Fatalf("legacy fallback query unexpectedly references revision: %q", queries[1])
+	}
+}
+
+func TestBdStoreReleaseIfCurrentDoesNotFallbackOnOtherMissingColumn(t *testing.T) {
+	var calls int
+	runner := func(_, _ string, _ ...string) ([]byte, error) {
+		calls++
+		return nil, errors.New("Error 1054 (42S22): Unknown column 'claim_fence' in 'field list'")
+	}
+	s := beads.NewBdStore("/city", legacyBdReleaseRunner(runner))
+
+	released, err := s.ReleaseIfCurrent("bd-42", "worker-1")
+	if err == nil || released {
+		t.Fatalf("ReleaseIfCurrent = (%v, %v), want false and the original schema error", released, err)
+	}
+	if calls != 1 {
+		t.Fatalf("release attempts = %d, want no legacy fallback for a non-revision column error", calls)
+	}
+}
+
+func TestBdStoreReleaseIfCurrentDoesNotReplayAmbiguousRevisionAwareWrite(t *testing.T) {
+	type releaseRow struct {
+		status   string
+		assignee string
+		revision int64
+	}
+	row := releaseRow{status: "in_progress", assignee: "worker-1", revision: 41}
+	var (
+		calls             int
+		releaseRevision   int64
+		reclaimRevision   int64
+		ambiguousWriteErr = errors.New("read tcp 127.0.0.1:53001->127.0.0.1:3306: connection reset by peer")
+	)
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" || len(args) != 3 || args[0] != "sql" || args[1] != "--json" {
+			return nil, fmt.Errorf("unexpected command %s %q", name, args)
+		}
+		calls++
+		releaseRevision = releaseRevisionFromQuery(t, args[2])
+		if row.status == "in_progress" && row.assignee == "worker-1" {
+			row = releaseRow{status: "open", revision: releaseRevision}
+		}
+		if calls == 1 {
+			reclaimRevision = releaseRevision + 1
+			if reclaimRevision <= 0 {
+				reclaimRevision = releaseRevision - 1
+			}
+			row = releaseRow{
+				status:   "in_progress",
+				assignee: "worker-1",
+				revision: reclaimRevision,
+			}
+			return nil, ambiguousWriteErr
+		}
+		return []byte(`{"rows_affected":1,"schema_version":1}`), nil
+	}
+	s := beads.NewBdStore("/city", legacyBdReleaseRunner(runner))
+
+	released, err := s.ReleaseIfCurrent("bd-42", "worker-1")
+	if err == nil || !strings.Contains(err.Error(), ambiguousWriteErr.Error()) {
+		t.Errorf("ReleaseIfCurrent error = %v, want ambiguous execution error", err)
+	}
+	if released {
+		t.Error("ReleaseIfCurrent released = true, want false while execution is ambiguous")
+	}
+	if calls != 1 {
+		t.Errorf("release attempts = %d, want exactly one", calls)
+	}
+	if row.status != "in_progress" || row.assignee != "worker-1" || row.revision != reclaimRevision {
+		t.Errorf("same-assignee reclaim = %+v, want in_progress/worker-1/revision %d", row, reclaimRevision)
+	}
+	if row.revision == releaseRevision {
+		t.Errorf("same-assignee reclaim token was reinstalled to release token %d", releaseRevision)
+	}
+}
+
+func TestBdStoreReleaseIfCurrentDoesNotReplayAmbiguousLegacyFallback(t *testing.T) {
+	var (
+		calls          int
+		legacyAttempts int
+		rowStatus      = "in_progress"
+		ambiguousErr   = errors.New("write tcp 127.0.0.1:3306: broken pipe")
+	)
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" || len(args) != 3 || args[0] != "sql" || args[1] != "--json" {
+			return nil, fmt.Errorf("unexpected command %s %q", name, args)
+		}
+		calls++
+		if strings.Contains(args[2], ", revision = ") {
+			return nil, errors.New("Error 1054 (42S22): Unknown column 'revision' in 'field list'")
+		}
+		legacyAttempts++
+		if rowStatus == "in_progress" {
+			rowStatus = "open"
+			if legacyAttempts == 1 {
+				return nil, ambiguousErr
+			}
+			return []byte(`{"rows_affected":1,"schema_version":1}`), nil
+		}
+		return []byte(`{"rows_affected":0,"schema_version":1}`), nil
+	}
+	s := beads.NewBdStore("/city", legacyBdReleaseRunner(runner))
+
+	released, err := s.ReleaseIfCurrent("bd-42", "worker-1")
+	if err == nil || !strings.Contains(err.Error(), ambiguousErr.Error()) {
+		t.Errorf("ReleaseIfCurrent error = %v, want ambiguous legacy execution error", err)
+	}
+	if released {
+		t.Error("ReleaseIfCurrent released = true, want false while legacy execution is ambiguous")
+	}
+	if calls != 2 || legacyAttempts != 1 {
+		t.Errorf("release attempts = %d total/%d legacy, want one revision-aware plus one legacy", calls, legacyAttempts)
+	}
+	if rowStatus != "open" {
+		t.Errorf("simulated ambiguous legacy commit left status %q, want open", rowStatus)
+	}
+}
+
+// A clean serialization conflict — the backend rolled the write back atomically,
+// leaving nothing applied — is safe to replay, and ReleaseIfCurrent must, or a
+// merge-queue release loses a race it should have won on retry. This pins the
+// transient-but-unambiguous branch that the ambiguous-write tests above exclude:
+// the release retry predicate is isBdTransientWriteError && !isBdAmbiguousWriteError.
+func TestBdStoreReleaseIfCurrentRetriesACleanSerializationConflict(t *testing.T) {
+	var calls int
+	cleanConflict := errors.New("Error 1213 (40001): serialization failure")
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" || len(args) != 3 || args[0] != "sql" || args[1] != "--json" {
+			return nil, fmt.Errorf("unexpected command %s %q", name, args)
+		}
+		calls++
+		if calls == 1 {
+			return nil, cleanConflict
+		}
+		return []byte(`{"rows_affected":1,"schema_version":1}`), nil
+	}
+	s := beads.NewBdStore("/city", legacyBdReleaseRunner(runner))
+
+	released, err := s.ReleaseIfCurrent("bd-42", "worker-1")
+	if err != nil {
+		t.Fatalf("ReleaseIfCurrent: %v", err)
+	}
+	if !released {
+		t.Fatal("ReleaseIfCurrent released = false, want true after a clean conflict is replayed")
+	}
+	if calls != 2 {
+		t.Fatalf("release attempts = %d, want the clean conflict retried once then applied", calls)
 	}
 }
 
@@ -3308,7 +3683,7 @@ func TestBdStoreReleaseIfCurrentFallsBackWhenEmbeddedBdSQLUnsupported(t *testing
 			return nil, fmt.Errorf("unexpected call %s", call)
 		}
 	}
-	s := beads.NewBdStore(dir, runner)
+	s := beads.NewBdStore(dir, legacyBdReleaseRunner(runner))
 
 	released, err := s.ReleaseIfCurrent("bd-42", "worker-1")
 	if err != nil {
@@ -3318,10 +3693,14 @@ func TestBdStoreReleaseIfCurrentFallsBackWhenEmbeddedBdSQLUnsupported(t *testing
 		t.Fatal("ReleaseIfCurrent released = false, want true")
 	}
 	wantCalls := []string{
-		dir + ": bd sql --json UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP WHERE id = 'bd-42' AND status = 'in_progress' AND assignee = 'worker-1'",
-		filepath.Join(dir, ".beads", "embeddeddolt", "demo") + ": dolt sql -r json -q UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP WHERE id = 'bd-42' AND status = 'in_progress' AND assignee = 'worker-1'; SELECT ROW_COUNT() AS rows_affected",
+		dir + ": bd sql --json UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP, revision = <revision> WHERE id = 'bd-42' AND status = 'in_progress' AND assignee = 'worker-1'",
+		filepath.Join(dir, ".beads", "embeddeddolt", "demo") + ": dolt sql -r json -q UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP, revision = <revision> WHERE id = 'bd-42' AND status = 'in_progress' AND assignee = 'worker-1'; SELECT ROW_COUNT() AS rows_affected",
 	}
-	if !reflect.DeepEqual(calls, wantCalls) {
+	normalizedCalls := make([]string, len(calls))
+	for i, call := range calls {
+		normalizedCalls[i] = normalizeReleaseRevisionQuery(t, call)
+	}
+	if !reflect.DeepEqual(normalizedCalls, wantCalls) {
 		t.Fatalf("calls = %#v, want %#v", calls, wantCalls)
 	}
 }
@@ -3387,7 +3766,7 @@ func TestBdStoreReleaseIfCurrentEmbeddedFallbackSkipsWrongAssignee(t *testing.T)
 			return nil, fmt.Errorf("unexpected command %s %q", name, args)
 		}
 	}
-	s := beads.NewBdStore(dir, runner)
+	s := beads.NewBdStore(dir, legacyBdReleaseRunner(runner))
 
 	released, err := s.ReleaseIfCurrent("bd-42", "worker-1")
 	if err != nil {
@@ -3417,19 +3796,16 @@ func embeddedDoltReleaseIfCurrentStore(t *testing.T, doltOut []byte) *beads.BdSt
 			return nil, fmt.Errorf("unexpected command %s %q", name, args)
 		}
 	}
-	return beads.NewBdStore(dir, runner)
+	return beads.NewBdStore(dir, legacyBdReleaseRunner(runner))
 }
 
 func TestBdStoreReleaseIfCurrentSkipsWhenRowsAffectedIsZero(t *testing.T) {
-	runner := fakeRunner(map[string]struct {
-		out []byte
-		err error
-	}{
-		`bd sql --json UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP WHERE id = 'bd-42' AND status = 'in_progress' AND assignee = 'worker-1'`: {
-			out: []byte(`{"rows_affected":0,"schema_version":1}`),
-		},
-	})
-	s := beads.NewBdStore("/city", runner)
+	var query string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		query = args[2]
+		return []byte(`{"rows_affected":0,"schema_version":1}`), nil
+	}
+	s := beads.NewBdStore("/city", legacyBdReleaseRunner(runner))
 
 	released, err := s.ReleaseIfCurrent("bd-42", "worker-1")
 	if err != nil {
@@ -3438,6 +3814,39 @@ func TestBdStoreReleaseIfCurrentSkipsWhenRowsAffectedIsZero(t *testing.T) {
 	if released {
 		t.Fatal("ReleaseIfCurrent released = true, want false")
 	}
+	if got := normalizeReleaseRevisionQuery(t, query); !strings.Contains(got, "revision = <revision>") {
+		t.Fatalf("no-op release query = %q, want revision-aware guarded update", query)
+	}
+}
+
+func normalizeReleaseRevisionQuery(t *testing.T, query string) string {
+	t.Helper()
+	revision := releaseRevisionFromQuery(t, query)
+	const marker = "revision = "
+	start := strings.Index(query, marker)
+	valueStart := start + len(marker)
+	valueEnd := valueStart + len(strconv.FormatInt(revision, 10))
+	return query[:valueStart] + "<revision>" + query[valueEnd:]
+}
+
+func releaseRevisionFromQuery(t *testing.T, query string) int64 {
+	t.Helper()
+	const marker = "revision = "
+	start := strings.Index(query, marker)
+	if start < 0 {
+		t.Fatalf("release query has no revision assignment: %q", query)
+	}
+	valueStart := start + len(marker)
+	valueEnd := strings.Index(query[valueStart:], " WHERE ")
+	if valueEnd < 0 {
+		t.Fatalf("release query has no WHERE after revision assignment: %q", query)
+	}
+	valueEnd += valueStart
+	revision, err := strconv.ParseInt(query[valueStart:valueEnd], 10, 64)
+	if err != nil || revision <= 0 {
+		t.Fatalf("release query revision = %q (%v), want a positive int64", query[valueStart:valueEnd], err)
+	}
+	return revision
 }
 
 // --- ListByLabel ---
