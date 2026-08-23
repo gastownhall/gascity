@@ -50,8 +50,6 @@ type BackendListResult struct {
 	Err   error
 }
 
-// IsPartialListError reports whether err represents a degraded-but-usable
-// ListRunning result from one or more failed backends.
 // IsRuntimeServerAbsent reports whether err is a [PartialListError] whose
 // consulted backend was not running at all, as opposed to a server that was up
 // and answered incompletely. Reap paths holding independent proof of death use
@@ -65,7 +63,7 @@ type BackendListResult struct {
 // still holding live sessions. Wrapping therefore degrades to "not absent",
 // which is the fail-safe answer.
 func IsRuntimeServerAbsent(err error) bool {
-	target, ok := err.(*PartialListError)
+	target, ok := err.(*PartialListError) //nolint:errorlint // the non-traversing assertion is the point: see the doc comment above — errors.As would report absence whenever ANY joined backend was absent, including when a healthy sibling still holds live sessions
 	return ok && target.ServerAbsent
 }
 
