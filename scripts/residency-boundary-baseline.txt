@@ -29,12 +29,6 @@ cmd/gc/api_state.go	completionReconcileInputs	c:beads.Store-literal	1
 cmd/gc/bd_relocated_classes.go	relocatedBeadClasses	d:ReservedClassPrefix	1
 cmd/gc/build_desired_state.go	collectAssignedWorkBeadsWithStores	ast:returns-store-list	1
 cmd/gc/build_desired_state.go	collectOpenUnassignedRoutedWork	ast:returns-store-list	1
-cmd/gc/by_id_store_route.go	classRouteCandidates	ast:returns-store-list	1
-cmd/gc/by_id_store_route.go	classRouteCandidates	b:storeref.ClassCandidates	1
-cmd/gc/by_id_store_route.go	classRouteCandidates	c:beads.Store-literal	1
-cmd/gc/by_id_store_route.go	classRouteCandidates	d:ReservedClassPrefix	1
-cmd/gc/by_id_store_route.go	classRoutedStoreForID	b:graphClassBinding	1
-cmd/gc/by_id_store_route.go	classRoutedStoreForID	d:bdIDIsClassReserved	1
 cmd/gc/census_residency.go	censusLegCandidates	c:storeref.EachLeg	1
 cmd/gc/city_runtime.go	beadReconcileTick	a:rigBeadStores	1
 cmd/gc/city_runtime.go	buildStandaloneRigStores	ast:returns-store-list	1

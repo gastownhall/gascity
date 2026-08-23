@@ -270,8 +270,9 @@ func cliResidencyBindings(cityPath string) ([]storeref.ClassBinding, error) {
 	return bindings, refused
 }
 
-// resetCLIResidencyBindings drops the memo. Wired into closeCLIStorageRoutes's
-// caller-visible lifecycle by the tests that need a second city in one process.
+// resetCLIResidencyBindings drops the memo wholesale. closeCLIStorageRoutes
+// calls it: this grouping is DERIVED from the routes that call closes, so it
+// cannot outlive them.
 func resetCLIResidencyBindings() {
 	cliResidencyBindingsMu.Lock()
 	cliResidencyBindingsByCity = nil

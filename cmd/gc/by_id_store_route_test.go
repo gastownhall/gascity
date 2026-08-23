@@ -166,31 +166,118 @@ func TestClassRoutedStoreForIDResolvesAClassResidentID(t *testing.T) {
 	}
 }
 
-// TestClassRoutedStoreForIDTakesTheSharedResolversCandidateOrder pins that the
-// probe list for an in-namespace id is literally storeref.ClassCandidates'
-// answer, so the ORDER and the identity gate have exactly one owner. A local
-// list that happened to agree today would drift the moment the resolver grows a
-// leg.
-func TestClassRoutedStoreForIDTakesTheSharedResolversCandidateOrder(t *testing.T) {
-	_, work, class := byIDRouteCity(t)
+// TestClassRoutedStoreForIDKeepsThePreSeamCandidateOrder is the before/after
+// pin for the migration onto the residency resolver.
+//
+// This route used to build its own probe list (classRouteCandidates) and walk
+// it with its own error classification. Both now come from
+// storeref.Plan(ByID)/ResolveOwnerRow, and the claim that the swap changed
+// nothing is PROVEN here rather than asserted in a commit message:
+// legacyClassRouteCandidates carries the deleted list verbatim, and every row
+// asserts the plan's leg stores are that list, in that order.
+//
+// The four rows are the four shapes the old list had branches for — an
+// in-namespace id, a work-shaped id the namespace gate declined, a city that
+// relocates nothing, and a refused city — so a plan that agreed on the ordinary
+// case and diverged on a branch cannot pass.
+func TestClassRoutedStoreForIDKeepsThePreSeamCandidateOrder(t *testing.T) {
 	prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph)
 	if !ok {
-		t.Fatal("no reserved graph prefix")
+		t.Fatal("no reserved graph prefix; there is no namespace for by-id routing to run on")
 	}
-	id := prefix + "-1"
-	want := storeref.ClassCandidates(id, storeref.ClassRouting{Prefix: prefix, Class: class, Work: work})
-	if len(want) == 0 {
-		t.Fatal("the shared resolver produced no candidates for an in-namespace id on a relocated city")
+	tests := []struct {
+		name  string
+		id    string
+		setup func(t *testing.T) (cityPath string, work beads.Store)
+	}{
+		{
+			name:  "in-namespace id on a relocated city",
+			id:    prefix + "-1",
+			setup: func(t *testing.T) (string, beads.Store) { p, w, _ := byIDRouteCity(t); return p, w },
+		},
+		{
+			name:  "work-shaped id the namespace gate declines",
+			id:    "hq-4177",
+			setup: func(t *testing.T) (string, beads.Store) { p, w, _ := byIDRouteCity(t); return p, w },
+		},
+		{
+			name: "city that relocates nothing",
+			id:   prefix + "-1",
+			setup: func(t *testing.T) (string, beads.Store) {
+				cityPath := t.TempDir()
+				resetCLIStorageRoutes(t)
+				seedCLIStorageRoutes(t, cityPath, nil)
+				return cityPath, splittest.NewWorkStore(t, "hq")
+			},
+		},
+		{
+			name: "refused city",
+			id:   "hq-4177",
+			setup: func(t *testing.T) (string, beads.Store) {
+				cityPath := t.TempDir()
+				resetCLIStorageRoutes(t)
+				entry := cliStorageRoutesEntryFor(filepath.Clean(cityPath))
+				entry.once.Do(func() {
+					entry.routes = refusingStorageRoutes("infra", errors.New("this city's storage cannot be served"))
+				})
+				return cityPath, splittest.NewWorkStore(t, "hq")
+			},
+		},
 	}
-	got := classRouteCandidates(id, class, work)
-	if len(got) != len(want) {
-		t.Fatalf("classRouteCandidates produced %d candidates, want the shared resolver's %d", len(got), len(want))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityPath, work := tt.setup(t)
+			class, _ := graphClassBinding(cliStorageRoutes(cityPath))
+			want := legacyClassRouteCandidates(tt.id, class, work)
+			got := planLegStoresForID(t, cityPath, tt.id, work)
+			if len(got) != len(want) {
+				t.Fatalf("the ByID plan has %d legs, the pre-seam list had %d candidates", len(got), len(want))
+			}
+			for i := range want {
+				if got[i] != want[i] {
+					t.Errorf("leg %d = %p, want the pre-seam candidate %p — the binding leads because it is the sole minter of the reserved namespace, and work follows as the residual", i, got[i], want[i])
+				}
+			}
+		})
 	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("candidate %d = %p, want %p — the class store leads because it is the sole minter of the namespace, and work follows as the fallback leg", i, got[i], want[i])
+}
+
+// legacyClassRouteCandidates is the deleted classRouteCandidates, carried here
+// verbatim (plus the identity gate its caller applied before reaching it) as the
+// reference implementation for the order pin above. Nothing in production calls
+// it; it exists so the migration's zero-change claim is checkable by a reader
+// who never saw the pre-seam file.
+func legacyClassRouteCandidates(id string, class, work beads.Store) []beads.Store {
+	if class == nil || class == work {
+		return []beads.Store{work}
+	}
+	if prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph); ok {
+		if candidates := storeref.ClassCandidates(id, storeref.ClassRouting{
+			Prefix: prefix,
+			Class:  class,
+			Work:   work,
+		}); candidates != nil {
+			return candidates
 		}
 	}
+	return []beads.Store{class, work}
+}
+
+// planLegStoresForID returns the stores the CLI's by-id plan probes, in plan
+// order. It reads cliByIDPlan — the seam's own builder — rather than assembling
+// a topology beside it, so a seam that stopped using the constructor fails the
+// pin instead of passing it.
+func planLegStoresForID(t *testing.T, cityPath, id string, work beads.Store) []beads.Store {
+	t.Helper()
+	plan, err := cliByIDPlan(cityPath, id, work)
+	if err != nil {
+		t.Fatalf("planning ByID{%q}: %v", id, err)
+	}
+	stores := make([]beads.Store, 0, len(plan.Legs))
+	for _, leg := range plan.Legs {
+		stores = append(stores, leg.Leg.Store)
+	}
+	return stores
 }
 
 // TestClassRoutedStoreForIDSurfacesAReadFailureRatherThanAbsence is the
