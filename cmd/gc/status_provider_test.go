@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -13,6 +14,8 @@ type statusProbeProvider struct {
 	delay       atomic.Int64
 	running     atomic.Bool
 	liveness    atomic.Value
+	observeErr  error
+	observeGate <-chan struct{}
 	observeCall atomic.Int32
 }
 
@@ -30,6 +33,14 @@ func (p *statusProbeProvider) IsRunning(string) bool {
 func (p *statusProbeProvider) ObserveLiveness(string, []string) runtime.Liveness {
 	p.observeCall.Add(1)
 	return p.liveness.Load().(runtime.Liveness)
+}
+
+func (p *statusProbeProvider) ObserveLivenessWithError(string, []string) (runtime.Liveness, error) {
+	p.observeCall.Add(1)
+	if p.observeGate != nil {
+		<-p.observeGate
+	}
+	return p.liveness.Load().(runtime.Liveness), p.observeErr
 }
 
 func TestStatusProviderTimeoutDoesNotStickAcrossCalls(t *testing.T) {
@@ -73,6 +84,35 @@ func TestStatusProviderPreservesNativeLivenessObservation(t *testing.T) {
 	}
 	if calls := base.observeCall.Load(); calls != 1 {
 		t.Fatalf("ObserveLiveness calls = %d, want 1", calls)
+	}
+}
+
+func TestStatusProviderLivenessTimeoutPreservesObservationUncertainty(t *testing.T) {
+	origTimeout := statusProviderCallTimeout
+	origWarn := statusProviderTimeoutWarning
+	t.Cleanup(func() {
+		statusProviderCallTimeout = origTimeout
+		statusProviderTimeoutWarning = origWarn
+	})
+	statusProviderCallTimeout = 10 * time.Millisecond
+	statusProviderTimeoutWarning = func() {}
+
+	base := newStatusProbeProvider()
+	base.liveness.Store(runtime.Liveness{Running: true, Alive: true})
+	gate := make(chan struct{})
+	base.observeGate = gate
+	t.Cleanup(func() { close(gate) })
+	wrapped := newBoundedStatusProvider(base)
+
+	got, err := runtime.ObserveLivenessWithError(wrapped, "worker", nil)
+	if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("ObserveLivenessWithError error = %v, want runtime unavailable", err)
+	}
+	if got != (runtime.Liveness{}) {
+		t.Fatalf("ObserveLivenessWithError = %+v, want zero while timed-out observation is unknown", got)
+	}
+	if !statusProviderPartial(wrapped) {
+		t.Fatal("statusProviderPartial = false, want true after liveness timeout")
 	}
 }
 

@@ -2877,6 +2877,60 @@ type falseNegativeRuntimeProvider struct {
 	falseNames map[string]bool
 }
 
+type observationErrorRuntimeProvider struct {
+	*runtime.Fake
+	livenessErr error
+	activityErr error
+}
+
+func (p *observationErrorRuntimeProvider) ObserveLivenessWithError(string, []string) (runtime.Liveness, error) {
+	if p.livenessErr != nil {
+		return runtime.Liveness{}, p.livenessErr
+	}
+	return runtime.Liveness{Running: true, Alive: true}, nil
+}
+
+func (p *observationErrorRuntimeProvider) GetLastActivity(string) (time.Time, error) {
+	return time.Time{}, p.activityErr
+}
+
+func TestObserveRuntimeForInfoPreservesObservationUncertainty(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		livenessErr error
+		activityErr error
+		wantError   bool
+	}{
+		{name: "liveness unavailable", livenessErr: fmt.Errorf("liveness transport: %w", runtime.ErrRuntimeUnavailable), wantError: true},
+		{name: "activity unavailable", activityErr: fmt.Errorf("activity transport: %w", runtime.ErrRuntimeUnavailable), wantError: true},
+		{name: "ordinary activity error stays best effort", activityErr: errors.New("malformed activity"), wantError: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := NewManagerWithOptions(beads.NewMemStore(), &observationErrorRuntimeProvider{
+				Fake:        runtime.NewFake(),
+				livenessErr: tc.livenessErr,
+				activityErr: tc.activityErr,
+			})
+			obs, err := mgr.ObserveRuntimeForInfo(Info{SessionName: "runtime-worker"}, nil)
+			if tc.wantError {
+				if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+					t.Fatalf("ObserveRuntimeForInfo error = %v, want runtime unavailable", err)
+				}
+				if obs != (RuntimeObservation{}) {
+					t.Fatalf("ObserveRuntimeForInfo observation = %#v, want zero with unknown result", obs)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ObserveRuntimeForInfo: %v", err)
+			}
+			if !obs.Running || !obs.Alive || !obs.LastActive.IsZero() {
+				t.Fatalf("ObserveRuntimeForInfo observation = %#v, want live with unknown activity", obs)
+			}
+		})
+	}
+}
+
 func (p *falseNegativeRuntimeProvider) IsRunning(name string) bool {
 	if p.falseNames[name] {
 		return false
@@ -2896,7 +2950,10 @@ func TestObserveRuntime_TreatsLiveProcessAsRunningWhenSessionProbeFalseNegatives
 		t.Fatalf("Create: %v", err)
 	}
 
-	obs := mgr.ObserveRuntimeForInfo(info, []string{"claude"})
+	obs, err := mgr.ObserveRuntimeForInfo(info, []string{"claude"})
+	if err != nil {
+		t.Fatalf("ObserveRuntimeForInfo: %v", err)
+	}
 	if !obs.Running || !obs.Alive {
 		t.Fatalf("ObserveRuntimeForInfo() = %#v, want running+alive true despite IsRunning false-negative", obs)
 	}
@@ -2911,7 +2968,10 @@ func TestObserveRuntime_WithoutProcessNamesTreatsRunningSessionAsAlive(t *testin
 		t.Fatalf("Create: %v", err)
 	}
 
-	obs := mgr.ObserveRuntimeForInfo(info, nil)
+	obs, err := mgr.ObserveRuntimeForInfo(info, nil)
+	if err != nil {
+		t.Fatalf("ObserveRuntimeForInfo: %v", err)
+	}
 	if !obs.Running || !obs.Alive {
 		t.Fatalf("ObserveRuntimeForInfo() = %#v, want running+alive true when no process names are configured", obs)
 	}

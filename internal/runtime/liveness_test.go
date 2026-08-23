@@ -2,8 +2,51 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
+
+var errLivenessUnavailableForTest = errors.New("liveness unavailable")
+
+type errorBearingLivenessProvider struct {
+	*Fake
+	observation Liveness
+	err         error
+}
+
+func (p *errorBearingLivenessProvider) ObserveLivenessWithError(string, []string) (Liveness, error) {
+	return p.observation, p.err
+}
+
+func TestObserveLivenessWithErrorPreservesOptionalProviderFailure(t *testing.T) {
+	sp := &errorBearingLivenessProvider{
+		Fake: NewFake(),
+		err:  errLivenessUnavailableForTest,
+	}
+
+	got, err := ObserveLivenessWithError(sp, "worker", []string{"agent-cli"})
+	if !errors.Is(err, errLivenessUnavailableForTest) {
+		t.Fatalf("ObserveLivenessWithError error = %v, want %v", err, errLivenessUnavailableForTest)
+	}
+	if got != (Liveness{}) {
+		t.Fatalf("ObserveLivenessWithError observation = %+v, want zero on unavailable observation", got)
+	}
+}
+
+func TestObserveLivenessWithErrorKeepsLegacyProviderCompatible(t *testing.T) {
+	sp := NewFake()
+	if err := sp.Start(context.Background(), "worker", Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	got, err := ObserveLivenessWithError(sp, "worker", nil)
+	if err != nil {
+		t.Fatalf("ObserveLivenessWithError legacy provider: %v", err)
+	}
+	if !got.Running || !got.Alive {
+		t.Fatalf("ObserveLivenessWithError legacy provider = %+v, want running+alive", got)
+	}
+}
 
 func TestObserveLivenessTracksZombieProcess(t *testing.T) {
 	sp := NewFake()

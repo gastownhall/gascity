@@ -17,6 +17,68 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+type t3SessionStatusExpectation struct {
+	name            string
+	status          string
+	includeStatus   bool
+	malformed       bool
+	wantLive        bool
+	wantUnavailable bool
+}
+
+func t3SessionStatusExpectations() []t3SessionStatusExpectation {
+	return []t3SessionStatusExpectation{
+		{name: "idle", status: "idle", includeStatus: true, wantLive: true},
+		{name: "starting", status: "starting", includeStatus: true, wantLive: true},
+		{name: "running", status: "running", includeStatus: true, wantLive: true},
+		{name: "ready", status: "ready", includeStatus: true, wantLive: true},
+		{name: "interrupted", status: "interrupted", includeStatus: true},
+		{name: "stopped", status: "stopped", includeStatus: true},
+		{name: "error", status: "error", includeStatus: true},
+		{name: "legacy none", status: "none", includeStatus: true},
+		{name: "legacy gone", status: "gone", includeStatus: true},
+		{name: "unknown", status: "future-state", includeStatus: true, wantUnavailable: true},
+		{name: "missing", wantUnavailable: true},
+	}
+}
+
+func t3SessionStatusSnapshot(name string, tc t3SessionStatusExpectation) map[string]interface{} {
+	session := map[string]interface{}{}
+	if tc.includeStatus {
+		session["status"] = tc.status
+	}
+	thread := map[string]interface{}{
+		"id":             "thread-" + name,
+		"customMetadata": map[string]interface{}{"gc.sessionName": name},
+		"session":        session,
+	}
+	if !tc.malformed {
+		thread["projectId"] = "project-1"
+	}
+	return map[string]interface{}{"threads": []interface{}{thread}}
+}
+
+func newSeamBackedSnapshotTestProvider(t *testing.T, wsURL string) (*seamBackedProvider, runtime.Provider) {
+	t.Helper()
+	resetBridgeAuthCacheForTest(t)
+	oldDefaults := defaultWSURLCandidates
+	defaultWSURLCandidates = nil
+	t.Cleanup(func() { defaultWSURLCandidates = oldDefaults })
+
+	t.Setenv("GC_EXEC_STATE_DIR", t.TempDir())
+	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
+	t.Setenv("T3_HOME", t.TempDir())
+	t.Setenv("T3_WS_URL", wsURL)
+	t.Setenv("GC_T3BRIDGE_STATE_DIR", t.TempDir())
+
+	sp := NewSeamBacked()
+	backed, ok := sp.(*seamBackedProvider)
+	if !ok {
+		t.Fatalf("NewSeamBacked() type = %T, want *seamBackedProvider", sp)
+	}
+	return backed, sp
+}
+
 func TestResolveProviderModel_PrefersCurrentConfigOverStoredEnvelope(t *testing.T) {
 	cfg := runtime.Config{
 		Command: "codex --dangerously-bypass-approvals-and-sandbox",
@@ -1036,5 +1098,329 @@ func TestListRunningSoftUnavailableIsRuntimeUnavailable(t *testing.T) {
 	}
 	if len(names) != 0 {
 		t.Fatalf("ListRunning names = %v, want none alongside total observation failure", names)
+	}
+}
+
+// The production seam-backed provider must distinguish a reachable empty T3
+// snapshot from a snapshot failure. Cached snapshots keep the positive and
+// confirmed-absent cases deterministic; the unreachable loopback endpoint owns
+// the transport-failure edge.
+func TestSeamBackedLivenessObservationPreservesSnapshotUncertainty(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		wsURL       string
+		recentStart bool
+	}{
+		{name: "unreachable snapshot is unknown", wsURL: "ws://127.0.0.1:1/ws"},
+		{name: "hard snapshot setup error is unknown", wsURL: "not-a-websocket-url"},
+		{name: "unreachable snapshot during recent start is provisionally live", wsURL: "ws://127.0.0.1:1/ws", recentStart: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backed, sp := newSeamBackedSnapshotTestProvider(t, tc.wsURL)
+			if tc.recentStart {
+				backed.raw.setRecentStart("worker", time.Now())
+			}
+
+			obs, err := runtime.ObserveLivenessWithError(sp, "worker", nil)
+			if tc.recentStart {
+				if err != nil {
+					t.Fatalf("ObserveLivenessWithError: %v", err)
+				}
+				if obs != (runtime.Liveness{Running: true, Alive: true}) {
+					t.Fatalf("ObserveLivenessWithError observation = %+v, want provisional liveness", obs)
+				}
+				return
+			}
+			if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("ObserveLivenessWithError error = %v, want runtime unavailable", err)
+			}
+			if obs != (runtime.Liveness{}) {
+				t.Fatalf("ObserveLivenessWithError observation = %+v, want zero with unknown result", obs)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name        string
+		recentStart bool
+		wantLive    bool
+	}{
+		{name: "ordinary reachable empty snapshot confirms absence"},
+		{name: "reachable empty snapshot during recent start is provisionally live", recentStart: true, wantLive: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backed, sp := newSeamBackedSnapshotTestProvider(t, "ws://127.0.0.1:1/ws")
+			backed.raw.cacheSnapshot(map[string]interface{}{"threads": []interface{}{}})
+			if tc.recentStart {
+				backed.raw.setRecentStart("worker", time.Now())
+			}
+
+			obs, err := runtime.ObserveLivenessWithError(sp, "worker", nil)
+			if err != nil {
+				t.Fatalf("ObserveLivenessWithError: %v", err)
+			}
+			want := runtime.Liveness{Running: tc.wantLive, Alive: tc.wantLive}
+			if obs != want {
+				t.Fatalf("ObserveLivenessWithError observation = %+v, want %+v", obs, want)
+			}
+			if got := backed.raw.IsRunning("worker"); got != tc.wantLive {
+				t.Fatalf("IsRunning = %v, want %v", got, tc.wantLive)
+			}
+			if got := backed.raw.ProcessAlive("worker", nil); got != tc.wantLive {
+				t.Fatalf("ProcessAlive = %v, want %v", got, tc.wantLive)
+			}
+		})
+	}
+
+	for _, tc := range t3SessionStatusExpectations() {
+		t.Run("reachable matching thread with "+tc.name+" status", func(t *testing.T) {
+			backed, sp := newSeamBackedSnapshotTestProvider(t, "ws://127.0.0.1:1/ws")
+			backed.raw.cacheSnapshot(t3SessionStatusSnapshot("worker", tc))
+
+			obs, err := runtime.ObserveLivenessWithError(sp, "worker", nil)
+			if tc.wantUnavailable {
+				if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+					t.Fatalf("ObserveLivenessWithError error = %v, want runtime unavailable", err)
+				}
+				if obs != (runtime.Liveness{}) {
+					t.Fatalf("ObserveLivenessWithError observation = %+v, want zero with unknown result", obs)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("ObserveLivenessWithError: %v", err)
+				}
+				want := runtime.Liveness{Running: tc.wantLive, Alive: tc.wantLive}
+				if obs != want {
+					t.Fatalf("ObserveLivenessWithError observation = %+v, want %+v", obs, want)
+				}
+			}
+
+			if got := backed.raw.IsRunning("worker"); got != tc.wantLive {
+				t.Fatalf("IsRunning = %v, want %v", got, tc.wantLive)
+			}
+			if got := backed.raw.ProcessAlive("worker", nil); got != tc.wantLive {
+				t.Fatalf("ProcessAlive = %v, want %v", got, tc.wantLive)
+			}
+		})
+	}
+
+	for _, status := range []string{"none", "gone"} {
+		t.Run("recent start keeps legacy "+status+" provisionally live", func(t *testing.T) {
+			backed, sp := newSeamBackedSnapshotTestProvider(t, "ws://127.0.0.1:1/ws")
+			backed.raw.cacheSnapshot(map[string]interface{}{
+				"threads": []interface{}{map[string]interface{}{
+					"id":        "thread-1",
+					"projectId": "project-1",
+					"customMetadata": map[string]interface{}{
+						"gc.sessionName": "worker",
+					},
+					"session": map[string]interface{}{"status": status},
+				}},
+			})
+			backed.raw.setRecentStart("worker", time.Now())
+
+			obs, err := runtime.ObserveLivenessWithError(sp, "worker", nil)
+			if err != nil {
+				t.Fatalf("ObserveLivenessWithError: %v", err)
+			}
+			if obs != (runtime.Liveness{Running: true, Alive: true}) {
+				t.Fatalf("ObserveLivenessWithError observation = %+v, want provisional liveness", obs)
+			}
+			if !backed.raw.IsRunning("worker") {
+				t.Fatal("IsRunning = false, want startup grace for legacy pre-session status")
+			}
+		})
+	}
+
+	t.Run("reachable matching malformed thread is unknown", func(t *testing.T) {
+		backed, sp := newSeamBackedSnapshotTestProvider(t, "ws://127.0.0.1:1/ws")
+		backed.raw.cacheSnapshot(map[string]interface{}{
+			"threads": []interface{}{map[string]interface{}{
+				"id": "thread-1",
+				"customMetadata": map[string]interface{}{
+					"gc.sessionName": "worker",
+				},
+				"session": map[string]interface{}{"status": "ready"},
+			}},
+		})
+
+		obs, err := runtime.ObserveLivenessWithError(sp, "worker", nil)
+		if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			t.Fatalf("ObserveLivenessWithError error = %v, want runtime unavailable", err)
+		}
+		if obs != (runtime.Liveness{}) {
+			t.Fatalf("ObserveLivenessWithError observation = %+v, want zero with malformed binding", obs)
+		}
+		if backed.raw.IsRunning("worker") {
+			t.Fatal("IsRunning = true, want legacy false for malformed binding")
+		}
+		if backed.raw.ProcessAlive("worker", nil) {
+			t.Fatal("ProcessAlive = true, want legacy false for malformed binding")
+		}
+	})
+}
+
+func TestListRunningClassifiesT3SessionStatuses(t *testing.T) {
+	cases := append(t3SessionStatusExpectations(), t3SessionStatusExpectation{
+		name: "malformed binding", status: "ready", includeStatus: true, malformed: true, wantUnavailable: true,
+	})
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &Provider{}
+			p.cacheSnapshot(t3SessionStatusSnapshot("worker", tc))
+
+			names, err := p.ListRunning("")
+			if tc.wantUnavailable {
+				if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+					t.Fatalf("ListRunning error = %v, want runtime unavailable", err)
+				}
+				if runtime.IsPartialListError(err) {
+					t.Fatalf("ListRunning error = %v, want total failure with no usable names", err)
+				}
+			} else if err != nil {
+				t.Fatalf("ListRunning: %v", err)
+			}
+			wantNames := []string(nil)
+			if tc.wantLive {
+				wantNames = []string{"worker"}
+			}
+			if strings.Join(names, ",") != strings.Join(wantNames, ",") {
+				t.Fatalf("ListRunning names = %v, want %v", names, wantNames)
+			}
+		})
+	}
+}
+
+func TestT3LivenessSurfacesSelectNewestEligibleDuplicateThread(t *testing.T) {
+	thread := func(id, status, updatedAt, state string, deleted bool) map[string]interface{} {
+		meta := map[string]interface{}{"gc.sessionName": "worker"}
+		if state != "" {
+			meta["gc.state"] = state
+		}
+		got := map[string]interface{}{
+			"id":             id,
+			"projectId":      "project-1",
+			"updatedAt":      updatedAt,
+			"customMetadata": meta,
+			"session":        map[string]interface{}{"status": status},
+		}
+		if deleted {
+			got["deletedAt"] = "2026-08-23T00:03:00Z"
+		}
+		return got
+	}
+
+	olderStopped := thread("thread-old", "stopped", "2026-08-23T00:01:00Z", "", false)
+	newerReady := thread("thread-new", "ready", "2026-08-23T00:02:00Z", "", false)
+	olderReady := thread("thread-live", "ready", "2026-08-23T00:01:00Z", "", false)
+	newerArchived := thread("thread-archived", "stopped", "2026-08-23T00:02:00Z", "archived", false)
+	newerDeleted := thread("thread-deleted", "stopped", "2026-08-23T00:02:00Z", "", true)
+
+	for _, tc := range []struct {
+		name     string
+		threads  []interface{}
+		wantLive bool
+	}{
+		{name: "newest live after stale stopped", threads: []interface{}{olderStopped, newerReady}, wantLive: true},
+		{name: "snapshot order does not change selection", threads: []interface{}{newerReady, olderStopped}, wantLive: true},
+		{name: "archived replacement is ineligible", threads: []interface{}{olderReady, newerArchived}, wantLive: true},
+		{name: "deleted replacement is ineligible", threads: []interface{}{olderReady, newerDeleted}, wantLive: true},
+		{name: "archived and deleted only are absent", threads: []interface{}{newerArchived, newerDeleted}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &Provider{}
+			p.cacheSnapshot(map[string]interface{}{"threads": tc.threads})
+
+			names, err := p.ListRunning("")
+			if err != nil {
+				t.Fatalf("ListRunning: %v", err)
+			}
+			listed := strings.Join(names, ",") == "worker"
+			if listed != tc.wantLive {
+				t.Fatalf("ListRunning names = %v, want live=%v", names, tc.wantLive)
+			}
+
+			obs, err := runtime.ObserveLivenessWithError(p, "worker", nil)
+			if err != nil {
+				t.Fatalf("ObserveLivenessWithError: %v", err)
+			}
+			if obs.Running != tc.wantLive || obs.Alive != tc.wantLive {
+				t.Fatalf("ObserveLivenessWithError = %+v, want live=%v", obs, tc.wantLive)
+			}
+			if got := p.IsRunning("worker"); got != tc.wantLive {
+				t.Fatalf("IsRunning = %v, want %v", got, tc.wantLive)
+			}
+			if got := p.ProcessAlive("worker", nil); got != tc.wantLive {
+				t.Fatalf("ProcessAlive = %v, want %v", got, tc.wantLive)
+			}
+		})
+	}
+}
+
+func TestListRunningIncludesRecentStartsBeforeSnapshotMaterialization(t *testing.T) {
+	p := &Provider{recentStarts: map[string]time.Time{
+		"worker":       time.Now(),
+		"other-worker": time.Now(),
+	}}
+	p.cacheSnapshot(map[string]interface{}{"threads": []interface{}{}})
+
+	names, err := p.ListRunning("work")
+	if err != nil {
+		t.Fatalf("ListRunning: %v", err)
+	}
+	if strings.Join(names, ",") != "worker" {
+		t.Fatalf("ListRunning names = %v, want recent prefix-matching worker", names)
+	}
+}
+
+func TestListRunningReturnsLiveNamesWithPartialErrorForUnknownStatus(t *testing.T) {
+	p := &Provider{}
+	p.cacheSnapshot(map[string]interface{}{
+		"threads": []interface{}{
+			map[string]interface{}{
+				"id":             "thread-live",
+				"projectId":      "project-1",
+				"customMetadata": map[string]interface{}{"gc.sessionName": "live-worker"},
+				"session":        map[string]interface{}{"status": "idle"},
+			},
+			map[string]interface{}{
+				"id":             "thread-unknown",
+				"projectId":      "project-1",
+				"customMetadata": map[string]interface{}{"gc.sessionName": "unknown-worker"},
+				"session":        map[string]interface{}{},
+			},
+		},
+	})
+
+	names, err := p.ListRunning("")
+	if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("ListRunning error = %v, want runtime unavailable", err)
+	}
+	if !runtime.IsPartialListError(err) {
+		t.Fatalf("ListRunning error = %v, want partial-list classification", err)
+	}
+	if strings.Join(names, ",") != "live-worker" {
+		t.Fatalf("ListRunning names = %v, want live-worker partial result", names)
+	}
+}
+
+func TestSeamBackedLastActivityPreservesSnapshotUncertainty(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		wsURL string
+	}{
+		{name: "soft transport outage", wsURL: "ws://127.0.0.1:1/ws"},
+		{name: "hard snapshot setup error", wsURL: "not-a-websocket-url"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, sp := newSeamBackedSnapshotTestProvider(t, tc.wsURL)
+			lastActivity, err := sp.GetLastActivity("worker")
+			if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("GetLastActivity error = %v, want runtime unavailable", err)
+			}
+			if !lastActivity.IsZero() {
+				t.Fatalf("GetLastActivity = %v, want zero with unknown result", lastActivity)
+			}
+		})
 	}
 }
