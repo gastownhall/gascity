@@ -72,8 +72,8 @@ type RemoteOptions struct {
 	Token TokenSource
 	// RefreshToken, when non-nil, force-mints a fresh bearer (bypassing any
 	// expiry cache). The transport calls it once on a 401 and retries only a
-	// bearer-authenticated, replayable non-SSE request without a single-use
-	// city-write grant.
+	// bearer-authenticated, safe, replayable non-SSE request without a
+	// single-use city-write grant.
 	RefreshToken TokenRefreshSource
 	// Grant, when non-nil, mints an X-GC-City-Write grant for each mutating
 	// request (a direct hardened self-host). Reads never carry a grant.
@@ -145,6 +145,8 @@ func NewRemoteEventsClient(baseURL string, opts RemoteOptions) (*genclient.Clien
 		genclient.WithHTTPClient(stream),
 		genclient.WithRequestEditorFn(func(_ context.Context, req *http.Request) error {
 			req.Header.Set("X-GC-Request", "true")
+			// This client is used exclusively for generated SSE operations.
+			req.Header.Set("Accept", "text/event-stream")
 			return nil
 		}),
 	}
@@ -295,11 +297,11 @@ func newRemoteHTTPClients(opts RemoteOptions) (rest, stream *http.Client, err er
 	return rest, stream, nil
 }
 
-// reauthRoundTripper retries one bearer-authenticated, replayable non-SSE
+// reauthRoundTripper retries one bearer-authenticated, safe, replayable non-SSE
 // request after a 401 by force-minting a fresh bearer. It calls the underlying
 // transport directly for the retry, so a second 401 is returned without another
-// refresh. Redirect follow-ups and requests with single-use city-write grants
-// are deliberately never retried.
+// refresh. Unsafe requests, redirect follow-ups, and requests with single-use
+// city-write grants are deliberately never retried.
 type reauthRoundTripper struct {
 	base    http.RoundTripper
 	refresh TokenRefreshSource
@@ -310,7 +312,8 @@ func (rt *reauthRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 	if err != nil || resp == nil || resp.StatusCode != http.StatusUnauthorized || rt.refresh == nil {
 		return resp, err
 	}
-	if !hasBearerAuthorization(req.Header.Get("Authorization")) ||
+	if !isRetrySafeMethod(req.Method) ||
+		!hasBearerAuthorization(req.Header.Get("Authorization")) ||
 		req.Header.Get("X-GC-City-Write") != "" ||
 		isSSERequest(req) ||
 		req.Response != nil ||
@@ -358,13 +361,16 @@ func hasBearerAuthorization(value string) bool {
 	return strings.HasPrefix(value, "Bearer ") && strings.TrimSpace(strings.TrimPrefix(value, "Bearer ")) != ""
 }
 
-func isSSERequest(req *http.Request) bool {
-	// Generated SSE requests intentionally have no Accept header. Keep only
-	// their exact route shapes non-replayable; generic "stream" paths remain
-	// eligible for the normal safe-REST retry policy.
-	if req.Method == http.MethodGet && req.URL != nil && isGeneratedSSEPath(req.URL.EscapedPath()) {
+func isRetrySafeMethod(method string) bool {
+	switch strings.ToUpper(method) {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
 		return true
+	default:
+		return false
 	}
+}
+
+func isSSERequest(req *http.Request) bool {
 	for _, value := range req.Header.Values("Accept") {
 		for _, mediaType := range strings.Split(value, ",") {
 			if strings.EqualFold(strings.TrimSpace(strings.SplitN(mediaType, ";", 2)[0]), "text/event-stream") {
@@ -373,37 +379,6 @@ func isSSERequest(req *http.Request) bool {
 		}
 	}
 	return false
-}
-
-func isGeneratedSSEPath(path string) bool {
-	segments := strings.Split(path, "/")
-	nonEmpty := func(indexes ...int) bool {
-		for _, index := range indexes {
-			if segments[index] == "" {
-				return false
-			}
-		}
-		return true
-	}
-
-	switch len(segments) {
-	case 4: // /v0/events/stream
-		return segments[0] == "" && segments[1] == "v0" && segments[2] == "events" && segments[3] == "stream"
-	case 6: // /v0/city/{city}/events/stream
-		return segments[0] == "" && segments[1] == "v0" && segments[2] == "city" &&
-			nonEmpty(3) && segments[4] == "events" && segments[5] == "stream"
-	case 7: // /v0/city/{city}/session/{id}/stream
-		return segments[0] == "" && segments[1] == "v0" && segments[2] == "city" &&
-			nonEmpty(3, 5) && segments[4] == "session" && segments[6] == "stream"
-	case 8: // /v0/city/{city}/agent/{base}/output/stream
-		return segments[0] == "" && segments[1] == "v0" && segments[2] == "city" &&
-			nonEmpty(3, 5) && segments[4] == "agent" && segments[6] == "output" && segments[7] == "stream"
-	case 9: // /v0/city/{city}/agent/{dir}/{base}/output/stream
-		return segments[0] == "" && segments[1] == "v0" && segments[2] == "city" &&
-			nonEmpty(3, 5, 6) && segments[4] == "agent" && segments[7] == "output" && segments[8] == "stream"
-	default:
-		return false
-	}
 }
 
 // remoteTLSConfig builds the client TLS config from the options: a custom CA

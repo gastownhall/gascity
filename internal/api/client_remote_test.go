@@ -455,13 +455,55 @@ func TestReauthRoundTripper_SkipsGrantedRequest(t *testing.T) {
 		return &http.Response{StatusCode: http.StatusUnauthorized, Body: io.NopCloser(strings.NewReader("")), Header: http.Header{}}, nil
 	})
 	rt := &reauthRoundTripper{base: base, refresh: func(context.Context) (string, error) { return "fresh", nil }}
-	req, _ := http.NewRequest("POST", "https://example/y", nil)
+	// Use a safe method so this test exercises the grant exclusion itself rather
+	// than the unsafe-method exclusion.
+	req, _ := http.NewRequest(http.MethodGet, "https://example/y", nil)
+	req.Header.Set("Authorization", "Bearer stale")
 	req.Header.Set("X-GC-City-Write", "grant")
 	if _, err := rt.RoundTrip(req); err != nil {
 		t.Fatal(err)
 	}
 	if calls != 1 {
 		t.Fatalf("calls = %d, want 1 (granted request must not retry)", calls)
+	}
+}
+
+func TestReauthRoundTripperSkipsUnsafeReplayableRequests(t *testing.T) {
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
+		t.Run(method, func(t *testing.T) {
+			calls, refreshes := 0, 0
+			rt := &reauthRoundTripper{
+				base: rtFunc(func(*http.Request) (*http.Response, error) {
+					calls++
+					return &http.Response{
+						StatusCode: http.StatusUnauthorized,
+						Body:       io.NopCloser(strings.NewReader("rejected")),
+						Header:     http.Header{},
+					}, nil
+				}),
+				refresh: func(context.Context) (string, error) {
+					refreshes++
+					return "fresh", nil
+				},
+			}
+			req, err := http.NewRequest(method, "https://example.test/status", strings.NewReader("replayable body"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if req.GetBody == nil {
+				t.Fatal("test request must be replayable")
+			}
+			req.Header.Set("Authorization", "Bearer stale")
+
+			resp, err := rt.RoundTrip(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusUnauthorized || calls != 1 || refreshes != 0 {
+				t.Fatalf("status=%d calls=%d refreshes=%d, want 401, 1, 0", resp.StatusCode, calls, refreshes)
+			}
+		})
 	}
 }
 
@@ -507,7 +549,7 @@ func TestReauthRoundTripperSkipsIneligible401(t *testing.T) {
 			name: "non replayable body",
 			request: func(t *testing.T) *http.Request {
 				t.Helper()
-				req, err := http.NewRequest(http.MethodPost, "https://example.test/status", io.NopCloser(strings.NewReader("stream")))
+				req, err := http.NewRequest(http.MethodGet, "https://example.test/status", io.NopCloser(strings.NewReader("stream")))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -750,7 +792,7 @@ func TestReauthRoundTripperReturnsBodyRecreationFailure(t *testing.T) {
 		}),
 		refresh: func(context.Context) (string, error) { refreshes++; return "fresh", nil },
 	}
-	req, err := http.NewRequest(http.MethodPost, "https://example.test/status", strings.NewReader("body"))
+	req, err := http.NewRequest(http.MethodGet, "https://example.test/status", strings.NewReader("body"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -766,8 +808,7 @@ func TestReauthRoundTripperReturnsBodyRecreationFailure(t *testing.T) {
 }
 
 // TestNewRemoteEventsClientDoesNotRetrySSE401 proves every generated SSE request
-// is never replayed after a 401. These generated requests do not set
-// Accept: text/event-stream, so each real wire path must remain non-replayable.
+// sends its required Accept header and is never replayed after a 401.
 func TestNewRemoteEventsClientDoesNotRetrySSE401(t *testing.T) {
 	tests := []struct {
 		name string
@@ -849,8 +890,8 @@ func TestNewRemoteEventsClientDoesNotRetrySSE401(t *testing.T) {
 			if gotPath != tt.path {
 				t.Fatalf("request path = %q, want %q", gotPath, tt.path)
 			}
-			if gotAccept != "" {
-				t.Fatalf("generated stream Accept = %q, want none", gotAccept)
+			if gotAccept != "text/event-stream" {
+				t.Fatalf("generated stream Accept = %q, want text/event-stream", gotAccept)
 			}
 			if gotAuth != "Bearer stale" {
 				t.Fatalf("Authorization = %q, want Bearer stale", gotAuth)
