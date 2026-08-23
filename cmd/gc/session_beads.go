@@ -2878,8 +2878,8 @@ func reapPreBootSessionBeads(
 			continue
 		}
 		if closeBead(store, info.ID, "stale-session", clk.Now().UTC(), stderr) {
-			fmt.Fprintf(stderr, "session reconciler: reaped pre-boot session bead %s (session %q created %s, host booted %s) — runtime server absent\n",
-				info.ID, strings.TrimSpace(info.SessionNameMetadata), info.CreatedAt.UTC().Format(time.RFC3339), boot.UTC().Format(time.RFC3339)) //nolint:errcheck
+			fmt.Fprintf(stderr, "session reconciler: reaped pre-boot session bead %s (session %q created %s, host booted %s) — runtime server absent\n", //nolint:errcheck
+				info.ID, strings.TrimSpace(info.SessionNameMetadata), info.CreatedAt.UTC().Format(time.RFC3339), boot.UTC().Format(time.RFC3339))
 			reaped++
 		}
 	}
