@@ -320,7 +320,9 @@ func (rt *reauthRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 	tok = strings.TrimSpace(tok)
 	if rerr != nil {
 		_ = resp.Body.Close()
-		return nil, fmt.Errorf("refreshing bearer after 401: %w", rerr)
+		// Refresh sources may execute credential helpers whose errors include
+		// stderr. Keep helper diagnostics out of this public transport error.
+		return nil, fmt.Errorf("refreshing bearer after 401: credential refresh failed")
 	}
 	if tok == "" {
 		_ = resp.Body.Close()

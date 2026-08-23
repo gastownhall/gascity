@@ -2,8 +2,13 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -88,10 +93,30 @@ func TestResolveReadTarget_Remote(t *testing.T) {
 func TestCmdBeadsList_RemoteRoutesToServerNoFallback(t *testing.T) {
 	t.Setenv("GC_HOME", t.TempDir())
 
+	statePath := filepath.Join(t.TempDir(), "credential-state")
+	scriptPath := filepath.Join(t.TempDir(), "credential-helper.sh")
+	script := "#!/bin/sh\n" +
+		"if [ -e \"$1\" ]; then\n" +
+		"  printf '%s\\n' '{\"token\":\"fresh\",\"expiration_timestamp\":\"2030-01-01T00:00:00Z\"}'\n" +
+		"else\n" +
+		"  : > \"$1\"\n" +
+		"  printf '%s\\n' '{\"token\":\"stale\",\"expiration_timestamp\":\"2030-01-01T00:00:00Z\"}'\n" +
+		"fi\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	command := fmt.Sprintf("%s %s", strconv.Quote(scriptPath), strconv.Quote(statePath))
+
 	var gotPath, gotReq string
+	var auth []string
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotReq = r.Header.Get("X-GC-Request")
+		auth = append(auth, r.Header.Get("Authorization"))
+		if len(auth) == 1 {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{}`))
@@ -99,7 +124,7 @@ func TestCmdBeadsList_RemoteRoutesToServerNoFallback(t *testing.T) {
 	defer srv.Close()
 
 	var out, errb bytes.Buffer
-	if code := doContextAdd(clientcontext.Context{Name: "prod", URL: srv.URL, City: "mc", InsecureSkipVerify: true}, &out, &errb); code != 0 {
+	if code := doContextAdd(clientcontext.Context{Name: "prod", URL: srv.URL, City: "mc", InsecureSkipVerify: true, CredentialCommand: command}, &out, &errb); code != 0 {
 		t.Fatalf("seed context: %q", errb.String())
 	}
 	setProdContextFlag(t)
@@ -121,6 +146,9 @@ func TestCmdBeadsList_RemoteRoutesToServerNoFallback(t *testing.T) {
 	}
 	if gotReq != "true" {
 		t.Errorf("X-GC-Request = %q, want true", gotReq)
+	}
+	if got, want := auth, []string{"Bearer stale", "Bearer fresh"}; !slices.Equal(got, want) {
+		t.Fatalf("Authorization sequence = %v, want %v", got, want)
 	}
 }
 

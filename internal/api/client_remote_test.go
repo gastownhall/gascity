@@ -588,28 +588,81 @@ func TestReauthRoundTripperStopsAfterSecond401(t *testing.T) {
 	}
 }
 
-func TestReauthRoundTripperRefreshFailureClosesResponseAndPropagatesContext(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+func TestReauthRoundTripperRefreshFailureIsSecretSafe(t *testing.T) {
 	firstBody := &closeTrackingBody{Reader: strings.NewReader("rejected")}
 	rt := &reauthRoundTripper{
 		base: rtFunc(func(*http.Request) (*http.Response, error) {
-			cancel()
 			return &http.Response{StatusCode: http.StatusUnauthorized, Body: firstBody, Header: http.Header{}}, nil
 		}),
-		refresh: func(ctx context.Context) (string, error) { return "", ctx.Err() },
+		refresh: func(context.Context) (string, error) {
+			return "", errors.New("credential helper failed: bearer=super-secret helper stderr")
+		},
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://example.test/status", nil)
+	req, err := http.NewRequest(http.MethodGet, "https://example.test/status", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	req.Header.Set("Authorization", "Bearer stale")
 	resp, err := rt.RoundTrip(req)
-	if !errors.Is(err, context.Canceled) || resp != nil {
-		t.Fatalf("response=%v error=%v, want nil response and context cancellation", resp, err)
+	if resp != nil || err == nil {
+		t.Fatalf("response=%v error=%v, want nil response and refresh error", resp, err)
+	}
+	if got, want := err.Error(), "refreshing bearer after 401: credential refresh failed"; got != want {
+		t.Fatalf("refresh error = %q, want %q", got, want)
+	}
+	if strings.Contains(err.Error(), "super-secret") || strings.Contains(err.Error(), "stderr") {
+		t.Fatalf("refresh error leaked credential-helper output: %q", err)
 	}
 	if !firstBody.closed {
 		t.Fatal("first 401 response body was not closed")
+	}
+}
+
+func TestReauthRoundTripperRejectsEmptyRefreshedCredential(t *testing.T) {
+	firstBody := &closeTrackingBody{Reader: strings.NewReader("rejected")}
+	refreshes := 0
+	rt := &reauthRoundTripper{
+		base: rtFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusUnauthorized, Body: firstBody, Header: http.Header{}}, nil
+		}),
+		refresh: func(context.Context) (string, error) { refreshes++; return "  ", nil },
+	}
+	req, err := http.NewRequest(http.MethodGet, "https://example.test/status", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer stale")
+	resp, err := rt.RoundTrip(req)
+	if resp != nil || err == nil || err.Error() != "refreshing bearer after 401: credential source returned an empty token" {
+		t.Fatalf("response=%v error=%v, want empty refreshed credential error", resp, err)
+	}
+	if refreshes != 1 || !firstBody.closed {
+		t.Fatalf("refreshes=%d body closed=%v, want 1, true", refreshes, firstBody.closed)
+	}
+}
+
+func TestReauthRoundTripperReturnsBodyRecreationFailure(t *testing.T) {
+	firstBody := &closeTrackingBody{Reader: strings.NewReader("rejected")}
+	baseCalls, refreshes := 0, 0
+	rt := &reauthRoundTripper{
+		base: rtFunc(func(*http.Request) (*http.Response, error) {
+			baseCalls++
+			return &http.Response{StatusCode: http.StatusUnauthorized, Body: firstBody, Header: http.Header{}}, nil
+		}),
+		refresh: func(context.Context) (string, error) { refreshes++; return "fresh", nil },
+	}
+	req, err := http.NewRequest(http.MethodPost, "https://example.test/status", strings.NewReader("body"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.GetBody = func() (io.ReadCloser, error) { return nil, errors.New("body recreation failed") }
+	req.Header.Set("Authorization", "Bearer stale")
+	resp, err := rt.RoundTrip(req)
+	if resp != nil || err == nil || !strings.Contains(err.Error(), "body recreation failed") {
+		t.Fatalf("response=%v error=%v, want body recreation failure", resp, err)
+	}
+	if baseCalls != 1 || refreshes != 1 || !firstBody.closed {
+		t.Fatalf("calls=%d refreshes=%d body closed=%v, want 1, 1, true", baseCalls, refreshes, firstBody.closed)
 	}
 }
 
