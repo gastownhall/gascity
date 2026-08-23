@@ -910,6 +910,14 @@ func TestCityRuntimeDemandSnapshotRefreshesForNewRoutedReadyWork(t *testing.T) {
 	if got := second.result.PoolDesiredCounts[template]; got != 1 {
 		t.Fatalf("PoolDesiredCounts[%s] = %d, want 1 for newly-ready routed work", template, got)
 	}
+
+	third := cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
+	if buildCalls != 2 {
+		t.Fatalf("buildDesiredState call count = %d, want 2 after stable patrol reuse", buildCalls)
+	}
+	if got := third.result.PoolDesiredCounts[template]; got != 1 {
+		t.Fatalf("cached PoolDesiredCounts[%s] = %d, want 1", template, got)
+	}
 }
 
 func TestCityRuntimeEnsureManagedDoltPublishedForTickCallsHealthWhenManagedPortMissing(t *testing.T) {
