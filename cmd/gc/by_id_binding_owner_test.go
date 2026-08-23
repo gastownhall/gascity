@@ -4,13 +4,16 @@ import (
 	"bytes"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/storeref/storereftest"
 )
 
@@ -297,9 +300,112 @@ func TestBindingOwnerLeavesTheWorkResidualUnprobed(t *testing.T) {
 		t.Errorf("a city that relocates nothing reported a binding owner %p", owner.Store)
 	}
 
-	if _, err := (unprobedWorkResidual{}).Get("gc-1"); err == nil {
+	residual := newUnprobedWorkResidual()
+	got, err := residual.Get("gc-1")
+	if err == nil {
 		t.Error("the residual placeholder answered a Get; it must report the contract violation instead of a miss")
 	}
+	if !strings.Contains(err.Error(), "gc-1") {
+		t.Errorf("the residual's Get refusal reads %v, want the probed id named", err)
+	}
+	_ = got
+
+	// Get is the method the resolver reaches for, so it is the one with a
+	// bespoke message — but a leg role that called anything else must not get a
+	// nil-pointer panic, and must not get a clean empty answer either.
+	if _, err := residual.List(beads.ListQuery{}); !errors.Is(err, errWorkResidualProbed) {
+		t.Errorf("the residual answered List with err=%v, want the contract violation — an empty list here reads as absence", err)
+	}
+	if err := residual.Close("gc-1"); !errors.Is(err, errWorkResidualProbed) {
+		t.Errorf("the residual answered Close with err=%v, want the contract violation", err)
+	}
+	if _, err := residual.Create(beads.Bead{Title: "written through a placeholder"}); !errors.Is(err, errWorkResidualProbed) {
+		t.Errorf("the residual answered Create with err=%v, want the contract violation", err)
+	}
+}
+
+// TestConvoyResolutionStillRefusesAnIdTwoLedgersBothHold covers the rule the
+// binding short-circuit steps around, which until now nothing asserted anywhere
+// in the tree.
+//
+// The claim "dual residency is not ambiguity" only means something if ambiguity
+// is still refused when it is real. Two candidate stores holding the same id
+// with no binding in play is two ledgers disagreeing by accident, and the scan
+// must say so rather than resolve to whichever candidate it enumerated first —
+// the close that followed would write the loser.
+func TestConvoyResolutionStillRefusesAnIdTwoLedgersBothHold(t *testing.T) {
+	cityPath := t.TempDir()
+	seedCLIStorageRoutes(t, cityPath, &storageRoutes{stores: map[coordclass.Class]beads.Store{}})
+	cfg := &config.City{Rigs: []config.Rig{{Name: "alpha", Path: filepath.Join(cityPath, "rigs", "alpha")}}}
+
+	byDir := map[string]beads.Store{}
+	openStore := func(dir string) (beads.Store, error) {
+		if store, ok := byDir[dir]; ok {
+			return store, nil
+		}
+		store := splittest.NewWorkStore(t, "hq")
+		if _, err := store.Create(beads.Bead{Title: "a copy in " + dir, Type: "task"}); err != nil {
+			t.Fatalf("seeding the candidate at %s: %v", dir, err)
+		}
+		byDir[dir] = store
+		return store, nil
+	}
+
+	if len(convoyStoreCandidates(cfg, cityPath, "hq-1")) < 2 {
+		t.Fatalf("the fixture offers %d candidate store(s); a uniqueness refusal needs at least two", len(convoyStoreCandidates(cfg, cityPath, "hq-1")))
+	}
+	_, _, err := resolveOwningStoreDir("hq-1", cfg, cityPath, openStore)
+	if err == nil {
+		t.Fatal("an id two candidate stores both hold resolved cleanly; the scan's uniqueness rule is gone and the close would write whichever store enumerated last")
+	}
+	if !strings.Contains(err.Error(), "uniquely addressable") {
+		t.Errorf("the refusal reads %v, want the uniqueness contract named", err)
+	}
+}
+
+// TestBeadForOwnerDoesNotReReadAProbedLeg pins the reason Owner carries a bead
+// at all.
+//
+// A leg the resolver actually probed has already paid for the read, and the
+// answer it returns IS that read. Fetching it again is not merely wasteful: it
+// opens a window in which the second read disagrees with the one the resolver
+// made its ownership decision from.
+func TestBeadForOwnerDoesNotReReadAProbedLeg(t *testing.T) {
+	counted := &countingGetStore{Store: splittest.NewWorkStore(t, "hq")}
+	seeded, err := counted.Create(beads.Bead{Title: "the probed answer", Type: "task"})
+	if err != nil {
+		t.Fatalf("seeding the counted store: %v", err)
+	}
+
+	got, err := beadForOwner(storeref.Owner{Store: counted, Bead: seeded, Read: true}, seeded.ID)
+	if err != nil {
+		t.Fatalf("reading a probed owner: %v", err)
+	}
+	if got.Title != "the probed answer" {
+		t.Errorf("a probed owner served %q, want the bead the resolver already read", got.Title)
+	}
+	if counted.gets != 0 {
+		t.Errorf("a probed owner cost %d further Get(s), want 0 — the leg's read is the caller's read", counted.gets)
+	}
+
+	if _, err := beadForOwner(storeref.Owner{Store: counted}, seeded.ID); err != nil {
+		t.Fatalf("reading an unprobed owner: %v", err)
+	}
+	if counted.gets != 1 {
+		t.Errorf("an unprobed owner cost %d Get(s), want exactly 1", counted.gets)
+	}
+}
+
+// countingGetStore counts the reads a caller makes of its own accord, so a test
+// can tell a served answer from a re-fetched one.
+type countingGetStore struct {
+	beads.Store
+	gets int
+}
+
+func (s *countingGetStore) Get(id string) (beads.Bead, error) {
+	s.gets++
+	return s.Store.Get(id)
 }
 
 // resetAutocloseFaultOnce lets a test observe the once-per-process warning more
