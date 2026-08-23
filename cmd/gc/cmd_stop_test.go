@@ -563,7 +563,7 @@ func setupSupervisorManagedInvalidCity(t *testing.T) string {
 		t.Fatal(err)
 	}
 	reg := registryAt(t, gcHome)
-	if err := reg.Register(cityDir, "invalid-supervisor-city"); err != nil {
+	if err := reg.Register(cityDir, "registered-invalid-city"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -581,6 +581,23 @@ func setupSupervisorManagedInvalidCity(t *testing.T) string {
 
 func TestCmdStopWallClockTimeoutBoundsSupervisorManagedInvalidConfigStop(t *testing.T) {
 	cityDir := setupSupervisorManagedInvalidCity(t)
+	reg := registryAt(t, os.Getenv("GC_HOME"))
+	assertOriginalRegistration := func(when string) {
+		t.Helper()
+		entries, err := reg.List()
+		if err != nil {
+			t.Fatalf("list registry %s: %v", when, err)
+		}
+		if len(entries) != 1 {
+			t.Fatalf("registry %s = %v, want the original city entry", when, entries)
+		}
+		if got, want := canonicalTestPath(entries[0].Path), canonicalTestPath(cityDir); got != want {
+			t.Fatalf("registry path %s = %q, want %q", when, got, want)
+		}
+		if got, want := entries[0].EffectiveName(), "registered-invalid-city"; got != want {
+			t.Fatalf("registry name %s = %q, want %q", when, got, want)
+		}
+	}
 	waitEntered := make(chan struct{})
 	releaseWait := make(chan struct{})
 	waitExited := make(chan struct{})
@@ -658,7 +675,12 @@ func TestCmdStopWallClockTimeoutBoundsSupervisorManagedInvalidConfigStop(t *test
 	if !strings.Contains(stderr.String(), fmt.Sprintf("timed out after %s", testWallClockCap)) {
 		t.Fatalf("stderr = %q, want wall-clock timeout message", stderr.String())
 	}
+	assertOriginalRegistration("when the timeout returns")
+	if !strings.Contains(stderr.String(), "restored registration for 'registered-invalid-city'") {
+		t.Fatalf("stderr = %q, want timeout rollback message", stderr.String())
+	}
 	releaseAndDrainWorker()
+	assertOriginalRegistration("after the late worker exits")
 	if stdout.String() != "" {
 		t.Fatalf("stdout = %q after timed-out worker exited, want no late success JSON", stdout.String())
 	}
@@ -727,7 +749,7 @@ func TestCmdStopJSONReportsUnregisteredTrueForSupervisorManagedCity(t *testing.T
 	waitForSupervisorControllerStopHook = func(string, time.Duration) error { return nil }
 
 	var stdout, stderr lockedBuffer
-	code := cmdStopJSON([]string{cityDir}, &stdout, &stderr, 0, false, true)
+	code := cmdStopJSON([]string{cityDir}, &stdout, &stderr, 5*time.Second, false, true)
 	if code != 0 {
 		t.Fatalf("cmdStopJSON() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
@@ -737,6 +759,13 @@ func TestCmdStopJSONReportsUnregisteredTrueForSupervisorManagedCity(t *testing.T
 	}
 	if got.Unregistered == nil || !*got.Unregistered {
 		t.Fatalf("payload.Unregistered = %v, want pointer to true; payload=%+v", got.Unregistered, got)
+	}
+	entries, err := reg.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("registry after successful JSON stop = %v, want committed removal", entries)
 	}
 }
 
@@ -843,6 +872,16 @@ func TestCmdStopSupervisorManagedInvalidCityTomlFailsWhenShutdownFails(t *testin
 	}
 	if !strings.Contains(stderr.String(), "bead store") || !strings.Contains(stderr.String(), "provider-stop-failed") {
 		t.Fatalf("stderr = %q, want bead-store shutdown error", stderr.String())
+	}
+	entries, err := reg.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || !samePath(entries[0].Path, cityDir) || entries[0].EffectiveName() != "invalid-supervisor-city" {
+		t.Fatalf("registry after managed-provider stop failure = %v, want exact original entry", entries)
+	}
+	if !strings.Contains(stderr.String(), "restored registration for 'invalid-supervisor-city'") {
+		t.Fatalf("stderr = %q, want registration rollback after managed-provider stop failure", stderr.String())
 	}
 }
 
