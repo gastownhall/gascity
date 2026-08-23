@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/api/genclient"
 	"github.com/gastownhall/gascity/internal/citywriteauth"
@@ -618,6 +619,64 @@ func TestReauthRoundTripperRefreshFailureIsSecretSafe(t *testing.T) {
 	}
 }
 
+func TestReauthRoundTripperRefreshFailurePreservesRequestContext(t *testing.T) {
+	tests := []struct {
+		name                string
+		newContext          func(*testing.T) (context.Context, context.CancelFunc)
+		cancelBeforeRefresh bool
+		want                error
+	}{
+		{
+			name: "canceled",
+			newContext: func(t *testing.T) (context.Context, context.CancelFunc) {
+				return context.WithCancel(t.Context())
+			},
+			cancelBeforeRefresh: true,
+			want:                context.Canceled,
+		},
+		{
+			name: "deadline exceeded",
+			newContext: func(t *testing.T) (context.Context, context.CancelFunc) {
+				return context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+			},
+			want: context.DeadlineExceeded,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := tt.newContext(t)
+			defer cancel()
+			firstBody := &closeTrackingBody{Reader: strings.NewReader("rejected")}
+			rt := &reauthRoundTripper{
+				base: rtFunc(func(*http.Request) (*http.Response, error) {
+					if tt.cancelBeforeRefresh {
+						cancel()
+					}
+					return &http.Response{StatusCode: http.StatusUnauthorized, Body: firstBody, Header: http.Header{}}, nil
+				}),
+				refresh: func(context.Context) (string, error) {
+					return "", errors.New("credential helper failed: bearer=super-secret helper stderr")
+				},
+			}
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://example.test/status", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Authorization", "Bearer stale")
+			resp, err := rt.RoundTrip(req)
+			if resp != nil || !errors.Is(err, tt.want) {
+				t.Fatalf("response=%v error=%v, want nil response and %v", resp, err, tt.want)
+			}
+			if strings.Contains(err.Error(), "super-secret") || strings.Contains(err.Error(), "stderr") {
+				t.Fatalf("refresh error leaked credential-helper output: %q", err)
+			}
+			if !firstBody.closed {
+				t.Fatal("first 401 response body was not closed")
+			}
+		})
+	}
+}
+
 func TestReauthRoundTripperRejectsEmptyRefreshedCredential(t *testing.T) {
 	firstBody := &closeTrackingBody{Reader: strings.NewReader("rejected")}
 	refreshes := 0
@@ -666,32 +725,56 @@ func TestReauthRoundTripperReturnsBodyRecreationFailure(t *testing.T) {
 	}
 }
 
-// TestNewRemoteEventsClientAttachesAuth proves the events client (used by
-// `gc events --context`) carries the X-GC-Request CSRF header and an
-// Authorization bearer from opts.Token — so the events feed authenticates to a
-// remote edge like the REST client does.
-func TestNewRemoteEventsClientAttachesAuth(t *testing.T) {
-	var gotAuth, gotCSRF string
+// TestNewRemoteEventsClientDoesNotRetrySSE401 proves the actual generated
+// StreamEvents request is never replayed after a 401. The generated request
+// does not set Accept: text/event-stream, so this covers its real wire shape.
+func TestNewRemoteEventsClientDoesNotRetrySSE401(t *testing.T) {
+	var gotAuth, gotCSRF, gotPath, gotAccept string
+	requests, refreshes := 0, 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
 		gotAuth = r.Header.Get("Authorization")
 		gotCSRF = r.Header.Get("X-GC-Request")
-		w.WriteHeader(http.StatusOK)
+		gotPath = r.URL.Path
+		gotAccept = r.Header.Get("Accept")
+		w.WriteHeader(http.StatusUnauthorized)
 	}))
 	defer srv.Close()
 
 	gen, err := NewRemoteEventsClient(srv.URL, RemoteOptions{
-		Token: func() (string, error) { return "tok", nil },
+		Token: func() (string, error) { return "stale", nil },
+		RefreshToken: func(context.Context) (string, error) {
+			refreshes++
+			return "fresh", nil
+		},
 	})
 	if err != nil {
 		t.Fatalf("NewRemoteEventsClient: %v", err)
 	}
-	if _, err := gen.StreamEvents(context.Background(), "mc", &genclient.StreamEventsParams{}); err != nil {
+	resp, err := gen.StreamEvents(context.Background(), "mc", &genclient.StreamEventsParams{})
+	if err != nil {
 		t.Fatalf("StreamEvents: %v", err)
 	}
-	if gotAuth != "Bearer tok" {
-		t.Fatalf("Authorization = %q, want Bearer tok", gotAuth)
+	if resp == nil {
+		t.Fatal("StreamEvents returned a nil response")
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("StreamEvents status = %d, want 401", resp.StatusCode)
+	}
+	if gotPath != "/v0/city/mc/events/stream" {
+		t.Fatalf("request path = %q, want generated stream path", gotPath)
+	}
+	if gotAccept != "" {
+		t.Fatalf("generated StreamEvents Accept = %q, want none", gotAccept)
+	}
+	if gotAuth != "Bearer stale" {
+		t.Fatalf("Authorization = %q, want Bearer stale", gotAuth)
 	}
 	if gotCSRF != "true" {
 		t.Fatalf("X-GC-Request = %q, want true", gotCSRF)
+	}
+	if requests != 1 || refreshes != 0 {
+		t.Fatalf("requests=%d refreshes=%d, want 1, 0", requests, refreshes)
 	}
 }

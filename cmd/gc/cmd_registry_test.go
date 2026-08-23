@@ -976,10 +976,76 @@ func TestRegistryProviderReauthRoundTripperRetriesOnlyEligible401(t *testing.T) 
 }
 
 func TestRegistryProviderReauthRoundTripperRefreshHonorsCancellation(t *testing.T) {
-	requests := 0
+	tests := []struct {
+		name                string
+		newContext          func(*testing.T) (context.Context, context.CancelFunc)
+		cancelBeforeRefresh bool
+		want                error
+	}{
+		{
+			name: "canceled",
+			newContext: func(t *testing.T) (context.Context, context.CancelFunc) {
+				return context.WithCancel(t.Context())
+			},
+			cancelBeforeRefresh: true,
+			want:                context.Canceled,
+		},
+		{
+			name: "deadline exceeded",
+			newContext: func(t *testing.T) (context.Context, context.CancelFunc) {
+				return context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+			},
+			want: context.DeadlineExceeded,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := tt.newContext(t)
+			defer cancel()
+			requests := 0
+			rt := &registryProviderReauthRoundTripper{
+				base: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+					requests++
+					if tt.cancelBeforeRefresh {
+						cancel()
+					}
+					return &http.Response{
+						StatusCode: http.StatusUnauthorized,
+						Header:     make(http.Header),
+						Body:       io.NopCloser(strings.NewReader(`{}`)),
+						Request:    r,
+					}, nil
+				}),
+				refresh: func(_ context.Context, force bool) (string, error) {
+					if !force {
+						t.Fatal("401 refresh was not forced")
+					}
+					return "", errors.New("credential helper failed: bearer=super-secret helper stderr")
+				},
+			}
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://registry.example/api/publish-requests", bytes.NewReader([]byte("payload")))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Authorization", "Bearer initial")
+
+			resp, err := rt.RoundTrip(req)
+			if resp != nil || !errors.Is(err, tt.want) {
+				t.Fatalf("response=%v error=%v, want nil response and %v", resp, err, tt.want)
+			}
+			if strings.Contains(err.Error(), "super-secret") || strings.Contains(err.Error(), "stderr") {
+				t.Fatalf("refresh error leaked credential-helper output: %q", err)
+			}
+			if requests != 1 {
+				t.Fatalf("requests = %d, want no replay after cancellation", requests)
+			}
+		})
+	}
+}
+
+func TestRegistryProviderReauthRoundTripperRefreshFailureIsSecretSafe(t *testing.T) {
 	rt := &registryProviderReauthRoundTripper{
 		base: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
-			requests++
 			return &http.Response{
 				StatusCode: http.StatusUnauthorized,
 				Header:     make(http.Header),
@@ -987,30 +1053,25 @@ func TestRegistryProviderReauthRoundTripperRefreshHonorsCancellation(t *testing.
 				Request:    r,
 			}, nil
 		}),
-		refresh: func(ctx context.Context, force bool) (string, error) {
-			if !force {
-				t.Fatal("401 refresh was not forced")
-			}
-			return "", ctx.Err()
+		refresh: func(context.Context, bool) (string, error) {
+			return "", errors.New("credential helper failed: bearer=super-secret helper stderr")
 		},
 	}
-	ctx, cancel := context.WithCancel(t.Context())
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://registry.example/api/publish-requests", bytes.NewReader([]byte("payload")))
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "https://registry.example/api/publish-requests", bytes.NewReader([]byte("payload")))
 	if err != nil {
 		t.Fatal(err)
 	}
 	req.Header.Set("Authorization", "Bearer initial")
-	cancel()
 
 	resp, err := rt.RoundTrip(req)
-	if resp != nil {
-		t.Fatalf("response = %v, want nil after refresh cancellation", resp)
+	if resp != nil || err == nil {
+		t.Fatalf("response=%v error=%v, want nil response and refresh error", resp, err)
 	}
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("err = %v, want context.Canceled", err)
+	if got, want := err.Error(), "refreshing registry credential after 401: credential refresh failed"; got != want {
+		t.Fatalf("refresh error = %q, want %q", got, want)
 	}
-	if requests != 1 {
-		t.Fatalf("requests = %d, want no replay after cancellation", requests)
+	if strings.Contains(err.Error(), "super-secret") || strings.Contains(err.Error(), "stderr") {
+		t.Fatalf("refresh error leaked credential-helper output: %q", err)
 	}
 }
 

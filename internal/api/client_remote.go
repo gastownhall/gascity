@@ -130,11 +130,11 @@ func NewRemoteCityScopedClient(baseURL, cityName string, opts RemoteOptions) (*C
 // NewRemoteEventsClient builds a genclient for the events feed against a remote
 // city. It is backed by the NO-TIMEOUT stream HTTP client — a --follow SSE
 // stream must not be cut by the bounded REST timeout — and carries the same auth
-// as the REST client: the X-GC-Request CSRF header, an Authorization bearer from
-// opts.Token, and a 401 re-mint via opts.RefreshToken (wrapped into the stream
-// transport by newRemoteHTTPClients). It is the events path's authenticated
-// client for a --context/--city-url remote target. No X-GC-City-Write grant: the
-// events feed is read-only.
+// as the REST client: the X-GC-Request CSRF header and an Authorization bearer
+// from opts.Token. A 401 on the stream is deliberately not retried, because
+// reconnecting an SSE request can duplicate event delivery. It is the events
+// path's authenticated client for a --context/--city-url remote target. No
+// X-GC-City-Write grant: the events feed is read-only.
 func NewRemoteEventsClient(baseURL string, opts RemoteOptions) (*genclient.ClientWithResponses, error) {
 	_, stream, err := newRemoteHTTPClients(opts)
 	if err != nil {
@@ -320,6 +320,9 @@ func (rt *reauthRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 	tok = strings.TrimSpace(tok)
 	if rerr != nil {
 		_ = resp.Body.Close()
+		if ctxErr := req.Context().Err(); ctxErr != nil {
+			return nil, fmt.Errorf("refreshing bearer after 401: %w", ctxErr)
+		}
 		// Refresh sources may execute credential helpers whose errors include
 		// stderr. Keep helper diagnostics out of this public transport error.
 		return nil, fmt.Errorf("refreshing bearer after 401: credential refresh failed")
@@ -349,6 +352,20 @@ func hasBearerAuthorization(value string) bool {
 }
 
 func isSSERequest(req *http.Request) bool {
+	// The generated StreamEvents request intentionally has no Accept header.
+	// Keep its exact route non-replayable even when a 401 arrives before a
+	// server can establish the SSE response.
+	if req.Method == http.MethodGet && req.URL != nil {
+		const prefix = "/v0/city/"
+		const suffix = "/events/stream"
+		path := req.URL.Path
+		if strings.HasPrefix(path, prefix) && strings.HasSuffix(path, suffix) {
+			cityName := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
+			if cityName != "" && !strings.Contains(cityName, "/") {
+				return true
+			}
+		}
+	}
 	for _, value := range req.Header.Values("Accept") {
 		for _, mediaType := range strings.Split(value, ",") {
 			if strings.EqualFold(strings.TrimSpace(strings.SplitN(mediaType, ";", 2)[0]), "text/event-stream") {
