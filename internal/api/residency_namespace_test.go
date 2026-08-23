@@ -27,10 +27,9 @@ import (
 // only thing the retirement premise needs about future beads. A store that
 // names nothing has verified nothing.
 //
-// The relic bit is the other half and is pessimistic on purpose. Nothing in
-// this build censuses a binding's residents, so "not known to hold relics" is
-// all a constructor can honestly say, and that is not the claim that retires a
-// probe. The two must land together: an observed mint bit over an optimistic
+// The relic bit is the other half, and this row supplies no census — so it
+// pins the default. "Not asked" is not "not known to hold relics", and neither
+// is the claim that retires a probe. An observed mint bit over an optimistic
 // relic bit would retire the probe on every converged city at boot, over
 // exactly the ids `gc storage migrate` preserved.
 func TestAPIBindingReportsBothHalvesOfTheRetirementCondition(t *testing.T) {
@@ -52,6 +51,7 @@ func TestAPIBindingReportsBothHalvesOfTheRetirementCondition(t *testing.T) {
 			bindings, _ := apiResidencyBindings(
 				[]beads.Store{tt.store},
 				map[beads.Store][]coordclass.Class{tt.store: {coordclass.ClassGraph}},
+				nil,
 			)
 			if len(bindings) != 1 {
 				t.Fatalf("got %d bindings, want 1", len(bindings))
@@ -60,7 +60,7 @@ func TestAPIBindingReportsBothHalvesOfTheRetirementCondition(t *testing.T) {
 				t.Errorf("MintsReserved = %v, want %v", bindings[0].MintsReserved, tt.mints)
 			}
 			if !bindings[0].HasLegacyResidents {
-				t.Error("HasLegacyResidents = false, but nothing in this build censuses the binding's residents; the probe would retire over every id the migration preserved")
+				t.Error("HasLegacyResidents = false for a caller that supplied no census; an unasked question is not a clean answer, and the probe would retire over every id the migration preserved")
 			}
 		})
 	}
@@ -107,6 +107,7 @@ func TestAPIBindingDeclaresEveryHeldNamespace(t *testing.T) {
 			bindings, refused := apiResidencyBindings(
 				[]beads.Store{store},
 				map[beads.Store][]coordclass.Class{store: tt.observed},
+				nil,
 			)
 			if refused != nil {
 				t.Fatalf("unexpected refusal: %v", refused)

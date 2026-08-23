@@ -62,6 +62,7 @@ import (
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/storebinding"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // storageSupportedTopologyStatement is the one sentence describing what this
@@ -94,6 +95,61 @@ type storageRoutes struct {
 	// its CachingStore stays the only emitter on that side — see
 	// class_store_emit.go for why the two must not both emit.
 	emitCityPath string
+	// relics records, per binding store, whether the boot-time census found an
+	// open bead outside the namespaces that binding declares.
+	//
+	// ABSENT MEANS UNKNOWN, and unknown means "assume relics" — see
+	// hasLegacyResidents. A process that never censused, or a binding whose
+	// mint bit is off so the answer would not matter, must not read as clean.
+	//
+	// Keying a map on beads.Store is safe here for the same confined reason
+	// residencyBindingsFromRoutes gives: every key comes from this struct's own
+	// stores map, which holds what storage boot opened.
+	relics map[beads.Store]bool
+}
+
+// hasLegacyResidents reports the boot census's verdict for a binding store.
+//
+// The default is the pessimistic one on every path that could skip the census:
+// a nil receiver, an uncensused process, and a store the census never reached
+// all answer true. Retirement is the claim that needs evidence.
+func (r *storageRoutes) hasLegacyResidents(store beads.Store) bool {
+	if r == nil {
+		return true
+	}
+	verdict, censused := r.relics[store]
+	if !censused {
+		return true
+	}
+	return verdict
+}
+
+// censusBindingRelics takes the once-per-process live read that turns
+// ClassBinding.HasLegacyResidents from a pessimistic default into an
+// observation.
+//
+// It runs only for a binding whose mint bit already verified, which is both a
+// cost bound and a statement of what the answer is for: probe retirement needs
+// BOTH halves, so a binding that does not mint truthfully pays nothing to learn
+// an answer that cannot change its plans.
+func censusBindingRelics(routes *storageRoutes) {
+	if routes == nil {
+		return
+	}
+	// Built with the pessimistic default still in force — the census reads the
+	// bindings' stores and prefixes, never their relic bits — so this is not
+	// circular. A refusal here is carried by the bindings themselves; the
+	// census's own error handling is what makes a refused binding keep its
+	// probe.
+	bindings, _ := residencyBindingsFromRoutes(routes)
+	relics := make(map[beads.Store]bool, len(bindings))
+	for _, binding := range bindings {
+		if !binding.MintsReserved {
+			continue
+		}
+		relics[binding.Leg.Store] = storeref.HasOpenLegacyResidents(binding) // residency:allow — indexes a census result by the binding it was taken from; resolves nothing
+	}
+	routes.relics = relics
 }
 
 // storeFor returns the store serving a class and whether these routes relocate
@@ -291,6 +347,11 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 	if err := recordServedBinding(plan, cityPath, storage, target); err != nil {
 		return nil, errors.Join(fmt.Errorf("%s: %w", logPrefix, err), routes.close())
 	}
+	// One read, here, because this is the single funnel both planes pass
+	// through — the controller's boot and the one-shot CLI's memoized routes.
+	// Taking it anywhere downstream would put a store read inside a per-tick
+	// topology constructor.
+	censusBindingRelics(routes)
 	return routes, nil
 }
 

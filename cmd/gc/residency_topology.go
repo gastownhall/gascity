@@ -410,12 +410,16 @@ func residencyBindingsFromRoutes(routes *storageRoutes) ([]storeref.ClassBinding
 		}
 		byStore[store] = append(byStore[store], class)
 	}
-	return residencyBindingsFor(order, byStore)
+	return residencyBindingsFor(order, byStore, routes.hasLegacyResidents)
 }
 
 // residencyBindingsFor turns a store->classes grouping into bindings, and
 // reports the standing refusal when any binding is a refusing store.
-func residencyBindingsFor(order []beads.Store, byStore map[beads.Store][]coordclass.Class) ([]storeref.ClassBinding, error) {
+//
+// relics answers the boot census's question for a binding store. A nil one is
+// the pessimistic answer for every store, which is what a caller holding no
+// censused routes is entitled to claim.
+func residencyBindingsFor(order []beads.Store, byStore map[beads.Store][]coordclass.Class, relics func(beads.Store) bool) ([]storeref.ClassBinding, error) {
 	var refused error
 	bindings := make([]storeref.ClassBinding, 0, len(order))
 	for _, store := range order {
@@ -425,13 +429,13 @@ func residencyBindingsFor(order []beads.Store, byStore map[beads.Store][]coordcl
 			Classes:  classes,
 			Prefixes: prefixes,
 			Leg:      storeref.Leg{Ref: storeref.ClassRef(classes), Store: store},
-			// The mint bit is observed from the store's own declaration; the
-			// relic bit is pessimistic because nothing here censuses residents.
-			// The probe therefore still stays in every plan — see the
-			// ClassBinding docs for why the optimistic pairing is the one shape
-			// that must never ship.
+			// Both bits are observations now: the mint bit from the store's own
+			// declaration, the relic bit from the boot census. Neither is ever
+			// optimistic by default — a store that declares no namespace does
+			// not mint truthfully, and a binding no census reached still has
+			// relics as far as this build knows.
 			MintsReserved:      storeref.MintsInsideNamespace(store, prefixes),
-			HasLegacyResidents: true,
+			HasLegacyResidents: hasLegacyResidentsOr(relics, store),
 		})
 		if refusing, ok := store.(storeref.RefusingStore); ok && refused == nil {
 			refused = refusing.StorageRefusal()
@@ -442,6 +446,15 @@ func residencyBindingsFor(order []beads.Store, byStore map[beads.Store][]coordcl
 	}
 	sort.SliceStable(bindings, func(i, j int) bool { return bindings[i].Leg.Ref < bindings[j].Leg.Ref })
 	return bindings, refused
+}
+
+// hasLegacyResidentsOr applies the census verdict, or the pessimistic default
+// when there is no census to ask.
+func hasLegacyResidentsOr(relics func(beads.Store) bool, store beads.Store) bool {
+	if relics == nil {
+		return true
+	}
+	return relics(store)
 }
 
 // infrastructureClasses is the class set a whole split relocates: every

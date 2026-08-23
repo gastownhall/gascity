@@ -40,6 +40,7 @@ func TestCLIBindingReportsBothHalvesOfTheRetirementCondition(t *testing.T) {
 			bindings, _ := residencyBindingsFor(
 				[]beads.Store{tt.store},
 				map[beads.Store][]coordclass.Class{tt.store: {coordclass.ClassGraph}},
+				nil,
 			)
 			if len(bindings) != 1 {
 				t.Fatalf("got %d bindings, want 1", len(bindings))
@@ -48,7 +49,7 @@ func TestCLIBindingReportsBothHalvesOfTheRetirementCondition(t *testing.T) {
 				t.Errorf("MintsReserved = %v, want %v", bindings[0].MintsReserved, tt.mints)
 			}
 			if !bindings[0].HasLegacyResidents {
-				t.Error("HasLegacyResidents = false, but nothing in this build censuses the binding's residents; the probe would retire over every id the migration preserved")
+				t.Error("HasLegacyResidents = false for a caller that supplied no census; an unasked question is not a clean answer, and the probe would retire over every id the migration preserved")
 			}
 		})
 	}

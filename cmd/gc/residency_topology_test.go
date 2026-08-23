@@ -218,7 +218,7 @@ func TestTopologyConstructorsServeOnlyTheWholeSplit(t *testing.T) {
 		t.Fatal("MintsReserved is set for a store that declares no mint prefix; the bit is an OBSERVATION and a store that names nothing has verified nothing")
 	}
 	if !bindings[0].HasLegacyResidents {
-		t.Fatal("HasLegacyResidents is clear, but nothing in this build censuses relics — the probe would retire over every id the migration preserved")
+		t.Fatal("HasLegacyResidents is clear on routes the boot never censused; an unasked question is not a clean answer, and the probe would retire over every id the migration preserved")
 	}
 }
 

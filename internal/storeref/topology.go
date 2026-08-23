@@ -216,14 +216,7 @@ func (t Topology) orderedRigs() []Leg {
 
 // coversID reports whether any of the binding's reserved prefixes claims id's
 // namespace.
-func (b ClassBinding) coversID(id string) bool {
-	for _, p := range b.Prefixes {
-		if IDInNamespace(id, p) {
-			return true
-		}
-	}
-	return false
-}
+func (b ClassBinding) coversID(id string) bool { return idInAnyNamespace(id, b.Prefixes) }
 
 // probeRetired reports whether the residence probe may be dropped for this
 // binding: it mints truthfully AND holds no open legacy resident. Both halves

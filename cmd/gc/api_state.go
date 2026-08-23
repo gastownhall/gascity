@@ -1706,6 +1706,18 @@ func (cs *controllerState) OrdersBeadStore() beads.OrdersStore {
 	return beads.OrdersStore{Store: resolveOrderStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
 }
 
+// ClassBindingHasLegacyResidents replays the boot census for one binding store.
+//
+// The store values the class accessors above hand out are the routes' own
+// stores — resolveClassStore returns routes.storeFor unwrapped — so the census
+// map the boot keyed by store answers directly here. A store this city never
+// censused, the work store included, keeps its probe.
+func (cs *controllerState) ClassBindingHasLegacyResidents(store beads.Store) bool {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.storageRoutes.hasLegacyResidents(store)
+}
+
 // CityBeadsDiagnostic returns the city-level bead store selection diagnostic.
 func (cs *controllerState) CityBeadsDiagnostic() *beads.BeadsDiagnostic {
 	cs.mu.RLock()
