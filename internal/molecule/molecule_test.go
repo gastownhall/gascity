@@ -1183,6 +1183,35 @@ func TestStepToBeadSubstitutesMetadataAndNotes(t *testing.T) {
 	}
 }
 
+func TestStepToBeadPreservesSourceSpecJSONWhenVariableContainsNewlines(t *testing.T) {
+	frozen := formula.Step{
+		ID:          "implement",
+		Description: "Request: {{request}}",
+	}
+	encoded, err := json.Marshal(frozen)
+	if err != nil {
+		t.Fatalf("marshal source step: %v", err)
+	}
+
+	request := "first line\nsecond \"quoted\" line\\tail"
+	bead := stepToBead(formula.RecipeStep{
+		Title:       "Step spec for implement",
+		Type:        "spec",
+		Description: string(encoded),
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey: "spec",
+		},
+	}, map[string]string{"request": request}, nil)
+
+	var got formula.Step
+	if err := json.Unmarshal([]byte(bead.Description), &got); err != nil {
+		t.Fatalf("unmarshal substituted source spec: %v\nsource spec: %s", err, bead.Description)
+	}
+	if want := "Request: " + request; got.Description != want {
+		t.Fatalf("source description = %q, want %q", got.Description, want)
+	}
+}
+
 func TestInstantiateUsesGraphApplyStoreForRetryLogicalRefs(t *testing.T) {
 	store := &graphApplySpyStore{MemStore: beads.NewMemStore()}
 	prev := IsGraphApplyEnabled()
