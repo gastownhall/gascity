@@ -12,6 +12,14 @@
 # worth reviewing — internal/api/residency_by_id.go's three []storeref.Leg
 # returners are the WorkAxisRouter the resolver itself declares, and
 # c:storeref.EachLeg's two entries are the enumeration seam's only consumers.
+#
+# The single c:WorkAxisRouter row is the census of storeref.ByID.WorkAxis
+# implementations. It is deliberately HERE and not in the shell guard's
+# allowlist: the allowlist filters a file before counting, which would blind the
+# ratchet to exactly the growth worth seeing. A second row means a second plane
+# answers "which work store holds this id" in its own order, and the rule that
+# governs that — stated beside the pattern in residency-boundary-patterns.txt —
+# requires a cross-plane router-agreement pin to land with it.
 cmd/gc/api_state.go	BeadStores	a:BeadStores	1
 cmd/gc/api_state.go	BeadStores	ast:returns-store-list	1
 cmd/gc/api_state.go	beadEventStoresLocked	ast:returns-store-list	1
@@ -106,6 +114,7 @@ internal/api/huma_handlers_convoys.go	humaHandleConvoyGet	a:BeadStores	1
 internal/api/huma_handlers_convoys.go	humaHandleConvoyList	a:BeadStores	1
 internal/api/huma_handlers_convoys.go	humaHandleConvoyRemove	a:BeadStores	1
 internal/api/residency_by_id.go	WorkLegsForID	ast:returns-store-list	1
+internal/api/residency_by_id.go	WorkLegsForID	c:WorkAxisRouter	1
 internal/api/residency_by_id.go	configuredPrefixLegs	ast:returns-store-list	1
 internal/api/residency_by_id.go	resolveLegByConfiguredIDPrefix	d:IDInNamespace	1
 internal/api/residency_by_id.go	unroutedWorkLegs	a:BeadStores	1

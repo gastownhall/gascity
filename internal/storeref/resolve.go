@@ -123,6 +123,15 @@ type ByID struct {
 // route byte-identical to the caller reading its own store. Any further legs
 // are read in order, so a multi-leg answer proves absence rather than handing
 // back a residual.
+//
+// DECLARING ONE IS A REVIEWED ACT. An implementation replaces this package's
+// by-id work rule with the plane's own, so a second one is a second answer to
+// the same question — the bug class the residency resolver exists to end,
+// wearing the resolver's API. A plane may declare at most one axis, every
+// declaration is named in scripts/residency-boundary-baseline.txt under the
+// c:WorkAxisRouter pattern, and the day a SECOND plane declares one the two
+// must land with a cross-plane router-agreement pin. The rule is stated in
+// full beside the pattern in scripts/residency-boundary-patterns.txt.
 type WorkAxisRouter interface {
 	// WorkLegsForID returns the work legs for id, or nil to leave the
 	// resolver's own [work, covering-shadows] rule in place.
