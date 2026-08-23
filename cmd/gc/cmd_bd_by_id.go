@@ -740,17 +740,24 @@ func (d bdByIDClassDoor) bindingName() string {
 // stops holding, this door has to resolve per class — the graph store would
 // otherwise be asked for a sessions-class id it does not hold, and would
 // truthfully answer that it is absent.
+//
+// cliSoleClassBinding is how that condition is CHECKED rather than assumed: it
+// reports the city's relocated bindings grouped by store and refuses to name a
+// sole one when there is more than one. Asking the graph class specifically
+// (graphClassBinding) could not tell the two shapes apart.
 func openBdByIDClassFrontDoor(cityPath string) (bdByIDClassDoor, bool, error) {
-	routes := cliStorageRoutes(cityPath)
-	store, relocated := graphClassBinding(routes)
+	binding, relocated, err := cliSoleClassBinding(cityPath)
+	if err != nil {
+		return bdByIDClassDoor{}, false, fmt.Errorf("resolving the class front door: %w", err)
+	}
 	if !relocated {
 		return bdByIDClassDoor{}, false, nil
 	}
-	graph, err := storebinding.NewBeadsGraphStore(store)
+	graph, err := storebinding.NewBeadsGraphStore(binding.Store)
 	if err != nil {
-		return bdByIDClassDoor{}, false, fmt.Errorf("projecting the class front door of binding %q: %w", routes.binding, err)
+		return bdByIDClassDoor{}, false, fmt.Errorf("projecting the class front door of binding %q: %w", binding.Name, err)
 	}
-	return bdByIDClassDoor{Graph: graph, Store: store, Binding: routes.binding}, true, nil
+	return bdByIDClassDoor{Graph: graph, Store: binding.Store, Binding: binding.Name}, true, nil
 }
 
 // resolve asks the open front door whether it owns id.

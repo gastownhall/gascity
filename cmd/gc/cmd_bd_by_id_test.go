@@ -769,11 +769,17 @@ func TestBdByIDSurfaceResolvesOneStoreNotAProviderPerOperation(t *testing.T) {
 			t.Errorf("%s calls %s %d time(s); the by-ID surface must resolve its store through the storage funnel alone", file, forbidden, counts[forbidden])
 		}
 	}
-	if counts["cliStorageRoutes"] != 1 {
-		t.Errorf("%s calls cliStorageRoutes %d time(s), want exactly 1: one store resolution per command", file, counts["cliStorageRoutes"])
+	if counts["cliSoleClassBinding"] != 1 {
+		t.Errorf("%s calls cliSoleClassBinding %d time(s), want exactly 1: one store resolution per command", file, counts["cliSoleClassBinding"])
 	}
-	if counts["graphClassBinding"] != 1 {
-		t.Errorf("%s calls graphClassBinding %d time(s), want exactly 1", file, counts["graphClassBinding"])
+	// The two calls cliSoleClassBinding replaced. Asking the graph class
+	// specifically cannot tell a whole split from a per-class fan-out, and
+	// re-entering the funnel beside the resolver is how the two answers get to
+	// disagree; both are now the resolver's job and neither belongs in this file.
+	for _, replaced := range []string{"cliStorageRoutes", "graphClassBinding"} {
+		if counts[replaced] != 0 {
+			t.Errorf("%s calls %s %d time(s); the by-ID surface resolves its binding through cliSoleClassBinding alone", file, replaced, counts[replaced])
+		}
 	}
 }
 

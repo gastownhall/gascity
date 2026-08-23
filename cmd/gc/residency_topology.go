@@ -29,6 +29,7 @@ package main
 // the retired row, so the day verification ships this is a bit, not a redesign.
 
 import (
+	"fmt"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -268,6 +269,70 @@ func cliResidencyBindings(cityPath string) ([]storeref.ClassBinding, error) {
 	}
 	cliResidencyBindingsByCity[key] = &cliResidencyBindingsEntry{bindings: bindings, refused: refused}
 	return bindings, refused
+}
+
+// cliRelocatedBinding is the one relocated class binding a city is served from.
+//
+// It carries the opened store rather than the storeref.ClassBinding it was
+// derived from, and that is the residency boundary rather than a convenience: a
+// caller handed the ClassBinding would read binding.Leg.Store, which is a
+// consumer picking a store out of a plan leg — the shape the boundary check
+// forbids, because a second consumer will pick a different one. The leg access
+// happens here, in the file that assembles legs, exactly once.
+//
+// Name is the operator-facing name of the configured [storage] binding, which is
+// not derivable from the ClassBinding: storeref carries a class REF
+// ("class:graph+sessions+…"), describing what the binding answers for and not
+// which configured binding it is. Operator text wants the latter.
+type cliRelocatedBinding struct {
+	Store   beads.Store
+	Classes []coordclass.Class
+	Name    string
+}
+
+// cliSoleClassBinding returns the single relocated class binding serving this
+// city, for the callers that answer EVERY reserved prefix from ONE store.
+//
+// # It turns a comment into a check
+//
+// The by-id front door and the claim route both used to ask
+// graphClassBinding — "which store serves the graph class" — and then answer
+// for sessions, convoy and mail ids out of that same store. That is correct
+// only because storageSplitShapeOf admits a split only when all five
+// infrastructure classes name the same binding and refuses a per-class fan-out
+// outright, and until now that argument lived entirely in a comment. Reading
+// the grouped bindings instead makes it a runtime condition: two bindings is a
+// fan-out neither caller can serve, and it says so rather than quietly picking
+// the graph one and letting a sessions-class read come back truthfully absent.
+//
+// # The refusal is carried, not returned
+//
+// A city configured for a binding it has not converged on still produces a
+// binding here — a refusedClassStore whose every operation returns the boot
+// gate's sentence — and cliResidencyBindings reports that refusal alongside it.
+// Both callers want the STORE in that case, exactly as they got it before: the
+// refusal reaches them through the reads they were going to make anyway, where
+// each already classifies it (bdByIDClassDoor.resolve, hookClaimClassRoute.holds).
+// Returning it here instead would collapse "this city cannot be served" into
+// "this city relocates nothing", which sends those reads back to the work
+// ledger the beads were migrated off — the exact stale-answer path the door was
+// built to close.
+func cliSoleClassBinding(cityPath string) (cliRelocatedBinding, bool, error) {
+	bindings, _ := cliResidencyBindings(cityPath)
+	switch len(bindings) {
+	case 0:
+		return cliRelocatedBinding{}, false, nil
+	case 1:
+		return cliRelocatedBinding{
+			Store:   bindings[0].Leg.Store,
+			Classes: bindings[0].Classes,
+			Name:    cliStorageRoutes(cityPath).binding,
+		}, true, nil
+	default:
+		return cliRelocatedBinding{}, false, fmt.Errorf(
+			"this city serves its coordination classes from %d separate bindings; %s",
+			len(bindings), storageSupportedTopologyStatement)
+	}
 }
 
 // resetCLIResidencyBindings drops the memo wholesale. closeCLIStorageRoutes
