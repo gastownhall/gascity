@@ -258,6 +258,74 @@ func TestStripResumeFlagArg(t *testing.T) {
 	}
 }
 
+// TestStripSessionIDFlagArg pins the value-agnostic fallback for
+// stripSessionIDFlag. When the session id embedded in a first-start command
+// diverges from the bead's current session_key, the keyed strip is a no-op; this
+// fallback must still drop the "--session-id <value>" pair regardless of value so
+// the retry doesn't replay a dead id. A command with no session-id flag is
+// already a valid fresh start and must be returned unchanged.
+func TestStripSessionIDFlagArg(t *testing.T) {
+	tests := []struct {
+		name          string
+		cmd           string
+		sessionIDFlag string
+		want          string
+	}{
+		{
+			// The diverged-key case: the embedded key differs from the bead's
+			// session_key, so the keyed strip was a no-op. The value-agnostic
+			// strip must still remove the trailing "--session-id <key>".
+			name:          "removes diverged trailing session id",
+			cmd:           "claude --dangerously-skip-permissions --session-id key-A-diverged",
+			sessionIDFlag: "--session-id",
+			want:          "claude --dangerously-skip-permissions",
+		},
+		{
+			name:          "removes diverged session id mid-command",
+			cmd:           "claude --session-id key-A-diverged --effort max",
+			sessionIDFlag: "--session-id",
+			want:          "claude --effort max",
+		},
+		{
+			name:          "removes equals form regardless of value",
+			cmd:           "claude --session-id=key-A-diverged --effort max",
+			sessionIDFlag: "--session-id",
+			want:          "claude --effort max",
+		},
+		{
+			// No session-id flag present: the command is already a fresh start,
+			// so it must be returned unchanged (callers launch it as-is).
+			name:          "no session id flag returns command unchanged",
+			cmd:           "claude --model sonnet",
+			sessionIDFlag: "--session-id",
+			want:          "claude --model sonnet",
+		},
+		{
+			name:          "empty session id flag returns command unchanged",
+			cmd:           "claude --session-id key-A-diverged",
+			sessionIDFlag: "",
+			want:          "claude --session-id key-A-diverged",
+		},
+		{
+			// A quoted literal that merely contains the flag text must not be
+			// mistaken for the generated flag token.
+			name:          "preserves quoted session id literal",
+			cmd:           `claude --label "--session-id keep-me" --session-id key-A-diverged`,
+			sessionIDFlag: "--session-id",
+			want:          `claude --label "--session-id keep-me"`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := stripSessionIDFlagArg(tt.cmd, tt.sessionIDFlag)
+			if got != tt.want {
+				t.Errorf("stripSessionIDFlagArg(%q, %q) = %q, want %q",
+					tt.cmd, tt.sessionIDFlag, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSessionMutationLocksSerializeSameSession(t *testing.T) {
 	firstEntered := make(chan struct{})
 	releaseFirst := make(chan struct{})
