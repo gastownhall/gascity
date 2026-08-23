@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/storebinding"
 	"github.com/gastownhall/gascity/internal/storebinding/beadsworkspace"
 	sqlitebinding "github.com/gastownhall/gascity/internal/storebinding/sqlite"
+	"github.com/gastownhall/gascity/internal/storeref/storereftest"
 )
 
 // configRefEngineProviderID is the foreign provider the fixtures below serve
@@ -1313,6 +1314,12 @@ func TestBdCloseAlreadyClosedIsStoreContractNoOp(t *testing.T) {
 // migration's retained one. Draining the duplicate copies is still the sweep's
 // job — agreement is about which copy is authoritative, not about there being
 // one.
+//
+// The clauses live in storereftest so this test and the API's
+// TestBeadDualResidentAnswersFromTheBinding assert the SAME sentences. That is
+// the whole point: two surfaces can each pass their own pin and still disagree
+// about which copy of one id is real, and a shared property is the only thing
+// that catches it.
 func TestBdCloseDualResidentWritesServingCopy(t *testing.T) {
 	cityPath, classStore := foreignProviderCity(t)
 	work := workStoreFor(t, cityPath)
@@ -1321,38 +1328,67 @@ func TestBdCloseDualResidentWritesServingCopy(t *testing.T) {
 		t.Fatalf("seeding the work store: %v", err)
 	}
 	resident := classResidentWorkShapedBead(t, classStore, shadow.ID, "the class-binding copy")
-
-	var stdout, stderr bytes.Buffer
-	if code, handled := maybeRouteBdByID(cityPath, "", []string{"close", resident.ID}, &stdout, &stderr); !handled || code != 0 {
-		t.Fatalf("closing the dual-resident %s = (%d, %t): %s", resident.ID, code, handled, stderr.String())
-	}
-	classCopy, err := classStore.Get(resident.ID)
+	control, err := work.Create(beads.Bead{Title: "a work bead the binding never held", Type: "task"})
 	if err != nil {
-		t.Fatalf("re-reading the class copy: %v", err)
-	}
-	if classCopy.Status != "closed" {
-		t.Errorf("the class copy's status = %q, want closed", classCopy.Status)
-	}
-	workCopy, err := work.Get(shadow.ID)
-	if err != nil {
-		t.Fatalf("re-reading the work copy: %v", err)
-	}
-	if workCopy.Status == "closed" {
-		t.Errorf("the work copy was closed too; one id, one owner, one write")
+		t.Fatalf("seeding the control: %v", err)
 	}
 
-	// The read the same surface serves must agree with the write it just made.
-	stdout.Reset()
-	stderr.Reset()
-	if code, handled := maybeRouteBdByID(cityPath, "", []string{"show", resident.ID, "--json"}, &stdout, &stderr); !handled || code != 0 {
-		t.Fatalf("showing the dual-resident %s = (%d, %t): %s", resident.ID, code, handled, stderr.String())
-	}
-	var shown []beads.Bead
-	if err := json.Unmarshal(stdout.Bytes(), &shown); err != nil {
-		t.Fatalf("decoding the routed show %q: %v", stdout.String(), err)
-	}
-	if len(shown) != 1 || shown[0].Status != "closed" {
-		t.Errorf("the routed show reports %+v; the surface's read and its write disagree about which copy is authoritative", shown)
+	storereftest.RunBindingWins(t,
+		storereftest.BindingWinsStores{
+			Binding:       classStore,
+			Work:          work,
+			DualID:        resident.ID,
+			BindingTitle:  "the class-binding copy",
+			WorkOnlyID:    control.ID,
+			WorkOnlyTitle: "a work bead the binding never held",
+		},
+		storereftest.BindingWinsSurface{
+			Name: "the gc bd by-id class door",
+			Get:  showThroughTheClassDoor(cityPath, work),
+			Close: func(t *testing.T, id string) {
+				t.Helper()
+				var stdout, stderr bytes.Buffer
+				code, handled := maybeRouteBdByID(cityPath, "", []string{"close", id}, &stdout, &stderr)
+				if !handled || code != 0 {
+					t.Fatalf("closing %s = (%d, %t): %s", id, code, handled, stderr.String())
+				}
+			},
+		})
+}
+
+// showThroughTheClassDoor adapts `gc bd show --json` to the shared property's
+// Get.
+//
+// The door answers only for ids it resolves to a binding; for anything else it
+// returns handled=false and the real command falls through to a bd subprocess
+// pointed at the city's work ledger. A test cannot run that subprocess, so this
+// reads the work store the subprocess would have been given — which is what
+// makes the control clause an assertion about the DOOR rather than about bd: it
+// holds because the door DECLINED, and a door that started claiming ids no
+// binding holds would answer here from the binding and fail.
+func showThroughTheClassDoor(cityPath string, work beads.Store) func(*testing.T, string) beads.Bead {
+	return func(t *testing.T, id string) beads.Bead {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		code, handled := maybeRouteBdByID(cityPath, "", []string{"show", id, "--json"}, &stdout, &stderr)
+		if !handled {
+			bead, err := work.Get(id)
+			if err != nil {
+				t.Fatalf("the door declined %s and the work ledger it falls through to cannot serve it either: %v", id, err)
+			}
+			return bead
+		}
+		if code != 0 {
+			t.Fatalf("the routed show of %s exited %d: %s", id, code, stderr.String())
+		}
+		var shown []beads.Bead
+		if err := json.Unmarshal(stdout.Bytes(), &shown); err != nil {
+			t.Fatalf("decoding the routed show %q: %v", stdout.String(), err)
+		}
+		if len(shown) != 1 {
+			t.Fatalf("the routed show of %s returned %d beads, want exactly one", id, len(shown))
+		}
+		return shown[0]
 	}
 }
 
