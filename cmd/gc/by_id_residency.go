@@ -28,6 +28,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/storeref"
@@ -91,4 +92,56 @@ func cliByIDOwner(cityPath, id string, work beads.Store) (storeref.Owner, error)
 // says nothing about whether the seam still uses it.
 func cliByIDPlan(cityPath, id string, work beads.Store) (storeref.ResolvedPlan, error) {
 	return storeref.Plan(storeref.ByID{ID: id}, cliResidencyTopology(cityPath, nil, work, nil))
+}
+
+// cliByIDBindingOwner answers the binding half of the by-id question for a
+// surface whose work axis is not a beads.Store.
+//
+// `gc convoy`'s resolution is a directory scan with a uniqueness contract — it
+// probes every candidate and REFUSES an id present in more than one — and `gc
+// beads show`'s is the same scan taking the first hit. Neither is expressible
+// as a leg, and neither should be: the scan is what those commands are. What
+// they were missing is the leg in FRONT of it. A relocated class binding is not
+// one of the city's directories, so a directory scan cannot reach it at all,
+// and the id it cannot reach is answered instead by the retained pre-migration
+// copy sitting in the city store — successfully, with no error to notice.
+//
+// So the plan is resolved with a SENTINEL where the work leg goes and the
+// answer is read as a yes/no. ok=true is a binding that owns the id, with the
+// row it already read; ok=false is "no binding answered, run your own scan",
+// and the caller then does exactly what it did before.
+func cliByIDBindingOwner(cityPath, id string) (storeref.Owner, bool, error) {
+	owner, err := cliByIDOwner(cityPath, id, unprobedWorkResidual{})
+	if err != nil {
+		return storeref.Owner{}, false, err
+	}
+	if _, isResidual := owner.Store.(unprobedWorkResidual); isResidual {
+		return storeref.Owner{}, false, nil
+	}
+	return owner, true, nil
+}
+
+// beadForOwner returns the row the owner names, reading it only when the
+// resolver has not already. A probed leg's read IS the caller's read, and doing
+// it again doubles every by-id operation against a relocated city's binding.
+func beadForOwner(owner storeref.Owner, id string) (beads.Bead, error) {
+	if owner.Read {
+		return owner.Bead, nil
+	}
+	return owner.Store.Get(id)
+}
+
+// unprobedWorkResidual stands in for a work axis the resolver must not run.
+//
+// Plan(ByID) ends every plan in a work leg and hands the LAST one back
+// UNPROBED, which is the contract cliByIDBindingOwner rests on: this value is
+// returned, never read. Its Get therefore reports a bug rather than a miss — a
+// resolver that started probing the residual would otherwise turn "the caller
+// runs its own scan" into "the bead is absent", silently, on every convoy
+// command of every relocated city.
+type unprobedWorkResidual struct{ beads.Store }
+
+// Get reports the contract violation described on the type.
+func (unprobedWorkResidual) Get(id string) (beads.Bead, error) {
+	return beads.Bead{}, fmt.Errorf("internal: the by-id work residual was probed for %s; it is a placeholder for a work axis this surface runs itself", id)
 }
