@@ -27,8 +27,8 @@ import (
 //
 // A class accessor that returns the city store, or nil, relocates nothing and
 // contributes no binding — the identity gate that keeps a single-store city
-// byte-identical. MintsReserved stays false: nothing in this build verifies a
-// binding's mint prefix, so every plan keeps its residence probe.
+// byte-identical. Every plan still keeps its residence probe: the mint bit is
+// observed, but the relic bit is pessimistic until a census can say otherwise.
 func (s *Server) residencyTopology() storeref.Topology {
 	cfg := s.state.Config()
 	city := s.state.CityBeadStore()
@@ -157,6 +157,13 @@ func apiResidencyBindings(order []beads.Store, byStore map[beads.Store][]coordcl
 			Classes:  classes,
 			Prefixes: prefixes,
 			Leg:      storeref.Leg{Ref: storeref.ClassRef(classes), Store: store},
+			// The mint bit is observed from the store's own declaration; the
+			// relic bit is pessimistic because nothing here censuses residents.
+			// The probe therefore still stays in every plan — see the
+			// ClassBinding docs for why the optimistic pairing is the one shape
+			// that must never ship.
+			MintsReserved:      storeref.MintsInsideNamespace(store, prefixes),
+			HasLegacyResidents: true,
 		})
 		if refusing, ok := store.(storeref.RefusingStore); ok && refused == nil {
 			refused = refusing.StorageRefusal()

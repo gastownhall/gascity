@@ -19,6 +19,66 @@ import (
 	"github.com/gastownhall/gascity/internal/coordclass"
 )
 
+// The two halves of the residence-probe retirement condition, as this plane
+// reports them.
+//
+// The mint bit is observed rather than assumed: a store that names the
+// namespace it mints into, and names one the binding claims, has verified the
+// only thing the retirement premise needs about future beads. A store that
+// names nothing has verified nothing.
+//
+// The relic bit is the other half and is pessimistic on purpose. Nothing in
+// this build censuses a binding's residents, so "not known to hold relics" is
+// all a constructor can honestly say, and that is not the claim that retires a
+// probe. The two must land together: an observed mint bit over an optimistic
+// relic bit would retire the probe on every converged city at boot, over
+// exactly the ids `gc storage migrate` preserved.
+func TestAPIBindingReportsBothHalvesOfTheRetirementCondition(t *testing.T) {
+	graphPrefix, ok := config.ReservedClassPrefix(config.BeadClassGraph)
+	if !ok {
+		t.Fatal("graph has no reserved mint prefix")
+	}
+	tests := []struct {
+		name  string
+		store beads.Store
+		mints bool
+	}{
+		{"store declaring the binding's namespace", newPrefixDeclaringStore(graphPrefix), true},
+		{"store minting work ids", newPrefixDeclaringStore("ga"), false},
+		{"store declaring nothing", beads.NewMemStore(), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bindings, _ := apiResidencyBindings(
+				[]beads.Store{tt.store},
+				map[beads.Store][]coordclass.Class{tt.store: {coordclass.ClassGraph}},
+			)
+			if len(bindings) != 1 {
+				t.Fatalf("got %d bindings, want 1", len(bindings))
+			}
+			if bindings[0].MintsReserved != tt.mints {
+				t.Errorf("MintsReserved = %v, want %v", bindings[0].MintsReserved, tt.mints)
+			}
+			if !bindings[0].HasLegacyResidents {
+				t.Error("HasLegacyResidents = false, but nothing in this build censuses the binding's residents; the probe would retire over every id the migration preserved")
+			}
+		})
+	}
+}
+
+// prefixDeclaringStore names the namespace it mints into, which beads.MemStore
+// does not.
+type prefixDeclaringStore struct {
+	beads.Store
+	prefix string
+}
+
+func newPrefixDeclaringStore(prefix string) beads.Store {
+	return prefixDeclaringStore{Store: beads.NewMemStore(), prefix: prefix}
+}
+
+func (s prefixDeclaringStore) IDPrefix() string { return s.prefix }
+
 func TestAPIBindingDeclaresEveryHeldNamespace(t *testing.T) {
 	tests := []struct {
 		name     string

@@ -12,9 +12,60 @@ package main
 import (
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 )
+
+// The retirement condition's two halves, as the CLI plane reports them. Same
+// rule as the API plane's, asserted separately because the two constructors are
+// separate code and a plane that disagreed with the other about whether a probe
+// may retire would resolve the same id to two different stores.
+func TestCLIBindingReportsBothHalvesOfTheRetirementCondition(t *testing.T) {
+	graphPrefix, ok := config.ReservedClassPrefix(config.BeadClassGraph)
+	if !ok {
+		t.Fatal("graph has no reserved mint prefix")
+	}
+	tests := []struct {
+		name  string
+		store beads.Store
+		mints bool
+	}{
+		{"store declaring the binding's namespace", newPrefixDeclaringStore(graphPrefix), true},
+		{"store minting work ids", newPrefixDeclaringStore("ga"), false},
+		{"store declaring nothing", beads.NewMemStore(), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bindings, _ := residencyBindingsFor(
+				[]beads.Store{tt.store},
+				map[beads.Store][]coordclass.Class{tt.store: {coordclass.ClassGraph}},
+			)
+			if len(bindings) != 1 {
+				t.Fatalf("got %d bindings, want 1", len(bindings))
+			}
+			if bindings[0].MintsReserved != tt.mints {
+				t.Errorf("MintsReserved = %v, want %v", bindings[0].MintsReserved, tt.mints)
+			}
+			if !bindings[0].HasLegacyResidents {
+				t.Error("HasLegacyResidents = false, but nothing in this build censuses the binding's residents; the probe would retire over every id the migration preserved")
+			}
+		})
+	}
+}
+
+// prefixDeclaringStore names the namespace it mints into, which beads.MemStore
+// does not.
+type prefixDeclaringStore struct {
+	beads.Store
+	prefix string
+}
+
+func newPrefixDeclaringStore(prefix string) beads.Store {
+	return prefixDeclaringStore{Store: beads.NewMemStore(), prefix: prefix}
+}
+
+func (s prefixDeclaringStore) IDPrefix() string { return s.prefix }
 
 func TestReservedPrefixesForDeclaresHeldNamespaces(t *testing.T) {
 	got := map[string]bool{}

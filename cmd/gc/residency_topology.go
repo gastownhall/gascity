@@ -23,10 +23,11 @@ package main
 // A constructor takes the opened work and rig stores it is handed and the
 // routes this process already resolved. It does not decide which rigs are
 // serving — a suspended rig is simply absent from the map it is given — and it
-// does not decide whether a binding mints truthfully: nothing in this build
-// verifies a binding's mint prefix, so MintsReserved stays false everywhere
-// here and the residence probe stays in every plan. The corpus already carries
-// the retired row, so the day verification ships this is a bit, not a redesign.
+// does not decide whether a binding mints truthfully: it asks the store, which
+// declares the namespace it mints into. The residence probe nonetheless stays
+// in every plan, because retirement also needs a binding known to hold no
+// relics and nothing here censuses residents. The corpus already carries the
+// retired row, so the day the census ships this is a bit, not a redesign.
 
 import (
 	"fmt"
@@ -78,9 +79,9 @@ func cliResidencyTopology(cityPath string, cfg *config.City, work beads.Store, r
 // (buildSuspendedRigPathsForCity, threaded through the census arms) rather than
 // being re-derived here: the constructor is told, it does not decide.
 //
-// MintsReserved stays false for the same reason it does everywhere else —
-// nothing in this build verifies a binding's mint prefix — so the residence
-// probe stays in every plan.
+// The residence probe stays in every plan for the same reason it does
+// everywhere else: the mint bit is observed, but nothing censuses a binding's
+// relics, so the retirement condition's other half is never satisfied.
 func (cr *CityRuntime) residencyTopology(servingRigs map[string]beads.Store) storeref.Topology {
 	bindings, refused := residencyBindingsFromRoutes(cr.storageRoutes)
 	return assembleResidencyTopology(cr.cfg, cr.cityBeadStore(), servingRigs, bindings, refused)
@@ -419,13 +420,18 @@ func residencyBindingsFor(order []beads.Store, byStore map[beads.Store][]coordcl
 	bindings := make([]storeref.ClassBinding, 0, len(order))
 	for _, store := range order {
 		classes := byStore[store]
+		prefixes := reservedPrefixesFor(classes)
 		bindings = append(bindings, storeref.ClassBinding{
 			Classes:  classes,
-			Prefixes: reservedPrefixesFor(classes),
+			Prefixes: prefixes,
 			Leg:      storeref.Leg{Ref: storeref.ClassRef(classes), Store: store},
-			// MintsReserved and HasLegacyResidents stay false: nothing in this
-			// build verifies a binding's mint prefix or censuses its relics, so
-			// the residence probe stays in every plan.
+			// The mint bit is observed from the store's own declaration; the
+			// relic bit is pessimistic because nothing here censuses residents.
+			// The probe therefore still stays in every plan — see the
+			// ClassBinding docs for why the optimistic pairing is the one shape
+			// that must never ship.
+			MintsReserved:      storeref.MintsInsideNamespace(store, prefixes),
+			HasLegacyResidents: true,
 		})
 		if refusing, ok := store.(storeref.RefusingStore); ok && refused == nil {
 			refused = refusing.StorageRefusal()
