@@ -806,7 +806,7 @@ func TestRegistryGasworksCredentialOriginAllowsOnlyCanonicalProductionOrigin(t *
 	}
 }
 
-func TestDoRegistryPublishProviderRefreshesOnceAfter401(t *testing.T) {
+func TestDoRegistryPublishProviderDoesNotRefreshAfter401(t *testing.T) {
 	_, packDir := setupRegistryPublishRepo(t)
 	clearRegistryEnv(t)
 	const baseURL = defaultRegistryPublishURL
@@ -832,32 +832,14 @@ func TestDoRegistryPublishProviderRefreshesOnceAfter401(t *testing.T) {
 	requests := 0
 	registryPublishHTTPClient = &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
 		requests++
-		if requests == 1 {
-			if got := r.Header.Get("Authorization"); got != "Bearer sts-initial" {
-				t.Fatalf("first Authorization = %q", got)
-			}
-			return &http.Response{
-				StatusCode: http.StatusUnauthorized,
-				Header:     http.Header{"Content-Type": []string{"application/json"}},
-				Body:       io.NopCloser(strings.NewReader(`{"error":{"code":"unauthorized","message":"expired"}}`)),
-				Request:    r,
-			}, nil
-		}
-		if got := r.Header.Get("Authorization"); got != "Bearer sts-refreshed" {
-			t.Fatalf("retry Authorization = %q", got)
+		if got := r.Header.Get("Authorization"); got != "Bearer sts-initial" {
+			t.Fatalf("Authorization = %q", got)
 		}
 		return &http.Response{
-			StatusCode: http.StatusOK,
+			StatusCode: http.StatusUnauthorized,
 			Header:     http.Header{"Content-Type": []string{"application/json"}},
-			Body: io.NopCloser(strings.NewReader(`{
-				"publishRequest": {
-					"id": "prq_refreshed",
-					"status": "pending_review",
-					"requestedName": "gastownhall/demo-pack",
-					"requestedVersion": "0.2.0"
-				}
-			}`)),
-			Request: r,
+			Body:       io.NopCloser(strings.NewReader(`{"error":{"code":"unauthorized","message":"expired"}}`)),
+			Request:    r,
 		}, nil
 	})}
 
@@ -866,17 +848,14 @@ func TestDoRegistryPublishProviderRefreshesOnceAfter401(t *testing.T) {
 		RegistryURL: baseURL,
 		Validate:    true,
 	}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("doRegistryPublish = %d, stderr=%q", code, stderr.String())
+	if code == 0 {
+		t.Fatalf("doRegistryPublish succeeded, stdout=%q", stdout.String())
 	}
-	if requests != 2 {
-		t.Fatalf("publish requests = %d, want 2", requests)
+	if requests != 1 {
+		t.Fatalf("publish requests = %d, want 1", requests)
 	}
-	if len(forceRefresh) != 2 || forceRefresh[0] || !forceRefresh[1] {
-		t.Fatalf("force refresh calls = %v, want [false true]", forceRefresh)
-	}
-	if !strings.Contains(stdout.String(), "prq_refreshed") {
-		t.Fatalf("stdout = %q", stdout.String())
+	if len(forceRefresh) != 1 || forceRefresh[0] {
+		t.Fatalf("force refresh calls = %v, want [false]", forceRefresh)
 	}
 }
 
@@ -909,7 +888,7 @@ func TestRegistryProviderReauthRoundTripperRetriesOnlyEligible401(t *testing.T) 
 				return "refreshed", nil
 			},
 		}
-		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "https://registry.example/api/publish-requests", bytes.NewReader([]byte("payload")))
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://registry.example/api/me", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -956,9 +935,9 @@ func TestRegistryProviderReauthRoundTripperRetriesOnlyEligible401(t *testing.T) 
 			var req *http.Request
 			var err error
 			if tc.replayable {
-				req, err = http.NewRequestWithContext(t.Context(), http.MethodPost, "https://registry.example/api/publish-requests", bytes.NewReader([]byte("payload")))
+				req, err = http.NewRequestWithContext(t.Context(), http.MethodGet, "https://registry.example/api/me", bytes.NewReader([]byte("payload")))
 			} else {
-				req, err = http.NewRequestWithContext(t.Context(), http.MethodPost, "https://registry.example/api/publish-requests", io.NopCloser(strings.NewReader("payload")))
+				req, err = http.NewRequestWithContext(t.Context(), http.MethodGet, "https://registry.example/api/me", io.NopCloser(strings.NewReader("payload")))
 			}
 			if err != nil {
 				t.Fatal(err)
@@ -973,6 +952,95 @@ func TestRegistryProviderReauthRoundTripperRetriesOnlyEligible401(t *testing.T) 
 				t.Fatalf("requests=%d refreshes=%d, want 1/0", requests, refreshes)
 			}
 		})
+	}
+
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
+		t.Run(method+" 401 is not replayed", func(t *testing.T) {
+			requests := 0
+			refreshes := 0
+			rt := &registryProviderReauthRoundTripper{
+				base: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+					requests++
+					return &http.Response{
+						StatusCode: http.StatusUnauthorized,
+						Header:     make(http.Header),
+						Body:       io.NopCloser(strings.NewReader(`{}`)),
+						Request:    r,
+					}, nil
+				}),
+				refresh: func(context.Context, bool) (string, error) {
+					refreshes++
+					return "refreshed", nil
+				},
+			}
+			req, err := http.NewRequestWithContext(t.Context(), method, "https://registry.example/api/publish-requests", bytes.NewReader([]byte("payload")))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Authorization", "Bearer initial")
+			resp, err := rt.RoundTrip(req)
+			if err != nil {
+				t.Fatalf("RoundTrip: %v", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusUnauthorized || requests != 1 || refreshes != 0 {
+				t.Fatalf("status=%d requests=%d refreshes=%d, want 401/1/0", resp.StatusCode, requests, refreshes)
+			}
+		})
+	}
+}
+
+type registryCloseTrackingBody struct {
+	io.Reader
+	closed bool
+}
+
+func (b *registryCloseTrackingBody) Close() error {
+	b.closed = true
+	return nil
+}
+
+func TestRegistryProviderReauthRoundTripperSanitizesBodyRecreationFailure(t *testing.T) {
+	const secretMarker = "registry-body-recreation-super-secret"
+
+	firstBody := &registryCloseTrackingBody{Reader: strings.NewReader("rejected")}
+	baseCalls, refreshes := 0, 0
+	rt := &registryProviderReauthRoundTripper{
+		base: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			baseCalls++
+			return &http.Response{
+				StatusCode: http.StatusUnauthorized,
+				Header:     make(http.Header),
+				Body:       firstBody,
+				Request:    r,
+			}, nil
+		}),
+		refresh: func(context.Context, bool) (string, error) {
+			refreshes++
+			return "fresh", nil
+		},
+	}
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://registry.example/api/me", strings.NewReader("body"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.GetBody = func() (io.ReadCloser, error) {
+		return nil, errors.New("body recreation failed: " + secretMarker)
+	}
+	req.Header.Set("Authorization", "Bearer stale")
+
+	resp, err := rt.RoundTrip(req)
+	if resp != nil || err == nil {
+		t.Fatalf("response=%v error=%v, want nil response and sanitized body recreation failure", resp, err)
+	}
+	if got, want := err.Error(), "replaying registry request after credential refresh: request body recreation failed"; got != want {
+		t.Fatalf("error = %q, want %q", got, want)
+	}
+	if strings.Contains(err.Error(), secretMarker) {
+		t.Fatalf("body recreation error leaked request material: %q", err)
+	}
+	if baseCalls != 1 || refreshes != 1 || !firstBody.closed {
+		t.Fatalf("calls=%d refreshes=%d body closed=%v, want 1, 1, true", baseCalls, refreshes, firstBody.closed)
 	}
 }
 
@@ -1024,7 +1092,7 @@ func TestRegistryProviderReauthRoundTripperRefreshHonorsCancellation(t *testing.
 					return "", errors.New("credential helper failed: bearer=super-secret helper stderr")
 				},
 			}
-			req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://registry.example/api/publish-requests", bytes.NewReader([]byte("payload")))
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://registry.example/api/me", nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1068,7 +1136,7 @@ func TestRegistryProviderReauthRoundTripperRefreshPreservesHelperContext(t *test
 					return "", fmt.Errorf("credential helper stderr bearer=super-secret: %w", tt.want)
 				},
 			}
-			req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://registry.example/api/publish-requests", bytes.NewReader([]byte("payload")))
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://registry.example/api/me", nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1102,7 +1170,7 @@ func TestRegistryProviderReauthRoundTripperRefreshFailureIsSecretSafe(t *testing
 			return "", errors.New("credential helper failed: bearer=super-secret helper stderr")
 		},
 	}
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "https://registry.example/api/publish-requests", bytes.NewReader([]byte("payload")))
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://registry.example/api/me", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
