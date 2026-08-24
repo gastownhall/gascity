@@ -208,6 +208,9 @@ func releaseOrphanedPoolAssignments(
 	}
 
 	var released []releasedPoolAssignment
+	var protectedForeign protectedForeignAssignees
+	defer protectedForeign.log()
+	cityName := cfg.EffectiveCityName()
 	for i, wb := range assignedWorkBeads {
 		if wb.Status != "open" && wb.Status != "in_progress" {
 			continue
@@ -241,6 +244,17 @@ func releaseOrphanedPoolAssignments(
 				continue
 			}
 			if assigneePreservesNamedSessionRoute(cfg, cityPath, template, assignee, workStoreRef, storeRefAware) {
+				continue
+			}
+			// Roster gate, deliberately AHEAD of the liveness question:
+			// liveOpenSessionAssignmentExists answers from THIS city's stores
+			// only, so for an identity this city does not configure a missing
+			// session bead is unobservable rather than absent. The two
+			// positive-evidence checks above can only ever SKIP a release, so
+			// running them first costs nothing and keeps the protected count
+			// reporting exactly the claims this gate saved.
+			if !poolAssigneeIsLocallyObservable(cfg, cityName, assignee) {
+				protectedForeign.add(assignee, wb.ID)
 				continue
 			}
 			if liveOpenSessionAssignmentExists(sessionStore.Store, assignee) {
