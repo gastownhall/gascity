@@ -40,6 +40,7 @@ async function runCommand(
   extraEnv = {},
   timeout = 30000,
 ) {
+  const startedAt = Date.now();
   try {
     const { stdout, stderr } = await execFileAsync(GC_BIN, args, {
       cwd: directory,
@@ -55,7 +56,7 @@ async function runCommand(
     return stdout.trim();
   } catch (err) {
     if (warnOnFailure) {
-      logRunFailure(args, directory, err);
+      logRunFailure(args, directory, err, Date.now() - startedAt, timeout);
     }
     return "";
   }
@@ -72,16 +73,25 @@ async function runWithWarning(directory, ...args) {
   return runCommand(directory, args, true);
 }
 
-function logRunFailure(args, directory, err) {
+// Node reports killed=true and signal=SIGTERM both when our own timeout fires
+// and when something else terminates the child (a supervisor restart, say), so
+// the error alone cannot tell them apart. Report the elapsed time against the
+// budget that was in force: a failure at ~3000ms of a 3000ms budget is our
+// timeout, one at 200ms is not.
+function logRunFailure(args, directory, err, elapsedMs, timeoutMs) {
   try {
     const detail =
       (err && (err.code || err.signal || err.message)) || "unknown error";
+    const timing =
+      Number.isFinite(elapsedMs) && Number.isFinite(timeoutMs)
+        ? ` after ${elapsedMs}ms (budget ${timeoutMs}ms)`
+        : "";
     console.warn(
       "gascity opencode plugin:",
       `${GC_BIN} ${args.join(" ")}`,
       "cwd",
       directory,
-      "failed:",
+      `failed${timing}:`,
       detail,
     );
   } catch {
