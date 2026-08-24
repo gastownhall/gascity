@@ -20,19 +20,31 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const GC_OPENCODE_HOOK_VERSION = 5;
+const GC_OPENCODE_HOOK_VERSION = 6;
 const GC_BIN = process.env.GC_BIN || "gc";
+// Optional per-turn injection (queued nudges, unread mail) is best effort and
+// sits on the critical path of a turn, so it gets a short fail-open budget
+// rather than the 30s default used for lifecycle work such as prime and
+// handoff. A stalled optional command drops its contribution instead of
+// stalling the turn.
+const INJECTION_TIMEOUT_MS = 3000;
 // GC_BIN is the explicit override. The fallback order matches Pi hooks so
 // sibling providers resolve the same installed gc before developer-local bins.
 const PATH_PREFIX =
   `/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`;
 
-async function runCommand(directory, args, warnOnFailure, extraEnv = {}) {
+async function runCommand(
+  directory,
+  args,
+  warnOnFailure,
+  extraEnv = {},
+  timeout = 30000,
+) {
   try {
     const { stdout, stderr } = await execFileAsync(GC_BIN, args, {
       cwd: directory,
       encoding: "utf-8",
-      timeout: 30000,
+      timeout,
       env: {
         ...process.env,
         ...extraEnv,
@@ -49,8 +61,11 @@ async function runCommand(directory, args, warnOnFailure, extraEnv = {}) {
   }
 }
 
-async function run(directory, ...args) {
-  return runCommand(directory, args, false);
+// Optional injection: short budget, fails open, but still reports why. The
+// failure used to be swallowed entirely, which left no way to tell which
+// command stalled a turn.
+async function runOptional(directory, ...args) {
+  return runCommand(directory, args, true, {}, INJECTION_TIMEOUT_MS);
 }
 
 async function runWithWarning(directory, ...args) {
@@ -158,8 +173,10 @@ export default async function gascityPlugin({ directory, client }) {
 
   async function buildPrefix() {
     const prime = await readPrime();
-    const nudges = await run(directory, "nudge", "drain", "--inject");
-    const mail = await run(directory, "mail", "check", "--inject");
+    const [nudges, mail] = await Promise.all([
+      runOptional(directory, "nudge", "drain", "--inject"),
+      runOptional(directory, "mail", "check", "--inject"),
+    ]);
     return [prime, nudges, mail].filter(Boolean).join("\n\n");
   }
 
