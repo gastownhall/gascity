@@ -2,6 +2,7 @@ package hooks
 
 import (
 	"bytes"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -31,8 +32,8 @@ func TestPreserveManagedFileKeepsCurrentPlugin(t *testing.T) {
 func TestPreserveManagedFileKeepsNewerPlugin(t *testing.T) {
 	rel := filepath.Join(".opencode", "plugins", "gascity.js")
 	newer := bytes.Replace(installedOpenCodePlugin(t),
-		[]byte("GC_OPENCODE_HOOK_VERSION = 5"),
-		[]byte("GC_OPENCODE_HOOK_VERSION = 99"), 1)
+		[]byte(fmt.Sprintf("GC_OPENCODE_HOOK_VERSION = %d", managedOpenCodeHookVersion)),
+		[]byte("GC_OPENCODE_HOOK_VERSION = 999"), 1)
 	if !PreserveManagedFile(rel, newer) {
 		t.Fatal("a newer managed plugin was not preserved")
 	}
@@ -42,8 +43,8 @@ func TestPreserveManagedFileKeepsNewerPlugin(t *testing.T) {
 func TestPreserveManagedFileReplacesStalePlugin(t *testing.T) {
 	rel := filepath.Join(".opencode", "plugins", "gascity.js")
 	stale := bytes.Replace(installedOpenCodePlugin(t),
-		[]byte("GC_OPENCODE_HOOK_VERSION = 5"),
-		[]byte("GC_OPENCODE_HOOK_VERSION = 1"), 1)
+		[]byte(fmt.Sprintf("GC_OPENCODE_HOOK_VERSION = %d", managedOpenCodeHookVersion)),
+		[]byte("GC_OPENCODE_HOOK_VERSION = 0"), 1)
 	if PreserveManagedFile(rel, stale) {
 		t.Fatal("a stale managed plugin was preserved")
 	}
