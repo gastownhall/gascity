@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"errors"
 	"testing"
 )
 
@@ -44,6 +45,63 @@ func TestConfigureServerReappliesExitEmptyForReplacementServer(t *testing.T) {
 	}
 	if count != 2 {
 		t.Fatalf("set-option -g exit-empty off issued %d times across 2 ConfigureServer calls, want 2", count)
+	}
+}
+
+func TestConfigureServerRetriesExitEmptyAfterFailure(t *testing.T) {
+	firstAttempt := errors.New("set option unavailable")
+	fe := &fakeExecutor{errs: []error{firstAttempt, nil}}
+	tm := &Tmux{cfg: DefaultConfig(), exec: fe}
+
+	if err := tm.ConfigureServer(); !errors.Is(err, firstAttempt) {
+		t.Fatalf("first ConfigureServer() error = %v, want %v", err, firstAttempt)
+	}
+	if err := tm.ConfigureServer(); err != nil {
+		t.Fatalf("second ConfigureServer() error = %v, want nil after retry", err)
+	}
+
+	count := 0
+	for _, call := range fe.calls {
+		if containsSetOptionExitEmptyWithValue(call, "off") {
+			count++
+		}
+	}
+	if count != 2 {
+		t.Fatalf("set-option -g exit-empty off issued %d times across failed retry, want 2", count)
+	}
+}
+
+func TestProviderStopDistinguishesMissingSessionFromMissingServer(t *testing.T) {
+	tests := []struct {
+		name    string
+		stopErr error
+		wantErr error
+	}{
+		{
+			name:    "responsive server missing session is idempotent",
+			stopErr: ErrSessionNotFound,
+		},
+		{
+			name:    "responsive empty server is idempotent",
+			stopErr: ErrNoCurrentTarget,
+		},
+		{
+			name:    "missing server remains uncertain",
+			stopErr: ErrNoServer,
+			wantErr: ErrNoServer,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			provider := NewProviderWithConfig(Config{SocketName: "gctest-stop-outcome"})
+			provider.tm.exec = &fakeExecutor{err: test.stopErr}
+
+			err := provider.Stop("worker")
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("Stop() error = %v, want %v", err, test.wantErr)
+			}
+		})
 	}
 }
 

@@ -327,6 +327,10 @@ type Tmux struct {
 	// observer; tests inject a deterministic observation without opening a
 	// socket.
 	serverSocketObserver func(context.Context, string) error
+
+	// namedSocketLstat observes a named socket before an attach. Nil selects
+	// the production filesystem observation.
+	namedSocketLstat func(context.Context, string) (namedSocketObservation, error)
 }
 
 // pokeInfo records a gc-initiated send-keys ("poke", e.g. a wake or nudge) to a
@@ -396,6 +400,15 @@ func (t *Tmux) runCtx(ctx context.Context, args ...string) (string, error) {
 // Every invocation is bounded by tmuxSubprocessTimeout via runCtx.
 func (t *Tmux) run(args ...string) (string, error) {
 	return t.runCtx(context.Background(), args...)
+}
+
+// runForAttach adds tmux's no-start-server flag for a named socket. The
+// default socket keeps its existing behavior.
+func (t *Tmux) runForAttach(args ...string) (string, error) {
+	if t.cfg.SocketName == "" {
+		return t.run(args...)
+	}
+	return t.run(append([]string{"-N"}, args...)...)
 }
 
 // wrapError wraps tmux errors with context.
@@ -931,58 +944,73 @@ func (t *Tmux) KillSessionWithProcessesExcluding(name string, excludePIDs []stri
 	if err != nil {
 		// Session might not exist or server may have already gone away.
 		killErr := t.KillSession(name)
-		if killErr == nil || errors.Is(killErr, ErrSessionNotFound) || errors.Is(killErr, ErrNoServer) {
+		if killErr == nil || errors.Is(killErr, ErrSessionNotFound) || errors.Is(killErr, ErrNoCurrentTarget) {
 			return nil
 		}
 		return killErr
 	}
 
 	if pid != "" {
-		// Get the process group ID
-		pgid := getProcessGroupID(pid)
-
-		// 1. Get all descendant PIDs recursively (catches processes that called setsid())
-		descendants := getAllDescendants(pid)
-
-		// Build known PID set for group membership verification
-		knownPIDs := make(map[string]bool, len(descendants)+1)
-		knownPIDs[pid] = true
-		for _, dpid := range descendants {
-			knownPIDs[dpid] = true
-		}
-
-		// 2. Get verified process group members (only reparented-to-init processes).
-		// Instead of adding ALL group members — which could include unrelated
-		// processes sharing the same PGID — we only add those that were reparented
-		// to init (PPID == 1), indicating they were likely children in our tree.
-		var reparented []string
-		if pgid != "" && pgid != "0" && pgid != "1" {
-			reparented = collectReparentedGroupMembers(pgid, knownPIDs)
-		}
-
-		// Partition the discovered process set into the descendant/group PIDs to
-		// terminate and whether the pane leader should be killed, honoring the
-		// exclusion set. This decision is pure so it can be unit-tested without
-		// real processes (see computeExcludingKillSet).
-		killList, killPaneLeader := computeExcludingKillSet(pid, descendants, reparented, exclude)
-
-		terminateProcesses(killList)
-
-		// Kill the pane process itself (may have called setsid() and detached),
-		// only if it is not excluded.
-		if killPaneLeader {
-			terminateProcesses([]string{pid})
-		}
+		terminatePaneProcessTreeExcluding(pid, exclude)
 	}
 
 	// Kill the tmux session - this will terminate the excluded process too.
-	// Ignore missing/dead-server errors - if we killed all non-excluded
-	// processes, tmux may have already destroyed the session automatically.
+	// A missing session on a responsive server is idempotent success. A missing
+	// server is an uncertain inventory observation and must reach the caller.
 	err = t.KillSession(name)
-	if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+	if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoCurrentTarget) {
 		return nil
 	}
 	return err
+}
+
+// KillSessionWithCertifiedPaneProcessesExcluding terminates the process trees
+// of the already-certified pane IDs, then kills the already-certified session
+// ID. It never accepts a session name, preventing a post-certification name
+// lookup from targeting a replacement session.
+func (t *Tmux) KillSessionWithCertifiedPaneProcessesExcluding(sessionID string, paneIDs, excludePIDs []string) error {
+	exclude := make(map[string]bool, len(excludePIDs))
+	for _, pid := range excludePIDs {
+		exclude[pid] = true
+	}
+
+	panePIDs := make([]string, 0, len(paneIDs))
+	for _, paneID := range paneIDs {
+		pid, err := t.GetPanePID(paneID)
+		if err != nil {
+			return fmt.Errorf("reading certified pane %q for session %q: %w", paneID, sessionID, err)
+		}
+		panePIDs = append(panePIDs, pid)
+	}
+	for _, pid := range panePIDs {
+		terminatePaneProcessTreeExcluding(pid, exclude)
+	}
+
+	err := t.KillSession(sessionID)
+	if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoCurrentTarget) {
+		return nil
+	}
+	return err
+}
+
+func terminatePaneProcessTreeExcluding(pid string, exclude map[string]bool) {
+	pgid := getProcessGroupID(pid)
+	descendants := getAllDescendants(pid)
+	knownPIDs := make(map[string]bool, len(descendants)+1)
+	knownPIDs[pid] = true
+	for _, descendantPID := range descendants {
+		knownPIDs[descendantPID] = true
+	}
+
+	var reparented []string
+	if pgid != "" && pgid != "0" && pgid != "1" {
+		reparented = collectReparentedGroupMembers(pgid, knownPIDs)
+	}
+	killList, killPaneLeader := computeExcludingKillSet(pid, descendants, reparented, exclude)
+	terminateProcesses(killList)
+	if killPaneLeader {
+		terminateProcesses([]string{pid})
+	}
 }
 
 // computeExcludingKillSet partitions a discovered process set into the
@@ -1246,6 +1274,17 @@ func (t *Tmux) IsAvailable() bool {
 // (e.g., "gt-deacon-boot" won't match when checking for "gt-deacon").
 func (t *Tmux) HasSession(name string) (bool, error) {
 	_, err := t.run("has-session", "-t", "="+name)
+	if err != nil {
+		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func (t *Tmux) hasSessionForAttach(name string) (bool, error) {
+	_, err := t.runForAttach("has-session", "-t", "="+name)
 	if err != nil {
 		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
 			return false, nil
@@ -1534,6 +1573,11 @@ func (t *Tmux) IsSessionAttached(target string) bool {
 	return err == nil && attached == "1"
 }
 
+func (t *Tmux) isSessionAttachedForAttach(target string) bool {
+	attached, err := t.runForAttach("display-message", "-t", target, "-p", "#{session_attached}")
+	return err == nil && attached == "1"
+}
+
 // WakePane triggers a SIGWINCH in a pane by resizing it slightly then restoring.
 // This wakes up Claude Code's event loop by simulating a terminal resize.
 //
@@ -1581,7 +1625,11 @@ func (t *Tmux) requiresHiddenAttachedInterrupt(target string) bool {
 }
 
 func (t *Tmux) ensureHiddenAttachedClient(target string) error {
-	if t.IsSessionAttached(target) {
+	witness, err := t.captureAttachSocketWitness()
+	if err != nil {
+		return err
+	}
+	if t.isSessionAttachedForAttach(target) {
 		return nil
 	}
 
@@ -1592,11 +1640,7 @@ func (t *Tmux) ensureHiddenAttachedClient(target string) error {
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), hiddenAttachMaxLifetime)
-	cmdArgs := []string{"-u"}
-	if t.cfg.SocketName != "" {
-		cmdArgs = append(cmdArgs, "-L", t.cfg.SocketName)
-	}
-	cmdArgs = append(cmdArgs, "attach-session", "-t", target)
+	cmdArgs := t.hiddenAttachCommandArgsForWitness(target, witness)
 	cmd := exec.CommandContext(ctx, "script", hiddenAttachScriptArgs(goruntime.GOOS, cmdArgs)...)
 	cmd.Env = append(cmd.Environ(), "TERM=xterm-256color")
 	cmd.Stdout = io.Discard
@@ -1604,6 +1648,12 @@ func (t *Tmux) ensureHiddenAttachedClient(target string) error {
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
+		cancel()
+		t.hiddenAttachMu.Unlock()
+		return err
+	}
+	if err := t.verifyAttachSocketWitness(witness); err != nil {
+		_ = stdin.Close()
 		cancel()
 		t.hiddenAttachMu.Unlock()
 		return err
@@ -1650,6 +1700,16 @@ func (t *Tmux) ensureHiddenAttachedClient(target string) error {
 		return err
 	}
 	return nil
+}
+
+func (t *Tmux) hiddenAttachCommandArgsForWitness(target string, witness namedSocketWitness) []string {
+	args := []string{"-u"}
+	if witness.canonicalPath != "" {
+		args = append(args, "-N", "-S", witness.canonicalPath)
+	} else if t.cfg.SocketName != "" {
+		args = append(args, "-N", "-L", t.cfg.SocketName)
+	}
+	return append(args, "attach-session", "-t", target)
 }
 
 func hiddenAttachScriptArgs(goos string, tmuxArgs []string) []string {
@@ -2585,11 +2645,23 @@ func (t *Tmux) GetPanePID(target string) (string, error) {
 // pane remains visible (for example because remain-on-exit is enabled).
 // When target is a session name, pane 0 is queried explicitly.
 func (t *Tmux) IsPaneDead(target string) (bool, error) {
+	return t.isPaneDead(target, false)
+}
+
+func (t *Tmux) isPaneDeadForAttach(target string) (bool, error) {
+	return t.isPaneDead(target, true)
+}
+
+func (t *Tmux) isPaneDead(target string, noStart bool) (bool, error) {
 	tmuxTarget := target
 	if !strings.HasPrefix(target, "%") {
 		tmuxTarget = target + ":^.0"
 	}
-	out, err := t.run("display-message", "-t", tmuxTarget, "-p", "#{pane_dead}")
+	run := t.run
+	if noStart {
+		run = t.runForAttach
+	}
+	out, err := run("display-message", "-t", tmuxTarget, "-p", "#{pane_dead}")
 	if err != nil {
 		return false, err
 	}
@@ -3027,7 +3099,14 @@ func (t *Tmux) CapturePaneLines(session string, lines int) ([]string, error) {
 // AttachSession attaches to an existing session.
 // Note: This replaces the current process with tmux attach.
 func (t *Tmux) AttachSession(session string) error {
-	_, err := t.run("attach-session", "-t", session)
+	witness, err := t.captureAttachSocketWitness()
+	if err != nil {
+		return err
+	}
+	if err := t.verifyAttachSocketWitness(witness); err != nil {
+		return err
+	}
+	_, err = t.runForAttachWitness(witness, "attach-session", "-t", session)
 	return err
 }
 

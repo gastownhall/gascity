@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -57,6 +58,12 @@ func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 		out = []runtime.LiveRuntime{}
 	}
 	return out, nil
+}
+
+// ScanBySessionIDSince returns the Darwin session-ID scan. Darwin collects one
+// complete ps snapshot, so it has no per-process inspection failures to bound.
+func ScanBySessionIDSince(id string, _ time.Time) ([]runtime.LiveRuntime, error) {
+	return ScanBySessionID(id)
 }
 
 // IsScanRoot reports whether pid is outside its GC_SESSION_ID parent's

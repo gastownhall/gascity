@@ -2,11 +2,21 @@
 
 package proctable
 
-import "github.com/gastownhall/gascity/internal/runtime"
+import (
+	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime"
+)
 
 // ScanBySessionID is unavailable on platforms without process environment
 // scanning support.
 func ScanBySessionID(string) ([]runtime.LiveRuntime, error) {
+	return []runtime.LiveRuntime{}, nil
+}
+
+// ScanBySessionIDSince is unavailable on platforms without process
+// environment scanning support.
+func ScanBySessionIDSince(string, time.Time) ([]runtime.LiveRuntime, error) {
 	return []runtime.LiveRuntime{}, nil
 }
 

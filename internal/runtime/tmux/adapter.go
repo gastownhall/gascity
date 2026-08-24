@@ -40,8 +40,10 @@ var (
 	_ runtime.ImmediateNudgeProvider        = (*Provider)(nil)
 	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
+	_ runtime.LivenessInvalidator           = (*Provider)(nil)
 	_ runtime.ProcessTableScanner           = (*Provider)(nil)
 	_ runtime.ServerLifecycleProvider       = (*Provider)(nil)
+	_ runtime.UnattendedSessionStopper      = (*Provider)(nil)
 )
 
 // NewProvider returns a [Provider] backed by a real tmux installation
@@ -254,7 +256,7 @@ func (p *Provider) Stop(name string) error {
 	// SIGTERMed mid-cleanup, leaving the agent alive and the bead un-closed.
 	// Excluding a caller that lives outside the pane is a harmless no-op.
 	err := p.tm.KillSessionWithProcessesExcluding(name, []string{strconv.Itoa(os.Getpid())})
-	if err != nil && (errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer)) {
+	if err != nil && errors.Is(err, ErrSessionNotFound) {
 		return nil // idempotent
 	}
 	if err == nil {
@@ -294,6 +296,12 @@ func (p *Provider) Interrupt(name string) error {
 // ObserveLiveness or ProcessAlive when agent-process liveness matters.
 func (p *Provider) IsRunning(name string) bool {
 	return p.cache.IsRunning(name)
+}
+
+// InvalidateLiveness discards the cached tmux runtime snapshot before a fresh
+// liveness observation. Tmux state is cached globally, so name is unused.
+func (p *Provider) InvalidateLiveness(_ string) {
+	p.cache.Invalidate()
 }
 
 // IsDeadRuntimeSession reports whether a visible tmux session is a
@@ -608,6 +616,172 @@ func (p *Provider) GetMeta(name, key string) (string, error) {
 	return val, nil
 }
 
+const unattendedSessionCensusFormat = "#{session_id}\t#{session_name}\t#{window_id}\t#{pane_id}\t#{session_attached}\t#{pane_in_mode}\t#{window_linked}"
+
+type unattendedSessionCensus struct {
+	sessionID       string
+	attachedClients int
+	copyModePanes   int
+	linkedWindows   map[string]struct{}
+	paneIdentities  map[string]struct{}
+	paneIDs         []string
+}
+
+// StopUnattendedSession stops the exact tmux session incarnation only after
+// proving that it is unattended. It closes only this provider's hidden client,
+// then carries the second census's stable session ID through process lookup and
+// kill so a replacement cannot be stopped by name after certification.
+func (p *Provider) StopUnattendedSession(name, expectedToken string) error {
+	if name == "" || strings.TrimSpace(name) != name {
+		return fmt.Errorf("stopping unattended tmux session: invalid session name %q", name)
+	}
+	if expectedToken == "" || strings.TrimSpace(expectedToken) != expectedToken {
+		return fmt.Errorf("stopping unattended tmux session %q: expected instance token is empty or malformed", name)
+	}
+
+	p.tm.CloseHiddenAttachClient(name)
+	before, err := p.unattendedSessionCensus(name)
+	if err != nil {
+		return err
+	}
+	actualToken, err := p.tm.GetEnvironment("="+name, "GC_INSTANCE_TOKEN")
+	if err != nil {
+		return fmt.Errorf("stopping unattended tmux session %q: reading exact instance token: %w", name, err)
+	}
+	if actualToken == "" || actualToken != expectedToken {
+		return fmt.Errorf("stopping unattended tmux session %q: instance token mismatch", name)
+	}
+	after, err := p.unattendedSessionCensus(name)
+	if err != nil {
+		return err
+	}
+	if before.sessionID != after.sessionID {
+		return fmt.Errorf("stopping unattended tmux session %q: session identity changed from %q to %q", name, before.sessionID, after.sessionID)
+	}
+	if !sameUnattendedPaneIdentities(before.paneIdentities, after.paneIdentities) {
+		return fmt.Errorf("stopping unattended tmux session %q: window/pane identity changed between censuses", name)
+	}
+	if before.attachedClients != 0 || after.attachedClients != 0 {
+		return fmt.Errorf("stopping unattended tmux session %q: attached clients observed before=%d after=%d", name, before.attachedClients, after.attachedClients)
+	}
+	if before.copyModePanes != 0 || after.copyModePanes != 0 {
+		return fmt.Errorf("stopping unattended tmux session %q: copy-mode panes observed before=%d after=%d", name, before.copyModePanes, after.copyModePanes)
+	}
+	if len(before.linkedWindows) != 0 || len(after.linkedWindows) != 0 {
+		return fmt.Errorf("stopping unattended tmux session %q: linked windows observed before=%d after=%d", name, len(before.linkedWindows), len(after.linkedWindows))
+	}
+	if err := p.tm.KillSessionWithCertifiedPaneProcessesExcluding(after.sessionID, after.paneIDs, []string{strconv.Itoa(os.Getpid())}); err != nil {
+		return fmt.Errorf("stopping unattended tmux session %q by certified ID %q: %w", name, after.sessionID, err)
+	}
+	p.cache.EvictSession(name)
+	return nil
+}
+
+func (p *Provider) unattendedSessionCensus(name string) (unattendedSessionCensus, error) {
+	out, err := p.tm.run("list-panes", "-s", "-t", "="+name, "-F", unattendedSessionCensusFormat)
+	if err != nil {
+		return unattendedSessionCensus{}, fmt.Errorf("stopping unattended tmux session %q: listing exact panes: %w", name, err)
+	}
+	return parseUnattendedSessionCensus(name, out)
+}
+
+func parseUnattendedSessionCensus(name, output string) (unattendedSessionCensus, error) {
+	census := unattendedSessionCensus{
+		linkedWindows:  make(map[string]struct{}),
+		paneIdentities: make(map[string]struct{}),
+	}
+	seenPanes := make(map[string]struct{})
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	if len(lines) == 1 && strings.TrimSpace(lines[0]) == "" {
+		return census, fmt.Errorf("stopping unattended tmux session %q: empty pane census", name)
+	}
+	for index, line := range lines {
+		fields := strings.Split(line, "\t")
+		if len(fields) != 7 {
+			return census, fmt.Errorf("stopping unattended tmux session %q: malformed pane census row %d", name, index+1)
+		}
+		sessionID, sessionName, windowID, paneID := fields[0], fields[1], fields[2], fields[3]
+		if !wellFormedTmuxID(sessionID, '$') || !wellFormedTmuxID(windowID, '@') || !wellFormedTmuxID(paneID, '%') {
+			return census, fmt.Errorf("stopping unattended tmux session %q: malformed identity in pane census row %d", name, index+1)
+		}
+		if sessionName != name {
+			return census, fmt.Errorf("stopping unattended tmux session %q: census row %d names session %q", name, index+1, sessionName)
+		}
+		if census.sessionID == "" {
+			census.sessionID = sessionID
+		} else if census.sessionID != sessionID {
+			return census, fmt.Errorf("stopping unattended tmux session %q: mixed session identities in pane census", name)
+		}
+		if _, duplicate := seenPanes[paneID]; duplicate {
+			return census, fmt.Errorf("stopping unattended tmux session %q: duplicate pane %q in census", name, paneID)
+		}
+		seenPanes[paneID] = struct{}{}
+		census.paneIdentities[windowID+"\t"+paneID] = struct{}{}
+		census.paneIDs = append(census.paneIDs, paneID)
+
+		attached, err := parseNonnegativeTmuxCount(fields[4])
+		if err != nil {
+			return census, fmt.Errorf("stopping unattended tmux session %q: malformed attachment count in pane census row %d", name, index+1)
+		}
+		if index == 0 {
+			census.attachedClients = attached
+		} else if census.attachedClients != attached {
+			return census, fmt.Errorf("stopping unattended tmux session %q: inconsistent attachment counts in pane census", name)
+		}
+		inMode, err := parseNonnegativeTmuxCount(fields[5])
+		if err != nil {
+			return census, fmt.Errorf("stopping unattended tmux session %q: malformed copy-mode count in pane census row %d", name, index+1)
+		}
+		if inMode > 0 {
+			census.copyModePanes++
+		}
+		linked, err := parseNonnegativeTmuxCount(fields[6])
+		if err != nil {
+			return census, fmt.Errorf("stopping unattended tmux session %q: malformed linked-window count in pane census row %d", name, index+1)
+		}
+		if linked > 0 {
+			census.linkedWindows[windowID] = struct{}{}
+		}
+	}
+	return census, nil
+}
+
+func sameUnattendedPaneIdentities(left, right map[string]struct{}) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for identity := range left {
+		if _, ok := right[identity]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func wellFormedTmuxID(value string, prefix byte) bool {
+	if len(value) < 2 || value[0] != prefix {
+		return false
+	}
+	for i := 1; i < len(value); i++ {
+		if value[i] < '0' || value[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func parseNonnegativeTmuxCount(value string) (int, error) {
+	if value == "" {
+		return 0, fmt.Errorf("empty count")
+	}
+	for i := range value {
+		if value[i] < '0' || value[i] > '9' {
+			return 0, fmt.Errorf("non-decimal count %q", value)
+		}
+	}
+	return strconv.Atoi(value)
+}
+
 // RemoveMeta removes a key from the named session's tmux environment.
 func (p *Provider) RemoveMeta(name, key string) error {
 	return p.tm.RemoveEnvironment(name, key)
@@ -751,26 +925,32 @@ func (p *Provider) CopyTo(name, src, relDst string) error {
 // refuses to attach to tmux remain-on-exit dead panes with a tmux-specific
 // message-only error. Pane-state query failures fall through to tmux attach.
 func (p *Provider) Attach(name string) error {
-	has, err := p.tm.HasSession(name)
+	witness, err := p.tm.captureAttachSocketWitness()
+	if err != nil {
+		return fmt.Errorf("checking tmux server before attach: %w", err)
+	}
+	has, err := p.tm.hasSessionForAttach(name)
 	if err != nil {
 		return fmt.Errorf("checking tmux session before attach: %w", err)
 	}
 	if !has {
+		if err := p.tm.verifyAttachSocketWitness(witness); err != nil {
+			return fmt.Errorf("checking tmux server before attach: %w", err)
+		}
 		return fmt.Errorf("%w: %w: %s", runtime.ErrSessionNotFound, ErrSessionNotFound, name)
 	}
-	dead, err := p.tm.IsPaneDead(name)
+	dead, err := p.tm.isPaneDeadForAttach(name)
 	if err == nil && dead {
 		return fmt.Errorf("refusing to attach to dead pane for session %q", name)
 	}
-	args := []string{"-u"}
-	if p.cfg.SocketName != "" {
-		args = append(args, "-L", p.cfg.SocketName)
-	}
-	args = append(args, "attach-session", "-t", name)
+	args := p.tm.attachCommandArgs(name, witness)
 	cmd := exec.Command("tmux", args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	if err := p.tm.verifyAttachSocketWitness(witness); err != nil {
+		return fmt.Errorf("checking tmux server before attach: %w", err)
+	}
 	return cmd.Run()
 }
 

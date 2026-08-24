@@ -229,6 +229,13 @@ type Provider interface {
 	Capabilities() ProviderCapabilities
 }
 
+// UnattendedSessionStopper is an optional extension for providers that can
+// prove a destructive effect still targets the expected session incarnation,
+// has no interactive owner, and then stop that exact runtime incarnation.
+type UnattendedSessionStopper interface {
+	StopUnattendedSession(name, expectedToken string) error
+}
+
 // PendingInteraction describes a blocking interaction raised by a session.
 // This is an optional capability exposed by providers that support
 // structured approvals, questions, or other turn-blocking prompts.

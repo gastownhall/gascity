@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -16,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/runtimetest"
 	"github.com/gastownhall/gascity/internal/shellquote"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // Compile-time check.
@@ -127,6 +129,158 @@ func TestProvider_StartWithEnv(t *testing.T) {
 	}
 	if val != "hello" {
 		t.Fatalf("GC_TEST: got %q, want %q", val, "hello")
+	}
+}
+
+func TestProviderStopUnattendedSessionRealNamedTmuxBoundary(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+	if _, err := exec.LookPath("script"); err != nil {
+		t.Skip("script executable not installed")
+	}
+
+	cfg := DefaultConfig()
+	cfg.SocketName = fmt.Sprintf("gctest-certify-unattended-%d-%d", os.Getpid(), time.Now().UnixNano())
+	p := NewProviderWithConfig(cfg)
+	name := "certify-unattended"
+	const token = "certification-token"
+	socketPath := namedSocketPath(cfg.SocketName)
+	defaultPath := namedSocketPath("default")
+	defaultBefore, defaultBeforeErr := os.Lstat(defaultPath)
+	serverStopped := false
+	t.Cleanup(func() {
+		if !serverStopped {
+			if err := p.TeardownServer(); err != nil && !errors.Is(err, ErrNoServer) {
+				t.Errorf("tear down exact named tmux server: %v", err)
+			}
+		}
+		if err := os.Remove(socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("remove exact named tmux socket: %v", err)
+		}
+	})
+
+	if err := p.Start(context.Background(), name, runtime.Config{
+		Command: "sleep 300",
+		Env:     map[string]string{"GC_INSTANCE_TOKEN": token},
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	stubbornReady := fmt.Sprintf("gc-cert-stubborn-ready-%d", time.Now().UnixNano())
+	stubbornCommand := "trap '' HUP TERM; tmux -L " + shellquote.Quote(cfg.SocketName) + " wait-for -S " + shellquote.Quote(stubbornReady) + "; while :; do sleep 1; done"
+	secondPane, err := p.tm.run("new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "="+name, "exec sh -c "+shellquote.Quote(stubbornCommand))
+	if err != nil {
+		t.Fatalf("create second-window pane: %v", err)
+	}
+	if !wellFormedTmuxID(secondPane, '%') {
+		t.Fatalf("second-window pane ID = %q, want %%<digits>", secondPane)
+	}
+
+	waitSignal := func(signal, description string) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), testutil.ExecRaceTimeout)
+		defer cancel()
+		if _, err := p.tm.runCtx(ctx, "wait-for", signal); err != nil {
+			t.Fatalf("wait for %s: %v", description, err)
+		}
+	}
+	waitSignal(stubbornReady, "stubborn second-pane process startup")
+	secondPanePID, err := p.tm.GetPanePID(secondPane)
+	if err != nil {
+		t.Fatalf("read stubborn second-pane process PID: %v", err)
+	}
+	if !processAlive(secondPanePID) {
+		t.Fatalf("stubborn second-pane process %s is not alive before certified stop", secondPanePID)
+	}
+	// A second provider instance owns the real hidden PTY. It is therefore
+	// untracked by p, exactly like a human client from the certifier's point of
+	// view; p must observe it without closing or detaching it.
+	other := NewProviderWithConfig(cfg)
+	if err := other.tm.ensureHiddenAttachedClient(name); err != nil {
+		t.Fatalf("attach real PTY through second provider: %v", err)
+	}
+	defer other.tm.CloseHiddenAttachClient(name)
+	if err := p.StopUnattendedSession(name, token); err == nil || !strings.Contains(err.Error(), "attached clients") {
+		t.Fatalf("attached real PTY stop = %v, want attached-client park", err)
+	}
+	if has, err := p.tm.HasSession(name); err != nil || !has {
+		t.Fatalf("attached stop killed target: has=%v err=%v", has, err)
+	}
+	if !other.tm.IsSessionAttached(name) {
+		t.Fatal("bound stop detached the PTY tracked only by the second provider")
+	}
+
+	detachedSignal := fmt.Sprintf("gc-cert-detached-%d", time.Now().UnixNano())
+	if _, err := p.tm.run("set-hook", "-t", name, "client-detached", "wait-for -S "+detachedSignal); err != nil {
+		t.Fatalf("arm client-detached signal: %v", err)
+	}
+	other.tm.CloseHiddenAttachClient(name)
+	waitSignal(detachedSignal, "real PTY detachment")
+
+	if _, err := p.tm.run("copy-mode", "-t", secondPane); err != nil {
+		t.Fatalf("enter copy mode on second-window pane: %v", err)
+	}
+	if err := p.StopUnattendedSession(name, token); err == nil || !strings.Contains(err.Error(), "copy-mode panes") {
+		t.Fatalf("second-window copy-mode stop = %v, want copy-mode park", err)
+	}
+	if has, err := p.tm.HasSession(name); err != nil || !has {
+		t.Fatalf("copy-mode stop killed target: has=%v err=%v", has, err)
+	}
+	if _, err := p.tm.run("send-keys", "-t", secondPane, "-X", "cancel"); err != nil {
+		t.Fatalf("clear second-window copy mode: %v", err)
+	}
+	observer := "certify-unattended-observer"
+	if _, err := p.tm.run("new-session", "-d", "-s", observer, "sleep 300"); err != nil {
+		t.Fatalf("create observer session: %v", err)
+	}
+	if _, err := p.tm.run("link-window", "-s", "="+name+":0", "-t", "="+observer); err != nil {
+		t.Fatalf("link target window into observer session: %v", err)
+	}
+	if err := other.tm.ensureHiddenAttachedClient(observer); err != nil {
+		t.Fatalf("attach observer PTY: %v", err)
+	}
+	if err := p.StopUnattendedSession(name, token); err == nil || !strings.Contains(err.Error(), "linked windows") {
+		t.Fatalf("linked-window stop = %v, want linked-window park", err)
+	}
+	if has, err := p.tm.HasSession(name); err != nil || !has {
+		t.Fatalf("linked-window stop killed target: has=%v err=%v", has, err)
+	}
+	other.tm.CloseHiddenAttachClient(observer)
+	if err := p.tm.KillSession(observer); err != nil {
+		t.Fatalf("remove observer session: %v", err)
+	}
+	if err := p.StopUnattendedSession(name, token); err != nil {
+		t.Fatalf("stable detached stop: %v", err)
+	}
+	if has, err := p.tm.HasSession(name); err != nil || has {
+		t.Fatalf("certified stop left session present: has=%v err=%v", has, err)
+	}
+	if processAlive(secondPanePID) {
+		t.Fatalf("certified stop left stubborn second-pane process %s alive", secondPanePID)
+	}
+
+	if err := p.TeardownServer(); err != nil {
+		t.Fatalf("tear down exact named tmux server: %v", err)
+	}
+	serverStopped = true
+	if err := os.Remove(socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("remove exact named tmux socket: %v", err)
+	}
+	if _, err := os.Lstat(socketPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("named tmux socket still exists after exact cleanup: %v", err)
+	}
+	defaultAfter, defaultAfterErr := os.Lstat(defaultPath)
+	switch {
+	case errors.Is(defaultBeforeErr, os.ErrNotExist):
+		if !errors.Is(defaultAfterErr, os.ErrNotExist) {
+			t.Fatalf("default tmux socket was created: %v", defaultAfterErr)
+		}
+	case defaultBeforeErr != nil:
+		t.Fatalf("inspect default tmux socket before proof: %v", defaultBeforeErr)
+	case defaultAfterErr != nil:
+		t.Fatalf("default tmux socket changed during proof: %v", defaultAfterErr)
+	case !os.SameFile(defaultBefore, defaultAfter):
+		t.Fatal("default tmux socket identity changed during named-socket proof")
 	}
 }
 
