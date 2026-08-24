@@ -22,12 +22,23 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 const GC_OPENCODE_HOOK_VERSION = 6;
 const GC_BIN = process.env.GC_BIN || "gc";
-// Optional per-turn injection (queued nudges, unread mail) is best effort and
-// sits on the critical path of a turn, so it gets a short fail-open budget
-// rather than the 30s default used for lifecycle work such as prime and
-// handoff. A stalled optional command drops its contribution instead of
-// stalling the turn.
-const INJECTION_TIMEOUT_MS = 3000;
+// Optional per-turn injection (queued nudges, unread mail) is best effort, so
+// it gets its own fail-open budget rather than the 30s default used for
+// lifecycle work such as prime and handoff. A stalled optional command drops
+// its contribution for that turn instead of stalling the turn.
+//
+// The budget is not a latency target. `gc nudge drain --inject` resolves a
+// session, claims queued items, validates them and acknowledges them, so on a
+// city with a busy or remote bead store it legitimately takes seconds; a
+// budget tuned to a fast store just guarantees it is cut off. Injection no
+// longer blocks the send acknowledgement, so overshooting costs a slower reply
+// rather than a message that appears stuck.
+//
+// Override with GC_OPENCODE_INJECTION_TIMEOUT_MS when a store is slower still.
+const INJECTION_TIMEOUT_MS = (() => {
+  const override = Number(process.env.GC_OPENCODE_INJECTION_TIMEOUT_MS);
+  return Number.isFinite(override) && override > 0 ? override : 10000;
+})();
 // GC_BIN is the explicit override. The fallback order matches Pi hooks so
 // sibling providers resolve the same installed gc before developer-local bins.
 const PATH_PREFIX =
