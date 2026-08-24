@@ -6,8 +6,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
@@ -123,7 +127,11 @@ func TestNativeDoltStoreConditionalWriterRequireAgainstRealOpenBestAvailable(t *
 		t.Fatalf("ResolveConditionalWriter = (%T, %+v, %v), want writer, nil, nil", writer, diagnostic, err)
 	}
 
-	created, err := store.Create(Bead{Title: "conditional-writer-real"})
+	parent, err := store.Create(Bead{Title: "conditional-writer-parent"})
+	if err != nil {
+		t.Fatalf("Create parent: %v", err)
+	}
+	created, err := store.Create(Bead{Title: "conditional-writer-real", Labels: []string{"remove-me"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -149,20 +157,38 @@ func TestNativeDoltStoreConditionalWriterRequireAgainstRealOpenBestAvailable(t *
 		t.Fatalf("revision after update = %d, want a fresh token", updated.Revision)
 	}
 
-	if err := writer.CloseIfMatch(updated.ID, updated.Revision); err != nil {
+	parentID := parent.ID
+	compositeTitle := "conditional-writer-composite"
+	if err := writer.UpdateIfMatch(updated.ID, updated.Revision, UpdateOpts{
+		Title:        &compositeTitle,
+		ParentID:     &parentID,
+		Labels:       []string{"atomic"},
+		RemoveLabels: []string{"remove-me"},
+	}); err != nil {
+		t.Fatalf("composite UpdateIfMatch: %v", err)
+	}
+	composite, err := store.Get(updated.ID)
+	if err != nil {
+		t.Fatalf("Get after composite update: %v", err)
+	}
+	if composite.Revision == updated.Revision || composite.Title != compositeTitle || composite.ParentID != parent.ID ||
+		!slices.Contains(composite.Labels, "atomic") || slices.Contains(composite.Labels, "remove-me") {
+		t.Fatalf("composite after-image = %+v", composite)
+	}
+
+	if err := writer.CloseIfMatch(composite.ID, composite.Revision); err != nil {
 		t.Fatalf("CloseIfMatch: %v", err)
 	}
-	closed, err := store.Get(updated.ID)
+	closed, err := store.Get(composite.ID)
 	if err != nil {
 		t.Fatalf("Get after close: %v", err)
 	}
 	if closed.Status != "closed" {
 		t.Fatalf("status after CloseIfMatch = %q, want closed", closed.Status)
 	}
-	if closed.Revision == updated.Revision {
+	if closed.Revision == composite.Revision {
 		t.Fatalf("revision after close = %d, want a fresh token", closed.Revision)
 	}
-
 	if err := writer.DeleteIfMatch(closed.ID, closed.Revision); err != nil {
 		t.Fatalf("DeleteIfMatch: %v", err)
 	}
@@ -337,6 +363,160 @@ func requireNativeDoltRelatedUpdatePrerequisite(t *testing.T, store *NativeDoltS
 	if !hasTouch {
 		t.Skip("current beads pin predates transaction TouchIssue; exercised by the pending-pin compatibility gate")
 	}
+}
+
+func assertRealNativeConditionalCloseCoordinate(t *testing.T, store *NativeDoltStore, id string) {
+	t.Helper()
+	storage, release, err := store.acquireStorage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	coordinate, err := readNativeConditionalCloseCoordinate(context.Background(), storage, id)
+	if err != nil {
+		t.Fatalf("read durable conditional-close coordinate: %v", err)
+	}
+	if !strings.HasPrefix(coordinate, nativeConditionalCloseCoordinatePrefix) ||
+		len(coordinate) != len(nativeConditionalCloseCoordinatePrefix)+32 {
+		t.Fatalf("durable conditional-close coordinate = %q, want namespaced 128-bit coordinate", coordinate)
+	}
+}
+
+func TestNativeDoltStoreRelatedOnlyUpdateBumpsRealRowVersion(t *testing.T) {
+	store := openRealNativeDoltStoreForCAS(t, "conditional-related-bump")
+	parent, err := store.Create(Bead{Title: "parent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := store.Create(Bead{Title: "target"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err = store.Get(target.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Update(target.ID, UpdateOpts{Labels: []string{"label-only"}}); err != nil {
+		t.Fatalf("label-only Update: %v", err)
+	}
+	afterLabel, err := store.Get(target.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterLabel.Revision == target.Revision {
+		t.Fatalf("label-only update left RowVersion %d unchanged", target.Revision)
+	}
+	parentID := parent.ID
+	if err := store.Update(target.ID, UpdateOpts{ParentID: &parentID}); err != nil {
+		t.Fatalf("parent-only Update: %v", err)
+	}
+	afterParent, err := store.Get(target.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterParent.Revision == afterLabel.Revision {
+		t.Fatalf("parent-only update left RowVersion %d unchanged", afterLabel.Revision)
+	}
+
+	// A nonempty scalar map is not proof the scalar changed: beads discards
+	// same-value row patches. The related mutation must still trigger TouchIssue
+	// and invalidate the preimage token.
+	sameTitle := afterParent.Title
+	if err := store.UpdateIfMatch(target.ID, afterParent.Revision, UpdateOpts{
+		Title: &sameTitle, Labels: []string{"same-title-related"},
+	}); err != nil {
+		t.Fatalf("same-title related UpdateIfMatch: %v", err)
+	}
+	afterSameTitle, err := store.Get(target.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterSameTitle.Revision == afterParent.Revision || !slices.Contains(afterSameTitle.Labels, "same-title-related") {
+		t.Fatalf("same-title related after-image = %+v, preimage revision %d", afterSameTitle, afterParent.Revision)
+	}
+	if err := store.UpdateIfMatch(target.ID, afterParent.Revision, UpdateOpts{Labels: []string{"stale"}}); !IsPreconditionFailed(err) {
+		t.Fatalf("reused preimage revision after related update = %v, want PreconditionFailedError", err)
+	}
+}
+
+func TestNativeDoltStoreConditionalWriterAgainstRealWisp(t *testing.T) {
+	store := openRealNativeDoltStoreForCAS(t, "conditional-writer-wisp")
+	parent, err := store.Create(Bead{Title: "regular parent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := store.Create(Bead{Title: "wisp", Ephemeral: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err = store.Get(target.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentID := parent.ID
+	title := "wisp composite"
+	if err := store.UpdateIfMatch(target.ID, target.Revision, UpdateOpts{
+		Title: &title, ParentID: &parentID, Labels: []string{"wisp-atomic"},
+	}); err != nil {
+		t.Fatalf("wisp composite UpdateIfMatch: %v", err)
+	}
+	composite, err := store.Get(target.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if composite.Revision == target.Revision || composite.ParentID != parent.ID ||
+		!slices.Contains(composite.Labels, "wisp-atomic") {
+		t.Fatalf("wisp composite after-image = %+v", composite)
+	}
+	if err := store.CloseIfMatch(composite.ID, composite.Revision); err != nil {
+		t.Fatalf("wisp CloseIfMatch: %v", err)
+	}
+	closed, err := store.Get(composite.ID)
+	if err != nil || closed.Status != "closed" {
+		t.Fatalf("closed wisp = %+v, err=%v", closed, err)
+	}
+	if err := store.DeleteIfMatch(closed.ID, closed.Revision); err != nil {
+		t.Fatalf("wisp DeleteIfMatch: %v", err)
+	}
+}
+
+func TestNativeDoltStoreConditionalCloseCoordinateAgainstRealServerDolt(t *testing.T) {
+	ctx := context.Background()
+	scopeRoot := t.TempDir()
+	port := startTestDoltServer(t)
+	beadsDir := filepath.Join(scopeRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	metadata := fmt.Sprintf(`{"backend":"dolt","database":"beads","dolt_mode":"server","dolt_server_host":"127.0.0.1","dolt_server_port":%d}`, port)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	storage, err := beadslib.OpenBestAvailable(ctx, beadsDir)
+	if err != nil {
+		t.Fatalf("open server-mode native storage: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := storage.Close(); err != nil {
+			t.Errorf("close server-mode native storage: %v", err)
+		}
+	})
+	if err := storage.SetConfig(ctx, "issue_prefix", "gc"); err != nil {
+		t.Fatal(err)
+	}
+	store := newNativeDoltStoreWithStorageAndPrefix(storage, "conditional-close-coordinate", "gc")
+	created, err := store.Create(Bead{Title: "server conditional close"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err = store.Get(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CloseIfMatch(created.ID, created.Revision); err != nil {
+		t.Fatal(err)
+	}
+	assertRealNativeConditionalCloseCoordinate(t, store, created.ID)
 }
 
 // TestNativeDoltStoreMetadataCASSequentialAgainstRealDolt exercises the

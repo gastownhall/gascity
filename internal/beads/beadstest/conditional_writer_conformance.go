@@ -23,9 +23,8 @@ type ConditionalWriterOptions struct {
 	// labels through writes it cannot fold into a revision-guarded update, so
 	// UpdateIfMatch must reject those options with
 	// *beads.ConditionalUpdateFieldUnsupportedError instead of applying them.
-	// bd-backed stores do; a store that keeps the whole bead in one row, or the
-	// native Dolt store that composes related writes transactionally, leaves
-	// this false.
+	// BdStore, MemStore, FileStore, and SQLiteStore do; NativeDoltStore composes
+	// the related writes transactionally and leaves this false.
 	RestrictedUpdateFields bool
 
 	// OpenDisabled returns a fresh store of the same kind whose conditional

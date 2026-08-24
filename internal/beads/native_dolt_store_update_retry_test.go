@@ -7,15 +7,20 @@ import (
 	"sync/atomic"
 	"testing"
 
+	mysql "github.com/go-sql-driver/mysql"
 	beadslib "github.com/steveyegge/beads"
 )
 
-// serializationConflictErr is the verbatim error Dolt returns when a write
-// transaction loses a serialization race. Reproduced from a CI failure of
-// TestHumaBinary_SessionMessageAsync, where a concurrent supervisor write made
-// a session suspend fail permanently and surface as HTTP 500.
-const serializationConflictErr = "sql commit (regular): Error 1213 (40001): serialization failure: " +
-	"this transaction conflicts with a committed transaction from another client, try restarting transaction."
+// serializationConflictError models the decoded server response Dolt returns
+// when a transaction loses a serialization race. Production replay requires
+// the typed rollback proof; matching this text without the MySQL error is
+// deliberately insufficient.
+func serializationConflictError() error {
+	return &mysql.MySQLError{
+		Number:  1213,
+		Message: "serialization failure: this transaction conflicts with a committed transaction from another client, try restarting transaction.",
+	}
+}
 
 // conflictThenOKStorage fails the first failures transactions with a
 // serialization conflict, then succeeds, counting every attempt.
@@ -23,7 +28,7 @@ func conflictThenOKStorage(failures int32, attempts *int32) *nativeDoltStorageSp
 	return &nativeDoltStorageSpy{
 		runInTransaction: func(context.Context, string, func(beadslib.Transaction) error) error {
 			if atomic.AddInt32(attempts, 1) <= failures {
-				return errors.New(serializationConflictErr)
+				return serializationConflictError()
 			}
 			return nil
 		},

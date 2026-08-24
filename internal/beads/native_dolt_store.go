@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	mysql "github.com/go-sql-driver/mysql"
 	beadslib "github.com/steveyegge/beads"
 )
 
@@ -1118,10 +1119,12 @@ func (s *NativeDoltStore) applyUpdateInTx(
 			return err
 		}
 	}
-	if nativeUpdateTouchesRelatedTables(opts) {
+	if nativeConditionalUpdateNeedsTransaction(opts) {
 		// Related-table writes do not rewrite the owning issue row in beads.
 		// Touch it after every sibling mutation (including a no-op close of an
-		// already-closed row) so the aggregate publishes one fresh revision.
+		// already-closed row) so the aggregate publishes one fresh RowVersion.
+		// Do this even when updates was nonempty: beads discards same-value row
+		// patches, while a sibling label/parent mutation may still have landed.
 		if err := nativeDoltTouchIssueInTx(ctx, tx, id, s.actor); err != nil {
 			return err
 		}
@@ -1593,18 +1596,12 @@ const (
 // with something other than a Dolt serialization conflict, or exhausts
 // nativeWriteAttempts.
 //
-// Re-running the whole attempt is safe: it re-reads inside a fresh transaction
-// and therefore builds on the competing transaction's committed rows rather
-// than overwriting them from a stale read. In the conflict this guards against,
-// the regular-table commit is the one that loses the race and nothing lands.
-// isNativeDoltSerializationConflict classifies on error text and cannot tell
-// which of beadslib's commit points failed, so a conflict reported after the
-// regular commit already succeeded would replay the attempt; callers must
-// therefore keep each attempt idempotent under replay, which the metadata
-// merge, label add/remove and reparent operations are.
-//
-// Each attempt gets its own operation context, so an earlier attempt's deadline
-// cannot doom the retries.
+// Re-running the whole attempt is safe only after
+// isNativeDoltSerializationConflict has decoded a server response that proves
+// rollback. Each attempt re-reads inside a fresh transaction and therefore
+// builds on the competing transaction's committed rows rather than overwriting
+// them from a stale read. ErrCommitIndeterminate and untyped errors are never
+// classified as retryable.
 //
 // Every other error is returned on the first try. Retrying a genuine fault only
 // multiplies write load and hides the cause behind a slower failure.
@@ -1670,19 +1667,25 @@ func (s *NativeDoltStore) setMetadataBatchOnce(ctx context.Context, storage bead
 	return nativeStoreError(id, storage.UpdateIssue(ctx, id, map[string]interface{}{"metadata": raw}, s.actor))
 }
 
-// isNativeDoltSerializationConflict reports only Dolt/MySQL transaction
-// serialization conflicts, which are known not to have committed and are safe
-// to retry. Ambiguous connection failures intentionally remain fail-fast.
+// isNativeDoltSerializationConflict reports only decoded Dolt/MySQL failures
+// whose server response proves the transaction rolled back. Untyped errors are
+// never replayed merely because their text resembles a serialization failure.
+// ErrCommitIndeterminate takes precedence even when a wrapper also carries a
+// decoded retryable error.
 func isNativeDoltSerializationConflict(err error) bool {
-	if err == nil {
+	if err == nil || errors.Is(err, beadslib.ErrCommitIndeterminate) {
 		return false
 	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "error 1213") ||
-		strings.Contains(msg, "error 1205") ||
-		(strings.Contains(msg, "sqlstate") && strings.Contains(msg, "40001")) ||
-		strings.Contains(msg, "(40001)") ||
-		strings.Contains(msg, "this transaction conflicts with a committed transaction")
+	var mysqlErr *mysql.MySQLError
+	if !errors.As(err, &mysqlErr) {
+		return false
+	}
+	if mysqlErr.Number == 1213 || mysqlErr.Number == 1205 {
+		return true
+	}
+	return mysqlErr.Number == 1105 &&
+		(mysqlErr.Message == "Merge conflict detected, @autocommit transaction rolled back" ||
+			mysqlErr.Message == "Merge conflict detected, @autocommit transaction rolled back.")
 }
 
 // SetLocalString sets a clone-local string value for a bead. See

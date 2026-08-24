@@ -218,8 +218,10 @@ type ConditionalWriter interface {
 	// that persists ParentID, Labels, or RemoveLabels through separate writes
 	// cannot fold them into the guarded update and rejects them with
 	// *ConditionalUpdateFieldUnsupportedError. The native Dolt store composes
-	// them in one transaction; other backends may reject them. Callers must
-	// therefore handle that error rather than assume the fields applied.
+	// them in one transaction; bd, memory, file, and sqlite stores currently
+	// reject them. Wrappers delegate this capability decision to their resolved
+	// backing, so callers must handle the typed refusal rather than assume the
+	// fields applied.
 	UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error
 	// CloseIfMatch closes the bead only if its revision equals expectedRevision;
 	// otherwise it returns *PreconditionFailedError.
@@ -292,8 +294,9 @@ func (e *ConditionalUpdateFieldUnsupportedError) Error() string {
 	return fmt.Sprintf("conditional update: %s is not supported with revision matching", e.Field)
 }
 
-// validateConditionalUpdateOpts rejects the fields bd must persist separately
-// before any store evaluates a revision fence or mutates state.
+// validateConditionalUpdateOpts rejects related fields for backends that
+// cannot fold them into one revision-fenced mutation. A capable backend may
+// validate only emptiness and enforce related-field semantics transactionally.
 func validateConditionalUpdateOpts(o UpdateOpts) error {
 	switch {
 	case o.ParentID != nil:

@@ -3,6 +3,8 @@ package beads
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -180,16 +182,13 @@ func TestCachingStoreOverNativeDoltStoreForwardsConditionalWrites(t *testing.T) 
 	}
 }
 
-// TestNativeDoltStoreMetadataCASRetryDoesNotLeakPriorAttemptResult models the
-// whole-callback retry performed by beads/Dolt RunInTransaction. A first
-// callback reaches UpdateIssue, then the retry observes a competitor's value.
-// The durable result is a lost race, regardless of what the abandoned callback
-// wrote before the retry.
-func TestNativeDoltStoreMetadataCASRetryDoesNotLeakPriorAttemptResult(t *testing.T) {
-	storage := &nativeDoltMetadataCASRetryStorage{
+// TestNativeDoltStoreMetadataCASIndeterminateCommitIsNotSelfConfirmed models a
+// lost commit acknowledgement after the callback's write landed. The durable
+// value may match next, but that image does not prove authorship: Gas City must
+// return the exported ambiguity sentinel and must not invoke the callback again.
+func TestNativeDoltStoreMetadataCASIndeterminateCommitIsNotSelfConfirmed(t *testing.T) {
+	storage := &nativeDoltMetadataCASIndeterminateStorage{
 		nativeDoltMemStorage: newNativeDoltMemStorage(),
-		key:                  "lease",
-		competitor:           "holder-2",
 	}
 	store := newNativeDoltStoreForTest(storage)
 	created, err := store.Create(Bead{
@@ -199,8 +198,7 @@ func TestNativeDoltStoreMetadataCASRetryDoesNotLeakPriorAttemptResult(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	storage.id = created.ID
-	storage.retryCAS = true
+	storage.indeterminate = true
 
 	writer, ok := MetadataCASWriterFor(store)
 	if !ok {
@@ -208,15 +206,63 @@ func TestNativeDoltStoreMetadataCASRetryDoesNotLeakPriorAttemptResult(t *testing
 	}
 	swapped, err := writer.CompareAndSetMetadataKey(
 		created.ID,
-		storage.key,
+		"lease",
 		"unclaimed",
 		"holder-1",
 	)
-	if err != nil {
-		t.Fatalf("CompareAndSetMetadataKey: %v", err)
+	if !errors.Is(err, beadslib.ErrCommitIndeterminate) || swapped {
+		t.Fatalf("CompareAndSetMetadataKey = (%v, %v), want (false, ErrCommitIndeterminate)", swapped, err)
 	}
-	if swapped {
-		t.Fatal("CompareAndSetMetadataKey = true after retry lost to competitor")
+	if storage.callbackCalls != 1 {
+		t.Fatalf("transaction callback calls = %d, want 1", storage.callbackCalls)
+	}
+	got, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value := got.Metadata["lease"]; value != "holder-1" {
+		t.Fatalf("durable metadata[%q] = %q, want landed value %q", "lease", value, "holder-1")
+	}
+}
+
+type nativeDoltMetadataCASIndeterminateStorage struct {
+	*nativeDoltMemStorage
+	indeterminate bool
+	callbackCalls int
+}
+
+func (s *nativeDoltMetadataCASIndeterminateStorage) RunInTransaction(
+	ctx context.Context,
+	_ string,
+	fn func(beadslib.Transaction) error,
+) error {
+	if !s.indeterminate {
+		return s.nativeDoltMemStorage.RunInTransaction(ctx, "", fn)
+	}
+	s.callbackCalls++
+	if err := fn(nativeDoltTransactionForTest{storage: s.nativeDoltMemStorage}); err != nil {
+		return err
+	}
+	return fmt.Errorf("commit acknowledgement lost after callback: %w: %w", serializationConflictError(), beadslib.ErrCommitIndeterminate)
+}
+
+// TestNativeDoltStoreMetadataCASRollbackRetryRechecksValue models the safe
+// retry boundary abc4 exposes: the first callback ran, but a decoded MySQL
+// response proves its transaction rolled back. A competitor claims the value
+// before the fresh attempt, so this caller must return (false, nil), never the
+// first attempt's stale swapped=true result.
+func TestNativeDoltStoreMetadataCASRollbackRetryRechecksValue(t *testing.T) {
+	storage := &nativeDoltMetadataCASRollbackStorage{nativeDoltMemStorage: newNativeDoltMemStorage()}
+	store := newNativeDoltStoreForTest(storage)
+	created, err := store.Create(Bead{Title: "rollback CAS", Metadata: map[string]string{"lease": "unclaimed"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	storage.targetID = created.ID
+
+	swapped, err := store.CompareAndSetMetadataKey(created.ID, "lease", "unclaimed", "ours")
+	if err != nil || swapped {
+		t.Fatalf("CompareAndSetMetadataKey = (%v, %v), want (false, nil)", swapped, err)
 	}
 	if storage.callbackCalls != 2 {
 		t.Fatalf("transaction callback calls = %d, want 2", storage.callbackCalls)
@@ -225,56 +271,38 @@ func TestNativeDoltStoreMetadataCASRetryDoesNotLeakPriorAttemptResult(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if value := got.Metadata[storage.key]; value != storage.competitor {
-		t.Fatalf("durable metadata[%q] = %q, want competitor %q", storage.key, value, storage.competitor)
+	if got.Metadata["lease"] != "competitor" {
+		t.Fatalf("durable lease = %q, want competitor", got.Metadata["lease"])
 	}
 }
 
-type nativeDoltMetadataCASRetryStorage struct {
+type nativeDoltMetadataCASRollbackStorage struct {
 	*nativeDoltMemStorage
-	id            string
-	key           string
-	competitor    string
-	retryCAS      bool
+	targetID      string
 	callbackCalls int
 }
 
-func (s *nativeDoltMetadataCASRetryStorage) RunInTransaction(
+func (s *nativeDoltMetadataCASRollbackStorage) RunInTransaction(
 	ctx context.Context,
-	_ string,
+	commitMsg string,
 	fn func(beadslib.Transaction) error,
 ) error {
-	if !s.retryCAS {
-		return s.nativeDoltMemStorage.RunInTransaction(ctx, "", fn)
+	s.callbackCalls++
+	if s.callbackCalls > 1 {
+		return s.nativeDoltMemStorage.RunInTransaction(ctx, commitMsg, fn)
 	}
 
-	tx := nativeDoltTransactionForTest{storage: s.nativeDoltMemStorage}
-	// Snapshot the durable state before the first callback. The callback's
-	// UpdateIssue is deliberately rolled back below to model a commit-phase
-	// failure: it may have set the caller's local result flag, but it never
-	// linearized in the store.
 	s.store.mu.Lock()
 	seq, beads, deps := s.store.snapshot()
 	s.store.mu.Unlock()
-	s.callbackCalls++
-	if err := fn(tx); err != nil {
+	closeSnapshot := s.snapshotCloseProjections()
+	if err := fn(nativeDoltTransactionForTest{storage: s.nativeDoltMemStorage}); err != nil {
 		return err
 	}
 	s.store.restoreFrom(seq, beads, deps)
-
-	raw, err := metadataRawFromMap(map[string]string{s.key: s.competitor})
-	if err != nil {
+	s.restoreCloseProjections(closeSnapshot)
+	if err := s.store.SetMetadata(s.targetID, "lease", "competitor"); err != nil {
 		return err
 	}
-	if err := s.UpdateIssue(
-		ctx,
-		s.id,
-		map[string]interface{}{"metadata": raw},
-		"competitor",
-	); err != nil {
-		return err
-	}
-
-	s.callbackCalls++
-	return fn(tx)
+	return serializationConflictError()
 }

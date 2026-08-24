@@ -3,6 +3,7 @@ package beads
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,7 +17,9 @@ import (
 	"testing"
 	"time"
 
+	mysql "github.com/go-sql-driver/mysql"
 	beadslib "github.com/steveyegge/beads"
+	"github.com/steveyegge/beads/issueops"
 )
 
 func TestNativeDoltStoreCreateDelegatesToUpstreamStorage(t *testing.T) {
@@ -1062,7 +1065,7 @@ func TestNativeDoltStoreSetMetadataBatchRetriesSerializationConflictFromFreshSta
 		updateIssue: func(_ context.Context, _ string, updates map[string]interface{}, _ string) error {
 			updateCalls++
 			if updateCalls == 1 {
-				return errors.New("dolt commit: Error 1213 (40001): serialization failure: this transaction conflicts with a committed transaction, try restarting transaction")
+				return serializationConflictError()
 			}
 			raw, ok := updates["metadata"].(json.RawMessage)
 			if !ok {
@@ -1119,7 +1122,7 @@ func TestNativeDoltStoreSetMetadataBatchDoesNotRetryPermanentWriteError(t *testi
 }
 
 func TestNativeDoltStoreSetMetadataBatchStopsAfterThreeSerializationConflicts(t *testing.T) {
-	wantErr := errors.New("commit failed (SQLSTATE 40001): serialization failure")
+	wantErr := serializationConflictError()
 	getCalls := 0
 	updateCalls := 0
 	storage := &nativeDoltStorageSpy{
@@ -1149,10 +1152,16 @@ func TestNativeDoltSerializationConflictClassification(t *testing.T) {
 		err  error
 		want bool
 	}{
-		{name: "mysql error and SQLSTATE", err: errors.New("Error 1213 (40001): serialization failure"), want: true},
-		{name: "mysql lock wait timeout", err: errors.New("Error 1205 (HY000): lock wait timeout exceeded"), want: true},
-		{name: "SQLSTATE", err: errors.New("commit failed (SQLSTATE 40001)"), want: true},
-		{name: "Dolt conflict wording", err: errors.New("this transaction conflicts with a committed transaction"), want: true},
+		{name: "mysql deadlock", err: &mysql.MySQLError{Number: 1213, Message: "serialization failure"}, want: true},
+		{name: "wrapped mysql lock wait timeout", err: fmt.Errorf("commit: %w", &mysql.MySQLError{Number: 1205, Message: "lock wait timeout exceeded"}), want: true},
+		{name: "exact dolt rollback", err: &mysql.MySQLError{Number: 1105, Message: "Merge conflict detected, @autocommit transaction rolled back"}, want: true},
+		{name: "dolt rollback with period", err: &mysql.MySQLError{Number: 1105, Message: "Merge conflict detected, @autocommit transaction rolled back."}, want: true},
+		{name: "dolt rollback with extra text", err: &mysql.MySQLError{Number: 1105, Message: "Merge conflict detected, @autocommit transaction rolled back. Please retry"}, want: false},
+		{name: "other mysql 1105", err: &mysql.MySQLError{Number: 1105, Message: "Merge conflict detected"}, want: false},
+		{name: "untyped mysql text", err: errors.New("Error 1213 (40001): serialization failure"), want: false},
+		{name: "untyped SQLSTATE", err: errors.New("commit failed (SQLSTATE 40001)"), want: false},
+		{name: "untyped Dolt conflict wording", err: errors.New("this transaction conflicts with a committed transaction"), want: false},
+		{name: "indeterminate takes precedence over decoded conflict", err: fmt.Errorf("commit: %w: %w", &mysql.MySQLError{Number: 1213, Message: "deadlock"}, beadslib.ErrCommitIndeterminate), want: false},
 		{name: "unrelated serialization wording", err: errors.New("serialization failed while encoding metadata"), want: false},
 		{name: "permanent error", err: errors.New("permission denied"), want: false},
 		{name: "nil", err: nil, want: false},
@@ -1166,10 +1175,10 @@ func TestNativeDoltSerializationConflictClassification(t *testing.T) {
 	}
 }
 
-func TestNativeDoltStoreCloseWithMetadataIfMatchRetriesWholeTransaction(t *testing.T) {
+func TestNativeDoltStoreCloseWithMetadataIfMatchDoesNotOuterRetryTransaction(t *testing.T) {
 	for _, conflict := range []error{
-		errors.New("Error 1213 (40001): deadlock"),
-		errors.New("Error 1205 (HY000): lock wait timeout exceeded"),
+		&mysql.MySQLError{Number: 1213, Message: "deadlock"},
+		&mysql.MySQLError{Number: 1205, Message: "lock wait timeout exceeded"},
 	} {
 		t.Run(conflict.Error(), func(t *testing.T) {
 			storage := &retryingNativeDoltStorage{
@@ -1183,27 +1192,31 @@ func TestNativeDoltStoreCloseWithMetadataIfMatchRetriesWholeTransaction(t *testi
 			}
 
 			closed, err := store.CloseWithMetadataIfMatch(created.ID, created.Revision, map[string]string{"state": "drained"})
-			if err != nil {
-				t.Fatalf("CloseWithMetadataIfMatch: %v", err)
+			if !errors.Is(err, conflict) {
+				t.Fatalf("CloseWithMetadataIfMatch error = %v, want %v", err, conflict)
 			}
-			if storage.txCalls != 2 {
-				t.Fatalf("RunInTransaction calls = %d, want 2", storage.txCalls)
+			if storage.txCalls != 1 {
+				t.Fatalf("RunInTransaction calls = %d, want 1", storage.txCalls)
 			}
-			if closed.Status != "closed" || closed.Metadata["state"] != "drained" {
-				t.Fatalf("returned bead = %#v, want closed row from replay", closed)
+			if !reflect.DeepEqual(closed, Bead{}) {
+				t.Fatalf("failed transaction returned %#v, want zero bead", closed)
+			}
+			fresh, getErr := store.Get(created.ID)
+			if getErr != nil || fresh.Status != "open" || fresh.Metadata["state"] != "" {
+				t.Fatalf("rolled-back after-image = %#v, err=%v", fresh, getErr)
 			}
 		})
 	}
 }
 
-func TestNativeDoltStoreCloseWithMetadataIfMatchRetryRereadsFence(t *testing.T) {
+func TestNativeDoltStoreCloseWithMetadataIfMatchDoesNotConvertLaterWriteToFenceResult(t *testing.T) {
 	storage := &retryingNativeDoltStorage{nativeDoltMemStorage: newNativeDoltMemStorage()}
 	store := newNativeDoltStoreForTest(storage)
 	created, err := store.Create(Bead{Title: "retry stale fence"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	storage.txErrors = []error{errors.New("Error 1213 (40001): deadlock")}
+	storage.txErrors = []error{&mysql.MySQLError{Number: 1213, Message: "deadlock"}}
 	storage.afterConflict = func() {
 		if err := storage.store.SetMetadata(created.ID, "intervening", "write"); err != nil {
 			t.Fatalf("intervening write: %v", err)
@@ -1211,14 +1224,14 @@ func TestNativeDoltStoreCloseWithMetadataIfMatchRetryRereadsFence(t *testing.T) 
 	}
 
 	closed, err := store.CloseWithMetadataIfMatch(created.ID, created.Revision, map[string]string{"state": "drained"})
-	if !IsPreconditionFailed(err) {
-		t.Fatalf("CloseWithMetadataIfMatch error = %v, want precondition failure", err)
+	if err == nil || IsPreconditionFailed(err) {
+		t.Fatalf("CloseWithMetadataIfMatch error = %v, want original transaction failure", err)
 	}
 	if !reflect.DeepEqual(closed, Bead{}) {
 		t.Fatalf("failed replay returned %#v, want zero bead", closed)
 	}
-	if storage.txCalls != 2 {
-		t.Fatalf("RunInTransaction calls = %d, want 2", storage.txCalls)
+	if storage.txCalls != 1 {
+		t.Fatalf("RunInTransaction calls = %d, want 1", storage.txCalls)
 	}
 	fresh, err := store.Get(created.ID)
 	if err != nil {
@@ -1253,11 +1266,11 @@ func TestNativeDoltStoreCloseWithMetadataIfMatchDoesNotRetryAmbiguousFailure(t *
 	}
 }
 
-func TestNativeDoltStoreCloseWithMetadataIfMatchReturnsZeroAfterRetryExhaustion(t *testing.T) {
-	conflict := errors.New("Error 1213 (40001): deadlock")
+func TestNativeDoltStoreCloseWithMetadataIfMatchIndeterminateTakesRetryPrecedence(t *testing.T) {
+	conflict := fmt.Errorf("commit: %w: %w", &mysql.MySQLError{Number: 1213, Message: "deadlock"}, beadslib.ErrCommitIndeterminate)
 	storage := &retryingNativeDoltStorage{
 		nativeDoltMemStorage: newNativeDoltMemStorage(),
-		txErrors:             []error{conflict, conflict, conflict},
+		txErrors:             []error{conflict},
 	}
 	store := newNativeDoltStoreForTest(storage)
 	created, err := store.Create(Bead{Title: "exhaust close retries"})
@@ -1272,19 +1285,18 @@ func TestNativeDoltStoreCloseWithMetadataIfMatchReturnsZeroAfterRetryExhaustion(
 	if !reflect.DeepEqual(closed, Bead{}) {
 		t.Fatalf("exhausted retry returned %#v, want zero bead", closed)
 	}
-	if storage.txCalls != nativeWriteAttempts {
-		t.Fatalf("RunInTransaction calls = %d, want %d", storage.txCalls, nativeWriteAttempts)
+	if storage.txCalls != 1 {
+		t.Fatalf("RunInTransaction calls = %d, want 1", storage.txCalls)
 	}
 }
 
-// DeleteIfMatch runs its fence check and delete inside one transaction, so a
-// serialization conflict must replay the WHOLE transaction — re-reading the row
-// version each attempt — exactly like the close path. Retrying only the delete
-// would fence against a RowVersion the rolled-back read already invalidated.
-func TestNativeDoltStoreDeleteIfMatchRetriesWholeTransaction(t *testing.T) {
+// DeleteIfMatch delegates one at-most-once callback to beads. Gas City does not
+// wrap that public call in a second retry loop, even when the returned error is
+// a decoded rollback-proven database conflict.
+func TestNativeDoltStoreDeleteIfMatchDoesNotOuterRetryTransaction(t *testing.T) {
 	for _, conflict := range []error{
-		errors.New("Error 1213 (40001): deadlock"),
-		errors.New("Error 1205 (HY000): lock wait timeout exceeded"),
+		&mysql.MySQLError{Number: 1213, Message: "deadlock"},
+		&mysql.MySQLError{Number: 1205, Message: "lock wait timeout exceeded"},
 	} {
 		t.Run(conflict.Error(), func(t *testing.T) {
 			storage := &retryingNativeDoltStorage{
@@ -1297,14 +1309,14 @@ func TestNativeDoltStoreDeleteIfMatchRetriesWholeTransaction(t *testing.T) {
 				t.Fatalf("Create: %v", err)
 			}
 
-			if err := store.DeleteIfMatch(created.ID, created.Revision); err != nil {
-				t.Fatalf("DeleteIfMatch: %v", err)
+			if err := store.DeleteIfMatch(created.ID, created.Revision); !errors.Is(err, conflict) {
+				t.Fatalf("DeleteIfMatch error = %v, want %v", err, conflict)
 			}
-			if storage.txCalls != 2 {
-				t.Fatalf("RunInTransaction calls = %d, want 2", storage.txCalls)
+			if storage.txCalls != 1 {
+				t.Fatalf("RunInTransaction calls = %d, want 1", storage.txCalls)
 			}
-			if _, err := store.Get(created.ID); !errors.Is(err, ErrNotFound) {
-				t.Fatalf("Get after replayed delete = %v, want ErrNotFound", err)
+			if _, err := store.Get(created.ID); err != nil {
+				t.Fatalf("Get after rolled-back delete = %v, want bead intact", err)
 			}
 		})
 	}
@@ -1314,7 +1326,7 @@ func TestNativeDoltStoreDeleteIfMatchRetriesWholeTransaction(t *testing.T) {
 // or a delete that already applied would run again against a moved fence. This
 // pins the same transient/ambiguous split the close path draws.
 func TestNativeDoltStoreDeleteIfMatchDoesNotRetryAmbiguousFailure(t *testing.T) {
-	sentinel := errors.New("connection reset by peer")
+	sentinel := fmt.Errorf("connection reset by peer: %w", beadslib.ErrCommitIndeterminate)
 	storage := &retryingNativeDoltStorage{
 		nativeDoltMemStorage: newNativeDoltMemStorage(),
 		txErrors:             []error{sentinel},
@@ -2538,12 +2550,15 @@ type nativeDoltTransactionTestStorage interface {
 	GetIssue(context.Context, string) (*beadslib.Issue, error)
 	UpdateIssue(context.Context, string, map[string]interface{}, string) error
 	CloseIssue(context.Context, string, string, string, string) error
+	CloseIssueChecked(context.Context, string, string, beadslib.CloseIssueOptions) (beadslib.CloseIssueResult, error)
 	DeleteIssue(context.Context, string) error
 	AddLabel(context.Context, string, string, string) error
 	RemoveLabel(context.Context, string, string, string) error
+	GetLabels(context.Context, string) ([]string, error)
 	AddDependency(context.Context, *beadslib.Dependency, string) error
 	RemoveDependency(context.Context, string, string, string) error
 	GetDependencyRecords(context.Context, string) ([]*beadslib.Dependency, error)
+	IsBlocked(context.Context, string) (bool, []string, error)
 }
 
 type nativeDoltTransactionForTest struct {
@@ -2561,6 +2576,14 @@ func (tx nativeDoltTransactionForTest) CreateIssues(ctx context.Context, issues 
 
 func (tx nativeDoltTransactionForTest) CloseIssue(ctx context.Context, id, reason, actor, session string) error {
 	return tx.storage.CloseIssue(ctx, id, reason, actor, session)
+}
+
+func (tx nativeDoltTransactionForTest) CloseIssueChecked(
+	ctx context.Context,
+	id, actor string,
+	opts beadslib.CloseIssueOptions,
+) (beadslib.CloseIssueResult, error) {
+	return tx.storage.CloseIssueChecked(ctx, id, actor, opts)
 }
 
 func (tx nativeDoltTransactionForTest) DeleteIssue(ctx context.Context, id string) error {
@@ -2591,8 +2614,9 @@ func (tx nativeDoltTransactionForTest) TouchIssue(ctx context.Context, id, actor
 	if issue == nil {
 		return ErrNotFound
 	}
-	// MemStore advances Revision on every update, so a same-value title write
-	// models TouchIssue's revision-only mutation for older fixture types.
+	// The MemStore fixture bumps Revision for every Update, including a
+	// same-value title. This models Beads TouchIssue without inventing a second
+	// fake-only revision hook.
 	return tx.storage.UpdateIssue(ctx, id, map[string]interface{}{"title": issue.Title}, actor)
 }
 
@@ -2602,6 +2626,10 @@ func (tx nativeDoltTransactionForTest) AddLabel(ctx context.Context, issueID, la
 
 func (tx nativeDoltTransactionForTest) RemoveLabel(ctx context.Context, issueID, label, actor string) error {
 	return tx.storage.RemoveLabel(ctx, issueID, label, actor)
+}
+
+func (tx nativeDoltTransactionForTest) GetLabels(ctx context.Context, issueID string) ([]string, error) {
+	return tx.storage.GetLabels(ctx, issueID)
 }
 
 func (tx nativeDoltTransactionForTest) AddDependency(ctx context.Context, dep *beadslib.Dependency, actor string) error {
@@ -2614,6 +2642,10 @@ func (tx nativeDoltTransactionForTest) RemoveDependency(ctx context.Context, iss
 
 func (tx nativeDoltTransactionForTest) GetDependencyRecords(ctx context.Context, issueID string) ([]*beadslib.Dependency, error) {
 	return tx.storage.GetDependencyRecords(ctx, issueID)
+}
+
+func (tx nativeDoltTransactionForTest) IsBlocked(ctx context.Context, issueID string) (bool, []string, error) {
+	return tx.storage.IsBlocked(ctx, issueID)
 }
 
 type nativeDoltStorageSpy struct {
@@ -2636,6 +2668,7 @@ type nativeDoltStorageSpy struct {
 	addDependency               func(context.Context, *beadslib.Dependency, string) error
 	removeDependency            func(context.Context, string, string, string) error
 	getDependencyRecords        func(context.Context, string) ([]*beadslib.Dependency, error)
+	isBlocked                   func(context.Context, string) (bool, []string, error)
 	getDependenciesWithMetadata func(context.Context, string) ([]*beadslib.IssueWithDependencyMetadata, error)
 	getDependentsWithMetadata   func(context.Context, string) ([]*beadslib.IssueWithDependencyMetadata, error)
 	getConfig                   func(context.Context, string) (string, error)
@@ -2715,6 +2748,13 @@ func (s *nativeDoltStorageSpy) DeleteIssue(ctx context.Context, id string) error
 		return nil
 	}
 	return s.deleteIssue(ctx, id)
+}
+
+func (s *nativeDoltStorageSpy) IsBlocked(ctx context.Context, id string) (bool, []string, error) {
+	if s.isBlocked == nil {
+		return false, nil, nil
+	}
+	return s.isBlocked(ctx, id)
 }
 
 func (s *nativeDoltStorageSpy) SearchIssues(ctx context.Context, query string, filter beadslib.IssueFilter) ([]*beadslib.Issue, error) {
@@ -2811,12 +2851,22 @@ func (s *nativeDoltStorageSpy) Close() error {
 
 type nativeDoltMemStorage struct {
 	beadslib.Storage
-	store *MemStore
-	txMu  sync.Mutex
+	store   *MemStore
+	txMu    sync.Mutex
+	closeMu sync.Mutex
+	closes  map[string]nativeDoltTestCloseProjection
+}
+
+type nativeDoltTestCloseProjection struct {
+	reason  string
+	session string
 }
 
 func newNativeDoltMemStorage() *nativeDoltMemStorage {
-	return &nativeDoltMemStorage{store: NewMemStore()}
+	return &nativeDoltMemStorage{
+		store:  NewMemStore(),
+		closes: make(map[string]nativeDoltTestCloseProjection),
+	}
 }
 
 func (s *nativeDoltMemStorage) RunInTransaction(_ context.Context, _ string, fn func(beadslib.Transaction) error) error {
@@ -2831,11 +2881,70 @@ func runNativeDoltMemStorageTransactionForTest(storage *nativeDoltMemStorage, fn
 	storage.store.mu.Lock()
 	seq, beads, deps := storage.store.snapshot()
 	storage.store.mu.Unlock()
+	closeSnapshot := storage.snapshotCloseProjections()
 	if err := fn(); err != nil {
 		storage.store.restoreFrom(seq, beads, deps)
+		storage.restoreCloseProjections(closeSnapshot)
 		return err
 	}
 	return nil
+}
+
+func (s *nativeDoltMemStorage) snapshotCloseProjections() map[string]nativeDoltTestCloseProjection {
+	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
+	out := make(map[string]nativeDoltTestCloseProjection, len(s.closes))
+	for id, projection := range s.closes {
+		out[id] = projection
+	}
+	return out
+}
+
+func (s *nativeDoltMemStorage) restoreCloseProjections(snapshot map[string]nativeDoltTestCloseProjection) {
+	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
+	s.closes = make(map[string]nativeDoltTestCloseProjection, len(snapshot))
+	for id, projection := range snapshot {
+		s.closes[id] = projection
+	}
+}
+
+func (s *nativeDoltMemStorage) recordCloseProjection(id, reason, session string) {
+	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
+	if s.closes == nil {
+		s.closes = make(map[string]nativeDoltTestCloseProjection)
+	}
+	s.closes[id] = nativeDoltTestCloseProjection{reason: reason, session: session}
+}
+
+func (s *nativeDoltMemStorage) clearCloseProjection(id string) {
+	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
+	delete(s.closes, id)
+}
+
+func (s *nativeDoltMemStorage) readNativeConditionalCloseCoordinate(_ context.Context, id string) (string, error) {
+	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
+	projection, ok := s.closes[id]
+	if !ok {
+		return "", sql.ErrNoRows
+	}
+	return projection.session, nil
+}
+
+func (s *nativeDoltMemStorage) applyCloseProjection(issue *beadslib.Issue) {
+	if issue == nil {
+		return
+	}
+	s.closeMu.Lock()
+	projection, ok := s.closes[issue.ID]
+	s.closeMu.Unlock()
+	if ok {
+		issue.CloseReason = projection.reason
+		issue.ClosedBySession = projection.session
+	}
 }
 
 func (s *nativeDoltMemStorage) CreateIssue(_ context.Context, issue *beadslib.Issue, _ string) error {
@@ -2849,6 +2958,7 @@ func (s *nativeDoltMemStorage) CreateIssue(_ context.Context, issue *beadslib.Is
 	if err != nil {
 		return err
 	}
+	s.clearCloseProjection(created.ID)
 	converted, err := nativeIssueFromBead(created)
 	if err != nil {
 		return err
@@ -2871,7 +2981,12 @@ func (s *nativeDoltMemStorage) GetIssue(_ context.Context, id string) (*beadslib
 	if err != nil {
 		return nil, err
 	}
-	return nativeIssueFromBead(bead)
+	issue, err := nativeIssueFromBead(bead)
+	if err != nil {
+		return nil, err
+	}
+	s.applyCloseProjection(issue)
+	return issue, nil
 }
 
 func (s *nativeDoltMemStorage) UpdateIssue(_ context.Context, id string, updates map[string]interface{}, _ string) error {
@@ -2900,15 +3015,29 @@ func (s *nativeDoltMemStorage) UpdateIssueChecked(
 }
 
 func (s *nativeDoltMemStorage) ReopenIssue(_ context.Context, id string, _ string, _ string) error {
-	return s.store.Reopen(id)
+	if err := s.store.Reopen(id); err != nil {
+		return err
+	}
+	s.clearCloseProjection(id)
+	return nil
 }
 
-func (s *nativeDoltMemStorage) CloseIssue(_ context.Context, id string, _ string, _ string, _ string) error {
-	return s.store.Close(id)
+func (s *nativeDoltMemStorage) CloseIssue(_ context.Context, id, reason, _ string, session string) error {
+	before, err := s.store.Get(id)
+	if err != nil {
+		return err
+	}
+	if err := s.store.Close(id); err != nil {
+		return err
+	}
+	if before.Status != "closed" {
+		s.recordCloseProjection(id, reason, session)
+	}
+	return nil
 }
 
 func (s *nativeDoltMemStorage) CloseIssueChecked(
-	_ context.Context,
+	ctx context.Context,
 	id string,
 	_ string,
 	opts beadslib.CloseIssueOptions,
@@ -2917,19 +3046,55 @@ func (s *nativeDoltMemStorage) CloseIssueChecked(
 	if err != nil {
 		return beadslib.CloseIssueResult{}, err
 	}
-	if opts.ExpectedVersion == nil {
-		err = s.store.Close(id)
-	} else {
-		err = s.store.CloseIfMatch(id, *opts.ExpectedVersion)
+	if opts.ExpectedVersion != nil && current.Revision != *opts.ExpectedVersion {
+		return beadslib.CloseIssueResult{}, fmt.Errorf("%w: %w", beadslib.ErrVersionMismatch, &PreconditionFailedError{
+			ID: id, Expected: *opts.ExpectedVersion, Current: current.Revision,
+		})
 	}
+	if !opts.Force {
+		dependents, depErr := s.store.DepList(id, "up")
+		if depErr != nil {
+			return beadslib.CloseIssueResult{}, depErr
+		}
+		openChildren := 0
+		for _, dep := range dependents {
+			if dep.Type != "parent-child" {
+				continue
+			}
+			child, getErr := s.store.Get(dep.IssueID)
+			if getErr == nil && child.Status != "closed" {
+				openChildren++
+			}
+		}
+		if openChildren > 0 {
+			return beadslib.CloseIssueResult{}, fmt.Errorf("%w: cannot close %s: %d open child issues", issueops.ErrCloseOpenChildren, id, openChildren)
+		}
+		if current.Status != "closed" {
+			blocked, blockers, blockedErr := s.IsBlocked(ctx, id)
+			if blockedErr != nil {
+				return beadslib.CloseIssueResult{}, blockedErr
+			}
+			if blocked && len(blockers) > 0 {
+				return beadslib.CloseIssueResult{}, fmt.Errorf("%w: %s is blocked by %v", beadslib.ErrCloseBlocked, id, blockers)
+			}
+		}
+	}
+	err = s.store.Close(id)
 	if err != nil {
 		return beadslib.CloseIssueResult{}, nativeDoltMemCheckedError(err)
+	}
+	if current.Status != "closed" {
+		s.recordCloseProjection(id, opts.Reason, opts.Session)
 	}
 	return beadslib.CloseIssueResult{Unchanged: current.Status == "closed"}, nil
 }
 
 func (s *nativeDoltMemStorage) DeleteIssue(_ context.Context, id string) error {
-	return s.store.Delete(id)
+	if err := s.store.Delete(id); err != nil {
+		return err
+	}
+	s.clearCloseProjection(id)
+	return nil
 }
 
 func nativeDoltMemCheckedError(err error) error {
@@ -3017,6 +3182,14 @@ func (s *nativeDoltMemStorage) RemoveLabel(_ context.Context, issueID, label, _ 
 	return s.store.Update(issueID, UpdateOpts{RemoveLabels: []string{label}})
 }
 
+func (s *nativeDoltMemStorage) GetLabels(_ context.Context, issueID string) ([]string, error) {
+	bead, err := s.store.Get(issueID)
+	if err != nil {
+		return nil, err
+	}
+	return append([]string(nil), bead.Labels...), nil
+}
+
 func (s *nativeDoltMemStorage) AddDependency(_ context.Context, dep *beadslib.Dependency, _ string) error {
 	return s.store.DepAdd(dep.IssueID, dep.DependsOnID, string(dep.Type))
 }
@@ -3039,6 +3212,35 @@ func (s *nativeDoltMemStorage) GetDependencyRecords(_ context.Context, issueID s
 		})
 	}
 	return records, nil
+}
+
+func (s *nativeDoltMemStorage) IsBlocked(_ context.Context, issueID string) (bool, []string, error) {
+	if _, err := s.store.Get(issueID); err != nil {
+		return false, nil, err
+	}
+	deps, err := s.store.DepList(issueID, "down")
+	if err != nil {
+		return false, nil, err
+	}
+	blockers := make([]string, 0, len(deps))
+	for _, dep := range deps {
+		switch dep.Type {
+		case "blocks", "waits-for", "conditional-blocks":
+		default:
+			continue
+		}
+		blocking, getErr := s.store.Get(dep.DependsOnID)
+		if getErr != nil {
+			if errors.Is(getErr, ErrNotFound) {
+				continue
+			}
+			return false, nil, getErr
+		}
+		if blocking.Status != "closed" {
+			blockers = append(blockers, blocking.ID)
+		}
+	}
+	return len(blockers) > 0, blockers, nil
 }
 
 func (s *nativeDoltMemStorage) GetDependenciesWithMetadata(_ context.Context, issueID string) ([]*beadslib.IssueWithDependencyMetadata, error) {
@@ -3136,6 +3338,17 @@ func (s *nativeDoltFailingCloseStorage) CloseIssue(ctx context.Context, id, reas
 		return s.closeIssue(ctx, id, reason, actor, session)
 	}
 	return s.nativeDoltMemStorage.CloseIssue(ctx, id, reason, actor, session)
+}
+
+func (s *nativeDoltFailingCloseStorage) CloseIssueChecked(
+	ctx context.Context,
+	id, actor string,
+	opts beadslib.CloseIssueOptions,
+) (beadslib.CloseIssueResult, error) {
+	if s.closeIssue != nil {
+		return beadslib.CloseIssueResult{}, s.closeIssue(ctx, id, opts.Reason, actor, opts.Session)
+	}
+	return s.nativeDoltMemStorage.CloseIssueChecked(ctx, id, actor, opts)
 }
 
 func (s *nativeDoltCloseCapturingStorage) CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error {

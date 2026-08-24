@@ -63,7 +63,7 @@ func TestNativeDoltStoreCloseRetriesSerializationConflict(t *testing.T) {
 	spy := newCloseSpy(func(attempt int32, markClosed func()) error {
 		if attempt == 1 {
 			// Lost the race: nothing landed.
-			return errors.New(serializationConflictErr)
+			return serializationConflictError()
 		}
 		markClosed()
 		return nil
@@ -96,7 +96,7 @@ func TestNativeDoltStoreCloseReplayShortCircuitsWhenAnotherActorClosedTheBead(t 
 			// flip is synchronous here, so this models ordering, not
 			// backoff timing.
 			markClosed()
-			return errors.New(serializationConflictErr)
+			return serializationConflictError()
 		}
 		t.Errorf("CloseIssue called %d times; the replay must short-circuit on the already-closed bead", attempt)
 		return nil
@@ -116,7 +116,7 @@ func TestNativeDoltStoreCloseReplayShortCircuitsWhenAnotherActorClosedTheBead(t 
 
 func TestNativeDoltStoreCloseStopsAtAttemptLimit(t *testing.T) {
 	spy := newCloseSpy(func(int32, func()) error {
-		return errors.New(serializationConflictErr)
+		return serializationConflictError()
 	})
 	store := newNativeDoltStoreForTest(spy)
 
@@ -189,7 +189,7 @@ func TestNativeDoltStoreCloseAllRecoversWhenTheCloseConflictsAfterMetadataLanded
 		},
 		closeIssue: func(context.Context, string, string, string, string) error {
 			if atomic.AddInt32(&closes, 1) == 1 {
-				return errors.New(serializationConflictErr)
+				return serializationConflictError()
 			}
 			atomic.StoreInt32(&closed, 1)
 			return nil
@@ -239,7 +239,7 @@ func newReopenSpy(mutate func(attempt int32, markOpen func()) error) *closeReope
 func TestNativeDoltStoreReopenRetriesSerializationConflict(t *testing.T) {
 	spy := newReopenSpy(func(attempt int32, markOpen func()) error {
 		if attempt == 1 {
-			return errors.New(serializationConflictErr)
+			return serializationConflictError()
 		}
 		markOpen()
 		return nil
@@ -261,7 +261,7 @@ func TestNativeDoltStoreReopenReplayShortCircuitsWhenAnotherActorReopenedTheBead
 	spy := newReopenSpy(func(attempt int32, markOpen func()) error {
 		if attempt == 1 {
 			markOpen()
-			return errors.New(serializationConflictErr)
+			return serializationConflictError()
 		}
 		t.Errorf("ReopenIssue called %d times; the replay must short-circuit on the already-open bead", attempt)
 		return nil
