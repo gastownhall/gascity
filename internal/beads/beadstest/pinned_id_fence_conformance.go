@@ -284,6 +284,55 @@ func RunPinnedIDFenceConformance(t *testing.T, openFenced func(t *testing.T, min
 		})
 	})
 
+	// The fence covers the transactional write surface too.
+	//
+	// Store.Tx is a Create in every sense the invariant cares about: the bead it
+	// writes is as resident, and as unreachable by an id-shaped lookup of the
+	// namespace it lands in, as one written outside a transaction. A store that
+	// fences only the standalone Create passes every row above and still lets a
+	// caller write a foreign bead into a binding that claims not to hold one —
+	// which is how this row came to exist (ga-qdt5y.14 review, both shipped
+	// providers had the hole).
+	//
+	// Tx is on Store, so this row can neither skip nor be satisfied by omission.
+	t.Run("TheFenceCoversTheTransactionalCreate", func(t *testing.T) {
+		s := fenced(t)
+		id := foreign + "-42"
+		err := s.Tx("a foreign pinned id inside a transaction", func(tx beads.Tx) error {
+			_, createErr := tx.Create(beads.Bead{ID: id, Title: "pinned inside a transaction"})
+			return createErr
+		})
+		if err == nil {
+			t.Fatal("Tx accepted a foreign pinned id; a transaction is not an exemption from the namespace claim")
+		}
+		if !errors.Is(err, beads.ErrPinnedIDOutsideNamespace) {
+			t.Errorf("refusal is %v, which does not wrap ErrPinnedIDOutsideNamespace", err)
+		}
+		if _, err := s.Get(id); !errors.Is(err, beads.ErrNotFound) {
+			t.Errorf("after the refusal Get(%q) = %v, want ErrNotFound", id, err)
+		}
+
+		// The must-be-silent counterpart: an in-namespace pin inside a
+		// transaction still goes through, honored verbatim. Without it a store
+		// conforms by making Tx.Create refuse everything.
+		held := aux + "-inside-a-tx"
+		if err := s.Tx("an in-namespace pinned id inside a transaction", func(tx beads.Tx) error {
+			created, createErr := tx.Create(beads.Bead{ID: held, Title: "held by this binding"})
+			if createErr != nil {
+				return createErr
+			}
+			if created.ID != held {
+				t.Errorf("Tx Create(%q) returned %q; a pinned id inside the namespace must be honored verbatim", held, created.ID)
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("Tx refused an in-namespace pinned id: %v", err)
+		}
+		if _, err := s.Get(held); err != nil {
+			t.Errorf("Get(%q) after committing it in a transaction: %v", held, err)
+		}
+	})
+
 	// Fence before existence. A relic under a foreign id can already be
 	// resident, and a later create pinning that id must still be told the store
 	// does not serve the namespace — not that the row is a duplicate. The
