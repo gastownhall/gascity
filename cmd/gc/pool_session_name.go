@@ -272,6 +272,9 @@ func releaseOrphanedPoolAssignments(
 	}
 
 	var released []releasedPoolAssignment
+	var protectedForeign protectedForeignAssignees
+	defer protectedForeign.log()
+	cityName := cfg.EffectiveCityName()
 	for i, wb := range assignedWorkBeads {
 		if wb.Status != "open" && wb.Status != "in_progress" {
 			continue
@@ -319,9 +322,20 @@ func releaseOrphanedPoolAssignments(
 			// Ordered ahead of the store-listing probe below deliberately: both
 			// are pure skip-gates with no mutation, so the released set is
 			// identical either way, but this one answers from the in-memory
-			// openSessionInfos snapshot while the next one issues a live
+			// openSessionInfos snapshot while that probe issues a live
 			// per-assignee store listing.
 			if liveEphemeralSessionForTemplate(openSessionInfos, cfg, cityPath, agentCfg, assignee, template, workStoreRef, storeRefAware) {
+				continue
+			}
+			// Roster gate, deliberately AHEAD of the liveness question:
+			// liveOpenSessionAssignmentExists answers from THIS city's stores
+			// only, so for an identity this city does not configure a missing
+			// session bead is unobservable rather than absent. The
+			// positive-evidence checks above can only ever SKIP a release, so
+			// running them first costs nothing and keeps the protected count
+			// reporting exactly the claims this gate saved.
+			if !poolAssigneeIsLocallyObservable(cfg, cityName, assignee) {
+				protectedForeign.add(assignee, wb.ID)
 				continue
 			}
 			if memoizedLiveOpenSessionAssignmentExists(sessionStoreLiveAssignee, assignee, sessionStore.Store, assignee) {
