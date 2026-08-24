@@ -39,18 +39,26 @@ const Namespace = "gc."
 // cmd/. Keep this block sorted by identifier; the Go compiler rejects duplicate
 // identifiers, giving us a free compile-time uniqueness guarantee.
 const (
-	AttemptLogMetadataKey                = "gc.attempt_log"
-	AttemptMetadataKey                   = "gc.attempt"
-	BondMetadataKey                      = "gc.bond"
-	BondVarsMetadataKey                  = "gc.bond_vars"
-	BoundStepIDMetadataKey               = "gc.bound_step_id"
-	BrainParentSIDMetadataKey            = "gc.brain_parent_sid"
-	CancelRequestedMetadataKey           = "gc.cancel_requested"
-	CheckInfraRetryMetadataKey           = "gc.check_infra_retry"
-	CheckModeMetadataKey                 = "gc.check_mode"
-	CheckPathMetadataKey                 = "gc.check_path"
-	CheckTimeoutMetadataKey              = "gc.check_timeout"
-	CityPathMetadataKey                  = "gc.city_path"
+	AttemptLogMetadataKey      = "gc.attempt_log"
+	AttemptMetadataKey         = "gc.attempt"
+	BondMetadataKey            = "gc.bond"
+	BondVarsMetadataKey        = "gc.bond_vars"
+	BoundStepIDMetadataKey     = "gc.bound_step_id"
+	BrainParentSIDMetadataKey  = "gc.brain_parent_sid"
+	CancelRequestedMetadataKey = "gc.cancel_requested"
+	CheckInfraRetryMetadataKey = "gc.check_infra_retry"
+	CheckModeMetadataKey       = "gc.check_mode"
+	CheckPathMetadataKey       = "gc.check_path"
+	CheckTimeoutMetadataKey    = "gc.check_timeout"
+	CityPathMetadataKey        = "gc.city_path"
+	// ClaimedAtMetadataKey records the RFC3339 UTC instant a bead was first
+	// claimed through `gc hook --claim`. It is write-once: the claim hook
+	// stamps it only when absent from the bead's current metadata and never
+	// overwrites an already-present value, unlike the compare-and-overwrite
+	// keys in this same claim-time patch (see hookClaimIdentityPatch in
+	// cmd/gc/cmd_hook_claim.go). Feeds the created→claimed and
+	// claimed→started latency-watch transitions (OBS-001).
+	ClaimedAtMetadataKey                 = "gc.claimed_at"
 	ClosedByAttemptMetadataKey           = "gc.closed_by_attempt"
 	ContinuationGroupMetadataKey         = "gc.continuation_group"
 	ControlDispatcherFallbackMetadataKey = "gc.control_dispatcher_fallback"
@@ -361,6 +369,7 @@ var KnownMetadataKeys = []string{
 	CheckPathMetadataKey,
 	CheckTimeoutMetadataKey,
 	CityPathMetadataKey,
+	ClaimedAtMetadataKey,
 	ClosedByAttemptMetadataKey,
 	ContinuationGroupMetadataKey,
 	ControlEpochMetadataKey,

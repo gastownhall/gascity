@@ -135,7 +135,20 @@ func runProductMetricsTaggedControlFlow(t *testing.T, binary, workingDir, home s
 	if _, err := os.Stat(productUsageRoot); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("non-TTY metrics on created product state: %v", err)
 	}
-	ordinaryWorkingDir := filepath.Join(t.TempDir(), privacySentinel)
+	// Ordinary help must run from inside a real city, because a city is what
+	// makes it load pack state at all. Without one, findCity's walk-up decides
+	// what this subtest exercises: on a host with a stray /tmp/city.toml it
+	// resolves that and takes the repo-cache lock, and on a clean host it
+	// resolves nothing and never locks — the same test asserting two different
+	// things. configureProductMetricsTrustedProcessTempRoot pins TMPDIR to /tmp
+	// deliberately (product metrics reject a user-owned writable ancestor), so
+	// this fixture cannot move off the shared root; it has to out-rank it. A
+	// city.toml one level up is nearer than /tmp, so the walk-up stops here.
+	ordinaryCityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(ordinaryCityDir, "city.toml"), []byte("[workspace]\nname = \"ordinary-help\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ordinaryWorkingDir := filepath.Join(ordinaryCityDir, privacySentinel)
 	if err := os.MkdirAll(ordinaryWorkingDir, 0o700); err != nil {
 		t.Fatal(err)
 	}

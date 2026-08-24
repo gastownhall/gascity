@@ -33,6 +33,67 @@ func TestAliveTreatsZombieAsDead(t *testing.T) {
 	t.Fatalf("Alive(%d) stayed true for exited child", cmd.Process.Pid)
 }
 
+func TestProcStatState(t *testing.T) {
+	tests := []struct {
+		name string
+		stat string
+		want string
+		ok   bool
+	}{
+		{
+			name: "ordinary sleeping process",
+			stat: "123 (gc) S 1 2 3",
+			want: "S",
+			ok:   true,
+		},
+		{
+			name: "spaced zombie comm",
+			stat: "123 (gc worker) Z 1 2 3",
+			want: "Z",
+			ok:   true,
+		},
+		{
+			name: "embedded parentheses in running comm",
+			stat: "123 (gc (worker) name) R 1 2 3",
+			want: "R",
+			ok:   true,
+		},
+		{
+			name: "missing closing parenthesis",
+			stat: "123 (gc worker Z 1 2 3",
+		},
+		{
+			name: "missing state",
+			stat: "123 (gc worker)",
+		},
+		{
+			name: "invalid pid prefix",
+			stat: "not-a-pid (gc worker) Z 1 2 3",
+		},
+		{
+			name: "invalid multi-character state",
+			stat: "123 (gc worker) ZZ 1 2 3",
+		},
+		{
+			name: "missing separator before comm",
+			stat: "123(gc worker) Z 1 2 3",
+		},
+		{
+			name: "missing separator after comm",
+			stat: "123 (gc worker)Z 1 2 3",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := procStatState(tc.stat)
+			if ok != tc.ok || got != tc.want {
+				t.Fatalf("procStatState(%q) = (%q, %v), want (%q, %v)", tc.stat, got, ok, tc.want, tc.ok)
+			}
+		})
+	}
+}
+
 func TestPSReportsZombieReturnsWhenPSHangs(t *testing.T) {
 	binDir := t.TempDir()
 	psPath := filepath.Join(binDir, "ps")

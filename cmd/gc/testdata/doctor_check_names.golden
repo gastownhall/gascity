@@ -63,6 +63,7 @@ census-owner-liveness
 run-target-routed-to-backfill
 route-recovery-quarantine
 hold-label-routed-to
+pool-idle-routed-work
 work-option-metadata-migration
 backlog-depth
 order-tracking-retention

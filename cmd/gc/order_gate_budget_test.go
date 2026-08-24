@@ -216,15 +216,26 @@ func barrierCheckScript(liveDir, ranMarker string, startDelay time.Duration) str
 // TestConditionChecksRunConcurrentlyWithinTheirCap is the parallel half of the
 // leg, and it proves real overlap rather than measuring wall clock.
 //
-// Every check registers itself in a shared directory and then waits, bounded, to
-// SEE a sibling registered. Overlap is therefore the pass condition: with a cap
-// that admits more than one, the checks see each other and every order fires;
-// with a cap of one, no check ever sees a sibling and nothing fires. Each check
-// exits normally either way and removes its own registration on the way out, so
-// the two arms differ only in whether the pass ran them at the same time.
+// Every check registers itself in a shared directory and polls, bounded, for
+// the FULL wave to be registered before exiting 0; a check that never sees
+// the whole cohort exits 1. Cleanup is conditional on that outcome
+// (ga-e7cxrg): only a check that timed out removes its registration, so a
+// later non-overlapping cap-1 run never inherits a stale marker. A check that
+// DID see the full wave leaves its marker behind, because polling isn't
+// synchronized across checks — the moment the cohort completes, whichever
+// check notices first would otherwise tear down the evidence (unconditional
+// cleanup-on-exit) before a sibling one poll tick behind ever looked, and
+// that race — not a slow fork/exec — is what actually produced the flake:
+// every check always ran and registered, but the completed-cohort state
+// could vanish in under one 20ms poll interval. Leaving success markers in
+// place means that state can only grow, never shrink, until every check
+// still polling has had a turn to see it.
 //
-// The same fixture is its own control, and neither outcome is reachable by a
-// pass that simply stopped running checks: that one fires nothing AND leaves the
+// With a cap that admits the whole wave, every check eventually sees all of
+// them and every order fires; with a cap of one, checks run strictly
+// sequentially and none ever sees more than itself, so nothing fires. The
+// same fixture is its own control, and neither outcome is reachable by a pass
+// that simply stopped running checks: that one fires nothing AND leaves the
 // registration directory empty, which the first arm asserts against.
 func TestConditionChecksRunConcurrentlyWithinTheirCap(t *testing.T) {
 	const wave = 4
@@ -244,7 +255,16 @@ func TestConditionChecksRunConcurrentlyWithinTheirCap(t *testing.T) {
 			cityPath, cfg, _ := newExecOrderFixture(t)
 			liveDir := filepath.Join(t.TempDir(), "live")
 			ranMarker := filepath.Join(t.TempDir(), "ran")
-			check := barrierCheckScript(liveDir, ranMarker, 0)
+			// Register, then wait up to ~1s to see the FULL wave registered.
+			// Exit 0 only once every sibling has checked in. The trap only
+			// unregisters on a timeout ($ok stays 0): a check that DID see the
+			// full cohort leaves its marker behind so a sibling polling on a
+			// different tick still finds the completed wave rather than racing
+			// the first-to-notice check's own cleanup.
+			check := fmt.Sprintf(
+				`mkdir -p %[1]s; echo . >> %[3]s; f=$(mktemp %[1]s/w.XXXXXX); ok=0; trap '[ "$ok" = 1 ] || rm -f "$f"' EXIT; `+
+					`i=0; while [ $i -lt 50 ]; do if [ "$(ls %[1]s | wc -l)" -ge %[2]d ]; then ok=1; exit 0; fi; sleep 0.02; i=$((i+1)); done; exit 1`,
+				liveDir, wave, ranMarker)
 
 			aa := make([]orders.Order, 0, wave)
 			for i := range wave {
