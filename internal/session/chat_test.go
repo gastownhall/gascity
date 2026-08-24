@@ -307,12 +307,28 @@ func TestStripSessionIDFlagArg(t *testing.T) {
 			want:          "claude --session-id key-A-diverged",
 		},
 		{
-			// A quoted literal that merely contains the flag text must not be
-			// mistaken for the generated flag token.
-			name:          "preserves quoted session id literal",
+			// Quote-prefixed flag text ("--session-id glued to the opening
+			// quote) is not at a space boundary, so the boundary-anchored strip
+			// skips it and removes only the real trailing generated pair. This is
+			// a real guarantee of the in-place strip, not an incidental artifact
+			// of tokenization.
+			name:          "preserves quote-prefixed session id literal",
 			cmd:           `claude --label "--session-id keep-me" --session-id key-A-diverged`,
 			sessionIDFlag: "--session-id",
 			want:          `claude --label "--session-id keep-me"`,
+		},
+		{
+			// Documented limitation, pinned so a future regression is visible: the
+			// strip is shell-token-simple, so a *space-separated* bare "--session-id"
+			// token inside a quoted argument sits at a space boundary and IS matched.
+			// This never occurs for the framework-generated commands this fallback
+			// sees (they carry exactly one, top-level "--session-id"); if command
+			// construction ever admits caller-supplied quoted text, make the strip
+			// shell-quote-aware and update this expectation.
+			name:          "space-separated flag token inside quotes is not shell-aware",
+			cmd:           `claude --note "use --session-id here" --session-id key-A-diverged`,
+			sessionIDFlag: "--session-id",
+			want:          `claude --note "use --session-id key-A-diverged`,
 		},
 	}
 	for _, tt := range tests {

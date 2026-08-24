@@ -165,33 +165,67 @@ func stripInsertedResumeSubcommandArg(cmd, resumeFlag string) string {
 // ("--session-id=<key>") are handled. Returns cmd unchanged when the flag is
 // empty or absent — the command then carries no generated session id and is
 // itself a valid fresh-start command.
+//
+// The removal is done in place: only the "<flag> <value>" / "<flag>=<value>"
+// span (plus one adjacent separator) is excised, leaving every other argument
+// and its whitespace verbatim — the keyed stripSessionIDFlag and the resume
+// fallback stripResumeFlagArg preserve the rest of the command the same way.
+// (Re-tokenizing with strings.Fields and rejoining with strings.Join would
+// collapse unrelated whitespace and rewrite the structure of quoted or
+// multiline commands even when only the flag was meant to change.) Like those
+// siblings it is deliberately shell-token-simple: it matches the flag only at a
+// start-of-string or single-space boundary, which is sufficient for the
+// framework-generated commands this fallback ever sees and never for
+// caller-supplied shell text.
 func stripSessionIDFlagArg(cmd, sessionIDFlag string) string {
 	if sessionIDFlag == "" {
 		return cmd
 	}
-	fields := strings.Fields(cmd)
-	out := make([]string, 0, len(fields))
-	stripped := false
-	for i := 0; i < len(fields); i++ {
-		if fields[i] == sessionIDFlag {
-			// Space form: drop the flag and, when present, its value token.
-			stripped = true
-			if i+1 < len(fields) {
-				i++
+	for searchFrom := 0; ; {
+		idx := strings.Index(cmd[searchFrom:], sessionIDFlag)
+		if idx < 0 {
+			return cmd
+		}
+		flagStart := searchFrom + idx
+		afterFlag := flagStart + len(sessionIDFlag)
+		// Require a token boundary before the flag so it is not matched inside a
+		// longer token (e.g. "--not-session-id" or quote-prefixed literal text).
+		if flagStart > 0 && cmd[flagStart-1] != ' ' {
+			searchFrom = afterFlag
+			continue
+		}
+		spanEnd := afterFlag
+		switch {
+		case afterFlag < len(cmd) && cmd[afterFlag] == '=':
+			// Equals form: flag and value are one token ending at the next space.
+			spanEnd = afterFlag + 1
+			for spanEnd < len(cmd) && cmd[spanEnd] != ' ' {
+				spanEnd++
 			}
+		case afterFlag == len(cmd) || cmd[afterFlag] == ' ':
+			// Space form: skip the separator to the value token, then to its end.
+			for spanEnd < len(cmd) && cmd[spanEnd] == ' ' {
+				spanEnd++
+			}
+			for spanEnd < len(cmd) && cmd[spanEnd] != ' ' {
+				spanEnd++
+			}
+		default:
+			// Right side is not a boundary (e.g. "--session-id-file"): keep looking.
+			searchFrom = afterFlag
 			continue
 		}
-		if strings.HasPrefix(fields[i], sessionIDFlag+"=") {
-			// Equals form: the flag and value are a single token.
-			stripped = true
-			continue
+		// Consume one adjacent separator so the removal leaves no doubled space,
+		// preferring the space before the flag (matches stripSessionIDFlag's
+		// " "+target / target+" " removal followed by TrimSpace).
+		spanStart := flagStart
+		if spanStart > 0 && cmd[spanStart-1] == ' ' {
+			spanStart--
+		} else if spanEnd < len(cmd) && cmd[spanEnd] == ' ' {
+			spanEnd++
 		}
-		out = append(out, fields[i])
+		return strings.TrimSpace(cmd[:spanStart] + cmd[spanEnd:])
 	}
-	if !stripped {
-		return cmd
-	}
-	return strings.Join(out, " ")
 }
 
 func freshStartCommandFromMetadata(metadata map[string]string, fallback string) string {
