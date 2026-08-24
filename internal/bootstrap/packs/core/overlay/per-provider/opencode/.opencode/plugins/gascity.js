@@ -24,21 +24,27 @@ const GC_OPENCODE_HOOK_VERSION = 6;
 const GC_BIN = process.env.GC_BIN || "gc";
 // Optional per-turn injection (queued nudges, unread mail) is best effort, so
 // it gets its own fail-open budget rather than the 30s default used for
-// lifecycle work such as prime and handoff. A stalled optional command drops
-// its contribution for that turn instead of stalling the turn; the items are
-// leased rather than consumed, so a later pass redelivers them.
+// lifecycle work. This is a backstop against a hang, not a latency control:
+// injection no longer blocks the send acknowledgement, so overshooting costs a
+// slower reply, while undershooting silently skips a turn's nudges.
 //
-// Sized from measurement, not from a latency target. Against a live city the
-// floor for one gc invocation (startup, config load, store connect, target
-// resolve) is ~800ms and `gc prime --hook` runs ~1.5s, so the budget has to
-// clear a couple of seconds of legitimate work plus acknowledgement
-// round-trips. 5s is roughly 6x the observed floor while staying 6x tighter
-// than the lifecycle default.
+// Skipped items are not lost — they are leased, and recoverExpiredInFlightNudges
+// returns an unacknowledged claim to pending after defaultQueuedNudgeClaimTTL
+// (2 minutes). That asymmetry argues for a generous budget: the cost of being
+// too high is a slow reply once, the cost of being too low is nudges arriving
+// minutes late, every turn, on exactly the busy systems that can least afford it.
 //
-// Override with GC_OPENCODE_INJECTION_TIMEOUT_MS for a slower store.
+// Measured against live cities: one gc invocation costs ~750ms at the floor,
+// and that floor is invariant to database size (identical at 2 and 1435 beads,
+// because the drain walks the nudge queue rather than the bead table). Real
+// variance comes from queue depth and store contention, neither of which is
+// bounded by anything measured here, so the budget sits well above observed
+// cost rather than close to it.
+//
+// Override with GC_OPENCODE_INJECTION_TIMEOUT_MS.
 const INJECTION_TIMEOUT_MS = (() => {
   const override = Number(process.env.GC_OPENCODE_INJECTION_TIMEOUT_MS);
-  return Number.isFinite(override) && override > 0 ? override : 5000;
+  return Number.isFinite(override) && override > 0 ? override : 15000;
 })();
 // GC_BIN is the explicit override. The fallback order matches Pi hooks so
 // sibling providers resolve the same installed gc before developer-local bins.
