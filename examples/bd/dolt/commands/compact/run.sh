@@ -1539,7 +1539,11 @@ mail_compact_quarantine_alert() {
   _ca_created_at="${5:-<unknown>}"
   _ca_msg="db=$_ca_db type=$_ca_type marker=$_ca_path reason=$_ca_reason created_at=$_ca_created_at recipient=$compact_alert_to"
   quarantine_notify_error=""
-  if _ca_err=$(gc mail send "$compact_alert_to" --from controller -s "dolt compact quarantine: $_ca_db $_ca_type" -m "$_ca_msg" 2>&1 >/dev/null); then
+  exec 4>&1
+  _ca_err=$(gc mail send "$compact_alert_to" --from controller -s "dolt compact quarantine: $_ca_db $_ca_type" -m "$_ca_msg" 2>&1 1>&4)
+  _ca_status=$?
+  exec 4>&-
+  if [ "$_ca_status" -eq 0 ]; then
     return 0
   fi
   # A quarantine nobody is told about is a quarantine nobody clears, so an
