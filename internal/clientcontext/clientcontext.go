@@ -16,6 +16,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/BurntSushi/toml"
 )
@@ -33,15 +35,18 @@ var validName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 // a direct hardened self-host. A city that needs neither is reached over the
 // X-GC-Request header alone.
 type Context struct {
-	Name               string `toml:"name"`
-	URL                string `toml:"url"`
-	City               string `toml:"city,omitempty"`
-	CredentialCommand  string `toml:"credential_command,omitempty"`
-	GrantCommand       string `toml:"grant_command,omitempty"`
-	CAFile             string `toml:"ca_file,omitempty"`
-	TLSServerName      string `toml:"tls_server_name,omitempty"`
-	InsecureSkipVerify bool   `toml:"insecure_skip_verify,omitempty"`
-	Timeout            string `toml:"timeout,omitempty"` // REST overall timeout; never applied to SSE streams
+	Name                     string   `toml:"name"`
+	URL                      string   `toml:"url"`
+	City                     string   `toml:"city,omitempty"`
+	CredentialCommand        string   `toml:"credential_command,omitempty"`
+	CredentialAudience       string   `toml:"credential_audience,omitempty"`
+	CredentialRequiredScopes []string `toml:"credential_required_scopes,omitempty"`
+	CredentialOrg            string   `toml:"credential_org,omitempty"`
+	GrantCommand             string   `toml:"grant_command,omitempty"`
+	CAFile                   string   `toml:"ca_file,omitempty"`
+	TLSServerName            string   `toml:"tls_server_name,omitempty"`
+	InsecureSkipVerify       bool     `toml:"insecure_skip_verify,omitempty"`
+	Timeout                  string   `toml:"timeout,omitempty"` // REST overall timeout; never applied to SSE streams
 }
 
 // File is the on-disk shape of ~/.gc/contexts.toml. Default names the sticky
@@ -62,6 +67,9 @@ func Load(path string) (*File, error) {
 		}
 		return nil, fmt.Errorf("loading contexts %q: %w", path, err)
 	}
+	if err := f.Validate(); err != nil {
+		return nil, fmt.Errorf("loading contexts %q: %w", path, err)
+	}
 	return &f, nil
 }
 
@@ -69,6 +77,9 @@ func Load(path string) (*File, error) {
 // rename) with owner-only permissions, since contexts may reference
 // credential commands. The parent directory is created if absent.
 func (f *File) Save(path string) error {
+	if err := f.Validate(); err != nil {
+		return err
+	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("creating contexts dir %q: %w", dir, err)
@@ -137,7 +148,49 @@ func (c Context) Validate() error {
 	if c.City != "" && !validName.MatchString(c.City) {
 		return fmt.Errorf("context %q: city %q must match %s (no control characters or path separators)", c.Name, c.City, validName)
 	}
+	providerConfigured := c.CredentialAudience != "" || len(c.CredentialRequiredScopes) > 0 || c.CredentialOrg != ""
+	if providerConfigured {
+		if c.CredentialCommand != "" {
+			return fmt.Errorf("context %q: credential_provider fields cannot be combined with credential_command", c.Name)
+		}
+		if c.CredentialAudience == "" {
+			return fmt.Errorf("context %q: credential_provider tuple incomplete; credential_audience is required", c.Name)
+		}
+		if !validCredentialValue(c.CredentialAudience) {
+			return fmt.Errorf("context %q: credential_audience is invalid", c.Name)
+		}
+		if len(c.CredentialRequiredScopes) == 0 {
+			return fmt.Errorf("context %q: credential_provider tuple incomplete; credential_required_scopes is required", c.Name)
+		}
+		seenScopes := make(map[string]struct{}, len(c.CredentialRequiredScopes))
+		for _, scope := range c.CredentialRequiredScopes {
+			if !validCredentialValue(scope) {
+				return fmt.Errorf("context %q: credential_required_scopes contains an invalid scope", c.Name)
+			}
+			if _, duplicate := seenScopes[scope]; duplicate {
+				return fmt.Errorf("context %q: credential_required_scopes contains duplicate scopes", c.Name)
+			}
+			seenScopes[scope] = struct{}{}
+		}
+		if c.CredentialOrg != "" && !validCredentialValue(c.CredentialOrg) {
+			return fmt.Errorf("context %q: credential_org is invalid", c.Name)
+		}
+	} else if c.CredentialOrg != "" {
+		return fmt.Errorf("context %q: credential_org requires credential_audience and credential_required_scopes", c.Name)
+	}
 	return nil
+}
+
+func validCredentialValue(value string) bool {
+	if value == "" || len(value) > 512 || !utf8.ValidString(value) {
+		return false
+	}
+	for _, r := range value {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
 }
 
 // Validate checks every context and the cross-context invariants: names are

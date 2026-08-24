@@ -17,7 +17,6 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/sessionlog"
-	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func immediateStaleKeyDetectionWaiter(context.Context, string) error { return nil }
@@ -63,7 +62,7 @@ func awaitStaleKeyWaiterEntry(t *testing.T, waiter *manualStaleKeyDetectionWaite
 		if got != want {
 			t.Fatalf("stale-key waiter entered for %q, want %q", got, want)
 		}
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(goroutineHangBudget):
 		t.Fatalf("timed out waiting for stale-key waiter entry for %q", want)
 	}
 }
@@ -73,7 +72,7 @@ func awaitSessionOperation(t *testing.T, result <-chan error, description string
 	select {
 	case err := <-result:
 		return err
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(goroutineHangBudget):
 		t.Fatalf("timed out waiting for %s", description)
 		return nil
 	}

@@ -20,7 +20,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runproj"
-	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 type fakeResolver struct {
@@ -150,7 +149,7 @@ func TestRunTailerColdLoadAndLiveTail(t *testing.T) {
 
 	select {
 	case <-tl.readyCh:
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("cold replay did not complete")
 	}
 	waitForLanes(t, tl, 1)
@@ -182,7 +181,7 @@ func TestRunTailerManagerRebindsChangedEventsPath(t *testing.T) {
 	first := m.ensure("alpha", firstPath)
 	select {
 	case <-first.readyCh:
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("first cold replay did not complete")
 	}
 	waitForLanes(t, first, 1)
@@ -196,12 +195,12 @@ func TestRunTailerManagerRebindsChangedEventsPath(t *testing.T) {
 	}
 	select {
 	case <-first.doneCh:
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("replaced path-bound tailer did not stop")
 	}
 	select {
 	case <-replacement.readyCh:
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("replacement cold replay did not complete")
 	}
 	waitForLanes(t, replacement, 1)
@@ -234,7 +233,7 @@ func TestRunTailerLogsColdLoadFailureOnce(t *testing.T) {
 	tailer := m.ensure("alpha", filepath.Join(t.TempDir(), ".gc", "events.jsonl"))
 	select {
 	case <-tailer.readyCh:
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		cancel()
 		wg.Wait()
 		t.Fatal("cold replay attempt did not complete")

@@ -69,11 +69,37 @@ func Alive(pid int) bool {
 	if err != nil {
 		return !psReportsZombie(pid)
 	}
-	fields := strings.Fields(string(data))
-	if len(fields) >= 3 && fields[2] == "Z" {
+	state, ok := procStatState(string(data))
+	if ok && state == "Z" {
 		return false
 	}
 	return true
+}
+
+// procStatState returns field 3 (state) from a Linux /proc/<pid>/stat row.
+// Field 2 (comm) may contain spaces and parentheses, so the state is the first
+// token after comm's final closing parenthesis, not the third whitespace token.
+func procStatState(stat string) (string, bool) {
+	lparen := strings.IndexByte(stat, '(')
+	rparen := strings.LastIndexByte(stat, ')')
+	if lparen <= 0 || rparen <= lparen ||
+		!isASCIIWhitespace(stat[lparen-1]) ||
+		rparen+1 >= len(stat) || !isASCIIWhitespace(stat[rparen+1]) {
+		return "", false
+	}
+	parsedPID, err := strconv.Atoi(strings.TrimSpace(stat[:lparen]))
+	if err != nil || parsedPID <= 0 {
+		return "", false
+	}
+	fields := strings.Fields(stat[rparen+1:])
+	if len(fields) == 0 || len(fields[0]) != 1 {
+		return "", false
+	}
+	return fields[0], true
+}
+
+func isASCIIWhitespace(b byte) bool {
+	return b == ' ' || b >= '\t' && b <= '\r'
 }
 
 // StartTime returns a PID's start time — field 22 (starttime, in clock ticks

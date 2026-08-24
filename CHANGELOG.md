@@ -42,6 +42,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   always locks to `sha:<HEAD commit>`, matching the documented behavior;
   registry/remote sources are unaffected. Fixes #3659.
 
+- **`gc doctor`'s `order-firing-current` check no longer hard-fails
+  `gc doctor` (exit code, `BlockingFailed`) when its own order-history
+  lookup times out.** The check races a Dolt-backed order-history query
+  against a 15s budget; on timeout it returned `StatusError` with no
+  `Severity` set, silently defaulting to `SeverityBlocking` (the zero
+  value of `CheckSeverity`) — turning a slow-but-healthy city's doctor run
+  red even when scheduled orders were firing normally, since a timed-out
+  lookup proves nothing about actual order staleness. The timeout branch
+  now explicitly sets `Severity: SeverityAdvisory` and `TimedOut: true`,
+  matching how `Doctor.boundedRun`'s own per-check timeout is already
+  reported, so callers (including `--json` output) can distinguish
+  "confirmed stale" from "the query didn't finish in time." (#4895)
+
+- **Wisp GC now reaps rootless leaf plain-task wisps.** The orphan reaper
+  (`reapOrphanedClosedWisps`) previously skipped any closed wisp-tier row
+  with no `gc.root_bead_id` pointer outright, and the root-rooted closure
+  purge never enumerated it either (it matches none of the root selectors:
+  not a molecule, not `gc.kind=wisp`, not a graph.v2 workflow). A closed
+  plain-task wisp that never had an owning root therefore accumulated
+  uncollected in the wisp tier indefinitely. Such a row now reaps on its
+  own closed status when it is a leaf — no parent and no children — since
+  it then has no root to check for collectibility and the single-bead
+  delete strands nothing. Leaf-ness is tested over both ownership links a
+  bead can carry — the `parent_id` column and a `parent-child` dep row —
+  since some step beads are joined to their parent by the dep row alone.
+  A rootless row that owns a subtree, is itself a subtree member, or is
+  not a plain task, remains out of scope, preserving the original safety
+  boundary. The leaf-ness probes are bounded per sweep (including in the
+  dry-run default, where they are the only backend cost) so the scan never
+  does unbounded reads per tick. Fixes #3780.
+
+- **The legacy workspace-identity deprecation warning now caveats that
+  following it can silently break packs pinned to an older revision.**
+  `city.toml`'s `workspace.name`/`workspace.prefix` deprecation hint told
+  operators to move those fields to `.gc/site.toml`, but any installed pack
+  still pinned to a revision that reads `workspace.name` directly (rather
+  than the newer site-binding-aware resolution) would silently lose its
+  identity/routing once the field was removed — reported after one
+  deployment lost inbound Discord messages for ~2 days with zero alarms
+  before anyone checked delivery receipts. The warning now says so
+  explicitly, naming `gc doctor --fix` (which performs the removal) so
+  operators check pack compatibility before running it. (#3887)
+
 - **The dolt pack's `run_bounded` python3 fallback now sends SIGTERM before
   SIGKILL, matching its documented contract.** The fallback (used when
   neither `timeout` nor `gtimeout` is on `PATH`, the default on stock macOS)

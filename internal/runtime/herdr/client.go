@@ -71,25 +71,44 @@ type envelope struct {
 
 // run executes `herdr --session <session> <args…>` and returns the result
 // payload, or an error (transport failure or herdr-reported error).
+//
+// Its errors are scrubbed of anything this client's flag grammar can identify;
+// see redaction.go. An argv carrying a credential anywhere else needs
+// [client.runWithSecrets].
 func (c *client) run(ctx context.Context, args ...string) (json.RawMessage, error) {
+	return c.runWithSecrets(ctx, nil, args...)
+}
+
+// runWithSecrets is run for an argv carrying a credential the grammar cannot
+// find. declared comes from whoever built the argv; see redaction.go.
+func (c *client) runWithSecrets(ctx context.Context, declared []string, args ...string) (json.RawMessage, error) {
 	full := append([]string{"--session", c.session}, args...)
 	out, err := exec.CommandContext(ctx, c.bin, full...).Output()
 	if err != nil {
+		safe, secrets := redactedArgv(args, declared)
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
-			return nil, fmt.Errorf("herdr %v: %s", args, ee.Stderr)
+			return nil, fmt.Errorf("herdr %v: %s", safe, redactText(string(ee.Stderr), secrets))
 		}
-		return nil, fmt.Errorf("herdr %v: %w", args, err)
+		// err here is exec's own (*exec.Error, *exec.ExitError): it carries the
+		// binary name and a status, never anything from args.
+		return nil, fmt.Errorf("herdr %v: %w", safe, err)
 	}
 	if len(strings.TrimSpace(string(out))) == 0 {
 		return nil, nil // success with no payload (e.g. pane send-keys / pane run)
 	}
 	var env envelope
 	if err := json.Unmarshal(out, &env); err != nil {
-		return nil, fmt.Errorf("herdr %v: decode response: %w", args, err)
+		// The secrets are dropped deliberately: a json.SyntaxError carries an
+		// offset and at most one byte of herdr's stdout, and an
+		// UnmarshalTypeError carries type names, so there is nothing here to
+		// scrub. Do not "fix" this either direction without changing that.
+		safe, _ := redactedArgv(args, declared)
+		return nil, fmt.Errorf("herdr %v: decode response: %w", safe, err)
 	}
 	if env.Error != nil {
-		return nil, fmt.Errorf("herdr %v: %w", args, env.Error)
+		safe, secrets := redactedArgv(args, declared)
+		return nil, fmt.Errorf("herdr %v: %w", safe, env.Error.redacted(secrets))
 	}
 	return env.Result, nil
 }
@@ -195,21 +214,28 @@ func (c *client) paneRead(ctx context.Context, paneID, source string, lines int)
 // JSON envelope (0.7.5 `pane read`). Failures still arrive as an envelope on
 // stdout or as stderr text, so an output that decodes to an envelope carrying
 // an error is surfaced as that error; anything else is returned verbatim.
+//
+// It takes no declared secrets: no raw verb carries one outside an `--env`
+// pair, which redaction.go finds on its own. Give it one and this needs the
+// [client.runWithSecrets] treatment.
 func (c *client) runRaw(ctx context.Context, args ...string) (string, error) {
 	full := append([]string{"--session", c.session}, args...)
 	out, err := exec.CommandContext(ctx, c.bin, full...).Output()
 	if err != nil {
+		safe, secrets := redactedArgv(args, nil)
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
-			return "", fmt.Errorf("herdr %v: %s", args, ee.Stderr)
+			return "", fmt.Errorf("herdr %v: %s", safe, redactText(string(ee.Stderr), secrets))
 		}
-		return "", fmt.Errorf("herdr %v: %w", args, err)
+		// See run: exec's own error carries the binary name and a status only.
+		return "", fmt.Errorf("herdr %v: %w", safe, err)
 	}
 	trimmed := strings.TrimSpace(string(out))
 	if strings.HasPrefix(trimmed, "{") {
 		var env envelope
 		if jerr := json.Unmarshal([]byte(trimmed), &env); jerr == nil && env.Error != nil {
-			return "", fmt.Errorf("herdr %v: %w", args, env.Error)
+			safe, secrets := redactedArgv(args, nil)
+			return "", fmt.Errorf("herdr %v: %w", safe, env.Error.redacted(secrets))
 		}
 	}
 	return string(out), nil
@@ -250,8 +276,29 @@ func (c *client) sendKeys(ctx context.Context, paneID string, keys ...string) er
 }
 
 // paneRun → `herdr pane run <paneID> <command>` (pastes text into the pane).
+//
+// The operand is not necessarily a command: pasteAndSubmit delivers an agent's
+// prompt or nudge through this same verb. Text pasted here is treated as
+// carrying no credentials, so it is rendered verbatim in errors — a raw launch
+// uses [client.paneRunCommand] instead. The wider exposure of prompt text in
+// argv is ga-mxj2a.
 func (c *client) paneRun(ctx context.Context, paneID, command string) error {
 	_, err := c.run(ctx, "pane", "run", paneID, command)
+	return err
+}
+
+// paneRunCommand is paneRun for a session's configured launch command, which
+// is opaque to us: it is a user-authored shell string, so any credential in it
+// sits somewhere only a shell parser could find — after an `env` wrapper, past
+// a `&&`, inside a nested `sh -c`, spelled with quotes that keep the value from
+// matching its own rendering. Rather than guess at that structure, the whole
+// operand is declared and so withheld from error text — down to the floor
+// [runtime.RedactSecrets] substitutes above, below which a shell command is too
+// short to hold a credential. The error still names the verb, the pane and
+// herdr's own complaint; the command it was asked to run is in the session's
+// config.
+func (c *client) paneRunCommand(ctx context.Context, paneID, command string) error {
+	_, err := c.runWithSecrets(ctx, []string{command}, "pane", "run", paneID, command)
 	return err
 }
 
@@ -479,9 +526,11 @@ func (c *client) findWorkspace(ctx context.Context, label string) (string, error
 }
 
 // workspaceCreate makes a workspace labeled label whose root shell pane is
-// created with the given cwd and env, and returns the workspace id plus the
-// default tab and root pane (the agent's pane) herdr auto-spawns inside it.
-func (c *client) workspaceCreate(ctx context.Context, label, cwd string, env map[string]string) (wsID, tabID, paneID string, err error) {
+// created with the given cwd and env, and returns the default tab and root pane
+// (the agent's pane) herdr auto-spawns inside it. The workspace id itself is not
+// returned: callers address the agent by tab and pane, and resolveWorkspace
+// looks the id up by label when it needs one.
+func (c *client) workspaceCreate(ctx context.Context, label, cwd string, env map[string]string) (tabID, paneID string, err error) {
 	args := []string{"workspace", "create", "--label", label, "--no-focus"}
 	if cwd != "" {
 		args = append(args, "--cwd", cwd)
@@ -491,12 +540,9 @@ func (c *client) workspaceCreate(ctx context.Context, label, cwd string, env map
 	}
 	res, err := c.run(ctx, args...)
 	if err != nil {
-		return "", "", "", err
+		return "", "", err
 	}
 	var wrap struct {
-		Workspace struct {
-			WorkspaceID string `json:"workspace_id"`
-		} `json:"workspace"`
 		Tab struct {
 			TabID string `json:"tab_id"`
 		} `json:"tab"`
@@ -505,9 +551,9 @@ func (c *client) workspaceCreate(ctx context.Context, label, cwd string, env map
 		} `json:"root_pane"`
 	}
 	if err := json.Unmarshal(res, &wrap); err != nil {
-		return "", "", "", fmt.Errorf("herdr workspace create: decode: %w", err)
+		return "", "", fmt.Errorf("herdr workspace create: decode: %w", err)
 	}
-	return wrap.Workspace.WorkspaceID, wrap.Tab.TabID, wrap.RootPane.PaneID, nil
+	return wrap.Tab.TabID, wrap.RootPane.PaneID, nil
 }
 
 // listTabs returns the tabs in wsID.
@@ -582,7 +628,7 @@ func (c *client) ensurePlacement(ctx context.Context, wsLabel, tabLabel, cwd str
 	}
 	if wsID == "" {
 		// New workspace: repurpose the default tab herdr spawns for this agent.
-		_, tabID, paneID, err = c.workspaceCreate(ctx, wsLabel, cwd, env)
+		tabID, paneID, err = c.workspaceCreate(ctx, wsLabel, cwd, env)
 		if err != nil {
 			return "", "", err
 		}
@@ -603,13 +649,26 @@ func (c *client) ensurePlacement(ctx context.Context, wsLabel, tabLabel, cwd str
 
 // ── shared session-server lifecycle ──────────────────────────────────────────
 
-// socketPath is the unix socket for this client's herdr session.
+// socketPath is the unix socket for this client's herdr session. Must match
+// wherever the herdr binary itself resolves its config/state directory —
+// confirmed empirically (`XDG_CONFIG_HOME=X herdr --help` prints
+// "Config: X/herdr/config.toml" regardless of $HOME; with XDG_CONFIG_HOME
+// unset it falls back to "$HOME/.config/herdr/…") to be standard XDG Base
+// Directory precedence, i.e. exactly os.UserConfigDir() on this platform. A
+// plain os.UserHomeDir()+".config" join (the prior implementation) silently
+// ignores XDG_CONFIG_HOME, so it diverges from herdr's own resolution in any
+// environment that sets XDG_CONFIG_HOME while pointing $HOME elsewhere —
+// this fleet's agent sandboxes do exactly that. The result: this client
+// dials a socket no herdr process ever binds, so serverAlive() reads false
+// against a perfectly healthy server ("did not become ready"), and every
+// retry launches a redundant herdr server contending for the same pane
+// ("agent_pane_busy") — ga-nqlb8q.
 func (c *client) socketPath() string {
-	home, _ := os.UserHomeDir()
+	configDir, _ := os.UserConfigDir()
 	if c.session == "" || c.session == "default" {
-		return filepath.Join(home, ".config", "herdr", "herdr.sock")
+		return filepath.Join(configDir, "herdr", "herdr.sock")
 	}
-	return filepath.Join(home, ".config", "herdr", "sessions", c.session, "herdr.sock")
+	return filepath.Join(configDir, "herdr", "sessions", c.session, "herdr.sock")
 }
 
 // serverAlive reports whether the session-server is actually accepting
