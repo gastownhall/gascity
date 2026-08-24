@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/gastownhall/gascity/internal/bootstrap/packs/core"
 	"github.com/gastownhall/gascity/internal/citylayout"
@@ -38,6 +39,106 @@ const (
 	managedMimoCodeHookVersion = 2
 	managedOmpHookVersion      = 2
 )
+
+// hookContains reports whether a managed hook file contains a marker, ignoring
+// formatting that carries no meaning in JavaScript or TypeScript.
+//
+// The markers below are load-bearing: they decide whether an installed hook
+// file is current or gets replaced. Matching them as literal substrings made
+// them whitespace-sensitive, so running any formatter over a hook file — which
+// re-wraps calls and adds trailing commas without changing behavior — flipped a
+// current file to permanently stale, and reflowing the header comment made gc
+// stop recognizing the file as managed at all (#5555).
+//
+// Both sides are normalized by dropping whitespace outside string literals and
+// dropping a trailing comma before a closing bracket. Whitespace inside string
+// literals is preserved, so distinct literals never collapse into each other.
+func hookContains(content, marker string) bool {
+	return strings.Contains(normalizeHookSource(content), normalizeHookSource(marker))
+}
+
+func normalizeHookSource(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+
+	runes := []rune(s)
+	var quote rune
+	escaped := false
+	pendingComma := false
+	inLineComment := false
+	inBlockComment := false
+
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+
+		// Comment text is kept (the managed-file identity marker lives in a
+		// comment) but its punctuation is inert: an apostrophe in prose such as
+		// "OpenCode's plugin API" must not open a string literal, and the "//"
+		// or "/*" delimiters are formatting a reflow can move.
+		if inLineComment {
+			if r == '\n' {
+				inLineComment = false
+			} else if !unicode.IsSpace(r) {
+				b.WriteRune(r)
+			}
+			continue
+		}
+		if inBlockComment {
+			if r == '*' && i+1 < len(runes) && runes[i+1] == '/' {
+				inBlockComment = false
+				i++
+			} else if !unicode.IsSpace(r) && r != '*' {
+				b.WriteRune(r)
+			}
+			continue
+		}
+		if quote != 0 {
+			b.WriteRune(r)
+			switch {
+			case escaped:
+				escaped = false
+			case r == '\\':
+				escaped = true
+			case r == quote:
+				quote = 0
+			}
+			continue
+		}
+		if unicode.IsSpace(r) {
+			continue
+		}
+		if r == '/' && i+1 < len(runes) && runes[i+1] == '/' {
+			inLineComment = true
+			i++
+			continue
+		}
+		if r == '/' && i+1 < len(runes) && runes[i+1] == '*' {
+			inBlockComment = true
+			i++
+			continue
+		}
+		if r == ',' {
+			// Hold it: a formatter's trailing comma before a closing bracket
+			// is not part of the source's meaning.
+			pendingComma = true
+			continue
+		}
+		if pendingComma {
+			pendingComma = false
+			if r != ')' && r != ']' && r != '}' {
+				b.WriteRune(',')
+			}
+		}
+		if r == '"' || r == '\'' || r == '`' {
+			quote = r
+		}
+		b.WriteRune(r)
+	}
+	if pendingComma {
+		b.WriteRune(',')
+	}
+	return b.String()
+}
 
 var (
 	piHookVersionPattern       = regexp.MustCompile(`\bGC_PI_HOOK_VERSION\s*=\s*([0-9]+)\b`)
@@ -244,17 +345,17 @@ func overlayManagedNeedsUpgrade(provider, rel string) func([]byte) bool {
 
 func piHookNeedsUpgrade(existing []byte) bool {
 	content := string(existing)
-	if !strings.Contains(content, "Gas City hooks for Pi Coding Agent") {
+	if !hookContains(content, "Gas City hooks for Pi Coding Agent") {
 		return false
 	}
 	if piHookVersion(content) < managedPiHookVersion ||
-		!strings.Contains(content, "gc prime --hook") ||
-		!strings.Contains(content, "gc hook --inject") ||
-		!strings.Contains(content, "gc handoff --auto") ||
-		!strings.Contains(content, "mirrorTempCounter") ||
-		!strings.Contains(content, "GC_PROVIDER_SESSION_ID") ||
-		!strings.Contains(content, "GC_PROVIDER_SESSION_ID_REQUIRED") ||
-		!strings.Contains(content, `stdio: ["ignore", "pipe", "inherit"]`) {
+		!hookContains(content, "gc prime --hook") ||
+		!hookContains(content, "gc hook --inject") ||
+		!hookContains(content, "gc handoff --auto") ||
+		!hookContains(content, "mirrorTempCounter") ||
+		!hookContains(content, "GC_PROVIDER_SESSION_ID") ||
+		!hookContains(content, "GC_PROVIDER_SESSION_ID_REQUIRED") ||
+		!hookContains(content, `stdio: ["ignore", "pipe", "inherit"]`) {
 		return true
 	}
 	for _, marker := range []string{
@@ -264,7 +365,7 @@ func piHookNeedsUpgrade(existing []byte) bool {
 		`"session.deleted"`,
 		`"experimental.chat.system.transform"`,
 	} {
-		if strings.Contains(content, marker) {
+		if hookContains(content, marker) {
 			return true
 		}
 	}
@@ -285,19 +386,19 @@ func piHookVersion(content string) int {
 
 func opencodeHookNeedsUpgrade(existing []byte) bool {
 	content := string(existing)
-	if !strings.Contains(content, "Gas City hooks for OpenCode.") {
+	if !hookContains(content, "Gas City hooks for OpenCode.") {
 		return false
 	}
 	if opencodeHookVersion(content) < managedOpenCodeHookVersion ||
-		!strings.Contains(content, `process.env.GC_BIN || "gc"`) ||
-		!strings.Contains(content, `/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`) ||
-		!strings.Contains(content, `"experimental.session.compacting"`) ||
-		!strings.Contains(content, `runWithWarning(directory, "handoff", "--auto", "context cycle")`) ||
-		!strings.Contains(content, "output.context.push(handoff)") ||
-		!strings.Contains(content, "logRunFailure") ||
-		!strings.Contains(content, "logRunStderr(stderr);") ||
-		!strings.Contains(content, "GC_PROVIDER_SESSION_ID") ||
-		!strings.Contains(content, "GC_PROVIDER_SESSION_ID_REQUIRED") {
+		!hookContains(content, `process.env.GC_BIN || "gc"`) ||
+		!hookContains(content, `/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`) ||
+		!hookContains(content, `"experimental.session.compacting"`) ||
+		!hookContains(content, `runWithWarning(directory, "handoff", "--auto", "context cycle")`) ||
+		!hookContains(content, "output.context.push(handoff)") ||
+		!hookContains(content, "logRunFailure") ||
+		!hookContains(content, "logRunStderr(stderr);") ||
+		!hookContains(content, "GC_PROVIDER_SESSION_ID") ||
+		!hookContains(content, "GC_PROVIDER_SESSION_ID_REQUIRED") {
 		return true
 	}
 	for _, marker := range []string{
@@ -305,7 +406,7 @@ func opencodeHookNeedsUpgrade(existing []byte) bool {
 		`"session", "reset"`,
 		`"session.deleted"`,
 	} {
-		if strings.Contains(content, marker) {
+		if hookContains(content, marker) {
 			return true
 		}
 	}
@@ -329,7 +430,7 @@ func opencodeHookVersion(content string) int {
 // header are user-authored and never upgraded.
 func mimocodeHookNeedsUpgrade(existing []byte) bool {
 	content := string(existing)
-	if !strings.Contains(content, "Gas City hooks for MiMo Code.") {
+	if !hookContains(content, "Gas City hooks for MiMo Code.") {
 		return false
 	}
 	return mimocodeHookVersion(content) < managedMimoCodeHookVersion
@@ -349,18 +450,18 @@ func mimocodeHookVersion(content string) int {
 
 func ompHookNeedsUpgrade(existing []byte) bool {
 	content := string(existing)
-	if !strings.Contains(content, "Gas City hooks for Oh My Pi (OMP).") {
+	if !hookContains(content, "Gas City hooks for Oh My Pi (OMP).") {
 		return false
 	}
 	if ompHookVersion(content) < managedOmpHookVersion ||
-		!strings.Contains(content, "gascityOmpExtension") ||
-		!strings.Contains(content, "GC_PROVIDER_SESSION_ID") ||
-		!strings.Contains(content, "GC_PROVIDER_SESSION_ID_REQUIRED") ||
-		!strings.Contains(content, `pi.on("session_start"`) ||
-		!strings.Contains(content, `pi.on("session_compact"`) ||
-		!strings.Contains(content, `pi.on("before_agent_start"`) ||
-		!strings.Contains(content, "logRunFailure") ||
-		!strings.Contains(content, `stdio: ["ignore", "pipe", "inherit"]`) {
+		!hookContains(content, "gascityOmpExtension") ||
+		!hookContains(content, "GC_PROVIDER_SESSION_ID") ||
+		!hookContains(content, "GC_PROVIDER_SESSION_ID_REQUIRED") ||
+		!hookContains(content, `pi.on("session_start"`) ||
+		!hookContains(content, `pi.on("session_compact"`) ||
+		!hookContains(content, `pi.on("before_agent_start"`) ||
+		!hookContains(content, "logRunFailure") ||
+		!hookContains(content, `stdio: ["ignore", "pipe", "inherit"]`) {
 		return true
 	}
 	for _, marker := range []string{
@@ -369,7 +470,7 @@ func ompHookNeedsUpgrade(existing []byte) bool {
 		`"session.compacted"`,
 		`"experimental.chat.system.transform"`,
 	} {
-		if strings.Contains(content, marker) {
+		if hookContains(content, marker) {
 			return true
 		}
 	}
