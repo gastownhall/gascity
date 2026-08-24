@@ -22,9 +22,13 @@ import (
 	"testing"
 )
 
-// runFFSync sets up a one-DB ("app") SQL-mode city with the fake dolt already
-// installed in binDir, runs `gc dolt sync <args>`, and returns combined output.
-func runFFSync(t *testing.T, binDir string, args ...string) string {
+// runFFSyncEnv sets up a one-DB ("app") SQL-mode city with the fake dolt
+// already installed in binDir, runs `gc dolt sync <args>` with extraEnv
+// appended after the base sync env (so an override such as
+// GC_DOLT_REMOTE_<DB> takes effect), and returns combined output plus the
+// command's error so callers that must assert the sync itself did not fail
+// (as opposed to merely producing unexpected output) can do so.
+func runFFSyncEnv(t *testing.T, binDir string, extraEnv []string, args ...string) (string, error) {
 	t.Helper()
 	root := repoRoot(t)
 	script := filepath.Join(root, syncScript)
@@ -48,8 +52,18 @@ func runFFSync(t *testing.T, binDir string, args ...string) string {
 		"GC_DOLT_USER=root",
 		"GC_DOLT_PASSWORD=",
 	)
-	out, _ := cmd.CombinedOutput()
-	return string(out)
+	cmd.Env = append(cmd.Env, extraEnv...)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// runFFSync is runFFSyncEnv with no extra environment variables, discarding
+// the command error: none of its callers assert on the sync's exit status,
+// only on its output.
+func runFFSync(t *testing.T, binDir string, args ...string) string {
+	t.Helper()
+	out, _ := runFFSyncEnv(t, binDir, nil, args...)
+	return out
 }
 
 // fakeDoltHeader is the shared preamble: log argv and answer the remote-lookup
@@ -328,40 +342,17 @@ func TestSyncMultiRemotePrefersLocalOverGitHttpsRemote(t *testing.T) {
 // pins remote selection even to a non-local (git+https) remote that the
 // default policy would otherwise skip past in favor of a file:// alternative.
 func TestSyncRemoteEnvOverridePinsNonLocalRemote(t *testing.T) {
-	root := repoRoot(t)
-	script := filepath.Join(root, syncScript)
-	port, cleanup := startReachableTCPListener(t)
-	defer cleanup()
-
-	cityPath := t.TempDir()
-	dataDir := filepath.Join(cityPath, "data")
-	if err := os.MkdirAll(filepath.Join(dataDir, "app", ".dolt"), 0o755); err != nil {
-		t.Fatalf("mkdir db: %v", err)
-	}
-	writeSyncFakeBeadsBD(t, cityPath)
-
 	binDir := t.TempDir()
 	writeSyncFakeDoltMultiRemote(t, binDir, []string{
 		"origin,git+https://github.com/gastownhall/beads",
 		"usb,file:///mnt/usb/beads",
 	})
 
-	cmd := exec.Command("sh", script, "--db", "app", "--force", "--dry-run")
-	cmd.Env = append(syncFilteredEnv(),
-		"PATH="+binDir+":"+os.Getenv("PATH"),
-		"GC_CITY_PATH="+cityPath,
-		"GC_PACK_DIR="+root,
-		"GC_DOLT_DATA_DIR="+dataDir,
-		fmt.Sprintf("GC_DOLT_PORT=%d", port),
-		"GC_DOLT_USER=root",
-		"GC_DOLT_PASSWORD=",
-		"GC_DOLT_REMOTE_APP=origin",
-	)
-	out, err := cmd.CombinedOutput()
+	out, err := runFFSyncEnv(t, binDir, []string{"GC_DOLT_REMOTE_APP=origin"}, "--db", "app", "--force", "--dry-run")
 	if err != nil {
 		t.Fatalf("gc dolt sync failed: %v\n%s", err, out)
 	}
-	if !strings.Contains(string(out), "-> origin:main (git+https://github.com/gastownhall/beads)") {
+	if !strings.Contains(out, "-> origin:main (git+https://github.com/gastownhall/beads)") {
 		t.Fatalf("GC_DOLT_REMOTE_APP=origin should pin selection to origin even though usb (file://) is available.\nout:\n%s", out)
 	}
 }
