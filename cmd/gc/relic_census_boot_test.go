@@ -261,3 +261,67 @@ func TestCensusOfIdentityRoutesIsANoOp(t *testing.T) {
 		t.Errorf("nil routes produced %d bindings", len(bindings))
 	}
 }
+
+// Seeding a relic is an OUT-OF-ORDER act by construction, and this pins that the
+// fixture puts the order back.
+//
+// The census runs when the funnel OPENS a binding, and no fixture can plant a
+// bead in a binding it has not opened yet — so every relic a test seeds arrives
+// after the verdict that describes it. A row that then asserts on residency is
+// reading a verdict that was true when it was taken and is false by the time it
+// is read, and the failure is silent in the worst direction: the probe retires,
+// the binding stops being asked, and the row passes or fails for a reason that
+// has nothing to do with what it claims to test.
+//
+// Production never produces that ordering. Relics are what `gc storage migrate`
+// leaves behind, so every process that meets them starts after they exist and
+// censuses once at boot — which is why the seed helper reopens the funnel rather
+// than papering over the verdict. Deleting that reopen is what this row catches.
+func TestSeedingARelicLeavesTheBindingCensusedAsRelicBearing(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	classResidentWorkShapedBead(t, cityPath, "gc-relic1", "an orphaned patrol root")
+
+	binding := soleBinding(t, cliStorageRoutes(cityPath))
+	if !binding.MintsReserved {
+		t.Fatal("the fixture's binding does not mint inside its own namespaces, so the relic bit decides nothing and this row pins no ordering")
+	}
+	if !binding.HasLegacyResidents {
+		t.Error("the binding holds a seeded relic and still reads as clean; the census verdict predates the relic, so every row that seeds one is asserting against a stale answer")
+	}
+}
+
+// The `gc bd` by-id door reaches a relic even where storeref has retired the
+// probe, and that divergence is the point of this row.
+//
+// There are TWO residence probes in the tree and they do not agree about
+// retirement. storeref.planByID skips a binding whose census came back clean
+// (internal/storeref/resolve.go). bdByIDClassDoor.resolve asks the binding for
+// every id unconditionally and has never heard of the census
+// (cmd/gc/cmd_bd_by_id.go). On a real city the two cannot disagree — a binding
+// holding a relic is never certified clean — so this is not a correctness bug
+// today. It is two answers to one question, which is the shape this epic exists
+// to collapse, and it means the retirement the census was built to deliver is
+// unrealized on the highest-traffic one-shot path. ga-qdt5y.18 tracks it.
+//
+// What this row pins is the property that must survive the collapse either way:
+// a read never loses a bead the binding holds. Whichever probe the door ends up
+// using, a relic stays reachable.
+func TestBdByIDDoorReachesARelicTheStorerefPlanWouldSkip(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	relic, _ := classResidentWorkShapedBead(t, cityPath, "gc-relic1", "an orphaned patrol root")
+
+	door, relocated, err := openBdByIDClassFrontDoor(cityPath)
+	if err != nil {
+		t.Fatalf("opening the by-id class front door: %v", err)
+	}
+	if !relocated {
+		t.Fatal("the fixture city resolved no class binding, so there is no door to test")
+	}
+	resolution, err := door.resolve(relic.ID)
+	if err != nil {
+		t.Fatalf("the door failed to decide ownership of %s: %v", relic.ID, err)
+	}
+	if !resolution.Found {
+		t.Errorf("the door reported %s absent; the binding holds it, and a read that loses a relic is the root-loss shape this lane exists to prevent", relic.ID)
+	}
+}

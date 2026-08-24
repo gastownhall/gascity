@@ -52,13 +52,13 @@ func resolveThroughTheConvoyScan(t *testing.T, cityPath, id string) (beads.Store
 // migrate` retained in the city store, and the close that followed wrote
 // through it.
 func TestConvoyResolutionServesTheBindingCopy(t *testing.T) {
-	cityPath, classStore := foreignProviderCity(t)
+	cityPath, _ := foreignProviderCity(t)
 	work := workStoreFor(t, cityPath)
 	shadow, err := work.Create(beads.Bead{Title: "the retained work copy", Type: "task"})
 	if err != nil {
 		t.Fatalf("seeding the work store: %v", err)
 	}
-	resident := classResidentWorkShapedBead(t, classStore, shadow.ID, "the class-binding copy")
+	resident, classStore := classResidentWorkShapedBead(t, cityPath, shadow.ID, "the class-binding copy")
 	control, err := work.Create(beads.Bead{Title: "a work bead the binding never held", Type: "task"})
 	if err != nil {
 		t.Fatalf("seeding the control: %v", err)
@@ -103,8 +103,8 @@ func TestConvoyResolutionServesTheBindingCopy(t *testing.T) {
 // its own — so reporting anything but the city path here would strand every
 // root recorded before the move.
 func TestConvoyResolutionReportsTheCityDirForABindingHit(t *testing.T) {
-	cityPath, classStore := foreignProviderCity(t)
-	resident := classResidentWorkShapedBead(t, classStore, "gc-relic1", "a relocated patrol root")
+	cityPath, _ := foreignProviderCity(t)
+	resident, classStore := classResidentWorkShapedBead(t, cityPath, "gc-relic1", "a relocated patrol root")
 
 	store, dir := resolveThroughTheConvoyScan(t, cityPath, resident.ID)
 	if store != classStore {
@@ -125,13 +125,13 @@ func TestConvoyResolutionReportsTheCityDirForABindingHit(t *testing.T) {
 // the uniqueness rule here would refuse every convoy command on exactly the
 // cities that finished migrating.
 func TestConvoyResolutionDoesNotRefuseDualResidenceAsAmbiguous(t *testing.T) {
-	cityPath, classStore := foreignProviderCity(t)
+	cityPath, _ := foreignProviderCity(t)
 	work := workStoreFor(t, cityPath)
 	shadow, err := work.Create(beads.Bead{Title: "the retained work copy", Type: "task"})
 	if err != nil {
 		t.Fatalf("seeding the work store: %v", err)
 	}
-	resident := classResidentWorkShapedBead(t, classStore, shadow.ID, "the class-binding copy")
+	resident, classStore := classResidentWorkShapedBead(t, cityPath, shadow.ID, "the class-binding copy")
 
 	store, _, err := resolveOwningStoreDir(resident.ID, convoyCityConfig(t, cityPath), cityPath, func(storeDir string) (beads.Store, error) {
 		return openStoreAtForCity(storeDir, cityPath)
@@ -243,13 +243,13 @@ func TestAutocloseOwningStoreStaysQuietOnAbsence(t *testing.T) {
 // show` arm: the same scan, taking the first hit rather than refusing a second
 // one, and the same retained copy standing in front of the live one.
 func TestBeadsShowFallbackServesTheBindingCopy(t *testing.T) {
-	cityPath, classStore := foreignProviderCity(t)
+	cityPath, _ := foreignProviderCity(t)
 	work := workStoreFor(t, cityPath)
 	shadow, err := work.Create(beads.Bead{Title: "the retained work copy", Type: "task"})
 	if err != nil {
 		t.Fatalf("seeding the work store: %v", err)
 	}
-	resident := classResidentWorkShapedBead(t, classStore, shadow.ID, "the class-binding copy")
+	resident, _ := classResidentWorkShapedBead(t, cityPath, shadow.ID, "the class-binding copy")
 
 	var stdout, stderr bytes.Buffer
 	if code := doBeadsShowFallback(cityPath, resident.ID, "json", &stdout, &stderr); code != 0 {
