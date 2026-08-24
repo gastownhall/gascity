@@ -834,6 +834,27 @@ func conformanceClaimRouting(t *testing.T, e splitEnv) {
 	if (cityRoute != nil) != e.split {
 		t.Fatalf("hookClaimClassRouteForCity returned route!=nil = %v on a split=%v city; a claim routed on a city that relocates nothing writes through a binding it has no business opening, and one NOT routed on a split city writes ownership into a ledger that does not hold the bead", cityRoute != nil, e.split)
 	}
+	if e.split {
+		// WHICH store it bound, not merely that it bound one. "A route exists"
+		// is satisfied by handing back the work store, and that is the exact
+		// failure this route was built to end: a claim escalating off a
+		// work-store not-found only to write its ownership back into the same
+		// work ledger, while the reader keeps answering from the binding.
+		//
+		// The store is identified by the id space it mints, because the route
+		// resolves through the one-shot funnel — a second handle on the same
+		// binding root — so it is never pointer-identical to e.class and no
+		// identity comparison is available. The namespace is the property that
+		// distinguishes the two ledgers, and it is the one the by-id door routes
+		// on.
+		probe, err := cityRoute.class.Create(beads.Bead{Title: "which ledger did the claim route bind?", Type: "task"})
+		if err != nil {
+			t.Fatalf("creating through the claim route's bound store: %v", err)
+		}
+		if !strings.HasPrefix(probe.ID, classPrefix+"-") {
+			t.Errorf("the claim route bound a store minting %q, want the %q- namespace; it is holding the WORK ledger, so every routed claim writes ownership into the store whose not-found opened the escalation", probe.ID, classPrefix)
+		}
+	}
 
 	if !e.split {
 		wisp := e.mintWisp(t, "claim-routing wisp")

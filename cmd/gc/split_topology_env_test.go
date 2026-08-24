@@ -180,6 +180,7 @@ func newSplitEnvWith(t *testing.T, split bool, opts splitEnvOptions) splitEnv {
 		// map straight to the value OpenEngine returned. See the file header.
 		e.class = newSplitEnvClassLeaf(t)
 		e.routes = splitEnvRoutes(e.class)
+		assertSplitEnvStagesAServingSplit(t, e.class, e.routes)
 	}
 	writeSplitTopologyCityConfig(t, cityPath, rigPath, split)
 	// The assigned-work spine resolves a city's bindings BY PATH, because its
@@ -197,6 +198,39 @@ func newSplitEnvWith(t *testing.T, split bool, opts splitEnvOptions) splitEnv {
 		e.attachRigLeg(t, rigPath)
 	}
 	return e
+}
+
+// assertSplitEnvStagesAServingSplit refuses to hand back a fixture whose split
+// is only nominal.
+//
+// Every invariant in the conformance suite reads "this is the split topology"
+// off the fields this constructor sets, and nothing downstream re-checks that
+// the binding it names can be READ. Substitute a refusedClassStore for the class
+// leg — the store a city configured for a binding it has not converged on
+// resolves to, and one line of fixture code away — and the whole suite still
+// passes: every row that expects a class-resident bead to be absent from the
+// work store gets its expectation from a store that answers the boot refusal to
+// everything, and a topology that serves nothing reads as a healthy split.
+//
+// So both halves are asserted here, once, where the fixture makes the claim: the
+// leg answers reads, and the routes derived from it group into one binding with
+// no refusal carried. The probes are read-only — a create here would seed a bead
+// the residence rows then have to account for.
+func assertSplitEnvStagesAServingSplit(t *testing.T, class beads.Store, routes *storageRoutes) {
+	t.Helper()
+	if err := class.Ping(); err != nil {
+		t.Fatalf("the fixture's class leg refuses Ping (%v); this stages a city whose binding serves nothing, and every split-topology invariant below would be asserted against a store that answers the boot refusal to every read", err)
+	}
+	if _, err := class.List(beads.ListQuery{AllowScan: true}); err != nil {
+		t.Fatalf("the fixture's class leg refuses List (%v); see Ping above — a refusing leg makes 'the bead is not in the work store' true for the wrong reason", err)
+	}
+	bindings, refused := residencyBindingsFromRoutes(routes)
+	if refused != nil {
+		t.Fatalf("the routes the fixture staged carry a standing refusal (%v); this is a city that has not converged, not the served whole-split every invariant here describes", refused)
+	}
+	if len(bindings) != 1 {
+		t.Fatalf("the routes the fixture staged group into %d binding(s), want exactly 1; this build serves the whole split or nothing (storageSplitWhole)", len(bindings))
+	}
 }
 
 // newSplitEnvClassLeaf opens the class leg on the store a split city is really
