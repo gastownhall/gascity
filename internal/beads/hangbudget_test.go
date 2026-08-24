@@ -22,18 +22,3 @@ import "github.com/gastownhall/gascity/internal/testutil"
 // its own explicit short deadline instead — this budget is the wrong tool for
 // either.
 const beadsHangBudget = 6 * testutil.GoroutineRaceTimeout
-
-// beadsSequenceFloorHangBudget bounds the pure hang-detector wait in
-// sqlite_store_sequence_floor_process_linux_test.go's (*sqliteSequenceFloorChild).line:
-// the parent re-execs the test binary as a child that opens a SQLiteStore and
-// arms a barrier before printing its "ready" protocol line over stdout: no
-// assertion depends on how long that takes, only on the line's content once it
-// arrives, so this is a hang detector, not a latency assertion. Structurally
-// the same shape as storebinding/sqlite's sqliteFenceHangBudget (ga-sptey3): a
-// re-exec'd child clearing Go runtime + package init, flag parse and test
-// enumeration, plus a SQLite open, before its first protocol line.
-// testutil.ExecRaceTimeout (10s) is a floor, not a target, for the same reason
-// beadsHangBudget treats testutil.GoroutineRaceTimeout as a floor above.
-// Mirrors the same 6x multiplier precedent (60s, well under the gate package
-// timeout).
-const beadsSequenceFloorHangBudget = 6 * testutil.ExecRaceTimeout
