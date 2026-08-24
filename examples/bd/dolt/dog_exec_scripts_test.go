@@ -331,7 +331,10 @@ func runCompactScriptCommand(t *testing.T, mode string) (string, string, error) 
 // fixtures. It logs every invocation and, when the returned mail-failure
 // sentinel file exists, fails `gc mail send` so tests can exercise the
 // script's mail-delivery failure path. The sentinel does not exist by
-// default, so mail succeeds unless a test opts in.
+// default, so mail succeeds unless a test opts in. On a successful mail
+// send it prints a stdout confirmation line, mirroring real `gc mail
+// send`'s stdout-on-success behavior, so callers can assert that the
+// caller script actually surfaces it instead of swallowing it.
 func writeCompactFakeGC(t *testing.T, binDir string) (logPath, mailFailPath string) {
 	t.Helper()
 	logPath = filepath.Join(binDir, "gc.log")
@@ -345,6 +348,10 @@ fi
 if [ "${1:-}" = "mail" ] && [ "${2:-}" = "send" ] && [ -f %s ]; then
   printf 'fake gc: mail send failed\n' >&2
   exit 1
+fi
+if [ "${1:-}" = "mail" ] && [ "${2:-}" = "send" ]; then
+  printf 'gc mail send: message sent\n'
+  exit 0
 fi
 exit 0
 `, shellQuote(logPath), shellQuote(mailFailPath)))
@@ -3699,6 +3706,20 @@ func TestCompactScriptQuarantineBlocksSecondCycleAfterRowCountDecrease(t *testin
 	}
 	if strings.Contains(string(logData), "DOLT_GC") {
 		t.Fatalf("quarantined database must not run full GC:\n%s", logData)
+	}
+}
+
+func TestCompactScriptQuarantineAlertSuccessConfirmationIsVisible(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	firstOut, err := fixture.run(t, "row_count_decreases", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("first compact succeeded despite row-count decrease:\n%s", firstOut)
+	}
+
+	// A successful quarantine alert send still has a live stdout stream;
+	// capturing stderr for the failure path must not discard it.
+	if !strings.Contains(firstOut, "gc mail send: message sent") {
+		t.Fatalf("a successful quarantine alert send must surface its own confirmation, not swallow it:\n%s", firstOut)
 	}
 }
 
