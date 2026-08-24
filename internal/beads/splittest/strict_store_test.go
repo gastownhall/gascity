@@ -167,6 +167,12 @@ func TestStrictStoreCatchesWhatLenientDoublesLetThrough(t *testing.T) {
 // an unroutable row. A kit that hard-failed here would put a test on an error
 // branch production never takes, so it accepts too — and records, so the fixture
 // still cannot walk past it.
+//
+// The dep half is the whole story for a class store. The pinned-id half is not:
+// OpenEngine also FENCES a class binding's store to the namespaces it claims, so
+// the unroutable row is refused before SQLite ever gets the chance to accept it.
+// Both outcomes are real, and which one a leaf gives depends on whether it
+// serves a binding — see pinned_id_fence.go and the two rows below.
 func TestClassStoreModelsSQLitesSilentAcceptance(t *testing.T) {
 	t.Parallel()
 
@@ -198,24 +204,41 @@ func TestClassStoreModelsSQLitesSilentAcceptance(t *testing.T) {
 		assertClaimedViolation(t, graph, "dep-add", workBead.ID)
 	})
 
-	t.Run("foreign-prefix create is accepted verbatim", func(t *testing.T) {
+	// The pinned-id half is the one the fence took back. An UNFENCED SQLite
+	// store still accepts a foreign-prefix row verbatim — normalizeCreate has no
+	// prefix check — so the kit models that outcome for a leaf with no namespace
+	// claim, and this row is what keeps that arm honest. A leaf serving a class
+	// binding is fenced, and the refusal is pinned beside it.
+	t.Run("foreign-prefix create is accepted verbatim without a fence", func(t *testing.T) {
 		t.Parallel()
-		_, graph := NewSplitStores(t)
+		unfenced := newStrictMemLeaf(t, "gcg", SQLiteSemantics)
 
-		created, err := graph.Create(beads.Bead{ID: "gc-123", Title: "work-prefixed row in the class database"})
+		created, err := unfenced.Create(beads.Bead{ID: "gc-123", Title: "work-prefixed row in the class database"})
 		if err != nil {
-			t.Fatalf("class store rejected a foreign-prefix create SQLite accepts: %v", err)
+			t.Fatalf("unfenced SQLite leaf rejected a foreign-prefix create SQLite accepts: %v", err)
 		}
 		if created.ID != "gc-123" {
 			t.Fatalf("created id = %q, want %q kept verbatim as SQLiteStore.normalizeCreate keeps it", created.ID, "gc-123")
 		}
-		if _, err := graph.Get("gc-123"); err != nil {
+		if _, err := unfenced.Get("gc-123"); err != nil {
 			t.Fatalf("get the foreign-prefix row: %v", err)
 		}
-		if owner := storeref.PrefixOwner("gc-123", []beads.Store{graph}); owner != nil {
+		if owner := storeref.PrefixOwner("gc-123", []beads.Store{unfenced}); owner != nil {
 			t.Error("prefix routing found the foreign row in the class store; production's routing looks in the work store and never sees it, which is what makes the row unreachable")
 		}
-		assertClaimedViolation(t, graph, "create", "gc-123")
+		assertClaimedViolation(t, unfenced, "create", "gc-123")
+	})
+
+	t.Run("a class binding's store is fenced, so the same create is refused", func(t *testing.T) {
+		t.Parallel()
+		_, graph := NewSplitStores(t)
+
+		if _, err := graph.Create(beads.Bead{ID: "gc-123", Title: "work-prefixed row in the class database"}); !errors.Is(err, beads.ErrPinnedIDOutsideNamespace) {
+			t.Fatalf("the class store answered %v, want ErrPinnedIDOutsideNamespace: OpenEngine fences a class binding to the namespaces it claims, so the unreachable row above is never written in the first place", err)
+		}
+		if _, err := graph.Get("gc-123"); !errors.Is(err, beads.ErrNotFound) {
+			t.Errorf("after the refusal Get(%q) = %v, want ErrNotFound", "gc-123", err)
+		}
 	})
 }
 
@@ -684,7 +707,7 @@ func TestNewStrictRejectsAnUndeclaredContract(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store, err := newStrict(tc.leaf, tc.prefix, tc.semantics)
+			store, err := newStrict(tc.leaf, tc.prefix, tc.semantics, nil)
 			if err == nil {
 				t.Fatalf("newStrict returned %T for %s, want an error", store, tc.name)
 			}
@@ -718,12 +741,15 @@ func TestUnclaimedResidenceViolationsFailTheTest(t *testing.T) {
 // TestClaimingResidenceViolationsClearsThem pins the other half: a fixture that
 // asserts the production corruption claims the violations, and the store must
 // then have nothing left to fail its test with.
+// The leaf is unfenced because a fenced one refuses the create outright and
+// records nothing; the violation this is about is the one an unfenced SQLite
+// store accepts.
 func TestClaimingResidenceViolationsClearsThem(t *testing.T) {
 	t.Parallel()
-	_, graph := NewSplitStores(t)
+	graph := newStrictMemLeaf(t, "gcg", SQLiteSemantics)
 
 	if _, err := graph.Create(beads.Bead{ID: "gc-123", Title: "foreign row"}); err != nil {
-		t.Fatalf("class store rejected a create SQLite accepts: %v", err)
+		t.Fatalf("unfenced SQLite leaf rejected a create SQLite accepts: %v", err)
 	}
 	if claimed := TakeResidenceViolations(graph); len(claimed) != 1 {
 		t.Fatalf("claimed %v, want the one create violation", claimed)

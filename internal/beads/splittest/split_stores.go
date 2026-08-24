@@ -29,12 +29,13 @@ const defaultWorkPrefix = "gc"
 //   - work mints "gc-<n>" on BdSemantics: a graph-prefixed create and a dep on
 //     a graph bead are hard errors, the way bd fails them.
 //   - graph mints under config.ReservedClassPrefix(config.BeadClassGraph)
-//     ("gcg-<n>") on SQLiteSemantics: the same two writes are ACCEPTED, the way
-//     the SQLite class database accepts them, and recorded as residence
-//     violations that fail the test at cleanup unless the fixture claims them.
-//     It honors explicit in-prefix ids, so production-shaped wisp ids
-//     (gcg-wisp-*) round-trip, and exposes IDPrefix() == "gcg" for storeref
-//     prefix routing.
+//     ("gcg-<n>") on SQLiteSemantics, FENCED to the graph class's reserved
+//     namespaces: a foreign-prefix pinned create is REFUSED with
+//     beads.ErrPinnedIDOutsideNamespace, the way the real binding refuses it,
+//     while a cross-store dep is ACCEPTED and recorded as a residence violation
+//     that fails the test at cleanup unless the fixture claims it. It honors
+//     explicit in-prefix ids, so production-shaped wisp ids (gcg-wisp-*)
+//     round-trip, and exposes IDPrefix() == "gcg" for storeref prefix routing.
 //
 // The asymmetry is the point: these two stores really do run on different
 // backends, and a pair that answered the same way would misrepresent one of
@@ -62,16 +63,25 @@ func NewSplitStores(t *testing.T) (work, graph beads.Store) {
 //
 // The leaf runs on SQLiteSemantics, because that is what serves a relocated
 // class in production: internal/storebinding/sqlite/beads_engine.go OpenEngine
-// opens beads.OpenSQLiteStore with the class's reserved prefix. A residence
-// violation here is therefore ACCEPTED and recorded, not rejected — see the
-// package doc's rule table and TakeResidenceViolations.
+// opens beads.OpenSQLiteStore with the class's reserved prefix. A cross-store
+// dep is therefore ACCEPTED and recorded, not rejected — see the package doc's
+// rule table and TakeResidenceViolations.
+//
+// It is also FENCED to config.ReservedClassPrefixesFor(class), because that same
+// OpenEngine passes storebinding.EngineReservedPrefixes into the store option: a
+// pinned id outside the namespaces the binding claims is refused with
+// beads.ErrPinnedIDOutsideNamespace under either semantics. The class's mint
+// prefix is only the first of those namespaces — nudges, for one, holds the
+// nudge queue's prefix as well and never mints under it — so the fence is the
+// whole set, not the mint alone. Migration copies keep their foreign ids through
+// beads.ForeignIDCreator, which the fence deliberately leaves open.
 func NewClassStore(t *testing.T, class string) beads.Store {
 	t.Helper()
 	prefix, err := classPrefix(class)
 	if err != nil {
 		t.Fatalf("splittest.NewClassStore: %v", err)
 	}
-	return newStrictMemLeaf(t, prefix, SQLiteSemantics)
+	return newStrictMemLeaf(t, prefix, SQLiteSemantics, config.ReservedClassPrefixesFor(class)...)
 }
 
 // classPrefix resolves a relocated coordination class to the id prefix its
@@ -128,10 +138,13 @@ func workPrefix(prefix string) (string, error) {
 // half and HonorExplicitIDs the accepting half — together they are what makes a
 // MemStore able to stand in for a real per-class database instead of one global
 // id space.
-func newStrictMemLeaf(t *testing.T, prefix string, semantics Semantics) beads.Store {
+//
+// namespaces fences the leaf as in Strict; passing none leaves it unfenced,
+// which is what a work store is.
+func newStrictMemLeaf(t *testing.T, prefix string, semantics Semantics, namespaces ...string) beads.Store {
 	t.Helper()
 	leaf := beads.NewMemStore()
 	leaf.IDPrefix = prefix
 	leaf.HonorExplicitIDs = true
-	return StrictWithPrefix(t, leaf, prefix, semantics)
+	return StrictWithPrefix(t, leaf, prefix, semantics, namespaces...)
 }

@@ -32,6 +32,12 @@ const (
 	// prefix check on a pinned id, no foreign key on deps — and records each as
 	// a ResidenceViolation, so a fixture sees production's outcome instead of
 	// an error branch production never takes.
+	//
+	// The foreign-prefix half is what an UNFENCED SQLite store does. The same
+	// OpenEngine that opens the store also fences it to the namespaces its class
+	// binding claims, and a fenced leaf refuses a pinned id outside them under
+	// either semantics — the fence is the binding's rule, not a backend's. See
+	// pinned_id_fence.go; the dep half is unaffected by it.
 	SQLiteSemantics
 )
 

@@ -1011,14 +1011,19 @@ func conformanceHookClaimClassRouting(t *testing.T, e splitEnv, workBeadID strin
 	}
 	classResident := e.mintWispWith(t, wispOpts{title: "hook-claim routed graph step"})
 
-	// The migration copy: a WORK-shaped id live in both stores. The class leaf
-	// models SQLite, which accepts a foreign-prefix pinned id and records the
-	// residence violation instead of refusing, so the fixture claims the record.
-	if _, err := e.class.Create(beads.Bead{ID: workBeadID, Title: "migrated copy of a work bead", Type: "task"}); err != nil {
-		t.Fatalf("staging the co-resident migration copy of %s in the class store: %v", workBeadID, err)
+	// The migration copy: a WORK-shaped id live in both stores. It is staged
+	// through the SAME door `gc storage migrate` uses — beads.ForeignIDCreator,
+	// the forced create — because the class binding is fenced to the namespaces
+	// it claims and a plain Create of a work id is refused. That refusal is the
+	// point of the fence; the migration copy is the one sanctioned way past it,
+	// which is exactly why the co-resident steady state this pins can exist at
+	// all.
+	creator, ok := e.class.(beads.ForeignIDCreator)
+	if !ok {
+		t.Fatalf("the class store %T is not a beads.ForeignIDCreator; the migration copy has no door and the co-resident state below cannot be staged the way production reaches it", e.class)
 	}
-	if violations := splittest.TakeResidenceViolations(e.class); len(violations) == 0 {
-		t.Fatal("class store recorded no residence violation for the co-resident work id; the SQLite-semantics leaf is not modeling the migrated steady state")
+	if _, err := creator.CreateWithForeignID(beads.Bead{ID: workBeadID, Title: "migrated copy of a work bead", Type: "task"}); err != nil {
+		t.Fatalf("staging the co-resident migration copy of %s in the class store: %v", workBeadID, err)
 	}
 
 	for _, tt := range []struct {
