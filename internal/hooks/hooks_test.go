@@ -1764,7 +1764,6 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 		"const GC_OPENCODE_HOOK_VERSION = 6",
 		`process.env.GC_BIN || "gc"`,
 		`/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`,
-		"INJECTION_TIMEOUT_MS",
 		"Promise.all([",
 		`"experimental.session.compacting"`,
 		`runWithWarning(directory, "handoff", "--auto", "context cycle")`,
@@ -2205,7 +2204,6 @@ runWithWarning(directory, "handoff", "--auto", "context cycle");
 output.context.push(handoff);
 GC_PROVIDER_SESSION_ID;
 GC_PROVIDER_SESSION_ID_REQUIRED;
-INJECTION_TIMEOUT_MS;
 Promise.all([]);
 `)
 	stale := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 6"), []byte("GC_OPENCODE_HOOK_VERSION = 5"), 1)

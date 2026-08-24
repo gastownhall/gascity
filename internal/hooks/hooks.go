@@ -298,8 +298,7 @@ func opencodeHookNeedsUpgrade(existing []byte) bool {
 		!strings.Contains(content, "logRunStderr(stderr);") ||
 		!strings.Contains(content, "GC_PROVIDER_SESSION_ID") ||
 		!strings.Contains(content, "GC_PROVIDER_SESSION_ID_REQUIRED") ||
-		// Optional injection must be bounded and concurrent (#5553).
-		!strings.Contains(content, "INJECTION_TIMEOUT_MS") ||
+		// Optional injection must run concurrently (#5553).
 		!strings.Contains(content, "Promise.all([") {
 		return true
 	}
