@@ -42,11 +42,16 @@
 //	                                   --force to       in                SQLiteSemantics: accept,
 //	                                   override         normalizeCreate   record a violation.
 //
-//	Create, explicit id outside the    rejects, wrapping ErrPinnedID-     Reject, wrapping
-//	namespaces the binding claims,     OutsideNamespace — the SAME rule   ErrPinnedIDOutsideNamespace
-//	FENCED                             in both, because it is the         under BOTH semantics: the
-//	                                   invariant, not a backend's         fence is a property of the
-//	                                   behavior                           BINDING, not of a backend.
+//	Create, explicit id outside the    rejects with     rejects with      Reject under BOTH
+//	namespaces the binding claims,     the sentinel     the sentinel      semantics, with the
+//	FENCED                                                                sentinel.
+//
+// The FENCED row is the only one whose three cells agree, and a refusal records
+// nothing under either semantics — production refuses before the backend sees
+// the write, so there is nothing to record. That is a real loss of reach: a
+// caller that swallows the error used to be caught by the unclaimed-violation
+// cleanup and now is not. Modeling it would mean recording something production
+// does not.
 //
 //	DepAdd, endpoint missing from      rejects: no      accepts: deps has BdSemantics: reject with
 //	this store, SAME prefix            issue found      no foreign key    bd's message.
@@ -108,6 +113,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
@@ -122,10 +128,10 @@ import (
 //     always fails loudly when the leaf hands back an id other than the one
 //     that was asked for.
 //
-// A FENCED leaf refuses a pinned id outside the namespaces it claims under both
-// semantics, because the fence is the binding's rule rather than a backend's.
-// Otherwise a BdSemantics store rejects and a SQLiteSemantics store accepts and
-// records (see the package doc's rule table, and ResidenceViolation).
+// A FENCED leaf refuses a pinned id outside the namespaces it claims, under
+// both semantics. Otherwise a BdSemantics store rejects and a SQLiteSemantics
+// store accepts and records (see the package doc's rule table, and
+// ResidenceViolation).
 //
 // Reads are untouched. Optional leaf capabilities that production code
 // discovers by type-assertion are forwarded (see the method set and the
@@ -270,7 +276,17 @@ func newStrict(s beads.Store, prefix string, semantics Semantics, namespaces []s
 	if normalized == "" {
 		return nil, fmt.Errorf("empty id prefix %q; the residence checks need a declared namespace to be about", prefix)
 	}
-	strict := &StrictStore{Store: s, prefix: normalized, semantics: semantics, namespaces: normalizeNamespaces(namespaces)}
+	fence := normalizeNamespaces(namespaces)
+	// The fence is variadic, so forgetting it is silent and yields the store
+	// the kit shipped before there was one. That is right for every leaf except
+	// this shape: a SQLiteSemantics leaf minting under a RESERVED class prefix
+	// is standing in for a class binding, and storebinding.EngineReservedPrefixes
+	// fences every non-work class set, so production has no such store to model.
+	// The mirror of workPrefix's refusal of a reserved prefix, on the other side.
+	if semantics == SQLiteSemantics && len(fence) == 0 && config.IsReservedClassPrefix(normalized) {
+		return nil, fmt.Errorf("prefix %q is a reserved class prefix but no namespaces were given; a store minting a class namespace serves a class binding, and every class binding production opens is fenced — pass the namespaces it claims (config.ReservedClassPrefixesFor), or use a work-shaped prefix if an UNFENCED SQLite store is what you mean to model", normalized)
+	}
+	strict := &StrictStore{Store: s, prefix: normalized, semantics: semantics, namespaces: fence}
 	if semantics == SQLiteSemantics {
 		strict.residence = &residenceLog{}
 	}

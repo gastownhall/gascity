@@ -1025,6 +1025,13 @@ func conformanceHookClaimClassRouting(t *testing.T, e splitEnv, workBeadID strin
 	if _, err := creator.CreateWithForeignID(beads.Bead{ID: workBeadID, Title: "migrated copy of a work bead", Type: "task"}); err != nil {
 		t.Fatalf("staging the co-resident migration copy of %s in the class store: %v", workBeadID, err)
 	}
+	// Read the copy back. The staging is what MAKES the last row co-resident, and
+	// a CreateWithForeignID that returned nil and wrote nothing would leave the
+	// row a byte-identical rerun of the work-only row above it — still green,
+	// still claiming to pin the tie-break, and pinning nothing.
+	if _, err := e.class.Get(workBeadID); err != nil {
+		t.Fatalf("the staged migration copy of %s is not resident in the class store: %v; the co-resident row below would be a rerun of the work-only row", workBeadID, err)
+	}
 
 	for _, tt := range []struct {
 		name, id  string

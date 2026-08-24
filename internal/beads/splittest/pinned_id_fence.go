@@ -19,12 +19,18 @@ import (
 // binding refuses is green on writes production would have rejected.
 //
 // This is a SECOND spelling of internal/beads/pinned_id_fence.go's rule, and
-// that file's own doc says a second spelling is how two fences drift apart. It
-// is here anyway because the alternative is exporting a production API for a
-// test kit's benefit. What holds the two together is not the code: it is that
-// this leaf is run against the same PROVIDER contract the real stores are,
-// beadstest.RunPinnedIDFenceConformance (see fence_conformance_test.go). A
-// divergence fails that suite here exactly as it would fail it there.
+// that file's own doc says a second spelling is how two fences drift apart.
+// Exporting beads.checkPinnedIDNamespace instead would be cheap — internal/beads
+// is repo-private, so nothing outside the module would see it — and would delete
+// this file. It is spelled twice anyway because the kit is a MODEL of the two
+// backends, and a model that calls the thing it models cannot disagree with it,
+// which is the one failure the class-store double exists to make visible.
+//
+// What keeps the two spellings together is therefore not the code but the
+// contract: this leaf runs against beadstest.RunPinnedIDFenceConformance, the
+// same provider suite the shipped stores run (see fence_conformance_test.go). A
+// divergence fails that suite here exactly as it would fail it there — on every
+// axis the suite covers, which is the standing bound on this trade.
 //
 // The rules below are the ones the conformance suite pins, in its words:
 // membership is tested on the SEPARATOR (plain containment admits "gcnx-1",

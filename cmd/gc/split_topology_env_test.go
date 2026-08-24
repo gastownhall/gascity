@@ -270,10 +270,16 @@ func newSplitEnvClassLeaf(t *testing.T) beads.Store {
 			_ = closer.CloseStore()
 		}
 	})
-	// Both halves carry the fence, and they have to agree: the wrapper answers
-	// first, so a fenced leaf under an unfenced wrapper would record the create
-	// as an accepted residence violation and then have the leaf refuse it —
-	// a fixture reading a corruption that never happened.
+	// Both halves carry the same fence, from the one variable above, so they
+	// cannot diverge here. Passing it to both is still not redundant, but the
+	// reach is one-directional: the wrapper answers first, so an unfenced
+	// wrapper over this fenced leaf records the create as an accepted residence
+	// violation and only then has the leaf refuse it — a fixture reading a
+	// corruption that never happened. The other direction is invisible: a fenced
+	// wrapper over an unfenced leaf refuses before the leaf is asked, so the leaf
+	// losing its fence would not show up here. That direction is covered where it
+	// belongs, on the provider itself — beadstest.RunPinnedIDFenceConformance
+	// runs against beads.OpenSQLiteStore directly.
 	return splittest.Strict(t, leaf, splittest.SQLiteSemantics, namespaces...)
 }
 

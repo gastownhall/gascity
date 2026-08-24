@@ -35,22 +35,40 @@ func TestStrictStorePinnedIDFenceConformance(t *testing.T) {
 		// to the unfenced case only: a fenced leaf that started recording
 		// instead of refusing must still fail. Cleanups run LIFO, so this one
 		// drains before the constructor's unclaimed-violation check reads.
+		//
+		// It asserts what it drains rather than discarding, because a blind
+		// claim would also swallow anything ELSE an unfenced row went on to
+		// accept — a cross-store dep, say — and silently retire the backstop
+		// for every row the shared suite grows later.
 		if len(namespaces) == 0 {
-			t.Cleanup(func() { TakeResidenceViolations(s) })
+			t.Cleanup(func() {
+				for _, v := range TakeResidenceViolations(s) {
+					if v.Op != "create" {
+						t.Errorf("the unfenced control accepted a %q violation (%s); only the control's own foreign-prefix create belongs here, and claiming the rest hides it", v.Op, v.Detail)
+					}
+				}
+			})
 		}
 		return s
 	})
 }
 
 // TestTheFenceHoldsUnderBdSemanticsToo pins the half the conformance run above
-// cannot reach: the fence is a property of the BINDING, not of a backend.
+// cannot reach.
 //
 // Both leaves refuse the same foreign pinned id, and the fenced one refuses it
-// with beads.ErrPinnedIDOutsideNamespace — the sentinel a caller uses to tell
-// "route this to a sibling binding" from "this bead could not be created". An
-// unfenced bd leaf refuses too, but on the prefix mismatch, which carries no
-// sentinel; without this row the two failures are indistinguishable and a
-// fenced bd leaf could quietly answer with the wrong one.
+// with beads.ErrPinnedIDOutsideNamespace — the sentinel that will let a caller
+// tell "route this to a sibling binding" from "this bead could not be created".
+// (Nothing outside internal/beads reads it yet; it is the discrimination the
+// error exists to make available.) An unfenced bd leaf refuses too, but on the
+// prefix mismatch, which carries no sentinel; without this row the two failures
+// are indistinguishable and a fenced bd leaf could quietly answer with the
+// wrong one.
+//
+// The transactional row is here for the same reason: the fence runs before the
+// semantics fork, so a single-spelling regression goes red in the SQLite
+// conformance run above — but a regression that gated the guard ON a semantics
+// would not, and Tx is the surface where that gate is easiest to write.
 func TestTheFenceHoldsUnderBdSemanticsToo(t *testing.T) {
 	fenced := newStrictMemLeaf(t, "kitn", BdSemantics, "kitn", "kitnq")
 	_, err := fenced.Create(beads.Bead{ID: "kitwork-42", Title: "another binding's id"})
@@ -74,6 +92,22 @@ func TestTheFenceHoldsUnderBdSemanticsToo(t *testing.T) {
 	if _, err := fenced.Create(beads.Bead{ID: "kitnq-7", Title: "held, never minted"}); err != nil {
 		t.Errorf("the fenced leaf refused an id in a namespace it holds: %v", err)
 	}
+
+	txErr := fenced.Tx("a foreign pinned id inside a transaction", func(tx beads.Tx) error {
+		_, createErr := tx.Create(beads.Bead{ID: "kitwork-43", Title: "another binding's id, transactionally"})
+		return createErr
+	})
+	if !errors.Is(txErr, beads.ErrPinnedIDOutsideNamespace) {
+		t.Errorf("a fenced BdSemantics Tx create refused with %v, want ErrPinnedIDOutsideNamespace", txErr)
+	}
+	// Its must-be-silent counterpart, so the row above cannot pass on a Tx that
+	// refuses every pinned id.
+	if err := fenced.Tx("an in-namespace pinned id inside a transaction", func(tx beads.Tx) error {
+		_, createErr := tx.Create(beads.Bead{ID: "kitnq-8", Title: "held, never minted, transactionally"})
+		return createErr
+	}); err != nil {
+		t.Errorf("a fenced BdSemantics Tx refused an id in a namespace it holds: %v", err)
+	}
 }
 
 // TestNewClassStoreIsFencedToEveryNamespaceItsClassHolds proves the fence the
@@ -83,9 +117,24 @@ func TestTheFenceHoldsUnderBdSemanticsToo(t *testing.T) {
 // The suite runs against a leaf the adapter builds by hand, so it says nothing
 // about what NewClassStore configures. Nudges is the class that makes the
 // distinction observable: it holds a queue prefix it never mints under, which
-// is exactly the namespace a mint-only fence would refuse.
+// is exactly the namespace a mint-only fence would refuse. That such a class
+// exists is the test's whole discriminating power, so it is asserted rather
+// than assumed — an emptied auxiliary table would otherwise leave every
+// subtest green and the mint-only regression invisible.
 func TestNewClassStoreIsFencedToEveryNamespaceItsClassHolds(t *testing.T) {
-	for class := range config.ReservedClassPrefixes() {
+	classes := config.ReservedClassPrefixes()
+	holdsMoreThanItMints := false
+	for class := range classes {
+		if len(config.ReservedClassPrefixesFor(class)) > 1 {
+			holdsMoreThanItMints = true
+			break
+		}
+	}
+	if !holdsMoreThanItMints {
+		t.Fatal("no class holds a namespace it does not mint under; with only mint prefixes left, a fence built from the mint alone passes every row below and the regression this test is for stops being observable")
+	}
+
+	for class := range classes {
 		t.Run(class, func(t *testing.T) {
 			store := NewClassStore(t, class)
 			held := config.ReservedClassPrefixesFor(class)
@@ -116,6 +165,10 @@ func TestNewClassStoreIsFencedToEveryNamespaceItsClassHolds(t *testing.T) {
 // so fencing it would refuse the foreign-prefix create bd is supposed to answer
 // with its own prefix-mismatch rejection — and would make every class store's
 // fence indistinguishable from a blanket refusal.
+//
+// That the work store is not simply refusing everything is the companion pin:
+// TestStoreTrioRoutesByPrefix creates "ra-1" on this same constructor, so an
+// in-prefix pin is proven to go through.
 func TestNewWorkStoreIsUnfenced(t *testing.T) {
 	work := NewWorkStore(t, "ra")
 	_, err := work.Create(beads.Bead{ID: "kitwork-1", Title: "foreign to this work store"})

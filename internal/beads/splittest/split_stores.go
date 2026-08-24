@@ -67,14 +67,24 @@ func NewSplitStores(t *testing.T) (work, graph beads.Store) {
 // dep is therefore ACCEPTED and recorded, not rejected — see the package doc's
 // rule table and TakeResidenceViolations.
 //
-// It is also FENCED to config.ReservedClassPrefixesFor(class), because that same
-// OpenEngine passes storebinding.EngineReservedPrefixes into the store option: a
-// pinned id outside the namespaces the binding claims is refused with
-// beads.ErrPinnedIDOutsideNamespace under either semantics. The class's mint
-// prefix is only the first of those namespaces — nudges, for one, holds the
-// nudge queue's prefix as well and never mints under it — so the fence is the
-// whole set, not the mint alone. Migration copies keep their foreign ids through
-// beads.ForeignIDCreator, which the fence deliberately leaves open.
+// It is also FENCED, because that same OpenEngine passes
+// storebinding.EngineReservedPrefixes into the store option: a pinned id outside
+// the namespaces the binding claims is refused with
+// beads.ErrPinnedIDOutsideNamespace under either semantics. Migration copies keep
+// their foreign ids through beads.ForeignIDCreator, which the fence leaves open.
+//
+// The fence is config.ReservedClassPrefixesFor(class) — the namespaces of the
+// ONE class this leaf serves, which is narrower than any binding the runtime
+// will boot. The only servable split is storageSplitWhole (cmd/gc/storage_boot.go),
+// where all five infrastructure classes share one binding fenced to the union,
+// so a real binding accepts a sibling class's pinned id and this leaf refuses
+// it. That is deliberate: the kit's leaves are per-class, and a graph leaf that
+// swallowed a gcn- id would put the row where the nudges leaf will never find
+// it — a worse fixture than a refusal. The mint prefix is only the first of the
+// class's namespaces (nudges holds the nudge queue's prefix and never mints
+// under it), so the fence is still the whole per-class set and not the mint
+// alone; cmd/gc's split fixtures, which stand in for the real whole-split
+// binding, derive the union instead.
 func NewClassStore(t *testing.T, class string) beads.Store {
 	t.Helper()
 	prefix, err := classPrefix(class)
