@@ -13,6 +13,11 @@
 //     and inject the handoff confirmation into the compaction context
 //   - experimental.chat.system.transform → inject gc prime --hook, queued
 //     nudges, and unread mail into the system prompt for each turn
+//
+// Injection deliberately does NOT use chat.message. OpenCode awaits that hook
+// before it persists the user's message (SessionPrompt calls updateMessage /
+// updatePart only after the trigger returns), so building the prefix there
+// delays the send acknowledgement itself rather than just the reply.
 
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
@@ -20,7 +25,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const GC_OPENCODE_HOOK_VERSION = 5;
+const GC_OPENCODE_HOOK_VERSION = 6;
 const GC_BIN = process.env.GC_BIN || "gc";
 // GC_BIN is the explicit override. The fallback order matches Pi hooks so
 // sibling providers resolve the same installed gc before developer-local bins.
@@ -180,13 +185,6 @@ export default async function gascityPlugin({ directory, client }) {
           return;
         default:
           return;
-      }
-    },
-
-    "chat.message": async (_input, output) => {
-      const prefix = await buildPrefix();
-      if (prefix) {
-        output.message.system = prependText(output.message.system, prefix);
       }
     },
 
