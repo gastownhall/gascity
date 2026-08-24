@@ -324,10 +324,10 @@ type cliRelocatedBinding struct {
 // gate's sentence — and cliResidencyBindings reports that refusal alongside it.
 // Both callers want the STORE in that case, exactly as they got it before: the
 // refusal reaches them through the reads they were going to make anyway, and is
-// classified there. bdByIDClassDoor.resolve no longer classifies it itself —
-// since ga-qdt5y.18 it runs storeref's plan, which tolerates the refusal on a
-// residence probe and surfaces it on the authority leg. hookClaimClassRoute.holds
-// still carries its own hand-rolled version of that judgement (ga-qdt5y.16).
+// classified there. Neither classifies it itself any more: bdByIDClassDoor.resolve
+// runs storeref's plan (ga-qdt5y.18) and hookClaimClassRoute.holds runs the same
+// plan over its own captured frame (ga-qdt5y.16), and the plan tolerates the
+// refusal on a residence probe and surfaces it on the authority leg.
 // Returning it here instead would collapse "this city cannot be served" into
 // "this city relocates nothing", which sends those reads back to the work
 // ledger the beads were migrated off — the exact stale-answer path the door was
@@ -429,6 +429,31 @@ func residencyBindingsFromRoutes(routes *storageRoutes) ([]storeref.ClassBinding
 // censused routes is entitled to claim.
 func residencyBindingsFor(order []beads.Store, byStore map[beads.Store][]coordclass.Class, relics func(beads.Store) bool) ([]storeref.ClassBinding, error) {
 	return storeref.BuildBindings(order, byStore, storeref.BindingOptions{Relics: relics})
+}
+
+// soleBindingResidency derives the bindings for a caller that holds ONE opened
+// class store and no census — the shape a route constructed over a bare store is
+// in, with no routes behind it to ask.
+//
+// It lives here rather than at that call site because this file is where legs
+// are assembled, and it goes through residencyBindingsFor for the reason every
+// other constructor does: Prefixes, Classes, Ref and both retirement bits then
+// come from storeref.BuildBindings, so a topology built from a bare store cannot
+// disagree with one built from a city about what a binding's namespaces are.
+//
+// The relics func is nil, which BuildBindings reads as HasLegacyResidents=true
+// for every store. That is not a stub — it is the honest verdict for a caller
+// that took no census, and it keeps the residence probe running, which is the
+// safe direction.
+//
+// store is used as a MAP KEY, so it inherits residencyBindingsFromRoutes's
+// confinement verbatim: a beads.Store whose dynamic type carries a slice, a map
+// or a func is not hashable and panics here. Every caller's store is one storage
+// boot opened or one a test wrapped around it, all pointer- or field-comparable,
+// which is the same argument that makes the grouping above safe.
+func soleBindingResidency(store beads.Store) ([]storeref.ClassBinding, error) {
+	order := []beads.Store{store} // residency:allow one opened binding, grouped for the shared BuildBindings derivation below
+	return residencyBindingsFor(order, map[beads.Store][]coordclass.Class{store: infrastructureClasses()}, nil)
 }
 
 // infrastructureClasses is the class set a whole split relocates: every

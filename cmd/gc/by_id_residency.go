@@ -60,7 +60,25 @@ import (
 // authority leg for an id inside a reserved namespace surfaces it, because there
 // the refusal IS the answer.
 func cliByIDOwner(cityPath, id string, work beads.Store) (storeref.Owner, error) {
-	plan, err := cliByIDPlan(cityPath, id, work)
+	return byIDOwnerForTopology(residencyTopologyForCity(cityPath, nil, work, nil), id, work)
+}
+
+// byIDOwnerForTopology is cliByIDOwner over a topology the caller already holds.
+//
+// The split is at the topology line because that is the only thing the one-shot
+// funnel contributes: everything below it — the ByID plan, the residual
+// contract, the two miss shapes — is the same question asked of whatever legs
+// are in play. A caller that captured its topology at construction (the
+// claim-time class route) gets the resolver's rules without re-entering the
+// funnel per bead, which is what makes its probe handle and its write handle the
+// same store by construction rather than by coincidence.
+//
+// work is passed again rather than read back off the topology: it is the value
+// the not-found fallback below must return, and reaching into topo.Work.Store
+// for it would be this file picking a store out of a leg — the residency
+// boundary's one forbidden move, and pointless when the caller already has it.
+func byIDOwnerForTopology(topo storeref.Topology, id string, work beads.Store) (storeref.Owner, error) {
+	plan, err := byIDPlanForTopology(topo, id)
 	if err != nil {
 		return storeref.Owner{}, err
 	}
@@ -99,8 +117,19 @@ func cliByIDOwner(cityPath, id string, work beads.Store) (storeref.Owner, error)
 // seam actually executes rather than one assembled the same way beside it. A
 // pin over a parallel construction proves the topology constructor is right and
 // says nothing about whether the seam still uses it.
+//
+// It stays a composition of the two calls cliByIDOwner makes, not a third
+// spelling of them: the same residencyTopologyForCity and the same
+// byIDPlanForTopology, so the pin cannot drift from the executed path without
+// one of those two changing under both.
 func cliByIDPlan(cityPath, id string, work beads.Store) (storeref.ResolvedPlan, error) {
-	return storeref.Plan(storeref.ByID{ID: id}, residencyTopologyForCity(cityPath, nil, work, nil))
+	return byIDPlanForTopology(residencyTopologyForCity(cityPath, nil, work, nil), id)
+}
+
+// byIDPlanForTopology is the ByID plan itself, the one line both the cityPath
+// and the captured-topology forms go through.
+func byIDPlanForTopology(topo storeref.Topology, id string) (storeref.ResolvedPlan, error) {
+	return storeref.Plan(storeref.ByID{ID: id}, topo)
 }
 
 // cliByIDBindingOwner answers the binding half of the by-id question for a
@@ -120,7 +149,22 @@ func cliByIDPlan(cityPath, id string, work beads.Store) (storeref.ResolvedPlan, 
 // row it already read; ok=false is "no binding answered, run your own scan",
 // and the caller then does exactly what it did before.
 func cliByIDBindingOwner(cityPath, id string) (storeref.Owner, bool, error) {
-	owner, err := cliByIDOwner(cityPath, id, newUnprobedWorkResidual())
+	residual := newUnprobedWorkResidual()
+	return byIDBindingOwnerForTopology(residencyTopologyForCity(cityPath, nil, residual, nil), id)
+}
+
+// byIDBindingOwnerForTopology is cliByIDBindingOwner over a topology the caller
+// already holds.
+//
+// That topology's WORK leg must be an unprobedWorkResidual, because ok=false is
+// read off the returned store's type: a topology assembled with a real work
+// store answers ok=true for every id that store holds, which turns "run your own
+// scan" into "the work ledger owns it" — the stale answer this whole seam
+// closes. The residual handed to byIDOwnerForTopology below is a fresh value
+// rather than the caller's, which is sound because the assertion is on the TYPE;
+// both reach the reader as the same "no binding answered".
+func byIDBindingOwnerForTopology(topo storeref.Topology, id string) (storeref.Owner, bool, error) {
+	owner, err := byIDOwnerForTopology(topo, id, newUnprobedWorkResidual())
 	if err != nil {
 		return storeref.Owner{}, false, err
 	}

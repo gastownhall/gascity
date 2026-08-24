@@ -249,12 +249,12 @@ type standingStorageRefusal struct{ err error }
 func (e standingStorageRefusal) Error() string { return e.err.Error() }
 func (e standingStorageRefusal) Unwrap() error { return e.err }
 
-// isStandingStorageRefusal reports whether err is this build's standing verdict
-// about the city rather than a fault in the read that produced it.
-func isStandingStorageRefusal(err error) bool {
-	var refusal standingStorageRefusal
-	return errors.As(err, &refusal)
-}
+// The predicate over this type is storeref.IsStandingRefusal, which matches on
+// the StandingStorageRefusal() marker (declared in residency_topology.go)
+// instead of on this concrete type. cmd/gc had its own errors.As spelling until
+// the claim route stopped needing one: with the last production caller collapsed
+// onto the resolver, a second predicate could only drift from the one the
+// resolver's leg policy actually consults.
 
 // refusedClassStore is the store a relocated class resolves to on a city this
 // build must not serve: every operation fails with the refusal that says why and

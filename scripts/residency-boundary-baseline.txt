@@ -90,6 +90,14 @@
 # which is the leg-order decision the resolver owns. Same shape as the drain.go
 # pair and pinned for the same reason; ga-qdt5y.16 covers it.
 #
+# cmd/gc/claim_class_route.go's holds was the fourth of that family and is the
+# first retired: ga-qdt5y.16 collapsed it onto storeref's ByID plan over a frame
+# the route captures at construction. Its row was `d:bdIDIsClassReserved` — the
+# vocabulary that gave it away, because deciding a refusal's meaning from an id's
+# prefix is the resolver's per-leg policy restated by hand. The route still
+# appears below on the cliSoleClassBinding row, which is a different claim (this
+# surface answers every reserved prefix from one store) and stays.
+#
 # The four ast:uncounted-call-spelling rows are storeFor calls reached through a
 # receiver no grep row names: cs.storageRoutes.storeFor in api_state.go,
 # cliStorageRoutes(cityPath).storeFor in cli_class_stores.go (the receiver is a
@@ -144,7 +152,6 @@ cmd/gc/city_runtime.go	run	a:rigBeadStores	1
 cmd/gc/city_runtime.go	sweepOrphanedOrderTrackingAtBoot	c:beads.Store-literal	1
 cmd/gc/city_runtime.go	syncBeadsAndUpdateIndex	a:rigBeadStores	1
 cmd/gc/city_runtime.go	tick	a:rigBeadStores	4
-cmd/gc/claim_class_route.go	holds	d:bdIDIsClassReserved	1
 cmd/gc/claim_class_route.go	hookClaimClassRouteForCity	b:cliSoleClassBinding	1
 cmd/gc/class_store.go	graphClassBinding	b:graphClassBinding	1
 cmd/gc/class_store.go	graphClassBinding	b:routes.storeFor	1

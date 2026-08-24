@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // classRoutedStoreForID returns the store that actually holds id: the relocated
@@ -102,7 +103,7 @@ func classBindingForID(cityPath, id string) (beads.Store, bool, error) {
 // An error is a read that FAILED, never absence: reading "the binding could not
 // answer" as "the bead is not there" is the root-loss shape this lane exists to
 // prevent. The one error that is not a fault is the one-shot funnel's standing
-// refusal (isStandingStorageRefusal) — a verdict about the CITY's storage
+// refusal (storeref.IsStandingRefusal) — a verdict about the CITY's storage
 // configuration that says nothing about a bead, and a refused city still serves
 // WORK from its work ledger. So for a work-shaped id the refusal establishes
 // nothing and work answers; for an id inside a reserved namespace the refusal IS
@@ -115,7 +116,7 @@ func classRoutedStoreForIDIn(class beads.Store, id string, work beads.Store) (be
 		switch {
 		case errors.Is(err, beads.ErrNotFound):
 			return work, nil
-		case isStandingStorageRefusal(err) && !bdIDIsClassReserved(id):
+		case storeref.IsStandingRefusal(err) && !bdIDIsClassReserved(id):
 			return work, nil
 		default:
 			return nil, fmt.Errorf("reading %q from the relocated class binding: %w", id, err)

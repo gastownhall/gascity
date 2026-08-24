@@ -774,10 +774,10 @@ func openBdByIDClassFrontDoor(cityPath string) (bdByIDClassDoor, bool, error) {
 // itself. There is exactly one implementation of "does this binding hold this
 // id" in the tree that knows about the boot census, and a second answer taken
 // locally would be blind to it — so the answer is asked for where it is known,
-// not recomputed where it isn't. (hookClaimClassRoute.holds, in
-// claim_class_route.go, is the last probe still asking the binding directly and
-// still census-blind; ga-qdt5y.16 tracks it, and it is why this comment does
-// not claim the divergence is closed.)
+// not recomputed where it isn't. hookClaimClassRoute.holds was the last probe
+// still asking the binding directly; ga-qdt5y.16 collapsed it onto the same
+// plan, over a frame it captures once at construction, so there is no longer a
+// second spelling of this judgement anywhere in cmd/gc.
 //
 // The probe is why an id with no reserved prefix is asked about at all: `gc
 // storage migrate` copies the work store's infrastructure slice with its ids
