@@ -28,7 +28,9 @@
 #       and reaching a PlanLeg's .Leg.Store directly. The executor
 #       (ResolveOwner/Union) is the only place leg order and per-leg error policy
 #       are applied; a literal list skips both, and so does a consumer that runs
-#       a plan's legs itself. Zero hits today, so the first one is a violation.
+#       a plan's legs itself. Both shapes have baselined hits, so growth is the
+#       violation; the .Leg.Store row also has an AST twin that sees the same
+#       access split across a line break or wrapped in a parenthesis.
 #       WorkLegsForID is the same idea one level up: a plane that implements
 #       storeref.WorkAxisRouter tells the resolver to use the plane's leg order
 #       instead of its own, so a second implementation is a second answer to the
@@ -60,6 +62,24 @@
 # visible in the diff of a single function, and the AST half additionally
 # catches any new store-list SIGNATURE, which is the shape a genuinely new
 # resolver-bypassing helper takes.
+#
+# WHAT THIS HALF CANNOT SEE AT ALL: four rules live only in the Go half
+# (scripts/residency_boundary_test.go), because each needs a parse tree to
+# separate a reference from a declaration or from prose —
+#   ast:returns-store-list        a new store-list signature, including one
+#                                 spelled as a local type name or hung off a
+#                                 package var as a func value
+#   ast:vocabulary-alias          taking a guarded accessor as a VALUE instead
+#                                 of calling it
+#   ast:plan-leg-store-chain      `.Leg.Store` reached across a line break or
+#                                 through a parenthesis
+#   ast:uncounted-call-spelling   a call whose dot, name and `(` are not on one
+#                                 line, or whose package qualifier was renamed
+#                                 at the import — both invisible to every
+#                                 call-shaped row in the pattern file
+# They ratchet against the SAME baseline file, keyed the same way; this script's
+# --emit-baseline prints only its own rows, which is why regenerating needs all
+# three emitters listed at the top of that baseline.
 #
 # SELF-TEST: `--self-test` proves the guard's own bite on real temp trees (new
 # site fails, marker suppresses, stale baseline fails, fail-closed cases fail).
@@ -94,18 +114,44 @@ baseline_file="$repo_root/scripts/residency-boundary-baseline.txt"
 # Directories the lookup contract governs.
 scan_dirs=(cmd/gc internal/api internal/sling internal/dispatch)
 
-# Genuine exceptions, each with a reason:
-#   residency_topology.go  — the topology constructors themselves (§1.2).
-#   infra_class_migrate.go
-#   cmd_storage.go         — migration and status must enumerate stores BY
-#                            DEFINITION; they are the tools that create topology.
-#   cmd_bd_topology.go     — fork-only work-axis workspace routing, orthogonal
-#                            to class residency.
+# EXEMPTION IS SCOPED TO THE CALL SITE, NOT THE FILE. This list holds one entry,
+# and the four it used to hold are now ordinary baseline rows.
+#
+# The allowlist filters a file BEFORE counting, so nothing inside an exempt file
+# is censused — including a helper that hands the derivation back OUT. A
+# one-line `func launder() map[string]beads.Store { return BeadStores() }` in an
+# exempt file re-exports the enumeration to callers anywhere in the tree: the
+# body is never counted, `launder` is not vocabulary, and both halves pass. The
+# AST half shares the hole, since it skips the same files and so cannot see the
+# store-list result type either.
+#
+# residency_topology.go, internal/api/residency_topology.go, infra_class_migrate.go
+# and cmd_storage.go genuinely do have to enumerate — they are the constructors
+# that BUILD topology and the tools that migrate it — so the hits they turn out
+# to hold between them are pinned in the shrink-only baseline instead: seven,
+# spread over six rows (internal/api/residency_topology.go holds none, and now
+# has to keep holding none). That exempts the calls that exist rather than the
+# files around them, and an eighth is a reviewed baseline change like anywhere
+# else.
+#
+# Three of those seven are the guarded accessors' OWN `func` lines. The census
+# sets the enclosing function from a line and then tests that same line, so a
+# declaration of vocabulary counts as a mention of it. That is not a defect to
+# net out: the row still moves if the declaration is deleted or renamed, which
+# is the movement worth seeing. It does mean "hits" here is mentions, not call
+# sites — the four real call sites are the smaller number.
+#
+# The alias evasion this leaves — taking the accessor as a VALUE rather than
+# calling it, which no value-position grep row can catch without also firing on
+# every mention in a comment — is closed on the AST side, by the
+# ast:vocabulary-alias rule in scripts/residency_boundary_test.go.
+#
+#   cmd_bd_topology.go — fork-only work-axis workspace routing, orthogonal to
+#                        class residency. It stays here because it does not
+#                        exist upstream: it is overlaid downstream, so it can
+#                        have no baseline row to be pinned by, and dropping the
+#                        exemption would break the fork the day it overlays.
 allowlist=(
-	cmd/gc/residency_topology.go
-	internal/api/residency_topology.go
-	cmd/gc/infra_class_migrate.go
-	cmd/gc/cmd_storage.go
 	cmd/gc/cmd_bd_topology.go
 )
 
@@ -224,6 +270,29 @@ run_self_test() {
 	printf 'package main\n\ntype rogueAxis struct{}\n\nfunc (rogueAxis) WorkLegsForID(id string) []storeref.Leg { return nil }\n' >"$tmp/axis-baselined/internal/api/axis.go"
 	expect 0 "a BASELINED WorkAxisRouter must pass" "$tmp/axis-baselined"
 
+	# THE LAUNDERING WRAPPER. cmd_storage.go used to be allowlisted, and an
+	# allowlist filters a file BEFORE counting: a helper written there could hand
+	# the enumeration back out to callers anywhere in the tree with neither half
+	# of the guard seeing it — not the body (not censused), not the name (not
+	# vocabulary), not even the store-list result type (the AST half skipped the
+	# same files). This case exits 0 against the pre-fix script.
+	fixture "$tmp/launder" $'cmd/gc/existing.go\ta\ta:BeadStores\t1\n'
+	printf 'package main\n\nfunc launder() map[string]beads.Store { return BeadStores() }\n' >"$tmp/launder/cmd/gc/cmd_storage.go"
+	expect 1 "a wrapper in a formerly-allowlisted file must be censused" "$tmp/launder"
+
+	# Its control: the same site, pinned, passes — so retiring the exemption
+	# ratchets the calls that must enumerate rather than banning them.
+	fixture "$tmp/launder-baselined" $'cmd/gc/existing.go\ta\ta:BeadStores\t1\ncmd/gc/cmd_storage.go\tlaunder\ta:BeadStores\t1\n'
+	printf 'package main\n\nfunc launder() map[string]beads.Store { return BeadStores() }\n' >"$tmp/launder-baselined/cmd/gc/cmd_storage.go"
+	expect 0 "a BASELINED call in a formerly-allowlisted file must pass" "$tmp/launder-baselined"
+
+	# And the one exemption that survives: cmd_bd_topology.go is overlaid by the
+	# fork and exists in no upstream tree, so it can have no baseline row to be
+	# pinned by. Un-allowlisting it would break the fork the day it overlays.
+	fixture "$tmp/fork" $'cmd/gc/existing.go\ta\ta:BeadStores\t1\n'
+	printf 'package main\n\nfunc workAxis() { _ = BeadStores() }\n' >"$tmp/fork/cmd/gc/cmd_bd_topology.go"
+	expect 0 "the fork-only work-axis router must stay exempt" "$tmp/fork"
+
 	return $rc
 }
 
@@ -259,6 +328,22 @@ is_allowlisted() {
 # site. One awk pass over every scanned file rather than one grep per (file,
 # pattern): the guard runs on every commit, and a quadratic scan is a guard
 # people disable.
+#
+# THE UNION PREFILTER is what keeps that true. `$0 ~ pregex[i]` is a DYNAMIC
+# regex — the pattern is a variable, so gawk compiles it per evaluation and its
+# small cache thrashes when 25 of them rotate. At ~300k lines that is 7.4M
+# compiles and the census took four minutes of pinned CPU, which is exactly the
+# quadratic-scan failure this comment warned about arriving by another route.
+# Testing one combined alternation first means the same variable is compiled on
+# nearly every line (cache hit) and the 25-way loop runs only on the ~0.03% of
+# lines that can match. The union is the alternation of the same rows, so the
+# output is identical by construction — and the baseline is a byte-level golden
+# that proves it: any change in what the loop reports fails the ratchet.
+#
+# node_modules and the dashboard bundle are pruned here and in the Go half. They
+# are not Go source we own — internal/api/dashboardspa's vendored tree holds
+# exactly one .go file, some upstream package's test fixture — and censusing it
+# would let a dependency bump move this repo's baseline.
 census() {
 	local dir
 	local -a present=()
@@ -266,11 +351,13 @@ census() {
 		[[ -d "$repo_root/$dir" ]] && present+=("$repo_root/$dir")
 	done
 	((${#present[@]})) || return 0
-	find "${present[@]}" -type f -name '*.go' ! -name '*_test.go' -print0 |
+	find "${present[@]}" \( -type d \( -name node_modules -o -name dist \) -prune \) -o \
+		-type f -name '*.go' ! -name '*_test.go' -print0 |
 		sort -z |
 		xargs -0 --no-run-if-empty awk -v patfile="$patterns_file" '
 			BEGIN {
 				npat = 0
+				union = ""
 				while ((getline line < patfile) > 0) {
 					if (line ~ /^#/ || line ~ /^[ \t]*$/) continue
 					tab = index(line, "\t")
@@ -278,6 +365,7 @@ census() {
 					npat++
 					pname[npat] = substr(line, 1, tab - 1)
 					pregex[npat] = substr(line, tab + 1)
+					union = (union == "" ? pregex[npat] : union "|" pregex[npat])
 				}
 				close(patfile)
 			}
@@ -294,6 +382,7 @@ census() {
 				}
 				if ($0 ~ /^[ \t]*(\/\/|\*|\/\*)/) next
 				if (index($0, "residency:allow") > 0) next
+				if ($0 !~ union) next
 				for (i = 1; i <= npat; i++)
 					if ($0 ~ pregex[i]) print FILENAME "\t" fn "\t" pname[i]
 			}
@@ -333,9 +422,10 @@ fi
 current=$(census)
 
 if ((emit_baseline)); then
-	printf '%s\n' "# residency-boundary baseline: path <TAB> function <TAB> pattern <TAB> count."
-	printf '%s\n' "# SHRINK ONLY. Regenerate when a migration slice RETIRES sites; growth is a"
-	printf '%s\n' "# new blind reader and the check refuses it. See scripts/check-residency-boundary.sh."
+	printf '%s\n' "# PARTIAL: the grep rows only. The ast: rows come from two go test emitters,"
+	printf '%s\n' "# and the baseline's hand-written header explains every pinned row. Redirecting"
+	printf '%s\n' "# this over scripts/residency-boundary-baseline.txt DESTROYS both. Follow the"
+	printf '%s\n' "# regeneration procedure in that file's header instead."
 	printf '%s\n' "$current"
 	exit 0
 fi
@@ -384,7 +474,7 @@ for key in "${!baseline_count[@]}"; do
 	want=${baseline_count[$key]}
 	have=${current_count[$key]:-0}
 	if ((have < want)); then
-		printf 'RESIDENCY-BOUNDARY: %s: %d sites, baseline %d — the baseline must SHRINK in the same commit that retires a site. Run `scripts/check-residency-boundary.sh --emit-baseline > scripts/residency-boundary-baseline.txt`.\n' "${key//	/ }" "$have" "$want"
+		printf 'RESIDENCY-BOUNDARY: %s: %d sites, baseline %d — the baseline must SHRINK in the same commit that retires a site. Follow the regeneration procedure in the header of scripts/residency-boundary-baseline.txt; do NOT redirect --emit-baseline over that file, it emits this half%s rows only.\n' "${key//	/ }" "$have" "$want" "'"
 		failed=1
 	fi
 done

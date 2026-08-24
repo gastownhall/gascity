@@ -46,13 +46,13 @@ var newAgentWorktreeGitProbe = func(workDir string) agentWorktreeGitProbe {
 func cleanupClosedBeadAgentHomeWorktrees(
 	cityPath string,
 	cfg *config.City,
-	rigBeadStores map[string]beads.Store,
+	rigStores map[string]beads.Store,
 	stderr io.Writer,
 ) int {
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	if cfg == nil || len(rigBeadStores) == 0 {
+	if cfg == nil || len(rigStores) == 0 {
 		return 0
 	}
 
@@ -66,7 +66,7 @@ func cleanupClosedBeadAgentHomeWorktrees(
 	wtRoot := filepath.Join(cityPath, ".gc", "worktrees")
 	cleaned := 0
 
-	for rigName, store := range rigBeadStores {
+	for rigName, store := range rigStores {
 		if store == nil {
 			continue
 		}

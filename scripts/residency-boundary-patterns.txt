@@ -14,6 +14,31 @@
 # counted once, under its own name, and not a second time as a substring of
 # BeadStores().
 #
+# EVERY CALL-SHAPED ROW HERE IS ALSO AN ALIAS ROW. The Go half derives, from
+# these same regexes, the set of names it is a violation to take as a VALUE:
+# `g := BeadStores; g()` and `f(routes.storeFor)` call the accessor without
+# writing the call parenthesis these patterns key on. That rule is
+# ast:vocabulary-alias, it needs a parse tree (a value-position grep would fire
+# on `BeadStores` in prose and on the accessor's own declaration), and it reads
+# this file rather than a second list — so adding a row below extends both the
+# call census and the alias ban, and there is no way to extend one alone.
+# Rows with no call parenthesis (the []beads.Store literal, .Leg.Store, the
+# NudgeQueueIDPrefix constant) are deliberately not alias-guarded: a constant
+# taken by value is a copy, not a second derivation.
+#
+# THE SAME ROWS ALSO FEED ast:uncounted-call-spelling, which watches the calls
+# these regexes cannot see. Every method or qualified row here needs a dot, a
+# name and an open parenthesis on ONE LINE. Two legal spellings break that up and
+# gofmt preserves both: `routes.` at the end of a line with `storeFor(c)` at the
+# start of the next, and a renamed import so the qualifier a row names never
+# appears (`sr.EachLeg(...)` for storeref.EachLeg). Neither is exotic — gofmt
+# writes the first itself on a long chain — so the Go half counts them under
+# their own name rather than letting a line break launder a call. The
+# consequence worth knowing: a method named EachLeg or ClassCandidates on some
+# unrelated receiver will be counted too, because the selector half of a
+# qualified row is guarded on its own. That is the deliberate direction to err
+# in, and `// residency:allow <reason>` is the answer for a real collision.
+#
 # (a) base-enumerator consumption. None of these ever contains a class binding,
 #     so every list built from one is binding-blind by construction.
 a:BeadStores	(^|[^A-Za-z0-9_])BeadStores\(\)
@@ -48,8 +73,12 @@ b:storeref.ClassCandidates	(^|[^A-Za-z0-9_])storeref\.ClassCandidates\(
 # (c) hand-rolled probe lists and plan disassembly. The executor
 #     (ResolveOwner/Union) is the only place leg order and per-leg error policy
 #     are applied; a literal list skips both, and so does a consumer that runs a
-#     resolved plan's legs itself. plan-leg-store-access has zero hits today, so
-#     the first one is a violation.
+#     resolved plan's legs itself.
+#
+#     plan-leg-store-access is a TEXT rule and sees only the chain written on one
+#     line. Its AST twin, ast:plan-leg-store-chain, sees the same access split
+#     across a line break or a parenthesis; the two overlap on purpose, which is
+#     why cliSoleClassBinding carries a row under each.
 #
 #     storeref.EachLeg is the SANCTIONED enumeration seam — it hands over the
 #     order and the policy, which is what a hand-rolled list loses — but it is

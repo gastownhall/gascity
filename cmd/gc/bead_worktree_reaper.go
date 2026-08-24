@@ -94,7 +94,7 @@ type reapReport struct {
 func reapClosedBeadWorktrees(
 	cityPath string,
 	cfg *config.City,
-	rigBeadStores map[string]beads.Store,
+	rigStores map[string]beads.Store,
 	liveSessionDirs []string,
 	dryRun bool,
 	rec events.Recorder,
@@ -108,7 +108,7 @@ func reapClosedBeadWorktrees(
 	if rec == nil {
 		rec = events.Discard
 	}
-	if cfg == nil || len(rigBeadStores) == 0 {
+	if cfg == nil || len(rigStores) == 0 {
 		return report
 	}
 
@@ -136,7 +136,7 @@ func reapClosedBeadWorktrees(
 
 	wtRoot := filepath.Join(cityPath, ".gc", "worktrees")
 
-	for rigName, store := range rigBeadStores {
+	for rigName, store := range rigStores {
 		if store == nil {
 			continue
 		}
