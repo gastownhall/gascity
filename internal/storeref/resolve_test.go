@@ -236,11 +236,11 @@ func TestSplitTopologyPerformsAtLeastOneProbe(t *testing.T) {
 func TestResidenceProbeRetirementFlip(t *testing.T) {
 	retired := mustPlan(t, ByID{ID: workShapedID}, newT6().topo)
 	if len(retired.Legs) != 1 || retired.Legs[0].Role != RoleWorkFallback {
-		t.Fatalf("mint-truthful binding with zero open relics still probes: %s", retired)
+		t.Fatalf("mint-truthful binding with no legacy residents still probes: %s", retired)
 	}
 	present := mustPlan(t, ByID{ID: workShapedID}, newT6Relics().topo)
 	if len(present.Legs) != 2 || present.Legs[0].Role != RoleResidenceProbe {
-		t.Fatalf("mint-truthful binding with OPEN relics dropped the probe: %s", present)
+		t.Fatalf("mint-truthful binding holding legacy residents dropped the probe: %s", present)
 	}
 }
 

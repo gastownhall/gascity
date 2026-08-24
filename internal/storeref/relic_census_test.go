@@ -65,8 +65,8 @@ func TestOpenLegacyResidentsFindsAMigratedID(t *testing.T) {
 	if len(relics) != 1 || relics[0] != "ga-relic" {
 		t.Fatalf("census reported %v, want just the work-shaped id the migration carried across", relics)
 	}
-	if !HasOpenLegacyResidents(censusBinding(store)) {
-		t.Error("a binding holding an open relic reported none; its probe would retire and the relic would be unreadable")
+	if !HasLegacyResidents(censusBinding(store)) {
+		t.Error("a binding holding a relic reported none; its probe would retire and the relic would be unreadable")
 	}
 }
 
@@ -87,15 +87,19 @@ func TestOpenLegacyResidentsIgnoresEveryNamespaceTheBindingHolds(t *testing.T) {
 	if len(relics) != 0 {
 		t.Fatalf("census reported %v as relics; every one of those namespaces is one this binding declares", relics)
 	}
-	if HasOpenLegacyResidents(censusBinding(store)) {
+	if HasLegacyResidents(censusBinding(store)) {
 		t.Error("a binding holding only its own ids reported relics")
 	}
 }
 
+// The DRAIN report stays open-only, and this is the row that keeps it that way.
+//
+// OpenLegacyResidents is now only `gc storage status`'s count — the number an
+// operator watches fall as the carried-across work closes. Retirement moved off
+// it (see TestAClosedRelicKeepsTheProbe). Widening this one to match the
+// verdict would be a natural-looking tidy-up that silently replaces a draining
+// count with one that can never fall, and nothing else in the tree would fail.
 func TestOpenLegacyResidentsIgnoresAClosedRelic(t *testing.T) {
-	// The retirement blocker is a relic that can still be READ BY ID, and the
-	// operational story is watching that population drain as the beads close.
-	// Counting closed rows would pin the probe to a city's whole history.
 	store := newCensusStore()
 	store.seedBead(t, "ga-done")
 	if err := store.Close("ga-done"); err != nil {
@@ -107,12 +111,69 @@ func TestOpenLegacyResidentsIgnoresAClosedRelic(t *testing.T) {
 		t.Fatalf("census: %v", err)
 	}
 	if len(relics) != 0 {
-		t.Fatalf("census reported %v; a closed relic is not a retirement blocker", relics)
+		t.Fatalf("the drain count reported %v; a closed relic is drained, and an operator watching this number must see it reach zero", relics)
+	}
+}
+
+// The soundness row for ga-qdt5y.19, and the one that fails against the rule
+// this replaced.
+//
+// Closing a relic does not make it unreachable. `gc storage migrate` never
+// deletes the work store's pre-migration copy, so if closing the last relic
+// retired the probe, that id's next read would fall to the work axis and be
+// served from a frozen copy that reads OPEN with pre-migration fields — a
+// lifecycle regression that never heals, on `gc bd show`, `gc beads show`,
+// `gc convoy` and the API State surface alike.
+//
+// Mutation that must make this fire: legacyResidents' IncludeClosed back to
+// false, or the verdict pointed at OpenLegacyResidents.
+func TestAClosedRelicKeepsTheProbe(t *testing.T) {
+	store := newCensusStore()
+	store.seedBead(t, "ga-done")
+	if err := store.Close("ga-done"); err != nil {
+		t.Fatalf("closing the relic: %v", err)
+	}
+
+	relics, err := LegacyResidents(store, infraPrefixes)
+	if err != nil {
+		t.Fatalf("census: %v", err)
+	}
+	if len(relics) != 1 {
+		t.Fatalf("the census reported %v, want the closed relic; it is still read, reopened and claimed by id, and only this binding holds the live copy", relics)
+	}
+	if !HasLegacyResidents(censusBinding(store)) {
+		t.Error("a binding whose only relic has closed was certified clean; the probe retires and every read of that id is answered by the migration's frozen copy")
+	}
+}
+
+// The must-be-silent counterpart. Widening the census to closed beads must
+// widen only the CLOSED half — the namespace filter still decides what counts.
+//
+// Without this row, a census that dropped the namespace check on closed rows
+// would pass everything above: no other fixture holds a closed IN-namespace
+// bead at census time, so the binding's own retired infrastructure would read
+// as a relic and pin the probe on every converged city forever.
+func TestAClosedInNamespaceBeadIsNotARelic(t *testing.T) {
+	store := newCensusStore()
+	store.seedBead(t, "gcg-1")
+	if err := store.Close("gcg-1"); err != nil {
+		t.Fatalf("closing the binding's own bead: %v", err)
+	}
+
+	relics, err := LegacyResidents(store, infraPrefixes)
+	if err != nil {
+		t.Fatalf("census: %v", err)
+	}
+	if len(relics) != 0 {
+		t.Fatalf("the census reported %v; a closed bead inside the binding's own namespace is ordinary retired infrastructure, findable by prefix, and blocks nothing", relics)
+	}
+	if HasLegacyResidents(censusBinding(store)) {
+		t.Error("a binding holding only its own closed beads kept its probe; retirement would never fire on any city that has ever closed an infrastructure bead")
 	}
 }
 
 func TestOpenLegacyResidentsReportsAnEmptyBindingClean(t *testing.T) {
-	if HasOpenLegacyResidents(censusBinding(newCensusStore())) {
+	if HasLegacyResidents(censusBinding(newCensusStore())) {
 		t.Error("an empty binding reported relics; nothing is what a fresh born-split city holds")
 	}
 }
@@ -126,7 +187,7 @@ func TestUnreadableBindingKeepsItsProbe(t *testing.T) {
 	if _, err := OpenLegacyResidents(store, infraPrefixes); err == nil {
 		t.Fatal("a failing List produced no census error; the caller cannot tell a clean binding from an unread one")
 	}
-	if !HasOpenLegacyResidents(censusBinding(store)) {
+	if !HasLegacyResidents(censusBinding(store)) {
 		t.Error("an unreadable binding was reported clean; a census that cannot read must not retire a probe")
 	}
 }
@@ -138,7 +199,7 @@ func TestRefusedBindingKeepsItsProbe(t *testing.T) {
 	store := newCensusStore()
 	store.listErr = newRefusal()
 
-	if !HasOpenLegacyResidents(censusBinding(store)) {
+	if !HasLegacyResidents(censusBinding(store)) {
 		t.Error("a refused city's binding was reported clean")
 	}
 }
@@ -147,7 +208,7 @@ func TestCensusWithoutAStoreKeepsItsProbe(t *testing.T) {
 	if _, err := OpenLegacyResidents(nil, infraPrefixes); err == nil {
 		t.Fatal("censusing a nil store succeeded")
 	}
-	if !HasOpenLegacyResidents(ClassBinding{Classes: infraClasses, Prefixes: infraPrefixes}) {
+	if !HasLegacyResidents(ClassBinding{Classes: infraClasses, Prefixes: infraPrefixes}) {
 		t.Error("a binding with no store was reported clean")
 	}
 }
@@ -178,7 +239,7 @@ func TestCensusReadsOnlyTheBinding(t *testing.T) {
 	work := newCensusStore()
 	work.seedBead(t, "ga-1")
 
-	if HasOpenLegacyResidents(ClassBinding{
+	if HasLegacyResidents(ClassBinding{
 		Classes:  []coordclass.Class{coordclass.ClassGraph},
 		Prefixes: []string{"gcg"},
 		Leg:      Leg{Ref: ClassRef([]coordclass.Class{coordclass.ClassGraph}), Store: binding},

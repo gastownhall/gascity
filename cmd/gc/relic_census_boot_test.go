@@ -210,6 +210,92 @@ func TestBootGateKeepsTheProbeForACityThatMigratedWork(t *testing.T) {
 	}
 }
 
+// The ga-qdt5y.19 incident shape, at the boot gate: the last relic CLOSES, and
+// the probe must not retire.
+//
+// Closing a relic drains it from the operator's report and changes nothing
+// about where it lives. `gc storage migrate` never deletes the work store's
+// pre-migration copy, so if this city retired its probe the relic's own id
+// would resolve to that copy — OPEN, with pre-migration fields, forever, with
+// no error anywhere. A `show` would report a bead completed weeks ago as ready
+// work, and an `update --claim` would claim it.
+//
+// This row fails against the open-only census that shipped before .19, which is
+// the point: nothing in the tree closed a relic and then asked about it, so the
+// bug lived in the gap between the fixtures that seed OPEN relics and the ones
+// that hold none at all.
+func TestBootCensusKeepsTheProbeForAClosedRelic(t *testing.T) {
+	cityPath, cfg, source, _ := convergedInfraCity(t)
+	carried := infraStoreFingerprint(t, source)
+	if len(carried) != 1 {
+		t.Fatalf("the converged fixture carried %d beads across, want exactly 1 so closing it empties the OPEN population outright", len(carried))
+	}
+
+	var stderr bytes.Buffer
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, &stderr)
+	if err != nil {
+		t.Fatalf("booting a converged city: %v (stderr: %s)", err, stderr.String())
+	}
+	t.Cleanup(func() { _ = routes.close() })
+
+	binding := soleBinding(t, routes)
+	if err := binding.Leg.Store.Close(carried[0]); err != nil {
+		t.Fatalf("closing the carried-across bead %s in the binding it lives in: %v", carried[0], err)
+	}
+	if open, err := storeref.OpenLegacyResidents(binding.Leg.Store, config.AllReservedClassPrefixes()); err != nil || len(open) != 0 {
+		t.Fatalf("after the close the binding still reports %v open relics (err %v); this row cannot distinguish a widened census from an undrained one", open, err)
+	}
+	censusBindingRelics(routes)
+
+	if !soleBinding(t, routes).HasLegacyResidents {
+		t.Fatal("the boot certified a binding clean because its only relic had CLOSED; the probe retires and every read of that id is answered by the migration's frozen open copy")
+	}
+	if !bindingLegRead(t, routes, carried[0]) {
+		t.Errorf("the plan for %s no longer reads the binding holding its live record", carried[0])
+	}
+}
+
+// The divergence pin: the drain count kept its OPEN semantics when the
+// retirement verdict widened past them.
+//
+// These are now two different questions over one binding — "how much is left to
+// drain" (open) and "can this binding hold this id" (open or closed) — and the
+// silent failure is someone tidying them back into one. Pointing
+// reportBindingRelics at the widened list would print a count that can never
+// fall, turning an operator's drain gauge into a constant; pointing the verdict
+// back at the open list is the .19 bug. This row holds both ends apart on one
+// city at one moment.
+func TestClosingTheLastRelicDrainsTheCountAndKeepsTheProbe(t *testing.T) {
+	cityPath, cfg, source, _ := convergedInfraCity(t)
+	carried := infraStoreFingerprint(t, source)
+	if len(carried) != 1 {
+		t.Fatalf("the converged fixture carried %d beads across, want exactly 1", len(carried))
+	}
+	var bootErr bytes.Buffer
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, &bootErr)
+	if err != nil {
+		t.Fatalf("booting a converged city: %v (stderr: %s)", err, bootErr.String())
+	}
+	t.Cleanup(func() { _ = routes.close() })
+	if err := soleBinding(t, routes).Leg.Store.Close(carried[0]); err != nil {
+		t.Fatalf("closing the carried-across bead %s: %v", carried[0], err)
+	}
+	censusBindingRelics(routes)
+	stubInfraControllerPing(t, 0)
+
+	var stdout, stderr bytes.Buffer
+	if code := doStorageStatus(storageOperatorRequest{CityPath: cityPath, Cfg: cfg}, &stdout, &stderr); code != 0 {
+		t.Fatalf("status exited %d on a drained city (stdout: %s, stderr: %s)", code, stdout.String(), stderr.String())
+	}
+	if got := stdout.String(); !strings.Contains(got, "open relics: 0") {
+		t.Errorf("the drain count did not reach zero after its last relic closed, so an operator watching it never sees the drain land:\n%s", got)
+	}
+
+	if !soleBinding(t, routes).HasLegacyResidents {
+		t.Error("the drained city retired its residence probe; the relic is closed, not gone, and its id still resolves to the binding")
+	}
+}
+
 // The operator's view of the same count.
 //
 // The probe retires on its own, silently, on the day the last relic closes.
@@ -290,23 +376,21 @@ func TestSeedingARelicLeavesTheBindingCensusedAsRelicBearing(t *testing.T) {
 	}
 }
 
-// The `gc bd` by-id door reaches a relic even where storeref has retired the
-// probe, and that divergence is the point of this row.
+// The `gc bd` by-id door reaches a relic the binding holds. That is the property
+// this row has always pinned, and it now pins it against ONE probe.
 //
-// There are TWO residence probes in the tree and they do not agree about
-// retirement. storeref.planByID skips a binding whose census came back clean
-// (internal/storeref/resolve.go). bdByIDClassDoor.resolve asks the binding for
-// every id unconditionally and has never heard of the census
-// (cmd/gc/cmd_bd_by_id.go). On a real city the two cannot disagree — a binding
-// holding a relic is never certified clean — so this is not a correctness bug
-// today. It is two answers to one question, which is the shape this epic exists
-// to collapse, and it means the retirement the census was built to deliver is
-// unrealized on the highest-traffic one-shot path. ga-qdt5y.18 tracks it.
+// There used to be two. storeref.planByID skipped a binding whose census came
+// back clean; bdByIDClassDoor.resolve asked the binding for every id
+// unconditionally and had never heard of the census. ga-qdt5y.18 collapsed the
+// door onto the plan, so the census verdict is now load-bearing on the CLI's
+// hottest one-shot path rather than advisory to it: get retirement wrong and
+// this read is the one that loses the bead.
 //
-// What this row pins is the property that must survive the collapse either way:
-// a read never loses a bead the binding holds. Whichever probe the door ends up
-// using, a relic stays reachable.
-func TestBdByIDDoorReachesARelicTheStorerefPlanWouldSkip(t *testing.T) {
+// Which is why the seed here must recensus. classResidentWorkShapedBead does —
+// see the warning on it — and without that the binding would still read as
+// clean, the plan would retire the probe, and this row would fail for the
+// fixture's reason instead of the code's.
+func TestBdByIDDoorReachesASeededRelic(t *testing.T) {
 	cityPath, _ := foreignProviderCity(t)
 	relic, _ := classResidentWorkShapedBead(t, cityPath, "gc-relic1", "an orphaned patrol root")
 
@@ -323,5 +407,46 @@ func TestBdByIDDoorReachesARelicTheStorerefPlanWouldSkip(t *testing.T) {
 	}
 	if !resolution.Found {
 		t.Errorf("the door reported %s absent; the binding holds it, and a read that loses a relic is the root-loss shape this lane exists to prevent", relic.ID)
+	}
+}
+
+// The same door, one lifecycle step on, against the REAL census rather than a
+// stubbed verdict — the ga-qdt5y.19 incident at the surface an operator feels.
+//
+// TestBdByIDDoorSkipsTheProbeOnACensusCleanBinding pins that the door consumes
+// the plan's retirement, and it does so from a hand-written verdict, so it is
+// silent on whether the census produces the right one. This row lets the census
+// run for itself: the binding's only relic is CLOSED, which drains the operator
+// count to zero and changes nothing about where the bead lives. Under the
+// open-only rule the recensus certifies the binding clean, the plan retires the
+// probe, and `gc bd show` answers from the work store's frozen pre-migration
+// copy — reporting a bead that was closed a moment ago as open, forever.
+func TestBdByIDDoorReachesAClosedRelic(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	relic, classStore := classResidentWorkShapedBead(t, cityPath, "gc-relic1", "an orphaned patrol root")
+	if err := classStore.Close(relic.ID); err != nil {
+		t.Fatalf("closing the relic in the binding it lives in: %v", err)
+	}
+	if open, err := storeref.OpenLegacyResidents(classStore, config.AllReservedClassPrefixes()); err != nil || len(open) != 0 {
+		t.Fatalf("the binding still reports %v open relics after the close (err %v); this row cannot tell a widened census from an undrained one", open, err)
+	}
+	recensusAfterSeedingARelic(t, cityPath)
+
+	door, relocated, err := openBdByIDClassFrontDoor(cityPath)
+	if err != nil {
+		t.Fatalf("opening the by-id class front door: %v", err)
+	}
+	if !relocated {
+		t.Fatal("the fixture city resolved no class binding, so there is no door to test")
+	}
+	resolution, err := door.resolve(relic.ID)
+	if err != nil {
+		t.Fatalf("the door failed to decide ownership of %s: %v", relic.ID, err)
+	}
+	if !resolution.Found {
+		t.Fatalf("the door lost %s the moment it closed; the binding still holds the only live record, and the work store's answer is a frozen copy that reads open forever", relic.ID)
+	}
+	if resolution.Bead.Status != "closed" {
+		t.Errorf("the door answered with a %q record for a bead that was just closed in the binding; that is the migration's retained pre-migration copy, not the live one", resolution.Bead.Status)
 	}
 }

@@ -171,6 +171,13 @@ func TestBdByIDRigRuleDoesNotBlameTheFlagForAnIDThatDoesNotExist(t *testing.T) {
 // keeps the rule from becoming "any --rig is refused on a split city". A rig id
 // under --rig is exactly what the flag is for, the class store never held it,
 // and it must reach bd unchanged.
+//
+// Note what this does NOT prove. The fixture's binding is census-clean, so the
+// residence probe is retired and the passthrough here is a probe that never
+// ran, not a probe that ran and missed. The probed-miss half lives in
+// TestBdByIDWorkIDAbsentFromARelicBearingBindingStillPassesThrough, which seeds
+// a relic to keep the probe alive; without that row a probe that had become an
+// unconditional ROUTE would leave this one green.
 func TestBdByIDRigScopeLeavesWorkStoreIDsToThePassthrough(t *testing.T) {
 	cityPath, _ := foreignProviderCity(t)
 	var stdout, stderr bytes.Buffer

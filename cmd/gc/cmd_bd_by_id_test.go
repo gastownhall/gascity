@@ -11,6 +11,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 
@@ -21,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/storebinding"
 	"github.com/gastownhall/gascity/internal/storebinding/beadsworkspace"
 	sqlitebinding "github.com/gastownhall/gascity/internal/storebinding/sqlite"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/storeref/storereftest"
 )
 
@@ -86,8 +89,10 @@ func (p configRefEngineProvider) BindingLocation(spec storebinding.BindingSpec) 
 }
 
 // writeForeignProviderCityTOML writes a city whose whole infrastructure split is
-// served by a foreign provider, in the config-reference spelling.
-func writeForeignProviderCityTOML(t *testing.T, cityPath, provider, ref string) {
+// served by a foreign provider, in the config-reference spelling. The provider
+// varies across rows; the binding name and the config_ref it resolves do not,
+// so they stay in the template rather than becoming parameters no caller moves.
+func writeForeignProviderCityTOML(t *testing.T, cityPath, provider string) {
 	t.Helper()
 	body := fmt.Sprintf(`[workspace]
 name = "by-id-city"
@@ -102,8 +107,8 @@ nudges = "infra"
 
 [storage.bindings.infra]
 provider = %q
-config_ref = %q
-`, config.StorageWorkBinding, provider, ref)
+config_ref = "infra"
+`, config.StorageWorkBinding, provider)
 	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(body), 0o644); err != nil {
 		t.Fatalf("writing city.toml: %v", err)
 	}
@@ -137,7 +142,7 @@ func foreignProviderCity(t *testing.T) (cityPath string, classStore beads.Store)
 	t.Helper()
 	clearGCEnv(t)
 	cityPath = t.TempDir()
-	writeForeignProviderCityTOML(t, cityPath, string(configRefEngineProviderID), "infra")
+	writeForeignProviderCityTOML(t, cityPath, string(configRefEngineProviderID))
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_CITY", cityPath)
 	registerConfigRefEngineProvider(t)
@@ -460,6 +465,12 @@ func TestBdByIDReservedPrefixAbsenceIsNotAFallThrough(t *testing.T) {
 // Deciding ownership by prefix alone would send exactly those reads back to the
 // ledger they were moved off — and they are the beads a migrated city has the
 // most of, because every one of them predates the split.
+//
+// The probe this pins is storeref's, and storeref keeps it only while the boot
+// census still reports relics in the binding. classResidentWorkShapedBead seeds
+// one and recensuses, so the probe is kept here on purpose. Retire it wrongly —
+// drop the relic half of ClassBinding.probeRetired — and this row is the first
+// to say so.
 func TestBdByIDRoutesAWorkShapedIDResidentInTheClassBinding(t *testing.T) {
 	cityPath, _ := foreignProviderCity(t)
 	created, _ := classResidentWorkShapedBead(t, cityPath, "demo-premigration", "carried across by the migration")
@@ -573,6 +584,13 @@ func TestBdByIDShowRendersTheWholeRecord(t *testing.T) {
 // TestBdByIDLeavesWorkStoreIDsToThePassthrough is the other half of the same
 // rule. An ordinary work id the class store has never seen is still bd's to
 // answer, and the passthrough answers it byte-identically.
+//
+// The city here is relic-free, so the plan has RETIRED this binding's probe and
+// the passthrough is reached without reading the class store at all. That makes
+// this row a pin on the retired path, not on a probed miss — a probed miss is
+// its own row, TestBdByIDWorkIDAbsentFromARelicBearingBindingStillPassesThrough,
+// which seeds a relic first so the probe is kept and then misses on it. Read the
+// two together: apart, either one passes for the wrong reason.
 func TestBdByIDLeavesWorkStoreIDsToThePassthrough(t *testing.T) {
 	cityPath, _ := foreignProviderCity(t)
 
@@ -642,7 +660,7 @@ func TestBdByIDRefusesAnUnservedVerbOnAClassOwnedBead(t *testing.T) {
 func TestBdByIDRefusesRatherThanFallsThroughWhenTheWorkspaceIsNotThere(t *testing.T) {
 	clearGCEnv(t)
 	cityPath := t.TempDir()
-	writeForeignProviderCityTOML(t, cityPath, string(beadsworkspace.ProviderID), "infra")
+	writeForeignProviderCityTOML(t, cityPath, string(beadsworkspace.ProviderID))
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_CITY", cityPath)
 	stubInfraMigrationSource(t)
@@ -834,6 +852,49 @@ func TestBdByIDSurfaceResolvesOneStoreNotAProviderPerOperation(t *testing.T) {
 		if counts[replaced] != 0 {
 			t.Errorf("%s calls %s %d time(s); the by-ID surface resolves its binding through cliSoleClassBinding alone", file, replaced, counts[replaced])
 		}
+	}
+	// One residence probe, and it is the shared one. A second answer to "does
+	// this binding hold this id" is exactly what this surface used to carry —
+	// its own unconditional Get, which never learned the boot census and so kept
+	// probing bindings the plan had retired. A raw count of Get calls cannot pin
+	// this (the claim and update paths legitimately re-read the resolved bead),
+	// so the pin is on the seam.
+	if counts["cliByIDBindingOwner"] != 1 {
+		t.Errorf("%s calls cliByIDBindingOwner %d time(s), want exactly 1: residence is decided by storeref's plan, once, not by a probe this file keeps of its own", file, counts["cliByIDBindingOwner"])
+	}
+}
+
+// TestBdByIDReservedPrefixSetsAgreeAcrossTheTwoReaders pins the one thing the
+// collapse onto storeref made load-bearing between two packages.
+//
+// Two derivations of "is this id reserved" now meet inside one resolve. This
+// file's bdIDIsClassReserved reads config.AllReservedClassPrefixes and sets the
+// Reserved bit, which alone makes bdByIDResolution.Owned true — a reserved id
+// with no row is answered here rather than passed through, because it has
+// nowhere else to live. storeref's ClassBinding.coversID reads
+// ReservedPrefixesFor(binding.Classes) and decides whether the id gets an
+// authority leg or the residence-probe tail.
+//
+// Let those sets drift and the failure is silent and one-directional: a prefix
+// this file calls reserved but no binding covers gets planned as work-shaped —
+// probes, then the work axis — while Owned still swears the door owns it. The
+// door then reports absent for an id the work store may well hold, and no row
+// in this file would notice, because both halves are individually consistent.
+//
+// The pin is at the source rather than over a fixture's bindings on purpose: a
+// fixture proves the sets agree for the classes that fixture happens to bind,
+// which is the subset least likely to drift.
+func TestBdByIDReservedPrefixSetsAgreeAcrossTheTwoReaders(t *testing.T) {
+	fromConfig := append([]string(nil), config.AllReservedClassPrefixes()...)
+	fromStoreref := append([]string(nil), storeref.ReservedPrefixesFor(coordclass.Classes())...)
+	sort.Strings(fromConfig)
+	sort.Strings(fromStoreref)
+
+	if !slices.Equal(fromConfig, fromStoreref) {
+		t.Errorf("the two reserved-prefix readers disagree:\n  bdIDIsClassReserved (config.AllReservedClassPrefixes): %v\n  coversID (storeref.ReservedPrefixesFor over every class): %v\nan id in the first set but not the second is claimed by this door and planned as work-shaped, so it is reported absent instead of passed through", fromConfig, fromStoreref)
+	}
+	if len(fromConfig) == 0 {
+		t.Fatal("no reserved prefixes at all, so the comparison above is vacuous and would pass against any drift")
 	}
 }
 
@@ -1160,6 +1221,15 @@ func classResidentWorkShapedBead(t *testing.T, cityPath, id, title string) (bead
 // migrationSeed writes a bead into a binding the way `gc storage migrate` does:
 // through the store's foreign-id create, which keeps a preserved id that the
 // ordinary create fences out.
+//
+// It does NOT recensus, and on its own that makes it a trap. The boot census is
+// taken when the funnel opens a binding, so a bead planted afterwards leaves the
+// binding reading as relic-free — and since ga-qdt5y.18 the `gc bd` by-id door
+// takes that verdict as permission to skip the binding entirely. A row that
+// seeds through here and then expects a read to reach the bead is asserting
+// against a verdict that predates it, and will pass or fail for the fixture's
+// reason rather than the code's. Call classResidentWorkShapedBead, which seeds
+// and recensuses as one step, unless the staleness is what you are pinning.
 func migrationSeed(store beads.Store, b beads.Bead) (beads.Bead, error) {
 	creator, ok := store.(beads.ForeignIDCreator)
 	if !ok {
@@ -1221,6 +1291,11 @@ func TestBdCloseServesClassResidentWorkPrefixedBead(t *testing.T) {
 // DIFFERENTLY: T1 asserts the door answered, this asserts the passthrough is
 // still reached. A residence probe that turned into an unconditional route to
 // the binding would pass T1 and fail here.
+//
+// The city is relic-free, so the probe is retired before this id is ever asked
+// about — the passthrough here is reached without a read, the same shape as
+// TestBdByIDLeavesWorkStoreIDsToThePassthrough. The probed-miss half of the
+// control lives in TestBdByIDWorkIDAbsentFromARelicBearingBindingStillPassesThrough.
 func TestBdClosePrefixStoreBeadKeepsPassthrough(t *testing.T) {
 	cityPath, classStore := foreignProviderCity(t)
 	normal, err := workStoreFor(t, cityPath).Create(beads.Bead{Title: "an ordinary work bead", Type: "task"})
@@ -1900,6 +1975,280 @@ func stubClassBindingStore(t *testing.T, cityPath string, store beads.Store) {
 			routes.stores[class] = previous
 		}
 	})
+}
+
+// countingClassStore is a real class store that records how many times it was
+// asked for a bead by id.
+//
+// The counter is what makes probe RETIREMENT observable. Retirement's whole
+// effect is a read that does not happen, and a read that does not happen leaves
+// no trace in stdout, in stderr, or in an exit code — so a row asserting on the
+// answer alone passes identically whether the probe ran or not. Pointer-typed
+// because the count must survive being stored as an interface value in the
+// routes map and read back here.
+//
+// IDPrefix is delegated explicitly rather than promoted: beads.Store does not
+// carry it, so embedding the interface would hide the wrapped store's
+// declaration and the binding's mint bit would read false — which keeps the
+// probe, which is the opposite of what a retirement row needs.
+type countingClassStore struct {
+	beads.Store
+	gets int
+}
+
+func (s *countingClassStore) Get(id string) (beads.Bead, error) {
+	s.gets++
+	return s.Store.Get(id)
+}
+
+func (s *countingClassStore) IDPrefix() string {
+	declaring, ok := s.Store.(storeref.HasIDPrefix)
+	if !ok {
+		return ""
+	}
+	return declaring.IDPrefix()
+}
+
+// installCountedClassBinding swaps this city's class stores for a counting
+// wrapper AND restates the census verdict for it, returning the counter.
+//
+// Both halves, because the verdict is keyed by store identity and the swap
+// installs a store the census never saw. relicFree=true is the certified-clean
+// verdict; leaving the key absent means UNKNOWN, which reads as "assume relics"
+// and keeps the probe — so a row that took only the counter would be asserting
+// on the un-retired path while claiming to test retirement. That is why this is
+// not named for the counting alone.
+func installCountedClassBinding(t *testing.T, cityPath string, relicFree bool) *countingClassStore {
+	t.Helper()
+	routes := cliStorageRoutes(cityPath)
+	if routes == nil {
+		t.Fatal("the city resolved no routes to count")
+	}
+	var counter *countingClassStore
+	restore := make(map[coordclass.Class]beads.Store, len(routes.stores))
+	for class, previous := range routes.stores {
+		restore[class] = previous
+		if counter == nil {
+			counter = &countingClassStore{Store: previous}
+		}
+		routes.stores[class] = counter
+	}
+	if counter == nil {
+		t.Fatal("the city relocated no class store to count")
+	}
+	previousRelics := routes.relics
+	routes.relics = map[beads.Store]bool{counter: !relicFree}
+	dropDerivedResidencyMemo(t, cityPath)
+	t.Cleanup(func() {
+		routes.relics = previousRelics
+		for class, previous := range restore {
+			routes.stores[class] = previous
+		}
+	})
+
+	// Prove the swap landed where the door will look, on the door's own
+	// derivation. Everything above edits routes in place; the by-id path reads
+	// bindings back through cliResidencyBindings, and if that grouping resolves
+	// to anything other than this counter — a wrapper re-applied downstream, a
+	// second binding the fixture grew, a memo that outlived the drop — the
+	// caller's read count stays at whatever it was initialized to and every
+	// count assertion built on it reads as "no reads happened". That is the
+	// silent direction: a retirement row would pass while proving nothing.
+	bindings, err := cliResidencyBindings(cityPath)
+	if err != nil {
+		t.Fatalf("re-deriving the bindings the by-id door will use: %v", err)
+	}
+	if len(bindings) != 1 {
+		t.Fatalf("the counted city derives %d bindings, want the one this fixture serves; a count taken from one of several says nothing about the others", len(bindings))
+	}
+	if bindings[0].Leg.Store != beads.Store(counter) {
+		t.Fatalf("the door's binding resolves to %T, not the installed counter; the reads this row measures are happening somewhere it cannot see", bindings[0].Leg.Store)
+	}
+	if bindings[0].HasLegacyResidents == relicFree {
+		t.Fatalf("the binding reads HasLegacyResidents=%t for a relicFree=%t fixture; the restated census verdict did not reach the derivation, so this row is exercising the opposite tier from the one it names", bindings[0].HasLegacyResidents, relicFree)
+	}
+	return counter
+}
+
+// TestBdByIDDoorSkipsTheProbeOnACensusCleanBinding is the saving this whole
+// collapse was for, asserted as work that does not happen.
+//
+// The census exists to retire the residence probe on a binding it has proved
+// holds no relic, and `gc bd show|close|update` is the highest-traffic by-id
+// path there is. Before the door moved onto storeref it probed unconditionally,
+// so every one of those invocations on a converged, relic-free city paid a
+// binding read that the shared plan would have skipped —
+// TestBootCensusRetiresTheProbeOnACleanBinding and
+// TestCLIEmissionKeepsTheCensusVerdict both asserted the saving and neither
+// covered this door, so both stayed green while it was not taken.
+//
+// Asserted on the read COUNT because retirement has no other observable: the
+// answer is a passthrough either way.
+func TestBdByIDDoorSkipsTheProbeOnACensusCleanBinding(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	counter := installCountedClassBinding(t, cityPath, true)
+
+	var stdout, stderr bytes.Buffer
+	if code, handled := maybeRouteBdByID(cityPath, "", []string{"show", "gc-abc123"}, &stdout, &stderr); handled {
+		t.Fatalf("a work-store id was answered by the class door (exit %d): %s%s", code, stdout.String(), stderr.String())
+	}
+	if counter.gets != 0 {
+		t.Errorf("the door read the class binding %d time(s) for a work-shaped id on a census-clean binding; the retirement the census was taken for is not being taken", counter.gets)
+	}
+}
+
+// TestBdByIDDoorKeepsTheAuthorityLegOnACensusCleanBinding is the must-be-silent
+// counterpart, and it is what stops the row above from being satisfied by a
+// door that stopped reading altogether.
+//
+// Retirement is a rule about the RESIDENCE PROBE — the leg that exists only
+// because a migration preserved ids. The authority leg, for an id inside a
+// reserved namespace, is never retired by any census: that store is the sole
+// minter of the namespace, so it is the only thing that can answer, and a clean
+// census says nothing about whether it holds this particular bead.
+func TestBdByIDDoorKeepsTheAuthorityLegOnACensusCleanBinding(t *testing.T) {
+	cityPath, classStore := foreignProviderCity(t)
+	held := mustCreateClassBead(t, classStore, beads.Bead{Title: "held by the clean binding"})
+	counter := installCountedClassBinding(t, cityPath, true)
+
+	var stdout, stderr bytes.Buffer
+	code, handled := maybeRouteBdByID(cityPath, "", []string{"show", held.ID}, &stdout, &stderr)
+	if !handled {
+		t.Fatal("a reserved-prefix id fell through to the bd subprocess on a census-clean binding")
+	}
+	if code != 0 {
+		t.Fatalf("reading a bead the clean binding holds exited %d: %s%s", code, stdout.String(), stderr.String())
+	}
+	// Exactly one, not merely more than zero. The authority leg reads the bead
+	// and the door reuses that record through owner.Read, so a door that went
+	// back to fetching its own copy — beadForOwner(owner, id) rewritten as
+	// d.Graph.Get(id) — still answers correctly, still reads a nonzero number of
+	// times, and would slip past a "> 0" assertion while re-splitting the read
+	// handle from the proof handle this collapse joined.
+	if counter.gets != 1 {
+		t.Errorf("the door read the class binding %d time(s) for an id only that binding can mint, want exactly 1: zero means a clean census retired the authority leg, which nothing may do, and more than one means the door re-reads what the leg already proved", counter.gets)
+	}
+	if !strings.Contains(stdout.String(), held.Title) {
+		t.Errorf("the record does not carry the bead the binding holds: %q", stdout.String())
+	}
+}
+
+// TestBdByIDWorkIDAbsentFromARelicBearingBindingStillPassesThrough is the
+// probed-miss control at the tier where the probe still runs.
+//
+// Two rows used to carry it — TestBdByIDLeavesWorkStoreIDsToThePassthrough and
+// TestBdClosePrefixStoreBeadKeepsPassthrough — and both still pass, but on a
+// clean binding they now pass because the probe is retired rather than because
+// it ran and missed. That is a real hole: the residence probe becoming an
+// unconditional ROUTE, claiming every work-shaped id for the binding, would be
+// invisible to them.
+//
+// Seeding a relic is what keeps the probe: a binding holding an open bead
+// outside its namespaces is never certified clean, so this asks a probe that
+// definitely runs about an id it definitely does not hold.
+func TestBdByIDWorkIDAbsentFromARelicBearingBindingStillPassesThrough(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	relic, classStore := classResidentWorkShapedBead(t, cityPath, "gc-relic1", "an orphaned patrol root")
+
+	// The relic is what keeps the probe; the subject is a DIFFERENT work id the
+	// binding has never held. Asserted for both a read and a write, because a
+	// probe that had become a route would answer the read and swallow the write.
+	absent := "gc-notinthebinding"
+	for _, args := range [][]string{{"show", absent}, {"close", absent}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code, handled := maybeRouteBdByID(cityPath, "", args, &stdout, &stderr); handled {
+				t.Fatalf("the class door claimed %q, which the binding does not hold (exit %d): %s%s", absent, code, stdout.String(), stderr.String())
+			}
+			if _, err := classStore.Get(absent); !errors.Is(err, beads.ErrNotFound) {
+				t.Errorf("after the passthrough the binding holds %q (Get = %v); a residence probe reads, it never writes", absent, err)
+			}
+		})
+	}
+
+	// The control for the control: the probe really is running on this fixture,
+	// so the passthrough above is a probed MISS and not a skipped probe.
+	var stdout, stderr bytes.Buffer
+	code, handled := maybeRouteBdByID(cityPath, "", []string{"show", relic.ID}, &stdout, &stderr)
+	if !handled {
+		t.Fatal("the relic the binding holds fell through to the bd subprocess; the probe is not running and the rows above prove nothing")
+	}
+	if code != 0 {
+		t.Fatalf("reading the relic exited %d: %s%s", code, stdout.String(), stderr.String())
+	}
+}
+
+// TestBdByIDWorkIDOnARefusedCityKeepsThePassthrough is the must-be-silent
+// counterpart to TestBdByIDRefusesRatherThanFallsThroughWhenTheWorkspaceIsNotThere.
+//
+// The standing storage refusal is a verdict about a CITY's storage
+// configuration and says nothing about any bead, and a refused city still
+// serves work out of its work ledger. So on the authority leg the refusal IS
+// the answer and must surface (the row above), while on the residence probe it
+// establishes nothing and the work path must stand.
+//
+// That distinction used to live in the door as its own arm; it now comes from
+// the plan's leg policy. Both halves are asserted because either one alone can
+// be satisfied by collapsing the distinction in the wrong direction.
+func TestBdByIDWorkIDOnARefusedCityKeepsThePassthrough(t *testing.T) {
+	clearGCEnv(t)
+	cityPath := t.TempDir()
+	writeForeignProviderCityTOML(t, cityPath, string(beadsworkspace.ProviderID))
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_CITY", cityPath)
+	stubInfraMigrationSource(t)
+	resetCLIStorageRoutes(t)
+	captureCLIStorageStderr(t)
+
+	var stdout, stderr bytes.Buffer
+	if code, handled := maybeRouteBdByID(cityPath, "", []string{"show", "gc-abc123"}, &stdout, &stderr); handled {
+		t.Fatalf("a refused city answered a work-shaped id from the class door (exit %d): %s%s", code, stdout.String(), stderr.String())
+	}
+}
+
+// The BARE reserved token — `gc bd show gcg`, a prefix with no number — is
+// where the two ownership matchers disagree, and this row records which one
+// the collapse made load-bearing.
+//
+// storeref.IDInNamespace admits it (`id == prefix || HasPrefix(id, prefix+"-")`,
+// class_candidates.go), so ClassBinding.coversID claims it and the plan gives
+// it the AUTHORITY leg, whose refusal policy is fatal. bdIDIsClassReserved
+// requires the dash, so the door's own Reserved bit reads false. Before the
+// collapse that bit decided the refusal arm and a bare token passed through to
+// bd; now the plan decides, and the refusal surfaces.
+//
+// Surfacing is the better answer — no store mints a bare token, so bd would
+// only have reported not-found on a city whose storage is the actual problem —
+// but the change was silent, and the underlying asymmetry between the two
+// matchers is real. Pinned here so the next person to align them sees this row
+// go red instead of discovering the flip from an operator.
+func TestBdByIDBareReservedTokenOnARefusedCitySurfacesTheRefusal(t *testing.T) {
+	clearGCEnv(t)
+	cityPath := t.TempDir()
+	writeForeignProviderCityTOML(t, cityPath, string(beadsworkspace.ProviderID))
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_CITY", cityPath)
+	stubInfraMigrationSource(t)
+	resetCLIStorageRoutes(t)
+	captureCLIStorageStderr(t)
+
+	bare := storeref.ReservedPrefixesFor(coordclass.Classes())
+	if len(bare) == 0 {
+		t.Fatal("no reserved prefixes, so there is no bare token to ask about")
+	}
+	token := bare[0]
+	if bdIDIsClassReserved(token) {
+		t.Fatalf("the door's own matcher already claims the bare token %q; the asymmetry this row records is gone and the row is asserting nothing", token)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code, handled := maybeRouteBdByID(cityPath, "", []string{"show", token}, &stdout, &stderr)
+	if !handled {
+		t.Fatalf("the bare token %q fell through to bd on a city whose storage cannot be served; the subprocess answers not-found and the operator never learns the city is refused", token)
+	}
+	if code == 0 {
+		t.Fatalf("the bare token %q resolved successfully on a refused city: %s", token, stdout.String())
+	}
 }
 
 // TestDoorUpdateAfterFoundSurfacesStoreErrorVerbatim pins the OTHER proximate
