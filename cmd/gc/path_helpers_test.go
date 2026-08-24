@@ -456,7 +456,11 @@ func isAbandonedGoTempDirConfigPath(configPath, tempParent string) bool {
 	if _, ok := activeTestRootUnder(filepath.Clean(configPath), filepath.Clean(tempParent), []string{"Test"}); !ok {
 		return false
 	}
-	_, err := os.Stat(configPath)
+	// Bounded like statConfigPathState: configPath comes from an arbitrary
+	// host process's argv and may sit on a hung NFS/FUSE mount. A timeout
+	// returns ctx.Err() rather than ErrNotExist, so a stuck mount degrades
+	// to "not stale" (protect) instead of wedging the startup sweep.
+	_, err := statWithTimeout(configPath)
 	return errors.Is(err, os.ErrNotExist)
 }
 
