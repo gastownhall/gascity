@@ -3,7 +3,9 @@ package tmuxtest
 import (
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -171,8 +173,68 @@ func SweepOrphanPIDPrefixedDirs(root, prefix string, diagnostics io.Writer) {
 		// Name each removal so a recurrence of ga-djbcqt is attributable
 		// from run logs instead of gate-log forensics.
 		_, _ = fmt.Fprintf(diagnostics, "tmuxtest: removing orphaned socket parent %s (%s)\n", path, reason)
+		killTmuxServersUnder(path, diagnostics)
 		_ = os.RemoveAll(path)
 	}
+}
+
+// killTmuxServerWait bounds how long killTmuxServersUnder waits for a
+// killed server's process to actually exit before falling back to a direct
+// SIGKILL. "tmux kill-server" returning success only means the server
+// accepted the shutdown request -- closing panes and exiting happens
+// asynchronously afterward (measured in the tens of milliseconds on a idle
+// host), so this deadline is generous headroom for a loaded host, not a
+// measured requirement.
+const killTmuxServerWait = 2 * time.Second
+
+// killTmuxServerPollInterval is the spacing between liveness checks while
+// killTmuxServersUnder waits out killTmuxServerWait.
+const killTmuxServerPollInterval = 20 * time.Millisecond
+
+// killTmuxServersUnder issues "tmux -S <path> kill-server" for every Unix
+// domain socket file found under dir, best-effort, and waits for the
+// server process to actually exit before returning. A tmux server whose
+// creator died before reaping it is still listening on that socket;
+// os.RemoveAll only unlinks the socket file and never touches the server
+// process itself, which is exactly what left it running and orphaned,
+// reparented to init (ga-t33q83). The server's own PID is queried via
+// "#{pid}" before the kill (the socket, and any session target on it, may
+// already be gone by the time teardown finishes), then polled until it's
+// confirmed dead or killTmuxServerWait elapses, with a direct SIGKILL
+// fallback for a server that outlives the deadline. Each targeted
+// socket/PID is explicit -- never a bare or default-socket kill-server, nor
+// an untargeted signal. Diagnostics mirror the removal message above so a
+// recurrence stays attributable from run logs.
+func killTmuxServersUnder(dir string, diagnostics io.Writer) {
+	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil || info.Mode()&os.ModeSocket == 0 {
+			return nil
+		}
+		pidOut, err := exec.Command("tmux", "-S", path, "display-message", "-p", "#{pid}").Output()
+		if err != nil {
+			return nil
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(pidOut)))
+		if err != nil || pid <= 0 {
+			return nil
+		}
+		if _, err := exec.Command("tmux", "-S", path, "kill-server").CombinedOutput(); err != nil {
+			return nil
+		}
+		deadline := time.Now().Add(killTmuxServerWait)
+		for pidutil.Alive(pid) && time.Now().Before(deadline) {
+			time.Sleep(killTmuxServerPollInterval)
+		}
+		if pidutil.Alive(pid) {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+		_, _ = fmt.Fprintf(diagnostics, "tmuxtest: killed orphaned tmux server at socket %s (pid %d)\n", path, pid)
+		return nil
+	})
 }
 
 // NewSocketParentDir sweeps orphaned sibling socket parent directories
