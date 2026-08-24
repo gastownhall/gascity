@@ -20,8 +20,8 @@ package storeref
 import (
 	"sort"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 )
 
@@ -104,7 +104,7 @@ func BuildBindings(order []beads.Store, byStore map[beads.Store][]coordclass.Cla
 func ReservedPrefixesFor(classes []coordclass.Class) []string {
 	prefixes := make([]string, 0, len(classes))
 	for _, class := range classes {
-		prefixes = append(prefixes, config.ReservedClassPrefixesFor(class.String())...)
+		prefixes = append(prefixes, beadmeta.ReservedClassPrefixesFor(class.String())...)
 	}
 	return prefixes
 }
