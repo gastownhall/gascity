@@ -1449,10 +1449,8 @@ func prepareInfraDestination(destination beads.Store) error {
 	if err != nil {
 		return fmt.Errorf("listing binding: %w", err)
 	}
-	for _, b := range existing {
-		if b.Metadata[infraMigrationStampKey] == "" {
-			return fmt.Errorf("binding already holds %d beads including %s, which this migration did not write: refusing to overwrite a populated destination", len(existing), b.ID)
-		}
+	if err := infraDestinationPopulatedRefusal(existing); err != nil {
+		return err
 	}
 	for _, b := range existing {
 		if err := destination.Delete(b.ID); err != nil {
@@ -1460,6 +1458,53 @@ func prepareInfraDestination(destination beads.Store) error {
 		}
 	}
 	return nil
+}
+
+// infraDestinationPopulatedRefusal returns the refusal for a destination
+// holding content this migration did not write, or nil when there is nothing in
+// the way.
+//
+// Split out of prepareInfraDestination so the preflight rehearsal can run this
+// exact predicate instead of a second copy of it. The preparer goes on to
+// DELETE the stamped rows it clears, which a read-only path must not do, but
+// the refusal itself is a pure function of what the destination holds — and a
+// refusal that drifted between the rehearsal and the migration would clear a
+// city inside the window that the migration then refuses.
+func infraDestinationPopulatedRefusal(existing []beads.Bead) error {
+	for _, b := range existing {
+		if b.Metadata[infraMigrationStampKey] == "" {
+			return fmt.Errorf("binding already holds %d beads including %s, which this migration did not write: refusing to overwrite a populated destination", len(existing), b.ID)
+		}
+	}
+	return nil
+}
+
+// infraDestinationPreflightRefusal reports what prepareInfraDestination would
+// refuse, without creating anything.
+//
+// The database is opened only when it is already on disk, for the reason
+// infraBindingHoldsNothing gives: openInfraDestination CREATES it, and a
+// rehearsal that created the database it was asked about would leave a store
+// behind on a city that never cut over — and would answer its own question,
+// since the store it just made is empty and clears every time.
+func infraDestinationPreflightRefusal(target infraBindingTarget) error {
+	present, err := infraPathExists(target.Database)
+	if err != nil {
+		return fmt.Errorf("reading the binding database %s: %w", target.Database, err)
+	}
+	if !present {
+		return nil
+	}
+	store, err := openInfraDestination(target)
+	if err != nil {
+		return fmt.Errorf("opening the binding %q at %s: %w", target.Binding, target.Database, err)
+	}
+	defer closeBeadStoreHandle(store) //nolint:errcheck // best-effort close
+	existing, err := store.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
+	if err != nil {
+		return fmt.Errorf("listing the binding %s: %w", target.Database, err)
+	}
+	return infraDestinationPopulatedRefusal(existing)
 }
 
 // importInfraSnapshot copies rows into the destination with their ids preserved

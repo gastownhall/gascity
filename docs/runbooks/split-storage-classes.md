@@ -27,7 +27,9 @@ config, run one command, start the city.
   and never creates the database it reports on.
 - **Rehearse the cutover.** `gc storage preflight` runs every check the
   migration runs, against a live city, without migrating. Run it before you
-  schedule the window, not inside it.
+  schedule the window, not inside it — but after Step 1, since it resolves its
+  destination from `[storage.classes]` and has nothing to check until that
+  section names a binding.
 - **Stop the city.** The migration refuses while a controller is live, and it
   asks you to attest that nothing else is writing either. `gc stop` handles
   the controller; the attestation is yours.
@@ -89,12 +91,21 @@ and names the command an operator runs deliberately, with the city stopped.
 gc storage preflight
 ```
 
-Runs every check the migration runs, in the same order, against a **live** city
-— and copies nothing, creates nothing, takes no migration guard, and publishes
-no event. It exists because the migration's refusals are all correct and all
-arrive at the worst possible moment: with the fleet stopped and a window
-running. The rig-scope census is the one that most justifies it, because its
-remedy is moving beads by hand and no command here does that for you.
+Runs every check the migration runs against a **live** city — and copies
+nothing, creates nothing, takes no migration guard, and publishes no event. It
+exists because the migration's refusals are all correct and all arrive at the
+worst possible moment: with the fleet stopped and a window running. The
+rig-scope census is the one that most justifies it, because its remedy is moving
+beads by hand and no command here does that for you.
+
+The checks that most often stop a real cutover, and what each wants from you:
+
+| Block | What it means | What to do |
+| --- | --- | --- |
+| `rig scopes` | An infrastructure bead lives in a rig's store, and the copy reads only the city work store. | Move the named beads into the city work store by hand. |
+| `served binding` | This city already served its infrastructure classes from a different binding. | Verify or recover that binding first. Removing the note is your attestation that you have. |
+| `edge payloads` | A dependency edge carries a payload this build's copy cannot carry — `waits_for` gates write these. | Nothing to fix yet; the carry is not built. The refusal keeps the source intact. |
+| `destination` | The binding already holds beads this migration did not write. | Find out whose they are before letting a copy overwrite them. |
 
 It exits non-zero when the migration would refuse for something you have to go
 and fix. **That is a different question from `gc storage status`**, which exits
