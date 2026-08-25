@@ -134,12 +134,37 @@ type hookClaimReleaseRecord struct {
 }
 
 type hookClaimOptions struct {
-	Assignee           string
+	Assignee string
+	// SessionID is this session's durable bead ID. Assignee is deliberately the
+	// alias/agent form that read paths query through GC_AGENT, but a continuation
+	// pin means "run this on THIS session", which only a session identity can
+	// express. See continuationPinAssignee.
+	SessionID          string
 	IdentityCandidates []string
 	RouteTargets       []string
 	Env                []string
 	DrainAck           bool
 	JSON               bool
+}
+
+// continuationPinAssignee returns the identity a continuation sibling is pinned
+// to. It prefers the session's durable bead ID because that is the only value
+// every consumer of an assignee agrees on: ComputeAwakeSet matches it via
+// sessionAssigneeMatches (assignee == bead.ID), the continuation backstop
+// resolves it via currentSessionAssigneeIdentities, and the session's own
+// re-poll queries $GC_SESSION_ID first.
+//
+// Assignee cannot serve here. With no alias or agent in the environment it falls
+// through to cliSessionName's runtime form (gascity--gc__implementation-worker-5-pool),
+// which is not what a session bead records as session_name
+// (gc__implementation-worker-gcs-session-<id>). Beads pinned to that form matched
+// no session identity at all, so neither wake demand nor the backstop could ever
+// reach them and the molecule stalled permanently.
+func continuationPinAssignee(opts hookClaimOptions) string {
+	if id := strings.TrimSpace(opts.SessionID); id != "" {
+		return id
+	}
+	return opts.Assignee
 }
 
 type hookClaimOps struct {
@@ -977,6 +1002,7 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 	if err != nil {
 		return nil, err
 	}
+	pinAssignee := continuationPinAssignee(opts)
 	assigned := make([]string, 0, len(siblings))
 	for _, sibling := range siblings {
 		if strings.TrimSpace(sibling.ID) == "" ||
@@ -986,7 +1012,7 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 			!hookClaimMatchesRoute(sibling, opts.RouteTargets) {
 			continue
 		}
-		if err := ops.AssignContinuation(ctx, dir, opts.Env, sibling.ID, opts.Assignee); err != nil {
+		if err := ops.AssignContinuation(ctx, dir, opts.Env, sibling.ID, pinAssignee); err != nil {
 			return assigned, fmt.Errorf("assigning %s: %w", sibling.ID, err)
 		}
 		assigned = append(assigned, sibling.ID)
