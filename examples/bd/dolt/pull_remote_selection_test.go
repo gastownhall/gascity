@@ -6,11 +6,14 @@ package dolt_test
 // mirror) instead of the fleet-private source of truth. This is pull's own
 // policy: refuses outright unless GC_DOLT_REMOTE_<DB> names one of the
 // candidates; a non-file:// pick additionally requires
-// GC_DOLT_PULL_ALLOW_REMOTE_<DB>=1. It is not currently identical to sync's
-// remote-selection fix (ga-fqi7kq, not yet on main) — consolidating the two
-// into a shared helper is a future intent, not current behavior. These
-// tests cover both the SQL-mode (dolt_remotes table) and CLI-mode
-// (.dolt/remotes.json) candidate sources.
+// GC_DOLT_PULL_ALLOW_REMOTE_<DB>=1. The same locality/allow-flag check also
+// applies to a database with exactly one configured remote (ga-nht26j) — a
+// sole non-local remote is not exempt just because there was nothing to
+// disambiguate. It is not currently identical to sync's remote-selection
+// fix (ga-2w96wd, not yet on main) — consolidating the two into a shared
+// helper is a future intent, not current behavior. These tests cover both
+// the SQL-mode (dolt_remotes table) and CLI-mode (.dolt/remotes.json)
+// candidate sources.
 
 import (
 	"fmt"
@@ -450,5 +453,181 @@ func TestPullCLIMultipleRemotesOverrideSelectsNamed(t *testing.T) {
 	log := readLog(t, doltLog)
 	if !strings.Contains(log, "pull internal main") {
 		t.Fatalf("expected CLI pull from the overridden 'internal' remote.\nlog:\n%s\noutput:\n%s", log, out)
+	}
+}
+
+// writePullFakeDoltSoleRemote installs a fake dolt reporting exactly one
+// configured remote, named "origin", at the given URL, for the SQL-mode
+// remote-lookup query. CALL DOLT_PULL falls through to the default success
+// path.
+func writePullFakeDoltSoleRemote(t *testing.T, dir string, url string) string {
+	t.Helper()
+	logPath := filepath.Join(dir, "dolt.log")
+	body := `#!/bin/sh
+printf '%s\n' "$*" >> "` + logPath + `"
+case "$*" in
+  *"SELECT name, url FROM dolt_remotes"*)
+    printf 'name,url\norigin,` + url + `\n'
+    ;;
+esac
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(dir, "dolt"), []byte(body), 0o755); err != nil {
+		t.Fatalf("write fake dolt: %v", err)
+	}
+	return logPath
+}
+
+// A sole configured remote is not exempt from the locality policy: the
+// count<=1 shortcut used to return it unconditionally, so a database with
+// exactly one non-local remote would pull from it with no override, no
+// allow flag, and no refusal. This must require the same
+// GC_DOLT_PULL_ALLOW_REMOTE_<DB>=1 opt-in that a multi-remote override
+// already demands (ga-nht26j — mirrors the equivalent sync-side fix,
+// ga-2w96wd).
+func TestPullSQLSoleNonLocalRemoteRequiresAllowFlag(t *testing.T) {
+	t.Parallel()
+
+	root := repoRoot(t)
+	script := filepath.Join(root, pullScript)
+
+	port, cleanup := startReachableTCPListener(t)
+	defer cleanup()
+
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "data")
+	if err := os.MkdirAll(filepath.Join(dataDir, "app", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir db: %v", err)
+	}
+
+	binDir := t.TempDir()
+	doltLog := writePullFakeDoltSoleRemote(t, binDir, "https://public.example.invalid/repo")
+	_ = writeSyncFakeBeadsBD(t, cityPath)
+
+	cmd := exec.Command("sh", script, "--db", "app")
+	cmd.Env = append(filteredEnv(
+		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
+		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
+	),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_DATA_DIR="+dataDir,
+		fmt.Sprintf("GC_DOLT_PORT=%d", port),
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"GC_DOLT_PULL_ALLOW_REMOTE_APP=",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("gc dolt pull should refuse a sole non-local remote without the allow flag:\n%s", out)
+	}
+
+	output := string(out)
+	if !strings.Contains(output, "non-local remote") {
+		t.Fatalf("expected a 'non-local remote' refusal:\n%s", output)
+	}
+	if !strings.Contains(output, "origin") {
+		t.Fatalf("expected the refusal to name the sole remote 'origin':\n%s", output)
+	}
+	if !strings.Contains(output, "GC_DOLT_PULL_ALLOW_REMOTE") {
+		t.Fatalf("expected the refusal to name the allow-flag escape hatch:\n%s", output)
+	}
+
+	log := readLog(t, doltLog)
+	if strings.Contains(log, "DOLT_PULL") {
+		t.Fatalf("a gated sole non-local remote must NOT be pulled:\nlog:\n%s", log)
+	}
+}
+
+func TestPullSQLSoleNonLocalRemoteWithAllowFlagProceeds(t *testing.T) {
+	t.Parallel()
+
+	root := repoRoot(t)
+	script := filepath.Join(root, pullScript)
+
+	port, cleanup := startReachableTCPListener(t)
+	defer cleanup()
+
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "data")
+	if err := os.MkdirAll(filepath.Join(dataDir, "app", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir db: %v", err)
+	}
+
+	binDir := t.TempDir()
+	doltLog := writePullFakeDoltSoleRemote(t, binDir, "https://public.example.invalid/repo")
+	_ = writeSyncFakeBeadsBD(t, cityPath)
+
+	cmd := exec.Command("sh", script, "--db", "app")
+	cmd.Env = append(filteredEnv(
+		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
+		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
+	),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_DATA_DIR="+dataDir,
+		fmt.Sprintf("GC_DOLT_PORT=%d", port),
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"GC_DOLT_PULL_ALLOW_REMOTE_APP=1",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("a sole non-local remote with the allow flag set should succeed:\n%s", out)
+	}
+
+	log := readLog(t, doltLog)
+	want := "CALL DOLT_PULL('origin', 'main')"
+	if !strings.Contains(log, want) {
+		t.Fatalf("expected pull from the sole 'origin' remote.\nwant %q\nlog:\n%s\noutput:\n%s", want, log, out)
+	}
+}
+
+// A sole local (file://) remote is the common case (a freshly cloned or
+// single-writer database) and must keep proceeding with zero ceremony —
+// this is a regression guard for that default, not new behavior.
+func TestPullSQLSoleFileRemoteProceedsWithoutOverride(t *testing.T) {
+	t.Parallel()
+
+	root := repoRoot(t)
+	script := filepath.Join(root, pullScript)
+
+	port, cleanup := startReachableTCPListener(t)
+	defer cleanup()
+
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "data")
+	if err := os.MkdirAll(filepath.Join(dataDir, "app", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir db: %v", err)
+	}
+
+	binDir := t.TempDir()
+	doltLog := writePullFakeDoltSoleRemote(t, binDir, "file:///data/remotes/origin")
+	_ = writeSyncFakeBeadsBD(t, cityPath)
+
+	cmd := exec.Command("sh", script, "--db", "app")
+	cmd.Env = append(filteredEnv(
+		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
+		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
+	),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_DATA_DIR="+dataDir,
+		fmt.Sprintf("GC_DOLT_PORT=%d", port),
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("a sole file:// remote should proceed without any override:\n%s", out)
+	}
+
+	log := readLog(t, doltLog)
+	want := "CALL DOLT_PULL('origin', 'main')"
+	if !strings.Contains(log, want) {
+		t.Fatalf("expected pull from the sole 'origin' remote.\nwant %q\nlog:\n%s\noutput:\n%s", want, log, out)
 	}
 }
