@@ -3,11 +3,89 @@
 package proctable
 
 import (
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
+	"syscall"
 	"testing"
 )
+
+func TestProcessIdentityDistinguishesGoneFromUnreadable(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		readErr error
+	}{
+		{name: "missing proc entry", readErr: fs.ErrNotExist},
+		{name: "wrapped missing proc entry", readErr: fmt.Errorf("reading stat: %w", &os.PathError{Op: "open", Path: "/proc/42/stat", Err: syscall.ENOENT})},
+		{name: "process vanishes during read", readErr: syscall.ESRCH},
+		{name: "wrapped process vanishes during read", readErr: &os.PathError{Op: "read", Path: "/proc/42/stat", Err: syscall.ESRCH}},
+		{name: "outer-wrapped process vanishes during read", readErr: fmt.Errorf("reading stat: %w", &os.PathError{Op: "read", Path: "/proc/42/stat", Err: syscall.ESRCH})},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := processIdentityWithReader(42, func(string) ([]byte, error) { return nil, test.readErr })
+			if !errors.Is(err, ErrProcessGone) {
+				t.Fatalf("missing process error = %v, want ErrProcessGone", err)
+			}
+		})
+	}
+
+	for _, test := range []struct {
+		name    string
+		readErr error
+	}{
+		{name: "permission denied", readErr: &os.PathError{Op: "open", Path: "/proc/42/stat", Err: fs.ErrPermission}},
+		{name: "operation denied", readErr: &os.PathError{Op: "read", Path: "/proc/42/stat", Err: syscall.EPERM}},
+		{name: "I/O failure", readErr: &os.PathError{Op: "read", Path: "/proc/42/stat", Err: syscall.EIO}},
+		{name: "interrupted read", readErr: &os.PathError{Op: "read", Path: "/proc/42/stat", Err: syscall.EINTR}},
+		{name: "process table exhausted", readErr: &os.PathError{Op: "open", Path: "/proc/42/stat", Err: syscall.EMFILE}},
+		{name: "system file table exhausted", readErr: &os.PathError{Op: "open", Path: "/proc/42/stat", Err: syscall.ENFILE}},
+		{name: "invalid proc path", readErr: &os.PathError{Op: "open", Path: "/proc/42/stat", Err: syscall.ENOTDIR}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := processIdentityWithReader(42, func(string) ([]byte, error) { return nil, test.readErr })
+			if err == nil || errors.Is(err, ErrProcessGone) || !errors.Is(err, test.readErr) {
+				t.Fatalf("unreadable process error = %v, want propagated %v, not gone", err, test.readErr)
+			}
+		})
+	}
+
+	for _, test := range []struct {
+		name string
+		stat string
+	}{
+		{name: "missing command terminator", stat: "42 (malformed stat"},
+		{name: "short stat", stat: "42 (cmd) S 1 2"},
+		{name: "invalid parent PID", stat: "42 (cmd) S nope 12 13 0 -1 0 0 0 0 0 0 0 0 0 0 0 1 0 98765 0"},
+		{name: "invalid process group", stat: "42 (cmd) S 11 nope 13 0 -1 0 0 0 0 0 0 0 0 0 0 0 1 0 98765 0"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := processIdentityWithReader(42, func(string) ([]byte, error) { return []byte(test.stat), nil })
+			if err == nil || errors.Is(err, ErrProcessGone) {
+				t.Fatalf("malformed process identity error = %v, want parse uncertainty, not gone", err)
+			}
+		})
+	}
+}
+
+func TestParseProcStatIdentityCarriesParentGroupAndStart(t *testing.T) {
+	// The suffix begins at field 3 (state), so suffix index 19 is Linux
+	// /proc/<pid>/stat field 22 (starttime); the trailing 0 is field 23.
+	stat := "42 (cmd (worker)) S 11 12 13 0 -1 0 0 0 0 0 0 0 0 0 0 0 1 0 98765 0"
+
+	ppid, pgid, startTime, ok, err := parseProcStatIdentity(stat)
+	if err != nil {
+		t.Fatalf("parseProcStatIdentity: %v", err)
+	}
+	if !ok {
+		t.Fatal("parseProcStatIdentity reported missing record")
+	}
+	if ppid != 11 || pgid != 12 || startTime != "98765" {
+		t.Fatalf("parseProcStatIdentity = (%d, %d, %q), want (11, 12, %q)", ppid, pgid, startTime, "98765")
+	}
+}
 
 // buildFakeProc builds a minimal /proc-shaped fixture tree under root for pid
 // with parent PID 1 (init). environ is written as NUL-delimited key=value pairs.

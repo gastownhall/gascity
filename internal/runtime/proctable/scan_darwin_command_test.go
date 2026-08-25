@@ -1,6 +1,8 @@
 package proctable
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestDarwinPSCommandIgnoresInlineTmuxEnv(t *testing.T) {
 	fields := []string{
