@@ -148,12 +148,24 @@ func validateWorkRecordOnClose(bead beads.Bead, commitReachable func(commit, bra
 // repo, unknown ref, unknown commit — reads as "not reachable". A commit/branch
 // that looks like a flag (leading "-") is rejected outright so a malformed
 // metadata value can never be parsed as a git option.
+//
+// The check prefers the fully-qualified refs/remotes/origin/<branch> ref over
+// the bare branch name. Worktrees in this fleet share one object store and one
+// refs/heads/ namespace, so a stale local branch of the same name — left
+// behind by a different worktree or session — resolves ahead of
+// refs/remotes/origin/<branch> under git's standard bare-name resolution
+// order, shadowing the ref that reflects what was actually pushed. The bare
+// name is still checked as a fallback for branches that have not been pushed
+// yet (no origin/<branch> ref to consult).
 func gitCommitReachableOnBranch(repoDir, commit, branch string) bool {
 	if strings.TrimSpace(repoDir) == "" || commit == "" || branch == "" {
 		return false
 	}
 	if strings.HasPrefix(commit, "-") || strings.HasPrefix(branch, "-") {
 		return false
+	}
+	if exec.Command("git", "-C", repoDir, "merge-base", "--is-ancestor", commit, "refs/remotes/origin/"+branch).Run() == nil {
+		return true
 	}
 	return exec.Command("git", "-C", repoDir, "merge-base", "--is-ancestor", commit, branch).Run() == nil
 }
