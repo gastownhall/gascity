@@ -15433,7 +15433,7 @@ func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeStorageBindingNotCon
 
 // FromTypedEventStreamEnvelopeStorageBindingNotConfigured overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeStorageBindingNotConfigured
 func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeStorageBindingNotConfigured(v TypedEventStreamEnvelopeStorageBindingNotConfigured) error {
-	v.Type = "storage.binding.not-configured"
+	v.Type = "storage.binding.not_configured"
 	b, err := json.Marshal(v)
 	t.union = b
 	return err
@@ -15441,7 +15441,7 @@ func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeStorageBindingNot
 
 // MergeTypedEventStreamEnvelopeStorageBindingNotConfigured performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeStorageBindingNotConfigured
 func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeStorageBindingNotConfigured(v TypedEventStreamEnvelopeStorageBindingNotConfigured) error {
-	v.Type = "storage.binding.not-configured"
+	v.Type = "storage.binding.not_configured"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -15916,7 +15916,7 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeStorageBindingConverged()
 	case "storage.binding.genesis":
 		return t.AsTypedEventStreamEnvelopeStorageBindingGenesis()
-	case "storage.binding.not-configured":
+	case "storage.binding.not_configured":
 		return t.AsTypedEventStreamEnvelopeStorageBindingNotConfigured()
 	case "storage.binding.uncheckable":
 		return t.AsTypedEventStreamEnvelopeStorageBindingUncheckable()
@@ -18312,7 +18312,7 @@ func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeStorageB
 
 // FromTypedTaggedEventStreamEnvelopeStorageBindingNotConfigured overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured
 func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeStorageBindingNotConfigured(v TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured) error {
-	v.Type = "storage.binding.not-configured"
+	v.Type = "storage.binding.not_configured"
 	b, err := json.Marshal(v)
 	t.union = b
 	return err
@@ -18320,7 +18320,7 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeStora
 
 // MergeTypedTaggedEventStreamEnvelopeStorageBindingNotConfigured performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeStorageBindingNotConfigured(v TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured) error {
-	v.Type = "storage.binding.not-configured"
+	v.Type = "storage.binding.not_configured"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -18795,7 +18795,7 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeStorageBindingConverged()
 	case "storage.binding.genesis":
 		return t.AsTypedTaggedEventStreamEnvelopeStorageBindingGenesis()
-	case "storage.binding.not-configured":
+	case "storage.binding.not_configured":
 		return t.AsTypedTaggedEventStreamEnvelopeStorageBindingNotConfigured()
 	case "storage.binding.uncheckable":
 		return t.AsTypedTaggedEventStreamEnvelopeStorageBindingUncheckable()

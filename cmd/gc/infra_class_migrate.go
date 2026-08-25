@@ -877,12 +877,22 @@ func infraBindingHoldsNothing(target infraBindingTarget) (bool, error) {
 // own count says what is being served today, and the two diverge the moment
 // anything writes to or reaps from the binding.
 //
-// An absent database is zero rather than an error, for the same reason
-// infraBindingHoldsNothing refuses to open one: opening creates it, and a
-// report that creates the database it is asked about would leave a store behind
-// on a city that never cut over. Any other failure is returned rather than
-// reported as zero, because a count nothing could read is not a count of zero.
+// The root read comes first, exactly as it does in the evidence probe, and for
+// the same reason. "The database file is not there" is only a count of zero if
+// the directory that would hold it was observed; an unmounted volume takes the
+// database away with the whole root, so a confident "binding: 0 held now" would
+// be the same positive-looking absence the probe exists to refuse — handed this
+// time to a human deciding whether a cutover landed. The caller renders the
+// fault in place of the number rather than a number nobody could take.
+//
+// Below a readable root, an absent database is zero rather than an error, for
+// the same reason infraBindingHoldsNothing refuses to open one: opening creates
+// it, and a report that creates the database it is asked about would leave a
+// store behind on a city that never cut over.
 func infraBindingCensus(target infraBindingTarget) (int, error) {
+	if err := infraBindingRootEnumerable(target.Root); err != nil {
+		return 0, err
+	}
 	present, err := infraPathExists(target.Database)
 	if err != nil {
 		return 0, fmt.Errorf("reading the binding database %s: %w", target.Database, err)

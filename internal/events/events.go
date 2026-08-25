@@ -344,11 +344,17 @@ const (
 	// nothing at all, and nothing reads the same as a gate that crashed before
 	// deciding or a build too old to have one. A subscriber gating a deploy on
 	// these events has to be able to see "this city has no split" as an answer.
+	//
+	// The multi-word segment is spelled with an underscore because every other
+	// multi-word type in this package is. The internal outcome renders itself as
+	// "not-configured" and that spelling is what travels in the payload's outcome
+	// field, but a payload value is not a type name, and matching it here would
+	// have made this the one hyphen among the whole taxonomy.
 	StorageBindingConverged     = "storage.binding.converged"
 	StorageBindingGenesis       = "storage.binding.genesis"
 	StorageBindingUnconverged   = "storage.binding.unconverged"
 	StorageBindingUncheckable   = "storage.binding.uncheckable"
-	StorageBindingNotConfigured = "storage.binding.not-configured"
+	StorageBindingNotConfigured = "storage.binding.not_configured"
 )
 
 // KnownEventTypes lists every event-type constant this package defines.
