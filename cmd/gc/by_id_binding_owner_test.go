@@ -499,3 +499,134 @@ func TestByIDPlanUsesTheRegisteredControllerRoutes(t *testing.T) {
 		})
 	}
 }
+
+// bindingHitCity builds the fixture the binding short-circuit runs on: a city
+// whose infrastructure classes are served by one store, plus a rig, plus a
+// per-directory store opener the caller controls.
+//
+// The binding is a work-PREFIXED store on purpose. A binding that minted
+// reserved ids would retire the residence probe, and then a work-shaped id
+// would never reach the binding leg at all — which is the fixture testing
+// itself rather than the resolver.
+func bindingHitCity(t *testing.T) (cityPath, rigPath string, cfg *config.City, binding beads.Store) {
+	t.Helper()
+	cityPath = t.TempDir()
+	binding = splittest.NewWorkStore(t, "hq")
+	seedCLIStorageRoutes(t, cityPath, messagingSplitRoutes(binding))
+	rigPath = filepath.Join(cityPath, "rigs", "alpha")
+	cfg = &config.City{Rigs: []config.Rig{{Name: "alpha", Path: rigPath}}}
+	return cityPath, rigPath, cfg, binding
+}
+
+// storesByDir is an openStore that hands each directory the store the test
+// prepared for it, and an empty one for any directory it did not name.
+func storesByDir(t *testing.T, byDir map[string]beads.Store) func(string) (beads.Store, error) {
+	t.Helper()
+	return func(dir string) (beads.Store, error) {
+		if store, ok := byDir[dir]; ok {
+			return store, nil
+		}
+		return splittest.NewWorkStore(t, "hq"), nil
+	}
+}
+
+// TestResolveOwningStoreDirRefusesBindingRigCollision is the ga-qnagn
+// regression.
+//
+// The binding leg short-circuits the scan, and with it the scan's uniqueness
+// refusal. That is right for the city's own retained copy — dual residency is
+// the migration working — but it is not right for a RIG, which is never a
+// migration target and so has no retained copy to be excused. A rig holding the
+// same id is two ledgers disagreeing by accident, exactly what the uniqueness
+// contract exists for, and answering it silently from the binding means the
+// close that follows writes one copy while the other stays open forever.
+func TestResolveOwningStoreDirRefusesBindingRigCollision(t *testing.T) {
+	cityPath, rigPath, cfg, binding := bindingHitCity(t)
+	resident, err := binding.Create(beads.Bead{Title: "the binding's copy", Type: "task"})
+	if err != nil {
+		t.Fatalf("seeding the binding: %v", err)
+	}
+	rig := splittest.NewWorkStore(t, "hq")
+	collision, err := rig.Create(beads.Bead{Title: "a rig copy under the same id", Type: "task"})
+	if err != nil {
+		t.Fatalf("seeding the rig: %v", err)
+	}
+	if collision.ID != resident.ID {
+		t.Fatalf("the fixture minted %s and %s; a collision needs one id", resident.ID, collision.ID)
+	}
+
+	_, _, err = resolveOwningStoreDir(resident.ID, cfg, cityPath, storesByDir(t, map[string]beads.Store{rigPath: rig}))
+	if err == nil {
+		t.Fatal("a binding/rig collision resolved cleanly; the caller would close one copy and leave the other open")
+	}
+	if !strings.Contains(err.Error(), "exists in multiple stores") {
+		t.Errorf("the refusal reads %v, want the scan's own uniqueness wording", err)
+	}
+	if !strings.Contains(err.Error(), rigPath) {
+		t.Errorf("the refusal %v does not name the rig store that collides", err)
+	}
+}
+
+// TestResolveOwningStoreDirBindingWinsOverRetainedCityCopy is the control for
+// the test above, and the reason its probe skips the city store.
+//
+// The city store is where the migration RETAINED its copies, so it holds the
+// same id by design on every converged city. A probe that counted it would
+// refuse every convoy command on exactly the cities that finished migrating —
+// the failure PR1's short-circuit was added to prevent.
+func TestResolveOwningStoreDirBindingWinsOverRetainedCityCopy(t *testing.T) {
+	cityPath, _, cfg, binding := bindingHitCity(t)
+	resident, err := binding.Create(beads.Bead{Title: "the binding's copy", Type: "task"})
+	if err != nil {
+		t.Fatalf("seeding the binding: %v", err)
+	}
+	city := splittest.NewWorkStore(t, "hq")
+	retained, err := city.Create(beads.Bead{Title: "the copy the migration retained", Type: "task"})
+	if err != nil {
+		t.Fatalf("seeding the retained city copy: %v", err)
+	}
+	if retained.ID != resident.ID {
+		t.Fatalf("the fixture minted %s and %s; dual residency needs one id", resident.ID, retained.ID)
+	}
+
+	store, dir, err := resolveOwningStoreDir(resident.ID, cfg, cityPath, storesByDir(t, map[string]beads.Store{cityPath: city}))
+	if err != nil {
+		t.Fatalf("a dual-resident id resolved to %v; the retained city copy is the migration working, not a collision", err)
+	}
+	if store != binding {
+		t.Errorf("the resolver returned %p, want the binding %p", store, binding)
+	}
+	if dir != cityPath {
+		t.Errorf("the resolver reported dir %q, want the city path %q", dir, cityPath)
+	}
+}
+
+// TestResolveOwningStoreDirSkipsTheRigProbeForAReservedID pins the probe's
+// other bound.
+//
+// A class-reserved prefix is minted by the binding and by nothing else, so a
+// rig cannot hold one legitimately and there is no collision to find. Probing
+// anyway would add a full rig walk to every reserved-id resolution — including
+// bd's on-close hook, which runs in bursts — to learn nothing.
+func TestResolveOwningStoreDirSkipsTheRigProbeForAReservedID(t *testing.T) {
+	cityPath, rigPath, cfg, binding := bindingHitCity(t)
+	reserved, err := migrationSeed(binding, beads.Bead{ID: "gcg-1", Title: "a graph-class bead", Type: "task"})
+	if err != nil {
+		t.Fatalf("seeding the reserved-prefix bead: %v", err)
+	}
+	if !bdIDIsClassReserved(reserved.ID) {
+		t.Fatalf("the fixture id %q carries no reserved class prefix", reserved.ID)
+	}
+	rig := splittest.NewWorkStore(t, "hq")
+	if _, err := migrationSeed(rig, beads.Bead{ID: reserved.ID, Title: "a rig copy the probe must not consult", Type: "task"}); err != nil {
+		t.Fatalf("seeding the rig: %v", err)
+	}
+
+	store, _, err := resolveOwningStoreDir(reserved.ID, cfg, cityPath, storesByDir(t, map[string]beads.Store{rigPath: rig}))
+	if err != nil {
+		t.Fatalf("a reserved-prefix id resolved to %v; no rig can own one, so there is nothing to refuse", err)
+	}
+	if store != binding {
+		t.Errorf("the resolver returned %p, want the binding %p", store, binding)
+	}
+}

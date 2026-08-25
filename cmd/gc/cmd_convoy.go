@@ -697,6 +697,9 @@ func resolveOwningStoreDir(beadID string, cfg *config.City, cityPath string, ope
 		return nil, "", err
 	}
 	if ownedByBinding {
+		if err := refuseBindingRigCollision(beadID, cfg, cityPath, openStore); err != nil {
+			return nil, "", err
+		}
 		return owner.Store, cityPath, nil
 	}
 
@@ -728,6 +731,51 @@ func resolveOwningStoreDir(beadID string, cfg *config.City, cityPath string, ope
 		return nil, "", beads.ErrNotFound
 	}
 	return foundStore, foundDir, nil
+}
+
+// refuseBindingRigCollision restores the uniqueness contract to the one case
+// the binding short-circuit takes it away from without meaning to.
+//
+// A binding hit returns before the scan runs, and the scan is where "this id
+// exists in more than one store" is refused. Skipping it is right for the CITY
+// store, whose copy of a relocated id is the migration working as designed, and
+// wrong for a RIG: a rig is never a migration target, so it has no retained copy
+// to be excused, and one holding the same id is two ledgers disagreeing by
+// accident. Answering that silently from the binding means whichever caller
+// follows — a close, a land, a convoy walk — acts on one copy while the other
+// stays open forever, which is the failure the contract was written for.
+//
+// So the probe is the rigs and only the rigs, and only for an id no reserved
+// class prefix claims. A reserved prefix is minted by the binding and by nothing
+// else, so a rig cannot hold one legitimately and the walk would cost every
+// reserved-id resolution — bd's on-close hook among them, and it closes in
+// bursts — to learn nothing.
+//
+// Read faults are refusals, not skips. This runs in front of callers that
+// MUTATE, and a rig that cannot answer has not established the id is uniquely
+// addressable; the error policy is the scan's own, one function down, for the
+// same probe.
+func refuseBindingRigCollision(beadID string, cfg *config.City, cityPath string, openStore func(string) (beads.Store, error)) error {
+	if bdIDIsClassReserved(beadID) {
+		return nil
+	}
+	candidates, err := openConvoyStores(cfg, cityPath, beadID, openStore)
+	if err != nil {
+		return err
+	}
+	for _, candidate := range candidates {
+		if candidate.store == nil || samePath(candidate.path, cityPath) {
+			continue
+		}
+		if _, err := candidate.store.Get(beadID); err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				continue
+			}
+			return err
+		}
+		return fmt.Errorf("bead %s exists in multiple stores (%s and %s); resolution requires a uniquely addressable bead id", beadID, convoyBindingViewPath, candidate.path)
+	}
+	return nil
 }
 
 func openAllConvoyStores(stderr io.Writer, cmdName string) ([]convoyStoreView, int) {
