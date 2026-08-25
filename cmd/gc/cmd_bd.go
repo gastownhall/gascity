@@ -12,24 +12,10 @@ import (
 	"unicode"
 
 	"github.com/gastownhall/gascity/internal/bdflags"
-	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/spf13/cobra"
 )
-
-// heartbeatMetadataKey is the bead-metadata key freshened by the gc-only
-// `gc bd heartbeat <issue-id>` subcommand. The gas-city-dashboard will read
-// this exact key — with the `_at` suffix — to tell a live worker from a dead
-// one (gastownhall/gascity#1855; reader tracked in dashboard #324). Unrelated
-// benchmark/test code writes the suffixless `gc.last_heartbeat` for a
-// different purpose; do not unify them.
-const heartbeatMetadataKey = beadmeta.LastHeartbeatAtMetadataKey
-
-// bdHeartbeatNow supplies the timestamp stamped by `gc bd heartbeat`. It is a
-// package var so tests can pin it to a fixed instant; the rewrite normalizes
-// the result to UTC, so an injected non-UTC clock still produces a UTC stamp.
-var bdHeartbeatNow = time.Now
 
 // bdSilentFallbackExitCode is the exit code gc bd emits when it detects
 // that bd silently fell back to on-disk auto-import mode (managed Dolt
@@ -40,6 +26,14 @@ var bdHeartbeatNow = time.Now
 const bdSilentFallbackExitCode = 4
 
 const bdSilentFallbackUserMessage = "gc bd: managed Dolt unreachable; bd fell back to on-disk auto-import mode. If this command wrote data, that write was NOT persisted. Restart the managed Dolt server (or check connectivity) and retry. (See gastownhall/gascity#2080.)"
+
+// bdDoltStartConflictUserMessage is appended (bd's own output is left
+// intact) when bd's error output suggests running `bd dolt start` to
+// recover from an unreachable managed Dolt server. That command starts a
+// second, unmanaged Dolt server that conflicts with gc's own managed server
+// on the same data directory, so gc bd points at the gc-managed remedy
+// instead. See gastownhall/gascity#1374.
+const bdDoltStartConflictUserMessage = "gc bd: bd suggested \"bd dolt start\" to recover, but that starts a second, unmanaged Dolt server that will conflict with gc's managed server on the same data directory. Run \"gc start\" (or \"gc dolt restart\") to restart the managed Dolt server instead, then retry. (See gastownhall/gascity#1374.)"
 
 // bdStderrScanLimit caps how much of bd's stderr gc retains to scan for the
 // silent-fallback marker. bd emits the marker pair while opening the store —
@@ -85,12 +79,31 @@ city (HQ) store. An explicit --city is a true scope override: it forces the
 city store and disables rig auto-detection (GC_RIG, cwd, bead prefix), so a
 deliberate city-scoped query is never silently downgraded to a rig store.
 
-All arguments after "gc bd" are forwarded to bd unchanged, except the
-gc-only "heartbeat <issue-id>" subcommand, which rewrites to
-"update <issue-id> --set-metadata gc.last_heartbeat_at=<RFC3339 UTC now>"
-so long-running workers can signal liveness to the dashboard, and
-"release-if-current <issue-id> <assignee>", which conditionally resets an
-in-progress assignment only when the bead still has that assignee.
+On a city that serves a coordination class from its own [storage] binding,
+a by-id read or write of a bead that binding owns is answered in process
+from the binding, not by bd against a work store that does not hold it.
+--rig is refused for those beads rather than ignored or honored: it names a
+work scope, and a relocated class is not partitioned by rig, so there is
+nothing to narrow within. Drop --rig for a class-owned id. Auto-detected
+scope (GC_RIG, -C, cwd) is unaffected, and --city still selects which city's
+binding answers.
+
+"gc bd ready" is refused outright on such a city, whatever arguments it is
+given, and so is "gc bd list --ready", which bd documents as the same
+semantics: both compute a frontier over one ledger and take no selector that
+could reach another, so the answer is the work-class subset of the city's
+ready set with no way to tell. Use "gc ready", which federates every store
+the city spreads work across. It is flag-compatible with the "bd ready"
+invocation the generated work query builds, not with all of "bd ready" —
+"gc ready --help" lists what it takes. A city that relocates no class is
+unaffected.
+
+All arguments after "gc bd" are forwarded to bd unchanged. "heartbeat
+<issue-id>" forwards to bd's native heartbeat, which refreshes the claim's
+lease and fails loudly when the caller no longer owns it. gc adds one
+subcommand of its own: "release-if-current <issue-id> <assignee>", which
+conditionally resets an in-progress assignment only when the bead still has
+that assignee.
 
 gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
 from wedging the wrapper after printing command output. If you need
@@ -100,7 +113,7 @@ auto-export behavior, invoke bd directly.`,
   gc bd show my-project-abc          # auto-detects rig from bead prefix
   gc bd list --rig my-project -s open
   gc bd --city /path/to/city list    # pins the city (HQ) store, no rig auto-detect
-  gc bd heartbeat my-project-abc     # stamp gc.last_heartbeat_at=now
+  gc bd heartbeat my-project-abc     # refresh the claim lease you hold
   gc bd release-if-current my-project-abc worker-1`,
 		DisableFlagParsing: true,
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -170,17 +183,16 @@ func warnExternalBdOverrideDrift(stderr io.Writer, cityPath string, target execS
 	_, _ = fmt.Fprintf(stderr, "gc bd: warning: ignoring ambient Dolt host/port override for external target: %s\n", strings.Join(drift, ", "))
 }
 
-// rewriteBdHeartbeatArgs expands the gc-only `heartbeat <issue-id>`
-// subcommand into the bd command that performs the write:
-//
-//	update <issue-id> --set-metadata gc.last_heartbeat_at=<RFC3339 UTC>
-//
-// Long-running workers call `gc bd heartbeat {{issue}}` periodically so the
-// dashboard can distinguish a live worker from a dead one
-// (gastownhall/gascity#1855). It reuses bd's existing metadata-write path
-// rather than adding a new store method, and leaves the issue id in place so
-// the generic scope resolver still routes the write to the correct rig store.
-// Args that do not begin with "heartbeat" pass through unchanged.
+// rewriteBdHeartbeatArgs validates the `heartbeat <issue-id>` subcommand and
+// forwards it to bd's NATIVE heartbeat, which pushes the claim's
+// lease_expires_at forward and fails loudly when the caller no longer owns
+// the claim (reclaimed lease, closed issue). gc used to rewrite this into
+// `update <issue-id> --set-metadata gc.last_heartbeat_at=<now>` — a write
+// nothing reads — which reported success while leaving the lease untouched,
+// so a worker's claim could go stale mid-task under a green heartbeat
+// (dip-wdt5aq). The id is validated here so a malformed id never reaches
+// bd's prefix-based rig auto-detection. Args that do not begin with
+// "heartbeat" pass through unchanged.
 func rewriteBdHeartbeatArgs(bdArgs []string) ([]string, error) {
 	if len(bdArgs) == 0 || bdArgs[0] != "heartbeat" {
 		return bdArgs, nil
@@ -193,8 +205,7 @@ func rewriteBdHeartbeatArgs(bdArgs []string) ([]string, error) {
 		strings.IndexFunc(rest[0], unicode.IsSpace) >= 0 {
 		return nil, fmt.Errorf("usage: gc bd heartbeat <issue-id>")
 	}
-	stamp := bdHeartbeatNow().UTC().Format(time.RFC3339)
-	return []string{"update", rest[0], "--set-metadata", heartbeatMetadataKey + "=" + stamp}, nil
+	return []string{"heartbeat", rest[0]}, nil
 }
 
 func doBd(args []string, stdout, stderr io.Writer) int {
@@ -235,6 +246,42 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+
+	// `gc bd sql`, `gc bd query` and the selector verbs (`list`, `search`) are
+	// passthroughs to bd, and bd answers about the bd ledger only. On a split
+	// city a read that names a relocated class's beads comes back empty and exit
+	// 0 — a confident wrong answer, and the one that reported live molecule roots
+	// as missing. A frontier read (`gc bd ready`, or `gc bd list --ready`, which
+	// runs the same query) is refused on the same seam for a different reason:
+	// its whole result set is short by the relocated class whatever the argv.
+	// Refuse both here, where the class routing is known; bd cannot know a class
+	// was relocated.
+	if msg, blind := bdSQLRelocatedClassRefusal(cfg, bdArgs); blind {
+		if !bdRelocatedClassOverrideEnabled() {
+			fmt.Fprintf(stderr, "gc bd: %s.%s\n", msg, bdRelocatedClassEscapeHint(bdRelocatedClassInvocationComputesFrontier(bdArgs))) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		// Overridden, but never silently: the operator asked for a read this
+		// ledger cannot answer by class, so the reason it would have been
+		// refused travels with the result they are about to trust.
+		fmt.Fprintf(stderr, "gc bd: %s is set; running anyway: %s\n", bdRelocatedClassOverrideEnvVar, msg) //nolint:errcheck // best-effort stderr
+	}
+	// A by-ID operation whose subject a relocated class owns is answered in
+	// process, from the binding that class is served from, and never handed to
+	// the subprocess — which opens the work workspace and cannot see the bead.
+	// It runs BEFORE the release-if-current arm below because that arm resolves
+	// only the work scope: on a split city it would release against the ledger
+	// the bead was moved off. See cmd_bd_by_id.go.
+	//
+	// rigName is the explicit --rig, and it travels because the WORK scope this
+	// function just resolved and the class binding are two different ledgers: a
+	// class-owned subject under an explicit --rig is refused rather than served
+	// from a store the operator did not name. Auto-detected scope (GC_RIG, -C,
+	// cwd) is resolved inside resolveBdScopeTarget and deliberately does not
+	// travel — see refuseRigScopedClassOwnedTarget.
+	if code, handled := maybeRouteBdByID(cityPath, rigName, bdArgs, stdout, stderr); handled {
+		return code
+	}
 	if id, expectedAssignee, ok, err := parseBdReleaseIfCurrentArgs(bdArgs); ok || err != nil {
 		if err != nil {
 			fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -264,7 +311,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// than requested) blocks the write. ErrNotFound and store-unavailable are
 	// non-fatal — the write falls through to bd, which will produce its own
 	// error if the bead truly does not exist. This preserves correctness for
-	// legitimate flows (heartbeat metadata writes, silent-fallback paths,
+	// legitimate flows (native heartbeat lease refresh, silent-fallback paths,
 	// ephemeral/wisp rows, projection-lag writes) that proceed even when the
 	// bead isn't yet visible through the read seam.
 	//
@@ -321,9 +368,16 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	reapStaleBdExportJSONL(target.ScopeRoot)
 	warnExternalBdOverrideDrift(stderr, cityPath, target)
 
-	bdPath, err := exec.LookPath("bd")
+	// Resolve the same binary every other bd path in the tree resolves for
+	// this scope: a scope bound to a complete storage binding pins the bd
+	// build that speaks that backend, and the passthrough must honor the pin
+	// or it hands the command to an ambient bd that rejects the bound
+	// backend. Keying on the target scope rather than the city keeps a rig
+	// that owns its binding on its pin, and keeps a rig that overrides the
+	// city backend on the ambient bd its runtime env already implies.
+	bdPath, err := resolveBdBinaryForScope(cityPath, target.ScopeRoot)
 	if err != nil {
-		fmt.Fprintln(stderr, "gc bd: bd not found in PATH") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -360,6 +414,10 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 
 	if runErr != nil {
 		if traceExit > 0 {
+			if bdOutputSuggestsConflictingDoltStart(stderrScan.String()) &&
+				bdScopeDoltIsGcManaged(cityPath, target.ScopeRoot) {
+				fmt.Fprintln(stderr, bdDoltStartConflictUserMessage) //nolint:errcheck // best-effort stderr
+			}
 			return traceExit
 		}
 		fmt.Fprintf(stderr, "gc bd: %v\n", runErr) //nolint:errcheck // best-effort stderr
@@ -401,8 +459,8 @@ func invalidBdReleaseIfCurrentArg(value string) bool {
 }
 
 // bdMutationWriteIDs extracts all positional bead IDs from a bd write-mutation
-// command (update, close, reopen, delete) and reports whether the scan was
-// unambiguous.
+// command (update, close, reopen, delete, heartbeat) and reports whether the
+// scan was unambiguous.
 //
 // Returns:
 //   - ids: all positional (non-flag) tokens after the subcommand; may be empty.
@@ -417,6 +475,9 @@ func invalidBdReleaseIfCurrentArg(value string) bool {
 // "-" and do not contain "=" are treated as potentially value-consuming, which
 // triggers ambiguous=true. Boolean flags (no value) are fine to ignore.
 // The "--" terminator is respected: everything after it is positional.
+// heartbeat is positional-only — rewriteBdHeartbeatArgs has already reduced its
+// argv to a single pre-validated id with no flags, so its flag sets are empty
+// by design and the lone id is scanned as positional.
 //
 // All returned IDs must be verified via BdStore.Get (exact-ID guard) before
 // the mutation is forwarded to the bd subprocess.
@@ -426,7 +487,7 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 	}
 	sub := args[0]
 	switch sub {
-	case "update", "close", "reopen", "delete":
+	case "update", "close", "reopen", "delete", "heartbeat":
 	default:
 		return nil, false, false
 	}

@@ -521,10 +521,10 @@ func TestValidateRequiresExactlyOneClaimPerConstructorContract(t *testing.T) {
 	})
 }
 
-func TestCatalogBindsFakeAndSubprocessWithDirAndDefersDefaultConstructor(t *testing.T) {
+func TestCatalogBindsFakeAndBothSubprocessConstructors(t *testing.T) {
 	var fakeProof *ProofRef
 	var subprocessProof *ProofRef
-	var subprocessDefaultWaiver *Waiver
+	var subprocessDefaultProof *ProofRef
 
 	for _, entry := range Catalog() {
 		for _, claim := range entry.Claims {
@@ -540,10 +540,10 @@ func TestCatalogBindsFakeAndSubprocessWithDirAndDefersDefaultConstructor(t *test
 				}
 				subprocessProof = claim.Proof
 			case entry.ID == "runtime.builtin.subprocess" && claim.Constructor == repoSymbol("internal/runtime/subprocess", "NewSeamBacked"):
-				if claim.Disposition != DispositionWaived {
-					t.Errorf("subprocess default disposition = %q, want %q", claim.Disposition, DispositionWaived)
+				if claim.Disposition != DispositionProved {
+					t.Errorf("subprocess default disposition = %q, want %q", claim.Disposition, DispositionProved)
 				}
-				subprocessDefaultWaiver = claim.Waiver
+				subprocessDefaultProof = claim.Proof
 			}
 			if claim.Waiver != nil && claim.Waiver.Owner == "ga-80po0c.1.2" {
 				t.Errorf("obsolete ga-80po0c.1.2 waiver remains on %s", renderSymbolRef(claim.Constructor))
@@ -565,8 +565,14 @@ func TestCatalogBindsFakeAndSubprocessWithDirAndDefersDefaultConstructor(t *test
 	if got, want := renderSymbolRefs(subprocessProof.AllowedCalls), "fmt.Sprintf, internal/testutil.ShortTempDir, sync/atomic.AddInt64"; got != want {
 		t.Errorf("subprocess WithDir allowed calls = %q, want %q", got, want)
 	}
-	if subprocessDefaultWaiver == nil || subprocessDefaultWaiver.Owner != "ga-80po0c.3" {
-		t.Errorf("subprocess default waiver = %+v, want ga-80po0c.3 ownership", subprocessDefaultWaiver)
+	if subprocessDefaultProof == nil {
+		t.Fatal("subprocess.NewSeamBacked proof is missing")
+	}
+	if subprocessDefaultProof.File != "internal/runtime/subprocess/seam_conformance_test.go" || subprocessDefaultProof.Test != "TestSubprocessDefaultDirSeamConformance" {
+		t.Errorf("subprocess default proof = %s#%s, want subprocess default-directory conformance entrypoint", subprocessDefaultProof.File, subprocessDefaultProof.Test)
+	}
+	if got, want := renderSymbolRefs(subprocessDefaultProof.AllowedCalls), "fmt.Sprintf, os.Getpid, sync/atomic.AddInt64"; got != want {
+		t.Errorf("subprocess default allowed calls = %q, want %q", got, want)
 	}
 }
 
@@ -1609,7 +1615,7 @@ func TestCatalogReturnsIndependentEntries(t *testing.T) {
 	first[0].Claims[0].Contract = ContractID("mutated.contract")
 	first[0].Claims[0].Proof.File = "mutated-proof.go"
 	first[0].Claims[0].Proof.AllowedCalls[0].Name = "MutatedCall"
-	first[2].Claims[0].Waiver.Owner = "mutated-owner"
+	first[3].Claims[0].Waiver.Owner = "mutated-owner"
 	first[len(first)-1].Source.Function = "mutatedSource"
 
 	second := Catalog()
@@ -1634,8 +1640,8 @@ func TestCatalogReturnsIndependentEntries(t *testing.T) {
 	if got := second[0].Claims[0].Proof.AllowedCalls[0].Name; got != "Sprintf" {
 		t.Errorf("Catalog() proof allowed call leaked mutation: %q", got)
 	}
-	if second[2].Claims[0].Waiver.Owner != "ga-80po0c.3" {
-		t.Errorf("Catalog() waiver leaked mutation: %q", second[2].Claims[0].Waiver.Owner)
+	if second[3].Claims[0].Waiver.Owner != "ga-80po0c.3" {
+		t.Errorf("Catalog() waiver leaked mutation: %q", second[3].Claims[0].Waiver.Owner)
 	}
 	if second[len(second)-1].Source.Function != "resolveSessionTransportProvider" {
 		t.Errorf("Catalog() source leaked mutation: %q", second[len(second)-1].Source.Function)

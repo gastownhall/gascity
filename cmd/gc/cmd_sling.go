@@ -498,15 +498,16 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 		eventRecorder = openCityRecorderAt(cityPath, stderr)
 	}
 	deps := slingDeps{
-		CityName:   cityName,
-		CityPath:   cityPath,
-		Cfg:        cfg,
-		SP:         sp,
-		Runner:     runner,
-		Store:      store,
-		GraphStore: resolveGraphStore(store, cfg, cityPath, eventRecorder),
-		Events:     eventRecorder,
-		StoreRef:   storeRef,
+		CityName:           cityName,
+		CityPath:           cityPath,
+		Cfg:                cfg,
+		SP:                 sp,
+		Runner:             runner,
+		Store:              store,
+		GraphStore:         resolveGraphStore(cliStorageRoutes(cityPath), store, cfg, cityPath, eventRecorder),
+		Events:             eventRecorder,
+		ExecutionWorkStore: executionEmitStore(store, cityPath),
+		StoreRef:           storeRef,
 		SourceWorkflowStores: func() ([]sling.SourceWorkflowStore, error) {
 			stores, skips, err := openSourceWorkflowStoresWithProvider(cfg, cityPath, "", func(scopeRoot string) string {
 				return authoritativeBeadsProviderForScope(scopeRoot, cityPath)
@@ -1507,7 +1508,7 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 	st := cfg.Workspace.SessionTemplate
 
 	if a.Suspended {
-		fmt.Fprintf(stderr, "cannot nudge: agent %q is suspended\n", a.QualifiedName()) //nolint:errcheck // best-effort
+		fmt.Fprintf(stderr, "warning: cannot nudge %q: agent is suspended — bead routed but not nudged\n", a.QualifiedName()) //nolint:errcheck // best-effort
 		return
 	}
 
@@ -1526,11 +1527,7 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 				if err != nil || !running {
 					continue
 				}
-				member, ok := resolveAgentIdentity(cfg, ref.qualifiedInstance, currentRigContext(cfg))
-				if !ok {
-					fmt.Fprintf(stderr, "gc sling: agent %q not found in config\n", ref.qualifiedInstance) //nolint:errcheck // best-effort
-					return true
-				}
+				member := resolvePoolNudgeMember(cfg, a, ref.qualifiedInstance)
 				target := buildSlingNudgeTarget(member, cityName, cityPath, cfg, sessStore, ref.sessionName)
 				deliverSlingNudge(target, sp, rawStore, cityPath, stdout, stderr)
 				return true
@@ -1563,6 +1560,25 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 	sn := lookupSessionNameOrLegacy(sessStore, cityName, a.QualifiedName(), st)
 	target := buildSlingNudgeTarget(*a, cityName, cityPath, cfg, sessStore, sn)
 	deliverSlingNudge(target, sp, store, cityPath, stdout, stderr)
+}
+
+// resolvePoolNudgeMember resolves the config identity to nudge for a live pool
+// member. Live members are addressed by their instance identity, which is not
+// itself a config entry: numeric slots expand to "pool-N", and namepool slots
+// expand to the namepool name (e.g. "rig/binding.furiosa"). resolveAgentIdentity
+// synthesizes the numeric shape but has no namepool knowledge, so a config
+// lookup alone strands every namepool pool member.
+//
+// The pool agent the bead was routed to is always in config, so its instance
+// projection is the correct fallback: pool members inherit the pool's provider
+// and workspace settings, and only the identity differs.
+func resolvePoolNudgeMember(cfg *config.City, pool *config.Agent, qualifiedInstance string) config.Agent {
+	if member, ok := resolveAgentIdentity(cfg, qualifiedInstance, currentRigContext(cfg)); ok {
+		return member
+	}
+	// sessionBeadConfigAgent returns the pool agent itself when the identity is
+	// not an expanded instance, so a non-nil pool always yields a usable agent.
+	return *sessionBeadConfigAgent(pool, qualifiedInstance)
 }
 
 // pokeController sends a "poke" command to the controller socket to
@@ -1655,9 +1671,9 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Stor
 		}
 	}
 
-	if err := enqueueQueuedNudgeWithStore(target.cityPath, beads.NudgesStore{Store: store}, newQueuedNudgeWithOptions(target.agent.QualifiedName(), msg, "sling", now, queuedNudgeOptionsFromTarget(target))); err != nil {
+	if err := enqueueQueuedNudgeWithStore(target.cityPath, cliNudgesStore(store, target.cfg, target.cityPath), newQueuedNudgeWithOptions(target.agent.QualifiedName(), msg, "sling", now, queuedNudgeOptionsFromTarget(target))); err != nil {
 		telemetry.RecordNudge(context.Background(), target.agent.QualifiedName(), err)
-		fmt.Fprintf(stderr, "gc sling: nudge failed: %v\n", err) //nolint:errcheck // best-effort
+		fmt.Fprintf(stderr, "warning: bead routed but nudge failed: %v\n", err) //nolint:errcheck // best-effort
 		return
 	}
 	if running {

@@ -123,8 +123,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   549,
-			BaselineFiles:   166,
+			BaselineCalls:   628,
+			BaselineFiles:   182,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-80po0c.2",
@@ -136,8 +136,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   431,
-			BaselineFiles:   160,
+			BaselineCalls:   456,
+			BaselineFiles:   165,
 			ReportedCalls:   447,
 			ReportedFiles:   157,
 			OwnerBead:       "ga-80po0c.2",
@@ -164,8 +164,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   410,
-			BaselineFiles:   115,
+			BaselineCalls:   421,
+			BaselineFiles:   123,
 			ReportedCalls:   380,
 			ReportedFiles:   98,
 			OwnerBead:       "ga-80po0c.2",
@@ -177,8 +177,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   286,
-			BaselineFiles:   114,
+			BaselineCalls:   302,
+			BaselineFiles:   116,
 			ReportedCalls:   295,
 			ReportedFiles:   114,
 			OwnerBead:       "ga-80po0c.2",
@@ -190,7 +190,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceEnvironment,
-			BaselineCalls:   128,
+			BaselineCalls:   122,
 			BaselineFiles:   13,
 			ReportedCalls:   3960,
 			ReportedFiles:   184,
@@ -342,6 +342,17 @@ var bootstrapPolicy = Ledger{
 			Expires:         "2026-10-01",
 		},
 		{
+			PackageDir:      "cmd/gc",
+			PackageName:     "main",
+			Owner:           "TestPassthroughEnvWithholdsControllerTokenFromChildProcess",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-80po0c.2.1",
+			Invariant:       "the controller-token withholding proof is a checked Medium subprocess owner",
+			ResourceOwner:   "the one /bin/sh subprocess is confined to TestPassthroughEnvWithholdsControllerTokenFromChildProcess, which exists to read a credential back out of a real child process: the session env is an overlay, so only a real child can prove GC_CONTROLLER_TOKEN is absent rather than merely missing from a map",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-01",
+		},
+		{
 			PackageDir:      "internal/runtime/herdr",
 			PackageName:     "herdr",
 			Owner:           "TestServerAliveRejectsStaleSocket",
@@ -453,8 +464,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   404,
-			BaselineFiles:   112,
+			BaselineCalls:   414,
+			BaselineFiles:   119,
 			ReportedCalls:   394,
 			ReportedFiles:   105,
 			OwnerBead:       "ga-80po0c.2.1",
@@ -466,8 +477,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   286,
-			BaselineFiles:   114,
+			BaselineCalls:   302,
+			BaselineFiles:   116,
 			ReportedCalls:   287,
 			ReportedFiles:   113,
 			OwnerBead:       "ga-80po0c.2.1",
@@ -479,7 +490,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceEnvironment,
-			BaselineCalls:   122,
+			BaselineCalls:   116,
 			BaselineFiles:   13,
 			ReportedCalls:   4348,
 			ReportedFiles:   200,
@@ -661,13 +672,16 @@ func scopeContains(scope Scope, occurrence Occurrence) bool {
 	}
 }
 
-// ScanRepository scans the repository's tracked Go test files. Tracked sibling
-// Go source supplies package-level declaration context but is never counted.
-func ScanRepository(root string) (Census, error) {
+// TrackedGoFiles lists every git-tracked *.go file under root, repository-
+// relative with forward slashes. Listing tracked files rather than walking the
+// filesystem means an untracked nested git worktree checked out under root —
+// the common gitignored worktrees/<bead> pool-slot pattern — contributes
+// nothing: its files live in that worktree's own index, never this one's.
+func TrackedGoFiles(root string) ([]string, error) {
 	cmd := exec.Command("git", "-C", root, "ls-files", "-z", "--", "*.go")
 	out, err := cmd.Output()
 	if err != nil {
-		return Census{}, fmt.Errorf("listing tracked Go source: %w", err)
+		return nil, fmt.Errorf("listing tracked Go source: %w", err)
 	}
 	parts := strings.Split(string(out), "\x00")
 	files := make([]string, 0, len(parts))
@@ -675,6 +689,16 @@ func ScanRepository(root string) (Census, error) {
 		if name != "" {
 			files = append(files, filepath.ToSlash(name))
 		}
+	}
+	return files, nil
+}
+
+// ScanRepository scans the repository's tracked Go test files. Tracked sibling
+// Go source supplies package-level declaration context but is never counted.
+func ScanRepository(root string) (Census, error) {
+	files, err := TrackedGoFiles(root)
+	if err != nil {
+		return Census{}, err
 	}
 	return scanFiles(os.DirFS(root), files, reviewedHermeticPackages(bootstrapPolicy.ReviewedHermeticBody))
 }

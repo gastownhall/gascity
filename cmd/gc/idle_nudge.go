@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // Session-bead metadata keys for the stalled-claim backstop. The state machine
@@ -474,6 +475,10 @@ func normalizeIdleClaimStoreRef(storeRef string) string {
 	storeRef = strings.TrimSpace(storeRef)
 	switch {
 	case storeRef == "", storeRef == "city", strings.HasPrefix(storeRef, "city:"):
+		return "city"
+	// A class binding is city scope: it is the same store the leading arm used
+	// to record under the city ref, now named as a leg of its own.
+	case storeref.IsClassRef(storeRef):
 		return "city"
 	case strings.HasPrefix(storeRef, "rig:"):
 		return "rig:" + strings.TrimSpace(strings.TrimPrefix(storeRef, "rig:"))

@@ -827,10 +827,34 @@ func renderSessionListFromAPI(cr api.CachedRead[[]SessionView], jsonOutput bool,
 	}
 	_ = w.Flush() //nolint:errcheck // best-effort stdout
 
-	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
-		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck
+	if cr.AgeSeconds > sessionStateCacheAgeBannerThresholdSeconds {
+		fmt.Fprintln(stdout, sessionCacheAgeBanner(cr.AgeSeconds, "STATE")) //nolint:errcheck
 	}
 	return 0
+}
+
+// sessionStateCacheAgeBannerThresholdSeconds is the cache-age cutoff for the
+// session list and peek cache-age banner. It is session-scoped (NOT the
+// shared cacheAgeBannerThresholdSeconds) and intentionally lower — 15s vs 30s —
+// because the session values it flags (the STATE column, the cached pane
+// output) most often lag inside the post-wake reconciler poll window (#3755).
+// Scoping the lower cutoff to just these two views keeps the generic
+// "reconciler may be lagging" footer on every other command at 30s.
+const sessionStateCacheAgeBannerThresholdSeconds = 15.0
+
+// sessionCacheAgeBanner is the human-output footer for the session list and peek
+// views when the supervisor read-cache age exceeds
+// sessionStateCacheAgeBannerThresholdSeconds. Unlike the generic cache-age
+// banner, it names the specific cached value most likely to lag a just-woken
+// session within the reconciler poll window and points operators at out-of-band
+// ground truth. subject identifies that value per view — the STATE column on the
+// session list, the cached pane output on peek — so the footer never names a
+// STATE column peek does not render. cr.AgeSeconds is a single whole-read value,
+// so this stays a low-noise footer rather than a per-row marker (true per-row
+// freshness needs a SessionView state_updated_at field — out of scope, follow-up
+// gco-cyt3).
+func sessionCacheAgeBanner(ageSeconds float64, subject string) string {
+	return fmt.Sprintf("(cache age: %.0fs — %s may lag the runtime; verify a just-woken session via transcript / bead state)", ageSeconds, subject)
 }
 
 // sessionViewTarget mirrors sessionListTarget's fallback behavior, but
@@ -1845,11 +1869,19 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 	// Each Update fires the bd on_update hook, which emits a bead.updated
 	// event the supervisor's CachingStore absorbs — the cache-update event
 	// the close path was previously missing (gastownhall/gascity#2625).
+	//
+	// The scan leads with the WORK store here, unlike the reconciler's, which
+	// leads with the sessions-class store. On a split city that difference used
+	// to be the whole release tier for relocated work: claim-time class routing
+	// (claim_class_route.go) can leave an in_progress assignee in the graph
+	// binding, and a work-led scan cannot see it. The binding is now a leg of
+	// the sweep's own plan (assignedWorkSweepPlan), so this site hands in
+	// nothing and a city that relocates nothing still reads one store.
 	var rigStores map[string]beads.Store
 	if cityErr == nil && cfg != nil {
 		rigStores = buildStandaloneRigStores(cfg, cityPath, stderr)
 	}
-	unclaimWorkAssignedToRetiredSessionBead(store, rigStores, closedSessionBead, "", stderr)
+	unclaimWorkAssignedToRetiredSessionBead(cityPath, cfg, store, rigStores, closedSessionBead, "", stderr)
 
 	if asJSON {
 		if err := writeSessionActionJSON(stdout, sessionActionResult{
@@ -2208,8 +2240,8 @@ func renderSessionPeekFromAPI(cr api.CachedRead[api.SessionView], target string,
 	if !strings.HasSuffix(output, "\n") {
 		fmt.Fprintln(stdout) //nolint:errcheck // best-effort stdout
 	}
-	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
-		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck
+	if cr.AgeSeconds > sessionStateCacheAgeBannerThresholdSeconds {
+		fmt.Fprintln(stdout, sessionCacheAgeBanner(cr.AgeSeconds, "cached pane output")) //nolint:errcheck
 	}
 	return 0
 }

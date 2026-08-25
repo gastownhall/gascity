@@ -1512,7 +1512,7 @@ func TestCmdMailInbox_NormalizesCanonicalManagedProviderEnvAndReadsInbox(t *test
 	if err != nil {
 		t.Fatalf("nativeDoltOpenEnvForScope(): %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), nativeStorageFixtureBootTimeout)
 	defer cancel()
 	nativeStorage, err := beads.OpenNativeStorage(ctx, cityDir, nativeEnv)
 	if err != nil {
@@ -3606,6 +3606,27 @@ func TestMailCheckInjectDoesNotCloseBeads(t *testing.T) {
 	}
 }
 
+// assertAutoHandoffRetainedAddressable pins the dip-6ov51a contract at the inject
+// integration boundary: an injected auto-handoff is MARK-READ + CLOSED and stamped
+// with the retention marker (retain-addressable), NOT hard-deleted, so an
+// unconsumed handoff stays recoverable until the read-gated TTL sweep reclaims it.
+func assertAutoHandoffRetainedAddressable(t *testing.T, store beads.Store, id string) {
+	t.Helper()
+	b, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("auto handoff %s must be retained addressable after injection, not hard-deleted; store.Get = %v", id, err)
+	}
+	if b.Status != "closed" {
+		t.Errorf("auto handoff %s status = %q, want closed", id, b.Status)
+	}
+	if got := b.Metadata[mail.ReadMetadataKey]; got != "true" {
+		t.Errorf("auto handoff %s metadata[%q] = %q, want %q (marked read)", id, mail.ReadMetadataKey, got, "true")
+	}
+	if got := b.Metadata["close_reason"]; got != beadmail.RetentionSweepCloseReason {
+		t.Errorf("auto handoff %s close_reason = %q, want %q (retain-addressable)", id, got, beadmail.RetentionSweepCloseReason)
+	}
+}
+
 func TestMailCheckInjectArchivesAutoHandoffMessages(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
@@ -3632,9 +3653,7 @@ func TestMailCheckInjectArchivesAutoHandoffMessages(t *testing.T) {
 	if !strings.Contains(stdout.String(), auto.ID) {
 		t.Fatalf("injected output missing auto handoff id %s:\n%s", auto.ID, stdout.String())
 	}
-	if _, err := store.Get(auto.ID); !errors.Is(err, beads.ErrNotFound) {
-		t.Fatalf("auto handoff mail should be archived after injection, got err=%v", err)
-	}
+	assertAutoHandoffRetainedAddressable(t, store, auto.ID)
 	b, err := store.Get(ordinary.ID)
 	if err != nil {
 		t.Fatalf("ordinary mail should remain: %v", err)
@@ -3645,9 +3664,10 @@ func TestMailCheckInjectArchivesAutoHandoffMessages(t *testing.T) {
 }
 
 // TestMailCheckInjectArchivesEphemeralAutoHandoffMessages verifies that
-// ephemeral (wisp-tier) auto-handoff mail is archived after injection.
+// ephemeral (wisp-tier) auto-handoff mail is retired after injection.
 // gc handoff --auto creates Ephemeral:true beads; BdStore.Get must fall back
-// to the wisp tier so ArchiveInjectedAutoHandoffs can delete them.
+// to the wisp tier so ArchiveInjectedAutoHandoffs can retire them
+// (mark-read + close, retain-addressable — dip-6ov51a).
 func TestMailCheckInjectArchivesEphemeralAutoHandoffMessages(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
@@ -3671,9 +3691,7 @@ func TestMailCheckInjectArchivesEphemeralAutoHandoffMessages(t *testing.T) {
 	if !strings.Contains(stdout.String(), auto.ID) {
 		t.Fatalf("injected output missing auto handoff id %s:\n%s", auto.ID, stdout.String())
 	}
-	if _, err := store.Get(auto.ID); !errors.Is(err, beads.ErrNotFound) {
-		t.Fatalf("ephemeral auto handoff mail should be archived after injection, got err=%v", err)
-	}
+	assertAutoHandoffRetainedAddressable(t, store, auto.ID)
 }
 
 // TestMailCheckInjectFloatsPriorityAutoHandoffIntoWindow is the deliberate
@@ -3719,10 +3737,8 @@ func TestMailCheckInjectFloatsPriorityAutoHandoffIntoWindow(t *testing.T) {
 	if !strings.Contains(stdout.String(), auto.ID) {
 		t.Fatalf("priority:1 auto handoff id %s should float into the injection window:\n%s", auto.ID, stdout.String())
 	}
-	// ...and is archived (deleted) after injection.
-	if _, err := store.Get(auto.ID); !errors.Is(err, beads.ErrNotFound) {
-		t.Fatalf("priority:1 auto handoff should be archived after injection, got err=%v", err)
-	}
+	// ...and is retired (mark-read+closed, retain-addressable) after injection.
+	assertAutoHandoffRetainedAddressable(t, store, auto.ID)
 	// The lowest-ranked ordinary message is the one clamped out — still open.
 	clampedOut := ordinaryIDs[len(ordinaryIDs)-1]
 	b, err := store.Get(clampedOut)
@@ -4637,9 +4653,7 @@ name = "mayor"
 	if strings.Contains(stdout.String(), "msg-1") {
 		t.Fatalf("inject path used API inbox instead of local provider:\n%s", stdout.String())
 	}
-	if _, err := store.Get(auto.ID); !errors.Is(err, beads.ErrNotFound) {
-		t.Fatalf("auto handoff mail should be archived after local injection, got err=%v", err)
-	}
+	assertAutoHandoffRetainedAddressable(t, store, auto.ID)
 }
 
 func TestRenderMailCheckFromAPIInjectCodexUsesUserPromptSubmit(t *testing.T) {

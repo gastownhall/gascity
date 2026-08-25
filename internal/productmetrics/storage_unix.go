@@ -1584,6 +1584,7 @@ func (directory *unixStorageDirectory) writeFileAtomically(name string, data []b
 	if metadataErr != nil {
 		return result, metadataErr
 	}
+	result.record = recordIncarnation{dev: tempMetadata.dev, ino: tempMetadata.ino}
 	if marker != nil {
 		if err := marker.revalidateBound(tempMetadata); err != nil {
 			return result, err

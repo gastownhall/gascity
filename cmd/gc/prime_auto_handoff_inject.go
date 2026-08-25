@@ -112,7 +112,7 @@ func sessionStartAutoHandoffInjection(stderr io.Writer) (primeHookContextInjecti
 		return primeHookContextInjection{}, nil
 	}
 	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
-	msgStore := resolveMailMessagesStore(store, cfg, cityPath, nil)
+	msgStore := resolveMailMessagesStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)
 	sessStore := cliSessionStore(store, cfg, cityPath)
 	mp := beadmail.NewWithStores(msgStore, sessStore)
 	sessionID := strings.TrimSpace(os.Getenv("GC_SESSION_ID"))

@@ -66,11 +66,15 @@ func registerPackCommands(root *cobra.Command, args []string, stdout, stderr io.
 	if isCredentialHelperInvocation(args) {
 		return
 	}
-	cityPath, err := resolveCity()
+	// Eager discovery runs on every gc invocation, whatever the user typed, so
+	// it resolves advisorily: it must not wait on another process's repo-cache
+	// clone. When it degrades, the command the user actually typed still
+	// resolves through the blocking lazy paths below.
+	cityPath, err := resolveCityForDiscovery()
 	if err != nil {
 		return
 	}
-	cfg, err := quietLoadCityConfig(cityPath)
+	cfg, err := loadCityConfigAdvisory(cityPath)
 	if err != nil {
 		return
 	}

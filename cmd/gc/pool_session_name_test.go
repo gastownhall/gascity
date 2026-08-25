@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"errors"
 	"log"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -1161,7 +1163,7 @@ func TestCollectAndReleaseOrphanPoolStepBead_Issue2793(t *testing.T) {
 
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}
 
-	found, foundStores, foundStoreRefs, _, partial := collectAssignedWorkBeadsWithStores(cfg, store, nil, nil, nil)
+	found, foundStores, foundStoreRefs, _, partial := collectAssignedWorkBeadsWithStores("", cfg, store, nil, nil, nil)
 	if partial {
 		t.Fatal("collectAssignedWorkBeadsWithStores reported partial results")
 	}
@@ -1212,7 +1214,7 @@ func TestCollectAndReleaseOrphanWorkflowRunTargetBead(t *testing.T) {
 
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}
 
-	found, foundStores, foundStoreRefs, _, partial := collectAssignedWorkBeadsWithStores(cfg, store, nil, nil, nil)
+	found, foundStores, foundStoreRefs, _, partial := collectAssignedWorkBeadsWithStores("", cfg, store, nil, nil, nil)
 	if partial {
 		t.Fatal("collectAssignedWorkBeadsWithStores reported partial results")
 	}
@@ -1262,7 +1264,7 @@ func TestCollectAndReleaseNonWorkflowRunTargetBeadStaysAssigned(t *testing.T) {
 
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}
 
-	found, foundStores, foundStoreRefs, _, partial := collectAssignedWorkBeadsWithStores(cfg, store, nil, nil, nil)
+	found, foundStores, foundStoreRefs, _, partial := collectAssignedWorkBeadsWithStores("", cfg, store, nil, nil, nil)
 	if partial {
 		t.Fatal("collectAssignedWorkBeadsWithStores reported partial results")
 	}
@@ -1301,6 +1303,7 @@ func TestCollectAssignedWorkBeadsIncludesUnassignedInProgressPoolWorkForRecovery
 	}
 
 	found, stores, _, _, partial := collectAssignedWorkBeadsWithStores(
+		"",
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		store,
 		nil,
@@ -2275,6 +2278,7 @@ func (s *conditionalReleaseProbeStore) reclaim() {
 func releaseProbeAssignments(store *conditionalReleaseProbeStore, work beads.Bead) []releasedPoolAssignment {
 	return releaseOrphanedPoolAssignments(
 		store,
+		beads.SessionStore{Store: store},
 		testPoolReleaseConfig(),
 		"",
 		nil,
@@ -2482,7 +2486,9 @@ func releaseOrphanedPoolAssignmentsFromBeads(
 	for _, b := range openSessionBeads {
 		infos = append(infos, seedSessionInfo(b))
 	}
-	return releaseOrphanedPoolAssignments(store, cfg, cityPath, infos, assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, rigStores)
+	// Single-store fixtures: the session class resolves to the work store, which
+	// is what a city without a [storage.classes] sessions binding does.
+	return releaseOrphanedPoolAssignments(store, beads.SessionStore{Store: store}, cfg, cityPath, infos, assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, rigStores)
 }
 
 // gcSweepSessionBeadsFromBeads projects raw session beads to session.Info and
@@ -2493,5 +2499,133 @@ func gcSweepSessionBeadsFromBeads(store beads.Store, sessionBeads []beads.Bead) 
 	for _, b := range sessionBeads {
 		infos = append(infos, seedSessionInfo(b))
 	}
-	return GCSweepSessionBeads(store, nil, infos)
+	return GCSweepSessionBeads("", store, nil, infos)
+}
+
+func TestDirectSessionBeadIDCandidates_DerivesModernPoolSessionBeadID(t *testing.T) {
+	// Regression (ga-us0j): pool session names are
+	// PoolSessionName(template, beadID) == "<sanitized-template-base>-<beadID>",
+	// and bead IDs themselves contain a "-" ("th-vb20q"), so the bead ID is
+	// not the final "-"-delimited segment. The direct-resolution candidates
+	// must still offer it, otherwise liveSessionBeadExistsByIdentity cannot
+	// resolve a live modern-named session and orphan release drops a live
+	// worker's claim.
+	sessionName := PoolSessionName("gascity/koolkats.polekitten", "th-vb20q")
+	if sessionName != "koolkats__polekitten-th-vb20q" {
+		t.Fatalf("PoolSessionName = %q, want koolkats__polekitten-th-vb20q", sessionName)
+	}
+
+	candidates := directSessionBeadIDCandidates(sessionName)
+	if !slices.Contains(candidates, "th-vb20q") {
+		t.Fatalf("candidates = %v, want to contain the session bead ID %q", candidates, "th-vb20q")
+	}
+
+	// The legacy "-mc-" form must keep resolving.
+	legacy := directSessionBeadIDCandidates("worker-mc-live")
+	if !slices.Contains(legacy, "mc-live") {
+		t.Fatalf("legacy candidates = %v, want to contain %q", legacy, "mc-live")
+	}
+}
+
+func TestReleaseOrphanedPoolAssignments_SkipsLiveModernPoolSessionWhenLiveListMissesIt(t *testing.T) {
+	// Regression (ga-us0j): a live pool worker's claim was reset to
+	// open+unassigned while the worker was mid-run. The work bead kept
+	// gc.routed_to, so it immediately re-matched pending pool demand and a
+	// second worker could be spawned onto the same bead and branch.
+	//
+	// The trigger is a live session that is absent from BOTH the open-session
+	// snapshot and the live gc:session label list. The designed backstop is
+	// liveSessionBeadExistsByIdentity resolving the session bead directly by
+	// ID, but it only understood the legacy "-mc-" naming, so modern pool
+	// session names had no backstop at all.
+	base := beads.NewMemStore()
+	sessionBead, err := base.Create(beads.Bead{
+		Title:  "polekitten",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":             "gascity/koolkats.polekitten",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+	// The session name embeds this session bead's own ID, exactly as the
+	// runtime builds it.
+	sessionName := PoolSessionName("gascity/koolkats.polekitten", sessionBead.ID)
+	if err := base.SetMetadata(sessionBead.ID, "session_name", sessionName); err != nil {
+		t.Fatalf("Set session_name: %v", err)
+	}
+
+	work, err := base.Create(beads.Bead{
+		Title:    "claimed pool work",
+		Assignee: sessionName,
+		Metadata: map[string]string{"gc.routed_to": "gascity/koolkats.polekitten"},
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	if err := base.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set work status: %v", err)
+	}
+	work, err = base.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Reload work bead: %v", err)
+	}
+
+	// The live gc:session label list misses the session; Get still resolves it.
+	store := sessionListMissStore{Store: base}
+
+	released := releaseOrphanedPoolAssignments(
+		store,
+		beads.SessionStore{Store: store},
+		&config.City{Agents: []config.Agent{{
+			Name:              "gascity/koolkats.polekitten",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(2),
+		}}},
+		"",
+		nil, // open-session snapshot also misses the live session
+		[]beads.Bead{work},
+		[]beads.Store{store},
+		nil,
+		nil,
+	)
+	if len(released) != 0 {
+		t.Fatalf("released = %v, want none — the owning pool session is live", released)
+	}
+
+	got, err := base.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Status != "in_progress" {
+		t.Fatalf("status = %q, want in_progress — a live worker's claim was dropped", got.Status)
+	}
+	if got.Assignee != sessionName {
+		t.Fatalf("assignee = %q, want %q", got.Assignee, sessionName)
+	}
+}
+
+func TestDirectSessionBeadIDCandidates_SkipsFlagLikeCandidates(t *testing.T) {
+	// agent.SessionNameFor encodes "/" as "--" for qualified identities, so a
+	// named-session assignee can carry a "--" pair. The suffix starting at the
+	// second "-" of that pair begins with "-", which is never a bead ID and
+	// which shell-out stores would read as a flag.
+	sessionName := agent.SessionNameFor("", "hello-world/polecat", "") + "-th-abc12"
+	if sessionName != "hello-world--polecat-th-abc12" {
+		t.Fatalf("session name = %q, want hello-world--polecat-th-abc12", sessionName)
+	}
+
+	candidates := directSessionBeadIDCandidates(sessionName)
+	if !slices.Contains(candidates, "th-abc12") {
+		t.Fatalf("candidates = %v, want to contain the session bead ID %q", candidates, "th-abc12")
+	}
+	for _, c := range candidates {
+		if strings.HasPrefix(c, "-") {
+			t.Fatalf("candidate %q starts with %q; stores that shell out would read it as a flag (all: %v)", c, "-", candidates)
+		}
+	}
 }

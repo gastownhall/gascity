@@ -1386,7 +1386,7 @@ drain_connections_before_stop() {
 # check_read_only tests if the dolt server is in read-only mode.
 # Returns 0 if read-only, 1 if writable, 2 if the write probe is inconclusive.
 check_read_only() {
-    local host gc_bin db quoted_db probe_table sql output err_file err_text status
+    local host gc_bin db quoted_db probe_table ignore_table sql output err_file err_text status
     host=$(connect_host)
     gc_bin=$(resolve_gc_helper_bin)
     if [ -n "$gc_bin" ]; then
@@ -1428,7 +1428,20 @@ check_read_only() {
     fi
     quoted_db=$(quote_dolt_identifier "$db")
     probe_table='`__gc_read_only_probe`'
-    sql="CREATE TABLE IF NOT EXISTS ${quoted_db}.${probe_table} (k INT PRIMARY KEY); REPLACE INTO ${quoted_db}.${probe_table} VALUES (1);"
+    ignore_table='`dolt_ignore`'
+    # The probe table is registered in dolt_ignore so history flattening can
+    # never first-commit it: a non-ignored table that lives only in the working
+    # set is committed by the compaction flatten's DOLT_COMMIT -Am, which drifts
+    # the database hash and quarantines GC for that database (hq June 2026, daa
+    # 2026-08-04). INSERT IGNORE keeps an operator's explicit ignored = 0
+    # override. The probe opens with USE because dolt_ignore is a session-root
+    # backed system table: this remote connection has no default schema, and a
+    # qualified write to dolt_ignore without a current database fails with "no
+    # root value found in session". USE is read-only, so the registration stays
+    # last and a read-only server still fails on the CREATE or REPLACE, which
+    # the classification below keys on. Mirrors cmd/gc/dolt_sql_health.go
+    # managedDoltReadOnlyProbeStatementsFor.
+    sql="USE ${quoted_db}; CREATE TABLE IF NOT EXISTS ${quoted_db}.${probe_table} (k INT PRIMARY KEY); REPLACE INTO ${quoted_db}.${probe_table} VALUES (1); INSERT IGNORE INTO ${quoted_db}.${ignore_table} (pattern, ignored) VALUES ('__gc_read_only_probe', 1);"
     if output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
         sql -q "$sql" 2>&1); then
         return 1

@@ -32,10 +32,43 @@ const (
 	// Turns the otherwise-silent lost-claim race (RCA gc-typpc: one bead, four
 	// concurrent polecat claims) into an observable signal. ADR-0009.
 	BeadClaimRejected = "bead.claim_rejected"
+	// BeadClaimReleased fires when a claim this process WON is given back
+	// because it could not be delivered to a live consumer: the worker's result
+	// write failed (the provider closed the tool pipe), or the CAS landed after
+	// the invoking turn's claim window was already spent. Both shapes produce an
+	// in_progress bead nobody will ever execute, so the claim is released
+	// compare-and-swap and this event records that it happened. It is the
+	// release dual of BeadClaimRejected: that one reports a claim we did not
+	// get, this one a claim we could not keep.
+	//
+	// COMPENSATION PAIR — read this before treating step lifecycle as monotonic.
+	// A bead.claim_released whose subject already has an execution.step_started
+	// is the second half of a compensating pair, not a step that ran and
+	// finished: the claim path emits step_started at claim time and only then
+	// discovers it cannot deliver the result (or that the CAS landed past its
+	// window), so the release UNDOES a step that never executed. An
+	// event-sourcing consumer — the runs view especially — must treat that pair
+	// as "no attempt happened" rather than leaving the step in-flight forever
+	// waiting for an execution.step_completed that is never coming. The pair is
+	// always same-subject and same-process, and the payload's reason names which
+	// unwind ran.
+	BeadClaimReleased = "bead.claim_released"
+	// ExecutionClaimWindowExpired fires when gc hook --claim reaches a claim
+	// mutation after its invocation window has elapsed — the signature of a
+	// claim command that outlived the agent turn that invoked it (an abandoned
+	// or killed provider tool call). No claim is minted. The payload's
+	// invocation_age_ms and parent_alive let the fleet distinguish honest slow
+	// stores from orphaned claimers reparented to init.
+	ExecutionClaimWindowExpired = "execution.claim_window_expired"
 	// ExecutionWorkAssociated records an authoritative association between a
 	// graph.v2 workflow run and one physical input work bead. Subject carries
 	// the work bead and RunID carries the workflow root.
 	ExecutionWorkAssociated = "execution.work_associated"
+	// ExecutionRunAnchored records an authoritative relation between a graph.v2
+	// workflow run and a source work bead. Subject carries the source bead
+	// and RunID carries the workflow root; it does not replace the physical
+	// launch carried by ExecutionWorkAssociated.
+	ExecutionRunAnchored = "execution.run_anchored"
 	// ExecutionStepDefined records one physical native execution-step
 	// occurrence. Subject carries the physical step bead, RunID the workflow
 	// root, and StepID/DependsOnStepIDs the semantic topology.
@@ -45,6 +78,13 @@ const (
 	// RunID, SessionID, StepID, and DependsOnStepIDs carry its durable identity.
 	ExecutionStepStarted   = "execution.step_started"
 	ExecutionStepCompleted = "execution.step_completed"
+	// ExecutionStepStalled records that a session claimed a step and then never
+	// executed it: the claim-without-execution shape the controller's execution
+	// backstop gave up re-delivering a claim nudge for. Subject carries the work
+	// bead, RunID the workflow root, SessionID the holder. It is a controller
+	// LIVENESS fact, not a graph execution fact — nothing about the step's
+	// topology is asserted, and no projector consumes it.
+	ExecutionStepStalled = "execution.step_stalled"
 	// BeadDeadAssigneeReopened fires when the reconciler reopens a routed work
 	// bead whose assignee resolves to no open session bead — the owning session
 	// closed/retired while the bead stayed assigned, leaving it open+routed but
@@ -103,12 +143,20 @@ const (
 	// session, template, reset timestamp, and elapsed wait.
 	SessionResetStalled = "session.reset_stalled"
 	// SessionWorkQueryFailed fires when the current managed session's
-	// work-discovery query subprocess is killed by an external signal or
-	// aborted by the runner-imposed timeout before producing output.
+	// work-discovery query FAILED — killed by an external signal, aborted by the
+	// runner-imposed timeout, or exited non-zero — before producing output.
 	// Emission requires the current session ID so the lifecycle payload
 	// remains correlated; the companion reconciler handler is tracked in
 	// #1497.
 	SessionWorkQueryFailed = "session.work_query_failed"
+	// SessionDemandClaimDivergence fires when a seat the controller spawned on
+	// DEMAND evidence drains with no work. It is a diagnostics counter for the
+	// agreement invariant between the two readers — the controller's demand read
+	// and the worker's claim read — and it never influences the drain it reports
+	// on. Two classifications: benign (a sibling legitimately claimed the row
+	// first, which is correct pull, not a defect) and divergence (the row is
+	// still open, unassigned and route-matching, so the readers disagreed).
+	SessionDemandClaimDivergence = "session.demand_claim_divergence"
 	// SessionColdStartTimeout fires when a pool session's first runtime spawn
 	// (a pending create) exceeds the start deadline and is rolled back. It is
 	// per-session: it fires whenever a fresh spawn times out, including a warm
@@ -120,6 +168,19 @@ const (
 	ConvoyClosed            = "convoy.closed"
 	ControllerStarted       = "controller.started"
 	ControllerStopped       = "controller.stopped"
+	// ControlStalled fires once, when a control bead's bounded semantic-refusal
+	// retry budget expires and the control dispatcher quarantines it. Before
+	// this event the control plane had no control.* vocabulary at all, so a
+	// city whose dispatcher spent 95% of its throughput re-asking a question
+	// the store had already refused was, by construction, invisible on the
+	// event bus: no event, no metric, every health surface green. It is
+	// edge-triggered on the quarantine, not level-triggered on the retry — one
+	// emission per stalled bead under the intended single-control-dispatcher-
+	// per-city topology, never one per attempt. Control beads carry no
+	// claim/lease, so a misconfigured second dispatcher over the same store
+	// could also observe expiry and emit; consumers should tolerate a duplicate
+	// rather than assume a globally exactly-once signal.
+	ControlStalled = "control.stalled"
 	// SupervisorStarted fires once per supervisor startup, after the
 	// instance lock is acquired. Its payload classifies how the previous
 	// supervisor instance exited (clean, crash, or unknown), derived from
@@ -155,11 +216,18 @@ const (
 
 	// Non-terminal city lifecycle events recorded in the per-city
 	// event log during init/unregister for diagnostics.
-	CityCreated                     = "city.created"
-	CityUnregisterRequested         = "city.unregister_requested"
-	OrderFired                      = "order.fired"
-	OrderCompleted                  = "order.completed"
-	OrderFailed                     = "order.failed"
+	CityCreated             = "city.created"
+	CityUnregisterRequested = "city.unregister_requested"
+	OrderFired              = "order.fired"
+	OrderCompleted          = "order.completed"
+	OrderFailed             = "order.failed"
+	// OrderSuppressed reports that an order's open-work gate has held it shut
+	// for a long unbroken run of dispatch checks. The gate is single-flight
+	// machinery, not a failure, so a short streak is normal; a streak that keeps
+	// growing is an order that has stopped running with nothing else to say so.
+	// Rate-bounded at the emit site (see cmd/gc/order_dispatch.go) — a
+	// permanently wedged order cannot turn this into a per-tick stream.
+	OrderSuppressed                 = "order.suppressed"
 	ProviderSwapped                 = "provider.swapped"
 	WorkerOperation                 = "worker.operation"
 	ProjectIdentityStamped          = "project.identity.stamped"
@@ -223,12 +291,12 @@ const (
 	StoreDiskWarn     = "gc.store.disk_warn"
 	StoreDiskCritical = "gc.store.disk_critical"
 
-	// Postgres credential resolution. Emitted by the bd-env projection
-	// path on every successful pgauth resolve. The payload identifies
-	// the scope and the resolution tier that supplied the value; it
-	// MUST NOT carry the password value (asserted by
-	// TestPostgresEventOmitsPassword).
-	PostgresCredentialResolved = "pg.credential_resolved"
+	// BackendCredentialResolved records that a credential for a storage
+	// backend was resolved for one scope. The payload names the backend,
+	// the scope and the resolution tier that supplied the value; it MUST
+	// NOT carry the value itself (asserted by
+	// TestBackendCredentialResolvedPayloadOmitsTheCredential).
+	BackendCredentialResolved = "backend.credential_resolved"
 
 	// ProviderHealthGateAlert fires once per red episode when the provider-health
 	// gate parks respawns for a provider. Carries episode ID, onset time, and
@@ -251,6 +319,20 @@ const (
 	// lifecycle events under bead.*). Registered in stage 2 (S2-T11);
 	// emission is wired in stage 3 — nothing emits it yet.
 	BeadsConditionalWritesDegraded = "beads.conditional_writes.degraded"
+
+	// Storage-class binding outcomes. Emitted once per controller boot by the
+	// storage gate, and once per run by `gc storage migrate`, for a city whose
+	// [storage.classes] relocate the infrastructure classes to a binding.
+	//
+	// Converged and Genesis are the two serving outcomes: the first opened a
+	// binding a proven copy already populated, the second created one for a
+	// city that had nothing to move. Unconverged and Uncheckable are the two
+	// refusals: config and data disagree, or the check that would decide could
+	// not run. A city with no [storage] section emits none of them.
+	StorageBindingConverged   = "storage.binding.converged"
+	StorageBindingGenesis     = "storage.binding.genesis"
+	StorageBindingUnconverged = "storage.binding.unconverged"
+	StorageBindingUncheckable = "storage.binding.uncheckable"
 )
 
 // KnownEventTypes lists every event-type constant this package defines.
@@ -266,23 +348,27 @@ var KnownEventTypes = []string{
 	SessionUnknownState,
 	SessionResetStalled,
 	SessionWorkQueryFailed,
+	SessionDemandClaimDivergence,
 	SessionColdStartTimeout,
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
-	BeadClaimRejected,
+	BeadClaimRejected, BeadClaimReleased,
 	BeadDeadAssigneeReopened,
-	ExecutionWorkAssociated, ExecutionStepDefined, ExecutionStepStarted, ExecutionStepCompleted,
+	ExecutionWorkAssociated, ExecutionRunAnchored, ExecutionStepDefined, ExecutionStepStarted, ExecutionStepCompleted,
+	ExecutionClaimWindowExpired,
+	ExecutionStepStalled,
 	MailSent, MailRead, MailArchived, MailMarkedRead, MailMarkedUnread,
 	MailReplied, MailDeleted,
 	ConvoyCreated, ConvoyClosed,
 	ControllerStarted, ControllerStopped,
+	ControlStalled,
 	CitySuspended, CityResumed,
 	RequestResultCityCreate, RequestResultCityUnregister,
 	RequestResultSessionCreate, RequestResultSessionMessage,
 	RequestResultSessionSubmit, RequestResultRigCreate, RequestFailed,
 	RigProvisionProgress,
 	CityCreated, CityUnregisterRequested,
-	OrderFired, OrderCompleted, OrderFailed,
+	OrderFired, OrderCompleted, OrderFailed, OrderSuppressed,
 	ProviderSwapped, WorkerOperation, ProjectIdentityStamped, SupervisorFSPressureSkippedTick,
 	MoleculeResolved,
 	SupervisorStarted, SupervisorShutdownRequested, SupervisorRequest,
@@ -294,9 +380,11 @@ var KnownEventTypes = []string{
 	EventsRotated,
 	StoreMaintenanceDone, StoreMaintenanceFailed,
 	StoreDiskWarn, StoreDiskCritical,
-	PostgresCredentialResolved,
+	BackendCredentialResolved,
 	EmergencySignaled, EmergencyAcked,
 	BeadsConditionalWritesDegraded,
+	StorageBindingConverged, StorageBindingGenesis,
+	StorageBindingUnconverged, StorageBindingUncheckable,
 	// ProviderHealthGateAlert is intentionally omitted from KnownEventTypes.
 	// The event is emitted by the reconciler but its typed SSE payload is not
 	// yet registered in internal/api (the payload registration lives in a

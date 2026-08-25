@@ -330,6 +330,33 @@ test_allow_when_assignee_is_session_name() {
     rm -rf "$repo" "$fbd"
 }
 
+# Regression (ga-kzl21p): a session running as pool instance "<agent>-N" has
+# GC_TEMPLATE set to the bare pool identity "<agent>" (stamped by the SDK at
+# session start regardless of which instance is running — see
+# internal/session/lifecycle.go), but work routed to the whole pool can carry
+# that same bare "<agent>" string as bead.assignee (not any instance-suffixed
+# form). GC_TEMPLATE was missing from the identity-set match, so a session
+# whose GC_AGENT/GC_SESSION_ID/GC_SESSION_NAME are all instance-specific could
+# never match a pool-level assignee — completed, gate-verified work became
+# unpushable with no reassignment and no bypass. Concrete instance: TEMPLATE=
+# gascity/builder, TARGET=gascity/builder-1, assignee=gascity/builder.
+test_allow_when_assignee_is_bare_pool_template() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    # assignee is the bare pool template ("tmpl-x"), matching GC_TEMPLATE —
+    # not GC_AGENT/GC_SESSION_ID/GC_SESSION_NAME, which are all instance-shaped.
+    write_show_json "$fbd" "ga-abc123.1" "in_progress" "tmpl-x" "tmpl-x" "[]"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 5 "sess-id-x" "sess-name-x" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]]; then
+        record_pass "allow/assignee-is-bare-pool-template (rc=0, GC_AGENT/SESSION_ID/SESSION_NAME all differ)"
+    else
+        record_fail "allow/assignee-is-bare-pool-template" "expected rc=0, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
 test_block_on_routed_to_changed() {
     local repo fbd out rc
     repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
@@ -552,6 +579,199 @@ test_bead_id_fallback_used_when_branch_no_match() {
         record_pass "resolve/assignee-fallback-used-when-branch-no-match (rc=0)"
     else
         record_fail "resolve/assignee-fallback-used-when-branch-no-match" "expected rc=0, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+# ---------------------------------------------------------------------------
+# Branch reuse (ga-bf39j8): the same branch name can be reused across a
+# sequence of beads over time -- e.g. a build bead closes, and a review bead
+# continues work on the IDENTICAL branch. The branch-derived id then names a
+# CLOSED predecessor, not this push's actual bead, and the plain
+# branch-wins rule permanently blocks every future push on that branch.
+# Concrete real repro (see ga-bf39j8's own notes for the full chain, verified
+# against live bd data twice): branch builder/ga-pyp2oh, bead ga-pyp2oh
+# closed, a review bead (e.g. ga-zpo) with metadata.branch ==
+# "builder/ga-pyp2oh" and metadata.build_bead == "ga-14w" (an intermediate
+# closed bead) still in_progress under the same session identity. The fix
+# only overrides when a candidate among this session's own in-progress beads
+# EXPLICITLY declares itself the branch's continuation (metadata.branch
+# equal to the literal current branch name, or metadata.build_bead equal to
+# the closed branch-derived id) AND a fresh read confirms the branch-derived
+# bead is actually no longer active. An explicit declared link is required,
+# not just "any in-progress bead under this assignee": this shared assignee
+# identity routinely holds several unrelated in-progress beads at once (see
+# the cardinality test below), and picking one blind would validate this
+# push against totally unrelated work.
+# ---------------------------------------------------------------------------
+
+test_bead_id_branch_reused_prefers_open_successor_when_branch_bead_closed() {
+    local repo fbd out rc show_ids
+    repo="$(new_repo_with_branch "builder/ga-oldbld-my-feature")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    cat > "$fbd/bd" <<'FAKE'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  show)
+    echo "$2" >> "$(dirname "$0")/show-ids.log"
+    case "$2" in
+      ga-oldbld) printf '[{"id":"ga-oldbld","status":"closed","assignee":"agent-x","metadata":{"gc.routed_to":"tmpl-x"},"labels":[]}]' ;;
+      ga-newsuc) printf '[{"id":"ga-newsuc","status":"in_progress","assignee":"agent-x","metadata":{"gc.routed_to":"tmpl-x"},"labels":[]}]' ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  list)
+    printf '[{"id":"ga-newsuc","metadata":{"branch":"builder/ga-oldbld-my-feature","build_bead":"ga-oldbld"}}]'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+FAKE
+    chmod +x "$fbd/bd"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    show_ids="$(cat "$fbd/show-ids.log" 2>/dev/null || true)"
+    if [[ $rc -eq 0 ]] && grep -qx "ga-oldbld" <<<"$show_ids" && grep -qx "ga-newsuc" <<<"$show_ids"; then
+        record_pass "resolve/branch-reused-prefers-open-successor-when-branch-bead-closed (rc=0, checked ga-oldbld (found closed) then verified ownership fresh against live successor ga-newsuc)"
+    else
+        record_fail "resolve/branch-reused-prefers-open-successor-when-branch-bead-closed" "expected rc=0 with bd show called against both ga-oldbld (closure check) and ga-newsuc (final ownership check), got rc=$rc show_ids=[$show_ids], output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+# Same fixture, but the successor declares itself via metadata.branch alone
+# (no build_bead key at all) -- pins that either signal independently is
+# sufficient, not just their conjunction.
+test_bead_id_branch_reused_successor_match_via_branch_metadata_alone() {
+    local repo fbd out rc show_ids
+    repo="$(new_repo_with_branch "builder/ga-oldbld-my-feature")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    cat > "$fbd/bd" <<'FAKE'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  show)
+    echo "$2" >> "$(dirname "$0")/show-ids.log"
+    case "$2" in
+      ga-oldbld) printf '[{"id":"ga-oldbld","status":"closed","assignee":"agent-x","metadata":{"gc.routed_to":"tmpl-x"},"labels":[]}]' ;;
+      ga-newsuc) printf '[{"id":"ga-newsuc","status":"in_progress","assignee":"agent-x","metadata":{"gc.routed_to":"tmpl-x"},"labels":[]}]' ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  list)
+    printf '[{"id":"ga-newsuc","metadata":{"branch":"builder/ga-oldbld-my-feature"}}]'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+FAKE
+    chmod +x "$fbd/bd"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    show_ids="$(cat "$fbd/show-ids.log" 2>/dev/null || true)"
+    if [[ $rc -eq 0 ]] && grep -qx "ga-newsuc" <<<"$show_ids"; then
+        record_pass "resolve/branch-reused-successor-match-via-branch-metadata-alone (rc=0, metadata.branch alone is sufficient)"
+    else
+        record_fail "resolve/branch-reused-successor-match-via-branch-metadata-alone" "expected rc=0 with ga-newsuc checked, got rc=$rc show_ids=[$show_ids], output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+# Same fixture again, successor declares itself via metadata.build_bead alone
+# (metadata.branch absent) -- the mirror image of the test above.
+test_bead_id_branch_reused_successor_match_via_build_bead_metadata_alone() {
+    local repo fbd out rc show_ids
+    repo="$(new_repo_with_branch "builder/ga-oldbld-my-feature")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    cat > "$fbd/bd" <<'FAKE'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  show)
+    echo "$2" >> "$(dirname "$0")/show-ids.log"
+    case "$2" in
+      ga-oldbld) printf '[{"id":"ga-oldbld","status":"closed","assignee":"agent-x","metadata":{"gc.routed_to":"tmpl-x"},"labels":[]}]' ;;
+      ga-newsuc) printf '[{"id":"ga-newsuc","status":"in_progress","assignee":"agent-x","metadata":{"gc.routed_to":"tmpl-x"},"labels":[]}]' ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  list)
+    printf '[{"id":"ga-newsuc","metadata":{"build_bead":"ga-oldbld"}}]'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+FAKE
+    chmod +x "$fbd/bd"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    show_ids="$(cat "$fbd/show-ids.log" 2>/dev/null || true)"
+    if [[ $rc -eq 0 ]] && grep -qx "ga-newsuc" <<<"$show_ids"; then
+        record_pass "resolve/branch-reused-successor-match-via-build-bead-metadata-alone (rc=0, metadata.build_bead alone is sufficient)"
+    else
+        record_fail "resolve/branch-reused-successor-match-via-build-bead-metadata-alone" "expected rc=0 with ga-newsuc checked, got rc=$rc show_ids=[$show_ids], output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+# Safety/cardinality (the reasoning that ruled out a plain "any live claim
+# wins" fix): the shared assignee identity routinely holds several
+# unrelated in-progress beads at once. An in-progress bead with no
+# metadata.branch/build_bead tying it to THIS branch or to the closed
+# branch-derived bead must never be silently substituted -- the guard must
+# keep blocking on the real (closed) branch-derived bead instead.
+test_bead_id_branch_reused_does_not_pick_unrelated_inprogress_bead_as_successor() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "builder/ga-oldbld-my-feature")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    printf '[{"id":"ga-unrel8d","metadata":{}}]' > "$fbd/fake-bd-state/list-json"
+    write_show_json "$fbd" "ga-oldbld" "closed" "agent-x" "tmpl-x" "[]"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] && grep -qi "status" <<<"$out" && grep -q -- "--no-verify" <<<"$out"; then
+        record_pass "resolve/branch-reused-does-not-pick-unrelated-inprogress-bead-as-successor (rc=$rc, unrelated concurrent bead correctly ignored, blocks on the real closed bead)"
+    else
+        record_fail "resolve/branch-reused-does-not-pick-unrelated-inprogress-bead-as-successor" "expected non-zero rc mentioning status+--no-verify (an unrelated in-progress bead under the same assignee must never be silently substituted), got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+# The override must require CONFIRMED inactivity, not just the existence of
+# a declared successor candidate: if the branch-derived bead is still
+# active, it remains authoritative even though a (differently-purposed)
+# in-progress successor-shaped bead exists.
+test_bead_id_branch_reused_does_not_override_when_branch_bead_still_active() {
+    local repo fbd out rc show_ids
+    repo="$(new_repo_with_branch "builder/ga-oldbld-my-feature")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    cat > "$fbd/bd" <<'FAKE'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  show)
+    echo "$2" >> "$(dirname "$0")/show-ids.log"
+    case "$2" in
+      ga-oldbld) printf '[{"id":"ga-oldbld","status":"in_progress","assignee":"agent-x","metadata":{"gc.routed_to":"tmpl-x"},"labels":[]}]' ;;
+      ga-newsuc) printf '[{"id":"ga-newsuc","status":"in_progress","assignee":"agent-x","metadata":{"gc.routed_to":"tmpl-x"},"labels":[]}]' ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  list)
+    printf '[{"id":"ga-newsuc","metadata":{"branch":"builder/ga-oldbld-my-feature","build_bead":"ga-oldbld"}}]'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+FAKE
+    chmod +x "$fbd/bd"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    show_ids="$(cat "$fbd/show-ids.log" 2>/dev/null || true)"
+    if [[ $rc -eq 0 ]] && grep -qx "ga-oldbld" <<<"$show_ids" && ! grep -qx "ga-newsuc" <<<"$show_ids"; then
+        record_pass "resolve/branch-reused-does-not-override-when-branch-bead-still-active (rc=0, final ownership check used still-active ga-oldbld only, never queried ga-newsuc)"
+    else
+        record_fail "resolve/branch-reused-does-not-override-when-branch-bead-still-active" "expected rc=0 with bd show called against ga-oldbld only (still-active branch bead must remain authoritative, not be overridden), got rc=$rc show_ids=[$show_ids], output: $out"
     fi
     rm -rf "$repo" "$fbd"
 }
@@ -842,6 +1062,7 @@ run_all() {
     test_block_on_reassigned
     test_allow_when_assignee_is_session_id
     test_allow_when_assignee_is_session_name
+    test_allow_when_assignee_is_bare_pool_template
     test_block_on_routed_to_changed
     test_block_on_hold_mayor
     test_block_on_hold_external
@@ -855,6 +1076,11 @@ run_all() {
     test_bead_id_branch_wins_and_warns_on_disagreement
     test_bead_id_branch_resolves_multi_level_subbead_id
     test_bead_id_fallback_used_when_branch_no_match
+    test_bead_id_branch_reused_prefers_open_successor_when_branch_bead_closed
+    test_bead_id_branch_reused_successor_match_via_branch_metadata_alone
+    test_bead_id_branch_reused_successor_match_via_build_bead_metadata_alone
+    test_bead_id_branch_reused_does_not_pick_unrelated_inprogress_bead_as_successor
+    test_bead_id_branch_reused_does_not_override_when_branch_bead_still_active
     test_bead_id_deploy_gate_branch_prefers_live_assignee
     test_bead_id_deploy_gate_branch_allows_when_no_live_assignee
     test_bead_id_deploy_gate_branch_blocks_when_assignee_lookup_fails

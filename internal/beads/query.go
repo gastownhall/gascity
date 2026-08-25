@@ -47,6 +47,34 @@ const (
 	TierBoth
 )
 
+// FederatedReadTier is the tier every leg of a CITY-WIDE FEDERATED read must be
+// asked for explicitly, and it exists because the zero value cannot be trusted
+// across a federation whose legs are wrapped differently.
+//
+// A city's work stores are wrapped in a bead-policy layer that rewrites a
+// TierIssues read to TierBoth before it reaches the backend, so a work leg has
+// always answered across both tiers no matter what the caller asked for. A
+// relocated coordination-class store carries no such layer — the storage routes
+// key the class map straight to the value the provider's engine opener returned
+// — so it answers at exactly the tier in the query. A federation that leaves
+// TierMode at its zero value therefore asks the work legs one question and the
+// class leg a narrower one, and merges the two answers as if they were the same
+// question. The class store's whole ephemeral tier drops out, silently: no leg
+// errored, no flag was rejected, the rows are simply not there.
+//
+// That is not hypothetical. On a live split city `bd ready --include-ephemeral`
+// against the relocated graph database returned 17 claimable beads, three of
+// them wisps; the federated reader over the same store returned exactly the
+// other 14, while still serving the work stores' own ephemeral rows. Ephemeral
+// wisps are how orchestration steps run, so a molecule mid-execution reads as
+// having no runnable frontier and is diagnosed as stalled when it is fine.
+//
+// Every federated reader therefore states this tier on every leg. It is TierBoth
+// because that is the question the policy-wrapped legs have always answered, so
+// stating it changes nothing for a city that relocates no class and makes the
+// relocated leg answer the same question as its peers.
+const FederatedReadTier = TierBoth
+
 // TierModeFromOpts returns the tier mode implied by a slice of QueryOpts.
 // WithBothTiers takes precedence over WithEphemeral.
 func TierModeFromOpts(opts []QueryOpt) TierMode {
@@ -77,7 +105,19 @@ type ListQuery struct {
 	// batched form of ParentID for graph/subtree walks. Backends that do not
 	// recognize it should ignore it (returning a superset); callers that need
 	// exact results must filter the returned beads by parent in memory.
-	ParentIDs     []string
+	ParentIDs []string
+	// IDs matches beads whose id is any of the listed ids — the IN-list form of
+	// a batch of Gets. It exists so a lane that already knows WHICH beads it
+	// needs pays one store round trip instead of one per bead: on a city whose
+	// work ledger is remote, N sequential Gets is N x the round-trip latency and
+	// is how the controller tick's route-repair leg came to cost minutes
+	// (ga-l7jdg).
+	//
+	// Same backend contract as ParentIDs: a store that cannot push the IN-list
+	// into its backend returns a superset, which ApplyListQuery/Matches then cut
+	// exactly — so the RESULT is always exact and only the pushdown is
+	// best-effort. It counts as a filter, so an IDs query needs no AllowScan.
+	IDs           []string
 	Metadata      map[string]string
 	CreatedBefore time.Time
 	// UpdatedBefore matches beads whose UpdatedAt is before this timestamp.
@@ -180,6 +220,7 @@ func (q ListQuery) HasFilter() bool {
 		q.Assignee != "" ||
 		len(q.Assignees) > 0 ||
 		q.ParentID != "" ||
+		len(q.IDs) > 0 ||
 		len(q.Metadata) > 0 ||
 		!q.CreatedBefore.IsZero() ||
 		!q.UpdatedBefore.IsZero() ||
@@ -240,6 +281,18 @@ func (q ListQuery) Matches(b Bead) bool {
 	}
 	if q.ParentID != "" && b.ParentID != q.ParentID {
 		return false
+	}
+	if len(q.IDs) > 0 {
+		matched := false
+		for _, id := range q.IDs {
+			if b.ID == id {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
 	}
 	if len(q.Metadata) > 0 && !matchesMetadata(b, q.Metadata) {
 		return false

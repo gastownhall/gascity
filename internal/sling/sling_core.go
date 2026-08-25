@@ -442,23 +442,40 @@ func slingOnFormula(opts SlingOpts, deps SlingDeps, querier BeadQuerier, beadID 
 
 // attachedBeadInstructionsDroppedHint returns a sling-time diagnostic when
 // --on/default-formula attaches a formula to an existing bead whose own
-// description carries real instructions. The formula wisp root's own
+// description carries real instructions and no route into the formula's
+// rendered context is available for it. The formula wisp root's own
 // description is always the FORMULA's own boilerplate
-// (internal/formula/compile.go rootDesc), never the target bead's text, and
-// no formula var exposes the bead's Description either — so a bead's
-// instructions are otherwise silently invisible to the formula's rendered
-// context, unless the caller explicitly carries them in via
-// context_path/requirements_path (#3681). It changes neither routing nor
-// the materialized wisp.
+// (internal/formula/compile.go rootDesc), never the target bead's text.
+// Two routes carry it in instead: the caller-supplied
+// context_path/requirements_path (#3681), and the legacy sling path's
+// auto-stamped `gc.var.issue`, which every route-table step template
+// resolves and re-fetches via `bd show` (Route B, added 2026-08-02). The
+// hint only fires when neither route is live — in practice, only when the
+// caller explicitly voids `issue=`, since BuildSlingFormulaVars stamps it
+// automatically otherwise. It changes neither routing nor the materialized
+// wisp.
 func attachedBeadInstructionsDroppedHint(querier BeadQuerier, beadID string, userVars []string) string {
 	if querier == nil || beadID == "" {
 		return ""
 	}
+	// BuildSlingFormulaVars auto-stamps gc.var.issue = beadID whenever
+	// beadID != "", unless the caller explicitly overrides it — so assume
+	// Route B is live unless userVars says otherwise.
+	issueVarCarriesBead := true
 	for _, v := range userVars {
-		key, _, ok := strings.Cut(v, "=")
-		if ok && (key == "context_path" || key == "requirements_path") {
-			return ""
+		key, value, ok := strings.Cut(v, "=")
+		if !ok {
+			continue
 		}
+		switch key {
+		case "context_path", "requirements_path":
+			return ""
+		case "issue":
+			issueVarCarriesBead = value != ""
+		}
+	}
+	if issueVarCarriesBead {
+		return ""
 	}
 	bead, err := querier.Get(beadID)
 	if err != nil || strings.TrimSpace(bead.Description) == "" {
@@ -511,7 +528,15 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 			if err := checkLegacySourceWorkflowConflict(deps, beadID); err != nil {
 				return result, fmt.Errorf("%w", err)
 			}
-			replacedSnapshot, err := snapshotGraphV2ReplacementRoot(deps.Store, formulaName, formulaVars, opts.ScopeKind, opts.ScopeRef, opts.Force)
+			// The replaced root is a graph.v2 workflow root, and every root
+			// this sling can find here was BORN through deps.graphStore()
+			// (InstantiateSlingFormula). Looking it up through deps.Store on a
+			// city that relocates graph asks the work ledger about a bead it
+			// never held: --force then finds nothing to replace and launches a
+			// second live root beside the first, and the rollback below has no
+			// snapshot to restore. Identity to deps.Store wherever graph is not
+			// relocated, so a single-store sling is byte-identical.
+			replacedSnapshot, err := snapshotGraphV2ReplacementRoot(deps.graphStore(), formulaName, formulaVars, opts.ScopeKind, opts.ScopeRef, opts.Force)
 			if err != nil {
 				return result, fmt.Errorf("instantiating %s %q on %s: %w", errLabel, formulaName, beadID, err)
 			}
@@ -526,7 +551,11 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 			wfResult, wfErr := doStartGraphWorkflow(mResult.RootID, "", a, method, deps)
 			wfResult.FormulaName = formulaName
 			if wfErr != nil {
-				if rollbackErr := rollbackGraphV2ReplacementLaunch(deps.Store, mResult.RootID, replacedSnapshot); rollbackErr != nil {
+				// Same store the snapshot was taken from and the replacement
+				// root was created in: a rollback that closed the replacement
+				// through a store that does not hold it would leave the failed
+				// launch live and restore nothing.
+				if rollbackErr := rollbackGraphV2ReplacementLaunch(deps.graphStore(), mResult.RootID, replacedSnapshot); rollbackErr != nil {
 					return wfResult, errors.Join(wfErr, rollbackErr)
 				}
 				return wfResult, wfErr
@@ -1011,7 +1040,12 @@ func pendingGraphWorkflowLaunch(rootID, sourceBeadID string, a config.Agent, met
 			return result, err
 		},
 		rollback: func() error {
-			_, err := sourceworkflow.CloseWorkflowSubtree(deps.Store, rootID)
+			// rootID is the workflow root this launch just materialized
+			// through deps.graphStore(); the subtree it closes is that root's
+			// own members. Closing it through deps.Store on a city that
+			// relocates graph reads an empty subtree and silently leaves the
+			// abandoned launch open and claim-attracting.
+			_, err := sourceworkflow.CloseWorkflowSubtree(deps.graphStore(), rootID)
 			return err
 		},
 	}
@@ -1258,7 +1292,15 @@ func sourceWorkflowRootByID(deps SlingDeps, sourceBeadID, workflowID, sourceStor
 	}
 	sourceStoreRef = strings.TrimSpace(sourceStoreRef)
 	if deps.SourceWorkflowStores == nil {
-		return sourceWorkflowRootByIDInStore(deps.Store, sourceBeadID, workflowID, sourceStoreRef, sourceStoreRef)
+		// The single-store fallback, for callers that wire no federation. The
+		// subject is a workflow ROOT, which lives in the graph store; deps.Store
+		// holds the SOURCE bead. Identity wherever graph is not relocated.
+		//
+		// NOT fixed here: the federated arm below enumerates work scopes only
+		// (cmd/gc's openSourceWorkflowStores walks the city and rig dirs), so a
+		// city that relocates graph AND wires the federation still misses the
+		// binding. That is a query-federation gap, not a by-id one.
+		return sourceWorkflowRootByIDInStore(deps.graphStore(), sourceBeadID, workflowID, sourceStoreRef, sourceStoreRef)
 	}
 	stores, err := deps.SourceWorkflowStores()
 	if err != nil {

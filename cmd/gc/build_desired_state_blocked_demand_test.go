@@ -36,7 +36,7 @@ func TestCollectOpenUnassignedRoutedWorkExcludesBlocked(t *testing.T) {
 	}
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 
-	work, _, _, partial := collectOpenUnassignedRoutedWork(cfg, store, nil, nil, io.Discard)
+	work, _, _, partial := collectOpenUnassignedRoutedWork("", cfg, store, nil, nil, io.Discard)
 	if partial {
 		t.Errorf("collectOpenUnassignedRoutedWork reported partial on a healthy live read")
 	}
@@ -79,7 +79,7 @@ func TestCollectOpenUnassignedRoutedWorkReportsPartialOnLiveOutage(t *testing.T)
 	store := liveOpenListErrorStore{Store: beads.NewMemStore(), err: errors.New("live open list outage")}
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 
-	work, _, _, partial := collectOpenUnassignedRoutedWork(cfg, store, nil, nil, io.Discard)
+	work, _, _, partial := collectOpenUnassignedRoutedWork("", cfg, store, nil, nil, io.Discard)
 
 	if !partial {
 		t.Errorf("collectOpenUnassignedRoutedWork did not report partial on a live List outage (fail-open-to-zero, gc-ft31x)")
@@ -277,7 +277,7 @@ func TestCollectAssignedWorkBeadsExcludesBlockedFromDemandButReaperStillSeesIt(t
 	}
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}
 
-	found, _, _, readyAssigned, partial := collectAssignedWorkBeadsWithStores(cfg, store, nil, nil, nil)
+	found, _, _, readyAssigned, partial := collectAssignedWorkBeadsWithStores("", cfg, store, nil, nil, nil)
 	if partial {
 		t.Fatal("collectAssignedWorkBeadsWithStores reported partial results")
 	}

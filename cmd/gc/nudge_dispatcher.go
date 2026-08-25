@@ -112,12 +112,28 @@ func startNudgeWakeListener(ctx context.Context, cityPath string, wakeCh chan<- 
 //
 // This is a no-op when the dispatcher is configured for "legacy" mode —
 // the per-session `gc nudge poll` processes own delivery in that case.
-func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot) (int, error) {
+//
+// debugOut receives one GC_DEBUG-gated line per silently-skipped target (see
+// logNudgeDispatchSkip); pass nil to suppress (skip counts still accumulate
+// into the persisted queue state's DispatchSkips regardless of debugOut, so
+// `gc nudge status` stays informative even with GC_DEBUG unset).
+func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot, debugOut io.Writer) (int, error) {
 	if cfg == nil || sessionBeads == nil || cityPath == "" {
 		return 0, nil
 	}
 	if !nudgeDispatcherIsSupervisor(cfg) {
 		return 0, nil
+	}
+	now := time.Now()
+	// Run the queue's TTL/max-attempts maintenance sweep unconditionally,
+	// independent of whether any item below matches an open session. The
+	// per-session loop's only path to recover/prune is a successful claim in
+	// claimDueQueuedNudgesForTarget, which a structurally orphaned item
+	// (target agent has no open session, and never will again) can never
+	// reach — leaving it in Pending past its ExpiresAt forever. See
+	// ra-oudpha finding-3.
+	if err := runNudgeQueueMaintenanceSweep(cityPath, now); err != nil {
+		return 0, fmt.Errorf("nudge queue maintenance sweep: %w", err)
 	}
 	state, err := nudgequeue.LoadState(cityPath)
 	if err != nil {
@@ -126,7 +142,6 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 	if len(state.Pending) == 0 && len(state.InFlight) == 0 {
 		return 0, nil
 	}
-	now := time.Now()
 	pendingAgents := make(map[string]bool, len(state.Pending))
 	for _, item := range state.Pending {
 		if item.Agent == "" {
@@ -163,9 +178,18 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 	// nudges relocates independently of sessions).
 	delivered := 0
 	var firstErr error
+	// skipCounts accumulates this tick's silent-skip reasons in memory; it is
+	// merged into the persisted queue state's running totals once, after the
+	// loop, rather than on every skip — recordNudgeDispatchSkips takes the
+	// queue flock, and taking it once per matched info instead of once per
+	// tick would multiply lock contention against the claim path below for
+	// no benefit (the counters only need tick-granularity, not per-item).
+	skipCounts := make(map[string]int64)
 	for _, info := range sessionBeads.OpenInfos() {
 		target := resolveNudgeTargetFromSessionInfo(cityPath, cfg, info)
 		if target.sessionName == "" {
+			skipCounts["no-target"]++
+			logNudgeDispatchSkip(debugOut, "no-target", info.AgentName, info.ID, "")
 			continue
 		}
 		// ACP sessions also flow through this dispatcher. The inject-on-hook
@@ -182,6 +206,12 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 			}
 		}
 		if !matched {
+			// Routine: this open session simply has no pending queue item
+			// targeting it. Counted (not just logged) so an operator can
+			// tell "nothing queued for anyone" apart from the anomalous
+			// skip reasons below at a glance.
+			skipCounts["not-matched"]++
+			logNudgeDispatchSkip(debugOut, "not-matched", target.agentKey(), target.sessionName, "")
 			continue
 		}
 		obs, err := workerObserveNudgeTarget(target, sessStore, sp)
@@ -189,9 +219,13 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 			if firstErr == nil {
 				firstErr = err
 			}
+			skipCounts["observe-error"]++
+			logNudgeDispatchSkip(debugOut, "observe-error", target.agentKey(), target.sessionName, err.Error())
 			continue
 		}
 		if !obs.Running {
+			skipCounts["not-running"]++
+			logNudgeDispatchSkip(debugOut, "not-running", target.agentKey(), target.sessionName, "")
 			continue
 		}
 		ok, err := tryDeliverQueuedNudgesByPoller(target, store, sessStore, sp, defaultNudgePollQuiescence, obs)
@@ -200,7 +234,42 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 		}
 		if ok {
 			delivered++
+			continue
 		}
+		// Matched a live, running session, yet nothing was claimed/delivered
+		// this tick — e.g. the poller quiescence gate (pollerSessionIdleEnough)
+		// hasn't cleared, or claimDueQueuedNudgesForTarget found nothing
+		// claimable (already claimed by a concurrent drain path). Either way
+		// this is the class of skip ra-oudpha finding-3 could not otherwise
+		// distinguish from "not matched" or "not running" without a trace.
+		reason := "not-delivered"
+		if err != nil {
+			reason = "not-delivered-error"
+		}
+		skipCounts[reason]++
+		detail := ""
+		if err != nil {
+			detail = err.Error()
+		}
+		logNudgeDispatchSkip(debugOut, reason, target.agentKey(), target.sessionName, detail)
+	}
+	if err := recordNudgeDispatchSkips(cityPath, skipCounts); err != nil && firstErr == nil {
+		firstErr = fmt.Errorf("recording nudge dispatch skip counters: %w", err)
 	}
 	return delivered, firstErr
+}
+
+// logNudgeDispatchSkip emits a single GC_DEBUG-gated line documenting one
+// silently-skipped target from the dispatchAllQueuedNudges loop. w may be
+// nil, in which case this is a no-op (callers that don't have a debug sink,
+// e.g. most existing tests, pass nil).
+func logNudgeDispatchSkip(w io.Writer, reason, agent, session, detail string) {
+	if w == nil {
+		return
+	}
+	extra := []string{"agent", agent, "session", session}
+	if detail != "" {
+		extra = append(extra, "detail", detail)
+	}
+	logRoute(w, "nudge-dispatch-tick", "skip", reason, extra...)
 }

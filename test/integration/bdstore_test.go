@@ -23,6 +23,13 @@ import (
 const (
 	bdInitTimeout          = 60 * time.Second
 	doltServerStartupLimit = 10 * time.Second
+	// doltServerReadyTimeout budgets startDoltServerOnAllInterfaces's
+	// TCP-dial readiness wait (dolt_config_test.go). Kept separate from
+	// doltServerStartupLimit — same shape of wait, but a distinct call
+	// site — so a future tuning of one doesn't silently retune the other;
+	// that kind of implicit coupling is what let runBDInitCompat's timeout
+	// drift out of sync with bdInitTimeout in the first place (ga-gajll3).
+	doltServerReadyTimeout = 60 * time.Second
 )
 
 // TestBdStoreConformance runs the beads conformance suite against BdStore
@@ -79,7 +86,7 @@ func TestBdStoreConformance(t *testing.T) {
 
 		configureCustomTypes(t, env, wsDir, doctor.RequiredCustomTypes)
 
-		return beads.NewBdStore(wsDir, beads.ExecCommandRunner())
+		return beads.NewBdStore(wsDir, pinnedBdStoreCommandRunner())
 	}
 
 	// Run conformance suite. We skip RunSequentialIDTests because BdStore
@@ -200,7 +207,7 @@ func TestBdStoreMailWispInsert(t *testing.T) {
 	runBDInit(t, env, wsDir, "mc", serverPort)
 	configureCustomTypes(t, env, wsDir, doctor.RequiredCustomTypes)
 
-	store := beads.NewBdStore(wsDir, beads.ExecCommandRunner())
+	store := beads.NewBdStore(wsDir, pinnedBdStoreCommandRunner())
 
 	// Create an ephemeral message bead — exercises bd create --ephemeral →
 	// Dolt SQL INSERT INTO wisps + INSERT INTO wisp_events.

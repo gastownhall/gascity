@@ -1006,9 +1006,20 @@ func buildPreparedStartWithWorkDirResolver(
 	// transcript layer so each provider keeps its own resumability rules; for
 	// providers whose resume state we cannot probe on disk (codex/gemini/...)
 	// the probe reports !probeable and we leave their metadata untouched.
+	// transcriptState carries the same probe result forward to the firstStart
+	// classification below, so the disk is read once per launch.
+	transcriptState := sessTranscriptUnknown
 	if sk := strings.TrimSpace(candidate.info.SessionKey); sk != "" && agentCfg.WorkDir != "" {
 		provider := sessionTranscriptProvider(tp.ResolvedProvider, candidate.info)
-		if present, probeable := staleResumeKeyProbe(provider, agentCfg.WorkDir, sk); probeable && !present {
+		present, probeable := staleResumeKeyProbe(provider, agentCfg.WorkDir, sk)
+		if probeable {
+			if present {
+				transcriptState = sessTranscriptPresent
+			} else {
+				transcriptState = sessTranscriptAbsent
+			}
+		}
+		if probeable && !present {
 			var sessFront *sessionpkg.Store
 			if store != nil {
 				sessFront = sessionFrontDoor(store)
@@ -1034,13 +1045,17 @@ func buildPreparedStartWithWorkDirResolver(
 		// Fold the mint onto the typed twin so the stale-key death detection at
 		// runPreparedStartCandidate (info.SessionKey != "") sees the minted key.
 		candidate.info = candidate.info.ApplyPatch(sessionpkg.MetadataPatch{"session_key": sessionKey})
+		// A key minted right here has no conversation behind it yet, whichever
+		// way the probe above went for the key it replaced.
+		transcriptState = sessTranscriptAbsent
 	}
 	// firstStart classification routes through the level-triggered converge core
-	// (deriveFirstStart). This call passes sessTranscriptUnknown, which reproduces
-	// the legacy durable-only signal (started_config_hash == "") byte-for-byte;
-	// probing the transcript here to activate the #3849 crash-loop fix is the
-	// remaining wiring (see session_level_converge.go).
-	firstStart := deriveFirstStart(candidate.info.StartedConfigHash, sessTranscriptUnknown)
+	// (deriveFirstStart), fed the transcript probe taken above. Passing a real
+	// state (rather than sessTranscriptUnknown) activates both crash-loop
+	// branches: hash-present + transcript-absent starts fresh (#3849), and
+	// hash-absent + transcript-present resumes instead of replaying a
+	// --session-id the provider will reject as already in use.
+	firstStart := deriveFirstStart(candidate.info.StartedConfigHash, transcriptState)
 	forceFresh := candidate.info.WakeMode == "fresh"
 	// Fork-launch validation (fail loud, never silent fresh). A session carrying
 	// gc.brain_parent_sid is a warm arm that must fork off a pre-built brain;

@@ -252,6 +252,9 @@ type City struct {
 	Rigs []Rig `toml:"rigs,omitempty"`
 	// Patches holds targeted modifications applied after fragment merge.
 	Patches Patches `toml:"patches,omitempty"`
+	// Storage assigns the six semantic storage classes to immutable named
+	// bindings. Nil preserves the existing all-Work storage topology.
+	Storage *StorageConfig `toml:"storage,omitempty"`
 	// Beads configures the bead store backend.
 	Beads BeadsConfig `toml:"beads,omitempty"`
 	// Session configures the session provider backend.
@@ -1952,6 +1955,16 @@ type DoltConfig struct {
 	// WriteTimeoutMillis overrides the managed Dolt listener write_timeout_millis.
 	// 0 means use the managed default.
 	WriteTimeoutMillis int `toml:"write_timeout_millis,omitempty" jsonschema:"default=300000"`
+	// WaitTimeoutSeconds overrides the managed server's wait_timeout system
+	// variable, which is how long Dolt keeps an idle connection before reaping
+	// it. Cities that raise ReadTimeoutMillis above the reconcile tick gap
+	// generally need this raised with it, or the controller's long-lived
+	// dispatch-pool connections are still reaped between ticks. Before this
+	// field existed the only way to set it was GC_DOLT_WAIT_TIMEOUT in the
+	// supervisor's process environment, which no city.toml could express and
+	// no shell-invoked restart inherited — so a restart from an operator shell
+	// silently rewrote the value. 0 (omitted) means use the managed default.
+	WaitTimeoutSeconds int `toml:"wait_timeout_seconds,omitempty" jsonschema:"default=30"`
 	// DoltLockReleaseTimeout is how long managed-dolt lifecycle operations
 	// wait for dolt's on-disk exclusive store locks (the root-level
 	// `<data_dir>/.dolt/noms/LOCK` and per-database
@@ -2024,6 +2037,16 @@ func (d DoltConfig) EffectiveWriteTimeoutMillis() int {
 	return DefaultDoltWriteTimeoutMillis
 }
 
+// DefaultDoltWaitTimeoutSeconds is the managed server's idle-connection reap
+// window when neither city.toml nor the environment configures one.
+//
+// Deliberately not paired with an Effective* accessor like the other [dolt]
+// fields: wait_timeout resolves three ways, not two. An unset field must fall
+// through to GC_DOLT_WAIT_TIMEOUT, which can itself select "omit the system
+// variable entirely" with a negative value, so collapsing unset to this default
+// would silently discard the env layer.
+const DefaultDoltWaitTimeoutSeconds = 30
+
 // DefaultDoltLockReleaseTimeout is the wait window for dolt's on-disk
 // exclusive store lock to be released when no value is configured. 1m covers
 // the longest observed clean-shutdown flush of a multi-GB chunk journal on
@@ -2065,6 +2088,16 @@ type OrdersConfig struct {
 	// timeout only; a condition trigger's check_timeout is a separate probe
 	// deadline and is not capped here.
 	MaxTimeout string `toml:"max_timeout,omitempty"`
+
+	// *int rather than int so an unset value stays out of marshaled config:
+	// BurntSushi's omitempty does not drop a zero int, so a plain int would
+	// emit max_dispatches_per_tick = 0 into every marshaled city.toml.
+
+	// MaxDispatchesPerTick caps how many orders the supervisor dispatches
+	// per tick. Unset keeps the built-in default of 4; set to 1 to drain
+	// overdue cooldown orders one-per-tick at cold start instead of firing
+	// several concurrent goroutines at once.
+	MaxDispatchesPerTick *int `toml:"max_dispatches_per_tick,omitempty"`
 	// Overrides apply per-order field overrides after scanning.
 	// Each override targets an order by name and optionally by rig.
 	Overrides []OrderOverride `toml:"overrides,omitempty"`
@@ -2563,8 +2596,11 @@ type DaemonConfig struct {
 	// AutoReapClosedBeadWorktrees controls whether the reconciler patrol
 	// automatically removes per-bead git worktrees once their associated
 	// work bead reaches closed status. Only worktrees with a clean working
-	// tree, no unpushed commits, and no stashes are removed; unsafe worktrees
-	// are logged as warnings and left in place for operator review. Session
+	// tree, no stashes, and no commits that removal would orphan — commits
+	// reachable from no branch, tag, or remote-tracking ref — are removed;
+	// push state is deliberately not the test, since `git worktree remove`
+	// deletes the checkout and not refs/heads. Unsafe worktrees are logged
+	// as warnings and left in place for operator review. Session
 	// home directories (agent template directories) are never touched.
 	// Defaults to false. Set to true to enable automated worktree cleanup.
 	AutoReapClosedBeadWorktrees *bool `toml:"auto_reap_closed_bead_worktrees,omitempty" jsonschema:"default=false"`
@@ -2575,9 +2611,13 @@ type DaemonConfig struct {
 	// what it protected, without removing anything. This is the safe
 	// staged-rollout surface: an operator enables dry-run first, confirms via
 	// `gc events` that no live worktree appears in the would-reap set, then
-	// enables AutoReapClosedBeadWorktrees for real removal. Dry-run has no
-	// effect when AutoReapClosedBeadWorktrees is already true (real removal
-	// supersedes it). Defaults to false.
+	// enables AutoReapClosedBeadWorktrees for real removal. Those events are
+	// edge-triggered: each worktree is reported when the patrol first
+	// classifies it and again whenever its verdict changes, not once per
+	// tick, so the would-reap set is complete right after dry-run is enabled
+	// rather than reprinted every sweep. Dry-run has no effect when
+	// AutoReapClosedBeadWorktrees is already true (real removal supersedes
+	// it). Defaults to false.
 	AutoReapClosedBeadWorktreesDryRun *bool `toml:"auto_reap_closed_bead_worktrees_dry_run,omitempty" jsonschema:"default=false"`
 	// AutoReapClosedBeadWorktreesMinAgeMinutes is the minimum worktree age,
 	// in minutes, before a closed-bead worktree becomes eligible for reap
@@ -4570,6 +4610,9 @@ func Parse(data []byte) (*City, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
+	if err := validateStorageAuthoringSurface(md); err != nil {
+		return nil, fmt.Errorf("parsing config: %w", err)
+	}
 	normalizeAgentDefaultsAlias(&cfg, md)
 	applyDaemonFormulaV2Default(&cfg, md)
 	normalizeLegacyOrderOverrideAliases(&cfg)
@@ -4586,6 +4629,12 @@ func Parse(data []byte) (*City, error) {
 		return nil, err
 	}
 	if err := validateGuardedRelease(cfg.Beads.GuardedRelease); err != nil {
+		return nil, err
+	}
+	// Parse sees one layer. Cross-layer storage invariants (six-class
+	// completeness, binding resolution) are checked on the composed root in
+	// LoadWithIncludesOptions, because a fragment may supply either half.
+	if err := validateStorageLayer(&cfg); err != nil {
 		return nil, err
 	}
 	return &cfg, nil

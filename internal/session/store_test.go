@@ -352,6 +352,124 @@ func TestRecordCurrentBeadEmitsSingleKeySetMetadata(t *testing.T) {
 	}
 }
 
+// TestSetCurrentClaimEmitsSingleKeySetMetadata proves SetCurrentClaim stamps the
+// claimed work-bead id as a single-key SetMetadata of
+// beadmeta.CurrentClaimBeadIDMetadataKey — the same shape as RecordCurrentBead,
+// and deliberately a DIFFERENT key so the self-claim lane and the reconciler's
+// wake-time assignment lane cannot clobber each other.
+func TestSetCurrentClaimEmitsSingleKeySetMetadata(t *testing.T) {
+	b := sessionBeadFixture("s-1", "open", nil)
+	is, rec := recordingStore(t, b)
+
+	wrote, err := is.SetCurrentClaim("s-1", "gcg-42")
+	if err != nil {
+		t.Fatalf("SetCurrentClaim: %v", err)
+	}
+	if !wrote {
+		t.Fatal("SetCurrentClaim reported no write for a fresh stamp")
+	}
+	c := rec.CallsForOp("SetMetadata")
+	if len(c) != 1 {
+		t.Fatalf("SetMetadata calls = %d, want 1 (ops=%v)", len(c), opsOf(rec.Calls()))
+	}
+	if c[0].ID != "s-1" || c[0].Key != beadmeta.CurrentClaimBeadIDMetadataKey || c[0].Value != "gcg-42" {
+		t.Errorf("SetCurrentClaim call = (%q,%q,%q), want (s-1,%q,gcg-42)",
+			c[0].ID, c[0].Key, c[0].Value, beadmeta.CurrentClaimBeadIDMetadataKey)
+	}
+	if c[0].Key == CurrentBeadIDKey {
+		t.Errorf("SetCurrentClaim wrote the reconciler's %q key", CurrentBeadIDKey)
+	}
+	if n := len(rec.CallsForOp("SetMetadataBatch")); n != 0 {
+		t.Errorf("SetCurrentClaim emitted %d batch writes, want a single-key write", n)
+	}
+}
+
+// TestSetCurrentClaimSkipsWhenUnchanged pins the idempotence guard: the claim
+// path re-stamps on every hook tick through its adoption branches, so an
+// already-current value must issue no write at all.
+func TestSetCurrentClaimSkipsWhenUnchanged(t *testing.T) {
+	b := sessionBeadFixture("s-1", "open", map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: "gcg-42"})
+	is, rec := recordingStore(t, b)
+
+	wrote, err := is.SetCurrentClaim("s-1", "gcg-42")
+	if err != nil {
+		t.Fatalf("SetCurrentClaim: %v", err)
+	}
+	if wrote {
+		t.Error("SetCurrentClaim reported a write for an unchanged value")
+	}
+	if n := len(rec.CallsForOp("SetMetadata")); n != 0 {
+		t.Errorf("unchanged stamp emitted %d writes, want 0", n)
+	}
+}
+
+// TestSetCurrentClaimClearsWithEmptyValue proves the release side of the stamp:
+// clearing writes an empty value through the same single-key op, so a session
+// that no longer owns work stops naming a bead it cannot close.
+func TestSetCurrentClaimClearsWithEmptyValue(t *testing.T) {
+	b := sessionBeadFixture("s-1", "open", map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: "gcg-42"})
+	is, rec := recordingStore(t, b)
+
+	if _, err := is.SetCurrentClaim("s-1", ""); err != nil {
+		t.Fatalf("SetCurrentClaim clear: %v", err)
+	}
+	c := rec.CallsForOp("SetMetadata")
+	if len(c) != 1 || c[0].Key != beadmeta.CurrentClaimBeadIDMetadataKey || c[0].Value != "" {
+		t.Fatalf("clear = %#v, want one SetMetadata(%s,\"\")", c, beadmeta.CurrentClaimBeadIDMetadataKey)
+	}
+	got, err := is.CurrentClaimBeadID("s-1")
+	if err != nil {
+		t.Fatalf("CurrentClaimBeadID: %v", err)
+	}
+	if got != "" {
+		t.Errorf("CurrentClaimBeadID after clear = %q, want empty", got)
+	}
+}
+
+// TestCurrentClaimBeadIDReadsTheStampedValue proves the read half of the
+// back-channel returns the stamped id verbatim, and empty when nothing is
+// stamped.
+func TestCurrentClaimBeadIDReadsTheStampedValue(t *testing.T) {
+	is, _ := recordingStore(t, sessionBeadFixture("s-1", "open",
+		map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: "gcg-42"}))
+	got, err := is.CurrentClaimBeadID("s-1")
+	if err != nil {
+		t.Fatalf("CurrentClaimBeadID: %v", err)
+	}
+	if got != "gcg-42" {
+		t.Errorf("CurrentClaimBeadID = %q, want gcg-42", got)
+	}
+
+	bare, _ := recordingStore(t, sessionBeadFixture("s-2", "open", nil))
+	got, err = bare.CurrentClaimBeadID("s-2")
+	if err != nil {
+		t.Fatalf("CurrentClaimBeadID (unstamped): %v", err)
+	}
+	if got != "" {
+		t.Errorf("CurrentClaimBeadID (unstamped) = %q, want empty", got)
+	}
+}
+
+// TestCurrentClaimRefusesANonSessionBead proves both halves route through
+// validatedBead: a present-but-non-session bead is refused with
+// ErrSessionNotFound BEFORE any write, so bd's fuzzy id resolver cannot redirect
+// the claim stamp onto a foreign bead.
+func TestCurrentClaimRefusesANonSessionBead(t *testing.T) {
+	mem := beads.NewMemStoreFrom(1, []beads.Bead{{ID: "wb-1", Status: "open", Title: "work"}}, nil)
+	rec := beadstest.NewRecordingStore(mem)
+	is := NewStore(beads.SessionStore{Store: rec})
+
+	if _, err := is.SetCurrentClaim("wb-1", "gcg-42"); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("SetCurrentClaim on a non-session bead = %v, want ErrSessionNotFound", err)
+	}
+	if n := len(rec.CallsForOp("SetMetadata")); n != 0 {
+		t.Errorf("refused stamp still wrote %d times", n)
+	}
+	if _, err := is.CurrentClaimBeadID("wb-1"); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("CurrentClaimBeadID on a non-session bead = %v, want ErrSessionNotFound", err)
+	}
+}
+
 // TestCloseWithoutReasonEmitsSingleClose proves CloseWithoutReason emits exactly
 // one Close op and no metadata write — byte-identical to closeBead's raw
 // store.Close(id) after it stamps ClosePatch separately.
