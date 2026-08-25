@@ -282,6 +282,7 @@ exit 0
 // remote every time. Mirrors the real incident's remote set (a git+https
 // upstream plus two file:// backups) across three distinct row orderings.
 func TestSyncRemoteSelectionIsOrderIndependent(t *testing.T) {
+	t.Parallel()
 	origin := "origin,git+https://github.com/gastownhall/beads"
 	usb := "usb,file:///mnt/usb/beads"
 	usbSnap := "usb_snap_20260820,file:///mnt/usb/beads_snap"
@@ -306,6 +307,7 @@ func TestSyncRemoteSelectionIsOrderIndependent(t *testing.T) {
 // must report the database as skipped, with a stated reason, and never
 // select or push to either remote.
 func TestSyncMultiRemoteAmbiguousNonLocalSkipsAndNeverPushes(t *testing.T) {
+	t.Parallel()
 	binDir := t.TempDir()
 	writeSyncFakeDoltMultiRemote(t, binDir, []string{
 		"mirror,git+https://example.invalid/mirror",
@@ -324,6 +326,7 @@ func TestSyncMultiRemoteAmbiguousNonLocalSkipsAndNeverPushes(t *testing.T) {
 // git+https remote is configured alongside a file:// alternative: the
 // git+https remote must never be the one selected/pushed.
 func TestSyncMultiRemotePrefersLocalOverGitHttpsRemote(t *testing.T) {
+	t.Parallel()
 	binDir := t.TempDir()
 	writeSyncFakeDoltMultiRemote(t, binDir, []string{
 		"origin,git+https://github.com/gastownhall/beads",
@@ -342,6 +345,7 @@ func TestSyncMultiRemotePrefersLocalOverGitHttpsRemote(t *testing.T) {
 // pins remote selection even to a non-local (git+https) remote that the
 // default policy would otherwise skip past in favor of a file:// alternative.
 func TestSyncRemoteEnvOverridePinsNonLocalRemote(t *testing.T) {
+	t.Parallel()
 	binDir := t.TempDir()
 	writeSyncFakeDoltMultiRemote(t, binDir, []string{
 		"origin,git+https://github.com/gastownhall/beads",
@@ -365,6 +369,7 @@ func TestSyncRemoteEnvOverridePinsNonLocalRemote(t *testing.T) {
 // that already applies when there are multiple remotes must apply
 // identically when there is exactly one.
 func TestSyncSoleNonLocalRemoteSkipsAndNeverPushes(t *testing.T) {
+	t.Parallel()
 	binDir := t.TempDir()
 	writeSyncFakeDoltMultiRemote(t, binDir, []string{
 		"origin,git+https://github.com/gastownhall/beads",
