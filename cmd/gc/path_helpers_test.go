@@ -447,7 +447,7 @@ func isStaleCmdGCTestConfigPathWithPIDCheck(configPath string, activeRoots []str
 }
 
 // isAbandonedGoTempDirConfigPath classifies configs under a Go t.TempDir()
-// root (Test<Name><rand>/...) that carry no gct<pid>-/gctshard<pid>- owner
+// root (Test<Name><rand>/...) that carry no gct<pid>-/gcx<pid>- owner
 // component. Those appear when a run dies uncleanly (timeout, panic,
 // SIGKILL): TestMain's temp-root cleanup removes the config from disk while
 // the dolt server lives on. The missing config file is the stale signal —
