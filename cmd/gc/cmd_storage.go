@@ -269,7 +269,11 @@ open the binding's engine unless that database already exists, because opening
 it would create the very database the report is being asked about.
 
 It exits non-zero when the city is configured for a binding it has not
-converged on, so a deployment script can gate on it.`,
+converged on, so a deployment script can gate on it. That is the ordinary state
+of every city with a cutover still ahead of it, and it is NOT a fault report: a
+non-zero status here says the migration has not run, not that it would fail. To
+find out whether it would fail, run ` + "`gc storage " + storagePreflightVerb + "`" + `, which rehearses
+every check the migration makes without migrating.`,
 		RunE: func(*cobra.Command, []string) error {
 			request, err := resolveStorageOperatorRequest()
 			if err != nil {
