@@ -668,6 +668,28 @@ func (s *emittingClassStore) DepMetadata(issueID, dependsOnID string) (string, b
 	return reader.DepMetadata(issueID, dependsOnID)
 }
 
+// DepAddWithMetadata is DepAdd for an edge that carries a payload, and emits
+// the same bead.updated the plain form does. Both endpoints move: the edge is
+// what changed, and a subscriber that saw the payloadless add but not this one
+// would hold a stale view of exactly the edges formula gating depends on.
+//
+// An inner store without the write gets an error rather than falling back to
+// DepAdd. The fallback is the shape this must never take: on a store that keeps
+// the payload in a sidecar, a plain DepAdd over an edge that had one CLEARS it,
+// so "carry it if you can, add it plainly if you cannot" is not a degraded carry
+// but a destructive one.
+func (s *emittingClassStore) DepAddWithMetadata(issueID, dependsOnID, depType, metadata string) error {
+	writer, ok := s.Store.(beads.DepMetadataWriter)
+	if !ok {
+		return fmt.Errorf("writing dependency metadata %s -> %s: emitting store %T cannot carry an edge payload", issueID, dependsOnID, s.Store)
+	}
+	if err := writer.DepAddWithMetadata(issueID, dependsOnID, depType, metadata); err != nil {
+		return err
+	}
+	s.emitUpdated(issueID)
+	return nil
+}
+
 func (s *emittingClassStore) SequenceFloor() (int64, error) {
 	floor, ok := s.Store.(interface{ SequenceFloor() (int64, error) })
 	if !ok {

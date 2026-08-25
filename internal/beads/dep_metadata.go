@@ -21,6 +21,32 @@ type DepMetadataReader interface {
 	DepMetadata(issueID, dependsOnID string) (string, bool, error)
 }
 
+// DepMetadataWriter is the optional surface a Store implements when it can
+// record an edge TOGETHER WITH the payload it carried.
+//
+// It is the write half of DepMetadataReader and exists for the same reason: Dep
+// carries the pair and the type, so DepAdd has no argument a payload could
+// travel in. A copy that re-added edges through DepAdd alone did not merely
+// fail to carry the payload — on a store that keeps the payload in a sidecar,
+// DepAdd CLEARS it — so the missing write surface was a silent destruction, not
+// a silent omission.
+//
+// It is deliberately not an expansion of Dep. That model is stable and read by
+// every store in the tree; the payload is a projection two engines happen to
+// keep, and widening the wire model to carry it would put a field on every
+// DepList result that almost no caller can populate. Assert for this interface
+// and treat a store that does not implement it as UNABLE TO CARRY — a copy that
+// treated it as "nothing to carry" would be making the same conflation
+// DepMetadataReader's doc comment warns about, from the other side.
+type DepMetadataWriter interface {
+	// DepAddWithMetadata records the issueID -> dependsOnID edge and stores
+	// metadata as its payload. An empty metadata leaves the edge carrying
+	// nothing, which must stay distinguishable from carrying an empty payload:
+	// callers hand this the value a DepMetadataReader gave them, and both
+	// engines report "carries nothing" as the empty string.
+	DepAddWithMetadata(issueID, dependsOnID, depType, metadata string) error
+}
+
 // DepMetadataCarries reports whether a metadata column value is an actual
 // payload rather than an engine's rendering of none.
 //

@@ -445,6 +445,13 @@ func (s transientDepListSource) DepList(id, direction string) ([]beads.Dep, erro
 	return s.Store.DepList(id, direction)
 }
 
+// DepMetadata forwards to the leaf, for the reason every migration double needs
+// to: embedding beads.Store strips the read, and a source the repair cannot ask
+// about edge payloads is refused rather than assumed empty.
+func (s transientDepListSource) DepMetadata(issueID, dependsOnID string) (string, bool, error) {
+	return depMetadataThrough(s.Store, issueID, dependsOnID)
+}
+
 func (s transientDepListSource) List(query beads.ListQuery) ([]beads.Bead, error) {
 	rows, err := s.Store.List(query)
 	if err != nil {

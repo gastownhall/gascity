@@ -93,40 +93,127 @@ func migrateFromSource(t *testing.T, source beads.Store) (infraMigrationReport, 
 	return report, stderr.String()
 }
 
-// TestInfraMigrationRefusesASourceCarryingEdgePayloads is the interim safety
-// property: until the copy can CARRY a dependency payload, a source that has
-// one is refused rather than copied.
+// TestInfraMigrationCarriesAnEdgePayloadToTheBinding is the property this file
+// was written to demand and could not yet assert: a source edge carrying a
+// waits_for gate arrives in the binding still carrying it.
 //
-// The copy re-adds edges with beads.Dep, which holds the pair and the type and
-// nothing else, so a payload on the source has no way across — and on the
-// destination the empty carry is not merely absent but destructive, because
-// setGraphEdgeMetadataTx clears the pair's sidecar before deciding it has
-// nothing to store. Refusing is strictly better than dropping: the source is
-// retained and unchanged, so a refused city is exactly where it was.
-func TestInfraMigrationRefusesASourceCarryingEdgePayloads(t *testing.T) {
+// Until the carry existed the migration refused such a city — better than
+// dropping the payload, since the source is retained and a refused city is
+// exactly where it was, but it meant no city whose formulas use waits_for gates
+// could cut over at all. What makes the carry safe rather than merely present
+// is that the equality stage now witnesses the payload too: a copy that moved
+// the edge and dropped the gate is refused before the marker, not blessed by it.
+func TestInfraMigrationCarriesAnEdgePayloadToTheBinding(t *testing.T) {
 	backing, from, to, _ := seedInfraEdgeSource(t)
+	const payload = `{"gate":"waits_for","threshold":3}`
 	source := &payloadCarryingSource{
 		Store:    backing,
-		payloads: map[[2]string]string{{from.ID, to.ID}: `{"gate":"waits_for","threshold":3}`},
+		payloads: map[[2]string]string{{from.ID, to.ID}: payload},
 	}
 
 	report, said := migrateFromSource(t, source)
-	if report.Outcome == infraMigrationConverged {
-		t.Fatal("the migration converged a city whose source carries edge payloads the copy drops")
+	if report.Outcome != infraMigrationConverged {
+		t.Fatalf("Outcome = %v, want infraMigrationConverged; the copy still cannot carry an edge payload: %s", report.Outcome, said)
 	}
-	if report.Outcome != infraMigrationUnconverged {
-		t.Fatalf("Outcome = %v, want infraMigrationUnconverged", report.Outcome)
+
+	binding := openMigratedBinding(t, report)
+	got, carried, err := binding.DepMetadata(from.ID, to.ID)
+	if err != nil {
+		t.Fatalf("reading the payload back out of the binding: %v", err)
 	}
-	for _, want := range []string{from.ID, to.ID, "payload"} {
-		if !strings.Contains(said, want) {
-			t.Errorf("the refusal does not mention %q, so an operator cannot find the edge it is about: %s", want, said)
-		}
+	if !carried || got != payload {
+		t.Fatalf("the binding's edge %s -> %s carries (%q, %v), want (%q, true): the migration converged having dropped the gate",
+			from.ID, to.ID, got, carried, payload)
 	}
-	// Nothing may have been written: the refusal runs before the destination is
-	// touched, so a re-run after the payload is carried starts from empty.
-	if !report.BindingProvenEmpty {
-		t.Errorf("the refusal left content in the binding (probe: %s)", report.BindingProbe)
+}
+
+// TestInfraMigrationLeavesAPayloadlessEdgeCarryingNothing is the other half of
+// the carry, and the one a writer is most likely to get wrong.
+//
+// setGraphEdgeMetadataTx stores whatever it is handed, so a copy that passed
+// through an engine's rendering of "no payload" — Dolt hands back "{}" — would
+// write that literally and the binding would read back a payload the source
+// never had. Absent and present-but-empty are exactly the two the binding's own
+// adoption witness insists must stay distinguishable.
+func TestInfraMigrationLeavesAPayloadlessEdgeCarryingNothing(t *testing.T) {
+	backing, from, to, _ := seedInfraEdgeSource(t)
+	for _, empty := range []string{"", "{}", "  ", "null"} {
+		t.Run(fmt.Sprintf("source says %q", empty), func(t *testing.T) {
+			source := &payloadCarryingSource{
+				Store:    backing,
+				payloads: map[[2]string]string{{from.ID, to.ID}: empty},
+			}
+			report, said := migrateFromSource(t, source)
+			if report.Outcome != infraMigrationConverged {
+				t.Fatalf("Outcome = %v, want infraMigrationConverged: %s", report.Outcome, said)
+			}
+			binding := openMigratedBinding(t, report)
+			got, carried, err := binding.DepMetadata(from.ID, to.ID)
+			if err != nil {
+				t.Fatalf("reading the payload back out of the binding: %v", err)
+			}
+			if carried || got != "" {
+				t.Fatalf("the binding's edge carries (%q, %v), want (\"\", false): the copy stored an engine's spelling of no payload as a payload", got, carried)
+			}
+		})
 	}
+}
+
+// TestInfraCopyDepEdgeRefusesADestinationThatCannotCarryAPayload pins the
+// fail-closed half of the carry, mirroring the source-side rule: a destination
+// that cannot hold the payload is refused rather than written to without it.
+//
+// It also pins the narrowness of that refusal. A store with no writer is a
+// perfectly good destination for an edge that carries nothing, and refusing it
+// unconditionally would reject every destination in this tree apart from
+// SQLite — including the MemStore every other migration test uses.
+func TestInfraCopyDepEdgeRefusesADestinationThatCannotCarryAPayload(t *testing.T) {
+	backing, from, to, _ := seedInfraEdgeSource(t)
+	destination := beads.NewMemStore()
+	if _, ok := beads.Store(destination).(beads.DepMetadataWriter); ok {
+		t.Fatal("MemStore now carries edge payloads, so it is no longer the store this test needs")
+	}
+
+	carrying := &payloadCarryingSource{
+		Store:    backing,
+		payloads: map[[2]string]string{{from.ID, to.ID}: `{"gate":"waits_for"}`},
+	}
+	err := infraCopyDepEdge(destination, carrying, from.ID, to.ID, "blocks")
+	if err == nil {
+		t.Fatal("a destination that cannot carry a payload accepted an edge that has one, dropping it silently")
+	}
+	if !strings.Contains(err.Error(), from.ID) || !strings.Contains(err.Error(), "payload") {
+		t.Errorf("the refusal does not name the edge and what was lost: %v", err)
+	}
+
+	// The control: the same destination, the same edge, no payload. It must be
+	// written, or the refusal above is indistinguishable from a blanket one.
+	if err := infraCopyDepEdge(destination, backing, from.ID, to.ID, "blocks"); err != nil {
+		t.Fatalf("a payloadless edge was refused by a destination that has nothing to lose: %v", err)
+	}
+	deps, err := destination.DepList(from.ID, "down")
+	if err != nil {
+		t.Fatalf("DepList: %v", err)
+	}
+	if len(deps) != 1 || deps[0].DependsOnID != to.ID {
+		t.Fatalf("the payloadless edge did not land: %+v", deps)
+	}
+}
+
+// openMigratedBinding reopens the binding a completed migration wrote and asks
+// it for its edge-payload read, for a test that needs to see what landed rather
+// than what the report says landed.
+func openMigratedBinding(t *testing.T, report infraMigrationReport) beads.DepMetadataReader {
+	t.Helper()
+	if report.Target.Database == "" {
+		t.Fatal("the report names no database, so there is nothing to read back")
+	}
+	opened := openMigratedDestination(t, report.Target)
+	reader, ok := opened.(beads.DepMetadataReader)
+	if !ok {
+		t.Fatalf("the binding opened as %T, which cannot be asked about edge payloads", opened)
+	}
+	return reader
 }
 
 // TestInfraMigrationProceedsWhenNoEdgeCarriesAPayload is the control the
@@ -174,32 +261,36 @@ func TestInfraMigrationRefusesASourceThatCannotReportEdgePayloads(t *testing.T) 
 	}
 }
 
-// TestInfraSourceEdgePayloadRefusalIsSilentOnAnEmptyPayload pins the rule at
-// the boundary the engines disagree on. Dolt renders an absent payload as the
-// empty JSON object; a reader that called that a payload would refuse every
-// city, which is the same as having no check at all.
-func TestInfraSourceEdgePayloadRefusalIsSilentOnAnEmptyPayload(t *testing.T) {
+// TestInfraSourceEdgePayloadRefusalPassesAnySourceItCanRead pins what the
+// refusal narrowed to once the copy could carry a payload: it asks whether the
+// source can be READ, not what the read returned. A payload is now carried, so
+// finding one is no longer a reason to stop.
+//
+// The empty spellings are still enumerated because they are the ones most
+// likely to be mistaken for a fault by a future edit — Dolt renders an absent
+// payload as the empty JSON object — and a check that refused on those would
+// refuse every city, which is the same as having no check at all.
+func TestInfraSourceEdgePayloadRefusalPassesAnySourceItCanRead(t *testing.T) {
 	backing, from, to, _ := seedInfraEdgeSource(t)
 	rows, err := readInfraSnapshot(backing)
 	if err != nil {
 		t.Fatalf("readInfraSnapshot: %v", err)
 	}
 
-	for _, empty := range []string{"", "{}", "  ", "null"} {
+	for _, payload := range []string{"", "{}", "  ", "null", `{"gate":"waits_for"}`} {
 		source := &payloadCarryingSource{
 			Store:    backing,
-			payloads: map[[2]string]string{{from.ID, to.ID}: empty},
+			payloads: map[[2]string]string{{from.ID, to.ID}: payload},
 		}
 		if err := infraSourceEdgePayloadRefusal(source, rows); err != nil {
-			t.Errorf("an edge whose payload is %q was refused: %v", empty, err)
+			t.Errorf("an edge whose payload is %q was refused, but the copy carries payloads now: %v", payload, err)
 		}
 	}
-	carrying := &payloadCarryingSource{
-		Store:    backing,
-		payloads: map[[2]string]string{{from.ID, to.ID}: `{"gate":"waits_for"}`},
-	}
-	if err := infraSourceEdgePayloadRefusal(carrying, rows); err == nil {
-		t.Error("a real payload was not refused")
+
+	// The control. Only an unreadable source stops the migration here, or the
+	// loop above is passing because the check does nothing.
+	if err := infraSourceEdgePayloadRefusal(mutePayloadSource{Store: backing}, rows); err == nil {
+		t.Error("a source that cannot be asked about edge payloads was cleared")
 	}
 }
 

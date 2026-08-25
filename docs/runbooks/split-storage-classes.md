@@ -104,7 +104,7 @@ The checks that most often stop a real cutover, and what each wants from you:
 | --- | --- | --- |
 | `rig scopes` | An infrastructure bead lives in a rig's store, and the copy reads only the city work store. | Move the named beads into the city work store by hand. |
 | `served binding` | This city already served its infrastructure classes from a different binding. | Verify or recover that binding first. Removing the note is your attestation that you have. |
-| `edge payloads` | A dependency edge carries a payload this build's copy cannot carry — `waits_for` gates write these. | Nothing to fix yet; the carry is not built. The refusal keeps the source intact. |
+| `edge payloads` | The work store cannot be asked what its dependency edges carry — `waits_for` gates store a payload there. | Nothing to fix in your data; the store this city serves from has no such read. A store that cannot answer is not one that carries nothing, so the migration stops rather than copying edges and dropping their gates. |
 | `destination` | The binding already holds beads this migration did not write. | Find out whose they are before letting a copy overwrite them. |
 
 It exits non-zero when the migration would refuse for something you have to go

@@ -435,6 +435,17 @@ func TestStoragePreflightIsReachableFromTheCommandTree(t *testing.T) {
 // to the city it is handed. The migration leg is also the control: a fixture
 // that fails to make the migration refuse would make the preflight assertion
 // vacuous, so it fails the test rather than passing quietly.
+//
+// One migration refusal is deliberately absent from this table and cannot be
+// added to it: infraCopyDepEdge refuses a DESTINATION that cannot carry an edge
+// payload. The answer lives on the destination, and opening the destination is
+// the one thing this rehearsal will not do — the opener creates the database, so
+// a preflight that asked would answer its own question. It is the same class as
+// the migration's ForeignIDCreator assertion, and safe for the same reason: in
+// production openInfraDestination returns a *beads.SQLiteStore, which carries a
+// compile-time beads.DepMetadataWriter assertion in sqlite_store_graph_apply.go.
+// A destination that could reach an operator without one does not exist, so
+// there is no window this omission could cost.
 func TestPreflightRefusesEveryCityTheMigrationRefuses(t *testing.T) {
 	cases := map[string]func(t *testing.T) (storageOperatorRequest, *config.City){
 		"a served-binding note names another binding": func(t *testing.T) (storageOperatorRequest, *config.City) {
@@ -446,16 +457,6 @@ func TestPreflightRefusesEveryCityTheMigrationRefuses(t *testing.T) {
 			}); err != nil {
 				t.Fatalf("writing the served-binding note: %v", err)
 			}
-			return request, cfg
-		},
-		"an infra edge carries a payload the copy cannot carry": func(t *testing.T) (storageOperatorRequest, *config.City) {
-			request, cfg, _ := preflightReadyCity(t, 0)
-			backing, from, to, _ := seedInfraEdgeSource(t)
-			source := &payloadCarryingSource{
-				Store:    backing,
-				payloads: map[[2]string]string{{from.ID, to.ID}: `{"gate":"waits_for","threshold":3}`},
-			}
-			openInfraMigrationSource = func(string) (beads.Store, error) { return source, nil }
 			return request, cfg
 		},
 		"the source cannot be asked about edge payloads at all": func(t *testing.T) (storageOperatorRequest, *config.City) {
