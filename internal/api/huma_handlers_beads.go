@@ -754,8 +754,11 @@ func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInpu
 // humaHandleBeadClose is the Huma-typed handler for POST /v0/bead/{id}/close.
 func (s *Server) humaHandleBeadClose(_ context.Context, input *BeadCloseInput) (*OKResponse, error) {
 	id := input.ID
-	store, _, err := s.resolveBeadOwner(id)
+	store, current, err := s.resolveBeadOwner(id)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.gateWorkRecordClose(id, store, current, nil); err != nil {
 		return nil, err
 	}
 	if err := store.Close(id); err != nil {
@@ -863,6 +866,14 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 	if opts.Status != nil {
 		waitStatus = *opts.Status
 	}
+	if closesStatus(opts.Status) {
+		// This spelling closes the bead, so it answers to the same contract as
+		// the close route. body.Metadata rides along because the documented
+		// atomic close stamps the work record in this very request.
+		if err := s.gateWorkRecordClose(id, store, current, body.Metadata); err != nil {
+			return nil, err
+		}
+	}
 	// Once Get succeeded in the resolved store, treat Update-ErrNotFound as a
 	// concurrent-delete race (409) rather than resolving again — otherwise a
 	// delete racing with update silently applies the mutation to a different
@@ -892,6 +903,12 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 // It is implemented as a soft-delete (store.Close) — see the `"closed"`
 // status field for honest wire-contract semantics. Hard-delete is not
 // exposed through the API.
+//
+// The work-record close gate deliberately does not apply here. Delete says
+// "this bead should not exist", not "this work completed", so demanding a work
+// record would make an unwanted bead undeletable under enforcement; the CLI
+// plane draws the same line, gating `bd close` and `bd update --status closed`
+// but not `bd delete`.
 func (s *Server) humaHandleBeadDelete(_ context.Context, input *BeadDeleteInput) (*OKResponse, error) {
 	id := input.ID
 	store, _, err := s.resolveBeadOwner(id)
