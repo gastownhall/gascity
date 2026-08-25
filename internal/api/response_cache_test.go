@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/events"
 )
 
@@ -165,9 +167,24 @@ func TestHandleStatusServesStaleAndRefreshesInBackground(t *testing.T) {
 		statusResponseTTLFloor = oldFloor
 	})
 
+	// Pin the liveness clock so the city store's snapshot age is exact, and
+	// back the city scope with a CachingStore-like reporter whose last fresh
+	// observation is staleSnapshotAgeS old. That is the lagging-reconciler
+	// case: the response entry below is milliseconds old, the snapshot it was
+	// built from is minutes old, and X-GC-Cache-Age-S must report the worse
+	// of the two so `gc status`'s staleness banner still fires.
+	const staleSnapshotAgeS = 300.0
+	now := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	t.Cleanup(SetLivenessClockForTest(&clock.Fake{Time: now}))
+
 	state := newFakeState(t)
 	fastStore := &countingStore{Store: beads.NewMemStore()}
 	state.stores["myrig"] = fastStore
+	state.cityBeadStore = stubLivenessReporter{
+		Store:     beads.NewMemStore(),
+		live:      true,
+		lastFresh: now.Add(-time.Duration(staleSnapshotAgeS) * time.Second),
+	}
 	srv := New(state)
 	h := newTestCityHandlerWith(t, state, srv)
 
@@ -217,23 +234,70 @@ func TestHandleStatusServesStaleAndRefreshesInBackground(t *testing.T) {
 	// does, so no new field was added), letting the CLI's existing >30s
 	// staleness banner logic (which reads this same header via the CLI's
 	// api.Client) apply to an SWR-served body the same way it does to any
-	// other cache hit.
-	if got := rec2.Header().Get("X-GC-Cache-Age-S"); got == "" {
+	// other cache hit. Its VALUE matters, not just its presence: the header
+	// must report the greater of the response-entry age (milliseconds here)
+	// and the city store's snapshot age (staleSnapshotAgeS). Reporting only
+	// the entry age would silently suppress the CLI banner on exactly the
+	// lagging-reconciler city this endpoint exists to survive.
+	raw := rec2.Header().Get("X-GC-Cache-Age-S")
+	if raw == "" {
 		t.Fatal("stale-served response missing X-GC-Cache-Age-S header")
+	}
+	age, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		t.Fatalf("X-GC-Cache-Age-S = %q, want a float: %v", raw, err)
+	}
+	if age < 0 {
+		t.Fatalf("X-GC-Cache-Age-S = %v, want >= 0", age)
+	}
+	if age != staleSnapshotAgeS {
+		t.Fatalf("X-GC-Cache-Age-S = %v, want %v (the greater of the response-entry age and the lagging store snapshot age)", age, staleSnapshotAgeS)
+	}
+
+	// Concurrent duplicate misses must coalesce onto a single background
+	// rebuild rather than each launching their own. Issue them while the
+	// blocking store is still held, so every one of them races the same
+	// in-flight guard; the assertion is on the List count measured after a
+	// barrier, never on timing.
+	const concurrentMisses = 4
+	var wg sync.WaitGroup
+	concurrentRecs := make([]*httptest.ResponseRecorder, concurrentMisses)
+	for i := range concurrentRecs {
+		concurrentRecs[i] = httptest.NewRecorder()
+		wg.Add(1)
+		go func(rec *httptest.ResponseRecorder) {
+			defer wg.Done()
+			// A per-goroutine request: http.Request is not safe to share
+			// across concurrent ServeHTTP calls.
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(state, "/status"), nil))
+		}(concurrentRecs[i])
+	}
+	allServed := make(chan struct{})
+	go func() { wg.Wait(); close(allServed) }()
+	select {
+	case <-allServed:
+	case <-time.After(5 * time.Second): // hang guard, not a timing bound
+		t.Fatal("concurrent /status requests blocked on rebuild instead of being served the stale cached body (SWR not honored)")
+	}
+	for i, rec := range concurrentRecs {
+		if rec.Code != http.StatusOK {
+			t.Fatalf("concurrent stale-served status #%d = %d, want 200", i, rec.Code)
+		}
 	}
 
 	// Release the blocked store and let the background refresh finish, then
-	// confirm it actually ran (not skipped) by observing a fresh List call.
+	// confirm it actually ran (not skipped) by observing a fresh List call —
+	// and that all the misses above produced exactly ONE rebuild between
+	// them, not one apiece.
+	listCallsBeforeRefresh := fastStore.listCalls
 	closeRelease()
 	srv.waitForBackground()
-	if fastStore.listCalls < 2 {
-		t.Fatalf("List calls after background refresh = %d, want >= 2 (background rebuild must still run)", fastStore.listCalls)
+	if got := fastStore.listCalls - listCallsBeforeRefresh; got != 1 {
+		t.Fatalf("rig List calls during background refresh = %d, want exactly 1 (%d concurrent misses must coalesce onto one rebuild)", got, concurrentMisses+1)
 	}
 
-	// A concurrent duplicate miss must coalesce onto the same background
-	// refresh rather than starting a second one. Simulate by asserting the
-	// in-flight guard cleared after completion (a leaked guard would wedge
-	// every future refresh for this key).
+	// The in-flight guard must clear after completion; a leaked guard would
+	// wedge every future refresh for this key.
 	if srv.responseRefreshing["status"] {
 		t.Fatal("responseRefreshing[\"status\"] still true after background refresh completed (leaked guard)")
 	}

@@ -122,15 +122,26 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 		// measured ~3.65s on a 26-agent/1.2GB city — the same failure class
 		// that used to 503 the legacy runs/census endpoint at its internal
 		// budget. Rather than let a request pay that cost inline, serve the
-		// stale body immediately (CacheAgeS reports its real age, reusing the
-		// existing staleness signal `gc status` already renders a banner for
-		// above cacheAgeBannerThresholdSeconds) and refresh in the background
-		// so the next poll gets a fresh body. A genuine cold cache (nothing
-		// ever built) has nothing to serve here and falls through to the
-		// synchronous build below, same as before this change.
+		// stale body immediately and refresh in the background so the next
+		// poll gets a fresh body. A genuine cold cache (nothing ever built)
+		// has nothing to serve here and falls through to the synchronous
+		// build below, same as before this change.
+		//
+		// CacheAgeS reports the GREATER of the two staleness signals: how
+		// long ago this response entry was built, and cacheAgeSeconds(store)
+		// — the age of the CachingStore snapshot the body was built from.
+		// Reporting only the response-entry age would let a recently built
+		// entry sitting on top of a lagging reconciler under-report true
+		// staleness and suppress the banner `gc status` renders above
+		// cacheAgeBannerThresholdSeconds; reporting only the store age would
+		// hide the SWR delay. The max preserves both.
 		if body, age, ok := staleResponseAs[StatusBody](s, cacheKey); ok {
 			s.refreshStatusResponseInBackground(cacheKey, input.Lite)
-			return &IndexOutput[StatusBody]{Index: index, CacheAgeS: age.Seconds(), Body: body}, nil
+			return &IndexOutput[StatusBody]{
+				Index:     index,
+				CacheAgeS: max(age.Seconds(), cacheAgeSeconds(store)),
+				Body:      body,
+			}, nil
 		}
 	}
 
