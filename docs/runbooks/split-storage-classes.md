@@ -122,10 +122,37 @@ gc storage status
 ```
 
 `status` reports the class map, the binding, the marker and manifest paths,
-how many infrastructure beads the retained source still holds, and — once
-converged — the proven-copy size, the stranded count, and how many the
-binding's own garbage collection has removed since cutover. It exits non-zero
-while the city is unconverged, so a deployment script can gate on it.
+how many infrastructure beads the retained source still holds, how many the
+binding itself holds right now, and — once converged — the proven-copy size,
+the stranded count, and how many the binding's own garbage collection has
+removed since cutover. It exits non-zero while the city is unconverged, so a
+deployment script can gate on it.
+
+Read the two census lines as a pair. The `source:` count does not change when
+a cutover succeeds — the migration copies and retains — so it is the `binding:`
+count that tells you whether anything is being served from the new store. On an
+unconverged city that line reads zero without the database being created to
+learn it.
+
+## Watching a cutover from outside
+
+Every boot publishes one `storage.binding.*` event carrying what the gate
+concluded and, on a serving outcome, the size of the proven copy it rests on:
+
+| Event                            | Meaning                                                 |
+| -------------------------------- | ------------------------------------------------------- |
+| `storage.binding.converged`      | Serving a binding a proven copy already populated.       |
+| `storage.binding.genesis`        | Serving a binding created for a city with nothing to move. |
+| `storage.binding.unconverged`    | Refused: config and data disagree. `invariant` says how. |
+| `storage.binding.uncheckable`    | Refused: the check that would decide could not run.      |
+| `storage.binding.not-configured` | This city has no infrastructure split.                   |
+
+The last one is a verdict, not the absence of one, and it is why a subscriber
+can gate on these events at all: silence would otherwise be indistinguishable
+from a gate that crashed before deciding.
+
+`proven_beads` is zero on every refusal, where it means the size was not
+established rather than that the copy is empty. On `genesis` the zero is real.
 
 ### `gc bd ready` stops answering, on purpose
 

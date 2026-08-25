@@ -350,11 +350,18 @@ const (
 	// binding a proven copy already populated, the second created one for a
 	// city that had nothing to move. Unconverged and Uncheckable are the two
 	// refusals: config and data disagree, or the check that would decide could
-	// not run. A city with no [storage] section emits none of them.
-	StorageBindingConverged   = "storage.binding.converged"
-	StorageBindingGenesis     = "storage.binding.genesis"
-	StorageBindingUnconverged = "storage.binding.unconverged"
-	StorageBindingUncheckable = "storage.binding.uncheckable"
+	// not run.
+	//
+	// NotConfigured is the fifth, and it is a verdict rather than the absence of
+	// one. A city that relocates nothing used to leave the gate having published
+	// nothing at all, and nothing reads the same as a gate that crashed before
+	// deciding or a build too old to have one. A subscriber gating a deploy on
+	// these events has to be able to see "this city has no split" as an answer.
+	StorageBindingConverged     = "storage.binding.converged"
+	StorageBindingGenesis       = "storage.binding.genesis"
+	StorageBindingUnconverged   = "storage.binding.unconverged"
+	StorageBindingUncheckable   = "storage.binding.uncheckable"
+	StorageBindingNotConfigured = "storage.binding.not-configured"
 )
 
 // KnownEventTypes lists every event-type constant this package defines.
@@ -409,6 +416,7 @@ var KnownEventTypes = []string{
 	BeadsConditionalWritesDegraded,
 	StorageBindingConverged, StorageBindingGenesis,
 	StorageBindingUnconverged, StorageBindingUncheckable,
+	StorageBindingNotConfigured,
 	// ProviderHealthGateAlert is intentionally omitted from KnownEventTypes.
 	// The event is emitted by the reconciler but its typed SSE payload is not
 	// yet registered in internal/api (the payload registration lives in a
