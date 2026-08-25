@@ -75,10 +75,27 @@ type poolAllocationShadowPolicy struct {
 	maxActiveSessions   int
 }
 
-// supported is clause 1 of the uniform predicate contract: the single
-// eligibility spelling for every pool-family site. See the type doc.
+// supported is clause 1 of the uniform predicate contract for sites that TAKE a
+// seat: the single eligibility spelling for every pool-family allocation site.
+// See the type doc.
 func (p poolAllocationShadowPolicy) supported() bool {
 	return p.reason == poolAllocationShadowEligible || p.reason == poolAllocationShadowEligibleAgentCap
+}
+
+// releaseEligible is clause 1 for sites that GIVE a seat BACK. A release — a
+// drain acknowledgement finalizing into stop — never consumes capacity, so
+// every capacity-shaped reason is eligible here: a min floor, a workspace or
+// rig cap, a namepool, and an agent cap all bound how many seats may be TAKEN,
+// and refusing a release under one leaks the very seat it exists to bound. Only
+// the identity-model exclusions can disqualify a release, because only they say
+// the keyed lane does not own this agent's pool at all — and that is exactly
+// what contributionPresent already records, which is why this reads the field
+// rather than re-spelling the partition as a reason list. Gating a release on
+// supported() is the allocation question asked at a release site: it makes any
+// city with a workspace cap refuse every agent drain acknowledgement forever,
+// stranding the row in draining and the pool slot with it (ga-f7v2ft, mc-by7s).
+func (p poolAllocationShadowPolicy) releaseEligible() bool {
+	return p.contributionPresent
 }
 
 func newPoolAllocationShadowPolicy(
@@ -160,6 +177,23 @@ func (p poolAllocationShadowPolicy) forSourceStore(
 		p.reason = poolAllocationShadowSourceStore
 	}
 	return p
+}
+
+// poolAllocationShadowReachesSourceStore asks forSourceStore's question on its
+// own, without the policy overlay. Allocation sites can fold the answer into
+// reason because they refuse on !supported() anyway, so the early return there
+// costs nothing. A release site cannot: it admits every capacity shape, so
+// routing this through forSourceStore would skip the check entirely in exactly
+// the capped cities the release gate now serves, and let an acknowledgement
+// whose trigger store the agent cannot read walk into the store resolution
+// below and fail as an error instead of a refusal.
+func poolAllocationShadowReachesSourceStore(
+	cfg *config.City,
+	agent *config.Agent,
+	cityPath string,
+	storeRef string,
+) bool {
+	return strings.TrimSpace(storeRef) != "" && agentutil.AgentReachesWorkflowStore(storeRef, agent, cityPath, cfg)
 }
 
 func poolAllocationShadowHasCap(limit *int) bool {
