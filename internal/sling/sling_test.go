@@ -4695,3 +4695,54 @@ func TestCheckBeadStateRoutedPoolForeignAssigneeStillWarns(t *testing.T) {
 		t.Fatalf("expected a warning naming the conflicting assignee, got none")
 	}
 }
+
+// TestCheckBeadStateRoutedPoolSiblingPrefixIsCurrentlyOverMatched pins a known
+// gap in the target+"-" anchor rather than asserting the invariant the
+// neighboring control claims. TestCheckBeadStateRoutedPoolForeignAssigneeStillWarns
+// pairs "novices-sess1" against target "smiths" — two strings sharing no prefix —
+// so it passes even with the anchor removed entirely and cannot detect an
+// over-match. This case uses the real boundary: a sibling pool whose qualified
+// name begins with this pool's qualified name plus "-".
+//
+// Current behavior is that the sibling's claim reads as this pool's own and the
+// conflict warning is suppressed. That is a lost warning, not a double-mint —
+// the over-match lands on the idempotent branch, which dispatches nothing. This
+// test asserts that behavior so the gap is visible and any future tightening of
+// the ownership predicate has to update it deliberately.
+func TestCheckBeadStateRoutedPoolSiblingPrefixIsCurrentlyOverMatched(t *testing.T) {
+	store := beads.NewMemStore()
+	a := config.Agent{
+		Name:              "smiths",
+		Dir:               "myrig",
+		MinActiveSessions: intPtr(1),
+		MaxActiveSessions: intPtr(4),
+	}
+	target := agentutil.RoutedToIdentity(&a) // "myrig/smiths"
+
+	convoy, err := store.Create(beads.Bead{Title: "auto convoy", Type: "convoy", Status: "open"})
+	if err != nil {
+		t.Fatalf("store.Create(convoy): %v", err)
+	}
+	bead, err := store.Create(beads.Bead{
+		Title:    "pool work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: target + "-ops-1", // sibling pool "myrig/smiths-ops", slot 1
+		Metadata: map[string]string{"gc.routed_to": target},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(bead): %v", err)
+	}
+	if err := store.DepAdd(convoy.ID, bead.ID, "tracks"); err != nil {
+		t.Fatalf("store.DepAdd(tracks): %v", err)
+	}
+
+	result := CheckBeadState(store, bead.ID, a, SlingDeps{Store: store})
+
+	if !result.Idempotent {
+		t.Fatalf("known over-match: expected Idempotent=true for a sibling-pool claim under the current anchor, got %+v", result)
+	}
+	if len(result.Warnings) != 0 {
+		t.Fatalf("known over-match: expected the conflict warning to be suppressed, got %v", result.Warnings)
+	}
+}
