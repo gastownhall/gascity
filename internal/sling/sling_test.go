@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -4744,5 +4745,44 @@ func TestCheckBeadStateRoutedPoolSiblingPrefixIsCurrentlyOverMatched(t *testing.
 	}
 	if len(result.Warnings) != 0 {
 		t.Fatalf("known over-match: expected the conflict warning to be suppressed, got %v", result.Warnings)
+	}
+}
+
+// TestCheckBeadStateRoutedRigQualifiedPoolSessionIsNotMatched pins the
+// complement of the anchor's reach. RoutedToIdentity returns the
+// UNSANITIZED qualified name ("myrig/smiths"), but a pool session's
+// runtime identity is sanitized — SanitizeQualifiedNameForSession
+// encodes "/" as "--" — so the real assignee is "myrig--smiths-2" and
+// target+"-" never matches it. The target+"-" anchor therefore only
+// fires for Dir-less pools. This is a lost fix, not a regression: the
+// pre-fix behavior for this shape is unchanged. Asserted so the gap is
+// visible until a session->pool ownership lookup replaces the prefix.
+func TestCheckBeadStateRoutedRigQualifiedPoolSessionIsNotMatched(t *testing.T) {
+	store := beads.NewMemStore()
+	a := config.Agent{
+		Name:              "smiths",
+		Dir:               "myrig",
+		MinActiveSessions: intPtr(1),
+		MaxActiveSessions: intPtr(4),
+	}
+	target := agentutil.RoutedToIdentity(&a) // "myrig/smiths"
+	bead, err := store.Create(beads.Bead{
+		Title:    "pool work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: agent.SanitizeQualifiedNameForSession(target + "-2"), // "myrig--smiths-2"
+		Metadata: map[string]string{"gc.routed_to": target},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(bead): %v", err)
+	}
+
+	result := CheckBeadState(store, bead.ID, a, SlingDeps{Store: store})
+
+	if result.Idempotent {
+		t.Fatalf("known gap: sanitized rig-qualified pool session is not matched by the target+\"-\" anchor; got %+v", result)
+	}
+	if len(result.Warnings) == 0 {
+		t.Fatalf("expected the conflict warning for an unmatched pool-session claim, got none")
 	}
 }
