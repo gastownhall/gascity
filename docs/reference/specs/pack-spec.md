@@ -85,6 +85,7 @@ A pack may contain the following abstract content:
 | Named sessions | `[[named_session]]` in `pack.toml` | current |
 | Services | `[[service]]` in `pack.toml` | current |
 | Providers | `[providers.<name>]` in `pack.toml` | current |
+| Runtimes | `[runtimes.<name>]` in `pack.toml` | current |
 | Formulas | `formulas/` | preferred |
 | Orders | `orders/<name>.toml` | preferred |
 | Skills | `skills/` | preferred |
@@ -181,6 +182,7 @@ Conceptually, the file may contain these tables:
 | `[[named_session]]` | Pack-provided named sessions. | current |
 | `[[service]]` | Pack-provided services. | current |
 | `[providers.<name>]` | Pack-provided provider presets. | current |
+| `[runtimes.<name>]` | Pack-shipped runtime provider executables. | current |
 | `[[patches.agent]]` | Pack-level agent patches. | current |
 | `[global]` | Pack-wide live session commands. | current |
 | `[[pricing]]` | Pack-provided pricing estimates. | current |
@@ -455,7 +457,43 @@ the effective city wins.
 
 Provider fields are the same provider fields accepted in `city.toml`.
 
-### 1.2.8. Formula Directory
+### 1.2.8. `[runtimes.<name>]`
+
+The `[runtimes]` table declares pack-shipped runtime provider executables. Each
+`[runtimes.<name>]` entry binds a selection name to a Runtime Provider Protocol
+(RPP) executable:
+
+```toml
+[runtimes.cloudflare]
+command = "gc-runtime-cloudflare"   # pack-relative if it contains a path
+                                     # separator, else resolved on PATH
+protocol = 0
+```
+
+| Field | Meaning | Status |
+|---|---|---|
+| `command` | Required. The runtime executable: a path relative to the pack directory (anything containing a path separator), or a bare name resolved on PATH at session start. | required |
+| `protocol` | The RPP version the executable speaks. `0` is the only version today; any other value fails composition. | current |
+
+`<name>` must not contain `:`, `/`, or whitespace, since `:` is reserved for
+prefix-form selection names (`exec:...`) and `/` and whitespace keep selection
+names shell- and TOML-friendly.
+
+City composition registers declared runtimes into a city-wide selection
+registry (`City.Runtimes`), including runtimes declared by rig-imported packs.
+Consumers select a runtime by name the same way they select a builtin
+provider — `city.toml` `[session].provider`, or an agent/template `session`
+field — for example `provider = "cloudflare"` for the entry above. Name
+collisions with builtin runtimes or other packs are composition errors; only
+identical re-declarations of the same pack reached through a diamond import
+graph dedupe.
+
+`gc runtime check <name>` resolves a declared name and runs the RPP
+conformance suite against the pack's executable. A `pack-runtimes` doctor
+check verifies each declared executable is installed and answers the
+`protocol` handshake.
+
+### 1.2.9. Formula Directory
 
 A pack's formula directory is the well-known `formulas/` directory at the pack
 root. The only formula directory the pack loader collects is `formulas/`.
@@ -466,7 +504,7 @@ directories are collected before higher-priority pack directories.
 > **Compatibility:** Older material may mention `[formulas].dir`. That field is
 > invalid in `pack.toml`; new packs should put formulas under `formulas/`.
 
-### 1.2.9. `[[patches.agent]]`
+### 1.2.10. `[[patches.agent]]`
 
 Agent patches modify an existing agent by identity.
 
@@ -499,7 +537,7 @@ The specified append fields are:
 Pack-level patch paths in `prompt_template`, `session_setup_script`, and
 `overlay_dir` resolve relative to the patching pack directory.
 
-### 1.2.10. Doctor Directory
+### 1.2.11. Doctor Directory
 
 Pack doctor checks are authored under `doctor/`. Each immediate child directory
 under `doctor/` defines one check when it contains a runnable check script.
@@ -530,7 +568,7 @@ metadata:
 > **Compatibility:** Legacy `pack.toml` `[[doctor]]` entries remain loader
 > compatibility for existing packs. New packs should use `doctor/<name>/`.
 
-### 1.2.11. Command Directory
+### 1.2.12. Command Directory
 
 Pack commands are authored under `commands/`. Each directory containing `run.sh`
 defines one command leaf. Nested directories imply nested command words.
@@ -558,7 +596,7 @@ An optional `command.toml` may override the default command words or script:
 > **Compatibility:** Legacy `pack.toml` `[[commands]]` entries remain loader
 > compatibility for existing packs. New packs should use `commands/<path>/`.
 
-### 1.2.12. `[global]`
+### 1.2.13. `[global]`
 
 The `[global]` table declares pack-wide live session commands.
 
@@ -575,7 +613,7 @@ When `[global].session_live` is loaded, `{{.ConfigDir}}` is resolved to the
 concrete pack directory. Other template variables remain for per-agent
 expansion.
 
-### 1.2.13. `[[pricing]]`
+### 1.2.14. `[[pricing]]`
 
 Each `[[pricing]]` table declares an estimated model-pricing entry for one
 provider/model pair.
@@ -608,7 +646,7 @@ Pack pricing entries are lower priority than city-level `[[pricing]]` entries
 and higher priority than the built-in default pricing table. Pricing entries
 are estimates for decision support, not invoice reconciliation.
 
-### 1.2.14. Authoring Summary
+### 1.2.15. Authoring Summary
 
 New packs should use these authoring constructs:
 
@@ -629,6 +667,7 @@ New packs should use these authoring constructs:
 | `[[named_session]]` | Pack named sessions. |
 | `[[service]]` | Pack services. |
 | `[providers.<name>]` | Pack provider presets. |
+| `[runtimes.<name>]` | Pack-shipped runtime provider executables. |
 | `[[patches.agent]]` | Pack-level agent patches. |
 | `[global]` | Pack-wide live session commands. |
 | `[[pricing]]` | Pack pricing estimates. |
