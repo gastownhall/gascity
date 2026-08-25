@@ -667,6 +667,20 @@ func TestNoMaintenanceBuiltinPack(t *testing.T) {
 	}
 }
 
+// TestCorePackShipsDeadRunDetectOrder pins that the dead-run-detect order and
+// the script it execs ship in the bundled core pack, so every city that imports
+// core gets the silently-dead-run escalation without per-city configuration.
+func TestCorePackShipsDeadRunDetectOrder(t *testing.T) {
+	order := readBundledPackFileForTest(t, "core", "orders/dead-run-detect.toml")
+	if !strings.Contains(order, `exec = "$PACK_DIR/assets/scripts/dead-run-detect.sh"`) {
+		t.Errorf("dead-run-detect order does not exec its bundled script:\n%s", order)
+	}
+	script := readBundledPackFileForTest(t, "core", "assets/scripts/dead-run-detect.sh")
+	if first := strings.SplitN(script, "\n", 2)[0]; first != "#!/usr/bin/env bash" {
+		t.Errorf("dead-run-detect.sh first line = %q, want bash shebang", first)
+	}
+}
+
 func TestEnsureBuiltinRuntimeAssetsHydratesCacheAndShim(t *testing.T) {
 	clearGCEnv(t) // fresh GC_HOME → hydration starts from a cold cache
 	city := t.TempDir()

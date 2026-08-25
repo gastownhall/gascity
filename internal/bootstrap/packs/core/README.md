@@ -18,6 +18,7 @@ none requires per-city configuration.
 | `cross-rig-deps` | cooldown 5m | Convert satisfied cross-rig `blocks` deps to `related` |
 | `order-tracking-sweep` | cooldown | Close stale order-tracking beads and prune expired tracking history |
 | `spawn-storm-detect` | cooldown | Detect beads repeatedly bouncing back to pool |
+| `dead-run-detect` | cooldown 30m | Mail the mayor once when an in_progress workflow root's driving session is gone |
 | `prune-branches` | cooldown | Clean stale `gc/*` branches from all rigs |
 | `wisp-compact` | cooldown | TTL-based cleanup of expired ephemeral beads (wisps) |
 | **`nudge-on-route`** | **event `bead.updated`** | **Nudge the target session when a bead is routed to it** |
@@ -111,6 +112,71 @@ Entries older than the retention window are pruned on each run.
 | -------- | ------- | ------- |
 | `GC_CASCADE_NUDGE_LOOKBACK` | `5m` | Event lookback window |
 | `GC_CASCADE_NUDGE_RETENTION` | `1h` | Dedup-entry retention (Ns/Nm/Nh) |
+
+## `dead-run-detect`
+
+**Why.** A formulas-v2 (graph.v2) run is driven by the session that claimed
+its workflow root. When that session dies between steps — after a
+decomposition step closed and before the drain was routed — the root stays
+`in_progress`, the step beads stay open and unclaimed, and the run reports as
+active indefinitely with no signal to anyone. Nothing else catches that shape:
+`reaper.sh`'s stale-root close needs an empty assignee, >24h of silence and
+no descendant in a live status (`open` is live, so open step beads make the
+root permanently ineligible — and it closes silently anyway);
+`orphan-sweep.sh` resets `in_progress` beads whose assignee is unknown, and a
+configured agent name counts as known with no session running; the
+dashboard's run staleness (`internal/runproj/enrich.go`) is display-only; the
+pool-slot backstops (`cmd/gc/execution_backstop.go`, `cmd/gc/idle_nudge.go`)
+never look at workflow roots. This order ships the missing detector.
+
+**Predicate.** Every sweep collects the live session identities from
+`gc session list --json` for HQ and every non-HQ rig (the liveness source
+`orphan-sweep.sh` uses; a failed list in any scope skips the whole sweep so a
+partial picture never produces a false verdict), enumerates `in_progress` and
+`open` beads per scope, and selects workflow roots: `status == in_progress`
+and `gc.kind == workflow` or `gc.formula_contract == graph.v2`
+(`sourceworkflow.IsWorkflowRoot`) and `gc.root_bead_id` empty or self. A
+root's driver is read from the fields the run projection reads
+(`internal/runproj/detail_sessionlink.go`): `session_name` /
+`gc.session_name` / `gc.sessionName` / `session_id` / `gc.session_id` /
+`gc.sessionId`, then the assignee, then `gc.routed_to`; the reconciler
+back-fills `gc.session_name` onto the root from its worked steps
+(`cmd/gc/build_desired_state.go` `stampRunRootFromStep`). A root is escalated
+when none of those identities matches a live session (exact
+id/session_name/alias/agent_name/name/template, or the rig-stripped and
+pool-slot-stripped forms `orphan-sweep.sh` accepts), it has at least one
+open step with an empty assignee (`gc.root_bead_id == root`), no
+`in_progress` step is held by a live session, and no step bead has been
+created or updated for longer than `GC_DEAD_RUN_THRESHOLD`. A root with no
+recorded driver at all is left alone as unverifiable.
+
+**Escalation.** One `gc mail send --notify` to `GC_DEAD_RUN_RECIPIENT`
+(default `mayor`), falling back to `GC_ESCALATION_RECIPIENT` (default
+`human`) when the primary address is undeliverable. The body names the root,
+its driver, the silence age, the unclaimed step ids, and the recovery recipe
+validated in production: re-enter with `gc sling <target> <convoy> --on
+build-from-convoy --force` (build-from-convoy adopts the existing
+implementation convoy and takes `requirements_path` / `plan_path` /
+`decomposition_path` vars), then close the dead root and all of its step beads
+in ONE `gc bd close` invocation (per-bead close loops time out). Undeliverable
+sends surface loudly, are not marked, and exit non-zero so the controller logs
+them (loud-fail, gastownhall/gascity#4543).
+
+**Idempotence / dedup.** The marker `gc.dead_run_escalated_at=<ISO timestamp>`
+is written on the root only after a delivered send; a marked root is never
+re-mailed. The marker is removed when the condition clears (driver alive
+again, steps claimed, run progressed), so a recurrence re-alerts. The marker is
+the only mutation the order ever makes: it never closes, resets, or reassigns
+work beads.
+
+**Configuration** (all optional, via `[order.env]` or the controller env):
+
+| Variable | Default | Meaning |
+| -------- | ------- | ------- |
+| `GC_DEAD_RUN_THRESHOLD` | `2h` | Silence (no step created/updated) required before escalating |
+| `GC_DEAD_RUN_RECIPIENT` | `mayor` | Primary escalation address |
+| `GC_ESCALATION_RECIPIENT` | `human` | Fallback address when the primary is undeliverable |
+| `GC_DEAD_RUN_REENTRY_FORMULA` | `build-from-convoy` | Re-entry formula named in the recovery recipe |
 
 ## Dependencies
 

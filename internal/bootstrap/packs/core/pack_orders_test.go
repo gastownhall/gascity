@@ -331,3 +331,87 @@ func TestRenudgeStaleHumanGatesScriptContract(t *testing.T) {
 		t.Error("renudge-stale-human-gates.sh must exit non-zero when a re-nudge failed, or the loud-fail message is never logged (#4543)")
 	}
 }
+
+// TestDeadRunDetectOrder pins the dead-run detector's contract: it is a
+// cooldown-triggered exec order running the dead-run-detect script, the
+// escalation counterpart to spawn-storm-detect for runs whose driving session
+// died between steps.
+func TestDeadRunDetectOrder(t *testing.T) {
+	assertCooldownExecOrder(t, "dead-run-detect.toml", "dead-run-detect.sh")
+}
+
+// TestDeadRunDetectScriptContract guards the load-bearing behaviors of the
+// dead-run detector. Its failures are best-effort and swallowed at runtime, so
+// the contract is pinned here:
+//
+//   - Liveness comes from `gc session list --json` (the source orphan-sweep
+//     uses), swept across HQ and every non-HQ rig (`.hq != true`), never from
+//     config: a configured agent name is exactly what orphan-sweep already
+//     accepts as "known" with no session running.
+//   - Roots are selected by sourceworkflow.IsWorkflowRoot's discriminator —
+//     gc.kind == workflow OR gc.formula_contract == graph.v2 — plus the
+//     gc.root_bead_id self/empty test, so graph.v2-only roots are not missed.
+//   - The driver is read from gc.session_name (back-filled onto the root by
+//     stampRunRootFromStep) with the runproj session-link fallbacks and
+//     gc.routed_to; steps are matched by gc.root_bead_id.
+//   - The silence threshold is configurable (GC_DEAD_RUN_THRESHOLD).
+//   - Dedup is a metadata marker on the root (gc.dead_run_escalated_at), set
+//     with --set-metadata only after a delivered send and cleared with
+//     --unset-metadata when the condition clears, so a recurrence re-alerts.
+//   - The mail rides `gc mail send --notify` and carries the recovery recipe
+//     (`gc sling ... --force`, build-from-convoy, batch `gc bd close`).
+//   - Loud-fail: the send is conditional, an undeliverable one surfaces to
+//     stderr, and the script exits non-zero when any send failed (#4543).
+//   - The marker is the ONLY mutation: no close, delete, reset, or reopen.
+func TestDeadRunDetectScriptContract(t *testing.T) {
+	data, err := fs.ReadFile(PackFS, "assets/scripts/dead-run-detect.sh")
+	if err != nil {
+		t.Fatalf("reading dead-run-detect.sh: %v", err)
+	}
+	body := string(data)
+
+	for _, want := range []string{
+		"gc session list --json",              // liveness source (HQ + rigs)
+		".hq != true",                         // exclude HQ pseudo-rig from rig enumeration
+		`.bead.status == "in_progress"`,       // roots are in_progress
+		`"gc.kind"`,                           // root discriminator (legacy)
+		`"gc.formula_contract"`,               // root discriminator (graph.v2)
+		`"graph.v2"`,                          // ...
+		`"gc.root_bead_id"`,                   // root self-test + step ownership
+		`"gc.session_name"`,                   // driving session field
+		`"gc.routed_to"`,                      // last-resort driver identity
+		"GC_DEAD_RUN_THRESHOLD",               // configurable silence threshold
+		"gc.dead_run_escalated_at",            // dedup marker
+		"--set-metadata",                      // marker write
+		"--unset-metadata",                    // marker clear on recurrence
+		"if gc mail send",                     // conditional send (loud-fail)
+		"--notify",                            // mail + nudge primitive
+		"GC_ESCALATION_RECIPIENT",             // fallback address
+		"gc sling",                            // recovery recipe: re-entry
+		"--force",                             // ...replaces the dead workflow
+		"build-from-convoy",                   // ...default re-entry formula
+		"requirements_path",                   // ...required vars
+		"gc bd close $root_id $UNCLAIMED_IDS", // ...one batch close
+		"will retry next sweep",               // loud-fail message
+		`"$FAILED" -gt 0`,                     // loud-fail exit
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("dead-run-detect.sh missing load-bearing element %q", want)
+		}
+	}
+
+	// The marker must be the only mutation. Any of these would turn a detector
+	// into a destructive sweep.
+	for _, forbidden := range []string{
+		"release-if-current",
+		"gc bd delete",
+		"gc bd reopen",
+		"--status=closed",
+		"--status closed",
+		`gc bd close "`,
+	} {
+		if strings.Contains(body, forbidden) {
+			t.Errorf("dead-run-detect.sh must never mutate work beads beyond the marker; found %q", forbidden)
+		}
+	}
+}

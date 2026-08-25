@@ -11472,3 +11472,412 @@ exit 0
 		t.Fatalf("cross-rig-deps summary missing or wrong (subshell counter regression?)\nwant substring: %q\ngot output:\n%s\nbd log:\n%s", want, out, logData)
 	}
 }
+
+// deadRunDetectFixture is the fake city a dead-run-detect test runs against:
+// the session rows `gc session list --json` reports for the "project" rig and
+// the in_progress / open beads `gc bd list --rig project` returns. HQ reports
+// no sessions and no beads. Mail delivery is driven by DEAD_RUN_TEST_MAIL_FAIL
+// (comma-separated recipients whose send fails) and the session list by
+// DEAD_RUN_TEST_SESSION_LIST_EXIT (non-empty = that exit code).
+type deadRunDetectFixture struct {
+	sessions     string // JSON array of session rows for the "project" rig
+	inProgress   string // JSON array of beads for the "project" rig
+	open         string // JSON array of beads for the "project" rig
+	hqInProgress string // JSON array of beads for HQ (bare gc bd list); "[]" when empty
+	hqOpen       string // JSON array of beads for HQ; "[]" when empty
+}
+
+func writeDeadRunDetectGCStub(t *testing.T, path string, fx deadRunDetectFixture) {
+	t.Helper()
+	hqInProgress, hqOpen := fx.hqInProgress, fx.hqOpen
+	if hqInProgress == "" {
+		hqInProgress = "[]"
+	}
+	if hqOpen == "" {
+		hqOpen = "[]"
+	}
+	writeExecutable(t, path, `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+rig=""
+if [ "$1" = "--rig" ]; then
+  rig="$2"
+  shift 2
+fi
+case "$1" in
+  rig)
+    printf '{"rigs":[{"name":"hq","hq":true},{"name":"project","hq":false}]}\n'
+    exit 0
+    ;;
+  session)
+    if [ -n "${DEAD_RUN_TEST_SESSION_LIST_EXIT:-}" ]; then
+      exit "$DEAD_RUN_TEST_SESSION_LIST_EXIT"
+    fi
+    if [ "$rig" = "project" ]; then
+      cat <<'JSON'
+{"sessions":`+fx.sessions+`,"summary":{},"filters":{},"schema_version":"1"}
+JSON
+    else
+      printf '{"sessions":[],"summary":{},"filters":{},"schema_version":"1"}\n'
+    fi
+    exit 0
+    ;;
+  bd)
+    case "$2" in
+      list)
+        case "$*" in
+          *"--rig project"*"--status=in_progress"*)
+            cat <<'JSON'
+`+fx.inProgress+`
+JSON
+            ;;
+          *"--rig project"*"--status=open"*)
+            cat <<'JSON'
+`+fx.open+`
+JSON
+            ;;
+          *"--status=in_progress"*)
+            cat <<'JSON'
+`+hqInProgress+`
+JSON
+            ;;
+          *)
+            cat <<'JSON'
+`+hqOpen+`
+JSON
+            ;;
+        esac
+        exit 0
+        ;;
+      update)
+        exit 0
+        ;;
+    esac
+    exit 1
+    ;;
+  mail)
+    case ",${DEAD_RUN_TEST_MAIL_FAIL:-}," in
+      *",$3,"*) exit 1 ;;
+    esac
+    exit 0
+    ;;
+esac
+exit 1
+`)
+}
+
+// runDeadRunDetect runs the script against fx with extra env and returns its
+// combined output, the gc call log, and the exit error.
+func runDeadRunDetect(t *testing.T, fx deadRunDetectFixture, extra map[string]string) (string, string, error) {
+	t.Helper()
+	binDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	writeDeadRunDetectGCStub(t, filepath.Join(binDir, "gc"), fx)
+	env := map[string]string{
+		"GC_CITY":     t.TempDir(),
+		"GC_CALL_LOG": gcLog,
+		"PATH":        binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+	for k, v := range extra {
+		env[k] = v
+	}
+	out, err := runScriptResult(t, coreScriptPath("dead-run-detect.sh"), env)
+	logData, readErr := os.ReadFile(gcLog)
+	if readErr != nil && !os.IsNotExist(readErr) {
+		t.Fatalf("ReadFile(gc log): %v", readErr)
+	}
+	return string(out), string(logData), err
+}
+
+const deadRunDriver = "gc__run-operator-mc-dead"
+
+// deadRunRootJSON is an in_progress graph.v2 workflow root driven by
+// deadRunDriver: it is the assignee and is stamped as gc.session_name the way
+// stampRunRootFromStep does.
+func deadRunRootJSON(at, extraMeta string) string {
+	return fmt.Sprintf(`{"id":"ga-root","title":"Build widget","status":"in_progress","assignee":%q,"created_at":%q,"updated_at":%q,"metadata":{"gc.kind":"workflow","gc.formula_contract":"graph.v2","gc.session_name":%q,"gc.input_convoy_id":"ga-convoy","gc.formula_name":"build-basic","gc.routed_to":"gascity/gc.run-operator"%s}}`,
+		deadRunDriver, at, at, deadRunDriver, extraMeta)
+}
+
+// deadRunStepJSON is a step bead under ga-root. An empty assignee is emitted
+// as a missing field for the first id and as "" for the second, matching both
+// shapes bd produces for an unclaimed bead.
+func deadRunStepJSON(id, status, assignee, at string) string {
+	assigneeField := ""
+	if assignee != "" || strings.HasSuffix(id, "2") {
+		assigneeField = fmt.Sprintf(`"assignee":%q,`, assignee)
+	}
+	return fmt.Sprintf(`{"id":%q,"status":%q,%s"created_at":%q,"updated_at":%q,"metadata":{"gc.root_bead_id":"ga-root"}}`,
+		id, status, assigneeField, at, at)
+}
+
+func deadRunTimestamp(ago time.Duration) string {
+	return time.Now().UTC().Add(-ago).Format(time.RFC3339)
+}
+
+func TestDeadRunDetectEscalatesDeadRootWithRecoveryRecipe(t *testing.T) {
+	old := deadRunTimestamp(3 * time.Hour)
+	fx := deadRunDetectFixture{
+		// The driver is present only as a CLOSED row: closed rows must not
+		// count as live.
+		sessions:   `[{"id":"mc-closed","session_name":"` + deadRunDriver + `","closed":true},{"id":"mc-other","session_name":"project__worker-gc-live","template":"project/worker","closed":false}]`,
+		inProgress: `[` + deadRunRootJSON(old, "") + `,{"id":"ga-plain","status":"in_progress","assignee":"project__worker-gc-live","created_at":"` + old + `","updated_at":"` + old + `"}]`,
+		open:       `[` + deadRunStepJSON("ga-step1", "open", "", old) + `,` + deadRunStepJSON("ga-step2", "open", "", old) + `]`,
+	}
+
+	out, log, err := runDeadRunDetect(t, fx, nil)
+	if err != nil {
+		t.Fatalf("dead-run-detect.sh failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "dead-run-detect: escalated=1 already-escalated=0 cleared=0") {
+		t.Fatalf("unexpected output:\n%s", out)
+	}
+	if got := strings.Count(log, "mail send "); got != 1 {
+		t.Fatalf("mail send count = %d, want 1\n%s", got, log)
+	}
+	for _, want := range []string{
+		"mail send mayor -s DEAD_RUN: workflow root ga-root has no live driving session -m ",
+		"driving it (gascity/gc.run-operator, " + deadRunDriver + ")",
+		"silent for 3h0m (threshold: 2h)",
+		"2 open, unclaimed step bead(s): ga-step1 ga-step2",
+		"formula: build-basic; input convoy: ga-convoy",
+		"gc sling gascity/gc.run-operator ga-convoy --on build-from-convoy --force --var requirements_path=<requirements.md> --var plan_path=<plan.md> --var decomposition_path=<decomposition.json>",
+		`gc bd close ga-root ga-step1 ga-step2 --reason "dead workflow run superseded by re-entry"`,
+		" --notify\n",
+		"bd update ga-root --rig project --set-metadata gc.dead_run_escalated_at=",
+	} {
+		if !strings.Contains(log, want) {
+			t.Errorf("gc log missing %q:\n%s", want, log)
+		}
+	}
+	// The marker is the only mutation: no close, no reset, and the plain
+	// in_progress task is never touched. The recovery recipe in the mail body
+	// mentions `gc bd close`, so match logged INVOCATIONS (line prefixes), not
+	// substrings.
+	for _, line := range nonEmptyLogLines(log) {
+		for _, forbidden := range []string{"bd close", "bd delete", "bd release-if-current", "bd update ga-plain", "bd update ga-step"} {
+			if strings.HasPrefix(line, forbidden) {
+				t.Errorf("gc log contains forbidden mutation %q: %s", forbidden, line)
+			}
+		}
+	}
+}
+
+func TestDeadRunDetectSkipsRootWithLiveDriver(t *testing.T) {
+	old := deadRunTimestamp(3 * time.Hour)
+	fx := deadRunDetectFixture{
+		sessions:   `[{"id":"mc-live","session_name":"` + deadRunDriver + `","state":"active","closed":false}]`,
+		inProgress: `[` + deadRunRootJSON(old, "") + `]`,
+		open:       `[` + deadRunStepJSON("ga-step1", "open", "", old) + `]`,
+	}
+
+	out, log, err := runDeadRunDetect(t, fx, nil)
+	if err != nil {
+		t.Fatalf("dead-run-detect.sh failed: %v\n%s", err, out)
+	}
+	if strings.Contains(log, "mail send") || strings.Contains(log, "bd update") {
+		t.Fatalf("live-driver root must not be escalated or marked:\n%s", log)
+	}
+}
+
+// TestDeadRunDetectAcceptsLiveTemplateShortFormAsDriver pins the conservative
+// identity matching: a root whose recorded driver is the bare agent name
+// (gc.run-operator) is alive when any non-closed session of that template
+// (gascity/gc.run-operator) exists, mirroring the rig-stripped forms
+// orphan-sweep accepts. Without this, every named-agent root would alert the
+// moment its session was recycled under a new session_name.
+func TestDeadRunDetectAcceptsLiveTemplateShortFormAsDriver(t *testing.T) {
+	old := deadRunTimestamp(3 * time.Hour)
+	fx := deadRunDetectFixture{
+		sessions:   `[{"id":"mc-new","session_name":"gc__run-operator-mc-new","template":"gascity/gc.run-operator","closed":false}]`,
+		inProgress: `[{"id":"ga-root","status":"in_progress","assignee":"gc.run-operator","created_at":"` + old + `","updated_at":"` + old + `","metadata":{"gc.formula_contract":"graph.v2"}}]`,
+		open:       `[` + deadRunStepJSON("ga-step1", "open", "", old) + `]`,
+	}
+
+	out, log, err := runDeadRunDetect(t, fx, nil)
+	if err != nil {
+		t.Fatalf("dead-run-detect.sh failed: %v\n%s", err, out)
+	}
+	if strings.Contains(log, "mail send") || strings.Contains(log, "bd update") {
+		t.Fatalf("root driven by a live template must not be escalated:\n%s", log)
+	}
+}
+
+func TestDeadRunDetectDedupsMarkedRootAndClearsMarkerOnRecovery(t *testing.T) {
+	old := deadRunTimestamp(3 * time.Hour)
+	marked := deadRunRootJSON(old, `,"gc.dead_run_escalated_at":"2026-01-01T00:00:00Z"`)
+	steps := `[` + deadRunStepJSON("ga-step1", "open", "", old) + `]`
+
+	// Still dead, already marked: no second mail, no marker rewrite.
+	out, log, err := runDeadRunDetect(t, deadRunDetectFixture{
+		sessions:   `[]`,
+		inProgress: `[` + marked + `]`,
+		open:       steps,
+	}, nil)
+	if err != nil {
+		t.Fatalf("dead-run-detect.sh failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "escalated=0 already-escalated=1 cleared=0") {
+		t.Fatalf("unexpected output:\n%s", out)
+	}
+	if strings.Contains(log, "mail send") || strings.Contains(log, "bd update") {
+		t.Fatalf("marked root must be deduped, not re-mailed or re-marked:\n%s", log)
+	}
+
+	// Driver back: the marker is cleared so a recurrence re-alerts.
+	out, log, err = runDeadRunDetect(t, deadRunDetectFixture{
+		sessions:   `[{"id":"mc-live","session_name":"` + deadRunDriver + `","closed":false}]`,
+		inProgress: `[` + marked + `]`,
+		open:       steps,
+	}, nil)
+	if err != nil {
+		t.Fatalf("dead-run-detect.sh failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "escalated=0 already-escalated=0 cleared=1") {
+		t.Fatalf("unexpected output:\n%s", out)
+	}
+	if !strings.Contains(log, "bd update ga-root --rig project --unset-metadata gc.dead_run_escalated_at") {
+		t.Fatalf("marker was not cleared:\n%s", log)
+	}
+	if strings.Contains(log, "mail send") {
+		t.Fatalf("recovered root must not be mailed:\n%s", log)
+	}
+}
+
+func TestDeadRunDetectHonorsSilenceThreshold(t *testing.T) {
+	old := deadRunTimestamp(3 * time.Hour)
+	recent := deadRunTimestamp(10 * time.Minute)
+	fx := deadRunDetectFixture{
+		sessions:   `[]`,
+		inProgress: `[` + deadRunRootJSON(old, "") + `]`,
+		// The step was touched 10 minutes ago: the run is silent, but not
+		// past the default 2h threshold.
+		open: `[` + deadRunStepJSON("ga-step1", "open", "", recent) + `]`,
+	}
+
+	out, log, err := runDeadRunDetect(t, fx, nil)
+	if err != nil {
+		t.Fatalf("dead-run-detect.sh failed: %v\n%s", err, out)
+	}
+	if strings.Contains(log, "mail send") || strings.Contains(log, "bd update") {
+		t.Fatalf("run inside the silence threshold must not be escalated:\n%s", log)
+	}
+
+	out, log, err = runDeadRunDetect(t, fx, map[string]string{"GC_DEAD_RUN_THRESHOLD": "5m"})
+	if err != nil {
+		t.Fatalf("dead-run-detect.sh failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(log, "mail send mayor") || !strings.Contains(log, "--set-metadata gc.dead_run_escalated_at=") {
+		t.Fatalf("lowered threshold must escalate:\n%s", log)
+	}
+	if !strings.Contains(log, "(threshold: 5m)") {
+		t.Fatalf("mail must name the configured threshold:\n%s", log)
+	}
+}
+
+func TestDeadRunDetectSkipsRunWithStepHeldByLiveSession(t *testing.T) {
+	old := deadRunTimestamp(3 * time.Hour)
+	fx := deadRunDetectFixture{
+		sessions:   `[{"id":"mc-w","session_name":"project__worker-gc-live","closed":false}]`,
+		inProgress: `[` + deadRunRootJSON(old, "") + `,` + deadRunStepJSON("ga-step2", "in_progress", "project__worker-gc-live", old) + `]`,
+		open:       `[` + deadRunStepJSON("ga-step1", "open", "", old) + `]`,
+	}
+
+	out, log, err := runDeadRunDetect(t, fx, nil)
+	if err != nil {
+		t.Fatalf("dead-run-detect.sh failed: %v\n%s", err, out)
+	}
+	if strings.Contains(log, "mail send") || strings.Contains(log, "bd update") {
+		t.Fatalf("run with a step held by a live session is not dead:\n%s", log)
+	}
+}
+
+func TestDeadRunDetectFallsBackToEscalationRecipientAndFailsLoud(t *testing.T) {
+	old := deadRunTimestamp(3 * time.Hour)
+	fx := deadRunDetectFixture{
+		sessions:   `[]`,
+		inProgress: `[` + deadRunRootJSON(old, "") + `]`,
+		open:       `[` + deadRunStepJSON("ga-step1", "open", "", old) + `]`,
+	}
+
+	// No mayor to deliver to: the fallback address gets the mail and the
+	// root is marked.
+	out, log, err := runDeadRunDetect(t, fx, map[string]string{"DEAD_RUN_TEST_MAIL_FAIL": "mayor"})
+	if err != nil {
+		t.Fatalf("dead-run-detect.sh failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(log, "mail send mayor") || !strings.Contains(log, "mail send human") {
+		t.Fatalf("expected mayor attempt then human fallback:\n%s", log)
+	}
+	if !strings.Contains(log, "--set-metadata gc.dead_run_escalated_at=") {
+		t.Fatalf("delivered fallback must mark the root:\n%s", log)
+	}
+
+	// Nothing deliverable: loud-fail — non-zero exit, stderr, and NO marker so
+	// the next sweep retries.
+	out, log, err = runDeadRunDetect(t, fx, map[string]string{"DEAD_RUN_TEST_MAIL_FAIL": "mayor,human"})
+	if err == nil {
+		t.Fatalf("dead-run-detect.sh must exit non-zero when no escalation was delivered; output:\n%s", out)
+	}
+	if !strings.Contains(out, "FAILED to escalate dead workflow run ga-root") || !strings.Contains(out, "will retry next sweep") {
+		t.Fatalf("expected loud-fail message; output:\n%s", out)
+	}
+	if strings.Contains(log, "bd update") {
+		t.Fatalf("undelivered escalation must not be marked:\n%s", log)
+	}
+}
+
+func TestDeadRunDetectSkipsSweepWhenSessionListFails(t *testing.T) {
+	old := deadRunTimestamp(3 * time.Hour)
+	fx := deadRunDetectFixture{
+		sessions:   `[]`,
+		inProgress: `[` + deadRunRootJSON(old, "") + `]`,
+		open:       `[` + deadRunStepJSON("ga-step1", "open", "", old) + `]`,
+	}
+
+	out, log, err := runDeadRunDetect(t, fx, map[string]string{"DEAD_RUN_TEST_SESSION_LIST_EXIT": "1"})
+	if err != nil {
+		t.Fatalf("dead-run-detect.sh must skip (exit 0) on an unverifiable session list: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "liveness unverifiable, skipping sweep") {
+		t.Fatalf("expected skip notice; output:\n%s", out)
+	}
+	if strings.Contains(log, "mail send") || strings.Contains(log, "bd update") || strings.Contains(log, "bd list") {
+		t.Fatalf("unverifiable liveness must stop the sweep before any bead read or write:\n%s", log)
+	}
+}
+
+// TestDeadRunDetectHandlesHQScopedRoot pins the HQ scope: a root that lives in
+// the city store (listed by a bare `gc bd list`, no --rig) must be evaluated
+// and marked without a --rig argument. The scope is an empty TSV field, which a
+// tab-IFS `read` strips when it LEADS the line — so the script must emit the
+// id first, or every HQ-scoped root is silently skipped.
+func TestDeadRunDetectHandlesHQScopedRoot(t *testing.T) {
+	old := deadRunTimestamp(3 * time.Hour)
+	fx := deadRunDetectFixture{
+		sessions:     `[]`,
+		inProgress:   `[]`,
+		open:         `[]`,
+		hqInProgress: `[` + deadRunRootJSON(old, "") + `]`,
+		hqOpen:       `[` + deadRunStepJSON("ga-step1", "open", "", old) + `]`,
+	}
+
+	out, log, err := runDeadRunDetect(t, fx, nil)
+	if err != nil {
+		t.Fatalf("dead-run-detect.sh failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "dead-run-detect: escalated=1 already-escalated=0 cleared=0") {
+		t.Fatalf("HQ-scoped dead root was not escalated; output:\n%s", out)
+	}
+	if !strings.Contains(log, "mail send mayor -s DEAD_RUN: workflow root ga-root has no live driving session") {
+		t.Fatalf("gc log missing HQ escalation mail:\n%s", log)
+	}
+	if !strings.Contains(log, "Scope: hq;") {
+		t.Fatalf("mail must report the hq scope:\n%s", log)
+	}
+	if !strings.Contains(log, "bd update ga-root --set-metadata gc.dead_run_escalated_at=") {
+		t.Fatalf("HQ marker write must not carry --rig:\n%s", log)
+	}
+	if strings.Contains(log, "bd update ga-root --rig") {
+		t.Fatalf("HQ marker write carried a --rig argument:\n%s", log)
+	}
+}

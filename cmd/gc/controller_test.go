@@ -2161,7 +2161,7 @@ func TestTryReloadConfig_IncludesBuiltinPackOrders(t *testing.T) {
 	}
 
 	// Core pack housekeeping orders (explicit core include).
-	for _, want := range []string{"gate-sweep", "wisp-compact"} {
+	for _, want := range []string{"gate-sweep", "wisp-compact", "dead-run-detect"} {
 		if !names[want] {
 			t.Errorf("missing core order %q; got %v", want, names)
 		}

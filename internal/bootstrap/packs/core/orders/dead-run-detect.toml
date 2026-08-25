@@ -1,0 +1,35 @@
+# dead-run-detect escalates an in-flight formulas-v2 workflow run whose
+# driving session is gone. When the run-operator session that claimed a
+# workflow root dies between steps — after a decomposition step closed and
+# before the drain was routed — the root stays in_progress, its step beads
+# stay open and unclaimed, and the run reports as active indefinitely with
+# zero signal to anyone. No existing sweep catches that shape: reaper.sh's
+# stale-root close needs an empty assignee and no open descendants (open
+# step beads make the root permanently ineligible, and it closes silently
+# anyway), orphan-sweep.sh only resets beads whose assignee is unknown (a
+# configured agent name counts as known with no session running), the
+# dashboard's run staleness is display-only, and the pool-slot backstops
+# never look at workflow roots.
+#
+# It is a cooldown sweep (mechanical: list sessions, list beads, compare
+# timestamps, send mail — no LLM judgment), mirroring spawn-storm-detect.
+# Each run collects the live session identities from `gc session list`
+# across HQ and every rig, selects in_progress workflow roots
+# (gc.kind=workflow or gc.formula_contract=graph.v2), resolves the session
+# each root records as its driver (gc.session_name / gc.session_id /
+# assignee / gc.routed_to), and when that session is absent AND the root
+# has an open, unclaimed step AND the run has been silent past
+# GC_DEAD_RUN_THRESHOLD (default 2h), mails the mayor ONCE with the
+# recovery recipe. Dedup rides a gc.dead_run_escalated_at metadata marker
+# on the root, cleared when the condition clears so a recurrence re-alerts.
+# It never closes, resets, or reassigns work beads. See
+# assets/scripts/dead-run-detect.sh.
+#
+# Undeliverable escalations surface loudly and are NOT marked, so the next
+# sweep retries them (loud-fail, gastownhall/gascity#4543).
+[order]
+description = "Escalate in_progress workflow roots whose driving session is gone"
+trigger = "cooldown"
+interval = "30m"
+timeout = "120s"
+exec = "$PACK_DIR/assets/scripts/dead-run-detect.sh"
