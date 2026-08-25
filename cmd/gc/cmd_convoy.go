@@ -529,8 +529,8 @@ func (v convoyStoreView) isClassBinding() bool {
 // the view's own path. The binding is not a directory at all — it is where the
 // city's infrastructure classes were relocated to — and its rows belong to the
 // city scope, which is the answer three separate questions need: which store ref
-// a workflow root implies when it carries none, which directory a source-workflow
-// lock is taken in, and whether two matched views are one scope or two.
+// a workflow root implies when it carries none, which scope a source-workflow
+// lock is keyed on, and whether two matched views are one scope or two.
 func (v convoyStoreView) scopePath(cityPath string) string {
 	if v.isClassBinding() {
 		return cityPath
@@ -617,8 +617,41 @@ func convoyStoreViewsForRead(cityPath string, views []convoyStoreView, stderr io
 	return merged
 }
 
-// mergeConvoyViewRows folds one row set per view into one, dropping the rows a
-// class binding supersedes.
+// convoyBindingOwnedIDs asks the class binding which of these ids it HOLDS.
+//
+// This is deliberately not "which of these ids did the binding return for the
+// caller's query". Those are different questions, and answering the second one
+// is how a migrated city ends up serving frozen rows: `gc convoy list` asks
+// every store for its OPEN convoys, so the moment the city closes a relocated
+// convoy in the binding — the normal end of every migrated workflow, not an edge
+// case — the binding stops answering for that id, the retained copy stops
+// looking superseded, and a convoy the city finished prints open forever.
+//
+// So the ownership probe carries only the ids it is asking about and
+// IncludeClosed, and no filter of the caller's reaches it. It is one round trip:
+// ListQuery.IDs is the IN-list form of a batch of Gets and counts as a filter,
+// so it needs no AllowScan and costs one query rather than one per row.
+//
+// A probe that FAILS is an error, never an empty answer. Reading a fault as "the
+// binding holds none of these" would serve every frozen twin as live data and
+// say nothing about why.
+func convoyBindingOwnedIDs(binding beads.Store, ids []string) (map[string]bool, error) {
+	owned := make(map[string]bool, len(ids))
+	if binding == nil || len(ids) == 0 {
+		return owned, nil
+	}
+	held, err := binding.List(beads.ListQuery{IDs: ids, IncludeClosed: true})
+	if err != nil {
+		return nil, fmt.Errorf("asking %s which ids it holds: %w", convoyBindingViewPath, err)
+	}
+	for _, b := range held {
+		owned[b.ID] = true
+	}
+	return owned, nil
+}
+
+// mergeConvoyViewRows folds one row set per view into one, dropping the frozen
+// copies a class binding supersedes.
 //
 // Ids are unique only WITHIN a store, so this is not an id dedupe: a city and a
 // rig that each mint "gc-1" hold two different beads and both belong in the
@@ -626,26 +659,46 @@ func convoyStoreViewsForRead(cityPath string, views []convoyStoreView, stderr io
 // copies a class into the binding with ids preserved and deletes nothing — so
 // the migration source's copy is a frozen duplicate of a row the binding now
 // owns. That pair, and only that pair, collapses, with the binding winning.
-func mergeConvoyViewRows[T any](views []convoyStoreView, rows [][]T, idOf func(T) string) []T {
-	superseded := make(map[string]bool)
+//
+// Which is why the supersede question is asked of the BINDING and only about the
+// migration source's ids, rather than read off the two row sets. A rig's id is
+// never put to the binding at all, so the role scoping is structural; and the
+// answer does not depend on whether the binding's own row happened to survive
+// the caller's filter, so a relocated bead the city has since closed still
+// supersedes its twin.
+func mergeConvoyViewRows[T any](views []convoyStoreView, rows [][]T, idOf func(T) string) ([]T, error) {
+	var binding beads.Store
 	for i, view := range views {
-		if view.role != convoyViewClassBinding {
+		if view.role == convoyViewClassBinding && len(rows) > i {
+			binding = view.store
+		}
+	}
+	var candidates []string
+	for i, view := range views {
+		if view.role != convoyViewMigrationSource || len(rows) <= i {
 			continue
 		}
 		for _, row := range rows[i] {
-			superseded[idOf(row)] = true
+			candidates = append(candidates, idOf(row))
 		}
+	}
+	owned, err := convoyBindingOwnedIDs(binding, candidates)
+	if err != nil {
+		return nil, err
 	}
 	merged := make([]T, 0)
 	for i, view := range views {
+		if len(rows) <= i {
+			continue
+		}
 		for _, row := range rows[i] {
-			if view.role == convoyViewMigrationSource && superseded[idOf(row)] {
+			if view.role == convoyViewMigrationSource && owned[idOf(row)] {
 				continue
 			}
 			merged = append(merged, row)
 		}
 	}
-	return merged
+	return merged, nil
 }
 
 func openConvoyStores(cfg *config.City, cityPath, beadID string, openStore func(string) (beads.Store, error)) ([]convoyStoreView, error) {
@@ -903,7 +956,10 @@ func collectOpenConvoys(stores []convoyStoreView) ([]convoyWithStore, error) {
 			rows[i] = append(rows[i], convoyWithStore{store: candidate.store, bead: b})
 		}
 	}
-	convoys := mergeConvoyViewRows(stores, rows, func(c convoyWithStore) string { return c.bead.ID })
+	convoys, err := mergeConvoyViewRows(stores, rows, func(c convoyWithStore) string { return c.bead.ID })
+	if err != nil {
+		return nil, err
+	}
 	sort.SliceStable(convoys, func(i, j int) bool {
 		if convoys[i].bead.ID == convoys[j].bead.ID {
 			return convoys[i].bead.Title < convoys[j].bead.Title

@@ -313,9 +313,11 @@ func doBeadsShowFallback(cityPath, beadID, format string, stdout, stderr io.Writ
 // default UX.
 //
 // The merge is mergeConvoyViewRows, so a relocated class binding's rows
-// supersede the frozen copies the migration retained in the city store. Rows
-// from two scanned stores that happen to share an id are two different beads
-// and both survive.
+// supersede the frozen copies the migration retained in the city store — asked
+// of the binding by id rather than read off these filtered results, because a
+// filter the caller chose must not decide which store owns a bead. Rows from two
+// scanned stores that happen to share an id are two different beads and both
+// survive.
 func collectBeadsAcrossStores(stores []convoyStoreView, filters beadFilters) ([]beads.Bead, error) {
 	q := beads.ListQuery{
 		Label:         filters.label,
@@ -331,7 +333,7 @@ func collectBeadsAcrossStores(stores []convoyStoreView, filters beadFilters) ([]
 		}
 		rows[i] = list
 	}
-	return mergeConvoyViewRows(stores, rows, func(b beads.Bead) string { return b.ID }), nil
+	return mergeConvoyViewRows(stores, rows, func(b beads.Bead) string { return b.ID })
 }
 
 // sortBeadsForList orders beads by ID so output is stable across store

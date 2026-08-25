@@ -2577,3 +2577,168 @@ func TestConvoyListReadsTheBindingRow(t *testing.T) {
 		t.Errorf("the list printed the frozen work copy; the binding is the truth for reads:\n%s", out)
 	}
 }
+
+// TestConvoyListDropsTheFrozenCopyOfAConvoyTheBindingClosed is the ga-efyq4
+// regression on the state a migrated city ENDS in.
+//
+// Every relocated workflow eventually finishes, and finishing it closes the
+// binding's row. From that moment the binding's open-only query returns nothing
+// for the id, so a supersede set derived from the query's ROWS forgets the
+// binding owns it — and the retained copy, frozen open at cutover and never
+// touched since, is served as the live convoy. The convoy reports open forever,
+// which is the incident this bead exists to close, arrived at through the normal
+// end of the workflow rather than through any edge case.
+func TestConvoyListDropsTheFrozenCopyOfAConvoyTheBindingClosed(t *testing.T) {
+	cityPath, convoyID, _, binding := relocatedConvoyCity(t)
+	if err := binding.Close(convoyID); err != nil {
+		t.Fatalf("closing the binding's convoy: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doConvoyListFallback(cityPath, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc convoy list exited %d: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if strings.Contains(out, "the retained frozen convoy") {
+		t.Errorf("a convoy the city CLOSED in the binding is listed open from its frozen twin:\n%s", out)
+	}
+	if strings.Contains(out, convoyID) {
+		t.Errorf("%s is still listed after the binding closed it:\n%s", convoyID, out)
+	}
+}
+
+// rigHoldingID registers a rig on cityPath and plants a bead in it under a
+// pinned id, so a fixture can put a rig row and a binding row in collision.
+//
+// Ids are unique only within a store. A rig mints from its own sequence and
+// nothing keeps that sequence disjoint from the ids a relocated binding holds,
+// so "gc-1" in a rig and "gc-1" in the binding are two different beads that both
+// belong in a fan-out's output. Without a rig in the fixtures, every relocated
+// city under test has exactly one non-binding store and a merge that collapsed
+// on id alone would look correct.
+//
+// The pinned id goes in through the file store's explicit-id mode, which is off
+// by default so that ordinary creates cannot mint a collision by accident. The
+// returned handle is the fixture's own; the CLI opens the same JSON afresh.
+func rigHoldingID(t *testing.T, cityPath, id, title, beadType string) beads.Store {
+	t.Helper()
+	const rigName = "frontend"
+	rigDir := filepath.Join(cityPath, "rigs", rigName)
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("creating the directory of rig %s: %v", rigName, err)
+	}
+	cityTOML := filepath.Join(cityPath, "city.toml")
+	body, err := os.ReadFile(cityTOML)
+	if err != nil {
+		t.Fatalf("reading city.toml to register rig %s: %v", rigName, err)
+	}
+	body = append(body, []byte(fmt.Sprintf("\n[[rigs]]\nname = %q\npath = %q\n", rigName, rigDir))...)
+	if err := os.WriteFile(cityTOML, body, 0o644); err != nil {
+		t.Fatalf("registering rig %s in city.toml: %v", rigName, err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(rigDir); err != nil {
+		t.Fatalf("giving rig %s its own file store: %v", rigName, err)
+	}
+	store, err := openScopeLocalFileStore(rigDir)
+	if err != nil {
+		t.Fatalf("opening the store of rig %s: %v", rigName, err)
+	}
+	store.HonorExplicitIDs = true
+	if _, err := store.Create(beads.Bead{ID: id, Title: title, Type: beadType}); err != nil {
+		t.Fatalf("planting %s in rig %s: %v", id, rigName, err)
+	}
+	return store
+}
+
+// TestConvoyListKeepsARigConvoyThatCollidesWithABindingID pins the SCOPE of the
+// supersede rule: it collapses the migration's duplicate and nothing else.
+//
+// The migration is the one place an id means the same bead twice, because it
+// copies with ids preserved and deletes nothing. Two stores the directory scan
+// enumerated are not that: a rig's "gc-1" and the binding's "gc-1" are separate
+// beads, and a merge that dropped either because the binding "owns" the id would
+// delete a live rig convoy from the listing.
+//
+// This is also the row that makes the supersede pin bite. Without a colliding
+// rig, dropping every id the binding owns and dropping only the migration
+// source's produce identical output, so the role scoping is unfalsifiable.
+func TestConvoyListKeepsARigConvoyThatCollidesWithABindingID(t *testing.T) {
+	cityPath, convoyID, _, _ := relocatedConvoyCity(t)
+	rigHoldingID(t, cityPath, convoyID, "the rig's own convoy", "convoy")
+
+	var stdout, stderr bytes.Buffer
+	if code := doConvoyListFallback(cityPath, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc convoy list exited %d: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "the rig's own convoy") {
+		t.Errorf("the rig's convoy was dropped as if the binding superseded it; it is a different bead that merely shares an id:\n%s", out)
+	}
+	if !strings.Contains(out, "the binding's live convoy") {
+		t.Errorf("the binding's convoy is missing from the listing:\n%s", out)
+	}
+	if strings.Contains(out, "the retained frozen convoy") {
+		t.Errorf("the frozen work copy is still listed; the binding supersedes it:\n%s", out)
+	}
+}
+
+// TestBeadsListKeepsARigBeadThatCollidesWithABindingID is the same scope pin on
+// the arm the caller filters, where the ownership probe runs against ids drawn
+// from a query result rather than a whole-store listing.
+func TestBeadsListKeepsARigBeadThatCollidesWithABindingID(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	work := workStoreFor(t, cityPath)
+	frozen, err := work.Create(beads.Bead{Title: "the retained frozen copy", Type: "task"})
+	if err != nil {
+		t.Fatalf("seeding the retained copy in the work store: %v", err)
+	}
+	if _, classStore := classResidentWorkShapedBead(t, cityPath, frozen.ID, "the binding's live row"); classStore == nil {
+		t.Fatal("seeding the binding's row returned no class store")
+	}
+	rigHoldingID(t, cityPath, frozen.ID, "the rig's own row", "task")
+
+	var stdout, stderr bytes.Buffer
+	if code := doBeadsListFallback(cityPath, "", beadFilters{}, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc beads list exited %d: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "the rig's own row") {
+		t.Errorf("the rig's bead was dropped as if the binding superseded it:\n%s", out)
+	}
+	if !strings.Contains(out, "the binding's live row") {
+		t.Errorf("the binding's bead is missing from the listing:\n%s", out)
+	}
+	if strings.Contains(out, "the retained frozen copy") {
+		t.Errorf("the frozen work copy is still listed; the binding supersedes it:\n%s", out)
+	}
+}
+
+// TestBeadsListFilteredByStatusDropsTheFrozenCopy is the same regression on the
+// arm that lets the CALLER choose the filter.
+//
+// `gc beads list --status open` asks every store for its open rows. The binding
+// answers with the ones that are open THERE; the frozen twin of a row the
+// binding has since closed is open in the work ledger, and a supersede set built
+// from the binding's answer to the caller's filter cannot see that it is a twin.
+// Whether the binding owns an id and whether the binding has a row matching this
+// filter are two different questions, and only the first one decides a merge.
+func TestBeadsListFilteredByStatusDropsTheFrozenCopy(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	work := workStoreFor(t, cityPath)
+	frozen, err := work.Create(beads.Bead{Title: "the retained frozen copy", Type: "task"})
+	if err != nil {
+		t.Fatalf("seeding the retained copy in the work store: %v", err)
+	}
+	_, classStore := classResidentWorkShapedBead(t, cityPath, frozen.ID, "the binding's live row")
+	if err := classStore.Close(frozen.ID); err != nil {
+		t.Fatalf("closing the binding's row: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doBeadsListFallback(cityPath, "", beadFilters{status: "open"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc beads list --status open exited %d: %s", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "the retained frozen copy") {
+		t.Errorf("a bead the city CLOSED in the binding is listed open from its frozen twin:\n%s", stdout.String())
+	}
+}
