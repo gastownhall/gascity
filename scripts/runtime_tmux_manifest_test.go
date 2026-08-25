@@ -32,7 +32,7 @@ func TestRuntimeTmuxManifestMatchesCanonicalLinuxIntegrationInventory(t *testing
 	if got, want := len(untagged), 276; got != want {
 		t.Fatalf("runtime-tmux untagged inventory contains %d tests, want %d", got, want)
 	}
-	if got, want := len(declared)-len(untagged), 121; got != want {
+	if got, want := len(declared)-len(untagged), 122; got != want {
 		t.Fatalf("runtime-tmux integration-only inventory contains %d tests, want %d", got, want)
 	}
 }

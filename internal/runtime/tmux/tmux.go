@@ -2239,10 +2239,16 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	// the input box, and this paste concatenates on top of it instead of
 	// replacing it: stacked injections merge into one draft that Claude's TUI
 	// does not treat as a clean single-line submit (ra-3x46cy finding 2).
-	if _, err := t.run("send-keys", "-t", target, "C-u"); err != nil {
-		return err
+	//
+	// Skip the clear when a client is attached: a human may be mid-keystroke,
+	// and silently wiping their in-progress input is worse than the
+	// concatenation this clear otherwise prevents (#5192).
+	if !t.IsSessionAttached(session) {
+		if _, err := t.run("send-keys", "-t", target, "C-u"); err != nil {
+			return err
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
-	time.Sleep(50 * time.Millisecond)
 
 	// 1.5. Dismiss Claude Code's post-turn feedback survey if it is parked on
 	// the pane (ga-zg7fjq). The composer is empty at this point -- the C-u
