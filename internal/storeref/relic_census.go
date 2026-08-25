@@ -117,13 +117,21 @@ func HasLegacyResidents(b ClassBinding) bool {
 // reaches its rows through the beads library and holds no SQL of its own, so it
 // cannot implement the capability and lists exactly as before.
 //
+// Discovery goes through beads.NamespaceCensusFor rather than a bare assertion
+// on beads.NamespaceCensus, because the binding this runs against is not always
+// a bare engine: cmd/gc's emitting class store is held to every engine method
+// by TestEmittingClassStoreKeepsEveryEngineCapability, so it carries
+// HasResidentOutside whatever it wraps, and a bare assertion would take that
+// method's word for a native-Dolt-served binding and lose the scan the binding
+// depends on.
+//
 // The drain report (OpenLegacyResidents) deliberately does not come through
 // here: it needs the ids themselves, and a verdict cannot name them.
 func legacyResidentVerdict(store beads.Store, prefixes []string) (bool, error) {
 	if store == nil {
 		return false, fmt.Errorf("relic census: no binding store to read")
 	}
-	if census, ok := store.(beads.NamespaceCensus); ok {
+	if census, ok := beads.NamespaceCensusFor(store); ok {
 		has, err := census.HasResidentOutside(prefixes)
 		if err != nil {
 			// Not a reason to fall back to the scan: a store whose own read

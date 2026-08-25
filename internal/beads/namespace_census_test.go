@@ -185,3 +185,114 @@ func TestSQLiteStoreIsANamespaceCensus(t *testing.T) {
 		t.Fatalf("%T does not satisfy beads.NamespaceCensus; the census would silently fall back to the full scan on every city", store)
 	}
 }
+
+// censusHandleStore models a decorator that carries HasResidentOutside
+// structurally — cmd/gc's emitting class store is held to every engine method
+// by a reflective guard, so it has no choice — while knowing perfectly well
+// whether its backing can answer.
+//
+// Its structural method deliberately answers a WRONG verdict, because that is
+// the failure being pinned: a discovery that takes it has retired a probe over
+// beads nobody looked for.
+type censusHandleStore struct {
+	Store
+	capable       bool
+	handleCalls   int
+	structCalls   int
+	handedBack    NamespaceCensus
+	structVerdict bool
+}
+
+func (s *censusHandleStore) HasResidentOutside([]string) (bool, error) {
+	s.structCalls++
+	return s.structVerdict, nil
+}
+
+func (s *censusHandleStore) NamespaceCensusHandle() (NamespaceCensus, bool) {
+	s.handleCalls++
+	if !s.capable {
+		return nil, false
+	}
+	return s.handedBack, true
+}
+
+// censusAnswer is a bare census with no store behind it, so a test can tell the
+// handed-back capability apart from the wrapper's own method by its answer.
+type censusAnswer struct {
+	verdict bool
+	calls   int
+}
+
+func (c *censusAnswer) HasResidentOutside([]string) (bool, error) {
+	c.calls++
+	return c.verdict, nil
+}
+
+// The handle is consulted BEFORE the plain assertion, which is the whole reason
+// this helper exists rather than a bare `store.(NamespaceCensus)`. A wrapper
+// forced to carry the method satisfies the assertion whatever it wraps, so an
+// assertion-first lookup would take the method's word and never ask the handle.
+//
+// Both directions are pinned here: a wrapper whose backing cannot answer must
+// be reported as having NO census even though the method is right there, and
+// one whose backing can must hand back the BACKING's census rather than its own
+// method. Only the first is the data-integrity case, but a helper that answered
+// "no" to everything would pass it alone.
+func TestNamespaceCensusForConsultsTheHandleBeforeTheMethod(t *testing.T) {
+	t.Run("incapable backing is not advertised", func(t *testing.T) {
+		wrapper := &censusHandleStore{Store: NewMemStore()}
+		census, ok := NamespaceCensusFor(wrapper)
+		if ok {
+			t.Fatalf("a wrapper over a backing with no census was advertised as one (%T); the caller retires its probe on the wrapper's own verdict", census)
+		}
+		if wrapper.handleCalls != 1 {
+			t.Errorf("the handle was asked %d times, want exactly 1", wrapper.handleCalls)
+		}
+		if wrapper.structCalls != 0 {
+			t.Errorf("the wrapper's own HasResidentOutside was called %d times during discovery; discovery must not take a verdict", wrapper.structCalls)
+		}
+	})
+
+	t.Run("capable backing hands back the backing", func(t *testing.T) {
+		backing := &censusAnswer{verdict: true}
+		wrapper := &censusHandleStore{Store: NewMemStore(), capable: true, handedBack: backing}
+		census, ok := NamespaceCensusFor(wrapper)
+		if !ok {
+			t.Fatal("a wrapper whose backing answers the census was reported as having none; every city would scan its whole binding")
+		}
+		got, err := census.HasResidentOutside([]string{"gcg"})
+		if err != nil {
+			t.Fatalf("HasResidentOutside: %v", err)
+		}
+		if !got {
+			t.Error("the discovered census answered the wrapper's own verdict, not the backing's")
+		}
+		if backing.calls != 1 {
+			t.Errorf("the backing census was asked %d times, want exactly 1", backing.calls)
+		}
+		if wrapper.structCalls != 0 {
+			t.Errorf("the wrapper's own HasResidentOutside was called %d times, want 0", wrapper.structCalls)
+		}
+	})
+}
+
+// A store that simply implements the capability, with no handle, still resolves
+// — that is every production engine, and a helper that only understood handles
+// would send all of them down the scan.
+func TestNamespaceCensusForResolvesAPlainImplementation(t *testing.T) {
+	var store Store = openCensusStore(t)
+	if _, ok := NamespaceCensusFor(store); !ok {
+		t.Fatalf("%T implements the census but was not discovered through NamespaceCensusFor", store)
+	}
+}
+
+// Nil and census-less stores are the fallback's entry condition, and the
+// fallback is the safe path — it must stay reachable.
+func TestNamespaceCensusForReportsNoCensus(t *testing.T) {
+	if _, ok := NamespaceCensusFor(nil); ok {
+		t.Error("a nil store was reported as answering the census")
+	}
+	if _, ok := NamespaceCensusFor(NewMemStore()); ok {
+		t.Error("the mem store was reported as answering the census; it has no such query and the caller must scan it")
+	}
+}

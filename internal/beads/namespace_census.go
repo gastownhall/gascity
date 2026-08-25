@@ -38,13 +38,67 @@ import (
 //
 // Answering FALSE strands every bead the implementation failed to see, so a
 // store that cannot answer the question exactly must not implement this at all.
-// Callers type-assert for it and fall back to listing the store and applying the
-// rule themselves, which is always available and merely slower.
+// Callers discover it through NamespaceCensusFor — never a bare type assertion,
+// see there — and fall back to listing the store and applying the rule
+// themselves, which is always available and merely slower.
 type NamespaceCensus interface {
 	HasResidentOutside(prefixes []string) (bool, error)
 }
 
 var _ NamespaceCensus = (*SQLiteStore)(nil)
+
+// ErrNamespaceCensusUnsupported reports a census asked of a store that cannot
+// answer it. It is what a wrapper carrying HasResidentOutside structurally
+// returns when its backing has no census: the one answer that is neither a
+// verdict nor a lie, and the caller reads it the same way it reads any other
+// failed census — keep the probe.
+var ErrNamespaceCensusUnsupported = errors.New("namespace census unsupported")
+
+// NamespaceCensusHandleProvider lets a wrapper expose the census capability of
+// its backing without claiming it when that backing cannot answer.
+//
+// A wrapper needs this precisely when something else forces it to carry
+// HasResidentOutside structurally — cmd/gc's emitting class store is held to
+// every engine method by TestEmittingClassStoreKeepsEveryEngineCapability — so
+// the method's presence stops being evidence that an answer exists behind it.
+type NamespaceCensusHandleProvider interface {
+	NamespaceCensusHandle() (NamespaceCensus, bool)
+}
+
+// NamespaceCensusFor returns store's census capability when one is really
+// there. Callers MUST discover the capability through this rather than
+// asserting NamespaceCensus directly.
+//
+// The provider is consulted BEFORE the plain assertion, which is the opposite
+// of GraphApplyFor's order and the same as AtomicConditionalCloserFor's, for
+// the same reason as there: a wrapper that carries the method structurally
+// satisfies the plain assertion too, so an assertion-first lookup would return
+// the wrapper's method and never reach the handle that knows whether the
+// backing can honor it. Discovery here is a hard capability gate — answering
+// FALSE strands every bead the answer failed to see — so the honest "no" has
+// to win.
+//
+// Unlike AtomicConditionalCloserFor this does NOT follow
+// ConditionalWritesResolveTarget. That seam is declared for one capability and
+// says so (internal/beads/class_store.go: "the one optional capability where
+// forgetting the unwrap would not fail loudly but silently resolve
+// unset→legacy (fatal under require). All other optional capabilities keep the
+// assert-on-.Store convention"), and the asymmetry that earns it does not exist
+// here: a conditional writer that goes undiscovered collapses to a legacy
+// write, while a census that goes undiscovered falls back to the scan, which
+// returns the same verdict a little slower. Borrowing the follow would let a
+// wrapper's read-shaping decisions be stepped around by a question about the
+// wrapper's contents, to buy nothing but speed.
+func NamespaceCensusFor(store Store) (NamespaceCensus, bool) {
+	if store == nil {
+		return nil, false
+	}
+	if provider, ok := store.(NamespaceCensusHandleProvider); ok {
+		return provider.NamespaceCensusHandle()
+	}
+	census, ok := store.(NamespaceCensus)
+	return census, ok
+}
 
 // namespaceExclusionSQL builds the WHERE fragment matching rows whose id
 // expression falls outside every prefix, together with its bind arguments. It

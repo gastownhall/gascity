@@ -448,3 +448,105 @@ func TestCensusReadsOnlyTheBinding(t *testing.T) {
 		t.Error("the census reported relics for a clean binding; it must read the binding leg alone")
 	}
 }
+
+// censusWrapperStore is the shape of a production decorator over a binding —
+// cmd/gc's emitting class store — reproduced here so the verdict's DISCOVERY is
+// testable in this package.
+//
+// It carries HasResidentOutside structurally because a reflective guard over
+// there forces it to, and it declares beads.NamespaceCensusHandleProvider
+// because carrying the method is not the same as being able to answer. The two
+// counters are what let a row say WHICH of the three paths ran: the backing's
+// census, the wrapper's own method, or the scan.
+type censusWrapperStore struct {
+	beads.Store
+	directCalls int
+	handleCalls int
+}
+
+func (s *censusWrapperStore) HasResidentOutside(prefixes []string) (bool, error) {
+	s.directCalls++
+	census, ok := beads.NamespaceCensusFor(s.Store)
+	if !ok {
+		return false, beads.ErrNamespaceCensusUnsupported
+	}
+	return census.HasResidentOutside(prefixes)
+}
+
+func (s *censusWrapperStore) NamespaceCensusHandle() (beads.NamespaceCensus, bool) {
+	s.handleCalls++
+	return beads.NamespaceCensusFor(s.Store)
+}
+
+// A wrapped binding whose backing CAN answer still reaches the predicate. The
+// wrapper is not a wall: losing the capability here would put every one-shot
+// command on a converged city back on the full scan, which is the cost this
+// whole capability exists to remove.
+func TestTheVerdictReachesThePredicateThroughAWrapper(t *testing.T) {
+	backing := newCensusCapabilityStore()
+	backing.outside = true
+	wrapper := &censusWrapperStore{Store: backing}
+
+	if !HasLegacyResidents(censusBinding(wrapper)) {
+		t.Fatal("the verdict discarded the wrapped backing's census; an empty store scanned clean and the capability's answer was thrown away")
+	}
+	if backing.censusCalls != 1 {
+		t.Errorf("the backing's census was asked %d times, want exactly 1", backing.censusCalls)
+	}
+	if backing.listCalls != 0 {
+		t.Errorf("the verdict issued %d List calls through a wrapper whose backing answers directly", backing.listCalls)
+	}
+	if wrapper.handleCalls != 1 {
+		t.Errorf("the wrapper's census handle was consulted %d times, want exactly 1; discovery went somewhere else", wrapper.handleCalls)
+	}
+}
+
+// The row that makes the seam worth having: a wrapped binding whose backing
+// CANNOT answer must fall back to the scan and reach the same verdict the scan
+// reaches unwrapped.
+//
+// This is the native-Dolt-served binding. Its wrapper carries
+// HasResidentOutside all the same, so a bare `store.(beads.NamespaceCensus)`
+// would match, the scan would never run, and the binding's whole population
+// would be answered for by a method with nothing behind it. Both directions run
+// against one fixture read three ways — wrapped verdict, unwrapped verdict,
+// scan — because a fallback that answered TRUE unconditionally would pass the
+// relic row and strand nothing only by luck.
+func TestTheVerdictScansThroughAWrapperWhoseBackingCannotAnswer(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		seed []string
+		want bool
+	}{
+		{name: "binding holding a relic", seed: []string{"gcg-1", "ga-relic"}, want: true},
+		{name: "clean binding", seed: []string{"gcg-1", "gcnq-2"}, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backing := newCensusStore()
+			for _, id := range tc.seed {
+				backing.seedBead(t, id)
+			}
+			if _, ok := beads.Store(backing).(beads.NamespaceCensus); ok {
+				t.Fatal("the fixture backing answers the census itself; this row proves nothing")
+			}
+			wrapper := &censusWrapperStore{Store: backing}
+			if _, ok := beads.Store(wrapper).(beads.NamespaceCensus); !ok {
+				t.Fatal("the wrapper fixture does not carry HasResidentOutside, so it does not model the wrapper the guard forces; this row proves nothing")
+			}
+
+			relics, err := LegacyResidents(backing, infraPrefixes)
+			if err != nil {
+				t.Fatalf("scan: %v", err)
+			}
+			if scanned := len(relics) > 0; scanned != tc.want {
+				t.Fatalf("the unwrapped scan answered %v, want %v (relics %v)", scanned, tc.want, relics)
+			}
+			if got := HasLegacyResidents(censusBinding(wrapper)); got != tc.want {
+				t.Fatalf("the verdict over the wrapped binding answered %v, want the scan's %v", got, tc.want)
+			}
+			if wrapper.directCalls != 0 {
+				t.Errorf("the wrapper's own HasResidentOutside answered for a backing that has no census (%d call(s)); the scan is the only thing that can speak for this binding", wrapper.directCalls)
+			}
+		})
+	}
+}
