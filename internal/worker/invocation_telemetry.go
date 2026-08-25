@@ -442,12 +442,15 @@ func usagesSinceCursor(usages []sessionlog.TailUsage, cursor string) []sessionlo
 //
 // It is best-effort. The returned settled reports whether the interval is fully
 // accounted for and needs no retry: true when the transcript was read (even if
-// nothing new was pending) OR the miss is permanent (unregistered family, or a
+// nothing new was pending) OR the miss is permanent (unregistered family; a
 // keyless codex session whose bounded workdir+window fallback found no unambiguous
 // rollout in a CLEAN scan — a closed session's rollout is already on disk, so that
-// miss is ambiguity/out-of-window/TZ, which no retry resolves); false when the
+// miss is ambiguity/out-of-window/TZ, which no retry resolves; or a keyless claude
+// session whose transcript lookup refused an ambiguous shared workdir, which no
+// retry resolves either while the pool shares that directory); false when the
 // miss is transient (a keyed codex rollout not discovered yet, a keyless codex
-// scan clouded by a transient IO fault, an extraction error, or a sink Record
+// scan clouded by a transient IO fault, a keyless claude transcript lookup that
+// failed to read the store, an extraction error, or a sink Record
 // failure) so the caller should retry on a later tick. err is reserved for
 // a sink Record failure; the cursor is then advanced only through the last
 // successfully recorded entry so the retry resumes at the gap rather than
@@ -489,7 +492,7 @@ func (f *Factory) SweepSessionModelUsage(ctx context.Context, id string, meta ma
 	keyless := strings.TrimSpace(meta["session_key"]) == ""
 	keylessCodex := family == "codex" && keyless
 	keylessClaude := family == "claude" && keyless
-	if keylessCodex && !scanClean {
+	if (keylessCodex || keylessClaude) && !scanClean {
 		// The (cwd, wake-window) fallback hit a transient IO fault (a non-ENOENT
 		// readdir or a cwd-probe open failure — EMFILE/ESTALE). That clouds the whole
 		// scan whether or not a path was found: an empty result may have hidden the
@@ -497,8 +500,11 @@ func (f *Factory) SweepSessionModelUsage(ctx context.Context, id string, meta ma
 		// rollout that would make it ambiguous. Either way the result is
 		// non-definitive, so record nothing and leave the interval unsettled for a
 		// later, unclouded tick; the recently-closed sweep window bounds the retries.
-		slog.Debug("model-usage sweep: keyless codex workdir scan hit a transient IO fault; will retry",
-			slog.String("session_id", id))
+		// The claude case is the same shape: a TranscriptPath store-read error is
+		// non-definitive, unlike its shared-workdir ambiguity refusal, which returns
+		// an empty path with a nil error and settles as a clean miss below.
+		slog.Debug("model-usage sweep: keyless transcript scan was non-definitive; will retry",
+			slog.String("session_id", id), slog.String("provider", family))
 		return 0, false, nil
 	}
 	if path == "" {
@@ -529,12 +535,14 @@ func (f *Factory) SweepSessionModelUsage(ctx context.Context, id string, meta ma
 //
 // settled classifies a miss with the same meaning SweepSessionModelUsage gives
 // it, so a caller that memoizes discovery can distinguish the two kinds: true
-// means there is definitively nothing to find (an unregistered provider family,
-// or a keyless codex session whose bounded workdir+window fallback came up empty
-// on a CLEAN scan) and re-running discovery is pure waste; false means the miss
-// is transient (a keyed rollout not flushed yet, or a keyless scan clouded by an
-// I/O fault, which leaves both an empty result and a lone hit non-definitive) and
-// a later attempt may resolve it. A found path is always settled.
+// means there is definitively nothing to find (an unregistered provider family;
+// a keyless codex session whose bounded workdir+window fallback came up empty
+// on a CLEAN scan; or a keyless claude session whose transcript lookup cleanly
+// refused an ambiguous shared workdir) and re-running discovery is pure waste;
+// false means the miss is transient (a keyed rollout not flushed yet, a keyless
+// codex scan clouded by an I/O fault, which leaves both an empty result and a
+// lone hit non-definitive, or a keyless claude lookup that failed to read the
+// store) and a later attempt may resolve it. A found path is always settled.
 func (f *Factory) DiscoverSweepTranscript(id string, meta map[string]string, now time.Time) (path string, settled bool) {
 	id = strings.TrimSpace(id)
 	if f == nil || id == "" || meta == nil {
@@ -548,7 +556,7 @@ func (f *Factory) DiscoverSweepTranscript(id string, meta map[string]string, now
 	keyless := strings.TrimSpace(meta["session_key"]) == ""
 	keylessCodex := family == "codex" && keyless
 	keylessClaude := family == "claude" && keyless
-	if keylessCodex && !scanClean {
+	if (keylessCodex || keylessClaude) && !scanClean {
 		return "", false
 	}
 	if path == "" {
@@ -681,14 +689,18 @@ func (f *Factory) sweepResolvedTranscript(ctx context.Context, family, id string
 // under the same cwd yields "") so a reused workdir records nothing rather than
 // misattributing.
 //
-// The returned scanClean is meaningful only for the keyless-codex fallback: it is
-// false when the (cwd, wake-window) scan hit a transient IO fault (a non-ENOENT
-// readdir or a cwd-probe open failure — EMFILE/ESTALE). That clouds BOTH an empty
-// path (a miss that may have hidden the only rollout) AND a lone hit (a fault may
-// have hidden a second same-cwd rollout, making the singleton non-definitive), so
-// the caller retries rather than recording or settling either. The keyed codex
-// lookup and the claude manager lookup return scanClean true, which the caller
-// does not consult.
+// The returned scanClean reports whether the lookup was definitive, for both
+// keyless families. For the keyless-codex fallback it is false when the (cwd,
+// wake-window) scan hit a transient IO fault (a non-ENOENT readdir or a cwd-probe
+// open failure — EMFILE/ESTALE). That clouds BOTH an empty path (a miss that may
+// have hidden the only rollout) AND a lone hit (a fault may have hidden a second
+// same-cwd rollout, making the singleton non-definitive), so the caller retries
+// rather than recording or settling either. For the claude manager lookup it is
+// false when TranscriptPath returned an error — a store read failure, which says
+// nothing about whether a transcript exists. That is distinct from the manager's
+// shared-workdir ambiguity refusal, which returns an empty path with a nil error
+// and so is a CLEAN, permanent miss. The keyed codex lookup always returns
+// scanClean true.
 func (f *Factory) discoverSweepTranscript(family, id string, meta map[string]string, now time.Time) (path string, scanClean bool) {
 	switch family {
 	case "codex":
@@ -712,7 +724,7 @@ func (f *Factory) discoverSweepTranscript(family, id string, meta map[string]str
 	default:
 		path, terr := f.manager.TranscriptPath(id, f.searchPaths)
 		if terr != nil {
-			return "", true
+			return "", false
 		}
 		return strings.TrimSpace(path), true
 	}

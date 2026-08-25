@@ -1011,6 +1011,155 @@ func TestFactorySweepSessionModelUsageKeylessClaudeAmbiguousSettles(t *testing.T
 	}
 }
 
+// TestDiscoverSweepTranscriptKeylessClaudeAmbiguousSettles pins the discovery
+// half of the same rule: the memoizing live lane must classify a keyless Claude
+// shared-workdir ambiguity refusal as a settled miss, so it stops rediscovering
+// a path that stays ambiguous for as long as the pool shares that directory.
+func TestDiscoverSweepTranscriptKeylessClaudeAmbiguousSettles(t *testing.T) {
+	searchBase := t.TempDir()
+	workDir := t.TempDir()
+
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	factory, err := NewFactory(FactoryConfig{
+		Store:       store,
+		Provider:    sp,
+		SearchPaths: []string{searchBase},
+		UsageSink:   usage.NewLocalSink(filepath.Join(t.TempDir(), "usage.jsonl")),
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+
+	// Two open sessions, same workdir, no session_key -> ambiguous workdir fallback.
+	for _, title := range []string{"one", "two"} {
+		h, err := factory.Session(SessionSpec{
+			Profile:  ProfileClaudeTmuxCLI,
+			Template: "probe",
+			Title:    title,
+			Command:  "claude",
+			WorkDir:  workDir,
+			Provider: "claude",
+		})
+		if err != nil {
+			t.Fatalf("Session(%s): %v", title, err)
+		}
+		if err := h.Start(context.Background()); err != nil {
+			t.Fatalf("Start(%s): %v", title, err)
+		}
+		if err := store.SetMetadata(h.sessionID, "session_key", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	slugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+	if err := os.MkdirAll(slugDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	writeWorkerTestJSONL(t, filepath.Join(slugDir, "latest.jsonl"), []map[string]any{
+		usageEntryWithMessageID("u1", "msg-1", 100, 50, 0, 0),
+	})
+
+	sessions, err := store.List(beads.ListQuery{Label: sessionpkg.LabelSession})
+	if err != nil || len(sessions) < 2 {
+		t.Fatalf("List sessions: err=%v len=%d", err, len(sessions))
+	}
+	meta := sessions[0].Metadata
+	meta["session_key"] = ""
+	path, settled := factory.DiscoverSweepTranscript(sessions[0].ID, meta, time.Unix(1, 0).UTC())
+	if path != "" {
+		t.Fatalf("path = %q, want \"\" (ambiguous keyless claude must resolve nothing)", path)
+	}
+	if !settled {
+		t.Fatal("keyless claude ambiguous miss must memoize as settled")
+	}
+}
+
+// listErrStore wraps a Store and fails List once armed, standing in for a
+// transient store-read fault. Setup runs with fail unset so the session beads
+// can be created and read back.
+type listErrStore struct {
+	beads.Store
+	fail bool
+}
+
+func (s *listErrStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if s.fail {
+		return nil, fmt.Errorf("injected list failure")
+	}
+	return s.Store.List(query)
+}
+
+// TestFactorySweepSessionModelUsageKeylessClaudeTranscriptErrorRetries pins the
+// other side of the keyless-Claude settle: an empty transcript path produced by
+// a store-read FAILURE is non-definitive, not the manager's clean ambiguity
+// refusal. Settling it would strand the interval's tokens forever on a transient
+// hiccup, so the sweep must record nothing and stay unsettled for a later tick.
+func TestFactorySweepSessionModelUsageKeylessClaudeTranscriptErrorRetries(t *testing.T) {
+	searchBase := t.TempDir()
+	workDir := t.TempDir()
+
+	store := &listErrStore{Store: beads.NewMemStore()}
+	sp := runtime.NewFake()
+	factory, err := NewFactory(FactoryConfig{
+		Store:       store,
+		Provider:    sp,
+		SearchPaths: []string{searchBase},
+		UsageSink:   usage.NewLocalSink(filepath.Join(t.TempDir(), "usage.jsonl")),
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+
+	h, err := factory.Session(SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "one",
+		Command:  "claude",
+		WorkDir:  workDir,
+		Provider: "claude",
+	})
+	if err != nil {
+		t.Fatalf("Session: %v", err)
+	}
+	if err := h.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := store.SetMetadata(h.sessionID, "session_key", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	sessions, err := store.List(beads.ListQuery{Label: sessionpkg.LabelSession})
+	if err != nil || len(sessions) != 1 {
+		t.Fatalf("List sessions: err=%v len=%d", err, len(sessions))
+	}
+	meta := sessions[0].Metadata
+	meta["session_key"] = ""
+
+	// Arm the fault only now: sameWorkDirSessionBeads is the first List the
+	// transcript lookup makes, so TranscriptPath returns a non-nil error.
+	store.fail = true
+
+	emitted, settled, err := factory.SweepSessionModelUsage(context.Background(), sessions[0].ID, meta, time.Unix(1, 0).UTC())
+	if err != nil {
+		t.Fatalf("SweepSessionModelUsage: %v", err)
+	}
+	if emitted != 0 {
+		t.Fatalf("emitted = %d, want 0 (a failed transcript lookup must mint nothing)", emitted)
+	}
+	if settled {
+		t.Fatal("a keyless claude transcript-lookup error must stay unsettled so a later tick retries")
+	}
+
+	path, discSettled := factory.DiscoverSweepTranscript(sessions[0].ID, meta, time.Unix(1, 0).UTC())
+	if path != "" {
+		t.Fatalf("DiscoverSweepTranscript path = %q, want \"\"", path)
+	}
+	if discSettled {
+		t.Fatal("DiscoverSweepTranscript must not memoize a failed lookup as a settled miss")
+	}
+}
+
 // TestFactorySweepSessionModelUsageKeylessCodexDirtyScanRetries pins the P3 fix
 // at the sweep boundary: when the keyless-codex (cwd, wake-window) fallback misses
 // because a transient IO fault clouded the scan (here an unreadable day directory
