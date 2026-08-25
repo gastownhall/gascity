@@ -155,6 +155,15 @@ func (f topoFixture) resetGets() {
 	}
 }
 
+// bindingSpec is one binding of a corpus topology.
+//
+// mints and relics are not independent, and the corpus may not spell a pair
+// production cannot produce. A census only ever runs against a binding whose
+// mint bit verified (cmd/gc's censusBindingRelics), so a binding with mints
+// false was never asked, and BuildBindings leaves it on the pessimistic default:
+// relics TRUE. mints=false with relics=false is therefore unreachable, and a
+// fixture carrying it silently exempts itself from any rule keyed on the
+// pessimistic bit. TestCorpusBindingsAreProductionReachable is the guard.
 type bindingSpec struct {
 	classes  []coordclass.Class
 	prefixes []string
@@ -206,8 +215,11 @@ func buildTopology(name string, rigs map[string]string, specs []bindingSpec, ref
 	return f
 }
 
+// wholeSplit is a binding carrying all five infrastructure classes, unverified:
+// no mint declaration, and therefore never censused, so the pessimistic relic
+// bit stands. A fixture that verifies the mint bit lowers relics explicitly.
 func wholeSplit() bindingSpec {
-	return bindingSpec{classes: infraClasses, prefixes: infraPrefixes}
+	return bindingSpec{classes: infraClasses, prefixes: infraPrefixes, relics: true}
 }
 
 func newT0() topoFixture { return buildTopology("T0", nil, nil, nil) }
@@ -232,7 +244,6 @@ func newT3Known() topoFixture {
 	refusal := newRefusal()
 	spec := wholeSplit()
 	spec.refusing = true
-	spec.relics = true
 	spec.known = true
 	return buildTopology("T3k", nil, []bindingSpec{spec}, refusal)
 }
@@ -249,26 +260,50 @@ func newT4() topoFixture {
 // skip-until row rots, and the tripwire this replaces lived in two files.
 func newT5() topoFixture {
 	return buildTopology("T5", nil, []bindingSpec{
-		{classes: []coordclass.Class{coordclass.ClassGraph}, prefixes: []string{"gcg"}},
-		{classes: []coordclass.Class{coordclass.ClassSessions}, prefixes: []string{"gcs"}},
+		{classes: []coordclass.Class{coordclass.ClassGraph}, prefixes: []string{"gcg"}, relics: true},
+		{classes: []coordclass.Class{coordclass.ClassSessions}, prefixes: []string{"gcs"}, relics: true},
 	}, nil)
 }
 
+// newT6 is the retirement shape: a binding that mints truthfully AND was
+// censused clean, which is the only way the pessimistic bit comes down.
 func newT6() topoFixture {
 	spec := wholeSplit()
 	spec.mints = true
+	spec.relics = false
 	return buildTopology("T6", nil, []bindingSpec{spec}, nil)
 }
 
 func newT6Relics() topoFixture {
 	spec := wholeSplit()
 	spec.mints = true
-	spec.relics = true
 	return buildTopology("T6r", nil, []bindingSpec{spec}, nil)
 }
 
 func allTopologies() []topoFixture {
 	return []topoFixture{newT0(), newT1(), newT2(), newT3(), newT3Known(), newT4(), newT5(), newT6(), newT6Relics()}
+}
+
+// TestCorpusBindingsAreProductionReachable keeps the corpus from asserting about
+// states no city can be in.
+//
+// A fixture in an impossible state is worse than a missing fixture: it looks
+// like coverage. The refused topology carried mints=false with relics=false for
+// exactly this reason, and it made a rule keyed on the pessimistic bit
+// indistinguishable from a rule keyed on the proof — the two collapse only on a
+// binding where the pessimistic bit is false, which a refused binding's never
+// is. Both bits are then checked here rather than in each row.
+func TestCorpusBindingsAreProductionReachable(t *testing.T) {
+	for _, f := range allTopologies() {
+		for _, b := range f.topo.Bindings {
+			if !b.MintsReserved && !b.HasLegacyResidents {
+				t.Errorf("%s binding %s: mints=false with HasLegacyResidents=false; a binding that does not mint truthfully is never censused, so production leaves the pessimistic bit standing", f.name, b.Leg.Ref)
+			}
+			if b.KnownLegacyResidents && !b.HasLegacyResidents {
+				t.Errorf("%s binding %s: proven to hold relics yet pessimistically clean; BuildBindings raises the bit on proof and no city reports this pair", f.name, b.Leg.Ref)
+			}
+		}
+	}
 }
 
 // planString renders a row: the plan, or "error: <msg>" when the intent cannot

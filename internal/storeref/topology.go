@@ -138,9 +138,11 @@ type ClassBinding struct {
 	// unknown or deny reads on unknown, and both are the failure this package
 	// exists to prevent, in one direction or the other.
 	//
-	// True here always implies HasLegacyResidents — every constructor derives
-	// the pessimistic bit from the same or a weaker source — so "proven relics
-	// on a retired probe" is not a state a caller has to reason about.
+	// True here always implies HasLegacyResidents, so "proven relics on a
+	// retired probe" is not a state a caller has to reason about. BuildBindings
+	// makes that true of the FIELD by raising the pessimistic bit on proof, and
+	// probeRetired makes it true of the DECISION for a binding assembled by
+	// hand — the two are pinned separately, in bindings_test.go.
 	KnownLegacyResidents bool
 }
 
@@ -240,7 +242,22 @@ func (b ClassBinding) coversID(id string) bool { return idInAnyNamespace(id, b.P
 // binding: it mints truthfully AND holds no open legacy resident. Both halves
 // are required — a point-in-time "zero relics" on a binding that still mints
 // work-shaped ids re-strands the very next create.
-func (b ClassBinding) probeRetired() bool { return b.MintsReserved && !b.HasLegacyResidents }
+func (b ClassBinding) probeRetired() bool { return b.MintsReserved && !b.holdsLegacyResidents() }
+
+// holdsLegacyResidents is the relic question read as ONE answer: the pessimistic
+// bit, or the proof that outranks it.
+//
+// BuildBindings already raises HasLegacyResidents on proof, so for a binding it
+// built the two clauses agree and this reads the same field twice. It is here
+// for the bindings it did not build. ClassBinding is exported and planes
+// assemble one by hand — cmd/gc's refused-city topology does — so the
+// contradictory shape (proven, yet pessimistically clean) is spellable, and it
+// would be silent: a retired probe answers "no such bead" for precisely the ids
+// the proof is about. Enforcing the implication where the decision is made costs
+// one clause and cannot be bypassed by a constructor.
+func (b ClassBinding) holdsLegacyResidents() bool {
+	return b.HasLegacyResidents || b.KnownLegacyResidents
+}
 
 // probeRefusalPolicy is the error policy a residence probe over this binding
 // carries.
