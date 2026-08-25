@@ -2209,6 +2209,22 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						continue
 					}
 					closed := closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, infoByID[id], reason, clk.Now().UTC(), stderr, false)
+					if !closed && reason == "orphaned" {
+						// The guard refused because the seat still holds work. Nothing
+						// else can resolve that: the wake path is blocked on the orphaned
+						// base state and releaseOrphanedPoolAssignments skips work whose
+						// seat's session bead is still open. This site has already
+						// confirmed the runtime is observably dead (livenessErr == nil
+						// above, and this is the not-running branch), so it owns the
+						// tie-break — release, then close (ga-jrnou).
+						//
+						// Restricted to "orphaned": a "suspended" seat is configured and
+						// merely scaled down, so its work stays put for its return.
+						if released := releaseConfirmedOrphanSessionWork(cfg, store, rigStores, assignedWorkBeads, infoByID[id]); len(released) > 0 {
+							emitDeadAssigneeReopenedEvents(rec, assignedWorkBeads, released, clk.Now().UTC())
+							closed = closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, infoByID[id], reason, clk.Now().UTC(), stderr, false)
+						}
+					}
 					if closed {
 						// Keep the snapshot's Info.Closed in step with the in-memory
 						// close so the cross-session min-floor scan does not count this
