@@ -601,6 +601,14 @@ func (s *growingInfraSource) List(query beads.ListQuery) ([]beads.Bead, error) {
 	return s.Store.List(query)
 }
 
+// DepMetadata forwards the leaf's edge-payload read. The subject here is a
+// mid-copy arrival, not an edge payload, and an interface-embedding double that
+// stays silent about the capability would be refused as unanswerable before the
+// arrival could ever be observed.
+func (s *growingInfraSource) DepMetadata(issueID, dependsOnID string) (string, bool, error) {
+	return depMetadataThrough(s.Store, issueID, dependsOnID)
+}
+
 // TestEnsureInfraClassMigratedBlocksOnAnEqualityMismatch proves the equality
 // stage is a real gate rather than a formality. A bead written to the work
 // store while the copy was running is in the source and not in the destination;

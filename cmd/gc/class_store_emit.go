@@ -652,12 +652,18 @@ func (s *emittingClassStore) WaitForParentProjection(ctx context.Context, parent
 	return waiter.WaitForParentProjection(ctx, parentID, childID, scope)
 }
 
+// DepMetadata forwards the inner store's edge-payload read. Emission has
+// nothing to say about what an edge carries, so the answer passes through.
+//
+// An inner store without the read gets an error rather than ("", false, nil).
+// The lenient form is the one shape this capability must never take: a caller
+// that refuses on uncertainty — the infra-class migration is one — would read
+// a store that CANNOT be asked as one answering "carries nothing", which is
+// exactly the conflation that let edge payloads drop silently for months.
 func (s *emittingClassStore) DepMetadata(issueID, dependsOnID string) (string, bool, error) {
-	reader, ok := s.Store.(interface {
-		DepMetadata(string, string) (string, bool, error)
-	})
+	reader, ok := s.Store.(beads.DepMetadataReader)
 	if !ok {
-		return "", false, nil
+		return "", false, fmt.Errorf("reading dependency metadata %s -> %s: emitting store %T exposes no edge-payload read", issueID, dependsOnID, s.Store)
 	}
 	return reader.DepMetadata(issueID, dependsOnID)
 }

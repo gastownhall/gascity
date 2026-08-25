@@ -732,6 +732,21 @@ func (m *MemStore) DepList(id, direction string) ([]Dep, error) {
 	return result, nil
 }
 
+// DepMetadata reports that no edge of this store carries a payload.
+//
+// That is a fact about MemStore, not a stub: its only edge-writing paths are
+// DepAdd and the Needs field, both of which carry the pair and the type alone,
+// and it implements no GraphApply. So there is no way to put a payload in and
+// nothing to lose by saying so.
+//
+// It is implemented rather than omitted because a reader that CANNOT be asked
+// and one that answers "nothing here" mean different things to a caller that
+// refuses on uncertainty — the infra-class migration is one. Anything that
+// teaches MemStore to store an edge payload has to teach this to read it.
+func (m *MemStore) DepMetadata(_, _ string) (string, bool, error) {
+	return "", false, nil
+}
+
 // DepListBatch returns "down" dependencies for multiple beads from memory.
 func (m *MemStore) DepListBatch(ids []string) (map[string][]Dep, error) {
 	m.mu.Lock()
