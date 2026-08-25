@@ -55,7 +55,13 @@ func BuildProviderResumeCommand(resolved *ResolvedProvider, optionOverrides map[
 		return "", fmt.Errorf("resolved provider is nil")
 	}
 	command := strings.TrimSpace(resolved.ResumeCommand)
-	if command == "" || len(resolved.OptionsSchema) == 0 || !hasProviderOptionValues(resolved, optionOverrides) {
+	// Unlike the launch-side gate above, this deliberately checks explicit
+	// overrides only: resolve.go already ran completeResumeCommandDefaults
+	// over ResumeCommand, filling in EffectiveDefaults in place. Gating on
+	// EffectiveDefaults here too would strip and unconditionally re-append
+	// every schema flag, corrupting a template where they were already
+	// positioned correctly.
+	if command == "" || len(resolved.OptionsSchema) == 0 || !hasSchemaOptionOverrides(optionOverrides) {
 		return command, nil
 	}
 	mergedArgs, err := providerOptionArgs(resolved, optionOverrides)
