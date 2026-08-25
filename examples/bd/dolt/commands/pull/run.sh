@@ -73,16 +73,31 @@ remote_allow_env_value() {
 }
 
 # Pull's own remote-selection policy: refuse an ambiguous multi-remote db
-# unless GC_DOLT_REMOTE_<DB> names one explicitly, and additionally require
-# GC_DOLT_PULL_ALLOW_REMOTE_<DB>=1 before honoring an override that points at
-# a non-local (non-file://) remote. This is not currently identical to
-# sync's remote-selection fix (ga-fqi7kq, not yet on main) — consolidating
-# the two into a shared helper is a future intent, not current behavior.
+# unless GC_DOLT_REMOTE_<DB> names one explicitly, and require
+# GC_DOLT_PULL_ALLOW_REMOTE_<DB>=1 before honoring any selection — override
+# or sole-remote default alike — that resolves to a non-local (non-file://)
+# remote. The locality check applies regardless of how many candidates there
+# are, including exactly one (ga-nht26j; mirrors the equivalent sync-side
+# fix, ga-2w96wd, not yet on main — consolidating the two into a shared
+# helper remains a future intent, not current behavior).
 select_remote() {
   sel_db="$1"; sel_candidates="$2"
   [ -z "$sel_candidates" ] && return 0
   sel_count=$(printf '%s\n' "$sel_candidates" | grep -c '.')
-  if [ "$sel_count" -le 1 ]; then printf '%s\n' "$sel_candidates"; return 0; fi
+  if [ "$sel_count" -le 1 ]; then
+    sel_solo_name=${sel_candidates%%,*}
+    sel_solo_url=${sel_candidates#*,}
+    case "$sel_solo_url" in
+      file://*) ;;
+      *)
+        sel_solo_allowed=$(remote_allow_env_value "$sel_db") || return 1
+        if [ "$sel_solo_allowed" != "1" ]; then
+          echo "  $sel_db: ERROR: sole configured remote '$sel_solo_name' is a non-local remote ($sel_solo_url) — set GC_DOLT_PULL_ALLOW_REMOTE_<DB>=1 to allow pulling from it" >&2
+          return 1
+        fi ;;
+    esac
+    printf '%s\n' "$sel_candidates"; return 0
+  fi
   sel_names=$(printf '%s\n' "$sel_candidates" | awk -F, '{ if (o=="") o=$1; else o=o","$1 } END{print o}')
   sel_override=$(remote_env_value "$sel_db") || return 1
   if [ -z "$sel_override" ]; then

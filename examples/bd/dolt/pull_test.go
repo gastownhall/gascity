@@ -40,6 +40,7 @@ func TestPullUsesLiveSQLWhenManagedServerReachable(t *testing.T) {
 		fmt.Sprintf("GC_DOLT_PORT=%d", port),
 		"GC_DOLT_USER=root",
 		"GC_DOLT_PASSWORD=",
+		"GC_DOLT_PULL_ALLOW_REMOTE_APP=1",
 	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
