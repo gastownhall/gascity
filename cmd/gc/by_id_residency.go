@@ -19,7 +19,8 @@ package main
 // RoleWorkFallback leg is returned UNPROBED, which means "no binding answered —
 // run your own work axis". A caller whose work axis IS a store passes that
 // store and uses the answer directly; a caller whose work axis is a subprocess
-// or a scan passes a sentinel and treats it as the signal to fall through.
+// or a scan asks only the binding half, through storeref.ResolveBindingOwner,
+// and reads its ok=false as the signal to fall through.
 //
 // That residual is also what keeps a single-store city byte-identical: its plan
 // has one leg, nothing is probed, and the caller gets back the exact store value
@@ -144,34 +145,29 @@ func byIDPlanForTopology(topo storeref.Topology, id string) (storeref.ResolvedPl
 // and the id it cannot reach is answered instead by the retained pre-migration
 // copy sitting in the city store — successfully, with no error to notice.
 //
-// So the plan is resolved with a SENTINEL where the work leg goes and the
-// answer is read as a yes/no. ok=true is a binding that owns the id, with the
-// row it already read; ok=false is "no binding answered, run your own scan",
-// and the caller then does exactly what it did before.
+// So the plan is executed by storeref.ResolveBindingOwner, the executor that
+// walks the binding legs and stops at the work axis. ok=true is a binding that
+// owns the id, with the row it already read; ok=false is "no binding answered,
+// run your own scan", and the caller then does exactly what it did before.
 func cliByIDBindingOwner(cityPath, id string) (storeref.Owner, bool, error) {
-	residual := newUnprobedWorkResidual()
-	return byIDBindingOwnerForTopology(residencyTopologyForCity(cityPath, nil, residual, nil), id)
+	return byIDBindingOwnerForTopology(residencyTopologyForCity(cityPath, nil, newUnprobedWorkResidual(), nil), id)
 }
 
 // byIDBindingOwnerForTopology is cliByIDBindingOwner over a topology the caller
 // already holds.
 //
-// That topology's WORK leg must be an unprobedWorkResidual, because ok=false is
-// read off the returned store's type: a topology assembled with a real work
-// store answers ok=true for every id that store holds, which turns "run your own
-// scan" into "the work ledger owns it" — the stale answer this whole seam
-// closes. The residual handed to byIDOwnerForTopology below is a fresh value
-// rather than the caller's, which is sound because the assertion is on the TYPE;
-// both reach the reader as the same "no binding answered".
+// The work leg is still supplied — Plan(ByID) ends every plan in one, and a
+// topology without it is not a topology — but the executor never reads it, so
+// what goes there only has to be a beads.Store. Both call sites pass the
+// unprobedWorkResidual sentinel, which turns a resolver that started probing
+// the work leg into a loud error here rather than a silent "the work ledger
+// owns it" on every convoy command of every relocated city.
 func byIDBindingOwnerForTopology(topo storeref.Topology, id string) (storeref.Owner, bool, error) {
-	owner, err := byIDOwnerForTopology(topo, id, newUnprobedWorkResidual())
+	plan, err := byIDPlanForTopology(topo, id)
 	if err != nil {
 		return storeref.Owner{}, false, err
 	}
-	if _, isResidual := owner.Store.(unprobedWorkResidual); isResidual {
-		return storeref.Owner{}, false, nil
-	}
-	return owner, true, nil
+	return storeref.ResolveBindingOwner(plan, id)
 }
 
 // beadForOwner returns the row the owner names, reading it only when the
@@ -186,12 +182,13 @@ func beadForOwner(owner storeref.Owner, id string) (beads.Bead, error) {
 
 // unprobedWorkResidual stands in for a work axis the resolver must not run.
 //
-// Plan(ByID) ends every plan in a work leg and hands the LAST one back
-// UNPROBED, which is the contract cliByIDBindingOwner rests on: this value is
-// returned, never read. Its Get therefore reports a bug rather than a miss — a
-// resolver that started probing the residual would otherwise turn "the caller
-// runs its own scan" into "the bead is absent", silently, on every convoy
-// command of every relocated city.
+// Plan(ByID) ends every plan in a work leg, so a surface that owns its own work
+// axis still has to put something there. storeref.ResolveBindingOwner
+// guarantees the leg is never read; this value makes a broken guarantee visible
+// instead of plausible. Its Get reports a bug rather than a miss, because a
+// resolver that started probing here would otherwise turn "the caller runs its
+// own scan" into "the work ledger owns it" — silently, on every convoy command
+// of every relocated city.
 //
 // It refuses through a WHOLE beads.Store rather than an embedded nil one, for
 // the reason refusedClassStore already carries: a nil embedded interface makes

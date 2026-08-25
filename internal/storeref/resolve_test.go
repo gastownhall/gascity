@@ -245,6 +245,80 @@ func TestResidenceProbeRetirementFlip(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// The binding-only executor. A surface whose work axis is not a beads.Store —
+// `gc convoy`'s directory scan, `gc bd`'s subprocess fall-through — asks only
+// the binding half of the by-id question and runs its own axis for the rest.
+
+// TestResolveBindingOwnerNeverProbesTheWorkLeg is the executor's whole contract:
+// the work leg is in the plan (it has to be — the plan is the same one every
+// by-id surface gets) and is never READ. A caller whose work axis is a scan
+// would otherwise be told its own retained pre-migration copy is the owner.
+func TestResolveBindingOwnerNeverProbesTheWorkLeg(t *testing.T) {
+	f := newT1()
+	f.work.seed(t, workShapedID) // the copy `gc storage migrate` retained
+	plan := mustPlan(t, ByID{ID: workShapedID}, f.topo)
+	f.resetGets()
+
+	owner, ok, err := ResolveBindingOwner(plan, workShapedID)
+	if err != nil {
+		t.Fatalf("a clean binding miss produced an error: %v", err)
+	}
+	if ok {
+		t.Fatalf("the work store's copy of %s came back as a binding owner (%s); ok=false is what tells the caller to run its own axis", workShapedID, storeNameOf(owner.Store))
+	}
+	if *f.work.gets != 0 {
+		t.Fatalf("the work leg was probed %d time(s), want 0 — this executor answers about the BINDING and must never run an axis the caller owns", *f.work.gets)
+	}
+}
+
+// TestResolveBindingOwnerReturnsTheBindingRow is the other half: a binding that
+// DOES hold the id answers with the row it already read, so the caller does not
+// pay for the same read twice — and does not open a window in which the second
+// read disagrees with the one ownership was decided from.
+func TestResolveBindingOwnerReturnsTheBindingRow(t *testing.T) {
+	f := newT1()
+	f.legStore(ClassRef(infraClasses)).seed(t, workShapedID)
+	plan := mustPlan(t, ByID{ID: workShapedID}, f.topo)
+
+	owner, ok, err := ResolveBindingOwner(plan, workShapedID)
+	if err != nil {
+		t.Fatalf("ResolveBindingOwner: %v", err)
+	}
+	if !ok {
+		t.Fatalf("a binding-resident id resolved to ok=false; the caller would fall through to a work axis that holds a stale copy or nothing at all")
+	}
+	if owner.Ref != ClassRef(infraClasses) {
+		t.Fatalf("pinned %q (%s), want the binding", owner.Ref, storeNameOf(owner.Store))
+	}
+	if !owner.Read || owner.Bead.ID != workShapedID {
+		t.Fatalf("the winning probe's row was dropped (Read=%v, bead %q); the leg's read IS the caller's read", owner.Read, owner.Bead.ID)
+	}
+}
+
+// TestResolveBindingOwnerSurfacesAReadFault keeps the fail-loud classification
+// on this executor too: a binding that could not answer has said nothing about
+// the id, and reporting that as "no binding owns it" sends the caller's own
+// scan at the ledger holding the frozen copy.
+func TestResolveBindingOwnerSurfacesAReadFault(t *testing.T) {
+	f := newT1()
+	boom := errors.New("binding unreachable")
+	f.legStore(ClassRef(infraClasses)).getErr = boom
+	plan := mustPlan(t, ByID{ID: workShapedID}, f.topo)
+
+	if _, ok, err := ResolveBindingOwner(plan, workShapedID); !errors.Is(err, boom) {
+		t.Fatalf("an unreadable binding resolved to (ok=%v, err=%v), want the read failure", ok, err)
+	}
+}
+
+func TestResolveBindingOwnerRejectsAUnionPlan(t *testing.T) {
+	f := newT1()
+	plan := mustPlan(t, RoutedWork{}, f.topo)
+	if _, _, err := ResolveBindingOwner(plan, workShapedID); err == nil {
+		t.Fatal("ResolveBindingOwner accepted a Union plan; the mode decides the executor")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Executor guards.
 
 func TestResolveOwnerRejectsAMismatchedID(t *testing.T) {

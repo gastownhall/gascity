@@ -594,24 +594,73 @@ type Owner struct {
 // binding — the hot path, and exactly the funnel cost the identity fast-path
 // exists to avoid.
 func ResolveOwnerRow(p ResolvedPlan, id string) (Owner, error) {
+	owner, found, err := resolveByID(p, id, false)
+	switch {
+	case err != nil:
+		return owner, err
+	case !found:
+		return Owner{}, beads.ErrNotFound
+	default:
+		return owner, nil
+	}
+}
+
+// ResolveBindingOwner is the ModeFirstOwner executor for a caller that owns its
+// own work axis: it answers only the BINDING half of the by-id question.
+//
+// `gc convoy`'s member scan and the `gc bd` class door reach a work store that
+// is not a beads.Store — a directory of files, a subprocess they shell out to —
+// so they cannot let the resolver walk the work leg on their behalf. What they
+// need is the one thing they cannot compute themselves: whether a relocated
+// class binding owns this id. `ok` false means "no binding answered; run your
+// own axis", and it is returned WITHOUT touching the work leg the plan carries
+// for everyone else.
+//
+// That untouched work leg is the whole point. `gc storage migrate` preserved
+// ids and deleted nothing, so the work store still holds a frozen copy of every
+// relocated bead. Probing it here would hand a caller its own stale copy as an
+// authoritative owner — succeeding, against the wrong store, with no
+// diagnostic. TestResolveBindingOwnerNeverProbesTheWorkLeg pins the zero.
+//
+// The walk stops at the work axis rather than at the plan's last leg, so legs
+// ordered BELOW work — a rig whose configured prefix shadows the id — are left
+// to the caller too. Declining is always safe; claiming an id a caller's own
+// axis owns is not.
+//
+// A read fault is still an error rather than a decline: a binding that could
+// not answer has said nothing about the id, and turning that into "no binding
+// owns it" sends the caller straight at the frozen copy.
+func ResolveBindingOwner(p ResolvedPlan, id string) (Owner, bool, error) {
+	return resolveByID(p, id, true)
+}
+
+// resolveByID is the leg walk both ModeFirstOwner executors share. found
+// reports whether an owner was pinned; bindingOnly stops the walk at the work
+// axis instead of handing the work leg back unprobed.
+func resolveByID(p ResolvedPlan, id string, bindingOnly bool) (Owner, bool, error) {
 	if p.Mode != ModeFirstOwner {
-		return Owner{}, fmt.Errorf("storeref: ResolveOwner needs a %s plan, got %s", ModeFirstOwner, p.Mode)
+		return Owner{}, false, fmt.Errorf("storeref: ResolveOwner needs a %s plan, got %s", ModeFirstOwner, p.Mode)
 	}
 	id = strings.TrimSpace(id)
 	if p.ID != "" && p.ID != id {
-		return Owner{}, fmt.Errorf("storeref: plan was resolved for %q, executed for %q — a by-id plan is id-specific", p.ID, id)
+		return Owner{}, false, fmt.Errorf("storeref: plan was resolved for %q, executed for %q — a by-id plan is id-specific", p.ID, id)
 	}
 	if len(p.Legs) == 0 {
-		return Owner{}, errors.New("storeref: plan has no legs")
+		return Owner{}, false, errors.New("storeref: plan has no legs")
 	}
 	for i, leg := range p.Legs {
-		if leg.Role == RoleWorkFallback && i == len(p.Legs)-1 {
-			return Owner{Store: leg.Leg.Store, Ref: leg.Leg.Ref}, nil
+		if leg.Role == RoleWorkFallback {
+			if bindingOnly {
+				return Owner{}, false, nil
+			}
+			if i == len(p.Legs)-1 {
+				return Owner{Store: leg.Leg.Store, Ref: leg.Leg.Ref}, true, nil
+			}
 		}
 		b, err := leg.Leg.Store.Get(id)
 		switch {
 		case err == nil:
-			return Owner{Store: leg.Leg.Store, Ref: leg.Leg.Ref, Bead: b, Read: true}, nil
+			return Owner{Store: leg.Leg.Store, Ref: leg.Leg.Ref, Bead: b, Read: true}, true, nil
 		case errors.Is(err, beads.ErrNotFound):
 			continue
 		case leg.OnError == PolicyRefusalTolerated && IsStandingRefusal(err):
@@ -619,10 +668,10 @@ func ResolveOwnerRow(p ResolvedPlan, id string) (Owner, error) {
 			// residence probe for an id no relocated class could own.
 			continue
 		default:
-			return Owner{Ref: leg.Leg.Ref}, fmt.Errorf("reading %q from %s: %w", id, legName(leg.Leg.Ref), err)
+			return Owner{Ref: leg.Leg.Ref}, false, fmt.Errorf("reading %q from %s: %w", id, legName(leg.Leg.Ref), err)
 		}
 	}
-	return Owner{}, beads.ErrNotFound
+	return Owner{}, false, nil
 }
 
 // ResolvePlacement is the ModeSingleOwner executor: the one store a
