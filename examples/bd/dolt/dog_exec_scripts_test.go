@@ -511,10 +511,35 @@ set_hash() {
   [ -n "$hash_state_file" ] || return 0
   printf '%%s\n' "$1" > "$hash_state_file"
 }
+# state_head reads the head state without the call-counting side effects some
+# modes attach to current_head, for the tip probes added around the push.
+state_head() {
+  if [ -n "$state_file" ] && [ -f "$state_file" ]; then
+    sed -n '1p' "$state_file"
+  else
+    printf 'headcommit\n'
+  fi
+}
+# The fake mirrors dolt's remote-tracking refs: a DOLT_PUSH that lands records
+# the pushed tip per remote/branch and the dolt_remote_branches probes answer
+# with it from then on. remote_push_tip_unmoved models the production incident
+# shape — DOLT_PUSH exits 0 but the tracking ref never advances.
+pushed_tip_file() {
+  printf '%%s.pushed.%%s.%%s\n' "$state_file" "$1" "$2"
+}
+record_push() {
+  [ -n "$state_file" ] || return 0
+  [ "$mode" = "remote_push_tip_unmoved" ] && return 0
+  state_head > "$(pushed_tip_file "$1" "$2")"
+}
+answer_pushed_tip() {
+  [ -n "$state_file" ] && [ -f "$(pushed_tip_file "$1" "$2")" ] || return 1
+  print_cell "$(sed -n '1p' "$(pushed_tip_file "$1" "$2")")"
+}
 case "$query" in
   *"SELECT COUNT(*) FROM dolt_remotes WHERE name = 'origin'"*)
     case "$mode" in
-      remote_success|remote_active_branch|remote_invalid_active_branch|remote_ahead|remote_ahead_reconciled|remote_fetch_failure|remote_fetch_failure_once|remote_push_failure|remote_advances_before_push|remote_gc_failure_once|remote_empty_head_push_failure|remote_ancestry_probe_failure|remote_writer_race_before_flatten|multiple_remotes_with_origin|backup_remote_reconcile|backup_remote_push_failure|backup_remote_filters_non_file_and_authoritative)
+      remote_success|remote_active_branch|remote_invalid_active_branch|remote_ahead|remote_ahead_reconciled|remote_fetch_failure|remote_fetch_failure_once|remote_push_failure|remote_push_tip_unmoved|remote_advances_before_push|remote_gc_failure_once|remote_empty_head_push_failure|remote_ancestry_probe_failure|remote_writer_race_before_flatten|multiple_remotes_with_origin|backup_remote_reconcile|backup_remote_push_failure|backup_remote_filters_non_file_and_authoritative)
         print_cell 1
         ;;
       *)
@@ -536,7 +561,7 @@ case "$query" in
     ;;
   *"SELECT COUNT(*) FROM dolt_remotes"*)
     case "$mode" in
-      remote_success|remote_active_branch|remote_invalid_active_branch|remote_ahead|remote_ahead_reconciled|remote_fetch_failure|remote_fetch_failure_once|remote_push_failure|remote_advances_before_push|remote_gc_failure_once|remote_empty_head_push_failure|remote_ancestry_probe_failure|remote_writer_race_before_flatten)
+      remote_success|remote_active_branch|remote_invalid_active_branch|remote_ahead|remote_ahead_reconciled|remote_fetch_failure|remote_fetch_failure_once|remote_push_failure|remote_push_tip_unmoved|remote_advances_before_push|remote_gc_failure_once|remote_empty_head_push_failure|remote_ancestry_probe_failure|remote_writer_race_before_flatten)
         print_cell 1
         ;;
       multiple_remotes_with_origin|multiple_remotes_no_origin)
@@ -559,7 +584,7 @@ case "$query" in
     ;;
   *"SELECT name FROM dolt_remotes ORDER BY name LIMIT 1"*)
     case "$mode" in
-      remote_success|remote_active_branch|remote_invalid_active_branch|remote_ahead|remote_ahead_reconciled|remote_fetch_failure|remote_fetch_failure_once|remote_push_failure|remote_advances_before_push|remote_gc_failure_once|remote_empty_head_push_failure|remote_ancestry_probe_failure|remote_writer_race_before_flatten|multiple_remotes_with_origin)
+      remote_success|remote_active_branch|remote_invalid_active_branch|remote_ahead|remote_ahead_reconciled|remote_fetch_failure|remote_fetch_failure_once|remote_push_failure|remote_push_tip_unmoved|remote_advances_before_push|remote_gc_failure_once|remote_empty_head_push_failure|remote_ancestry_probe_failure|remote_writer_race_before_flatten|multiple_remotes_with_origin)
         print_cell origin
         ;;
       explicit_backup_remote)
@@ -619,6 +644,9 @@ case "$query" in
     exit 0
     ;;
   *"SELECT hash FROM dolt_remote_branches WHERE name = 'remotes/origin/main'"*)
+    if answer_pushed_tip origin main; then
+      exit 0
+    fi
     if [ "$mode" = "remote_advances_before_push" ] || [ "$mode" = "remote_writer_race_before_flatten" ]; then
       calls_file="$state_file.remote-head-calls"
       calls=0
@@ -644,15 +672,28 @@ case "$query" in
     exit 0
     ;;
   *"SELECT hash FROM dolt_remote_branches WHERE name = 'remotes/origin/gascity-3'"*)
+    if answer_pushed_tip origin gascity-3; then
+      exit 0
+    fi
     print_cell headcommit
     exit 0
     ;;
   *"SELECT hash FROM dolt_remote_branches WHERE name = 'remotes/origin/trunk'"*)
+    if answer_pushed_tip origin trunk; then
+      exit 0
+    fi
     print_cell headcommit
     exit 0
     ;;
   *"SELECT hash FROM dolt_remote_branches WHERE name = 'remotes/backup/main'"*)
+    if answer_pushed_tip backup main; then
+      exit 0
+    fi
     print_cell headcommit
+    exit 0
+    ;;
+  *"SELECT hash FROM dolt_branches WHERE name = '"*)
+    print_cell "$(state_head)"
     exit 0
     ;;
   *"SELECT COUNT(*) FROM dolt_log WHERE commit_hash = 'remotecommit'"*)
@@ -1195,12 +1236,15 @@ case "$query" in
       printf 'push unavailable\n' >&2
       exit 53
     fi
+    record_push origin main
     exit 0
     ;;
   *"DOLT_PUSH('--force', '--set-upstream', 'origin', 'gascity-3')"*)
+    record_push origin gascity-3
     exit 0
     ;;
   *"DOLT_PUSH('--force', '--set-upstream', 'origin', 'gascity-3:trunk')"*)
+    record_push origin trunk
     exit 0
     ;;
   *"DOLT_PUSH('--force', '--set-upstream', 'origin', 'main:gascity-3')"*)
@@ -1208,6 +1252,7 @@ case "$query" in
       printf 'push unavailable\n' >&2
       exit 53
     fi
+    record_push origin gascity-3
     exit 0
     ;;
   *"DOLT_PUSH('--force', '--set-upstream', 'backup', 'main')"*)
@@ -1215,6 +1260,7 @@ case "$query" in
       printf 'push unavailable\n' >&2
       exit 53
     fi
+    record_push backup main
     exit 0
     ;;
 esac
@@ -1974,7 +2020,12 @@ func TestCompactScriptRecordsPendingPushWhenRemotePushFails(t *testing.T) {
 	}
 }
 
-func TestCompactScriptBlocksStalePendingPushRetryBeforeForcePush(t *testing.T) {
+// TestCompactScriptBlocksStalePendingPushRetryAfterOneFailedAutomaticRetry pins
+// the strand gate: a marker past GC_DOLT_COMPACT_PENDING_PUSH_MAX_AGE_SECS gets
+// exactly one automatic retry (so a push that died once to a transient failure
+// self-heals), and only when that retry leaves the marker in place does the
+// gate fail closed with the manual-review message and stop force-pushing.
+func TestCompactScriptBlocksStalePendingPushRetryAfterOneFailedAutomaticRetry(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	firstOut, err := fixture.run(t, "remote_push_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
 	if err != nil {
@@ -1983,27 +2034,43 @@ func TestCompactScriptBlocksStalePendingPushRetryBeforeForcePush(t *testing.T) {
 	pendingPush := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-push", "beads")
 	replaceCompactMarkerCreatedAt(t, pendingPush, "1970-01-01T00:00:00Z")
 
-	secondOut, err := fixture.run(t, "remote_success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
-	if err == nil {
-		t.Fatalf("stale pending-push retry succeeded without manual review:\n%s", secondOut)
+	secondOut, err := fixture.run(t, "remote_push_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("stale marker must get one automatic retry, which defers like any failed push: %v\n%s", err, secondOut)
 	}
 	if !strings.Contains(secondOut, "pending_push marker is stale") ||
-		!strings.Contains(secondOut, "manual review required") {
-		t.Fatalf("retry missing stale-marker manual-review explanation:\n%s", secondOut)
+		!strings.Contains(secondOut, "attempting one automatic remote push retry") ||
+		strings.Contains(secondOut, "manual review required") {
+		t.Fatalf("first stale cycle should retry, not demand manual review:\n%s", secondOut)
+	}
+	if got := compactMarkerValue(t, pendingPush, "created_at"); got != "1970-01-01T00:00:00Z" {
+		t.Fatalf("failed automatic retry must preserve marker age, got created_at=%s", got)
+	}
+
+	thirdOut, err := fixture.run(t, "remote_success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("stale pending-push retry succeeded after its one automatic retry without manual review:\n%s", thirdOut)
+	}
+	if !strings.Contains(thirdOut, "pending_push marker is stale") ||
+		!strings.Contains(thirdOut, "manual review required") {
+		t.Fatalf("second stale cycle missing manual-review explanation:\n%s", thirdOut)
 	}
 	logData, err := os.ReadFile(fixture.doltLog)
 	if err != nil {
 		t.Fatalf("read dolt log: %v", err)
 	}
-	if strings.Count(string(logData), "CALL DOLT_PUSH('--force', '--set-upstream', 'origin', 'main')") != 1 {
-		t.Fatalf("stale pending-push retry must not attempt another force push:\n%s", logData)
+	if got := strings.Count(string(logData), "CALL DOLT_PUSH('--force', '--set-upstream', 'origin', 'main')"); got != 2 {
+		t.Fatalf("stale marker should force-push exactly once more (initial + one automatic retry), got %d:\n%s", got, logData)
 	}
 	if _, err := os.Stat(pendingPush); err != nil {
 		t.Fatalf("stale retry should keep pending-push marker: %v", err)
 	}
 }
 
-func TestCompactScriptStalePendingPushMarkerAlertsDefaultMayorBeforeManualReview(t *testing.T) {
+// TestCompactScriptStalePendingPushMarkerAlertsDefaultMayorOnceAfterFailedAutomaticRetry
+// pins the escalation contract: no alert while the one automatic retry runs,
+// exactly one alert when the marker survives it, and silence on the cycle after.
+func TestCompactScriptStalePendingPushMarkerAlertsDefaultMayorOnceAfterFailedAutomaticRetry(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	firstOut, err := fixture.run(t, "remote_push_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
 	if err != nil {
@@ -2013,17 +2080,38 @@ func TestCompactScriptStalePendingPushMarkerAlertsDefaultMayorBeforeManualReview
 	replaceCompactMarkerCreatedAt(t, pendingPush, "1970-01-01T00:00:00Z")
 	resetCompactGCLog(t, fixture)
 
-	secondOut, err := fixture.run(t, "remote_success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	secondOut, err := fixture.run(t, "remote_push_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("automatic retry of a stale marker should defer like any failed push: %v\n%s", err, secondOut)
+	}
+	if log := readCompactGCLog(t, fixture); len(compactGCLogLinesWithPrefix(log, "gc mail send ")) != 0 {
+		t.Fatalf("automatic retry must not page the operator:\n%s", log)
+	}
+
+	thirdOut, err := fixture.run(t, "remote_success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
 	if err == nil {
-		t.Fatalf("stale pending-push retry succeeded without manual review:\n%s", secondOut)
+		t.Fatalf("stale pending-push retry succeeded without manual review:\n%s", thirdOut)
 	}
-	if !strings.Contains(secondOut, "pending_push marker is stale") ||
-		!strings.Contains(secondOut, "manual review required") {
-		t.Fatalf("retry missing stale-marker manual-review explanation:\n%s", secondOut)
+	if !strings.Contains(thirdOut, "pending_push marker is stale") ||
+		!strings.Contains(thirdOut, "manual review required") {
+		t.Fatalf("retry missing stale-marker manual-review explanation:\n%s", thirdOut)
 	}
-	assertCompactBeadsQuarantineAlert(t, fixture, "mayor", pendingPush, "compact-pending-push", "pending_push marker is stale")
+	assertCompactStaleMarkerAlertedOnce(t, fixture, "mayor", pendingPush, "compact-pending-push", "pending_push marker is stale", 1)
+
+	fourthOut, err := fixture.run(t, "remote_success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("stranded marker must keep failing the run until an operator acts:\n%s", fourthOut)
+	}
+	if !strings.Contains(fourthOut, "manual review required") ||
+		!strings.Contains(fourthOut, "alert already sent") {
+		t.Fatalf("later cycle should explain it is not re-alerting:\n%s", fourthOut)
+	}
+	assertCompactStaleMarkerAlertedOnce(t, fixture, "mayor", pendingPush, "compact-pending-push", "pending_push marker is stale", 2)
 }
 
+// TestCompactScriptDryRunReportsStalePendingPushMarker pins that --dry-run
+// previews the strand gate without consuming the one automatic retry, writing
+// bookkeeping, or paging the operator.
 func TestCompactScriptDryRunReportsStalePendingPushMarker(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	firstOut, err := fixture.run(t, "remote_push_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
@@ -2031,9 +2119,35 @@ func TestCompactScriptDryRunReportsStalePendingPushMarker(t *testing.T) {
 		t.Fatalf("first compact should succeed locally despite remote push failure: %v\n%s", err, firstOut)
 	}
 	pendingPush := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-push", "beads")
+	retryState := pendingPush + ".retry-state"
 	replaceCompactMarkerCreatedAt(t, pendingPush, "1970-01-01T00:00:00Z")
+	resetCompactGCLog(t, fixture)
 
 	dryRunOut, err := fixture.run(t, "remote_success",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_COMPACT_DRY_RUN=1",
+	)
+	if err != nil {
+		t.Fatalf("dry run of a stale marker that still has its automatic retry should succeed: %v\n%s", err, dryRunOut)
+	}
+	if !strings.Contains(dryRunOut, "pending_push marker is stale") ||
+		!strings.Contains(dryRunOut, "would attempt one automatic remote push retry") ||
+		!strings.Contains(dryRunOut, "would retry remote push") {
+		t.Fatalf("dry-run should preview the one automatic retry:\n%s", dryRunOut)
+	}
+	if _, err := os.Stat(retryState); !os.IsNotExist(err) {
+		t.Fatalf("dry-run must not consume the automatic retry (stat err=%v)", err)
+	}
+
+	secondOut, err := fixture.run(t, "remote_push_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("automatic retry should defer on push failure: %v\n%s", err, secondOut)
+	}
+	if _, err := os.Stat(retryState); err != nil {
+		t.Fatalf("real run should record the consumed automatic retry: %v", err)
+	}
+
+	dryRunOut, err = fixture.run(t, "remote_success",
 		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
 		"GC_DOLT_COMPACT_DRY_RUN=1",
 	)
@@ -2045,14 +2159,21 @@ func TestCompactScriptDryRunReportsStalePendingPushMarker(t *testing.T) {
 		t.Fatalf("dry-run missing stale-marker manual-review explanation:\n%s", dryRunOut)
 	}
 	if strings.Contains(dryRunOut, "would retry remote push") {
-		t.Fatalf("dry-run should not claim it would retry a stale pending push:\n%s", dryRunOut)
+		t.Fatalf("dry-run should not claim it would retry a stranded pending push:\n%s", dryRunOut)
 	}
 	logData, err := os.ReadFile(fixture.doltLog)
 	if err != nil {
 		t.Fatalf("read dolt log: %v", err)
 	}
-	if strings.Count(string(logData), "CALL DOLT_PUSH('--force', '--set-upstream', 'origin', 'main')") != 1 {
-		t.Fatalf("dry-run stale pending-push retry must not attempt another force push:\n%s", logData)
+	if got := strings.Count(string(logData), "CALL DOLT_PUSH('--force', '--set-upstream', 'origin', 'main')"); got != 2 {
+		t.Fatalf("dry runs must never force-push (want initial + one automatic retry = 2), got %d:\n%s", got, logData)
+	}
+	log := readCompactGCLog(t, fixture)
+	if mails := compactGCLogLinesWithPrefix(log, "gc mail send "); len(mails) != 0 {
+		t.Fatalf("dry-run must not page the operator, got %d mail(s):\n%s", len(mails), log)
+	}
+	if events := compactGCLogLinesWithPrefix(log, "gc event emit dolt.compact.quarantine"); len(events) != 0 {
+		t.Fatalf("dry-run must not emit quarantine events, got %d:\n%s", len(events), log)
 	}
 }
 
