@@ -136,23 +136,43 @@ learn it.
 
 ## Watching a cutover from outside
 
-Every boot publishes one `storage.binding.*` event carrying what the gate
-concluded and, on a serving outcome, the size of the proven copy it rests on:
+A boot that reaches a verdict about the binding publishes one
+`storage.binding.*` event carrying that verdict and, on a serving outcome, the
+size of the proven copy it rests on:
 
 | Event                            | Meaning                                                 |
 | -------------------------------- | ------------------------------------------------------- |
-| `storage.binding.converged`      | Serving a binding a proven copy already populated.       |
+| `storage.binding.converged`      | Serving. Either a proven copy populated the binding, or the city was born split and the work store holds no infrastructure bead. |
 | `storage.binding.genesis`        | Serving a binding created for a city with nothing to move. |
 | `storage.binding.unconverged`    | Refused: config and data disagree. `invariant` says how. |
 | `storage.binding.uncheckable`    | Refused: the check that would decide could not run.      |
-| `storage.binding.not-configured` | This city has no infrastructure split.                   |
+| `storage.binding.not_configured` | This city has no infrastructure split.                   |
 
 The last one is a verdict, not the absence of one, and it is why a subscriber
 can gate on these events at all: silence would otherwise be indistinguishable
 from a gate that crashed before deciding.
 
+`outcome` is finer than the event type. Four refusals — `unconverged`,
+`stranded`, `born-split-blocked` and `genesis-blocked` — all arrive as
+`storage.binding.unconverged`, because a subscriber branches on "is this city
+serving" and all four answer no. The `outcome` field says which no it was and
+`invariant` says why, so a consumer that switches on `outcome` must handle all
+eight values, not the five type names.
+
 `proven_beads` is zero on every refusal, where it means the size was not
 established rather than that the copy is empty. On `genesis` the zero is real.
+It is also real on a born-split `converged`, where it means something else
+again: no copy ever ran, and the discipline being reported is that the work
+store holds nothing the binding would need. Those two are told apart by
+`database`, which a born-split event leaves empty.
+
+**Some refusals publish nothing, on purpose or otherwise.** A `[storage.classes]`
+arrangement this build cannot serve at all, a plan that does not resolve, and a
+binding whose provider opens no bead engine are all refused before any verdict
+about the binding exists — the last deliberately, so a permanently unservable
+binding does not publish `converged` on every boot. Gate on the events for the
+cutover states above; read the exit code and stderr for the config states, which
+no event describes.
 
 ### `gc bd ready` stops answering, on purpose
 

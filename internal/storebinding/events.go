@@ -20,10 +20,25 @@ type StorageBindingOutcomePayload struct {
 	// Binding is the [storage.bindings.<name>] key the infrastructure classes
 	// are assigned to.
 	Binding string `json:"binding"`
-	// Database is the resolved file the binding's engine opens.
+	// Database is the resolved file the binding's engine opens, and is empty
+	// when no such file was resolved: a city with no split named no binding at
+	// all, and a born-split city serves from a provider this build does not open
+	// — its location is whatever that provider means by one, which is not
+	// something this field can promise is a path. Binding is the field that is
+	// always populated once a binding exists.
 	Database string `json:"database"`
-	// Outcome names what was concluded: not-configured, converged, genesis,
-	// unconverged, or uncheckable.
+	// Outcome names what was concluded, and it is FINER than the event type.
+	// Five types carry eight outcomes: not-configured, converged, genesis and
+	// uncheckable each have a type to themselves, while unconverged, stranded,
+	// born-split-blocked and genesis-blocked all arrive as
+	// storage.binding.unconverged.
+	//
+	// They share a type because a subscriber branches on "is this city serving"
+	// and all four answer no; they keep distinct outcomes because an operator
+	// reading one event needs to know which no it was. A consumer switching on
+	// this field must handle all eight — matching only the five type names would
+	// silently drop three real values — and Invariant is the sentence that
+	// explains whichever one arrived.
 	Outcome string `json:"outcome"`
 	// ProvenBeads is the size of the proven-copy manifest a serving verdict
 	// rests on. "Converged" alone does not distinguish a city serving its whole
@@ -34,8 +49,15 @@ type StorageBindingOutcomePayload struct {
 	// It costs nothing: every path that reaches a serving verdict has already
 	// read the manifest to reach it. Every other outcome leaves it zero, and
 	// zero there means the copy's size is not something this verdict
-	// established — NOT that the copy is empty. On a serving outcome zero is the
-	// real answer, which is what a genesis city reports.
+	// established — NOT that the copy is empty.
+	//
+	// Two serving outcomes report a real zero, and they mean different things. A
+	// genesis city converged on a copy that carried nothing. A born-split city —
+	// converged, on a binding this build does not migrate onto — never had a
+	// proven copy to size, because nothing was ever copied into it; its zero says
+	// the work store holds no infrastructure bead, which is the whole of what
+	// that discipline proves. Read them apart by Database, which a born-split
+	// event leaves empty.
 	ProvenBeads int `json:"proven_beads"`
 	// Invariant is the operator-facing sentence a non-serving outcome carries,
 	// empty when the binding is being served. It is the same text the refusal

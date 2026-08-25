@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"slices"
@@ -58,8 +61,15 @@ func decodeStorageBindingOutcome(t *testing.T, rec *events.Fake) (events.Event, 
 //
 // The walk is driven by String()'s own fallback rather than a hand-kept list, so
 // an outcome added to the const block is covered here the moment it exists
-// without anyone remembering to add it.
+// without anyone remembering to add it — but only as far as String() names it.
+// A constant added with no String() arm ends the walk early and every outcome
+// after it goes unvisited, which is the same invisibility with one more step in
+// front of it. So the walk's length is cross-checked against the const block
+// itself, read from source: the two counts disagree exactly when a constant
+// exists that String() does not name.
 func TestEveryMigrationOutcomeReachesARegisteredEventType(t *testing.T) {
+	declared := declaredMigrationOutcomeCount(t)
+	visited := 0
 	for i := 0; ; i++ {
 		outcome := infraMigrationOutcome(i)
 		if strings.HasPrefix(outcome.String(), "infraMigrationOutcome(") {
@@ -68,6 +78,7 @@ func TestEveryMigrationOutcomeReachesARegisteredEventType(t *testing.T) {
 			}
 			break
 		}
+		visited++
 		eventType, mapped := storageBindingEventTypes[outcome]
 		if !mapped {
 			t.Errorf("outcome %v reaches no event type, so a process concluding it publishes nothing and a subscriber cannot tell that verdict from no verdict", outcome)
@@ -77,6 +88,52 @@ func TestEveryMigrationOutcomeReachesARegisteredEventType(t *testing.T) {
 			t.Errorf("outcome %v maps to %q, which is missing from events.KnownEventTypes, so the SSE projection would carry it untyped", outcome, eventType)
 		}
 	}
+	if visited != declared {
+		t.Errorf("the walk visited %d outcome(s) but the const block declares %d: an outcome String() does not name stops the walk, and everything at or after it was never checked for an event type", visited, declared)
+	}
+}
+
+// declaredMigrationOutcomeCount counts the constants in the infraMigrationOutcome
+// const block, read from source.
+//
+// Source rather than reflection because Go gives an int-based enum no runtime
+// membership at all: nothing at run time can distinguish a declared constant
+// from any other int, which is the reason String()'s fallback exists and the
+// reason a walk driven by it cannot see past a missing arm. The declaration is
+// the only place the true count lives.
+func declaredMigrationOutcomeCount(t *testing.T) int {
+	t.Helper()
+	const source = "infra_class_migrate.go"
+	file, err := parser.ParseFile(token.NewFileSet(), source, nil, 0)
+	if err != nil {
+		t.Fatalf("parsing %s: %v", source, err)
+	}
+	declared := 0
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.CONST {
+			continue
+		}
+		block := 0
+		typed := false
+		for _, spec := range gen.Specs {
+			value, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			if name, ok := value.Type.(*ast.Ident); ok && name.Name == "infraMigrationOutcome" {
+				typed = true
+			}
+			block += len(value.Names)
+		}
+		if typed {
+			declared += block
+		}
+	}
+	if declared == 0 {
+		t.Fatalf("found no infraMigrationOutcome constants in %s, so the cross-check proves nothing", source)
+	}
+	return declared
 }
 
 // TestNotConfiguredCityPublishesItsVerdictRatherThanSilence pins the fourth
@@ -161,34 +218,42 @@ func TestNotConfiguredVerdictStillCreatesNothing(t *testing.T) {
 // those are the two situations an operator watching a cutover most needs to tell
 // apart. The count is the size of the proven-copy manifest the verdict already
 // read, so it costs the boot path nothing: no census, no second store opened.
+//
+// Two sizes rather than one, because one size cannot tell a manifest read from
+// a constant: a field hardcoded to whatever the single fixture carries passes
+// every assertion that fixture can make. Two cities carrying different slices
+// leave no constant that satisfies both.
 func TestConvergedVerdictCarriesTheProvenCopySize(t *testing.T) {
-	cityPath := t.TempDir()
-	cfg := infraSplitConfig(filepath.Join(t.TempDir(), "store"))
-	source := stubInfraMigrationSource(t)
-	const carried = 3
-	for i := 0; i < carried; i++ {
-		mustCreateInfraBead(t, source, beads.Bead{Title: fmt.Sprintf("session %d", i), Type: "session"})
-	}
+	for _, carried := range []int{1, 4} {
+		t.Run(fmt.Sprintf("%d carried", carried), func(t *testing.T) {
+			cityPath := t.TempDir()
+			cfg := infraSplitConfig(filepath.Join(t.TempDir(), "store"))
+			source := stubInfraMigrationSource(t)
+			for i := 0; i < carried; i++ {
+				mustCreateInfraBead(t, source, beads.Bead{Title: fmt.Sprintf("session %d", i), Type: "session"})
+			}
 
-	var log bytes.Buffer
-	if got := migrateInfraClasses(t, cityPath, cfg, &log); got.Outcome != infraMigrationConverged {
-		t.Fatalf("the migration reported %s: %s", got.Outcome, log.String())
-	}
+			var log bytes.Buffer
+			if got := migrateInfraClasses(t, cityPath, cfg, &log); got.Outcome != infraMigrationConverged {
+				t.Fatalf("the migration reported %s: %s", got.Outcome, log.String())
+			}
 
-	rec := events.NewFake()
-	var stderr bytes.Buffer
-	routes, err := storageBootGate(cityPath, cfg, "gc start", rec, &stderr)
-	if err != nil {
-		t.Fatalf("a converged city was refused: %v", err)
-	}
-	t.Cleanup(func() { _ = routes.close() })
+			rec := events.NewFake()
+			var stderr bytes.Buffer
+			routes, err := storageBootGate(cityPath, cfg, "gc start", rec, &stderr)
+			if err != nil {
+				t.Fatalf("a converged city was refused: %v", err)
+			}
+			t.Cleanup(func() { _ = routes.close() })
 
-	event, payload := decodeStorageBindingOutcome(t, rec)
-	if event.Type != events.StorageBindingConverged {
-		t.Fatalf("recorded %s, want %s", event.Type, events.StorageBindingConverged)
-	}
-	if payload.ProvenBeads != carried {
-		t.Errorf("ProvenBeads = %d, want %d; the converged verdict does not say how big the copy it rests on is", payload.ProvenBeads, carried)
+			event, payload := decodeStorageBindingOutcome(t, rec)
+			if event.Type != events.StorageBindingConverged {
+				t.Fatalf("recorded %s, want %s", event.Type, events.StorageBindingConverged)
+			}
+			if payload.ProvenBeads != carried {
+				t.Errorf("ProvenBeads = %d, want %d; the converged verdict does not say how big the copy it rests on is", payload.ProvenBeads, carried)
+			}
+		})
 	}
 }
 
@@ -272,23 +337,31 @@ func TestUncheckableVerdictNamesTheReadThatFailed(t *testing.T) {
 // is the binding, and until now `gc storage status` reported the manifest — a
 // record of what the copy was proven to deliver at cutover — rather than what
 // the binding holds today. Those diverge the moment the binding's own GC runs.
+//
+// So the fixture makes them diverge, rather than asserting two numbers that
+// happen to be equal. A bead the copy delivered is dropped from the binding
+// afterwards — the reap this line exists to make visible — leaving source 2 and
+// binding 1. Equal counts would let status print the source's number on the
+// binding's line and pass, which is precisely the regression described above.
 func TestStorageStatusReportsBothSidesOfTheCutover(t *testing.T) {
 	cfg := infraSplitConfig(filepath.Join(t.TempDir(), "store"))
 	request := storageTestRequest(t, cfg)
 	source := stubInfraMigrationSource(t)
 	mustCreateInfraBead(t, source, beads.Bead{Title: "carried across", Type: "session"})
+	reaped := mustCreateInfraBead(t, source, beads.Bead{Title: "reaped after cutover", Type: "session"}).ID
 
 	var log bytes.Buffer
 	if got := migrateInfraClasses(t, request.CityPath, cfg, &log); got.Outcome != infraMigrationConverged {
 		t.Fatalf("the migration reported %s: %s", got.Outcome, log.String())
 	}
+	dropFromInfraBinding(t, request.CityPath, cfg, reaped)
 
 	var stdout, stderr bytes.Buffer
 	if code := doStorageStatus(request, &stdout, &stderr); code != 0 {
 		t.Fatalf("status exited %d on a converged city: stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "1 infrastructure bead(s) retained") {
+	if !strings.Contains(out, "source: 2 infrastructure bead(s) retained") {
 		t.Errorf("status does not report the retained source census: %q", out)
 	}
 	if !strings.Contains(out, "binding: 1 infrastructure bead(s)") {
@@ -296,12 +369,35 @@ func TestStorageStatusReportsBothSidesOfTheCutover(t *testing.T) {
 	}
 }
 
+// dropFromInfraBinding removes one bead from the binding, standing in for the
+// binding's own garbage collection reaping a row the copy delivered.
+func dropFromInfraBinding(t *testing.T, cityPath string, cfg *config.City, id string) {
+	t.Helper()
+	target, ok, err := resolveInfraBindingTarget(cityPath, cfg)
+	if err != nil || !ok {
+		t.Fatalf("resolving the binding target: ok=%t err=%v", ok, err)
+	}
+	store, err := openInfraDestination(target)
+	if err != nil {
+		t.Fatalf("opening the binding: %v", err)
+	}
+	defer closeBeadStoreHandle(store) //nolint:errcheck // best-effort close
+	if err := store.Delete(id); err != nil {
+		t.Fatalf("dropping %s from the binding: %v", id, err)
+	}
+}
+
 // TestStorageStatusCensusOfAnAbsentBindingCreatesNothing pins the read-only
-// contract on the new census.
+// contract on the census, and the refusal to guess when it cannot run.
 //
-// An unconverged city has no binding database yet, and the count of what it
-// holds is zero. Opening it to learn that would CREATE it — the report would
-// answer its own question and leave a database behind on a city that never cut
+// An unconverged city has no binding root, and a whole missing root is the one
+// state that reads the same whether the city never cut over or its volume is
+// not mounted right now. So the line reports the fault instead of a number: a
+// confident "0 held now" would sit next to "converged: no" as a second piece of
+// positive-looking evidence for a city that may well hold everything.
+//
+// Learning the count by opening the database would CREATE it — the report would
+// answer its own question and leave a store behind on a city that never cut
 // over, which is exactly the mutation the whole status path is defined against.
 func TestStorageStatusCensusOfAnAbsentBindingCreatesNothing(t *testing.T) {
 	bindingParent := t.TempDir()
@@ -318,7 +414,40 @@ func TestStorageStatusCensusOfAnAbsentBindingCreatesNothing(t *testing.T) {
 	if got := treeFingerprint(t, bindingParent); !equalStrings(before, got) {
 		t.Errorf("the binding census changed the binding tree:\n before %v\n after  %v", before, got)
 	}
+	out := stdout.String()
+	if !strings.Contains(out, "binding: unknown") {
+		t.Errorf("status does not report the binding side at all on an unconverged city, so the two sides cannot be compared where comparing them matters most: %q", out)
+	}
+	if strings.Contains(out, "binding: 0 infrastructure bead(s)") {
+		t.Errorf("status reports a confident zero for a binding root nobody could look inside: %q", out)
+	}
+	if !strings.Contains(out, filepath.Join(bindingParent, "store")) {
+		t.Errorf("the unknown census does not name the root it could not read, so an operator cannot tell an unmounted volume from a city that never cut over: %q", out)
+	}
+}
+
+// TestStorageStatusCountsABindingItCanRead is the control the refusal above is
+// worthless without.
+//
+// "Unknown" is the safe answer, and a census that always answered unknown would
+// pass every assertion in that test while reporting nothing. This is the same
+// unconverged city with its binding root present and empty — the state a genesis
+// boot leaves — where zero is a real observation and must be printed as one.
+func TestStorageStatusCountsABindingItCanRead(t *testing.T) {
+	bindingParent := t.TempDir()
+	cfg := infraSplitConfig(filepath.Join(bindingParent, "store"))
+	request := storageTestRequest(t, cfg)
+	source := stubInfraMigrationSource(t)
+	mustCreateInfraBead(t, source, beads.Bead{Title: "a session", Type: "session"})
+	if err := os.MkdirAll(filepath.Join(bindingParent, "store"), 0o755); err != nil {
+		t.Fatalf("creating the binding root: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doStorageStatus(request, &stdout, &stderr); code == 0 {
+		t.Fatalf("status exited 0 on an unconverged city: %q", stdout.String())
+	}
 	if !strings.Contains(stdout.String(), "binding: 0 infrastructure bead(s)") {
-		t.Errorf("status does not report the binding's count on an unconverged city, so the two sides cannot be compared where comparing them matters most: %q", stdout.String())
+		t.Errorf("status withholds a count it could take: an empty readable root holds zero beads, and that zero is an observation: %q", stdout.String())
 	}
 }

@@ -55,6 +55,12 @@ const (
 	// storageStatusVerb is the read-only sibling of the migrate verb.
 	storageStatusVerb = "status"
 
+	// storageStopCommand is the one spelling of the command that clears the
+	// controller a migration refuses under. Both the migration's refusal and the
+	// preflight's advisory print it, for the reason the file header gives: an
+	// instruction naming a command this binary does not carry fails at the shell.
+	storageStopCommand = "gc stop"
+
 	// storageFleetStoppedFlag is the operator's attestation that nothing this
 	// process cannot see is still writing to the source.
 	storageFleetStoppedFlag = "fleet-stopped"
@@ -334,7 +340,7 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 	}
 
 	if pid := infraMigrationForeignControllerPID(request.CityPath); pid != 0 {
-		fmt.Fprintf(stderr, "%s: controller PID %d is live on this city and is still writing to the work store. Stop it (gc stop) and run this again\n", logPrefix, pid) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: controller PID %d is live on this city and is still writing to the work store. Stop it (%s) and run this again\n", logPrefix, pid, storageStopCommand) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if !request.FleetStopped {
@@ -474,12 +480,17 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 	// binding's zero is the whole point. The source count alone cannot tell an
 	// operator whether a cutover landed, because the migration retains the
 	// source verbatim and that number is the same either way.
-	held, err := infraBindingCensus(target)
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-		return 1
+	//
+	// A census that could not run prints its reason in place of the number
+	// instead of a confident zero. The unreadable case is a whole missing binding
+	// root, which takes the marker and the manifest with it, so this line would
+	// otherwise sit next to "converged: no" as a second piece of positive-looking
+	// evidence for a city that may well have cut over.
+	if held, err := infraBindingCensus(target); err != nil {
+		fmt.Fprintf(stdout, "binding: unknown — %v\n", err) //nolint:errcheck // best-effort stdout
+	} else {
+		fmt.Fprintf(stdout, "binding: %d infrastructure bead(s) held now\n", held) //nolint:errcheck // best-effort stdout
 	}
-	fmt.Fprintf(stdout, "binding: %d infrastructure bead(s) held now\n", held) //nolint:errcheck // best-effort stdout
 
 	if state != infraConvergenceMarked {
 		fmt.Fprintf(stdout, "converged: no\nblocking invariant: boot never migrates; run `%s`\n", storageMigrationCommand) //nolint:errcheck // best-effort stdout
