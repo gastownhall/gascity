@@ -97,11 +97,49 @@ func legacyResidents(store beads.Store, prefixes []string, includeClosed bool) (
 // refused city, whose store answers every read with the standing storage
 // refusal, takes this branch too.
 func HasLegacyResidents(b ClassBinding) bool {
-	relics, err := LegacyResidents(b.Leg.Store, b.Prefixes)
+	has, err := legacyResidentVerdict(b.Leg.Store, b.Prefixes)
 	if err != nil {
 		return true
 	}
-	return len(relics) > 0
+	return has
+}
+
+// legacyResidentVerdict answers the verdict from the store itself when the store
+// can answer it, and by listing the store when it cannot.
+//
+// The verdict is a yes-or-no question over the binding's whole history, and the
+// listing form pays for the history twice: once to hydrate every row, once to
+// throw all but the id away. A store that can answer it in one statement is
+// asked directly, and it is asked instead of the scan rather than as well as it
+// — running both would make the fast path a pure cost.
+//
+// The fallback is not a legacy path. A binding served by the native Dolt engine
+// reaches its rows through the beads library and holds no SQL of its own, so it
+// cannot implement the capability and lists exactly as before.
+//
+// The drain report (OpenLegacyResidents) deliberately does not come through
+// here: it needs the ids themselves, and a verdict cannot name them.
+func legacyResidentVerdict(store beads.Store, prefixes []string) (bool, error) {
+	if store == nil {
+		return false, fmt.Errorf("relic census: no binding store to read")
+	}
+	if census, ok := store.(beads.NamespaceCensus); ok {
+		has, err := census.HasResidentOutside(prefixes)
+		if err != nil {
+			// Not a reason to fall back to the scan: a store whose own read
+			// failed will not serve a listing of itself either, so the fallback
+			// would only pay the cost twice on the way to the same answer. The
+			// caller reads an error as "keep the probe", which is the honest
+			// verdict for a binding that said nothing.
+			return false, fmt.Errorf("relic census: asking the binding for a resident outside its namespaces: %w", err)
+		}
+		return has, nil
+	}
+	relics, err := LegacyResidents(store, prefixes)
+	if err != nil {
+		return false, err
+	}
+	return len(relics) > 0, nil
 }
 
 // idInAnyNamespace reports whether any prefix claims id's namespace. It is the
