@@ -289,6 +289,26 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		}
 		return doBdReleaseIfCurrent(cityPath, cfg, target, id, expectedAssignee, stdout, stderr)
 	}
+
+	// Disclose which store answers a read-only passthrough, so a zero-row
+	// result is distinguishable from a true empty (gastownhall/gascity#5170).
+	// resolveBdScopeTarget's priority chain (explicit --rig > explicit --city
+	// > bead-prefix detect > -C/--directory > GC_RIG env > cwd > city)
+	// silently picks a store on every one of those paths but the GC_RIG-
+	// mismatch warning above; the common cwd-auto-detect case reached bd with
+	// no diagnostic at all. Placed after the by-ID and release-if-current
+	// arms above (rather than immediately after resolveBdScopeTarget) so it
+	// names the store that actually serves the request: a class-owned `show`
+	// on a split city is answered in process from the class's own binding by
+	// maybeRouteBdByID, not from target, and disclosing target there would be
+	// wrong for that one read. This is stderr-only and additive — bd's own
+	// stdout (human or --json) is untouched, and it never changes the exit
+	// code, matching the disclosure style #5162/#5167 established for the
+	// sibling relocated-class invariant.
+	if verb, _, ok := bdRelocatedClassVerb(bdArgs); ok && bdScopeDisclosureVerbs[verb] {
+		fmt.Fprintf(stderr, "gc bd: answering from the %s store\n", scopeLabel(target)) //nolint:errcheck // best-effort stderr
+	}
+
 	if provider := rawBeadsProviderForScope(target.ScopeRoot, cityPath); !providerUsesBdStoreContract(provider) {
 		fmt.Fprintf(stderr, "gc bd: only supported for bd-backed beads providers (resolved %q for %s)\n", provider, target.ScopeRoot) //nolint:errcheck // best-effort stderr
 		if hint := bdProviderMismatchHint(target.ScopeRoot, provider); hint != "" {
@@ -777,6 +797,19 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 		fmt.Fprintf(stderr, "gc bd: warning: GC_RIG=%q does not name a bound rig in this city; ignoring it and answering from the %s store instead (the same value via --rig would exit 1)\n", gcRigDiscarded, scopeLabel(target)) //nolint:errcheck // best-effort stderr
 	}
 	return target, nil
+}
+
+// bdScopeDisclosureVerbs are the bd read-only passthrough verbs whose
+// resolved store gets announced on stderr (gastownhall/gascity#5170). Scoped
+// to reads: a write verb's effect is directly observable (the record it
+// touched can be re-read), while a read verb's silence is exactly what makes
+// an empty answer indistinguishable from "no matches in the store that was
+// asked."
+var bdScopeDisclosureVerbs = map[string]bool{
+	"list":   true,
+	"ready":  true,
+	"search": true,
+	"show":   true,
 }
 
 // scopeLabel renders a store target for operator-facing diagnostics, e.g.
