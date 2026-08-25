@@ -435,10 +435,29 @@ func (cr *CityRuntime) authorizeRoutedWorkPoolDrainAck(
 	for i := range snapshot.Config.NamedSessions {
 		namedTemplates[snapshot.Config.NamedSessions[i].TemplateQualifiedName()] = struct{}{}
 	}
-	policy := newPoolAllocationShadowPolicy(snapshot.Config, agent, namedTemplates).
-		forSourceStore(snapshot.Config, agent, snapshot.CityPath, lease.SourceStore)
-	if !policy.supported() ||
-		(policy.maxActiveSessions == 1 && !isCanonicalPoolManagedSessionInfoForTemplate(info, lease.PoolTarget)) {
+	// This is a release site, so it asks releaseEligible, not supported.
+	policy := newPoolAllocationShadowPolicy(snapshot.Config, agent, namedTemplates)
+	if !policy.releaseEligible() {
+		return false, drainAckRefusalPolicyUnsupported, nil
+	}
+	// The source-store clause, asked directly rather than through the
+	// forSourceStore overlay. That overlay early-returns on !supported(), so
+	// under any capacity cap it never runs — which was invisible while the gate
+	// above refused every capped city outright, and would have become a silent
+	// skip the moment it stopped. An unreadable trigger store has to refuse
+	// here: the store resolution below would otherwise surface it as an error,
+	// and a drain acknowledgement the keyed lane cannot service is legacy's to
+	// handle, not an incident.
+	if !poolAllocationShadowReachesSourceStore(snapshot.Config, agent, snapshot.CityPath, lease.SourceStore) {
+		return false, drainAckRefusalPolicyUnsupported, nil
+	}
+	// The singleton exclusion, read from the agent rather than from the policy's
+	// maxActiveSessions. The constructor fills that field only on the agent-cap
+	// branch, so any city that returns earlier — under a min floor, a workspace
+	// or rig cap, or a namepool — leaves it at -1 and the exclusion quietly stops
+	// being evaluated. The agent's own cap is the fact this clause is about.
+	if maximum := agent.EffectiveMaxActiveSessions(); poolAllocationShadowHasCap(maximum) && *maximum == 1 &&
+		!isCanonicalPoolManagedSessionInfoForTemplate(info, lease.PoolTarget) {
 		return false, drainAckRefusalPolicyUnsupported, nil
 	}
 	// The runtime half. It proves the acknowledgement is the agent's and that
