@@ -58,8 +58,10 @@ func TestStandaloneControllerClient(t *testing.T) {
 // the socket is alive and an [api] port is configured, nil (the caller's local
 // fallback) when alive without a standalone port, the supervisor client when the
 // socket is down, and nil under the GC_NO_API escape hatch. The supervisor
-// fall-through for a managed city with no [api] port is scoped to maintenance —
-// see TestMaintenanceAPIClientRoutesToSupervisor. (gascity ga-tp7)
+// fall-through for a managed city with no [api] port is scoped to the
+// supervisorFallthroughAPIClient callers — see
+// TestMaintenanceAPIClientRoutesToSupervisor and
+// TestCityStatusAPIClientRoutesToSupervisor. (gascity ga-tp7)
 func TestAPIClientRouting(t *testing.T) {
 	sentinel := api.NewClient("http://supervisor.sentinel:1")
 
