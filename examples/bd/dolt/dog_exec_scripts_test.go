@@ -272,6 +272,11 @@ func (f compactScriptFixture) runWithArgs(t *testing.T, mode string, args []stri
 		"GC_DOLT_PASSWORD=",
 		"GC_DOLT_MANAGED_LOCAL=1",
 		fmt.Sprintf("GC_DOLT_COMPACT_CALL_TIMEOUT_SECS=%d", compactScriptCallTimeoutSecs),
+		// The managed listener's default read_timeout_millis ([dolt]
+		// read_timeout_millis, default 120000) comfortably covers the call
+		// timeout, so full-GC paths pass the listener guard. Tests of that
+		// guard override this with a deliberately short value.
+		"GC_DOLT_READ_TIMEOUT_MILLIS=120000",
 		fmt.Sprintf("GC_DOLT_COMPACT_PUSH_TIMEOUT_SECS=%d", compactScriptPushTimeoutSecs),
 		"GC_FAKE_DOLT_COMPACT_MODE="+mode,
 		"GC_FAKE_DOLT_COUNT_FILE="+filepath.Join(f.binDir, "row-count-calls"),
@@ -5532,6 +5537,179 @@ func TestCompactScriptGCOnlyFlagSurfacesDoltGCFailure(t *testing.T) {
 		marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", dir, "beads")
 		if _, err := os.Stat(marker); !os.IsNotExist(err) {
 			t.Fatalf("gc-only failure must not write %s marker, stat err=%v", dir, err)
+		}
+	}
+}
+
+// assertGCOnlyRefusedBeforeDoltGC checks the --gc-only listener fail-close:
+// the refusal names the ceiling and its source, and no DOLT_GC was issued.
+func assertGCOnlyRefusedBeforeDoltGC(t *testing.T, fixture compactScriptFixture, out string, err error, want ...string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("gc-only must fail closed when the listener ceiling is below the full-GC bound:\n%s", out)
+	}
+	want = append(want,
+		"refusing to start DOLT_GC",
+		"Set GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS to the longest full GC you expect",
+		"1 database(s) failed gc-only reclaim",
+	)
+	for _, w := range want {
+		if !strings.Contains(out, w) {
+			t.Fatalf("gc-only refusal missing %q:\n%s", w, out)
+		}
+	}
+	if logData, err := os.ReadFile(fixture.doltLog); err == nil {
+		if strings.Contains(string(logData), "DOLT_GC") {
+			t.Fatalf("gc-only must not issue DOLT_GC when the listener would cancel it:\n%s", logData)
+		}
+	}
+}
+
+func TestCompactScriptGCOnlyFlagFailsClosedWhenListenerShorterThanCallTimeout(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.runWithArgs(t, "below_threshold", []string{"--gc-only"},
+		"GC_DOLT_READ_TIMEOUT_MILLIS=15000",
+		"GC_DOLT_COMPACT_CALL_TIMEOUT_SECS=1800")
+	assertGCOnlyRefusedBeforeDoltGC(t, fixture, out, err,
+		"the managed sql-server listener.read_timeout_millis=15000 ceiling (from GC_DOLT_READ_TIMEOUT_MILLIS, no readable server config) is below the 1800s full-GC bound",
+		"raise it via city.toml [dolt] read_timeout_millis (keep it under half of write_timeout_millis), then gc dolt restart",
+	)
+}
+
+func TestCompactScriptGCOnlyFlagAssumesLowestDefaultWithoutAnyCeiling(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.runWithArgs(t, "below_threshold", []string{"--gc-only"},
+		"GC_DOLT_READ_TIMEOUT_MILLIS=",
+		"GC_DOLT_COMPACT_CALL_TIMEOUT_SECS=20")
+	assertGCOnlyRefusedBeforeDoltGC(t, fixture, out, err,
+		"listener.read_timeout_millis=15000 ceiling (assumed, no readable server config) is below the 20s full-GC bound",
+	)
+}
+
+func TestCompactScriptGCOnlyFlagReadsLiveListenerTimeoutFromConfigYaml(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	configPath := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
+	writeCompactDoltConfig(t, configPath, "15000")
+	out, err := fixture.runWithArgs(t, "below_threshold", []string{"--gc-only"},
+		"GC_DOLT_READ_TIMEOUT_MILLIS=1800000",
+		"GC_DOLT_COMPACT_CALL_TIMEOUT_SECS=1800")
+	assertGCOnlyRefusedBeforeDoltGC(t, fixture, out, err,
+		"listener.read_timeout_millis=15000 ceiling (in "+configPath+") is below the 1800s full-GC bound",
+	)
+}
+
+// The rendered config is the running server's value, so it wins over a
+// lower GC_DOLT_READ_TIMEOUT_MILLIS that a city.toml edit has not yet
+// restarted into the server.
+func TestCompactScriptGCOnlyFlagRunsWhenLiveListenerCoversBound(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	configPath := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
+	writeCompactDoltConfig(t, configPath, "30000")
+	out, err := fixture.runWithArgs(t, "below_threshold", []string{"--gc-only"},
+		"GC_DOLT_READ_TIMEOUT_MILLIS=1000",
+		"GC_DOLT_COMPACT_CALL_TIMEOUT_SECS=20")
+	if err != nil {
+		t.Fatalf("gc-only should run when the live listener covers the full-GC bound: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "refusing to start DOLT_GC") {
+		t.Fatalf("gc-only must not refuse when the live listener covers the bound:\n%s", out)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if !strings.Contains(string(logData), "DOLT_GC") {
+		t.Fatalf("gc-only should issue DOLT_GC when the live listener covers the bound:\n%s", logData)
+	}
+}
+
+func TestCompactScriptGCOnlyFlagDedicatedReadTimeoutEnvOverridesCallTimeout(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.runWithArgs(t, "below_threshold", []string{"--gc-only"},
+		"GC_DOLT_READ_TIMEOUT_MILLIS=15000",
+		"GC_DOLT_COMPACT_CALL_TIMEOUT_SECS=5",
+		"GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS=1800")
+	assertGCOnlyRefusedBeforeDoltGC(t, fixture, out, err, "is below the 1800s full-GC bound")
+}
+
+// An explicit external-local target's ceiling is read only from
+// GC_DOLT_CONFIG_FILE, never from the managed pack state, and its refusal gets
+// the target-neutral remedy the cancellation diagnostic uses.
+func TestCompactScriptGCOnlyFlagFailsClosedForExternalLocalTarget(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// configFile returns GC_DOLT_CONFIG_FILE, or "" to leave it unset.
+		configFile func(t *testing.T, externalRoot string) string
+		source     func(configFile string) string
+	}{
+		{
+			name:       "config_file_unset",
+			configFile: func(*testing.T, string) string { return "" },
+			source:     func(string) string { return "(from GC_DOLT_READ_TIMEOUT_MILLIS, no readable server config)" },
+		},
+		{
+			name: "server_config_rendered",
+			configFile: func(t *testing.T, externalRoot string) string {
+				path := filepath.Join(externalRoot, "server-config.yaml")
+				writeCompactDoltConfig(t, path, "15000")
+				return path
+			},
+			source: func(configFile string) string { return "(in " + configFile + ")" },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			stateDir := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt")
+			// A leftover managed config that would pass the check must not
+			// stand in for the external server's ceiling.
+			managedConfig := filepath.Join(stateDir, "dolt-config.yaml")
+			writeCompactDoltConfig(t, managedConfig, "3600000")
+			externalRoot := filepath.Join(stateDir, "external-target")
+			if err := os.MkdirAll(filepath.Join(externalRoot, "beads", ".dolt"), 0o755); err != nil {
+				t.Fatalf("mkdir external target db: %v", err)
+			}
+			env := []string{
+				"GC_DOLT_MANAGED_LOCAL=0",
+				"GC_DOLT_HOST=127.0.0.2",
+				"GC_DOLT_DATA_DIR=" + externalRoot,
+				"GC_DOLT_STATE_FILE=" + filepath.Join(externalRoot, "dolt-state.json"),
+				"GC_DOLT_READ_TIMEOUT_MILLIS=15000",
+				"GC_DOLT_COMPACT_CALL_TIMEOUT_SECS=1800",
+			}
+			configFile := tc.configFile(t, externalRoot)
+			if configFile != "" {
+				env = append(env, "GC_DOLT_CONFIG_FILE="+configFile)
+			}
+			out, err := fixture.runWithArgs(t, "below_threshold", []string{"--gc-only"}, env...)
+			assertGCOnlyRefusedBeforeDoltGC(t, fixture, out, err,
+				"the sql-server listener.read_timeout_millis=15000 ceiling "+tc.source(configFile)+" is below the 1800s full-GC bound",
+				"raise it in that sql-server's own config, then restart the server",
+			)
+			for _, unwanted := range []string{managedConfig, "managed sql-server", "city.toml", "gc dolt restart"} {
+				if strings.Contains(out, unwanted) {
+					t.Fatalf("external-local refusal must not contain %q:\n%s", unwanted, out)
+				}
+			}
+		})
+	}
+}
+
+// --gc-only runs the same full GC as the flatten path, so a GC the server
+// cancels gets the same read-timeout diagnostic.
+func TestCompactScriptGCOnlyFlagExplainsReadTimeoutCancellation(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.runWithArgs(t, "gc_read_timeout", []string{"--gc-only"},
+		"GC_DOLT_READ_TIMEOUT_MILLIS=15000",
+		"GC_DOLT_COMPACT_CALL_TIMEOUT_SECS=5")
+	if err == nil {
+		t.Fatalf("gc-only must fail when the server cancels DOLT_GC:\n%s", out)
+	}
+	for _, want := range []string{
+		"context canceled",
+		"most likely by the managed sql-server at its listener.read_timeout_millis ceiling",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("gc-only output missing %q:\n%s", want, out)
 		}
 	}
 }

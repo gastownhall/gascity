@@ -115,7 +115,25 @@
 #                                         compaction window announced to
 #                                         every clone of that history.
 #   GC_DOLT_COMPACT_CALL_TIMEOUT_SECS
-#     (default: 1800) — wall-clock bound for each SQL CALL.
+#     (default: 1800) — wall-clock bound for each SQL CALL. This does
+#     NOT extend the sql-server's listener.read_timeout_millis (managed
+#     default 120000; releases through v1.4.2 shipped 15000), which
+#     cancels a statement that produces no rows for that long. CALL
+#     DOLT_GC('--full') produces none until GC finishes, so the listener
+#     caps the whole reclaim. Raise [dolt] read_timeout_millis and
+#     restart managed dolt, or put this variable (or
+#     GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS) in the managed-server start
+#     environment so start floors the listener.
+#   GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS
+#     (optional) — dedicated full-GC bound, in seconds. When set, wins
+#     over GC_DOLT_COMPACT_CALL_TIMEOUT_SECS as the --gc-only preflight
+#     bound and as the start-path listener floor. Set it to the longest
+#     full GC you expect.
+#   GC_DOLT_READ_TIMEOUT_MILLIS
+#     (optional) — the listener read_timeout_millis --gc-only assumes
+#     when the server's rendered config is unreadable (15000 when this
+#     is unset too). gc dolt compact --gc-only fail-closes when the
+#     ceiling is below the full-GC bound above.
 #   GC_DOLT_COMPACT_PUSH_TIMEOUT_SECS
 #     (default: 120) — wall-clock bound for remote compare-and-push
 #                     after local compaction. Push failures are recorded for
@@ -443,6 +461,30 @@ case "$call_timeout" in
   ''|*[!0-9]*|0)
     printf 'compact: invalid GC_DOLT_COMPACT_CALL_TIMEOUT_SECS=%s (must be a positive integer)\n' \
       "$call_timeout" >&2
+    exit 2
+    ;;
+esac
+
+case "${GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS:-}" in
+  '')
+    compact_gc_read_timeout_secs="$call_timeout"
+    ;;
+  *[!0-9]*|0)
+    printf 'compact: invalid GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS=%s (must be a positive integer)\n' \
+      "$GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS" >&2
+    exit 2
+    ;;
+  *)
+    compact_gc_read_timeout_secs="$GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS"
+    ;;
+esac
+
+case "${GC_DOLT_READ_TIMEOUT_MILLIS:-}" in
+  '')
+    ;;
+  *[!0-9]*|0)
+    printf 'compact: invalid GC_DOLT_READ_TIMEOUT_MILLIS=%s (must be a positive integer)\n' \
+      "$GC_DOLT_READ_TIMEOUT_MILLIS" >&2
     exit 2
     ;;
 esac
@@ -908,6 +950,63 @@ discover_database_names() {
       emit_server_database_name "$db"
     done
   fi
+}
+
+# resolve_listener_target — sets listener_server, listener_config and
+# listener_remedy for the sql-server this run targets. Both managed config
+# writers render dolt-config.yaml right before they launch the server, so it
+# holds the running server's read_timeout_millis. An explicit external-local
+# target reads only GC_DOLT_CONFIG_FILE, never the managed pack state, and gets
+# a target-neutral remedy: city.toml cannot reconfigure that server.
+resolve_listener_target() {
+  if [ "$explicit_external_local_dolt" = "1" ]; then
+    listener_server="sql-server"
+    listener_config="${GC_DOLT_CONFIG_FILE:-}"
+    listener_remedy="raise it in that sql-server's own config, then restart the server"
+  else
+    listener_server="managed sql-server"
+    listener_config="${GC_DOLT_CONFIG_FILE:-${DOLT_STATE_DIR:-}/dolt-config.yaml}"
+    listener_remedy='raise it via city.toml [dolt] read_timeout_millis (keep it under half of write_timeout_millis), then gc dolt restart (see docs/troubleshooting/dolt-bloat-recovery.md "A full GC canceled at the read timeout")'
+  fi
+}
+
+# listener_config_read_timeout_millis — the positive read_timeout_millis in
+# listener_config (set by resolve_listener_target), or nothing when no
+# readable file names one.
+listener_config_read_timeout_millis() {
+  [ -n "$listener_config" ] && [ -r "$listener_config" ] || return 0
+  sed -n 's/^[[:space:]]*read_timeout_millis:[[:space:]]*\([1-9][0-9]*\).*/\1/p' "$listener_config" | sed -n '1p'
+}
+
+# require_listener_timeout_for_full_gc DB — --gc-only fail-close. DOLT_GC
+# produces no rows until it finishes, so a listener read_timeout_millis below
+# the full-GC bound (GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS, else
+# GC_DOLT_COMPACT_CALL_TIMEOUT_SECS) would let the server cancel the reclaim
+# mid-GC. The ceiling comes from the running server's rendered config. Without
+# one, GC_DOLT_READ_TIMEOUT_MILLIS stands in for it, and with neither the check
+# assumes 15000, the lowest managed default any release shipped, so an unknown
+# ceiling refuses rather than starting a GC the server may kill.
+require_listener_timeout_for_full_gc() {
+  db="$1"
+  resolve_listener_target
+  listener_ms=$(listener_config_read_timeout_millis)
+  listener_source="in $listener_config"
+  if [ -z "$listener_ms" ]; then
+    if [ -n "${GC_DOLT_READ_TIMEOUT_MILLIS:-}" ]; then
+      listener_ms="$GC_DOLT_READ_TIMEOUT_MILLIS"
+      listener_source="from GC_DOLT_READ_TIMEOUT_MILLIS, no readable server config"
+    else
+      listener_ms=15000
+      listener_source="assumed, no readable server config"
+    fi
+  fi
+  required_ms=$((compact_gc_read_timeout_secs * 1000))
+  if [ "$listener_ms" -lt "$required_ms" ]; then
+    printf 'compact: db=%s the %s listener.read_timeout_millis=%s ceiling (%s) is below the %ss full-GC bound — DOLT_GC produces no rows until it finishes, so that timeout would cancel the reclaim; refusing to start DOLT_GC. Set GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS to the longest full GC you expect, or %s\n' \
+      "$db" "$listener_server" "$listener_ms" "$listener_source" "$compact_gc_read_timeout_secs" "$listener_remedy" >&2
+    return 1
+  fi
+  return 0
 }
 
 # dolt_query — wrapper that runs a single SQL statement against the
@@ -2419,13 +2518,11 @@ clear_compact_marker() {
 #   server stop or restart, a dropped connection). ELAPSED is the statement's
 #   wall time, measured from before it started, so a deadline kill always has
 #   ELAPSED >= ceiling - 1s; the ceiling is blamed only when ELAPSED reached it.
-#   Both managed config writers render the file right before they launch the
-#   server, so it holds the running server's value. GC_DOLT_READ_TIMEOUT_MILLIS
-#   in this command's env is not read: it carries city.toml's current value,
-#   which an edit makes differ from the running server's until gc dolt restart.
-#   With no readable config the line is hedged. An explicit external-local
-#   target reads only GC_DOLT_CONFIG_FILE, never the managed pack state, and
-#   gets a target-neutral remedy.
+#   The ceiling and the remedy come from resolve_listener_target, the same
+#   source the --gc-only fail-close reads. GC_DOLT_READ_TIMEOUT_MILLIS in this
+#   command's env is not read: it carries city.toml's current value, which an
+#   edit makes differ from the running server's until gc dolt restart. With no
+#   readable config the line is hedged.
 explain_full_gc_cancellation() {
   db="$1"
   err_file="$2"
@@ -2436,31 +2533,20 @@ explain_full_gc_cancellation() {
     *"connection was closed"*|*"row read wait bigger than connection timeout"*|*"context canceled"*) ;;
     *) return 0 ;;
   esac
-  if [ "$explicit_external_local_dolt" = "1" ]; then
-    gc_server="sql-server"
-    gc_server_config="${GC_DOLT_CONFIG_FILE:-}"
-    gc_remedy="raise it in that sql-server's own config, then restart the server"
-  else
-    gc_server="managed sql-server"
-    gc_server_config="${GC_DOLT_CONFIG_FILE:-${DOLT_STATE_DIR:-}/dolt-config.yaml}"
-    gc_remedy='raise it via city.toml [dolt] read_timeout_millis (keep it under half of write_timeout_millis), then gc dolt restart (see docs/troubleshooting/dolt-bloat-recovery.md "A full GC canceled at the read timeout")'
-  fi
-  gc_ceiling=""
-  if [ -n "$gc_server_config" ] && [ -r "$gc_server_config" ]; then
-    gc_ceiling=$(sed -n 's/^[[:space:]]*read_timeout_millis:[[:space:]]*\([1-9][0-9]*\).*/\1/p' "$gc_server_config" | sed -n '1p')
-  fi
+  resolve_listener_target
+  gc_ceiling=$(listener_config_read_timeout_millis)
   if [ -z "$gc_ceiling" ]; then
     printf 'compact: db=%s DOLT_GC was canceled after %ss, most likely by the %s at its listener.read_timeout_millis ceiling — DOLT_GC produces no rows until it finishes, so that timeout caps the whole reclaim; if the sql-server log shows an i/o timeout on that connection, %s\n' \
-      "$db" "$gc_elapsed" "$gc_server" "$gc_remedy" >&2
+      "$db" "$gc_elapsed" "$listener_server" "$listener_remedy" >&2
     return 0
   fi
   if [ "$(( (gc_elapsed + 1) * 1000 ))" -lt "$gc_ceiling" ]; then
     printf 'compact: db=%s DOLT_GC was canceled after %ss, before the listener.read_timeout_millis=%s ceiling in %s, so that timeout did not end it — look in the sql-server log for a stop, restart, or dropped connection\n' \
-      "$db" "$gc_elapsed" "$gc_ceiling" "$gc_server_config" >&2
+      "$db" "$gc_elapsed" "$gc_ceiling" "$listener_config" >&2
     return 0
   fi
   printf 'compact: db=%s the %s ended DOLT_GC after %ss at its listener.read_timeout_millis=%s ceiling in %s — DOLT_GC produces no rows until it finishes, so that timeout caps the whole reclaim and the next full GC hits the same ceiling; %s\n' \
-    "$db" "$gc_server" "$gc_elapsed" "$gc_ceiling" "$gc_server_config" "$gc_remedy" >&2
+    "$db" "$listener_server" "$gc_elapsed" "$gc_ceiling" "$listener_config" "$listener_remedy" >&2
 }
 
 # Every GC here passes --archive-level=0: Dolt 2.3.3-2.5.1 default to
@@ -3985,6 +4071,10 @@ gc_only_database() {
     # Same operator-visible state as a scheduled refusal, so it reports the
     # same way: stdout alone leaves the quarantine off the bus entirely.
     report_existing_quarantine "$db"
+    return 1
+  fi
+
+  if ! require_listener_timeout_for_full_gc "$db"; then
     return 1
   fi
 

@@ -160,6 +160,30 @@ live server can give it belongs offline: follow the **Recovery Procedure** above
 with `dolt gc --full --archive-level=0` as step 3, which no listener timeout
 bounds and which also rewrites `oldgen`.
 
+`gc dolt compact --gc-only` checks the ceiling before it starts the GC. It
+refuses when the ceiling is below the full-GC bound, which is
+`GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS`, or `GC_DOLT_COMPACT_CALL_TIMEOUT_SECS`
+(default `1800`) when that is unset:
+
+```
+compact: db=<database> the managed sql-server listener.read_timeout_millis=120000 ceiling (in <runtime>/packs/dolt/dolt-config.yaml) is below the 1800s full-GC bound — DOLT_GC produces no rows until it finishes, so that timeout would cancel the reclaim; refusing to start DOLT_GC. Set GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS to the longest full GC you expect, or raise it via city.toml [dolt] read_timeout_millis ...
+```
+
+The ceiling comes from the running server's rendered config. With none
+readable, the check uses `GC_DOLT_READ_TIMEOUT_MILLIS`, and assumes `15000`
+without that either. An explicit external-local target's ceiling comes only
+from `GC_DOLT_CONFIG_FILE`. With stock settings the default bound is above the
+ceiling, so set the bound to the longest full GC you expect, at or under the
+ceiling:
+
+```bash
+GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS=60 gc dolt compact --gc-only --only-db <database>
+```
+
+Setting either bound variable in the managed server's start environment also
+raises the ceiling to it on the next start. That ceiling still has to stay under
+half of `write_timeout_millis`.
+
 The tell that you are looking at this and not a real disconnect is the server
 log: the `client connection went away` line that precedes the failure carries
 `i/o timeout`, not `EOF`, and lands exactly `read_timeout_millis` after the
