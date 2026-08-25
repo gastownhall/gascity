@@ -669,9 +669,10 @@ func (s *emittingClassStore) DepMetadata(issueID, dependsOnID string) (string, b
 }
 
 // DepAddWithMetadata is DepAdd for an edge that carries a payload, and emits
-// the same bead.updated the plain form does. Both endpoints move: the edge is
-// what changed, and a subscriber that saw the payloadless add but not this one
-// would hold a stale view of exactly the edges formula gating depends on.
+// the same bead.updated for the same endpoint the plain form does: the issue
+// side, whose DepList the snapshot hydrates. A subscriber that saw the
+// payloadless add but not this one would hold a stale view of exactly the edges
+// formula gating depends on.
 //
 // An inner store without the write gets an error rather than falling back to
 // DepAdd. The fallback is the shape this must never take: on a store that keeps

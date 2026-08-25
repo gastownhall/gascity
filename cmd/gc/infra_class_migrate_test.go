@@ -1283,15 +1283,72 @@ func failingInfraRename(t *testing.T, base string) {
 	t.Cleanup(func() { infraMigrationRename = prev })
 }
 
-// undeppableInfraSource is a work store whose rows list but whose dep edges do
-// not: the copy imports every bead and then fails, leaving a populated binding
-// with no manifest and no marker.
+// undeppableInfraSource is a work store whose rows list but whose dep edges
+// stop listing partway through: the copy imports every bead and then fails,
+// leaving a populated binding with no manifest and no marker.
+//
+// The failure is armed on the SECOND read of an id rather than on the first,
+// and the two forwards below are what keep this double meaning what its name
+// says. Two passes now read a source's edges before the import writes anything:
+// infraSourceEdgePayloadRefusal walks every row to prove the payloads are
+// readable, and importInfraSnapshot walks them again to copy. A double that
+// failed on the first read — or that embedded beads.Store without forwarding
+// DepMetadata, which strips beads.DepMetadataReader and reads as UNABLE TO
+// ANSWER — would be refused before the destination was ever opened, and this
+// case would quietly become a duplicate of the mute-source one instead of the
+// populated-binding case the revert-advice table needs it to be.
 type undeppableInfraSource struct {
 	beads.Store
-	err error
+	err  error
+	seen map[string]int
 }
 
-func (s undeppableInfraSource) DepList(string, string) ([]beads.Dep, error) { return nil, s.err }
+func (s undeppableInfraSource) DepList(id, direction string) ([]beads.Dep, error) {
+	if s.seen == nil {
+		return nil, s.err
+	}
+	s.seen[id]++
+	if s.seen[id] > 1 {
+		return nil, s.err
+	}
+	return s.Store.DepList(id, direction)
+}
+
+func (s undeppableInfraSource) DepMetadata(issueID, dependsOnID string) (string, bool, error) {
+	return depMetadataThrough(s.Store, issueID, dependsOnID)
+}
+
+// TestUndeppableInfraSourceFailsAfterTheRowsLand pins what the double above
+// reaches, which the revert-advice table cannot.
+//
+// That table asserts only one direction for this case — the revert must not be
+// RENDERED over a populated binding — so a double refused before the
+// destination was ever opened leaves an empty binding, renders the revert
+// legitimately, and passes while proving nothing. The case is then a silent
+// duplicate of the source-cannot-list one two rows above it. Only an assertion
+// that the rows actually landed keeps it the populated-binding case the table
+// needs, and this is where the edge-payload passes would break it first.
+func TestUndeppableInfraSourceFailsAfterTheRowsLand(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := infraSplitConfig(filepath.Join(cityPath, ".gc", "store"))
+	source := stubInfraMigrationSource(t)
+	resident := mustCreateInfraBead(t, source, beads.Bead{Title: "a session", Type: "session", Labels: []string{"gc:session"}})
+	broken := undeppableInfraSource{Store: source, err: fmt.Errorf("database is locked"), seen: map[string]int{}}
+	failInfraMigrationSourceWith(t, func(string) (beads.Store, error) { return broken, nil })
+
+	var log bytes.Buffer
+	report := migrateInfraClasses(t, cityPath, cfg, &log)
+	if report.Outcome != infraMigrationUnconverged {
+		t.Fatalf("Outcome = %v, want infraMigrationUnconverged: %s", report.Outcome, log.String())
+	}
+	if report.BindingProvenEmpty {
+		t.Fatalf("the binding is provably empty, so the copy was refused before it imported anything and this double no longer reaches the import: %s", log.String())
+	}
+	count, known := infraBindingContents(t, report.Target)
+	if !known || count == 0 {
+		t.Fatalf("the binding holds %d bead(s) (known=%v), want the imported rows: the failure landed before %s was written", count, known, resident.ID)
+	}
+}
 
 // TestInfraMigrationRevertAdviceRequiresAProvablyEmptyBinding is the property,
 // driven over the whole space instead of over the paths.
@@ -1442,7 +1499,7 @@ func TestInfraMigrationRevertAdviceRequiresAProvablyEmptyBinding(t *testing.T) {
 			wantOutcome: infraMigrationUnconverged,
 			setup: func(t *testing.T) (string, *config.City) {
 				cityPath, cfg, source := freshCity(t)
-				broken := undeppableInfraSource{Store: source, err: fmt.Errorf("database is locked")}
+				broken := undeppableInfraSource{Store: source, err: fmt.Errorf("database is locked"), seen: map[string]int{}}
 				failInfraMigrationSourceWith(t, func(string) (beads.Store, error) { return broken, nil })
 				return cityPath, cfg
 			},

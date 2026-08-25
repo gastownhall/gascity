@@ -698,6 +698,32 @@ func TestInfraEdgePayloadDifferenceComparesPayloadsBothWays(t *testing.T) {
 	if _, err := infraEdgePayloadDifference(from.ID, deps, deps, infra, mutePayloadSource{Store: backing}, carrying(gate)); err == nil {
 		t.Error("the equality stage treated an unanswerable source as one carrying nothing")
 	}
+
+	// An edge only the DESTINATION holds. Every case above hands the same slice
+	// as both sides, so the walk over the destination's own deps is never the
+	// thing that finds anything and could be deleted with the suite still green.
+	//
+	// Through verifyInfraCopy this is unreachable — infraDepDifference runs
+	// first and refuses any structural asymmetry before payloads are compared —
+	// which is exactly why it is pinned on the function directly. The comparator
+	// is a general one, the doc above it claims both directions, and the next
+	// caller need not run a structural pass first.
+	// The source's only edge leaves infra, so the wantDeps walk — which filters
+	// to within-infra targets — contributes no pair at all. Every pair here comes
+	// from the destination's own list, which is what makes this the one case that
+	// dies if that walk is deleted.
+	sourceDeps := []beads.Dep{{IssueID: from.ID, DependsOnID: work.ID, Type: "blocks"}}
+	onlyOnDestination := []beads.Dep{
+		{IssueID: from.ID, DependsOnID: work.ID, Type: "blocks"},
+		{IssueID: from.ID, DependsOnID: to.ID, Type: "blocks"},
+	}
+	diff, err := infraEdgePayloadDifference(from.ID, sourceDeps, onlyOnDestination, infra, backing, carrying(gate))
+	if err != nil {
+		t.Fatalf("comparing an edge only the destination holds: %v", err)
+	}
+	if diff == "" {
+		t.Error("a payload on an edge only the destination holds compared equal; the walk over the destination's deps finds nothing")
+	}
 }
 
 // countingInfraSource records how many times the equality stage re-read the

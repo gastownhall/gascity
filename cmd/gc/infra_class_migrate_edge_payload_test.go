@@ -259,6 +259,28 @@ func TestInfraMigrationRefusesASourceThatCannotReportEdgePayloads(t *testing.T) 
 	if !strings.Contains(said, "payload") {
 		t.Errorf("the refusal does not say what it could not read: %s", said)
 	}
+	assertRefusedBeforeTheDestinationWasTouched(t, report, said)
+}
+
+// assertRefusedBeforeTheDestinationWasTouched pins WHERE a source-side edge
+// refusal happens, which the outcome alone cannot say.
+//
+// Both refusals below would still report infraMigrationUnconverged if the check
+// moved from infraSourceEdgePayloadRefusal into the import — infraCopyDepEdge
+// reaches the same fault a moment later, and fail() maps any pre-marker failure
+// to the same outcome. The difference is the operator's: a refusal taken before
+// the destination is opened leaves a binding a revert cannot abandon anything
+// from, and BindingProvenEmpty is the only positive evidence of that in the
+// report. It is also what keeps the preflight parity honest, since the rehearsal
+// opens no destination and can only mirror a check that runs before one exists.
+func assertRefusedBeforeTheDestinationWasTouched(t *testing.T, report infraMigrationReport, said string) {
+	t.Helper()
+	if report.BindingProbe != nil {
+		t.Fatalf("the binding probe could not run (%v), so nothing here proves the refusal came before the copy: %s", report.BindingProbe, said)
+	}
+	if !report.BindingProvenEmpty {
+		t.Fatalf("BindingProvenEmpty = false: the refusal landed after the destination was written to, so a revert can now abandon rows: %s", said)
+	}
 }
 
 // TestInfraSourceEdgePayloadRefusalPassesAnySourceItCanRead pins what the
@@ -308,6 +330,7 @@ func TestInfraMigrationRefusesWhenTheEdgePayloadReadFails(t *testing.T) {
 	if !strings.Contains(said, "the dependencies table is unreadable") {
 		t.Errorf("the refusal does not carry the read failure, so an operator cannot tell why it stopped: %s", said)
 	}
+	assertRefusedBeforeTheDestinationWasTouched(t, report, said)
 }
 
 // TestPolicyWrappedStoreAnswersTheEdgePayloadRead pins the forwarding the
