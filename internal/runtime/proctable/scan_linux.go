@@ -185,25 +185,46 @@ func isInfrastructureParent(root string, pid int) bool {
 }
 
 func readParentPID(path string) (int, bool, error) {
+	ppid, _, _, ok, err := readProcStatIdentity(path)
+	return ppid, ok, err
+}
+
+func readProcStatIdentity(path string) (ppid, pgid int, startTime string, ok bool, err error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrPermission) || os.IsPermission(err) {
-			return 0, false, nil
+			return 0, 0, "", false, nil
 		}
-		return 0, false, err
+		return 0, 0, "", false, err
 	}
-	text := string(data)
-	closeParen := strings.LastIndex(text, ")")
+	ppid, pgid, startTime, ok, err = parseProcStatIdentity(string(data))
+	if err != nil {
+		return 0, 0, "", false, fmt.Errorf("parsing %s: %w", path, err)
+	}
+	return ppid, pgid, startTime, ok, nil
+}
+
+func parseProcStatIdentity(text string) (ppid, pgid int, startTime string, ok bool, err error) {
+	closeParen := strings.LastIndexByte(text, ')')
 	if closeParen < 0 || closeParen+1 >= len(text) {
-		return 0, false, fmt.Errorf("malformed stat file %s", path)
+		return 0, 0, "", false, fmt.Errorf("malformed proc stat record")
 	}
 	fields := strings.Fields(text[closeParen+1:])
-	if len(fields) < 2 {
-		return 0, false, fmt.Errorf("malformed stat file %s", path)
+	const startTimeIndexAfterComm = 19
+	if len(fields) <= startTimeIndexAfterComm {
+		return 0, 0, "", false, fmt.Errorf("malformed proc stat record: got %d post-comm fields", len(fields))
 	}
-	ppid, err := strconv.Atoi(fields[1])
+	ppid, err = strconv.Atoi(fields[1])
 	if err != nil {
-		return 0, false, fmt.Errorf("parsing ppid from %s: %w", path, err)
+		return 0, 0, "", false, fmt.Errorf("parsing proc stat ppid: %w", err)
 	}
-	return ppid, true, nil
+	pgid, err = strconv.Atoi(fields[2])
+	if err != nil {
+		return 0, 0, "", false, fmt.Errorf("parsing proc stat pgid: %w", err)
+	}
+	startTime = fields[startTimeIndexAfterComm]
+	if startTime == "" {
+		return 0, 0, "", false, fmt.Errorf("proc stat start time is empty")
+	}
+	return ppid, pgid, startTime, true, nil
 }

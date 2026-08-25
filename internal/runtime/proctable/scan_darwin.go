@@ -3,15 +3,19 @@
 package proctable
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
+
+const processSnapshotTimeout = 10 * time.Second
 
 // ScanBySessionID returns live agent root processes whose environment carries
 // GC_SESSION_ID equal to id. Empty id returns all roots with any GC_SESSION_ID.
@@ -98,7 +102,9 @@ type psRecord struct {
 }
 
 func psRecords() (map[int]psRecord, error) {
-	out, err := exec.Command("ps", "eww", "-ax", "-o", "pid=,ppid=,command=").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), processSnapshotTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "ps", "eww", "-ax", "-o", "pid=,ppid=,command=").Output()
 	if err != nil {
 		return nil, fmt.Errorf("running ps: %w", err)
 	}
