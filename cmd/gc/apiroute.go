@@ -32,13 +32,29 @@ var (
 //
 // A standalone controller (gc controller / gc serve) and a supervisor-managed
 // city both answer the per-city controller socket — the supervisor hosts that
-// controller in-process. When the socket is alive, apiClient routes to the
-// standalone HTTP endpoint if the city configures an [api] port, otherwise
-// returns nil so the caller uses its local fallback; when the socket is not
-// alive it returns the supervisor-managed client. Maintenance commands have no
-// local fallback, so they use maintenanceAPIClient, which additionally routes a
-// supervisor-managed city (alive socket, no standalone [api] port) to the
-// supervisor client rather than reporting controller-down. (gascity ga-tp7)
+// controller in-process — so liveness alone cannot say which endpoint serves
+// the API. The controller reports that itself, and routing keys on it:
+//
+//   - supervisor-hosted: the supervisor serves this city on its own port via
+//     city-scoped routes and IGNORES the city's [api] port, so route to the
+//     supervisor client. Routing to the configured standalone port instead
+//     sends every call to a listener that does not exist; the call fails and
+//     the caller drops into a local fallback that constructs a fresh,
+//     process-local runtime. That fallback cannot reach a runtime the
+//     supervisor owns in memory — an ACP session lives in the supervisor
+//     process, so `gc session submit` failed with "ACP provider does not own
+//     session" while the supervisor held it. Falling back is only sound for
+//     state that lives on disk, not for process-owned runtimes.
+//   - standalone: route to the standalone HTTP endpoint when city.toml
+//     configures a usable [api] port, else return nil for the local fallback.
+//   - unknown (a controller predating the identity command): keep the
+//     pre-existing standalone-only routing rather than inferring a role.
+//
+// When the socket is not alive it returns the supervisor-managed client.
+// Maintenance commands have no local fallback, so they use
+// maintenanceAPIClient, which additionally routes an unknown-mode managed city
+// (alive socket, no standalone [api] port) to the supervisor client rather
+// than reporting controller-down. (gascity ga-tp7)
 func apiClient(cityPath string) *api.Client {
 	// Remote routing is NOT handled here. A remote target is refused upstream by
 	// the capability gate in resolveContext (Phase 1) and, once enabled, will be
@@ -57,14 +73,20 @@ func apiClient(cityPath string) *api.Client {
 	} else if warn != "" {
 		fmt.Fprintln(os.Stderr, "warning: "+warn) //nolint:errcheck // best-effort stderr
 	}
-	if apiRouteControllerAliveHook(cityPath) != 0 {
-		// Alive socket: use the standalone HTTP endpoint when configured, else
-		// return nil so the caller takes its local fallback. A supervisor-managed
-		// city (no standalone [api] port) reaches the supervisor client only via
-		// maintenanceAPIClient, which has no local fallback.
-		return standaloneControllerClient(cityPath)
+	identity := controllerIdentityHook(cityPath)
+	if identity.PID == 0 {
+		return apiRouteSupervisorClientHook(cityPath)
 	}
-	return apiRouteSupervisorClientHook(cityPath)
+	if identity.HostingMode == controllerHostingSupervisor {
+		// The supervisor owns this city. Its client is the only endpoint that
+		// reaches the live runtime; a nil result means there is no usable API,
+		// so return that rather than a standalone port nothing is serving.
+		return apiRouteSupervisorClientHook(cityPath)
+	}
+	// Standalone, or a legacy controller whose mode is unknown: use the
+	// standalone HTTP endpoint when configured, else return nil so the caller
+	// takes its local fallback.
+	return standaloneControllerClient(cityPath)
 }
 
 // standaloneControllerClient builds an API client for a standalone controller
