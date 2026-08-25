@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 type countingStore struct {
@@ -300,6 +301,85 @@ func TestHandleStatusServesStaleAndRefreshesInBackground(t *testing.T) {
 	// wedge every future refresh for this key.
 	if srv.responseRefreshing["status"] {
 		t.Fatal("responseRefreshing[\"status\"] still true after background refresh completed (leaked guard)")
+	}
+}
+
+// panicOnIsRunningProvider panics from IsRunning, which buildStatusBody calls
+// synchronously on its own goroutine while counting agents. That makes it an
+// injection point for a panic raised on the SWR background-refresh goroutine
+// itself — the blast radius this endpoint's move to a detached rebuild
+// created. A rig store that panics would NOT exercise the same path: the
+// work-count fan-out reads stores from child goroutines
+// (statusWorkCounts/statusListStoreWithTimeout), whose panics no recover in
+// the refresh closure can catch, and which already crashed the process on the
+// pre-SWR request path too.
+type panicOnIsRunningProvider struct {
+	runtime.Provider
+}
+
+func (p *panicOnIsRunningProvider) IsRunning(string) bool {
+	panic("injected panic from the status background refresh")
+}
+
+// TestHandleStatusBackgroundRefreshPanicDoesNotCrashServer pins the blast
+// radius of the ra-4u2eqc background rebuild. Before SWR, buildStatusBody ran
+// on the request path, where withRecovery (middleware.go) turned a panic into
+// a single 500. runBackground spawns its task with no recover of its own, so
+// the detached rebuild must recover for itself or one panic takes the whole
+// controller process down. The panicking refresh must also release the
+// in-flight guard, or every future refresh for this key is wedged.
+func TestHandleStatusBackgroundRefreshPanicDoesNotCrashServer(t *testing.T) {
+	oldTTL := timeBucketResponseCacheTTL
+	timeBucketResponseCacheTTL = time.Nanosecond // every request lands in a new bucket
+	oldFloor := statusResponseTTLFloor
+	statusResponseTTLFloor = 0 // floor off: force the second request past both fast-path caches
+	t.Cleanup(func() {
+		timeBucketResponseCacheTTL = oldTTL
+		statusResponseTTLFloor = oldFloor
+	})
+
+	state := newFakeState(t)
+	fastStore := &countingStore{Store: beads.NewMemStore()}
+	state.stores["myrig"] = fastStore
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+
+	// Prime the cache with a healthy build, so the request below has a stale
+	// entry to be served and takes the SWR branch rather than falling through
+	// to the synchronous cold-start build.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(state, "/status"), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("priming status = %d, want 200", rec.Code)
+	}
+	var primed statusResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &primed); err != nil {
+		t.Fatalf("decode priming response: %v", err)
+	}
+
+	// Arm the panic only after priming, so it can fire in the background
+	// rebuild and nowhere else.
+	state.sessionProvider = &panicOnIsRunningProvider{Provider: state.sp}
+
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, cityURL(state, "/status"), nil))
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("stale-served status = %d, want 200", rec2.Code)
+	}
+	var stale statusResponse
+	if err := json.Unmarshal(rec2.Body.Bytes(), &stale); err != nil {
+		t.Fatalf("decode stale response: %v", err)
+	}
+	if stale.UptimeSec != primed.UptimeSec || stale.Name != primed.Name {
+		t.Fatalf("stale-served body = %+v, want a copy of the primed body %+v", stale, primed)
+	}
+
+	// If the refresh did not recover, the process is already gone and this
+	// line never runs; reaching it at all is half the assertion.
+	srv.waitForBackground()
+
+	if srv.responseRefreshing["status"] {
+		t.Fatal("responseRefreshing[\"status\"] still true after a panicking background refresh (leaked guard wedges every future refresh)")
 	}
 }
 

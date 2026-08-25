@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
@@ -167,6 +169,15 @@ func (s *Server) refreshStatusResponseInBackground(cacheKey string, lite bool) {
 		return
 	}
 	s.runBackground(func(ctx context.Context) {
+		defer func() {
+			if r := recover(); r != nil {
+				// The background refresh is best-effort: a panic here must not
+				// take the controller down. The request path's recover
+				// (withRecovery, middleware.go) does not cover detached
+				// goroutines, and the next poll simply rebuilds.
+				log.Printf("api: panic in background /status refresh: %v\n%s", r, debug.Stack())
+			}
+		}()
 		defer s.endResponseRefresh(cacheKey)
 		resp := s.buildStatusBody(ctx, lite)
 		s.storeResponse(cacheKey, responseCacheTimeBucket(time.Now()), resp)
