@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // --- gc convoy create ---
@@ -2740,5 +2741,207 @@ func TestBeadsListFilteredByStatusDropsTheFrozenCopy(t *testing.T) {
 	}
 	if strings.Contains(stdout.String(), "the retained frozen copy") {
 		t.Errorf("a bead the city CLOSED in the binding is listed open from its frozen twin:\n%s", stdout.String())
+	}
+}
+
+// idsFaultingClassStore answers an ordinary listing and faults on the OWNERSHIP
+// probe, which is the one thing a healthy-binding fixture cannot reach.
+//
+// The probe is the only read that carries ListQuery.IDs, so keying the fault on
+// a non-empty IDs list separates it from the caller's own query without a flag
+// the production path could never set. A binding that fails BOTH — the shape
+// installFaultingClassBinding produces — never reaches the merge at all, because
+// its empty row set makes the probe moot; this one contributes rows and then
+// cannot say which of them it owns.
+//
+// IDPrefix is delegated explicitly for countingClassStore's reason: beads.Store
+// does not carry it, so embedding the interface alone would hide the wrapped
+// store's declaration.
+type idsFaultingClassStore struct {
+	beads.Store
+	err    error
+	probes int
+}
+
+func (s *idsFaultingClassStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if len(q.IDs) > 0 {
+		s.probes++
+		return nil, s.err
+	}
+	return s.Store.List(q)
+}
+
+func (s *idsFaultingClassStore) IDPrefix() string {
+	declaring, ok := s.Store.(storeref.HasIDPrefix)
+	if !ok {
+		return ""
+	}
+	return declaring.IDPrefix()
+}
+
+// TestBeadsListRefusesWhenTheOwnershipProbeFaults pins the FAULT arm of the
+// ownership probe, which no healthy-binding row can reach.
+//
+// Every other relocated-city read fixture serves a binding that answers both
+// questions, so the probe's error path is never taken and a merge that read a
+// probe fault as "the binding holds none of these" would produce byte-identical
+// output. That misreading is the whole hazard: an empty owned set supersedes
+// nothing, so every frozen copy the migration retained is served as a live row —
+// silently, with the command exiting 0 and the fault named nowhere.
+//
+// The binding here resolves, answers the caller's query, and fails only when
+// asked which ids it holds. The listing must stop and say why rather than print
+// the frozen twin.
+func TestBeadsListRefusesWhenTheOwnershipProbeFaults(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	work := workStoreFor(t, cityPath)
+	frozen, err := work.Create(beads.Bead{Title: "the retained frozen copy", Type: "task"})
+	if err != nil {
+		t.Fatalf("seeding the retained copy in the work store: %v", err)
+	}
+	if _, classStore := classResidentWorkShapedBead(t, cityPath, frozen.ID, "the binding's live row"); classStore == nil {
+		t.Fatal("seeding the binding's row returned no class store")
+	}
+	var probe *idsFaultingClassStore
+	installWrappedClassBinding(t, cityPath, func(previous beads.Store) beads.Store {
+		probe = &idsFaultingClassStore{Store: previous, err: errors.New("the id index is corrupt")}
+		return probe
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := doBeadsListFallback(cityPath, "", beadFilters{}, &stdout, &stderr)
+	if probe.probes == 0 {
+		t.Fatal("the ownership probe never ran, so this row asserts on a path it did not take")
+	}
+	if code != 1 {
+		t.Fatalf("gc beads list exited %d after the ownership probe faulted, want 1:\n%s%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "the id index is corrupt") {
+		t.Errorf("the refusal does not name the fault that caused it: %q", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "the retained frozen copy") {
+		t.Errorf("the frozen copy was served as a live row after the probe that supersedes it faulted:\n%s", stdout.String())
+	}
+}
+
+// sqliteMaxBoundVariables is the ceiling modernc sqlite enforces on one
+// statement's bound variables, which is what an unchunked ownership probe hits.
+const sqliteMaxBoundVariables = 32766
+
+// varCappedIDStore answers an ownership probe the way a sqlite binding does,
+// including the bound-variable ceiling, and records the batch sizes it was asked
+// for.
+//
+// The recording is what makes the chunking observable: a batched probe and an
+// unbatched one over a small population return the same answer, so a row taking
+// only the answer would pass identically against either. The cap is what makes
+// the fault reachable at all — sqliteListSQL emits one placeholder per id, so
+// the ceiling is a property of the query the probe builds, not of the data.
+type varCappedIDStore struct {
+	beads.Store
+	held    map[string]bool
+	batches []int
+}
+
+func (s *varCappedIDStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	s.batches = append(s.batches, len(q.IDs))
+	if len(q.IDs) > sqliteMaxBoundVariables {
+		return nil, fmt.Errorf("SQL logic error: too many SQL variables (%d)", len(q.IDs))
+	}
+	held := make([]beads.Bead, 0, len(q.IDs))
+	for _, id := range q.IDs {
+		if s.held[id] {
+			held = append(held, beads.Bead{ID: id})
+		}
+	}
+	return held, nil
+}
+
+// TestConvoyBindingOwnedIDsBatchesPastTheSQLVariableCap pins the scale arm of
+// the ownership probe.
+//
+// The probe puts one SQL placeholder per candidate id on the wire, and the
+// candidates are every migration-source row matching the caller's query — with
+// `gc beads list` running unbounded, that is the whole work ledger's history on
+// a converged city. Past the driver's ceiling the statement does not run at all,
+// so the probe fails, the merge fails and the listing exits 1: the large
+// migrated cities the federation exists for are exactly the ones that lose the
+// read.
+//
+// Two things are asserted, because either alone is passable by wrong code. The
+// batched answer must equal the answer one query would have given if the driver
+// allowed one, and no batch may reach the ceiling — and the control below proves
+// the ceiling IS reachable from this population, so a probe that stopped
+// chunking fails here rather than passing quietly.
+func TestConvoyBindingOwnedIDsBatchesPastTheSQLVariableCap(t *testing.T) {
+	const population = 100000
+	ids := make([]string, population)
+	held := make(map[string]bool, population/7+1)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("gc-%d", i)
+		if i%7 == 0 {
+			held[ids[i]] = true
+		}
+	}
+	binding := &varCappedIDStore{held: held}
+
+	// Control: the population really does exceed what one statement can carry,
+	// so a probe that sent it whole would fail rather than merely run slowly.
+	if _, err := binding.List(beads.ListQuery{IDs: ids, IncludeClosed: true}); err == nil {
+		t.Fatal("the fixture answered every id in one query; this row cannot tell a chunked probe from an unchunked one")
+	}
+	binding.batches = nil
+
+	owned, err := convoyBindingOwnedIDs(binding, ids)
+	if err != nil {
+		t.Fatalf("convoyBindingOwnedIDs over %d candidates: %v", population, err)
+	}
+	if len(owned) != len(held) {
+		t.Fatalf("the probe reported %d owned ids, want %d; the batches do not union to the whole answer", len(owned), len(held))
+	}
+	for id := range held {
+		if !owned[id] {
+			t.Fatalf("%s is held by the binding but missing from the batched answer", id)
+		}
+	}
+	if len(binding.batches) < 2 {
+		t.Fatalf("the probe issued %d queries for %d candidates; it did not batch", len(binding.batches), population)
+	}
+	carried := 0
+	for _, size := range binding.batches {
+		if size > sqliteMaxBoundVariables {
+			t.Fatalf("a batch carried %d ids, past the %d the driver allows", size, sqliteMaxBoundVariables)
+		}
+		carried += size
+	}
+	if carried != population {
+		t.Errorf("the batches carried %d ids in total, want %d; the probe skipped candidates", carried, population)
+	}
+}
+
+// TestConvoyBindingOwnedIDsKeepsOneQueryUnderTheCap is the other side of the
+// same boundary: batching must not turn the ordinary case into a fan of queries.
+//
+// The probe is an IN-list rather than one Get per row precisely because a
+// per-row fan-out is what a converged city cannot afford on every listing, so a
+// population that fits stays a single round trip.
+func TestConvoyBindingOwnedIDsKeepsOneQueryUnderTheCap(t *testing.T) {
+	ids := make([]string, 500)
+	held := make(map[string]bool, len(ids))
+	for i := range ids {
+		ids[i] = fmt.Sprintf("gc-%d", i)
+		held[ids[i]] = true
+	}
+	binding := &varCappedIDStore{held: held}
+
+	owned, err := convoyBindingOwnedIDs(binding, ids)
+	if err != nil {
+		t.Fatalf("convoyBindingOwnedIDs: %v", err)
+	}
+	if len(owned) != len(ids) {
+		t.Errorf("the probe reported %d owned ids, want %d", len(owned), len(ids))
+	}
+	if len(binding.batches) != 1 {
+		t.Errorf("the probe issued %d queries for %d candidates, want 1", len(binding.batches), len(ids))
 	}
 }

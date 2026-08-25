@@ -609,13 +609,34 @@ func convoyStoreViewsWithBinding(cityPath string, views []convoyStoreView) ([]co
 // missing from that output, though, so the omission is announced — every run,
 // not once per process, because each invocation is a fresh answer and has to
 // carry its own caveat.
+//
+// The caveat says both halves, because on a converged city the omission is not
+// the whole hazard. The migration RETAINED a frozen copy of every row it moved,
+// and it is the binding's answer that supersedes those copies — so while the
+// refusal stands they are no longer superseded and print as live rows in place
+// of the ones that are missing. A convoy the city closed in the binding lists
+// open again for exactly as long as the binding cannot be read.
 func convoyStoreViewsForRead(cityPath string, views []convoyStoreView, stderr io.Writer, cmdName string) []convoyStoreView {
 	merged, err := convoyStoreViewsWithBinding(cityPath, views)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s: the city's relocated class binding is unreadable, so any beads it holds are missing from this output: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: the city's relocated class binding is unreadable, so any beads it holds are missing from this output and retained pre-migration copies of them may appear in their place as stale open rows: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 	}
 	return merged
 }
+
+// convoyOwnershipProbeBatch bounds how many ids one ownership probe puts on the
+// wire, because an unbounded IN-list is a query no sqlite binding can run.
+//
+// The IDs filter compiles to one bound variable per id (`b.id IN (?,...,?)` in
+// sqliteListSQL, with no chunking of its own) and modernc sqlite refuses any
+// statement carrying more than 32766 of them. The candidate set is every
+// migration-source row matching the caller's query and `gc beads list` runs
+// unbounded, so on a converged city with a long history the probe would carry
+// the whole work ledger and come back "too many SQL variables" — failing the
+// read outright on exactly the large migrated cities the federation exists for.
+// Batching under the cap keeps the probe O(candidates/batch) round trips rather
+// than the one-per-row it replaced.
+const convoyOwnershipProbeBatch = 30000
 
 // convoyBindingOwnedIDs asks the class binding which of these ids it HOLDS.
 //
@@ -628,9 +649,9 @@ func convoyStoreViewsForRead(cityPath string, views []convoyStoreView, stderr io
 // looking superseded, and a convoy the city finished prints open forever.
 //
 // So the ownership probe carries only the ids it is asking about and
-// IncludeClosed, and no filter of the caller's reaches it. It is one round trip:
-// ListQuery.IDs is the IN-list form of a batch of Gets and counts as a filter,
-// so it needs no AllowScan and costs one query rather than one per row.
+// IncludeClosed, and no filter of the caller's reaches it. ListQuery.IDs is the
+// IN-list form of a batch of Gets and counts as a filter, so it needs no
+// AllowScan and costs one query per batch rather than one per row.
 //
 // A probe that FAILS is an error, never an empty answer. Reading a fault as "the
 // binding holds none of these" would serve every frozen twin as live data and
@@ -640,12 +661,15 @@ func convoyBindingOwnedIDs(binding beads.Store, ids []string) (map[string]bool, 
 	if binding == nil || len(ids) == 0 {
 		return owned, nil
 	}
-	held, err := binding.List(beads.ListQuery{IDs: ids, IncludeClosed: true})
-	if err != nil {
-		return nil, fmt.Errorf("asking %s which ids it holds: %w", convoyBindingViewPath, err)
-	}
-	for _, b := range held {
-		owned[b.ID] = true
+	for start := 0; start < len(ids); start += convoyOwnershipProbeBatch {
+		batch := ids[start:min(start+convoyOwnershipProbeBatch, len(ids))]
+		held, err := binding.List(beads.ListQuery{IDs: batch, IncludeClosed: true})
+		if err != nil {
+			return nil, fmt.Errorf("asking %s which ids it holds: %w", convoyBindingViewPath, err)
+		}
+		for _, b := range held {
+			owned[b.ID] = true
+		}
 	}
 	return owned, nil
 }

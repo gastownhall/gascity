@@ -7582,21 +7582,42 @@ func (s *faultingClassStore) IDPrefix() string {
 // resolving rather than on one that resolves and cannot answer.
 func installFaultingClassBinding(t *testing.T, cityPath string, readErr, writeErr error) {
 	t.Helper()
+	installWrappedClassBinding(t, cityPath, func(previous beads.Store) beads.Store {
+		return &faultingClassStore{Store: previous, readErr: readErr, writeErr: writeErr}
+	})
+}
+
+// installWrappedClassBinding swaps this city's class stores for wrap's store and
+// restates the census verdict for it, so the binding still derives as relocated
+// and relic-bearing.
+//
+// Both halves, for installCountedClassBindingWrapped's reason: the verdict is
+// keyed by store identity and the swap installs a store the census never saw.
+// Without the restatement the derivation would re-probe through a store that is
+// now failing, and the row would be asserting on a binding that stopped
+// resolving rather than on one that resolves and cannot answer.
+//
+// wrap is called exactly once, on the first relocated class store, and the store
+// it returns fronts every class — the fixtures here relocate one class, and a
+// wrapper installed for some of them would leave the row asserting on whichever
+// leg the command happened to take.
+func installWrappedClassBinding(t *testing.T, cityPath string, wrap func(beads.Store) beads.Store) {
+	t.Helper()
 	routes := cliStorageRoutes(cityPath)
 	if routes == nil {
-		t.Fatal("the city resolved no routes to fault")
+		t.Fatal("the city resolved no routes to wrap")
 	}
-	var installed *faultingClassStore
+	var installed beads.Store
 	restore := make(map[coordclass.Class]beads.Store, len(routes.stores))
 	for class, previous := range routes.stores {
 		restore[class] = previous
 		if installed == nil {
-			installed = &faultingClassStore{Store: previous, readErr: readErr, writeErr: writeErr}
+			installed = wrap(previous)
 		}
 		routes.stores[class] = installed
 	}
 	if installed == nil {
-		t.Fatal("the city relocated no class store to fault")
+		t.Fatal("the city relocated no class store to wrap")
 	}
 	previousRelics := routes.relics
 	routes.relics = map[beads.Store]bool{installed: true}
@@ -7610,10 +7631,10 @@ func installFaultingClassBinding(t *testing.T, cityPath string, readErr, writeEr
 
 	bindings, err := cliResidencyBindings(cityPath)
 	if err != nil {
-		t.Fatalf("re-deriving the bindings the sweep will use: %v", err)
+		t.Fatalf("re-deriving the bindings this row will use: %v", err)
 	}
-	if len(bindings) != 1 || bindings[0].Leg.Store != beads.Store(installed) {
-		t.Fatalf("the sweep's binding resolves to %d bindings not fronted by the faulting store; this row would exercise a healthy one", len(bindings))
+	if len(bindings) != 1 || bindings[0].Leg.Store != installed {
+		t.Fatalf("the binding resolves to %d bindings not fronted by the installed store; this row would exercise a healthy one", len(bindings))
 	}
 }
 
@@ -7756,8 +7777,10 @@ func TestWorkflowDeleteSourceRefusesWhenTheBindingFaultsOnARigLeg(t *testing.T) 
 // deleted nothing, or deleted through the wrong store, and the command would
 // still have printed a count and exited 0.
 //
-// The row also pins the order. The binding is erased FIRST, so a fault partway
-// through leaves the frozen twins behind rather than the live tree.
+// The row does NOT pin sweepOrder's ordering: with every store healthy the sweep
+// reaches all of them whichever way round it goes, so this row passes against
+// the identity order too. The order is falsified by the refusal row below, where
+// the binding's fault is what the retained copies have to be spared by.
 func TestDeleteWorkflowMatchesErasesTheBindingThroughItsStoreHandle(t *testing.T) {
 	binding := beads.NewMemStore()
 	live, err := binding.Create(beads.Bead{Title: "the binding's live root", Type: "task"})
@@ -7812,6 +7835,11 @@ func TestDeleteWorkflowMatchesErasesTheBindingThroughItsStoreHandle(t *testing.T
 // TestDeleteWorkflowMatchesRefusesABindingThatWillNotDelete pins the fault half
 // of the same arm: the binding's store handle is the only access path to it, so
 // a delete it rejects has to stop the sweep before the frozen twins go.
+//
+// This is also the row that falsifies sweepOrder on the delete arm. The binding
+// is listed second, as the federation appends it, and its delete fails — so the
+// retained copy survives only if the sweep put the binding first. Neutered to
+// the identity order, the `bd delete` guard on the retained view fires.
 func TestDeleteWorkflowMatchesRefusesABindingThatWillNotDelete(t *testing.T) {
 	binding := beads.NewMemStore()
 	live, err := binding.Create(beads.Bead{Title: "the binding's live root", Type: "task"})
@@ -7852,6 +7880,186 @@ func TestDeleteWorkflowMatchesRefusesABindingThatWillNotDelete(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), convoyBindingViewPath) {
 		t.Errorf("the refusal does not name the store that failed: %v", err)
+	}
+}
+
+// unhonouredCloseStore reports a close count it did not apply, which is the one
+// store shape the verification pass exists for.
+//
+// A store that accepts CloseAll and leaves the rows open returns exactly what a
+// store that honoured it returns — same count, nil error — so the sweep cannot
+// tell them apart from the write's own answer. effect is what the close ACTUALLY
+// does to the rows; nil means nothing at all. getErr faults the re-read instead,
+// which is the other way the verification can fail to get an answer.
+type unhonouredCloseStore struct {
+	beads.Store
+	effect func(ids []string)
+	getErr error
+}
+
+func (s *unhonouredCloseStore) CloseAll(ids []string, _ map[string]string) (int, error) {
+	if s.effect != nil {
+		s.effect(ids)
+	}
+	return len(ids), nil
+}
+
+func (s *unhonouredCloseStore) Get(id string) (beads.Bead, error) {
+	if s.getErr != nil {
+		return beads.Bead{}, s.getErr
+	}
+	return s.Store.Get(id)
+}
+
+// TestCloseWorkflowMatchesVerifiesTheRowsItWasToldItClosed pins every arm of the
+// re-read that follows the default mode's close.
+//
+// The close IS the destructive act of `gc workflow delete`, and its only report
+// is a count the store chooses. A store that accepts the write and does not
+// apply it — a stale view, a rejected transaction retried into a no-op, a
+// binding fronting a class it can no longer write — returns the identical count
+// and nil error as one that honoured it, so the command would print "Closed 2
+// open beads" over a workflow that is still running. The re-read is the only
+// thing that can tell those apart, and without a store that lies there is
+// nothing in the suite it can be told apart FROM.
+func TestCloseWorkflowMatchesVerifiesTheRowsItWasToldItClosed(t *testing.T) {
+	readFailed := errors.New("the store went away after the write")
+	tests := []struct {
+		name    string
+		effect  func(store beads.Store) func(ids []string)
+		getErr  error
+		wantErr string
+	}{
+		{
+			name: "a close the store did not apply is refused",
+			// The rows stay exactly as they were: open, and reported closed.
+			wantErr: "is still open after the sweep",
+		},
+		{
+			name: "a close the store honoured is accepted",
+			effect: func(store beads.Store) func([]string) {
+				return func(ids []string) {
+					for _, id := range ids {
+						if err := store.Close(id); err != nil {
+							panic(err)
+						}
+					}
+				}
+			},
+		},
+		{
+			name: "a row the store deleted instead counts as swept",
+			// Gone is what the sweep wanted; --delete reaches this shape, and
+			// so does a store that erases on close.
+			effect: func(store beads.Store) func([]string) {
+				return func(ids []string) {
+					for _, id := range ids {
+						if err := store.Delete(id); err != nil {
+							panic(err)
+						}
+					}
+				}
+			},
+		},
+		{
+			name:    "a re-read that faults is refused rather than assumed clean",
+			getErr:  readFailed,
+			wantErr: readFailed.Error(),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			backing := beads.NewMemStore()
+			row, err := backing.Create(beads.Bead{Title: "a matched workflow bead", Type: "task"})
+			if err != nil {
+				t.Fatalf("seeding the matched bead: %v", err)
+			}
+			store := &unhonouredCloseStore{Store: backing, getErr: tc.getErr}
+			if tc.effect != nil {
+				store.effect = tc.effect(backing)
+			}
+
+			closed, err := closeWorkflowMatches([]workflowStoreMatch{{
+				store: store,
+				beads: []beads.Bead{row},
+				label: "city",
+				path:  "/city",
+				role:  convoyViewMigrationSource,
+			}})
+			if closed != 1 {
+				t.Errorf("closed = %d, want the 1 the store reported; the count is what the command prints either way", closed)
+			}
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("closeWorkflowMatches refused a sweep the store honoured: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("closeWorkflowMatches returned nil; the command would print %d closed over rows it did not close", closed)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("the refusal is %v, want it to name %q", err, tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), "city") {
+				t.Errorf("the refusal does not name the store that failed: %v", err)
+			}
+		})
+	}
+}
+
+// TestCloseWorkflowMatchesClosesTheBindingBeforeTheRetainedCopies pins
+// sweepOrder on the CLOSE arm, which is the arm `gc workflow delete` takes by
+// default.
+//
+// sweepOrder's promise is stated for mutations generally, not for --delete
+// alone: a fault before the binding is touched sweeps nothing, and a fault after
+// it means the workflow really did stop. The close arm needs that at least as
+// much as the delete arm does, because closing the frozen twins while the live
+// tree keeps running is the partial sweep that LOOKS finished — the retained
+// copies are what a reader sees.
+//
+// So the binding is listed second here, as the federation appends it, and the
+// retained view faults. Swept binding-first, the live tree is closed before the
+// fault; swept in the order given, the fault lands first and the binding is
+// never reached.
+func TestCloseWorkflowMatchesClosesTheBindingBeforeTheRetainedCopies(t *testing.T) {
+	binding := beads.NewMemStore()
+	live, err := binding.Create(beads.Bead{Title: "the binding's live root", Type: "task"})
+	if err != nil {
+		t.Fatalf("seeding the binding's root: %v", err)
+	}
+	retained := beads.NewMemStore()
+	frozen, err := retained.Create(beads.Bead{Title: "the retained frozen root", Type: "task"})
+	if err != nil {
+		t.Fatalf("seeding the retained root: %v", err)
+	}
+
+	_, err = closeWorkflowMatches([]workflowStoreMatch{
+		{
+			store: &faultingClassStore{Store: retained, writeErr: errors.New("database is locked mid-close")},
+			beads: []beads.Bead{frozen},
+			label: "city",
+			path:  "/city",
+			role:  convoyViewMigrationSource,
+		},
+		{
+			store: binding,
+			beads: []beads.Bead{live},
+			label: convoyBindingViewPath,
+			path:  convoyBindingViewPath,
+			role:  convoyViewClassBinding,
+		},
+	})
+	if err == nil {
+		t.Fatal("closeWorkflowMatches returned nil after the retained view refused every close")
+	}
+	current, err := binding.Get(live.ID)
+	if err != nil {
+		t.Fatalf("reading the binding's root back: %v", err)
+	}
+	if current.Status != "closed" {
+		t.Errorf("the binding's live root is still %s; the sweep faulted on the retained copies before it reached the tree the city is running", current.Status)
 	}
 }
 
