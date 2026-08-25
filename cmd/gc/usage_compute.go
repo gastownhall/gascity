@@ -405,8 +405,10 @@ func (cr *CityRuntime) sweepLiveSessionModelUsage(
 		// a keyless codex session whose CLEAN workdir+window scan found nothing —
 		// ambiguity, an out-of-window filename, or a TZ shift, none of which a retry
 		// resolves; or a keyless claude session whose transcript lookup cleanly
-		// refused an ambiguous shared workdir, which stays ambiguous while the pool
-		// shares it). Record it so the scan is never repeated; the session's usage is
+		// REFUSED an ambiguous shared workdir, which stays ambiguous while the pool
+		// shares it — note an unambiguous claude session whose transcript is merely
+		// not written yet is NOT settled, so the live lane keeps rediscovering it).
+		// Record it so the scan is never repeated; the session's usage is
 		// still recovered by the terminal sweep when its interval ends, and a re-wake
 		// starts a fresh epoch that discovers again.
 		path, settled := factory.DiscoverSweepTranscript(b.ID, b.Metadata, now)

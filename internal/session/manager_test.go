@@ -4533,6 +4533,92 @@ func TestTranscriptPathSkipsAmbiguousWorkDirFallback(t *testing.T) {
 	}
 }
 
+// TestTranscriptPathClassifiedDistinguishesAbsentFromAmbiguous pins the reason
+// codes behind an empty transcript path. TranscriptPath returns ("", nil) for
+// three unrelated situations, so a caller that treats every empty result the same
+// way cannot tell a permanent refusal from a transcript that has not been written
+// yet. TranscriptPathClassified separates them.
+func TestTranscriptPathClassifiedDistinguishesAbsentFromAmbiguous(t *testing.T) {
+	newManagerWithSession := func(t *testing.T, workDir string, titles ...string) (*Manager, []Info) {
+		t.Helper()
+		store := beads.NewMemStore()
+		mgr := NewManagerWithOptions(store, runtime.NewFake())
+		infos := make([]Info, 0, len(titles))
+		for _, title := range titles {
+			info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: title, Command: "claude", WorkDir: workDir, Provider: "claude", Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+			if err != nil {
+				t.Fatalf("Create %s: %v", title, err)
+			}
+			infos = append(infos, info)
+		}
+		return mgr, infos
+	}
+
+	t.Run("absent", func(t *testing.T) {
+		workDir := t.TempDir()
+		searchBase := t.TempDir()
+		mgr, infos := newManagerWithSession(t, workDir, "only")
+
+		// Sole session on the workdir, nothing written to disk yet.
+		path, lookup, err := mgr.TranscriptPathClassified(infos[0].ID, []string{searchBase})
+		if err != nil {
+			t.Fatalf("TranscriptPathClassified: %v", err)
+		}
+		if path != "" {
+			t.Fatalf("path = %q, want empty before any transcript is written", path)
+		}
+		if lookup != TranscriptAbsent {
+			t.Fatalf("lookup = %v, want TranscriptAbsent", lookup)
+		}
+
+		slugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+		if err := os.MkdirAll(slugDir, 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		want := filepath.Join(slugDir, "latest.jsonl")
+		if err := os.WriteFile(want, []byte("{}\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		path, lookup, err = mgr.TranscriptPathClassified(infos[0].ID, []string{searchBase})
+		if err != nil {
+			t.Fatalf("TranscriptPathClassified after write: %v", err)
+		}
+		if path != want {
+			t.Fatalf("path = %q, want %q", path, want)
+		}
+		if lookup != TranscriptFound {
+			t.Fatalf("lookup = %v, want TranscriptFound", lookup)
+		}
+	})
+
+	t.Run("ambiguous", func(t *testing.T) {
+		workDir := t.TempDir()
+		searchBase := t.TempDir()
+		mgr, infos := newManagerWithSession(t, workDir, "one", "two")
+
+		slugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+		if err := os.MkdirAll(slugDir, 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(slugDir, "latest.jsonl"), []byte("{}\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+
+		// Two keyless sessions share the workdir: the refusal is deliberate, not a
+		// missing file — the transcript above exists and is still not resolved.
+		path, lookup, err := mgr.TranscriptPathClassified(infos[1].ID, []string{searchBase})
+		if err != nil {
+			t.Fatalf("TranscriptPathClassified: %v", err)
+		}
+		if path != "" {
+			t.Fatalf("path = %q, want empty when the workdir fallback is ambiguous", path)
+		}
+		if lookup != TranscriptAmbiguous {
+			t.Fatalf("lookup = %v, want TranscriptAmbiguous", lookup)
+		}
+	})
+}
+
 func TestTranscriptPathCodexSessionKeyBeatsAmbiguousWorkDirFallback(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

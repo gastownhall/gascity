@@ -478,13 +478,13 @@ func TestDiscoverSweepTranscriptCodexBoundedToInterval(t *testing.T) {
 
 	// Rollout well outside the interval window and the UUID hint: must NOT match.
 	writeCodexSessionMetaRollout(t, codexRoot, "2018", "01", "01", workDir, sessionKey)
-	if got, _ := factory.discoverSweepTranscript("codex", "gc-codex-1", meta, now); got != "" {
+	if got, _, _ := factory.discoverSweepTranscript("codex", "gc-codex-1", meta, now); got != "" {
 		t.Fatalf("rollout outside the interval window must not be discovered by the bounded sweep, got %q", got)
 	}
 
 	// Control: the same session's rollout inside the interval window IS discovered.
 	inside := writeCodexSessionMetaRollout(t, codexRoot, "2026", "06", "15", workDir, sessionKey)
-	if got, _ := factory.discoverSweepTranscript("codex", "gc-codex-1", meta, now); got != inside {
+	if got, _, _ := factory.discoverSweepTranscript("codex", "gc-codex-1", meta, now); got != inside {
 		t.Fatalf("rollout inside the interval window must be discovered, got %q want %q", got, inside)
 	}
 }
@@ -1157,6 +1157,93 @@ func TestFactorySweepSessionModelUsageKeylessClaudeTranscriptErrorRetries(t *tes
 	}
 	if discSettled {
 		t.Fatal("DiscoverSweepTranscript must not memoize a failed lookup as a settled miss")
+	}
+}
+
+// TestFactorySweepSessionModelUsageKeylessClaudeAbsentTranscriptRetries pins the
+// discriminating third branch of the keyless-Claude rule: a SINGLE keyless session
+// on a workdir it shares with nobody is not ambiguous — the lookup came back empty
+// only because the transcript has not been written yet. Settling that would strand
+// the whole awake epoch on the live lane (liveSweepMemo caches settledMiss until a
+// new wake or session_key), so it must stay unsettled and resolve once the JSONL
+// lands.
+func TestFactorySweepSessionModelUsageKeylessClaudeAbsentTranscriptRetries(t *testing.T) {
+	searchBase := t.TempDir()
+	workDir := t.TempDir()
+
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	factory, err := NewFactory(FactoryConfig{
+		Store:       store,
+		Provider:    sp,
+		SearchPaths: []string{searchBase},
+		UsageSink:   usage.NewLocalSink(filepath.Join(t.TempDir(), "usage.jsonl")),
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+
+	// Exactly one session on this workdir, no session_key: unambiguous, keyless.
+	h, err := factory.Session(SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "only",
+		Command:  "claude",
+		WorkDir:  workDir,
+		Provider: "claude",
+	})
+	if err != nil {
+		t.Fatalf("Session: %v", err)
+	}
+	if err := h.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := store.SetMetadata(h.sessionID, "session_key", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	sessions, err := store.List(beads.ListQuery{Label: sessionpkg.LabelSession})
+	if err != nil || len(sessions) != 1 {
+		t.Fatalf("List sessions: err=%v len=%d", err, len(sessions))
+	}
+	meta := sessions[0].Metadata
+	meta["session_key"] = ""
+
+	// No transcript on disk yet.
+	emitted, settled, err := factory.SweepSessionModelUsage(context.Background(), sessions[0].ID, meta, time.Unix(1, 0).UTC())
+	if err != nil {
+		t.Fatalf("SweepSessionModelUsage: %v", err)
+	}
+	if emitted != 0 {
+		t.Fatalf("emitted = %d, want 0 (no transcript to read yet)", emitted)
+	}
+	if settled {
+		t.Fatal("an unambiguous keyless claude session with no transcript yet must stay unsettled")
+	}
+
+	path, discSettled := factory.DiscoverSweepTranscript(sessions[0].ID, meta, time.Unix(1, 0).UTC())
+	if path != "" {
+		t.Fatalf("DiscoverSweepTranscript path = %q, want \"\" before the transcript is written", path)
+	}
+	if discSettled {
+		t.Fatal("DiscoverSweepTranscript must not memoize an absent-but-unambiguous transcript as settled")
+	}
+
+	// The transcript lands: the same lookup now resolves and settles.
+	slugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+	if err := os.MkdirAll(slugDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	writeWorkerTestJSONL(t, filepath.Join(slugDir, "latest.jsonl"), []map[string]any{
+		usageEntryWithMessageID("u1", "msg-1", 100, 50, 0, 0),
+	})
+
+	path, discSettled = factory.DiscoverSweepTranscript(sessions[0].ID, meta, time.Unix(1, 0).UTC())
+	if path == "" {
+		t.Fatal("DiscoverSweepTranscript must resolve the transcript once it is written")
+	}
+	if !discSettled {
+		t.Fatal("a found path is always settled")
 	}
 }
 
