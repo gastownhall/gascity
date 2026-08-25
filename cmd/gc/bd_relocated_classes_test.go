@@ -390,6 +390,14 @@ var errBdRunnerShouldNotRun = errors.New("bd must not run for a refused read")
 // split and single-store runs is the relocation itself.
 func bdSQLRefusalCity(t *testing.T, storageTOML string) (capture string) {
 	t.Helper()
+	capture, _ = bdSQLRefusalCityDir(t, storageTOML)
+	return capture
+}
+
+// bdSQLRefusalCityDir is bdSQLRefusalCity plus the city root, for the rows that
+// have to seed the relocated binding before they can address a bead it HOLDS.
+func bdSQLRefusalCityDir(t *testing.T, storageTOML string) (capture, cityDir string) {
+	t.Helper()
 
 	origCityFlag, origRigFlag, origProbe := cityFlag, rigFlag, bdBeadExists
 	t.Cleanup(func() {
@@ -398,7 +406,7 @@ func bdSQLRefusalCity(t *testing.T, storageTOML string) (capture string) {
 	bdBeadExists = func(string, *config.City, execStoreTarget, string) bool { return false }
 	cityFlag, rigFlag = "", ""
 
-	cityDir := t.TempDir()
+	cityDir = t.TempDir()
 	writeReachableManagedDoltState(t, cityDir)
 	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
@@ -426,7 +434,35 @@ dolt.auto-start: false
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("CAPTURE_PATH", capture)
 	t.Setenv("GC_CITY_PATH", cityDir)
-	return capture
+	return capture, cityDir
+}
+
+// seedRelocatedBindingBead plants a bead in the split city's relocated class
+// binding and returns it, minted by the binding's own sequence so it carries the
+// reserved prefix production would give it.
+//
+// Every other fixture in this file leaves that binding EMPTY, which is enough to
+// prove a refusal fires but not enough to prove what it fires ON: against an
+// empty binding "the binding holds this bead" and "the token carries a reserved
+// prefix" are the same observation. A row that means to pin ownership has to
+// address a bead that is actually there.
+func seedRelocatedBindingBead(t *testing.T, cityDir, title string) beads.Bead {
+	t.Helper()
+	binding, relocated, err := cliSoleClassBinding(cityDir)
+	if err != nil {
+		t.Fatalf("resolving the relocated class binding at %s: %v", cityDir, err)
+	}
+	if !relocated {
+		t.Fatalf("the split city at %s resolved no relocated class binding", cityDir)
+	}
+	created, err := binding.Store.Create(beads.Bead{Title: title, Type: "task"})
+	if err != nil {
+		t.Fatalf("seeding the relocated class binding: %v", err)
+	}
+	if !bdIDIsClassReserved(created.ID) {
+		t.Fatalf("the binding minted %q, which is outside every reserved class namespace", created.ID)
+	}
+	return created
 }
 
 const bdSQLRefusalSplitStorage = `
@@ -703,29 +739,37 @@ func TestGcBdListForwardsAFreeTextSearchThatNamesAGraphID(t *testing.T) {
 // ADDRESSED id, and it is the reason the selector dialect does not need an
 // offset-0 anchor.
 //
-// `--id`, `--parent` and `-p` are in bdIDValuedFlags, so the by-id door has
-// always refused them and names the BEAD and the binding that owns it.
-// Anchoring the selector scan at offset 0 to catch them a second time would
-// shadow that with the vaguer namespace message — the dialect guard runs first
-// — while adding no coverage. So the behavior here must be the ownership
-// refusal, byte for byte the same one a legacy build produced.
+// `--id`, `--parent` and `-p` are in bdIDValuedFlags, so the by-id door — not
+// the dialect guard — is what answers them, and it names the BEAD and the
+// binding that owns it. Anchoring the selector scan at offset 0 to catch them a
+// second time would shadow that with the vaguer namespace message while adding
+// no coverage.
+//
+// Ownership here is RESIDENCE, so the refused id is one the binding was seeded
+// with. The second half drives the same three flags at a reserved id the
+// binding does not hold: the binding is the namespace's authority, not its only
+// lawful holder, so that id belongs to whatever ledger the passthrough is
+// pointed at and the argv must reach bd unchanged. Both halves run together —
+// either alone is satisfied by a door that stopped discriminating.
 func TestGcBdListOnAnIDValuedFlagRefusesByOwnership(t *testing.T) {
-	for name, args := range map[string][]string{
-		"--id":     {"list", "--id", "gcg-abc123", "--json"},
-		"--parent": {"list", "--parent", "gcg-abc123", "--json"},
-		"-p":       {"list", "-p", "gcg-abc123", "--json"},
+	for name, flag := range map[string]string{
+		"--id":     "--id",
+		"--parent": "--parent",
+		"-p":       "-p",
 	} {
 		t.Run(name, func(t *testing.T) {
-			capture := bdSQLRefusalCity(t, bdSQLRefusalSplitStorage)
+			capture, cityDir := bdSQLRefusalCityDir(t, bdSQLRefusalSplitStorage)
 			t.Setenv("BD_STUB_STDOUT", "[]")
 			resetCLIStorageRoutes(t)
 			captureCLIStorageStderr(t)
+			resident := seedRelocatedBindingBead(t, cityDir, "held by the binding")
 
+			args := []string{"list", flag, resident.ID, "--json"}
 			var stdout, stderr bytes.Buffer
 			if code := doBd(args, &stdout, &stderr); code == 0 {
 				t.Fatalf("doBd(%v) exited 0; stdout=%q", args, stdout.String())
 			}
-			if !strings.Contains(stderr.String(), "gcg-abc123 is owned by") {
+			if !strings.Contains(stderr.String(), resident.ID+" is owned by") {
 				t.Errorf("the refusal is not the by-id OWNERSHIP one, so the dialect guard is shadowing a more specific message; stderr=%q", stderr.String())
 			}
 			// The by-id door resolves the class binding before it refuses, and
@@ -733,6 +777,20 @@ func TestGcBdListOnAnIDValuedFlagRefusesByOwnership(t *testing.T) {
 			// reach bd is the REFUSED argv.
 			if data, err := os.ReadFile(capture); err == nil && strings.Contains(string(data), strings.Join(args, " ")) {
 				t.Fatalf("the refused invocation was forwarded to bd: %q", data)
+			}
+
+			missing := []string{"list", flag, "gcg-abc123", "--json"}
+			stdout.Reset()
+			stderr.Reset()
+			if code := doBd(missing, &stdout, &stderr); code != 0 {
+				t.Fatalf("doBd(%v) exited %d for a reserved id the binding does not hold; stderr=%q", missing, code, stderr.String())
+			}
+			data, err := os.ReadFile(capture)
+			if err != nil {
+				t.Fatalf("bd was not invoked for %v: %v", missing, err)
+			}
+			if !strings.Contains(string(data), strings.Join(missing, " ")) {
+				t.Fatalf("bd received %q, want %v forwarded verbatim", data, missing)
 			}
 		})
 	}
@@ -748,21 +806,29 @@ func TestGcBdListOnAnIDValuedFlagRefusesByOwnership(t *testing.T) {
 // reserved-prefix positional and refuseClassOwnedTarget names the routing cause.
 // This is the regression the scorecard's required change #2 asks for: an explicit
 // unsupported-routing diagnostic in place of bd not-found.
+//
+// "Class-owned" is RESIDENCE, so the refused bead is seeded into the binding.
+// The second half is the boundary: a reserved id the binding does not hold is a
+// bead the binding never leased and cannot refresh, and the ledger the
+// passthrough is pointed at is the only one that could — a rig configured with
+// a prefix inside the reserved namespace mints work beads there and heartbeats
+// them on every tick.
 func TestGcBdHeartbeatOnARelocatedClassIDRefusesByOwnership(t *testing.T) {
-	args := []string{"heartbeat", "gcg-abc123"}
-	capture := bdSQLRefusalCity(t, bdSQLRefusalSplitStorage)
+	capture, cityDir := bdSQLRefusalCityDir(t, bdSQLRefusalSplitStorage)
 	t.Setenv("BD_STUB_STDOUT", "[]")
 	resetCLIStorageRoutes(t)
 	captureCLIStorageStderr(t)
+	resident := seedRelocatedBindingBead(t, cityDir, "leased by the binding")
 
+	args := []string{"heartbeat", resident.ID}
 	var stdout, stderr bytes.Buffer
 	if code := doBd(args, &stdout, &stderr); code == 0 {
-		t.Fatalf("doBd(%v) exited 0; a heartbeat against a relocated-class id must not run against the work store; stdout=%q", args, stdout.String())
+		t.Fatalf("doBd(%v) exited 0; a heartbeat against a bead the binding holds must not run against the work store; stdout=%q", args, stdout.String())
 	}
 	// The refusal must be the by-id OWNERSHIP one, naming the bead, its binding
 	// and heartbeat as the unserved verb — the routing cause — not bd's substring
 	// not-found from the one ledger that holds no gcg- row.
-	for _, want := range []string{"gcg-abc123 is owned by", "heartbeat", "is not served in process"} {
+	for _, want := range []string{resident.ID + " is owned by", "heartbeat", "is not served in process"} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Errorf("refusal does not name the routing cause (missing %q); stderr=%q", want, stderr.String())
 		}
@@ -771,6 +837,20 @@ func TestGcBdHeartbeatOnARelocatedClassIDRefusesByOwnership(t *testing.T) {
 	// REFUSED heartbeat argv must never have been forwarded to bd.
 	if data, err := os.ReadFile(capture); err == nil && strings.Contains(string(data), strings.Join(args, " ")) {
 		t.Fatalf("the refused heartbeat invocation was forwarded to bd: %q", data)
+	}
+
+	missing := []string{"heartbeat", "gcg-abc123"}
+	stdout.Reset()
+	stderr.Reset()
+	if code := doBd(missing, &stdout, &stderr); code != 0 {
+		t.Fatalf("doBd(%v) exited %d for a reserved id the binding does not hold; stderr=%q", missing, code, stderr.String())
+	}
+	data, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatalf("bd was not invoked for %v: %v", missing, err)
+	}
+	if !strings.Contains(string(data), strings.Join(missing, " ")) {
+		t.Fatalf("bd received %q, want %v forwarded verbatim", data, missing)
 	}
 }
 
@@ -1155,11 +1235,12 @@ func TestBdRelocatedClassGuardCoversEveryFrontierSurface(t *testing.T) {
 // Both halves are asserted together: either alone is satisfied by a surface that
 // stopped discriminating.
 //
-// The class-owned leg's binding is empty, so the routed answer is a genuine
-// absence reported in bd's own shape — the same claim
-// TestGcBdShowNeverReachesBdForAClassOwnedIDOnASplitCity makes for `show`. That
-// the walk itself is correct is pinned separately, against a populated binding,
-// by TestBdByIDServesDepTreeFromTheClassBinding.
+// Ownership is residence, so the class-owned leg seeds the binding and walks a
+// bead that is actually in it. The third leg is the boundary the first two
+// cannot show: a reserved-prefix id the binding does NOT hold is not owned by
+// it, and goes back out to bd with the rest. That the walk itself is correct
+// over a deeper graph is pinned separately by
+// TestBdByIDServesDepTreeFromTheClassBinding.
 func TestGcBdDepTreeSplitsOnOwnershipNotOnServability(t *testing.T) {
 	t.Run("work id is forwarded verbatim", func(t *testing.T) {
 		args := []string{"dep", "tree", "demo-abc123"}
@@ -1181,20 +1262,40 @@ func TestGcBdDepTreeSplitsOnOwnershipNotOnServability(t *testing.T) {
 	})
 
 	t.Run("class-owned id is answered in process", func(t *testing.T) {
+		capture, cityDir := bdSQLRefusalCityDir(t, bdSQLRefusalSplitStorage)
+		resetCLIStorageRoutes(t)
+		captureCLIStorageStderr(t)
+		resident := seedRelocatedBindingBead(t, cityDir, "the root of the walk")
+
+		args := []string{"dep", "tree", resident.ID}
+		var stdout, stderr bytes.Buffer
+		if code := doBd(args, &stdout, &stderr); code != 0 {
+			t.Fatalf("doBd(%v) = %d for a bead the binding holds; stderr=%q", args, code, stderr.String())
+		}
+		if data, err := os.ReadFile(capture); err == nil && strings.Contains(string(data), strings.Join(args, " ")) {
+			t.Fatalf("the class-owned dep tree was forwarded to bd: %q", data)
+		}
+		if !strings.Contains(stdout.String(), resident.ID) {
+			t.Errorf("the walk does not name its root; stdout=%q", stdout.String())
+		}
+	})
+
+	t.Run("reserved id the binding does not hold is forwarded verbatim", func(t *testing.T) {
 		args := []string{"dep", "tree", "gcg-abc123"}
 		capture := bdSQLRefusalCity(t, bdSQLRefusalSplitStorage)
 		resetCLIStorageRoutes(t)
 		captureCLIStorageStderr(t)
 
 		var stdout, stderr bytes.Buffer
-		if code := doBd(args, &stdout, &stderr); code == 0 {
-			t.Fatalf("doBd(%v) exited 0 for a class-owned id the binding does not hold; stdout=%q", args, stdout.String())
+		if code := doBd(args, &stdout, &stderr); code != 0 {
+			t.Fatalf("doBd(%v) = %d; stderr=%q", args, code, stderr.String())
 		}
-		if data, err := os.ReadFile(capture); err == nil && strings.Contains(string(data), strings.Join(args, " ")) {
-			t.Fatalf("the class-owned dep tree was forwarded to bd: %q", data)
+		data, err := os.ReadFile(capture)
+		if err != nil {
+			t.Fatalf("bd was not invoked for %v: %v", args, err)
 		}
-		if !strings.Contains(stderr.String(), "gcg-abc123") {
-			t.Errorf("the answer does not name the bead; stderr=%q", stderr.String())
+		if !strings.Contains(string(data), strings.Join(args, " ")) {
+			t.Fatalf("bd received %q, want the args forwarded verbatim", data)
 		}
 	})
 }
@@ -1202,29 +1303,36 @@ func TestGcBdDepTreeSplitsOnOwnershipNotOnServability(t *testing.T) {
 // TestGcBdShowNeverReachesBdForAClassOwnedIDOnASplitCity is the other half, and
 // the behavior change this pin used to forbid.
 //
-// The split city here serves its binding, and it is empty, so the read is a
-// genuine absence. The old passthrough answered it from the work ledger and
+// The old passthrough answered a relocated-class read from the work ledger and
 // exited 0 — a confident wrong answer about a bead that ledger cannot hold. The
-// routed surface reports the absence in bd's own shape and never reaches the
+// routed surface serves it from the binding that holds it and never reaches the
 // subprocess.
+//
+// It is asserted against a SEEDED bead, because that is what "class-owned"
+// means. An empty binding would make the row pass on the prefix alone, and the
+// prefix does not decide ownership: it names the binding as the namespace's
+// AUTHORITY, and an id it does not hold goes back out to bd — which
+// TestGcBdDepTreeSplitsOnOwnershipNotOnServability's third leg pins for the
+// recursive read on the same fixture.
 func TestGcBdShowNeverReachesBdForAClassOwnedIDOnASplitCity(t *testing.T) {
-	capture := bdSQLRefusalCity(t, bdSQLRefusalSplitStorage)
+	capture, cityDir := bdSQLRefusalCityDir(t, bdSQLRefusalSplitStorage)
 	resetCLIStorageRoutes(t)
 	captureCLIStorageStderr(t)
+	resident := seedRelocatedBindingBead(t, cityDir, "held by the binding")
 
 	var stdout, stderr bytes.Buffer
-	if code := doBd([]string{"show", "gcg-abc123"}, &stdout, &stderr); code == 0 {
-		t.Fatalf("doBd exited 0 for a class-owned id the binding does not hold; stdout=%q", stdout.String())
+	if code := doBd([]string{"show", resident.ID}, &stdout, &stderr); code != 0 {
+		t.Fatalf("doBd exited %d for a bead the binding holds; stderr=%q", code, stderr.String())
 	}
 	// The capture records every bd invocation this command made, including the
 	// convergence check's own census of the work store — which is a read of the
 	// ledger it is entitled to read. What must not appear is the operator's
 	// read, forwarded verbatim.
-	if data, err := os.ReadFile(capture); err == nil && strings.Contains(string(data), "show gcg-abc123") {
+	if data, err := os.ReadFile(capture); err == nil && strings.Contains(string(data), "show "+resident.ID) {
 		t.Fatalf("the by-ID read was forwarded to bd: %q", data)
 	}
-	if !strings.Contains(stderr.String(), "gcg-abc123") {
-		t.Errorf("the answer does not name the bead; stderr=%q", stderr.String())
+	if !strings.Contains(stdout.String(), resident.ID) {
+		t.Errorf("the answer does not name the bead; stdout=%q", stdout.String())
 	}
 }
 
