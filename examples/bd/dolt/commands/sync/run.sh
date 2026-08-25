@@ -297,11 +297,13 @@ classify_count() {
 # select_remote <db> <pairs> — apply the remote-selection policy (see the
 # "Remote resolution" header doc) over newline-separated "name|url" candidate
 # pairs and emit the winner as "name|url". Emits nothing for zero candidates,
-# or the literal token "AMBIGUOUS" when multiple non-local candidates exist
-# with no override to break the tie. Never depends on the input's row order:
-# candidates are sorted by name before any policy rule is applied. Returns 1
-# (with its own stderr message) only when GC_DOLT_REMOTE_<DB> is set but
-# names a remote that is not among the candidates.
+# or the literal token "AMBIGUOUS" when no candidate is local and no override
+# was given — regardless of how many candidates there are, including exactly
+# one: a sole remote is not auto-selected unless it is local. Never depends
+# on the input's row order: candidates are sorted by name before any policy
+# rule is applied. Returns 1 (with its own stderr message) only when
+# GC_DOLT_REMOTE_<DB> is set but names a remote that is not among the
+# candidates.
 select_remote() {
   sr_db="$1"
   sr_pairs="$2"
@@ -317,12 +319,6 @@ select_remote() {
       return 1
     fi
     printf '%s\n' "$sr_match"
-    return 0
-  fi
-
-  sr_count=$(printf '%s\n' "$sr_sorted" | wc -l | tr -d '[:space:]')
-  if [ "$sr_count" -eq 1 ]; then
-    printf '%s\n' "$sr_sorted"
     return 0
   fi
 

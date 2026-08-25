@@ -73,7 +73,7 @@ func fakeDoltHeader(logPath, branch string) string {
 		"printf '%s\\n' \"$*\" >> \"" + logPath + "\"\n" +
 		"case \"$*\" in\n" +
 		"  *\"SELECT name, url FROM dolt_remotes ORDER BY name\"*)\n" +
-		"    printf 'name,url\\norigin,https://example.invalid/repo\\n' ; exit 0 ;;\n" +
+		"    printf 'name,url\\norigin,file:///example.invalid/repo\\n' ; exit 0 ;;\n" +
 		"  *\"SELECT active_branch()\"*)\n" +
 		"    printf 'active_branch()\\n" + branch + "\\n' ; exit 0 ;;\n"
 }
