@@ -1747,6 +1747,11 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 				w("  Bead " + opts.BeadOrFormula + " is already routed to " + a.QualifiedName() + ".")
 				w("  Without --force, sling would skip routing (exit 0).")
 				w("")
+			} else if check.Conflict != nil {
+				w("Routing conflict:")
+				w("  " + check.Conflict.Error() + ".")
+				w("  Without --force, sling would refuse to route (exit 1).")
+				w("")
 			}
 		}
 

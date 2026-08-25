@@ -7421,6 +7421,52 @@ func TestDryRunIdempotentBead(t *testing.T) {
 	}
 }
 
+// TestDryRunRoutingConflict pins the dry-run preview for a bead whose
+// gc.routed_to metadata already names a different target: the preview must
+// surface a "Routing conflict:" section describing the refusal instead of
+// silently previewing an overwrite, while still exiting 0 and executing no
+// side effects (dry-run never hard-errors).
+func TestDryRunRoutingConflict(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "deacon", MaxActiveSessions: intPtr(1)}
+	q := &fakeQuerier{
+		bead: beads.Bead{
+			ID:     "BL-42",
+			Title:  "Login page",
+			Status: "open",
+			Metadata: map[string]string{
+				"gc.routed_to": "rig/polecat",
+			},
+		},
+	}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.Store = seededStore("BL-42")
+	opts := testOpts(a, "BL-42")
+	opts.DryRun = true
+	code := doSling(opts, deps, q, stdout, stderr)
+
+	// Dry-run never hard-errors; it renders the conflict as a preview section.
+	if code != 0 {
+		t.Fatalf("returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Routing conflict:") {
+		t.Errorf("stdout missing Routing conflict section: %s", out)
+	}
+	if !strings.Contains(out, "Without --force, sling would refuse to route (exit 1).") {
+		t.Errorf("stdout should describe the refusal: %s", out)
+	}
+	if !strings.Contains(out, "No side effects executed (--dry-run).") {
+		t.Errorf("stdout missing footer: %s", out)
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("got %d runner calls, want 0: %v", len(runner.calls), runner.calls)
+	}
+}
+
 // --- Cross-rig guard tests ---
 
 func TestRigPrefixForAgentCityWide(t *testing.T) {

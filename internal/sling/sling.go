@@ -1658,6 +1658,10 @@ func PromoteWorkflowLaunchBead(store beads.Store, beadID string) error {
 type BeadCheckResult struct {
 	Idempotent bool
 	Warnings   []string
+	// Conflict is non-nil when the bead's gc.routed_to metadata already
+	// names a target other than the one being checked. Callers with a
+	// custom SlingQuery never see this populated — see routedStateWarnings.
+	Conflict error
 }
 
 // BeadCheckOptions configures pre-flight bead state checks for a route.

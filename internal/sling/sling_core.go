@@ -118,7 +118,11 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 
 	// Pre-flight idempotency check.
 	if shouldCheckBeadState(opts) {
-		if resolveIdempotentShortCircuit(opts, a, deps, querier, &result) {
+		idempotent, err := resolveIdempotentShortCircuit(opts, a, deps, querier, &result)
+		if err != nil {
+			return result, err
+		}
+		if idempotent {
 			return result, nil
 		}
 	}
@@ -169,10 +173,17 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 // formula still attaches. If the molecule-attachment probe cannot complete, the
 // fail-closed idempotent state is preserved and the probe failure is surfaced
 // as a bead warning rather than silently flipping into a mutating attach path.
-func resolveIdempotentShortCircuit(opts SlingOpts, a config.Agent, deps SlingDeps, querier BeadQuerier, result *SlingResult) bool {
+// A non-nil error reports a routing conflict (gc.routed_to already names a
+// different target): the caller must hard-refuse rather than proceed, except
+// during a dry-run preview, which never hard-errors and instead surfaces the
+// conflict as a rendered section.
+func resolveIdempotentShortCircuit(opts SlingOpts, a config.Agent, deps SlingDeps, querier BeadQuerier, result *SlingResult) (bool, error) {
 	check := CheckBeadStateWithOptions(querier, opts.BeadOrFormula, a, deps, BeadCheckOptions{
 		NoConvoy: opts.NoConvoy,
 	})
+	if check.Conflict != nil && !opts.DryRun {
+		return false, check.Conflict
+	}
 	if check.Idempotent {
 		decision, probeErr := onFormulaNeedsAttachment(opts, querier, deps)
 		switch {
@@ -210,7 +221,7 @@ func resolveIdempotentShortCircuit(opts SlingOpts, a config.Agent, deps SlingDep
 	}
 	if !check.Idempotent {
 		result.BeadWarnings = append(result.BeadWarnings, check.Warnings...)
-		return false
+		return false, nil
 	}
 	result.Idempotent = true
 	result.DryRun = opts.DryRun
@@ -226,7 +237,7 @@ func resolveIdempotentShortCircuit(opts SlingOpts, a config.Agent, deps SlingDep
 	if opts.Nudge && !opts.DryRun {
 		result.NudgeAgent = &a
 	}
-	return true
+	return true, nil
 }
 
 // rigSuspended reports whether the named rig is marked suspended in config.

@@ -448,7 +448,8 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 	}
 
 	if IsCustomSlingQuery(a) {
-		return BeadCheckResult{Warnings: routedStateWarnings(b, beadID)}
+		warnings, _ := routedStateWarnings(b, beadID)
+		return BeadCheckResult{Warnings: warnings}
 	}
 
 	target := agentutil.RoutedToIdentity(&a)
@@ -466,7 +467,8 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 		if b.Assignee == target {
 			return resolveConvoyRecovery(q, b, deps, opts, beadID)
 		}
-		return BeadCheckResult{Warnings: routedStateWarnings(b, beadID)}
+		warnings, conflict := routedStateWarnings(b, beadID)
+		return BeadCheckResult{Warnings: warnings, Conflict: conflict}
 	}
 
 	if strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) == "" {
@@ -477,25 +479,35 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 			}
 		}
 	}
-	return BeadCheckResult{Warnings: routedStateWarnings(b, beadID)}
+	warnings, conflict := routedStateWarnings(b, beadID)
+	return BeadCheckResult{Warnings: warnings, Conflict: conflict}
 }
 
 // routedStateWarnings reports human-readable warnings describing any existing
 // routing state on b (assignee, gc.routed_to metadata, and pool: labels) that
-// would collide with a fresh sling of beadID. It returns nil when b carries no
-// such state.
-func routedStateWarnings(b beads.Bead, beadID string) []string {
+// would collide with a fresh sling of beadID. It returns nil warnings when b
+// carries no such state.
+//
+// The error return reports a routing conflict: a non-blank gc.routed_to that
+// names a different target than the one about to be routed. Callers that
+// invoke this after already confirming gc.routed_to differs from their own
+// target (the only callers that reach it) can treat a non-nil error as that
+// conflict; callers for agents with a custom SlingQuery deliberately discard
+// it, since those agents don't key routing off gc.routed_to equality.
+func routedStateWarnings(b beads.Bead, beadID string) ([]string, error) {
 	var warnings []string
+	var conflict error
 	if b.Assignee != "" {
 		warnings = append(warnings, fmt.Sprintf("warning: bead %s already assigned to %q", beadID, b.Assignee))
 	}
 	if routedTo := strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]); routedTo != "" {
 		warnings = append(warnings, fmt.Sprintf("warning: bead %s already routed to %q", beadID, routedTo))
+		conflict = fmt.Errorf("gc sling: bead %s already routed to %q; use --force to override", beadID, routedTo)
 	}
 	for _, l := range b.Labels {
 		if strings.HasPrefix(l, "pool:") {
 			warnings = append(warnings, fmt.Sprintf("warning: bead %s already has pool label %q", beadID, l))
 		}
 	}
-	return warnings
+	return warnings, conflict
 }

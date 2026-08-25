@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -87,4 +88,87 @@ func TestAttachFormulaToBeadEntryShapes(t *testing.T) {
 			t.Errorf("error = %q, want prefix %q", err.Error(), want)
 		}
 	})
+}
+
+// TestDoSlingRefusesConflictingRoute pins the hard-refuse behavior: slinging
+// a bead whose gc.routed_to metadata already names a different target must
+// fail, and must leave the existing route untouched, when --force is not
+// passed.
+func TestDoSlingRefusesConflictingRoute(t *testing.T) {
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	a := config.Agent{Name: "deacon", MaxActiveSessions: intPtr(1)}
+	routed := beads.Bead{
+		ID:     "BL-1",
+		Title:  "BL-1",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey: "rig/polecat",
+		},
+	}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{routed}, nil)
+	router := &fakeBeadRouter{}
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	deps.Router = router
+	deps.Store = store
+
+	_, err := DoSling(SlingOpts{Target: a, BeadOrFormula: "BL-1"}, deps, store)
+	if err == nil {
+		t.Fatal("expected DoSling to refuse a conflicting gc.routed_to overwrite without --force")
+	}
+
+	// The actual gc.routed_to write is owned by the injected Router (in
+	// production, cmd/gc's cliBeadRouter); the refusal must happen in
+	// DoSling's own pre-flight, before Router.Route is ever called.
+	if len(router.routed) != 0 {
+		t.Fatalf("expected DoSling to refuse before delegating to the router, got %d route call(s)", len(router.routed))
+	}
+
+	got, getErr := store.Get("BL-1")
+	if getErr != nil {
+		t.Fatalf("store.Get: %v", getErr)
+	}
+	if got.Metadata[beadmeta.RoutedToMetadataKey] != "rig/polecat" {
+		t.Errorf("gc.routed_to = %q, want unchanged %q", got.Metadata[beadmeta.RoutedToMetadataKey], "rig/polecat")
+	}
+}
+
+// TestDoSlingForceOverridesConflictingRoute pins the --force escape hatch:
+// with --force, a conflicting gc.routed_to is overwritten and DoSling
+// succeeds.
+func TestDoSlingForceOverridesConflictingRoute(t *testing.T) {
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	a := config.Agent{Name: "deacon", MaxActiveSessions: intPtr(1)}
+	routed := beads.Bead{
+		ID:     "BL-1",
+		Title:  "BL-1",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey: "rig/polecat",
+		},
+	}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{routed}, nil)
+	router := &fakeBeadRouter{}
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	deps.Router = router
+	deps.Store = store
+
+	_, err := DoSling(SlingOpts{Target: a, BeadOrFormula: "BL-1", Force: true}, deps, store)
+	if err != nil {
+		t.Fatalf("DoSling with --force: %v", err)
+	}
+
+	// The gc.routed_to write itself belongs to the Router implementation (in
+	// production, cmd/gc's cliBeadRouter); what DoSling owns is delegating to
+	// it despite the pre-existing conflicting route.
+	if len(router.routed) != 1 {
+		t.Fatalf("got %d route call(s), want 1", len(router.routed))
+	}
+	if router.routed[0].BeadID != "BL-1" {
+		t.Errorf("routed BeadID = %q, want BL-1", router.routed[0].BeadID)
+	}
+	if router.routed[0].Target != a.QualifiedName() {
+		t.Errorf("routed Target = %q, want %q", router.routed[0].Target, a.QualifiedName())
+	}
 }
