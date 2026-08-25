@@ -396,6 +396,40 @@ func TestStorageGateRefusesAnArrangementItCannotServe(t *testing.T) {
 	}
 }
 
+// TestStorageGateRefusesARelocatedWorkBinding is the same gate applied to the
+// one class whose relocation this build has no way to carry out.
+//
+// infraMigrationClasses excludes work by construction, so nothing in cmd/gc
+// would move the ledger; the saga that could — internal/storebinding's work
+// participants, prepare receipts and provider proofs — has no caller in the
+// binary yet. A city that pointed [storage.classes].work at another binding and
+// STARTED would therefore serve an empty ledger while every bead it owns sat in
+// the work store, unread and unreferenced. Refusing is the only safe answer
+// this build has, and it is the epic's fail-closed rule reaching its hardest
+// case.
+//
+// The shape table above pins storageSplitShapeOf's verdict on this config. That
+// is one function; this is the gate, which is what a starting city actually
+// meets. Nothing between them was tested, so the classification could have been
+// correct and unconsulted.
+func TestStorageGateRefusesARelocatedWorkBinding(t *testing.T) {
+	root := t.TempDir()
+	cfg := infraSplitConfig(filepath.Join(root, "store"))
+	cfg.Storage.Classes.Work = "infra"
+
+	var stderr bytes.Buffer
+	routes, err := storageBootGate(root, cfg, "gc start", nil, &stderr)
+	if err == nil {
+		t.Fatal("a city that moved its work ledger off the reserved binding started; it is now serving a binding that holds none of its work")
+	}
+	if routes != nil {
+		t.Errorf("a refused gate still returned routes %+v", routes)
+	}
+	if !strings.Contains(err.Error(), "whole infrastructure split or none of it") {
+		t.Errorf("the refusal does not say what this build serves: %v", err)
+	}
+}
+
 // TestStorageGateRefusesAnUnconvergedCityAndNamesTheCommand is the core of the
 // boot-refusal design, and it asserts two separate things.
 //
