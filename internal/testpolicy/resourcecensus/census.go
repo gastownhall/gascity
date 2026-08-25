@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,6 +25,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/BurntSushi/toml"
+	"gopkg.in/yaml.v3"
 )
 
 // Resource is a syntax-observable test resource.
@@ -58,6 +60,9 @@ const (
 	ResourceSyscallListen Resource = "syscall_listen"
 	// ResourceTmux counts typed tmux test helpers, production constructors, and literal tmux process calls.
 	ResourceTmux Resource = "tmux"
+	// ResourceTestTarget counts declared go test invocation lines in tracked
+	// build-orchestration files (Makefile, GitHub Actions workflow YAML).
+	ResourceTestTarget Resource = "test_target"
 )
 
 var knownResources = map[Resource]struct{}{
@@ -73,6 +78,7 @@ var knownResources = map[Resource]struct{}{
 	ResourceNetListenPacket: {},
 	ResourceSyscallListen:   {},
 	ResourceTmux:            {},
+	ResourceTestTarget:      {},
 }
 
 // Scope selects the source population counted by a ledger row.
@@ -85,6 +91,9 @@ const (
 	ScopeUntagged Scope = "untagged"
 	// ScopeCmdGCUntagged selects untagged test files beneath cmd/gc.
 	ScopeCmdGCUntagged Scope = "cmd/gc+untagged"
+	// ScopeBuildTargets selects declared go test invocation lines in tracked
+	// build-orchestration files rather than Go test source.
+	ScopeBuildTargets Scope = "build_targets"
 )
 
 type baselineKey struct {
@@ -315,6 +324,19 @@ var bootstrapPolicy = Ledger{
 			Invariant:       "untagged tmux dependency call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "each owning test confines tmux processes and sockets to its isolated namespace and cleanup",
 			MigrationTarget: "P0.4c-tmux",
+			Expires:         "2026-10-01",
+		},
+		{
+			Scope:           ScopeBuildTargets,
+			Resource:        ResourceTestTarget,
+			BaselineCalls:   43,
+			BaselineFiles:   4,
+			ReportedCalls:   43,
+			ReportedFiles:   4,
+			OwnerBead:       "ga-4ag4p2.1",
+			Invariant:       "declared go-test invocation sites in tracked build-orchestration files (Makefile, CI workflow YAML) cannot grow without an explicit, reviewed baseline update",
+			ResourceOwner:   "each new test target's author declares it via a baseline bump with real ownership fields — same contract as every other resource dimension (ga-hpcma0)",
+			MigrationTarget: "n/a — preventive dimension, not paying down inherited debt",
 			Expires:         "2026-10-01",
 		},
 	},
@@ -667,21 +689,25 @@ func scopeContains(scope Scope, occurrence Occurrence) bool {
 		return !occurrence.Tagged
 	case ScopeCmdGCUntagged:
 		return !occurrence.Tagged && strings.HasPrefix(occurrence.Path, "cmd/gc/")
+	case ScopeBuildTargets:
+		return occurrence.Resource == ResourceTestTarget
 	default:
 		return false
 	}
 }
 
-// TrackedGoFiles lists every git-tracked *.go file under root, repository-
-// relative with forward slashes. Listing tracked files rather than walking the
-// filesystem means an untracked nested git worktree checked out under root —
-// the common gitignored worktrees/<bead> pool-slot pattern — contributes
-// nothing: its files live in that worktree's own index, never this one's.
-func TrackedGoFiles(root string) ([]string, error) {
-	cmd := exec.Command("git", "-C", root, "ls-files", "-z", "--", "*.go")
+// gitLsFiles lists git-tracked files under root matching pathspecs,
+// repository-relative with forward slashes. Listing tracked files rather than
+// walking the filesystem means an untracked nested git worktree checked out
+// under root — the common gitignored worktrees/<bead> pool-slot pattern —
+// contributes nothing: its files live in that worktree's own index, never
+// this one's.
+func gitLsFiles(root string, pathspecs ...string) ([]string, error) {
+	args := append([]string{"-C", root, "ls-files", "-z", "--"}, pathspecs...)
+	cmd := exec.Command("git", args...)
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("listing tracked Go source: %w", err)
+		return nil, fmt.Errorf("listing tracked files: %w", err)
 	}
 	parts := strings.Split(string(out), "\x00")
 	files := make([]string, 0, len(parts))
@@ -693,35 +719,185 @@ func TrackedGoFiles(root string) ([]string, error) {
 	return files, nil
 }
 
-// ScanRepository scans the repository's tracked Go test files. Tracked sibling
-// Go source supplies package-level declaration context but is never counted.
+// TrackedGoFiles lists every git-tracked *.go file under root, repository-
+// relative with forward slashes.
+func TrackedGoFiles(root string) ([]string, error) {
+	files, err := gitLsFiles(root, "*.go")
+	if err != nil {
+		return nil, fmt.Errorf("listing tracked Go source: %w", err)
+	}
+	return files, nil
+}
+
+// trackedBuildTargetFiles lists every git-tracked Makefile and GitHub Actions
+// workflow YAML file under root, repository-relative with forward slashes.
+func trackedBuildTargetFiles(root string) ([]string, error) {
+	files, err := gitLsFiles(root, "Makefile", ".github/workflows/*.yml", ".github/workflows/*.yaml")
+	if err != nil {
+		return nil, fmt.Errorf("listing tracked build-orchestration files: %w", err)
+	}
+	return files, nil
+}
+
+// ScanRepository scans the repository's tracked Go test files, plus its
+// tracked build-orchestration files (Makefile, GitHub Actions workflow YAML)
+// for declared go test invocation lines. Tracked sibling Go source supplies
+// package-level declaration context but is never counted.
 func ScanRepository(root string) (Census, error) {
 	files, err := TrackedGoFiles(root)
 	if err != nil {
 		return Census{}, err
 	}
-	return scanFiles(os.DirFS(root), files, reviewedHermeticPackages(bootstrapPolicy.ReviewedHermeticBody))
+	census, err := scanFiles(os.DirFS(root), files, reviewedHermeticPackages(bootstrapPolicy.ReviewedHermeticBody))
+	if err != nil {
+		return Census{}, err
+	}
+	buildTargetFiles, err := trackedBuildTargetFiles(root)
+	if err != nil {
+		return Census{}, err
+	}
+	buildTargetOccurrences, err := scanBuildTargetFiles(os.DirFS(root), buildTargetFiles)
+	if err != nil {
+		return Census{}, err
+	}
+	census.Occurrences = append(census.Occurrences, buildTargetOccurrences...)
+	sortOccurrences(census.Occurrences)
+	return census, nil
 }
 
-// ScanFS scans every *_test.go file in sourceFS. Sibling Go source supplies
-// package-level declaration context but is never counted. ScanFS is intended
-// for hermetic policy fixtures; repository checks use ScanRepository so
-// untracked files do not perturb the checked baseline.
+// ScanFS scans every *_test.go file in sourceFS, plus every Makefile and
+// GitHub Actions workflow YAML file for declared go test invocation lines.
+// Sibling Go source supplies package-level declaration context but is never
+// counted. ScanFS is intended for hermetic policy fixtures; repository checks
+// use ScanRepository so untracked files do not perturb the checked baseline.
 func ScanFS(sourceFS fs.FS) (Census, error) {
 	var files []string
+	var buildTargetFiles []string
 	err := fs.WalkDir(sourceFS, ".", func(name string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if !entry.IsDir() && strings.HasSuffix(name, ".go") {
+		if entry.IsDir() {
+			return nil
+		}
+		if strings.HasSuffix(name, ".go") {
 			files = append(files, filepath.ToSlash(name))
+		}
+		if isBuildTargetFile(name) {
+			buildTargetFiles = append(buildTargetFiles, filepath.ToSlash(name))
 		}
 		return nil
 	})
 	if err != nil {
 		return Census{}, fmt.Errorf("walking test source: %w", err)
 	}
-	return scanFiles(sourceFS, files, nil)
+	census, err := scanFiles(sourceFS, files, nil)
+	if err != nil {
+		return Census{}, err
+	}
+	buildTargetOccurrences, err := scanBuildTargetFiles(sourceFS, buildTargetFiles)
+	if err != nil {
+		return Census{}, err
+	}
+	census.Occurrences = append(census.Occurrences, buildTargetOccurrences...)
+	sortOccurrences(census.Occurrences)
+	return census, nil
+}
+
+// isBuildTargetFile reports whether name is a tracked build-orchestration
+// file the build-target census scans: the repository-root Makefile, or a
+// GitHub Actions workflow YAML file.
+func isBuildTargetFile(name string) bool {
+	if name == "Makefile" {
+		return true
+	}
+	if path.Dir(name) != ".github/workflows" {
+		return false
+	}
+	return strings.HasSuffix(name, ".yml") || strings.HasSuffix(name, ".yaml")
+}
+
+// goTestInvocationPattern matches a `go test` invocation as adjacent,
+// whitespace-separated words. This is literal-text matching, the same
+// fidelity as the pre-AST audit census: it does not parse Makefile recipes or
+// shell, so it cannot distinguish a real invocation from one that merely
+// appears inside a string. It is deliberately scoped to declared recipe/run
+// lines (comments and non-run YAML text are excluded before this pattern
+// ever sees them) to keep that imprecision bounded.
+var goTestInvocationPattern = regexp.MustCompile(`\bgo\s+test\b`)
+
+// workflowFile is the minimal shape of a GitHub Actions workflow needed to
+// find declared step run text. Unrecognized fields are ignored.
+type workflowFile struct {
+	Jobs map[string]workflowJob `yaml:"jobs"`
+}
+
+type workflowJob struct {
+	Steps []workflowStep `yaml:"steps"`
+}
+
+type workflowStep struct {
+	Run string `yaml:"run"`
+}
+
+// lineOccurrences returns one Occurrence per line in text that invokes go
+// test, skipping blank lines and lines whose first non-whitespace content is
+// a comment. requireTabIndent restricts matches to Makefile recipe lines
+// (leading tab, the syntax that marks a line as a recipe rather than a
+// target/variable declaration); workflow run text has no such prefix
+// requirement.
+func lineOccurrences(path, text string, requireTabIndent bool) []Occurrence {
+	var occurrences []Occurrence
+	for _, line := range strings.Split(text, "\n") {
+		if requireTabIndent && !strings.HasPrefix(line, "\t") {
+			continue
+		}
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if goTestInvocationPattern.MatchString(trimmed) {
+			occurrences = append(occurrences, Occurrence{Path: path, Resource: ResourceTestTarget})
+		}
+	}
+	return occurrences
+}
+
+// scanBuildTargetFiles scans Makefile and GitHub Actions workflow YAML files
+// for declared go test invocation lines. Unlike scanFiles, these are not Go
+// source: no AST parsing applies, and every Occurrence is a bare
+// Path/Resource pair — build-orchestration text has no Go package identity,
+// tagging, or runnable ownership to attach.
+func scanBuildTargetFiles(sourceFS fs.FS, names []string) ([]Occurrence, error) {
+	var occurrences []Occurrence
+	for _, name := range names {
+		content, err := fs.ReadFile(sourceFS, name)
+		if err != nil {
+			return nil, fmt.Errorf("reading %s: %w", name, err)
+		}
+		if path.Base(name) == "Makefile" {
+			occurrences = append(occurrences, lineOccurrences(name, string(content), true)...)
+			continue
+		}
+		var workflow workflowFile
+		if err := yaml.Unmarshal(content, &workflow); err != nil {
+			return nil, fmt.Errorf("parsing workflow %s: %w", name, err)
+		}
+		jobNames := make([]string, 0, len(workflow.Jobs))
+		for jobName := range workflow.Jobs {
+			jobNames = append(jobNames, jobName)
+		}
+		sort.Strings(jobNames)
+		for _, jobName := range jobNames {
+			for _, step := range workflow.Jobs[jobName].Steps {
+				if step.Run == "" {
+					continue
+				}
+				occurrences = append(occurrences, lineOccurrences(name, step.Run, false)...)
+			}
+		}
+	}
+	return occurrences, nil
 }
 
 func reviewedHermeticPackages(rows []ReviewedHermeticBody) map[packageKey]struct{} {
@@ -1011,8 +1187,15 @@ func scanFiles(sourceFS fs.FS, names []string, hermeticPackages map[packageKey]s
 		}
 	}
 
-	sort.Slice(census.Occurrences, func(i, j int) bool {
-		left, right := census.Occurrences[i], census.Occurrences[j]
+	sortOccurrences(census.Occurrences)
+	return census, nil
+}
+
+// sortOccurrences sorts occurrences into the deterministic order every
+// census caller relies on: path, then owner, then resource.
+func sortOccurrences(occurrences []Occurrence) {
+	sort.Slice(occurrences, func(i, j int) bool {
+		left, right := occurrences[i], occurrences[j]
 		if left.Path != right.Path {
 			return left.Path < right.Path
 		}
@@ -1021,7 +1204,6 @@ func scanFiles(sourceFS fs.FS, names []string, hermeticPackages map[packageKey]s
 		}
 		return left.Resource < right.Resource
 	})
-	return census, nil
 }
 
 func (p parsedFile) groupKey() packageKey {
@@ -1947,7 +2129,7 @@ func validateBaseline(prefix string, row Baseline, census Census) []string {
 }
 
 func knownScope(scope Scope) bool {
-	return scope == ScopeAll || scope == ScopeUntagged || scope == ScopeCmdGCUntagged
+	return scope == ScopeAll || scope == ScopeUntagged || scope == ScopeCmdGCUntagged || scope == ScopeBuildTargets
 }
 
 func validateOwnership(prefix string, row Baseline, now time.Time) []string {

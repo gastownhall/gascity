@@ -204,6 +204,19 @@ resource_owner = "each owning test confines tmux processes and sockets to its is
 migration_target = "P0.4c-tmux"
 expires = "2026-10-01"
 
+[[debt]]
+scope = "build_targets"
+resource = "test_target"
+baseline_calls = 43
+baseline_files = 4
+reported_calls = 43
+reported_files = 4
+owner_bead = "ga-4ag4p2.1"
+invariant = "declared go-test invocation sites in tracked build-orchestration files (Makefile, CI workflow YAML) cannot grow without an explicit, reviewed baseline update"
+resource_owner = "each new test target's author declares it via a baseline bump with real ownership fields — same contract as every other resource dimension (ga-hpcma0)"
+migration_target = "n/a — preventive dimension, not paying down inherited debt"
+expires = "2026-10-01"
+
 # Exact Medium owners are keyed by source directory, package clause, and
 # top-level Go test identity. Only matching resources lexically inside that
 # declaration leave the Small-debt census; helper bodies and sibling tests do
