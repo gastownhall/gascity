@@ -12299,6 +12299,87 @@ func TestBuildDesiredState_RepairsRigRoutedCityControlWork(t *testing.T) {
 	}
 }
 
+// TestBuildDesiredState_RepairsClassBoundRigRoutedControlWork covers the
+// converged graph->infra-class binding topology `gc storage status` proves
+// live: a P0 retry control bead physically resides in the graph-class binding
+// (relocated there by `gc storage migrate`), but still carries its
+// pre-migration LOGICAL gc.root_store_ref ("rig:fixture") and a stale rig
+// route. On the runtime plane, storeref.Narrow drops every leg but the class
+// binding once the plan touches one (internal/storeref/relevance.go), so the
+// binding candidate is the ONLY leg that can ever see this row — there is no
+// separate "rig:fixture" leg behind it to catch what the binding candidate
+// declines. rootStoreRefMatchesCandidate must therefore treat the class
+// candidate as authoritative for a rig-rooted row it physically serves, or the
+// row is dropped from collectOpenUnassignedRoutedWork entirely: never repaired
+// by repairControlDispatcherRoutesForStoreScope and never counted by
+// openControlDispatcherDemand (e7e7427 already maps class bindings to CITY
+// control scope; this closes the gap that mapping left for rig-logical rows).
+func TestBuildDesiredState_RepairsClassBoundRigRoutedControlWork(t *testing.T) {
+	cityPath := t.TempDir()
+	work := beads.NewMemStore()
+	binding := beads.NewMemStore()
+	routes := splitRoutes(binding)
+	registerResidencyRoutes(cityPath, routes, func() beads.Store { return work })
+	t.Cleanup(func() { unregisterResidencyRoutes(cityPath, routes) })
+
+	control, err := binding.Create(beads.Bead{
+		Title:  "Transcribe order retry",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:         beadmeta.KindWorkflowFinalize,
+			beadmeta.RoutedToMetadataKey:     "fixture/core.control-dispatcher",
+			beadmeta.RootStoreRefMetadataKey: "rig:fixture",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+
+	rigStore := beads.NewMemStore()
+	maxActive := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "fixture", Path: t.TempDir()}},
+		Agents: []config.Agent{
+			{
+				Name:              config.ControlDispatcherAgentName,
+				BindingName:       "core",
+				StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+				MaxActiveSessions: &maxActive,
+			},
+			{
+				Name:              config.ControlDispatcherAgentName,
+				BindingName:       "core",
+				Dir:               "fixture",
+				StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+				MaxActiveSessions: &maxActive,
+			},
+		},
+	}
+
+	// binding is handed as the leading (sessions-class) store, exactly what
+	// buildDesiredState hands the census on a converged split (D6).
+	result := buildDesiredStateWithSessionBeads(
+		"test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), binding,
+		map[string]beads.Store{"fixture": rigStore}, newSessionBeadSnapshot(nil), nil, io.Discard,
+	)
+
+	stored, err := binding.Get(control.ID)
+	if err != nil {
+		t.Fatalf("get control: %v", err)
+	}
+	if got := stored.Metadata[beadmeta.RoutedToMetadataKey]; got != "core.control-dispatcher" {
+		t.Fatalf("stored gc.routed_to = %q, want repaired city route core.control-dispatcher", got)
+	}
+	if got := result.ScaleCheckCounts["core.control-dispatcher"]; got != 1 {
+		t.Fatalf("city dispatcher demand = %d, want 1", got)
+	}
+	if got := result.ScaleCheckCounts["fixture/core.control-dispatcher"]; got != 0 {
+		t.Fatalf("rig dispatcher demand = %d, want 0 for a class-bound control row", got)
+	}
+}
+
 func TestBuildDesiredState_DoesNotWakeRigDispatcherWhenCityRouteRepairFails(t *testing.T) {
 	cityPath := t.TempDir()
 	cityBase := beads.NewMemStore()

@@ -5383,9 +5383,29 @@ func normalizeDemandStoreRef(storeRef string) string {
 // through the city candidate and rig-owned rows only through their named rig.
 // Legacy rows without a canonical ref remain visible through every independent
 // store so same-ID beads in genuinely separate stores are not collapsed.
+//
+// A class-binding candidate is a special case of "authoritative", not an
+// exception to it. The duplicate-view risk this filter exists for is legacy
+// unscoped file-store mode, where two DIFFERENT store handles alias the same
+// physical file; a relocated class binding is never that — it is a distinct
+// physical store `gc storage migrate` moves rows INTO, and `gc storage status`
+// proves it converged. So a row the binding physically serves is never also
+// visible through a second candidate to defer to, city- or rig-logical alike:
+// on the runtime plane Narrow (internal/storeref/relevance.go) drops every
+// leg but the binding once a plan touches one, so it is the only leg that will
+// ever offer the row; on the reconcile plane the binding still holds the row
+// no legacy rig/city store does post-migration. Gating it on rootRig the way a
+// legacy-store candidate is gated would silently drop every rig-logical row a
+// migration relocated into the binding — the row is real, open, routed, and
+// permanently invisible to demand and route repair. e7e7427 already mapped the
+// binding's OWN ref onto city scope for this same reason; this closes the
+// matching gap for rows the binding serves under a still-rig-logical root.
 func rootStoreRefMatchesCandidate(rootStoreRef, candidateStoreRef string) bool {
 	rootRig, rootScoped := storeref.ScopeRigContext(rootStoreRef)
 	if !rootScoped {
+		return true
+	}
+	if storeref.IsClassRef(candidateStoreRef) {
 		return true
 	}
 	candidateRig, candidateScoped := storeref.ScopeRigContext(candidateStoreRef)
