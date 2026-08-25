@@ -375,6 +375,176 @@ func TestNewFileRecorderLeavesUnparseableLegacyArchive(t *testing.T) {
 	}
 }
 
+// TestNewFileRecorderTruncatesNulPaddedTail simulates the unclean-shutdown
+// scenario from gastownhall/gascity#5336: a delayed-allocation filesystem
+// length-extends the active log before flushing, a crash strands a NUL run
+// at the end, and the next open must repair it before appends resume.
+func TestNewFileRecorderTruncatesNulPaddedTail(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	const goodLines = `{"seq":1,"type":"bead.created","actor":"human","subject":"first"}
+{"seq":2,"type":"bead.closed","actor":"human","subject":"last"}
+`
+	nulRun := bytes.Repeat([]byte{0}, 4096)
+	if err := os.WriteFile(path, append([]byte(goodLines), nulRun...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.Record(Event{Type: BeadClosed, Actor: "human", Subject: "post-recovery"})
+	if err := rec.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(stderr.String(), "NUL-padded tail") {
+		t.Errorf("expected stderr to report the NUL-tail truncation, got %q", stderr.String())
+	}
+
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(contents, []byte{0}) {
+		t.Errorf("NUL bytes still present in repaired log:\n%q", contents)
+	}
+
+	events, err := readActiveOnly(path)
+	if err != nil {
+		t.Fatalf("repaired log did not parse cleanly: %v", err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("got %d events, want 3 (2 original + 1 post-recovery); log:\n%q", len(events), contents)
+	}
+	if events[0].Seq != 1 || events[1].Seq != 2 {
+		t.Errorf("original seqs = [%d,%d], want [1,2]", events[0].Seq, events[1].Seq)
+	}
+	if events[2].Seq != 3 {
+		t.Errorf("post-recovery seq = %d, want 3 (continuing monotonically past the repaired tail)", events[2].Seq)
+	}
+}
+
+// TestNewFileRecorderNulTailNoOpOnCleanFile is the regression guard for the
+// truncation logic: a well-formed log (no trailing NUL run) must not be
+// modified at all on open.
+func TestNewFileRecorderNulTailNoOpOnCleanFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	const body = `{"seq":1,"type":"bead.created","actor":"human","subject":"first"}
+{"seq":2,"type":"bead.closed","actor":"human","subject":"last"}
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rec.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if stderr.Len() > 0 {
+		t.Errorf("expected no stderr for a clean file, got %q", stderr.String())
+	}
+
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != body {
+		t.Errorf("clean file was modified:\n got=%q\nwant=%q", contents, body)
+	}
+}
+
+// TestTruncateNulPaddedTailDirect exercises truncateNulPaddedTail directly
+// against edge cases the recorder-level tests above don't isolate: a
+// missing file, an empty file, a file with no newline before its NUL run,
+// and a file whose tail has non-NUL garbage after the last newline (which
+// must be left alone rather than guessed at).
+func TestTruncateNulPaddedTailDirect(t *testing.T) {
+	t.Run("missing file is a no-op", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "events.jsonl")
+		var stderr bytes.Buffer
+		if err := truncateNulPaddedTail(path, &stderr); err != nil {
+			t.Fatalf("truncateNulPaddedTail: %v", err)
+		}
+		if stderr.Len() > 0 {
+			t.Errorf("unexpected stderr: %q", stderr.String())
+		}
+	})
+
+	t.Run("empty file is a no-op", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "events.jsonl")
+		if err := os.WriteFile(path, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var stderr bytes.Buffer
+		if err := truncateNulPaddedTail(path, &stderr); err != nil {
+			t.Fatalf("truncateNulPaddedTail: %v", err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Size() != 0 {
+			t.Errorf("empty file size = %d, want 0", info.Size())
+		}
+	})
+
+	t.Run("NUL run with no preceding newline is left alone", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "events.jsonl")
+		body := bytes.Repeat([]byte{0}, 128)
+		if err := os.WriteFile(path, body, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var stderr bytes.Buffer
+		if err := truncateNulPaddedTail(path, &stderr); err != nil {
+			t.Fatalf("truncateNulPaddedTail: %v", err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Size() != int64(len(body)) {
+			t.Errorf("size = %d, want unchanged %d", info.Size(), len(body))
+		}
+		if stderr.Len() > 0 {
+			t.Errorf("unexpected stderr: %q", stderr.String())
+		}
+	})
+
+	t.Run("non-NUL trailing garbage is left alone", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "events.jsonl")
+		body := []byte("{\"seq\":1,\"type\":\"x\"}\npartial garbage, not NUL")
+		if err := os.WriteFile(path, body, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var stderr bytes.Buffer
+		if err := truncateNulPaddedTail(path, &stderr); err != nil {
+			t.Fatalf("truncateNulPaddedTail: %v", err)
+		}
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(contents) != string(body) {
+			t.Errorf("non-NUL tail was modified:\n got=%q\nwant=%q", contents, body)
+		}
+		if stderr.Len() > 0 {
+			t.Errorf("unexpected stderr: %q", stderr.String())
+		}
+	})
+}
+
 func findArchiveBySeq(t *testing.T, dir string, first, last uint64) (string, archiveInfo) {
 	t.Helper()
 
