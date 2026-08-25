@@ -977,10 +977,39 @@ func graphBindingResidentScope(cityPath string, cfg *config.City, beadID string)
 	return cityStore, cityPath, nil
 }
 
+// findUniqueBeadAcrossStoresView resolves the store view holding beadID, and
+// the row itself, refusing an id that more than one store answers.
+//
+// The binding leg runs in front of the scan for the reason resolveOwningStoreDir
+// states: a relocated class binding is not one of the city's directories, so a
+// directory scan answers a relocated id from the frozen copy the migration
+// retained. That matters more here than for a read — the view this returns is
+// the one delete-source and reopen-source WRITE the source bead's metadata
+// through, and clearing workflow_id on the frozen twin leaves the live row still
+// pointing at a workflow that no longer exists.
+//
+// A binding hit skips the uniqueness rule for the city's own retained copy,
+// which is dual residency working as designed, and still refuses a rig holding
+// the same id, which never is.
 func findUniqueBeadAcrossStoresView(cityPath, beadID string) (convoyStoreView, beads.Bead, error) {
 	cfg, err := loadCityConfig(cityPath, os.Stderr)
 	if err != nil {
 		return convoyStoreView{}, beads.Bead{}, fmt.Errorf("loading city config for bead %q: %w", beadID, err)
+	}
+	owner, ownedByBinding, err := cliByIDBindingOwner(cityPath, beadID)
+	if err != nil {
+		return convoyStoreView{}, beads.Bead{}, err
+	}
+	if ownedByBinding {
+		openStore := func(dir string) (beads.Store, error) { return openStoreAtForCity(dir, cityPath) }
+		if err := refuseBindingRigCollision(beadID, cfg, cityPath, openStore); err != nil {
+			return convoyStoreView{}, beads.Bead{}, err
+		}
+		bead, err := beadForOwner(owner, beadID)
+		if err != nil {
+			return convoyStoreView{}, beads.Bead{}, fmt.Errorf("getting bead %q from %s: %w", beadID, convoyBindingViewPath, err)
+		}
+		return convoyStoreView{path: convoyBindingViewPath, store: owner.Store, role: convoyViewClassBinding}, bead, nil
 	}
 	stores, skips, err := openSourceWorkflowStores(cfg, cityPath, beadID)
 	if err != nil {
@@ -1371,7 +1400,47 @@ type workflowStoreMatch struct {
 	beads  []beads.Bead
 	label  string
 	path   string
+	role   convoyViewRole
 	runner beads.CommandRunner
+}
+
+// refuseSweepPastAnUnreadableBinding federates a sweep's store views with the
+// city's relocated class binding, and turns a refused binding into a hard error.
+//
+// This is the one policy difference between a sweep and a read fan-out. A read
+// prints what it reached and names what it could not; a destructive one-shot has
+// no such output — "I could not see the binding's tree" and "the binding's tree
+// is gone" leave the operator believing the same thing, and only one of them is
+// true. So the sweep stops before it touches anything.
+func refuseSweepPastAnUnreadableBinding(cityPath string, views []convoyStoreView, cmdName string) ([]convoyStoreView, error) {
+	merged, err := convoyStoreViewsWithBinding(cityPath, views)
+	if err != nil {
+		return nil, fmt.Errorf("%s: the city's relocated class binding is unreadable, so this would sweep only some of the workflow: %w", cmdName, err)
+	}
+	return merged, nil
+}
+
+// workflowDeleteStoreLabelForView names a store view in sweep output. The class
+// binding has no directory to fall back on, so it is named for what it is.
+func workflowDeleteStoreLabelForView(cfg *config.City, cityPath string, view convoyStoreView) string {
+	if view.isClassBinding() {
+		return convoyBindingViewPath
+	}
+	return workflowDeleteStoreLabel(cfg, cityPath, view.path)
+}
+
+// workflowDeleteRunnerForView returns the `bd` runner for a view's scope, and
+// nil for the class binding.
+//
+// bd runs IN a directory. The binding is a database the city was rebound to, not
+// a directory, so there is nothing to root an invocation at; its beads are
+// deleted through the store handle instead — the same route delete-source has
+// always taken for every store.
+func workflowDeleteRunnerForView(cfg *config.City, cityPath string, view convoyStoreView) beads.CommandRunner {
+	if view.isClassBinding() {
+		return nil
+	}
+	return workflowDeleteRunnerForPath(cfg, cityPath, view.path)
 }
 
 func cmdWorkflowDelete(workflowID string, force, deleteBeads bool, stdout, stderr io.Writer) int {
@@ -1396,6 +1465,15 @@ func cmdWorkflowDelete(workflowID string, force, deleteBeads bool, stdout, stder
 		fmt.Fprintf(stderr, "gc workflow delete: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// The scan enumerates directories, and a relocated binding is not one. Every
+	// row it holds is the row the city is actually running; the copies retained
+	// in the work ledger are frozen twins of the same ids. Both are swept — the
+	// operator is erasing the workflow, not choosing between its copies.
+	stores, err = refuseSweepPastAnUnreadableBinding(cityPath, stores, "gc workflow delete")
+	if err != nil {
+		fmt.Fprintf(stderr, "%v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	for _, info := range stores {
 		found := findWorkflowBeads(info.store, workflowID)
 		if len(found) == 0 {
@@ -1404,9 +1482,10 @@ func cmdWorkflowDelete(workflowID string, force, deleteBeads bool, stdout, stder
 		matches = append(matches, workflowStoreMatch{
 			store:  info.store,
 			beads:  found,
-			label:  workflowDeleteStoreLabel(cfg, cityPath, info.path),
+			label:  workflowDeleteStoreLabelForView(cfg, cityPath, info),
 			path:   info.path,
-			runner: workflowDeleteRunnerForPath(cfg, cityPath, info.path),
+			role:   info.role,
+			runner: workflowDeleteRunnerForView(cfg, cityPath, info),
 		})
 	}
 
@@ -1477,10 +1556,21 @@ func workflowDeleteRunnerForPath(cfg *config.City, cityPath, scopePath string) b
 func deleteWorkflowMatches(matches []workflowStoreMatch) (int, error) {
 	deleted := 0
 	for _, m := range matches {
+		ids := workflowBeadIDs(m.beads)
+		if m.role == convoyViewClassBinding {
+			// No directory, so no bd invocation. The store handle is the whole
+			// access path to a relocated class, and it is the same one
+			// delete-source deletes every match through.
+			n, errs := deleteWorkflowBeads(m.store, ids)
+			deleted += n
+			if len(errs) > 0 {
+				return deleted, fmt.Errorf("%s: %w", m.label, errors.Join(errs...))
+			}
+			continue
+		}
 		if m.runner == nil {
 			return deleted, fmt.Errorf("%s: delete runner missing", m.label)
 		}
-		ids := workflowBeadIDs(m.beads)
 		args := append([]string{"delete"}, ids...)
 		args = append(args, "--cascade", "--force")
 		if _, err := m.runner(m.path, "bd", args...); err != nil {
@@ -1492,12 +1582,37 @@ func deleteWorkflowMatches(matches []workflowStoreMatch) (int, error) {
 }
 
 type sourceWorkflowStoreMatch struct {
-	label  string
-	store  beads.Store
-	roots  []beads.Bead
-	beads  []beads.Bead
-	path   string
-	runner beads.CommandRunner
+	label string
+	store beads.Store
+	roots []beads.Bead
+	beads []beads.Bead
+	path  string
+	// scopePath is the directory whose scope owns these rows. It differs from
+	// path only for the class binding, whose rows are the city's — which is what
+	// keeps a converged city's two matched views from reading as two stores.
+	scopePath string
+	runner    beads.CommandRunner
+}
+
+// distinctSourceWorkflowScopes counts the SCOPES a match set spans.
+//
+// The multi-store guard exists because a live root in a rig and a live root in
+// the city are two different workflows, and delete-source cannot pick one. A
+// converged city's binding is not that case: it and the city's work ledger are
+// one scope holding one workflow in two copies, deliberately, and refusing there
+// would take delete-source away from every city that has migrated.
+func distinctSourceWorkflowScopes(matches []sourceWorkflowStoreMatch) []string {
+	scopes := make([]string, 0, len(matches))
+	for _, match := range matches {
+		scope := match.scopePath
+		if strings.TrimSpace(scope) == "" {
+			scope = match.path
+		}
+		if !slices.ContainsFunc(scopes, func(existing string) bool { return samePath(existing, scope) }) {
+			scopes = append(scopes, scope)
+		}
+	}
+	return scopes
 }
 
 type sourceWorkflowStoreSelector struct {
@@ -1542,7 +1657,7 @@ func resolveSourceWorkflowTarget(cfg *config.City, cityPath, sourceBeadID string
 				return resolvedSourceWorkflowTarget{}, fmt.Errorf("getting bead %q: %w", sourceBeadID, beads.ErrNotFound)
 			}
 		default:
-			return resolvedSourceWorkflowTarget{}, fmt.Errorf("getting bead %q from %s: %w", sourceBeadID, workflowDeleteStoreLabel(cfg, cityPath, view.path), err)
+			return resolvedSourceWorkflowTarget{}, fmt.Errorf("getting bead %q from %s: %w", sourceBeadID, workflowDeleteStoreLabelForView(cfg, cityPath, view), err)
 		}
 		return target, nil
 	}
@@ -1555,7 +1670,7 @@ func resolveSourceWorkflowTarget(cfg *config.City, cityPath, sourceBeadID string
 	}
 	target.storeView = view
 	target.sourceBead = bead
-	target.storeRef = workflowStoreRefForDir(view.path, cityPath, loadedCityName(cfg, cityPath), cfg)
+	target.storeRef = workflowStoreRefForDir(view.scopePath(cityPath), cityPath, loadedCityName(cfg, cityPath), cfg)
 	return target, nil
 }
 
@@ -1662,7 +1777,12 @@ func cmdWorkflowDeleteSource(sourceBeadID string, selector sourceWorkflowStoreSe
 		_, _ = fmt.Fprintf(stderr, "gc workflow delete-source: %v\n", err)
 		return 1
 	}
-	lockScope := target.storeView.path
+	// The lock is taken in a directory, so it follows the view's SCOPE. A
+	// relocated class binding has no directory of its own and its rows are the
+	// city's, so it locks the city — which is also what keeps a binding-resolved
+	// target and a city-resolved one from running concurrently over the same
+	// workflow.
+	lockScope := target.storeView.scopePath(cityPath)
 	if strings.TrimSpace(lockScope) == "" {
 		lockScope = cityPath
 	}
@@ -1682,7 +1802,7 @@ func cmdWorkflowDeleteSource(sourceBeadID string, selector sourceWorkflowStoreSe
 			// rather than silently declaring success.
 			fmt.Fprintln(stderr, "warning:", formatSourceWorkflowStoreSkips(skips)) //nolint:errcheck
 		}
-		if target.storeRef == "" && len(matches) > 1 {
+		if target.storeRef == "" && len(distinctSourceWorkflowScopes(matches)) > 1 {
 			return fmt.Errorf(
 				"source workflow %s has live roots in multiple stores (%s); rerun with --rig <name> or --store-ref <city:name|rig:name>",
 				sourceBeadID,
@@ -1809,7 +1929,7 @@ func cmdWorkflowReopenSource(sourceBeadID string, selector sourceWorkflowStoreSe
 	}
 	ctx, cancel := sourceWorkflowCommandContext()
 	defer cancel()
-	runErr := sourceworkflow.WithLock(ctx, cityPath, target.storeView.path, sourceBeadID, func() error {
+	runErr := sourceworkflow.WithLock(ctx, cityPath, target.storeView.scopePath(cityPath), sourceBeadID, func() error {
 		target, err := resolveSourceWorkflowTarget(cfg, cityPath, sourceBeadID, selector, true)
 		if err != nil {
 			return err
@@ -2028,6 +2148,14 @@ func collectSourceWorkflowMatches(cfg *config.City, cityPath, sourceBeadID, sour
 	if err != nil {
 		return nil, skips, err
 	}
+	// A relocated class binding is not one of the directories the scan
+	// enumerated, and on a converged city it is where the live workflow graph
+	// actually is. Sweeping without it would delete the frozen retained copy and
+	// leave the running one.
+	stores, err = refuseSweepPastAnUnreadableBinding(cityPath, stores, "gc workflow delete-source")
+	if err != nil {
+		return nil, skips, err
+	}
 	return collectSourceWorkflowMatchesFromStores(cfg, cityPath, sourceBeadID, sourceStoreRef, stores, skips)
 }
 
@@ -2069,7 +2197,7 @@ func ensureSelectedSourceStorePresent(cfg *config.City, cityPath, cityName, sour
 	}
 	present := slices.ContainsFunc(stores, func(info convoyStoreView) bool {
 		return info.store != nil &&
-			sourceworkflow.NormalizeSourceStoreRef(workflowStoreRefForDir(info.path, cityPath, cityName, cfg)) == selectedRef
+			sourceworkflow.NormalizeSourceStoreRef(workflowStoreRefForDir(info.scopePath(cityPath), cityPath, cityName, cfg)) == selectedRef
 	})
 	if present {
 		return nil
@@ -2115,7 +2243,7 @@ func (c *sourceWorkflowMatchCollector) collect(currentSourceID, currentSourceSto
 		if err != nil {
 			return err
 		}
-		rootStoreRef := workflowStoreRefForDir(info.path, c.cityPath, c.cityName, c.cfg)
+		rootStoreRef := workflowStoreRefForDir(info.scopePath(c.cityPath), c.cityPath, c.cityName, c.cfg)
 		for _, child := range children {
 			if err := c.collect(child.ID, rootStoreRef); err != nil {
 				return err
@@ -2138,11 +2266,15 @@ func (c *sourceWorkflowMatchCollector) scanStore(index int, info convoyStoreView
 	if _, failed := c.failedStores[index]; failed {
 		return nil, nil
 	}
-	rootStoreRef := workflowStoreRefForDir(info.path, c.cityPath, c.cityName, c.cfg)
-	// Downward delete-source walks key by root store plus source identity. The
-	// upward finalize walk in internal/dispatch only needs source store plus
-	// bead ID because each hop has one parent.
-	visitKey := rootStoreRef + "\x00" + currentSourceStoreRef + "\x00" + currentSourceID
+	rootStoreRef := workflowStoreRefForDir(info.scopePath(c.cityPath), c.cityPath, c.cityName, c.cfg)
+	// Downward delete-source walks key by the store actually being read plus the
+	// source identity. The upward finalize walk in internal/dispatch only needs
+	// source store plus bead ID because each hop has one parent.
+	//
+	// The key is the VIEW, not its store ref: a converged city's binding and its
+	// work ledger share one scope and therefore one ref, so keying on the ref
+	// would mark the pair visited after the first and leave the second unswept.
+	visitKey := info.path + "\x00" + currentSourceStoreRef + "\x00" + currentSourceID
 	if _, ok := c.visited[visitKey]; ok {
 		return nil, nil
 	}
@@ -2180,12 +2312,13 @@ func (c *sourceWorkflowMatchCollector) mergeRootMatches(info convoyStoreView, ro
 		beadSet = append(beadSet, workflowBeads...)
 	}
 	mergeSourceWorkflowMatch(c.matchesByLabel, sourceWorkflowStoreMatch{
-		label:  workflowDeleteStoreLabel(c.cfg, c.cityPath, info.path),
-		store:  info.store,
-		roots:  roots,
-		beads:  uniqueBeads(beadSet),
-		path:   info.path,
-		runner: workflowDeleteRunnerForPath(c.cfg, c.cityPath, info.path),
+		label:     workflowDeleteStoreLabelForView(c.cfg, c.cityPath, info),
+		store:     info.store,
+		roots:     roots,
+		beads:     uniqueBeads(beadSet),
+		path:      info.path,
+		scopePath: info.scopePath(c.cityPath),
+		runner:    workflowDeleteRunnerForView(c.cfg, c.cityPath, info),
 	})
 	return nil
 }
@@ -2195,14 +2328,14 @@ func (c *sourceWorkflowMatchCollector) mergeRootMatches(info convoyStoreView, ro
 // when the failed store is the strict selected source store (so the caller
 // aborts). Otherwise it returns nil so the walk tolerates the failure.
 func (c *sourceWorkflowMatchCollector) recordScanFailure(index int, info convoyStoreView, currentSourceStoreRef, operation string, scanErr error) error {
-	wrapped := fmt.Errorf("%s in %s: %w", operation, workflowDeleteStoreLabel(c.cfg, c.cityPath, info.path), scanErr)
+	wrapped := fmt.Errorf("%s in %s: %w", operation, workflowDeleteStoreLabelForView(c.cfg, c.cityPath, info), scanErr)
 	if c.firstScanErr == nil {
 		c.firstScanErr = wrapped
 	}
 	c.failedStores[index] = struct{}{}
 	c.skips = append(c.skips, sourceWorkflowStoreSkip{path: info.path, err: wrapped})
 
-	rootStoreRef := workflowStoreRefForDir(info.path, c.cityPath, c.cityName, c.cfg)
+	rootStoreRef := workflowStoreRefForDir(info.scopePath(c.cityPath), c.cityPath, c.cityName, c.cfg)
 	selectedStore := strings.TrimSpace(currentSourceStoreRef) != "" &&
 		sourceworkflow.NormalizeSourceStoreRef(rootStoreRef) == sourceworkflow.NormalizeSourceStoreRef(currentSourceStoreRef)
 	if selectedStore {

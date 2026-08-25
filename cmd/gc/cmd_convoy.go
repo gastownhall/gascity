@@ -517,6 +517,27 @@ const (
 // working directory has to check the view's role first.
 const convoyBindingViewPath = "city (class binding)"
 
+// isClassBinding reports whether this view is the city's relocated class
+// binding rather than one of the directories the scan enumerated.
+func (v convoyStoreView) isClassBinding() bool {
+	return v.role == convoyViewClassBinding
+}
+
+// scopePath is the directory whose SCOPE owns the view's rows.
+//
+// Every view but the class binding is itself a scope root, so this is usually
+// the view's own path. The binding is not a directory at all — it is where the
+// city's infrastructure classes were relocated to — and its rows belong to the
+// city scope, which is the answer three separate questions need: which store ref
+// a workflow root implies when it carries none, which directory a source-workflow
+// lock is taken in, and whether two matched views are one scope or two.
+func (v convoyStoreView) scopePath(cityPath string) string {
+	if v.isClassBinding() {
+		return cityPath
+	}
+	return v.path
+}
+
 // convoyStoreViewsWithBinding federates a directory scan's views with the
 // city's relocated class binding, and reports a refusal rather than deciding
 // what to do about it.
