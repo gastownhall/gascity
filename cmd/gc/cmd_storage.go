@@ -470,6 +470,16 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 		return 1
 	}
 	fmt.Fprintf(stdout, "source: %d infrastructure bead(s) retained in the work store\n", len(rows)) //nolint:errcheck // best-effort stdout
+	// Both sides, always — including on the unconverged arm below, where the
+	// binding's zero is the whole point. The source count alone cannot tell an
+	// operator whether a cutover landed, because the migration retains the
+	// source verbatim and that number is the same either way.
+	held, err := infraBindingCensus(target)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	fmt.Fprintf(stdout, "binding: %d infrastructure bead(s) held now\n", held) //nolint:errcheck // best-effort stdout
 
 	if state != infraConvergenceMarked {
 		fmt.Fprintf(stdout, "converged: no\nblocking invariant: boot never migrates; run `%s`\n", storageMigrationCommand) //nolint:errcheck // best-effort stdout

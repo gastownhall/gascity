@@ -368,6 +368,19 @@ type infraMigrationReport struct {
 	ServedBinding  string
 	ServedProvider string
 	ServedNotePath string
+	// ProvenBeads is the size of the proven-copy manifest a serving verdict
+	// rests on, and is set only by the paths that read that manifest to reach
+	// their verdict. Zero on every other outcome means the size was not
+	// established here, not that the copy is empty — a genesis city's zero is
+	// the real answer, and it reaches this field the same way.
+	ProvenBeads int
+	// Fault is the read that stopped this check from reaching a verdict, and is
+	// set only by the uncheckable outcome. It travels on the report for the same
+	// reason Stranded does: the refusal string is the only output a supervisor
+	// records and the only thing an event subscriber receives, so a fault
+	// written to stderr and nowhere else is a fault they cannot see. "The reason
+	// is above" is not an answer to a reader holding one line.
+	Fault error
 	// Target is the resolved destination the outcome is about. Its zero value
 	// belongs to the outcomes that resolved nothing.
 	Target infraBindingTarget
@@ -436,7 +449,17 @@ func infraMigrationOperatorAdvice(report infraMigrationReport, logPrefix string)
 		situation = fmt.Sprintf("%s: this city converged on binding %q, and the retained work store holds %d infrastructure bead(s) the binding cannot read: %s. The named beads are intact in the retained work store. Stop every writer and copy them into the binding with:  %s. Re-check with `gc storage status`, which exits zero once the binding contains them.",
 			logPrefix, report.Target.Binding, len(report.Stranded), infraStrandedIDList(report.Stranded), storageRecoveryInstruction())
 	case infraMigrationUncheckable:
-		situation = fmt.Sprintf("%s: this city's infrastructure binding %q could NOT be verified (reason above), so nothing here proved it is safe to serve from.", logPrefix, report.Target.Binding)
+		// The fault is repeated here rather than left on stderr because this
+		// sentence is what a supervisor records and what the event carries, and
+		// neither of those readers has an "above" to look at. Every producer of
+		// this outcome sets it today; the other arm is what a future one that
+		// forgets degrades to, and it degrades to the old sentence rather than
+		// to a rendered nil.
+		if report.Fault != nil {
+			situation = fmt.Sprintf("%s: this city's infrastructure binding %q could NOT be verified: %v. Nothing here proved it is safe to serve from.", logPrefix, report.Target.Binding, report.Fault)
+		} else {
+			situation = fmt.Sprintf("%s: this city's infrastructure binding %q could NOT be verified (reason above), so nothing here proved it is safe to serve from.", logPrefix, report.Target.Binding)
+		}
 	case infraMigrationBornSplitBlocked:
 		// This arm deliberately does NOT name the recovery command. That verb
 		// resolves its destination through resolveInfraBindingTarget, which
@@ -662,7 +685,7 @@ func checkInfraClassConvergence(cityPath string, cfg *config.City, logPrefix str
 		// over nor the rows that say whether a revert would lose them. The
 		// zero-value report stands, and it withholds the revert.
 		fmt.Fprintf(stderr, "%s: storage class migration: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-		return infraMigrationReport{Outcome: infraMigrationUncheckable}
+		return infraMigrationReport{Outcome: infraMigrationUncheckable, Fault: err}
 	}
 	if !ok {
 		return infraMigrationReport{Outcome: infraMigrationNotConfigured}
@@ -686,7 +709,9 @@ func checkInfraClassConvergence(cityPath string, cfg *config.City, logPrefix str
 func inspectInfraConvergence(cityPath string, target infraBindingTarget, logPrefix string, stderr io.Writer) infraMigrationReport {
 	say := func(outcome infraMigrationOutcome, err error) infraMigrationReport {
 		fmt.Fprintf(stderr, "%s: storage class migration: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-		return infraMigrationReport{Outcome: outcome}
+		// The fault rides along so the outcome that could not decide can say what
+		// stopped it, wherever that outcome is later rendered.
+		return infraMigrationReport{Outcome: outcome, Fault: err}
 	}
 
 	if blocked, ok := servedBindingNoteHold(cityPath, target.Binding, config.StorageProviderSQLiteBeads, target.Database); ok {
@@ -842,6 +867,41 @@ func infraBindingHoldsNothing(target infraBindingTarget) (bool, error) {
 	return len(rows) == 0, nil
 }
 
+// infraBindingCensus counts what the binding holds right now, without creating
+// it.
+//
+// The retained source cannot answer whether a cutover landed: the migration
+// copies and keeps, so the source census reads the same before and after a
+// successful one. The manifest cannot answer it either — it records what the
+// copy was proven to deliver at cutover, which is the past. Only the binding's
+// own count says what is being served today, and the two diverge the moment
+// anything writes to or reaps from the binding.
+//
+// An absent database is zero rather than an error, for the same reason
+// infraBindingHoldsNothing refuses to open one: opening creates it, and a
+// report that creates the database it is asked about would leave a store behind
+// on a city that never cut over. Any other failure is returned rather than
+// reported as zero, because a count nothing could read is not a count of zero.
+func infraBindingCensus(target infraBindingTarget) (int, error) {
+	present, err := infraPathExists(target.Database)
+	if err != nil {
+		return 0, fmt.Errorf("reading the binding database %s: %w", target.Database, err)
+	}
+	if !present {
+		return 0, nil
+	}
+	store, err := openInfraDestination(target)
+	if err != nil {
+		return 0, fmt.Errorf("opening the binding %q at %s: %w", target.Binding, target.Database, err)
+	}
+	defer closeBeadStoreHandle(store) //nolint:errcheck // best-effort close
+	rows, err := store.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
+	if err != nil {
+		return 0, fmt.Errorf("listing the binding %s: %w", target.Database, err)
+	}
+	return len(rows), nil
+}
+
 // infraBindingRootEnumerable reports whether this boot could look inside the
 // binding root at all, and is the precondition on every absence read under it.
 //
@@ -915,7 +975,9 @@ func infraBindingRootEnumerable(root string) error {
 func runInfraClassMigration(cityPath string, target infraBindingTarget, logPrefix string, stderr io.Writer) infraMigrationReport {
 	say := func(outcome infraMigrationOutcome, err error) infraMigrationReport {
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-		return infraMigrationReport{Outcome: outcome}
+		// The fault rides along so the outcome that could not decide can say what
+		// stopped it, wherever that outcome is later rendered.
+		return infraMigrationReport{Outcome: outcome, Fault: err}
 	}
 
 	// A served-binding note naming any other binding is a hold on this whole
@@ -1010,7 +1072,10 @@ func runInfraClassMigration(cityPath string, target infraBindingTarget, logPrefi
 	}
 	fmt.Fprintf(stderr, "%s: infrastructure classes migrated to %s (%d beads copied, source retained)\n", //nolint:errcheck // best-effort stderr
 		logPrefix, target.Database, imported)
-	return infraMigrationReport{Outcome: infraMigrationConverged}
+	// The manifest's size rather than the import count: the manifest is what
+	// every later verdict re-reads, so reporting anything else here would make
+	// the cutover's own event disagree with every boot that follows it.
+	return infraMigrationReport{Outcome: infraMigrationConverged, ProvenBeads: len(proven)}
 }
 
 // infraConvergenceState is what the binding root says about whether this city
@@ -1098,14 +1163,18 @@ func confirmInfraConvergence(cityPath string, target infraBindingTarget, logPref
 		// write this exists to name. Say which it is instead.
 		fmt.Fprintf(stderr, "%s: %s converged before %s was recorded, so stranded-write detection is OFF for this city. Nothing distinguishes a bead the copy never carried from one the binding's own GC has since collected. Re-converge the binding to restore the check.\n", //nolint:errcheck // best-effort stderr
 			logPrefix, target.Database, target.ManifestPath())
-		return infraMigrationReport{Outcome: infraMigrationUncheckable}
+		return infraMigrationReport{
+			Outcome: infraMigrationUncheckable,
+			Fault: fmt.Errorf("%s converged before %s was recorded, so stranded-write detection is off for this city; re-converge the binding to restore the check",
+				target.Database, target.ManifestPath()),
+		}
 	}
 	gap, err := classifyInfraContainmentGap(cityPath, target, proven)
 	if err != nil {
 		return reportUncheckableConvergence(target, logPrefix, stderr, err)
 	}
 	if len(gap.Stranded) == 0 {
-		return infraMigrationReport{Outcome: infraMigrationConverged}
+		return infraMigrationReport{Outcome: infraMigrationConverged, ProvenBeads: len(proven)}
 	}
 	// The removed-since count is context for reading the strand, not a second
 	// alarm: on a city whose wisp GC has run it is large and entirely expected,
@@ -1135,7 +1204,11 @@ func confirmInfraConvergence(cityPath string, target infraBindingTarget, logPref
 func reportUncheckableConvergence(target infraBindingTarget, logPrefix string, stderr io.Writer, cause error) infraMigrationReport {
 	fmt.Fprintf(stderr, "%s: %s converged (%s records it) and this could NOT be re-checked for stranded writes: %v. That is a failure of the check, not evidence the copy never happened. Resolve the fault and start again.\n", //nolint:errcheck // best-effort stderr
 		logPrefix, target.Database, target.MarkerPath(), cause)
-	return infraMigrationReport{Outcome: infraMigrationUncheckable}
+	return infraMigrationReport{
+		Outcome: infraMigrationUncheckable,
+		Fault: fmt.Errorf("%s converged (%s records it) and the stranded-write re-check could not run: %w",
+			target.Database, target.MarkerPath(), cause),
+	}
 }
 
 // infraContainmentGap is what one containment re-check found: the source infra

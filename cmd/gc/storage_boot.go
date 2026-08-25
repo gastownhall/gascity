@@ -253,6 +253,7 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 			recordStorageBindingOutcome(rec, blocked, advice)
 			return nil, errors.New(advice)
 		}
+		recordStorageBindingOutcome(rec, infraMigrationReport{Outcome: infraMigrationNotConfigured}, "")
 		return nil, nil
 	}
 
@@ -288,6 +289,11 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 			recordStorageBindingOutcome(rec, blocked, advice)
 			return nil, errors.New(advice)
 		}
+		// Same verdict as the absent section above, and deliberately the same
+		// event: an operator who reverted by re-pointing every class and one who
+		// deleted the section have arrived at the same place, and a subscriber
+		// should not have to know which edit they made to read it.
+		recordStorageBindingOutcome(rec, infraMigrationReport{Outcome: infraMigrationNotConfigured}, "")
 		return nil, nil
 	}
 
@@ -578,13 +584,13 @@ func checkBornSplitDiscipline(cityPath string, logPrefix string, stderr io.Write
 	source, err := openInfraMigrationSource(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: born-split check: opening the work store: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-		return infraMigrationReport{Outcome: infraMigrationUncheckable}
+		return infraMigrationReport{Outcome: infraMigrationUncheckable, Fault: fmt.Errorf("born-split check: opening the work store: %w", err)}
 	}
 	defer closeBeadStoreHandle(source) //nolint:errcheck // best-effort close
 	infra, err := readInfraSnapshot(source)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: born-split check: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-		return infraMigrationReport{Outcome: infraMigrationUncheckable}
+		return infraMigrationReport{Outcome: infraMigrationUncheckable, Fault: fmt.Errorf("born-split check: %w", err)}
 	}
 	if len(infra) == 0 {
 		return infraMigrationReport{Outcome: infraMigrationConverged}
@@ -617,10 +623,17 @@ func plannedBindingOpener(plan *storebinding.StoragePlan, name string) storebind
 }
 
 // storageBindingEventTypes maps a migration outcome to the event that reports
-// it. Outcomes with no entry are not events: not-configured describes a city
-// that was never asked, and stranded is carried inside the refusal that names
-// the ids.
+// it. Every outcome has one, and TestEveryMigrationOutcomeReachesARegisteredEventType
+// keeps it that way: an unmapped outcome publishes nothing and does so silently,
+// so a subscriber gating a deploy would read a verdict that was reached as no
+// verdict at all.
+//
+// Several refusals share the unconverged type on purpose — a stranded city, a
+// blocked born split and a blocked genesis are all "config and data disagree",
+// and the sentence in the payload's invariant is what distinguishes them. The
+// distinct types are the ones a subscriber would branch on rather than read.
 var storageBindingEventTypes = map[infraMigrationOutcome]string{
+	infraMigrationNotConfigured:    events.StorageBindingNotConfigured,
 	infraMigrationConverged:        events.StorageBindingConverged,
 	infraMigrationGenesis:          events.StorageBindingGenesis,
 	infraMigrationUnconverged:      events.StorageBindingUnconverged,
@@ -644,10 +657,11 @@ func recordStorageBindingOutcome(rec events.Recorder, report infraMigrationRepor
 		return
 	}
 	raw, err := json.Marshal(storebinding.StorageBindingOutcomePayload{
-		Binding:   report.Target.Binding,
-		Database:  report.Target.Database,
-		Outcome:   report.Outcome.String(),
-		Invariant: invariant,
+		Binding:     report.Target.Binding,
+		Database:    report.Target.Database,
+		Outcome:     report.Outcome.String(),
+		Invariant:   invariant,
+		ProvenBeads: report.ProvenBeads,
 	})
 	if err != nil {
 		return

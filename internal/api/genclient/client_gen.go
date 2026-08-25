@@ -5085,10 +5085,11 @@ type StatusWorkCounts struct {
 
 // StorageBindingOutcomePayload defines model for StorageBindingOutcomePayload.
 type StorageBindingOutcomePayload struct {
-	Binding   string `json:"binding"`
-	Database  string `json:"database"`
-	Invariant string `json:"invariant"`
-	Outcome   string `json:"outcome"`
+	Binding     string `json:"binding"`
+	Database    string `json:"database"`
+	Invariant   string `json:"invariant"`
+	Outcome     string `json:"outcome"`
+	ProvenBeads int64  `json:"proven_beads"`
 }
 
 // StoreDiskCriticalPayload defines model for StoreDiskCriticalPayload.
@@ -6646,6 +6647,22 @@ type TypedEventStreamEnvelopeStorageBindingConverged struct {
 
 // TypedEventStreamEnvelopeStorageBindingGenesis defines model for TypedEventStreamEnvelopeStorageBindingGenesis.
 type TypedEventStreamEnvelopeStorageBindingGenesis struct {
+	Actor            string                       `json:"actor"`
+	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
+	Message          *string                      `json:"message,omitempty"`
+	Payload          StorageBindingOutcomePayload `json:"payload"`
+	RunId            *string                      `json:"run_id,omitempty"`
+	Seq              int64                        `json:"seq"`
+	SessionId        *string                      `json:"session_id,omitempty"`
+	StepId           *string                      `json:"step_id,omitempty"`
+	Subject          *string                      `json:"subject,omitempty"`
+	Ts               time.Time                    `json:"ts"`
+	Type             string                       `json:"type"`
+	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeStorageBindingNotConfigured defines model for TypedEventStreamEnvelopeStorageBindingNotConfigured.
+type TypedEventStreamEnvelopeStorageBindingNotConfigured struct {
 	Actor            string                       `json:"actor"`
 	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
 	Message          *string                      `json:"message,omitempty"`
@@ -8239,6 +8256,23 @@ type TypedTaggedEventStreamEnvelopeStorageBindingConverged struct {
 
 // TypedTaggedEventStreamEnvelopeStorageBindingGenesis defines model for TypedTaggedEventStreamEnvelopeStorageBindingGenesis.
 type TypedTaggedEventStreamEnvelopeStorageBindingGenesis struct {
+	Actor            string                       `json:"actor"`
+	City             string                       `json:"city"`
+	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
+	Message          *string                      `json:"message,omitempty"`
+	Payload          StorageBindingOutcomePayload `json:"payload"`
+	RunId            *string                      `json:"run_id,omitempty"`
+	Seq              int64                        `json:"seq"`
+	SessionId        *string                      `json:"session_id,omitempty"`
+	StepId           *string                      `json:"step_id,omitempty"`
+	Subject          *string                      `json:"subject,omitempty"`
+	Ts               time.Time                    `json:"ts"`
+	Type             string                       `json:"type"`
+	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured defines model for TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured.
+type TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured struct {
 	Actor            string                       `json:"actor"`
 	City             string                       `json:"city"`
 	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
@@ -15390,6 +15424,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeStorageBindingGe
 	return err
 }
 
+// AsTypedEventStreamEnvelopeStorageBindingNotConfigured returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeStorageBindingNotConfigured
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeStorageBindingNotConfigured() (TypedEventStreamEnvelopeStorageBindingNotConfigured, error) {
+	var body TypedEventStreamEnvelopeStorageBindingNotConfigured
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeStorageBindingNotConfigured overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeStorageBindingNotConfigured
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeStorageBindingNotConfigured(v TypedEventStreamEnvelopeStorageBindingNotConfigured) error {
+	v.Type = "storage.binding.not-configured"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeStorageBindingNotConfigured performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeStorageBindingNotConfigured
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeStorageBindingNotConfigured(v TypedEventStreamEnvelopeStorageBindingNotConfigured) error {
+	v.Type = "storage.binding.not-configured"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeStorageBindingUncheckable returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeStorageBindingUncheckable
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeStorageBindingUncheckable() (TypedEventStreamEnvelopeStorageBindingUncheckable, error) {
 	var body TypedEventStreamEnvelopeStorageBindingUncheckable
@@ -15854,6 +15916,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeStorageBindingConverged()
 	case "storage.binding.genesis":
 		return t.AsTypedEventStreamEnvelopeStorageBindingGenesis()
+	case "storage.binding.not-configured":
+		return t.AsTypedEventStreamEnvelopeStorageBindingNotConfigured()
 	case "storage.binding.uncheckable":
 		return t.AsTypedEventStreamEnvelopeStorageBindingUncheckable()
 	case "storage.binding.unconverged":
@@ -18239,6 +18303,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeStor
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeStorageBindingNotConfigured returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeStorageBindingNotConfigured() (TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured, error) {
+	var body TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeStorageBindingNotConfigured overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeStorageBindingNotConfigured(v TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured) error {
+	v.Type = "storage.binding.not-configured"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeStorageBindingNotConfigured performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeStorageBindingNotConfigured(v TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured) error {
+	v.Type = "storage.binding.not-configured"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeStorageBindingUncheckable returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeStorageBindingUncheckable
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeStorageBindingUncheckable() (TypedTaggedEventStreamEnvelopeStorageBindingUncheckable, error) {
 	var body TypedTaggedEventStreamEnvelopeStorageBindingUncheckable
@@ -18703,6 +18795,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeStorageBindingConverged()
 	case "storage.binding.genesis":
 		return t.AsTypedTaggedEventStreamEnvelopeStorageBindingGenesis()
+	case "storage.binding.not-configured":
+		return t.AsTypedTaggedEventStreamEnvelopeStorageBindingNotConfigured()
 	case "storage.binding.uncheckable":
 		return t.AsTypedTaggedEventStreamEnvelopeStorageBindingUncheckable()
 	case "storage.binding.unconverged":
