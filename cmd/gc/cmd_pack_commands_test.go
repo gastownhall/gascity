@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -260,6 +261,58 @@ func TestLegacyPackCommandHelpFlagUsesBuiltInHelp(t *testing.T) {
 	}
 	if strings.Contains(out, "hello from mypack") {
 		t.Fatalf("help should not execute the pack command, got:\n%s", out)
+	}
+}
+
+// TestDiscoveredCommandArgvExcludesGlobalFlags reproduces gastownhall/gascity
+// bead ga-h3g3db: `gc --city <path> <pack> <cmd> --commit ABC --dir /tmp`
+// must hand the pack script argv `--commit ABC --dir /tmp`, not gc's own
+// --city flag and value prepended to it. Uses the same root-pack (schema 2,
+// directory-convention) layout proven by TestNewRootCmdExposesRootPackCommands,
+// but drives the real run() entrypoint with an explicit --city flag (as in
+// the bug repro) instead of chdir+env, and the probe script writes its raw
+// "$@" to a file (rather than stdout) since run()'s stdout plumbing does its
+// own buffering for JSON-mode detection.
+func TestDiscoveredCommandArgvExcludesGlobalFlags(t *testing.T) {
+	dir := t.TempDir()
+
+	cityPath := filepath.Join(dir, "city")
+	if err := os.MkdirAll(filepath.Join(cityPath, "commands", "argprobe"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "pack.toml"), []byte("[pack]\nname = \"probe\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	capturePath := filepath.Join(dir, "argv-capture.txt")
+	probeScript := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$ARGPROBE_CAPTURE_FILE\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "commands", "argprobe", "run.sh"), []byte(probeScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("ARGPROBE_CAPTURE_FILE", capturePath)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"--city", cityPath,
+		"probe", "argprobe",
+		"--commit", "ABC", "--dir", "/tmp",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() exit code = %d, want 0\nstdout=%s\nstderr=%s", code, stdout.String(), stderr.String())
+	}
+
+	captured, err := os.ReadFile(capturePath)
+	if err != nil {
+		t.Fatalf("reading argv capture file: %v", err)
+	}
+	got := strings.Fields(string(captured))
+	want := []string{"--commit", "ABC", "--dir", "/tmp"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("pack command argv = %q, want %q (gc must consume its own --city flag before dispatch)", got, want)
 	}
 }
 
