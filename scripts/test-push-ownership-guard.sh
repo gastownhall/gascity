@@ -330,6 +330,33 @@ test_allow_when_assignee_is_session_name() {
     rm -rf "$repo" "$fbd"
 }
 
+# Regression (ga-kzl21p): a session running as pool instance "<agent>-N" has
+# GC_TEMPLATE set to the bare pool identity "<agent>" (stamped by the SDK at
+# session start regardless of which instance is running — see
+# internal/session/lifecycle.go), but work routed to the whole pool can carry
+# that same bare "<agent>" string as bead.assignee (not any instance-suffixed
+# form). GC_TEMPLATE was missing from the identity-set match, so a session
+# whose GC_AGENT/GC_SESSION_ID/GC_SESSION_NAME are all instance-specific could
+# never match a pool-level assignee — completed, gate-verified work became
+# unpushable with no reassignment and no bypass. Concrete instance: TEMPLATE=
+# gascity/builder, TARGET=gascity/builder-1, assignee=gascity/builder.
+test_allow_when_assignee_is_bare_pool_template() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    # assignee is the bare pool template ("tmpl-x"), matching GC_TEMPLATE —
+    # not GC_AGENT/GC_SESSION_ID/GC_SESSION_NAME, which are all instance-shaped.
+    write_show_json "$fbd" "ga-abc123.1" "in_progress" "tmpl-x" "tmpl-x" "[]"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 5 "sess-id-x" "sess-name-x" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]]; then
+        record_pass "allow/assignee-is-bare-pool-template (rc=0, GC_AGENT/SESSION_ID/SESSION_NAME all differ)"
+    else
+        record_fail "allow/assignee-is-bare-pool-template" "expected rc=0, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
 test_block_on_routed_to_changed() {
     local repo fbd out rc
     repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
@@ -1035,6 +1062,7 @@ run_all() {
     test_block_on_reassigned
     test_allow_when_assignee_is_session_id
     test_allow_when_assignee_is_session_name
+    test_allow_when_assignee_is_bare_pool_template
     test_block_on_routed_to_changed
     test_block_on_hold_mayor
     test_block_on_hold_external

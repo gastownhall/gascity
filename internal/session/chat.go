@@ -1047,17 +1047,46 @@ func (m *Manager) Respond(id string, response runtime.InteractionResponse) error
 	})
 }
 
+// TranscriptLookup classifies why a transcript resolution came back empty, so
+// callers can tell a permanent refusal from a not-yet-written transcript.
+type TranscriptLookup int
+
+const (
+	// TranscriptFound reports that a transcript path was resolved.
+	TranscriptFound TranscriptLookup = iota
+	// TranscriptNoWorkDir reports that the session bead carries no work_dir, so
+	// there is nothing to search — now or ever.
+	TranscriptNoWorkDir
+	// TranscriptAmbiguous reports that more than one session shares the workdir
+	// with no stable session key to tell them apart, so resolution was refused
+	// on purpose rather than coming up empty.
+	TranscriptAmbiguous
+	// TranscriptAbsent reports that the session was unambiguous but no
+	// transcript file exists yet; a later attempt may find one.
+	TranscriptAbsent
+)
+
 // TranscriptPath resolves the best available session transcript file.
 // It prefers session-key-specific lookup and falls back to workdir-based
 // discovery for providers that do not expose a stable session key.
 func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error) {
+	path, _, err := m.TranscriptPathClassified(id, searchPaths)
+	return path, err
+}
+
+// TranscriptPathClassified resolves the best available session transcript file
+// and reports why the resolution came back empty. Callers that must distinguish
+// a permanent refusal (no workdir, or same-workdir ambiguity with no stable
+// session key) from a transcript that simply has not been written yet use this
+// instead of TranscriptPath, whose empty path is overloaded across all three.
+func (m *Manager) TranscriptPathClassified(id string, searchPaths []string) (string, TranscriptLookup, error) {
 	b, _, err := m.loadSessionBead(id, true)
 	if err != nil {
-		return "", err
+		return "", TranscriptAbsent, err
 	}
 	workDir := b.Metadata["work_dir"]
 	if workDir == "" {
-		return "", nil
+		return "", TranscriptNoWorkDir, nil
 	}
 	provider := strings.TrimSpace(b.Metadata["provider_kind"])
 	if provider == "" {
@@ -1067,7 +1096,7 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 		searchPaths = sessionlog.DefaultSearchPaths()
 	}
 	if path := workertranscript.DiscoverKeyedPath(searchPaths, provider, workDir, b.Metadata["session_key"]); path != "" {
-		return path, nil
+		return path, TranscriptFound, nil
 	}
 	// zcode carries no session_key — no session-id flag, no hook plugin — so
 	// the keyed lookup above can never hit for it and the ambiguity guard below
@@ -1080,12 +1109,12 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 		b.Metadata["session_name"],
 		b.Metadata["continuation_epoch"],
 	); path != "" {
-		return path, nil
+		return path, TranscriptFound, nil
 	}
 
 	sameWorkDirSessions, err := m.sameWorkDirSessionBeads(b, provider, workDir)
 	if err != nil {
-		return "", err
+		return "", TranscriptAbsent, err
 	}
 	if len(sameWorkDirSessions) > 1 {
 		sameWorkDirInfos := make([]Info, 0, len(sameWorkDirSessions))
@@ -1093,13 +1122,16 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 			sameWorkDirInfos = append(sameWorkDirInfos, infoFromPersistedBead(s))
 		}
 		if path := ResolveCodexTranscriptBySessionOrder(searchPaths, provider, workDir, b.ID, sameWorkDirInfos); path != "" {
-			return path, nil
+			return path, TranscriptFound, nil
 		}
 		// Without a stable session key, multiple sessions sharing the same
 		// workdir cannot be mapped safely to a single transcript.
-		return "", nil
+		return "", TranscriptAmbiguous, nil
 	}
-	return workertranscript.DiscoverPath(searchPaths, provider, workDir, ""), nil
+	if path := workertranscript.DiscoverPath(searchPaths, provider, workDir, ""); path != "" {
+		return path, TranscriptFound, nil
+	}
+	return "", TranscriptAbsent, nil
 }
 
 // sameWorkDirSessionBeads returns the session beads that share workDir with the

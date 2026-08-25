@@ -66,7 +66,16 @@ func ExecCommandRunner() CommandRunner {
 // applies the provided environment overrides. Explicit keys replace any
 // inherited values from the parent process.
 func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
-	return execCommandRunnerWithEnv(context.Background(), env)
+	return execCommandRunnerWithEnv(context.Background(), env, false)
+}
+
+// ExecCommandRunnerWithEnvWithoutAmbientBeads returns a CommandRunner whose
+// inherited environment excludes the complete BEADS_* namespace before the
+// explicit overrides are applied. Hosted workspace bindings use this so a
+// parent-shell variable added by a newer beads release cannot repoint the
+// selected workspace or replace its credential command.
+func ExecCommandRunnerWithEnvWithoutAmbientBeads(env map[string]string) CommandRunner {
+	return execCommandRunnerWithEnv(context.Background(), env, true)
 }
 
 // ExecCommandRunnerWithEnvContext is like ExecCommandRunnerWithEnv but binds
@@ -75,10 +84,16 @@ func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 // budget (for example the claim-time gc.current_run_id decoration) use this so a
 // slow or stuck bd child cannot outlast that budget.
 func ExecCommandRunnerWithEnvContext(ctx context.Context, env map[string]string) CommandRunner {
-	return execCommandRunnerWithEnv(ctx, env)
+	return execCommandRunnerWithEnv(ctx, env, false)
 }
 
-func execCommandRunnerWithEnv(parent context.Context, env map[string]string) CommandRunner {
+// ExecCommandRunnerWithEnvContextWithoutAmbientBeads is the context-bound
+// form of ExecCommandRunnerWithEnvWithoutAmbientBeads.
+func ExecCommandRunnerWithEnvContextWithoutAmbientBeads(ctx context.Context, env map[string]string) CommandRunner {
+	return execCommandRunnerWithEnv(ctx, env, true)
+}
+
+func execCommandRunnerWithEnv(parent context.Context, env map[string]string, withoutAmbientBeads bool) CommandRunner {
 	return func(dir, name string, args ...string) ([]byte, error) {
 		execName := name
 		if name == "bd" {
@@ -110,7 +125,18 @@ func execCommandRunnerWithEnv(parent context.Context, env map[string]string) Com
 		cmd.Cancel = func() error {
 			return killCommandTree(cmd)
 		}
-		cmd.Env = execEnvFor(name, processEnvSnapshotExcludingNativeDoltOpen(), env)
+		baseEnv := processEnvSnapshotExcludingNativeDoltOpen()
+		overrides := env
+		if withoutAmbientBeads {
+			baseEnv = envWithoutPrefix(baseEnv, beadsEnvPrefix)
+			overrides = maps.Clone(env)
+			for key, value := range overrides {
+				if strings.HasPrefix(key, beadsEnvPrefix) && value == "" {
+					delete(overrides, key)
+				}
+			}
+		}
+		cmd.Env = execEnvFor(name, baseEnv, overrides)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		out, err := cmd.Output()
@@ -720,6 +746,21 @@ func envWithout(environ []string, key string) []string {
 		if !strings.HasPrefix(e, prefix) {
 			out = append(out, e)
 		}
+	}
+	return out
+}
+
+// envWithoutPrefix returns a copy of environ without variables whose names
+// begin with prefix. Matching stops at the first '=' so a value containing the
+// prefix is never mistaken for a variable name.
+func envWithoutPrefix(environ []string, prefix string) []string {
+	out := make([]string, 0, len(environ))
+	for _, entry := range environ {
+		key, _, ok := strings.Cut(entry, "=")
+		if ok && strings.HasPrefix(key, prefix) {
+			continue
+		}
+		out = append(out, entry)
 	}
 	return out
 }

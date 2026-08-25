@@ -123,8 +123,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   626,
-			BaselineFiles:   180,
+			BaselineCalls:   628,
+			BaselineFiles:   182,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-80po0c.2",
@@ -136,8 +136,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   453,
-			BaselineFiles:   164,
+			BaselineCalls:   456,
+			BaselineFiles:   165,
 			ReportedCalls:   447,
 			ReportedFiles:   157,
 			OwnerBead:       "ga-80po0c.2",
@@ -164,8 +164,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   419,
-			BaselineFiles:   121,
+			BaselineCalls:   421,
+			BaselineFiles:   123,
 			ReportedCalls:   380,
 			ReportedFiles:   98,
 			OwnerBead:       "ga-80po0c.2",
@@ -464,8 +464,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   412,
-			BaselineFiles:   117,
+			BaselineCalls:   414,
+			BaselineFiles:   119,
 			ReportedCalls:   394,
 			ReportedFiles:   105,
 			OwnerBead:       "ga-80po0c.2.1",
@@ -672,13 +672,16 @@ func scopeContains(scope Scope, occurrence Occurrence) bool {
 	}
 }
 
-// ScanRepository scans the repository's tracked Go test files. Tracked sibling
-// Go source supplies package-level declaration context but is never counted.
-func ScanRepository(root string) (Census, error) {
+// TrackedGoFiles lists every git-tracked *.go file under root, repository-
+// relative with forward slashes. Listing tracked files rather than walking the
+// filesystem means an untracked nested git worktree checked out under root —
+// the common gitignored worktrees/<bead> pool-slot pattern — contributes
+// nothing: its files live in that worktree's own index, never this one's.
+func TrackedGoFiles(root string) ([]string, error) {
 	cmd := exec.Command("git", "-C", root, "ls-files", "-z", "--", "*.go")
 	out, err := cmd.Output()
 	if err != nil {
-		return Census{}, fmt.Errorf("listing tracked Go source: %w", err)
+		return nil, fmt.Errorf("listing tracked Go source: %w", err)
 	}
 	parts := strings.Split(string(out), "\x00")
 	files := make([]string, 0, len(parts))
@@ -686,6 +689,16 @@ func ScanRepository(root string) (Census, error) {
 		if name != "" {
 			files = append(files, filepath.ToSlash(name))
 		}
+	}
+	return files, nil
+}
+
+// ScanRepository scans the repository's tracked Go test files. Tracked sibling
+// Go source supplies package-level declaration context but is never counted.
+func ScanRepository(root string) (Census, error) {
+	files, err := TrackedGoFiles(root)
+	if err != nil {
+		return Census{}, err
 	}
 	return scanFiles(os.DirFS(root), files, reviewedHermeticPackages(bootstrapPolicy.ReviewedHermeticBody))
 }
