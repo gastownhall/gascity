@@ -78,6 +78,37 @@ func TestBuildProviderLaunchCommandIgnoresInitialMessageOverride(t *testing.T) {
 	}
 }
 
+// TestBuildProviderResumeCommandAppliesProviderDefaultsWithoutExplicitOverrides
+// is a regression test for gastownhall/gascity#5185: resuming a session with
+// no explicit option overrides (the common case — template overrides parsed
+// from session metadata rarely carry explicit option keys) must still carry
+// provider option_defaults, exactly like BuildProviderLaunchCommand does.
+// Before the fix, BuildProviderResumeCommand gated on
+// hasSchemaOptionOverrides (explicit overrides only) instead of
+// hasProviderOptionValues (which also counts EffectiveDefaults), so a
+// defaults-only resume silently dropped flags like
+// --dangerously-skip-permissions and --effort max.
+func TestBuildProviderResumeCommandAppliesProviderDefaultsWithoutExplicitOverrides(t *testing.T) {
+	spec := BuiltinProviders()["claude"]
+	rp := specToResolved("claude", &spec)
+	// Simulate the real call site (cmd/gc/worker_handle.go
+	// resolvedWorkerRuntimeWithConfigAndMetadata): the resolved provider's
+	// ResumeCommand starts empty for claude (flag-style resume), and the
+	// session-stored resume template is layered on top before calling
+	// BuildProviderResumeCommand.
+	rp.ResumeCommand = "claude --resume {{.SessionKey}}"
+
+	got, err := BuildProviderResumeCommand(rp, nil)
+	if err != nil {
+		t.Fatalf("BuildProviderResumeCommand: %v", err)
+	}
+
+	want := "claude --resume {{.SessionKey}} --dangerously-skip-permissions --effort max"
+	if got != want {
+		t.Fatalf("Command = %q, want %q", got, want)
+	}
+}
+
 func TestProviderOptionMapCapacity(t *testing.T) {
 	tests := []struct {
 		name         string

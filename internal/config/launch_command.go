@@ -55,7 +55,7 @@ func BuildProviderResumeCommand(resolved *ResolvedProvider, optionOverrides map[
 		return "", fmt.Errorf("resolved provider is nil")
 	}
 	command := strings.TrimSpace(resolved.ResumeCommand)
-	if command == "" || len(resolved.OptionsSchema) == 0 || !hasSchemaOptionOverrides(optionOverrides) {
+	if command == "" || len(resolved.OptionsSchema) == 0 || !hasProviderOptionValues(resolved, optionOverrides) {
 		return command, nil
 	}
 	mergedArgs, err := providerOptionArgs(resolved, optionOverrides)
