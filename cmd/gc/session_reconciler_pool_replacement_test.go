@@ -337,7 +337,7 @@ func TestReusablePoolSessionInfo_OneShotAsleepFreeableIsReusable(t *testing.T) {
 	asleepHeld.ID = "session-asleep-quarantine"
 	asleepHeld.SleepReason = "quarantine"
 	if got := reusablePoolSessionInfo(bp, cfgAgent, template, asleepHeld, nil); got {
-		t.Fatalf("reusablePoolSessionInfo(one_shot, asleep, sleep_reason=quarantine) = true; "+
+		t.Fatalf("reusablePoolSessionInfo(one_shot, asleep, sleep_reason=quarantine) = true; " +
 			"want false — a deliberately held sleep must still block reuse")
 	}
 
@@ -346,7 +346,7 @@ func TestReusablePoolSessionInfo_OneShotAsleepFreeableIsReusable(t *testing.T) {
 	// gets a fresh identity instead of resuming a possibly-corrupt conversation.
 	persistentAgent := &config.Agent{Name: "claude-sonnet-one-shot", Dir: "fable-nomad"}
 	if got := reusablePoolSessionInfo(bp, persistentAgent, template, asleepFreeable, nil); got {
-		t.Fatalf("reusablePoolSessionInfo(persistent, asleep, sleep_reason=idle) = true; "+
+		t.Fatalf("reusablePoolSessionInfo(persistent, asleep, sleep_reason=idle) = true; " +
 			"want false — the freeable-asleep reuse carve-out is scoped to lifecycle=one_shot")
 	}
 }
