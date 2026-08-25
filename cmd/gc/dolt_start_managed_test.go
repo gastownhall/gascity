@@ -1468,6 +1468,25 @@ func TestApplyCompactGCReadTimeoutFloor(t *testing.T) {
 	}
 }
 
+func TestResolveManagedDoltConfigForStartFloorsReadTimeoutFromCompactEnv(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(`
+[workspace]
+name = "test"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS", "1800")
+	got, err := resolveManagedDoltConfigForStart(dir, -1)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltConfigForStart: %v", err)
+	}
+	if got.EffectiveReadTimeoutMillis() != 1_800_000 {
+		t.Fatalf("EffectiveReadTimeoutMillis() = %d, want 1800000", got.EffectiveReadTimeoutMillis())
+	}
+}
+
 func TestResolveManagedDoltConfigForStartUsesCityListenerOverrides(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(`
