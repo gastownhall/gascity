@@ -1859,12 +1859,8 @@ func startPreparedStartCandidate(
 	cfg *config.City,
 	phases *startPhaseTimings,
 	staleKeyDetectionWaiter sessionpkg.StaleKeyDetectionWaiter,
-	warmClaims ...warmClaimTriggerProbe,
+	warmClaim warmClaimTriggerProbe,
 ) (bool, error) {
-	var warmClaim warmClaimTriggerProbe
-	if len(warmClaims) > 0 {
-		warmClaim = warmClaims[0]
-	}
 	name := item.candidate.name()
 	if sp != nil {
 		running, alive := observeRuntimeProviderLiveness(sp, name, item.cfg.ProcessNames)
