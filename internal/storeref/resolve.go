@@ -626,10 +626,13 @@ func ResolveOwnerRow(p ResolvedPlan, id string) (Owner, error) {
 // authoritative owner — succeeding, against the wrong store, with no
 // diagnostic. TestResolveBindingOwnerNeverProbesTheWorkLeg pins the zero.
 //
-// The walk stops at the work axis rather than at the plan's last leg, so legs
-// ordered BELOW work — a rig whose configured prefix shadows the id — are left
-// to the caller too. Declining is always safe; claiming an id a caller's own
-// axis owns is not.
+// The walk stops at the FIRST leg of that axis rather than at the plan's last
+// leg, so legs ordered below it — a rig whose configured prefix shadows the id
+// — are left to the caller too. Declining is always safe; claiming an id a
+// caller's own axis owns is not. The stop reads the leg's role rather than its
+// position, because the residual is not always there to stop at: dedupeLegs
+// removes it on a city whose binding resolved back to the work store, and the
+// shadows behind it stay.
 //
 // A read fault is still an error rather than a decline: a binding that could
 // not answer has said nothing about the id, and turning that into "no binding
@@ -653,13 +656,11 @@ func resolveByID(p ResolvedPlan, id string, bindingOnly bool) (Owner, bool, erro
 		return Owner{}, false, errors.New("storeref: plan has no legs")
 	}
 	for i, leg := range p.Legs {
-		if leg.Role == RoleWorkFallback {
-			if bindingOnly {
-				return Owner{}, false, nil
-			}
-			if i == len(p.Legs)-1 {
-				return Owner{Store: leg.Leg.Store, Ref: leg.Leg.Ref}, true, nil
-			}
+		if bindingOnly && leg.Role.ownedByCallersWorkAxis() {
+			return Owner{}, false, nil
+		}
+		if leg.Role == RoleWorkFallback && i == len(p.Legs)-1 {
+			return Owner{Store: leg.Leg.Store, Ref: leg.Leg.Ref}, true, nil
 		}
 		b, err := leg.Leg.Store.Get(id)
 		switch {

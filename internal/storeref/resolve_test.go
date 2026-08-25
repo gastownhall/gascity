@@ -322,6 +322,74 @@ func TestResolveBindingOwnerNeverProbesTheWorkLeg(t *testing.T) {
 	}
 }
 
+// TestResolveBindingOwnerLeavesEveryLegBelowWorkAlone carries that zero to the
+// legs the work leg stands in front of.
+//
+// The work leg is not the last leg of a by-id plan on a city with rigs: a rig
+// whose CONFIGURED prefix also covers the id follows it as a shadow. Those legs
+// belong to the caller's axis for the same reason the work leg does — a surface
+// that scans a directory for its city scans its rigs the same way — so a walk
+// that merely declined the work leg and kept going would answer with a rig
+// store, succeeding against a store this executor promised not to touch.
+//
+// Both production callers pass rigs=nil, so nothing reached this shape and the
+// contract sentence was pinning itself.
+func TestResolveBindingOwnerLeavesEveryLegBelowWorkAlone(t *testing.T) {
+	f := newT2()
+	alpha := f.rigs["alpha"]
+	alpha.seed(t, rigShapedID)
+	plan := mustPlan(t, ByID{ID: rigShapedID}, f.topo)
+	f.resetGets()
+
+	owner, ok, err := ResolveBindingOwner(plan, rigShapedID)
+	if err != nil {
+		t.Fatalf("a clean binding miss produced an error: %v", err)
+	}
+	if ok {
+		t.Fatalf("a leg below the work axis (%s) came back as the binding owner of %s; ok=false is what hands the id to the caller's own scan", storeNameOf(owner.Store), rigShapedID)
+	}
+	if *alpha.gets != 0 {
+		t.Fatalf("the rig shadow leg was probed %d time(s), want 0", *alpha.gets)
+	}
+	if got := *f.legStore(ClassRef(infraClasses)).gets; got != 1 {
+		t.Fatalf("the binding was probed %d time(s), want 1 — the walk has to reach the work axis for a stop there to mean anything", got)
+	}
+}
+
+// TestResolveBindingOwnerStopsAtAShadowTheDedupeExposed is that stop with the
+// work leg itself gone.
+//
+// dedupeLegs drops a repeat of a store the plan already carries, and on a city
+// whose binding resolved back to the work store — the shape that function's own
+// doc names — the work leg is the repeat. What survives is a plan whose
+// caller-owned legs wear RoleShadow and nothing else, so a stop keyed on
+// RoleWorkFallback alone walks straight past them and probes a rig.
+func TestResolveBindingOwnerStopsAtAShadowTheDedupeExposed(t *testing.T) {
+	f := newT2()
+	f.topo.Bindings[0].Leg.Store = f.work // the binding IS the work ledger
+	alpha := f.rigs["alpha"]
+	alpha.seed(t, rigShapedID)
+
+	plan := mustPlan(t, ByID{ID: rigShapedID}, f.topo)
+	for _, leg := range plan.Legs {
+		if leg.Role == RoleWorkFallback {
+			t.Fatalf("plan %s still carries a work-fallback leg; the dedupe this row is about did not happen", plan)
+		}
+	}
+	f.resetGets()
+
+	owner, ok, err := ResolveBindingOwner(plan, rigShapedID)
+	if err != nil {
+		t.Fatalf("a clean binding miss produced an error: %v", err)
+	}
+	if ok {
+		t.Fatalf("%s answered as the binding owner of %s on a plan whose work leg the dedupe removed", storeNameOf(owner.Store), rigShapedID)
+	}
+	if *alpha.gets != 0 {
+		t.Fatalf("the rig shadow leg was probed %d time(s), want 0", *alpha.gets)
+	}
+}
+
 // TestResolveBindingOwnerReturnsTheBindingRow is the other half: a binding that
 // DOES hold the id answers with the row it already read, so the caller does not
 // pay for the same read twice — and does not open a window in which the second
