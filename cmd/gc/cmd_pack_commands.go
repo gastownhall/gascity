@@ -11,6 +11,7 @@ import (
 	"strings"
 	"text/template"
 
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/spf13/cobra"
 )
@@ -247,16 +248,53 @@ func failClosedPackCommandTree(root *cobra.Command, binding string, stderr io.Wr
 
 func applyResolvedPackCommandArgs(root *cobra.Command, args []string, blindRequest, resolvedRequest packCommandTreePreparation) {
 	prepared := preparePackCommandArgs(args, resolvedRequest)
-	if blindRequest.scopeCount > resolvedRequest.scopeCount &&
-		(resolvedRequest.preLeafHelpKind == packCommandPreLeafHelpNone || resolvedRequest.preLeafHelpKind == packCommandPreLeafHelpTrue) {
+	switch {
+	case blindRequest.scopeCount > resolvedRequest.scopeCount &&
+		(resolvedRequest.preLeafHelpKind == packCommandPreLeafHelpNone || resolvedRequest.preLeafHelpKind == packCommandPreLeafHelpTrue):
 		// Compatibility: established eager/lazy dispatch passes an ordinary
 		// pre-leaf scope through to DisableFlagParsing children. When a blind
 		// missing-tree scan over-counted later child-owned scopes, remove only
 		// the proven root-owned prefix so the later tokens reach the child
 		// exactly once without changing the established single-scope path.
 		prepared = packCommandArgsWithoutLeadingScopes(prepared, resolvedRequest.scopeCount)
+	case resolvedRequest.preLeafCommandIndex > 0 &&
+		resolvedRequest.preLeafHelpKind == packCommandPreLeafHelpNone &&
+		!packCommandAmbientCityResolves():
+		// The blind scan didn't over-count (the branch above didn't fire), yet
+		// no city resolves ambiently at all -- gc has no notion of "current
+		// city" without this request's own explicit --city/--rig. That scope
+		// was gc's sole means of finding anything, so it must not leak into a
+		// DisableFlagParsing leaf's argv (gastownhall/gascity ga-h3g3db). When
+		// an ambient city does resolve (even one that doesn't itself define
+		// this binding), the explicit scope only redirected among otherwise
+		// locatable commands, and established behavior forwards it unchanged.
+		prepared = packCommandArgsWithoutScopesBeforeIndex(prepared, resolvedRequest.preLeafCommandIndex)
 	}
 	root.SetArgs(prepared)
+}
+
+// packCommandAmbientCityResolves reports whether gc can resolve some city at
+// all through pure ambient discovery -- the same lookup gc performs with no
+// --city/--rig at all. It does not check whether that city defines any
+// particular binding; it only asks whether gc has a "current city" absent
+// explicit scope.
+//
+// resolveCity's own upward-walk from cwd is refused unconditionally in test
+// binaries -- even at zero distance -- as a safety gate against a test
+// accidentally escaping its temp dir and finding a real host city. That gate
+// has no analog in production, where the walk always runs. Fall back to a
+// direct, non-walking check of cwd itself (exactly what the walk would find
+// at zero distance, per findCity's own first check) so a test chdir'd
+// straight into a real city root is still correctly treated as ambient.
+func packCommandAmbientCityResolves() bool {
+	if _, err := resolveCity(); err == nil {
+		return true
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return false
+	}
+	return citylayout.HasCityConfig(cwd)
 }
 
 type packCommandTreeCandidate struct {
@@ -620,6 +658,34 @@ func preparePackCommandArgs(args []string, request packCommandTreePreparation) [
 		prepared = packCommandPreLeafArgs(prepared, adjusted)
 	}
 	return prepared
+}
+
+// packCommandArgsWithoutScopesBeforeIndex removes gc's own --city/--rig
+// scope tokens (and their values) that fall strictly before commandIndex,
+// mirroring the bounded stripping packCommandPreLeafArgs performs on the
+// help-flag paths. It leaves everything at or after commandIndex untouched
+// so a DisableFlagParsing leaf's own argv can never be misread as scope.
+func packCommandArgsWithoutScopesBeforeIndex(args []string, commandIndex int) []string {
+	if commandIndex <= 0 || commandIndex >= len(args) {
+		return args
+	}
+	out := make([]string, 0, len(args))
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		if index < commandIndex {
+			switch {
+			case arg == "--city" || arg == "--rig":
+				if index+1 < commandIndex {
+					index++
+				}
+				continue
+			case strings.HasPrefix(arg, "--city=") || strings.HasPrefix(arg, "--rig="):
+				continue
+			}
+		}
+		out = append(out, arg)
+	}
+	return out
 }
 
 func movePackCommandPreLeafJSONControls(args []string, request packCommandTreePreparation) ([]string, packCommandTreePreparation) {
