@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -437,5 +438,88 @@ func TestWorkRecordEnforceEnabled(t *testing.T) {
 		if workRecordEnforceEnabled() {
 			t.Errorf("workRecordEnforceEnabled(%q) = true, want false", v)
 		}
+	}
+}
+
+// runWorkRecordGateGit runs a git subcommand in dir, failing the test on error.
+func runWorkRecordGateGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return string(out)
+}
+
+// initWorkRecordGateTestRepo creates a git repo at dir with the given initial
+// branch name and a test user identity, so commits do not depend on any
+// ambient git config.
+func initWorkRecordGateTestRepo(t *testing.T, dir, branch string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	runWorkRecordGateGit(t, dir, "init", "-q")
+	runWorkRecordGateGit(t, dir, "checkout", "-q", "-b", branch)
+	runWorkRecordGateGit(t, dir, "config", "user.email", "gc-test@test.local")
+	runWorkRecordGateGit(t, dir, "config", "user.name", "gc-test")
+}
+
+// commitWorkRecordGateTestFile writes name/content in dir, commits it, and
+// returns the new commit's SHA.
+func commitWorkRecordGateTestFile(t *testing.T, dir, name, content string) string {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	runWorkRecordGateGit(t, dir, "add", name)
+	runWorkRecordGateGit(t, dir, "commit", "-q", "-m", "commit "+name)
+	return strings.TrimSpace(runWorkRecordGateGit(t, dir, "rev-parse", "HEAD"))
+}
+
+// TestGitCommitReachableOnBranchPrefersOriginOverShadowingLocalBranch guards
+// against a stale local branch of the same name shadowing the correct
+// origin/<branch> ref. Worktrees in this fleet share one object store and one
+// refs/heads/ namespace, so a stale local branch left behind by a different
+// worktree/session resolves ahead of refs/remotes/origin/<branch> under git's
+// standard bare-name resolution order — producing a false "not reachable"
+// verdict for a commit that was, in fact, shipped and pushed.
+func TestGitCommitReachableOnBranchPrefersOriginOverShadowingLocalBranch(t *testing.T) {
+	origin := t.TempDir()
+	initWorkRecordGateTestRepo(t, origin, "work-branch")
+	wantCommit := commitWorkRecordGateTestFile(t, origin, "feature.txt", "feature work\n")
+
+	repoDir := t.TempDir()
+	initWorkRecordGateTestRepo(t, repoDir, "main")
+	commitWorkRecordGateTestFile(t, repoDir, "base.txt", "base\n")
+	runWorkRecordGateGit(t, repoDir, "remote", "add", "origin", origin)
+	runWorkRecordGateGit(t, repoDir, "fetch", "-q", "origin")
+
+	// A stale local branch of the identical name points at an unrelated
+	// commit that does NOT contain wantCommit — reproducing a worktree left
+	// behind by another session.
+	runWorkRecordGateGit(t, repoDir, "branch", "work-branch")
+
+	if !gitCommitReachableOnBranch(repoDir, wantCommit, "work-branch") {
+		t.Fatalf("gitCommitReachableOnBranch(%s, work-branch) = false, want true: "+
+			"commit is reachable via refs/remotes/origin/work-branch but a stale "+
+			"same-named local branch shadows it", wantCommit)
+	}
+}
+
+// TestGitCommitReachableOnBranchFallsBackToLocalBranchWithoutOrigin confirms
+// the fix does not regress the not-yet-pushed case: a branch that exists only
+// locally (no origin/<branch> ref at all) must still resolve via the bare
+// branch name.
+func TestGitCommitReachableOnBranchFallsBackToLocalBranchWithoutOrigin(t *testing.T) {
+	repoDir := t.TempDir()
+	initWorkRecordGateTestRepo(t, repoDir, "main")
+	commitWorkRecordGateTestFile(t, repoDir, "base.txt", "base\n")
+	runWorkRecordGateGit(t, repoDir, "checkout", "-q", "-b", "not-yet-pushed")
+	wantCommit := commitWorkRecordGateTestFile(t, repoDir, "feature.txt", "feature\n")
+
+	if !gitCommitReachableOnBranch(repoDir, wantCommit, "not-yet-pushed") {
+		t.Fatalf("gitCommitReachableOnBranch(%s, not-yet-pushed) = false, want true (local-only branch, no origin remote)", wantCommit)
 	}
 }
