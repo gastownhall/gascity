@@ -313,6 +313,11 @@ type startExecutionOptions struct {
 	// deferred under storeQueryPartial today.
 	deferSessionClosesOnBoot bool
 	readyAssignedFlags       []bool
+	// poolWorkQueryRunner executes the controller-side zero-cost preflight for
+	// on-demand pool starts. Nil selects the production shell runner. Tests
+	// inject a deterministic runner so the coordination contract can assert that
+	// an empty query never reaches runtime.Provider.Start.
+	poolWorkQueryRunner ScaleCheckRunner
 }
 
 type startExecutionOption func(*startExecutionOptions)
@@ -411,6 +416,12 @@ func withDeferSessionClosesOnBoot() startExecutionOption {
 func withReadyAssignedFlags(readyAssignedFlags []bool) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.readyAssignedFlags = readyAssignedFlags
+	}
+}
+
+func withPoolStartWorkQueryRunner(runner ScaleCheckRunner) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.poolWorkQueryRunner = runner
 	}
 }
 
@@ -2757,6 +2768,14 @@ func executePlannedStartsTraced(
 				}
 				if !allDependenciesAliveForTemplateWithClock(candidate.logicalTemplate(cfg), cfg, desiredState, sp, cityName, store, clk) {
 					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "blocked_on_dependencies", time.Time{}, time.Time{}, nil)
+					continue
+				}
+				preflight := runPoolStartWorkQueryPreflight(
+					ctx, candidate, cfg, cityPath, cityName, store, clk.Now(),
+					startOpts.poolWorkQueryRunner, stderr,
+				)
+				if !preflight.AllowStart {
+					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), preflight.Outcome, preflight.Started, preflight.Finished, preflight.Err)
 					continue
 				}
 				var release func()

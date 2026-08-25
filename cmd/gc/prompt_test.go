@@ -912,8 +912,12 @@ func TestCoreWorkerPromptsUseHookClaimProtocol(t *testing.T) {
 				t.Fatalf("ReadFile(%s): %v", rel, err)
 			}
 			text := string(data)
-			if !strings.Contains(text, "gc hook --claim --drain-ack --json") {
+			claimAt := strings.Index(text, "gc hook --claim --drain-ack --json")
+			if claimAt < 0 {
 				t.Fatalf("%s missing drain-aware hook claim startup protocol", rel)
+			}
+			if primeAt := strings.Index(text, "gc prime"); primeAt >= 0 && primeAt < claimAt {
+				t.Fatalf("%s runs gc prime before the zero-cost hook claim", rel)
 			}
 			if !strings.Contains(text, "gc hook --claim --json") {
 				t.Fatalf("%s missing hook claim polling protocol", rel)

@@ -56,11 +56,12 @@ type recorderInstruments struct {
 	bdTotal              metric.Int64Counter
 	slingTotal           metric.Int64Counter
 
-	// Counters — Phase 2 (4)
-	poolSpawnTotal  metric.Int64Counter
-	poolRemoveTotal metric.Int64Counter
-	mailOpsTotal    metric.Int64Counter
-	drainTotal      metric.Int64Counter
+	// Counters — Phase 2 (5)
+	poolSpawnTotal          metric.Int64Counter
+	poolRemoveTotal         metric.Int64Counter
+	poolStartPreflightTotal metric.Int64Counter
+	mailOpsTotal            metric.Int64Counter
+	drainTotal              metric.Int64Counter
 
 	// Gauges (1)
 	beadStoreHealthy metric.Int64Gauge
@@ -146,6 +147,9 @@ func initInstruments() {
 		)
 		inst.poolRemoveTotal, _ = m.Int64Counter("gc.pool.removes.total",
 			metric.WithDescription("Total pool member instance removals"),
+		)
+		inst.poolStartPreflightTotal, _ = m.Int64Counter("gc.pool.start_preflights.total",
+			metric.WithDescription("Pool starts admitted or suppressed by work_query preflight"),
 		)
 		inst.mailOpsTotal, _ = m.Int64Counter("gc.mail.operations.total",
 			metric.WithDescription("Total mail operations"),
@@ -616,6 +620,26 @@ func RecordPoolCheck(ctx context.Context, agent string, durationMs float64, desi
 		otellog.Float64("duration_ms", durationMs),
 		otellog.Int("desired", desired),
 		otellog.String("status", status),
+		errKV(err),
+	)
+}
+
+// RecordPoolStartPreflight records the final zero-cost work_query decision made
+// before an on-demand pool session reaches its model runtime. The template
+// label is stable across numbered pool instances; outcome distinguishes useful
+// work from empty and failed reads.
+func RecordPoolStartPreflight(ctx context.Context, template, outcome string, duration time.Duration, err error) {
+	initInstruments()
+	inst.poolStartPreflightTotal.Add(ctx, 1,
+		metric.WithAttributes(
+			attribute.String("template", template),
+			attribute.String("outcome", outcome),
+		),
+	)
+	emit(ctx, "pool.start_preflight", severity(err),
+		otellog.String("template", template),
+		otellog.String("outcome", outcome),
+		otellog.Float64("duration_ms", float64(duration.Milliseconds())),
 		errKV(err),
 	)
 }
