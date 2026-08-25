@@ -34,6 +34,18 @@ var (
 	resolveImportVersion    = packman.ResolveVersion
 	defaultImportConstraint = packman.DefaultConstraint
 	resolveImportHeadCommit = defaultImportHeadCommit
+
+	// validateComposedConfigAfterInstall loads the composed city config after
+	// install, so `gc import install` fails on the same load errors gc
+	// doctor's expanded-config-load check would report, instead of reporting
+	// success on a config the loader will refuse to load on a later reload.
+	// A var so command tests that stub syncImports/installLockedImports
+	// (and so have no real cache content on disk for the loader to expand)
+	// can stub this too. See #5382.
+	validateComposedConfigAfterInstall = func(cityPath string) error {
+		_, err := loadCityConfig(cityPath, io.Discard)
+		return err
+	}
 )
 
 // resolveImportVersion and resolveImportHeadCommit carry a leading cityRoot so
@@ -712,6 +724,18 @@ func doImportInstall(cityPath string, stdout, stderr io.Writer) int {
 		printCredentialHint(stderr, err)
 		return 1
 	}
+
+	// Installing the locked imports can still leave the city with a composed
+	// config the loader will refuse: install resolves and fetches packs, but
+	// never runs the same expansion/validation `gc doctor`'s
+	// expanded-config-load check applies. Validate here so install fails
+	// closed on the same errors doctor would later catch, instead of
+	// succeeding while every subsequent config reload aborts. See #5382.
+	if cfgErr := validateComposedConfigAfterInstall(cityPath); cfgErr != nil {
+		fmt.Fprintf(stderr, "gc import install: composed config failed to load after install: %v\n", cfgErr) //nolint:errcheck
+		return 1
+	}
+
 	fmt.Fprintf(stdout, "Installed %d remote import(s)\n", len(lock.Packs)) //nolint:errcheck
 	return 0
 }
