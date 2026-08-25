@@ -1829,6 +1829,53 @@ func (s *NativeDoltStore) depList(ctx context.Context, storage beadslib.Storage,
 	return deps, nil
 }
 
+// DepMetadata returns the opaque payload stored on one dependency edge.
+//
+// The Dep wire model carries only the pair and the type, so until this existed
+// nothing in Gas City could ask a Dolt-backed store whether an edge had a
+// payload at all — which is how the infra-class migration came to copy edges
+// and silently drop theirs. The contract is SQLiteStore.DepMetadata's, to the
+// letter, because the two are read through one interface: a missing edge and an
+// empty payload both answer carried=false, since SQLite declines to persist an
+// empty payload and reporting a difference here would name a loss the
+// destination cannot suffer.
+//
+// A pair can hold more than one row (one per dep type) and the first carrying
+// row wins — the same first-row-wins the SQLite reader has, reached the only
+// way the root beadslib surface allows. GetDependencyRecords is the direct
+// source-keyed read, but it lives on the Transaction interface and is not
+// re-exported; DependentQuerier is, so the read is target-keyed and filtered
+// back down to the source here.
+func (s *NativeDoltStore) DepMetadata(issueID, dependsOnID string) (string, bool, error) {
+	var (
+		metadata string
+		carried  bool
+	)
+	err := s.withReadRetry(func(ctx context.Context, storage beadslib.Storage) error {
+		querier, ok := beadslib.AsDependentQuerier(storage)
+		if !ok {
+			return fmt.Errorf("reading dependency metadata %s -> %s: backing storage exposes no dependency-record read", issueID, dependsOnID)
+		}
+		records, err := querier.GetDependentRecordsForIssues(ctx, []string{dependsOnID})
+		if err != nil {
+			return nativeStoreError(issueID, err)
+		}
+		metadata, carried = "", false
+		for _, dep := range records[dependsOnID] {
+			if dep == nil || dep.IssueID != issueID || !DepMetadataCarries(dep.Metadata) {
+				continue
+			}
+			metadata, carried = dep.Metadata, true
+			return nil
+		}
+		return nil
+	})
+	if err != nil {
+		return "", false, err
+	}
+	return metadata, carried, nil
+}
+
 type nativeIssueGetter interface {
 	GetIssue(context.Context, string) (*beadslib.Issue, error)
 }

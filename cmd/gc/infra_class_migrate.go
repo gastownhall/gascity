@@ -976,6 +976,11 @@ func runInfraClassMigration(cityPath string, target infraBindingTarget, logPrefi
 	if err != nil {
 		return fail(err)
 	}
+	// Before the destination is touched, so a refused city can re-run from
+	// empty once the payload can be carried.
+	if err := infraSourceEdgePayloadRefusal(source, rows); err != nil {
+		return fail(err)
+	}
 	if err := prepareInfraDestination(writer); err != nil {
 		return fail(err)
 	}
@@ -1288,6 +1293,66 @@ func readInfraSnapshot(source beads.Store) ([]beads.Bead, error) {
 	return infra, nil
 }
 
+// infraSourceEdgePayloadRefusal returns the refusal for a source whose
+// dependency edges carry payloads this copy cannot carry, or nil when the copy
+// is safe.
+//
+// The copy re-adds edges through beads.Dep, which holds the pair and the type
+// and nothing else, so a payload on the source has no way across. On the
+// destination the empty carry is worse than absent: setGraphEdgeMetadataTx
+// clears the pair's sidecar before deciding it has nothing to store. Until the
+// carry exists (ga-o34dj.4.9), refusing is strictly better than dropping —
+// the source is retained and unchanged, so a refused city is exactly where it
+// was, and the operator learns which edge is in the way.
+//
+// A source this build cannot ask is refused too. "No reader" and "no payloads"
+// are different answers, and treating the first as the second is precisely the
+// conflation that let the drop go unnoticed. Every store on the deployed
+// migration path answers: the SQLite and native-Dolt leaves read their own
+// column, MemStore and the file store report honestly that they have no way to
+// hold a payload, and the caching, policy, and strict wrappers forward. What
+// remains mute is beads.BdStore and the exec store, whose payloads live behind
+// a bd process that offers no dependency-metadata read today (bd dep add takes
+// no metadata flag; a payload reaches bd only through a create --graph plan,
+// and bd dep list --json does not report it). A city on either of those is
+// refused by name until that read exists — tracked as ga-qcpgy.
+//
+// The scope is edges whose BOTH endpoints are infra, matching what the copy
+// actually re-adds. A cross-boundary edge into work is not carried at all — it
+// stays metadata linkage resolved by the owning-store read on each side — so
+// its payload is not something this copy drops, and refusing on it would block
+// cities over an edge the migration never touches.
+func infraSourceEdgePayloadRefusal(source beads.Store, rows []beads.Bead) error {
+	reader, ok := source.(beads.DepMetadataReader)
+	if !ok {
+		return fmt.Errorf("work store %T cannot report whether its dependency edges carry payloads, and an unanswerable source is not an empty one: refusing to copy edges whose payloads would be dropped without a trace", source)
+	}
+	infraIDs := make(map[string]bool, len(rows))
+	for _, b := range rows {
+		infraIDs[b.ID] = true
+	}
+	for _, b := range rows {
+		deps, err := source.DepList(b.ID, "down")
+		if err != nil {
+			return fmt.Errorf("listing deps of %s to check for edge payloads: %w", b.ID, err)
+		}
+		for _, dep := range deps {
+			if !infraIDs[dep.DependsOnID] {
+				continue
+			}
+			payload, carried, err := reader.DepMetadata(dep.IssueID, dep.DependsOnID)
+			if err != nil {
+				return fmt.Errorf("reading the payload on dep %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
+			}
+			if !carried || !beads.DepMetadataCarries(payload) {
+				continue
+			}
+			return fmt.Errorf("dep %s -> %s carries an edge payload this copy cannot carry, and copying it would drop the payload silently: refusing. The work store is unchanged; carrying edge payloads is tracked as ga-o34dj.4.9", dep.IssueID, dep.DependsOnID)
+		}
+	}
+	return nil
+}
+
 // prepareInfraDestination makes the destination safe to import into.
 //
 // An empty destination is ready as-is. A destination holding only rows this
@@ -1589,30 +1654,30 @@ func infraCopyClassDifference(want, got beads.Bead) string {
 // only when both sides carry one: the destination normalizes an empty type to
 // its own default, so an empty source type is evidence of nothing.
 //
-// # The edge payload is NOT witnessed, and the copy destroys it
+// # The edge payload is still not witnessed HERE — it is refused upstream
 //
-// This is a named gap, not an oversight, and it is stated here because the
-// alternative is that it stays invisible. The source's dependency rows carry a
-// metadata JSON column, written in production by every formula step with a
-// waits_for gate. The copy cannot carry it: beads.Dep exposes only IssueID,
-// DependsOnID and Type, so importInfraSnapshot's DepAdd has nothing to pass —
-// and on the destination that empty payload is not merely absent but
-// DESTRUCTIVE, because setGraphEdgeMetadataTx clears the pair's sidecar before
-// deciding it has nothing to store.
+// The source's dependency rows carry a metadata JSON column, written in
+// production by every formula step with a waits_for gate. The copy cannot carry
+// it: beads.Dep exposes only IssueID, DependsOnID and Type, so
+// importInfraSnapshot's DepAdd has nothing to pass — and on the destination
+// that empty payload is not merely absent but DESTRUCTIVE, because
+// setGraphEdgeMetadataTx clears the pair's sidecar before deciding it has
+// nothing to store.
 //
-// This stage cannot compare it and cannot even detect it. DepMetadata is
-// implemented only by the destination (SQLiteStore); the bd/Dolt source does not
-// implement it, so the adapter answers unsupportedBeadsCapability and there is
-// no read through beads.Store that would let this migration refuse a source
-// carrying payloads it is about to drop.
+// This stage therefore compares no payload, and deliberately does not try to:
+// by the time it runs, infraSourceEdgePayloadRefusal has already refused any
+// source holding one, so an edge that reaches here is known to have nothing to
+// compare. That refusal is what closed the detection half of the gap —
+// NativeDoltStore.DepMetadata gave a Dolt-backed source a payload read, and a
+// source that cannot answer at all is refused rather than assumed clean.
 //
-// Note the standard this falls short of: the binding's own adoption witness
+// What remains open is CARRIAGE. The binding's own adoption witness
 // (internal/storebinding/sqlite/graph_witness.go) insists that "a destination
-// that moved the edges but dropped their payloads must not hash equal". This
-// stage holds the same binding to a weaker standard. Closing it needs a payload
-// read on the source side, which is a Store-interface widening beyond this
-// slice — tracked as its own bead, and it must land before any city whose
-// formulas use waits_for gates cuts over.
+// that moved the edges but dropped their payloads must not hash equal"; this
+// stage still cannot move one. So a city whose formulas use waits_for gates
+// cannot cut over — it is refused, loudly, naming the edge — until the carry
+// lands. That is a strictly better failure than the silent drop it replaced,
+// and it is not the finished job.
 func infraDepDifference(id string, wantDeps, gotDeps []beads.Dep, infraIDs map[string]bool) string {
 	wantTypes := make(map[string][]string, len(wantDeps))
 	for _, d := range wantDeps {

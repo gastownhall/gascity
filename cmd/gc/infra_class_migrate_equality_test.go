@@ -684,6 +684,14 @@ func (s *unlinkingInfraSource) List(query beads.ListQuery) ([]beads.Bead, error)
 	return s.Store.List(query)
 }
 
+// DepMetadata forwards the leaf's edge-payload read. The subject here is which
+// bytes the equality stage reads, not what an edge carries, and a double that
+// stays silent about the capability is refused as unanswerable before the
+// unlink this test turns on can ever happen.
+func (s *unlinkingInfraSource) DepMetadata(issueID, dependsOnID string) (string, bool, error) {
+	return depMetadataThrough(s.Store, issueID, dependsOnID)
+}
+
 // TestEnsureInfraClassMigratedProvesEqualityAgainstTheReopenedDatabase pins the
 // stage boundary the marker's meaning rests on: what convergence attests to is
 // the database the runtime binding will open, not the connection this migration
