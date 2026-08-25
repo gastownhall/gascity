@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
@@ -9,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/bdflags"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 )
 
 // relocatedBeadClasses reports the coordination classes a city serves from
@@ -437,6 +439,228 @@ func bdRelocatedClassVerb(bdArgs []string) (verb string, verbArgs []string, ok b
 		return "", bdArgs[i+1:], false
 	}
 	return "", nil, false
+}
+
+// bdRelocatedClassCreateVerbs are the bd subcommands that MINT a bead from
+// argv, mapped to the bdflags manifest describing their flags.
+//
+// `create` is the ordinary one, `new` is the alias bd registers for it, and `q`
+// is quick capture — the same mint through a shorter dialect (-t/--type,
+// -l/--labels, -p/--priority, --parent). bdflags pins no manifest for `q`,
+// which costs nothing here: the flags that state a bead's CLASS are read by
+// name below, and the manifest is consulted only to step over OTHER flags'
+// values.
+var bdRelocatedClassCreateVerbs = map[string]string{
+	"create": "create",
+	"new":    "create",
+	"q":      "q",
+}
+
+// bdRelocatedClassMintPaths names the gc-native command that mints a bead of
+// each relocatable class into the binding the class is served from.
+//
+// A refusal that names no alternative leaves the operator holding a command
+// that does not work and no command that does, so this table is part of the
+// message rather than a nicety.
+// TestBdRelocatedClassCreateNamesAMintPathForEveryRelocatableClass pins it
+// against infraMigrationClasses and resolves every entry in the real command
+// tree, so neither a new class nor a renamed command can leave a refusal
+// pointing at nothing.
+var bdRelocatedClassMintPaths = map[string]string{
+	config.BeadClassGraph:     "gc sling",
+	config.BeadClassMessaging: "gc mail send",
+	config.BeadClassSessions:  "gc session new",
+	config.BeadClassOrders:    "gc order run",
+	config.BeadClassNudges:    "gc nudge",
+}
+
+// bdRelocatedClassCreateShapeFlags are the create-dialect flags that state a
+// prospective bead's CLASS, and how each lands on the bead the classifier
+// judges. Title, priority, description and assignee are absent because
+// classification does not read them — they are stepped over, not modeled.
+var bdRelocatedClassCreateShapeFlags = map[string]func(*beads.Bead, string){
+	"--type":     bdRelocatedClassCreateSetType,
+	"-t":         bdRelocatedClassCreateSetType,
+	"--labels":   bdRelocatedClassCreateAddLabels,
+	"-l":         bdRelocatedClassCreateAddLabels,
+	"--label":    bdRelocatedClassCreateAddLabels,
+	"--metadata": bdRelocatedClassCreateAddMetadata,
+}
+
+// bdRelocatedClassCreateSetType records a --type value on the prospective bead.
+func bdRelocatedClassCreateSetType(shape *beads.Bead, value string) {
+	shape.Type = strings.TrimSpace(value)
+}
+
+// bdRelocatedClassCreateAddLabels records a --labels value, which bd parses as
+// a comma-separated list (a cobra StringSlice), so `-l triage,gc:nudge` states
+// two labels and the second one decides the class.
+func bdRelocatedClassCreateAddLabels(shape *beads.Bead, value string) {
+	for _, label := range strings.Split(value, ",") {
+		if label = strings.TrimSpace(label); label != "" {
+			shape.Labels = append(shape.Labels, label)
+		}
+	}
+}
+
+// bdRelocatedClassCreateAddMetadata records a --metadata value, which bd parses
+// as a JSON object. It decodes through beads.StringMap so a value bd stores as
+// a JSON number or boolean reads here exactly as it reads back off the wire.
+//
+// A body this cannot decode — malformed JSON, or the `@file.json` spelling
+// whose object is not in argv at all — contributes nothing, and that is not a
+// swallowed error: bd applies the identical parse and exits non-zero WITHOUT
+// writing when it fails, so a token unreadable here cannot become a bead
+// either. The `@file.json` case is a real limit and is documented on
+// bdRelocatedClassCreateShape with the other file-borne shapes.
+func bdRelocatedClassCreateAddMetadata(shape *beads.Bead, value string) {
+	var fields beads.StringMap
+	if err := json.Unmarshal([]byte(value), &fields); err != nil {
+		return
+	}
+	if shape.Metadata == nil {
+		shape.Metadata = beads.StringMap{}
+	}
+	for key, text := range fields {
+		shape.Metadata[key] = text
+	}
+}
+
+// bdRelocatedClassCreateShape builds the bead a create WOULD mint, from the
+// only evidence this seam has: argv.
+//
+// It reads the three fields coordclass.Classify decides on — type, labels,
+// metadata — in every spelling cobra accepts for them: separated
+// (`--type message`), inline (`--type=message`), and attached shorthand
+// (`-tmessage`). Any other flag is stepped over, and its value with it when the
+// pinned manifest says it takes one separately, so a title like `--title
+// --type` can never be read as the flag it spells.
+//
+// Two shapes are NOT stated in argv and are deliberately not guessed at:
+//
+//   - `create -f plan.md` and `create --graph <json>` take their beads from a
+//     file or a plan body. Parsing either would mean reimplementing bd's own
+//     parser here and drifting from it; classifying them by their absent argv
+//     would be a confident wrong answer.
+//   - A shorthand CLUSTER (`-qtmessage`) hides the type behind another
+//     shorthand. Decomposing one needs to know which letters take values, which
+//     bdflags pins per FLAG rather than per letter.
+//
+// Both are documented limits rather than fail-closed refusals: a create whose
+// shape this cannot read is forwarded, exactly as it is today, and refusing
+// every bulk create on a split city would break the ordinary work mints the
+// work ledger exists for. The guard is a floor on stranded mints, not a proof
+// of their impossibility — the migration's containment check is what audits
+// beads already on disk.
+func bdRelocatedClassCreateShape(manifest string, verbArgs []string) beads.Bead {
+	values := bdflags.ValueFlags(manifest)
+	var shape beads.Bead
+	for i := 0; i < len(verbArgs); i++ {
+		name, value, stated := bdRelocatedClassCreateFlagValue(verbArgs[i])
+		apply, statesTheShape := bdRelocatedClassCreateShapeFlags[name]
+		switch {
+		case !statesTheShape:
+			if !stated && values[name] {
+				i++
+			}
+		case stated:
+			apply(&shape, value)
+		case i+1 < len(verbArgs):
+			i++
+			apply(&shape, verbArgs[i])
+		}
+	}
+	return shape
+}
+
+// bdRelocatedClassCreateFlagValue splits one argv token into the flag it names
+// and the value it states inside the same token, if any.
+//
+// cobra accepts a value flag two ways without a following token: `--type=x`
+// and the attached shorthand `-tx`. Reading only the first left `-tmessage`
+// classifying as an unnamed type, which is a create the guard would have
+// forwarded on a spelling bd itself accepts.
+func bdRelocatedClassCreateFlagValue(arg string) (name, value string, stated bool) {
+	if name, value, inline := strings.Cut(arg, "="); inline {
+		return name, value, true
+	}
+	if len(arg) > 2 && arg[0] == '-' && arg[1] != '-' {
+		return arg[:2], arg[2:], true
+	}
+	return arg, "", false
+}
+
+// bdRelocatedClassCreateRefusal reports whether a `gc bd` invocation would mint
+// a bead of a class this city serves from a storage binding, and returns the
+// operator-facing refusal when it would.
+//
+// This is the write side of the same split the read guard above covers, and it
+// fails differently: a blind READ answers emptily and can be re-run once the
+// operator knows better, while a blind CREATE leaves a row in the wrong ledger
+// under the wrong prefix — a bead no later read finds, and no migration moves,
+// because renaming it into the class namespace afterwards is not something any
+// backend can do.
+//
+// It refuses rather than reroutes because rerouting is impossible on this seam:
+// only argv crosses to the bd subprocess, and the binding is opened in process.
+// The gc-native commands in bdRelocatedClassMintPaths are the supported doors,
+// and the refusal names the one that fits.
+//
+// The classifier is coordclass.Classify — the production one the router and the
+// migration use — and not a lookalike label list. The split is not type-shaped:
+// an extmsg record is a type=task bead carrying a gc:extmsg-* label and a nudge
+// is a type=chore bead, so any table written here would have to relearn the
+// boundary and would drift from it.
+//
+// An undecidable verb (a subcommand hidden behind an unrecognized root flag)
+// returns no refusal, unlike the read scan's fail-closed judgment of every
+// remaining token: there is nothing to fail closed ABOUT, because bd rejects
+// the unknown flag before creating anything, so no mint can occur either way.
+func bdRelocatedClassCreateRefusal(cfg *config.City, bdArgs []string) (string, bool) {
+	relocated := relocatedBeadClasses(cfg)
+	if len(relocated) == 0 {
+		return "", false
+	}
+	verb, verbArgs, resolved := bdRelocatedClassVerb(bdArgs)
+	if !resolved {
+		return "", false
+	}
+	manifest, mints := bdRelocatedClassCreateVerbs[verb]
+	if !mints {
+		return "", false
+	}
+	// A work-class shape matches nothing: relocatedBeadClasses never names the
+	// work class, which is the residual one and the one bd's ledger holds.
+	class := coordclass.Classify(bdRelocatedClassCreateShape(manifest, verbArgs))
+	for _, candidate := range relocated {
+		if candidate.Class == class.String() {
+			return bdRelocatedClassCreateRefusalText(verb, candidate), true
+		}
+	}
+	return "", false
+}
+
+// bdRelocatedClassCreateRefusalText renders the refusal for one stranded mint:
+// what the create would make, where beads of that kind actually live, and the
+// command that mints one there.
+//
+// It is built here rather than in internal/beads because that package's
+// relocated-class messages are READ-shaped — they steer the reader to `gc bd
+// show` and the federated projections — and a create needs the opposite advice.
+func bdRelocatedClassCreateRefusalText(verb string, class beads.RelocatedClass) string {
+	where := strings.TrimSpace(class.Location)
+	if where == "" {
+		where = "another store"
+	}
+	mint := ""
+	if path := bdRelocatedClassMintPaths[class.Class]; path != "" {
+		mint = fmt.Sprintf(" Mint it with `%s`, which writes the binding that class is served from.", path)
+	}
+	return fmt.Sprintf("bd %s would mint a %s-class bead, and this city serves %s-class beads (id prefix %q) from %s. "+
+		"bd writes the work ledger and nothing else, so the bead would land where the %s subsystem never reads it — and "+
+		"nothing would report that, because bd would have done exactly what it was asked. A bead minted under the work "+
+		"prefix cannot be moved into the class namespace afterwards, so this is refused before anything is written.%s",
+		verb, class.Class, class.Class, class.IDPrefix+"-", where, class.Class, mint)
 }
 
 // relocatedClassLocation describes where a binding serves from, for the

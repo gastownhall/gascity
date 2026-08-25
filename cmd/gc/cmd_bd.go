@@ -365,6 +365,28 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		// refused travels with the result they are about to trust.
 		fmt.Fprintf(stderr, "gc bd: %s is set; running anyway: %s\n", bdRelocatedClassOverrideEnvVar, msg) //nolint:errcheck // best-effort stderr
 	}
+	// The same split, on the write side. `gc bd create` is a passthrough too, and
+	// bd writes the work ledger only, so a create whose SHAPE belongs to a
+	// relocated class strands the bead in a ledger that class is never read from
+	// — silently, because bd did what it was asked and exited 0. Placement is
+	// impossible here (only argv crosses to the subprocess), so the create is
+	// refused before anything is written and the refusal names the gc-native
+	// command that mints it correctly.
+	//
+	// The read override above deliberately does not reach this arm: it exists
+	// because the read scan classifies ambiguous TEXT and a refused read can be
+	// re-run, while a stranded mint leaves a row under the wrong prefix that no
+	// later read finds and no migration moves.
+	//
+	// It runs before the by-id door rather than after because the two answer
+	// different questions and cannot shadow each other: this arm reads the
+	// prospective bead's CLASS and never an addressed id, so a create that names
+	// a relocated bead in --parent still reaches the ownership refusal, which
+	// names that bead. When both are true the mint is what has to be stopped.
+	if msg, stranded := bdRelocatedClassCreateRefusal(cfg, bdArgs); stranded {
+		fmt.Fprintf(stderr, "gc bd: %s\n", msg) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	// A by-ID operation whose subject a relocated class owns is answered in
 	// process, from the binding that class is served from, and never handed to
 	// the subprocess — which opens the work workspace and cannot see the bead.

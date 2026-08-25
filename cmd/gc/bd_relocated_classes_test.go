@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -1336,5 +1337,204 @@ func TestGcBdSQLIsUnchangedOnASingleStoreCity(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "gcg-abc123") {
 		t.Fatalf("bd received %q, want the unmodified query", data)
+	}
+}
+
+// TestBdCreateRefusesInfraShapedCreateOnSplitCity is the stranded mint, caught
+// from the only evidence the passthrough has: the shape argv states.
+//
+// `gc bd create` hands its arguments to bd, and bd writes one ledger — the work
+// one. On a city that serves a coordination class from a storage binding, a
+// create whose shape belongs to that class lands the bead in the ledger the
+// class is no longer read from, and nothing reports it, because bd did exactly
+// what it was asked and exited 0. Placement is impossible on this seam (only
+// argv crosses it), so the create is refused at the boundary instead.
+//
+// Every row asserts the same three facts an operator needs to act: the class,
+// where its beads actually live, and the gc-native command that mints one
+// correctly. Each row also runs against a city that relocates nothing, where
+// the identical argv must pass through untouched — the single-store
+// compatibility claim, checked per row rather than once.
+func TestBdCreateRefusesInfraShapedCreateOnSplitCity(t *testing.T) {
+	messaging := []string{"messaging-class", `"gcm-"`, `"infra" storage binding`, "gc mail send"}
+	for name, tc := range map[string]struct {
+		args []string
+		want []string
+	}{
+		"mail by type":            {[]string{"create", "--type", "message", "hello"}, messaging},
+		"mail by type shorthand":  {[]string{"create", "-t", "message", "hello"}, messaging},
+		"mail by inline type":     {[]string{"create", "--type=message", "hello"}, messaging},
+		"mail by attached type":   {[]string{"create", "-tmessage", "hello"}, messaging},
+		"mail behind a root flag": {[]string{"--json", "create", "--type", "message", "hello"}, messaging},
+		"mail through the alias":  {[]string{"new", "--type", "message", "hello"}, messaging},
+		// The title is not the shape. A bead titled "message" is a work bead.
+		"mail type beside a title flag": {[]string{"create", "--title", "ship it", "--type", "message"}, messaging},
+		// The reason the classifier has to be the runtime one: an extmsg record
+		// is a type=task bead, indistinguishable from work by type alone.
+		"extmsg by label":               {[]string{"create", "--type", "task", "--labels", "gc:extmsg-binding", "x"}, messaging},
+		"extmsg in a label list":        {[]string{"create", "-l", "triage,gc:extmsg-delivery", "x"}, messaging},
+		"session by type":               {[]string{"create", "--type", "session", "x"}, []string{"sessions-class", `"gcs-"`, "gc session new"}},
+		"session by label":              {[]string{"create", "--label", "gc:session", "x"}, []string{"sessions-class", "gc session new"}},
+		"session through quick capture": {[]string{"q", "-t", "session", "x"}, []string{"sessions-class", "gc session new"}},
+		"nudge by label":                {[]string{"create", "--type", "chore", "-l", "gc:nudge", "x"}, []string{"nudges-class", `"gcn-"`, "gc nudge"}},
+		"order tracking by label":       {[]string{"create", "--type", "task", "-l", "order-tracking", "x"}, []string{"orders-class", `"gco-"`, "gc order run"}},
+		"wisp by metadata":              {[]string{"create", "--metadata", `{"gc.kind":"wisp"}`, "x"}, []string{"graph-class", `"gcg-"`, "gc sling"}},
+		"graph node by metadata":        {[]string{"create", "--metadata", `{"gc.root_bead_id":"gcg-abc123"}`, "x"}, []string{"graph-class", "gc sling"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			msg, refused := bdRelocatedClassCreateRefusal(splitCityConfig(), tc.args)
+			if !refused {
+				t.Fatalf("`gc bd %s` was forwarded to bd on a split city; bd writes the work ledger only, so that mint is stranded", strings.Join(tc.args, " "))
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(msg, want) {
+					t.Errorf("refusal is missing %q; msg=%q", want, msg)
+				}
+			}
+			for cityName, cfg := range map[string]*config.City{
+				"no storage section":  nil,
+				"every class on work": allWorkCityConfig(),
+			} {
+				if msg, refused := bdRelocatedClassCreateRefusal(cfg, tc.args); refused {
+					t.Errorf("a city with %s relocates nothing, so this create is not stranded, but it was refused: %q", cityName, msg)
+				}
+			}
+		})
+	}
+}
+
+// TestBdCreateForwardsAWorkShapedCreateOnASplitCity is the false-positive proof.
+//
+// A split city still mints work beads through this passthrough — that is what
+// the work ledger is for — so the guard must fire on the SHAPE and on nothing
+// else. A title that reads like a class, a label that is merely near one, and
+// an id-valued flag naming a relocated bead are all left alone here: the last
+// belongs to the by-id ownership door in cmd_bd_by_id.go, which names the bead
+// rather than the class, and a second refusal on this seam would shadow it with
+// a vaguer message while adding no coverage.
+func TestBdCreateForwardsAWorkShapedCreateOnASplitCity(t *testing.T) {
+	for name, args := range map[string][]string{
+		"bare create":                {"create", "plain work"},
+		"explicit task":              {"create", "-t", "task", "plain work"},
+		"task with labels":           {"create", "--type", "task", "--labels", "triage,p1", "x"},
+		"title that reads as a type": {"create", "--title", "message", "-t", "task"},
+		"label near but not a class": {"create", "-l", "gc:nudged", "x"},
+		"epic":                       {"create", "--type", "epic", "roll up"},
+		"convoy":                     {"create", "--type", "convoy", "batch"},
+		"id-valued flag":             {"create", "--type", "task", "--parent", "gcg-abc123", "x"},
+		"not a create verb":          {"list", "--type", "message", "--json"},
+		"show is not a create verb":  {"show", "gcm-abc123"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if msg, refused := bdRelocatedClassCreateRefusal(splitCityConfig(), args); refused {
+				t.Fatalf("`gc bd %s` mints a work bead into the work ledger, which is where it belongs, but it was refused: %q", strings.Join(args, " "), msg)
+			}
+		})
+	}
+}
+
+// TestGcBdCreateRefusesAnInfraShapedCreateOnASplitCity drives the refusal
+// through the real command: the exit code is non-zero and bd is never spawned,
+// so nothing is written anywhere.
+func TestGcBdCreateRefusesAnInfraShapedCreateOnASplitCity(t *testing.T) {
+	capture := bdSQLRefusalCity(t, bdSQLRefusalSplitStorage)
+
+	var stdout, stderr bytes.Buffer
+	if code := doBd([]string{"create", "--type", "message", "hello"}, &stdout, &stderr); code == 0 {
+		t.Fatalf("doBd exited 0 on a stranded mint; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	for _, want := range []string{"messaging-class", `"infra" storage binding`, "gc mail send"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("refusal is missing %q; stderr=%q", want, stderr.String())
+		}
+	}
+	if _, err := os.Stat(capture); err == nil {
+		data, _ := os.ReadFile(capture) //nolint:errcheck // diagnostic only
+		t.Fatalf("bd was invoked despite the refusal: %q", data)
+	}
+}
+
+// TestGcBdCreateRefusalIsNotLiftedByTheReadOverride pins the one thing the
+// existing escape hatch must not reach.
+//
+// GC_BD_ALLOW_RELOCATED_CLASS_READ exists because the READ scan classifies
+// text, and text is not always decidable — an operator holding a false positive
+// needs a way to run the query anyway. A refused create is not that: it is a
+// WRITE that would leave a row in the wrong ledger, where no later read can
+// find it and no migration will move it. Honoring the read knob here would turn
+// an escape hatch into a data-loss switch.
+func TestGcBdCreateRefusalIsNotLiftedByTheReadOverride(t *testing.T) {
+	capture := bdSQLRefusalCity(t, bdSQLRefusalSplitStorage)
+	t.Setenv(bdRelocatedClassOverrideEnvVar, "1")
+
+	var stdout, stderr bytes.Buffer
+	if code := doBd([]string{"create", "--type", "message", "hello"}, &stdout, &stderr); code == 0 {
+		t.Fatalf("the read override let a stranded mint through; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(capture); err == nil {
+		data, _ := os.ReadFile(capture) //nolint:errcheck // diagnostic only
+		t.Fatalf("bd was invoked with the read override set: %q", data)
+	}
+}
+
+// TestGcBdCreateIsUnchangedOnASingleStoreCity is the compatibility proof end to
+// end: the exact invocation a split city refuses reaches bd verbatim, and
+// succeeds, on a city that relocates nothing.
+func TestGcBdCreateIsUnchangedOnASingleStoreCity(t *testing.T) {
+	for name, tc := range map[string]struct {
+		storage string
+		args    []string
+	}{
+		"infra shape, no split": {"", []string{"create", "--type", "message", "hello"}},
+		"work shape, split":     {bdSQLRefusalSplitStorage, []string{"create", "--type", "task", "hello"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			capture := bdSQLRefusalCity(t, tc.storage)
+			t.Setenv("BD_STUB_STDOUT", `{"id":"demo-1"}`)
+
+			var stdout, stderr bytes.Buffer
+			if code := doBd(tc.args, &stdout, &stderr); code != 0 {
+				t.Fatalf("doBd = %d; stderr=%q", code, stderr.String())
+			}
+			data, err := os.ReadFile(capture)
+			if err != nil {
+				t.Fatalf("bd was not invoked: %v", err)
+			}
+			if !strings.Contains(string(data), strings.Join(tc.args, " ")) {
+				t.Fatalf("bd received %q, want the create forwarded verbatim", data)
+			}
+		})
+	}
+}
+
+// TestBdRelocatedClassCreateNamesAMintPathForEveryRelocatableClass is the
+// anti-drift pin on the one part of the refusal an operator acts on.
+//
+// A refusal that names no alternative leaves the operator with a command that
+// does not work and no command that does, and the failure mode of a hand-kept
+// table is that a class grows without one. So the table is checked against the
+// same class list the migration uses, and each command it names is resolved in
+// the real cobra tree rather than trusted as a string.
+func TestBdRelocatedClassCreateNamesAMintPathForEveryRelocatableClass(t *testing.T) {
+	root := newRootCmdWithOptions(io.Discard, io.Discard, rootCommandOptions{})
+	for _, class := range infraMigrationClasses {
+		path, named := bdRelocatedClassMintPaths[string(class)]
+		if !named {
+			t.Errorf("class %q can be relocated but the refusal names no gc-native command that mints one", class)
+			continue
+		}
+		words := strings.Fields(path)
+		if len(words) < 2 || words[0] != "gc" {
+			t.Errorf("class %q names mint path %q, which is not a `gc ...` command", class, path)
+			continue
+		}
+		cmd, _, err := root.Find(words[1:])
+		if err != nil {
+			t.Errorf("class %q names mint path %q, which does not resolve: %v", class, path, err)
+			continue
+		}
+		if cmd.Name() != words[len(words)-1] {
+			t.Errorf("class %q names mint path %q, which resolved to `gc %s` instead", class, path, cmd.CommandPath())
+		}
 	}
 }
