@@ -181,12 +181,14 @@ func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer
 		preflightPass(stdout, "cutover", "not converged yet, which is what the migration is for")
 	}
 
-	// 6. What the copy would carry, and whether it could carry it. A read that
+	// 6. What the copy would carry, and whether it could read it. A read that
 	// failed leaves the whole clearance unfounded, so it blocks rather than
 	// reporting zero — the same positive-looking absence this path refuses
 	// everywhere else. The edge-payload refusal runs on the same open source and
-	// the same snapshot the migration hands it, because a payload it cannot carry
-	// is refused by edge id at exactly this point in the window.
+	// the same snapshot the migration hands it, because a payload the copy cannot
+	// READ is refused by edge id at exactly this point in the window. Whether it
+	// could WRITE one is not asked here: that answer lives on the destination,
+	// and opening the destination is the one thing this rehearsal will not do.
 	source, err := openInfraMigrationSource(request.CityPath)
 	if err != nil {
 		return preflightBlock(stdout, "work store", fmt.Errorf("opening the work store: %w", err))
@@ -206,7 +208,7 @@ func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer
 	if edgeErr != nil {
 		return preflightBlock(stdout, "edge payloads", edgeErr)
 	}
-	preflightPass(stdout, "edge payloads", "every dependency edge the copy would re-add carries what it needs to")
+	preflightPass(stdout, "edge payloads", "the work store can report the payload on every edge the copy would re-add")
 
 	// 7. What the destination already holds. Read-only: the database is opened
 	// only if it is already there, because opening creates it.

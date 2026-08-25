@@ -804,9 +804,13 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 
 	// Dep edges, after every row exists, so an edge's far endpoint can be
 	// resolved. Only edges the binding lacks are written: the pass is a diff, so
-	// re-running it on a converged city writes nothing and says so.
+	// re-running it on a converged city writes nothing and says so. Each goes
+	// through the migration's own edge writer, carrying the payload the source
+	// holds for it — a repair that restored the edges and dropped their payloads
+	// would report the same "edges: N restored" line while leaving the binding
+	// short of what it is being repaired toward.
 	for _, d := range plan.missing {
-		if err := destination.DepAdd(d.IssueID, d.DependsOnID, d.Type); err != nil {
+		if err := infraCopyDepEdge(destination, source, d.IssueID, d.DependsOnID, d.Type); err != nil {
 			fmt.Fprintf(stderr, "%s: restoring dep %s -> %s: %v\n", logPrefix, d.IssueID, d.DependsOnID, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}

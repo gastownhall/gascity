@@ -1377,34 +1377,41 @@ func readInfraSnapshot(source beads.Store) ([]beads.Bead, error) {
 }
 
 // infraSourceEdgePayloadRefusal returns the refusal for a source whose
-// dependency edges carry payloads this copy cannot carry, or nil when the copy
-// is safe.
+// dependency edge payloads this copy cannot READ, or nil when every
+// within-infra edge can be asked.
 //
-// The copy re-adds edges through beads.Dep, which holds the pair and the type
-// and nothing else, so a payload on the source has no way across. On the
-// destination the empty carry is worse than absent: setGraphEdgeMetadataTx
-// clears the pair's sidecar before deciding it has nothing to store. Until the
-// carry exists (ga-o34dj.4.9), refusing is strictly better than dropping —
-// the source is retained and unchanged, so a refused city is exactly where it
-// was, and the operator learns which edge is in the way.
+// It used to refuse a source that carried a payload at all, because the copy
+// had no way to carry one: it re-added edges through beads.Dep, which holds the
+// pair and the type and nothing else. That is no longer true —
+// beads.DepMetadataWriter is the carry, and infraCopyDepEdge uses it — so what
+// remains here is the half that was always the point. A payload the copy cannot
+// read is a payload it would drop, and on the destination a dropped payload is
+// worse than absent: setGraphEdgeMetadataTx clears the pair's sidecar before
+// deciding it has nothing to store.
 //
-// A source this build cannot ask is refused too. "No reader" and "no payloads"
-// are different answers, and treating the first as the second is precisely the
-// conflation that let the drop go unnoticed. Every store on the deployed
-// migration path answers: the SQLite and native-Dolt leaves read their own
-// column, MemStore and the file store report honestly that they have no way to
-// hold a payload, and the caching, policy, and strict wrappers forward. What
-// remains mute is beads.BdStore and the exec store, whose payloads live behind
-// a bd process that offers no dependency-metadata read today (bd dep add takes
-// no metadata flag; a payload reaches bd only through a create --graph plan,
-// and bd dep list --json does not report it). A city on either of those is
-// refused by name until that read exists — tracked as ga-qcpgy.
+// So a source this build cannot ask is still refused. "No reader" and "no
+// payloads" are different answers, and treating the first as the second is
+// precisely the conflation that let the drop go unnoticed. Every store on the
+// deployed migration path answers: the SQLite and native-Dolt leaves read their
+// own column, MemStore and the file store report honestly that they have no way
+// to hold a payload, and the caching, policy, and strict wrappers forward. What
+// remains mute is beads.BdStore and the exec store, whose payloads live behind a
+// bd process that offers no dependency-metadata read today (bd dep add takes no
+// metadata flag; a payload reaches bd only through a create --graph plan, and bd
+// dep list --json does not report it). A city on either of those is refused by
+// name until that read exists — tracked as ga-qcpgy.
+//
+// The per-edge read stays even though importInfraSnapshot reads every edge
+// again a moment later. It is what `gc storage preflight` runs to answer "would
+// a read fail inside my window", and the preflight opens no destination, so a
+// refusal that lived only in the import would be one the rehearsal could not
+// reach.
 //
 // The scope is edges whose BOTH endpoints are infra, matching what the copy
 // actually re-adds. A cross-boundary edge into work is not carried at all — it
 // stays metadata linkage resolved by the owning-store read on each side — so
-// its payload is not something this copy drops, and refusing on it would block
-// cities over an edge the migration never touches.
+// its payload is not something this copy touches, and refusing on it would
+// block cities over an edge the migration never re-adds.
 func infraSourceEdgePayloadRefusal(source beads.Store, rows []beads.Bead) error {
 	reader, ok := source.(beads.DepMetadataReader)
 	if !ok {
@@ -1423,17 +1430,76 @@ func infraSourceEdgePayloadRefusal(source beads.Store, rows []beads.Bead) error 
 			if !infraIDs[dep.DependsOnID] {
 				continue
 			}
-			payload, carried, err := reader.DepMetadata(dep.IssueID, dep.DependsOnID)
-			if err != nil {
+			if _, _, err := reader.DepMetadata(dep.IssueID, dep.DependsOnID); err != nil {
 				return fmt.Errorf("reading the payload on dep %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
 			}
-			if !carried || !beads.DepMetadataCarries(payload) {
-				continue
-			}
-			return fmt.Errorf("dep %s -> %s carries an edge payload this copy cannot carry, and copying it would drop the payload silently: refusing. The work store is unchanged; carrying edge payloads is tracked as ga-o34dj.4.9", dep.IssueID, dep.DependsOnID)
 		}
 	}
 	return nil
+}
+
+// infraEdgePayload is one edge's payload as a store reports it: the bytes, and
+// whether a payload is carried at all.
+//
+// The two are kept together rather than collapsed to a string because absent
+// and present-but-empty must stay distinguishable — the rule the binding's own
+// adoption witness states (internal/storebinding/sqlite/graph_witness.go) and
+// the one a copy is most likely to blur, since both engines spell "carries
+// nothing" as the empty string.
+type infraEdgePayload struct {
+	Payload string
+	Carried bool
+}
+
+// infraReadEdgePayload reads one edge's payload through a store, normalizing an
+// engine's rendering of "no payload" to no payload.
+//
+// The normalization is what makes the source's answer and the destination's
+// answer comparable at all. Dolt types the column as JSON and hands back "{}"
+// for an edge added without metadata; SQLite stores nothing and hands back "".
+// NativeDoltStore.DepMetadata already filters through beads.DepMetadataCarries,
+// so this is belt-and-braces for that leaf — but it is load-bearing for any
+// other reader, and it is what lets infraCopyDepEdge write nothing rather than
+// writing "{}" into the destination's sidecar, where it would read back as a
+// payload the source never had.
+func infraReadEdgePayload(store beads.Store, issueID, dependsOnID string) (infraEdgePayload, error) {
+	reader, ok := store.(beads.DepMetadataReader)
+	if !ok {
+		return infraEdgePayload{}, fmt.Errorf("store %T cannot report the payload on dep %s -> %s, and an unanswerable store is not an empty one", store, issueID, dependsOnID)
+	}
+	payload, carried, err := reader.DepMetadata(issueID, dependsOnID)
+	if err != nil {
+		return infraEdgePayload{}, fmt.Errorf("reading the payload on dep %s -> %s: %w", issueID, dependsOnID, err)
+	}
+	if !carried || !beads.DepMetadataCarries(payload) {
+		return infraEdgePayload{}, nil
+	}
+	return infraEdgePayload{Payload: payload, Carried: true}, nil
+}
+
+// infraCopyDepEdge re-adds one edge on the destination, carrying whatever
+// payload the source holds for it.
+//
+// It is the one place either copy path writes an edge — the migration's import
+// and the stranded-row recovery both go through it — because the payload is
+// easy to forget and a forgotten payload is silent. A destination that cannot
+// carry one is refused rather than written to, but only when there is a payload
+// to carry: a store with no writer is a perfectly good destination for a city
+// whose edges hold nothing, and refusing it unconditionally would reject every
+// destination this tree has apart from SQLite.
+func infraCopyDepEdge(destination, source beads.Store, issueID, dependsOnID, depType string) error {
+	edge, err := infraReadEdgePayload(source, issueID, dependsOnID)
+	if err != nil {
+		return err
+	}
+	if !edge.Carried {
+		return destination.DepAdd(issueID, dependsOnID, depType)
+	}
+	writer, ok := destination.(beads.DepMetadataWriter)
+	if !ok {
+		return fmt.Errorf("dep %s -> %s carries an edge payload and binding store %T cannot carry one: refusing rather than adding the edge without it, which would drop the payload silently", issueID, dependsOnID, destination)
+	}
+	return writer.DepAddWithMetadata(issueID, dependsOnID, depType, edge.Payload)
 }
 
 // prepareInfraDestination makes the destination safe to import into.
@@ -1508,10 +1574,10 @@ func infraDestinationPreflightRefusal(target infraBindingTarget) error {
 }
 
 // importInfraSnapshot copies rows into the destination with their ids preserved
-// and re-adds the dep edges whose BOTH endpoints are infra. Cross-boundary
-// edges into work stay metadata linkage, resolved by the owning-store read on
-// each side — re-adding them here would need a work-store row the destination
-// does not own.
+// and re-adds the dep edges whose BOTH endpoints are infra, each carrying the
+// payload the source holds for it. Cross-boundary edges into work stay metadata
+// linkage, resolved by the owning-store read on each side — re-adding them here
+// would need a work-store row the destination does not own.
 func importInfraSnapshot(destination beads.Store, source beads.Store, rows []beads.Bead) (int, error) {
 	creator, ok := destination.(beads.ForeignIDCreator)
 	if !ok {
@@ -1540,7 +1606,7 @@ func importInfraSnapshot(destination beads.Store, source beads.Store, rows []bea
 			if !infraIDs[d.DependsOnID] {
 				continue
 			}
-			if err := destination.DepAdd(b.ID, d.DependsOnID, d.Type); err != nil {
+			if err := infraCopyDepEdge(destination, source, b.ID, d.DependsOnID, d.Type); err != nil {
 				return imported, fmt.Errorf("importing dep %s -> %s: %w", b.ID, d.DependsOnID, err)
 			}
 		}
@@ -1662,9 +1728,75 @@ func verifyInfraCopy(openDestination func() (beads.Store, error), source beads.S
 		if diff := infraDepDifference(want.ID, wantDeps, gotDeps, infraIDs); diff != "" {
 			return nil, errors.New(diff)
 		}
+		diff, err := infraEdgePayloadDifference(want.ID, wantDeps, gotDeps, infraIDs, source, destination)
+		if err != nil {
+			return nil, err
+		}
+		if diff != "" {
+			return nil, errors.New(diff)
+		}
 	}
 	sort.Strings(proven)
 	return proven, nil
+}
+
+// infraEdgePayloadDifference compares the payloads on one bead's within-infra
+// edges in BOTH directions, or "" when every edge carries on the destination
+// exactly what it carries on the source.
+//
+// It is separate from infraDepDifference because the payload is not a field of
+// beads.Dep — it is a sidecar the source keeps in its dependencies.metadata
+// column and the destination keeps in kv, reachable only by asking the store
+// about a specific pair. No reflection over the Dep struct can see it, which is
+// why the edge field-sync guard cannot cover it and why this exists instead.
+//
+// Both directions, for the reason the structural comparison gives: a copy that
+// invented a payload is as much a changed graph as one that dropped it, and a
+// forward-only check would let the destination carry a gate the source never
+// had. The union of the two edge sets is walked rather than the source's alone,
+// so an edge present only on the destination is compared too — its source-side
+// payload reads as absent, and a destination payload on it is a difference.
+//
+// Absent and present-but-empty stay distinguishable, which is the rule the
+// binding's own adoption witness states. infraReadEdgePayload normalizes each
+// engine's rendering of "no payload" to absent before comparing, so the two
+// sides are comparable without either being flattened into the other.
+func infraEdgePayloadDifference(id string, wantDeps, gotDeps []beads.Dep, infraIDs map[string]bool, source, destination beads.Store) (string, error) {
+	pairs := make(map[string]bool, len(wantDeps)+len(gotDeps))
+	for _, d := range wantDeps {
+		if infraIDs[d.DependsOnID] {
+			pairs[d.DependsOnID] = true
+		}
+	}
+	for _, d := range gotDeps {
+		pairs[d.DependsOnID] = true
+	}
+	for _, dependsOn := range sortedMapKeys(pairs) {
+		want, err := infraReadEdgePayload(source, id, dependsOn)
+		if err != nil {
+			return "", fmt.Errorf("re-reading the work store's payload on dep %s -> %s: %w", id, dependsOn, err)
+		}
+		got, err := infraReadEdgePayload(destination, id, dependsOn)
+		if err != nil {
+			return "", fmt.Errorf("reading the binding's payload on dep %s -> %s: %w", id, dependsOn, err)
+		}
+		if want == got {
+			continue
+		}
+		return fmt.Sprintf("dep %s -> %s carries %s in the binding, want %s",
+			id, dependsOn, infraFormatEdgePayload(got), infraFormatEdgePayload(want)), nil
+	}
+	return "", nil
+}
+
+// infraFormatEdgePayload renders an edge payload for a difference message,
+// spelling absence as a word rather than as an empty pair of quotes an operator
+// would have to tell apart from a payload that is genuinely empty.
+func infraFormatEdgePayload(edge infraEdgePayload) string {
+	if !edge.Carried {
+		return "no payload"
+	}
+	return strconv.Quote(edge.Payload)
 }
 
 // beadCopyDifference returns a human-readable description of the first field
@@ -1782,30 +1914,20 @@ func infraCopyClassDifference(want, got beads.Bead) string {
 // only when both sides carry one: the destination normalizes an empty type to
 // its own default, so an empty source type is evidence of nothing.
 //
-// # The edge payload is still not witnessed HERE — it is refused upstream
+// # The edge payload is witnessed next door, not here
 //
 // The source's dependency rows carry a metadata JSON column, written in
-// production by every formula step with a waits_for gate. The copy cannot carry
-// it: beads.Dep exposes only IssueID, DependsOnID and Type, so
-// importInfraSnapshot's DepAdd has nothing to pass — and on the destination
-// that empty payload is not merely absent but DESTRUCTIVE, because
-// setGraphEdgeMetadataTx clears the pair's sidecar before deciding it has
-// nothing to store.
+// production by every formula step with a waits_for gate. It is not a field of
+// beads.Dep — it is a sidecar reached by asking a store about one pair — so no
+// comparison over this struct can see it, and the field-sync guard over
+// beads.Dep cannot cover it either. infraEdgePayloadDifference witnesses it,
+// both directions, on the same edges this function compares structurally.
 //
-// This stage therefore compares no payload, and deliberately does not try to:
-// by the time it runs, infraSourceEdgePayloadRefusal has already refused any
-// source holding one, so an edge that reaches here is known to have nothing to
-// compare. That refusal is what closed the detection half of the gap —
-// NativeDoltStore.DepMetadata gave a Dolt-backed source a payload read, and a
-// source that cannot answer at all is refused rather than assumed clean.
-//
-// What remains open is CARRIAGE. The binding's own adoption witness
-// (internal/storebinding/sqlite/graph_witness.go) insists that "a destination
-// that moved the edges but dropped their payloads must not hash equal"; this
-// stage still cannot move one. So a city whose formulas use waits_for gates
-// cannot cut over — it is refused, loudly, naming the edge — until the carry
-// lands. That is a strictly better failure than the silent drop it replaced,
-// and it is not the finished job.
+// Splitting them is deliberate: this one is a pure function of two edge slices
+// and stays testable as such, while the payload comparison has to read both
+// stores and can fail. Folding the reads in here would give every caller —
+// including the recovery path, which compares edges it did not write — an error
+// return it has nothing to do with.
 func infraDepDifference(id string, wantDeps, gotDeps []beads.Dep, infraIDs map[string]bool) string {
 	wantTypes := make(map[string][]string, len(wantDeps))
 	for _, d := range wantDeps {

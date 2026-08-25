@@ -18,6 +18,11 @@ const sqliteGraphEdgeMetadataKVPrefix = "gascity.graph-edge-metadata.v1/"
 var (
 	_ GraphApplyStore        = (*SQLiteStore)(nil)
 	_ StorageGraphApplyStore = (*SQLiteStore)(nil)
+	// The two halves of the edge-payload contract. Reading without writing is
+	// what let the infra-class copy detect a payload it could not carry;
+	// asserting both here keeps a refactor from removing the half that closed it.
+	_ DepMetadataReader = (*SQLiteStore)(nil)
+	_ DepMetadataWriter = (*SQLiteStore)(nil)
 )
 
 // ApplyGraphPlan atomically instantiates an entire bead graph (nodes + edges) in

@@ -2,6 +2,68 @@ package beads
 
 import "testing"
 
+// TestSQLiteStoreCarriesAnEdgePayload pins the write half of the payload
+// contract: an edge added with a payload reads back carrying it, and an edge
+// added without one reads back absent rather than present-and-empty.
+//
+// The second half is the one worth a test. setGraphEdgeMetadataTx CLEARS the
+// pair's sidecar before deciding it has nothing to store, so a writer that
+// passed through an engine's rendering of "no payload" — Dolt's "{}" — would
+// store that literally, and the destination would read back ("{}", true) where
+// the source read ("", false). Absent and present-but-empty are exactly the two
+// the adoption witness insists must stay distinguishable, and a copy that
+// blurred them would be a copy that changed the graph.
+func TestSQLiteStoreCarriesAnEdgePayload(t *testing.T) {
+	store := newSQLiteGraphApplyStore(t, t.TempDir())
+	var asStore Store = store
+	writer, ok := asStore.(DepMetadataWriter)
+	if !ok {
+		t.Fatal("SQLiteStore does not implement DepMetadataWriter, so the infra-class copy has no way to carry an edge payload")
+	}
+
+	seed := func(title string) Bead {
+		b, err := store.Create(Bead{Title: title})
+		if err != nil {
+			t.Fatalf("seeding %s: %v", title, err)
+		}
+		return b
+	}
+	gated, gate, plain := seed("gated"), seed("gate"), seed("plain")
+
+	const payload = `{"gate":"waits_for","threshold":3}`
+	if err := writer.DepAddWithMetadata(gated.ID, gate.ID, "blocks", payload); err != nil {
+		t.Fatalf("DepAddWithMetadata: %v", err)
+	}
+	got, carried, err := store.DepMetadata(gated.ID, gate.ID)
+	if err != nil {
+		t.Fatalf("DepMetadata: %v", err)
+	}
+	if !carried || got != payload {
+		t.Errorf("DepMetadata = (%q, %v), want (%q, true)", got, carried, payload)
+	}
+
+	if err := writer.DepAddWithMetadata(gated.ID, plain.ID, "blocks", ""); err != nil {
+		t.Fatalf("DepAddWithMetadata with no payload: %v", err)
+	}
+	got, carried, err = store.DepMetadata(gated.ID, plain.ID)
+	if err != nil {
+		t.Fatalf("DepMetadata on the payloadless edge: %v", err)
+	}
+	if carried || got != "" {
+		t.Errorf("an edge added with no payload reads back (%q, %v), want (\"\", false)", got, carried)
+	}
+
+	// The edge itself must exist either way — a payload writer that only wrote
+	// sidecars would pass both assertions above and copy no graph at all.
+	deps, err := store.DepList(gated.ID, "down")
+	if err != nil {
+		t.Fatalf("DepList: %v", err)
+	}
+	if len(deps) != 2 {
+		t.Fatalf("DepAddWithMetadata wrote %d edges, want 2: %+v", len(deps), deps)
+	}
+}
+
 // TestDepMetadataCarries pins the rule that separates a real edge payload from
 // an engine's rendering of an absent one.
 //

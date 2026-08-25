@@ -1797,6 +1797,28 @@ func (s *SQLiteStore) DepAdd(issueID, dependsOnID, depType string) error {
 	})
 }
 
+// DepAddWithMetadata records a dependency edge together with the opaque payload
+// it carries. It is DepAdd for a caller that has a payload to preserve — the
+// infra-class migration is the one in tree — and is otherwise identical,
+// including the empty-payload behavior: passing "" stores no sidecar, so the
+// edge reads back carrying nothing rather than carrying an empty payload.
+func (s *SQLiteStore) DepAddWithMetadata(issueID, dependsOnID, depType, metadata string) error {
+	if err := s.ensureOpen(); err != nil {
+		return err
+	}
+	return retryOnBusy(func() error {
+		tx, err := s.db.BeginTx(context.Background(), nil)
+		if err != nil {
+			return fmt.Errorf("sqlite dep add with metadata: begin tx: %w", err)
+		}
+		defer tx.Rollback() //nolint:errcheck
+		if err := s.depAddWithMetadataTx(context.Background(), tx, issueID, dependsOnID, depType, metadata); err != nil {
+			return err
+		}
+		return tx.Commit()
+	})
+}
+
 func (s *SQLiteStore) depAddTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID, depType string) error {
 	return s.depAddWithMetadataTx(ctx, tx, issueID, dependsOnID, depType, "")
 }
