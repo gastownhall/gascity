@@ -357,6 +357,28 @@ func TestSyncRemoteEnvOverridePinsNonLocalRemote(t *testing.T) {
 	}
 }
 
+// TestSyncSoleNonLocalRemoteSkipsAndNeverPushes covers the case the original
+// fix (ga-fqi7kq) missed: select_remote's sr_count -eq 1 branch returned the
+// sole candidate unconditionally, with no locality check at all, so a
+// database whose only configured remote is non-local (e.g. a public
+// git+https upstream) was auto-selected and pushed to. The locality rule
+// that already applies when there are multiple remotes must apply
+// identically when there is exactly one.
+func TestSyncSoleNonLocalRemoteSkipsAndNeverPushes(t *testing.T) {
+	binDir := t.TempDir()
+	writeSyncFakeDoltMultiRemote(t, binDir, []string{
+		"origin,git+https://github.com/gastownhall/beads",
+	})
+
+	out := runFFSync(t, binDir, "--db", "app", "--force", "--dry-run")
+	if !strings.Contains(out, "skipped") || !strings.Contains(out, "none local") {
+		t.Fatalf("a sole non-local remote must be skipped with a stated reason, same as the multi-remote ambiguous case.\nout:\n%s", out)
+	}
+	if strings.Contains(out, "would") {
+		t.Fatalf("a sole non-local remote must never be auto-selected or pushed to.\nout:\n%s", out)
+	}
+}
+
 // TestSyncRejectsInvalidFetchTimeout covers the GC_DOLT_SYNC_FETCH_TIMEOUT_SECS
 // validator (the twin of the push-timeout validator): the bound is checked at
 // startup before any database is touched, and an empty / non-numeric / all-zero
