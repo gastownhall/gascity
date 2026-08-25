@@ -16,53 +16,52 @@ import (
 // because both inject a fake oracle to stay off disk — so it is pinned here,
 // against a real repository.
 
-func runGit(t *testing.T, dir string, args ...string) string {
-	t.Helper()
-	out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+// The git process is declared Medium ownership in test/test-resources.toml, so
+// it is deliberately built inside this runnable rather than in a package-level
+// helper: the resource census only recognizes an owner it can name, and a
+// process a shared helper spawns belongs to no test in particular.
+func TestCommitReachableOnBranch(t *testing.T) {
+	runGit := func(dir string, args ...string) string {
+		t.Helper()
+		out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+		return string(out)
 	}
-	return string(out)
-}
 
-// commitRepo builds a repo with one commit on main and one commit on a side
-// branch that main never saw, and returns the repo dir and both SHAs.
-func commitRepo(t *testing.T) (repoDir, onMain, offMain string) {
-	t.Helper()
-	repoDir = t.TempDir()
-	runGit(t, repoDir, "init", "--initial-branch=main")
-	runGit(t, repoDir, "config", "user.name", "Gas City Test")
-	runGit(t, repoDir, "config", "user.email", "gc-test@test.local")
+	// A repo with one commit on main and one commit on a side branch main never
+	// saw: reachability is only a real question when some commit is unreachable.
+	repoDir := t.TempDir()
+	runGit(repoDir, "init", "--initial-branch=main")
+	runGit(repoDir, "config", "user.name", "Gas City Test")
+	runGit(repoDir, "config", "user.email", "gc-test@test.local")
 	write := func(name, body string) {
 		if err := os.WriteFile(filepath.Join(repoDir, name), []byte(body), 0o644); err != nil {
 			t.Fatalf("write %s: %v", name, err)
 		}
-		runGit(t, repoDir, "add", name)
+		runGit(repoDir, "add", name)
 	}
 	write("shipped.txt", "on main\n")
-	runGit(t, repoDir, "commit", "-m", "test: land the artifact")
-	onMain = strings.TrimSpace(runGit(t, repoDir, "rev-parse", "HEAD"))
+	runGit(repoDir, "commit", "-m", "test: land the artifact")
+	onMain := strings.TrimSpace(runGit(repoDir, "rev-parse", "HEAD"))
 
-	runGit(t, repoDir, "checkout", "-b", "side")
+	runGit(repoDir, "checkout", "-b", "side")
 	write("side.txt", "never merged\n")
-	runGit(t, repoDir, "commit", "-m", "test: a commit main never saw")
-	offMain = strings.TrimSpace(runGit(t, repoDir, "rev-parse", "HEAD"))
-	runGit(t, repoDir, "checkout", "main")
+	runGit(repoDir, "commit", "-m", "test: a commit main never saw")
+	offMain := strings.TrimSpace(runGit(repoDir, "rev-parse", "HEAD"))
+	runGit(repoDir, "checkout", "main")
 
 	// Two branches whose local and remote-tracking refs disagree, in both
 	// directions — the pair gastownhall/gascity#5037 turns on. remote-ahead is
 	// the reported bug (the commit landed via another worktree, so only
 	// refs/remotes/origin/remote-ahead advanced); local-ahead is its mirror (a
 	// commit made here and never pushed).
-	runGit(t, repoDir, "branch", "remote-ahead", onMain)
-	runGit(t, repoDir, "update-ref", "refs/remotes/origin/remote-ahead", offMain)
-	runGit(t, repoDir, "branch", "local-ahead", offMain)
-	runGit(t, repoDir, "update-ref", "refs/remotes/origin/local-ahead", onMain)
-	return repoDir, onMain, offMain
-}
+	runGit(repoDir, "branch", "remote-ahead", onMain)
+	runGit(repoDir, "update-ref", "refs/remotes/origin/remote-ahead", offMain)
+	runGit(repoDir, "branch", "local-ahead", offMain)
+	runGit(repoDir, "update-ref", "refs/remotes/origin/local-ahead", onMain)
 
-func TestCommitReachableOnBranch(t *testing.T) {
-	repoDir, onMain, offMain := commitRepo(t)
 	notARepo := t.TempDir()
 
 	tests := []struct {

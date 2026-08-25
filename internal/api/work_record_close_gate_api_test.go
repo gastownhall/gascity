@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -218,40 +216,67 @@ func TestAPIBeadCloseEnforcesWorkRecord(t *testing.T) {
 // TestAPIBeadCloseResolvesTheOwningScopeAsTheCommitRepo pins the half of the
 // gate that cannot be answered from the bead alone: "reachable on which
 // repository?". The owning store names the scope, so a rig-resident bead is
-// checked against the rig's checkout — and the control proves the answer is not
-// simply "any repo the server can see", because the same record in the city
-// store, whose root is not that checkout, refuses.
+// checked against the rig's checkout while a city-resident one is checked
+// against the city — the answer is not "any repo the server can see".
+//
+// The resolution is asserted directly rather than through a close against a
+// seeded repository: whether git calls a commit an ancestor is
+// internal/workrecord's row, pinned there against a real repo, and running a
+// second one here would only re-prove git. What is this plane's own is which
+// directory that oracle is handed, and an exact path is a sharper statement of
+// it than "the close succeeded".
 func TestAPIBeadCloseResolvesTheOwningScopeAsTheCommitRepo(t *testing.T) {
 	st := newFakeState(t)
 	city := beads.NewMemStore()
 	rig := beads.NewMemStore()
 	rigPath := t.TempDir()
-	commit := seedGitRepo(t, rigPath)
 	st.cityBeadStore = city
 	st.stores = map[string]beads.Store{"myrig": rig}
 	st.cfg.Rigs = []config.Rig{{Name: "myrig", Path: rigPath}}
-
-	shipped := map[string]string{
-		beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped,
-		beadmeta.WorkCommitMetadataKey:  commit,
-		beadmeta.WorkBranchMetadataKey:  "main",
-	}
-	rigID := seedGateBead(t, rig, "wr-rig-1", shipped)
-	cityID := seedGateBead(t, city, "wr-city-1", shipped)
-
-	t.Setenv(workrecord.EnforceEnvVar, "1")
-	logged := captureWorkRecordGateLog(t)
 	s := New(st)
 
-	if _, err := s.humaHandleBeadClose(context.Background(), &BeadCloseInput{ID: rigID}); err != nil {
-		t.Fatalf("closing the rig-resident bead against its own checkout: %v (gate log: %s)", err, logged.String())
+	shipped := beads.Bead{Type: "task", Metadata: beads.StringMap{
+		beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped,
+		beadmeta.WorkCommitMetadataKey:  "0000000000000000000000000000000000000000",
+		beadmeta.WorkBranchMetadataKey:  "main",
+	}}
+
+	if got := s.workRecordRepoDir(rig, shipped); got != rigPath {
+		t.Fatalf("rig-resident bead resolves to %q, want the rig checkout %q", got, rigPath)
 	}
-	if out := logged.String(); out != "" {
-		t.Fatalf("expected no gate output for a reachable commit, got %q", out)
+	if got := s.workRecordRepoDir(city, shipped); got != st.cityPath {
+		t.Fatalf("city-resident bead resolves to %q, want the city directory %q", got, st.cityPath)
 	}
 
-	_, err := s.humaHandleBeadClose(context.Background(), &BeadCloseInput{ID: cityID})
+	// A rig path is configured relative to the city, so the scope root — not the
+	// server's working directory — is what a relative path resolves against.
+	st.cfg.Rigs = []config.Rig{{Name: "myrig", Path: "rigs/myrig"}}
+	wantRelative := filepath.Join(st.cityPath, "rigs/myrig")
+	if got := s.workRecordRepoDir(rig, shipped); got != wantRelative {
+		t.Fatalf("relative rig path resolves to %q, want %q", got, wantRelative)
+	}
+
+	// A bead that recorded its own work directory outranks the scope root: the
+	// commit was made where the work happened.
+	recorded := shipped
+	recorded.Metadata = beads.StringMap{beadmeta.WorkDirMetadataKey: "/work/elsewhere"}
+	if got := s.workRecordRepoDir(rig, recorded); got != "/work/elsewhere" {
+		t.Fatalf("bead with %s resolves to %q, want the recorded directory", beadmeta.WorkDirMetadataKey, got)
+	}
+
+	// The resolved directory is handed to the oracle rather than dropped: the rig
+	// checkout is a real path but not a repository, so the clause answers "not
+	// reachable" instead of degrading the way an unknown root does.
+	st.cfg.Rigs = []config.Rig{{Name: "myrig", Path: rigPath}}
+	rigID := seedGateBead(t, rig, "wr-rig-1", shipped.Metadata)
+	t.Setenv(workrecord.EnforceEnvVar, "1")
+	logged := captureWorkRecordGateLog(t)
+
+	_, err := s.humaHandleBeadClose(context.Background(), &BeadCloseInput{ID: rigID})
 	assertConflict(t, err, "not reachable")
+	if out := logged.String(); strings.Contains(out, "reachability unverified") {
+		t.Fatalf("gate output %q degraded the clause for a known scope root", out)
+	}
 }
 
 // TestAPIBeadCloseDegradesReachabilityWhenTheScopeRootIsUnknown covers the bead
@@ -385,26 +410,4 @@ func TestAPIBeadDeleteStaysOutsideTheWorkRecordGate(t *testing.T) {
 	if out := logged.String(); out != "" {
 		t.Fatalf("expected no gate output for a delete, got %q", out)
 	}
-}
-
-// seedGitRepo makes dir a git repository with one commit on main and returns
-// that commit's SHA.
-func seedGitRepo(t *testing.T, dir string) string {
-	t.Helper()
-	run := func(args ...string) string {
-		out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
-		if err != nil {
-			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
-		}
-		return string(out)
-	}
-	run("init", "--initial-branch=main")
-	run("config", "user.name", "Gas City Test")
-	run("config", "user.email", "gc-test@test.local")
-	if err := os.WriteFile(filepath.Join(dir, "artifact.txt"), []byte("integrated\n"), 0o644); err != nil {
-		t.Fatalf("write artifact: %v", err)
-	}
-	run("add", "artifact.txt")
-	run("commit", "-m", "test: integrate the artifact")
-	return strings.TrimSpace(run("rev-parse", "HEAD"))
 }
