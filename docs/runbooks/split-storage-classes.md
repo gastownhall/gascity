@@ -25,6 +25,9 @@ config, run one command, start the city.
   infrastructure state exists in two places. Back up the city directory.
 - **Know which side you are on.** `gc storage status` answers it, read-only,
   and never creates the database it reports on.
+- **Rehearse the cutover.** `gc storage preflight` runs every check the
+  migration runs, against a live city, without migrating. Run it before you
+  schedule the window, not inside it.
 - **Stop the city.** The migration refuses while a controller is live, and it
   asks you to attest that nothing else is writing either. `gc stop` handles
   the controller; the attestation is yours.
@@ -80,7 +83,34 @@ This is the design working. **Boot never migrates.** A booting binary cannot
 know whether some other process is still writing to the source, so it refuses
 and names the command an operator runs deliberately, with the city stopped.
 
-## Step 3: run the migration
+## Step 3: rehearse it before you take the window
+
+```
+gc storage preflight
+```
+
+Runs every check the migration runs, in the same order, against a **live** city
+— and copies nothing, creates nothing, takes no migration guard, and publishes
+no event. It exists because the migration's refusals are all correct and all
+arrive at the worst possible moment: with the fleet stopped and a window
+running. The rig-scope census is the one that most justifies it, because its
+remedy is moving beads by hand and no command here does that for you.
+
+It exits non-zero when the migration would refuse for something you have to go
+and fix. **That is a different question from `gc storage status`**, which exits
+non-zero whenever the city is not yet serving from its binding — the ordinary
+state of every city with a cutover still ahead of it. A city that preflight
+clears will still fail a `status` gate until it has actually migrated.
+
+Two things it reports rather than refuses. A **live controller** is named by PID
+and does not affect the exit code — stopping it is the next thing you were going
+to do anyway, and blocking would mean the command for planning a window could
+only be run from inside one. And `--fleet-stopped` is **never checked**, here or
+anywhere: it is an operator attestation precisely because no process can verify
+it, and preflight says so rather than letting a clean report read as broader
+than it is.
+
+## Step 4: run the migration
 
 ```
 gc stop
@@ -114,7 +144,7 @@ What the command does, in order:
 The source is never mutated. Nothing is deleted, moved, or pruned from the
 work store.
 
-## Step 4: start, and verify
+## Step 5: start, and verify
 
 ```
 gc start
