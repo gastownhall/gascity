@@ -100,6 +100,87 @@ func ReadAll(path string) ([]Event, error) {
 	return ReadFiltered(path, Filter{})
 }
 
+// seqProbeBufSize bounds the read-ahead used when probing a byte offset for the
+// line that begins there. Events average ~1.4 KB on a live log; 64 KB
+// comfortably spans one line plus the partial line a probe may land inside.
+const seqProbeBufSize = 64 * 1024
+
+// seqLineAt probes byte offset off and returns the seq of the next parseable
+// line, along with that line's start offset.
+//
+// Contract, which the binary search in activeScanStart depends on: for off > 0
+// the line containing off is treated as a partial line and DISCARDED, so the
+// result is the first parseable line beginning strictly after off. Only off == 0
+// reads the line starting at off itself. Probing a known line start therefore
+// returns the FOLLOWING line, not the line at that offset.
+//
+// start is always a true line boundary. Unparseable lines are skipped, matching
+// the scanner's long-standing tolerance for malformed rows. ok is false when EOF
+// is reached without finding a parseable line.
+func seqLineAt(f *os.File, off int64) (seq uint64, start int64, ok bool) {
+	if _, err := f.Seek(off, io.SeekStart); err != nil {
+		return 0, 0, false
+	}
+	r := bufio.NewReaderSize(f, seqProbeBufSize)
+	pos := off
+	if off > 0 {
+		partial, err := r.ReadBytes('\n')
+		if err != nil {
+			return 0, 0, false
+		}
+		pos += int64(len(partial))
+	}
+	for {
+		line, err := r.ReadBytes('\n')
+		if len(line) > 0 {
+			var probe struct {
+				Seq uint64 `json:"seq"`
+			}
+			if json.Unmarshal(bytes.TrimRight(line, "\r\n"), &probe) == nil && probe.Seq > 0 {
+				return probe.Seq, pos, true
+			}
+			pos += int64(len(line))
+		}
+		if err != nil {
+			return 0, 0, false
+		}
+	}
+}
+
+// activeScanStart returns the byte offset in the active log at which a scan can
+// begin without missing any event Filter.AfterSeq can match.
+//
+// The active log is append-only with strictly increasing seq (FileRecorder
+// assigns e.Seq = r.seq++ under its mutex), so every line at or below the
+// cursor sorts before every line above it and can be skipped wholesale. This is
+// the seq-window skip archiveOverlapsFilter already applies to .gz archives,
+// extended to the active file. Without it a cursored read re-parses the entire
+// log on every call and AfterSeq saves nothing, because matchesFilter applies
+// it only after each line has been unmarshalled -- the dominant cost of the
+// supervisor's per-tick order-trigger check (gcy-ocb5).
+//
+// Returns 0 (full scan) whenever the boundary cannot be established, so a log
+// that violates the ordering invariant degrades in speed, never in correctness.
+func activeScanStart(f *os.File, size int64, afterSeq uint64) int64 {
+	if afterSeq == 0 || size <= 0 {
+		return 0
+	}
+	// Nothing to skip when the log's first line is already above the cursor.
+	if first, _, ok := seqLineAt(f, 0); !ok || first > afterSeq {
+		return 0
+	}
+	i := sort.Search(int(size), func(i int) bool {
+		seq, _, ok := seqLineAt(f, int64(i))
+		return !ok || seq > afterSeq
+	})
+	seq, start, ok := seqLineAt(f, int64(i))
+	if !ok || seq <= afterSeq {
+		// Cursor is at or beyond the newest event: skip the file entirely.
+		return size
+	}
+	return start
+}
+
 // ReadFiltered reads events from path and sibling archives, returning
 // only those matching all non-zero fields in filter. Archives whose
 // seq window is fully excluded by the filter's AfterSeq predicate are
@@ -166,6 +247,17 @@ func readFilteredTracked(path string, filter Filter) ([]Event, map[eventSeqWindo
 		return result, listed, fmt.Errorf("reading events: %w", err)
 	}
 	defer f.Close() //nolint:errcheck // read-only file
+
+	// Skip the prefix of the active log the cursor already covers. seqLineAt
+	// leaves the descriptor wherever its last probe ended, so seek explicitly
+	// even when the scan starts at 0 (the uncursored case).
+	scanFrom := int64(0)
+	if st, statErr := f.Stat(); statErr == nil {
+		scanFrom = activeScanStart(f, st.Size(), filter.AfterSeq)
+	}
+	if _, err := f.Seek(scanFrom, io.SeekStart); err != nil {
+		return result, listed, fmt.Errorf("seeking events: %w", err)
+	}
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // handle lines up to 1MB
