@@ -1784,10 +1784,14 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 			}
 			w("")
 		} else if !opts.NoFormula && a.EffectiveDefaultSlingFormula() != "" {
+			// Report-only pre-check: unlike explicit --on, an implicit
+			// default formula no longer hard-fails on a pre-existing
+			// molecule/wisp -- the live path skips the attach and routes
+			// the bead plainly -- so the preview must not predict an
+			// error the real run will not produce.
+			var blockingLabel, blockingID string
 			if preCheck {
-				if rc := dryRunReportBlockingMolecule(opts, deps, querier, stderr); rc != 0 {
-					return rc
-				}
+				blockingLabel, blockingID = sling.FindBlockingMolecule(querier, opts.BeadOrFormula, deps.Store)
 			}
 			w("Default formula:")
 			w("  Formula: " + a.EffectiveDefaultSlingFormula())
@@ -1800,7 +1804,11 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 			}
 			w("  Would run: " + cookCmd)
 			if preCheck {
-				w("  Pre-check: " + opts.BeadOrFormula + " has no existing molecule/wisp children ✓")
+				if blockingLabel != "" {
+					w(fmt.Sprintf("  Pre-check: %s already has attached %s %s — the default formula will be skipped and the bead routed plainly.", opts.BeadOrFormula, blockingLabel, blockingID))
+				} else {
+					w("  Pre-check: " + opts.BeadOrFormula + " has no existing molecule/wisp children ✓")
+				}
 			}
 			w("")
 		}
