@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -28,6 +29,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 func TestDrainItemRecipeVarsIncludesRuntimeMetadata(t *testing.T) {
@@ -840,7 +842,10 @@ func TestFindWorkflowBeadsIncludesClosedDescendants(t *testing.T) {
 		t.Fatalf("Create(child): %v", err)
 	}
 
-	found := findWorkflowBeads(store, root.ID)
+	found, err := findWorkflowBeads(store, root.ID)
+	if err != nil {
+		t.Fatalf("findWorkflowBeads(...): %v", err)
+	}
 	ids := make([]string, 0, len(found))
 	for _, bead := range found {
 		ids = append(ids, bead.ID)
@@ -879,7 +884,10 @@ func TestFindWorkflowBeadsResolvesLogicalWorkflowID(t *testing.T) {
 		t.Fatalf("Create(child): %v", err)
 	}
 
-	found := findWorkflowBeads(store, "wf-delete-logical")
+	found, err := findWorkflowBeads(store, "wf-delete-logical")
+	if err != nil {
+		t.Fatalf("findWorkflowBeads(logical): %v", err)
+	}
 	ids := make([]string, 0, len(found))
 	for _, bead := range found {
 		ids = append(ids, bead.ID)
@@ -6651,28 +6659,21 @@ func TestApplySourceWorkflowMatchCleanupDeletesOnlyCollectedWorkflowBeads(t *tes
 		t.Fatalf("DepAdd(outside->second): %v", err)
 	}
 
-	runnerCalled := false
-	runner := func(_ string, _ string, _ ...string) ([]byte, error) {
-		runnerCalled = true
-		return []byte("ok"), nil
-	}
-
+	// The match carries no bd runner, which is the point: delete-source deletes
+	// exactly the ids it collected, in process. A `bd delete --cascade` would
+	// walk the dependency edges out of the workflow and take `outside` with it.
 	var stderr bytes.Buffer
 	closed, deleted, incomplete := applySourceWorkflowMatchCleanup(sourceWorkflowStoreMatch{
-		label:  "rig:gascity",
-		store:  store,
-		beads:  []beads.Bead{first, second},
-		path:   "/repo",
-		runner: runner,
+		label: "rig:gascity",
+		store: store,
+		beads: []beads.Bead{first, second},
+		path:  "/repo",
 	}, true, &stderr)
 	if incomplete {
 		t.Fatalf("cleanup incomplete; stderr=%s", stderr.String())
 	}
 	if closed != 2 || deleted != 2 {
 		t.Fatalf("closed/deleted = %d/%d, want 2/2", closed, deleted)
-	}
-	if runnerCalled {
-		t.Fatal("cleanup used bd cascade runner; want explicit in-process deletion of collected IDs")
 	}
 	for _, id := range []string{first.ID, second.ID} {
 		if _, err := store.Get(id); err == nil {
@@ -7326,15 +7327,20 @@ func TestWorkflowDeleteSweepsTheRelocatedTreeAndTheRetainedCopy(t *testing.T) {
 	}
 }
 
-// TestWorkflowDeleteRefusesToSweepPastAnUnreadableBinding pins the arm that
-// separates a sweep from a read.
+// TestWorkflowDeleteRefusesToSweepPastABindingThatStandsRefused pins the arm
+// that separates a sweep from a read.
 //
 // `gc beads list` prints what it can reach and says what it could not. A
 // destructive one-shot cannot: "I could not see the binding's tree" and "the
 // binding's tree is gone" produce the same exit code and the same operator
 // belief, and only one of them is true. So the refusal stops the sweep before it
 // touches anything.
-func TestWorkflowDeleteRefusesToSweepPastAnUnreadableBinding(t *testing.T) {
+//
+// The fault here is a STANDING refusal — a verdict about storage config that
+// arrives at federation time, before a row is read. A binding that resolves and
+// then fails mid-read is a different arrival with the same consequence, and it
+// is pinned separately by the ...FaultsMidRead rows below.
+func TestWorkflowDeleteRefusesToSweepPastABindingThatStandsRefused(t *testing.T) {
 	cityPath, rootID, _, work, _ := relocatedWorkflowCity(t)
 	failClassBindingReads(t, cityPath, errors.New("the class binding is having a bad day"))
 
@@ -7366,7 +7372,7 @@ func TestWorkflowDeleteRefusesToSweepPastAnUnreadableBinding(t *testing.T) {
 // all, and would also read as a second store to the multi-store guard — which
 // would refuse every converged city instead of sweeping it.
 func TestWorkflowDeleteSourceSweepsTheRelocatedRoots(t *testing.T) {
-	cityPath, rootID, bindingOnlyID, work, binding := relocatedWorkflowCity(t)
+	_, rootID, bindingOnlyID, work, binding := relocatedWorkflowCity(t)
 
 	source, err := work.Create(beads.Bead{Title: "the source bead", Type: "task", Status: "in_progress"})
 	if err != nil {
@@ -7380,7 +7386,6 @@ func TestWorkflowDeleteSourceSweepsTheRelocatedRoots(t *testing.T) {
 			t.Fatalf("stamping the root's source bead id: %v", err)
 		}
 	}
-	_ = cityPath
 
 	var stdout, stderr bytes.Buffer
 	if code := cmdWorkflowDeleteSource(source.ID, sourceWorkflowStoreSelector{}, true, false, &stdout, &stderr); code != 0 {
@@ -7414,8 +7419,8 @@ func TestWorkflowDeleteSourceSweepsTheRelocatedRoots(t *testing.T) {
 	}
 }
 
-// TestWorkflowDeleteSourceRefusesToSweepPastAnUnreadableBinding is the
-// delete-source half of the refusal. It runs a different collector from
+// TestWorkflowDeleteSourceRefusesToSweepPastABindingThatStandsRefused is the
+// delete-source half of the standing refusal. It runs a different collector from
 // `gc workflow delete`, so the policy has to be stated in both.
 //
 // The selector is explicit on purpose. Without one, delete-source resolves the
@@ -7423,7 +7428,7 @@ func TestWorkflowDeleteSourceSweepsTheRelocatedRoots(t *testing.T) {
 // so an unreadable binding aborts the command before the sweep is ever planned,
 // and the exit code proves nothing about the sweep. Naming the store skips the
 // by-id leg and puts the collector's own refusal on the only path to failure.
-func TestWorkflowDeleteSourceRefusesToSweepPastAnUnreadableBinding(t *testing.T) {
+func TestWorkflowDeleteSourceRefusesToSweepPastABindingThatStandsRefused(t *testing.T) {
 	cityPath, rootID, _, work, _ := relocatedWorkflowCity(t)
 	source, err := work.Create(beads.Bead{Title: "the source bead", Type: "task", Status: "in_progress"})
 	if err != nil {
@@ -7511,5 +7516,232 @@ func TestWorkflowReopenSourceSeesTheRelocatedRoot(t *testing.T) {
 	}
 	if unchanged.Status != "closed" {
 		t.Errorf("the source bead is %q, want closed; reopen-source ran past a live workflow it could not see", unchanged.Status)
+	}
+}
+
+// faultingClassStore wraps a city's real class binding and makes chosen
+// operations fail at RUNTIME, without the binding becoming a standing refusal.
+//
+// That distinction is the whole point of the rows below. refusedClassStore is a
+// verdict about the city's storage configuration, taken before any work starts,
+// and it is the one shape the sweep's federation guard was written to intercept.
+// A binding that resolves normally and then drops its connection mid-sweep — a
+// sqlite I/O error, a dolt server going away, a permission change — announces
+// nothing: it contributes no rows, which is indistinguishable from holding none,
+// and a sweep that reads that silence as "nothing here" reports a completed
+// erase over a live tree.
+//
+// Pointer-typed because the binding grouping keys a map on store identity, and
+// IDPrefix is delegated explicitly for the reason countingClassStore delegates
+// it: beads.Store does not carry it, so embedding the interface alone would hide
+// the leaf's declaration and the binding's mint bit would read false.
+type faultingClassStore struct {
+	beads.Store
+	readErr  error
+	writeErr error
+}
+
+func (s *faultingClassStore) Get(id string) (beads.Bead, error) {
+	if s.readErr != nil {
+		return beads.Bead{}, s.readErr
+	}
+	return s.Store.Get(id)
+}
+
+func (s *faultingClassStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if s.readErr != nil {
+		return nil, s.readErr
+	}
+	return s.Store.List(q)
+}
+
+func (s *faultingClassStore) CloseAll(ids []string, meta map[string]string) (int, error) {
+	if s.writeErr != nil {
+		return 0, s.writeErr
+	}
+	return s.Store.CloseAll(ids, meta)
+}
+
+func (s *faultingClassStore) IDPrefix() string {
+	declaring, ok := s.Store.(storeref.HasIDPrefix)
+	if !ok {
+		return ""
+	}
+	return declaring.IDPrefix()
+}
+
+// installFaultingClassBinding swaps this city's class stores for one that faults
+// on the given operations, and restates the census verdict for the store it
+// installed so the binding still derives as relocated and relic-bearing.
+//
+// Both halves, for installCountedClassBindingWrapped's reason: the verdict is
+// keyed by store identity and the swap installs a store the census never saw.
+// Without the restatement the derivation would re-probe through a store that is
+// now failing, and the row would be asserting on a binding that stopped
+// resolving rather than on one that resolves and cannot answer.
+func installFaultingClassBinding(t *testing.T, cityPath string, readErr, writeErr error) {
+	t.Helper()
+	routes := cliStorageRoutes(cityPath)
+	if routes == nil {
+		t.Fatal("the city resolved no routes to fault")
+	}
+	var installed *faultingClassStore
+	restore := make(map[coordclass.Class]beads.Store, len(routes.stores))
+	for class, previous := range routes.stores {
+		restore[class] = previous
+		if installed == nil {
+			installed = &faultingClassStore{Store: previous, readErr: readErr, writeErr: writeErr}
+		}
+		routes.stores[class] = installed
+	}
+	if installed == nil {
+		t.Fatal("the city relocated no class store to fault")
+	}
+	previousRelics := routes.relics
+	routes.relics = map[beads.Store]bool{installed: true}
+	dropDerivedResidencyMemo(t, cityPath)
+	t.Cleanup(func() {
+		routes.relics = previousRelics
+		for class, previous := range restore {
+			routes.stores[class] = previous
+		}
+	})
+
+	bindings, err := cliResidencyBindings(cityPath)
+	if err != nil {
+		t.Fatalf("re-deriving the bindings the sweep will use: %v", err)
+	}
+	if len(bindings) != 1 || bindings[0].Leg.Store != beads.Store(installed) {
+		t.Fatalf("the sweep's binding resolves to %d bindings not fronted by the faulting store; this row would exercise a healthy one", len(bindings))
+	}
+}
+
+// TestWorkflowDeleteRefusesToSweepPastABindingThatFaultsMidRead is the ga-gqc9e
+// regression on the fault a standing refusal does not cover.
+//
+// A binding that resolves as relocated and then FAILS its reads contributes zero
+// rows to the sweep. Zero rows is what an empty store contributes, so the sweep
+// drops it, closes the retained frozen copies it could reach, prints a count and
+// exits 0 — never naming the binding whose live tree it did not touch. That is
+// the partial sweep reported as success, arrived at without any refusal for the
+// federation guard to intercept.
+func TestWorkflowDeleteRefusesToSweepPastABindingThatFaultsMidRead(t *testing.T) {
+	cityPath, rootID, _, work, _ := relocatedWorkflowCity(t)
+	installFaultingClassBinding(t, cityPath, errors.New("connection reset mid-sweep"), nil)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdWorkflowDelete(rootID, true, false, &stdout, &stderr); code != 1 {
+		t.Fatalf("gc workflow delete exited %d, want 1: %s%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "connection reset mid-sweep") {
+		t.Errorf("the refusal does not carry the fault that caused it: %q", stderr.String())
+	}
+	retained, err := work.Get(rootID)
+	if err != nil {
+		t.Fatalf("reading %s back from the work store: %v", rootID, err)
+	}
+	if retained.Status == "closed" {
+		t.Errorf("the sweep closed the copies it could reach and reported success over an unread binding")
+	}
+}
+
+// TestWorkflowDeleteReportsAFailedCloseInTheBinding is the ga-gqc9e regression on
+// the default mode's WRITE half.
+//
+// `gc workflow delete` without --delete closes; that close is the destructive
+// act, and its error was dropped on the floor. Ordinary views are swept before
+// the binding, so a binding whose writes fail loses nothing of its own and takes
+// the retained copies with it: the frozen twins close, the live tree stays open,
+// and the command prints the count of what it managed and exits 0. Delete mode
+// and delete-source both fail loud here; the default mode of the same command
+// must too.
+func TestWorkflowDeleteReportsAFailedCloseInTheBinding(t *testing.T) {
+	cityPath, rootID, bindingOnlyID, _, binding := relocatedWorkflowCity(t)
+	installFaultingClassBinding(t, cityPath, nil, errors.New("database is locked mid-close"))
+
+	var stdout, stderr bytes.Buffer
+	code := cmdWorkflowDelete(rootID, true, false, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("gc workflow delete exited 0 after the binding refused every close: %s%s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "database is locked mid-close") {
+		t.Errorf("the failure does not carry the store's cause: %q", stderr.String())
+	}
+	for _, id := range []string{rootID, bindingOnlyID} {
+		live, err := binding.Get(id)
+		if err != nil {
+			t.Fatalf("reading %s back from the binding: %v", id, err)
+		}
+		if live.Status == "closed" {
+			t.Fatalf("the fixture's binding closed %s after all; this row cannot distinguish a reported failure from a real sweep", id)
+		}
+	}
+}
+
+// TestWorkflowDeleteSourceRefusesWhenTheBindingFaultsOnARigLeg is the ga-gqc9e
+// regression on the gap the selected-store rule leaves open.
+//
+// The source-workflow collector tolerates a per-store scan failure so one sick
+// rig cannot take the whole walk down, and it makes an exception only for the
+// store the walk was told to work in. The class binding is never that store on a
+// rig-selected sweep: the binding's rows are the city's and carry the CITY's
+// ref, so `--rig frontend` puts it permanently outside the strict set. The sweep
+// then warns, closes the retained frozen copy it could reach, prints
+// result=cleaned and exits 0 while the tree the city is running stays live in
+// the store it could not read.
+//
+// The topology here is the ordinary one, not a contrivance: the source bead
+// lives in a rig, the workflow's control beads live in the city's coordination
+// class, and relocation moved that class into the binding. So the leg that
+// carries the rig's ref is the same leg that has to reach the binding.
+//
+// A binding is not a rig whose absence merely degrades coverage — on a converged
+// city it IS the city's store. Whether it can answer is not a question about
+// which leg the walk is on.
+func TestWorkflowDeleteSourceRefusesWhenTheBindingFaultsOnARigLeg(t *testing.T) {
+	cityPath, rootID, _, work, _ := relocatedWorkflowCity(t)
+	binding, relocated := cliSoleClassBindingStore(cityPath)
+	if !relocated {
+		t.Fatal("the fixture city resolved no class binding")
+	}
+	const sourceID = "rig-src-1"
+	rig := rigHoldingID(t, cityPath, sourceID, "the rig's source bead", "task")
+	for _, store := range []beads.Store{work, binding} {
+		if err := store.SetMetadataBatch(rootID, map[string]string{
+			beadmeta.SourceBeadIDMetadataKey:   sourceID,
+			beadmeta.SourceStoreRefMetadataKey: "rig:frontend",
+		}); err != nil {
+			t.Fatalf("stamping the root's source identity: %v", err)
+		}
+	}
+	if err := rig.SetMetadata(sourceID, "workflow_id", rootID); err != nil {
+		t.Fatalf("stamping the rig source bead's workflow_id: %v", err)
+	}
+	installFaultingClassBinding(t, cityPath, errors.New("connection reset mid-sweep"), nil)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdWorkflowDeleteSource(sourceID, sourceWorkflowStoreSelector{storeRef: "rig:frontend"}, true, false, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("gc workflow delete-source exited %d, want 1: %s%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "connection reset mid-sweep") {
+		t.Errorf("the refusal does not carry the fault that caused it: %q", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "result=cleaned") {
+		t.Errorf("delete-source reported a clean sweep over a binding it could not read:\n%s", stdout.String())
+	}
+	retained, err := work.Get(rootID)
+	if err != nil {
+		t.Fatalf("reading %s back from the work store: %v", rootID, err)
+	}
+	if retained.Status == "closed" {
+		t.Errorf("delete-source closed the copies it could reach and reported success over an unread binding")
+	}
+	source, err := rig.Get(sourceID)
+	if err != nil {
+		t.Fatalf("reading the rig's source bead back: %v", err)
+	}
+	if strings.TrimSpace(source.Metadata["workflow_id"]) == "" {
+		t.Errorf("the source bead's workflow_id was cleared, which tells the next sling the workflow is gone")
 	}
 }
