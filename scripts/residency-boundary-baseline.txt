@@ -21,10 +21,10 @@
 # governs that — stated beside the pattern in residency-boundary-patterns.txt —
 # requires a cross-plane router-agreement pin to land with it.
 #
-# The two b:cliSoleClassBinding rows are the same kind of census one layer down:
-# the surfaces that answer every reserved prefix from ONE store, which is a
-# claim about the city's topology and not just a call. The accessor checks that
-# claim and refuses a fan-out, so a third row is not a correctness bug — it is a
+# The three b:cliSoleClassBinding rows are the same kind of census one layer
+# down: the surfaces that answer every reserved prefix from ONE store, which is
+# a claim about the city's topology and not just a call. The accessor checks that
+# claim and refuses a fan-out, so a fourth row is not a correctness bug — it is a
 # new surface routing class-reserved ids, which is the thing worth seeing.
 cmd/gc/api_state.go	BeadStores	a:BeadStores	1
 cmd/gc/api_state.go	BeadStores	ast:returns-store-list	1
@@ -67,6 +67,7 @@ cmd/gc/cmd_bd_by_id.go	resolve	d:bdIDIsClassReserved	1
 cmd/gc/cmd_beads.go	doBeadsListFallback	a:openAllConvoyStoresAt	1
 cmd/gc/cmd_beads.go	doBeadsShowFallback	a:openAllConvoyStoresAt	1
 cmd/gc/cmd_convoy.go	convoyStoreCandidates	a:convoyStoreCandidates	1
+cmd/gc/cmd_convoy.go	convoyStoreViewsWithBinding	b:cliSoleClassBinding	1
 cmd/gc/cmd_convoy.go	doConvoyCheckFallback	a:openAllConvoyStoresAt	1
 cmd/gc/cmd_convoy.go	doConvoyListFallback	a:openAllConvoyStoresAt	1
 cmd/gc/cmd_convoy.go	openAllConvoyStores	a:openAllConvoyStoresAt	1

@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/events"
 )
 
@@ -2478,5 +2479,101 @@ func TestRouteConvoyStatus_RemoteWorkflowConvoyNoLocalFallback(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "route=api reason=error") {
 		t.Errorf("expected route=api reason=error for a remote workflow-convoy:\n%s", stderr.String())
+	}
+}
+
+// relocatedConvoyCity builds the shape `gc storage migrate` leaves behind for a
+// convoy: one id, two rows, and a binding that is the live one.
+//
+// The work ledger keeps the copy the migration RETAINED — frozen at cutover,
+// still carrying the open child it had then — and the binding holds the row the
+// city has gone on mutating, whose children are finished. Every read surface has
+// to prefer the second, and the two differ in exactly the way that makes a wrong
+// choice visible: the frozen copy still gates, the live one is ready to close.
+func relocatedConvoyCity(t *testing.T) (cityPath, convoyID string, work, binding beads.Store) {
+	t.Helper()
+	cityPath, _ = foreignProviderCity(t)
+	work = workStoreFor(t, cityPath)
+
+	frozen, err := work.Create(beads.Bead{Title: "the retained frozen convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("seeding the retained convoy in the work store: %v", err)
+	}
+	if _, err := work.Create(beads.Bead{Title: "still open in the frozen copy", ParentID: frozen.ID}); err != nil {
+		t.Fatalf("seeding the frozen copy's open child: %v", err)
+	}
+
+	binding, relocated := cliSoleClassBindingStore(cityPath)
+	if !relocated {
+		t.Fatal("the fixture city resolved no class binding; it is not split")
+	}
+	if _, err := migrationSeed(binding, beads.Bead{ID: frozen.ID, Title: "the binding's live convoy", Type: "convoy"}); err != nil {
+		t.Fatalf("carrying %s across to the class binding: %v", frozen.ID, err)
+	}
+	binding = recensusAfterSeedingARelic(t, cityPath)
+
+	done, err := binding.Create(beads.Bead{Title: "finished in the binding", ParentID: frozen.ID})
+	if err != nil {
+		t.Fatalf("seeding the binding copy's child: %v", err)
+	}
+	if err := binding.Close(done.ID); err != nil {
+		t.Fatalf("closing the binding copy's child: %v", err)
+	}
+	return cityPath, frozen.ID, work, binding
+}
+
+// TestConvoyCheckReadsTheBindingRow is the ga-efyq4 regression on the arm that
+// MUTATES.
+//
+// `gc convoy check` closes convoys whose children are all done, and it decides
+// that from whichever row its directory scan happened to find. On a migrated
+// city that is the retained copy, whose children were frozen mid-flight at
+// cutover — so the convoy the city actually finished never auto-closes, and the
+// gate it feeds never opens.
+func TestConvoyCheckReadsTheBindingRow(t *testing.T) {
+	cityPath, convoyID, work, binding := relocatedConvoyCity(t)
+
+	var stdout, stderr bytes.Buffer
+	if code := doConvoyCheckFallback(cityPath, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc convoy check exited %d: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Auto-closed convoy "+convoyID) {
+		t.Errorf("the finished convoy did not auto-close; check read the frozen copy's open child:\n%s", stdout.String())
+	}
+
+	closed, err := binding.Get(convoyID)
+	if err != nil {
+		t.Fatalf("reading %s back from the binding: %v", convoyID, err)
+	}
+	if !convoycore.IsTerminalStatus(closed.Status) {
+		t.Errorf("the binding's convoy is %q after the check, want a terminal status", closed.Status)
+	}
+	retained, err := work.Get(convoyID)
+	if err != nil {
+		t.Fatalf("reading %s back from the work store: %v", convoyID, err)
+	}
+	if convoycore.IsTerminalStatus(retained.Status) {
+		t.Errorf("the check closed the retained work copy too; the frozen copy still has an open child and is not the row this decides from")
+	}
+}
+
+// TestConvoyListReadsTheBindingRow is the ga-efyq4 regression on the plain list.
+//
+// One convoy must print once, as the binding has it. Printing the frozen copy
+// instead reports progress that stopped at cutover; printing both reports two
+// convoys where the city has one.
+func TestConvoyListReadsTheBindingRow(t *testing.T) {
+	cityPath, _, _, _ := relocatedConvoyCity(t)
+
+	var stdout, stderr bytes.Buffer
+	if code := doConvoyListFallback(cityPath, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc convoy list exited %d: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if got := strings.Count(out, "the binding's live convoy"); got != 1 {
+		t.Errorf("the binding's convoy appears %d times, want exactly 1:\n%s", got, out)
+	}
+	if strings.Contains(out, "the retained frozen convoy") {
+		t.Errorf("the list printed the frozen work copy; the binding is the truth for reads:\n%s", out)
 	}
 }

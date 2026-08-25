@@ -152,6 +152,69 @@ func foreignProviderCity(t *testing.T) (cityPath string, classStore beads.Store)
 	return cityPath, store
 }
 
+// cliSoleClassBindingStore resolves the city's sole relocated class binding as
+// a STORE, for fixtures that seed both sides of a migration and have no error
+// channel of their own.
+//
+// The fan-out — the only error cliSoleClassBinding returns — is a topology this
+// build refuses to serve, so a fixture that met one has not built the city it
+// meant to build and says so here rather than seeding half of it.
+func cliSoleClassBindingStore(cityPath string) (beads.Store, bool) {
+	binding, relocated, err := cliSoleClassBinding(cityPath)
+	if err != nil {
+		return refusedClassStore{err: standingStorageRefusal{err: err}}, true
+	}
+	if !relocated {
+		return nil, false
+	}
+	return binding.Store, true
+}
+
+// recensusAfterSeedingARelic reopens the funnel so the binding's relic census
+// runs again, and returns the class store on the far side of it.
+//
+// The census runs when the funnel OPENS a binding, and a fixture that plants a
+// work-shaped id afterwards has produced a verdict that was true when it was
+// taken and is false by the time the row asserts on it. The residence probe
+// retires on that stale verdict — MintsReserved && !HasLegacyResidents — and the
+// row then reads the retained work copy while claiming to test that the binding
+// wins.
+//
+// Reopening is not a workaround for the ordering: it IS what production does.
+// Relics are what `gc storage migrate` leaves behind, so every process that
+// meets them starts after they exist, censuses once at boot, and sees them. A
+// one-shot `gc` invocation against a migrated city is exactly this.
+//
+// The returned store is a NEW handle — the engine is a real sqlite database
+// under .gc/, so the seeded relic is still there, but the pointer the fixture
+// handed back before the reopen is closed and no longer the one the door
+// resolves. Rows that compare store identity must use this one.
+func recensusAfterSeedingARelic(t *testing.T, cityPath string) beads.Store {
+	t.Helper()
+	if err := closeCLIStorageRoutes(); err != nil {
+		t.Fatalf("closing the funnel so the binding is censused again: %v", err)
+	}
+	store, relocated := cliSoleClassBindingStore(cityPath)
+	if !relocated {
+		t.Fatal("the reopened funnel resolved no class binding; the fixture's city stopped being split across the reopen")
+	}
+	return store
+}
+
+// dropDerivedResidencyMemo drops one city's memoized binding grouping, for the
+// fixtures that swap a route's store out from under it.
+//
+// The grouping is DERIVED from the routes, and nothing recomputes it when a
+// test reaches into routes.stores directly. Without this a fault-injecting row
+// holds a store captured before the swap and passes against a healthy one,
+// which is the failure mode a fault-injection row exists to rule out. Dropped
+// again on cleanup so the swap does not outlive the test that made it.
+func dropDerivedResidencyMemo(t *testing.T, cityPath string) {
+	t.Helper()
+	dropCLIResidencyBindings(filepath.Clean(cityPath))
+	t.Cleanup(func() { dropCLIResidencyBindings(filepath.Clean(cityPath)) })
+}
+
 // mustCreateClassBead creates a bead in the class binding and proves it carries
 // a reserved class prefix, which is what makes it unanswerable by any other
 // store.

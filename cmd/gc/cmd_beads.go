@@ -181,6 +181,7 @@ func doBeadsListFallback(cityPath, format string, filters beadFilters, stdout, s
 	if stores == nil {
 		return code
 	}
+	stores = convoyStoreViewsForRead(cityPath, stores, stderr, "gc beads list")
 	all, err := collectBeadsAcrossStores(stores, filters)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc beads list: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -310,6 +311,11 @@ func doBeadsShowFallback(cityPath, beadID, format string, stdout, stderr io.Writ
 // for sorting. --all maps to IncludeClosed (matching `bd list --all`); the
 // CLI always opts into AllowScan because an unfiltered list is a valid
 // default UX.
+//
+// The merge is mergeConvoyViewRows, so a relocated class binding's rows
+// supersede the frozen copies the migration retained in the city store. Rows
+// from two scanned stores that happen to share an id are two different beads
+// and both survive.
 func collectBeadsAcrossStores(stores []convoyStoreView, filters beadFilters) ([]beads.Bead, error) {
 	q := beads.ListQuery{
 		Label:         filters.label,
@@ -317,15 +323,15 @@ func collectBeadsAcrossStores(stores []convoyStoreView, filters beadFilters) ([]
 		IncludeClosed: filters.all,
 		AllowScan:     true,
 	}
-	all := make([]beads.Bead, 0)
-	for _, candidate := range stores {
+	rows := make([][]beads.Bead, len(stores))
+	for i, candidate := range stores {
 		list, err := candidate.store.List(q)
 		if err != nil {
 			return nil, err
 		}
-		all = append(all, list...)
+		rows[i] = list
 	}
-	return all, nil
+	return mergeConvoyViewRows(stores, rows, func(b beads.Bead) string { return b.ID }), nil
 }
 
 // sortBeadsForList orders beads by ID so output is stable across store

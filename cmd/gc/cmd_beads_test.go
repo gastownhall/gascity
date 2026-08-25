@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -12,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 func TestDoBeadsHealth_FileProvider(t *testing.T) {
@@ -758,5 +760,88 @@ func TestRun_BeadsShowRejectsExtraArgs(t *testing.T) {
 	}
 	if !strings.Contains(errb.String(), "accepts at most 1 arg") {
 		t.Fatalf("stderr = %q, want an at-most-1-arg error", errb.String())
+	}
+}
+
+// TestBeadsListFallbackReadsTheRelocatedBinding is the ga-efyq4 regression on
+// the beads-list arm.
+//
+// The fan-out enumerates the city's DIRECTORIES, and a relocated class binding
+// is not one of them. On a migrated city that makes the list doubly wrong: the
+// binding's live rows are absent, and the copies `gc storage migrate` retained
+// in the work ledger — frozen at cutover, never mutated again — are printed in
+// their place. The reader cannot tell the two apart, because the migration
+// preserves ids and only the titles here differ.
+func TestBeadsListFallbackReadsTheRelocatedBinding(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	work := workStoreFor(t, cityPath)
+	frozen, err := work.Create(beads.Bead{Title: "the retained frozen copy", Type: "task"})
+	if err != nil {
+		t.Fatalf("seeding the retained copy in the work store: %v", err)
+	}
+	binding, relocated := cliSoleClassBindingStore(cityPath)
+	if !relocated {
+		t.Fatal("the fixture city resolved no class binding; it is not split")
+	}
+	classResidentWorkShapedBead(t, binding, frozen.ID, "the binding's live row")
+	classStore := recensusAfterSeedingARelic(t, cityPath)
+	mustCreateClassBead(t, classStore, beads.Bead{Title: "minted in the binding after the migration", Type: "task"})
+	if _, err := work.Create(beads.Bead{Title: "a work bead the binding never held", Type: "task"}); err != nil {
+		t.Fatalf("seeding the work-only control: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doBeadsListFallback(cityPath, "", beadFilters{}, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc beads list exited %d: %s", code, stderr.String())
+	}
+
+	out := stdout.String()
+	if got := strings.Count(out, "the binding's live row"); got != 1 {
+		t.Errorf("the binding's row appears %d times, want exactly 1:\n%s", got, out)
+	}
+	if strings.Contains(out, "the retained frozen copy") {
+		t.Errorf("the list printed the frozen work copy of %s; the binding is the truth for reads:\n%s", frozen.ID, out)
+	}
+	if !strings.Contains(out, "a work bead the binding never held") {
+		t.Errorf("a work-only bead vanished from the list; the merge dropped rows the binding never claimed:\n%s", out)
+	}
+	// The discriminator between the two ways this can be broken. A bead the
+	// binding minted after the migration has no retained copy anywhere, so it
+	// survives a merge that picks the wrong winner and disappears only when the
+	// binding is not read at all.
+	if !strings.Contains(out, "minted in the binding after the migration") {
+		t.Errorf("a bead that exists only in the binding is missing; the fan-out never read it:\n%s", out)
+	}
+}
+
+// TestBeadsListFallbackWarnsEveryRunOnARefusedBinding pins the list surface's
+// half of the refusal policy.
+//
+// A list is a read, and a refused city still serves work from its work ledger,
+// so failing the whole command would take `gc beads list` away from every city
+// whose storage config is mid-repair. The rows the binding holds are missing
+// from that output, though, and a listing that silently omits them is the
+// stale-answer failure this lane exists to close — so the omission is said out
+// loud EVERY run. Not once per process: each `gc beads list` is a fresh answer
+// and has to carry its own caveat.
+func TestBeadsListFallbackWarnsEveryRunOnARefusedBinding(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	work := workStoreFor(t, cityPath)
+	if _, err := work.Create(beads.Bead{Title: "a work bead the binding never held", Type: "task"}); err != nil {
+		t.Fatalf("seeding the work-only control: %v", err)
+	}
+	failClassBindingReads(t, cityPath, errors.New("the class binding is having a bad day"))
+
+	for run := 1; run <= 2; run++ {
+		var stdout, stderr bytes.Buffer
+		if code := doBeadsListFallback(cityPath, "", beadFilters{}, &stdout, &stderr); code != 0 {
+			t.Fatalf("run %d: a refused binding failed the whole list (exit %d); a refused city still serves work: %s", run, code, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "a work bead the binding never held") {
+			t.Errorf("run %d: the work ledger's own rows went missing:\n%s", run, stdout.String())
+		}
+		if !strings.Contains(stderr.String(), "bad day") {
+			t.Errorf("run %d: the refusal was not announced with its own cause: %q", run, stderr.String())
+		}
 	}
 }

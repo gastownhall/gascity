@@ -422,6 +422,7 @@ func doConvoyListFallback(cityPath string, jsonOut bool, stdout, stderr io.Write
 	if stores == nil {
 		return code
 	}
+	stores = convoyStoreViewsForRead(cityPath, stores, stderr, "gc convoy list")
 	return doConvoyListAcrossStores(stores, jsonOut, stdout, stderr)
 }
 
@@ -486,6 +487,144 @@ func convoyStoreCandidatesWithProvider(cfg *config.City, cityPath, beadID string
 type convoyStoreView struct {
 	path  string
 	store beads.Store
+	role  convoyViewRole
+}
+
+// convoyViewRole says how a view's rows relate to the other views' rows. It is
+// the only thing a fan-out merge needs to know about where a store came from.
+type convoyViewRole int
+
+const (
+	// convoyViewOrdinary is a store the directory scan enumerated. Its ids are
+	// its own: a city and a rig that each mint "gc-1" hold two different beads,
+	// and a merge that collapsed them would delete one from the output.
+	convoyViewOrdinary convoyViewRole = iota
+	// convoyViewClassBinding is the city's relocated class binding — the store
+	// `gc storage migrate` moved the infrastructure classes INTO, and the one
+	// the city has gone on mutating since.
+	convoyViewClassBinding
+	// convoyViewMigrationSource is the city store the migration copied OUT of.
+	// The copies it retained are frozen at cutover and share their ids with the
+	// binding's live rows, so they are the one duplicate a merge can safely
+	// collapse.
+	convoyViewMigrationSource
+)
+
+// convoyBindingViewPath is what the class binding is called in fan-out output.
+//
+// It is deliberately not a directory. No `bd` invocation can be rooted there
+// and no lock can be taken on it, so a caller that treats a view's path as a
+// working directory has to check the view's role first.
+const convoyBindingViewPath = "city (class binding)"
+
+// convoyStoreViewsWithBinding federates a directory scan's views with the
+// city's relocated class binding, and reports a refusal rather than deciding
+// what to do about it.
+//
+// The scan enumerates DIRECTORIES, and a relocated binding is not one of them.
+// On a converged city that makes every fan-out read the copies `gc storage
+// migrate` retained — frozen at cutover, never mutated since — while the rows
+// the city actually works are invisible. Appending the binding as one more view
+// is what closes that, and marking the city's view as the migration source is
+// what lets the merge collapse the resulting duplicate.
+//
+// A REFUSED binding comes back as an error with the views unchanged, because
+// the two kinds of caller need opposite things from it. A read can print what
+// it has and say what is missing; a destructive sweep cannot, because reaching
+// only some of the rows it was asked to delete is worse than deleting nothing.
+// Deciding that here would force one of them to be wrong.
+//
+// Both shapes of refusal arrive as an error and neither arrives as "this city
+// relocates nothing". A city configured for a binding it has not converged on
+// resolves to a refusedClassStore carrying the boot gate's sentence; a city
+// serving its classes from more than one binding is a topology this build
+// refuses outright, and that is a STANDING verdict about the city rather than a
+// fault this read ran into, so it is marked as one. Reporting either as
+// unrelocated would send the fan-out to the directory scan alone — the retained
+// pre-migration copies, printed as live rows — which is the confidently stale
+// answer this federation exists to close.
+func convoyStoreViewsWithBinding(cityPath string, views []convoyStoreView) ([]convoyStoreView, error) {
+	relocated, isRelocated, err := cliSoleClassBinding(cityPath)
+	if err != nil {
+		return views, standingStorageRefusal{err: err}
+	}
+	binding := relocated.Store
+	if !isRelocated || binding == nil {
+		return views, nil
+	}
+	if refusal, refused := binding.(refusedClassStore); refused {
+		return views, refusal.err
+	}
+	for _, view := range views {
+		// The scan already opened this exact store, so the binding is not a
+		// second leg — it is the one that is there. Adding it would duplicate
+		// every row against itself. This is relocatedGraphLegFrom's identity
+		// gate, applied to a list of views.
+		if view.store == binding {
+			return views, nil
+		}
+	}
+
+	merged := make([]convoyStoreView, 0, len(views)+1)
+	for _, view := range views {
+		if samePath(view.path, cityPath) {
+			view.role = convoyViewMigrationSource
+		}
+		merged = append(merged, view)
+	}
+	return append(merged, convoyStoreView{
+		path:  convoyBindingViewPath,
+		store: binding,
+		role:  convoyViewClassBinding,
+	}), nil
+}
+
+// convoyStoreViewsForRead is convoyStoreViewsWithBinding for the surfaces that
+// only READ, which continue past a refusal and say so.
+//
+// A refused city still serves work from its work ledger, so failing the whole
+// listing would take `gc beads list` and `gc convoy list` away from every city
+// whose storage configuration is mid-repair. The rows the binding holds are
+// missing from that output, though, so the omission is announced — every run,
+// not once per process, because each invocation is a fresh answer and has to
+// carry its own caveat.
+func convoyStoreViewsForRead(cityPath string, views []convoyStoreView, stderr io.Writer, cmdName string) []convoyStoreView {
+	merged, err := convoyStoreViewsWithBinding(cityPath, views)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: the city's relocated class binding is unreadable, so any beads it holds are missing from this output: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
+	}
+	return merged
+}
+
+// mergeConvoyViewRows folds one row set per view into one, dropping the rows a
+// class binding supersedes.
+//
+// Ids are unique only WITHIN a store, so this is not an id dedupe: a city and a
+// rig that each mint "gc-1" hold two different beads and both belong in the
+// output. The one place an id means the same bead twice is the migration, which
+// copies a class into the binding with ids preserved and deletes nothing — so
+// the migration source's copy is a frozen duplicate of a row the binding now
+// owns. That pair, and only that pair, collapses, with the binding winning.
+func mergeConvoyViewRows[T any](views []convoyStoreView, rows [][]T, idOf func(T) string) []T {
+	superseded := make(map[string]bool)
+	for i, view := range views {
+		if view.role != convoyViewClassBinding {
+			continue
+		}
+		for _, row := range rows[i] {
+			superseded[idOf(row)] = true
+		}
+	}
+	merged := make([]T, 0)
+	for i, view := range views {
+		for _, row := range rows[i] {
+			if view.role == convoyViewMigrationSource && superseded[idOf(row)] {
+				continue
+			}
+			merged = append(merged, row)
+		}
+	}
+	return merged
 }
 
 func openConvoyStores(cfg *config.City, cityPath, beadID string, openStore func(string) (beads.Store, error)) ([]convoyStoreView, error) {
@@ -501,7 +640,7 @@ func openConvoyStores(cfg *config.City, cityPath, beadID string, openStore func(
 			}
 			continue
 		}
-		stores = append(stores, convoyStoreView{path: dir, store: store})
+		stores = append(stores, convoyStoreView{path: dir, store: store, role: convoyViewOrdinary})
 	}
 	if len(stores) > 0 {
 		return stores, nil
@@ -685,16 +824,17 @@ type convoyStatusResultJSON struct {
 }
 
 func collectOpenConvoys(stores []convoyStoreView) ([]convoyWithStore, error) {
-	convoys := make([]convoyWithStore, 0)
-	for _, candidate := range stores {
+	rows := make([][]convoyWithStore, len(stores))
+	for i, candidate := range stores {
 		all, err := candidate.store.List(beads.ListQuery{Type: "convoy"})
 		if err != nil {
 			return nil, err
 		}
 		for _, b := range all {
-			convoys = append(convoys, convoyWithStore{store: candidate.store, bead: b})
+			rows[i] = append(rows[i], convoyWithStore{store: candidate.store, bead: b})
 		}
 	}
+	convoys := mergeConvoyViewRows(stores, rows, func(c convoyWithStore) string { return c.bead.ID })
 	sort.SliceStable(convoys, func(i, j int) bool {
 		if convoys[i].bead.ID == convoys[j].bead.ID {
 			return convoys[i].bead.Title < convoys[j].bead.Title
@@ -1397,6 +1537,7 @@ func doConvoyCheckFallback(cityPath string, jsonOut bool, stdout, stderr io.Writ
 	if stores == nil {
 		return code
 	}
+	stores = convoyStoreViewsForRead(cityPath, stores, stderr, "gc convoy check")
 	rec := openCityRecorderAt(cityPath, stderr)
 	return doConvoyCheckAcrossStoresJSON(stores, rec, jsonOut, stdout, stderr)
 }
