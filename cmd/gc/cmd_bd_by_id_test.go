@@ -431,24 +431,38 @@ func TestBdByIDServesDepTreeFromTheClassBinding(t *testing.T) {
 	}
 }
 
-// TestBdByIDReservedPrefixAbsenceIsNotAFallThrough pins the rule that makes the
-// routing safe: a reserved-prefix id is minted by the class store and nowhere
-// else, so its absence there is genuine absence. Falling through would print a
-// work-store answer about a bead the work store never held.
-func TestBdByIDReservedPrefixAbsenceIsNotAFallThrough(t *testing.T) {
-	cityPath, _ := foreignProviderCity(t)
+// TestBdByIDReservedMissFallsThroughToTheWorkAxis pins the rule that makes the
+// routing correct: the binding is the namespace's AUTHORITY, not its only lawful
+// holder.
+//
+// A reserved prefix is warned-and-allowed on a work store — config.ValidateRigs
+// does not reject it and config.ReservedPrefixWarnings only advises — so a rig
+// or HQ configured with one legitimately mints and holds ids inside the reserved
+// namespace, and a stranded pre-split mint sits there too. The binding answering
+// "not here" therefore settles the binding and nothing else, and the id goes to
+// this surface's own work axis: the bd passthrough. Refusing it stranded every
+// such bead on this one door, including the core pack's step-completion write.
+//
+// The control in the same test is what stops this passing by never routing.
+func TestBdByIDReservedMissFallsThroughToTheWorkAxis(t *testing.T) {
+	cityPath, classStore := foreignProviderCity(t)
 	missing := reservedClassID(t, "notthere")
 
 	var stdout, stderr bytes.Buffer
 	code, handled := maybeRouteBdByID(cityPath, "", []string{"show", missing}, &stdout, &stderr)
-	if !handled {
-		t.Fatal("an absent reserved-prefix id fell through to the bd subprocess")
+	if handled {
+		t.Fatalf("a reserved-prefix id the binding does not hold was refused here (exit %d): %s%s", code, stdout.String(), stderr.String())
 	}
-	if code == 0 {
-		t.Errorf("an absent bead exited 0 with stdout %q", stdout.String())
+
+	// The control: the same city, an id the binding DOES hold, still served.
+	held := mustCreateClassBead(t, classStore, beads.Bead{Title: "held by the binding", Type: "task"})
+	stdout.Reset()
+	stderr.Reset()
+	if code, handled := maybeRouteBdByID(cityPath, "", []string{"show", held.ID, "--json"}, &stdout, &stderr); !handled || code != 0 {
+		t.Fatalf("show %s = (%d, %t): %s — the fall-through above must not have become a door that never routes", held.ID, code, handled, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), missing) {
-		t.Errorf("the absence does not name %s: %q", missing, stderr.String())
+	if !strings.Contains(stdout.String(), held.ID) {
+		t.Errorf("the served show printed %q, want %s", stdout.String(), held.ID)
 	}
 }
 
@@ -635,6 +649,37 @@ func TestBdByIDRefusesAnUnservedVerbOnAClassOwnedBead(t *testing.T) {
 		t.Fatalf("re-reading the refused bead: %v", err)
 	} else if got.Status == "closed" {
 		t.Error("the refused delete reached the class binding anyway")
+	}
+}
+
+// TestBdByIDUnservedVerbReservedMissFallsThrough is the unserved half of the
+// same rule, and it is the arm that decides whether an operator can reach their
+// OWN bead at all.
+//
+// The refusal's claim is that the binding owns the bead and the work ledger does
+// not hold it. For an id the binding cleanly misses that claim is false, and the
+// spellings it captured are the whole unserved manifest — `show --long`,
+// `heartbeat`, `delete` — on every bead a warned-and-allowed work-axis prefix
+// mints. So ownership is proven by RESIDENCE here too, exactly as it already is
+// for a work-shaped id, and a clean miss goes to the passthrough.
+//
+// The refusal for a bead the binding really holds is the control, and it lives
+// in TestBdByIDRefusesAnUnservedVerbOnAClassOwnedBead.
+func TestBdByIDUnservedVerbReservedMissFallsThrough(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	missing := reservedClassID(t, "notthere")
+
+	for _, args := range [][]string{
+		{"delete", missing},
+		{"show", missing, "--long"},
+		{"heartbeat", missing},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code, handled := maybeRouteBdByID(cityPath, "", args, &stdout, &stderr); handled {
+				t.Fatalf("%v was refused for a reserved id the binding does not hold (exit %d): %s%s", args, code, stdout.String(), stderr.String())
+			}
+		})
 	}
 }
 
@@ -1235,9 +1280,9 @@ func TestBdClosePrefixStoreBeadKeepsPassthrough(t *testing.T) {
 // TestBdByIDRefusesUnservedSpellingsOfAClassOwnedBead, which loses its `close`
 // row here.
 //
-// Absence keeps its own rule: a reserved-prefix id is minted by the class store
-// and nowhere else, so a close of one that is not there reports genuine absence
-// in bd's own shape rather than falling through to a ledger that never held it.
+// A binding MISS takes the residual rule instead: the binding is the namespace's
+// authority and not its only lawful holder, so a close of an id it does not hold
+// goes to the bd passthrough, whose own not-found is then the answer.
 func TestBdCloseReservedPrefixServedInProcess(t *testing.T) {
 	cityPath, classStore := foreignProviderCity(t)
 	bead := mustCreateClassBead(t, classStore, beads.Bead{Title: "a reserved-prefix step", Type: "task"})
@@ -1258,15 +1303,8 @@ func TestBdCloseReservedPrefixServedInProcess(t *testing.T) {
 	missing := reservedClassID(t, "notthere")
 	stdout.Reset()
 	stderr.Reset()
-	code, handled = maybeRouteBdByID(cityPath, "", []string{"close", missing}, &stdout, &stderr)
-	if !handled {
-		t.Fatal("an absent reserved-prefix close fell through to the bd subprocess")
-	}
-	if code == 0 {
-		t.Errorf("closing an absent bead exited 0 with stdout %q", stdout.String())
-	}
-	if !strings.Contains(stderr.String(), "no issue found") {
-		t.Errorf("genuine absence is not reported in bd's own shape: %q", stderr.String())
+	if code, handled := maybeRouteBdByID(cityPath, "", []string{"close", missing}, &stdout, &stderr); handled {
+		t.Fatalf("closing a reserved-prefix id the binding does not hold was answered here (exit %d): %s%s", code, stdout.String(), stderr.String())
 	}
 }
 
