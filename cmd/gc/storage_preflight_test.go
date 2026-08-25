@@ -465,6 +465,19 @@ func TestPreflightRefusesEveryCityTheMigrationRefuses(t *testing.T) {
 			openInfraMigrationSource = func(string) (beads.Store, error) { return mutePayloadSource{Store: backing}, nil }
 			return request, cfg
 		},
+		// The source answers the type assertion and then FAILS the read. This
+		// is the fixture that makes infraSourceEdgePayloadRefusal's per-edge
+		// loop load-bearing: with only the mute case above, deleting the loop
+		// and keeping the assertion leaves every test in the tree green while
+		// preflight starts clearing a city the migration refuses — the single
+		// thing this table exists to prevent.
+		"the source's edge-payload read fails": func(t *testing.T) (storageOperatorRequest, *config.City) {
+			request, cfg, _ := preflightReadyCity(t, 0)
+			backing, _, _, _ := seedInfraEdgeSource(t)
+			source := &payloadCarryingSource{Store: backing, readErr: errors.New("the dependencies table is unreadable")}
+			openInfraMigrationSource = func(string) (beads.Store, error) { return source, nil }
+			return request, cfg
+		},
 		"the destination already holds beads this migration did not write": func(t *testing.T) (storageOperatorRequest, *config.City) {
 			request, cfg, _ := preflightReadyCity(t, 1)
 			target := mustResolveInfraTarget(t, request.CityPath, cfg)

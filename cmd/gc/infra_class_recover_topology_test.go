@@ -564,6 +564,75 @@ func (s divergentSecondReadSource) DepList(id, direction string) ([]beads.Dep, e
 	return s.Store.DepList(id, direction)
 }
 
+// payloadAppearingOnSecondReadSource reports an edge as carrying nothing the
+// first time it is asked and carrying a payload every time after, which is what
+// a payload the write silently failed to pick up looks like from the outside.
+//
+// It is the payload-side twin of divergentSecondReadSource, and it exists
+// because the recovery's write and its equality stage are the only two callers
+// that ask: the write takes the first answer and adds a bare edge, the verify
+// takes the second and must refuse the binding it just wrote.
+type payloadAppearingOnSecondReadSource struct {
+	beads.Store
+	pair    [2]string
+	payload string
+	seen    map[[2]string]int
+}
+
+func (s payloadAppearingOnSecondReadSource) DepMetadata(issueID, dependsOnID string) (string, bool, error) {
+	key := [2]string{issueID, dependsOnID}
+	if key != s.pair {
+		return depMetadataThrough(s.Store, issueID, dependsOnID)
+	}
+	s.seen[key]++
+	if s.seen[key] == 1 {
+		return "", false, nil
+	}
+	return s.payload, true, nil
+}
+
+// TestStorageRecoverStrandedVerifiesRestoredEdgePayloads is the payload half of
+// the equality stage, and the only thing that proves the stage asks at all.
+//
+// The presence loop cannot see this failure: a repair that wrote every edge in
+// plan.missing and dropped every gate produces exactly the Dep set that loop
+// demands, so the run reported "edges: N restored", extended the manifest, and
+// exited 0 over a binding short of the gates it was being repaired toward — the
+// same blindness the migration's own equality stage carried until it learned to
+// witness payloads.
+//
+// Red-before, with the payload comparison removed from the stage:
+//
+//	the run reported success while the source's own second read names a payload
+//	the binding does not carry
+func TestStorageRecoverStrandedVerifiesRestoredEdgePayloads(t *testing.T) {
+	cityPath, cfg, source, target := convergedRecoveryCity(t)
+	gated := mustCreateInfraBead(t, source, beads.Bead{Title: "order finalize", Type: "task", Labels: []string{"order-tracking"}})
+	gate := mustCreateInfraBead(t, source, beads.Bead{Title: "order vote", Type: "task", Labels: []string{"order-tracking"}})
+	if err := source.DepAdd(gated.ID, gate.ID, "blocks"); err != nil {
+		t.Fatalf("seeding the stranded edge: %v", err)
+	}
+	before := manifestIDs(t, target)
+
+	swapRecoverySource(t, payloadAppearingOnSecondReadSource{
+		Store:   source,
+		pair:    [2]string{gated.ID, gate.ID},
+		payload: `{"gate":"waits_for","threshold":3}`,
+		seen:    map[[2]string]int{},
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := runStrandedRecovery(t, cityPath, cfg, &stdout, &stderr); code == 0 {
+		t.Fatalf("the run reported success while the source's own second read names a payload the binding does not carry: %s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "dep "+gated.ID+" -> "+gate.ID) {
+		t.Errorf("the refusal does not name the edge whose payload went missing: %q", stderr.String())
+	}
+	if got := manifestIDs(t, target); !slices.Equal(got, before) {
+		t.Errorf("the manifest was extended over an edge restored without its payload: %v -> %v", before, got)
+	}
+}
+
 // TestStorageRecoverStrandedVerifiesEdgesAgainstAFreshSourceRead is why the
 // equality stage re-reads.
 //
