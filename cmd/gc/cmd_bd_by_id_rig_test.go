@@ -271,6 +271,55 @@ func TestBdByIDShadowPrefixRigBeadReachesThePassthrough(t *testing.T) {
 	}
 }
 
+// TestBdByIDStrandedMintReachesThePassthrough is the other row of the
+// warned-and-allowed population, and the one with no rig in it.
+//
+// A shadow prefix does not have to belong to a rig. A city whose own HQ work
+// ledger was configured with a prefix inside a reserved namespace — or that
+// carries beads minted under one before the split — holds reserved-prefix rows
+// the binding has never held, at CITY scope, where no --rig can be dropped and
+// no rig store can be pointed at. The binding is still only the namespace's
+// authority, so the miss hands the id to the passthrough exactly as it does for
+// a rig's own bead.
+//
+// The rig helper does the seeding, pointed at the city root: the ledger a
+// scope resolves to is the same file either way, and reusing it keeps the two
+// rows provably on the same seam.
+func TestBdByIDStrandedMintReachesThePassthrough(t *testing.T) {
+	reserved, ok := config.ReservedClassPrefix(config.BeadClassGraph)
+	if !ok || reserved == "" {
+		t.Fatalf("no reserved id prefix is registered for the %q class", config.BeadClassGraph)
+	}
+	cityPath, classStore := foreignProviderCity(t)
+	stranded := seedRigWorkBead(t, cityPath, cityPath, reserved, "a reserved-prefix bead stranded in the city work ledger")
+	if !bdIDIsClassReserved(stranded.ID) {
+		t.Fatalf("the seeded id %q is outside the reserved namespace; the fixture proves nothing about the shadow rule", stranded.ID)
+	}
+	if _, err := classStore.Get(stranded.ID); err == nil {
+		t.Fatalf("the class binding also holds %s; the fixture cannot tell a fall-through from a served read", stranded.ID)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code, handled := maybeRouteBdByID(cityPath, "", []string{"show", stranded.ID}, &stdout, &stderr); handled {
+		t.Fatalf("show %s was answered at this door (exit %d): %s%s — the only ledger holding it is the city work store, on the far side of the passthrough", stranded.ID, code, stdout.String(), stderr.String())
+	}
+
+	// The control: on the same city an id the binding DOES hold is still served
+	// here. Without it the fix could be "stop routing".
+	held := mustCreateClassBead(t, classStore, beads.Bead{Title: "held by the binding", Type: "task"})
+	if held.ID == stranded.ID {
+		t.Fatalf("the binding minted the stranded id %s; the two ledgers agreed and the control is meaningless", held.ID)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code, handled := maybeRouteBdByID(cityPath, "", []string{"show", held.ID, "--json"}, &stdout, &stderr); !handled || code != 0 {
+		t.Fatalf("show %s = (%d, %t): %s", held.ID, code, handled, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), held.ID) {
+		t.Errorf("the served show printed %q, want %s", stdout.String(), held.ID)
+	}
+}
+
 // TestBdByIDRigScopeLeavesWorkStoreIDsToThePassthrough is the carve-out that
 // keeps the rule from becoming "any --rig is refused on a split city". A rig id
 // under --rig is exactly what the flag is for, the class store never held it,

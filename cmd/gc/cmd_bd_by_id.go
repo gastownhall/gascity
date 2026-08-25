@@ -37,8 +37,12 @@ package main
 //
 // storeref.ClassCandidates is the tree's by-id resolver, and its answer for a
 // relocated city is [class, work] — the class store first, because it is the
-// sole MINTER of the reserved namespace, then the work store, because minting
-// is not holding. This surface probes exactly that list in exactly that order.
+// reserved namespace's AUTHORITY, then the work store, because authority is not
+// exclusive possession. The class store is not the namespace's only MINTER
+// either: a rig configured with a prefix inside one mints work beads there, and
+// `gc storage migrate` preserved ids in the other direction. Leading is a
+// statement about probe ORDER, never about who could have created the id. This
+// surface probes exactly that list in exactly that order.
 // What differs is only how the work leg is READ: here it is the `bd`
 // subprocess, which is why the leg appears as a fall-through rather than as a
 // beads.Store. The in-process form of the same list, for the one-shot commands
@@ -139,8 +143,14 @@ package main
 // The id asked about is read from an ID POSITION and never from an id-shaped
 // value. A `gc bd list --metadata-field workflow_id=gcg-…` probe quotes a class
 // id rather than addressing one, so this surface declines it — OWNERSHIP is not
-// what is wrong with it. A `--parent gcg-…` names a class bead, and letting the
-// work store answer that returns a silent empty result.
+// what is wrong with it. A `--parent gcg-…` DOES address one, so it is put to
+// the binding — and the binding's answer, not the prefix, is what happens next.
+// A parent the binding holds is refused, because letting the work store answer
+// that returns a silent empty result. A parent it cleanly misses falls through,
+// and bd runs the create against the work ledger, which is the right ledger for
+// the population this door re-routed: a shadow-prefix rig referencing its own
+// bead. An id no ledger holds is bd's own dep validation to reject, not this
+// door's to guess about.
 //
 // Declining is not forwarding. That same selector is refused one pre-flight
 // earlier, by bd_relocated_classes.go, and for a different reason: `list` is a
@@ -899,9 +909,18 @@ func maybeRouteBdByID(cityPath, rigName string, bdArgs []string, stdout, stderr 
 
 // refuseUnservedClassMutation answers a by-ID invocation that addresses a bead
 // the class binding HOLDS in a spelling this surface does not serve. Returning
-// (0, false) means no subject is resident there — bd is still their truth and
-// the caller's passthrough answers byte-identically, including doBd's own
-// exact-ID collision guard, which this arm must not displace.
+// (0, false) means none of the subjects PROBED is resident there — bd is still
+// their truth and the caller's passthrough answers byte-identically, including
+// doBd's own exact-ID collision guard, which this arm must not displace.
+//
+// "Probed" is narrower than "addressed", and the gap is named rather than
+// implied. The candidates are the first reserved id in the argv plus whatever
+// bdMutationWriteIDs could reduce to subjects, and that scanner covers only
+// update/close/reopen/delete/heartbeat — so a `dep add`/`dep remove` whose
+// SECOND subject is resident falls through on the first id's clean miss, and
+// the protection depends on the order the subjects were typed. The
+// all-work-prefix spelling of that argv never opened this door at all, which is
+// where the gap comes from; ga-zvetw tracks closing both ends of it.
 //
 // Ownership is decided by RESIDENCE for every subject, including one carrying a
 // reserved prefix. The prefix decides which id is asked about first — an argv

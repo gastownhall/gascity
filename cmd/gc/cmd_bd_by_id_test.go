@@ -683,6 +683,78 @@ func TestBdByIDUnservedVerbReservedMissFallsThrough(t *testing.T) {
 	}
 }
 
+// TestBdByIDUnservedReservedIDFailsLoudOnClassProbeFault is the failing-binding
+// mirror of the row above, on exactly the population this door re-routed.
+//
+// A clean MISS on a reserved id is a fall-through, and that is the whole point
+// of the rule. A binding that could not ANSWER is not a miss, and the distance
+// between the two is the root-loss shape this lane exists to prevent: forwarding
+// a fault sends the write to a ledger that may not hold the bead while the store
+// that might was never heard from.
+//
+// The work-prefixed half of this arm is pinned by
+// TestBdUpdateUnservedWorkResidentFailsLoudOnClassProbeFault, and it reaches the
+// error branch only through mutationIDs. A reserved id reaches it through the
+// OTHER candidate source, bdArgsNameClassOwnedBead's — so without this row the
+// error arm can be made conditional on that flag and every existing pin stays
+// green, which is the shape the pre-change code (a namesClassBead-first branch
+// at this very site) makes a plausible refactor away.
+//
+// `list --id` is the load-bearing row: `list` is not a write mutation, so the
+// reserved candidate is the ONLY one probed and nothing else can produce the
+// error. delete and heartbeat ride the same branch with both sources populated.
+func TestBdByIDUnservedReservedIDFailsLoudOnClassProbeFault(t *testing.T) {
+	for _, args := range [][]string{
+		{"list", "--id", "RESERVED"},
+		{"delete", "RESERVED"},
+		{"heartbeat", "RESERVED"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			cityPath, _ := foreignProviderCity(t)
+			missing := reservedClassID(t, "notthere")
+			failure := errors.New("the class binding faulted mid-probe")
+			failClassBindingReads(t, cityPath, failure)
+
+			argv := append([]string{}, args...)
+			for i, arg := range argv {
+				if arg == "RESERVED" {
+					argv[i] = missing
+				}
+			}
+
+			var stdout, stderr bytes.Buffer
+			code, handled := maybeRouteBdByID(cityPath, "", argv, &stdout, &stderr)
+			if !handled {
+				t.Fatalf("%v was handed to the bd subprocess while the binding that decides ownership could not answer", argv)
+			}
+			if code == 0 {
+				t.Errorf("a class-probe fault exited 0 with stdout %q", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), failure.Error()) {
+				t.Errorf("the failure does not carry the store's cause: %q", stderr.String())
+			}
+			if strings.Contains(stderr.String(), "no issue found") {
+				t.Errorf("a class-probe fault was reported as an absent bead: %q", stderr.String())
+			}
+		})
+	}
+
+	// The control: the same argv shapes on a HEALTHY binding that cleanly misses
+	// the id still fall through, so the rows above cannot be satisfied by a
+	// surface that simply refuses every reserved id again.
+	// TestBdByIDUnservedVerbReservedMissFallsThrough is that control for delete
+	// and heartbeat; `list --id` gets it here because no other row drives it.
+	t.Run("control list --id on a healthy binding", func(t *testing.T) {
+		cityPath, _ := foreignProviderCity(t)
+		missing := reservedClassID(t, "notthere")
+
+		var stdout, stderr bytes.Buffer
+		if code, handled := maybeRouteBdByID(cityPath, "", []string{"list", "--id", missing}, &stdout, &stderr); handled {
+			t.Fatalf("list --id %s was answered here on a healthy binding (exit %d): %s%s", missing, code, stdout.String(), stderr.String())
+		}
+	})
+}
+
 // TestBdByIDRefusesRatherThanFallsThroughWhenTheWorkspaceIsNotThere is the
 // failure semantics against the real beads workspace provider: a binding whose
 // workspace is missing produces the boot gate's own refusal, naming the
