@@ -286,6 +286,100 @@ func TestGoTestShardWatchdogKillsARunThatDefeatsGoTimeout(t *testing.T) {
 	}
 }
 
+// processGroupOf resolves the process group ID pid currently belongs to. The
+// QUIT regression below needs the *job's* group specifically — see the
+// comment on TestGoTestShardTrapsQuitInsteadOfCoreDumping for why the
+// runner's own pid is a different, and insufficient, target.
+func processGroupOf(t *testing.T, pid int) int {
+	t.Helper()
+	out, err := exec.Command("ps", "-o", "pgid=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		t.Fatalf("ps -o pgid= -p %d: %v", pid, err)
+	}
+	pgid, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		t.Fatalf("parse pgid from %q: %v", out, err)
+	}
+	return pgid
+}
+
+// TestGoTestShardTrapsQuitInsteadOfCoreDumping is the ga-5kse5n regression:
+// gc_harness_watchdog (harness-reap.sh:96) signals the *job's* process group
+// with SIGQUIT when a shard blows its deadline — gc_harness_signal_group
+// sends to "-$pgid", never to the top-level runner's own pid. But
+// gc_harness_run_supervised backgrounds that job with a bare `"$@" &`, and
+// bash resets an inherited (but not locally reinstalled) trap to SIG_DFL for
+// an async subshell. So the job itself — not the runner — takes QUIT's
+// default disposition: terminate plus core dump. Production sampled 498 bash
+// coredumps this way (127/day), all comm=bash running this script's job
+// group. QUIT itself must still reach the run uncaught: it drives the Go
+// runtime's own goroutine dump, the only artifact that answers "which test
+// wedged." Only bash's own disposition on the way past may change.
+//
+// The runner's own exit status can't tell buggy from fixed apart: bash
+// collapses "$?" to the same 128+SIGQUIT=131 whether the job died from the
+// uncaught signal or from a trap that itself calls `exit 131`, and the
+// runner is never the job's parent for the deeper descendants either, so it
+// has no wait4()-level status for them. What does distinguish the two is
+// bash's own job-control death report — printed against the job's pid,
+// specifically, only for a job job control still under monitor mode learns
+// died from an uncaught signal, never for a clean exit — which is why this
+// asserts on that message rather than on any wait status.
+func TestGoTestShardTrapsQuitInsteadOfCoreDumping(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "descendant.pid")
+
+	// A plain sleeping descendant is enough to resolve the job's process
+	// group (it inherits job_pgid; nothing in this chain calls setpgid) and
+	// to show whether the supervised job is reaped or orphaned afterward.
+	fixture := newReapFixture(t, fmt.Sprintf(`
+    echo $$ > %q
+    sleep %d
+`, pidFile, fixtureLifetimeSeconds))
+
+	// Force RLIMIT_CORE=0 for the fixture process this test spawns so a
+	// pre-fix run cannot leave a real core file or a coredumpctl entry
+	// behind — the very artifact this bug exists to drive to zero. Bash's
+	// job-control death report (asserted below) reflects signal disposition
+	// independently of whether a core was actually written, so this does not
+	// weaken the assertion.
+	var oldRlimit syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_CORE, &oldRlimit); err != nil {
+		t.Fatalf("get RLIMIT_CORE: %v", err)
+	}
+	if err := syscall.Setrlimit(syscall.RLIMIT_CORE, &syscall.Rlimit{Cur: 0, Max: oldRlimit.Max}); err != nil {
+		t.Fatalf("set RLIMIT_CORE: %v", err)
+	}
+	t.Cleanup(func() { _ = syscall.Setrlimit(syscall.RLIMIT_CORE, &oldRlimit) })
+
+	cmd := fixture.start(t)
+	descendant := waitForPIDFile(t, pidFile, 30*time.Second)
+	jobPgid := processGroupOf(t, descendant)
+
+	// Signal the job's process group exactly as gc_harness_watchdog does —
+	// group-wide, never the runner's own pid alone.
+	if err := syscall.Kill(-jobPgid, syscall.SIGQUIT); err != nil {
+		t.Fatalf("signal job group -%d: %v", jobPgid, err)
+	}
+
+	err := waitWithin(t, cmd, 20*time.Second)
+	if err == nil {
+		t.Fatalf("runner exited 0 after SIGQUIT; expected a QUIT-driven termination.\n%s", fixture.output())
+	}
+	exitError := &exec.ExitError{}
+	if errors.As(err, &exitError) {
+		t.Fatalf("wait runner: %v\n%s", err, fixture.output())
+	}
+
+	wantDeath := fmt.Sprintf("%d Quit", jobPgid)
+	if out := fixture.output(); strings.Contains(out, wantDeath) {
+		t.Fatalf("job group %d died from an uncaught QUIT instead of trapping it and exiting cleanly — this is the ga-5kse5n bash core dump.\n%s", jobPgid, out)
+	}
+
+	if !processGone(descendant, 20*time.Second) {
+		t.Fatalf("descendant pid %d survived the runner's QUIT: the QUIT trap must reap the supervised job before exiting, like the other signal traps do", descendant)
+	}
+}
+
 // sweepHarness runs gc_harness_sweep_stale_orphans against a scripted process
 // table. `kill` is a bash builtin and cannot be shadowed on PATH, so the sweep
 // routes every kill through gc_harness_kill_pid and the test overrides that
