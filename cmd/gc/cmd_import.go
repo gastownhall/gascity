@@ -734,10 +734,13 @@ func doImportInstall(cityPath string, stdout, stderr io.Writer) int {
 	// Nothing rolls back: the packs are in the cache and packs.lock is
 	// written by the time this runs, and the load error may predate this
 	// command. Say so, or a non-zero exit reads as "nothing was installed"
-	// and the operator re-runs instead of fixing the config.
+	// and the operator re-runs instead of fixing the config. No count here:
+	// the success line's len(lock.Packs) is the lock closure by source, not
+	// a count of import bindings, and it is 0 for a local-path-only city
+	// whose config is nonetheless on disk.
 	if cfgErr := validateComposedConfigAfterInstall(cityPath); cfgErr != nil {
-		fmt.Fprintf(stderr, "gc import install: composed config failed to load after install: %v\n", cfgErr)                                          //nolint:errcheck
-		fmt.Fprintf(stderr, "%d remote import(s) and packs.lock are on disk; fix the config, then re-run `gc doctor` to confirm.\n", len(lock.Packs)) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc import install: composed config failed to load after install: %v\n", cfgErr)                        //nolint:errcheck
+		fmt.Fprintln(stderr, "The installed packs and packs.lock are on disk; fix the config, then re-run `gc doctor` to confirm.") //nolint:errcheck
 		return 1
 	}
 
