@@ -72,7 +72,26 @@ func poolAssigneeIsLocallyObservable(cfg *config.City, cityName, assignee string
 // instances, and the instance identities gc mints for a local agent (numeric
 // slots and adhoc tokens).
 func poolIdentityInLocalRoster(cfg *config.City, cityName, identity string) bool {
-	for _, candidate := range poolIdentityLocalCandidates(identity) {
+	for _, candidate := range poolIdentityLocalCandidates(cfg, identity) {
+		// A candidate still carrying a binding this city does not mint cannot
+		// name a local agent, whatever the resolvers say (ga-8yi7ne). This is
+		// the SECOND route into the collision and it does not go through the
+		// stripped candidate above: poolIdentityIsInstanceOfLocalAgent reduces
+		// "qcore/pool.omp-1" to base "qcore/pool.omp", which
+		// findAgentByTemplate then matches against our unbound "qcore/omp" via
+		// legacyBoundTemplateMatchesUnboundAgent — that helper accepts ANY
+		// binding, by design, because it also serves bound->unbound MIGRATION
+		// RECOVERY in cities where the binding was genuinely removed. So the
+		// discriminator cannot live there without breaking that recovery; it
+		// belongs here, where the question is "is this claim FOREIGN?" rather
+		// than "what agent did this identity used to name?".
+		//
+		// Gating candidates rather than individual checks is deliberate: all
+		// five resolvers below inherit it, so a sixth added later cannot
+		// silently reopen the hole.
+		if !poolCandidateBindingIsLocal(cfg, candidate) {
+			continue
+		}
 		if _, ok := findNamedSessionSpec(cfg, cityName, candidate); ok {
 			return true
 		}
@@ -93,7 +112,7 @@ func poolIdentityInLocalRoster(cfg *config.City, cityName, identity string) bool
 }
 
 // poolIdentityLocalCandidates returns the identity itself plus, when its local
-// part carries a binding prefix, the binding-stripped form.
+// part carries a binding prefix THIS CITY MINTS, the binding-stripped form.
 //
 // Persisted assignees outlive the config that minted them: this city's own
 // release history is full of "qcore/gastown.polecat" and
@@ -105,7 +124,23 @@ func poolIdentityInLocalRoster(cfg *config.City, cityName, identity string) bool
 // Without it this gate reads 45 of this city's 46 historically-reaped pool
 // identities as foreign and protects them forever — a sweeper that has been
 // disabled rather than fixed.
-func poolIdentityLocalCandidates(identity string) []string {
+//
+// THE BINDING GATE (ga-8yi7ne). Stripping ANY binding is what turned this gate
+// from a protection into a cross-city hazard: another city's canonical
+// "qcore/pool.omp-1" strips to "qcore/omp-1", which matches OUR configured
+// "qcore/omp", so their live claim reads as our dead instance and is released.
+// Measured in the field 2026-08-25 — the bead oscillated, released and
+// re-claimed twice, and only their post-hoc quarantine rule settled it.
+//
+// The fix is to strip only bindings this city could itself have minted. A
+// binding names an import, and the city's own agents record which import
+// carried them (config.Agent.BindingName), so the set is exact and needs no
+// heuristic. Measured on this city: {bd, cherub-law, core, gastown, gc,
+// oversight} — which covers every historically-reaped local identity — while
+// the neighbouring city's "pool" and "review" are absent. Their naming is
+// linter-certified canonical on their side and cannot be changed, so the
+// discriminator has to live here.
+func poolIdentityLocalCandidates(cfg *config.City, identity string) []string {
 	identity = strings.TrimSpace(identity)
 	if identity == "" {
 		return nil
@@ -113,13 +148,75 @@ func poolIdentityLocalCandidates(identity string) []string {
 	candidates := []string{identity}
 	rig, local := config.ParseQualifiedName(identity)
 	if binding, unbound, ok := strings.Cut(local, "."); ok && binding != "" && unbound != "" {
-		stripped := unbound
-		if rig != "" {
-			stripped = rig + "/" + unbound
+		if cityMintsBinding(cfg, binding) {
+			stripped := unbound
+			if rig != "" {
+				stripped = rig + "/" + unbound
+			}
+			candidates = append(candidates, stripped)
 		}
-		candidates = append(candidates, stripped)
 	}
 	return candidates
+}
+
+// cityMintsBinding reports whether binding names an import THIS city binds, and
+// so whether this city could itself have minted a "<binding>.<agent>" identity.
+//
+// The DECLARED import tables are the primary source, deliberately ahead of
+// anything inferred from the agents themselves. An import binding is a
+// declaration; whether some agent currently carries it is a side effect, and a
+// city whose only agent from an import has migrated bound->unbound would lose
+// the binding entirely if this read agents alone. That would strand exactly the
+// legacy identities the bound->unbound tolerance exists to keep resolvable.
+//
+//	cfg.Imports            city-level [imports.<binding>]
+//	cfg.DefaultRigImports  [defaults.rig.imports], for imports whose agents are
+//	                       not currently instantiated
+//	rig.Imports            rig-level [rigs.<rig>.imports]; a rig-scoped import
+//	                       mints "<rig>/<binding>.<agent>" just the same
+//	Agent.BindingName      backstop for agents composed through a path none of
+//	                       the tables above record
+//
+// An empty or unknown binding is NOT ours, and that refusal is the whole point.
+// It fails in the safe direction: declining to resolve only ever PROTECTS a
+// claim. Stranding this city's own stale work is repairable and, in the pool
+// sweeper, reported in the per-sweep protected-identity summary; releasing a
+// neighbouring city's live claim is neither.
+func cityMintsBinding(cfg *config.City, binding string) bool {
+	binding = strings.TrimSpace(binding)
+	if cfg == nil || binding == "" {
+		return false
+	}
+	if _, ok := cfg.Imports[binding]; ok {
+		return true
+	}
+	if _, ok := cfg.DefaultRigImports[binding]; ok {
+		return true
+	}
+	for i := range cfg.Rigs {
+		if _, ok := cfg.Rigs[i].Imports[binding]; ok {
+			return true
+		}
+	}
+	for i := range cfg.Agents {
+		if strings.TrimSpace(cfg.Agents[i].BindingName) == binding {
+			return true
+		}
+	}
+	return false
+}
+
+// poolCandidateBindingIsLocal reports whether a roster candidate is free of a
+// FOREIGN binding prefix. A candidate with no binding at all is local as far as
+// this predicate is concerned — bare names are this city's own naming and were
+// never the cross-city hazard.
+func poolCandidateBindingIsLocal(cfg *config.City, candidate string) bool {
+	_, local := config.ParseQualifiedName(strings.TrimSpace(candidate))
+	binding, unbound, ok := strings.Cut(local, ".")
+	if !ok || strings.TrimSpace(binding) == "" || strings.TrimSpace(unbound) == "" {
+		return true
+	}
+	return cityMintsBinding(cfg, binding)
 }
 
 // poolIdentityIsThemedInstance matches a namepool display name, e.g.
