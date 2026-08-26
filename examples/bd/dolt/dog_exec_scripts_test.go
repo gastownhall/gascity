@@ -1120,11 +1120,17 @@ case "$query" in
     fi
     if [ "$mode" = "quarantine_autoclear_outside_known_tables" ]; then
       case "$query" in
+        *"rows_deleted"*"'ghost_table'"*)
+          print_cell 1
+          ;;
+        *"rows_modified"*"'ghost_table'"*)
+          print_cell 0
+          ;;
         *"rows_deleted"*|*"rows_modified"*)
           print_cell 0
           ;;
         *)
-          print_cell ghost_table
+          print_cells beads ghost_table
           ;;
       esac
       exit 0
@@ -3888,10 +3894,14 @@ func TestCompactScriptQuarantineProbeFailureHardBlocksAutoClear(t *testing.T) {
 }
 
 // TestCompactScriptQuarantineDriftOutsideKnownTablesHardBlocksAutoClear
-// covers the case where the preservation probe RUNS successfully but proves
-// the wrong thing: DOLT_DIFF_STAT reports drift in a table outside the set
-// verify_counts already checked. A probe that runs but does not prove
-// confinement must hard-block exactly like a probe that fails to run.
+// covers the case where the preservation probe RUNS successfully for every
+// drifted table but does not prove confinement for all of them: two tables
+// drift between the pre-flight and current heads (beads, ghost_table);
+// DOLT_DIFF_STAT proves beads' content preserved (rows_deleted=0,
+// rows_modified=0) but proves ghost_table's was NOT (rows_deleted=1). The
+// loop must not stop at the first, confirmed-preserved table — it must keep
+// checking and hard-block on the second, unconfirmed one, exactly like a
+// probe that fails to run.
 func TestCompactScriptQuarantineDriftOutsideKnownTablesHardBlocksAutoClear(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	firstOut, err := fixture.run(t, "same_count_db_hash_drift", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")

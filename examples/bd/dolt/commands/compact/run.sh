@@ -1327,6 +1327,57 @@ verify_counts() {
   return "$fail"
 }
 
+# diff_stat_preserved_tables — emit one table name per line for every table
+# DOLT_DIFF_STAT(<from>, <to>) reports as drifted whose content is PROVEN
+# preserved: rows_deleted=0 AND rows_modified=0 for that table between the
+# two heads, meaning any change is pure row addition, never a mutation or
+# removal of an existing row. This is the proof
+# db_root_drift_within_verified_tables() requires of its preflight_file
+# argument when called from the quarantine auto-clear path, where there is
+# no live verify_counts state to reuse (the quarantine marker was written by
+# a prior cycle). Table PRESENCE at <to> — e.g. via committed_tables()'s bare
+# SHOW TABLES AS OF listing — is not sufficient: a same-row-count UPDATE
+# leaves a table present with its committed content silently changed, the
+# exact signature of the live production corruption this guards against
+# (table `issues`, 19012 rows before and after, hash changed). A table name
+# DOLT_DIFF_STAT reports that fails valid_table_name, or any per-table probe
+# failure, fails the whole proof closed (no output, non-zero exit) instead
+# of silently skipping that table.
+diff_stat_preserved_tables() {
+  db="$1"
+  from="$2"
+  to="$3"
+  [ -n "$from" ] && [ -n "$to" ] || return 1
+  stat_tmp=$(mktemp)
+  if ! dolt_query "$db" \
+    "SELECT table_name FROM DOLT_DIFF_STAT('$from', '$to')" \
+    > "$stat_tmp" 2>/dev/null; then
+    rm -f "$stat_tmp"
+    return 1
+  fi
+  drift_tables=$(awk 'NR>=4 && /^\|/ {gsub(/^\| | \|$/, ""); gsub(/ /, ""); if ($0 != "") print}' "$stat_tmp")
+  rm -f "$stat_tmp"
+  [ -n "$drift_tables" ] || return 1
+  for stat_t in $drift_tables; do
+    if ! valid_table_name "$stat_t"; then
+      return 1
+    fi
+    deleted=$(query_single_cell "$db" "diff stat rows_deleted probe failed for table=$stat_t" \
+      "SELECT rows_deleted FROM DOLT_DIFF_STAT('$from', '$to', '$stat_t')") || return 1
+    case "$deleted" in
+      ''|*[!0-9]*) return 1 ;;
+    esac
+    modified=$(query_single_cell "$db" "diff stat rows_modified probe failed for table=$stat_t" \
+      "SELECT rows_modified FROM DOLT_DIFF_STAT('$from', '$to', '$stat_t')") || return 1
+    case "$modified" in
+      ''|*[!0-9]*) return 1 ;;
+    esac
+    if [ "$deleted" -eq 0 ] && [ "$modified" -eq 0 ]; then
+      printf '%s\n' "$stat_t"
+    fi
+  done
+}
+
 # db_root_drift_within_verified_tables — prove a committed-root drift benign.
 # Reached only after per-table verification has PASSED: every verified table's
 # working-set value matches the pre-flight snapshot. The flatten's -Am commits
@@ -2286,18 +2337,18 @@ flatten_database() {
     case "${quarantine_reason:-}" in
       "post-flatten table value hash changed without row-count increase"|"post-flatten value hash changed without row-count increase"|"post-flatten table value hash changed with row-count increase"|"post-flatten value hash changed with row-count increase")
         autoclear_preflight_head=$(compact_marker_value "$quarantine_dir" "$db" flatten_preflight_head || true)
-        autoclear_known_tables_tmp=$(mktemp)
+        autoclear_preserved_tables_tmp=$(mktemp)
         if autoclear_current_head=$(head_commit "$db") && [ -n "$autoclear_current_head" ] && \
-           committed_tables "$db" "$autoclear_current_head" > "$autoclear_known_tables_tmp" && \
-           db_root_drift_within_verified_tables "$db" "$autoclear_preflight_head" "$autoclear_current_head" "$autoclear_known_tables_tmp"; then
-          rm -f "$autoclear_known_tables_tmp"
-          printf 'compact: db=%s integrity quarantine marker auto-cleared — drift confined to verified table(s) [%s] via DOLT_DIFF_STAT(%s..%s), reason=%s created_at=%s\n' \
+           diff_stat_preserved_tables "$db" "$autoclear_preflight_head" "$autoclear_current_head" > "$autoclear_preserved_tables_tmp" && \
+           db_root_drift_within_verified_tables "$db" "$autoclear_preflight_head" "$autoclear_current_head" "$autoclear_preserved_tables_tmp"; then
+          rm -f "$autoclear_preserved_tables_tmp"
+          printf 'compact: db=%s integrity quarantine marker auto-cleared — drift confined to content-preserved table(s) [%s] via DOLT_DIFF_STAT(%s..%s), reason=%s created_at=%s\n' \
             "$db" "${db_root_drift_proven_tables:-}" "${autoclear_preflight_head:-<empty>}" "$autoclear_current_head" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" >&2
           send_compact_quarantine_alert "$db" "compact-quarantine" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" || true
           rm -f "$quarantine_marker"
         else
-          rm -f "$autoclear_known_tables_tmp"
-          printf 'compact: db=%s cannot auto-clear integrity quarantine marker — preservation proof did not confirm drift is confined to known, verified tables (reason=%s)\n' \
+          rm -f "$autoclear_preserved_tables_tmp"
+          printf 'compact: db=%s cannot auto-clear integrity quarantine marker — preservation proof did not confirm drift is confined to content-preserved, verified tables (reason=%s)\n' \
             "$db" "${quarantine_reason:-<unknown>}" >&2
           report_existing_quarantine "$db"
           return 1
