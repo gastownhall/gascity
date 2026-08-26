@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/testpolicy/waiverclock"
 )
 
 const moduleImportPath = "github.com/gastownhall/gascity"
@@ -366,8 +368,15 @@ func notApplicableRuntime(constructor SymbolRef, reason string) ContractClaim {
 }
 
 // Validate checks ledger structure and waiver policy at the supplied time.
-func Validate(entries []Entry, now time.Time) error {
+//
+// Structural problems always fail, in every mode: they can only appear with a
+// code change, so they belong to whoever made it. A lapsed waiver is different
+// — the clock moves on its own, so it fails under mode, and the returned
+// warnings carry the lapses that are being tolerated for now. See
+// internal/testpolicy/waiverclock for why that split exists.
+func Validate(entries []Entry, now time.Time, mode waiverclock.Mode) (warnings []string, err error) {
 	var problems []string
+	var expiries []waiverclock.Expiry
 	seenIDs := make(map[string]bool)
 	seenCatalogKeys := make(map[string]string)
 	seenSourceRefs := make(map[string]string)
@@ -490,7 +499,9 @@ func Validate(entries []Entry, now time.Time) error {
 				problems = append(problems, claimPrefix+" is duplicated")
 			}
 			seenClaims[key] = true
-			problems = append(problems, validateClaim(claimPrefix, claim, now)...)
+			claimProblems, claimExpiries := validateClaim(claimPrefix, claim, now)
+			problems = append(problems, claimProblems...)
+			expiries = append(expiries, claimExpiries...)
 		}
 		for _, constructor := range entry.Constructors {
 			if !seenClaims[claimKey{constructor: constructor, contract: ContractRuntimeProvider}] {
@@ -499,7 +510,8 @@ func Validate(entries []Entry, now time.Time) error {
 		}
 	}
 
-	return joinProblems(problems)
+	report := waiverclock.Check(expiries, now, mode)
+	return report.Warnings, joinProblems(append(problems, report.Fatal...))
 }
 
 func hasRole(roles []Role, want Role) bool {
@@ -511,8 +523,11 @@ func hasRole(roles []Role, want Role) bool {
 	return false
 }
 
-func validateClaim(prefix string, claim ContractClaim, now time.Time) []string {
-	var problems []string
+// validateClaim reports the claim's structural problems and hands back any
+// dated waiver for the clock policy to classify. It deliberately does not
+// decide whether a waiver has lapsed: that verdict depends on the enforcement
+// mode, which only the caller knows.
+func validateClaim(prefix string, claim ContractClaim, now time.Time) (problems []string, expiries []waiverclock.Expiry) {
 	payloads := 0
 	if claim.Proof != nil {
 		payloads++
@@ -573,15 +588,22 @@ func validateClaim(prefix string, claim ContractClaim, now time.Time) []string {
 		if waiver.Expires.IsZero() {
 			problems = append(problems, prefix+" waiver expiry is required")
 		} else {
-			if !waiver.Expires.After(now) {
-				problems = append(problems, fmt.Sprintf("%s waiver owned by %s expired %s", prefix, waiver.Owner, waiver.Expires.Format("2006-01-02")))
-			}
+			// The horizon stays fatal in every mode. It reads the clock but is
+			// self-healing — time passing can only bring a distant date inside
+			// the horizon — so unlike a lapse it can never red a bystander.
 			if waiver.Expires.After(now.Add(maxWaiverHorizon)) {
 				problems = append(problems, fmt.Sprintf("%s waiver owned by %s exceeds the %s horizon", prefix, waiver.Owner, maxWaiverHorizon))
 			}
+			if strings.TrimSpace(waiver.Owner) != "" {
+				expiries = append(expiries, waiverclock.Expiry{
+					Label:   prefix,
+					Owner:   waiver.Owner,
+					Expires: waiver.Expires,
+				})
+			}
 		}
 	}
-	return problems
+	return problems, expiries
 }
 
 func validateSymbolRef(ref SymbolRef) error {
