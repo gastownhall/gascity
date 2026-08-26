@@ -14,6 +14,13 @@ import (
 // a rig-scoped pool agent with a namepool, addressed in persisted assignees
 // both bare ("repo/worker") and in the legacy bound form ("repo/pack.worker")
 // that outlived its binding.
+//
+// The third agent is what makes "pack" a binding THIS city mints (ga-8yi7ne).
+// It is not decoration: the legacy bound forms above only resolve because some
+// agent from that import is still bound, which is exactly the field condition —
+// one agent moved bound→unbound while its siblings did not. Without it the
+// fixture would describe a city that had removed the import entirely, and the
+// bound forms SHOULD be unresolvable there.
 func foreignIdentityTestCity(t *testing.T) *config.City {
 	t.Helper()
 	return &config.City{
@@ -27,6 +34,7 @@ func foreignIdentityTestCity(t *testing.T) *config.City {
 				MaxActiveSessions: intPtr(2),
 				NamepoolNames:     []string{"furiosa", "nux"},
 			},
+			{Name: "sibling", Dir: "repo", BindingName: "pack"},
 		},
 	}
 }
@@ -236,6 +244,16 @@ func TestPoolAssigneeIsLocallyObservable(t *testing.T) {
 		{"runtime session name", "gastown__dog-ga-up143", true},
 		{"session bead id form", "claude-mc-xyz", true},
 		{"empty", "", true},
+		// ga-8yi7ne: a NEIGHBOURING city's canonical "<rig>/<binding>.<name>"
+		// whose binding this city does not mint. "pool" is not one of our
+		// imports; "worker" is our agent. Before the binding gate, every one of
+		// these resolved to our local worker and their live claims were
+		// released — measured in the shared store, where the bead oscillated
+		// between released and re-claimed twice.
+		{"foreign binding, plain", "repo/pool.worker", false},
+		{"foreign binding, numeric instance", "repo/pool.worker-1", false},
+		{"foreign binding, adhoc instance", "repo/pool.worker-adhoc-a1b2c3d4e5", false},
+		{"foreign binding, themed instance", "repo/pool.nux", false},
 		{"foreign named crew", "repo/dalinar", false},
 		{"foreign named crew in an unknown rig", "westeros/szeth", false},
 		{"decommissioned local agent", "repo/retired-hand", false},
@@ -316,5 +334,123 @@ func TestProtectedForeignAssigneesSummary(t *testing.T) {
 	gotMany := many.summary()
 	if !strings.Contains(gotMany, `"repo/leak" (7: qc-1, qc-2, qc-3, qc-4, qc-5 +2 more)`) {
 		t.Fatalf("bounded sample not rendered: %q", gotMany)
+	}
+}
+
+// TestCityMintsBinding pins the discriminator that decides whether a
+// "<binding>.<name>" identity could have been minted HERE (ga-8yi7ne).
+//
+// Both sources are asserted, and so is the refusal: an unknown binding must be
+// rejected, because that is the only thing standing between a neighbouring
+// city's canonical identity and our local agent of the same leaf name.
+func TestCityMintsBinding(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker"},                            // unbound: contributes nothing
+			{Name: "polecat", BindingName: "gastown"},   // bound: contributes "gastown"
+			{Name: "dog", BindingName: "bd"},            // bound: contributes "bd"
+			{Name: "spaced", BindingName: "  padded  "}, // trimmed on both sides
+		},
+		DefaultRigImports: map[string]config.Import{"core": {}},
+	}
+	for _, tc := range []struct {
+		name    string
+		binding string
+		want    bool
+	}{
+		{"binding carried by a configured agent", "gastown", true},
+		{"second binding on the same city", "bd", true},
+		{"binding is trimmed before comparison", "padded", true},
+		{"default rig import with no instantiated agent", "core", true},
+		{"neighbouring city's binding", "pool", false},
+		{"neighbouring city's other binding", "review", false},
+		{"empty binding is never ours", "", false},
+		{"whitespace binding is never ours", "   ", false},
+		{"agent NAME is not a binding", "worker", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := cityMintsBinding(cfg, tc.binding); got != tc.want {
+				t.Fatalf("cityMintsBinding(%q) = %v, want %v", tc.binding, got, tc.want)
+			}
+		})
+	}
+	if cityMintsBinding(nil, "gastown") {
+		t.Fatal("cityMintsBinding(nil, ...) = true, want false — a nil config knows no bindings")
+	}
+}
+
+// TestForeignBindingIsRejectedAtThePolicyLayer covers the SECOND route into
+// the cross-city collision (ga-8yi7ne) — the one that does not go through the
+// stripped candidate.
+//
+// poolIdentityIsInstanceOfLocalAgent reduces "qcore/pool.omp-1" to base
+// "qcore/pool.omp", and findAgentByTemplate matches that against an unbound
+// "qcore/omp" through legacyBoundTemplateMatchesUnboundAgent. That helper
+// accepts ANY binding ON PURPOSE, because it also serves bound->unbound
+// migration recovery in cities that removed the binding entirely
+// (build_desired_state_legacy_bound_recovery_test.go depends on exactly that).
+// So the resolver is deliberately left alone and the discriminator sits in the
+// guard, which is asserted here.
+func TestForeignBindingIsRejectedAtThePolicyLayer(t *testing.T) {
+	cfg := &config.City{
+		Rigs:    []config.Rig{{Name: "qcore", Path: t.TempDir()}},
+		Imports: map[string]config.Import{"gastown": {}},
+		Agents: []config.Agent{
+			{Name: "omp", Dir: "qcore", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(4)},
+			{Name: "polecat", Dir: "qcore", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(4)},
+		},
+	}
+
+	// The resolver still mis-resolves, unchanged and intentionally so. If this
+	// assertion ever flips, the discriminator moved and the migration-recovery
+	// path needs re-checking.
+	if findAgentByTemplate(cfg, "qcore/pool.omp") == nil {
+		t.Fatal("precondition changed: findAgentByTemplate no longer resolves a foreign binding, so this test is no longer testing the second route")
+	}
+
+	for _, tc := range []struct {
+		name       string
+		assignee   string
+		observable bool
+	}{
+		{"foreign binding, instance form (the field case)", "qcore/pool.omp-1", false},
+		{"foreign binding, plain form", "qcore/pool.omp", false},
+		{"foreign binding, adhoc form", "qcore/pool.omp-adhoc-a1b2c3d4e5", false},
+		// The other direction. A minted binding must still resolve, or this
+		// "fix" strands 45 of this city's 46 historically reaped identities.
+		{"minted binding still resolves", "qcore/gastown.polecat-1", true},
+		{"our own bare instance is untouched", "qcore/omp-1", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := poolAssigneeIsLocallyObservable(cfg, "testcity", tc.assignee); got != tc.observable {
+				t.Fatalf("poolAssigneeIsLocallyObservable(%q) = %v, want %v", tc.assignee, got, tc.observable)
+			}
+		})
+	}
+}
+
+// TestPoolCandidateBindingIsLocal pins the candidate filter directly, including
+// the shapes that must pass through untouched.
+func TestPoolCandidateBindingIsLocal(t *testing.T) {
+	cfg := &config.City{Imports: map[string]config.Import{"gastown": {}}}
+	for _, tc := range []struct {
+		name      string
+		candidate string
+		want      bool
+	}{
+		{"minted binding", "qcore/gastown.polecat", true},
+		{"foreign binding", "qcore/pool.omp", false},
+		{"no binding at all", "qcore/omp", true},
+		{"bare name", "omp", true},
+		{"empty", "", true},
+		{"trailing dot is not a binding", "qcore/omp.", true},
+		{"leading dot is not a binding", "qcore/.omp", true},
+		{"session bead id form is untouched", "claude-mc-xyz", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := poolCandidateBindingIsLocal(cfg, tc.candidate); got != tc.want {
+				t.Fatalf("poolCandidateBindingIsLocal(%q) = %v, want %v", tc.candidate, got, tc.want)
+			}
+		})
 	}
 }
