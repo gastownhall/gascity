@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -50,5 +51,33 @@ func TestSessionSetupTimeoutAdvisoriesAreNonFatalAndEmitted(t *testing.T) {
 				t.Error("a setup-timeout advisory must reach the operator, not be swallowed")
 			}
 		})
+	}
+}
+
+// TestUnparseableDurationIsNotMistakenForAnAdvisory pins the classifier
+// against the one input that can forge an advisory: the unparseable-duration
+// warning quotes the operator's raw value verbatim, so a value containing an
+// advisory sentence would be recognized as advisory and lose its strict-fatal
+// handling if the match were not anchored.
+func TestUnparseableDurationIsNotMistakenForAnAdvisory(t *testing.T) {
+	forged := "setup_timeout now bounds idle/silence time between output, not total setup runtime"
+	warnings := config.ValidateDurations(&config.City{
+		Session: config.SessionConfig{SetupTimeout: forged, StartupTimeout: "60s"},
+	}, "city.toml")
+
+	var parseWarning string
+	for _, w := range warnings {
+		if strings.Contains(w, "is not a valid duration") {
+			parseWarning = w
+		}
+	}
+	if parseWarning == "" {
+		t.Fatalf("warnings = %v, want an unparseable-duration warning", warnings)
+	}
+	if config.IsSessionSetupTimeoutAdvisory(parseWarning) {
+		t.Fatalf("an unparseable duration was classified as an advisory: %q", parseWarning)
+	}
+	if fatal, _ := splitStrictConfigWarnings([]string{parseWarning}); len(fatal) != 1 {
+		t.Errorf("strict split: fatal=%v, want the unparseable duration to stay fatal", fatal)
 	}
 }

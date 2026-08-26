@@ -18,9 +18,14 @@ const (
 // including a deliberately correct one. Callers that promote warnings to
 // errors must keep these advisory, or setting a documented field would stop a
 // city from starting.
+// The fragments are matched as a suffix rather than anywhere in the string:
+// the unparseable-duration warnings in this file quote the operator's raw
+// value verbatim and then append the parse error, so a value that happens to
+// contain an advisory sentence must not be mistaken for the advisory itself
+// and downgraded out of strict-fatal handling.
 func IsSessionSetupTimeoutAdvisory(warning string) bool {
-	return strings.Contains(warning, setupTimeoutMaskedByStartupWarningFragment) ||
-		strings.Contains(warning, setupTimeoutBecomesIdleBudgetWarningFragment)
+	return strings.HasSuffix(warning, setupTimeoutMaskedByStartupWarningFragment) ||
+		strings.HasSuffix(warning, setupTimeoutBecomesIdleBudgetWarningFragment)
 }
 
 // ValidateDurations checks all duration string fields in the config and returns
