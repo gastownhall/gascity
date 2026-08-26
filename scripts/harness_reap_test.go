@@ -289,16 +289,16 @@ func TestGoTestShardWatchdogKillsARunThatDefeatsGoTimeout(t *testing.T) {
 // processGroupOf resolves the process group ID pid currently belongs to. The
 // QUIT regression below needs the *job's* group specifically — see the
 // comment on TestGoTestShardTrapsQuitInsteadOfCoreDumping for why the
-// runner's own pid is a different, and insufficient, target.
+// runner's own pid is a different, and insufficient, target. This calls
+// getpgid(2) directly instead of shelling out to ps: getpgid is POSIX and
+// available on both Linux and the macOS this suite also targets, and it
+// costs this test suite no new subprocess call site against the resource
+// census ledger (test/test-resources.toml).
 func processGroupOf(t *testing.T, pid int) int {
 	t.Helper()
-	out, err := exec.Command("ps", "-o", "pgid=", "-p", strconv.Itoa(pid)).Output()
+	pgid, err := syscall.Getpgid(pid)
 	if err != nil {
-		t.Fatalf("ps -o pgid= -p %d: %v", pid, err)
-	}
-	pgid, err := strconv.Atoi(strings.TrimSpace(string(out)))
-	if err != nil {
-		t.Fatalf("parse pgid from %q: %v", out, err)
+		t.Fatalf("getpgid(%d): %v", pid, err)
 	}
 	return pgid
 }
