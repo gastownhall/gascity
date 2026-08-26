@@ -85,14 +85,16 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 			}
 
 			sessionName := agentSessionName(cityName, ea.qualifiedName, sessTmpl)
-			var running bool
+			// Liveness stays on IsRunning: it is already a cached,
+			// fleet-wide read that excludes pane_dead corpses, whereas
+			// roster membership comes from list-sessions, which still
+			// lists a session whose pane exited under remain-on-exit.
+			// The roster is an attributes source only.
+			running := sp.IsRunning(sessionName)
 			var rosterEntry runtime.SessionRosterEntry
 			var haveRosterEntry bool
 			if rosterMap != nil {
 				rosterEntry, haveRosterEntry = rosterMap[sessionName]
-				running = haveRosterEntry
-			} else {
-				running = sp.IsRunning(sessionName)
 			}
 			// Fold active graph-resident (wisp) work into the running signal so
 			// an agent whose work executes under an agent-agnostic wisp session

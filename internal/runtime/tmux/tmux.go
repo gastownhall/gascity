@@ -1377,6 +1377,15 @@ func (s *SessionSet) Names() []string {
 // last-activity is intentionally NOT read from that same exec's raw
 // #{session_activity} field, which is documented-stale for detached
 // sessions (see rawSessionActivity).
+//
+// The result is an ATTRIBUTES source, not a liveness source. list-sessions
+// still reports a session whose pane has exited under remain-on-exit, so
+// roster membership does not imply the session is live; callers must use
+// [Provider.IsRunning], whose StateCache snapshot skips panes with
+// pane_dead set. Note also that the ErrNoServer absorption below reports an
+// empty roster when the socket is momentarily unreachable, deliberately
+// without StateCache's last-known-good preservation — one more reason a
+// caller must not read an absent name here as "stopped".
 func (t *Tmux) SessionRoster() (map[string]runtime.SessionRosterEntry, error) {
 	out, err := t.run("list-sessions", "-F", "#{session_name}|#{session_attached}")
 	if err != nil {

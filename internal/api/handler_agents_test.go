@@ -517,6 +517,9 @@ func TestAgentListPrefersBatchSessionRosterAndEnvironment(t *testing.T) {
 			"myrig--worker": {"suspended": "true", "GC_SESSION_ID": "sess-xyz"},
 		},
 	}
+	// Liveness still comes from IsRunning, so the session must actually be
+	// started; the roster only supplies attributes for it.
+	fake.Start(context.Background(), "myrig--worker", runtime.Config{}) //nolint:errcheck
 	state.sessionProvider = fake
 	srv := New(state)
 	h := newTestCityHandlerWith(t, state, srv)
@@ -542,7 +545,7 @@ func TestAgentListPrefersBatchSessionRosterAndEnvironment(t *testing.T) {
 
 	item := resp.Items[0]
 	if !item.Running {
-		t.Error("Running = false, want true (from roster presence)")
+		t.Error("Running = false, want true")
 	}
 	if !item.Suspended {
 		t.Error("Suspended = false, want true (from batched GetAllEnvironment)")
@@ -554,10 +557,61 @@ func TestAgentListPrefersBatchSessionRosterAndEnvironment(t *testing.T) {
 		t.Errorf("Session.LastActivity = %+v, want %v (from roster)", item.Session, lastActivity)
 	}
 
-	for _, method := range []string{"IsRunning", "IsAttached", "GetLastActivity", "GetMeta"} {
+	// IsRunning is deliberately absent: it is the liveness source and is
+	// already a single cached fleet-wide read, so batching does not replace
+	// it. The reads below are the ones the batch path subsumes.
+	for _, method := range []string{"IsAttached", "GetLastActivity", "GetMeta"} {
 		if n := fake.CountCalls(method, "myrig--worker"); n != 0 {
 			t.Errorf("%s calls = %d, want 0 (batch path should bypass per-session-name methods)", method, n)
 		}
+	}
+}
+
+// TestAgentListRosterPresenceIsNotLiveness guards the invariant that the
+// batched session roster is an attributes source, not a liveness source.
+// The runtime's session listing still reports a session whose pane has
+// exited (tmux keeps such a corpse listed under remain-on-exit), while
+// IsRunning excludes it. A name present in the roster but not running must
+// therefore report running=false, or a crashed agent surfaces as idle.
+func TestAgentListRosterPresenceIsNotLiveness(t *testing.T) {
+	state := newFakeState(t)
+	fake := &rosterFake{
+		Fake: runtime.NewFake(),
+		roster: map[string]runtime.SessionRosterEntry{
+			// Present in the roster, but never started: the corpse case.
+			"myrig--worker": {Attached: true, LastActivity: time.Unix(1700000000, 0)},
+		},
+		env: map[string]map[string]string{},
+	}
+	state.sessionProvider = fake
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var resp struct {
+		Items []agentResponse `json:"items"`
+		Total int             `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Total != 1 {
+		t.Fatalf("Total = %d, want 1", resp.Total)
+	}
+
+	item := resp.Items[0]
+	if item.Running {
+		t.Error("Running = true, want false (roster presence must not imply liveness)")
+	}
+	if item.Session != nil {
+		t.Errorf("Session = %+v, want nil for a non-running agent", item.Session)
 	}
 }
 
