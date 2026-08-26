@@ -523,6 +523,22 @@ func (cr *CityRuntime) authorizeRoutedWorkPoolDrainAck(
 		return false, drainAckRefusalUnavailable, fmt.Errorf("authorizing pool drain acknowledgement for %q: source store %q is unavailable", info.ID, lease.SourceStore)
 	}
 	work, err := beads.HandlesFor(sourceStore).Live.Get(lease.WorkID)
+	if errors.Is(err, beads.ErrNotFound) {
+		// A relocated city serves graph-class beads through the city-keyed
+		// graph binding while the acknowledged scope ref still spells the work
+		// store ("city:<name>"), so a graph trigger — the molecule step this
+		// seat actually finished — is invisible to the raw work-store read.
+		// Retry through the binding the way every graph-class coordination
+		// surface routes (scopeIsCity/resolveGraphStore): city scope only, rig
+		// scopes never take the graph class, and a city that relocates nothing
+		// resolves the byte-identical work store, where the not-found stands.
+		cityName := loadedCityName(snapshot.Config, snapshot.CityPath)
+		if workflowStoreRefForDir(snapshot.CityPath, snapshot.CityPath, cityName, snapshot.Config) == strings.TrimSpace(lease.SourceStore) {
+			if graphStore := cr.graphBeadStore().Store; graphStore != nil && graphStore != sourceStore {
+				work, err = beads.HandlesFor(graphStore).Live.Get(lease.WorkID)
+			}
+		}
+	}
 	if err != nil {
 		return false, drainAckRefusalUnavailable, fmt.Errorf("authorizing pool drain acknowledgement for %q: reading trigger work %q: %w", info.ID, lease.WorkID, err)
 	}

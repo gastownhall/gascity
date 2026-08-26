@@ -6,6 +6,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 )
 
 // A drain acknowledgement hands a pool seat BACK. Gating it on supported() —
@@ -331,5 +332,86 @@ func TestAuthorizeRoutedWorkPoolDrainAckReleasesACityServedTriggerForARigScopedA
 	authorized, refusal, err := fixture.cr.authorizeRoutedWorkPoolDrainAck(fixture.snapshot, info, lease)
 	if err != nil || !authorized || refusal != drainAckRefusalNone {
 		t.Fatalf("authorization = (%t, %q, %v), want the city-served release to hold", authorized, refusal, err)
+	}
+}
+
+// TestAuthorizeRoutedWorkPoolDrainAckReadsAGraphClassTriggerThroughTheGraphBinding
+// pins the trigger-work read against the relocated-graph shape. A city with
+// [beads.classes.graph] serves every graph-class bead (molecule steps — the
+// gcg- work a pool seat actually finishes) through the city-keyed graph
+// binding, while the acknowledged scope ref still spells the work store
+// ("city:<name>"). Reading the trigger through routedWorkStore alone answers
+// "bead not found" for exactly those acknowledgements, and a not-found here is
+// an UNAVAILABLE error — retried forever — not a refusal. The read must route
+// the way every graph-class coordination surface routes (scopeIsCity /
+// resolveGraphStore): city scope retries through the graph binding, and a city
+// that relocates nothing retries through the byte-identical work store, where
+// not-found stands.
+func TestAuthorizeRoutedWorkPoolDrainAckReadsAGraphClassTriggerThroughTheGraphBinding(t *testing.T) {
+	fixture := newRoutedWorkPoolDrainAckAuthorizationFixture(t)
+
+	graphStore := beads.NewMemStore()
+	fixture.cr.storageRoutes = &storageRoutes{
+		stores:  map[coordclass.Class]beads.Store{coordclass.ClassGraph: graphStore},
+		binding: "test-graph-binding",
+	}
+
+	// Both MemStores mint ids from the same prefix, so mint until the id does
+	// NOT exist in the work store — the control below is what makes the routed
+	// read actually exercise the binding rather than a same-id work bead.
+	var graphWork beads.Bead
+	for range 8 {
+		b, err := graphStore.Create(beads.Bead{
+			Title:  "graph-resident routed work",
+			Type:   "task",
+			Status: "open",
+			Metadata: map[string]string{
+				"gc.routed_to": fixture.template,
+			},
+		})
+		if err != nil {
+			t.Fatalf("create graph-resident work: %v", err)
+		}
+		if _, err := fixture.store.Get(b.ID); err != nil {
+			graphWork = b
+			break
+		}
+	}
+	if graphWork.ID == "" {
+		t.Fatal("control failed: every minted graph id is visible in the work store")
+	}
+	if err := graphStore.Close(graphWork.ID); err != nil {
+		t.Fatalf("close graph-resident work: %v", err)
+	}
+
+	if err := fixture.store.SetMetadataBatch(fixture.info.ID, map[string]string{
+		beadmeta.TriggerBeadIDMetadataKey:       graphWork.ID,
+		beadmeta.TriggerBeadStoreRefMetadataKey: fixture.sourceStore,
+	}); err != nil {
+		t.Fatalf("re-point member trigger at the graph-resident work: %v", err)
+	}
+	for key, value := range map[string]string{
+		reconcilerDrainAckTriggerBeadIDKey:   graphWork.ID,
+		reconcilerDrainAckTriggerStoreRefKey: fixture.sourceStore,
+	} {
+		if err := fixture.provider.SetMeta(fixture.info.SessionName, key, value); err != nil {
+			t.Fatalf("restamp acknowledged trigger %s: %v", key, err)
+		}
+	}
+	info, err := sessionFrontDoor(fixture.store).Get(fixture.info.ID)
+	if err != nil {
+		t.Fatalf("read re-pointed pool session: %v", err)
+	}
+	if err := fixture.cr.poolMembershipShadow.replace(fixture.snapshot.Config, info); err != nil {
+		t.Fatalf("publish re-pointed pool membership: %v", err)
+	}
+	lease, _, _, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, info)
+	if err != nil {
+		t.Fatalf("build drain acknowledgement lease: %v", err)
+	}
+
+	authorized, refusal, err := fixture.cr.authorizeRoutedWorkPoolDrainAck(fixture.snapshot, info, lease)
+	if err != nil || !authorized || refusal != drainAckRefusalNone {
+		t.Fatalf("authorization = (%t, %q, %v), want the graph-resident release to hold", authorized, refusal, err)
 	}
 }
