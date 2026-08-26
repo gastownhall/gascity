@@ -977,7 +977,12 @@ func PurgeReadMessageWisps(store beads.MailStore, cutoff time.Time) (int, error)
 		// read:true snapshot — re-verify against the live store immediately
 		// before the destructive delete.
 		current, err := live.Get(entry.ID)
+		if errors.Is(err, beads.ErrNotFound) {
+			// Deleted by a concurrent path inside the cache window — nothing to do.
+			continue
+		}
 		if err != nil {
+			deleteErr = errors.Join(deleteErr, fmt.Errorf("live re-verify of bead %q before delete: %w", entry.ID, err))
 			continue
 		}
 		if current.Metadata[mail.ReadMetadataKey] != "true" {

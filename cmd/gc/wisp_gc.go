@@ -734,8 +734,15 @@ func deleteExpiredBeadClosure(store beads.Store, rootID string) error {
 	// destructive batch delete. A root that is already gone has nothing to
 	// delete.
 	live, err := beads.HandlesFor(store).Live.Get(rootID)
-	if err != nil {
+	switch {
+	case errors.Is(err, beads.ErrNotFound):
+		// Root already gone — nothing to delete.
 		return errBeadNoLongerEligible
+	case err != nil:
+		// Any other live-read failure means we cannot PROVE the root is still
+		// collectible; surface it rather than silently skipping, matching
+		// reapOrphanedClosedWisps' treatment of an unreadable root Get.
+		return fmt.Errorf("live re-verify of root %q before closure delete: %w", rootID, err)
 	}
 	if live.Status != "closed" {
 		return errBeadNoLongerEligible

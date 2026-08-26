@@ -436,6 +436,46 @@ func TestWispGC_ClosureSkipsRootReopenedAfterSnapshot(t *testing.T) {
 	}
 }
 
+// TestWispGC_ClosureSurfacesLiveRecheckError asserts that a transient live-read
+// failure during the pre-delete re-verify is SURFACED rather than silently
+// treated as "already gone". A backend outage must produce a visible sweep
+// error, not a zero-purge sweep with a nil error — and must still never delete.
+func TestWispGC_ClosureSurfacesLiveRecheckError(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCBead("mol-boom", now.Add(-2*time.Hour), "closed", "molecule"),
+		{
+			ID:        "mol-boom.1",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-2 * time.Hour),
+			ParentID:  "mol-boom",
+		},
+	})
+	if err := store.DepAdd("mol-boom.1", "mol-boom", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(mol-boom.1->mol-boom): %v", err)
+	}
+
+	entries, err := closedWispGCEntries(store)
+	if err != nil {
+		t.Fatalf("closedWispGCEntries: %v", err)
+	}
+
+	// The live re-verify now fails for a reason other than not-found.
+	store.getErrors["mol-boom"] = fmt.Errorf("backend down")
+
+	purged, err := purgeExpiredBeadClosures(store, entries, now, 0)
+	if err == nil {
+		t.Fatal("purgeExpiredBeadClosures: want error, got nil (a live-read failure must not be swallowed)")
+	}
+	if purged != 0 {
+		t.Fatalf("purged = %d, want 0 (live re-verify failed)", purged)
+	}
+	if len(store.deletedIDs) != 0 {
+		t.Fatalf("deletedIDs = %v, want none", store.deletedIDs)
+	}
+}
+
 func TestWispGC_PurgesExpiredClosureAcrossStorageTiers(t *testing.T) {
 	now := time.Now()
 	store := newGCStore([]beads.Bead{

@@ -62,7 +62,17 @@ func (s listErrStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 type deleteTrackStore struct {
 	*beads.MemStore
 	failDelete map[string]error
-	deleted    []string
+	// getErrors injects a live-read failure for a specific ID so tests can
+	// exercise the pre-delete re-verify's error branch.
+	getErrors map[string]error
+	deleted   []string
+}
+
+func (s *deleteTrackStore) Get(id string) (beads.Bead, error) {
+	if err, ok := s.getErrors[id]; ok {
+		return beads.Bead{}, err
+	}
+	return s.MemStore.Get(id)
 }
 
 func (s *deleteTrackStore) Delete(id string) error {
@@ -383,6 +393,37 @@ func TestPurgeReadMessageWisps_SkipsMessageGoneAfterSnapshot(t *testing.T) {
 	}
 	if purged != 0 {
 		t.Fatalf("purged = %d, want 0 (message already gone)", purged)
+	}
+	if len(underlying.deleted) != 0 {
+		t.Fatalf("deleted = %v, want none", underlying.deleted)
+	}
+}
+
+// TestPurgeReadMessageWisps_SurfacesLiveRecheckError asserts that a transient
+// live-read failure during the pre-delete re-verify is reported rather than
+// silently swallowed as "already gone" — and still never deletes.
+func TestPurgeReadMessageWisps_SurfacesLiveRecheckError(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	cutoff := now.Add(-time.Hour)
+	aged := now.Add(-2 * time.Hour)
+
+	seed := []beads.Bead{
+		{ID: "boom", Type: "message", Status: "open", CreatedAt: aged, Labels: []string{"read"}, Metadata: map[string]string{mail.ReadMetadataKey: "true"}, Ephemeral: true},
+	}
+	underlying := &deleteTrackStore{
+		MemStore:   beads.NewMemStoreFrom(100, seed, nil),
+		failDelete: map[string]error{},
+		getErrors:  map[string]error{"boom": errors.New("backend down")},
+	}
+	store := &staleListStore{deleteTrackStore: underlying, snapshot: seed}
+
+	mailStore := beads.MailStore{Store: store}
+	purged, err := PurgeReadMessageWisps(mailStore, cutoff)
+	if err == nil {
+		t.Fatal("PurgeReadMessageWisps: want error, got nil (a live-read failure must not be swallowed)")
+	}
+	if purged != 0 {
+		t.Fatalf("purged = %d, want 0 (live re-verify failed)", purged)
 	}
 	if len(underlying.deleted) != 0 {
 		t.Fatalf("deleted = %v, want none", underlying.deleted)
