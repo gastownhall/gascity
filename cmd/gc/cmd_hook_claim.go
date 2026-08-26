@@ -1187,11 +1187,14 @@ func hookEmitExecutionStepStarted(step beads.Bead, dir string, env []string, ass
 // direction from stampHookClaimIdentity's work-bead back-reference.
 //
 // It exists because a claimed step id is otherwise UNREACHABLE from the step's
-// own shell: GC_BEAD_ID / GC_TRIGGER_BEAD_ID are set only in the dispatch
-// condition-script environment (internal/convergence/condition.go), never in a
-// pool session, so a formula step that must close the bead it is running had no
-// way to name it and silently skipped its own close — work that did nothing
-// reported green. `gc hook current` reads this stamp back and closes that gap.
+// own shell: GC_BEAD_ID is set only in the dispatch condition-script
+// environment (internal/convergence/condition.go), and GC_TRIGGER_BEAD_ID —
+// exported to demand-spawned pool seats as a pool-level spawn marker
+// (build_desired_state.go) — is absent on other seats and is a presence
+// signal, not a claim directive, so a formula step that must close the bead it
+// is running had no reliable way to name it and silently skipped its own close
+// — work that did nothing reported green. `gc hook current` reads this stamp
+// back and closes that gap.
 //
 // Unlike the work-bead session back-reference this is stamped for CONTROL beads
 // too: that exclusion exists because a control step must stay session-free by
