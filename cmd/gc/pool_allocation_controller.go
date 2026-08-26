@@ -539,10 +539,19 @@ func (cr *CityRuntime) authorizeRoutedWorkPoolDrainAck(
 			}
 		}
 	}
-	if err != nil {
+	switch {
+	case errors.Is(err, beads.ErrNotFound):
+		// The trigger no longer exists in ANY configured serving store.
+		// Ephemeral molecule work is deleted after its scope finalizes, so
+		// absence here is legitimate and PERMANENT — reporting it as
+		// unavailable retries forever, and each deadline release re-parks the
+		// obligation on the next admission. A deleted trigger cannot be open,
+		// which is the only fact this check guards; the live assigned-work
+		// check below stays the real fence against stopping a seat that still
+		// holds work.
+	case err != nil:
 		return false, drainAckRefusalUnavailable, fmt.Errorf("authorizing pool drain acknowledgement for %q: reading trigger work %q: %w", info.ID, lease.WorkID, err)
-	}
-	if work.ID != lease.WorkID || work.Status != "closed" {
+	case work.ID != lease.WorkID || work.Status != "closed":
 		return false, drainAckRefusalWorkNotClosed, nil
 	}
 	hasAssigned, err := sessionHasAwakeAssignedWorkForReachableStore(snapshot.CityPath, snapshot.Config, snapshot.Store, cr.rigBeadStores(), info)
