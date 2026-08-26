@@ -465,14 +465,13 @@ The `[runtimes]` table declares pack-shipped runtime provider executables. Each
 
 ```toml
 [runtimes.cloudflare]
-command = "gc-runtime-cloudflare"   # pack-relative if it contains a path
-                                     # separator, else resolved on PATH
+command = "gc-runtime-cloudflare"   # bare name, resolved on PATH
 protocol = 0
 ```
 
 | Field | Meaning | Status |
 |---|---|---|
-| `command` | Required. The runtime executable: a path relative to the pack directory (anything containing a path separator), or a bare name resolved on PATH at session start. | required |
+| `command` | Required. The runtime executable. A bare name (no path separator) is resolved on PATH at session start. A relative path (any other value containing a separator) is anchored at the declaring pack directory during load. An absolute path is used as written. | required |
 | `protocol` | The RPP version the executable speaks. `0` is the only version today; any other value fails composition. | current |
 
 `<name>` must not contain `:`, `/`, or whitespace, since `:` is reserved for
@@ -484,14 +483,19 @@ registry (`City.Runtimes`), including runtimes declared by rig-imported packs.
 Consumers select a runtime by name the same way they select a builtin
 provider — `city.toml` `[session].provider`, or an agent/template `session`
 field — for example `provider = "cloudflare"` for the entry above. Name
-collisions with builtin runtimes or other packs are composition errors; only
-identical re-declarations of the same pack reached through a diamond import
-graph dedupe.
+collisions with builtin runtimes or other packs are composition errors. The
+only re-declaration that dedupes is the same pack *directory* reached twice
+through a diamond import graph with the same command and protocol; two
+distinct pack directories collide even when their pack name, command, and
+protocol all coincide, so a runtime's provenance is never silently
+re-attributed.
 
-`gc runtime check <name>` resolves a declared name and runs the RPP
-conformance suite against the pack's executable. A `pack-runtimes` doctor
-check verifies each declared executable is installed and answers the
-`protocol` handshake.
+`gc runtime check <name>` and `gc runtime conformance <name>` both accept a
+declared name and run against that pack's executable: `check` is the smoke
+test (handshake, lifecycle round-trip, declared capabilities, optional
+probes), and `conformance` is the full requirement-coded RPP suite. A
+`pack-runtimes` doctor check verifies each declared executable is installed
+and answers the `protocol` handshake.
 
 ### 1.2.9. Formula Directory
 
