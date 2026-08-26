@@ -40,9 +40,11 @@ const (
 	// ratchet's teeth while bounding what a bystander pays for someone else's
 	// missed date.
 	ModeGrace Mode = iota
-	// ModeStrict makes any lapse fatal on the day it happens. The owner's lanes
-	// run this: the scheduled audit, and pre-commit when the waiver files are
-	// staged.
+	// ModeStrict makes any lapse fatal on the day it happens. Only the owner's
+	// lanes run this, and they are all scheduled: scripts/waiver-clock-audit,
+	// reached by the nightly waiver-clock job and by the maintainer city's audit
+	// order. Nothing on the commit or push path may set it, or a calendar
+	// rollover blocks pushes carrying no code change all over again.
 	ModeStrict
 )
 
