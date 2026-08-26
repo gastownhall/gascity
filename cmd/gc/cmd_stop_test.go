@@ -362,7 +362,7 @@ func TestCmdStopForceEscalatesInProgressControllerStop(t *testing.T) {
 	var normalStdout, normalStderr lockedBuffer
 	normalDone := make(chan int, 1)
 	go func() {
-		normalDone <- cmdStop([]string{dir}, &normalStdout, &normalStderr, 10*time.Second, false)
+		normalDone <- cmdStop([]string{dir}, &normalStdout, &normalStderr, 0, false)
 	}()
 
 	interrupted := sp.waitForInterrupts(t, 1)
@@ -373,7 +373,7 @@ func TestCmdStopForceEscalatesInProgressControllerStop(t *testing.T) {
 	var forceStdout, forceStderr lockedBuffer
 	forceDone := make(chan int, 1)
 	go func() {
-		forceDone <- cmdStop([]string{dir}, &forceStdout, &forceStderr, 10*time.Second, true)
+		forceDone <- cmdStop([]string{dir}, &forceStdout, &forceStderr, 0, true)
 	}()
 
 	stopped := sp.waitForStops(t, 1)
@@ -834,7 +834,24 @@ func TestCmdStopSupervisorManagedInvalidCityTomlFailsWhenShutdownFails(t *testin
 	})
 
 	var stdout, stderr lockedBuffer
-	code := cmdStop([]string{cityDir}, &stdout, &stderr, 5*time.Second, false)
+	// Input 0 selects production's normal config-derived timeout path instead
+	// of an arbitrary test override; completion is observed via the package
+	// hang detector below rather than via this input, so a scheduler-starved
+	// run reports a hang budget failure instead of racing a tight deadline.
+	codeCh := make(chan int, 1)
+	go func() {
+		codeCh <- cmdStop([]string{cityDir}, &stdout, &stderr, 0, false)
+	}()
+
+	var code int
+	awaitCond(t, func() bool {
+		select {
+		case code = <-codeCh:
+			return true
+		default:
+			return false
+		}
+	}, "cmdStop to finish for invalid-config shutdown failure")
 	if code != 1 {
 		t.Fatalf("cmdStop() = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
