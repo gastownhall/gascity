@@ -480,9 +480,10 @@ names shell- and TOML-friendly.
 
 City composition registers declared runtimes into a city-wide selection
 registry (`City.Runtimes`), including runtimes declared by rig-imported packs.
-Consumers select a runtime by name the same way they select a builtin
-provider — `city.toml` `[session].provider`, or an agent/template `session`
-field — for example `provider = "cloudflare"` for the entry above. Name
+Selection is city-wide: set `city.toml` `[session].provider` to the declared
+name (`provider = "cloudflare"` for the entry above), or override it for one
+invocation with `GC_SESSION`. An agent's `session` field does not select a
+runtime; it names a session transport (`acp`, `tmux`, or omitted). Name
 collisions with builtin runtimes or other packs are composition errors. The
 only re-declaration that dedupes is the same pack *directory* reached twice
 through a diamond import graph with the same command and protocol; two
