@@ -67,7 +67,7 @@ func writeWorktreeStaleMarker(gp gitProbe, workerDir, reason string, stderr io.W
 	}
 	// blocking=no: the reconciler declined to prune an already-closed
 	// worktree. It does not stop the live agent still working in it.
-	header := fmt.Sprintf("branch=%s\nworktree=%s\nreason=%s\nblocking=no\nat=%s\n\n",
+	header := fmt.Sprintf("branch=%s\nworktree=%s\nreason=%s\nblocking=no\nat=%s\nwritten-by=session-reconciler\n\n",
 		branch, workerDir, reason, time.Now().UTC().Format(time.RFC3339))
 	content := header + worktreeStaleGuidance(reason, dirty)
 	if err := os.WriteFile(filepath.Join(workerDir, worktreeStaleFileName), []byte(content), 0o644); err != nil {
@@ -128,7 +128,7 @@ NEVER
 
 WHAT TO DO
   1. See what hasn't been pushed:
-       git log --oneline @{u}..HEAD
+       git log HEAD --oneline --not --remotes
   2. Push the branch so the commits are safe on the remote:
        git push -u origin HEAD
   3. No further action needed after that: the next reconciler pass
