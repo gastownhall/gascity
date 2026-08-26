@@ -83,6 +83,9 @@ func assertWorktreeStaleMarker(t *testing.T, workerDir, wantBranch, wantReason s
 	if !strings.Contains(content, "blocking=no") {
 		t.Errorf("marker content = %q, want to contain %q", content, "blocking=no")
 	}
+	if !strings.Contains(content, "written-by=session-reconciler") {
+		t.Errorf("marker content = %q, want to contain %q", content, "written-by=session-reconciler")
+	}
 
 	var atLine string
 	for _, line := range strings.Split(content, "\n") {
@@ -513,6 +516,33 @@ func TestWriteWorktreeStaleMarker_UnpushedCommitsGuidanceIsReasonSpecific(t *tes
 	}
 }
 
+// TestWriteWorktreeStaleMarker_UnpushedGuidanceMentionsRecoveryCommand pins
+// the exact recovery command against internal/git.Git.HasUnpushedCommitsResult
+// (git log HEAD --oneline --not --remotes), not the @{u}-relative form. These
+// worktrees have no upstream tracking configured, so a reader who copy-pastes
+// "git log --oneline @{u}..HEAD" hits "fatal: no upstream configured" instead
+// of recovering (gm-shwey8).
+func TestWriteWorktreeStaleMarker_UnpushedGuidanceMentionsRecoveryCommand(t *testing.T) {
+	fx := newPruneFixture(t)
+	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, hasUnpushed: true, currentBranch: "builder/ga-def456"})
+
+	var stderr bytes.Buffer
+	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, &stderr) {
+		t.Fatal("prune returned true with unpushed commits")
+	}
+	data, err := os.ReadFile(filepath.Join(fx.workerDir, worktreeStaleFileName))
+	if err != nil {
+		t.Fatalf("reading marker: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "git log HEAD --oneline --not --remotes") {
+		t.Errorf("marker content = %q, want the --not --remotes recovery command", content)
+	}
+	if strings.Contains(content, "@{u}") {
+		t.Errorf("marker content = %q, want no @{u}-relative command (no upstream tracking in these worktrees)", content)
+	}
+}
+
 func TestWriteWorktreeStaleMarker_StashedWorkGuidanceIsReasonSpecific(t *testing.T) {
 	fx := newPruneFixture(t)
 	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, hasStashes: true, currentBranch: "builder/ga-ghi789"})
@@ -563,8 +593,8 @@ func TestWorktreeStaleGuidance(t *testing.T) {
 		{
 			name:    "unpushed commits",
 			reason:  worktreeStaleReasonUnpushedCommits,
-			want:    []string{"WHAT HAPPENED", "WHAT TO DO", "NEVER", "git log --oneline @{u}..HEAD", "git push -u origin"},
-			mustNot: []string{"git stash"},
+			want:    []string{"WHAT HAPPENED", "WHAT TO DO", "NEVER", "git log HEAD --oneline --not --remotes", "git push -u origin"},
+			mustNot: []string{"git stash", "@{u}"},
 		},
 		{
 			name:    "stashed work",
