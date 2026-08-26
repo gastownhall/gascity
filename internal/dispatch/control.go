@@ -822,6 +822,50 @@ func setIterationMetadata(meta map[string]string, iteration string) {
 	meta[beadmeta.IterationMetadataKey] = iteration
 }
 
+// attemptIteration returns which loop iteration an attempt's sub-DAG belongs to,
+// tracked separately from gc.attempt. A ralph step's attempts ARE its
+// iterations, so it defines the value; every other step inherits it from its
+// control, which is the only way a retry nested inside a ralph body learns which
+// iteration it is retrying within. Derived from the live control chain and never
+// from the frozen spec, so a stale copy in step.Metadata cannot survive.
+func attemptIteration(step *formula.Step, control beads.Bead, attemptNum int) string {
+	if step.Ralph != nil {
+		return strconv.Itoa(attemptNum)
+	}
+	return strings.TrimSpace(control.Metadata[beadmeta.IterationMetadataKey])
+}
+
+// applyRalphBodyChildControls rewrites the counters and lineage a ralph body
+// child must take from the live control chain instead of its frozen spec. The
+// iteration is inherited so a retry nested in the body knows which iteration it
+// is retrying within; setIterationMetadata clears it for a non-loop child. A
+// ralph body child additionally resets its retry counter to the child's own
+// spec attempt each iteration (RalphBodyChildAttempt), so an iteration-N child
+// is not born exhausted, and namespaces a bare gc.control_for under this attempt
+// so sibling attempt roots stop colliding on a shared gc.step_id across
+// iterations.
+func applyRalphBodyChildControls(childMeta map[string]string, step, child *formula.Step, attemptNum int, iteration, attemptPrefix string) {
+	setIterationMetadata(childMeta, iteration)
+	if step.Ralph == nil {
+		return
+	}
+	childMeta[beadmeta.AttemptMetadataKey] = formula.RalphBodyChildAttempt(child, attemptNum)
+	// Same S38 rewrite namespaceRalphBodySteps applies at compile time, extended
+	// to the shape it missed. A frozen ralph body arrives already retry-expanded,
+	// so a nested control's attempt root carries gc.control_for as the BARE child
+	// id — identical in every outer iteration. Left bare, each iteration's
+	// control matches all its siblings' attempt roots through the shared
+	// gc.step_id identity member, and only max(gc.attempt) told them apart. That
+	// tiebreak was the iteration index being stamped as an attempt number, so it
+	// disappears with the counter split; the ref has to carry the distinction it
+	// was always supposed to carry. buildNestedControlSeed already yields this
+	// form for nested ralphs, whose synthetic control is keyed by the namespaced
+	// child ref.
+	if cf := strings.TrimSpace(child.Metadata[beadmeta.ControlForMetadataKey]); cf != "" {
+		childMeta[beadmeta.ControlForMetadataKey] = attemptPrefix + "." + cf
+	}
+}
+
 // buildAttemptRecipe constructs a minimal formula.Recipe for one attempt
 // from the frozen step spec.
 func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) *formula.Recipe {
@@ -844,16 +888,7 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 		attemptPrefix = fmt.Sprintf("%s.attempt.%d", stepRef, attemptNum)
 	}
 
-	// Which loop iteration this sub-DAG belongs to, tracked separately from
-	// gc.attempt. A ralph step's attempts ARE its iterations, so it defines the
-	// value; every other step inherits it from its control, which is the only
-	// way a retry nested inside a ralph body learns which iteration it is
-	// retrying within. Derived from the live control chain and never from the
-	// frozen spec, so a stale copy in step.Metadata cannot survive.
-	iteration := strings.TrimSpace(control.Metadata[beadmeta.IterationMetadataKey])
-	if step.Ralph != nil {
-		iteration = strconv.Itoa(attemptNum)
-	}
+	iteration := attemptIteration(step, control, attemptNum)
 
 	// Root step for the attempt sub-DAG.
 	// For ralph iterations with children, the root is a scope bead.
@@ -931,12 +966,8 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 
 		for _, child := range step.Children {
 			childID := attemptPrefix + "." + child.ID
-			childAttempt := strconv.Itoa(attemptNum)
-			if step.Ralph != nil {
-				childAttempt = formula.RalphBodyChildAttempt(child, attemptNum)
-			}
 			childMeta := map[string]string{
-				beadmeta.AttemptMetadataKey:     childAttempt,
+				beadmeta.AttemptMetadataKey:     strconv.Itoa(attemptNum),
 				beadmeta.StepRefMetadataKey:     childID,
 				beadmeta.StepIDMetadataKey:      child.ID,
 				beadmeta.ScopeRefMetadataKey:    attemptPrefix,
@@ -950,27 +981,11 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 					childMeta[k] = v
 				}
 			}
-			// Written after the copy loop for the same reason gc.control_for is
-			// on the root: the iteration comes from the live control chain, so a
-			// value carried in a frozen spec must not shadow it.
-			setIterationMetadata(childMeta, iteration)
-			// Same S38 rewrite namespaceRalphBodySteps applies at compile time,
-			// extended to the shape it missed. A frozen ralph body arrives
-			// already retry-expanded, so a nested control's attempt root carries
-			// gc.control_for as the BARE child id — identical in every outer
-			// iteration. Left bare, each iteration's control matches all its
-			// siblings' attempt roots through the shared gc.step_id identity
-			// member, and only max(gc.attempt) told them apart. That tiebreak
-			// was the iteration index being stamped as an attempt number, so it
-			// disappears with the counter split; the ref has to carry the
-			// distinction it was always supposed to carry. buildNestedControlSeed
-			// already yields this form for nested ralphs, whose synthetic control
-			// is keyed by the namespaced child ref.
-			if step.Ralph != nil {
-				if cf := strings.TrimSpace(child.Metadata[beadmeta.ControlForMetadataKey]); cf != "" {
-					childMeta[beadmeta.ControlForMetadataKey] = attemptPrefix + "." + cf
-				}
-			}
+			// Rewrite the counters and lineage a ralph body child must take from
+			// the live control chain rather than its frozen spec. Applied after
+			// the copy loop, for the same reason gc.control_for is on the root: a
+			// value carried in a frozen spec must not shadow them.
+			applyRalphBodyChildControls(childMeta, step, child, attemptNum, iteration, attemptPrefix)
 			if child.OnComplete != nil {
 				childMeta[beadmeta.OutputJSONRequiredMetadataKey] = "true"
 			}
