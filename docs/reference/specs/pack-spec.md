@@ -496,7 +496,8 @@ declared name and run against that pack's executable: `check` is the smoke
 test (handshake, lifecycle round-trip, declared capabilities, optional
 probes), and `conformance` is the full requirement-coded RPP suite. A
 `pack-runtimes` doctor check verifies each declared executable is installed
-and answers the `protocol` handshake.
+and that its RPP handshake works. An executable with no `protocol` op is the
+documented version-0 floor and passes; a present-but-broken handshake fails.
 
 ### 1.2.9. Formula Directory
 
