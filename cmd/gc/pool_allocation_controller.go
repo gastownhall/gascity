@@ -441,14 +441,19 @@ func (cr *CityRuntime) authorizeRoutedWorkPoolDrainAck(
 		return false, drainAckRefusalPolicyUnsupported, nil
 	}
 	// The source-store clause, asked directly rather than through the
-	// forSourceStore overlay. That overlay early-returns on !supported(), so
-	// under any capacity cap it never runs — which was invisible while the gate
-	// above refused every capped city outright, and would have become a silent
-	// skip the moment it stopped. An unreadable trigger store has to refuse
-	// here: the store resolution below would otherwise surface it as an error,
-	// and a drain acknowledgement the keyed lane cannot service is legacy's to
-	// handle, not an incident.
-	if !poolAllocationShadowReachesSourceStore(snapshot.Config, agent, snapshot.CityPath, lease.SourceStore) {
+	// forSourceStore overlay (which early-returns on !supported(), so under any
+	// capacity cap it never runs). The refusable fact is the CITY's, not the
+	// agent's: the acknowledgement is serviced with routedWorkStore below, so
+	// what must hold is that the ref names a store this city serves at all. The
+	// agent-rig equality the overlay applies is an ALLOCATION scope rule — a
+	// rig-scoped pool member whose city relocated its work class legitimately
+	// acknowledges a trigger claimed at CITY scope (maintainer-city stamps
+	// gc.trigger_bead_store_ref=city:<name> on every class-served claim), and
+	// demanding "rig:<name>" there refused every such acknowledgement forever.
+	// An UNCONFIGURED ref still refuses here: the resolution below would
+	// surface it as an error, and an acknowledgement the keyed lane cannot
+	// service is legacy's to handle, not an incident.
+	if !routedWorkStoreRefConfigured(snapshot.Config, snapshot.CityPath, lease.SourceStore) {
 		return false, drainAckRefusalPolicyUnsupported, nil
 	}
 	// The singleton exclusion, read from the agent rather than from the policy's
@@ -1061,6 +1066,36 @@ func canonicalizeLegacyWorkflowStoreRef(cfg *config.City, cityPath, storeRef str
 		}
 	}
 	return storeRef
+}
+
+// routedWorkStoreRefConfigured reports whether sourceStore names a store this
+// CITY is configured to serve — the city work ref or any registered rig's ref.
+// It is the pure-config half of controllerState.routedWorkStore, split out for
+// the drain-ack release gate: whether a ref names a store at all is a permanent
+// fact and refusable, while handle liveness is transient and stays with the
+// resolution itself, which reports unavailable and retries.
+func routedWorkStoreRefConfigured(cfg *config.City, cityPath, sourceStore string) bool {
+	if cfg == nil {
+		return false
+	}
+	sourceStore = strings.TrimSpace(sourceStore)
+	if sourceStore == "" {
+		return false
+	}
+	cityName := loadedCityName(cfg, cityPath)
+	if workflowStoreRefForDir(cityPath, cityPath, cityName, cfg) == sourceStore {
+		return true
+	}
+	for i := range cfg.Rigs {
+		rigPath := cfg.Rigs[i].Path
+		if !filepath.IsAbs(rigPath) {
+			rigPath = filepath.Join(cityPath, rigPath)
+		}
+		if workflowStoreRefForDir(rigPath, cityPath, cityName, cfg) == sourceStore {
+			return true
+		}
+	}
+	return false
 }
 
 // routedWorkStore resolves a routed-work key's source store ref to the store it

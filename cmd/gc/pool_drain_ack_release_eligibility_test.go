@@ -3,6 +3,8 @@ package main
 import (
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -263,4 +265,71 @@ func TestAuthorizeRoutedWorkPoolDrainAckKeepsSingletonExclusionUnderACap(t *test
 			t.Fatalf("authorization = (%t, %q, %v), want the release to hold", authorized, refusal, err)
 		}
 	})
+}
+
+// TestAuthorizeRoutedWorkPoolDrainAckReleasesACityServedTriggerForARigScopedAgent
+// pins the release against the fifth spelling of the single-store assumption.
+// A city that relocates its work class serves claims at CITY scope, so a
+// rig-scoped pool member's acknowledged trigger legitimately carries the city
+// ref — maintainer-city stamps gc.trigger_bead_store_ref=city:maintainer-city
+// on every class-served claim. The source-store clause asked whether the
+// AGENT's own rig equals the ref, and "rig:<name>" never equals "city:<name>",
+// so every such acknowledgement refused lease_invalid/policy_unsupported and
+// the seat drained forever. The refusable fact is the CITY's: does the ref
+// name a store this city serves at all — the same resolution that services
+// the acknowledgement below (routedWorkStore).
+func TestAuthorizeRoutedWorkPoolDrainAckReleasesACityServedTriggerForARigScopedAgent(t *testing.T) {
+	fixture := newRoutedWorkPoolDrainAckAuthorizationFixtureWithOptions(t,
+		routedWorkPoolAuthorizationFixtureOptions{rigName: "gascity"})
+
+	// The city-served trigger: a closed work bead resolvable through the city
+	// ref, which is what a relocated work class serves.
+	cityWork, err := fixture.store.Create(beads.Bead{
+		Title:  "city-served routed work",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to": fixture.template,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create city-served work: %v", err)
+	}
+	if err := fixture.store.Close(cityWork.ID); err != nil {
+		t.Fatalf("close city-served work: %v", err)
+	}
+	const cityRef = "city:test-city"
+	if err := fixture.store.SetMetadataBatch(fixture.info.ID, map[string]string{
+		beadmeta.TriggerBeadIDMetadataKey:       cityWork.ID,
+		beadmeta.TriggerBeadStoreRefMetadataKey: cityRef,
+	}); err != nil {
+		t.Fatalf("re-point member trigger at the city-served work: %v", err)
+	}
+	for key, value := range map[string]string{
+		reconcilerDrainAckTriggerBeadIDKey:   cityWork.ID,
+		reconcilerDrainAckTriggerStoreRefKey: cityRef,
+	} {
+		if err := fixture.provider.SetMeta(fixture.info.SessionName, key, value); err != nil {
+			t.Fatalf("restamp acknowledged trigger %s: %v", key, err)
+		}
+	}
+	info, err := sessionFrontDoor(fixture.store).Get(fixture.info.ID)
+	if err != nil {
+		t.Fatalf("read re-pointed pool session: %v", err)
+	}
+	if err := fixture.cr.poolMembershipShadow.replace(fixture.snapshot.Config, info); err != nil {
+		t.Fatalf("publish re-pointed pool membership: %v", err)
+	}
+	lease, _, _, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, info)
+	if err != nil {
+		t.Fatalf("build drain acknowledgement lease: %v", err)
+	}
+	if lease.SourceStore != cityRef {
+		t.Fatalf("lease source store = %q, want the city ref %q — the clause under test never runs otherwise", lease.SourceStore, cityRef)
+	}
+
+	authorized, refusal, err := fixture.cr.authorizeRoutedWorkPoolDrainAck(fixture.snapshot, info, lease)
+	if err != nil || !authorized || refusal != drainAckRefusalNone {
+		t.Fatalf("authorization = (%t, %q, %v), want the city-served release to hold", authorized, refusal, err)
+	}
 }

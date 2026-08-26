@@ -3476,8 +3476,13 @@ func TestAuthorizeRoutedWorkPoolDrainAckRequiresExactLiveEvidence(t *testing.T) 
 			},
 		},
 		{
-			name:      "source store unavailable",
-			wantError: true,
+			// An unconfigured source ref refuses cleanly at the release gate —
+			// an acknowledgement the keyed lane cannot service is legacy's to
+			// handle. It no longer walks into the store resolution and errors
+			// as unavailable, which retried a permanently-unresolvable ref
+			// forever (the old agent-scope proxy waved any "city:" prefix
+			// through for a city-scoped agent).
+			name: "source store unconfigured",
 			mutate: func(f *routedWorkPoolDrainAckAuthorizationFixture) {
 				f.info.TriggerBeadStoreRef = "city:missing"
 				f.lease.SourceStore = "city:missing"
