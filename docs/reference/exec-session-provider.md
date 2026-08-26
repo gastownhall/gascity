@@ -53,8 +53,10 @@ Rules:
 - Config reload enforces the same registration rules, and rebuilds the
   session provider when the declaration behind the selected name changes
   (the executable binding is fixed at provider construction).
-- `gc runtime check <name>` resolves the declared name and runs the
-  full conformance suite against the pack's executable.
+- `gc runtime check <name>` and `gc runtime conformance <name>` both
+  resolve the declared name and run against the pack's executable:
+  `check` is the smoke test, `conformance` the full requirement-coded
+  suite.
 
 ## Calling Convention
 
