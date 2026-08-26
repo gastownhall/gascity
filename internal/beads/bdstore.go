@@ -1816,12 +1816,36 @@ func (s *BdStore) Claim(id string) (Bead, bool, error) {
 // bead ID via `bd reclaim --id <id> --json`. It reports whether a reclaim
 // happened and, if so, the previous owner. Staleness itself is decided
 // entirely by bd's own lease-TTL machinery -- this method makes no judgment
-// call of its own (ga-7rj87d NFR3).
-//
-// TDD-RED scaffolding (ga-7rj87d): signature only. Implemented in this
-// bead's GREEN step.
-func (s *BdStore) ReclaimStale(_ string) (bool, string, error) {
-	return false, "", errors.New("BdStore.ReclaimStale: not yet implemented (ga-7rj87d GREEN)")
+// call of its own (ga-7rj87d NFR3), so it deliberately never passes
+// --older-than and relies on bd's own default grace window.
+func (s *BdStore) ReclaimStale(id string) (bool, string, error) {
+	out, err := s.runBDTransientWriteOutput("reclaim", "--id", id, "--json")
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if isBdNotFound(err) {
+			return false, "", fmt.Errorf("reclaiming bead %q: %w", id, ErrNotFound)
+		}
+		if msg != "" {
+			return false, "", fmt.Errorf("reclaiming bead %q: %w: %s", id, err, msg)
+		}
+		return false, "", fmt.Errorf("reclaiming bead %q: %w", id, err)
+	}
+	var result struct {
+		Reclaimed []struct {
+			ID            string `json:"id"`
+			PreviousOwner string `json:"previous_owner"`
+		} `json:"reclaimed"`
+		Count int `json:"count"`
+	}
+	if err := json.Unmarshal(extractJSON(out), &result); err != nil {
+		return false, "", fmt.Errorf("reclaiming bead %q: parsing JSON: %w", id, err)
+	}
+	for _, r := range result.Reclaimed {
+		if r.ID == id {
+			return true, r.PreviousOwner, nil
+		}
+	}
+	return false, "", nil
 }
 
 func parseBDMutationBead(op string, out []byte) (Bead, error) {

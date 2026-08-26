@@ -947,6 +947,7 @@ func agentConfigFromAgent(agent config.Agent) agentFile {
 		MaxSessionAge:          agent.MaxSessionAge,
 		MaxSessionAgeJitter:    agent.MaxSessionAgeJitter,
 		SleepAfterIdle:         agent.SleepAfterIdle,
+		AutoReclaimStaleClaims: agent.AutoReclaimStaleClaims,
 		AssignedWorkDeferLimit: agent.AssignedWorkDeferLimit,
 		InstallAgentHooks:      agent.InstallAgentHooks,
 		HooksInstalled:         agent.HooksInstalled,

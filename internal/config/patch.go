@@ -577,6 +577,9 @@ func applyAgentMutation(a *Agent, p *AgentPatch, sleepSource string) {
 		a.SleepAfterIdle = NormalizeSleepAfterIdle(*p.SleepAfterIdle)
 		a.SleepAfterIdleSource = sleepSource
 	}
+	if p.AutoReclaimStaleClaims != nil {
+		a.AutoReclaimStaleClaims = *p.AutoReclaimStaleClaims
+	}
 	if len(p.InstallAgentHooks) > 0 {
 		a.InstallAgentHooks = append([]string(nil), p.InstallAgentHooks...)
 	}

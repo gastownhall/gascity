@@ -514,6 +514,12 @@ func (ops *hookClaimOps) applyDefaults() {
 	if ops.EmitClaimReleased == nil {
 		ops.EmitClaimReleased = hookEmitClaimReleased
 	}
+	if ops.ReclaimStale == nil {
+		ops.ReclaimStale = hookClaimReclaimWithBdStore
+	}
+	if ops.EmitHookClaimReclaimedStale == nil {
+		ops.EmitHookClaimReclaimedStale = hookEmitClaimReclaimedStale
+	}
 	if ops.Now == nil {
 		ops.Now = time.Now
 	}
@@ -753,8 +759,31 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 	claimsErrored := false
 	now := ops.nowOrWallClock()
 	for _, candidate := range candidates {
+		reclaimedFrom := ""
 		if !hookCandidateClaimable(candidate, opts.RouteTargets, now) {
-			continue
+			// ga-7rj87d FR1/FR2: a route-matched candidate whose ONLY claim
+			// blocker is an existing (possibly stale) assignee gets a scoped,
+			// opt-in reclaim attempt before being skipped. Off by default
+			// (NFR4/NFR5): the flag check short-circuits before
+			// hookCandidateReclaimEligible or ops.ReclaimStale ever run, so the
+			// flag-off path is byte-for-byte unchanged.
+			if !opts.AutoReclaimStaleClaims || !hookCandidateReclaimEligible(candidate, opts.RouteTargets) {
+				continue
+			}
+			if ops.claimWindowSpent() {
+				return refuseExpiredHookClaimWindow(candidate.ID, ops, stderr)
+			}
+			if ctx.Err() != nil {
+				break
+			}
+			reclaimed, previousOwner, err := ops.ReclaimStale(ctx, dir, opts.Env, candidate.ID)
+			if err != nil || !reclaimed {
+				// Best-effort optimization, not a claim path of its own: any
+				// non-reclaim outcome leaves the candidate untouched (FR4) and
+				// the hook moves on to the next candidate.
+				continue
+			}
+			reclaimedFrom = previousOwner
 		}
 		// F-B. The fresh-claim CAS is the mutation that mints a new obligation,
 		// so it is the one the turn-binding window most directly guards.
@@ -834,6 +863,12 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 		if result.Assignee == "" {
 			result.Assignee = opts.Assignee
 		}
+		if reclaimedFrom != "" {
+			// ga-7rj87d FR5: only fires once the retried Claim above actually
+			// succeeded -- a reclaim followed by a lost claim race reports nothing,
+			// since the bead was never ours to begin with.
+			ops.EmitHookClaimReclaimedStale(result.BeadID, reclaimedFrom, result.Assignee)
+		}
 		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, claimed, opts, ops, dir, true, stdout, stderr)}
 	}
 
@@ -882,6 +917,15 @@ func hookCandidateBudgetDeferred(candidate beads.Bead, now time.Time) bool {
 		return false
 	}
 	return deferAt.After(now)
+}
+
+// hookCandidateReclaimEligible reports whether a route-matched candidate's ONLY
+// claim-eligibility failure is a non-empty (possibly stale) assignee -- the exact
+// shape ga-7rj87d FR1 scopes a stale-lease reclaim attempt to.
+func hookCandidateReclaimEligible(candidate beads.Bead, routeTargets []string) bool {
+	return strings.TrimSpace(candidate.ID) != "" &&
+		strings.TrimSpace(candidate.Assignee) != "" &&
+		hookClaimMatchesRoute(candidate, routeTargets)
 }
 
 // reportHookClaimRejected publishes a bead.claim_rejected event (ADR-0009) when a
@@ -1273,6 +1317,16 @@ func hookClaimWithBdStore(ctx context.Context, dir string, env []string, beadID,
 	return hookClaimThroughStore(beadID, assignee,
 		func() (beads.Bead, bool, error) { return store.Claim(beadID) },
 		store.Get)
+}
+
+// hookClaimReclaimWithBdStore attempts a scoped stale-lease reclaim (ga-7rj87d
+// FR1/FR2) via `bd reclaim --id beadID`, inheriting bd's own default staleness
+// threshold (NFR3) rather than passing --older-than. No assignee: a reclaim only
+// reverts a stale bead to ready, it never assigns -- the caller retries a normal
+// Claim to actually take it.
+func hookClaimReclaimWithBdStore(ctx context.Context, dir string, env []string, beadID string) (bool, string, error) {
+	store := hookClaimBdStoreContext(ctx, dir, env, "")
+	return store.ReclaimStale(beadID)
 }
 
 // hookClaimThroughStore is the post-mutation classification shared by every
@@ -2151,6 +2205,30 @@ func hookEmitClaimRejected(beadID, existingClaimant, attemptedClaimant string) {
 	rec.Record(events.Event{
 		Type:    events.BeadClaimRejected,
 		Actor:   attemptedClaimant,
+		Subject: beadID,
+		Payload: payload,
+	})
+	if closer, ok := rec.(io.Closer); ok {
+		_ = closer.Close()
+	}
+}
+
+// hookEmitClaimReclaimedStale publishes a best-effort hook.claim.reclaimed_stale
+// event (ga-7rj87d FR5) so a scoped stale-lease recovery is observable to
+// mayor/watchers instead of surfacing only as an ordinary fresh claim.
+func hookEmitClaimReclaimedStale(beadID, previousOwner, newAssignee string) {
+	payload, err := json.Marshal(events.HookClaimReclaimedStalePayload{
+		BeadID:        beadID,
+		PreviousOwner: previousOwner,
+		NewAssignee:   newAssignee,
+	})
+	if err != nil {
+		return
+	}
+	rec := openCityRecorder(io.Discard)
+	rec.Record(events.Event{
+		Type:    events.HookClaimReclaimedStale,
+		Actor:   newAssignee,
 		Subject: beadID,
 		Payload: payload,
 	})

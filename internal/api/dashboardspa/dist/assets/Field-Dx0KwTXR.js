@@ -1,5 +1,0 @@
-<<<<<<<< HEAD:internal/api/dashboardspa/dist/assets/Field-Dx0KwTXR.js
-import{j as e}from"./index-DGPzTKQO.js";function i({label:t,children:s,variant:a="definition"}){return a==="form"?e.jsxs("label",{className:"block space-y-1.5",children:[e.jsx("span",{className:"text-label uppercase tracking-wider text-fg-muted",children:t}),s]}):e.jsxs("div",{children:[e.jsx("dt",{className:"text-label uppercase tracking-wider text-fg-faint mb-1",children:t}),e.jsx("dd",{className:"text-body text-fg",children:s})]})}export{i as F};
-========
-import{j as e}from"./index-DPplcU7H.js";function i({label:t,children:s,variant:a="definition"}){return a==="form"?e.jsxs("label",{className:"block space-y-1.5",children:[e.jsx("span",{className:"text-label uppercase tracking-wider text-fg-muted",children:t}),s]}):e.jsxs("div",{children:[e.jsx("dt",{className:"text-label uppercase tracking-wider text-fg-faint mb-1",children:t}),e.jsx("dd",{className:"text-body text-fg",children:s})]})}export{i as F};
->>>>>>>> 784fc3ded5 (test(hook): RED suite for scoped stale-claim reclaim (ga-7rj87d)):internal/api/dashboardspa/dist/assets/Field-C8xzgYgy.js

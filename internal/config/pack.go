@@ -2816,6 +2816,7 @@ func (ov *AgentOverride) toAgentPatch() *AgentPatch {
 		MaxSessionAgeJitter:     ov.MaxSessionAgeJitter,
 		AssignedWorkDeferLimit:  ov.AssignedWorkDeferLimit,
 		SleepAfterIdle:          ov.SleepAfterIdle,
+		AutoReclaimStaleClaims:  ov.AutoReclaimStaleClaims,
 		InstallAgentHooks:       ov.InstallAgentHooks,
 		Skills:                  ov.Skills,
 		MCP:                     ov.MCP,

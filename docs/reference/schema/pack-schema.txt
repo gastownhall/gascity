@@ -190,6 +190,10 @@
           "type": "string",
           "description": "SleepAfterIdle overrides idle sleep policy for this agent. Accepts a\nduration string (e.g., \"30s\") or \"off\"."
         },
+        "auto_reclaim_stale_claims": {
+          "type": "boolean",
+          "description": "AutoReclaimStaleClaims opts this agent into gc hook --claim attempting\na scoped stale-lease reclaim (via `bd reclaim --id`) when a\nroute-matched candidate's only claim blocker is an existing assignee.\nOff by default; staleness is decided entirely by bd's own lease TTL."
+        },
         "install_agent_hooks": {
           "items": {
             "type": "string"
@@ -476,6 +480,10 @@
         "sleep_after_idle": {
           "type": "string",
           "description": "SleepAfterIdle overrides idle sleep policy for this agent. Accepts a\nduration string or \"off\"."
+        },
+        "auto_reclaim_stale_claims": {
+          "type": "boolean",
+          "description": "AutoReclaimStaleClaims overrides Agent.AutoReclaimStaleClaims (see that\nfield for semantics)."
         },
         "install_agent_hooks": {
           "items": {

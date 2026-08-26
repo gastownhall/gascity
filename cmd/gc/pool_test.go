@@ -837,6 +837,7 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		MaxSessionAgeJitter:          "15m",
 		SleepAfterIdle:               "30s",
 		SleepAfterIdleSource:         "agent",
+		AutoReclaimStaleClaims:       true,
 		InstallAgentHooks:            []string{"claude"},
 		SkillsDir:                    "/skills",
 		MCPDir:                       "/mcp",

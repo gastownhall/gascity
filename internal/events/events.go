@@ -53,6 +53,15 @@ const (
 	// always same-subject and same-process, and the payload's reason names which
 	// unwind ran.
 	BeadClaimReleased = "bead.claim_released"
+	// HookClaimReclaimedStale fires when gc hook --claim (ga-7rj87d), opted in
+	// via config.Agent.AutoReclaimStaleClaims, recovers a route-matched
+	// candidate whose only claim blocker was another worker's stale (lease-
+	// expired) assignee, and then wins the retried claim in the same hook
+	// cycle. Scoped to exactly the one candidate bd reclaim --id targeted —
+	// this is not a sweep. Lets mayor/watchers see the recovery happen instead
+	// of only ever observing the fresh claim with no story for how the prior
+	// assignee's abandoned work moved.
+	HookClaimReclaimedStale = "hook.claim.reclaimed_stale"
 	// ExecutionClaimWindowExpired fires when gc hook --claim reaches a claim
 	// mutation after its invocation window has elapsed — the signature of a
 	// claim command that outlived the agent turn that invoked it (an abandoned
@@ -405,6 +414,7 @@ var KnownEventTypes = []string{
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
 	BeadClaimRejected, BeadClaimReleased,
+	HookClaimReclaimedStale,
 	BeadDeadAssigneeReopened,
 	ExecutionWorkAssociated, ExecutionRunAnchored, ExecutionStepDefined, ExecutionStepStarted, ExecutionStepCompleted,
 	ExecutionClaimWindowExpired,
