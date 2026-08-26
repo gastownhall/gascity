@@ -420,19 +420,27 @@ func (s *Store) RecentRuns(scoped string, limit int) ([]OrderRun, error) {
 // decoded into OrderRun values. It is the typed face of the /v0/orders/feed read
 // it replaces: it confines the order-tracking List and the tracking-bead decode
 // the feed previously performed inline. Beads with no order-run label (which
-// RunFromTrackingBead rejects) are skipped. The query is byte-identical to the
-// feed's prior raw scan — order-tracking label, created-desc, both tiers, and no
-// IncludeClosed so only in-flight/open tracking beads surface. Decoded rows and
-// any list error are returned together (the RecentRuns pattern) so callers keep
-// the feed's err-branch semantics.
-func (s *Store) ListTracking() ([]OrderRun, error) {
+// RunFromTrackingBead rejects) are skipped. Decoded rows and any list error are
+// returned together (the RecentRuns pattern) so callers keep the feed's
+// err-branch semantics.
+//
+// limit is pushed to the backing (AllowBackingCreatedLimit) rather than
+// applied client-side, matching RecentRuns's ga-klv fix: slicing after an
+// unbounded fetch still pays the full scan cost on a city with a large
+// retained tracking-bead corpus. IncludeClosed is always true -- unlike
+// LatestOpenRun's deliberate open-only narrowing, the feed lists completed
+// runs alongside in-flight ones. A non-positive limit means unlimited.
+func (s *Store) ListTracking(limit int) ([]OrderRun, error) {
 	if s.store.Store == nil {
 		return nil, nil
 	}
 	list, err := s.store.List(beads.ListQuery{
-		Label:    labelOrderTracking,
-		Sort:     beads.SortCreatedDesc,
-		TierMode: beads.TierBoth,
+		Label:                    labelOrderTracking,
+		Limit:                    limit,
+		IncludeClosed:            true,
+		Sort:                     beads.SortCreatedDesc,
+		TierMode:                 beads.TierBoth,
+		AllowBackingCreatedLimit: true,
 	})
 	runs := make([]OrderRun, 0, len(list))
 	for _, b := range list {

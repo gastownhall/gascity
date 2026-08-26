@@ -1286,3 +1286,18 @@ func readCriticalPathWorkflow(t *testing.T, name string) ciCriticalPathWorkflow 
 	}
 	return wf
 }
+
+// Fork main branches receive every upstream fast-forward, but they do not and
+// should not carry the canonical repository's cross-repository dispatch token.
+// Keep that expected fork run green while preserving a hard failure if the
+// canonical publisher loses its secret or dispatch permission.
+func TestNotifyImageRebuildsRunsOnlyInCanonicalRepository(t *testing.T) {
+	wf := readCriticalPathWorkflow(t, "notify-image-build.yaml")
+	notify, ok := wf.Jobs["notify"]
+	if !ok {
+		t.Fatal("notify-image-build workflow has no notify job")
+	}
+	if got, want := notify.If, "github.repository == 'gastownhall/gascity'"; got != want {
+		t.Fatalf("notify job if = %q, want %q", got, want)
+	}
+}

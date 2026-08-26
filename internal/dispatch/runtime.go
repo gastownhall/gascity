@@ -1527,13 +1527,17 @@ func loadDownDepsForScopeSkip(store beads.Store, ids []string) (map[string][]bea
 	}
 	if batch, ok := store.(scopeSkipDepBatchLister); ok {
 		deps, err := batch.DepListBatch(ids)
-		if err != nil {
-			return nil, fmt.Errorf("batch listing scope skip deps: %w", err)
+		// A wrapper forwards this method so the capability is not silently lost, so a
+		// capability miss arrives as this sentinel: fall back to the per-anchor reads.
+		if !errors.Is(err, beads.ErrDepListBatchUnsupported) {
+			if err != nil {
+				return nil, fmt.Errorf("batch listing scope skip deps: %w", err)
+			}
+			if deps == nil {
+				deps = make(map[string][]beads.Dep, len(ids))
+			}
+			return deps, nil
 		}
-		if deps == nil {
-			deps = make(map[string][]beads.Dep, len(ids))
-		}
-		return deps, nil
 	}
 	depsByID := make(map[string][]beads.Dep, len(ids))
 	for _, id := range ids {
