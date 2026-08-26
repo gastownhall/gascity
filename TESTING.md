@@ -267,6 +267,58 @@ processes, listeners, environment mutation, and CWD mutation. Reductions lower
 the checked baseline; new debt requires the same explicit, expiring policy
 change as any other waiver.
 
+## Waiver expiry clocks
+
+Two checked ledgers carry dated waivers: the runtime provider ledger
+(`internal/testutil/providerledger`) and the resource census
+(`internal/testpolicy/resourcecensus`). Both are untagged, both land in the
+unit-core job, and that job runs in `.githooks/pre-push`. A date passing is
+therefore enough on its own to turn every Go-touching push in the fleet red with
+no code change involved. That happened on 2026-08-12 and again on 2026-08-26,
+and both times it was cleared by whoever happened to be blocked rather than by
+the waiver's owner.
+
+**One clock.** Every dated ledger asks `internal/testpolicy/waiverclock` and
+never reads `time.Now()` itself. A ledger that computes its own answer is a
+second policy, and a shared expiry date drifting between two ledgers is what two
+policies look like from the outside.
+
+**Structural defects are not on the clock.** A missing owner, a malformed or
+absent date, an expiry parked past the horizon ceiling — none of these can
+appear without a code change, so they are fatal in every mode and belong to
+whoever wrote them. The clock governs one thing: a date that passed while the
+code sat still.
+
+**Mode ownership.** `GC_WAIVER_CLOCK` selects `grace` or `strict`. Grace is the
+fleet mode: it is what pre-commit, pre-push, and PR CI run, and it is what an
+unset environment gets, so a lane that scrubs its environment fails safe instead
+of silently strict. Strict belongs only to scheduled lanes the owner is
+answerable for — `scripts/waiver-clock-audit`, reached by the nightly
+`waiver-clock` job and by the maintainer city's audit order. Do not wire strict
+into pre-commit, pre-push, or any PR-blocking check. That is precisely the shape
+of the two incidents above.
+
+**The timeline.** A waiver warns from 14 days before its expiry, so its owner
+hears about it while there is still time to land the proof. Past the expiry it
+warns for another 14 days, naming its owner in every message. Past that it is
+fatal in every mode, grace included. Twenty-eight days of runway, and then the
+ratchet has its teeth back — grace bounds what a bystander pays for someone
+else's missed date, it does not repeal the ratchet.
+
+**Waivers do not become permanent through inaction.** A lapse has exactly two
+resolutions: land the replacement proof and delete the row, or re-date it as an
+explicit policy change citing the owner bead, reviewed like any other ledger
+edit. Doing neither is bounded, not stable — it ends on the fleet-fatal day the
+failure message prints.
+
+**If the clock blocks you and you are not the owner.** The message names the
+owner, the fleet-fatal day, and the `bd show` that gives you context; reproduce
+it with `GC_WAIVER_CLOCK=strict`. Once a lapse is fleet-fatal, anyone may land
+the re-date — as its own commit, citing the owner bead, updating the open
+`source:waiver-clock-audit` alert. What is forbidden is folding the new date
+silently into an unrelated change. That is how an expiry moves with no reviewer
+seeing it, and it is how the last two rollovers got "fixed".
+
 ## Checked source-level resource ratchets
 
 `test/test-resources.toml` is the checked P0.4 resource ledger. It scans tracked
@@ -1375,22 +1427,26 @@ This table is rendered from `internal/testutil/providerledger` and checked by `g
 
 | Provider path | Roles | Reusable type | Port | Constructor | Discovery | Contract | Status |
 |---|---|---|---|---|---|---|---|
-| `runtime.builtin.acp` | production_provider | — | `runtime.Provider` | `internal/runtime/acp.NewSeamBacked` | runtime.builtin/exact:acp | `runtime.Provider` | waived by ga-uz5t3a through 2026-09-07: NewSeamBacked always uses shared os.TempDir()/gc-acp-<euid> state; the WithDir proof does not exercise that composition |
+| `runtime.builtin.acp` | production_provider | — | `runtime.Provider` | `internal/runtime/acp.NewSeamBacked` | runtime.builtin/exact:acp | `runtime.Provider` | waived by ga-80po0c.3 through 2026-10-08: NewSeamBacked always uses shared os.TempDir()/gc-acp-<euid> state; the WithDir proof does not exercise that composition |
 | `runtime.builtin.acp` | production_provider | — | `runtime.Provider` | `internal/runtime/acp.NewSeamBackedWithDir` | runtime.builtin/exact:acp | `runtime.Provider` | proved by internal/runtime/acp/conformance_test.go#TestACPConformance |
 | `runtime.builtin.exec` | production_provider | — | `runtime.Provider` | `internal/runtime/exec.NewSeamBacked` | runtime.builtin/prefix:exec: | `runtime.Provider` | proved by internal/runtime/exec/exec_test.go#TestExecConformance |
-| `runtime.builtin.exec` | production_provider | — | `runtime.Provider` | `internal/runtime/t3bridge.NewSeamBacked` | runtime.builtin/prefix:exec: | `runtime.Provider` | waived by ga-uz5t3a through 2026-09-07: the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which has no full shared runtime contract |
+| `runtime.builtin.exec` | production_provider | — | `runtime.Provider` | `internal/runtime/t3bridge.NewSeamBacked` | runtime.builtin/prefix:exec: | `runtime.Provider` | waived by ga-80po0c.3 through 2026-11-05: the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which has no full shared runtime contract |
 | `runtime.builtin.fail` | production_provider, reusable_double | `internal/runtime.Fake` | `runtime.Provider` | `internal/runtime.NewFailFake` | runtime.builtin/exact:fail; reusable: internal/runtime/fake.go | `runtime.Provider` | not applicable: intentional faulting double: a successful lifecycle cannot be exercised, so the successful-provider contract is not applicable |
 | `runtime.builtin.fake` | production_provider, reusable_double | `internal/runtime.Fake` | `runtime.Provider` | `internal/runtime.NewFake` | runtime.builtin/exact:fake; reusable: internal/runtime/fake.go | `runtime.Provider` | proved by internal/runtime/fake_conformance_test.go#TestFakeConformance |
-| `runtime.builtin.herdr` | production_provider | — | `runtime.Provider` | `internal/runtime/herdr.New` | runtime.builtin/exact:herdr | `runtime.Provider` | waived by ga-uz5t3a through 2026-09-07: the existing full conformance run skips in short mode or when the herdr executable is absent |
-| `runtime.builtin.hybrid` | production_provider | — | `runtime.Provider` | `cmd/gc.newHybridProvider` | runtime.builtin/exact:hybrid | `runtime.Provider` | waived by ga-uz5t3a through 2026-09-07: cmd/gc.newHybridProvider is the selected registry construction boundary; its internal tmux, K8s, and hybrid constructors are not claimed here, and the wrapper has no full shared runtime contract |
-| `runtime.builtin.k8s` | production_provider | — | `runtime.Provider` | `internal/runtime/k8s.NewSeamBacked` | runtime.builtin/exact:k8s | `runtime.Provider` | waived by ga-uz5t3a through 2026-09-07: the actual K8s production composition has no full shared runtime contract |
-| `runtime.builtin.ssh` | production_provider | — | `runtime.Provider` | `internal/runtime/ssh.NewSeamBacked` | runtime.builtin/prefix:ssh: | `runtime.Provider` | waived by ga-uz5t3a through 2026-09-07: the production SSH composition has no full shared runtime contract |
+| `runtime.builtin.herdr` | production_provider | — | `runtime.Provider` | `internal/runtime/herdr.New` | runtime.builtin/exact:herdr | `runtime.Provider` | waived by ga-80po0c.3 through 2026-09-24: the existing full conformance run skips in short mode or when the herdr executable is absent |
+| `runtime.builtin.hybrid` | production_provider | — | `runtime.Provider` | `cmd/gc.newHybridProvider` | runtime.builtin/exact:hybrid | `runtime.Provider` | waived by ga-80po0c.3 through 2026-10-22: cmd/gc.newHybridProvider is the selected registry construction boundary; its internal tmux, K8s, and hybrid constructors are not claimed here, and the wrapper has no full shared runtime contract |
+| `runtime.builtin.k8s` | production_provider | — | `runtime.Provider` | `internal/runtime/k8s.NewSeamBacked` | runtime.builtin/exact:k8s | `runtime.Provider` | waived by ga-80po0c.3 through 2026-11-12: the actual K8s production composition has no full shared runtime contract |
+| `runtime.builtin.ssh` | production_provider | — | `runtime.Provider` | `internal/runtime/ssh.NewSeamBacked` | runtime.builtin/prefix:ssh: | `runtime.Provider` | waived by ga-80po0c.3 through 2026-11-19: the production SSH composition has no full shared runtime contract |
 | `runtime.builtin.subprocess` | production_provider | — | `runtime.Provider` | `internal/runtime/subprocess.NewSeamBacked` | runtime.builtin/exact:subprocess | `runtime.Provider` | proved by internal/runtime/subprocess/seam_conformance_test.go#TestSubprocessDefaultDirSeamConformance |
 | `runtime.builtin.subprocess` | production_provider | — | `runtime.Provider` | `internal/runtime/subprocess.NewSeamBackedWithDir` | runtime.builtin/exact:subprocess | `runtime.Provider` | proved by internal/runtime/subprocess/seam_conformance_test.go#TestSubprocessSeamConformance |
-| `runtime.builtin.t3bridge` | production_provider | — | `runtime.Provider` | `internal/runtime/t3bridge.NewSeamBacked` | runtime.builtin/exact:t3bridge | `runtime.Provider` | waived by ga-uz5t3a through 2026-09-07: the production T3 bridge composition has focused tests but no full shared runtime contract |
-| `runtime.builtin.tmux` | production_provider | — | `runtime.Provider` | `internal/runtime/tmux.NewSeamBackedWithConfig` | runtime.builtin/exact:tmux | `runtime.Provider` | waived by ga-uz5t3a through 2026-09-07: the existing full conformance run skips when the tmux executable is absent |
+| `runtime.builtin.t3bridge` | production_provider | — | `runtime.Provider` | `internal/runtime/t3bridge.NewSeamBacked` | runtime.builtin/exact:t3bridge | `runtime.Provider` | waived by ga-80po0c.3 through 2026-11-05: the production T3 bridge composition has focused tests but no full shared runtime contract |
+| `runtime.builtin.tmux` | production_provider | — | `runtime.Provider` | `internal/runtime/tmux.NewSeamBackedWithConfig` | runtime.builtin/exact:tmux | `runtime.Provider` | waived by ga-80po0c.3 through 2026-09-17: the existing full conformance run skips when the tmux executable is absent |
 | `runtime.composition.auto` | production_provider | — | `runtime.Provider` | `internal/runtime/auto.New` | source: cmd/gc/providers.go#resolveSessionTransportProvider — conditional transport composition is outside the runtime registry | `runtime.Provider` | proved by internal/runtime/auto/conformance_test.go#TestAutoConformance (default-route conformance; ACP route covered by focused auto routing tests) |
 <!-- END CHECKED RUNTIME PROVIDER LEDGER -->
+
+Rows reading `waived by <bead> through <date>` are governed by "Waiver expiry
+clocks" above: the date is enforced through `internal/testpolicy/waiverclock`,
+it warns for 14 days on either side, and past that it is fatal in every mode.
 
 Conformance tests verify the behavioral contract (create/read/update/delete,
 error handling, concurrency). They deliberately don't test lifecycle ordering
