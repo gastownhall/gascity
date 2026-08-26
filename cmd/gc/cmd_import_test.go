@@ -812,10 +812,16 @@ version = "^1.4"
 
 	prevSync := syncImports
 	prevInstall := installLockedImports
+	prevValidate := validateComposedConfigAfterInstall
 	t.Cleanup(func() {
 		syncImports = prevSync
 		installLockedImports = prevInstall
+		validateComposedConfigAfterInstall = prevValidate
 	})
+	// The fetch and lockfile calls below are stubbed, so no pack content is
+	// actually cached on disk; skip the post-install config load, which is
+	// covered on its own in TestDoImportInstallRejectsUnloadableComposedConfig.
+	validateComposedConfigAfterInstall = func(_ string) error { return nil }
 	syncImports = func(cityRoot string, imports map[string]config.Import, mode packman.InstallMode) (*packman.Lockfile, error) {
 		if cityRoot != dir {
 			t.Fatalf("cityRoot = %q, want %q", cityRoot, dir)
@@ -940,10 +946,16 @@ version = "^1.0"
 
 	prevSync := syncImports
 	prevInstall := installLockedImports
+	prevValidate := validateComposedConfigAfterInstall
 	t.Cleanup(func() {
 		syncImports = prevSync
 		installLockedImports = prevInstall
+		validateComposedConfigAfterInstall = prevValidate
 	})
+	// The fetch and lockfile calls below are stubbed, so no pack content is
+	// actually cached on disk; skip the post-install config load, which is
+	// covered on its own in TestDoImportInstallRejectsUnloadableComposedConfig.
+	validateComposedConfigAfterInstall = func(_ string) error { return nil }
 	syncImports = func(_ string, _ map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
 		return &packman.Lockfile{
 			Schema: packman.LockfileSchema,
@@ -988,10 +1000,16 @@ version = "^1.4"
 
 	prevSync := syncImports
 	prevInstall := installLockedImports
+	prevValidate := validateComposedConfigAfterInstall
 	t.Cleanup(func() {
 		syncImports = prevSync
 		installLockedImports = prevInstall
+		validateComposedConfigAfterInstall = prevValidate
 	})
+	// The fetch and lockfile calls below are stubbed, so no pack content is
+	// actually cached on disk; skip the post-install config load, which is
+	// covered on its own in TestDoImportInstallRejectsUnloadableComposedConfig.
+	validateComposedConfigAfterInstall = func(_ string) error { return nil }
 
 	syncImports = func(cityRoot string, imports map[string]config.Import, mode packman.InstallMode) (*packman.Lockfile, error) {
 		if cityRoot != dir {
@@ -1055,6 +1073,62 @@ func TestDoImportInstallWithNoImportsSucceeds(t *testing.T) {
 	}
 	if len(lock.Packs) != 0 {
 		t.Fatalf("len(Packs) = %d, want 0", len(lock.Packs))
+	}
+}
+
+// TestDoImportInstallRejectsUnloadableComposedConfig mirrors the fixture in
+// TestExpandedConfigLoadCheckReportsImportedPackLegacyOrderPath
+// (doctor_v2_checks_test.go): a locally-sourced pack whose order lives at
+// the legacy PackV1 path. `gc doctor`'s expanded-config-load check already
+// refuses to load this composed config; `gc import install` must now refuse
+// it too instead of reporting success (#5382). The import here is a local
+// path source, so syncImports/installLockedImports run for real -- no
+// network fetch is needed to reproduce the gap.
+func TestDoImportInstallRejectsUnloadableComposedConfig(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, `
+[workspace]
+name = "order-city"
+`)
+	writePackToml(t, dir, `
+[pack]
+name = "order-city"
+schema = 2
+
+[imports.ops]
+source = "./packs/ops"
+`)
+	writeDoctorFile(t, dir, "packs/ops/pack.toml", `
+[pack]
+name = "ops"
+schema = 2
+`)
+	writeDoctorFile(t, dir, "packs/ops/orders/nightly/order.toml", `
+[order]
+formula = "nightly"
+trigger = "manual"
+`)
+
+	var stdout, stderr bytes.Buffer
+	code := doImportInstall(dir, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1; stdout = %s", code, stdout.String())
+	}
+	for _, want := range []string{
+		"gc import install: composed config failed to load after install",
+		"unsupported PackV1 order path",
+		"packs/ops/orders/nightly/order.toml",
+		// The install is not rolled back, so the failure must say what is
+		// already on disk rather than reading as "nothing was installed".
+		"packs.lock is written",
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want substring %q", stderr.String(), want)
+		}
+	}
+	if strings.Contains(stdout.String(), "Installed") {
+		t.Fatalf("stdout = %q, install should not have reported success", stdout.String())
 	}
 }
 

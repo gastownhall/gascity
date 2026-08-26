@@ -152,6 +152,82 @@ func stripInsertedResumeSubcommandArg(cmd, resumeFlag string) string {
 	return strings.TrimSpace(binary + " " + afterKey)
 }
 
+// stripSessionIDFlagArg removes the fresh-start session-id flag and its value
+// from cmd regardless of the value — the value-agnostic fallback for
+// stripSessionIDFlag, mirroring stripResumeFlagArg for the resume flag. When the
+// session_key embedded in a first-start "<flag> <key>" command at build time has
+// diverged from the bead's current session_key (a concurrent fresh start minted
+// a new key, or a stale store read), the keyed strip is a no-op, and — because a
+// first start carries no resume flag — the resume fallback cannot reach it
+// either. Without this strip the retry replays the dead "--session-id <oldkey>"
+// into the same "id already in use" provider rejection the retry exists to
+// escape. Both the space form ("--session-id <key>") and the equals form
+// ("--session-id=<key>") are handled. Returns cmd unchanged when the flag is
+// empty or absent — the command then carries no generated session id and is
+// itself a valid fresh-start command.
+//
+// The removal is done in place: only the "<flag> <value>" / "<flag>=<value>"
+// span (plus one adjacent separator) is excised, leaving every other argument
+// and its whitespace verbatim — the keyed stripSessionIDFlag and the resume
+// fallback stripResumeFlagArg preserve the rest of the command the same way.
+// (Re-tokenizing with strings.Fields and rejoining with strings.Join would
+// collapse unrelated whitespace and rewrite the structure of quoted or
+// multiline commands even when only the flag was meant to change.) Like those
+// siblings it is deliberately shell-token-simple: it matches the flag only at a
+// start-of-string or single-space boundary, which is sufficient for the
+// framework-generated commands this fallback ever sees and never for
+// caller-supplied shell text.
+func stripSessionIDFlagArg(cmd, sessionIDFlag string) string {
+	if sessionIDFlag == "" {
+		return cmd
+	}
+	for searchFrom := 0; ; {
+		idx := strings.Index(cmd[searchFrom:], sessionIDFlag)
+		if idx < 0 {
+			return cmd
+		}
+		flagStart := searchFrom + idx
+		afterFlag := flagStart + len(sessionIDFlag)
+		// Require a token boundary before the flag so it is not matched inside a
+		// longer token (e.g. "--not-session-id" or quote-prefixed literal text).
+		if flagStart > 0 && cmd[flagStart-1] != ' ' {
+			searchFrom = afterFlag
+			continue
+		}
+		spanEnd := afterFlag
+		switch {
+		case afterFlag < len(cmd) && cmd[afterFlag] == '=':
+			// Equals form: flag and value are one token ending at the next space.
+			spanEnd = afterFlag + 1
+			for spanEnd < len(cmd) && cmd[spanEnd] != ' ' {
+				spanEnd++
+			}
+		case afterFlag == len(cmd) || cmd[afterFlag] == ' ':
+			// Space form: skip the separator to the value token, then to its end.
+			for spanEnd < len(cmd) && cmd[spanEnd] == ' ' {
+				spanEnd++
+			}
+			for spanEnd < len(cmd) && cmd[spanEnd] != ' ' {
+				spanEnd++
+			}
+		default:
+			// Right side is not a boundary (e.g. "--session-id-file"): keep looking.
+			searchFrom = afterFlag
+			continue
+		}
+		// Consume one adjacent separator so the removal leaves no doubled space,
+		// preferring the space before the flag (matches stripSessionIDFlag's
+		// " "+target / target+" " removal followed by TrimSpace).
+		spanStart := flagStart
+		if spanStart > 0 && cmd[spanStart-1] == ' ' {
+			spanStart--
+		} else if spanEnd < len(cmd) && cmd[spanEnd] == ' ' {
+			spanEnd++
+		}
+		return strings.TrimSpace(cmd[:spanStart] + cmd[spanEnd:])
+	}
+}
+
 func freshStartCommandFromMetadata(metadata map[string]string, fallback string) string {
 	if metadata == nil {
 		return fallback
@@ -211,7 +287,19 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 	// A first start carries "<session_id_flag> <key>", not the resume flag, so
 	// the strip above cannot touch it. Remove it here or the retry replays the
 	// dead command verbatim against an id the provider now considers taken.
-	freshCmd = stripSessionIDFlag(freshCmd, b.Metadata["session_id_flag"], b.Metadata["session_key"])
+	sessionIDFlag := b.Metadata["session_id_flag"]
+	beforeSessionIDStrip := freshCmd
+	freshCmd = stripSessionIDFlag(freshCmd, sessionIDFlag, b.Metadata["session_key"])
+	// A non-empty session_id_flag whose keyed strip was a no-op means the
+	// session_key embedded in the first-start command diverged from the bead's
+	// current session_key (a concurrent fresh start minted a new key, or a stale
+	// store read). The resume fallback below cannot reach it — a first start
+	// carries no resume flag — so strip the "<session_id_flag> <key>" pair
+	// value-agnostically here, mirroring stripResumeFlagArg. Otherwise the retry
+	// replays the dead id into the same provider rejection it exists to escape.
+	if sessionIDFlag != "" && freshCmd == beforeSessionIDStrip {
+		freshCmd = stripSessionIDFlagArg(freshCmd, sessionIDFlag)
+	}
 	if err := m.clearStaleResumeMetadata(id, b); err != nil {
 		if unroute != nil {
 			unroute()

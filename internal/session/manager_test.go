@@ -5271,6 +5271,63 @@ func TestEnsureRunning_RetriesExplicitResumeCommandWhenResumeKeyDiverged(t *test
 	}
 }
 
+// A first-start session launched with "claude ... --session-id <key>" carries no
+// resume flag, so the resume fallback in retryFreshStartAfterStaleKey never
+// reaches it. When the embedded session id diverges from the bead's current
+// session_key (a concurrent fresh start minted a new key, or a stale store
+// read), the keyed stripSessionIDFlag is a no-op and — before the
+// stripSessionIDFlagArg fallback — the retry replayed the dead
+// "--session-id <oldkey>" verbatim into the same "id already in use" provider
+// rejection the retry exists to escape. This pins the value-agnostic fallback:
+// the retried Start command must drop the diverged session id.
+func TestEnsureRunning_RetriesWhenSessionIDKeyDiverged(t *testing.T) {
+	store := beads.NewMemStore()
+	base := runtime.NewFake()
+
+	sp := &startupDeathProvider{Fake: base}
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "worker", Title: "", Command: "claude --dangerously-skip-permissions", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{
+		ResumeFlag:    "--resume",
+		SessionIDFlag: "--session-id",
+	}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := store.SetMetadata(info.ID, "session_key", "key-B-current"); err != nil {
+		t.Fatalf("SetMetadata session_key: %v", err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	sp.armed = true
+
+	// A first-start command (no resume flag) whose --session-id carries a
+	// DIVERGED key (KEY_A) while the bead's session_key is KEY_B. The keyed
+	// strip ("--session-id key-B-current") cannot match it; only the
+	// value-agnostic fallback produces a clean fresh start.
+	resumeCommand := "claude --dangerously-skip-permissions --session-id key-A-diverged"
+	err = mgr.Send(context.Background(), info.ID, "hello", resumeCommand, runtime.Config{WorkDir: "/tmp"})
+	if err != nil {
+		t.Fatalf("Send should recover via fresh start when session id key diverged, got: %v", err)
+	}
+
+	var retryCommand string
+	for _, call := range base.Calls {
+		if call.Method == "Start" && call.Name == info.SessionName {
+			retryCommand = call.Config.Command
+		}
+	}
+	if retryCommand == "" {
+		t.Fatalf("fresh retry Start call not recorded: %#v", base.Calls)
+	}
+	if want := "claude --dangerously-skip-permissions"; retryCommand != want {
+		t.Fatalf("fresh retry command = %q, want %q (diverged --session-id must be stripped)", retryCommand, want)
+	}
+}
+
 // Issue #1655 — a session created without resume capability
 // (ProviderResume{} on Create → empty resume_flag in bead metadata)
 // must still be able to recover from a stale session_key. The
