@@ -13,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	beadslib "github.com/steveyegge/beads"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // TestNativeDoltStoreMetadataCASPreservesMixedJSONSiblingTypesAgainstRealDolt
@@ -167,6 +168,174 @@ func TestNativeDoltStoreConditionalWriterRequireAgainstRealOpenBestAvailable(t *
 	}
 	if _, err := store.Get(closed.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Get after delete = %v, want ErrNotFound", err)
+	}
+}
+
+func TestNativeDoltStoreUpdateIfMatchClosePolicyAgainstRealDolt(t *testing.T) {
+	store := openRealNativeDoltStoreForCAS(t, "conditional-close-policy")
+	closed := "closed"
+
+	t.Run("live blocker", func(t *testing.T) {
+		blocker, err := store.Create(Bead{Title: "live blocker"})
+		if err != nil {
+			t.Fatalf("Create blocker: %v", err)
+		}
+		target, err := store.Create(Bead{Title: "blocked target"})
+		if err != nil {
+			t.Fatalf("Create target: %v", err)
+		}
+		if err := store.DepAdd(target.ID, blocker.ID, "blocks"); err != nil {
+			t.Fatalf("DepAdd blocker: %v", err)
+		}
+		before, err := store.Get(target.ID)
+		if err != nil {
+			t.Fatalf("Get before: %v", err)
+		}
+		err = store.UpdateIfMatch(target.ID, before.Revision, UpdateOpts{Status: &closed})
+		if !errors.Is(err, beadslib.ErrCloseBlocked) {
+			t.Fatalf("UpdateIfMatch = %v, want ErrCloseBlocked", err)
+		}
+		after, err := store.Get(target.ID)
+		if err != nil || after.Status != "open" || after.Revision != before.Revision {
+			t.Fatalf("refused blocker close = %+v, err=%v; before=%+v", after, err, before)
+		}
+	})
+
+	t.Run("open child", func(t *testing.T) {
+		parent, err := store.Create(Bead{Title: "parent"})
+		if err != nil {
+			t.Fatalf("Create parent: %v", err)
+		}
+		child, err := store.Create(Bead{Title: "open child"})
+		if err != nil {
+			t.Fatalf("Create child: %v", err)
+		}
+		if err := store.DepAdd(child.ID, parent.ID, "parent-child"); err != nil {
+			t.Fatalf("DepAdd child: %v", err)
+		}
+		before, err := store.Get(parent.ID)
+		if err != nil {
+			t.Fatalf("Get before: %v", err)
+		}
+		err = store.UpdateIfMatch(parent.ID, before.Revision, UpdateOpts{Status: &closed})
+		if !errors.Is(err, issueops.ErrCloseOpenChildren) {
+			t.Fatalf("UpdateIfMatch = %v, want ErrCloseOpenChildren", err)
+		}
+		after, err := store.Get(parent.ID)
+		if err != nil || after.Status != "open" || after.Revision != before.Revision {
+			t.Fatalf("refused open-child close = %+v, err=%v; before=%+v", after, err, before)
+		}
+	})
+}
+
+func TestNativeDoltStoreUpdateIfMatchMixedClosePolicyAgainstRealDolt(t *testing.T) {
+	store := openRealNativeDoltStoreForCAS(t, "conditional-mixed-close-policy")
+	requireNativeDoltRelatedUpdatePrerequisite(t, store)
+	closed := "closed"
+
+	blocker, err := store.Create(Bead{Title: "live blocker"})
+	if err != nil {
+		t.Fatalf("Create blocker: %v", err)
+	}
+	newParent, err := store.Create(Bead{Title: "new parent"})
+	if err != nil {
+		t.Fatalf("Create parent: %v", err)
+	}
+	target, err := store.Create(Bead{Title: "before", Labels: []string{"keep"}})
+	if err != nil {
+		t.Fatalf("Create target: %v", err)
+	}
+	if err := store.DepAdd(target.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd blocker: %v", err)
+	}
+	before, err := store.Get(target.ID)
+	if err != nil {
+		t.Fatalf("Get before refused mixed close: %v", err)
+	}
+	title := "must roll back"
+	err = store.UpdateIfMatch(target.ID, before.Revision, UpdateOpts{
+		Status:   &closed,
+		Title:    &title,
+		ParentID: &newParent.ID,
+		Labels:   []string{"must-roll-back"},
+	})
+	if !errors.Is(err, beadslib.ErrCloseBlocked) {
+		t.Fatalf("mixed blocked UpdateIfMatch = %v, want ErrCloseBlocked", err)
+	}
+	afterRefusal, err := store.Get(target.ID)
+	if err != nil {
+		t.Fatalf("Get after refused mixed close: %v", err)
+	}
+	if afterRefusal.Status != before.Status || afterRefusal.Title != before.Title ||
+		afterRefusal.ParentID != before.ParentID || afterRefusal.Revision != before.Revision ||
+		forceCloseContainsString(afterRefusal.Labels, "must-roll-back") {
+		t.Fatalf("refused mixed close left partial mutation: before=%+v after=%+v", before, afterRefusal)
+	}
+
+	oldParent, err := store.Create(Bead{Title: "old parent"})
+	if err != nil {
+		t.Fatalf("Create old parent: %v", err)
+	}
+	success, err := store.Create(Bead{Title: "before", ParentID: oldParent.ID, Labels: []string{"keep", "remove"}})
+	if err != nil {
+		t.Fatalf("Create success target: %v", err)
+	}
+	success, err = store.Get(success.ID)
+	if err != nil {
+		t.Fatalf("Get success target: %v", err)
+	}
+	title = "after"
+	err = store.UpdateIfMatch(success.ID, success.Revision, UpdateOpts{
+		Status:       &closed,
+		Title:        &title,
+		ParentID:     &newParent.ID,
+		Labels:       []string{"added"},
+		RemoveLabels: []string{"remove"},
+	})
+	if err != nil {
+		t.Fatalf("successful mixed UpdateIfMatch: %v", err)
+	}
+	after, err := store.Get(success.ID)
+	if err != nil {
+		t.Fatalf("Get successful mixed close: %v", err)
+	}
+	if after.Status != "closed" || after.Title != title || after.ParentID != newParent.ID ||
+		!forceCloseContainsString(after.Labels, "added") || !forceCloseContainsString(after.Labels, "keep") ||
+		forceCloseContainsString(after.Labels, "remove") || after.Revision == success.Revision {
+		t.Fatalf("successful mixed close = %+v; before=%+v", after, success)
+	}
+
+	priorRevision := after.Revision
+	err = store.UpdateIfMatch(after.ID, priorRevision, UpdateOpts{Status: &closed, Labels: []string{"after-close"}})
+	if err != nil {
+		t.Fatalf("already-closed label UpdateIfMatch: %v", err)
+	}
+	afterTouch, err := store.Get(after.ID)
+	if err != nil {
+		t.Fatalf("Get after already-closed label update: %v", err)
+	}
+	if afterTouch.Status != "closed" || !forceCloseContainsString(afterTouch.Labels, "after-close") || afterTouch.Revision == priorRevision {
+		t.Fatalf("already-closed label update = %+v, want label and fresh revision from %d", afterTouch, priorRevision)
+	}
+}
+
+func requireNativeDoltRelatedUpdatePrerequisite(t *testing.T, store *NativeDoltStore) {
+	t.Helper()
+	storage, release, err := store.acquireStorage()
+	if err != nil {
+		t.Fatalf("acquire storage for TouchIssue prerequisite probe: %v", err)
+	}
+	defer release()
+	hasTouch := false
+	err = storage.RunInTransaction(context.Background(), "gc: probe related update prerequisite", func(tx beadslib.Transaction) error {
+		_, hasTouch = any(tx).(nativeDoltTransactionIssueToucher)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("probe TouchIssue prerequisite: %v", err)
+	}
+	if !hasTouch {
+		t.Skip("current beads pin predates transaction TouchIssue; exercised by the pending-pin compatibility gate")
 	}
 }
 

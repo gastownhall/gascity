@@ -1044,7 +1044,7 @@ func (s *NativeDoltStore) Update(id string, opts UpdateOpts) error {
 		ctx, cancel := nativeDoltOperationContext(context.TODO())
 		defer cancel()
 		return storage.RunInTransaction(ctx, fmt.Sprintf("gc: update bead %s", id), func(tx beadslib.Transaction) error {
-			return s.applyUpdateInTx(ctx, tx, id, opts)
+			return s.applyUpdateInTx(ctx, tx, id, opts, nativeUpdateForceClosePolicy)
 		})
 	})
 	if err != nil {
@@ -1053,11 +1053,29 @@ func (s *NativeDoltStore) Update(id string, opts UpdateOpts) error {
 	return nil
 }
 
-// applyUpdateInTx applies an Update against an open beadslib transaction. It is
-// shared by the standalone Update (one op, one commit) and the multi-write
-// Store.Tx path (many ops, one commit) so both routes have identical semantics.
-func (s *NativeDoltStore) applyUpdateInTx(ctx context.Context, tx beadslib.Transaction, id string, opts UpdateOpts) error {
-	forceClose := opts.Status != nil && *opts.Status == "closed"
+type nativeUpdateClosePolicy uint8
+
+const (
+	// nativeUpdateForceClosePolicy preserves Gas City's unconditional Update
+	// contract: status=closed bypasses beads' blocker/open-child policy.
+	nativeUpdateForceClosePolicy nativeUpdateClosePolicy = iota
+	// nativeUpdatePreserveClosePolicy leaves status=closed on the generic beads
+	// update so its blocker/open-child policy remains authoritative.
+	nativeUpdatePreserveClosePolicy
+)
+
+// applyUpdateInTx applies an update against an open beadslib transaction. The
+// explicit close policy keeps unconditional Update/Store.Tx force-close
+// semantics separate from revision-fenced UpdateIfMatch semantics while the
+// remaining scalar, label, and parent mutations share one implementation.
+func (s *NativeDoltStore) applyUpdateInTx(
+	ctx context.Context,
+	tx beadslib.Transaction,
+	id string,
+	opts UpdateOpts,
+	closePolicy nativeUpdateClosePolicy,
+) error {
+	forceClose := closePolicy == nativeUpdateForceClosePolicy && opts.Status != nil && *opts.Status == "closed"
 	if opts.ParentID != nil {
 		if err := s.validateUpdateParent(ctx, tx, *opts.ParentID); err != nil {
 			return err
@@ -1096,7 +1114,17 @@ func (s *NativeDoltStore) applyUpdateInTx(ctx context.Context, tx beadslib.Trans
 		}
 	}
 	if forceClose {
-		return s.applyCloseInTx(ctx, tx, id)
+		if err := s.applyCloseInTx(ctx, tx, id); err != nil {
+			return err
+		}
+	}
+	if nativeUpdateTouchesRelatedTables(opts) {
+		// Related-table writes do not rewrite the owning issue row in beads.
+		// Touch it after every sibling mutation (including a no-op close of an
+		// already-closed row) so the aggregate publishes one fresh revision.
+		if err := nativeDoltTouchIssueInTx(ctx, tx, id, s.actor); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -1720,7 +1748,7 @@ func (t *nativeDoltTx) Create(b Bead) (Bead, error) {
 }
 
 func (t *nativeDoltTx) Update(id string, opts UpdateOpts) error {
-	if err := t.store.applyUpdateInTx(t.ctx, t.tx, id, opts); err != nil {
+	if err := t.store.applyUpdateInTx(t.ctx, t.tx, id, opts, nativeUpdateForceClosePolicy); err != nil {
 		return nativeStoreError(id, err)
 	}
 	return nil

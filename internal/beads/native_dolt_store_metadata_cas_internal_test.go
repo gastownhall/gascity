@@ -164,8 +164,19 @@ func TestCachingStoreOverNativeDoltStoreForwardsConditionalWrites(t *testing.T) 
 	if capable, reason := cache.probeConditionalWriteCapability(); !capable {
 		t.Fatalf("CachingStore reports conditional-write capability = false (%s)", reason)
 	}
-	if _, ok := ConditionalWriterFor(cache); !ok {
+	conditional, ok := ConditionalWriterFor(cache)
+	if !ok {
 		t.Fatal("CachingStore over NativeDoltStore does not resolve a ConditionalWriter")
+	}
+	if err := conditional.UpdateIfMatch(got.ID, got.Revision, UpdateOpts{Labels: []string{"through-cache"}}); err != nil {
+		t.Fatalf("related-field UpdateIfMatch through cache: %v", err)
+	}
+	afterRelated, err := cache.Get(got.ID)
+	if err != nil {
+		t.Fatalf("Get after related-field UpdateIfMatch: %v", err)
+	}
+	if !forceCloseContainsString(afterRelated.Labels, "through-cache") || afterRelated.Revision == got.Revision {
+		t.Fatalf("related-field update through cache = %+v, want label and fresh revision from %d", afterRelated, got.Revision)
 	}
 }
 

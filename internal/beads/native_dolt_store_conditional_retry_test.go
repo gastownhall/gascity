@@ -46,6 +46,32 @@ func TestNativeDoltStoreUpdateIfMatchRetriesSerializationConflict(t *testing.T) 
 	}
 }
 
+func TestNativeDoltStoreUpdateIfMatchRelatedFieldsRetriesSerializationConflict(t *testing.T) {
+	var attempts int32
+	var spy *nativeDoltStorageSpy
+	spy = &nativeDoltStorageSpy{
+		getIssue: func(_ context.Context, id string) (*beadslib.Issue, error) {
+			issue := openIssueForConditionalTest(id)
+			issue.RowVersion = 7
+			return issue, nil
+		},
+		runInTransaction: func(_ context.Context, _ string, fn func(beadslib.Transaction) error) error {
+			if atomic.AddInt32(&attempts, 1) == 1 {
+				return errors.New(serializationConflictErr)
+			}
+			return fn(nativeDoltTransactionForTest{storage: spy})
+		},
+	}
+	store := newNativeDoltStoreForTest(spy)
+
+	if err := store.UpdateIfMatch("gc-1", 7, UpdateOpts{Labels: []string{"retry-me"}}); err != nil {
+		t.Fatalf("related-field UpdateIfMatch after one serialization conflict: got %v, want nil", err)
+	}
+	if got := atomic.LoadInt32(&attempts); got != 2 {
+		t.Fatalf("transaction attempts = %d, want 2 (one conflict, one retry)", got)
+	}
+}
+
 func TestNativeDoltStoreUpdateIfMatchStopsAtAttemptLimit(t *testing.T) {
 	var attempts int32
 	spy := &nativeDoltStorageSpy{

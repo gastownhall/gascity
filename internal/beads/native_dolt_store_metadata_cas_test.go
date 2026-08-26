@@ -21,7 +21,6 @@ func TestNativeDoltStoreConditionalWriterConformance(t *testing.T) {
 		func(_ *testing.T) beads.Store { return beads.NewNativeDoltStoreForConformance() },
 		beadstest.ConditionalWriterOptions{
 			RowBackedMutationFlavors: true,
-			RestrictedUpdateFields:   true,
 			SuppliesCurrent:          true,
 		},
 	)

@@ -101,8 +101,11 @@ func (s *NativeDoltStore) probeConditionalWriteCapability() (bool, string) {
 // UpdateIfMatch applies row-backed opts only while id still has
 // expectedRevision.
 func (s *NativeDoltStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {
-	if err := validateConditionalUpdateOpts(opts); err != nil {
-		return fmt.Errorf("conditional update %s: %w", id, err)
+	if isEmptyUpdateOpts(opts) {
+		return fmt.Errorf("conditional update %s: %w", id, ErrEmptyConditionalUpdate)
+	}
+	if nativeUpdateTouchesRelatedTables(opts) {
+		return s.updateIfMatchInTransaction(id, expectedRevision, opts)
 	}
 	storage, release, err := s.acquireStorage()
 	if err != nil {
@@ -130,6 +133,59 @@ func (s *NativeDoltStore) UpdateIfMatch(id string, expectedRevision int64, opts 
 		})
 	})
 	return s.conditionalWriteError(ctx, storage, id, expectedRevision, err)
+}
+
+func nativeUpdateTouchesRelatedTables(opts UpdateOpts) bool {
+	return opts.ParentID != nil || len(opts.Labels) > 0 || len(opts.RemoveLabels) > 0
+}
+
+// nativeDoltTransactionIssueToucher is the pending beads transaction
+// prerequisite for publishing a fresh aggregate revision after label or parent
+// mutations. Keep this structural while Gas City's module remains on the
+// compatibility pin: an older transaction fails closed instead of accepting a
+// conditional write whose original revision could be reused.
+type nativeDoltTransactionIssueToucher interface {
+	TouchIssue(context.Context, string, string) error
+}
+
+func nativeDoltTouchIssueInTx(ctx context.Context, tx beadslib.Transaction, id, actor string) error {
+	toucher, ok := any(tx).(nativeDoltTransactionIssueToucher)
+	if !ok {
+		return fmt.Errorf("native beads transaction %T lacks TouchIssue required for related-field revision fencing", tx)
+	}
+	return nativeStoreError(id, toucher.TouchIssue(ctx, id, actor))
+}
+
+func (s *NativeDoltStore) updateIfMatchInTransaction(id string, expectedRevision int64, opts UpdateOpts) error {
+	storage, release, err := s.acquireStorage()
+	if err != nil {
+		return err
+	}
+	defer release()
+	commitMsg := fmt.Sprintf("gc: conditional update bead %s", id)
+	err = retryOnNativeDoltSerializationConflict(func() error {
+		ctx, cancel := nativeDoltOperationContext(context.TODO())
+		defer cancel()
+		return storage.RunInTransaction(ctx, commitMsg, func(tx beadslib.Transaction) error {
+			issue, err := tx.GetIssue(ctx, id)
+			if err != nil {
+				return nativeStoreError(id, err)
+			}
+			if issue == nil {
+				return fmt.Errorf("conditional update %q: %w", id, ErrNotFound)
+			}
+			if issue.RowVersion != expectedRevision {
+				return &PreconditionFailedError{
+					ID:       id,
+					Expected: expectedRevision,
+					Current:  issue.RowVersion,
+					Raw:      "native row-version mismatch",
+				}
+			}
+			return s.applyUpdateInTx(ctx, tx, id, opts, nativeUpdatePreserveClosePolicy)
+		})
+	})
+	return nativeStoreError(id, err)
 }
 
 // CloseIfMatch closes id only while it still has expectedRevision.

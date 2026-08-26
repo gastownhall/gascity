@@ -217,9 +217,9 @@ type ConditionalWriter interface {
 	// expectedRevision; otherwise it returns *PreconditionFailedError. A store
 	// that persists ParentID, Labels, or RemoveLabels through separate writes
 	// cannot fold them into the guarded update and rejects them with
-	// *ConditionalUpdateFieldUnsupportedError; bd-backed and Dolt-backed stores
-	// do. Callers must therefore handle that error rather than assume the
-	// fields applied.
+	// *ConditionalUpdateFieldUnsupportedError. The native Dolt store composes
+	// them in one transaction; other backends may reject them. Callers must
+	// therefore handle that error rather than assume the fields applied.
 	UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error
 	// CloseIfMatch closes the bead only if its revision equals expectedRevision;
 	// otherwise it returns *PreconditionFailedError.

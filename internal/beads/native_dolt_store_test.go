@@ -2575,6 +2575,27 @@ func (tx nativeDoltTransactionForTest) UpdateIssue(ctx context.Context, id strin
 	return tx.storage.UpdateIssue(ctx, id, updates, actor)
 }
 
+// TouchIssue models the transaction-scoped aggregate revision publication
+// exposed by newer beads revisions without making the production module pin a
+// prerequisite for the in-memory compatibility tests.
+func (tx nativeDoltTransactionForTest) TouchIssue(ctx context.Context, id, actor string) error {
+	if toucher, ok := tx.storage.(interface {
+		TouchIssue(context.Context, string, string) error
+	}); ok {
+		return toucher.TouchIssue(ctx, id, actor)
+	}
+	issue, err := tx.storage.GetIssue(ctx, id)
+	if err != nil {
+		return err
+	}
+	if issue == nil {
+		return ErrNotFound
+	}
+	// MemStore advances Revision on every update, so a same-value title write
+	// models TouchIssue's revision-only mutation for older fixture types.
+	return tx.storage.UpdateIssue(ctx, id, map[string]interface{}{"title": issue.Title}, actor)
+}
+
 func (tx nativeDoltTransactionForTest) AddLabel(ctx context.Context, issueID, label, actor string) error {
 	return tx.storage.AddLabel(ctx, issueID, label, actor)
 }

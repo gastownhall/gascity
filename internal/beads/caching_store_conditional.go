@@ -144,8 +144,8 @@ func (c *CachingStore) probeConditionalWriteCapability() (bool, string) {
 // fails or the precondition does. A backing without the capability yields
 // ErrConditionalWriteUnsupported — never an unconditional write.
 func (c *CachingStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {
-	if err := validateConditionalUpdateOpts(opts); err != nil {
-		return fmt.Errorf("conditional update %s: %w", id, err)
+	if isEmptyUpdateOpts(opts) {
+		return fmt.Errorf("conditional update %s: %w", id, ErrEmptyConditionalUpdate)
 	}
 	writer, ok := ConditionalWriterFor(c.conditionalBacking())
 	if !ok {
@@ -275,10 +275,11 @@ func (c *CachingStore) CompareAndSetMetadataKey(id, key, expected, next string) 
 // caller untouched — the backing stores stamp ID/Expected/Current; this layer
 // adds cache maintenance, not decoration.
 func (c *CachingStore) applyConditionalWriteFailure(id string, err error) {
+	var fieldUnsupported *ConditionalUpdateFieldUnsupportedError
 	switch {
 	case IsPreconditionFailed(err), IsCASRetriesExhausted(err):
 		c.evictForConditionalWrite(id)
-	case IsGateRefusal(err), IsConditionalWriteUnsupported(err):
+	case IsGateRefusal(err), IsConditionalWriteUnsupported(err), errors.As(err, &fieldUnsupported):
 	default:
 		// noteLocalMutationLocked bumps the mutation seq so a scan that
 		// started before this failure cannot merge its pre-write row back
