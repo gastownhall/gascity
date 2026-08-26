@@ -518,10 +518,14 @@ func TestWriteWorktreeStaleMarker_UnpushedCommitsGuidanceIsReasonSpecific(t *tes
 
 // TestWriteWorktreeStaleMarker_UnpushedGuidanceMentionsRecoveryCommand pins
 // the exact recovery command against internal/git.Git.HasUnpushedCommitsResult
-// (git log HEAD --oneline --not --remotes), not the @{u}-relative form. These
-// worktrees have no upstream tracking configured, so a reader who copy-pastes
-// "git log --oneline @{u}..HEAD" hits "fatal: no upstream configured" instead
-// of recovering (gm-shwey8).
+// (git log HEAD --oneline --not --remotes), not the @{u}-relative form that
+// ga-owvytd's own description proposes. These fleet worktrees have no
+// upstream tracking configured (verified directly: `git rev-parse
+// --abbrev-ref @{u}` fails with "fatal: no upstream configured" on a fresh
+// builder branch), so a reader who copy-pastes "git log --oneline
+// @{u}..HEAD" hits that same error instead of recovering. --not --remotes
+// needs no tracking branch and matches the command the codebase's own
+// unpushed-commits probe already uses.
 func TestWriteWorktreeStaleMarker_UnpushedGuidanceMentionsRecoveryCommand(t *testing.T) {
 	fx := newPruneFixture(t)
 	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, hasUnpushed: true, currentBranch: "builder/ga-def456"})
