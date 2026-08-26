@@ -44,7 +44,12 @@
 #                   we just want both"). We KEEP BOTH sides (ours then theirs),
 #                   dropping only the conflict markers. We do NOT do this for
 #                   source code — concatenating two divergent code edits can
-#                   produce a duplicate-definition or logic corruption.
+#                   produce a duplicate-definition or logic corruption. Test
+#                   files ARE source, so for a *.go union we additionally
+#                   verify the concatenated result still parses before
+#                   accepting it — two hunks that are each a plausible partial
+#                   edit can still concatenate into an unbalanced brace or a
+#                   duplicate declaration (ga-nlvpzq).
 #
 # If a file contains ANY hunk that is none of the above (i.e. both sides are
 # non-empty, differ, and the file is NOT an allowlisted additive file), the
@@ -122,7 +127,9 @@ is_additive_keepboth_path() {
 #
 # Implementation note: we do the parse/classify/rewrite in a single awk pass so
 # the logic is auditable in one place. awk exits 0 (resolved) / 1 (real
-# conflict) / 2 (malformed markers); we mirror that exit code.
+# conflict) / 2 (malformed markers); we mirror that exit code, except a *.go
+# file that fails to parse after an awk-resolved ADDITIVE-BOTH union is
+# downgraded from 0 to 1 (ga-nlvpzq) — awk only judges markers, not syntax.
 resolve_conflict_markers_in_file() {
     local path="$1"
     local allow_keepboth="${2:-0}"
@@ -218,7 +225,19 @@ resolve_conflict_markers_in_file() {
             if (state != 0) { exit 2 }       # unterminated conflict marker
         }
     ' "$path" > "$tmp"; then
-        # awk exited 0 — fully resolved. Replace the file.
+        # awk exited 0 — fully resolved per the marker/hunk rules. For a *.go
+        # file, that is necessary but not sufficient: an ADDITIVE-BOTH union
+        # of two partial-edit hunks can still be invalid Go (duplicate
+        # declaration, unbalanced brace) even with zero markers left. Verify
+        # it parses before accepting the resolution.
+        case "$path" in
+            *.go)
+                if ! gofmt -e "$tmp" >/dev/null 2>&1; then
+                    rm -f "$tmp"
+                    return 1
+                fi
+                ;;
+        esac
         mv -f "$tmp" "$path"
         return 0
     else
