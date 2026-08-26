@@ -9,6 +9,8 @@
 - Push remote: `origin`
 - Gate result: **PASS**
 
+See "Post-gate amendment" below: criterion 2's ownership premise is corrected.
+
 ## Gate criteria
 
 | # | Criterion | Result | Evidence |
@@ -98,3 +100,35 @@ make check-native-dependency-surface                     FAIL-ATTRIBUTED: 270281
 reviewed source, commit this checklist, push that isolated branch, open the PR,
 publish `release-gate/deploy-clearance=success` on the exact PR head, and route
 the merge-request to the merge authority. The deployer does not merge.
+
+## Post-gate amendment — the ownership swap was backwards (ga-lgizl)
+
+The fable review council on PR #5610 found criterion 2's premise inverted, and
+`bd` confirms it against this repository's store:
+
+```text
+bd show ga-uz5t3a   Error fetching ga-uz5t3a: no issue found matching "ga-uz5t3a"
+bd show ga-zzzzzzz  Error fetching ga-zzzzzzz: no issue found matching "ga-zzzzzzz"   (control)
+bd show ga-80po0c.3 ○ ga-80po0c.3 · H5: contract production runtime compositions once  [P2 · OPEN]
+```
+
+**Correction to criterion 2.** `ga-80po0c` is not dead. It is an OPEN epic whose
+child `ga-80po0c.3` — "contract production runtime compositions once" — is
+exactly the work these eight waivers wait on, and 36 of the 37 rows in
+`test/test-resources.toml` still name it. `ga-uz5t3a` resolves to nothing here;
+it appears to live in the maintainer city's separate ledger. The swap moved the
+runtime waivers from a live owner to a string, and the accompanying test change
+replaced three literal-owner assertions with comparisons against the constant
+that populates the field, so the check became self-referential and could no
+longer fail.
+
+The gate's other criteria stand: the ledger was in sync, the expiry literals
+were correctly de-shared, and the package passed. Only the ownership premise was
+wrong.
+
+**Repaired by `ga-lgizl`.** `runtimeContractWaiverOwner` is back to
+`ga-80po0c.3`, and `TestRuntimeWaiverOwnerIsPinnedAndWellFormed` pins that
+literal in one place so re-owning all eight waivers is a reviewed edit rather
+than a constant rename. The mutation the review council used to expose the hole
+— renaming the constant to `ga-DEADBEEF` and updating the eight `TESTING.md`
+rows to match — now fails the package.

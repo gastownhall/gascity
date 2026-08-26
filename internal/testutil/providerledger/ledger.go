@@ -67,7 +67,9 @@ const (
 	// runtimeDoubleBoundaryPath is the designated runtime.Provider double source.
 	runtimeDoubleBoundaryPath = "internal/runtime/fake.go"
 	// runtimeContractWaiverOwner owns the remaining production-runtime gaps.
-	runtimeContractWaiverOwner = "ga-uz5t3a"
+	// It is pinned by TestRuntimeWaiverOwnerIsPinnedAndWellFormed: changing it
+	// re-owns every runtime waiver at once, so it needs to be a deliberate edit.
+	runtimeContractWaiverOwner = "ga-80po0c.3"
 
 	// MarkdownStart begins the generated TESTING.md table.
 	MarkdownStart = "<!-- BEGIN CHECKED RUNTIME PROVIDER LEDGER -->"
@@ -764,19 +766,38 @@ func markdownCell(value string) string {
 
 // CheckMarkdown checks the single generated TESTING.md ledger block.
 func CheckMarkdown(document string, entries []Entry) error {
-	if strings.Count(document, MarkdownStart) != 1 || strings.Count(document, MarkdownEnd) != 1 {
-		return errors.New("TESTING.md must contain exactly one checked runtime provider ledger marker pair")
+	start, end, err := markerBlockBounds(document)
+	if err != nil {
+		return err
 	}
-	start := strings.Index(document, MarkdownStart)
-	end := strings.Index(document[start:], MarkdownEnd)
-	if end < 0 {
-		return errors.New("TESTING.md checked runtime provider ledger markers are out of order")
-	}
-	end += start + len(MarkdownEnd)
 	if got, want := document[start:end], RenderMarkdown(entries); got != want {
 		return fmt.Errorf("TESTING.md checked runtime provider table does not match the provider ledger; replace the marker block with:\n%s", want)
 	}
 	return nil
+}
+
+// ReplaceMarkdownBlock swaps the marked ledger block for replacement, leaving
+// the rest of the document byte-identical.
+func ReplaceMarkdownBlock(document, replacement string) (string, error) {
+	start, end, err := markerBlockBounds(document)
+	if err != nil {
+		return "", err
+	}
+	return document[:start] + replacement + document[end:], nil
+}
+
+// markerBlockBounds locates the single marked ledger block, returning the
+// half-open byte range that covers it including both markers.
+func markerBlockBounds(document string) (start, end int, err error) {
+	if strings.Count(document, MarkdownStart) != 1 || strings.Count(document, MarkdownEnd) != 1 {
+		return 0, 0, errors.New("TESTING.md must contain exactly one checked runtime provider ledger marker pair")
+	}
+	start = strings.Index(document, MarkdownStart)
+	end = strings.Index(document[start:], MarkdownEnd)
+	if end < 0 {
+		return 0, 0, errors.New("TESTING.md checked runtime provider ledger markers are out of order")
+	}
+	return start, end + start + len(MarkdownEnd), nil
 }
 
 func joinProblems(problems []string) error {

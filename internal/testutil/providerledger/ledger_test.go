@@ -1,6 +1,7 @@
 package providerledger
 
 import (
+	"flag"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,12 @@ import (
 
 	"github.com/gastownhall/gascity/internal/testpolicy/waiverclock"
 )
+
+// updateLedgerDoc regenerates the TESTING.md checked runtime provider block
+// from the Go ledger when set. Run:
+//
+//	go test ./internal/testutil/providerledger -run TestCatalogMatchesProductionWiringAndDocumentation -update
+var updateLedgerDoc = flag.Bool("update", false, "regenerate the TESTING.md checked runtime provider ledger block from the Go ledger")
 
 func TestValidateRejectsInvalidContractClaims(t *testing.T) {
 	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
@@ -1588,9 +1595,22 @@ func TestCatalogMatchesProductionWiringAndDocumentation(t *testing.T) {
 	if err := ValidateProofRefs(root, entries); err != nil {
 		t.Fatalf("ValidateProofRefs: %v", err)
 	}
-	doc, err := os.ReadFile(filepath.Join(root, "TESTING.md"))
+	testingMDPath := filepath.Join(root, "TESTING.md")
+	doc, err := os.ReadFile(testingMDPath)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if *updateLedgerDoc {
+		updated, err := ReplaceMarkdownBlock(string(doc), RenderMarkdown(entries))
+		if err != nil {
+			t.Fatalf("replace TESTING.md ledger block: %v", err)
+		}
+		if updated != string(doc) {
+			if err := os.WriteFile(testingMDPath, []byte(updated), 0o644); err != nil {
+				t.Fatalf("write TESTING.md: %v", err)
+			}
+			doc = []byte(updated)
+		}
 	}
 	if err := CheckMarkdown(string(doc), entries); err != nil {
 		t.Fatalf("CheckMarkdown: %v", err)
@@ -1678,6 +1698,39 @@ func TestCheckMarkdownRejectsDrift(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), RenderMarkdown(entries)) {
 		t.Fatalf("CheckMarkdown() error = %v, want actionable expected block", err)
+	}
+}
+
+func TestReplaceMarkdownBlockRewritesOnlyTheMarkedBlock(t *testing.T) {
+	doc := "before\n" + MarkdownStart + "\nstale\n" + MarkdownEnd + "\nafter\n"
+	replacement := MarkdownStart + "\nfresh\n" + MarkdownEnd
+
+	got, err := ReplaceMarkdownBlock(doc, replacement)
+	if err != nil {
+		t.Fatalf("ReplaceMarkdownBlock: %v", err)
+	}
+	if want := "before\n" + replacement + "\nafter\n"; got != want {
+		t.Fatalf("ReplaceMarkdownBlock() = %q, want %q", got, want)
+	}
+}
+
+func TestReplaceMarkdownBlockRejectsMissingMarkers(t *testing.T) {
+	tests := []struct {
+		name string
+		doc  string
+		want string
+	}{
+		{"no markers", "plain document\n", "exactly one"},
+		{"duplicated start", MarkdownStart + MarkdownStart + MarkdownEnd, "exactly one"},
+		{"out of order", MarkdownEnd + "\nbody\n" + MarkdownStart, "out of order"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ReplaceMarkdownBlock(tt.doc, "replacement")
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("ReplaceMarkdownBlock(%q) error = %v, want containing %q", tt.doc, err, tt.want)
+			}
+		})
 	}
 }
 
