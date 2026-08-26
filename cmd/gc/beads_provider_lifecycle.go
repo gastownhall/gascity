@@ -335,6 +335,18 @@ func initDirIfReadyManagedDolt(cityPath, dir, prefix, provider string) error {
 	// ambiguous pre-existing layouts fail before any provider process runs. Do
 	// not manufacture bd/Dolt state for unrelated custom exec providers.
 	if execProviderUsesCanonicalBdScopeFiles(provider) {
+		// A live standalone `bd dolt` owns the same root that the managed
+		// provider would inspect. Preserve the established convergence error
+		// (including its actionable `bd dolt stop` hint) before the fresh-root
+		// admission gate examines that locked layout. This check is read-only;
+		// ensureBeadsProvider repeats it at the actual start boundary so a
+		// process that appears after this observation is still rejected.
+		if strings.HasPrefix(provider, "exec:") &&
+			samePath(strings.TrimPrefix(provider, "exec:"), gcBeadsBdScriptPath(cityPath)) {
+			if err := standaloneBdDoltConflictIfPresent(cityPath); err != nil {
+				return err
+			}
+		}
 		if err := seedDeferredManagedBeadsErr(cityPath, dir, prefix, ""); err != nil {
 			return err
 		}

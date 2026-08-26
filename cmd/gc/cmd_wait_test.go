@@ -915,7 +915,7 @@ prefix = "fe"
 }
 
 //nolint:unused // exercised by native_dolt_rebind_integration_test.go
-func managedBdWaitTestTemplate(t *testing.T, bdPath, doltPath string) string {
+func managedBdWaitTestTemplate(t *testing.T) string {
 	t.Helper()
 	managedBdWaitTemplateOnce.Do(func() {
 		cityPath, err := os.MkdirTemp("/tmp", "gc-bd-template-city-")
@@ -932,51 +932,30 @@ func managedBdWaitTestTemplate(t *testing.T, bdPath, doltPath string) string {
 			managedBdWaitTemplateErr = fmt.Errorf("EnsureBuiltinRuntimeAssets(template): %w", err)
 			return
 		}
-		script := gcBeadsBdScriptPath(cityPath)
-		homeDir, err := os.MkdirTemp("/tmp", "gc-bd-template-home-")
+		// Build the reusable database template through the same Go lifecycle as
+		// production. A direct provider-script start cannot mint fresh-root
+		// provenance: initDirIfReady must publish and bind the exact admission
+		// before gc-beads-bd is allowed to create the Dolt root.
+		deferred, err := initDirIfReady(cityPath, cityPath, "gc")
 		if err != nil {
-			managedBdWaitTemplateErr = fmt.Errorf("MkdirTemp(template home): %w", err)
+			managedBdWaitTemplateErr = fmt.Errorf("initialize template city: %w", err)
 			return
 		}
-		if err := writeWaitTestDoltIdentity(homeDir); err != nil {
-			managedBdWaitTemplateErr = fmt.Errorf("write template dolt identity: %w", err)
+		if deferred {
+			managedBdWaitTemplateErr = fmt.Errorf("initialize template city: managed provider startup deferred")
 			return
 		}
-		env := waitTestEnv(map[string]string{
-			"GC_BEADS":       "bd",
-			"GC_DOLT":        "",
-			"GC_BIN":         currentGCBinaryForTests(t),
-			"GC_CITY":        cityPath,
-			"GC_CITY_PATH":   cityPath,
-			"HOME":           homeDir,
-			"DOLT_ROOT_PATH": homeDir,
-			"PATH":           strings.Join([]string{filepath.Dir(bdPath), filepath.Dir(doltPath), os.Getenv("PATH")}, string(os.PathListSeparator)),
-		})
-		runScript := func(args ...string) error {
-			cmd := exec.Command(script, args...)
-			cmd.Env = env
-			out, err := cmd.CombinedOutput()
-			if err != nil {
-				return fmt.Errorf("%s: %w\n%s", strings.Join(args, " "), err, out)
-			}
-			return nil
-		}
-		if err := runScript("start"); err != nil {
-			managedBdWaitTemplateErr = err
+		deferred, err = initDirIfReady(cityPath, rigPath, "fe")
+		if err != nil {
+			managedBdWaitTemplateErr = fmt.Errorf("initialize template rig: %w", err)
 			return
 		}
-		if err := runScript("init", cityPath, "gc", "hq"); err != nil {
-			managedBdWaitTemplateErr = err
+		if deferred {
+			managedBdWaitTemplateErr = fmt.Errorf("initialize template rig: managed provider startup deferred")
 			return
 		}
-		if err := runScript("init", rigPath, "fe", "fe"); err != nil {
-			managedBdWaitTemplateErr = err
-			return
-		}
-		stopCmd := exec.Command(script, "stop")
-		stopCmd.Env = env
-		if out, err := stopCmd.CombinedOutput(); err != nil {
-			managedBdWaitTemplateErr = fmt.Errorf("stop template city: %w\n%s", err, out)
+		if err := shutdownBeadsProvider(cityPath); err != nil {
+			managedBdWaitTemplateErr = fmt.Errorf("stop template city: %w", err)
 			return
 		}
 		if err := clearManagedDoltRuntimeState(cityPath); err != nil {
@@ -2895,7 +2874,7 @@ func setupManagedBdWaitTestCity(t *testing.T) (string, string) {
 		rigFlag = prevRigFlag
 	})
 
-	templatePath := managedBdWaitTestTemplate(t, bdPath, doltPath)
+	templatePath := managedBdWaitTestTemplate(t)
 	cityPath := shortSocketTempDir(t, "gc-bd-city-")
 	if err := overlay.CopyDir(templatePath, cityPath, io.Discard); err != nil {
 		t.Fatalf("overlay.CopyDir(template city): %v", err)
