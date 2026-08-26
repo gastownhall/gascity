@@ -455,7 +455,12 @@ test: test-fsys-darwin-compile
 
 # MAC_UNIT_PKGS excludes cmd/gc from the Mac unit sweep; cmd/gc runs
 # sharded via the mac-cmd-gc-process CI matrix job instead.
-MAC_UNIT_PKGS = $(shell go list ./... | grep -v '/cmd/gc$$')
+# go list runs outside TEST_ENV/env -i here, so a toolchain mismatch (e.g. a
+# pinned setup-go version older than go.mod's directive) makes go list fail;
+# $(shell ...) swallows that non-zero exit and yields an empty string, which
+# would otherwise make go test silently run zero packages. Guard it: an empty
+# result is always a go list failure, never an intentional "test nothing".
+MAC_UNIT_PKGS = $(or $(strip $(shell go list ./... | grep -v '/cmd/gc$$')),$(error MAC_UNIT_PKGS resolved to an empty package list -- go list failed (check the Go toolchain against go.mod) or matched no packages))
 
 ## test-mac: Mac unit sweep with cmd/gc excluded; cmd/gc covered by the Mac sharded job.
 test-mac: test-fsys-darwin-compile
@@ -775,7 +780,10 @@ check-docs:
 #   session/tmux: integration-test-only, not meaningful for unit coverage
 #   beadstest: conformance helper, runs under internal/beads coverage
 # cmd/gc excluded: it runs sharded below in test-cover to stay under per-package timeout
-UNIT_COVER_PKGS_NONCMDGC = $(shell go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./... | grep -v -e /session/tmux -e /beadstest -e '/cmd/gc$$')
+# See MAC_UNIT_PKGS above: go list runs outside TEST_ENV/env -i, so a broken
+# toolchain silently yields an empty $(shell ...) result instead of failing;
+# guard against go test then running with zero package arguments.
+UNIT_COVER_PKGS_NONCMDGC = $(or $(strip $(shell go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./... | grep -v -e /session/tmux -e /beadstest -e '/cmd/gc$$')),$(error UNIT_COVER_PKGS_NONCMDGC resolved to an empty package list -- go list failed (check the Go toolchain against go.mod) or matched no packages))
 
 ## test-cover: run fast unit-test coverage without the integration-tagged package sweep.
 ## cmd/gc is sharded CMD_GC_COVER_TOTAL (default 6) ways via test-go-test-shard so each

@@ -2,8 +2,20 @@ package herdr
 
 import (
 	"path/filepath"
+	"runtime"
 	"testing"
 )
+
+// skipUnlessXDGPlatform skips XDG-precedence assertions on platforms where
+// os.UserConfigDir() does not follow XDG_CONFIG_HOME: on darwin it always
+// resolves under "$HOME/Library/Application Support", so herdr's own
+// resolution there is unverified by this test (see ga-nqlb8q).
+func skipUnlessXDGPlatform(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skipf("os.UserConfigDir() does not follow XDG_CONFIG_HOME on %s; herdr's own resolution on this platform is unverified (see ga-nqlb8q)", runtime.GOOS)
+	}
+}
 
 // socketPath must resolve the SAME directory herdr itself uses for its
 // config/socket state, or this client dials a path no herdr server ever
@@ -20,6 +32,7 @@ import (
 // old code compute a path no herdr process ever binds.
 
 func TestSocketPathHonorsXDGConfigHomeOverHome(t *testing.T) {
+	skipUnlessXDGPlatform(t)
 	xdg := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", xdg)
 	t.Setenv("HOME", t.TempDir()) // deliberately different; must be ignored
@@ -36,6 +49,7 @@ func TestSocketPathHonorsXDGConfigHomeOverHome(t *testing.T) {
 }
 
 func TestSocketPathFallsBackToHomeConfigWhenXDGUnset(t *testing.T) {
+	skipUnlessXDGPlatform(t)
 	t.Setenv("XDG_CONFIG_HOME", "")
 	home := t.TempDir()
 	t.Setenv("HOME", home)
