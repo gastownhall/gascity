@@ -71,21 +71,37 @@ composes `rig/agent` and `city.agent` strings when constructing an agent's
 qualified name, and it is the only codebase that calls the encode direction
 (§4) to produce a tmux-safe session name from one.
 
-**beads** never mints and has no equivalent of the encode direction. It does,
-however, independently re-derive part of the *decode* direction for
-comparison purposes: `canonicalActor` (beads repo,
-`internal/storage/issueops/identity.go:50`, duplicated at
-`internal/validation/issue.go:112` because storage may not import
-validation) special-cases an exact `--` run and decodes it to `/`, so a
-rig-qualified identity compares equal regardless of which spelling it
-arrived in. It does NOT restore `__` to `.` the way gascity's own
-`UnsanitizeQualifiedNameFromSession` (§4) does — instead it collapses `__`,
-and any other single or mixed run of `.`/`_`/`-`, to a generic `_`. This is
-the independent re-derivation that let the two sides drift into being
-complements before this contract existed (see the architecture ruling this
-contract implements, `ga-qv1d2d`). A canonicalizer implementing this rule
-MUST NOT collapse `--` and `__` to that same generic form: doing so is the
-widening this contract exists to prevent.
+**beads** never mints and has no equivalent of the encode direction, and it
+does not implement the *decode* direction described in §4 at all. What it
+has instead is `issueops.ActorMatches` (beads repo,
+`internal/storage/issueops/identity.go`, backed by the unexported
+`canonicalActor` at lines 29-49; package-local-duplicated as
+`validation.ActorMatches`/`CanonicalActor` in `internal/validation/issue.go`
+because storage may not import validation) — a narrower, dot-axis-only
+canonicalizer used purely for assignee/actor comparison. It collapses any
+run of `.`, `_`, or `-` down to a single `_`. Per its own doc comment, this
+exists to reconcile the different *contextual spellings of a dot* that the
+same identity can arrive in — `__` in a session name, `_` in a Dolt
+table/database name, an unspecified `-` "elsewhere" — not to decode the `/`
+rig-boundary. It MISSES the slash axis entirely: `/` is not one of its
+cases, so a raw `/` always passes through untouched, and a `/`-spelled
+identity does NOT compare equal to its `--`-spelled encoding under this
+function (see the architecture ruling this contract implements,
+`ga-qv1d2d`, which measures exactly this: beads' matcher never reconciles
+the `/` axis). What it *does* do is collapse `--` and `__` to that same
+generic `_` — the widening this contract exists to prevent, since two
+structurally distinct gascity identities (a rig/agent pair and a
+city/agent pair built from the same segment names) can be driven to
+compare equal on the beads side.
+
+This canonicalizer is also newer than the beads version gascity currently
+builds against: it lives in beads >= `v1.1.1-0.20260810093734-d0e612eaf8a4`,
+while gascity's `go.mod` pins `v1.1.1-0.20260805093327-bf97b73749ac`, five
+days earlier — `internal/storage/issueops/identity.go` does not exist at
+gascity's current pin at all. This paragraph describes the nearest
+available upstream behavior, not code gascity has adopted yet; re-verify
+against the pinned version when gascity's `go.mod` moves past
+`v1.1.1-0.20260810093734-d0e612eaf8a4`.
 
 ## 4. Source of truth
 
