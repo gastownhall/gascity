@@ -38,11 +38,41 @@ WD.15 campaign readout (`evidence/we-final-yield-join.json`).
 
 ---
 
-## 0. Entry #1 — the poolDesired demand-derivation circularity (win3's, active)
+## 0. Entry #1 — the poolDesired demand-derivation circularity (win3's; RESOLVED 2026-08-26, ported)
 
 | # | Class | Trigger | Keyed version | Evidence | Bead |
 |---|---|---|---|---|---|
 | 1 | **Pool demand derived from session existence** — a keyed stop erases its own regeneration demand | Pool desired-state (`cmd/gc/pool_desired_state.go` `ComputePoolDesiredStates*`, fed by `cmd/gc/build_desired_state.go`) derives fill demand from open session rows / live snapshot; when the keyed engine stops or closes a seat, desired drops with it, so the pool-fill arm sees no deficit to materialize | EXISTS@site for the *arms* — pool-fill materialize `cmd/gc/pool_allocation_controller.go:1261-1278` (ungated, `effect_owner=keyed` hardcoded) and start commit (`TraceSiteLifecycleStartCommit`, `cmd/gc/session_start_reconcile.go`, owner-stamped since `a29e5e3142`) — but the *demand producer* is the circular part. **win3's team is actively working this ONE instance — do not touch; cross-reference their findings on ga-f7v2ft.161 when they land** | Both always-on sinks read **ZERO fleet-wide across the entire soak**: census v1 (2026-08-24, C3: "honest NO-DEMAND") and census v3 (2026-08-26 Table B: pool-fill materialize 0, start commit 0, "no-demand"), while D-DRAIN/D-ORPHAN/D-STRANDED applied 97 effects on the same fleet. Adjacent field shapes: the `.194` Finding-3 / asleep-identity deadlock ("session name already exists … (skipping)" with poolDesired=1..2 and ZERO tmux sessions, ga-f7v2ft.161 2026-08-23) shows the allocator side of the same identity/demand coupling | ga-f7v2ft.161 (win3 coordination channel — their findings land there) |
+
+### Disposition: RESOLVED — five fixes, all ported to OSS (2026-08-26)
+
+win3's findings landed as the `6o`→`6s` deploy chain on maintainer-city. The
+circularity was never one defect: it was a demand-side blindness plus a
+four-arm release wedge that kept the drained seats from ever coming back. Both
+halves reproduce on the OSS lane — `cmd/gc/pool_allocation_controller.go` and
+`cmd/gc/pool_allocation_shadow.go` were **byte-identical** (md5) to the
+enterprise pre-chain baseline, so none of this is enterprise-only.
+
+| Arm | Defect | OSS fix |
+|---|---|---|
+| Demand | `filterAssignedWorkBeadsForPoolDemand` matched a work bead's census ref against the agent's configured **rig**, so graph-resident work carrying a relocated binding's `class:*` ref was structurally invisible. The wake filter got this widening in ga-whzrt; the demand half never did — the city drained a slot and then refused to refill it | `assignedWorkIndexReachableFromAgentOnClaimRefs` + `assignedWorkRelocatedClaimRefs` (empty for a single-store city, so unsplit cities stay byte-identical) |
+| Release 1 | `authorizeRoutedWorkPoolDrainAck` gated a **release** on the **allocation** predicate `supported()`, which is false for every capacity shape. Any city with `[workspace] max_active_sessions` (or a min floor, rig cap, or namepool) refused *every* agent drain-ack it ever saw, permanently | `releaseEligible()` reads `contributionPresent`; the singleton and source-store clauses lifted out of `supported()`'s early return |
+| Release 2 | The source-store clause used agent-rig equality, but a city that relocates its work class serves claims at **city** scope — `rig:<name>` never equals `city:<name>`, so every rig-scoped member's ack refused forever | `routedWorkStoreRefConfigured` — the pure-config half of `routedWorkStore`; asks the CITY's reachability |
+| Release 3 | The work-closed proof read the trigger from the raw work store; `gcg-` triggers live in the graph binding, so `ErrNotFound` surfaced as *unavailable* and retried forever | `ErrNotFound` fallback through the graph binding at city scope (no-op on a single-store city, where `graphStore == sourceStore`) |
+| Release 4 | Triggers **deleted** after scope finalize are permanently absent, but absence was reported as transient-unavailable and retried forever | a deleted trigger satisfies the work-closed check; `sessionHasAwakeAssignedWorkForReachableStore` remains the fence |
+
+Field evidence (maintainer-city, live): 26 rows wedged in `draining` holding 26
+distinct slot names, and a lifetime `drain_ack_source` split of 271
+keyed-superseded against **zero** agent acks, ever — the only path that had ever
+finalized a drain in that city was the pane dying. That is the sink behind rows
+46/47 reading true-zero fleet-wide: the arms were never no-demand, the demand
+could not be seen and the seats could not be given back.
+
+Held back deliberately: the enterprise `edcaf9619` ByID-federation refactor of
+the release-3 fallback. It fixes no observed defect, swaps a narrow live-verified
+two-leg rule for a broad multi-leg resolver, adds a new `storeref.Plan` error
+path onto drain-ack authorization, and is **undeployed** — the fleet tip is the
+release-4 commit. Revisit once it has fleet time.
 
 ---
 
@@ -155,5 +185,6 @@ row-6/19 store contract is boot-enforced. Everything else is keyed-owned
 already; the census tiers above say which arms carry field proof and which
 rest on the test corpus.
 
-*Audit: Fable, 2026-08-26, lane `rec/ga88-continue`. Cross-reference win3's
-poolDesired findings on ga-f7v2ft.161 when they land — entry #1 is theirs.*
+*Audit: Fable, 2026-08-26, lane `rec/ga88-continue`. Entry #1 was win3's; their
+poolDesired findings landed on ga-f7v2ft.161 the same day as the `6o`→`6s`
+chain and are now ported — see its disposition section above.*
