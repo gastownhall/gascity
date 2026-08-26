@@ -149,17 +149,24 @@ type hookClaimOptions struct {
 
 // continuationPinAssignee returns the identity a continuation sibling is pinned
 // to. It prefers the session's durable bead ID because that is the only value
-// every consumer of an assignee agrees on: ComputeAwakeSet matches it via
-// sessionAssigneeMatches (assignee == bead.ID), the continuation backstop
-// resolves it via currentSessionAssigneeIdentities, and the session's own
-// re-poll queries $GC_SESSION_ID first.
+// the consumers of an assignee agree on: ComputeAwakeSet matches it via
+// sessionAssigneeMatches (assignee == bead.ID), and the session's own re-poll
+// queries $GC_SESSION_ID first.
 //
 // Assignee cannot serve here. With no alias or agent in the environment it falls
 // through to cliSessionName's runtime form (gascity--gc__implementation-worker-5-pool),
 // which is not what a session bead records as session_name
 // (gc__implementation-worker-gcs-session-<id>). Beads pinned to that form matched
-// no session identity at all, so neither wake demand nor the backstop could ever
-// reach them and the molecule stalled permanently.
+// no session identity at all, so wake demand could never reach them and the
+// molecule stalled permanently.
+//
+// The reconciler's continuation-claim CANDIDATE gate is NOT one of those
+// consumers: evaluateReadyContinuationClaimCandidate (build_desired_state.go)
+// admits a row only when the root's gc.session_name equals the sibling's
+// assignee, and that key only ever holds a session name / alias
+// (sessionBeadIdentifier), never a bead ID — so a bead-ID pin is absent
+// before currentSessionAssigneeIdentities is ever consulted. That is
+// follow-up, not a regression: the slot-label form failed the same gate.
 func continuationPinAssignee(opts hookClaimOptions) string {
 	if id := strings.TrimSpace(opts.SessionID); id != "" {
 		return id

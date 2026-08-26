@@ -225,9 +225,9 @@ func TestPreassignHookContinuationGroupPinsSiblingsToSessionID(t *testing.T) {
 		wantAssignee string
 	}{{
 		// The pin means "run this on THIS session". Only the session bead ID is an
-		// identity every consumer agrees on: ComputeAwakeSet matches it, the
-		// continuation backstop resolves it, and the session's own re-poll queries
-		// $GC_SESSION_ID. The runtime slot label in Assignee matches none of them.
+		// identity the consumers agree on: ComputeAwakeSet matches it, and the
+		// session's own re-poll queries $GC_SESSION_ID. The runtime slot label in
+		// Assignee matches neither.
 		name:         "session id wins over the runtime slot label",
 		opts:         hookClaimOptions{Assignee: "gascity--gc__implementation-worker-5-pool", SessionID: "gcs-session-74f608f2"},
 		wantAssignee: "gcs-session-74f608f2",
