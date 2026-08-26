@@ -73,6 +73,18 @@ const (
 	MarkdownEnd = "<!-- END CHECKED RUNTIME PROVIDER LEDGER -->"
 
 	maxWaiverHorizon = 90 * 24 * time.Hour
+
+	// maxWaiversPerExpiryDate caps how many waivers may share a single expiry
+	// date. Independent expiry literals are not enough on their own: when every
+	// literal holds the same date the whole ledger still lapses in one instant
+	// and turns the repository red at an hour nobody chose (GitHub #5195).
+	maxWaiversPerExpiryDate = 2
+
+	// waiverRunwayWindow is how far ahead of a waiver's expiry WaiverRunway
+	// starts warning. The warning lands while the owner still has two weeks to
+	// renew or land the contract, so the deadline arrives as a scheduled
+	// reminder rather than as an unannounced repository-wide outage.
+	waiverRunwayWindow = 14 * 24 * time.Hour
 )
 
 // CatalogRef binds a ledger entry to a discoverable production catalog key.
@@ -182,7 +194,7 @@ func Catalog() []Entry {
 			"acp", "exact:acp", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/acp", "NewSeamBacked"),
-				time.Date(2026, time.September, 7, 0, 0, 0, 0, time.UTC),
+				time.Date(2026, time.September, 14, 0, 0, 0, 0, time.UTC),
 				"NewSeamBacked always uses shared os.TempDir()/gc-acp-<euid> state; the WithDir proof does not exercise that composition",
 			),
 			provedRuntime(
@@ -199,7 +211,7 @@ func Catalog() []Entry {
 			"t3bridge", "exact:t3bridge", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"),
-				time.Date(2026, time.September, 7, 0, 0, 0, 0, time.UTC),
+				time.Date(2026, time.October, 12, 0, 0, 0, 0, time.UTC),
 				"the production T3 bridge composition has focused tests but no full shared runtime contract",
 			),
 		),
@@ -207,7 +219,7 @@ func Catalog() []Entry {
 			"k8s", "exact:k8s", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/k8s", "NewSeamBacked"),
-				time.Date(2026, time.September, 7, 0, 0, 0, 0, time.UTC),
+				time.Date(2026, time.October, 26, 0, 0, 0, 0, time.UTC),
 				"the actual K8s production composition has no full shared runtime contract",
 			),
 		),
@@ -215,7 +227,7 @@ func Catalog() []Entry {
 			"herdr", "exact:herdr", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/herdr", "New"),
-				time.Date(2026, time.September, 7, 0, 0, 0, 0, time.UTC),
+				time.Date(2026, time.September, 28, 0, 0, 0, 0, time.UTC),
 				"the existing full conformance run skips in short mode or when the herdr executable is absent",
 			),
 		),
@@ -223,7 +235,7 @@ func Catalog() []Entry {
 			"hybrid", "exact:hybrid", nil,
 			waivedRuntime(
 				repoSymbol("cmd/gc", "newHybridProvider"),
-				time.Date(2026, time.September, 7, 0, 0, 0, 0, time.UTC),
+				time.Date(2026, time.October, 26, 0, 0, 0, 0, time.UTC),
 				"cmd/gc.newHybridProvider is the selected registry construction boundary; its internal tmux, K8s, and hybrid constructors are not claimed here, and the wrapper has no full shared runtime contract",
 			),
 		),
@@ -239,7 +251,7 @@ func Catalog() []Entry {
 			),
 			waivedRuntime(
 				repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"),
-				time.Date(2026, time.September, 7, 0, 0, 0, 0, time.UTC),
+				time.Date(2026, time.October, 12, 0, 0, 0, 0, time.UTC),
 				"the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which has no full shared runtime contract",
 			),
 		),
@@ -247,7 +259,7 @@ func Catalog() []Entry {
 			"ssh", "prefix:ssh:", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/ssh", "NewSeamBacked"),
-				time.Date(2026, time.September, 7, 0, 0, 0, 0, time.UTC),
+				time.Date(2026, time.September, 28, 0, 0, 0, 0, time.UTC),
 				"the production SSH composition has no full shared runtime contract",
 			),
 		),
@@ -255,7 +267,7 @@ func Catalog() []Entry {
 			"tmux", "exact:tmux", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/tmux", "NewSeamBackedWithConfig"),
-				time.Date(2026, time.September, 7, 0, 0, 0, 0, time.UTC),
+				time.Date(2026, time.September, 14, 0, 0, 0, 0, time.UTC),
 				"the existing full conformance run skips when the tmux executable is absent",
 			),
 		),
@@ -343,6 +355,15 @@ func provedRuntimeScoped(constructor SymbolRef, file, test, scope string, allowe
 // validator allows): a long horizon hides a stalled contract behind a
 // green run, while a short one puts the question back in front of the
 // owner while the context is still fresh.
+//
+// Independent literals are necessary but not sufficient, so two rules
+// keep the cliff from re-forming. Validate rejects more than
+// maxWaiversPerExpiryDate waivers on any one date, so a single lapse can
+// never take the whole ledger with it. WaiverRunway then warns
+// waiverRunwayWindow ahead of each expiry, and the nightly workflow
+// promotes that warning to a failure. A new date should therefore leave
+// at least a full window of runway and land somewhere that is not
+// already carrying its share of the ledger.
 func waivedRuntime(constructor SymbolRef, expires time.Time, reason string) ContractClaim {
 	return ContractClaim{
 		Constructor: constructor,
@@ -499,7 +520,82 @@ func Validate(entries []Entry, now time.Time) error {
 		}
 	}
 
+	problems = append(problems, validateWaiverExpirySpread(entries)...)
+
 	return joinProblems(problems)
+}
+
+// validateWaiverExpirySpread reports expiry dates carrying more waivers than
+// maxWaiversPerExpiryDate, so no single date can take the whole ledger down.
+func validateWaiverExpirySpread(entries []Entry) []string {
+	counts := make(map[string]int)
+	var order []string
+	for _, claim := range waivedClaims(entries) {
+		day := claim.Waiver.Expires.Format("2006-01-02")
+		if counts[day] == 0 {
+			order = append(order, day)
+		}
+		counts[day]++
+	}
+
+	sort.Strings(order)
+	var problems []string
+	for _, day := range order {
+		if counts[day] > maxWaiversPerExpiryDate {
+			problems = append(problems, fmt.Sprintf(
+				"%d waivers share expiry %s, at most %d may: stagger the dates so one lapse cannot fail the whole ledger",
+				counts[day], day, maxWaiversPerExpiryDate,
+			))
+		}
+	}
+	return problems
+}
+
+// WaiverRunwayMarker prefixes every runway warning so a log sweep, a CI
+// annotation, or a human reading test output can grep for one string.
+const WaiverRunwayMarker = "WAIVER RUNWAY WARNING:"
+
+// WaiverRunway reports every waiver whose expiry falls inside
+// waiverRunwayWindow of now, as advisory warnings rather than as an error.
+//
+// The tiers are deliberately split. An already-expired waiver is a hard
+// Validate failure, because a lapsed waiver means an unproved production
+// constructor is shipping unaccounted for. Approaching expiry is only a
+// warning: failing the baseline on the passage of time alone would rebuild
+// the very outage this package exists to prevent (GitHub #5195), just with
+// a shorter fuse. Callers that want the warnings to be fatal opt in — the
+// nightly workflow does, so the reminder lands on a schedule instead of on
+// whoever happens to push that morning.
+func WaiverRunway(entries []Entry, now time.Time) []string {
+	deadline := now.Add(waiverRunwayWindow)
+	var warnings []string
+	for _, waived := range waivedClaims(entries) {
+		expires := waived.Waiver.Expires
+		// Already-expired waivers belong to Validate's hard tier, not here.
+		if expires.After(deadline) || !expires.After(now) {
+			continue
+		}
+		warnings = append(warnings, fmt.Sprintf(
+			"%s %s waiver owned by %s expires %s (%d days remaining): renew the waiver or land the contract",
+			WaiverRunwayMarker, renderSymbolRef(waived.Constructor), waived.Waiver.Owner,
+			expires.Format("2006-01-02"), int(expires.Sub(now).Hours()/24),
+		))
+	}
+	sort.Strings(warnings)
+	return warnings
+}
+
+// waivedClaims returns every waived claim across entries.
+func waivedClaims(entries []Entry) []ContractClaim {
+	var claims []ContractClaim
+	for _, entry := range entries {
+		for _, claim := range entry.Claims {
+			if claim.Waiver != nil && !claim.Waiver.Expires.IsZero() {
+				claims = append(claims, claim)
+			}
+		}
+	}
+	return claims
 }
 
 func hasRole(roles []Role, want Role) bool {

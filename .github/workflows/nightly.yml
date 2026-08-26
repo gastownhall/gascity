@@ -102,6 +102,26 @@ jobs:
       - name: Acceptance tests (SQLite coordination store, Tier A)
         run: make test-acceptance
 
+  # Catches calendar-side drift: a runtime-provider waiver approaching its
+  # expiry does not fail the baseline, so nothing in a normal PR run surfaces
+  # it until it has already lapsed and turned every branch red (#5195). This
+  # job promotes the advance warning to a failure on a schedule instead.
+  waiver-runway:
+    name: Runtime provider waiver runway
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+
+      - name: Warn on waivers approaching expiry
+        env:
+          GC_WAIVER_RUNWAY_STRICT: '1'
+        run: go test ./internal/testutil/providerledger/ -run TestCatalogMatchesProductionWiringAndDocumentation -count=1
+
   # Catches registry-side drift: a new gastown release published to
   # gascity-packs makes the local pins stale without any PR to trigger
   # the pack-gate pin check in ci.yml.

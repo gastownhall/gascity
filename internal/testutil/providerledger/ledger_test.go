@@ -1,6 +1,7 @@
 package providerledger
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1544,8 +1545,15 @@ func TestValidateSourceRefsBindsManualCompositionConstructor(t *testing.T) {
 func TestCatalogMatchesProductionWiringAndDocumentation(t *testing.T) {
 	root := repoRoot(t)
 	entries := Catalog()
-	if err := Validate(entries, time.Now().UTC()); err != nil {
+	now := time.Now().UTC()
+	if err := Validate(entries, now); err != nil {
 		t.Fatalf("Validate(Catalog): %v", err)
+	}
+	for _, warning := range WaiverRunway(entries, now) {
+		t.Log(warning)
+		if os.Getenv("GC_WAIVER_RUNWAY_STRICT") == "1" {
+			t.Errorf("%s", warning)
+		}
 	}
 
 	runtimeSource, err := os.ReadFile(filepath.Join(root, "cmd/gc/runtime_registry.go"))
@@ -1740,5 +1748,106 @@ func repoRoot(t *testing.T) string {
 			t.Fatal("could not find repository root")
 		}
 		dir = parent
+	}
+}
+
+func waivedFixtureEntry(id, key string, expires time.Time) Entry {
+	return validRuntimeEntry(id, key, ContractClaim{
+		Constructor: repoSymbol("internal/runtime/fixture", "New"),
+		Contract:    ContractRuntimeProvider,
+		Disposition: DispositionWaived,
+		Waiver: &Waiver{
+			Owner:   "example-owner",
+			Expires: expires,
+			Reason:  "tracked contract gap",
+		},
+	})
+}
+
+func TestValidateRejectsWaiverExpiryCluster(t *testing.T) {
+	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	shared := now.Add(30 * 24 * time.Hour)
+
+	entries := make([]Entry, 0, maxWaiversPerExpiryDate+1)
+	for i := 0; i <= maxWaiversPerExpiryDate; i++ {
+		entries = append(entries, waivedFixtureEntry(
+			fmt.Sprintf("runtime.fixture.%d", i),
+			fmt.Sprintf("exact:fixture%d", i),
+			shared,
+		))
+	}
+
+	err := Validate(entries, now)
+	if err == nil || !strings.Contains(err.Error(), "waivers share expiry 2026-08-12") {
+		t.Fatalf("Validate() error = %v, want clustered-expiry error", err)
+	}
+
+	entries[len(entries)-1].Claims[0].Waiver.Expires = shared.Add(24 * time.Hour)
+	if err := Validate(entries, now); err != nil {
+		t.Fatalf("Validate(staggered) error = %v, want nil", err)
+	}
+}
+
+func TestWaiverRunwayWarnsBeforeExpiryWithoutFailing(t *testing.T) {
+	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+
+	comfortable := waivedFixtureEntry("runtime.fixture.far", "exact:fixturefar", now.Add(waiverRunwayWindow+48*time.Hour))
+	if warnings := WaiverRunway([]Entry{comfortable}, now); len(warnings) != 0 {
+		t.Fatalf("WaiverRunway(comfortable) = %v, want none", warnings)
+	}
+
+	imminent := waivedFixtureEntry("runtime.fixture.near", "exact:fixturenear", now.Add(waiverRunwayWindow-48*time.Hour))
+	warnings := WaiverRunway([]Entry{imminent}, now)
+	if len(warnings) != 1 {
+		t.Fatalf("WaiverRunway(imminent) = %v, want exactly one warning", warnings)
+	}
+	for _, want := range []string{
+		WaiverRunwayMarker,
+		"internal/runtime/fixture.New",
+		"example-owner",
+		"2026-07-25",
+		"12 days remaining",
+		"renew the waiver or land the contract",
+	} {
+		if !strings.Contains(warnings[0], want) {
+			t.Fatalf("WaiverRunway(imminent) = %q, want containing %q", warnings[0], want)
+		}
+	}
+
+	// An approaching expiry must never fail validation on its own: only an
+	// actually-lapsed waiver is a hard failure.
+	if err := Validate([]Entry{imminent}, now); err != nil {
+		t.Fatalf("Validate(imminent) error = %v, want nil", err)
+	}
+}
+
+func TestValidateStillFailsExpiredWaiver(t *testing.T) {
+	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	expired := waivedFixtureEntry("runtime.fixture.gone", "exact:fixturegone", now.Add(-time.Hour))
+
+	err := Validate([]Entry{expired}, now)
+	if err == nil || !strings.Contains(err.Error(), "waiver owned by example-owner expired") {
+		t.Fatalf("Validate(expired) error = %v, want expired-waiver error", err)
+	}
+}
+
+// TestProductionCatalogHasRunwayAtEveryStaggerStep pins the property the
+// baseline depends on: the ledger check must stay green as each staggered
+// expiry approaches, so the passage of time alone can never turn the
+// repository red (GitHub #5195).
+func TestProductionCatalogHasRunwayAtEveryStaggerStep(t *testing.T) {
+	entries := Catalog()
+	for _, day := range []time.Time{
+		time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC),
+		time.Date(2026, time.September, 15, 12, 0, 0, 0, time.UTC),
+		time.Date(2026, time.October, 13, 12, 0, 0, 0, time.UTC),
+	} {
+		warnings := WaiverRunway(entries, day)
+		if len(warnings) == 0 {
+			t.Errorf("WaiverRunway(Catalog, %s) = none, want an advance warning", day.Format("2006-01-02"))
+		}
+		for _, warning := range warnings {
+			t.Logf("%s: %s", day.Format("2006-01-02"), warning)
+		}
 	}
 }

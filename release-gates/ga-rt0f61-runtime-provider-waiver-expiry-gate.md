@@ -35,7 +35,11 @@ ANCESTRY_SCOPE=PASS
 2. `git grep 'ga-80po0c' HEAD -- internal/testutil/providerledger` returns no match.
 3. `runtimeWaiverExpiry` is absent. The eight production waiver claims each pass
    an expiry literal directly to `waivedRuntime`, and the generated table names
-   `ga-uz5t3a` through `2026-09-07` for all eight runtime constructors.
+   `ga-uz5t3a` as owner. The eight expiries are staggered in pairs across four
+   dates so no single lapse can fail the whole ledger: `2026-09-14` (acp,
+   tmux), `2026-09-28` (herdr, ssh), `2026-10-12` (both t3bridge claims), and
+   `2026-10-26` (k8s, hybrid). `Validate` enforces the spread, and
+   `WaiverRunway` warns ahead of each date.
 
 ## Test evidence
 
