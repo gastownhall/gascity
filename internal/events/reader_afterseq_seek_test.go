@@ -151,6 +151,99 @@ func TestReadFilteredAfterSeqEquivalence(t *testing.T) {
 	}
 }
 
+// writeRawSeqLog writes one JSON line per entry in seqs, in order, with no
+// requirement that seqs be increasing. Models a log corrupted by a stale
+// post-rotation writer or a torn write, where seq no longer tracks byte
+// offset.
+func writeRawSeqLog(t *testing.T, seqs []uint64) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var sb strings.Builder
+	for _, seq := range seqs {
+		fmt.Fprintf(&sb, `{"seq":%d,"type":"a","ts":"2026-08-25T00:00:00Z","actor":"t","subject":"s%d"}`+"\n", seq, seq)
+	}
+	if err := os.WriteFile(path, []byte(sb.String()), 0o644); err != nil {
+		t.Fatalf("write log: %v", err)
+	}
+	return path
+}
+
+// TestActiveScanStartNonMonotonicReversal pins the fix for gastownhall/gascity#5650:
+// a log whose tail seq sits below its head seq (the shape a stale
+// post-rotation file descriptor produces, per the issue's reachability
+// analysis) must not let activeScanStart's sort.Search fast path silently
+// convince ReadFiltered to skip records that are still owed to the caller.
+// activeScanStart must fall back to a full scan (offset 0) rather than trust
+// a boundary computed against a non-monotone predicate.
+func TestActiveScanStartNonMonotonicReversal(t *testing.T) {
+	seqs := []uint64{10, 11, 12, 1, 2, 3}
+	path := writeRawSeqLog(t, seqs)
+
+	for _, tc := range []struct {
+		after uint64
+		want  []uint64
+	}{
+		{after: 10, want: []uint64{11, 12}},
+		{after: 11, want: []uint64{12}},
+	} {
+		f, err := os.Open(path)
+		if err != nil {
+			t.Fatalf("open: %v", err)
+		}
+		st, err := f.Stat()
+		if err != nil {
+			f.Close() //nolint:errcheck // test cleanup
+			t.Fatalf("stat: %v", err)
+		}
+		if got := activeScanStart(f, st.Size(), tc.after); got != 0 {
+			t.Errorf("after=%d: activeScanStart = %d, want 0 (full scan fallback on reversed tail)", tc.after, got)
+		}
+		f.Close() //nolint:errcheck // test cleanup
+
+		got, err := ReadFiltered(path, Filter{AfterSeq: tc.after})
+		if err != nil {
+			t.Fatalf("after=%d: ReadFiltered: %v", tc.after, err)
+		}
+		if len(got) != len(tc.want) {
+			t.Fatalf("after=%d: got %d events, want %d (%v)", tc.after, len(got), len(tc.want), tc.want)
+		}
+		for i, w := range tc.want {
+			if got[i].Seq != w {
+				t.Errorf("after=%d: event %d seq=%d, want %d", tc.after, i, got[i].Seq, w)
+			}
+		}
+	}
+}
+
+// TestActiveScanStartInteriorSpikeResidualGap documents a known, accepted gap
+// left open by the gastownhall/gascity#5650 hardening: activeScanStart's
+// head/tail consistency check (see TestActiveScanStartNonMonotonicReversal)
+// can only detect non-monotonicity that is visible at the file's endpoints.
+// A single out-of-order record whose value falls strictly between the head
+// and tail seq -- an interior spike -- is information-theoretically
+// indistinguishable, from just the head and tail, from a healthy log whose
+// cursor happens to have caught up to the tail (activeScanStartTest already
+// pins that a caught-up cursor must still return size, not 0). Detecting an
+// interior spike would require scanning the file, which is exactly the cost
+// the optimization exists to avoid. This test pins the current, documented
+// behavior rather than asserting a fix that cannot exist at this cost.
+func TestActiveScanStartInteriorSpikeResidualGap(t *testing.T) {
+	path := writeRawSeqLog(t, []uint64{1, 2, 3, 100, 4, 5, 6})
+
+	got, err := ReadFiltered(path, Filter{AfterSeq: 6})
+	if err != nil {
+		t.Fatalf("ReadFiltered: %v", err)
+	}
+	// The correct answer per the issue's repro is [100]; the head/tail check
+	// cannot see it (head=1, tail=6 look perfectly healthy), so the fast path
+	// still skips the file. Recorded here so a future, stronger fix has a
+	// test to flip rather than a silent regression to catch.
+	if len(got) != 0 {
+		t.Fatalf("got %d events %v, want 0 (documenting the residual gap -- if this now finds [100], update this test to assert the fix and delete this comment)", len(got), got)
+	}
+}
+
 // TestReadFilteredAfterSeqMalformedLines pins that the seek path degrades to a
 // correct result when the log contains unparseable lines, which the scanner has
 // always tolerated by skipping.
