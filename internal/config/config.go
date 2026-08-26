@@ -720,6 +720,9 @@ type AgentOverride struct {
 	// SleepAfterIdle overrides idle sleep policy for this agent. Accepts a
 	// duration string (e.g., "30s") or "off".
 	SleepAfterIdle *string `toml:"sleep_after_idle,omitempty"`
+	// AutoReclaimStaleClaims overrides Agent.AutoReclaimStaleClaims (see that
+	// field for semantics).
+	AutoReclaimStaleClaims *bool `toml:"auto_reclaim_stale_claims,omitempty"`
 	// InstallAgentHooks overrides the agent's install_agent_hooks list.
 	InstallAgentHooks []string `toml:"install_agent_hooks,omitempty"`
 	// Skills is a tombstone field retained for v0.15.1 backwards
@@ -3367,6 +3370,11 @@ type Agent struct {
 	// SleepAfterIdle overrides idle sleep policy for this agent. Accepts a
 	// duration string (e.g., "30s") or "off".
 	SleepAfterIdle string `toml:"sleep_after_idle,omitempty"`
+	// AutoReclaimStaleClaims opts this agent into gc hook --claim attempting
+	// a scoped stale-lease reclaim (via `bd reclaim --id`) when a
+	// route-matched candidate's only claim blocker is an existing assignee.
+	// Off by default; staleness is decided entirely by bd's own lease TTL.
+	AutoReclaimStaleClaims bool `toml:"auto_reclaim_stale_claims,omitempty"`
 	// InstallAgentHooks overrides workspace-level install_agent_hooks for this agent.
 	// When set, replaces (not adds to) the workspace default.
 	InstallAgentHooks []string `toml:"install_agent_hooks,omitempty"`

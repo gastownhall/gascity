@@ -1221,3 +1221,36 @@ func sliceEqual(a, b []string) bool {
 	}
 	return true
 }
+
+// TestApplyPatches_AgentAutoReclaimStaleClaims covers ga-7rj87d FR1/NFR4: the
+// flag is opt-in per agent and must flow through the AgentPatch merge path
+// (ApplyPatches -> applyAgentPatchFields -> applyAgentMutation).
+func TestApplyPatches_AgentAutoReclaimStaleClaims(t *testing.T) {
+	cfg := &City{
+		Agents: []Agent{
+			{Name: "polecat", Dir: "hw"},
+		},
+	}
+	err := ApplyPatches(cfg, Patches{
+		Agents: []AgentPatch{
+			{Dir: "hw", Name: "polecat", AutoReclaimStaleClaims: ptrBool(true)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ApplyPatches: %v", err)
+	}
+	if !cfg.Agents[0].AutoReclaimStaleClaims {
+		t.Error("polecat should have AutoReclaimStaleClaims enabled after patch")
+	}
+}
+
+// TestApplyAgentOverride_AutoReclaimStaleClaims covers the rig-override merge
+// path (applyAgentOverride), the second of the two merge entry points the
+// AGENTS.md field-sync ritual requires alongside AgentPatch.
+func TestApplyAgentOverride_AutoReclaimStaleClaims(t *testing.T) {
+	a := &Agent{Name: "polecat"}
+	applyAgentOverride(a, &AgentOverride{AutoReclaimStaleClaims: ptrBool(true)})
+	if !a.AutoReclaimStaleClaims {
+		t.Error("AutoReclaimStaleClaims should be true after applyAgentOverride")
+	}
+}

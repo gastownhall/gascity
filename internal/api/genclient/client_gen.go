@@ -966,6 +966,7 @@ type AgentPatch struct {
 	Args                    *[]string         `json:"Args"`
 	AssignedWorkDeferLimit  *int64            `json:"AssignedWorkDeferLimit"`
 	Attach                  *bool             `json:"Attach"`
+	AutoReclaimStaleClaims  *bool             `json:"AutoReclaimStaleClaims"`
 	DefaultSlingFormula     *string           `json:"DefaultSlingFormula"`
 	DependsOn               *[]string         `json:"DependsOn"`
 	Dir                     string            `json:"Dir"`

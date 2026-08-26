@@ -1242,3 +1242,13 @@ func readFile(t *testing.T, path string) string {
 	}
 	return string(data)
 }
+
+// TestAgentConfigFromAgentCarriesAutoReclaimStaleClaims covers ga-7rj87d
+// NFR4: the new opt-in flag must survive the persisted-config projection
+// (agentConfigFromAgent) alongside the rest of Agent's patchable surface.
+func TestAgentConfigFromAgentCarriesAutoReclaimStaleClaims(t *testing.T) {
+	got := agentConfigFromAgent(config.Agent{AutoReclaimStaleClaims: true})
+	if !got.AutoReclaimStaleClaims {
+		t.Error("agentConfigFromAgent should carry AutoReclaimStaleClaims through to the persisted agentFile")
+	}
+}

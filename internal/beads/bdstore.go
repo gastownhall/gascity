@@ -1812,6 +1812,18 @@ func (s *BdStore) Claim(id string) (Bead, bool, error) {
 	return claimed, true, nil
 }
 
+// ReclaimStale attempts a scoped stale-lease reclaim for exactly the given
+// bead ID via `bd reclaim --id <id> --json`. It reports whether a reclaim
+// happened and, if so, the previous owner. Staleness itself is decided
+// entirely by bd's own lease-TTL machinery -- this method makes no judgment
+// call of its own (ga-7rj87d NFR3).
+//
+// TDD-RED scaffolding (ga-7rj87d): signature only. Implemented in this
+// bead's GREEN step.
+func (s *BdStore) ReclaimStale(_ string) (bool, string, error) {
+	return false, "", errors.New("BdStore.ReclaimStale: not yet implemented (ga-7rj87d GREEN)")
+}
+
 func parseBDMutationBead(op string, out []byte) (Bead, error) {
 	issues, parseErr := parseIssuesTolerant(extractJSON(out))
 	if parseErr == nil && len(issues) > 0 {

@@ -62,6 +62,7 @@ export type AgentPatch = {
     Args: Array<string> | null;
     AssignedWorkDeferLimit: number | null;
     Attach: boolean | null;
+    AutoReclaimStaleClaims: boolean | null;
     DefaultSlingFormula: string | null;
     DependsOn: Array<string> | null;
     Dir: string;

@@ -181,6 +181,12 @@
               "null"
             ]
           },
+          "AutoReclaimStaleClaims": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "DefaultSlingFormula": {
             "type": [
               "string",
@@ -533,6 +539,7 @@
           "MaxSessionAgeJitter",
           "AssignedWorkDeferLimit",
           "SleepAfterIdle",
+          "AutoReclaimStaleClaims",
           "InstallAgentHooks",
           "Skills",
           "MCP",

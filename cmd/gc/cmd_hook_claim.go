@@ -156,6 +156,10 @@ type hookClaimOptions struct {
 	Env                []string
 	DrainAck           bool
 	JSON               bool
+	// AutoReclaimStaleClaims opts into a scoped stale-lease reclaim attempt
+	// (ga-7rj87d) when a route-matched candidate's only claim blocker is an
+	// existing assignee. Off by default; wired from config.Agent.
+	AutoReclaimStaleClaims bool
 }
 
 // continuationPinAssignee returns the identity a continuation sibling is pinned
@@ -248,6 +252,14 @@ type hookClaimOps struct {
 	// not-found from ONE leg be checked against the others before it opens the
 	// escalation. See claim_class_route.go.
 	ClassRoute *hookClaimClassRoute
+	// ReclaimStale attempts a scoped stale-lease reclaim (ga-7rj87d FR1/FR2)
+	// for exactly one candidate bead ID. Only consulted when
+	// hookClaimOptions.AutoReclaimStaleClaims is set.
+	ReclaimStale hookClaimReclaimFunc
+	// EmitHookClaimReclaimedStale publishes hook.claim.reclaimed_stale
+	// (ga-7rj87d FR5) after a successful reclaim-then-claim in the same
+	// cycle. Best-effort, like the other Emit* seams.
+	EmitHookClaimReclaimedStale func(beadID, previousOwner, newAssignee string)
 }
 
 type (
@@ -262,6 +274,10 @@ type (
 	hookStampSessionClaimFunc  func(sessionID, beadID string) error
 	hookPublishRunMapFunc      func(runID, beadID string, sessionKeys ...string) error
 	hookClaimReleaseFunc       func(ctx context.Context, dir string, env []string, beadID, assignee string) (bool, error)
+	// hookClaimReclaimFunc attempts a scoped stale-lease reclaim for exactly
+	// one bead ID (ctx, dir, env, beadID) and reports whether it reclaimed
+	// the lease and, if so, the previous owner.
+	hookClaimReclaimFunc func(context.Context, string, []string, string) (bool, string, error)
 )
 
 type hookClaimJSONResult struct {
