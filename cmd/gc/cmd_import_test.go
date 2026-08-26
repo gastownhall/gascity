@@ -1121,7 +1121,7 @@ trigger = "manual"
 		"packs/ops/orders/nightly/order.toml",
 		// The install is not rolled back, so the failure must say what is
 		// already on disk rather than reading as "nothing was installed".
-		"packs.lock are on disk",
+		"packs.lock is written",
 	} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Fatalf("stderr = %q, want substring %q", stderr.String(), want)
