@@ -125,9 +125,14 @@ type LoadOptions struct {
 	// discovery, shell completion — set this and degrade to "no pack state
 	// right now"; a load whose result the caller acts on must leave it false
 	// and wait, because a busy cache would otherwise read as an empty one.
-	RepoCacheNonBlocking    bool
-	deferRigPatches         bool
-	deferredRigPatches      *[]deferredRigPatches
+	RepoCacheNonBlocking bool
+	deferRigPatches      bool
+	deferredRigPatches   *[]deferredRigPatches
+	// hoistedCityFormulaDirs collects the formulas/ dirs of rig-scope packs
+	// that contributed a city-scoped agent or named session. Hoisting the
+	// agent without its formulas leaves it unable to resolve the formula it
+	// executes (gs-gd0z), so the dirs are promoted to the city layer too.
+	hoistedCityFormulaDirs  *[]string
 	allowLegacyOrderLayouts bool
 }
 
@@ -579,10 +584,14 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	// deferred so they still run after city-level [[patches.agent]].
 	rigFormulaDirs := make(map[string][]string)
 	var deferredRigPatches []deferredRigPatches
+	// Formulas of rig-scope packs that contributed a city-scoped agent. They
+	// join the city layer so the hoisted agent can resolve them (gs-gd0z).
+	var hoistedCityFormulaDirs []string
 	if HasPackRigs(root.Rigs) {
 		rigPackOpts := opts
 		rigPackOpts.deferRigPatches = true
 		rigPackOpts.deferredRigPatches = &deferredRigPatches
+		rigPackOpts.hoistedCityFormulaDirs = &hoistedCityFormulaDirs
 		if err := expandPacks(root, fs, cityRoot, rigFormulaDirs, rigPackOpts); err != nil {
 			return nil, nil, fmt.Errorf("expanding packs: %w", err)
 		}
@@ -693,6 +702,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	// Always use FormulasDir() which defaults to "formulas" when
 	// [formulas] is not explicitly configured in city.toml.
 	cityLocalFormulas := citylayout.ResolveFormulasDir(cityRoot, root.FormulasDir())
+	cityTopoFormulas = appendUnique(cityTopoFormulas, hoistedCityFormulaDirs...)
 	root.FormulaLayers = ComputeFormulaLayers(
 		cityTopoFormulas, cityLocalFormulas, rigFormulaDirs, root.Rigs, cityRoot)
 

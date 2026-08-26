@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -5467,4 +5468,117 @@ func mustResolvedPackNames(t *testing.T, includes []string, imports map[string]I
 		t.Fatalf("resolvedPackNames: %v", err)
 	}
 	return names
+}
+
+// TestHoistedCityAgentSeesItsPackFormulas verifies that when a pack reached
+// only through a RIG import contributes a city-scoped agent, that pack's
+// formulas dir is hoisted to the city formula layer alongside the agent.
+//
+// Without this, the hoist is half-done: the agent registers at city scope but
+// the formula it executes stays in the rig layer, so the agent can never
+// resolve it. That is how gs-gd0z stopped the deacon — city.toml moved the
+// gastown import from city defaults to the celilo rig, the deacon hoisted to
+// city scope as designed, and mol-deacon-patrol did not follow it.
+func TestHoistedCityAgentSeesItsPackFormulas(t *testing.T) {
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	packDir := filepath.Join(dir, "town")
+	mustMkdirAll(t, cityDir, 0o755)
+	mustMkdirAll(t, packDir, 0o755)
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+
+[[rigs]]
+name = "onerig"
+path = "/tmp/onerig"
+
+[rigs.imports.town]
+source = "../town"
+`)
+	writeTestFile(t, packDir, "pack.toml", `
+[pack]
+name = "town"
+schema = 2
+
+[[agent]]
+name = "deacon"
+scope = "city"
+
+[[agent]]
+name = "witness"
+scope = "rig"
+`)
+	writeTestFile(t, packDir, "formulas/mol-deacon-patrol.toml", "formula = \"mol-deacon-patrol\"\n")
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	var deacon *Agent
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Name == "deacon" {
+			deacon = &cfg.Agents[i]
+		}
+	}
+	if deacon == nil {
+		t.Fatalf("city-scoped deacon was not hoisted; agents: %v", agentNamesOf(cfg.Agents))
+	}
+	if deacon.Dir != "" {
+		t.Fatalf("hoisted deacon dir = %q, want \"\" (city scope)", deacon.Dir)
+	}
+
+	formulaDir := filepath.Join(packDir, "formulas")
+	if !slices.Contains(cfg.FormulaLayers.City, formulaDir) {
+		t.Fatalf("hoisted city agent cannot resolve its own pack formulas:\n  want %q in city layer\n  got  %v",
+			formulaDir, cfg.FormulaLayers.City)
+	}
+}
+
+// TestRigOnlyPackWithoutCityAgentsKeepsFormulasAtRigScope is the negative
+// half: a rig-imported pack with NO city-scoped agents must not leak its
+// formulas to the city layer. Only the hoist justifies the promotion.
+func TestRigOnlyPackWithoutCityAgentsKeepsFormulasAtRigScope(t *testing.T) {
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	packDir := filepath.Join(dir, "rigonly")
+	mustMkdirAll(t, cityDir, 0o755)
+	mustMkdirAll(t, packDir, 0o755)
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+
+[[rigs]]
+name = "onerig"
+path = "/tmp/onerig"
+
+[rigs.imports.rigonly]
+source = "../rigonly"
+`)
+	writeTestFile(t, packDir, "pack.toml", `
+[pack]
+name = "rigonly"
+schema = 2
+
+[[agent]]
+name = "witness"
+scope = "rig"
+`)
+	writeTestFile(t, packDir, "formulas/mol-witness-patrol.toml", "formula = \"mol-witness-patrol\"\n")
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	formulaDir := filepath.Join(packDir, "formulas")
+	if slices.Contains(cfg.FormulaLayers.City, formulaDir) {
+		t.Fatalf("rig-only pack leaked formulas to city layer: %v", cfg.FormulaLayers.City)
+	}
+	if !slices.Contains(cfg.FormulaLayers.Rigs["onerig"], formulaDir) {
+		t.Fatalf("rig-imported pack formulas missing from rig layer: %v", cfg.FormulaLayers.Rigs["onerig"])
+	}
 }

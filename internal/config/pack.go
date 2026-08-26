@@ -214,8 +214,9 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 
 			// Keep only rig-scoped and unscoped agents for rig expansion;
 			// hoist city-scoped ones to city scope instead of dropping them.
-			hoistedAgents = append(hoistedAgents, hoistCityScopedAgents(agents)...)
-			hoistedNamedSessions = append(hoistedNamedSessions, hoistCityScopedNamedSessions(namedSessions)...)
+			ha, hns := hoistCityScopeFromRigPack(agents, namedSessions, topoDirs, fs, opts)
+			hoistedAgents = append(hoistedAgents, ha...)
+			hoistedNamedSessions = append(hoistedNamedSessions, hns...)
 			agents = filterAgentsByScope(agents, false)
 			namedSessions = filterNamedSessionsByScope(namedSessions, false)
 
@@ -419,8 +420,9 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 
 				// Hoist city-scoped agents/sessions to city scope instead of
 				// dropping them at the rig-import boundary.
-				hoistedAgents = append(hoistedAgents, hoistCityScopedAgents(agents)...)
-				hoistedNamedSessions = append(hoistedNamedSessions, hoistCityScopedNamedSessions(namedSessions)...)
+				ha, hns := hoistCityScopeFromRigPack(agents, namedSessions, topoDirs, fs, opts)
+				hoistedAgents = append(hoistedAgents, ha...)
+				hoistedNamedSessions = append(hoistedNamedSessions, hns...)
 				agents = filterAgentsByScope(agents, false)
 				namedSessions = filterNamedSessionsByScope(namedSessions, false)
 
@@ -2664,6 +2666,37 @@ func hoistCityScopedNamedSessions(sessions []NamedSession) []NamedSession {
 		hoisted = append(hoisted, s)
 	}
 	return hoisted
+}
+
+// hoistCityScopeFromRigPack hoists the city-scoped agents and named sessions
+// of a pack reached through a rig include/import, and — when it hoisted
+// anything — promotes that pack's formulas/ dirs to the city formula layer.
+//
+// Hoisting an agent without its formulas leaves the agent registered at city
+// scope while the formula it executes stays in the rig layer, where the agent
+// never looks. That half-hoist stopped the deacon in gs-gd0z: moving a pack
+// import from city defaults to a single rig kept the deacon at city scope and
+// left mol-deacon-patrol behind, so every patrol cycle failed to pour.
+//
+// A pack with no city-scoped agents promotes nothing; only the hoist justifies
+// widening the formula layer.
+func hoistCityScopeFromRigPack(agents []Agent, namedSessions []NamedSession, topoDirs []string, fs fsys.FS, opts LoadOptions) ([]Agent, []NamedSession) {
+	hoistedAgents := hoistCityScopedAgents(agents)
+	hoistedSessions := hoistCityScopedNamedSessions(namedSessions)
+	if len(hoistedAgents) == 0 && len(hoistedSessions) == 0 {
+		return hoistedAgents, hoistedSessions
+	}
+	if opts.hoistedCityFormulaDirs == nil {
+		return hoistedAgents, hoistedSessions
+	}
+	for _, td := range topoDirs {
+		fd := filepath.Join(td, "formulas")
+		if _, err := fs.Stat(fd); err != nil {
+			continue
+		}
+		*opts.hoistedCityFormulaDirs = appendUnique(*opts.hoistedCityFormulaDirs, fd)
+	}
+	return hoistedAgents, hoistedSessions
 }
 
 // mergeHoistedCityAgents appends hoisted city-scoped agents to the city
