@@ -8,6 +8,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/beads"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
 // A claim must name the OCCUPANT of a pool slot, not the slot.
@@ -219,5 +223,74 @@ func TestCmdHookClaimAliasedSessionStillClaimsUnderItsAlias(t *testing.T) {
 	}
 	if result.Assignee != alias {
 		t.Fatalf("claim assignee = %q, want the alias %q unchanged", result.Assignee, alias)
+	}
+}
+
+// TestPoolWorkerClaimIdentityDistinguishesOccupantsOfOneSlot is the guard the
+// existing pool-slot pins could not be: an ABSOLUTE property rather than a
+// relative one.
+//
+// The pins in pool_slot_unaliased_test.go compare one derived value against
+// another derived value ("GC_AGENT == tp.SessionName") or against a literal
+// fixture already written in the good shape. Both stayed green through #5372,
+// which changed poolRuntimeSessionName from a bead-ID-bearing name to the
+// slot-derived "<identity>-pool" step-aside. GC_AGENT still equalled the
+// session name; the session name had simply stopped identifying an occupant.
+//
+// The invariant that does not depend on any naming scheme: a pool slot is a
+// CHAIR, and every session that sits in it spawns with the same runtime name.
+// Two distinct incarnations must therefore never claim work under the same
+// string, or "is the holder still alive?" becomes a question about the chair
+// and every reader answers yes while the occupant is gone.
+//
+// So: seed two successive occupants of ONE derived chair, run each through the
+// real runtime-env projection, and require the claim identities to differ.
+// Any assignee that is a pure function of (config, identity, template, slot)
+// fails this by construction, whatever that function is.
+func TestPoolWorkerClaimIdentityDistinguishesOccupantsOfOneSlot(t *testing.T) {
+	cfg := transientSlotPoolConfig()
+
+	// The chair, derived the way production derives it -- not a literal.
+	chair := poolRuntimeSessionName(cfg, "rig/claude-1", "rig/claude", true)
+	if strings.TrimSpace(chair) == "" {
+		t.Fatal("poolRuntimeSessionName returned an empty runtime name")
+	}
+
+	seen := map[string]string{}
+	for _, beadID := range []string{"gcg-session-first", "gcg-session-second"} {
+		info := sessiontest.SeedBead(t, beads.Bead{
+			ID:     beadID,
+			Type:   sessionBeadType,
+			Status: "open",
+			Labels: []string{sessionBeadLabel, "agent:rig/claude-1"},
+			Metadata: map[string]string{
+				"template":             "rig/claude",
+				"agent_name":           "rig/claude-1",
+				"session_name":         chair,
+				"pool_slot":            "1",
+				poolManagedMetadataKey: boolMetadata(true),
+			},
+		})
+
+		env := sessionpkg.RuntimeEnvWithSessionContext(info, 1, 1, "tok")
+		if env["GC_SESSION_ID"] != beadID {
+			t.Fatalf("%s: GC_SESSION_ID = %q, want the session bead id -- the claim reads the occupant from here",
+				beadID, env["GC_SESSION_ID"])
+		}
+
+		assignee := hookClaimAssigneeIdentity(env["GC_ALIAS"], env["GC_SESSION_ID"], env["GC_AGENT"], "", env["GC_SESSION_NAME"])
+		if assignee == chair {
+			t.Fatalf("%s claimed under the chair %q: that string is shared by every occupant of pool slot 1, "+
+				"so a liveness read about the holder answers about the slot instead", beadID, assignee)
+		}
+		if assignee != beadID {
+			t.Fatalf("%s: claim assignee = %q, want the session bead id -- sessionBeadAssigneeIdentities leads with "+
+				"bead.ID, so it is the one form every reader resolves back to a single incarnation", beadID, assignee)
+		}
+		if prior, dup := seen[assignee]; dup {
+			t.Fatalf("occupants %s and %s both claim under %q: distinct incarnations of one chair must be distinguishable",
+				prior, beadID, assignee)
+		}
+		seen[assignee] = beadID
 	}
 }
