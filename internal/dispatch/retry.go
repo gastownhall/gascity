@@ -67,9 +67,10 @@ func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (
 	if subject.Status != "closed" {
 		return ControlResult{}, ErrControlPending
 	}
+	subjectID := subject.ID
 	subject, err = resolveRetrySubjectOutcome(store, subject, bead.ID, opts)
 	if err != nil {
-		return ControlResult{}, fmt.Errorf("%s: resolving retry subject outcome for %s: %w", bead.ID, subject.ID, err)
+		return ControlResult{}, fmt.Errorf("%s: resolving retry subject outcome for %s: %w", bead.ID, subjectID, err)
 	}
 
 	result, err := classifyRetryAttemptWithPostconditions(store, subject, opts)
