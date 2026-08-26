@@ -7883,28 +7883,28 @@ func TestDeleteWorkflowMatchesRefusesABindingThatWillNotDelete(t *testing.T) {
 	}
 }
 
-// unhonouredCloseStore reports a close count it did not apply, which is the one
+// unhonoredCloseStore reports a close count it did not apply, which is the one
 // store shape the verification pass exists for.
 //
 // A store that accepts CloseAll and leaves the rows open returns exactly what a
-// store that honoured it returns — same count, nil error — so the sweep cannot
+// store that honored it returns — same count, nil error — so the sweep cannot
 // tell them apart from the write's own answer. effect is what the close ACTUALLY
 // does to the rows; nil means nothing at all. getErr faults the re-read instead,
 // which is the other way the verification can fail to get an answer.
-type unhonouredCloseStore struct {
+type unhonoredCloseStore struct {
 	beads.Store
 	effect func(ids []string)
 	getErr error
 }
 
-func (s *unhonouredCloseStore) CloseAll(ids []string, _ map[string]string) (int, error) {
+func (s *unhonoredCloseStore) CloseAll(ids []string, _ map[string]string) (int, error) {
 	if s.effect != nil {
 		s.effect(ids)
 	}
 	return len(ids), nil
 }
 
-func (s *unhonouredCloseStore) Get(id string) (beads.Bead, error) {
+func (s *unhonoredCloseStore) Get(id string) (beads.Bead, error) {
 	if s.getErr != nil {
 		return beads.Bead{}, s.getErr
 	}
@@ -7918,7 +7918,7 @@ func (s *unhonouredCloseStore) Get(id string) (beads.Bead, error) {
 // is a count the store chooses. A store that accepts the write and does not
 // apply it — a stale view, a rejected transaction retried into a no-op, a
 // binding fronting a class it can no longer write — returns the identical count
-// and nil error as one that honoured it, so the command would print "Closed 2
+// and nil error as one that honored it, so the command would print "Closed 2
 // open beads" over a workflow that is still running. The re-read is the only
 // thing that can tell those apart, and without a store that lies there is
 // nothing in the suite it can be told apart FROM.
@@ -7936,7 +7936,7 @@ func TestCloseWorkflowMatchesVerifiesTheRowsItWasToldItClosed(t *testing.T) {
 			wantErr: "is still open after the sweep",
 		},
 		{
-			name: "a close the store honoured is accepted",
+			name: "a close the store honored is accepted",
 			effect: func(store beads.Store) func([]string) {
 				return func(ids []string) {
 					for _, id := range ids {
@@ -7974,7 +7974,7 @@ func TestCloseWorkflowMatchesVerifiesTheRowsItWasToldItClosed(t *testing.T) {
 			if err != nil {
 				t.Fatalf("seeding the matched bead: %v", err)
 			}
-			store := &unhonouredCloseStore{Store: backing, getErr: tc.getErr}
+			store := &unhonoredCloseStore{Store: backing, getErr: tc.getErr}
 			if tc.effect != nil {
 				store.effect = tc.effect(backing)
 			}
@@ -7991,7 +7991,7 @@ func TestCloseWorkflowMatchesVerifiesTheRowsItWasToldItClosed(t *testing.T) {
 			}
 			if tc.wantErr == "" {
 				if err != nil {
-					t.Fatalf("closeWorkflowMatches refused a sweep the store honoured: %v", err)
+					t.Fatalf("closeWorkflowMatches refused a sweep the store honored: %v", err)
 				}
 				return
 			}
