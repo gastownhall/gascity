@@ -859,7 +859,7 @@ func buildDesiredStateWithSessionBeads(
 		if len(scaleCheckPartialTemplates) > 0 {
 			fmt.Fprintf(stderr, "scaleCheck: PARTIAL — scale_check failed for %s, retaining affected sessions\n", strings.Join(sortedBoolMapKeys(scaleCheckPartialTemplates), ",")) //nolint:errcheck
 		}
-		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs)
+		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, store, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs)
 		bp.assignedWorkBeads = poolWorkBeads
 		bp.poolScaleCheckPartialTemplates = poolScaleCheckPartialTemplates
 		bp.providerHealthSnapshot = loadProviderHealthSnapshot(cityPath)
