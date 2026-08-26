@@ -731,8 +731,13 @@ func doImportInstall(cityPath string, stdout, stderr io.Writer) int {
 	// expanded-config-load check applies. Validate here so install fails
 	// closed on the same errors doctor would later catch, instead of
 	// succeeding while every subsequent config reload aborts. See #5382.
+	// Nothing rolls back: the packs are in the cache and packs.lock is
+	// written by the time this runs, and the load error may predate this
+	// command. Say so, or a non-zero exit reads as "nothing was installed"
+	// and the operator re-runs instead of fixing the config.
 	if cfgErr := validateComposedConfigAfterInstall(cityPath); cfgErr != nil {
-		fmt.Fprintf(stderr, "gc import install: composed config failed to load after install: %v\n", cfgErr) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc import install: composed config failed to load after install: %v\n", cfgErr)                                          //nolint:errcheck
+		fmt.Fprintf(stderr, "%d remote import(s) and packs.lock are on disk; fix the config, then re-run `gc doctor` to confirm.\n", len(lock.Packs)) //nolint:errcheck
 		return 1
 	}
 
