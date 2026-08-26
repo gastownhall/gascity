@@ -447,9 +447,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	sessionID := strings.TrimSpace(overrides["GC_SESSION_ID"])
 	sessionName := strings.TrimSpace(sessionForQuery)
 	alias := strings.TrimSpace(overrides["GC_ALIAS"])
-	// Write the alias/agent form that read paths query through GC_AGENT.
-	// Session forms remain fallbacks for unaliased workers.
-	assignee := firstNonEmptyHookValue(alias, agentForQuery, resolvedAgentName, sessionName, sessionID)
+	assignee := hookClaimAssigneeIdentity(alias, sessionID, agentForQuery, resolvedAgentName, sessionName)
 	// IdentityCandidates governs ADOPTION of already-owned in_progress/open
 	// work (hookClaimExistingAssignment, claimFirstReadyHookAssignment, and
 	// the display path's hookCandidateVisible own-work check); it must be
@@ -788,6 +786,44 @@ func hookSessionAgentForQuery() string {
 		os.Getenv("GC_AGENT"),
 		os.Getenv("GC_SESSION_NAME"),
 	)
+}
+
+// hookClaimAssigneeIdentity picks the identity a claim is RECORDED under. It is
+// the writer half of the contract every liveness reader already implements, and
+// the order is the whole of it.
+//
+// An unaliased pool spawn has no occupant name in the environment except its
+// session bead id. clearPoolTemplateRuntimeIdentity blanks GC_ALIAS and stamps
+// GC_AGENT with the slot-derived runtime session name, and that name is a CHAIR:
+// it is stable across every session that ever occupies the slot, by design
+// (poolRuntimeSessionName — a bead-ID-scoped runtime name leaked one sandbox per
+// failed start, ga-vcjr9). Recording a claim under it makes every "is the holder
+// still alive?" consumer answer about the chair, so a dead occupant's in_progress
+// bead reads as held by whoever sits there next and is never released, resumed,
+// or replaced. On maintainer-city one such label was the session_name of 24
+// distinct session beads, and the worst of them 66.
+//
+// So the session bead id goes ahead of every session/agent NAME form. Every
+// reader already leads with it — sessionBeadAssigneeIdentities,
+// currentSessionAssigneeIdentities and ComputeAwakeSet all list bead.ID first,
+// directSessionBeadIDCandidates resolves it with a direct Get, and the default
+// work query's own documented order is "$GC_SESSION_ID (bead ID) >
+// $GC_SESSION_NAME > $GC_ALIAS" (config.EffectiveWorkQuery). The writer was the
+// only side reading that list backwards; this changes which of several identities
+// it picks, never what a reader has to understand.
+//
+// alias stays FIRST, and that is what scopes this to unaliased pool workers. A
+// non-empty GC_ALIAS means clearPoolTemplateRuntimeIdentity did not run: the
+// session is a named holder, a namepool member, or an explicit `gc hook <agent>`
+// target, whose alias is a configured identity that a later invocation from a
+// fresh shell — one with no GC_SESSION_ID at all — must still resolve to. Moving
+// the session id ahead of it would strand exactly that adoption.
+//
+// Everything after sessionID is the pre-existing fallback chain, reached only
+// when the environment carries no session bead id (a bare shell, an explicit
+// target outside a session).
+func hookClaimAssigneeIdentity(alias, sessionID, agentForQuery, resolvedAgentName, sessionName string) string {
+	return firstNonEmptyHookValue(alias, sessionID, agentForQuery, resolvedAgentName, sessionName)
 }
 
 func firstNonEmptyHookValue(values ...string) string {
