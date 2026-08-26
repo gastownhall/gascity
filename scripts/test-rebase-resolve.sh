@@ -658,6 +658,105 @@ test_bounded_rebase_real_conflict_refused_untouched() {
     rm -rf "$remote" "$work" "$seed"
 }
 
+# Regression (ga-nlvpzq / ga-vzckwr round 10): an ADDITIVE-BOTH hunk on an
+# allowlisted _test.go path where naive ours-then-theirs concatenation
+# produces syntactically INVALID Go (two unclosed "if" opens sharing one
+# trailing "}", two consecutive redeclared "wantShardCounts :=" lines) must
+# never be certified as a successful resolution. Per the acceptance criteria
+# the helper must either refuse (rc=12, branch and remote left exactly as
+# before, no push) or produce a result that is valid Go — it must never
+# reach rc=0 with corrupted content reaching the push step.
+test_bounded_rebase_additive_both_invalid_go_never_certified() {
+    local remote work seed
+    remote="$(new_bare_remote)"
+    seed="$(mktemp -d "${TMPDIR:-/tmp}/gc-deployer-rebase-seed.XXXXXX")"
+    git clone -q "$remote" "$seed" 2>/dev/null
+    (
+        cd "$seed" || exit 1
+        git config commit.gpgsign false
+        mkdir -p scripts
+        cat > scripts/runtime_tmux_manifest_test.go <<'GOEOF'
+package scripts
+
+import "testing"
+
+func TestRuntimeTmuxManifestSixShardsPartitionInventoryExactlyOnce(t *testing.T) {
+	manifest := buildManifest()
+	if got, want := len(manifest), 6; got != want {
+		t.Fatalf("manifest length = %d, want %d", got, want)
+	}
+}
+GOEOF
+        git add -A && git commit -qm base
+        git push -q origin main
+        git checkout -q -b feature
+        cat > scripts/runtime_tmux_manifest_test.go <<'GOEOF'
+package scripts
+
+import "testing"
+
+func TestRuntimeTmuxManifestSixShardsPartitionInventoryExactlyOnce(t *testing.T) {
+	manifest := buildManifest()
+	wantShardCounts := []int{2, 2, 2}
+	if got, want := len(manifest), len(wantShardCounts)*3; got != want {
+		t.Fatalf("manifest length = %d, want %d", got, want)
+	}
+}
+GOEOF
+        git add -A && git commit -qm "feature adds six-shard assertion"
+        git push -q origin feature
+        git checkout -q main
+        cat > scripts/runtime_tmux_manifest_test.go <<'GOEOF'
+package scripts
+
+import "testing"
+
+func TestRuntimeTmuxManifestSixShardsPartitionInventoryExactlyOnce(t *testing.T) {
+	manifest := buildManifest()
+	wantShardCounts := []int{3, 3, 3, 3}
+	if got, want := len(manifest), len(wantShardCounts)+2; got != want {
+		t.Fatalf("manifest length = %d, want %d", got, want)
+	}
+}
+GOEOF
+        git add -A && git commit -qm "main adds independent shard-count assertion"
+        git push -q origin main
+    )
+    work="$(mktemp -d "${TMPDIR:-/tmp}/gc-deployer-rebase-work.XXXXXX")"
+    git clone -q "$remote" "$work"
+    ( cd "$work" && git config commit.gpgsign false && git checkout -q feature )
+
+    local before_local remote_before
+    before_local="$(git -C "$work" rev-parse HEAD)"
+    remote_before="$(remote_sha "$remote" refs/heads/feature)"
+
+    local output rc
+    output="$(cd "$work" && attempt_bounded_self_rebase feature main 2>&1)"; rc=$?
+
+    if [[ $rc -eq 12 ]]; then
+        local after_local remote_after
+        after_local="$(git -C "$work" rev-parse HEAD)"
+        remote_after="$(remote_sha "$remote" refs/heads/feature)"
+        if [[ "$after_local" == "$before_local" && "$remote_after" == "$remote_before" ]] \
+           && ! has_markers "$work"; then
+            record_pass "bounded/additive-both-invalid-go-never-certified (rc=12, refused, branch/remote untouched)"
+        else
+            record_fail "bounded/additive-both-invalid-go-never-certified" \
+                "rc=12 but branch/remote not fully restored: after_local=$after_local before_local=$before_local remote_after=$remote_after remote_before=$remote_before"
+        fi
+    elif [[ $rc -eq 0 ]]; then
+        if gofmt -e "$work/scripts/runtime_tmux_manifest_test.go" >/dev/null 2>&1; then
+            record_pass "bounded/additive-both-invalid-go-never-certified (rc=0, resolution is valid Go)"
+        else
+            record_fail "bounded/additive-both-invalid-go-never-certified" \
+                "rc=0 (certified success) but the resolved file is NOT valid Go — duplicate-declaration corruption reached the push step: $(tr '\n' '|' < "$work/scripts/runtime_tmux_manifest_test.go")"
+        fi
+    else
+        record_fail "bounded/additive-both-invalid-go-never-certified" "expected rc=12 or rc=0-with-valid-Go, got rc=$rc, output: $output"
+    fi
+    rm -rf "$remote" "$work" "$seed"
+}
+
 # Bead-required case 4 (dynamic half): confirm --force-with-lease (not
 # --force) is what's actually invoked, by proving the lease's staleness
 # protection is live — a concurrent push to the remote after our clone must
@@ -799,6 +898,7 @@ run_all() {
     test_bounded_rebase_clean_fastforward_succeeds
     test_bounded_rebase_trivial_conflict_resolves_and_succeeds
     test_bounded_rebase_real_conflict_refused_untouched
+    test_bounded_rebase_additive_both_invalid_go_never_certified
     test_bounded_rebase_stale_lease_returns_13
     test_bounded_rebase_restricted_fetch_refspec_still_pushes
 
