@@ -18,9 +18,10 @@
 # assignment), re-reads its live state from bd, and returns non-zero
 # (blocking the push) unless the bead is still open/in_progress, still
 # assigned to one of this session's identities (any of GC_SESSION_NAME,
-# GC_SESSION_ID, GC_ALIAS, GC_AGENT — mirroring the claim path), still
-# routed to this session's config identity, and not held by the mayor or an
-# external actor.
+# GC_SESSION_ID, GC_ALIAS, GC_AGENT — mirroring the claim path — or
+# GC_TEMPLATE, for work routed to the whole pool rather than claimed by one
+# instance; see ga-kzl21p), still routed to this session's config identity,
+# and not held by the mayor or an external actor.
 #
 # TWO CALL SITES (defense in depth — see ga-fip9ps.1 bead notes):
 #   Layer A — .githooks/pre-push calls this unconditionally for every
@@ -323,9 +324,21 @@ assert_bead_still_claimed() {
     # bead is legitimately assigned to the session name/id. Fail-closed
     # semantics preserved: with identities present, an assignee matching none
     # (including empty) still blocks.
+    #
+    # GC_TEMPLATE is also a valid match (ga-kzl21p): it's the bare pool
+    # identity (e.g. "gascity/builder"), stamped by the SDK at session start
+    # for every session shape regardless of which specific pool instance is
+    # running (e.g. "gascity/builder-1") — see internal/session/lifecycle.go.
+    # Work routed to the whole pool, rather than claimed by one instance, can
+    # carry that bare identity as assignee. Without this, a session whose
+    # GC_SESSION_NAME/GC_SESSION_ID/GC_ALIAS/GC_AGENT are all instance-shaped
+    # could never match a pool-level assignee, and completed, gate-verified
+    # work became unpushable with no reassignment and no bypass. This is the
+    # same trust boundary the routed_to check below already applies to
+    # GC_TEMPLATE — extended here to cover assignee too.
     local -a _pog_identities=()
     local _pog_ident
-    for _pog_ident in "${GC_SESSION_NAME:-}" "${GC_SESSION_ID:-}" "${GC_ALIAS:-}" "${GC_AGENT:-}"; do
+    for _pog_ident in "${GC_SESSION_NAME:-}" "${GC_SESSION_ID:-}" "${GC_ALIAS:-}" "${GC_AGENT:-}" "${GC_TEMPLATE:-}"; do
         [[ -n "$_pog_ident" ]] && _pog_identities+=("$_pog_ident")
     done
     if [[ ${#_pog_identities[@]} -gt 0 ]]; then

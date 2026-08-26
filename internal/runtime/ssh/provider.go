@@ -139,16 +139,43 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	prelude := setupPrelude(cfg, name, staged.envPath)
 
 	// PreStart prepares the target filesystem; a failure aborts startup.
+	//
+	// The failure renders both the command and what the box wrote, and either can
+	// carry a credential: the command may name one inline, and the prelude
+	// exported the session env, so a `set -x` trace or a failing curl echoes it
+	// back. This error is durable — logs, event bus, bead notes — so unlike argv
+	// it outlives the process. Only the session env is in scope here, not this
+	// process's: the command ran on the far box and inherited that box's
+	// environment, not ours.
+	secrets := runtime.SecretEnvValues(cfg.Env)
 	for _, cmd := range cfg.PreStart {
 		if cmd == "" {
 			continue
 		}
 		out, code, err := p.conn.Exec(ctx, name, []string{"sh", "-c", prelude + cmd})
 		if err != nil {
-			return fmt.Errorf("ssh start %q: pre_start: %w", name, err)
+			// A transport error is not always about transport. ssh reserves exit
+			// 255 for its own failures and cannot distinguish those from a remote
+			// command that genuinely exits 255 — `exit -1`, a nested ssh, rsync —
+			// so [shellRunner.run] collapses both and folds the box's stderr into
+			// the message. That stderr is the pre_start command's, written after
+			// the prelude exported the session env, so this branch carries exactly
+			// the credential risk the one below does.
+			//
+			// Redacting means rendering the error rather than wrapping it. Only
+			// cancellation is worth matching on here, and that branch returns
+			// before any stderr is read, so it keeps its chain; nothing else in
+			// this message was ever matchable.
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return fmt.Errorf("ssh start %q: pre_start: %w", name, err)
+			}
+			return fmt.Errorf("ssh start %q: pre_start %q: %s", name,
+				runtime.RedactSecrets(cmd, secrets), runtime.RedactSecrets(err.Error(), secrets))
 		}
 		if code != 0 {
-			return fmt.Errorf("ssh start %q: pre_start %q exited %d: %s", name, cmd, code, strings.TrimSpace(string(out)))
+			detail := runtime.RedactSecrets(strings.TrimSpace(string(out)), secrets)
+			return fmt.Errorf("ssh start %q: pre_start %q exited %d: %s",
+				name, runtime.RedactSecrets(cmd, secrets), code, detail)
 		}
 	}
 

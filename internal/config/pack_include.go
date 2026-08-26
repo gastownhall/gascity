@@ -2,6 +2,7 @@ package config
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -96,7 +97,7 @@ func parseGitHubTreeURL(s string) (source, subpath, ref string) {
 
 // resolvePackRef resolves a pack reference to a local directory.
 // Handles local paths, GitHub tree URLs, and git source//sub#ref URLs.
-func resolvePackRef(ref, declDir, cityRoot string) (string, error) {
+func resolvePackRef(ref, declDir, cityRoot string, nonBlocking bool) (string, error) {
 	if isGitHubTreeURL(ref) || isRemoteInclude(ref) {
 		// parseRemoteInclude handles GitHub tree/blob URLs too
 		// (remotesource.Parse short-circuits to ParseGitHubTreeOrBlob),
@@ -121,7 +122,7 @@ func resolvePackRef(ref, declDir, cityRoot string) (string, error) {
 			lockKeys = append(lockKeys, source)
 		}
 		for _, key := range lockKeys {
-			if cacheDir, ok, err := resolveLockedRemoteImport(key, cityRoot); err != nil {
+			if cacheDir, ok, err := resolveLockedRemoteImport(key, cityRoot, nonBlocking); err != nil {
 				return "", err
 			} else if ok {
 				if subpath != "" {
@@ -150,7 +151,7 @@ type remoteImportLockEntry struct {
 	Commit string `toml:"commit"`
 }
 
-func resolveLockedRemoteImport(source, cityRoot string) (string, bool, error) {
+func resolveLockedRemoteImport(source, cityRoot string, nonBlocking bool) (string, bool, error) {
 	lockPath := filepath.Join(cityRoot, "packs.lock")
 	data, err := os.ReadFile(lockPath)
 	if err != nil {
@@ -174,7 +175,7 @@ func resolveLockedRemoteImport(source, cityRoot string) (string, bool, error) {
 		return "", false, err
 	}
 	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, entry.Commit))
-	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, entry.Commit); err != nil {
+	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, entry.Commit, nonBlocking); err != nil {
 		return "", false, err
 	}
 	return cacheDir, true, nil
@@ -284,7 +285,7 @@ func IsBundledSourceAtCanonicalPin(source, commit string) bool {
 // be installed for real, exactly like any other remote import. This
 // fallback keeps cities composable before the first "gc import install"
 // writes the lock.
-func resolveBundledSourceWithoutLock(source, declaredVersion string) (string, bool, error) {
+func resolveBundledSourceWithoutLock(source, declaredVersion string, nonBlocking bool) (string, bool, error) {
 	if !builtinpacks.IsSource(source) {
 		return "", false, nil
 	}
@@ -305,23 +306,26 @@ func resolveBundledSourceWithoutLock(source, declaredVersion string) (string, bo
 	if builtinpacks.ValidateSyntheticRepoFast(cacheDir, repository, commit) == nil {
 		return cacheDir, true, nil
 	}
-	if _, err := WithRepoCacheWriteLock(cacheRoot, func() (string, error) {
+	if _, err := withRepoCacheWriteLock(cacheRoot, nonBlocking, func() (string, error) {
 		if builtinpacks.ValidateSyntheticRepo(cacheDir, repository, commit) == nil {
 			return cacheDir, nil
 		}
 		return cacheDir, builtinpacks.MaterializeSyntheticRepo(cacheDir, repository, commit)
 	}); err != nil {
+		if errors.Is(err, ErrRepoCacheBusy) {
+			return "", true, err
+		}
 		return "", true, fmt.Errorf("hydrating synthetic repo cache: %w", err)
 	}
 	return cacheDir, true, nil
 }
 
-func resolveInstalledRemoteImport(source, declaredVersion, cityRoot string) (string, error) {
+func resolveInstalledRemoteImport(source, declaredVersion, cityRoot string, nonBlocking bool) (string, error) {
 	lockPath := filepath.Join(cityRoot, "packs.lock")
 	data, err := os.ReadFile(lockPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			if cacheDir, ok, err := resolveBundledSourceWithoutLock(source, declaredVersion); ok {
+			if cacheDir, ok, err := resolveBundledSourceWithoutLock(source, declaredVersion, nonBlocking); ok {
 				if err != nil {
 					return "", fmt.Errorf("resolving remote import %s without lock: %w", source, err)
 				}
@@ -338,7 +342,7 @@ func resolveInstalledRemoteImport(source, declaredVersion, cityRoot string) (str
 	}
 	entry, ok := lock.Packs[source]
 	if !ok || entry.Commit == "" {
-		if cacheDir, ok, err := resolveBundledSourceWithoutLock(source, declaredVersion); ok {
+		if cacheDir, ok, err := resolveBundledSourceWithoutLock(source, declaredVersion, nonBlocking); ok {
 			if err != nil {
 				return "", fmt.Errorf("resolving remote import %s without lock entry: %w", source, err)
 			}
@@ -352,7 +356,7 @@ func resolveInstalledRemoteImport(source, declaredVersion, cityRoot string) (str
 		return "", err
 	}
 	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, entry.Commit))
-	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, entry.Commit); err != nil {
+	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, entry.Commit, nonBlocking); err != nil {
 		return "", err
 	}
 	return cacheDir, nil
@@ -397,7 +401,7 @@ func remoteCacheFingerprint(cacheDir string) string {
 // validateInstalledRemoteCacheLocked validates the remote cache under the
 // repo-cache read lock, memoizing the success so a warm, unchanged cache skips
 // both the flock and the git execs on subsequent loads.
-func validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit string) error {
+func validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit string, nonBlocking bool) error {
 	key := cacheDir + "\x00" + commit
 	fp := remoteCacheFingerprint(cacheDir)
 	if v, ok := remoteCacheValidationCache.Load(key); ok {
@@ -405,9 +409,18 @@ func validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit stri
 			return nil
 		}
 	}
-	if err := WithRepoCacheReadLock(cacheRoot, func() error {
+	readLock := WithRepoCacheReadLock
+	if nonBlocking {
+		readLock = TryWithRepoCacheReadLock
+	}
+	if err := readLock(cacheRoot, func() error {
 		return validateInstalledRemoteCache(source, cacheDir, commit)
 	}); err != nil {
+		// A busy cache is not a verdict on this cache's contents, so it must
+		// not trigger the absent-cache rebuild below.
+		if errors.Is(err, ErrRepoCacheBusy) {
+			return err
+		}
 		// A locked bundled source pinned at its canonical commit is served from
 		// the running binary's embedded content. A freshly installed/upgraded
 		// binary resolves a new content-hash cache dir (RepoCacheKey folds the
@@ -417,7 +430,7 @@ func validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit stri
 		// case so a present-but-invalid cache (content drift, tampering, bad
 		// marker) still fails loudly per its security contract. The read lock
 		// above is already released here, so taking the write lock is safe.
-		if rematerializeAbsentBundledCache(source, cacheRoot, cacheDir, commit) {
+		if rematerializeAbsentBundledCache(source, cacheRoot, cacheDir, commit, nonBlocking) {
 			remoteCacheValidationCache.Store(key, remoteCacheValidationEntry{fingerprint: remoteCacheFingerprint(cacheDir)})
 			return nil
 		}
@@ -435,7 +448,7 @@ func validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit stri
 // reports success only if the rebuilt cache validates. It deliberately leaves
 // a present-but-invalid cache untouched, so content-drift / tampering /
 // bad-marker rejection in validateInstalledRemoteCache keeps failing loudly.
-func rematerializeAbsentBundledCache(source, cacheRoot, cacheDir, commit string) bool {
+func rematerializeAbsentBundledCache(source, cacheRoot, cacheDir, commit string, nonBlocking bool) bool {
 	if !IsBundledSourceAtCanonicalPin(source, commit) {
 		return false
 	}
@@ -447,7 +460,7 @@ func rematerializeAbsentBundledCache(source, cacheRoot, cacheDir, commit string)
 	if !ok {
 		return false
 	}
-	if _, err := WithRepoCacheWriteLock(cacheRoot, func() (string, error) {
+	if _, err := withRepoCacheWriteLock(cacheRoot, nonBlocking, func() (string, error) {
 		// Re-check under the lock: another writer may have materialized it.
 		if builtinpacks.ValidateSyntheticRepo(cacheDir, repository, commit) == nil {
 			return cacheDir, nil

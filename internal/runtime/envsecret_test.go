@@ -90,6 +90,78 @@ func TestSplitEnvByArgvSafety(t *testing.T) {
 	}
 }
 
+func TestMetaSeedableEnvKey(t *testing.T) {
+	// The meta store is a private sidecar, not argv, so it seeds one key argv
+	// refuses: the incarnation fence's own token. Everything else tracks
+	// envArgvSafe, so there is no second classification to drift.
+	if !MetaSeedableEnvKey("GC_INSTANCE_TOKEN") {
+		t.Error("the fence token must seed: every consumer reads it back via GetMeta and treats absence as permission")
+	}
+	if !MetaSeedableEnvKey("GC_SESSION_ID") {
+		t.Error("an argv-safe identity key must remain seedable")
+	}
+	for _, key := range []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "BEADS_HOLDER_TOKEN", "SOME_FUTURE_KEY"} {
+		if MetaSeedableEnvKey(key) {
+			t.Errorf("%s has no GetMeta consumer and must not reach disk", key)
+		}
+	}
+}
+
+func TestSplitEnvForMetaSeed(t *testing.T) {
+	env := map[string]string{
+		"GC_SESSION_ID":        "sess-1",
+		"GC_INSTANCE_TOKEN":    "deadbeef",
+		"GC_RUNTIME_EPOCH":     "3",
+		"LC_ALL":               "",
+		"ANTHROPIC_AUTH_TOKEN": "sk-test-NOT-REAL",
+	}
+	seed, withheld := SplitEnvForMetaSeed(env)
+
+	wantSeed := map[string]string{
+		"GC_SESSION_ID":     "sess-1",
+		"GC_INSTANCE_TOKEN": "deadbeef",
+		"GC_RUNTIME_EPOCH":  "3",
+		"LC_ALL":            "",
+	}
+	wantWithheld := map[string]string{"ANTHROPIC_AUTH_TOKEN": "sk-test-NOT-REAL"}
+	if !maps.Equal(seed, wantSeed) {
+		t.Errorf("seed keys = %v, want %v", keysOf(seed), keysOf(wantSeed))
+	}
+	if !maps.Equal(withheld, wantWithheld) {
+		t.Errorf("withheld keys = %v, want %v", keysOf(withheld), keysOf(wantWithheld))
+	}
+
+	// The control on over-withholding: a filter that withheld everything would
+	// satisfy "no credential on disk" and silently break incarnation fencing,
+	// which fails open and so reports nothing when it breaks.
+	if seed["GC_INSTANCE_TOKEN"] != "deadbeef" {
+		t.Error("the fence token must survive the split with its exact value")
+	}
+	if len(seed)+len(withheld) != len(env) {
+		t.Errorf("partition lost entries: %d + %d != %d", len(seed), len(withheld), len(env))
+	}
+
+	seedNil, withheldNil := SplitEnvForMetaSeed(nil)
+	if seedNil == nil || withheldNil == nil {
+		t.Error("both halves must be non-nil so callers can range without a nil check")
+	}
+}
+
+func TestMetaCapabilityKeysAreNotArgvSafe(t *testing.T) {
+	// The two classifications answer different questions, and the capability
+	// set exists precisely because a key can be too secret for argv while still
+	// being required on the private sidecar. A name drifting into envArgvSafe
+	// would widen argv routing without anyone editing that list.
+	for key := range metaCapabilityEnv {
+		if ArgvSafeEnvKey(key) {
+			t.Errorf("%s is in both metaCapabilityEnv and envArgvSafe; the capability set is only for keys argv must refuse", key)
+		}
+	}
+	if len(metaCapabilityEnv) == 0 {
+		t.Error("control: an empty capability set would make this test vacuous")
+	}
+}
+
 func keysOf(m map[string]string) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {

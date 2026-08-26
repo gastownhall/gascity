@@ -722,7 +722,8 @@ func (rt *registryProviderReauthRoundTripper) RoundTrip(req *http.Request) (*htt
 	if err != nil || resp == nil || resp.StatusCode != http.StatusUnauthorized || rt.refresh == nil {
 		return resp, err
 	}
-	if !registryHasBearerAuthorization(req.Header.Get("Authorization")) ||
+	if !isRegistryRetrySafeMethod(req.Method) ||
+		!registryHasBearerAuthorization(req.Header.Get("Authorization")) ||
 		(req.Body != nil && req.Body != http.NoBody && req.GetBody == nil) {
 		return resp, nil
 	}
@@ -730,7 +731,16 @@ func (rt *registryProviderReauthRoundTripper) RoundTrip(req *http.Request) (*htt
 	token, err := rt.refresh(req.Context(), true)
 	if err != nil {
 		_ = resp.Body.Close()
-		return nil, fmt.Errorf("refreshing registry credential after 401: %w", err)
+		if ctxErr := req.Context().Err(); ctxErr != nil {
+			return nil, fmt.Errorf("refreshing registry credential after 401: %w", ctxErr)
+		}
+		if errors.Is(err, context.Canceled) {
+			return nil, fmt.Errorf("refreshing registry credential after 401: %w", context.Canceled)
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, fmt.Errorf("refreshing registry credential after 401: %w", context.DeadlineExceeded)
+		}
+		return nil, errors.New("refreshing registry credential after 401: credential refresh failed")
 	}
 	token = strings.TrimSpace(token)
 	if token == "" {
@@ -743,7 +753,7 @@ func (rt *registryProviderReauthRoundTripper) RoundTrip(req *http.Request) (*htt
 		retry.Body, err = req.GetBody()
 		if err != nil {
 			_ = resp.Body.Close()
-			return nil, fmt.Errorf("replaying registry request after credential refresh: %w", err)
+			return nil, errors.New("replaying registry request after credential refresh: request body recreation failed")
 		}
 	}
 	retry.Header.Set("Authorization", "Bearer "+token)
@@ -754,6 +764,15 @@ func (rt *registryProviderReauthRoundTripper) RoundTrip(req *http.Request) (*htt
 func registryHasBearerAuthorization(value string) bool {
 	fields := strings.Fields(value)
 	return len(fields) == 2 && strings.EqualFold(fields[0], "Bearer") && fields[1] != ""
+}
+
+func isRegistryRetrySafeMethod(method string) bool {
+	switch strings.ToUpper(method) {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	default:
+		return false
+	}
 }
 
 func (a registryPublishAuth) hasCredentials() bool {
