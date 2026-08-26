@@ -1717,7 +1717,7 @@ func TestSyncCLIForcePushReportsExitCode(t *testing.T) {
 func TestSyncSummaryNamesFailedDatabaseAmongHealthyOnes(t *testing.T) {
 	cityPath := t.TempDir()
 	dataDir := filepath.Join(cityPath, "data")
-	remotes := `{"remotes":[{"name":"origin","url":"https://example.invalid/repo"}]}`
+	remotes := `{"remotes":[{"name":"origin","url":"file:///example.invalid/repo"}]}`
 	for _, name := range []string{"good1", "bad", "good2"} {
 		dbDir := filepath.Join(dataDir, name)
 		if err := os.MkdirAll(filepath.Join(dbDir, ".dolt"), 0o755); err != nil {
