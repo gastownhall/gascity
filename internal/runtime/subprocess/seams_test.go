@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
-	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // TestSeamsLifecycle drives the subprocess provider through the de-conflated
@@ -131,10 +130,11 @@ func TestSeamsInterrupt(t *testing.T) {
 	}
 
 	// Death is now deterministic, but reaping (SIGINT delivery + cmd.Wait closing
-	// sc.done) still races the scheduler, so poll up to the shared exec-race floor
+	// sc.done) still races the scheduler, so poll up to this package's hang
+	// budget (derived from the shared exec-race floor, see hangbudget_test.go)
 	// rather than asserting a constant. The ceiling is a safety margin, not the
 	// subject under test: we prove Interrupt delegates, not that it lands within N.
-	deadline := time.Now().Add(testutil.ExecRaceTimeout)
+	deadline := time.Now().Add(hangBudget)
 	for {
 		alive, _ := place.IsRunning(ctx)
 		if !alive {

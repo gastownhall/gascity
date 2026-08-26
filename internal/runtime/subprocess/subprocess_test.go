@@ -347,7 +347,7 @@ func TestLegacySocketRemainsVisibleWhenPrivateFallbackIsMissing(t *testing.T) {
 			if got != want {
 				t.Fatalf("legacy socket command = %q, want %q", got, want)
 			}
-		case <-time.After(testutil.ExecRaceTimeout):
+		case <-time.After(hangBudget):
 			t.Fatalf("timed out waiting for legacy socket command %q", want)
 		}
 	}
@@ -1296,7 +1296,7 @@ func TestInterruptPreservesBestEffortForNormalSocketProtocolError(t *testing.T) 
 		if got != "interrupt" {
 			t.Fatalf("socket command = %q, want interrupt", got)
 		}
-	case <-time.After(testutil.ExecRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("timed out waiting for interrupt command")
 	}
 }

@@ -22,6 +22,7 @@ go_test(
     name = "subprocess_test",
     srcs = [
         "fence_test.go",
+        "hangbudget_test.go",
         "meta_privacy_test.go",
         "process_env_projection_test.go",
         "seam_conformance_test.go",
