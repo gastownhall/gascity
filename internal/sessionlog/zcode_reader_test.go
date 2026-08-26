@@ -232,10 +232,12 @@ func TestFindZCodeSessionFileByScopeSeparatesSameWorkDirSessions(t *testing.T) {
 	if got := FindZCodeSessionFileByScope([]string{root}, workDir, "s-gc-1", "2"); got != "" {
 		t.Fatalf("fresh conversation resolved a superseded mirror: %q", got)
 	}
-	// The canceled-boot placeholder is never the answer.
-	write("s-gc-3#1", "pending-s-gc-3_1")
-	if got := FindZCodeSessionFileByScope([]string{root}, workDir, "s-gc-3", "1"); got != "" {
-		t.Fatalf("placeholder surfaced as a transcript: %q", got)
+	// A canceled-boot placeholder is the only mirror a first-turn failure
+	// leaves behind (no session id was ever assigned), so when no real mirror
+	// exists it must stay resolvable rather than the scope reading as empty.
+	pending := write("s-gc-3#1", "pending-s-gc-3_1")
+	if got := FindZCodeSessionFileByScope([]string{root}, workDir, "s-gc-3", "1"); got != pending {
+		t.Fatalf("first-turn placeholder not surfaced as fallback: got %q, want %q", got, pending)
 	}
 	// A name needing sanitization resolves the same way the adapter wrote it.
 	slashed := write("gascity_gc.worker-9#1", "sess_slashed")
@@ -285,5 +287,48 @@ func TestFindZCodeSessionFileByScopeResolvesArchivedConversations(t *testing.T) 
 	}
 	if !strings.Contains(archived, "archived-transcripts") {
 		t.Fatalf("archived path %q is not under the archive root", archived)
+	}
+}
+
+// TestFindZCodeSessionFileByScopePrefersRealMirrorOverPending pins the
+// placeholder-fallback contract: a first-turn failure leaves only the
+// canceled-boot placeholder (no session id ever existed), so it must stay
+// resolvable as a last resort, while any real mirror in the same scope wins
+// outright because it adopts the placeholder on the first successful turn. The
+// placeholder embeds its work dir just like a real mirror, so the work-dir
+// filter still isolates it.
+func TestFindZCodeSessionFileByScopePrefersRealMirrorOverPending(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "wd")
+	write := func(scope, id, directory string) string {
+		dir := filepath.Join(root, scope)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+		path := filepath.Join(dir, id+".json")
+		body := `{"info":{"id":"` + id + `","directory":"` + filepath.ToSlash(directory) + `"},"messages":[]}`
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+		return path
+	}
+
+	// First-turn failure: only the placeholder exists.
+	pending := write("s-boot#1", "pending-s-boot_1", workDir)
+	if got := FindZCodeSessionFileByScope([]string{root}, workDir, "s-boot", "1"); got != pending {
+		t.Fatalf("placeholder-only scope resolved %q, want the placeholder %q", got, pending)
+	}
+
+	// Once a real mirror establishes in the same scope it wins outright.
+	realMirror := write("s-boot#1", "sess_real", workDir)
+	if got := FindZCodeSessionFileByScope([]string{root}, workDir, "s-boot", "1"); got != realMirror {
+		t.Fatalf("real mirror not preferred over placeholder: got %q, want %q", got, realMirror)
+	}
+
+	// A placeholder whose embedded directory belongs to another work dir is
+	// filtered out exactly like a real mirror would be.
+	write("s-other#1", "pending-s-other_1", filepath.Join(t.TempDir(), "elsewhere"))
+	if got := FindZCodeSessionFileByScope([]string{root}, workDir, "s-other", "1"); got != "" {
+		t.Fatalf("placeholder from another work dir surfaced: %q", got)
 	}
 }

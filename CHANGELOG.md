@@ -85,6 +85,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicitly, naming `gc doctor --fix` (which performs the removal) so
   operators check pack compatibility before running it. (#3887)
 
+- **The dashboard's bead dependency graph preserves relation type on inverse
+  ("Blocks") edges instead of collapsing every downstream relation to a
+  plain, untyped blocker.** `buildBeadGraph`'s inverse-edge pass previously
+  stored only the raw dependent bead, discarding the `dependencies[].type`
+  (or `needs`) that produced the forward edge; the `BeadDependencies` detail
+  view then rendered every downstream relation — `tracks`, `parent-child`,
+  or a genuine `blocks` need alike — under the same unlabeled "Blocks"
+  heading. A `tracks` relation (e.g. a workflow root tracking a finalizer)
+  could therefore read as a second hard dependency. The inverse edge now
+  carries the same `kind` as its forward counterpart, and the detail view
+  labels it the same way the "Needs" section already labels non-`needs`
+  forward edges. (gascity#4365)
+
 - **The dolt pack's `run_bounded` python3 fallback now sends SIGTERM before
   SIGKILL, matching its documented contract.** The fallback (used when
   neither `timeout` nor `gtimeout` is on `PATH`, the default on stock macOS)
