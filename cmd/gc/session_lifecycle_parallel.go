@@ -923,6 +923,7 @@ func refreshConfiguredNamedStartCandidate(
 		if stderr != nil {
 			fmt.Fprintf(stderr, "session reconciler: refreshing named session start %s: %v\n", candidate.name(), err) //nolint:errcheck
 		}
+		candidate.info = refreshedInfo // the bind may have cleared the stamp durably before the resolve failed
 		return candidate
 	}
 	candidate.tp = refreshed
