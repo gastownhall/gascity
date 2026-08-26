@@ -56,11 +56,16 @@ func BuildProviderResumeCommand(resolved *ResolvedProvider, optionOverrides map[
 	}
 	command := strings.TrimSpace(resolved.ResumeCommand)
 	// Unlike the launch-side gate above, this deliberately checks explicit
-	// overrides only: resolve.go already ran completeResumeCommandDefaults
-	// over ResumeCommand, filling in EffectiveDefaults in place. Gating on
-	// EffectiveDefaults here too would strip and unconditionally re-append
-	// every schema flag, corrupting a template where they were already
-	// positioned correctly.
+	// overrides only. For a provider-supplied resume_command, resolve.go has
+	// already run completeResumeCommandDefaults over ResumeCommand, filling
+	// in EffectiveDefaults in place; gating on EffectiveDefaults here too
+	// would strip and unconditionally re-append every schema flag, corrupting
+	// a template where they were already positioned correctly.
+	//
+	// That resolve-time completion is skipped when the agent supplies its own
+	// resume_command (resolve.go's agent.ResumeCommand == "" guard), so that
+	// shape gets EffectiveDefaults from neither side. Widening this gate is
+	// not the fix for it, for the reason above; see issue #5659.
 	if command == "" || len(resolved.OptionsSchema) == 0 || !hasSchemaOptionOverrides(optionOverrides) {
 		return command, nil
 	}
