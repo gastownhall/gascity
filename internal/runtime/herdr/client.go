@@ -114,9 +114,11 @@ func (c *client) runWithSecrets(ctx context.Context, declared []string, args ...
 	return env.Result, nil
 }
 
-// agentInfo mirrors herdr's agent object.
+// agentInfo mirrors herdr's agent object. Verified live against herdr 0.7.3:
+// the per-entry name field is emitted under the JSON key "agent", not "name"
+// (`herdr agent list` → {"agents":[{"agent":"act-a","agent_status":"idle",...}]}).
 type agentInfo struct {
-	Name        string `json:"name"`
+	Name        string `json:"agent"`
 	PaneID      string `json:"pane_id"`
 	WorkspaceID string `json:"workspace_id"`
 	TabID       string `json:"tab_id"`
@@ -472,23 +474,36 @@ func (c *client) closePane(ctx context.Context, paneID string) error {
 }
 
 // getAgent fetches one agent by target — an agent name or the pane id hosting
-// it, both of which herdr resolves: (info, true, nil) if present, (zero,
-// false, nil) if herdr reports it absent, (_, false, err) on failure.
-func (c *client) getAgent(ctx context.Context, name string) (agentInfo, bool, error) {
-	res, err := c.run(ctx, "agent", "get", name)
-	if err != nil {
-		if strings.Contains(err.Error(), "not_found") || strings.Contains(err.Error(), "not found") {
-			return agentInfo{}, false, nil
+// it: (info, true, nil) if present, (zero, false, nil) if herdr reports it
+// absent, (_, false, err) on failure. Verified live on herdr 0.7.3: `agent
+// get <target>` only resolves a pane id — passing an agent name returns
+// agent_not_found even though `agent list` lists that same agent under that
+// name — so a name-shaped target that `agent get` rejects as not-found falls
+// back to a listAgents scan, which does resolve by name.
+func (c *client) getAgent(ctx context.Context, target string) (agentInfo, bool, error) {
+	res, err := c.run(ctx, "agent", "get", target)
+	if err == nil {
+		var wrap struct {
+			Agent agentInfo `json:"agent"`
 		}
+		if err := json.Unmarshal(res, &wrap); err != nil {
+			return agentInfo{}, false, fmt.Errorf("herdr agent get: decode: %w", err)
+		}
+		return wrap.Agent, true, nil
+	}
+	if !strings.Contains(err.Error(), "not_found") && !strings.Contains(err.Error(), "not found") {
 		return agentInfo{}, false, err
 	}
-	var wrap struct {
-		Agent agentInfo `json:"agent"`
+	agents, lerr := c.listAgents(ctx)
+	if lerr != nil {
+		return agentInfo{}, false, fmt.Errorf("herdr agent get %q: list fallback: %w", target, lerr)
 	}
-	if err := json.Unmarshal(res, &wrap); err != nil {
-		return agentInfo{}, false, fmt.Errorf("herdr agent get: decode: %w", err)
+	for _, a := range agents {
+		if a.Name == target {
+			return a, true, nil
+		}
 	}
-	return wrap.Agent, true, nil
+	return agentInfo{}, false, nil
 }
 
 // ── workspace / tab placement ────────────────────────────────────────────────

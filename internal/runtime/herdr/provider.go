@@ -922,7 +922,7 @@ func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 // known state, and never-observed sessions read as unknown (zero), which every
 // consumer already treats as "no signal".
 func (p *Provider) GetLastActivity(name string) (time.Time, error) {
-	p.act.start(p)
+	p.act.start(p, name)
 	return p.act.lastActivity(name), nil
 }
 

@@ -10,8 +10,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 629
-baseline_files = 182
+baseline_calls = 634
+baseline_files = 184
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-80po0c.2"
@@ -23,8 +23,8 @@ expires = "2026-10-01"
 [[audit_baseline]]
 scope = "all"
 resource = "fixed_sleep"
-baseline_calls = 456
-baseline_files = 165
+baseline_calls = 474
+baseline_files = 169
 reported_calls = 447
 reported_files = 157
 owner_bead = "ga-80po0c.2"
@@ -51,8 +51,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 422
-baseline_files = 123
+baseline_calls = 427
+baseline_files = 125
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-80po0c.2"
@@ -64,8 +64,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 302
-baseline_files = 116
+baseline_calls = 320
+baseline_files = 120
 reported_calls = 295
 reported_files = 114
 owner_bead = "ga-80po0c.2"
@@ -142,8 +142,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "net_listen"
-baseline_calls = 95
-baseline_files = 36
+baseline_calls = 96
+baseline_files = 37
 reported_calls = 92
 reported_files = 34
 owner_bead = "ga-80po0c.2.2.2"
@@ -355,8 +355,8 @@ medium_reason = "package TestMain mutates process state"
 [[small_debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 415
-baseline_files = 119
+baseline_calls = 420
+baseline_files = 121
 reported_calls = 394
 reported_files = 105
 owner_bead = "ga-80po0c.2.1"
@@ -368,8 +368,8 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 302
-baseline_files = 116
+baseline_calls = 320
+baseline_files = 120
 reported_calls = 287
 reported_files = 113
 owner_bead = "ga-80po0c.2.1"
@@ -446,8 +446,8 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "net_listen"
-baseline_calls = 93
-baseline_files = 35
+baseline_calls = 94
+baseline_files = 36
 reported_calls = 92
 reported_files = 34
 owner_bead = "ga-80po0c.2.2.2"

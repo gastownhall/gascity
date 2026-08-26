@@ -56,10 +56,16 @@ import (
 //     value as the stream's relist debounce.
 //   - activityPollTimeout: bound on one agent.list call so a wedged server
 //     cannot hang the seed call or the loop.
+//   - activitySeedRetryInterval / activitySeedRetryBudget: herdr's own
+//     agent-detection can lag pane creation by a poll or two, so the seed
+//     poll retries at this cadence until the requested session appears or
+//     the budget elapses, rather than trusting a single one-shot query.
 var (
-	activityPollInterval  = 30 * time.Second
-	activityEventDebounce = 300 * time.Millisecond
-	activityPollTimeout   = 2 * time.Second
+	activityPollInterval      = 30 * time.Second
+	activityEventDebounce     = 300 * time.Millisecond
+	activityPollTimeout       = 2 * time.Second
+	activitySeedRetryInterval = 25 * time.Millisecond
+	activitySeedRetryBudget   = 1 * time.Second
 )
 
 // Agent-status values the tracker interprets (herdr 0.7.3 enum: idle,
@@ -90,8 +96,11 @@ type activityTracker struct {
 
 // start seeds the map synchronously and launches the tracking loop, once.
 // Every caller of the first wave blocks on the seed, so no consumer ever
-// reads a cold zero for a session that is observably live.
-func (a *activityTracker) start(p *Provider) {
+// reads a cold zero for a session that is observably live. seedName is the
+// session the caller actually wants: herdr's own agent detection can lag
+// pane creation by a poll or two, so the seed retries until seedName appears
+// or the retry budget elapses, rather than trusting a single poll.
+func (a *activityTracker) start(p *Provider, seedName string) {
 	a.startOnce.Do(func() {
 		a.mu.Lock()
 		if a.now == nil {
@@ -104,12 +113,40 @@ func (a *activityTracker) start(p *Provider) {
 		a.cancel = cancel
 		a.done = done
 		a.mu.Unlock()
-		a.poll(ctx, p.c)
+		a.seedWithRetry(ctx, p.c, seedName)
 		go func() {
 			defer close(done)
 			a.run(ctx, p)
 		}()
 	})
+}
+
+// seedWithRetry polls until seedName is observed, the retry budget elapses,
+// or ctx is canceled. A single poll always runs, so an unrequested seed
+// (seedName == "") or a genuinely unknown session still gets the same
+// one-shot behavior as before.
+func (a *activityTracker) seedWithRetry(ctx context.Context, c *client, seedName string) {
+	deadline := a.now().Add(activitySeedRetryBudget)
+	for {
+		a.poll(ctx, c)
+		if seedName == "" {
+			return
+		}
+		a.mu.Lock()
+		_, seen := a.entries[seedName]
+		a.mu.Unlock()
+		if seen {
+			return
+		}
+		if a.now().Add(activitySeedRetryInterval).After(deadline) {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(activitySeedRetryInterval):
+		}
+	}
 }
 
 // stop cancels the tracking loop and waits for it to exit. Unused in

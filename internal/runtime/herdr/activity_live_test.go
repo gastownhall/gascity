@@ -2,8 +2,8 @@ package herdr
 
 import (
 	"context"
+	"encoding/json"
 	"os/exec"
-	"strings"
 	"testing"
 	"time"
 
@@ -44,10 +44,29 @@ func TestActivityLive(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = p.Stop("act-a") })
 
-	// Cold seed is synchronous: the very first call observes the live agent.
+	// herdr does not list, and therefore cannot name, a pane until something
+	// reports an agent onto it (`pane report-agent`/`pane report-agent-session`).
+	// A bare integration-less pane sits in `pane list` with no name field at
+	// all, so name-keyed queries (agent.list/agent.get, and this tracker) have
+	// nothing to seed from until the first report. Resolve the pane id via
+	// `pane list` (name-independent) and report once to establish identity —
+	// this mirrors what any real herdr-integrated agent does on attach.
+	paneID := firstPaneID(t, session)
+	report := func(state string) {
+		t.Helper()
+		out, err := exec.Command("herdr", "--session", session, "pane", "report-agent", paneID,
+			"--source", "gctest", "--agent", "act-a", "--state", state).CombinedOutput()
+		if err != nil {
+			t.Fatalf("pane report-agent %s: %v: %s", state, err, out)
+		}
+	}
+	report("idle")
+
+	// Cold seed is synchronous: the very first call after identity is
+	// established observes the live agent.
 	first := lastActivity(t, p, "act-a")
 	if first.IsZero() {
-		t.Fatal("cold seed returned zero for a live agent")
+		t.Fatal("cold seed returned zero for a live, reported agent")
 	}
 	t.Logf("seeded: %v (age %v)", first, time.Since(first))
 
@@ -55,16 +74,7 @@ func TestActivityLive(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("getAgent act-a: ok=%v err=%v", ok, err)
 	}
-	t.Logf("natural agent_status of an undetected pane: %q (revision %d)", a.AgentStatus, a.Revision)
-
-	report := func(state string) {
-		t.Helper()
-		out, err := exec.Command("herdr", "--session", session, "pane", "report-agent", a.PaneID,
-			"--source", "gctest", "--agent", "gctest", "--state", state).CombinedOutput()
-		if err != nil {
-			t.Fatalf("pane report-agent %s: %v: %s", state, err, out)
-		}
-	}
+	t.Logf("natural agent_status of a reported-idle pane: %q (revision %d)", a.AgentStatus, a.Revision)
 
 	// working → continuously active: successive reads advance and stay ~now.
 	report("working")
@@ -90,54 +100,59 @@ func TestActivityLive(t *testing.T) {
 	t.Logf("idle stamp frozen at %v", frozen)
 
 	// Unknown-status revision leg: reported states stick, so use a second
-	// undetected pane. A quiet cat must age. Whether real output re-stamps
-	// depends on the environment — herdr 0.7.3 moves a pane's revision only
-	// while a client renders it, so on a HEADLESS server (gc's normal mode,
-	// verified live: a pane printing every 300ms holds revision 0) output is
-	// invisible to the tracker and the stamp must keep aging; with a client
-	// attached the revision moves and the stamp must refresh. The leg asserts
+	// pane reported into the "unknown" state (herdr never names/lists a pane
+	// nothing has reported an agent onto, so this leg needs its own report
+	// call, same as act-a above — an unreported pane never appears here at
+	// all). A quiet cat must age. Whether real output re-stamps depends on
+	// the environment — herdr 0.7.3 moves a pane's revision only while a
+	// client renders it, so on a HEADLESS server (gc's normal mode, verified
+	// live: a pane printing every 300ms holds revision 0) output is invisible
+	// to the tracker and the stamp must keep aging; with a client attached
+	// the revision moves and the stamp must refresh. The leg asserts
 	// whichever contract matches the observed revision behavior.
-	if strings.EqualFold(strings.TrimSpace(a.AgentStatus), agentStatusUnknown) {
-		if err := p.Start(ctx, "act-b", liveActivityCfg(t)); err != nil {
-			t.Fatalf("Start act-b: %v", err)
-		}
-		t.Cleanup(func() { _ = p.Stop("act-b") })
-		waitActivity(t, p, "act-b", 5*time.Second, func(got time.Time) bool {
-			return !got.IsZero()
+	if err := p.Start(ctx, "act-b", liveActivityCfg(t)); err != nil {
+		t.Fatalf("Start act-b: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Stop("act-b") })
+	bPaneID := firstPaneID(t, session, paneID)
+	out, err := exec.Command("herdr", "--session", session, "pane", "report-agent", bPaneID,
+		"--source", "gctest", "--agent", "act-b", "--state", agentStatusUnknown).CombinedOutput()
+	if err != nil {
+		t.Fatalf("pane report-agent unknown: %v: %s", err, out)
+	}
+	waitActivity(t, p, "act-b", 5*time.Second, func(got time.Time) bool {
+		return !got.IsZero()
+	})
+	// Let any startup output settle so the aging window is clean.
+	time.Sleep(300 * time.Millisecond)
+	aged := lastActivity(t, p, "act-b")
+	time.Sleep(150 * time.Millisecond)
+	if got := lastActivity(t, p, "act-b"); !got.Equal(aged) {
+		t.Fatalf("quiet unknown-status pane must age, not re-stamp: %v then %v", aged, got)
+	}
+	b, ok, err := p.c.getAgent(ctx, "act-b")
+	if err != nil || !ok {
+		t.Fatalf("getAgent act-b: ok=%v err=%v", ok, err)
+	}
+	pokeOut, err := exec.Command("herdr", "--session", session, "pane", "run", b.PaneID, "revision-poke").CombinedOutput()
+	if err != nil {
+		t.Fatalf("pane run: %v: %s", err, pokeOut)
+	}
+	time.Sleep(500 * time.Millisecond) // several shrunk poll intervals
+	after, ok, err := p.c.getAgent(ctx, "act-b")
+	if err != nil || !ok {
+		t.Fatalf("getAgent act-b after poke: ok=%v err=%v", ok, err)
+	}
+	if after.Revision != b.Revision {
+		bumped := waitActivity(t, p, "act-b", 5*time.Second, func(got time.Time) bool {
+			return got.After(aged)
 		})
-		// Let any startup output settle so the aging window is clean.
-		time.Sleep(300 * time.Millisecond)
-		aged := lastActivity(t, p, "act-b")
-		time.Sleep(150 * time.Millisecond)
-		if got := lastActivity(t, p, "act-b"); !got.Equal(aged) {
-			t.Fatalf("quiet unknown-status pane must age, not re-stamp: %v then %v", aged, got)
-		}
-		b, ok, err := p.c.getAgent(ctx, "act-b")
-		if err != nil || !ok {
-			t.Fatalf("getAgent act-b: ok=%v err=%v", ok, err)
-		}
-		out, err := exec.Command("herdr", "--session", session, "pane", "run", b.PaneID, "revision-poke").CombinedOutput()
-		if err != nil {
-			t.Fatalf("pane run: %v: %s", err, out)
-		}
-		time.Sleep(500 * time.Millisecond) // several shrunk poll intervals
-		after, ok, err := p.c.getAgent(ctx, "act-b")
-		if err != nil || !ok {
-			t.Fatalf("getAgent act-b after poke: ok=%v err=%v", ok, err)
-		}
-		if after.Revision != b.Revision {
-			bumped := waitActivity(t, p, "act-b", 5*time.Second, func(got time.Time) bool {
-				return got.After(aged)
-			})
-			t.Logf("revision leg (rendered: %d→%d): output re-stamped %v", b.Revision, after.Revision, bumped)
-		} else {
-			if got := lastActivity(t, p, "act-b"); !got.Equal(aged) {
-				t.Fatalf("revision held at %d but the stamp moved: %v then %v", after.Revision, aged, got)
-			}
-			t.Logf("revision leg (headless: revision held at %d): output invisible, stamp kept aging as designed", after.Revision)
-		}
+		t.Logf("revision leg (rendered: %d→%d): output re-stamped %v", b.Revision, after.Revision, bumped)
 	} else {
-		t.Logf("skipping revision leg: undetected pane reports %q, not %q", a.AgentStatus, agentStatusUnknown)
+		if got := lastActivity(t, p, "act-b"); !got.Equal(aged) {
+			t.Fatalf("revision held at %d but the stamp moved: %v then %v", after.Revision, aged, got)
+		}
+		t.Logf("revision leg (headless: revision held at %d): output invisible, stamp kept aging as designed", after.Revision)
 	}
 
 	// Stop → the agent leaves agent.list → activity drops to zero (unknown).
@@ -155,4 +170,37 @@ func TestActivityLive(t *testing.T) {
 func liveActivityCfg(t *testing.T) runtime.Config {
 	t.Helper()
 	return runtime.Config{WorkDir: t.TempDir(), Command: "cat"}
+}
+
+// firstPaneID returns a pane id from `herdr pane list` not present in
+// exclude, for a session whose panes have no agent reported onto them yet
+// (an unreported pane carries no name, so `pane list` — not agent.list — is
+// the only name-independent way to find it).
+func firstPaneID(t *testing.T, session string, exclude ...string) string {
+	t.Helper()
+	skip := make(map[string]bool, len(exclude))
+	for _, id := range exclude {
+		skip[id] = true
+	}
+	out, err := exec.Command("herdr", "--session", session, "pane", "list").CombinedOutput()
+	if err != nil {
+		t.Fatalf("pane list: %v: %s", err, out)
+	}
+	var resp struct {
+		Result struct {
+			Panes []struct {
+				PaneID string `json:"pane_id"`
+			} `json:"panes"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(out, &resp); err != nil {
+		t.Fatalf("pane list: unmarshal: %v: %s", err, out)
+	}
+	for _, pane := range resp.Result.Panes {
+		if !skip[pane.PaneID] {
+			return pane.PaneID
+		}
+	}
+	t.Fatalf("pane list: no unexcluded pane found: %s", out)
+	return ""
 }
