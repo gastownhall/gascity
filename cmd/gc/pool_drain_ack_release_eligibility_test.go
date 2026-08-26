@@ -415,3 +415,51 @@ func TestAuthorizeRoutedWorkPoolDrainAckReadsAGraphClassTriggerThroughTheGraphBi
 		t.Fatalf("authorization = (%t, %q, %v), want the graph-resident release to hold", authorized, refusal, err)
 	}
 }
+
+// TestAuthorizeRoutedWorkPoolDrainAckReleasesADeletedTrigger pins the terminal
+// arm of the trigger-read chain. Ephemeral molecule work is DELETED after its
+// scope finalizes, so an acknowledged trigger can be legitimately absent from
+// every configured serving store. Absence is permanent: reporting it as
+// unavailable retries forever, and each deadline release re-parks the
+// obligation on the next admission — maintainer-city held 7 seats in draining
+// against 7 deleted triggers. A deleted trigger cannot be open, which is the
+// only fact the work-closed check guards; the live assigned-work check below
+// it stays the real fence against stopping a seat with live work.
+func TestAuthorizeRoutedWorkPoolDrainAckReleasesADeletedTrigger(t *testing.T) {
+	fixture := newRoutedWorkPoolDrainAckAuthorizationFixture(t)
+
+	const deletedID = "hq-trigger-deleted-everywhere"
+	if _, err := fixture.store.Get(deletedID); err == nil {
+		t.Fatal("control failed: the deleted trigger id exists in the work store")
+	}
+	if err := fixture.store.SetMetadataBatch(fixture.info.ID, map[string]string{
+		beadmeta.TriggerBeadIDMetadataKey:       deletedID,
+		beadmeta.TriggerBeadStoreRefMetadataKey: fixture.sourceStore,
+	}); err != nil {
+		t.Fatalf("re-point member trigger at the deleted work: %v", err)
+	}
+	for key, value := range map[string]string{
+		reconcilerDrainAckTriggerBeadIDKey:   deletedID,
+		reconcilerDrainAckTriggerStoreRefKey: fixture.sourceStore,
+	} {
+		if err := fixture.provider.SetMeta(fixture.info.SessionName, key, value); err != nil {
+			t.Fatalf("restamp acknowledged trigger %s: %v", key, err)
+		}
+	}
+	info, err := sessionFrontDoor(fixture.store).Get(fixture.info.ID)
+	if err != nil {
+		t.Fatalf("read re-pointed pool session: %v", err)
+	}
+	if err := fixture.cr.poolMembershipShadow.replace(fixture.snapshot.Config, info); err != nil {
+		t.Fatalf("publish re-pointed pool membership: %v", err)
+	}
+	lease, _, _, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, info)
+	if err != nil {
+		t.Fatalf("build drain acknowledgement lease: %v", err)
+	}
+
+	authorized, refusal, err := fixture.cr.authorizeRoutedWorkPoolDrainAck(fixture.snapshot, info, lease)
+	if err != nil || !authorized || refusal != drainAckRefusalNone {
+		t.Fatalf("authorization = (%t, %q, %v), want the deleted-trigger release to hold", authorized, refusal, err)
+	}
+}

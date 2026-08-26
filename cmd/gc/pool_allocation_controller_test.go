@@ -3550,15 +3550,13 @@ func TestAuthorizeRoutedWorkPoolDrainAckRequiresExactLiveEvidence(t *testing.T) 
 				}
 			},
 		},
-		{
-			name:      "trigger work disappeared",
-			wantError: true,
-			mutate: func(f *routedWorkPoolDrainAckAuthorizationFixture) {
-				f.info.TriggerBeadID = "ga-missing-work"
-				f.lease.WorkID = "ga-missing-work"
-				restampAckTrigger(f, "ga-missing-work", f.sourceStore)
-			},
-		},
+		// "trigger work disappeared" moved to
+		// TestAuthorizeRoutedWorkPoolDrainAckReleasesADeletedTrigger with the
+		// OPPOSITE contract: ephemeral molecule work is deleted after its scope
+		// finalizes, so absence is legitimate and permanent, and refusing it
+		// parked seats in draining forever. Identity, provenance and requester
+		// binding are all proven before the read, and the live assigned-work
+		// check after it stays the fence against stopping a seat with work.
 		{
 			name: "other awake assigned work",
 			mutate: func(f *routedWorkPoolDrainAckAuthorizationFixture) {
