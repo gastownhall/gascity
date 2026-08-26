@@ -1384,6 +1384,26 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 		if isBdNotFound(err) {
 			return fmt.Errorf("updating bead %q: %w", id, ErrNotFound)
 		}
+		if opts.Status != nil && *opts.Status == "closed" {
+			if policyErr := classifyBDUpdateClosePolicy(id, err); policyErr != nil {
+				// abc4's --force flag combines close-policy authority with live
+				// assignee-transfer authority. It is safe to retry this exact,
+				// proven-no-write refusal only when the request has no assignee
+				// edit; otherwise fail closed rather than silently turn a close
+				// compatibility retry into permission to steal a live claim.
+				if opts.Assignee != nil {
+					return fmt.Errorf("updating bead %q: close-policy-only force is unavailable for a combined assignee edit: %w: %w", id, policyErr, err)
+				}
+				forcedArgs := append(append([]string(nil), args...), "--force")
+				if forceErr := s.runBDTransientWrite(forcedArgs...); forceErr != nil {
+					if isBdNotFound(forceErr) {
+						return fmt.Errorf("updating bead %q with forced close policy: %w", id, ErrNotFound)
+					}
+					return fmt.Errorf("updating bead %q with forced close policy: %w", id, forceErr)
+				}
+				return nil
+			}
+		}
 		return fmt.Errorf("updating bead %q: %w", id, err)
 	}
 	return nil

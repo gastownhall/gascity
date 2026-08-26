@@ -335,6 +335,25 @@ func gcBeadsBdTestHomeEnv(t *testing.T) []string {
 	}
 }
 
+// prepareCurrentManagedDoltRootForProviderScriptTest gives direct
+// gc-beads-bd.sh tests an established current-era local root. Production
+// first-starts obtain their sealed fresh-init admission from the Go lifecycle;
+// tests that intentionally invoke the provider script without that lifecycle
+// must not rely on the legacy filename-only witness bypass.
+func prepareCurrentManagedDoltRootForProviderScriptTest(t *testing.T, cityPath string) {
+	t.Helper()
+	beadsDir := filepath.Join(cityPath, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatalf("create direct-provider .beads fixture: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, ".local_version"), []byte("1.2.2\n"), 0o600); err != nil {
+		t.Fatalf("write direct-provider current witness: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(beadsDir, "dolt"), 0o700); err != nil {
+		t.Fatalf("create direct-provider Dolt root: %v", err)
+	}
+}
+
 func writeTestDoltIdentity(homeDir string) error {
 	doltDir := filepath.Join(homeDir, ".dolt")
 	if err := os.MkdirAll(doltDir, 0o755); err != nil {

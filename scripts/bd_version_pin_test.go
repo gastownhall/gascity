@@ -24,10 +24,11 @@ func TestBDVersionPins(t *testing.T) {
 	root := repoRoot(t)
 	env := readDotenv(t, filepath.Join(root, "deps.env"))
 
-	bdVersion := env["BD_VERSION"]         // installable default (v-prefixed release tag)
-	bdPrev := env["BD_PREV_VERSION"]       // min-supported matrix cell (downloadable)
-	bdCurrent := env["BD_CURRENT_VERSION"] // bleeding-edge matrix cell (built from source)
-	bdCurrentRef := env["BD_CURRENT_REF"]  // beads commit the current cell builds from
+	bdVersion := env["BD_VERSION"]                 // installable default (v-prefixed release tag)
+	bdPrev := env["BD_PREV_VERSION"]               // min-supported matrix cell (downloadable)
+	bdCurrent := env["BD_CURRENT_VERSION"]         // bleeding-edge matrix cell (built from source)
+	bdRuntime := env["BD_CURRENT_RUNTIME_VERSION"] // numeric storage-era identity emitted by that source build
+	bdCurrentRef := env["BD_CURRENT_REF"]          // beads commit the current cell builds from
 
 	if bdVersion == "" {
 		t.Fatal("deps.env missing BD_VERSION")
@@ -37,6 +38,9 @@ func TestBDVersionPins(t *testing.T) {
 	}
 	if bdCurrent == "" {
 		t.Fatal("deps.env missing BD_CURRENT_VERSION (the bleeding-edge contract-matrix cell)")
+	}
+	if !regexp.MustCompile(`^\d+\.\d+\.\d+$`).MatchString(bdRuntime) {
+		t.Fatalf("deps.env BD_CURRENT_RUNTIME_VERSION = %q, want strict numeric X.Y.Z for bd's storage-era witness", bdRuntime)
 	}
 
 	// The current cell has no release tarball, so it is built from a pinned beads
@@ -62,6 +66,12 @@ func TestBDVersionPins(t *testing.T) {
 	dockerfile := readFile(t, root, "contrib/k8s/Dockerfile.agent")
 	if !strings.Contains(dockerfile, "ARG BD_SOURCE_REF="+bdCurrentRef) {
 		t.Fatalf("contrib/k8s/Dockerfile.agent BD_SOURCE_REF must equal deps.env BD_CURRENT_REF (%s)", bdCurrentRef)
+	}
+	if !strings.Contains(dockerfile, "ARG BD_CURRENT_VERSION="+bdCurrent) {
+		t.Fatalf("contrib/k8s/Dockerfile.agent BD_CURRENT_VERSION must equal deps.env BD_CURRENT_VERSION (%s)", bdCurrent)
+	}
+	if !strings.Contains(dockerfile, "ARG BD_RUNTIME_VERSION="+bdRuntime) {
+		t.Fatalf("contrib/k8s/Dockerfile.agent BD_RUNTIME_VERSION must equal deps.env BD_CURRENT_RUNTIME_VERSION (%s)", bdRuntime)
 	}
 	if !strings.Contains(dockerfile, "ARG BD_BUILD="+bdCurrentRef[:10]) {
 		t.Fatalf("contrib/k8s/Dockerfile.agent BD_BUILD must equal the first 10 characters of BD_CURRENT_REF (%s)", bdCurrentRef[:10])

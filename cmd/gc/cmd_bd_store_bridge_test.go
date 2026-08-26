@@ -3,11 +3,222 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/beads"
 )
+
+type blockedCloseBridgeStore struct {
+	*beads.MemStore
+	combinedErr error
+	closeErr    error
+	combined    int
+	retried     int
+	closed      int
+}
+
+func (s *blockedCloseBridgeStore) Update(id string, opts beads.UpdateOpts) error {
+	if opts.Status != nil && *opts.Status == "closed" {
+		s.combined++
+		return s.combinedErr
+	}
+	s.retried++
+	return s.MemStore.Update(id, opts)
+}
+
+func (s *blockedCloseBridgeStore) Close(id string) error {
+	s.closed++
+	return s.MemStore.Close(id)
+}
+
+func (s *blockedCloseBridgeStore) AtomicTx() bool { return true }
+
+func (s *blockedCloseBridgeStore) Tx(_ string, fn func(beads.Tx) error) error {
+	tx := &blockedCloseBridgeTx{store: s}
+	if err := fn(tx); err != nil {
+		return err
+	}
+	for _, update := range tx.updates {
+		if err := s.MemStore.Update(update.id, update.opts); err != nil {
+			return err
+		}
+	}
+	if tx.closeID != "" {
+		return s.MemStore.Close(tx.closeID)
+	}
+	return nil
+}
+
+type blockedCloseBridgeUpdate struct {
+	id   string
+	opts beads.UpdateOpts
+}
+
+type blockedCloseBridgeTx struct {
+	store   *blockedCloseBridgeStore
+	updates []blockedCloseBridgeUpdate
+	closeID string
+}
+
+func (tx *blockedCloseBridgeTx) Create(beads.Bead) (beads.Bead, error) {
+	return beads.Bead{}, errors.New("unexpected Create in close compatibility transaction")
+}
+
+func (tx *blockedCloseBridgeTx) Update(id string, opts beads.UpdateOpts) error {
+	tx.store.retried++
+	tx.updates = append(tx.updates, blockedCloseBridgeUpdate{id: id, opts: opts})
+	return nil
+}
+
+func (tx *blockedCloseBridgeTx) SetMetadataBatch(id string, kvs map[string]string) error {
+	return tx.Update(id, beads.UpdateOpts{Metadata: kvs})
+}
+
+func (tx *blockedCloseBridgeTx) Close(id string) error {
+	tx.store.closed++
+	if tx.store.closeErr != nil {
+		return tx.store.closeErr
+	}
+	tx.closeID = id
+	return nil
+}
+
+func TestBdStoreBridgeUpdateConvergesTypedClosePolicyBeforeExecBoundary(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name         string
+		combinedErr  error
+		wantErr      error
+		wantRetry    int
+		wantClose    int
+		wantStatus   string
+		wantTitle    string
+		wantMetadata string
+		statusOnly   bool
+		closeErr     error
+	}{
+		{
+			name:         "typed_blocked_close_retries_fields_then_force_closes",
+			combinedErr:  fmt.Errorf("bridge update: %w", beads.ErrCloseBlocked),
+			wantRetry:    1,
+			wantClose:    1,
+			wantStatus:   "closed",
+			wantTitle:    "updated before forced close",
+			wantMetadata: "pass",
+		},
+		{
+			name:         "typed_open_children_retries_fields_then_force_closes",
+			combinedErr:  fmt.Errorf("bridge update: %w", beads.ErrCloseOpenChildren),
+			wantRetry:    1,
+			wantClose:    1,
+			wantStatus:   "closed",
+			wantTitle:    "updated before forced close",
+			wantMetadata: "pass",
+		},
+		{
+			name:        "typed_open_children_status_only_force_closes_without_empty_update",
+			combinedErr: fmt.Errorf("bridge update: %w", beads.ErrCloseOpenChildren),
+			wantClose:   1,
+			wantStatus:  "closed",
+			wantTitle:   "original",
+			statusOnly:  true,
+		},
+		{
+			name:        "atomic_force_close_failure_rolls_back_sibling_fields",
+			combinedErr: fmt.Errorf("bridge update: %w", beads.ErrCloseBlocked),
+			closeErr:    errors.New("injected close failure"),
+			wantErr:     errors.New("injected close failure"),
+			wantRetry:   1,
+			wantClose:   1,
+			wantStatus:  "open",
+			wantTitle:   "original",
+		},
+		{
+			name:        "generic_failure_never_retries_or_force_closes",
+			combinedErr: errors.New("transport failed"),
+			wantErr:     errors.New("transport failed"),
+			wantStatus:  "open",
+			wantTitle:   "original",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := beads.NewMemStore()
+			created, err := mem.Create(beads.Bead{Title: "original", Status: "open"})
+			if err != nil {
+				t.Fatalf("create: %v", err)
+			}
+			store := &blockedCloseBridgeStore{MemStore: mem, combinedErr: tc.combinedErr, closeErr: tc.closeErr}
+			status := "closed"
+			title := "updated before forced close"
+			opts := beads.UpdateOpts{
+				Status:   &status,
+				Title:    &title,
+				Metadata: map[string]string{"outcome": "pass"},
+			}
+			if tc.statusOnly {
+				opts = beads.UpdateOpts{Status: &status}
+			}
+			err = updateBdStoreBridge(store, created.ID, opts)
+			if tc.wantErr != nil {
+				if err == nil || !errors.Is(err, tc.wantErr) && !strings.Contains(err.Error(), tc.wantErr.Error()) {
+					t.Fatalf("error = %v, want %v", err, tc.wantErr)
+				}
+			} else if err != nil {
+				t.Fatalf("updateBdStoreBridge: %v", err)
+			}
+			if store.combined != 1 || store.retried != tc.wantRetry || store.closed != tc.wantClose {
+				t.Fatalf("calls combined/retried/closed = %d/%d/%d, want 1/%d/%d", store.combined, store.retried, store.closed, tc.wantRetry, tc.wantClose)
+			}
+			got, getErr := mem.Get(created.ID)
+			if getErr != nil {
+				t.Fatalf("get: %v", getErr)
+			}
+			if got.Status != tc.wantStatus || got.Title != tc.wantTitle || got.Metadata["outcome"] != tc.wantMetadata {
+				t.Fatalf("bead after bridge update = %+v, want status=%q title=%q outcome=%q", got, tc.wantStatus, tc.wantTitle, tc.wantMetadata)
+			}
+		})
+	}
+}
+
+type nonAtomicBlockedCloseBridgeStore struct{ *blockedCloseBridgeStore }
+
+func (*nonAtomicBlockedCloseBridgeStore) AtomicTx() bool { return false }
+
+func TestBdStoreBridgeUpdateFailsClosedWithoutAtomicFallback(t *testing.T) {
+	t.Parallel()
+	mem := beads.NewMemStore()
+	created, err := mem.Create(beads.Bead{Title: "original", Status: "open"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	base := &blockedCloseBridgeStore{
+		MemStore:    mem,
+		combinedErr: fmt.Errorf("bridge update: %w", beads.ErrCloseOpenChildren),
+	}
+	store := &nonAtomicBlockedCloseBridgeStore{blockedCloseBridgeStore: base}
+	closed := "closed"
+	title := "must not persist"
+	err = updateBdStoreBridge(store, created.ID, beads.UpdateOpts{Status: &closed, Title: &title})
+	if !errors.Is(err, beads.ErrCloseOpenChildren) {
+		t.Fatalf("error = %v, want original typed refusal", err)
+	}
+	if base.retried != 0 || base.closed != 0 {
+		t.Fatalf("non-atomic fallback attempted retry/close = %d/%d", base.retried, base.closed)
+	}
+	got, getErr := mem.Get(created.ID)
+	if getErr != nil {
+		t.Fatalf("get: %v", getErr)
+	}
+	if got.Status != "open" || got.Title != "original" {
+		t.Fatalf("non-atomic refusal mutated bead: %+v", got)
+	}
+}
 
 func withTestStdin(t *testing.T, input string, fn func()) {
 	t.Helper()

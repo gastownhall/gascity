@@ -65,11 +65,13 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 
 func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	const (
-		bdSourceRef    = "bf97b73749ac3ef2fca2365b54537ac041ad4293"
-		bdSourceSHA256 = "a8b1d8dd85b2c008093615cb85937067a9597e760e8d39f93fe55f5c1cbb4d37"
-		bdBuild        = "bf97b73749"
+		bdCurrent      = "v1.1.1-0.20260824111725-abc4a9fa7964"
+		bdRuntime      = "1.2.2"
+		bdSourceRef    = "abc4a9fa7964d7558f91a06e20404f257e65e264"
+		bdSourceSHA256 = "72ffa80937c782c98c876d90b3fe665b38ed7d39bae1c407bcac62d9f0132491"
+		bdBuild        = "abc4a9fa79"
 		bdBranch       = "HEAD"
-		grpcVersion    = "1.82.1"
+		grpcVersion    = "1.83.0"
 	)
 
 	root := repoRoot(t)
@@ -81,6 +83,8 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	dockerfile := readFile(t, root, "contrib/k8s/Dockerfile.agent")
 	for _, want := range []string{
 		"ARG BD_VERSION=" + bdVersion,
+		"ARG BD_CURRENT_VERSION=" + bdCurrent,
+		"ARG BD_RUNTIME_VERSION=" + bdRuntime,
 		"ARG BD_SOURCE_REF=" + bdSourceRef,
 		"ARG BD_SOURCE_SHA256=" + bdSourceSHA256,
 		"ARG BD_BUILD=" + bdBuild,
@@ -88,14 +92,15 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		"ARG GRPC_VERSION=" + grpcVersion,
 		`https://github.com/gastownhall/beads/archive/${BD_SOURCE_REF}.tar.gz`,
 		`echo "${BD_SOURCE_SHA256}  /tmp/bd-source.tar.gz" | sha256sum --check --strict`,
-		`grep -Fq "Version = \"${bd_version}\"" cmd/bd/version.go`,
+		`grep -Fq "Version = \"${BD_RUNTIME_VERSION}\"" cmd/bd/version.go`,
 		`go get "google.golang.org/grpc@v${GRPC_VERSION}"`,
 		`CGO_ENABLED=1 go build`,
 		`-tags="gms_pure_go"`,
-		`-X main.Version=${bd_version}`,
+		`-X main.Version=${BD_RUNTIME_VERSION}`,
 		`-X main.Build=${BD_BUILD}`,
 		`-X main.Commit=${BD_SOURCE_REF}`,
 		`-X main.Branch=${BD_BRANCH}`,
+		`/out/bd version | grep -Fq "bd version ${BD_RUNTIME_VERSION} (${BD_BUILD}:"`,
 		`COPY --from=bd-builder /out/bd /usr/local/bin/bd`,
 		`CGO_ENABLED=0 go build -o gc ./cmd/gc`,
 		`RUN gc version`,
@@ -103,6 +108,9 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		if !strings.Contains(dockerfile, want) {
 			t.Errorf("contrib/k8s/Dockerfile.agent missing %q", want)
 		}
+	}
+	if strings.Contains(dockerfile, `grep -Fq "Version = \"${bd_version}\"" cmd/bd/version.go`) {
+		t.Error("contrib/k8s/Dockerfile.agent still equates published BD_VERSION with current-main source identity")
 	}
 	if got := strings.Count(dockerfile, `go get "google.golang.org/grpc@v${GRPC_VERSION}"`); got != 1 {
 		t.Errorf("contrib/k8s/Dockerfile.agent applies the bd grpc override %d times, want exactly 1", got)

@@ -22,21 +22,24 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 	}
 
 	var (
-		stateFile     string
-		pidText       string
-		runText       string
-		portText      string
-		dataDir       string
-		startedAt     string
-		field         string
-		cityPath      string
-		hostText      string
-		userText      string
-		checkReadOnly bool
-		checkDeleted  bool
-		forceReset    bool
-		logLevel      string
-		timeoutMS     int
+		stateFile                  string
+		pidText                    string
+		runText                    string
+		portText                   string
+		dataDir                    string
+		startedAt                  string
+		field                      string
+		cityPath                   string
+		hostText                   string
+		userText                   string
+		checkReadOnly              bool
+		checkDeleted               bool
+		forceReset                 bool
+		logLevel                   string
+		timeoutMS                  int
+		checkFreshWitnessAdmission bool
+		allowCreatedFreshRoot      bool
+		bdBinText                  string
 	)
 
 	writeProvider := &cobra.Command{
@@ -108,6 +111,13 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
+			if checkFreshWitnessAdmission {
+				if err := validateFreshManagedDoltWitnessAdmission(cityPath, dataDir, bdBinText, allowCreatedFreshRoot); err != nil {
+					fmt.Fprintf(stderr, "gc dolt-state runtime-layout: fresh witness admission: %v\n", err) //nolint:errcheck
+					return errExit
+				}
+				return nil
+			}
 			layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc dolt-state runtime-layout: %v\n", err) //nolint:errcheck
@@ -123,6 +133,10 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		},
 	}
 	runtimeLayout.Flags().StringVar(&cityPath, "city", "", "city root")
+	runtimeLayout.Flags().StringVar(&dataDir, "data-dir", "", "Dolt data directory for fresh-witness validation")
+	runtimeLayout.Flags().StringVar(&bdBinText, "bd-bin", "", "selected bd executable for fresh-witness validation")
+	runtimeLayout.Flags().BoolVar(&checkFreshWitnessAdmission, "check-fresh-witness-admission", false, "validate Gas City-owned fresh managed-Dolt provenance")
+	runtimeLayout.Flags().BoolVar(&allowCreatedFreshRoot, "allow-created-fresh-root", false, "validate the narrow post-root fresh-init resume state")
 	_ = runtimeLayout.MarkFlagRequired("city")
 	cmd.AddCommand(runtimeLayout)
 

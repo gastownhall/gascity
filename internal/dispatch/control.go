@@ -1861,7 +1861,23 @@ func updateMetadataAndClose(store beads.Store, beadID string, metadata map[strin
 		Status:   &status,
 		Metadata: metadata,
 	}); err != nil {
-		return err
+		if !beads.IsClosePolicyRefusal(err) || !beads.StoreSupportsAtomicTx(store) {
+			return err
+		}
+		// Both typed close-policy refusals prove the combined update wrote
+		// nothing. Replay metadata and the legacy force-close only inside a
+		// rollback-capable transaction, so a failed close cannot strand outcome
+		// metadata on an open control bead.
+		if txErr := store.Tx("gc: atomically preserve outcome and force close", func(tx beads.Tx) error {
+			if len(metadata) > 0 {
+				if metaErr := tx.Update(beadID, beads.UpdateOpts{Metadata: metadata}); metaErr != nil {
+					return metaErr
+				}
+			}
+			return tx.Close(beadID)
+		}); txErr != nil {
+			return fmt.Errorf("atomically preserving metadata and force-closing %s: %w", beadID, txErr)
+		}
 	}
 	bead, err := store.Get(beadID)
 	if err != nil {

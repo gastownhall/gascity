@@ -2476,8 +2476,258 @@ run_bd_pinned() {
         export GC_DOLT_PASSWORD="$DOLT_PASSWORD"
         export BEADS_DOLT_SERVER_USER="$DOLT_USER"
         export BEADS_DOLT_PASSWORD="$DOLT_PASSWORD"
-        bd "$@"
+        "${BD_BIN:-bd}" "$@"
     )
+}
+
+# bd_witness_is_current mirrors beads' currentVersionWitness contract: a clean
+# numeric X.Y.Z marker whose major version is at least one. Such a marker proves
+# that an existing workspace was created by a current-era bd rather than by a
+# legacy pre-1.0 layout that needs a different upgrade path.
+bd_witness_is_current() {
+    local _v _major _minor _rest _patch
+    _v="${1#v}"
+    case "$_v" in
+        ''|*[!0-9.]*) return 1 ;;
+    esac
+    _major="${_v%%.*}"
+    _rest="${_v#*.}"
+    [ "$_rest" != "$_v" ] || return 1
+    _minor="${_rest%%.*}"
+    _patch="${_rest#*.}"
+    [ "$_patch" != "$_rest" ] || return 1
+    case "$_patch" in *.*) return 1 ;; esac
+    [ -n "$_major" ] && [ -n "$_minor" ] && [ -n "$_patch" ] || return 1
+    [ "$_major" -ge 1 ] 2>/dev/null || return 1
+    return 0
+}
+
+# read_bd_current_era_witness accepts only a small, regular, non-symlink marker.
+# Command substitution removes the trailing newline that bd normally writes;
+# any other whitespace remains and is rejected by bd_witness_is_current.
+read_bd_current_era_witness() {
+    local witness="$1"
+    local value size_before size_after disallowed_bytes
+    [ -f "$witness" ] && [ ! -L "$witness" ] || return 1
+    size_before=$(LC_ALL=C wc -c < "$witness" 2>/dev/null) || return 1
+    case "$size_before" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$size_before" -gt 0 ] && [ "$size_before" -le 64 ] || return 1
+    # Reject bytes a shell variable could erase or reinterpret (notably NUL)
+    # before reading. grep treats NUL-bearing input as binary and can report no
+    # regex match, so count the bytes left after deleting the exact wire
+    # alphabet instead. Newlines are the only whitespace admitted here.
+    disallowed_bytes=$(LC_ALL=C tr -d 'v0123456789.\n' < "$witness" 2>/dev/null | LC_ALL=C wc -c) || return 1
+    case "$disallowed_bytes" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$disallowed_bytes" -eq 0 ] || return 1
+    value=$(LC_ALL=C head -c 64 "$witness" 2>/dev/null) || return 1
+    size_after=$(LC_ALL=C wc -c < "$witness" 2>/dev/null) || return 1
+    [ "$size_after" = "$size_before" ] || return 1
+    bd_witness_is_current "$value" || return 1
+    printf '%s\n' "$value"
+}
+
+# bd_storage_layout_is_fresh_for_witness recognizes the deliberately tiny
+# pre-init shape Gas City creates: its sealed admission record plus canonical
+# configuration/metadata files, but no prior storage or other workspace
+# artifacts. In particular, SQLite files and sidecars, issues.jsonl,
+# embeddeddolt, retained roots, symlinks, and unknown entries all make the
+# layout non-fresh. That prevents creating dolt/ from hiding a legacy shape
+# from beads' own read-only upgrade guard.
+bd_storage_layout_is_fresh_for_witness() {
+    local beads_dir="$1"
+    local allowed_tmp="${2:-}"
+    local entry name seen_admission=false
+
+    [ -d "$beads_dir" ] && [ ! -L "$beads_dir" ] || return 1
+    for entry in "$beads_dir"/* "$beads_dir"/.[!.]* "$beads_dir"/..?*; do
+        if [ ! -e "$entry" ] && [ ! -L "$entry" ]; then
+            continue
+        fi
+        if [ -n "$allowed_tmp" ] && [ "$entry" = "$allowed_tmp" ]; then
+            [ -f "$entry" ] && [ ! -L "$entry" ] || return 1
+            continue
+        fi
+        name=${entry##*/}
+        case "$name" in
+            .gascity-fresh-dolt-admission|config.yaml|metadata.json)
+                [ -f "$entry" ] && [ ! -L "$entry" ] || return 1
+                [ "$name" != ".gascity-fresh-dolt-admission" ] || seen_admission=true
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+    done
+    [ "$seen_admission" = true ]
+}
+
+# A filename-only allowlist cannot establish freshness: metadata.json may be a
+# valid remote/hosted binding, a stale local binding, or an unknown document
+# that an older Gas City would silently canonicalize. The Go lifecycle creates
+# this admission before either canonical file, seals it to both exact hashes,
+# and exposes only this read-only validator to the provider script. Direct
+# script invocation without the matching gc binary therefore fails closed.
+require_gascity_fresh_witness_admission() {
+    local dir="$1"
+    local data_root="$2"
+    local allow_created_root="${3:-false}"
+    local gc_bin="${GC_BIN:-}"
+    local bd_bin="${BD_BIN:-bd}"
+    local admission="$dir/.beads/.gascity-fresh-dolt-admission"
+
+    [ -f "$admission" ] && [ ! -L "$admission" ] || \
+        die "refusing to seed bd witness without a regular Gas City fresh-init admission"
+    [ -n "$gc_bin" ] && [ -x "$gc_bin" ] || \
+        die "refusing to seed bd witness without a Gas City fresh-init validator"
+    if [ "$allow_created_root" = true ]; then
+        "$gc_bin" dolt-state runtime-layout --city "$dir" \
+            --data-dir "$data_root" --bd-bin "$bd_bin" \
+            --check-fresh-witness-admission --allow-created-fresh-root \
+            </dev/null >/dev/null 2>&1 || \
+            die "refusing to resume bd witness without sealed Gas City fresh-init provenance for $dir"
+        return 0
+    fi
+    "$gc_bin" dolt-state runtime-layout --city "$dir" \
+        --data-dir "$data_root" --bd-bin "$bd_bin" \
+        --check-fresh-witness-admission </dev/null >/dev/null 2>&1 || \
+        die "refusing to seed bd witness without sealed Gas City fresh-init provenance for $dir"
+}
+
+# A crash can occur after the no-clobber hard link installs .local_version but
+# before its mktemp source is unlinked. The Go validator accepts only exact
+# six-character mktemp names that are hard links to the already validated
+# witness; repeat the same inode check here before removing those leftovers.
+cleanup_gascity_fresh_witness_temps() {
+    local dir="$1"
+    local witness="$dir/.beads/.local_version"
+    local tmp
+    for tmp in "$dir/.beads"/.local_version.tmp.??????; do
+        if [ ! -e "$tmp" ] && [ ! -L "$tmp" ]; then
+            continue
+        fi
+        [ -f "$tmp" ] && [ ! -L "$tmp" ] && [ "$tmp" -ef "$witness" ] || \
+            die "refusing divergent fresh-witness temp at $tmp"
+        rm -f "$tmp" || die "cannot remove resumed fresh-witness temp at $tmp"
+    done
+}
+
+# seed_fresh_bd_current_era_witness is the only Gas City-owned bypass of
+# beads' legacy-upgrade guard. It is valid only while the entire managed
+# storage layout is provably fresh. Existing markers, data roots, or other
+# storage artifacts are migration inputs, never things this helper may relabel
+# or overwrite.
+#
+# The hard-link install is same-filesystem, atomic, and no-clobber. Concurrent
+# Gas City creators cannot replace an existing marker. Freshness alone does
+# not prove which storage era an ambient bd will create, so the selected
+# executable must itself report a current-major version.
+seed_fresh_bd_current_era_witness() {
+    local dir="$1"
+    local data_root="${2:-$dir/.beads/dolt}"
+    local beads_dir="$dir/.beads"
+    local default_root="$beads_dir/dolt"
+    local witness="$beads_dir/.local_version"
+    local version version_output tmp
+
+    [ -d "$beads_dir" ] && [ ! -L "$beads_dir" ] || \
+        die "refusing to seed bd witness: managed directory is absent or not a real directory: $beads_dir"
+    [ "$data_root" = "$default_root" ] || \
+        die "refusing fresh managed Dolt initialization with custom data root $data_root; initialize or explicitly adopt it before use"
+    # The witness is scope-global, so a custom managed DATA_DIR cannot prove
+    # the default root safe. Refuse if either location already carries storage.
+    if [ -e "$default_root" ] || [ -L "$default_root" ]; then
+        die "refusing to seed bd witness beside pre-existing default Dolt storage at $default_root; migrate or explicitly adopt it first"
+    fi
+    if [ "$data_root" != "$default_root" ] && { [ -e "$data_root" ] || [ -L "$data_root" ]; }; then
+        die "refusing to seed bd witness beside pre-existing Dolt storage at $data_root; migrate or explicitly adopt it first"
+    fi
+
+    # Validate the bound admission before interpreting a marker without a root.
+    # A valid current marker is the one narrowly resumable crash state: the
+    # previous creator linked it but did not yet create the admitted data root.
+    require_gascity_fresh_witness_admission "$dir" "$data_root"
+    if [ -e "$witness" ] || [ -L "$witness" ]; then
+        if read_bd_current_era_witness "$witness" >/dev/null; then
+            cleanup_gascity_fresh_witness_temps "$dir"
+            mkdir "$data_root" || die "cannot exclusively resume freshly admitted managed Dolt root at $data_root"
+            require_gascity_fresh_witness_admission "$dir" "$data_root" true
+            rm -f "$beads_dir/.gascity-fresh-dolt-admission" || \
+                die "cannot consume resumed Gas City fresh-init admission under $beads_dir"
+            return 0
+        fi
+        die "refusing to seed bd witness beside an invalid pre-existing witness without its Dolt root at $witness; recover or explicitly adopt it first"
+    fi
+    if ! bd_storage_layout_is_fresh_for_witness "$beads_dir"; then
+        die "refusing to seed bd witness: pre-existing or unrecognized storage layout under $beads_dir requires migration or explicit adoption"
+    fi
+
+    version_output=$("${BD_BIN:-bd}" version 2>/dev/null) || \
+        die "refusing to seed bd witness: selected bd executable could not report its version"
+    case "$version_output" in
+        'bd version '*)
+            version="${version_output#bd version }"
+            version="${version%%[[:space:]]*}"
+            ;;
+        *) version="" ;;
+    esac
+    if ! bd_witness_is_current "$version"; then
+        die "refusing to seed bd witness: selected bd executable did not report a current-major version"
+    fi
+
+    tmp=$(mktemp "$beads_dir/.local_version.tmp.XXXXXX") || \
+        die "cannot create temporary current-era bd witness in $beads_dir"
+    if ! printf '%s\n' "$version" > "$tmp"; then
+        rm -f "$tmp"
+        die "cannot write current-era bd witness at $tmp"
+    fi
+    chmod 600 "$tmp" 2>/dev/null || true
+
+    # Recheck the complete layout immediately before the no-clobber install.
+    # Only this process's regular temp file is excluded from the scan.
+    if [ -e "$default_root" ] || [ -L "$default_root" ]; then
+        rm -f "$tmp"
+        die "refusing to seed bd witness beside concurrently created default Dolt storage at $default_root"
+    fi
+    if [ "$data_root" != "$default_root" ] && { [ -e "$data_root" ] || [ -L "$data_root" ]; }; then
+        rm -f "$tmp"
+        die "refusing to seed bd witness beside concurrently created Dolt storage at $data_root"
+    fi
+    if ! bd_storage_layout_is_fresh_for_witness "$beads_dir" "$tmp"; then
+        rm -f "$tmp"
+        die "refusing to seed bd witness: storage layout under $beads_dir changed during initialization"
+    fi
+    if ln "$tmp" "$witness" 2>/dev/null; then
+        if ! mkdir "$data_root"; then
+            rm -f "$tmp"
+            die "cannot create freshly admitted managed Dolt root at $data_root"
+        fi
+        rm -f "$tmp"
+        require_gascity_fresh_witness_admission "$dir" "$data_root" true
+        rm -f "$beads_dir/.gascity-fresh-dolt-admission" || \
+            die "cannot consume Gas City fresh-init admission under $beads_dir"
+        return 0
+    fi
+    rm -f "$tmp"
+    die "cannot install current-era bd witness without clobbering $witness"
+}
+
+# Existing local Dolt storage must already carry beads' current-era witness.
+# Missing/legacy/malformed markers require the explicit, backed-up migration or
+# adoption path; silently manufacturing one would bypass beads' safety guard.
+require_bd_current_era_witness_for_local_dolt_root() {
+    local dir="$1"
+    local data_root="${2:-$dir/.beads/dolt}"
+    local witness="$dir/.beads/.local_version"
+    local existing
+
+    if [ ! -e "$data_root" ] && [ ! -L "$data_root" ]; then
+        return 0
+    fi
+    existing=$(read_bd_current_era_witness "$witness" || true)
+    if bd_witness_is_current "$existing"; then
+        return 0
+    fi
+    die "refusing current bd against pre-existing Dolt storage at $data_root without a valid current-era witness at $witness; migrate or explicitly adopt it first"
 }
 
 run_bd_init_pinned() {
@@ -2486,6 +2736,7 @@ run_bd_init_pinned() {
     local dolt_database="$3"
     local host="$4"
     local force_init="${5:-false}"
+    require_bd_current_era_witness_for_local_dolt_root "$dir"
     if [ "$force_init" = "true" ]; then
         run_bd_pinned "$dir" init --force --quiet --server -p "$prefix" --database "$dolt_database" --skip-hooks --skip-agents \
             --server-host "$host" --server-port "$DOLT_PORT" "$dir" || die "bd init failed for $dir"
@@ -2626,8 +2877,33 @@ run_doltlite_existing_db_maintenance() {
 ensure_beads_dir_permissions() {
     local dir="$1"
     local beads_dir="$dir/.beads"
-    mkdir -p "$beads_dir" || die "failed to create $beads_dir"
+    prepare_bd_witness_directory "$dir"
     chmod 700 "$beads_dir" || die "failed to set $beads_dir permissions to 700"
+}
+
+# Establish the marker parent without mutating an unproven existing path.
+# New directories are private from creation; existing directories keep their
+# mode until their witness/storage state has passed the relevant validation.
+prepare_bd_witness_directory() {
+    local dir="$1"
+    local beads_dir="$dir/.beads"
+
+    if [ -L "$beads_dir" ]; then
+        die "refusing symlinked managed beads directory: $beads_dir"
+    fi
+    if [ -e "$beads_dir" ]; then
+        [ -d "$beads_dir" ] || die "refusing non-directory managed beads path: $beads_dir"
+        return 0
+    fi
+    if (umask 077 && mkdir "$beads_dir"); then
+        return 0
+    fi
+    # A concurrent managed creator may have won mkdir. Accept only the same
+    # real-directory shape; every other race remains fail-closed.
+    if [ -d "$beads_dir" ] && [ ! -L "$beads_dir" ]; then
+        return 0
+    fi
+    die "failed to create safe managed beads directory: $beads_dir"
 }
 
 normalize_scope_after_init() {
@@ -2689,7 +2965,7 @@ op_init() {
     local beads_dir="$dir/.beads"
     unset BEADS_DIR
     export BEADS_DIR="$beads_dir"
-    ensure_beads_dir_permissions "$dir"
+    prepare_bd_witness_directory "$dir"
     ensure_beads_role
 
     if [ -z "$dolt_database" ]; then
@@ -3219,9 +3495,25 @@ if ! load_runtime_layout_from_gc; then
     LOCK_FILE="${GC_DOLT_LOCK_FILE:-$PACK_STATE_DIR/dolt.lock}"
     CONFIG_FILE="${GC_DOLT_CONFIG_FILE:-$PACK_STATE_DIR/dolt-config.yaml}"
 fi
-if is_doltlite_backend; then
+if is_doltlite_backend || is_remote || [ -n "${BEADS_DOLT_CREDENTIAL_COMMAND:-}" ]; then
+    # Remote and credential-backed providers do not own a local Dolt root.
+    # Their existing .beads binding is provenance, not a fresh layout for Gas
+    # City to relabel. They need only private provider runtime state.
     mkdir -p "$PACK_STATE_DIR"
 else
+    prepare_bd_witness_directory "$GC_CITY_PATH"
+    if [ -e "$DATA_DIR" ] || [ -L "$DATA_DIR" ]; then
+        require_bd_current_era_witness_for_local_dolt_root "$GC_CITY_PATH" "$DATA_DIR"
+        if [ -e "$BEADS_DIR_ROOT/.gascity-fresh-dolt-admission" ] || [ -L "$BEADS_DIR_ROOT/.gascity-fresh-dolt-admission" ]; then
+            require_gascity_fresh_witness_admission "$GC_CITY_PATH" "$DATA_DIR" true
+            cleanup_gascity_fresh_witness_temps "$GC_CITY_PATH"
+            rm -f "$BEADS_DIR_ROOT/.gascity-fresh-dolt-admission" || \
+                die "cannot consume resumed Gas City fresh-init admission under $BEADS_DIR_ROOT"
+        fi
+    else
+        seed_fresh_bd_current_era_witness "$GC_CITY_PATH" "$DATA_DIR"
+    fi
+    ensure_beads_dir_permissions "$GC_CITY_PATH"
     mkdir -p "$DATA_DIR" "$PACK_STATE_DIR"
 fi
 

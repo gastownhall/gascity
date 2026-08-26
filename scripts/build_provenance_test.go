@@ -55,6 +55,22 @@ func TestBuildTargetDisablesToolchainVCSStamping(t *testing.T) {
 	}
 }
 
+// TestNativeDependencySurfaceBuildDisablesToolchainVCSStamping keeps the
+// dependency guard runnable from polecat worktrees too. The guard inspects
+// symbols and binary size, neither of which needs the Go toolchain's ambient
+// repository stamp; allowing buildvcs there can make Go walk past a worktree's
+// .git file and either stamp the enclosing city or fail on that directory.
+func TestNativeDependencySurfaceBuildDisablesToolchainVCSStamping(t *testing.T) {
+	scriptPath := filepath.Join(repoRoot(t), "scripts", "check-native-dependency-surface.sh")
+	script, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", scriptPath, err)
+	}
+	if !strings.Contains(string(script), "go build -buildvcs=false") {
+		t.Fatalf("native dependency guard must pass -buildvcs=false so it works from nested git worktrees")
+	}
+}
+
 // TestBuildStampsWorkingTreeDirtiness asserts that disabling buildvcs did not
 // silently drop dirty detection along with the bogus stamp. `gc version
 // --long`, the supervisor's /health build_id, and binary-drift detection all

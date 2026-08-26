@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-max_modules="${GC_NATIVE_DEP_MAX_MODULES:-727}"
-max_binary_bytes="${GC_NATIVE_DEP_MAX_BINARY_BYTES:-270000000}"
+max_modules="${GC_NATIVE_DEP_MAX_MODULES:-740}"
+# Calibrated with the official upstream Go 1.26.6 toolchain after the Beads
+# transaction/native-Dolt cutover plus the admission hardening: Ubuntu CI
+# projects 271,911,960 bytes from the exact patch-on-upstream build, leaving
+# 588,040 bytes below the cap. Keep essentially the prior gate's half-megabyte
+# headroom rather than inheriting Fedora's built-in nodwarf5 inflation or
+# allowing an open-ended increase.
+max_binary_bytes="${GC_NATIVE_DEP_MAX_BINARY_BYTES:-272500000}"
 max_aws_modules="${GC_NATIVE_DEP_MAX_AWS_MODULES:-25}"
 max_azure_modules="${GC_NATIVE_DEP_MAX_AZURE_MODULES:-9}"
 max_dolthub_modules="${GC_NATIVE_DEP_MAX_DOLTHUB_MODULES:-15}"
@@ -51,7 +57,7 @@ fi
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT INT TERM HUP
-go build -o "$tmpdir/gc" ./cmd/gc
+go build -buildvcs=false -o "$tmpdir/gc" ./cmd/gc
 
 go tool nm "$tmpdir/gc" > "$tmpdir/gc.nm"
 for forbidden_symbol in \

@@ -7,10 +7,30 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/steveyegge/beads/issueops"
 )
 
 // ErrNotFound is returned when a bead ID does not exist in the store.
 var ErrNotFound = errors.New("bead not found")
+
+// ErrCloseBlocked is returned when a non-forced transition to closed is
+// refused because the bead still has a live blocker. It aliases beads' public
+// sentinel so native-store errors retain identity; subprocess-backed stores
+// map the exact structured bd refusal onto the same value.
+var ErrCloseBlocked = issueops.ErrCloseBlocked
+
+// ErrCloseOpenChildren is returned when a non-forced transition to closed is
+// refused because the bead has an open child. Like ErrCloseBlocked, this is a
+// no-write policy refusal and aliases beads' public sentinel.
+var ErrCloseOpenChildren = issueops.ErrCloseOpenChildren
+
+// IsClosePolicyRefusal reports the two typed, no-write close-policy refusals
+// introduced by beads abc4. Callers may use this only to select an atomic
+// force-close compatibility path; generic failures carry no such authority.
+func IsClosePolicyRefusal(err error) bool {
+	return errors.Is(err, ErrCloseBlocked) || errors.Is(err, ErrCloseOpenChildren)
+}
 
 // ErrIDCollision is returned when bd's fuzzy/substring resolver returns a bead
 // whose ID differs from the requested ID (e.g. "gcy-dv7" resolves to
@@ -636,7 +656,10 @@ type Store interface {
 	Get(id string) (Bead, error)
 
 	// Update modifies fields of an existing bead. Only non-nil fields in opts
-	// are applied. Returns ErrNotFound if the bead does not exist.
+	// are applied. Status="closed" has the same unconditional close-policy
+	// authority as Close; sibling fields belong to the same update outcome and
+	// atomic stores must not commit them if the close fails. Returns ErrNotFound
+	// if the bead does not exist.
 	Update(id string, opts UpdateOpts) error
 
 	// Close sets a bead's status to "closed". Returns ErrNotFound if the ID

@@ -1057,6 +1057,7 @@ func (s *NativeDoltStore) Update(id string, opts UpdateOpts) error {
 // shared by the standalone Update (one op, one commit) and the multi-write
 // Store.Tx path (many ops, one commit) so both routes have identical semantics.
 func (s *NativeDoltStore) applyUpdateInTx(ctx context.Context, tx beadslib.Transaction, id string, opts UpdateOpts) error {
+	forceClose := opts.Status != nil && *opts.Status == "closed"
 	if opts.ParentID != nil {
 		if err := s.validateUpdateParent(ctx, tx, *opts.ParentID); err != nil {
 			return err
@@ -1065,6 +1066,14 @@ func (s *NativeDoltStore) applyUpdateInTx(ctx context.Context, tx beadslib.Trans
 	updates, err := s.nativeUpdates(ctx, tx, id, opts)
 	if err != nil {
 		return err
+	}
+	// Gas City's Store.Update has always treated status=closed like Store.Close:
+	// it is an unconditional lifecycle transition. beads abc4 added policy gates
+	// to generic status updates, so keep the close out of UpdateIssue and apply
+	// the remaining fields plus the force-close in this same transaction. A
+	// close failure therefore rolls every sibling field back with it.
+	if forceClose {
+		delete(updates, "status")
 	}
 	if len(updates) > 0 {
 		if err := tx.UpdateIssue(ctx, id, updates, s.actor); err != nil {
@@ -1085,6 +1094,9 @@ func (s *NativeDoltStore) applyUpdateInTx(ctx context.Context, tx beadslib.Trans
 		if err := s.updateParentInTransaction(ctx, tx, id, *opts.ParentID); err != nil {
 			return err
 		}
+	}
+	if forceClose {
+		return s.applyCloseInTx(ctx, tx, id)
 	}
 	return nil
 }

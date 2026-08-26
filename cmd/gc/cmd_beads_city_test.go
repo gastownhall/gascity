@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -317,6 +318,50 @@ func TestDoBeadsCityUseExternalStopsManagedLocalProvider(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(cityDir, ".beads", "dolt-server.port")); !os.IsNotExist(err) {
 		t.Fatalf("managed port mirror still present, stat err = %v", err)
+	}
+}
+
+func TestDoBeadsCityUseExternalDiscardsUnstartedAdmissionWithoutProviderInvocation(t *testing.T) {
+	cityDir := t.TempDir()
+	callLog := filepath.Join(cityDir, "provider-calls.log")
+	script := writeManagedBdTestScript(t, "#!/bin/sh\necho \"$1\" >> "+callLog+"\nexit 91\n")
+	provider := "exec:" + script
+	writeCityEndpointCityConfigWithCompat(t, cityDir, config.DoltConfig{}, nil)
+	t.Setenv("GC_BEADS", provider)
+	t.Setenv("GC_BEADS_SCOPE_ROOT", cityDir)
+
+	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("load managed config: %v", err)
+	}
+	prefix := config.EffectiveHQPrefix(cfg)
+	state := desiredCityDoltConfigState(cityDir, cfg.Dolt, prefix)
+	if needed, err := prepareFreshManagedDoltWitnessAdmission(cityDir, state, "hq"); err != nil || !needed {
+		t.Fatalf("prepare unstarted admission = (%v, %v), want (true, nil)", needed, err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doBeadsCityEndpoint(fsys.OSFS{}, cityDir, cityEndpointOptions{
+		External:        true,
+		Host:            "db.example.com",
+		Port:            "4406",
+		AdoptUnverified: true,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doBeadsCityEndpoint() = %d, stderr = %s", code, stderr.String())
+	}
+	if _, err := os.Stat(callLog); !os.IsNotExist(err) {
+		t.Fatalf("provider was invoked for an unstarted local admission, stat err = %v", err)
+	}
+	beadsDir := filepath.Join(cityDir, ".beads")
+	for _, absent := range []string{freshManagedDoltAdmissionName, ".local_version", "dolt"} {
+		if _, err := os.Lstat(filepath.Join(beadsDir, absent)); !os.IsNotExist(err) {
+			t.Fatalf("endpoint transition left or created %s, stat err = %v", absent, err)
+		}
+	}
+	got := readRigEndpointConfigState(t, cityDir)
+	if got.EndpointOrigin != contract.EndpointOriginCityCanonical || got.DoltHost != "db.example.com" || got.DoltPort != "4406" {
+		t.Fatalf("external endpoint state = %+v", got)
 	}
 }
 

@@ -178,6 +178,7 @@ func doBeadsCityEndpoint(fs fsys.FS, cityPath string, opts cityEndpointOptions, 
 
 	managedStopScript := ""
 	var managedStopEnv []string
+	var freshAdmissionGuard *freshManagedDoltExternalTransitionGuard
 	if currentState.EndpointOrigin == contract.EndpointOriginManagedCity && targetState.EndpointOrigin == contract.EndpointOriginCityCanonical {
 
 		provider := beadsProvider(cityPath)
@@ -197,6 +198,32 @@ func doBeadsCityEndpoint(fs fsys.FS, cityPath string, opts cityEndpointOptions, 
 				return 1
 			}
 			managedStopEnv = append([]string(nil), providerEnv...)
+		}
+	}
+	if managedStopScript != "" {
+		release, err := acquireProviderSemaphoreForOp(cityPath, "stop")
+		if err != nil {
+			fmt.Fprintf(stderr, "%s: serializing managed provider transition: %v\n", name, err) //nolint:errcheck
+			return 1
+		}
+		defer release()
+		prefix := config.EffectiveHQPrefix(cfg)
+		freshAdmissionGuard, err = lockAwaitingFreshManagedDoltAdmissionForExternalTransition(
+			cityPath,
+			desiredCityDoltConfigState(cityPath, cfg.Dolt, prefix),
+			canonicalScopeDoltDatabase(cityPath, cityPath, prefix),
+		)
+		if err != nil {
+			fmt.Fprintf(stderr, "%s: locking unstarted managed provider admission: %v\n", name, err) //nolint:errcheck
+			return 1
+		}
+		if freshAdmissionGuard != nil {
+			defer freshAdmissionGuard.release()
+			// A locked awaiting/rootless admission proves this provider has never
+			// started. Keep the lock through config writes and discard it only
+			// after every other fallible transition step has succeeded.
+			managedStopScript = ""
+			managedStopEnv = nil
 		}
 	}
 
@@ -242,6 +269,12 @@ func doBeadsCityEndpoint(fs fsys.FS, cityPath string, opts cityEndpointOptions, 
 		}
 		if err := clearManagedDoltRuntimeStateUnlessBound(cityPath); err != nil {
 			writeCityEndpointRollbackError(fs, stderr, snapshots, name, "clearing managed runtime state", err)
+			return 1
+		}
+	}
+	if freshAdmissionGuard != nil {
+		if err := freshAdmissionGuard.discard(); err != nil {
+			writeCityEndpointRollbackError(fs, stderr, snapshots, name, "discarding unstarted managed provider admission", err)
 			return 1
 		}
 	}

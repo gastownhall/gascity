@@ -180,7 +180,7 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 		if err := decodeJSON(stdin, &req); err != nil {
 			return err
 		}
-		return store.Update(args[0], beads.UpdateOpts{
+		return updateBdStoreBridge(store, args[0], beads.UpdateOpts{
 			Title:        req.Title,
 			Status:       req.Status,
 			Type:         req.Type,
@@ -297,6 +297,41 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 	default:
 		return fmt.Errorf("unsupported operation %q", op)
 	}
+}
+
+// updateBdStoreBridge resolves typed close-policy refusals before the exec-store
+// process boundary would flatten their identity. Both refusal types guarantee
+// that the combined update wrote nothing. Only an atomic Store.Tx may replay
+// the sibling fields and Store.Close's force-close contract; a non-atomic store
+// returns the original refusal rather than risking a partial terminal state.
+func updateBdStoreBridge(store beads.Store, id string, opts beads.UpdateOpts) error {
+	err := store.Update(id, opts)
+	if err == nil || opts.Status == nil || *opts.Status != "closed" || !beads.IsClosePolicyRefusal(err) {
+		return err
+	}
+	if !beads.StoreSupportsAtomicTx(store) {
+		return err
+	}
+
+	nonStatus := opts
+	nonStatus.Status = nil
+	if txErr := store.Tx("gc: preserve legacy force-close update", func(tx beads.Tx) error {
+		if hasBdStoreBridgeUpdate(nonStatus) {
+			if updateErr := tx.Update(id, nonStatus); updateErr != nil {
+				return fmt.Errorf("persisting non-status fields: %w", updateErr)
+			}
+		}
+		return tx.Close(id)
+	}); txErr != nil {
+		return fmt.Errorf("atomically force-closing %s after typed close-policy refusal: %w", id, txErr)
+	}
+	return nil
+}
+
+func hasBdStoreBridgeUpdate(opts beads.UpdateOpts) bool {
+	return opts.Title != nil || opts.Status != nil || opts.Type != nil || opts.Priority != nil ||
+		opts.Description != nil || opts.ParentID != nil || opts.Assignee != nil ||
+		len(opts.Labels) > 0 || len(opts.RemoveLabels) > 0 || len(opts.Metadata) > 0
 }
 
 func bdStoreBridgeEnv(dir, host, port, user, password string) map[string]string {

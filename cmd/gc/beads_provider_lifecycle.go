@@ -445,17 +445,36 @@ func seedDeferredManagedBeadsErr(cityPath, dir, prefix, doltDatabase string) err
 	} else if skipsManagedDolt {
 		return nil
 	}
-	if state, ok, err := desiredScopeDoltConfigStateForInit(cityPath, dir, prefix); err != nil {
+	state, hasState, err := desiredScopeDoltConfigStateForInit(cityPath, dir, prefix)
+	if err != nil {
 		return err
-	} else if ok {
-		if err := ensureCanonicalScopeConfigState(fsys.OSFS{}, dir, state); err != nil {
-			return err
-		}
 	}
 	if strings.TrimSpace(doltDatabase) == "" {
 		doltDatabase = readDeferredManagedDoltDatabase(filepath.Join(dir, ".beads", "metadata.json"), defaultScopeDoltDatabase(cityPath, dir, prefix))
 	}
-	return ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, dir, doltDatabase)
+	managedLocalFreshRoot := state.EndpointOrigin == contract.EndpointOriginManagedCity &&
+		strings.TrimSpace(state.DoltHost) == "" && strings.TrimSpace(state.DoltPort) == ""
+	if samePath(cityPath, dir) && execProviderUsesCanonicalBdScopeFiles(beadsProvider(cityPath)) && managedLocalFreshRoot {
+		if !hasState {
+			return fmt.Errorf("cannot prepare fresh managed Dolt admission without canonical city config state")
+		}
+		admissionActive, err := prepareFreshManagedDoltWitnessAdmission(dir, state, doltDatabase)
+		if err != nil {
+			return err
+		}
+		if admissionActive {
+			return nil
+		}
+	}
+	if hasState {
+		if err := ensureCanonicalScopeConfigState(fsys.OSFS{}, dir, state); err != nil {
+			return err
+		}
+	}
+	if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, dir, doltDatabase); err != nil {
+		return err
+	}
+	return nil
 }
 
 func readDeferredManagedDoltDatabase(path, fallback string) string {
@@ -835,6 +854,16 @@ func ensureBeadsProvider(cityPath string) error {
 		if envErr != nil {
 			return envErr
 		}
+		// Bind a fresh managed-Dolt admission at the operation boundary, after
+		// the final provider environment is projected and immediately before the
+		// only lifecycle operation allowed to create its new local root. Building
+		// an environment is side-effect free: endpoint transitions retain an old
+		// managed environment across config writes before an optional stop.
+		if execProviderUsesCanonicalBdScopeFiles(provider) {
+			if err := bindFreshManagedDoltAdmissionForProviderEnv(cityPath, providerEnv); err != nil {
+				return err
+			}
+		}
 		if err := runProviderOpWithEnv(script, providerEnv, "start"); err != nil {
 			// Managed bd startup occasionally reports a start error even though
 			// the Dolt server is already live. If the follow-up health probe
@@ -868,12 +897,26 @@ func shutdownBeadsProvider(cityPath string) error {
 	}
 	provider := beadsProvider(cityPath)
 	if strings.HasPrefix(provider, "exec:") {
+		release, err := acquireProviderSemaphoreForOp(cityPath, "stop")
+		if err != nil {
+			return err
+		}
+		defer release()
 		if providerUsesBdStoreContract(provider) {
 			owned, err := managedDoltLifecycleOwned(cityPath)
 			if err != nil {
 				return err
 			}
 			if !owned {
+				return clearManagedDoltRuntimeStateUnlessBound(cityPath)
+			}
+		}
+		if execProviderUsesCanonicalBdScopeFiles(provider) {
+			unstarted, err := freshManagedDoltAdmissionProvesProviderUnstarted(cityPath)
+			if err != nil {
+				return err
+			}
+			if unstarted {
 				return clearManagedDoltRuntimeStateUnlessBound(cityPath)
 			}
 		}
@@ -2217,6 +2260,65 @@ func providerLifecycleProcessEnvWithError(cityPath, provider string) ([]string, 
 		return nil, err
 	}
 	return providerLifecycleProcessEnvFromBase(cityPath, provider, env), nil
+}
+
+func bindFreshManagedDoltAdmissionForProviderEnv(scopeRoot string, env []string) error {
+	if !providerLifecycleEnvUsesManagedLocalDolt(env) {
+		return nil
+	}
+	desired := func() (contract.ConfigState, string, error) {
+		cfg, err := loadCityConfigWithoutBuiltinPackRefresh(scopeRoot, io.Discard)
+		if err != nil {
+			return contract.ConfigState{}, "", err
+		}
+		prefix := config.EffectiveHQPrefix(cfg)
+		state := desiredCityDoltConfigState(scopeRoot, cfg.Dolt, prefix)
+		if state.EndpointOrigin != contract.EndpointOriginManagedCity || strings.TrimSpace(state.DoltHost) != "" || strings.TrimSpace(state.DoltPort) != "" {
+			return contract.ConfigState{}, "", fmt.Errorf("refusing stale managed-local provider environment after desired endpoint changed")
+		}
+		return state, canonicalScopeDoltDatabase(scopeRoot, scopeRoot, prefix), nil
+	}
+	// The projected environment may have been retained across an endpoint
+	// edit. Refuse a stale local start even when no admission remains: after an
+	// external transition, the current desired config is authoritative.
+	_, _, err := desired()
+	if err != nil {
+		return fmt.Errorf("resolve current desired provider state before local start: %w", err)
+	}
+	if err := bindFreshManagedDoltAdmissionToBD(scopeRoot, runtimeEnvEntriesToMap(env)["BD_BIN"], desired); err != nil {
+		return err
+	}
+	_, _, err = desired()
+	return err
+}
+
+// providerLifecycleEnvUsesManagedLocalDolt mirrors the provider script's
+// pre-root bypasses. Lifecycle ownership is the authoritative topology gate;
+// these projected-env checks additionally cover process-local transitions such
+// as a hosted credential bridge or GC_DOLT=skip. An admission must never be
+// sealed for a subprocess that will not create the admitted local Dolt root.
+func providerLifecycleEnvUsesManagedLocalDolt(env []string) bool {
+	values := runtimeEnvEntriesToMap(env)
+	if strings.EqualFold(strings.TrimSpace(values["GC_DOLT"]), "skip") {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(values["GC_BEADS_BACKEND"]), "doltlite") ||
+		strings.EqualFold(strings.TrimSpace(values["BEADS_BACKEND"]), "doltlite") {
+		return false
+	}
+	if values["BEADS_DOLT_CREDENTIAL_COMMAND"] != "" {
+		return false
+	}
+	// Keep this set byte-for-byte aligned with gc-beads-bd.sh:is_remote.
+	// The broader topology helper intentionally accepts other loopback and
+	// unspecified addresses, but the provider shell treats those as remote and
+	// therefore will not create or consume this local-root admission.
+	switch values["GC_DOLT_HOST"] {
+	case "", "127.0.0.1", "0.0.0.0", "localhost", "::1", "[::1]":
+		return true
+	default:
+		return false
+	}
 }
 
 // providerLifecycleProcessEnvForScopeInitWithError builds the process env a

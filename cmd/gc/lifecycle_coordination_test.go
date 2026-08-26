@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -561,7 +562,7 @@ func TestSeedDeferredManagedBeadsUsesExplicitDoltDatabase(t *testing.T) {
 	}
 }
 
-func TestSeedDeferredManagedBeadsNormalizesMalformedExistingConfig(t *testing.T) {
+func TestSeedDeferredManagedBeadsRefusesUnprovenMalformedRootlessConfig(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
@@ -570,27 +571,67 @@ func TestSeedDeferredManagedBeadsNormalizesMalformedExistingConfig(t *testing.T)
 		t.Fatal(err)
 	}
 
-	seedDeferredManagedBeads(dir, dir, "gc", "hq")
+	before := snapshotBeadsTreeExact(t, filepath.Join(dir, ".beads"))
+	if err := seedDeferredManagedBeadsErr(dir, dir, "gc", "hq"); err == nil {
+		t.Fatal("seed deferred managed beads accepted malformed rootless config without fresh-init provenance")
+	}
 
-	configData, err := os.ReadFile(filepath.Join(dir, ".beads", "config.yaml"))
-	if err != nil {
-		t.Fatalf("read config: %v", err)
+	after := snapshotBeadsTreeExact(t, filepath.Join(dir, ".beads"))
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("refused malformed rootless config mutated .beads:\nbefore: %#v\nafter:  %#v", before, after)
 	}
-	cfg := string(configData)
-	for _, needle := range []string{
-		"issue_prefix: gc",
-		"issue-prefix: gc",
-		"dolt.auto-start: false",
-		"gc.endpoint_origin: managed_city",
-		"gc.endpoint_status: verified",
-		": not yaml",
+}
+
+func TestSeedDeferredManagedBeadsRefusesLegacyExistingRootBeforeCanonicalWrites(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		witness     string
+		symlinkRoot bool
+	}{
+		{name: "missing witness"},
+		{name: "legacy witness", witness: "0.49.0\n"},
+		{name: "symlinked root", witness: "1.2.2\n", symlinkRoot: true},
 	} {
-		if !strings.Contains(cfg, needle) {
-			t.Fatalf("config missing %q after malformed deferred normalization:\n%s", needle, cfg)
-		}
-	}
-	if strings.Contains(cfg, "dolt_server_port") {
-		t.Fatalf("config should scrub deprecated port key after malformed deferred normalization:\n%s", cfg)
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			beadsDir := filepath.Join(dir, ".beads")
+			if err := os.Mkdir(beadsDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("issue_prefix: stale\nexport.auto: true\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte("{\"backend\":\"dolt\",\"database\":\"dolt\",\"dolt_mode\":\"server\",\"dolt_database\":\"legacy\"}\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(beadsDir, "issues.jsonl"), []byte("load-bearing migration export\n"), 0o640); err != nil {
+				t.Fatal(err)
+			}
+			if tc.witness != "" {
+				if err := os.WriteFile(filepath.Join(beadsDir, ".local_version"), []byte(tc.witness), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.symlinkRoot {
+				target := filepath.Join(t.TempDir(), "legacy-dolt")
+				if err := os.Mkdir(target, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, filepath.Join(beadsDir, "dolt")); err != nil {
+					t.Skipf("symlink unavailable: %v", err)
+				}
+			} else if err := os.Mkdir(filepath.Join(beadsDir, "dolt"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			before := snapshotBeadsTreeExact(t, beadsDir)
+			if err := seedDeferredManagedBeadsErr(dir, dir, "gc", "hq"); err == nil {
+				t.Fatal("legacy existing root reached canonical writers")
+			}
+			after := snapshotBeadsTreeExact(t, beadsDir)
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("refused legacy existing root mutated .beads:\nbefore: %#v\nafter:  %#v", before, after)
+			}
+		})
 	}
 }
 
@@ -920,7 +961,9 @@ func TestSeedDeferredManagedBeadsPreservesExistingDoltDatabaseWhenCanonicalUnkno
 func TestSeedDeferredManagedBeadsCreatesDirWith0700(t *testing.T) {
 	dir := t.TempDir()
 
-	seedDeferredManagedBeads(dir, dir, "gc", "test")
+	if err := seedDeferredManagedBeadsErr(dir, dir, "gc", "test"); err != nil {
+		t.Fatalf("seed deferred managed beads: %v", err)
+	}
 
 	info, err := os.Stat(filepath.Join(dir, ".beads"))
 	if err != nil {
@@ -946,7 +989,9 @@ func TestSeedDeferredManagedBeadsTightensExistingDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	seedDeferredManagedBeads(dir, dir, "gc", "test")
+	if err := seedDeferredManagedBeadsErr(dir, dir, "gc", "test"); err != nil {
+		t.Fatalf("seed deferred managed beads: %v", err)
+	}
 
 	info, err := os.Stat(beadsDir)
 	if err != nil {
