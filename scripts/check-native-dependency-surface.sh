@@ -3,12 +3,13 @@ set -euo pipefail
 
 max_modules="${GC_NATIVE_DEP_MAX_MODULES:-740}"
 # Calibrated with the official upstream Go 1.26.6 toolchain after the Beads
-# transaction/native-Dolt cutover plus the admission hardening: Ubuntu CI
-# projects 271,911,960 bytes from the exact patch-on-upstream build, leaving
-# 588,040 bytes below the cap. Keep essentially the prior gate's half-megabyte
-# headroom rather than inheriting Fedora's built-in nodwarf5 inflation or
-# allowing an open-ended increase.
-max_binary_bytes="${GC_NATIVE_DEP_MAX_BINARY_BYTES:-272500000}"
+# transaction/native-Dolt cutover plus the admission hardening, rebased onto
+# 2527f6869: the exact patch-on-upstream build is 273,023,608 bytes, leaving
+# 576,392 bytes below the cap. The same toolchain builds that upstream commit
+# at 270,374,808 bytes, already above its old 270 MB tripwire; carry forward
+# that measured upstream growth without creating open-ended headroom or
+# inheriting Fedora's built-in nodwarf5 inflation.
+max_binary_bytes="${GC_NATIVE_DEP_MAX_BINARY_BYTES:-273600000}"
 max_aws_modules="${GC_NATIVE_DEP_MAX_AWS_MODULES:-25}"
 max_azure_modules="${GC_NATIVE_DEP_MAX_AZURE_MODULES:-9}"
 max_dolthub_modules="${GC_NATIVE_DEP_MAX_DOLTHUB_MODULES:-15}"
