@@ -186,7 +186,7 @@ func Catalog() []Entry {
 			"acp", "exact:acp", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/acp", "NewSeamBacked"),
-				time.Date(2026, time.September, 7, 0, 0, 0, 0, time.UTC),
+				time.Date(2026, time.October, 8, 0, 0, 0, 0, time.UTC),
 				"NewSeamBacked always uses shared os.TempDir()/gc-acp-<euid> state; the WithDir proof does not exercise that composition",
 			),
 			provedRuntime(
@@ -203,7 +203,7 @@ func Catalog() []Entry {
 			"t3bridge", "exact:t3bridge", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"),
-				time.Date(2026, time.September, 7, 0, 0, 0, 0, time.UTC),
+				time.Date(2026, time.November, 5, 0, 0, 0, 0, time.UTC),
 				"the production T3 bridge composition has focused tests but no full shared runtime contract",
 			),
 		),
@@ -211,7 +211,7 @@ func Catalog() []Entry {
 			"k8s", "exact:k8s", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/k8s", "NewSeamBacked"),
-				time.Date(2026, time.September, 7, 0, 0, 0, 0, time.UTC),
+				time.Date(2026, time.November, 12, 0, 0, 0, 0, time.UTC),
 				"the actual K8s production composition has no full shared runtime contract",
 			),
 		),
@@ -219,7 +219,7 @@ func Catalog() []Entry {
 			"herdr", "exact:herdr", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/herdr", "New"),
-				time.Date(2026, time.September, 7, 0, 0, 0, 0, time.UTC),
+				time.Date(2026, time.September, 24, 0, 0, 0, 0, time.UTC),
 				"the existing full conformance run skips in short mode or when the herdr executable is absent",
 			),
 		),
@@ -227,7 +227,7 @@ func Catalog() []Entry {
 			"hybrid", "exact:hybrid", nil,
 			waivedRuntime(
 				repoSymbol("cmd/gc", "newHybridProvider"),
-				time.Date(2026, time.September, 7, 0, 0, 0, 0, time.UTC),
+				time.Date(2026, time.October, 22, 0, 0, 0, 0, time.UTC),
 				"cmd/gc.newHybridProvider is the selected registry construction boundary; its internal tmux, K8s, and hybrid constructors are not claimed here, and the wrapper has no full shared runtime contract",
 			),
 		),
@@ -243,7 +243,7 @@ func Catalog() []Entry {
 			),
 			waivedRuntime(
 				repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"),
-				time.Date(2026, time.September, 7, 0, 0, 0, 0, time.UTC),
+				time.Date(2026, time.November, 5, 0, 0, 0, 0, time.UTC),
 				"the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which has no full shared runtime contract",
 			),
 		),
@@ -251,7 +251,7 @@ func Catalog() []Entry {
 			"ssh", "prefix:ssh:", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/ssh", "NewSeamBacked"),
-				time.Date(2026, time.September, 7, 0, 0, 0, 0, time.UTC),
+				time.Date(2026, time.November, 19, 0, 0, 0, 0, time.UTC),
 				"the production SSH composition has no full shared runtime contract",
 			),
 		),
@@ -259,7 +259,7 @@ func Catalog() []Entry {
 			"tmux", "exact:tmux", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/tmux", "NewSeamBackedWithConfig"),
-				time.Date(2026, time.September, 7, 0, 0, 0, 0, time.UTC),
+				time.Date(2026, time.September, 17, 0, 0, 0, 0, time.UTC),
 				"the existing full conformance run skips when the tmux executable is absent",
 			),
 		),
