@@ -408,6 +408,64 @@ func TestLifecycleCoordination_InitDirIfReady_PropagatesManagedDoltInitFailure(t
 	}
 }
 
+func TestLifecycleCoordination_InitDirIfReadyPublishesFreshAdmissionBeforeManagedProviderStart(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"test\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	materializeBuiltinPacksForTest(t, dir)
+	t.Setenv("GC_BEADS", "bd")
+
+	originalEnsure := initDirIfReadyEnsureBeadsProvider
+	originalInitAndHook := initDirIfReadyInitAndHookDir
+	originalWait := initDirIfReadyWaitForManagedDolt
+	t.Cleanup(func() {
+		initDirIfReadyEnsureBeadsProvider = originalEnsure
+		initDirIfReadyInitAndHookDir = originalInitAndHook
+		initDirIfReadyWaitForManagedDolt = originalWait
+	})
+
+	var providerSawAdmission bool
+	initDirIfReadyEnsureBeadsProvider = func(scope string) error {
+		if !samePath(scope, dir) {
+			t.Fatalf("provider scope = %q, want %q", scope, dir)
+		}
+		record, err := readFreshManagedDoltAdmission(filepath.Join(dir, ".beads", freshManagedDoltAdmissionName))
+		if err != nil {
+			t.Fatalf("provider start did not receive a regular fresh admission: %v", err)
+		}
+		if record.State != freshManagedDoltAdmissionAwaitingBD {
+			t.Fatalf("provider-start admission state = %q, want %q", record.State, freshManagedDoltAdmissionAwaitingBD)
+		}
+		for _, name := range []string{"config.yaml", "metadata.json"} {
+			if info, err := os.Lstat(filepath.Join(dir, ".beads", name)); err != nil || !info.Mode().IsRegular() {
+				t.Fatalf("provider-start canonical file %s = (%v, %v), want regular file", name, info, err)
+			}
+		}
+		if _, err := os.Lstat(filepath.Join(dir, ".beads", "dolt")); !os.IsNotExist(err) {
+			t.Fatalf("provider-start Dolt root must still be absent, stat err = %v", err)
+		}
+		providerSawAdmission = true
+		return nil
+	}
+	initDirIfReadyWaitForManagedDolt = func(_ string, _ time.Duration) error { return nil }
+	initDirIfReadyInitAndHookDir = func(_, _, _ string) error { return nil }
+
+	deferred, err := initDirIfReady(dir, dir, "gc")
+	if err != nil {
+		t.Fatalf("initDirIfReady: %v", err)
+	}
+	if deferred {
+		t.Fatal("initDirIfReady deferred = true, want managed provider startup")
+	}
+	if !providerSawAdmission {
+		t.Fatal("managed provider start was not reached")
+	}
+}
+
 func TestLifecycleCoordination_InitDirIfReady_PropagatesManagedDoltSchemaError(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {

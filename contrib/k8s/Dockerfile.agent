@@ -20,11 +20,12 @@ ARG BASE_IMAGE=gc-agent-base:latest
 FROM golang:1.26.6-bookworm@sha256:433f9dc4f8ea3a1ce4e28f9f15d0f7c056b10475307f886d6f1ac1ccc4abd976 AS bd-builder
 
 ARG BD_VERSION=v1.1.0
-ARG BD_CURRENT_VERSION=v1.1.1-0.20260824111725-abc4a9fa7964
+ARG BD_SOURCE_REPO=jm2/beads
+ARG BD_CURRENT_VERSION=v1.1.1-0.20260826035214-b80784c09af4
 ARG BD_RUNTIME_VERSION=1.2.2
-ARG BD_SOURCE_REF=abc4a9fa7964d7558f91a06e20404f257e65e264
-ARG BD_SOURCE_SHA256=72ffa80937c782c98c876d90b3fe665b38ed7d39bae1c407bcac62d9f0132491
-ARG BD_BUILD=abc4a9fa79
+ARG BD_SOURCE_REF=b80784c09af4a2a722679b82a03e6198f039fe27
+ARG BD_SOURCE_SHA256=1001a7849cd303a3495d52cb283229a5225030f6fcf87e770b3f347266c891d3
+ARG BD_BUILD=b80784c09a
 ARG BD_BRANCH=HEAD
 ARG GRPC_VERSION=1.83.0
 
@@ -37,7 +38,7 @@ ARG GRPC_VERSION=1.83.0
 # downloadable compatibility-floor cell.
 RUN mkdir -p /src/bd /out \
     && curl -fsSL --retry 3 \
-       "https://github.com/gastownhall/beads/archive/${BD_SOURCE_REF}.tar.gz" \
+       "https://github.com/${BD_SOURCE_REPO}/archive/${BD_SOURCE_REF}.tar.gz" \
        -o /tmp/bd-source.tar.gz \
     && echo "${BD_SOURCE_SHA256}  /tmp/bd-source.tar.gz" | sha256sum --check --strict \
     && tar -xzf /tmp/bd-source.tar.gz --strip-components=1 -C /src/bd \

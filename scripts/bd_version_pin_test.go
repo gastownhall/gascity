@@ -26,9 +26,11 @@ func TestBDVersionPins(t *testing.T) {
 
 	bdVersion := env["BD_VERSION"]                 // installable default (v-prefixed release tag)
 	bdPrev := env["BD_PREV_VERSION"]               // min-supported matrix cell (downloadable)
+	bdSourceRepo := env["BD_SOURCE_REPO"]          // repository containing the exact source commit
 	bdCurrent := env["BD_CURRENT_VERSION"]         // bleeding-edge matrix cell (built from source)
 	bdRuntime := env["BD_CURRENT_RUNTIME_VERSION"] // numeric storage-era identity emitted by that source build
 	bdCurrentRef := env["BD_CURRENT_REF"]          // beads commit the current cell builds from
+	bdSourceSHA256 := env["BD_SOURCE_SHA256"]      // GitHub archive digest for repository + commit
 
 	if bdVersion == "" {
 		t.Fatal("deps.env missing BD_VERSION")
@@ -39,6 +41,9 @@ func TestBDVersionPins(t *testing.T) {
 	if bdCurrent == "" {
 		t.Fatal("deps.env missing BD_CURRENT_VERSION (the bleeding-edge contract-matrix cell)")
 	}
+	if !regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`).MatchString(bdSourceRepo) {
+		t.Fatalf("deps.env BD_SOURCE_REPO = %q, want an exact GitHub owner/repository slug", bdSourceRepo)
+	}
 	if !regexp.MustCompile(`^\d+\.\d+\.\d+$`).MatchString(bdRuntime) {
 		t.Fatalf("deps.env BD_CURRENT_RUNTIME_VERSION = %q, want strict numeric X.Y.Z for bd's storage-era witness", bdRuntime)
 	}
@@ -47,7 +52,10 @@ func TestBDVersionPins(t *testing.T) {
 	// commit. A non-deterministic ref (branch name, short SHA) would make the cell
 	// irreproducible; require a full 40-char commit SHA.
 	if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(bdCurrentRef) {
-		t.Fatalf("deps.env BD_CURRENT_REF = %q, want a full 40-char gastownhall/beads commit SHA", bdCurrentRef)
+		t.Fatalf("deps.env BD_CURRENT_REF = %q, want a full 40-char %s commit SHA", bdCurrentRef, bdSourceRepo)
+	}
+	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(bdSourceSHA256) {
+		t.Fatalf("deps.env BD_SOURCE_SHA256 = %q, want the exact source archive SHA-256", bdSourceSHA256)
 	}
 	if !regexp.MustCompile(`^v?\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$`).MatchString(bdCurrent) {
 		t.Fatalf("deps.env BD_CURRENT_VERSION = %q, want a semver token", bdCurrent)
@@ -56,16 +64,33 @@ func TestBDVersionPins(t *testing.T) {
 	// source-built agent image must all use the same upstream commit. A drift
 	// here can pair one schema catalog with another version's write behavior.
 	goMod := readFile(t, root, "go.mod")
-	goModMatch := regexp.MustCompile(`(?m)^\s*github\.com/steveyegge/beads\s+v\S+-([0-9a-f]{12})\s*$`).FindStringSubmatch(goMod)
+	goModMatch := regexp.MustCompile(`(?m)^\s*github\.com/steveyegge/beads\s+(v\S+-([0-9a-f]{12}))\s*$`).FindStringSubmatch(goMod)
 	if goModMatch == nil {
 		t.Fatal("go.mod missing a pseudo-version pin for github.com/steveyegge/beads")
 	}
-	if got, want := goModMatch[1], bdCurrentRef[:12]; got != want {
+	effectiveVersion, effectiveCommit := goModMatch[1], goModMatch[2]
+	// Candidate branches may temporarily replace the canonical module with an
+	// exact fork commit while the upstream Beads prerequisite is under review.
+	// Treat that replacement as the effective build source; the independent
+	// module-boundary test still prevents a replace directive from shipping.
+	if replaceMatch := regexp.MustCompile(`(?m)^replace\s+github\.com/steveyegge/beads\s+=>\s+\S+\s+(v\S+-([0-9a-f]{12}))\s*$`).FindStringSubmatch(goMod); replaceMatch != nil {
+		effectiveVersion, effectiveCommit = replaceMatch[1], replaceMatch[2]
+	}
+	if effectiveVersion != bdCurrent {
+		t.Fatalf("go.mod effective beads version = %q, want BD_CURRENT_VERSION %q", effectiveVersion, bdCurrent)
+	}
+	if got, want := effectiveCommit, bdCurrentRef[:12]; got != want {
 		t.Fatalf("go.mod beads pseudo-version commit = %q, want BD_CURRENT_REF prefix %q", got, want)
 	}
 	dockerfile := readFile(t, root, "contrib/k8s/Dockerfile.agent")
+	if !strings.Contains(dockerfile, "ARG BD_SOURCE_REPO="+bdSourceRepo) {
+		t.Fatalf("contrib/k8s/Dockerfile.agent BD_SOURCE_REPO must equal deps.env BD_SOURCE_REPO (%s)", bdSourceRepo)
+	}
 	if !strings.Contains(dockerfile, "ARG BD_SOURCE_REF="+bdCurrentRef) {
 		t.Fatalf("contrib/k8s/Dockerfile.agent BD_SOURCE_REF must equal deps.env BD_CURRENT_REF (%s)", bdCurrentRef)
+	}
+	if !strings.Contains(dockerfile, "ARG BD_SOURCE_SHA256="+bdSourceSHA256) {
+		t.Fatalf("contrib/k8s/Dockerfile.agent BD_SOURCE_SHA256 must equal deps.env BD_SOURCE_SHA256 (%s)", bdSourceSHA256)
 	}
 	if !strings.Contains(dockerfile, "ARG BD_CURRENT_VERSION="+bdCurrent) {
 		t.Fatalf("contrib/k8s/Dockerfile.agent BD_CURRENT_VERSION must equal deps.env BD_CURRENT_VERSION (%s)", bdCurrent)
@@ -75,6 +100,13 @@ func TestBDVersionPins(t *testing.T) {
 	}
 	if !strings.Contains(dockerfile, "ARG BD_BUILD="+bdCurrentRef[:10]) {
 		t.Fatalf("contrib/k8s/Dockerfile.agent BD_BUILD must equal the first 10 characters of BD_CURRENT_REF (%s)", bdCurrentRef[:10])
+	}
+	ciWorkflow := readFile(t, root, ".github/workflows/ci.yml")
+	if !strings.Contains(ciWorkflow, `repo="$(grep -E '^BD_SOURCE_REPO=' deps.env | cut -d= -f2)"`) {
+		t.Fatal("contract-acceptance-current must resolve BD_SOURCE_REPO from deps.env")
+	}
+	if !strings.Contains(ciWorkflow, `git clone --filter=blob:none "https://github.com/${{ steps.bd.outputs.repo }}" "$src"`) {
+		t.Fatal("contract-acceptance-current must clone its pinned BD_SOURCE_REPO")
 	}
 
 	// Anchor roles, kept as distinct contracts so a promotion cannot quietly

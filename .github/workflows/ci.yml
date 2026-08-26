@@ -371,10 +371,10 @@ jobs:
 
   # Cross-version contract gate: the "current" cell of the bd matrix. The
   # "prev" cell is contract-acceptance-previous above (the min-supported
-  # release). This cell builds bd from gastownhall/beads source at
-  # BD_CURRENT_REF (deps.env) — the bleeding-edge rc has no release tarball —
-  # and runs the same focused CLI contract, so a bd change that breaks gc's
-  # decoder/classifier surface against the newer bd is caught before merge.
+  # release). This cell builds bd from BD_SOURCE_REPO at BD_CURRENT_REF
+  # (deps.env) — the bleeding-edge rc has no release tarball — and runs the
+  # same focused CLI contract, so a bd change that breaks gc's decoder/
+  # classifier surface against the newer bd is caught before merge.
   # Path-gated on the beads filter; tolerated as a skip by the Check gate.
   contract-acceptance-current:
     name: Contract / acceptance A (bd current)
@@ -392,19 +392,21 @@ jobs:
         id: bd
         run: |
           set -euo pipefail
+          repo="$(grep -E '^BD_SOURCE_REPO=' deps.env | cut -d= -f2)"
           ref="$(grep -E '^BD_CURRENT_REF=' deps.env | cut -d= -f2)"
           ver="$(grep -E '^BD_CURRENT_VERSION=' deps.env | cut -d= -f2)"
-          if [ -z "$ref" ] || [ -z "$ver" ]; then
-            echo "::error::BD_CURRENT_REF/BD_CURRENT_VERSION missing or empty in deps.env" >&2
+          if [ -z "$repo" ] || [ -z "$ref" ] || [ -z "$ver" ]; then
+            echo "::error::BD_SOURCE_REPO/BD_CURRENT_REF/BD_CURRENT_VERSION missing or empty in deps.env" >&2
             exit 1
           fi
+          echo "repo=$repo" >> "$GITHUB_OUTPUT"
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
           echo "ver=$ver" >> "$GITHUB_OUTPUT"
       - name: Build bd ${{ steps.bd.outputs.ver }} from source @ ${{ steps.bd.outputs.ref }}
         run: |
           set -euo pipefail
           src="${RUNNER_TEMP}/beads-src"
-          git clone --filter=blob:none https://github.com/gastownhall/beads "$src"
+          git clone --filter=blob:none "https://github.com/${{ steps.bd.outputs.repo }}" "$src"
           git -C "$src" checkout "${{ steps.bd.outputs.ref }}"
           mkdir -p "${HOME}/.local/bin"
           go -C "$src" build -tags gms_pure_go -o "${HOME}/.local/bin/bd" ./cmd/bd

@@ -631,6 +631,9 @@ func TestReloadConfigTracedRescansOrdersWhenConfigRevisionUnchanged(t *testing.T
 	}
 	cfg := result.Cfg
 	applyFeatureFlags(cfg)
+	if err := seedDeferredManagedBeadsErr(dir, dir, config.EffectiveHQPrefix(cfg), "hq"); err != nil {
+		t.Fatalf("seed managed-Dolt admission: %v", err)
+	}
 	var stdout, stderr bytes.Buffer
 	initialOrders, err := scanOrderSetSnapshotFS(fsys.OSFS{}, dir, cfg, &stderr, "test")
 	if err != nil {

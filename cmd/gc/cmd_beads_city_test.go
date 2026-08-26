@@ -107,6 +107,7 @@ func TestDoBeadsCityUseExternalWritesVerifiedCityAndInheritedRigs(t *testing.T) 
 	writeRigEndpointCanonicalConfig(t, cityDir, contract.ConfigState{IssuePrefix: "gc", EndpointOrigin: contract.EndpointOriginManagedCity, EndpointStatus: contract.EndpointStatusVerified})
 	writeRigEndpointCanonicalConfig(t, inheritDir, contract.ConfigState{IssuePrefix: "fe", EndpointOrigin: contract.EndpointOriginInheritedCity, EndpointStatus: contract.EndpointStatusVerified})
 	writeRigEndpointCanonicalConfig(t, explicitDir, contract.ConfigState{IssuePrefix: "ops", EndpointOrigin: contract.EndpointOriginExplicit, EndpointStatus: contract.EndpointStatusVerified, DoltHost: "ops-db.example.com", DoltPort: "5501", DoltUser: "ops-user"})
+	prepareCurrentManagedDoltRootForProviderScriptTest(t, cityDir)
 	for _, dir := range []string{cityDir, inheritDir, explicitDir} {
 		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
 			t.Fatal(err)
@@ -219,6 +220,7 @@ prefix = "fe"
 	writeRigEndpointMetadata(t, inheritDir, "fe")
 	writeRigEndpointCanonicalConfig(t, cityDir, contract.ConfigState{IssuePrefix: "gc", EndpointOrigin: contract.EndpointOriginManagedCity, EndpointStatus: contract.EndpointStatusVerified})
 	writeRigEndpointCanonicalConfig(t, inheritDir, contract.ConfigState{IssuePrefix: "fe", EndpointOrigin: contract.EndpointOriginInheritedCity, EndpointStatus: contract.EndpointStatusVerified})
+	prepareCurrentManagedDoltRootForProviderScriptTest(t, cityDir)
 	for _, dir := range []string{cityDir, inheritDir} {
 		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
 			t.Fatal(err)
@@ -541,6 +543,7 @@ func TestDoBeadsCityUseExternalRewritesCompatRigWithRelativePath(t *testing.T) {
 	writeRigEndpointMetadata(t, inheritDir, "fe")
 	writeRigEndpointCanonicalConfig(t, cityDir, contract.ConfigState{IssuePrefix: "gc", EndpointOrigin: contract.EndpointOriginManagedCity, EndpointStatus: contract.EndpointStatusVerified})
 	writeRigEndpointCanonicalConfig(t, inheritDir, contract.ConfigState{IssuePrefix: "fe", EndpointOrigin: contract.EndpointOriginInheritedCity, EndpointStatus: contract.EndpointStatusVerified})
+	prepareCurrentManagedDoltRootForProviderScriptTest(t, cityDir)
 
 	origVerify := verifyCityExternalEndpoint
 	defer func() { verifyCityExternalEndpoint = origVerify }()
@@ -732,6 +735,7 @@ func TestDoBeadsCityUseExternalAdoptUnverifiedSkipsValidation(t *testing.T) {
 	writeRigEndpointMetadata(t, inheritDir, "fe")
 	writeRigEndpointCanonicalConfig(t, cityDir, contract.ConfigState{IssuePrefix: "gc", EndpointOrigin: contract.EndpointOriginManagedCity, EndpointStatus: contract.EndpointStatusVerified})
 	writeRigEndpointCanonicalConfig(t, inheritDir, contract.ConfigState{IssuePrefix: "fe", EndpointOrigin: contract.EndpointOriginInheritedCity, EndpointStatus: contract.EndpointStatusVerified})
+	prepareCurrentManagedDoltRootForProviderScriptTest(t, cityDir)
 
 	origVerify := verifyCityExternalEndpoint
 	defer func() { verifyCityExternalEndpoint = origVerify }()

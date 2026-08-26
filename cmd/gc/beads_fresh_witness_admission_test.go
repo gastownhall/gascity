@@ -632,7 +632,7 @@ func TestFreshManagedDoltBinderWinsEndpointTransitionRace(t *testing.T) {
 	releaseProbe := filepath.Join(probeDir, "release")
 	bdBin := filepath.Join(probeDir, "bd")
 	writeExecutable(t, bdBin, fmt.Sprintf(
-		"#!/bin/sh\n: > %q\nwhile [ ! -e %q ]; do sleep 0.01; done\nprintf 'bd version 1.2.2\\n'\n",
+		"#!/bin/sh\nprintf 'started\\n' > %q\nwhile [ ! -e %q ]; do sleep 0.01; done\nprintf 'bd version 1.2.2\\n'\n",
 		probeStarted,
 		releaseProbe,
 	))
@@ -640,16 +640,7 @@ func TestFreshManagedDoltBinderWinsEndpointTransitionRace(t *testing.T) {
 	go func() {
 		binderResult <- bindFreshManagedDoltAdmissionToBD(scope, bdBin, staticFreshManagedDoltDesired(state, "hq"))
 	}()
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if _, err := os.Stat(probeStarted); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("selected-BD probe did not reach its controlled lock hold")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	waitForProviderTestNonEmptyFile(t, probeStarted, 2*time.Second)
 
 	type endpointResult struct {
 		guard *freshManagedDoltExternalTransitionGuard
@@ -816,21 +807,12 @@ func TestProviderLifecycleBinderRechecksDesiredConfigAfterBDProbe(t *testing.T) 
 	started := filepath.Join(probeDir, "started")
 	release := filepath.Join(probeDir, "release")
 	bdBin := filepath.Join(probeDir, "bd")
-	writeExecutable(t, bdBin, fmt.Sprintf("#!/bin/sh\n: > %q\nwhile [ ! -e %q ]; do sleep 0.01; done\nprintf 'bd version 1.2.2\\n'\n", started, release))
+	writeExecutable(t, bdBin, fmt.Sprintf("#!/bin/sh\nprintf 'started\\n' > %q\nwhile [ ! -e %q ]; do sleep 0.01; done\nprintf 'bd version 1.2.2\\n'\n", started, release))
 	result := make(chan error, 1)
 	go func() {
 		result <- bindFreshManagedDoltAdmissionForProviderEnv(scope, []string{"BD_BIN=" + bdBin})
 	}()
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if _, err := os.Stat(started); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("selected BD version probe did not start")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	waitForProviderTestNonEmptyFile(t, started, 2*time.Second)
 	writeFreshAdmissionTestCityConfig(t, scope, "new", provider)
 	if err := os.WriteFile(release, []byte("release\n"), 0o600); err != nil {
 		t.Fatal(err)

@@ -65,11 +65,12 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 
 func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	const (
-		bdCurrent      = "v1.1.1-0.20260824111725-abc4a9fa7964"
+		bdCurrent      = "v1.1.1-0.20260826035214-b80784c09af4"
 		bdRuntime      = "1.2.2"
-		bdSourceRef    = "abc4a9fa7964d7558f91a06e20404f257e65e264"
-		bdSourceSHA256 = "72ffa80937c782c98c876d90b3fe665b38ed7d39bae1c407bcac62d9f0132491"
-		bdBuild        = "abc4a9fa79"
+		bdSourceRepo   = "jm2/beads"
+		bdSourceRef    = "b80784c09af4a2a722679b82a03e6198f039fe27"
+		bdSourceSHA256 = "1001a7849cd303a3495d52cb283229a5225030f6fcf87e770b3f347266c891d3"
+		bdBuild        = "b80784c09a"
 		bdBranch       = "HEAD"
 		grpcVersion    = "1.83.0"
 	)
@@ -83,6 +84,7 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	dockerfile := readFile(t, root, "contrib/k8s/Dockerfile.agent")
 	for _, want := range []string{
 		"ARG BD_VERSION=" + bdVersion,
+		"ARG BD_SOURCE_REPO=" + bdSourceRepo,
 		"ARG BD_CURRENT_VERSION=" + bdCurrent,
 		"ARG BD_RUNTIME_VERSION=" + bdRuntime,
 		"ARG BD_SOURCE_REF=" + bdSourceRef,
@@ -90,7 +92,7 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		"ARG BD_BUILD=" + bdBuild,
 		"ARG BD_BRANCH=" + bdBranch,
 		"ARG GRPC_VERSION=" + grpcVersion,
-		`https://github.com/gastownhall/beads/archive/${BD_SOURCE_REF}.tar.gz`,
+		`https://github.com/${BD_SOURCE_REPO}/archive/${BD_SOURCE_REF}.tar.gz`,
 		`echo "${BD_SOURCE_SHA256}  /tmp/bd-source.tar.gz" | sha256sum --check --strict`,
 		`grep -Fq "Version = \"${BD_RUNTIME_VERSION}\"" cmd/bd/version.go`,
 		`go get "google.golang.org/grpc@v${GRPC_VERSION}"`,

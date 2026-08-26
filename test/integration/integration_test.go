@@ -400,7 +400,7 @@ func binaryOverride(envName string) (string, bool, error) {
 // older host bd open the database after gc has migrated it, producing a schema
 // skew that obscures the workflow under test.
 func buildPinnedIntegrationBDBinary(tmpDir string) (string, error) {
-	version, err := pinnedIntegrationBeadsModuleVersion()
+	source, err := pinnedIntegrationBeadsModuleSource()
 	if err != nil {
 		return "", err
 	}
@@ -408,15 +408,24 @@ func buildPinnedIntegrationBDBinary(tmpDir string) (string, error) {
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		return "", fmt.Errorf("create pinned bd directory: %w", err)
 	}
+	moduleFile := "module gascity.test/integrationbd\n\ngo 1.26.6\n\nrequire " + source.Path + " " + source.Version + "\n"
+	if source.Replace != nil {
+		moduleFile += "\nreplace " + source.Path + " => " + source.Replace.Path + " " + source.Replace.Version + "\n"
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "go.mod"), []byte(moduleFile), 0o600); err != nil {
+		return "", fmt.Errorf("write isolated integration-bd module: %w", err)
+	}
 	// CGO_ENABLED=1 + gms_pure_go is the embedded-capable bd build (per beads
 	// INSTALLING.md): the pinned bd's `bd init` defaults to embedded Dolt,
 	// which a CGO_ENABLED=0 binary refuses at runtime.
-	cmd := exec.Command("go", "install", "-tags", "gms_pure_go", "github.com/steveyegge/beads/cmd/bd@"+version)
-	cmd.Env = append(os.Environ(), "CGO_ENABLED=1", "GOBIN="+binDir)
+	bdPath := filepath.Join(binDir, "bd")
+	cmd := exec.Command("go", "build", "-mod=mod", "-tags", "gms_pure_go", "-o", bdPath, source.Path+"/cmd/bd")
+	cmd.Dir = binDir
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=1")
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("go install github.com/steveyegge/beads/cmd/bd@%s: %w\n%s", version, err, out)
+		return "", fmt.Errorf("build %s/cmd/bd from %s: %w\n%s", source.Path, source.effectiveVersion(), err, out)
 	}
-	return filepath.Join(binDir, "bd"), nil
+	return bdPath, nil
 }
 
 // pinnedBdStoreCommandRunner keeps direct BdStore integration tests on the
@@ -434,18 +443,49 @@ func pinnedBdStoreCommandRunner() beads.CommandRunner {
 	}
 }
 
-func pinnedIntegrationBeadsModuleVersion() (string, error) {
-	cmd := exec.Command("go", "list", "-m", "-f", "{{.Version}}", "github.com/steveyegge/beads")
+type integrationBeadsModuleSource struct {
+	Path    string                        `json:"Path"`
+	Version string                        `json:"Version"`
+	Replace *integrationBeadsModuleSource `json:"Replace"`
+}
+
+func (s integrationBeadsModuleSource) effectivePath() string {
+	if s.Replace != nil {
+		return s.Replace.Path
+	}
+	return s.Path
+}
+
+func (s integrationBeadsModuleSource) effectiveVersion() string {
+	if s.Replace != nil {
+		return s.Replace.Version
+	}
+	return s.Version
+}
+
+func pinnedIntegrationBeadsModuleSource() (integrationBeadsModuleSource, error) {
+	cmd := exec.Command("go", "list", "-m", "-json", "github.com/steveyegge/beads")
 	cmd.Dir = findModuleRoot()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("resolve github.com/steveyegge/beads module version: %w\n%s", err, out)
+		return integrationBeadsModuleSource{}, fmt.Errorf("resolve github.com/steveyegge/beads module source: %w\n%s", err, out)
 	}
-	version := strings.TrimSpace(string(out))
-	if version == "" {
-		return "", errors.New("github.com/steveyegge/beads module version is empty")
+	var source integrationBeadsModuleSource
+	if err := json.Unmarshal(out, &source); err != nil {
+		return integrationBeadsModuleSource{}, fmt.Errorf("decode github.com/steveyegge/beads module source: %w", err)
 	}
-	return version, nil
+	if source.Path == "" || source.Version == "" || source.effectivePath() == "" || source.effectiveVersion() == "" {
+		return integrationBeadsModuleSource{}, fmt.Errorf("github.com/steveyegge/beads module source is incomplete: %+v", source)
+	}
+	return source, nil
+}
+
+func pinnedIntegrationBeadsModuleVersion() (string, error) {
+	source, err := pinnedIntegrationBeadsModuleSource()
+	if err != nil {
+		return "", err
+	}
+	return source.effectiveVersion(), nil
 }
 
 func TestPinnedIntegrationBeadsModuleVersion(t *testing.T) {
@@ -453,7 +493,7 @@ func TestPinnedIntegrationBeadsModuleVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pinnedIntegrationBeadsModuleVersion() error = %v", err)
 	}
-	const want = "v1.1.1-0.20260805093327-bf97b73749ac"
+	const want = "v1.1.1-0.20260826035214-b80784c09af4"
 	if version != want {
 		t.Errorf("pinnedIntegrationBeadsModuleVersion() = %q, want %q", version, want)
 	}

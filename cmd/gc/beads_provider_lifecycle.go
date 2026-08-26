@@ -327,7 +327,18 @@ func initDirIfReady(cityPath, dir, prefix string) (deferred bool, err error) {
 	return false, nil
 }
 
-func initDirIfReadyManagedDolt(cityPath, dir, prefix, _ string) error {
+func initDirIfReadyManagedDolt(cityPath, dir, prefix, provider string) error {
+	// A fresh managed provider may create the city Dolt root as part of start.
+	// Publish its canonical config, metadata, and rootless admission before that
+	// operation so the provider shell never has to infer freshness from an
+	// empty/missing directory. Existing stores are validated read-only here;
+	// ambiguous pre-existing layouts fail before any provider process runs. Do
+	// not manufacture bd/Dolt state for unrelated custom exec providers.
+	if execProviderUsesCanonicalBdScopeFiles(provider) {
+		if err := seedDeferredManagedBeadsErr(cityPath, dir, prefix, ""); err != nil {
+			return err
+		}
+	}
 	if err := initDirIfReadyEnsureBeadsProvider(cityPath); err != nil {
 		return fmt.Errorf("bead store: %w", err)
 	}
