@@ -60,7 +60,8 @@ func BuildProviderResumeCommand(resolved *ResolvedProvider, optionOverrides map[
 	// already run completeResumeCommandDefaults, inserting the missing
 	// EffectiveDefaults flags around the template's own tokens. Gating on
 	// EffectiveDefaults here too would take the path below instead, which
-	// strips every schema flag and re-emits the merged set in schema order,
+	// strips the schema's declared flags and aliases (an undeclared alias
+	// survives) and re-emits the merged set in schema order,
 	// reordering a template whose flags were already positioned deliberately
 	// and replacing a declared short alias with its canonical spelling.
 	//
