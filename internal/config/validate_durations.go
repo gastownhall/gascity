@@ -2,8 +2,26 @@ package config
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
+
+const (
+	setupTimeoutMaskedByStartupWarningFragment   = "setup_timeout can never fire because startup_timeout bounds the whole session Start() call first"
+	setupTimeoutBecomesIdleBudgetWarningFragment = "setup_timeout now bounds idle/silence time between output, not total setup runtime"
+)
+
+// IsSessionSetupTimeoutAdvisory reports whether warning is one of the
+// [session] setup-timeout advisories. They describe how the timeout knobs
+// reinterpret each other rather than a config the loader cannot honor: the
+// setup_max_timeout advisory fires on every config that sets the field,
+// including a deliberately correct one. Callers that promote warnings to
+// errors must keep these advisory, or setting a documented field would stop a
+// city from starting.
+func IsSessionSetupTimeoutAdvisory(warning string) bool {
+	return strings.Contains(warning, setupTimeoutMaskedByStartupWarningFragment) ||
+		strings.Contains(warning, setupTimeoutBecomesIdleBudgetWarningFragment)
+}
 
 // ValidateDurations checks all duration string fields in the config and returns
 // warnings for any values that cannot be parsed by time.ParseDuration. This
@@ -88,8 +106,8 @@ func ValidateDurations(cfg *City, source string) []string {
 	// conflicting default is still caught (gastownhall/gascity#5279).
 	if setupDur, startupDur := cfg.Session.SetupTimeoutDuration(), cfg.Session.StartupTimeoutDuration(); setupDur >= startupDur {
 		warnings = append(warnings, fmt.Sprintf(
-			"%s: [session] setup_timeout (%s) >= startup_timeout (%s): setup_timeout can never fire because startup_timeout bounds the whole session Start() call first",
-			source, setupDur, startupDur))
+			"%s: [session] setup_timeout (%s) >= startup_timeout (%s): %s",
+			source, setupDur, startupDur, setupTimeoutMaskedByStartupWarningFragment))
 	}
 
 	// setup_max_timeout > 0 silently reinterprets setup_timeout from a
@@ -98,8 +116,8 @@ func ValidateDurations(cfg *City, source string) []string {
 	// is being tuned (gastownhall/gascity#5279).
 	if maxDur := cfg.Session.SetupMaxTimeoutDuration(); maxDur > 0 {
 		warnings = append(warnings, fmt.Sprintf(
-			"%s: [session] setup_max_timeout (%s) is set: setup_timeout now bounds idle/silence time between output, not total setup runtime",
-			source, maxDur))
+			"%s: [session] setup_max_timeout (%s) is set: %s",
+			source, maxDur, setupTimeoutBecomesIdleBudgetWarningFragment))
 	}
 
 	// Daemon config durations.
