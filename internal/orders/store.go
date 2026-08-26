@@ -326,6 +326,21 @@ func (s *Store) SetCursor(runID, scoped string, cursor EventCursor) error {
 	return nil
 }
 
+// AdvanceCursor replaces a run's existing sequence label while preserving the
+// order label. Cursor checkpoints use it when their own bookkeeping events
+// move the durable cursor beyond the sequence stored at creation time.
+func (s *Store) AdvanceCursor(runID, scoped string, from, to EventCursor) error {
+	labels := []string{
+		labelOrderTitlePrefix + scoped,
+		fmt.Sprintf("%s%d", labelSeqPrefix, uint64(to)),
+	}
+	remove := []string{fmt.Sprintf("%s%d", labelSeqPrefix, uint64(from))}
+	if err := s.store.Update(runID, beads.UpdateOpts{Labels: labels, RemoveLabels: remove}); err != nil {
+		return fmt.Errorf("advancing order run cursor on %q: %w", runID, err)
+	}
+	return nil
+}
+
 // CloseRun closes a tracking bead, stamping close_reason so validation.on-close
 // cities accept it. Replaces the defer-Close / immediate-close sites in
 // cmd_order.go.
@@ -376,6 +391,25 @@ func (s *Store) CreateRunClosed(scoped string, outcome RunOutcome, cursor *Event
 	}
 	if err := s.CloseRun(created.ID, closeReason); err != nil {
 		return run, err
+	}
+	return run, nil
+}
+
+// CreateCursorCheckpoint records a consumed event cursor without a separate
+// update, avoiding recursive bead.updated event triggers.
+func (s *Store) CreateCursorCheckpoint(scoped string, cursor EventCursor, closeReason string) (OrderRun, error) {
+	labels := append(baseLabels(scoped, RunOutcomeNone), labelOrderTitlePrefix+scoped, fmt.Sprintf("%s%d", labelSeqPrefix, uint64(cursor)))
+	var metadata map[string]string
+	if closeReason != "" {
+		metadata = map[string]string{"close_reason": closeReason}
+	}
+	created, err := s.store.Create(beads.Bead{Title: trackingTitle(scoped), Labels: labels, Metadata: metadata, NoHistory: true})
+	if err != nil {
+		return OrderRun{}, fmt.Errorf("creating cursor checkpoint for %q: %w", scoped, err)
+	}
+	run := OrderRun{ID: created.ID, Scoped: scoped, CreatedAt: created.CreatedAt, Cursor: cursor}
+	if err := s.store.Close(created.ID); err != nil {
+		return run, fmt.Errorf("closing cursor checkpoint %q: %w", created.ID, err)
 	}
 	return run, nil
 }
