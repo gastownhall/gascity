@@ -1367,6 +1367,62 @@ func (s *SessionSet) Names() []string {
 	return names
 }
 
+// SessionRoster returns attributes for every session currently known to
+// tmux, keyed by session name. It satisfies [runtime.SessionRosterProvider]
+// by folding the per-session Attached and LastActivity reads that
+// expandAgent's hot loop otherwise performs one exec at a time into a single
+// list-sessions call plus one list-windows call per session (via
+// GetSessionActivity, in sorted name order for deterministic call
+// sequencing) — attachment state comes for free from list-sessions, but
+// last-activity is intentionally NOT read from that same exec's raw
+// #{session_activity} field, which is documented-stale for detached
+// sessions (see rawSessionActivity).
+//
+// The result is an ATTRIBUTES source, not a liveness source. list-sessions
+// still reports a session whose pane has exited under remain-on-exit, so
+// roster membership does not imply the session is live; callers must use
+// [Provider.IsRunning], whose StateCache snapshot skips panes with
+// pane_dead set. Note also that the ErrNoServer absorption below reports an
+// empty roster when the socket is momentarily unreachable, deliberately
+// without StateCache's last-known-good preservation — one more reason a
+// caller must not read an absent name here as "stopped".
+func (t *Tmux) SessionRoster() (map[string]runtime.SessionRosterEntry, error) {
+	out, err := t.run("list-sessions", "-F", "#{session_name}|#{session_attached}")
+	if err != nil {
+		if errors.Is(err, ErrNoServer) {
+			return map[string]runtime.SessionRosterEntry{}, nil
+		}
+		return nil, err
+	}
+
+	attached := make(map[string]bool)
+	names := make([]string, 0)
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "|", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		name := parts[0]
+		attached[name] = parts[1] == "1"
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	roster := make(map[string]runtime.SessionRosterEntry, len(names))
+	for _, name := range names {
+		entry := runtime.SessionRosterEntry{Attached: attached[name]}
+		if activity, err := t.GetSessionActivity(name); err == nil {
+			entry.LastActivity = activity
+		}
+		roster[name] = entry
+	}
+	return roster, nil
+}
+
 // ListSessionIDs returns a map of session name to session ID.
 // Session IDs are in the format "$N" where N is a number.
 func (t *Tmux) ListSessionIDs() (map[string]string, error) {
