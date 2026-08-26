@@ -498,15 +498,12 @@ func TestLifecycleCoordination_InitDirIfReady_BdDeferredPreservesExistingDoltDat
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, ".beads", "metadata.json"), []byte(`{"backend":"dolt","database":"dolt","dolt_mode":"server","dolt_database":"gascity"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	materializeBuiltinPacksForTest(t, dir)
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
+	if err := seedDeferredManagedBeadsErr(dir, dir, "gc", "gascity"); err != nil {
+		t.Fatalf("seed managed-Dolt admission: %v", err)
+	}
 
 	deferred, err := initDirIfReady(dir, dir, "gc")
 	if err != nil {

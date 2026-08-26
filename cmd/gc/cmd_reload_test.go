@@ -964,6 +964,9 @@ func TestReloadConfigTracedRebuildsProviderWhenPackRuntimeCommandChanges(t *test
 	}
 	cfg := result.Cfg
 	applyFeatureFlags(cfg)
+	if err := seedDeferredManagedBeadsErr(dir, dir, config.EffectiveHQPrefix(cfg), "hq"); err != nil {
+		t.Fatalf("seed managed-Dolt admission: %v", err)
+	}
 	var stdout, stderr bytes.Buffer
 	cr := &CityRuntime{
 		cityPath:   dir,

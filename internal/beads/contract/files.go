@@ -931,6 +931,7 @@ func readConfigStateFromData(data []byte) ConfigState {
 		DoltHost:       scanConfigValueFromData(data, "dolt.host:"),
 		DoltPort:       scanConfigValueFromData(data, "dolt.port:"),
 		DoltUser:       scanConfigValueFromData(data, "dolt.user:"),
+		DoltMode:       scanConfigValueFromData(data, "dolt.mode:"),
 		Dolt:           readDoltConfigFromDataOrEmpty(data),
 	}
 }
@@ -943,6 +944,7 @@ func readConfigStateFromRoot(root *yaml.Node) ConfigState {
 		DoltHost:       configValue(root, "dolt.host"),
 		DoltPort:       configValue(root, "dolt.port"),
 		DoltUser:       configValue(root, "dolt.user"),
+		DoltMode:       configValue(root, "dolt.mode"),
 		Dolt:           readDoltConfigFromRoot(root),
 	}
 }

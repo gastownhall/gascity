@@ -1888,6 +1888,10 @@ func TestEnsureCanonicalConfigWritesDoltModeOnAbsentConfig(t *testing.T) {
 	if !strings.Contains(string(data), "dolt.mode: server") {
 		t.Fatalf("config missing dolt.mode: server:\n%s", data)
 	}
+	state, ok, err := ReadConfigState(fs, path)
+	if err != nil || !ok || state.DoltMode != "server" {
+		t.Fatalf("ReadConfigState() = (%+v, %v, %v), want DoltMode server", state, ok, err)
+	}
 }
 
 // TestEnsureCanonicalConfigDoltModeIdempotent verifies that a second call with
