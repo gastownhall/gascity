@@ -179,23 +179,6 @@ func (p poolAllocationShadowPolicy) forSourceStore(
 	return p
 }
 
-// poolAllocationShadowReachesSourceStore asks forSourceStore's question on its
-// own, without the policy overlay. Allocation sites can fold the answer into
-// reason because they refuse on !supported() anyway, so the early return there
-// costs nothing. A release site cannot: it admits every capacity shape, so
-// routing this through forSourceStore would skip the check entirely in exactly
-// the capped cities the release gate now serves, and let an acknowledgement
-// whose trigger store the agent cannot read walk into the store resolution
-// below and fail as an error instead of a refusal.
-func poolAllocationShadowReachesSourceStore(
-	cfg *config.City,
-	agent *config.Agent,
-	cityPath string,
-	storeRef string,
-) bool {
-	return strings.TrimSpace(storeRef) != "" && agentutil.AgentReachesWorkflowStore(storeRef, agent, cityPath, cfg)
-}
-
 func poolAllocationShadowHasCap(limit *int) bool {
 	return limit != nil && *limit >= 0
 }
