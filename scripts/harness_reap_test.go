@@ -365,8 +365,8 @@ func TestGoTestShardTrapsQuitInsteadOfCoreDumping(t *testing.T) {
 	if err == nil {
 		t.Fatalf("runner exited 0 after SIGQUIT; expected a QUIT-driven termination.\n%s", fixture.output())
 	}
-	exitError := &exec.ExitError{}
-	if errors.As(err, &exitError) {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
 		t.Fatalf("wait runner: %v\n%s", err, fixture.output())
 	}
 
