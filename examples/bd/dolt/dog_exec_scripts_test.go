@@ -1085,6 +1085,10 @@ case "$query" in
     exit 0
     ;;
   *"DOLT_DIFF_STAT"*)
+    if [ "$mode" = "table_discovery_failure" ]; then
+      printf 'diff stat table discovery unavailable\n' >&2
+      exit 43
+    fi
     if [ "$mode" = "absorbed_ws_db_hash_drift" ]; then
       print_cell beads
       exit 0
@@ -1104,11 +1108,39 @@ case "$query" in
         ;;
     esac
     if [ "$mode" = "quarantine_autoclear_confined" ]; then
-      print_cell beads
+      case "$query" in
+        *"rows_deleted"*|*"rows_modified"*)
+          print_cell 0
+          ;;
+        *)
+          print_cell beads
+          ;;
+      esac
       exit 0
     fi
     if [ "$mode" = "quarantine_autoclear_outside_known_tables" ]; then
-      print_cell ghost_table
+      case "$query" in
+        *"rows_deleted"*|*"rows_modified"*)
+          print_cell 0
+          ;;
+        *)
+          print_cell ghost_table
+          ;;
+      esac
+      exit 0
+    fi
+    if [ "$mode" = "quarantine_autoclear_content_not_preserved" ]; then
+      case "$query" in
+        *"rows_deleted"*)
+          print_cell 0
+          ;;
+        *"rows_modified"*)
+          print_cell 1
+          ;;
+        *)
+          print_cell beads
+          ;;
+      esac
       exit 0
     fi
     printf 'unexpected DOLT_DIFF_STAT query: %%s\n' "$query" >&2
@@ -3890,6 +3922,56 @@ func TestCompactScriptQuarantineDriftOutsideKnownTablesHardBlocksAutoClear(t *te
 	}
 	if strings.Contains(string(doltLogData), "DOLT_GC") {
 		t.Fatalf("a quarantine with drift outside the known tables must not run full GC:\n%s", doltLogData)
+	}
+}
+
+// TestCompactScriptHardBlockQuarantineReasonsDoNotAutoClearAndAlert proves
+// the round-1 regression this rework fixes (ga-4hwttw): a table can be
+// present at current HEAD — satisfying the old, presence-only
+// committed_tables() check — while its content was NOT preserved.
+// DOLT_DIFF_STAT('from','to','beads') proves rows_modified=1: a genuine
+// UPDATE, the same same-row-count/hash-drift signature as a real corruption,
+// not an absorbed working-set add. A gate that proves content, not
+// presence, must still hard-block this case even though the table name is
+// confined to the known/verified set and would have auto-cleared under the
+// old mechanism.
+func TestCompactScriptHardBlockQuarantineReasonsDoNotAutoClearAndAlert(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	firstOut, err := fixture.run(t, "same_count_db_hash_drift", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("cycle 1 should have quarantined, but compact succeeded:\n%s", firstOut)
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Fatalf("cycle 1 should have written quarantine marker: %v", statErr)
+	}
+	reasonBefore := compactMarkerValue(t, marker, "reason")
+
+	secondOut, err := fixture.run(t, "quarantine_autoclear_content_not_preserved", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("cycle 2 must not auto-clear when DOLT_DIFF_STAT proves the table's content was not preserved (table present but rows_modified>0):\n%s", secondOut)
+	}
+	if !strings.Contains(secondOut, "cannot auto-clear") {
+		t.Fatalf("output missing content-not-preserved explanation:\n%s", secondOut)
+	}
+	if strings.Contains(secondOut, "quarantine marker auto-cleared") {
+		t.Fatalf("content-not-preserved drift must never print the auto-clear notice:\n%s", secondOut)
+	}
+	if !strings.Contains(secondOut, "integrity quarantine marker exists") {
+		t.Fatalf("content-not-preserved drift must still report the existing quarantine:\n%s", secondOut)
+	}
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Fatalf("content-not-preserved drift must not remove the quarantine marker: %v", statErr)
+	}
+	if reasonAfter := compactMarkerValue(t, marker, "reason"); reasonAfter != reasonBefore {
+		t.Fatalf("content-not-preserved drift must not alter the quarantine reason: before=%q after=%q", reasonBefore, reasonAfter)
+	}
+	doltLogData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if strings.Contains(string(doltLogData), "DOLT_GC") {
+		t.Fatalf("a quarantine whose content was not actually preserved must not run full GC:\n%s", doltLogData)
 	}
 }
 
