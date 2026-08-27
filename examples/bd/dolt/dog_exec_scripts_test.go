@@ -136,8 +136,8 @@ var compactScriptTestSlots = make(chan struct{}, compactScriptTestParallelism)
 // logic was correct. Match the budget compact_real_dolt_test.go already
 // uses for the same env vars against a real (slower) dolt server.
 const (
-	compactScriptCallTimeoutSecs = 5
-	compactScriptPushTimeoutSecs = 5
+	compactScriptCallTimeoutSecs = 20
+	compactScriptPushTimeoutSecs = 20
 )
 
 // TestCompactScriptFixtureTimeoutsAccommodateLoadedHost guards the per-call
