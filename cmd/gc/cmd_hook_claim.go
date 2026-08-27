@@ -154,7 +154,11 @@ type hookClaimOps struct {
 	// ResolveWorkBranch returns the git branch of the worker's worktree (dir),
 	// stamped onto the bead as gc.work_branch at claim time. Empty result (no
 	// repo / detached HEAD) omits the branch key — the session back-reference is
-	// still stamped.
+	// still stamped. The stamp is PROVISIONAL (the work does not exist yet, so
+	// this is the best-known value, useful for salvage if the worker dies): the
+	// close gate resolves the truth at close time and emits a stale-stamp
+	// advisory when the work landed on a different branch (ADR-0009 Defect C,
+	// work_record_gate.go).
 	ResolveWorkBranch hookResolveWorkBranchFunc
 	// StampWorkMeta writes the claim-time execution-identity metadata patch
 	// (gc.work_branch and/or the durable session back-reference gc.session_id /

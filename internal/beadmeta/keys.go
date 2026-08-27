@@ -240,8 +240,11 @@ const (
 // whom, with what artifact, to what end":
 //
 //   - WorkBranchMetadataKey ("gc.work_branch") — the git branch the claiming
-//     worker is on; the durable handle from the bead to its work. Stamped at
-//     claim time alongside WorkDirMetadataKey and read by the close gate.
+//     worker is on; the handle from the bead to its work. Stamped at claim time
+//     alongside WorkDirMetadataKey, which makes it PROVISIONAL — the work does
+//     not exist yet when it is written. The close gate resolves the truth at
+//     close (remote-first) and advises when the work landed on a different
+//     branch (ADR-0009 Defect C, cmd/gc/work_record_gate.go).
 //   - WorkOutcomeMetadataKey ("gc.work_outcome") — the typed close disposition,
 //     one of "shipped" | "no-op" | "blocked" | "abandoned". Deliberately NOT
 //     OutcomeMetadataKey ("gc.outcome"): that key is the control-plane step
