@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -666,6 +667,17 @@ type CompletionBackstop struct {
 
 	storeIndex  int
 	afterRootID string
+	// storeRoots holds the current store's UNSTAMPED roots, listed and sorted
+	// once when the cursor enters the store and reused by every chunk of the
+	// same sweep. The old shape re-listed and re-sorted the store's whole root
+	// set on every chunk — O(roots^2) listing per sweep — and a mid-sweep list
+	// change could shift the cursor's ground. Roots created mid-sweep are
+	// picked up by the NEXT sweep, which was already the documented contract.
+	storeRoots       []beads.Bead
+	storeRootsLoaded bool
+	// skippedConverged accumulates the stamped-root skips of the store
+	// currently being traversed so each chunk reports only its own share.
+	skippedConverged int
 	// index is this sweep's idempotency record, loaded once per SWEEP rather
 	// than once per chunk. Re-reading the whole journal per chunk would make the
 	// chunking that keeps the sweep bounded cost more than the sweep it bounds.
@@ -685,6 +697,10 @@ type CompletionBackstopResult struct {
 	// it has to be REPORTED: a convergence lane that quietly converges nothing
 	// is indistinguishable from one with nothing to do.
 	ListErrors []error
+	// RootsSkippedConverged counts roots this chunk skipped because they carry
+	// the converged stamp: closed roots whose facts a previous pass proved
+	// fully journaled. They cost the chunk a map lookup, not a step listing.
+	RootsSkippedConverged int
 	// WarmFailed reports that the chunk could not load its idempotency record
 	// and therefore visited nothing. It is otherwise indistinguishable from a
 	// budget-bounded chunk, and the two need different follow-ups: a budget
@@ -716,30 +732,48 @@ func (b *CompletionBackstop) Pass(recorder events.Provider, graphStores []beads.
 		}
 		graphStore := graphStores[b.storeIndex]
 		if graphStore.Store == nil {
-			b.storeIndex++
-			b.afterRootID = ""
+			b.advanceStore()
 			continue
 		}
-		roots, err := graphStore.ListByMetadata(
-			map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow},
-			0,
-			beads.IncludeClosed,
-			beads.WithBothTiers,
-		)
-		if err != nil {
-			// A store that cannot be listed does not stall the sweep; the next
-			// sweep retries it. The caller is told, so a lane converging nothing
-			// cannot look like a lane with nothing to converge.
-			result.ListErrors = append(result.ListErrors, fmt.Errorf("listing workflow roots in graph store %d: %w", b.storeIndex, err))
-			b.storeIndex++
-			b.afterRootID = ""
-			continue
+		if !b.storeRootsLoaded {
+			roots, err := graphStore.ListByMetadata(
+				map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow},
+				0,
+				beads.IncludeClosed,
+				beads.WithBothTiers,
+			)
+			if err != nil {
+				// A store that cannot be listed does not stall the sweep; the next
+				// sweep retries it. The caller is told, so a lane converging nothing
+				// cannot look like a lane with nothing to converge.
+				result.ListErrors = append(result.ListErrors, fmt.Errorf("listing workflow roots in graph store %d: %w", b.storeIndex, err))
+				b.advanceStore()
+				continue
+			}
+			// Converged roots leave the traversal here: the stamp rides the
+			// listing already in hand, so skipping one costs a map lookup where
+			// visiting it costs a per-root step listing (ga-wevcl).
+			unstamped := roots[:0]
+			skipped := 0
+			for _, root := range roots {
+				if strings.TrimSpace(root.Metadata[beadmeta.CompletionFactsConvergedMetadataKey]) != "" {
+					skipped++
+					continue
+				}
+				unstamped = append(unstamped, root)
+			}
+			sort.Slice(unstamped, func(i, j int) bool { return unstamped[i].ID < unstamped[j].ID })
+			b.storeRoots = unstamped
+			b.storeRootsLoaded = true
+			b.skippedConverged = skipped
 		}
-		sort.Slice(roots, func(i, j int) bool { return roots[i].ID < roots[j].ID })
-		// Resume strictly after the last root this cursor visited. The list is
-		// re-read each Pass, so a root created mid-sweep before the cursor is
-		// picked up by the NEXT sweep rather than being skipped forever.
-		remaining := roots
+		if b.skippedConverged > 0 {
+			result.RootsSkippedConverged += b.skippedConverged
+			b.skippedConverged = 0
+		}
+		// Resume strictly after the last root this cursor visited, over the
+		// list held for this sweep.
+		remaining := b.storeRoots
 		for len(remaining) > 0 && b.afterRootID != "" && remaining[0].ID <= b.afterRootID {
 			remaining = remaining[1:]
 		}
@@ -756,8 +790,7 @@ func (b *CompletionBackstop) Pass(recorder events.Provider, graphStores []beads.
 			b.afterRootID = chunk[len(chunk)-1].ID
 		}
 		if len(chunk) == len(remaining) {
-			b.storeIndex++
-			b.afterRootID = ""
+			b.advanceStore()
 		}
 	}
 	b.storeIndex = 0
@@ -769,6 +802,16 @@ func (b *CompletionBackstop) Pass(recorder events.Provider, graphStores []beads.
 // reconcileRoots projects the closed steps of the supplied roots and records the
 // completion facts the journal is missing. The index is updated as it goes so
 // one pass cannot emit the same fact twice across stores.
+// advanceStore moves the sweep cursor to the next store and drops the held
+// root list so the next store lists afresh.
+func (b *CompletionBackstop) advanceStore() {
+	b.storeIndex++
+	b.afterRootID = ""
+	b.storeRoots = nil
+	b.storeRootsLoaded = false
+	b.skippedConverged = 0
+}
+
 func reconcileRoots(recorder events.Recorder, graphStore beads.GraphStore, roots []beads.Bead, completed *CompletedFactIndex, actor string) int {
 	emitted := 0
 	for _, root := range roots {
@@ -780,6 +823,7 @@ func reconcileRoots(recorder events.Recorder, graphStore beads.GraphStore, roots
 		if err != nil {
 			continue
 		}
+		everyStepClosed := true
 		for _, row := range rows {
 			// The row the steps List already returned decides the status.
 			// Re-Getting it would only narrow a window the journal-keyed
@@ -787,6 +831,7 @@ func reconcileRoots(recorder events.Recorder, graphStore beads.GraphStore, roots
 			// the List and the write is repaired by the next pass.
 			step := row.bead
 			if !strings.EqualFold(strings.TrimSpace(step.Status), "closed") {
+				everyStepClosed = false
 				continue
 			}
 			event, ok := LifecycleEvent(events.ExecutionStepCompleted, root, step, actor)
@@ -800,6 +845,18 @@ func reconcileRoots(recorder events.Recorder, graphStore beads.GraphStore, roots
 			recorder.Record(event)
 			completed.add(key)
 			emitted++
+		}
+		// A CLOSED root whose every listed step is closed has, at this point,
+		// every emittable fact in the journal — and nothing about it can change
+		// again. Stamp it so the backstop sweep skips it from the roots listing
+		// alone instead of re-paying this per-root step listing every hour
+		// (ga-wevcl). Best-effort by design: a failed stamp just means the next
+		// sweep re-proves and re-stamps. Live closes on already-stamped roots
+		// stay covered by the delta lane, which reacts to the close events.
+		if everyStepClosed &&
+			strings.EqualFold(strings.TrimSpace(root.Status), "closed") &&
+			strings.TrimSpace(root.Metadata[beadmeta.CompletionFactsConvergedMetadataKey]) == "" {
+			_ = graphStore.SetMetadata(root.ID, beadmeta.CompletionFactsConvergedMetadataKey, time.Now().UTC().Format(time.RFC3339))
 		}
 	}
 	return emitted

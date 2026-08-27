@@ -102,6 +102,7 @@ type completionsLane struct {
 	sweepReason    string
 	sweepEmitted   int
 	sweepRoots     int
+	sweepSkipped   int
 
 	interval time.Duration
 	poll     time.Duration
@@ -228,7 +229,7 @@ func (l *completionsLane) noteSweepFailure(now time.Time) {
 // completed a full traversal, closes the sweep out: it clears the force latch,
 // advances the cadence, and returns the whole sweep's totals for the summary
 // line. A sweep still in progress returns done=false and keeps the lane due.
-func (l *completionsLane) noteSweepChunk(now time.Time, reason string, emitted, roots int, complete bool) (total completionsSweepTotals, done bool) {
+func (l *completionsLane) noteSweepChunk(now time.Time, reason string, emitted, roots, skipped int, complete bool) (total completionsSweepTotals, done bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.sweepStartedAt.IsZero() {
@@ -237,12 +238,14 @@ func (l *completionsLane) noteSweepChunk(now time.Time, reason string, emitted, 
 	}
 	l.sweepEmitted += emitted
 	l.sweepRoots += roots
+	l.sweepSkipped += skipped
 	if !complete {
 		return completionsSweepTotals{}, false
 	}
 	total = completionsSweepTotals{
 		Emitted: l.sweepEmitted,
 		Roots:   l.sweepRoots,
+		Skipped: l.sweepSkipped,
 		Elapsed: now.Sub(l.sweepStartedAt),
 		Reason:  l.sweepReason,
 	}
@@ -254,6 +257,7 @@ func (l *completionsLane) noteSweepChunk(now time.Time, reason string, emitted, 
 	l.sweepReason = ""
 	l.sweepEmitted = 0
 	l.sweepRoots = 0
+	l.sweepSkipped = 0
 	return total, true
 }
 
@@ -261,6 +265,10 @@ func (l *completionsLane) noteSweepChunk(now time.Time, reason string, emitted, 
 type completionsSweepTotals struct {
 	Emitted int
 	Roots   int
+	// Skipped counts converged-stamped roots the sweep excluded from the
+	// walk; visible so a sweep that visits 10 of 900 roots reads as the
+	// optimization working, not as 890 roots vanishing.
+	Skipped int
 	Elapsed time.Duration
 	// Reason is why the sweep was due, latched from its first chunk.
 	Reason string
@@ -365,10 +373,10 @@ func (cr *CityRuntime) runCompletionsSweepChunk(backstop *executionevent.Complet
 	for _, listErr := range result.ListErrors {
 		fmt.Fprintf(cr.stderr, "%s: completions sweep: %v\n", cr.logPrefix, listErr) //nolint:errcheck // best-effort stderr
 	}
-	total, done := lane.noteSweepChunk(time.Now(), reason, result.Emitted, result.RootsVisited, result.SweepComplete)
+	total, done := lane.noteSweepChunk(time.Now(), reason, result.Emitted, result.RootsVisited, result.RootsSkippedConverged, result.SweepComplete)
 	if done {
-		summary := fmt.Sprintf("reason=%s converged %d root(s), emitted %d completion fact(s), took %s (stores=%d)",
-			total.Reason, total.Roots, total.Emitted, total.Elapsed.Round(time.Millisecond), len(graphStores))
+		summary := fmt.Sprintf("reason=%s converged %d root(s) (+%d already-converged skipped), emitted %d completion fact(s), took %s (stores=%d)",
+			total.Reason, total.Roots, total.Skipped, total.Emitted, total.Elapsed.Round(time.Millisecond), len(graphStores))
 		fmt.Fprintf(cr.stderr, "%s: completions sweep: %s\n", cr.logPrefix, summary) //nolint:errcheck // best-effort stderr
 	}
 	return result
