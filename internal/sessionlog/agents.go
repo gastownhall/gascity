@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -116,11 +117,7 @@ func FindAgentMappings(parentLogPath string) ([]AgentMapping, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(agentPaths) == 0 {
-		return nil, nil
-	}
-
-	var mappings []AgentMapping
+	mappingsByAgent := make(map[string]string)
 	for _, path := range agentPaths {
 		agentID := agentIDFromPath(path)
 		if agentID == "" {
@@ -130,10 +127,39 @@ func FindAgentMappings(parentLogPath string) ([]AgentMapping, error) {
 		if err != nil {
 			return nil, fmt.Errorf("reading agent %q mapping: %w", agentID, err)
 		}
-		mappings = append(mappings, AgentMapping{
-			AgentID:         agentID,
-			ParentToolUseID: toolUseID,
-		})
+		mappingsByAgent[agentID] = toolUseID
+	}
+	metaPaths, err := filepath.Glob(filepath.Join(agentDir(parentLogPath), "agent-*.meta.json"))
+	if err != nil {
+		return nil, fmt.Errorf("finding agent metadata: %w", err)
+	}
+	for _, path := range metaPaths {
+		agentID := agentIDFromPath(path)
+		if agentID == "" {
+			continue
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("reading agent %q metadata: %w", agentID, err)
+		}
+		var meta struct {
+			ToolUseID string `json:"toolUseId"`
+		}
+		if err := json.Unmarshal(data, &meta); err != nil {
+			return nil, fmt.Errorf("parsing agent %q metadata: %w", agentID, err)
+		}
+		// Metadata is authoritative: current provider transcripts leave the
+		// JSONL parentToolUseId empty, while this file carries the real join key.
+		mappingsByAgent[agentID] = meta.ToolUseID
+	}
+	ids := make([]string, 0, len(mappingsByAgent))
+	for agentID := range mappingsByAgent {
+		ids = append(ids, agentID)
+	}
+	sort.Strings(ids)
+	mappings := make([]AgentMapping, 0, len(ids))
+	for _, agentID := range ids {
+		mappings = append(mappings, AgentMapping{AgentID: agentID, ParentToolUseID: mappingsByAgent[agentID]})
 	}
 	return mappings, nil
 }
@@ -186,11 +212,18 @@ func ReadAgentSession(parentLogPath, agentID string) (*AgentSession, error) {
 // "/path/to/agent-{id}.jsonl".
 func agentIDFromPath(path string) string {
 	base := filepath.Base(path)
-	if !strings.HasPrefix(base, "agent-") || !strings.HasSuffix(base, ".jsonl") {
+	if !strings.HasPrefix(base, "agent-") {
 		return ""
 	}
 	name := strings.TrimPrefix(base, "agent-")
-	name = strings.TrimSuffix(name, ".jsonl")
+	switch {
+	case strings.HasSuffix(name, ".meta.json"):
+		name = strings.TrimSuffix(name, ".meta.json")
+	case strings.HasSuffix(name, ".jsonl"):
+		name = strings.TrimSuffix(name, ".jsonl")
+	default:
+		return ""
+	}
 	if name == "" {
 		return ""
 	}

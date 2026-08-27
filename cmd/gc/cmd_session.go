@@ -2331,6 +2331,7 @@ func outputLineCount(output string) int {
 // newSessionKillCmd creates the "gc session kill <id-or-alias>" command.
 func newSessionKillCmd(stdout, stderr io.Writer) *cobra.Command {
 	var jsonOutput bool
+	var force bool
 	cmd := &cobra.Command{
 		Use:   "kill <session-id-or-alias>",
 		Short: "Force-kill session runtime (reconciler restarts)",
@@ -2343,7 +2344,7 @@ useful for unsticking a session without losing its conversation history.
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdSessionKill(args, stdout, stderr, jsonOutput) != 0 {
+			if cmdSessionKillWithForce(args, stdout, stderr, jsonOutput, force) != 0 {
 				return errExit
 			}
 			return nil
@@ -2351,6 +2352,7 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		ValidArgsFunction: completeSessionIDs,
 	}
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSONL")
+	cmd.Flags().BoolVar(&force, "force", false, "destroy a session even when it has live background subagents")
 	return cmd
 }
 
@@ -2359,8 +2361,11 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 var sessionKillPokeController = pokeController
 
 // cmdSessionKill is the CLI entry point for "gc session kill".
-func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool) int {
-	asJSON := sessionJSONRequested(jsonOutput)
+func cmdSessionKill(args []string, stdout, stderr io.Writer) int {
+	return cmdSessionKillWithForce(args, stdout, stderr, false, false)
+}
+
+func cmdSessionKillWithForce(args []string, stdout, stderr io.Writer, asJSON, force bool) int {
 	store, code := openCityStore(stderr, "gc session kill")
 	if store == nil {
 		return code
@@ -2369,7 +2374,7 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 	cityPath, err := resolveCity()
 	var cfg *config.City
 	if err == nil {
-		cfg, _ = loadCityConfig(cityPath, configWarnWriter(sessionJSONRequested(jsonOutput), stderr))
+		cfg, _ = loadCityConfig(cityPath, configWarnWriter(asJSON, stderr))
 	}
 	// Every store consumer here is session-class (session-ID resolution, session
 	// bead read, session worker handle, circuit-breaker clear, asleep sync), so
@@ -2406,6 +2411,9 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 	handle, err := workerHandleForSessionWithConfig(cityPath, sessStore, sp, cfg, sessionID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session kill: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if !force && !runtimeAlreadyInactive && refuseKillForLiveSubagents("gc session kill", workerHandleForSessionTargetWithConfig, cityPath, sessStore, sp, cfg, sessionID, stderr) {
 		return 1
 	}
 
