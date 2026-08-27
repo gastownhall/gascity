@@ -121,6 +121,42 @@ const compactScriptTestParallelism = 8
 // compactScriptTestSlots bounds real shell fan-out on high-core test hosts.
 var compactScriptTestSlots = make(chan struct{}, compactScriptTestParallelism)
 
+// compactScriptCallTimeoutSecs and compactScriptPushTimeoutSecs bound each
+// individual `dolt` subprocess invocation the script under test makes
+// (dolt_query's run_bounded wrapper in run.sh). The mocked dolt commands in
+// this fixture are trivial shell scripts that answer instantly on an idle
+// host, but under full-suite parallel load (LOCAL_TEST_JOBS=14: many
+// concurrent go test binaries competing for CPU) fork/exec scheduling
+// delays alone can stretch a single subprocess invocation past a few
+// seconds even though the mock itself does no real work. A 5s budget was
+// observed losing/killing mocked HEAD and table-value-hash probes under
+// that load (ga-ssif8u), hard-blocking auto-clear and failing
+// TestCompactScriptAutoClearsRaceClassQuarantineWhenDriftConfinedToKnownTables
+// and TestCompactScriptSkipFetchPerDBList even though the underlying script
+// logic was correct. Match the budget compact_real_dolt_test.go already
+// uses for the same env vars against a real (slower) dolt server.
+const (
+	compactScriptCallTimeoutSecs = 5
+	compactScriptPushTimeoutSecs = 5
+)
+
+// TestCompactScriptFixtureTimeoutsAccommodateLoadedHost guards the per-call
+// dolt subprocess timeout budget every test in this file runs under. Keep
+// the floor at the remediation target, not the old value, so a regression
+// back to a tight budget fails this guard instead of only surfacing as
+// sporadic, unrelated-looking probe failures under full-suite load.
+func TestCompactScriptFixtureTimeoutsAccommodateLoadedHost(t *testing.T) {
+	const minLoadedHostBudgetSecs = 20
+	if compactScriptCallTimeoutSecs < minLoadedHostBudgetSecs {
+		t.Errorf("compactScriptCallTimeoutSecs = %d, want >= %d (loaded-host dolt subprocess budget)",
+			compactScriptCallTimeoutSecs, minLoadedHostBudgetSecs)
+	}
+	if compactScriptPushTimeoutSecs < minLoadedHostBudgetSecs {
+		t.Errorf("compactScriptPushTimeoutSecs = %d, want >= %d (loaded-host dolt subprocess budget)",
+			compactScriptPushTimeoutSecs, minLoadedHostBudgetSecs)
+	}
+}
+
 // newCompactScriptFixture runs its hermetic shell scenario in parallel while
 // holding one bounded process slot for the lifetime of the test.
 func newCompactScriptFixture(t *testing.T) compactScriptFixture {
@@ -214,8 +250,8 @@ func (f compactScriptFixture) runWithArgs(t *testing.T, mode string, args []stri
 		"GC_DOLT_USER=root",
 		"GC_DOLT_PASSWORD=",
 		"GC_DOLT_MANAGED_LOCAL=1",
-		"GC_DOLT_COMPACT_CALL_TIMEOUT_SECS=5",
-		"GC_DOLT_COMPACT_PUSH_TIMEOUT_SECS=5",
+		fmt.Sprintf("GC_DOLT_COMPACT_CALL_TIMEOUT_SECS=%d", compactScriptCallTimeoutSecs),
+		fmt.Sprintf("GC_DOLT_COMPACT_PUSH_TIMEOUT_SECS=%d", compactScriptPushTimeoutSecs),
 		"GC_FAKE_DOLT_COMPACT_MODE="+mode,
 		"GC_FAKE_DOLT_COUNT_FILE="+filepath.Join(f.binDir, "row-count-calls"),
 		"GC_FAKE_DOLT_STATE_FILE="+f.stateFile,
