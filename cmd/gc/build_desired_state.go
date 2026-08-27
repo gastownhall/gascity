@@ -446,6 +446,8 @@ func buildDesiredStateWithSessionBeadsAt(
 
 	// Pre-compute suspended rig paths (config + runtime state).
 	suspendedRigPaths := buildSuspendedRigPathsForCity(cfg, cityPath)
+	bp.sessionCensusRigStores = cloneSessionCensusRigStores(rigStores)
+	bp.sessionCensusSuspendedRigPaths = cloneSessionCensusSuspendedRigPaths(suspendedRigPaths)
 
 	// Collect all open session Infos from all stores to correctly count
 	// running sessions for each pool. A partial/failed collection is logged,
@@ -1209,6 +1211,36 @@ func collectAllOpenSessionInfos(
 	rigStores map[string]beads.Store,
 	suspendedRigPaths map[string]bool,
 ) ([]session.Info, error) {
+	return collectOpenSessionInfos(cityPath, cfg, cityStore, rigStores, suspendedRigPaths, true, false)
+}
+
+// collectAllOpenSessionAvailabilityInfos preserves distinct identifier
+// projections of the same stable bead ID across census legs. The ordinary
+// reconciler census is first-leg-wins because duplicated migrated rows must be
+// counted once; an availability proof is stricter because an old alias/name in
+// either copy must remain reserved until every copy agrees.
+func collectAllOpenSessionAvailabilityInfos(
+	cityPath string,
+	cfg *config.City,
+	cityStore beads.Store,
+	rigStores map[string]beads.Store,
+	suspendedRigPaths map[string]bool,
+) ([]session.Info, error) {
+	// This read runs only inside the complete identifier lock set. Live bypasses
+	// production CachingStore snapshots so an external store mutation committed
+	// after the planning census participates in the lock-time proof.
+	return collectOpenSessionInfos(cityPath, cfg, cityStore, rigStores, suspendedRigPaths, false, true)
+}
+
+func collectOpenSessionInfos(
+	cityPath string,
+	cfg *config.City,
+	cityStore beads.Store,
+	rigStores map[string]beads.Store,
+	suspendedRigPaths map[string]bool,
+	firstLegWins bool,
+	live bool,
+) ([]session.Info, error) {
 	// Sessions arm of the reconciler frame, over the Plan(Session) leg set: the
 	// sessions binding, the city work store, then the serving rigs.
 	// CachingStore-wrapped stores are used when available.
@@ -1222,6 +1254,7 @@ func collectAllOpenSessionInfos(
 	type storeResult struct {
 		infos []session.Info
 		err   error
+		ref   string
 	}
 	results := make([]storeResult, len(stores))
 	var wg sync.WaitGroup
@@ -1234,8 +1267,8 @@ func collectAllOpenSessionInfos(
 			// store, CachingStore-wrapped when available) — same tier as the prior
 			// raw ListAllSessionBeads, projected to Info. Partial-result rows are
 			// still returned alongside the error, so the fold below preserves them.
-			infos, err := sessionFrontDoor(source.store).ListAll(session.ListAllOptions{})
-			results[idx] = storeResult{infos: infos, err: err}
+			infos, err := sessionFrontDoor(source.store).ListAll(session.ListAllOptions{Live: live})
+			results[idx] = storeResult{infos: infos, err: err, ref: source.ref}
 		}()
 	}
 	wg.Wait()
@@ -1248,7 +1281,7 @@ func collectAllOpenSessionInfos(
 			if info.Closed {
 				continue
 			}
-			if id := strings.TrimSpace(info.ID); id != "" {
+			if id := strings.TrimSpace(info.ID); firstLegWins && id != "" {
 				if _, dup := seen[id]; dup {
 					continue
 				}
@@ -1259,7 +1292,11 @@ func collectAllOpenSessionInfos(
 	}
 	for _, r := range results {
 		if r.err != nil {
-			errs = append(errs, r.err)
+			ref := strings.TrimSpace(r.ref)
+			if ref == "" {
+				ref = "<unscoped>"
+			}
+			errs = append(errs, fmt.Errorf("session census leg %q: %w", ref, r.err))
 			if beads.IsPartialResult(r.err) {
 				keep(r.infos)
 			}
@@ -1271,6 +1308,35 @@ func collectAllOpenSessionInfos(
 		return allInfos, errors.Join(errs...)
 	}
 	return allInfos, nil
+}
+
+// cloneSessionCensusRigStores freezes a constructor INPUT for a later
+// lock-time re-read. residency:allow — this is immutable snapshot plumbing,
+// not residency discovery: it preserves the caller-provided name/store pairs
+// byte-for-byte; it neither resolves ownership nor discovers or reads stores,
+// consults no config, binding, namespace, or leg order, and its result goes
+// only back through sessionCensusStoreCandidates/storeref.Plan under the full
+// identifier-lock set.
+func cloneSessionCensusRigStores(src map[string]beads.Store) map[string]beads.Store {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[string]beads.Store, len(src))
+	for name, store := range src {
+		dst[name] = store
+	}
+	return dst
+}
+
+func cloneSessionCensusSuspendedRigPaths(src map[string]bool) map[string]bool {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[string]bool, len(src))
+	for path, suspended := range src {
+		dst[path] = suspended
+	}
+	return dst
 }
 
 func cloneDesiredState(src map[string]TemplateParams) map[string]TemplateParams {
@@ -4216,6 +4282,84 @@ func freshPoolOccupancyInfos(bp *agentBuildParams) []session.Info {
 	return infos
 }
 
+// freshPoolAvailabilityInfos re-reads every configured session-census leg
+// while the caller holds all derived identifier locks, then conservatively
+// unions that current view with the build's original complete census and the
+// mutable primary snapshot. A holder that disappeared after planning therefore
+// cannot open a name during the same build, while a holder created in any
+// foreign leg after planning is visible before mutation.
+//
+// Exact duplicate projections are folded, but two projections of the same
+// stable bead ID with different alias/name/identity fields are deliberately
+// retained: either spelling may still be observed by a concurrent runtime and
+// must continue to reserve its namespace for this build.
+func freshPoolAvailabilityInfos(bp *agentBuildParams) ([]session.Info, error) {
+	if bp == nil {
+		return nil, fmt.Errorf("refreshing pool session availability: build params unavailable")
+	}
+	fresh, err := collectAllOpenSessionAvailabilityInfos(
+		bp.cityPath,
+		bp.city,
+		bp.beadStore,
+		bp.sessionCensusRigStores,
+		bp.sessionCensusSuspendedRigPaths,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("refreshing complete pool session availability: %w", err)
+	}
+	primary := bp.sessionBeads.OpenInfos()
+	infos := make([]session.Info, 0, len(fresh)+len(bp.sessionOccupancyInfos)+len(primary))
+	seen := make(map[string]bool, cap(infos))
+	appendInfo := func(info session.Info) {
+		key := strings.Join([]string{
+			strings.TrimSpace(info.ID),
+			strings.TrimSpace(info.SessionNameMetadata),
+			strings.TrimSpace(info.Alias),
+			strings.TrimSpace(info.AgentName),
+		}, "\x00")
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		infos = append(infos, info)
+	}
+	for _, info := range fresh {
+		appendInfo(info)
+	}
+	for _, info := range bp.sessionOccupancyInfos {
+		appendInfo(info)
+	}
+	for _, info := range primary {
+		appendInfo(info)
+	}
+	return infos, nil
+}
+
+// poolAliasCollisionFromInfos mirrors the live-session half of
+// session.EnsureAliasAvailableWithConfig over an already complete typed census.
+// Config reservations and primary-store query errors remain the exported
+// helper's responsibility; this adds the foreign session legs it cannot see.
+func poolAliasCollisionFromInfos(infos []session.Info, alias string) error {
+	alias = strings.TrimSpace(alias)
+	if alias == "" {
+		return nil
+	}
+	for _, info := range infos {
+		if info.Closed || isFailedCreateSessionInfo(info) {
+			continue
+		}
+		switch {
+		case strings.TrimSpace(info.SessionNameMetadata) == alias:
+			return fmt.Errorf("%w: %q conflicts with session name on %s", session.ErrSessionAliasExists, alias, info.ID)
+		case strings.TrimSpace(info.Alias) == alias:
+			return fmt.Errorf("%w: %q already belongs to %s", session.ErrSessionAliasExists, alias, info.ID)
+		case strings.TrimSpace(info.AgentName) == alias:
+			return fmt.Errorf("%w: %q conflicts with concrete session identity on %s", session.ErrSessionAliasExists, alias, info.ID)
+		}
+	}
+	return nil
+}
+
 // claimFreshPoolSlotInfo selects the lowest free in-cap concrete slot for a
 // fresh pool row. Snapshot holders contribute to a local occupied union only:
 // adding them to the shared request-order usedSlots map would let an anonymous
@@ -4342,6 +4486,36 @@ func infoIdentifiesAsCanonical(i session.Info, canonical string) bool {
 		containsString(i.Labels, "agent:"+canonical)
 }
 
+type poolSessionIdentifierLockFunc func(string, []string, func() error) error
+
+func poolSessionCreateLockIdentifiers(
+	identifiers poolSessionIdentifiers,
+	qualifiedAlias string,
+	resolvedTmuxAlias string,
+) []string {
+	seen := make(map[string]bool, len(identifiers.availabilityNames)+2)
+	lockIDs := make([]string, 0, len(identifiers.availabilityNames)+2)
+	add := func(identifier string) {
+		identifier = strings.TrimSpace(identifier)
+		if identifier == "" || seen[identifier] {
+			return
+		}
+		seen[identifier] = true
+		lockIDs = append(lockIDs, identifier)
+	}
+	for _, identifier := range identifiers.availabilityNames {
+		add(identifier)
+	}
+	// The qualified pool alias and configured base tmux alias are reservation
+	// participants even when the proven-alias-collision path ultimately defers
+	// alias persistence. Keeping both in the same city-scoped lock set joins
+	// this create with every other creator that addresses either spelling.
+	add(qualifiedAlias)
+	add(resolvedTmuxAlias)
+	sort.Strings(lockIDs)
+	return lockIDs
+}
+
 func createPoolSessionBeadWithGuardedAlias(
 	bp *agentBuildParams,
 	cfgAgent *config.Agent,
@@ -4350,8 +4524,31 @@ func createPoolSessionBeadWithGuardedAlias(
 	slot int,
 	metadata map[string]string,
 ) (session.Info, error) {
+	return createPoolSessionBeadWithGuardedAliasUsingLock(
+		bp,
+		cfgAgent,
+		template,
+		qualifiedInstance,
+		slot,
+		metadata,
+		session.WithCitySessionIdentifierLocks,
+	)
+}
+
+func createPoolSessionBeadWithGuardedAliasUsingLock(
+	bp *agentBuildParams,
+	cfgAgent *config.Agent,
+	template string,
+	qualifiedInstance string,
+	slot int,
+	metadata map[string]string,
+	withLocks poolSessionIdentifierLockFunc,
+) (session.Info, error) {
 	if bp == nil {
 		return session.Info{}, fmt.Errorf("creating pool session for %q: build params unavailable", template)
+	}
+	if withLocks == nil {
+		return session.Info{}, fmt.Errorf("creating pool session for %q: identifier locker unavailable", template)
 	}
 	if err := validateAgentSessionTransportForBuild(bp, cfgAgent, qualifiedInstance); err != nil {
 		return session.Info{}, err
@@ -4369,8 +4566,13 @@ func createPoolSessionBeadWithGuardedAlias(
 	// slot (TransientSlot, consumed in derivePoolSessionName), and it is never
 	// persisted as an alias (persistAlias below).
 	transientSlot := usesTransientPoolSlotIdentity(cfgAgent)
+	qualifiedInstance = strings.TrimSpace(qualifiedInstance)
+	identityAgentName := qualifiedInstance
+	if identityAgentName == "" {
+		identityAgentName = template
+	}
 	identity := poolSessionCreateIdentity{
-		AgentName:     qualifiedInstance,
+		AgentName:     identityAgentName,
 		Slot:          slot,
 		Metadata:      metadata,
 		TransientSlot: transientSlot,
@@ -4385,53 +4587,65 @@ func createPoolSessionBeadWithGuardedAlias(
 	// not both create a bead for it, and that is true whether or not the slot is
 	// an identity. persistAlias is what lands in the bead. For a transient slot
 	// the exclusion still applies and the persistence does not.
-	alias := strings.TrimSpace(qualifiedInstance)
+	alias := qualifiedInstance
 	persistAlias := alias
 	if transientSlot {
 		persistAlias = ""
 	}
+	identifiers, err := derivePoolSessionIdentifiers(bp.city, template, identity, resolvedTmuxAlias)
+	if err != nil {
+		return session.Info{}, err
+	}
 	if bp.beadStore == nil {
-		return createPoolSessionBeadWithAlias(bp.beadStore, template, bp.city, bp.sessionBeads, poolSessionCreateStartedAt(bp), identity, resolvedTmuxAlias)
+		return createPoolSessionBeadWithIdentifiers(bp.beadStore, template, bp.city, bp.sessionBeads, bp.sessionBeads, poolSessionCreateStartedAt(bp), identity, identifiers)
 	}
-	lockIDs := []string{}
-	if alias != "" {
-		lockIDs = append(lockIDs, alias)
-	}
-	if resolvedTmuxAlias != "" {
-		lockIDs = append(lockIDs, resolvedTmuxAlias)
-	}
-	if len(lockIDs) == 0 {
-		return createPoolSessionBeadWithAlias(bp.beadStore, template, bp.city, bp.sessionBeads, poolSessionCreateStartedAt(bp), identity, resolvedTmuxAlias)
-	}
+	lockIDs := poolSessionCreateLockIdentifiers(identifiers, alias, resolvedTmuxAlias)
 
 	var info session.Info
-	createdWithLock := false
-	lockErr := session.WithCitySessionIdentifierLocks(bp.cityPath, lockIDs, func() error {
+	lockErr := withLocks(bp.cityPath, lockIDs, func() error {
 		createIdentity := identity
+		// The exact identifier locks fence compliant creators across every store,
+		// but the pre-lock planning census is not current enough to prove absence.
+		// Re-read the full session topology under the lock. Any partial leg makes
+		// both alias and runtime-name answers unprovable, so fail before mutation.
+		availabilityInfos, availabilityErr := freshPoolAvailabilityInfos(bp)
+		if availabilityErr != nil {
+			return fmt.Errorf("checking locked pool availability for template %q: %w", template, availabilityErr)
+		}
 		if alias != "" {
-			// The availability probe runs on the SLOT string even when the slot
-			// will not be persisted as an alias: it matches on session_name,
-			// alias, AND agent_name (session.ensureSessionAliasAvailable), and a
-			// transient pool bead still persists the slot as agent_name. So the
-			// occupancy question — including its released/closed exclusions — is
-			// answered identically either way; only the persistence is
-			// conditional.
-			if err := session.EnsureAliasAvailableWithConfig(bp.beadStore, bp.city, alias, ""); err == nil {
+			// A proven collision retains the long-standing alias-deferral contract:
+			// the pool bead is created without a public alias and sync records
+			// pool_alias_conflict. An unanswerable reservation query is different:
+			// it is not proof of a collision and must fail the entire create closed.
+			aliasErr := session.EnsureAliasAvailableWithConfig(bp.beadStore, bp.city, alias, "")
+			if aliasErr == nil {
+				aliasErr = poolAliasCollisionFromInfos(availabilityInfos, alias)
+			}
+			switch {
+			case aliasErr == nil:
 				createIdentity.Alias = persistAlias
+			case errors.Is(aliasErr, session.ErrSessionAliasExists):
+				// Proven collision: intentionally defer alias persistence.
+			default:
+				return fmt.Errorf("checking pool alias %q for template %q: %w", alias, template, aliasErr)
 			}
 		}
-		var err error
-		info, err = createPoolSessionBeadWithAlias(bp.beadStore, template, bp.city, bp.sessionBeads, poolSessionCreateStartedAt(bp), createIdentity, resolvedTmuxAlias)
-		createdWithLock = true
-		return err
+		var createErr error
+		// Only the primary snapshot receives the successful-create writeback.
+		availabilitySnapshot := newSessionBeadSnapshotFromInfos(availabilityInfos)
+		info, createErr = createPoolSessionBeadWithIdentifiers(
+			bp.beadStore,
+			template,
+			bp.city,
+			availabilitySnapshot,
+			bp.sessionBeads,
+			poolSessionCreateStartedAt(bp),
+			createIdentity,
+			identifiers,
+		)
+		return createErr
 	})
-	if createdWithLock {
-		return info, lockErr
-	}
-	if lockErr != nil && bp.stderr != nil {
-		fmt.Fprintf(bp.stderr, "createPoolSessionBeadWithGuardedAlias: locking alias %q for %s: %v; creating without alias\n", alias, template, lockErr) //nolint:errcheck
-	}
-	return createPoolSessionBeadWithAlias(bp.beadStore, template, bp.city, bp.sessionBeads, poolSessionCreateStartedAt(bp), identity, "")
+	return info, lockErr
 }
 
 func isFailedCreateSessionBead(bead beads.Bead) bool {

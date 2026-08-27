@@ -5691,7 +5691,7 @@ func TestCreatePoolSessionBeadWithGuardedAliasSerializesResolvedTmuxAlias(t *tes
 	}
 }
 
-func TestCreatePoolSessionBeadWithGuardedAliasDropsTmuxAliasWhenIdentifierLockFails(t *testing.T) {
+func TestCreatePoolSessionBeadWithGuardedAliasFailsClosedWhenIdentifierLockFails(t *testing.T) {
 	store := beads.NewMemStore()
 	cityPath := filepath.Join(t.TempDir(), "not-a-directory")
 	if err := os.WriteFile(cityPath, []byte("city path blocks lock dir creation"), 0o600); err != nil {
@@ -5712,16 +5712,21 @@ func TestCreatePoolSessionBeadWithGuardedAliasDropsTmuxAliasWhenIdentifierLockFa
 	bp.sessionBeads = newSessionBeadSnapshot(nil)
 
 	info, err := createPoolSessionBeadWithGuardedAlias(bp, &cfg.Agents[0], "worker", "worker-1", 1, nil)
-	if err != nil {
-		t.Fatalf("createPoolSessionBeadWithGuardedAlias: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "session identifier lock") {
+		t.Fatalf("createPoolSessionBeadWithGuardedAlias error = %v, want identifier-lock failure", err)
 	}
-
-	want := poolRuntimeSessionName(nil, "worker-1", "worker", true)
-	if got := info.SessionNameMetadata; got != want {
-		t.Fatalf("session_name = %q, want transient pool identity fallback %q when tmux_alias lock fails", got, want)
+	if info.ID != "" {
+		t.Fatalf("lock-refused create returned session %#v", info)
 	}
-	if strings.Contains(stderr.String(), "creating without alias") && strings.Contains(info.SessionNameMetadata, "crew--test-city") {
-		t.Fatalf("lock failure warning emitted but session_name still used tmux_alias: %q", info.SessionNameMetadata)
+	created, listErr := store.ListByLabel(sessionBeadLabel, 0)
+	if listErr != nil {
+		t.Fatalf("listing session beads: %v", listErr)
+	}
+	if len(created) != 0 {
+		t.Fatalf("session beads = %#v, want none after lock failure", created)
+	}
+	if strings.Contains(stderr.String(), "creating without alias") {
+		t.Fatalf("stderr = %q, must not advertise an unguarded fallback", stderr.String())
 	}
 }
 
@@ -5868,7 +5873,7 @@ func TestRealizePoolDesiredSessions_ParallelizesDistinctAliasCreates(t *testing.
 	}
 }
 
-func TestCreatePoolSessionBeadWithGuardedAlias_LogsAliasLockSetupFailure(t *testing.T) {
+func TestCreatePoolSessionBeadWithGuardedAlias_LockSetupFailureNeverCreates(t *testing.T) {
 	store := beads.NewMemStore()
 	cityPath := filepath.Join(t.TempDir(), "city-file")
 	if err := os.WriteFile(cityPath, []byte("not a directory"), 0o644); err != nil {
@@ -5883,14 +5888,21 @@ func TestCreatePoolSessionBeadWithGuardedAlias_LogsAliasLockSetupFailure(t *test
 	}
 
 	bead, err := createPoolSessionBeadWithGuardedAlias(bp, nil, "claude", "claude-1", 1, nil)
-	if err != nil {
-		t.Fatalf("createPoolSessionBeadWithGuardedAlias: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "session identifier lock") {
+		t.Fatalf("createPoolSessionBeadWithGuardedAlias error = %v, want identifier-lock setup failure", err)
 	}
-	if got := bead.Alias; got != "" {
-		t.Fatalf("alias = %q, want empty fallback when alias lock setup fails", got)
+	if bead.ID != "" {
+		t.Fatalf("lock-refused create returned session %#v", bead)
 	}
-	if !strings.Contains(stderr.String(), "locking alias \"claude-1\"") || !strings.Contains(stderr.String(), "creating without alias") {
-		t.Fatalf("stderr = %q, want alias-lock setup failure and unaliased fallback", stderr.String())
+	created, listErr := store.ListByLabel(sessionBeadLabel, 0)
+	if listErr != nil {
+		t.Fatalf("listing session beads: %v", listErr)
+	}
+	if len(created) != 0 {
+		t.Fatalf("session beads = %#v, want none after lock setup failure", created)
+	}
+	if strings.Contains(stderr.String(), "creating without alias") {
+		t.Fatalf("stderr = %q, must not advertise an unguarded fallback", stderr.String())
 	}
 }
 

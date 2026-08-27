@@ -60,6 +60,14 @@ type agentBuildParams struct {
 	// used only for fresh concrete-slot reservation. Production sets it from
 	// collectAllOpenSessionInfos; focused fixtures fall back to sessionBeads.
 	sessionOccupancyInfos []session.Info
+	// sessionCensusRigStores and sessionCensusSuspendedRigPaths retain the
+	// immutable topology inputs used to produce sessionOccupancyInfos. A fresh
+	// pool create re-runs that complete census while holding every derived
+	// session-identifier lock; the initial snapshot alone cannot exclude a
+	// foreign-store holder created after planning. Successful creates still
+	// write back only to sessionBeads, the primary mutable snapshot.
+	sessionCensusRigStores         map[string]beads.Store
+	sessionCensusSuspendedRigPaths map[string]bool
 
 	// assignedWorkBeads is the actionable assigned-work snapshot for this
 	// build. Pool new-tier materialization uses it to avoid treating sessions

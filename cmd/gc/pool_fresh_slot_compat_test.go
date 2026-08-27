@@ -582,3 +582,55 @@ func TestOpenFailedCreateRetriesStableSlotOnlyAfterClose(t *testing.T) {
 		t.Fatalf("retry after close = slot %d info %+v, want same slot/name", slot, created)
 	}
 }
+
+func TestCrossStoreOpenFailedCreateBlocksStableSlotUntilClose(t *testing.T) {
+	maxSessions := 2
+	agent := config.Agent{Name: "worker", MaxActiveSessions: &maxSessions}
+	cfg := &config.City{Agents: []config.Agent{agent}}
+	store := beads.NewMemStore()
+	failed := freshSlotTestInfo("foreign-failed", "worker", "worker-1", 1)
+	failed.MetadataState = string(sessionpkg.StateFailedCreate)
+	failed.SessionNameMetadata = "worker-1-pool"
+	bp := &agentBuildParams{
+		city:      cfg,
+		cityPath:  t.TempDir(),
+		agents:    cfg.Agents,
+		beadStore: store,
+		// The failed row deliberately exists only in the complete cross-store
+		// census. It is absent from both the primary snapshot and primary store.
+		sessionBeads:                     newSessionBeadSnapshotFromInfos(nil),
+		sessionOccupancyInfos:            []sessionpkg.Info{failed},
+		sessionSnapshotCompletenessKnown: true,
+		sessionSnapshotComplete:          true,
+	}
+
+	if _, slot, err := selectOrCreateDependencyPoolSessionBeadWithSlot(bp, &cfg.Agents[0], "worker"); !errors.Is(err, errPoolSessionNameUnavailable) || slot != 1 {
+		t.Fatalf("cross-store open failed-create retry = slot %d err %v, want stable slot 1 unavailable", slot, err)
+	}
+	rows, err := store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("cross-store holder minted primary replacement: rows=%#v err=%v", rows, err)
+	}
+	if got := bp.sessionBeads.OpenInfos(); len(got) != 0 {
+		t.Fatalf("blocked create wrote primary snapshot: %#v", got)
+	}
+
+	// A later complete census proves the failed row closed. The allocator retries
+	// the same stable slot, the exact-name guard sees it free, and only then does
+	// the primary store/snapshot receive the replacement.
+	bp.sessionOccupancyInfos = []sessionpkg.Info{}
+	created, slot, err := selectOrCreateDependencyPoolSessionBeadWithSlot(bp, &cfg.Agents[0], "worker")
+	if err != nil {
+		t.Fatalf("cross-store retry after close: %v", err)
+	}
+	if slot != 1 || created.PoolSlot != "1" || created.SessionNameMetadata != "worker-1-pool" {
+		t.Fatalf("cross-store retry after close = slot %d info %+v, want same slot/name", slot, created)
+	}
+	rows, err = store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil || len(rows) != 1 || rows[0].ID != created.ID {
+		t.Fatalf("primary store rows after retry = %#v err=%v, want replacement %s", rows, err, created.ID)
+	}
+	if got := bp.sessionBeads.OpenInfos(); len(got) != 1 || got[0].ID != created.ID {
+		t.Fatalf("primary writeback after retry = %#v, want replacement %s", got, created.ID)
+	}
+}
