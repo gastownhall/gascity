@@ -456,6 +456,12 @@ func TestValidateCronSchedule(t *testing.T) {
 		{"0 */0 * * *", "step that is not positive"},
 		{"0 */x * * *", "non-numeric step"},
 		{"0 abc * * *", "is not"},
+		// A list with any out-of-range member is rejected whole, matching
+		// vixie-cron. Before this validation such a schedule fired on its valid
+		// member ("0,30" in hour fired at 00:00), so this is the one class that
+		// goes from partially working to dropped.
+		{"0 0,30 * * *", "outside the valid range 0-23"},
+		{"0 0 * * 1,15", "outside the valid range 0-7"},
 	}
 	for _, tt := range invalid {
 		err := ValidateCronSchedule(tt.schedule)
