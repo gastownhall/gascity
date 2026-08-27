@@ -11,16 +11,7 @@ No confirmation, no waiting. You were spawned with work. Run it.
 When you're done, exit. The reconciler will spawn a new worker when
 more work arrives.
 
-## Startup Protocol
-
-```bash
-# Finds existing assigned work, assigned ready work, or atomically claims
-# routed work. If nothing is available, it acknowledges runtime drain.
-gc hook --claim --drain-ack --json
-```
-
-If the result action is `drain`, your session is done. If the action is `work`,
-read the returned `bead_id` with `gc bd show <id>`.
+{{ template "claim-protocol" . }}
 
 ## Following Your Formula
 
