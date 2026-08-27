@@ -307,9 +307,6 @@ func (p poolExecutionBackstop) reserve(store beads.Store, s *beads.Bead, target 
 	return writeExecutionClaimMarker(store, s, target, attempts, now, stdout)
 }
 
-// exhausted turns a spent attempt budget into one observable fact and one drain
-// request, latched so both happen exactly once for this claim however many ticks
-// the session survives.
 // observeHold records WHY the backstop held or skipped this session, written
 // only when the reason changes so a standing hold costs one write, not one
 // per tick. The breadcrumb is what makes the next silent-hold incident a
@@ -343,6 +340,9 @@ func (p poolExecutionBackstop) clearHold(store beads.Store, s *beads.Bead, stdou
 // whole remaining life (ga-dd3ap).
 const executionStalledLatchRetryAfter = 30 * time.Minute
 
+// exhausted turns a spent attempt budget into one observable fact and one drain
+// request, latched so both happen exactly once for this claim however many ticks
+// the session survives.
 func (p poolExecutionBackstop) exhausted(store beads.Store, s *beads.Bead, stdout io.Writer) {
 	if latchedAt := strings.TrimSpace(s.Metadata[executionClaimNudgeStalledKey]); latchedAt != "" {
 		sameIncarnation := strings.TrimSpace(s.Metadata[executionClaimNudgeStalledTokenKey]) ==
@@ -444,6 +444,7 @@ func clearExecutionClaimMarker(store beads.Store, s *beads.Bead, stdout io.Write
 		executionClaimNudgeCountKey,
 		executionClaimNudgeAtKey,
 		executionClaimNudgeStalledKey,
+		executionClaimNudgeStalledTokenKey,
 	}
 	dirty := false
 	for _, key := range keys {
