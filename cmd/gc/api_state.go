@@ -1011,6 +1011,8 @@ func (cs *controllerState) admitReadyRoutedWorkEvent(evt events.Event, stores []
 
 // beadEventStoreRefLocked returns the storeRef string for the store that owns
 // beadID. Called under cs.mu read lock.
+// A relocated-class id falls through to "" on purpose: a storeRef names a work
+// scope, and "" is the ID-only mode that a single-minter class prefix makes safe.
 func (cs *controllerState) beadEventStoreRefLocked(beadID string) string {
 	if cs.cfg == nil {
 		return ""
@@ -1048,8 +1050,8 @@ func (cs *controllerState) runBeadCloseAutoclose(beadID string, store beads.Stor
 	graphStore := cs.GraphBeadStore()
 	beadCloseAutocloseDispatch(func() {
 		doConvoyAutocloseWith(store, rec, beadID, os.Stderr, os.Stderr)
-		doWispAutocloseWith(store, beadID, os.Stderr, graphStore.Store)
-		doMoleculeAutocloseWith(store, storeRef, rec, beadID, os.Stderr, graphStore.Store)
+		doWispAutocloseWith(store, beadID, os.Stderr, graphStore)
+		doMoleculeAutocloseWith(store, storeRef, rec, beadID, os.Stderr, graphStore)
 	})
 }
 
@@ -1116,6 +1118,18 @@ func (cs *controllerState) beadEventConfiguredStoreLocked(id string) (beads.Stor
 	match(config.EffectiveHQPrefix(cs.cfg), cs.cityBeadStore)
 	for _, rig := range cs.cfg.Rigs {
 		match(rig.EffectivePrefix(), cs.beadStores[rig.Name])
+	}
+	// Relocated classes are candidates under their reserved prefixes; without
+	// this a "gcg-*" close fell through to the broadcast and autoclose read an
+	// arbitrary work store. Gated on `relocated`, so single-store is unchanged.
+	for _, class := range infraMigrationClasses {
+		prefix, ok := config.ReservedClassPrefix(string(class)) // residency:allow — extends this scan's configured-prefix table, not a probe
+		if !ok {
+			continue
+		}
+		if store, relocated := cs.storageRoutes.storeFor(coordclassFor(string(class))); relocated {
+			match(prefix, store)
+		}
 	}
 	return matchedStore, matchedLen >= 0
 }

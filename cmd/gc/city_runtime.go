@@ -3029,7 +3029,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	readyWaitSet, err := func() (map[string]bool, error) {
 		releaseWaitDependencyVisibility := cr.cs.acquireSessionWaitDependencyLegacyVisibility()
 		defer releaseWaitDependencyVisibility()
-		return prepareWaitWakeStateWithSnapshot(sessionpkg.NewStore(sessStore), newWaitDependencyStoreSet(store, rigStores), cr.nudgesBeadStore(), time.Now(), sessionBeads, keyedWaitOwned)
+		return prepareWaitWakeStateWithSnapshot(sessionpkg.NewStore(sessStore), newWaitDependencyStoreSet(store, rigStores, cr.graphBeadStore()), cr.nudgesBeadStore(), time.Now(), sessionBeads, keyedWaitOwned)
 	}()
 	if err != nil {
 		fmt.Fprintf(cr.stderr, "%s: preparing waits: %v\n", cr.logPrefix, err) //nolint:errcheck

@@ -128,7 +128,7 @@ func (f *waitAdvanceStandDownFixture) runLegacyWaitAdvance(t *testing.T) map[str
 	t.Helper()
 	ready, err := prepareWaitWakeStateWithSnapshot(
 		sessionFrontDoor(f.env.store),
-		newWaitDependencyStoreSet(f.env.store, nil),
+		newWaitDependencyStoreSet(f.env.store, nil, beads.GraphStore{}),
 		beads.NudgesStore{Store: f.env.store},
 		f.env.clk.Now(),
 		nil,

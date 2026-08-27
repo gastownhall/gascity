@@ -1036,7 +1036,7 @@ func TestSessionWaitDependencyPrePokeReservationBlocksLegacyWaitPreparation(t *t
 
 	ready, err := prepareWaitWakeStateWithSnapshot(
 		sessionFrontDoor(env.store),
-		newWaitDependencyStoreSet(env.store, nil),
+		newWaitDependencyStoreSet(env.store, nil, beads.GraphStore{}),
 		beads.NudgesStore{Store: env.store},
 		env.clk.Now(),
 		nil,
@@ -1182,7 +1182,7 @@ func TestSessionWaitDependencyEventFenceBlocksLegacyWaitPreparation(t *testing.T
 		defer releaseVisibility()
 		ready, prepareErr := prepareWaitWakeStateWithSnapshot(
 			sessionFrontDoor(env.store),
-			newWaitDependencyStoreSet(env.store, nil),
+			newWaitDependencyStoreSet(env.store, nil, beads.GraphStore{}),
 			beads.NudgesStore{Store: env.store},
 			env.clk.Now(),
 			nil,
@@ -1628,7 +1628,7 @@ func TestValidateExactSessionWaitDependencyShadow(t *testing.T) {
 			}
 			hardErr := errors.New("authoritative read unavailable")
 			store := env.store
-			dependencies := waitDependencyReader(newWaitDependencyStoreSet(env.store, nil))
+			dependencies := waitDependencyReader(newWaitDependencyStoreSet(env.store, nil, beads.GraphStore{}))
 			switch test.hardRead {
 			case "wait":
 				store = &sessionWaitShadowReadAuditStore{Store: env.store, failID: wait.ID, failErr: hardErr}
@@ -1782,7 +1782,7 @@ func TestAuthoritativeWaitDependencyStoreSetRoutesByPrefixAtConstantCost(t *test
 		rigs["zzzz"] = sessionWaitDependencyPrefixAuditStore{
 			Store: owner, prefix: "zzzz", gets: gets,
 		}
-		stores := newAuthoritativeWaitDependencyStoreSet(nil, rigs)
+		stores := newAuthoritativeWaitDependencyStoreSet(nil, rigs, beads.GraphStore{})
 		got, err := stores.Get("zzzz-dependency")
 		if err != nil || got.ID != "zzzz-dependency" {
 			t.Fatalf("authoritative owner read = (%q, %v)", got.ID, err)
@@ -1821,7 +1821,7 @@ func TestSessionWaitDependencyShadowExactReadAndProbeCostDoesNotGrowWithFleet(t 
 		}
 		store := &getCountingStore{Store: env.store}
 		targetRef := sessionWaitDependencyTarget{WaitID: wait.ID, SessionID: target.ID, DepIDs: []string{dependency.ID}, DepMode: "all"}
-		outcome, err := validateExactSessionWaitDependencyShadow(store, targetRef, newWaitDependencyStoreSet(store, nil), env.clk.Now())
+		outcome, err := validateExactSessionWaitDependencyShadow(store, targetRef, newWaitDependencyStoreSet(store, nil, beads.GraphStore{}), env.clk.Now())
 		if err != nil || outcome != sessionWaitDependencyEvaluationReady {
 			t.Fatalf("validate = (%q, %v), want ready", outcome, err)
 		}

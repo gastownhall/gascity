@@ -147,7 +147,7 @@ func TestSessionWaitDependencyPrePokeUnsupportedEligibilityFallsBackToLegacy(t *
 
 				ready, err := prepareWaitWakeStateWithSnapshot(
 					sessionFrontDoor(env.store),
-					newWaitDependencyStoreSet(env.store, nil),
+					newWaitDependencyStoreSet(env.store, nil, beads.GraphStore{}),
 					beads.NudgesStore{Store: env.store},
 					env.clk.Now(),
 					nil,

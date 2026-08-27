@@ -203,7 +203,7 @@ func (cr *CityRuntime) reserveSessionWaitDependencyTargets(ctx context.Context, 
 		return nil
 	}
 	defer release()
-	dependencies := newAuthoritativeWaitDependencyStoreSet(cr.cityBeadStore(), cr.rigBeadStores())
+	dependencies := newAuthoritativeWaitDependencyStoreSet(cr.cityBeadStore(), cr.rigBeadStores(), cr.graphBeadStore())
 	now := clock.Real{}.Now()
 	reserved := make([]sessionWaitDependencyTarget, 0, len(targets))
 	for _, target := range targets {
@@ -569,7 +569,7 @@ func (cr *CityRuntime) handleSessionWaitDependencyStart(ctx context.Context, hin
 	}
 	defer release()
 	lease, owner, err := certifySessionWaitDependencyStartLease(snapshot.Store, hint.Target,
-		newAuthoritativeWaitDependencyStoreSet(cr.cityBeadStore(), cr.rigBeadStores()), snapshot.Config, snapshot.Provider, snapshot.CityName, snapshot.Generation, cr.poolMembershipShadow, clock.Real{}.Now())
+		newAuthoritativeWaitDependencyStoreSet(cr.cityBeadStore(), cr.rigBeadStores(), cr.graphBeadStore()), snapshot.Config, snapshot.Provider, snapshot.CityName, snapshot.Generation, cr.poolMembershipShadow, clock.Real{}.Now())
 	if err != nil {
 		cr.handleSessionWaitDependencyAdmissionFailure(hint, mode, err)
 		return
@@ -748,7 +748,7 @@ func (cr *CityRuntime) startSessionWaitDependencyProducer() bool {
 			return cr.sessionWaitDependencyTarget(waitID)
 		},
 		Dependencies: func() waitDependencyReader {
-			return newWaitDependencyStoreSet(cr.cityBeadStore(), cr.rigBeadStores())
+			return newWaitDependencyStoreSet(cr.cityBeadStore(), cr.rigBeadStores(), cr.graphBeadStore())
 		},
 		EnqueueSession: func(plan sessionWaitDependencyPlan, cause sessionWaitDependencyCause) error {
 			cr.sessionWaitDependencyMu.RLock()
@@ -808,8 +808,12 @@ func (cr *CityRuntime) retireCertifiedSessionWaitDependencyTarget(target session
 	}
 }
 
-func newAuthoritativeWaitDependencyStoreSet(cityStore beads.Store, rigStores map[string]beads.Store) waitDependencyStoreSet {
-	stores := newWaitDependencyStoreSet(cityStore, rigStores)
+// newAuthoritativeWaitDependencyStoreSet is newWaitDependencyStoreSet read
+// through the authoritative live handle. graphStore carries #5488's split-city
+// leg: a graph-resident dependency is invisible to a city+rig-only set. A zero
+// GraphStore is the single-store default and is skipped by the constructor.
+func newAuthoritativeWaitDependencyStoreSet(cityStore beads.Store, rigStores map[string]beads.Store, graphStore beads.GraphStore) waitDependencyStoreSet {
+	stores := newWaitDependencyStoreSet(cityStore, rigStores, graphStore)
 	for n, store := range stores {
 		stores[n] = authoritativeSessionStartReadStore{Store: store, live: beads.HandlesFor(store).Live}
 	}

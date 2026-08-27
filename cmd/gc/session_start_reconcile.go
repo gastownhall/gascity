@@ -3101,7 +3101,12 @@ func reconcileExactWaitDependencyStart(
 	if !alreadyClaimed && (wait.State != waitStatePending || waitPersisted.Revision != lease.WaitRevision) {
 		return preClaimFailure(errors.New("dependency wait no longer matches leased pending revision"))
 	}
-	ready, err := depsWaitReadyDetailedFrom(newAuthoritativeWaitDependencyStoreSet(params.Store, params.RigStores), wait)
+	// Zero GraphStore: exactSessionStartParams carries no storage routes, so the
+	// keyed reread cannot resolve the graph class the way CityRuntime does. This
+	// preserves the keyed path exactly as it was before #5488 rather than
+	// inventing a route here; a graph-resident dependency on a SPLIT city stays
+	// invisible to this reread, as it was on both sides of the merge.
+	ready, err := depsWaitReadyDetailedFrom(newAuthoritativeWaitDependencyStoreSet(params.Store, params.RigStores, beads.GraphStore{}), wait)
 	if err != nil || !ready {
 		if alreadyClaimed {
 			if err != nil {
@@ -3203,7 +3208,7 @@ func reconcileExactWaitDependencyStart(
 		if waitErr != nil || registrationErr != nil || liveWait.ID != lease.WaitID || !indexable || registration.sessionID != lease.SessionID || registration.depMode != lease.DepMode || !slices.Equal(registration.depIDs, lease.DepIDs) || liveWait.State != waitStateReady || liveWait.ReadyOwner != string(sessionpkg.WaitReadyOwnerDependency) || liveWait.ReadyOperation != lease.Operation || liveWait.RegisteredEpoch != lease.RegisteredEpoch {
 			return errors.New("dependency wait changed before provider start")
 		}
-		ready, depErr := depsWaitReadyDetailedFrom(newAuthoritativeWaitDependencyStoreSet(params.Store, params.RigStores), liveWait)
+		ready, depErr := depsWaitReadyDetailedFrom(newAuthoritativeWaitDependencyStoreSet(params.Store, params.RigStores, beads.GraphStore{}), liveWait)
 		if depErr != nil || !ready {
 			return errors.New("dependency readiness changed before provider start")
 		}

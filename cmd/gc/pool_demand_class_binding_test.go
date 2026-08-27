@@ -149,4 +149,47 @@ func TestPoolDemandFilterUnchangedOnASingleStoreCity(t *testing.T) {
 	if len(dropped) != 0 {
 		t.Fatalf("filtered work = %#v, want a foreign-rig bead still dropped on a single-store city", dropped)
 	}
+
+	// The load-bearing half of this control. On a single-store city EVERY bead
+	// lives under the work ref, so accepting "" for a rig-scoped agent would make
+	// the rig gate vacuous — the exact regression
+	// TestBuildDesiredState_RigPoolIgnoresAssignedWorkInUnreachableStore forbids.
+	// assignedWorkRelocatedClaimRefs answering nil is what keeps it rejected.
+	cityResident := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, beads.NewMemStore(), infos, workBeads, []string{""})
+	if len(cityResident) != 0 {
+		t.Fatalf("filtered work = %#v, want city-store work still dropped for a rig-scoped agent on a single-store city", cityResident)
+	}
+}
+
+// The intentional behavior change, stated out loud: on a SPLIT city a rig-scoped
+// pool agent does accept the work ref.
+//
+// This is not the gate going vacuous. On a split city "" names one specific leg
+// among several, and the sibling control above proves rigb's leg is still
+// rejected; on a single-store city "" names every leg, which is why the widening
+// is gated off there entirely. The bead still has to be routed to this agent's
+// template, and the resume tier downstream still requires the assignee to
+// resolve to an open session bead, so widening the ref set does not widen
+// ownership.
+//
+// It also has to be this way for the two filters to agree.
+// filterAssignedWorkBeadsForSessionWake takes the work ref unconditionally
+// (assignedWorkClaimRefs), so excluding it here would recreate in miniature the
+// very asymmetry this change exists to remove: wake retains the holder, demand
+// refuses to replace it.
+func TestPoolDemandFilterAcceptsTheWorkRefOnASplitCity(t *testing.T) {
+	cfg, cityPath, infos := rigScopedPoolDemandFixture(t)
+	binding := beads.NewMemStore()
+	seedSplitRoutes(t, cityPath, binding)
+	workBeads := []beads.Bead{routedPoolWorkBead()}
+
+	kept := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, beads.NewMemStore(), infos, workBeads, []string{""})
+	if len(kept) != 1 {
+		t.Fatalf("filtered work = %#v, want city-work-store work kept for the rig agent it is routed to on a split city", kept)
+	}
+
+	stillDropped := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, beads.NewMemStore(), infos, workBeads, []string{"rigb"})
+	if len(stillDropped) != 0 {
+		t.Fatalf("filtered work = %#v, want rigb's leg still rejected — accepting the work ref must not make the rig gate vacuous", stillDropped)
+	}
 }
