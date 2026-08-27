@@ -244,20 +244,28 @@ func bdSubcommandStart(tokens []string, i int) (start int, viaGC bool) {
 	}
 }
 
-// matchSubcommand returns the longest known subcommand key starting at
-// token index i, preferring the two-token compound form (e.g. "mol pour")
-// over the single-token form (e.g. "update").
+// matchSubcommand returns the longest known subcommand key starting at token
+// index i. Keys may be nested to any depth (for example "mol wisp gc"), so
+// matching is derived from the manifest rather than capped at two tokens.
 func matchSubcommand(tokens []string, i int) (key string, consumed int, ok bool) {
 	if i >= len(tokens) {
 		return "", 0, false
 	}
-	if i+1 < len(tokens) {
-		if two := tokens[i] + " " + tokens[i+1]; Known(two) {
-			return two, 2, true
+	for _, candidate := range Subcommands() {
+		parts := strings.Fields(candidate)
+		if len(parts) <= consumed || i+len(parts) > len(tokens) {
+			continue
+		}
+		matches := true
+		for offset, part := range parts {
+			if tokens[i+offset] != part {
+				matches = false
+				break
+			}
+		}
+		if matches {
+			key, consumed, ok = candidate, len(parts), true
 		}
 	}
-	if Known(tokens[i]) {
-		return tokens[i], 1, true
-	}
-	return "", 0, false
+	return key, consumed, ok
 }
