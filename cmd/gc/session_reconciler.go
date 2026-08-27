@@ -1809,7 +1809,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				for k := range orderedIDs {
 					preservedInfos[k] = infoByID[orderedIDs[k]]
 				}
-				preservedTP, preserveErr = resolvePreservedConfiguredNamedSessionTemplate(cityPath, cityName, cfg, sp, store, preservedInfos, info, clk, stderr)
+				var preservedInfo sessionpkg.Info
+				preservedTP, preservedInfo, preserveErr = resolvePreservedConfiguredNamedSessionTemplate(cityPath, cityName, cfg, sp, store, preservedInfos, info, clk, stderr)
+				// The resolver may have durably cleared a stale trigger stamp
+				// (bindNamedSessionTriggerBead, gascity#4373). Advance the snapshot
+				// with the post-write Info (Step 6d, group 1) so the rest of this
+				// tick — including checkRateLimitStability's fold just below —
+				// reads the cleared cluster instead of re-persisting the stamp.
+				// info == infoByID[id] here (pre-heal), so both advance together.
+				info = tick.set(id, preservedInfo)
 				if preserveErr == nil {
 					obs, obsErr := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, id, preservedTP.Hints.ProcessNames)
 					rateLimitAlive := rateLimitAliveFromObservation(obs.Alive, obsErr)
@@ -1868,13 +1876,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						}
 						continue
 					}
-					if trace != nil {
-						trace.RecordDecision(TraceSiteReconcilerCloseFailedCreate, TraceReasonCode(sessionpkg.StateFailedCreate), TraceOutcomeClosed, template, name, nil)
-					}
 					if storeQueryPartial || reconcileOpts.deferSessionClosesOnBoot {
+						if trace != nil {
+							trace.RecordDecision(TraceSiteReconcilerCloseFailedCreate, TraceReasonCode(sessionpkg.StateFailedCreate), TraceOutcomeSkipped, template, name, traceRecordPayload{
+								"store_query_partial":          storeQueryPartial,
+								"defer_session_closes_on_boot": reconcileOpts.deferSessionClosesOnBoot,
+							})
+						}
 						continue
 					}
-					if closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, infoByID[id], string(sessionpkg.StateFailedCreate), clk.Now().UTC(), stderr, false) {
+					closedFailedCreate := closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, infoByID[id], string(sessionpkg.StateFailedCreate), clk.Now().UTC(), stderr, false)
+					if closedFailedCreate {
 						// Reflect the in-memory close on the snapshot: the cross-session
 						// min-floor scan (below) reads Info.Closed off infoByID, so a
 						// session closed this tick must not still count as open in its
@@ -1884,6 +1896,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						// the Step-6d front-door cutover. Guarded by
 						// TestReconcileSessionBeads_MinFloorCountReflectsMidTickClose.
 						tick.markClosed(id)
+					}
+					if trace != nil {
+						outcome := TraceOutcomeClosed
+						if !closedFailedCreate {
+							// Same refusal as the orphan close below: the guard keeps a
+							// bead that still holds open assigned work, so "closed" would
+							// be a lie for as long as the seat stays wedged (ga-jrnou).
+							outcome = TraceOutcomeNoChange
+						}
+						trace.RecordDecision(TraceSiteReconcilerCloseFailedCreate, TraceReasonCode(sessionpkg.StateFailedCreate), outcome, template, name, nil)
 					}
 					continue
 				}
@@ -2177,13 +2199,33 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						}
 						continue
 					}
-					if trace != nil {
-						trace.RecordDecision(TraceSiteReconcilerCloseOrphan, TraceReasonCode(reason), TraceOutcomeClosed, template, name, nil)
-					}
 					if storeQueryPartial || reconcileOpts.deferSessionClosesOnBoot {
+						if trace != nil {
+							trace.RecordDecision(TraceSiteReconcilerCloseOrphan, TraceReasonCode(reason), TraceOutcomeSkipped, template, name, traceRecordPayload{
+								"store_query_partial":          storeQueryPartial,
+								"defer_session_closes_on_boot": reconcileOpts.deferSessionClosesOnBoot,
+							})
+						}
 						continue
 					}
-					if closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, infoByID[id], reason, clk.Now().UTC(), stderr, false) {
+					closed := closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, infoByID[id], reason, clk.Now().UTC(), stderr, false)
+					if !closed && reason == "orphaned" {
+						// The guard refused because the seat still holds work. Nothing
+						// else can resolve that: the wake path is blocked on the orphaned
+						// base state and releaseOrphanedPoolAssignments skips work whose
+						// seat's session bead is still open. This site has already
+						// confirmed the runtime is observably dead (livenessErr == nil
+						// above, and this is the not-running branch), so it owns the
+						// tie-break — release, then close (ga-jrnou).
+						//
+						// Restricted to "orphaned": a "suspended" seat is configured and
+						// merely scaled down, so its work stays put for its return.
+						if released := releaseConfirmedOrphanSessionWork(cfg, store, rigStores, assignedWorkBeads, infoByID[id]); len(released) > 0 {
+							emitDeadAssigneeReopenedEvents(rec, assignedWorkBeads, released, clk.Now().UTC())
+							closed = closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, infoByID[id], reason, clk.Now().UTC(), stderr, false)
+						}
+					}
+					if closed {
 						// Keep the snapshot's Info.Closed in step with the in-memory
 						// close so the cross-session min-floor scan does not count this
 						// orphan. Store-only close (closeBead/closeFailedCreateBead stamp
@@ -2194,6 +2236,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						// pre-close Info. Guarded by
 						// TestReconcileSessionBeads_MinFloorCountReflectsMidTickCloseOrphan.
 						tick.markClosed(id)
+					}
+					if trace != nil {
+						outcome := TraceOutcomeClosed
+						if !closed {
+							// The reachable-store guard refused — the seat still holds
+							// open assigned work. Reporting "closed" for a bead that is
+							// still open sends `gc trace` investigations the wrong way
+							// for as long as the seat stays wedged (ga-jrnou).
+							outcome = TraceOutcomeNoChange
+						}
+						trace.RecordDecision(TraceSiteReconcilerCloseOrphan, TraceReasonCode(reason), outcome, template, name, nil)
 					}
 				}
 				continue
@@ -3929,6 +3982,15 @@ func rateLimitAliveFromObservation(alive bool, err error) bool {
 	return alive
 }
 
+// resolvePreservedConfiguredNamedSessionTemplate resolves the template for a
+// preserved configured named session. It returns the resolved params plus the
+// session Info the params were resolved from as the SECOND value on EVERY path
+// — success and error alike — because bindNamedSessionTriggerBead may have
+// cleared a stale trigger stamp durably before the resolve. Callers must fold
+// that Info back onto their snapshot (write-returns-Info, Step 6d): a caller
+// that keeps its pre-call Info re-injects the cleared stamp downstream (env at
+// buildPreparedStartWithWorkDirResolver, gascity#4373). On the bind-error and
+// every early-error path the returned Info is the unchanged input.
 func resolvePreservedConfiguredNamedSessionTemplate(
 	cityPath, cityName string,
 	cfg *config.City,
@@ -3938,7 +4000,7 @@ func resolvePreservedConfiguredNamedSessionTemplate(
 	info sessionpkg.Info,
 	clk clock.Clock,
 	stderr io.Writer,
-) (TemplateParams, error) {
+) (TemplateParams, sessionpkg.Info, error) {
 	if cityPath == "" {
 		cityPath = "."
 	}
@@ -3948,14 +4010,21 @@ func resolvePreservedConfiguredNamedSessionTemplate(
 	identity := namedSessionIdentityInfo(info)
 	spec, ok := findNamedSessionSpec(cfg, cityName, identity)
 	if !ok || spec.Agent == nil {
-		return TemplateParams{}, fmt.Errorf("configured named session %q not found", identity)
+		return TemplateParams{}, info, fmt.Errorf("configured named session %q not found", identity)
 	}
 	bp := newAgentBuildParams(cityName, cityPath, cfg, sp, clk.Now().UTC(), store, stderr)
 	bp.sessionBeads = newSessionBeadSnapshotFromInfos(openInfos)
+	if bound, bindErr := bindNamedSessionTriggerBead(store, info, cityName); bindErr != nil {
+		if stderr != nil {
+			fmt.Fprintf(stderr, "session reconciler: named session %s trigger bead %s: %v (continuing with existing stamp)\n", identity, info.TriggerBeadID, bindErr) //nolint:errcheck
+		}
+	} else {
+		info = bound
+	}
 	fpExtra := buildFingerprintExtra(spec.Agent)
 	tp, err := resolveTemplateForSessionBeadInfo(bp, spec.Agent, identity, fpExtra, info)
 	if err != nil {
-		return TemplateParams{}, err
+		return TemplateParams{}, info, err
 	}
 	tp.Alias = identity
 	tp.TemplateName = namedSessionBackingTemplate(spec)
@@ -3970,7 +4039,7 @@ func resolvePreservedConfiguredNamedSessionTemplate(
 	tp.Env["GC_AGENT"] = identity
 	tp.Env["GC_SESSION_ORIGIN"] = "named"
 	installAgentSideEffects(bp, spec.Agent, tp, stderr)
-	return tp, nil
+	return tp, info, nil
 }
 
 // sessionHasOpenAssignedWorkForConfig uses the same configured-named-session

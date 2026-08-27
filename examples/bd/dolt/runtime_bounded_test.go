@@ -80,9 +80,23 @@ func runRunBoundedUnderPython3Fallback(t *testing.T, childScript string, extraEn
 // `subprocess.run(..., timeout=...)` implementation (bare
 // `process.kill()` on expiry) the handler never runs and the marker
 // is never written.
+// The 1s bound below is production input to run_bounded, not this test's
+// own hang-detector timer (TESTING.md: a timeout the test feeds INTO the
+// code under test is never migrated to a hang budget), so the blanket
+// >=10s "Test deadline rule" for timers racing an exec start does not
+// apply to it — enlarging it would hide the very race gascity#4823 exists
+// to catch. run_bounded starts its timer at Popen, so python3 interpreter
+// startup is counted against the bound, and a starved host can starve the
+// child before signal.signal ever runs. The READY marker, written
+// immediately after the handler is installed and before the child
+// sleeps, is what keeps the assertion honest instead: an attempt where
+// READY never appears proved nothing about the SIGTERM contract (the
+// child never reached the handler within the bound) and is retried
+// rather than treated as a regression.
 func TestRunBoundedPython3FallbackSendsSigtermBeforeKill(t *testing.T) {
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "sigterm-received")
+	ready := filepath.Join(dir, "ready")
 	child := filepath.Join(dir, "child.py")
 	writeExecutable(t, child, `import os
 import signal
@@ -97,17 +111,34 @@ def handler(signum, frame):
 
 
 signal.signal(signal.SIGTERM, handler)
+with open(os.environ["READY_MARKER"], "w") as f:
+    f.write("ready\n")
 time.sleep(10)
 `)
 
-	exitCode, out := runRunBoundedUnderPython3Fallback(t, child, "MARKER_FILE="+marker)
+	const maxAttempts = 3
+	var exitCode int
+	var out string
+	reachedReady := false
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		_ = os.Remove(marker)
+		_ = os.Remove(ready)
+		exitCode, out = runRunBoundedUnderPython3Fallback(t, child, "MARKER_FILE="+marker, "READY_MARKER="+ready)
+		if _, err := os.Stat(ready); err == nil {
+			reachedReady = true
+			break
+		}
+	}
+	if !reachedReady {
+		t.Fatalf("child never reached its SIGTERM handler installation within the bound after %d attempts (readiness marker never appeared); likely host load starved python3 interpreter startup, not a SIGTERM regression\noutput:\n%s", maxAttempts, out)
+	}
 
 	if exitCode != 124 {
 		t.Fatalf("run_bounded exit code = %d, want 124 (timeout)\noutput:\n%s", exitCode, out)
 	}
 	got, err := os.ReadFile(marker)
 	if err != nil {
-		t.Fatalf("child never received SIGTERM (marker file missing): %v\noutput:\n%s", err, out)
+		t.Fatalf("child was ready and still never received SIGTERM (marker file missing): %v\noutput:\n%s", err, out)
 	}
 	if string(got) != "caught\n" {
 		t.Fatalf("marker file contents = %q, want %q", got, "caught\n")

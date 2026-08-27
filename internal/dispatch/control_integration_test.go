@@ -67,6 +67,108 @@ func makeAttemptBead(t *testing.T, store beads.Store, rootID, stepRef string, at
 	return b
 }
 
+// TestSpawnNextAttemptPreservesTopLevelStepContract guards the frozen-spec to
+// molecule.Attach boundary used by both retry and Ralph controls. A regenerated
+// top-level attempt must carry the same worker task and formula-owned contract
+// metadata as the source step; otherwise the worker is launched with no task.
+func TestSpawnNextAttemptPreservesTopLevelStepContract(t *testing.T) {
+	t.Parallel()
+
+	const (
+		description = "Read the prior failure, repair the canonical artifact, and report the result."
+		resultPath  = ".gc/artifacts/run/delivery/requirements.md"
+	)
+
+	tests := []struct {
+		name      string
+		kind      string
+		stepRef   string
+		attemptID func(int) string
+		configure func(*formula.Step)
+	}{
+		{
+			name:    "retry",
+			kind:    beadmeta.KindRetry,
+			stepRef: "mol-test.requirements",
+			attemptID: func(attempt int) string {
+				return "mol-test.requirements.attempt." + strconv.Itoa(attempt)
+			},
+			configure: func(step *formula.Step) {
+				step.Retry = &formula.RetrySpec{MaxAttempts: 3}
+			},
+		},
+		{
+			name:    "ralph",
+			kind:    beadmeta.KindRalph,
+			stepRef: "mol-test.requirements-loop",
+			attemptID: func(attempt int) string {
+				return "mol-test.requirements-loop.iteration." + strconv.Itoa(attempt)
+			},
+			configure: func(step *formula.Step) {
+				step.Ralph = &formula.RalphSpec{MaxAttempts: 3}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			for _, attempt := range []int{2, 3} {
+				t.Run("attempt_"+strconv.Itoa(attempt), func(t *testing.T) {
+					t.Parallel()
+					store := beads.NewMemStore()
+					step := &formula.Step{
+						ID:          "requirements",
+						Title:       "Write requirements",
+						Description: description,
+						Type:        "task",
+						Metadata: map[string]string{
+							"gc.result_contract":   "gc.build.requirements.v1",
+							"gc.requirements_path": resultPath,
+						},
+					}
+					tc.configure(step)
+
+					specJSON, err := json.Marshal(step)
+					if err != nil {
+						t.Fatalf("marshal frozen step spec: %v", err)
+					}
+					root := mustCreate(t, store, beads.Bead{
+						Title:    "workflow",
+						Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow},
+					})
+					control := mustCreate(t, store, beads.Bead{
+						Title: "requirements control",
+						Metadata: map[string]string{
+							beadmeta.KindMetadataKey:           tc.kind,
+							beadmeta.RootBeadIDMetadataKey:     root.ID,
+							beadmeta.StepRefMetadataKey:        tc.stepRef,
+							beadmeta.StepIDMetadataKey:         step.ID,
+							beadmeta.SourceStepSpecMetadataKey: string(specJSON),
+							beadmeta.ControlEpochMetadataKey:   "1",
+						},
+					})
+
+					if err := spawnNextAttempt(t.Context(), store, control, attempt, ProcessOptions{}); err != nil {
+						t.Fatalf("spawnNextAttempt: %v", err)
+					}
+
+					got := findAttemptByRef(t, store, root.ID, tc.attemptID(attempt))
+					if got.Description != description {
+						t.Fatalf("description = %q, want frozen task %q", got.Description, description)
+					}
+					if got.Metadata["gc.result_contract"] != "gc.build.requirements.v1" {
+						t.Fatalf("gc.result_contract = %q, want preserved", got.Metadata["gc.result_contract"])
+					}
+					if got.Metadata["gc.requirements_path"] != resultPath {
+						t.Fatalf("gc.requirements_path = %q, want %q", got.Metadata["gc.requirements_path"], resultPath)
+					}
+				})
+			}
+		})
+	}
+}
+
 // TestRetryLifecycleTransientThenPass exercises the full lifecycle:
 // attempt 1 fails transient → processRetryControl spawns attempt 2 via Attach →
 // attempt 2 passes → processRetryControl closes control as pass.

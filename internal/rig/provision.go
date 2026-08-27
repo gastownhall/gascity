@@ -61,6 +61,17 @@ func Provision(deps Deps, req ProvisionRequest) (config.Rig, ProvisionResult, er
 		return config.Rig{}, result, err
 	}
 
+	// Step 2.1: refuse a rig path that cannot outlive the process registering
+	// it. This runs before the clone so a doomed path is rejected before any
+	// content is fetched into it.
+	durabilityWarning, err := checkRigPathDurability(cityPath, rigPath, req.AllowEphemeralPath)
+	if err != nil {
+		return config.Rig{}, result, err
+	}
+	if durabilityWarning != "" {
+		emit(ProvisionStep{Name: "rig-path-durability", Detail: durabilityWarning, Warn: true})
+	}
+
 	// Step 2.5: clone from --git-url when the caller supports it.
 	rigPathExists, err = maybeCloneRig(deps, req, rigPath, rigPathExists)
 	if err != nil {

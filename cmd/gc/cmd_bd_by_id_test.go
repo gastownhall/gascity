@@ -250,6 +250,125 @@ func TestBdByIDServesClaimReleaseAndDepListFromTheClassBinding(t *testing.T) {
 	}
 }
 
+// bdByIDTreeWireRow is the tree row as a CONSUMER reads it, declared here rather
+// than borrowed from the production type on purpose: what the pack scripts and
+// pr_review.py parse is the JSON, and a test that decodes into the emitter's own
+// struct would follow a field rename straight past them.
+type bdByIDTreeWireRow struct {
+	ID       string `json:"id"`
+	Status   string `json:"status"`
+	Depth    int    `json:"depth"`
+	Parent   string `json:"parent_id"`
+	Edge     string `json:"edge_from_parent"`
+	External bool   `json:"external"`
+}
+
+func routedDepTree(t *testing.T, cityPath string, args ...string) []bdByIDTreeWireRow {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	code, handled := maybeRouteBdByID(cityPath, "", append([]string{"dep", "tree"}, args...), &stdout, &stderr)
+	if !handled {
+		t.Fatalf("dep tree %v fell through to the bd subprocess", args)
+	}
+	if code != 0 {
+		t.Fatalf("dep tree %v = %d: %s", args, code, stderr.String())
+	}
+	var rows []bdByIDTreeWireRow
+	if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil {
+		t.Fatalf("decoding the routed dep tree %q: %v", stdout.String(), err)
+	}
+	return rows
+}
+
+// TestBdByIDServesDepTreeFromTheClassBinding is the recursive read, and it is
+// here because a molecule's whole subtree is what every status summary asks for.
+//
+// `dep list` was already served and `dep tree` was not, so the one federated
+// read that resolves a relocated root — pr_review.py's city_dep_subtree, which
+// the pr-review label poller runs on every labeled PR — was refused on every
+// tick. The tree walk is composed from the SAME contract the single-level read
+// uses: DepList to a level, Get for each related bead. Nothing new is asked of
+// the store, which is why serving it needs no contract change.
+//
+// The fixture is the shape a molecule actually has, and every leg of it is a
+// case the walk gets wrong if it is written as a naive recursion:
+//
+//   - a two-level subtree, so pre-order depth and parent_id are observable;
+//   - a `relates-to` edge, which bd's own walker excludes from the tree (it is a
+//     loose knowledge-graph link, not structure) and which would otherwise drag
+//     an unrelated bead into a molecule summary;
+//   - an edge out of the class store, reported as external and NOT recursed,
+//     the same boundary `dep list` draws;
+//   - a cycle, which without a visited set is an infinite walk rather than a
+//     wrong answer.
+func TestBdByIDServesDepTreeFromTheClassBinding(t *testing.T) {
+	cityPath, classStore := foreignProviderCity(t)
+	root := mustCreateClassBead(t, classStore, beads.Bead{Title: "molecule root", Type: "task"})
+	step := mustCreateClassBead(t, classStore, beads.Bead{Title: "step", Type: "task"})
+	leaf := mustCreateClassBead(t, classStore, beads.Bead{Title: "leaf", Type: "task"})
+	aside := mustCreateClassBead(t, classStore, beads.Bead{Title: "loosely related", Type: "task"})
+	external := reservedClassID(t, "notresident")
+
+	for _, edge := range []struct{ from, to, kind string }{
+		{root.ID, step.ID, "blocks"},
+		{step.ID, leaf.ID, "parent-child"},
+		{root.ID, aside.ID, "relates-to"},
+		{leaf.ID, external, "blocks"},
+		{leaf.ID, root.ID, "blocks"}, // the cycle
+	} {
+		if err := classStore.DepAdd(edge.from, edge.to, edge.kind); err != nil {
+			t.Fatalf("adding %s -%s-> %s: %v", edge.from, edge.kind, edge.to, err)
+		}
+	}
+
+	rows := routedDepTree(t, cityPath, root.ID, "--json")
+	got := make([]string, 0, len(rows))
+	for _, row := range rows {
+		got = append(got, row.ID)
+	}
+	want := []string{root.ID, step.ID, leaf.ID, external}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("the routed dep tree walked %v, want the pre-order subtree %v (relates-to excluded, the cycle visited once)", got, want)
+	}
+	for i, want := range []bdByIDTreeWireRow{
+		{ID: root.ID, Depth: 0},
+		{ID: step.ID, Depth: 1, Parent: root.ID, Edge: "blocks"},
+		{ID: leaf.ID, Depth: 2, Parent: step.ID, Edge: "parent-child"},
+		{ID: external, Depth: 3, Parent: leaf.ID, Edge: "blocks", External: true},
+	} {
+		if rows[i].Depth != want.Depth || rows[i].Parent != want.Parent || rows[i].Edge != want.Edge {
+			t.Errorf("row %d = %+v, want depth=%d parent=%q edge=%q", i, rows[i], want.Depth, want.Parent, want.Edge)
+		}
+		if rows[i].External != want.External {
+			t.Errorf("row %d external = %t, want %t; an edge out of this class binding is a declared reference, not a resident bead", i, rows[i].External, want.External)
+		}
+	}
+	if rows[0].Status != root.Status {
+		t.Errorf("the root row carries status %q, want %q; the summary reads status off these rows", rows[0].Status, root.Status)
+	}
+
+	// --max-depth is bd's own safety limit and it CUTS: depth >= max stops, so
+	// the deepest row a `--max-depth 2` walk emits is depth 1.
+	shallow := routedDepTree(t, cityPath, root.ID, "--max-depth", "2", "--json")
+	if len(shallow) != 2 || shallow[1].ID != step.ID {
+		t.Errorf("--max-depth 2 walked %+v, want the root and its one child", shallow)
+	}
+
+	// --direction=up is the same walk over the reverse edges, and it must not
+	// silently answer the down question.
+	up := routedDepTree(t, cityPath, leaf.ID, "--direction=up", "--json")
+	upIDs := make([]string, 0, len(up))
+	for _, row := range up {
+		upIDs = append(upIDs, row.ID)
+	}
+	if strings.Join(upIDs, ",") != strings.Join([]string{leaf.ID, step.ID, root.ID}, ",") {
+		t.Errorf("--direction=up from the leaf walked %v, want the chain of beads that depend on it", upIDs)
+	}
+	if len(up) > 1 && up[1].Edge != "parent-child" {
+		t.Errorf("the reverse walk reported edge %q from the leaf's dependent, want the edge that relates them", up[1].Edge)
+	}
+}
+
 // TestBdByIDReservedPrefixAbsenceIsNotAFallThrough pins the rule that makes the
 // routing safe: a reserved-prefix id is minted by the class store and nowhere
 // else, so its absence there is genuine absence. Falling through would print a
@@ -692,14 +811,15 @@ func TestBdByIDEntersTheFunnelOnlyForInvocationsThatCouldConcernAClassBead(t *te
 		enter bool
 	}{
 		"work list":                  {[]string{"list", "--status", "open"}, false},
-		"work dep tree":              {[]string{"dep", "tree", "gc-123"}, false},
 		"quoted id in a value":       {[]string{"list", "--metadata-field", "workflow_id=" + reserved}, false},
 		"ambiguous mutation scan":    {[]string{"delete", "gc-123", "--bogus", "v"}, false},
 		"mutation with no id":        {[]string{"delete", "--from-file", "ids.txt"}, false},
 		"class mutation":             {[]string{"update", reserved, "--status", "closed"}, true},
 		"class close":                {[]string{"close", reserved}, true},
 		"class id in an id flag":     {[]string{"list", "--parent", reserved}, true},
+		"unserved dep tree spelling": {[]string{"dep", "tree", "--show-all-paths", "gc-123"}, false},
 		"served read on a work id":   {[]string{"show", "gc-123"}, true},
+		"served dep tree":            {[]string{"dep", "tree", "gc-123"}, true},
 		"served write on a work id":  {[]string{"update", "gc-123", "--status", "closed"}, true},
 		"served close on a work id":  {[]string{"close", "gc-123"}, true},
 		"served reopen on a work id": {[]string{"reopen", "gc-123"}, true},
@@ -728,6 +848,7 @@ func TestBdByIDSurfaceServesAClosedVerbSet(t *testing.T) {
 		bdByIDClaim:   true,
 		bdByIDRelease: true,
 		bdByIDDepList: true,
+		bdByIDDepTree: true,
 		bdByIDUpdate:  true,
 		bdByIDClose:   true,
 		bdByIDReopen:  true,
@@ -739,6 +860,10 @@ func TestBdByIDSurfaceServesAClosedVerbSet(t *testing.T) {
 		{"dep", "list", "gcg-1"},
 		{"dep", "list", "gcg-1", "-t", "blocks"},
 		{"dep", "list", "gcg-1", "--direction=up"},
+		{"dep", "tree", "gcg-1"},
+		{"dep", "tree", "gcg-1", "--json"},
+		{"dep", "tree", "gcg-1", "--reverse"},
+		{"dep", "tree", "gcg-1", "--direction=up", "--max-depth", "3"},
 		{"update", "gcg-1", "--status", "closed"},
 		{"update", "gcg-1", "--set-metadata", "gc.outcome=pass", "--status=closed"},
 		{"close", "gcg-1"},
@@ -762,9 +887,21 @@ func TestBdByIDSurfaceServesAClosedVerbSet(t *testing.T) {
 		{"show", "--id", "gcg-1"},
 		{"update", "gcg-1"},
 		{"update", "gcg-1", "--notes", "hello"},
-		{"dep", "tree", "gcg-1"},
 		{"dep", "list"},
 		{"dep", "list", "gcg-1", "--direction=sideways"},
+		// dep tree spellings this walk does not implement. Serving them by
+		// dropping the flag would answer a different question than the one asked:
+		// --show-all-paths asks for every path to a bead the walk visits once,
+		// --status and --format reshape the result, and --direction=both merges
+		// two walks. Each stays unserved so it meets the ownership refusal.
+		{"dep", "tree"},
+		{"dep", "tree", "gcg-1", "gcg-2"},
+		{"dep", "tree", "gcg-1", "--show-all-paths"},
+		{"dep", "tree", "gcg-1", "--status", "open"},
+		{"dep", "tree", "gcg-1", "--format", "dot"},
+		{"dep", "tree", "gcg-1", "--direction=both"},
+		{"dep", "tree", "gcg-1", "--direction=sideways"},
+		{"dep", "tree", "gcg-1", "--max-depth", "0"},
 		{"close"},
 		{"close", "gcg-1", "gcg-2"},
 		{"close", "gcg-1", "--reason", "done"},
@@ -807,7 +944,10 @@ func TestBdByIDRefusesUnservedSpellingsOfAClassOwnedBead(t *testing.T) {
 		{"show", bead.ID, "--include-dependents"},
 		{"show", bead.ID, "--as-of", "2026-01-01"},
 		{"show", "--id", bead.ID},
-		{"dep", "tree", bead.ID},
+		{"dep", "tree", bead.ID, "--show-all-paths"},
+		{"dep", "tree", bead.ID, "--status", "open"},
+		{"dep", "tree", bead.ID, "--format", "dot"},
+		{"dep", "tree", bead.ID, "--direction=both"},
 		{"delete", bead.ID},
 		{"update", bead.ID, "--notes", "a note"},
 		{"close", bead.ID, "--reason", "done"},
@@ -1397,13 +1537,20 @@ func TestBdMutationAmbiguousScanNeverEntersFunnel(t *testing.T) {
 }
 
 // TestBdSelectorVerbsNeverEnterFunnel is the other half of the widened gate,
-// and the line it draws: a MUTATION addressing ids enters, a read or a selector
-// never does.
+// and the line it draws: a MUTATION addressing ids enters, a selector or a read
+// this surface does not serve never does.
 //
 // A selector quotes ids rather than addressing them — `--metadata-field
 // workflow_id=<id>` selects rows by a field they carry — so there is no subject
 // whose residence could decide anything, and these are the hot per-tick
 // invocations that must keep paying nothing.
+//
+// A SERVED read is not in this list and never was: `show` addresses its subject
+// and has to probe residence to find a class-resident row, which is why
+// TestBdByIDEntersTheFunnelOnlyForInvocationsThatCouldConcernAClassBead expects
+// it to enter. `dep tree` moved into that company under ga-pxppl, so what stands
+// here for it is the spelling the in-process walk does NOT implement — still a
+// read, still free.
 func TestBdSelectorVerbsNeverEnterFunnel(t *testing.T) {
 	cityPath, classStore := foreignProviderCity(t)
 	relic := classResidentWorkShapedBead(t, classStore, "gc-relic1", "an orphaned patrol root")
@@ -1413,7 +1560,7 @@ func TestBdSelectorVerbsNeverEnterFunnel(t *testing.T) {
 		{"list", "--label", relic.ID},
 		{"list", "--status", "open"},
 		{"search", relic.ID},
-		{"dep", "tree", relic.ID},
+		{"dep", "tree", relic.ID, "--show-all-paths"},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			resetCLIStorageRoutes(t)

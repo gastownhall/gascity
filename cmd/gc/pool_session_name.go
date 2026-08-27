@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"log"
 	"path"
@@ -61,12 +63,50 @@ type releasedPoolAssignment struct {
 	Index int
 }
 
-// PoolSessionName derives the tmux session name for a pool worker session.
-// Format: {basename(template)}-{beadID} (e.g., "claude-mc-xyz").
-// Named sessions with an alias use the alias instead.
+// PoolSessionName derives the legacy bead-ID-scoped session name for a pool
+// worker session. Format: {basename(template)}-{beadID} (e.g., "claude-mc-xyz").
+//
+// Fresh pool session beads no longer get their runtime name from this
+// derivation — see poolIdentitySessionName. It survives as the recognizer for
+// beads created before the change (beadOwnsPoolSessionName and the slot-recovery
+// fallbacks in build_desired_state.go still read it).
 func PoolSessionName(template, beadID string) string {
 	base := path.Base(template)
 	return agent.SanitizeQualifiedNameForSession(base) + "-" + beadID
+}
+
+// poolIdentitySessionName returns the runtime session name for a pool
+// instance. It is a pure function of the resolved pool identity — the
+// qualified instance name the planner derives from config and slot — so every
+// create attempt for the same slot addresses the same runtime box.
+//
+// It deliberately does not embed the session bead ID. A bead-ID-scoped name
+// mints a fresh runtime identity on every attempt, and because the runtime
+// name is the sandbox name (and therefore the pod name), a pool whose start op
+// keeps failing then leaks one box per attempt with nothing left to address the
+// previous one by. That is ga-vcjr9: desired=1, 602 pods.
+func poolIdentitySessionName(identity, template string) string {
+	base := strings.TrimSpace(identity)
+	if base == "" {
+		base = targetBasename(template)
+	}
+	if base == "" {
+		base = "pool"
+	}
+	return boundSessionNameLength(agent.SanitizeQualifiedNameForSession(base))
+}
+
+// boundSessionNameLength keeps a derived name inside the explicit-name length
+// limit without giving up identity stability: the shortened form carries a
+// digest of the full name, so identities sharing a long prefix stay distinct
+// and each identity always shortens to the same result.
+func boundSessionNameLength(name string) string {
+	if len(name) <= session.MaxExplicitSessionNameLen {
+		return name
+	}
+	sum := sha256.Sum256([]byte(name))
+	suffix := "-" + hex.EncodeToString(sum[:])[:10]
+	return name[:session.MaxExplicitSessionNameLen-len(suffix)] + suffix
 }
 
 // GCSweepSessionBeads closes open session beads that have no remaining
@@ -223,6 +263,86 @@ func releaseOrphanedPoolAssignments(
 			if storeAware {
 				log.Printf("releaseOrphanedPoolAssignments: missing owner store for assigned work %q at index %d", wb.ID, i)
 			}
+			continue
+		}
+		if !liveWorkAssignmentStillReleasable(ownerStore, wb.ID, wb.Status, assignee) {
+			continue
+		}
+		allowsRelease, clearDetached := detachedProbeAllowsOrphanRelease(wb)
+		if !allowsRelease {
+			continue
+		}
+		if !releaseOrphanedPoolAssignment(ownerStore, wb, clearDetached) {
+			continue
+		}
+		released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i})
+	}
+	return released
+}
+
+// releaseConfirmedOrphanSessionWork releases the pool-routed work still held by
+// a session the reconciler has confirmed orphaned, so the close guard that
+// refuses to close a seat holding work stops being a permanent block.
+//
+// This is the tie-break for the deadlock in ga-jrnou. An orphaned seat holding
+// work is unreachable by every other lane: the close guard refuses while the
+// work is assigned, the wake path is blocked because an orphaned base state
+// raises BlockerMissingConfig, and releaseOrphanedPoolAssignments skips the work
+// because the seat's session bead is still open — liveOpenSessionAssignmentExists
+// tests bead status, not runtime liveness. Each lane defers to the others and
+// the seat wedges indefinitely.
+//
+// The caller MUST have confirmed the runtime is observably dead. This function
+// deliberately takes no liveness argument and performs no liveness probe: the
+// orphan-close site is the only caller precisely because it has already failed
+// closed on an unreadable liveness observation. Releasing work from a seat that
+// is actually alive is data loss, not recovery (ga-g3pf0).
+//
+// Every per-bead gate from releaseOrphanedPoolAssignments applies unchanged,
+// including the live re-read in liveWorkAssignmentStillReleasable — the tick
+// snapshot names candidates but never by itself justifies a release.
+func releaseConfirmedOrphanSessionWork(
+	cfg *config.City,
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	assignedWorkBeads []beads.Bead,
+	info session.Info,
+) []releasedPoolAssignment {
+	if cfg == nil || store == nil || len(assignedWorkBeads) == 0 {
+		return nil
+	}
+	identifiers := make(map[string]struct{}, 5)
+	for _, id := range sessionAssignmentIdentifiersForConfigInfo(info, cfg) {
+		if id = strings.TrimSpace(id); id != "" {
+			identifiers[id] = struct{}{}
+		}
+	}
+	if len(identifiers) == 0 {
+		return nil
+	}
+
+	var released []releasedPoolAssignment
+	for i, wb := range assignedWorkBeads {
+		if wb.Status != "open" && wb.Status != "in_progress" {
+			continue
+		}
+		assignee := strings.TrimSpace(wb.Assignee)
+		if assignee == "" {
+			continue
+		}
+		if _, ok := identifiers[assignee]; !ok {
+			continue
+		}
+		template := routedToOrLegacyWorkflowTarget(wb)
+		if template == "" {
+			continue
+		}
+		agentCfg := findAgentByTemplate(cfg, template)
+		if agentCfg == nil || !agentCfg.SupportsGenericEphemeralSessions() {
+			continue
+		}
+		ownerStore := storeForPoolAssignment(cfg, store, rigStores, wb)
+		if ownerStore == nil {
 			continue
 		}
 		if !liveWorkAssignmentStillReleasable(ownerStore, wb.ID, wb.Status, assignee) {
