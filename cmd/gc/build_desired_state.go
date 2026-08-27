@@ -357,7 +357,20 @@ func buildDesiredState(
 			sessionQueryPartial = true
 		}
 	}
-	result := buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, cfg, sp, store, nil, sessionBeads, nil, stderr)
+	poolDecisionTime := time.Now()
+	result := buildDesiredStateWithSessionBeadsAt(
+		cityName,
+		cityPath,
+		beaconTime,
+		poolDecisionTime,
+		cfg,
+		sp,
+		store,
+		nil,
+		sessionBeads,
+		nil,
+		stderr,
+	)
 	result.SessionQueryPartial = result.SessionQueryPartial || sessionQueryPartial
 	return result
 }
@@ -380,6 +393,32 @@ func recordDemandSubPhase(trace *sessionReconcilerTraceCycle, name string, start
 func buildDesiredStateWithSessionBeads(
 	cityName, cityPath string,
 	beaconTime time.Time,
+	cfg *config.City,
+	sp runtime.Provider,
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	sessionBeads *sessionBeadSnapshot,
+	trace *sessionReconcilerTraceCycle,
+	stderr io.Writer,
+) DesiredStateResult {
+	return buildDesiredStateWithSessionBeadsAt(
+		cityName,
+		cityPath,
+		beaconTime,
+		time.Now(),
+		cfg,
+		sp,
+		store,
+		rigStores,
+		sessionBeads,
+		trace,
+		stderr,
+	)
+}
+
+func buildDesiredStateWithSessionBeadsAt(
+	cityName, cityPath string,
+	beaconTime, poolDecisionTime time.Time,
 	cfg *config.City,
 	sp runtime.Provider,
 	store beads.Store,
@@ -863,7 +902,15 @@ func buildDesiredStateWithSessionBeads(
 		bp.assignedWorkBeads = poolWorkBeads
 		bp.poolScaleCheckPartialTemplates = poolScaleCheckPartialTemplates
 		bp.providerHealthSnapshot = loadProviderHealthSnapshot(cityPath)
-		poolDesiredStates := ComputePoolDesiredStatesWithDemandTraced(cfg, poolWorkBeads, sessionBeads.OpenInfos(), scaleCheckCounts, scaleCheckDemandByTemplate, trace)
+		poolDesiredStates := ComputePoolDesiredStatesWithDemandTracedAt(
+			cfg,
+			poolWorkBeads,
+			sessionBeads.OpenInfos(),
+			scaleCheckCounts,
+			scaleCheckDemandByTemplate,
+			poolDecisionTime,
+			trace,
+		)
 		bp.configurePoolSessionCreateFairShare(poolDesiredStates)
 		for _, poolState := range poolDesiredStates {
 			cfgAgent := findAgentByTemplate(cfg, poolState.Template)
@@ -874,7 +921,7 @@ func buildDesiredStateWithSessionBeads(
 			if agentInSuspendedRig(cityPath, cfgAgent, cfg.Rigs, suspendedRigPaths) {
 				continue
 			}
-			realizePoolDesiredSessions(bp, cfgAgent, poolState, desired, stderr)
+			realizePoolDesiredSessionsAt(bp, cfgAgent, poolState, poolDecisionTime, desired, stderr)
 		}
 	} else {
 		// No store — use scale_check counts directly.
@@ -2876,6 +2923,17 @@ func realizePoolDesiredSessions(
 	desired map[string]TemplateParams,
 	stderr io.Writer,
 ) {
+	realizePoolDesiredSessionsAt(bp, cfgAgent, poolState, time.Now(), desired, stderr)
+}
+
+func realizePoolDesiredSessionsAt(
+	bp *agentBuildParams,
+	cfgAgent *config.Agent,
+	poolState PoolDesiredState,
+	poolDecisionTime time.Time,
+	desired map[string]TemplateParams,
+	stderr io.Writer,
+) {
 	qualifiedName := cfgAgent.QualifiedName()
 	if err := validateAgentSessionTransportForBuild(bp, cfgAgent, qualifiedName); err != nil {
 		fmt.Fprintf(stderr, "buildDesiredState: pool %q: %v (skipping)\n", qualifiedName, err) //nolint:errcheck
@@ -2909,7 +2967,7 @@ func realizePoolDesiredSessions(
 					prefer = &candidate
 				}
 			}
-			sessionInfo, slot, plan, err := selectOrPlanPoolSessionBead(bp, cfgAgent, qualifiedName, prefer, request, used, usedSlots)
+			sessionInfo, slot, plan, err := selectOrPlanPoolSessionBead(bp, cfgAgent, qualifiedName, prefer, request, poolDecisionTime, used, usedSlots)
 			if err != nil {
 				switch {
 				case errors.Is(err, errPoolSessionCreateBudgetExhausted):
@@ -3940,7 +3998,7 @@ func selectOrCreatePoolSessionBead(
 	used map[string]bool,
 	usedSlots map[int]bool,
 ) (session.Info, int, error) {
-	info, slot, plan, err := selectOrPlanPoolSessionBead(bp, cfgAgent, template, preferred, SessionRequest{}, used, usedSlots)
+	info, slot, plan, err := selectOrPlanPoolSessionBead(bp, cfgAgent, template, preferred, SessionRequest{}, time.Now(), used, usedSlots)
 	if err != nil {
 		return session.Info{}, 0, err
 	}
@@ -3974,6 +4032,7 @@ func selectOrPlanPoolSessionBead(
 	template string,
 	preferred *session.Info,
 	request SessionRequest,
+	decisionTime time.Time,
 	used map[string]bool,
 	usedSlots map[int]bool,
 ) (session.Info, int, *poolSessionCreatePlan, error) {
@@ -4006,7 +4065,7 @@ func selectOrPlanPoolSessionBead(
 		info, err := normalizeNonExpandingPoolSessionInfoForSelection(bp, cfgAgent, *preferred)
 		return info, slot, nil, err
 	}
-	if canonical, ok := findReusableCanonicalNonExpandingPoolSessionInfo(bp, cfgAgent, template, used); ok {
+	if canonical, ok := findReusableCanonicalNonExpandingPoolSessionInfoForRequest(bp, cfgAgent, template, request, decisionTime, used); ok {
 		slot := claimDesiredPoolSlotInfo(bp.city, cfgAgent, canonical, usedSlots)
 		info, err := normalizeNonExpandingPoolSessionInfoForSelection(bp, cfgAgent, canonical)
 		return info, slot, nil, err
@@ -4014,7 +4073,7 @@ func selectOrPlanPoolSessionBead(
 	// Reuse an existing active/creating session bead. Skip drained, closed,
 	// and asleep — asleep ephemerals are not restarted; a fresh session is
 	// created instead. The reconciler closes orphaned asleep beads.
-	for _, candidate := range reusablePoolSessionInfos(bp, cfgAgent, template, used) {
+	for _, candidate := range reusablePoolSessionInfosForRequest(bp, cfgAgent, template, request, decisionTime, used) {
 		if desiredName := strings.TrimSpace(candidate.SessionNameMetadata); desiredName != "" {
 			slot := claimDesiredPoolSlotInfo(bp.city, cfgAgent, candidate, usedSlots)
 			if slot == 0 && !cfgAgent.UsesCanonicalSingletonPoolIdentity() {

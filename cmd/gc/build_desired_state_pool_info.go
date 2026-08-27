@@ -241,6 +241,42 @@ func reusablePoolSessionInfos(bp *agentBuildParams, cfgAgent *config.Agent, temp
 	return candidates
 }
 
+// reusablePoolSessionInfosForRequest narrows ordinary reuse for anonymous
+// generic demand. A currently held/quarantined session cannot satisfy that
+// demand because the awake evaluator will suppress it. Dependency-only slots
+// remain reusable: real demand promotes them and session sync clears the marker
+// before awake evaluation. Concrete requests and pending creates retain their
+// existing reuse semantics: the former preserve resume identity, while the
+// latter must finish the create already counted as in-flight demand even if a
+// hold lands mid-create.
+func reusablePoolSessionInfosForRequest(
+	bp *agentBuildParams,
+	cfgAgent *config.Agent,
+	template string,
+	request SessionRequest,
+	decisionTime time.Time,
+	used map[string]bool,
+) []session.Info {
+	candidates := reusablePoolSessionInfos(bp, cfgAgent, template, used)
+	if request.SessionBeadID != "" {
+		return candidates
+	}
+	filtered := candidates[:0]
+	for _, info := range candidates {
+		if poolSessionConsumesNewDemandInfo(info) {
+			filtered = append(filtered, info)
+			continue
+		}
+		if strings.TrimSpace(info.WaitHold) != "" ||
+			metadataTimeInFuture(info.HeldUntil, decisionTime) ||
+			metadataTimeInFuture(info.QuarantinedUntil, decisionTime) {
+			continue
+		}
+		filtered = append(filtered, info)
+	}
+	return filtered
+}
+
 // findReusableCanonicalNonExpandingPoolSessionInfo is the session.Info sibling of
 // findReusableCanonicalNonExpandingPoolSessionBead.
 func findReusableCanonicalNonExpandingPoolSessionInfo(
@@ -254,6 +290,32 @@ func findReusableCanonicalNonExpandingPoolSessionInfo(
 	}
 	canonical := cfgAgent.QualifiedName()
 	for _, info := range reusablePoolSessionInfos(bp, cfgAgent, template, used) {
+		if strings.TrimSpace(info.SessionNameMetadata) == "" {
+			continue
+		}
+		if staleNonExpandingPoolSessionBeadInfo(cfgAgent, info) {
+			continue
+		}
+		if infoIdentifiesAsCanonical(info, canonical) {
+			return info, true
+		}
+	}
+	return session.Info{}, false
+}
+
+func findReusableCanonicalNonExpandingPoolSessionInfoForRequest(
+	bp *agentBuildParams,
+	cfgAgent *config.Agent,
+	template string,
+	request SessionRequest,
+	decisionTime time.Time,
+	used map[string]bool,
+) (session.Info, bool) {
+	if bp == nil || bp.sessionBeads == nil || !cfgAgent.UsesCanonicalSingletonPoolIdentity() {
+		return session.Info{}, false
+	}
+	canonical := cfgAgent.QualifiedName()
+	for _, info := range reusablePoolSessionInfosForRequest(bp, cfgAgent, template, request, decisionTime, used) {
 		if strings.TrimSpace(info.SessionNameMetadata) == "" {
 			continue
 		}

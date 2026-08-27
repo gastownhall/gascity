@@ -9996,6 +9996,7 @@ func TestSelectOrCreatePoolSessionBead_PreservesPreferredNamepoolSlotAboveReduce
 			SessionBeadID: nux.ID,
 			WorkBeadID:    "work-1",
 		},
+		time.Time{},
 		map[string]bool{},
 		usedSlots,
 	)
@@ -10075,6 +10076,7 @@ func TestSelectOrCreatePoolSessionBead_PreservesPreferredSlotViaAliasHistory(t *
 			SessionBeadID: nux.ID,
 			WorkBeadID:    "work-1",
 		},
+		time.Time{},
 		map[string]bool{},
 		usedSlots,
 	)
@@ -10186,6 +10188,7 @@ func TestSelectOrPlanPoolSessionBead_PreservesTwoAssignedSlotsAcrossCapShrink(t 
 				SessionBeadID: tc.beadID,
 				WorkBeadID:    tc.workBeadID,
 			},
+			time.Time{},
 			usedBeads,
 			usedSlots,
 		)
@@ -10253,6 +10256,7 @@ func TestSelectOrPlanPoolSessionBead_DoesNotPreserveInFlightNewAboveReducedCapac
 		"repo/gastown.polecat",
 		&preferredNux,
 		SessionRequest{Tier: "new", SessionBeadID: nux.ID},
+		time.Time{},
 		map[string]bool{},
 		usedSlots,
 	)
