@@ -3,6 +3,7 @@ package main
 import (
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -194,6 +195,70 @@ func TestFilterAssignedWorkBeadsForPoolDemandKeepsPersistedBoundRoute(t *testing
 
 	if len(got) != 1 || got[0].ID != "gp-qx0o" {
 		t.Fatalf("filtered work = %#v, want persisted bound route preserved", got)
+	}
+}
+
+func TestFilterAssignedWorkBeadsForPoolDemandDropsDeferredRoutedBead(t *testing.T) {
+	// A deferred bead retaining a stale gc.routed_to must not count as pool
+	// demand. bd ready (and so scale_check) already hides it; the raw
+	// List(status=open) pass this filter draws from does not. Without the
+	// deferred exclusion it drives poolDesired=1 with no ready work behind it.
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name: "worker",
+		}},
+	}
+	future := time.Now().UTC().Add(720 * time.Hour)
+	work := []beads.Bead{
+		{
+			ID:       "deferred-routed-anchor",
+			Status:   "open",
+			Assignee: "worker-dead",
+			Metadata: map[string]string{
+				"gc.routed_to": "worker",
+			},
+			DeferUntil: &future,
+		},
+		{
+			ID:       "live-routed-work",
+			Status:   "in_progress",
+			Assignee: "worker-dead",
+			Metadata: map[string]string{
+				"gc.routed_to": "worker",
+			},
+		},
+	}
+
+	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, work, []string{"", ""})
+
+	if len(got) != 1 || got[0].ID != "live-routed-work" {
+		t.Fatalf("filtered work = %#v, want only live-routed-work (deferred anchor dropped)", got)
+	}
+}
+
+func TestFilterAssignedWorkBeadsForPoolDemandKeepsElapsedDeferRoutedBead(t *testing.T) {
+	// A defer_until in the past is elapsed — the bead is ready again and must
+	// still count as demand. Only a FUTURE defer_until parks it.
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name: "worker",
+		}},
+	}
+	past := time.Now().UTC().Add(-1 * time.Hour)
+	work := []beads.Bead{{
+		ID:       "elapsed-defer-work",
+		Status:   "open",
+		Assignee: "worker-dead",
+		Metadata: map[string]string{
+			"gc.routed_to": "worker",
+		},
+		DeferUntil: &past,
+	}}
+
+	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, work, []string{""})
+
+	if len(got) != 1 || got[0].ID != "elapsed-defer-work" {
+		t.Fatalf("filtered work = %#v, want elapsed-defer bead preserved as demand", got)
 	}
 }
 
