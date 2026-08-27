@@ -131,9 +131,26 @@ add_fsys_compile_job() {
 # so it is a real run rather than a cached-result stall, and shares the shards'
 # timeout budget. Package parallelism is bounded separately for every job by the
 # GOFLAGS -p export below (ga-04m84s), so it is not pinned on this command.
+# internal/runtime/herdr is excluded alongside cmd/gc because it fails
+# DETERMINISTICALLY on bare origin/main -- no branch changes involved. Since this
+# job runs in .githooks/pre-push whenever go_changed=1, that failure blocked
+# EVERY push touching a .go file, fleet-wide (ga-at7jv0, P0).
+#
+# The failing tests are the *Live / conformance set, which need a real herdr
+# server to become ready -- integration tests that a "fast unit" gate should not
+# have been gating on. Measured on a clean origin/main worktree 2026-08-27:
+# FAIL in 29.4s ("startup delivery ... agent_prompt_stalled"). Observed as slow
+# as 222s in another tree, so this also removes minutes from every pre-push run.
+#
+# NOTE the signature is unstable -- three different errors across three trees on
+# one day. Re-measure on a CLEAN main worktree before treating any single one as
+# the upstream defect. Root cause is tracked at gascity#5653 (from PR #4966).
+#
+# REMOVE THIS once #5653 lands. It is a gate hole while it stands; the package
+# still runs in full CI, which is where these tests belong.
 add_unit_core_job() {
   add_job "unit-core" \
-    "GC_FAST_UNIT=1 go test -count=1 -timeout ${go_test_timeout} \$(go list ./... | grep -v '^github.com/gastownhall/gascity/cmd/gc\$')"
+    "GC_FAST_UNIT=1 go test -count=1 -timeout ${go_test_timeout} \$(go list ./... | grep -vE '^github.com/gastownhall/gascity/(cmd/gc|internal/runtime/herdr)\$')"
 }
 
 # Runs as a direct shell job rather than through a `go test` wrapper because a
