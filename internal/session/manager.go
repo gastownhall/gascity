@@ -849,16 +849,22 @@ func (m *Manager) CreateSession(ctx context.Context, spec CreateOptions) (Info, 
 // of what extraMeta claims -- a caller cannot fabricate a false positive, and
 // omitting the fields no longer produces a false negative.
 //
+// Derivation requires alias to be the canonical qualified identity of the
+// configured named session: config.FindNamedSession also accepts the V2
+// bare-name shorthand ("mayor" for "gastown.mayor"), but that shorthand is
+// deliberately not treated as a canonical ownership claim, because stamping
+// it would record an identity no canonical lookup keys off.
+//
 // When no city config has been wired, derivation is impossible, so this falls
 // back to the legacy behavior of trusting extraMeta's own claim (preserved
 // for callers/tests that construct a Manager without city config).
 func (m *Manager) resolveConfiguredNamedSessionIdentity(alias string, extraMeta map[string]string) (identity string, ok bool) {
 	if m.cityConfig != nil {
 		spec, found := FindNamedSessionSpec(m.cityConfig, m.cityConfig.EffectiveCityName(), alias)
-		if !found {
+		if !found || spec.Named.QualifiedName() != alias {
 			return "", false
 		}
-		return spec.Identity, true
+		return spec.Named.QualifiedName(), true
 	}
 	if extraMeta[NamedSessionMetadataKey] == "true" && extraMeta[NamedSessionIdentityMetadata] == alias {
 		return alias, true
