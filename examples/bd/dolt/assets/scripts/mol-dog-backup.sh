@@ -20,6 +20,30 @@ SYSTEM_DBS="^(information_schema|mysql|dolt_cluster|__gc_probe|performance_schem
 MIN_DOLT_BACKUP_VERSION="2.1.0"
 BACKUP_LOCK_FILE="${GC_DOLT_BACKUP_LOCK_FILE:-$GC_CITY_PATH/.gc/runtime/packs/dolt/backup-sync.lock}"
 BACKUP_LOCK_WAIT_SECONDS="${GC_DOLT_BACKUP_LOCK_WAIT_SECONDS:-5}"
+# Wall-clock bound for one `dolt backup sync` attempt, and how many attempts a
+# database gets before it is reported failed.
+#
+# Retries are here because the sync is a marginal operation rather than a
+# reliably-fast one. On a busy city the managed sql-server serialises the
+# backup against live agent traffic, so the same delta that takes single-digit
+# seconds against an idle server can land either side of the server's own
+# listener.read_timeout_millis ceiling depending on what else is running. A
+# single attempt then turns a load spike into a skipped backup, and the next
+# chance is a whole interval away. Measured on one city: four consecutive
+# scheduled runs failed at ~30s over 12 hours, and the first manual retry
+# afterwards succeeded in 28s against the same data.
+BACKUP_SYNC_TIMEOUT_SECS="${GC_DOLT_BACKUP_SYNC_TIMEOUT_SECS:-120}"
+BACKUP_SYNC_ATTEMPTS="${GC_DOLT_BACKUP_SYNC_ATTEMPTS:-3}"
+case "$BACKUP_SYNC_TIMEOUT_SECS" in
+    ''|*[!0-9]*) BACKUP_SYNC_TIMEOUT_SECS=120 ;;
+    *[1-9]*) ;;
+    *) BACKUP_SYNC_TIMEOUT_SECS=120 ;;
+esac
+case "$BACKUP_SYNC_ATTEMPTS" in
+    ''|*[!0-9]*) BACKUP_SYNC_ATTEMPTS=3 ;;
+    *[1-9]*) ;;
+    *) BACKUP_SYNC_ATTEMPTS=3 ;;
+esac
 
 dolt_sql() {
     DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}" \
@@ -71,6 +95,88 @@ append_failed_db() {
     else
         FAILED_DBS="$db_failure"
     fi
+}
+
+# append_failed_detail <db> <detail> — record the underlying diagnostic for a
+# database that failed every attempt, so the escalation body can carry a cause
+# rather than only the name of the symptom.
+append_failed_detail() {
+    detail_db="$1"
+    detail_text="$2"
+    [ -n "$detail_text" ] || detail_text="no diagnostic output"
+    FAILED_DETAILS="$FAILED_DETAILS
+  $detail_db: $detail_text"
+}
+
+# classify_sync_failure <rc> <stderr-file> — one actionable line naming what
+# went wrong, for operators reading the escalation rather than the log.
+#
+# `connection was closed` and `row read wait bigger than connection timeout`
+# are how the managed sql-server reports killing an operation that outran
+# listener.read_timeout_millis. That reads like a network fault and is not one:
+# the client is healthy and waiting, and the server ends the query because its
+# own read deadline elapsed. Naming the setting here is the difference between
+# an operator tuning the backup and an operator hunting a phantom disconnect.
+classify_sync_failure() {
+    classify_rc="$1"
+    classify_err_file="$2"
+    classify_stderr=""
+    if [ -s "$classify_err_file" ]; then
+        classify_stderr=$(tr '\n' ' ' <"$classify_err_file" | sed 's/[[:space:]]\{1,\}/ /g; s/^ //; s/ $//')
+    fi
+
+    if [ "$classify_rc" -eq 124 ]; then
+        printf 'timed out after %ss (raise GC_DOLT_BACKUP_SYNC_TIMEOUT_SECS)' "$BACKUP_SYNC_TIMEOUT_SECS"
+        return
+    fi
+    case "$classify_stderr" in
+        *"connection was closed"*|*"row read wait bigger than connection timeout"*)
+            printf 'exit %s: %s — the managed sql-server ended the operation at its listener.read_timeout_millis ceiling; the backup outran it under live load, so raise that ceiling for this city or reduce contention during the backup window' \
+                "$classify_rc" "$classify_stderr"
+            return
+            ;;
+    esac
+    if [ -n "$classify_stderr" ]; then
+        printf 'exit %s: %s' "$classify_rc" "$classify_stderr"
+    else
+        printf 'exit %s: no diagnostic output' "$classify_rc"
+    fi
+}
+
+# sync_one_database <db> <db-dir> — run `dolt backup sync` with bounded retries.
+# Emits nothing on success. On total failure it echoes the classified
+# diagnostic from the LAST attempt on stdout for the caller to record.
+#
+# Stderr is captured rather than discarded. Sending it to /dev/null is what
+# reduced a real 18-hour backup outage to the single string "hq(sync failed)",
+# with the actual cause visible nowhere; the sibling `gc dolt sync` in this
+# same pack captures and replays it for exactly this reason.
+sync_one_database() {
+    sync_db="$1"
+    sync_db_dir="$2"
+    sync_err_tmp=$(mktemp) || {
+        printf 'cannot create temp file for sync diagnostics'
+        return 1
+    }
+    sync_attempt=1
+    while [ "$sync_attempt" -le "$BACKUP_SYNC_ATTEMPTS" ]; do
+        sync_rc=0
+        (cd "$sync_db_dir" && run_bounded "$BACKUP_SYNC_TIMEOUT_SECS" \
+            dolt backup sync "${sync_db}-backup" >/dev/null 2>"$sync_err_tmp") || sync_rc=$?
+        if [ "$sync_rc" -eq 0 ]; then
+            if [ "$sync_attempt" -gt 1 ]; then
+                echo "backup: $sync_db: succeeded on attempt $sync_attempt/$BACKUP_SYNC_ATTEMPTS" >&2
+            fi
+            rm -f "$sync_err_tmp"
+            return 0
+        fi
+        sync_detail=$(classify_sync_failure "$sync_rc" "$sync_err_tmp")
+        echo "backup: $sync_db: attempt $sync_attempt/$BACKUP_SYNC_ATTEMPTS failed — $sync_detail" >&2
+        sync_attempt=$((sync_attempt + 1))
+    done
+    rm -f "$sync_err_tmp"
+    printf '%s' "$sync_detail"
+    return 1
 }
 
 acquire_backup_lock() {
@@ -165,6 +271,7 @@ TOTAL=$(printf '%s\n' "$DATABASES" | awk 'NF {count++} END {print count + 0}')
 SYNCED=0
 FAILED=0
 FAILED_DBS=""
+FAILED_DETAILS=""
 
 for db in $DATABASES; do
     if ! ensure_backup_remote "$db"; then
@@ -176,10 +283,12 @@ for db in $DATABASES; do
         append_failed_db "$db(not found)"
         continue
     fi
-    if (cd "$db_dir" && run_bounded 120 dolt backup sync "${db}-backup" 2>/dev/null); then
+    sync_failure_detail=""
+    if sync_failure_detail=$(sync_one_database "$db" "$db_dir"); then
         SYNCED=$((SYNCED + 1))
     else
         append_failed_db "$db(sync failed)"
+        append_failed_detail "$db" "$sync_failure_detail"
     fi
 done
 
@@ -205,7 +314,11 @@ fi
 if [ "$FAILED_COUNT" -gt 0 ]; then
     dolt_escalate \
         "Dolt backup: $FAILED_COUNT/$TOTAL databases failed to sync [MEDIUM]" \
-        "Failed databases:$FAILED_DBS" \
+        "Failed databases:$FAILED_DBS
+
+Each database was attempted up to $BACKUP_SYNC_ATTEMPTS times with a ${BACKUP_SYNC_TIMEOUT_SECS}s bound per attempt. Diagnostic from the final attempt:$FAILED_DETAILS
+
+A database listed here has no backup newer than its last successful sync, so the recoverable copy is as old as that run. Check freshness per database under $BACKUP_ARTIFACT_DIR rather than trusting this message alone." \
         2>/dev/null || true
 fi
 

@@ -53,16 +53,57 @@
     },
     "backups": {
       "type": "object",
-      "required": ["dolt_freshness", "dolt_age_sec", "dolt_stale"],
+      "required": ["dolt_measured", "dolt_freshness", "dolt_age_sec", "dolt_stale"],
       "properties": {
+        "dolt_measured": {
+          "type": "boolean",
+          "description": "Whether backup freshness was actually measured. When false, dolt_freshness, dolt_age_sec and dolt_stale carry no information and must not be read as a healthy verdict."
+        },
         "dolt_freshness": {
           "type": "string"
         },
         "dolt_age_sec": {
-          "type": "integer"
+          "type": "integer",
+          "description": "Age in seconds of the worst eligible Dolt backup remote, or -1 when that database has never produced a backup file. Carries no information when dolt_measured is false."
         },
         "dolt_stale": {
+          "type": ["boolean", "null"],
+          "description": "Staleness of the oldest eligible Dolt backup remote, or null when dolt_measured is false. Never false on an unmeasured probe."
+        },
+        "dolt_databases": {
+          "type": "array",
+          "description": "Per-database backup freshness. age_sec is -1 for an eligible database that has never produced a backup file; stale is true in that case.",
+          "items": {
+            "type": "object",
+            "required": ["name", "age_sec", "stale"],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "age_sec": {
+                "type": "integer"
+              },
+              "freshness": {
+                "type": "string"
+              },
+              "stale": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "migration_measured": {
           "type": "boolean"
+        },
+        "migration_freshness": {
+          "type": "string"
+        },
+        "migration_age_sec": {
+          "type": "integer"
+        },
+        "migration_stale": {
+          "type": ["boolean", "null"]
         }
       },
       "additionalProperties": true

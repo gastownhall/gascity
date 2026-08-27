@@ -278,22 +278,147 @@ if [ "$server_reachable" = true ]; then
 fi
 
 # Check backup freshness.
+#
+# Two unrelated artifacts have both been called "backups" in this report, and
+# the JSON field names promise the one the old probe did not read. The `dolt_*`
+# fields now measure the Dolt backup remotes under GC_BACKUP_ARTIFACT_DIR
+# (default $GC_CITY_PATH/.dolt-backup), which is what the backup order writes
+# and what an operator means when they ask whether the bead store is backed up.
+# The migration snapshots that `gc dolt rollback` restores live under
+# $GC_CITY_PATH/migration-backup-* and are still reported, now as `migration_*`.
+# Reading one and labelling it the other is why a city could run 18 hours with
+# no bead-store backup while this command printed nothing unusual.
+#
+# `dolt_measured` exists because the previous shape had no way to say "I did
+# not look". It initialised freshness to "", age to 0 and stale to false, then
+# skipped the block that would overwrite them whenever nothing was found, so a
+# probe that measured nothing rendered as a confident dolt_stale:false — the
+# one reading an operator must never get from a backup check. The flag is
+# spelled affirmatively so its zero value is the cautious claim, and dolt_stale
+# is null rather than false whenever nothing was measured.
+
+# Format an age in seconds the way this report has always formatted it.
+format_age() {
+  fa_sec="$1"
+  if [ "$fa_sec" -ge 3600 ]; then
+    printf '%dh%dm' "$((fa_sec / 3600))" "$((fa_sec % 3600 / 60))"
+  elif [ "$fa_sec" -ge 60 ]; then
+    printf '%dm%ds' "$((fa_sec / 60))" "$((fa_sec % 60))"
+  else
+    printf '%ds' "$fa_sec"
+  fi
+}
+
+path_mtime() {
+  pm_value=$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0)
+  case "$pm_value" in
+    ''|*[!0-9]*) pm_value=0 ;;
+  esac
+  printf '%s' "$pm_value"
+}
+
+# Stale threshold for Dolt backup remotes. Defaults to twice the 6h backup
+# interval, matching mol-dog-doctor.sh so the two paths cannot disagree about
+# the same database; GC_DOCTOR_BACKUP_STALE_S is honoured for the same reason.
+backup_stale_after="${GC_HEALTH_BACKUP_STALE_S:-${GC_DOCTOR_BACKUP_STALE_S:-43200}}"
+case "$backup_stale_after" in
+  ''|*[!0-9]*) backup_stale_after=43200 ;;
+esac
+
+backup_artifact_dir="${GC_BACKUP_ARTIFACT_DIR:-$GC_CITY_PATH/.dolt-backup}"
+backup_measured=false
+backup_worst_seen=false
 backup_freshness=""
-backup_stale=false
+backup_stale=null
 backup_age_sec=0
+backup_db_list=""
+now=$(date +%s)
+
+# A database is backup-eligible when the artifact directory holds a
+# same-named subdirectory, which is where the backup order points every remote
+# it configures (file://$BACKUP_ARTIFACT_DIR/<db>). This costs no dolt call, so
+# it stays inside the patrol's fork budget. An eligible database whose
+# directory holds no backup file yet is measured and reported stale: never
+# having been backed up is a known-bad state, not an unknown one.
+if [ -d "$backup_artifact_dir" ]; then
+  for bdir in "$backup_artifact_dir"/*/; do
+    [ -d "$bdir" ] || continue
+    bname="$(basename "$bdir")"
+    case "$(printf '%s' "$bname" | tr '[:upper:]' '[:lower:]')" in information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe) continue ;; esac
+    case "$bname" in
+      [A-Za-z0-9_]*)
+        case "$bname" in *[!A-Za-z0-9_-]*) continue ;; esac
+        ;;
+      *) continue ;;
+    esac
+    backup_measured=true
+    db_newest=0
+    for bfile in "$bdir"* ; do
+      [ -f "$bfile" ] || continue
+      bmtime=$(path_mtime "$bfile")
+      [ "$bmtime" -gt "$db_newest" ] && db_newest="$bmtime"
+    done
+    if [ "$db_newest" -le 0 ]; then
+      db_age=-1
+      db_stale=true
+      db_fresh=""
+    else
+      db_age=$((now - db_newest))
+      [ "$db_age" -lt 0 ] && db_age=0
+      db_fresh=$(format_age "$db_age")
+      db_stale=false
+      [ "$db_age" -gt "$backup_stale_after" ] && db_stale=true
+    fi
+    backup_db_list="$backup_db_list$bname|$db_age|$db_fresh|$db_stale
+"
+    # The aggregate reports the WORST eligible database, so a single stale
+    # database can never be averaged away by a healthy sibling.
+    if [ "$db_stale" = true ]; then
+      backup_stale=true
+    elif [ "$backup_stale" = null ]; then
+      backup_stale=false
+    fi
+    # The age follows the same worst-first rule, which a plain `-gt` against a
+    # zero seed gets wrong in two directions. A database that has never
+    # produced a backup carries -1, and that is the worst state there is rather
+    # than the smallest number, so it has to win outright or the aggregate
+    # reports 0 for a city with no backup at all — the same confident zero from
+    # an unmeasured probe that this block exists to stop emitting. A genuine
+    # age of 0 also has to be able to seed the aggregate, or a database synced
+    # in the second the check runs reports the empty freshness of one that was
+    # never measured.
+    if [ "$backup_worst_seen" != true ]; then
+      backup_worst_seen=true
+      backup_age_sec="$db_age"
+      backup_freshness="$db_fresh"
+    elif [ "$backup_age_sec" -ge 0 ]; then
+      if [ "$db_age" -lt 0 ] || [ "$db_age" -gt "$backup_age_sec" ]; then
+        backup_age_sec="$db_age"
+        backup_freshness="$db_fresh"
+      fi
+    fi
+  done
+fi
+if [ "$backup_measured" != true ]; then
+  backup_age_sec=0
+  backup_freshness=""
+  backup_stale=null
+fi
+
+# Migration snapshots: what this block used to measure, under a name that says so.
+migration_measured=false
+migration_freshness=""
+migration_stale=null
+migration_age_sec=0
 newest_backup=$(ls -1d "$GC_CITY_PATH"/migration-backup-* 2>/dev/null | sort -r | head -1 || true)
 if [ -n "$newest_backup" ]; then
-  backup_mtime=$(stat -c %Y "$newest_backup" 2>/dev/null || stat -f %m "$newest_backup" 2>/dev/null || echo 0)
-  now=$(date +%s)
-  backup_age_sec=$((now - backup_mtime))
-  if [ "$backup_age_sec" -ge 3600 ]; then
-    backup_freshness="$((backup_age_sec / 3600))h$((backup_age_sec % 3600 / 60))m"
-  elif [ "$backup_age_sec" -ge 60 ]; then
-    backup_freshness="$((backup_age_sec / 60))m$((backup_age_sec % 60))s"
-  else
-    backup_freshness="${backup_age_sec}s"
-  fi
-  [ "$backup_age_sec" -gt 1800 ] && backup_stale=true
+  migration_measured=true
+  migration_mtime=$(path_mtime "$newest_backup")
+  migration_age_sec=$((now - migration_mtime))
+  [ "$migration_age_sec" -lt 0 ] && migration_age_sec=0
+  migration_freshness=$(format_age "$migration_age_sec")
+  migration_stale=false
+  [ "$migration_age_sec" -gt 1800 ] && migration_stale=true
 fi
 
 # Find orphan databases.
@@ -574,9 +699,28 @@ JSONEOF
 
   ],
   "backups": {
+    "dolt_measured": $backup_measured,
     "dolt_freshness": "$backup_freshness",
     "dolt_age_sec": $backup_age_sec,
-    "dolt_stale": $backup_stale
+    "dolt_stale": $backup_stale,
+    "migration_measured": $migration_measured,
+    "migration_freshness": "$migration_freshness",
+    "migration_age_sec": $migration_age_sec,
+    "migration_stale": $migration_stale,
+    "dolt_databases": [
+JSONEOF
+  first=true
+  echo "$backup_db_list" | while IFS='|' read -r b_name b_age b_fresh b_stale; do
+    [ -z "$b_name" ] && continue
+    if [ "$first" = true ]; then first=false; else echo ","; fi
+    # age_sec is -1 for an eligible database that has never produced a backup
+    # file; stale is true there, so no consumer reads -1 as a fresh age.
+    printf '      {"name": "%s", "age_sec": %s, "freshness": "%s", "stale": %s}' \
+      "$b_name" "$b_age" "$b_fresh" "$b_stale"
+  done
+  cat <<JSONEOF
+
+    ]
   },
   "orphans": [
 JSONEOF
@@ -642,14 +786,26 @@ if [ -n "$db_info" ]; then
   done
 fi
 
-if [ -n "$backup_freshness" ]; then
-  stale=""
-  [ "$backup_stale" = true ] && stale=" [STALE]"
-  echo ""
-  echo "Backups: ${backup_freshness} ago${stale}"
+echo ""
+if [ "$backup_measured" = true ]; then
+  echo "Backups:"
+  echo "$backup_db_list" | while IFS='|' read -r b_name b_age b_fresh b_stale; do
+    [ -z "$b_name" ] && continue
+    if [ "$b_age" -lt 0 ]; then
+      echo "  $b_name: never backed up [STALE]"
+    elif [ "$b_stale" = true ]; then
+      echo "  $b_name: ${b_fresh} ago [STALE]"
+    else
+      echo "  $b_name: ${b_fresh} ago"
+    fi
+  done
 else
-  echo ""
-  echo "Backups: none found"
+  echo "Backups: not measured (no backup remotes under $backup_artifact_dir)"
+fi
+if [ "$migration_measured" = true ]; then
+  migration_stale_note=""
+  [ "$migration_stale" = true ] && migration_stale_note=" [STALE]"
+  echo "Migration snapshots: ${migration_freshness} ago${migration_stale_note}"
 fi
 
 if [ "$quarantine_count" -gt 0 ]; then

@@ -5823,3 +5823,131 @@ func TestCompactScriptSkipFetchRejectsInvalidValue(t *testing.T) {
 		}
 	}
 }
+
+// writeFlakyBackupFakeDolt fakes a dolt whose `backup sync` fails its first
+// failUntil attempts and then succeeds, counting attempts in a file so the
+// test can assert the retry actually happened rather than inferring it from
+// the outcome. stderr carries the diagnostic a real managed server emits when
+// it ends an operation at its listener read deadline.
+func writeFlakyBackupFakeDolt(t *testing.T, binDir string, failUntil int) (counterPath string) {
+	t.Helper()
+	logPath := filepath.Join(binDir, "dolt.log")
+	counterPath = filepath.Join(binDir, "sync-attempts")
+	writeExecutable(t, filepath.Join(binDir, "dolt"), fmt.Sprintf(`#!/usr/bin/env bash
+set -euo pipefail
+printf 'dolt %%s\n' "$*" >> %s
+if [ "${1:-}" = "version" ]; then
+  printf 'dolt version 2.1.0\n'
+  exit 0
+fi
+case "$*" in
+  *"SHOW DATABASES"*)
+    printf 'Database\nprod\n'
+    exit 0
+    ;;
+esac
+if [ "${1:-}" = "backup" ] && [ "$#" -eq 1 ]; then
+  db="$(basename "$PWD")"
+  printf '%%s-backup file:///backups/%%s\n' "$db" "$db"
+  exit 0
+fi
+if [ "${1:-} ${2:-}" = "backup sync" ]; then
+  printf 'x' >> %s
+  attempts=$(wc -c < %s | tr -d ' ')
+  if [ "$attempts" -le %d ]; then
+    printf 'Error 1105 (HY000): connection was closed\n' >&2
+    exit 1
+  fi
+  exit 0
+fi
+exit 0
+`, shellQuote(logPath), shellQuote(counterPath), shellQuote(counterPath), failUntil))
+	return counterPath
+}
+
+// TestBackupScriptRetriesMarginalSyncFailure pins that a database whose sync
+// fails once is retried rather than abandoned until the next interval.
+//
+// The backup is a marginal operation, not a reliably-fast one: on a busy city
+// the managed sql-server serializes it against live agent traffic, so the same
+// delta can land either side of the server's read deadline depending on what
+// else is running. One city measured four consecutive scheduled failures at
+// ~30s over twelve hours, then a manual retry that succeeded in 28s against
+// the same data — a whole day of backup coverage lost to a single attempt.
+func TestBackupScriptRetriesMarginalSyncFailure(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	if err := os.MkdirAll(filepath.Join(dataDir, "prod", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir db: %v", err)
+	}
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	counterPath := writeFlakyBackupFakeDolt(t, binDir, 1)
+
+	out := runDogScript(t, "mol-dog-backup.sh", binDir, cityPath, dataDir, "GC_BACKUP_DATABASES=prod")
+
+	if !strings.Contains(out, "synced: 1/1") {
+		t.Fatalf("a sync that succeeds on retry must count as synced:\n%s", out)
+	}
+	attempts, err := os.ReadFile(counterPath)
+	if err != nil {
+		t.Fatalf("read attempt counter: %v", err)
+	}
+	if len(attempts) != 2 {
+		t.Fatalf("backup sync attempted %d times, want 2 (one failure then one success)", len(attempts))
+	}
+	gcLog, _ := os.ReadFile(gcLogPath)
+	if strings.Contains(string(gcLog), "databases failed to sync") {
+		t.Errorf("a database that succeeded on retry must not escalate:\n%s", gcLog)
+	}
+}
+
+// TestBackupScriptSurfacesSyncDiagnosticInEscalation pins that the underlying
+// failure reaches the operator.
+//
+// The regression: the sync ran as `... 2>/dev/null`, so the only evidence that
+// left the script was the literal string "prod(sync failed)". One city sat 18
+// hours with no bead-store backup and the operator had nothing to act on,
+// because the cause — the managed sql-server ending the operation at its own
+// read deadline — was written to /dev/null every six hours. The sibling
+// `gc dolt sync` in this same pack captures and replays that stderr; this is
+// the backup half catching up.
+func TestBackupScriptSurfacesSyncDiagnosticInEscalation(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	if err := os.MkdirAll(filepath.Join(dataDir, "prod", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir db: %v", err)
+	}
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	// failUntil far above the attempt count: every attempt fails.
+	counterPath := writeFlakyBackupFakeDolt(t, binDir, 99)
+
+	out := runDogScript(t, "mol-dog-backup.sh", binDir, cityPath, dataDir,
+		"GC_BACKUP_DATABASES=prod", "GC_DOLT_BACKUP_SYNC_ATTEMPTS=2")
+
+	if !strings.Contains(out, "synced: 0/1") {
+		t.Fatalf("unexpected backup summary:\n%s", out)
+	}
+	attempts, err := os.ReadFile(counterPath)
+	if err != nil {
+		t.Fatalf("read attempt counter: %v", err)
+	}
+	if len(attempts) != 2 {
+		t.Fatalf("backup sync attempted %d times, want GC_DOLT_BACKUP_SYNC_ATTEMPTS=2", len(attempts))
+	}
+	gcLog, err := os.ReadFile(gcLogPath)
+	if err != nil {
+		t.Fatalf("read gc log: %v", err)
+	}
+	body := string(gcLog)
+	if !strings.Contains(body, "Dolt backup: 1/1 databases failed to sync") {
+		t.Fatalf("failure escalation missing:\n%s", body)
+	}
+	if !strings.Contains(body, "connection was closed") {
+		t.Fatalf("escalation must carry the underlying dolt diagnostic, not just the symptom:\n%s", body)
+	}
+	if !strings.Contains(body, "read_timeout_millis") {
+		t.Errorf("a read-deadline kill must name the setting that caused it, or the operator hunts a phantom disconnect:\n%s", body)
+	}
+}

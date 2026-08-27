@@ -627,12 +627,23 @@ instead of mailing a hardcoded role. Orders inherit the orchestrator's
 environment, so set these at orchestrator start to customize routing:
 
 - `GC_ESCALATION_RECIPIENT` — mail recipient for escalations (default:
-  `human`, the reserved human mailbox).
+  `human`, the reserved human mailbox). An agent recipient is woken with
+  `--notify`; the `human` default is a mailbox with no session behind it,
+  so nothing is woken and the escalation waits until somebody reads that
+  inbox. Point this at the agent that surfaces alerts (the manager, on a
+  Slack-connected city) if you want maintenance advisories acted on rather
+  than filed.
 - `GC_ESCALATE_SCRIPT` — absolute path to an escalation script to run
   instead of searching packs.
 - `GC_ESCALATE_SEARCH_PACKS` — space-separated pack names searched (in
   order) for an `assets/scripts/escalate.sh` override (default:
   `gastown maintenance bd core`). A pack earlier in the list wins.
+- `GC_ESCALATE_SEND_TIMEOUT_SECS` — wall-clock bound on one escalation
+  send (default: 30). The wake can outlive the send it follows, and
+  escalations run inline in maintenance orders, so the bound keeps a slow
+  wake from stalling the run that raised the alarm. The mail is written
+  before the wake blocks, so a tripped bound costs the wake, not the
+  message, and the script still exits 0.
 - `GC_MAINTENANCE_DONE_TARGET` — session target to nudge with
   `MAINTENANCE_DONE:`/warn summaries when a maintenance run completes
   (default: unset, no completion nudge). Deployments that relied on the
