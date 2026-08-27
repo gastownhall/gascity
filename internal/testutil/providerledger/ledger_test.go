@@ -557,7 +557,12 @@ func TestCatalogBindsFakeAndBothSubprocessConstructors(t *testing.T) {
 				}
 				subprocessDefaultProof = claim.Proof
 			}
-			if claim.Waiver != nil && claim.Waiver.Owner != runtimeContractWaiverOwner {
+			// internal/runtime/acp.NewSeamBacked is deliberately owned by
+			// ga-uz5t3a, not the shared runtimeContractWaiverOwner — see
+			// TestCatalogBindsACPWithDirAndDefersDefaultConstructor.
+			isACPDefaultDirWaiver := entry.ID == "runtime.builtin.acp" &&
+				claim.Constructor == repoSymbol("internal/runtime/acp", "NewSeamBacked")
+			if claim.Waiver != nil && !isACPDefaultDirWaiver && claim.Waiver.Owner != runtimeContractWaiverOwner {
 				t.Errorf("waiver owner drifted from runtimeContractWaiverOwner: got %q on %s", claim.Waiver.Owner, renderSymbolRef(claim.Constructor))
 			}
 		}
@@ -621,8 +626,31 @@ func TestCatalogBindsACPWithDirAndDefersDefaultConstructor(t *testing.T) {
 	if got, want := renderSymbolRefs(withDirProof.AllowedCalls), "fmt.Sprintf, internal/runtime/acp.acpConformanceCommand, internal/runtime/acp.acpConformanceDir, sync/atomic.AddInt64"; got != want {
 		t.Errorf("ACP WithDir allowed calls = %q, want %q", got, want)
 	}
-	if defaultWaiver == nil || defaultWaiver.Owner != runtimeContractWaiverOwner {
-		t.Errorf("ACP default waiver = %+v, want %s ownership", defaultWaiver, runtimeContractWaiverOwner)
+	if defaultWaiver == nil {
+		t.Fatal("acp.NewSeamBacked waiver is missing")
+	}
+	// Owned by ga-uz5t3a (successor to the lost ga-80po0c.3), not the shared
+	// runtimeContractWaiverOwner: this gap has its own tracking bead.
+	const wantOwner = "ga-uz5t3a"
+	if defaultWaiver.Owner != wantOwner {
+		t.Errorf("ACP default waiver owner = %q, want %q", defaultWaiver.Owner, wantOwner)
+	}
+	wantExpires := time.Date(2026, time.September, 11, 0, 0, 0, 0, time.UTC)
+	if !defaultWaiver.Expires.Equal(wantExpires) {
+		t.Errorf("ACP default waiver expires = %v, want %v", defaultWaiver.Expires, wantExpires)
+	}
+	// The default constructor now has its own direct proof attempt
+	// (TestACPDefaultDirConformance); the reason must point to that gap
+	// (currently: no clean Darwin-lane run yet, tracked by ga-csh74h) rather
+	// than resting on the WithDir proof, which does not exercise NewSeamBacked.
+	if strings.Contains(defaultWaiver.Reason, "WithDir proof does not exercise") {
+		t.Errorf("ACP default waiver reason still reads as the pre-ga-uz5t3a.10 generic reason: %q", defaultWaiver.Reason)
+	}
+	if !strings.Contains(defaultWaiver.Reason, "TestACPDefaultDirConformance") {
+		t.Errorf("ACP default waiver reason should name the implemented conformance test: %q", defaultWaiver.Reason)
+	}
+	if !strings.Contains(defaultWaiver.Reason, "ga-csh74h") {
+		t.Errorf("ACP default waiver reason should name the tracked Darwin-lane blocker: %q", defaultWaiver.Reason)
 	}
 }
 
@@ -1676,7 +1704,7 @@ func TestCatalogReturnsIndependentEntries(t *testing.T) {
 	if got := second[0].Claims[0].Proof.AllowedCalls[0].Name; got != "Sprintf" {
 		t.Errorf("Catalog() proof allowed call leaked mutation: %q", got)
 	}
-	if second[3].Claims[0].Waiver.Owner != runtimeContractWaiverOwner {
+	if second[3].Claims[0].Waiver.Owner != "ga-uz5t3a" {
 		t.Errorf("Catalog() waiver leaked mutation: %q", second[3].Claims[0].Waiver.Owner)
 	}
 	if second[len(second)-1].Source.Function != "resolveSessionTransportProvider" {
