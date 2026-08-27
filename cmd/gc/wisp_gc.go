@@ -690,6 +690,12 @@ func purgeExpiredBeadClosures(store beads.Store, entries []beads.Bead, cutoff ti
 	return purgeExpiredBeads(store, entries, cutoff, batchCap, deleteExpiredBeadClosure)
 }
 
+// errBeadNoLongerEligible signals that deleteFn's live re-check found the
+// candidate no longer eligible for deletion (reopened, or already gone) — a
+// deliberate skip, not a delete failure, so purgeExpiredBeads must not count
+// it as either purged or an error.
+var errBeadNoLongerEligible = errors.New("bead skipped: no longer eligible for deletion")
+
 // purgeExpiredBeads deletes each entry older than cutoff via deleteFn and
 // returns the count successfully purged. When batchCap > 0 it bounds the number
 // of DELETE ATTEMPTS per call — counting failures, not just successes — so a
@@ -709,6 +715,9 @@ func purgeExpiredBeads(store beads.Store, entries []beads.Bead, cutoff time.Time
 		}
 		attempted++
 		if err := deleteFn(store, entry.ID); err != nil {
+			if errors.Is(err, errBeadNoLongerEligible) {
+				continue
+			}
 			deleteErr = errors.Join(deleteErr, fmt.Errorf("deleting expired bead %q: %w", entry.ID, err))
 			continue
 		}
@@ -718,6 +727,26 @@ func purgeExpiredBeads(store beads.Store, entries []beads.Bead, cutoff time.Time
 }
 
 func deleteExpiredBeadClosure(store beads.Store, rootID string) error {
+	// closedWispGCEntries can answer from a stale cached snapshot. A root
+	// reopened (live work resumed) inside the cache window — after the
+	// snapshot was taken but before this purge reaches it — is no longer
+	// gc-eligible; re-verify against the live store immediately before the
+	// destructive batch delete. A root that is already gone has nothing to
+	// delete.
+	live, err := beads.HandlesFor(store).Live.Get(rootID)
+	switch {
+	case errors.Is(err, beads.ErrNotFound):
+		// Root already gone — nothing to delete.
+		return errBeadNoLongerEligible
+	case err != nil:
+		// Any other live-read failure means we cannot PROVE the root is still
+		// collectible; surface it rather than silently skipping, matching
+		// reapOrphanedClosedWisps' treatment of an unreadable root Get.
+		return fmt.Errorf("live re-verify of root %q before closure delete: %w", rootID, err)
+	}
+	if live.Status != "closed" {
+		return errBeadNoLongerEligible
+	}
 	// The closure is deleted as one batch: a store that supports
 	// beads.BatchDeleter (the sqlite/Dolt graph store) removes the collected
 	// ownership tree with a single `bd delete … --force`, which deletes exactly

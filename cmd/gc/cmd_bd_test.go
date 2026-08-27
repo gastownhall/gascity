@@ -809,10 +809,19 @@ esac
 	t.Setenv("GC_CITY_PATH", cityDir)
 	t.Setenv("BD_EXPORT_AUTO", "true")
 
-	for _, args := range [][]string{
-		{"show", "gc-1", "--json"},
-		{"update", "gc-1", "--claim", "--json"},
+	for _, tc := range []struct {
+		args       []string
+		wantStderr string // "" means stderr must be empty
+	}{
+		// show is a read-only passthrough verb, so it now carries the
+		// gastownhall/gascity#5170 scope-disclosure line (see
+		// TestGcBdDisclosesAnsweringStore); this test's own concern —
+		// BD_EXPORT_AUTO is suppressed and no auto-export error reaches the
+		// operator — is unaffected by that one additive line.
+		{args: []string{"show", "gc-1", "--json"}, wantStderr: "gc bd: answering from the city store\n"},
+		{args: []string{"update", "gc-1", "--claim", "--json"}, wantStderr: ""},
 	} {
+		args := tc.args
 		var stdout, stderr bytes.Buffer
 		if got := doBd(args, &stdout, &stderr); got != 0 {
 			t.Fatalf("doBd(%v) = %d, want 0; stdout=%q stderr=%q", args, got, stdout.String(), stderr.String())
@@ -820,8 +829,8 @@ esac
 		if strings.TrimSpace(stdout.String()) == "" {
 			t.Fatalf("doBd(%v) produced empty stdout", args)
 		}
-		if stderr.String() != "" {
-			t.Fatalf("doBd(%v) stderr = %q, want empty", args, stderr.String())
+		if stderr.String() != tc.wantStderr {
+			t.Fatalf("doBd(%v) stderr = %q, want %q", args, stderr.String(), tc.wantStderr)
 		}
 	}
 }
@@ -2853,6 +2862,107 @@ func TestGcBdPassthroughResolvesBdBinary(t *testing.T) {
 		}
 		if want := "partial beads storage binding"; !strings.Contains(stderr.String(), want) {
 			t.Fatalf("stderr = %q, want it to name the %q", stderr.String(), want)
+		}
+	})
+}
+
+// newBdScopeDisclosureTestCity stages a city with one dolt-backed rig
+// ("frontend") and a stub bd on PATH that answers "[]" to anything, for
+// TestGcBdDisclosesAnsweringStore. No [storage] split is configured, so
+// maybeRouteBdByID never intercepts a read here — this is the ordinary
+// single-store shape the issue's repro used.
+func newBdScopeDisclosureTestCity(t *testing.T) {
+	t.Helper()
+	disableManagedDoltRecoveryForTest(t)
+
+	origCityFlag := cityFlag
+	origRigFlag := rigFlag
+	t.Cleanup(func() {
+		cityFlag = origCityFlag
+		rigFlag = origRigFlag
+	})
+	cityFlag = ""
+	rigFlag = ""
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "fe"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "metadata.json"), []byte(`{"backend":"doltlite"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte("#!/bin/sh\necho '[]'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_CITY_PATH", cityDir)
+}
+
+// TestGcBdDisclosesAnsweringStore pins gastownhall/gascity#5170:
+// resolveBdScopeTarget's priority chain (explicit --rig > explicit --city >
+// bead-prefix detect > -C/--directory > GC_RIG env > cwd > city) silently
+// picked a store on every path but the GC_RIG-mismatch warning, so a
+// byte-identical `gc bd list`/`ready`/`search`/`show` invocation could answer
+// "[]"/exit 0 from either of two different stores with no diagnostic
+// distinguishing "this store has no matches" from "a different store
+// answered." doBd now emits one stderr line via scopeLabel naming the store
+// that served the read, for the read-only passthrough verbs only.
+func TestGcBdDisclosesAnsweringStore(t *testing.T) {
+	t.Run("cwd auto-detect discloses the city store", func(t *testing.T) {
+		newBdScopeDisclosureTestCity(t)
+
+		var stdout, stderr bytes.Buffer
+		if got := doBd([]string{"list"}, &stdout, &stderr); got != 0 {
+			t.Fatalf("doBd(list) = %d, want 0; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "gc bd: answering from the city store") {
+			t.Fatalf("stderr = %q, want scope disclosure naming the city store", stderr.String())
+		}
+	})
+
+	for _, verb := range []string{"list", "ready", "search", "show"} {
+		t.Run("explicit --rig discloses the rig store for "+verb, func(t *testing.T) {
+			newBdScopeDisclosureTestCity(t)
+
+			args := []string{"--rig", "frontend", verb}
+			switch verb {
+			case "search":
+				args = append(args, "x")
+			case "show":
+				args = append(args, "fe-1")
+			}
+			var stdout, stderr bytes.Buffer
+			if got := doBd(args, &stdout, &stderr); got != 0 {
+				t.Fatalf("doBd(%v) = %d, want 0; stdout=%q stderr=%q", args, got, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stderr.String(), `gc bd: answering from the rig "frontend" store`) {
+				t.Fatalf("stderr = %q, want scope disclosure naming rig %q", stderr.String(), "frontend")
+			}
+		})
+	}
+
+	t.Run("write verbs stay silent", func(t *testing.T) {
+		newBdScopeDisclosureTestCity(t)
+
+		var stdout, stderr bytes.Buffer
+		if got := doBd([]string{"--rig", "frontend", "create", "--json", "x", "-t", "task"}, &stdout, &stderr); got != 0 {
+			t.Fatalf("doBd(create) = %d, want 0; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
+		}
+		if strings.Contains(stderr.String(), "answering from") {
+			t.Fatalf("stderr = %q, want no scope disclosure for a write verb; stderr=%q", stderr.String(), stderr.String())
 		}
 	})
 }

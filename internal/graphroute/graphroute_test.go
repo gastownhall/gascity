@@ -1117,27 +1117,57 @@ func TestApplyGraphControlRouteBinding_ClearsStaleFallbackMetadata(t *testing.T)
 	}
 }
 
-func TestApplyGraphRouteBinding_PoolRouted_StampsContinuationGroup(t *testing.T) {
-	step := &formula.RecipeStep{
-		Metadata: map[string]string{},
+// Pinning a molecule's steps to one pool slot is the formula's decision, so
+// routing only honors a continuation group the formula already declared. It
+// must never manufacture one: a blanket group made every pool-routed molecule
+// single-slot, and on multi-agent formulas it pinned steps to a slot whose
+// template could not run them.
+func TestApplyGraphRouteBinding_PoolRouted_ContinuationGroupIsFormulaOptIn(t *testing.T) {
+	tests := []struct {
+		name       string
+		metadata   map[string]string
+		wantGroup  string
+		wantAffini string
+	}{
+		{
+			name:     "no declared group leaves the step unpinned",
+			metadata: map[string]string{},
+		},
+		{
+			name:       "declared group requires slot affinity",
+			metadata:   map[string]string{"gc.continuation_group": "review-chain"},
+			wantGroup:  "review-chain",
+			wantAffini: "require",
+		},
+		{
+			name: "re-decoration drops affinity when the group is gone",
+			metadata: map[string]string{
+				"gc.session_affinity": "require",
+			},
+		},
 	}
-	binding := GraphRouteBinding{
-		QualifiedName: "gascity/polecat",
-		MetadataOnly:  true,
-	}
-	ApplyGraphRouteBinding(step, binding)
 
-	if got := step.Metadata["gc.continuation_group"]; got != "pool-workflow" {
-		t.Errorf("gc.continuation_group = %q, want pool-workflow", got)
-	}
-	if got := step.Metadata["gc.session_affinity"]; got != "require" {
-		t.Errorf("gc.session_affinity = %q, want require", got)
-	}
-	if got := step.Metadata["gc.routed_to"]; got != "gascity/polecat" {
-		t.Errorf("gc.routed_to = %q, want gascity/polecat", got)
-	}
-	if step.Assignee != "" {
-		t.Errorf("Assignee = %q, want empty (pool slots claim at runtime)", step.Assignee)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			step := &formula.RecipeStep{Metadata: tt.metadata}
+			ApplyGraphRouteBinding(step, GraphRouteBinding{
+				QualifiedName: "gascity/polecat",
+				MetadataOnly:  true,
+			})
+
+			if got := step.Metadata["gc.continuation_group"]; got != tt.wantGroup {
+				t.Errorf("gc.continuation_group = %q, want %q", got, tt.wantGroup)
+			}
+			if got := step.Metadata["gc.session_affinity"]; got != tt.wantAffini {
+				t.Errorf("gc.session_affinity = %q, want %q", got, tt.wantAffini)
+			}
+			if got := step.Metadata["gc.routed_to"]; got != "gascity/polecat" {
+				t.Errorf("gc.routed_to = %q, want gascity/polecat", got)
+			}
+			if step.Assignee != "" {
+				t.Errorf("Assignee = %q, want empty (pool slots claim at runtime)", step.Assignee)
+			}
+		})
 	}
 }
 
