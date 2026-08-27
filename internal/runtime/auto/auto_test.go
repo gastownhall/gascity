@@ -531,3 +531,26 @@ func TestWaitForInterruptBoundaryDelegatesToRoutedBackend(t *testing.T) {
 		t.Fatalf("last call = %#v, want WaitForInterruptBoundary for interactive-agent", last)
 	}
 }
+
+// ttyCapsFake overrides the fake's capabilities so the intersection logic can
+// be exercised with differing backend support.
+type ttyCapsFake struct {
+	*runtime.Fake
+	caps runtime.ProviderCapabilities
+}
+
+func (c *ttyCapsFake) Capabilities() runtime.ProviderCapabilities { return c.caps }
+
+// Capabilities must intersect CanAttachTTY: a backend without TTY attach makes
+// the composite report false, and two capable backends keep it true.
+func TestProvider_CapabilitiesIntersectsCanAttachTTY(t *testing.T) {
+	tty := runtime.ProviderCapabilities{CanAttachTTY: true}
+	both := New(&ttyCapsFake{runtime.NewFake(), tty}, &ttyCapsFake{runtime.NewFake(), tty})
+	if !both.Capabilities().CanAttachTTY {
+		t.Error("CanAttachTTY = false with both backends capable, want true")
+	}
+	oneOnly := New(&ttyCapsFake{runtime.NewFake(), tty}, &ttyCapsFake{runtime.NewFake(), runtime.ProviderCapabilities{}})
+	if oneOnly.Capabilities().CanAttachTTY {
+		t.Error("CanAttachTTY = true with one incapable backend, want false")
+	}
+}
