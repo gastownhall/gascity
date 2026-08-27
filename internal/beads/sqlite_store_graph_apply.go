@@ -259,6 +259,14 @@ func (s *SQLiteStore) DepMetadata(issueID, dependsOnID string) (string, bool, er
 		}
 		return "", false, fmt.Errorf("reading Graph dependency metadata %s -> %s: %w", issueID, dependsOnID, err)
 	}
+	// Gate on the same predicate NativeDoltStore.DepMetadata uses. setGraphEdgeMetadataTx
+	// declines only the empty STRING, so a non-carrying-but-nonempty payload ("{}"/"[]"/
+	// "null") is persisted verbatim; reporting that as carried would disagree with the
+	// native reader on the (payload, carried) pair the cross-engine migration witness
+	// hashes, turning a byte-identical edge into a spurious "payload lost" verdict.
+	if !DepMetadataCarries(metadata) {
+		return "", false, nil
+	}
 	return metadata, true, nil
 }
 
