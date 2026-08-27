@@ -424,7 +424,7 @@ func TestBundledBuiltinPackOrdersScanWithoutWarnings(t *testing.T) {
 }
 
 func TestBundledWorkerPromptsIncludeFilesystemSearchGuidance(t *testing.T) {
-	for _, name := range []string{"pool-worker.md", "graph-worker.md"} {
+	for _, name := range []string{"pool-worker.template.md", "graph-worker.md"} {
 		t.Run(name, func(t *testing.T) {
 			data := readBundledPackFileForTest(t, "core", "assets/prompts/"+name)
 			if !strings.Contains(data, formulaFilesystemSearchGuidance) {

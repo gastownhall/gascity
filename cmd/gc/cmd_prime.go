@@ -354,22 +354,30 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 		// Agents without a prompt_template: read a builtin prompt shipped by
 		// the core bootstrap pack, resolved from the composed pack dirs.
 		// When formula_v2 is enabled, all agents use graph-worker.md.
-		// Otherwise pool agents use pool-worker.md.
+		// Otherwise pool agents use pool-worker.template.md.
 		// Pool instances have Pool=nil after resolution, so also check the
 		// template agent via findAgentByName.
+		//
+		// The read goes through renderPrompt, not os.ReadFile, so a builtin
+		// prompt that composes a core-pack template fragment (pool-worker
+		// pulls in "claim-protocol") resolves it here exactly as it does on
+		// the prompt_template path above. graph-worker.md is a plain .md and
+		// renders verbatim.
 		if a.PromptTemplate == "" {
 			promptFile := ""
 			if coreDir := cfg.PackDirByName("core"); coreDir != "" {
 				if cfg.Daemon.FormulaV2Enabled() {
 					promptFile = filepath.Join(coreDir, "assets", "prompts", "graph-worker.md")
 				} else if a.SupportsInstanceExpansion() || isPoolInstance(cfg, a) {
-					promptFile = filepath.Join(coreDir, "assets", "prompts", "pool-worker.md")
+					promptFile = filepath.Join(coreDir, "assets", "prompts", "pool-worker.template.md")
 				}
 			}
 			if promptFile != "" {
-				if content, fErr := os.ReadFile(promptFile); fErr == nil {
+				content := renderPrompt(fsys.OSFS{}, cityPath, cityName, promptFile, ctx, cfg.Workspace.SessionTemplate, stderr,
+					cfg.PackDirsForRig(ctx.RigName), nil, nil)
+				if content != "" {
 					injection := primeHookContextSuffix(cityPath, hookMode, hookContext, stderr, consumeHandoff)
-					writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, string(content), hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
+					writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, content, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
 					return 0
 				}
 			}
