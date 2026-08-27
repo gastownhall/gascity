@@ -1700,6 +1700,18 @@ func initFailureBackoffDelay(count int, msg string) time.Duration {
 	return delay
 }
 
+// supervisorBootStepReportThreshold is how long a named boot step has to take
+// before it is worth a line in the supervisor log. Every step of a city start
+// that can plausibly exceed it runs under a phase name, so a slow boot is
+// attributable from the log alone rather than appearing as an unnamed gap
+// between two phases (ga-1e78j).
+const supervisorBootStepReportThreshold = time.Second
+
+// supervisorBootStepNow is the clock the boot-phase timer reads. It is a
+// variable so tests can prove the phase wiring without sleeping through the
+// threshold; production never replaces it.
+var supervisorBootStepNow = time.Now
+
 // reconcileCities compares the registry against running cities and
 // starts/stops as needed. All state access goes through the cityRegistry.
 func reconcileCities(
@@ -2054,9 +2066,9 @@ func reconcileCities(
 			) {
 				initStatus[path] = cityInitProgress{name: cityName, status: status}
 			})
-			started := time.Now()
+			started := supervisorBootStepNow()
 			err := fn()
-			if dur := time.Since(started); dur > time.Second {
+			if dur := supervisorBootStepNow().Sub(started); dur > supervisorBootStepReportThreshold {
 				fmt.Fprintf(stderr, "gc supervisor: city '%s': %s took %s\n", cityName, status, dur.Round(10*time.Millisecond)) //nolint:errcheck
 			}
 			return err
@@ -2198,24 +2210,34 @@ func reconcileCities(
 		// blocked by pre-fix legacy entries inherited across a supervisor
 		// restart (ga-n2d Gap C). Best-effort, mirrors runController — a sweep
 		// failure must never block city startup.
-		if cs.cityBeadStore != nil {
+		_ = runPostPrepareStep("releasing_stale_name_claims", func() error {
+			if cs.cityBeadStore == nil {
+				return nil
+			}
 			if released, err := sessionpkg.ReleaseStaleConfiguredNameClaims(cs.cityBeadStore, cfg, cityName); err != nil {
 				fmt.Fprintf(stderr, "gc supervisor: city '%s': stale name-claim sweep: %v\n", cityName, err) //nolint:errcheck
 			} else if released > 0 {
 				fmt.Fprintf(stderr, "gc supervisor: city '%s': released %d stale configured name claim(s) at startup\n", cityName, released) //nolint:errcheck
 			}
-		}
+			return nil
+		})
 
-		cs.startBeadEventWatcher(cityCtx)
-		cs.startMaintenanceLoop(cityCtx)
+		_ = runPostPrepareStep("starting_bead_event_watcher", func() error {
+			cs.startBeadEventWatcher(cityCtx)
+			cs.startMaintenanceLoop(cityCtx)
+			return nil
+		})
 
 		// G13 §6 sweep-before-serve: reconcile this city's orphan in_flight
 		// rig-create idem records before it is published into the registry (and
 		// thus before the SupervisorMux can route a rig-create/sling request to
 		// it), so a same-id retry can never re-clone over un-torn-down debris.
-		if err := cs.sweepOrphanRigProvisions(cityCtx); err != nil {
-			fmt.Fprintf(stderr, "api: rig-create boot sweep (%s): %v\n", cityName, err) //nolint:errcheck // best-effort stderr
-		}
+		_ = runPostPrepareStep("sweeping_rig_provisions", func() error {
+			if err := cs.sweepOrphanRigProvisions(cityCtx); err != nil {
+				fmt.Fprintf(stderr, "api: rig-create boot sweep (%s): %v\n", cityName, err) //nolint:errcheck // best-effort stderr
+			}
+			return nil
+		})
 
 		// Run pool on_boot hooks (same as runController does).
 		if err := runPostPrepareStep("running_pool_on_boot", func() error {

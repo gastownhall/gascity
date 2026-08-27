@@ -2093,7 +2093,40 @@ func TestControllerStateEmitsCompletedFromAuthoritativeGraphStepClose(t *testing
 	}
 }
 
-func TestControllerStateBeadEventWatcherReconcilesCompletedCloseAfterRestart(t *testing.T) {
+// listCountingEventProvider counts the full-history reads a boot path performs.
+//
+// [events.Provider.List] is the expensive call in a completions reconcile: it
+// gunzips and scans every retained archive, and no seq filter avoids that. So
+// "did the boot path run a completions reconcile" is answerable by counting
+// List, and the answer does not depend on whether the corpus happened to hold a
+// repairable gap.
+type listCountingEventProvider struct {
+	*events.Fake
+	lists atomic.Int64
+}
+
+func (p *listCountingEventProvider) List(filter events.Filter) ([]events.Event, error) {
+	p.lists.Add(1)
+	return p.Fake.List(filter)
+}
+
+// TestControllerStateBeadEventWatcherLeavesCompletionRepairToStartupSweep pins
+// the boot-path contract: starting the watcher subscribes, and does nothing
+// else.
+//
+// The watcher used to run a WHOLE-CORPUS completions reconcile inline before
+// tailing, on the theory that the repair had to land before the tail began. It
+// did not: the tail's type switch consumes only bead.created/updated/closed/
+// deleted and the reconcile emits only execution.step_completed, so producer
+// and consumer are disjoint and no ordering edge exists between them. On
+// maintainer-city that inline pass was the dominant term in an ~18 min
+// uninstrumented boot gap, paid once per city, serially (ga-1e78j).
+//
+// The crash-window gap it repaired — a durable bead.closed whose best-effort
+// execution.step_completed never landed — is owned by the startup completions
+// sweep instead; see TestCompletionsStartupSweepRepairsCrashWindowGap for the
+// other half of this pair.
+func TestControllerStateBeadEventWatcherLeavesCompletionRepairToStartupSweep(t *testing.T) {
 	backing := beads.NewMemStore()
 	root, err := backing.Create(beads.Bead{ID: "gcg-run", Metadata: map[string]string{
 		"gc.kind": "workflow", "gc.formula_contract": "graph.v2",
@@ -2122,7 +2155,7 @@ func TestControllerStateBeadEventWatcherReconcilesCompletedCloseAfterRestart(t *
 	// The close is already in the authoritative journal when this controller
 	// starts. Its watcher cursor begins at that journal head, reproducing a
 	// process crash after bead.closed but before step_completed was recorded.
-	ep := events.NewFake()
+	ep := &listCountingEventProvider{Fake: events.NewFake()}
 	ep.Record(events.Event{Type: events.BeadClosed, Actor: "bd-close", Subject: step.ID, Payload: payload})
 	prevCityStore := newControllerStateOpenCityStore
 	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
@@ -2132,17 +2165,18 @@ func TestControllerStateBeadEventWatcherReconcilesCompletedCloseAfterRestart(t *
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	cs := newControllerState(ctx, &config.City{Workspace: config.Workspace{Name: "test-city"}}, runtime.NewFake(), ep, "test-city", t.TempDir())
+	baseline := ep.lists.Load()
 	cs.startBeadEventWatcher(ctx)
 
+	if reads := ep.lists.Load() - baseline; reads != 0 {
+		t.Fatalf("startBeadEventWatcher performed %d full-history journal read(s), want 0: the boot path must not run a whole-corpus completions reconcile", reads)
+	}
 	got, listErr := ep.List(events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
 	if listErr != nil {
 		t.Fatal(listErr)
 	}
-	if len(got) != 1 {
-		t.Fatalf("reconciled completed events = %#v, want one", got)
-	}
-	if got[0].RunID != root.ID || got[0].SessionID != "gcs-session" || got[0].StepID != "build" {
-		t.Fatalf("reconciled completed event = %#v", got[0])
+	if len(got) != 0 {
+		t.Fatalf("completed events emitted at watcher start = %#v, want none: the startup sweep owns this repair", got)
 	}
 }
 

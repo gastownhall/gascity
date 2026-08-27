@@ -211,6 +211,79 @@ func TestCompletionsSweepAlwaysReportsItselfAndItsDarkStores(t *testing.T) {
 	}
 }
 
+// TestCompletionsStartupSweepRepairsCrashWindowGap is the other half of the pair
+// with TestControllerStateBeadEventWatcherLeavesCompletionRepairToStartupSweep:
+// the boot path no longer reconciles completions inline, so the sweep has to be
+// demonstrably the owner of the repair that deletion gave up.
+//
+// The gap is the crash window: a controller died after the durable bead.closed
+// hit the journal but before its best-effort execution.step_completed did. The
+// close is therefore already BELOW a fresh watcher's cursor and no tail will
+// ever redeliver it, and the delta lane names no root for it either — so the
+// only thing that converges it is a whole-corpus pass. A fresh lane reports its
+// first sweep due for reason "startup" precisely so that pass runs once per
+// boot without waiting out the cadence.
+func TestCompletionsStartupSweepRepairsCrashWindowGap(t *testing.T) {
+	backing := beads.NewMemStore()
+	root, err := backing.Create(beads.Bead{ID: "gcg-run", Metadata: map[string]string{
+		beadmeta.KindMetadataKey: beadmeta.KindWorkflow, "gc.formula_contract": "graph.v2",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	step, err := backing.Create(beads.Bead{ID: "gcg-build-attempt", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: root.ID,
+		beadmeta.StepIDMetadataKey:     "build",
+		beadmeta.SessionIDMetadataKey:  "gcs-session",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backing.Close(step.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// The close is durable in the journal before this process starts; its
+	// completion fact is not. This is exactly what the boot-path reconcile used
+	// to repair.
+	ep := events.NewFake()
+	ep.Record(closedStepEvent(t, step.ID, root.ID))
+
+	cs := &controllerState{
+		cfg:           &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		cityBeadStore: backing,
+		eventProv:     ep,
+	}
+	cr := &CityRuntime{cityName: "test-city", cityPath: t.TempDir(), cfg: cs.cfg, cs: cs, logPrefix: "gc", stderr: &bytes.Buffer{}}
+	lane := cr.completionsLaneOf()
+
+	reason, due := lane.sweepDue(time.Now())
+	if !due || reason != backstopReasonStartup {
+		t.Fatalf("a fresh lane reports (reason=%q, due=%t), want a startup sweep due immediately: without it the crash-window gap waits out the full cadence", reason, due)
+	}
+
+	result := cr.runCompletionsSweepChunk(&executionevent.CompletionBackstop{}, lane, reason)
+	if result.Emitted != 1 || !result.SweepComplete {
+		t.Fatalf("startup sweep = %+v, want one repaired fact and a complete traversal", result)
+	}
+	completed, err := ep.List(events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(completed) != 1 {
+		t.Fatalf("completed events after the startup sweep = %#v, want one", completed)
+	}
+	if got := completed[0]; got.RunID != root.ID || got.SessionID != "gcs-session" || got.StepID != "build" {
+		t.Fatalf("repaired completion fact = %#v", got)
+	}
+
+	// Idempotency: the journal's exact fact is the record, so the cadence sweep
+	// that follows the startup one does not restate the repair.
+	if again := cr.runCompletionsSweepChunk(&executionevent.CompletionBackstop{}, lane, backstopReasonCadence); again.Emitted != 0 {
+		t.Fatalf("second sweep = %+v, want no new facts", again)
+	}
+}
+
 // errorListStore fails every metadata list, standing in for a store whose
 // backend is refusing (a dolt circuit breaker, a dead remote).
 type errorListStore struct {
