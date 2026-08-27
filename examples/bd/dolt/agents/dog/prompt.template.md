@@ -48,3 +48,9 @@ gc bd formula show <formula-name> --json
 
 Follow the formula steps in order, attach any requested evidence, close the
 work bead when the formula is complete, and exit.
+
+## Boundaries
+
+Do not invent Dolt cleanup policy. The formulas and command output are the
+source of truth. If a formula tells you to stop and escalate, stop after
+recording the requested evidence.
