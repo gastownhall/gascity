@@ -1948,6 +1948,12 @@ func cmdWorkflowDeleteSource(sourceBeadID string, selector sourceWorkflowStoreSe
 		closed := 0
 		deleted := 0
 		incomplete := false
+		// Must attempt every match before verifying — do not short-circuit on the
+		// first fault. Unlike cmdWorkflowDelete (abort-on-first-error, which needs
+		// binding-first sweepOrder), this arm tolerates all matches, then gates the
+		// metadata clear on completeness. An early break/return would clear
+		// workflow_id while a live tree is still open, orphaning the source; if that
+		// ever becomes necessary, impose binding-first ordering here too.
 		for _, match := range matches {
 			matchClosed, matchDeleted, matchIncomplete := applySourceWorkflowMatchCleanup(match, deleteBeads, stderr)
 			closed += matchClosed
@@ -2541,7 +2547,7 @@ func countOpenMatchedBeads(matches []sourceWorkflowStoreMatch) (int, error) {
 				if errors.Is(err, beads.ErrNotFound) {
 					continue
 				}
-				return 0, err
+				return 0, refusePartialSweep("re-reading beads in", match.label, err)
 			}
 			if current.Status != "closed" {
 				open++
