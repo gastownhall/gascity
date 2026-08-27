@@ -2042,6 +2042,15 @@ const (
 	submitConfirmPollsPerSend = 4
 	submitConfirmPollInterval = 150 * time.Millisecond
 	submitReEnterBackoff      = 200 * time.Millisecond
+	// Draft-recovery bounds: the ordinary confirm window above totals ~2.4s,
+	// and a large paste (an 11KB startup prompt) can take a codex TUI longer
+	// than that to ingest under load — every Enter in the window is swallowed
+	// and the draft sits staged forever ('[Pasted Content N chars]', ga-wr4ft:
+	// 12 of ~40 seats in one live sweep). While that marker is visible the
+	// submit has DEFINITELY not happened, so re-sending Enter is safe; the
+	// recovery loop paces generously and stops the moment the marker clears.
+	submitDraftRecoverySends   = 8
+	submitDraftRecoveryBackoff = time.Second
 )
 
 // submitEnterAndConfirm sends the provider's submit key sequence (see
@@ -2061,7 +2070,7 @@ const (
 //
 // All side effects are injected so the decision logic is unit-testable without
 // a live tmux server.
-func submitEnterAndConfirm(sendSubmit func() error, wake func(), busy func() (bool, error), sleep func(time.Duration)) (bool, error) {
+func submitEnterAndConfirm(sendSubmit func() error, wake func(), busy func() (bool, error), drafted func() (bool, error), sleep func(time.Duration)) (bool, error) {
 	var lastErr error
 	for send := 0; send < submitEnterMaxSends; send++ {
 		if send > 0 {
@@ -2085,7 +2094,56 @@ func submitEnterAndConfirm(sendSubmit func() error, wake func(), busy func() (bo
 			sleep(submitConfirmPollInterval)
 		}
 	}
+	// Draft recovery: the ordinary window can expire entirely inside a large
+	// paste's ingest, with every Enter swallowed. A visible staged-draft
+	// marker means the submit definitively did not happen, so re-sending is
+	// safe — and only then: providers without a draft probe keep the old
+	// contract untouched.
+	if drafted == nil {
+		return false, lastErr
+	}
+	for send := 0; send < submitDraftRecoverySends; send++ {
+		isDrafted, err := drafted()
+		if err != nil || !isDrafted {
+			break
+		}
+		if isBusy, err := busy(); err == nil && isBusy {
+			return true, nil
+		}
+		if err := sendSubmit(); err != nil {
+			lastErr = err
+		} else {
+			lastErr = nil
+		}
+		wake()
+		sleep(submitDraftRecoveryBackoff)
+		if isBusy, err := busy(); err == nil && isBusy {
+			return true, nil
+		}
+		if isDrafted, err := drafted(); err == nil && !isDrafted {
+			// The draft cleared: the submit landed even if the busy probe
+			// missed the turn (short turns can complete between polls).
+			return true, nil
+		}
+	}
 	return false, lastErr
+}
+
+// paneShowsStagedDraft reports whether the target pane's composer visibly
+// holds an unsubmitted pasted draft (codex renders '[Pasted Content N chars]'
+// in the input box until the draft is submitted). A visible draft is the one
+// state where re-sending Enter is provably safe (ga-wr4ft).
+func (t *Tmux) paneShowsStagedDraft(target string) (bool, error) {
+	lines, err := t.CapturePaneLines(target, promptObservationLines)
+	if err != nil {
+		return false, err
+	}
+	for _, line := range lines {
+		if strings.Contains(line, "[Pasted Content") {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // paneBusy reports whether the target pane shows an active processing indicator
@@ -2290,7 +2348,10 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	sendSubmit := func() error { return t.sendNudgeSubmitSequence(target, submitKeys) }
 	wake := func() { t.WakePaneIfDetached(session) }
 	if t.submitVerifyEligible(target) {
-		confirmed, err := submitEnterAndConfirm(sendSubmit, wake, func() (bool, error) { return t.paneBusy(target) }, time.Sleep)
+		confirmed, err := submitEnterAndConfirm(sendSubmit, wake,
+			func() (bool, error) { return t.paneBusy(target) },
+			func() (bool, error) { return t.paneShowsStagedDraft(target) },
+			time.Sleep)
 		if err != nil {
 			return fmt.Errorf("failed to send submit sequence: %w", err)
 		}
