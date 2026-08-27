@@ -154,8 +154,10 @@ type hookClaimOptions struct {
 // queries $GC_SESSION_ID first.
 //
 // Assignee cannot serve here. With no alias or agent in the environment it falls
-// through to cliSessionName's runtime form (gascity--gc__implementation-worker-5-pool),
-// which is not what a session bead records as session_name
+// through to the runtime session-name form — GC_SESSION_NAME, resolved via
+// hookSessionAgentForQuery in the pool-worker path where this fix is load-bearing
+// (gascity--gc__implementation-worker-5-pool) — which is not what a session bead
+// records as session_name
 // (gc__implementation-worker-gcs-session-<id>). Beads pinned to that form matched
 // no session identity at all, so wake demand could never reach them and the
 // molecule stalled permanently.
