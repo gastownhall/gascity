@@ -5392,7 +5392,7 @@ func TestBuildDesiredState_NamepoolMaxOneUsesNamepoolIdentity(t *testing.T) {
 	}
 }
 
-func TestBuildDesiredState_NewPoolSessionBeadDefersAliasWhenConcreteAliasTaken(t *testing.T) {
+func TestBuildDesiredState_DoesNotCreateWhenConcreteNamepoolIdentityHeld(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
 
@@ -5421,10 +5421,9 @@ func TestBuildDesiredState_NewPoolSessionBeadDefersAliasWhenConcreteAliasTaken(t
 			StartCommand:      "true",
 			MaxActiveSessions: intPtr(3),
 			ScaleCheck:        "printf 1",
-			// A NAMEPOOL agent: its members are identified by stable pool names
-			// ("furiosa"), which still persist as aliases, so the alias-conflict
-			// deferral lane this test covers is still reachable. Transient numeric
-			// slots never take an alias at all, so they have nothing to defer.
+			// A one-member namepool: the foreign manual row above holds its only
+			// concrete identity, so fresh allocation must fail at capacity rather
+			// than creating another occupant with the alias merely deferred.
 			NamepoolNames: []string{"furiosa"},
 		}},
 	}
@@ -5436,57 +5435,25 @@ func TestBuildDesiredState_NewPoolSessionBeadDefersAliasWhenConcreteAliasTaken(t
 	if err != nil {
 		t.Fatalf("load session beads: %v", err)
 	}
-	var created beads.Bead
+	managed := 0
 	for _, candidate := range sessionBeads {
 		if candidate.Metadata[poolManagedMetadataKey] == boolMetadata(true) {
-			created = candidate
-			break
+			managed++
 		}
 	}
-	if created.ID == "" {
-		t.Fatalf("did not create a managed pool session bead; beads=%#v", sessionBeads)
+	if managed != 0 || len(sessionBeads) != 1 {
+		t.Fatalf("session beads = %#v, want only the manual concrete-identity holder", sessionBeads)
 	}
-	if got := created.Metadata["agent_name"]; got != "rig/furiosa" {
-		t.Fatalf("created agent_name = %q, want namepool identity", got)
+	if len(dsResult.State) != 1 {
+		t.Fatalf("desired state = %#v, want only the manual concrete-identity holder", dsResult.State)
 	}
-	if got := created.Metadata["alias"]; got != "" {
-		t.Fatalf("created alias = %q, want deferred until alias guard accepts it", got)
+	for _, tp := range dsResult.State {
+		if !tp.ManualSession || tp.PoolSlot != 0 {
+			t.Fatalf("desired entry = %+v, want manual holder and no pool occupant", tp)
+		}
 	}
-	if got := created.Metadata["pool_slot"]; got != "1" {
-		t.Fatalf("created pool_slot = %q, want 1", got)
-	}
-	tp, ok := dsResult.State[created.Metadata["session_name"]]
-	if !ok {
-		t.Fatalf("desired state missing created session %q; keys=%v", created.Metadata["session_name"], mapKeys(dsResult.State))
-	}
-	if got := tp.Alias; got != "" {
-		t.Fatalf("deferred pool TemplateParams.Alias = %q, want empty until alias is claimed", got)
-	}
-	if got := tp.Env["GC_ALIAS"]; got != "" {
-		t.Fatalf("deferred pool GC_ALIAS = %q, want empty until alias is claimed", got)
-	}
-	if got := tp.Env["GC_AGENT"]; got != tp.SessionName {
-		t.Fatalf("deferred pool GC_AGENT = %q, want bead session name %q", got, tp.SessionName)
-	}
-	if tp.EnvIdentityStamped {
-		t.Fatal("deferred pool EnvIdentityStamped = true, want false until alias is claimed")
-	}
-
-	clk := &clock.Fake{Time: time.Date(2026, 5, 7, 15, 10, 0, 0, time.UTC)}
-	var syncStderr bytes.Buffer
-	syncSessionBeads(cityPath, store, dsResult.State, runtime.NewFake(), allConfiguredDS(dsResult.State), cfg, clk, &syncStderr, false)
-	got, err := store.Get(created.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Metadata["alias"] != "" {
-		t.Fatalf("synced alias = %q, want still deferred after conflict", got.Metadata["alias"])
-	}
-	if got.Metadata[poolAliasConflictMetadataKey] != "rig/furiosa" {
-		t.Fatalf("pool_alias_conflict = %q, want rig/furiosa", got.Metadata[poolAliasConflictMetadataKey])
-	}
-	if !strings.Contains(syncStderr.String(), "unavailable") {
-		t.Fatalf("sync stderr %q does not mention alias conflict", syncStderr.String())
+	if !strings.Contains(stderr.String(), "no free concrete slot") {
+		t.Fatalf("stderr %q does not report concrete-slot exhaustion", stderr.String())
 	}
 }
 
@@ -8642,7 +8609,7 @@ func TestBuildDesiredState_PoolSessionCoreFingerprintStableAcrossTicks(t *testin
 	}
 }
 
-func TestBuildDesiredState_FallsBackToLegacyPoolDemandWhenListFails(t *testing.T) {
+func TestBuildDesiredState_BlocksFreshPoolDemandWhenSessionListFails(t *testing.T) {
 	cityPath := t.TempDir()
 	memStore := beads.NewMemStore()
 	store := listFailStore{Store: memStore}
@@ -8657,22 +8624,18 @@ func TestBuildDesiredState_FallsBackToLegacyPoolDemandWhenListFails(t *testing.T
 	}
 
 	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
-	desired := dsResult.State
-	// With min=1, max=1: both the singleton path and the pool-floor path
-	// may contribute a session, yielding 1 or 2 desired entries depending
-	// on timing. Accept either.
-	if len(desired) < 1 || len(desired) > 2 {
-		t.Fatalf("desired sessions = %d, want 1 or 2", len(desired))
+	if len(dsResult.State) != 0 {
+		t.Fatalf("desired sessions = %#v, want no fresh row from a partial session census", dsResult.State)
 	}
-	// At least one session should have a worker-prefixed name.
-	found := false
-	for sn := range desired {
-		if strings.HasPrefix(sn, "worker") {
-			found = true
-		}
+	if !dsResult.SessionQueryPartial || dsResult.SessionSnapshotComplete {
+		t.Fatalf("session snapshot flags = partial:%v complete:%v, want partial and incomplete", dsResult.SessionQueryPartial, dsResult.SessionSnapshotComplete)
 	}
-	if !found {
-		t.Fatalf("no worker-prefixed session in desired: %v", desired)
+	rows, err := memStore.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		t.Fatalf("list backing store: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("session rows = %#v, want zero creates on partial census", rows)
 	}
 }
 

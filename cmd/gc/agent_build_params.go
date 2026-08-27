@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/materialize"
 	"github.com/gastownhall/gascity/internal/poolplan"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
@@ -46,6 +47,19 @@ type agentBuildParams struct {
 	// sessionBeads caches the open session-bead snapshot for the current
 	// desired-state build so per-agent resolution does not rescan the store.
 	sessionBeads *sessionBeadSnapshot
+
+	// sessionSnapshotComplete is the controller's explicit verdict that the
+	// session census used by this desired-state build is complete. Fresh pool
+	// materialization is unsafe without that proof: a missing holder can make an
+	// occupied concrete slot look free. sessionSnapshotCompletenessKnown
+	// distinguishes production's explicit verdict from focused unit fixtures;
+	// legacy fixtures infer completeness from a present, error-free snapshot.
+	sessionSnapshotComplete          bool
+	sessionSnapshotCompletenessKnown bool
+	// sessionOccupancyInfos is the complete cross-store open-session census
+	// used only for fresh concrete-slot reservation. Production sets it from
+	// collectAllOpenSessionInfos; focused fixtures fall back to sessionBeads.
+	sessionOccupancyInfos []session.Info
 
 	// assignedWorkBeads is the actionable assigned-work snapshot for this
 	// build. Pool new-tier materialization uses it to avoid treating sessions
@@ -105,6 +119,24 @@ type agentBuildParams struct {
 	// etc.). Used by the skill materialization integration to decide
 	// stage-2 eligibility.
 	sessionProvider string
+}
+
+// hasCompleteSessionSnapshot reports whether a store-backed build has a
+// complete session census. Storeless legacy builds do not allocate persistent
+// session rows and therefore do not require the bead snapshot. The inference
+// lane keeps focused unit fixtures concise; production always sets the explicit
+// verdict after both the primary snapshot load and the cross-store census.
+func (p *agentBuildParams) hasCompleteSessionSnapshot() bool {
+	if p == nil {
+		return false
+	}
+	if p.beadStore == nil {
+		return true
+	}
+	if p.sessionSnapshotCompletenessKnown {
+		return p.sessionSnapshotComplete
+	}
+	return p.sessionBeads != nil && p.sessionBeads.LoadError() == nil
 }
 
 // newAgentBuildParams constructs agentBuildParams from the common startup values.

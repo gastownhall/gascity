@@ -2270,8 +2270,8 @@ func TestBuildDesiredState_BlockedFreshSessionMaterializesRunnableReplacement(t 
 			if !replacement.PendingCreateClaim {
 				t.Fatalf("replacement %s is not pending create: %+v", replacement.ID, *replacement)
 			}
-			if replacement.PoolSlot != "1" {
-				t.Fatalf("replacement pool_slot = %q, want transitional reuse of logical slot 1", replacement.PoolSlot)
+			if replacement.PoolSlot != "2" {
+				t.Fatalf("replacement pool_slot = %q, want next free slot 2 while live holder retains slot 1", replacement.PoolSlot)
 			}
 			if _, ok := result.BaseState[blocked.Metadata["session_name"]]; ok {
 				t.Fatalf("blocked session %q leaked into base desired state", blocked.Metadata["session_name"])

@@ -372,18 +372,35 @@ func reusableDependencyPoolSessionInfos(bp *agentBuildParams, template string) [
 	return candidates
 }
 
-// findReusableCanonicalNonExpandingDependencyPoolSessionInfo is the session.Info
-// sibling of findReusableCanonicalNonExpandingDependencyPoolSessionBead.
-func findReusableCanonicalNonExpandingDependencyPoolSessionInfo(
+// reusableDependencyPoolSessionInfosAt excludes dependency rows that cannot
+// run at decisionTime. A held/quarantined dependency-only row still owns its
+// concrete slot, but it cannot satisfy the floor; the holder-aware fresh-slot
+// allocator therefore chooses another in-cap slot for the prerequisite.
+func reusableDependencyPoolSessionInfosAt(bp *agentBuildParams, template string, decisionTime time.Time) []session.Info {
+	candidates := reusableDependencyPoolSessionInfos(bp, template)
+	filtered := candidates[:0]
+	for _, info := range candidates {
+		if strings.TrimSpace(info.WaitHold) != "" ||
+			metadataTimeInFuture(info.HeldUntil, decisionTime) ||
+			metadataTimeInFuture(info.QuarantinedUntil, decisionTime) {
+			continue
+		}
+		filtered = append(filtered, info)
+	}
+	return filtered
+}
+
+func findReusableCanonicalNonExpandingDependencyPoolSessionInfoAt(
 	bp *agentBuildParams,
 	cfgAgent *config.Agent,
 	template string,
+	decisionTime time.Time,
 ) (session.Info, bool) {
 	if bp == nil || bp.sessionBeads == nil || !cfgAgent.UsesCanonicalSingletonPoolIdentity() {
 		return session.Info{}, false
 	}
 	canonical := cfgAgent.QualifiedName()
-	for _, info := range reusableDependencyPoolSessionInfos(bp, template) {
+	for _, info := range reusableDependencyPoolSessionInfosAt(bp, template, decisionTime) {
 		if staleNonExpandingPoolSessionBeadInfo(cfgAgent, info) {
 			continue
 		}
