@@ -155,6 +155,37 @@ func TestPreferredReachabilityRef(t *testing.T) {
 	}
 }
 
+// TestCommitReachableOnEitherRef pins the union: the remote-tracking ref is
+// preferred, but a commit reachable only from the local branch still passes.
+func TestCommitReachableOnEitherRef(t *testing.T) {
+	tests := []struct {
+		name           string
+		remoteResolves map[string]bool
+		reachable      map[string]bool
+		want           bool
+	}{
+		{"remote resolves and contains the commit", map[string]bool{"refs/remotes/origin/main": true}, map[string]bool{"refs/remotes/origin/main": true}, true},
+		{"remote is stale, local branch contains the commit", map[string]bool{"refs/remotes/origin/main": true}, map[string]bool{"main": true}, true},
+		{"neither ref contains the commit", map[string]bool{"refs/remotes/origin/main": true}, map[string]bool{}, false},
+		{"no remote-tracking ref, local branch contains the commit", map[string]bool{}, map[string]bool{"main": true}, true},
+		{"no remote-tracking ref, local branch does not", map[string]bool{}, map[string]bool{}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			probes := map[string]int{}
+			got := commitReachableOnEitherRef("main",
+				func(ref string) bool { return tc.remoteResolves[ref] },
+				func(ref string) bool { probes[ref]++; return tc.reachable[ref] })
+			if got != tc.want {
+				t.Fatalf("commitReachableOnEitherRef = %v, want %v", got, tc.want)
+			}
+			if probes["main"] > 1 {
+				t.Fatalf("local ref probed %d times, want at most 1", probes["main"])
+			}
+		})
+	}
+}
+
 func TestIsWorkRecordGatedBead(t *testing.T) {
 	tests := []struct {
 		name string

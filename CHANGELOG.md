@@ -125,9 +125,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   worktree — advancing `refs/remotes/origin/<branch>` but never the local ref
   checked out elsewhere — so a genuinely-landed commit read as unreachable
   until something happened to fast-forward the local branch, which in that
-  topology may be never. The gate now prefers `refs/remotes/origin/<branch>`
-  when it resolves, falling back to the bare name for purely local repos with
-  no `origin` remote. (gascity#5037)
+  topology may be never. The gate now checks `refs/remotes/origin/<branch>`
+  first when it resolves, and still falls back to the bare branch name — so a
+  commit is reachable if it is on either ref. Purely local repos with no
+  `origin` remote are unaffected, and a commit that has been committed locally
+  but not yet pushed continues to satisfy the gate as it did before.
+  (gascity#5037)
 
 - **The dolt pack's `run_bounded` python3 fallback now sends SIGTERM before
   SIGKILL, matching its documented contract.** The fallback (used when
