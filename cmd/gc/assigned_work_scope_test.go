@@ -304,7 +304,7 @@ func TestFilterAssignedWorkBeadsForPoolDemandDropsDeferredRoutedBead(t *testing.
 		},
 	}
 
-	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, work, []string{"", ""})
+	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, nil, work, []string{"", ""})
 
 	if len(got) != 1 || got[0].ID != "live-routed-work" {
 		t.Fatalf("filtered work = %#v, want only live-routed-work (deferred anchor dropped)", got)
@@ -330,7 +330,7 @@ func TestFilterAssignedWorkBeadsForPoolDemandKeepsElapsedDeferRoutedBead(t *test
 		DeferUntil: &past,
 	}}
 
-	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, work, []string{""})
+	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, nil, work, []string{""})
 
 	if len(got) != 1 || got[0].ID != "elapsed-defer-work" {
 		t.Fatalf("filtered work = %#v, want elapsed-defer bead preserved as demand", got)
