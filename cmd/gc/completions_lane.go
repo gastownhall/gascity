@@ -196,7 +196,20 @@ func (l *completionsLane) takePending() []string {
 // The reason is not decoration. A sweep running because the event feed declared
 // a gap and a sweep running on its hourly cadence are different events with
 // different follow-ups, and the trace field they both land in cannot tell them
-// apart unless the lane says which.
+// apart unless the lane says which. The reason also selects VisitStamped (only
+// a startup sweep re-examines converged-stamped roots), so the ORDER of these
+// cases is load-bearing.
+//
+// Startup is checked BEFORE forced, and must be: a startup sweep visits stamped
+// AND unstamped roots, a strict superset of the cursor-gap sweep's unstamped
+// walk, so answering "startup" for a boot that was also forced loses no
+// coverage. The reverse order does lose: the delta-feed gap callback can
+// force() the lane before its first sweep, and if forced won that race the boot
+// sweep would be cursor-gap-labeled with VisitStamped=false — skipping stamped
+// roots so the per-boot stale-stamp heal never runs on the one sweep that could.
+// Once the first full traversal completes, noteSweepChunk sets sweepRan and
+// clears forced together, so this case stops firing and a later force is
+// correctly reported as a cursor gap.
 func (l *completionsLane) sweepDue(now time.Time) (string, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -204,10 +217,10 @@ func (l *completionsLane) sweepDue(now time.Time) (string, bool) {
 		return "", false
 	}
 	switch {
-	case l.forced:
-		return backstopReasonCursorGap, true
 	case !l.sweepRan:
 		return backstopReasonStartup, true
+	case l.forced:
+		return backstopReasonCursorGap, true
 	case now.Sub(l.lastSweepAt) >= l.interval:
 		return backstopReasonCadence, true
 	default:

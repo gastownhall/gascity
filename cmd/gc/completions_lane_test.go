@@ -378,3 +378,35 @@ func TestCompletionsSweepReportsWhyItWasDue(t *testing.T) {
 		t.Fatalf("a lane that never swept reported %v, want no reason at all", fresh)
 	}
 }
+
+// TestCompletionsLaneForceBeforeFirstSweepStaysStartup pins Finding 2's fix: a
+// feed-gap force that arrives BEFORE the lane's first sweep must not demote that
+// boot sweep from startup to cursor-gap. Only a startup-labeled sweep sets
+// VisitStamped (executionevent's per-boot pass that re-examines converged
+// stamps), so a cursor-gap-labeled first sweep would skip stamped roots and the
+// stale-stamp heal would never run on the one sweep that could — nullifying the
+// "startup sweeps heal stale stamps" property. sweepDue keeps startup ahead of
+// forced until the first full sweep completes.
+func TestCompletionsLaneForceBeforeFirstSweepStaysStartup(t *testing.T) {
+	now := time.Now()
+	lane := newCompletionsLane()
+
+	// The delta-lane gap callback can force() the lane at boot, before the first
+	// sweep has run.
+	lane.force()
+
+	reason, due := lane.sweepDue(now)
+	if !due || reason != backstopReasonStartup {
+		t.Fatalf("a force before the first sweep left it due=%t reason=%q, want due with reason %q — a cursor-gap boot sweep suppresses VisitStamped and skips stamped roots", due, reason, backstopReasonStartup)
+	}
+
+	// Once the first full traversal completes, sweepRan latches and the force is
+	// cleared together, so a LATER gap is correctly reported as a cursor gap —
+	// the startup precedence applies only to the first sweep, it is not a
+	// permanent override of the gap reason.
+	lane.noteSweepChunk(now, reason, 0, 0, 0, true)
+	lane.force()
+	if r, due := lane.sweepDue(now.Add(time.Second)); !due || r != backstopReasonCursorGap {
+		t.Fatalf("a gap after the first sweep is due=%t reason=%q, want due with reason %q", due, r, backstopReasonCursorGap)
+	}
+}
