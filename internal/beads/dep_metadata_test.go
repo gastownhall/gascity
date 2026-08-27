@@ -64,6 +64,61 @@ func TestSQLiteStoreCarriesAnEdgePayload(t *testing.T) {
 	}
 }
 
+// TestSQLiteStoreReadsANonCarryingPayloadAsAbsent pins the read half of the
+// parity NativeDoltStore.DepMetadata's doc claims "to the letter": a sidecar
+// holding a payload that renders none — "{}"/"[]"/"null" — reads back
+// ("", false), the same answer the native reader gives.
+//
+// setGraphEdgeMetadataTx declines only the empty STRING, so these three land in
+// kv verbatim; without the reader gate SQLite would answer ("{}", true) where
+// native answers ("{}", false), and the cross-engine migration witness — which
+// hashes (payload, carried) — would read a byte-identical edge as payload lost.
+// The gap this closes was invisible to the suite because no test asserted the
+// carried bit for a persisted non-carrying-but-nonempty payload.
+func TestSQLiteStoreReadsANonCarryingPayloadAsAbsent(t *testing.T) {
+	store := newSQLiteGraphApplyStore(t, t.TempDir())
+	var asStore Store = store
+	writer, ok := asStore.(DepMetadataWriter)
+	if !ok {
+		t.Fatal("SQLiteStore does not implement DepMetadataWriter, so the infra-class copy has no way to carry an edge payload")
+	}
+
+	seed := func(title string) Bead {
+		b, err := store.Create(Bead{Title: title})
+		if err != nil {
+			t.Fatalf("seeding %s: %v", title, err)
+		}
+		return b
+	}
+
+	for _, payload := range []string{"{}", "[]", "null", " {\n} "} {
+		t.Run(payload, func(t *testing.T) {
+			if DepMetadataCarries(payload) {
+				t.Fatalf("test payload %q carries; it must be a non-carrying-but-nonempty value", payload)
+			}
+			gated, gate := seed("gated"), seed("gate")
+			if err := writer.DepAddWithMetadata(gated.ID, gate.ID, "blocks", payload); err != nil {
+				t.Fatalf("DepAddWithMetadata(%q): %v", payload, err)
+			}
+			got, carried, err := store.DepMetadata(gated.ID, gate.ID)
+			if err != nil {
+				t.Fatalf("DepMetadata: %v", err)
+			}
+			if carried || got != "" {
+				t.Errorf("an edge whose sidecar holds the non-carrying payload %q reads back (%q, %v), want (\"\", false) to match NativeDoltStore", payload, got, carried)
+			}
+			// The edge itself must still exist — the gate hides the payload, not the dependency.
+			deps, err := store.DepList(gated.ID, "down")
+			if err != nil {
+				t.Fatalf("DepList: %v", err)
+			}
+			if len(deps) != 1 {
+				t.Fatalf("wrote %d edges, want 1: %+v", len(deps), deps)
+			}
+		})
+	}
+}
+
 // TestDepMetadataCarries pins the rule that separates a real edge payload from
 // an engine's rendering of an absent one.
 //
