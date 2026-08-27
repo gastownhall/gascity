@@ -936,6 +936,22 @@ func buildDesiredStateWithSessionBeads(
 	// Raw gc.routed_to metadata is intentionally NOT treated as direct named
 	// demand here. The controller only uses assignment/readiness state; routed
 	// metadata is consumed by the agent-side gc hook path.
+	//
+	// namedClaimRefs widens the reachability test below the same way the pool
+	// demand tier is widened at :862 and the wake filter already is: a claim
+	// recorded under a relocated "class:*" binding ref matches no rig name, so a
+	// rig-scoped named session that dies holding one is otherwise never resumed
+	// even though the wake side still retains the holder (ga-whzrt, one tier
+	// over). It is a city-level property, so resolve it once — and only when
+	// there is both work to match and a named spec to match it — mirroring the
+	// pool filter's guards so an idle city does no topology work.
+	// assignedWorkRelocatedClaimRefs answers nil on a single-store city (nothing
+	// relocated) and degrades a nil store to nil refs, so this never widens the
+	// rig gate where the base rig-equality test is all that is correct.
+	var namedClaimRefs []string
+	if len(assignedWorkBeads) > 0 && len(namedSpecs) > 0 {
+		namedClaimRefs = assignedWorkRelocatedClaimRefs(cityPath, cfg, store)
+	}
 	for identity, spec := range namedSpecs {
 		for i, wb := range assignedWorkBeads {
 			// in_progress work is always actionable; open work is direct named
@@ -972,7 +988,7 @@ func buildDesiredStateWithSessionBeads(
 			// configured named session's own bare identity, so this bare match
 			// is trustworthy unconditionally — no per-template-shape guard
 			// needed here anymore (ga-p0u752).
-			if !assignedWorkIndexReachableFromAgent(cityPath, cfg, spec.Agent, assignedWorkStoreRefs, i) {
+			if !assignedWorkIndexReachableFromAgentOnClaimRefs(cityPath, cfg, spec.Agent, assignedWorkStoreRefs, i, namedClaimRefs) {
 				continue
 			}
 			fmt.Fprintf(stderr, "namedWorkReady: %s matched by bead %s (assignee=%s status=%s)\n", identity, wb.ID, assignee, wb.Status) //nolint:errcheck
@@ -3325,6 +3341,88 @@ func routedWorkRepointClaimedElsewhere(bp *agentBuildParams, current session.Inf
 	return "", false, nil
 }
 
+// namedTriggerRefIsSameStore reports whether a named session's stamped
+// gc.trigger_bead_store_ref names the city store that bindNamedSessionTriggerBead
+// was handed. Empty is the unstamped same-store default; "city" and
+// "city:<cityName>" are the two same-store spellings normalizeDemandStoreRef
+// already collapses onto the city. Everything else -- "rig:*", class refs,
+// another city's name, anything unrecognized -- is treated as a different
+// store. The match is exact by design: a ref this function cannot confidently
+// place is one whose target it cannot read, and a stale stamp is cheaper than
+// a wrong clear.
+func namedTriggerRefIsSameStore(storeRef, cityName string) bool {
+	storeRef = strings.TrimSpace(storeRef)
+	cityName = strings.TrimSpace(cityName)
+	switch {
+	case storeRef == "", storeRef == "city":
+		return true
+	case cityName != "" && storeRef == "city:"+cityName:
+		return true
+	default:
+		return false
+	}
+}
+
+// bindNamedSessionTriggerBead clears a named session's trigger stamp when its
+// stamped target is no longer workable (absent, closed, or blocked -- the last
+// read off bd's IsBlocked ready-work projection, since production stores fold
+// the raw `blocked` status into "open"), mirroring bindPoolSessionTriggerBead's
+// clear semantics for the pool path.
+// Unlike pool dispatch, the named path has no per-tick SessionRequest that
+// already reflects "no ready work" -- resolvePreservedConfiguredNamedSessionTemplate
+// only replays whatever is currently stamped -- so without this check a
+// parked target re-aims every subsequent seat indefinitely (gascity#4373).
+// A target in a *different* store (info.TriggerBeadStoreRef naming a store
+// other than `store`, per namedTriggerRefIsSameStore) is left untouched: this
+// function can only see `store`, and misjudging a bead it cannot reach is
+// worse than leaving a stale stamp for one more tick. The same-store city
+// spellings do reach the status check -- the reported #4373 shape stamps one
+// ("city"/"city:<name>"), so bailing on every non-empty ref would no-op on
+// exactly the case this exists for.
+func bindNamedSessionTriggerBead(store beads.Store, info session.Info, cityName string) (session.Info, error) {
+	triggerID := strings.TrimSpace(info.TriggerBeadID)
+	if triggerID == "" || store == nil {
+		return info, nil
+	}
+	if !namedTriggerRefIsSameStore(info.TriggerBeadStoreRef, cityName) {
+		return info, nil
+	}
+	target, err := store.Get(triggerID)
+	stale := errors.Is(err, beads.ErrNotFound)
+	if err != nil && !stale {
+		// Lookup failed for a reason other than "gone" (e.g. a transient
+		// backend error): don't misjudge a bead we couldn't actually read.
+		return info, nil
+	}
+	if !stale {
+		// mapBdStatus folds bd's raw `blocked` into "open" (gc-4zb/#4395), so a
+		// literal status check never fires through BdStore/DoltLite/NativeDolt.
+		// IsBlocked is bd's denormalized ready-work projection and is the signal
+		// the wake side already uses for #4726. A nil projection (native DoltLite
+		// snapshots, pre-1.0.5 bd) fails open: the stamp survives one more tick
+		// rather than risking a wrong clear. The literal check stays for stores
+		// that do surface the raw status.
+		stale = target.Status == "closed" ||
+			target.Status == "blocked" ||
+			(target.IsBlocked != nil && *target.IsBlocked)
+	}
+	if !stale {
+		return info, nil
+	}
+	// A same-store city ref reaches here stamped, so clear the whole cluster
+	// rather than leaving a store-ref key pointing at a trigger id that no
+	// longer exists -- the same keys the pool path clears in
+	// computePoolTriggerBindingPatch.
+	patch := session.MetadataPatch{beadmeta.TriggerBeadIDMetadataKey: ""}
+	if strings.TrimSpace(info.TriggerBeadStoreRef) != "" {
+		patch[beadmeta.TriggerBeadStoreRefMetadataKey] = ""
+	}
+	if strings.TrimSpace(info.BrainParentSID) != "" {
+		patch[beadmeta.BrainParentSIDMetadataKey] = ""
+	}
+	return sessionFrontDoor(store).UpdateMetadataInfo(info, patch)
+}
+
 func poolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, request SessionRequest) string {
 	if bp == nil || cfgAgent == nil || strings.TrimSpace(request.WorkBeadID) == "" {
 		return ""
@@ -5127,13 +5225,22 @@ func evaluateReadyContinuationClaimCandidate(
 	if err != nil {
 		return ContinuationClaimCandidate{}, continuationCandidateHold
 	}
+	// The root proves the molecule is a live graph-v2 run in this exact store.
+	// It deliberately does NOT gate on the root's gc.session_name: that key is a
+	// dashboard back-fill stamped by stampRunRootFromStep from whichever step
+	// most recently went in_progress (#2843), so on a multi-agent molecule it
+	// names one participating template and contradicts every other one. Gating
+	// here on it silently excluded every cross-template successor of formulas
+	// like mol-adopt-pr-v2 (apply-fixes on a worker slot, quality-scorecard on a
+	// reviewer slot) from ever being nudged. The binding that actually authorizes
+	// delivery is the step's own assignee resolving to exactly one live session
+	// (newPoolContinuationCandidateSnapshot).
 	if root.ID != rootID ||
 		!strings.EqualFold(strings.TrimSpace(root.Status), "in_progress") ||
 		!strings.EqualFold(strings.TrimSpace(root.Type), "task") ||
 		strings.TrimSpace(root.Metadata[beadmeta.RootStoreRefMetadataKey]) != canonicalStoreRef ||
 		strings.TrimSpace(root.Metadata[beadmeta.FormulaContractMetadataKey]) != "graph.v2" ||
-		strings.TrimSpace(root.Metadata[beadmeta.KindMetadataKey]) != "workflow" ||
-		strings.TrimSpace(root.Metadata[beadmeta.SessionNameMetadataKey]) != strings.TrimSpace(bead.Assignee) {
+		strings.TrimSpace(root.Metadata[beadmeta.KindMetadataKey]) != "workflow" {
 		return ContinuationClaimCandidate{}, continuationCandidateAbsent
 	}
 	return ContinuationClaimCandidate{

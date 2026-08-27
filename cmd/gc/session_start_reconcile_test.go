@@ -914,7 +914,7 @@ func TestResolveExactSessionStartTemplateEmptyPromptDoesNotInvokeGit(t *testing.
 		t.Fatalf("git path = %q, want fake %q", gitPath, want)
 	}
 
-	tp, err := resolveExactSessionStartTemplate(params, env.sessionInfo(bead.ID), &env.cfg.Agents[0], env.clk, io.Discard)
+	tp, _, err := resolveExactSessionStartTemplate(params, env.sessionInfo(bead.ID), &env.cfg.Agents[0], env.clk, io.Discard)
 	if err != nil {
 		t.Fatalf("resolve exact session start template: %v", err)
 	}

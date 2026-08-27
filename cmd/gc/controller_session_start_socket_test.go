@@ -1249,7 +1249,7 @@ func TestExactResetHandoffRefusesAWriterThatRacedTheAuthorityRead(t *testing.T) 
 	params.RolloutMode = rollout.Require
 	params.Store = race
 
-	tp, err := resolveExactSessionStartTemplate(params, before, &env.cfg.Agents[0], env.clk, io.Discard)
+	tp, _, err := resolveExactSessionStartTemplate(params, before, &env.cfg.Agents[0], env.clk, io.Discard)
 	if err != nil {
 		t.Fatalf("resolve reset template: %v", err)
 	}
@@ -1303,7 +1303,7 @@ func TestExactResetHandoffCommitsWhenNothingRacesIt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read reset row: %v", err)
 	}
-	tp, err := resolveExactSessionStartTemplate(params, info, &env.cfg.Agents[0], env.clk, io.Discard)
+	tp, _, err := resolveExactSessionStartTemplate(params, info, &env.cfg.Agents[0], env.clk, io.Discard)
 	if err != nil {
 		t.Fatalf("resolve reset template: %v", err)
 	}
@@ -1337,7 +1337,7 @@ func seedResetRowUnderIncompleteScan(
 	params.Provider = provider
 	params.Generation = 1
 	params.RolloutMode = rollout.Require
-	tp, err := resolveExactSessionStartTemplate(params, env.sessionInfo(bead.ID), &env.cfg.Agents[0], env.clk, io.Discard)
+	tp, _, err := resolveExactSessionStartTemplate(params, env.sessionInfo(bead.ID), &env.cfg.Agents[0], env.clk, io.Discard)
 	if err != nil {
 		t.Fatalf("resolve reset template: %v", err)
 	}

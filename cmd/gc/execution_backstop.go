@@ -301,10 +301,15 @@ func (p poolExecutionBackstop) exhausted(store beads.Store, s *beads.Bead, stdou
 	}, "execution-claim-nudge", stdout) {
 		return
 	}
-	p.emitStepStalled(s, beadID, atoiOr0(s.Metadata[executionClaimNudgeCountKey]))
+	// Report the attempts actually DELIVERED, not the cap. An agent with no
+	// configured nudge escalates at 0/3 having never been contacted, and an
+	// operator reading "after 3 attempts" there would go looking for three
+	// nudges that were never sent.
+	attempts := atoiOr0(s.Metadata[executionClaimNudgeCountKey])
+	p.emitStepStalled(s, beadID, attempts)
 	fmt.Fprintf(stdout, //nolint:errcheck // best-effort
-		"execution-claim-nudge: %s still holds %s unexecuted after %d attempts; draining (%s)\n",
-		sessName, beadID, idleClaimNudgeMaxAttempts, executionStalledDrainReason)
+		"execution-claim-nudge: %s still holds %s unexecuted after %d/%d nudge attempts; draining (%s)\n",
+		sessName, beadID, attempts, idleClaimNudgeMaxAttempts, executionStalledDrainReason)
 	if p.requestDrain == nil || sessName == "" {
 		return
 	}

@@ -8,8 +8,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 type observedErrContext struct {
@@ -62,12 +60,12 @@ func TestCachingStoreCountContextCancelsWhileWaitingForLock(t *testing.T) {
 
 	select {
 	case <-ctx.checked:
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(beadsHangBudget):
 		store.mu.Unlock()
 		locked = false
 		select {
 		case <-done:
-		case <-time.After(testutil.GoroutineRaceTimeout):
+		case <-time.After(beadsHangBudget):
 		}
 		t.Fatal("Count did not check context before waiting for the cache lock")
 	}
@@ -78,12 +76,12 @@ func TestCachingStoreCountContextCancelsWhileWaitingForLock(t *testing.T) {
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("Count error = %v, want context.Canceled", err)
 		}
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(beadsHangBudget):
 		store.mu.Unlock()
 		locked = false
 		select {
 		case <-done:
-		case <-time.After(testutil.GoroutineRaceTimeout):
+		case <-time.After(beadsHangBudget):
 		}
 		t.Fatal("Count waited for the cache lock after context cancellation")
 	}
@@ -235,12 +233,12 @@ func TestMemStoreReadyContextCancelsWhileWaitingForLock(t *testing.T) {
 	}()
 	select {
 	case <-ctx.checked: // the first pre-lock context check observed an active context
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(beadsHangBudget):
 		store.mu.Unlock()
 		locked = false
 		select {
 		case <-done:
-		case <-time.After(testutil.GoroutineRaceTimeout):
+		case <-time.After(beadsHangBudget):
 		}
 		t.Fatal("ReadyContext did not check context before waiting for the lock")
 	}
@@ -251,12 +249,12 @@ func TestMemStoreReadyContextCancelsWhileWaitingForLock(t *testing.T) {
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("ReadyContext error = %v, want context.Canceled", err)
 		}
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(beadsHangBudget):
 		store.mu.Unlock()
 		locked = false
 		select {
 		case <-done:
-		case <-time.After(testutil.GoroutineRaceTimeout):
+		case <-time.After(beadsHangBudget):
 		}
 		t.Fatal("ReadyContext waited for the lock after context cancellation")
 	}

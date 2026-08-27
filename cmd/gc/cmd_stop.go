@@ -79,11 +79,24 @@ type stopCommandOutcome struct {
 func cmdStopJSON(args []string, stdout, stderr io.Writer, wallClockTimeout time.Duration, force bool, jsonOut bool) int {
 	var outcome stopCommandOutcome
 	if wallClockTimeout > 0 {
-		outcome = runStopWithWallClockCap(wallClockTimeout, stderr, func() stopCommandOutcome {
-			return cmdStopJSONSequence(args, stdout, stderr, force, jsonOut, true)
+		unregisterTx := newSupervisorUnregisterTransaction()
+		outcome = runStopWithWallClockCap(wallClockTimeout, stderr, unregisterTx, func() stopCommandOutcome {
+			return cmdStopJSONSequence(args, stdout, stderr, force, jsonOut, true, unregisterTx)
 		})
 	} else {
-		outcome = cmdStopJSONSequence(args, stdout, stderr, force, jsonOut, false)
+		// The uncapped path holds the same pending-unregister transaction as
+		// the capped one: a stop that fails after removing the registration —
+		// a managed provider that refuses to shut down, an invalid config the
+		// body cannot recover — must hand the entry back rather than leave a
+		// live city unregistered. This mirrors the capped arm's accept/rollback
+		// exactly; the deferred success message is part of the same contract.
+		unregisterTx := newSupervisorUnregisterTransaction()
+		outcome = cmdStopJSONSequence(args, stdout, stderr, force, jsonOut, false, unregisterTx)
+		if outcome.code == 0 {
+			unregisterTx.commit()
+		} else {
+			writeSupervisorUnregisterRollback(stderr, "gc stop", "stop failed after unregistering city", unregisterTx.rollback())
+		}
 	}
 	if outcome.code != 0 {
 		return outcome.code
@@ -95,7 +108,7 @@ func cmdStopJSON(args []string, stdout, stderr io.Writer, wallClockTimeout time.
 	return 0
 }
 
-func cmdStopJSONSequence(args []string, stdout, stderr io.Writer, force bool, jsonOut bool, wallClockCapApplied bool) stopCommandOutcome {
+func cmdStopJSONSequence(args []string, stdout, stderr io.Writer, force bool, jsonOut bool, wallClockCapApplied bool, unregisterTx *supervisorUnregisterTransaction) stopCommandOutcome {
 	cityPath, err := resolveStopCityPath(args)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -108,7 +121,7 @@ func cmdStopJSONSequence(args []string, stdout, stderr io.Writer, force bool, js
 	}
 
 	unregisteredFromSupervisor := false
-	if handled, code := unregisterCityFromSupervisorWithForce(cityPath, stopStdout, stderr, "gc stop", force); handled {
+	if handled, code := unregisterCityFromSupervisorWithForce(cityPath, stopStdout, stderr, "gc stop", force, unregisterTx); handled {
 		if code != 0 {
 			return stopCommandOutcome{code: code, cityPath: cityPath}
 		}
@@ -141,10 +154,10 @@ func cmdStopJSONSequence(args []string, stdout, stderr io.Writer, force bool, js
 	if wallClockCapApplied {
 		return stopLoadedCity()
 	}
-	return runStopWithWallClockCap(defaultStopWallClockTimeout(cfg), stderr, stopLoadedCity)
+	return runStopWithWallClockCap(defaultStopWallClockTimeout(cfg), stderr, nil, stopLoadedCity)
 }
 
-func runStopWithWallClockCap(wallClockCap time.Duration, stderr io.Writer, stop func() stopCommandOutcome) stopCommandOutcome {
+func runStopWithWallClockCap(wallClockCap time.Duration, stderr io.Writer, unregisterTx *supervisorUnregisterTransaction, stop func() stopCommandOutcome) stopCommandOutcome {
 	doneCh := make(chan stopCommandOutcome, 1)
 	bodyDone := make(chan struct{})
 	go func() {
@@ -159,9 +172,21 @@ func runStopWithWallClockCap(wallClockCap time.Duration, stderr io.Writer, stop 
 
 	select {
 	case out := <-doneCh:
+		if unregisterTx != nil {
+			if out.code == 0 {
+				unregisterTx.commit()
+			} else {
+				writeSupervisorUnregisterRollback(stderr, "gc stop", "stop failed after unregistering city", unregisterTx.rollback())
+			}
+		}
 		return out
 	case <-timer.C:
+		var rollback supervisorUnregisterRollback
+		if unregisterTx != nil {
+			rollback = unregisterTx.rollback()
+		}
 		fmt.Fprintf(stderr, "gc stop: timed out after %s; some sessions may not have stopped — retry with --force if stop is wedged, or raise --timeout for large stop sets\n", wallClockCap) //nolint:errcheck // best-effort stderr
+		writeSupervisorUnregisterRollback(stderr, "gc stop", "wall-clock timeout", rollback)
 		return stopCommandOutcome{code: 1}
 	}
 }

@@ -37,12 +37,14 @@ var instanceTokenReader = rand.Reader
 var (
 	_ runtime.Provider                      = (*Provider)(nil)
 	_ runtime.DeadRuntimeSessionChecker     = (*Provider)(nil)
+	_ runtime.EnvironmentBatchProvider      = (*Provider)(nil)
 	_ runtime.ImmediateNudgeProvider        = (*Provider)(nil)
 	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
 	_ runtime.LivenessInvalidator           = (*Provider)(nil)
 	_ runtime.ProcessTableScanner           = (*Provider)(nil)
 	_ runtime.ServerLifecycleProvider       = (*Provider)(nil)
+	_ runtime.SessionRosterProvider         = (*Provider)(nil)
 	_ runtime.UnattendedSessionStopper      = (*Provider)(nil)
 	_ runtime.FencedNudgeProvider           = (*Provider)(nil)
 )
@@ -900,6 +902,20 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 // session. Delegates to [Tmux.GetSessionActivity].
 func (p *Provider) GetLastActivity(name string) (time.Time, error) {
 	return p.tm.GetSessionActivity(name)
+}
+
+// GetAllEnvironment returns all environment variables for a session,
+// satisfying [runtime.EnvironmentBatchProvider]. Delegates to
+// [Tmux.GetAllEnvironment].
+func (p *Provider) GetAllEnvironment(name string) (map[string]string, error) {
+	return p.tm.GetAllEnvironment(name)
+}
+
+// SessionRoster returns attributes for every session currently known to
+// tmux, satisfying [runtime.SessionRosterProvider]. Delegates to
+// [Tmux.SessionRoster].
+func (p *Provider) SessionRoster() (map[string]runtime.SessionRosterEntry, error) {
+	return p.tm.SessionRoster()
 }
 
 // ClearScrollback clears the scrollback history of the named session.

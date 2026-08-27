@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -7769,5 +7771,69 @@ func TestStaleResumeKeyProbe(t *testing.T) {
 	}
 	if _, probeable := staleResumeKeyProbe("claude", workDir, ""); probeable {
 		t.Fatal("empty key probeable = true, want false")
+	}
+}
+
+// TestPrepareStartCandidateForCity_ClearsStaleNamedTriggerEnv is the
+// launch-layer assertion for gascity#4373. resolvePreservedConfiguredNamedSessionTemplate
+// clearing the stamp is not enough on its own: buildPreparedStartWithWorkDirResolver
+// re-derives GC_TRIGGER_BEAD_ID from candidate.info via sessionTriggerBeadEnv,
+// so unless refreshConfiguredNamedStartCandidate folds the resolver's Info back
+// onto the candidate, the seat starting on the clearing tick still launches
+// aimed at the parked bead. Asserting on the resolved TemplateParams cannot
+// catch that; only prepared.cfg.Env can.
+func TestPrepareStartCandidateForCity_ClearsStaleNamedTriggerEnv(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+	}
+	// The production shape of a parked target: real stores fold bd's raw
+	// `blocked` into "open" and report the park via the IsBlocked projection.
+	blocked := true
+	work, err := store.Create(beads.Bead{Title: "parked work", Status: "open", IsBlocked: &blocked})
+	if err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+	sessionName := config.NamedSessionRuntimeName(cfg.Workspace.Name, cfg.Workspace, "worker")
+	session, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":                        "worker",
+			"session_name":                    sessionName,
+			namedSessionMetadataKey:           "true",
+			namedSessionIdentityMetadata:      "worker",
+			namedSessionModeMetadata:          "on_demand",
+			beadmeta.TriggerBeadIDMetadataKey: work.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	prepared, err := prepareStartCandidateForCity(startCandidate{
+		info:  sessiontest.SeedBead(t, session),
+		tp:    TemplateParams{TemplateName: "worker", SessionName: sessionName},
+		order: 0,
+	}, ".", cfg.Workspace.Name, cfg, nil, store, &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}, io.Discard, nil, nil)
+	if err != nil {
+		t.Fatalf("prepareStartCandidateForCity: %v", err)
+	}
+	if got := prepared.cfg.Env["GC_TRIGGER_BEAD_ID"]; got != "" {
+		t.Errorf("launched GC_TRIGGER_BEAD_ID = %q, want cleared for a parked target", got)
+	}
+	if got := prepared.cfg.Env["GC_TRIGGER_WORK_BEAD_ID"]; got != "" {
+		t.Errorf("launched GC_TRIGGER_WORK_BEAD_ID = %q, want cleared for a parked target", got)
+	}
+	after, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get session bead after prepare: %v", err)
+	}
+	if v := after.Metadata[beadmeta.TriggerBeadIDMetadataKey]; v != "" {
+		t.Errorf("durable trigger stamp = %q, want cleared", v)
 	}
 }

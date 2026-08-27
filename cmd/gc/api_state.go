@@ -830,6 +830,13 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 	stores := cs.beadEventStoresLocked(evt)
 	cs.mu.RUnlock()
 
+	// An event stamped by this process's own store layer carries a post-absorb
+	// SNAPSHOT — dependencies included — rather than a bd hook patch. Saying so
+	// keeps the cache from reading its own emission as a coverage-unknown
+	// payload and discarding the dependency and is_blocked state it just
+	// installed, which fences the row out of the next reconcile pass and
+	// re-emits forever (ga-yoix1).
+	snapshot := evt.Actor == beadStoreLayerActor
 	// Do not expose a dependency-close cache mutation to legacy wait preparation
 	// until exact ownership has either been reserved or deliberately left with
 	// legacy. The fence is inert when keyed pre-poke admission is not armed.
@@ -839,14 +846,18 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 		for _, candidate := range stores {
 			inner, _, _ := unwrapBeadPolicyStore(candidate.store)
 			if cached, ok := inner.(*beads.CachingStore); ok {
-				cached.ApplyEvent(evt.Type, evt.Payload)
+				if snapshot {
+					cached.ApplyEventSnapshot(evt.Type, evt.Payload)
+				} else {
+					cached.ApplyEvent(evt.Type, evt.Payload)
+				}
 			}
 		}
 		cs.admitSessionWaitDependencyPrePokeEvent(evt)
 	}()
 	cs.admitReadyRoutedWorkEvent(evt, stores)
 	cs.admitSessionStartEvent(evt)
-	if evt.Actor != beadStoreLayerActor {
+	if !snapshot {
 		cs.Poke()
 	}
 	if evt.Type == events.BeadClosed && evt.Subject != "" && len(stores) > 0 {
@@ -1000,6 +1011,8 @@ func (cs *controllerState) admitReadyRoutedWorkEvent(evt events.Event, stores []
 
 // beadEventStoreRefLocked returns the storeRef string for the store that owns
 // beadID. Called under cs.mu read lock.
+// A relocated-class id falls through to "" on purpose: a storeRef names a work
+// scope, and "" is the ID-only mode that a single-minter class prefix makes safe.
 func (cs *controllerState) beadEventStoreRefLocked(beadID string) string {
 	if cs.cfg == nil {
 		return ""
@@ -1037,8 +1050,8 @@ func (cs *controllerState) runBeadCloseAutoclose(beadID string, store beads.Stor
 	graphStore := cs.GraphBeadStore()
 	beadCloseAutocloseDispatch(func() {
 		doConvoyAutocloseWith(store, rec, beadID, os.Stderr, os.Stderr)
-		doWispAutocloseWith(store, beadID, os.Stderr, graphStore.Store)
-		doMoleculeAutocloseWith(store, storeRef, rec, beadID, os.Stderr, graphStore.Store)
+		doWispAutocloseWith(store, beadID, os.Stderr, graphStore)
+		doMoleculeAutocloseWith(store, storeRef, rec, beadID, os.Stderr, graphStore)
 	})
 }
 
@@ -1105,6 +1118,18 @@ func (cs *controllerState) beadEventConfiguredStoreLocked(id string) (beads.Stor
 	match(config.EffectiveHQPrefix(cs.cfg), cs.cityBeadStore)
 	for _, rig := range cs.cfg.Rigs {
 		match(rig.EffectivePrefix(), cs.beadStores[rig.Name])
+	}
+	// Relocated classes are candidates under their reserved prefixes; without
+	// this a "gcg-*" close fell through to the broadcast and autoclose read an
+	// arbitrary work store. Gated on `relocated`, so single-store is unchanged.
+	for _, class := range infraMigrationClasses {
+		prefix, ok := config.ReservedClassPrefix(string(class)) // residency:allow — extends this scan's configured-prefix table, not a probe
+		if !ok {
+			continue
+		}
+		if store, relocated := cs.storageRoutes.storeFor(coordclassFor(string(class))); relocated {
+			match(prefix, store)
+		}
 	}
 	return matchedStore, matchedLen >= 0
 }
