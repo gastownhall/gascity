@@ -111,6 +111,8 @@ func conditionalWritesEventStoreKind(kind string) string {
 		return "native"
 	case beads.BeadsStoreNameFileStore:
 		return "file"
+	case beads.BeadsStoreNameSQLiteStore:
+		return "sqlite-graph"
 	case "MemStore":
 		return "mem"
 	case "CachingStore":

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 203,
+  "next_id": 205,
   "permanent_ids": [
     {
       "name": "help",
@@ -3055,6 +3055,38 @@
       "canonical_target": "@help",
       "owner": "structural",
       "id": 1
+    },
+    {
+      "path": "gc perf parity-join",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": true,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "perf-wrapper",
+      "notice_policy": "ineligible",
+      "hidden_exception": "perf-wrapper",
+      "classification": "perf-parity-join",
+      "owner": "immediate",
+      "id": 204
+    },
+    {
+      "path": "gc perf reconciler-compare",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": true,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "perf-wrapper",
+      "notice_policy": "ineligible",
+      "hidden_exception": "perf-wrapper",
+      "classification": "perf-reconciler-compare",
+      "owner": "immediate",
+      "id": 203
     },
     {
       "path": "gc perf run",

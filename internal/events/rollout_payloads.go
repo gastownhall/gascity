@@ -13,7 +13,8 @@ package events
 // legacy write path. Emission is latched once per store instance, so one
 // event per store per process is the ceiling.
 type ConditionalWritesDegradedPayload struct {
-	// StoreID names the degraded store's scope, e.g. "rig/gastown" or "graph".
+	// StoreID names the degraded store's scope, e.g. "rig/gastown" or
+	// "storage/infra" for a relocated coordination-class binding.
 	StoreID string `json:"store_id"`
 	// StoreKind is the store implementation in the DESIGN §12.2 wire
 	// vocabulary: bd | native | sqlite-graph | caching | mem | file. The

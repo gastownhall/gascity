@@ -333,6 +333,7 @@ func TestCheckDoesNotUseMessageLabelSupplement(t *testing.T) {
 func TestCheckUsesSingleAssigneeMessageScanForSlashRecipient(t *testing.T) {
 	recipient := "gascity/workflows.codex-max"
 	var messageListCalls int
+	var wispQueryCalls int
 	runner := func(_ string, name string, args ...string) ([]byte, error) {
 		cmd := name + " " + strings.Join(args, " ")
 		switch {
@@ -348,10 +349,13 @@ func TestCheckUsesSingleAssigneeMessageScanForSlashRecipient(t *testing.T) {
 			}
 			messageListCalls++
 			return []byte(`[{"id":"msg-w","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"gascity/workflows.codex-max","from":"human","created_at":"2026-01-02T03:04:05Z","ephemeral":true}]`), nil
-		case strings.Contains(cmd, "bd query --json"):
-			if strings.Contains(cmd, recipient) {
-				t.Fatalf("slash recipient leaked into supplemental wisp query: %s", cmd)
+		case strings.Contains(cmd, "bd query --json") && strings.Contains(cmd, "type=message"):
+			if !strings.Contains(cmd, "assignee="+recipient) {
+				t.Fatalf("slash recipient wisp query = %s, want exact assignee filter", cmd)
 			}
+			wispQueryCalls++
+			return []byte(`[]`), nil
+		case strings.Contains(cmd, "bd query --json"):
 			return []byte(`[]`), nil
 		}
 		return nil, errors.New("unexpected command: " + cmd)
@@ -364,6 +368,9 @@ func TestCheckUsesSingleAssigneeMessageScanForSlashRecipient(t *testing.T) {
 	}
 	if messageListCalls != 1 {
 		t.Fatalf("message list calls = %d, want 1", messageListCalls)
+	}
+	if wispQueryCalls != 1 {
+		t.Fatalf("wisp query calls = %d, want 1", wispQueryCalls)
 	}
 	if len(msgs) != 1 || msgs[0].ID != "msg-w" {
 		t.Fatalf("Check = %#v, want msg-w", msgs)

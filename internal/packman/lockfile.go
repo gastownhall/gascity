@@ -98,7 +98,10 @@ func WriteLockfile(fs fsys.FS, cityRoot string, lock *Lockfile) error {
 		fmt.Fprintf(&buf, "fetched = %q\n", pack.Fetched.UTC().Format(time.RFC3339))
 	}
 
-	path := filepath.Join(cityRoot, LockfileName)
+	path, err := fsys.ResolveSymlinks(fs, filepath.Join(cityRoot, LockfileName))
+	if err != nil {
+		return fmt.Errorf("resolving %s write target: %w", LockfileName, err)
+	}
 	if err := fsys.WriteFileAtomic(fs, path, buf.Bytes(), 0o644); err != nil {
 		return fmt.Errorf("writing %s: %w", LockfileName, err)
 	}

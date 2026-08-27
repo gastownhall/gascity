@@ -4,6 +4,7 @@ package hybrid
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -23,8 +24,12 @@ var (
 	_ runtime.InteractionProvider           = (*Provider)(nil)
 	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
+	_ runtime.FencedNudgeProvider           = (*Provider)(nil)
 	_ runtime.RelaunchProvider              = (*Provider)(nil)
+	_ runtime.LivenessInvalidator           = (*Provider)(nil)
 	_ runtime.LivenessObserver              = (*Provider)(nil)
+	_ runtime.FreshLivenessObserver         = (*Provider)(nil)
+	_ runtime.UnattendedSessionStopper      = (*Provider)(nil)
 )
 
 // New creates a hybrid provider. isRemote returns true for sessions
@@ -38,6 +43,27 @@ func (p *Provider) route(name string) runtime.Provider {
 		return p.remote
 	}
 	return p.local
+}
+
+// StopUnattendedSession forwards the bound unattended stop only to the backend
+// selected for name. Evidence from another backend cannot prove or stop the
+// pending target, so unsupported or failed stops never fall through.
+func (p *Provider) StopUnattendedSession(name, expectedToken string) error {
+	selected := p.local
+	label := "local"
+	if p.isRemote(name) {
+		selected = p.remote
+		label = "remote"
+	}
+
+	stopper, ok := selected.(runtime.UnattendedSessionStopper)
+	if !ok {
+		return fmt.Errorf("hybrid %s backend does not support unattended-session stop for %q", label, name)
+	}
+	if err := stopper.StopUnattendedSession(name, expectedToken); err != nil {
+		return fmt.Errorf("hybrid %s backend stopping unattended session %q: %w", label, name, err)
+	}
+	return nil
 }
 
 // Start delegates to the routed backend.
@@ -58,6 +84,14 @@ func (p *Provider) Interrupt(name string) error {
 // IsRunning delegates to the routed backend.
 func (p *Provider) IsRunning(name string) bool {
 	return p.route(name).IsRunning(name)
+}
+
+// InvalidateLiveness forwards to the backend selected for name when it caches
+// liveness observations.
+func (p *Provider) InvalidateLiveness(name string) {
+	if invalidator, ok := p.route(name).(runtime.LivenessInvalidator); ok {
+		invalidator.InvalidateLiveness(name)
+	}
 }
 
 // IsDeadRuntimeSession delegates to the routed backend when it can positively
@@ -93,9 +127,27 @@ func (p *Provider) ObserveLiveness(name string, processNames []string) runtime.L
 	return runtime.ObserveLiveness(p.route(name), name, processNames)
 }
 
+// ObserveFreshLiveness forwards a decisive liveness observation to only the
+// backend selected for the target session. An unselected backend cannot prove
+// this target absent, so unsupported selected backends remain incomplete.
+func (p *Provider) ObserveFreshLiveness(target runtime.LivenessTarget) runtime.Liveness {
+	selected := p.route(target.SessionName)
+	return runtime.ObserveFreshLiveness(selected, target)
+}
+
 // Nudge delegates to the routed backend.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	return p.route(name).Nudge(name, content)
+}
+
+// NudgeFenced delegates only to the backend selected for name. It never
+// falls back to another backend or to unfenced input delivery.
+func (p *Provider) NudgeFenced(name, expectedInstanceToken string, content []runtime.ContentBlock) error {
+	provider, ok := p.route(name).(runtime.FencedNudgeProvider)
+	if !ok {
+		return runtime.ErrInteractionUnsupported
+	}
+	return provider.NudgeFenced(name, expectedInstanceToken, content)
 }
 
 // WaitForIdle delegates to the routed backend when it supports explicit

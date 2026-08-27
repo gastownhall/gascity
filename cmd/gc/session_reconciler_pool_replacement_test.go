@@ -46,6 +46,11 @@ func TestReconcileSessionBeads_DrainAckNoWorkFreesSlotAndReallocates(t *testing.
 	// terminal state (it does NOT linger in state=active), which is the
 	// precondition the #2520 report says was violated.
 	t.Run("reconciler_drains_no_work_loser_to_terminal", func(t *testing.T) {
+		// writeCityTOML scrubs the inherited beads env and registers the
+		// PID-scoped dolt reaper for cityDir; GC_DOLT=skip closes the third
+		// door, managed-dolt recovery, which reads no city.toml and would
+		// otherwise start a server under this root anyway.
+		disableManagedDoltRecoveryForTest(t)
 		now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 		cityDir := t.TempDir()
 		writeCityTOML(t, cityDir, "trace-town", "worker")
@@ -181,7 +186,20 @@ func TestReconcileSessionBeads_DrainAckNoWorkFreesSlotAndReallocates(t *testing.
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
+				// This sub-case drives a full desired-state build against a
+				// city root of its own, so it owns that root's dolt lifecycle:
+				// scrub first (an inherited GC_BEADS=bd makes any directory a
+				// bd-store-contract city and a managed dolt is provisioned
+				// under it), then register the PID-scoped reaper for whatever
+				// still gets spawned beneath tmpDir. Unlike part 1, nothing
+				// here writes a city.toml, so no [beads] provider = "file"
+				// stands between an inherited env and a server rooted in a
+				// temp dir that t.TempDir removes on the way out —
+				// ga-f7v2ft.146's orphan-with-no-data-dir shape.
+				clearInheritedBeadsEnv(t)
+				disableManagedDoltRecoveryForTest(t)
 				tmpDir := t.TempDir()
+				requireNoLeakedDoltAfterForPaths(t, tmpDir)
 				rigPath := tmpDir + "/rigs/rig-A"
 				if err := os.MkdirAll(rigPath, 0o755); err != nil {
 					t.Fatalf("mkdir rig path: %v", err)

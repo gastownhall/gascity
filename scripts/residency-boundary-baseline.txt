@@ -12,10 +12,12 @@
 # worth reviewing — internal/api/residency_by_id.go's three []storeref.Leg
 # returners are the WorkAxisRouter the resolver itself declares, and
 # c:storeref.EachLeg's two entries are the enumeration seam's only consumers.
+# store_contract_preflight.go's b:routes.storeFor is the third: it re-derives the
+# binding to ENUMERATE subjects for the boot capability warning, not to route a
+# read, so it cannot mis-resolve one. It is pinned rather than marked
+# residency:allow so a second call in that function still fails the ratchet.
 cmd/gc/api_state.go	BeadStores	a:BeadStores	1
 cmd/gc/api_state.go	BeadStores	ast:returns-store-list	1
-cmd/gc/api_state.go	beadEventStoresLocked	ast:returns-store-list	1
-cmd/gc/api_state.go	beadEventStoresLocked	c:beads.Store-literal	1
 cmd/gc/api_state.go	buildStores	ast:returns-store-list	1
 cmd/gc/api_state.go	completionReconcileInputs	c:beads.Store-literal	1
 cmd/gc/bd_relocated_classes.go	relocatedBeadClasses	d:ReservedClassPrefix	1
@@ -33,7 +35,6 @@ cmd/gc/city_runtime.go	buildStandaloneRigStores	ast:returns-store-list	1
 cmd/gc/city_runtime.go	openStandaloneRigStores	ast:returns-store-list	1
 cmd/gc/city_runtime.go	orderTrackingSweepStores	a:rigBeadStores	1
 cmd/gc/city_runtime.go	orderTrackingSweepStores	ast:returns-store-list	1
-cmd/gc/city_runtime.go	readyDemandSnapshotFingerprint	a:rigBeadStores	1
 cmd/gc/city_runtime.go	rigBeadStores	a:BeadStores	1
 cmd/gc/city_runtime.go	rigBeadStores	a:rigBeadStores	1
 cmd/gc/city_runtime.go	rigBeadStores	ast:returns-store-list	1
@@ -41,6 +42,10 @@ cmd/gc/city_runtime.go	run	a:rigBeadStores	1
 cmd/gc/city_runtime.go	sweepOrphanedOrderTrackingAtBoot	c:beads.Store-literal	1
 cmd/gc/city_runtime.go	syncBeadsAndUpdateIndex	a:rigBeadStores	1
 cmd/gc/city_runtime.go	tick	a:rigBeadStores	4
+cmd/gc/city_runtime_session_start.go	ensureSessionStartController	a:rigBeadStores	1
+cmd/gc/city_runtime_wait_dependency_index.go	handleSessionWaitDependencyStart	a:rigBeadStores	1
+cmd/gc/city_runtime_wait_dependency_index.go	reserveSessionWaitDependencyTargets	a:rigBeadStores	1
+cmd/gc/city_runtime_wait_dependency_index.go	startSessionWaitDependencyProducer	a:rigBeadStores	1
 cmd/gc/claim_class_route.go	holds	d:bdIDIsClassReserved	1
 cmd/gc/claim_class_route.go	hookClaimClassRouteForCity	b:graphClassBinding	1
 cmd/gc/class_store.go	graphClassBinding	b:graphClassBinding	1
@@ -85,8 +90,12 @@ cmd/gc/order_store.go	appendOrdersSweepStore	ast:returns-store-list	1
 cmd/gc/order_store.go	orderTrackingSweepStoresForConfigTargets	ast:returns-store-list	1
 cmd/gc/order_store.go	orderTrackingSweepStoresFromTargets	ast:returns-store-list	1
 cmd/gc/order_store.go	rawOrderStores	ast:returns-store-list	1
+cmd/gc/pool_allocation_controller.go	authorizeRoutedWorkPoolDrainAck	a:rigBeadStores	1
+cmd/gc/pool_allocation_reuse.go	routedWorkPoolReuseAssignedWork	a:rigBeadStores	1
 cmd/gc/ready_federation.go	readyLegsForTopology	c:storeref.EachLeg	1
 cmd/gc/ready_federation.go	readyRigLegStores	ast:returns-store-list	1
+cmd/gc/ready_routed_work_view.go	readReadyRoutedWorkView	a:rigBeadStores	1
+cmd/gc/store_contract_preflight.go	storeContractSubjects	b:routes.storeFor	1
 internal/api/dashport_support.go	BeadStores	a:BeadStores	1
 internal/api/dashport_support.go	BeadStores	ast:returns-store-list	1
 internal/api/handler_agents.go	findActiveBeadForAssigneesWithFreshness	a:BeadStores	1

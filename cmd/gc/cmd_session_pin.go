@@ -89,6 +89,7 @@ func cmdSessionSetPin(args []string, pinned bool, stdout, stderr io.Writer, json
 		id, err = resolveSessionIDWithConfig(cityPath, cfg, sessStore, args[0])
 		if err != nil {
 			id, err = resolveSessionIDMaterializingNamedWithMetadata(cityPath, cfg, sessStore, args[0], map[string]string{
+				"state":                     string(session.StateAsleep),
 				"pin_awake":                 "true",
 				"pending_create_claim":      "",
 				"pending_create_started_at": "",
@@ -128,7 +129,7 @@ func cmdSessionSetPin(args []string, pinned bool, stdout, stderr io.Writer, json
 			return 1
 		}
 	}
-	pokeSessionPinController(cityErr, cityPath)
+	pokeSessionPinController(cityErr, cityPath, id, pinned)
 
 	if asJSON {
 		if err := writeSessionActionJSON(stdout, sessionActionResult{
@@ -150,8 +151,12 @@ func cmdSessionSetPin(args []string, pinned bool, stdout, stderr io.Writer, json
 	return 0
 }
 
-func pokeSessionPinController(cityErr error, cityPath string) {
+func pokeSessionPinController(cityErr error, cityPath, sessionID string, pinned bool) {
 	if cityErr != nil || !cityUsesManagedReconciler(cityPath) {
+		return
+	}
+	if pinned {
+		_ = pokeSessionStartController(cityPath, sessionID)
 		return
 	}
 	_ = pokeController(cityPath)

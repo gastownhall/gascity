@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -115,5 +116,54 @@ func TestStartPreparedStartCandidateUsesWorkerBoundaryForRuntimeOnlyTarget(t *te
 	}
 	if start.Config.Command != "claude --resume seeded" {
 		t.Fatalf("start command = %q, want claude --resume seeded", start.Config.Command)
+	}
+}
+
+func TestRunPreparedStartCandidateAuthorizedDoesNotConvergeSameNameCollision(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := newSessionManagerWithConfig("", store, sp, nil)
+	info, err := mgr.CreateSession(t.Context(), sessionpkg.CreateOptions{
+		BeadOnly: true,
+		Template: "worker",
+		Title:    "Worker",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	})
+	if err != nil {
+		t.Fatalf("CreateBeadOnly: %v", err)
+	}
+	if err := sp.Start(t.Context(), info.SessionName, runtime.Config{Command: "replacement"}); err != nil {
+		t.Fatalf("start same-name replacement: %v", err)
+	}
+	sp.Calls = nil
+
+	result := runPreparedStartCandidateAuthorized(
+		t.Context(),
+		preparedStart{
+			candidate: startCandidate{info: info, tp: TemplateParams{TemplateName: "worker"}},
+			cfg:       runtime.Config{Command: "claude", WorkDir: info.WorkDir},
+		},
+		"",
+		sp,
+		store,
+		nil,
+		10*time.Second,
+		immediateStartStabilityWaiter,
+		nil,
+		func(context.Context) error { return nil },
+	)
+	if !errors.Is(result.err, runtime.ErrSessionExists) {
+		t.Fatalf("authorized start error = %v, want same-name collision", result.err)
+	}
+	if got := sp.CountCalls("Start", info.SessionName); got != 1 {
+		t.Fatalf("provider Start calls = %d, want one refused attempt", got)
+	}
+	if got := sp.CountCalls("Stop", info.SessionName); got != 0 {
+		t.Fatalf("provider Stop calls = %d, want no replacement recycling", got)
+	}
+	if !sp.IsRunning(info.SessionName) {
+		t.Fatal("same-name replacement was not preserved")
 	}
 }

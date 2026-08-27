@@ -8,6 +8,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
 
 // waitBeadFixture builds a durable wait bead carrying the canonical type and
@@ -44,6 +45,201 @@ func recordingWaitStore(t *testing.T, seed ...beads.Bead) (*Store, *beadstest.Re
 }
 
 var waitStoreNow = time.Date(2026, 3, 2, 4, 5, 6, 0, time.UTC)
+
+func TestGetWaitPersistedResponse_PreservesExactRevision(t *testing.T) {
+	store := beads.NewMemStore()
+	created, err := store.Create(waitBeadFixture("", "open", "gc-session", map[string]string{"state": "pending"}))
+	if err != nil {
+		t.Fatalf("create wait: %v", err)
+	}
+	s := waitStoreOver(store)
+
+	got, persisted, err := s.GetWaitPersistedResponse(created.ID)
+	if err != nil {
+		t.Fatalf("GetWaitPersistedResponse: %v", err)
+	}
+	if got.ID != created.ID || got.State != waitStatePending {
+		t.Fatalf("WaitInfo = %#v, want persisted pending wait %q", got, created.ID)
+	}
+	if persisted.Revision != created.Revision {
+		t.Fatalf("Revision = %d, want exact persisted revision %d", persisted.Revision, created.Revision)
+	}
+}
+
+func TestClaimPendingWaitReady_ClaimsExactPendingRevision(t *testing.T) {
+	s, store, pre, persisted := pendingWaitClaimFixture(t)
+
+	got, err := s.ClaimPendingWaitReady(pre, persisted, waitStoreNow, WaitReadyOwnerDependency, "dependency-ready/w-1/1")
+	if err != nil {
+		t.Fatalf("ClaimPendingWaitReady: %v", err)
+	}
+	if got.Outcome != WaitReadyClaimCommitted {
+		t.Fatalf("Outcome = %q, want committed (result=%#v)", got.Outcome, got)
+	}
+	if got.Wait.State != waitStateReady || got.Wait.ReadyAt != waitStoreNow.UTC().Format(time.RFC3339) {
+		t.Fatalf("claimed Wait = %#v, want ready at %s", got.Wait, waitStoreNow.UTC().Format(time.RFC3339))
+	}
+	if got.Wait.ReadyOwner != string(WaitReadyOwnerDependency) || got.Wait.ReadyOperation != "dependency-ready/w-1/1" {
+		t.Fatalf("ready provenance = owner=%q operation=%q", got.Wait.ReadyOwner, got.Wait.ReadyOperation)
+	}
+	if got.Persisted.Revision == persisted.Revision {
+		t.Fatalf("claimed revision = %d, want fresh revision after %d", got.Persisted.Revision, persisted.Revision)
+	}
+
+	stored, err := store.Get(pre.ID)
+	if err != nil {
+		t.Fatalf("read claimed wait: %v", err)
+	}
+	if stored.Metadata["state"] != waitStateReady || stored.Metadata["ready_at"] != waitStoreNow.UTC().Format(time.RFC3339) || stored.Metadata["ready_owner"] != string(WaitReadyOwnerDependency) || stored.Metadata["ready_operation"] != "dependency-ready/w-1/1" {
+		t.Fatalf("durable claim metadata = %#v", stored.Metadata)
+	}
+}
+
+func TestClaimPendingWaitReady_RereadsCancellationInsteadOfOverwritingIt(t *testing.T) {
+	s, store, pre, persisted := pendingWaitClaimFixture(t)
+	if err := store.SetMetadata(pre.ID, "state", waitStateCanceled); err != nil {
+		t.Fatalf("cancel wait: %v", err)
+	}
+
+	got, err := s.ClaimPendingWaitReady(pre, persisted, waitStoreNow, WaitReadyOwnerDependency, "dependency-ready/w-1/1")
+	if err != nil {
+		t.Fatalf("ClaimPendingWaitReady: %v", err)
+	}
+	if got.Outcome != WaitReadyClaimNotApplied || got.Wait.State != waitStateCanceled {
+		t.Fatalf("cancellation result = %#v, want exact canceled reread and no claim", got)
+	}
+	stored, err := store.Get(pre.ID)
+	if err != nil {
+		t.Fatalf("read canceled wait: %v", err)
+	}
+	if stored.Metadata["ready_at"] != "" || stored.Metadata["ready_owner"] != "" || stored.Metadata["ready_operation"] != "" {
+		t.Fatalf("canceled wait was overwritten: %#v", stored.Metadata)
+	}
+}
+
+func TestClaimPendingWaitReady_RereadsRebindInsteadOfClaimingOldSession(t *testing.T) {
+	s, store, pre, persisted := pendingWaitClaimFixture(t)
+	if err := store.Update(pre.ID, beads.UpdateOpts{Metadata: map[string]string{"session_id": "gc-rebound"}}); err != nil {
+		t.Fatalf("rebind wait: %v", err)
+	}
+
+	got, err := s.ClaimPendingWaitReady(pre, persisted, waitStoreNow, WaitReadyOwnerDependency, "dependency-ready/w-1/1")
+	if err != nil {
+		t.Fatalf("ClaimPendingWaitReady: %v", err)
+	}
+	if got.Outcome != WaitReadyClaimNotApplied || got.Wait.SessionID != "gc-rebound" || got.Wait.State != waitStatePending {
+		t.Fatalf("rebind result = %#v, want exact rebound pending reread and no claim", got)
+	}
+}
+
+func TestClaimPendingWaitReady_PreservesNewerReadyClaim(t *testing.T) {
+	s, store, pre, persisted := pendingWaitClaimFixture(t)
+	if err := store.Update(pre.ID, beads.UpdateOpts{Metadata: map[string]string{
+		"state":           waitStateReady,
+		"ready_at":        "2026-03-02T04:05:05Z",
+		"ready_owner":     string(WaitReadyOwnerDependency),
+		"ready_operation": "dependency-ready/other/2",
+	}}); err != nil {
+		t.Fatalf("write newer ready claim: %v", err)
+	}
+
+	got, err := s.ClaimPendingWaitReady(pre, persisted, waitStoreNow, WaitReadyOwnerDependency, "dependency-ready/w-1/1")
+	if err != nil {
+		t.Fatalf("ClaimPendingWaitReady: %v", err)
+	}
+	if got.Outcome != WaitReadyClaimNotApplied || got.Wait.ReadyAt != "2026-03-02T04:05:05Z" || got.Wait.ReadyOperation != "dependency-ready/other/2" {
+		t.Fatalf("newer ready result = %#v, want preserved newer claim", got)
+	}
+}
+
+func TestClassifyWaitReadyClaim_ConfirmsOwnClaimWithNegativeOpaqueRevisions(t *testing.T) {
+	candidate := waitClaimInfo()
+	after := candidate
+	after.State = waitStateReady
+	after.ReadyAt = waitStoreNow.UTC().Format(time.RFC3339)
+	after.ReadyOwner = string(WaitReadyOwnerDependency)
+	after.ReadyOperation = "dependency-ready/w-1/1"
+
+	got := classifyWaitReadyClaim(after, WaitPersistedResponse{Revision: -2}, candidate, WaitPersistedResponse{Revision: -1}, waitStoreNow.UTC().Format(time.RFC3339), WaitReadyOwnerDependency, "dependency-ready/w-1/1", errors.New("lost response"))
+	if got != WaitReadyClaimCommitted {
+		t.Fatalf("outcome = %q, want committed", got)
+	}
+}
+
+func TestClassifyWaitReadyClaim_MarksChangedNonOwnerResponseAmbiguous(t *testing.T) {
+	candidate := waitClaimInfo()
+	after := candidate
+	after.State = waitStateReady
+	after.ReadyAt = "2026-03-02T04:05:05Z"
+	after.ReadyOwner = string(WaitReadyOwnerDependency)
+	after.ReadyOperation = "dependency-ready/other/2"
+
+	got := classifyWaitReadyClaim(after, WaitPersistedResponse{Revision: 2}, candidate, WaitPersistedResponse{Revision: 1}, waitStoreNow.UTC().Format(time.RFC3339), WaitReadyOwnerDependency, "dependency-ready/w-1/1", errors.New("uncertain write response"))
+	if got != WaitReadyClaimAmbiguous {
+		t.Fatalf("outcome = %q, want ambiguous", got)
+	}
+}
+
+func TestClassifyWaitReadyClaim_MarksRegistrationRebindAmbiguousEvenWithOwnMarker(t *testing.T) {
+	candidate := waitClaimInfo()
+	after := candidate
+	after.SessionID = "gc-rebound"
+	after.State = waitStateReady
+	after.ReadyAt = waitStoreNow.UTC().Format(time.RFC3339)
+	after.ReadyOwner = string(WaitReadyOwnerDependency)
+	after.ReadyOperation = "dependency-ready/w-1/1"
+
+	got := classifyWaitReadyClaim(after, WaitPersistedResponse{Revision: 2}, candidate, WaitPersistedResponse{Revision: 1}, waitStoreNow.UTC().Format(time.RFC3339), WaitReadyOwnerDependency, "dependency-ready/w-1/1", errors.New("lost response"))
+	if got != WaitReadyClaimAmbiguous {
+		t.Fatalf("outcome = %q, want ambiguous", got)
+	}
+}
+
+func TestClassifyWaitReadyClaimReadFailure_MarksNonPreconditionAttemptAmbiguous(t *testing.T) {
+	if got := classifyWaitReadyClaimReadFailure(errors.New("lost response")); got != WaitReadyClaimAmbiguous {
+		t.Fatalf("non-precondition read-failure outcome = %q, want ambiguous", got)
+	}
+	if got := classifyWaitReadyClaimReadFailure(&beads.PreconditionFailedError{}); got != WaitReadyClaimNotApplied {
+		t.Fatalf("precondition read-failure outcome = %q, want not_applied", got)
+	}
+}
+
+func pendingWaitClaimFixture(t *testing.T) (*Store, beads.Store, WaitInfo, WaitPersistedResponse) {
+	t.Helper()
+	opened, err := beads.OpenStoreAtForCity(t.Context(), beads.StoreOpenOptions{
+		Provider:          "file",
+		OpenFileStore:     func() (beads.Store, error) { return beads.NewMemStore(), nil },
+		ConditionalWrites: gate.Auto,
+	})
+	if err != nil {
+		t.Fatalf("open conditional wait store: %v", err)
+	}
+	store := opened.Store
+	created, err := store.Create(waitBeadFixture("", "open", "gc-session", map[string]string{"state": "pending"}))
+	if err != nil {
+		t.Fatalf("create wait: %v", err)
+	}
+	s := waitStoreOver(store)
+	pre, persisted, err := s.GetWaitPersistedResponse(created.ID)
+	if err != nil {
+		t.Fatalf("GetWaitPersistedResponse: %v", err)
+	}
+	return s, store, pre, persisted
+}
+
+func waitClaimInfo() WaitInfo {
+	return WaitInfo{
+		ID:              "w-1",
+		SessionID:       "gc-session",
+		Kind:            "deps",
+		DepIDs:          []string{"gc-1"},
+		DepMode:         "all",
+		RegisteredEpoch: "7",
+		ExpiresAt:       "2026-03-03T04:05:06Z",
+		State:           waitStatePending,
+		Status:          "open",
+	}
+}
 
 // --- terminal-write intents: byte-identical SetMetadataBatch+Close pairs ---
 
@@ -144,7 +340,7 @@ func TestMarkWaitReady_EmitsReadyBatchNoClose(t *testing.T) {
 	if ops := opsOf(rec.Calls()); !reflect.DeepEqual(ops, []string{"SetMetadataBatch"}) {
 		t.Fatalf("MarkWaitReady ops = %v, want [SetMetadataBatch]", ops)
 	}
-	want := map[string]string{"state": "ready", "ready_at": waitStoreNow.UTC().Format(time.RFC3339)}
+	want := map[string]string{"state": "ready", "ready_at": waitStoreNow.UTC().Format(time.RFC3339), "ready_owner": "", "ready_operation": ""}
 	if got := rec.CallsForOp("SetMetadataBatch")[0].Metadata; !reflect.DeepEqual(got, want) {
 		t.Fatalf("MarkWaitReady batch = %#v, want %#v", got, want)
 	}
@@ -160,7 +356,7 @@ func TestMarkWaitReadyForRedelivery_WithoutNextAttempt(t *testing.T) {
 	if ops := opsOf(rec.Calls()); !reflect.DeepEqual(ops, []string{"SetMetadataBatch"}) {
 		t.Fatalf("ops = %v, want [SetMetadataBatch]", ops)
 	}
-	want := map[string]string{"state": "ready", "ready_at": waitStoreNow.UTC().Format(time.RFC3339)}
+	want := map[string]string{"state": "ready", "ready_at": waitStoreNow.UTC().Format(time.RFC3339), "ready_owner": "", "ready_operation": ""}
 	if got := rec.CallsForOp("SetMetadataBatch")[0].Metadata; !reflect.DeepEqual(got, want) {
 		t.Fatalf("batch = %#v, want %#v", got, want)
 	}
@@ -176,6 +372,8 @@ func TestMarkWaitReadyForRedelivery_WithNextAttemptClearsTerminalKeys(t *testing
 	want := map[string]string{
 		"state":            "ready",
 		"ready_at":         waitStoreNow.UTC().Format(time.RFC3339),
+		"ready_owner":      "",
+		"ready_operation":  "",
 		"delivery_attempt": "3",
 		"nudge_id":         "",
 		"commit_boundary":  "",

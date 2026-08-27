@@ -695,6 +695,56 @@ func recordSessionCircuitBreakerRestart(
 	return state, nil
 }
 
+// sessionCircuitBreakerResetOwed reports whether the durable circuit cluster on
+// a row still says OPEN while the in-memory model for that identity has already
+// gone CLOSED — the cooldown auto-reset having fired inside restoreFromMetadata
+// or IsOpen. The row then owes one convergent write.
+//
+// It is LEVEL-triggered on purpose, and that is the whole point (WD.11).
+// restoreFromMetadata is an EDGE: it returns reset=false for an identity that
+// already has an entry, so only the first caller to hydrate an identity after a
+// controller restart ever sees the reset. Once the detector sweep hydrates the
+// singleton — which it does before the god function runs on the same tick —
+// legacy's `else if reset` gate would silently stop firing, stranding a durable
+// "open" string that nothing clears and losing auto-recovery fleet-wide. Both
+// the sweep-fed legacy restore arm and the keyed wake gate answer from this
+// predicate instead, so neither depends on who hydrated first and no yield is
+// needed between them: the write is idempotent, provider-free and convergent
+// (the D-DUP expired-timer-heal shape, WD.13 delta 6).
+func sessionCircuitBreakerResetOwed(b *sessionCircuitBreaker, identity string, durable session.CircuitState, now time.Time) bool {
+	if b == nil || strings.TrimSpace(identity) == "" {
+		return false
+	}
+	if strings.TrimSpace(durable.State) != circuitOpen.String() {
+		return false
+	}
+	return !b.IsOpen(identity, now)
+}
+
+// sessionCircuitBreakerProgressPersistOwed reports whether the model's progress
+// signature for an identity has moved away from the one the durable row
+// carries. It replaces ObserveProgressSignature's return value as legacy's
+// persist gate for the same reason: that return is a consume-once edge on a
+// singleton the sweep now also observes, so the first observer would swallow
+// the persist.
+//
+// The comparison deliberately covers the SIGNATURE only, not lastObserved: the
+// signature is the change carrier (lastProgress moves with it), while
+// lastObserved advances in memory on every observation and comparing it would
+// turn a change-triggered write into a per-tick one for every named identity.
+func sessionCircuitBreakerProgressPersistOwed(b *sessionCircuitBreaker, identity string, durable session.CircuitState) bool {
+	if b == nil || strings.TrimSpace(identity) == "" {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	e := b.entries[identity]
+	if e == nil {
+		return false
+	}
+	return e.progressSig != durable.ProgressSignature
+}
+
 func cloneCircuitBreakerEntry(e *circuitBreakerEntry) *circuitBreakerEntry {
 	if e == nil {
 		return nil

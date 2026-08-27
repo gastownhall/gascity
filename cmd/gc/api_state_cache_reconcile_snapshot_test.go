@@ -46,7 +46,7 @@ func TestApplyBeadEventRoutesCacheReconcileEventsAsSnapshots(t *testing.T) {
 	}
 	cs.applyBeadEventToStores(events.Event{
 		Type:    events.BeadUpdated,
-		Actor:   cacheReconcileActor,
+		Actor:   beadStoreLayerActor,
 		Subject: created.ID,
 		Payload: payload,
 	})

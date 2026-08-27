@@ -14,9 +14,53 @@ import (
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/molecule"
-	"github.com/gastownhall/gascity/internal/session"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
+
+type observedSessionWaitCensus struct {
+	cache       *beads.CachingStore
+	observation beads.CacheObservation
+	waits       []sessionpkg.WaitInfo
+}
+
+// observeSessionWaitCensus reads the complete active session-wait census from
+// the session cache without falling back to backing-store I/O.
+func observeSessionWaitCensus(store beads.SessionStore) (observedSessionWaitCensus, error) {
+	raw, _, wrapped := unwrapBeadPolicyStore(store.Store)
+	cache, ok := raw.(*beads.CachingStore)
+	if !ok || cache == nil {
+		return observedSessionWaitCensus{}, fmt.Errorf("observing session waits: %w", beads.ErrCacheUnavailable)
+	}
+	query := beads.ListQuery{
+		Label:    sessionpkg.WaitBeadLabel,
+		TierMode: beads.TierIssues,
+		Sort:     beads.SortCreatedDesc,
+		Limit:    sessionpkg.SessionWaitLookupLimit + 1,
+	}
+	if wrapped {
+		query = expandPolicyReadTier(query)
+	}
+	rows, observation, ok := cache.ObservedList(query)
+	if !ok {
+		return observedSessionWaitCensus{}, fmt.Errorf("observing session waits: %w", beads.ErrCacheUnavailable)
+	}
+	waits := make([]sessionpkg.WaitInfo, 0, len(rows))
+	for _, row := range rows {
+		if sessionpkg.IsWaitBead(row) {
+			waits = append(waits, sessionpkg.WaitInfoFromBead(row))
+		}
+	}
+	census := observedSessionWaitCensus{cache: cache, observation: observation, waits: waits}
+	if len(rows) > sessionpkg.SessionWaitLookupLimit {
+		return census, fmt.Errorf("observing session waits: %w", beads.LookupLimitError{
+			Kind:  "wait",
+			Label: sessionpkg.WaitBeadLabel,
+			Limit: sessionpkg.SessionWaitLookupLimit,
+		})
+	}
+	return census, nil
+}
 
 // This file is the controller/CLI-side seam of the per-class store refactor.
 // It gives each coordination class a named accessor so a future per-class
@@ -113,9 +157,9 @@ func (cr *CityRuntime) graphBeadStore() beads.GraphStore {
 // sessionsBeadStore returns the runtime's session/session-wait bead store: the
 // configured session class store when [beads.classes.sessions] relocates
 // sessions, else the work store. The recorder is passed for signature parity
-// and is not what makes a write observable — the controller's emission comes
-// from the CachingStore around its work ledger, and a relocated class store has
-// no such layer on this side (class_store_emit.go covers the one-shot CLI's).
+// and is not what makes a write observable: emission is installed once on the
+// ROUTES, by the process that opened them (class_store_emit.go), and passing a
+// recorder here changes nothing about it either way.
 // Byte-identical to cityBeadStore() at the default bd backend.
 // Returned as the strongly-typed beads.SessionStore so the session class stays
 // statically visible; the wrapper carries the same underlying store value.
@@ -257,12 +301,12 @@ func (s *beadPolicyGraphStore) graphApplierFor(_ coordclass.Class) beads.GraphAp
 //
 // cfg, cityPath and rec stay in the signature for the per-scope work routing
 // that resolves elsewhere; they are not read here. rec in particular does NOT
-// make a relocated write observable, for any class: a class store is a bare
-// bead engine with no emitting layer, and what a caller passes here changes
-// nothing about that. Emission is decided where the ROUTES are built, once —
-// the one-shot CLI funnel gives its stores an emit target
-// (storageRoutes.withCLIEmission), and the controller's boot does not, because
-// its own emitter already covers it. See class_store_emit.go.
+// make a relocated write observable, for any class: what a caller passes here
+// changes nothing about emission. Emission is decided where the ROUTES are
+// built, once per process — the one-shot CLI funnel gives its stores the city
+// journal (storageRoutes.withCLIEmission) and the controller's boot gives them
+// the recorder it already holds (withControllerEmission). See
+// class_store_emit.go.
 func resolveClassStore(routes *storageRoutes, workStore beads.Store, cfg *config.City, cityPath, class string, rec events.Recorder) beads.Store {
 	_ = cfg
 	_ = cityPath
@@ -533,7 +577,7 @@ func newCityMailProvider(routes *storageRoutes, workStore beads.Store, cfg *conf
 func newCityExtMsgServices(routes *storageRoutes, workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) *extmsg.Services {
 	msgStore := resolveMailMessagesStore(routes, workStore, cfg, cityPath, rec)
 	sessStore := resolveSessionStore(routes, workStore, cfg, cityPath, rec)
-	svc, err := extmsg.NewServicesWithSessionDirectory(msgStore, session.NewStore(beads.SessionStore{Store: sessStore}))
+	svc, err := extmsg.NewServicesWithSessionDirectory(msgStore, sessionpkg.NewStore(beads.SessionStore{Store: sessStore}))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "api: external messaging services: %v\n", err) //nolint:errcheck // best-effort stderr
 		unrouted := extmsg.NewServices(workStore)

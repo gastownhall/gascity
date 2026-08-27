@@ -156,6 +156,17 @@ func (e *Editor) Do(fn func() error) error {
 	return fn()
 }
 
+// DoWithEditor runs fn while holding the Editor's mutation lock and gives fn a
+// transaction-scoped editor backed by the same filesystem and city.toml. The
+// scoped editor must not escape fn. Its methods may be used without re-entering
+// the outer Editor lock, while the outer lock keeps the whole caller-owned
+// snapshot, mutation, refresh, and rollback sequence serialized.
+func (e *Editor) DoWithEditor(fn func(*Editor) error) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return fn(NewEditor(e.fs, e.tomlPath))
+}
+
 func validateCityForEdit(cfg *config.City) error {
 	if err := config.ValidateAgents(cfg.Agents); err != nil {
 		return fmt.Errorf("%w: agents: %w", ErrValidation, err)

@@ -3,6 +3,7 @@ package session
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -49,6 +50,181 @@ func (s *Store) GetWait(id string) (WaitInfo, error) {
 		return WaitInfo{}, fmt.Errorf("%w: %s", ErrNotAWait, id)
 	}
 	return WaitInfoFromBead(b), nil
+}
+
+// WaitReadyClaim is the result of a pending-to-ready claim. Wait and Persisted
+// carry the newest exact observation when another writer canceled, rebound, or
+// otherwise advanced the wait; Outcome makes the mutation boundary explicit.
+type WaitReadyClaim struct {
+	Wait      WaitInfo
+	Persisted WaitPersistedResponse
+	Outcome   WaitReadyClaimOutcome
+}
+
+// WaitReadyClaimOutcome classifies whether ClaimPendingWaitReady reached its
+// mutation boundary. Callers may yield to legacy processing only for
+// WaitReadyClaimNotApplied; ambiguous outcomes retain keyed ownership.
+type WaitReadyClaimOutcome string
+
+const (
+	// WaitReadyClaimNotApplied proves the conditional mutation did not apply.
+	WaitReadyClaimNotApplied WaitReadyClaimOutcome = "not_applied"
+	// WaitReadyClaimCommitted proves this controller's exact ready claim applied.
+	WaitReadyClaimCommitted WaitReadyClaimOutcome = "committed"
+	// WaitReadyClaimAmbiguous means a conditional attempt may have mutated the row
+	// but the authoritative reread cannot prove the operation's final outcome.
+	WaitReadyClaimAmbiguous WaitReadyClaimOutcome = "ambiguous"
+)
+
+// WaitPersistedResponse carries the opaque whole-row revision from the same
+// durable read as a WaitInfo. It is internal and off-wire; zero means the
+// backend did not supply a revision.
+type WaitPersistedResponse struct {
+	Revision int64 `json:"-"`
+}
+
+// WaitReadyOwner identifies the controller protocol allowed to claim a
+// dependency-ready wait. Keeping this typed prevents another controller's
+// ownership marker from being accidentally adopted during crash recovery.
+type WaitReadyOwner string
+
+const (
+	// WaitReadyOwnerDependency is the sole owner for dependency-ready claims.
+	WaitReadyOwnerDependency WaitReadyOwner = "dependency-ready"
+)
+
+// GetWaitPersistedResponse loads one durable wait and its revision from one
+// same-read observation. The revision is only a precondition token for
+// ClaimPendingWaitReady; it never crosses a wire. Missing and non-wait error
+// behavior matches GetWait. Callers that require an authoritative read must
+// use the store's live handle before entering this domain surface.
+func (s *Store) GetWaitPersistedResponse(id string) (WaitInfo, WaitPersistedResponse, error) {
+	if s == nil || s.store.Store == nil {
+		return WaitInfo{}, WaitPersistedResponse{}, beads.ErrNotFound
+	}
+	b, err := s.store.Get(id)
+	if err != nil {
+		return WaitInfo{}, WaitPersistedResponse{}, err
+	}
+	if !IsWaitBead(b) {
+		return WaitInfo{}, WaitPersistedResponse{}, fmt.Errorf("%w: %s", ErrNotAWait, id)
+	}
+	return WaitInfoFromBead(b), WaitPersistedResponse{Revision: b.Revision}, nil
+}
+
+// ClaimPendingWaitReady conditionally moves an exact open pending wait to
+// ready. The caller supplies an operation token unique to its controller
+// attempt; it is durably recorded with the deterministic ready timestamp so a
+// later controller can reconstruct whether that exact operation won.
+//
+// The conditional write preserves all metadata not owned by this transition.
+// Every attempted write is followed by an authoritative exact reread: a stale
+// revision returns the new canceled/rebound/newer observation without
+// overwriting it, while a transport response lost after a committed write is
+// recognized as this caller's successful claim. If the write error cannot be
+// classified from the reread, Outcome is WaitReadyClaimAmbiguous and the
+// caller must retain keyed ownership.
+func (s *Store) ClaimPendingWaitReady(candidate WaitInfo, persisted WaitPersistedResponse, now time.Time, owner WaitReadyOwner, operation string) (WaitReadyClaim, error) {
+	result := WaitReadyClaim{Wait: candidate, Persisted: persisted, Outcome: WaitReadyClaimNotApplied}
+	if owner != WaitReadyOwnerDependency {
+		return result, fmt.Errorf("claiming pending wait: unsupported ready owner %q", owner)
+	}
+	if operation == "" || strings.TrimSpace(operation) != operation || strings.ContainsAny(operation, " \t\r\n") {
+		return result, fmt.Errorf("claiming pending wait: ready operation must be non-empty and canonical")
+	}
+	if candidate.ID == "" || persisted.Revision == 0 {
+		return result, fmt.Errorf("claiming pending wait: exact wait ID and revision are required")
+	}
+	if candidate.Status != "open" || candidate.State != waitStatePending {
+		return result, nil
+	}
+	if s == nil || s.store.Store == nil {
+		return result, fmt.Errorf("claiming pending wait %q: %w", candidate.ID, beads.ErrConditionalWriteUnsupported)
+	}
+
+	writer, _, resolveErr := beads.ResolveConditionalWriter(s.store)
+	if resolveErr != nil {
+		return result, fmt.Errorf("claiming pending wait %q: resolving conditional writer: %w", candidate.ID, resolveErr)
+	}
+	if writer == nil {
+		return result, fmt.Errorf("claiming pending wait %q: %w", candidate.ID, beads.ErrConditionalWriteUnsupported)
+	}
+	readyAt := now.UTC().Format(time.RFC3339)
+	writeErr := writer.UpdateIfMatch(candidate.ID, persisted.Revision, beads.UpdateOpts{Metadata: map[string]string{
+		"state":           waitStateReady,
+		"ready_at":        readyAt,
+		"ready_owner":     string(owner),
+		"ready_operation": operation,
+	}})
+
+	afterBead, readErr := beads.HandlesFor(s.store.Store).Live.Get(candidate.ID)
+	if readErr != nil {
+		result.Outcome = classifyWaitReadyClaimReadFailure(writeErr)
+		if result.Outcome == WaitReadyClaimNotApplied {
+			return result, fmt.Errorf("confirming rejected pending wait claim %q: %w", candidate.ID, readErr)
+		}
+		return result, fmt.Errorf("claiming pending wait %q: authoritative reread after conditional attempt: %w", candidate.ID, readErr)
+	}
+	if !IsWaitBead(afterBead) {
+		if beads.IsPreconditionFailed(writeErr) {
+			return result, nil
+		}
+		result.Outcome = WaitReadyClaimAmbiguous
+		return result, fmt.Errorf("confirming pending wait claim %q: %w", candidate.ID, ErrNotAWait)
+	}
+	after, afterPersisted := WaitInfoFromBead(afterBead), WaitPersistedResponse{Revision: afterBead.Revision}
+	result = WaitReadyClaim{Wait: after, Persisted: afterPersisted}
+	result.Outcome = classifyWaitReadyClaim(after, afterPersisted, candidate, persisted, readyAt, owner, operation, writeErr)
+	switch result.Outcome {
+	case WaitReadyClaimCommitted:
+		return result, nil
+	case WaitReadyClaimNotApplied:
+		if beads.IsPreconditionFailed(writeErr) {
+			return result, nil
+		}
+		return result, fmt.Errorf("claiming pending wait %q: %w", candidate.ID, writeErr)
+	default:
+		return result, fmt.Errorf("confirming pending wait claim %q: outcome is ambiguous after conditional attempt", candidate.ID)
+	}
+}
+
+func classifyWaitReadyClaim(after WaitInfo, afterPersisted WaitPersistedResponse, candidate WaitInfo, persisted WaitPersistedResponse, readyAt string, owner WaitReadyOwner, operation string, writeErr error) WaitReadyClaimOutcome {
+	if waitReadyClaimMatches(after, afterPersisted, candidate, persisted, readyAt, owner, operation) {
+		return WaitReadyClaimCommitted
+	}
+	if beads.IsPreconditionFailed(writeErr) {
+		return WaitReadyClaimNotApplied
+	}
+	if writeErr != nil && afterPersisted.Revision == persisted.Revision && reflect.DeepEqual(after, candidate) {
+		return WaitReadyClaimNotApplied
+	}
+	return WaitReadyClaimAmbiguous
+}
+
+func classifyWaitReadyClaimReadFailure(writeErr error) WaitReadyClaimOutcome {
+	if beads.IsPreconditionFailed(writeErr) {
+		return WaitReadyClaimNotApplied
+	}
+	return WaitReadyClaimAmbiguous
+}
+
+func waitReadyClaimMatches(after WaitInfo, afterPersisted WaitPersistedResponse, candidate WaitInfo, persisted WaitPersistedResponse, readyAt string, owner WaitReadyOwner, operation string) bool {
+	return afterPersisted.Revision != 0 && afterPersisted.Revision != persisted.Revision &&
+		waitRegistrationMatches(after, candidate) &&
+		after.Status == "open" &&
+		after.State == waitStateReady &&
+		after.ReadyAt == readyAt &&
+		after.ReadyOwner == string(owner) &&
+		after.ReadyOperation == operation
+}
+
+func waitRegistrationMatches(after, candidate WaitInfo) bool {
+	if after.ID != candidate.ID || after.SessionID != candidate.SessionID ||
+		after.Kind != candidate.Kind || after.DepMode != candidate.DepMode ||
+		after.RegisteredEpoch != candidate.RegisteredEpoch || after.ExpiresAt != candidate.ExpiresAt {
+		return false
+	}
+	return reflect.DeepEqual(after.DepIDs, candidate.DepIDs)
 }
 
 // WaitsForSession returns the WaitInfo projection of open durable wait beads for
@@ -254,8 +430,10 @@ func (s *Store) FailWaitFromNudge(id string, now time.Time, nudgeID, terminalRea
 // paths). It emits a single SetMetadataBatch.
 func (s *Store) MarkWaitReady(id string, now time.Time) error {
 	return s.store.SetMetadataBatch(id, map[string]string{
-		"state":    waitStateReady,
-		"ready_at": now.UTC().Format(time.RFC3339),
+		"state":           waitStateReady,
+		"ready_at":        now.UTC().Format(time.RFC3339),
+		"ready_owner":     "",
+		"ready_operation": "",
 	})
 }
 
@@ -264,8 +442,10 @@ func (s *Store) MarkWaitReady(id string, now time.Time) error {
 // keys so the wait can be re-dispatched. It emits a single SetMetadataBatch.
 func (s *Store) MarkWaitReadyForRedelivery(id, nextAttempt string, now time.Time) error {
 	batch := map[string]string{
-		"state":    waitStateReady,
-		"ready_at": now.UTC().Format(time.RFC3339),
+		"state":           waitStateReady,
+		"ready_at":        now.UTC().Format(time.RFC3339),
+		"ready_owner":     "",
+		"ready_operation": "",
 	}
 	if nextAttempt != "" {
 		batch["delivery_attempt"] = nextAttempt

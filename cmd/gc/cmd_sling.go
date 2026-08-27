@@ -1594,6 +1594,36 @@ func pokeController(cityPath string) error {
 	return pokeSupervisor()
 }
 
+// pingController probes controller reachability WITHOUT asking for a reconciler
+// tick. Callers that only need to know "is a controller serving this city" must
+// use this instead of pokeController: a generic poke runs a fleet tick against
+// whatever the store holds right now, and a caller that pokes before its own
+// durable write hands that tick a pre-write snapshot to reconcile from
+// (ga-f7v2ft.125). Mirrors pokeController's supervisor fallback so the
+// supervisor-hosted model answers too.
+func pingController(cityPath string) error {
+	if _, err := sendControllerCommand(cityPath, "ping"); err == nil {
+		return nil
+	}
+	return pingSupervisor()
+}
+
+// pingSupervisor is pokeSupervisor's read-only twin: it proves the supervisor is
+// serving without queueing a reconcile of every managed city.
+func pingSupervisor() error {
+	sockPath := supervisorSocketPath()
+	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
+	if err != nil {
+		return fmt.Errorf("connecting to supervisor: %w", err)
+	}
+	defer conn.Close()                                     //nolint:errcheck
+	conn.SetWriteDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
+	if _, err := conn.Write([]byte("ping\n")); err != nil {
+		return fmt.Errorf("sending ping: %w", err)
+	}
+	return nil
+}
+
 // reloadControllerConfig asks the controller to reload config immediately.
 // If the per-city controller socket doesn't exist (supervisor model), falls
 // back to sending "reload" to the supervisor socket.

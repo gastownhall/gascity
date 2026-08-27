@@ -1,0 +1,154 @@
+# Merge-integrity allowlist — scripts/check-merge-integrity.sh
+#
+# Format, tab-separated, one entry per line:
+#
+#   symbol   <TAB> Name        <TAB> why the lane deliberately keeps a symbol upstream retired
+#   test     <TAB> TestName    <TAB> why a test present at the merge base is gone
+#   restored <TAB> Name        <TAB> why a merge deliberately brings back a symbol the LANE retired
+#
+# A blank reason is a violation. An allowlist without reasons is a mute button,
+# and the whole point of this guard is that a merge cannot go quiet.
+#
+# Regenerating this file to absorb a finding defeats the guard: the diff is the
+# review. Prefer porting the upstream replacement into the lane call sites and
+# deleting the symbol, which is what ga-f7v2ft.167 had to do after the fact.
+#
+# Methods are spelled Receiver.Name; everything else is the bare identifier.
+
+# --- WD.0 tick-debouncer retirement -----------------------------------------
+# The keyed detector sweep replaced the tick debouncer outright. The deletion
+# is not merely deliberate, it is PINNED: cmd/gc/tick_debounce_retirement_test.go
+# fails if "tickDebouncer", "TickDebounce", "tick_debounce" or the dead
+# TraceSiteReconcilerIdleDrain constant reappears in any Go source. Restoring
+# these tests would fail that guard, which is the correct relationship — the
+# retirement has a test, so the census does not need one.
+test	TestTickDebouncer_CancelPendingDrainsQueuedFire	WD.0 retired the tick debouncer; the retirement is pinned by TestTickDebounceRetirementLeavesNoSourceReferences
+test	TestTickDebouncer_CancelPendingDropsTimer	WD.0 retired the tick debouncer; the retirement is pinned by TestTickDebounceRetirementLeavesNoSourceReferences
+test	TestTickDebouncer_CoalescesBurstyArms	WD.0 retired the tick debouncer; the retirement is pinned by TestTickDebounceRetirementLeavesNoSourceReferences
+test	TestTickDebouncer_IndependentInstances	WD.0 retired the tick debouncer; the retirement is pinned by TestTickDebounceRetirementLeavesNoSourceReferences
+test	TestTickDebouncer_RearmsAfterFire	WD.0 retired the tick debouncer; the retirement is pinned by TestTickDebounceRetirementLeavesNoSourceReferences
+test	TestTickDebouncer_ZeroFiresImmediately	WD.0 retired the tick debouncer; the retirement is pinned by TestTickDebounceRetirementLeavesNoSourceReferences
+test	TestTickDebouncer_ZeroPreservesCapOneCoalesce	WD.0 retired the tick debouncer; the retirement is pinned by TestTickDebounceRetirementLeavesNoSourceReferences
+test	TestDaemonTickDebounceCustom	WD.0 retired the daemon.tick_debounce config key with the debouncer it configured
+test	TestDaemonTickDebounceDefault	WD.0 retired the daemon.tick_debounce config key with the debouncer it configured
+test	TestDaemonTickDebounceInvalid	WD.0 retired the daemon.tick_debounce config key with the debouncer it configured
+test	TestDaemonTickDebounceNegative	WD.0 retired the daemon.tick_debounce config key with the debouncer it configured
+test	TestParseDaemonTickDebounce	WD.0 retired the daemon.tick_debounce parser with the config key
+
+# --- narrow-CAS tests both sides retired ------------------------------------
+# The 5ec88b1535 conflict ledger records dropping main's narrow-CAS test: its
+# premise ("no sound revision token at beads v1.1.0") is falsified by the
+# beadslib.Storage pin both branches share. Upstream no longer declares these
+# either, so they are not lane-only losses.
+test	TestCachingStoreOverNativeDoltStoreForwardsNarrowCAS	retired on BOTH sides; the narrow-CAS premise is falsified by the shared beadslib.Storage pin (5ec88b1535 ledger)
+test	TestNativeDoltStoreConditionalWritesStillRefuseOrDegrade	retired on BOTH sides; superseded by the lane's ConditionalWriter capability assertion (5ec88b1535 ledger)
+test	TestNativeDoltStoreDeclaresNarrowCASButNotConditionalWriter	retired on BOTH sides; superseded by the lane's ConditionalWriter capability assertion (5ec88b1535 ledger)
+
+# --- ga-f7v2ft.183 adjudication (2026-08-21) --------------------------------
+# The thirteen tests origin/main still ships that the lane had lost. Each was
+# recovered from origin/main and run against lane code before a verdict.
+#
+# TWO were genuine losses and are RESTORED, not listed here:
+# TestCmdSessionKill_PokesControllerAfterSleep and
+# TestCmdSessionKill_PokeFailureIsNonFatal are back in
+# cmd/gc/cmd_session_kill_poke_test.go. The generic-poke branch they cover is
+# still live; 84ba8cfa47 renamed them onto the exact-handoff seam it added, and
+# mutation-probing proved the lane's replacements are blind to both the
+# after-the-SleepPatch ordering and the non-fatality.
+#
+# The eleven below are retirements with a subject that moved. Where a reason
+# claims supersession it NAMES the successor, and the successor was verified to
+# assert at least as much.
+
+# stop: 5b83c3acef stopped tearing down a provider-owned server scope on the
+# ordinary stop path (SESSION-RECON-018). The lane pins the INVERSE contract.
+test	TestCmdStopBodyTeardownRunsAfterStopOrphansBeforeBeadsShutdown	5b83c3acef deleted the teardownServerForStop call from cmdStopBodyWithoutSuccess per SESSION-RECON-018 (ordinary stop preserves certified runtime inventory); the inverse contract is pinned by TestCmdStopBodyPreservesDrainedServerInventory
+test	TestCmdStopBodySkipsTeardownForNonLifecycleProvider	renamed in place by 5b83c3acef to TestCmdStopBodyStopsWithNonServerProvider; its teardown assertions are subsumed by TestCmdStopBodyPreservesDrainedServerInventory, which rejects teardown even for a provider that DOES implement runtime.ServerLifecycleProvider
+test	TestCmdStopBodyReportsTeardownErrorWithoutFailing	the cmdStopBody teardown seam it asserted on was deleted by 5b83c3acef per SESSION-RECON-018; teardownServerForStop now runs only on the supervisor-managed path, covered by TestCityRuntimeShutdownTearsDownProviderServer
+
+# class-store emission: fb41ffc2b1 (ga-f7v2ft.164) renamed all three in place.
+# The first one's NAME is now false on this lane BY DESIGN — see the reason.
+test	TestControllerClassRoutesStayEventSilentUnderReconcileShapedWrites	renamed by fb41ffc2b1 to TestWiredClassRoutesEmitExactlyOnceAndTheResolverArgumentDoesNot (same fixture, same three assertions, field emitCityPath->emit). The upstream NAME is deliberately false here: newCityRuntime wires withControllerEmission(p.Rec), because the CachingStore upstream relied on sits on the WORK ledger and cannot cover a relocated class. Upstream only ever asserted controller silence through the splitClassRoutes test helper, which no longer stands for the controller; double-emit is closed by construction and pinned by TestWiringRoutesTwiceDoesNotDoubleTheEmission
+test	TestClassStoreEmitTargetHasExactlyOneInjectionSite	generalized by fb41ffc2b1 to TestClassStoreEmitTargetIsInjectedOncePerProcess, a strict superset: it keeps every upstream check on withCLIEmission (one call, cli_storage_routes.go, ident receiver, one arg named cityPath) and adds withControllerEmission and withEmission
+test	TestControllerRoutesFromOpenStorageRoutesCarryNoEmitTarget	renamed by fb41ffc2b1 to TestOpenStorageRoutesInstallsNoEmitTarget; assertion-for-assertion identical body. openStorageRoutes still installs nothing — the per-process wiring moved up into newCityRuntime, so the old name's "the controller's routes" framing is what changed, not the invariant this seam holds
+
+# reconciler/runtime renames: covered function moved, assertions carried over.
+test	TestTraceHealClearedPendingCreateLeaseRecordsDecision	renamed in place by c481c15852 to TestTraceHealClearedPendingCreateLeaseInfoRecordsDecision (same trace site, reason, outcome and payload keys); the bead-form helper it pinned has no production caller even on origin/main. NOT the ga-f7v2ft.166 silent change: that was D-DEADLINE in session_deadline_reconcile.go, 24 days later
+test	TestCityRuntimeReadyDemandFingerprintLogsStableStoreError	renamed in place by 83049b52e8 to TestCityRuntimeReadyRoutedWorkViewLogsStableStoreError when the ready-demand scan was promoted to the sweep's routed-work view; all three assertions carried over. Deliberately NOT restored: readyDemandSnapshotFingerprint is a caller-less island the 5ec88b1535 merge resurrected, and restoring this would cement it (ga-f7v2ft.184)
+test	TestPackAddRemoveSerializeThroughConfigWriteLock	renamed in place by ad33f6ce93 to TestPackAddRemoveRouteThroughPackMutationTransaction, which adds packMutationCalls assertions; the upstream test still passes verbatim on the lane
+test	TestBdStoreListWispsFallsBackToClientFilteringForUnsafeQueryValues	renamed in place by 24587284f5 to TestBdStoreListWispsPushesSlashValuesAndFallsBackForUnsafeQueryValues. The fallback is intact — quotes, spaces, '=' and the AND/OR/NOT tokens are still client-filtered; 24587284f5 widened the safe charset by exactly one character ('/') so path-style assignees push down. Lane-vs-upstream divergence, will re-conflict on the next merge (ga-f7v2ft.185)
+test	TestRuntimeStartCallSitesCleanOrphansFirst	renamed in place by 1654bac8d1 to TestRuntimeStartCallSitesHavePreEffectFence. The census narrowed by one deliberate exemption: StartRuntimeOnlyAuthorized, where orphan cleanup would kill the very replacement runtime whose appearance revokes start authority. The other four Start sites still require cleanup, and the exempt site's property is pinned by TestSessionHandleStartResolvedAuthorizedNeverAcceptsOrRecyclesExistingRuntime in internal/worker/handle_test.go
+
+# --- ga-f7v2ft.184: the caller-less island, finished --------------------------
+# 83049b52e8 promoted the ready-demand scan to the sweep's routed-work view and
+# deleted readyDemandSnapshotFingerprint with it; 5ec88b1535 took the symbol back
+# to compile against two incoming upstream test files. The four tests below are
+# every caller it had. They are NOT re-pointed at readyRoutedWorkView, because
+# the promoted read is a DIFFERENT read: the retired scan hashed the storeref
+# RoutedWork plan narrowed to the runtime plane (bindings in, work ledger out),
+# and the view reads the canonical workflow stores (city ledger in). The
+# zero-ledger-read budget these tests pinned is not a property the live path has
+# or claims — readyRoutedWorkView is one bounded ReadyLive read per store per
+# patrol by design and says so on its own doc comment, not zero reads —
+# so re-pointing them would assert something false under a name that sounds true.
+# The live equivalents are TestReadyRoutedWorkViewFingerprintTracksDemandNotTouches
+# and TestReadyRoutedWorkViewEmitsResolvableStoreRefs.
+test	TestDemandFingerprintIssuesZeroLedgerReadsOnASplitCity	pinned readyDemandSnapshotFingerprint's zero-ledger-read budget; the scan is retired and the promoted routed-work view reads the city ledger by design (ga-f7v2ft.184)
+test	TestDemandFingerprintTracksTheBindingTheProbeReads	pinned the retired scan's binding leg; the live invalidation edge is covered by TestReadyRoutedWorkViewFingerprintTracksDemandNotTouches (ga-f7v2ft.184)
+test	TestDemandFingerprintIgnoresAStoreTheProbeDoesNotRead	the control for the test above, retired with it; the view's store scope is pinned by TestReadyRoutedWorkViewEmitsResolvableStoreRefs (ga-f7v2ft.184)
+test	TestDemandFingerprintReadsASingleStoreCityOnce	pinned the retired scan's single-store dedup; the view enumerates canonical workflow stores, which cannot double-count the city (ga-f7v2ft.184)
+
+# --- B1 nudge input fence: the modal dismissal was re-sited, not dropped -----
+# The council's release blocker B1 restored the Codex/GPT model-switch dismissal
+# to the nudge path (b290985c9e) as a CERTIFIED, server-queued effect. Doing that
+# retired the two symbols the three tests below called: the free function
+# dismissModelSwitchModal (its detection half now lives at
+# runtime.ContainsModelSwitchModal, pinned by TestContainsModelSwitchModal) and
+# the uncertified Tmux.DismissModelSwitchModalIfPresent. Both are absent from the
+# tree, so these are retirements-by-rename, not the delete-source class.
+#
+# Adjudicated per ga-f7v2ft.183's method — recover, run against lane code, then
+# rule. The base tests cannot compile at HEAD (they name deleted symbols), so the
+# ruling rests on the replacements being RUN, and each is strictly stronger than
+# what it replaces: it drives the production entry point instead of a helper, and
+# asserts the certification the base tests could not.
+test	TestDismissModelSwitchModal	renamed onto the production entry point as TestClearModelSwitchModalKeepsTheCurrentModel, which asserts the same Keep-current-model choice AND that Down/settle/Enter ride one if-shell effect re-proving the pane (B1, b290985c9e)
+test	TestDismissModelSwitchModalNoOpOnWorkingPane	renamed as TestClearModelSwitchModalNoOpOnWorkingPane on byte-identical pane content, now proving no send-keys AND no if-shell reaches a working pane that merely mentions rate limits (B1, b290985c9e)
+test	TestDismissModelSwitchModalIfPresentClearsModalOnRealTmux	renamed as TestClearModelSwitchModalOnRealTmux on the same fake-agent fixture and the same MODEL_KEPT assertion, with a deadline wait replacing the fixed sleep; TestNudgeNeverTypesIntoAModelSwitchModalOnRealTmux was added beside it to pin the #3916/ga-3syh signature end-to-end (B1, b290985c9e)
+
+# --- the retired-key registry stopped being empty ----------------------------
+# Council finding F2 registered the first entry in config.retiredKeys, which
+# falsifies the base test's own premise: its first assertion is
+# `len(retiredKeys) != 0 -> Fatal`. Recovered verbatim and RUN against lane code
+# per ga-f7v2ft.183's method, it fails on exactly that line — so it cannot be
+# restored, only re-expressed. The replacement carries both of its end-to-end
+# assertions unchanged (an unknown key stays fatal through
+# fatalUndecodedWarnings, and CheckUndecodedKeys still warns about it) and adds
+# the guard the registry now needs: every registered entry must carry a
+# RemovedIn anchor and a Note. Retiring a key must downgrade THAT key, never
+# open a hole for typos.
+test	TestUndecodedPathsWithEmptyRetiredRegistry	its premise (retiredKeys ships empty) is what F2 changed; re-expressed as TestUndecodedPathsWithPopulatedRetiredRegistry, which keeps both unknown-key-fatality assertions and adds a RemovedIn+Note requirement per entry
+
+# --- check 3: restorations the merge got RIGHT --------------------------------
+# Check 3's finding is not automatically a defect. A lane that lost a symbol
+# during branch churn and a merge that hands it back is the guard working in the
+# other direction — which is why each entry states the CALLER that proves the
+# behaviour is live, not just that the restoration was intended.
+restored	teardownServerForStop	the LANE lost upstream #5175/#5196's managed-stop teardown during branch churn; 5ec88b1535 restored it and the lane calls it in production from CityRuntime.shutdown (cmd/gc/city_runtime.go), pinned by TestCityRuntimeShutdownTearsDownProviderServer
+
+# --- NOT allowlisted, deliberately ------------------------------------------
+# Nothing is parked here awaiting a decision, and that is the invariant this
+# section exists to state. ga-f7v2ft.182 (four internal/pidutil timeout
+# constants origin/main retired in #5427) was ADOPTED by cherry-pick at
+# c2da2c1624 rather than exempted, so check 1 reports no resurrection; the
+# thirteen ga-f7v2ft.183 tests above are adjudicated, not absorbed; and the three
+# B1 modal tests were ruled on by running their replacements, including on real
+# tmux, before a line was written here.
+#
+# readyDemandSnapshotFingerprint and writeReadyDemandFingerprintBead are NOT
+# here either. Check 3 reports them at 5ec88b1535 and must keep reporting them:
+# that historical run is the guard's falsifiability proof, and the fix is the
+# deletion in the tree, not a line in this file.
+#
+# Adding a finding here to get a green run is the failure this file exists to
+# prevent. If the guard goes red, the red is the assignment.

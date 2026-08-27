@@ -27,7 +27,20 @@ func (s *atomicCloseMemStore) CloseWithMetadataIfMatch(id string, expectedRevisi
 	if s == nil || s.MemStore == nil {
 		return Bead{}, fmt.Errorf("atomic closing bead %q: store is nil", id)
 	}
-	m := s.MemStore
+	return s.closeWithMetadataIfMatch(id, expectedRevision, metadata)
+}
+
+// closeWithMetadataIfMatch is the shared atomic terminal-close body: the
+// metadata merge and the status flip happen under one MemStore lock and mint
+// one revision, so nothing can observe or write between them.
+//
+// It stays unexported deliberately. TestAtomicCloseMemStoreIsOptIn pins that a
+// plain MemStore does NOT advertise AtomicConditionalCloser, and that
+// non-capability is what keeps session.Store.Close's non-atomic arm
+// exercisable. The two callers are the opt-in atomicCloseMemStore and
+// FileStore, which needs the fused mutation to complete before its single
+// flush.
+func (m *MemStore) closeWithMetadataIfMatch(id string, expectedRevision int64, metadata map[string]string) (Bead, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.DisableConditionalWrites {

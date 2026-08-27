@@ -731,8 +731,34 @@ jobs:
           dolt-version: ${{ env.DOLT_VERSION }}
           bd-version: ${{ env.BD_VERSION }}
           install-claude-cli: "false"
+      - name: Build pinned v59 bd for cmd/gc integration
+        if: matrix.shard_name == 'packages-cmd-gc-integration'
+        run: |
+          set -euo pipefail
+          ref="$(sed -n 's/^BD_CURRENT_REF=//p' deps.env)"
+          if [ -z "$ref" ]; then
+            echo "::error::BD_CURRENT_REF missing or empty in deps.env" >&2
+            exit 1
+          fi
+          src="${RUNNER_TEMP}/beads-v59-src"
+          binary="${RUNNER_TEMP}/bd-v59"
+          git clone --filter=blob:none https://github.com/gastownhall/beads "$src"
+          git -C "$src" checkout --detach "$ref"
+          actual="$(git -C "$src" rev-parse HEAD)"
+          if [ "$actual" != "$ref" ]; then
+            echo "::error::resolved beads commit $actual, want $ref" >&2
+            exit 1
+          fi
+          go -C "$src" build -tags gms_pure_go -o "$binary" ./cmd/bd
+          test -x "$binary"
+          echo "GC_TEST_BD_BIN=$binary" >> "$GITHUB_ENV"
       - name: Run integration shard
-        run: ${{ matrix.command }}
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.shard_name }}" = "packages-cmd-gc-integration" ]; then
+            : "${GC_TEST_BD_BIN:?GC_TEST_BD_BIN is required for the equipped cmd/gc integration shard}"
+          fi
+          ${{ matrix.command }}
 
   # The full REST suite is broad release/post-merge coverage. PRs run the
   # focused REST smoke contract above; pushes retain all full-suite shards.

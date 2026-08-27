@@ -196,6 +196,14 @@ func (s *Store) ListAll(opts ListAllOptions) ([]Info, error) {
 type ReconcileSession struct {
 	Info    Info
 	Circuit CircuitState
+	// Revision is the row's persisted optimistic-concurrency token as of this
+	// read. It rides the feed for the same reason Circuit does — it is not a
+	// lifecycle-decision fact, so it stays off Info, but the reconciler needs it
+	// once per tick to fence an advisory write against a concurrent writer that
+	// changed the row after the snapshot was taken. Zero when the store does not
+	// supply revisions (an unrevisioned backend, or a row projected from beads
+	// that carry none); callers must treat zero as "unknown" and fail closed.
+	Revision int64
 }
 
 // ListAllForReconcile returns every session bead projected to a ReconcileSession,
@@ -216,8 +224,9 @@ func (s *Store) ListAllForReconcile(opts ListAllOptions) ([]ReconcileSession, er
 	out := make([]ReconcileSession, 0, len(rows))
 	for _, b := range rows {
 		out = append(out, ReconcileSession{
-			Info:    infoFromPersistedBead(b),
-			Circuit: CircuitStateFromMetadata(b.Metadata),
+			Info:     infoFromPersistedBead(b),
+			Circuit:  CircuitStateFromMetadata(b.Metadata),
+			Revision: b.Revision,
 		})
 	}
 	return out, err
@@ -236,8 +245,9 @@ func ReconcileRowsFromBeads(beadsIn []beads.Bead) []ReconcileSession {
 	out := make([]ReconcileSession, 0, len(beadsIn))
 	for _, b := range beadsIn {
 		out = append(out, ReconcileSession{
-			Info:    infoFromPersistedBead(b),
-			Circuit: CircuitStateFromMetadata(b.Metadata),
+			Info:     infoFromPersistedBead(b),
+			Circuit:  CircuitStateFromMetadata(b.Metadata),
+			Revision: b.Revision,
 		})
 	}
 	return out
@@ -298,8 +308,9 @@ func (s *Store) ListAllForReconcileWithFingerprint(opts ListAllOptions) ([]Recon
 	out := make([]ReconcileSession, 0, len(rows))
 	for _, b := range rows {
 		out = append(out, ReconcileSession{
-			Info:    infoFromPersistedBead(b),
-			Circuit: CircuitStateFromMetadata(b.Metadata),
+			Info:     infoFromPersistedBead(b),
+			Circuit:  CircuitStateFromMetadata(b.Metadata),
+			Revision: b.Revision,
 		})
 	}
 	return out, fingerprint, err

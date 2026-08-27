@@ -56,6 +56,137 @@ When you are done:
 gc trace stop --template repo/polecat
 ```
 
+## Cold-disable and re-enable the keyed reconciler
+
+`session_reconciler` is boot-latched: validate and atomically replace the city
+root, then restart the supervisor. There is no `gc config set` command for this
+field. Run the following from the city root to cold-disable it. The candidate is
+in the same directory as `city.toml`, so the final rename is atomic.
+
+> **Warning:** `gc supervisor stop --wait` is the portable supported path, but
+> it is machine-wide and destructive to live runtime state: it stops every
+> managed city and its live sessions. Durable work survives and can converge
+> again after restart, but tmux identities are not preserved. There is no
+> universal CLI command for a preserve-in-place supervisor restart today.
+
+```bash
+set -eu
+candidate=.city.toml.reconciler-next
+trap 'rm -f "$candidate"' EXIT
+awk '
+  /^[[:space:]]*session_reconciler[[:space:]]*=/ {
+    if (++n != 1) exit 42
+    sub(/"[^"]*"/, "\"off\"")
+  }
+  { print }
+  END { if (n != 1) exit 42 }
+' city.toml > "$candidate"
+gc config show --validate --root-file "$candidate"
+mv -f "$candidate" city.toml
+gc supervisor stop --wait
+gc supervisor start
+gc trace status
+```
+
+The final status must report `configured mode: off` and `effective owner:
+legacy`. Keep any incident trace separately; after the old supervisor exits its
+`controller_instance_id` must not appear on new shadow records.
+
+The exact-binary cold-disable acceptance journey also covers service-managed
+preserve semantics: its test-owned supervisor opts into preserve-on-SIGTERM and
+proves tmux identity continuity. That is a separate service configuration, not
+a property of the portable copy/paste procedure above.
+
+To re-enable the rollout path, repeat the same sequence with `"auto"` in place
+of `"off"`. `gc trace status` must then report `configured mode: auto` and,
+when the keyed capability is available, `effective owner: keyed`. Start a fresh,
+bounded trace arm before the reproduction:
+
+```bash
+gc trace start --template repo/polecat --for 20m --level detail
+gc trace show --template repo/polecat --since 20m --json > /tmp/reconciler-after-reenable.json
+```
+
+New records must carry a different `controller_instance_id`; do not treat old
+records in the append-only trace store as activity by the new controller.
+
+The arm buys DETAIL — the decisions, refusals and yields behind an outcome. It
+is not what proves the keyed engine is running. A keyed handler that commits an
+effect writes an always-on record carrying `effect_owner=keyed` and
+`effect_applied=true`, so an unarmed city already answers "is the opt-in
+acting?":
+
+```bash
+gc trace show --since 1h --json |
+  jq -c '.records[] | select(.fields.effect_owner == "keyed" and .fields.effect_applied == true)'
+```
+
+Empty output on a city that has reconciled something means the keyed engine did
+not act; it no longer means the trace was switched off.
+
+## Canary queued nudge target selection
+
+`nudge_shadow` is boot-latched. To canary it on an existing city, prepare a
+same-directory `city.toml` candidate with this exact daemon tuple and validate
+the candidate before stopping anything:
+
+```toml
+[daemon]
+nudge_dispatcher = "supervisor"
+session_reconciler = "off"
+nudge_shadow = "required"
+```
+
+```bash
+cp -f city.toml .city.toml.nudge-shadow-next
+# Edit .city.toml.nudge-shadow-next, then:
+gc config show --validate --root-file .city.toml.nudge-shadow-next
+gc supervisor stop --wait
+mv -f .city.toml.nudge-shadow-next city.toml
+gc supervisor start
+```
+
+The portable stop is destructive as described above; service-managed
+preserve-in-place restarts need their own verified supervisor configuration.
+Run this canary only while the city is quiescent. Inspect `gc nudge status
+<session-id-or-alias> --json` for every live session and require zero pending
+and in-flight items everywhere. The canary must be the single queued item in
+the whole city; if unrelated work is queued concurrently, abort, let it drain,
+and retry from a fresh trace cursor.
+
+After restart, note the `head_seq` from `gc trace status --json`, enqueue one
+unique canary, and inspect only later records. Once nudge status is terminal,
+poll trace status until `head_seq` stays unchanged for a bounded two-second
+flush window (restart that window whenever the head advances), then read the
+records:
+
+```bash
+gc session nudge <session-id-or-alias> "nudge-shadow-canary-$(date +%s)" --delivery=queue --json
+gc trace show --since 5m --json
+gc nudge status <session-id-or-alias> --json
+```
+
+Select the single later `nudge.due_target_selection.shadow` record whose
+`queue_item_count` is `1`. It must report
+`scope=queued_exact_due_target_selection`, candidate and legacy counts of `1`,
+equal 64-character digests, `comparison_outcome=matched`,
+`legacy_effect_owner=true`, and `shadow_effect_applied=false`. The timing fields
+must be non-negative. The trace must not contain the raw session ID, session
+name, alias, or canary message. Verify the canary appears exactly once in the
+target's visible transcript and that nudge status reports zero pending,
+in-flight, and dead items.
+
+If `queue_item_count` is not exactly `1`, another item coexisted with the
+canary; discard that observation and retry after the entire city queue is
+empty. Re-read after the bounded flush window and require the one-item record
+count to remain exactly one.
+
+Rollback is the same cold procedure with `nudge_shadow = "off"`. Record a new
+trace cursor after the off successor is ready, enqueue a fresh canary, and
+confirm legacy delivery still occurs exactly once. After the queue drains,
+wait the same bounded two-second quiet/flush window before declaring that no
+later `nudge.due_target_selection.shadow` record was created.
+
 ## What To Send An Agent
 
 Point the next agent at these artifacts:

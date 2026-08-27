@@ -645,112 +645,6 @@ func TestCityRuntimeRequestDeferredDrainFollowUpTick_PokesOnce(t *testing.T) {
 	}
 }
 
-func TestTickDebouncer_ZeroFiresImmediately(t *testing.T) {
-	d := newTickDebouncer()
-	d.arm(0)
-	select {
-	case <-d.fired():
-	default:
-		t.Fatal("debounce=0 should enqueue an immediate fire")
-	}
-}
-
-func TestTickDebouncer_ZeroPreservesCapOneCoalesce(t *testing.T) {
-	d := newTickDebouncer()
-	d.arm(0)
-	d.arm(0)
-	d.arm(0)
-	// Three arms should still produce exactly one queued fire — the
-	// cap=1 channel collapses the rest, matching the pre-debounce
-	// pokeCh non-blocking-send semantics.
-	if got := drainFiredCount(d, 5*time.Millisecond); got != 1 {
-		t.Fatalf("fired count = %d, want 1 (cap=1 coalesce)", got)
-	}
-}
-
-func TestTickDebouncer_CoalescesBurstyArms(t *testing.T) {
-	d := newTickDebouncer()
-	debounce := 200 * time.Millisecond
-	// Burst of arms with no inter-arm sleep so the entire burst fits well
-	// inside the debounce window even on a slow CI runner.
-	for i := 0; i < 5; i++ {
-		d.arm(debounce)
-	}
-	// Burst should produce exactly one fire after the window. The total
-	// observation window includes a generous tail to absorb GC pauses
-	// and CI scheduler jitter.
-	if got := drainFiredCount(d, debounce+200*time.Millisecond); got != 1 {
-		t.Fatalf("fired count = %d, want 1 after burst", got)
-	}
-}
-
-func TestTickDebouncer_CancelPendingDropsTimer(t *testing.T) {
-	d := newTickDebouncer()
-	d.arm(30 * time.Millisecond)
-	d.cancelPending()
-	// Wait past the original window — nothing should fire.
-	if got := drainFiredCount(d, 60*time.Millisecond); got != 0 {
-		t.Fatalf("fired count = %d, want 0 after cancelPending", got)
-	}
-}
-
-func TestTickDebouncer_CancelPendingDrainsQueuedFire(t *testing.T) {
-	d := newTickDebouncer()
-	d.arm(0) // queue a fire on fireCh
-	d.cancelPending()
-	// cancelPending should drain the already-queued fire, not just stop
-	// the timer — otherwise a debounce=0 "ticker absorbs poke" path would
-	// still receive on fired() in the next select iteration.
-	if got := drainFiredCount(d, 5*time.Millisecond); got != 0 {
-		t.Fatalf("fired count = %d, want 0 after cancelPending drains queued fire", got)
-	}
-}
-
-func TestTickDebouncer_RearmsAfterFire(t *testing.T) {
-	d := newTickDebouncer()
-	debounce := 20 * time.Millisecond
-	d.arm(debounce)
-	if got := drainFiredCount(d, debounce+50*time.Millisecond); got != 1 {
-		t.Fatalf("first burst fired count = %d, want 1", got)
-	}
-	// Second burst should arm a fresh timer — the AfterFunc callback must
-	// have cleared the internal timer pointer.
-	d.arm(debounce)
-	if got := drainFiredCount(d, debounce+50*time.Millisecond); got != 1 {
-		t.Fatalf("second burst fired count = %d, want 1", got)
-	}
-}
-
-func TestTickDebouncer_IndependentInstances(t *testing.T) {
-	a := newTickDebouncer()
-	b := newTickDebouncer()
-	debounce := 20 * time.Millisecond
-	a.arm(debounce)
-	b.arm(debounce)
-	if got := drainFiredCount(a, debounce+50*time.Millisecond); got != 1 {
-		t.Fatalf("a fired count = %d, want 1", got)
-	}
-	if got := drainFiredCount(b, 5*time.Millisecond); got != 1 {
-		t.Fatalf("b fired count = %d, want 1 (independent timer state)", got)
-	}
-}
-
-// drainFiredCount counts how many fires are available on the debouncer's
-// channel within window. It returns once window elapses with no further
-// fires for at least a short tail, so the count is stable.
-func drainFiredCount(d *tickDebouncer, window time.Duration) int {
-	deadline := time.After(window)
-	count := 0
-	for {
-		select {
-		case <-d.fired():
-			count++
-		case <-deadline:
-			return count
-		}
-	}
-}
-
 func TestCityRuntimeShutdownMarksCityStopSleepReason(t *testing.T) {
 	store := beads.NewMemStore()
 	session, err := store.Create(beads.Bead{
@@ -903,6 +797,11 @@ func TestCityRuntimeDemandSnapshotRefreshesForNewRoutedReadyWork(t *testing.T) {
 		t.Fatalf("Create routed work: %v", err)
 	}
 
+	// The declared routed-work read is floored at readyRoutedWorkViewFloor, so put
+	// this second tick where a real patrol tick always is — past the floor.
+	// Every patrol_interval at or above the floor (the 30s default included)
+	// lands here; see TestCityRuntimeReadyRoutedWorkViewFloorsPatrolRescan.
+	cr.readyRoutedWorkViewAt = time.Now().Add(-2 * readyRoutedWorkViewFloor)
 	second := cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
 	if buildCalls != 2 {
 		t.Fatalf("buildDesiredState call count = %d, want 2 after ready-demand change", buildCalls)
@@ -2351,9 +2250,8 @@ func TestCityRuntimeDemandSnapshotReplaysACPRoutesOnCacheHit(t *testing.T) {
 		stderr: io.Discard,
 	}
 	cr.demandSnapshot = &runtimeDemandSnapshot{
-		createdAt:              time.Now(),
-		sessionFingerprint:     sessionBeadSnapshotFingerprint(nil),
-		readyDemandFingerprint: cr.readyDemandSnapshotFingerprint(),
+		createdAt:          time.Now(),
+		sessionFingerprint: sessionBeadSnapshotFingerprint(nil),
 		result: DesiredStateResult{State: map[string]TemplateParams{
 			"headless-agent": {
 				SessionName: "headless-agent",
@@ -2369,7 +2267,7 @@ func TestCityRuntimeDemandSnapshotReplaysACPRoutesOnCacheHit(t *testing.T) {
 	}
 }
 
-func TestCityRuntimeReadyDemandFingerprintLogsStableStoreError(t *testing.T) {
+func TestCityRuntimeReadyRoutedWorkViewLogsStableStoreError(t *testing.T) {
 	var logBuf bytes.Buffer
 	oldLogOutput := log.Writer()
 	log.SetOutput(&logBuf)
@@ -2378,6 +2276,7 @@ func TestCityRuntimeReadyDemandFingerprintLogsStableStoreError(t *testing.T) {
 	store := &readyFailStore{Store: beads.NewMemStore()}
 	cr := &CityRuntime{
 		cityName: "test-city",
+		cityPath: t.TempDir(),
 		cfg: &config.City{
 			Workspace: config.Workspace{Name: "test-city"},
 		},
@@ -2389,17 +2288,42 @@ func TestCityRuntimeReadyDemandFingerprintLogsStableStoreError(t *testing.T) {
 		stderr: io.Discard,
 	}
 
-	first := cr.readyDemandSnapshotFingerprint()
-	second := cr.readyDemandSnapshotFingerprint()
+	first := cr.readReadyRoutedWorkView().Fingerprint
+	second := cr.readReadyRoutedWorkView().Fingerprint
 
 	if first != second {
-		t.Fatalf("readyDemandSnapshotFingerprint changed across stable store errors: %q != %q", first, second)
+		t.Fatalf("routed-work view fingerprint changed across stable store errors: %q != %q", first, second)
 	}
 	if store.readyCalls != 2 {
 		t.Fatalf("Ready calls = %d, want 2", store.readyCalls)
 	}
-	if got := logBuf.String(); !strings.Contains(got, "readyDemandSnapshotFingerprint: store test-city: backing ready should not be used") {
-		t.Fatalf("log output = %q, want readyDemandSnapshotFingerprint store error", got)
+	if got := logBuf.String(); !strings.Contains(got, "readyRoutedWorkView: store city:test-city: backing ready should not be used") {
+		t.Fatalf("log output = %q, want readyRoutedWorkView store error", got)
+	}
+}
+
+// TestReadyRoutedWorkViewNeverDropsTheCityStore pins the one asymmetry in
+// canonicalWorkflowStoreEntries. A rig store with no configured rig is dropped
+// because nothing could resolve its ref, but the city store is always read even
+// when its ref cannot be derived from a path — dropping it would turn a
+// labeling defect into a blind demand scan, which is strictly worse.
+func TestReadyRoutedWorkViewNeverDropsTheCityStore(t *testing.T) {
+	store := &readyFailStore{Store: beads.NewMemStore()}
+	cr := &CityRuntime{
+		cityName: "test-city",
+		cfg:      &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		cs: &controllerState{
+			cityName:      "test-city",
+			cityBeadStore: store,
+			eventProv:     events.NewFake(),
+		},
+		stderr: io.Discard,
+	}
+
+	view := cr.readReadyRoutedWorkView()
+
+	if view.Stores != 1 || store.readyCalls != 1 {
+		t.Fatalf("stores = %d, Ready calls = %d, want the city store read exactly once with no city path", view.Stores, store.readyCalls)
 	}
 }
 
@@ -2431,6 +2355,154 @@ func TestCityRuntimeDemandSnapshotPokeDoesNotScanReadyFingerprint(t *testing.T) 
 	}
 	if store.readyCalls != 0 {
 		t.Fatalf("Ready calls = %d, want 0 for forced non-patrol rebuild", store.readyCalls)
+	}
+}
+
+// unstableErrorReadyStore fails Ready with a different message every call, the
+// way a real store outage reports varying connection ids, retry counts, or
+// timestamps.
+type unstableErrorReadyStore struct {
+	beads.Store
+	readyCalls int
+}
+
+func (s *unstableErrorReadyStore) Ready(...beads.ReadyQuery) ([]beads.Bead, error) {
+	s.readyCalls++
+	return nil, fmt.Errorf("dial dolt: connection %d refused at %d", s.readyCalls, s.readyCalls*7)
+}
+
+func TestCityRuntimeReadyRoutedWorkViewFloorsPatrolRescan(t *testing.T) {
+	store := &readyStaticStore{Store: beads.NewMemStore(), ready: []beads.Bead{{ID: "work-1", Status: "open"}}}
+	buildCalls := 0
+	cr := &CityRuntime{
+		cityName: "test-city",
+		cityPath: t.TempDir(),
+		cfg: &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+		},
+		cs: &controllerState{
+			cityName:      "test-city",
+			cityBeadStore: store,
+			eventProv:     events.NewFake(),
+		},
+		stderr: io.Discard,
+	}
+	cr.buildFnWithSessionBeads = func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+		buildCalls++
+		return DesiredStateResult{State: map[string]TemplateParams{}}
+	}
+	if !cr.demandSnapshotsEnabled() {
+		t.Fatal("demand snapshots must be enabled for this fixture")
+	}
+
+	sessionBeads := newSessionBeadSnapshot(nil)
+
+	_ = cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
+	if store.readyCalls != 1 {
+		t.Fatalf("Ready calls after first patrol = %d, want 1", store.readyCalls)
+	}
+
+	// A second patrol tick inside the floor reuses the previous fingerprint
+	// instead of re-running the cache-bypassing ReadyLive scan against every
+	// store.
+	_ = cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
+	if store.readyCalls != 1 {
+		t.Fatalf("Ready calls after sub-interval second patrol = %d, want 1 (floored)", store.readyCalls)
+	}
+	if buildCalls != 1 {
+		t.Fatalf("buildDesiredState calls = %d, want 1", buildCalls)
+	}
+
+	// Certified-readiness wakes (routed-work / wait-dep pokes) are non-patrol
+	// triggers, so they bypass the floor and rebuild immediately.
+	_ = cr.loadDemandSnapshot(sessionBeads, nil, "poke", false)
+	if buildCalls != 2 {
+		t.Fatalf("buildDesiredState calls after poke = %d, want 2 (poke must bypass the floor)", buildCalls)
+	}
+
+	// Once the floor elapses the scan runs again: at the default 30s patrol
+	// cadence every tick is past the floor, so behavior is unchanged.
+	cr.readyRoutedWorkViewAt = time.Now().Add(-2 * scaleCheckDemandMinInterval)
+	_ = cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
+	if store.readyCalls != 2 {
+		t.Fatalf("Ready calls after floor elapsed = %d, want 2", store.readyCalls)
+	}
+}
+
+func TestCityRuntimeReadyRoutedWorkViewDefaultCadenceScansEveryTick(t *testing.T) {
+	store := &readyStaticStore{Store: beads.NewMemStore(), ready: []beads.Bead{{ID: "work-1", Status: "open"}}}
+	cr := &CityRuntime{
+		cityName: "test-city",
+		cityPath: t.TempDir(),
+		cfg: &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+		},
+		cs: &controllerState{
+			cityName:      "test-city",
+			cityBeadStore: store,
+			eventProv:     events.NewFake(),
+		},
+		stderr: io.Discard,
+	}
+	cr.buildFnWithSessionBeads = func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+		return DesiredStateResult{State: map[string]TemplateParams{}}
+	}
+
+	sessionBeads := newSessionBeadSnapshot(nil)
+	const ticks = 4
+	for i := range ticks {
+		if i > 0 {
+			// Age the view past the backstop so each tick must rebuild.
+			cr.readyRoutedWorkViewAt = cr.readyRoutedWorkViewAt.Add(-runtimeDemandSnapshotBackstopMaxAge)
+		}
+		_ = cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
+	}
+	if store.readyCalls != ticks {
+		t.Fatalf("Ready calls across %d default-cadence patrols = %d, want %d (floor must be a no-op)", ticks, store.readyCalls, ticks)
+	}
+}
+
+func TestCityRuntimeReadyRoutedWorkViewStableAcrossUnstableStoreErrors(t *testing.T) {
+	oldLogOutput := log.Writer()
+	log.SetOutput(io.Discard)
+	t.Cleanup(func() { log.SetOutput(oldLogOutput) })
+
+	store := &unstableErrorReadyStore{Store: beads.NewMemStore()}
+	buildCalls := 0
+	cr := &CityRuntime{
+		cityName: "test-city",
+		cityPath: t.TempDir(),
+		cfg: &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+		},
+		cs: &controllerState{
+			cityName:      "test-city",
+			cityBeadStore: store,
+			eventProv:     events.NewFake(),
+		},
+		stderr: io.Discard,
+	}
+	cr.buildFnWithSessionBeads = func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+		buildCalls++
+		return DesiredStateResult{State: map[string]TemplateParams{}}
+	}
+
+	first := cr.readReadyRoutedWorkView().Fingerprint
+	second := cr.readReadyRoutedWorkView().Fingerprint
+	if first != second {
+		t.Fatalf("routed-work view fingerprint changed across an unstable store outage: %q != %q", first, second)
+	}
+
+	// The outage must degrade to cache reuse, not a per-tick buildDesiredState
+	// rebuild storm.
+	sessionBeads := newSessionBeadSnapshot(nil)
+	_ = cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
+	for range 3 {
+		cr.readyRoutedWorkViewAt = time.Now().Add(-2 * scaleCheckDemandMinInterval)
+		_ = cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
+	}
+	if buildCalls != 1 {
+		t.Fatalf("buildDesiredState calls across a store outage = %d, want 1 (stable marker, no rebuild storm)", buildCalls)
 	}
 }
 
@@ -5134,7 +5206,7 @@ func TestCityRuntimeReloadRetainsTimedOutDispatcherForShutdownDrain(t *testing.T
 		configName: "test-city",
 	}
 
-	writeCityRuntimeConfigWithShutdownTimeout(t, tomlPath, "fake", "1s")
+	writeCityRuntimeConfigWithOneSecondShutdownTimeout(t, tomlPath)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	lastProviderName := "fake"
@@ -5183,7 +5255,7 @@ func TestCityRuntimeReloadDrainShortCircuitsOnTickContextCancel(t *testing.T) {
 		configName: "test-city",
 	}
 
-	writeCityRuntimeConfigWithShutdownTimeout(t, tomlPath, "fake", "1s")
+	writeCityRuntimeConfigWithOneSecondShutdownTimeout(t, tomlPath)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	lastProviderName := "fake"
@@ -5238,7 +5310,7 @@ func TestCityRuntimeReloadDrainBoundedByTimeout(t *testing.T) {
 		configName: "test-city",
 	}
 
-	writeCityRuntimeConfigWithShutdownTimeout(t, tomlPath, "fake", "1s")
+	writeCityRuntimeConfigWithOneSecondShutdownTimeout(t, tomlPath)
 	lastProviderName := "fake"
 	start := time.Now()
 	cr.reloadConfig(context.Background(), &lastProviderName, cityPath)
@@ -6756,11 +6828,11 @@ func writeCityRuntimeConfigNamed(t *testing.T, tomlPath, name, provider string) 
 	}
 }
 
-func writeCityRuntimeConfigWithShutdownTimeout(t *testing.T, tomlPath, provider, timeout string) {
+func writeCityRuntimeConfigWithOneSecondShutdownTimeout(t *testing.T, tomlPath string) {
 	t.Helper()
 	clearInheritedBeadsEnv(t)
 	requireNoLeakedDoltAfterForPaths(t, filepath.Dir(tomlPath))
-	data := []byte("[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"" + provider + "\"\n\n[daemon]\nshutdown_timeout = \"" + timeout + "\"\n")
+	data := []byte("[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"fake\"\n\n[daemon]\nshutdown_timeout = \"1s\"\n")
 	if err := os.WriteFile(tomlPath, data, 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}

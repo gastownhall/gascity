@@ -1427,6 +1427,30 @@ func (m *Manager) Kill(id string) error {
 	return m.sp.Stop(sessName)
 }
 
+// StopUnattendedSession stops an exact runtime incarnation only when the
+// provider can certify unattended ownership and perform the stop as one bound
+// operation. It intentionally preserves the lifecycle semantics of [Kill].
+func (m *Manager) StopUnattendedSession(id, expectedToken string) error {
+	b, sessName, err := m.sessionBead(id)
+	if err != nil {
+		return err
+	}
+	state := State(b.Metadata["state"])
+	switch state {
+	case StateActive, StateStartPending, StateCreating, StateDraining, StateAwake:
+		// Known live states — proceed.
+	default:
+		if !m.sp.IsRunning(sessName) {
+			return fmt.Errorf("session %s is not active", id)
+		}
+	}
+	stopper, ok := m.sp.(runtime.UnattendedSessionStopper)
+	if !ok {
+		return fmt.Errorf("runtime provider does not support unattended-session stop")
+	}
+	return stopper.StopUnattendedSession(sessName, expectedToken)
+}
+
 // BeginDrain transitions a session to the draining state. The caller is
 // responsible for signaling the runtime process to finish its work.
 // Idempotent: returns nil if the session is already draining.

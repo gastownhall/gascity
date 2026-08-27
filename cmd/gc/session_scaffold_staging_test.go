@@ -92,7 +92,7 @@ func TestPrepareStartCandidateStagesScaffoldInResolvedTaskWorkDirWhenCWDIsShared
 				MaxActiveSessions: intPtrScaffoldRegression(2),
 			},
 		},
-	}, nil, store, &clock.Fake{Time: time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)}, io.Discard, nil)
+	}, nil, store, &clock.Fake{Time: time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)}, io.Discard, nil, nil)
 	if err != nil {
 		t.Fatalf("prepareStartCandidateForCity: %v", err)
 	}

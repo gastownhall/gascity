@@ -19,22 +19,29 @@ package main
 // to recover from. The event-delta lanes read the same journal from a cursor,
 // so on a split city they read an empty delta and conclude nothing happened.
 //
-// # One target, injected once
+// # One target per process, and every process has one
 //
 // Emission is not a property of a store; it is a property of the PROCESS that
-// opened it. The controller has a live event bus and its own emitter, and a
-// second one on the same mutation is a double row in the log — worse on the
-// reconcile path, where the cache re-absorbs rows in bulk and a per-row emitter
-// turns absorption into a flood.
+// opened it, so the emit target is set on the ROUTES, once, at the construction
+// that belongs to that process: resolveCLIStorageRoutes for a one-shot command,
+// newCityRuntime for the controller. Each gets the target it can carry — a
+// one-shot command has no live bus and opens the journal per batch, the
+// controller records through the bus it already owns.
 //
-// So the emit target is set on the ROUTES, at the one construction that belongs
-// to a one-shot command (resolveCLIStorageRoutes), and never at the one that
-// belongs to the controller (openStorageRoutes). The controller path is
-// therefore untouched by construction rather than by a runtime test that could
-// answer wrongly: it never reaches this file at all.
-// TestClassStoreEmitTargetHasExactlyOneInjectionSite pins the single injector,
-// because "the controller does not emit" is a claim about the call graph and
-// nothing else keeps a second injector from appearing.
+// The controller used to be left out on the theory that its CachingStore
+// covered these writes. It does not: that cache sits on the city's WORK ledger,
+// and a relocated class is served from a binding no cache wraps, so every
+// session-class write a split city's controller made emitted nothing —
+// admitSessionStartEvent never fired for a session row and keyed admission fell
+// back to patrol cadence (ga-f7v2ft.161 Q4, .164 step 2). Emission is required
+// plumbing on a relocated class, not a capability a process may skip, so there
+// is no arm here that declines to wire one.
+//
+// Double emission is what the per-process rule prevents, and it is prevented by
+// arithmetic rather than by care: a store carries at most one wrapper because
+// exactly one construction per process installs it, and the layer that would
+// have been the second emitter (the CachingStore) is never on a relocated
+// class. TestClassStoreEmitTargetIsInjectedOncePerProcess pins the injectors.
 //
 // # Why the wrapper forwards so much
 //
@@ -89,21 +96,95 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 )
 
-// withCLIEmission makes every class store these routes serve append a canonical
-// bead.* event to cityPath's journal after each successful mutation, and
-// returns the routes.
+// classStoreEmitTarget is where one process writes the bead.* rows its
+// relocated class stores produce, and who those rows are attributed to.
 //
-// It is the ONE injector. Nil routes (a city that relocates nothing) and an
-// empty city path are returned untouched, so a single-store city reaches none
-// of this and its class resolvers keep returning the caller's own store value.
+// It exists because the two processes that open a binding differ in exactly one
+// respect: whether they already hold a recorder. Everything else about emission
+// — when, what, in which shape — is the same on both sides and lives below.
+type classStoreEmitTarget interface {
+	// openRecorder returns the recorder for one emission batch and the release
+	// that finishes it. A target that cannot open one returns the error, and
+	// the batch is dropped with a diagnostic rather than failing the mutation
+	// it describes.
+	openRecorder() (events.Recorder, func(), error)
+	// actor attributes the rows to whoever performed the mutation.
+	actor() string
+}
+
+// cityJournalEmitTarget appends to a city's event log, opening it per batch. It
+// is the one-shot CLI's target: a command has no live bus of its own, and its
+// rows have to reach the same journal every other writer uses.
+type cityJournalEmitTarget struct{ cityPath string }
+
+func (t cityJournalEmitTarget) openRecorder() (events.Recorder, func(), error) {
+	rec, err := newClassStoreEmitRecorder(t.cityPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("opening the event log of %s: %w", t.cityPath, err)
+	}
+	return rec, func() { _ = rec.Close() }, nil
+}
+
+// actor names the agent or command that made the write, which is what a
+// one-shot mutation is genuinely attributable to.
+func (cityJournalEmitTarget) actor() string { return eventActor() }
+
+// liveRecorderEmitTarget records through a recorder the process already owns:
+// the controller's event provider, which is also the journal its own bead-event
+// watcher tails.
+type liveRecorderEmitTarget struct{ rec events.Recorder }
+
+func (t liveRecorderEmitTarget) openRecorder() (events.Recorder, func(), error) {
+	return t.rec, func() {}, nil
+}
+
+// actor attributes a controller-side relocated write to the store layer, which
+// is what the controller's CachingStore already does for the identical write on
+// a city that relocates nothing. The value decides what ELSE the event does —
+// a tick poke, a routed-work demand contribution — so a split city emitting
+// under a different actor would not merely be labeled differently, it would
+// behave differently from the composition the campaign certified.
+func (liveRecorderEmitTarget) actor() string { return beadStoreLayerActor }
+
+// withCLIEmission gives these routes the one-shot CLI's emit target: the city's
+// own event log, opened per batch.
+func (r *storageRoutes) withCLIEmission(cityPath string) *storageRoutes {
+	if strings.TrimSpace(cityPath) == "" {
+		return r
+	}
+	return r.withEmission(cityJournalEmitTarget{cityPath: strings.TrimSpace(cityPath)})
+}
+
+// withControllerEmission gives these routes the controller's emit target: the
+// live recorder it already holds. Without it a split city's controller writes to
+// its relocated classes in silence — the defect this seam exists to close.
+func (r *storageRoutes) withControllerEmission(rec events.Recorder) *storageRoutes {
+	if rec == nil {
+		return r
+	}
+	return r.withEmission(liveRecorderEmitTarget{rec: rec})
+}
+
+// withEmission makes every class store these routes serve append a canonical
+// bead.* event through target after each successful mutation, and returns the
+// routes.
+//
+// Nil routes — a city that relocates nothing — are returned untouched, so a
+// single-store city reaches none of this and its class resolvers keep returning
+// the caller's own store value.
 //
 // Each distinct leaf store is wrapped exactly once, and every class it serves
 // gets that same wrapper value. Store identity is load-bearing: callers dedup
 // scan candidates in a map[beads.Store], so a wrapper per class would turn one
 // binding into five and re-scan it five times.
-func (r *storageRoutes) withCLIEmission(cityPath string) *storageRoutes {
-	cityPath = strings.TrimSpace(cityPath)
-	if r == nil || cityPath == "" || len(r.stores) == 0 {
+func (r *storageRoutes) withEmission(target classStoreEmitTarget) *storageRoutes {
+	if r == nil || target == nil || len(r.stores) == 0 {
+		return r
+	}
+	if r.emit != nil {
+		// Routes already claimed by a process. Wrapping a wrapper is the double
+		// row this file's header is about, and it costs nothing to make the
+		// "one target per process" rule arithmetic rather than discipline.
 		return r
 	}
 	emitting := make(map[beads.Store]beads.Store, 1)
@@ -113,12 +194,12 @@ func (r *storageRoutes) withCLIEmission(cityPath string) *storageRoutes {
 		}
 		wrapped, ok := emitting[store]
 		if !ok {
-			wrapped = &emittingClassStore{Store: store, cityPath: cityPath}
+			wrapped = &emittingClassStore{Store: store, target: target}
 			emitting[store] = wrapped
 		}
 		r.stores[class] = wrapped
 	}
-	r.emitCityPath = cityPath
+	r.emit = target
 	return r
 }
 
@@ -128,8 +209,25 @@ func (r *storageRoutes) withCLIEmission(cityPath string) *storageRoutes {
 // explicitly below.
 type emittingClassStore struct {
 	beads.Store
-	cityPath string
+	target classStoreEmitTarget
 }
+
+// EmitsChangeEvents reports that this store appends a bead.* event after its own
+// mutations. It answers the contract's recorder-wiring question about the store
+// rather than about its type, which is the only honest way to ask it: a wrapper
+// holding no target and one holding a live recorder are the same Go type.
+func (s *emittingClassStore) EmitsChangeEvents() bool { return s != nil && s.target != nil }
+
+// ConditionalWritesCapabilityTarget points every capability question at the
+// engine, while this wrapper stays the writer.
+//
+// The wrapper forwards the whole fenced trio, so asking whether IT can fence
+// answers yes for a store that may not be able to fence at all — the vacuous
+// capability the status wire must never report. Pointing the question down is
+// not the same as pointing the WRITE down: a resolve target would hand callers
+// the bare engine and every fenced write, terminal close included, would land
+// with no event at all.
+func (s *emittingClassStore) ConditionalWritesCapabilityTarget() beads.Store { return s.Store }
 
 // ---------------------------------------------------------------------------
 // Emission.
@@ -141,26 +239,20 @@ type classStoreEmission struct {
 	bead      beads.Bead
 }
 
-// emit appends one row per emission to the city's journal through a single
-// recorder, which owns the cross-process sequence and locking.
-//
-// events.WithoutStartupSweep is what makes a per-mutation open safe: the sweep
-// exists to recover rotating-* files a crash stranded, it belongs to the
-// supervisor's long-lived recorder, and running it here would race that
-// recorder mid-rotation. It does not make the open free — NewFileRecorder reads
-// the log directory either way, to continue the sequence past the archives —
-// only unraced.
+// emit appends one row per emission through a single recorder from the target,
+// which owns the cross-process sequence and locking. The batch is the unit
+// because a target may pay to open one.
 func (s *emittingClassStore) emit(emissions ...classStoreEmission) {
-	if len(emissions) == 0 {
+	if len(emissions) == 0 || s.target == nil {
 		return
 	}
-	rec, err := newClassStoreEmitRecorder(s.cityPath)
+	rec, release, err := s.target.openRecorder()
 	if err != nil {
-		warnClassStoreEmit(fmt.Errorf("opening the event log of %s: %w", s.cityPath, err))
+		warnClassStoreEmit(err)
 		return
 	}
-	defer rec.Close() //nolint:errcheck // best-effort: emission never surfaces I/O errors
-	actor := eventActor()
+	defer release()
+	actor := s.target.actor()
 	for _, emission := range emissions {
 		if strings.TrimSpace(emission.bead.ID) == "" {
 			continue
@@ -731,6 +823,13 @@ func beadStatusIsClosed(status string) bool {
 }
 
 // newClassStoreEmitRecorder opens the city's journal for one emission batch.
+//
+// events.WithoutStartupSweep is what makes a per-mutation open safe: the sweep
+// exists to recover rotating-* files a crash stranded, it belongs to the
+// supervisor's long-lived recorder, and running it here would race that
+// recorder mid-rotation. It does not make the open free — NewFileRecorder reads
+// the log directory either way, to continue the sequence past the archives —
+// only unraced.
 func newClassStoreEmitRecorder(cityPath string) (*events.FileRecorder, error) {
 	return events.NewFileRecorder(
 		filepath.Join(cityPath, citylayout.RuntimeRoot, "events.jsonl"),

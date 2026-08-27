@@ -187,10 +187,12 @@ vulnerabilities:
   # golang.org/x/crypto v0.52.0, which clears the gc instance of every
   # x/crypto/ssh CVE below (fixed in x/crypto 0.52.0) and CVE-2026-33814
   # (x/net http2, fixed in 0.53.0); the gc path is therefore dropped from those
-  # entries so the scan must prove gc is clean rather than mask it. bd (beads v1.1.0) and
-  # kubectl stay external and base-pre-existing (Container Scan already red on
-  # main, scheduled run 2026-06-24); remove their paths once they rebuild
-  # upstream. TestTrivyIgnoreDropsGCModuleWaiversPastThreshold enforces that no
+  # entries so the scan must prove gc is clean rather than mask it. The v59
+  # dependency bump now pins x/net v0.56.0, so gc also clears the HTML/idna
+  # CVEs below. bd (beads v1.1.0) and kubectl stay external and
+  # base-pre-existing (Container Scan already red on main, scheduled run
+  # 2026-06-24); remove their paths once they rebuild upstream.
+  # TestTrivyIgnoreDropsGCModuleWaiversPastThreshold enforces that no
   # gc waiver outlives its go.mod fix version.
   - id: CVE-2026-25680
     paths:

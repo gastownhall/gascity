@@ -1423,6 +1423,11 @@ func TestUnregisterCityFromSupervisorWithForceSendsForceStop(t *testing.T) {
 	if err := reg.Register(cityPath, "force-city"); err != nil {
 		t.Fatal(err)
 	}
+	controllerLock, err := acquireControllerLock(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controllerLock.Close() //nolint:errcheck
 
 	sockPath := controllerSocketPath(cityPath)
 	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
@@ -1458,12 +1463,27 @@ func TestUnregisterCityFromSupervisorWithForceSendsForceStop(t *testing.T) {
 			}
 		}
 		conn.Write([]byte("ok\n")) //nolint:errcheck
+		_ = lis.Close()
+		_ = os.Remove(sockPath)
+		_ = controllerLock.Close()
 	}()
 
+	ownershipHeld := false
 	withSupervisorTestHooks(
 		t,
 		func(_, _ io.Writer) int { return 0 },
-		func(_, _ io.Writer) int { return 0 },
+		func(_, _ io.Writer) int {
+			lock, lockErr := acquireControllerLock(cityPath)
+			switch {
+			case lockErr == nil:
+				_ = lock.Close()
+			case errors.Is(lockErr, errControllerAlreadyRunning):
+				ownershipHeld = true
+			default:
+				t.Errorf("probing controller ownership during supervisor reload: %v", lockErr)
+			}
+			return 0
+		},
 		func() int { return 4242 },
 		func(string) (bool, string, bool) { return false, "", false },
 		20*time.Millisecond,
@@ -1487,6 +1507,9 @@ func TestUnregisterCityFromSupervisorWithForceSendsForceStop(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for force controller command")
+	}
+	if !ownershipHeld {
+		t.Fatal("controller ownership was released before supervisor reload")
 	}
 }
 

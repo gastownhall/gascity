@@ -837,3 +837,95 @@ func TestBuildAwakeInputFromReconcilerNamedAlwaysPostChurnRewakes(t *testing.T) 
 		t.Errorf("wake reason = %q, want named-always", got.Reason)
 	}
 }
+
+// namedWorkQueryTwinFixture is the ONE fixture both AwakeInput builders are held
+// to for ga-f7v2ft.180: the rig named on_demand session
+// TestBuildAwakeInputFromReconciler_RigNamedWorkQueryDemandWakesCanonicalSession
+// already pins on the legacy side. The caller supplies the backing template's
+// work_query verdict separately, so the control is the same row and the same
+// config with one signal withdrawn.
+func namedWorkQueryTwinFixture(t *testing.T) (*config.City, string, []session.Info) {
+	t.Helper()
+	cfg := &config.City{
+		ResolvedWorkspaceName: "gc-test",
+		Agents: []config.Agent{
+			{Name: "worker", Scope: "rig", WorkQuery: "echo 1"},
+		},
+		NamedSessions: []config.NamedSession{
+			{Name: "refinery", Template: "worker", Mode: "on_demand", Scope: "rig", Dir: "rig-a"},
+		},
+	}
+	identity := "rig-a/refinery"
+	runtimeName := config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, identity)
+	bead := beads.Bead{
+		ID:     "mc-session-1",
+		Status: "open",
+		Type:   "session",
+		Metadata: map[string]string{
+			"configured_named_session":  "true",
+			"state":                     "asleep",
+			"session_name":              runtimeName,
+			"template":                  "rig-a/worker",
+			"configured_named_identity": identity,
+			"configured_named_mode":     "on_demand",
+		},
+	}
+	return cfg, runtimeName, []session.Info{sessiontest.SeedBead(t, bead)}
+}
+
+// TestAwakeInputTwinsAgreeOnNamedWorkQueryDemand is ga-f7v2ft.180's RED. The
+// legacy bridge and the detector's builder hand the SAME pure function its input,
+// so an on_demand named session whose backing template matched work_query has to
+// get the SAME verdict from both. Before the fix only the legacy bridge populated
+// AwakeInput.NamedSessionWorkQ, so ComputeAwakeSet answered work-query for the
+// legacy tick and ShouldWake=false for the detector — the same row, two answers.
+//
+// The withdrawn-signal control is what makes the positive mean anything: with an
+// empty WorkSet neither side may wake the row, so a test that passed because
+// on_demand named sessions wake for some unrelated reason fails here.
+func TestAwakeInputTwinsAgreeOnNamedWorkQueryDemand(t *testing.T) {
+	now := time.Now().UTC()
+
+	for _, tc := range []struct {
+		name       string
+		workSet    map[string]bool
+		wantWake   bool
+		wantReason string
+	}{
+		{name: "work_query matched", workSet: map[string]bool{"rig-a/worker": true}, wantWake: true, wantReason: "work-query"},
+		{name: "control: no work_query", workSet: nil, wantWake: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, runtimeName, infos := namedWorkQueryTwinFixture(t)
+
+			legacy := ComputeAwakeSet(buildAwakeInputFromReconciler(
+				cfg, "", infos, nil, nil, nil, tc.workSet, nil, nil, nil, nil, runtime.NewFake(), now,
+			))
+			rows := make([]session.ReconcileSession, 0, len(infos))
+			for _, info := range infos {
+				rows = append(rows, session.ReconcileSession{Info: info})
+			}
+			detector, _ := detectorAwakeSet(detectorSweepInput{
+				CityName: cfg.EffectiveCityName(),
+				Cfg:      cfg,
+				Provider: runtime.NewFake(),
+				WorkSet:  tc.workSet,
+			}, rows, nil, now)
+
+			for builder, decisions := range map[string]map[string]AwakeDecision{"legacy": legacy, "detector": detector} {
+				got, ok := decisions[runtimeName]
+				if !ok {
+					t.Fatalf("the %s builder produced no decision for %q", builder, runtimeName)
+				}
+				if got.ShouldWake != tc.wantWake {
+					t.Errorf("the %s builder answered ShouldWake=%v (reason %q), want %v.\n"+
+						"Both builders feed the same ComputeAwakeSet, so a disagreement here is one row the two arms wake and sleep differently (ga-f7v2ft.180).",
+						builder, got.ShouldWake, got.Reason, tc.wantWake)
+				}
+				if tc.wantWake && got.Reason != tc.wantReason {
+					t.Errorf("the %s builder answered Reason=%q, want %q", builder, got.Reason, tc.wantReason)
+				}
+			}
+		})
+	}
+}

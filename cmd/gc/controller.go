@@ -138,8 +138,26 @@ func acquireControllerLock(cityPath string) (*os.File, error) {
 // startControllerSocket listens on a Unix socket at .gc/controller.sock.
 // When a client sends "stop\n", cancelFn is called to shut down the
 // controller loop. convergenceReqCh is used to route convergence commands
-// to the event loop for serialized processing. Returns the listener for cleanup.
+// to the event loop for serialized processing.
+// Returns the listener for cleanup.
 func startControllerSocket(
+	cityPath string,
+	cancelFn context.CancelFunc,
+	dirty *atomic.Bool,
+	reloadReqCh chan reloadRequest,
+	convergenceReqCh chan convergenceRequest,
+	pokeCh chan struct{},
+	controlDispatcherCh chan struct{},
+) (net.Listener, error) {
+	return startControllerSocketWithSessionReconcilerStatus(
+		cityPath, controllerHostingStandalone, cancelFn, nil, dirty, reloadReqCh, convergenceReqCh,
+		pokeCh, controlDispatcherCh, nil, nil,
+	)
+}
+
+// startControllerSocketWithSessionReconcilerStatus starts a controller socket
+// that can serve a read-only live session-reconciler status snapshot.
+func startControllerSocketWithSessionReconcilerStatus(
 	cityPath string,
 	hostingMode controllerHostingMode,
 	cancelFn context.CancelFunc,
@@ -149,6 +167,8 @@ func startControllerSocket(
 	convergenceReqCh chan convergenceRequest,
 	pokeCh chan struct{},
 	controlDispatcherCh chan struct{},
+	admitSessionStart sessionStartSocketAdmitter,
+	sessionReconcilerStatus func() sessionReconcilerTraceStatus,
 ) (net.Listener, error) {
 	if !hostingMode.known() {
 		return nil, fmt.Errorf("starting controller socket: invalid hosting mode %q", hostingMode)
@@ -169,7 +189,7 @@ func startControllerSocket(
 			if err != nil {
 				return // listener closed
 			}
-			go handleControllerConn(conn, cityPath, hostingMode, cancelFn, forceShutdown, dirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+			go handleControllerConnWithSessionReconcilerStatus(conn, cityPath, hostingMode, cancelFn, forceShutdown, dirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh, admitSessionStart, sessionReconcilerStatus)
 		}
 	}()
 	return lis, nil
@@ -178,9 +198,24 @@ func startControllerSocket(
 // handleControllerConn reads from a connection and dispatches commands.
 // Supported commands: "stop" (shutdown), "stop-force" (shutdown without
 // interrupt grace), "ping" (legacy liveness check, returns numeric PID),
-// "identify" (typed process identity), and "converge:{json}" (convergence
-// commands routed to event loop).
+// "identify" (typed process identity), "converge:{json}" (convergence
+// commands routed to event loop), and "session-start:<id>" (exact durable-key
+// admission for the keyed start controller).
 func handleControllerConn(
+	conn net.Conn,
+	cityPath string,
+	hostingMode controllerHostingMode,
+	cancelFn context.CancelFunc,
+	dirty *atomic.Bool,
+	convergenceReqCh chan convergenceRequest,
+	pokeCh chan struct{},
+	controlDispatcherCh chan struct{},
+	admitSessionStart sessionStartSocketAdmitter,
+) {
+	handleControllerConnWithSessionReconcilerStatus(conn, cityPath, hostingMode, cancelFn, nil, dirty, nil, convergenceReqCh, pokeCh, controlDispatcherCh, admitSessionStart, nil)
+}
+
+func handleControllerConnWithSessionReconcilerStatus(
 	conn net.Conn,
 	cityPath string,
 	hostingMode controllerHostingMode,
@@ -191,6 +226,8 @@ func handleControllerConn(
 	convergenceReqCh chan convergenceRequest,
 	pokeCh chan struct{},
 	controlDispatcherCh chan struct{},
+	admitSessionStart sessionStartSocketAdmitter,
+	sessionReconcilerStatus func() sessionReconcilerTraceStatus,
 ) {
 	defer conn.Close()                                 //nolint:errcheck // best-effort cleanup
 	conn.SetDeadline(time.Now().Add(95 * time.Second)) //nolint:errcheck // symmetric read+write deadline; 5s margin over 30s enqueue + 60s reply
@@ -238,6 +275,8 @@ func handleControllerConn(
 			default:
 			}
 			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
+		case strings.HasPrefix(line, sessionStartCommandPrefix):
+			handleSessionStartSocketCmd(conn, line[len(sessionStartCommandPrefix):], admitSessionStart)
 		case strings.HasPrefix(line, sessionCircuitResetCommandPrefix):
 			handleSessionCircuitResetSocketCmd(conn, cityPath, line[len(sessionCircuitResetCommandPrefix):])
 		case strings.HasPrefix(line, "converge:"):
@@ -257,7 +296,7 @@ func handleControllerConn(
 				}
 			}
 		case line == "trace-status":
-			handleTraceStatusSocketCmd(conn, cityPath)
+			handleTraceStatusSocketCmd(conn, cityPath, sessionReconcilerStatus)
 		}
 	}
 }
@@ -1294,12 +1333,25 @@ func runController(
 	eventProv events.Provider,
 	stdout, stderr io.Writer,
 ) int {
+	cityName := loadedCityName(cfg, cityPath)
 	lock, err := acquireControllerLock(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	defer lock.Close() //nolint:errcheck // best-effort cleanup
+
+	nudgeShadowSelection, nudgeShadowTrace, err := prepareNudgeShadowRuntime(cityPath, cityName, cfg, stderr)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc start: nudge shadow preflight: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	nudgeShadowTraceTransferred := false
+	defer func() {
+		if nudgeShadowTrace != nil && !nudgeShadowTraceTransferred {
+			_ = nudgeShadowTrace.Close()
+		}
+	}()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1317,10 +1369,34 @@ func runController(
 	pokeCh := make(chan struct{}, 1)
 	controlDispatcherCh := make(chan struct{}, 1)
 	configDirty := &atomic.Bool{}
+	var sessionStartRuntime atomic.Pointer[CityRuntime]
+	admitSessionStart := func(sessionID string) sessionStartSocketReply {
+		if cr := sessionStartRuntime.Load(); cr != nil {
+			return cr.admitSessionStartSocketKey(sessionID)
+		}
+		return sessionStartSocketReplyFallback
+	}
 
 	sockPath := controllerSocketPath(cityPath)
 	forceShutdown := &atomic.Bool{}
-	lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+	lis, err := startControllerSocketWithSessionReconcilerStatus(
+		cityPath,
+		controllerHostingStandalone,
+		cancel,
+		forceShutdown,
+		configDirty,
+		reloadReqCh,
+		convergenceReqCh,
+		pokeCh,
+		controlDispatcherCh,
+		admitSessionStart,
+		func() sessionReconcilerTraceStatus {
+			if cr := sessionStartRuntime.Load(); cr != nil {
+				return cr.sessionReconcilerTraceStatus()
+			}
+			return unavailableSessionReconcilerTraceStatus()
+		},
+	)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1346,7 +1422,6 @@ func runController(
 	}
 	defer convergence.RemoveToken(cityPath) //nolint:errcheck // best-effort cleanup
 
-	cityName := loadedCityName(cfg, cityPath)
 	rec.Record(events.Event{Type: events.ControllerStarted, Actor: "gc"})
 	telemetry.RecordControllerLifecycle(context.Background(), "started")
 	fmt.Fprintln(stdout, "Controller started.") //nolint:errcheck // best-effort stdout
@@ -1372,13 +1447,18 @@ func runController(
 		ConvergenceReqCh:        convergenceReqCh,
 		PokeCh:                  pokeCh,
 		ControlDispatcherCh:     controlDispatcherCh,
+		NudgeShadowSelection:    nudgeShadowSelection,
+		Trace:                   nudgeShadowTrace,
 		Stdout:                  stdout,
 		Stderr:                  stderr,
 	})
 	if err != nil {
+		// The runtime never came into existence, so it never took the shadow
+		// trace; the deferred close above still owns it.
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	nudgeShadowTraceTransferred = true
 
 	// This process is the city's controller — the lock above says so — so its
 	// opened binding is the residency answer the assigned-work spine reads.
@@ -1400,6 +1480,7 @@ func runController(
 	cs.services = cr.svc
 	cs.emergencyCh = make(chan emergency.Record, 64)
 	cr.setControllerState(cs)
+	sessionStartRuntime.Store(cr)
 
 	// One-time startup hygiene: release stale runtime name claims held by
 	// closed configured named-session beads so on-demand respawn is not blocked

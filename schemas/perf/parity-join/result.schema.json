@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-gc-jsonl": {},
+  "title": "gc perf parity-join --json result",
+  "type": "object",
+  "required": [
+    "ok",
+    "schema_version",
+    "bar",
+    "cycles",
+    "families",
+    "triage",
+    "shadow_effect_violations",
+    "no_evidence",
+    "bar_met",
+    "we_blocker"
+  ],
+  "properties": {
+    "ok": {
+      "const": true
+    },
+    "schema_version": {
+      "const": "gascity.reconciler-parity-join.v1"
+    },
+    "bar": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 1
+    },
+    "cycles": {
+      "type": "object",
+      "required": [
+        "scanned",
+        "considered",
+        "excluded_record_budget_exceeded",
+        "excluded_no_cycle_rollup",
+        "without_detail_arms",
+        "unowned_records"
+      ],
+      "properties": {
+        "scanned": { "type": "integer", "minimum": 0 },
+        "considered": { "type": "integer", "minimum": 0 },
+        "excluded_record_budget_exceeded": { "type": "integer", "minimum": 0 },
+        "excluded_no_cycle_rollup": { "type": "integer", "minimum": 0 },
+        "without_detail_arms": { "type": "integer", "minimum": 0 },
+        "unowned_records": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "families": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "family",
+          "level",
+          "joined",
+          "legacy_only",
+          "detector_only",
+          "keyed",
+          "matched",
+          "mismatched",
+          "incomparable",
+          "unclassified",
+          "match_rate",
+          "bar_met"
+        ],
+        "properties": {
+          "family": { "type": "string", "minLength": 1 },
+          "level": { "enum": ["detection", "decision", "act"] },
+          "joined": { "type": "integer", "minimum": 0 },
+          "legacy_only": { "type": "integer", "minimum": 0 },
+          "detector_only": { "type": "integer", "minimum": 0 },
+          "keyed": { "type": "integer", "minimum": 0 },
+          "matched": { "type": "integer", "minimum": 0 },
+          "mismatched": { "type": "integer", "minimum": 0 },
+          "incomparable": { "type": "integer", "minimum": 0 },
+          "unclassified": { "type": "integer", "minimum": 0 },
+          "match_rate": { "type": "number", "minimum": 0, "maximum": 1 },
+          "bar_met": { "type": "boolean" }
+        }
+      }
+    },
+    "triage": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["family", "class", "classification", "count"],
+        "properties": {
+          "family": { "type": "string", "minLength": 1 },
+          "class": { "type": "string", "minLength": 1 },
+          "classification": { "enum": ["matched", "mismatched", "incomparable"] },
+          "count": { "type": "integer", "minimum": 1 }
+        }
+      }
+    },
+    "unclassified": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["family", "site_code", "side", "trace_id", "tick_id", "session_name"],
+        "properties": {
+          "family": { "type": "string", "minLength": 1 },
+          "site_code": { "type": "string", "minLength": 1 },
+          "side": { "enum": ["both", "legacy_only", "detector_only"] },
+          "trace_id": { "type": "string" },
+          "tick_id": { "type": "string" },
+          "session_name": { "type": "string" },
+          "session_bead_id": { "type": "string" },
+          "legacy_reason": { "type": "string" },
+          "legacy_outcome": { "type": "string" },
+          "detector_reason": { "type": "string" },
+          "detector_outcome": { "type": "string" }
+        }
+      }
+    },
+    "shadow_effect_violations": { "type": "integer", "minimum": 0 },
+    "no_evidence": { "type": "boolean" },
+    "bar_met": { "type": "boolean" },
+    "we_blocker": { "type": "boolean" }
+  }
+}

@@ -258,7 +258,7 @@ func computePoolDesiredStates(
 			resumeSessionBeadIDs[req.SessionBeadID] = struct{}{}
 		}
 	}
-	inFlightNewRequests := poolInFlightNewRequests(cfg, sessionInfos, resumeSessionBeadIDs)
+	inFlightNewRequests := poolInFlightNewRequests(cfg, sessionInfos, resumeSessionBeadIDs, scaleCheckDemand)
 
 	// Merge scale_check demand. In bead-backed reconciliation, scale_check is
 	// the authoritative signal for new unassigned demand only; resume requests
@@ -292,10 +292,32 @@ func computePoolDesiredStates(
 					"anonymous_new": newCount - inFlightCount,
 				})
 			}
+			consumedDetailedDemand := make(map[int]struct{})
+			genericInFlight := 0
 			for j := 0; j < inFlightCount; j++ {
-				req := inFlight[j]
+				inFlightRequest := inFlight[j]
+				req := inFlightRequest.request
 				allRequests = append(allRequests, req)
 				usage.accept(req, limits)
+				if inFlightRequest.demandIndex >= 0 {
+					consumedDetailedDemand[inFlightRequest.demandIndex] = struct{}{}
+				} else {
+					genericInFlight++
+				}
+			}
+			demand := scaleCheckDemand[template]
+			nextDetailedDemand := 0
+			for range genericInFlight {
+				for nextDetailedDemand < len(demand.WorkBeadIDs) {
+					if _, consumed := consumedDetailedDemand[nextDetailedDemand]; !consumed {
+						break
+					}
+					nextDetailedDemand++
+				}
+				if nextDetailedDemand < len(demand.WorkBeadIDs) {
+					consumedDetailedDemand[nextDetailedDemand] = struct{}{}
+					nextDetailedDemand++
+				}
 			}
 			for j := inFlightCount; j < newCount; j++ {
 				workBeadID := ""
@@ -304,8 +326,16 @@ func computePoolDesiredStates(
 				workWorkspace := ""
 				workStoreRef := ""
 				workParentSID := ""
-				if demand := scaleCheckDemand[template]; len(demand.WorkBeadIDs) > j {
-					workBeadID = strings.TrimSpace(demand.WorkBeadIDs[j])
+				if len(demand.WorkBeadIDs) > nextDetailedDemand {
+					for nextDetailedDemand < len(demand.WorkBeadIDs) {
+						if _, consumed := consumedDetailedDemand[nextDetailedDemand]; !consumed {
+							break
+						}
+						nextDetailedDemand++
+					}
+				}
+				if len(demand.WorkBeadIDs) > nextDetailedDemand {
+					workBeadID = strings.TrimSpace(demand.WorkBeadIDs[nextDetailedDemand])
 					if demand.Titles != nil {
 						workBeadTitle = strings.TrimSpace(demand.Titles[workBeadID])
 					}
@@ -321,6 +351,7 @@ func computePoolDesiredStates(
 					if demand.ParentSIDs != nil {
 						workParentSID = strings.TrimSpace(demand.ParentSIDs[workBeadID])
 					}
+					nextDetailedDemand++
 				}
 				req := SessionRequest{
 					Template:       template,
@@ -383,8 +414,13 @@ func canonicalSingletonAliasHeldTemplates(cfg *config.City, sessionInfos []sessi
 	return held
 }
 
-func poolInFlightNewRequests(cfg *config.City, sessionInfos []sessionpkg.Info, resumeSessionBeadIDs map[string]struct{}) map[string][]SessionRequest {
-	requests := make(map[string][]SessionRequest)
+type poolInFlightNewRequest struct {
+	request     SessionRequest
+	demandIndex int
+}
+
+func poolInFlightNewRequests(cfg *config.City, sessionInfos []sessionpkg.Info, resumeSessionBeadIDs map[string]struct{}, detailedDemand map[string]scaleCheckDemand) map[string][]poolInFlightNewRequest {
+	requests := make(map[string][]poolInFlightNewRequest)
 	sortedSessionInfos := append([]sessionpkg.Info(nil), sessionInfos...)
 	sort.SliceStable(sortedSessionInfos, func(i, j int) bool {
 		if !sortedSessionInfos[i].CreatedAt.Equal(sortedSessionInfos[j].CreatedAt) {
@@ -417,31 +453,57 @@ func poolInFlightNewRequests(cfg *config.City, sessionInfos []sessionpkg.Info, r
 			if !poolSessionConsumesNewDemandInfo(sb) {
 				continue
 			}
-			requests[template] = append(requests[template], SessionRequest{
+			demandIndex := -1
+			if poolSessionWaitHeldInfo(sb) {
+				demandIndex = scaleCheckDemandIndex(detailedDemand[template], sb.TriggerBeadID, sb.TriggerBeadStoreRef)
+				if demandIndex < 0 {
+					continue
+				}
+			}
+			requests[template] = append(requests[template], poolInFlightNewRequest{request: SessionRequest{
 				Template:       template,
 				Tier:           "new",
 				SessionBeadID:  sb.ID,
 				WorkBeadID:     strings.TrimSpace(sb.TriggerBeadID),
 				WorkStoreRef:   strings.TrimSpace(sb.TriggerBeadStoreRef),
 				BrainParentSID: strings.TrimSpace(sb.BrainParentSID),
-			})
+			}, demandIndex: demandIndex})
 		}
 	}
 	return requests
 }
 
+func poolSessionWaitHeldInfo(info sessionpkg.Info) bool {
+	return info.MetadataState == string(sessionpkg.StateAsleep) && info.WaitHold == "true" && info.SleepIntent == string(sessionpkg.SleepReasonWaitHold)
+}
+
+func scaleCheckDemandIndex(demand scaleCheckDemand, triggerBeadID, triggerStoreRef string) int {
+	triggerBeadID = strings.TrimSpace(triggerBeadID)
+	triggerStoreRef = strings.TrimSpace(triggerStoreRef)
+	if triggerBeadID == "" || triggerStoreRef == "" || demand.StoreRefs == nil {
+		return -1
+	}
+	for index, workBeadID := range demand.WorkBeadIDs {
+		workBeadID = strings.TrimSpace(workBeadID)
+		if workBeadID == triggerBeadID && strings.TrimSpace(demand.StoreRefs[workBeadID]) == triggerStoreRef {
+			return index
+		}
+	}
+	return -1
+}
+
 // poolSessionConsumesNewDemandInfo reports whether a pool session already
-// represents spent "new" demand: it holds an active pending_create_claim, or
-// its raw state is creating/start-pending. It reads PendingCreateClaim and the
-// raw MetadataState. This pure desired-state pass has no reconciler clock:
-// creating sessions still represent already-spent new demand; lifecycle code
-// owns stale-creating recovery with its clock-aware predicate.
+// represents spent "new" demand: it holds an active pending_create_claim, is
+// creating/start-pending, or is an asleep wait-held pool session. This pure
+// desired-state pass has no reconciler clock: creating sessions still represent
+// already-spent new demand; lifecycle code owns stale-creating recovery with
+// its clock-aware predicate.
 func poolSessionConsumesNewDemandInfo(info sessionpkg.Info) bool {
 	if info.PendingCreateClaim {
 		return true
 	}
 	state := strings.TrimSpace(info.MetadataState)
-	return state == "creating" || state == string(sessionpkg.StateStartPending)
+	return state == "creating" || state == string(sessionpkg.StateStartPending) || poolSessionWaitHeldInfo(info)
 }
 
 // applyNestedCaps enforces workspace, rig, and agent max_active_sessions caps.

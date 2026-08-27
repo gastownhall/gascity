@@ -106,6 +106,133 @@ patrol_interval = "1m"
 	}
 }
 
+func TestLoadWithIncludesPreservesSessionReconcilerAcrossDaemonFragment(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["fragment.toml"]
+
+[workspace]
+name = "test"
+
+[daemon]
+session_reconciler = "require"
+`)
+	fs.Files["/city/fragment.toml"] = []byte(`
+[daemon]
+patrol_interval = "1m"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if got := cfg.Daemon.SessionReconciler; got != "require" {
+		t.Fatalf("Daemon.SessionReconciler = %q, want require", got)
+	}
+	if cfg.Daemon.PatrolInterval != "1m" {
+		t.Fatalf("Daemon.PatrolInterval = %q, want fragment field", cfg.Daemon.PatrolInterval)
+	}
+}
+
+func TestLoadWithIncludesFragmentOverridesSessionReconciler(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["fragment.toml"]
+
+[workspace]
+name = "test"
+
+[daemon]
+session_reconciler = "require"
+`)
+	fs.Files["/city/fragment.toml"] = []byte(`
+[daemon]
+session_reconciler = "auto"
+`)
+
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if got := cfg.Daemon.SessionReconciler; got != "auto" {
+		t.Fatalf("Daemon.SessionReconciler = %q, want fragment override auto", got)
+	}
+}
+
+func TestLoadWithIncludesPreservesNudgeShadowAcrossUnrelatedDaemonFragment(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["fragment.toml"]
+
+[workspace]
+name = "test"
+
+[daemon]
+nudge_shadow = "required"
+`)
+	fs.Files["/city/fragment.toml"] = []byte(`
+[daemon]
+patrol_interval = "1m"
+`)
+
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if got := cfg.Daemon.NudgeShadow; got == nil || *got != "required" {
+		t.Fatalf("Daemon.NudgeShadow = %v, want pointer to required", got)
+	}
+	if got := cfg.Daemon.PatrolInterval; got != "1m" {
+		t.Fatalf("Daemon.PatrolInterval = %q, want fragment field", got)
+	}
+}
+
+func TestLoadWithIncludesFragmentOverridesNudgeShadow(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["fragment.toml"]
+
+[workspace]
+name = "test"
+
+[daemon]
+nudge_shadow = "required"
+`)
+	fs.Files["/city/fragment.toml"] = []byte(`
+[daemon]
+nudge_shadow = "off"
+`)
+
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if got := cfg.Daemon.NudgeShadow; got == nil || *got != "off" {
+		t.Fatalf("Daemon.NudgeShadow = %v, want fragment override pointer to off", got)
+	}
+}
+
+func TestLoadWithIncludesWarnsAndIgnoresRetiredSessionStartReconciler(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+
+[daemon]
+session_start_reconciler = "auto"
+`)
+
+	cfg, prov, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if got := cfg.Daemon.SessionReconciler; got != "" {
+		t.Fatalf("Daemon.SessionReconciler = %q, want retired key ignored", got)
+	}
+	if !containsWarningPrefix(prov.Warnings, `/city/city.toml: unknown field "daemon.session_start_reconciler"`) {
+		t.Fatalf("warnings = %v, want retired-key warning", prov.Warnings)
+	}
+}
+
 func TestLoadWithIncludes_InvalidProviderChainFailsLoad(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`

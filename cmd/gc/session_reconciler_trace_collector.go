@@ -91,6 +91,7 @@ type SessionReconcilerTraceCycle struct {
 	reasonCounts       map[string]int
 	outcomeCounts      map[string]int
 	autoArmsTriggered  int
+	directDetailArms   map[string]sessionLifecycleStartShadowAdmission
 }
 
 func newSessionReconcilerTracer(cityPath, cityName string, stderr io.Writer) *SessionReconcilerTracer {
@@ -267,6 +268,7 @@ func (t *SessionReconcilerTracer) BeginCycle(trigger TraceTickTrigger, triggerDe
 		mutationCounts:     make(map[string]int),
 		reasonCounts:       make(map[string]int),
 		outcomeCounts:      make(map[string]int),
+		directDetailArms:   make(map[string]sessionLifecycleStartShadowAdmission),
 	}
 	cycle.addRecord(newTraceRecord(TraceRecordCycleStart).withCycle(cycle, now.UTC()).withTrigger(trigger, triggerDetail))
 	cycle.syncArms(now.UTC(), cfg)
@@ -472,6 +474,21 @@ func (c *SessionReconcilerTraceCycle) syncArms(now time.Time, cfg *config.City) 
 	}
 	arms := traceArmStatus(state, now)
 	detail := buildTraceDetailScopes(cfg, arms)
+	directDetailArms := make(map[string]sessionLifecycleStartShadowAdmission)
+	for _, arm := range arms {
+		if arm.ScopeType != TraceArmScopeTemplate || arm.Level != TraceModeDetail {
+			continue
+		}
+		template := normalizedTraceTemplate(arm.ScopeValue)
+		if template == "" {
+			continue
+		}
+		directDetailArms[template] = sessionLifecycleStartShadowAdmission{
+			Template:  template,
+			Source:    TraceSource(arm.Source),
+			ExpiresAt: arm.ExpiresAt,
+		}
+	}
 	current := make(map[string]TraceArm, len(arms))
 	for _, arm := range arms {
 		current[traceScopeKey(arm.ScopeType, arm.ScopeValue, arm.Source)] = arm
@@ -524,6 +541,28 @@ func (c *SessionReconcilerTraceCycle) syncArms(now time.Time, cfg *config.City) 
 	c.tracer.detail = detail
 	c.tracer.lastArms = current
 	c.tracer.mu.Unlock()
+	c.mu.Lock()
+	c.directDetailArms = directDetailArms
+	c.mu.Unlock()
+}
+
+func (c *SessionReconcilerTraceCycle) startSelectionShadowAdmission(template string) (sessionLifecycleStartShadowAdmission, bool) {
+	if c == nil {
+		return sessionLifecycleStartShadowAdmission{}, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	admission, ok := c.directDetailArms[normalizedTraceTemplate(template)]
+	return admission, ok
+}
+
+func (c *SessionReconcilerTraceCycle) hasStartSelectionShadowAdmission() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.directDetailArms) > 0
 }
 
 func buildTraceDetailScopes(cfg *config.City, arms []TraceArm) map[string]TraceSource {

@@ -80,13 +80,20 @@ func TestRootCommandOptionsSkipPackDiscoveryForBuiltinCommands(t *testing.T) {
 		{name: "dolt state helper", args: []string{"dolt-state", "allocate-port", "--city", "/tmp/city"}, skip: true},
 		{name: "scoped dolt config helper", args: []string{"--city", "/tmp/city", "dolt-config", "normalize-scope"}, skip: true},
 		{name: "beads store bridge helper", args: []string{"bd-store-bridge", "--dir", "/tmp/rig", "list"}, skip: true},
+		{name: "managed hook wrapper", args: []string{"hook", "run", "--timeout", "15s", "--", "nudge", "drain", "--inject"}, skip: true},
+		{name: "scoped managed hook wrapper", args: []string{"--city", "/tmp/city", "hook", "run", "--", "mail", "check", "--inject"}, skip: true},
+		{name: "scoped nudge", args: []string{"--city=/tmp/city", "nudge", "drain", "--inject"}, skip: true},
+		{name: "scoped mail", args: []string{"--city", "/tmp/city", "mail", "check", "--inject"}, skip: true},
 		{name: "ordinary", args: []string{"status"}},
 		{name: "metrics is city value", args: []string{"--city", "metrics", "status"}},
 		{name: "bd is city value", args: []string{"--city", "bd", "status"}},
+		{name: "hook is city value", args: []string{"--city", "hook", "status"}},
 		{name: "after terminator", args: []string{"--", "metrics"}},
 		{name: "bd after terminator", args: []string{"--", "bd"}},
+		{name: "nudge after terminator", args: []string{"--", "nudge"}},
 		{name: "unknown flag", args: []string{"--unknown", "metrics"}},
 		{name: "bd after unknown flag", args: []string{"--unknown", "bd"}},
+		{name: "mail after unknown flag", args: []string{"--unknown", "mail"}},
 	}
 
 	for _, test := range tests {

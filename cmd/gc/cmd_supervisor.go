@@ -2019,6 +2019,19 @@ func reconcileCities(
 		}
 		applyRuntimeCityIdentity(cfg, cityName)
 
+		nudgeShadowSelection, nudgeShadowTrace, nudgeShadowErr := prepareNudgeShadowRuntime(path, cityName, cfg, stderr)
+		if nudgeShadowErr != nil {
+			emitPendingCityCreateFailure(cr, path, cityName, "nudge_shadow_preflight_failed", nudgeShadowErr, stderr)
+			recordInitFailure(cityName, fmt.Sprintf("nudge shadow preflight: %v", nudgeShadowErr))
+			continue
+		}
+		closeNudgeShadowTrace := func() {
+			if nudgeShadowTrace != nil {
+				_ = nudgeShadowTrace.Close()
+				nudgeShadowTrace = nil
+			}
+		}
+
 		// Track initialization progress for the API.
 		cr.BatchUpdate(func(
 			_ map[string]*managedCity,
@@ -2042,6 +2055,7 @@ func reconcileCities(
 		}); err != nil {
 			emitPendingCityCreateFailure(cr, path, cityName, "city_init_failed", err, stderr)
 			recordInitFailure(cityName, fmt.Sprintf("init: %v", err))
+			closeNudgeShadowTrace()
 			continue
 		}
 
@@ -2083,6 +2097,7 @@ func reconcileCities(
 		if spErr != nil {
 			emitPendingCityCreateFailure(cr, path, cityName, "session_provider_failed", spErr, stderr)
 			recordInitFailure(cityName, fmt.Sprintf("session provider: %v", spErr))
+			closeNudgeShadowTrace()
 			continue
 		}
 
@@ -2092,6 +2107,7 @@ func reconcileCities(
 		}); err != nil {
 			emitPendingCityCreateFailure(cr, path, cityName, "agent_image_check_failed", err, stderr)
 			recordInitFailure(cityName, err.Error())
+			closeNudgeShadowTrace()
 			continue
 		}
 
@@ -2144,6 +2160,8 @@ func reconcileCities(
 				ConvergenceReqCh:        convergenceReqCh,
 				PokeCh:                  pokeCh,
 				ControlDispatcherCh:     controlDispatcherCh,
+				NudgeShadowSelection:    nudgeShadowSelection,
+				Trace:                   nudgeShadowTrace,
 				TranscriptMetaEnabled:   transcriptmeta.Enabled(),
 				OnStarted: func() {
 					cr.UpdateCallback(path, func(m *managedCity) {
@@ -2162,10 +2180,12 @@ func reconcileCities(
 			})
 			return runtimeErr
 		}); err != nil {
+			closeNudgeShadowTrace()
 			emitPendingCityCreateFailure(cr, path, cityName, "city_runtime_failed", err, stderr)
 			recordInitFailure(cityName, fmt.Sprintf("city runtime: %v", err))
 			continue
 		}
+		nudgeShadowTrace = nil // ownership transferred to cityRuntime
 		mc.cr = cityRuntime
 
 		// Wire API state.
@@ -2290,7 +2310,7 @@ func reconcileCities(
 		// Start controller socket AFTER the alreadyRunning check so we
 		// never destroy a live city's socket or leak a listener.
 		sockPath := controllerSocketPath(path)
-		lis, lisErr := startControllerSocket(path, controllerHostingSupervisor, cityCancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+		lis, lisErr := startControllerSocketWithSessionReconcilerStatus(path, controllerHostingSupervisor, cityCancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh, cityRuntime.admitSessionStartSocketKey, cityRuntime.sessionReconcilerTraceStatus)
 		if lisErr != nil {
 			fmt.Fprintf(stderr, "gc supervisor: city '%s': controller socket: %v\n", cityName, lisErr) //nolint:errcheck
 			lock.Close()                                                                               //nolint:errcheck // no socket to race with

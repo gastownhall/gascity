@@ -1720,7 +1720,15 @@ func requireDoltIntegration(t *testing.T) {
 	}
 }
 
-func startIsolatedSupervisor(t *testing.T, env []string, gcHome string) {
+func isolatedSupervisorStatusOwnsPID(out string, pid int) bool {
+	var status struct {
+		Running bool `json:"running"`
+		PID     int  `json:"pid"`
+	}
+	return pid > 0 && json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(out))), &status) == nil && status.Running && status.PID == pid
+}
+
+func startIsolatedSupervisor(t *testing.T, env []string, gcHome string) int {
 	t.Helper()
 
 	logPath := filepath.Join(gcHome, "supervisor.log")
@@ -1748,8 +1756,8 @@ func startIsolatedSupervisor(t *testing.T, env []string, gcHome string) {
 
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		out, err := runCommand("", env, 2*time.Second, gcBinary, "supervisor", "status")
-		if err == nil && strings.Contains(out, "Supervisor is running") {
+		out, err := runCommand("", env, 2*time.Second, gcBinary, "supervisor", "status", "--json")
+		if err == nil && isolatedSupervisorStatusOwnsPID(out, cmd.Process.Pid) {
 			t.Cleanup(func() {
 				// --wait so runCommand blocks until the supervisor fully
 				// shut down, aligning with the cmd.Wait() synchronization below.
@@ -1758,7 +1766,7 @@ func startIsolatedSupervisor(t *testing.T, env []string, gcHome string) {
 				waitForIntegrationSupervisorDone(cmd, done, integrationSupervisorWaitDelay)
 				_ = logFile.Close()
 			})
-			return
+			return cmd.Process.Pid
 		}
 		select {
 		case err := <-done:
@@ -1778,6 +1786,7 @@ func startIsolatedSupervisor(t *testing.T, env []string, gcHome string) {
 	_ = logFile.Close()
 	logData, _ := os.ReadFile(logPath)
 	t.Fatalf("isolated supervisor did not become ready:\n%s", string(logData))
+	return 0
 }
 
 func waitForIntegrationSupervisorDone(cmd *exec.Cmd, done <-chan error, timeout time.Duration) {

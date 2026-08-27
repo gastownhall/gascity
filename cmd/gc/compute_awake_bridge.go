@@ -153,22 +153,7 @@ func buildAwakeInputFromReconciler(
 		input.SessionBeads = append(input.SessionBeads, bead)
 	}
 
-	// Preserve the reconciler's existing wake continuity for already-materialized
-	// on-demand named sessions: when work_query matched the backing template and
-	// the canonical bead still exists, carry an explicit named-session work-query
-	// signal rather than waking ordinary siblings from the generic WorkSet path.
-	for _, ns := range input.NamedSessions {
-		if ns.Mode != "on_demand" || !input.WorkSet[ns.Template] {
-			continue
-		}
-		if resolveNamedSessionBeadName(input.SessionBeads, ns) == "" {
-			continue
-		}
-		if input.NamedSessionWorkQ == nil {
-			input.NamedSessionWorkQ = make(map[string]bool)
-		}
-		input.NamedSessionWorkQ[ns.Identity] = true
-	}
+	fillAwakeNamedSessionWorkQueue(&input)
 
 	// Runtime liveness comes from wakeTargets. Attachment is probed only when
 	// it can affect the awake decision; the common active desired-session path
@@ -203,6 +188,36 @@ func buildAwakeInputFromReconciler(
 	}
 
 	return input
+}
+
+// fillAwakeNamedSessionWorkQueue preserves the reconciler's existing wake
+// continuity for already-materialized on-demand named sessions: when work_query
+// matched the backing template and the canonical bead still exists, carry an
+// explicit named-session work-query signal rather than waking ordinary siblings
+// from the generic WorkSet path.
+//
+// It is ONE derivation shared by both AwakeInput builders rather than a rung each
+// copies. The two builders are field-for-field constructions of the same struct
+// feeding the same pure ComputeAwakeSet, and a named-field struct literal cannot
+// fail to compile when a field is missing — which is exactly how the detector
+// carried this intent's consumer without its producer and answered
+// ShouldWake=false where the legacy tick answered work-query (ga-f7v2ft.180).
+//
+// Its inputs are NamedSessions, WorkSet and SessionBeads, so both callers invoke
+// it once all three are populated.
+func fillAwakeNamedSessionWorkQueue(input *AwakeInput) {
+	for _, ns := range input.NamedSessions {
+		if ns.Mode != "on_demand" || !input.WorkSet[ns.Template] {
+			continue
+		}
+		if resolveNamedSessionBeadName(input.SessionBeads, ns) == "" {
+			continue
+		}
+		if input.NamedSessionWorkQ == nil {
+			input.NamedSessionWorkQ = make(map[string]bool)
+		}
+		input.NamedSessionWorkQ[ns.Identity] = true
+	}
 }
 
 func shouldProbeAttachmentForAwakeInput(info session.Info, alive bool, cfg *config.City, poolDesired map[string]int) bool {

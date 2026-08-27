@@ -20,8 +20,9 @@ import (
 )
 
 const (
-	meterRecorderName = "github.com/gastownhall/gascity"
-	loggerName        = "gascity"
+	meterRecorderName       = "github.com/gastownhall/gascity"
+	loggerName              = "gascity"
+	nudgeShadowHealthMetric = "gc.reconcile.nudge_shadow.health"
 )
 
 // BDSlowThreshold is the fixed wall-clock point where an in-flight bd
@@ -63,7 +64,8 @@ type recorderInstruments struct {
 	drainTotal      metric.Int64Counter
 
 	// Gauges (1)
-	beadStoreHealthy metric.Int64Gauge
+	beadStoreHealthy  metric.Int64Gauge
+	nudgeShadowHealth metric.Int64Gauge
 
 	// Histograms — Phase 1 (1)
 	bdDurationHist metric.Float64Histogram
@@ -157,6 +159,9 @@ func initInstruments() {
 		// Gauges
 		inst.beadStoreHealthy, _ = m.Int64Gauge("gc.bead_store.healthy",
 			metric.WithDescription("Whether the bead store is healthy (1) or unavailable (0)"),
+		)
+		inst.nudgeShadowHealth, _ = m.Int64Gauge(nudgeShadowHealthMetric,
+			metric.WithDescription("Bounded nudge-shadow health evidence"),
 		)
 
 		// Histograms
@@ -482,6 +487,32 @@ func RecordBeadStoreHealth(ctx context.Context, cityName string, healthy bool) {
 	}
 	inst.beadStoreHealthy.Record(ctx, val,
 		metric.WithAttributes(attribute.String("city", cityName)),
+	)
+}
+
+// NudgeShadowHealthProbe is the bounded, identity-free health evidence for a
+// nudge-shadow comparison. Its fields are the complete metric attribute set.
+type NudgeShadowHealthProbe struct {
+	City            string
+	Provider        string
+	Config          string
+	Comparison      string
+	OwnerGeneration int64
+}
+
+// RecordNudgeShadowHealth records one healthy nudge-shadow observation using
+// only the probe's bounded city, provider, config, comparison, and owner
+// generation dimensions.
+func RecordNudgeShadowHealth(ctx context.Context, probe NudgeShadowHealthProbe) {
+	initInstruments()
+	inst.nudgeShadowHealth.Record(ctx, 1,
+		metric.WithAttributes(
+			attribute.String("city", probe.City),
+			attribute.String("provider", probe.Provider),
+			attribute.String("config", probe.Config),
+			attribute.String("comparison", probe.Comparison),
+			attribute.Int64("owner_generation", probe.OwnerGeneration),
+		),
 	)
 }
 

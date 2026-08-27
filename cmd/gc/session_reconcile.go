@@ -1006,8 +1006,13 @@ func healStatePatchWithRollbackInfo(info sessionpkg.Info, alive bool, observed b
 
 // healStateWithRollbackInfo computes and persists an advisory-state heal.
 // Callers may fold the returned patch only when err is nil; an error leaves
-// their current projection authoritative for the rest of the pass.
-func healStateWithRollbackInfo(info sessionpkg.Info, alive bool, observed bool, sessFront *sessionpkg.Store, clk clock.Clock, startupTimeout time.Duration, rollbackAvailable bool) (map[string]string, error) {
+// their current projection authoritative for the rest of the pass. A nil patch
+// with a nil error means nothing was written — either the heal was already
+// converged, or the fence below refused it.
+//
+// loadedRevision is the revision of the row the heal decision was computed from.
+// See applyHealPatchFenced for why the write is fenced on it.
+func healStateWithRollbackInfo(info sessionpkg.Info, alive bool, observed bool, sessFront *sessionpkg.Store, clk clock.Clock, startupTimeout time.Duration, rollbackAvailable bool, loadedRevision int64) (map[string]string, error) {
 	// Closed beads are terminal; their advisory state metadata should not move
 	// (matches healStateWithRollback's session.Status == "closed" guard —
 	// Info.Closed is the projected mirror).
@@ -1018,15 +1023,60 @@ func healStateWithRollbackInfo(info sessionpkg.Info, alive bool, observed bool, 
 	if len(batch) == 0 {
 		return nil, nil
 	}
-	if err := sessFront.ApplyPatch(info.ID, batch); err != nil {
+	applied, err := applyHealPatchFenced(sessFront, info.ID, loadedRevision, batch)
+	if err != nil {
 		return nil, err
+	}
+	if !applied {
+		return nil, nil
 	}
 	// S19 Stage 3 shadow: record the legacy compared-key writes this heal ACTUALLY
 	// applied (no-op unless the shadow harness is enabled). Colocated with the
-	// ApplyPatch so a pure builder (healStatePatchWithRollbackInfo) invoked only for
+	// write so a pure builder (healStatePatchWithRollbackInfo) invoked only for
 	// inspection never records a write that never happened.
 	recordLegacyCompareWrites(info.ID, "healStateWithRollback", batch)
 	return batch, nil
+}
+
+// applyHealPatchFenced persists an advisory status heal and reports whether it
+// landed. The heal is computed from a per-tick snapshot, so an unconditional
+// write is a lost update: `gc session suspend` writes {state, sleep_intent,
+// held_until} durably, and a heal computed from the pre-suspend row then reverts
+// state to "awake" while leaving the other two keys in place — the row reads
+// awake+user-hold+held forever and the keyed suspend stop never engages
+// (ga-f7v2ft.125). Where the deployment has conditional writes enabled the write
+// is therefore fenced on loadedRevision: a concurrent writer that moved the row
+// since the snapshot loses the CAS, and the heal is skipped rather than applied.
+// The heal is advisory and level-triggered, so the next tick recomputes it from a
+// snapshot that includes the concurrent write.
+//
+// A skipped heal returns (false, nil): the caller must not fold it either.
+// Deployments with conditional writes off keep the unconditional write (no
+// revision contract exists there); a state-changing heal with no known revision
+// cannot be fenced at all and fails closed.
+func applyHealPatchFenced(sessFront *sessionpkg.Store, id string, loadedRevision int64, batch map[string]string) (bool, error) {
+	writer, _, resolveErr := beads.ResolveConditionalWriter(sessFront.Store())
+	if resolveErr != nil {
+		return false, fmt.Errorf("resolving conditional writer for status heal %q: %w", id, resolveErr)
+	}
+	if writer != nil {
+		if beads.RevisionKnown(loadedRevision) {
+			if err := writer.UpdateIfMatch(id, loadedRevision, beads.UpdateOpts{Metadata: batch}); err != nil {
+				if beads.IsPreconditionFailed(err) {
+					return false, nil
+				}
+				return false, err
+			}
+			return true, nil
+		}
+		if _, changesState := batch["state"]; changesState {
+			return false, nil
+		}
+	}
+	if err := sessFront.ApplyPatch(id, batch); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // clearPendingCreateLeaseInfo is the Info-form counterpart of

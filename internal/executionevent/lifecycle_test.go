@@ -279,6 +279,8 @@ func (p *countingEventProvider) List(filter events.Filter) ([]events.Event, erro
 	return p.Provider.List(filter)
 }
 
+// A settled root that is touched again (its row changes) must be re-walked.
+
 func TestCompletedFactKeyDistinguishesUnknownFromKnownEmptyTopology(t *testing.T) {
 	base := events.Event{Subject: "gcg-attempt", RunID: "gcg-run", SessionID: "gcs-session", StepID: "build"}
 	var nilSlice []string

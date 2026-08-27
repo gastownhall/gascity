@@ -145,6 +145,20 @@ func (h *RuntimeHandle) Kill(ctx context.Context) (err error) {
 	return err
 }
 
+// StopUnattended stops the exact runtime incarnation only when its provider
+// can bind unattended certification and destruction in one operation.
+func (h *RuntimeHandle) StopUnattended(ctx context.Context, expectedToken string) (err error) {
+	event := h.beginOperationEvent(ctx, workerOperationKill)
+	defer func() { event.finish(err) }()
+
+	stopper, ok := h.provider.(runtime.UnattendedSessionStopper)
+	if !ok {
+		return fmt.Errorf("%w: runtime provider does not support unattended-session stop", ErrOperationUnsupported)
+	}
+	err = stopper.StopUnattendedSession(h.sessionName, expectedToken)
+	return err
+}
+
 // Close asks the provider to close the live runtime session.
 func (h *RuntimeHandle) Close(ctx context.Context) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationClose)

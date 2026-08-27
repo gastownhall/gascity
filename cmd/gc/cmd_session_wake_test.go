@@ -584,14 +584,14 @@ func TestCmdSessionWake_PokesManagedControllerAndRequestsSuspendedStart(t *testi
 			}
 		case cmd, ok := <-commands:
 			if !ok {
-				t.Fatalf("controller commands = %v, want ping plus poke", gotCommands)
+				t.Fatalf("controller commands = %v, want ping plus exact start", gotCommands)
 			}
 			gotCommands = append(gotCommands, cmd)
 		case <-deadline:
 			t.Fatalf("timed out waiting for controller commands, got %v", gotCommands)
 		}
 	}
-	wantCommands := []string{"ping\n", "poke\n"}
+	wantCommands := []string{"ping\n", sessionStartCommandPrefix + sessionID + "\n"}
 	for i, want := range wantCommands {
 		if gotCommands[i] != want {
 			t.Fatalf("controller command %d = %q, want %q", i, gotCommands[i], want)

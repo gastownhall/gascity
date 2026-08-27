@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"io"
 	"log"
 	"os"
@@ -18,7 +17,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -26,11 +24,12 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/nudgeshadow"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
-	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -178,13 +177,108 @@ type CityRuntime struct {
 	asyncStarts        asyncStartTracker
 	asyncStops         asyncStartTracker
 	demandSnapshot     *runtimeDemandSnapshot
+	// readyRoutedWorkView memoizes the declared routed-work read so every
+	// consumer inside one patrol tick — the demand snapshot's invalidation and
+	// the detector sweep's pool-fill enqueue — shares ONE bounded ReadyLive per
+	// store. readyRoutedWorkViewChanged is the edge the refresh decision
+	// consumes (see flooredReadyRoutedWorkView).
+	readyRoutedWorkView        readyRoutedWorkView
+	readyRoutedWorkViewAt      time.Time
+	readyRoutedWorkViewChanged bool
 
 	// liveSweepMemos carries the live model-usage sweep's per-session memo: the
 	// resolved transcript path, whether discovery definitively found nothing, and
 	// the sweep-interval floor. The worker factory is rebuilt per tick, so this
 	// process-lifetime cache is what keeps a per-tick live lane from repeating
 	// bounded discovery and transcript reads for every awake session.
-	liveSweepMemos sync.Map // session bead id -> liveSweepMemo
+	liveSweepMemos        sync.Map // session bead id -> liveSweepMemo
+	lifecycleShadowWorker *sessionLifecycleShadowWorker
+	// waitDependencyEnqueue is an opt-in private shadow sink. It stays nil
+	// until the lifecycle adapter owns a real downstream consumer.
+	waitDependencyEnqueue  func(sessionWaitDependencyTarget, sessionWaitDependencyCause) (retire bool, err error)
+	waitDependencyProducer *sessionWaitDependencyProducer
+
+	sessionWaitDependencyMu                sync.RWMutex
+	sessionWaitDependencyIndex             *sessionWaitDependencyIndex
+	sessionWaitDependencyIndexGeneration   uint64
+	sessionWaitDependencyStartupCensusOwed bool
+	// Rejected-census IDs come from the bounded lookup census and let a
+	// wait that repairs itself by losing wait identity re-arm convergence.
+	sessionWaitDependencyRejectedCensusIDs map[string]struct{}
+	// sessionWaitDependencyReservations is the bounded pre-claim bridge between
+	// a dependency-close event and the keyed controller admission. It is keyed
+	// by exact session ID; the retained lease also binds the wait identity.
+	sessionWaitDependencyReservations map[string]sessionWaitDependencyStartLease
+
+	// sessionStartLifecycleMu serializes the two keyed session-start lifecycle
+	// entry points, ensureSessionStartController and stopSessionStartController,
+	// against each other. It exists so neither of them has to hold
+	// sessionStartMu across a controller.Stop(): Stop drains the workqueue and
+	// blocks until every in-flight worker finishes, and those workers take
+	// sessionStartMu to read the published fleet views, so draining under that
+	// lock deadlocks by construction (ga-f7v2ft.143). Lock ordering is always
+	// sessionStartLifecycleMu → sessionStartMu, never the reverse, and no
+	// controller worker ever takes the lifecycle lock.
+	sessionStartLifecycleMu sync.Mutex
+	sessionStartMu          sync.Mutex
+	sessionStartController  *sessionStartController
+	sessionStartOwnership   sessionStartOwnership
+	sessionStartMode        rollout.Mode
+	poolMembershipShadow    *poolMembershipIndex
+	// desiredSessionNames is the desired-session view the patrol/boot bead
+	// reconcile tick publishes for the keyed D-ORPHAN close handler, which has
+	// to re-derive undesiredness per key and cannot recompute a fleet-shaped
+	// answer itself. Guarded by sessionStartMu; nil until the first tick
+	// publishes, which fails every keyed close closed. Only beadReconcileTick
+	// publishes: controlDispatcherTick and `gc start` build narrowed desired
+	// states, and a narrowed view would read as fleet-wide undesiredness.
+	desiredSessionNames map[string]bool
+	// providerHealthSnap is the ADR-0013 registry view the patrol/boot tick
+	// loaded ONCE for its detector sweep and republishes for the keyed gates,
+	// so a start, wake or stall admission answers the respawn gate from the
+	// tick's snapshot instead of re-reading provider-health.json per key
+	// (DETECTOR.md §3, circuit/health: the sweep is the hydration point).
+	// Guarded by sessionStartMu; nil until the first tick publishes, which
+	// falls the gates back to their own file read — today's behavior.
+	providerHealthSnap *providerHealthSnapshot
+	// sessionLiveness is the two-bit provider observation the patrol/boot tick's
+	// detector sweep already made over the bead-awake fleet, published for the
+	// keyed D-ZOMBIE guard. That family's whole condition is provider I/O, so
+	// without a fleet view every admission on a healthy awake row would pay a
+	// probe just to be declined. Guarded by sessionStartMu; nil until the first
+	// patrol sweep publishes, which declines the family rather than probing.
+	sessionLiveness map[string]detectorLivenessBits
+	// sessionWakeEvals is the wake verdict per bead ID the patrol/boot tick's
+	// detector sweep derived, published for the keyed D-DRAIN advance's third
+	// cancel arm (ga-f7v2ft.179). "The session reacquired ANY wake reason" is a
+	// fleet verdict over pool counts, named and routed demand and the ready-wait
+	// set, so the handler reads the tick's answer rather than re-deriving one.
+	// Guarded by sessionStartMu; nil until the first patrol sweep publishes,
+	// which declines the arm rather than inventing a rescue.
+	sessionWakeEvals map[string]wakeEvaluation
+	// orphanSuspendDeferrals is the detector's own #3630 named spec-absence
+	// confirmation window (DETECTOR.md §3, D-ORPHAN). Guarded by sessionStartMu
+	// and created on first use; only beadReconcileTick supplies it to the sweep,
+	// because it is the one call site with a cross-tick identity and the one
+	// that routes.
+	orphanSuspendDeferrals *detectorSuspendDeferralTracker
+	// sleepIdleProbeCursor is the detector's own round-robin position over
+	// D-SLEEP's idle-probe candidates (DETECTOR.md §2, "probe cursor"). Guarded
+	// by sessionStartMu and created on first use; supplied by beadReconcileTick
+	// alone, for the same reason orphanSuspendDeferrals is.
+	sleepIdleProbeCursor *detectorIdleProbeCursor
+	// guarded by sessionStartMu; startup retries reuse this runtime's one
+	// controller-state admission owner.
+	readyRoutedWorkEventAdmissionInstalled bool
+	nudgeKeyMu                             sync.Mutex
+	nudgeKeyController                     *nudgeKeyController
+	nudgeKeyFallback                       map[string]struct{}
+	nudgeKeyMode                           rollout.Mode
+	nudgeShadowSelection                   nudgeshadow.Selection
+	// sessionStartOptions is empty in production. Focused tests install the
+	// existing deterministic start waiters here so composition tests prove the
+	// real exact-start path without wall-clock stability delays.
+	sessionStartOptions []startExecutionOption
 
 	// transcriptMetaEnabled is set only by the machine-wide supervisor after it
 	// has armed the event-correlation sidecar gate. One asynchronous snapshot pass
@@ -218,6 +312,28 @@ type CityRuntime struct {
 	managedDoltOwned    func(string) (bool, error)
 	managedDoltPort     func(string) string
 
+	// A certified dependency-ready result upgrades the next coalesced poke so
+	// it does not wait behind the ordinary fleet-tick debounce.
+	sessionWaitDependencyReadyPokePending atomic.Bool
+	// A poked tick services a mutation this process did not make, so its first
+	// session snapshot must bypass the bead cache: a cached read cannot see a
+	// bead another process just wrote, and `gc session new` hands a deferred
+	// start to the controller through exactly that write-then-poke sequence.
+	sessionSnapshotLivePending atomic.Bool
+	// waitDependencyLiveResolve* throttle the bead.closed live dependent lookup
+	// on a city with no pending waits at all (ga-zo9h3 option (b)). Guarded by
+	// sessionWaitDependencyMu.
+	waitDependencyLiveResolveAt    time.Time
+	waitDependencyLiveResolveEmpty bool
+	// A certified ready routed-work result uses the same legacy tick, but keeps
+	// an independent bit so either exact source can consume its own request.
+	// Stable exact-key hints enter the serialized runtime loop through this
+	// bounded channel. Overflow remains legacy-owned.
+	routedWorkPoolAllocationCh chan routedWorkPoolAllocationHint
+	// Dependency-wait producers only publish an exact, bounded hint. Durable
+	// certification and keyed admission happen on run's serialized boundary.
+	sessionWaitDependencyStartCh chan sessionWaitDependencyStartHint
+
 	shutdownOnce             sync.Once
 	preserveSessionsShutdown atomic.Bool
 	// ownedCity is set true once run() begins, i.e. once this runtime has
@@ -234,22 +350,21 @@ type CityRuntime struct {
 }
 
 // runtimeDemandSnapshotBackstopMaxAge bounds how long an EVENT-BACKED demand
-// snapshot may be reused before it is rebuilt regardless of what the ready
-// fingerprint says.
+// snapshot may be reused before it is rebuilt regardless of what the routed-work
+// view says.
 //
 // It is a convergence backstop, not the freshness mechanism, and it used to be
 // neither. At 30s it sat at or below the patrol interval — and far below a slow
-// tick — which mattered because the age gate SHORT-CIRCUITS the fingerprint:
-// loadDemandSnapshot only computes readyDemandSnapshotFingerprint when the
-// snapshot is not already due. On maintainer-city's 373s tick the snapshot was
-// therefore always due, the fingerprint was never consulted, and the cache it
-// guards was dead code (ga-l7jdg).
+// tick — so on maintainer-city's 373s tick the snapshot was always already due,
+// every patrol rebuilt it, and the cache the bound guards was dead code
+// (ga-l7jdg).
 //
-// Freshness is the fingerprint's job: a claim, close or create anywhere in the
-// routed-demand leg set changes it and forces a rebuild in the same tick, and
-// the session fingerprint covers the session half. This bound exists for what
-// neither can see — a change no read of the ready set reflects — so it is set
-// well clear of any plausible tick rather than tuned for responsiveness.
+// Freshness is the routed-work view's job: a claim, close or create anywhere in
+// the view's store set moves its fingerprint, and the change edge
+// loadDemandSnapshot consumes forces a rebuild in the same tick; the session
+// fingerprint covers the session half. This bound exists for what neither can
+// see — a change no read of the ready set reflects — so it is set well clear of
+// any plausible tick rather than tuned for responsiveness.
 //
 // It applies ONLY on the event-backed path. A city with a configured scale_check
 // is not event-backed at all (demandSnapshotsEnabled), and keeps the per-tick
@@ -270,10 +385,9 @@ const runtimeDemandSnapshotBackstopMaxAge = 5 * time.Minute
 const scaleCheckDemandMinInterval = 1 * time.Second
 
 type runtimeDemandSnapshot struct {
-	createdAt              time.Time
-	sessionFingerprint     string
-	readyDemandFingerprint string
-	result                 DesiredStateResult
+	createdAt          time.Time
+	sessionFingerprint string
+	result             DesiredStateResult
 }
 
 // CityRuntimeParams holds the caller-provided parameters for creating a
@@ -314,6 +428,10 @@ type CityRuntimeParams struct {
 	// zero value, so one-shot CLI processes cannot activate the reconcile path.
 	TranscriptMetaEnabled bool
 
+	LifecycleShadowWorker *sessionLifecycleShadowWorker
+	NudgeShadowSelection  nudgeshadow.Selection
+	Trace                 *sessionReconcilerTraceManager
+
 	LogPrefix      string // "gc start" or "gc supervisor"; defaults to "gc start"
 	Stdout, Stderr io.Writer
 }
@@ -340,6 +458,29 @@ const cityRuntimeReloadLifecycleRetryLimit = 2
 // It is intentionally longer than staleCreatingStateTimeout because startup
 // plus the first patrol can legitimately exceed one minute.
 const postCreateProtectionTimeout = 2 * time.Minute
+
+// prepareNudgeShadowRuntime resolves the boot-latched selection and, only for
+// required mode, opens and verifies the trace recorder that the runtime will
+// own. Off mode does not open or inspect trace state.
+func prepareNudgeShadowRuntime(cityPath, cityName string, cfg *config.City, stderr io.Writer) (nudgeshadow.Selection, *sessionReconcilerTraceManager, error) {
+	selection, err := nudgeshadow.Resolve(cfg)
+	if err != nil {
+		return nudgeshadow.Selection{}, nil, err
+	}
+	if !selection.Required() {
+		return selection, nil, nil
+	}
+	trace := newSessionReconcilerTraceManager(cityPath, cityName, stderr)
+	selection, err = nudgeshadow.Preflight(cfg, nudgeshadow.Requirements{
+		CityPath:       cityPath,
+		TraceRecording: trace.Enabled(),
+	})
+	if err != nil {
+		_ = trace.Close()
+		return nudgeshadow.Selection{}, nil, err
+	}
+	return selection, trace, nil
+}
 
 // newCityRuntime creates a CityRuntime, building internal components
 // (crash tracker, idle tracker, wisp GC, order dispatcher) from the
@@ -398,11 +539,28 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A relocated class is served from a bare bead engine: the CachingStore
+	// this controller wraps its work ledger in never sees it, so without this
+	// the whole infrastructure half of a split city writes in silence —
+	// admitSessionStartEvent never fires for a session row and keyed admission
+	// falls back to patrol cadence (ga-f7v2ft.164 step 2). Emission is required
+	// plumbing on a binding, so it is wired at the seam that opened it rather
+	// than asked for per call site. p.Rec is the same recorder this process's
+	// bead-event watcher tails, which is what closes the loop.
+	routes = routes.withControllerEmission(p.Rec)
 	// NOTE: the routes are NOT registered as this city's residency answer here.
 	// Construction happens before the supervisor knows whether it can take the
 	// controller lock, and a replacement that loses it would have repointed the
 	// live city's release sweeps at a binding it is about to close. The lock
 	// holder registers — see registerResidencyRoutes.
+
+	// Opened only past the storage gate: a refused city returns before this
+	// runtime exists, and nobody would be left holding the trace file to close
+	// it. A caller-supplied trace stays the caller's to close on that path.
+	trace := p.Trace
+	if trace == nil {
+		trace = newSessionReconcilerTraceManager(p.CityPath, p.CityName, p.Stderr)
+	}
 
 	sweepOrphanedOrderTrackingAtBoot(routes, p.CityPath, p.Cfg, p.Rec, p.Stderr)
 
@@ -435,7 +593,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 		orderSetSignature:       orderSnapshot.Signature,
 		orderRescanEnabled:      true,
 		orderRescanLast:         time.Now(),
-		trace:                   newSessionReconcilerTraceManager(p.CityPath, p.CityName, p.Stderr),
+		trace:                   trace,
 		rec:                     p.Rec,
 		reapSkips:               newReapSkipTracker(),
 		poolSessions:            p.PoolSessions,
@@ -443,6 +601,8 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 		forceStopShutdown:       p.ForceStopShutdown,
 		suspendedNames:          suspendedNames,
 		asyncStartLimiter:       newAsyncStartLimiter(maxParallelStartsPerTick(p.Cfg)),
+		lifecycleShadowWorker:   p.LifecycleShadowWorker,
+		poolMembershipShadow:    newPoolMembershipIndex(),
 		transcriptMetaEnabled:   p.TranscriptMetaEnabled,
 		convergenceReqCh:        p.ConvergenceReqCh,
 		reloadReqCh: func() chan reloadRequest {
@@ -463,17 +623,28 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 			}
 			return make(chan struct{}, 1)
 		}(),
-		nudgeWakeCh:       make(chan struct{}, 1),
-		onStarted:         p.OnStarted,
-		onStatus:          p.OnStatus,
-		managedDoltHealth: managedDoltHealth,
-		managedDoltOwned:  managedDoltOwned,
-		managedDoltPort:   managedDoltPort,
-		logPrefix:         logPrefix,
-		stdout:            p.Stdout,
-		stderr:            p.Stderr,
+		nudgeWakeCh:                  make(chan struct{}, 1),
+		routedWorkPoolAllocationCh:   make(chan routedWorkPoolAllocationHint, routedWorkPoolAllocationQueueSize),
+		sessionWaitDependencyStartCh: make(chan sessionWaitDependencyStartHint, routedWorkPoolAllocationQueueSize),
+		nudgeShadowSelection:         p.NudgeShadowSelection,
+		onStarted:                    p.OnStarted,
+		onStatus:                     p.OnStatus,
+		managedDoltHealth:            managedDoltHealth,
+		managedDoltOwned:             managedDoltOwned,
+		managedDoltPort:              managedDoltPort,
+		logPrefix:                    logPrefix,
+		stdout:                       p.Stdout,
+		stderr:                       p.Stderr,
 	}
 	cr.svc = workspacesvc.NewManager(&serviceRuntime{cr: cr})
+	if cr.lifecycleShadowWorker == nil {
+		worker, err := newSessionLifecycleShadowWorker(1, cr.recordSessionLifecycleStartShadowEvaluation, shadowWorkerStderr(cr.stderr))
+		if err != nil {
+			fmt.Fprintf(shadowWorkerStderr(cr.stderr), "%s: lifecycle shadow worker disabled: %v\n", cr.logPrefix, err) //nolint:errcheck // shadow startup must not affect legacy reconciliation
+		} else {
+			cr.lifecycleShadowWorker = worker
+		}
+	}
 	if err := cr.svc.Reload(); err != nil {
 		fmt.Fprintf(cr.stderr, "%s: service init: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 	}
@@ -491,11 +662,240 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 // accessors read it under RLock.
 func (cr *CityRuntime) setControllerState(cs *controllerState) {
 	cr.cs = cs
+	if cs != nil {
+		// The routes already crossed at construction, so this is simply the
+		// first moment the class front doors resolve to the stores that will
+		// actually serve them — and therefore the first moment the session
+		// class's required fencing capability can be asserted, or the wider
+		// class contract enumerated over every store this city serves.
+		cs.preflightSessionClassConditionalWrites()
+		cs.preflightStoreContract()
+	}
 }
 
 // crashTracker returns the crash tracker for API server wiring.
 func (cr *CityRuntime) crashTrack() crashTracker {
 	return cr.ct
+}
+
+func (cr *CityRuntime) startSessionLifecycleShadowWorker() {
+	if cr == nil || cr.lifecycleShadowWorker == nil {
+		return
+	}
+	if err := cr.lifecycleShadowWorker.Start(); err != nil {
+		fmt.Fprintf(cr.stderr, "%s: lifecycle shadow worker disabled: %v\n", cr.logPrefix, err) //nolint:errcheck // shadow startup must not affect legacy reconciliation
+	}
+}
+
+func (cr *CityRuntime) stopSessionLifecycleShadowWorker() {
+	if cr == nil || cr.lifecycleShadowWorker == nil {
+		return
+	}
+	cr.lifecycleShadowWorker.Stop()
+}
+
+func (cr *CityRuntime) installReadyRoutedWorkEventAdmission() error {
+	if cr == nil || cr.cs == nil {
+		return nil
+	}
+	cr.sessionStartMu.Lock()
+	defer cr.sessionStartMu.Unlock()
+	if cr.readyRoutedWorkEventAdmissionInstalled {
+		return nil
+	}
+	if cr.sessionStartOwnership != sessionStartOwnershipKeyed {
+		return nil
+	}
+	if err := cr.cs.installReadyRoutedWorkEventAdmission(func(contribution readyRoutedWorkDemandContribution) {
+		cr.sessionStartMu.Lock()
+		stillKeyed := cr.sessionStartOwnership == sessionStartOwnershipKeyed
+		cr.sessionStartMu.Unlock()
+		if !stillKeyed {
+			return
+		}
+		cr.recordReadyRoutedWorkDemandContribution(contribution)
+		if !cr.enqueueRoutedWorkPoolAllocation(contribution) {
+			// Census-owed re-detection (Q2): the 256-slot hint channel drops on
+			// overflow, and the drop is recorded and dropped rather than
+			// converted into a legacy poke. The condition is level-triggered off
+			// durable state, so the next patrol's declared routed-work view
+			// re-detects the same unallocated key. Only latency is lost.
+			cr.recordRoutedWorkPoolAllocationOverflow(contribution)
+		}
+	}); err != nil {
+		return err
+	}
+	cr.readyRoutedWorkEventAdmissionInstalled = true
+	return nil
+}
+
+func (cr *CityRuntime) recordReadyRoutedWorkDemandContribution(contribution readyRoutedWorkDemandContribution) {
+	if cr == nil || cr.trace == nil || contribution.WorkID == "" || contribution.PoolTarget == "" ||
+		contribution.ObservedAt.IsZero() || contribution.DecidedAt.IsZero() ||
+		contribution.DecidedAt.Before(contribution.ObservedAt) {
+		return
+	}
+	lookupStarted := time.Now()
+	membership := cr.poolMembershipShadow.observe(contribution.PoolTarget)
+	lookupDuration := time.Since(lookupStarted)
+	allocation := decideRoutedWorkPoolAllocationShadow(contribution, membership)
+	capacityDecidedAt := time.Now().UTC()
+	cr.serviceStateMu.RLock()
+	cfg := cr.cfg
+	cr.serviceStateMu.RUnlock()
+	cycle := cr.trace.BeginCycle(TraceTickTriggerControl, "pool_demand.contribution.shadow", contribution.DecidedAt, cfg)
+	if cycle == nil {
+		return
+	}
+	reason := TraceReasonRetained
+	outcome := TraceOutcomeAccepted
+	if !contribution.ContributionPresent {
+		reason = TraceReasonNoEffectTemplateMatch
+		outcome = TraceOutcomeSkipped
+	}
+	eventToDecision := int64(0)
+	eventTimestampValid := !contribution.EventAt.IsZero() && !contribution.DecidedAt.Before(contribution.EventAt)
+	if eventTimestampValid {
+		eventToDecision = contribution.DecidedAt.Sub(contribution.EventAt).Nanoseconds()
+	}
+	eventToCapacityDecision := int64(0)
+	if !contribution.EventAt.IsZero() && !capacityDecidedAt.Before(contribution.EventAt) {
+		eventToCapacityDecision = capacityDecidedAt.Sub(contribution.EventAt).Nanoseconds()
+	}
+	demandToCapacityDecision := int64(0)
+	if !capacityDecidedAt.Before(contribution.DecidedAt) {
+		demandToCapacityDecision = capacityDecidedAt.Sub(contribution.DecidedAt).Nanoseconds()
+	}
+	cycle.RecordControllerOperation(
+		TraceSitePoolDemandContributionShadow,
+		reason,
+		outcome,
+		"pool_demand.contribution.shadow",
+		capacityDecidedAt.Sub(contribution.ObservedAt),
+		map[string]any{
+			"work_id":                               contribution.WorkID,
+			"pool_target":                           contribution.PoolTarget,
+			"source_actor":                          contribution.SourceActor,
+			"source_store":                          contribution.SourceStore,
+			"contribution_present":                  contribution.ContributionPresent,
+			"event_timestamp_valid":                 eventTimestampValid,
+			"event_to_shadow_decision_ns":           eventToDecision,
+			"observation_to_shadow_decision_ns":     contribution.DecidedAt.Sub(contribution.ObservedAt).Nanoseconds(),
+			"pool_member_count":                     membership.members,
+			"pool_occupancy":                        membership.occupied,
+			"pool_membership_certified":             membership.certified,
+			"pool_membership_revision":              membership.revision,
+			"pool_membership_reason":                string(membership.reason),
+			"pool_membership_lookup_ns":             lookupDuration.Nanoseconds(),
+			"event_to_capacity_shadow_decision_ns":  eventToCapacityDecision,
+			"demand_to_capacity_shadow_decision_ns": demandToCapacityDecision,
+			"allocation_action":                     string(allocation.action),
+			"allocation_reason":                     string(allocation.reason),
+			"allocation_start_count":                allocation.startCount,
+			"allocation_supported":                  allocation.action == poolAllocationShadowStartOne,
+			"effect_applied":                        false,
+		},
+	)
+	if err := cycle.End(TraceCompletionCompleted, nil); err != nil {
+		fmt.Fprintf(shadowWorkerStderr(cr.stderr), "%s: routed-work demand shadow trace: %v\n", cr.logPrefix, err) //nolint:errcheck // tracing must not affect legacy reconciliation
+	}
+}
+
+func shadowWorkerStderr(stderr io.Writer) io.Writer {
+	if stderr == nil {
+		return io.Discard
+	}
+	return stderr
+}
+
+func (cr *CityRuntime) recordSessionLifecycleStartShadowEvaluation(evaluation sessionLifecycleStartShadowEvaluation) {
+	if cr == nil || cr.trace == nil || evaluation.Observation.Input.ObservedAt.IsZero() ||
+		evaluation.CompletedAt.IsZero() ||
+		evaluation.CompletedAt.Before(evaluation.Observation.Input.ObservedAt) {
+		return
+	}
+	cr.serviceStateMu.RLock()
+	cfg := cr.cfg
+	cr.serviceStateMu.RUnlock()
+	cycle := cr.trace.BeginCycle(TraceTickTriggerControl, "lifecycle.start_selection.shadow", evaluation.CompletedAt, cfg)
+	if cycle == nil {
+		return
+	}
+	outcome := TraceOutcomeUnknown
+	switch evaluation.Comparison.Outcome {
+	case sessionLifecycleStartSelectionComparisonMatched:
+		outcome = TraceOutcomeNoChange
+	case sessionLifecycleStartSelectionComparisonMismatched:
+		outcome = TraceOutcomeFailed
+	case sessionLifecycleStartSelectionComparisonIncomparable:
+		outcome = TraceOutcomeSkipped
+	}
+	cycle.recordAdmittedDetailOperation(
+		TraceSiteLifecycleStartSelectionShadow,
+		TraceReasonRetained,
+		outcome,
+		"lifecycle.start_selection.shadow",
+		evaluation.Observation.Admission.Template,
+		evaluation.Observation.Input.Info.ID,
+		evaluation.Observation.Input.Info.SessionNameMetadata,
+		evaluation.Observation.Admission.Source,
+		evaluation.CompletedAt.Sub(evaluation.Observation.Input.ObservedAt),
+		map[string]any{
+			"session_id":               evaluation.Observation.Input.Info.ID,
+			"admitted_template":        evaluation.Observation.Admission.Template,
+			"admitted_source":          string(evaluation.Observation.Admission.Source),
+			"admitted_expires_at":      evaluation.Observation.Admission.ExpiresAt,
+			"candidate_outcome":        sessionLifecycleStartSelectionOutcomeTraceValue(evaluation.Comparison.Plan.Outcome),
+			"candidate_reason":         string(evaluation.Comparison.Plan.Reason),
+			"legacy_selected":          evaluation.Comparison.LegacySelected,
+			"comparison_outcome":       string(evaluation.Comparison.Outcome),
+			"comparison_reason":        string(evaluation.Comparison.Reason),
+			"queue_latency_ns":         evaluation.QueueLatency.Nanoseconds(),
+			"planning_latency_ns":      evaluation.PlanningLatency.Nanoseconds(),
+			"observed_to_completed_ns": evaluation.CompletedAt.Sub(evaluation.Observation.Input.ObservedAt).Nanoseconds(),
+			"effect_applied":           false,
+		},
+	)
+	if err := cycle.End(TraceCompletionCompleted, nil); err != nil {
+		fmt.Fprintf(shadowWorkerStderr(cr.stderr), "%s: lifecycle start-selection shadow trace: %v\n", cr.logPrefix, err) //nolint:errcheck // tracing must not affect reconciliation
+	}
+}
+
+func sessionLifecycleStartSelectionOutcomeTraceValue(outcome sessionLifecycleStartSelectionOutcome) string {
+	switch outcome {
+	case sessionLifecycleStartSelectionPrepare:
+		return "prepare"
+	case sessionLifecycleStartSelectionNoop:
+		return "noop"
+	case sessionLifecycleStartSelectionPark:
+		return "park"
+	default:
+		return "unknown"
+	}
+}
+
+func (cr *CityRuntime) sessionLifecycleShadowStartOption(cycle *SessionReconcilerTraceCycle) startExecutionOption {
+	if cr == nil || !cr.lifecycleShadowWorker.acceptingObservations() ||
+		cr.sessionStartOwnershipState() != sessionStartOwnershipLegacy ||
+		cycle == nil || !cycle.hasStartSelectionShadowAdmission() {
+		return nil
+	}
+	admission := func(template string) (sessionLifecycleStartShadowAdmission, bool) {
+		token, ok := cycle.startSelectionShadowAdmission(template)
+		if !ok || (!token.ExpiresAt.IsZero() && token.ExpiresAt.Before(time.Now().UTC())) {
+			return sessionLifecycleStartShadowAdmission{}, false
+		}
+		return token, true
+	}
+	worker := cr.lifecycleShadowWorker
+	return func(opts *startExecutionOptions) {
+		withSessionLifecycleStartSelectionShadowObserver(func(observation sessionLifecycleStartShadowObservation) {
+			if err := worker.EnqueueStart(observation); err != nil {
+				fmt.Fprintf(shadowWorkerStderr(cr.stderr), "%s: lifecycle shadow observation dropped: %v\n", cr.logPrefix, err) //nolint:errcheck // shadow admission must not affect legacy reconciliation
+			}
+		})(opts)
+		withSessionLifecycleStartSelectionShadowAdmission(admission)(opts)
+	}
 }
 
 // run executes the reconciliation loop until ctx is canceled. This is
@@ -507,6 +907,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// one allowed to tear the provider's shared server down.
 	cr.ownedCity.Store(true)
 	defer cr.shutdown()
+	cr.startSessionLifecycleShadowWorker()
 
 	dirty := cr.configDirty
 	if dirty == nil {
@@ -728,6 +1129,17 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		if reapStaleSessionBeads(cr.sessionsBeadStore().Store, cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr) > 0 {
 			sessionBeads = cr.loadSessionBeadSnapshot()
 		}
+		if err := cr.ensureSessionStartController(ctx, sessionBeads); err != nil {
+			fmt.Fprintf(cr.stderr, "%s: session-start controller: %v\n", cr.logPrefix, err) //nolint:errcheck // startup refusal is surfaced before readiness
+			return
+		}
+		if err := cr.installReadyRoutedWorkEventAdmission(); err != nil {
+			fmt.Fprintf(cr.stderr, "%s: ready routed-work admission: %v (using ordinary reconciler pokes)\n", cr.logPrefix, err) //nolint:errcheck // optimization failure retains legacy convergence
+		}
+		if err := cr.ensureNudgeKeyControllerForSelection(ctx); err != nil {
+			fmt.Fprintf(cr.stderr, "%s: keyed nudge controller: %v\n", cr.logPrefix, err) //nolint:errcheck // startup refusal is surfaced before readiness
+			return
+		}
 		result := cr.buildDesiredState(sessionBeads, startupTrace)
 		sessionBeads = cr.loadSessionBeadSnapshot()
 		result = cr.refreshDesiredState(result, sessionBeads)
@@ -769,6 +1181,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
+	cr.startSessionWaitDependencyShadowWithContext(ctx)
 
 	// Mark city as started only after all retry-critical startup work has
 	// completed. Publishing readiness before bead reconciliation or
@@ -793,6 +1206,13 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		// A dependency-close event reserves its exact supported target before
+		// publishing the generic poke. Transfer every queued reservation to the
+		// keyed controller before the legacy tick can inspect the same rows.
+		if trigger == "patrol" {
+			cr.redriveSessionWaitDependencyReservations(ctx)
+		}
+		cr.drainSessionWaitDependencyStartHints(ctx)
 		// Record the tick reason for any bd subprocess spawned during
 		// this tick — TraceBDCall reads it to attribute calls to
 		// patrol vs poke. Single-tenant best-effort: restore the
@@ -804,6 +1224,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		}, trigger)
 	}
 	if dirty.Load() {
+		cr.requireLiveSessionSnapshot()
 		runTick("startup-poke")
 		if ctx.Err() != nil {
 			return
@@ -850,42 +1271,33 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		<-acceptDone
 		cr.failActiveReload("Reload canceled because the controller is shutting down.")
 	}()
-	// Debounce event-driven ticks so a burst of pokes / control-dispatcher
-	// signals collapses into a single fire. Each channel gets its own
-	// debouncer so trace-tag identity ("poke" vs "control-dispatcher") is
-	// preserved when the deferred tick eventually runs. With debounce=0
-	// (the default), arm() falls back to non-blocking send and the loop
-	// behaves identically to the pre-debounce implementation.
-	pokeDB := newTickDebouncer()
-	ctrlDB := newTickDebouncer()
-	defer pokeDB.cancelPending()
-	defer ctrlDB.cancelPending()
-
 	for {
-		// Re-read on every iteration so a hot reload of city.toml takes
-		// effect on the next event without disturbing in-flight timers.
-		debounce := cr.cfg.Daemon.TickDebounceDuration()
 		select {
 		case <-ticker.C:
-			// Patrol scans every reconciler state authoritatively, so any
-			// pending event-driven fires are redundant — drop them.
-			pokeDB.cancelPending()
-			ctrlDB.cancelPending()
 			runTick("patrol")
 		case <-cr.pokeCh:
-			// Event-driven wake path: sling or API assigned work to a sleeping
-			// session. Arm the debouncer; the deferred fire runs runTick("poke")
-			// once the burst settles.
-			pokeDB.arm(debounce)
-		case <-pokeDB.fired():
+			// pokeCh is a cap-1 channel written with a non-blocking send, so a
+			// burst of event-driven wakes already collapses into the single
+			// tick this branch runs. The serialized full tick remains the sole
+			// legacy mutation/effect owner. The priority-poke flags record that
+			// certified readiness is waiting on a tick; the tick that services
+			// the poke consumes them so they never latch true.
+			cr.sessionWaitDependencyReadyPokePending.Store(false)
+			cr.requireLiveSessionSnapshot()
 			runTick("poke")
 		case <-cr.nudgeWakeCh:
 			cr.safeTick(func() {
 				cr.nudgeDispatchTick(ctx)
 			}, "nudge-wake")
+		case hint := <-cr.routedWorkPoolAllocationCh:
+			cr.safeTick(func() {
+				cr.handleRoutedWorkPoolAllocation(ctx, hint)
+			}, "pool-allocation")
+		case hint := <-cr.sessionWaitDependencyStartCh:
+			cr.safeTick(func() {
+				cr.handleSessionWaitDependencyStart(ctx, hint)
+			}, "wait-dependency")
 		case <-cr.controlDispatcherCh:
-			ctrlDB.arm(debounce)
-		case <-ctrlDB.fired():
 			cr.safeTick(func() {
 				cr.controlDispatcherTick(ctx)
 			}, "control-dispatcher")
@@ -965,78 +1377,6 @@ func (cr *CityRuntime) startupReadinessWatchdog(ctx context.Context, ready <-cha
 	fmt.Fprintf(cr.stderr, //nolint:errcheck // best-effort stderr
 		"%s: startup watchdog: city %q not ready after %s (half of [daemon].start_ready_timeout=%s); goroutine dump follows:\n%s\n",
 		cr.logPrefix, cr.cityName, delay, total, buf[:n])
-}
-
-// tickDebouncer coalesces bursty event-driven tick signals into a
-// single delayed fire. The first arm() call in a quiet period schedules
-// a timer; subsequent arm() calls while the timer is pending are
-// dropped (the eventual single fire re-reads authoritative state
-// covering all collapsed events). When delay <= 0 it falls back to
-// non-blocking send on fired(), preserving the cap=1 channel-level
-// coalesce semantics the runtime had before debouncing was added.
-//
-// Methods are safe to call from multiple goroutines (time.AfterFunc
-// callbacks run on their own goroutine).
-type tickDebouncer struct {
-	mu     sync.Mutex
-	timer  *time.Timer
-	fireCh chan struct{}
-}
-
-// newTickDebouncer allocates a tickDebouncer with a cap=1 fire channel.
-// The channel buffer matches the existing pokeCh/controlDispatcherCh
-// non-blocking-send pattern so a pending fire collapses with any new
-// arm() call that completes before the receiver drains.
-func newTickDebouncer() *tickDebouncer {
-	return &tickDebouncer{fireCh: make(chan struct{}, 1)}
-}
-
-// arm schedules a fire after delay if no fire is already pending. If
-// delay <= 0 the fire is enqueued immediately (non-blocking) to keep
-// debounce-disabled runtime cost identical to the prior implementation.
-func (d *tickDebouncer) arm(delay time.Duration) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if delay <= 0 {
-		select {
-		case d.fireCh <- struct{}{}:
-		default:
-		}
-		return
-	}
-	if d.timer != nil {
-		return // already pending — burst collapse
-	}
-	d.timer = time.AfterFunc(delay, func() {
-		d.mu.Lock()
-		d.timer = nil
-		d.mu.Unlock()
-		select {
-		case d.fireCh <- struct{}{}:
-		default:
-		}
-	})
-}
-
-// cancelPending stops an armed timer and discards a queued fire, if
-// any. Used when a higher-priority tick (e.g. the periodic patrol)
-// supersedes whatever caused the pending fire.
-func (d *tickDebouncer) cancelPending() {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.timer != nil {
-		d.timer.Stop()
-		d.timer = nil
-	}
-	select {
-	case <-d.fireCh:
-	default:
-	}
-}
-
-// fired returns the channel that emits when a debounced fire is due.
-func (d *tickDebouncer) fired() <-chan struct{} {
-	return d.fireCh
 }
 
 // convScope returns the convergence scope for the given rig name under a read
@@ -1342,6 +1682,7 @@ func (cr *CityRuntime) tick(
 			clock.Real{},
 			cr.rec,
 			cr.stderr,
+			cr.sessionStartLegacyExclusionPredicate(),
 		)
 	}
 	recordPhase(TraceSiteControllerTickPhase, "finalize_drain_ack_stop_pending", phaseStart, map[string]any{
@@ -1958,8 +2299,14 @@ func (cr *CityRuntime) reloadConfigTraced(
 	if configName == "" {
 		configName = cr.cityName
 	}
-	result, err := tryReloadConfig(cr.tomlPath, configName, cityRoot)
+	result, err := cr.loadConfigSnapshot(ctx, configName, cityRoot)
 	if err != nil {
+		if errors.Is(err, errConfigMutationInProgress) {
+			// Preserve the level-triggered retry without immediately poking: the
+			// mutation completion pokes on success, while an immediate retry would
+			// only hit the same held barrier and hot-loop full reconciliation ticks.
+			cr.markConfigReloadDirty()
+		}
 		if result != nil {
 			for _, warning := range result.Warnings {
 				appendWarning(warning)
@@ -1983,6 +2330,42 @@ func (cr *CityRuntime) reloadConfigTraced(
 	for _, warning := range result.Warnings {
 		appendWarning(warning)
 	}
+	if err := cr.nudgeShadowSelection.Validate(result.Cfg, nudgeshadow.Requirements{
+		CityPath:       cr.cityPath,
+		TraceRecording: cr.nudgeShadowSelection.Required() && cr.trace != nil && cr.trace.Enabled(),
+	}); err != nil {
+		err = fmt.Errorf("nudge shadow reload preflight: %w", err)
+		fmt.Fprintf(cr.stderr, "%s: config reload: %v (keeping old config)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+		telemetry.RecordConfigReload(ctx, result.Revision, string(source), string(reloadOutcomeFailed), len(warnings), err)
+		if trace != nil {
+			trace.RecordConfigReload(cr.configRev, result.Revision, TraceOutcomeFailed, source, nil, nil, false, warnings, err)
+		}
+		return reloadControlReply{
+			Outcome:  reloadOutcomeFailed,
+			Error:    err.Error(),
+			Revision: result.Revision,
+			Warnings: warnings,
+		}
+	}
+	oldRevision := cr.configRev
+	rejectSuperseded := func(phase string) reloadControlReply {
+		cr.requestConfigReloadRetry()
+		err := fmt.Errorf(
+			"config reload revision %s was superseded %s; retry scheduled",
+			shortRev(result.Revision), phase,
+		)
+		fmt.Fprintf(cr.stderr, "%s: %v (keeping current runtime config)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+		telemetry.RecordConfigReload(ctx, result.Revision, string(source), string(reloadOutcomeFailed), len(warnings), err)
+		if trace != nil {
+			trace.RecordConfigReload(oldRevision, result.Revision, TraceOutcomeFailed, source, nil, nil, false, warnings, err)
+		}
+		return reloadControlReply{
+			Outcome:  reloadOutcomeFailed,
+			Error:    err.Error(),
+			Revision: result.Revision,
+			Warnings: warnings,
+		}
+	}
 	if cr.configRev != "" && result.Revision == cr.configRev {
 		ordersChanged, orderSummary, orderErr := cr.rescanOrderDispatcher(ctx, cityRoot, result.Cfg, "gc reload: order scan", time.Now())
 		if orderErr != nil {
@@ -1999,8 +2382,13 @@ func (cr *CityRuntime) reloadConfigTraced(
 				Warnings: warnings,
 			}
 		}
+		if cr.cs != nil && !cr.cs.runtimeUpdateWouldBeAccepted(result.Cfg, result.Revision) {
+			return rejectSuperseded("during same-revision preparation")
+		}
 		if cr.cs != nil && cr.cs.storeMetadataChanged(result.Cfg) {
-			cr.cs.update(result.Cfg, cr.sp)
+			if !cr.publishRuntimeConfig(result.Cfg, cr.sp, cr.dops, result.Revision) {
+				return rejectSuperseded("during same-revision metadata publication")
+			}
 			message := fmt.Sprintf("Config reloaded: bead store metadata changed (rev %s)", shortRev(result.Revision))
 			if ordersChanged {
 				message = fmt.Sprintf("Config reloaded: bead store metadata changed; orders reloaded: %s (rev %s)", orderSummary, shortRev(result.Revision))
@@ -2045,7 +2433,6 @@ func (cr *CityRuntime) reloadConfigTraced(
 
 	oldAgentCount := len(cr.cfg.Agents)
 	oldRigCount := len(cr.cfg.Rigs)
-	oldRevision := cr.configRev
 	nextCfg := result.Cfg
 	applyRuntimeCityIdentity(nextCfg, cr.cityName)
 
@@ -2072,6 +2459,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 	nextSp := cr.sp
 	nextDops := cr.dops
 	providerChanged := false
+	providerSwapSummary := ""
 
 	// Detect session provider change. A pack-declared runtime binds its
 	// command into the provider at construction time, so a changed (or
@@ -2150,13 +2538,20 @@ func (cr *CityRuntime) reloadConfigTraced(
 	pruneLegacyConfiguredScripts(cityRoot, nextCfg, func(scope string, err error) {
 		appendWarning(fmt.Sprintf("config reload: pruning legacy %s scripts: %v", scope, err))
 	})
+	if providerChanged && cr.cs != nil && !cr.cs.runtimeUpdateWouldBeAccepted(nextCfg, result.Revision) {
+		return rejectSuperseded("before provider effects")
+	}
 
 	if providerChanged {
-		running, lErr := cr.sp.ListRunning("")
-		if lErr != nil {
-			err := fmt.Errorf("config reload: listing sessions failed during provider swap: %w", lErr)
-			if runtime.IsPartialListError(lErr) {
-				err = fmt.Errorf("config reload: listing sessions partially failed during provider swap: %w", lErr)
+		// The keyed child owns provider Start calls independently of the fleet
+		// tick. Stop its admissions and workers before observing the old provider.
+		// An in-flight drain-ack stop keeps the old provider generation live, so
+		// defer that swap and restore the keyed child instead of waiting here.
+		cr.stopSessionStartController()
+		if hasInFlightDrainAckStops(&cr.asyncStops) {
+			err := errors.New("config reload: provider swap deferred while a drain-ack stop is in progress")
+			if restartErr := cr.restartSessionStartController(ctx); restartErr != nil {
+				err = errors.Join(err, fmt.Errorf("restoring session-start controller after deferred provider swap: %w", restartErr))
 			}
 			fmt.Fprintf(cr.stderr, "%s: %v (keeping old config)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 			telemetry.RecordConfigReload(ctx, "", string(source), string(reloadOutcomeFailed), len(warnings), err)
@@ -2169,7 +2564,27 @@ func (cr *CityRuntime) reloadConfigTraced(
 				Warnings: warnings,
 			}
 		}
-		providerSwapSummary := fmt.Sprintf("%s → %s", displayProviderName(*lastProviderName), displayProviderName(pendingProviderName))
+		running, lErr := cr.sp.ListRunning("")
+		if lErr != nil {
+			err := fmt.Errorf("config reload: listing sessions failed during provider swap: %w", lErr)
+			if runtime.IsPartialListError(lErr) {
+				err = fmt.Errorf("config reload: listing sessions partially failed during provider swap: %w", lErr)
+			}
+			if restartErr := cr.restartSessionStartController(ctx); restartErr != nil {
+				err = errors.Join(err, fmt.Errorf("restoring session-start controller after aborted provider swap: %w", restartErr))
+			}
+			fmt.Fprintf(cr.stderr, "%s: %v (keeping old config)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+			telemetry.RecordConfigReload(ctx, "", string(source), string(reloadOutcomeFailed), len(warnings), err)
+			if trace != nil {
+				trace.RecordConfigReload(oldRevision, result.Revision, TraceOutcomeFailed, source, nil, nil, false, warnings, err)
+			}
+			return reloadControlReply{
+				Outcome:  reloadOutcomeFailed,
+				Error:    err.Error(),
+				Warnings: warnings,
+			}
+		}
+		providerSwapSummary = fmt.Sprintf("%s → %s", displayProviderName(*lastProviderName), displayProviderName(pendingProviderName))
 		if pendingProviderName == *lastProviderName {
 			providerSwapSummary = fmt.Sprintf("%s runtime declaration changed", displayProviderName(pendingProviderName))
 		}
@@ -2178,13 +2593,27 @@ func (cr *CityRuntime) reloadConfigTraced(
 				providerSwapSummary, len(running))
 			gracefulStopAll(running, cr.sp, nextCfg.Daemon.ShutdownTimeoutDuration(), cr.rec, cr.cfg, cr.sessionsBeadStore(), cr.stdout, cr.stderr)
 		}
-		cr.rec.Record(events.Event{
-			Type:    events.ProviderSwapped,
-			Actor:   "gc",
-			Message: providerSwapSummary,
-		})
-		fmt.Fprintf(cr.stdout, "Session provider swapped to %s.\n", displayProviderName(pendingProviderName)) //nolint:errcheck
-		*lastProviderName = pendingProviderName
+	}
+
+	// Join in-flight order writes before controller-state publication can swap
+	// their backing stores. If the candidate is rejected, the existing
+	// dispatcher remains active and must not also enter the retired list.
+	outgoingOD := cr.od
+	outgoingODDrained := true
+	if outgoingOD != nil {
+		drainCtx, drainCancel := context.WithTimeout(ctx, reloadOrderDrainTimeout)
+		outgoingODDrained = outgoingOD.drain(drainCtx)
+		drainCancel()
+	}
+	nextOD, orderSnapshot := buildOrderDispatcherWithSnapshot(cr.storageRoutes, cityRoot, nextCfg, cr.rec, cr.stderr, "gc reload: order scan")
+	orderSummary := orderSetChangeSummary(cr.orderSet, orderSnapshot.Orders)
+	if !cr.publishRuntimeConfig(nextCfg, nextSp, nextDops, result.Revision) {
+		if providerChanged {
+			if restartErr := cr.restartSessionStartController(ctx); restartErr != nil {
+				appendWarning(fmt.Sprintf("restoring session-start controller after superseded provider reload: %v", restartErr))
+			}
+		}
+		return rejectSuperseded("during runtime publication")
 	}
 
 	cr.poolSessions = computePoolSessions(nextCfg, cr.cityName, cr.cityPath, nextSp)
@@ -2220,23 +2649,9 @@ func (cr *CityRuntime) reloadConfigTraced(
 
 	cr.wg = newWispGCForConfig(nextCfg)
 
-	// Drain the outgoing dispatcher before replacing it so in-flight
-	// dispatchOne goroutines persist their tracking-bead outcomes against
-	// the store they were scheduled against. Reload runs on the same
-	// goroutine as tick, so no concurrent dispatch can create a new
-	// in-flight signal on this dispatcher while drain observes it. The
-	// reload budget is capped at reloadOrderDrainTimeout so a wedged exec
-	// order cannot stall the tick loop; timed-out dispatchers are retained
-	// and drained again during shutdown.
-	// Deriving from ctx (the tick ctx) lets a shutdown racing with reload
-	// short-circuit the drain instead of waiting the full 1s.
-	if cr.od != nil {
-		drainCtx, drainCancel := context.WithTimeout(ctx, reloadOrderDrainTimeout)
-		cr.drainOutgoingOrderDispatcher(drainCtx, cr.od)
-		drainCancel()
+	if outgoingOD != nil && !outgoingODDrained {
+		cr.retiredOrderDispatchers = append(cr.retiredOrderDispatchers, outgoingOD)
 	}
-	nextOD, orderSnapshot := buildOrderDispatcherWithSnapshot(cr.storageRoutes, cityRoot, nextCfg, cr.rec, cr.stderr, "gc reload: order scan")
-	orderSummary := orderSetChangeSummary(cr.orderSet, orderSnapshot.Orders)
 	cr.replaceOrderDispatcher(nextOD)
 	cr.orderSet = orderSnapshot.Orders
 	cr.orderSetSignature = orderSnapshot.Signature
@@ -2244,16 +2659,20 @@ func (cr *CityRuntime) reloadConfigTraced(
 	if orderSummary != "unchanged" {
 		fmt.Fprintf(cr.stderr, "%s: orders reloaded: %s\n", cr.logPrefix, orderSummary) //nolint:errcheck // best-effort stderr
 	}
-
-	cr.serviceStateMu.Lock()
-	cr.cfg = nextCfg
-	cr.sp = nextSp
-	cr.dops = nextDops
-	cr.serviceStateMu.Unlock()
-	cr.demandSnapshot = nil
-
-	if cr.cs != nil {
-		cr.cs.updateFromRuntime(nextCfg, nextSp, result.Revision)
+	if providerChanged {
+		cr.rec.Record(events.Event{
+			Type:    events.ProviderSwapped,
+			Actor:   "gc",
+			Message: providerSwapSummary,
+		})
+		fmt.Fprintf(cr.stdout, "Session provider swapped to %s.\n", displayProviderName(pendingProviderName)) //nolint:errcheck
+		*lastProviderName = pendingProviderName
+		if err := cr.restartSessionStartController(ctx); err != nil {
+			// The provider/config swap is already committed and cannot be rolled
+			// back without resurrecting stopped old-provider sessions. Require mode
+			// remains fail-closed; auto's activation helper degrades loudly itself.
+			appendWarning(fmt.Sprintf("session-start controller restart after provider swap: %v; keyed starts remain blocked", err))
+		}
 	}
 	if cr.svc != nil {
 		if err := cr.svc.Reload(); err != nil {
@@ -2329,6 +2748,44 @@ func (cr *CityRuntime) reloadConfigTraced(
 		Revision: result.Revision,
 		Warnings: warnings,
 	}
+}
+
+// loadConfigSnapshot reads one candidate config generation. A pack mutation
+// owns its multi-file write and controller refresh before this helper may read
+// it; the runtime deliberately releases that barrier before provider, session,
+// and order effects begin.
+func (cr *CityRuntime) loadConfigSnapshot(ctx context.Context, configName, cityRoot string) (*reloadResult, error) {
+	var result *reloadResult
+	load := func() error {
+		var err error
+		result, err = tryReloadConfig(cr.tomlPath, configName, cityRoot)
+		return err
+	}
+	if cr.cs != nil {
+		if err := cr.cs.withConfigSnapshotIfIdle(ctx, load); err != nil {
+			return result, err
+		}
+		return result, nil
+	}
+	if err := load(); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+// hasInFlightDrainAckStops reports whether a keyed drain-ack stop still owns
+// provider work. It does not mutate the tracker, so a deferred provider reload
+// leaves the existing async-stop path available to finish normally.
+func hasInFlightDrainAckStops(tracker *asyncStartTracker) bool {
+	if tracker == nil {
+		return false
+	}
+	active := false
+	tracker.drainAckStopKeys.Range(func(_, _ any) bool {
+		active = true
+		return false
+	})
+	return active
 }
 
 func (cr *CityRuntime) applySoftReloadAcceptance(
@@ -2436,6 +2893,8 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		recordPhase(TraceSiteSessionSnapshot, "bead_reconcile.load_session_snapshot", phaseStart, traceSessionSnapshotFields(sessionBeads))
 		result.SessionQueryPartial = result.SessionQueryPartial || sessionQueryPartial
 	}
+	cr.seedActiveSessionStartController(sessionBeads)
+	cr.submitSessionWaitDependencyStartupCensus()
 	// Emit any due compute usage facts by reusing the open-session snapshot this
 	// tick already loaded, rather than issuing a second redundant store scan. The
 	// boot pass covers the whole fleet at once on the readiness path, so it takes
@@ -2566,7 +3025,12 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	phaseStart = time.Now()
 	cfgNames := configuredSessionNamesWithSnapshot(cr.cfg, cityName, sessionBeads)
 
-	readyWaitSet, err := prepareWaitWakeStateWithSnapshot(sessionpkg.NewStore(sessStore), newWaitDependencyStoreSet(store, rigStores, cr.graphBeadStore()), cr.nudgesBeadStore(), time.Now(), sessionBeads)
+	keyedWaitOwned := cr.keyedWaitAdvanceExcluded
+	readyWaitSet, err := func() (map[string]bool, error) {
+		releaseWaitDependencyVisibility := cr.cs.acquireSessionWaitDependencyLegacyVisibility()
+		defer releaseWaitDependencyVisibility()
+		return prepareWaitWakeStateWithSnapshot(sessionpkg.NewStore(sessStore), newWaitDependencyStoreSet(store, rigStores, cr.graphBeadStore()), cr.nudgesBeadStore(), time.Now(), sessionBeads, keyedWaitOwned)
+	}()
 	if err != nil {
 		fmt.Fprintf(cr.stderr, "%s: preparing waits: %v\n", cr.logPrefix, err) //nolint:errcheck
 		readyWaitSet = nil
@@ -2611,12 +3075,66 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		// unclaimed-trigger gate.
 		withWarmClaimProbe(buildWarmClaimTriggerProbe(store, rigStores)),
 	}
+	if shadowOption := cr.sessionLifecycleShadowStartOption(trace); shadowOption != nil {
+		reconcileStartOptions = append(reconcileStartOptions, shadowOption)
+	}
+	if keyedOption := cr.sessionStartLegacyExclusionOption(); keyedOption != nil {
+		reconcileStartOptions = append(reconcileStartOptions, keyedOption)
+	}
 	if bootReconcile {
 		// #3288: skip the per-session orphan/failed-create session-bead closes on
 		// the boot tick so readiness does not wait on their wisp-tier work-probe
 		// fan-out; the first steady-state tick performs them.
 		reconcileStartOptions = append(reconcileStartOptions, withDeferSessionClosesOnBoot())
 	}
+	// Detector sweep, beside legacy (WD.1). Detection itself is read-only and
+	// reuses this tick's already-loaded inputs; the routing seam then hands the
+	// ACTING families' exact keys to the session-start controller (WD.2:
+	// D-DEADLINE; WD.3: D-ORPHAN's close arms; WD.4: its live-orphan drain
+	// arm). Admit is nil in a legacy-owned city, which keeps the whole sweep
+	// read-only there. The desired view is published first so the keyed close
+	// handler re-derives undesiredness from the same view that raised the
+	// condition.
+	cr.publishDesiredSessionNames(desiredState)
+	// One provider-health file read per tick, shared by the sweep and by every
+	// key it produces (WD.11). Before this the keyed gates each re-read the file
+	// per admission.
+	providerHealth := loadProviderHealthSnapshot(cr.cityPath)
+	cr.publishProviderHealthSnapshot(providerHealth)
+	runDetectorSweep(ctx, trace, detectorSweepInput{
+		CityPath:               cr.cityPath,
+		CityName:               cityName,
+		Cfg:                    cr.cfg,
+		Provider:               cr.sp,
+		Rows:                   sessionBeads.OpenForReconcile(),
+		Snapshot:               sessionBeads,
+		Desired:                desiredState,
+		CfgNames:               cfgNames,
+		PoolDesired:            poolDesired,
+		RoutedWork:             cr.flooredReadyRoutedWorkView().unallocated(),
+		NamedDemand:            result.NamedSessionDemand,
+		NamedRoutedDemand:      result.NamedSessionRoutedDemand,
+		WorkSet:                workSet,
+		ReadyWaitSet:           readyWaitSet,
+		AssignedWorkBeads:      awakeAssignedWorkBeads,
+		ReadyAssignedFlags:     readyAssignedFlagsForBeads(result.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs),
+		ProviderHealth:         providerHealth,
+		Drains:                 cr.sessionDrains,
+		Idle:                   cr.it,
+		MaxAge:                 cr.mat,
+		SuspendDeferrals:       cr.detectorSuspendDeferrals(),
+		IdleProbes:             cr.detectorIdleProbes(),
+		Clock:                  clock.Real{},
+		StartupTimeout:         cr.cfg.Session.StartupTimeoutDuration(),
+		StoreQueryPartial:      result.snapshotQueryPartial(),
+		DeferSessionCloses:     bootReconcile,
+		Trigger:                detectorSweepTriggerFor(bootReconcile),
+		Admit:                  cr.detectorAdmitFunc(),
+		PublishLiveness:        cr.publishSessionLiveness,
+		PublishWakeEvaluations: cr.publishSessionWakeEvaluations,
+		AdmitWake:              cr.detectorWakeAdmitFunc(),
+		EnqueuePoolAllocation:  cr.detectorPoolAllocationEnqueueFunc(),
+	})
 	reconcileSessionBeadsTracedWithNamedDemand(
 		ctx, cr.cityPath, sessionBeads.OpenForReconcile(), sessionBeads, desiredState, cfgNames, cr.cfg, cr.sp, sessStore,
 		cr.dops,
@@ -3159,6 +3677,10 @@ func sweepUndesiredPoolSessionBeads(
 		if agentCfg == nil || !isEphemeralSessionInfo(info) {
 			continue
 		}
+		// WD.10a sweep rule: never reap a wake-current canonical singleton.
+		if wakeCurrentSingletonPreservesUndesiredRow(info, cfg, time.Now().UTC()) {
+			continue
+		}
 		processNames := config.AgentProcessNames(cfg, *agentCfg, exec.LookPath)
 		if running, err := poolSessionBeadRuntimeRunningInfo(info, sp, processNames); err == nil && running {
 			continue
@@ -3272,11 +3794,57 @@ func (cr *CityRuntime) nudgeDispatchTick(_ context.Context) {
 	if store.Store == nil {
 		return
 	}
+	if !cr.nudgeKeyControllerActive() {
+		sessionBeads := cr.loadSessionBeadSnapshot()
+		if sessionBeads == nil {
+			return
+		}
+		observer := cr.nudgeDueTargetSelectionObserver()
+		var err error
+		if observer == nil {
+			_, err = dispatchAllQueuedNudges(cr.cityPath, cr.cfg, store.Store, cr.sessionsBeadStore().Store, cr.sp, sessionBeads, cr.stderr)
+		} else {
+			_, err = dispatchAllQueuedNudgesObserved(cr.cityPath, cr.cfg, store.Store, cr.sessionsBeadStore().Store, cr.sp, sessionBeads, observer, cr.stderr)
+		}
+		if err != nil {
+			fmt.Fprintf(cr.stderr, "%s: nudge dispatcher: %v\n", cr.logPrefix, err) //nolint:errcheck
+		}
+		return
+	}
+	// The keyed path loads the queue itself and then dispatches the legacy tail
+	// from that snapshot, so it never reaches the sweep dispatchAllQueuedNudges
+	// runs before its own load. Sweep here instead, before admission, so an
+	// orphaned item expires on this path too (ra-oudpha finding-3).
+	if err := runNudgeQueueMaintenanceSweep(cr.cityPath, time.Now()); err != nil {
+		fmt.Fprintf(cr.stderr, "%s: nudge queue maintenance sweep: %v\n", cr.logPrefix, err) //nolint:errcheck
+	}
+	excluded, legacyNeeded, state, admissionErr := cr.admitDueExactNudges(time.Now())
+	if admissionErr != nil {
+		cr.requestNudgeKeyAudit()
+		cr.nudgeKeyMu.Lock()
+		mode := cr.nudgeKeyMode
+		cr.nudgeKeyMu.Unlock()
+		if mode != rollout.Auto {
+			fmt.Fprintf(cr.stderr, "%s: keyed nudge queue load failed in require mode; leaving queue pending\n", cr.logPrefix) //nolint:errcheck
+			return
+		}
+		sessionBeads := cr.loadSessionBeadSnapshot()
+		if sessionBeads == nil {
+			return
+		}
+		if _, err := dispatchAllQueuedNudges(cr.cityPath, cr.cfg, store.Store, cr.sessionsBeadStore().Store, cr.sp, sessionBeads, cr.stderr); err != nil {
+			fmt.Fprintf(cr.stderr, "%s: nudge dispatcher fallback: %v\n", cr.logPrefix, err) //nolint:errcheck
+		}
+		return
+	}
+	if !legacyNeeded {
+		return
+	}
 	sessionBeads := cr.loadSessionBeadSnapshot()
 	if sessionBeads == nil {
 		return
 	}
-	if _, err := dispatchAllQueuedNudges(cr.cityPath, cr.cfg, store.Store, cr.sessionsBeadStore().Store, cr.sp, sessionBeads, cr.stderr); err != nil {
+	if _, err := dispatchAllQueuedNudgesFromState(cr.cityPath, cr.cfg, store.Store, cr.sessionsBeadStore().Store, cr.sp, sessionBeads, excluded, state, cr.stderr); err != nil {
 		fmt.Fprintf(cr.stderr, "%s: nudge dispatcher: %v\n", cr.logPrefix, err) //nolint:errcheck
 	}
 }
@@ -3356,6 +3924,32 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		poolDesired = make(map[string]int)
 	}
 	mergeNamedSessionDemand(poolDesired, wfcResult.NamedSessionDemand, filteredCfg)
+	// Detector sweep beside legacy on the control-dispatcher entry point, over
+	// the same narrowed inputs this tick already computed (WD.1). The
+	// control-dispatcher tick has no trace cycle of its own, so the sweep runs
+	// for its guards and cost profile and records nothing here.
+	runDetectorSweep(ctx, nil, detectorSweepInput{
+		CityPath:          cr.cityPath,
+		CityName:          cr.cityName,
+		Cfg:               filteredCfg,
+		Provider:          cr.sp,
+		Rows:              filteredRows,
+		Snapshot:          filteredSnap,
+		Desired:           desiredState,
+		CfgNames:          reconcileNames,
+		PoolDesired:       poolDesired,
+		NamedDemand:       wfcResult.NamedSessionDemand,
+		NamedRoutedDemand: wfcResult.NamedSessionRoutedDemand,
+		ProviderHealth:    loadProviderHealthSnapshot(cr.cityPath),
+		Drains:            cr.sessionDrains,
+		Idle:              cr.it,
+		Clock:             clock.Real{},
+		StartupTimeout:    cr.cfg.Session.StartupTimeoutDuration(),
+		// The config-change path does not query work beads, so its view is
+		// never partial for the reasons the guard exists.
+		StoreQueryPartial: false,
+		Trigger:           "control-dispatcher",
+	})
 	reconcileSessionBeadsAtPathWithNamedDemand(
 		ctx,
 		cr.cityPath,
@@ -3484,17 +4078,80 @@ func (cr *CityRuntime) loadSessionBeadSnapshot() *sessionBeadSnapshot {
 	return sessionBeads
 }
 
+// requireLiveSessionSnapshot marks the next session-bead snapshot as a live
+// read. Callers use it when the work they are about to do was triggered by
+// another process's write, which the bead cache does not learn about until its
+// own reconcile cycle (up to a full cadence later, and never at all on a city
+// whose patrol interval outlives the wait).
+func (cr *CityRuntime) requireLiveSessionSnapshot() {
+	cr.sessionSnapshotLivePending.Store(true)
+}
+
+// takeLiveSessionSnapshot consumes the live-read request. It is a one-shot: a
+// live list absorbs its rows back into the cache, so the later loads in the
+// same tick see the same fresh set without paying another store round-trip.
+func (cr *CityRuntime) takeLiveSessionSnapshot() bool {
+	return cr.sessionSnapshotLivePending.Swap(false)
+}
+
 func (cr *CityRuntime) loadSessionBeadSnapshotWithPartial() (*sessionBeadSnapshot, bool) {
+	var (
+		membership      *poolMembershipIndex
+		membershipToken uint64
+		membershipCfg   *config.City
+	)
+	if cr.poolMembershipShadow != nil && cr.sessionStartOwnershipState() == sessionStartOwnershipKeyed {
+		membershipSnapshot, release, err := cr.cs.acquireSessionStartSnapshot()
+		if err != nil {
+			cr.poolMembershipShadow.invalidate(poolMembershipUncertifiedSnapshotGap)
+		} else {
+			cr.serviceStateMu.RLock()
+			configCurrent := cr.cfg == membershipSnapshot.Config
+			cr.serviceStateMu.RUnlock()
+			if !configCurrent {
+				release()
+				cr.poolMembershipShadow.invalidate(poolMembershipUncertifiedConfigChanged)
+			} else {
+				defer release()
+				membership = cr.poolMembershipShadow
+				membershipToken = membership.rebuildToken()
+				membershipCfg = membershipSnapshot.Config
+			}
+		}
+	}
 	// The session-bead snapshot is a sessions-class read, so route it through the
 	// sessions accessor (identity to the city store today).
 	store := cr.sessionsBeadStore()
 	if store.Store == nil {
+		if membership != nil {
+			membership.invalidate(poolMembershipUncertifiedSnapshotGap)
+		}
 		return nil, false
 	}
-	sessionBeads, err := loadSessionBeadSnapshot(store.Store)
+	sessionBeads, err := loadSessionBeadSnapshotLive(store.Store, cr.takeLiveSessionSnapshot())
 	if err != nil {
+		if membership != nil {
+			membership.invalidate(poolMembershipUncertifiedSnapshotGap)
+		}
 		fmt.Fprintf(cr.stderr, "%s: loading session beads: %v\n", cr.logPrefix, err) //nolint:errcheck
 		return nil, true
+	}
+	if membership != nil {
+		candidate, buildErr := buildPoolMembershipState(membershipCfg, sessionBeads.OpenInfos())
+		if buildErr != nil {
+			membership.invalidate(poolMembershipUncertifiedInvalidSnapshot)
+			fmt.Fprintf(shadowWorkerStderr(cr.stderr), "%s: pool membership shadow rebuild: %v\n", cr.logPrefix, buildErr) //nolint:errcheck // shadow failure must not affect reconciliation
+		} else {
+			cr.serviceStateMu.RLock()
+			configCurrent := cr.cfg == membershipCfg
+			if configCurrent {
+				membership.publishRebuild(membershipToken, candidate)
+			}
+			cr.serviceStateMu.RUnlock()
+			if !configCurrent {
+				membership.invalidate(poolMembershipUncertifiedConfigChanged)
+			}
+		}
 	}
 	return sessionBeads, false
 }
@@ -3577,18 +4234,20 @@ func (cr *CityRuntime) loadDemandSnapshot(
 	configChanged bool,
 ) runtimeDemandSnapshot {
 	sessionFingerprint := sessionBeadSnapshotFingerprint(sessionBeads)
-	readyDemandFingerprint := ""
 	refresh := cr.shouldRefreshDemandSnapshot(trigger, configChanged, sessionFingerprint)
-	if !refresh && trigger == "patrol" && cr.demandSnapshotsEnabled() {
-		readyDemandFingerprint = cr.readyDemandSnapshotFingerprint()
-		refresh = cr.demandSnapshot.readyDemandFingerprint != readyDemandFingerprint
+	if trigger == "patrol" && cr.demandSnapshotsEnabled() {
+		// The declared routed-work view IS the invalidation signal: one bounded
+		// read per store per patrol (floored), shared with the detector sweep,
+		// and a moved view means routed demand moved.
+		cr.flooredReadyRoutedWorkView()
+		if cr.takeReadyRoutedWorkViewChanged() {
+			refresh = true
+		}
 	}
 	if refresh {
-		if trigger == "patrol" && cr.demandSnapshotsEnabled() && readyDemandFingerprint == "" {
-			readyDemandFingerprint = cr.readyDemandSnapshotFingerprint()
-		} else if cr.demandSnapshot != nil {
-			readyDemandFingerprint = cr.demandSnapshot.readyDemandFingerprint
-		}
+		// A rebuild for any cause absorbs a pending view edge: leaving it set
+		// would refresh again next tick for a change this build already saw.
+		cr.takeReadyRoutedWorkViewChanged()
 		result := cr.buildDesiredState(sessionBeads, trace)
 		var openSessionInfos []sessionpkg.Info
 		if sessionBeads != nil {
@@ -3608,10 +4267,9 @@ func (cr *CityRuntime) loadDemandSnapshot(
 		mergeNamedSessionDemand(result.PoolDesiredCounts, result.NamedSessionDemand, cr.cfg)
 		result.WorkSet = make(map[string]bool)
 		cr.demandSnapshot = &runtimeDemandSnapshot{
-			createdAt:              time.Now(),
-			sessionFingerprint:     sessionFingerprint,
-			readyDemandFingerprint: readyDemandFingerprint,
-			result:                 result,
+			createdAt:          time.Now(),
+			sessionFingerprint: sessionFingerprint,
+			result:             result,
 		}
 	}
 	if cr.demandSnapshot == nil {
@@ -3669,118 +4327,6 @@ func (cr *CityRuntime) demandSnapshotPatrolMaxAge() time.Duration {
 	// bites sub-second patrol_intervals, where it stops the probe subprocess
 	// from running on every tick.
 	return scaleCheckDemandMinInterval
-}
-
-// readyDemandSnapshotFingerprint hashes the ready sets of every store the
-// demand probe reads, so a write anywhere in that set invalidates the cached
-// demand snapshot instead of letting it be reused for up to its max age.
-//
-// "Every store the probe reads" is the load-bearing part, and it is now answered
-// by the resolver: the legs are Plan(RoutedWork) narrowed to the RUNTIME plane —
-// the identical leg set the routed-demand read itself consumes
-// (routedWorkStoreCandidates). A fingerprint over a WIDER set than the read
-// invalidates the cache for changes the read cannot see; a fingerprint over a
-// NARROWER set licenses reuse of a snapshot that is already wrong. The old
-// hand-rolled list was the second kind: it hashed the work store and the rigs
-// and missed the graph binding where every routed step lives, so a step claimed
-// there changed nothing it could see and the controller kept asserting demand
-// for work already taken.
-//
-// The plane is what makes the check cheap. It used to issue one ReadyLive per
-// store — remote work ledger, binding, every rig — so asking "may I reuse the
-// cached demand?" cost several remote round trips on every patrol tick, to avoid
-// recomputing something cheaper (ga-l7jdg).
-//
-// Read through the resolver's Walk executor rather than an enumeration: a leg
-// read failure is HASHED rather than raised (a stable error must license reuse
-// exactly as a stable read does, or a dark store rebuilds the snapshot every
-// tick forever), so the visit never returns an error and the plan's per-leg
-// policy has nothing to escalate.
-func (cr *CityRuntime) readyDemandSnapshotFingerprint() string {
-	h := fnv.New64a()
-	cfg := cr.serviceConfigSnapshot()
-	// The rig map is a constructor INPUT to the topology, not a residency answer
-	// — it is filtered by the configured suspension frame and handed straight to
-	// residencyTopology, which is what decides the legs. It stays on the
-	// residency-boundary census (baselined) because the census counts every
-	// consumer of a base enumerator, not only the wrong ones.
-	rigs := cr.rigBeadStores()
-	topo := cr.residencyTopology(servingRigStores(cfg, rigs, buildSuspendedRigPathsForCity(cfg, cr.cityPath)))
-	plan, err := storeref.Plan(storeref.RoutedWork{}, topo)
-	if err == nil {
-		plan, err = storeref.Narrow(plan, storeref.PlaneRuntime)
-	}
-	if err != nil {
-		// A refused city has no plan. Hash the refusal: it is stable while the
-		// refusal stands, and every arm downstream already reports it loudly.
-		_, _ = io.WriteString(h, "refused:")
-		_, _ = io.WriteString(h, err.Error())
-		return fmt.Sprintf("%x", h.Sum64())
-	}
-	_, _ = storeref.Walk(plan, func(leg storeref.Leg) (bool, error) {
-		ref := demandFingerprintRef(cr.cityName, leg.Ref)
-		_, _ = io.WriteString(h, ref)
-		_, _ = io.WriteString(h, "\x00")
-		if leg.Store == nil {
-			_, _ = io.WriteString(h, "<nil>")
-			_, _ = io.WriteString(h, "\x00")
-			return false, nil
-		}
-		ready, err := beads.ReadyLive(leg.Store, beads.ReadyQuery{TierMode: beads.TierBoth})
-		if err != nil {
-			log.Printf("readyDemandSnapshotFingerprint: store %s: %v", ref, err)
-			_, _ = io.WriteString(h, "error:")
-			_, _ = io.WriteString(h, err.Error())
-			_, _ = io.WriteString(h, "\x00")
-			return false, nil
-		}
-		sort.Slice(ready, func(i, j int) bool {
-			return ready[i].ID < ready[j].ID
-		})
-		for _, bead := range ready {
-			writeReadyDemandFingerprintBead(h, bead)
-		}
-		return false, nil
-	})
-	return fmt.Sprintf("%x", h.Sum64())
-}
-
-// demandFingerprintRef spells a plan leg the way this fingerprint's log line
-// always has.
-func demandFingerprintRef(cityName string, ref storeref.StoreRef) string {
-	switch {
-	case ref == storeref.WorkRef:
-		return cityName
-	case storeref.IsClassRef(string(ref)):
-		return string(ref)
-	default:
-		rig, _ := storeref.ScopeRigContext(string(ref))
-		return rig
-	}
-}
-
-func writeReadyDemandFingerprintBead(w io.Writer, bead beads.Bead) {
-	_, _ = io.WriteString(w, bead.ID)
-	_, _ = io.WriteString(w, "\x00")
-	_, _ = io.WriteString(w, bead.Status)
-	_, _ = io.WriteString(w, "\x00")
-	_, _ = io.WriteString(w, bead.Type)
-	_, _ = io.WriteString(w, "\x00")
-	_, _ = io.WriteString(w, bead.Assignee)
-	_, _ = io.WriteString(w, "\x00")
-	_, _ = io.WriteString(w, bead.UpdatedAt.Format(time.RFC3339Nano))
-	_, _ = io.WriteString(w, "\x00")
-	for _, key := range []string{
-		beadmeta.RoutedToMetadataKey,
-		beadmeta.RunTargetMetadataKey,
-		beadmeta.KindMetadataKey,
-		beadmeta.FormulaContractMetadataKey,
-	} {
-		_, _ = io.WriteString(w, key)
-		_, _ = io.WriteString(w, "\x00")
-		_, _ = io.WriteString(w, bead.Metadata[key])
-		_, _ = io.WriteString(w, "\x00")
-	}
 }
 
 func (cr *CityRuntime) demandSnapshotsEnabled() bool {
@@ -3898,6 +4444,58 @@ func (cr *CityRuntime) beginTraceCycle(trigger, detail string, sessionBeads *ses
 	return cr.trace.beginCycle(info, cr.cfg, sessionBeads)
 }
 
+const traceSiteNudgeDueTargetSelectionShadow TraceSiteCode = "nudge.due_target_selection.shadow"
+
+const nudgeDueTargetSelectionTraceFieldLimit = 13
+
+func (cr *CityRuntime) ensureNudgeKeyControllerForSelection(ctx context.Context) error {
+	if cr == nil || cr.nudgeShadowSelection.Required() {
+		return nil
+	}
+	return cr.ensureNudgeKeyController(ctx)
+}
+
+func (cr *CityRuntime) nudgeDueTargetSelectionObserver() nudgeDueTargetSelectionObserver {
+	if cr == nil || !cr.nudgeShadowSelection.Required() {
+		return nil
+	}
+	return cr.recordNudgeDueTargetSelection
+}
+
+func (cr *CityRuntime) recordNudgeDueTargetSelection(observation nudgeDueTargetSelectionObservation) {
+	if cr == nil {
+		return
+	}
+	cycle := cr.beginTraceCycle("control", nudgeshadow.ScopeQueuedExactDueTargetSelection, nil)
+	if cycle == nil {
+		return
+	}
+	fields := map[string]any{
+		"scope":                 observation.Scope,
+		"queue_item_count":      observation.QueueItemCount,
+		"candidate_count":       observation.CandidateCount,
+		"candidate_digest":      observation.CandidateDigest,
+		"legacy_count":          observation.LegacyCount,
+		"legacy_digest":         observation.LegacyDigest,
+		"comparison_outcome":    observation.ComparisonOutcome,
+		"queue_duration_ms":     observation.QueueDuration.Milliseconds(),
+		"candidate_duration_ms": observation.CandidateDuration.Milliseconds(),
+		"legacy_duration_ms":    observation.LegacyDuration.Milliseconds(),
+		"total_duration_ms":     observation.TotalDuration.Milliseconds(),
+		"legacy_effect_owner":   observation.LegacyEffectOwner,
+		"shadow_effect_applied": observation.ShadowEffectApplied,
+	}
+	cycle.RecordControllerDecision(
+		traceSiteNudgeDueTargetSelectionShadow,
+		TraceReasonRetained,
+		TraceOutcomeNoChange,
+		fields,
+	)
+	if err := cycle.End(TraceCompletionCompleted, nil); err != nil {
+		fmt.Fprintf(cr.stderr, "%s: nudge due-target selection trace: %v\n", cr.logPrefix, err) //nolint:errcheck
+	}
+}
+
 func (cr *CityRuntime) drainOutgoingOrderDispatcher(ctx context.Context, od orderDispatcher) {
 	if od == nil {
 		return
@@ -3981,6 +4579,17 @@ func (cr *CityRuntime) shutdown() {
 				fmt.Fprintf(cr.stderr, "%s: closing the storage binding: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 			}
 		}()
+		// The keyed controllers and shadow observers stop before anything
+		// drains: each of them can still enqueue work or write a trace, and the
+		// drain below is only meaningful once nothing new can arrive.
+		if cr.cs != nil {
+			cr.cs.stopSessionWaitDependencyShadowAdmission()
+			cr.cs.stopReadyRoutedWorkEventAdmission()
+		}
+		cr.stopSessionWaitDependencyProducer()
+		cr.stopSessionStartController()
+		cr.stopNudgeKeyController()
+		cr.stopSessionLifecycleShadowWorker()
 		asyncStartsDrained := cr.waitForAsyncStarts()
 		cr.waitForAsyncStops()
 		preserveSessions := cr.preserveSessionsShutdown.Load()

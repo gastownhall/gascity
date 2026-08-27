@@ -2,6 +2,7 @@ package materialize
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -283,6 +284,36 @@ func TestMCPTemplateDataPreservesBranchAlias(t *testing.T) {
 	}
 	if got["Branch"] != got["DefaultBranch"] {
 		t.Fatalf("Branch = %q, want %q", got["Branch"], got["DefaultBranch"])
+	}
+}
+
+func TestEffectiveMCPForSessionWithoutSourcesDoesNotInvokeGit(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "git-invoked")
+	fakeGitDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(fakeGitDir, "git"), []byte("#!/bin/sh\nprintf 'git\\n' >> \"$GC_TEST_GIT_MARKER\"\n"), 0o755); err != nil {
+		t.Fatalf("write fake git: %v", err)
+	}
+	t.Setenv("GC_TEST_GIT_MARKER", marker)
+	t.Setenv("PATH", fakeGitDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("find fake git: %v", err)
+	}
+	if want := filepath.Join(fakeGitDir, "git"); gitPath != want {
+		t.Fatalf("git path = %q, want fake %q", gitPath, want)
+	}
+
+	catalog, err := EffectiveMCPForSession(&config.City{}, t.TempDir(), &config.Agent{Name: "worker"}, "worker", t.TempDir(), config.QueryTopology{})
+	if err != nil {
+		t.Fatalf("effective MCP for source-free session: %v", err)
+	}
+	if len(catalog.Servers) != 0 {
+		t.Fatalf("source-free MCP catalog servers = %+v, want empty", catalog.Servers)
+	}
+	if calls, err := os.ReadFile(marker); err == nil {
+		t.Fatalf("source-free MCP resolution invoked git:\n%s", calls)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("read fake git marker: %v", err)
 	}
 }
 

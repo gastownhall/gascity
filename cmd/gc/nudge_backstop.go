@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -45,7 +46,9 @@ type backstopPredicate interface {
 	observe(store beads.Store, s *beads.Bead, target backstopTarget, now time.Time, stdout io.Writer)
 
 	// reserve durably records a nudge attempt before delivery. false means the
-	// write failed and the provider must not be nudged.
+	// write failed and the provider must not be nudged. It doubles as the
+	// rollback: re-reserving the pre-delivery count after a fenced refusal
+	// gives the attempt back while re-stamping the pacing clock.
 	reserve(store beads.Store, s *beads.Bead, target backstopTarget, attempts int, now time.Time, stdout io.Writer) bool
 
 	// exhausted is invoked once attempts reach the shared max attempts.
@@ -212,6 +215,21 @@ func runNudgeBackstop(
 				continue
 			}
 			if err := sp.Nudge(sessName, runtime.TextContent(content)); err != nil {
+				if errors.Is(err, runtime.ErrInputFenced) {
+					// The runtime proved the input never reached the session
+					// (parked in copy mode, target changed under the guard).
+					// Nothing was delivered, so this must not burn one of the
+					// bounded attempts — otherwise a parked session exhausts
+					// its backstop and stays deaf after the fence clears. Roll
+					// the reservation back to its pre-delivery count while
+					// keeping now as the pacing clock, so refusals retry on the
+					// normal cadence instead of on every tick. The queued-nudge
+					// lane releases its claims on the same sentinel.
+					pred.reserve(store, s, target, attempts, now, stdout)
+					fmt.Fprintf(stdout, "%s: %s input fenced for %s, attempt not consumed (%d/%d used): %v\n", //nolint:errcheck // best-effort
+						label, sessName, target.ID, attempts, idleClaimNudgeMaxAttempts, err)
+					continue
+				}
 				fmt.Fprintf(stdout, "%s: %s failed: %v\n", label, sessName, err) //nolint:errcheck // best-effort
 				continue
 			}

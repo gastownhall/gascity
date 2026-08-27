@@ -29,6 +29,13 @@ type ConditionalWritesInspection struct {
 	// StoreKind names the resolved store type in the diagnostic vocabulary
 	// (BdStore, MemStore, ...; %T for build-tagged types).
 	StoreKind string
+	// Implements reports whether the resolved store implements
+	// ConditionalWriter at all. It is the one capability fact available for
+	// free — a type assertion, no probe, no subprocess — which is why the
+	// status wire can state a class's fencing REQUIREMENT without violating
+	// its own rule that a poll must never shell out to bd. Capable answers a
+	// different question: whether a probe or latch has definitively said no.
+	Implements bool
 	// Probe is the memoized capability-probe verdict:
 	// capable | incapable | unprobed.
 	Probe string
@@ -111,7 +118,11 @@ func (c *CachingStore) inspectConditionalWriteState() (probe, latch, reason stri
 // unexercised bd store legitimately reports Probe=unprobed.
 func InspectConditionalWrites(store Store) ConditionalWritesInspection {
 	if store != nil {
-		store = followConditionalWritesResolveTarget(store)
+		// Two steps, and the second is what stops a side-effect wrapper from
+		// reporting its own vacuous yes: the writer may be the wrapper, but the
+		// probe memo, the stamp and the store kind all belong to the engine it
+		// declares (ConditionalWritesCapabilityTargeter).
+		store = followConditionalWritesCapabilityTarget(followConditionalWritesResolveTarget(store))
 	}
 	insp := ConditionalWritesInspection{
 		StoreKind: conditionalStoreKind(store),
@@ -121,6 +132,7 @@ func InspectConditionalWrites(store Store) ConditionalWritesInspection {
 	if store == nil {
 		return insp
 	}
+	_, insp.Implements = ConditionalWriterFor(store)
 	if carrier, ok := store.(conditionalWritesModeCarrier); ok {
 		insp.Mode, insp.Defaulted = carrier.conditionalWritesMode()
 	}

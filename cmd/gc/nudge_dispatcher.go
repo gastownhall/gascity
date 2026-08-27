@@ -2,17 +2,22 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/nudgeshadow"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -21,6 +26,35 @@ import (
 // missing socket — legacy-mode cities and pre-start producers expect the
 // dial to fail fast.
 const pingNudgeWakeSocketDialTimeout = 200 * time.Millisecond
+
+const (
+	nudgeDueTargetSelectionMatched       = "matched"
+	nudgeDueTargetSelectionMismatch      = "mismatch"
+	nudgeDueTargetSelectionCandidateOnly = "candidate_only"
+	nudgeDueTargetSelectionLegacyOnly    = "legacy_only"
+
+	nudgeDueTargetSelectionDigestDomain = "gascity.nudge.due-target-selection.v1"
+)
+
+// nudgeDueTargetSelectionObservation is a bounded summary of candidate and
+// legacy due-target selection. It deliberately contains no raw session IDs.
+type nudgeDueTargetSelectionObservation struct {
+	Scope               string
+	QueueItemCount      int
+	CandidateCount      int
+	CandidateDigest     string
+	LegacyCount         int
+	LegacyDigest        string
+	ComparisonOutcome   string
+	QueueDuration       time.Duration
+	CandidateDuration   time.Duration
+	LegacyDuration      time.Duration
+	TotalDuration       time.Duration
+	LegacyEffectOwner   bool
+	ShadowEffectApplied bool
+}
+
+type nudgeDueTargetSelectionObserver func(nudgeDueTargetSelectionObservation)
 
 // pingNudgeWakeSocket sends a best-effort wake signal to the supervisor's
 // nudge dispatcher. Callers invoke this after enqueueing a queued nudge so
@@ -118,13 +152,29 @@ func startNudgeWakeListener(ctx context.Context, cityPath string, wakeCh chan<- 
 // into the persisted queue state's DispatchSkips regardless of debugOut, so
 // `gc nudge status` stays informative even with GC_DEBUG unset).
 func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot, debugOut io.Writer) (int, error) {
+	return dispatchAllQueuedNudgesExcept(cityPath, cfg, store, sessStore, sp, sessionBeads, nil, debugOut)
+}
+
+// dispatchAllQueuedNudgesObserved runs the same legacy dispatch while
+// observing its pre-provider due-target selection.
+func dispatchAllQueuedNudgesObserved(cityPath string, cfg *config.City, store, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot, observer nudgeDueTargetSelectionObserver, debugOut io.Writer) (int, error) {
+	return dispatchAllQueuedNudgesExceptObserved(cityPath, cfg, store, sessStore, sp, sessionBeads, nil, observer, debugOut)
+}
+
+// dispatchAllQueuedNudgesExcept preserves legacy delivery for every target
+// except exact session IDs currently scheduled by the keyed controller. Queue
+// claiming remains the physical cross-path delivery fence.
+func dispatchAllQueuedNudgesExcept(cityPath string, cfg *config.City, store, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot, excludedSessionIDs map[string]struct{}, debugOut io.Writer) (int, error) {
+	return dispatchAllQueuedNudgesExceptObserved(cityPath, cfg, store, sessStore, sp, sessionBeads, excludedSessionIDs, nil, debugOut)
+}
+
+func dispatchAllQueuedNudgesExceptObserved(cityPath string, cfg *config.City, store, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot, excludedSessionIDs map[string]struct{}, observer nudgeDueTargetSelectionObserver, debugOut io.Writer) (int, error) {
 	if cfg == nil || sessionBeads == nil || cityPath == "" {
 		return 0, nil
 	}
 	if !nudgeDispatcherIsSupervisor(cfg) {
 		return 0, nil
 	}
-	now := time.Now()
 	// Run the queue's TTL/max-attempts maintenance sweep unconditionally,
 	// independent of whether any item below matches an open session. The
 	// per-session loop's only path to recover/prune is a successful claim in
@@ -132,15 +182,99 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 	// (target agent has no open session, and never will again) can never
 	// reach — leaving it in Pending past its ExpiresAt forever. See
 	// ra-oudpha finding-3.
-	if err := runNudgeQueueMaintenanceSweep(cityPath, now); err != nil {
+	//
+	// It runs before LoadState below so the state this pass dispatches from
+	// already reflects the sweep.
+	if err := runNudgeQueueMaintenanceSweep(cityPath, time.Now()); err != nil {
 		return 0, fmt.Errorf("nudge queue maintenance sweep: %w", err)
+	}
+	var queueStarted time.Time
+	if observer != nil {
+		queueStarted = time.Now()
 	}
 	state, err := nudgequeue.LoadState(cityPath)
 	if err != nil {
 		return 0, fmt.Errorf("loading nudge queue: %w", err)
 	}
+	if observer != nil {
+		return dispatchAllQueuedNudgesFromStateObserved(
+			cityPath,
+			cfg,
+			store,
+			sessStore,
+			sp,
+			sessionBeads,
+			excludedSessionIDs,
+			state,
+			time.Since(queueStarted),
+			observer,
+			debugOut,
+		)
+	}
+	return dispatchAllQueuedNudgesFromState(cityPath, cfg, store, sessStore, sp, sessionBeads, excludedSessionIDs, state, debugOut)
+}
+
+// dispatchAllQueuedNudgesFromState uses the state snapshot already loaded by
+// keyed admission, avoiding a second queue read on the mixed legacy path.
+func dispatchAllQueuedNudgesFromState(cityPath string, cfg *config.City, store, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot, excludedSessionIDs map[string]struct{}, state nudgequeue.State, debugOut io.Writer) (int, error) {
+	skipCounts := make(map[string]int64)
+	targets := selectLegacyQueuedNudgeTargets(cityPath, cfg, sessionBeads, state, time.Now(), debugOut, skipCounts)
+	return dispatchSelectedQueuedNudgeTargets(targets, store, sessStore, sp, excludedSessionIDs, cityPath, debugOut, skipCounts)
+}
+
+// dispatchAllQueuedNudgesFromStateObserved compares the pure exact-session
+// candidate selector with the immutable legacy pre-provider selection, then
+// makes the legacy dispatcher consume precisely the selection it observed.
+func dispatchAllQueuedNudgesFromStateObserved(
+	cityPath string,
+	cfg *config.City,
+	store, sessStore beads.Store,
+	sp runtime.Provider,
+	sessionBeads *sessionBeadSnapshot,
+	excludedSessionIDs map[string]struct{},
+	state nudgequeue.State,
+	queueDuration time.Duration,
+	observer nudgeDueTargetSelectionObserver,
+	debugOut io.Writer,
+) (int, error) {
+	selectionStarted := time.Now()
+	now := time.Now()
+
+	candidateStarted := time.Now()
+	candidateIDs := discoverDueExactNudgeSessionIDs(state, now)
+	candidateDuration := time.Since(candidateStarted)
+
+	skipCounts := make(map[string]int64)
+	legacyStarted := time.Now()
+	targets := selectLegacyQueuedNudgeTargets(cityPath, cfg, sessionBeads, state, now, debugOut, skipCounts)
+	legacyDuration := time.Since(legacyStarted)
+	legacyIDs := make([]string, 0, len(targets))
+	for _, target := range targets {
+		legacyIDs = append(legacyIDs, target.sessionID)
+	}
+
+	observation := newNudgeDueTargetSelectionObservation(
+		state,
+		candidateIDs,
+		legacyIDs,
+		queueDuration,
+		candidateDuration,
+		legacyDuration,
+		queueDuration+time.Since(selectionStarted),
+	)
+	delivered, err := dispatchSelectedQueuedNudgeTargets(targets, store, sessStore, sp, excludedSessionIDs, cityPath, debugOut, skipCounts)
+	if observer != nil {
+		observer(observation)
+	}
+	return delivered, err
+}
+
+// selectLegacyQueuedNudgeTargets resolves the open sessions a legacy dispatch
+// pass should try. skipCounts accumulates this pass's silent-skip reasons; the
+// caller merges them into the persisted queue state once, after delivery.
+func selectLegacyQueuedNudgeTargets(cityPath string, cfg *config.City, sessionBeads *sessionBeadSnapshot, state nudgequeue.State, now time.Time, debugOut io.Writer, skipCounts map[string]int64) []nudgeTarget {
 	if len(state.Pending) == 0 && len(state.InFlight) == 0 {
-		return 0, nil
+		return nil
 	}
 	pendingAgents := make(map[string]bool, len(state.Pending))
 	for _, item := range state.Pending {
@@ -165,26 +299,10 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 		pendingAgents[item.Agent] = true
 	}
 	if len(pendingAgents) == 0 {
-		return 0, nil
+		return nil
 	}
 
-	// The dispatcher receives the nudges-class store (store) PLUS the session-class
-	// store (sessStore) the caller resolved from the WORK store — the controller
-	// threads cr.sessionsBeadStore().Store, whose fallback is the work store, NOT
-	// the nudges store. The session observe below and the queue-delivery path's
-	// session ops route through sessStore; the queue record/dead-letter stays on
-	// store. Identity today; corrects the pre-existing controller-side class mix
-	// (deriving sessStore from the nudges base would mis-resolve session beads once
-	// nudges relocates independently of sessions).
-	delivered := 0
-	var firstErr error
-	// skipCounts accumulates this tick's silent-skip reasons in memory; it is
-	// merged into the persisted queue state's running totals once, after the
-	// loop, rather than on every skip — recordNudgeDispatchSkips takes the
-	// queue flock, and taking it once per matched info instead of once per
-	// tick would multiply lock contention against the claim path below for
-	// no benefit (the counters only need tick-granularity, not per-item).
-	skipCounts := make(map[string]int64)
+	targets := make([]nudgeTarget, 0, len(pendingAgents))
 	for _, info := range sessionBeads.OpenInfos() {
 		target := resolveNudgeTargetFromSessionInfo(cityPath, cfg, info)
 		if target.sessionName == "" {
@@ -214,6 +332,32 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 			logNudgeDispatchSkip(debugOut, "not-matched", target.agentKey(), target.sessionName, "")
 			continue
 		}
+		targets = append(targets, target)
+	}
+	return targets
+}
+
+// dispatchSelectedQueuedNudgeTargets delivers to the selected targets and
+// persists this pass's skip counters once, at the end.
+//
+// The dispatcher receives the nudges-class store (store) PLUS the session-class
+// store (sessStore) the caller resolved from the WORK store — the controller
+// threads cr.sessionsBeadStore().Store, whose fallback is the work store, NOT
+// the nudges store. The session observe below and the queue-delivery path's
+// session ops route through sessStore; the queue record/dead-letter stays on
+// store. Identity today; corrects the pre-existing controller-side class mix
+// (deriving sessStore from the nudges base would mis-resolve session beads once
+// nudges relocates independently of sessions).
+//
+// skipCounts is merged into the persisted queue state's running totals once,
+// after the loop, rather than on every skip — recordNudgeDispatchSkips takes
+// the queue flock, and taking it once per target instead of once per pass would
+// multiply lock contention against the claim path for no benefit (the counters
+// only need pass-granularity, not per-item).
+func dispatchSelectedQueuedNudgeTargets(targets []nudgeTarget, store, sessStore beads.Store, sp runtime.Provider, excludedSessionIDs map[string]struct{}, cityPath string, debugOut io.Writer, skipCounts map[string]int64) (int, error) {
+	delivered := 0
+	var firstErr error
+	for _, target := range targets {
 		obs, err := workerObserveNudgeTarget(target, sessStore, sp)
 		if err != nil {
 			if firstErr == nil {
@@ -228,7 +372,10 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 			logNudgeDispatchSkip(debugOut, "not-running", target.agentKey(), target.sessionName, "")
 			continue
 		}
-		ok, err := tryDeliverQueuedNudgesByPoller(target, store, sessStore, sp, defaultNudgePollQuiescence, obs)
+		ok, err := tryDeliverQueuedNudgesByPollerMatching(target, store, sessStore, sp, defaultNudgePollQuiescence, obs, func(item queuedNudge) bool {
+			_, excluded := excludedSessionIDs[item.SessionID]
+			return !excluded
+		})
 		if err != nil && firstErr == nil {
 			firstErr = err
 		}
@@ -257,6 +404,69 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 		firstErr = fmt.Errorf("recording nudge dispatch skip counters: %w", err)
 	}
 	return delivered, firstErr
+}
+
+func newNudgeDueTargetSelectionObservation(
+	state nudgequeue.State,
+	candidateIDs, legacyIDs []string,
+	queueDuration, candidateDuration, legacyDuration, totalDuration time.Duration,
+) nudgeDueTargetSelectionObservation {
+	return nudgeDueTargetSelectionObservation{
+		Scope:               nudgeshadow.ScopeQueuedExactDueTargetSelection,
+		QueueItemCount:      len(state.Pending) + len(state.InFlight),
+		CandidateCount:      len(candidateIDs),
+		CandidateDigest:     digestNudgeDueTargetSelection(candidateIDs),
+		LegacyCount:         len(legacyIDs),
+		LegacyDigest:        digestNudgeDueTargetSelection(legacyIDs),
+		ComparisonOutcome:   compareNudgeDueTargetSelections(candidateIDs, legacyIDs),
+		QueueDuration:       queueDuration,
+		CandidateDuration:   candidateDuration,
+		LegacyDuration:      legacyDuration,
+		TotalDuration:       totalDuration,
+		LegacyEffectOwner:   true,
+		ShadowEffectApplied: false,
+	}
+}
+
+func compareNudgeDueTargetSelections(candidateIDs, legacyIDs []string) string {
+	if equalNudgeDueTargetSelections(candidateIDs, legacyIDs) {
+		return nudgeDueTargetSelectionMatched
+	}
+	switch {
+	case len(candidateIDs) > 0 && len(legacyIDs) == 0:
+		return nudgeDueTargetSelectionCandidateOnly
+	case len(candidateIDs) == 0 && len(legacyIDs) > 0:
+		return nudgeDueTargetSelectionLegacyOnly
+	default:
+		return nudgeDueTargetSelectionMismatch
+	}
+}
+
+func equalNudgeDueTargetSelections(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	left = append([]string(nil), left...)
+	right = append([]string(nil), right...)
+	sort.Strings(left)
+	sort.Strings(right)
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func digestNudgeDueTargetSelection(ids []string) string {
+	ordered := append([]string(nil), ids...)
+	sort.Strings(ordered)
+	digest := sha256.New()
+	_, _ = io.WriteString(digest, nudgeDueTargetSelectionDigestDomain)
+	for _, id := range ordered {
+		_, _ = io.WriteString(digest, "\x00"+strconv.Itoa(len(id))+"\x00"+id)
+	}
+	return hex.EncodeToString(digest.Sum(nil))
 }
 
 // logNudgeDispatchSkip emits a single GC_DEBUG-gated line documenting one

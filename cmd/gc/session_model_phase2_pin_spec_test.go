@@ -77,11 +77,17 @@ func TestPhase2CmdSessionPin_ControllerMaterializesWithPinAsOnlyWakeCause(t *tes
 	}
 
 	b := onlySessionBead(t, cityDir)
+	if got := b.Metadata["state"]; got != string(session.StateAsleep) {
+		t.Fatalf("state = %q, want asleep for pin-only materialization", got)
+	}
 	if got := b.Metadata["pin_awake"]; got != "true" {
 		t.Fatalf("pin_awake = %q, want true", got)
 	}
 	if got := b.Metadata["pending_create_claim"]; got != "" {
 		t.Fatalf("pending_create_claim = %q, want no one-shot claim because pin_awake is the wake cause", got)
+	}
+	if got := b.Metadata["pending_create_started_at"]; got != "" {
+		t.Fatalf("pending_create_started_at = %q, want cleared for pin-only materialization", got)
 	}
 }
 

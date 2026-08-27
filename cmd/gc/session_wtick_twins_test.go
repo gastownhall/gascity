@@ -287,7 +287,7 @@ func TestRetireDuplicateRowsMatchesBeads(t *testing.T) {
 		for i, b := range rowBeads {
 			rows[i] = session.ReconcileSession{Info: sessiontest.SeedBead(t, b)}
 		}
-		retireDuplicateConfiguredNamedSessionRows("", store, nil, sp, cfg, cityName, rows, now, nil)
+		retireDuplicateConfiguredNamedSessionRows("", store, nil, sp, cfg, cityName, rows, nil, now, nil)
 	}
 
 	t.Run("stop-succeeds-loser-retired-and-stopped", func(t *testing.T) {

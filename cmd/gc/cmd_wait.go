@@ -1016,7 +1016,11 @@ func prepareWaitWakeStateForCity(cityPath string, store beads.Store, now time.Ti
 	return prepareWaitWakeStateWithSnapshot(cliSessionFrontDoor(store, cfg, cityPath), dependencies, cliNudgesStore(store, cfg, cityPath), now, nil)
 }
 
-func prepareWaitWakeStateWithSnapshot(sessFront *sessionpkg.Store, dependencies waitDependencyReader, nudges beads.NudgesStore, now time.Time, sessionBeads *sessionBeadSnapshot) (map[string]bool, error) {
+func prepareWaitWakeStateWithSnapshot(sessFront *sessionpkg.Store, dependencies waitDependencyReader, nudges beads.NudgesStore, now time.Time, sessionBeads *sessionBeadSnapshot, keyedWaitOwned ...func(sessionpkg.WaitInfo) bool) (map[string]bool, error) {
+	var owned func(sessionpkg.WaitInfo) bool
+	if len(keyedWaitOwned) > 0 {
+		owned = keyedWaitOwned[0]
+	}
 	if sessionBeads == nil {
 		var err error
 		sessionBeads, err = loadSessionBeadSnapshot(sessFront.Store().Store)
@@ -1095,7 +1099,20 @@ func prepareWaitWakeStateWithSnapshot(sessFront *sessionpkg.Store, dependencies 
 				}
 				continue
 			}
+			if wait.ReadyOwner == string(sessionpkg.WaitReadyOwnerDependency) && strings.TrimSpace(wait.ReadyOperation) == wait.ReadyOperation && wait.ReadyOperation != "" {
+				continue
+			}
+			// Finalization above remains shared, but an exact dependency-owned
+			// wait must not become generic legacy wake demand afterwards.
+			if owned != nil && owned(wait) {
+				continue
+			}
 			readyWaitSet[sessionID] = true
+			continue
+		}
+		if owned != nil && owned(wait) {
+			// Do not let legacy mark a retained pending exact wait ready while
+			// its keyed lease is still responsible for certification.
 			continue
 		}
 		if wait.Kind != "deps" {

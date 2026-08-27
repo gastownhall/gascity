@@ -764,7 +764,7 @@ func TestCreateWithProviderWithoutProcessScannerStillStarts(t *testing.T) {
 	}
 }
 
-func TestRuntimeStartCallSitesCleanOrphansFirst(t *testing.T) {
+func TestRuntimeStartCallSitesHavePreEffectFence(t *testing.T) {
 	tests := []struct {
 		file   string
 		idExpr string
@@ -789,8 +789,8 @@ func TestRuntimeStartCallSitesCleanOrphansFirst(t *testing.T) {
 				// result gates the Start (manager.go wraps it in an
 				// `if orphanErr := …; orphanErr != nil` refusal), so scan a
 				// short preceding window rather than only the immediate line.
-				if !orphanCleanupPrecedes(lines, i, tt.idExpr) {
-					t.Errorf("%s:%d Start is not preceded by orphan cleanup using %s", tt.file, i+1, tt.idExpr)
+				if !orphanCleanupPrecedes(lines, i, tt.idExpr) && !authorizedStartPrecedes(lines, i) {
+					t.Errorf("%s:%d Start is not preceded by orphan cleanup using %s or exact authorization", tt.file, i+1, tt.idExpr)
 				}
 			}
 			if starts == 0 {
@@ -798,6 +798,24 @@ func TestRuntimeStartCallSitesCleanOrphansFirst(t *testing.T) {
 			}
 		})
 	}
+}
+
+// authorizedStartPrecedes recognizes the one non-destructive alternative to
+// orphan cleanup: StartRuntimeOnlyAuthorized's caller proves complete absence
+// at the final effect boundary. Running orphan cleanup there could stop the
+// replacement whose appearance is supposed to revoke start authority.
+func authorizedStartPrecedes(lines []string, before int) bool {
+	authorized := false
+	for i := before - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if strings.Contains(line, "authorize(ctx)") {
+			authorized = true
+		}
+		if strings.HasPrefix(line, "func ") {
+			return authorized && strings.Contains(line, "StartRuntimeOnlyAuthorized")
+		}
+	}
+	return false
 }
 
 // orphanCleanupPrecedes reports whether m.killExistingOrphans(ctx, idExpr)

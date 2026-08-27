@@ -5853,17 +5853,18 @@ func TestDoStop_UsesDependencyAwareOrdering(t *testing.T) {
 }
 
 func TestDoStopStopError(t *testing.T) {
-	sp := runtime.NewFailFake() // Stop will fail
+	sp := runtime.NewFailFake()
 
 	var stdout, stderr bytes.Buffer
 	code := doStop([]string{"mayor"}, sp, nil, nil, 0, events.Discard, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("doStop = %d, want 0 (errors are non-fatal); stderr: %s", code, stderr.String())
+	if code != 1 {
+		t.Fatalf("doStop = %d, want 1 after runtime inventory failure; stderr: %s", code, stderr.String())
 	}
-	// FailFake makes IsRunning return false, so no stop attempt.
-	// Should still print "City stopped."
-	if !strings.Contains(stdout.String(), "City stopped.") {
-		t.Errorf("stdout missing 'City stopped.': %q", stdout.String())
+	if !strings.Contains(stderr.String(), "gc stop: listing sessions: session unavailable") {
+		t.Errorf("stderr missing inventory failure diagnostic: %q", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "City stopped.") {
+		t.Errorf("stdout reported false success after inventory failure: %q", stdout.String())
 	}
 }
 
@@ -7310,7 +7311,7 @@ func TestDoPrimeClaudeHookPersistsProviderSessionKeyFromHookStdin(t *testing.T) 
 	dir, sessionID := setupPrimeHookProviderSessionKeyTest(t, "claude", `[providers.claude]
 base = "builtin:claude"`)
 	setPrimeHookStdinJSON(t, map[string]string{
-		"session_id":      "claude-provider-session",
+		"session_id":      "a1473624-c72c-4e42-b379-9e27e753d1ec",
 		"hook_event_name": "SessionStart",
 		"source":          "startup",
 	})
@@ -7329,8 +7330,36 @@ base = "builtin:claude"`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.TrimSpace(updated.Metadata["session_key"]); got != "claude-provider-session" {
+	if got := strings.TrimSpace(updated.Metadata["session_key"]); got != "a1473624-c72c-4e42-b379-9e27e753d1ec" {
 		t.Fatalf("session_key = %q, want Claude provider session id from hook stdin", got)
+	}
+}
+
+func TestDoPrimeHookIgnoresProviderSessionKeyFromHookStdinForUntrustedProvider(t *testing.T) {
+	dir, sessionID := setupPrimeHookProviderSessionKeyTest(t, "kimi", `[providers.kimi]
+base = "builtin:kimi"`)
+	setPrimeHookStdinJSON(t, map[string]string{
+		"session_id":      "untrusted-provider-session",
+		"hook_event_name": "SessionStart",
+		"source":          "startup",
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithMode(nil, &stdout, &stderr, true, false)
+	if code != 0 {
+		t.Fatalf("doPrimeWithMode = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	updatedStore, err := openCityStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := updatedStore.Get(sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(updated.Metadata["session_key"]); got != "" {
+		t.Fatalf("session_key = %q, want empty for hook stdin session id from an untrusted provider", got)
 	}
 }
 

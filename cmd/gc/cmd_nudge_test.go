@@ -925,8 +925,8 @@ func TestDeliverSessionNudgeWithWorkerManagedWaitNudgeWithdrawFailureKeepsQueued
 	if !strings.Contains(stdout.String(), "Queued nudge for "+info.ID) {
 		t.Fatalf("stdout = %q, want queued confirmation", stdout.String())
 	}
-	if stderr.Len() != 0 {
-		t.Fatalf("stderr = %q, want empty", stderr.String())
+	if !strings.Contains(stderr.String(), "warning: poke failed:") || !strings.Contains(stderr.String(), "generic fallback requested") {
+		t.Fatalf("stderr = %q, want exact-ingress fallback diagnostic", stderr.String())
 	}
 	if withdraws != 1 {
 		t.Fatalf("withdraws = %d, want 1", withdraws)
@@ -3141,6 +3141,91 @@ func TestCmdNudgeDrainStampsLastNudgeDeliveredAt(t *testing.T) {
 			}
 			if drift := time.Since(parsed); drift < 0 || drift > time.Minute {
 				t.Fatalf("%s timestamp drift %s is outside the 1-minute test window (raw=%q)", session.MetadataLastNudgeDeliveredAt, drift, raw)
+			}
+		})
+	}
+}
+
+func TestCmdNudgeDrainInjectSkipsTargetResolutionForEmptyQueue(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	writeNamedSessionCityTOML(t, cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_ALIAS", "worker")
+
+	previous := openNudgeBeadStore
+	openCalls := 0
+	openNudgeBeadStore = func(string) beads.NudgesStore {
+		openCalls++
+		return beads.NudgesStore{}
+	}
+	t.Cleanup(func() { openNudgeBeadStore = previous })
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdNudgeDrainWithFormat(nil, true, "", &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdNudgeDrainWithFormat = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if openCalls != 0 {
+		t.Fatalf("nudge target store opens = %d, want 0 for an empty inject queue", openCalls)
+	}
+	if !strings.Contains(stdout.String(), "Current time:") {
+		t.Fatalf("stdout = %q, want unchanged hook clock context", stdout.String())
+	}
+}
+
+func TestCmdNudgeDrainInjectFallsBackForNonEmptyOrUnreadableQueue(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(*testing.T, string)
+	}{
+		{
+			name: "non_empty",
+			setup: func(t *testing.T, cityDir string) {
+				t.Helper()
+				if err := withNudgeQueueState(cityDir, func(state *nudgeQueueState) error {
+					state.Pending = []queuedNudge{{ID: "nudge-other", Agent: "other"}}
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "unreadable",
+			setup: func(t *testing.T, cityDir string) {
+				t.Helper()
+				writeCorruptNudgeQueueState(t, cityDir)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearGCEnv(t)
+			disableManagedDoltRecoveryForTest(t)
+			t.Setenv("GC_BEADS", "file")
+
+			cityDir := t.TempDir()
+			writeNamedSessionCityTOML(t, cityDir)
+			t.Setenv("GC_CITY_PATH", cityDir)
+			t.Setenv("GC_ALIAS", "worker")
+			tc.setup(t, cityDir)
+
+			previous := openNudgeBeadStore
+			openCalls := 0
+			openNudgeBeadStore = func(string) beads.NudgesStore {
+				openCalls++
+				return beads.NudgesStore{}
+			}
+			t.Cleanup(func() { openNudgeBeadStore = previous })
+
+			var stdout, stderr bytes.Buffer
+			if code := cmdNudgeDrainWithFormat(nil, true, "", &stdout, &stderr); code != 0 {
+				t.Fatalf("cmdNudgeDrainWithFormat = %d, want fail-open 0; stderr=%s", code, stderr.String())
+			}
+			if openCalls != 1 {
+				t.Fatalf("nudge target store opens = %d, want 1 for fallback", openCalls)
 			}
 		})
 	}

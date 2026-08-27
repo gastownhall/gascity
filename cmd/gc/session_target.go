@@ -10,9 +10,12 @@ import (
 // sessionRuntimeTarget captures the public identity and runtime session name
 // needed by session-facing CLI commands.
 type sessionRuntimeTarget struct {
-	cityPath    string
-	display     string
-	sessionName string
+	cityPath               string
+	display                string
+	sessionID              string
+	sessionName            string
+	requesterSessionID     string
+	requesterInstanceToken string
 }
 
 func defaultSessionDisplayIdentity() string {
@@ -46,10 +49,27 @@ func currentSessionRuntimeTarget() (sessionRuntimeTarget, error) {
 		return sessionRuntimeTarget{}, fmt.Errorf("not in session context (city context not set)")
 	}
 	return sessionRuntimeTarget{
-		cityPath:    cityPath,
-		display:     display,
-		sessionName: sessionName,
+		cityPath:               cityPath,
+		display:                display,
+		sessionID:              strings.TrimSpace(os.Getenv("GC_SESSION_ID")),
+		sessionName:            sessionName,
+		requesterSessionID:     strings.TrimSpace(os.Getenv("GC_SESSION_ID")),
+		requesterInstanceToken: strings.TrimSpace(os.Getenv("GC_INSTANCE_TOKEN")),
 	}, nil
+}
+
+func bindExplicitDrainAckRequester(target sessionRuntimeTarget, requesterSessionID, requesterInstanceToken string) (sessionRuntimeTarget, error) {
+	requesterSessionID = strings.TrimSpace(requesterSessionID)
+	requesterInstanceToken = strings.TrimSpace(requesterInstanceToken)
+	if requesterSessionID == "" {
+		return target, nil
+	}
+	if target.sessionID == "" || target.sessionID != requesterSessionID {
+		return sessionRuntimeTarget{}, fmt.Errorf("refusing cross-session drain acknowledgement from %q to %q", requesterSessionID, target.sessionID)
+	}
+	target.requesterSessionID = requesterSessionID
+	target.requesterInstanceToken = requesterInstanceToken
+	return target, nil
 }
 
 func resolveSessionRuntimeTarget(identifier string, warningWriter ...io.Writer) (sessionRuntimeTarget, error) {
@@ -64,6 +84,7 @@ func resolveSessionRuntimeTarget(identifier string, warningWriter ...io.Writer) 
 	return sessionRuntimeTarget{
 		cityPath:    target.cityPath,
 		display:     display,
+		sessionID:   target.sessionID,
 		sessionName: target.sessionName,
 	}, nil
 }

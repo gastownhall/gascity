@@ -53,6 +53,36 @@ func (h *SessionHandle) StartResolved(ctx context.Context, startCommand string, 
 	return err
 }
 
+// StartResolvedAuthorized starts the runtime only after authorize succeeds at
+// the provider-effect boundary. Unlike ordinary convergence, it never accepts
+// an already-running replacement or recycles a zombie runtime.
+func (h *SessionHandle) StartResolvedAuthorized(
+	ctx context.Context,
+	startCommand string,
+	hints runtime.Config,
+	authorize func(context.Context) error,
+) (err error) {
+	event := h.beginOperationEvent(ctx, workerOperationStartResolved)
+	defer func() { event.finish(err) }()
+
+	id, err := h.ensureSessionID()
+	if err != nil {
+		return err
+	}
+	command := strings.TrimSpace(startCommand)
+	if command == "" {
+		command, err = h.startCommand(id)
+		if err != nil {
+			return err
+		}
+	}
+	startHints := hints
+	if strings.TrimSpace(startHints.Command) == "" {
+		startHints = h.runtimeHints()
+	}
+	return h.manager.StartRuntimeOnlyAuthorized(ctx, id, command, startHints, authorize)
+}
+
 // Attach ensures the worker runtime is live and then attaches the caller's
 // terminal using the underlying session transport.
 func (h *SessionHandle) Attach(ctx context.Context) (err error) {
@@ -135,6 +165,20 @@ func (h *SessionHandle) Kill(ctx context.Context) (err error) {
 		return nil
 	}
 	err = h.manager.Kill(id)
+	return err
+}
+
+// StopUnattended stops the exact runtime incarnation only when its provider
+// can bind unattended certification and destruction in one operation.
+func (h *SessionHandle) StopUnattended(ctx context.Context, expectedToken string) (err error) {
+	event := h.beginOperationEvent(ctx, workerOperationKill)
+	defer func() { event.finish(err) }()
+
+	id := h.currentSessionID()
+	if id == "" {
+		return nil
+	}
+	err = h.manager.StopUnattendedSession(id, expectedToken)
 	return err
 }
 
@@ -366,6 +410,42 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 		err = fmt.Errorf("unknown nudge delivery %q", req.Delivery)
 		return NudgeResult{}, err
 	}
+}
+
+// NudgeWaitIdleAuthorized waits for a live session's idle boundary, calls
+// authorize, and performs only a provider-token-fenced input delivery. It
+// accepts no fallback delivery mode or wake policy.
+func (h *SessionHandle) NudgeWaitIdleAuthorized(ctx context.Context, req NudgeRequest, expectedInstanceToken string, authorize func(context.Context) error) (result NudgeResult, err error) {
+	event := h.beginOperationEvent(ctx, workerOperationNudge)
+	defer func() {
+		event.payload.Delivered = boolPointer(result.Delivered)
+		event.finish(err)
+		if err == nil {
+			h.recordInvocationTelemetry(ctx)
+		}
+	}()
+
+	if strings.TrimSpace(req.Text) == "" {
+		return NudgeResult{}, fmt.Errorf("nudge text is required")
+	}
+	if req.Delivery != NudgeDeliveryWaitIdle || req.Wake != NudgeWakeLiveOnly {
+		return NudgeResult{}, fmt.Errorf("authorized nudge requires wait-idle live-only delivery")
+	}
+	if strings.TrimSpace(expectedInstanceToken) == "" || strings.TrimSpace(expectedInstanceToken) != expectedInstanceToken {
+		return NudgeResult{}, fmt.Errorf("authorized nudge expected instance token is required")
+	}
+	if authorize == nil {
+		return NudgeResult{}, fmt.Errorf("authorized nudge callback is required")
+	}
+	id := h.currentSessionID()
+	if id == "" {
+		return NudgeResult{Delivered: false}, nil
+	}
+	delivered, err := h.manager.NudgeWaitIdleAuthorized(ctx, id, req.Source, req.Text, expectedInstanceToken, authorize)
+	if err != nil {
+		return NudgeResult{}, err
+	}
+	return NudgeResult{Delivered: delivered}, nil
 }
 
 func (h *SessionHandle) ensureSessionID() (string, error) {

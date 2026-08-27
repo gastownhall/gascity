@@ -1031,6 +1031,31 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	}
 	mergeNamedSessionDemand(poolDesired, dsResult.NamedSessionDemand, cfg)
 	awakeAssignedWorkBeads, awakeAssignedStoreRefs := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, oneShotStore, openInfos, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
+	// Detector sweep beside legacy on the one-shot `gc start` entry point
+	// (WD.1), over the inputs this run already built. Standalone start has no
+	// tracer, so the sweep records nothing; it is wired here so the cutover
+	// does not have to discover this call site later.
+	runDetectorSweep(sigCtx, nil, detectorSweepInput{
+		CityPath:           cityPath,
+		CityName:           cityName,
+		Cfg:                cfg,
+		Provider:           sp,
+		Rows:               sessionBeads.OpenForReconcile(),
+		Snapshot:           sessionBeads,
+		Desired:            ds,
+		CfgNames:           cfgNames,
+		PoolDesired:        poolDesired,
+		NamedDemand:        dsResult.NamedSessionDemand,
+		NamedRoutedDemand:  dsResult.NamedSessionRoutedDemand,
+		AssignedWorkBeads:  awakeAssignedWorkBeads,
+		ReadyAssignedFlags: readyAssignedFlagsForBeads(dsResult.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs),
+		ProviderHealth:     loadProviderHealthSnapshot(cityPath),
+		Drains:             dt,
+		Clock:              clock.Real{},
+		StartupTimeout:     cfg.Session.StartupTimeoutDuration(),
+		StoreQueryPartial:  dsResult.snapshotQueryPartial(),
+		Trigger:            "start",
+	})
 	reconcileSessionBeadsAtPathWithNamedDemand(
 		sigCtx, cityPath, sessionBeads.OpenForReconcile(), sessionBeads, ds, cfgNames, cfg, sp, sessStore,
 		nil, awakeAssignedWorkBeads, rigStores, nil, dt, nil, poolDesired,

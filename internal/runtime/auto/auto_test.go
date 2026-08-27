@@ -4,14 +4,389 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 var _ runtime.Provider = (*Provider)(nil)
+
+type noFencedNudgeProvider struct{ runtime.Provider }
+
+func TestProviderNudgeFencedRoutesOnlySelectedBackend(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		session  string
+		routeACP bool
+	}{
+		{name: "default", session: "default-worker"},
+		{name: "acp", session: "acp-worker", routeACP: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			defaultProvider := runtime.NewFake()
+			acpProvider := runtime.NewFake()
+			provider := New(defaultProvider, acpProvider)
+			if test.routeACP {
+				provider.RouteACP(test.session)
+			}
+			for _, backend := range []*runtime.Fake{defaultProvider, acpProvider} {
+				if err := backend.Start(t.Context(), test.session, runtime.Config{}); err != nil {
+					t.Fatalf("Start: %v", err)
+				}
+				if err := backend.SetMeta(test.session, "GC_INSTANCE_TOKEN", "launch-1"); err != nil {
+					t.Fatalf("SetMeta: %v", err)
+				}
+			}
+
+			if err := provider.NudgeFenced(test.session, "launch-1", runtime.TextContent("continue")); err != nil {
+				t.Fatalf("NudgeFenced: %v", err)
+			}
+			selected, other := defaultProvider, acpProvider
+			if test.routeACP {
+				selected, other = acpProvider, defaultProvider
+			}
+			if got := selected.CountCalls("NudgeFenced", test.session); got != 1 {
+				t.Fatalf("selected fenced nudge calls = %d, want 1", got)
+			}
+			if got := other.CountCalls("NudgeFenced", test.session); got != 0 {
+				t.Fatalf("other fenced nudge calls = %d, want 0", got)
+			}
+		})
+	}
+}
+
+func TestProviderNudgeFencedFailsClosedForUnsupportedSelectedBackend(t *testing.T) {
+	defaultFake := runtime.NewFake()
+	acpFake := runtime.NewFake()
+	session := "acp-worker"
+	if err := acpFake.Start(t.Context(), session, runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	provider := New(defaultFake, &noFencedNudgeProvider{Provider: acpFake})
+	provider.RouteACP(session)
+
+	err := provider.NudgeFenced(session, "launch-1", runtime.TextContent("continue"))
+	if !errors.Is(err, runtime.ErrInteractionUnsupported) {
+		t.Fatalf("NudgeFenced = %v, want ErrInteractionUnsupported", err)
+	}
+	if got := defaultFake.CountCalls("NudgeFenced", session); got != 0 {
+		t.Fatalf("default fenced nudge calls = %d, want 0", got)
+	}
+	if got := acpFake.CountCalls("NudgeFenced", session); got != 0 {
+		t.Fatalf("ACP fenced nudge calls = %d, want 0", got)
+	}
+}
+
+type unattendedStopCall struct {
+	name          string
+	expectedToken string
+}
+
+type unattendedStopperProvider struct {
+	runtime.Provider
+	calls []unattendedStopCall
+	err   error
+}
+
+func newUnattendedStopperProvider(err error) *unattendedStopperProvider {
+	return &unattendedStopperProvider{Provider: runtime.NewFake(), err: err}
+}
+
+func (p *unattendedStopperProvider) StopUnattendedSession(name, expectedToken string) error {
+	p.calls = append(p.calls, unattendedStopCall{name: name, expectedToken: expectedToken})
+	return p.err
+}
+
+type freshLivenessProvider struct {
+	*runtime.Fake
+	calls       []runtime.LivenessTarget
+	observation runtime.Liveness
+}
+
+func newFreshLivenessProvider(observation runtime.Liveness) *freshLivenessProvider {
+	return &freshLivenessProvider{Fake: runtime.NewFake(), observation: observation}
+}
+
+func (p *freshLivenessProvider) ObserveFreshLiveness(target runtime.LivenessTarget) runtime.Liveness {
+	p.calls = append(p.calls, target)
+	return p.observation
+}
+
+type sequencedFreshUnattendedProvider struct {
+	*runtime.Fake
+	observations []runtime.Liveness
+	next         int
+}
+
+func (p *sequencedFreshUnattendedProvider) StopUnattendedSession(name, _ string) error {
+	return p.Stop(name)
+}
+
+func (p *sequencedFreshUnattendedProvider) ObserveFreshLiveness(runtime.LivenessTarget) runtime.Liveness {
+	if p.next >= len(p.observations) {
+		return runtime.Liveness{}
+	}
+	observation := p.observations[p.next]
+	p.next++
+	return observation
+}
+
+type blockingFreshUnattendedProvider struct {
+	*runtime.Fake
+	started chan struct{}
+	release chan struct{}
+}
+
+func (p *blockingFreshUnattendedProvider) StopUnattendedSession(name, _ string) error {
+	return p.Stop(name)
+}
+
+func (p *blockingFreshUnattendedProvider) ObserveFreshLiveness(runtime.LivenessTarget) runtime.Liveness {
+	close(p.started)
+	<-p.release
+	return runtime.Liveness{Complete: true}
+}
+
+func TestProviderBoundACPStopRetainsRouteUntilFreshCompleteAbsence(t *testing.T) {
+	const name = "reused-session"
+	defaultSP := runtime.NewFake()
+	acpSP := &sequencedFreshUnattendedProvider{
+		Fake: runtime.NewFake(),
+		observations: []runtime.Liveness{
+			{},
+			{Running: true, Alive: true, Complete: true},
+			{Complete: true},
+		},
+	}
+	p := New(defaultSP, acpSP)
+	p.RouteACP(name)
+	if err := p.Start(context.Background(), name, runtime.Config{}); err != nil {
+		t.Fatalf("Start(ACP): %v", err)
+	}
+	if err := p.StopUnattendedSession(name, "incarnation-token"); err != nil {
+		t.Fatalf("StopUnattendedSession(ACP): %v", err)
+	}
+	if got := p.route(name); got != acpSP {
+		t.Fatalf("route after bound stop = %T, want ACP retained for confirmation", got)
+	}
+
+	target := runtime.LivenessTarget{SessionID: "durable-id", SessionName: name}
+	if got := p.ObserveFreshLiveness(target); got.Complete {
+		t.Fatalf("first fresh liveness = %#v, want incomplete", got)
+	}
+	if got := p.route(name); got != acpSP {
+		t.Fatalf("route after incomplete observation = %T, want ACP retained", got)
+	}
+	if got := p.ObserveFreshLiveness(target); !got.Complete || !got.Running || !got.Alive {
+		t.Fatalf("second fresh liveness = %#v, want complete live observation", got)
+	}
+	if got := p.route(name); got != acpSP {
+		t.Fatalf("route after live observation = %T, want ACP retained", got)
+	}
+	if got := p.ObserveFreshLiveness(target); !got.Complete || got.Running || got.Alive {
+		t.Fatalf("third fresh liveness = %#v, want complete absence", got)
+	}
+	if got := p.route(name); got != defaultSP {
+		t.Fatalf("route after complete absence = %T, want default", got)
+	}
+
+	if err := p.Start(context.Background(), name, runtime.Config{}); err != nil {
+		t.Fatalf("Start(reused default): %v", err)
+	}
+	if got := defaultSP.CountCalls("Start", name); got != 1 {
+		t.Fatalf("default Start calls = %d, want 1 for reused name", got)
+	}
+	if got := acpSP.CountCalls("Start", name); got != 1 {
+		t.Fatalf("ACP Start calls = %d, want only initial routed start", got)
+	}
+}
+
+func TestProviderFreshAbsenceDoesNotClearReplacementACPRoute(t *testing.T) {
+	const name = "replaced-session"
+	defaultSP := runtime.NewFake()
+	acpSP := &blockingFreshUnattendedProvider{
+		Fake:    runtime.NewFake(),
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	p := New(defaultSP, acpSP)
+	p.RouteACP(name)
+	if err := p.Start(context.Background(), name, runtime.Config{}); err != nil {
+		t.Fatalf("Start(initial ACP): %v", err)
+	}
+	if err := p.StopUnattendedSession(name, "old-incarnation"); err != nil {
+		t.Fatalf("StopUnattendedSession(initial ACP): %v", err)
+	}
+
+	observed := make(chan runtime.Liveness, 1)
+	go func() {
+		observed <- p.ObserveFreshLiveness(runtime.LivenessTarget{
+			SessionID:   "old-durable-id",
+			SessionName: name,
+		})
+	}()
+	select {
+	case <-acpSP.started:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("old ACP observation did not start")
+	}
+
+	p.RouteACP(name)
+	close(acpSP.release)
+	select {
+	case got := <-observed:
+		if !got.Complete || got.Running || got.Alive {
+			t.Fatalf("old fresh liveness = %#v, want complete absence", got)
+		}
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("old ACP observation did not finish")
+	}
+	if got := p.route(name); got != acpSP {
+		t.Fatalf("replacement route = %T, want ACP registration retained", got)
+	}
+
+	if err := p.Start(context.Background(), name, runtime.Config{}); err != nil {
+		t.Fatalf("Start(replacement ACP): %v", err)
+	}
+	if got := acpSP.CountCalls("Start", name); got != 2 {
+		t.Fatalf("ACP Start calls = %d, want initial plus replacement", got)
+	}
+	if got := defaultSP.CountCalls("Start", name); got != 0 {
+		t.Fatalf("default Start calls = %d, want 0", got)
+	}
+}
+
+func TestProviderObserveFreshLivenessRoutesOnlySelectedBackend(t *testing.T) {
+	target := runtime.LivenessTarget{
+		SessionID:            "durable-session-id",
+		SessionName:          "target-session",
+		ProcessNames:         []string{"agent"},
+		IncarnationStartedAt: time.Unix(123, 0),
+	}
+	want := runtime.Liveness{Running: true, Alive: true, Complete: true}
+
+	t.Run("default", func(t *testing.T) {
+		defaultSP := newFreshLivenessProvider(want)
+		acpSP := newFreshLivenessProvider(runtime.Liveness{Complete: true})
+		p := New(defaultSP, acpSP)
+
+		if got := runtime.ObserveFreshLiveness(p, target); got != want {
+			t.Fatalf("ObserveFreshLiveness(default) = %#v, want %#v", got, want)
+		}
+		if got := defaultSP.calls; len(got) != 1 || !reflect.DeepEqual(got[0], target) {
+			t.Fatalf("default fresh observations = %#v, want one exact target", got)
+		}
+		if got := acpSP.calls; len(got) != 0 {
+			t.Fatalf("ACP fresh observations = %#v, want no fallback probe", got)
+		}
+		if got := acpSP.SnapshotCalls(); len(got) != 0 {
+			t.Fatalf("ACP backend calls = %#v, want untouched backend", got)
+		}
+	})
+
+	t.Run("ACP", func(t *testing.T) {
+		defaultSP := newFreshLivenessProvider(runtime.Liveness{Complete: true})
+		acpSP := newFreshLivenessProvider(want)
+		p := New(defaultSP, acpSP)
+		p.RouteACP(target.SessionName)
+
+		if got := runtime.ObserveFreshLiveness(p, target); got != want {
+			t.Fatalf("ObserveFreshLiveness(ACP) = %#v, want %#v", got, want)
+		}
+		if got := acpSP.calls; len(got) != 1 || !reflect.DeepEqual(got[0], target) {
+			t.Fatalf("ACP fresh observations = %#v, want one exact target", got)
+		}
+		if got := defaultSP.calls; len(got) != 0 {
+			t.Fatalf("default fresh observations = %#v, want no fallback probe", got)
+		}
+		if got := defaultSP.SnapshotCalls(); len(got) != 0 {
+			t.Fatalf("default backend calls = %#v, want untouched backend", got)
+		}
+	})
+
+	t.Run("unsupported selected backend is incomplete without probing ACP", func(t *testing.T) {
+		acpSP := newFreshLivenessProvider(want)
+		p := New(runtime.NewFake(), acpSP)
+
+		if got := runtime.ObserveFreshLiveness(p, target); got.Complete {
+			t.Fatalf("ObserveFreshLiveness(unsupported default) = %#v, want incomplete", got)
+		}
+		if got := acpSP.calls; len(got) != 0 {
+			t.Fatalf("ACP fresh observations = %#v, want no fallback probe", got)
+		}
+		if got := acpSP.SnapshotCalls(); len(got) != 0 {
+			t.Fatalf("ACP backend calls = %#v, want untouched backend", got)
+		}
+	})
+}
+
+func TestProviderStopUnattendedSessionRoutesOnlySelectedBackend(t *testing.T) {
+	t.Run("default", func(t *testing.T) {
+		defaultSP := newUnattendedStopperProvider(nil)
+		acpSP := newUnattendedStopperProvider(nil)
+		p := New(defaultSP, acpSP)
+
+		if err := p.StopUnattendedSession("plain", "token-default"); err != nil {
+			t.Fatalf("StopUnattendedSession(default): %v", err)
+		}
+		if got := defaultSP.calls; len(got) != 1 || got[0] != (unattendedStopCall{name: "plain", expectedToken: "token-default"}) {
+			t.Fatalf("default unattended stops = %#v, want exact plain/token-default call", got)
+		}
+		if got := acpSP.calls; len(got) != 0 {
+			t.Fatalf("ACP unattended stops = %#v, want none", got)
+		}
+	})
+
+	t.Run("ACP", func(t *testing.T) {
+		defaultSP := newUnattendedStopperProvider(nil)
+		acpSP := newUnattendedStopperProvider(nil)
+		p := New(defaultSP, acpSP)
+		p.RouteACP("acpsess")
+
+		if err := p.StopUnattendedSession("acpsess", "token-acp"); err != nil {
+			t.Fatalf("StopUnattendedSession(ACP): %v", err)
+		}
+		if got := acpSP.calls; len(got) != 1 || got[0] != (unattendedStopCall{name: "acpsess", expectedToken: "token-acp"}) {
+			t.Fatalf("ACP unattended stops = %#v, want exact acpsess/token-acp call", got)
+		}
+		if got := defaultSP.calls; len(got) != 0 {
+			t.Fatalf("default unattended stops = %#v, want none", got)
+		}
+	})
+
+	t.Run("unsupported default does not probe ACP", func(t *testing.T) {
+		acpSP := newUnattendedStopperProvider(nil)
+		p := New(runtime.NewFake(), acpSP)
+
+		err := p.StopUnattendedSession("plain", "token")
+		if err == nil || !strings.Contains(err.Error(), "default backend") {
+			t.Fatalf("StopUnattendedSession error = %v, want contextual default-backend error", err)
+		}
+		if got := acpSP.calls; len(got) != 0 {
+			t.Fatalf("ACP unattended stops = %#v, want no fallback probe", got)
+		}
+	})
+
+	t.Run("ACP error does not probe default", func(t *testing.T) {
+		sentinel := errors.New("ACP unattended stop unavailable")
+		defaultSP := newUnattendedStopperProvider(nil)
+		acpSP := newUnattendedStopperProvider(sentinel)
+		p := New(defaultSP, acpSP)
+		p.RouteACP("acpsess")
+
+		err := p.StopUnattendedSession("acpsess", "token")
+		if !errors.Is(err, sentinel) || !strings.Contains(err.Error(), "ACP backend") {
+			t.Fatalf("StopUnattendedSession error = %v, want wrapped contextual ACP error", err)
+		}
+		if got := defaultSP.calls; len(got) != 0 {
+			t.Fatalf("default unattended stops = %#v, want no fallback probe", got)
+		}
+	})
+}
 
 // Relaunch must reach the routed backend (default vs ACP), or the reconciler's
 // RelaunchProvider type-assert would be masked by the auto router and fall back

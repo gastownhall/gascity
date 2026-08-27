@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -685,9 +686,190 @@ func TestDoRuntimeDrainCheckJSONNotDrainingWritesFalseResult(t *testing.T) {
 	validateJSONAgainstResultSchema(t, []string{"runtime", "drain-check"}, stdout.Bytes())
 }
 
+func TestCmdRuntimeDrainCheckExplicitTargetDoesNotApplyDrainAckAuthority(t *testing.T) {
+	cityPath, sessionID := writeE2b2ProviderFailureCity(t)
+	const sessionName = "test-city--frontend--worker"
+	t.Setenv("GC_CITY", cityPath)
+	t.Setenv("GC_CITY_PATH", cityPath)
+	t.Setenv("GC_SESSION", "fake")
+	t.Setenv("GC_SESSION_ID", "gc-other-session")
+	t.Setenv("GC_INSTANCE_TOKEN", "other-token")
+
+	sp := runtime.NewFake()
+	if err := sp.SetMeta(sessionName, "GC_DRAIN", "1"); err != nil {
+		t.Fatalf("seed drain metadata: %v", err)
+	}
+	oldBuild := buildSessionProviderByName
+	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		return sp, nil
+	}
+	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdRuntimeDrainCheck([]string{sessionID}, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("explicit drain-check code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+}
+
 // ---------------------------------------------------------------------------
 // doRuntimeDrainAck tests
 // ---------------------------------------------------------------------------
+
+func TestCmdRuntimeDrainAckExplicitSelfPokesExactSession(t *testing.T) {
+	cityPath, sessionID := writeE2b2ProviderFailureCity(t)
+	const sessionName = "test-city--frontend--worker"
+	t.Setenv("GC_CITY", cityPath)
+	t.Setenv("GC_CITY_PATH", cityPath)
+	t.Setenv("GC_SESSION", "fake")
+	t.Setenv("GC_SESSION_ID", sessionID)
+	t.Setenv("GC_INSTANCE_TOKEN", "self-token")
+
+	sp := runtime.NewFake()
+	oldBuild := buildSessionProviderByName
+	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		return sp, nil
+	}
+	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
+
+	oldExact := drainAckPokeSessionStartController
+	oldGeneric := drainAckPokeController
+	var exactSessionID string
+	genericCalls := 0
+	drainAckPokeSessionStartController = func(gotCityPath, gotSessionID string) error {
+		if canonicalTestPath(gotCityPath) != canonicalTestPath(cityPath) {
+			t.Fatalf("exact poke city = %q, want %q", gotCityPath, cityPath)
+		}
+		exactSessionID = gotSessionID
+		return nil
+	}
+	drainAckPokeController = func(string) error {
+		genericCalls++
+		return nil
+	}
+	t.Cleanup(func() {
+		drainAckPokeSessionStartController = oldExact
+		drainAckPokeController = oldGeneric
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdRuntimeDrainAck([]string{sessionID}, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("self drain-ack code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if exactSessionID != sessionID || genericCalls != 0 {
+		t.Fatalf("poke result = exact %q generic %d, want exact %q only", exactSessionID, genericCalls, sessionID)
+	}
+	for key, want := range map[string]string{
+		drainAckRequesterSessionIDKey:     sessionID,
+		drainAckRequesterInstanceTokenKey: "self-token",
+	} {
+		got, err := sp.GetMeta(sessionName, key)
+		if err != nil || got != want {
+			t.Fatalf("runtime metadata %s = (%q, %v), want %q", key, got, err, want)
+		}
+	}
+}
+
+func TestRunRuntimeDrainAckExplicitCityOutsideCWDUsesExactControllerPoke(t *testing.T) {
+	cityPath, sessionID := writeE2b2ProviderFailureCity(t)
+	t.Chdir(t.TempDir())
+	t.Setenv("GC_CITY", "")
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_DIR", "")
+	t.Setenv("GC_SESSION", "fake")
+	t.Setenv("GC_SESSION_ID", sessionID)
+	t.Setenv("GC_INSTANCE_TOKEN", "self-token")
+
+	sp := runtime.NewFake()
+	oldBuild := buildSessionProviderByName
+	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		return sp, nil
+	}
+	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
+
+	oldExact := drainAckPokeSessionStartController
+	oldGeneric := drainAckPokeController
+	var exactCityPath, exactCommand string
+	exactFallbackCalls := 0
+	genericCalls := 0
+	drainAckPokeSessionStartController = func(gotCityPath, gotSessionID string) error {
+		return pokeSessionStartControllerWith(
+			gotCityPath,
+			gotSessionID,
+			func(senderCityPath, command string) ([]byte, error) {
+				exactCityPath = senderCityPath
+				exactCommand = command
+				if canonicalTestPath(senderCityPath) != canonicalTestPath(cityPath) {
+					return nil, errors.New("wrong controller socket city")
+				}
+				return []byte(sessionStartSocketReplyOK), nil
+			},
+			func(string) error {
+				exactFallbackCalls++
+				return nil
+			},
+		)
+	}
+	drainAckPokeController = func(string) error {
+		genericCalls++
+		return nil
+	}
+	t.Cleanup(func() {
+		drainAckPokeSessionStartController = oldExact
+		drainAckPokeController = oldGeneric
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--city", cityPath, "runtime", "drain-ack", sessionID}, &stdout, &stderr); code != 0 {
+		t.Fatalf("run drain-ack = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if canonicalTestPath(exactCityPath) != canonicalTestPath(cityPath) || exactCommand != sessionStartCommandPrefix+sessionID {
+		t.Fatalf("exact wire = (%q, %q), want (%q, %q)", exactCityPath, exactCommand, cityPath, sessionStartCommandPrefix+sessionID)
+	}
+	if exactFallbackCalls != 0 || genericCalls != 0 {
+		t.Fatalf("fallback calls = exact:%d generic:%d, want exact:0 generic:0", exactFallbackCalls, genericCalls)
+	}
+}
+
+func TestCmdRuntimeDrainAckExplicitCrossSessionRefusesBeforeMutation(t *testing.T) {
+	cityPath, sessionID := writeE2b2ProviderFailureCity(t)
+	t.Setenv("GC_CITY", cityPath)
+	t.Setenv("GC_CITY_PATH", cityPath)
+	t.Setenv("GC_SESSION", "fake")
+	t.Setenv("GC_SESSION_ID", "gc-other-session")
+	t.Setenv("GC_INSTANCE_TOKEN", "other-token")
+
+	sp := runtime.NewFake()
+	oldBuild := buildSessionProviderByName
+	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		return sp, nil
+	}
+	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
+
+	oldExact := drainAckPokeSessionStartController
+	oldGeneric := drainAckPokeController
+	pokeCalls := 0
+	drainAckPokeSessionStartController = func(string, string) error { pokeCalls++; return nil }
+	drainAckPokeController = func(string) error { pokeCalls++; return nil }
+	t.Cleanup(func() {
+		drainAckPokeSessionStartController = oldExact
+		drainAckPokeController = oldGeneric
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdRuntimeDrainAck([]string{sessionID}, false, &stdout, &stderr); code != 1 {
+		t.Fatalf("cross-session drain-ack code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "refusing cross-session drain acknowledgement") {
+		t.Fatalf("cross-session stderr = %q, want refusal", stderr.String())
+	}
+	if pokeCalls != 0 {
+		t.Fatalf("cross-session drain acknowledgement poked controller %d time(s), want 0", pokeCalls)
+	}
+	if got, err := sp.GetMeta("test-city--frontend--worker", "GC_DRAIN_ACK"); err != nil || got != "" {
+		t.Fatalf("cross-session acknowledgement metadata = (%q, %v), want empty", got, err)
+	}
+}
 
 func TestDoRuntimeDrainAck(t *testing.T) {
 	old := drainAckPokeController
@@ -784,6 +966,70 @@ func TestDoRuntimeDrainAckPokesController(t *testing.T) {
 	}
 }
 
+func TestDoRuntimeDrainAckPokesExactDurableSession(t *testing.T) {
+	oldExact := drainAckPokeSessionStartController
+	var gotCityPath, gotSessionID string
+	drainAckPokeSessionStartController = func(cityPath, sessionID string) error {
+		gotCityPath = cityPath
+		gotSessionID = sessionID
+		return nil
+	}
+	t.Cleanup(func() { drainAckPokeSessionStartController = oldExact })
+
+	dops := newFakeDrainOps()
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainAckTarget(dops, sessionRuntimeTarget{
+		cityPath:               "/city/path",
+		display:                "display-name",
+		sessionID:              "gc-exact-session",
+		sessionName:            "session-name",
+		requesterSessionID:     "gc-exact-session",
+		requesterInstanceToken: "exact-token",
+	}, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if gotCityPath != "/city/path" || gotSessionID != "gc-exact-session" {
+		t.Fatalf("exact poke = (%q, %q), want (/city/path, gc-exact-session)", gotCityPath, gotSessionID)
+	}
+	if !dops.acked["session-name"] {
+		t.Fatal("drain acknowledgement was not written before the exact poke")
+	}
+}
+
+func TestDoRuntimeDrainAckOperatorTargetUsesGenericPoke(t *testing.T) {
+	oldExact := drainAckPokeSessionStartController
+	oldGeneric := drainAckPokeController
+	exactCalls, genericCalls := 0, 0
+	drainAckPokeSessionStartController = func(string, string) error {
+		exactCalls++
+		return nil
+	}
+	drainAckPokeController = func(string) error {
+		genericCalls++
+		return nil
+	}
+	t.Cleanup(func() {
+		drainAckPokeSessionStartController = oldExact
+		drainAckPokeController = oldGeneric
+	})
+
+	dops := newFakeDrainOps()
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainAckTarget(dops, sessionRuntimeTarget{
+		cityPath:    "/city/path",
+		display:     "display-name",
+		sessionID:   "gc-target-session",
+		sessionName: "session-name",
+	}, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if exactCalls != 0 || genericCalls != 1 {
+		t.Fatalf("poke calls = exact:%d generic:%d, want exact:0 generic:1", exactCalls, genericCalls)
+	}
+}
+
 func TestDoRuntimeDrainAckErrorDoesNotPoke(t *testing.T) {
 	calls := 0
 	old := drainAckPokeController
@@ -821,6 +1067,59 @@ func TestDoRuntimeDrainAckPokeFailureWarns(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "Drain acknowledged.") {
 		t.Errorf("stdout = %q, want it to contain %q", stdout.String(), "Drain acknowledged.")
+	}
+}
+
+func TestDoRuntimeDrainAckBlockedControllerRefusesWithoutAcknowledgement(t *testing.T) {
+	oldExact := drainAckPokeSessionStartController
+	drainAckPokeSessionStartController = func(string, string) error {
+		return fmt.Errorf("refused: %w", errSessionStartControllerBlocked)
+	}
+	t.Cleanup(func() { drainAckPokeSessionStartController = oldExact })
+
+	dops := newFakeDrainOps()
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainAckTarget(dops, sessionRuntimeTarget{
+		cityPath:               "/city",
+		display:                "worker",
+		sessionID:              "gc-self",
+		sessionName:            "worker",
+		requesterSessionID:     "gc-self",
+		requesterInstanceToken: "instance-token",
+	}, true, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("blocked controller exit code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "controller refused") || strings.Contains(stdout.String(), "acknowledged") {
+		t.Fatalf("blocked controller output stdout=%q stderr=%q, want clear refusal and no acknowledgement", stdout.String(), stderr.String())
+	}
+}
+
+func TestDoRuntimeDrainAckRejectsSelfContextMissingInstanceTokenBeforeMutation(t *testing.T) {
+	oldExact := drainAckPokeSessionStartController
+	oldGeneric := drainAckPokeController
+	pokes := 0
+	drainAckPokeSessionStartController = func(string, string) error { pokes++; return nil }
+	drainAckPokeController = func(string) error { pokes++; return nil }
+	t.Cleanup(func() {
+		drainAckPokeSessionStartController = oldExact
+		drainAckPokeController = oldGeneric
+	})
+
+	dops := newFakeDrainOps()
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainAckTarget(dops, sessionRuntimeTarget{
+		cityPath:           "/city",
+		display:            "worker",
+		sessionID:          "gc-self",
+		sessionName:        "worker",
+		requesterSessionID: "gc-self",
+	}, false, &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "missing GC_INSTANCE_TOKEN") {
+		t.Fatalf("missing-token acknowledgement = code %d stdout=%q stderr=%q, want refusal", code, stdout.String(), stderr.String())
+	}
+	if dops.acked["worker"] || pokes != 0 {
+		t.Fatalf("missing-token acknowledgement mutated=%t pokes=%d, want neither", dops.acked["worker"], pokes)
 	}
 }
 
@@ -893,6 +1192,27 @@ func TestProviderDrainOpsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestProviderDrainOpsSetDrainAckBindsRequesterMetadata(t *testing.T) {
+	t.Setenv("GC_SESSION_ID", "gc-self")
+	t.Setenv("GC_INSTANCE_TOKEN", "self-token")
+	sp := runtime.NewFake()
+	if err := sp.Start(t.Context(), "worker", runtime.Config{}); err != nil {
+		t.Fatalf("start fake runtime: %v", err)
+	}
+	if err := newDrainOps(sp).setDrainAck("worker"); err != nil {
+		t.Fatalf("set requester-bound drain acknowledgement: %v", err)
+	}
+	for key, want := range map[string]string{
+		drainAckRequesterSessionIDKey:     "gc-self",
+		drainAckRequesterInstanceTokenKey: "self-token",
+	} {
+		got, err := sp.GetMeta("worker", key)
+		if err != nil || got != want {
+			t.Fatalf("runtime metadata %s = (%q, %v), want %q", key, got, err, want)
+		}
+	}
+}
+
 func TestProviderDrainOpsReportsMetadataErrors(t *testing.T) {
 	sp := runtime.NewFailFake()
 	dops := newDrainOps(sp)
@@ -950,6 +1270,10 @@ func TestProviderDrainOpsClearDrainAttemptsAllMetadataRemovals(t *testing.T) {
 	want := []string{
 		"GC_DRAIN_ACK",
 		reconcilerDrainAckSourceKey,
+		drainAckRequesterSessionIDKey,
+		drainAckRequesterInstanceTokenKey,
+		reconcilerDrainAckTriggerBeadIDKey,
+		reconcilerDrainAckTriggerStoreRefKey,
 		reconcilerDrainAckReasonKey,
 		reconcilerDrainAckGenerationKey,
 		"GC_DRAIN",
@@ -978,11 +1302,155 @@ func TestProviderDrainOpsSetDrainAckAttemptsAckAfterCleanupErrors(t *testing.T) 
 	}
 	wantSet := []string{
 		reconcilerDrainAckSourceKey,
+		drainAckRequesterSessionIDKey,
+		drainAckRequesterInstanceTokenKey,
 		"GC_DRAIN_ACK",
 	}
 	if !slices.Equal(sp.setKeys, wantSet) {
 		t.Fatalf("set keys = %v, want %v", sp.setKeys, wantSet)
 	}
+}
+
+// TestProviderDrainOpsSetDrainAckStampsAcknowledgedTrigger pins the ack-time
+// half of ga-f7v2ft.131: the routed work an agent finished travels WITH its
+// acknowledgement, verbatim off the member row, so the controller never has to
+// ask what the row says on a later tick.
+func TestProviderDrainOpsSetDrainAckStampsAcknowledgedTrigger(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(t.Context(), "worker", runtime.Config{}); err != nil {
+		t.Fatalf("start fake runtime: %v", err)
+	}
+	dops := newDrainAckOps(sp, func() (drainAckTriggerBinding, error) {
+		return drainAckTriggerBinding{BeadID: "gc-work-1", StoreRef: "rig:packs"}, nil
+	})
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatalf("set drain acknowledgement: %v", err)
+	}
+	for key, want := range map[string]string{
+		reconcilerDrainAckTriggerBeadIDKey:   "gc-work-1",
+		reconcilerDrainAckTriggerStoreRefKey: "rig:packs",
+	} {
+		got, err := sp.GetMeta("worker", key)
+		if err != nil || got != want {
+			t.Fatalf("runtime metadata %s = (%q, %v), want %q", key, got, err, want)
+		}
+	}
+}
+
+func TestProviderDrainOpsSetDrainAckStampsBothOrNeither(t *testing.T) {
+	t.Run("no reader leaves the acknowledgement unstamped", func(t *testing.T) {
+		sp := newStartedFakeRuntime(t)
+		if err := newDrainOps(sp).setDrainAck("worker"); err != nil {
+			t.Fatalf("set drain acknowledgement: %v", err)
+		}
+		assertNoAckTriggerStamp(t, sp)
+	})
+
+	t.Run("empty row trigger leaves the acknowledgement unstamped", func(t *testing.T) {
+		sp := newStartedFakeRuntime(t)
+		dops := newDrainAckOps(sp, func() (drainAckTriggerBinding, error) {
+			return drainAckTriggerBinding{}, nil
+		})
+		if err := dops.setDrainAck("worker"); err != nil {
+			t.Fatalf("set drain acknowledgement: %v", err)
+		}
+		assertNoAckTriggerStamp(t, sp)
+	})
+
+	t.Run("a row with no store ref leaves the acknowledgement unstamped", func(t *testing.T) {
+		sp := newStartedFakeRuntime(t)
+		dops := newDrainAckOps(sp, func() (drainAckTriggerBinding, error) {
+			return drainAckTriggerBinding{BeadID: "gc-work-1"}, nil
+		})
+		if err := dops.setDrainAck("worker"); err != nil {
+			t.Fatalf("set drain acknowledgement: %v", err)
+		}
+		assertNoAckTriggerStamp(t, sp)
+	})
+
+	t.Run("a half-written pair is rolled back", func(t *testing.T) {
+		sp := &failOnKeySetMetaProvider{Fake: runtime.NewFake(), failKey: reconcilerDrainAckTriggerStoreRefKey}
+		if err := sp.Start(t.Context(), "worker", runtime.Config{}); err != nil {
+			t.Fatalf("start fake runtime: %v", err)
+		}
+		dops := newDrainAckOps(sp, func() (drainAckTriggerBinding, error) {
+			return drainAckTriggerBinding{BeadID: "gc-work-1", StoreRef: "city:test-city"}, nil
+		})
+		if err := dops.setDrainAck("worker"); err == nil {
+			t.Fatal("setDrainAck should report a failed trigger stamp")
+		}
+		assertNoAckTriggerStamp(t, sp)
+	})
+}
+
+// TestDrainAckTriggerReaderDegradesToUnstampedAck pins the contract that keeps
+// the acknowledgement itself as reliable as it was before the stamp: an
+// unreadable member row warns and yields no stamp rather than failing an ack
+// the agent has already earned.
+func TestDrainAckTriggerReaderDegradesToUnstampedAck(t *testing.T) {
+	var stderr bytes.Buffer
+	read := drainAckTriggerReaderFrom(func() (drainAckTriggerBinding, error) {
+		return drainAckTriggerBinding{}, errors.New("opening store: unavailable")
+	}, &stderr)
+	binding, err := read()
+	if err != nil || binding != (drainAckTriggerBinding{}) {
+		t.Fatalf("degraded trigger read = (%+v, %v), want an empty binding and no error", binding, err)
+	}
+	if !strings.Contains(stderr.String(), "acknowledging without a trigger stamp") {
+		t.Fatalf("stderr = %q, want the unstamped-acknowledgement warning", stderr.String())
+	}
+}
+
+func TestNewDrainAckTriggerReaderRequiresDurableIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		target sessionRuntimeTarget
+	}{
+		{name: "no city path", target: sessionRuntimeTarget{sessionID: "gc-1"}},
+		{name: "no session id", target: sessionRuntimeTarget{cityPath: t.TempDir()}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if reader := newDrainAckTriggerReader(test.target, io.Discard); reader != nil {
+				t.Fatal("reader built without a durable session identity; there is no row to read")
+			}
+		})
+	}
+}
+
+func newStartedFakeRuntime(t *testing.T) *runtime.Fake {
+	t.Helper()
+	sp := runtime.NewFake()
+	if err := sp.Start(t.Context(), "worker", runtime.Config{}); err != nil {
+		t.Fatalf("start fake runtime: %v", err)
+	}
+	return sp
+}
+
+func assertNoAckTriggerStamp(t *testing.T, sp runtime.Provider) {
+	t.Helper()
+	for _, key := range []string{reconcilerDrainAckTriggerBeadIDKey, reconcilerDrainAckTriggerStoreRefKey} {
+		got, err := sp.GetMeta("worker", key)
+		if err != nil {
+			t.Fatalf("read %s: %v", key, err)
+		}
+		if got != "" {
+			t.Fatalf("runtime metadata %s = %q, want no stamp", key, got)
+		}
+	}
+}
+
+// failOnKeySetMetaProvider fails exactly one SetMeta key, which is how a
+// half-written trigger pair happens in the field.
+type failOnKeySetMetaProvider struct {
+	*runtime.Fake
+	failKey string
+}
+
+func (p *failOnKeySetMetaProvider) SetMeta(name, key, value string) error {
+	if key == p.failKey {
+		return errors.New("metadata write unavailable")
+	}
+	return p.Fake.SetMeta(name, key, value)
 }
 
 // ---------------------------------------------------------------------------
@@ -1421,6 +1889,27 @@ func TestDrainAckNoArgsFallsBackToCityPathEnv(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	oldExact := drainAckPokeSessionStartController
+	drainAckPokeSessionStartController = func(cityPath, sessionID string) error {
+		if canonicalTestPath(cityPath) != canonicalTestPath(cityDir) || sessionID != "gc-42" {
+			t.Fatalf("exact poke = (%q, %q), want (%q, gc-42)", cityPath, sessionID, cityDir)
+		}
+		return nil
+	}
+	t.Cleanup(func() { drainAckPokeSessionStartController = oldExact })
+
+	// This city is a bare directory with no store behind it. The reader is
+	// swapped for one that fails so the leg also proves the contract in
+	// newDrainAckTriggerReader: an unreadable trigger binding warns and leaves
+	// the acknowledgement unstamped rather than failing an ack the agent has
+	// already earned.
+	oldReader := drainAckTriggerReaderFor
+	drainAckTriggerReaderFor = func(_ sessionRuntimeTarget, stderr io.Writer) drainAckTriggerReader {
+		return drainAckTriggerReaderFrom(func() (drainAckTriggerBinding, error) {
+			return drainAckTriggerBinding{}, errors.New("opening store: unavailable")
+		}, stderr)
+	}
+	t.Cleanup(func() { drainAckTriggerReaderFor = oldReader })
 
 	var stdout, stderr bytes.Buffer
 	cmd := newRuntimeDrainAckCmd(&stdout, &stderr)
@@ -1429,6 +1918,7 @@ func TestDrainAckNoArgsFallsBackToCityPathEnv(t *testing.T) {
 	t.Setenv("GC_SESSION", "fake")
 	t.Setenv("GC_ALIAS", "mayor")
 	t.Setenv("GC_SESSION_ID", "gc-42")
+	t.Setenv("GC_INSTANCE_TOKEN", "self-token")
 	t.Setenv("GC_SESSION_NAME", "s-gc-42")
 	t.Setenv("GC_CITY", "")
 	t.Setenv("GC_CITY_PATH", cityDir)
@@ -1440,6 +1930,9 @@ func TestDrainAckNoArgsFallsBackToCityPathEnv(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "Drain acknowledged") {
 		t.Fatalf("stdout = %q, want drain acknowledgement", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "acknowledging without a trigger stamp") {
+		t.Fatalf("stderr = %q, want the unstamped-acknowledgement warning", stderr.String())
 	}
 }
 

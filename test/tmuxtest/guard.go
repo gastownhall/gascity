@@ -111,6 +111,35 @@ func (g *Guard) SocketName() string {
 	return g.socketName
 }
 
+// SocketPath returns the exact filesystem path for this guard's named tmux
+// socket. tmux honors TMUX_TMPDIR for named sockets and otherwise uses /tmp;
+// TMPDIR is intentionally not a fallback.
+func (g *Guard) SocketPath() string {
+	tmpDir := os.Getenv(tmuxTmpEnv)
+	if tmpDir == "" {
+		tmpDir = "/tmp"
+	}
+	return filepath.Join(tmpDir, fmt.Sprintf("tmux-%d", os.Getuid()), g.socketName)
+}
+
+// ServerPID returns the live tmux server PID for this guard's exact socket.
+func (g *Guard) ServerPID() int {
+	g.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxGuardCommandTimeout)
+	defer cancel()
+	args := tmuxArgs(g.socketName, "display-message", "-p", "#{pid}")
+	out, err := exec.CommandContext(ctx, "tmux", args...).CombinedOutput()
+	if err != nil {
+		g.t.Fatalf("tmuxtest: read server PID for socket %q: %v\n%s", g.socketName, err, strings.TrimSpace(string(out)))
+	}
+	text := strings.TrimSpace(string(out))
+	pid, err := strconv.Atoi(text)
+	if err != nil || pid <= 0 || strconv.Itoa(pid) != text {
+		g.t.Fatalf("tmuxtest: invalid server PID for socket %q: %q", g.socketName, text)
+	}
+	return pid
+}
+
 // SessionName returns the expected tmux session name for an agent.
 // Default session naming is just the sanitized agent name because per-city
 // tmux socket isolation makes a city prefix unnecessary.

@@ -561,3 +561,66 @@ func TestFactoryRuntimeHandleUsesConfiguredProviderAndRecorder(t *testing.T) {
 		t.Fatalf("payload.SessionName = %q, want %q", got, want)
 	}
 }
+
+func TestFactoryObserveSessionInfoDoesNotReloadStore(t *testing.T) {
+	wantStoreErr := errors.New("unexpected session reload")
+	sp := runtime.NewFake()
+	const sessionName = "gc-test-worker"
+	if err := sp.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
+		t.Fatalf("seed runtime: %v", err)
+	}
+	factory, err := NewFactory(FactoryConfig{
+		Store: failingGetStore{
+			Store: beads.NewMemStore(),
+			err:   wantStoreErr,
+		},
+		Provider: sp,
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+
+	info := sessionpkg.Info{
+		ID:          "gc-session-1",
+		SessionName: sessionName,
+		State:       sessionpkg.StateSuspended,
+	}
+	obs, err := factory.ObserveSessionInfo(context.Background(), info, nil)
+	if err != nil {
+		t.Fatalf("ObserveSessionInfo: %v", err)
+	}
+	if !obs.Running || !obs.Alive || !obs.Suspended {
+		t.Fatalf("ObserveSessionInfo = %#v, want running, alive, and suspended", obs)
+	}
+	if obs.SessionID != info.ID || obs.RuntimeSessionID != info.ID || obs.SessionName != sessionName {
+		t.Fatalf("ObserveSessionInfo identity = %#v, want session id %q and name %q", obs, info.ID, sessionName)
+	}
+}
+
+func TestFactoryObserveSessionInfoRejectsUnavailableInputs(t *testing.T) {
+	factory, err := NewFactory(FactoryConfig{})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+
+	t.Run("nil context", func(t *testing.T) {
+		if _, err := factory.ObserveSessionInfo(nil, sessionpkg.Info{}, nil); err == nil { //nolint:staticcheck // nil context is the contract under test
+			t.Fatal("ObserveSessionInfo(nil context) error = nil")
+		}
+	})
+
+	t.Run("canceled context", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if _, err := factory.ObserveSessionInfo(ctx, sessionpkg.Info{}, nil); !errors.Is(err, context.Canceled) {
+			t.Fatalf("ObserveSessionInfo(canceled context) error = %v, want context.Canceled", err)
+		}
+	})
+
+	t.Run("nil factory", func(t *testing.T) {
+		var nilFactory *Factory
+		if _, err := nilFactory.ObserveSessionInfo(context.Background(), sessionpkg.Info{}, nil); !errors.Is(err, ErrHandleConfig) {
+			t.Fatalf("ObserveSessionInfo(nil factory) error = %v, want ErrHandleConfig", err)
+		}
+	})
+}

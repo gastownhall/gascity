@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -84,6 +85,57 @@ func TestAddImportHappyPathWritesManifestAndResult(t *testing.T) {
 	}
 	if _, ok := lock.Packs["https://github.com/example/tools.git"]; !ok {
 		t.Fatalf("lock = %#v, want tools entry", lock.Packs)
+	}
+}
+
+func TestAddImportPreservesSymlinkedManifestAndLockfile(t *testing.T) {
+	cityDir := t.TempDir()
+	checkoutDir := t.TempDir()
+	writeFile(t, filepath.Join(cityDir, "city.toml"), "[workspace]\nname = \"demo\"\n")
+
+	targets := map[string]string{
+		"pack.toml":  "[pack]\nname = \"demo\"\nschema = 1\n",
+		"packs.lock": "schema = 1\n",
+	}
+	for name, content := range targets {
+		target := filepath.Join(checkoutDir, name)
+		writeFile(t, target, content)
+		if err := os.Symlink(target, filepath.Join(cityDir, name)); err != nil {
+			t.Fatalf("symlink %s: %v", name, err)
+		}
+	}
+
+	if _, err := AddImportWith(
+		fsys.OSFS{}, cityDir,
+		"https://github.com/example/tools.git", "", "",
+		stubDeps(t, nil),
+	); err != nil {
+		t.Fatalf("AddImportWith: %v", err)
+	}
+
+	for name := range targets {
+		link := filepath.Join(cityDir, name)
+		info, err := os.Lstat(link)
+		if err != nil {
+			t.Fatalf("Lstat %s: %v", name, err)
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("%s symlink was replaced by mode %v", name, info.Mode())
+		}
+	}
+	manifestBytes, err := os.ReadFile(filepath.Join(checkoutDir, "pack.toml"))
+	if err != nil {
+		t.Fatalf("read manifest target: %v", err)
+	}
+	if !strings.Contains(string(manifestBytes), "[imports.tools]") {
+		t.Fatalf("manifest target was not updated:\n%s", manifestBytes)
+	}
+	lockBytes, err := os.ReadFile(filepath.Join(checkoutDir, "packs.lock"))
+	if err != nil {
+		t.Fatalf("read lockfile target: %v", err)
+	}
+	if !strings.Contains(string(lockBytes), `[packs."https://github.com/example/tools.git"]`) {
+		t.Fatalf("lockfile target was not updated:\n%s", lockBytes)
 	}
 }
 

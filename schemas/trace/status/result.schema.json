@@ -8,7 +8,8 @@
     "as_of",
     "controller_running",
     "head_seq",
-    "active_arms"
+    "active_arms",
+    "session_reconciler"
   ],
   "properties": {
     "schema_version": {
@@ -40,6 +41,105 @@
         "type": "object",
         "additionalProperties": true
       }
+    },
+    "session_reconciler": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "available",
+        "configured_mode",
+        "effective_owner",
+        "pending_keys",
+        "audit_pending"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "1"
+        },
+        "available": {
+          "type": "boolean"
+        },
+        "configured_mode": {
+          "enum": ["", "off", "auto", "require"]
+        },
+        "effective_owner": {
+          "enum": ["legacy", "keyed", "required_blocked", "unavailable"]
+        },
+        "pending_keys": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "audit_pending": {
+          "type": "boolean"
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "available": {
+              "const": false
+            },
+            "configured_mode": {
+              "enum": ["", "off", "auto", "require"]
+            },
+            "effective_owner": {
+              "const": "unavailable"
+            },
+            "pending_keys": {
+              "const": 0
+            },
+            "audit_pending": {
+              "const": false
+            }
+          }
+        },
+        {
+          "properties": {
+            "available": {
+              "const": true
+            },
+            "configured_mode": {
+              "const": "off"
+            },
+            "effective_owner": {
+              "const": "legacy"
+            },
+            "pending_keys": {
+              "const": 0
+            },
+            "audit_pending": {
+              "const": false
+            }
+          }
+        },
+        {
+          "properties": {
+            "available": {
+              "const": true
+            },
+            "configured_mode": {
+              "const": "auto"
+            },
+            "effective_owner": {
+              "enum": ["legacy", "keyed"]
+            }
+          }
+        },
+        {
+          "properties": {
+            "available": {
+              "const": true
+            },
+            "configured_mode": {
+              "const": "require"
+            },
+            "effective_owner": {
+              "enum": ["keyed", "required_blocked"]
+            }
+          }
+        }
+      ],
+      "additionalProperties": false
     }
   },
   "additionalProperties": false

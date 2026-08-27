@@ -264,6 +264,109 @@ func TestCloseEmitsClosePatchThenClose(t *testing.T) {
 	}
 }
 
+type staleAwakeDuringCloseStore struct {
+	beads.Store
+	interfered      bool
+	alwaysInterfere bool
+	atomicCalls     int
+	plainCloseCalls int
+}
+
+func (s *staleAwakeDuringCloseStore) interfere(id string) error {
+	if s.interfered && !s.alwaysInterfere {
+		return nil
+	}
+	s.interfered = true
+	return s.SetMetadata(id, "state", string(StateAwake))
+}
+
+func (s *staleAwakeDuringCloseStore) Close(id string) error {
+	s.plainCloseCalls++
+	if err := s.interfere(id); err != nil {
+		return err
+	}
+	return s.Store.Close(id)
+}
+
+func (s *staleAwakeDuringCloseStore) CloseWithMetadataIfMatch(id string, expectedRevision int64, metadata map[string]string) (beads.Bead, error) {
+	s.atomicCalls++
+	if err := s.interfere(id); err != nil {
+		return beads.Bead{}, err
+	}
+	closer, ok := beads.AtomicConditionalCloserFor(s.Store)
+	if !ok {
+		return beads.Bead{}, beads.ErrConditionalWriteUnsupported
+	}
+	return closer.CloseWithMetadataIfMatch(id, expectedRevision, metadata)
+}
+
+// TestCloseRetriesAStaleAwakeWriterBeforeAtomicTerminalClose reproduces the
+// suspend/cleanup race from ga-f7v2ft.78.6. A controller holding an older awake
+// observation writes after Close reads the suspended row. Closing must retry
+// from the new revision and publish closed+drained in one terminal mutation.
+func TestCloseRetriesAStaleAwakeWriterBeforeAtomicTerminalClose(t *testing.T) {
+	backing := beads.NewAtomicCloseMemStore()
+	created, err := backing.Create(sessionBeadFixture("s-race", "open", map[string]string{"state": string(StateSuspended)}))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	tracing := &staleAwakeDuringCloseStore{Store: backing}
+	front := NewStore(beads.SessionStore{Store: tracing})
+
+	closed, err := front.Close(created.ID, "drained", time.Date(2026, 8, 6, 1, 2, 3, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if !closed {
+		t.Fatal("Close reported not-closed for an open suspended session")
+	}
+
+	got, err := backing.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get after Close: %v", err)
+	}
+	if got.Status != "closed" || got.Metadata["state"] != string(StateDrained) {
+		t.Fatalf("terminal row = status %q state %q, want closed/%s", got.Status, got.Metadata["state"], StateDrained)
+	}
+	if tracing.atomicCalls != 2 {
+		t.Fatalf("atomic close calls = %d, want 2 (one stale fence, one retry)", tracing.atomicCalls)
+	}
+	if tracing.plainCloseCalls != 0 {
+		t.Fatalf("plain close calls = %d, want 0 when atomic close is available", tracing.plainCloseCalls)
+	}
+}
+
+func TestCloseBoundsRepeatedAtomicRevisionConflicts(t *testing.T) {
+	backing := beads.NewAtomicCloseMemStore()
+	created, err := backing.Create(sessionBeadFixture("s-hot", "open", map[string]string{"state": string(StateSuspended)}))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	tracing := &staleAwakeDuringCloseStore{Store: backing, alwaysInterfere: true}
+	front := NewStore(beads.SessionStore{Store: tracing})
+
+	closed, err := front.Close(created.ID, "drained", time.Date(2026, 8, 6, 1, 2, 3, 0, time.UTC))
+	if err == nil {
+		t.Fatal("Close error = nil, want bounded revision-conflict failure")
+	}
+	if closed {
+		t.Fatal("Close reported closed after every atomic fence lost")
+	}
+	if tracing.atomicCalls != terminalCloseMaxAttempts {
+		t.Fatalf("atomic close calls = %d, want bounded %d", tracing.atomicCalls, terminalCloseMaxAttempts)
+	}
+	if tracing.plainCloseCalls != 0 {
+		t.Fatalf("plain close calls = %d, want no unsafe fallback", tracing.plainCloseCalls)
+	}
+	got, getErr := backing.Get(created.ID)
+	if getErr != nil {
+		t.Fatalf("Get after conflicts: %v", getErr)
+	}
+	if got.Status != "open" {
+		t.Fatalf("status after conflicts = %q, want open (no partial close)", got.Status)
+	}
+}
+
 // TestCloseAlreadyClosedIsNoOp proves Close on a closed bead emits no writes.
 func TestCloseAlreadyClosedIsNoOp(t *testing.T) {
 	b := sessionBeadFixture("s-1", "closed", nil)

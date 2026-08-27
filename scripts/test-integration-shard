@@ -18,6 +18,15 @@ gc_test_slice_reexec "$repo_root/scripts/test-integration-shard" "$@"
 timeout="${GO_TEST_TIMEOUT:-30m}"
 pkg="./test/integration"
 
+# GC_TEST_BD_BIN opts the real-bd cmd/gc integration journey into a specific
+# caller-pinned bd build. Preserve it through the hermetic environment; when
+# supplied, reject a bad pin rather than letting the journey silently skip.
+gc_test_bd_bin="${GC_TEST_BD_BIN:-}"
+if [[ -n "$gc_test_bd_bin" && ( ! -f "$gc_test_bd_bin" || ! -x "$gc_test_bd_bin" ) ]]; then
+  echo "GC_TEST_BD_BIN must name an executable file when set: $gc_test_bd_bin" >&2
+  exit 1
+fi
+
 gopath_val="$(go env GOPATH)"
 gocache_val="$(go env GOCACHE)"
 gomodcache_val="$(go env GOMODCACHE)"
@@ -61,6 +70,7 @@ run_go() {
     GOVCS="${GOVCS-}" \
     GOWORK="${GOWORK-}" \
     GC_BEADS="${GC_BEADS-}" \
+    GC_TEST_BD_BIN="${gc_test_bd_bin}" \
     GC_FAST_UNIT=0 \
     CGO_CPPFLAGS="${cgo_cppflags}" \
     CGO_LDFLAGS="${cgo_ldflags}" \
@@ -110,9 +120,14 @@ rest_smoke_tests=(
 cmd_gc_integration_tests=(
   TestCapstoneIntegrationRealMinter
   TestControllerDiscoversAddedCronOrderWithoutRestart
+  TestExactSessionStartNativeV59RealBDTmuxJourney
+  TestKeyedDrainFinalizeLiveReadObservesForeignProcessClose
   TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind
   TestPhase2WorkerCoreRealTransportProof
   TestRigAddIncludeResolvesScopedRegistryPackName
+  TestSessionLifecycleStartShadowRealTmuxJourney
+  TestSiblingPoolIsolationMetadataDiff
+  TestSiblingPoolIsolationToleratesSleepPolicyHydration
   TestStorageGateServesACityFromItsBeadsWorkspace
 )
 

@@ -2,34 +2,39 @@ package session
 
 import "github.com/gastownhall/gascity/internal/beads"
 
-// PersistedResponse is the persisted half of a session's API response: the
-// bead-stored facts (status and metadata) that the response builder needs but
-// that are not part of the scalar session.Info projection. It exists so the
-// response path can speak domain types end to end — session.Info for the scalar
-// fields, PersistedResponse for the status/metadata-derived fields — without a
-// *beads.Bead crossing into the API layer.
+// PersistedResponse carries fields projected from one persisted session bead.
+// Status and Metadata form the backend-invariant response projection that is
+// not part of scalar session.Info. Revision is internal, backend-dependent
+// provenance from that same read. Keeping them together lets response and
+// reconciliation paths use domain types without a *beads.Bead crossing their
+// boundary.
 //
 // Bead serialization is confined here: PersistedResponseFromBead is the only
-// place the API response path learns these facts come from a bead. Metadata is
-// the full persisted metadata map; callers decode specific keys through the
-// existing session codecs (ParseTemplateOverrides, SubmissionCapabilitiesForMetadata,
-// LifecycleDisplayReasonWithLiveness, the NamedSessionMetadataKey lookup), never
-// by re-reading a bead.
+// place callers learn these facts come from a bead. Callers decode specific
+// metadata keys through the existing session codecs (ParseTemplateOverrides,
+// SubmissionCapabilitiesForMetadata, LifecycleDisplayReasonWithLiveness, the
+// NamedSessionMetadataKey lookup), never by re-reading a bead.
 type PersistedResponse struct {
 	// Status is the persisted bead status ("open"/"closed"), used to derive the
 	// lifecycle reason and to gate the metadata-derived fields on closed beads.
 	Status string
 	// Metadata is the full persisted session metadata map.
 	Metadata map[string]string
+	// Revision is copied from the same loaded Bead under the strong whole-row
+	// beads.Bead.Revision contract. It is internal and off-wire; zero means the
+	// revision is unavailable. It is not capability authorization and is not the
+	// schema59 partial RowVersion.
+	Revision int64 `json:"-"`
 }
 
-// PersistedResponseFromBead projects a persisted session bead onto the
-// PersistedResponse fields the API response builder consumes. It is pure and
-// backend-invariant: it reads only stored bead fields, so a bead round-trips to
-// the same PersistedResponse regardless of which backend stored it.
+// PersistedResponseFromBead projects one loaded persisted session bead without
+// additional I/O. Status and Metadata are backend-invariant response fields;
+// Revision intentionally preserves the backend-dependent whole-row provenance
+// supplied on that same loaded bead.
 func PersistedResponseFromBead(b beads.Bead) PersistedResponse {
 	return PersistedResponse{
 		Status:   b.Status,
 		Metadata: b.Metadata,
+		Revision: b.Revision,
 	}
 }

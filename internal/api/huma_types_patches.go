@@ -188,7 +188,7 @@ type StatusBody struct {
 type StatusConditionalWrites struct {
 	Mode      string                               `json:"mode" enum:"off,auto,require" doc:"Boot-latched beads.conditional_writes mode."`
 	Origin    string                               `json:"origin" enum:"builtin,config,env" doc:"Where the latched mode came from."`
-	Effective string                               `json:"effective" enum:"off,active,degraded,fail_closed,pending_restart" doc:"Aggregate verdict: off (gate off), active (every store capable), degraded (auto with at least one incapable store), fail_closed (require with at least one incapable store — fenced writes on it refuse), pending_restart (on-disk config drifted from the latched mode)."`
+	Effective string                               `json:"effective" enum:"off,active,degraded,fail_closed,pending_restart" doc:"Aggregate verdict: off (gate off), active (every store capable), degraded (auto with at least one incapable store), fail_closed (require with at least one incapable store, OR the session class lacks the conditional writes it requires — which outranks the mode and applies even when the gate is off), pending_restart (on-disk config drifted from the latched mode)."`
 	Stores    []StatusConditionalWriteStoreVerdict `json:"stores,omitempty" doc:"Per-store verdicts, one row per controller-owned store."`
 	Notices   []StatusRolloutNotice                `json:"notices,omitempty" doc:"Retained rollout notices (env overrides, drift, invalid spellings)."`
 }
@@ -199,7 +199,7 @@ type StatusConditionalWrites struct {
 // rejected a real fenced write at runtime and the fix is a restart to
 // re-probe, not a bd upgrade.
 type StatusConditionalWriteStoreVerdict struct {
-	StoreID string `json:"store_id" doc:"Store scope: city, or rig/<name>."`
+	StoreID string `json:"store_id" doc:"Store scope: city, rig/<name>, storage/<binding> for a relocated coordination-class binding, or 'sessions (required)' for the session class's mode-independent fencing requirement."`
 	Kind    string `json:"kind" doc:"Store kind in the degraded-event wire vocabulary (bd, native, caching, mem, file)."`
 	Probe   string `json:"probe" enum:"capable,incapable,unprobed" doc:"Memoized capability-probe verdict. unprobed means no fenced write has exercised this store yet."`
 	Latch   string `json:"latch" enum:"incapable,unlatched" doc:"Runtime unsupported latch: incapable after the store rejected a real fenced write; cleared only by restart."`

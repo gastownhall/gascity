@@ -624,6 +624,14 @@ func (s *SQLiteStore) normalizeCreate(b Bead) Bead {
 	if b.UpdatedAt.IsZero() {
 		b.UpdatedAt = b.CreatedAt
 	}
+	// Report the revision this create is about to persist, so a caller can fence
+	// on the bead it just got back. A layout without the column projects 0 on
+	// every read, and must keep reporting 0 here.
+	if s.hasRevisionColumn {
+		b.Revision = 1
+	} else {
+		b.Revision = 0
+	}
 	return b
 }
 
@@ -917,12 +925,22 @@ func (s *SQLiteStore) upsertBeadTx(ctx context.Context, tx *sql.Tx, b Bead) erro
 			 ref=excluded.ref,
 			 description=excluded.description,
 			 bead_json=excluded.bead_json`
+	// A first version is revision 1, not 0, matching every other store: a
+	// caller that reads 0 back cannot tell a fresh bead from a store with no
+	// revision support, and would fence against a token that means "unknown".
+	// The column's DDL default stays 0 for rows an older writer left behind;
+	// this writer is explicit. On conflict the excluded value is ignored and
+	// the stored revision advances instead.
+	columns := `id,tier,title,status,issue_type,priority,created_at,updated_at,assignee,from_agent,parent_id,ref,description,bead_json`
+	placeholders := `?,?,?,?,?,?,?,?,?,?,?,?,?,?`
 	if s.hasRevisionColumn {
 		update += `, revision=beads.revision+1`
+		columns += `,revision`
+		placeholders += `,1`
 	}
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO beads(id,tier,title,status,issue_type,priority,created_at,updated_at,assignee,from_agent,parent_id,ref,description,bead_json)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		INSERT INTO beads(`+columns+`)
+		VALUES(`+placeholders+`)
 		ON CONFLICT(id) DO UPDATE SET `+update,
 		b.ID, tier, b.Title, b.Status, b.Type, priority, b.CreatedAt.UnixNano(), sqliteUnixNanoOrZero(b.UpdatedAt),
 		b.Assignee, b.From, b.ParentID, b.Ref, b.Description, string(payload))

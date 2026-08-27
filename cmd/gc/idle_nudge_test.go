@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -232,6 +234,88 @@ func TestNudgeStalledPoolClaims_DeliveryFailureConsumesAttempt(t *testing.T) {
 	session = mustGetTestBead(t, store, session.ID)
 	if got := session.Metadata[idleClaimNudgeCountKey]; got != strconv.Itoa(idleClaimNudgeMaxAttempts) {
 		t.Fatalf("persisted attempt count = %q, want cap %d preserved", got, idleClaimNudgeMaxAttempts)
+	}
+}
+
+// fencedNudgeProvider refuses every delivery with runtime.ErrInputFenced, the
+// contract a runtime uses to say "I proved your input never reached the pane".
+type fencedNudgeProvider struct {
+	runtime.Provider
+	nudgeCalls int
+}
+
+func (p *fencedNudgeProvider) Nudge(string, []runtime.ContentBlock) error {
+	p.nudgeCalls++
+	return fmt.Errorf("%w: tmux session is parked in copy mode", runtime.ErrInputFenced)
+}
+
+// A fenced refusal is proof that NO input reached the session, so it must not
+// burn one of the bounded attempts — otherwise a session parked in copy mode
+// (or behind any other input fence) silently exhausts its backstop in three
+// ticks and is never nudged again once the fence clears. The queued-nudge lane
+// already treats runtime.ErrInputFenced this way (cmd_nudge.go releases the
+// claim instead of recording a failure); this pins the same rule for the
+// backstop engine. Its control is
+// TestNudgeStalledPoolClaims_DeliveryFailureConsumesAttempt: a plain delivery
+// error, which may have partially landed, still consumes an attempt and still
+// reaches the cap.
+func TestNudgeStalledPoolClaims_FencedRefusalNeverConsumesAttempt(t *testing.T) {
+	sp := &fencedNudgeProvider{Provider: runningIdleClaimFake(t, "session-a")}
+	cfg := idleClaimTestCfg()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	session := idleClaimPoolSession()
+	session.Metadata[idleClaimNudgeTriggerKey] = "work-a"
+	session.Metadata[idleClaimNudgeCountKey] = "0"
+	session.Metadata[idleClaimNudgeAtKey] = base.Format(time.RFC3339)
+	work := []beads.Bead{{ID: "work-a", Status: "open"}}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{session}, nil)
+	clk := &clock.Fake{Time: base.Add(idleClaimNudgeGrace + time.Second)}
+	var out bytes.Buffer
+
+	// Refuse far more times than the cap: a fence that never consumes an
+	// attempt can never exhaust the backstop.
+	rounds := idleClaimNudgeMaxAttempts + 3
+	for round := 1; round <= rounds; round++ {
+		nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, clk.Now(), &out)
+		if sp.nudgeCalls != round {
+			t.Fatalf("round %d delivery calls = %d, want %d: the fence exhausted the backstop", round, sp.nudgeCalls, round)
+		}
+		session = mustGetTestBead(t, store, session.ID)
+		if got := session.Metadata[idleClaimNudgeCountKey]; got != "0" {
+			t.Fatalf("round %d persisted attempt count = %q, want 0: a fenced refusal consumed an attempt", round, got)
+		}
+		if got := session.Metadata[idleClaimNudgeAtKey]; got != clk.Now().UTC().Format(time.RFC3339) {
+			t.Fatalf("round %d persisted attempt time = %q, want %q so refusals stay paced", round, got, clk.Now().UTC().Format(time.RFC3339))
+		}
+		// Pacing survives the rollback: nothing is retried until the clock moves.
+		nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, clk.Now(), &out)
+		if sp.nudgeCalls != round {
+			t.Fatalf("round %d re-tick delivery calls = %d, want unchanged %d", round, sp.nudgeCalls, round)
+		}
+		clk.Advance(idleClaimNudgeGrace + time.Second)
+		session = mustGetTestBead(t, store, session.ID)
+	}
+
+	// A parked session must be diagnosable from the controller log by a named
+	// reason, not just "failed".
+	log := out.String()
+	if !strings.Contains(log, "input fenced") || !strings.Contains(log, "attempt not consumed") {
+		t.Fatalf("controller log = %q, want a distinct fenced-refusal reason", log)
+	}
+	if !strings.Contains(log, "copy mode") {
+		t.Fatalf("controller log = %q, want the runtime's named fence reason carried through", log)
+	}
+
+	// Once the fence clears, the very next delivery is attempt 1 of 3 — the
+	// backstop still has its full budget.
+	live := runningIdleClaimFake(t, "session-a")
+	nudgeStalledPoolClaims(live, cfg, store, []beads.Bead{session}, work, nil, clk.Now(), &out)
+	if got := live.CountCalls("Nudge", "session-a"); got != 1 {
+		t.Fatalf("post-fence Nudge calls = %d, want 1", got)
+	}
+	session = mustGetTestBead(t, store, session.ID)
+	if got := session.Metadata[idleClaimNudgeCountKey]; got != "1" {
+		t.Fatalf("post-fence attempt count = %q, want 1", got)
 	}
 }
 

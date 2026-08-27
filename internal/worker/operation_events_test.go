@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/events"
@@ -266,6 +267,42 @@ func TestRuntimeHandleInterruptRecordsWorkerOperationEvent(t *testing.T) {
 	}
 	if got, want := payload.Provider, "claude"; got != want {
 		t.Fatalf("payload.Provider = %q, want %q", got, want)
+	}
+}
+
+func TestRuntimeHandleStopUnattendedRecordsKillOperationEvent(t *testing.T) {
+	recorder := &recordingEventRecorder{}
+	provider := &unattendedStopTestProvider{Fake: runtime.NewFake()}
+	if err := provider.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		Provider:     provider,
+		SessionName:  "legacy-worker",
+		ProviderName: "claude",
+		Transport:    "tmux-cli",
+		Recorder:     recorder,
+	})
+	if err != nil {
+		t.Fatalf("NewRuntimeHandle: %v", err)
+	}
+
+	if err := handle.StopUnattended(context.Background(), "exact-token"); err != nil {
+		t.Fatalf("StopUnattended: %v", err)
+	}
+	if got, want := provider.calls, []unattendedStopTestCall{{name: "legacy-worker", token: "exact-token"}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("bound unattended stops = %#v, want %#v", got, want)
+	}
+
+	var payload operationEventPayload
+	if err := json.Unmarshal(lastRecordedWorkerOperation(t, recorder).Payload, &payload); err != nil {
+		t.Fatalf("Unmarshal(payload): %v", err)
+	}
+	if got, want := payload.Operation, string(workerOperationKill); got != want {
+		t.Fatalf("payload.Operation = %q, want %q", got, want)
+	}
+	if got, want := payload.Result, operationResultSucceeded; got != want {
+		t.Fatalf("payload.Result = %q, want %q", got, want)
 	}
 }
 

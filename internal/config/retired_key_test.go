@@ -42,12 +42,18 @@ func TestClassifyUndecodedRetiredKey(t *testing.T) {
 	}
 }
 
-// TestUndecodedPathsWithEmptyRetiredRegistry proves the SHIPPED registry (empty
-// until S5-T7) leaves unknown-key fatality intact end-to-end through both paths.
-func TestUndecodedPathsWithEmptyRetiredRegistry(t *testing.T) {
+// TestUndecodedPathsWithPopulatedRetiredRegistry proves the SHIPPED registry
+// leaves unknown-key fatality intact end-to-end through both paths: retiring a
+// key must downgrade THAT key, never open a hole for typos.
+func TestUndecodedPathsWithPopulatedRetiredRegistry(t *testing.T) {
 	t.Parallel()
-	if len(retiredKeys) != 0 {
-		t.Fatalf("retiredKeys ships empty (S5-T7 adds the first entry); got %v", retiredKeys)
+	for key, rk := range retiredKeys {
+		if rk.RemovedIn == "" {
+			t.Errorf("retired key %q has no RemovedIn anchor", key)
+		}
+		if rk.Note == "" {
+			t.Errorf("retired key %q has no Note; the operator needs to know what the behavior does now", key)
+		}
 	}
 	var cfg City
 	md, err := toml.Decode("[daemon]\ntotally_unknown_key = true\n", &cfg)

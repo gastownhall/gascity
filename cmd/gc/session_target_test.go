@@ -14,6 +14,7 @@ func TestCurrentSessionRuntimeTargetUsesAlias(t *testing.T) {
 	t.Setenv("GC_CITY", cityDir)
 	t.Setenv("GC_ALIAS", "mayor")
 	t.Setenv("GC_SESSION_ID", "gc-42")
+	t.Setenv("GC_INSTANCE_TOKEN", "token-42")
 	t.Setenv("GC_SESSION_NAME", "s-gc-42")
 
 	got, err := currentSessionRuntimeTarget()
@@ -28,6 +29,35 @@ func TestCurrentSessionRuntimeTargetUsesAlias(t *testing.T) {
 	}
 	if got.sessionName != "s-gc-42" {
 		t.Fatalf("sessionName = %q, want s-gc-42", got.sessionName)
+	}
+	if got.sessionID != "gc-42" {
+		t.Fatalf("sessionID = %q, want gc-42", got.sessionID)
+	}
+	if got.requesterSessionID != "gc-42" || got.requesterInstanceToken != "token-42" {
+		t.Fatalf("requester binding = (%q, %q), want (gc-42, token-42)", got.requesterSessionID, got.requesterInstanceToken)
+	}
+}
+
+func TestBindExplicitDrainAckRequesterRejectsCrossSessionTarget(t *testing.T) {
+	target := sessionRuntimeTarget{sessionID: "gc-target"}
+	if _, err := bindExplicitDrainAckRequester(target, "gc-caller", "caller-token"); err == nil {
+		t.Fatal("cross-session drain acknowledgement was not rejected")
+	}
+
+	bound, err := bindExplicitDrainAckRequester(target, "gc-target", "target-token")
+	if err != nil {
+		t.Fatalf("bind self drain acknowledgement: %v", err)
+	}
+	if bound.requesterSessionID != "gc-target" || bound.requesterInstanceToken != "target-token" {
+		t.Fatalf("self requester binding = (%q, %q), want (gc-target, target-token)", bound.requesterSessionID, bound.requesterInstanceToken)
+	}
+
+	operator, err := bindExplicitDrainAckRequester(target, "", "")
+	if err != nil {
+		t.Fatalf("bind out-of-session operator: %v", err)
+	}
+	if operator.requesterSessionID != "" || operator.requesterInstanceToken != "" {
+		t.Fatalf("operator requester binding = (%q, %q), want empty", operator.requesterSessionID, operator.requesterInstanceToken)
 	}
 }
 

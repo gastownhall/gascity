@@ -228,6 +228,27 @@ func TestFakeNudge(t *testing.T) {
 	}
 }
 
+func TestFakeNudgeFencedRejectsMismatchedInstanceTokenWithoutInput(t *testing.T) {
+	f := NewFake()
+	if err := f.Start(t.Context(), "worker", Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := f.SetMeta("worker", "GC_INSTANCE_TOKEN", "live-token"); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+
+	err := f.NudgeFenced("worker", "replacement-token", TextContent("continue"))
+	if !errors.Is(err, ErrInputFenced) {
+		t.Fatalf("NudgeFenced = %v, want ErrInputFenced", err)
+	}
+	if got := f.CountCalls("NudgeFenced", "worker"); got != 0 {
+		t.Fatalf("NudgeFenced calls = %d, want 0 for a rejected effect", got)
+	}
+	if got := f.CountCalls("Nudge", "worker"); got != 0 {
+		t.Fatalf("Nudge calls = %d, want 0 for a rejected effect", got)
+	}
+}
+
 func TestFakeNudgeBroken(t *testing.T) {
 	f := NewFailFake()
 

@@ -178,6 +178,25 @@ func (dt *drainTracker) idleProbe(beadID string) (idleProbeState, bool) {
 	return *probe, true
 }
 
+// activeIdleProbes counts the idle probes still waiting on WaitForIdle. It is
+// the denominator of the per-tick probe ceiling, read by both the fleet loop's
+// selectIdleProbeTargets and the detector sweep's own budget, so the two spend
+// against one count of in-flight probes rather than two.
+func (dt *drainTracker) activeIdleProbes() int {
+	if dt == nil {
+		return 0
+	}
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	active := 0
+	for _, probe := range dt.idleProbes {
+		if probe != nil && !probe.ready {
+			active++
+		}
+	}
+	return active
+}
+
 func (dt *drainTracker) startIdleProbe(beadID string) *idleProbeState {
 	if dt == nil {
 		return nil

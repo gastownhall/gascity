@@ -597,6 +597,14 @@ func ignoreProcessSignal(int, syscall.Signal) error {
 	return nil
 }
 
+// processNeverAlive is the liveness twin of ignoreProcessSignal. A killer that
+// signals nothing has nothing to wait on, and probing a scripted PID against the
+// real process table makes the reap hinge on whatever unrelated process happens
+// to hold that number on this host (ga-ay6x1: pid 50002 was live on the runner).
+func processNeverAlive(int) bool {
+	return false
+}
+
 // TestReapDoltLeakPIDsWithKillerAndWaiter_WaitsForConfirmedExit proves the
 // reaper polls for actual exit instead of returning the instant SIGKILL is
 // sent. A killFn call succeeding only means the kernel accepted the signal,
@@ -668,16 +676,24 @@ func requireNoLeakedDoltAfterWith(t testReporter, enumerate func() ([]DoltProcIn
 	t.Helper()
 	homeDir, _ := os.UserHomeDir()
 	tempDir := os.TempDir()
-	requireNoLeakedDoltAfterWithFilterAndKiller(t, enumerate, func(configPath string) bool {
+	requireNoLeakedDoltAfterWithFilterKillerAndWaiter(t, enumerate, func(configPath string) bool {
 		return isTestConfigPath(configPath, homeDir, tempDir)
-	}, ignoreProcessSignal)
+	}, ignoreProcessSignal, processNeverAlive)
 }
 
 func requireNoLeakedDoltAfterWithFilter(t testReporter, enumerate func() ([]DoltProcInfo, error), includeConfigPath func(string) bool) {
-	requireNoLeakedDoltAfterWithFilterAndKiller(t, enumerate, includeConfigPath, ignoreProcessSignal)
+	requireNoLeakedDoltAfterWithFilterKillerAndWaiter(t, enumerate, includeConfigPath, ignoreProcessSignal, processNeverAlive)
 }
 
 func requireNoLeakedDoltAfterWithFilterAndKiller(t testReporter, enumerate func() ([]DoltProcInfo, error), includeConfigPath func(string) bool, killFn func(int, syscall.Signal) error) {
+	requireNoLeakedDoltAfterWithFilterKillerAndWaiter(t, enumerate, includeConfigPath, killFn, processStillAlive)
+}
+
+// requireNoLeakedDoltAfterWithFilterKillerAndWaiter is the fully injectable form.
+// killFn and aliveFn must agree about which process table they act on: a scripted
+// enumerator pairs a fake killer with processNeverAlive, and only the real
+// discoverDoltProcesses path pairs killProcess with processStillAlive.
+func requireNoLeakedDoltAfterWithFilterKillerAndWaiter(t testReporter, enumerate func() ([]DoltProcInfo, error), includeConfigPath func(string) bool, killFn func(int, syscall.Signal) error, aliveFn func(int) bool) {
 	t.Helper()
 	initial := snapshotDoltProcessPIDsWithFilter(t, enumerate, includeConfigPath)
 	t.Cleanup(func() {
@@ -699,7 +715,7 @@ func requireNoLeakedDoltAfterWithFilterAndKiller(t testReporter, enumerate func(
 		}
 		t.Errorf("test leaked %d dolt sql-server process(es); ensure cleanup paths reach shutdownBeadsProvider, or call clearInheritedBeadsEnv to prevent inherited GC_BEADS=bd from triggering gc-beads-bd.sh:\n%s",
 			len(leaked), strings.Join(rep, "\n"))
-		for _, err := range reapDoltLeakPIDsWithKiller(pids, killFn) {
+		for _, err := range reapDoltLeakPIDsWithKillerAndWaiter(pids, killFn, aliveFn, doltLeakReapPollInterval, doltLeakReapDeadline) {
 			t.Errorf("test leaked dolt cleanup failed: %v", err)
 		}
 	})

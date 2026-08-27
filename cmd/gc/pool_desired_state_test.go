@@ -5,8 +5,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 func intPtr(n int) *int { return &n }
@@ -1238,6 +1240,123 @@ func TestComputePoolDesiredStates_InFlightNewSessionsConsumeScaleDemand(t *testi
 		if !seen[id] {
 			t.Fatalf("missing in-flight request for %s; saw %#v", id, seen)
 		}
+	}
+}
+
+func TestComputePoolDesiredStates_WaitHeldPoolMemberConsumesExactDemand(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	held := poolSessionBeadWithState("sess-held", "asleep", boolMetadata(false))
+	held.Metadata["wait_hold"] = boolMetadata(true)
+	held.Metadata["sleep_intent"] = string(sessionpkg.SleepReasonWaitHold)
+	held.Metadata[beadmeta.TriggerBeadIDMetadataKey] = "ready-a"
+	held.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey] = "city:test-city"
+	ordinary := poolSessionBeadWithState("sess-ordinary", "asleep", boolMetadata(false))
+	cleared := poolSessionBeadWithState(held.ID, "asleep", boolMetadata(false))
+	cleared.Metadata["sleep_intent"] = string(sessionpkg.SleepReasonWaitHold)
+	cleared.Metadata["wait_hold"] = boolMetadata(false)
+
+	for _, tc := range []struct {
+		name string
+		bead beads.Bead
+		want string
+	}{
+		{name: "complete tuple", bead: held, want: held.ID},
+		{name: "ordinary asleep", bead: ordinary},
+		{name: "wait hold cleared", bead: cleared},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result := ComputePoolDesiredStatesWithDemandTraced(
+				cfg,
+				nil,
+				sessionInfosFromBeads([]beads.Bead{tc.bead}),
+				map[string]int{"claude": 1},
+				map[string]scaleCheckDemand{
+					"claude": {WorkBeadIDs: []string{"ready-a"}, StoreRefs: map[string]string{"ready-a": "city:test-city"}},
+				},
+				nil,
+			)
+			if len(result) != 1 || len(result[0].Requests) != 1 {
+				t.Fatalf("pool demand = %#v, want one new request", result)
+			}
+			request := result[0].Requests[0]
+			if request.Tier != "new" || request.SessionBeadID != tc.want {
+				t.Fatalf("request = %+v, want new request for %q", request, tc.want)
+			}
+		})
+	}
+}
+
+func TestComputePoolDesiredStates_WaitHeldPoolMemberDoesNotConsumeOtherReadyDemand(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	held := poolSessionBeadWithState("sess-held", "asleep", boolMetadata(false))
+	held.Metadata["wait_hold"] = boolMetadata(true)
+	held.Metadata["sleep_intent"] = string(sessionpkg.SleepReasonWaitHold)
+	held.Metadata[beadmeta.TriggerBeadIDMetadataKey] = "sleeping-a"
+	held.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey] = "city:test-city"
+
+	result := ComputePoolDesiredStatesWithDemandTraced(
+		cfg,
+		nil,
+		sessionInfosFromBeads([]beads.Bead{held}),
+		map[string]int{"claude": 1},
+		map[string]scaleCheckDemand{
+			"claude": {
+				WorkBeadIDs: []string{"ready-b"},
+				StoreRefs:   map[string]string{"ready-b": "city:test-city"},
+			},
+		},
+		nil,
+	)
+	if len(result) != 1 || len(result[0].Requests) != 1 {
+		t.Fatalf("pool demand = %#v, want one request for ready B", result)
+	}
+	request := result[0].Requests[0]
+	if request.SessionBeadID != "" || request.WorkBeadID != "ready-b" || request.WorkStoreRef != "city:test-city" {
+		t.Fatalf("request = %+v, want anonymous new request for ready B", request)
+	}
+}
+
+func TestComputePoolDesiredStates_ExactWaitHoldAndGenericInFlightConsumeDistinctDetailedDemand(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	generic := pendingPoolSessionBead("generic")
+	held := poolSessionBeadWithState("held", "asleep", boolMetadata(false))
+	held.Metadata["wait_hold"] = boolMetadata(true)
+	held.Metadata["sleep_intent"] = string(sessionpkg.SleepReasonWaitHold)
+	held.Metadata[beadmeta.TriggerBeadIDMetadataKey] = "ready-a"
+	held.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey] = "city:test-city"
+
+	result := ComputePoolDesiredStatesWithDemandTraced(
+		cfg,
+		nil,
+		sessionInfosFromBeads([]beads.Bead{generic, held}),
+		map[string]int{"claude": 3},
+		map[string]scaleCheckDemand{
+			"claude": {
+				WorkBeadIDs: []string{"ready-a", "ready-b", "ready-c"},
+				StoreRefs: map[string]string{
+					"ready-a": "city:test-city",
+					"ready-b": "city:test-city",
+					"ready-c": "city:test-city",
+				},
+			},
+		},
+		nil,
+	)
+	if len(result) != 1 || len(result[0].Requests) != 3 {
+		t.Fatalf("pool demand = %#v, want generic, held, and anonymous requests", result)
+	}
+	requests := result[0].Requests
+	if requests[0].SessionBeadID != generic.ID || requests[1].SessionBeadID != held.ID {
+		t.Fatalf("explicit requests = %#v, want generic then held", requests[:2])
+	}
+	if requests[2].SessionBeadID != "" || requests[2].WorkBeadID != "ready-c" {
+		t.Fatalf("anonymous request = %+v, want ready-c after A and B are consumed", requests[2])
 	}
 }
 

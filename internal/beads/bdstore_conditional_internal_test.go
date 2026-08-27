@@ -472,6 +472,11 @@ type scriptedBd struct {
 	writeArgv      [][]string
 	sawDoltPrefix  bool
 	probeIncapable bool
+	// ifStatusCapable advertises `bd update --if-status` in the --help probe
+	// surface and enforces the guard on writes. It is independent of
+	// probeIncapable so a test can model the pinned schema-v59 bd exactly:
+	// --if-status present, --if-revision absent.
+	ifStatusCapable bool
 	// writeHook, if non-nil, runs at the start of each write call holding mu. It
 	// may mutate backing and, by returning handled=true, short-circuit the
 	// default fence-and-apply with a canned (out, err).
@@ -502,11 +507,14 @@ func (w *scriptedBd) runner(_, _ string, args ...string) ([]byte, error) {
 }
 
 func (w *scriptedBd) helpOutput(verb string) []byte {
-	if w.probeIncapable {
-		return []byte("Usage:\n  bd " + verb + " [flags]\n\nFlags:\n  --json   emit JSON\n")
+	flags := "  --json   emit JSON\n"
+	if !w.probeIncapable {
+		flags += "  --if-revision int   apply only at this revision\n"
 	}
-	return []byte("Usage:\n  bd " + verb + " [flags]\n\nFlags:\n" +
-		"  --if-revision int   apply only at this revision\n  --json\n")
+	if verb == "update" && w.ifStatusCapable {
+		flags += "  " + bdStatusGuardFlag + " string   apply only at this status\n"
+	}
+	return []byte("Usage:\n  bd " + verb + " [flags]\n\nFlags:\n" + flags)
 }
 
 func (w *scriptedBd) handleShow() ([]byte, error) {
@@ -517,6 +525,25 @@ func (w *scriptedBd) handleShow() ([]byte, error) {
 		return nil, errors.New("exit status 1: no issues found matching the provided IDs")
 	}
 	return w.showJSONLocked(), nil
+}
+
+// statusLocked returns the modeled status, defaulting to open exactly as
+// showJSONLocked renders it.
+func (w *scriptedBd) statusLocked() string {
+	if w.status == "" {
+		return "open"
+	}
+	return w.status
+}
+
+// scriptedFlagValue returns the value following flag in args.
+func scriptedFlagValue(args []string, flag string) (string, bool) {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == flag {
+			return args[i+1], true
+		}
+	}
+	return "", false
 }
 
 func (w *scriptedBd) showJSONLocked() []byte {
@@ -546,9 +573,21 @@ func (w *scriptedBd) handleWrite(verb string, args []string) ([]byte, error) {
 	if hasFence && ifRev != w.revision {
 		return w.preconditionBodyLocked(ifRev), errors.New("exit status 1")
 	}
+	if want, ok := scriptedFlagValue(args, bdStatusGuardFlag); ok {
+		if have := w.statusLocked(); want != have {
+			// bd's exit-13 guard refusal: nothing written, sentinel on stderr,
+			// which classifyBDExecResult folds into the returned error.
+			return nil, fmt.Errorf(
+				`exit status 13: Error updating %s: status mismatch: %s has status %q, expected %q`,
+				w.id, w.id, have, want)
+		}
+	}
 	switch verb {
 	case "update":
 		w.applySetMetadataLocked(args)
+		if status, ok := scriptedFlagValue(args, "--status"); ok {
+			w.status = status
+		}
 	case "close":
 		w.status = "closed"
 	case "delete":

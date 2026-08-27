@@ -47,6 +47,41 @@ func TestCmdGCIntegrationShardRunsOnlyIntegrationManifest(t *testing.T) {
 	}
 }
 
+// An explicitly-equipped integration run is the canonical execution for the
+// real bd v59 journey. The hermetic shard wrapper must carry that binary into
+// go test; otherwise the journey silently skips despite the caller pinning it.
+func TestCmdGCIntegrationShardForwardsPinnedBDBinary(t *testing.T) {
+	fixture := newIntegrationShardFixture(t)
+	pinnedBinary := filepath.Join(fixture.binDir, "bd-v59")
+	writeExecutable(t, pinnedBinary, "#!/bin/sh\nexit 0\n")
+
+	out, err := fixture.runShardWithEnv(t, "packages-cmd-gc-integration", "GC_TEST_BD_BIN="+pinnedBinary)
+	if err != nil {
+		t.Fatalf("test-integration-shard failed: %v\n%s", err, out)
+	}
+
+	captured, err := os.ReadFile(fixture.bdBinaryCapturePath)
+	if err != nil {
+		t.Fatalf("read captured GC_TEST_BD_BIN: %v", err)
+	}
+	if got := strings.TrimSpace(string(captured)); got != pinnedBinary {
+		t.Fatalf("GC_TEST_BD_BIN seen by go test = %q, want pinned binary %q", got, pinnedBinary)
+	}
+}
+
+func TestCmdGCIntegrationShardRejectsNonExecutablePinnedBDBinary(t *testing.T) {
+	fixture := newIntegrationShardFixture(t)
+	pinnedBinary := filepath.Join(t.TempDir(), "not-executable-bd")
+	if err := os.WriteFile(pinnedBinary, []byte("not executable"), 0o644); err != nil {
+		t.Fatalf("write non-executable bd fixture: %v", err)
+	}
+
+	out, err := fixture.runShardWithEnv(t, "packages-cmd-gc-integration", "GC_TEST_BD_BIN="+pinnedBinary)
+	if err == nil || !strings.Contains(string(out), "GC_TEST_BD_BIN must name an executable file") {
+		t.Fatalf("test-integration-shard error = %v\n%s\nwant pinned-bd validation failure", err, out)
+	}
+}
+
 func TestRuntimeTmuxIntegrationShardUsesCheckedManifestOnLinux(t *testing.T) {
 	repo := repoRoot(t)
 	manifest := parseRuntimeTmuxManifest(t, filepath.Join(repo, runtimeTmuxManifestRelativePath))
@@ -441,9 +476,10 @@ func cmdGCIntegrationManifestDrift(manifest, declared []string) []string {
 }
 
 type integrationShardFixture struct {
-	binDir      string
-	homeDir     string
-	capturePath string
+	binDir              string
+	homeDir             string
+	capturePath         string
+	bdBinaryCapturePath string
 }
 
 func newIntegrationShardFixture(t *testing.T) integrationShardFixture {
@@ -459,11 +495,13 @@ func newIntegrationShardFixtureForPlatform(t *testing.T, goos, goarch string) in
 		t.Fatalf("mkdir fake bin: %v", err)
 	}
 	capturePath := filepath.Join(tmp, "go-test.capture")
+	bdBinaryCapturePath := filepath.Join(tmp, "gc-test-bd-bin.capture")
 
 	writeExecutable(t, filepath.Join(binDir, "go"), `#!/usr/bin/env bash
 set -euo pipefail
 
 capture_path=`+shellQuote(capturePath)+`
+bd_binary_capture_path=`+shellQuote(bdBinaryCapturePath)+`
 modeled_goos=`+shellQuote(goos)+`
 modeled_goarch=`+shellQuote(goarch)+`
 
@@ -489,6 +527,7 @@ case "$1" in
     done
     printf '%s\0' "$@" >> "$capture_path"
     printf '\0' >> "$capture_path"
+    printf '%s' "${GC_TEST_BD_BIN:-}" > "$bd_binary_capture_path"
     if [[ "$is_list" == "1" ]]; then
       printf '%s\n' TestDarwinAlpha TestDarwinBeta TestDarwinGamma 'ok  github.com/gastownhall/gascity/internal/runtime/tmux  0.001s'
     fi
@@ -501,9 +540,10 @@ esac
 `)
 
 	return integrationShardFixture{
-		binDir:      binDir,
-		homeDir:     filepath.Join(tmp, "home"),
-		capturePath: capturePath,
+		binDir:              binDir,
+		homeDir:             filepath.Join(tmp, "home"),
+		capturePath:         capturePath,
+		bdBinaryCapturePath: bdBinaryCapturePath,
 	}
 }
 

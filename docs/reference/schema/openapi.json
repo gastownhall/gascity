@@ -11306,7 +11306,7 @@
             "type": "string"
           },
           "store_id": {
-            "description": "Store scope: city, or rig/\u003cname\u003e.",
+            "description": "Store scope: city, rig/\u003cname\u003e, storage/\u003cbinding\u003e for a relocated coordination-class binding, or 'sessions (required)' for the session class's mode-independent fencing requirement.",
             "type": "string"
           }
         },
@@ -11323,7 +11323,7 @@
         "additionalProperties": false,
         "properties": {
           "effective": {
-            "description": "Aggregate verdict: off (gate off), active (every store capable), degraded (auto with at least one incapable store), fail_closed (require with at least one incapable store — fenced writes on it refuse), pending_restart (on-disk config drifted from the latched mode).",
+            "description": "Aggregate verdict: off (gate off), active (every store capable), degraded (auto with at least one incapable store), fail_closed (require with at least one incapable store, OR the session class lacks the conditional writes it requires — which outranks the mode and applies even when the gate is off), pending_restart (on-disk config drifted from the latched mode).",
             "enum": [
               "off",
               "active",
@@ -38729,6 +38729,21 @@
               }
             }
           },
+          "408": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Request Timeout",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
           "409": {
             "content": {
               "application/problem+json": {
@@ -38774,6 +38789,21 @@
               }
             }
           },
+          "501": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Implemented",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
           "502": {
             "content": {
               "application/problem+json": {
@@ -38783,6 +38813,21 @@
               }
             },
             "description": "Bad Gateway",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "504": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Gateway Timeout",
             "headers": {
               "X-GC-Request-Id": {
                 "$ref": "#/components/headers/X-GC-Request-Id"
@@ -38907,6 +38952,21 @@
               }
             }
           },
+          "408": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Request Timeout",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
           "422": {
             "content": {
               "application/problem+json": {
@@ -38931,6 +38991,36 @@
               }
             },
             "description": "Internal Server Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "501": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Implemented",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "504": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Gateway Timeout",
             "headers": {
               "X-GC-Request-Id": {
                 "$ref": "#/components/headers/X-GC-Request-Id"

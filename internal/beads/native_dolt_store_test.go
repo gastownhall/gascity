@@ -888,6 +888,28 @@ func TestNativeDoltStoreListDelegatesAndConvertsIssues(t *testing.T) {
 	}
 }
 
+func TestNativeDoltStoreListExactAssigneePushesFilterToBacking(t *testing.T) {
+	const wantAssignee = "pool/one"
+	searches := 0
+	storage := &nativeDoltStorageSpy{
+		searchIssues: func(_ context.Context, _ string, filter beadslib.IssueFilter) ([]*beadslib.Issue, error) {
+			searches++
+			if filter.Assignee == nil || *filter.Assignee != wantAssignee {
+				t.Fatalf("backing assignee filter = %v, want %q", filter.Assignee, wantAssignee)
+			}
+			return nil, nil
+		},
+	}
+	store := newNativeDoltStoreForTest(storage)
+
+	if _, err := store.List(ListQuery{Assignee: wantAssignee, Live: true, TierMode: TierBoth}); err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if searches != 1 {
+		t.Fatalf("backing searches = %d, want one exact-assignee search", searches)
+	}
+}
+
 func TestNativeDoltStoreListSkipsInvalidMetadataRows(t *testing.T) {
 	corrupt := &beadslib.Issue{
 		ID:        "gc-corrupt",

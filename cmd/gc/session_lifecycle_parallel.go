@@ -292,17 +292,52 @@ func (p startPhaseTimings) formatLog() string {
 	return " phases=[" + strings.Join(parts, " ") + "]"
 }
 
+// tracePayload preserves the exact, unrounded phase durations for a single
+// correlated start. Lifecycle logs stay human-readable and millisecond-rounded;
+// the trace is the machine-readable measurement seam.
+func (p startPhaseTimings) tracePayload(sessionID string, total time.Duration) traceRecordPayload {
+	return traceRecordPayload{
+		"session_id":             strings.TrimSpace(sessionID),
+		"duration_ms":            total.Milliseconds(),
+		"duration_ns":            total.Nanoseconds(),
+		"start_call_ns":          p.StartCall.Nanoseconds(),
+		"zombie_recycle_ns":      p.ZombieRecycle.Nanoseconds(),
+		"state_sync_recovery_ns": p.StateSyncRecovery.Nanoseconds(),
+		"post_start_observe_ns":  p.PostStartObserve.Nanoseconds(),
+		"commit_refresh_ns":      p.CommitRefresh.Nanoseconds(),
+	}
+}
+
 type startExecutionOptions struct {
-	async                          bool
-	asyncFollowUp                  func()
-	asyncLimiter                   *asyncStartLimiter
-	asyncTracker                   *asyncStartTracker
-	asyncStopTracker               *asyncStartTracker
-	maxSessionAgeTr                maxSessionAgeTracker
-	assignedWorkDeferTr            assignedWorkDeferTracker
-	workDirResolver                taskWorkDirResolver
-	stabilityWaiter                startStabilityWaiter
-	sessionStaleKeyDetectionWaiter sessionpkg.StaleKeyDetectionWaiter
+	async                             bool
+	asyncFollowUp                     func()
+	asyncLimiter                      *asyncStartLimiter
+	asyncTracker                      *asyncStartTracker
+	asyncStopTracker                  *asyncStartTracker
+	maxSessionAgeTr                   maxSessionAgeTracker
+	assignedWorkDeferTr               assignedWorkDeferTracker
+	workDirResolver                   taskWorkDirResolver
+	stabilityWaiter                   startStabilityWaiter
+	sessionStaleKeyDetectionWaiter    sessionpkg.StaleKeyDetectionWaiter
+	statusComparisonObserver          sessionLifecycleStatusComparisonObserver
+	exactStatusObserver               exactSessionLifecycleStatusObserver
+	startSelectionObserver            sessionLifecycleStartSelectionComparisonObserver
+	startSelectionShadowObserver      func(sessionLifecycleStartShadowObservation)
+	startSelectionShadowAdmission     func(string) (sessionLifecycleStartShadowAdmission, bool)
+	legacyStartExcluded               func(sessionpkg.Info) bool
+	legacyStatusHealExcluded          func(sessionpkg.Info) bool
+	legacyDeadlineStopExcluded        func(sessionpkg.Info) bool
+	legacyOrphanCloseExcluded         func(sessionpkg.Info) bool
+	legacyOrphanDrainExcluded         func(sessionpkg.Info) bool
+	legacyStaleCreateRollbackExcluded func(sessionpkg.Info) bool
+	legacyConfigDriftConvergeExcluded func(sessionpkg.Info) bool
+	legacyConfigDriftDeferExcluded    func(sessionpkg.Info) bool
+	legacyDuplicateRetireExcluded     func(sessionpkg.Info) bool
+	legacySleepDrainExcluded          func(sessionpkg.Info) bool
+	legacyDrainAdvanceExcluded        func(sessionpkg.Info) bool
+	legacyProgressStallExcluded       func(sessionpkg.Info) bool
+	legacyStrandedRepairExcluded      func(sessionpkg.Info) bool
+	legacyZombieMarkExcluded          func(sessionpkg.Info) bool
 	// deferSessionClosesOnBoot suppresses the per-session orphan/failed-create
 	// session-bead closes during the synchronous boot reconcile. Those closes
 	// gate on a per-session open-work probe that reads the wisp tier
@@ -391,6 +426,322 @@ func withSessionStaleKeyDetectionWaiter(waiter sessionpkg.StaleKeyDetectionWaite
 	}
 }
 
+func withSessionLifecycleStatusComparisonObserver(observer sessionLifecycleStatusComparisonObserver) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.statusComparisonObserver = observer
+	}
+}
+
+func withExactSessionLifecycleStatusObserver(observer exactSessionLifecycleStatusObserver) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.exactStatusObserver = observer
+	}
+}
+
+func withSessionLifecycleStartSelectionComparisonObserver(observer sessionLifecycleStartSelectionComparisonObserver) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.startSelectionObserver = observer
+	}
+}
+
+func withSessionLifecycleStartSelectionShadowObserver(
+	observer func(sessionLifecycleStartShadowObservation),
+) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.startSelectionShadowObserver = observer
+	}
+}
+
+func withSessionLifecycleStartSelectionShadowAdmission(
+	admission func(string) (sessionLifecycleStartShadowAdmission, bool),
+) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.startSelectionShadowAdmission = admission
+	}
+}
+
+// withLegacyStartExclusion installs the active keyed-ownership bridge for the
+// start family. Returning true leaves the durable wake cause untouched and
+// prevents the fleet loop from preparing or entering the provider for that
+// session; the keyed controller is then the sole start decider.
+func withLegacyStartExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.legacyStartExcluded = excluded
+	}
+}
+
+// withLegacyDeadlineStopExclusion installs the keyed-ownership bridge for the
+// D-DEADLINE family. Returning true keeps the fleet loop's idle-timeout and
+// max-session-age arms out of the kill entirely — no provider stop, no sleep
+// patch, no event — because the keyed handler already owns that exact key.
+// Unlike the start seam this is not a race to lose: both writers fire off the
+// same tracker on the same tick, so without the yield an acting D-DEADLINE
+// double-stops by construction. Retired at WE with the god function.
+func withLegacyDeadlineStopExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.legacyDeadlineStopExcluded = excluded
+	}
+}
+
+// withLegacyOrphanCloseExclusion installs the keyed-ownership bridge for the
+// D-ORPHAN CLOSE family. Returning true keeps the fleet loop's CloseOrphan and
+// CloseFailedCreate arms out of the close entirely — no ClosePatch, no status
+// close, no work-release cascade — because the keyed handler already owns that
+// exact key. It is a sibling of withLegacyDeadlineStopExclusion, not a reuse:
+// each names one family's in-flight effect, and one predicate covering both
+// would silently disable the other family's legacy arm. Like the deadline seam
+// this is not a race to lose — both writers read the same durable row on the
+// same tick, so an acting D-ORPHAN beside a non-yielding legacy double-closes
+// by construction. Retired at WE with the god function.
+func withLegacyOrphanCloseExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.legacyOrphanCloseExcluded = excluded
+	}
+}
+
+// withLegacyOrphanDrainExclusion installs the keyed-ownership bridge for the
+// D-ORPHAN DRAIN arm. Returning true keeps the fleet loop's Orphaned drain out
+// of beginSessionDrainInfo entirely, because the keyed handler already owns
+// that exact key and writes its intent into the SAME in-memory tracker. That
+// shared tracker is why the yield is mandatory rather than best-effort: an
+// un-yielding legacy would either double-begin or, worse, win the race and
+// stamp its own reason on the keyed arm's drain. It is a sibling of
+// withLegacyOrphanCloseExclusion — the close arm's predicate is false for every
+// drain admission, and vice versa. Retired at WE with the god function.
+func withLegacyOrphanDrainExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.legacyOrphanDrainExcluded = excluded
+	}
+}
+
+// withLegacyStaleCreateRollbackExclusion installs the keyed-ownership bridge for
+// the D-STALE-CREATE family. Returning true keeps the fleet loop's pending-create
+// rollback arms out of the effect entirely — no Tx close, no retired-session
+// cleanup, and no per-tick budget spent — because the keyed handler already owns
+// that exact key. It is deliberately NOT the start-family predicate: a stranded
+// create is usually lifecycle-terminal or named/pool-managed, which
+// classifyExactSessionStartOwnership hands to legacy, so reusing that predicate
+// would leave exactly these rows unyielded while disabling legacy rollback on
+// rows keyed never admitted. Retired at WE with the god function.
+func withLegacyStaleCreateRollbackExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.legacyStaleCreateRollbackExcluded = excluded
+	}
+}
+
+// withLegacyConfigDriftConvergeExclusion installs the keyed-ownership bridge for
+// the D-DRIFT CONVERGENCE arms. Returning true keeps the fleet loop out of the
+// silent rebaseline write, the launch-only relaunch, the named restart-in-place,
+// the ordinary drift drain, and the live re-apply — because the keyed handler
+// already owns that exact key and converges the same row from the same durable
+// hashes. Like the deadline seam and unlike the start seam this is not a race to
+// lose: both writers compare the same two fingerprints on the same tick, so an
+// un-yielding legacy relaunches the agent twice, or drains a session the keyed
+// handler just relaunched.
+//
+// It is installed at the CONVERGENCE effects only, never at the top of the drift
+// block, and its deferral counterpart below is installed at the deferral effects
+// for the same reason: each arm's legacy counterpart stands down exactly when
+// the keyed handler owns THAT arm, so no arm is ever unguarded by both writers.
+//
+// Retired at WE with the god function.
+func withLegacyConfigDriftConvergeExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.legacyConfigDriftConvergeExcluded = excluded
+	}
+}
+
+// withLegacyConfigDriftDeferExclusion installs the keyed-ownership bridge for
+// the D-DRIFT DEFERRAL arms. Returning true keeps the fleet loop out of the
+// attached window stamp, the named bounded-window stamp, and the two
+// drain-cancel arms — because the keyed handler already owns that exact key and
+// writes the same durable stamps through the same metadata keys. An un-yielding
+// legacy would refresh the attached window a second time on the tick the keyed
+// handler wrote it, which is a Dolt commit per session per tick for every
+// attached drifted row — the exact churn sessionAttachedConfigDriftRefreshInterval
+// exists to prevent.
+//
+// It is a SEPARATE option from the convergence bridge, not a wider one, because
+// the two arms crossed in separate slices: while only convergence had landed,
+// legacy's deferral arms had to keep stamping or an attached session would have
+// been defended by nobody. The call site guards the deferral arms on BOTH
+// predicates for the same reason (session_reconciler.go): standing legacy's
+// deferral arm down while its convergence arms still ran would drop an attached
+// session through the ladder into a relaunch or a drain, which is the one
+// outcome A6 forbids.
+//
+// Retired at WE with the god function.
+func withLegacyConfigDriftDeferExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.legacyConfigDriftDeferExcluded = excluded
+	}
+}
+
+// withLegacyDuplicateRetireExclusion installs the keyed-ownership bridge for
+// the D-DUP family. Returning true keeps the fleet pass's Phase-0b duplicate
+// retire off that row entirely — no runtime stop, no archive batch, no work
+// re-point — because the keyed handler already owns that exact key. Like the
+// deadline seam and unlike the start seam, this is not a race to lose: both
+// writers derive the same duplicate set from the same durable rows on the same
+// tick, so an un-yielding legacy stops the loser's runtime a second time and
+// races a second re-point at the same work beads.
+//
+// The expired-timer heal in the phase above takes NO such fence, deliberately.
+// It is a convergent, idempotent, provider-free clear of an already-elapsed
+// timestamp: two writers cannot disagree, and there is no destructive effect to
+// serialize. It self-yields instead — once the keyed admission heal
+// (healExactSessionAdmissionTimers) has cleared the timer, the fold here finds
+// nothing to clear and performs zero writes.
+//
+// Retired at WE with the god function.
+func withLegacyDuplicateRetireExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.legacyDuplicateRetireExcluded = excluded
+	}
+}
+
+// withLegacySleepDrainExclusion installs the keyed-ownership bridge for the
+// D-SLEEP family. Returning true keeps the fleet loop's awake-scan no-wake arm
+// off that row entirely — no idle-probe consumption, no idle-stop-pending mark,
+// no drain begin — because the keyed handler already owns that exact key.
+//
+// It sits BELOW the #3994 keep-alive escape on purpose. That escape cancels a
+// drain a heartbeat hold has overtaken, and it must keep running for every row:
+// the keyed family never enqueues a held row, so a yield above the escape would
+// only disable a cancel nobody replaced.
+//
+// Like the deadline seam and unlike the start seam this is not a race to lose.
+// Both writers record drain intent in the SAME in-memory tracker and consume the
+// same idle probe, so an un-yielding legacy would either double-begin or win and
+// stamp its own reason on the keyed arm's drain — and legacy's consumption of a
+// ready probe (shouldBeginIdleDrainInfo clears it) would silently retract the
+// confirmation the keyed handler is waiting for. It is a SIBLING of
+// withLegacyOrphanDrainExclusion, not a reuse: the orphan predicate is false for
+// every sleep admission, and one predicate serving both would make each arm's
+// legacy counterpart stand down for the other's rows. Retired at WE with the god
+// function.
+func withLegacySleepDrainExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.legacySleepDrainExcluded = excluded
+	}
+}
+
+// withLegacyDrainAdvanceExclusion installs the keyed-ownership bridge for the
+// D-DRAIN family. Returning true keeps the fleet loop out of BOTH halves of
+// legacy's drain handling for that row — the forward-pass acknowledgement block
+// (its stop-pending transition, its cancel arms and its finalize) and the
+// end-of-tick advance scan (the deferred acknowledgement write, completeDrain,
+// the cancels and the timeout stop) — because the keyed handler already owns
+// that exact key and drives the same intent out of the same in-memory tracker.
+//
+// One option covers both halves because they are one ladder: legacy splits the
+// decision across a forward-pass block and a trailing scan purely because the
+// scan needs the tick's wake evaluation, and a yield installed at only one half
+// would leave the other half advancing a drain the keyed handler is holding.
+//
+// Like the sleep and orphan drain seams and unlike the start seam, this is not a
+// race to lose. Both writers read and mutate the SAME drainState pointer on the
+// same tick, so an un-yielding legacy would set the acknowledgement the keyed
+// handler is waiting on, or complete a drain the keyed cancel arms had just
+// decided to spare. Retired at WE with the god function.
+func withLegacyDrainAdvanceExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.legacyDrainAdvanceExcluded = excluded
+	}
+}
+
+// withLegacyProgressStallRecycleExclusion installs the keyed-ownership bridge
+// for the D-STALL family. Returning true keeps the fleet loop's progress-stall
+// and claim-holder-stall arms from writing restart_requested for that row,
+// because the keyed handler already owns that exact key. It gates the WRITES
+// only: legacy keeps evaluating its ladder and keeps recording its
+// ProgressStallExempt trace above the yield, so the WD.15 parity join still sees
+// both populations on every tick (the shape WD.4 recorded for the drain begin).
+//
+// The yield is mandatory rather than best-effort. Both writers evaluate the same
+// thresholds against the same durable row on the same tick, so an un-yielding
+// legacy does not merely double-request a restart: its restart block would kill
+// the fresh incarnation the keyed reset handoff has just committed, and the
+// keyed handler would report a recycle that a second stop immediately undid.
+// Retired at WE with the god function.
+func withLegacyProgressStallRecycleExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.legacyProgressStallExcluded = excluded
+	}
+}
+
+// withLegacyStrandedRepairExclusion installs the keyed-ownership bridge for the
+// D-STRANDED family. Returning true keeps the fleet pass's dead-pool repair off
+// that row entirely — no unassign/reopen of its work, no close, no worktree
+// prune — because the keyed handler already owns that exact key. Like the
+// deadline and duplicate seams this is not a race to lose: both writers read the
+// same durable marker on the same tick, so an un-yielding legacy races a second
+// release at the same work beads, and a release that lands after a replacement
+// member has claimed the work clears a LIVE claim.
+//
+// The stranded DIAGNOSTIC above the repair takes no such fence, deliberately. It
+// is the emit-once stamp of the confirmation marker, and that marker is the
+// keyed family's own entry condition: fencing it would starve the detector of
+// the fact it keys on. Retired at WE with the god function, at which point the
+// marker's ownership moves with it.
+func withLegacyStrandedRepairExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.legacyStrandedRepairExcluded = excluded
+	}
+}
+
+// withLegacyZombieMarkExclusion installs the keyed-ownership bridge for the
+// D-ZOMBIE family. Returning true keeps the fleet loop's zombie-capture block
+// off that row entirely — no markProviderTerminalError write, no SessionCrashed
+// event, no crash telemetry — because the keyed handler already owns that exact
+// key.
+//
+// It gates the WHOLE block rather than just the write, unlike the stranded and
+// stall seams which keep legacy's observational records above the yield. The
+// reason is that this arm has no observational half: every step below the
+// `running && !alive` test is an effect (a metadata batch, a bus event, a
+// telemetry sample), and the SessionCrashed event in particular is exactly the
+// alarm a duplicate would corrupt — ops read one crash per incarnation.
+//
+// Like the deadline and duplicate seams this is not a race to lose. Both
+// writers observe the same dead incarnation on the same tick, so an un-yielding
+// legacy does not merely double-write an idempotent batch: it fires a second
+// crash event and a second telemetry sample for one death, and its unfenced
+// front-door patch can land between the keyed handler's fence read and its
+// conditional write. Retired at WE with the god function.
+func withLegacyZombieMarkExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.legacyZombieMarkExcluded = excluded
+	}
+}
+
+func withLegacyStatusHealExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.legacyStatusHealExcluded = excluded
+	}
+}
+
+// combineStartExecutionOptions folds several options into one, skipping nils.
+// It returns nil when nothing is left to apply, so a caller can hand the result
+// straight back as "no option". Each WD slice adds one more legacy-yield bridge
+// to the same call site, and this keeps that a one-line addition.
+func combineStartExecutionOptions(opts ...startExecutionOption) startExecutionOption {
+	applied := make([]startExecutionOption, 0, len(opts))
+	for _, opt := range opts {
+		if opt != nil {
+			applied = append(applied, opt)
+		}
+	}
+	if len(applied) == 0 {
+		return nil
+	}
+	return func(target *startExecutionOptions) {
+		for _, apply := range applied {
+			apply(target)
+		}
+	}
+}
+
 func resolveStartStabilityWaiter(waiter startStabilityWaiter) startStabilityWaiter {
 	if waiter == nil {
 		return waitForStartStability
@@ -468,6 +819,14 @@ func (t *asyncStartTracker) startDrainAckStop(key string) (func(), bool) {
 		t.drainAckStopKeys.Delete(key)
 		done()
 	}, true
+}
+
+func (t *asyncStartTracker) drainAckStopInFlight(key string) bool {
+	if t == nil || strings.TrimSpace(key) == "" {
+		return false
+	}
+	_, ok := t.drainAckStopKeys.Load(key)
+	return ok
 }
 
 func (t *asyncStartTracker) wait(timeout time.Duration) bool {
@@ -834,9 +1193,13 @@ func prepareStartCandidate(
 	store beads.Store,
 	clk clock.Clock,
 ) (*preparedStart, error) {
-	return prepareStartCandidateForCity(candidate, "", "", cfg, nil, store, clk, io.Discard, nil)
+	return prepareStartCandidateForCity(candidate, "", "", cfg, nil, store, clk, io.Discard, nil, nil)
 }
 
+// prepareStartCandidateForCity is the legacy start family's entrance to the
+// shared start executor. keyedStartExcluded is the installed keyed-ownership
+// seam (nil where keyed reconciliation is not active); the prepare-time
+// validator re-runs the ownership question on the CURRENT row through it.
 func prepareStartCandidateForCity(
 	candidate startCandidate,
 	cityPath string,
@@ -847,6 +1210,198 @@ func prepareStartCandidateForCity(
 	clk clock.Clock,
 	stderr io.Writer,
 	workDirResolver taskWorkDirResolver,
+	keyedStartExcluded func(sessionpkg.Info) bool,
+) (*preparedStart, error) {
+	return prepareStartCandidateForCityWithNamedRefresh(
+		candidate, cityPath, cityName, cfg, sp, store, clk, stderr, workDirResolver, true,
+		legacyStartInfoBeforeWake(candidate.info, cfg, clk, keyedStartExcluded),
+	)
+}
+
+// legacyStartPreWakeSkip reports that a legacy start candidate was superseded
+// between the snapshot it was decided on and its prepare. It unwraps to
+// errPreWakeSuperseded so every caller of the shared executor treats it as the
+// same convergence outcome a lost pre-wake CAS produces; reason names the arm for
+// the traced decision.
+type legacyStartPreWakeSkip struct{ reason string }
+
+func (e *legacyStartPreWakeSkip) Error() string {
+	return "legacy start superseded: " + e.reason
+}
+
+func (e *legacyStartPreWakeSkip) Unwrap() error { return errPreWakeSuperseded }
+
+// legacyStartInfoBeforeWake is the legacy start family's prepare-time
+// re-validation, symmetric to the keyed
+// getAuthoritativeExactSessionStartInfoBeforeWake. The keyed entrance has always
+// re-read AND re-classified before committing an incarnation; the legacy
+// entrance re-read and validated nothing, so a candidate decided on a stale
+// per-tick snapshot committed its rotation regardless of what the row had become
+// (ga-l1j53).
+//
+// Under the already-held per-session mutation lock, after the current row is
+// loaded, the candidate is skipped as superseded when:
+//
+//	(i)   the keyed-ownership seam is installed AND it excludes the CURRENT row,
+//	      or classifyExactSessionStartOwnership says the CURRENT row is
+//	      keyed-owned. This is the F4 exclusion generalized off the snapshot onto
+//	      current state: once wake_request=explicit lands, legacy aborts and the
+//	      keyed admission is the sole starter. It is gated on the seam because a
+//	      city without keyed reconciliation has no other starter — skipping there
+//	      would strand every explicit wake.
+//
+//	      The seam consult is the half classification cannot do (ga-ij8mh, sixth
+//	      round). The certified wake families own rows the classifier hands to
+//	      legacy — a canonical singleton is pool-managed, and every pool-managed
+//	      row classifies legacy — so a candidate that passed its loop-top
+//	      exclusion before the lease landed reached this boundary unfenced and
+//	      started the row a second time (run 13: "op=start wave=0
+//	      session=dependent outcome=success" beside the keyed start, then an
+//	      orphan close and a reaped runtime). The seam already carries the wake
+//	      leases' ownsX arms and is already passed in here; asking it on current
+//	      state is the whole fix. Certification cannot move into the classifier:
+//	      that is a pure projection with no provider, store, or membership
+//	      context. Standing down on mere CANDIDACY would strand a row no family
+//	      can certify, so the answer must come from a live lease, never from the
+//	      row's shape.
+//	(ii)  a wake-relevant premise drifted between the snapshot the candidate was
+//	      decided on and current. Drift means the decision was made against a row
+//	      that no longer exists; the next tick re-decides from a fresh snapshot.
+//	      This covers the respawn-after-kill (the sleep markers moved since the
+//	      snapshot) WITHOUT judging fleet demand: a genuinely-desired pool floor
+//	      refill whose row did not change still starts. Deliberately NOT gated on
+//	      IsDeliberateSleepReason — "killed" is not in that list, and fleet-demand
+//	      judgment does not belong at this boundary.
+//	(iii) another writer's rotation is already in flight (a fresh `creating` row
+//	      that already carries last_woke_at). Largely subsumed by (ii); kept
+//	      explicit because it is the arm that stops the second incarnation.
+func legacyStartInfoBeforeWake(
+	snapshot sessionpkg.Info,
+	cfg *config.City,
+	clk clock.Clock,
+	keyedStartExcluded func(sessionpkg.Info) bool,
+) func(beads.Store, string) (sessionpkg.Info, int64, error) {
+	return func(store beads.Store, id string) (sessionpkg.Info, int64, error) {
+		current, persisted, err := sessionFrontDoor(store).GetPersistedResponse(id)
+		if err != nil {
+			return sessionpkg.Info{}, 0, err
+		}
+		if keyedStartExcluded != nil && keyedStartOwnsCurrentStart(current, cfg, clk, keyedStartExcluded) {
+			return sessionpkg.Info{}, 0, &legacyStartPreWakeSkip{reason: "keyed_start_owner"}
+		}
+		if key, drifted := wakeStartPremiseDrift(snapshot, current); drifted {
+			return sessionpkg.Info{}, 0, &legacyStartPreWakeSkip{reason: "premise_drift:" + key}
+		}
+		if midIncarnationStartInFlight(current, clk) {
+			return sessionpkg.Info{}, 0, &legacyStartPreWakeSkip{reason: "mid_incarnation"}
+		}
+		return current, persisted.Revision, nil
+	}
+}
+
+// keyedStartOwnsCurrentStart answers clause (i) on the current row: the
+// installed seam first, because it is the only arm that can see a certified wake
+// lease, then the classification for the rows no lease covers.
+func keyedStartOwnsCurrentStart(
+	current sessionpkg.Info,
+	cfg *config.City,
+	clk clock.Clock,
+	keyedStartExcluded func(sessionpkg.Info) bool,
+) bool {
+	if keyedStartExcluded(current) {
+		return true
+	}
+	_, _, owner := classifyExactSessionStartOwnership(current, cfg, clk.Now().UTC())
+	return owner == exactSessionStartKeyedOwner
+}
+
+// wakeStartPremiseDrift reports the first wake-relevant field that moved between
+// the snapshot a start candidate was decided on and the current row, naming it
+// for the traced decision. The set is exactly the durable state a wake decision
+// rests on: the lifecycle state, the incarnation (generation + token), the sleep
+// markers a kill or sleep writes, and the wake request itself. session.Info has
+// no slept_at projection, so the kill is observed through the markers SleepPatch
+// does surface — state, sleep_reason, sleep_intent, and the cleared last_woke_at.
+func wakeStartPremiseDrift(snapshot, current sessionpkg.Info) (string, bool) {
+	switch {
+	case snapshot.MetadataState != current.MetadataState:
+		return "state", true
+	case strings.TrimSpace(snapshot.Generation) != strings.TrimSpace(current.Generation):
+		return "generation", true
+	case strings.TrimSpace(snapshot.InstanceToken) != strings.TrimSpace(current.InstanceToken):
+		return "instance_token", true
+	case strings.TrimSpace(snapshot.SleepReason) != strings.TrimSpace(current.SleepReason):
+		return "sleep_reason", true
+	case strings.TrimSpace(snapshot.SleepIntent) != strings.TrimSpace(current.SleepIntent):
+		return "sleep_intent", true
+	case strings.TrimSpace(snapshot.LastWokeAt) != strings.TrimSpace(current.LastWokeAt):
+		return "last_woke_at", true
+	case strings.TrimSpace(snapshot.WakeRequest) != strings.TrimSpace(current.WakeRequest):
+		return "wake_request", true
+	}
+	return "", false
+}
+
+// midIncarnationStartInFlight reports whether the row is mid-rotation:
+// `creating` with a last_woke_at (so a pre-wake commit already landed) and not
+// yet aged past the stale-creating window. A stale creating row stays startable —
+// that is the existing respawn contract, not a race — so this reuses the
+// reconciler's own pendingCreateAttemptStaleInfo rather than a second timeout.
+func midIncarnationStartInFlight(current sessionpkg.Info, clk clock.Clock) bool {
+	return current.MetadataState == string(sessionpkg.StateCreating) &&
+		strings.TrimSpace(current.LastWokeAt) != "" &&
+		!pendingCreateAttemptStaleInfo(current, clk)
+}
+
+// prepareExactStartCandidateForCity prepares a candidate whose TemplateParams
+// were reconstructed from the same authoritative exact-key read. It keeps the
+// authoritative pre-wake freshness read and all existing preparation writes,
+// but does not replace that template through
+// refreshConfiguredNamedStartCandidate's fleet-wide snapshot.
+func prepareExactStartCandidateForCity(
+	candidate startCandidate,
+	cityPath string,
+	cityName string,
+	cfg *config.City,
+	sp runtime.Provider,
+	store beads.Store,
+	clk clock.Clock,
+	stderr io.Writer,
+	workDirResolver taskWorkDirResolver,
+	readCurrent func(beads.Store, string) (sessionpkg.Info, int64, error),
+) (*preparedStart, error) {
+	if readCurrent == nil {
+		readCurrent = func(store beads.Store, id string) (sessionpkg.Info, int64, error) {
+			return getAuthoritativeExactSessionStartInfoBeforeWake(store, id, cfg, clk.Now().UTC())
+		}
+	}
+	return prepareStartCandidateForCityWithNamedRefresh(
+		candidate,
+		cityPath,
+		cityName,
+		cfg,
+		sp,
+		store,
+		clk,
+		stderr,
+		workDirResolver,
+		false,
+		readCurrent,
+	)
+}
+
+func prepareStartCandidateForCityWithNamedRefresh(
+	candidate startCandidate,
+	cityPath string,
+	cityName string,
+	cfg *config.City,
+	sp runtime.Provider,
+	store beads.Store,
+	clk clock.Clock,
+	stderr io.Writer,
+	workDirResolver taskWorkDirResolver,
+	refreshNamed bool,
+	readCurrent func(beads.Store, string) (sessionpkg.Info, int64, error),
 ) (*preparedStart, error) {
 	if id := strings.TrimSpace(candidate.info.ID); id != "" && store != nil {
 		if err := sessionpkg.WithSessionMutationLock(id, func() error {
@@ -860,7 +1415,16 @@ func prepareStartCandidateForCity(
 			// a bead that is no longer a session (IsSessionBeadOrRepairable), the
 			// documented front-door-Get delta from the former raw store.Get. This is
 			// the SANCTIONED cross-goroutine freshness re-read, not a per-patch re-Get.
-			current, _, err := sessFront.GetPersistedResponse(id)
+			var current sessionpkg.Info
+			var loadedRevision int64
+			var err error
+			if readCurrent != nil {
+				current, loadedRevision, err = readCurrent(store, id)
+			} else {
+				var persisted sessionpkg.PersistedResponse
+				current, persisted, err = sessFront.GetPersistedResponse(id)
+				loadedRevision = persisted.Revision
+			}
 			if err != nil {
 				return err
 			}
@@ -868,8 +1432,11 @@ func prepareStartCandidateForCity(
 			// the batch; folding it onto the freshly re-read Info keeps the twin
 			// byte-coherent with the persisted state without a second Get. It shares
 			// preWakeCommit's error contract: a failed re-read already returned above,
-			// so the twin is never folded from a stale/rejected bead.
-			_, _, fold, err := preWakeCommit(current, sessFront, clk)
+			// so the twin is never folded from a stale/rejected bead. The commit is
+			// fenced on the revision THAT re-read carried, so a writer that moved the
+			// row since (including one in another process) makes this entrant abort as
+			// superseded instead of rotating the incarnation a second time.
+			_, _, fold, err := preWakeCommit(current, loadedRevision, sessFront, clk)
 			if err != nil {
 				return err
 			}
@@ -878,12 +1445,14 @@ func prepareStartCandidateForCity(
 		}); err != nil {
 			return nil, err
 		}
-	} else if _, _, fold, err := preWakeCommit(candidate.info, sessionFrontDoor(store), clk); err != nil {
+	} else if _, _, fold, err := preWakeCommit(candidate.info, 0, sessionFrontDoor(store), clk); err != nil {
 		return nil, err
 	} else {
 		candidate.info = candidate.info.ApplyPatch(fold)
 	}
-	candidate = refreshConfiguredNamedStartCandidate(candidate, cityPath, cityName, cfg, sp, store, clk, stderr)
+	if refreshNamed {
+		candidate = refreshConfiguredNamedStartCandidate(candidate, cityPath, cityName, cfg, sp, store, clk, stderr)
+	}
 	// buildPreparedStart folds its own post-append mutations (stale-resume clears,
 	// session_key / instance_token mints) onto candidate.info at their write sites, so
 	// the returned prepared.candidate.info stays coherent with the store WITHOUT a
@@ -1429,6 +1998,46 @@ func runPreparedStartCandidate(
 	sessionStaleKeyDetectionWaiter sessionpkg.StaleKeyDetectionWaiter,
 	warmClaim warmClaimTriggerProbe,
 ) (result startResult) {
+	return runPreparedStartCandidateWith(
+		ctx, item, cityPath, sp, store, cfg, startupTimeout, stabilityWaiter, true,
+		func(startCtx context.Context, phases *startPhaseTimings) (bool, error) {
+			return startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg, phases, sessionStaleKeyDetectionWaiter, warmClaim)
+		},
+	)
+}
+
+func runPreparedStartCandidateAuthorized(
+	ctx context.Context,
+	item preparedStart,
+	cityPath string,
+	sp runtime.Provider,
+	store beads.Store,
+	cfg *config.City,
+	startupTimeout time.Duration,
+	stabilityWaiter startStabilityWaiter,
+	sessionStaleKeyDetectionWaiter sessionpkg.StaleKeyDetectionWaiter,
+	authorize func(context.Context) error,
+) startResult {
+	return runPreparedStartCandidateWith(
+		ctx, item, cityPath, sp, store, cfg, startupTimeout, stabilityWaiter, false,
+		func(startCtx context.Context, _ *startPhaseTimings) (bool, error) {
+			return startPreparedStartCandidateAuthorized(startCtx, item, cityPath, store, sp, cfg, sessionStaleKeyDetectionWaiter, authorize)
+		},
+	)
+}
+
+func runPreparedStartCandidateWith(
+	ctx context.Context,
+	item preparedStart,
+	cityPath string,
+	sp runtime.Provider,
+	store beads.Store,
+	cfg *config.City,
+	startupTimeout time.Duration,
+	stabilityWaiter startStabilityWaiter,
+	allowRuntimeConvergence bool,
+	startCall func(context.Context, *startPhaseTimings) (bool, error),
+) (result startResult) {
 	started := time.Now()
 	result = startResult{
 		prepared: item,
@@ -1456,14 +2065,14 @@ func runPreparedStartCandidate(
 	defer cancel()
 	var phases startPhaseTimings
 	startCallBegin := time.Now()
-	startedFresh, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg, &phases, sessionStaleKeyDetectionWaiter, warmClaim)
+	startedFresh, err := startCall(startCtx, &phases)
 	startCtxErr := startCtx.Err()
 	// Split start_call into provider.Start and the ErrStateSync recovery
 	// branch (gc-9ha). The recovery branch hits the worker observation
 	// API which can dominate start_call when the runtime is wedged.
 	// state_sync_recovery only fires when err==ErrStateSync, so it stays
 	// zero on the happy path.
-	if err != nil && errors.Is(err, sessionpkg.ErrStateSync) {
+	if allowRuntimeConvergence && err != nil && errors.Is(err, sessionpkg.ErrStateSync) {
 		recoveryBegin := time.Now()
 		obs, runningErr := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, item.candidate.name(), item.cfg.ProcessNames)
 		phases.StateSyncRecovery = time.Since(recoveryBegin)
@@ -1499,7 +2108,7 @@ func runPreparedStartCandidate(
 	finished := time.Now()
 	rollbackPending := err != nil && shouldRollbackPendingCreateInfo(item.candidate.info)
 	rateLimitScreen := err != nil && startupRateLimitScreenDetected(item, cityPath, sp, store, cfg)
-	if err != nil && rollbackPending && !rateLimitScreen && runningSessionMatchesPendingCreateInfo(item.candidate.info, item.candidate.name(), sp) {
+	if allowRuntimeConvergence && err != nil && rollbackPending && !rateLimitScreen && runningSessionMatchesPendingCreateInfo(item.candidate.info, item.candidate.name(), sp) {
 		return startResult{
 			prepared:        item,
 			err:             nil,
@@ -1528,6 +2137,10 @@ func runPreparedStartCandidate(
 	case err == nil:
 		outcome = TraceOutcomeSuccess
 	case errors.Is(err, runtime.ErrSessionExists):
+		if !allowRuntimeConvergence {
+			outcome = TraceOutcomeSessionExists
+			break
+		}
 		obs, runningErr := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, item.candidate.name(), item.cfg.ProcessNames)
 		switch {
 		case runningErr != nil || !runtimeObservationLive(obs):
@@ -1672,7 +2285,36 @@ func commitAsyncStartResultWithContext(
 	wave int,
 	stdout, stderr io.Writer,
 	trace *sessionReconcilerTraceCycle,
-) (committed bool) {
+) bool {
+	return commitStartResultWithFreshness(
+		ctx, result, sp, store, clk, rec, wave, stdout, stderr, trace,
+	) == startCommitCommitted
+}
+
+type startCommitDisposition uint8
+
+const (
+	startCommitFailed startCommitDisposition = iota
+	startCommitCommitted
+	startCommitSuperseded
+)
+
+// commitStartResultWithFreshness applies the async start-result freshness
+// fence and distinguishes a durable commit failure from an expected stale
+// result. The keyed exact-start path needs that distinction so a concurrent
+// close or replacement converges as a successful no-op instead of being
+// retried, while genuine persistence failures still surface to its workqueue.
+func commitStartResultWithFreshness(
+	ctx context.Context,
+	result startResult,
+	sp runtime.Provider,
+	store beads.Store,
+	clk clock.Clock,
+	rec events.Recorder,
+	wave int,
+	stdout, stderr io.Writer,
+	trace *sessionReconcilerTraceCycle,
+) (disposition startCommitDisposition) {
 	name := result.prepared.candidate.name()
 	template := result.prepared.candidate.tp.TemplateName
 	// Session front door constructed once from the same store; nil when store
@@ -1695,7 +2337,7 @@ func commitAsyncStartResultWithContext(
 			// still show start_call / post_start_observe timings; commit_refresh
 			// may be unset if the panic fired before refreshAsyncStartResult.
 			logLifecycleOutcome(stderr, "start", wave, name, template, "panic_recovered", result.started, time.Now(), err, result.phases)
-			committed = false
+			disposition = startCommitFailed
 		}
 	}()
 
@@ -1721,7 +2363,10 @@ func commitAsyncStartResultWithContext(
 			outcome = "async_start_refresh_failed"
 		}
 		logLifecycleOutcome(stderr, "start", wave, name, template, outcome, result.started, time.Now(), nil, refreshed.phases)
-		return false
+		if releaseInFlight && !cleanupRuntime {
+			return startCommitFailed
+		}
+		return startCommitSuperseded
 	}
 	if refreshed.err != nil && refreshed.rollbackPending && runningSessionMatchesPendingCreateInfo(refreshed.prepared.candidate.info, refreshed.prepared.candidate.name(), sp) {
 		refreshed.err = nil
@@ -1730,19 +2375,25 @@ func commitAsyncStartResultWithContext(
 	}
 	if ctx != nil && ctx.Err() != nil {
 		if refreshed.err != nil && refreshed.rollbackPending {
-			return commitStartResultTraced(refreshed, sessFront, clk, rec, wave, stdout, stderr, trace)
+			if commitStartResultTraced(refreshed, sessFront, clk, rec, wave, stdout, stderr, trace) {
+				return startCommitCommitted
+			}
+			return startCommitFailed
 		}
 		if refreshed.err == nil && shouldRollbackPendingCreateInfo(refreshed.prepared.candidate.info) {
 			stopStaleAsyncStartRuntime(refreshed, sp, stderr)
 			rollbackPendingCreate(refreshed.prepared.candidate.info, sessFront, clk.Now().UTC(), stderr)
 		}
 		logLifecycleOutcome(stderr, "start", wave, name, template, "context_canceled", refreshed.started, time.Now(), ctx.Err(), refreshed.phases)
-		return false
+		return startCommitFailed
 	}
 	if sp != nil && refreshed.err == nil && refreshed.outcome != TraceOutcomeSessionInitializing {
 		_ = clearReconcilerDrainAckMetadata(sp, refreshed.prepared.candidate.name())
 	}
-	return commitStartResultTraced(refreshed, sessFront, clk, rec, wave, stdout, stderr, trace)
+	if commitStartResultTraced(refreshed, sessFront, clk, rec, wave, stdout, stderr, trace) {
+		return startCommitCommitted
+	}
+	return startCommitFailed
 }
 
 // refreshAsyncStartResult re-reads the session bead just before commit so the async
@@ -1752,7 +2403,7 @@ func commitAsyncStartResultWithContext(
 // NOT a forbidden per-patch re-Get: it fires once per async start commit, on the
 // budget-limited start path, never once per reconciler metadata write.
 //
-// The read goes through the session front door via GetPersistedResponse, which
+// The read goes through the live store handle and session front door, which
 // returns the current Info directly (no raw-bead codec call in this file). The
 // staleness gates (asyncStartPreparedCommandStaleInfo, asyncStartSessionStillCurrentInfo)
 // and the commit-time decision reads (which project off candidate.info downstream)
@@ -1770,7 +2421,7 @@ func refreshAsyncStartResult(result startResult, store beads.Store, stderr io.Wr
 	if store == nil || strings.TrimSpace(preparedInfo.ID) == "" {
 		return result, true, false, false
 	}
-	currentInfo, _, err := sessionFrontDoor(store).GetPersistedResponse(preparedInfo.ID)
+	currentInfo, _, err := getAuthoritativeSessionStartPersistedRecord(store, preparedInfo.ID)
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: refreshing async start %s: %v\n", result.prepared.candidate.name(), err) //nolint:errcheck
 		return result, false, false, true
@@ -1934,6 +2585,32 @@ func startPreparedStartCandidate(
 		return true, err
 	}
 	return true, handle.StartResolved(ctx, item.cfg.Command, item.cfg)
+}
+
+func startPreparedStartCandidateAuthorized(
+	ctx context.Context,
+	item preparedStart,
+	cityPath string,
+	store beads.Store,
+	sp runtime.Provider,
+	cfg *config.City,
+	staleKeyDetectionWaiter sessionpkg.StaleKeyDetectionWaiter,
+	authorize func(context.Context) error,
+) (bool, error) {
+	if store == nil || strings.TrimSpace(item.candidate.info.ID) == "" {
+		return false, errors.New("authorized exact start requires a persisted session")
+	}
+	handle, err := workerHandleForSessionWithStaleKeyDetectionWaiter(
+		cityPath, store, sp, cfg, item.candidate.info.ID, staleKeyDetectionWaiter,
+	)
+	if err != nil {
+		return false, err
+	}
+	authorized, ok := handle.(worker.AuthorizedStartHandle)
+	if !ok {
+		return false, errors.New("worker handle does not support authorized exact start")
+	}
+	return true, authorized.StartResolvedAuthorized(ctx, item.cfg.Command, item.cfg, authorize)
 }
 
 func runtimeObservationLive(obs worker.LiveObservation) bool {
@@ -2866,7 +3543,7 @@ func executePlannedStartsTraced(
 						}
 					}
 				}
-				item, err := prepareStartCandidateForCity(candidate, cityPath, cityName, cfg, sp, store, clk, stderr, startOpts.workDirResolver)
+				item, err := prepareStartCandidateForCity(candidate, cityPath, cityName, cfg, sp, store, clk, stderr, startOpts.workDirResolver, startOpts.legacyStartExcluded)
 				if err != nil {
 					clearPendingStartInFlightLease(candidate.info.ID, sessFront, stderr)
 					if release != nil {
@@ -2874,6 +3551,26 @@ func executePlannedStartsTraced(
 					}
 					if done != nil {
 						done()
+					}
+					// A superseded prepare is convergence, not a failure: another writer
+					// owns this row's current state, so this candidate is dropped without
+					// entering the provider and the next tick re-decides from a fresh
+					// snapshot. Logging it as "failed" would turn every coexistence race
+					// into an error storm (ga-l1j53).
+					if errors.Is(err, errPreWakeSuperseded) {
+						reason := "pre_wake_cas"
+						var skip *legacyStartPreWakeSkip
+						if errors.As(err, &skip) {
+							reason = skip.reason
+						}
+						if trace != nil {
+							trace.RecordDecision(TraceSiteReconcilerWakeDecision, TraceReasonCode("start_commit_superseded"), TraceOutcomeSkipped, candidate.logicalTemplate(cfg), candidate.name(), traceRecordPayload{
+								"session_id": candidate.info.ID,
+								"reason":     reason,
+							})
+						}
+						logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "superseded", time.Time{}, time.Time{}, nil)
+						continue
 					}
 					fmt.Fprintf(stderr, "session reconciler: pre-wake %s: %s\n", candidate.name(), formatLifecycleError(err)) //nolint:errcheck
 					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "failed", time.Time{}, time.Time{}, err)
@@ -2912,10 +3609,10 @@ func executePlannedStartsTraced(
 			}
 			for _, result := range results {
 				if trace != nil {
-					trace.RecordOperation(TraceSiteLifecycleStartRun, TraceReasonStart, result.outcome, "", result.prepared.candidate.tp.TemplateName, result.prepared.candidate.name(), result.finished.Sub(result.started), traceRecordPayload{
-						"rollback_pending": result.rollbackPending,
-						"duration_ms":      result.finished.Sub(result.started).Milliseconds(),
-					})
+					duration := result.finished.Sub(result.started)
+					payload := result.phases.tracePayload(result.prepared.candidate.info.ID, duration)
+					payload["rollback_pending"] = result.rollbackPending
+					trace.RecordOperation(TraceSiteLifecycleStartRun, TraceReasonStart, result.outcome, "", result.prepared.candidate.tp.TemplateName, result.prepared.candidate.name(), duration, payload)
 				}
 				if result.outcome == TraceOutcomeStartEnqueued {
 					logLifecycleOutcome(stderr, "start", wave, result.prepared.candidate.name(), result.prepared.candidate.logicalTemplate(cfg), string(result.outcome), result.started, result.finished, nil)

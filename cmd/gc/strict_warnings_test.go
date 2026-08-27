@@ -151,3 +151,15 @@ func TestSplitStrictConfigWarnings_MissingSiteBindingRemainsFatal(t *testing.T) 
 		t.Fatalf("fatal = %v, want missing-binding warning to stay fatal", fatal)
 	}
 }
+
+func TestSplitStrictConfigWarnings_RetiredSessionStartReconcilerRemainsFatal(t *testing.T) {
+	warning := `city.toml: unknown field "daemon.session_start_reconciler"`
+	fatal, nonFatal := splitStrictConfigWarnings([]string{warning})
+
+	if len(nonFatal) != 0 {
+		t.Fatalf("nonFatal = %v, want none", nonFatal)
+	}
+	if len(fatal) != 1 || fatal[0] != warning {
+		t.Fatalf("fatal = %v, want retired daemon key rejected in strict mode", fatal)
+	}
+}

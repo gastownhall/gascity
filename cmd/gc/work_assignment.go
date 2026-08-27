@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -47,15 +48,17 @@ func (w workAssignment) unwrapped() beads.Store {
 	return w.store.Store
 }
 
-// OpenAssignedTo returns the open or in-progress WORK beads in this store
-// assigned to the given identity for the given tier mode, excluding session
-// beads and mail message beads. It is the typed form of the raw
+// OpenAssignedTo returns the open or in-progress beads in this store assigned
+// to the given identity for the given tier mode, excluding mail message beads.
+// It is the typed form of the raw
 // List{Assignee,Status,Live,TierMode} probe the reconciler ran directly.
-// status selects the bead status ("open" / "in_progress"); live mirrors the
-// raw ListQuery.Live flag. Session beads (and repairable session beads) are
-// filtered out, matching the raw probes; mail message beads are filtered out
-// here too (ra-59207) — a mail wisp has no claim/routing semantics, so every
-// caller that reassigns or releases what this returns must never see one.
+// status selects the bead status ("open" / "in_progress"); an empty status
+// returns every non-closed status so callers can batch a small status set and
+// filter it in memory. live mirrors the raw ListQuery.Live flag. Callers filter
+// session beads (and repairable session beads) with HasNonSessionWork or the
+// equivalent typed predicate. Mail message beads are filtered here (ra-59207):
+// a mail wisp has no claim/routing semantics, so callers that reassign or
+// release results must never see one.
 func (w workAssignment) OpenAssignedTo(assignee, status string, tierMode beads.TierMode, live bool) ([]beads.Bead, error) {
 	store := w.unwrapped()
 	if store == nil {
@@ -66,6 +69,52 @@ func (w workAssignment) OpenAssignedTo(assignee, status string, tierMode beads.T
 		return nil, err
 	}
 	return excludeMailMessageBeads(items), nil
+}
+
+// OpenAssignedToAny returns open or in-progress non-session work assigned to
+// any supplied identity using exact live, both-tier assignee queries. It is the
+// bounded pool-reuse form of repeated OpenAssignedTo probes. Keeping each read
+// singular is load-bearing: production stores push down Assignee, while their
+// plural-assignee compatibility paths may otherwise scan and filter the fleet.
+func (w workAssignment) OpenAssignedToAny(assignees []string) ([]beads.Bead, error) {
+	store := w.unwrapped()
+	if store == nil {
+		return nil, nil
+	}
+	canonical := make([]string, 0, len(assignees))
+	seen := make(map[string]struct{}, len(assignees))
+	for _, assignee := range assignees {
+		assignee = strings.TrimSpace(assignee)
+		if assignee == "" {
+			continue
+		}
+		if _, duplicate := seen[assignee]; duplicate {
+			continue
+		}
+		seen[assignee] = struct{}{}
+		canonical = append(canonical, assignee)
+	}
+	if len(canonical) == 0 {
+		return nil, nil
+	}
+	sort.Strings(canonical)
+	var result []beads.Bead
+	for _, assignee := range canonical {
+		items, err := w.OpenAssignedTo(assignee, "", beads.TierBoth, true)
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range items {
+			if item.Status != "open" && item.Status != "in_progress" {
+				continue
+			}
+			if sessionpkg.IsSessionBeadOrRepairable(item) {
+				continue
+			}
+			result = append(result, item)
+		}
+	}
+	return result, nil
 }
 
 // CachedOpenAssignedWisps returns cached open-assigned wisp-tier WORK beads when

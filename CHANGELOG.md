@@ -7,7 +7,109 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`[daemon] session_reconciler` selects a keyed session reconciler,
+  opt-in and off by default.** A city keeps its sessions matching its config —
+  starting what is missing, stopping what has finished, waking what has work —
+  and by default decides that with one pass over every session on each patrol
+  tick. Set `session_reconciler = "auto"` and each session is decided against
+  its own identity instead, with the fleet-wide pass covering anything the
+  keyed engine declines. `"off"` is the default and the existing behavior. It
+  is a change of engine, not of behavior: the same triggers start, stop and
+  wake the same sessions under the same config.
+
+  One qualification on `"auto"`'s cover. A session the keyed engine *declines*
+  falls to the fleet-wide pass on the same tick. A session it *takes and
+  cannot finish* stays its own — the fleet-wide pass skips the row while that
+  claim is held — and is retried on a bounded cadence, escalating to a named
+  `drain_ack_escalated` state re-examined on the drain's own ack-or-timeout
+  deadline until it resolves or that deadline hands the row back. So the worst
+  case under `"auto"` is a bounded, named delay on the sessions the keyed
+  engine holds — not, as it would be tempting to say, identical to `"off"`.
+
+  `"require"` is narrower than its name suggests, and on one store class it is
+  worse than `"auto"`. It refuses **startup** for the exact-start requirements
+  only. A session store that cannot fence its own writes does *not* stop the
+  city: it starts, and then refuses closed every pool drain acknowledgement that
+  store has to serve — so drains wedge until their own ack-or-timeout deadline
+  fires, with no hand-back to the fleet-wide pass. The store class this reaches
+  today is the bd-hook-backed one: a scope carrying executable
+  `.beads/hooks/on_create`, `on_update` or `on_close` handlers falls back to the
+  `bd` subprocess store, and the pinned `bd` does not advertise the
+  conditional-write flag those fenced writes need. Under `"auto"` the same city
+  is covered. Every city now checks this capability at boot in every mode and
+  prints one startup `ERROR` line naming the store kind and what it lacks, so
+  restart once on `"auto"` and read the controller log before considering
+  `"require"`.
+
+  Upgrading: the value is read once at startup, so a city takes it on the next
+  `gc stop` / `gc start`. There is no drain-and-wait step first — a session
+  that was mid-drain when the city restarted is re-evaluated against the state
+  it is actually in, so a drain already under way finishes normally. Rollback
+  is `session_reconciler = "off"` and one more restart: neither engine writes
+  anything the other cannot read, nothing on disk is converted, and a build
+  without the setting behaves as `"off"`. See
+  [Turn On Keyed Session Reconciliation](docs/runbooks/keyed-session-reconciler.md).
+
 ### Changed
+
+- **`[daemon] tick_debounce` is retired: the key is ignored and the debounce
+  window is gone.** The knob held bursty event-driven ticks — wisp lifecycle
+  writes, witness writes, control-dispatcher pokes — behind one timer, and it
+  was retired along with the tick loop the keyed session reconciler's detector
+  sweep landed in. A city that still carries the key loads normally (it is a
+  migration warning, never a hard failure) and ticks at exactly the
+  `patrol_interval` it declares.
+
+  Upgrading, for the cities that actually set it: this is a behavior change,
+  not just a config cleanup. Only the in-tick coalesce survives — the poke
+  channels are cap-1 with a non-blocking send, so a burst arriving *while a
+  tick is running* still collapses into one tick, but a burst arriving
+  *between* ticks now fires one tick each, which is the load the knob was added
+  to suppress (measured at the time as ~77 new `bd`-subprocess connections/sec
+  against a shared dolt server). There is no replacement knob: `patrol_interval`
+  paces the periodic scan, not the event-driven pokes. Remove the key, and if
+  the city was set to a debounce for shared-store load, watch `bd`/dolt
+  connection load across the first restart — `session_reconciler = "auto"`
+  restores per-key coalescing for the session-reconcile work those pokes drive.
+
+- **A nudge no longer types into a tmux session it cannot prove is safe to type
+  into.** Every input-affecting nudge path now runs an input fence first: it
+  takes an exact pane census of the named session, clears the two blockers that
+  park a session indefinitely with nobody watching, and proves the target
+  before any keystroke is delivered. A copy-mode park (a stray wheel-up
+  swallows every keystroke) is cancelled and the nudge delivered, scoped to the
+  pane the nudge is about to use — a park on any other pane of the session is
+  left alone, because input is pane-targeted. A Codex/GPT model-switch modal is
+  dismissed keeping the current model: tmux cannot see a TUI dialog, so no pane
+  predicate can fence one, and left standing it eats the nudge's text and turns
+  its Enter into a confirmed model downgrade.
+
+  Two changes to the modal dismissal itself. It now runs **before** the
+  wait-for-idle rather than only after that wait has already timed out — a
+  standing modal is exactly what stops a pane from ever going idle, so clearing
+  it up front lets the payload land on a live prompt instead of on the timeout
+  fallback. And detection reads only the pane's *visible screen* instead of 120
+  lines of scrollback: a modal is on screen by definition, and matching history
+  meant a pane whose dialog had already been answered and scrolled away could
+  still be sent a stray `Down`+`Enter`. Both keys ride one server
+  command-queue entry, each re-proving the full
+  session/window/pane/mode/ownership predicate.
+
+  Anything that survives remediation, and any census that cannot be completed,
+  is refused as a named fence error rather than delivered blind: the input stays
+  pending and the controller log says which blocker held it, so a parked session
+  is diagnosable without attaching. A fenced refusal does **not** consume one of
+  the nudge backstop's bounded attempts — the runtime has proven nothing reached
+  the pane, so the reservation is rolled back and the pacing clock re-stamped,
+  and the log line says `attempt not consumed`. Having a client attached does
+  not fence delivery: tmux routes pane-targeted input to the pane named whether
+  or not anyone is watching, so `gc attach` never stops the controller from
+  talking to the session under observation. Attachment does still suppress the
+  SIGWINCH wake, unchanged — resize-window on an attached window switches it to
+  manual sizing, and an attached client is already servicing the pane's event
+  loop.
 
 - **`gc pack registry publish` now refuses an unscoped pack name unless you
   pass `--allow-unscoped-name`.** Registry pack names are scoped as
@@ -30,6 +132,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only restate the name `pack.toml` already declares.
 
 ### Fixed
+
+- **A split city's infrastructure writes are no longer silent.** When a city
+  relocates a bead class — sessions, graph, mail, nudges — to its own store,
+  that store is a bare bead engine, not the `CachingStore` the work ledger is
+  wrapped in, and `CachingStore` was the only thing emitting `bead.*` events.
+  So the entire infrastructure half of a split city wrote without ever
+  announcing it: the most visible symptom was a molecule whose beads had all
+  closed still reporting `Running`, because bead-close autoclose and execution
+  events never fired for those rows. The controller now wires emission at the
+  seam that opens a relocated class, so a split city announces its writes the
+  way an unsplit city always has.
+
+  Operator note: this is unconditional — it applies with
+  `session_reconciler` at its `"off"` default, not just under `"auto"`. On a
+  split city expect a new baseline of `bead.*` rows for controller writes to
+  relocated classes, and expect close-autoclose and execution-event emission to
+  start firing for controller closes that previously did nothing. Unsplit
+  cities are unaffected; they already had all of this. The events carry the
+  store-layer actor, which is the same attribution `CachingStore` has always
+  used, so nothing downstream treats them as user-driven activity.
 
 - **`gc import add` of a local in-git pack now locks to HEAD, not the repo's
   latest tag.** Per `gc import add --help`, a local path inside a git

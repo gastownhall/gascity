@@ -330,30 +330,73 @@ func (s *Store) GetState(id string) (state State, closed bool, err error) {
 	return info.State, info.Closed, nil
 }
 
-// Close closes the session bead with terminal close metadata via ClosePatch,
-// then sets status closed. It is the front door for closeBead /
-// closeFailedCreateBead. stateCode is the canonical short state code recorded
-// before close; ClosePatch expands it to a validator-safe close_reason.
+const terminalCloseMaxAttempts = 3
+
+// Close closes the session bead with terminal close metadata via ClosePatch.
+// Stores with atomic terminal-close support commit the metadata and closed
+// status together behind whatever fence that store can honor — a row revision
+// on the native stores, bd's in-transaction status compare-and-swap on a
+// bd-backed store — and a concurrent writer that wins the fence causes a
+// bounded reread and retry. Only stores WITHOUT that capability retain the
+// historical ClosePatch-then-Close sequence, whose gap is what let a stale
+// writer strand a closed row in a nonterminal state (ga-f7v2ft.78.6).
+// It is the front door for closeBead / closeFailedCreateBead.
+// stateCode is the canonical short state code recorded before close;
+// ClosePatch expands it to a validator-safe close_reason.
 //
 // Reports whether the bead was actually closed (false when it was already
 // closed). PHASE 0: the work-reassignment side effect that closeBead performs
 // (releaseWorkFromClosedSessionBead) is intentionally NOT part of this method —
 // that is a cross-class WORK op owned by the Phase 6 work/assignment API.
 func (s *Store) Close(id, stateCode string, now time.Time) (bool, error) {
-	info, err := s.Get(id)
+	bead, err := s.validatedBead(id)
 	if err != nil {
 		return false, err
 	}
-	if info.Closed {
+	if bead.Status == "closed" {
 		return false, nil
 	}
-	if err := s.ApplyPatch(id, ClosePatch(now, stateCode)); err != nil {
-		return false, err
+	patch := ClosePatch(now, stateCode)
+	closer, atomic := beads.AtomicConditionalCloserFor(s.store)
+	if !atomic {
+		if err := s.ApplyPatch(id, patch); err != nil {
+			return false, err
+		}
+		if err := s.store.Close(id); err != nil {
+			return false, fmt.Errorf("closing session %q: %w", id, err)
+		}
+		return true, nil
 	}
-	if err := s.store.Close(id); err != nil {
-		return false, fmt.Errorf("closing session %q: %w", id, err)
+
+	var conflict error
+	for attempt := 1; attempt <= terminalCloseMaxAttempts; attempt++ {
+		// The observed revision is passed through as-is, including 0. Fence
+		// validity belongs to the store, not here: only `bd show` projects bd's
+		// row_lock token as `revision`, so a bead served from a CachingStore
+		// primed by `bd list` legitimately carries 0, and refusing it here would
+		// wedge every session close on a bd-backed city. A store that fences on
+		// the revision rejects a useless token with a precondition — retried and
+		// bounded below — and never closes unfenced.
+		_, err = closer.CloseWithMetadataIfMatch(id, bead.Revision, map[string]string(patch))
+		if err == nil {
+			return true, nil
+		}
+		if !beads.IsPreconditionFailed(err) {
+			return false, fmt.Errorf("closing session %q atomically: %w", id, err)
+		}
+		conflict = err
+		if attempt == terminalCloseMaxAttempts {
+			break
+		}
+		bead, err = s.validatedBead(id)
+		if err != nil {
+			return false, err
+		}
+		if bead.Status == "closed" {
+			return false, nil
+		}
 	}
-	return true, nil
+	return false, fmt.Errorf("closing session %q atomically after %d revision conflicts: %w", id, terminalCloseMaxAttempts, conflict)
 }
 
 // SetStatusOpen sets the session bead status to "open". It is the front door

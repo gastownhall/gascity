@@ -693,6 +693,12 @@ func retireDuplicateConfiguredNamedSessionBeads(
 // fold (Closed stays false: the raw form re-asserts Status="open"). The raw form
 // survives for the class-(c) sync path. TestRetireDuplicateRowsMatchesBeads pins
 // the both-ways equivalence.
+//
+// excluded is the keyed-ownership yield (WD.13): a loser it accepts is left
+// entirely alone — no runtime stop, no archive, no re-point — because the keyed
+// D-DUP handler holds that exact key. It never suppresses the winner
+// computation, so the identity's other losers still retire on this pass. A nil
+// predicate is the pre-WD behavior.
 func retireDuplicateConfiguredNamedSessionRows(
 	cityPath string,
 	store beads.Store,
@@ -701,6 +707,7 @@ func retireDuplicateConfiguredNamedSessionRows(
 	cfg *config.City,
 	cityName string,
 	rows []session.ReconcileSession,
+	excluded func(session.Info) bool,
 	now time.Time,
 	stderr io.Writer,
 ) []session.ReconcileSession {
@@ -739,6 +746,9 @@ func retireDuplicateConfiguredNamedSessionRows(
 				continue
 			}
 			info := rows[idx].Info
+			if excluded != nil && excluded(info) {
+				continue
+			}
 			oldSessionName := strings.TrimSpace(info.SessionNameMetadata)
 			if oldSessionName != "" && oldSessionName != winnerSessionName &&
 				!stopRuntimeBeforeSessionBeadMutationInfo(store, sp, cfg, info, "duplicate named session", stderr) {
@@ -2433,6 +2443,14 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			if preserveConfiguredNamedSessionBead(b, cfg, cityName) {
 				continue
 			}
+			// WD.10a sweep rule: this pass stamps the canonical singleton identity
+			// on a configured single-session agent's row and, in the same pass,
+			// would close that row as an orphan — because no such agent generates
+			// desired-state demand of its own. A CURRENT explicit wake is demand,
+			// and reaping it here is what made the keyed wake family unreachable.
+			if wakeCurrentSingletonPreservesUndesiredBead(b, cfg, now) {
+				continue
+			}
 			if spec, conflict, err := findConflictingNamedSessionSpecForBead(cfg, cityName, b); err != nil {
 				fmt.Fprintf(stderr, "session beads: checking named-session conflict for %s: %v\n", b.ID, err) //nolint:errcheck
 			} else if conflict {
@@ -2851,6 +2869,21 @@ func reapStaleSessionBeads(
 	return reaped
 }
 
+// sessionBeadClaimsLiveRuntime reports whether the durable row asserts an
+// incarnation that should be running right now. It answers from the lifecycle
+// projection rather than a state string so both spellings of a running row
+// (`active` before the status heal, `awake` after) and every dormant spelling
+// are classified the same way the rest of the reconciler classifies them.
+func sessionBeadClaimsLiveRuntime(info session.Info) bool {
+	switch session.ProjectLifecycle(session.LifecycleInputFromInfo(info)).BaseState {
+	case session.BaseStateActive, session.BaseStateStartPending,
+		session.BaseStateCreating, session.BaseStateDraining:
+		return true
+	default:
+		return false
+	}
+}
+
 func cleanupDeadRuntimeSessionCorpses(
 	store beads.Store,
 	_ map[string]beads.Store,
@@ -2913,6 +2946,27 @@ func cleanupDeadRuntimeSessionCorpses(
 		if !dead {
 			continue
 		}
+		// The corpse must be THIS row's incarnation. A restart rotates the
+		// row's instance token at the pre-wake commit and starts the new
+		// runtime after it, so a name mid-rebind carries the previous
+		// incarnation's corpse under a row that has already moved on: reaping
+		// it stops a session this pass never observed, and closing the row
+		// terminates a restart in flight (ga-f7v2ft.156). The identity proof
+		// belongs at the destructive boundary, which is the same place the
+		// keyed stop proves it (council R1). A row with no token cannot be
+		// fenced this way and keeps the pass's existing behavior.
+		if rowToken := strings.TrimSpace(info.InstanceToken); rowToken != "" {
+			runtimeToken, tokenErr := sp.GetMeta(name, "GC_INSTANCE_TOKEN")
+			if tokenErr != nil {
+				fmt.Fprintf(stderr, "session reconciler: reading instance token of dead runtime session %s: %v\n", name, tokenErr) //nolint:errcheck
+				continue
+			}
+			if strings.TrimSpace(runtimeToken) != rowToken {
+				fmt.Fprintf(stderr, "session reconciler: dead runtime session %s belongs to another incarnation (runtime token %q, row %s token %q); leaving it to the owner\n", //nolint:errcheck
+					name, strings.TrimSpace(runtimeToken), info.ID, rowToken)
+				continue
+			}
+		}
 		if err := sp.Stop(name); err != nil {
 			if runtime.IsSessionGone(err) {
 				continue
@@ -2937,7 +2991,23 @@ func cleanupDeadRuntimeSessionCorpses(
 		// The outer `if store != nil` guard tolerates a nil store so the
 		// runtime-Stop side effect still runs in test contexts that do not
 		// wire a real store; closeBead is idempotent on already-closed beads.
-		if store != nil {
+		//
+		// The close is scoped to a row that CLAIMS the runtime it just lost.
+		// A dormant row — asleep, suspended, drained — asserts no incarnation:
+		// `gc session kill` stops the runtime and syncs the bead to asleep
+		// exactly so a later wake can start a fresh one on the same durable
+		// session, and the corpse is that sleep's expected residue. Closing it
+		// destroys a session an operator explicitly preserved and leaves the
+		// wake nothing to converge on (ga-f7v2ft.156). Reaping the corpse is
+		// still right either way: it is what frees the name for the wake.
+		if store != nil && sessionBeadClaimsLiveRuntime(info) {
+			// Name the row this close terminates, not just the runtime it
+			// reaped. A dead-runtime close is a TERMINAL durable write on a row
+			// nobody asked to retire, and until this line existed the only
+			// evidence it had happened was the close reason on the corpse.
+			fmt.Fprintf(stderr, "session reconciler: closing session bead %s as dead-runtime (name=%s state=%q reason=%q sleep_reason=%q origin=%q wake_request=%q)\n", //nolint:errcheck
+				info.ID, name, strings.TrimSpace(info.MetadataState), strings.TrimSpace(info.StateReason),
+				strings.TrimSpace(info.SleepReason), strings.TrimSpace(info.SessionOrigin), strings.TrimSpace(info.WakeRequest))
 			closeBead(store, info.ID, "dead-runtime", clk.Now().UTC(), stderr)
 		}
 		cleaned++

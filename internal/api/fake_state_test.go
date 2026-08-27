@@ -202,11 +202,14 @@ type fakeMutatorState struct {
 	*fakeState
 	suspended map[string]bool
 
-	// serializeMu + serializeCalls make fakeMutatorState a ConfigWriteSerializer
-	// so pack handler tests exercise the real per-city write-lock seam and can
-	// assert mutations route through it.
+	// serializeMu + serializeCalls model the editor-lock portion of the pack
+	// transaction so handler tests can assert both layers are entered.
 	serializeMu    sync.Mutex
 	serializeCalls atomic.Int32
+
+	packMutationCalls atomic.Int32
+	packMutationValue any
+	packMutationErr   error
 
 	// provisionGate, when non-nil, blocks ProvisionRigFromGit until it is closed
 	// or receives — lets a test hold a provision in flight to exercise the
@@ -243,6 +246,20 @@ func (f *fakeMutatorState) SerializeConfigWrite(fn func() error) error {
 	f.serializeCalls.Add(1)
 	return fn()
 }
+
+// MutatePackConfig records the request context before running the callback.
+// It is deliberately a test double for the narrower pack transaction seam;
+// the production controller additionally coordinates reload snapshots.
+func (f *fakeMutatorState) MutatePackConfig(ctx context.Context, fn func() error) error {
+	f.packMutationCalls.Add(1)
+	f.packMutationValue = ctx.Value(packMutationContextKey{})
+	if f.packMutationErr != nil {
+		return f.packMutationErr
+	}
+	return f.SerializeConfigWrite(fn)
+}
+
+type packMutationContextKey struct{}
 
 func (f *fakeMutatorState) SuspendAgent(name string) error { f.suspended[name] = true; return nil }
 func (f *fakeMutatorState) ResumeAgent(name string) error  { delete(f.suspended, name); return nil }

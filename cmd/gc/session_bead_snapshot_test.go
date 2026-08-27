@@ -3,11 +3,15 @@ package main
 import (
 	"fmt"
 	"reflect"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // seedSessionBeads populates a Store with the given number of open and
@@ -401,6 +405,193 @@ func TestSessionBeadSnapshotFromInfosTypedLookups(t *testing.T) {
 	}
 	if got, ok := snap.FindInfoByNamedIdentity("beads/reviewer"); !ok || got.ID != "ga-named-reviewer" {
 		t.Errorf("FindInfoByNamedIdentity = (%+v, %v), want the seeded info", got, ok)
+	}
+}
+
+// TestSessionBeadSnapshotAddInfoRebuildDoesNotBlockExactReadAndRecapturesConcurrentPublish
+// protects the snapshot's hot exact-id read while addInfo rebuilds the fleet-wide
+// indexes. A concurrent add must survive the first add's stale rebuild retry, and
+// FindInfoByID must return a detached Info so callers cannot mutate the snapshot.
+func TestSessionBeadSnapshotAddInfoRebuildDoesNotBlockExactReadAndRecapturesConcurrentPublish(t *testing.T) {
+	seed := sessiontest.SeedBead(t, beads.Bead{
+		ID:     "ga-seed",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession, "agent:seed"},
+		Metadata: map[string]string{
+			"template":      "seed",
+			"agent_name":    "seed",
+			"session_name":  "s-seed",
+			"alias_history": "old-seed",
+		},
+	})
+	first := sessiontest.SeedBead(t, beads.Bead{
+		ID:     "ga-first",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"template": "first", "agent_name": "first", "session_name": "s-first",
+		},
+	})
+	second := sessiontest.SeedBead(t, beads.Bead{
+		ID:     "ga-second",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"template": "second", "agent_name": "second", "session_name": "s-second",
+		},
+	})
+	snap := newSessionBeadSnapshotFromInfos([]session.Info{seed})
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	var rebuilds atomic.Int32
+	snap.beforeAddInfoRebuild = func() {
+		if rebuilds.Add(1) == 1 {
+			close(entered)
+			<-release
+		}
+	}
+	t.Cleanup(func() {
+		releaseOnce.Do(func() { close(release) })
+		snap.beforeAddInfoRebuild = nil
+	})
+
+	firstDone := make(chan struct{})
+	go func() {
+		snap.addInfo(first)
+		close(firstDone)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("first addInfo did not begin its rebuild")
+	}
+
+	type lookupResult struct {
+		info session.Info
+		ok   bool
+	}
+	lookupDone := make(chan lookupResult, 1)
+	go func() {
+		info, ok := snap.FindInfoByID(seed.ID)
+		lookupDone <- lookupResult{info: info, ok: ok}
+	}()
+	var got lookupResult
+	select {
+	case got = <-lookupDone:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("FindInfoByID blocked behind addInfo rebuild")
+	}
+	if !got.ok || got.info.ID != seed.ID {
+		t.Fatalf("FindInfoByID(%q) = (%+v, %t), want seed", seed.ID, got.info, got.ok)
+	}
+	got.info.Labels[0] = "mutated"
+	got.info.AliasHistory[0] = "mutated"
+	if reread, ok := snap.FindInfoByID(seed.ID); !ok || reread.Labels[0] == "mutated" || reread.AliasHistory[0] == "mutated" {
+		t.Fatalf("FindInfoByID returned an aliased Info: %+v, %t", reread, ok)
+	}
+
+	// Publish a second add while the first is paused. The first candidate is
+	// now stale and must recapture this publish before it becomes authoritative.
+	snap.addInfo(second)
+	releaseOnce.Do(func() { close(release) })
+	select {
+	case <-firstDone:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("first addInfo did not finish after its rebuild retry")
+	}
+	for _, want := range []string{seed.ID, first.ID, second.ID} {
+		if info, ok := snap.FindInfoByID(want); !ok || info.ID != want {
+			t.Fatalf("FindInfoByID(%q) = (%+v, %t), want present after concurrent add", want, info, ok)
+		}
+	}
+}
+
+// TestSessionBeadSnapshotAddInfoRecapturesConcurrentRowMutations proves that
+// generation changes from both in-place row mutation paths invalidate a paused
+// addInfo candidate. Without the generation bump, its stale candidate would
+// overwrite the writeback or patch when it is released.
+func TestSessionBeadSnapshotAddInfoRecapturesConcurrentRowMutations(t *testing.T) {
+	newInfo := func(id, name string) session.Info {
+		return session.Info{ID: id, Template: name, AgentName: name, SessionNameMetadata: "s-" + name}
+	}
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(*sessionBeadSnapshot, session.Info)
+		assert func(session.Info) bool
+	}{
+		{
+			name: "writeback",
+			mutate: func(snap *sessionBeadSnapshot, seed session.Info) {
+				updated := seed
+				updated.SessionNameMetadata = "s-seed-writeback"
+				snap.WriteBackReconcileInfos(map[string]session.Info{seed.ID: updated})
+			},
+			assert: func(info session.Info) bool { return info.SessionNameMetadata == "s-seed-writeback" },
+		},
+		{
+			name: "patch",
+			mutate: func(snap *sessionBeadSnapshot, seed session.Info) {
+				snap.ApplyOpenInfoPatch(seed.ID, session.MetadataPatch{"alias_history": "patched-seed"})
+			},
+			assert: func(info session.Info) bool { return reflect.DeepEqual(info.AliasHistory, []string{"patched-seed"}) },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			seed := newInfo("ga-seed", "seed")
+			added := newInfo("ga-added", "added")
+			snap := newSessionBeadSnapshotFromInfos([]session.Info{seed})
+			entered := make(chan struct{})
+			release := make(chan struct{})
+			var releaseOnce sync.Once
+			var rebuilds atomic.Int32
+			snap.beforeAddInfoRebuild = func() {
+				if rebuilds.Add(1) == 1 {
+					close(entered)
+					<-release
+				}
+			}
+			t.Cleanup(func() {
+				releaseOnce.Do(func() { close(release) })
+				snap.beforeAddInfoRebuild = nil
+			})
+
+			done := make(chan struct{})
+			go func() {
+				snap.addInfo(added)
+				close(done)
+			}()
+			select {
+			case <-entered:
+			case <-time.After(testutil.GoroutineRaceTimeout):
+				t.Fatal("addInfo did not capture before the concurrent mutation")
+			}
+			tc.mutate(snap, seed)
+			releaseOnce.Do(func() { close(release) })
+			select {
+			case <-done:
+			case <-time.After(testutil.GoroutineRaceTimeout):
+				t.Fatal("addInfo did not finish after recapturing the concurrent mutation")
+			}
+			if info, ok := snap.FindInfoByID(seed.ID); !ok || !tc.assert(info) {
+				t.Fatalf("seed after stale-candidate retry = (%+v, %t), want concurrent mutation preserved", info, ok)
+			}
+			if info, ok := snap.FindInfoByID(added.ID); !ok || info.ID != added.ID {
+				t.Fatalf("added Info = (%+v, %t), want present after stale-candidate retry", info, ok)
+			}
+		})
+	}
+}
+
+func TestSessionBeadSnapshotFindInfoByIDKeepsFirstDuplicate(t *testing.T) {
+	first := session.Info{ID: "ga-duplicate", Template: "first", SessionNameMetadata: "s-first"}
+	second := first
+	second.SessionNameMetadata = "s-second"
+	snap := newSessionBeadSnapshotFromInfos([]session.Info{first, second})
+	if info, ok := snap.FindInfoByID(first.ID); !ok || info.SessionNameMetadata != "s-first" {
+		t.Fatalf("FindInfoByID(%q) = (%+v, %t), want first duplicate", first.ID, info, ok)
 	}
 }
 

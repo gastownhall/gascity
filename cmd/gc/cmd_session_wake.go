@@ -50,6 +50,7 @@ type sessionWakeDeps struct {
 	withdrawQueuedWaitNudges  func(string, []string) error
 	cityUsesManagedReconciler func(string) bool
 	pokeController            func(string) error
+	sendControllerCommand     controllerCommandSender
 }
 
 // cmdSessionWake is the CLI entry point for "gc session wake".
@@ -74,6 +75,7 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 		withdrawQueuedWaitNudges:  withdrawQueuedWaitNudges,
 		cityUsesManagedReconciler: cityUsesManagedReconciler,
 		pokeController:            pokeController,
+		sendControllerCommand:     sendControllerCommand,
 	})
 }
 
@@ -141,7 +143,7 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 			fmt.Fprintf(stderr, "gc session wake: warning: withdrawing queued wait nudges: %v\n", err) //nolint:errcheck
 		}
 		if deps.cityUsesManagedReconciler(deps.cityPath) {
-			if err := deps.pokeController(deps.cityPath); err != nil {
+			if err := pokeSessionStartControllerWith(deps.cityPath, id, deps.sendControllerCommand, deps.pokeController); err != nil {
 				fmt.Fprintf(stderr, "gc session wake: warning: poke failed: %v\n", err) //nolint:errcheck
 			}
 		}

@@ -9,11 +9,18 @@ import (
 // TestRetiredKeyWarningIsNonFatalAndEmitted proves the retirement contract holds
 // on the two downstream re-classifiers of config warnings: strict mode keeps a
 // retired-key warning NON-FATAL, and the agent warning-emit path SURFACES it.
-// Without the config.IsRetiredKeyWarning wiring, a retired key (once S5-T7
-// registers daemon.graph_workflows) would make `gc start` — strict by default —
-// exit 1 on a city that still carries the key, or drop the warning silently.
+// Without the config.IsRetiredKeyWarning wiring, a city still carrying a key the
+// registry has retired would make `gc start` — strict by default — exit 1, or
+// drop the warning silently. Both are wrong: the point of retiring a key
+// warn-and-ignore is that the city keeps running and the operator still hears
+// about the behavior that went with it.
+//
+// The warning below is synthetic on purpose. The predicate is anchored to the
+// RENDERING, not to any particular key, and spelling the shipped entry here would
+// trip the retirement source-reference guard in cmd/gc, which keeps retired
+// spellings out of Go sources.
 func TestRetiredKeyWarningIsNonFatalAndEmitted(t *testing.T) {
-	w := `city.toml: "daemon.graph_workflows" was retired in v1.4.0 and is ignored; use daemon.formula_v2`
+	w := `city.toml: "daemon.graph_workflows" was retired in v9.9.9 and is ignored; use daemon.formula_v2`
 	if !config.IsRetiredKeyWarning(w) {
 		t.Fatalf("test warning not recognized as retired: %q", w)
 	}

@@ -92,3 +92,42 @@ func TestWriteLockfileSortsKeys(t *testing.T) {
 		t.Fatalf("lockfile not sorted:\n%s", text)
 	}
 }
+
+func TestWriteLockfilePreservesSymlinkAndWritesTarget(t *testing.T) {
+	cityDir := t.TempDir()
+	checkoutDir := t.TempDir()
+	target := filepath.Join(checkoutDir, LockfileName)
+	if err := os.WriteFile(target, []byte("schema = 1\n"), 0o644); err != nil {
+		t.Fatalf("write lockfile target: %v", err)
+	}
+	link := filepath.Join(cityDir, LockfileName)
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink lockfile: %v", err)
+	}
+
+	lock := &Lockfile{Packs: map[string]LockedPack{
+		"github.com/example/tools": {
+			Version: "1.2.3",
+			Commit:  "abc123",
+			Fetched: time.Unix(10, 0).UTC(),
+		},
+	}}
+	if err := WriteLockfile(fsys.OSFS{}, cityDir, lock); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("Lstat lockfile link: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("packs.lock symlink was replaced by mode %v", info.Mode())
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read lockfile target: %v", err)
+	}
+	if !strings.Contains(string(data), `[packs."github.com/example/tools"]`) {
+		t.Fatalf("lockfile target was not updated:\n%s", data)
+	}
+}

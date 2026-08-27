@@ -1,0 +1,277 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "gc perf reconciler-compare --json result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "ok",
+    "provenance",
+    "warmup",
+    "coverage",
+    "actions",
+    "totals"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "gascity.reconciler-comparison.v1"
+    },
+    "ok": {
+      "const": true
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "commit",
+        "dirty",
+        "goos",
+        "goarch",
+        "cpus",
+        "store",
+        "store_schema",
+        "runtime",
+        "workload"
+      ],
+      "properties": {
+        "commit": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dirty": {
+          "type": "boolean"
+        },
+        "goos": {
+          "type": "string",
+          "minLength": 1
+        },
+        "goarch": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cpus": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "store": {
+          "type": "string",
+          "minLength": 1
+        },
+        "store_schema": {
+          "type": "string",
+          "minLength": 1
+        },
+        "runtime": {
+          "type": "string",
+          "minLength": 1
+        },
+        "workload": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "warmup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pairs_per_action",
+        "excluded_from_statistics",
+        "execution_order"
+      ],
+      "properties": {
+        "pairs_per_action": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "excluded_from_statistics": {
+          "type": "boolean"
+        },
+        "execution_order": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "required_actions",
+        "measured_actions",
+        "missing_actions"
+      ],
+      "properties": {
+        "required_actions": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "measured_actions": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "missing_actions": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "start",
+              "stop",
+              "nudge"
+            ]
+          }
+        }
+      }
+    },
+    "actions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/action_summary"
+      }
+    },
+    "totals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pair_count",
+        "mismatch_count",
+        "legacy_error_count",
+        "keyed_error_count"
+      ],
+      "properties": {
+        "pair_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "mismatch_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "legacy_error_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "keyed_error_count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  },
+  "$defs": {
+    "latency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "p50_ns",
+        "p95_ns",
+        "p99_ns",
+        "max_ns"
+      ],
+      "properties": {
+        "p50_ns": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "p95_ns": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "p99_ns": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_ns": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "arm_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attempted_count",
+        "sample_count",
+        "error_count",
+        "measurement_window_ns",
+        "throughput_per_second",
+        "latency"
+      ],
+      "properties": {
+        "attempted_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sample_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "error_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "measurement_window_ns": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "throughput_per_second": {
+          "type": "number",
+          "minimum": 0
+        },
+        "latency": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/latency"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "action_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action",
+        "pair_count",
+        "mismatch_count",
+        "mismatch_pair_ids",
+        "legacy",
+        "keyed"
+      ],
+      "properties": {
+        "action": {
+          "enum": [
+            "start",
+            "stop",
+            "nudge"
+          ]
+        },
+        "pair_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "mismatch_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "mismatch_pair_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "legacy": {
+          "$ref": "#/$defs/arm_summary"
+        },
+        "keyed": {
+          "$ref": "#/$defs/arm_summary"
+        }
+      }
+    }
+  }
+}

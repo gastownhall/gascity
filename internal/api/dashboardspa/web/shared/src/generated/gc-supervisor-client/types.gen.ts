@@ -4769,14 +4769,14 @@ export type StatusConditionalWriteStoreVerdict = {
      */
     reason?: string;
     /**
-     * Store scope: city, or rig/<name>.
+     * Store scope: city, rig/<name>, storage/<binding> for a relocated coordination-class binding, or 'sessions (required)' for the session class's mode-independent fencing requirement.
      */
     store_id: string;
 };
 
 export type StatusConditionalWrites = {
     /**
-     * Aggregate verdict: off (gate off), active (every store capable), degraded (auto with at least one incapable store), fail_closed (require with at least one incapable store — fenced writes on it refuse), pending_restart (on-disk config drifted from the latched mode).
+     * Aggregate verdict: off (gate off), active (every store capable), degraded (auto with at least one incapable store), fail_closed (require with at least one incapable store, OR the session class lacks the conditional writes it requires — which outranks the mode and applies even when the gate is off), pending_restart (on-disk config drifted from the latched mode).
      */
     effective: 'off' | 'active' | 'degraded' | 'fail_closed' | 'pending_restart';
     /**
@@ -14885,6 +14885,10 @@ export type AddPackErrors = {
      */
     404: ErrorModel;
     /**
+     * Request Timeout
+     */
+    408: ErrorModel;
+    /**
      * Conflict
      */
     409: ErrorModel;
@@ -14897,9 +14901,17 @@ export type AddPackErrors = {
      */
     500: ErrorModel;
     /**
+     * Not Implemented
+     */
+    501: ErrorModel;
+    /**
      * Bad Gateway
      */
     502: ErrorModel;
+    /**
+     * Gateway Timeout
+     */
+    504: ErrorModel;
 };
 
 export type AddPackError = AddPackErrors[keyof AddPackErrors];
@@ -14953,6 +14965,10 @@ export type DeleteV0CityByCityNamePacksByNameErrors = {
      */
     404: ErrorModel;
     /**
+     * Request Timeout
+     */
+    408: ErrorModel;
+    /**
      * Unprocessable Entity
      */
     422: ErrorModel;
@@ -14960,6 +14976,14 @@ export type DeleteV0CityByCityNamePacksByNameErrors = {
      * Internal Server Error
      */
     500: ErrorModel;
+    /**
+     * Not Implemented
+     */
+    501: ErrorModel;
+    /**
+     * Gateway Timeout
+     */
+    504: ErrorModel;
 };
 
 export type DeleteV0CityByCityNamePacksByNameError = DeleteV0CityByCityNamePacksByNameErrors[keyof DeleteV0CityByCityNamePacksByNameErrors];

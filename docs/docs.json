@@ -214,7 +214,8 @@
             "pages": [
               "runbooks/managed-city-endpoints",
               "runbooks/remote-hardened-city",
-              "runbooks/split-storage-classes"
+              "runbooks/split-storage-classes",
+              "runbooks/keyed-session-reconciler"
             ]
           }
         ]

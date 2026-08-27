@@ -646,6 +646,86 @@ func (c *CachingStore) CachedReady() ([]Bead, bool) {
 	return result, true
 }
 
+// CachedReadyByID certifies one bead against the dependency-complete active
+// cache without waiting for the cache lock or touching the backing store. The
+// boolean is false when the cache cannot provide a clean complete snapshot or
+// when the bead is not ready. Work is proportional only to the bead's blocking
+// dependencies, never to the fleet size.
+func (c *CachingStore) CachedReadyByID(id string, now time.Time) (Bead, bool) {
+	if c == nil || id == "" || now.IsZero() || !c.mu.TryRLock() {
+		return Bead{}, false
+	}
+	defer c.mu.RUnlock()
+	if c.state != cacheLive || !c.depsComplete || c.primePartialErr != nil || len(c.dirty) > 0 {
+		return Bead{}, false
+	}
+
+	bead, ok := c.beads[id]
+	if !ok || !IsReadyCandidateForTier(bead, now, TierBoth) {
+		return Bead{}, false
+	}
+	deps := c.deps[id]
+	statusByID := make(map[string]string, len(deps))
+	for _, dep := range deps {
+		if !isReadyBlockingDependencyType(dep.Type) {
+			continue
+		}
+		if dependency, found := c.beads[dep.DependsOnID]; found {
+			statusByID[dep.DependsOnID] = dependency.Status
+		}
+	}
+	if !cachedBeadReady(bead, statusByID, deps) {
+		return Bead{}, false
+	}
+	return cloneBead(bead), true
+}
+
+// LiveReadyByID authoritatively checks one cached candidate when an otherwise
+// clean live cache has incomplete dependency coverage. It performs one Get for
+// the work bead, one downward DepList, and at most one Get per distinct
+// blocking dependency; it never falls back to a fleet List or Ready scan.
+// Partial, dirty, busy, or dependency-complete caches decline without backing
+// I/O because CachedReadyByID owns the complete-cache path.
+func (c *CachingStore) LiveReadyByID(id string, now time.Time) (Bead, bool) {
+	if c == nil || id == "" || now.IsZero() || !c.mu.TryRLock() {
+		return Bead{}, false
+	}
+	cached, exists := c.beads[id]
+	admissible := c.state == cacheLive && !c.depsComplete && c.primePartialErr == nil && len(c.dirty) == 0 &&
+		exists && IsReadyCandidateForTier(cached, now, TierBoth)
+	c.mu.RUnlock()
+	if !admissible {
+		return Bead{}, false
+	}
+
+	bead, err := c.backing.Get(id)
+	if err != nil || !IsReadyCandidateForTier(bead, now, TierBoth) {
+		return Bead{}, false
+	}
+	deps, err := c.backing.DepList(id, "down")
+	if err != nil {
+		return Bead{}, false
+	}
+	statusByID := make(map[string]string, len(deps))
+	for _, dep := range deps {
+		if !IsReadyBlockingDependencyType(dep.Type) {
+			continue
+		}
+		if _, seen := statusByID[dep.DependsOnID]; seen {
+			continue
+		}
+		dependency, err := c.backing.Get(dep.DependsOnID)
+		if err != nil {
+			return Bead{}, false
+		}
+		statusByID[dep.DependsOnID] = dependency.Status
+	}
+	if !cachedBeadReady(bead, statusByID, deps) {
+		return Bead{}, false
+	}
+	return cloneBead(bead), true
+}
+
 func cachedBeadReady(b Bead, statusByID map[string]string, deps []Dep) bool {
 	if b.IsBlocked != nil {
 		return !*b.IsBlocked

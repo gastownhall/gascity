@@ -18,12 +18,16 @@ func loadConfigCommandCityConfig(cityPath string) (*config.City, *config.Provena
 	return loadCityConfigWithBuiltinPacks(cityPath, extraConfigFiles...)
 }
 
-// loadCityConfigWithBuiltinPacks loads the city config after refreshing the
-// materialized builtin packs. The includes are caller-supplied extras (e.g.
-// --config files); builtin packs themselves compose only through the explicit
-// city.toml includes written by gc init and repaired by gc doctor --fix.
+// loadCityConfigWithBuiltinPacks loads city.toml after refreshing the
+// materialized builtin packs. The includes are caller-supplied overlays.
 func loadCityConfigWithBuiltinPacks(cityPath string, includes ...string) (*config.City, *config.Provenance, error) {
-	tomlPath := filepath.Join(cityPath, "city.toml")
+	return loadConfigCommandRootConfig(filepath.Join(cityPath, "city.toml"), includes...)
+}
+
+// loadConfigCommandRootConfig loads a root city config after refreshing the
+// materialized builtin packs. The includes are caller-supplied overlays;
+// builtin packs themselves compose only through the root's explicit includes.
+func loadConfigCommandRootConfig(tomlPath string, includes ...string) (*config.City, *config.Provenance, error) {
 	if err := ensureBuiltinPacksForConfigLoad(fsys.OSFS{}, tomlPath, resolveLoadCityConfigWarningWriter()); err != nil {
 		return nil, nil, err
 	}
@@ -61,6 +65,7 @@ func newConfigShowCmd(stdout, stderr io.Writer) *cobra.Command {
 	var validate bool
 	var showProvenance bool
 	var asJSON bool
+	var rootFile string
 	cmd := &cobra.Command{
 		Use:   "show",
 		Short: "Dump the resolved city configuration as TOML",
@@ -74,10 +79,15 @@ config element. Use -f to layer additional config files.`,
   gc config show --validate
   gc config show --provenance
   gc config show --json
-  gc config show -f overlay.toml`,
+  gc config show -f overlay.toml
+  gc config show --validate --root-file next-city.toml`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if doConfigShow(validate, showProvenance, asJSON, stdout, stderr) != 0 {
+			if err := validateConfigShowRootFileFlags(rootFile, validate, showProvenance, extraConfigFiles); err != nil {
+				fmt.Fprintf(stderr, "gc config show: %v\n", err) //nolint:errcheck // best-effort stderr
+				return errExit
+			}
+			if doConfigShow(validate, showProvenance, asJSON, rootFile, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -86,14 +96,31 @@ config element. Use -f to layer additional config files.`,
 	cmd.Flags().BoolVar(&validate, "validate", false, "validate config and exit (0 = valid, 1 = errors)")
 	cmd.Flags().BoolVar(&showProvenance, "provenance", false, "show where each config element originated")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit JSON")
+	cmd.Flags().StringVar(&rootFile, "root-file", "", "candidate city root to validate (requires --validate)")
 	cmd.Flags().StringArrayVarP(&extraConfigFiles, "file", "f", nil,
 		"additional config files to layer (can be repeated)")
 	return cmd
 }
 
+func validateConfigShowRootFileFlags(rootFile string, validate, showProvenance bool, overlayFiles []string) error {
+	if rootFile == "" {
+		return nil
+	}
+	switch {
+	case !validate:
+		return fmt.Errorf("--root-file requires --validate")
+	case len(overlayFiles) != 0:
+		return fmt.Errorf("--root-file cannot be combined with --file")
+	case showProvenance:
+		return fmt.Errorf("--root-file cannot be combined with --provenance")
+	default:
+		return nil
+	}
+}
+
 // doConfigShow loads city.toml (with includes) and dumps the resolved
 // config, validates it, or shows provenance.
-func doConfigShow(validate, showProvenance, asJSON bool, stdout, stderr io.Writer) int {
+func doConfigShow(validate, showProvenance, asJSON bool, rootFile string, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc config show: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -105,9 +132,19 @@ func doConfigShow(validate, showProvenance, asJSON bool, stdout, stderr io.Write
 		return 1
 	}
 
-	cfg, prov, err := loadConfigCommandCityConfig(cityPath)
+	var cfg *config.City
+	var prov *config.Provenance
+	if rootFile == "" {
+		cfg, prov, err = loadConfigCommandCityConfig(cityPath)
+	} else {
+		cfg, prov, err = loadConfigCommandRootConfig(rootFile)
+	}
 	if err != nil {
-		fmt.Fprintf(stderr, "gc config show: %v\n", err) //nolint:errcheck // best-effort stderr
+		if rootFile != "" {
+			fmt.Fprintf(stderr, "gc config show: candidate root file %q: %v\n", rootFile, err) //nolint:errcheck // best-effort stderr
+		} else {
+			fmt.Fprintf(stderr, "gc config show: %v\n", err) //nolint:errcheck // best-effort stderr
+		}
 		return 1
 	}
 
@@ -136,6 +173,11 @@ func doConfigShow(validate, showProvenance, asJSON bool, stdout, stderr io.Write
 	}
 	validationErrors = append(validationErrors, validateLegacyFormulaConfigRoutes(cfg)...)
 	validationWarnings := singletonSessionMigrationWarnings(cfg)
+	if rootFile != "" && len(validationErrors) > 0 {
+		for i, validationError := range validationErrors {
+			validationErrors[i] = fmt.Sprintf("candidate root file %q: %s", rootFile, validationError)
+		}
+	}
 
 	if validate {
 		if asJSON {

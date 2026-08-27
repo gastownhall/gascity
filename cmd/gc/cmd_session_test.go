@@ -23,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -586,11 +587,11 @@ args = ["{{.AgentName}}", "{{.WorkDir}}", "{{.TemplateName}}"]
 	}
 	defer lis.Close() //nolint:errcheck
 
-	commands := make(chan string, 3)
+	commands := make(chan string, 2)
 	errCh := make(chan error, 1)
 	go func() {
 		defer close(commands)
-		for i := 0; i < 3; i++ {
+		for i := 0; i < 2; i++ {
 			conn, err := lis.Accept()
 			if err != nil {
 				errCh <- err
@@ -623,9 +624,9 @@ args = ["{{.AgentName}}", "{{.WorkDir}}", "{{.TemplateName}}"]
 		t.Fatalf("cmdSessionNew(acp) = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
-	gotCommands := make([]string, 0, 3)
-	deadline := time.After(2 * time.Second)
-	for len(gotCommands) < 3 {
+	gotCommands := make([]string, 0, 2)
+	deadline := time.After(testutil.GoroutineRaceTimeout)
+	for len(gotCommands) < 2 {
 		select {
 		case err := <-errCh:
 			if err != nil {
@@ -633,18 +634,24 @@ args = ["{{.AgentName}}", "{{.WorkDir}}", "{{.TemplateName}}"]
 			}
 		case cmd, ok := <-commands:
 			if !ok {
-				if len(gotCommands) != 3 {
-					t.Fatalf("controller commands = %v, want ping plus 2 pokes", gotCommands)
+				if len(gotCommands) != 2 {
+					t.Fatalf("controller commands = %v, want liveness ping and exact post-create start", gotCommands)
 				}
 				break
 			}
 			gotCommands = append(gotCommands, cmd)
 		case <-deadline:
-			t.Fatalf("timed out waiting for controller pokes, got %v", gotCommands)
+			t.Fatalf("timed out waiting for controller commands, got %v", gotCommands)
 		}
 	}
 
 	bead := onlySessionBead(t, cityDir)
+	wantCommands := []string{"ping\n", sessionStartCommandPrefix + bead.ID + "\n"}
+	for i, want := range wantCommands {
+		if gotCommands[i] != want {
+			t.Fatalf("controller command %d = %q, want %q", i, gotCommands[i], want)
+		}
+	}
 	if got := bead.Metadata[session.MCPIdentityMetadataKey]; got == "" {
 		t.Fatal("mcp_identity metadata = empty, want persisted identity")
 	}
@@ -2370,11 +2377,11 @@ func TestCmdSessionNew_AllowsReservedNamedAliasWithController(t *testing.T) {
 	}
 	defer lis.Close() //nolint:errcheck
 
-	commands := make(chan string, 3)
+	commands := make(chan string, 2)
 	errCh := make(chan error, 1)
 	go func() {
 		defer close(commands)
-		for i := 0; i < 3; i++ {
+		for i := 0; i < 2; i++ {
 			conn, err := lis.Accept()
 			if err != nil {
 				errCh <- err
@@ -2407,9 +2414,9 @@ func TestCmdSessionNew_AllowsReservedNamedAliasWithController(t *testing.T) {
 		t.Fatalf("cmdSessionNew(controller) = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
-	gotCommands := make([]string, 0, 3)
-	deadline := time.After(2 * time.Second)
-	for len(gotCommands) < 3 {
+	gotCommands := make([]string, 0, 2)
+	deadline := time.After(testutil.GoroutineRaceTimeout)
+	for len(gotCommands) < 2 {
 		select {
 		case err := <-errCh:
 			if err != nil {
@@ -2417,24 +2424,24 @@ func TestCmdSessionNew_AllowsReservedNamedAliasWithController(t *testing.T) {
 			}
 		case cmd, ok := <-commands:
 			if !ok {
-				if len(gotCommands) != 3 {
-					t.Fatalf("controller commands = %v, want ping plus 2 pokes", gotCommands)
+				if len(gotCommands) != 2 {
+					t.Fatalf("controller commands = %v, want liveness ping and exact post-create start", gotCommands)
 				}
 				break
 			}
 			gotCommands = append(gotCommands, cmd)
 		case <-deadline:
-			t.Fatalf("timed out waiting for controller pokes, got %v", gotCommands)
+			t.Fatalf("timed out waiting for controller commands, got %v", gotCommands)
 		}
 	}
-	wantCommands := []string{"ping\n", "poke\n", "poke\n"}
+	b := onlySessionBead(t, cityDir)
+	wantCommands := []string{"ping\n", sessionStartCommandPrefix + b.ID + "\n"}
 	for i, want := range wantCommands {
 		if gotCommands[i] != want {
 			t.Fatalf("controller command %d = %q, want %q", i, gotCommands[i], want)
 		}
 	}
 
-	b := onlySessionBead(t, cityDir)
 	if got := b.Metadata["alias"]; got != "mayor" {
 		t.Fatalf("alias = %q, want mayor", got)
 	}

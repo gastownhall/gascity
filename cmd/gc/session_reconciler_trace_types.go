@@ -93,7 +93,6 @@ const (
 	TraceSiteReconcilerCloseOrphan          TraceSiteCode = "reconciler.session.close_orphan"
 	TraceSiteReconcilerPendingCreate        TraceSiteCode = "reconciler.session.rollback_pending_create"
 	TraceSiteReconcilerConfigDrift          TraceSiteCode = "reconciler.session.config_drift"
-	TraceSiteReconcilerIdleDrain            TraceSiteCode = "reconciler.session.idle_drain"
 	TraceSiteReconcilerIdleTimeout          TraceSiteCode = "reconciler.session.idle_timeout"
 	TraceSiteReconcilerResetStalled         TraceSiteCode = "reconciler.session.reset_stalled"
 	TraceSiteReconcilerProgressStallExempt  TraceSiteCode = "reconciler.session.progress_stall_exempt"
@@ -108,6 +107,11 @@ const (
 	TraceSiteLifecycleStartRollback         TraceSiteCode = "reconciler.start.rollback_pending"
 	TraceSiteLifecycleStartFailed           TraceSiteCode = "reconciler.start.failed"
 	TraceSiteLifecycleStartRun              TraceSiteCode = "reconciler.start.execute"
+	TraceSiteLifecycleStatusShadow          TraceSiteCode = "lifecycle.status.shadow"
+	TraceSiteLifecycleStartSelectionShadow  TraceSiteCode = "lifecycle.start_selection.shadow"
+	TraceSiteWaitDependencyShadow           TraceSiteCode = "lifecycle.wait_dependency.shadow"
+	TraceSitePoolDemandContributionShadow   TraceSiteCode = "pool_demand.contribution.shadow"
+	TraceSitePoolAllocationMaterialize      TraceSiteCode = "pool_allocation.materialize"
 	TraceSiteLifecycleStartPrepare          TraceSiteCode = "lifecycle.start.prepare"
 	TraceSiteLifecycleStartExecute          TraceSiteCode = "lifecycle.start.execute"
 	TraceSiteLifecycleStartCommit           TraceSiteCode = "lifecycle.start.commit"
@@ -196,25 +200,34 @@ const (
 	TraceReasonQuarantine            TraceReasonCode = "quarantine"
 	TraceReasonPinned                TraceReasonCode = "pinned"
 	TraceReasonAssignedWorkExhausted TraceReasonCode = "assigned_work_exhausted"
+	// TraceReasonAdmissionOverflow marks a key a bounded admission channel
+	// dropped. Recovery is census-owed re-detection, never a retry or a legacy
+	// poke (DETECTOR.md §2, degradation rules).
+	TraceReasonAdmissionOverflow TraceReasonCode = "admission_overflow"
 )
 
 type TraceOutcomeCode string
 
 const (
-	TraceOutcomeUnknown                 TraceOutcomeCode = "unknown"
-	TraceOutcomeComplete                TraceOutcomeCode = "complete"
-	TraceOutcomePartial                 TraceOutcomeCode = "partial"
-	TraceOutcomeApplied                 TraceOutcomeCode = "applied"
-	TraceOutcomeNoChange                TraceOutcomeCode = "no_change"
-	TraceOutcomeFailed                  TraceOutcomeCode = "failed"
-	TraceOutcomeSuccess                 TraceOutcomeCode = "success"
-	TraceOutcomeDeferredByWakeBudget    TraceOutcomeCode = "deferred_by_wake_budget"
-	TraceOutcomeSessionExists           TraceOutcomeCode = "session_exists"
-	TraceOutcomeSessionExistsConverged  TraceOutcomeCode = "session_exists_converged"
-	TraceOutcomeBlockedOnDependencies   TraceOutcomeCode = "blocked_on_dependencies"
-	TraceOutcomeProviderError           TraceOutcomeCode = "provider_error"
-	TraceOutcomePanicRecovered          TraceOutcomeCode = "panic_recovered"
-	TraceOutcomeDeadlineExceeded        TraceOutcomeCode = "deadline_exceeded"
+	TraceOutcomeUnknown                TraceOutcomeCode = "unknown"
+	TraceOutcomeComplete               TraceOutcomeCode = "complete"
+	TraceOutcomePartial                TraceOutcomeCode = "partial"
+	TraceOutcomeApplied                TraceOutcomeCode = "applied"
+	TraceOutcomeNoChange               TraceOutcomeCode = "no_change"
+	TraceOutcomeFailed                 TraceOutcomeCode = "failed"
+	TraceOutcomeSuccess                TraceOutcomeCode = "success"
+	TraceOutcomeDeferredByWakeBudget   TraceOutcomeCode = "deferred_by_wake_budget"
+	TraceOutcomeSessionExists          TraceOutcomeCode = "session_exists"
+	TraceOutcomeSessionExistsConverged TraceOutcomeCode = "session_exists_converged"
+	TraceOutcomeBlockedOnDependencies  TraceOutcomeCode = "blocked_on_dependencies"
+	TraceOutcomeProviderError          TraceOutcomeCode = "provider_error"
+	TraceOutcomePanicRecovered         TraceOutcomeCode = "panic_recovered"
+	TraceOutcomeDeadlineExceeded       TraceOutcomeCode = "deadline_exceeded"
+	// TraceOutcomeEscalated marks a retained drain-ack obligation crossing its
+	// refusal-escalation threshold: the obligation is kept, re-examination
+	// slows to the drain-budget cadence, and this record is the named signal
+	// that replaces the per-retry storm (ga-f7v2ft.173).
+	TraceOutcomeEscalated               TraceOutcomeCode = "escalated"
 	TraceOutcomeCanceled                TraceOutcomeCode = "canceled"
 	TraceOutcomeSlowStorageDegraded     TraceOutcomeCode = "slow_storage_degraded"
 	TraceOutcomeLowSpaceDegraded        TraceOutcomeCode = "low_space_degraded"

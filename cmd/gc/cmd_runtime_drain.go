@@ -36,9 +36,25 @@ type drainOps interface {
 	clearDriftRestart(sessionName string) error
 }
 
+// drainAckTriggerBinding is the routed work a member was serving at the moment
+// it acknowledged its drain. Both fields are the row's VERBATIM spelling:
+// canonicalization stays at the single controller-side read point
+// (canonicalizeLegacyWorkflowStoreRef, ga-2oboq).
+type drainAckTriggerBinding struct {
+	BeadID   string
+	StoreRef string
+}
+
+// drainAckTriggerReader reads the acknowledging member's trigger binding once,
+// at ack time. A nil reader — no durable session identity, or a store the CLI
+// could not open — stamps nothing, which leaves the controller on its
+// pre-stamp row fallback.
+type drainAckTriggerReader func() (drainAckTriggerBinding, error)
+
 // providerDrainOps implements drainOps using runtime.Provider metadata.
 type providerDrainOps struct {
-	sp runtime.Provider
+	sp      runtime.Provider
+	trigger drainAckTriggerReader
 }
 
 type runtimeDrainCheckJSON struct {
@@ -68,6 +84,10 @@ func (o *providerDrainOps) clearDrain(sessionName string) error {
 	return errors.Join(
 		o.sp.RemoveMeta(sessionName, "GC_DRAIN_ACK"),
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckSourceKey),
+		o.sp.RemoveMeta(sessionName, drainAckRequesterSessionIDKey),
+		o.sp.RemoveMeta(sessionName, drainAckRequesterInstanceTokenKey),
+		o.sp.RemoveMeta(sessionName, reconcilerDrainAckTriggerBeadIDKey),
+		o.sp.RemoveMeta(sessionName, reconcilerDrainAckTriggerStoreRefKey),
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckReasonKey),
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckGenerationKey),
 		o.sp.RemoveMeta(sessionName, "GC_DRAIN"),
@@ -98,11 +118,69 @@ func (o *providerDrainOps) drainStartTime(sessionName string) (time.Time, error)
 }
 
 func (o *providerDrainOps) setDrainAck(sessionName string) error {
+	requesterSessionID := strings.TrimSpace(os.Getenv("GC_SESSION_ID"))
+	requesterInstanceToken := strings.TrimSpace(os.Getenv("GC_INSTANCE_TOKEN"))
+	binding, err := o.ackTriggerBinding()
+	if err != nil {
+		return err
+	}
+	// The trigger stamp lands BEFORE GC_DRAIN_ACK: the effect boundary refuses
+	// until that last key is "1", so a reader can never observe an admissible
+	// acknowledgement whose stamp has not landed yet.
 	return joinDrainAckMutationErrors(
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckReasonKey),
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckGenerationKey),
 		o.sp.SetMeta(sessionName, reconcilerDrainAckSourceKey, drainAckSourceAgentValue),
+		o.sp.SetMeta(sessionName, drainAckRequesterSessionIDKey, requesterSessionID),
+		o.sp.SetMeta(sessionName, drainAckRequesterInstanceTokenKey, requesterInstanceToken),
+		o.stampDrainAckTrigger(sessionName, binding),
 		o.sp.SetMeta(sessionName, "GC_DRAIN_ACK", "1"),
+	)
+}
+
+// ackTriggerBinding reads the acknowledging member's routed work exactly once,
+// at ack time. A missing session row is not a failure: it degrades to the
+// unstamped acknowledgement older agents already write.
+func (o *providerDrainOps) ackTriggerBinding() (drainAckTriggerBinding, error) {
+	if o.trigger == nil {
+		return drainAckTriggerBinding{}, nil
+	}
+	binding, err := o.trigger()
+	if err != nil {
+		if drainAckMissingSessionBeadError(err) {
+			return drainAckTriggerBinding{}, nil
+		}
+		return drainAckTriggerBinding{}, fmt.Errorf("reading acknowledged trigger binding: %w", err)
+	}
+	return binding, nil
+}
+
+// stampDrainAckTrigger records the acknowledged work beside the rest of the ack
+// evidence, both-or-neither: the controller reads the pair only when both keys
+// are present and non-empty, so a half-written pair is rolled back rather than
+// left to be read as a lone key. A row with no trigger — or one whose store ref
+// is unset, which can never canonicalize into an admissible lease anyway —
+// stamps nothing and leaves the controller on its row fallback.
+//
+// The honest residual: legacy can re-point the row between the read above and
+// this write (~ms), and the stamp then names the new trigger rather than the
+// work the agent actually finished. That window is bounded by the WD.6
+// deadline release and repaired by the stranded-binding path (WD.14); it
+// replaces an unbounded refusal with a millisecond one.
+func (o *providerDrainOps) stampDrainAckTrigger(sessionName string, binding drainAckTriggerBinding) error {
+	if strings.TrimSpace(binding.BeadID) == "" || strings.TrimSpace(binding.StoreRef) == "" {
+		return nil
+	}
+	idErr := o.sp.SetMeta(sessionName, reconcilerDrainAckTriggerBeadIDKey, binding.BeadID)
+	refErr := o.sp.SetMeta(sessionName, reconcilerDrainAckTriggerStoreRefKey, binding.StoreRef)
+	if idErr == nil && refErr == nil {
+		return nil
+	}
+	return errors.Join(
+		idErr,
+		refErr,
+		o.sp.RemoveMeta(sessionName, reconcilerDrainAckTriggerBeadIDKey),
+		o.sp.RemoveMeta(sessionName, reconcilerDrainAckTriggerStoreRefKey),
 	)
 }
 
@@ -168,9 +246,71 @@ func drainAckMissingSessionBeadError(err error) bool {
 	return runtime.IsSessionGone(err) || errors.Is(err, beads.ErrNotFound)
 }
 
-// newDrainOps creates a drainOps from a runtime.Provider.
+// newDrainOps creates a drainOps from a runtime.Provider. Acknowledgements it
+// writes carry no trigger stamp; use newDrainAckOps on the `gc runtime
+// drain-ack` path, which can read the acknowledging member's row.
 func newDrainOps(sp runtime.Provider) drainOps {
 	return &providerDrainOps{sp: sp}
+}
+
+// newDrainAckOps creates a drainOps whose acknowledgements also stamp the
+// routed work the member was serving.
+func newDrainAckOps(sp runtime.Provider, trigger drainAckTriggerReader) drainOps {
+	return &providerDrainOps{sp: sp, trigger: trigger}
+}
+
+// drainAckTriggerReaderFor is a mutable global test seam over
+// newDrainAckTriggerReader, matching drainAckPokeController: the reader opens
+// the city store, which a bare test city cannot serve. Tests that swap it MUST
+// NOT call t.Parallel().
+var drainAckTriggerReaderFor = newDrainAckTriggerReader
+
+// newDrainAckTriggerReader binds the ack-time trigger read to a resolved
+// target. It returns nil when the target has no durable session identity —
+// there is no row to read, so the acknowledgement stays unstamped.
+func newDrainAckTriggerReader(target sessionRuntimeTarget, stderr io.Writer) drainAckTriggerReader {
+	cityPath := strings.TrimSpace(target.cityPath)
+	sessionID := strings.TrimSpace(target.sessionID)
+	if cityPath == "" || sessionID == "" {
+		return nil
+	}
+	return drainAckTriggerReaderFrom(func() (drainAckTriggerBinding, error) {
+		return readDrainAckTriggerBinding(cityPath, sessionID)
+	}, stderr)
+}
+
+// drainAckTriggerReaderFrom applies the degrade policy over a raw trigger read:
+// a failure is warned rather than fatal. The stamp is a fence around an
+// acknowledgement the agent has already earned, and its absence puts the
+// controller back on exactly the row fallback it used before the stamp existed;
+// failing the ack instead would turn a store hiccup into a wedged drain.
+func drainAckTriggerReaderFrom(read func() (drainAckTriggerBinding, error), stderr io.Writer) drainAckTriggerReader {
+	return func() (drainAckTriggerBinding, error) {
+		binding, err := read()
+		if err != nil {
+			fmt.Fprintf(stderr, "gc runtime drain-ack: warning: %v (acknowledging without a trigger stamp)\n", err) //nolint:errcheck // best-effort stderr
+			return drainAckTriggerBinding{}, nil
+		}
+		return binding, nil
+	}
+}
+
+// readDrainAckTriggerBinding loads the member row's trigger binding through the
+// session coordination-class store, verbatim.
+func readDrainAckTriggerBinding(cityPath, sessionID string) (drainAckTriggerBinding, error) {
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		return drainAckTriggerBinding{}, fmt.Errorf("opening store: %w", err)
+	}
+	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	info, err := cliSessionFrontDoor(store, cfg, cityPath).Get(sessionID)
+	if err != nil {
+		return drainAckTriggerBinding{}, fmt.Errorf("loading session %q: %w", sessionID, err)
+	}
+	return drainAckTriggerBinding{
+		BeadID:   strings.TrimSpace(info.TriggerBeadID),
+		StoreRef: strings.TrimSpace(info.TriggerBeadStoreRef),
+	}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -475,13 +615,18 @@ func cmdRuntimeDrainAck(args []string, jsonOutput bool, stdout, stderr io.Writer
 			fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
+		target, err = bindExplicitDrainAckRequester(target, os.Getenv("GC_SESSION_ID"), os.Getenv("GC_INSTANCE_TOKEN"))
+		if err != nil {
+			fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		sp, err := newSessionProvider()
 		if err != nil {
 			fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		dops := newDrainOps(sp)
-		return doRuntimeDrainAck(dops, target.cityPath, target.display, target.sessionName, jsonOutput, stdout, stderr)
+		dops := newDrainAckOps(sp, drainAckTriggerReaderFor(target, stderr))
+		return doRuntimeDrainAckTarget(dops, target, jsonOutput, stdout, stderr)
 	}
 
 	current, err := currentSessionRuntimeTarget()
@@ -494,8 +639,8 @@ func cmdRuntimeDrainAck(args []string, jsonOutput bool, stdout, stderr io.Writer
 		fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	dops := newDrainOps(sp)
-	return doRuntimeDrainAck(dops, current.cityPath, current.display, current.sessionName, jsonOutput, stdout, stderr)
+	dops := newDrainAckOps(sp, drainAckTriggerReaderFor(current, stderr))
+	return doRuntimeDrainAckTarget(dops, current, jsonOutput, stdout, stderr)
 }
 
 // ---------------------------------------------------------------------------
@@ -695,6 +840,10 @@ func waitForControllerRestart(ctx context.Context, dops drainOps, sp runtime.Pro
 // Tests that swap it MUST NOT call t.Parallel().
 var drainAckPokeController = pokeController
 
+// drainAckPokeSessionStartController is the exact-key controller handoff.
+// Tests that swap it MUST NOT call t.Parallel().
+var drainAckPokeSessionStartController = pokeSessionStartController
+
 // drainAckReleaseHeldClaims is a mutable global test seam over
 // releaseUnexecutedClaimsForSession, matching drainAckPokeController above.
 // Tests that swap it MUST NOT call t.Parallel().
@@ -770,18 +919,44 @@ const drainAckReleaseBudget = 15 * time.Second
 // doRuntimeDrainAck releases any unexecuted claim the session still holds, sets
 // the drain-ack flag, then pokes the controller so the reconciler observes the
 // drained state immediately instead of waiting for its next patrol tick.
-//
-// The release runs BEFORE the ack, and the order is load-bearing: the ack is what
-// tells the controller it may stop this session, so acknowledging first opens a
-// window in which the session dies still holding exactly the claim this release
-// exists to clear.
 func doRuntimeDrainAck(dops drainOps, cityPath, targetName, sn string, jsonOutput bool, stdout, stderr io.Writer) int {
-	drainAckReleaseHeldClaims(cityPath, sn, stderr)
-	if err := dops.setDrainAck(sn); err != nil {
+	return doRuntimeDrainAckTarget(dops, sessionRuntimeTarget{
+		cityPath:    cityPath,
+		display:     targetName,
+		sessionName: sn,
+	}, jsonOutput, stdout, stderr)
+}
+
+// doRuntimeDrainAckTarget persists the provider acknowledgement before it
+// hands its exact durable session identity to the keyed controller. An absent
+// identity deliberately preserves the old generic poke: the exact command is
+// a latency hint, never a new correctness dependency.
+//
+// The held-claim release runs BEFORE the ack, and the order is load-bearing:
+// the ack is what tells the controller it may stop this session, so
+// acknowledging first opens a window in which the session dies still holding
+// exactly the claim this release exists to clear.
+func doRuntimeDrainAckTarget(dops drainOps, target sessionRuntimeTarget, jsonOutput bool, stdout, stderr io.Writer) int {
+	if target.requesterSessionID != "" && target.requesterInstanceToken == "" {
+		fmt.Fprintln(stderr, "gc runtime drain-ack: refusing self-context acknowledgement: missing GC_INSTANCE_TOKEN") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	drainAckReleaseHeldClaims(target.cityPath, target.sessionName, stderr)
+	if err := dops.setDrainAck(target.sessionName); err != nil {
 		fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if err := drainAckPokeController(cityPath); err != nil {
+	poke := func() error {
+		if target.sessionID != "" && target.requesterSessionID == target.sessionID && target.requesterInstanceToken != "" {
+			return drainAckPokeSessionStartController(target.cityPath, target.sessionID)
+		}
+		return drainAckPokeController(target.cityPath)
+	}
+	if err := poke(); err != nil {
+		if errors.Is(err, errSessionStartControllerBlocked) {
+			fmt.Fprintf(stderr, "gc runtime drain-ack: controller refused acknowledgement: %v\n", err) //nolint:errcheck // explicit safety refusal is user-visible
+			return 1
+		}
 		fmt.Fprintf(stderr, "gc runtime drain-ack: warning: poke failed: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 	if jsonOutput {
@@ -790,8 +965,8 @@ func doRuntimeDrainAck(dops drainOps, cityPath, targetName, sn string, jsonOutpu
 			OK:            true,
 			Command:       "runtime drain-ack",
 			Action:        "drain-ack",
-			Session:       sn,
-			Target:        targetName,
+			Session:       target.sessionName,
+			Target:        target.display,
 			Status:        "acknowledged",
 		}); err != nil {
 			fmt.Fprintf(stderr, "gc runtime drain-ack: writing JSON: %v\n", err) //nolint:errcheck // best-effort stderr

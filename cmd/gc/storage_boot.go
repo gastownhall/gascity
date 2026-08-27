@@ -81,19 +81,55 @@ type storageRoutes struct {
 	// reserved work binding is absent, so it falls through to the work store
 	// the caller already holds.
 	stores map[coordclass.Class]beads.Store
+	// engines lists each opened engine once, in open order, beside the binding
+	// that named it. The class map answers "who serves this class" and
+	// deliberately repeats one store across every class it serves; the
+	// operator surfaces ask the other question — "what did this process open"
+	// — and must not report one engine five times or dedupe by comparing
+	// interface values whose dynamic type need not be comparable.
+	engines []routedEngine
 	// closers owns the durable resources the opened bindings hold, in open
 	// order. The process closes them once, on shutdown.
 	closers []io.Closer
 	// binding names the non-work binding these routes were opened from, for
 	// diagnostics.
 	binding string
-	// emitCityPath is the city whose event log these routes' class stores
-	// append bead.* events to, and it is set on exactly one construction:
-	// the one-shot CLI funnel's (cli_storage_routes.go). openStorageRoutes
-	// leaves it empty, so the controller's routes carry no emit target and
-	// its CachingStore stays the only emitter on that side — see
-	// class_store_emit.go for why the two must not both emit.
-	emitCityPath string
+	// emit is where the bead.* rows these routes' class stores produce are
+	// written. Every process that serves a binding sets one, at its own single
+	// construction — the one-shot CLI funnel's (cli_storage_routes.go) and the
+	// controller's (city_runtime.go). openStorageRoutes leaves it nil because
+	// opening a binding does not decide who will record for it; a route map
+	// that reaches a running process still holding nil is the event-silence
+	// defect, which is why the boot preflight asks. See class_store_emit.go.
+	emit classStoreEmitTarget
+}
+
+// routedEngine is one opened binding engine and the binding that named it.
+type routedEngine struct {
+	binding string
+	store   beads.Store
+}
+
+// openedEngines lists the engines these routes opened. A nil receiver opened
+// none, which is the identity path every city without [storage] takes.
+func (r *storageRoutes) openedEngines() []routedEngine {
+	if r == nil {
+		return nil
+	}
+	return r.engines
+}
+
+// conditionalWritesStoreID labels a routed engine on the operator surfaces,
+// beside the "city" and "rig/<name>" spellings the work stores use.
+func (e routedEngine) conditionalWritesStoreID() string {
+	return storageBindingStoreID(e.binding)
+}
+
+// storageBindingStoreID is the one spelling a routed binding carries across the
+// operator surfaces. Two surfaces naming one store differently is two stores as
+// far as anyone reading them is concerned.
+func storageBindingStoreID(binding string) string {
+	return "storage/" + binding
 }
 
 // storeFor returns the store serving a class and whether these routes relocate
@@ -635,6 +671,7 @@ func openStorageRoutes(plan *storebinding.StoragePlan, target infraBindingTarget
 	}
 	routes := &storageRoutes{
 		stores:  make(map[coordclass.Class]beads.Store, len(planned.AssignedClasses.Classes())),
+		engines: []routedEngine{{binding: target.Binding, store: store}},
 		closers: []io.Closer{closer},
 		binding: target.Binding,
 	}

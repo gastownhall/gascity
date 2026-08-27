@@ -356,6 +356,10 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if p.city != nil {
 		topo.Beads = p.city.Beads
 	}
+	defaultBranch := ""
+	if cfgAgent.PromptTemplate != "" {
+		defaultBranch = defaultBranchForRig(rigName, p.rigs, workDir)
+	}
 	// Controller-owned: config.QueryTopology{Beads: ...} and NOT
 	// cityQueryTopology. Resolving the federation fact means asking the
 	// storage routes, and the one-shot funnel that answers for a CLI command
@@ -375,7 +379,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		RigRoot:                 rigRoot,
 		WorkDir:                 workDir,
 		IssuePrefix:             findRigPrefix(rigName, p.rigs),
-		DefaultBranch:           defaultBranchForRig(rigName, p.rigs, workDir),
+		DefaultBranch:           defaultBranch,
 		AssignedInProgressQuery: expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "assigned_in_progress_query", cfgAgent.EffectiveAssignedInProgressQueryFor(topo), p.stderr),
 		AssignedReadyQuery:      expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "assigned_ready_query", cfgAgent.EffectiveAssignedReadyQueryFor(topo), p.stderr),
 		RoutedPoolQuery:         expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "routed_pool_query", cfgAgent.EffectiveRoutedPoolQueryFor(topo), p.stderr),

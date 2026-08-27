@@ -315,15 +315,27 @@ func newPreconditionFailed(body bdConditionalErrorBody, out []byte, err error) *
 }
 
 // isBdConditionalPrecondition reports whether a code-less failure is nonetheless a
-// revision-precondition mismatch, inferred from revision fields or a precondition
-// message (both hyphenated and spaced forms bd might use).
+// precondition mismatch, inferred from revision fields, a precondition message
+// (both hyphenated and spaced forms bd might use), or bd's semantic-field guard
+// refusal.
+//
+// The guard forms come from `bd update --if-status/--if-assignee` (bd-wsqvw),
+// which the atomic terminal close fences on because the pinned bd has no
+// --if-revision. bd reports them as exit 13 with the sentinel text
+// "status mismatch" / "assignee mismatch" on stderr plus a per-ID JSON failure
+// carrying "guard_mismatch":true; classifyBDExecResult folds both into
+// err.Error(). Semantically they are exactly a precondition: bd evaluated the
+// caller's guard inside the mutation transaction and wrote nothing.
 func isBdConditionalPrecondition(body bdConditionalErrorBody, msg string) bool {
 	if body.ExpectedRevision != nil || body.CurrentRevision != nil {
 		return true
 	}
 	lower := strings.ToLower(msg)
 	return strings.Contains(lower, "precondition failed") ||
-		strings.Contains(lower, "revision mismatch")
+		strings.Contains(lower, "revision mismatch") ||
+		strings.Contains(lower, "status mismatch") ||
+		strings.Contains(lower, "assignee mismatch") ||
+		strings.Contains(lower, `"guard_mismatch":true`)
 }
 
 // isBdUnknownIfRevisionFlag matches the usage error a bd without revision-CAS

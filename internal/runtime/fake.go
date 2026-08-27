@@ -58,6 +58,7 @@ type Fake struct {
 var (
 	_ ProcessTableScanner = (*Fake)(nil)
 	_ RelaunchProvider    = (*Fake)(nil)
+	_ FencedNudgeProvider = (*Fake)(nil)
 )
 
 // Call records a single method invocation on [Fake].
@@ -401,6 +402,33 @@ func (f *Fake) NudgeNow(name string, content []ContentBlock) error {
 	if f.broken {
 		return fmt.Errorf("session unavailable")
 	}
+	return nil
+}
+
+// NudgeFenced records input only when the fake's live instance token matches
+// expectedInstanceToken. It models the provider-side effect fence used by
+// authorized wait-idle nudges.
+func (f *Fake) NudgeFenced(name, expectedInstanceToken string, content []ContentBlock) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if expectedInstanceToken == "" || strings.TrimSpace(expectedInstanceToken) != expectedInstanceToken {
+		return fmt.Errorf("%w: expected instance token is empty or malformed", ErrInputFenced)
+	}
+	if f.broken {
+		return fmt.Errorf("session unavailable")
+	}
+	if _, exists := f.sessions[name]; !exists {
+		return fmt.Errorf("%w: %q", ErrSessionNotFound, name)
+	}
+	if f.meta[name]["GC_INSTANCE_TOKEN"] != expectedInstanceToken {
+		return fmt.Errorf("%w: instance token mismatch", ErrInputFenced)
+	}
+	f.Calls = append(f.Calls, Call{
+		Method:  "NudgeFenced",
+		Name:    name,
+		Message: FlattenText(content),
+		Content: append([]ContentBlock(nil), content...),
+	})
 	return nil
 }
 

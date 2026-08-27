@@ -19,6 +19,30 @@ import (
 	"github.com/gastownhall/gascity/internal/sessionlog"
 )
 
+type unattendedStopTestCall struct {
+	name  string
+	token string
+}
+
+type unattendedStopTestProvider struct {
+	*runtime.Fake
+	calls []unattendedStopTestCall
+}
+
+type idleOnlyNudgeProvider struct {
+	runtime.Provider
+	fake *runtime.Fake
+}
+
+func (p *idleOnlyNudgeProvider) WaitForIdle(ctx context.Context, name string, timeout time.Duration) error {
+	return p.fake.WaitForIdle(ctx, name, timeout)
+}
+
+func (p *unattendedStopTestProvider) StopUnattendedSession(name, expectedToken string) error {
+	p.calls = append(p.calls, unattendedStopTestCall{name: name, token: expectedToken})
+	return p.Stop(name)
+}
+
 func TestSessionHandleStartStopState(t *testing.T) {
 	handle, store, sp, mgr := newTestSessionHandle(t, SessionSpec{
 		Profile:  ProfileClaudeTmuxCLI,
@@ -422,6 +446,293 @@ func TestSessionHandleKillUsesWorkerBoundary(t *testing.T) {
 	}
 	if bead.Metadata["state"] != string(sessionpkg.StateActive) {
 		t.Fatalf("bead state = %q, want %q after Kill", bead.Metadata["state"], sessionpkg.StateActive)
+	}
+}
+
+func TestSessionHandleStopUnattendedUsesBoundWorkerBoundary(t *testing.T) {
+	store := beads.NewMemStore()
+	provider := &unattendedStopTestProvider{Fake: runtime.NewFake()}
+	manager := sessionpkg.NewManagerWithOptions(store, provider)
+	handle, err := NewSessionHandle(SessionHandleConfig{
+		Manager: manager,
+		Session: SessionSpec{
+			Template: "probe",
+			Title:    "Probe",
+			Command:  "claude",
+			WorkDir:  t.TempDir(),
+			Provider: "claude",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewSessionHandle: %v", err)
+	}
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	info, err := manager.Get(handle.sessionID)
+	if err != nil {
+		t.Fatalf("manager.Get(%q): %v", handle.sessionID, err)
+	}
+
+	if err := handle.StopUnattended(context.Background(), "exact-token"); err != nil {
+		t.Fatalf("StopUnattended: %v", err)
+	}
+	if got, want := provider.calls, []unattendedStopTestCall{{name: info.SessionName, token: "exact-token"}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("bound unattended stops = %#v, want %#v", got, want)
+	}
+	if got := provider.CountCalls("Stop", info.SessionName); got != 1 {
+		t.Fatalf("runtime Stop calls = %d, want exactly one bound stop", got)
+	}
+	bead, err := store.Get(handle.sessionID)
+	if err != nil {
+		t.Fatalf("store.Get(%q): %v", handle.sessionID, err)
+	}
+	if got, want := bead.Metadata["state"], string(sessionpkg.StateActive); got != want {
+		t.Fatalf("bead state = %q, want %q after bound stop", got, want)
+	}
+}
+
+func TestSessionHandleNudgeWaitIdleAuthorizedOrdersAuthorizationBeforeFencedDelivery(t *testing.T) {
+	handle, _, provider, manager := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	})
+	if err := handle.Start(t.Context()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	info, err := manager.Get(handle.sessionID)
+	if err != nil {
+		t.Fatalf("manager.Get: %v", err)
+	}
+	if err := provider.SetMeta(info.SessionName, "GC_INSTANCE_TOKEN", "launch-1"); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+	provider.WaitForIdleErrors[info.SessionName] = nil
+
+	var order []string
+	result, err := handle.NudgeWaitIdleAuthorized(t.Context(), NudgeRequest{
+		Text:     "continue",
+		Delivery: NudgeDeliveryWaitIdle,
+		Wake:     NudgeWakeLiveOnly,
+	}, "launch-1", func(context.Context) error {
+		order = append(order, "authorize")
+		if got := provider.CountCalls("WaitForIdle", info.SessionName); got != 1 {
+			t.Fatalf("idle waits during authorization = %d, want 1", got)
+		}
+		if got := provider.CountCalls("NudgeFenced", info.SessionName); got != 0 {
+			t.Fatalf("fenced delivery calls during authorization = %d, want 0", got)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("NudgeWaitIdleAuthorized: %v", err)
+	}
+	if !result.Delivered {
+		t.Fatal("NudgeWaitIdleAuthorized Delivered = false, want true")
+	}
+	if got := provider.CountCalls("WaitForIdle", info.SessionName); got != 1 {
+		t.Fatalf("WaitForIdle calls = %d, want 1", got)
+	}
+	if got := provider.CountCalls("NudgeFenced", info.SessionName); got != 1 {
+		t.Fatalf("NudgeFenced calls = %d, want 1", got)
+	}
+	if !reflect.DeepEqual(order, []string{"authorize"}) {
+		t.Fatalf("authorization order = %#v, want one authorization after idle wait", order)
+	}
+}
+
+func TestSessionHandleNudgeWaitIdleAuthorizedFailsClosedForUnsupportedProvider(t *testing.T) {
+	store := beads.NewMemStore()
+	fake := runtime.NewFake()
+	provider := &idleOnlyNudgeProvider{Provider: fake, fake: fake}
+	manager := sessionpkg.NewManagerWithOptions(store, provider)
+	handle, err := NewSessionHandle(SessionHandleConfig{Manager: manager, Session: SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	}})
+	if err != nil {
+		t.Fatalf("NewSessionHandle: %v", err)
+	}
+	if err := handle.Start(t.Context()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	info, err := manager.Get(handle.sessionID)
+	if err != nil {
+		t.Fatalf("manager.Get: %v", err)
+	}
+
+	result, err := handle.NudgeWaitIdleAuthorized(t.Context(), NudgeRequest{
+		Text:     "continue",
+		Delivery: NudgeDeliveryWaitIdle,
+		Wake:     NudgeWakeLiveOnly,
+	}, "launch-1", func(context.Context) error {
+		t.Fatal("authorization called for an unsupported provider")
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("NudgeWaitIdleAuthorized: %v", err)
+	}
+	if result.Delivered {
+		t.Fatal("NudgeWaitIdleAuthorized Delivered = true, want false")
+	}
+	for _, method := range []string{"WaitForIdle", "Nudge", "NudgeNow", "NudgeFenced"} {
+		if got := fake.CountCalls(method, info.SessionName); got != 0 {
+			t.Fatalf("%s calls = %d, want 0 for unsupported provider", method, got)
+		}
+	}
+}
+
+func TestSessionHandleNudgeWaitIdleAuthorizedDenialAndErrorHaveZeroDeliveryEffect(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		authorize func(context.Context) error
+		wantErr   error
+	}{
+		{name: "denied", authorize: func(context.Context) error { return errors.New("denied") }},
+		{name: "error", authorize: func(context.Context) error { return context.Canceled }, wantErr: context.Canceled},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			handle, _, provider, manager := newTestSessionHandle(t, SessionSpec{
+				Profile:  ProfileClaudeTmuxCLI,
+				Template: "probe",
+				Title:    "Probe",
+				Command:  "claude",
+				WorkDir:  t.TempDir(),
+				Provider: "claude",
+			})
+			if err := handle.Start(t.Context()); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			info, err := manager.Get(handle.sessionID)
+			if err != nil {
+				t.Fatalf("manager.Get: %v", err)
+			}
+			if err := provider.SetMeta(info.SessionName, "GC_INSTANCE_TOKEN", "launch-1"); err != nil {
+				t.Fatalf("SetMeta: %v", err)
+			}
+			provider.WaitForIdleErrors[info.SessionName] = nil
+
+			result, err := handle.NudgeWaitIdleAuthorized(t.Context(), NudgeRequest{
+				Text:     "continue",
+				Delivery: NudgeDeliveryWaitIdle,
+				Wake:     NudgeWakeLiveOnly,
+			}, "launch-1", test.authorize)
+			if err == nil {
+				t.Fatal("NudgeWaitIdleAuthorized error = nil, want authorization failure")
+			}
+			if test.wantErr != nil && !errors.Is(err, test.wantErr) {
+				t.Fatalf("NudgeWaitIdleAuthorized error = %v, want %v", err, test.wantErr)
+			}
+			if result.Delivered {
+				t.Fatal("NudgeWaitIdleAuthorized Delivered = true, want false")
+			}
+			if got := provider.CountCalls("NudgeFenced", info.SessionName); got != 0 {
+				t.Fatalf("NudgeFenced calls = %d, want 0 after authorization failure", got)
+			}
+		})
+	}
+}
+
+func TestSessionHandleStartResolvedAuthorizedOrdersAuthorizationBeforeStart(t *testing.T) {
+	handle, _, provider, _ := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	})
+	info, err := handle.Create(t.Context(), CreateModeDeferred)
+	if err != nil {
+		t.Fatalf("Create(deferred): %v", err)
+	}
+	provider.Calls = nil
+
+	authorized := 0
+	err = handle.StartResolvedAuthorized(t.Context(), "claude", runtime.Config{Command: "claude"}, func(context.Context) error {
+		authorized++
+		if got := provider.CountCalls("Start", info.SessionName); got != 0 {
+			t.Fatalf("provider Start calls during authorization = %d, want 0", got)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("StartResolvedAuthorized: %v", err)
+	}
+	if authorized != 1 {
+		t.Fatalf("authorization calls = %d, want 1", authorized)
+	}
+	if got := provider.CountCalls("Start", info.SessionName); got != 1 {
+		t.Fatalf("provider Start calls = %d, want 1", got)
+	}
+}
+
+func TestSessionHandleStartResolvedAuthorizedDenialHasZeroRuntimeEffect(t *testing.T) {
+	handle, _, provider, _ := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	})
+	info, err := handle.Create(t.Context(), CreateModeDeferred)
+	if err != nil {
+		t.Fatalf("Create(deferred): %v", err)
+	}
+	provider.Calls = nil
+	denied := errors.New("recovery authority lost")
+
+	err = handle.StartResolvedAuthorized(t.Context(), "claude", runtime.Config{Command: "claude"}, func(context.Context) error {
+		return denied
+	})
+	if !errors.Is(err, denied) {
+		t.Fatalf("StartResolvedAuthorized error = %v, want %v", err, denied)
+	}
+	for _, method := range []string{"Start", "Stop"} {
+		if got := provider.CountCalls(method, info.SessionName); got != 0 {
+			t.Fatalf("provider %s calls = %d, want 0 after authorization refusal", method, got)
+		}
+	}
+}
+
+func TestSessionHandleStartResolvedAuthorizedNeverAcceptsOrRecyclesExistingRuntime(t *testing.T) {
+	handle, _, provider, _ := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	})
+	info, err := handle.Create(t.Context(), CreateModeDeferred)
+	if err != nil {
+		t.Fatalf("Create(deferred): %v", err)
+	}
+	if err := provider.Start(t.Context(), info.SessionName, runtime.Config{Command: "replacement"}); err != nil {
+		t.Fatalf("start replacement runtime: %v", err)
+	}
+	provider.Calls = nil
+
+	err = handle.StartResolvedAuthorized(t.Context(), "claude", runtime.Config{Command: "claude"}, func(context.Context) error {
+		return nil
+	})
+	if !errors.Is(err, runtime.ErrSessionExists) {
+		t.Fatalf("StartResolvedAuthorized error = %v, want session-exists refusal", err)
+	}
+	if got := provider.CountCalls("Start", info.SessionName); got != 1 {
+		t.Fatalf("provider Start calls = %d, want one refused start attempt", got)
+	}
+	if got := provider.CountCalls("Stop", info.SessionName); got != 0 {
+		t.Fatalf("provider Stop calls = %d, want no replacement recycling", got)
 	}
 }
 

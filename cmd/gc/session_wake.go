@@ -25,6 +25,13 @@ import (
 // different incarnation and this drain/stop is stale.
 var errTokenMismatch = errors.New("instance token mismatch")
 
+// errPreWakeSuperseded reports that another writer moved the row between the
+// freshness re-read this incarnation was computed from and its commit. It is an
+// expected convergence outcome, not a failure: the caller aborts the start
+// BEFORE any provider call and lets the next tick re-decide from a fresh
+// snapshot.
+var errPreWakeSuperseded = errors.New("pre-wake commit superseded")
+
 // preWakeCommit persists a new incarnation (generation + token) BEFORE
 // starting the process. This is Phase 1 of the two-phase wake protocol.
 // Returns the new generation, instance token, and the PreWakePatch batch it
@@ -33,11 +40,110 @@ var errTokenMismatch = errors.New("instance token mismatch")
 // persisted state off the caller's typed Info (session_name, generation,
 // continuation epoch, sleep_reason, wake_mode, and the continuation-reset
 // signals) — every field a verbatim raw mirror — so no raw bead crosses in.
+//
+// The write is FENCED on loadedRevision — the revision of the genuine re-read
+// info came from, tested with beads.RevisionKnown. The legacy and keyed start
+// families share this executor, and `gc start` runs the same wave in a SECOND
+// process beside a controller, so the per-session mutation lock cannot
+// serialize every entrant. Unfenced, the loser re-rotates on top of the winner
+// and the durable instance_token ends up naming an incarnation with no runtime
+// behind it — a permanent split-brain, since every token-fenced operation then
+// refuses forever (ga-l1j53). A lost CAS
+// returns errPreWakeSuperseded. Deployments with conditional writes off keep the
+// unconditional write (the ga-797vy F1 precedent): there is no revision contract
+// to fence on there, and a mandatory lifecycle write must not fail closed.
 func preWakeCommit(
 	info sessions.Info,
+	loadedRevision int64,
 	sessFront *sessions.Store,
 	clk clock.Clock,
 ) (newGen int, token string, fold sessions.MetadataPatch, err error) {
+	newGen, token, batch, err := buildPreWakePatch(info, clk)
+	if err != nil {
+		return 0, "", nil, err
+	}
+	applied, writeErr := applyFencedSessionLifecyclePatch(sessFront, "pre-wake commit", info.ID, loadedRevision, batch)
+	if writeErr != nil {
+		return 0, "", nil, fmt.Errorf("pre-wake metadata commit: %w", writeErr)
+	}
+	if !applied {
+		return 0, "", nil, errPreWakeSuperseded
+	}
+	freshWake := info.WakeMode == "fresh" || pendingContinuationResetNeedsFreshStart(info)
+	traceFreshWakeMetadataReset(info.SessionNameMetadata, freshWakeResetPriorValues(info), batch, freshWake)
+
+	return newGen, token, batch, nil
+}
+
+// applyFencedSessionLifecyclePatch is the one spelling of a MANDATORY lifecycle
+// write fenced on the revision its caller read, mirroring applyHealPatchFenced
+// (ga-797vy F1) for the writes that cannot fail closed. `purpose` names the
+// write in the resolve error; everything else is identical for every caller,
+// which is the point — a per-caller copy of this body is how two sites end up
+// disagreeing about what a CAS miss means.
+//
+// A CAS miss returns (false, nil): another writer moved the row since the
+// re-read, so this write must not be committed at all and the caller re-derives
+// from a fresh read. An UNKNOWN revision (the store's zero sentinel), or a
+// deployment with conditional writes off, keeps the unconditional write — unlike
+// the advisory heal, a mandatory lifecycle write must not fail closed, because
+// doing so makes the operation permanently unreachable on stores with no
+// revision contract.
+//
+// The known-revision test is beads.RevisionKnown and not a sign comparison: bd
+// revisions are signed, and gating on `> 0` made this fence a no-op on the
+// negative half of every city's rows — the split-brain ga-l1j53 closed was wide
+// open there (ga-f7v2ft.141). Extracting this body gave that defect a second
+// caller rather than fixing it, so the correction lands once here and covers
+// both.
+//
+// Callers: preWakeCommit (a lost fence there leaves the durable instance_token
+// naming an incarnation with no runtime, ga-l1j53) and
+// commitExactSessionResetHandoff (a lost fence there commits a restart handoff
+// on top of a row some other writer already moved).
+func applyFencedSessionLifecyclePatch(
+	sessFront *sessions.Store,
+	purpose string,
+	id string,
+	loadedRevision int64,
+	batch sessions.MetadataPatch,
+) (bool, error) {
+	writer, _, resolveErr := beads.ResolveConditionalWriter(sessFront.Store())
+	if resolveErr != nil {
+		return false, fmt.Errorf("resolving conditional writer for %s %q: %w", purpose, id, resolveErr)
+	}
+	if writer != nil && beads.RevisionKnown(loadedRevision) {
+		if err := writer.UpdateIfMatch(id, loadedRevision, beads.UpdateOpts{Metadata: batch}); err != nil {
+			if beads.IsPreconditionFailed(err) {
+				return false, nil
+			}
+			return false, err
+		}
+		return true, nil
+	}
+	if err := sessFront.ApplyPatch(id, batch); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// buildPreWakePatch computes one new runtime incarnation without persisting it.
+// Ordinary lifecycle starts commit the returned patch through preWakeCommit;
+// exact recovery starts use it with their existing whole-row CAS fence.
+func buildPreWakePatch(
+	info sessions.Info,
+	clk clock.Clock,
+) (newGen int, token string, patch sessions.MetadataPatch, err error) {
+	return buildPreWakePatchWithToken(info, clk, "")
+}
+
+// buildPreWakePatchWithToken is buildPreWakePatch for an exact owner that has
+// already minted and durably recorded its operation token.
+func buildPreWakePatchWithToken(
+	info sessions.Info,
+	clk clock.Clock,
+	token string,
+) (newGen int, nextToken string, patch sessions.MetadataPatch, err error) {
 	name := info.SessionNameMetadata
 	if !sessions.IsSessionNameSyntaxValid(name) {
 		return 0, "", nil, fmt.Errorf("invalid session_name %q", name)
@@ -45,7 +151,9 @@ func preWakeCommit(
 
 	gen, _ := strconv.Atoi(info.Generation)
 	newGen = gen + 1
-	token = sessions.NewInstanceToken()
+	if token == "" {
+		token = sessions.NewInstanceToken()
+	}
 	continuationEpoch, _ := strconv.Atoi(info.ContinuationEpoch)
 	if continuationEpoch <= 0 {
 		continuationEpoch = sessions.DefaultContinuationEpoch
@@ -62,7 +170,7 @@ func preWakeCommit(
 	}
 
 	freshWake := info.WakeMode == "fresh" || pendingContinuationResetNeedsFreshStart(info)
-	batch := sessions.PreWakePatch(sessions.PreWakePatchInput{
+	patch = sessions.PreWakePatch(sessions.PreWakePatchInput{
 		Generation:        newGen,
 		InstanceToken:     token,
 		ContinuationEpoch: continuationEpoch,
@@ -70,12 +178,7 @@ func preWakeCommit(
 		SleepReason:       sleepReason,
 		FreshWake:         freshWake,
 	})
-	if writeErr := sessFront.ApplyPatch(info.ID, batch); writeErr != nil {
-		return 0, "", nil, fmt.Errorf("pre-wake metadata commit: %w", writeErr)
-	}
-	traceFreshWakeMetadataReset(name, freshWakeResetPriorValues(info), batch, freshWake)
-
-	return newGen, token, batch, nil
+	return newGen, token, patch, nil
 }
 
 // freshWakeResetPriorValues reconstructs the pre-reset values of the fresh-wake
@@ -232,11 +335,25 @@ func pendingDrainReasonCancelable(reason string) bool {
 }
 
 const (
-	reconcilerDrainAckSourceKey     = "GC_DRAIN_ACK_SOURCE"
-	reconcilerDrainAckSourceValue   = "reconciler"
-	drainAckSourceAgentValue        = "agent"
-	reconcilerDrainAckReasonKey     = "GC_DRAIN_REASON"
-	reconcilerDrainAckGenerationKey = "GC_DRAIN_GENERATION"
+	reconcilerDrainAckSourceKey       = "GC_DRAIN_ACK_SOURCE"
+	reconcilerDrainAckSourceValue     = "reconciler"
+	drainAckSourceAgentValue          = sessions.DrainAckSourceAgentValue
+	drainAckRequesterSessionIDKey     = "GC_DRAIN_ACK_REQUESTER_SESSION_ID"
+	drainAckRequesterInstanceTokenKey = "GC_DRAIN_ACK_REQUESTER_INSTANCE_TOKEN"
+	reconcilerDrainAckReasonKey       = "GC_DRAIN_REASON"
+	reconcilerDrainAckGenerationKey   = "GC_DRAIN_GENERATION"
+	// The routed work the agent had finished when it acknowledged its drain,
+	// captured at ack time by the ack's own writer (gc runtime drain-ack). An
+	// acknowledgement is about a unit of work, not about whatever trigger the
+	// member row happens to carry when the keyed sweep next rebuilds its lease:
+	// the legacy pool builder may legitimately re-point a still-active member
+	// during the ack → stop-pending window, and every lease rebuilt after that
+	// named a different, genuinely open trigger (ga-f7v2ft.131). The pair
+	// travels WITH the ack, in the ack's own channel, and has exactly the ack's
+	// lifetime (ack → stop) — which is why it is provider meta and not a
+	// durable bead write.
+	reconcilerDrainAckTriggerBeadIDKey   = "GC_DRAIN_ACK_TRIGGER_BEAD_ID"
+	reconcilerDrainAckTriggerStoreRefKey = "GC_DRAIN_ACK_TRIGGER_STORE_REF"
 )
 
 func setReconcilerDrainAckMetadata(sp runtime.Provider, name string, ds *drainState) error {
@@ -266,7 +383,16 @@ func clearReconcilerDrainAckMetadata(sp runtime.Provider, name string) error {
 		return fmt.Errorf("session provider is nil")
 	}
 	var errs []error
-	for _, key := range []string{"GC_DRAIN_ACK", reconcilerDrainAckSourceKey, reconcilerDrainAckReasonKey, reconcilerDrainAckGenerationKey} {
+	for _, key := range []string{
+		"GC_DRAIN_ACK",
+		reconcilerDrainAckSourceKey,
+		drainAckRequesterSessionIDKey,
+		drainAckRequesterInstanceTokenKey,
+		reconcilerDrainAckTriggerBeadIDKey,
+		reconcilerDrainAckTriggerStoreRefKey,
+		reconcilerDrainAckReasonKey,
+		reconcilerDrainAckGenerationKey,
+	} {
 		if err := sp.RemoveMeta(name, key); err != nil {
 			log.Printf("session wake: clearing reconciler drain ack metadata %s for %s: %v", key, name, err)
 			errs = append(errs, fmt.Errorf("removing %s: %w", key, err))
@@ -519,6 +645,27 @@ func advanceSessionDrainsWithSessionsTraced(
 	clk clock.Clock,
 	trace *sessionReconcilerTraceCycle,
 ) {
+	advanceSessionDrainsExcluding(dt, sp, store, infoLookup, wakeEvals, cfg, clk, trace, nil)
+}
+
+// advanceSessionDrainsExcluding is the fleet drain scan with the D-DRAIN
+// coexistence seam (WD.6). A row the keyed controller currently holds a
+// drain-advance admission for is skipped entirely: the keyed handler advances
+// the same intent out of the same tracker, and a second writer on the same tick
+// would set the acknowledgement it is waiting on or complete a drain its cancel
+// arms had just decided to spare. A nil predicate is today's behavior verbatim,
+// which is what keeps every existing caller unchanged. Retired at WE.
+func advanceSessionDrainsExcluding(
+	dt *drainTracker,
+	sp runtime.Provider,
+	store beads.Store,
+	infoLookup func(id string) (sessions.Info, bool),
+	wakeEvals map[string]wakeEvaluation,
+	cfg *config.City,
+	clk clock.Clock,
+	trace *sessionReconcilerTraceCycle,
+	excluded func(sessions.Info) bool,
+) {
 	// wakeEvals is required. The reconciler builds it from the coherent infoByID
 	// snapshot via ComputeAwakeSet -> awakeSetToWakeEvals; tests supply explicit
 	// wakeEvals encoding the premise they exercise. Step 5d dropped the raw-bead
@@ -535,6 +682,9 @@ func advanceSessionDrainsWithSessionsTraced(
 		if !ok {
 			dt.clearIdleProbe(id)
 			dt.remove(id)
+			continue
+		}
+		if excluded != nil && excluded(info) {
 			continue
 		}
 		// The whole scan runs off the typed Info: decision reads (session_name,

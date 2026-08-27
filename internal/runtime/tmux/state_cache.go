@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -72,6 +74,11 @@ type runtimeStateSnapshot struct {
 	ProcessesAvailable bool
 }
 
+type exactProcessScan struct {
+	runtimes []runtime.LiveRuntime
+	complete bool
+}
+
 // StateCache caches tmux runtime state to avoid spawning N subprocess calls per
 // status check or reconciler pass. Concurrent callers are coalesced via
 // singleflight so at most one tmux/process snapshot refresh runs at a time.
@@ -86,16 +93,123 @@ type StateCache struct {
 	staleTTL   time.Duration
 	sf         singleflight.Group
 	fetcher    StateFetcher
+	scanMu     sync.RWMutex
+	// scanBySessionID is an instance-owned seam so fresh liveness tests can
+	// model exact and partial process-table scans without mutable global state.
+	scanBySessionID func(string, time.Time, proctable.SessionScope) exactProcessScan
 }
 
 // NewStateCache creates a new cache with the given fetcher and TTL.
 // staleTTL defaults to 30s.
 func NewStateCache(fetcher StateFetcher, ttl time.Duration) *StateCache {
-	return &StateCache{
-		fetcher:  fetcher,
-		ttl:      ttl,
-		staleTTL: defaultStaleTTL,
+	var scanBySessionID func(string, time.Time, proctable.SessionScope) exactProcessScan
+	if goruntime.GOOS == "linux" || goruntime.GOOS == "darwin" {
+		scanBySessionID = func(id string, incarnationStartedAt time.Time, scope proctable.SessionScope) exactProcessScan {
+			runtimes, err := proctable.ScanBySessionIDSinceInScope(id, incarnationStartedAt, scope)
+			return exactProcessScan{runtimes: runtimes, complete: err == nil}
+		}
 	}
+	return &StateCache{
+		fetcher:         fetcher,
+		ttl:             ttl,
+		staleTTL:        defaultStaleTTL,
+		scanBySessionID: scanBySessionID,
+	}
+}
+
+// freshState forces a post-invalidation cache generation and reports whether
+// that generation, or a newer generation that superseded it, published a
+// usable, non-stale snapshot.
+func (c *StateCache) freshState() (runtimeStateSnapshot, bool) {
+	c.Invalidate()
+	for {
+		c.mu.RLock()
+		generation := c.generation
+		state := c.state
+		complete := !c.dirty && c.lastError == nil && state.Sessions != nil &&
+			!c.fetchedAt.IsZero() && time.Since(c.fetchedAt) <= c.staleTTL
+		c.mu.RUnlock()
+		if complete {
+			return state, true
+		}
+
+		if c.refresh(generation) {
+			continue
+		}
+
+		c.mu.RLock()
+		state = c.state
+		currentGeneration := c.generation
+		complete = !c.dirty && c.lastError == nil && state.Sessions != nil &&
+			!c.fetchedAt.IsZero() && time.Since(c.fetchedAt) <= c.staleTTL
+		c.mu.RUnlock()
+		if currentGeneration != generation {
+			continue
+		}
+		return state, complete
+	}
+}
+
+func (c *StateCache) setScanBySessionID(scan func(string, time.Time, proctable.SessionScope) exactProcessScan) {
+	c.scanMu.Lock()
+	c.scanBySessionID = scan
+	c.scanMu.Unlock()
+}
+
+func (c *StateCache) scanSessionID(id string, incarnationStartedAt time.Time, scope proctable.SessionScope) (exactProcessScan, bool) {
+	c.scanMu.RLock()
+	scan := c.scanBySessionID
+	c.scanMu.RUnlock()
+	if scan == nil {
+		return exactProcessScan{}, false
+	}
+	return scan(id, incarnationStartedAt, scope), true
+}
+
+// ObserveFreshLiveness forces a new tmux snapshot and combines it with an
+// exact GC_SESSION_ID process-table scan. Absence is complete only when both
+// sources were fully observed in that post-invalidation generation, and it is
+// a proof of absence within the session's reachable scope, not across the
+// whole host: when the fresh snapshot is complete and the target session holds
+// no pane, that fact licenses the scan's live-pane-scope proof, so unreadable
+// strangers inside OTHER live panes' spawn scopes cannot park this session's
+// stop forever (ga-lp5w6).
+func (p *Provider) ObserveFreshLiveness(target runtime.LivenessTarget) runtime.Liveness {
+	name := strings.TrimSpace(target.SessionName)
+	if name == "" || p.cache == nil {
+		return runtime.Liveness{}
+	}
+
+	state, cacheComplete := p.cache.freshState()
+	session, panePresent := state.Sessions[name]
+	panePresent = panePresent && session.Running
+	processNames := nonEmptyProcessNames(target.ProcessNames)
+	processAlive := len(processNames) > 0 && state.processAlive(name, processNames)
+
+	var (
+		exactProcessAlive bool
+		scanComplete      bool
+	)
+	if sessionID := strings.TrimSpace(target.SessionID); sessionID != "" {
+		scope := proctable.SessionScope{
+			TmuxSessionProvenAbsent: cacheComplete && !panePresent,
+		}
+		result, scanned := p.cache.scanSessionID(sessionID, target.IncarnationStartedAt, scope)
+		scanComplete = scanned && result.complete
+		for _, live := range result.runtimes {
+			if live.SessionID == sessionID {
+				exactProcessAlive = true
+				break
+			}
+		}
+	}
+
+	positive := panePresent || processAlive || exactProcessAlive
+	complete := cacheComplete && scanComplete
+	if len(processNames) > 0 && panePresent && !state.ProcessesAvailable {
+		complete = false
+	}
+	return runtime.Liveness{Running: positive, Alive: positive, Complete: complete}
 }
 
 // IsRunning reports whether the named session exists in the cached set.
@@ -118,38 +232,40 @@ func (c *StateCache) ProcessAlive(name string, processNames []string) bool {
 }
 
 func (c *StateCache) currentState() runtimeStateSnapshot {
-	c.mu.RLock()
-	state := c.state
-	fetchedAt := c.fetchedAt
-	dirty := c.dirty
-	c.mu.RUnlock()
+	for {
+		c.mu.RLock()
+		state := c.state
+		fetchedAt := c.fetchedAt
+		dirty := c.dirty
+		generation := c.generation
+		c.mu.RUnlock()
 
-	// Cache hit: fresh data, not invalidated.
-	if state.Sessions != nil && !fetchedAt.IsZero() && !dirty && time.Since(fetchedAt) < c.ttl {
+		// Cache hit: fresh data, not invalidated.
+		if state.Sessions != nil && !fetchedAt.IsZero() && !dirty && time.Since(fetchedAt) < c.ttl {
+			return state
+		}
+
+		// Stale, empty, or dirty — trigger a refresh. Calls from the same
+		// generation coalesce, while an invalidation advances the key so a
+		// fresh call never joins a pre-invalidation fetch.
+		if c.refresh(generation) {
+			continue
+		}
+
+		// Read the (potentially updated) cache.
+		c.mu.RLock()
+		state = c.state
+		fetchedAt = c.fetchedAt
+		c.mu.RUnlock()
+
+		// If the cache is older than staleTTL, report all sessions as not running.
+		// Note: fetchedAt is preserved on failure (never zeroed), so this only
+		// triggers after staleTTL of real wall-clock time since last success.
+		if state.Sessions == nil || fetchedAt.IsZero() || time.Since(fetchedAt) > c.staleTTL {
+			return runtimeStateSnapshot{}
+		}
 		return state
 	}
-
-	// Stale, empty, or dirty — trigger refresh.
-	// When dirty, forget any in-flight singleflight so we get a fresh fetch
-	// instead of coalescing with a pre-invalidation call.
-	if dirty {
-		c.sf.Forget("refresh")
-	}
-	c.refresh()
-
-	// Read the (potentially updated) cache.
-	c.mu.RLock()
-	state = c.state
-	fetchedAt = c.fetchedAt
-	c.mu.RUnlock()
-
-	// If the cache is older than staleTTL, report all sessions as not running.
-	// Note: fetchedAt is preserved on failure (never zeroed), so this only
-	// triggers after staleTTL of real wall-clock time since last success.
-	if state.Sessions == nil || fetchedAt.IsZero() || time.Since(fetchedAt) > c.staleTTL {
-		return runtimeStateSnapshot{}
-	}
-	return state
 }
 
 // Invalidate marks the cache as dirty, forcing the next IsRunning call
@@ -167,7 +283,9 @@ func (c *StateCache) Invalidate() {
 // the next refresh cycle (which may race with singleflight coalescing).
 func (c *StateCache) EvictSession(name string) {
 	c.mu.Lock()
-	delete(c.state.Sessions, name)
+	sessions := maps.Clone(c.state.Sessions)
+	delete(sessions, name)
+	c.state.Sessions = sessions
 	c.dirty = true
 	c.generation++
 	c.mu.Unlock()
@@ -175,22 +293,25 @@ func (c *StateCache) EvictSession(name string) {
 
 // refresh executes a single coalesced fetch. If the fetch fails, the
 // last-known-good cache is preserved and the error is logged.
-func (c *StateCache) refresh() {
-	_, _, _ = c.sf.Do("refresh", func() (interface{}, error) {
+func (c *StateCache) refresh(generation uint64) bool {
+	key := "refresh:" + strconv.FormatUint(generation, 10)
+	value, _, _ := c.sf.Do(key, func() (interface{}, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
 		defer cancel()
-
-		c.mu.RLock()
-		startGeneration := c.generation
-		c.mu.RUnlock()
 
 		start := time.Now()
 		state, err := c.fetcher.FetchState(ctx)
 		elapsed := time.Since(start)
 
+		c.mu.Lock()
+		if c.generation != generation {
+			c.mu.Unlock()
+			if os.Getenv("GC_LOG_TMUX_CACHE") == "true" {
+				log.Printf("tmux state cache: discarded refresh from generation %d after %v", generation, elapsed)
+			}
+			return true, nil
+		}
 		if err != nil {
-			log.Printf("tmux state cache: refresh failed in %v: %v", elapsed, err)
-			c.mu.Lock()
 			c.lastError = err
 			// Two distinct failure regimes, keyed on whether the cache was ever
 			// primed (fetchedAt set by a prior success):
@@ -215,17 +336,10 @@ func (c *StateCache) refresh() {
 				c.dirty = false
 			}
 			c.mu.Unlock()
-			return nil, err
+			log.Printf("tmux state cache: refresh failed in %v: %v", elapsed, err)
+			return false, err
 		}
 
-		c.mu.Lock()
-		if c.generation != startGeneration {
-			c.mu.Unlock()
-			if os.Getenv("GC_LOG_TMUX_CACHE") == "true" {
-				log.Printf("tmux state cache: discarded refresh from generation %d after %v", startGeneration, elapsed)
-			}
-			return nil, nil
-		}
 		// Successful refresh is noisy on the session loop; opt-in via env var
 		// keeps it available for diagnostics without polluting normal CLI use.
 		if os.Getenv("GC_LOG_TMUX_CACHE") == "true" {
@@ -237,8 +351,10 @@ func (c *StateCache) refresh() {
 		c.lastError = nil
 		c.dirty = false
 		c.mu.Unlock()
-		return nil, nil
+		return false, nil
 	})
+	superseded, _ := value.(bool)
+	return superseded
 }
 
 // tmuxFetcher implements StateFetcher using a real Tmux instance.

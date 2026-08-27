@@ -396,6 +396,22 @@ func BeginDrainPatch(now time.Time, reason string) MetadataPatch {
 // running asynchronously and waiting for controller finalization.
 const DrainAckStopPendingReason = "drain-ack-stop-pending"
 
+// Durable drain-ack provenance is written with an exact agent-owned
+// stop-pending transition. It survives a controller restart after the runtime
+// metadata used to authorize STOP has disappeared.
+const (
+	DrainAckSourceMetadataKey                 = "drain_ack_source"
+	DrainAckRequesterSessionIDMetadataKey     = "drain_ack_requester_session_id"
+	DrainAckRequesterInstanceTokenMetadataKey = "drain_ack_requester_instance_token"
+	DrainAckSourceAgentValue                  = "agent"
+	// DrainAckSourceSupersededValue names a keyed recovery that superseded a
+	// stop-pending row carrying no recognizable acknowledgement provenance,
+	// after a fresh COMPLETE liveness observation proved the runtime dead.
+	// It is deliberately distinct from the agent value: a supersede records
+	// the evidence it acted on and never forges an acknowledgement.
+	DrainAckSourceSupersededValue = "keyed-superseded"
+)
+
 // DrainAckStopPendingPatch records that a drain-acked session has moved into
 // durable stop-pending state. The provider stop itself is asynchronous; the
 // controller finalizes the bead with the normal drain completion patches after
@@ -404,6 +420,17 @@ func DrainAckStopPendingPatch(now time.Time) MetadataPatch {
 	patch := BeginDrainPatch(now, DrainAckStopPendingReason)
 	patch["pending_create_claim"] = ""
 	patch["pending_create_started_at"] = ""
+	return patch
+}
+
+// AgentDrainAckStopPendingPatch records the exact agent acknowledgement that
+// authorized a keyed asynchronous STOP, alongside its durable stop-pending
+// state.
+func AgentDrainAckStopPendingPatch(now time.Time, requesterSessionID, requesterInstanceToken string) MetadataPatch {
+	patch := DrainAckStopPendingPatch(now)
+	patch[DrainAckSourceMetadataKey] = DrainAckSourceAgentValue
+	patch[DrainAckRequesterSessionIDMetadataKey] = requesterSessionID
+	patch[DrainAckRequesterInstanceTokenMetadataKey] = requesterInstanceToken
 	return patch
 }
 
@@ -535,6 +562,7 @@ func ClosePatch(now time.Time, stateCode string) MetadataPatch {
 	ts := now.UTC().Format(time.RFC3339)
 	return MetadataPatch{
 		"state":        stateCode,
+		"state_reason": "",
 		"close_reason": CanonicalCloseReason(stateCode),
 		"closed_at":    ts,
 		"synced_at":    ts,

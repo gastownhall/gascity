@@ -117,6 +117,15 @@ type WaitInfo struct {
 	DeliveryAttempt string
 	// NudgeID is the shadow wait-nudge ID once dispatched (metadata nudge_id).
 	NudgeID string
+	// ReadyAt is the deterministic RFC3339 timestamp of the ready transition
+	// (metadata ready_at).
+	ReadyAt string
+	// ReadyOwner identifies the keyed controller that claimed this ready
+	// transition (metadata ready_owner).
+	ReadyOwner string
+	// ReadyOperation is the durable operation token for the keyed ready claim
+	// (metadata ready_operation).
+	ReadyOperation string
 	// ExpiresAt is the raw RFC3339 expiry string kept verbatim; consumers parse
 	// it and tolerate malformed values (metadata expires_at).
 	ExpiresAt string
@@ -146,6 +155,9 @@ func WaitInfoFromBead(b beads.Bead) WaitInfo {
 		RegisteredEpoch: b.Metadata["registered_epoch"],
 		DeliveryAttempt: b.Metadata["delivery_attempt"],
 		NudgeID:         b.Metadata["nudge_id"],
+		ReadyAt:         b.Metadata["ready_at"],
+		ReadyOwner:      b.Metadata["ready_owner"],
+		ReadyOperation:  b.Metadata["ready_operation"],
 		ExpiresAt:       b.Metadata["expires_at"],
 		Note:            b.Description,
 		Status:          b.Status,

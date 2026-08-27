@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionhybrid "github.com/gastownhall/gascity/internal/runtime/hybrid"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -42,6 +45,236 @@ func (p *recordingStopProvider) Stop(name string) error {
 func (p *recordingStopProvider) Interrupt(name string) error {
 	p.interrupts <- name
 	return p.Fake.Interrupt(name)
+}
+
+func (p *recordingStopProvider) stopped() []string {
+	var names []string
+	for {
+		select {
+		case name := <-p.stops:
+			names = append(names, name)
+		default:
+			return names
+		}
+	}
+}
+
+// observationFailingStopStore fails the observation read of selected session
+// beads while letting the preceding target resolution succeed, reproducing a
+// per-target worker observation failure without also breaking target lookup.
+type observationFailingStopStore struct {
+	beads.Store
+	mu      sync.Mutex
+	gets    map[string]int
+	failFor map[string]error
+}
+
+func newObservationFailingStopStore(store beads.Store, failFor map[string]error) *observationFailingStopStore {
+	return &observationFailingStopStore{Store: store, gets: map[string]int{}, failFor: failFor}
+}
+
+func (s *observationFailingStopStore) Get(id string) (beads.Bead, error) {
+	s.mu.Lock()
+	s.gets[id]++
+	seen := s.gets[id]
+	err := s.failFor[id]
+	s.mu.Unlock()
+	if err != nil && seen > 1 {
+		return beads.Bead{}, err
+	}
+	return s.Store.Get(id)
+}
+
+func newStopTestSession(t *testing.T, store beads.Store, sp runtime.Provider, title string, beadOnly bool) sessionpkg.Info {
+	t.Helper()
+	mgr := newSessionManagerWithConfig("", store, sp, nil)
+	info, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{
+		BeadOnly: beadOnly,
+		Template: "worker",
+		Title:    title,
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	})
+	if err != nil {
+		t.Fatalf("CreateSession(%s): %v", title, err)
+	}
+	return info
+}
+
+// TestDoStopPerTargetObservationFailureFailsClosed proves gc stop cannot report
+// terminal success when a target's worker observation failed: the target is
+// unknown rather than absent, so it is left untouched and the diagnostic stays
+// correlated to it.
+func TestDoStopPerTargetObservationFailureFailsClosed(t *testing.T) {
+	base := beads.NewMemStore()
+	provider := newRecordingStopProvider()
+	info := newStopTestSession(t, base, provider, "unobservable", true)
+	store := newObservationFailingStopStore(base, map[string]error{
+		info.ID: errors.New("session record unavailable"),
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := doStop([]string{info.ID}, provider, nil, store, 0, events.Discard, &stdout, &stderr)
+
+	if code != 1 {
+		t.Fatalf("doStop = %d, want fail-closed code 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "City stopped.") {
+		t.Fatalf("stdout reported terminal success after target observation failed: %q", stdout.String())
+	}
+	for _, want := range []string{info.ID, "session record unavailable"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want retained observation detail %q", stderr.String(), want)
+		}
+	}
+	if got := provider.stopped(); len(got) != 0 {
+		t.Fatalf("stop calls = %v, want none for an unwitnessed target whose observation failed", got)
+	}
+}
+
+// TestDoStopObservationFailureStaysCorrelatedToItsTarget proves a failed
+// observation neither swallows its own error nor contaminates the sibling
+// targets that were observed cleanly.
+func TestDoStopObservationFailureStaysCorrelatedToItsTarget(t *testing.T) {
+	base := beads.NewMemStore()
+	provider := newRecordingStopProvider()
+	healthy := newStopTestSession(t, base, provider, "healthy", false)
+	broken := newStopTestSession(t, base, provider, "unobservable", true)
+	store := newObservationFailingStopStore(base, map[string]error{
+		broken.ID: errors.New("session record unavailable"),
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := doStop([]string{healthy.ID, broken.ID}, provider, nil, store, 0, events.Discard, &stdout, &stderr)
+
+	if code != 1 {
+		t.Fatalf("doStop = %d, want fail-closed code 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "City stopped.") {
+		t.Fatalf("stdout reported terminal success after target observation failed: %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "observing session "+broken.ID) {
+		t.Fatalf("stderr = %q, want observation failure correlated to %s", stderr.String(), broken.ID)
+	}
+	if strings.Contains(stderr.String(), "observing session "+healthy.ID) {
+		t.Fatalf("stderr = %q, want no observation failure attributed to cleanly observed %s", stderr.String(), healthy.ID)
+	}
+	if provider.IsRunning(healthy.SessionName) {
+		t.Fatalf("cleanly observed session %s survived the stop", healthy.SessionName)
+	}
+}
+
+// TestDoStopStopsDuplicateTargetsExactlyOnce keeps best-effort cleanup
+// idempotent when the same session is listed twice among the stop targets.
+func TestDoStopStopsDuplicateTargetsExactlyOnce(t *testing.T) {
+	store := beads.NewMemStore()
+	provider := newRecordingStopProvider()
+	info := newStopTestSession(t, store, provider, "healthy", false)
+
+	var stdout, stderr bytes.Buffer
+	code := doStop([]string{info.ID, info.ID}, provider, nil, store, 0, events.Discard, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("doStop = %d, want 0 for a fully observed city; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "City stopped.") {
+		t.Fatalf("stdout = %q, want terminal success for a fully observed city", stdout.String())
+	}
+	if got := provider.stopped(); len(got) != 1 {
+		t.Fatalf("stop calls = %v, want exactly one for a duplicated target", got)
+	}
+}
+
+func TestDoStopPartialRuntimeObservationFailsClosedAfterBestEffortCleanup(t *testing.T) {
+	const sessionName = "partial-stop-session"
+	tests := []struct {
+		name      string
+		running   bool
+		wantStops int
+	}{
+		{name: "no positively observed names"},
+		{name: "positive names remain cleanup candidates", running: true, wantStops: 1},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			healthy := runtime.NewFake()
+			if test.running {
+				if err := healthy.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			provider := sessionhybrid.New(healthy, runtime.NewFailFake(), func(string) bool { return false })
+
+			var stdout, stderr bytes.Buffer
+			code := doStop([]string{sessionName}, provider, nil, nil, 0, events.Discard, &stdout, &stderr)
+
+			if code != 1 {
+				t.Fatalf("doStop = %d, want fail-closed code 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			if strings.Contains(stdout.String(), "City stopped.") {
+				t.Fatalf("stdout reported terminal success after partial observation: %q", stdout.String())
+			}
+			if got := healthy.CountCalls("Stop", sessionName); got != test.wantStops {
+				t.Fatalf("best-effort Stop calls = %d, want %d", got, test.wantStops)
+			}
+		})
+	}
+}
+
+// TestStopCommandFailsClosedAfterPartialRuntimeObservation is the command,
+// PackV2 config, provider-factory, and production hybrid composition proof.
+func TestStopCommandFailsClosedAfterPartialRuntimeObservation(t *testing.T) {
+	resetFlags(t)
+	const (
+		cityName    = "partial-stop-city"
+		sessionName = "partial-stop-session"
+	)
+	cityDir := setupCity(t, cityName)
+	cfg := &config.City{
+		Beads:  config.BeadsConfig{Provider: "file"},
+		Daemon: config.DaemonConfig{ShutdownTimeout: "0s"},
+	}
+	data, err := cfg.MarshalForWrite()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeCatalogFile(t, cityDir, filepath.Join("agents", sessionName, "agent.toml"), "scope = \"city\"\n")
+
+	healthy := runtime.NewFake()
+	if err := healthy.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	provider := sessionhybrid.New(healthy, runtime.NewFailFake(), func(string) bool { return false })
+	oldFactory := sessionProviderForStopCity
+	sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) {
+		return provider, nil
+	}
+	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	cmd := newStopCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{cityDir})
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	err = cmd.Execute()
+
+	if !errors.Is(err, errExit) {
+		t.Fatalf("stop command error = %v, want errExit; stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "City stopped.") {
+		t.Fatalf("stdout reported terminal success after partial observation: %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "listing sessions partially failed") {
+		t.Fatalf("stderr = %q, want partial-observation detail", stderr.String())
+	}
+	if healthy.IsRunning(sessionName) {
+		t.Fatalf("positively observed session %q is still running", sessionName)
+	}
 }
 
 func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
@@ -933,9 +1166,19 @@ func TestCmdStopInvalidConfigManagedRuntimeStopsStandaloneController(t *testing.
 	cityDir := setupInvalidConfigManagedRuntime(t)
 	stopCommands := startAcknowledgingStandaloneController(t, cityDir)
 	var shutdowns int
+	ownershipHeld := false
 	overrideShutdownBeadsProviderForStop(t, func(path string) error {
 		shutdowns++
 		assertSameTestPath(t, path, cityDir)
+		lock, err := acquireControllerLock(path)
+		switch {
+		case err == nil:
+			_ = lock.Close()
+		case errors.Is(err, errControllerAlreadyRunning):
+			ownershipHeld = true
+		default:
+			return err
+		}
 		return nil
 	})
 
@@ -958,6 +1201,9 @@ func TestCmdStopInvalidConfigManagedRuntimeStopsStandaloneController(t *testing.
 	}
 	if shutdowns != 1 {
 		t.Fatalf("shutdown calls = %d, want 1", shutdowns)
+	}
+	if !ownershipHeld {
+		t.Fatal("controller ownership was released before managed provider shutdown")
 	}
 	if !strings.Contains(stdout.String(), "Controller stopping...") {
 		t.Fatalf("stdout missing controller stop message: %q", stdout.String())
@@ -1012,6 +1258,40 @@ provider = "file"
 		}
 	case <-time.After(time.Second):
 		t.Fatal("controller did not receive stop command")
+	}
+}
+
+func TestCmdStopBodyHoldsControllerOwnershipThroughProviderShutdown(t *testing.T) {
+	cityDir := setupCity(t, "acknowledged-controller-stop")
+	startAcknowledgingStandaloneController(t, cityDir)
+
+	ownershipHeld := false
+	overrideShutdownBeadsProviderForStop(t, func(path string) error {
+		lock, err := acquireControllerLock(path)
+		if err == nil {
+			_ = lock.Close()
+			return nil
+		}
+		if errors.Is(err, errControllerAlreadyRunning) {
+			ownershipHeld = true
+			return nil
+		}
+		return err
+	})
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "acknowledged-controller-stop"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Daemon:    config.DaemonConfig{ShutdownTimeout: "0s"},
+	}
+	var stdout, stderr lockedBuffer
+	code := cmdStopBody(cityDir, cfg, false, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("cmdStopBody() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !ownershipHeld {
+		t.Fatal("controller ownership was released before provider shutdown")
 	}
 }
 

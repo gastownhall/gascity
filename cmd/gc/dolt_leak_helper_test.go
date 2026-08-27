@@ -326,12 +326,12 @@ func TestRequireNoLeakedDoltAfterWithFilterReportsAndKillsOwnedPID(t *testing.T)
 	}
 	var killed []killCall
 	inner := &recordingTB{}
-	requireNoLeakedDoltAfterWithFilterAndKiller(inner, enumerate, func(configPath string) bool {
+	requireNoLeakedDoltAfterWithFilterKillerAndWaiter(inner, enumerate, func(configPath string) bool {
 		return samePath(configPath, ownedRoot) || strings.HasPrefix(configPath, ownedRoot+string(filepath.Separator))
 	}, func(pid int, sig syscall.Signal) error {
 		killed = append(killed, killCall{pid: pid, sig: sig})
 		return nil
-	})
+	}, processNeverAlive)
 	inner.runCleanups()
 
 	if !inner.failed() {
@@ -366,14 +366,14 @@ func TestRequireNoLeakedDoltAfterWithFilterReportsKillErrors(t *testing.T) {
 	}
 	enumerate := scriptedDoltEnumerator(t, nil, []DoltProcInfo{owned})
 	inner := &recordingTB{}
-	requireNoLeakedDoltAfterWithFilterAndKiller(inner, enumerate, func(configPath string) bool {
+	requireNoLeakedDoltAfterWithFilterKillerAndWaiter(inner, enumerate, func(configPath string) bool {
 		return samePath(configPath, ownedRoot) || strings.HasPrefix(configPath, ownedRoot+string(filepath.Separator))
 	}, func(_ int, sig syscall.Signal) error {
 		if sig == syscall.SIGTERM {
 			return errors.New("synthetic kill failure")
 		}
 		return nil
-	})
+	}, processNeverAlive)
 	inner.runCleanups()
 
 	msg := strings.Join(inner.errors, "\n")

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
@@ -21,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
@@ -370,7 +372,9 @@ func TestControllerStateRuntimeUpdateDoesNotDropPendingMutationRigs(t *testing.T
 	cs := newControllerState(context.Background(), current, runtime.NewFake(), events.NewFake(), "city1", cityDir)
 	cs.markConfigMutationPending("current-rev")
 
-	cs.updateFromRuntime(stale, runtime.NewFake(), "stale-rev")
+	if cs.updateFromRuntime(stale, runtime.NewFake(), "stale-rev") {
+		t.Fatal("stale runtime update reported acceptance")
+	}
 
 	if got := cs.Config(); got != current {
 		t.Fatalf("Config() = %+v, want pending mutation config with rig alpha", got)
@@ -379,7 +383,9 @@ func TestControllerStateRuntimeUpdateDoesNotDropPendingMutationRigs(t *testing.T
 		t.Fatal("pending mutation marker cleared by stale runtime update")
 	}
 
-	cs.updateFromRuntime(current, runtime.NewFake(), "current-rev")
+	if !cs.updateFromRuntime(current, runtime.NewFake(), "current-rev") {
+		t.Fatal("matching runtime update reported rejection")
+	}
 
 	if cs.configMutationPending.Load() {
 		t.Fatal("pending mutation marker not cleared after matching runtime update")
@@ -411,7 +417,9 @@ func TestControllerStateRuntimeUpdateDoesNotDropPendingMutationAgents(t *testing
 	cs := newControllerState(context.Background(), current, runtime.NewFake(), events.NewFake(), "city1", cityDir)
 	cs.markConfigMutationPending("current-rev")
 
-	cs.updateFromRuntime(stale, runtime.NewFake(), "stale-rev")
+	if cs.updateFromRuntime(stale, runtime.NewFake(), "stale-rev") {
+		t.Fatal("stale runtime update reported acceptance")
+	}
 
 	if got := cs.Config(); got != current {
 		t.Fatalf("Config() = %+v, want pending mutation config with helper agent", got)
@@ -844,7 +852,9 @@ provider = "bash"
 	originalProvider := runtime.NewFake()
 	cs := newControllerState(context.Background(), current, originalProvider, events.NewFake(), "city1", cityDir)
 
-	cs.updateFromRuntime(stale, runtime.NewFake(), "stale-rev")
+	if cs.updateFromRuntime(stale, runtime.NewFake(), "stale-rev") {
+		t.Fatal("stale runtime update reported acceptance")
+	}
 
 	if got := cs.Config(); got != current {
 		t.Fatalf("Config() = %+v, want current config with worker agent", got)
@@ -1633,9 +1643,10 @@ func TestControllerStateMutationRestoresSymlinkedCityTomlWhenRefreshFails(t *tes
 	cs := &controllerState{
 		cityPath: cityDir,
 		cfg:      &config.City{Workspace: config.Workspace{Name: "city1"}},
+		editor:   configedit.NewEditor(fsys.OSFS{}, liveCityPath),
 	}
 
-	mutErr := cs.mutateAndPoke(func() error {
+	mutErr := cs.mutateAndPoke(func(*configedit.Editor) error {
 		// Forward mutation writes through the resolved symlink target, exactly
 		// like the config editor's ResolveCityRewritePath path. The broken TOML
 		// then makes refreshConfigSnapshot fail and triggers rollback -- the
@@ -2051,6 +2062,564 @@ func TestControllerStateAppliesCacheReconcileBeadEventsToStores(t *testing.T) {
 	}
 	if items[0].Status != "in_progress" {
 		t.Fatalf("status after cache-reconcile event = %q, want in_progress", items[0].Status)
+	}
+}
+
+func TestControllerStateAppliesTypedExternalBeadEventsThroughPolicyWrappedCache(t *testing.T) {
+	backing := beads.NewMemStore()
+	store := wrapWithCachingStore(
+		context.Background(),
+		wrapStoreWithBeadPolicies(backing, &config.City{}),
+		nil,
+		false,
+	)
+	inner, _, wrapped := unwrapBeadPolicyStore(store)
+	if !wrapped {
+		t.Fatalf("store type = %T, want production policy wrapper", store)
+	}
+	cached, ok := inner.(*beads.CachingStore)
+	if !ok {
+		t.Fatalf("policy inner store type = %T, want *beads.CachingStore", inner)
+	}
+
+	cs := &controllerState{
+		beadStores: map[string]beads.Store{"alpha": store},
+		pokeCh:     make(chan struct{}, 2),
+	}
+	snapshot, err := backing.Create(beads.Bead{
+		Title:  "external bead",
+		Type:   "task",
+		Status: "open",
+	})
+	if err != nil {
+		t.Fatalf("create external bead: %v", err)
+	}
+	apply := func(eventType string) {
+		t.Helper()
+		payload, err := json.Marshal(api.BeadEventPayload{Bead: snapshot})
+		if err != nil {
+			t.Fatalf("marshal typed bead payload: %v", err)
+		}
+		cs.applyBeadEventToStores(events.Event{
+			Type:    eventType,
+			Actor:   "bd-hook",
+			Subject: snapshot.ID,
+			Payload: payload,
+		})
+	}
+
+	apply(events.BeadCreated)
+	items, err := cached.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("List after typed bead.created: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != snapshot.ID || items[0].Status != "open" {
+		t.Fatalf("cache after typed bead.created = %+v, want %s open", items, snapshot.ID)
+	}
+
+	inProgress := "in_progress"
+	if err := backing.Update(snapshot.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("update external bead: %v", err)
+	}
+	snapshot, err = backing.Get(snapshot.ID)
+	if err != nil {
+		t.Fatalf("get updated external bead: %v", err)
+	}
+	apply(events.BeadUpdated)
+	items, err = cached.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("List after typed bead.updated: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != snapshot.ID || items[0].Status != "in_progress" {
+		t.Fatalf("cache after typed bead.updated = %+v, want %s in_progress", items, snapshot.ID)
+	}
+}
+
+type readyRoutedWorkReadAuditStore struct {
+	beads.Store
+	getCalls     atomic.Int64
+	listCalls    atomic.Int64
+	readyCalls   atomic.Int64
+	depListCalls atomic.Int64
+}
+
+func (s *readyRoutedWorkReadAuditStore) Get(id string) (beads.Bead, error) {
+	s.getCalls.Add(1)
+	return s.Store.Get(id)
+}
+
+func (s *readyRoutedWorkReadAuditStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.listCalls.Add(1)
+	return s.Store.List(query)
+}
+
+func (s *readyRoutedWorkReadAuditStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
+	s.readyCalls.Add(1)
+	return s.Store.Ready(query...)
+}
+
+func (s *readyRoutedWorkReadAuditStore) DepList(id, direction string) ([]beads.Dep, error) {
+	s.depListCalls.Add(1)
+	return s.Store.DepList(id, direction)
+}
+
+func readyRoutedWorkMax(n int) *int { return &n }
+
+func readyRoutedWorkEvent(t *testing.T, bead beads.Bead, deps []beads.Dep) events.Event {
+	t.Helper()
+	payload, err := json.Marshal(bead)
+	if err != nil {
+		t.Fatalf("marshal routed-work event: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		t.Fatalf("decode routed-work event fields: %v", err)
+	}
+	if deps == nil {
+		deps = []beads.Dep{}
+	}
+	fields["dependencies"], err = json.Marshal(deps)
+	if err != nil {
+		t.Fatalf("marshal routed-work dependencies: %v", err)
+	}
+	payload, err = json.Marshal(fields)
+	if err != nil {
+		t.Fatalf("marshal complete routed-work event: %v", err)
+	}
+	return events.Event{
+		Type:    events.BeadUpdated,
+		Actor:   "bd-hook",
+		Subject: bead.ID,
+		Payload: payload,
+	}
+}
+
+func readyRoutedWorkEventWithoutDependencies(t *testing.T, bead beads.Bead) events.Event {
+	t.Helper()
+	payload, err := json.Marshal(bead)
+	if err != nil {
+		t.Fatalf("marshal routed-work event without dependencies: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		t.Fatalf("decode routed-work event without dependencies: %v", err)
+	}
+	delete(fields, "dependencies")
+	delete(fields, "needs")
+	payload, err = json.Marshal(fields)
+	if err != nil {
+		t.Fatalf("marshal routed-work event without dependency fields: %v", err)
+	}
+	return events.Event{
+		Type:    events.BeadUpdated,
+		Actor:   "bd-hook",
+		Subject: bead.ID,
+		Payload: payload,
+	}
+}
+
+func TestControllerStatePrioritizesOnlyExactReadyRoutedWork(t *testing.T) {
+	now := time.Now().UTC()
+	tests := []struct {
+		name             string
+		work             beads.Bead
+		configure        func(*config.City)
+		afterCreate      func(*testing.T, *readyRoutedWorkReadAuditStore, beads.Bead)
+		partial          bool
+		malformed        bool
+		omitDependencies bool
+		auditExactReads  bool
+		wantTarget       string
+		wantContribution bool
+		wantGetCalls     int64
+		wantDepListCalls int64
+	}{
+		{
+			name: "ready unassigned instance route",
+			work: beads.Bead{
+				Title:    "ready work",
+				Type:     "task",
+				Status:   "open",
+				Metadata: map[string]string{"gc.routed_to": "worker"},
+			},
+			wantTarget:       "worker",
+			wantContribution: true,
+		},
+		{
+			name: "schema 59 ready update omits dependencies",
+			work: beads.Bead{
+				Title:    "ready work with omitted dependencies",
+				Type:     "task",
+				Status:   "open",
+				Metadata: map[string]string{"gc.routed_to": "worker"},
+			},
+			omitDependencies: true,
+			auditExactReads:  true,
+			wantTarget:       "worker",
+			wantContribution: true,
+			wantGetCalls:     1,
+			wantDepListCalls: 1,
+		},
+		{
+			name: "custom scale check remains legacy only",
+			work: beads.Bead{Title: "custom scale work", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}},
+			configure: func(cfg *config.City) {
+				cfg.Agents[0].ScaleCheck = "printf 1"
+			},
+			wantTarget: "worker",
+		},
+		{
+			name: "named session template remains legacy only",
+			work: beads.Bead{Title: "named session work", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}},
+			configure: func(cfg *config.City) {
+				cfg.NamedSessions = []config.NamedSession{{Template: "worker", Mode: "on_demand"}}
+			},
+			wantTarget: "worker",
+		},
+		{
+			name: "blocked",
+			work: beads.Bead{Title: "blocked work", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}},
+			afterCreate: func(t *testing.T, store *readyRoutedWorkReadAuditStore, work beads.Bead) {
+				t.Helper()
+				blocker, err := store.Create(beads.Bead{Title: "open blocker", Type: "task", Status: "open"})
+				if err != nil {
+					t.Fatalf("create blocker: %v", err)
+				}
+				if err := store.DepAdd(work.ID, blocker.ID, "blocks"); err != nil {
+					t.Fatalf("add blocking dependency: %v", err)
+				}
+			},
+		},
+		{
+			name:             "schema 59 blocked update omits dependencies",
+			work:             beads.Bead{Title: "blocked work with omitted dependencies", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}},
+			omitDependencies: true,
+			auditExactReads:  true,
+			afterCreate: func(t *testing.T, store *readyRoutedWorkReadAuditStore, work beads.Bead) {
+				t.Helper()
+				blocker, err := store.Create(beads.Bead{Title: "open blocker", Type: "task", Status: "open"})
+				if err != nil {
+					t.Fatalf("create blocker: %v", err)
+				}
+				if err := store.DepAdd(work.ID, blocker.ID, "blocks"); err != nil {
+					t.Fatalf("add blocking dependency: %v", err)
+				}
+			},
+			wantGetCalls:     2,
+			wantDepListCalls: 1,
+		},
+		{
+			name: "deferred",
+			work: beads.Bead{Title: "deferred work", Type: "task", Status: "open", DeferUntil: func() *time.Time {
+				deferred := now.Add(time.Hour)
+				return &deferred
+			}(), Metadata: map[string]string{"gc.routed_to": "worker"}},
+		},
+		{
+			name: "assigned",
+			work: beads.Bead{Title: "assigned work", Type: "task", Status: "open", Assignee: "worker-1", Metadata: map[string]string{"gc.routed_to": "worker"}},
+		},
+		{
+			name: "closed",
+			work: beads.Bead{Title: "closed work", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}},
+			afterCreate: func(t *testing.T, store *readyRoutedWorkReadAuditStore, work beads.Bead) {
+				t.Helper()
+				if err := store.Close(work.ID); err != nil {
+					t.Fatalf("close work: %v", err)
+				}
+			},
+		},
+		{
+			name: "ready-excluded type",
+			work: beads.Bead{Title: "container", Type: "molecule", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}},
+		},
+		{
+			// #5250's agreement rule, at the EVENT reader. IsReadyCandidateForTier
+			// does not compensate for either of these: readyExcludeTypes has no
+			// "epic" and drops only the gc:session / order-tracking labels. Each
+			// one counted here is one seat minted for a row its own hook query is
+			// forbidden to serve.
+			name: "routed epic",
+			work: beads.Bead{Title: "routed epic", Type: "epic", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}},
+		},
+		{
+			name: "routed bead parked on a dispatch hold",
+			work: beads.Bead{Title: "held work", Type: "task", Status: "open", Labels: []string{beadmeta.HoldMayorLabel}, Metadata: map[string]string{"gc.routed_to": "worker"}},
+		},
+		{
+			name: "unknown route",
+			work: beads.Bead{Title: "unknown route", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "missing"}},
+		},
+		{
+			name: "suspended pool",
+			work: beads.Bead{Title: "suspended target", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}},
+			configure: func(cfg *config.City) {
+				cfg.Agents[0].Suspended = true
+			},
+		},
+		{
+			name: "zero-capacity pool",
+			work: beads.Bead{Title: "disabled target", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}},
+			configure: func(cfg *config.City) {
+				cfg.Agents[0].MaxActiveSessions = readyRoutedWorkMax(0)
+			},
+		},
+		{
+			name:      "malformed payload",
+			work:      beads.Bead{Title: "malformed event", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}},
+			malformed: true,
+		},
+		{
+			name:    "partial cache",
+			work:    beads.Bead{Title: "partial projection", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}},
+			partial: true,
+		},
+		{
+			name:             "partial cache update omits dependencies",
+			work:             beads.Bead{Title: "partial omitted projection", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}},
+			partial:          true,
+			omitDependencies: true,
+			auditExactReads:  true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			backing := &readyRoutedWorkReadAuditStore{Store: beads.NewMemStore()}
+			created, err := backing.Create(test.work)
+			if err != nil {
+				t.Fatalf("create work: %v", err)
+			}
+			if test.afterCreate != nil {
+				test.afterCreate(t, backing, created)
+			}
+			created, err = backing.Get(created.ID)
+			if err != nil {
+				t.Fatalf("reload work: %v", err)
+			}
+
+			cache := beads.NewCachingStoreForTest(backing, nil)
+			if test.partial {
+				err = cache.PrimeActive()
+			} else {
+				err = cache.Prime(context.Background())
+			}
+			if err != nil {
+				t.Fatalf("prime cache: %v", err)
+			}
+			if test.wantTarget != "" {
+				if cachedWork, ready := cache.CachedReadyByID(created.ID, now); !ready {
+					t.Fatalf("exact cached readiness = (%+v, false), cache stats=%+v", cachedWork, cache.Stats())
+				}
+			}
+			cfg := &config.City{Agents: []config.Agent{{
+				Name:              "worker",
+				MaxActiveSessions: readyRoutedWorkMax(2),
+			}}}
+			if test.configure != nil {
+				test.configure(cfg)
+			}
+			cs := &controllerState{
+				cfg:        cfg,
+				beadStores: map[string]beads.Store{"work": cache},
+				pokeCh:     make(chan struct{}, 1),
+			}
+			var contributions []readyRoutedWorkDemandContribution
+			if err := cs.installReadyRoutedWorkEventAdmission(func(contribution readyRoutedWorkDemandContribution) {
+				contributions = append(contributions, contribution)
+			}); err != nil {
+				t.Fatalf("install routed-work admission: %v", err)
+			}
+			t.Cleanup(cs.stopReadyRoutedWorkEventAdmission)
+
+			var evt events.Event
+			if test.omitDependencies {
+				evt = readyRoutedWorkEventWithoutDependencies(t, created)
+			} else {
+				deps, err := backing.DepList(created.ID, "down")
+				if err != nil {
+					t.Fatalf("read event dependencies: %v", err)
+				}
+				evt = readyRoutedWorkEvent(t, created, deps)
+			}
+			if test.malformed {
+				evt.Payload = json.RawMessage(`{`)
+			}
+			getCallsBefore := backing.getCalls.Load()
+			listCallsBefore := backing.listCalls.Load()
+			readyCallsBefore := backing.readyCalls.Load()
+			depListCallsBefore := backing.depListCalls.Load()
+			cs.applyBeadEventToStores(evt)
+
+			if test.wantTarget == "" {
+				if len(contributions) != 0 {
+					t.Fatalf("demand contributions = %+v, want ordinary fallback only", contributions)
+				}
+			} else if len(contributions) != 1 ||
+				contributions[0].WorkID != created.ID ||
+				contributions[0].PoolTarget != test.wantTarget ||
+				contributions[0].SourceActor != evt.Actor ||
+				contributions[0].ContributionPresent != test.wantContribution ||
+				contributions[0].ObservedAt.IsZero() ||
+				contributions[0].DecidedAt.Before(contributions[0].ObservedAt) {
+				t.Fatalf("demand contributions = %+v, want one exact contribution for %s with present=%t", contributions, test.wantTarget, test.wantContribution)
+			}
+			if got := len(cs.pokeCh); got != 1 {
+				t.Fatalf("ordinary fallback poke count = %d, want 1", got)
+			}
+			if got := backing.listCalls.Load(); got != listCallsBefore {
+				t.Fatalf("backing List calls after event = %d, want unchanged %d", got, listCallsBefore)
+			}
+			if got := backing.readyCalls.Load(); got != readyCallsBefore {
+				t.Fatalf("backing Ready calls after event = %d, want unchanged %d", got, readyCallsBefore)
+			}
+			if test.auditExactReads {
+				if got := backing.getCalls.Load() - getCallsBefore; got != test.wantGetCalls {
+					t.Fatalf("backing Get calls after event = %d, want %d", got, test.wantGetCalls)
+				}
+				if got := backing.depListCalls.Load() - depListCallsBefore; got != test.wantDepListCalls {
+					t.Fatalf("backing DepList calls after event = %d, want %d", got, test.wantDepListCalls)
+				}
+			}
+		})
+	}
+}
+
+// TestReadyRoutedWorkOverflowIsCensusOwedNotLegacyFallback is Q2's second
+// negative: the pool-allocation hint channel is saturated (nil here — the same
+// non-blocking drop), so the exact key is lost. The admission records the
+// overflow and RETURNS: it never retries, never blocks, and never converts the
+// key into a priority legacy poke. Recovery is re-detection by the next patrol's
+// declared routed-work view, which is what preserves the work and loses only
+// latency (DETECTOR.md §2, degradation rules).
+func TestReadyRoutedWorkOverflowIsCensusOwedNotLegacyFallback(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		ownership sessionStartOwnership
+	}{
+		{name: "keyed", ownership: sessionStartOwnershipKeyed},
+		{name: "legacy", ownership: sessionStartOwnershipLegacy},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			backing := beads.NewMemStore()
+			work, err := backing.Create(beads.Bead{
+				Title:    "ready work",
+				Type:     "task",
+				Status:   "open",
+				Metadata: map[string]string{"gc.routed_to": "worker"},
+			})
+			if err != nil {
+				t.Fatalf("create work: %v", err)
+			}
+			cache := beads.NewCachingStoreForTest(backing, nil)
+			if err := cache.Prime(context.Background()); err != nil {
+				t.Fatalf("prime cache: %v", err)
+			}
+			cfg := &config.City{Agents: []config.Agent{{Name: "worker", MaxActiveSessions: readyRoutedWorkMax(2)}}}
+			pokeCh := make(chan struct{}, 1)
+			cs := &controllerState{cfg: cfg, beadStores: map[string]beads.Store{"work": cache}, pokeCh: pokeCh}
+			cr := &CityRuntime{cs: cs, cfg: cfg, pokeCh: pokeCh, sessionStartOwnership: test.ownership}
+			if err := cr.installReadyRoutedWorkEventAdmission(); err != nil {
+				t.Fatalf("install runtime routed-work admission: %v", err)
+			}
+			if err := cr.installReadyRoutedWorkEventAdmission(); err != nil {
+				t.Fatalf("repeat runtime routed-work admission installation: %v", err)
+			}
+			t.Cleanup(cs.stopReadyRoutedWorkEventAdmission)
+
+			evt := readyRoutedWorkEvent(t, work, nil)
+			cs.applyBeadEventToStores(evt)
+			cs.applyBeadEventToStores(evt)
+
+			if got := len(pokeCh); got != 1 {
+				t.Fatalf("buffered poke count = %d, want only the ordinary bead-event poke after duplicate events", got)
+			}
+		})
+	}
+}
+
+func TestReadyRoutedWorkAdmissionRecordsExactEffectFreeDemandShadow(t *testing.T) {
+	cityPath := t.TempDir()
+	backing := beads.NewMemStore()
+	work, err := backing.Create(beads.Bead{
+		Title:    "ready work",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("create work: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("prime cache: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city", Prefix: "hq"},
+		Rigs:      []config.Rig{{Name: "work", Path: "work", Prefix: "gc"}},
+		Agents:    []config.Agent{{Name: "worker", MaxActiveSessions: readyRoutedWorkMax(2)}},
+	}
+	pokeCh := make(chan struct{}, 1)
+	cs := &controllerState{
+		cfg:        cfg,
+		cityPath:   cityPath,
+		beadStores: map[string]beads.Store{"work": cache},
+		pokeCh:     pokeCh,
+	}
+	trace := newSessionReconcilerTraceManager(cityPath, "test-city", io.Discard)
+	t.Cleanup(func() { _ = trace.Close() })
+	cr := &CityRuntime{
+		cityPath:              cityPath,
+		cityName:              "test-city",
+		cs:                    cs,
+		cfg:                   cfg,
+		pokeCh:                pokeCh,
+		trace:                 trace,
+		stderr:                io.Discard,
+		sessionStartOwnership: sessionStartOwnershipKeyed,
+	}
+	if err := cr.installReadyRoutedWorkEventAdmission(); err != nil {
+		t.Fatalf("install runtime routed-work admission: %v", err)
+	}
+	t.Cleanup(cs.stopReadyRoutedWorkEventAdmission)
+
+	eventAt := time.Now().UTC().Add(-time.Second)
+	evt := readyRoutedWorkEvent(t, work, nil)
+	evt.Ts = eventAt
+	cs.applyBeadEventToStores(evt)
+
+	records, err := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{})
+	if err != nil {
+		t.Fatalf("read routed-work demand shadow trace: %v", err)
+	}
+	var matches []SessionReconcilerTraceRecord
+	for _, record := range records {
+		if record.RecordType == TraceRecordOperation && string(record.SiteCode) == "pool_demand.contribution.shadow" {
+			matches = append(matches, record)
+		}
+	}
+	if len(matches) != 1 {
+		t.Fatalf("routed-work demand shadow records = %d, want 1: %+v", len(matches), matches)
+	}
+	record := matches[0]
+	if record.Fields["work_id"] != work.ID ||
+		record.Fields["pool_target"] != "worker" ||
+		record.Fields["source_actor"] != "bd-hook" ||
+		record.Fields["source_store"] != "rig:work" ||
+		record.Fields["contribution_present"] != true ||
+		record.Fields["effect_applied"] != false {
+		t.Fatalf("routed-work demand shadow record = %+v, want exact effect-free contribution", record)
+	}
+	eventLatency, ok := record.Fields["event_to_shadow_decision_ns"].(float64)
+	if !ok || eventLatency <= 0 {
+		t.Fatalf("event-to-shadow latency = %#v, want positive nanoseconds after %s", record.Fields["event_to_shadow_decision_ns"], eventAt)
+	}
+	decisionLatency, ok := record.Fields["observation_to_shadow_decision_ns"].(float64)
+	if !ok || decisionLatency < 0 {
+		t.Fatalf("observation-to-shadow latency = %#v, want non-negative nanoseconds", record.Fields["observation_to_shadow_decision_ns"])
+	}
+	if len(pokeCh) != 1 {
+		t.Fatalf("ordinary bead-event pokes = %d, want the one the event path already fires", len(pokeCh))
 	}
 }
 
@@ -4266,6 +4835,8 @@ func TestConfigMutationSnapshotRestoresThroughSymlinks(t *testing.T) {
 	for link, target := range map[string]string{
 		filepath.Join(cityDir, "city.toml"):        filepath.Join(checkoutDir, "city.toml"),
 		filepath.Join(cityDir, ".gc", "site.toml"): filepath.Join(checkoutDir, "site.toml"),
+		filepath.Join(cityDir, "pack.toml"):        filepath.Join(checkoutDir, "pack.toml"),
+		filepath.Join(cityDir, "packs.lock"):       filepath.Join(checkoutDir, "packs.lock"),
 	} {
 		if err := os.WriteFile(target, []byte("original = true\n"), 0o644); err != nil {
 			t.Fatal(err)
@@ -4307,6 +4878,254 @@ func TestConfigMutationSnapshotRestoresThroughSymlinks(t *testing.T) {
 			t.Fatalf("%s target content = %q, want original bytes restored", link, data)
 		}
 	}
+}
+
+func TestControllerStatePackConfigMutationRollbackPreservesSymlinkedPackFiles(t *testing.T) {
+	cityDir := t.TempDir()
+	checkoutDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"city1\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	originals := map[string][]byte{
+		"pack.toml":  []byte("[pack]\nname = \"city1\"\nschema = 2\n"),
+		"packs.lock": []byte("schema = 1\n"),
+	}
+	for name, content := range originals {
+		target := filepath.Join(checkoutDir, name)
+		if err := os.WriteFile(target, content, 0o644); err != nil {
+			t.Fatalf("write %s target: %v", name, err)
+		}
+		if err := os.Symlink(target, filepath.Join(cityDir, name)); err != nil {
+			t.Fatalf("symlink %s: %v", name, err)
+		}
+	}
+
+	cs := &controllerState{
+		cityPath:              cityDir,
+		cfg:                   &config.City{Workspace: config.Workspace{Name: "city1"}},
+		editor:                configedit.NewEditor(fsys.OSFS{}, filepath.Join(cityDir, "city.toml")),
+		pokeCh:                make(chan struct{}, 1),
+		configDirty:           &atomic.Bool{},
+		configMutationBarrier: make(chan struct{}, 1),
+	}
+	wantErr := errors.New("fail after pack files were written")
+	err := cs.MutatePackConfig(context.Background(), func() error {
+		packTarget, resolveErr := fsys.ResolveSymlinks(fsys.OSFS{}, filepath.Join(cityDir, "pack.toml"))
+		if resolveErr != nil {
+			return resolveErr
+		}
+		if writeErr := fsys.WriteFileAtomic(fsys.OSFS{}, packTarget, []byte("partial pack\n"), 0o644); writeErr != nil {
+			return writeErr
+		}
+		if writeErr := packman.WriteLockfile(fsys.OSFS{}, cityDir, &packman.Lockfile{
+			Packs: map[string]packman.LockedPack{"example": {Version: "1.0.0", Commit: "abc"}},
+		}); writeErr != nil {
+			return writeErr
+		}
+		return wantErr
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("MutatePackConfig error = %v, want %v", err, wantErr)
+	}
+
+	for name, want := range originals {
+		link := filepath.Join(cityDir, name)
+		info, statErr := os.Lstat(link)
+		if statErr != nil {
+			t.Fatalf("Lstat %s: %v", name, statErr)
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("%s symlink was replaced by mode %v", name, info.Mode())
+		}
+		got, readErr := os.ReadFile(filepath.Join(checkoutDir, name))
+		if readErr != nil {
+			t.Fatalf("read %s target: %v", name, readErr)
+		}
+		if string(got) != string(want) {
+			t.Fatalf("%s target = %q, want original bytes %q", name, got, want)
+		}
+	}
+}
+
+func TestControllerStatePackConfigMutationRollsBackPartialCallbackWrite(t *testing.T) {
+	cityDir := t.TempDir()
+	originals := map[string][]byte{
+		"city.toml":  []byte("[workspace]\nname = \"city1\"\n"),
+		"pack.toml":  []byte("[pack]\nname = \"city1\"\nschema = 2\n"),
+		"packs.lock": []byte("original lock bytes\n"),
+	}
+	for name, content := range originals {
+		if err := os.WriteFile(filepath.Join(cityDir, name), content, 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	cs := &controllerState{
+		cityPath:              cityDir,
+		cfg:                   &config.City{Workspace: config.Workspace{Name: "city1"}},
+		editor:                configedit.NewEditor(fsys.OSFS{}, filepath.Join(cityDir, "city.toml")),
+		pokeCh:                make(chan struct{}, 1),
+		configDirty:           &atomic.Bool{},
+		configMutationBarrier: make(chan struct{}, 1),
+	}
+	wantErr := errors.New("import failed after writing manifest")
+	err := cs.MutatePackConfig(context.Background(), func() error {
+		for name := range originals {
+			if writeErr := os.WriteFile(filepath.Join(cityDir, name), []byte("partial "+name), 0o644); writeErr != nil {
+				return writeErr
+			}
+		}
+		return wantErr
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("MutatePackConfig error = %v, want %v", err, wantErr)
+	}
+	for name, want := range originals {
+		got, readErr := os.ReadFile(filepath.Join(cityDir, name))
+		if readErr != nil {
+			t.Fatalf("read restored %s: %v", name, readErr)
+		}
+		if string(got) != string(want) {
+			t.Fatalf("%s = %q, want original bytes %q", name, got, want)
+		}
+	}
+	if cs.configMutationPending.Load() || cs.pendingConfigRevision() != "" {
+		t.Fatal("failed pack mutation published a pending config revision")
+	}
+	if cs.configDirty.Load() {
+		t.Fatal("failed pack mutation marked config dirty")
+	}
+	select {
+	case <-cs.pokeCh:
+		t.Fatal("failed pack mutation poked the controller")
+	default:
+	}
+}
+
+func TestControllerStatePackConfigMutationRestoresAllFilesWhenRefreshRefuses(t *testing.T) {
+	cityDir := t.TempDir()
+	originals := map[string][]byte{
+		"city.toml":  []byte("[workspace]\nname = \"city1\"\n"),
+		"pack.toml":  []byte("[pack]\nname = \"city1\"\nschema = 2\n"),
+		"packs.lock": []byte("original lock bytes\n"),
+	}
+	for name, content := range originals {
+		if err := os.WriteFile(filepath.Join(cityDir, name), content, 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	cs := &controllerState{
+		cityPath:              cityDir,
+		cfg:                   &config.City{Workspace: config.Workspace{Name: "city1"}},
+		editor:                configedit.NewEditor(fsys.OSFS{}, filepath.Join(cityDir, "city.toml")),
+		pokeCh:                make(chan struct{}, 1),
+		configDirty:           &atomic.Bool{},
+		configMutationBarrier: make(chan struct{}, 1),
+	}
+	err := cs.MutatePackConfig(context.Background(), func() error {
+		if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte("partial pack"), 0o644); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(cityDir, "packs.lock"), []byte("partial lock"), 0o644); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("["), 0o644)
+	})
+	if err == nil || !strings.Contains(err.Error(), "refreshing updated city config") {
+		t.Fatalf("MutatePackConfig error = %v, want refresh refusal", err)
+	}
+	for name, want := range originals {
+		got, readErr := os.ReadFile(filepath.Join(cityDir, name))
+		if readErr != nil {
+			t.Fatalf("read restored %s: %v", name, readErr)
+		}
+		if string(got) != string(want) {
+			t.Fatalf("%s = %q, want original bytes %q", name, got, want)
+		}
+	}
+	if cs.configMutationPending.Load() || cs.pendingConfigRevision() != "" || cs.configDirty.Load() {
+		t.Fatal("refresh-refused pack mutation published config state")
+	}
+	select {
+	case <-cs.pokeCh:
+		t.Fatal("refresh-refused pack mutation poked the controller")
+	default:
+	}
+}
+
+func TestControllerStateConfigMutationBarrierCancelsWaiterAndRemainsReusable(t *testing.T) {
+	cs := &controllerState{
+		editor:                configedit.NewEditor(fsys.OSFS{}, filepath.Join(t.TempDir(), "city.toml")),
+		configMutationBarrier: make(chan struct{}, 1),
+	}
+	enteredMutation := make(chan struct{})
+	releaseMutation := make(chan struct{})
+	mutationDone := make(chan error, 1)
+	go func() {
+		mutationDone <- cs.MutatePackConfig(context.Background(), func() error {
+			close(enteredMutation)
+			<-releaseMutation
+			return nil
+		})
+	}()
+	<-enteredMutation
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := cs.MutatePackConfig(canceled, func() error { return nil }); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled pack-mutation waiter error = %v, want context.Canceled", err)
+	}
+	close(releaseMutation)
+	if err := <-mutationDone; err != nil {
+		t.Fatalf("held pack mutation: %v", err)
+	}
+	if err := cs.MutatePackConfig(context.Background(), func() error { return nil }); err != nil {
+		t.Fatalf("barrier was not reusable after cancellation: %v", err)
+	}
+}
+
+func TestControllerStatePackConfigMutationBlocksOrdinaryMutationUntilCommit(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		cs := &controllerState{
+			editor:                configedit.NewEditor(fsys.OSFS{}, filepath.Join(t.TempDir(), "city.toml")),
+			configMutationBarrier: make(chan struct{}, 1),
+		}
+		packEntered := make(chan struct{})
+		releasePack := make(chan struct{})
+		packDone := make(chan error, 1)
+		go func() {
+			packDone <- cs.MutatePackConfig(context.Background(), func() error {
+				close(packEntered)
+				<-releasePack
+				return nil
+			})
+		}()
+		<-packEntered
+
+		var ordinaryEntered atomic.Bool
+		ordinaryDone := make(chan error, 1)
+		go func() {
+			ordinaryDone <- cs.mutateAndPoke(func(*configedit.Editor) error {
+				ordinaryEntered.Store(true)
+				return nil
+			})
+		}()
+		synctest.Wait()
+		enteredBeforeCommit := ordinaryEntered.Load()
+
+		close(releasePack)
+		synctest.Wait()
+		if err := <-packDone; err != nil {
+			t.Fatalf("pack mutation: %v", err)
+		}
+		if err := <-ordinaryDone; err != nil {
+			t.Fatalf("ordinary mutation: %v", err)
+		}
+		if enteredBeforeCommit {
+			t.Fatal("ordinary mutation entered while a pack generation was in flight")
+		}
+	})
 }
 
 func TestConfigMutationSnapshotRestoresSymlinkedAgentTomlTarget(t *testing.T) {

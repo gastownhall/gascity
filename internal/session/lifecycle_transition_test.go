@@ -338,8 +338,10 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 		{
 			name:  "close",
 			patch: ClosePatch(now, "orphaned"),
+			// Terminal close clears transient drain-ack-stop-pending ownership.
 			want: MetadataPatch{
 				"state":        "orphaned",
+				"state_reason": "",
 				"close_reason": "session orphaned: configured agent removed",
 				"closed_at":    now.Format(time.RFC3339),
 				"synced_at":    now.Format(time.RFC3339),
@@ -676,6 +678,21 @@ func TestDrainAckStopPendingPatchOwnsDurableStopPendingMetadata(t *testing.T) {
 	}
 }
 
+func TestAgentDrainAckStopPendingPatchPersistsExactRequesterProvenance(t *testing.T) {
+	now := time.Date(2026, 5, 18, 4, 15, 0, 0, time.UTC)
+	patch := AgentDrainAckStopPendingPatch(now, "session-1", "instance-1")
+
+	for key, want := range map[string]string{
+		DrainAckSourceMetadataKey:                 DrainAckSourceAgentValue,
+		DrainAckRequesterSessionIDMetadataKey:     "session-1",
+		DrainAckRequesterInstanceTokenMetadataKey: "instance-1",
+	} {
+		if got := patch[key]; got != want {
+			t.Fatalf("patch[%q] = %q, want %q", key, got, want)
+		}
+	}
+}
+
 func TestDrainCompletionPatchesClearStopPendingReason(t *testing.T) {
 	now := time.Date(2026, 5, 18, 4, 15, 0, 0, time.UTC)
 	tests := []struct {
@@ -914,5 +931,15 @@ func TestClosePatchKeepsShortStateCode(t *testing.T) {
 	if trimmed := strings.TrimSpace(patch["close_reason"]); len(trimmed) < 20 {
 		t.Errorf("close_reason = %q (%d trimmed chars); want >=20 to satisfy validator",
 			patch["close_reason"], len(trimmed))
+	}
+}
+
+func TestClosePatchClearsTransientStateReason(t *testing.T) {
+	merged := ClosePatch(time.Now().UTC(), "drained").Apply(map[string]string{
+		"state":        string(StateDraining),
+		"state_reason": DrainAckStopPendingReason,
+	})
+	if got := merged["state_reason"]; got != "" {
+		t.Fatalf("state_reason = %q, want terminal close to clear transient reason", got)
 	}
 }

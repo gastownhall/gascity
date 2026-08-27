@@ -773,6 +773,7 @@ gc config show --validate
 gc config show --provenance
 gc config show --json
 gc config show -f overlay.toml
+gc config show --validate --root-file next-city.toml
 ```
 
 | Flag | Type | Default | Description |
@@ -780,6 +781,7 @@ gc config show -f overlay.toml
 | `-f`, `--file` | stringArray |  | additional config files to layer (can be repeated) |
 | `--json` | bool |  | emit JSON |
 | `--provenance` | bool |  | show where each config element originated |
+| `--root-file` | string |  | candidate city root to validate (requires --validate) |
 | `--validate` | bool |  | validate config and exit (0 = valid, 1 = errors) |
 
 ## gc context

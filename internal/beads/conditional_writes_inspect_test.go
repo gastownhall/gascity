@@ -40,6 +40,12 @@ func TestInspectConditionalWritesIsSideEffectFree(t *testing.T) {
 	if !insp.Capable {
 		t.Error("unprobed store with no definitive incapable verdict should report Capable=true")
 	}
+	// Implements is what lets the status wire state a class's fencing
+	// REQUIREMENT without paying the probe tax: it must be answered by the
+	// type assertion alone, which the zero-subprocess assertion above covers.
+	if !insp.Implements {
+		t.Error("BdStore implements ConditionalWriter; the inspection says it does not")
+	}
 
 	// The memo must be untouched: the first real capability check still probes.
 	s.condWriteMu.Lock()

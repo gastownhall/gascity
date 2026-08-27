@@ -49,15 +49,19 @@ import (
 // They stand up a city that has really converged onto a binding and enter
 // through the real constructors — resolveCLIStorageRoutes for the one-shot side
 // (TestOneShotCLIWritesEmitBeadEventsOnAMigratedCity) and openStorageRoutes for
-// the controller's (TestControllerRoutesFromOpenStorageRoutesCarryNoEmitTarget)
+// the controller's (TestOpenStorageRoutesInstallsNoEmitTarget)
 // — so a mutation at either injection point reddens a DIFFERENT one of them.
 // The lesson generalizes: a gate that constructs the thing under test cannot
 // also be the gate that proves it is constructed.
 
 // splitClassRoutes builds the routes a split city resolves: every
 // infrastructure class served by one binding store, work left alone. It is the
-// shape openStorageRoutes produces, so a test that does NOT call
-// withCLIEmission is holding the CONTROLLER's routes.
+// shape openStorageRoutes produces — which is NOT the shape the controller
+// serves: newCityRuntime wires withControllerEmission(p.Rec) on top of it
+// (city_runtime.go), so unwrapped routes stand for the injection point's INPUT,
+// never for the controller's routes. The controller's own routes are asserted
+// through newCityRuntime in class_store_emit_controller_test.go
+// (TestControllerRoutesCarryAnEmitTarget).
 func splitClassRoutes(class beads.Store) *storageRoutes {
 	routes := &storageRoutes{stores: make(map[coordclass.Class]beads.Store), binding: "infra"}
 	for _, c := range coordclass.Classes() {
@@ -223,94 +227,35 @@ func closeThroughClassResolver(resolve func(*storageRoutes, beads.Store, *config
 	}
 }
 
-// AtomicConditionalCloserFor is a hard capability gate, not a rollout seam. The
-// emitting class-store wrapper carries CloseWithMetadataIfMatch structurally for
-// every engine — TestEmittingClassStoreKeepsEveryEngineCapability forces that,
-// because *NativeDoltStore has it — so a bare type assertion would advertise
-// atomic close even over a backing (the sqlite CLI engine) that cannot honor it.
-// The wrapper's AtomicConditionalCloserHandle keeps discovery honest: yes only
-// when the resolved backing truly provides atomic close, and the closer it hands
-// back is the emitting wrapper itself, so a DISCOVERED atomic close still appends
-// bead.closed rather than silently going dark on the binding.
-func TestEmittingClassStoreAtomicCloseHonorsBackingCapability(t *testing.T) {
-	t.Run("an atomic backing yields an emitting closer that appends bead.closed", func(t *testing.T) {
-		cityPath := t.TempDir()
-		leaf := beads.NewAtomicCloseMemStore()
-		wrapped := splitClassRoutes(leaf).withCLIEmission(cityPath).stores[coordclass.ClassGraph]
-
-		closer, ok := beads.AtomicConditionalCloserFor(wrapped)
-		if !ok {
-			t.Fatal("AtomicConditionalCloserFor(wrapper over an atomic backing) = unavailable, want the emitting wrapper's closer")
-		}
-
-		bead := seedClassBead(t, leaf, "atomic-close")
-		if got := beadEvents(readCityJournal(t, cityPath)); len(got) != 0 {
-			t.Fatalf("seeding the leaf emitted %d bead event(s); the fixture must be silent", len(got))
-		}
-
-		closed, err := closer.CloseWithMetadataIfMatch(bead.ID, bead.Revision, map[string]string{"state": "drained"})
-		if err != nil {
-			t.Fatalf("CloseWithMetadataIfMatch: %v", err)
-		}
-		if !strings.EqualFold(closed.Status, "closed") || closed.Metadata["state"] != "drained" {
-			t.Fatalf("returned bead = %#v, want a closed row carrying the merged metadata", closed)
-		}
-
-		got := beadEvents(readCityJournal(t, cityPath))
-		if len(got) != 1 {
-			t.Fatalf("a discovered atomic close appended %d bead event(s), want exactly 1: %s", len(got), eventSummary(got))
-		}
-		if got[0].Type != events.BeadClosed || got[0].Subject != bead.ID {
-			t.Errorf("event = %q on %q, want %q on %q", got[0].Type, got[0].Subject, events.BeadClosed, bead.ID)
-		}
-		snapshot, ok := beads.DecodeBeadEventPayload(got[0].Payload)
-		if !ok || !strings.EqualFold(snapshot.Status, "closed") {
-			t.Errorf("payload = %s, want a decodable closed snapshot", got[0].Payload)
-		}
-	})
-
-	t.Run("a non-atomic backing refuses discovery even though the wrapper carries the method", func(t *testing.T) {
-		cityPath := t.TempDir()
-		wrapped := splitClassRoutes(beads.NewMemStore()).withCLIEmission(cityPath).stores[coordclass.ClassGraph]
-
-		if _, ok := any(wrapped).(beads.AtomicConditionalCloser); !ok {
-			t.Fatal("the emitting wrapper must carry CloseWithMetadataIfMatch structurally; the engine-parity gate requires it")
-		}
-		if closer, ok := beads.AtomicConditionalCloserFor(wrapped); ok || closer != nil {
-			t.Fatalf("AtomicConditionalCloserFor(wrapper over a non-atomic backing) = (%v, %v), want (nil, false): the seam is a hard capability gate, and a bare type assertion would answer yes here", closer, ok)
-		}
-	})
-}
-
-// GATE 2 (the control). The CONTROLLER's routes — the ones openStorageRoutes
-// builds, which never carry an emit target — stay silent under a
-// reconcile-shaped absorption, even when the resolver is handed a live
-// recorder. The controller reaches its own emission through the CachingStore;
-// a second emitter on this path is a double-emit, and on the reconcile path it
-// is the cache-reconcile flood.
+// GATE 2. A wired class store appends exactly ONE row per mutation, and
+// passing a live recorder to the class RESOLVER appends none.
 //
-// The control is falsifiable rather than vacuous: the same mutations through
-// the CLI-emitting twin of the same routes DO land in the same journal, so a
-// fixture that could not observe an event fails here before it can certify
-// silence.
-func TestControllerClassRoutesStayEventSilentUnderReconcileShapedWrites(t *testing.T) {
+// Two claims that have to hold together. The first is the double-emit guard the
+// per-process rule exists for: whatever the reconcile shape does to a relocated
+// class — the runtime re-writing rows it just read — it must not turn one
+// mutation into two rows, because on the reconcile path that is a flood. The
+// second is where emission is DECIDED: on the routes, once, by the process that
+// opened them. A recorder handed to resolveGraphStore is signature parity and
+// nothing else, and a build in which it started meaning something would be a
+// second, per-call-site injector.
+func TestWiredClassRoutesEmitExactlyOnceAndTheResolverArgumentDoesNot(t *testing.T) {
 	cityPath := t.TempDir()
 	leaf := beads.NewMemStore()
-	controllerRoutes := splitClassRoutes(leaf)
 
-	if controllerRoutes.emitCityPath != "" {
-		t.Fatalf("controller-shaped routes carry emit target %q; only the one-shot funnel may set one", controllerRoutes.emitCityPath)
-	}
-
-	// A live recorder, exactly as the controller passes one to the resolvers.
+	// A live recorder, exactly as the controller passes one to the resolvers —
+	// on routes nobody wired.
 	rec, err := events.NewFileRecorder(cityJournalPath(cityPath), io.Discard)
 	if err != nil {
 		t.Fatalf("opening the city journal: %v", err)
 	}
 	t.Cleanup(func() { _ = rec.Close() })
 
+	unwired := splitClassRoutes(leaf)
+	if unwired.emit != nil {
+		t.Fatalf("routes nobody wired carry emit target %T", unwired.emit)
+	}
 	absorbed := seedClassBead(t, leaf, "absorb")
-	store := resolveGraphStore(controllerRoutes, beads.NewMemStore(), nil, cityPath, rec)
+	store := resolveGraphStore(unwired, beads.NewMemStore(), nil, cityPath, rec)
 
 	// The reconcile shape: the runtime re-writes rows it just read.
 	closed := "closed"
@@ -320,43 +265,55 @@ func TestControllerClassRoutesStayEventSilentUnderReconcileShapedWrites(t *testi
 	if err := store.SetMetadata(absorbed.ID, "gc.absorbed", "1"); err != nil {
 		t.Fatalf("reconcile-shaped metadata write: %v", err)
 	}
-
 	if got := beadEvents(readCityJournal(t, cityPath)); len(got) != 0 {
-		t.Fatalf("the controller's class routes appended %d bead event(s), want 0: %s", len(got), eventSummary(got))
+		t.Fatalf("a recorder passed to the class resolver appended %d bead event(s), want 0: emission is decided on the routes, not per call site: %s", len(got), eventSummary(got))
 	}
 
-	// The control's own control: prove this fixture CAN see an emission, so the
-	// zero above is a fact about the controller path and not about the harness.
+	// Wired, the same mutations land — once each, never twice.
 	emitting := splitClassRoutes(leaf).withCLIEmission(cityPath)
 	observable := seedClassBead(t, leaf, "observable")
 	if err := resolveGraphStore(emitting, beads.NewMemStore(), nil, cityPath, nil).Close(observable.ID); err != nil {
-		t.Fatalf("closing through the emitting twin: %v", err)
+		t.Fatalf("closing through the wired routes: %v", err)
 	}
 	witness := beadEvents(readCityJournal(t, cityPath))
 	if len(witness) != 1 || witness[0].Subject != observable.ID {
-		t.Fatalf("the emitting twin appended %d bead event(s) for %s, want exactly 1: this fixture cannot observe emission, so the silence assertion above proves nothing", len(witness), observable.ID)
+		t.Fatalf("wired routes appended %d bead event(s) for %s, want exactly 1: %s", len(witness), observable.ID, eventSummary(witness))
 	}
 }
 
-// The structural half of gate 2: the emit target is injected in exactly one
-// place, ON the resolved routes, WITH the city path. "The controller never
-// emits" is a claim about the call graph, and a second injection site is how a
-// claim like that stops being true without anybody noticing.
+// The structural half of gate 2: each process injects its emit target in
+// exactly one place, ON the resolved routes, WITH the thing that process holds.
+// "Every process wires one, and no process wires two" is a claim about the call
+// graph, and it stops being true without anybody noticing.
 //
 // It checks the argument and the receiver, not just the name, because the first
 // cut of this guard checked neither and a mutant survived it: rewriting the
 // shipped call as withCLIEmission("") kept it green while production emission
 // was entirely dead (the empty path early-returns unwrapped). A syntactic guard
 // a semantic mutant walks past is worse than none, since it reads as coverage.
-// The gates that actually prove the wiring are the two production-seam tests
-// below; this one keeps the SHAPE from drifting.
-func TestClassStoreEmitTargetHasExactlyOneInjectionSite(t *testing.T) {
+// The gates that actually prove the wiring are the production-seam tests below
+// and in class_store_emit_controller_test.go; this one keeps the SHAPE from
+// drifting.
+func TestClassStoreEmitTargetIsInjectedOncePerProcess(t *testing.T) {
+	injectors := map[string]struct {
+		file  string // the one production file that may call it
+		calls int    // how many times, there
+		arg   string // the identifier the argument must resolve through
+	}{
+		"withCLIEmission":        {file: "cli_storage_routes.go", calls: 1, arg: "cityPath"},
+		"withControllerEmission": {file: "city_runtime.go", calls: 1, arg: "p"},
+		// The shared body takes an already-constructed target, so anything
+		// calling it outside its own two wrappers is a process-level injector
+		// by another name.
+		"withEmission": {file: "class_store_emit.go", calls: 2},
+	}
+
 	entries, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatalf("reading cmd/gc: %v", err)
 	}
 	fset := token.NewFileSet()
-	sites := map[string]int{}
+	sites := map[string]map[string]int{}
 	var shape []string
 	for _, entry := range entries {
 		name := entry.Name()
@@ -373,34 +330,52 @@ func TestClassStoreEmitTargetHasExactlyOneInjectionSite(t *testing.T) {
 				return true
 			}
 			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok || sel.Sel == nil || sel.Sel.Name != "withCLIEmission" {
+			if !ok || sel.Sel == nil {
 				return true
 			}
-			sites[name]++
-			// The receiver must be the routes value the gate just resolved,
-			// and the argument must be the city path the funnel was asked
-			// about — never a literal, which is how an injection gets
-			// silently neutered while still reading as one.
+			injector, watched := injectors[sel.Sel.Name]
+			if !watched {
+				return true
+			}
+			if sites[sel.Sel.Name] == nil {
+				sites[sel.Sel.Name] = map[string]int{}
+			}
+			sites[sel.Sel.Name][name]++
+			// The receiver must be the routes value the caller just resolved,
+			// and the argument must be what that process actually holds —
+			// never a literal, which is how an injection gets silently neutered
+			// while still reading as one.
 			if _, ok := sel.X.(*ast.Ident); !ok {
-				shape = append(shape, fmt.Sprintf("%s: receiver is %T, want the resolved routes identifier", name, sel.X))
+				shape = append(shape, fmt.Sprintf("%s: %s receiver is %T, want the resolved routes identifier", name, sel.Sel.Name, sel.X))
+			}
+			if injector.arg == "" {
+				return true
 			}
 			if len(call.Args) != 1 {
-				shape = append(shape, fmt.Sprintf("%s: %d argument(s), want exactly the city path", name, len(call.Args)))
+				shape = append(shape, fmt.Sprintf("%s: %s takes %d argument(s), want exactly one", name, sel.Sel.Name, len(call.Args)))
 				return true
 			}
-			arg, ok := call.Args[0].(*ast.Ident)
+			root := call.Args[0]
+			if field, ok := root.(*ast.SelectorExpr); ok {
+				root = field.X
+			}
+			arg, ok := root.(*ast.Ident)
 			if !ok {
-				shape = append(shape, fmt.Sprintf("%s: argument is %T, want the cityPath identifier (a literal cannot be the city the funnel was asked about)", name, call.Args[0]))
+				shape = append(shape, fmt.Sprintf("%s: %s argument is %T, want %s (a literal cannot be what the process holds)", name, sel.Sel.Name, call.Args[0], injector.arg))
 				return true
 			}
-			if arg.Name != "cityPath" {
-				shape = append(shape, fmt.Sprintf("%s: argument is %q, want cityPath", name, arg.Name))
+			if arg.Name != injector.arg {
+				shape = append(shape, fmt.Sprintf("%s: %s argument resolves through %q, want %q", name, sel.Sel.Name, arg.Name, injector.arg))
 			}
 			return true
 		})
 	}
-	if len(sites) != 1 || sites["cli_storage_routes.go"] != 1 {
-		t.Fatalf("withCLIEmission is called from %v, want exactly one call in cli_storage_routes.go: the controller path is untouched only while the one-shot funnel is the sole injector", sites)
+
+	for injector, want := range injectors {
+		got := sites[injector]
+		if len(got) != 1 || got[want.file] != want.calls {
+			t.Errorf("%s is called from %v, want exactly %d call(s) in %s", injector, got, want.calls, want.file)
+		}
 	}
 	if len(shape) > 0 {
 		t.Fatalf("the injection does not have the shape that makes it one:\n  %s", strings.Join(shape, "\n  "))
@@ -744,11 +719,9 @@ func TestClassStoreEmissionCoversConditionalRelease(t *testing.T) {
 	}
 }
 
-// A landed atomic fenced close — merge metadata and close in one revision-guarded
-// transaction — is a terminal transition a fold has to see. The capability is
-// discovered through AtomicConditionalCloserFor, and it must resolve to the
-// EMITTING wrapper: a bare backing would close silently and leave the run view
-// rendering the step running forever, the exact silence this seam ends.
+// The atomic fenced close is the terminal write the drain path uses, and it is
+// the one mutation that commits metadata and the status flip together. A fold
+// that missed it would keep showing a running step whose row is closed.
 func TestClassStoreEmissionCoversAtomicMetadataClose(t *testing.T) {
 	cityPath := t.TempDir()
 	leaf := beads.NewAtomicCloseMemStore()
@@ -796,12 +769,67 @@ func TestClassStoreEmissionCoversAtomicMetadataClose(t *testing.T) {
 	}
 }
 
-// Atomic close is a hard capability gate, not a rollout seam. The wrapper is
-// forced to carry CloseWithMetadataIfMatch structurally for every engine
-// (TestEmittingClassStoreKeepsEveryEngineCapability), so a bare type assertion
-// would advertise the capability even over a backing that cannot honor the
-// all-or-nothing close. AtomicConditionalCloserFor must consult the resolved
-// backing and answer no when it lacks the atomic terminal write.
+// AtomicConditionalCloserFor is a hard capability gate, not a rollout seam. The
+// emitting class-store wrapper carries CloseWithMetadataIfMatch structurally for
+// every engine — TestEmittingClassStoreKeepsEveryEngineCapability forces that,
+// because *NativeDoltStore has it — so a bare type assertion would advertise
+// atomic close even over a backing that cannot honor it. The wrapper's
+// AtomicConditionalCloserHandle keeps discovery honest: yes only when the
+// resolved backing truly provides atomic close, and the closer it hands back is
+// the emitting wrapper itself, so a DISCOVERED atomic close still appends
+// bead.closed rather than silently going dark on the binding.
+func TestEmittingClassStoreAtomicCloseHonorsBackingCapability(t *testing.T) {
+	t.Run("an atomic backing yields an emitting closer that appends bead.closed", func(t *testing.T) {
+		cityPath := t.TempDir()
+		leaf := beads.NewAtomicCloseMemStore()
+		wrapped := splitClassRoutes(leaf).withCLIEmission(cityPath).stores[coordclass.ClassGraph]
+
+		closer, ok := beads.AtomicConditionalCloserFor(wrapped)
+		if !ok {
+			t.Fatal("AtomicConditionalCloserFor(wrapper over an atomic backing) = unavailable, want the emitting wrapper's closer")
+		}
+
+		bead := seedClassBead(t, leaf, "atomic-close")
+		if got := beadEvents(readCityJournal(t, cityPath)); len(got) != 0 {
+			t.Fatalf("seeding the leaf emitted %d bead event(s); the fixture must be silent", len(got))
+		}
+
+		closed, err := closer.CloseWithMetadataIfMatch(bead.ID, bead.Revision, map[string]string{"state": "drained"})
+		if err != nil {
+			t.Fatalf("CloseWithMetadataIfMatch: %v", err)
+		}
+		if !beadStatusIsClosed(closed.Status) || closed.Metadata["state"] != "drained" {
+			t.Fatalf("returned bead = %#v, want a closed row carrying the merged metadata", closed)
+		}
+
+		got := beadEvents(readCityJournal(t, cityPath))
+		if len(got) != 1 {
+			t.Fatalf("a discovered atomic close appended %d bead event(s), want exactly 1: %s", len(got), eventSummary(got))
+		}
+		if got[0].Type != events.BeadClosed || got[0].Subject != bead.ID {
+			t.Errorf("event = %q on %q, want %q on %q", got[0].Type, got[0].Subject, events.BeadClosed, bead.ID)
+		}
+		snapshot, ok := beads.DecodeBeadEventPayload(got[0].Payload)
+		if !ok || !beadStatusIsClosed(snapshot.Status) {
+			t.Errorf("payload = %s, want a decodable closed snapshot", got[0].Payload)
+		}
+	})
+
+	t.Run("a non-atomic backing refuses discovery even though the wrapper carries the method", func(t *testing.T) {
+		cityPath := t.TempDir()
+		wrapped := splitClassRoutes(beads.NewMemStore()).withCLIEmission(cityPath).stores[coordclass.ClassGraph]
+
+		if _, ok := any(wrapped).(beads.AtomicConditionalCloser); !ok {
+			t.Fatal("the emitting wrapper must carry CloseWithMetadataIfMatch structurally; the engine-parity gate requires it")
+		}
+		if closer, ok := beads.AtomicConditionalCloserFor(wrapped); ok || closer != nil {
+			t.Fatalf("AtomicConditionalCloserFor(wrapper over a non-atomic backing) = (%v, %v), want (nil, false): the seam is a hard capability gate, and a bare type assertion would answer yes here", closer, ok)
+		}
+	})
+}
+
+// The same refusal through the production resolver, not just the raw route map:
+// resolveGraphStore is what every CLI call site actually holds.
 func TestEmittingClassStoreRefusesAtomicCloseOverANonAtomicBacking(t *testing.T) {
 	cityPath := t.TempDir()
 	// Plain MemStore deliberately does not expose the atomic terminal close.
@@ -1008,14 +1036,20 @@ func TestOneShotCLIWritesEmitBeadEventsOnAMigratedCity(t *testing.T) {
 }
 
 // PRODUCTION SEAM, gate 2 (the control). Routes built by the REAL
-// openStorageRoutes — the controller's constructor — carry no emit target and
-// serve no emitting store, so a wrap added there is caught here rather than
-// discovered as a double row in a city's log.
+// openStorageRoutes carry no emit target of their own: opening a binding does
+// not decide who will record for it, and the seam has no recorder to give.
+//
+// This is the control for the wiring the two processes install afterwards. If
+// the open seam emitted by itself, "the controller wired it" would be
+// unfalsifiable, and a process that forgot would look identical to one that
+// did — which is the state a split city's controller was actually in
+// (ga-f7v2ft.161 Q4). Routes that reach a running process still in this shape
+// are what preflightStoreContract reports.
 //
 // The type assertion is the load-bearing half. A behavioral "the city journal
 // stayed empty" would pass a mutant that wrapped with the BINDING root instead
 // of the city path, because those events land somewhere this test never looks.
-func TestControllerRoutesFromOpenStorageRoutesCarryNoEmitTarget(t *testing.T) {
+func TestOpenStorageRoutesInstallsNoEmitTarget(t *testing.T) {
 	cityPath, cfg := migratedOneShotCLICity(t)
 	captureCLIStorageStderr(t)
 
@@ -1029,30 +1063,30 @@ func TestControllerRoutesFromOpenStorageRoutesCarryNoEmitTarget(t *testing.T) {
 	}
 	defer routes.close() //nolint:errcheck // the test asserts on the routes, not on the close
 
-	if routes.emitCityPath != "" {
-		t.Errorf("openStorageRoutes set an emit target %q; only the one-shot funnel may set one", routes.emitCityPath)
+	if routes.emit != nil {
+		t.Errorf("openStorageRoutes set an emit target %T; the process that serves the routes installs one, so this seam cannot", routes.emit)
 	}
 	served := 0
 	for class, store := range routes.stores {
 		served++
 		if _, emitting := store.(*emittingClassStore); emitting {
-			t.Errorf("the controller's %s store is an emitting wrapper; the controller emits through its own CachingStore and a second emitter is a double row in the log", class)
+			t.Errorf("the %s store came out of the open seam already wrapped; wrapping is a process's decision and wrapping twice is a double row in the log", class)
 		}
 	}
 	if served == 0 {
-		t.Fatal("the controller's routes serve no class; this gate has lost its subject")
+		t.Fatal("the routes serve no class; this gate has lost its subject")
 	}
 
 	// And behaviorally, for the emit target this file would use.
 	store := resolveGraphStore(routes, beads.NewMemStore(), cfg, cityPath, nil)
-	step, err := store.Create(beads.Bead{Title: "controller write", Type: "task", Status: "open"})
+	step, err := store.Create(beads.Bead{Title: "unwired write", Type: "task", Status: "open"})
 	if err != nil {
-		t.Fatalf("creating through the controller's class store: %v", err)
+		t.Fatalf("creating through the unwired class store: %v", err)
 	}
 	if err := store.Close(step.ID); err != nil {
-		t.Fatalf("closing through the controller's class store: %v", err)
+		t.Fatalf("closing through the unwired class store: %v", err)
 	}
 	if got := beadEvents(readCityJournal(t, cityPath)); len(got) != 0 {
-		t.Fatalf("the controller's class routes appended %d bead event(s), want 0: %s", len(got), eventSummary(got))
+		t.Fatalf("routes nobody wired appended %d bead event(s), want 0: %s", len(got), eventSummary(got))
 	}
 }

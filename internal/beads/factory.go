@@ -22,11 +22,15 @@ const (
 	BeadsStoreNameExecStore = "ExecStore"
 	// BeadsStoreNameNativeDoltStore is the diagnostic store name for native Dolt stores.
 	BeadsStoreNameNativeDoltStore = "NativeDoltStore"
+	// BeadsStoreNameSQLiteStore is the diagnostic store name for the embedded
+	// SQLite store a storage binding serves relocated classes from.
+	BeadsStoreNameSQLiteStore = "SQLiteStore"
 
 	storeNameBdStore         = BeadsStoreNameBdStore
 	storeNameFileStore       = BeadsStoreNameFileStore
 	storeNameExecStore       = BeadsStoreNameExecStore
 	storeNameNativeDoltStore = BeadsStoreNameNativeDoltStore
+	storeNameSQLiteStore     = BeadsStoreNameSQLiteStore
 	nativeForceFallbackEnv   = "GC_BEADS_FORCE_FALLBACK"
 	nativeForceFallbackGate  = "force_fallback"
 	nativeHooksGate          = "bd_hooks"

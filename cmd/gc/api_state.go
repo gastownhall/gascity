@@ -35,6 +35,7 @@ import (
 	"github.com/gastownhall/gascity/internal/orderdiscovery"
 	"github.com/gastownhall/gascity/internal/orderdispatch"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/rig"
 	"github.com/gastownhall/gascity/internal/rollout"
@@ -48,13 +49,10 @@ import (
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
-// cacheReconcileActor is the event actor the controller stamps on bead events
-// emitted by a CachingStore's reconciliation pass, distinguishing the cache's
-// own snapshots from foreign writes delivered by a bd hook.
-const cacheReconcileActor = "cache-reconcile"
+var errBeadEventIdentityMismatch = errors.New("bead event subject does not match payload identity")
 
 // controllerState implements api.State, api.StateMutator, and
-// api.ConfigWriteSerializer.
+// api.PackConfigMutationTransaction.
 // Protected by an RWMutex for hot-reload: readers take RLock,
 // the controller loop takes Lock when updating cfg/sp/stores.
 type controllerState struct {
@@ -101,7 +99,6 @@ type controllerState struct {
 	updateMu               sync.Mutex                       // serializes rebuild+swap so stale reloads cannot overtake newer mutations
 	beadEventStartSeq      uint64
 	beadEventStartSeqOK    bool // false when LatestSeq errored at construction; 0+true = genuinely empty log
-
 	// completionsDeltaIndex is the tick delta pass's warm completion-fact
 	// idempotency record: loaded from the journal once, then kept current by the
 	// same journal feed that names the lane's roots. The off-tick convergence
@@ -119,6 +116,13 @@ type controllerState struct {
 	// until the loop observes and applies the same or a newer on-disk config.
 	configMutationPending atomic.Bool
 	pendingConfigRev      string
+
+	// configMutationBarrier serializes each durable config generation from its
+	// rollback snapshot through controller publication. Runtime candidate loads
+	// take the same barrier without waiting, so the reconciler never observes a
+	// tentative multi-file generation or stalls behind a slow import.
+	configMutationBarrierMu sync.Mutex
+	configMutationBarrier   chan struct{}
 
 	// rolloutFlags is the boot-latched rollout-gate snapshot: written once in
 	// newControllerState, never reassigned (reads are lock-free by construction,
@@ -140,11 +144,66 @@ type controllerState struct {
 	// rolloutLogf, when non-nil, receives noteRolloutDrift's transition lines
 	// (tests capture it); nil falls back to os.Stderr via rolloutWarnf.
 	rolloutLogf func(format string, args ...any)
+
+	// sessionStartGeneration binds the exact-start controller's config,
+	// provider, and session store into one snapshot. The store generation only
+	// advances when the store swap succeeds; a failed reopen therefore makes
+	// sessionStartSnapshot fail closed instead of pairing a new config/provider
+	// with the previous store accidentally.
+	sessionStartGeneration      uint64
+	sessionStartStoreGeneration uint64
+
+	// sessionStartEventAdmission is installed only after the keyed controller
+	// is accepting work. Add and drain are serialized under mu so shutdown can
+	// remove admission, wait for callbacks already in flight, and only then
+	// stop the controller and stores.
+	sessionStartEventAdmission         func(string)
+	sessionStartEventAdmissionStopping bool
+	sessionStartEventAdmissionWG       sync.WaitGroup
+
+	// readyRoutedWorkEventAdmission reports an exact, cache-certified pool
+	// demand contribution before upgrading the same event to an immediate
+	// legacy tick. It is installed only while keyed session-start ownership is
+	// active and drained before stores close.
+	readyRoutedWorkEventAdmission         func(readyRoutedWorkDemandContribution)
+	readyRoutedWorkEventAdmissionStopping bool
+	readyRoutedWorkEventAdmissionWG       sync.WaitGroup
+
+	// sessionWaitShadowAdmission is a read-only, joined refresh callback for
+	// the private dependency-wait index. Events only mark the projection
+	// pending; the callback rebuilds from the observed cache.
+	sessionWaitShadowAdmission         func() sessionWaitShadowRefreshResult
+	sessionWaitPrePokeAdmission        func(events.Event)
+	sessionWaitShadowMayContain        func(string) bool
+	sessionWaitShadowProducerAdmission func(sessionWaitDependencyProducerRequest)
+	sessionWaitShadowAdmissionStopping bool
+	sessionWaitShadowAdmissionWG       sync.WaitGroup
+	// sessionWaitDependencyVisibilityMu makes a bead-event cache mutation and
+	// its exact dependency-wait reservation one visibility boundary for legacy
+	// reconciliation. Event application takes the writer side; a legacy session
+	// reconcile retains the reader side through planning and admission.
+	sessionWaitDependencyVisibilityMu sync.RWMutex
+	sessionWaitShadowPending          bool
+	sessionWaitShadowGeneration       uint64
+	sessionWaitShadowPendingRequests  map[string]sessionWaitDependencyProducerRequest
+	sessionWaitShadowPendingOverflow  bool
+
+	// sessionStartLeaseMu fences state swaps against exact-start work that has
+	// captured the previous generation. New leases fail fast while a swap is
+	// pending; the swap waits for existing leases before replacing or closing
+	// their store/provider/config generation.
+	sessionStartLeaseMu       sync.Mutex
+	sessionStartLeases        int
+	sessionStartSwapPending   bool
+	sessionStartLeasesDrained chan struct{}
+	sessionStartSwapDone      chan struct{}
 }
 
 var controllerStateInitRigDirIfReady = initDirIfReady
 
 var beadEventWatcherRetryDelay = time.Second
+
+var errConfigMutationInProgress = errors.New("config mutation in progress; reload retry scheduled")
 
 // newControllerStateOpenCityStore opens the city-level bead store for
 // newControllerState. Test code can swap this to return an in-memory store
@@ -225,21 +284,23 @@ func newControllerStateWithRoutes(
 		fmt.Fprintf(os.Stderr, "api: rollout gates: %v (using zero Flags; legacy paths)\n", rolloutErr)
 	}
 	cs := &controllerState{
-		cfg:                 cfg,
-		sp:                  sp,
-		cacheCtx:            ctx,
-		storageRoutes:       routes,
-		eventProv:           ep,
-		usageSink:           usageSinkForCity(cfg, cityPath),
-		editor:              configedit.NewEditor(fsys.OSFS{}, tomlPath),
-		cityName:            cityName,
-		cityPath:            cityPath,
-		version:             version,
-		startedAt:           time.Now(),
-		adapterReg:          extmsg.NewAdapterRegistry(),
-		beadEventStartSeq:   beadEventStartSeq,
-		beadEventStartSeqOK: beadEventStartSeqOK,
-		rolloutFlags:        rolloutFlags,
+		cfg:                    cfg,
+		sp:                     sp,
+		cacheCtx:               ctx,
+		storageRoutes:          routes,
+		eventProv:              ep,
+		usageSink:              usageSinkForCity(cfg, cityPath),
+		editor:                 configedit.NewEditor(fsys.OSFS{}, tomlPath),
+		cityName:               cityName,
+		cityPath:               cityPath,
+		version:                version,
+		startedAt:              time.Now(),
+		adapterReg:             extmsg.NewAdapterRegistry(),
+		beadEventStartSeq:      beadEventStartSeq,
+		beadEventStartSeqOK:    beadEventStartSeqOK,
+		rolloutFlags:           rolloutFlags,
+		sessionStartGeneration: 1,
+		configMutationBarrier:  make(chan struct{}, 1),
 	}
 	// Boot-resolved rollout notices are retained on the Flags value; echo
 	// them once at startup so an env override contradicting explicit config
@@ -262,6 +323,7 @@ func newControllerStateWithRoutes(
 		cs.cityBeadsDiagnostic = diagnosticPtr(opened.Diagnostic)
 		cs.cityMailProv = newCityMailProvider(cs.storageRoutes, cs.cityBeadStore, cfg, cityPath, ep)
 		cs.extmsgSvc = newCityExtMsgServices(cs.storageRoutes, cs.cityBeadStore, cfg, cityPath, ep)
+		cs.sessionStartStoreGeneration = cs.sessionStartGeneration
 	}
 	cs.preflightConditionalWrites()
 	cs.storeMetadataSignature = storeMetadataSignature(cityPath, cfg)
@@ -269,6 +331,14 @@ func newControllerStateWithRoutes(
 }
 
 // wrapWithCachingStore wraps store in an in-memory read cache. When
+// beadStoreLayerActor attributes a bead.* row to the store layer of the process
+// that made the mutation, as opposed to an externally-authored write arriving
+// through a bd hook. The distinction is load-bearing rather than cosmetic: a
+// row carrying it does not poke the tick and does not contribute routed-work
+// demand, because the process that wrote the bead already knows. The wire value
+// is historical — the caching store was the first layer to emit under it.
+const beadStoreLayerActor = "cache-reconcile"
+
 // backgroundRefresh is true the cache fully primes and runs a continuous
 // reconcile loop (the steady-state cost: one bd subprocess per cycle per scope).
 // When false the cache only pre-primes active beads synchronously — enough for
@@ -292,7 +362,7 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 		if recorder != nil {
 			recorder.Record(events.Event{
 				Type:             eventType,
-				Actor:            cacheReconcileActor,
+				Actor:            beadStoreLayerActor,
 				Subject:          beadID,
 				RunID:            runID,
 				SessionID:        sessionID,
@@ -626,7 +696,7 @@ func (cs *controllerState) completionReconcileInputs(plane storePlane) (events.P
 	// graph.v2 executions normally live in the individual rig work stores.
 	// Scan both surfaces in stable order, collapsing wrappers first so aliases
 	// are not scanned more than once.
-	cs.mu.RLock()
+	cs.mu.Lock()
 	stores := []beads.Store{
 		resolveGraphStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv),
 		cs.cityBeadStore,
@@ -635,7 +705,7 @@ func (cs *controllerState) completionReconcileInputs(plane storePlane) (events.P
 	for name, store := range cs.beadStores {
 		rigStores[name] = store
 	}
-	cs.mu.RUnlock()
+	cs.mu.Unlock()
 
 	rigNames := make([]string, 0, len(rigStores))
 	for name := range rigStores {
@@ -750,30 +820,43 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 	if len(evt.Payload) == 0 {
 		return
 	}
+	canonicalEvent, err := canonicalBeadEventIdentity(evt)
+	if err != nil {
+		log.Printf("dropping bead event type=%s subject=%q: %v", evt.Type, evt.Subject, err)
+		return
+	}
+	evt = canonicalEvent
 	cs.mu.RLock()
 	stores := cs.beadEventStoresLocked(evt)
-	var storeRef string
-	if evt.Type == events.BeadClosed {
-		storeRef = cs.autocloseStoreRefLocked(evt.Subject)
-	}
 	cs.mu.RUnlock()
 
-	// A cache-reconcile event carries a CachingStore's own post-absorb snapshot,
-	// dependencies included, rather than a bd hook patch. Saying so keeps the
-	// cache from reading its own emission as a coverage-unknown payload and
-	// discarding the dependency and is_blocked state it just installed, which
-	// fences the row out of the next reconcile pass and re-emits forever
-	// (ga-yoix1).
-	snapshot := evt.Actor == cacheReconcileActor
-	for _, store := range stores {
-		if cached, ok := store.(*beads.CachingStore); ok {
-			if snapshot {
-				cached.ApplyEventSnapshot(evt.Type, evt.Payload)
-			} else {
-				cached.ApplyEvent(evt.Type, evt.Payload)
+	// An event stamped by this process's own store layer carries a post-absorb
+	// SNAPSHOT — dependencies included — rather than a bd hook patch. Saying so
+	// keeps the cache from reading its own emission as a coverage-unknown
+	// payload and discarding the dependency and is_blocked state it just
+	// installed, which fences the row out of the next reconcile pass and
+	// re-emits forever (ga-yoix1).
+	snapshot := evt.Actor == beadStoreLayerActor
+	// Do not expose a dependency-close cache mutation to legacy wait preparation
+	// until exact ownership has either been reserved or deliberately left with
+	// legacy. The fence is inert when keyed pre-poke admission is not armed.
+	releaseWaitDependencyVisibility := cs.acquireSessionWaitDependencyEventVisibility(evt)
+	func() {
+		defer releaseWaitDependencyVisibility()
+		for _, candidate := range stores {
+			inner, _, _ := unwrapBeadPolicyStore(candidate.store)
+			if cached, ok := inner.(*beads.CachingStore); ok {
+				if snapshot {
+					cached.ApplyEventSnapshot(evt.Type, evt.Payload)
+				} else {
+					cached.ApplyEvent(evt.Type, evt.Payload)
+				}
 			}
 		}
-	}
+		cs.admitSessionWaitDependencyPrePokeEvent(evt)
+	}()
+	cs.admitReadyRoutedWorkEvent(evt, stores)
+	cs.admitSessionStartEvent(evt)
 	if !snapshot {
 		cs.Poke()
 	}
@@ -785,15 +868,152 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 		}
 		cs.mu.RUnlock()
 		executionevent.EmitCompletedFromClosedNotification(rec, cs.GraphBeadStore().Store, evt.Payload, evt.Actor)
-		cs.runBeadCloseAutoclose(evt.Subject, stores[0], storeRef)
+		cs.runBeadCloseAutoclose(evt.Subject, stores[0].store, stores[0].ref)
+	}
+	cs.admitSessionWaitDependencyShadowEvent(evt)
+}
+
+type readyRoutedWorkDemandContribution struct {
+	WorkID              string
+	PoolTarget          string
+	SourceActor         string
+	SourceStore         string
+	ContributionPresent bool
+	AllocationPolicy    poolAllocationShadowPolicy
+	EventAt             time.Time
+	ObservedAt          time.Time
+	DecidedAt           time.Time
+}
+
+func (cs *controllerState) installReadyRoutedWorkEventAdmission(admit func(readyRoutedWorkDemandContribution)) error {
+	if cs == nil {
+		return fmt.Errorf("installing ready routed-work event admission: controller state is nil")
+	}
+	if admit == nil {
+		return fmt.Errorf("installing ready routed-work event admission: callback is nil")
+	}
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	if cs.readyRoutedWorkEventAdmissionStopping {
+		return fmt.Errorf("installing ready routed-work event admission: admission is stopping")
+	}
+	if cs.readyRoutedWorkEventAdmission != nil {
+		return fmt.Errorf("installing ready routed-work event admission: callback is already installed")
+	}
+	cs.readyRoutedWorkEventAdmission = admit
+	return nil
+}
+
+func (cs *controllerState) stopReadyRoutedWorkEventAdmission() {
+	if cs == nil {
+		return
+	}
+	cs.mu.Lock()
+	cs.readyRoutedWorkEventAdmissionStopping = true
+	cs.readyRoutedWorkEventAdmission = nil
+	cs.mu.Unlock()
+	cs.readyRoutedWorkEventAdmissionWG.Wait()
+	cs.mu.Lock()
+	cs.readyRoutedWorkEventAdmissionStopping = false
+	cs.mu.Unlock()
+}
+
+func (cs *controllerState) admitReadyRoutedWorkEvent(evt events.Event, stores []beadEventStore) {
+	if cs == nil || evt.Actor == beadStoreLayerActor || !isBeadMutationEvent(evt.Type) {
+		return
+	}
+	observedAt := time.Now().UTC()
+	eventBead, ok := beads.DecodeBeadEventPayload(evt.Payload)
+	if !ok {
+		return
+	}
+	if subject := strings.TrimSpace(evt.Subject); subject != "" && subject != eventBead.ID {
+		return
+	}
+
+	cs.mu.Lock()
+	admit := cs.readyRoutedWorkEventAdmission
+	cfg := cs.cfg
+	if admit != nil && cfg != nil && !cs.readyRoutedWorkEventAdmissionStopping {
+		cs.readyRoutedWorkEventAdmissionWG.Add(1)
+	} else {
+		admit = nil
+	}
+	cs.mu.Unlock()
+	if admit == nil {
+		return
+	}
+	defer cs.readyRoutedWorkEventAdmissionWG.Done()
+
+	namedTemplates := make(map[string]struct{}, len(cfg.NamedSessions))
+	for i := range cfg.NamedSessions {
+		namedTemplates[cfg.NamedSessions[i].TemplateQualifiedName()] = struct{}{}
+	}
+	templates := make(map[string]struct{}, len(cfg.Agents))
+	allocationPolicies := make(map[string]poolAllocationShadowPolicy, len(cfg.Agents))
+	allocationAgents := make(map[string]*config.Agent, len(cfg.Agents))
+	for i := range cfg.Agents {
+		agent := &cfg.Agents[i]
+		if agent.Suspended || !agent.SupportsGenericEphemeralSessions() {
+			continue
+		}
+		target := agent.QualifiedName()
+		templates[target] = struct{}{}
+		allocationPolicies[target] = newPoolAllocationShadowPolicy(cfg, agent, namedTemplates)
+		allocationAgents[target] = agent
+	}
+	if len(templates) == 0 {
+		return
+	}
+	now := time.Now().UTC()
+	// AGREEMENT: IsReadyCandidateForTier is not the serving rules. Its exclude
+	// list has no "epic" and it drops only the gc:session / order-tracking
+	// labels, so a routed epic and a row on a dispatch hold both pass it — and
+	// neither is servable to the seat this event would mint.
+	if strings.TrimSpace(eventBead.Assignee) != "" ||
+		!beads.IsReadyCandidateForTier(eventBead, now, beads.TierBoth) {
+		return
+	}
+	if _, servable := demandServableForTemplates(cfg, eventBead, templates); !servable {
+		return
+	}
+
+	for _, candidate := range stores {
+		inner, _, _ := unwrapBeadPolicyStore(candidate.store)
+		cached, ok := inner.(*beads.CachingStore)
+		if !ok {
+			continue
+		}
+		work, ready := cached.CachedReadyByID(eventBead.ID, now)
+		if !ready {
+			work, ready = cached.LiveReadyByID(eventBead.ID, now)
+		}
+		if !ready || strings.TrimSpace(work.Assignee) != "" {
+			continue
+		}
+		if target, servable := demandServableForTemplates(cfg, work, templates); servable {
+			policy := allocationPolicies[target].forSourceStore(cfg, allocationAgents[target], cs.cityPath, candidate.ref)
+			admit(readyRoutedWorkDemandContribution{
+				WorkID:              work.ID,
+				PoolTarget:          target,
+				SourceActor:         evt.Actor,
+				SourceStore:         candidate.ref,
+				ContributionPresent: policy.contributionPresent,
+				AllocationPolicy:    policy,
+				EventAt:             evt.Ts.UTC(),
+				ObservedAt:          observedAt,
+				DecidedAt:           time.Now().UTC(),
+			})
+			return
+		}
 	}
 }
 
-// autocloseStoreRefLocked returns the storeRef string for the store that owns
+// beadEventStoreRefLocked returns the storeRef string for the store that owns
 // beadID. Called under cs.mu read lock.
 // A relocated-class id falls through to "" on purpose: a storeRef names a work
 // scope, and "" is the ID-only mode that a single-minter class prefix makes safe.
-func (cs *controllerState) autocloseStoreRefLocked(beadID string) string {
+func (cs *controllerState) beadEventStoreRefLocked(beadID string) string {
 	if cs.cfg == nil {
 		return ""
 	}
@@ -835,22 +1055,31 @@ func (cs *controllerState) runBeadCloseAutoclose(beadID string, store beads.Stor
 	})
 }
 
-func (cs *controllerState) beadEventStoresLocked(evt events.Event) []beads.Store {
+type beadEventStore struct {
+	store beads.Store
+	ref   string
+}
+
+func (cs *controllerState) beadEventStoresLocked(evt events.Event) []beadEventStore {
 	if id := beadEventID(evt); id != "" && cs.cfg != nil {
 		if store, known := cs.beadEventConfiguredStoreLocked(id); known {
 			if store == nil {
 				return nil
 			}
-			return []beads.Store{store}
+			return []beadEventStore{{store: store, ref: cs.beadEventStoreRefLocked(id)}}
 		}
 	}
 
-	stores := make([]beads.Store, 0, len(cs.beadStores)+1)
-	for _, s := range cs.beadStores {
-		stores = append(stores, s)
+	stores := make([]beadEventStore, 0, len(cs.beadStores)+1)
+	for name, store := range cs.beadStores {
+		stores = append(stores, beadEventStore{store: store, ref: "rig:" + name})
 	}
 	if cs.cityBeadStore != nil {
-		stores = append(stores, cs.cityBeadStore)
+		cityName := loadedCityName(cs.cfg, cs.cityPath)
+		if cityName == "" {
+			cityName = "city"
+		}
+		stores = append(stores, beadEventStore{store: cs.cityBeadStore, ref: "city:" + cityName})
 	}
 	return stores
 }
@@ -906,21 +1135,46 @@ func (cs *controllerState) beadEventConfiguredStoreLocked(id string) (beads.Stor
 }
 
 func beadEventID(evt events.Event) string {
-	id := strings.TrimSpace(evt.Subject)
-	if id == "" {
-		var payload struct {
-			ID string `json:"id"`
-		}
-		if err := json.Unmarshal(evt.Payload, &payload); err == nil {
-			id = strings.TrimSpace(payload.ID)
-		}
+	return strings.TrimSpace(evt.Subject)
+}
+
+// canonicalBeadEventIdentity reconciles the event envelope subject with the
+// typed bead snapshot at the controller's bead-event edge. A valid snapshot
+// supplies a missing subject, while conflicting non-empty identities are
+// unsafe to route and must be dropped. Events without a valid bead snapshot
+// retain their legacy envelope-driven behavior.
+func canonicalBeadEventIdentity(evt events.Event) (events.Event, error) {
+	if !isBeadMutationEvent(evt.Type) {
+		return evt, nil
 	}
-	return id
+	bead, ok := beads.DecodeBeadEventPayload(evt.Payload)
+	if !ok {
+		return evt, nil
+	}
+	payloadID := strings.TrimSpace(bead.ID)
+	subject := strings.TrimSpace(evt.Subject)
+	if subject != "" && subject != payloadID {
+		return events.Event{}, fmt.Errorf("%w: subject=%q payload_id=%q", errBeadEventIdentityMismatch, subject, payloadID)
+	}
+	evt.Subject = payloadID
+	return evt, nil
 }
 
 // update replaces the config, session provider, and reopens stores.
 // Stores are built outside the lock to avoid blocking readers during I/O.
 func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
+	cs.updateWithSessionStartTransition(cfg, sp, "")
+}
+
+func (cs *controllerState) updateWithPendingConfigMutation(cfg *config.City, sp runtime.Provider, revision string) {
+	cs.updateWithSessionStartTransition(cfg, sp, revision)
+}
+
+func (cs *controllerState) updateWithSessionStartTransition(
+	cfg *config.City,
+	sp runtime.Provider,
+	pendingRevision string,
+) {
 	cs.updateMu.Lock()
 	defer cs.updateMu.Unlock()
 
@@ -958,7 +1212,16 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	// Swap under short critical section.
 	var oldCityStore beads.Store
 	var oldRigStores map[string]beads.Store
+	releaseSessionStartFence := cs.beginSessionStartGenerationSwap()
+	defer releaseSessionStartFence()
+	if pendingRevision != "" {
+		// The generation fence has stopped new exact-start snapshots and drained
+		// every old one. Only now may auto mode return ownership to legacy while
+		// the runtime loop catches up to the API-visible config generation.
+		cs.markConfigMutationPending(pendingRevision)
+	}
 	cs.mu.Lock()
+	cs.advanceSessionStartGenerationLocked()
 	cs.cfg = cfg
 	if rawCfg != nil {
 		cs.rawCfg = rawCfg
@@ -973,6 +1236,7 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 		cs.cityBeadsDiagnostic = cityBeadsDiagnostic
 		cs.cityMailProv = cityMailProv
 		cs.storeMetadataSignature = storeSignature
+		cs.sessionStartStoreGeneration = cs.sessionStartGeneration
 	}
 	if extSvc != nil {
 		cs.extmsgSvc = extSvc
@@ -1052,32 +1316,51 @@ func storePointerKey(store beads.Store) (uintptr, bool) {
 	return value.Pointer(), true
 }
 
-func (cs *controllerState) updateFromRuntime(cfg *config.City, sp runtime.Provider, revision string) {
+func (cs *controllerState) updateFromRuntime(cfg *config.City, sp runtime.Provider, revision string) bool {
 	if cs.configMutationPending.Load() {
 		matchesPending, stale := cs.runtimeUpdateStatusForPendingMutation(revision)
 		if stale {
-			return
+			return false
 		}
 		if matchesPending {
 			if cs.runtimeUpdateDropsPendingRigs(cfg) {
-				return
+				return false
 			}
 			if cs.runtimeUpdateCanReuseCurrentStores(cfg) {
 				cs.updateConfigAndProviderOnly(cfg, sp)
 				cs.clearConfigMutationPending()
-				return
+				return true
 			}
 		}
 	} else if cs.runtimeUpdateRevisionIsStale(revision) {
-		return
+		return false
 	}
 	if cs.runtimeUpdateCanReuseCurrentStores(cfg) {
 		cs.updateConfigAndProviderOnly(cfg, sp)
 		cs.clearConfigMutationPending()
-		return
+		return true
 	}
 	cs.update(cfg, sp)
 	cs.clearConfigMutationPending()
+	return true
+}
+
+// runtimeUpdateWouldBeAccepted performs the read-only half of
+// updateFromRuntime. Reload uses it immediately before irreversible provider
+// cutover work, then updateFromRuntime repeats the check at publication to
+// close races during that work.
+func (cs *controllerState) runtimeUpdateWouldBeAccepted(cfg *config.City, revision string) bool {
+	if cs == nil {
+		return false
+	}
+	if cs.configMutationPending.Load() {
+		matchesPending, stale := cs.runtimeUpdateStatusForPendingMutation(revision)
+		if stale {
+			return false
+		}
+		return !matchesPending || !cs.runtimeUpdateDropsPendingRigs(cfg)
+	}
+	return !cs.runtimeUpdateRevisionIsStale(revision)
 }
 
 func (cs *controllerState) updateConfigAndProviderOnly(cfg *config.City, sp runtime.Provider) {
@@ -1091,13 +1374,21 @@ func (cs *controllerState) updateConfigAndProviderOnly(cfg *config.City, sp runt
 	// the store-reuse reload path.
 	usageSink := usageSinkForCity(cfg, cs.cityPath)
 	rawCfg := cs.loadRawSnapshot()
+	releaseSessionStartFence := cs.beginSessionStartGenerationSwap()
+	defer releaseSessionStartFence()
 	cs.mu.Lock()
+	storeWasCoherent := cs.sessionStartGeneration != 0 &&
+		cs.sessionStartStoreGeneration == cs.sessionStartGeneration
+	cs.advanceSessionStartGenerationLocked()
 	cs.cfg = cfg
 	if rawCfg != nil {
 		cs.rawCfg = rawCfg
 	}
 	cs.sp = sp
 	cs.usageSink = usageSink
+	if storeWasCoherent {
+		cs.sessionStartStoreGeneration = cs.sessionStartGeneration
+	}
 	cs.mu.Unlock()
 }
 
@@ -1175,18 +1466,49 @@ func (cs *controllerState) preflightConditionalWrites() {
 	if cs.rolloutFlags.BeadsConditionalWrites() != rollout.Require {
 		return
 	}
-	probe := func(name string, store beads.Store) {
-		if store == nil {
-			return
-		}
-		if _, _, err := beads.ResolveConditionalWriter(store); err != nil {
-			cs.rolloutWarnf("api: rollout: ERROR: conditional_writes=require but store %s cannot fence: %v\n", name, err)
-		}
-	}
 	for rigName, store := range cs.beadStores {
-		probe("rig/"+rigName, store)
+		cs.probeConditionalWrites("rig/"+rigName, store)
 	}
-	probe("city", cs.cityBeadStore)
+	cs.probeConditionalWrites("city", cs.cityBeadStore)
+}
+
+// preflightSessionClassConditionalWrites asserts the capability the session
+// class REQUIRES, against the store that actually serves it.
+//
+// It runs on every boot, in every mode: the requirement is not a rollout
+// option. The keyed reconciler's session writes are revision-fenced by
+// construction, so a session-class store that cannot fence is a startup error
+// naming the store and what it lacks — not a silent absence discovered at the
+// first drain (ga-f7v2ft.162).
+//
+// It is a second entry point rather than part of the constructor's pass
+// because the storage routes are attached AFTER the controller state is built
+// (setControllerState composes the pair): a constructor-time check would
+// inspect the work store on a split city and clear a class served from
+// somewhere else entirely.
+func (cs *controllerState) preflightSessionClassConditionalWrites() {
+	if cs == nil {
+		return
+	}
+	store := cs.SessionsBeadStore().Store
+	if store == nil {
+		return
+	}
+	if _, err := beads.RequiredConditionalWriter(store); err != nil {
+		cs.rolloutWarnf("api: beads: ERROR: the session-class store cannot fence its own writes, which the session reconciler requires: %v\n", err)
+	}
+}
+
+// probeConditionalWrites resolves one store's fence under the city's rollout
+// mode and reports a require-mode refusal as a startup ERROR line naming the
+// store.
+func (cs *controllerState) probeConditionalWrites(name string, store beads.Store) {
+	if store == nil {
+		return
+	}
+	if _, _, err := beads.ResolveConditionalWriter(store); err != nil {
+		cs.rolloutWarnf("api: rollout: ERROR: conditional_writes=require but store %s cannot fence: %v\n", name, err)
+	}
 }
 
 // rolloutWarnf routes noteRolloutDrift's transition lines to the injected sink
@@ -1666,10 +1988,9 @@ func (cs *controllerState) SessionsBeadStore() beads.SessionStore {
 // when [beads.classes.graph] is relocated it returns the dedicated graph store at the
 // legacy .gc/beads.sqlite location (or the gcg Postgres schema). cs.eventProv is
 // passed for signature parity with the other accessors but is ignored by
-// resolveGraphStore, as it is for every class: a class store carries no emitting
-// layer, and on this side the controller's CachingStore is the emitter. The
-// one-shot CLI's side is covered by class_store_emit.go. The result is wrapped in
-// the strongly-typed beads.GraphStore so the
+// resolveGraphStore, as it is for every class: emission is installed on the
+// routes at boot, not chosen per accessor (class_store_emit.go). The result is
+// wrapped in the strongly-typed beads.GraphStore so the
 // graph class is statically visible to callers; the wrapper carries the same
 // underlying store value, so runtime behavior is unchanged.
 func (cs *controllerState) GraphBeadStore() beads.GraphStore {
@@ -1740,8 +2061,8 @@ func (cs *controllerState) OrdersAll() []orders.Order {
 // EnableOrder creates or updates an override with enabled=true.
 func (cs *controllerState) EnableOrder(name, rig string) error {
 	enabled := true
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.MergeOrderOverride(config.OrderOverride{
+	return cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.MergeOrderOverride(config.OrderOverride{
 			Name:    name,
 			Rig:     rig,
 			Enabled: &enabled,
@@ -1752,8 +2073,8 @@ func (cs *controllerState) EnableOrder(name, rig string) error {
 // DisableOrder creates or updates an override with enabled=false.
 func (cs *controllerState) DisableOrder(name, rig string) error {
 	enabled := false
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.MergeOrderOverride(config.OrderOverride{
+	return cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.MergeOrderOverride(config.OrderOverride{
 			Name:    name,
 			Rig:     rig,
 			Enabled: &enabled,
@@ -1761,51 +2082,100 @@ func (cs *controllerState) DisableOrder(name, rig string) error {
 	})
 }
 
-// SerializeConfigWrite runs fn under the same per-city mutation lock the
-// configedit.Editor uses for agent/rig/provider/formula edits. The HTTP pack
-// import add/remove handlers write pack.toml, packs.lock, and sometimes
-// city.toml outside the Editor callback shape, so routing them through this
-// shared lock keeps concurrent config writers from interleaving and losing an
-// update or desyncing the manifest and lockfile.
-func (cs *controllerState) SerializeConfigWrite(fn func() error) error {
-	return cs.editor.Do(fn)
+// MutatePackConfig runs the multi-file pack import callback through the
+// controller's canonical mutation refresh path. ctx cancels only while waiting
+// for the config barrier; it does not cancel a later wait on the editor or an
+// importsvc operation after fn starts, because either may already be running
+// filesystem or git work.
+func (cs *controllerState) MutatePackConfig(ctx context.Context, fn func() error) error {
+	return cs.withConfigMutation(ctx, func(*configedit.Editor) error {
+		return cs.mutateAndPokeLocked(fn, true)
+	})
 }
 
-var _ api.ConfigWriteSerializer = (*controllerState)(nil)
+var _ api.PackConfigMutationTransaction = (*controllerState)(nil)
+
+func (cs *controllerState) withConfigMutation(ctx context.Context, fn func(*configedit.Editor) error) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	barrier := cs.configMutationGate()
+	select {
+	case barrier <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-barrier }()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return cs.editor.DoWithEditor(fn)
+}
+
+func (cs *controllerState) withConfigSnapshotIfIdle(ctx context.Context, fn func() error) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	barrier := cs.configMutationGate()
+	select {
+	case barrier <- struct{}{}:
+		defer func() { <-barrier }()
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return fn()
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		return errConfigMutationInProgress
+	}
+}
+
+func (cs *controllerState) configMutationGate() chan struct{} {
+	cs.configMutationBarrierMu.Lock()
+	defer cs.configMutationBarrierMu.Unlock()
+	if cs.configMutationBarrier == nil {
+		cs.configMutationBarrier = make(chan struct{}, 1)
+	}
+	return cs.configMutationBarrier
+}
 
 // SuspendAgent writes suspended=true to durable agent config.
 // Uses configedit.Editor for provenance-aware edit (inline vs discovered vs patch).
 func (cs *controllerState) SuspendAgent(name string) error {
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.SuspendAgent(name)
+	return cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.SuspendAgent(name)
 	})
 }
 
 // ResumeAgent clears suspended in durable agent config.
 func (cs *controllerState) ResumeAgent(name string) error {
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.ResumeAgent(name)
+	return cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.ResumeAgent(name)
 	})
 }
 
 // SuspendRig writes suspended=true on the rig in city.toml.
 func (cs *controllerState) SuspendRig(name string) error {
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.SuspendRig(name)
+	return cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.SuspendRig(name)
 	})
 }
 
 // ResumeRig clears suspended on the rig in city.toml.
 func (cs *controllerState) ResumeRig(name string) error {
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.ResumeRig(name)
+	return cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.ResumeRig(name)
 	})
 }
 
 // SuspendCity sets workspace.suspended = true.
 func (cs *controllerState) SuspendCity() error {
-	if err := cs.mutateAndPoke(func() error {
-		return cs.editor.SuspendCity()
+	if err := cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.SuspendCity()
 	}); err != nil {
 		return err
 	}
@@ -1817,8 +2187,8 @@ func (cs *controllerState) SuspendCity() error {
 
 // ResumeCity sets workspace.suspended = false.
 func (cs *controllerState) ResumeCity() error {
-	if err := cs.mutateAndPoke(func() error {
-		return cs.editor.ResumeCity()
+	if err := cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.ResumeCity()
 	}); err != nil {
 		return err
 	}
@@ -1830,8 +2200,8 @@ func (cs *controllerState) ResumeCity() error {
 
 // CreateAgent adds a new agent to city.toml.
 func (cs *controllerState) CreateAgent(a config.Agent) error {
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.CreateAgent(a)
+	return cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.CreateAgent(a)
 	})
 }
 
@@ -1851,43 +2221,30 @@ func (cs *controllerState) FormulaSource(name string) ([]byte, bool, error) {
 // never silent. If a prior source exists but cannot be read, the mutation aborts
 // before any write, since rollback would have no basis to restore it.
 func (cs *controllerState) UpsertFormula(name string, content []byte) error {
-	// The read-prior -> write -> refresh -> rollback sequence is not atomic across
-	// concurrent editor ops (the pre-existing mutateAndPoke rollback race class):
-	// a same-name racing upsert could see this rollback's delete-on-no-prior erase
-	// its committed file. Very low risk on a single-operator control plane; a
-	// coarse per-city mutation lock is deferred as out of scope for this change.
-	prior, hadPrior, readErr := cs.editor.FormulaSource(name)
-	if readErr != nil {
-		// FormulaSource reports a missing source as (nil, false, nil); a non-nil
-		// error means a prior source exists but is unreadable. Treating that as
-		// absent would let a refresh failure delete or overwrite the only
-		// restorable copy, so abort before mutating.
-		return fmt.Errorf("reading prior formula %q before upsert: %w", name, readErr)
-	}
-	err := cs.mutateAndPoke(func() error {
-		return cs.editor.UpsertFormula(name, content)
-	})
-	if err != nil {
-		var rollbackErr error
-		if hadPrior {
-			rollbackErr = cs.editor.UpsertFormula(name, prior)
-		} else {
-			// No prior file existed, so the desired rollback post-state is
-			// "absent". A brand-new write that faulted before creating the file
-			// leaves nothing to delete, and DeleteFormula then returns
-			// ErrNotFound — that desired state, not a rollback failure. Joining it
-			// would let mutationError map the create's real infrastructure or
-			// validation failure to HTTP 404, masking the true error class, so
-			// treat ErrNotFound here as a satisfied rollback.
-			if rb := cs.editor.DeleteFormula(name); rb != nil && !errors.Is(rb, configedit.ErrNotFound) {
+	return cs.withConfigMutation(context.Background(), func(editor *configedit.Editor) error {
+		prior, hadPrior, readErr := editor.FormulaSource(name)
+		if readErr != nil {
+			// FormulaSource reports a missing source as (nil, false, nil); a
+			// non-nil error means rollback has no safe basis, so abort before
+			// mutating.
+			return fmt.Errorf("reading prior formula %q before upsert: %w", name, readErr)
+		}
+		err := cs.mutateAndPokeLocked(func() error {
+			return editor.UpsertFormula(name, content)
+		}, false)
+		if err != nil {
+			var rollbackErr error
+			if hadPrior {
+				rollbackErr = editor.UpsertFormula(name, prior)
+			} else if rb := editor.DeleteFormula(name); rb != nil && !errors.Is(rb, configedit.ErrNotFound) {
 				rollbackErr = rb
 			}
+			if rollbackErr != nil {
+				return errors.Join(err, fmt.Errorf("rolling back formula %q write: %w", name, rollbackErr))
+			}
 		}
-		if rollbackErr != nil {
-			return errors.Join(err, fmt.Errorf("rolling back formula %q write: %w", name, rollbackErr))
-		}
-	}
-	return err
+		return err
+	})
 }
 
 // DeleteFormula removes a city-local formula source and refreshes state. A failed
@@ -1896,19 +2253,21 @@ func (cs *controllerState) UpsertFormula(name string, content []byte) error {
 // be read, the delete aborts before mutating, since rollback would have no basis
 // to restore it.
 func (cs *controllerState) DeleteFormula(name string) error {
-	prior, hadPrior, readErr := cs.editor.FormulaSource(name)
-	if readErr != nil {
-		return fmt.Errorf("reading prior formula %q before delete: %w", name, readErr)
-	}
-	err := cs.mutateAndPoke(func() error {
-		return cs.editor.DeleteFormula(name)
-	})
-	if err != nil && hadPrior {
-		if rollbackErr := cs.editor.UpsertFormula(name, prior); rollbackErr != nil {
-			return errors.Join(err, fmt.Errorf("rolling back formula %q delete: %w", name, rollbackErr))
+	return cs.withConfigMutation(context.Background(), func(editor *configedit.Editor) error {
+		prior, hadPrior, readErr := editor.FormulaSource(name)
+		if readErr != nil {
+			return fmt.Errorf("reading prior formula %q before delete: %w", name, readErr)
 		}
-	}
-	return err
+		err := cs.mutateAndPokeLocked(func() error {
+			return editor.DeleteFormula(name)
+		}, false)
+		if err != nil && hadPrior {
+			if rollbackErr := editor.UpsertFormula(name, prior); rollbackErr != nil {
+				return errors.Join(err, fmt.Errorf("rolling back formula %q delete: %w", name, rollbackErr))
+			}
+		}
+		return err
+	})
 }
 
 // WaitForAgentVisibility blocks until findAgent in the controller's hot-reloaded
@@ -1922,8 +2281,8 @@ func (cs *controllerState) WaitForAgentVisibility(ctx context.Context, qualified
 
 // UpdateAgent partially updates an existing agent definition in city.toml.
 func (cs *controllerState) UpdateAgent(name string, patch api.AgentUpdate) error {
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.UpdateAgent(name, configedit.AgentUpdate{
+	return cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.UpdateAgent(name, configedit.AgentUpdate{
 			Provider:  patch.Provider,
 			Scope:     patch.Scope,
 			Suspended: patch.Suspended,
@@ -1933,8 +2292,8 @@ func (cs *controllerState) UpdateAgent(name string, patch api.AgentUpdate) error
 
 // DeleteAgent removes an agent from city.toml.
 func (cs *controllerState) DeleteAgent(name string) error {
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.DeleteAgent(name)
+	return cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.DeleteAgent(name)
 	})
 }
 
@@ -2042,8 +2401,8 @@ func realPathForContainment(target string) (string, error) {
 // rolls back through Provision's own topology snapshot (mutateAndPoke returns
 // the mutate error without touching its config snapshot), while a post-write
 // refresh failure rolls back through mutateAndPoke's config snapshot. The two
-// restore layers never overlap. The whole handshake runs under
-// SerializeConfigWrite so a concurrent config edit cannot interleave with
+// restore layers never overlap. The whole handshake runs under the common
+// config transaction so a concurrent config edit cannot interleave with
 // Provision's read-modify-append of city.toml.
 func (cs *controllerState) CreateRig(r config.Rig) error {
 	rigPath := strings.TrimSpace(r.Path)
@@ -2396,7 +2755,7 @@ func (cs *controllerState) sweepOrphanRigProvisions(ctx context.Context) error {
 }
 
 // provisionRigLocked runs the config-write half of a rig add under the per-city
-// guard (SerializeConfigWrite → mutateAndPoke). r.Path must already be resolved
+// config transaction. r.Path must already be resolved
 // absolute. onStep, when non-nil, wires rig.Deps.OnStep so the caller can
 // project provisioning progress onto events; nil onStep produces the exact
 // git-blind behavior CreateRig has always had. It returns the provisioned rig.
@@ -2415,12 +2774,10 @@ func (cs *controllerState) provisionRigLocked(r config.Rig, onStep func(step, de
 	}
 
 	var provisionedRig config.Rig
-	if err := cs.SerializeConfigWrite(func() error {
-		return cs.mutateAndPoke(func() error {
-			var err error
-			provisionedRig, err = cs.provisionRigWrite(r, depOnStep)
-			return err
-		})
+	if err := cs.mutateAndPoke(func(*configedit.Editor) error {
+		var err error
+		provisionedRig, err = cs.provisionRigWrite(r, depOnStep)
+		return err
 	}); err != nil {
 		return config.Rig{}, err
 	}
@@ -2455,8 +2812,8 @@ func rigConfigHasRigNamed(cfg *config.City, name string) bool {
 }
 
 // provisionRigWrite performs the config-mutating half of a git_url rig add. It
-// MUST run inside cs.SerializeConfigWrite → cs.mutateAndPoke (the per-city write
-// lock plus refresh/poke): it loads the raw for-edit config, re-asserts the
+// MUST run inside cs.mutateAndPoke (the per-city transaction plus refresh/poke):
+// it loads the raw for-edit config, re-asserts the
 // duplicate-name guard authoritatively under the lock, registers the city dolt
 // config for the beads-init path, and runs rig.Provision. A best-effort
 // PostProvision failure is logged, not returned, so mutateAndPoke still commits
@@ -2611,8 +2968,8 @@ func ensurePublicGitHost(gitURL string) (resolveOverride string, err error) {
 
 // UpdateRig partially updates a rig in city.toml.
 func (cs *controllerState) UpdateRig(name string, patch api.RigUpdate) error {
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.UpdateRig(name, configedit.RigUpdate{
+	return cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.UpdateRig(name, configedit.RigUpdate{
 			Path:          patch.Path,
 			Prefix:        patch.Prefix,
 			DefaultBranch: patch.DefaultBranch,
@@ -2623,22 +2980,22 @@ func (cs *controllerState) UpdateRig(name string, patch api.RigUpdate) error {
 
 // DeleteRig removes a rig from city.toml.
 func (cs *controllerState) DeleteRig(name string) error {
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.DeleteRig(name)
+	return cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.DeleteRig(name)
 	})
 }
 
 // CreateProvider adds a new city-level provider to city.toml.
 func (cs *controllerState) CreateProvider(name string, spec config.ProviderSpec) error {
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.CreateProvider(name, spec)
+	return cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.CreateProvider(name, spec)
 	})
 }
 
 // UpdateProvider partially updates an existing city-level provider.
 func (cs *controllerState) UpdateProvider(name string, patch api.ProviderUpdate) error {
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.UpdateProvider(name, configedit.ProviderUpdate{
+	return cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.UpdateProvider(name, configedit.ProviderUpdate{
 			DisplayName:        patch.DisplayName,
 			Base:               patch.Base,
 			Command:            patch.Command,
@@ -2659,50 +3016,50 @@ func (cs *controllerState) UpdateProvider(name string, patch api.ProviderUpdate)
 
 // DeleteProvider removes a city-level provider from city.toml.
 func (cs *controllerState) DeleteProvider(name string) error {
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.DeleteProvider(name)
+	return cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.DeleteProvider(name)
 	})
 }
 
 // SetAgentPatch creates or replaces an agent patch in city.toml.
 func (cs *controllerState) SetAgentPatch(patch config.AgentPatch) error {
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.SetAgentPatch(patch)
+	return cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.SetAgentPatch(patch)
 	})
 }
 
 // DeleteAgentPatch removes an agent patch from city.toml.
 func (cs *controllerState) DeleteAgentPatch(name string) error {
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.DeleteAgentPatch(name)
+	return cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.DeleteAgentPatch(name)
 	})
 }
 
 // SetRigPatch creates or replaces a rig patch in city.toml.
 func (cs *controllerState) SetRigPatch(patch config.RigPatch) error {
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.SetRigPatch(patch)
+	return cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.SetRigPatch(patch)
 	})
 }
 
 // DeleteRigPatch removes a rig patch from city.toml.
 func (cs *controllerState) DeleteRigPatch(name string) error {
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.DeleteRigPatch(name)
+	return cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.DeleteRigPatch(name)
 	})
 }
 
 // SetProviderPatch creates or replaces a provider patch in city.toml.
 func (cs *controllerState) SetProviderPatch(patch config.ProviderPatch) error {
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.SetProviderPatch(patch)
+	return cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.SetProviderPatch(patch)
 	})
 }
 
 // DeleteProviderPatch removes a provider patch from city.toml.
 func (cs *controllerState) DeleteProviderPatch(name string) error {
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.DeleteProviderPatch(name)
+	return cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.DeleteProviderPatch(name)
 	})
 }
 
@@ -2744,6 +3101,8 @@ func captureConfigMutationSnapshot(cityPath string) (*configMutationSnapshot, er
 	for _, path := range []string{
 		cityToml,
 		filepath.Join(cityPath, ".gc", "site.toml"),
+		filepath.Join(cityPath, "pack.toml"),
+		filepath.Join(cityPath, packman.LockfileName),
 	} {
 		if err := capture(path); err != nil {
 			return nil, err
@@ -2817,7 +3176,19 @@ func (s *configMutationSnapshot) restore() error {
 	return restoreErr
 }
 
-func (cs *controllerState) mutateAndPoke(mutate func() error) error {
+func (cs *controllerState) mutateAndPoke(mutate func(*configedit.Editor) error) error {
+	return cs.withConfigMutation(context.Background(), func(editor *configedit.Editor) error {
+		return cs.mutateAndPokeLocked(func() error {
+			return mutate(editor)
+		}, false)
+	})
+}
+
+// mutateAndPokeLocked retains ordinary config mutations' legacy behavior
+// on callback errors. Pack imports opt in because importsvc can have written
+// several config files before returning an error. The caller holds both the
+// config mutation barrier and the editor lock.
+func (cs *controllerState) mutateAndPokeLocked(mutate func() error, rollbackCallbackError bool) error {
 	var snapshot *configMutationSnapshot
 	if cs.cityPath != "" {
 		var err error
@@ -2827,9 +3198,14 @@ func (cs *controllerState) mutateAndPoke(mutate func() error) error {
 		}
 	}
 	if err := mutate(); err != nil {
+		if rollbackCallbackError && snapshot != nil {
+			if restoreErr := snapshot.restore(); restoreErr != nil {
+				return fmt.Errorf("mutating city config: %w", errors.Join(err, fmt.Errorf("restoring previous city config: %w", restoreErr)))
+			}
+		}
 		return err
 	}
-	revision, err := cs.refreshConfigSnapshot()
+	_, err := cs.refreshConfigSnapshot()
 	if err != nil {
 		if snapshot != nil {
 			if restoreErr := snapshot.restore(); restoreErr != nil {
@@ -2839,7 +3215,6 @@ func (cs *controllerState) mutateAndPoke(mutate func() error) error {
 		}
 		return fmt.Errorf("refreshing updated city config: %w", err)
 	}
-	cs.markConfigMutationPending(revision)
 	if cs.configDirty != nil {
 		cs.configDirty.Store(true)
 	}
@@ -2863,7 +3238,7 @@ func (cs *controllerState) refreshConfigSnapshot() (string, error) {
 	cs.mu.RLock()
 	sp := cs.sp
 	cs.mu.RUnlock()
-	cs.update(nextCfg, sp)
+	cs.updateWithPendingConfigMutation(nextCfg, sp, revision)
 	return revision, nil
 }
 

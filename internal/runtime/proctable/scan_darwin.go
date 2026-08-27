@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -57,6 +58,21 @@ func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 		out = []runtime.LiveRuntime{}
 	}
 	return out, nil
+}
+
+// ScanBySessionIDSince returns the Darwin session-ID scan. Darwin collects one
+// complete ps snapshot, so it has no per-process inspection failures to bound.
+func ScanBySessionIDSince(id string, _ time.Time) ([]runtime.LiveRuntime, error) {
+	return ScanBySessionID(id)
+}
+
+// ScanBySessionIDSinceInScope returns the Darwin session-ID scan. Scope facts
+// are irrelevant on Darwin: the ps snapshot has no per-process inspection
+// failures for the scope proofs to adjudicate, and no completeness domain for
+// the Linux kernel-dead exclusion (ga-f7v2ft.194) to narrow — a Darwin zombie
+// carries no environment in the ps snapshot, so it never looks like a runtime.
+func ScanBySessionIDSinceInScope(id string, _ time.Time, _ SessionScope) ([]runtime.LiveRuntime, error) {
+	return ScanBySessionID(id)
 }
 
 // IsScanRoot reports whether pid is outside its GC_SESSION_ID parent's

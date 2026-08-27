@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -118,6 +119,32 @@ func TestStartPhaseTimingsFormatLog(t *testing.T) {
 				t.Errorf("formatLog() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestStartPhaseTimingsTracePayloadKeepsExactDurationsAndIdentity(t *testing.T) {
+	phases := startPhaseTimings{
+		StartCall:         5*time.Second + 123*time.Microsecond,
+		ZombieRecycle:     2 * time.Millisecond,
+		StateSyncRecovery: 3 * time.Millisecond,
+		PostStartObserve:  2*time.Second + 456*time.Microsecond,
+		CommitRefresh:     7 * time.Millisecond,
+	}
+	total := 8*time.Second + 789*time.Microsecond
+	payload := phases.tracePayload("gc-session-opaque", total)
+
+	want := traceRecordPayload{
+		"session_id":             "gc-session-opaque",
+		"duration_ms":            total.Milliseconds(),
+		"duration_ns":            total.Nanoseconds(),
+		"start_call_ns":          phases.StartCall.Nanoseconds(),
+		"zombie_recycle_ns":      phases.ZombieRecycle.Nanoseconds(),
+		"state_sync_recovery_ns": phases.StateSyncRecovery.Nanoseconds(),
+		"post_start_observe_ns":  phases.PostStartObserve.Nanoseconds(),
+		"commit_refresh_ns":      phases.CommitRefresh.Nanoseconds(),
+	}
+	if !reflect.DeepEqual(payload, want) {
+		t.Fatalf("trace payload = %#v, want %#v", payload, want)
 	}
 }
 

@@ -334,8 +334,8 @@ func TestConditionalWritesStatusBlock(t *testing.T) {
 		if got.Mode != "require" || got.Effective != "fail_closed" {
 			t.Fatalf("mode=%q effective=%q, want require/fail_closed", got.Mode, got.Effective)
 		}
-		if len(got.Stores) != 3 {
-			t.Fatalf("stores = %d rows, want 3 (city + 2 rigs)", len(got.Stores))
+		if len(got.Stores) != 4 {
+			t.Fatalf("stores = %d rows, want 4 (city + 2 rigs + the session-class requirement)", len(got.Stores))
 		}
 		byID := map[string]api.StatusConditionalWriteStoreVerdict{}
 		for _, v := range got.Stores {
@@ -347,13 +347,24 @@ func TestConditionalWritesStatusBlock(t *testing.T) {
 		if v := byID["city"]; !v.Capable || v.Kind != "file" {
 			t.Fatalf("city verdict = %+v, want capable kind=file", v)
 		}
+		// The session class is served by the (capable) city store here, so its
+		// requirement is met; ga-f7v2ft.162 added the row so a class served
+		// from somewhere else cannot go unreported.
+		if v, ok := byID[sessionClassStoreID]; !ok || !v.Capable {
+			t.Fatalf("session-class requirement verdict = %+v (present=%t), want the requirement met", v, ok)
+		}
 	})
 
+	// The incapable store is a RIG store: the session-class requirement is
+	// mode-independent and outranks a mode degrade, so an incapable store that
+	// also served the session class would report fail_closed instead — which
+	// the requirement tests in storage_boot_conditional_writes_test.go pin.
 	t.Run("auto with an incapable store is degraded", func(t *testing.T) {
 		cs := &controllerState{
 			rolloutFlags: rollout.ForTest(rollout.WithBeadsConditionalWrites(rollout.Auto)),
 		}
-		cs.cityBeadStore = disableFencing(t, openStamped(t, gate.Auto))
+		cs.cityBeadStore = openStamped(t, gate.Auto)
+		cs.beadStores = map[string]beads.Store{"bad": disableFencing(t, openStamped(t, gate.Auto))}
 		got := cs.ConditionalWritesStatus()
 		if got.Effective != "degraded" {
 			t.Fatalf("effective = %q, want degraded", got.Effective)
@@ -378,15 +389,21 @@ func TestConditionalWritesStatusBlock(t *testing.T) {
 		}
 	})
 
-	t.Run("off renders off with no store rows", func(t *testing.T) {
+	// Off suppresses the MODE-gated rows — the write path never consults the
+	// gate, so they would be noise — but not the session class's required
+	// capability, which no mode turns off.
+	t.Run("off renders off with only the session-class requirement row", func(t *testing.T) {
 		cs := &controllerState{rolloutFlags: rollout.ForTest(rollout.WithBeadsConditionalWrites(rollout.Off))}
 		cs.cityBeadStore = openStamped(t, gate.Off)
 		got := cs.ConditionalWritesStatus()
 		if got.Mode != "off" || got.Effective != "off" {
 			t.Fatalf("mode=%q effective=%q, want off/off", got.Mode, got.Effective)
 		}
-		if len(got.Stores) != 0 {
-			t.Fatalf("off mode rendered %d store rows, want 0", len(got.Stores))
+		if len(got.Stores) != 1 || got.Stores[0].StoreID != sessionClassStoreID {
+			t.Fatalf("off mode rendered %+v, want only the session-class requirement row", got.Stores)
+		}
+		if !got.Stores[0].Capable {
+			t.Fatalf("a capable session-class store reported the requirement unmet: %+v", got.Stores[0])
 		}
 	})
 

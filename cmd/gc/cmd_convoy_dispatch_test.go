@@ -335,6 +335,82 @@ func TestCollectSourceWorkflowMatchesFailsWhenNoStoreIsAvailable(t *testing.T) {
 	}
 }
 
+// TestCollectSourceWorkflowMatchesAcceptsBareCityStoreRef pins the store ref a
+// caller produces when the city has no [workspace] name: the city store's ref
+// is the bare "city:", and the selected-store presence check must recognize it
+// as the city store rather than reporting the store unavailable to scan.
+//
+// Every other test here names the workspace, so the presence check was only
+// ever exercised against "city:<name>". A city without a workspace name — the
+// default for a city created from a bare directory — took the failure branch on
+// every delete-source, which is what stalled PR adoption on mc.
+func TestCollectSourceWorkflowMatchesAcceptsBareCityStoreRef(t *testing.T) {
+	cityPath := "/city"
+	cfg := &config.City{Rigs: []config.Rig{{Name: "rig-a", Path: "rigs/a"}}}
+	cityStore := beads.NewMemStore()
+	root, err := cityStore.Create(beads.Bead{
+		ID:     "wf-city",
+		Title:  "city workflow",
+		Type:   "task",
+		Status: "in_progress",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:           beadmeta.KindWorkflow,
+			beadmeta.SourceBeadIDMetadataKey:   "mc-source",
+			beadmeta.SourceStoreRefMetadataKey: "city:",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	stores := []convoyStoreView{
+		{path: cityPath, store: cityStore},
+		{path: filepath.Join(cityPath, "rigs/a"), store: beads.NewMemStore()},
+	}
+
+	matches, _, err := collectSourceWorkflowMatchesFromStores(cfg, cityPath, "mc-source", "city:", stores, nil)
+	if err != nil {
+		t.Fatalf("collectSourceWorkflowMatchesFromStores(%q) error = %v, want the city store to be scannable", "city:", err)
+	}
+	if len(matches) != 1 || len(matches[0].roots) != 1 || matches[0].roots[0].ID != root.ID {
+		t.Fatalf("matches = %#v, want city root %s", matches, root.ID)
+	}
+}
+
+// TestEnsureSelectedSourceStorePresentStillRejectsAnUnopenedCityStore is the
+// control for the test above: relaxing the bare "city:" comparison must not
+// make the presence check vacuous. With no city store among the opened stores,
+// the selected store is still unavailable and the walk must abort.
+func TestEnsureSelectedSourceStorePresentStillRejectsAnUnopenedCityStore(t *testing.T) {
+	cityPath := "/city"
+	cfg := &config.City{Rigs: []config.Rig{{Name: "rig-a", Path: "rigs/a"}}}
+	stores := []convoyStoreView{
+		{path: filepath.Join(cityPath, "rigs/a"), store: beads.NewMemStore()},
+	}
+
+	err := ensureSelectedSourceStorePresent(cfg, cityPath, loadedCityName(cfg, cityPath), "city:", stores, nil)
+	if err == nil {
+		t.Fatal("ensureSelectedSourceStorePresent = nil, want failure when no city store was opened")
+	}
+	if !strings.Contains(err.Error(), "unavailable to scan") {
+		t.Fatalf("error = %v, want an unavailable-to-scan failure", err)
+	}
+}
+
+// TestEnsureSelectedSourceStorePresentStillRejectsAnotherCityName is the second
+// control: the bare "city:" relaxation must not turn the comparison into a
+// prefix match in both directions. A ref naming a DIFFERENT city is still a
+// miss, so a stale cross-city ref cannot silently select this city's store.
+func TestEnsureSelectedSourceStorePresentStillRejectsAnotherCityName(t *testing.T) {
+	cityPath := "/city"
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	stores := []convoyStoreView{{path: cityPath, store: beads.NewMemStore()}}
+
+	err := ensureSelectedSourceStorePresent(cfg, cityPath, loadedCityName(cfg, cityPath), "city:other", stores, nil)
+	if err == nil || !strings.Contains(err.Error(), "unavailable to scan") {
+		t.Fatalf("ensureSelectedSourceStorePresent(city:other) = %v, want an unavailable-to-scan failure", err)
+	}
+}
+
 func TestWorkflowFinalizeRetriesWhenSourceWorkflowStoreScanSkipsLiveRoot(t *testing.T) {
 	cityPath := "/city"
 	cfg := &config.City{

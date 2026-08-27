@@ -102,7 +102,7 @@ type PackAddedOutput struct {
 // fence the caller-supplied source, write the [imports.<name>] entry, resolve +
 // lock + install, so the pack's templates compose into the city.
 // POST /v0/city/{cityName}/packs.
-func (s *Server) humaHandlePackAdd(_ context.Context, input *PackAddInput) (*PackAddedOutput, error) {
+func (s *Server) humaHandlePackAdd(ctx context.Context, input *PackAddInput) (*PackAddedOutput, error) {
 	// Idempotency: import at most once per Idempotency-Key — a pack add shells
 	// out to git and is exactly the expensive, retry-prone create the key is
 	// for. The cached value is the AddResult the response body echoes.
@@ -117,7 +117,7 @@ func (s *Server) humaHandlePackAdd(_ context.Context, input *PackAddInput) (*Pac
 				return importsvc.AddResult{}, packImportHTTPError(err)
 			}
 			var added *importsvc.AddResult
-			if err := s.serializeConfigWrite(func() error {
+			if err := s.mutatePackConfig(ctx, func() error {
 				var addErr error
 				added, addErr = packAddImport(fsys.OSFS{}, s.state.CityPath(), input.Body.Source, input.Body.Name, input.Body.Version)
 				return addErr
@@ -152,9 +152,9 @@ type PackRemovedOutput struct {
 
 // humaHandlePackRemove drops a pack import from the city; its templates leave the
 // composed config on the next reload. DELETE /v0/city/{cityName}/packs/{name}.
-func (s *Server) humaHandlePackRemove(_ context.Context, input *PackRemoveInput) (*PackRemovedOutput, error) {
+func (s *Server) humaHandlePackRemove(ctx context.Context, input *PackRemoveInput) (*PackRemovedOutput, error) {
 	var res *importsvc.RemoveResult
-	if err := s.serializeConfigWrite(func() error {
+	if err := s.mutatePackConfig(ctx, func() error {
 		var rmErr error
 		res, rmErr = packRemoveImport(fsys.OSFS{}, s.state.CityPath(), input.Name)
 		return rmErr
@@ -166,22 +166,28 @@ func (s *Server) humaHandlePackRemove(_ context.Context, input *PackRemoveInput)
 	return out, nil
 }
 
-// serializeConfigWrite runs fn under the per-city config write lock when the
-// state supports it, so pack import add/remove serialize against the
-// configedit.Editor boundary the other city-config mutation handlers use.
-// A State that does not implement ConfigWriteSerializer (e.g. a read-only test
-// double) runs fn directly.
-func (s *Server) serializeConfigWrite(fn func() error) error {
-	if ser, ok := s.state.(ConfigWriteSerializer); ok {
-		return ser.SerializeConfigWrite(fn)
+// mutatePackConfig prefers the controller-owned pack transaction so an API
+// import refreshes the in-memory snapshot atomically with its multi-file write.
+// Pack writes fail closed when the state lacks that capability: falling back to
+// a plain write lock would reintroduce the split snapshot this seam prevents.
+func (s *Server) mutatePackConfig(ctx context.Context, fn func() error) error {
+	if tx, ok := s.state.(PackConfigMutationTransaction); ok {
+		return tx.MutatePackConfig(ctx, fn)
 	}
-	return fn()
+	return errMutationsNotSupported
 }
 
 // packImportHTTPError maps importsvc sentinels to RFC 9457 problem responses.
 func packImportHTTPError(err error) error {
+	var statusErr huma.StatusError
 	var authErr *gitcred.AuthError
 	switch {
+	case errors.As(err, &statusErr):
+		return statusErr
+	case errors.Is(err, context.Canceled):
+		return huma.Error408RequestTimeout("request canceled while awaiting pack config mutation")
+	case errors.Is(err, context.DeadlineExceeded):
+		return apierr.GatewayTimeout.Msg("pack config mutation did not begin before the request deadline")
 	case errors.As(err, &authErr):
 		return packCredentialRequiredProblem(authErr)
 	case errors.Is(err, importsvc.ErrInvalidSource), errors.Is(err, importsvc.ErrScopeLoad),

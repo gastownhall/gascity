@@ -4898,10 +4898,11 @@ func TestBdStoreListWispAwareTiersTolerateAdaptersWithoutBdQuery(t *testing.T) {
 	}
 }
 
-// TestBdStoreListWispsFallsBackToClientFilteringForUnsafeQueryValues pins the
-// bd list storage-tier contract: bd list has no ephemeral-only flag, so wisp
-// reads use normal list flags and then filter the storage tier client-side.
-func TestBdStoreListWispsFallsBackToClientFilteringForUnsafeQueryValues(t *testing.T) {
+// TestBdStoreListWispsPushesSlashValuesAndFallsBackForUnsafeQueryValues pins
+// the bd query storage-tier contract: path-style identifiers are valid DSL
+// tokens and stay server-filtered, while values the DSL cannot represent
+// safely are filtered client-side.
+func TestBdStoreListWispsPushesSlashValuesAndFallsBackForUnsafeQueryValues(t *testing.T) {
 	cases := []struct {
 		name  string
 		query beads.ListQuery
@@ -4954,8 +4955,8 @@ func TestBdStoreListWispsFallsBackToClientFilteringForUnsafeQueryValues(t *testi
 			queryCmd := firstCommandWithPrefix(calls, "bd query ")
 			switch tc.name {
 			case "slash assignee":
-				if strings.Contains(queryCmd, "gascity/workflows.codex-max") {
-					t.Fatalf("query cmd = %q, unsafe slash assignee must be client-filtered", queryCmd)
+				if !strings.Contains(queryCmd, "assignee=gascity/workflows.codex-max") {
+					t.Fatalf("query cmd = %q, want server-filtered path-style assignee", queryCmd)
 				}
 			case "label with space":
 				if strings.Contains(queryCmd, "order tracking") {

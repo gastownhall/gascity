@@ -576,7 +576,9 @@ func TestStoreGetPersistedResponse(t *testing.T) {
 		"agent_name":   "polecat-7",
 		"session_name": "s-gpr-1",
 	})
-	front := NewStore(seedSessionStore(t, b))
+	b.Revision = 31
+	store := &persistedResponseGetCountStore{Store: seedSessionStore(t, b).Store}
+	front := NewStore(beads.SessionStore{Store: store})
 
 	info, pr, err := front.GetPersistedResponse("s-gpr-1")
 	if err != nil {
@@ -586,8 +588,11 @@ func TestStoreGetPersistedResponse(t *testing.T) {
 		t.Fatalf("Info mismatch\n got=%+v\nwant=%+v", info, wantInfo)
 	}
 	wantPR := PersistedResponseFromBead(b)
-	if pr.Status != wantPR.Status || !reflect.DeepEqual(pr.Metadata, wantPR.Metadata) {
+	if pr.Status != wantPR.Status || pr.Revision != wantPR.Revision || !reflect.DeepEqual(pr.Metadata, wantPR.Metadata) {
 		t.Fatalf("PersistedResponse mismatch\n got=%+v\nwant=%+v", pr, wantPR)
+	}
+	if store.gets != 1 {
+		t.Fatalf("GetPersistedResponse store.Get calls = %d, want one same-read Info/metadata/revision record", store.gets)
 	}
 
 	// Absent id: error equivalence with Get (both route through validatedBead and
@@ -605,6 +610,16 @@ func TestStoreGetPersistedResponse(t *testing.T) {
 	if _, _, err := taskFront.GetPersistedResponse("t-1"); !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("GetPersistedResponse(task) = %v, want ErrSessionNotFound", err)
 	}
+}
+
+type persistedResponseGetCountStore struct {
+	beads.Store
+	gets int
+}
+
+func (s *persistedResponseGetCountStore) Get(id string) (beads.Bead, error) {
+	s.gets++
+	return s.Store.Get(id)
 }
 
 // TestHasOpenSessionNamed pins the Live-tier existence probe: an open session

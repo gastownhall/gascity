@@ -83,6 +83,11 @@ const (
 
 	// ExportInterval is how often metrics are pushed to VictoriaMetrics.
 	ExportInterval = 30 * time.Second
+
+	// ForceFlushTimeout bounds an explicit telemetry export without shutting
+	// down the providers. It keeps optional health evidence from delaying its
+	// caller indefinitely when the collector is unavailable.
+	ForceFlushTimeout = 5 * time.Second
 )
 
 // package-level state for idempotent Init.
@@ -95,12 +100,50 @@ var (
 // Provider wraps OTel SDK providers and their shutdown functions.
 type Provider struct {
 	shutdowns    []func(context.Context) error
+	flushes      []func(context.Context) error
 	shutdownMu   sync.Mutex
 	shutdownDone bool
 
 	// resource is the OTel resource shared by all providers; retained so
 	// tests can assert Init wires newResource into the export pipeline.
 	resource *resource.Resource
+}
+
+// ForceFlush exports pending telemetry without stopping the providers.
+// The caller context is additionally bounded by ForceFlushTimeout.
+func (p *Provider) ForceFlush(ctx context.Context) error {
+	if p == nil {
+		return nil
+	}
+	if ctx == nil {
+		return errors.New("telemetry force flush: context is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, ForceFlushTimeout)
+	defer cancel()
+
+	var errs []error
+	for _, fn := range p.flushes {
+		if err := ctx.Err(); err != nil {
+			errs = append(errs, err)
+			break
+		}
+		if err := fn(ctx); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("telemetry force flush errors: %w", errors.Join(errs...))
+	}
+	return nil
+}
+
+// ForceFlush exports pending telemetry when provider is non-nil. It is a
+// nil-safe seam for optional telemetry callers and never shuts a provider down.
+func ForceFlush(ctx context.Context, provider *Provider) error {
+	return provider.ForceFlush(ctx)
 }
 
 // Shutdown flushes all pending data and stops the OTel providers.
@@ -270,6 +313,7 @@ func Init(ctx context.Context, serviceName, serviceVersion string) (*Provider, e
 	)
 	otel.SetMeterProvider(mp)
 	p.shutdowns = append(p.shutdowns, mp.Shutdown)
+	p.flushes = append(p.flushes, mp.ForceFlush)
 	initInstruments()
 
 	// Logs → VictoriaLogs
@@ -288,6 +332,7 @@ func Init(ctx context.Context, serviceName, serviceVersion string) (*Provider, e
 	)
 	global.SetLoggerProvider(lp)
 	p.shutdowns = append(p.shutdowns, lp.Shutdown)
+	p.flushes = append(p.flushes, lp.ForceFlush)
 
 	initDone = true
 	globalProvider = p

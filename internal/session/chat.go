@@ -431,7 +431,32 @@ func sessionName(id string, b beads.Bead) string {
 }
 
 func (m *Manager) loadSessionBead(id string, allowClosed bool) (beads.Bead, string, error) {
-	b, err := m.store.Get(id)
+	return m.loadSessionBeadWith(id, allowClosed, m.store.Get)
+}
+
+func (m *Manager) loadLiveSessionBead(id string, allowClosed bool) (beads.Bead, string, error) {
+	return m.loadSessionBeadWith(id, allowClosed, beads.HandlesFor(m.store).Live.Get)
+}
+
+func (m *Manager) validateLiveRuntimeStartIntent(id string, prepared beads.Bead, sessionName string) error {
+	current, currentName, err := m.loadLiveSessionBead(id, false)
+	if err != nil {
+		return err
+	}
+	preparedLease := LeaseFromInfo(infoFromPersistedBead(prepared))
+	currentLease := LeaseFromInfo(infoFromPersistedBead(current))
+	if currentName != sessionName || !preparedLease.SameIdentity(currentLease) {
+		return fmt.Errorf("%w: durable runtime-start intent changed", ErrStateSync)
+	}
+	return nil
+}
+
+func (m *Manager) loadSessionBeadWith(
+	id string,
+	allowClosed bool,
+	get func(string) (beads.Bead, error),
+) (beads.Bead, string, error) {
+	b, err := get(id)
 	if err != nil {
 		return beads.Bead{}, "", fmt.Errorf("getting session: %w", err)
 	}
@@ -620,6 +645,12 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
 	transport, _ := m.transportForBead(b, sessName)
 	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
+	failStart := func(err error) error {
+		if unroute != nil {
+			unroute()
+		}
+		return err
+	}
 	if m.sp.IsRunning(sessName) {
 		return nil
 	}
@@ -669,10 +700,14 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 	// work bead. This is the reconciler respawn bridge on a stable/reused bead
 	// ID. No fresh-create to roll back, so unroute and propagate before Start.
 	if orphanErr := m.killExistingOrphans(ctx, id); orphanErr != nil {
-		if unroute != nil {
-			unroute()
-		}
-		return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
+		return failStart(fmt.Errorf("pre-start orphan cleanup: %w", orphanErr))
+	}
+	// Runtime creation cannot be committed atomically with the durable intent
+	// that requested it. Re-read through the live handle immediately before the
+	// provider effect so an external close or replacement cannot be
+	// hidden by the controller cache while this start was queued.
+	if err := m.validateLiveRuntimeStartIntent(id, b, sessName); err != nil {
+		return failStart(err)
 	}
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 		switch {
@@ -968,6 +1003,64 @@ func (m *Manager) StartRuntimeOnly(ctx context.Context, id, resumeCommand string
 	})
 }
 
+// StartRuntimeOnlyAuthorized performs one caller-resolved runtime start after
+// an authorization callback succeeds immediately before the provider effect.
+// It intentionally bypasses ordinary already-running convergence, orphan
+// cleanup, and stale-key retry so a replacement runtime is never accepted,
+// stopped, or recycled by this exact-effect path.
+func (m *Manager) StartRuntimeOnlyAuthorized(
+	ctx context.Context,
+	id string,
+	resumeCommand string,
+	hints runtime.Config,
+	authorize func(context.Context) error,
+) error {
+	if authorize == nil {
+		return fmt.Errorf("authorized runtime start requires an authorization callback")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return withSessionMutationLock(id, func() error {
+		b, sessName, err := m.sessionBead(id)
+		if err != nil {
+			return err
+		}
+		command := strings.TrimSpace(resumeCommand)
+		if command == "" {
+			return fmt.Errorf("%w: %s", ErrResumeRequired, id)
+		}
+		cfg := hints
+		cfg.Command = command
+		if cfg.WorkDir == "" {
+			cfg.WorkDir = b.Metadata["work_dir"]
+		}
+		cfg = runtime.SyncWorkDirEnv(cfg)
+
+		if err := authorize(ctx); err != nil {
+			return fmt.Errorf("authorizing runtime start: %w", err)
+		}
+
+		transport, _ := m.transportForBead(b, sessName)
+		unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
+		failStart := func(cause error) error {
+			if unroute != nil {
+				unroute()
+			}
+			return cause
+		}
+		if err := m.sp.Start(ctx, sessName, cfg); err != nil {
+			// A same-name replacement may have appeared after authorization.
+			// Preserve its route and return the collision; never accept or unwind it.
+			if errors.Is(err, runtime.ErrSessionExists) {
+				return fmt.Errorf("resuming session: %w", err)
+			}
+			return failStart(fmt.Errorf("resuming session: %w", err))
+		}
+		return nil
+	})
+}
+
 // Send resumes a suspended session if needed, then nudges the runtime with a
 // new user message.
 func (m *Manager) Send(ctx context.Context, id, message, resumeCommand string, hints runtime.Config) error {
@@ -1026,6 +1119,63 @@ func (m *Manager) TryWaitIdleNudgeLiveOnly(ctx context.Context, id, source, mess
 		return err
 	})
 	return delivered, err
+}
+
+// NudgeWaitIdleAuthorized delivers a live-only nudge only after the provider
+// reports an idle boundary and authorize succeeds. The final delivery remains
+// fenced to expectedInstanceToken by the runtime provider, so a replacement
+// cannot receive input after authorization.
+func (m *Manager) NudgeWaitIdleAuthorized(ctx context.Context, id, source, message, expectedInstanceToken string, authorize func(context.Context) error) (bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := validateAuthorizedIdleNudge(message, expectedInstanceToken, authorize); err != nil {
+		return false, err
+	}
+	var delivered bool
+	err := withSessionMutationLock(id, func() error {
+		_, sessName, err := m.sessionBead(id)
+		if err != nil {
+			return err
+		}
+		if !m.sp.IsRunning(sessName) {
+			return nil
+		}
+		waiter, ok := m.sp.(runtime.IdleWaitProvider)
+		if !ok {
+			return nil
+		}
+		fenced, ok := m.sp.(runtime.FencedNudgeProvider)
+		if !ok {
+			return nil
+		}
+		content := runtime.TextContent(formatWaitIdleReminder(normalizeWaitIdleNudgeSource(source), message))
+		if err := waiter.WaitForIdle(ctx, sessName, waitIdleNudgeTimeout); err != nil {
+			return err
+		}
+		if err := authorize(ctx); err != nil {
+			return err
+		}
+		if err := fenced.NudgeFenced(sessName, expectedInstanceToken, content); err != nil {
+			return err
+		}
+		delivered = true
+		return nil
+	})
+	return delivered, err
+}
+
+func validateAuthorizedIdleNudge(message, expectedInstanceToken string, authorize func(context.Context) error) error {
+	if strings.TrimSpace(message) == "" {
+		return fmt.Errorf("authorized nudge message is required")
+	}
+	if strings.TrimSpace(expectedInstanceToken) == "" || strings.TrimSpace(expectedInstanceToken) != expectedInstanceToken {
+		return fmt.Errorf("authorized nudge expected instance token is required")
+	}
+	if authorize == nil {
+		return fmt.Errorf("authorized nudge callback is required")
+	}
+	return nil
 }
 
 // StopTurn issues a provider-appropriate interrupt for the currently running

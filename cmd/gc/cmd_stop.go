@@ -338,10 +338,12 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 	stopResult := tryStopControllerWithForce(cityPath, stdout, force)
 	switch stopResult.outcome {
 	case controllerStopAcknowledged:
-		if err := waitForStandaloneControllerStop(cityPath, cfg.Daemon.ShutdownTimeoutDuration()+15*time.Second); err != nil {
+		ownership, err := waitForAcknowledgedControllerOwnership(cityPath, stopResult, cfg.Daemon.ShutdownTimeoutDuration()+15*time.Second)
+		if err != nil {
 			fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
+		defer ownership.Close() //nolint:errcheck // retain ownership through terminal cleanup
 		// Controller handled the shutdown — still stop bead store below.
 		if err := shutdownBeadsProviderForStop(cityPath); err != nil {
 			fmt.Fprintf(stderr, "gc stop: bead store: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -400,13 +402,17 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 		graceTimeout = 0
 	}
 
-	code := doStopWithoutSuccess(sessionNames, sp, cfg, sessStore, graceTimeout, recorder, stdout, stderr)
+	code := doStopWithoutSuccessMessage(sessionNames, sp, cfg, sessStore, graceTimeout, recorder, stdout, stderr)
 
 	// Clean up orphan sessions (sessions with the city prefix that are
 	// not in the current config).
-	stopOrphans(sp, desired, cfg, sessionFrontDoor(sessStore), graceTimeout, recorder, stdout, stderr)
+	if stopOrphans(sp, desired, cfg, sessionFrontDoor(sessStore), graceTimeout, recorder, stdout, stderr) {
+		code = 1
+	}
 
-	teardownServerForStop(sp, stderr, "gc stop")
+	if code == 0 {
+		fmt.Fprintln(stdout, "City stopped.") //nolint:errcheck // best-effort stdout
+	}
 
 	// Stop bead store's backing service after agents.
 	if err := shutdownBeadsProviderForStop(cityPath); err != nil {
@@ -481,10 +487,13 @@ func stopCityManagedBeadsProvider(cityPath string) (bool, error) {
 var shutdownBeadsProviderForStop = shutdownBeadsProvider
 
 func stopManagedRuntimeWithoutConfig(cityPath string, cfgErr error, stdout, stderr io.Writer, force bool) (bool, int) {
-	controllerStopped, controllerErr := stopStandaloneControllerWithoutConfig(cityPath, stdout, force)
+	controllerStopped, ownership, controllerErr := stopStandaloneControllerWithoutConfig(cityPath, stdout, force)
 	if controllerErr != nil {
 		fmt.Fprintf(stderr, "gc stop: %v\n", controllerErr) //nolint:errcheck // best-effort stderr
 		return true, 1
+	}
+	if ownership != nil {
+		defer ownership.Close() //nolint:errcheck // retain ownership through terminal cleanup
 	}
 	stopped, stopErr := stopCityManagedBeadsProvider(cityPath)
 	if stopErr != nil {
@@ -498,31 +507,32 @@ func stopManagedRuntimeWithoutConfig(cityPath string, cfgErr error, stdout, stde
 	return true, 0
 }
 
-func stopStandaloneControllerWithoutConfig(cityPath string, stdout io.Writer, force bool) (bool, error) {
+func stopStandaloneControllerWithoutConfig(cityPath string, stdout io.Writer, force bool) (bool, *os.File, error) {
 	stopResult := tryStopControllerWithForce(cityPath, stdout, force)
 	switch stopResult.outcome {
 	case controllerStopAcknowledged:
-		if err := waitForStandaloneControllerStop(cityPath, supervisorCityStopTimeout(cityPath)); err != nil {
-			return true, err
+		ownership, err := waitForAcknowledgedControllerOwnership(cityPath, stopResult, supervisorCityStopTimeout(cityPath))
+		if err != nil {
+			return true, nil, err
 		}
-		return true, nil
+		return true, ownership, nil
 	case controllerStopDefinitePreEntryUnavailable:
 		// No stop request entered a controller, so the lock probe may proceed.
 	case controllerStopMayHaveEntered, controllerStopOutcomeInvalid:
-		return true, stopResult.failClosedError()
+		return true, nil, stopResult.failClosedError()
 	default:
-		return true, stopResult.failClosedError()
+		return true, nil, stopResult.failClosedError()
 	}
 	if _, err := os.Stat(filepath.Join(cityPath, ".gc")); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return false, nil
+			return false, nil, nil
 		}
-		return false, fmt.Errorf("probing standalone controller runtime dir: %w", err)
+		return false, nil, fmt.Errorf("probing standalone controller runtime dir: %w", err)
 	}
 	if err := waitForStandaloneControllerStop(cityPath, 0); err != nil {
-		return false, err
+		return false, nil, err
 	}
-	return false, nil
+	return false, nil, nil
 }
 
 func warnInvalidConfigAfterSuccessfulStop(cityPath string, stderr io.Writer) {
@@ -543,12 +553,12 @@ func warnInvalidConfigStopSuccess(err error, stderr io.Writer) {
 // isolation, all sessions on the socket belong to this city.
 func stopOrphans(sp runtime.Provider, desired map[string]bool, cfg *config.City, sessFront *session.Store,
 	timeout time.Duration, rec events.Recorder, stdout, stderr io.Writer,
-) {
+) bool {
 	running, err := sp.ListRunning("")
 	partialList := runtime.IsPartialListError(err)
 	if err != nil && !partialList {
 		fmt.Fprintf(stderr, "gc stop: listing sessions: %v\n", err) //nolint:errcheck // best-effort stderr
-		return
+		return true
 	}
 	if partialList {
 		fmt.Fprintf(stderr, "gc stop: listing sessions partially failed: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -561,6 +571,7 @@ func stopOrphans(sp runtime.Provider, desired map[string]bool, cfg *config.City,
 		orphans = append(orphans, name)
 	}
 	gracefulStopAll(orphans, sp, timeout, rec, cfg, sessFront.Store(), stdout, stderr)
+	return partialList
 }
 
 // tryStopController connects to the controller socket and sends "stop".
@@ -637,28 +648,33 @@ func controllerStopTimeoutError(identity controllerIdentityReply, waitingForLock
 // doStop is the pure logic for "gc stop". Filters to running sessions and
 // performs graceful shutdown (interrupt → wait → kill). Accepts session names,
 // provider, timeout, and recorder for testability.
-func doStop(sessionNames []string, sp runtime.Provider, cfg *config.City, store beads.Store, timeout time.Duration, //nolint:unparam // compatibility wrapper preserves the production-shaped store seam for direct tests
+//
+//nolint:unparam // compatibility wrapper preserves the established test seam; production passes its store to the no-message core.
+func doStop(sessionNames []string, sp runtime.Provider, cfg *config.City, store beads.Store, timeout time.Duration,
 	rec events.Recorder, stdout, stderr io.Writer,
 ) int {
-	code := doStopWithoutSuccess(sessionNames, sp, cfg, store, timeout, rec, stdout, stderr)
+	code := doStopWithoutSuccessMessage(sessionNames, sp, cfg, store, timeout, rec, stdout, stderr)
 	if code == 0 {
 		fmt.Fprintln(stdout, "City stopped.") //nolint:errcheck // best-effort stdout
 	}
 	return code
 }
 
-func doStopWithoutSuccess(sessionNames []string, sp runtime.Provider, cfg *config.City, store beads.Store, timeout time.Duration,
+func doStopWithoutSuccessMessage(sessionNames []string, sp runtime.Provider, cfg *config.City, store beads.Store, timeout time.Duration,
 	rec events.Recorder, stdout, stderr io.Writer,
 ) int {
 	visible := map[string]bool{}
+	observationIncomplete := false
 	if sp != nil {
 		names, err := sp.ListRunning("")
 		partialList := runtime.IsPartialListError(err)
 		if err != nil && !partialList {
+			observationIncomplete = true
 			fmt.Fprintf(stderr, "gc stop: listing sessions: %v\n", err) //nolint:errcheck // best-effort stderr
 			names = nil
 		}
 		if partialList {
+			observationIncomplete = true
 			fmt.Fprintf(stderr, "gc stop: listing sessions partially failed: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
 		for _, name := range names {
@@ -673,7 +689,15 @@ func doStopWithoutSuccess(sessionNames []string, sp runtime.Provider, cfg *confi
 		if sn == "" {
 			continue
 		}
-		if alive, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, sn); err == nil && alive {
+		alive, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, sn)
+		if err != nil {
+			// The target's own observation failed, so it is unknown rather
+			// than absent. Keep the error correlated to the target, withhold
+			// terminal success, and fall through to the runtime inventory so
+			// a positively witnessed name is still a cleanup candidate.
+			observationIncomplete = true
+			fmt.Fprintf(stderr, "gc stop: observing session %s: %v\n", sn, err) //nolint:errcheck // best-effort stderr
+		} else if alive {
 			running = append(running, sn)
 			continue
 		}
@@ -682,5 +706,8 @@ func doStopWithoutSuccess(sessionNames []string, sp runtime.Provider, cfg *confi
 		}
 	}
 	gracefulStopAll(running, sp, timeout, rec, cfg, beads.SessionStore{Store: store}, stdout, stderr)
+	if observationIncomplete {
+		return 1
+	}
 	return 0
 }

@@ -19,3 +19,4 @@
 # The rollout-gate registry is the only human gate on flag Expires extensions
 # and Category classification (an agent-authored repo); admin review is required.
 /internal/rollout/registry.go @gastownhall/gascity-admin
+/engdocs/plans/reconciler-redesign/ @gastownhall/gascity-admin

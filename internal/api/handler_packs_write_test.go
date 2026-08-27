@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -165,11 +166,10 @@ func TestHandlePackRemove(t *testing.T) {
 	}
 }
 
-// TestPackAddRemoveSerializeThroughConfigWriteLock is the regression for the
-// concurrency finding: the pack add/remove handlers must route their mutation
-// through the per-city config write lock (ConfigWriteSerializer), so they can
-// not interleave with each other or with configedit mutations of the same city.
-func TestPackAddRemoveSerializeThroughConfigWriteLock(t *testing.T) {
+// TestPackAddRemoveRouteThroughPackMutationTransaction proves both pack
+// handlers take the controller-owned transaction rather than an out-of-band
+// file-write path.
+func TestPackAddRemoveRouteThroughPackMutationTransaction(t *testing.T) {
 	restore := stubPackSourceResolver(t, map[string][]net.IP{
 		"github.com": {net.ParseIP("140.82.112.3")},
 	})
@@ -198,6 +198,9 @@ func TestPackAddRemoveSerializeThroughConfigWriteLock(t *testing.T) {
 	if got := state.serializeCalls.Load(); got != 1 {
 		t.Fatalf("add routed through config write lock %d times, want 1", got)
 	}
+	if got := state.packMutationCalls.Load(); got != 1 {
+		t.Fatalf("add pack transactions = %d, want 1", got)
+	}
 
 	delReq := httptest.NewRequest("DELETE", cityURL(state, "/packs/review"), nil)
 	delReq.Header.Set("X-GC-Request", "true")
@@ -208,5 +211,94 @@ func TestPackAddRemoveSerializeThroughConfigWriteLock(t *testing.T) {
 	}
 	if got := state.serializeCalls.Load(); got != 2 {
 		t.Fatalf("remove routed through config write lock; total calls = %d, want 2", got)
+	}
+	if got := state.packMutationCalls.Load(); got != 2 {
+		t.Fatalf("remove pack transactions = %d, want 2", got)
+	}
+}
+
+func TestPackAddRoutesRequestContextThroughPackMutationTransaction(t *testing.T) {
+	restore := stubPackSourceResolver(t, map[string][]net.IP{
+		"github.com": {net.ParseIP("140.82.112.3")},
+	})
+	t.Cleanup(restore)
+
+	original := packAddImport
+	packAddImport = func(fsys.FS, string, string, string, string) (*importsvc.AddResult, error) {
+		return &importsvc.AddResult{Name: "review", Source: "https://github.com/org/repo", GitBacked: true}, nil
+	}
+	t.Cleanup(func() { packAddImport = original })
+
+	state := newFakeMutatorState(t)
+	h := newTestCityHandler(t, state)
+	ctx := context.WithValue(context.Background(), packMutationContextKey{}, "request-value")
+	req := httptest.NewRequest(http.MethodPost, cityURL(state, "/packs"),
+		strings.NewReader(`{"source":"https://github.com/org/repo/tree/main/packs/review"}`)).WithContext(ctx)
+	req.Header.Set("X-GC-Request", "true")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	if got := state.packMutationCalls.Load(); got != 1 {
+		t.Fatalf("pack mutation transactions = %d, want 1", got)
+	}
+	if got := state.packMutationValue; got != "request-value" {
+		t.Fatalf("pack mutation context value = %#v, want request value", got)
+	}
+}
+
+func TestPackAddWithoutMutationTransactionReturnsNotImplemented(t *testing.T) {
+	restore := stubPackSourceResolver(t, map[string][]net.IP{
+		"github.com": {net.ParseIP("140.82.112.3")},
+	})
+	t.Cleanup(restore)
+
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodPost, cityURL(state, "/packs"),
+		strings.NewReader(`{"source":"https://github.com/org/repo/tree/main/packs/review"}`))
+	req.Header.Set("X-GC-Request", "true")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusNotImplemented, rec.Body.String())
+	}
+}
+
+func TestPackMutationAdmissionContextErrorsKeepHTTPMeaning(t *testing.T) {
+	restore := stubPackSourceResolver(t, map[string][]net.IP{
+		"github.com": {net.ParseIP("140.82.112.3")},
+	})
+	t.Cleanup(restore)
+
+	for _, tc := range []struct {
+		name    string
+		err     error
+		want    int
+		message string
+	}{
+		{name: "canceled", err: context.Canceled, want: http.StatusRequestTimeout, message: "canceled"},
+		{name: "deadline", err: context.DeadlineExceeded, want: http.StatusGatewayTimeout, message: "deadline"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := newFakeMutatorState(t)
+			state.packMutationErr = tc.err
+			h := newTestCityHandler(t, state)
+			req := httptest.NewRequest(http.MethodPost, cityURL(state, "/packs"),
+				strings.NewReader(`{"source":"https://github.com/org/repo/tree/main/packs/review"}`))
+			req.Header.Set("X-GC-Request", "true")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != tc.want {
+				t.Fatalf("status = %d, want %d; body=%s", rec.Code, tc.want, rec.Body.String())
+			}
+			if !strings.Contains(strings.ToLower(rec.Body.String()), tc.message) {
+				t.Fatalf("body = %s, want safe %q context", rec.Body.String(), tc.message)
+			}
+		})
 	}
 }

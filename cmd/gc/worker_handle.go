@@ -467,6 +467,22 @@ func workerKillSessionTargetWithConfig(cityPath string, store beads.Store, sp ru
 	return handle.Kill(context.Background())
 }
 
+func workerStopUnattendedSessionByIDWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, sessionID, expectedToken string) error {
+	factory, err := workerFactoryWithConfig(cityPath, store, sp, cfg)
+	if err != nil {
+		return err
+	}
+	handle, err := factory.SessionByID(sessionID)
+	if err != nil {
+		return err
+	}
+	stopper, ok := handle.(worker.UnattendedStopHandle)
+	if !ok {
+		return fmt.Errorf("worker handle does not support unattended-session stop")
+	}
+	return stopper.StopUnattended(context.Background(), expectedToken)
+}
+
 func workerStopSessionTargetWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) error {
 	handle, err := workerHandleForSessionTargetWithConfig(cityPath, store, sp, cfg, target)
 	if err != nil {
@@ -493,6 +509,22 @@ func workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath string, store
 		return worker.LiveObservation{}, err
 	}
 	return worker.ObserveHandle(context.Background(), handle)
+}
+
+func workerObserveLoadedSessionWithRuntimeHintsWithConfig(
+	ctx context.Context,
+	cityPath string,
+	store beads.Store,
+	sp runtime.Provider,
+	cfg *config.City,
+	info session.Info,
+	processNames []string,
+) (worker.LiveObservation, error) {
+	factory, err := workerFactoryWithConfig(cityPath, store, sp, cfg)
+	if err != nil {
+		return worker.LiveObservation{}, err
+	}
+	return factory.ObserveSessionInfo(ctx, info, processNames)
 }
 
 func workerSessionTargetRunningWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) (bool, error) {

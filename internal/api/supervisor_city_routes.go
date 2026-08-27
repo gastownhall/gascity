@@ -333,9 +333,19 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Summary:       "Add a pack",
 		Description:   "Imports a pack into the city by source (a remote git URL or registry ref), resolving + installing it so its templates compose into the city.",
 		DefaultStatus: http.StatusCreated,
-		Errors:        []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusBadGateway},
+		Errors: []int{
+			http.StatusBadRequest,
+			http.StatusUnauthorized,
+			http.StatusForbidden,
+			http.StatusNotFound,
+			http.StatusRequestTimeout,
+			http.StatusConflict,
+			http.StatusBadGateway,
+			http.StatusGatewayTimeout,
+			http.StatusNotImplemented,
+		},
 	}, (*Server).humaHandlePackAdd)
-	cityDelete(sm, "/packs/{name}", (*Server).humaHandlePackRemove, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound))
+	cityDelete(sm, "/packs/{name}", (*Server).humaHandlePackRemove, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusRequestTimeout, http.StatusNotImplemented, http.StatusGatewayTimeout))
 
 	// Sling. Part of the P12 error-contract pilot (see Beads above); a mutation,
 	// so it also declares 403 for the CSRF/read-only middleware.

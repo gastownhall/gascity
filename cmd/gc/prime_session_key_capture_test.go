@@ -70,7 +70,7 @@ func TestPersistPrimeHookProviderSessionKey_ClaudeHookStdinCaptured(t *testing.T
 
 	const claudeSessionID = "8273e9ca-ff09-4260-a03a-1f8534cc1ba5"
 	var stderr bytes.Buffer
-	persistPrimeHookProviderSessionKey(claudeSessionID, &stderr)
+	persistPrimeHookProviderSessionKeyAtCity(claudeSessionID, cityDir, &stderr)
 
 	got := reloadSessionKey(t, cityDir, id)
 	if got != claudeSessionID {
@@ -91,7 +91,7 @@ func TestPersistPrimeHookProviderSessionKey_CodexHookStdinStillCaptured(t *testi
 
 	const codexSessionID = "codex-abc-123"
 	var stderr bytes.Buffer
-	persistPrimeHookProviderSessionKey(codexSessionID, &stderr)
+	persistPrimeHookProviderSessionKeyAtCity(codexSessionID, cityDir, &stderr)
 
 	if got := reloadSessionKey(t, cityDir, id); got != codexSessionID {
 		t.Fatalf("codex session_key = %q, want %q", got, codexSessionID)
@@ -118,7 +118,7 @@ func TestPersistPrimeHookProviderSessionKey_ClaudeDoesNotOverwrite(t *testing.T)
 	isolateProviderSessionEnv(t)
 
 	var stderr bytes.Buffer
-	persistPrimeHookProviderSessionKey("different-uuid", &stderr)
+	persistPrimeHookProviderSessionKeyAtCity("different-uuid", cityDir, &stderr)
 
 	if got := reloadSessionKey(t, cityDir, b.ID); got != "original-uuid" {
 		t.Fatalf("session_key = %q, want unchanged %q", got, "original-uuid")
@@ -156,7 +156,7 @@ func TestPersistPrimeHookProviderSessionKey_UnsupportedFamilyHookStdinRejected(t
 	isolateProviderSessionEnv(t)
 
 	var stderr bytes.Buffer
-	persistPrimeHookProviderSessionKey("11111111-2222-3333-4444-555555555555", &stderr)
+	persistPrimeHookProviderSessionKeyAtCity("11111111-2222-3333-4444-555555555555", cityDir, &stderr)
 
 	if got := reloadSessionKey(t, cityDir, id); got != "" {
 		t.Fatalf("gemini session_key = %q, want empty (hook stdin id must not be captured for non-allowlisted families)", got)
@@ -177,7 +177,7 @@ func TestPersistPrimeHookProviderSessionKey_ClaudeEnvSessionIDCaptured(t *testin
 	t.Setenv("GC_PROVIDER_SESSION_ID", envSessionID)
 
 	var stderr bytes.Buffer
-	persistPrimeHookProviderSessionKey("", &stderr)
+	persistPrimeHookProviderSessionKeyAtCity("", cityDir, &stderr)
 
 	if got := reloadSessionKey(t, cityDir, id); got != envSessionID {
 		t.Fatalf("claude env session_key = %q, want %q (env path must be unaffected by the stdin gate)", got, envSessionID)
@@ -194,7 +194,7 @@ func TestPersistPrimeHookProviderSessionKey_RejectsIDEqualToGCSessionID(t *testi
 	isolateProviderSessionEnv(t)
 
 	var stderr bytes.Buffer
-	persistPrimeHookProviderSessionKey(id, &stderr) // hook id == gc session id
+	persistPrimeHookProviderSessionKeyAtCity(id, cityDir, &stderr) // hook id == gc session id
 
 	if got := reloadSessionKey(t, cityDir, id); got != "" {
 		t.Fatalf("session_key = %q, want empty (provider id equal to GC_SESSION_ID must be rejected)", got)

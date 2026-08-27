@@ -43,6 +43,27 @@ type LifecycleHandle interface {
 	StateHandle
 }
 
+// UnattendedStopHandle exposes the optional bound stop operation used only
+// when a caller must preserve a runtime provider's exact-incarnation proof.
+// Ordinary lifecycle operations remain on [LifecycleHandle].
+type UnattendedStopHandle interface {
+	StopUnattended(context.Context, string) error
+}
+
+// AuthorizedIdleNudgeHandle exposes the optional, live-only idle nudge path
+// for callers that must reauthorize immediately before a token-fenced input
+// effect.
+type AuthorizedIdleNudgeHandle interface {
+	NudgeWaitIdleAuthorized(context.Context, NudgeRequest, string, func(context.Context) error) (NudgeResult, error)
+}
+
+// AuthorizedStartHandle exposes the exact start path used when a caller must
+// reauthorize immediately before provider START. It deliberately does not
+// treat an existing runtime as success or recycle it.
+type AuthorizedStartHandle interface {
+	StartResolvedAuthorized(context.Context, string, runtime.Config, func(context.Context) error) error
+}
+
 // MessagingHandle exposes live input delivery operations.
 type MessagingHandle interface {
 	Message(context.Context, MessageRequest) (MessageResult, error)
@@ -309,14 +330,16 @@ type SessionHandle struct {
 }
 
 var (
-	_ Handle                = (*SessionHandle)(nil)
-	_ LifecycleHandle       = (*SessionHandle)(nil)
-	_ MessagingHandle       = (*SessionHandle)(nil)
-	_ TranscriptHandle      = (*SessionHandle)(nil)
-	_ HistoryHandle         = (*SessionHandle)(nil)
-	_ InteractionHandle     = (*SessionHandle)(nil)
-	_ PeekHandle            = (*SessionHandle)(nil)
-	_ LiveObservationHandle = (*SessionHandle)(nil)
+	_ Handle                    = (*SessionHandle)(nil)
+	_ AuthorizedStartHandle     = (*SessionHandle)(nil)
+	_ AuthorizedIdleNudgeHandle = (*SessionHandle)(nil)
+	_ LifecycleHandle           = (*SessionHandle)(nil)
+	_ MessagingHandle           = (*SessionHandle)(nil)
+	_ TranscriptHandle          = (*SessionHandle)(nil)
+	_ HistoryHandle             = (*SessionHandle)(nil)
+	_ InteractionHandle         = (*SessionHandle)(nil)
+	_ PeekHandle                = (*SessionHandle)(nil)
+	_ LiveObservationHandle     = (*SessionHandle)(nil)
 )
 
 type historyGeneration struct {

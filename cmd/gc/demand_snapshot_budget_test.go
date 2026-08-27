@@ -7,58 +7,69 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // The demand snapshot's read budget.
 //
-// load_demand_snapshot was 24.2s of a 373s maintainer-city tick, and two of its
-// three costs were reads of the remote work ledger that the operator invariant
-// says do not belong on the runtime plane at all (ga-l7jdg, bd memory
-// gascity-runtime-infra-store-invariant):
+// load_demand_snapshot was 24.2s of a 373s maintainer-city tick, and its largest
+// avoidable cost was a read of the remote work ledger that the operator
+// invariant says does not belong on the runtime plane at all (ga-l7jdg, bd
+// memory gascity-runtime-infra-store-invariant): collect_unassigned_routed,
+// 8.1s, one live open-list per census leg, SEQUENTIALLY, for work the operator
+// ruling says lives only in the graph store ("gc ready work will never be in the
+// work db").
 //
-//   - the CACHE CHECK itself. readyDemandSnapshotFingerprint issued one ReadyLive
-//     per store — city ledger, sessions binding, every rig — so asking "may I
-//     reuse the snapshot?" cost more remote round trips than most legs.
-//   - collect_unassigned_routed, 8.1s: one live open-list per census leg,
-//     SEQUENTIALLY, for work the operator ruling says lives only in the graph
-//     store ("gc ready work will never be in the work db").
+// collect_assigned_work deliberately keeps its ledger leg: a session whose only
+// claim is an HQ work bead must stay visible to the census or the drain gate
+// reaps a live holder (ga-w8ucu). Latency is not a reason to go blind about who
+// holds what.
 //
-// The third, collect_assigned_work, deliberately keeps its ledger leg: a session
-// whose only claim is an HQ work bead must stay visible to the census or the
-// drain gate reaps a live holder (ga-w8ucu). Latency is not a reason to go blind
-// about who holds what.
+// The third cost, the per-patrol cache check, is no longer the snapshot's to
+// pay: invalidation is the detector sweep's declared routed-work view
+// (ready_routed_work_view.go), whose own budget is pinned next to it.
 
-// TestDemandFingerprintIssuesZeroLedgerReadsOnASplitCity pins the cache check to
-// the infra binding.
-func TestDemandFingerprintIssuesZeroLedgerReadsOnASplitCity(t *testing.T) {
-	ledger := &countingReadyStore{Store: beads.NewMemStore()}
-	binding := &countingReadyStore{Store: beads.NewMemStore()}
-	cr := bindingFingerprintRuntime(t, ledger, binding)
-	routedStepIn(t, binding, "routed graph step")
-	routedStepIn(t, ledger, "routed work-ledger bead")
-
-	cr.readyDemandSnapshotFingerprint()
-
-	if ledger.readyCalls != 0 {
-		t.Fatalf("the demand cache check issued %d work-ledger Ready read(s), want 0 — at maintainer-city's ~5.4s RTT that is %v spent deciding whether to reuse a cache",
-			ledger.readyCalls, time.Duration(ledger.readyCalls)*5400*time.Millisecond)
+// bindingFingerprintRuntime builds a CityRuntime whose sessions class is served
+// from a DIFFERENT store than the work store, the way a converged split city
+// serves it.
+func bindingFingerprintRuntime(t *testing.T, work, binding beads.Store) *CityRuntime {
+	t.Helper()
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Storage:   infraSplitConfig(cityPath).Storage,
 	}
-	// Control: the binding answered, so the zero above is a routing fact and not
-	// a fingerprint that stopped reading.
-	if binding.readyCalls != 1 {
-		t.Fatalf("binding Ready reads = %d, want exactly 1", binding.readyCalls)
+	cr := &CityRuntime{
+		cityName: "test-city",
+		cityPath: cityPath,
+		cfg:      cfg,
+		cs: &controllerState{
+			cityName:      "test-city",
+			cityBeadStore: work,
+			eventProv:     events.NewFake(),
+		},
+		stderr: io.Discard,
 	}
+	cr.storageRoutes = &storageRoutes{binding: "infra", stores: map[coordclass.Class]beads.Store{
+		coordclass.ClassGraph:     binding,
+		coordclass.ClassSessions:  binding,
+		coordclass.ClassMessaging: binding,
+		coordclass.ClassOrders:    binding,
+		coordclass.ClassNudges:    binding,
+	}}
+	return cr
 }
 
 // TestDemandFingerprintPatrolMaxAgeOutlivesATick is the other half of "the cache
 // can engage".
 //
-// The age gate SHORT-CIRCUITS the fingerprint — loadDemandSnapshot only computes
-// the fingerprint when the snapshot is not already due — so a max age at or below
-// the tick duration means the fingerprint is never consulted and the snapshot is
-// rebuilt every tick no matter how little changed. On maintainer-city the tick
-// was 373s against a 30s max age, and the whole cache was dead code.
+// The max age is what licenses reuse when nothing the routed-work view sees has
+// moved, so a max age at or below the tick duration means the snapshot is
+// rebuilt every tick no matter how little changed and the cache is dead code. On
+// maintainer-city the tick was 373s against a 30s max age.
 func TestDemandFingerprintPatrolMaxAgeOutlivesATick(t *testing.T) {
 	cr := bindingFingerprintRuntime(t, beads.NewMemStore(), beads.NewMemStore())
 	maxAge := cr.demandSnapshotPatrolMaxAge()

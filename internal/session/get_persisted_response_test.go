@@ -1,7 +1,9 @@
 package session
 
 import (
+	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -64,5 +66,35 @@ func TestGetPersistedResponseNotFound(t *testing.T) {
 	mgr := NewManagerWithOptions(store, runtime.NewFake())
 	if _, _, err := mgr.PersistedStore().GetPersistedResponse("missing"); err == nil {
 		t.Fatal("GetPersistedResponse(missing): want error, got nil")
+	}
+}
+
+func TestPersistedResponseFromBeadCarriesRevision(t *testing.T) {
+	bead := sessionBeadFixture("s-revision", "open", map[string]string{
+		"state": "asleep",
+	})
+	bead.Revision = 47
+
+	got := PersistedResponseFromBead(bead)
+	if got.Revision != bead.Revision {
+		t.Fatalf("Revision = %d, want %d", got.Revision, bead.Revision)
+	}
+}
+
+func TestPersistedResponseRevisionIsJSONInvisible(t *testing.T) {
+	response := PersistedResponse{Status: "open", Revision: 47}
+	data, err := json.Marshal(response)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(strings.ToLower(string(data)), "revision") {
+		t.Fatalf("PersistedResponse JSON leaked revision: %s", data)
+	}
+
+	if err := json.Unmarshal([]byte(`{"Status":"closed","Revision":99}`), &response); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if response.Status != "closed" || response.Revision != 47 {
+		t.Fatalf("unmarshaled response = %#v, want updated status with revision retained at 47", response)
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/spf13/cobra"
 )
 
@@ -40,22 +41,184 @@ type traceControlReply struct {
 }
 
 type traceStatusJSON struct {
-	CityPath          string     `json:"city_path"`
-	AsOf              time.Time  `json:"as_of"`
-	ControllerRunning bool       `json:"controller_running"`
-	ControllerPID     int        `json:"controller_pid,omitempty"`
-	HeadSeq           uint64     `json:"head_seq"`
-	ActiveArms        []TraceArm `json:"active_arms"`
+	CityPath          string                       `json:"city_path"`
+	AsOf              time.Time                    `json:"as_of"`
+	ControllerRunning bool                         `json:"controller_running"`
+	ControllerPID     int                          `json:"controller_pid,omitempty"`
+	HeadSeq           uint64                       `json:"head_seq"`
+	ActiveArms        []TraceArm                   `json:"active_arms"`
+	SessionReconciler sessionReconcilerTraceStatus `json:"session_reconciler"`
 }
 
 type traceStatusResultJSON struct {
-	SchemaVersion     string     `json:"schema_version"`
-	CityPath          string     `json:"city_path"`
-	AsOf              time.Time  `json:"as_of"`
-	ControllerRunning bool       `json:"controller_running"`
-	ControllerPID     int        `json:"controller_pid,omitempty"`
-	HeadSeq           uint64     `json:"head_seq"`
-	ActiveArms        []TraceArm `json:"active_arms"`
+	SchemaVersion     string                       `json:"schema_version"`
+	CityPath          string                       `json:"city_path"`
+	AsOf              time.Time                    `json:"as_of"`
+	ControllerRunning bool                         `json:"controller_running"`
+	ControllerPID     int                          `json:"controller_pid,omitempty"`
+	HeadSeq           uint64                       `json:"head_seq"`
+	ActiveArms        []TraceArm                   `json:"active_arms"`
+	SessionReconciler sessionReconcilerTraceStatus `json:"session_reconciler"`
+}
+
+type sessionReconcilerTraceStatus struct {
+	SchemaVersion  string `json:"schema_version"`
+	Available      bool   `json:"available"`
+	ConfiguredMode string `json:"configured_mode"`
+	EffectiveOwner string `json:"effective_owner"`
+	PendingKeys    int    `json:"pending_keys"`
+	AuditPending   bool   `json:"audit_pending"`
+}
+
+func unavailableSessionReconcilerTraceStatus() sessionReconcilerTraceStatus {
+	return sessionReconcilerTraceStatus{
+		SchemaVersion:  "1",
+		Available:      false,
+		EffectiveOwner: "unavailable",
+	}
+}
+
+func normalizeSessionReconcilerTraceStatus(status sessionReconcilerTraceStatus) sessionReconcilerTraceStatus {
+	if status.SchemaVersion != "1" || status.PendingKeys < 0 {
+		return unavailableSessionReconcilerTraceStatus()
+	}
+	switch status.ConfiguredMode {
+	case "", "off", "auto", "require":
+	default:
+		return unavailableSessionReconcilerTraceStatus()
+	}
+	if !status.Available {
+		if status.EffectiveOwner != "unavailable" || status.PendingKeys != 0 || status.AuditPending {
+			return unavailableSessionReconcilerTraceStatus()
+		}
+		return status
+	}
+	valid := false
+	switch status.ConfiguredMode {
+	case "off":
+		valid = status.EffectiveOwner == "legacy" && status.PendingKeys == 0 && !status.AuditPending
+	case "auto":
+		valid = status.EffectiveOwner == "legacy" || status.EffectiveOwner == "keyed"
+	case "require":
+		valid = status.EffectiveOwner == "keyed" || status.EffectiveOwner == "required_blocked"
+	}
+	if !valid {
+		return unavailableSessionReconcilerTraceStatus()
+	}
+	return status
+}
+
+// sessionReconcilerTraceStatus returns a read-only snapshot of the live keyed
+// session-start controller. The controller socket is the authority for whether
+// a runtime is live; offline callers use unavailableSessionReconcilerTraceStatus.
+func (cr *CityRuntime) sessionReconcilerTraceStatus() sessionReconcilerTraceStatus {
+	if cr == nil {
+		return unavailableSessionReconcilerTraceStatus()
+	}
+
+	cr.sessionStartMu.Lock()
+	controller := cr.sessionStartController
+	if controller != nil {
+		controller.mu.Lock()
+	}
+	mode := cr.sessionStartMode
+	owner := cr.sessionStartOwnership
+	pendingKeys := 0
+	auditPending := false
+	if controller != nil {
+		pendingKeys = len(controller.admissions)
+		auditPending = controller.auditPending
+	}
+	configMutationPending := cr.cs != nil && cr.cs.configMutationPending.Load()
+	if controller != nil {
+		controller.mu.Unlock()
+	}
+	cr.sessionStartMu.Unlock()
+
+	sessionStartEventAdmission := false
+	sessionWaitShadowProducerAdmission := false
+	if cr.cs != nil {
+		cr.cs.mu.RLock()
+		sessionStartEventAdmission = cr.cs.sessionStartEventAdmission != nil
+		sessionWaitShadowProducerAdmission = cr.cs.sessionWaitShadowProducerAdmission != nil
+		cr.cs.mu.RUnlock()
+	}
+
+	cr.nudgeKeyMu.Lock()
+	nudgeKeyController := cr.nudgeKeyController != nil
+	cr.nudgeKeyMu.Unlock()
+
+	cr.sessionWaitDependencyMu.RLock()
+	waitDependencyProducer := cr.waitDependencyProducer != nil
+	cr.sessionWaitDependencyMu.RUnlock()
+
+	if mode == rollout.ModeUnset {
+		if cr.cs != nil {
+			mode = cr.cs.RolloutFlags().SessionReconciler()
+		}
+		configuredMode, _ := sessionReconcilerTraceConfiguredMode(mode)
+		return normalizeSessionReconcilerTraceStatus(sessionReconcilerTraceStatus{
+			SchemaVersion:  "1",
+			ConfiguredMode: configuredMode,
+			EffectiveOwner: "unavailable",
+		})
+	}
+
+	configuredMode, modeOK := sessionReconcilerTraceConfiguredMode(mode)
+	effectiveOwner, ownerOK := sessionReconcilerTraceEffectiveOwner(owner)
+	controllerTupleOK := (owner == sessionStartOwnershipKeyed) == (controller != nil)
+	offLegacyOwnersAbsent := mode != rollout.Off ||
+		owner != sessionStartOwnershipLegacy ||
+		(controller == nil &&
+			!sessionStartEventAdmission &&
+			!nudgeKeyController &&
+			!waitDependencyProducer &&
+			!sessionWaitShadowProducerAdmission)
+	if !modeOK || !ownerOK || !controllerTupleOK || !offLegacyOwnersAbsent {
+		return unavailableSessionReconcilerTraceStatus()
+	}
+
+	status := sessionReconcilerTraceStatus{
+		SchemaVersion:  "1",
+		Available:      true,
+		ConfiguredMode: configuredMode,
+		EffectiveOwner: effectiveOwner,
+		PendingKeys:    pendingKeys,
+		AuditPending:   auditPending,
+	}
+	if owner == sessionStartOwnershipKeyed && configMutationPending {
+		switch mode {
+		case rollout.Auto:
+			status.EffectiveOwner = "legacy"
+		case rollout.Require:
+			status.EffectiveOwner = "required_blocked"
+		}
+	}
+	return normalizeSessionReconcilerTraceStatus(status)
+}
+
+func sessionReconcilerTraceConfiguredMode(mode rollout.Mode) (string, bool) {
+	switch mode {
+	case rollout.Auto:
+		return "auto", true
+	case rollout.Require:
+		return "require", true
+	case rollout.Off:
+		return "off", true
+	}
+	return "", false
+}
+
+func sessionReconcilerTraceEffectiveOwner(owner sessionStartOwnership) (string, bool) {
+	switch owner {
+	case sessionStartOwnershipKeyed:
+		return "keyed", true
+	case sessionStartOwnershipRequiredBlocked:
+		return "required_blocked", true
+	case sessionStartOwnershipLegacy:
+		return "legacy", true
+	}
+	return "", false
 }
 
 type traceShowResultJSON struct {
@@ -352,27 +515,42 @@ func cmdTraceStatusWithJSON(jsonOut bool, stdout, stderr io.Writer) int {
 		ControllerPID:     status.ControllerPID,
 		HeadSeq:           head,
 		ActiveArms:        activeArms,
+		SessionReconciler: status.SessionReconciler,
 	}
-	if jsonOut {
-		if err := writeCLIJSONLine(stdout, result); err != nil {
-			fmt.Fprintf(stderr, "gc trace status: %v\n", err) //nolint:errcheck
-			return 1
-		}
-		return 0
-	}
-
-	fmt.Fprintf(stdout, "Trace status for %s\n", cityPath)                    //nolint:errcheck
-	fmt.Fprintf(stdout, "Controller running: %t\n", status.ControllerRunning) //nolint:errcheck
-	if status.ControllerPID > 0 {
-		fmt.Fprintf(stdout, "Controller PID: %d\n", status.ControllerPID) //nolint:errcheck
-	}
-	fmt.Fprintf(stdout, "Head seq: %d\n", head)                     //nolint:errcheck
-	fmt.Fprintf(stdout, "Active trace arms: %d\n", len(activeArms)) //nolint:errcheck
-	for _, arm := range activeArms {
-		_, _ = fmt.Fprintf(stdout, "- %s %s %s until %s\n",
-			arm.Source, arm.ScopeValue, arm.Level, arm.ExpiresAt.Format(time.RFC3339))
+	if err := renderTraceStatusResult(stdout, result, jsonOut); err != nil {
+		fmt.Fprintf(stderr, "gc trace status: %v\n", err) //nolint:errcheck
+		return 1
 	}
 	return 0
+}
+
+func renderTraceStatusResult(stdout io.Writer, result traceStatusResultJSON, jsonOut bool) error {
+	result.SchemaVersion = "1"
+	result.SessionReconciler = normalizeSessionReconcilerTraceStatus(result.SessionReconciler)
+	if jsonOut {
+		return writeCLIJSONLine(stdout, result)
+	}
+
+	var rendered strings.Builder
+	_, _ = fmt.Fprintf(&rendered, "Trace status for %s\n", result.CityPath)
+	_, _ = fmt.Fprintf(&rendered, "Controller running: %t\n", result.ControllerRunning)
+	if result.ControllerPID > 0 {
+		_, _ = fmt.Fprintf(&rendered, "Controller PID: %d\n", result.ControllerPID)
+	}
+	_, _ = fmt.Fprintf(&rendered, "Head seq: %d\n", result.HeadSeq)
+	_, _ = fmt.Fprintf(&rendered, "Active trace arms: %d\n", len(result.ActiveArms))
+	for _, arm := range result.ActiveArms {
+		_, _ = fmt.Fprintf(&rendered, "- %s %s %s until %s\n",
+			arm.Source, arm.ScopeValue, arm.Level, arm.ExpiresAt.Format(time.RFC3339))
+	}
+	_, _ = fmt.Fprintf(&rendered, "Session reconciler schema version: %s\n", result.SessionReconciler.SchemaVersion)
+	_, _ = fmt.Fprintf(&rendered, "Session reconciler available: %t\n", result.SessionReconciler.Available)
+	_, _ = fmt.Fprintf(&rendered, "Session reconciler configured mode: %s\n", result.SessionReconciler.ConfiguredMode)
+	_, _ = fmt.Fprintf(&rendered, "Session reconciler effective owner: %s\n", result.SessionReconciler.EffectiveOwner)
+	_, _ = fmt.Fprintf(&rendered, "Session reconciler pending keys: %d\n", result.SessionReconciler.PendingKeys)
+	_, _ = fmt.Fprintf(&rendered, "Session reconciler audit pending: %t\n", result.SessionReconciler.AuditPending)
+	_, err := io.WriteString(stdout, rendered.String())
+	return err
 }
 
 func traceStatusHeadSeq(status traceStatusJSON, cityPath string) (uint64, error) {
@@ -715,6 +893,7 @@ func traceStatusFromState(cityPath string, state TraceArmState, now time.Time) t
 		ControllerPID:     pid,
 		HeadSeq:           head,
 		ActiveArms:        arms,
+		SessionReconciler: unavailableSessionReconcilerTraceStatus(),
 	}
 }
 
@@ -745,6 +924,10 @@ func traceSocketStatus(cityPath string) (*traceStatusJSON, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
+	return decodeTraceStatusReply(resp)
+}
+
+func decodeTraceStatusReply(resp []byte) (*traceStatusJSON, string, error) {
 	var reply traceControlReply
 	if err := json.Unmarshal(resp, &reply); err != nil {
 		return nil, "", err
@@ -754,6 +937,9 @@ func traceSocketStatus(cityPath string) (*traceStatusJSON, string, error) {
 			reply.Error = "trace status failed"
 		}
 		return nil, "", fmt.Errorf("%s", reply.Error)
+	}
+	if reply.Status != nil {
+		reply.Status.SessionReconciler = normalizeSessionReconcilerTraceStatus(reply.Status.SessionReconciler)
 	}
 	return reply.Status, reply.Message, nil
 }
@@ -787,11 +973,14 @@ func handleTraceSocketCmd(conn net.Conn, cityPath, action, payload string) bool 
 	return true
 }
 
-func handleTraceStatusSocketCmd(conn net.Conn, cityPath string) {
+func handleTraceStatusSocketCmd(conn net.Conn, cityPath string, sessionReconcilerStatus func() sessionReconcilerTraceStatus) {
 	status, _, err := traceStatusLocal(cityPath)
 	if err != nil {
 		writeJSONLine(conn, traceControlReply{OK: false, Error: err.Error()})
 		return
+	}
+	if sessionReconcilerStatus != nil {
+		status.SessionReconciler = normalizeSessionReconcilerTraceStatus(sessionReconcilerStatus())
 	}
 	writeJSONLine(conn, traceControlReply{OK: true, Message: "ok", Status: status})
 }

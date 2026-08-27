@@ -43,6 +43,11 @@ var ErrSessionDiedDuringStartup = errors.New("session died during startup")
 // dispatch with errors.Is.
 var ErrSessionNotFound = errors.New("session not found")
 
+// ErrInputFenced reports that a runtime could not safely inject input because
+// its terminal state is ambiguous or reserved for user interaction. Callers
+// should leave the input pending and retry once the fence clears.
+var ErrInputFenced = errors.New("runtime input is fenced")
+
 // ErrExecUnsupported reports that a provider implements [ExecProvider] but the
 // underlying runtime does not implement the RPP `exec` wire op (it answered
 // exit 2). Carriers treat this as "fall back to the legacy driving op".
@@ -229,6 +234,13 @@ type Provider interface {
 	Capabilities() ProviderCapabilities
 }
 
+// UnattendedSessionStopper is an optional extension for providers that can
+// prove a destructive effect still targets the expected session incarnation,
+// has no interactive owner, and then stop that exact runtime incarnation.
+type UnattendedSessionStopper interface {
+	StopUnattendedSession(name, expectedToken string) error
+}
+
 // PendingInteraction describes a blocking interaction raised by a session.
 // This is an optional capability exposed by providers that support
 // structured approvals, questions, or other turn-blocking prompts.
@@ -263,6 +275,16 @@ type InteractionProvider interface {
 // rely on timeout-bounded completion for cleanup.
 type IdleWaitProvider interface {
 	WaitForIdle(ctx context.Context, name string, timeout time.Duration) error
+}
+
+// FencedNudgeProvider is an optional extension for runtimes that can inject
+// input only when the live target still has the expected GC_INSTANCE_TOKEN at
+// the provider's native effect boundary.
+//
+// Implementations must fail closed without injecting input when the expected
+// token is empty, malformed, or no longer identifies the live target.
+type FencedNudgeProvider interface {
+	NudgeFenced(name, expectedInstanceToken string, content []ContentBlock) error
 }
 
 // ExecProvider is an optional extension for runtimes that expose the RPP

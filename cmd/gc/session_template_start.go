@@ -198,7 +198,7 @@ func materializeSessionForTemplateWithOptions(
 					return createErr
 				})
 				if createErr == nil {
-					_ = pokeController(cityPath)
+					_ = pokeSessionStartController(cityPath, info.ID)
 					return info.SessionName, nil
 				}
 				if snapshot, err := loadSessionBeadSnapshot(store); err == nil {
@@ -353,7 +353,7 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 				return createErr
 			})
 			if createErr == nil {
-				_ = pokeController(cityPath)
+				_ = pokeSessionStartController(cityPath, info.ID)
 				return info.SessionName, nil
 			}
 			return "", createErr

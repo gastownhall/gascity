@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
 )
@@ -22,13 +23,20 @@ type primeHookContextInjection struct {
 // consumeHandoff gates only the destructive archive: preview callers (--json)
 // still render the exact text the hook would emit, but must not consume the
 // durable mail out from under the real SessionStart invocation.
-func primeHookContextSuffix(cityPath string, hookMode bool, hookContext primeHookContext, stderr io.Writer, consumeHandoff bool) primeHookContextInjection {
+func primeHookContextSuffix(cityPath string, sessionStartStore beads.Store, hookMode bool, hookContext primeHookContext, stderr io.Writer, consumeHandoff bool) primeHookContextInjection {
 	if !hookMode {
 		return primeHookContextInjection{}
 	}
 	injection := primeHookContextInjection{text: wispStepInjectionContent(cityPath)}
 	if primeHookSessionStart(hookContext) {
-		autoHandoff, autoHandoffIDs := sessionStartAutoHandoffInjection(stderr)
+		var autoHandoff primeHookContextInjection
+		var autoHandoffIDs map[string]bool
+		var ordinaryMailProvider mail.Provider
+		if sessionStartStore != nil {
+			autoHandoff, autoHandoffIDs, ordinaryMailProvider = sessionStartAutoHandoffInjectionWithStore(sessionStartStore, cityPath, stderr)
+		} else {
+			autoHandoff, autoHandoffIDs, ordinaryMailProvider = sessionStartAutoHandoffInjection(stderr)
+		}
 		injection.text += autoHandoff.text
 		if consumeHandoff {
 			injection.afterDelivery = autoHandoff.afterDelivery
@@ -40,7 +48,7 @@ func primeHookContextSuffix(cityPath string, hookMode bool, hookContext primeHoo
 		// READ-ONLY — it never archives, so it can never consume/hide a message —
 		// and it excludes the auto-handoff messages already rendered above so a
 		// beadmail-backed ordinary provider does not double-render them.
-		injection.text += primeUnreadMailInjection(autoHandoffIDs)
+		injection.text += primeUnreadMailInjectionWithProvider(autoHandoffIDs, ordinaryMailProvider)
 	}
 	return injection
 }
@@ -66,7 +74,23 @@ func primeInjectMailContent() string {
 // archives/mutates mail (so the SessionStart preview cannot consume/hide a
 // message), and any error degrades silently to "" so a prime is never blocked.
 func primeUnreadMailInjection(skip map[string]bool) string {
-	messages := primeUnreadMailMessages()
+	return primeUnreadMailInjectionWithProvider(skip, nil)
+}
+
+// primeUnreadMailInjectionWithProvider is the read/format half of
+// primeUnreadMailInjection. SessionStart supplies the provider already built
+// over its auto-handoff stores; nil keeps the standalone opener fallback.
+func primeUnreadMailInjectionWithProvider(skip map[string]bool, mp mail.Provider) string {
+	if mp == nil {
+		mp, _ = openCityMailProvider(io.Discard, "gc prime")
+	}
+	if mp == nil {
+		return ""
+	}
+	messages, err := collectMailMessages(mp.Check, defaultMailIdentityCandidates())
+	if err != nil {
+		return ""
+	}
 	if len(skip) > 0 {
 		kept := make([]mail.Message, 0, len(messages))
 		for _, m := range messages {
@@ -82,52 +106,52 @@ func primeUnreadMailInjection(skip map[string]bool) string {
 	return formatInjectOutput(messages)
 }
 
-// primeUnreadMailMessages returns the current agent's unread ordinary mail via
-// the configured city mail provider, using the same identity candidates as the
-// check path (GC_SESSION_ID/GC_ALIAS/GC_AGENT via defaultMailIdentityCandidates)
-// but resolved by the provider's own recipient routing rather than by
-// resolveMailTargetsWithConfig — so this reads the union of those candidates,
-// not the first-resolving target. It is read-only and returns nil on any error.
-func primeUnreadMailMessages() []mail.Message {
-	mp, _ := openCityMailProvider(io.Discard, "gc prime")
-	if mp == nil {
-		return nil
-	}
-	messages, err := collectMailMessages(mp.Check, defaultMailIdentityCandidates())
-	if err != nil {
-		return nil
-	}
-	return messages
-}
-
 // sessionStartAutoHandoffInjection returns only durable auto-handoff mail for
-// the current managed session, along with the set of auto-handoff message IDs it
-// rendered (so the ordinary-unread-mail block can dedup against them). It
-// intentionally constructs beadmail directly: gc handoff persists this
-// continuation class through beadmail regardless of any separately configured
-// ordinary-mail provider.
-func sessionStartAutoHandoffInjection(stderr io.Writer) (primeHookContextInjection, map[string]bool) {
+// the current managed session, the set of auto-handoff message IDs it rendered,
+// and the configured ordinary-mail provider built over the same already-open
+// class stores. It intentionally handles auto-handoff through beadmail:
+// gc handoff persists this continuation class there regardless of any separately
+// configured ordinary-mail provider.
+func sessionStartAutoHandoffInjection(stderr io.Writer) (primeHookContextInjection, map[string]bool, mail.Provider) {
 	store, cityPath, code := openCityStoreWithPath(io.Discard, "gc prime")
 	if store == nil || code != 0 {
-		return primeHookContextInjection{}, nil
+		return primeHookContextInjection{}, nil, nil
 	}
-	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	return sessionStartAutoHandoffInjectionWithStore(store, cityPath, stderr)
+}
+
+// sessionStartAutoHandoffInjectionWithStore builds SessionStart mail context
+// from a caller-owned base store. Class-store routing still runs normally; only
+// the redundant base city-store open is skipped.
+func sessionStartAutoHandoffInjectionWithStore(store beads.Store, cityPath string, stderr io.Writer) (primeHookContextInjection, map[string]bool, mail.Provider) {
+	if store == nil {
+		return primeHookContextInjection{}, nil, nil
+	}
+	cfg, cfgErr := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 	msgStore := resolveMailMessagesStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)
 	sessStore := cliSessionStore(store, cfg, cityPath)
+	var ordinaryMailProvider mail.Provider
+	if cfgErr == nil && cfg != nil {
+		providerName := cfg.Mail.Provider
+		if override := os.Getenv("GC_MAIL"); override != "" {
+			providerName = override
+		}
+		ordinaryMailProvider = newMailProviderNamedWithSessionStore(providerName, msgStore, sessStore, true)
+	}
 	mp := beadmail.NewWithStores(msgStore, sessStore)
 	sessionID := strings.TrimSpace(os.Getenv("GC_SESSION_ID"))
 	target, err := resolveMailTargetsWithConfig(cityPath, cfg, sessStore, sessionID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc prime: resolving auto-handoff mailbox: %v\n", err) //nolint:errcheck // best-effort hook diagnostics
-		return primeHookContextInjection{}, nil
+		return primeHookContextInjection{}, nil, ordinaryMailProvider
 	}
 	messages, err := mp.CheckAutoHandoffs(target.recipients)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc prime: checking auto-handoff mail: %v\n", err) //nolint:errcheck // best-effort hook diagnostics
-		return primeHookContextInjection{}, nil
+		return primeHookContextInjection{}, nil, ordinaryMailProvider
 	}
 	if len(messages) == 0 {
-		return primeHookContextInjection{}, nil
+		return primeHookContextInjection{}, nil, ordinaryMailProvider
 	}
 	ids := make(map[string]bool, len(messages))
 	for _, m := range messages {
@@ -142,5 +166,5 @@ func sessionStartAutoHandoffInjection(stderr io.Writer) (primeHookContextInjecti
 		afterDelivery: func() {
 			archiveInjectedAutoHandoffMessages(mp, injectedMessages, stderr)
 		},
-	}, ids
+	}, ids, ordinaryMailProvider
 }

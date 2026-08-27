@@ -30,17 +30,32 @@ type retiredKey struct {
 // classifier (classifyUndecoded), and IsRetiredKeyWarning keeps it non-fatal +
 // surfaced on the two downstream deciders that re-classify config warnings —
 // strict mode (cmd/gc/strict_warnings.go) and the agent warning-emit path
-// (cmd/gc/cmd_agent.go). It is intentionally empty until the first consumer:
-// S5-T7 retires daemon.graph_workflows (today still a live formula_v2 alias).
+// (cmd/gc/cmd_agent.go).
 //
-// S5-T7 INTEGRATION NOTES (deferred to the change that adds the first entry):
+// The Note is what the operator acts on, so it states what the BEHAVIOR now
+// does, not merely that the spelling went away: "unknown field" reads like a
+// typo, and an operator who deletes the line believing nothing changed is the
+// failure this registry exists to prevent.
+//
+// INTEGRATION NOTES for further entries:
 //   - Whole-table retirement needs BOTH the parent-table key and each leaf key
 //     registered, because toml.MetaData.Undecoded() reports both.
 //   - The struct-round-trip rewrite guard (GuardRewriteKeyLoss in
 //     site_binding.go) and `gc migrate` still refuse a file carrying a retired
-//     key (the rewrite would drop it). S5-T7 must decide whether to exempt
-//     retired keys there or reword the "upgrade gc" guidance.
-var retiredKeys = map[string]retiredKey{}
+//     key (the rewrite would drop it) — the same refusal an unknown key already
+//     got, so registering a key here does not change that path. A future entry
+//     may want to exempt retired keys there or reword the "upgrade gc" guidance.
+//   - daemon.graph_workflows is NOT here: it is still a live formula_v2 alias.
+var retiredKeys = map[string]retiredKey{
+	"daemon.tick_debounce": {
+		RemovedIn: "the release after v1.4.1",
+		Note: "the tick debounce window is gone, not just the key: event-driven pokes " +
+			"arriving between ticks now fire one tick each (only the in-tick cap-1 " +
+			"coalesce survives). There is no replacement knob — patrol_interval paces " +
+			"the periodic scan, not the pokes. Remove the key, and watch bd/dolt " +
+			"connection load across the first restart if you set it for shared-store load",
+	},
+}
 
 // retiredKeyWarning renders the migration warning for a retired key.
 func retiredKeyWarning(source, key string, rk retiredKey) string {

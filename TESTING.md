@@ -503,9 +503,9 @@ all-source audit while staying outside untagged and Small debt.
 <!-- BEGIN CHECKED TEST RESOURCE LEDGER -->
 | Ledger kind | Source scope | Resource baseline | Tracking owner | Invariant / resource owner | Migration | Expiry |
 | --- | --- | --- | --- | --- | --- | --- |
-| Audit baseline | all tracked test source | fixed_sleep: 474 calls / 169 files (historical regex census: 447 / 157) | ga-80po0c.2 | tracked test source totals remain visible as audit evidence; ga-80po0c.2 owns this point-in-time source census | P0.4a | 2026-10-01 |
+| Audit baseline | all tracked test source | fixed_sleep: 478 calls / 171 files (historical regex census: 447 / 157) | ga-80po0c.2 | tracked test source totals remain visible as audit evidence; ga-80po0c.2 owns this point-in-time source census | P0.4a | 2026-10-01 |
 | Audit baseline | all tracked test source | listener_helper: 58 calls / 23 files | ga-80po0c.2.2.3 | all-source listener-helper call/file totals cannot drift without an explicit checked policy update; ga-80po0c.2.2.3 owns this all-source audit; tagged calls stay Large and receive no Medium exemption | P0.4c-listener-helper | 2026-10-01 |
-| Audit baseline | all tracked test source | subprocess: 636 calls / 184 files (historical regex census: 495 / 135) | ga-80po0c.2 | tracked test source totals remain visible as audit evidence; ga-80po0c.2 owns this point-in-time source census | P0.4a | 2026-10-01 |
+| Audit baseline | all tracked test source | subprocess: 642 calls / 187 files (historical regex census: 495 / 135) | ga-80po0c.2 | tracked test source totals remain visible as audit evidence; ga-80po0c.2 owns this point-in-time source census | P0.4a | 2026-10-01 |
 | Medium owner | `cmd/gc` package `main` | TestMain: environment, tmux | ga-80po0c.2.1 | cmd/gc TestMain is the checked package-level Medium owner for process environment and tmux namespace setup; only declared environment and tmux calls lexically inside TestMain leave Small debt | P0.4b/P0.4c-tmux | 2026-10-01 |
 | Medium owner | `cmd/gc` package `main` | TestPassthroughEnvWithholdsControllerTokenFromChildProcess: subprocess | ga-80po0c.2.1 | the controller-token withholding proof is a checked Medium subprocess owner; the one /bin/sh subprocess is confined to TestPassthroughEnvWithholdsControllerTokenFromChildProcess, which exists to read a credential back out of a real child process: the session env is an overlay, so only a real child can prove GC_CONTROLLER_TOKEN is absent rather than merely missing from a map | P0.4b | 2026-10-01 |
 | Medium owner | `internal/api` package `api` | TestEveryEmittedErrorCodeIsRegistered: subprocess | ga-80po0c.2.1 | internal/api tracked-source error URN guard is a checked Medium owner; only the git ls-files call lexically inside TestEveryEmittedErrorCodeIsRegistered leaves Small debt | P0.4b | 2026-10-01 |
@@ -514,6 +514,7 @@ all-source audit while staying outside untagged and Small debt.
 | Medium owner | `internal/runtime/herdr` package `herdr` | TestServerAliveDetectsLiveServer: net_listen | ga-80po0c.2.2.2 | herdr live-server liveness regression is a checked Medium stream-listener owner; the Unix stream listener is confined to TestServerAliveDetectsLiveServer and closed by test cleanup | P0.4c-listener | 2026-10-01 |
 | Medium owner | `internal/runtime/herdr` package `herdr` | TestServerAliveRejectsStaleSocket: net_listen | ga-80po0c.2.2.2 | herdr stale-socket liveness regression is a checked Medium stream-listener owner; the Unix stream listener is confined to TestServerAliveRejectsStaleSocket and closed before liveness detection | P0.4c-listener | 2026-10-01 |
 | Medium owner | `internal/runtime/tmux` package `tmux` | TestMain: environment, tmux | ga-80po0c.2.2.1 | runtime tmux TestMain is the checked Medium owner for isolated tmux process and socket cleanup; only declared environment and tmux calls lexically inside TestMain leave Small debt | P0.4c-tmux | 2026-10-01 |
+| Medium owner | `internal/telemetry` package `telemetry` | TestForceFlushAcknowledgesHealthProbeAtIsolatedOTLPReceiver: http_test_server | ga-f7v2ft.44.1 | isolated OTLP receiver acknowledgment is a checked Medium owner; the one HTTP test server is confined to TestForceFlushAcknowledgesHealthProbeAtIsolatedOTLPReceiver and closed by the test | P0.4c | 2026-10-01 |
 | Medium owner | `scripts` package `scripts_test` | TestDockerSessionProtocol: subprocess | ga-80po0c.23.1 | Docker session adapter protocol proof is a checked Medium owner; the one adapter subprocess is confined to TestDockerSessionProtocol and Docker itself is a strict PATH-injected fake | W6 | 2026-10-01 |
 | Medium owner | `scripts` package `scripts_test` | TestProviderOverridesAndSuiteContractsCrossMakeIsolation: subprocess | ga-80po0c.2.1 | Make/provider and suite-contract proof is a checked Medium owner; the six isolated Make invocations are confined to TestProviderOverridesAndSuiteContractsCrossMakeIsolation | P0.1 | 2026-10-01 |
 | Small debt ratchet | `cmd/gc` untagged test source | cwd: 174 calls / 16 files (historical regex census: 284 / 43) | ga-80po0c.2.1 | untagged Small cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners restore or eliminate every cwd mutation | D5/D6 | 2026-10-01 |
@@ -532,7 +533,7 @@ all-source audit while staying outside untagged and Small debt.
 | Source debt ratchet | `cmd/gc` untagged test source | environment: 122 calls / 13 files (historical regex census: 3960 / 184) | ga-80po0c.2.3 | untagged cmd/gc environment call/file totals cannot grow; reductions must lower this baseline; cmd/gc callers restore or eliminate every recognized process-environment mutation | D5/D6/E6 | 2026-10-01 |
 | Source debt ratchet | `cmd/gc` untagged test source | slow_process_gate: 58 calls / 24 files (historical regex census: 78 / 27) | ga-80po0c.2.3 | untagged cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline; the helper definition and every marked caller retain an explicit process-suite migration owner | D5/D6/E6 | 2026-10-01 |
 | Source debt ratchet | all untagged test source | fixed_sleep: 320 calls / 120 files (historical regex census: 295 / 114) | ga-80po0c.2 | untagged fixed-sleep call/file totals cannot grow; reductions must lower this baseline; each owning test replaces elapsed wall time with its lifecycle signal | W1-W5 | 2026-10-01 |
-| Source debt ratchet | all untagged test source | http_test_server: 318 calls / 66 files (historical regex census: 255 / 56) | ga-80po0c.2.2 | untagged HTTP test server call/file totals cannot grow; reductions must lower this baseline; each owning test closes its loopback server and removes duplicate server-backed coverage | P0.4c | 2026-10-01 |
+| Source debt ratchet | all untagged test source | http_test_server: 319 calls / 67 files (historical regex census: 255 / 56) | ga-80po0c.2.2 | untagged HTTP test server call/file totals cannot grow; reductions must lower this baseline; each owning test closes its loopback server and removes duplicate server-backed coverage | P0.4c | 2026-10-01 |
 | Source debt ratchet | all untagged test source | listener_helper: 38 calls / 13 files | ga-80po0c.2.2.3 | untagged listener-helper call/file totals cannot grow; reductions must lower this baseline; each owning test replaces helper-backed listeners or moves the retained boundary to exact Medium ownership | P0.4c-listener-helper | 2026-10-01 |
 | Source debt ratchet | all untagged test source | net_listen: 96 calls / 37 files (historical regex census: 92 / 34) | ga-80po0c.2.2.2 | untagged stream-listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its stream listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-01 |
 | Source debt ratchet | all untagged test source | net_listen_config: 1 calls / 1 files | ga-80po0c.2.2.2 | untagged net.ListenConfig listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its configured listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-01 |
@@ -548,6 +549,65 @@ all-source audit while staying outside untagged and Small debt.
 | `cmd/gc` package `main` — TestDoSessionWake_PokesManagedControllerAfterStateChange | medium | package TestMain mutates process state | `cmd/gc` package `main` — TestCmdSessionWake_PokesManagedControllerAndRequestsSuspendedStart |
 | `cmd/gc` package `main` — TestPrepareWaitWakeState_ResolvesRigDependencyBeads | medium | package TestMain mutates process state | `cmd/gc` package `main` — TestCmdSessionWait_AllowsRigDependencyBeads |
 <!-- END CHECKED TEST RESOURCE LEDGER -->
+
+## Merge integrity: the census that runs at every origin/main sync
+
+A long-lived branch can lose meaning across a merge while still compiling clean
+and running green, because the loss is a *set difference* against the merge
+base rather than a broken symbol. `scripts/check-merge-integrity.sh` audits
+those three set differences. Run it at **every** origin/main sync — once before
+merging, once after:
+
+```bash
+make check-merge-integrity          # --self-test, then the real audit
+```
+
+Or against a specific merge, which is how a past merge is audited:
+
+```bash
+bash scripts/check-merge-integrity.sh --merged <merge-commit>
+```
+
+**Check 1 — deleted-symbol resurrection.** Top-level Go symbols present at the
+merge base and absent from origin/main are symbols upstream retired. None may
+survive into the merged tree. A resurrection is how a conflict resolution keeps
+lane call sites compiling against a contract upstream has already withdrawn.
+
+**Check 2 — vanished-test census.** Every `Test*` present at the merge base must
+exist after the merge, be named in a commit message on `base..merged`, or be
+listed in the allowlist. A conflict resolution that drops a behaviour drops its
+test in the same hunk, so the suite that would have caught it is deleted by the
+commit that broke the code.
+
+**Check 3 — restored lane deletion**, the mirror of check 1. Symbols present at
+the merge base and absent from the LANE are symbols *this branch* retired; none
+may come back through the merge. Check 1 is blind to this class: when upstream
+never touched the symbol it is byte-identical between base and head, so there is
+no upstream retirement to compare against. The classic failure is an incoming
+upstream *test* file calling a symbol the lane retired, the merge breaking the
+compile, and the compile being fixed by taking the symbol back — shipping a
+caller-less island. The check needs a lane ref, which it takes from `^1` of a
+merge commit or from `--lane`; in the pre-merge mode the lane *is* the tree, so
+it reports NOT APPLICABLE rather than passing mute.
+
+Deliberate keeps and retirements go in `scripts/merge-integrity-allow.txt`, one
+per line with the reason. **A blank reason fails.** The three kinds are separate
+(`symbol`, `test`, `restored`) so a waiver written for one class cannot silence
+another. Regenerating the file to absorb a finding defeats the guard — the diff
+is the review. A finding stays out of the file until it is adjudicated, and the
+guard stays red on it on purpose in the meantime. Adopting upstream's retirement
+is a better adjudication than a waiver whenever the lane can live without the
+symbol.
+
+Two traps worth naming. Audit the cut commit itself, not its parent: a
+`--merged` run against `HEAD^` certifies a tree you are not shipping. And
+recover a vanished test and run it against lane code before ruling on it — a
+test that still passes was a genuine loss, not a retirement.
+
+`scripts/merge_integrity_test.go` is the CI-visible half: it pins the path from
+`make check-merge-integrity` to a guard that proves its own bite with
+`--self-test` before it audits, and it fails closed on a malformed or
+reasonless allowlist line.
 
 ## Five test categories, clear boundaries
 
@@ -1133,6 +1193,76 @@ results, event streams, OpenAPI/response agreement, cross-route lifecycle
 coherence, and end-to-end provider wiring. Do not put low-level edge cases
 here. Corrupt files, exact parser failures, request validation branches, and
 single handler error cases belong in unit tests next to the implementation.
+
+#### Opt-in supervisor preserve-adoption latency baseline
+
+`TestSupervisorPreserveAdoptionLatencyExactBinary` is a local measurement
+journey, deliberately excluded from the integration shards. It builds and uses
+the test suite's exact `gc` binary, a real bd/Dolt-backed city, and a named,
+test-owned tmux socket. The isolated launcher returns the PID of its direct
+supervisor child only after `supervisor status --json` reports `running:true`
+and that exact PID through the isolated control socket. A zero or different
+fallback PID keeps waiting, while early child exit reports the child log. The
+journey verifies the returned PID is alive and sends SIGTERM only to it, never
+to an API or service-manager fallback PID. It then measures
+successor readiness after the supervisor API reports the city running, exactly
+one durable worker session is still `state:"active"` and `running:true`, its
+stable lifecycle fields are unchanged, and the named tmux socket, session,
+window, pane, and pane PID identity all match the pre-signal witness. Closed,
+suspended, and non-running projections are not readiness witnesses. The
+measured isolated environment is pinned to `GC_SESSION=tmux`;
+caller-selected `hybrid`, `subprocess`, or other runtime routing cannot enter
+the baseline.
+
+It is opt-in because the default run has one excluded warmup plus 30 sequential
+preserve/restart attempts and may take **up to 35 minutes**. Run it only on a
+host where `tmux`, `bd`, and `dolt` are available (or provide the normal
+`GC_INTEGRATION_REAL_BD` and `GC_INTEGRATION_DOLT_BINARY` overrides).
+`GC_INTEGRATION_GC_BINARY` must be unset: the integration harness wraps that
+override in a shim, so the benchmark rejects it rather than misreporting the
+shim hash as the gc payload hash.
+
+```bash
+mkdir -p /tmp/gc-adoption-latency
+GC_RUN_ADOPTION_PERF=1 \
+GC_ADOPTION_PERF_REPORT=/tmp/gc-adoption-latency/report.json \
+go test -tags=integration ./test/integration/ \
+  -run '^TestSupervisorPreserveAdoptionLatencyExactBinary$' -count=1 -timeout=35m
+```
+
+For a one-sample smoke of the same real boundaries, add
+`GC_ADOPTION_PERF_SAMPLES=1`. The report is atomically written even when setup,
+warmup, or an attempt fails. It records separate provenance for the invoked gc
+binary, invoked bd filebdshim (`bdBinary`), real bd payload (`realBDBinary`),
+invoked Dolt wrapper, real Dolt payload, and tmux: each has a path, SHA-256, and
+version. It also records the gc commit, host OS and architecture, and preserved
+runtime identity. The selected runtime provider must be `tmux`, and the
+reported `cpu_count` is the positive value from `runtime.NumCPU`; both are
+required for `ok:true` and keep comparisons on the documented like-for-like
+runtime and CPU profile.
+Every requested index is retained: cycles skipped after budget exhaustion or
+an unsafe identity failure are explicitly `not_attempted`. It reports
+successful-only p50/p95/p99/max plus exactly the six readiness phases.
+`starting_bead_store` has a fixed one-second censor threshold and records
+observed and censored counts; its percentiles are explicitly observed-only
+(and null when nothing was observed). Internally the journey gives setup and
+samples a 32-minute work context. Initial readiness has a 60-second child
+context and reports its last observed error. Shared lifecycle helpers do not
+all accept the per-cycle context, so an in-flight cycle can overrun it by at
+most 80 seconds: 60 seconds for the PID-exit wait, 10 seconds for successor
+startup, and 10 seconds for command and `WaitDelay` caps. The 35-minute Go
+timeout therefore leaves 100 seconds for cleanup and atomic report publication.
+The per-cycle 60-second context bounds context-aware commands and readiness, but
+is not a hard wall-clock bound around those shared helpers. The warmup is
+excluded from both the sample list and percentiles; a setup failure records it
+as `not_attempted`.
+
+This is a baseline, not an SLO or a legacy-versus-new performance comparison.
+It excludes warmup time, pre-existing supervisor/city setup, default-tmux
+behavior, cross-host contention, and provider execution time. Non-ready
+attempts are retained for diagnosis but excluded from the successful latency
+percentiles; do not interpret a percentile with failures as a reliability
+claim.
 
 #### Dashboard serve-level projection tests (`test/dashport`)
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -54,6 +55,74 @@ func TestWorkAssignmentOpenAssignedTo_ByteIdenticalQuery(t *testing.T) {
 	}
 	if !reflect.DeepEqual(rec.listQueries[0], want) {
 		t.Fatalf("List query mismatch:\n got  %#v\n want %#v", rec.listQueries[0], want)
+	}
+}
+
+func TestWorkAssignmentOpenAssignedToAnyUsesExactAssigneeQueries(t *testing.T) {
+	rec := newRecordingWorkStore()
+	for _, item := range []beads.Bead{
+		{Title: "first", Type: "task", Status: "open", Assignee: "pool/one"},
+		{Title: "second", Type: "task", Status: "in_progress", Assignee: "pool/two"},
+		{Title: "unrelated", Type: "task", Status: "open", Assignee: "somebody-else"},
+	} {
+		if _, err := rec.Create(item); err != nil {
+			t.Fatalf("create %q: %v", item.Title, err)
+		}
+	}
+
+	items, err := workAssignmentForStore(beads.WorkStore{Store: rec}).OpenAssignedToAny([]string{
+		" pool/two ", "pool/one", "pool/two", "",
+	})
+	if err != nil {
+		t.Fatalf("OpenAssignedToAny: %v", err)
+	}
+	if len(items) != 2 || items[0].Assignee != "pool/one" || items[1].Assignee != "pool/two" {
+		t.Fatalf("items = %+v, want exact pool/one and pool/two assignments", items)
+	}
+
+	want := []beads.ListQuery{
+		{Assignee: "pool/one", Live: true, TierMode: beads.TierBoth},
+		{Assignee: "pool/two", Live: true, TierMode: beads.TierBoth},
+	}
+	if !reflect.DeepEqual(rec.listQueries, want) {
+		t.Fatalf("List queries = %#v, want exact indexed member queries %#v", rec.listQueries, want)
+	}
+}
+
+func TestWorkAssignmentOpenAssignedToAnyBoundsBdReadsByExactAssignee(t *testing.T) {
+	var commands []string
+	runner := func(_ string, name string, args ...string) ([]byte, error) {
+		commands = append(commands, name+" "+strings.Join(args, " "))
+		return []byte("[]"), nil
+	}
+	store := beads.NewBdStore(t.TempDir(), runner)
+
+	if _, err := workAssignmentForStore(beads.WorkStore{Store: store}).OpenAssignedToAny([]string{"pool/two", "pool/one"}); err != nil {
+		t.Fatalf("OpenAssignedToAny: %v", err)
+	}
+	if len(commands) != 4 {
+		t.Fatalf("bd commands = %d, want two exact tier reads per assignee: %v", len(commands), commands)
+	}
+	counts := map[string]int{"pool/one": 0, "pool/two": 0}
+	for _, command := range commands {
+		matched := ""
+		for assignee := range counts {
+			if strings.Contains(command, "assignee="+assignee) {
+				if matched != "" {
+					t.Fatalf("bd command contains multiple pool assignees: %q", command)
+				}
+				matched = assignee
+			}
+		}
+		if matched == "" {
+			t.Fatalf("bd command is not constrained by an exact pool assignee: %q", command)
+		}
+		counts[matched]++
+	}
+	for assignee, count := range counts {
+		if count != 2 {
+			t.Fatalf("bd reads for %q = %d, want one issues and one ephemeral read", assignee, count)
+		}
 	}
 }
 

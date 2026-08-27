@@ -437,6 +437,14 @@ type BdStore struct {
 	// incapable-because-old on every later capability answer.
 	condWriteProbeErr error
 
+	// Atomic terminal-close (AtomicConditionalCloser) capability state, memoized
+	// lazily on the first discovery or close (bdstore_atomic_close.go). Its own
+	// mutex, never held across condWriteMu.
+	statusGuardMu       sync.Mutex
+	statusGuardProbed   bool
+	statusGuardCapable  bool
+	statusGuardProbeErr error
+
 	// condWritesStamp carries the factory-stamped beads.conditional_writes
 	// mode plus the once-per-store degrade latch, under its own mutex
 	// (disjoint from condWriteMu's capability state; no nesting).
@@ -1443,7 +1451,10 @@ func (s *BdStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
 	}
 	// The raw-SQL fallback writes the row itself, so it also has to mint the
 	// fresh revision bd's verb path mints for us: a release that left the
-	// pre-release token in place would keep a stale fence current.
+	// pre-release token in place would keep a stale fence current. The verb path
+	// runs bd's own mutation, which rewrites the row lock itself; `bd sql` does
+	// not, so a release written as raw SQL would otherwise leave the revision
+	// untouched and be invisible to every revision-fenced reader.
 	revision, err := newRevisionToken()
 	if err != nil {
 		return false, fmt.Errorf("bd release-if-current: minting revision: %w", err)
@@ -2908,7 +2919,7 @@ func isBareBdQueryValue(value string) bool {
 		case r >= 'a' && r <= 'z':
 		case r >= 'A' && r <= 'Z':
 		case r >= '0' && r <= '9':
-		case r == '_' || r == '-' || r == ':' || r == '.':
+		case r == '_' || r == '-' || r == ':' || r == '.' || r == '/':
 		default:
 			return false
 		}

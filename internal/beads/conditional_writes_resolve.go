@@ -187,6 +187,43 @@ type ConditionalWritesResolveTargeter interface {
 	ConditionalWritesResolveTarget() Store
 }
 
+// ConditionalWritesCapabilityTargeter is implemented by store WRAPPERS that
+// perform the fenced write themselves — because the wrapping exists for a side
+// effect on the write path — but hold no capability answer of their own.
+//
+// Such a wrapper forwards the fenced trio, so asking it whether it can fence
+// returns a vacuous yes: it implements the methods, and the store that decides
+// whether they can actually succeed is the engine underneath. Declaring that
+// engine points every capability question at it (the boot requirement, the
+// status inspection) while the WRITER stays the wrapper, so its side effect is
+// not bypassed.
+//
+// That is exactly why it is not ConditionalWritesResolveTargeter: that one
+// redirects the writer, which for a wrapper with a write-path side effect means
+// the side effect silently stops happening. In-package wrappers express the same
+// thing by forwarding the unexported prober and inspector (CachingStore does);
+// this is the seam for the ones that cannot.
+type ConditionalWritesCapabilityTargeter interface {
+	ConditionalWritesCapabilityTarget() Store
+}
+
+// followConditionalWritesCapabilityTarget walks wrapper-declared capability
+// targets to the store that answers for the whole chain.
+func followConditionalWritesCapabilityTarget(store Store) Store {
+	for range conditionalWritesMaxResolveDepth {
+		targeter, ok := store.(ConditionalWritesCapabilityTargeter)
+		if !ok {
+			return store
+		}
+		target := targeter.ConditionalWritesCapabilityTarget()
+		if target == nil || target == store {
+			return store
+		}
+		store = target
+	}
+	return store
+}
+
 // conditionalWritesMaxResolveDepth bounds resolve-target following so a
 // self-referential wrapper degrades to legacy instead of looping.
 const conditionalWritesMaxResolveDepth = 8
@@ -343,6 +380,8 @@ func conditionalStoreKind(store Store) string {
 		return "CachingStore"
 	case *NativeDoltStore:
 		return storeNameNativeDoltStore
+	case *SQLiteStore:
+		return storeNameSQLiteStore
 	case nil:
 		return "<nil>"
 	default:

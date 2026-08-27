@@ -27,7 +27,7 @@ func rootCommandOptionsForArgs(args []string) rootCommandOptions {
 // resolution when it runs.
 func rootCommandSkipsPackDiscovery(command string) bool {
 	switch command {
-	case "metrics", "bd", "git-credential", "dolt-state", "dolt-config", "bd-store-bridge":
+	case "metrics", "bd", "git-credential", "dolt-state", "dolt-config", "bd-store-bridge", "hook", "nudge", "mail":
 		return true
 	default:
 		return false

@@ -187,19 +187,22 @@ type failRateLimitHoldStore struct {
 	rateLimitHoldCalls int
 }
 
-type failSessionHealStore struct {
+type applyThenErrorSessionHealStore struct {
 	beads.Store
 	sessionID string
 	err       error
 	attempts  int
 }
 
-func (s *failSessionHealStore) SetMetadataBatch(id string, kvs map[string]string) error {
-	if id == s.sessionID && kvs["state"] == string(sessionpkg.StateAsleep) {
-		s.attempts++
-		return s.err
+func (s *applyThenErrorSessionHealStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if id != s.sessionID || kvs["state"] != string(sessionpkg.StateAsleep) {
+		return s.Store.SetMetadataBatch(id, kvs)
 	}
-	return s.Store.SetMetadataBatch(id, kvs)
+	s.attempts++
+	if err := s.Store.SetMetadataBatch(id, kvs); err != nil {
+		return err
+	}
+	return s.err
 }
 
 func (s *failRateLimitHoldStore) SetMetadataBatch(id string, kvs map[string]string) error {
@@ -471,13 +474,18 @@ func TestReconcileSessionBeadsHealFailureStopsSamePassEffects(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get session before reconcile: %v", err)
 	}
+	beforeInfo := env.sessionInfo(session.ID)
 	writeErr := errors.New("ambiguous heal write")
-	failing := &failSessionHealStore{
+	failing := &applyThenErrorSessionHealStore{
 		Store:     env.store,
 		sessionID: session.ID,
 		err:       writeErr,
 	}
 	env.store = failing
+	var comparisons []sessionLifecycleStatusComparison
+	env.startOptions = append(env.startOptions, withSessionLifecycleStatusComparisonObserver(func(comparison sessionLifecycleStatusComparison) {
+		comparisons = append(comparisons, comparison)
+	}))
 
 	if woken := env.reconcile([]beads.Bead{before}); woken != 0 {
 		t.Fatalf("wake attempts after failed heal = %d, want 0", woken)
@@ -489,8 +497,29 @@ func TestReconcileSessionBeadsHealFailureStopsSamePassEffects(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get session after reconcile: %v", err)
 	}
-	if !reflect.DeepEqual(after, before) {
-		t.Fatalf("failed heal changed persisted session:\n got: %#v\nwant: %#v", after, before)
+	wantPatch := sessionpkg.MetadataPatch{
+		"continuation_reset_pending": "true",
+		"primed_at":                  "",
+		"priming_attempted_at":       "",
+		"prompt_hash":                "",
+		"session_key":                "",
+		"sleep_reason":               string(sessionpkg.SleepReasonRuntimeMissing),
+		"started_config_hash":        "",
+		"state":                      string(sessionpkg.StateAsleep),
+	}
+	afterInfo := env.sessionInfo(session.ID)
+	if wantInfo := beforeInfo.ApplyPatch(wantPatch); !reflect.DeepEqual(afterInfo, wantInfo) {
+		t.Fatalf("persisted status-heal row = %#v, want committed patch %#v", afterInfo, wantInfo)
+	}
+	if after.Status != "open" {
+		t.Fatalf("persisted status = %q, want open after failed heal", after.Status)
+	}
+	if len(comparisons) != 1 {
+		t.Fatalf("comparison count = %d, want 1; comparisons=%+v", len(comparisons), comparisons)
+	}
+	comparison := comparisons[0]
+	if comparison.Site != sessionLifecycleStatusHealSiteDesired || comparison.Outcome != sessionLifecycleStatusComparisonIncomparable || comparison.Reason != sessionLifecycleStatusComparisonReasonLegacyError || comparison.LegacyPatch != nil || comparison.LegacyError != writeErr.Error() {
+		t.Fatalf("comparison = %+v, want desired/incomparable/legacy_error with nil legacy patch", comparison)
 	}
 	if drain := env.dt.get(session.ID); drain != nil {
 		t.Fatalf("failed heal started a drain: %#v", drain)
@@ -1708,7 +1737,7 @@ func TestConfirmDrainAckRuntimeDeadTokenFenceStopsOnReplacement(t *testing.T) {
 	}
 
 	var stderr synchronizedBuffer
-	dead := confirmDrainAckRuntimeDead("", store, sp, &config.City{}, "worker", "original-token", []string{"claude"}, &stderr)
+	dead := confirmDrainAckRuntimeDead("", store, sp, &config.City{}, "", "worker", "original-token", []string{"claude"}, &stderr, time.Time{}, false)
 	if !dead {
 		t.Fatal("confirm-dead must report the original target dead once a replacement owns the name")
 	}
@@ -1722,6 +1751,116 @@ func TestConfirmDrainAckRuntimeDeadTokenFenceStopsOnReplacement(t *testing.T) {
 	}
 	if got := stderr.String(); !strings.Contains(got, "instance token mismatch") {
 		t.Fatalf("stderr = %q, want token mismatch diagnostic", got)
+	}
+}
+
+type freshLivenessProvider struct {
+	*runtime.Fake
+	mu       sync.Mutex
+	fresh    runtime.Liveness
+	sequence []runtime.Liveness
+	targets  []runtime.LivenessTarget
+}
+
+func (p *freshLivenessProvider) ObserveFreshLiveness(target runtime.LivenessTarget) runtime.Liveness {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.targets = append(p.targets, target)
+	if index := len(p.targets) - 1; index < len(p.sequence) {
+		return p.sequence[index]
+	}
+	return p.fresh
+}
+
+func (p *freshLivenessProvider) lastTarget() runtime.LivenessTarget {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.targets) == 0 {
+		return runtime.LivenessTarget{}
+	}
+	return p.targets[len(p.targets)-1]
+}
+
+func TestConfirmDrainAckRuntimeDeadStrictRequiresCompleteAbsence(t *testing.T) {
+	oldTimeout, oldPoll := drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll
+	drainAckStopConfirmDeadTimeout = 20 * time.Millisecond
+	drainAckStopConfirmDeadPoll = time.Millisecond
+	defer func() {
+		drainAckStopConfirmDeadTimeout = oldTimeout
+		drainAckStopConfirmDeadPoll = oldPoll
+	}()
+
+	store := beads.NewMemStore()
+	sp := &freshLivenessProvider{Fake: runtime.NewFake()}
+
+	if confirmDrainAckRuntimeDead("", store, runtime.NewFake(), &config.City{}, "sid-1", "worker", "", nil, io.Discard, time.Time{}, true) {
+		t.Fatal("strict confirm-dead accepted absence from an unsupported provider")
+	}
+
+	sp.fresh = runtime.Liveness{}
+	if confirmDrainAckRuntimeDead("", store, sp, &config.City{}, "sid-1", "worker", "", nil, io.Discard, time.Time{}, true) {
+		t.Fatal("strict confirm-dead accepted incomplete absence")
+	}
+
+	sp.fresh = runtime.Liveness{Complete: true}
+	incarnationStartedAt := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	if !confirmDrainAckRuntimeDead("", store, sp, &config.City{}, "sid-1", "worker", "", nil, io.Discard, incarnationStartedAt, true) {
+		t.Fatal("strict confirm-dead rejected complete absence")
+	}
+	if got := sp.lastTarget().IncarnationStartedAt; !got.Equal(incarnationStartedAt) {
+		t.Fatalf("strict confirm-dead incarnation boundary = %v, want %v", got, incarnationStartedAt)
+	}
+}
+
+func TestConfirmDrainAckRuntimeDeadStrictWaitsForCompleteAbsence(t *testing.T) {
+	oldTimeout, oldPoll := drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll
+	drainAckStopConfirmDeadTimeout = 100 * time.Millisecond
+	drainAckStopConfirmDeadPoll = time.Millisecond
+	defer func() {
+		drainAckStopConfirmDeadTimeout = oldTimeout
+		drainAckStopConfirmDeadPoll = oldPoll
+	}()
+
+	sp := &freshLivenessProvider{
+		Fake: runtime.NewFake(),
+		sequence: []runtime.Liveness{
+			{},
+			{Complete: true},
+		},
+	}
+	if !confirmDrainAckRuntimeDead(
+		"", beads.NewMemStore(), sp, &config.City{},
+		"sid-1", "worker", "original-token", nil, io.Discard, time.Time{}, true,
+	) {
+		t.Fatal("strict confirm-dead rejected complete absence after a transient incomplete observation")
+	}
+	if len(sp.targets) < 2 {
+		t.Fatalf("fresh liveness observations = %d, want at least 2", len(sp.targets))
+	}
+	for _, call := range sp.Calls {
+		if call.Method == "Stop" {
+			t.Fatal("strict confirm-dead re-killed a provider-absent target while waiting for complete evidence")
+		}
+	}
+}
+
+func TestConfirmDrainAckRuntimeDeadStrictTokenFenceRetainsLiveEvidence(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &freshLivenessProvider{Fake: runtime.NewFake(), fresh: runtime.Liveness{Running: true, Alive: true, Complete: true}}
+	if err := sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := sp.SetMeta("worker", "GC_INSTANCE_TOKEN", "replacement"); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+
+	if confirmDrainAckRuntimeDead("", store, sp, &config.City{}, "sid-1", "worker", "original", nil, io.Discard, time.Time{}, true) {
+		t.Fatal("strict confirm-dead treated token-fenced live evidence as dead")
+	}
+	for _, call := range sp.Calls {
+		if call.Method == "Stop" && call.Name == "worker" {
+			t.Fatal("strict confirm-dead killed a token-fenced replacement")
+		}
 	}
 }
 
@@ -3115,7 +3254,7 @@ func strandedRepairReconcileEnv(t *testing.T) (*reconcilerTestEnv, beads.Bead, b
 
 // runStrandedReconcileTick drives one full reconcile tick through the real
 // call site with the standard stranded-repair fixture arguments.
-func runStrandedReconcileTick(t *testing.T, env *reconcilerTestEnv, sessions []beads.Bead) {
+func runStrandedReconcileTick(t *testing.T, env *reconcilerTestEnv, sessions []beads.Bead, opts ...startExecutionOption) {
 	t.Helper()
 	reconcileSessionBeadsAtPath(
 		context.Background(),
@@ -3142,6 +3281,7 @@ func runStrandedReconcileTick(t *testing.T, env *reconcilerTestEnv, sessions []b
 		0,
 		&env.stdout,
 		&env.stderr,
+		opts...,
 	)
 }
 
@@ -3509,14 +3649,16 @@ func (s *listErrStore) List(q beads.ListQuery) ([]beads.Bead, error) {
 
 type assignOnListStore struct {
 	beads.Store
-	sessionID string
-	calls     int
-	assigned  bool
+	sessionID         string
+	sessionProbeCalls int
+	assigned          bool
 }
 
 func (s *assignOnListStore) List(q beads.ListQuery) ([]beads.Bead, error) {
-	s.calls++
-	if !s.assigned && s.calls == 3 {
+	if q.Assignee == s.sessionID && q.Status == "open" && q.Live && q.TierMode == beads.TierIssues {
+		s.sessionProbeCalls++
+	}
+	if !s.assigned && s.sessionProbeCalls == 2 {
 		if _, err := s.Create(beads.Bead{
 			Title:    "raced assigned work",
 			Type:     "task",
@@ -3528,6 +3670,31 @@ func (s *assignOnListStore) List(q beads.ListQuery) ([]beads.Bead, error) {
 		s.assigned = true
 	}
 	return s.Store.List(q)
+}
+
+func TestSessionHasAssignedWorkDeduplicatesIdentitiesAcrossStatusesAndTiers(t *testing.T) {
+	store := newRecordingWorkStore()
+
+	has, err := sessionHasAssignedWorkInStoreByIdentifiersForStatuses(
+		store,
+		[]string{"worker-session", "worker-session"},
+		[]string{"open", "in_progress"},
+	)
+	if err != nil {
+		t.Fatalf("sessionHasAssignedWorkInStoreByIdentifiersForStatuses: %v", err)
+	}
+	if has {
+		t.Fatal("empty store reported assigned work")
+	}
+	want := []beads.ListQuery{
+		{Assignee: "worker-session", Status: "open", Live: true, TierMode: beads.TierIssues},
+		{Assignee: "worker-session", Status: "open", Live: true, TierMode: beads.TierWisps},
+		{Assignee: "worker-session", Status: "in_progress", Live: true, TierMode: beads.TierIssues},
+		{Assignee: "worker-session", Status: "in_progress", Live: true, TierMode: beads.TierWisps},
+	}
+	if !reflect.DeepEqual(store.listQueries, want) {
+		t.Fatalf("assignment probes = %#v, want one live issue/wisp pair per status for one deduplicated identity %#v", store.listQueries, want)
+	}
 }
 
 type failSetMetadataBatchStore struct {
@@ -3558,7 +3725,7 @@ func TestFinalizeDrainAckStoppedSessionDoesNotEmitEventsWhenFinalMetadataFails(t
 	failingStore := &failSetMetadataBatchStore{Store: env.store, err: errors.New("metadata write failed")}
 	finalizeDrainAckStoppedSession(
 		"", env.cfg, failingStore, nil, env.sessionInfo(session.ID), "worker", false,
-		newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
+		newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr, nil, nil,
 	)
 
 	if len(fake.Events) != 0 {
@@ -3585,7 +3752,7 @@ func TestFinalizeDrainAckStoppedSessionFallsThroughWhenCloseGateRacesWithAssignm
 	racingStore := &assignOnListStore{Store: env.store, sessionID: session.ID}
 	finalizeDrainAckStoppedSession(
 		"", env.cfg, racingStore, nil, env.sessionInfo(session.ID), "worker", true,
-		newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
+		newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr, nil, nil,
 	)
 
 	got, err := env.store.Get(session.ID)
@@ -6070,6 +6237,10 @@ func TestReconcileSessionBeads_PoolDependencyUnblocksWake(t *testing.T) {
 	}
 }
 
+// TestReconcileSessionBeads_OrphanSessionDrained is DETECTOR.md §1's anchor for
+// the Orphaned drain site. Its CONTRACT is re-pointed keyed at WD.4 by
+// TestExactOrphanLiveRowDrainsOnceByKey; this legacy form stays green until the
+// god function dies at WE, because a city with no keyed owner still drains here.
 func TestReconcileSessionBeads_OrphanSessionDrained(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "other"}}}
@@ -6088,6 +6259,10 @@ func TestReconcileSessionBeads_OrphanSessionDrained(t *testing.T) {
 	}
 }
 
+// TestReconcileSessionBeads_OrphanDrainLiveAssignedWorkStaysOpen is the
+// kept-open negative for the same site. Its CONTRACT is re-pointed keyed at WD.4
+// by TestDetectorOrphanLiveAssignedWorkNeverEnqueuesOrDrains, where suppression
+// happens before the key is ever enqueued; this legacy form stays green until WE.
 func TestReconcileSessionBeads_OrphanDrainLiveAssignedWorkStaysOpen(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "other"}}}
@@ -6643,6 +6818,10 @@ func TestReconcileSessionBeads_DeadDrainAckedOrphanWithAssignedWorkCompletesDrai
 	}
 }
 
+// TestReconcileSessionBeads_OrphanNotRunningClosed is DETECTOR.md §1 site 4's
+// anchor. Its CONTRACT is re-pointed keyed at WD.3 by
+// TestExactOrphanDeadRowClosesOnceByKey; this legacy form stays green until the
+// god function dies at WE, because a city with no keyed owner still closes here.
 func TestReconcileSessionBeads_OrphanNotRunningClosed(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "other"}}}
@@ -7163,7 +7342,7 @@ func TestReconcileAndWake_RestartRequestBumpsContinuationEpoch(t *testing.T) {
 	}
 
 	// Phase 2: preWakeCommit consumes continuation_reset_pending → bumps epoch.
-	if _, _, _, err := preWakeCommit(env.sessionInfo(session.ID), sessionFrontDoor(env.store), env.clk); err != nil {
+	if _, _, _, err := preWakeCommit(env.sessionInfo(session.ID), 0, sessionFrontDoor(env.store), env.clk); err != nil {
 		t.Fatalf("preWakeCommit: %v", err)
 	}
 	woke, _ := env.store.Get(session.ID)
@@ -8019,7 +8198,10 @@ func TestPendingCreateLeaseExpiredForRollbackChecksInFlightBeforeAsleepRecovery(
 	}
 }
 
-func TestTraceHealClearedPendingCreateLeaseRecordsDecision(t *testing.T) {
+// Complete stale-create claims are consumed by the legacy rollback prepasses,
+// so a positive through-reconciler emission is unreachable; this direct test
+// honestly owns the production Info trace callee.
+func TestTraceHealClearedPendingCreateLeaseInfoRecordsDecision(t *testing.T) {
 	trace := &sessionReconcilerTraceCycle{
 		tracer: &SessionReconcilerTracer{
 			detail: map[string]TraceSource{"helper": TraceSourceManual},
@@ -8035,15 +8217,15 @@ func TestTraceHealClearedPendingCreateLeaseRecordsDecision(t *testing.T) {
 		reasonCounts:      map[string]int{},
 		outcomeCounts:     map[string]int{},
 	}
-	session := makeBead("b1", map[string]string{
+	info := sessiontest.InfoFromMeta(t, map[string]string{
 		"session_name": "helper",
 		"state":        "asleep",
 		"template":     "helper",
 	})
 
-	traceHealClearedPendingCreateLease(
+	traceHealClearedPendingCreateLeaseInfo(
 		trace,
-		session,
+		info,
 		&config.City{Agents: []config.Agent{{Name: "helper"}}},
 		"",
 		"",
@@ -12024,6 +12206,10 @@ func TestReconcileSessionBeads_SyncReplacesFailedCreateNamedSession(t *testing.T
 // TestReconcileSessionBeads_ClosesOrphanedFailedCreateAndFreesSlot verifies
 // the post-lease-expiry close path for a pool session bead whose close call
 // failed after failed-create metadata was written.
+//
+// DETECTOR.md §1 site 5's anchor. Its CONTRACT is re-pointed keyed at WD.3 by
+// TestExactOrphanFailedCreateClosesByKeyAndFreesSlot; this legacy form stays
+// green until the god function dies at WE.
 func TestReconcileSessionBeads_ClosesOrphanedFailedCreateAndFreesSlot(t *testing.T) {
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)}

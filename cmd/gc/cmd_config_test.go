@@ -3,11 +3,105 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
+
+func TestConfigShowValidateRootFileUsesCandidateRootAndPreservesLiveConfig(t *testing.T) {
+	oldExtraConfigFiles := extraConfigFiles
+	extraConfigFiles = nil
+	t.Cleanup(func() { extraConfigFiles = oldExtraConfigFiles })
+
+	clearGCEnv(t)
+	dir := t.TempDir()
+	t.Chdir(dir)
+	t.Setenv("GC_CITY_PATH", dir)
+	if err := os.MkdirAll(".gc", 0o755); err != nil {
+		t.Fatalf("MkdirAll(.gc): %v", err)
+	}
+	live := []byte("[workspace]\nname = \"live\"\n")
+	writeCityToml(t, dir, string(live))
+	candidateDir := filepath.Join(dir, "candidate")
+	if err := os.MkdirAll(candidateDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(candidate): %v", err)
+	}
+	candidate := filepath.Join(candidateDir, "city.toml")
+	if err := os.WriteFile(candidate, []byte("include = [\"fragment.toml\"]\n[workspace]\nname = \"candidate\"\n"), 0o644); err != nil {
+		t.Fatalf("write candidate root: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(candidateDir, "fragment.toml"), []byte("[[agent]]\nname = \"candidate-worker\"\n"), 0o644); err != nil {
+		t.Fatalf("write candidate fragment: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"config", "show", "--validate", "--root-file", candidate}, &stdout, &stderr); code != 0 {
+		t.Fatalf("run(config show --validate --root-file) = %d, stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	if got := stdout.String(); got != "Config valid.\n" {
+		t.Fatalf("stdout = %q, want Config valid", got)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"config", "show", "--validate", "--file", candidate}, &stdout, &stderr); code == 0 {
+		t.Fatalf("run(config show --validate --file candidate) = 0, want legacy fragment interpretation to fail; stderr=%q stdout=%q", stderr.String(), stdout.String())
+	}
+	gotLive, err := os.ReadFile(filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("read live city.toml: %v", err)
+	}
+	if !bytes.Equal(gotLive, live) {
+		t.Fatalf("live city.toml changed during validation: got %q want %q", gotLive, live)
+	}
+}
+
+func TestConfigShowRootFileIncompatibleFlagsWriteDiagnostics(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "validate required",
+			args: []string{"--root-file", "candidate.toml"},
+			want: "gc config show: --root-file requires --validate\n",
+		},
+		{
+			name: "file forbidden",
+			args: []string{"--validate", "--root-file", "candidate.toml", "--file", "overlay.toml"},
+			want: "gc config show: --root-file cannot be combined with --file\n",
+		},
+		{
+			name: "provenance forbidden",
+			args: []string{"--validate", "--root-file", "candidate.toml", "--provenance"},
+			want: "gc config show: --root-file cannot be combined with --provenance\n",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			oldExtraConfigFiles := extraConfigFiles
+			extraConfigFiles = nil
+			t.Cleanup(func() { extraConfigFiles = oldExtraConfigFiles })
+
+			var stdout, stderr bytes.Buffer
+			cmd := newConfigShowCmd(&stdout, &stderr)
+			cmd.SilenceErrors = true
+			cmd.SilenceUsage = true
+			cmd.SetArgs(tt.args)
+			if err := cmd.Execute(); !errors.Is(err, errExit) {
+				t.Fatalf("Execute() error = %v, want errExit", err)
+			}
+			if got := stdout.String(); got != "" {
+				t.Fatalf("stdout = %q, want empty", got)
+			}
+			if got := stderr.String(); got != tt.want {
+				t.Fatalf("stderr = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
 
 func TestDoConfigShowMissingRemoteImportSuggestsInstall(t *testing.T) {
 	clearGCEnv(t)
@@ -28,7 +122,7 @@ version = "^1.4"
 `)
 
 	var stdout, stderr bytes.Buffer
-	code := doConfigShow(false, false, false, &stdout, &stderr)
+	code := doConfigShow(false, false, false, "", &stdout, &stderr)
 	if code == 0 {
 		t.Fatal("expected failure for missing remote import")
 	}

@@ -2488,6 +2488,20 @@ type DaemonConfig struct {
 	// GraphWorkflows is the deprecated predecessor of FormulaV2. Retained
 	// for backwards compatibility as an alias. Explicit formula_v2 wins.
 	GraphWorkflows bool `toml:"graph_workflows,omitempty"`
+	// SessionReconciler selects keyed exact-start ownership and, when the current
+	// store has a conditional writer, eligible desired-session status healing.
+	// "off" (the default) keeps both on the legacy fleet-wide reconciler. "auto"
+	// degrades either family to legacy when its requirements are unavailable.
+	// Orphan and unsupported rows remain legacy-owned. "require" refuses startup
+	// only when exact-start requirements are unavailable; a conditional-write
+	// refusal instead parks heal candidates without disabling converged exact
+	// starts. The value is boot-latched; changing it requires a controller restart.
+	SessionReconciler string `toml:"session_reconciler,omitempty" jsonschema:"default=off,enum=off,enum=auto,enum=require"`
+	// NudgeShadow selects whether the queued exact due-target selection shadow
+	// is required. Nil means omitted and resolves to the built-in "off" default;
+	// a non-nil value is an explicit operator selection. The value is
+	// boot-latched; changing it requires a controller restart.
+	NudgeShadow *string `toml:"nudge_shadow,omitempty" jsonschema:"default=off,enum=off,enum=required"`
 	// PatrolInterval is the health patrol interval. Duration string (e.g., "30s", "5m", "1h"). Defaults to "30s".
 	PatrolInterval string `toml:"patrol_interval,omitempty" jsonschema:"default=30s"`
 	// MaxRestarts is the maximum number of agent restarts within RestartWindow before
@@ -2642,15 +2656,6 @@ type DaemonConfig struct {
 	// default start/register budget; [session].startup_timeout may still
 	// extend the effective wait for a slow single session.
 	StartReadyTimeout string `toml:"start_ready_timeout,omitempty" jsonschema:"default=5m"`
-	// TickDebounce coalesces bursty event-driven ticks (pokeCh,
-	// controlDispatcherCh) within this window. A first event in a quiet
-	// period arms a timer; subsequent events arriving before the timer
-	// fires are dropped (the single delayed tick re-reads authoritative
-	// state covering all collapsed events). Zero (the default) disables
-	// debouncing — each event fires its own tick, matching pre-existing
-	// behavior. Duration string (e.g., "250ms", "500ms"). Trade-off:
-	// adds tick latency up to this value when set.
-	TickDebounce string `toml:"tick_debounce,omitempty"`
 	// AutoPruneWorkerDir controls whether the reconciler removes a
 	// pool-managed session's worker_dir (agent worktree) after the session
 	// bead is closed. Removal is gated on: path lives under the city's
@@ -2728,20 +2733,6 @@ func (d *DaemonConfig) AutoPruneWorkerDirEnabled() bool {
 // Defaults to 30s if empty or unparseable.
 func (d *DaemonConfig) PatrolIntervalDuration() time.Duration {
 	return durationOr(d.PatrolInterval, 30*time.Second)
-}
-
-// TickDebounceDuration returns the tick-debounce window as a
-// time.Duration. Returns 0 (debouncing disabled) on empty, unparseable,
-// or negative input.
-func (d *DaemonConfig) TickDebounceDuration() time.Duration {
-	if d.TickDebounce == "" {
-		return 0
-	}
-	dur, err := time.ParseDuration(d.TickDebounce)
-	if err != nil || dur < 0 {
-		return 0
-	}
-	return dur
 }
 
 // MaxRestartsOrDefault returns the max restarts threshold. Nil (unset) defaults
@@ -4678,6 +4669,17 @@ func validateGuardedRelease(raw string) error {
 // raw pointer field.
 func (d DaemonConfig) FormulaV2Enabled() bool {
 	return d.FormulaV2 == nil || *d.FormulaV2
+}
+
+// SessionReconcilerMode returns the configured session-reconciler mode,
+// mapping only omission to the safe "off" default. Unknown non-empty values
+// pass through so internal/rollout can reject them instead of silently
+// selecting the legacy path.
+func (d DaemonConfig) SessionReconcilerMode() string {
+	if d.SessionReconciler == "" {
+		return "off"
+	}
+	return d.SessionReconciler
 }
 
 func applyDaemonFormulaV2Default(cfg *City, md toml.MetaData) {

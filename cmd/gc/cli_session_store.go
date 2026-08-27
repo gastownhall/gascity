@@ -17,7 +17,10 @@ import (
 // The recorder is nil, and passing one would change nothing: resolveSessionStore
 // ignores it. What makes a relocated one-shot write observable is the emit
 // target the funnel puts on the ROUTES (class_store_emit.go), which
-// cliStorageRoutes has already applied by the time this returns.
+// cliStorageRoutes has already applied by the time this returns. Callers that
+// write durable session-start intent send the exact resulting session key over
+// the controller socket; the controller still rereads this store as the sole
+// authority.
 func cliSessionStore(store beads.Store, cfg *config.City, cityPath string) beads.Store {
 	return resolveSessionStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)
 }

@@ -52,10 +52,17 @@ func TestControllerStopClientAcceptsOnlyExactAcknowledgement(t *testing.T) {
 				readTimeout:  time.Second,
 			}
 
-			result := client.stop(t.TempDir(), tt.force)
+			cityPath := t.TempDir()
+			result := client.stop(cityPath, tt.force)
 
 			if result.outcome != tt.wantOutcome {
 				t.Fatalf("outcome = %v, want %v (err=%v)", result.outcome, tt.wantOutcome, result.err)
+			}
+			if result.socketPath != controllerSocketPath(cityPath) {
+				t.Fatalf("socket witness path = %q, want %q", result.socketPath, controllerSocketPath(cityPath))
+			}
+			if result.socketInfo == nil || !os.SameFile(result.socketInfo, info) {
+				t.Fatal("controller stop result did not retain the dialed socket identity")
 			}
 			if got := conn.writes.String(); got != tt.wantCommand {
 				t.Fatalf("command = %q, want %q", got, tt.wantCommand)

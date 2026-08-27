@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -143,4 +144,85 @@ func TestBindPoolSessionTriggerBead_FailedWritePersistsNothing(t *testing.T) {
 			t.Errorf("durable cluster key %q = %q after failed Update, want %q (all-or-nothing)", k, got, want)
 		}
 	}
+}
+
+// TestLegacyPoolTriggerStampCanonicalizesBareStoreRefs is the write-side half of
+// ga-2oboq. The legacy demand collector names the HQ store "city" and a rig
+// store by its bare rig name, and that spelling reaches the member row through
+// SessionRequest.WorkStoreRef. Both stamp sites -- the create stamp
+// (poolTriggerMetadata) and the reconcile bind (bindPoolSessionTriggerBead) --
+// convert it to the canonical workflow ref, so rows written from here on carry
+// the spelling the keyed seams and the agent's GC_TRIGGER_WORK_STORE_REF
+// environment already speak. They MUST move together: canonicalizing only one
+// would make the other rewrite the row back on the next tick.
+func TestLegacyPoolTriggerStampCanonicalizesBareStoreRefs(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "packs", Path: filepath.Join(cityPath, "rigs", "packs")}},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+	}
+
+	t.Run("create stamp", func(t *testing.T) {
+		for _, test := range []struct{ name, ref, want string }{
+			{name: "bare city", ref: "city", want: "city:test-city"},
+			{name: "bare rig", ref: "packs", want: "rig:packs"},
+			{name: "already canonical", ref: "rig:packs", want: "rig:packs"},
+			{name: "unknown ref left verbatim", ref: "not-a-store", want: "not-a-store"},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				var stderr bytes.Buffer
+				bp := newAgentBuildParams("test-city", cityPath, cfg, runtime.NewFake(), time.Now().UTC(), beads.NewMemStore(), &stderr)
+				metadata := poolTriggerMetadata(bp, &cfg.Agents[0], "worker", SessionRequest{
+					WorkBeadID:   "wb-1",
+					WorkStoreRef: test.ref,
+				})
+				if got := metadata[beadmeta.TriggerBeadStoreRefMetadataKey]; got != test.want {
+					t.Fatalf("created trigger store ref = %q, want %q", got, test.want)
+				}
+			})
+		}
+	})
+
+	t.Run("bind heals a legacy row once and never flips it back", func(t *testing.T) {
+		mem := beads.NewMemStore()
+		bead := triggerClusterSessionBead()
+		bead.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey] = "city"
+		created, err := mem.Create(bead)
+		if err != nil {
+			t.Fatalf("create legacy-stamped session bead: %v", err)
+		}
+		rec := beadstest.NewRecordingStore(mem)
+		info, err := sessionFrontDoor(rec).Get(created.ID)
+		if err != nil {
+			t.Fatalf("read legacy-stamped session bead: %v", err)
+		}
+		var stderr bytes.Buffer
+		bp := newAgentBuildParams("test-city", cityPath, cfg, runtime.NewFake(), time.Now().UTC(), rec, &stderr)
+		request := SessionRequest{WorkBeadID: "wb-A", WorkStoreRef: "city", BrainParentSID: "brain-A"}
+
+		bound, err := bindPoolSessionTriggerBead(bp, &cfg.Agents[0], "worker", info, request)
+		if err != nil {
+			t.Fatalf("bind legacy-stamped session bead: %v", err)
+		}
+		if bound.TriggerBeadStoreRef != "city:test-city" {
+			t.Fatalf("bound trigger store ref = %q, want the canonical %q", bound.TriggerBeadStoreRef, "city:test-city")
+		}
+		if updates := len(rec.CallsForOp("Update")); updates != 1 {
+			t.Fatalf("Update ops on the healing bind = %d, want 1", updates)
+		}
+
+		// The same legacy request against the now-canonical row must be a no-op.
+		// A stamp site left un-canonicalized would rewrite it back to "city" here.
+		rebound, err := bindPoolSessionTriggerBead(bp, &cfg.Agents[0], "worker", bound, request)
+		if err != nil {
+			t.Fatalf("re-bind canonical session bead: %v", err)
+		}
+		if rebound.TriggerBeadStoreRef != "city:test-city" {
+			t.Fatalf("re-bound trigger store ref = %q, want the canonical spelling preserved", rebound.TriggerBeadStoreRef)
+		}
+		if updates := len(rec.CallsForOp("Update")); updates != 1 {
+			t.Fatalf("Update ops after the idempotent re-bind = %d, want the healing write only", updates)
+		}
+	})
 }

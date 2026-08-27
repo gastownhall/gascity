@@ -2066,19 +2066,42 @@ func ensureSelectedSourceStorePresent(cfg *config.City, cityPath, cityName, sour
 		return nil
 	}
 	present := slices.ContainsFunc(stores, func(info convoyStoreView) bool {
-		return info.store != nil &&
-			sourceworkflow.NormalizeSourceStoreRef(workflowStoreRefForDir(info.path, cityPath, cityName, cfg)) == selectedRef
+		return info.store != nil && sourceStoreRefSelectsDir(selectedRef, info.path, cityPath, cityName, cfg)
 	})
 	if present {
 		return nil
 	}
 	for _, skip := range skips {
-		skipRef := sourceworkflow.NormalizeSourceStoreRef(workflowStoreRefForDir(skip.path, cityPath, cityName, cfg))
-		if skipRef == selectedRef && skip.err != nil {
+		if sourceStoreRefSelectsDir(selectedRef, skip.path, cityPath, cityName, cfg) && skip.err != nil {
 			return fmt.Errorf("selected source workflow store %s is unavailable to scan: %w", selectedRef, skip.err)
 		}
 	}
 	return fmt.Errorf("selected source workflow store %s is unavailable to scan", selectedRef)
+}
+
+// sourceStoreRefSelectsDir reports whether selectedRef names the store rooted at
+// storeDir.
+//
+// It is not a string comparison because the two sides are produced by different
+// code with different conventions. workflowStoreRefForDir always renders the
+// city as "city:<name>", falling back to the city directory's basename when the
+// config carries no [workspace] name. A caller that builds the ref from the
+// config alone has no basename to fall back to and renders the same store as a
+// bare "city:" — which is exactly how openSourceWorkflowStoreRef and
+// sourceworkflow.LockScopeForStoreRef already read it, by prefix.
+//
+// A city has exactly one city store, so matching a bare "city:" against any
+// "city:*" is precise, not lenient: there is no second store the relaxed form
+// could accidentally select.
+func sourceStoreRefSelectsDir(selectedRef, storeDir, cityPath, cityName string, cfg *config.City) bool {
+	dirRef := sourceworkflow.NormalizeSourceStoreRef(workflowStoreRefForDir(storeDir, cityPath, cityName, cfg))
+	if dirRef == "" {
+		return false
+	}
+	if dirRef == selectedRef {
+		return true
+	}
+	return selectedRef == "city:" && strings.HasPrefix(dirRef, "city:")
 }
 
 // sourceWorkflowMatchCollector walks the source-workflow graph across every

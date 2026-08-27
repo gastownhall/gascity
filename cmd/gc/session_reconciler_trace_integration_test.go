@@ -243,6 +243,56 @@ func TestSessionReconcilerTraceLifecycleRecordsTick(t *testing.T) {
 	}
 }
 
+func TestSessionReconcilerTraceCycleStartShadowAdmissionsExcludeExpiredAndDerivedArms(t *testing.T) {
+	cityDir := t.TempDir()
+	tracer := newSessionReconcilerTracer(cityDir, "trace-town", io.Discard)
+	t.Cleanup(func() { _ = tracer.Close() })
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	for _, arm := range []TraceArm{
+		{
+			ScopeType:  TraceArmScopeTemplate,
+			ScopeValue: "worker",
+			Source:     TraceArmSourceManual,
+			Level:      TraceModeDetail,
+			ArmedAt:    now.Add(-2 * time.Minute),
+			ExpiresAt:  now.Add(-time.Minute),
+			UpdatedAt:  now.Add(-2 * time.Minute),
+		},
+		{
+			ScopeType:  TraceArmScopeTemplate,
+			ScopeValue: "parent",
+			Source:     TraceArmSourceManual,
+			Level:      TraceModeDetail,
+			ArmedAt:    now,
+			ExpiresAt:  now.Add(time.Minute),
+			UpdatedAt:  now,
+		},
+	} {
+		if _, err := tracer.armStore.upsertArm(arm); err != nil {
+			t.Fatalf("upsert trace arm %q: %v", arm.ScopeValue, err)
+		}
+	}
+	cfg := &config.City{Agents: []config.Agent{{
+		Name:      "parent",
+		DependsOn: []string{"derived"},
+	}}}
+	cycle := tracer.BeginCycle(TraceTickTriggerPatrol, "controller_tick", now, cfg)
+	if cycle == nil {
+		t.Fatal("BeginCycle returned nil")
+	}
+	if _, ok := cycle.startSelectionShadowAdmission("worker"); ok {
+		t.Fatal("expired direct arm admitted start-selection shadow work")
+	}
+	if _, ok := cycle.startSelectionShadowAdmission("derived"); ok {
+		t.Fatal("derived dependency scope admitted start-selection shadow work")
+	}
+	admission, ok := cycle.startSelectionShadowAdmission("parent")
+	if !ok || admission.Template != "parent" || admission.Source != TraceSourceManual ||
+		!admission.ExpiresAt.Equal(now.Add(time.Minute)) {
+		t.Fatalf("active direct admission = %+v, %t", admission, ok)
+	}
+}
+
 func TestSessionReconcilerTraceStartAndDrainSubOps(t *testing.T) {
 	cityDir := t.TempDir()
 	writeCityTOML(t, cityDir, "trace-town", "mayor")
@@ -678,6 +728,12 @@ func TestSessionReconcilerTraceGH1654WorkRequestedStartCandidates(t *testing.T) 
 						t.Fatalf("template summary work_requested = %#v, want true", rec.Fields["work_requested"])
 					}
 					haveWorkRequestedSummary = true
+				}
+				// The WD.1 detector sweep records the same legacy site code in
+				// shadow, so count only the records that carry a legacy effect.
+				// effect_owner is exactly the discriminator that exists for this.
+				if owner, _ := rec.Fields["effect_owner"].(string); owner == detectorShadowEffectOwner {
+					continue
 				}
 				if rec.RecordType == TraceRecordDecision &&
 					rec.SiteCode == TraceSiteReconcilerWakeDecision &&

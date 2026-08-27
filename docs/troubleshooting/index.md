@@ -17,3 +17,6 @@ alive.
 ## Operate
 
 - [Operate Managed-City Dolt Endpoints](/runbooks/managed-city-endpoints) — mental model, forbidden edits, sanctioned escape hatches, and recovery recipe for the city-level Dolt endpoint architecture.
+- [Operate a Direct Hardened City from the gc CLI](/runbooks/remote-hardened-city) — stand up a self-hosted city that accepts remote writes over a signed grant, and wire a `gc` context to it.
+- [Move a City's Infrastructure Classes onto Their Own Store](/runbooks/split-storage-classes) — the whole `[storage]` cutover: config swap, one operator command, verification, and how to roll back while rolling back is still free.
+- [Turn On Keyed Session Reconciliation](/runbooks/keyed-session-reconciler) — what `[daemon] session_reconciler = "auto"` changes, how to switch a city onto it, and how to switch back.

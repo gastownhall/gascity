@@ -1098,6 +1098,48 @@ func TestPRIntegrationMatrixKeepsHeavyRestCoverageInReleaseGates(t *testing.T) {
 	}
 }
 
+func TestPRIntegrationCmdGCShardBuildsPinnedV59BD(t *testing.T) {
+	wf := readCriticalPathWorkflow(t, "ci.yml")
+	job, ok := wf.Jobs["integration-shards"]
+	if !ok {
+		t.Fatal("CI workflow has no integration-shards job")
+	}
+
+	var buildStep *ciCriticalPathStep
+	for i := range job.Steps {
+		step := &job.Steps[i]
+		if step.If == "matrix.shard_name == 'packages-cmd-gc-integration'" {
+			buildStep = step
+			break
+		}
+	}
+	if buildStep == nil {
+		t.Fatal("integration cmd/gc shard must build its pinned v59 bd binary before the shard runs")
+	}
+	for _, want := range []string{
+		"BD_CURRENT_REF=",
+		"git -C \"$src\" checkout --detach \"$ref\"",
+		"git -C \"$src\" rev-parse HEAD",
+		"GC_TEST_BD_BIN=",
+		"$GITHUB_ENV",
+	} {
+		if !strings.Contains(buildStep.Run, want) {
+			t.Errorf("pinned v59 bd build step missing %q:\n%s", want, buildStep.Run)
+		}
+	}
+	var runStep *ciCriticalPathStep
+	for i := range job.Steps {
+		step := &job.Steps[i]
+		if step.Name == "Run integration shard" {
+			runStep = step
+			break
+		}
+	}
+	if runStep == nil || !strings.Contains(runStep.Run, "GC_TEST_BD_BIN is required for the equipped cmd/gc integration shard") {
+		t.Fatal("integration cmd/gc shard runner must fail if its required pinned bd binary is unavailable")
+	}
+}
+
 func (n *ciCriticalPathNeeds) UnmarshalYAML(node *yaml.Node) error {
 	if node.Kind == yaml.ScalarNode {
 		*n = []string{node.Value}

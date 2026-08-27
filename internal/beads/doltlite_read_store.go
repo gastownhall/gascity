@@ -581,6 +581,32 @@ func (s *DoltliteReadStore) Close(id string) error {
 	return err
 }
 
+// AtomicConditionalCloserHandle shadows the handle promoted from the embedded
+// *BdStore so the capability resolves to THIS wrapper, not the inner store: the
+// promoted handle would hand callers a closer that writes through bd without
+// invalidating the order-run cache the SQL read path serves from.
+//
+// Unlike the four ConditionalWriter verbs above, this capability is NOT degraded
+// here. Its fence is bd's `--if-status` compare-and-swap evaluated against the
+// row BdStore reads back with `bd show`, so it never consults this wrapper's
+// revision-less SQL read path and the F2 veto's premise does not apply.
+func (s *DoltliteReadStore) AtomicConditionalCloserHandle() (AtomicConditionalCloser, bool) {
+	if _, ok := s.BdStore.AtomicConditionalCloserHandle(); !ok {
+		return nil, false
+	}
+	return s, true
+}
+
+// CloseWithMetadataIfMatch forwards the fused terminal close to the embedded
+// bd store and invalidates the order-run cache, mirroring Close.
+func (s *DoltliteReadStore) CloseWithMetadataIfMatch(id string, expectedRevision int64, metadata map[string]string) (Bead, error) {
+	closed, err := s.BdStore.CloseWithMetadataIfMatch(id, expectedRevision, metadata)
+	if err == nil {
+		s.resetOrderRunCache()
+	}
+	return closed, err
+}
+
 func (s *DoltliteReadStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
 	n, err := s.BdStore.CloseAll(ids, metadata)
 	if err == nil && n > 0 {

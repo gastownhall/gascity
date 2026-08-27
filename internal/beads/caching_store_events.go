@@ -719,6 +719,17 @@ func decodeCacheEvent(payload json.RawMessage) (Bead, map[string]json.RawMessage
 	return b, fields, nil
 }
 
+// EmitsChangeEvents reports whether this cache was constructed with a change
+// callback, and therefore whether a mutation through it produces a bead.* event
+// at all.
+//
+// It is a capability question a caller cannot answer any other way: a cache
+// wired to a recorder and one wired to nothing are the same Go type, so the
+// only honest answer comes from the instance. Consumers that require emission —
+// the class contract at controller boot — ask this rather than assert on the
+// type and be wrong on a store nobody wired.
+func (c *CachingStore) EmitsChangeEvents() bool { return c != nil && c.onChange != nil }
+
 func (c *CachingStore) notifyChange(eventType string, b Bead) {
 	if c.onChange == nil {
 		return

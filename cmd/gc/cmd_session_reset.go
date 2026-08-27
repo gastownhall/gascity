@@ -105,7 +105,8 @@ func cmdSessionReset(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 		return 1
 	}
 
-	_ = pokeController(cityPath)
+	// Admit only this durably reset session to the keyed controller.
+	_ = pokeSessionStartController(cityPath, sessionID)
 
 	if asJSON {
 		if err := writeSessionActionJSON(stdout, sessionActionResult{

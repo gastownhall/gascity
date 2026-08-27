@@ -19,7 +19,7 @@ type assignedWorkListErrorStore struct {
 }
 
 func (s *assignedWorkListErrorStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	if query.Assignee != "" && (query.Status == "open" || query.Status == "in_progress") {
+	if query.Assignee != "" && (query.Status == "" || query.Status == "open" || query.Status == "in_progress") {
 		return nil, s.err
 	}
 	return s.Store.List(query)

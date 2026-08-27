@@ -52,7 +52,7 @@ func infoFromPersistedBead(b beads.Bead) Info {
 //
 // The Get/List projection is the persisted view only — no live runtime overlay.
 // Callers that need live runtime enrichment (liveness, attachment, detected
-// transport) still go through session.Manager. The API/response-building layer
+// transport) still go through session.Manager. The response-building layer
 // reads persisted state through this type's GetPersistedResponse and pairs it
 // with Manager.EnrichInfo for the runtime overlay (see the api sessionGetEnriched
 // composition and worker.sessionRecordViaManager). The reconciler
@@ -83,7 +83,8 @@ func (s *Store) Get(id string) (Info, error) {
 }
 
 // GetPersistedResponse returns the persisted session.Info paired with the
-// persisted-response projection (status + metadata) for id, in a single store
+// persisted-response projection (status, metadata, and whole-row revision) for
+// id, in a single store
 // fetch. It is the persisted-read half of the session Get read model — pair it
 // with Manager.EnrichInfo for the runtime overlay (the api sessionGetEnriched
 // composition and worker.sessionRecordViaManager do exactly

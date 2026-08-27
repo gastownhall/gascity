@@ -805,6 +805,7 @@ func unregisterCityFromSupervisorWithOptions(cityPath string, stdout, stderr io.
 	}
 
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	var controllerOwnership *os.File
 	transaction := opts.transaction
 	ownsTransaction := transaction == nil
 	if ownsTransaction {
@@ -813,7 +814,13 @@ func unregisterCityFromSupervisorWithOptions(cityPath string, stdout, stderr io.
 	if opts.Force && supervisorAliveHook() != 0 {
 		stopResult := tryStopControllerWithForce(cityPath, io.Discard, true)
 		switch stopResult.outcome {
-		case controllerStopAcknowledged, controllerStopDefinitePreEntryUnavailable:
+		case controllerStopAcknowledged:
+			controllerOwnership, err = waitForAcknowledgedControllerOwnership(cityPath, stopResult, supervisorCityStopTimeout(cityPath))
+			if err != nil {
+				fmt.Fprintf(stderr, "%s: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
+				return true, 1
+			}
+		case controllerStopDefinitePreEntryUnavailable:
 		case controllerStopMayHaveEntered, controllerStopOutcomeInvalid:
 			fmt.Fprintf(stderr, "%s: %v\n", commandName, stopResult.failClosedError()) //nolint:errcheck // best-effort stderr
 			return true, 1
@@ -821,6 +828,9 @@ func unregisterCityFromSupervisorWithOptions(cityPath string, stdout, stderr io.
 			fmt.Fprintf(stderr, "%s: %v\n", commandName, stopResult.failClosedError()) //nolint:errcheck // best-effort stderr
 			return true, 1
 		}
+	}
+	if controllerOwnership != nil {
+		defer controllerOwnership.Close() //nolint:errcheck // retain ownership through terminal cleanup
 	}
 	cityMissing, err := transaction.unregister(reg, entry, cityPath, stdout)
 	if err != nil {
@@ -853,9 +863,14 @@ func unregisterCityFromSupervisorWithOptions(cityPath string, stdout, stderr io.
 			writeSupervisorUnregisterRollback(stderr, commandName, err.Error(), transaction.rollback())
 			return true, 1
 		}
-		if err := waitForSupervisorControllerStopHook(cityPath, supervisorCityStopTimeout(cityPath)); err != nil {
-			writeSupervisorUnregisterRollback(stderr, commandName, err.Error(), transaction.rollback())
-			return true, 1
+		// An acknowledged controller stop already handed this call the
+		// controller's own ownership fence, so the stop is proven and the
+		// supervisor-side wait would only re-derive it.
+		if controllerOwnership == nil {
+			if err := waitForSupervisorControllerStopHook(cityPath, supervisorCityStopTimeout(cityPath)); err != nil {
+				writeSupervisorUnregisterRollback(stderr, commandName, err.Error(), transaction.rollback())
+				return true, 1
+			}
 		}
 	}
 	if ownsTransaction {

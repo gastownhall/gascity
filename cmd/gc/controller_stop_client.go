@@ -42,8 +42,10 @@ func (o controllerStopOutcome) String() string {
 }
 
 type controllerStopResult struct {
-	outcome controllerStopOutcome
-	err     error
+	outcome    controllerStopOutcome
+	err        error
+	socketPath string
+	socketInfo os.FileInfo
 }
 
 func (r controllerStopResult) failClosedError() error {
@@ -73,33 +75,41 @@ func sendControllerStop(cityPath string, force bool) controllerStopResult {
 
 func (c controllerStopClient) stop(cityPath string, force bool) controllerStopResult {
 	socketPath := controllerSocketPath(cityPath)
+	var before os.FileInfo
+	classified := func(outcome controllerStopOutcome, operation string, err error) controllerStopResult {
+		result := classifiedControllerStopResult(outcome, operation, err)
+		result.socketPath = socketPath
+		result.socketInfo = before
+		return result
+	}
+
 	before, err := c.stat(socketPath)
 	if err != nil {
-		return classifiedControllerStopResult(controllerStopDefinitePreEntryUnavailable, "stating socket before dial", err)
+		return classified(controllerStopDefinitePreEntryUnavailable, "stating socket before dial", err)
 	}
 	if before == nil {
-		return classifiedControllerStopResult(controllerStopDefinitePreEntryUnavailable, "stating socket before dial", errors.New("socket stat returned no identity"))
+		return classified(controllerStopDefinitePreEntryUnavailable, "stating socket before dial", errors.New("socket stat returned no identity"))
 	}
 
 	conn, err := c.dial("unix", socketPath, c.dialTimeout)
 	if err != nil {
-		return classifiedControllerStopResult(controllerStopDefinitePreEntryUnavailable, "dialing socket", err)
+		return classified(controllerStopDefinitePreEntryUnavailable, "dialing socket", err)
 	}
 	defer conn.Close() //nolint:errcheck // the classified exchange result is authoritative
 
 	after, err := c.stat(socketPath)
 	if err != nil {
-		return classifiedControllerStopResult(controllerStopMayHaveEntered, "stating socket after dial", err)
+		return classified(controllerStopMayHaveEntered, "stating socket after dial", err)
 	}
 	if after == nil {
-		return classifiedControllerStopResult(controllerStopMayHaveEntered, "stating socket after dial", errors.New("socket stat returned no identity"))
+		return classified(controllerStopMayHaveEntered, "stating socket after dial", errors.New("socket stat returned no identity"))
 	}
 	if !os.SameFile(before, after) {
-		return classifiedControllerStopResult(controllerStopMayHaveEntered, "verifying socket identity", errors.New("controller socket changed during dial"))
+		return classified(controllerStopMayHaveEntered, "verifying socket identity", errors.New("controller socket changed during dial"))
 	}
 
 	if err := conn.SetWriteDeadline(time.Now().Add(c.writeTimeout)); err != nil {
-		return classifiedControllerStopResult(controllerStopMayHaveEntered, "setting write deadline", err)
+		return classified(controllerStopMayHaveEntered, "setting write deadline", err)
 	}
 	command := []byte("stop\n")
 	if force {
@@ -107,23 +117,27 @@ func (c controllerStopClient) stop(cityPath string, force bool) controllerStopRe
 	}
 	n, err := conn.Write(command)
 	if err != nil {
-		return classifiedControllerStopResult(controllerStopMayHaveEntered, "writing command", err)
+		return classified(controllerStopMayHaveEntered, "writing command", err)
 	}
 	if n != len(command) {
-		return classifiedControllerStopResult(controllerStopMayHaveEntered, "writing command", fmt.Errorf("short write: wrote %d of %d bytes", n, len(command)))
+		return classified(controllerStopMayHaveEntered, "writing command", fmt.Errorf("short write: wrote %d of %d bytes", n, len(command)))
 	}
 
 	if err := conn.SetReadDeadline(time.Now().Add(c.readTimeout)); err != nil {
-		return classifiedControllerStopResult(controllerStopMayHaveEntered, "setting read deadline", err)
+		return classified(controllerStopMayHaveEntered, "setting read deadline", err)
 	}
 	reply, err := readControllerStopReply(conn)
 	if err != nil {
-		return classifiedControllerStopResult(controllerStopMayHaveEntered, "reading acknowledgement", err)
+		return classified(controllerStopMayHaveEntered, "reading acknowledgement", err)
 	}
 	if !bytes.Equal(reply, []byte("ok\n")) {
-		return classifiedControllerStopResult(controllerStopMayHaveEntered, "validating acknowledgement", fmt.Errorf("unexpected response %q", reply))
+		return classified(controllerStopMayHaveEntered, "validating acknowledgement", fmt.Errorf("unexpected response %q", reply))
 	}
-	return controllerStopResult{outcome: controllerStopAcknowledged}
+	return controllerStopResult{
+		outcome:    controllerStopAcknowledged,
+		socketPath: socketPath,
+		socketInfo: before,
+	}
 }
 
 func readControllerStopReply(r io.Reader) ([]byte, error) {

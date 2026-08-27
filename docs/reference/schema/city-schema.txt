@@ -1288,6 +1288,25 @@
           "type": "boolean",
           "description": "GraphWorkflows is the deprecated predecessor of FormulaV2. Retained\nfor backwards compatibility as an alias. Explicit formula_v2 wins."
         },
+        "session_reconciler": {
+          "type": "string",
+          "enum": [
+            "off",
+            "auto",
+            "require"
+          ],
+          "description": "SessionReconciler selects keyed exact-start ownership and, when the current\nstore has a conditional writer, eligible desired-session status healing.\n\"off\" (the default) keeps both on the legacy fleet-wide reconciler. \"auto\"\ndegrades either family to legacy when its requirements are unavailable.\nOrphan and unsupported rows remain legacy-owned. \"require\" refuses startup\nonly when exact-start requirements are unavailable; a conditional-write\nrefusal instead parks heal candidates without disabling converged exact\nstarts. The value is boot-latched; changing it requires a controller restart.",
+          "default": "off"
+        },
+        "nudge_shadow": {
+          "type": "string",
+          "enum": [
+            "off",
+            "required"
+          ],
+          "description": "NudgeShadow selects whether the queued exact due-target selection shadow\nis required. Nil means omitted and resolves to the built-in \"off\" default;\na non-nil value is an explicit operator selection. The value is\nboot-latched; changing it requires a controller restart.",
+          "default": "off"
+        },
         "patrol_interval": {
           "type": "string",
           "description": "PatrolInterval is the health patrol interval. Duration string (e.g., \"30s\", \"5m\", \"1h\"). Defaults to \"30s\".",
@@ -1399,10 +1418,6 @@
           "type": "string",
           "description": "StartReadyTimeout is how long `gc start` and `gc register` wait for\nthe supervisor to report the city as Running. Cities with many\nregistered or adopted sessions take longer to start because the\nper-tick wake budget (max_wakes_per_tick) throttles startup: wall\ntime to wake N sessions is roughly ceil(N / max_wakes_per_tick) *\npatrol_interval. At the defaults (5 wakes / 30s), ~40 sessions\nneed ~4 minutes. Duration string (e.g., \"5m\", \"10m\"). Defaults to\nDefaultStartReadyTimeout (5m). When set, this value replaces the\ndefault start/register budget; [session].startup_timeout may still\nextend the effective wait for a slow single session.",
           "default": "5m"
-        },
-        "tick_debounce": {
-          "type": "string",
-          "description": "TickDebounce coalesces bursty event-driven ticks (pokeCh,\ncontrolDispatcherCh) within this window. A first event in a quiet\nperiod arms a timer; subsequent events arriving before the timer\nfires are dropped (the single delayed tick re-reads authoritative\nstate covering all collapsed events). Zero (the default) disables\ndebouncing — each event fires its own tick, matching pre-existing\nbehavior. Duration string (e.g., \"250ms\", \"500ms\"). Trade-off:\nadds tick latency up to this value when set."
         },
         "auto_prune_worker_dir": {
           "type": "boolean",

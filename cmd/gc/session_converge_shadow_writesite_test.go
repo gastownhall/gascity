@@ -22,6 +22,7 @@ import (
 // plan: "no non-test cmd/gc code may write a compared metadata key except via the
 // recording wrapper."
 var convergeComparedKeyWriteSiteInventory = map[string]string{
+	"cmd_perf_reconciler.go":        "synthetic STOP fixture canonical stamp; recorded via recordLegacyCompareWrites(newReconcilerPerfStopFixture.create)",
 	"session_identity.go":           "desiredSessionIdentity builds the canonical stamp (pure); recorded by callers (adoptionBarrier.create, syncSessionBeads.create)",
 	"session_name_lookup.go":        "pool-create canonical stamp; recorded via recordLegacyCompareWrites(poolSessionCreate)",
 	"session_reconcile.go":          "healStatePatchWithRollback builds priming clears; recorded via recordLegacyCompareWrites(healStateWithRollback) at the ApplyPatch site",

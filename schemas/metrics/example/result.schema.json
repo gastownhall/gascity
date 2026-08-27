@@ -212,7 +212,9 @@
               "storage-status",
               "ready",
               "storage-recover-stranded",
-              "beads-metadata-cas"
+              "beads-metadata-cas",
+              "perf-reconciler-compare",
+              "perf-parity-join"
             ]
           },
           "event_id": {

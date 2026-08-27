@@ -27,6 +27,36 @@ func (w primeHookFailWriter) Write([]byte) (int, error) {
 	return 0, w.err
 }
 
+func TestPersistPrimeHookProviderSessionKeyAtCityUsesSuppliedPath(t *testing.T) {
+	cityPath, sessionID := setupPrimeHookProviderSessionKeyTest(t, "claude", `[providers.claude]
+base = "builtin:claude"`)
+	t.Setenv("GC_PROVIDER_SESSION_ID", "provider-session-from-supplied-city")
+	for _, key := range []string{"GC_CITY", "GC_CITY_PATH", "GC_CITY_ROOT", "GC_DIR", "GC_RIG_ROOT"} {
+		t.Setenv(key, "")
+	}
+	if resolved, err := resolveCity(); err == nil {
+		t.Fatalf("test requires ambient city discovery to fail, resolved %q", resolved)
+	}
+
+	var stderr bytes.Buffer
+	persistPrimeHookProviderSessionKeyAtCity("", cityPath, &stderr)
+	if !strings.Contains(stderr.String(), "persisted resume session_key for claude session") {
+		t.Fatalf("persist stderr = %q, want successful supplied-city diagnostic", stderr.String())
+	}
+
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := store.Get(sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(updated.Metadata["session_key"]); got != "provider-session-from-supplied-city" {
+		t.Fatalf("session_key = %q, want provider key persisted through supplied city path", got)
+	}
+}
+
 func TestBuildPrimeContextFallsBackToConfiguredRigRoot(t *testing.T) {
 	t.Setenv("GC_RIG", "demo")
 	t.Setenv("GC_RIG_ROOT", "")
@@ -223,6 +253,116 @@ func TestPrimeInjectMailContentSurfacesUnreadMailForPromptlessWake(t *testing.T)
 	}
 	if !strings.Contains(got, "please review the auth PR") {
 		t.Fatalf("prime mail injection missing the seeded message body:\n%s", got)
+	}
+}
+
+func TestPrimeUnreadMailInjectionUsesProvidedProviderWithoutOpeningCity(t *testing.T) {
+	clearGCEnv(t)
+	t.Setenv("GC_CITY", filepath.Join(t.TempDir(), "missing-city"))
+	t.Setenv("GC_ALIAS", "worker")
+	provider := mail.NewFake()
+	if _, err := provider.Send("boss", "worker", "ready", "review the result"); err != nil {
+		t.Fatalf("seed mail: %v", err)
+	}
+
+	got := primeUnreadMailInjectionWithProvider(nil, provider)
+
+	if !strings.Contains(got, "review the result") {
+		t.Fatalf("injection = %q, want mail from provided provider", got)
+	}
+}
+
+func TestSessionStartAutoHandoffCarriesConfiguredOrdinaryMailProvider(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		envProvider string
+		wantErr     bool
+	}{
+		{name: "config provider", wantErr: true},
+		{name: "environment override", envProvider: "fake", wantErr: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearGCEnv(t)
+			disableManagedDoltRecoveryForTest(t)
+			cityDir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n[mail]\nprovider = \"fail\"\n"), 0o644); err != nil {
+				t.Fatalf("write city.toml: %v", err)
+			}
+			t.Setenv("GC_BEADS", "file")
+			t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+			t.Setenv("GC_CITY", cityDir)
+			t.Setenv("GC_CITY_PATH", cityDir)
+			t.Setenv("GC_MAIL", tc.envProvider)
+
+			_, _, provider := sessionStartAutoHandoffInjection(io.Discard)
+
+			if provider == nil {
+				t.Fatal("ordinary mail provider = nil, want reusable configured provider")
+			}
+			_, err := provider.Check("worker")
+			if got := err != nil; got != tc.wantErr {
+				t.Fatalf("Check error = %v, want error=%v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestSessionStartAutoHandoffUsesProvidedStoreWithoutOpeningCity(t *testing.T) {
+	clearGCEnv(t)
+	store := beads.NewMemStore()
+	sessionInfo, err := store.Create(beads.Bead{
+		Title:  "gastown--worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"agent_name":   "worker",
+			"session_name": "gastown--worker",
+			"state":        "active",
+			"template":     "worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	auto, ok := createHandoffMail(store, store, events.Discard, sessionInfo.ID, sessionInfo.ID,
+		[]string{"context cycle", "continue from the provided store"}, "context cycle",
+		[]string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel}, io.Discard)
+	if !ok {
+		t.Fatal("createHandoffMail(auto) failed")
+	}
+
+	missingCity := filepath.Join(t.TempDir(), "missing-city")
+	t.Setenv("GC_CITY", missingCity)
+	t.Setenv("GC_CITY_PATH", missingCity)
+	t.Setenv("GC_SESSION_ID", sessionInfo.ID)
+
+	injection, ids, _ := sessionStartAutoHandoffInjectionWithStore(store, missingCity, io.Discard)
+
+	for _, want := range []string{auto.ID, auto.Subject, auto.Body} {
+		if !strings.Contains(injection.text, want) {
+			t.Fatalf("injection = %q, want auto-handoff substring %q", injection.text, want)
+		}
+	}
+	if !ids[auto.ID] {
+		t.Fatalf("rendered IDs = %#v, want %q", ids, auto.ID)
+	}
+	if injection.afterDelivery == nil {
+		t.Fatal("afterDelivery = nil, want archive acknowledgement")
+	}
+	injection.afterDelivery()
+	// The archive is mark-read + close (retain-addressable), not a hard delete:
+	// "injected" only means the stdout write returned, so a handoff the agent
+	// never consumed must stay recoverable for the read-gated TTL sweep (#5051).
+	// What this asserts is that the archive landed in the PROVIDED store.
+	archived, err := store.Get(auto.ID)
+	if err != nil {
+		t.Fatalf("archived auto-handoff missing from the provided store: %v", err)
+	}
+	if archived.Status != "closed" {
+		t.Fatalf("archived auto-handoff status = %q, want closed", archived.Status)
+	}
+	if got := archived.Metadata["close_reason"]; got != beadmail.RetentionSweepCloseReason {
+		t.Fatalf("archived auto-handoff close_reason = %q, want %q", got, beadmail.RetentionSweepCloseReason)
 	}
 }
 

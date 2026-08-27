@@ -327,6 +327,10 @@ type Tmux struct {
 	// observer; tests inject a deterministic observation without opening a
 	// socket.
 	serverSocketObserver func(context.Context, string) error
+
+	// namedSocketLstat observes a named socket before an attach. Nil selects
+	// the production filesystem observation.
+	namedSocketLstat func(context.Context, string) (namedSocketObservation, error)
 }
 
 // pokeInfo records a gc-initiated send-keys ("poke", e.g. a wake or nudge) to a
@@ -396,6 +400,15 @@ func (t *Tmux) runCtx(ctx context.Context, args ...string) (string, error) {
 // Every invocation is bounded by tmuxSubprocessTimeout via runCtx.
 func (t *Tmux) run(args ...string) (string, error) {
 	return t.runCtx(context.Background(), args...)
+}
+
+// runForAttach adds tmux's no-start-server flag for a named socket. The
+// default socket keeps its existing behavior.
+func (t *Tmux) runForAttach(args ...string) (string, error) {
+	if t.cfg.SocketName == "" {
+		return t.run(args...)
+	}
+	return t.run(append([]string{"-N"}, args...)...)
 }
 
 // wrapError wraps tmux errors with context.
@@ -931,58 +944,73 @@ func (t *Tmux) KillSessionWithProcessesExcluding(name string, excludePIDs []stri
 	if err != nil {
 		// Session might not exist or server may have already gone away.
 		killErr := t.KillSession(name)
-		if killErr == nil || errors.Is(killErr, ErrSessionNotFound) || errors.Is(killErr, ErrNoServer) {
+		if killErr == nil || errors.Is(killErr, ErrSessionNotFound) || errors.Is(killErr, ErrNoCurrentTarget) {
 			return nil
 		}
 		return killErr
 	}
 
 	if pid != "" {
-		// Get the process group ID
-		pgid := getProcessGroupID(pid)
-
-		// 1. Get all descendant PIDs recursively (catches processes that called setsid())
-		descendants := getAllDescendants(pid)
-
-		// Build known PID set for group membership verification
-		knownPIDs := make(map[string]bool, len(descendants)+1)
-		knownPIDs[pid] = true
-		for _, dpid := range descendants {
-			knownPIDs[dpid] = true
-		}
-
-		// 2. Get verified process group members (only reparented-to-init processes).
-		// Instead of adding ALL group members — which could include unrelated
-		// processes sharing the same PGID — we only add those that were reparented
-		// to init (PPID == 1), indicating they were likely children in our tree.
-		var reparented []string
-		if pgid != "" && pgid != "0" && pgid != "1" {
-			reparented = collectReparentedGroupMembers(pgid, knownPIDs)
-		}
-
-		// Partition the discovered process set into the descendant/group PIDs to
-		// terminate and whether the pane leader should be killed, honoring the
-		// exclusion set. This decision is pure so it can be unit-tested without
-		// real processes (see computeExcludingKillSet).
-		killList, killPaneLeader := computeExcludingKillSet(pid, descendants, reparented, exclude)
-
-		terminateProcesses(killList)
-
-		// Kill the pane process itself (may have called setsid() and detached),
-		// only if it is not excluded.
-		if killPaneLeader {
-			terminateProcesses([]string{pid})
-		}
+		terminatePaneProcessTreeExcluding(pid, exclude)
 	}
 
 	// Kill the tmux session - this will terminate the excluded process too.
-	// Ignore missing/dead-server errors - if we killed all non-excluded
-	// processes, tmux may have already destroyed the session automatically.
+	// A missing session on a responsive server is idempotent success. A missing
+	// server is an uncertain inventory observation and must reach the caller.
 	err = t.KillSession(name)
-	if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+	if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoCurrentTarget) {
 		return nil
 	}
 	return err
+}
+
+// KillSessionWithCertifiedPaneProcessesExcluding terminates the process trees
+// of the already-certified pane IDs, then kills the already-certified session
+// ID. It never accepts a session name, preventing a post-certification name
+// lookup from targeting a replacement session.
+func (t *Tmux) KillSessionWithCertifiedPaneProcessesExcluding(sessionID string, paneIDs, excludePIDs []string) error {
+	exclude := make(map[string]bool, len(excludePIDs))
+	for _, pid := range excludePIDs {
+		exclude[pid] = true
+	}
+
+	panePIDs := make([]string, 0, len(paneIDs))
+	for _, paneID := range paneIDs {
+		pid, err := t.GetPanePID(paneID)
+		if err != nil {
+			return fmt.Errorf("reading certified pane %q for session %q: %w", paneID, sessionID, err)
+		}
+		panePIDs = append(panePIDs, pid)
+	}
+	for _, pid := range panePIDs {
+		terminatePaneProcessTreeExcluding(pid, exclude)
+	}
+
+	err := t.KillSession(sessionID)
+	if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoCurrentTarget) {
+		return nil
+	}
+	return err
+}
+
+func terminatePaneProcessTreeExcluding(pid string, exclude map[string]bool) {
+	pgid := getProcessGroupID(pid)
+	descendants := getAllDescendants(pid)
+	knownPIDs := make(map[string]bool, len(descendants)+1)
+	knownPIDs[pid] = true
+	for _, descendantPID := range descendants {
+		knownPIDs[descendantPID] = true
+	}
+
+	var reparented []string
+	if pgid != "" && pgid != "0" && pgid != "1" {
+		reparented = collectReparentedGroupMembers(pgid, knownPIDs)
+	}
+	killList, killPaneLeader := computeExcludingKillSet(pid, descendants, reparented, exclude)
+	terminateProcesses(killList)
+	if killPaneLeader {
+		terminateProcesses([]string{pid})
+	}
 }
 
 // computeExcludingKillSet partitions a discovered process set into the
@@ -1246,6 +1274,17 @@ func (t *Tmux) IsAvailable() bool {
 // (e.g., "gt-deacon-boot" won't match when checking for "gt-deacon").
 func (t *Tmux) HasSession(name string) (bool, error) {
 	_, err := t.run("has-session", "-t", "="+name)
+	if err != nil {
+		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func (t *Tmux) hasSessionForAttach(name string) (bool, error) {
+	_, err := t.runForAttach("has-session", "-t", "="+name)
 	if err != nil {
 		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
 			return false, nil
@@ -1590,6 +1629,11 @@ func (t *Tmux) IsSessionAttached(target string) bool {
 	return err == nil && attached == "1"
 }
 
+func (t *Tmux) isSessionAttachedForAttach(target string) bool {
+	attached, err := t.runForAttach("display-message", "-t", target, "-p", "#{session_attached}")
+	return err == nil && attached == "1"
+}
+
 // WakePane triggers a SIGWINCH in a pane by resizing it slightly then restoring.
 // This wakes up Claude Code's event loop by simulating a terminal resize.
 //
@@ -1637,7 +1681,11 @@ func (t *Tmux) requiresHiddenAttachedInterrupt(target string) bool {
 }
 
 func (t *Tmux) ensureHiddenAttachedClient(target string) error {
-	if t.IsSessionAttached(target) {
+	witness, err := t.captureAttachSocketWitness()
+	if err != nil {
+		return err
+	}
+	if t.isSessionAttachedForAttach(target) {
 		return nil
 	}
 
@@ -1648,11 +1696,7 @@ func (t *Tmux) ensureHiddenAttachedClient(target string) error {
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), hiddenAttachMaxLifetime)
-	cmdArgs := []string{"-u"}
-	if t.cfg.SocketName != "" {
-		cmdArgs = append(cmdArgs, "-L", t.cfg.SocketName)
-	}
-	cmdArgs = append(cmdArgs, "attach-session", "-t", target)
+	cmdArgs := t.hiddenAttachCommandArgsForWitness(target, witness)
 	cmd := exec.CommandContext(ctx, "script", hiddenAttachScriptArgs(goruntime.GOOS, cmdArgs)...)
 	cmd.Env = append(cmd.Environ(), "TERM=xterm-256color")
 	cmd.Stdout = io.Discard
@@ -1660,6 +1704,12 @@ func (t *Tmux) ensureHiddenAttachedClient(target string) error {
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
+		cancel()
+		t.hiddenAttachMu.Unlock()
+		return err
+	}
+	if err := t.verifyAttachSocketWitness(witness); err != nil {
+		_ = stdin.Close()
 		cancel()
 		t.hiddenAttachMu.Unlock()
 		return err
@@ -1706,6 +1756,16 @@ func (t *Tmux) ensureHiddenAttachedClient(target string) error {
 		return err
 	}
 	return nil
+}
+
+func (t *Tmux) hiddenAttachCommandArgsForWitness(target string, witness namedSocketWitness) []string {
+	args := []string{"-u"}
+	if witness.canonicalPath != "" {
+		args = append(args, "-N", "-S", witness.canonicalPath)
+	} else if t.cfg.SocketName != "" {
+		args = append(args, "-N", "-L", t.cfg.SocketName)
+	}
+	return append(args, "attach-session", "-t", target)
 }
 
 func hiddenAttachScriptArgs(goos string, tmuxArgs []string) []string {
@@ -1913,6 +1973,20 @@ func (t *Tmux) sendHiddenAttachedText(target, text string) (bool, error) {
 	return true, nil
 }
 
+// sendHiddenAttachedRewind is the provider-native Gemini reset input. It is
+// intentionally separate from generic nudges because stdin on this gc-owned
+// attached PTY cannot participate in tmux's server-queued input fence.
+func (t *Tmux) sendHiddenAttachedRewind(target string) error {
+	used, err := t.sendHiddenAttachedText(target, "/rewind")
+	if err != nil {
+		return err
+	}
+	if !used {
+		return fmt.Errorf("%w: hidden tmux client is unavailable for rewind", runtime.ErrInputFenced)
+	}
+	return nil
+}
+
 // isTransientSendKeysError returns true if the error from tmux send-keys is
 // transient and safe to retry. "not in a mode" occurs when the target pane's
 // TUI hasn't initialized its input handling yet (common during cold startup).
@@ -1929,6 +2003,273 @@ func isCommandTooLongError(err error) bool {
 		return false
 	}
 	return strings.Contains(err.Error(), "command too long")
+}
+
+const (
+	boundInputFenceMarker     = "__gc_input_fenced__"
+	boundInputDeliveredMarker = "__gc_input_delivered__"
+)
+
+type boundInputTarget struct {
+	sessionID string
+	windowID  string
+	paneID    string
+	attached  bool
+	inMode    bool
+	dead      bool
+}
+
+// NudgeSessionBound sends a nudge only when tmux can prove, in the same server
+// command queue entry as the input effect, that the named server and target
+// pane are still the observed ones and the pane has not entered copy mode.
+// The false branch has no input effect and reports runtime.ErrInputFenced.
+func (t *Tmux) NudgeSessionBound(session, message string) error {
+	return t.nudgeSessionBound(session, "", message)
+}
+
+// NudgeSessionBoundFenced sends a nudge only when the exact target remains
+// safe for input and its GC_INSTANCE_TOKEN still matches expectedInstanceToken
+// at the server-queued effect boundary.
+func (t *Tmux) NudgeSessionBoundFenced(session, expectedInstanceToken, message string) error {
+	if !validExpectedInstanceToken(expectedInstanceToken) {
+		return fmt.Errorf("%w: expected instance token is empty or malformed", runtime.ErrInputFenced)
+	}
+	return t.nudgeSessionBound(session, expectedInstanceToken, message)
+}
+
+func (t *Tmux) nudgeSessionBound(session, expectedInstanceToken, message string) error {
+	if message == "" {
+		return nil
+	}
+	witness, target, err := t.boundEffectTarget(session)
+	if err != nil {
+		return err
+	}
+	// paste-buffer is the one input verb tmux refuses on a remain-on-exit corpse
+	// ("target pane has exited"); there is no reader left to lose the text to.
+	if target.dead {
+		return nil
+	}
+
+	tmp, err := os.CreateTemp("", "gc-tmux-bound-input-*")
+	if err != nil {
+		return fmt.Errorf("creating bound tmux input buffer: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+	if _, err := tmp.WriteString(message); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("writing bound tmux input buffer: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("closing bound tmux input buffer: %w", err)
+	}
+
+	bufferName := nextPasteBufferName()
+	if _, err := t.runForAttachWitness(witness, "load-buffer", "-b", bufferName, tmpName); err != nil {
+		return fmt.Errorf("loading bound tmux input buffer: %w", err)
+	}
+	loaded := true
+	defer func() {
+		if loaded {
+			_, _ = t.runForAttachWitness(witness, "delete-buffer", "-b", bufferName)
+		}
+	}()
+
+	debounce := t.nudgeSubmitDebounce(target.paneID)
+	commitPoke := t.beginPoke(session)
+	condition := boundInputCondition(target, witness, expectedInstanceToken, panePlain)
+	elseCommand := fmt.Sprintf("delete-buffer -b %s ; display-message -p %s", bufferName, boundInputFenceMarker)
+	thenCommand := boundInputThenCommand(condition, target, bufferName, debounce+50*time.Millisecond, elseCommand)
+	out, err := t.runForAttachWitness(witness, "if-shell", "-t", target.paneID, "-F", condition, thenCommand, elseCommand)
+	if err != nil {
+		return fmt.Errorf("sending bound tmux input: %w", err)
+	}
+	switch strings.TrimSpace(out) {
+	case boundInputFenceMarker:
+		loaded = false
+		return fmt.Errorf("%w: tmux input target changed under the certified guard", runtime.ErrInputFenced)
+	case boundInputDeliveredMarker:
+		loaded = false // paste-buffer -d consumed the buffer in the successful branch.
+		commitPoke()
+		return nil
+	default:
+		return fmt.Errorf("sending bound tmux input: missing submission confirmation")
+	}
+}
+
+func boundInputThenCommand(condition string, target boundInputTarget, bufferName string, settle time.Duration, fenceCommand string) string {
+	inputCommand := fmt.Sprintf("paste-buffer -p -d -b %s -t %s ; send-keys -t %s Enter ; display-message -p %s", bufferName, target.paneID, target.paneID, boundInputDeliveredMarker)
+	recheck := shellquote.Join([]string{"if-shell", "-t", target.paneID, "-F", condition, inputCommand, fenceCommand})
+	if target.attached {
+		// A client is already servicing this pane's event loop, so the SIGWINCH
+		// wake below buys nothing — and resize-window on an attached window
+		// switches it to manual sizing, which would leave a human's window stuck
+		// at the wrong size long after the nudge. Deliver without the wake, still
+		// under the same certified predicate.
+		return recheck
+	}
+	return fmt.Sprintf(
+		"resize-window -t %s -D 1 ; run-shell 'sleep %.3f' ; resize-window -t %s -U 1 ; %s",
+		target.windowID, settle.Seconds(), target.windowID, recheck,
+	)
+}
+
+// runBoundPaneEffect runs thenCommand only if tmux still satisfies condition in
+// the same server command queue entry, and reports whether the effect ran.
+// thenCommand must print boundInputDeliveredMarker on its own success path.
+func (t *Tmux) runBoundPaneEffect(witness namedSocketWitness, target boundInputTarget, condition, thenCommand string) (bool, error) {
+	fenceCommand := "display-message -p " + boundInputFenceMarker
+	out, err := t.runForAttachWitness(witness, "if-shell", "-t", target.paneID, "-F", condition, thenCommand, fenceCommand)
+	if err != nil {
+		return false, err
+	}
+	switch strings.TrimSpace(out) {
+	case boundInputDeliveredMarker:
+		return true, nil
+	case boundInputFenceMarker:
+		return false, nil
+	default:
+		return false, fmt.Errorf("missing bound effect confirmation")
+	}
+}
+
+// clearParkedCopyMode force-exits copy mode on the session's certified agent
+// pane, under the same predicate (including expectedInstanceToken, when set)
+// that will guard the payload.
+//
+// The ga-c4w WheelUpPane binding parks an interactive pane on wheel-up and the
+// park outlives the human detaching; tmux then routes every controller keystroke
+// into the copy-mode key table instead of the agent. Refusing until someone
+// exits leaves the session permanently deaf with nobody watching, so the nudge
+// path cancels and delivers — but only on the pane it is about to type into, and
+// only through a certified effect. A park on some other pane of the session is
+// left alone: input is pane-targeted, so it cannot swallow the nudge.
+func (t *Tmux) clearParkedCopyMode(session, expectedInstanceToken string) error {
+	witness, target, err := t.boundEffectTarget(session)
+	if err != nil {
+		return err
+	}
+	if !target.inMode {
+		return nil
+	}
+	condition := boundInputCondition(target, witness, expectedInstanceToken, paneParked)
+	thenCommand := fmt.Sprintf("send-keys -t %s -X cancel ; display-message -p %s", target.paneID, boundInputDeliveredMarker)
+	// A fenced cancel is not itself a failure — the pane may have left copy mode
+	// on its own between the two observations — so the re-read below, not the
+	// effect's own verdict, decides whether this pane is safe to type into.
+	if _, err := t.runBoundPaneEffect(witness, target, condition, thenCommand); err != nil {
+		return fmt.Errorf("%w: canceling copy mode on tmux session %q: %w", runtime.ErrInputFenced, session, err)
+	}
+	after, err := t.boundInputTarget(session, witness)
+	if err != nil {
+		return fmt.Errorf("%w: reproving copy mode on tmux session %q: %w", runtime.ErrInputFenced, session, err)
+	}
+	if after.inMode {
+		return fmt.Errorf("%w: tmux session %q stayed in copy mode after cancel", runtime.ErrInputFenced, session)
+	}
+	return nil
+}
+
+// boundEffectTarget resolves the exact server, session, window, and pane that a
+// certified input effect will run against, classifying resolution failures as
+// fences rather than plain errors.
+func (t *Tmux) boundEffectTarget(session string) (namedSocketWitness, boundInputTarget, error) {
+	witness, err := t.captureAttachSocketWitness()
+	if err != nil {
+		return namedSocketWitness{}, boundInputTarget{}, fmt.Errorf("%w: witnessing tmux server: %w", runtime.ErrInputFenced, err)
+	}
+	target, err := t.boundInputTarget(session, witness)
+	if err != nil {
+		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+			return witness, boundInputTarget{}, err
+		}
+		return witness, boundInputTarget{}, fmt.Errorf("%w: %w", runtime.ErrInputFenced, err)
+	}
+	return witness, target, nil
+}
+
+func (t *Tmux) boundInputTarget(session string, witness namedSocketWitness) (boundInputTarget, error) {
+	target := session
+	if pane, err := t.FindAgentPane(session); err == nil && pane != "" {
+		target = pane
+	}
+	out, err := t.runForAttachWitness(witness, "display-message", "-t", target, "-p", "#{session_id}\t#{session_name}\t#{window_id}\t#{pane_id}\t#{session_attached}\t#{pane_in_mode}\t#{pane_dead}")
+	if err != nil {
+		return boundInputTarget{}, err
+	}
+	fields := strings.Split(strings.TrimSpace(out), "\t")
+	if len(fields) != 7 || fields[1] != session || !wellFormedTmuxID(fields[0], '$') || !wellFormedTmuxID(fields[2], '@') || !wellFormedTmuxID(fields[3], '%') {
+		return boundInputTarget{}, fmt.Errorf("invalid exact tmux input target for session %q", session)
+	}
+	attached, err := parseNonnegativeTmuxCount(fields[4])
+	if err != nil {
+		return boundInputTarget{}, fmt.Errorf("invalid attachment count for session %q", session)
+	}
+	inMode, err := parseNonnegativeTmuxCount(fields[5])
+	if err != nil {
+		return boundInputTarget{}, fmt.Errorf("invalid copy-mode state for session %q", session)
+	}
+	dead, err := parseNonnegativeTmuxCount(fields[6])
+	if err != nil {
+		return boundInputTarget{}, fmt.Errorf("invalid pane liveness for session %q", session)
+	}
+	return boundInputTarget{
+		sessionID: fields[0],
+		windowID:  fields[2],
+		paneID:    fields[3],
+		attached:  attached > 0,
+		inMode:    inMode > 0,
+		dead:      dead > 0,
+	}, nil
+}
+
+// panePlain and paneParked are the two #{pane_in_mode} states a certified effect
+// can require: input is only ever delivered to a plain pane, and the copy-mode
+// cancel is only ever delivered to a parked one.
+const (
+	panePlain  = 0
+	paneParked = 1
+)
+
+// boundInputCondition builds the predicate tmux re-evaluates in the same server
+// command queue entry as the effect. Attachment is deliberately absent: tmux
+// routes pane-targeted input to the pane we name whether or not a client is
+// watching, so fencing on it would make `gc attach` silently stop the controller
+// from talking to the session under observation. Window-linked ownership stays,
+// because that is the case where the pane can be reached through a session we
+// never certified.
+func boundInputCondition(target boundInputTarget, witness namedSocketWitness, expectedInstanceToken string, paneInMode int) string {
+	checks := []string{
+		fmt.Sprintf("#{==:#{session_id},%s}", target.sessionID),
+		fmt.Sprintf("#{==:#{window_id},%s}", target.windowID),
+		fmt.Sprintf("#{==:#{pane_id},%s}", target.paneID),
+		fmt.Sprintf("#{==:#{pane_in_mode},%d}", paneInMode),
+		"#{==:#{window_linked_sessions_list},#{session_name}}",
+	}
+	if witness.serverPID > 0 {
+		checks = append([]string{fmt.Sprintf("#{==:#{pid},%d}", witness.serverPID)}, checks...)
+	}
+	if expectedInstanceToken != "" {
+		checks = append(checks, fmt.Sprintf("#{==:#{E:GC_INSTANCE_TOKEN},%s}", expectedInstanceToken))
+	}
+	condition := checks[len(checks)-1]
+	for index := len(checks) - 2; index >= 0; index-- {
+		condition = fmt.Sprintf("#{&&:%s,%s}", checks[index], condition)
+	}
+	return condition
+}
+
+func validExpectedInstanceToken(value string) bool {
+	if value == "" || strings.TrimSpace(value) != value {
+		return false
+	}
+	for _, r := range value {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '-' && r != '_' {
+			return false
+		}
+	}
+	return true
 }
 
 func nextPasteBufferName() string {
@@ -2471,49 +2812,55 @@ func (t *Tmux) DismissKnownDialogs(ctx context.Context, sess string, timeout tim
 // selection move before the confirm keypress, so Enter does not race the Down.
 const modelSwitchDismissConfirmDelay = 150 * time.Millisecond
 
-// dismissModelSwitchModal dismisses the Codex/GPT mid-session "approaching rate
-// limits — switch to a cheaper model?" modal by selecting "Keep current model"
-// (Down off the default "Switch" option, then Enter). It is a no-op unless the
-// high-confidence runtime.ContainsModelSwitchModal matcher fires, so it never
-// sends stray keystrokes into ordinary working panes. Side effects are injected
-// so the decision is unit-testable without a live tmux server. Returns whether
-// the modal was present (i.e. a dismiss was attempted).
-func dismissModelSwitchModal(content string, sendKeys func(keys ...string) error, sleep func(time.Duration)) (bool, error) {
-	if !runtime.ContainsModelSwitchModal(content) {
-		return false, nil
-	}
-	if err := sendKeys("Down"); err != nil {
-		return true, err
-	}
-	sleep(modelSwitchDismissConfirmDelay)
-	return true, sendKeys("Enter")
+// boundModalDismissThenCommand selects "Keep current model" (Down off the
+// default "Switch" option, then Enter) on one certified pane. The settle
+// between the two keys is a yield inside the server's command queue, so the
+// confirming Enter re-proves the full predicate first — the same shape the
+// payload uses around its wake.
+func boundModalDismissThenCommand(condition, paneID string, settle time.Duration, fenceCommand string) string {
+	confirm := fmt.Sprintf("send-keys -t %s Enter ; display-message -p %s", paneID, boundInputDeliveredMarker)
+	recheck := shellquote.Join([]string{"if-shell", "-t", paneID, "-F", condition, confirm, fenceCommand})
+	return fmt.Sprintf("send-keys -t %s Down ; run-shell 'sleep %.3f' ; %s", paneID, settle.Seconds(), recheck)
 }
 
-// DismissModelSwitchModalIfPresent clears a mid-session Codex/GPT model-switch
-// modal on the session's agent pane (keeping the current model — no downgrade,
-// no spend change) so a session that would otherwise hang on it can proceed.
-// No-op when the modal is absent. Best-effort: capture/send failures are
-// swallowed (the caller retries on the next wake).
-func (t *Tmux) DismissModelSwitchModalIfPresent(session string) {
-	target := session
-	if agentPane, err := t.FindAgentPane(session); err == nil && agentPane != "" {
-		target = agentPane
-	}
-	content, err := t.CapturePane(target, promptObservationLines)
+// clearModelSwitchModal clears a mid-session Codex/GPT "approaching rate limits
+// — switch to a cheaper model?" modal on the session's certified agent pane,
+// keeping the current model (no downgrade, no spend change). tmux cannot see a
+// TUI modal, so no pane predicate can fence one: left standing, it eats the next
+// nudge's text and turns its Enter into a confirmed model switch (#3916,
+// ga-3syh).
+//
+// Detection reads only the pane's visible screen, never its scrollback: a modal
+// is by definition on screen, while the same words sitting in history (an agent
+// discussing rate limits, a dismissed modal that scrolled) would otherwise make
+// every later nudge fire stray keystrokes. Success is the dismissal being
+// delivered under the certified guard — it is deliberately not re-read from the
+// pane afterwards, because a text matcher cannot distinguish "still up" from
+// "already scrolled into history", and guessing wrong there would fence a
+// healthy session forever.
+func (t *Tmux) clearModelSwitchModal(session, expectedInstanceToken string) error {
+	witness, target, err := t.boundEffectTarget(session)
 	if err != nil {
-		return
+		return err
 	}
-	_, _ = dismissModelSwitchModal(content,
-		func(keys ...string) error {
-			for _, k := range keys {
-				if _, err := t.run("send-keys", "-t", target, k); err != nil {
-					return err
-				}
-			}
-			return nil
-		},
-		time.Sleep,
-	)
+	content, err := t.capturePaneScreen(target.paneID)
+	if err != nil {
+		return fmt.Errorf("%w: reading tmux session %q for a model-switch modal: %w", runtime.ErrInputFenced, session, err)
+	}
+	if !runtime.ContainsModelSwitchModal(content) {
+		return nil
+	}
+	condition := boundInputCondition(target, witness, expectedInstanceToken, panePlain)
+	fenceCommand := "display-message -p " + boundInputFenceMarker
+	thenCommand := boundModalDismissThenCommand(condition, target.paneID, modelSwitchDismissConfirmDelay, fenceCommand)
+	dismissed, err := t.runBoundPaneEffect(witness, target, condition, thenCommand)
+	if err != nil {
+		return fmt.Errorf("%w: dismissing the model-switch modal on tmux session %q: %w", runtime.ErrInputFenced, session, err)
+	}
+	if !dismissed {
+		return fmt.Errorf("%w: could not certify tmux session %q to dismiss its model-switch modal", runtime.ErrInputFenced, session)
+	}
+	return nil
 }
 
 // GetPaneCommand returns the current command running in a pane.
@@ -2652,11 +2999,23 @@ func (t *Tmux) GetPanePID(target string) (string, error) {
 // pane remains visible (for example because remain-on-exit is enabled).
 // When target is a session name, pane 0 is queried explicitly.
 func (t *Tmux) IsPaneDead(target string) (bool, error) {
+	return t.isPaneDead(target, false)
+}
+
+func (t *Tmux) isPaneDeadForAttach(target string) (bool, error) {
+	return t.isPaneDead(target, true)
+}
+
+func (t *Tmux) isPaneDead(target string, noStart bool) (bool, error) {
 	tmuxTarget := target
 	if !strings.HasPrefix(target, "%") {
 		tmuxTarget = target + ":^.0"
 	}
-	out, err := t.run("display-message", "-t", tmuxTarget, "-p", "#{pane_dead}")
+	run := t.run
+	if noStart {
+		run = t.runForAttach
+	}
+	out, err := run("display-message", "-t", tmuxTarget, "-p", "#{pane_dead}")
 	if err != nil {
 		return false, err
 	}
@@ -3074,6 +3433,13 @@ func (t *Tmux) CapturePaneJoined(session string, lines int) (string, error) {
 	return t.run("capture-pane", "-p", "-J", "-t", session, "-S", fmt.Sprintf("-%d", lines))
 }
 
+// capturePaneScreen captures only what is currently on the pane's screen, with
+// no scrollback. Use it for "is this on screen right now" questions, where
+// history would answer for a state the pane has already left.
+func (t *Tmux) capturePaneScreen(target string) (string, error) {
+	return t.run("capture-pane", "-p", "-t", target)
+}
+
 // CapturePaneAll captures all scrollback history.
 func (t *Tmux) CapturePaneAll(session string) (string, error) {
 	return t.run("capture-pane", "-p", "-t", session, "-S", "-")
@@ -3094,7 +3460,14 @@ func (t *Tmux) CapturePaneLines(session string, lines int) ([]string, error) {
 // AttachSession attaches to an existing session.
 // Note: This replaces the current process with tmux attach.
 func (t *Tmux) AttachSession(session string) error {
-	_, err := t.run("attach-session", "-t", session)
+	witness, err := t.captureAttachSocketWitness()
+	if err != nil {
+		return err
+	}
+	if err := t.verifyAttachSocketWitness(witness); err != nil {
+		return err
+	}
+	_, err = t.runForAttachWitness(witness, "attach-session", "-t", session)
 	return err
 }
 
