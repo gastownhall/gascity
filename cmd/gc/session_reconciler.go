@@ -778,7 +778,21 @@ func finalizeDrainAckStopPendingSessions(
 		// pool slot while the agent still runs.
 		processNames := drainAckStopPendingProcessNames(cfg, info)
 		obs, err := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, info.ID, processNames)
-		if err != nil || obs.Running || obs.Alive {
+		if err != nil {
+			// Observation unavailable, not "still alive". Re-queue the stop and
+			// say nothing to the agent: a reminder is a claim about the row's
+			// state, and this tick has none.
+			queueDrainAckAsyncStop(cityPath, store, sp, cfg, info.ID, name, info.InstanceToken, processNames, asyncStopTracker, stderr)
+			continue
+		}
+		if obs.Running || obs.Alive {
+			// The stop was already queued and the runtime is still here. This is
+			// the one drain state with no exit of its own: the loop re-queues the
+			// same stop every tick, nothing in it ever tells the AGENT anything,
+			// and the only thing that has ever cleared such a row is an operator
+			// killing the pane. Ask the agent to acknowledge and leave.
+			// See drain_reminder.go.
+			remindStopPendingDrain(sp, store, info, clk, stderr)
 			queueDrainAckAsyncStop(cityPath, store, sp, cfg, info.ID, name, info.InstanceToken, processNames, asyncStopTracker, stderr)
 			continue
 		}
