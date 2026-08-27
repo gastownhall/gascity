@@ -2626,7 +2626,11 @@ func reconcileExactSessionStartWithOwner(
 		return owner, nil
 	}
 
-	tp, err := resolveExactSessionStartTemplate(params, info, cfgAgent, clk, stderr)
+	tp, resolvedInfo, err := resolveExactSessionStartTemplate(params, info, cfgAgent, clk, stderr)
+	// Fold the resolver's Info back before the error branch reads info.ID: the
+	// named resolver may have durably cleared a stale trigger stamp on the way
+	// in, and every downstream read here must see the cleared row.
+	info = resolvedInfo
 	if err != nil {
 		retainStatusFromInitialRead(exactSessionLifecycleStatusInput{UnavailableReason: exactSessionLifecycleStatusReasonPrerequisiteUnavailable, Error: err.Error()})
 		return owner, fmt.Errorf("reconciling exact session start %q: resolving template: %w", info.ID, err)
@@ -3561,13 +3565,22 @@ func exactSessionStartOwnerForKey(
 	return owner, nil
 }
 
+// resolveExactSessionStartTemplate resolves the template for one exact keyed
+// session. Like resolvePreservedConfiguredNamedSessionTemplate, whose result it
+// returns verbatim on the named path, it hands back the session Info the params
+// were resolved from as the SECOND value on every path — success and error
+// alike — because the named resolver's bindNamedSessionTriggerBead may have
+// cleared a stale trigger stamp durably before the resolve. Callers must fold
+// that Info back onto their own copy (write-returns-Info); keeping the pre-call
+// Info re-injects the cleared stamp downstream (gascity#4373). On the
+// non-named path the returned Info is the unchanged input.
 func resolveExactSessionStartTemplate(
 	params exactSessionStartParams,
 	info sessionpkg.Info,
 	cfgAgent *config.Agent,
 	clk clock.Clock,
 	stderr io.Writer,
-) (TemplateParams, error) {
+) (TemplateParams, sessionpkg.Info, error) {
 	cityName := params.CityName
 	if cityName == "" {
 		cityName = config.EffectiveCityName(params.Config, "")
@@ -3599,11 +3612,11 @@ func resolveExactSessionStartTemplate(
 		resolveAgent, qualifiedName = canonicalSessionIdentityWithConfigInfo(params.Config, cfgAgent, info)
 	}
 	if resolveAgent == nil || qualifiedName == "" {
-		return TemplateParams{}, fmt.Errorf("configured session identity is unresolved")
+		return TemplateParams{}, info, fmt.Errorf("configured session identity is unresolved")
 	}
 	tp, err := resolveTemplateForSessionBeadInfo(bp, resolveAgent, qualifiedName, buildFingerprintExtra(resolveAgent), info)
 	if err != nil {
-		return TemplateParams{}, err
+		return TemplateParams{}, info, err
 	}
 	tp.ManualSession = isManualSessionInfoForAgent(info, cfgAgent)
 	if tp.ManualSession {
@@ -3622,5 +3635,5 @@ func resolveExactSessionStartTemplate(
 		}
 	}
 	installAgentSideEffects(bp, cfgAgent, tp, stderr)
-	return tp, nil
+	return tp, info, nil
 }

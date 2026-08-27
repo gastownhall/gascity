@@ -28,7 +28,7 @@ const (
 	// one whose bd is new enough to carry --if-assignee/--if-status.
 	expectedCIExecutionHash      = "38aeabd035b1347074caae62308aed183549eb980f0cc24f5a08243206283c5b"
 	expectedNightlyTriggersHash  = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
-	expectedNightlyExecutionHash = "80575ca368f28ba9f8b14bf72ce5767a7877ffe4dcadc136854ab4b0b5f1377a"
+	expectedNightlyExecutionHash = "a2c68532e85598b527a2cff2d2057c99ed5c65208fa34ea143869d8375f99a84"
 	expectedSetupActionHash      = "8f2d6b3a57f11d4f33a41211b1d3d5362d1437ba40c7b6db068abb98e731e5ac"
 )
 

@@ -2157,7 +2157,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				for k := range orderedIDs {
 					preservedInfos[k] = infoByID[orderedIDs[k]]
 				}
-				preservedTP, preserveErr = resolvePreservedConfiguredNamedSessionTemplate(cityPath, cityName, cfg, sp, store, preservedInfos, info, clk, stderr)
+				var preservedInfo sessionpkg.Info
+				preservedTP, preservedInfo, preserveErr = resolvePreservedConfiguredNamedSessionTemplate(cityPath, cityName, cfg, sp, store, preservedInfos, info, clk, stderr)
+				// The resolver may have durably cleared a stale trigger stamp
+				// (bindNamedSessionTriggerBead, gascity#4373). Advance the snapshot
+				// with the post-write Info (Step 6d, group 1) so the rest of this
+				// tick — including checkRateLimitStability's fold just below —
+				// reads the cleared cluster instead of re-persisting the stamp.
+				// info == infoByID[id] here (pre-heal), so both advance together.
+				info = tick.set(id, preservedInfo)
 				if preserveErr == nil {
 					obs, obsErr := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, id, preservedTP.Hints.ProcessNames)
 					rateLimitAlive := rateLimitAliveFromObservation(obs.Alive, obsErr)
@@ -4539,6 +4547,15 @@ func rateLimitAliveFromObservation(alive bool, err error) bool {
 	return alive
 }
 
+// resolvePreservedConfiguredNamedSessionTemplate resolves the template for a
+// preserved configured named session. It returns the resolved params plus the
+// session Info the params were resolved from as the SECOND value on EVERY path
+// — success and error alike — because bindNamedSessionTriggerBead may have
+// cleared a stale trigger stamp durably before the resolve. Callers must fold
+// that Info back onto their snapshot (write-returns-Info, Step 6d): a caller
+// that keeps its pre-call Info re-injects the cleared stamp downstream (env at
+// buildPreparedStartWithWorkDirResolver, gascity#4373). On the bind-error and
+// every early-error path the returned Info is the unchanged input.
 func resolvePreservedConfiguredNamedSessionTemplate(
 	cityPath, cityName string,
 	cfg *config.City,
@@ -4548,7 +4565,7 @@ func resolvePreservedConfiguredNamedSessionTemplate(
 	info sessionpkg.Info,
 	clk clock.Clock,
 	stderr io.Writer,
-) (TemplateParams, error) {
+) (TemplateParams, sessionpkg.Info, error) {
 	if cityPath == "" {
 		cityPath = "."
 	}
@@ -4558,14 +4575,21 @@ func resolvePreservedConfiguredNamedSessionTemplate(
 	identity := namedSessionIdentityInfo(info)
 	spec, ok := findNamedSessionSpec(cfg, cityName, identity)
 	if !ok || spec.Agent == nil {
-		return TemplateParams{}, fmt.Errorf("configured named session %q not found", identity)
+		return TemplateParams{}, info, fmt.Errorf("configured named session %q not found", identity)
 	}
 	bp := newAgentBuildParams(cityName, cityPath, cfg, sp, clk.Now().UTC(), store, stderr)
 	bp.sessionBeads = newSessionBeadSnapshotFromInfos(openInfos)
+	if bound, bindErr := bindNamedSessionTriggerBead(store, info, cityName); bindErr != nil {
+		if stderr != nil {
+			fmt.Fprintf(stderr, "session reconciler: named session %s trigger bead %s: %v (continuing with existing stamp)\n", identity, info.TriggerBeadID, bindErr) //nolint:errcheck
+		}
+	} else {
+		info = bound
+	}
 	fpExtra := buildFingerprintExtra(spec.Agent)
 	tp, err := resolveTemplateForSessionBeadInfo(bp, spec.Agent, identity, fpExtra, info)
 	if err != nil {
-		return TemplateParams{}, err
+		return TemplateParams{}, info, err
 	}
 	tp.Alias = identity
 	tp.TemplateName = namedSessionBackingTemplate(spec)
@@ -4580,7 +4604,7 @@ func resolvePreservedConfiguredNamedSessionTemplate(
 	tp.Env["GC_AGENT"] = identity
 	tp.Env["GC_SESSION_ORIGIN"] = "named"
 	installAgentSideEffects(bp, spec.Agent, tp, stderr)
-	return tp, nil
+	return tp, info, nil
 }
 
 // sessionHasOpenAssignedWorkForConfig uses the same configured-named-session

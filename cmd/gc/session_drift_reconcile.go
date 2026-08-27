@@ -119,7 +119,10 @@ func resolveExactSessionConfigDrift(
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	tp, err := resolveExactSessionStartTemplate(params, info, cfgAgent, clk, stderr)
+	tp, resolvedInfo, err := resolveExactSessionStartTemplate(params, info, cfgAgent, clk, stderr)
+	// Fold the resolver's Info back: the named path may have durably cleared a
+	// stale trigger stamp, and the drift verdict below is computed off info.
+	info = resolvedInfo
 	if err != nil {
 		// An unresolvable template is not a drift verdict. Fail closed: the row
 		// keeps whatever legacy makes of it, and the condition is re-detected.

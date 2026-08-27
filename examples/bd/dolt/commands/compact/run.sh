@@ -35,16 +35,17 @@
 #      otherwise looks identical to the ambiguous gain+drift corruption signal.
 #      Quarantining that false positive blocks all future GC of the db and
 #      starves DOLT_GC until host memory is exhausted. So, mirroring the remote-
-#      push path's HEAD-stability defer, gain+drift and row-count-decrease
-#      cases are downgraded from a blocking quarantine to a skip-and-retry-
-#      next-run ONLY when a concurrent writer is proven. A writer is proven
-#      (and distinguished from the flatten's OWN commit) when either HEAD
-#      captured immediately before the mutating reset differs from the stable
-#      pre-flight HEAD (a writer landed in the preflight->reset window, before
-#      the flatten committed), or HEAD captured after verify moved past the
-#      flatten's own commit (a writer landed during/after verify). All other
-#      failures — and gain+drift or row-decrease with a stable HEAD — still
-#      quarantine. Probe failure leaves the race unproven and quarantines.
+#      push path's HEAD-stability defer, gain+drift, row-count-decrease, and
+#      same-count value-hash-drift cases are downgraded from a blocking
+#      quarantine to a skip-and-retry-next-run ONLY when a concurrent writer is
+#      proven. A writer is proven (and distinguished from the flatten's OWN
+#      commit) when either HEAD captured immediately before the mutating reset
+#      differs from the stable pre-flight HEAD (a writer landed in the
+#      preflight->reset window, before the flatten committed), or HEAD captured
+#      after verify moved past the flatten's own commit (a writer landed
+#      during/after verify). All other failures — and any of those signatures
+#      with a stable HEAD — still quarantine. Probe failure leaves the race
+#      unproven and quarantines.
 #   4b. Committed-root drift gate. When per-table verification passed but the
 #      whole-database hash still drifted, DOLT_DIFF_STAT names the tables that
 #      differ across the flatten. Drift is benign only when every named table
@@ -85,6 +86,15 @@
 #   GC_DOLT_COMPACT_PENDING_PUSH_MAX_AGE_SECS
 #     (default: 172800) — maximum age for automatic pending remote-push retry.
 #                       Older markers require manual review before push.
+#   GC_DOLT_COMPACT_RENOTIFY_BACKSTOP_SECS
+#     (default: 86400) — once a quarantine, pending-push, or pending-gc
+#                       marker has mailed an alert for an unchanged reason,
+#                       suppress repeat mail until this many seconds have
+#                       elapsed since the last notification, then send
+#                       exactly one more. Set to 0 to restore
+#                       notify-once-per-reason-forever (the marker never
+#                       re-mails on its own once a given reason has been
+#                       reported, even if left unresolved indefinitely).
 #   GC_DOLT_COMPACT_REMOTE               (optional) — remote to fetch/push.
 #                                         Defaults to origin when present;
 #                                         ambiguous multi-remote stores fail.
@@ -303,6 +313,7 @@ threshold_commits="${GC_DOLT_COMPACT_THRESHOLD_COMMITS:-2000}"
 call_timeout="${GC_DOLT_COMPACT_CALL_TIMEOUT_SECS:-1800}"
 push_timeout="${GC_DOLT_COMPACT_PUSH_TIMEOUT_SECS:-120}"
 pending_push_max_age_secs="${GC_DOLT_COMPACT_PENDING_PUSH_MAX_AGE_SECS:-172800}"
+compact_renotify_backstop_secs="${GC_DOLT_COMPACT_RENOTIFY_BACKSTOP_SECS:-86400}"
 compact_remote="${GC_DOLT_COMPACT_REMOTE:-}"
 dry_run="${GC_DOLT_COMPACT_DRY_RUN:-}"
 only_dbs="${GC_DOLT_COMPACT_ONLY_DBS:-}"
@@ -379,6 +390,14 @@ case "$pending_push_max_age_secs" in
   ''|*[!0-9]*)
     printf 'compact: invalid GC_DOLT_COMPACT_PENDING_PUSH_MAX_AGE_SECS=%s (must be a non-negative integer)\n' \
       "$pending_push_max_age_secs" >&2
+    exit 2
+    ;;
+esac
+
+case "$compact_renotify_backstop_secs" in
+  ''|*[!0-9]*)
+    printf 'compact: invalid GC_DOLT_COMPACT_RENOTIFY_BACKSTOP_SECS=%s (must be a non-negative integer)\n' \
+      "$compact_renotify_backstop_secs" >&2
     exit 2
     ;;
 esac
@@ -1485,10 +1504,14 @@ write_compact_marker() {
   fi
   if [ "$dir" = "$quarantine_dir" ]; then
     emit_compact_quarantine_event "$db" "compact-quarantine" "$marker_path" "$reason" "$created_at"
-    if mail_compact_quarantine_alert "$db" "compact-quarantine" "$marker_path" "$reason" "$created_at"; then
-      record_quarantine_notify_state "$db" "$reason" 1
+    if marker_should_notify "$quarantine_dir" "$db" "$reason" "$compact_renotify_backstop_secs"; then
+      if mail_compact_quarantine_alert "$db" "compact-quarantine" "$marker_path" "$reason" "$created_at"; then
+        record_marker_notify_state "$quarantine_dir" "$db" "$reason" 1
+      else
+        record_marker_notify_state "$quarantine_dir" "$db" "$reason" 0
+      fi
     else
-      record_quarantine_notify_state "$db" "$reason" 0
+      record_marker_notify_state "$quarantine_dir" "$db" "$reason" 0
     fi
   fi
   return 0
@@ -1517,91 +1540,111 @@ mail_compact_quarantine_alert() {
   return 1
 }
 
-send_compact_quarantine_alert() {
-  emit_compact_quarantine_event "$@"
-  mail_compact_quarantine_alert "$@"
+# marker_should_notify DIR DB REASON BACKSTOP_SECS
+#   Fail-open dedup+backstop check: EMIT (return 0) unless DIR/DB's marker
+#   last_notified_reason already matches REASON exactly AND fewer than
+#   BACKSTOP_SECS have elapsed since last_notified_ts. A missing/unreadable
+#   marker, a marker never notified before, a changed reason, or a
+#   missing/unparseable last_notified_ts all emit — this must never wrongly
+#   suppress a real alert. BACKSTOP_SECS<=0 disables the backstop re-notify
+#   (dedup holds forever once a reason has been notified, matching the
+#   original notify-once-per-distinct-state contract). Shared by quarantine,
+#   pending-push, and pending-gc markers — they carry the same
+#   seen_count/notify_count/last_notified_ts/last_notified_reason shape.
+#   Mirrors the notify-once-per-distinct-state marker shape in
+#   gc-management's packs/maintainer-pr-review/scripts/hold-notice-lib.sh,
+#   extended with a time backstop so an unresolved condition cannot go
+#   silent forever.
+marker_should_notify() {
+  _mn_dir="$1"
+  _mn_db="$2"
+  _mn_reason="$3"
+  _mn_backstop_secs="$4"
+
+  _mn_marker=$(compact_marker_path "$_mn_dir" "$_mn_db")
+  [ -f "$_mn_marker" ] && [ -r "$_mn_marker" ] || return 0
+
+  _mn_prev_reason=$(compact_marker_value "$_mn_dir" "$_mn_db" last_notified_reason || true)
+  [ -n "$_mn_prev_reason" ] || return 0
+  [ "$_mn_prev_reason" = "$_mn_reason" ] || return 0
+
+  [ "$_mn_backstop_secs" -gt 0 ] 2>/dev/null || return 1
+
+  _mn_last_ts=$(compact_marker_value "$_mn_dir" "$_mn_db" last_notified_ts || true)
+  _mn_last_epoch=$(parse_compact_timestamp "$_mn_last_ts" || true)
+  [ -n "$_mn_last_epoch" ] || return 0
+
+  _mn_now_epoch=$(date -u +%s)
+  _mn_age=$(( _mn_now_epoch - _mn_last_epoch ))
+  [ "$_mn_age" -lt 0 ] && _mn_age=0
+  [ "$_mn_age" -ge "$_mn_backstop_secs" ] && return 0
+  return 1
 }
 
-# quarantine_should_notify DB REASON
-#   Fail-open dedup check: EMIT (return 0) unless the quarantine marker's
-#   last_notified_reason already matches REASON, meaning a mail already went
-#   out for this exact quarantine state. A missing marker, missing field, or
-#   unreadable marker always emits — this must never wrongly suppress a real
-#   alert. Mirrors the notify-once-per-distinct-state marker shape in
-#   gc-management's packs/maintainer-pr-review/scripts/hold-notice-lib.sh.
-quarantine_should_notify() {
-  db="$1"
-  reason="$2"
-  _qn_marker=$(compact_marker_path "$quarantine_dir" "$db")
-  [ -f "$_qn_marker" ] && [ -r "$_qn_marker" ] || return 0
-  _qn_prev_reason=$(compact_marker_value "$quarantine_dir" "$db" last_notified_reason || true)
-  [ -n "$_qn_prev_reason" ] || return 0
-  [ "$_qn_prev_reason" = "$reason" ] && return 1
-  return 0
-}
-
-# record_quarantine_notify_state DB REASON EMITTED
+# record_marker_notify_state DIR DB REASON EMITTED
 #   Patches only the notify-bookkeeping fields (seen_count, notify_count,
-#   last_notified_ts, last_notified_reason) onto DB's existing quarantine
-#   marker, preserving every other field byte-for-byte. EMITTED=1 bumps
+#   last_notified_ts, last_notified_reason) onto DB's existing marker in
+#   DIR, preserving every other field byte-for-byte. EMITTED=1 bumps
 #   notify_count and stamps last_notified_ts/last_notified_reason; EMITTED=0
 #   only bumps seen_count. A missing marker or write failure is a silent
 #   no-op — bookkeeping must never block or fail compaction.
-record_quarantine_notify_state() {
-  db="$1"
-  reason="$2"
-  _qn_emitted="$3"
+record_marker_notify_state() {
+  _mn_dir="$1"
+  _mn_db="$2"
+  _mn_reason="$3"
+  _mn_emitted="$4"
 
-  _qn_marker=$(compact_marker_path "$quarantine_dir" "$db")
-  [ -f "$_qn_marker" ] && [ -r "$_qn_marker" ] || return 0
+  _mn_marker=$(compact_marker_path "$_mn_dir" "$_mn_db")
+  [ -f "$_mn_marker" ] && [ -r "$_mn_marker" ] || return 0
 
-  _qn_seen_count=$(compact_marker_value "$quarantine_dir" "$db" seen_count || true)
-  case "$_qn_seen_count" in ''|*[!0-9]*) _qn_seen_count=0 ;; esac
-  _qn_seen_count=$((_qn_seen_count + 1))
+  _mn_seen_count=$(compact_marker_value "$_mn_dir" "$_mn_db" seen_count || true)
+  case "$_mn_seen_count" in ''|*[!0-9]*) _mn_seen_count=0 ;; esac
+  _mn_seen_count=$((_mn_seen_count + 1))
 
-  _qn_notify_count=$(compact_marker_value "$quarantine_dir" "$db" notify_count || true)
-  case "$_qn_notify_count" in ''|*[!0-9]*) _qn_notify_count=0 ;; esac
-  _qn_last_ts=$(compact_marker_value "$quarantine_dir" "$db" last_notified_ts || true)
-  _qn_last_reason=$(compact_marker_value "$quarantine_dir" "$db" last_notified_reason || true)
-  if [ "$_qn_emitted" = "1" ]; then
-    _qn_notify_count=$((_qn_notify_count + 1))
-    _qn_last_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    _qn_last_reason="$reason"
+  _mn_notify_count=$(compact_marker_value "$_mn_dir" "$_mn_db" notify_count || true)
+  case "$_mn_notify_count" in ''|*[!0-9]*) _mn_notify_count=0 ;; esac
+  _mn_last_ts=$(compact_marker_value "$_mn_dir" "$_mn_db" last_notified_ts || true)
+  _mn_last_reason=$(compact_marker_value "$_mn_dir" "$_mn_db" last_notified_reason || true)
+  if [ "$_mn_emitted" = "1" ]; then
+    _mn_notify_count=$((_mn_notify_count + 1))
+    _mn_last_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    _mn_last_reason="$_mn_reason"
   fi
 
-  _qn_old_umask=$(umask)
+  _mn_old_umask=$(umask)
   umask 077
-  _qn_tmp=$(mktemp "$quarantine_dir/$db.tmp.XXXXXX") || {
-    umask "$_qn_old_umask"
+  _mn_tmp=$(mktemp "$_mn_dir/$_mn_db.tmp.XXXXXX") || {
+    umask "$_mn_old_umask"
     return 0
   }
-  umask "$_qn_old_umask"
-  if ! awk '!/^(seen_count|notify_count|last_notified_ts|last_notified_reason)=/' "$_qn_marker" > "$_qn_tmp" 2>/dev/null; then
-    rm -f "$_qn_tmp"
+  umask "$_mn_old_umask"
+  if ! awk '!/^(seen_count|notify_count|last_notified_ts|last_notified_reason)=/' "$_mn_marker" > "$_mn_tmp" 2>/dev/null; then
+    rm -f "$_mn_tmp"
     return 0
   fi
   if ! {
-    printf 'seen_count=%s\n' "$_qn_seen_count"
-    printf 'notify_count=%s\n' "$_qn_notify_count"
-    printf 'last_notified_ts=%s\n' "$_qn_last_ts"
-    printf 'last_notified_reason=%s\n' "$_qn_last_reason"
-  } >> "$_qn_tmp" 2>/dev/null; then
-    rm -f "$_qn_tmp"
+    printf 'seen_count=%s\n' "$_mn_seen_count"
+    printf 'notify_count=%s\n' "$_mn_notify_count"
+    printf 'last_notified_ts=%s\n' "$_mn_last_ts"
+    printf 'last_notified_reason=%s\n' "$_mn_last_reason"
+  } >> "$_mn_tmp" 2>/dev/null; then
+    rm -f "$_mn_tmp"
     return 0
   fi
-  if ! grep -q '^db=' "$_qn_tmp" 2>/dev/null; then
-    rm -f "$_qn_tmp"
+  if ! grep -q '^db=' "$_mn_tmp" 2>/dev/null; then
+    rm -f "$_mn_tmp"
     return 0
   fi
-  mv -f "$_qn_tmp" "$_qn_marker" || rm -f "$_qn_tmp"
+  mv -f "$_mn_tmp" "$_mn_marker" || rm -f "$_mn_tmp"
   return 0
 }
 
 # report_existing_quarantine DB
 #   Diagnostic + alert path for a compact/bare-gc invocation that hit an
 #   already-quarantined database. The event still fires every cycle; the
-#   mail is gated by quarantine_should_notify so a stable quarantine reason
-#   pages once instead of on every subsequent run.
+#   mail is gated by marker_should_notify so a stable quarantine reason
+#   pages on discovery and then again only after the renotify backstop
+#   elapses, instead of once ever or on every single cycle.
 report_existing_quarantine() {
   db="$1"
   quarantine_marker=$(compact_marker_path "$quarantine_dir" "$db")
@@ -1612,12 +1655,14 @@ report_existing_quarantine() {
   emit_compact_quarantine_event "$db" "compact-quarantine" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}"
 
   quarantine_alert_emitted=0
-  if quarantine_should_notify "$db" "${quarantine_reason:-<unknown>}"; then
-    if mail_compact_quarantine_alert "$db" "compact-quarantine" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}"; then
+  if marker_should_notify "$quarantine_dir" "$db" "${quarantine_reason:-<unknown>}" "$compact_renotify_backstop_secs"; then
+    quarantine_seen_count=$(compact_marker_value "$quarantine_dir" "$db" seen_count || true)
+    case "$quarantine_seen_count" in ''|*[!0-9]*) quarantine_seen_count=0 ;; esac
+    if mail_compact_quarantine_alert "$db" "compact-quarantine" "$quarantine_marker" "${quarantine_reason:-<unknown>} seen=$((quarantine_seen_count + 1))" "${quarantine_created_at:-<unknown>}"; then
       quarantine_alert_emitted=1
     fi
   fi
-  record_quarantine_notify_state "$db" "${quarantine_reason:-<unknown>}" "$quarantine_alert_emitted"
+  record_marker_notify_state "$quarantine_dir" "$db" "${quarantine_reason:-<unknown>}" "$quarantine_alert_emitted"
 }
 
 ensure_compact_marker_writable() {
@@ -1755,20 +1800,36 @@ write_quarantine_marker() {
     "$@"
 }
 
-compact_marker_created_at_epoch() {
-  dir="$1"
-  db="$2"
-  created_at=$(compact_marker_value "$dir" "$db" created_at || true)
-  [ -n "$created_at" ] || return 1
-  case "$created_at" in
+# parse_compact_timestamp TIMESTAMP
+#   Parses a UTC "%Y-%m-%dT%H:%M:%SZ" marker timestamp field to epoch
+#   seconds, trying GNU date then BSD date. Empty or non-timestamp-charset
+#   input fails without invoking date.
+parse_compact_timestamp() {
+  _pt_ts="$1"
+  [ -n "$_pt_ts" ] || return 1
+  case "$_pt_ts" in
     *[!0-9TZ:.-]*)
       return 1
       ;;
   esac
-  date -u -d "$created_at" +%s 2>/dev/null ||
-    date -ju -f "%Y-%m-%dT%H:%M:%SZ" "$created_at" +%s 2>/dev/null
+  date -u -d "$_pt_ts" +%s 2>/dev/null ||
+    date -ju -f "%Y-%m-%dT%H:%M:%SZ" "$_pt_ts" +%s 2>/dev/null
 }
 
+compact_marker_created_at_epoch() {
+  dir="$1"
+  db="$2"
+  created_at=$(compact_marker_value "$dir" "$db" created_at || true)
+  parse_compact_timestamp "$created_at"
+}
+
+# ensure_remote_push_retry_fresh DIR DB MARKER_LABEL
+#   Gates an automatic remote-push retry on marker age: markers older than
+#   pending_push_max_age_secs fail the retry and alert. The alert event
+#   fires every cycle; the alert mail is gated by marker_should_notify so
+#   an unresolved stale marker pages on first detection and then again only
+#   after the renotify backstop elapses, instead of on every single cycle
+#   (previously: unconditional mail on every invocation past max-age).
 ensure_remote_push_retry_fresh() {
   dir="$1"
   db="$2"
@@ -1788,7 +1849,22 @@ ensure_remote_push_retry_fresh() {
   if [ "$age_secs" -gt "$pending_push_max_age_secs" ]; then
     printf 'compact: db=%s %s marker is stale age=%ss max_age=%ss — manual review required before remote push retry\n' \
       "$db" "$marker_label" "$age_secs" "$pending_push_max_age_secs" >&2
-    send_compact_quarantine_alert "$db" "$(basename "$dir")" "$(compact_marker_path "$dir" "$db")" "$marker_label marker is stale" "$(compact_marker_value "$dir" "$db" created_at || true)" || true
+    stale_reason="$marker_label marker is stale"
+    stale_marker_path=$(compact_marker_path "$dir" "$db")
+    stale_marker_type=$(basename "$dir")
+    stale_created_at=$(compact_marker_value "$dir" "$db" created_at || true)
+    emit_compact_quarantine_event "$db" "$stale_marker_type" "$stale_marker_path" "$stale_reason" "$stale_created_at"
+    if marker_should_notify "$dir" "$db" "$stale_reason" "$compact_renotify_backstop_secs"; then
+      stale_seen_count=$(compact_marker_value "$dir" "$db" seen_count || true)
+      case "$stale_seen_count" in ''|*[!0-9]*) stale_seen_count=0 ;; esac
+      if mail_compact_quarantine_alert "$db" "$stale_marker_type" "$stale_marker_path" "$stale_reason age=${age_secs}s seen=$((stale_seen_count + 1))" "$stale_created_at"; then
+        record_marker_notify_state "$dir" "$db" "$stale_reason" 1
+      else
+        record_marker_notify_state "$dir" "$db" "$stale_reason" 0
+      fi
+    else
+      record_marker_notify_state "$dir" "$db" "$stale_reason" 0
+    fi
     return 1
   fi
   return 0
@@ -2659,10 +2735,12 @@ flatten_database() {
   if [ "$verify_counts_rc" -ne 0 ]; then
     integrity_reason="${verify_counts_failure_reason:-post-flatten integrity check failed}"
     integrity_guidance="${verify_counts_failure_guidance:-post-flatten integrity check failed; investigate before re-running}"
-    # Downgrade quarantine -> defer ONLY for the ambiguous gain+drift case when
-    # a concurrent writer is proven. Every other integrity failure (row-count
-    # decrease, same-count hash drift, table-list drift, probe failure) and the
-    # gain+drift case with a stable HEAD still quarantine below unchanged.
+    # The blocks below each downgrade a quarantine to a skip-and-retry defer for
+    # one benign concurrent-writer signature — gain+drift, row-count decrease, or
+    # same-count value-hash drift — but only when a concurrent writer is
+    # HEAD-proven (or, for gain+drift, proven additive-only via DOLT_DIFF). A
+    # signature mixed with any other failure category, table-list drift, a probe
+    # failure, or a stable HEAD still quarantines below unchanged.
     if [ "$writer_race_detected" = "1" ] && \
        [ "${verify_counts_saw_gain:-0}" = "1" ] && \
        [ "${verify_counts_saw_gain_hash_drift:-0}" = "1" ] && \
@@ -2730,9 +2808,37 @@ flatten_database() {
       rm -f "$preflight_tmp"
       return 0
     fi
+    # Downgrade quarantine -> defer for concurrent-writer UPDATE. A concurrent
+    # UPDATE during the flatten window changes a committed table's value hash
+    # while leaving its row count unchanged — the net-zero-row-count churn that
+    # dominates the busiest db's workload (ephemeral wisp pour/burn and bead/mail
+    # row updates). The whole-database value-hash drift downgrade below already
+    # defers a same-content change when a concurrent writer is HEAD-proven, so the
+    # per-table check must not be stricter than the database-level check for the
+    # same phenomenon. Safe to defer when a writer is proven and no other anomaly
+    # (row gain+drift, row decrease, table-list change, or probe failure)
+    # prevents safe deferral.
+    if [ "$writer_race_detected" = "1" ] && \
+       [ "${verify_counts_saw_same_count_hash_drift:-0}" = "1" ] && \
+       [ "${verify_counts_saw_gain_hash_drift:-0}" != "1" ] && \
+       [ "${verify_counts_saw_row_decrease:-0}" != "1" ] && \
+       [ "${verify_counts_saw_table_list_change:-0}" != "1" ] && \
+       [ "${verify_counts_saw_probe_failure:-0}" != "1" ]; then
+      printf 'compact: db=%s writer race detected during flatten (snapshot_HEAD=%s pre_reset_HEAD=%s flatten_HEAD=%s post_verify_HEAD=%s) — same-count table value hash drift is concurrent-writer UPDATE data, not corruption; deferring, will retry next run\n' \
+        "$db" "$head" "${head_before_reset:-<empty>}" "$flatten_head" "${post_verify_head:-<empty>}" >&2
+      if ! defer_writer_race_after_flatten "$db" "$flatten_head" \
+        "$remote" "$expected_remote_head" "$expected_remote_head_verified" \
+        "$compacted_from_head" "$local_branch" "$remote_branch"; then
+        rm -f "$preflight_tmp"
+        return 1
+      fi
+      rm -f "$preflight_tmp"
+      return 0
+    fi
     if [ "$writer_race_detected" = "1" ] && \
        { [ "${verify_counts_saw_gain_hash_drift:-0}" = "1" ] || \
-         [ "${verify_counts_saw_row_decrease:-0}" = "1" ]; }; then
+         [ "${verify_counts_saw_row_decrease:-0}" = "1" ] || \
+         [ "${verify_counts_saw_same_count_hash_drift:-0}" = "1" ]; }; then
       printf 'compact: db=%s writer race detected during flatten (snapshot_HEAD=%s pre_reset_HEAD=%s flatten_HEAD=%s post_verify_HEAD=%s), but additional integrity failure category prevents defer; quarantine unchanged\n' \
         "$db" "$head" "${head_before_reset:-<empty>}" "$flatten_head" "${post_verify_head:-<empty>}" >&2
     fi

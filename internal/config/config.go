@@ -3672,7 +3672,7 @@ func InjectImplicitAgents(cfg *City) {
 	// prompt rendering falls back to the embedded baseline.
 	promptTemplate := ""
 	if coreDir := cfg.PackDirByName("core"); coreDir != "" {
-		promptTemplate = filepath.Join(coreDir, "assets", "prompts", "pool-worker.md")
+		promptTemplate = filepath.Join(coreDir, "assets", "prompts", "pool-worker.template.md")
 	}
 
 	slingFormula := cfg.AgentDefaults.DefaultSlingFormula

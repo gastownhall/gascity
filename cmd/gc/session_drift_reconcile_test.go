@@ -52,7 +52,7 @@ func driftAgentConfig(t *testing.T, env *reconcilerTestEnv, params exactSessionS
 	if cfgAgent == nil {
 		t.Fatalf("config has no agent for template %q", template)
 	}
-	tp, err := resolveExactSessionStartTemplate(params, info, cfgAgent, env.clk, io.Discard)
+	tp, _, err := resolveExactSessionStartTemplate(params, info, cfgAgent, env.clk, io.Discard)
 	if err != nil {
 		t.Fatalf("resolve keyed template for %q: %v", id, err)
 	}
@@ -74,7 +74,7 @@ func driftSweepInput(
 	// the sweep a hand-built stub would manufacture drift the handler cannot see.
 	tp := env.desiredState[name]
 	if cfgAgent := findAgentByTemplate(env.cfg, info.Template); cfgAgent != nil {
-		if resolved, err := resolveExactSessionStartTemplate(driftParams(env, cityPath, provider), info, cfgAgent, env.clk, io.Discard); err == nil {
+		if resolved, _, err := resolveExactSessionStartTemplate(driftParams(env, cityPath, provider), info, cfgAgent, env.clk, io.Discard); err == nil {
 			tp = resolved
 		}
 	}

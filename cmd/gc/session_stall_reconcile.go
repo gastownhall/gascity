@@ -273,7 +273,10 @@ func reconcileExactSessionProgressStallRecycle(
 	if cfgAgent == nil {
 		return exactSessionStartKeyedOwner, nil
 	}
-	tp, err := resolveExactSessionStartTemplate(params, info, cfgAgent, clk, stderr)
+	tp, resolvedInfo, err := resolveExactSessionStartTemplate(params, info, cfgAgent, clk, stderr)
+	// Fold the resolver's Info back: the named path may have durably cleared a
+	// stale trigger stamp, and the recycle below re-reads and fences off info.
+	info = resolvedInfo
 	if err != nil {
 		return exactSessionStartKeyedOwner, fmt.Errorf("recycling progress-stalled session %q: resolving template: %w", info.ID, err)
 	}

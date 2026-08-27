@@ -37,6 +37,7 @@ service-secrets-perms
 skill-collision
 skill-dangling-sink
 order-firing-current
+order-outcome-healthy
 codex-hooks-drift
 rig-pack-coverage
 pack-runtimes
