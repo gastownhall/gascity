@@ -483,6 +483,33 @@ func TestIsStaleCmdGCTestConfigPathSkipsLegacyUnownedRoot(t *testing.T) {
 	}
 }
 
+// A dolt server whose config sits under a Go t.TempDir() root
+// (Test<Name><rand>/...) with the config file gone from disk is the
+// signature of a run killed before its reap ran (timeout, panic, SIGKILL):
+// TestMain's cleanup removed the temp root while the server lived on
+// (observed 2026-08-21: 242 such servers accumulated over five weeks and
+// exhausted a host's gascity-test.slice pids quota). The gone config marks
+// it stale; a config still on disk marks a live concurrent run.
+func TestIsStaleCmdGCTestConfigPathReapsAbandonedGoTempDirRoot(t *testing.T) {
+	tempParent := t.TempDir()
+
+	goneConfig := filepath.Join(tempParent, "TestAbandoned1234", "001", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
+	if !isStaleCmdGCTestConfigPath(goneConfig, nil, tempParent) {
+		t.Fatalf("abandoned go tempdir config path %q (file gone) not classified as stale", goneConfig)
+	}
+
+	liveConfig := filepath.Join(tempParent, "TestLive1234", "001", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
+	if err := os.MkdirAll(filepath.Dir(liveConfig), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(liveConfig, []byte("listener:\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if isStaleCmdGCTestConfigPath(liveConfig, nil, tempParent) {
+		t.Fatalf("live go tempdir config path %q (file on disk) classified as stale", liveConfig)
+	}
+}
+
 // TestSnapshotDoltProcessPIDs_EnumeratorErrorIsFatal pins that a
 // discovery error is reported via Fatalf so test runs surface
 // enumeration failures directly rather than silently treating them
