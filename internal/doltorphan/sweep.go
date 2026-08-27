@@ -44,7 +44,7 @@ const lsofScanTimeout = 30 * time.Second
 const lockFileName = "LOCK"
 
 // maxLockSearchDepth bounds how deep findLockFiles descends below a
-// candidate directory looking for a dolt LOCK file, one level deeper than
+// candidate directory looking for a dolt LOCK file, two levels deeper than
 // maxMarkerDepth to comfortably cover <marker>/noms/LOCK wherever the
 // .dolt marker itself was found.
 const maxLockSearchDepth = maxMarkerDepth + 2
@@ -235,26 +235,40 @@ func hasDoltMarker(dir string, depth int) bool {
 
 // findLockFiles returns the full path of every file literally named "LOCK"
 // within depth levels of dir (dir's direct children are depth 1), mirroring
-// hasDoltMarker's bounded recursive traversal shape.
-func findLockFiles(dir string, depth int) []string {
+// hasDoltMarker's bounded recursive traversal shape. An unreadable
+// subdirectory is reported as an error rather than silently treated as
+// lock-free: the caller fails closed on it, matching Sweep's contract that
+// an unverifiable "is this held open" check counts the same as "held". This
+// matters under exactly the load this check exists for — ReadDir can fail
+// with EMFILE under heavy parallel churn, and a silent nil there would let
+// a live store through. A subdirectory that vanished mid-walk is not an
+// error: nothing that no longer exists can hold a lock.
+func findLockFiles(dir string, depth int) ([]string, error) {
 	if depth <= 0 {
-		return nil
+		return nil, nil
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read %s: %w", dir, err)
 	}
 	var found []string
 	for _, e := range entries {
 		if e.IsDir() {
-			found = append(found, findLockFiles(filepath.Join(dir, e.Name()), depth-1)...)
+			nested, err := findLockFiles(filepath.Join(dir, e.Name()), depth-1)
+			if err != nil {
+				return nil, err
+			}
+			found = append(found, nested...)
 			continue
 		}
 		if e.Name() == lockFileName {
 			found = append(found, filepath.Join(dir, e.Name()))
 		}
 	}
-	return found
+	return found, nil
 }
 
 // doltLockHeld reports whether any dolt LOCK file found within dir is
@@ -265,7 +279,11 @@ func findLockFiles(dir string, depth int) []string {
 // called speculatively against a path that hasn't already been confirmed
 // to exist.
 func doltLockHeld(dir string) (bool, error) {
-	for _, path := range findLockFiles(dir, maxLockSearchDepth) {
+	paths, err := findLockFiles(dir, maxLockSearchDepth)
+	if err != nil {
+		return false, err
+	}
+	for _, path := range paths {
 		held, err := probeLockHeld(path)
 		if err != nil {
 			return false, err

@@ -475,3 +475,41 @@ func TestSweep_RemovesWhenDoltLockFileExistsButIsUnheld(t *testing.T) {
 		t.Fatalf("dir %s should have been removed, stat err = %v", dir, err)
 	}
 }
+
+// TestSweep_LockSearchTraversalErrorFailsClosed covers the gap between the
+// two fail-closed checks that already existed: an unopenable LOCK file fails
+// closed via probeLockHeld, but a subtree we cannot even list used to look
+// identical to "no LOCK here" and permitted removal. ReadDir can fail with
+// EMFILE under exactly the heavy parallel load this whole check exists for.
+func TestSweep_LockSearchTraversalErrorFailsClosed(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions; cannot force a ReadDir failure")
+	}
+	root := t.TempDir()
+	old := time.Now().Add(-2 * time.Hour)
+	dir := mkStoreDir(t, root, "unreadable-noms", 1, old)
+
+	nomsDir := filepath.Join(dir, ".dolt", "noms")
+	if err := os.MkdirAll(nomsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s): %v", nomsDir, err)
+	}
+	if err := os.Chmod(nomsDir, 0o000); err != nil {
+		t.Fatalf("Chmod(%s): %v", nomsDir, err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(nomsDir, 0o755) })
+
+	result := Sweep(SweepConfig{Root: root, RunLsof: noLsofHits})
+
+	if len(result.Removed) != 0 {
+		t.Fatalf("Removed = %v, want none (lock search unverifiable; fail closed)", result.Removed)
+	}
+	if result.Skipped != 1 {
+		t.Fatalf("Skipped = %d, want 1", result.Skipped)
+	}
+	if len(result.Errors) == 0 {
+		t.Fatalf("expected an error reported for the unreadable lock search")
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("dir %s should still exist: %v", dir, err)
+	}
+}
