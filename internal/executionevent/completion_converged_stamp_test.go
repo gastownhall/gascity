@@ -43,11 +43,12 @@ func closedCompletionCorpus(t *testing.T, n int) (beads.Store, []string, []strin
 	return backing, rootIDs, stepIDs
 }
 
-// TestCompletionBackstopStampsAndSkipsConvergedRoots: a closed root whose
-// every step is closed and whose every fact is journaled cannot change again,
-// so the first sweep that proves that stamps it, and later sweeps skip it
-// without a per-root step listing.
-func TestCompletionBackstopStampsAndSkipsConvergedRoots(t *testing.T) {
+// TestCompletionBackstopStampsOnlyVerifiedConvergenceThenSkips: an EMITTING
+// pass must never stamp — its Record calls are fire-and-forget, and a stamp in
+// the same pass would turn a silently dropped append into a permanent fact
+// loss. The root converges one sweep later, when every fact reads back from
+// the journal, and is skipped forever after.
+func TestCompletionBackstopStampsOnlyVerifiedConvergenceThenSkips(t *testing.T) {
 	backing, rootIDs, _ := closedCompletionCorpus(t, 3)
 	store := &sweepCountingGraphStore{Store: backing}
 	journal := events.NewFake()
@@ -63,22 +64,108 @@ func TestCompletionBackstopStampsAndSkipsConvergedRoots(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if root.Metadata[beadmeta.CompletionFactsConvergedMetadataKey] == "" {
-			t.Fatalf("converged root %s not stamped", id)
+		if root.Metadata[beadmeta.CompletionFactsConvergedMetadataKey] != "" {
+			t.Fatalf("root %s stamped by the pass that EMITTED its facts; a dropped Record would now be a permanent loss", id)
 		}
 	}
 
-	stepListsAfterFirst := store.stepLists
 	second := &CompletionBackstop{}
 	r2 := second.Pass(journal, stores, "execution-reconcile")
-	if !r2.SweepComplete || r2.Emitted != 0 {
-		t.Fatalf("second sweep = %+v, want complete with 0 emitted", r2)
+	if !r2.SweepComplete || r2.Emitted != 0 || r2.RootsVisited != 3 {
+		t.Fatalf("second sweep = %+v, want a verifying visit of all 3 roots", r2)
 	}
-	if r2.RootsSkippedConverged != 3 {
-		t.Fatalf("second sweep skipped %d converged root(s), want 3", r2.RootsSkippedConverged)
+	for _, id := range rootIDs {
+		root, err := backing.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if root.Metadata[beadmeta.CompletionFactsConvergedMetadataKey] == "" {
+			t.Fatalf("verified-converged root %s not stamped", id)
+		}
 	}
-	if store.stepLists != stepListsAfterFirst {
-		t.Fatalf("second sweep issued %d per-root step listing(s) for stamped roots, want 0", store.stepLists-stepListsAfterFirst)
+
+	stepListsBefore := store.stepLists
+	third := &CompletionBackstop{}
+	r3 := third.Pass(journal, stores, "execution-reconcile")
+	if !r3.SweepComplete || r3.Emitted != 0 || r3.RootsSkippedConverged != 3 {
+		t.Fatalf("third sweep = %+v, want 3 stamped roots skipped", r3)
+	}
+	if store.stepLists != stepListsBefore {
+		t.Fatalf("third sweep issued %d per-root step listing(s) for stamped roots, want 0", store.stepLists-stepListsBefore)
+	}
+}
+
+// TestCompletionBackstopDoesNotStampAnEmptyStepListing: a store wedge that
+// answers empty-with-nil must not vacuously prove convergence.
+func TestCompletionBackstopDoesNotStampAnEmptyStepListing(t *testing.T) {
+	backing := beads.NewMemStore()
+	root := mustCreateProjectionRoot(t, backing, "")
+	closed := "closed"
+	if err := backing.Update(root.ID, beads.UpdateOpts{Status: &closed}); err != nil {
+		t.Fatal(err)
+	}
+	journal := events.NewFake()
+	stores := []beads.GraphStore{{Store: backing}}
+
+	for range 2 {
+		(&CompletionBackstop{}).Pass(journal, stores, "execution-reconcile")
+	}
+	after, err := backing.Get(root.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Metadata[beadmeta.CompletionFactsConvergedMetadataKey] != "" {
+		t.Fatal("a root with ZERO listed steps was stamped converged; an empty listing proves nothing")
+	}
+}
+
+// TestCompletionBackstopStartupSweepRevisitsAndClearsStaleStamps: the stamp is
+// a cadence optimization, not a terminal verdict — the per-boot startup sweep
+// re-examines stamped roots and clears a stamp whose root can still emit (a
+// hand-reopened and re-closed step), so a wrong stamp is bounded by one boot.
+func TestCompletionBackstopStartupSweepRevisitsAndClearsStaleStamps(t *testing.T) {
+	backing, rootIDs, stepIDs := closedCompletionCorpus(t, 1)
+	journal := events.NewFake()
+	stores := []beads.GraphStore{{Store: backing}}
+
+	for range 2 {
+		(&CompletionBackstop{}).Pass(journal, stores, "execution-reconcile")
+	}
+	root, err := backing.Get(rootIDs[0])
+	if err != nil || root.Metadata[beadmeta.CompletionFactsConvergedMetadataKey] == "" {
+		t.Fatalf("seed stamping failed: %v", err)
+	}
+
+	// Incident surgery: a step is hand-reopened and re-closes under a NEW
+	// session id — a new emittable fact key the delta lane never hears about.
+	open, closed := "open", "closed"
+	if err := backing.Update(stepIDs[0], beads.UpdateOpts{Status: &open}); err != nil {
+		t.Fatal(err)
+	}
+	if err := backing.Update(stepIDs[0], beads.UpdateOpts{
+		Status:   &closed,
+		Metadata: map[string]string{beadmeta.SessionIDMetadataKey: "gcs-resurrected"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Cadence sweeps skip the stamped root: the fact stays owed.
+	cadence := &CompletionBackstop{}
+	if r := cadence.Pass(journal, stores, "execution-reconcile"); r.Emitted != 0 || r.RootsSkippedConverged != 1 {
+		t.Fatalf("cadence sweep = %+v, want the stamped root skipped", r)
+	}
+
+	// The startup sweep revisits, emits the owed fact, and CLEARS the stamp.
+	startup := &CompletionBackstop{VisitStamped: true}
+	if r := startup.Pass(journal, stores, "execution-reconcile"); r.Emitted != 1 || r.RootsSkippedConverged != 0 {
+		t.Fatalf("startup sweep = %+v, want the owed fact emitted", r)
+	}
+	after, err := backing.Get(rootIDs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Metadata[beadmeta.CompletionFactsConvergedMetadataKey] != "" {
+		t.Fatal("the startup sweep left a STALE stamp on a root it just emitted for")
 	}
 }
 
@@ -90,9 +177,11 @@ func TestCompletionBackstopDoesNotStampLiveRoots(t *testing.T) {
 	journal := events.NewFake()
 	stores := []beads.GraphStore{{Store: store}}
 
-	first := &CompletionBackstop{}
-	if r := first.Pass(journal, stores, "execution-reconcile"); r.Emitted != 1 {
-		t.Fatalf("first sweep emitted %d, want 1", r.Emitted)
+	for i := range 3 {
+		r := (&CompletionBackstop{}).Pass(journal, stores, "execution-reconcile")
+		if r.RootsVisited != 1 || r.RootsSkippedConverged != 0 {
+			t.Fatalf("sweep %d = %+v, want the live root revisited every sweep", i, r)
+		}
 	}
 	root, err := backing.Get(rootIDs[0])
 	if err != nil {
@@ -100,11 +189,6 @@ func TestCompletionBackstopDoesNotStampLiveRoots(t *testing.T) {
 	}
 	if root.Metadata[beadmeta.CompletionFactsConvergedMetadataKey] != "" {
 		t.Fatal("an OPEN root was stamped converged; its steps can still change")
-	}
-
-	second := &CompletionBackstop{}
-	if r := second.Pass(journal, stores, "execution-reconcile"); r.RootsVisited != 1 || r.RootsSkippedConverged != 0 {
-		t.Fatalf("second sweep = %+v, want the live root revisited", r)
 	}
 }
 

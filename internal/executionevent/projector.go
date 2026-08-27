@@ -678,6 +678,20 @@ type CompletionBackstop struct {
 	// skippedConverged accumulates the stamped-root skips of the store
 	// currently being traversed so each chunk reports only its own share.
 	skippedConverged int
+	// VisitStamped makes the NEXT sweep traverse stamped roots too. The
+	// completions lane sets it for startup sweeps: converged stamps are a
+	// cadence optimization, and the per-boot full traversal is what re-examines
+	// them (clearing stale ones — a hand-reopened step, a vacuous stamp from a
+	// past store wedge) so a wrong stamp is bounded by one boot, not forever.
+	VisitStamped bool
+	// sweepVisitsStamped latches VisitStamped for the life of one sweep.
+	sweepVisitsStamped bool
+	// sweepStoreCount latches the store-fan width at sweep start. The caller
+	// re-resolves its store set every chunk, and the cursor is an INDEX into
+	// it: if the fan changes mid-sweep the held roots no longer correspond to
+	// the store at the cursor, so the sweep restarts rather than reconciling
+	// one store's roots against another store.
+	sweepStoreCount int
 	// index is this sweep's idempotency record, loaded once per SWEEP rather
 	// than once per chunk. Re-reading the whole journal per chunk would make the
 	// chunking that keeps the sweep bounded cost more than the sweep it bounds.
@@ -716,11 +730,25 @@ func (b *CompletionBackstop) Pass(recorder events.Provider, graphStores []beads.
 		result.SweepComplete = true
 		return result
 	}
-	if b.storeIndex == 0 && b.afterRootID == "" {
+	if b.storeIndex == 0 && b.afterRootID == "" && !b.storeRootsLoaded {
 		// A new sweep re-derives the record. Nothing feeds this index between
 		// sweeps, so a warm one would only know the facts it emitted itself and
 		// would re-emit everything the delta lane or the close path recorded.
 		b.index.Invalidate()
+		b.sweepVisitsStamped = b.VisitStamped
+		b.sweepStoreCount = len(graphStores)
+	}
+	if b.sweepStoreCount != len(graphStores) {
+		// The store fan changed under a sweep in progress; the cursor's store
+		// index no longer names the store its held roots came from. Restart
+		// the sweep against the current fan.
+		b.storeIndex = 0
+		b.afterRootID = ""
+		b.storeRoots = nil
+		b.storeRootsLoaded = false
+		b.skippedConverged = 0
+		b.sweepVisitsStamped = b.VisitStamped
+		b.sweepStoreCount = len(graphStores)
 	}
 	if !b.index.warm(recorder) {
 		result.WarmFailed = true
@@ -756,7 +784,8 @@ func (b *CompletionBackstop) Pass(recorder events.Provider, graphStores []beads.
 			unstamped := roots[:0]
 			skipped := 0
 			for _, root := range roots {
-				if strings.TrimSpace(root.Metadata[beadmeta.CompletionFactsConvergedMetadataKey]) != "" {
+				if !b.sweepVisitsStamped &&
+					strings.TrimSpace(root.Metadata[beadmeta.CompletionFactsConvergedMetadataKey]) != "" {
 					skipped++
 					continue
 				}
@@ -824,6 +853,7 @@ func reconcileRoots(recorder events.Recorder, graphStore beads.GraphStore, roots
 			continue
 		}
 		everyStepClosed := true
+		emittedForRoot := 0
 		for _, row := range rows {
 			// The row the steps List already returned decides the status.
 			// Re-Getting it would only narrow a window the journal-keyed
@@ -845,18 +875,30 @@ func reconcileRoots(recorder events.Recorder, graphStore beads.GraphStore, roots
 			recorder.Record(event)
 			completed.add(key)
 			emitted++
+			emittedForRoot++
 		}
-		// A CLOSED root whose every listed step is closed has, at this point,
-		// every emittable fact in the journal — and nothing about it can change
-		// again. Stamp it so the backstop sweep skips it from the roots listing
-		// alone instead of re-paying this per-root step listing every hour
-		// (ga-wevcl). Best-effort by design: a failed stamp just means the next
-		// sweep re-proves and re-stamps. Live closes on already-stamped roots
-		// stay covered by the delta lane, which reacts to the close events.
-		if everyStepClosed &&
-			strings.EqualFold(strings.TrimSpace(root.Status), "closed") &&
-			strings.TrimSpace(root.Metadata[beadmeta.CompletionFactsConvergedMetadataKey]) == "" {
+		stamped := strings.TrimSpace(root.Metadata[beadmeta.CompletionFactsConvergedMetadataKey]) != ""
+		switch {
+		case emittedForRoot == 0 && everyStepClosed && len(rows) > 0 &&
+			strings.EqualFold(strings.TrimSpace(root.Status), "closed") && !stamped:
+			// VERIFIED convergence only: this pass emitted NOTHING for the
+			// root, so every fact was already read back from the journal by the
+			// warm index — the one witness that survives a dropped best-effort
+			// Record. A pass that emitted stamps nothing: its Record calls are
+			// fire-and-forget, and stamping in the same pass would make a
+			// silently dropped append a PERMANENT fact loss (the review's
+			// critical). The root converges one sweep later, forever after.
+			// len(rows) > 0 keeps a transiently empty step listing (a store
+			// wedge answering empty-with-nil) from vacuously proving
+			// convergence. Best-effort: a failed stamp re-proves next sweep.
 			_ = graphStore.SetMetadata(root.ID, beadmeta.CompletionFactsConvergedMetadataKey, time.Now().UTC().Format(time.RFC3339))
+		case stamped && (emittedForRoot > 0 || !everyStepClosed || len(rows) == 0):
+			// A stamped root this pass could still emit for — or whose steps
+			// are open or invisible — carries a STALE stamp (a hand-reopened
+			// step, a vacuous stamp from a past wedge). Clear it so the hourly
+			// sweeps resume visiting; only a startup sweep re-examines stamped
+			// roots, so this is the per-boot healing bound.
+			_ = graphStore.SetMetadata(root.ID, beadmeta.CompletionFactsConvergedMetadataKey, "")
 		}
 	}
 	return emitted

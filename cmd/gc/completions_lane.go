@@ -358,6 +358,10 @@ func (cr *CityRuntime) runCompletionsSweepChunk(backstop *executionevent.Complet
 	if ep == nil {
 		return executionevent.CompletionBackstopResult{}
 	}
+	// Startup sweeps re-examine stamped roots; the converged stamp is a
+	// cadence optimization whose stale entries (hand-reopened steps, vacuous
+	// stamps from a past wedge) are healed by the per-boot full traversal.
+	backstop.VisitStamped = reason == backstopReasonStartup
 	result := backstop.Pass(ep, graphStores, "execution-reconcile")
 	if result.WarmFailed {
 		// The chunk read nothing: its idempotency record could not be loaded.
