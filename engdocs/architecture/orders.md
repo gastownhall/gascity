@@ -391,6 +391,9 @@ boundaries.
   whose stride cannot reach any value in its field: because the stride
   anchors at 0, `*/32` in day-of-month (`1`-`31`) and `*/13` in month
   (`1`-`12`) parse cleanly and match nothing, ever.
+  `internal/doctor/checks_order_firing.go` keeps a parallel matcher of its
+  own to estimate a cron order's firing interval, so a change to this
+  grammar belongs in both places.
 
 - **Condition trigger blocks the dispatch loop**: `checkCondition()` runs
   `sh -c <check>` synchronously during trigger evaluation. A slow check
