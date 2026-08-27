@@ -471,6 +471,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	if opts.Claim {
 		claimOpts := hookClaimOptions{
 			Assignee:           assignee,
+			SessionID:          sessionID,
 			IdentityCandidates: identityCandidates,
 			RouteTargets:       routeTargets,
 			Env:                queryEnv,
