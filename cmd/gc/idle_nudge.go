@@ -238,12 +238,17 @@ func (p poolContinuationBackstop) revalidate(target backstopTarget) backstopReso
 	if err != nil || root.ID != target.RootID {
 		return backstopResolutionHold
 	}
+	// Mirrors evaluateReadyContinuationClaimCandidate: the root proves the run is
+	// live, not who owns this step. gc.session_name on the root is a dashboard
+	// stamp, last-writer-wins across the molecule's steps, so requiring it to
+	// equal target.Assignee is unsatisfiable for any formula that routes steps to
+	// more than one agent template. current.Assignee above is the authoritative
+	// pin.
 	if !strings.EqualFold(strings.TrimSpace(root.Status), "in_progress") ||
 		!strings.EqualFold(strings.TrimSpace(root.Type), "task") ||
 		strings.TrimSpace(root.Metadata[beadmeta.RootStoreRefMetadataKey]) != target.StoreRef ||
 		strings.TrimSpace(root.Metadata[beadmeta.FormulaContractMetadataKey]) != "graph.v2" ||
-		strings.TrimSpace(root.Metadata[beadmeta.KindMetadataKey]) != "workflow" ||
-		strings.TrimSpace(root.Metadata[beadmeta.SessionNameMetadataKey]) != target.Assignee {
+		strings.TrimSpace(root.Metadata[beadmeta.KindMetadataKey]) != "workflow" {
 		return backstopResolutionClear
 	}
 	return backstopResolutionOutstanding
