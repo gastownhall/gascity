@@ -416,3 +416,86 @@ func resetAutocloseFaultOnce(t *testing.T) {
 	autocloseFaultOnce = sync.Once{}
 	t.Cleanup(func() { autocloseFaultOnce = sync.Once{} })
 }
+
+// TestByIDPlanUsesTheRegisteredControllerRoutes pins which routes the by-id
+// seam plans over.
+//
+// This resolver is not one-shot-only. A controller reaches it in-process —
+// order dispatch's emit store resolves a molecule root through
+// autocloseOwningStore, which lands in resolveOwningStoreDir — and a plan built
+// from the one-shot funnel inside a process that already opened its binding at
+// boot would open a SECOND handle on the same binding root: a duplicate
+// managed-Dolt server or a second sqlite writer. residencyTopologyForCity
+// exists to prevent exactly that, and this asserts the seam uses it.
+//
+// The funnel is seeded with an errStore rather than merely a different store,
+// so a plan that took the wrong routes FAILS rather than quietly answering from
+// the wrong handle. The second row is the one-shot fallback: with no
+// registration the funnel must still be what answers, or every genuine one-shot
+// command loses its binding leg.
+func TestByIDPlanUsesTheRegisteredControllerRoutes(t *testing.T) {
+	funnelFault := errors.New("the one-shot funnel opened a second handle")
+
+	tests := []struct {
+		name     string
+		register bool
+	}{
+		{name: "a registered controller's routes win over the funnel", register: true},
+		{name: "a one-shot command still falls through to the funnel", register: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+
+			var wantStore beads.Store
+			if tt.register {
+				// Seeded FIRST: registerResidencyRoutes drops the derived
+				// per-city binding memo, so the registration is what a later
+				// resolution re-reads.
+				seedCLIStorageRoutes(t, cityPath, messagingSplitRoutes(errStore{err: funnelFault}))
+				registered := splittest.NewWorkStore(t, "hq")
+				routes := messagingSplitRoutes(registered)
+				registerResidencyRoutes(cityPath, routes, func() beads.Store { return registered })
+				t.Cleanup(func() { unregisterResidencyRoutes(cityPath, routes) })
+				wantStore = registered
+			} else {
+				funnel := splittest.NewWorkStore(t, "hq")
+				seedCLIStorageRoutes(t, cityPath, messagingSplitRoutes(funnel))
+				wantStore = funnel
+			}
+
+			resident, err := wantStore.Create(beads.Bead{Title: "the binding's copy", Type: "task"})
+			if err != nil {
+				t.Fatalf("seeding the binding that should answer: %v", err)
+			}
+
+			owner, ok, err := cliByIDBindingOwner(cityPath, resident.ID)
+			if err != nil {
+				t.Fatalf("resolving %s: %v — a fault here is the funnel's binding answering, which means a second handle on the binding root", resident.ID, err)
+			}
+			if !ok {
+				t.Fatalf("no binding owned %s; the plan carried no binding leg at all", resident.ID)
+			}
+			if owner.Store != wantStore {
+				t.Errorf("the by-id plan resolved %s through %p, want %p", resident.ID, owner.Store, wantStore)
+			}
+
+			// The production caller, with a scan that fails the test if it runs:
+			// a binding hit must return before the directory scan, so the funnel
+			// is never reached by this arm either.
+			store, dir, err := resolveOwningStoreDir(resident.ID, nil, cityPath, func(storeDir string) (beads.Store, error) {
+				t.Errorf("the convoy scan opened %q for an id the binding owns", storeDir)
+				return nil, errors.New("the scan must not run for a binding hit")
+			})
+			if err != nil {
+				t.Fatalf("resolveOwningStoreDir(%s): %v", resident.ID, err)
+			}
+			if store != wantStore {
+				t.Errorf("the convoy resolver served %s from %p, want the binding %p", resident.ID, store, wantStore)
+			}
+			if dir != cityPath {
+				t.Errorf("the convoy resolver reported dir %q, want the city path %q", dir, cityPath)
+			}
+		})
+	}
+}

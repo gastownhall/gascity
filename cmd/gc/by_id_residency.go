@@ -85,13 +85,22 @@ func cliByIDOwner(cityPath, id string, work beads.Store) (storeref.Owner, error)
 
 // cliByIDPlan builds the leg list cliByIDOwner probes.
 //
+// The bindings come from residencyTopologyForCity, so a plan built INSIDE a
+// running controller prefers the routes that controller registered at boot and
+// only a genuine one-shot command falls through to the funnel. That preference
+// is not a tidiness: this seam is reachable in-process — order dispatch reaches
+// it through the autoclose owner resolution — and resolving a controller's
+// bindings through the one-shot funnel would open a SECOND handle on the same
+// binding root, a duplicate managed-Dolt server or a second sqlite writer,
+// which is the reason residencyTopologyForCity exists and documents.
+//
 // Split out so the before/after order pin
 // (TestClassRoutedStoreForIDKeepsThePreSeamCandidateOrder) reads the plan this
 // seam actually executes rather than one assembled the same way beside it. A
 // pin over a parallel construction proves the topology constructor is right and
 // says nothing about whether the seam still uses it.
 func cliByIDPlan(cityPath, id string, work beads.Store) (storeref.ResolvedPlan, error) {
-	return storeref.Plan(storeref.ByID{ID: id}, cliResidencyTopology(cityPath, nil, work, nil))
+	return storeref.Plan(storeref.ByID{ID: id}, residencyTopologyForCity(cityPath, nil, work, nil))
 }
 
 // cliByIDBindingOwner answers the binding half of the by-id question for a
