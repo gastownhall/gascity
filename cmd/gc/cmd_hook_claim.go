@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
@@ -1999,6 +2000,22 @@ func hookClaimHasIdentity(assignee string, identities []string) bool {
 	return false
 }
 
+// hookRouteIdentitiesEqual reports whether two route/identity strings refer
+// to the same qualified agent, tolerating the tmux-safe session-name
+// encoding (/ -> --, . -> __) alongside the canonical slash-qualified form.
+// gc.routed_to is always written in canonical form, but comparison
+// candidates built from a runtime session name (sessionForQuery) are
+// dash-encoded, so the two spellings must compare equal. This is the single
+// route-spelling matcher shared by the claim path (hookClaimMatchesRoute)
+// and the display path (hookCandidateVisible) per ga-1xaqgo.2 - do not fork
+// a second one.
+func hookRouteIdentitiesEqual(a, b string) bool {
+	if a == b {
+		return true
+	}
+	return agent.UnsanitizeQualifiedNameFromSession(a) == agent.UnsanitizeQualifiedNameFromSession(b)
+}
+
 func hookClaimMatchesRoute(candidate beads.Bead, routeTargets []string) bool {
 	if len(routeTargets) == 0 {
 		return false
@@ -2011,14 +2028,34 @@ func hookClaimMatchesRoute(candidate beads.Bead, routeTargets []string) bool {
 		if target == "" {
 			continue
 		}
-		if routedTo == target {
+		if hookRouteIdentitiesEqual(routedTo, target) {
 			return true
 		}
-		if routedTo == "" && kind == beadmeta.KindWorkflow && runTarget == target {
+		if routedTo == "" && kind == beadmeta.KindWorkflow && hookRouteIdentitiesEqual(runTarget, target) {
 			return true
 		}
 	}
 	return false
+}
+
+// hookCandidateVisible reports whether a work_query candidate should be
+// shown to this identity at all. An already-assigned candidate is visible
+// only when the assignee is one of this session's own identities. An
+// unassigned candidate is visible when it carries no route at all (legacy
+// and unrouted work is always claimable - the fail-open default the legacy
+// workflow-target path depends on) or when its route matches one of
+// routeTargets. This is deliberately more permissive than the claim path's
+// eligibility check, which additionally requires a positive route match
+// even for unrouted work; that stricter rule is correct for claiming but
+// would wrongly hide legitimately unrouted display candidates (ga-1xaqgo.2).
+func hookCandidateVisible(candidate beads.Bead, identities, routeTargets []string) bool {
+	if assignee := strings.TrimSpace(candidate.Assignee); assignee != "" {
+		return hookClaimHasIdentity(assignee, identities)
+	}
+	if hookClaimRoute(candidate) == "" {
+		return true
+	}
+	return hookClaimMatchesRoute(candidate, routeTargets)
 }
 
 func hookClaimRoute(candidate beads.Bead) string {
