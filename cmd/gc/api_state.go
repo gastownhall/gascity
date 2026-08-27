@@ -830,6 +830,13 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 	stores := cs.beadEventStoresLocked(evt)
 	cs.mu.RUnlock()
 
+	// An event stamped by this process's own store layer carries a post-absorb
+	// SNAPSHOT — dependencies included — rather than a bd hook patch. Saying so
+	// keeps the cache from reading its own emission as a coverage-unknown
+	// payload and discarding the dependency and is_blocked state it just
+	// installed, which fences the row out of the next reconcile pass and
+	// re-emits forever (ga-yoix1).
+	snapshot := evt.Actor == beadStoreLayerActor
 	// Do not expose a dependency-close cache mutation to legacy wait preparation
 	// until exact ownership has either been reserved or deliberately left with
 	// legacy. The fence is inert when keyed pre-poke admission is not armed.
@@ -839,14 +846,18 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 		for _, candidate := range stores {
 			inner, _, _ := unwrapBeadPolicyStore(candidate.store)
 			if cached, ok := inner.(*beads.CachingStore); ok {
-				cached.ApplyEvent(evt.Type, evt.Payload)
+				if snapshot {
+					cached.ApplyEventSnapshot(evt.Type, evt.Payload)
+				} else {
+					cached.ApplyEvent(evt.Type, evt.Payload)
+				}
 			}
 		}
 		cs.admitSessionWaitDependencyPrePokeEvent(evt)
 	}()
 	cs.admitReadyRoutedWorkEvent(evt, stores)
 	cs.admitSessionStartEvent(evt)
-	if evt.Actor != beadStoreLayerActor {
+	if !snapshot {
 		cs.Poke()
 	}
 	if evt.Type == events.BeadClosed && evt.Subject != "" && len(stores) > 0 {
