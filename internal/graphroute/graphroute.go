@@ -26,11 +26,6 @@ const (
 	GraphExecutionRigContextMetaKey = beadmeta.ExecutionRigContextMetadataKey
 )
 
-// poolWorkflowContinuationGroup is the continuation group value stamped on
-// pool-routed graph.v2 steps so preassignHookContinuationGroup keeps all steps
-// of a molecule on the same pool slot (fixes #2978).
-const poolWorkflowContinuationGroup = "pool-workflow"
-
 // AgentResolver resolves an agent name to a config.Agent.
 type AgentResolver interface {
 	ResolveAgent(cfg *config.City, name, rigContext string) (config.Agent, bool)
@@ -189,11 +184,19 @@ func ApplyGraphRouteBinding(step *formula.RecipeStep, binding GraphRouteBinding)
 	}
 	step.Metadata[beadmeta.RoutedToMetadataKey] = binding.QualifiedName
 	if binding.MetadataOnly {
-		// Pool-routed step: stamp continuation group so preassignHookContinuationGroup
-		// pre-assigns all molecule steps to the claiming slot, preventing scatter
-		// across pool slots (fixes #2978).
-		step.Metadata[beadmeta.ContinuationGroupMetadataKey] = poolWorkflowContinuationGroup
-		step.Metadata[beadmeta.SessionAffinityMetadataKey] = "require"
+		// Pool-routed step: the pool decides which slot runs it. Whether the
+		// molecule's steps must share one slot is the formula's call, declared as
+		// a continuation group; preassignHookContinuationGroup then pins the
+		// siblings to whichever slot claims first (#2978). Stamping a group here
+		// instead would apply that judgment to every pool-routed molecule whether
+		// its formula asked for it or not — a routing decision Go is not entitled
+		// to make. Affinity tracks the group so a re-decorated step never keeps a
+		// requirement its current binding no longer declares.
+		if strings.TrimSpace(step.Metadata[beadmeta.ContinuationGroupMetadataKey]) != "" {
+			step.Metadata[beadmeta.SessionAffinityMetadataKey] = "require"
+		} else {
+			delete(step.Metadata, beadmeta.SessionAffinityMetadataKey)
+		}
 		step.Assignee = ""
 		return
 	}
