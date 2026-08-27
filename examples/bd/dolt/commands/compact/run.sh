@@ -1531,6 +1531,14 @@ emit_compact_quarantine_event() {
 # marker. Empty means delivered; callers reset it before each attempt.
 quarantine_notify_error=""
 
+# mail_compact_quarantine_alert DB TYPE MARKER REASON [CREATED_AT]
+#   Send the quarantine alert; return 0 on delivery, 1 on a failed send with
+#   the reason recorded in quarantine_notify_error. CONTRACT: call this ONLY as
+#   a condition (e.g. `if mail_compact_quarantine_alert ...`), never as a bare
+#   statement. The internal _ca_err=$(gc mail send ...) capture runs under
+#   `set -eu`, so a bare-statement call would abort the whole compaction run on
+#   a failed send -- the exact silent mid-cycle failure this alert exists to
+#   prevent.
 mail_compact_quarantine_alert() {
   _ca_db="$1"
   _ca_type="$2"
