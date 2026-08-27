@@ -768,8 +768,18 @@ func sessionAssigneeMatches(named []AwakeNamedSession, bead AwakeSessionBead, wb
 // any eligible pool member (ga-8vz95k decision 4 — pool instances claim
 // pool-routed work). In-progress work keeps exact holder-identity ownership,
 // so a bare template assignment never matches once work is already claimed.
+//
+// Drained and dependency-only members are excluded: a bare template
+// assignment is generic template demand, and generic demand must not revive
+// a drained slot or bypass the dependency gate on a dependency-floor slot.
+// Every sibling generic-demand path (collectActiveBeads, collectCreatingBeads,
+// isMinActivePoolBead) makes the same exclusion. Concrete bead-ID or
+// session-name assignments still reach a drained bead through the caller,
+// which is the existing intended behavior (see the step-1 comment above).
 func sessionAssigneePoolTemplateMatches(bead AwakeSessionBead, wb AwakeWorkBead, assignee string) bool {
-	return wb.Status == "open" && bead.PoolManaged && bead.Template != "" && bead.Template == assignee
+	return wb.Status == "open" && bead.PoolManaged &&
+		!bead.Drained && !bead.DependencyOnly &&
+		bead.Template != "" && bead.Template == assignee
 }
 
 func isOnDemandSession(named []AwakeNamedSession, bead AwakeSessionBead) bool {

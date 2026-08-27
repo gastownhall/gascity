@@ -1,7 +1,6 @@
 package main
 
 import (
-	"reflect"
 	"testing"
 	"time"
 
@@ -18,7 +17,7 @@ const (
 )
 
 func TestAwakeSetReadyPoolTemplateAssignmentWakesEligibleMember(t *testing.T) {
-	input := requiredPoolTemplateAwakeInput(t, AwakeWorkBead{
+	input := poolTemplateAwakeInput(t, AwakeWorkBead{
 		ID:       "work-ready",
 		Assignee: poolTemplate,
 		Status:   "open",
@@ -144,12 +143,32 @@ func TestAwakeSetPoolTemplateServiceabilityRequiresConfiguredMembership(t *testi
 			name: "member of another pool",
 			session: func(t *testing.T) AwakeSessionBead {
 				t.Helper()
-				bead := poolManagedAwakeSessionIfSupported(t, AwakeSessionBead{
+				return AwakeSessionBead{
 					ID:          "mc-other-pool",
 					SessionName: "fixture--verify-slot-a",
 					Template:    "fixture/verify",
 					State:       "asleep",
-				})
+					PoolManaged: true,
+				}
+			},
+		},
+		{
+			name: "drained pool member",
+			session: func(t *testing.T) AwakeSessionBead {
+				t.Helper()
+				bead := poolManagedAwakeSession()
+				bead.SessionName = "fixture--build-slot-drained"
+				bead.Drained = true
+				return bead
+			},
+		},
+		{
+			name: "dependency-only pool member",
+			session: func(t *testing.T) AwakeSessionBead {
+				t.Helper()
+				bead := poolManagedAwakeSession()
+				bead.SessionName = "fixture--build-slot-depfloor"
+				bead.DependencyOnly = true
 				return bead
 			},
 		},
@@ -214,7 +233,7 @@ func TestBuildAwakeInputFromReconcilerCarriesConfiguredPoolMembership(t *testing
 	if len(input.SessionBeads) != 1 {
 		t.Fatalf("SessionBeads length = %d, want 1", len(input.SessionBeads))
 	}
-	if !awakeSessionPoolManaged(t, input.SessionBeads[0]) {
+	if !input.SessionBeads[0].PoolManaged {
 		t.Fatal("AwakeSessionBead pool membership = false, want typed session.Info membership preserved")
 	}
 }
@@ -223,17 +242,10 @@ func poolTemplateAwakeInput(t *testing.T, work AwakeWorkBead) AwakeInput {
 	t.Helper()
 	return AwakeInput{
 		Agents:       []AwakeAgent{{QualifiedName: poolTemplate}},
-		SessionBeads: []AwakeSessionBead{poolManagedAwakeSessionIfSupported(t, poolAwakeSession())},
+		SessionBeads: []AwakeSessionBead{poolManagedAwakeSession()},
 		WorkBeads:    []AwakeWorkBead{work},
 		Now:          now,
 	}
-}
-
-func requiredPoolTemplateAwakeInput(t *testing.T, work AwakeWorkBead) AwakeInput {
-	t.Helper()
-	input := poolTemplateAwakeInput(t, work)
-	input.SessionBeads[0] = requirePoolManagedAwakeSession(t, input.SessionBeads[0])
-	return input
 }
 
 func poolAwakeSession() AwakeSessionBead {
@@ -245,45 +257,10 @@ func poolAwakeSession() AwakeSessionBead {
 	}
 }
 
-// These reflection helpers let the RED contract compile before the typed
-// awake-set projection grows the pool-membership field it needs. They fail
-// loudly until that field exists, then exercise its actual boolean value.
-func requirePoolManagedAwakeSession(t *testing.T, bead AwakeSessionBead) AwakeSessionBead {
-	t.Helper()
-	v := reflect.ValueOf(&bead).Elem()
-	field := v.FieldByName("PoolManaged")
-	if !field.IsValid() {
-		t.Fatal("AwakeSessionBead has no PoolManaged field; pool serviceability must use typed configured membership")
-	}
-	if field.Kind() != reflect.Bool || !field.CanSet() {
-		t.Fatalf("AwakeSessionBead.PoolManaged kind/settable = %s/%t, want bool/true", field.Kind(), field.CanSet())
-	}
-	field.SetBool(true)
+// poolManagedAwakeSession returns the pool fixture with configured pool
+// membership set, as the reconciler bridge projects it from session.Info.
+func poolManagedAwakeSession() AwakeSessionBead {
+	bead := poolAwakeSession()
+	bead.PoolManaged = true
 	return bead
-}
-
-func poolManagedAwakeSessionIfSupported(t *testing.T, bead AwakeSessionBead) AwakeSessionBead {
-	t.Helper()
-	v := reflect.ValueOf(&bead).Elem()
-	field := v.FieldByName("PoolManaged")
-	if !field.IsValid() {
-		return bead
-	}
-	if field.Kind() != reflect.Bool || !field.CanSet() {
-		t.Fatalf("AwakeSessionBead.PoolManaged kind/settable = %s/%t, want bool/true", field.Kind(), field.CanSet())
-	}
-	field.SetBool(true)
-	return bead
-}
-
-func awakeSessionPoolManaged(t *testing.T, bead AwakeSessionBead) bool {
-	t.Helper()
-	field := reflect.ValueOf(bead).FieldByName("PoolManaged")
-	if !field.IsValid() {
-		t.Fatal("AwakeSessionBead has no PoolManaged field; reconciler cannot preserve typed pool membership")
-	}
-	if field.Kind() != reflect.Bool {
-		t.Fatalf("AwakeSessionBead.PoolManaged kind = %s, want bool", field.Kind())
-	}
-	return field.Bool()
 }
