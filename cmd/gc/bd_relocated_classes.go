@@ -536,22 +536,25 @@ func bdRelocatedClassCreateAddMetadata(shape *beads.Bead, value string) {
 // pinned manifest says it takes one separately, so a title like `--title
 // --type` can never be read as the flag it spells.
 //
-// Two shapes are NOT stated in argv and are deliberately not guessed at:
+// The file-backed create forms are NOT stated in argv, so this function does not
+// see them; bdRelocatedClassCreateRefusal handles them before it reaches here:
 //
-//   - `create -f plan.md` and `create --graph <json>` take their beads from a
-//     file or a plan body. Parsing either would mean reimplementing bd's own
-//     parser here and drifting from it; classifying them by their absent argv
-//     would be a confident wrong answer.
-//   - A shorthand CLUSTER (`-qtmessage`) hides the type behind another
-//     shorthand. Decomposing one needs to know which letters take values, which
-//     bdflags pins per FLAG rather than per letter.
+//   - `create --graph <plan>` carries a JSON graph-apply plan. It is decoded in
+//     the beads.GraphApplyPlan shape bd itself consumes and classified with
+//     coordclass.ClassifyGraphPlan — no reparse of bd's format, no drift.
+//   - `create -f/--file <file>` carries bd's own multi-issue markdown. Reparsing
+//     that format here would drift from bd, so on a split city it fails closed
+//     rather than forward a payload this cannot classify.
 //
-// Both are documented limits rather than fail-closed refusals: a create whose
-// shape this cannot read is forwarded, exactly as it is today, and refusing
-// every bulk create on a split city would break the ordinary work mints the
-// work ledger exists for. The guard is a floor on stranded mints, not a proof
-// of their impossibility — the migration's containment check is what audits
-// beads already on disk.
+// One argv-shaped input remains a documented limit rather than a guessed one: a
+// shorthand CLUSTER (`-qtmessage`) hides the type behind another shorthand, and
+// decomposing one needs to know which letters take values — bdflags pins that
+// per FLAG, not per letter. (A `--metadata` value this cannot read as the inline
+// JSON object bd expects likewise contributes nothing to the shape rather than a
+// wrong guess.) The guard is a floor on stranded mints, not a proof of their
+// impossibility: the file-backed forms above close the two highest-value doors,
+// and the migration's containment check only REPORTS strays already on disk — it
+// detects them, it does not move them.
 func bdRelocatedClassCreateShape(manifest string, verbArgs []string) beads.Bead {
 	values := bdflags.ValueFlags(manifest)
 	var shape beads.Bead
@@ -588,6 +591,91 @@ func bdRelocatedClassCreateFlagValue(arg string) (name, value string, stated boo
 		return arg[:2], arg[2:], true
 	}
 	return arg, "", false
+}
+
+// fileCreateForm names a create form that states its beads in a FILE rather than
+// in argv, which bdRelocatedClassCreateShape cannot see.
+type fileCreateForm int
+
+const (
+	// fileCreateNone is an argv-shaped create (or a verb with no file form).
+	fileCreateNone fileCreateForm = iota
+	// fileCreateGraph is `create --graph <plan>`: a JSON graph-apply plan.
+	fileCreateGraph
+	// fileCreateBulk is `create -f/--file <file>`: bd's multi-issue markdown.
+	fileCreateBulk
+)
+
+// bdRelocatedClassCreateFileForm reports whether a create states its beads in a
+// file, and returns the file path when it does.
+//
+// It walks verbArgs with the same manifest-aware stepping bdRelocatedClassCreateShape
+// uses, so a value flag whose value happens to spell `--graph` or `-f` (a title
+// of `--graph`, say) is stepped over rather than misread as the flag it names.
+// The file flags are read by the same cobra spellings as the shape flags:
+// separated (`--graph plan`), inline (`--graph=plan`), and attached shorthand
+// (`-fplan`). A file flag with no value is reported with an empty path; bd
+// rejects it and mints nothing, so the caller's graph arm falls through safely.
+func bdRelocatedClassCreateFileForm(manifest string, verbArgs []string) (fileCreateForm, string) {
+	values := bdflags.ValueFlags(manifest)
+	for i := 0; i < len(verbArgs); i++ {
+		name, value, stated := bdRelocatedClassCreateFlagValue(verbArgs[i])
+		form := fileCreateFormForFlag(name)
+		switch {
+		// A flag names a file form only when the verb actually takes it as a
+		// value flag; `q` pins no --graph/--file, so its tokens are not one.
+		case form != fileCreateNone && values[name]:
+			if stated {
+				return form, value
+			}
+			if i+1 < len(verbArgs) {
+				return form, verbArgs[i+1]
+			}
+			return form, ""
+		case !stated && values[name]:
+			i++
+		}
+	}
+	return fileCreateNone, ""
+}
+
+// fileCreateFormForFlag maps a create flag to the file form it introduces, or
+// fileCreateNone for a flag that states its value in argv.
+func fileCreateFormForFlag(name string) fileCreateForm {
+	switch name {
+	case "--graph":
+		return fileCreateGraph
+	case "-f", "--file":
+		return fileCreateBulk
+	default:
+		return fileCreateNone
+	}
+}
+
+// bdRelocatedClassGraphPlanClass classifies the plan a `create --graph <path>`
+// would apply, reporting parsed=false when the plan file cannot be read or
+// decoded.
+//
+// The plan file is JSON in the beads.GraphApplyPlan shape bd consumes —
+// internal/beads.ApplyGraphPlanWithStorage marshals exactly this struct before
+// handing the path to bd — so decoding it here and classifying with
+// coordclass.ClassifyGraphPlan is the same decision the router and the migration
+// make, not a reparse of bd's format.
+//
+// parsed=false is not a swallowed error: bd applies the identical json.Unmarshal
+// and exits non-zero WITHOUT writing when it fails, so a plan unreadable here
+// cannot become a bead either. The caller forwards it to fail at bd rather than
+// refusing a create that would mint nothing.
+func bdRelocatedClassGraphPlanClass(path string) (class coordclass.Class, parsed bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return coordclass.ClassWork, false
+	}
+	var plan beads.GraphApplyPlan
+	if err := json.Unmarshal(data, &plan); err != nil {
+		return coordclass.ClassWork, false
+	}
+	return coordclass.ClassifyGraphPlan(&plan), true
 }
 
 // bdRelocatedClassCreateRefusal reports whether a `gc bd` invocation would mint
@@ -629,9 +717,37 @@ func bdRelocatedClassCreateRefusal(cfg *config.City, bdArgs []string) (string, b
 	if !mints {
 		return "", false
 	}
+	// The file-backed create forms carry their beads outside argv, so they are
+	// decided here before the argv-shape walk below — which would see no shape
+	// and forward — reaches them.
+	switch form, path := bdRelocatedClassCreateFileForm(manifest, verbArgs); form {
+	case fileCreateGraph:
+		// A --graph plan is JSON in the beads.GraphApplyPlan shape bd consumes,
+		// so it classifies without drift via coordclass.ClassifyGraphPlan. An
+		// unreadable or malformed plan is left to fall through to bd, which
+		// applies the identical parse and mints nothing when it fails, so there
+		// is nothing for this guard to strand.
+		if class, parsed := bdRelocatedClassGraphPlanClass(path); parsed {
+			return bdRelocatedClassMatch(verb, relocated, class)
+		}
+	case fileCreateBulk:
+		// A -f/--file payload is bd's own multi-issue markdown, whose per-issue
+		// type and labels can name a relocated class. Reparsing that format here
+		// would drift from bd, so on a split city it fails closed rather than
+		// forward a payload this guard cannot classify.
+		return bdRelocatedClassCreateFileRefusalText(verb, relocated), true
+	}
 	// A work-class shape matches nothing: relocatedBeadClasses never names the
 	// work class, which is the residual one and the one bd's ledger holds.
-	class := coordclass.Classify(bdRelocatedClassCreateShape(manifest, verbArgs))
+	return bdRelocatedClassMatch(verb, relocated, coordclass.Classify(bdRelocatedClassCreateShape(manifest, verbArgs)))
+}
+
+// bdRelocatedClassMatch returns the create refusal for a prospective bead CLASS
+// when this city serves that class from a storage binding, and ("", false) when
+// the class is the work class bd's ledger holds. It is the shared tail of every
+// create arm — argv-shaped and file-backed alike — so they cannot disagree about
+// what a relocated class is.
+func bdRelocatedClassMatch(verb string, relocated []beads.RelocatedClass, class coordclass.Class) (string, bool) {
 	for _, candidate := range relocated {
 		if candidate.Class == class.String() {
 			return bdRelocatedClassCreateRefusalText(verb, candidate), true
@@ -661,6 +777,38 @@ func bdRelocatedClassCreateRefusalText(verb string, class beads.RelocatedClass) 
 		"nothing would report that, because bd would have done exactly what it was asked. A bead minted under the work "+
 		"prefix cannot be moved into the class namespace afterwards, so this is refused before anything is written.%s",
 		verb, class.Class, class.Class, class.IDPrefix+"-", where, class.Class, mint)
+}
+
+// bdRelocatedClassCreateFileRefusalText renders the fail-closed refusal for a
+// `create -f/--file <file>` on a split city.
+//
+// Unlike a --graph plan — JSON in the shape bd consumes, classified without drift
+// — a -f/--file payload is bd's own multi-issue markdown, and classifying it
+// would mean reimplementing bd's parser and drifting from it. Its per-issue type
+// and labels CAN name a relocated class, so the guard cannot prove the file mints
+// no relocated bead, and a bead stranded under the work prefix cannot be moved
+// into a class namespace afterwards. It therefore refuses before any write and
+// names the doors that ARE classified: an inline create read from argv, or the
+// class-native mint command for each class this city relocates.
+func bdRelocatedClassCreateFileRefusalText(verb string, relocated []beads.RelocatedClass) string {
+	var served strings.Builder
+	for i, class := range relocated {
+		if i > 0 {
+			served.WriteString(", ")
+		}
+		served.WriteString(class.Class)
+		if mint := bdRelocatedClassMintPaths[class.Class]; mint != "" {
+			fmt.Fprintf(&served, " (%s)", mint)
+		}
+	}
+	return fmt.Sprintf("bd %s reads its beads from a file, and this city serves these classes from a separate storage "+
+		"binding: %s. bd writes the work ledger only, so any bead of those classes in that file would land where its "+
+		"class is never read, and a bead minted under the work prefix cannot be moved into the class namespace "+
+		"afterwards. This guard classifies a create from its argv and will not reparse bd's file format, so it cannot "+
+		"prove a file-backed create mints no relocated bead — it is refused before anything is written. Create work "+
+		"beads inline with `gc bd %s ...` (classified from argv), or mint an infra bead with the class-native command "+
+		"shown above.",
+		verb, served.String(), verb)
 }
 
 // relocatedClassLocation describes where a binding serves from, for the
