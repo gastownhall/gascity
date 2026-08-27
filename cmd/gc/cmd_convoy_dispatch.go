@@ -1106,6 +1106,12 @@ func decorateDynamicFragmentRecipe(fragment *formula.FragmentRecipe, source bead
 		if err != nil {
 			return err
 		}
+		// Capture the formula-declared continuation group from the authored
+		// (freshly-cloned) step metadata so the pool opt-in is sourced immutably
+		// through the binding, matching DecorateGraphWorkflowRecipeWithDefaultBinding.
+		// The leaf now clears any group the binding does not carry, so omitting
+		// this on the dynamic-fragment path would drop every declared group.
+		binding.ContinuationGroup = strings.TrimSpace(step.Metadata[beadmeta.ContinuationGroupMetadataKey])
 		if graphroute.IsControlDispatcherKind(step.Metadata[beadmeta.KindMetadataKey]) {
 			controlRigContext := graphRouteBindingRigContext(binding)
 			if storeScoped {
