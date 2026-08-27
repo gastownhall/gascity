@@ -3182,8 +3182,8 @@ type Agent struct {
 	// universal derivation ("s-<beadID>" for ad-hoc sessions,
 	// "<basename>-<beadID>" for pool sessions). When set, it is expanded as a
 	// Go text/template using the same PathContext fields as work_dir /
-	// session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName),
-	// sanitized for tmux, and validated as an explicit session name. For pool
+	// session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName,
+	// DefaultBranch), sanitized for tmux, and validated as an explicit session name. For pool
 	// sessions, a live-name collision appends the bead ID as a deterministic
 	// suffix. For manual `gc session new` sessions, tmux_alias becomes the
 	// explicit session_name and takes precedence over --alias, which remains the
@@ -3277,8 +3277,8 @@ type Agent struct {
 	// levels. Legacy no-store evaluation continues to treat the output as
 	// the desired session count. If it contains Go template placeholders, gc
 	// expands them using the same PathContext fields as work_dir and
-	// session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName)
-	// before running the command.
+	// session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName,
+	// DefaultBranch) before running the command.
 	ScaleCheck string `toml:"scale_check,omitempty"`
 	// DrainTimeout is the maximum time to wait for a session to finish its
 	// current work before force-killing it during scale-down. Duration string
@@ -3287,13 +3287,14 @@ type Agent struct {
 	// OnBoot is a shell command template run once at controller startup for
 	// this agent. If it contains Go template placeholders, gc expands them
 	// using the same PathContext fields as work_dir and session_setup
-	// (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName) before running
-	// the command.
+	// (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName, DefaultBranch)
+	// before running the command.
 	OnBoot string `toml:"on_boot,omitempty"`
 	// OnDeath is a shell command template run when a session dies unexpectedly.
 	// If it contains Go template placeholders, gc expands them using the same
 	// PathContext fields as work_dir and session_setup (Agent, AgentBase,
-	// Rig, RigRoot, CityRoot, CityName) before running the command.
+	// Rig, RigRoot, CityRoot, CityName, DefaultBranch) before running the
+	// command.
 	OnDeath string `toml:"on_death,omitempty"`
 	// Namepool is the path to a plain text file with one name per line.
 	// When set, sessions use names from the file as display aliases.
@@ -3304,8 +3305,8 @@ type Agent struct {
 	// WorkQuery is the shell command template to find available work for this
 	// agent. If it contains Go template placeholders, gc expands them using
 	// the same PathContext fields as work_dir and session_setup (Agent,
-	// AgentBase, Rig, RigRoot, CityRoot, CityName) before probe, hook, and
-	// prompt-context execution. Used by gc hook and available in prompt
+	// AgentBase, Rig, RigRoot, CityRoot, CityName, DefaultBranch) before
+	// probe, hook, and prompt-context execution. Used by gc hook and available in prompt
 	// templates as {{.WorkQuery}}.
 	// If unset, Gas City uses a three-tier default query:
 	//   1. in_progress work assigned to this session/alias (crash recovery)
@@ -3317,8 +3318,8 @@ type Agent struct {
 	// SlingQuery is the command template to route a bead to this session config.
 	// If it contains Go template placeholders, gc expands them using the same
 	// PathContext fields as work_dir and session_setup (Agent, AgentBase,
-	// Rig, RigRoot, CityRoot, CityName) before replacing {} with the bead
-	// ID. Used by gc sling to make a bead visible to the target's work_query.
+	// Rig, RigRoot, CityRoot, CityName, DefaultBranch) before replacing {}
+	// with the bead ID. Used by gc sling to make a bead visible to the target's work_query.
 	// The placeholder {} is replaced with the bead ID at runtime.
 	// Default for all agents:
 	// "bd update {} --set-metadata gc.routed_to=<qualified-name>".
@@ -3386,7 +3387,10 @@ type Agent struct {
 	// SessionSetup is a list of shell commands run after session creation.
 	// Each command is a template string supporting placeholders:
 	// {{.Session}}, {{.Agent}}, {{.AgentBase}}, {{.Rig}}, {{.RigRoot}},
-	// {{.CityRoot}}, {{.CityName}}, {{.WorkDir}}.
+	// {{.CityRoot}}, {{.CityName}}, {{.WorkDir}}, {{.DefaultBranch}}.
+	// {{.DefaultBranch}} is the rig's configured default_branch (empty for
+	// city-scoped agents and rigs that record none); it is never probed from
+	// git, so scripts should keep their own origin/HEAD fallback.
 	// Commands run in gc's process (not inside the agent session) via sh -c.
 	// On failure, the last 4 KiB of the command's stdout/stderr is included
 	// in the error and may appear in controller and reconciler logs; avoid
@@ -4376,9 +4380,21 @@ func ValidateRigs(rigs []Rig, hqPrefix string) error {
 			return fmt.Errorf("rig %q: prefix %q collides with %s", r.Name, prefix, other)
 		}
 		seenPrefixes[prefix] = r.Name
+
+		if branch := r.EffectiveDefaultBranch(); branch != "" && !defaultBranchCharset.MatchString(branch) {
+			return fmt.Errorf("rig %q: default_branch %q contains characters outside [A-Za-z0-9._/@+=-]; the value is interpolated into prompts, formula variables, and pre_start shell commands, so shell-active characters are refused", r.Name, branch)
+		}
 	}
 	return nil
 }
+
+// defaultBranchCharset is the conservative branch-name alphabet ValidateRigs
+// accepts for default_branch. Git itself allows more (a single quote is a
+// legal ref character), but the value flows into template interpolation on
+// shell surfaces — {{base_branch}} in formula steps and
+// GC_DEFAULT_BRANCH='{{.DefaultBranch}}' in pre_start lines — where quotes and
+// metacharacters silently break or rewrite the command line.
+var defaultBranchCharset = regexp.MustCompile(`^[A-Za-z0-9._/@+=-]+$`)
 
 // ReservedPrefixWarnings returns advisory warnings for any effective HQ or rig
 // work-store prefix that shadows a reserved coordination-class id-prefix

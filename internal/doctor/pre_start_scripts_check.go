@@ -115,11 +115,21 @@ func resolvePreStartScript(cmd, sourceDir, cityPath string) (string, bool) {
 	if hasCityRoot {
 		expanded = strings.ReplaceAll(expanded, "{{.CityRoot}}", cityPath)
 	}
-	fields := strings.Fields(expanded)
-	if len(fields) == 0 {
+	first := ""
+	for _, field := range strings.Fields(expanded) {
+		// Skip leading shell env assignments (NAME=value ...), so a command
+		// that hands the script context — e.g.
+		// GC_DEFAULT_BRANCH='{{.DefaultBranch}}' /path/setup.sh — still gets
+		// its script path validated instead of being silently skipped.
+		if isShellEnvAssignment(field) {
+			continue
+		}
+		first = field
+		break
+	}
+	if first == "" {
 		return "", false
 	}
-	first := fields[0]
 	if strings.Contains(first, "{{") {
 		return "", false
 	}
@@ -127,4 +137,24 @@ func resolvePreStartScript(cmd, sourceDir, cityPath string) (string, bool) {
 		return "", false
 	}
 	return filepath.Clean(first), true
+}
+
+// isShellEnvAssignment reports whether field is a leading NAME=value
+// environment assignment rather than the command word.
+func isShellEnvAssignment(field string) bool {
+	eq := strings.Index(field, "=")
+	if eq <= 0 {
+		return false
+	}
+	for i, r := range field[:eq] {
+		switch {
+		case r == '_':
+		case r >= 'A' && r <= 'Z':
+		case r >= 'a' && r <= 'z':
+		case i > 0 && r >= '0' && r <= '9':
+		default:
+			return false
+		}
+	}
+	return true
 }

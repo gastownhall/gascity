@@ -3,7 +3,12 @@ description: |
 
   Picks up a bead a polecat handed off (assignee = this refinery,
   feature branch recorded in metadata.branch), merges that branch into
-  main, and closes the bead. The merge half of the lifecycle pipeline.
+  the rig's mainline, and closes the bead. The merge half of the
+  lifecycle pipeline.
+
+  The mainline is resolved per run: GC_DEFAULT_BRANCH (the rig's
+  configured default_branch) wins, then a live origin/HEAD probe, then
+  "main". Nothing here hardcodes a branch name.
 
   A refinery receives work already routed to it, so — unlike a polecat
   — it never races to claim; it acts on the bead directly. One process
@@ -42,6 +47,12 @@ turns:
           set -eu;
           BRANCH="${GC_SCRIPT_BEAD_METADATA_BRANCH:-}";
           BRANCH_HEAD="${GC_SCRIPT_BEAD_METADATA_BRANCH_HEAD:-}";
+          BASE="${GC_DEFAULT_BRANCH:-}";
+          if [ -z "$BASE" ]; then
+            BASE=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true);
+            BASE="${BASE#origin/}";
+          fi;
+          BASE="${BASE:-main}";
           case "$BRANCH" in
             ""|*[!A-Za-z0-9_./-]*) echo "unsafe branch metadata: $BRANCH" >&2; exit 1 ;;
           esac;
@@ -52,8 +63,8 @@ turns:
           { echo "invalid branch metadata: $BRANCH" >&2; exit 1; };
           ALREADY_MERGED=0;
           if git remote | grep -q '^origin$'; then
-            git fetch origin main;
-            git checkout -B main origin/main;
+            git fetch origin "$BASE";
+            git checkout -B "$BASE" "origin/$BASE";
             if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
               git fetch origin "$BRANCH";
               git update-ref "refs/heads/$BRANCH" FETCH_HEAD;
@@ -66,8 +77,8 @@ turns:
               exit 1;
             fi;
           else
-            git checkout main ||
-            { echo "main branch is required when no origin remote is configured" >&2; exit 1; };
+            git checkout "$BASE" ||
+            { echo "base branch $BASE is required when no origin remote is configured" >&2; exit 1; };
             if ! git rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null; then
               if [ -n "$BRANCH_HEAD" ] &&
                  git rev-parse --verify "$BRANCH_HEAD^{commit}" >/dev/null 2>&1 &&
@@ -86,21 +97,36 @@ turns:
           fi
       - shell: >
           set -eu;
+          BASE="${GC_DEFAULT_BRANCH:-}";
+          if [ -z "$BASE" ]; then
+            BASE=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true);
+            BASE="${BASE#origin/}";
+          fi;
+          BASE="${BASE:-main}";
           if git remote | grep -q '^origin$'; then
-            git push origin HEAD:main;
+            git push origin "HEAD:$BASE";
           fi
       - bd_update:
           id: "{bead.id}"
           status: closed
           metadata:
             merge_result: "merged"
-          notes: "scripted refinery: merged {bead.metadata.branch} into main"
+          notes: "scripted refinery: merged {bead.metadata.branch} into the rig mainline"
       - shell: >
           set -eu;
           BRANCH="${GC_SCRIPT_BEAD_METADATA_BRANCH:-}";
+          BASE="${GC_DEFAULT_BRANCH:-}";
+          if [ -z "$BASE" ]; then
+            BASE=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true);
+            BASE="${BASE#origin/}";
+          fi;
+          BASE="${BASE:-main}";
           case "$BRANCH" in
             ""|main|master|*[!A-Za-z0-9_./-]*) echo "unsafe branch metadata: $BRANCH" >&2; exit 0 ;;
           esac;
+          if [ "$BRANCH" = "$BASE" ]; then
+            echo "refusing to delete the base branch: $BRANCH" >&2; exit 0;
+          fi;
           if git rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null; then
             git branch -d "$BRANCH" 2>/dev/null || git branch -D "$BRANCH" || true;
           fi;
@@ -113,7 +139,7 @@ turns:
       - mail_send:
           to: "{rig}/lifecycle.polecat"
           subject: "MERGED: {bead.metadata.branch} ({bead.id})"
-          body: "scripted refinery {alias} merged {bead.metadata.branch} into main."
+          body: "scripted refinery {alias} merged {bead.metadata.branch} into the rig mainline."
       - log: "merged and closed {bead.id}"
       - exit: 0
   - when:

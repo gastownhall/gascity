@@ -547,15 +547,16 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		configDir = cfgAgent.SourceDir
 	}
 	setupCtx := SessionSetupContext{
-		Session:   sessName,
-		Agent:     qualifiedName,
-		AgentBase: agentBase,
-		Rig:       rigName,
-		RigRoot:   rigRoot,
-		CityRoot:  p.cityPath,
-		CityName:  p.cityName,
-		WorkDir:   workDir,
-		ConfigDir: configDir,
+		Session:       sessName,
+		Agent:         qualifiedName,
+		AgentBase:     agentBase,
+		Rig:           rigName,
+		RigRoot:       rigRoot,
+		CityRoot:      p.cityPath,
+		CityName:      p.cityName,
+		WorkDir:       workDir,
+		ConfigDir:     configDir,
+		DefaultBranch: dirCtx.DefaultBranch,
 	}
 	if strings.Contains(command, "{{") {
 		expanded := expandSessionSetup([]string{command}, setupCtx)
