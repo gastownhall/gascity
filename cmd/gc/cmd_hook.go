@@ -442,43 +442,49 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		emitQueryFailure(command, err)
 		return out, err
 	}
+	// The stale-session fence already ran before agent resolution above; this
+	// sessionID feeds only the claim/visibility assignee identity.
+	sessionID := strings.TrimSpace(overrides["GC_SESSION_ID"])
+	sessionName := strings.TrimSpace(sessionForQuery)
+	alias := strings.TrimSpace(overrides["GC_ALIAS"])
+	// Write the alias/agent form that read paths query through GC_AGENT.
+	// Session forms remain fallbacks for unaliased workers.
+	assignee := firstNonEmptyHookValue(alias, agentForQuery, resolvedAgentName, sessionName, sessionID)
+	// IdentityCandidates governs ADOPTION of already-owned in_progress/open
+	// work (hookClaimExistingAssignment, claimFirstReadyHookAssignment, and
+	// the display path's hookCandidateVisible own-work check); it must be
+	// scoped to this session's OWN runtime identity, never the bare pool
+	// template. A suffixed pool worker resolves config via the GC_TEMPLATE
+	// fallback, so resolvedAgentName == a.QualifiedName() is the bare
+	// template, which is ALSO the [[named_session]] holder's identity —
+	// including it let a suffixed worker adopt the holder's in_progress bead
+	// (ga-80pen8). The bare template stays in RouteTargets, which governs
+	// FRESH claims of UNASSIGNED routed work. The canonical slot / named
+	// holder keep it via `alias` (GC_ALIAS == qualified bare name); only
+	// suffixed workers drop it.
+	identityCandidates := hookClaimIdentityCandidates(
+		assignee,
+		sessionID,
+		sessionName,
+		alias,
+		agentForQuery,
+	)
+	routeTargets := hookClaimRouteTargets(hookClaimPrimaryRouteTarget(&a), resolvedAgentName, strings.TrimSpace(overrides["GC_TEMPLATE"]))
 	if opts.Claim {
-		// The stale-session fence already ran before agent resolution above; this
-		// sessionID feeds only the claim assignee identity.
-		sessionID := strings.TrimSpace(overrides["GC_SESSION_ID"])
-		sessionName := strings.TrimSpace(sessionForQuery)
-		alias := strings.TrimSpace(overrides["GC_ALIAS"])
-		// Write the alias/agent form that read paths query through GC_AGENT.
-		// Session forms remain fallbacks for unaliased workers.
-		assignee := firstNonEmptyHookValue(alias, agentForQuery, resolvedAgentName, sessionName, sessionID)
 		claimOpts := hookClaimOptions{
-			Assignee: assignee,
-			// IdentityCandidates governs ADOPTION of already-owned in_progress/open
-			// work (hookClaimExistingAssignment and
-			// claimFirstReadyHookAssignment); it must be scoped to this session's
-			// OWN runtime identity, never the bare pool template. A
-			// suffixed pool worker resolves config via the GC_TEMPLATE fallback, so
-			// resolvedAgentName == a.QualifiedName() is the bare template, which is
-			// ALSO the [[named_session]] holder's identity — including it let a
-			// suffixed worker adopt the holder's in_progress bead (ga-80pen8). The
-			// bare template stays in RouteTargets, which governs FRESH claims of
-			// UNASSIGNED routed work. The canonical slot / named holder keep it via
-			// `alias` (GC_ALIAS == qualified bare name); only suffixed workers drop it.
-			IdentityCandidates: hookClaimIdentityCandidates(
-				assignee,
-				sessionID,
-				sessionName,
-				alias,
-				agentForQuery,
-			),
-			RouteTargets: hookClaimRouteTargets(hookClaimPrimaryRouteTarget(&a), resolvedAgentName, strings.TrimSpace(overrides["GC_TEMPLATE"])),
-			Env:          queryEnv,
-			DrainAck:     opts.DrainAck,
-			JSON:         opts.JSON,
+			Assignee:           assignee,
+			IdentityCandidates: identityCandidates,
+			RouteTargets:       routeTargets,
+			Env:                queryEnv,
+			DrainAck:           opts.DrainAck,
+			JSON:               opts.JSON,
 		}
 		return claimHookWork(cityPath, workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
 	}
-	return doHook(workQuery, workDir, false, runner, stdout, stderr)
+	return doHook(workQuery, workDir, false, runner, stdout, stderr, hookVisibility{
+		Identities:   identityCandidates,
+		RouteTargets: routeTargets,
+	})
 }
 
 // hookClaimSessionVerdict classifies a runtime session's fitness to claim routed
@@ -908,11 +914,25 @@ func workQueryEnvForDir(env []string, dir string) []string {
 	return append(out, "PWD="+dir)
 }
 
+// hookVisibility scopes which already-returned work_query candidates doHook
+// shows the caller. Identities match a candidate's OWN assignee
+// (already-claimed work); RouteTargets match an UNASSIGNED candidate's
+// gc.routed_to (freshly routed work). These are kept as two separate lists,
+// not merged into one, because they are not interchangeable - see the
+// IdentityCandidates/RouteTargets split in cmdHookWithOptions (ga-80pen8): a
+// suffixed pool worker's own session identity must never act as a route
+// target for fresh unassigned claims. The zero value disables filtering
+// entirely, matching pre-ga-1xaqgo.2 behavior byte-for-byte.
+type hookVisibility struct {
+	Identities   []string
+	RouteTargets []string
+}
+
 // doHook is the pure logic for gc hook. Runs the work query and outputs
 // results based on mode. Without inject: prints normalized ready-only output,
 // returns 0 if work exists, 1 if empty. With inject: skips the work query and
 // returns 0.
-func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, stderr io.Writer) int {
+func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, stderr io.Writer, visibility hookVisibility) int {
 	if inject {
 		return 0
 	}
@@ -929,6 +949,7 @@ func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, 
 	trimmed := strings.TrimSpace(output)
 	normalized := normalizeWorkQueryOutput(trimmed)
 	normalized = filterUnreadyHookCandidates(normalized, time.Now())
+	normalized = filterForeignHookCandidates(normalized, visibility)
 	hasWork := workQueryHasReadyWork(normalized)
 
 	// Non-inject mode: print normalized, ready-only output. Return 0 only when work exists.
@@ -1013,6 +1034,76 @@ func filterUnreadyHookCandidates(output string, now time.Time) string {
 		return output
 	}
 	return string(reencoded)
+}
+
+// filterForeignHookCandidates drops work_query candidates that belong to a
+// different agent or are routed to a different agent/rig, mirroring the
+// assignee/route eligibility the claim path already enforces
+// (hookCandidateVisible). Plain "gc hook" has no claim step to reject
+// foreign work at, so under native-store schema skew (gc.routed_to's own
+// store-side predicate silently no-ops - ga-lmy6yj) it would otherwise
+// display another agent's in-flight or routed work as if it were this
+// session's own (ga-1xaqgo.2). Fails open at every decode step -
+// unparseable output, non-array output, non-object items, and items that
+// fail to decode as a beads.Bead all pass through unchanged - and is a
+// no-op entirely when visibility carries no identity/route context, since a
+// filter that can silently empty an agent's queue is a worse outage than
+// the over-serving it replaces.
+func filterForeignHookCandidates(output string, visibility hookVisibility) string {
+	if output == "" {
+		return output
+	}
+	if len(visibility.Identities) == 0 && len(visibility.RouteTargets) == 0 {
+		return output
+	}
+	var decoded any
+	if err := json.Unmarshal([]byte(output), &decoded); err != nil {
+		return output
+	}
+	arr, ok := decoded.([]any)
+	if !ok {
+		return output
+	}
+	filtered := make([]any, 0, len(arr))
+	for _, item := range arr {
+		obj, ok := item.(map[string]any)
+		if !ok {
+			filtered = append(filtered, item)
+			continue
+		}
+		candidate, ok := decodeHookCandidateBead(obj)
+		if !ok {
+			filtered = append(filtered, obj)
+			continue
+		}
+		if !hookCandidateVisible(candidate, visibility.Identities, visibility.RouteTargets) {
+			continue
+		}
+		filtered = append(filtered, obj)
+	}
+	reencoded, err := json.Marshal(filtered)
+	if err != nil {
+		return output
+	}
+	return string(reencoded)
+}
+
+// decodeHookCandidateBead best-effort decodes a raw work_query candidate
+// into a beads.Bead so filterForeignHookCandidates can reuse the same
+// assignee/route predicates as gc hook --claim. Roundtrips through JSON
+// rather than a field-by-field map read because beads.Bead.Metadata
+// (StringMap) already carries the bd-CLI type-coercion tolerance that this
+// decode should inherit unchanged.
+func decodeHookCandidateBead(obj map[string]any) (beads.Bead, bool) {
+	raw, err := json.Marshal(obj)
+	if err != nil {
+		return beads.Bead{}, false
+	}
+	var candidate beads.Bead
+	if err := json.Unmarshal(raw, &candidate); err != nil {
+		return beads.Bead{}, false
+	}
+	return candidate, true
 }
 
 func isFutureDeferredHookCandidate(item map[string]any, now time.Time) bool {

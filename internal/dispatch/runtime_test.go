@@ -1297,6 +1297,45 @@ func TestBeadOutcomeFailedRetryAttemptExemptionAndOptInTrim(t *testing.T) {
 	}
 }
 
+func TestLoadDownDepsForScopeSkipFallsBackWhenBatchUnsupported(t *testing.T) {
+	t.Parallel()
+
+	store := &scopeSkipBatchStore{MemStore: beads.NewMemStore(), batchUnsupported: true}
+	blocker := mustCreateWorkflowBead(t, store, beads.Bead{Title: "blocker", Type: "task"})
+	dependent := mustCreateWorkflowBead(t, store, beads.Bead{Title: "dependent", Type: "task"})
+	mustDepAdd(t, store, dependent.ID, blocker.ID, "blocks")
+
+	deps, err := loadDownDepsForScopeSkip(store, []string{dependent.ID})
+	if err != nil {
+		t.Fatalf("loadDownDepsForScopeSkip returned %v; a capability miss must fall back, not abort the scope", err)
+	}
+	if store.depListCalls == 0 {
+		t.Fatalf("per-anchor DepList never ran; the sentinel must route to the fallback path")
+	}
+	if got := len(deps[dependent.ID]); got != 1 {
+		t.Fatalf("fallback returned %d edge(s) for %s, want 1", got, dependent.ID)
+	}
+}
+
+func TestLoadDownDepsForScopeSkipStillFailsClosedOnRealBatchError(t *testing.T) {
+	t.Parallel()
+
+	store := &scopeSkipFailingBatchStore{MemStore: beads.NewMemStore()}
+	bead := mustCreateWorkflowBead(t, store, beads.Bead{Title: "anchor", Type: "task"})
+
+	if _, err := loadDownDepsForScopeSkip(store, []string{bead.ID}); err == nil {
+		t.Fatal("loadDownDepsForScopeSkip succeeded on a transport error; only the capability sentinel may fall back")
+	}
+}
+
+type scopeSkipFailingBatchStore struct {
+	*beads.MemStore
+}
+
+func (s *scopeSkipFailingBatchStore) DepListBatch([]string) (map[string][]beads.Dep, error) {
+	return nil, errors.New("dolt: connection reset")
+}
+
 func TestSkipOpenScopeMembersBatchesDependencyChecksAndCloses(t *testing.T) {
 	t.Parallel()
 
@@ -2484,6 +2523,7 @@ type scopeSkipBatchStore struct {
 	*beads.MemStore
 	depListCalls      int
 	depListBatchCalls int
+	batchUnsupported  bool
 	updateCalls       int
 	closeAllCalls     int
 	closeAllIDs       [][]string
@@ -2540,6 +2580,9 @@ func (s *scopeSkipBatchStore) DepList(id, direction string) ([]beads.Dep, error)
 
 func (s *scopeSkipBatchStore) DepListBatch(ids []string) (map[string][]beads.Dep, error) {
 	s.depListBatchCalls++
+	if s.batchUnsupported {
+		return nil, beads.ErrDepListBatchUnsupported
+	}
 	return s.MemStore.DepListBatch(ids)
 }
 
