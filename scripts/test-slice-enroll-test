@@ -172,6 +172,7 @@ run_entry() {
   local name="$1" cgroup_file="$2"
   shift 2
   if ! out="$(env -u GC_TEST_NO_SLICE -u GC_TEST_SLICE_ENROLLED \
+    -u GC_TEST_SLICE_TASKS_MAX \
     PATH="$scen_bin" \
     GC_TEST_SLICE_CGROUP_FILE="$cgroup_file" \
     "$@" \
