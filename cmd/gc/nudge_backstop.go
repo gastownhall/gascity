@@ -18,6 +18,16 @@ import (
 //
 // poolClaimBackstop and poolContinuationBackstop (idle_nudge.go) are the two
 // predicates: initial trigger delivery and later graph-v2 successor delivery.
+// backstopHoldObserver is an optional predicate extension: a predicate that
+// implements it gets told WHY the engine held or skipped a session this tick,
+// as a durable breadcrumb. Three separate incidents (ga-gg4mv) were
+// undiagnosable from outside because every hold path was silent — the
+// operator could see THAT the backstop did nothing, never WHICH gate held.
+type backstopHoldObserver interface {
+	observeHold(store beads.Store, s *beads.Bead, reason string, stdout io.Writer)
+	clearHold(store beads.Store, s *beads.Bead, stdout io.Writer)
+}
+
 type backstopPredicate interface {
 	// governs reports whether this predicate applies to the session bead at
 	// all.
@@ -146,6 +156,9 @@ func runNudgeBackstop(
 		}
 		sessName := strings.TrimSpace(s.Metadata["session_name"])
 		if sessName == "" || !sp.IsRunning(sessName) {
+			if ho, ok := pred.(backstopHoldObserver); ok {
+				ho.observeHold(store, s, "runtime_not_running", stdout)
+			}
 			continue
 		}
 
@@ -155,8 +168,14 @@ func runNudgeBackstop(
 			continue
 		case backstopResolutionClear:
 			pred.clear(store, s, stdout)
+			if ho, ok := pred.(backstopHoldObserver); ok {
+				ho.clearHold(store, s, stdout)
+			}
 			continue
 		case backstopResolutionOutstanding:
+			if ho, ok := pred.(backstopHoldObserver); ok {
+				ho.clearHold(store, s, stdout)
+			}
 			// Continue below.
 		default:
 			continue
@@ -180,9 +199,15 @@ func runNudgeBackstop(
 		case backstopActionNudge:
 			switch pred.revalidate(target) {
 			case backstopResolutionHold:
+				if ho, ok := pred.(backstopHoldObserver); ok {
+					ho.observeHold(store, s, "revalidate_hold", stdout)
+				}
 				continue
 			case backstopResolutionClear:
 				pred.clear(store, s, stdout)
+				if ho, ok := pred.(backstopHoldObserver); ok {
+					ho.clearHold(store, s, stdout)
+				}
 				continue
 			case backstopResolutionOutstanding:
 				// Deliver below.

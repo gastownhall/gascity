@@ -72,6 +72,18 @@ const (
 	// typed event and the drain request fire once per stalled claim rather than
 	// once per tick for as long as the claim is held.
 	executionClaimNudgeStalledKey = "execution_claim_nudge_stalled"
+	// executionClaimNudgeStalledTokenKey binds the latch to the incarnation
+	// that was escalated. A latch that outlives its drain — the supervisor
+	// restarted before the requested drain completed and boot re-adopted the
+	// same row (ga-dd3ap) — must not silence the backstop for the NEXT
+	// incarnation holding the same claim.
+	executionClaimNudgeStalledTokenKey = "execution_claim_nudge_stalled_token"
+	// executionClaimHoldKey is the durable breadcrumb for WHY the backstop
+	// held or skipped this session on its most recent evaluation. Three
+	// incidents were undiagnosable because every hold path was silent
+	// (ga-gg4mv); this is written only on transition and cleared when the
+	// backstop acts or the claim resolves.
+	executionClaimHoldKey = "execution_claim_hold"
 )
 
 // nudgeStalledPoolExecution re-delivers the configured claim nudge to a pool slot
@@ -96,8 +108,15 @@ func nudgeStalledPoolExecution(
 	requestDrain func(sessionBead beads.Bead) error,
 	stdout io.Writer,
 ) {
-	if sp == nil || cfg == nil || store == nil || snapshotPartial {
+	if sp == nil || cfg == nil || store == nil {
 		return // hot reconcile path: never panic on a half-built dependency
+	}
+	if snapshotPartial {
+		// A partial snapshot is not evidence of a stall — but a backstop that
+		// silently sits out ticks is indistinguishable from a broken one
+		// (ga-gg4mv), so the sit-out is named.
+		fmt.Fprintf(stdout, "execution-claim-nudge: disabled this tick: assigned-work snapshot partial\n") //nolint:errcheck // best-effort
+		return
 	}
 	if sess, ok := store.(beads.SessionStore); ok && sess.Store == nil {
 		return
@@ -109,6 +128,8 @@ func nudgeStalledPoolExecution(
 		rec:          rec,
 		requestDrain: requestDrain,
 		claims:       newExecutionClaimSnapshot(work, workStores, workStoreRefs),
+		store:        store,
+		stdout:       stdout,
 	})
 }
 
@@ -190,6 +211,10 @@ type poolExecutionBackstop struct {
 	rec          events.Recorder
 	requestDrain func(sessionBead beads.Bead) error
 	claims       executionClaimSnapshot
+	// store/stdout let resolve record its hold reasons durably; the engine's
+	// driver only sees hold/clear, never which gate held (ga-gg4mv).
+	store  beads.Store
+	stdout io.Writer
 }
 
 func (p poolExecutionBackstop) governs(s beads.Bead) bool {
@@ -212,9 +237,11 @@ func (p poolExecutionBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, se
 	case 1:
 		// Continue below.
 	default:
+		p.observeHold(p.store, &s, "multi_claim", p.stdout)
 		return backstopTarget{}, backstopResolutionHold
 	}
 	if !p.sessionIsQuiet(sessName) {
+		p.observeHold(p.store, &s, "not_quiet", p.stdout)
 		return backstopTarget{}, backstopResolutionHold
 	}
 	claim := claims[0]
@@ -283,9 +310,53 @@ func (p poolExecutionBackstop) reserve(store beads.Store, s *beads.Bead, target 
 // exhausted turns a spent attempt budget into one observable fact and one drain
 // request, latched so both happen exactly once for this claim however many ticks
 // the session survives.
-func (p poolExecutionBackstop) exhausted(store beads.Store, s *beads.Bead, stdout io.Writer) {
-	if strings.TrimSpace(s.Metadata[executionClaimNudgeStalledKey]) != "" {
+// observeHold records WHY the backstop held or skipped this session, written
+// only when the reason changes so a standing hold costs one write, not one
+// per tick. The breadcrumb is what makes the next silent-hold incident a
+// one-query diagnosis instead of an hour of elimination (ga-gg4mv).
+func (p poolExecutionBackstop) observeHold(store beads.Store, s *beads.Bead, reason string, stdout io.Writer) {
+	if store == nil || s == nil || reason == "" {
 		return
+	}
+	if cur := strings.TrimSpace(s.Metadata[executionClaimHoldKey]); cur == reason || strings.HasPrefix(cur, reason+" ") {
+		return
+	}
+	writeSessionMetadata(store, s, map[string]string{
+		executionClaimHoldKey: reason + " " + p.now.UTC().Format(time.RFC3339),
+	}, "execution-claim-hold", stdout)
+}
+
+// clearHold wipes the breadcrumb once the backstop can act again (or the
+// claim resolved), so a stale reason never outlives the condition it named.
+func (p poolExecutionBackstop) clearHold(store beads.Store, s *beads.Bead, stdout io.Writer) {
+	if store == nil || s == nil || strings.TrimSpace(s.Metadata[executionClaimHoldKey]) == "" {
+		return
+	}
+	writeSessionMetadata(store, s, map[string]string{executionClaimHoldKey: ""}, "execution-claim-hold", stdout)
+}
+
+// executionStalledLatchRetryAfter bounds how long a stalled latch silences
+// re-escalation for the SAME incarnation. The latched drain normally lands in
+// seconds; a latch this old with the claim still held and the runtime still
+// running means the requested drain evaporated (a supervisor restart raced
+// it), and holding the latch forever turns the backstop off for the seat's
+// whole remaining life (ga-dd3ap).
+const executionStalledLatchRetryAfter = 30 * time.Minute
+
+func (p poolExecutionBackstop) exhausted(store beads.Store, s *beads.Bead, stdout io.Writer) {
+	if latchedAt := strings.TrimSpace(s.Metadata[executionClaimNudgeStalledKey]); latchedAt != "" {
+		sameIncarnation := strings.TrimSpace(s.Metadata[executionClaimNudgeStalledTokenKey]) ==
+			strings.TrimSpace(s.Metadata["instance_token"])
+		latchFresh := true
+		if ts, err := time.Parse(time.RFC3339, latchedAt); err == nil {
+			latchFresh = p.now.Sub(ts) < executionStalledLatchRetryAfter
+		}
+		if sameIncarnation && latchFresh {
+			return
+		}
+		// The latch belongs to a previous incarnation, or its drain never
+		// landed: fall through and escalate again (the re-write below stamps
+		// the current incarnation and restarts the retry clock).
 	}
 	beadID := strings.TrimSpace(s.Metadata[executionClaimNudgeWorkKey])
 	if beadID == "" {
@@ -297,7 +368,8 @@ func (p poolExecutionBackstop) exhausted(store beads.Store, s *beads.Bead, stdou
 	// the durable record that this claim was escalated, and the operator sees the
 	// failure on stdout.
 	if !writeSessionMetadata(store, s, map[string]string{
-		executionClaimNudgeStalledKey: p.now.UTC().Format(time.RFC3339),
+		executionClaimNudgeStalledKey:      p.now.UTC().Format(time.RFC3339),
+		executionClaimNudgeStalledTokenKey: strings.TrimSpace(s.Metadata["instance_token"]),
 	}, "execution-claim-nudge", stdout) {
 		return
 	}
