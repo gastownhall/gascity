@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -126,6 +127,15 @@ func (f *zombieRecoveryProcFixture) observationComplete(t *testing.T) bool {
 // orphaned onto init — the same retained obligation resolves, lifts its
 // ownership fence and clears its refusal history, freeing the pool seat.
 func TestSessionStartControllerEscalatedDrainAckResolvesWhenTheRuntimeBecomesAZombie(t *testing.T) {
+	// The fixture IS a procfs: it writes stat/status/environ/cwd under a fake
+	// /proc root and hands it to the real proctable scanner. On a platform
+	// without procfs the scanner has nothing to decline, so the undecidable
+	// premise this test rests on cannot be built at all — the guard below fires
+	// on darwin, which is exactly what it is protecting against.
+	if goruntime.GOOS != "linux" {
+		t.Skip("the zombie recovery premise is built from a fake procfs; linux only")
+	}
+
 	fixture := newZombieRecoveryProcFixture(t, "ga-drain-esc")
 	if fixture.observationComplete(t) {
 		t.Fatal("a live, unreadable, orphaned in-scope process read complete; the fixture models nothing")

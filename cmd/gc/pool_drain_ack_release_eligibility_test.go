@@ -227,7 +227,7 @@ func TestAuthorizeRoutedWorkPoolDrainAckRefusesAnUnreachableSourceStoreUnderACap
 // that only became reachable once the release gate stopped refusing everything
 // under a cap. Reading the agent's own cap keeps the clause honest.
 func TestAuthorizeRoutedWorkPoolDrainAckKeepsSingletonExclusionUnderACap(t *testing.T) {
-	setup := func(t *testing.T, agentCap int) (routedWorkPoolDrainAckAuthorizationFixture, *config.Agent) {
+	setup := func(t *testing.T, agentCap int) routedWorkPoolDrainAckAuthorizationFixture {
 		t.Helper()
 		fixture := newRoutedWorkPoolDrainAckAuthorizationFixture(t)
 		agent := findAgentByTemplate(fixture.snapshot.Config, fixture.lease.PoolTarget)
@@ -246,11 +246,11 @@ func TestAuthorizeRoutedWorkPoolDrainAckKeepsSingletonExclusionUnderACap(t *test
 		if policy.reason != poolAllocationShadowWorkspaceCap || policy.maxActiveSessions != -1 {
 			t.Fatalf("policy = (%q, %d), want a workspace_cap policy with an unfilled cap", policy.reason, policy.maxActiveSessions)
 		}
-		return fixture, agent
+		return fixture
 	}
 
 	t.Run("singleton pool refuses a non-canonical row", func(t *testing.T) {
-		fixture, _ := setup(t, 1)
+		fixture := setup(t, 1)
 		authorized, refusal, err := fixture.cr.authorizeRoutedWorkPoolDrainAck(fixture.snapshot, fixture.info, fixture.lease)
 		if err != nil || authorized || refusal != drainAckRefusalPolicyUnsupported {
 			t.Fatalf("authorization = (%t, %q, %v), want a policy_unsupported refusal", authorized, refusal, err)
@@ -260,7 +260,7 @@ func TestAuthorizeRoutedWorkPoolDrainAckKeepsSingletonExclusionUnderACap(t *test
 	// Control: the refusal above is the singleton clause, not the workspace cap
 	// leaking back in. Same row, same cap, a pool that simply is not a singleton.
 	t.Run("bounded pool releases the same row", func(t *testing.T) {
-		fixture, _ := setup(t, 2)
+		fixture := setup(t, 2)
 		authorized, refusal, err := fixture.cr.authorizeRoutedWorkPoolDrainAck(fixture.snapshot, fixture.info, fixture.lease)
 		if err != nil || !authorized || refusal != drainAckRefusalNone {
 			t.Fatalf("authorization = (%t, %q, %v), want the release to hold", authorized, refusal, err)
