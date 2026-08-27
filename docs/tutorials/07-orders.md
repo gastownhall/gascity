@@ -175,10 +175,12 @@ Notes per trigger:
 - **`cron`** — a 5-field expression (minute, hour, day-of-month, month,
   day-of-week) supporting `*`, integers, comma lists (`1,15`), ranges (`6-18`),
   and steps on either (`*/15`, `8-20/2`). A `*/N` step counts from 0; an
-  `A-B/N` step counts from `A`. Day-of-week runs `0`–`6`, Sunday first. A
-  schedule outside this grammar is rejected when the order loads, so it can't
-  sit registered and never fire. Unlike cooldown it hits the same wall-clock
-  times every day. Fires at most once per minute.
+  `A-B/N` step counts from `A`. Day-of-week runs `0`–`6`, Sunday first, and
+  `7` is accepted as a second spelling of Sunday. A schedule outside this
+  grammar is rejected when the order loads, so it can't sit registered and
+  never fire — including a `*/N` step too large to reach any value in its
+  field, like `*/32` in day-of-month. Unlike cooldown it hits the same
+  wall-clock times every day. Fires at most once per minute.
 - **`condition`** — the orchestrator runs `sh -c "<check>"` each tick, bounded by
   the order's `check_timeout` (a positive Go duration, default `10s`). This is
   separate from `timeout`, which bounds the dispatched formula/exec rather than

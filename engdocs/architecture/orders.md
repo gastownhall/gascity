@@ -288,7 +288,7 @@ Violations indicate bugs.
 | File | Responsibility |
 |---|---|
 | `internal/orders/order.go` | `Order` struct, `Parse()`, `Validate()`, `IsEnabled()`, `IsExec()`, `TimeoutOrDefault()`, `ScopedName()` |
-| `internal/orders/triggers.go` | `TriggerResult`, `CheckTrigger()`, `checkCooldown()`, `checkCron()`, `checkCondition()`, `checkEvent()`, `cronFieldMatches()`, `cronTermMatches()`, `ValidateCronSchedule()`, `MaxSeqFromLabels()` |
+| `internal/orders/triggers.go` | `TriggerResult`, `CheckTrigger()`, `checkCooldown()`, `checkCron()`, `checkCondition()`, `checkEvent()`, `cronFieldMatches()`, `cronDayOfWeekMatches()`, `cronTermMatches()`, `ValidateCronSchedule()`, `MaxSeqFromLabels()` |
 | `internal/orders/scanner.go` | `Scan()` -- discovers orders across formula layers with priority override |
 | `cmd/gc/order_dispatch.go` | `orderDispatcher` interface, `memoryOrderDispatcher`, `buildOrderDispatcher()`, `dispatch()`, `dispatchOne()`, `dispatchExec()`, `dispatchWisp()`, `effectiveTimeout()`, `rigExclusiveLayers()`, `qualifyPool()`, `ExecRunner`, `shellExecRunner` |
 | `cmd/gc/cmd_order.go` | CLI commands: `gc order list`, `show`, `run`, `check`, `history`. Helper functions: `loadOrders()`, `loadAllOrders()`, `cityFormulaLayers()`, `findOrder()`, `orderLastRunFn()`, `bdCursorFunc()` |
@@ -381,12 +381,16 @@ boundaries.
   minute-level granularity with field matching for `*`, exact integers,
   comma-separated lists, ranges (`1-5`), and steps on either (`*/5`,
   `8-20/2`). `*/N` anchors its stride at 0; `A-B/N` anchors at `A`.
-  Day-of-week is `0`-`6` (`time.Weekday`), so `7` for Sunday is rejected.
+  Day-of-week is `0`-`6` (`time.Weekday`); `7` is accepted as the common
+  cron spelling of Sunday and probed as `0` by `cronDayOfWeekMatches()`.
   There is no sub-minute scheduling, and no named months or weekdays.
   `ValidateCronSchedule()` rejects anything outside that grammar at load,
   because the matcher returns a bare bool: an unparseable field is
   indistinguishable from a non-matching one, and the order would otherwise
-  stay registered and never fire.
+  stay registered and never fire. For the same reason it rejects a `*/N`
+  whose stride cannot reach any value in its field: because the stride
+  anchors at 0, `*/32` in day-of-month (`1`-`31`) and `*/13` in month
+  (`1`-`12`) parse cleanly and match nothing, ever.
 
 - **Condition trigger blocks the dispatch loop**: `checkCondition()` runs
   `sh -c <check>` synchronously during trigger evaluation. A slow check

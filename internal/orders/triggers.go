@@ -201,7 +201,7 @@ func checkCron(a Order, now time.Time, lastRunFn LastRunFunc) TriggerResult {
 			cronFieldMatches(hour, t.Hour()) &&
 			cronFieldMatches(dom, t.Day()) &&
 			cronFieldMatches(month, int(t.Month())) &&
-			cronFieldMatches(dow, int(t.Weekday()))
+			cronDayOfWeekMatches(dow, int(t.Weekday()))
 	}
 	sameWallMinute := func(x, y time.Time) bool {
 		return x.Format(wallMinuteLayout) == y.Format(wallMinuteLayout)
@@ -298,15 +298,16 @@ type cronField struct {
 	extraMsg string
 }
 
-// cronFields are the five schedule fields, in order. Day-of-week stops at 6
-// because matchesAt compares against time.Weekday, which never yields 7; the
-// common cron spelling of Sunday-as-7 would silently never fire.
+// cronFields are the five schedule fields, in order. Day-of-week runs to 7
+// because 7 is the common cron spelling of Sunday: time.Weekday never yields
+// it, so cronDayOfWeekMatches probes such a schedule at both readings rather
+// than letting it validate cleanly and never fire.
 var cronFields = [5]cronField{
 	{name: "minute", low: 0, high: 59},
 	{name: "hour", low: 0, high: 23},
 	{name: "day-of-month", low: 1, high: 31},
 	{name: "month", low: 1, high: 12},
-	{name: "day-of-week", low: 0, high: 6, extraMsg: " (0=Sunday; 7 is not accepted)"},
+	{name: "day-of-week", low: 0, high: 7, extraMsg: " (0 or 7 = Sunday)"},
 }
 
 // ValidateCronSchedule reports whether a schedule is expressible in the
@@ -349,17 +350,28 @@ func validateCronTerm(f cronField, term string) error {
 	}
 
 	spec, stepText, hasStep := strings.Cut(term, "/")
+	step := 1
 	if hasStep {
-		step, err := strconv.Atoi(strings.TrimSpace(stepText))
+		n, err := strconv.Atoi(strings.TrimSpace(stepText))
 		if err != nil {
 			return bad("has a non-numeric step")
 		}
-		if step <= 0 {
+		if n <= 0 {
 			return bad("has a step that is not positive")
 		}
+		step = n
 	}
 	spec = strings.TrimSpace(spec)
 	if spec == "*" {
+		// "*/N" anchors its stride at 0, so in a field whose low bound is 1
+		// the smallest value it can produce is N itself. Once N passes the
+		// field's high bound the matching set is empty and the schedule is
+		// dead — the same silent never-fires this validation exists to catch.
+		// "A-B/N" needs no equivalent check: it anchors at A, which always
+		// matches.
+		if hasStep && f.low > 0 && step > f.high {
+			return bad(fmt.Sprintf(`has no value in %d-%d (a "*/N" step counts from 0)`, f.low, f.high))
+		}
 		return nil
 	}
 
@@ -413,6 +425,16 @@ func cronFieldMatches(field string, value int) bool {
 		}
 	}
 	return false
+}
+
+// cronDayOfWeekMatches accepts 7 as an alias for Sunday. time.Weekday never
+// yields 7, so a schedule written with the common cron spelling is probed at
+// both readings rather than silently never firing.
+func cronDayOfWeekMatches(field string, weekday int) bool {
+	if cronFieldMatches(field, weekday) {
+		return true
+	}
+	return weekday == 0 && cronFieldMatches(field, 7)
 }
 
 // cronTermMatches evaluates one comma-separated term of a cron field.
