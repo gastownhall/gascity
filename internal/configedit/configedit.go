@@ -711,6 +711,9 @@ func (e *Editor) ResumeRig(name string) error {
 // in .gc/runtime/suspension-state.json. The legacy `[workspace] suspended`
 // field in city.toml is no longer touched.
 func (e *Editor) SuspendCity() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	cityPath := filepath.Dir(e.tomlPath)
 	t := true
 	return suspensionstate.SetCitySuspended(e.fs, cityPath, &t)
@@ -720,6 +723,9 @@ func (e *Editor) SuspendCity() error {
 // state file. The explicit-resume override sticks across city restarts
 // even when [workspace] declares suspended_on_start = true.
 func (e *Editor) ResumeCity() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	cityPath := filepath.Dir(e.tomlPath)
 	f := false
 	return suspensionstate.SetCitySuspended(e.fs, cityPath, &f)

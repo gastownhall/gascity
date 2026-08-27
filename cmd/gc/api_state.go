@@ -1814,23 +1814,26 @@ func (cs *controllerState) ResumeAgent(name string) error {
 	})
 }
 
-// SuspendRig writes suspended=true on the rig in city.toml.
+// SuspendRig records a runtime-only suspension override and pokes the
+// reconciler. Runtime suspension does not recompose authored config: the
+// mutation did not change it, and treating the poke as a config write creates
+// an unrelated config generation and reload barrier.
 func (cs *controllerState) SuspendRig(name string) error {
-	return cs.mutateAndPoke(func() error {
+	return cs.mutateRuntimeStateAndPoke(func() error {
 		return cs.editor.SuspendRig(name)
 	})
 }
 
-// ResumeRig clears suspended on the rig in city.toml.
+// ResumeRig records a runtime-only resume override and pokes the reconciler.
 func (cs *controllerState) ResumeRig(name string) error {
-	return cs.mutateAndPoke(func() error {
+	return cs.mutateRuntimeStateAndPoke(func() error {
 		return cs.editor.ResumeRig(name)
 	})
 }
 
-// SuspendCity sets workspace.suspended = true.
+// SuspendCity records a runtime-only city suspension override.
 func (cs *controllerState) SuspendCity() error {
-	if err := cs.mutateAndPoke(func() error {
+	if err := cs.mutateRuntimeStateAndPoke(func() error {
 		return cs.editor.SuspendCity()
 	}); err != nil {
 		return err
@@ -1841,9 +1844,9 @@ func (cs *controllerState) SuspendCity() error {
 	return nil
 }
 
-// ResumeCity sets workspace.suspended = false.
+// ResumeCity records a runtime-only city resume override.
 func (cs *controllerState) ResumeCity() error {
-	if err := cs.mutateAndPoke(func() error {
+	if err := cs.mutateRuntimeStateAndPoke(func() error {
 		return cs.editor.ResumeCity()
 	}); err != nil {
 		return err
@@ -2868,6 +2871,20 @@ func (cs *controllerState) mutateAndPoke(mutate func() error) error {
 	cs.markConfigMutationPending(revision)
 	if cs.configDirty != nil {
 		cs.configDirty.Store(true)
+	}
+	cs.Poke()
+	return nil
+}
+
+// mutateRuntimeStateAndPoke applies a mutation whose durable source of truth
+// lives under .gc/runtime rather than in authored city configuration. The
+// Editor method owns the shared per-city mutation lock. There is deliberately
+// no config reload and no configDirty transition here: the existing composed
+// snapshot (including imported-pack entries) remains authoritative while the
+// poke asks the reconciler to re-read runtime state.
+func (cs *controllerState) mutateRuntimeStateAndPoke(mutate func() error) error {
+	if err := mutate(); err != nil {
+		return err
 	}
 	cs.Poke()
 	return nil
