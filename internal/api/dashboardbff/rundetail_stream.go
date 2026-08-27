@@ -103,8 +103,8 @@ func (p *Plane) handleRunDetailStream(w http.ResponseWriter, r *http.Request) {
 	}
 	runID := r.PathValue("runId")
 
-	flusher, ok := w.(http.Flusher)
-	if !ok {
+	flusher := findFlusher(w)
+	if flusher == nil {
 		// A ResponseWriter that cannot flush cannot stream; fail closed so the
 		// SPA falls back to the GET + nudge path rather than hanging on a stream
 		// that never delivers a frame.
@@ -256,4 +256,25 @@ func frameSeq(detail runproj.FormulaRunDetail) int64 {
 		return detail.SnapshotEventSeq.Seq
 	}
 	return 0
+}
+
+// findFlusher unwraps w to find one that supports http.Flusher. Middleware
+// wrappers commonly embed the http.ResponseWriter interface (not the
+// concrete writer), which promotes only the interface's own methods
+// (Header/Write/WriteHeader) -- not Flush -- so a bare type assertion on the
+// wrapper can fail even though the underlying writer supports it.
+func findFlusher(w http.ResponseWriter) http.Flusher {
+	type unwrapper interface {
+		Unwrap() http.ResponseWriter
+	}
+	for {
+		if f, ok := w.(http.Flusher); ok {
+			return f
+		}
+		if u, ok := w.(unwrapper); ok {
+			w = u.Unwrap()
+			continue
+		}
+		return nil
+	}
 }
