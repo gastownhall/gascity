@@ -152,6 +152,14 @@ func namedSessionModeInfo(i session.Info) string {
 	return session.NamedSessionModeInfo(i)
 }
 
+// recyclableDeadConfiguredNamePhantomInfo reports the configured identity a
+// process-dead session is squatting, when it is not that identity's canonical
+// owner and is therefore safe to close and recycle. Used by the reconciler's
+// Info-based close-orphan path.
+func recyclableDeadConfiguredNamePhantomInfo(i session.Info, cfg *config.City, cityName string) (string, bool) {
+	return session.RecyclableDeadConfiguredNamePhantomInfo(i, cfg, cityName)
+}
+
 func namedSessionContinuityEligible(b beads.Bead) bool {
 	return session.NamedSessionContinuityEligible(b)
 }

@@ -12135,3 +12135,152 @@ func TestReconcileSessionBeads_ClosesOrphanedFailedCreateAndFreesSlot(t *testing
 // Regression: poolDesired derived from desiredState counts ALL session beads
 // (including discovered ones), inflating the desired count. This test verifies
 // that derivePoolDesired only counts pool sessions, not all discovered beads.
+
+// namedSessionEnv builds a reconciler env with a single on_demand named session
+// and returns its qualified identity and resolved runtime name.
+func namedSessionEnv() (*reconcilerTestEnv, string, string) {
+	env := newReconcilerTestEnv()
+	// A SessionTemplate prefix makes the runtime session_name distinct from the
+	// qualified identity, mirroring production: merge work is assigned to the
+	// identity ("keeper"), not the runtime name ("test-city--keeper").
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city", SessionTemplate: "{{.City}}--{{.Agent}}"},
+		Agents:        []config.Agent{{Name: "keeper"}},
+		NamedSessions: []config.NamedSession{{Template: "keeper", Mode: "on_demand"}},
+	}
+	cityName := env.cfg.EffectiveCityName()
+	identity := env.cfg.NamedSessions[0].QualifiedName()
+	runtimeName := config.NamedSessionRuntimeName(cityName, env.cfg.Workspace, identity)
+	return env, identity, runtimeName
+}
+
+func assignOpenWorkTo(t *testing.T, env *reconcilerTestEnv, assignee string) beads.Bead {
+	t.Helper()
+	work, err := env.store.Create(beads.Bead{Title: "merge work", Type: "task"})
+	if err != nil {
+		t.Fatalf("create work: %v", err)
+	}
+	open := "open"
+	if err := env.store.Update(work.ID, beads.UpdateOpts{Status: &open, Assignee: &assignee}); err != nil {
+		t.Fatalf("assign work to %q: %v", assignee, err)
+	}
+	return work
+}
+
+// TestReconcileSessionBeads_RecyclesDeadNamedPhantomHoldingAssignedWork is the
+// ga-n2d Gap B fix: a process-dead phantom squatting a configured runtime name
+// (empty configured_named_identity) that holds work assigned to the configured
+// identity is recycled in one tick — closed so the name frees — while its work
+// stays on the stable identity for a fresh canonical bead to re-adopt.
+func TestReconcileSessionBeads_RecyclesDeadNamedPhantomHoldingAssignedWork(t *testing.T) {
+	env, identity, runtimeName := namedSessionEnv()
+
+	// Phantom: configured-named flag set, identity EMPTY, registry-asleep,
+	// process absent (never started in the fake provider). Not in desiredState,
+	// so it reconciles as !desired and reaches the close path.
+	phantom := env.createSessionBead(runtimeName, "keeper")
+	env.setSessionMetadata(&phantom, map[string]string{
+		namedSessionMetadataKey: "true",
+		"state":                 "asleep",
+	})
+
+	// Merge work assigned to the stable qualified identity (not the dead bead ID).
+	work := assignOpenWorkTo(t, env, identity)
+
+	env.reconcile([]beads.Bead{phantom})
+
+	got, err := env.store.Get(phantom.ID)
+	if err != nil {
+		t.Fatalf("get phantom: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("phantom status = %q, want closed (should be recycled in one tick)", got.Status)
+	}
+
+	gotWork, err := env.store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("get work: %v", err)
+	}
+	if gotWork.Status == "closed" {
+		t.Fatal("merge work must not be closed by the recycle")
+	}
+	if gotWork.Assignee != identity {
+		t.Fatalf("work assignee = %q, want %q (must survive recycle for re-adoption)", gotWork.Assignee, identity)
+	}
+
+	// The runtime name is now free: a fresh canonical bead for the same identity
+	// can claim it — the collision that previously wedged respawn is gone.
+	if err := sessionpkg.EnsureSessionNameAvailableWithConfigForOwner(env.store, env.cfg, runtimeName, "fresh-canonical-id", identity); err != nil {
+		t.Fatalf("runtime name still reserved after recycle: %v", err)
+	}
+}
+
+// TestReconcileSessionBeads_HealthyAsleepCanonicalNamedSessionNotRecycled is the
+// ga-n2d Gap B safety guard: a healthy idle-slept canonical session (identity
+// tagged + matching spec) holding assigned work must be preserved, never churned
+// by the phantom recycle path.
+func TestReconcileSessionBeads_HealthyAsleepCanonicalNamedSessionNotRecycled(t *testing.T) {
+	env, identity, runtimeName := namedSessionEnv()
+
+	canonical := env.createSessionBead(runtimeName, "keeper")
+	env.setSessionMetadata(&canonical, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: identity,
+		namedSessionModeMetadata:     "on_demand",
+		"state":                      "asleep",
+		"sleep_reason":               "idle-timeout",
+	})
+	work := assignOpenWorkTo(t, env, identity)
+
+	env.reconcile([]beads.Bead{canonical})
+
+	got, err := env.store.Get(canonical.ID)
+	if err != nil {
+		t.Fatalf("get canonical: %v", err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("healthy canonical session status = %q, want open (no churn)", got.Status)
+	}
+	gotWork, err := env.store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("get work: %v", err)
+	}
+	if gotWork.Assignee != identity {
+		t.Fatalf("work assignee = %q, want %q (canonical keeps its work)", gotWork.Assignee, identity)
+	}
+}
+
+// TestReconcileSessionBeads_StoppedCanonicalReachingCloseNotRecycled proves the
+// recycle predicate declines an identity-tagged canonical bead even when it
+// reaches the close path (state=stopped without a sleep_reason, so
+// preserveConfiguredNamedSessionBead does not catch it): the standard
+// assigned-work guard keeps it open instead of recycling it.
+func TestReconcileSessionBeads_StoppedCanonicalReachingCloseNotRecycled(t *testing.T) {
+	env, identity, runtimeName := namedSessionEnv()
+
+	canonical := env.createSessionBead(runtimeName, "keeper")
+	env.setSessionMetadata(&canonical, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: identity,
+		namedSessionModeMetadata:     "on_demand",
+		"state":                      "stopped",
+	})
+	work := assignOpenWorkTo(t, env, identity)
+
+	env.reconcile([]beads.Bead{canonical})
+
+	got, err := env.store.Get(canonical.ID)
+	if err != nil {
+		t.Fatalf("get canonical: %v", err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("stopped canonical session status = %q, want open (predicate must decline identity-tagged beads)", got.Status)
+	}
+	gotWork, err := env.store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("get work: %v", err)
+	}
+	if gotWork.Assignee != identity {
+		t.Fatalf("work assignee = %q, want %q (work guard must keep it)", gotWork.Assignee, identity)
+	}
+}
