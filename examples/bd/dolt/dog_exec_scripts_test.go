@@ -754,7 +754,7 @@ case "$query" in
     # probe, which reports writercommit so HEAD has moved past the flatten's own
     # commit. verify_counts still sees compactcommit (gain+drift) because it does
     # not probe HEAD and the "$(current_head)" gates read the real state.
-    if { [ "$mode" = "writer_race_during_verify" ] || [ "$mode" = "writer_race_db_hash_during_verify" ] || [ "$mode" = "writer_race_with_mixed_same_count_hash_drift" ] || [ "$mode" = "row_count_decreases_with_writer_race" ]; } && [ "$(current_head)" = "compactcommit" ]; then
+    if { [ "$mode" = "writer_race_during_verify" ] || [ "$mode" = "writer_race_db_hash_during_verify" ] || [ "$mode" = "writer_race_with_mixed_same_count_hash_drift" ] || [ "$mode" = "row_count_decreases_with_writer_race" ] || [ "$mode" = "same_count_hash_drift_with_writer_race" ]; } && [ "$(current_head)" = "compactcommit" ]; then
       calls_file="$state_file.postverify-head-calls"
       calls=0
       if [ -f "$calls_file" ]; then
@@ -852,7 +852,7 @@ case "$query" in
       print_cell ""
       exit 0
     fi
-    if { [ "$mode" = "row_count_and_hash_diverges" ] || [ "$mode" = "same_table_replacement_with_row_gain" ] || [ "$mode" = "mixed_row_count_gain_and_same_count_hash_drift" ] || [ "$mode" = "writer_race_before_flatten" ] || [ "$mode" = "remote_writer_race_before_flatten" ] || [ "$mode" = "writer_race_during_verify" ] || [ "$mode" = "writer_race_with_mixed_same_count_hash_drift" ] || [ "$mode" = "row_count_decreases_with_writer_race" ] || [ "$mode" = "row_count_decreases_with_hash_change" ]; } && [ "$(current_head)" = "compactcommit" ]; then
+    if { [ "$mode" = "row_count_and_hash_diverges" ] || [ "$mode" = "same_table_replacement_with_row_gain" ] || [ "$mode" = "mixed_row_count_gain_and_same_count_hash_drift" ] || [ "$mode" = "writer_race_before_flatten" ] || [ "$mode" = "remote_writer_race_before_flatten" ] || [ "$mode" = "writer_race_during_verify" ] || [ "$mode" = "writer_race_with_mixed_same_count_hash_drift" ] || [ "$mode" = "row_count_decreases_with_writer_race" ] || [ "$mode" = "row_count_decreases_with_hash_change" ] || [ "$mode" = "same_count_hash_drift_with_writer_race" ]; } && [ "$(current_head)" = "compactcommit" ]; then
       print_cell hash-beads-after-writer
       exit 0
     fi
@@ -5656,6 +5656,42 @@ func TestCompactScriptDefersWhenWriterDeletesRows(t *testing.T) {
 	}
 	if strings.Contains(string(data), "DOLT_GC") {
 		t.Fatalf("concurrent-DELETE defer must skip GC this run:\n%s", string(data))
+	}
+}
+
+// A concurrent UPDATE during the flatten window changes a committed table's
+// value hash while leaving its row count unchanged — the net-zero-row-count
+// churn that dominates the busiest db's workload (ephemeral wisp pour/burn and
+// bead/mail row updates). With a HEAD-proven concurrent writer this is benign
+// writer data, not corruption, and must defer-and-retry rather than quarantine.
+// The stable-HEAD control for the same signature is
+// TestCompactScriptQuarantinesSameRowCountWriterBeforeFullGC.
+func TestCompactScriptDefersWhenWriterCommitsCausingSameCountHashDrift(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "same_count_hash_drift_with_writer_race", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("concurrent-UPDATE same-count defer must exit 0 (skip, not failure): %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "same-count table value hash drift is concurrent-writer UPDATE data, not corruption") {
+		t.Fatalf("output missing concurrent-UPDATE same-count defer message:\n%s", out)
+	}
+	if !strings.Contains(out, "deferring, will retry next run") {
+		t.Fatalf("output missing defer confirmation:\n%s", out)
+	}
+	quarantine := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if _, statErr := os.Stat(quarantine); !os.IsNotExist(statErr) {
+		t.Fatalf("concurrent-UPDATE same-count defer must NOT write a quarantine marker; stat=%v", statErr)
+	}
+	pendingGC := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
+	if reason := compactMarkerValue(t, pendingGC, "reason"); reason != "writer race during flatten deferred full GC" {
+		t.Fatalf("concurrent-UPDATE same-count defer should record pending-GC retry marker, got reason %q", reason)
+	}
+	data, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read dolt log: %v", readErr)
+	}
+	if strings.Contains(string(data), "DOLT_GC") {
+		t.Fatalf("concurrent-UPDATE same-count defer must skip GC this run:\n%s", string(data))
 	}
 }
 
