@@ -26,7 +26,19 @@ a:openSourceWorkflowStores	(^|[^A-Za-z0-9_])openSourceWorkflowStores\(
 a:convoyStoreCandidates	(^|[^A-Za-z0-9_])convoyStoreCandidates\(
 # (b) direct binding-gate re-derivation. Asking "is this class relocated" a
 #     second time is how the split-store bug class reproduces (#5125, #5127).
+#
+#     cliSoleClassBinding is the SANCTIONED accessor for the callers that answer
+#     every reserved prefix out of one store, and it is ratcheted for the same
+#     reason storeref.EachLeg is: sanctioned is not free. Each call site is a
+#     surface asserting "this city serves all five infrastructure classes from
+#     one binding, and I am about to act on that" — the condition the accessor
+#     checks and refuses a fan-out for. Two are baselined today (the `gc bd`
+#     by-id front door and the claim-time class route). A third is a reviewed
+#     baseline change, because the review that matters is not whether the
+#     accessor was called correctly but whether that surface should be routing
+#     class-reserved ids at all.
 b:graphClassBinding	(^|[^A-Za-z0-9_])graphClassBinding\(
+b:cliSoleClassBinding	(^|[^A-Za-z0-9_])cliSoleClassBinding\(
 b:routes.storeFor	(^|[^A-Za-z0-9_])routes\.storeFor\(
 b:storeref.ClassCandidates	(^|[^A-Za-z0-9_])storeref\.ClassCandidates\(
 # (c) hand-rolled probe lists and plan disassembly. The executor
@@ -45,9 +57,25 @@ b:storeref.ClassCandidates	(^|[^A-Za-z0-9_])storeref\.ClassCandidates\(
 #     its own order with its own error handling, and pass both halves of the
 #     guard — which is the whole failure this file exists to prevent, wearing
 #     the resolver's name.
+#
+#     storeref.ByID.WorkAxis is the other sanctioned seam, and the same reasoning
+#     applies one level up: a plane that declares a work axis is telling the
+#     resolver "do not use your own rule here, use mine". THE RULE: a plane may
+#     declare at most one work axis, every declaration is named in the baseline,
+#     and the day a SECOND plane declares one the two must land with a
+#     cross-plane router-agreement pin — a shared-fixture test asserting both
+#     routers name the same owner leg sequence for configured-prefix ids, routed
+#     ids and unrouted ids, with any deliberate difference pinned as golden rows
+#     rather than settled in review prose. Today there is exactly one
+#     (internal/api's apiWorkAxis), so nothing stops a second from being written
+#     that diverges silently; this row is what makes writing it a reviewed act.
+#     The router's rows stay in the shrink-only baseline rather than moving to
+#     the script's allowlist: the allowlist filters a file BEFORE counting, and
+#     the router is the one file whose growth is most worth seeing.
 c:beads.Store-literal	\[\]beads\.Store\{
 c:plan-leg-store-access	\.Leg\.Store($|[^A-Za-z0-9_])
 c:storeref.EachLeg	(^|[^A-Za-z0-9_])storeref\.EachLeg\(
+c:WorkAxisRouter	(^|[^A-Za-z0-9_])WorkLegsForID\(
 # (d) bespoke residence probes. The namespace gate is the resolver's, and a site
 #     that re-derives it is one `gc storage migrate` away from ga-axin6.
 d:IDInNamespace	(^|[^A-Za-z0-9_])IDInNamespace\(
