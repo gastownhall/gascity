@@ -39,7 +39,7 @@ in a raw (unencoded) qualified identity:
 These two characters are always positional, never part of a name segment. A
 literal `-` or `_`, by contrast, is an ordinary character a name segment MAY
 contain: gascity's own agent-name validation permits both
-(`internal/config/config.go:27`, enforced at `:4016` — a name must match
+(`internal/config/config.go:27`, enforced at `:4015` — a name must match
 `[a-zA-Z0-9][a-zA-Z0-9_-]*`, so `hello-world` and `builder-1` are valid agent
 names in their own right, not `/`-delimited pairs).
 
@@ -58,11 +58,22 @@ contract.
 | City/agent boundary (imported identity) | `.` | `__` |
 
 The two axes are kept distinct on purpose: `/` and `.` encode to different
-two-character sequences (`--` vs `__`) so that decoding is unambiguous. A
-canonicalizer implementing this rule MUST NOT collapse `--` and `__` to the
-same normal form — doing so can silently merge two distinct minted
-identities into one (for example, treating `hello-world/polecat` and
-`hello_world.polecat` as the same key after canonicalization).
+two-character sequences (`--` vs `__`) so that the two boundaries stay
+separable. A canonicalizer implementing this rule MUST NOT collapse `--` and
+`__` to the same normal form — doing so can silently merge two distinct
+minted identities into one. For example, the encoded names
+`hello-world--polecat` and `hello_world__polecat` both reduce to
+`hello_world_polecat` under a canonicalizer that collapses any run of `.`,
+`_`, or `-` to a single `_`, even though they decode to the structurally
+distinct identities `hello-world/polecat` and `hello_world.polecat`.
+
+**Decoding is best-effort, not lossless.** A name segment may itself contain
+`--` or `__`: `builder--1` is a legal agent name under the §1 regex, so
+`rig/builder--1` encodes to `rig--builder--1` and decodes back to the
+*different* identity `rig/builder/1`. The encode direction is total; the
+decode direction guesses. Do not build an exact round-trip on this table —
+treat an encoded session name as a display and lookup key, and carry the raw
+qualified identity alongside it wherever you need to recover it exactly.
 
 ## 3. Who mints, who compares
 
@@ -108,10 +119,11 @@ against the pinned version when gascity's `go.mod` moves past
 The tables above describe the code; they do not replace it. The
 authoritative implementation is `internal/agent/session_name.go`:
 
-- `sessionNameQualifiedReplacer` (`internal/agent/session_name.go:15-18`) —
+- `sessionNameQualifiedReplacer` (`internal/agent/session_name.go:16-19`) —
   the encode direction (§2, raw → encoded).
-- `sessionNameQualifiedReverseReplacer` (`internal/agent/session_name.go:20-23`) —
-  the decode direction (§2, encoded → raw).
+- `sessionNameQualifiedReverseReplacer` (`internal/agent/session_name.go:21-24`) —
+  the **best-effort** decode direction (§2, encoded → raw); see the
+  decoding caveat in §2.
 
 If this document and `internal/agent/session_name.go` ever disagree, the
 code wins. File a correction against this doc rather than reimplementing

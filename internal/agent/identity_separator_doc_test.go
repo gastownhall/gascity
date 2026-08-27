@@ -36,6 +36,8 @@ func TestIdentitySeparatorContractDocExists(t *testing.T) {
 		"internal/agent/session_name.go",
 		"sessionNameQualifiedReplacer",
 		"sessionNameQualifiedReverseReplacer",
+		"best-effort",
+		"rig--builder--1",
 	}
 	for _, want := range requiredDocSubstrings {
 		if !strings.Contains(doc, want) {
