@@ -19,6 +19,10 @@ package main
 // STORE rather than a row.
 
 import (
+	"errors"
+	"fmt"
+	"strings"
+
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -48,4 +52,74 @@ func classRoutedStoreForID(cityPath, id string, work beads.Store) (beads.Store, 
 		return nil, err
 	}
 	return owner.Store, nil
+}
+
+// cityGraphClassBinding opens a city's graph class binding, nil when the class
+// is not relocated. Sole derivation point: re-asking is the split-store bug.
+func cityGraphClassBinding(cityPath string) beads.Store {
+	if strings.TrimSpace(cityPath) == "" {
+		return nil
+	}
+	store, relocated := graphClassBinding(cliStorageRoutes(cityPath))
+	if !relocated {
+		return nil
+	}
+	return store
+}
+
+// classBindingForID is the class leg of classRoutedStoreForID, for callers whose
+// work answer is a leg list rather than one store. A nil work leg makes the
+// residual answer nil, so ok=false means "no named leg answered".
+func classBindingForID(cityPath, id string) (beads.Store, bool, error) {
+	class := cityGraphClassBinding(cityPath)
+	if class == nil {
+		return nil, false, nil
+	}
+	store, err := classRoutedStoreForIDIn(class, id, nil)
+	if err != nil {
+		return nil, false, err
+	}
+	if store == nil {
+		return nil, false, nil
+	}
+	return class, true, nil
+}
+
+// classRoutedStoreForIDIn is classRoutedStoreForID with the binding already in
+// hand, for the callers that resolve it once per request and hold no cityPath to
+// hand cliByIDOwner: gc graph's per-id resolver (graphStores.storeFor), which
+// also needs the raw binding for convoycore.MemberClasses, and classBindingForID
+// itself. Nil class means no relocation.
+//
+// It applies the resolver's rule directly against the opened binding. The class
+// store leads because it MINTS the reserved namespace, but minting is not
+// holding: a work store may legitimately hold an id inside the class namespace
+// (ReservedPrefixWarnings warns, ValidateRigs does not reject), so the answer is
+// a RESIDENCE PROBE and not an unconditional route on the prefix. A miss falls
+// through to work — the caller's own store, both the residual answer and the
+// last leg — so its own later read produces its own error message.
+//
+// An error is a read that FAILED, never absence: reading "the binding could not
+// answer" as "the bead is not there" is the root-loss shape this lane exists to
+// prevent. The one error that is not a fault is the one-shot funnel's standing
+// refusal (isStandingStorageRefusal) — a verdict about the CITY's storage
+// configuration that says nothing about a bead, and a refused city still serves
+// WORK from its work ledger. So for a work-shaped id the refusal establishes
+// nothing and work answers; for an id inside a reserved namespace the refusal IS
+// the answer and surfaces.
+func classRoutedStoreForIDIn(class beads.Store, id string, work beads.Store) (beads.Store, error) {
+	if class == nil || class == work {
+		return work, nil
+	}
+	if _, err := class.Get(id); err != nil {
+		switch {
+		case errors.Is(err, beads.ErrNotFound):
+			return work, nil
+		case isStandingStorageRefusal(err) && !bdIDIsClassReserved(id):
+			return work, nil
+		default:
+			return nil, fmt.Errorf("reading %q from the relocated class binding: %w", id, err)
+		}
+	}
+	return class, nil
 }

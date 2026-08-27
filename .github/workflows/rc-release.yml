@@ -48,11 +48,26 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Mint release-tagger token
+        # Only the dispatch path creates the tag (the push path arrives with it
+        # already existing). The workflow's default GITHUB_TOKEN is not a bypass
+        # actor on the "Protect release tags" ruleset, so ref creation under
+        # refs/tags/v* is denied (GH013) — this burned the v1.4.1-rc1 dispatch.
+        # The gastownhall-release-tagger app is an Integration bypass actor on
+        # that ruleset; its short-lived token is used solely for the tag push.
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        id: tagger-token
+        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3
+        with:
+          app-id: ${{ secrets.RELEASE_TAGGER_APP_ID }}
+          private-key: ${{ secrets.RELEASE_TAGGER_APP_PRIVATE_KEY }}
+
       - name: Resolve RC tag
         id: rc
         env:
           DISPATCH_TAG: ${{ inputs.tag_name }}
           EVENT_NAME: ${{ github.event_name }}
+          TAGGER_TOKEN: ${{ steps.tagger-token.outputs.token || '' }}
         run: |
           set -euo pipefail
 
@@ -82,10 +97,18 @@ jobs:
               echo "ERROR: push event for $tag did not leave a local tag ref" >&2
               exit 1
             fi
+            if [ -z "${TAGGER_TOKEN}" ]; then
+              echo "ERROR: cannot create $tag — the tag ruleset restricts refs/tags/v* creation and no release-tagger token is available (RELEASE_TAGGER_APP_ID / RELEASE_TAGGER_APP_PRIVATE_KEY secrets missing?). Either configure the gastownhall-release-tagger app (see RELEASING.md) or push the tag manually and re-dispatch." >&2
+              exit 1
+            fi
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
             git tag -a "$tag" -m "Release $tag" "$commit"
-            git push origin "refs/tags/$tag"
+            # actions/checkout persists the default GITHUB_TOKEN as an
+            # http.extraheader that outranks URL-embedded credentials; blank it
+            # for this one push so the app token actually authenticates.
+            git -c "http.https://github.com/.extraheader=" \
+              push "https://x-access-token:${TAGGER_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "refs/tags/$tag"
             echo "Created tag $tag at $commit"
           fi
 

@@ -30,6 +30,12 @@ func cliNudgesStore(store beads.Store, cfg *config.City, cityPath string) beads.
 	return beads.NudgesStore{Store: resolveNudgesStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)}
 }
 
+// cliGraphStore routes a generic CLI one-shot work store to the graph
+// coordination-class store. Graph twin of cliSessionStore.
+func cliGraphStore(store beads.Store, cfg *config.City, cityPath string) beads.GraphStore {
+	return beads.GraphStore{Store: resolveGraphStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)}
+}
+
 // cliMailStore routes a generic CLI one-shot work store to the messaging
 // coordination-class store. It is the messaging twin of cliSessionStore; see
 // cliNudgesStore for why the CLI needs its own seam.

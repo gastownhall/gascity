@@ -859,7 +859,7 @@ func buildDesiredStateWithSessionBeads(
 		if len(scaleCheckPartialTemplates) > 0 {
 			fmt.Fprintf(stderr, "scaleCheck: PARTIAL — scale_check failed for %s, retaining affected sessions\n", strings.Join(sortedBoolMapKeys(scaleCheckPartialTemplates), ",")) //nolint:errcheck
 		}
-		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs)
+		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, store, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs)
 		bp.assignedWorkBeads = poolWorkBeads
 		bp.poolScaleCheckPartialTemplates = poolScaleCheckPartialTemplates
 		bp.providerHealthSnapshot = loadProviderHealthSnapshot(cityPath)
@@ -936,6 +936,22 @@ func buildDesiredStateWithSessionBeads(
 	// Raw gc.routed_to metadata is intentionally NOT treated as direct named
 	// demand here. The controller only uses assignment/readiness state; routed
 	// metadata is consumed by the agent-side gc hook path.
+	//
+	// namedClaimRefs widens the reachability test below the same way the pool
+	// demand tier is widened at :862 and the wake filter already is: a claim
+	// recorded under a relocated "class:*" binding ref matches no rig name, so a
+	// rig-scoped named session that dies holding one is otherwise never resumed
+	// even though the wake side still retains the holder (ga-whzrt, one tier
+	// over). It is a city-level property, so resolve it once — and only when
+	// there is both work to match and a named spec to match it — mirroring the
+	// pool filter's guards so an idle city does no topology work.
+	// assignedWorkRelocatedClaimRefs answers nil on a single-store city (nothing
+	// relocated) and degrades a nil store to nil refs, so this never widens the
+	// rig gate where the base rig-equality test is all that is correct.
+	var namedClaimRefs []string
+	if len(assignedWorkBeads) > 0 && len(namedSpecs) > 0 {
+		namedClaimRefs = assignedWorkRelocatedClaimRefs(cityPath, cfg, store)
+	}
 	for identity, spec := range namedSpecs {
 		for i, wb := range assignedWorkBeads {
 			// in_progress work is always actionable; open work is direct named
@@ -972,7 +988,7 @@ func buildDesiredStateWithSessionBeads(
 			// configured named session's own bare identity, so this bare match
 			// is trustworthy unconditionally — no per-template-shape guard
 			// needed here anymore (ga-p0u752).
-			if !assignedWorkIndexReachableFromAgent(cityPath, cfg, spec.Agent, assignedWorkStoreRefs, i) {
+			if !assignedWorkIndexReachableFromAgentOnClaimRefs(cityPath, cfg, spec.Agent, assignedWorkStoreRefs, i, namedClaimRefs) {
 				continue
 			}
 			fmt.Fprintf(stderr, "namedWorkReady: %s matched by bead %s (assignee=%s status=%s)\n", identity, wb.ID, assignee, wb.Status) //nolint:errcheck

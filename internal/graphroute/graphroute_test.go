@@ -1118,41 +1118,62 @@ func TestApplyGraphControlRouteBinding_ClearsStaleFallbackMetadata(t *testing.T)
 }
 
 // Pinning a molecule's steps to one pool slot is the formula's decision, so
-// routing only honors a continuation group the formula already declared. It
-// must never manufacture one: a blanket group made every pool-routed molecule
-// single-slot, and on multi-agent formulas it pinned steps to a slot whose
-// template could not run them.
+// routing only honors a continuation group the formula already declared,
+// threaded through the binding as the immutable source of truth. It must never
+// manufacture one: a blanket group made every pool-routed molecule single-slot,
+// and on multi-agent formulas it pinned steps to a slot whose template could
+// not run them. The opt-in is read from binding.ContinuationGroup, never from
+// the step's own (mutable, possibly re-decorated) metadata.
 func TestApplyGraphRouteBinding_PoolRouted_ContinuationGroupIsFormulaOptIn(t *testing.T) {
 	tests := []struct {
-		name       string
-		metadata   map[string]string
-		wantGroup  string
-		wantAffini string
+		name         string
+		stepMetadata map[string]string
+		bindingGroup string
+		wantGroup    string
+		wantAffini   string
 	}{
 		{
-			name:     "no declared group leaves the step unpinned",
-			metadata: map[string]string{},
+			name:         "no declared group leaves the step unpinned",
+			stepMetadata: map[string]string{},
 		},
 		{
-			name:       "declared group requires slot affinity",
-			metadata:   map[string]string{"gc.continuation_group": "review-chain"},
-			wantGroup:  "review-chain",
-			wantAffini: "require",
+			name:         "declared group requires slot affinity",
+			bindingGroup: "review-chain",
+			wantGroup:    "review-chain",
+			wantAffini:   "require",
 		},
 		{
 			name: "re-decoration drops affinity when the group is gone",
-			metadata: map[string]string{
+			stepMetadata: map[string]string{
 				"gc.session_affinity": "require",
+			},
+		},
+		{
+			// Reachability proof for the finding [1] concern: the opt-in reads
+			// the immutable binding, never the mutable step metadata. A step that
+			// arrives carrying a stale group its current binding did not declare
+			// is cleared (group + affinity together), so
+			// preassignHookContinuationGroup cannot vacuum later pool claims onto
+			// the stale group.
+			name: "stale group from a prior decoration is cleared, not preserved",
+			stepMetadata: map[string]string{
+				"gc.continuation_group": "pool-workflow",
+				"gc.session_affinity":   "require",
 			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			step := &formula.RecipeStep{Metadata: tt.metadata}
+			metadata := tt.stepMetadata
+			if metadata == nil {
+				metadata = map[string]string{}
+			}
+			step := &formula.RecipeStep{Metadata: metadata}
 			ApplyGraphRouteBinding(step, GraphRouteBinding{
-				QualifiedName: "gascity/polecat",
-				MetadataOnly:  true,
+				QualifiedName:     "gascity/polecat",
+				MetadataOnly:      true,
+				ContinuationGroup: tt.bindingGroup,
 			})
 
 			if got := step.Metadata["gc.continuation_group"]; got != tt.wantGroup {
@@ -1168,6 +1189,61 @@ func TestApplyGraphRouteBinding_PoolRouted_ContinuationGroupIsFormulaOptIn(t *te
 				t.Errorf("Assignee = %q, want empty (pool slots claim at runtime)", step.Assignee)
 			}
 		})
+	}
+}
+
+// TestDecorateGraphWorkflowRecipe_PoolContinuationGroupOptIn locks the opt-in
+// contract end-to-end through DecorateGraphWorkflowRecipe (the clone → resolve →
+// stamp path a real molecule takes), not just at the leaf. A formula-declared
+// group must survive decoration onto the stamped pool step with slot affinity;
+// a pool step the formula did not opt in must end unpinned. Together with the
+// leaf-level "stale group is cleared" case, this closes the finding [1]
+// re-decoration concern: the group that reaches a step is exactly the one its
+// formula declared, sourced immutably through the binding.
+func TestDecorateGraphWorkflowRecipe_PoolContinuationGroupOptIn(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{
+		{Name: "polecat", MaxActiveSessions: intPtr(2)}, // pool → MetadataOnly binding
+		{Name: "control-dispatcher", MaxActiveSessions: intPtr(1)},
+	}}
+	recipe := &formula.Recipe{
+		Name: "wf-optin",
+		Steps: []formula.RecipeStep{
+			{ID: "wf-optin", IsRoot: true, Metadata: map[string]string{
+				beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+				beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+			}},
+			{ID: "wf-optin.pinned", Metadata: map[string]string{
+				beadmeta.RunTargetMetadataKey:         "polecat",
+				beadmeta.ContinuationGroupMetadataKey: "review-chain",
+			}},
+			{ID: "wf-optin.free", Metadata: map[string]string{
+				beadmeta.RunTargetMetadataKey: "polecat",
+			}},
+		},
+	}
+
+	err := DecorateGraphWorkflowRecipe(
+		recipe, nil, "", "city", "test-city", "city:test",
+		"polecat", "", nil, "test-city", cfg, Deps{Resolver: testAgentResolver{}},
+	)
+	if err != nil {
+		t.Fatalf("DecorateGraphWorkflowRecipe: %v", err)
+	}
+
+	pinned := recipe.Steps[1]
+	if got := pinned.Metadata[beadmeta.ContinuationGroupMetadataKey]; got != "review-chain" {
+		t.Errorf("pinned gc.continuation_group = %q, want review-chain (formula opt-in survives decoration)", got)
+	}
+	if got := pinned.Metadata[beadmeta.SessionAffinityMetadataKey]; got != "require" {
+		t.Errorf("pinned gc.session_affinity = %q, want require", got)
+	}
+
+	free := recipe.Steps[2]
+	if got := free.Metadata[beadmeta.ContinuationGroupMetadataKey]; got != "" {
+		t.Errorf("free gc.continuation_group = %q, want empty (formula did not opt in)", got)
+	}
+	if got := free.Metadata[beadmeta.SessionAffinityMetadataKey]; got != "" {
+		t.Errorf("free gc.session_affinity = %q, want empty", got)
 	}
 }
 
