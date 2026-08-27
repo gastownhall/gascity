@@ -118,8 +118,9 @@ func gzipAndArchive(source, dest string, stderr io.Writer) error {
 // sweep continues — a single corrupt orphan must not block recovery
 // of the others.
 //
-// Designer §8.3: on canonical-name collision, the rotating-* file is
-// left in place rather than overwriting the existing archive.
+// Designer §8.3: on canonical-name collision, gzipAndArchive sets the
+// rotating source aside under supersededRotatingPrefix (see its doc)
+// rather than overwriting the existing archive.
 func reapOrphanedRotatingFiles(dir string, stderr io.Writer) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {

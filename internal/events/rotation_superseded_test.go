@@ -51,14 +51,23 @@ func TestSupersededSetAsideIsInvisibleToEveryScanner(t *testing.T) {
 // whose seq window an already-read archive covers holds the same events by
 // construction (seqs are globally unique), so decoding it is pure waste — and
 // the crash window between archive rename and source removal makes such twins
-// routine. The falsifier: the twin's content is garbage that would error if
-// opened, so a pass proves the skip rather than a successful dedupe.
+// routine. The twin holds VALID JSONL for its {1,2} window on purpose: a
+// rotating source is opened as plain text, so garbage content would be skipped
+// line-by-line and yield zero events whether or not the window skip fired,
+// leaving the assertion unable to fail. Decodable twin events make it real — if
+// the reader.go window skip regresses and the twin is opened, its two events
+// come back and len(events)==0 fails, so a pass proves the skip rather than a
+// silent parse miss.
 func TestReadRotationSourcesSkipsRotatingTwinOfListedArchive(t *testing.T) {
 	dir := t.TempDir()
 	active := filepath.Join(dir, "events.jsonl")
 	ts := time.Date(2026, 5, 7, 18, 0, 0, 0, time.UTC)
 	twin := filepath.Join(dir, "events.jsonl.rotating-"+ts.Format("20060102T150405Z")+"-seq-1-2")
-	if err := os.WriteFile(twin, []byte("this is not jsonl and must never be opened"), 0o644); err != nil {
+	// Valid JSONL whose seqs fill the {1,2} window the listed archive covers, so
+	// an un-skipped open would return both events — the genuine falsifier.
+	twinData := `{"seq":1,"type":"bead.created","actor":"a","subject":"s"}` + "\n" +
+		`{"seq":2,"type":"bead.created","actor":"a","subject":"s"}` + "\n"
+	if err := os.WriteFile(twin, []byte(twinData), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
