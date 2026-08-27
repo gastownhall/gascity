@@ -212,6 +212,36 @@ func TestPoolMaxBoundDrainWarning(t *testing.T) {
 	}
 }
 
+func TestPoolMaxBoundDrainWarningIgnoresIncreases(t *testing.T) {
+	t.Parallel()
+	// Bound went UP but active sits above the new bound: not a drain.
+	up := poolMaxBoundChange{Name: "rig-a/executor", Old: reloadPoolIntPtr(2), New: reloadPoolIntPtr(4)}
+	if got := poolMaxBoundDrainWarning(up, 6); got != "" {
+		t.Fatalf("increase with active above new bound: warning = %q, want empty", got)
+	}
+	// Unlimited → finite is still a tightening and must warn.
+	tighten := poolMaxBoundChange{Name: "rig-a/planner", Old: nil, New: reloadPoolIntPtr(2)}
+	if got := poolMaxBoundDrainWarning(tighten, 5); got == "" {
+		t.Fatal("unlimited→finite with active above new bound: want warning")
+	}
+}
+
+func TestAppendPoolMaxBoundFeedbackMixedChanges(t *testing.T) {
+	t.Parallel()
+	changes := []poolMaxBoundChange{
+		{Name: "rig-a/executor", Old: reloadPoolIntPtr(2), New: reloadPoolIntPtr(4)},
+		{Name: "rig-a/planner", Old: reloadPoolIntPtr(4), New: reloadPoolIntPtr(2)},
+	}
+	active := map[string]int{"rig-a/executor": 6, "rig-a/planner": 3}
+	msg, warnings := appendPoolMaxBoundFeedback("Config reloaded", nil, changes, active)
+	if !strings.Contains(msg, "pool rig-a/executor: max_active_sessions 2 → 4") {
+		t.Fatalf("message missing increase line: %q", msg)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "rig-a/planner") {
+		t.Fatalf("warnings = %v, want exactly one planner drain warning", warnings)
+	}
+}
+
 func TestAppendPoolMaxBoundFeedback(t *testing.T) {
 	t.Parallel()
 	base := "Config reloaded: 1 agents, 0 rigs (rev abc)"

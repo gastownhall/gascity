@@ -82,6 +82,12 @@ func poolMaxBoundDrainWarning(c poolMaxBoundChange, active int) string {
 	if c.New == nil || *c.New < 0 {
 		return ""
 	}
+	// Only a genuine tightening drains: unlimited → finite, or a lower finite
+	// bound. An increased bound never awaits attrition even if the current
+	// active count happens to sit above it (stale beads, out-of-band change).
+	if c.Old != nil && *c.Old >= 0 && *c.New >= *c.Old {
+		return ""
+	}
 	if active <= *c.New {
 		return ""
 	}
