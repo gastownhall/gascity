@@ -3180,6 +3180,28 @@ func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qu
 	return boundInfo, nil
 }
 
+// namedTriggerRefIsSameStore reports whether a named session's stamped
+// gc.trigger_bead_store_ref names the city store that bindNamedSessionTriggerBead
+// was handed. Empty is the unstamped same-store default; "city" and
+// "city:<cityName>" are the two same-store spellings normalizeDemandStoreRef
+// already collapses onto the city. Everything else -- "rig:*", class refs,
+// another city's name, anything unrecognized -- is treated as a different
+// store. The match is exact by design: a ref this function cannot confidently
+// place is one whose target it cannot read, and a stale stamp is cheaper than
+// a wrong clear.
+func namedTriggerRefIsSameStore(storeRef, cityName string) bool {
+	storeRef = strings.TrimSpace(storeRef)
+	cityName = strings.TrimSpace(cityName)
+	switch {
+	case storeRef == "", storeRef == "city":
+		return true
+	case cityName != "" && storeRef == "city:"+cityName:
+		return true
+	default:
+		return false
+	}
+}
+
 // bindNamedSessionTriggerBead clears a named session's trigger stamp when its
 // stamped target is no longer workable (absent, closed, or blocked -- the last
 // read off bd's IsBlocked ready-work projection, since production stores fold
@@ -3189,16 +3211,19 @@ func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qu
 // already reflects "no ready work" -- resolvePreservedConfiguredNamedSessionTemplate
 // only replays whatever is currently stamped -- so without this check a
 // parked target re-aims every subsequent seat indefinitely (gascity#4373).
-// A cross-store target (info.TriggerBeadStoreRef naming a store other than
-// `store`) is left untouched: this function can only see `store`, and
-// misjudging a bead it cannot reach is worse than leaving a stale stamp for
-// one more tick.
-func bindNamedSessionTriggerBead(store beads.Store, info session.Info) (session.Info, error) {
+// A target in a *different* store (info.TriggerBeadStoreRef naming a store
+// other than `store`, per namedTriggerRefIsSameStore) is left untouched: this
+// function can only see `store`, and misjudging a bead it cannot reach is
+// worse than leaving a stale stamp for one more tick. The same-store city
+// spellings do reach the status check -- the reported #4373 shape stamps one
+// ("city"/"city:<name>"), so bailing on every non-empty ref would no-op on
+// exactly the case this exists for.
+func bindNamedSessionTriggerBead(store beads.Store, info session.Info, cityName string) (session.Info, error) {
 	triggerID := strings.TrimSpace(info.TriggerBeadID)
 	if triggerID == "" || store == nil {
 		return info, nil
 	}
-	if strings.TrimSpace(info.TriggerBeadStoreRef) != "" {
+	if !namedTriggerRefIsSameStore(info.TriggerBeadStoreRef, cityName) {
 		return info, nil
 	}
 	target, err := store.Get(triggerID)
@@ -3223,9 +3248,14 @@ func bindNamedSessionTriggerBead(store beads.Store, info session.Info) (session.
 	if !stale {
 		return info, nil
 	}
-	// info.TriggerBeadStoreRef is empty here: any non-empty store ref returned
-	// above as a cross-store target, so the store-ref key needs no clear.
+	// A same-store city ref reaches here stamped, so clear the whole cluster
+	// rather than leaving a store-ref key pointing at a trigger id that no
+	// longer exists -- the same keys the pool path clears in
+	// computePoolTriggerBindingPatch.
 	patch := session.MetadataPatch{beadmeta.TriggerBeadIDMetadataKey: ""}
+	if strings.TrimSpace(info.TriggerBeadStoreRef) != "" {
+		patch[beadmeta.TriggerBeadStoreRefMetadataKey] = ""
+	}
 	if strings.TrimSpace(info.BrainParentSID) != "" {
 		patch[beadmeta.BrainParentSIDMetadataKey] = ""
 	}

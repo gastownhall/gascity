@@ -10,8 +10,9 @@ import (
 )
 
 // namedSessionBeadWithTrigger builds a named session bead stamped with a
-// trigger cluster pointing at workBeadID (same-store unless storeRef is
-// non-empty).
+// trigger cluster pointing at workBeadID. A non-empty storeRef is stamped
+// verbatim onto gc.trigger_bead_store_ref; whether that names this store is
+// namedTriggerRefIsSameStore's call, not the fixture's.
 func namedSessionBeadWithTrigger(workBeadID, storeRef string) beads.Bead {
 	metadata := map[string]string{
 		"session_name":                     "s-claude",
@@ -58,7 +59,7 @@ func TestBindNamedSessionTriggerBead_ClearsStampWhenTargetBlocked(t *testing.T) 
 		t.Fatalf("Get: %v", err)
 	}
 
-	bound, err := bindNamedSessionTriggerBead(rec, info)
+	bound, err := bindNamedSessionTriggerBead(rec, info, "test-city")
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
@@ -107,7 +108,7 @@ func TestBindNamedSessionTriggerBead_ClearsStampWhenTargetDependencyBlocked(t *t
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	bound, err := bindNamedSessionTriggerBead(rec, info)
+	bound, err := bindNamedSessionTriggerBead(rec, info, "test-city")
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
@@ -150,7 +151,7 @@ func TestBindNamedSessionTriggerBead_LeavesStampWhenTargetProjectionUnavailable(
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	bound, err := bindNamedSessionTriggerBead(rec, info)
+	bound, err := bindNamedSessionTriggerBead(rec, info, "test-city")
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
@@ -195,7 +196,7 @@ func TestBindNamedSessionTriggerBead_LeavesStampWhenTargetLookupFails(t *testing
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	bound, err := bindNamedSessionTriggerBead(failing, info)
+	bound, err := bindNamedSessionTriggerBead(failing, info, "test-city")
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
@@ -236,7 +237,7 @@ func TestBindNamedSessionTriggerBead_ClearsStampWhenTargetClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	bound, err := bindNamedSessionTriggerBead(rec, info)
+	bound, err := bindNamedSessionTriggerBead(rec, info, "test-city")
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
@@ -259,7 +260,7 @@ func TestBindNamedSessionTriggerBead_ClearsStampWhenTargetAbsent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	bound, err := bindNamedSessionTriggerBead(rec, info)
+	bound, err := bindNamedSessionTriggerBead(rec, info, "test-city")
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
@@ -287,7 +288,7 @@ func TestBindNamedSessionTriggerBead_LeavesStampWhenTargetOpen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	bound, err := bindNamedSessionTriggerBead(rec, info)
+	bound, err := bindNamedSessionTriggerBead(rec, info, "test-city")
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
@@ -302,10 +303,129 @@ func TestBindNamedSessionTriggerBead_LeavesStampWhenTargetOpen(t *testing.T) {
 // TestBindNamedSessionTriggerBead_LeavesCrossStoreTargetUntouched: a trigger
 // stamped against a different store's bead is outside what this store can
 // judge, so the stamp must survive rather than risk a wrong clear based on a
-// same-ID coincidence in the wrong store.
+// same-ID coincidence in the wrong store. Every ref here names a blocked bead
+// that IS present in this store under the stamped id -- if the predicate
+// widened to accept them, the target would read as stale and the stamp would
+// clear, so the zero-Update assertion is what pins the boundary.
 func TestBindNamedSessionTriggerBead_LeavesCrossStoreTargetUntouched(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		storeRef string
+	}{
+		{name: "rig scoped", storeRef: "rig:rig-a"},
+		{name: "bare rig name", storeRef: "rig-a"},
+		{name: "another city", storeRef: "city:other-city"},
+		{name: "class ref", storeRef: "class:worker"},
+		{name: "unrecognized", storeRef: "somewhere-else"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := beads.NewMemStore()
+			blocked := true
+			target, err := mem.Create(beads.Bead{Title: "work", Status: "open", IsBlocked: &blocked})
+			if err != nil {
+				t.Fatalf("create target: %v", err)
+			}
+			sess, err := mem.Create(namedSessionBeadWithTrigger(target.ID, tc.storeRef))
+			if err != nil {
+				t.Fatalf("create session bead: %v", err)
+			}
+			rec := beadstest.NewRecordingStore(mem)
+
+			info, err := sessionFrontDoor(rec).Get(sess.ID)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			bound, err := bindNamedSessionTriggerBead(rec, info, "test-city")
+			if err != nil {
+				t.Fatalf("bind: %v", err)
+			}
+			if bound.TriggerBeadID != target.ID {
+				t.Errorf("TriggerBeadID = %q, want untouched cross-store stamp %q", bound.TriggerBeadID, target.ID)
+			}
+			if bound.TriggerBeadStoreRef != tc.storeRef {
+				t.Errorf("TriggerBeadStoreRef = %q, want untouched %q", bound.TriggerBeadStoreRef, tc.storeRef)
+			}
+			if n := len(rec.CallsForOp("Update")); n != 0 {
+				t.Errorf("Update ops = %d, want 0 (a target in another store is not this store's to judge)", n)
+			}
+		})
+	}
+}
+
+// TestBindNamedSessionTriggerBead_ClearsStampForSameStoreCityRef is the
+// gascity#4373 shape the reporter actually filed: the parked bead's stamp
+// carries a *populated* gc.trigger_bead_store_ref naming this same city store
+// ("city" or "city:<name>", the two spellings normalizeDemandStoreRef collapses
+// onto the city). Bailing on every non-empty ref would no-op on exactly that
+// case. Both keys must clear together -- a store ref left pointing at a trigger
+// id that no longer exists is a dangling half-cluster, and the pool path
+// (computePoolTriggerBindingPatch) clears both.
+func TestBindNamedSessionTriggerBead_ClearsStampForSameStoreCityRef(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		storeRef string
+	}{
+		{name: "bare city", storeRef: "city"},
+		{name: "city scoped by name", storeRef: "city:test-city"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := beads.NewMemStore()
+			blocked := true
+			target, err := mem.Create(beads.Bead{Title: "parked work", Status: "open", IsBlocked: &blocked})
+			if err != nil {
+				t.Fatalf("create target: %v", err)
+			}
+			sess, err := mem.Create(namedSessionBeadWithTrigger(target.ID, tc.storeRef))
+			if err != nil {
+				t.Fatalf("create session bead: %v", err)
+			}
+			rec := beadstest.NewRecordingStore(mem)
+
+			info, err := sessionFrontDoor(rec).Get(sess.ID)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if info.TriggerBeadStoreRef != tc.storeRef {
+				t.Fatalf("fixture TriggerBeadStoreRef = %q, want %q", info.TriggerBeadStoreRef, tc.storeRef)
+			}
+			bound, err := bindNamedSessionTriggerBead(rec, info, "test-city")
+			if err != nil {
+				t.Fatalf("bind: %v", err)
+			}
+			if bound.TriggerBeadID != "" {
+				t.Errorf("TriggerBeadID = %q, want cleared for a parked same-store target", bound.TriggerBeadID)
+			}
+			if bound.TriggerBeadStoreRef != "" {
+				t.Errorf("TriggerBeadStoreRef = %q, want cleared alongside the trigger", bound.TriggerBeadStoreRef)
+			}
+			if bound.BrainParentSID != "" {
+				t.Errorf("BrainParentSID = %q, want cleared alongside the trigger", bound.BrainParentSID)
+			}
+			after, err := mem.Get(sess.ID)
+			if err != nil {
+				t.Fatalf("Get after bind: %v", err)
+			}
+			if v := after.Metadata[beadmeta.TriggerBeadIDMetadataKey]; v != "" {
+				t.Errorf("durable trigger stamp = %q, want cleared", v)
+			}
+			if v := after.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey]; v != "" {
+				t.Errorf("durable trigger store ref = %q, want cleared", v)
+			}
+		})
+	}
+}
+
+// TestBindNamedSessionTriggerBead_LeavesSameStoreCityRefStampWhenTargetOpen is
+// the negative half of the same-store city ref: reaching the status check is
+// not the same as clearing. A workable target keeps both keys and writes
+// nothing.
+func TestBindNamedSessionTriggerBead_LeavesSameStoreCityRefStampWhenTargetOpen(t *testing.T) {
 	mem := beads.NewMemStore()
-	sess, err := mem.Create(namedSessionBeadWithTrigger("wb-A", "rig-a"))
+	target, err := mem.Create(beads.Bead{Title: "work", Status: "open"})
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	sess, err := mem.Create(namedSessionBeadWithTrigger(target.ID, "city:test-city"))
 	if err != nil {
 		t.Fatalf("create session bead: %v", err)
 	}
@@ -315,11 +435,45 @@ func TestBindNamedSessionTriggerBead_LeavesCrossStoreTargetUntouched(t *testing.
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	bound, err := bindNamedSessionTriggerBead(rec, info)
+	bound, err := bindNamedSessionTriggerBead(rec, info, "test-city")
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
-	if bound.TriggerBeadID != "wb-A" {
-		t.Errorf("TriggerBeadID = %q, want untouched cross-store stamp %q", bound.TriggerBeadID, "wb-A")
+	if bound.TriggerBeadID != target.ID {
+		t.Errorf("TriggerBeadID = %q, want unchanged %q for a still-open target", bound.TriggerBeadID, target.ID)
+	}
+	if bound.TriggerBeadStoreRef != "city:test-city" {
+		t.Errorf("TriggerBeadStoreRef = %q, want unchanged %q", bound.TriggerBeadStoreRef, "city:test-city")
+	}
+	if n := len(rec.CallsForOp("Update")); n != 0 {
+		t.Errorf("Update ops = %d, want 0 (nothing stale to clear)", n)
+	}
+}
+
+// TestNamedTriggerRefIsSameStore pins the predicate directly, including the
+// empty-cityName guard: with no city name to compare against, "city:" is an
+// unrecognized ref, not a same-store match on the empty suffix.
+func TestNamedTriggerRefIsSameStore(t *testing.T) {
+	for _, tc := range []struct {
+		storeRef string
+		cityName string
+		want     bool
+	}{
+		{storeRef: "", cityName: "test-city", want: true},
+		{storeRef: "  ", cityName: "test-city", want: true},
+		{storeRef: "city", cityName: "test-city", want: true},
+		{storeRef: "city:test-city", cityName: "test-city", want: true},
+		{storeRef: "city", cityName: "", want: true},
+		{storeRef: "city:", cityName: "", want: false},
+		{storeRef: "city:test-city", cityName: "other-city", want: false},
+		{storeRef: "city:other-city", cityName: "test-city", want: false},
+		{storeRef: "rig:rig-a", cityName: "test-city", want: false},
+		{storeRef: "rig-a", cityName: "test-city", want: false},
+		{storeRef: "class:worker", cityName: "test-city", want: false},
+		{storeRef: "somewhere-else", cityName: "test-city", want: false},
+	} {
+		if got := namedTriggerRefIsSameStore(tc.storeRef, tc.cityName); got != tc.want {
+			t.Errorf("namedTriggerRefIsSameStore(%q, %q) = %v, want %v", tc.storeRef, tc.cityName, got, tc.want)
+		}
 	}
 }
