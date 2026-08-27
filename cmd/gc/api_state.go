@@ -48,6 +48,11 @@ import (
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
+// cacheReconcileActor is the event actor the controller stamps on bead events
+// emitted by a CachingStore's reconciliation pass, distinguishing the cache's
+// own snapshots from foreign writes delivered by a bd hook.
+const cacheReconcileActor = "cache-reconcile"
+
 // controllerState implements api.State, api.StateMutator, and
 // api.ConfigWriteSerializer.
 // Protected by an RWMutex for hot-reload: readers take RLock,
@@ -287,7 +292,7 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 		if recorder != nil {
 			recorder.Record(events.Event{
 				Type:             eventType,
-				Actor:            "cache-reconcile",
+				Actor:            cacheReconcileActor,
 				Subject:          beadID,
 				RunID:            runID,
 				SessionID:        sessionID,
@@ -753,12 +758,23 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 	}
 	cs.mu.RUnlock()
 
+	// A cache-reconcile event carries a CachingStore's own post-absorb snapshot,
+	// dependencies included, rather than a bd hook patch. Saying so keeps the
+	// cache from reading its own emission as a coverage-unknown payload and
+	// discarding the dependency and is_blocked state it just installed, which
+	// fences the row out of the next reconcile pass and re-emits forever
+	// (ga-yoix1).
+	snapshot := evt.Actor == cacheReconcileActor
 	for _, store := range stores {
 		if cached, ok := store.(*beads.CachingStore); ok {
-			cached.ApplyEvent(evt.Type, evt.Payload)
+			if snapshot {
+				cached.ApplyEventSnapshot(evt.Type, evt.Payload)
+			} else {
+				cached.ApplyEvent(evt.Type, evt.Payload)
+			}
 		}
 	}
-	if evt.Actor != "cache-reconcile" {
+	if !snapshot {
 		cs.Poke()
 	}
 	if evt.Type == events.BeadClosed && evt.Subject != "" && len(stores) > 0 {
