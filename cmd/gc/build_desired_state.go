@@ -4977,13 +4977,22 @@ func evaluateReadyContinuationClaimCandidate(
 	if err != nil {
 		return ContinuationClaimCandidate{}, continuationCandidateHold
 	}
+	// The root proves the molecule is a live graph-v2 run in this exact store.
+	// It deliberately does NOT gate on the root's gc.session_name: that key is a
+	// dashboard back-fill stamped by stampRunRootFromStep from whichever step
+	// most recently went in_progress (#2843), so on a multi-agent molecule it
+	// names one participating template and contradicts every other one. Gating
+	// here on it silently excluded every cross-template successor of formulas
+	// like mol-adopt-pr-v2 (apply-fixes on a worker slot, quality-scorecard on a
+	// reviewer slot) from ever being nudged. The binding that actually authorizes
+	// delivery is the step's own assignee resolving to exactly one live session
+	// (newPoolContinuationCandidateSnapshot).
 	if root.ID != rootID ||
 		!strings.EqualFold(strings.TrimSpace(root.Status), "in_progress") ||
 		!strings.EqualFold(strings.TrimSpace(root.Type), "task") ||
 		strings.TrimSpace(root.Metadata[beadmeta.RootStoreRefMetadataKey]) != canonicalStoreRef ||
 		strings.TrimSpace(root.Metadata[beadmeta.FormulaContractMetadataKey]) != "graph.v2" ||
-		strings.TrimSpace(root.Metadata[beadmeta.KindMetadataKey]) != "workflow" ||
-		strings.TrimSpace(root.Metadata[beadmeta.SessionNameMetadataKey]) != strings.TrimSpace(bead.Assignee) {
+		strings.TrimSpace(root.Metadata[beadmeta.KindMetadataKey]) != "workflow" {
 		return ContinuationClaimCandidate{}, continuationCandidateAbsent
 	}
 	return ContinuationClaimCandidate{
