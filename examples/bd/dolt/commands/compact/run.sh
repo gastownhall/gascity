@@ -1508,7 +1508,7 @@ write_compact_marker() {
       if mail_compact_quarantine_alert "$db" "compact-quarantine" "$marker_path" "$reason" "$created_at"; then
         record_marker_notify_state "$quarantine_dir" "$db" "$reason" 1
       else
-        record_marker_notify_state "$quarantine_dir" "$db" "$reason" 0
+        record_marker_notify_state "$quarantine_dir" "$db" "$reason" 0 "$quarantine_notify_error"
       fi
     else
       record_marker_notify_state "$quarantine_dir" "$db" "$reason" 0
