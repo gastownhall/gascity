@@ -652,6 +652,128 @@ func TestBdByIDRefusesAnUnservedVerbOnAClassOwnedBead(t *testing.T) {
 	}
 }
 
+// TestBdByIDRefusesAnUnservedMultiSubjectDepWhenALaterSubjectIsResident closes
+// the multi-subject gap in the fail-closed floor. `dep add`/`dep remove` address
+// MORE THAN ONE bead, so ownership must be decided by the residence of EVERY
+// addressed id, not just the first one typed.
+//
+// `dep add` is unserved by this surface (parseBdByIDOp serves only dep list/dep
+// tree), so it takes the refuse-or-fall-through path. That path used to probe
+// only the first reserved id plus whatever bdMutationWriteIDs could reduce to
+// subjects — and that scanner covers update|close|reopen|delete|heartbeat, never
+// dep add/remove. So `dep add <reserved-miss> <class-resident>` probed only the
+// clean miss, fell through, and ran against the work store that cannot hold the
+// resident second id: protection depended on the order the subjects were typed.
+//
+// Every addressed reserved id is a candidate now, so the resident is found in
+// either order. The both-missing case still falls through — neither id is a
+// class resident, so bd is their truth — which is the control that keeps this
+// from collapsing back into a blanket prefix refusal.
+func TestBdByIDRefusesAnUnservedMultiSubjectDepWhenALaterSubjectIsResident(t *testing.T) {
+	cityPath, classStore := foreignProviderCity(t)
+	resident := mustCreateClassBead(t, classStore, beads.Bead{Title: "a real class resident", Type: "task"})
+	missing := reservedClassID(t, "notthere")
+
+	// Both orders must refuse: the resident is addressed in each, and which id an
+	// operator typed first cannot decide whether their edge reaches the wrong
+	// store. The `<reserved-miss> <resident>` order is the one that fell through
+	// before this change; `<resident> <reserved-miss>` is the control it must not
+	// regress.
+	for _, args := range [][]string{
+		{"dep", "add", missing, resident.ID},
+		{"dep", "add", resident.ID, missing},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code, handled := maybeRouteBdByID(cityPath, "", args, &stdout, &stderr)
+			if !handled {
+				t.Fatalf("%v fell through to the bd subprocess though %s is a class resident", args, resident.ID)
+			}
+			if code == 0 {
+				t.Errorf("%v exited 0 instead of refusing", args)
+			}
+			if !strings.Contains(stderr.String(), resident.ID) {
+				t.Errorf("the refusal does not name the resident bead %s: %q", resident.ID, stderr.String())
+			}
+			if deps, err := classStore.DepList(resident.ID, "down"); err != nil {
+				t.Fatalf("re-reading the resident's dependencies: %v", err)
+			} else if len(deps) != 0 {
+				t.Errorf("the refused dep add reached the class binding anyway: %+v", deps)
+			}
+		})
+	}
+
+	// The control: an edge between two reserved ids the binding holds NEITHER of
+	// is ordinary work-store business and must still fall through. A dep whose
+	// subjects are both clean misses names no class resident, so refusing it would
+	// restore the blanket prefix rule this change removed.
+	t.Run("both subjects miss the binding", func(t *testing.T) {
+		otherMissing := reservedClassID(t, "alsonotthere")
+		var stdout, stderr bytes.Buffer
+		if code, handled := maybeRouteBdByID(cityPath, "", []string{"dep", "add", missing, otherMissing}, &stdout, &stderr); handled {
+			t.Fatalf("dep add between two reserved misses was refused (exit %d): %s%s", code, stdout.String(), stderr.String())
+		}
+	})
+}
+
+// TestBdByIDRefusesAnUnservedCommaListValueWhenALaterIDIsResident closes the
+// same multi-subject gap ONE LAYER DOWN, inside a single flag value.
+//
+// bd accepts comma lists for its id-valued flags (`--deps=A,B`,
+// `--blocked-by=…`, `--depends-on=…`), so a single token can address more than
+// one bead. The probe that decides class ownership therefore has to judge EVERY
+// reserved id in the comma list, not just the first one — otherwise
+// `create --deps=<reserved-miss>,<class-resident>` probes only the clean miss,
+// falls through on it, and runs against the work store that cannot hold the
+// resident second id. That is the exact fall-through-on-first-miss the
+// separate-token order fix (above) closes, reproduced within one value.
+//
+// Both comma orders must refuse: the resident is addressed in each, and which id
+// an operator typed first inside the list cannot decide whether their edge
+// reaches the wrong store. The `<reserved-miss>,<resident>` order is the one that
+// fell through before this change; `<resident>,<reserved-miss>` is the control it
+// must not regress. The both-missing case still falls through — neither id is a
+// class resident, so bd is their truth — which keeps this from collapsing back
+// into a blanket prefix refusal.
+func TestBdByIDRefusesAnUnservedCommaListValueWhenALaterIDIsResident(t *testing.T) {
+	cityPath, classStore := foreignProviderCity(t)
+	resident := mustCreateClassBead(t, classStore, beads.Bead{Title: "a real class resident", Type: "task"})
+	missing := reservedClassID(t, "notthere")
+
+	// `create` is unserved by this surface and carries no required positional id,
+	// so the only ids it addresses are the ones inside the `--deps` comma list —
+	// which isolates the token-internal probe.
+	for _, args := range [][]string{
+		{"create", "--deps=" + missing + "," + resident.ID},
+		{"create", "--deps=" + resident.ID + "," + missing},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code, handled := maybeRouteBdByID(cityPath, "", args, &stdout, &stderr)
+			if !handled {
+				t.Fatalf("%v fell through to the bd subprocess though %s is a class resident in the comma-list value", args, resident.ID)
+			}
+			if code == 0 {
+				t.Errorf("%v exited 0 instead of refusing", args)
+			}
+			if !strings.Contains(stderr.String(), resident.ID) {
+				t.Errorf("the refusal does not name the resident bead %s: %q", resident.ID, stderr.String())
+			}
+		})
+	}
+
+	// The control: a comma list whose ids the binding holds NEITHER of is
+	// ordinary work-store business and must still fall through. Refusing it would
+	// restore the blanket prefix rule this lane removed.
+	t.Run("both comma-list ids miss the binding", func(t *testing.T) {
+		otherMissing := reservedClassID(t, "alsonotthere")
+		var stdout, stderr bytes.Buffer
+		if code, handled := maybeRouteBdByID(cityPath, "", []string{"create", "--deps=" + missing + "," + otherMissing}, &stdout, &stderr); handled {
+			t.Fatalf("create with a comma list of two reserved misses was refused (exit %d): %s%s", code, stdout.String(), stderr.String())
+		}
+	})
+}
+
 // TestBdByIDUnservedVerbReservedMissFallsThrough is the unserved half of the
 // same rule, and it is the arm that decides whether an operator can reach their
 // OWN bead at all.

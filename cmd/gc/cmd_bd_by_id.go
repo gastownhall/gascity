@@ -87,7 +87,7 @@ package main
 // literal spelling parseBdByIDOp does not recognize, and it is no longer
 // rewritten to a metadata update the way it once was. On a city that relocates
 // the owning class a heartbeat of a bead the binding HOLDS is not a
-// fall-through: the ownership gate below (bdArgsNameClassOwnedBead) puts the id
+// fall-through: the ownership gate below (bdArgsAddressedClassIDs) puts the id
 // to the residence walk, and a hit is refused by refuseClassOwnedTarget, which
 // names the routing cause rather than letting the work store answer with bd's
 // not-found. A miss falls through with every other binding miss, so a rig whose
@@ -117,8 +117,8 @@ package main
 // is refused instead, before the subprocess.
 //
 // Ownership is one question with one answer: RESIDENCE. A reserved prefix is
-// what decides which id gets ASKED — bdArgsNameClassOwnedBead reads it from the
-// argv, so a reserved id is put to the binding even in an invocation the
+// what decides which ids get ASKED — bdArgsAddressedClassIDs reads them from the
+// argv, so every reserved id is put to the binding even in an invocation the
 // mutation scanner cannot reduce to subjects — and residence is what decides
 // the answer. Reading the prefix as the answer instead was the defect this
 // door carried: the binding is its namespaces' authority, not their only lawful
@@ -137,7 +137,7 @@ package main
 // "can this be served" said no to `show --long`, `show --id`, `dep list -t` and
 // the rest of bd's own manifest — and while a rejection meant fall-through,
 // those were precisely the invocations sent to the ledger that cannot answer.
-// Which id to ask about is now decided by bdArgsNameClassOwnedBead, which reads
+// Which ids to ask about is now decided by bdArgsAddressedClassIDs, which reads
 // only the argv and knows nothing about what this surface implements.
 //
 // The id asked about is read from an ID POSITION and never from an id-shaped
@@ -880,9 +880,9 @@ func bdIDIsClassReserved(id string) bool {
 // refuseRigScopedClassOwnedTarget.
 func maybeRouteBdByID(cityPath, rigName string, bdArgs []string, stdout, stderr io.Writer) (int, bool) {
 	op, served := parseBdByIDOp(bdArgs)
-	named, namesClassBead := bdArgsNameClassOwnedBead(bdArgs)
+	classIDs := bdArgsAddressedClassIDs(bdArgs)
 	mutationIDs := bdByIDMutationSubjects(bdArgs)
-	if !served && !namesClassBead && len(mutationIDs) == 0 {
+	if !served && len(classIDs) == 0 && len(mutationIDs) == 0 {
 		// Nothing here can concern a class-owned bead, so the binding is not
 		// opened and the funnel is not entered.
 		//
@@ -902,7 +902,7 @@ func maybeRouteBdByID(cityPath, rigName string, bdArgs []string, stdout, stderr 
 		return 0, false
 	}
 	if !served {
-		return refuseUnservedClassMutation(door, bdArgs, named, namesClassBead, mutationIDs, stderr)
+		return refuseUnservedClassMutation(door, bdArgs, classIDs, mutationIDs, stderr)
 	}
 	return serveBdByIDResolved(door, op, bdArgs, rigName, cityPath, stdout, stderr)
 }
@@ -913,27 +913,27 @@ func maybeRouteBdByID(cityPath, rigName string, bdArgs []string, stdout, stderr 
 // their truth and the caller's passthrough answers byte-identically, including
 // doBd's own exact-ID collision guard, which this arm must not displace.
 //
-// "Probed" is narrower than "addressed", and the gap is named rather than
-// implied. The candidates are the first reserved id in the argv plus whatever
-// bdMutationWriteIDs could reduce to subjects, and that scanner covers only
-// update/close/reopen/delete/heartbeat — so a `dep add`/`dep remove` whose
-// SECOND subject is resident falls through on the first id's clean miss, and
-// the protection depends on the order the subjects were typed. The
-// all-work-prefix spelling of that argv never opened this door at all, which is
-// where the gap comes from; ga-zvetw tracks closing both ends of it.
+// The candidates are EVERY reserved-prefix id the argv addresses
+// (bdArgsAddressedClassIDs) plus whatever bdMutationWriteIDs could reduce to
+// subjects. Probing every addressed id, not just the first, is what makes a
+// multi-subject `dep add`/`dep remove` order-independent: an argv whose first
+// reserved id is a clean miss and whose LATER id is class-resident is refused on
+// the later id rather than falling through on the first miss. The one spelling
+// still outside this net is the all-work-prefix argv, which carries no reserved
+// id and is no write-mutation verb, so it never opens this door to be probed at
+// all; ga-zvetw tracks that remaining end.
 //
 // Ownership is decided by RESIDENCE for every subject, including one carrying a
-// reserved prefix. The prefix decides which id is asked about first — an argv
-// naming a reserved id is asking about that id whether or not the mutation
-// scanner could reduce the rest to subjects — but it does not decide the
-// answer. The binding is the namespace's authority, not its only lawful holder,
-// so refusing on the prefix alone strands every write to a rig configured with
-// a prefix inside the namespace.
-func refuseUnservedClassMutation(door bdByIDClassDoor, bdArgs []string, named string, namesClassBead bool, mutationIDs []string, stderr io.Writer) (int, bool) {
-	candidates := mutationIDs
-	if namesClassBead {
-		candidates = append([]string{named}, mutationIDs...)
-	}
+// reserved prefix. The prefix decides which ids are asked about — an argv naming
+// a reserved id is asking about that id whether or not the mutation scanner
+// could reduce the rest to subjects — but it does not decide the answer. The
+// binding is the namespace's authority, not its only lawful holder, so refusing
+// on the prefix alone strands every write to a rig configured with a prefix
+// inside the namespace.
+func refuseUnservedClassMutation(door bdByIDClassDoor, bdArgs, classIDs, mutationIDs []string, stderr io.Writer) (int, bool) {
+	candidates := make([]string, 0, len(classIDs)+len(mutationIDs))
+	candidates = append(candidates, classIDs...)
+	candidates = append(candidates, mutationIDs...)
 	resident, err := door.firstResident(candidates)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1141,9 +1141,11 @@ func bdByIDRefusedVerb(bdArgs []string) string {
 	return strings.Join(words, " ")
 }
 
-// bdArgsNameClassOwnedBead reports the first reserved-prefix id an invocation
-// ADDRESSES, for any bd subcommand, and is what keeps an unserved spelling from
-// reaching the work ledger.
+// bdArgsAddressedClassIDs returns EVERY reserved-prefix id an invocation
+// ADDRESSES, in argv order, for any bd subcommand, and is what keeps an unserved
+// spelling from reaching the work ledger. Returning all addressed ids — not just
+// the first — is what makes a multi-subject verb's protection independent of the
+// order the subjects were typed (see refuseUnservedClassMutation).
 //
 // It exists because the served parsers are deliberately strict: they reject
 // every flag they do not implement, and a rejection used to mean the command
@@ -1184,7 +1186,7 @@ func bdByIDRefusedVerb(bdArgs []string) string {
 // token is treated as addressed. That is the same choice bdRelocatedClassVerb
 // makes and it is bounded the same way, because only a token that actually
 // carries a reserved class prefix can refuse anything.
-func bdArgsNameClassOwnedBead(bdArgs []string) (string, bool) {
+func bdArgsAddressedClassIDs(bdArgs []string) []string {
 	sub, args, resolved := bdByIDSubcommand(bdArgs)
 	valueFlags := bdflags.GlobalValueFlags()
 	boolFlags := bdflags.GlobalBoolFlags()
@@ -1201,53 +1203,68 @@ func bdArgsNameClassOwnedBead(bdArgs []string) (string, bool) {
 	undecidable := !resolved
 	positionalOnly := false
 
+	var ids []string
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
 		case positionalOnly:
+			ids = append(ids, bdReservedClassIDs(arg)...)
 		case arg == "--":
 			positionalOnly = true
-			continue
 		case strings.HasPrefix(arg, "-") && arg != "-":
-			name, inline, hasInline := strings.Cut(arg, "=")
-			if hasInline {
-				if bdIDValuedFlags[name] || (undecidable && !boolFlags[name]) {
-					if id, named := bdFirstReservedClassID(inline); named {
-						return id, true
-					}
-				}
-				continue
-			}
-			if boolFlags[name] {
-				continue
-			}
-			if !valueFlags[name] {
-				// Unknown flag: it may or may not consume the next token, so
-				// from here nothing is skipped.
-				undecidable = true
-				continue
-			}
-			if i+1 >= len(args) {
-				continue
-			}
-			i++
-			if bdIDValuedFlags[name] {
-				if id, named := bdFirstReservedClassID(args[i]); named {
-					return id, true
-				}
-			} else if undecidable {
-				// The flag is known to consume this token, so it is a value —
-				// but an earlier unknown flag may already have shifted the
-				// alignment, so judge it rather than trust the offset.
-				if id, named := bdFirstReservedClassID(args[i]); named {
-					return id, true
-				}
-			}
-			continue
+			var flagIDs []string
+			flagIDs, i, undecidable = bdArgsFlagAddressedIDs(args, i, undecidable, valueFlags, boolFlags)
+			ids = append(ids, flagIDs...)
+		default:
+			ids = append(ids, bdReservedClassIDs(arg)...)
 		}
-		if id, named := bdFirstReservedClassID(arg); named {
-			return id, true
+	}
+	return ids
+}
+
+// bdArgsFlagAddressedIDs judges a single flag token args[i] — already known to
+// start with "-" and not be a bare "-" — for the reserved-prefix class ids its
+// value addresses. It returns those ids, the index to resume the argv scan from
+// (advanced past a value token the flag consumed), and whether argv alignment is
+// now undecidable.
+//
+// A bd flag either inlines its value (`--deps=a,b`), consumes the next token
+// (`--deps a,b`), or takes none (a bool). An unknown flag might do any of these,
+// so once one is seen every following offset is undecidable and no later token is
+// skipped; the caller threads that state in and back out.
+func bdArgsFlagAddressedIDs(args []string, i int, undecidable bool, valueFlags, boolFlags map[string]bool) ([]string, int, bool) {
+	name, inline, hasInline := strings.Cut(args[i], "=")
+	var ids []string
+	switch {
+	case hasInline:
+		if bdIDValuedFlags[name] || (undecidable && !boolFlags[name]) {
+			ids = bdReservedClassIDs(inline)
 		}
+	case boolFlags[name]:
+		// A bool flag takes no value; there is nothing to judge.
+	case !valueFlags[name]:
+		// Unknown flag: it may or may not consume the next token, so from here
+		// nothing is skipped.
+		undecidable = true
+	case i+1 < len(args):
+		// A value flag consumes the next token. Judge it when the flag names a
+		// bead, or when an earlier unknown flag may already have shifted the
+		// alignment so the offset cannot be trusted.
+		i++
+		if bdIDValuedFlags[name] || undecidable {
+			ids = bdReservedClassIDs(args[i])
+		}
+	}
+	return ids, i, undecidable
+}
+
+// bdArgsNameClassOwnedBead reports the FIRST reserved-prefix id an invocation
+// addresses, and whether it addresses one at all. It is the singular projection
+// of bdArgsAddressedClassIDs, kept for callers that only need the leading id or
+// the boolean — the dep-tree ownership conformance test reads the boolean alone.
+func bdArgsNameClassOwnedBead(bdArgs []string) (string, bool) {
+	if ids := bdArgsAddressedClassIDs(bdArgs); len(ids) > 0 {
+		return ids[0], true
 	}
 	return "", false
 }
@@ -1304,17 +1321,21 @@ var bdIDValuedFlags = map[string]bool{
 	"--for": true, "--attach": true,
 }
 
-// bdFirstReservedClassID returns the first reserved-prefix id in a token,
-// splitting the comma lists bd accepts for `--deps` and friends so an id in a
-// later position is not missed.
-func bdFirstReservedClassID(token string) (string, bool) {
+// bdReservedClassIDs returns EVERY reserved-prefix id in a token, splitting the
+// comma lists bd accepts for `--deps`/`--blocked-by`/`--depends-on` and friends.
+// A single value can address more than one bead, and each reserved id is a
+// distinct class-ownership question, so returning only the first would let a
+// later class-resident id fall through on an earlier clean miss — the exact
+// order dependence the by-id door exists to remove, reproduced inside one token.
+func bdReservedClassIDs(token string) []string {
+	var ids []string
 	for _, part := range strings.Split(token, ",") {
 		part = strings.TrimSpace(part)
 		if bdIDIsClassReserved(part) {
-			return part, true
+			ids = append(ids, part)
 		}
 	}
-	return "", false
+	return ids
 }
 
 // bdByIDClaimActor returns the identity a routed claim acquires the bead for.
