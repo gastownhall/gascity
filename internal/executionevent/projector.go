@@ -501,6 +501,14 @@ type CompletedFactIndex struct {
 	// completedFactIndexGrowthCap forces a rebuild; see that const for why the
 	// bound is relative and not absolute.
 	baseline int
+	// maxSeq is the journal high-water of the last successful load. Journal
+	// seqs are monotonic and a fact once read cannot change, so every re-read
+	// resumes at this floor instead of byte 0 — the full-history form of the
+	// re-read (every archive gunzipped plus the whole active journal, per
+	// retry, per city) was the primary supervisor I/O burn (ga-ftgyl). It
+	// survives Invalidate and warm errors by design: only what was READ is
+	// behind it, so resuming from it can never skip an unseen fact.
+	maxSeq uint64
 }
 
 // Absorb records a completion fact the journal named, so the next pass does not
@@ -518,14 +526,18 @@ func (idx *CompletedFactIndex) Absorb(event events.Event) {
 	idx.facts[completedFactKeyFor(event)] = struct{}{}
 }
 
-// Invalidate drops the set so the next pass rebuilds it from the journal. Call
-// it when the event feed can no longer promise to name every fact.
+// Invalidate marks the set stale so the next pass re-derives from the journal
+// what other writers recorded meanwhile. Call it when the event feed can no
+// longer promise to name every fact.
+//
+// It keeps the facts and the high-water: everything below maxSeq was READ from
+// the journal and cannot change (seqs are monotonic, facts are appends), so the
+// re-derivation only needs the tail. Dropping the set here is what made every
+// sweep start a full-history read (ga-ftgyl).
 func (idx *CompletedFactIndex) Invalidate() {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
-	idx.facts = nil
 	idx.loaded = false
-	idx.baseline = 0
 }
 
 // ReconcileRoots repairs completion facts for the named roots, reusing this
@@ -578,6 +590,10 @@ func (idx *CompletedFactIndex) warm(recorder events.Provider) bool {
 	}
 	idx.mu.Unlock()
 
+	idx.mu.Lock()
+	afterSeq := idx.maxSeq
+	idx.mu.Unlock()
+
 	// Read outside the lock: this is the expensive call, and holding the lock
 	// across it would block the journal feed for the length of a full archive
 	// walk. A fact appended during the read can therefore miss both this read and
@@ -585,20 +601,31 @@ func (idx *CompletedFactIndex) warm(recorder events.Provider) bool {
 	// That window is the pre-index behavior exactly — every pass read the journal
 	// and then decided — so it is not new, and the emitted fact is a correct
 	// restatement of a real close rather than a wrong one.
-	existing, err := completedFacts(recorder, events.Filter{Type: events.ExecutionStepCompleted})
+	//
+	// The read resumes at the high-water: a cold index reads everything once, a
+	// warm or invalidated one reads only the tail, and the merge below is what
+	// keeps the earlier reads' facts. AfterSeq also lets the reader skip whole
+	// archives by their seq window instead of gunzipping them.
+	existing, err := completedFacts(recorder, events.Filter{Type: events.ExecutionStepCompleted, AfterSeq: afterSeq})
 	if err != nil {
 		return false
 	}
-	facts := make(map[completedFactKey]struct{}, len(existing))
-	for _, event := range existing {
-		if event.Type == events.ExecutionStepCompleted {
-			facts[completedFactKeyFor(event)] = struct{}{}
-		}
-	}
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
-	idx.facts = facts
-	idx.baseline = len(facts)
+	if idx.facts == nil {
+		idx.facts = make(map[completedFactKey]struct{}, len(existing))
+	}
+	maxSeq := idx.maxSeq
+	for _, event := range existing {
+		if event.Type == events.ExecutionStepCompleted {
+			idx.facts[completedFactKeyFor(event)] = struct{}{}
+		}
+		if event.Seq > maxSeq {
+			maxSeq = event.Seq
+		}
+	}
+	idx.maxSeq = maxSeq
+	idx.baseline = len(idx.facts)
 	idx.loaded = true
 	return true
 }
@@ -658,6 +685,12 @@ type CompletionBackstopResult struct {
 	// it has to be REPORTED: a convergence lane that quietly converges nothing
 	// is indistinguishable from one with nothing to do.
 	ListErrors []error
+	// WarmFailed reports that the chunk could not load its idempotency record
+	// and therefore visited nothing. It is otherwise indistinguishable from a
+	// budget-bounded chunk, and the two need different follow-ups: a budget
+	// chunk is re-polled immediately, a warm failure must be backed off or the
+	// caller re-issues the journal read every poll interval forever (ga-ftgyl).
+	WarmFailed bool
 }
 
 // Pass visits at most ChunkSize roots, resuming from the last Pass's cursor.
@@ -674,6 +707,7 @@ func (b *CompletionBackstop) Pass(recorder events.Provider, graphStores []beads.
 		b.index.Invalidate()
 	}
 	if !b.index.warm(recorder) {
+		result.WarmFailed = true
 		return result
 	}
 	for b.storeIndex < len(graphStores) {

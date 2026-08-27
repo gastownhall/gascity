@@ -60,6 +60,13 @@ const (
 	// one long one. The next pass resumes from the cursor rather than the start.
 	completionsBackstopChunk = 64
 
+	// completionsWarmFailureBackoff paces retries after a chunk that could not
+	// warm its idempotency record. The chunk cadence exists to keep a HEALTHY
+	// sweep moving; re-polling an unreadable journal at that cadence re-issues
+	// the journal read every poll interval for as long as the journal stays
+	// broken (ga-ftgyl). The debt is kept — only the retry is paced.
+	completionsWarmFailureBackoff = 5 * time.Minute
+
 	// completionsBackstopChunkInterval paces the chunks of one sweep. A sweep of
 	// a corpus larger than a chunk therefore takes several minutes of wall clock
 	// and no tick time at all, which is the trade this lane exists to make.
@@ -81,6 +88,10 @@ type completionsLane struct {
 	sweepRan        bool
 	lastSweepAt     time.Time
 	lastSweepReason string
+	// nextAttemptAt gates sweepDue after a warm failure. Zero means no backoff
+	// is in force. It never clears the forced latch or the cadence: the sweep
+	// stays owed, only the retry is paced.
+	nextAttemptAt time.Time
 
 	// Per-sweep accumulators. A sweep spans several chunks, so its summary line
 	// has to be assembled across them or it reports one chunk and calls it a
@@ -188,6 +199,9 @@ func (l *completionsLane) takePending() []string {
 func (l *completionsLane) sweepDue(now time.Time) (string, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if now.Before(l.nextAttemptAt) {
+		return "", false
+	}
 	switch {
 	case l.forced:
 		return backstopReasonCursorGap, true
@@ -198,6 +212,16 @@ func (l *completionsLane) sweepDue(now time.Time) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// noteSweepFailure paces the lane after a chunk that could not warm its
+// idempotency record. Nothing about the sweep's debt changes — forced stays
+// latched, the cadence clock does not advance — the next attempt is simply
+// deferred so an unreadable journal is not re-read every poll interval.
+func (l *completionsLane) noteSweepFailure(now time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.nextAttemptAt = now.Add(completionsWarmFailureBackoff)
 }
 
 // noteSweepChunk folds one chunk into the sweep in progress and, when the chunk
@@ -327,6 +351,14 @@ func (cr *CityRuntime) runCompletionsSweepChunk(backstop *executionevent.Complet
 		return executionevent.CompletionBackstopResult{}
 	}
 	result := backstop.Pass(ep, graphStores, "execution-reconcile")
+	if result.WarmFailed {
+		// The chunk read nothing: its idempotency record could not be loaded.
+		// Back the retry off instead of re-issuing the journal read at the
+		// chunk cadence; the sweep debt (forced latch, cadence clock) is kept.
+		lane.noteSweepFailure(time.Now())
+		fmt.Fprintf(cr.stderr, "%s: completions sweep: journal warm failed; retrying in %s\n", cr.logPrefix, completionsWarmFailureBackoff) //nolint:errcheck // best-effort stderr
+		return result
+	}
 	// A store the traversal could not list is skipped so one dark store cannot
 	// stall the sweep. Skipped silently, that is a lane converging nothing while
 	// looking healthy, so every skip is named.
