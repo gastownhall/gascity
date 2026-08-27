@@ -9,13 +9,6 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
 
-	// Blank import: pgauth's init() registers PostgresCredentialResolvedPayload
-	// in the events registry. The api package never references pgauth's types
-	// directly (the payload bytes flow through events.Event.Payload as JSON),
-	// so the import exists solely to fire the registration before the registry-
-	// coverage tests run.
-	_ "github.com/gastownhall/gascity/internal/pgauth"
-
 	// Blank import: emergency's init() registers emergency.Record as the payload
 	// type for EmergencySignaled and EmergencyAcked events.
 	_ "github.com/gastownhall/gascity/internal/emergency"

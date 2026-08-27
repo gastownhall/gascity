@@ -331,7 +331,10 @@ func runCompactScriptCommand(t *testing.T, mode string) (string, string, error) 
 // fixtures. It logs every invocation and, when the returned mail-failure
 // sentinel file exists, fails `gc mail send` so tests can exercise the
 // script's mail-delivery failure path. The sentinel does not exist by
-// default, so mail succeeds unless a test opts in.
+// default, so mail succeeds unless a test opts in. On a successful mail
+// send it prints a stdout confirmation line, mirroring real `gc mail
+// send`'s stdout-on-success behavior, so callers can assert that the
+// caller script actually surfaces it instead of swallowing it.
 func writeCompactFakeGC(t *testing.T, binDir string) (logPath, mailFailPath string) {
 	t.Helper()
 	logPath = filepath.Join(binDir, "gc.log")
@@ -345,6 +348,10 @@ fi
 if [ "${1:-}" = "mail" ] && [ "${2:-}" = "send" ] && [ -f %s ]; then
   printf 'fake gc: mail send failed\n' >&2
   exit 1
+fi
+if [ "${1:-}" = "mail" ] && [ "${2:-}" = "send" ]; then
+  printf 'gc mail send: message sent\n'
+  exit 0
 fi
 exit 0
 `, shellQuote(logPath), shellQuote(mailFailPath)))
@@ -445,6 +452,16 @@ print_cells() {
   done
   printf '+-------+\n'
 }
+print_remote_rows() {
+  printf '+------+-----+\n'
+  printf '| name | url |\n'
+  printf '+------+-----+\n'
+  while [ "$#" -ge 2 ]; do
+    printf '| %%s | %%s |\n' "$1" "$2"
+    shift 2
+  done
+  printf '+------+-----+\n'
+}
 current_head() {
   if [ "$mode" = "head_changes_before_flatten" ]; then
     calls_file="$state_file.head-calls"
@@ -497,7 +514,7 @@ set_hash() {
 case "$query" in
   *"SELECT COUNT(*) FROM dolt_remotes WHERE name = 'origin'"*)
     case "$mode" in
-      remote_success|remote_active_branch|remote_invalid_active_branch|remote_ahead|remote_ahead_reconciled|remote_fetch_failure|remote_fetch_failure_once|remote_push_failure|remote_advances_before_push|remote_gc_failure_once|remote_empty_head_push_failure|remote_ancestry_probe_failure|remote_writer_race_before_flatten|multiple_remotes_with_origin)
+      remote_success|remote_active_branch|remote_invalid_active_branch|remote_ahead|remote_ahead_reconciled|remote_fetch_failure|remote_fetch_failure_once|remote_push_failure|remote_advances_before_push|remote_gc_failure_once|remote_empty_head_push_failure|remote_ancestry_probe_failure|remote_writer_race_before_flatten|multiple_remotes_with_origin|backup_remote_reconcile|backup_remote_push_failure|backup_remote_filters_non_file_and_authoritative)
         print_cell 1
         ;;
       *)
@@ -528,6 +545,12 @@ case "$query" in
       explicit_backup_remote)
         print_cell 1
         ;;
+      backup_remote_reconcile|backup_remote_push_failure)
+        print_cell 2
+        ;;
+      backup_remote_filters_non_file_and_authoritative)
+        print_cell 3
+        ;;
       *)
         print_cell 0
         ;;
@@ -544,6 +567,20 @@ case "$query" in
         ;;
       *)
         print_cell ""
+        ;;
+    esac
+    exit 0
+    ;;
+  *"SELECT name, url FROM dolt_remotes ORDER BY name"*)
+    case "$mode" in
+      backup_remote_reconcile|backup_remote_push_failure)
+        print_remote_rows origin "https://example.test/beads" backup "file:///data/backup/beads"
+        ;;
+      backup_remote_filters_non_file_and_authoritative)
+        print_remote_rows backup "file:///data/backup/beads" mirror "https://mirror.test/beads" origin "https://example.test/beads"
+        ;;
+      *)
+        print_remote_rows
         ;;
     esac
     exit 0
@@ -724,7 +761,7 @@ case "$query" in
     # probe, which reports writercommit so HEAD has moved past the flatten's own
     # commit. verify_counts still sees compactcommit (gain+drift) because it does
     # not probe HEAD and the "$(current_head)" gates read the real state.
-    if { [ "$mode" = "writer_race_during_verify" ] || [ "$mode" = "writer_race_db_hash_during_verify" ] || [ "$mode" = "writer_race_with_mixed_same_count_hash_drift" ] || [ "$mode" = "row_count_decreases_with_writer_race" ]; } && [ "$(current_head)" = "compactcommit" ]; then
+    if { [ "$mode" = "writer_race_during_verify" ] || [ "$mode" = "writer_race_db_hash_during_verify" ] || [ "$mode" = "writer_race_with_mixed_same_count_hash_drift" ] || [ "$mode" = "row_count_decreases_with_writer_race" ] || [ "$mode" = "same_count_hash_drift_with_writer_race" ]; } && [ "$(current_head)" = "compactcommit" ]; then
       calls_file="$state_file.postverify-head-calls"
       calls=0
       if [ -f "$calls_file" ]; then
@@ -822,7 +859,7 @@ case "$query" in
       print_cell ""
       exit 0
     fi
-    if { [ "$mode" = "row_count_and_hash_diverges" ] || [ "$mode" = "same_table_replacement_with_row_gain" ] || [ "$mode" = "mixed_row_count_gain_and_same_count_hash_drift" ] || [ "$mode" = "writer_race_before_flatten" ] || [ "$mode" = "remote_writer_race_before_flatten" ] || [ "$mode" = "writer_race_during_verify" ] || [ "$mode" = "writer_race_with_mixed_same_count_hash_drift" ] || [ "$mode" = "row_count_decreases_with_writer_race" ] || [ "$mode" = "row_count_decreases_with_hash_change" ]; } && [ "$(current_head)" = "compactcommit" ]; then
+    if { [ "$mode" = "row_count_and_hash_diverges" ] || [ "$mode" = "same_table_replacement_with_row_gain" ] || [ "$mode" = "mixed_row_count_gain_and_same_count_hash_drift" ] || [ "$mode" = "writer_race_before_flatten" ] || [ "$mode" = "remote_writer_race_before_flatten" ] || [ "$mode" = "writer_race_during_verify" ] || [ "$mode" = "writer_race_with_mixed_same_count_hash_drift" ] || [ "$mode" = "row_count_decreases_with_writer_race" ] || [ "$mode" = "row_count_decreases_with_hash_change" ] || [ "$mode" = "same_count_hash_drift_with_writer_race" ]; } && [ "$(current_head)" = "compactcommit" ]; then
       print_cell hash-beads-after-writer
       exit 0
     fi
@@ -1146,6 +1183,10 @@ case "$query" in
     exit 0
     ;;
   *"DOLT_PUSH('--force', '--set-upstream', 'backup', 'main')"*)
+    if [ "$mode" = "backup_remote_push_failure" ]; then
+      printf 'push unavailable\n' >&2
+      exit 53
+    fi
     exit 0
     ;;
 esac
@@ -3668,6 +3709,20 @@ func TestCompactScriptQuarantineBlocksSecondCycleAfterRowCountDecrease(t *testin
 	}
 }
 
+func TestCompactScriptQuarantineAlertSuccessConfirmationIsVisible(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	firstOut, err := fixture.run(t, "row_count_decreases", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("first compact succeeded despite row-count decrease:\n%s", firstOut)
+	}
+
+	// A successful quarantine alert send still has a live stdout stream;
+	// capturing stderr for the failure path must not discard it.
+	if !strings.Contains(firstOut, "gc mail send: message sent") {
+		t.Fatalf("a successful quarantine alert send must surface its own confirmation, not swallow it:\n%s", firstOut)
+	}
+}
+
 func TestCompactScriptExistingQuarantineMarkerAlertsOnceAcrossRepeatedCycles(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	firstOut, err := fixture.run(t, "row_count_decreases", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
@@ -3735,6 +3790,44 @@ func TestCompactScriptQuarantineMailFailureIsRetriedNextCycle(t *testing.T) {
 	log = readCompactGCLog(t, fixture)
 	if mailLines := compactGCLogLinesWithPrefix(log, "gc mail send "); len(mailLines) != 2 {
 		t.Fatalf("a successful retry should re-establish dedup, want 2 attempts, got %d\nlog:\n%s", len(mailLines), log)
+	}
+}
+
+func TestCompactScriptUndeliverableQuarantineAlertRecordsWhyInMarker(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	if err := os.WriteFile(fixture.mailFailFile, nil, 0o644); err != nil {
+		t.Fatalf("arm mail-failure sentinel: %v", err)
+	}
+
+	firstOut, err := fixture.run(t, "row_count_decreases", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", "GC_DOLT_COMPACT_ALERT_TO=nobody")
+	if err == nil {
+		t.Fatalf("first compact succeeded despite row-count decrease:\n%s", firstOut)
+	}
+
+	// An alert that never lands is how five cities stayed fail-closed for a
+	// month: notify_count=0, and nothing anywhere saying why.
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if got := compactMarkerValue(t, marker, "last_notify_error"); !strings.Contains(got, "mail send failed") {
+		t.Fatalf("marker must record why the alert did not land, got %q", got)
+	}
+	if !strings.Contains(firstOut, "quarantine alert did not reach recipient") || !strings.Contains(firstOut, "nobody") {
+		t.Fatalf("compact must name the unreachable recipient:\n%s", firstOut)
+	}
+
+	// The field describes the CURRENT alerting state, so a delivered alert
+	// has to clear it rather than leave a stale cause behind.
+	if err := os.Remove(fixture.mailFailFile); err != nil {
+		t.Fatalf("disarm mail-failure sentinel: %v", err)
+	}
+	secondOut, err := fixture.run(t, "below_threshold", "GC_DOLT_COMPACT_ALERT_TO=nobody")
+	if err == nil {
+		t.Fatalf("second compact succeeded despite quarantine:\n%s", secondOut)
+	}
+	if got := compactMarkerValue(t, marker, "last_notify_error"); got != "" {
+		t.Fatalf("a delivered alert must clear last_notify_error, got %q", got)
+	}
+	if got := compactMarkerValue(t, marker, "notify_count"); got != "1" {
+		t.Fatalf("delivered alert should count once, got %q", got)
 	}
 }
 
@@ -4304,6 +4397,35 @@ func TestCompactScriptGCOnlyFlagReclaimsBelowThresholdWithFullGC(t *testing.T) {
 	}
 	if !strings.Contains(log, "CALL DOLT_GC('--full')") {
 		t.Fatalf("gc-only must issue full CALL DOLT_GC('--full'):\n%s", log)
+	}
+}
+
+func TestCompactScriptGCOnlyQuarantineRefusalStillReports(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	firstOut, err := fixture.run(t, "row_count_decreases", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("first compact succeeded despite row-count decrease:\n%s", firstOut)
+	}
+	before := len(compactGCLogLinesWithPrefix(readCompactGCLog(t, fixture), "gc event emit dolt.compact.quarantine"))
+
+	out, err := fixture.runWithArgs(t, "below_threshold", []string{"--gc-only"})
+	if err == nil {
+		t.Fatalf("gc-only reclaim succeeded despite quarantine:\n%s", out)
+	}
+	if !strings.Contains(out, "integrity quarantine marker exists") {
+		t.Fatalf("gc-only must explain the quarantine:\n%s", out)
+	}
+
+	// A gc-only refusal is the same operator-visible state as a scheduled
+	// one. Reporting it to stdout alone is how four cities held a quarantine
+	// for weeks with zero events on the bus (ga-u2wiy).
+	log := readCompactGCLog(t, fixture)
+	if after := len(compactGCLogLinesWithPrefix(log, "gc event emit dolt.compact.quarantine")); after != before+1 {
+		t.Fatalf("gc-only refusal must emit a dolt.compact.quarantine event, want %d got %d\nlog:\n%s", before+1, after, log)
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if got := compactMarkerValue(t, marker, "seen_count"); got != "2" {
+		t.Fatalf("gc-only refusal must count as a sighting, got seen_count=%q", got)
 	}
 }
 
@@ -5360,6 +5482,174 @@ exit 0
 	}
 }
 
+// writeDogHealthyFakeDolt writes a fake dolt whose probes all succeed with
+// no-warning values: probe ok, one connection, no databases (so no orphans and
+// no backup-eligible DBs).
+func writeDogHealthyFakeDolt(t *testing.T, binDir string) {
+	t.Helper()
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  *"SELECT active_branch()"*)
+    printf 'active_branch()\nmain\n'
+    exit 0
+    ;;
+  *"COUNT(*) FROM information_schema.PROCESSLIST"*)
+    printf 'COUNT(*)\n1\n'
+    exit 0
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\n'
+    exit 0
+    ;;
+esac
+exit 0
+`)
+}
+
+// readDogGCLog returns the fake-gc invocation log, or "" when the script never
+// invoked gc at all (the log file is only created on first invocation).
+func readDogGCLog(t *testing.T, gcLogPath string) string {
+	t.Helper()
+	data, err := os.ReadFile(gcLogPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ""
+		}
+		t.Fatalf("read gc log: %v", err)
+	}
+	return string(data)
+}
+
+const dogAdvisorySweepInvocation = "mail archive --to human --subject-prefix Dolt health advisory --limit 100"
+
+// TestDoctorScriptAdvisorySweepPrecedesFreshSend asserts that a fresh advisory
+// send is preceded by a superseded-advisory sweep, so the mailbox converges to
+// one standing advisory bead (and any pre-dedup backlog is archived) the
+// moment a new snapshot lands.
+func TestDoctorScriptAdvisorySweepPrecedesFreshSend(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
+
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	writeDogHealthyFakeDolt(t, binDir)
+
+	// LATENCY_WARN_S=0 forces the advisory path on every run.
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, "GC_DOCTOR_LATENCY_WARN_S=0")
+	if !strings.Contains(out, "server: ok") {
+		t.Fatalf("doctor should report server ok when probe succeeds, output:\n%s", out)
+	}
+	gcLog := readDogGCLog(t, gcLogPath)
+	sweepAt := strings.Index(gcLog, dogAdvisorySweepInvocation)
+	sendAt := strings.Index(gcLog, "mail send human -s Dolt health advisory [MEDIUM]")
+	if sweepAt < 0 {
+		t.Fatalf("advisory send did not sweep superseded advisories, log:\n%s", gcLog)
+	}
+	if sendAt < 0 {
+		t.Fatalf("advisory mail did not fire; latency-WARN should have triggered, log:\n%s", gcLog)
+	}
+	if sweepAt > sendAt {
+		t.Fatalf("sweep must precede the fresh send (or it would archive the new advisory), log:\n%s", gcLog)
+	}
+}
+
+// TestDoctorScriptHealthySweepsRecordedAdvisory asserts the healthy transition
+// archives the standing advisory recorded by an earlier tick and clears the
+// dedup state so a future condition re-alerts.
+func TestDoctorScriptHealthySweepsRecordedAdvisory(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
+
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	writeDogHealthyFakeDolt(t, binDir)
+
+	statePath := filepath.Join(t.TempDir(), "doctor-advisory-state")
+	if err := os.WriteFile(statePath, []byte("latency \n"), 0o600); err != nil {
+		t.Fatalf("seed advisory state: %v", err)
+	}
+
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir,
+		"GC_DOCTOR_ADVISORY_STATE_FILE="+statePath)
+	if !strings.Contains(out, "server: ok") {
+		t.Fatalf("doctor should report server ok when probe succeeds, output:\n%s", out)
+	}
+	gcLog := readDogGCLog(t, gcLogPath)
+	if !strings.Contains(gcLog, dogAdvisorySweepInvocation) {
+		t.Fatalf("healthy transition with a recorded advisory must sweep it, log:\n%s", gcLog)
+	}
+	if strings.Contains(gcLog, "mail send") {
+		t.Fatalf("healthy run must not send mail, log:\n%s", gcLog)
+	}
+	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
+		t.Fatalf("healthy run must clear the advisory state file, stat err = %v", err)
+	}
+}
+
+// TestDoctorScriptSteadyHealthySkipsSweep asserts a healthy tick with no
+// recorded advisory (the steady state) makes no gc calls at all — the sweep
+// only fires on the advisory->healthy transition.
+func TestDoctorScriptSteadyHealthySkipsSweep(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
+
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	writeDogHealthyFakeDolt(t, binDir)
+
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir)
+	if !strings.Contains(out, "server: ok") {
+		t.Fatalf("doctor should report server ok when probe succeeds, output:\n%s", out)
+	}
+	if gcLog := readDogGCLog(t, gcLogPath); strings.Contains(gcLog, "mail archive") {
+		t.Fatalf("steady healthy tick must not invoke the sweep, log:\n%s", gcLog)
+	}
+}
+
+// TestDoctorScriptSuppressedTickSkipsSweepAndSend asserts a tick whose
+// condition set matches the recorded signature (the #3409 dedup suppression)
+// neither re-sends nor re-sweeps — the standing advisory bead stays put.
+func TestDoctorScriptSuppressedTickSkipsSweepAndSend(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
+
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	writeDogHealthyFakeDolt(t, binDir)
+
+	statePath := filepath.Join(t.TempDir(), "doctor-advisory-state")
+	// "latency " (trailing space) is the exact signature a latency-only warning
+	// run records; seeding it makes the LATENCY_WARN_S=0 run below a suppressed
+	// repeat tick.
+	if err := os.WriteFile(statePath, []byte("latency \n"), 0o600); err != nil {
+		t.Fatalf("seed advisory state: %v", err)
+	}
+
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir,
+		"GC_DOCTOR_LATENCY_WARN_S=0",
+		"GC_DOCTOR_ADVISORY_STATE_FILE="+statePath)
+	if !strings.Contains(out, "server: ok") {
+		t.Fatalf("doctor should report server ok when probe succeeds, output:\n%s", out)
+	}
+	gcLog := readDogGCLog(t, gcLogPath)
+	if strings.Contains(gcLog, "mail archive") || strings.Contains(gcLog, "mail send") {
+		t.Fatalf("suppressed tick must neither sweep nor send, log:\n%s", gcLog)
+	}
+}
+
 // TestDoctorScriptUnreachableEscalationUsesGenericEscalation asserts the
 // server-unreachable path goes through the generic escalation recipient.
 func TestDoctorScriptUnreachableEscalationUsesGenericEscalation(t *testing.T) {
@@ -5454,6 +5744,42 @@ func TestCompactScriptDefersWhenWriterDeletesRows(t *testing.T) {
 	}
 	if strings.Contains(string(data), "DOLT_GC") {
 		t.Fatalf("concurrent-DELETE defer must skip GC this run:\n%s", string(data))
+	}
+}
+
+// A concurrent UPDATE during the flatten window changes a committed table's
+// value hash while leaving its row count unchanged — the net-zero-row-count
+// churn that dominates the busiest db's workload (ephemeral wisp pour/burn and
+// bead/mail row updates). With a HEAD-proven concurrent writer this is benign
+// writer data, not corruption, and must defer-and-retry rather than quarantine.
+// The stable-HEAD control for the same signature is
+// TestCompactScriptQuarantinesSameRowCountWriterBeforeFullGC.
+func TestCompactScriptDefersWhenWriterCommitsCausingSameCountHashDrift(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "same_count_hash_drift_with_writer_race", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("concurrent-UPDATE same-count defer must exit 0 (skip, not failure): %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "same-count table value hash drift is concurrent-writer UPDATE data, not corruption") {
+		t.Fatalf("output missing concurrent-UPDATE same-count defer message:\n%s", out)
+	}
+	if !strings.Contains(out, "deferring, will retry next run") {
+		t.Fatalf("output missing defer confirmation:\n%s", out)
+	}
+	quarantine := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if _, statErr := os.Stat(quarantine); !os.IsNotExist(statErr) {
+		t.Fatalf("concurrent-UPDATE same-count defer must NOT write a quarantine marker; stat=%v", statErr)
+	}
+	pendingGC := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
+	if reason := compactMarkerValue(t, pendingGC, "reason"); reason != "writer race during flatten deferred full GC" {
+		t.Fatalf("concurrent-UPDATE same-count defer should record pending-GC retry marker, got reason %q", reason)
+	}
+	data, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read dolt log: %v", readErr)
+	}
+	if strings.Contains(string(data), "DOLT_GC") {
+		t.Fatalf("concurrent-UPDATE same-count defer must skip GC this run:\n%s", string(data))
 	}
 }
 

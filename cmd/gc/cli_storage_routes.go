@@ -126,7 +126,10 @@ func cliStorageRoutes(cityPath string) *storageRoutes {
 // The config load is the only thing this adds to a city that relocates nothing:
 // storageBootGate owns the bypass, so a city with no [storage] section
 // constructs no registry, resolves no plan and reads no byte of a binding root
-// through this path either.
+// through this path either. The bypass does read the city's served-binding
+// note — one failed open on a city that never served a split — which is what
+// keeps deleting the [storage] section from being a way past every hold the
+// gate has.
 //
 // A config that will not load is treated as a city with no [storage]. By the
 // time a class resolver runs, the command's own load has already failed and
@@ -147,7 +150,12 @@ func resolveCLIStorageRoutes(cityPath string) *storageRoutes {
 	}
 	routes, err := storageBootGate(cityPath, cfg, cliStorageLogPrefix, nil, cliStorageStderr)
 	if err == nil {
-		return routes
+		// The one and only place a class store is given an emit target. A
+		// one-shot command has no live event bus, so without this its writes to
+		// a relocated class land in a store nothing observes; the controller
+		// resolves its routes through openStorageRoutes, never here, so its
+		// side stays exactly as it was. See class_store_emit.go.
+		return routes.withCLIEmission(cityPath)
 	}
 	// Once, here, rather than at each call site: a command that discards the
 	// store error still has to leave the operator holding the remedy.
@@ -208,7 +216,7 @@ func closeCLIStorageRoutes() error {
 // Under-refusing there would leave a class silently on the work store, which is
 // the exact failure the refusal exists to prevent.
 func refusingStorageRoutes(binding string, refusal error) *storageRoutes {
-	store := refusedClassStore{err: refusal}
+	store := refusedClassStore{err: standingStorageRefusal{err: refusal}}
 	routes := &storageRoutes{stores: make(map[coordclass.Class]beads.Store), binding: binding}
 	for _, class := range coordclass.Classes() {
 		if class.IsInfrastructure() {
@@ -216,6 +224,30 @@ func refusingStorageRoutes(binding string, refusal error) *storageRoutes {
 		}
 	}
 	return routes
+}
+
+// standingStorageRefusal marks an error as the verdict this build took about a
+// CITY, rather than a fault a particular read ran into. The message is the
+// refusal verbatim — wrapping adds no prefix — and the only thing the wrapper
+// adds is that the two can be told apart.
+//
+// They are told apart because a caller can act on the difference. A refused
+// city still serves its WORK beads from its work ledger, which is the whole
+// reason this file leaves work unrouted; so a caller holding a work id has been
+// told nothing about that id and must keep its existing path, while a caller
+// holding an id only a relocated class could own has been told the one thing
+// that matters. Answering both the same way turns a storage misconfiguration
+// into a city where no `gc bd` write runs at all.
+type standingStorageRefusal struct{ err error }
+
+func (e standingStorageRefusal) Error() string { return e.err.Error() }
+func (e standingStorageRefusal) Unwrap() error { return e.err }
+
+// isStandingStorageRefusal reports whether err is this build's standing verdict
+// about the city rather than a fault in the read that produced it.
+func isStandingStorageRefusal(err error) bool {
+	var refusal standingStorageRefusal
+	return errors.As(err, &refusal)
 }
 
 // refusedClassStore is the store a relocated class resolves to on a city this
@@ -266,6 +298,20 @@ func (s refusedClassStore) SetMetadata(string, string, string) error { return s.
 func (s refusedClassStore) SetMetadataBatch(string, map[string]string) error {
 	return s.err
 }
+
+// Claim and ReleaseIfCurrent are the conditional-assignment pair. They are
+// here for the reason the whole optional set is: the by-ID class front door
+// discovers them by type assertion, and a refusing store that lacked them
+// would answer "this store cannot claim" — a statement about a capability —
+// where the truth is that this city must not be served at all.
+func (s refusedClassStore) Claim(string, string) (beads.Bead, bool, error) { //nolint:unparam // a refusing store returns the refusal and never a value
+	return beads.Bead{}, false, s.err
+}
+
+func (s refusedClassStore) ReleaseIfCurrent(string, string) (bool, error) { //nolint:unparam // a refusing store returns the refusal and never a value
+	return false, s.err
+}
+
 func (s refusedClassStore) SetLocalString(string, string, string) error { return s.err }
 func (s refusedClassStore) GetLocalString(string, string) (string, error) {
 	return "", s.err

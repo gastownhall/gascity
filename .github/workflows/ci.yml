@@ -413,6 +413,13 @@ jobs:
         run: bd version
       - name: bd CLI contract (current)
         run: make test-bd-cli-contract
+      # The conditional-release CAS is the one bd contract only this cell can
+      # run: BdStore.ReleaseIfCurrent prefers bd's --if-assignee/--if-status verb
+      # (a rejected precondition is exit 13), and BD_VERSION — every other job's
+      # bd — is a published release that predates it, so the row skips there and
+      # the wisp-tier fix rides unguarded. The target refuses to skip.
+      - name: bd conditional-release CAS contract (current)
+        run: make test-bd-conditional-release-contract
 
   # NON-REQUIRED HEADxHEAD radar: builds bd from beads MAIN HEAD (live, not the
   # pinned BD_CURRENT_REF) and runs gc-HEAD's real bd CLI contract against it —

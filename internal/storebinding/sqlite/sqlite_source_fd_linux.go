@@ -13,6 +13,11 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// sqliteSourceDescriptorDetectionSupported reports whether this platform can
+// observe descriptors another part of the process already holds on a source.
+// Linux answers it by reading /proc. Mirrors sqliteWriterFencingSupported.
+func sqliteSourceDescriptorDetectionSupported() bool { return true }
+
 // ensureNoSQLiteSourceDescriptors enforces the migration startup invariant
 // before reservation opens any descriptor for the source. Linux releases a
 // process's traditional F_SETLK locks for an inode when *any* descriptor for

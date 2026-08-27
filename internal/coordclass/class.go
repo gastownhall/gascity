@@ -55,16 +55,18 @@ type Class int
 
 const (
 	// ClassWork is the real backlog: tasks, epics, bugs, features,
-	// merge-requests, and user/sling convoys. Owner: the bd backlog. This is the
-	// zero value so any bead not matched by an explicit infrastructure arm
-	// defaults to work.
+	// merge-requests, and EVERY convoy — user, sling, and the synthetic ones the
+	// system mints as glue (graph.v2 input convoys, drain-unit convoys). Owner:
+	// the bd backlog. This is the zero value so any bead not matched by an
+	// explicit infrastructure arm defaults to work.
 	ClassWork Class = iota
 
 	// ClassGraph is the formula-v2 execution engine's topology and control lane:
 	// molecule/step/gate/scope/run beads, every gc.kind control bead, wisp
-	// roots, convergence beads, spec sidecars, and synthetic (graph.v2 input /
-	// drain-unit) convoys. Owner: internal/dispatch + internal/molecule +
-	// internal/formula. This is the bead explosion the split primarily targets.
+	// roots, convergence beads, and spec sidecars. Owner: internal/dispatch +
+	// internal/molecule + internal/formula. This is the bead explosion the split
+	// primarily targets. Convoys are NOT here, synthetic ones included — see
+	// ClassWork and the synthetic-convoy arm in classify.go.
 	ClassGraph
 
 	// ClassMessaging is mail (type=message) and the extmsg families (type=task

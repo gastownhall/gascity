@@ -463,10 +463,11 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 
 		// Idle sleep: desired sessions idle too long should sleep.
 		// Attached, pending, pinned, mode=always named, and sessions with
-		// assigned demand work are exempt. Assigned demand work means either
-		// in_progress ownership or open work with Ready=true; blocked open
-		// assignments do not prevent idle sleep. Manual sessions within their
-		// grace period are also exempt.
+		// assigned demand work are exempt. A claimed in_progress bead also
+		// vetoes idle sleep even when blocked: blocked work does not wake an
+		// asleep owner, but it must not park the live seat that owns the claim.
+		// Blocked open assignments do not prevent idle sleep. Manual sessions
+		// within their grace period are also exempt.
 		//
 		// On_demand named sessions woken by routed/named demand
 		// ("named-demand", "routed-demand", "work-query") are also exempt:
@@ -479,14 +480,15 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		// because it has no idle reference. The "work done, no demand" drain
 		// still fires via the "on-demand:running" reason, which is NOT exempt.
 		// See #3413.
-		if decision.ShouldWake && !input.AttachedSessions[name] && !input.PendingSessions[name] && !bead.Pinned && !bead.IdleSince.IsZero() &&
+		agent, hasAgent := lookupAgent(bead.Template)
+		holdsClaimedWork := hasAgent && !agent.Suspended && sessionHasClaimedInProgressWork(input.WorkBeads, input.NamedSessions, bead)
+		if decision.ShouldWake && !input.AttachedSessions[name] && !input.PendingSessions[name] && !bead.Pinned && !holdsClaimedWork && !bead.IdleSince.IsZero() &&
 			!isAlwaysNamedSession(input.NamedSessions, bead) &&
 			desired[name] != "assigned-work" && desired[name] != "min-active" &&
 			desired[name] != "reset-pending" &&
 			desired[name] != "named-demand" && desired[name] != "routed-demand" &&
 			desired[name] != "work-query" &&
 			!inManualGracePeriod(bead, input.ManualGracePeriod, input.Now) {
-			agent, hasAgent := lookupAgent(bead.Template)
 			var idleTimeout time.Duration
 			switch {
 			case bead.ManualSession && input.ChatIdleTimeout > 0:
@@ -704,6 +706,15 @@ func sessionHasAssignedWork(workBeads []AwakeWorkBead, named []AwakeNamedSession
 			continue
 		}
 		if sessionAssigneeMatches(named, bead, assignee) {
+			return true
+		}
+	}
+	return false
+}
+
+func sessionHasClaimedInProgressWork(workBeads []AwakeWorkBead, named []AwakeNamedSession, bead AwakeSessionBead) bool {
+	for _, wb := range workBeads {
+		if wb.Status == "in_progress" && sessionAssigneeMatches(named, bead, strings.TrimSpace(wb.Assignee)) {
 			return true
 		}
 	}

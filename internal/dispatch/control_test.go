@@ -2436,6 +2436,49 @@ func TestBuildAttemptRecipeSimpleRetry(t *testing.T) {
 	}
 }
 
+// TestBuildAttemptRecipePreservesStepDescription pins gastownhall/gascity#4861:
+// ralph-loop attempt beads created for later iterations lost the task
+// description, making fresh-session execution fail with "missing_task_input"
+// while a warm session could mask the defect through context carryover.
+// buildAttemptRecipe's root attempt step copied title/type/labels/assignee/
+// metadata from the frozen step spec but not step.Description. This drives
+// attempts 1 and 2 (the reported failure was specifically iteration 2+) and
+// asserts both iteration roots retain the authored description — the same
+// symmetry retry cloning already has for subject/child/check beads
+// (internal/dispatch/ralph.go, ~526-535/563-572/596-605).
+func TestBuildAttemptRecipePreservesStepDescription(t *testing.T) {
+	t.Parallel()
+
+	const authoredDescription = "Full task description with detailed requirements the agent needs to do the work without any ambient session context."
+
+	step := &formula.Step{
+		ID:          "converge",
+		Title:       "Converge",
+		Description: authoredDescription,
+		Type:        "task",
+		Ralph:       &formula.RalphSpec{MaxAttempts: 5},
+	}
+
+	control := beads.Bead{
+		ID: "gc-1",
+		Metadata: map[string]string{
+			"gc.step_id":  "converge",
+			"gc.step_ref": "mol-test.converge",
+		},
+	}
+
+	for _, attempt := range []int{1, 2} {
+		recipe := buildAttemptRecipe(step, control, attempt)
+		if len(recipe.Steps) != 1 {
+			t.Fatalf("attempt %d: steps = %d, want 1", attempt, len(recipe.Steps))
+		}
+		rootStep := recipe.Steps[0]
+		if rootStep.Description != authoredDescription {
+			t.Errorf("attempt %d: root step Description = %q, want %q (a fresh session claiming this attempt would fail with missing_task_input)", attempt, rootStep.Description, authoredDescription)
+		}
+	}
+}
+
 func TestBuildAttemptRecipeRalphWithChildren(t *testing.T) {
 	t.Parallel()
 
@@ -2525,9 +2568,13 @@ func TestBuildAttemptRecipeRalphWithChildren(t *testing.T) {
 			foundScopeControlDep = true
 		}
 		if dep.StepID == "mol-test.converge.iteration.3" &&
-			dep.DependsOnID == "mol-test.converge.iteration.3.verify-scope-check" &&
+			dep.DependsOnID == "mol-test.converge.iteration.3.verify" &&
 			dep.Type == "blocks" {
 			foundScopeBodyDep = true
+		}
+		if dep.StepID == "mol-test.converge.iteration.3" &&
+			dep.DependsOnID == "mol-test.converge.iteration.3.verify-scope-check" {
+			t.Errorf("scope body blocks on the scope-check that closes it: %+v", dep)
 		}
 	}
 	if !foundBlocksDep {
@@ -2537,7 +2584,7 @@ func TestBuildAttemptRecipeRalphWithChildren(t *testing.T) {
 		t.Errorf("missing dep: apply scope-check blocks on apply; deps = %+v", recipe.Deps)
 	}
 	if !foundScopeBodyDep {
-		t.Errorf("missing dep: scope body blocks on verify scope-check; deps = %+v", recipe.Deps)
+		t.Errorf("missing dep: scope body blocks on verify; deps = %+v", recipe.Deps)
 	}
 
 	// Children should NOT have parent-child deps to the scope root —
@@ -3109,7 +3156,7 @@ func (s *graphApplyOuterDepFailStore) DepAdd(issueID, dependsOnID, depType strin
 
 func findOpenSpecByRef(t *testing.T, store beads.Store, rootID, stepRef string) beads.Bead {
 	t.Helper()
-	all, err := listByWorkflowRoot(store, rootID)
+	all, err := beads.DirectMembers(store, rootID)
 	if err != nil {
 		t.Fatalf("list workflow beads: %v", err)
 	}
@@ -3153,12 +3200,15 @@ func TestBuildAttemptRecipeScopeBlocksOnAllChildren(t *testing.T) {
 	recipe := buildAttemptRecipe(step, control, 1)
 	scopeID := "mol.review-loop.iteration.1"
 
-	// Scope must block on each child.
+	// The scope body must block on each child, and on the raw child rather
+	// than on that child's scope-check: every one of those scope-checks
+	// closes this body, so blocking on one is a permanent deadlock
+	// (ga-a6zy9).
 	expectedBlockers := []string{
-		scopeID + ".review-claude-scope-check",
-		scopeID + ".review-codex-scope-check",
-		scopeID + ".synthesize-scope-check",
-		scopeID + ".apply-fixes-scope-check",
+		scopeID + ".review-claude",
+		scopeID + ".review-codex",
+		scopeID + ".synthesize",
+		scopeID + ".apply-fixes",
 	}
 
 	scopeDeps := map[string]bool{}
@@ -3171,6 +3221,9 @@ func TestBuildAttemptRecipeScopeBlocksOnAllChildren(t *testing.T) {
 	for _, expected := range expectedBlockers {
 		if !scopeDeps[expected] {
 			t.Errorf("scope %q missing blocks dep on %q; scope deps = %v", scopeID, expected, scopeDeps)
+		}
+		if scopeDeps[expected+"-scope-check"] {
+			t.Errorf("scope %q blocks on %q, the control that closes it", scopeID, expected+"-scope-check")
 		}
 	}
 }
@@ -3259,7 +3312,9 @@ func TestBuildAttemptRecipeComposeExpandFanout(t *testing.T) {
 		}
 	}
 
-	// Scope blocks on all 4 child scope-check controls.
+	// Scope body blocks on all 4 children directly. It must NOT block on
+	// their scope-check controls: each of those closes this body, so the
+	// edge would be a permanent deadlock (ga-a6zy9).
 	scopeBlockers := map[string]bool{}
 	for _, dep := range recipe.Deps {
 		if dep.StepID == scopeID && dep.Type == "blocks" {
@@ -3267,13 +3322,16 @@ func TestBuildAttemptRecipeComposeExpandFanout(t *testing.T) {
 		}
 	}
 	for _, childID := range []string{
-		scopeID + ".review-pipeline.review-claude-scope-check",
-		scopeID + ".review-pipeline.review-codex-scope-check",
-		scopeID + ".review-pipeline.synthesize-scope-check",
-		scopeID + ".apply-fixes-scope-check",
+		scopeID + ".review-pipeline.review-claude",
+		scopeID + ".review-pipeline.review-codex",
+		scopeID + ".review-pipeline.synthesize",
+		scopeID + ".apply-fixes",
 	} {
 		if !scopeBlockers[childID] {
 			t.Errorf("scope missing blocks dep on %q", childID)
+		}
+		if scopeBlockers[childID+"-scope-check"] {
+			t.Errorf("scope blocks on %q, the control that closes it", childID+"-scope-check")
 		}
 	}
 

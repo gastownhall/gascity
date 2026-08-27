@@ -86,18 +86,29 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 	comparedStore := map[string]bool{
 		"beads": true, "deps": true, "depsComplete": true, "dirty": true,
 		"beadSeq": true, "localBeadAt": true, "deletedSeq": true, "state": true,
-		"lastFreshAt": true, "mutationSeq": true, "primePartialErr": true,
+		"readyProjectionLost": true, // compared as mergeEndState.readyLost
+		"lastFreshAt":         true, "mutationSeq": true, "primePartialErr": true,
 		"syncFailures": true, "circuitTripped": true,
 		"stats": true, // stats compared field-wise below
 	}
 	excludedStore := map[string]bool{
-		"backing": true, "idPrefix": true, "mu": true, "reconciling": true,
+		// observationRevision is a process-local publication fence, orthogonal to
+		// the merge oracle's durable cache-state comparison.
+		"observationRevision": true,
+		"backing":             true, "idPrefix": true, "mu": true, "reconciling": true,
 		"onChange": true, "problemf": true, "problemLog": true,
 		"lastReconcileLogAt": true, "primeMu": true, "primeRunning": true,
 		"primeCycle": true, "lastFullPrimeStartedAt": true, "primeRetryDelay": true,
 		"lifecycleMu": true, "lifecycleWG": true, "cancelFn": true, "stopCh": true,
 		"stopped": true, "latencyWindow": true, "latencyDriverActive": true,
 		"applyEventBeforeCommitForTest": true,
+		// readyProjectionDegraded is a one-way capability latch about the
+		// BACKING STORE, set by applyReadyProjection before the seam runs and
+		// never touched by mergeSnapshotLocked. It routes readiness reads to the
+		// live backing (readyReadsMustGoLive); the merge end state does not
+		// depend on it. Its own behavior is pinned by
+		// TestDegradedProjectionSendsReadyToTheLiveBdVerdict.
+		"readyProjectionDegraded": true,
 	}
 	assertFieldsClassified(t, reflect.TypeOf(CachingStore{}), comparedStore, excludedStore)
 

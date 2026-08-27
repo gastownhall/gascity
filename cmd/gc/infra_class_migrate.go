@@ -192,6 +192,11 @@ package main
 // city with no [storage] at all — does not resolve a migration target and this
 // opens nothing. A city whose destination already holds rows this migration did
 // not stamp is refused at the destination gate rather than overwritten.
+//
+// "No [storage] at all" means never configured, not un-configured: a city that
+// HAS served a split and then had its section deleted is held by the served-
+// binding note at the top of the boot gate, because its infrastructure state is
+// in a binding no work-store reader will ever look at.
 
 import (
 	"bufio"
@@ -291,6 +296,21 @@ const (
 	// migration may create. Boot creates the binding, records an empty proven
 	// copy, and serves from it.
 	infraMigrationGenesis
+	// infraMigrationBornSplitBlocked reports a city whose binding is served by
+	// a provider this build carries no migration discipline for, and whose
+	// work store holds infrastructure beads that binding cannot read. Such a
+	// binding serves only under the born-split invariant — the work store
+	// holds no infrastructure bead at all — and this outcome is that invariant
+	// failing, with the ids named.
+	infraMigrationBornSplitBlocked
+	// infraMigrationGenesisBlocked reports a city whose configuration points
+	// the infrastructure classes somewhere other than the binding its served
+	// note records. Nothing on this path proves the configured target holds
+	// what the served binding holds — genesis's premise that no marker and an
+	// empty work store mean nothing exists anywhere is false for such a city —
+	// so serving, genesis and migration all refuse until the operator attests
+	// by removing the note.
+	infraMigrationGenesisBlocked
 )
 
 // String names the outcome for operator-visible diagnostics and test failures.
@@ -308,6 +328,10 @@ func (o infraMigrationOutcome) String() string {
 		return "uncheckable"
 	case infraMigrationGenesis:
 		return "genesis"
+	case infraMigrationBornSplitBlocked:
+		return "born-split-blocked"
+	case infraMigrationGenesisBlocked:
+		return "genesis-blocked"
 	}
 	return fmt.Sprintf("infraMigrationOutcome(%d)", int(o))
 }
@@ -336,6 +360,14 @@ type infraMigrationReport struct {
 	// else, so ids carried anywhere but in the message are ids the operator
 	// never sees.
 	Stranded []string
+	// ServedBinding, ServedProvider and ServedNotePath carry the genesis-blocked
+	// evidence: which binding this city previously served its infrastructure
+	// classes from, under which provider, and the note file whose removal is
+	// the operator's attestation. They travel on the report for the same
+	// reason Stranded does — the refusal string is the only output recorded.
+	ServedBinding  string
+	ServedProvider string
+	ServedNotePath string
 	// Target is the resolved destination the outcome is about. Its zero value
 	// belongs to the outcomes that resolved nothing.
 	Target infraBindingTarget
@@ -395,10 +427,42 @@ func infraMigrationOperatorAdvice(report infraMigrationReport, logPrefix string)
 				logPrefix, infraMigrationClassList(), report.Target.Binding, report.Target.MarkerPath(), storageMigrationCommand)
 		}
 	case infraMigrationStranded:
-		situation = fmt.Sprintf("%s: this city converged on binding %q, and the retained work store holds %d infrastructure bead(s) the binding cannot read: %s.",
-			logPrefix, report.Target.Binding, len(report.Stranded), infraStrandedIDList(report.Stranded))
+		// The remedy names a command rather than describing one. It used to
+		// describe one — "recover them into the binding's database" — and a
+		// city that acquired strands was then permanently alarmed with no
+		// documented way out, because the migration refuses to re-run and
+		// nothing else moved a bead. See infra_class_recover.go for why the
+		// repair is a separate, additive verb and not the migration again.
+		situation = fmt.Sprintf("%s: this city converged on binding %q, and the retained work store holds %d infrastructure bead(s) the binding cannot read: %s. The named beads are intact in the retained work store. Stop every writer and copy them into the binding with:  %s. Re-check with `gc storage status`, which exits zero once the binding contains them.",
+			logPrefix, report.Target.Binding, len(report.Stranded), infraStrandedIDList(report.Stranded), storageRecoveryInstruction())
 	case infraMigrationUncheckable:
 		situation = fmt.Sprintf("%s: this city's infrastructure binding %q could NOT be verified (reason above), so nothing here proved it is safe to serve from.", logPrefix, report.Target.Binding)
+	case infraMigrationBornSplitBlocked:
+		// This arm deliberately does NOT name the recovery command. That verb
+		// resolves its destination through resolveInfraBindingTarget, which
+		// answers only for a binding backed by this build's own bead engine —
+		// and this outcome exists precisely because the binding is served by a
+		// provider this build carries no migration discipline for. Naming it
+		// here would send the operator to a command that refuses.
+		// TestBornSplitAdviceDoesNotNameARepairItCannotRun pins that.
+		situation = fmt.Sprintf("%s: binding %q is served by a provider this build cannot migrate onto, so it serves only while the work store holds no infrastructure bead — and the work store holds %d: %s. Either an earlier configuration wrote them before this city moved to the split, or a writer without this [storage] configuration is still writing. The named beads are intact in the work store. Recover them into the binding's database with every writer stopped, then delete them from the work store — the work store was never this split's infrastructure source, and the next boot serves once it holds none. This build carries no repair command for that provider; the one it does carry serves only a binding backed by its own bead engine.",
+			logPrefix, report.Target.Binding, len(report.Stranded), infraStrandedIDList(report.Stranded))
+	case infraMigrationGenesisBlocked:
+		if report.ServedProvider == "" {
+			// The note exists but could not be read. It is still evidence
+			// that some binding served this city's infrastructure classes,
+			// so it holds exactly as a readable note would.
+			situation = fmt.Sprintf("%s: this city's served-binding note (%s) exists but cannot be read, and an unreadable note must hold exactly as a readable one would: some binding served this city's infrastructure classes, and re-pointing them elsewhere would make every bead written there permanently invisible. Repair or inspect the note; removing it is the operator's attestation that the previously served binding's contents are recovered or deliberately abandoned.",
+				logPrefix, report.ServedNotePath)
+		} else {
+			situation = fmt.Sprintf("%s: this city's infrastructure classes are served from binding %q (provider %q), and this configuration points them somewhere else. Nothing here proves the configured target holds what the served binding holds, so this refuses rather than risk making every bead written there invisible. Verify or recover the served binding's contents first; removing %s is the operator's attestation that they are recovered, still reachable through the new configuration, or deliberately abandoned.",
+				logPrefix, report.ServedBinding, report.ServedProvider, report.ServedNotePath)
+		}
+		// Neither canned tail applies: the revert grant is evidence about the
+		// NEW target and says nothing about the served binding this outcome
+		// is protecting, and the do-not-revert tail names the wrong hazard.
+		// The withholding is explicit instead.
+		return situation + fmt.Sprintf(" Do NOT revert [storage.classes] to %q either: new infrastructure writes would land in the work store while the served binding's contents stay unrecovered.", config.StorageWorkBinding)
 	default:
 		return ""
 	}
@@ -623,6 +687,10 @@ func inspectInfraConvergence(cityPath string, target infraBindingTarget, logPref
 	say := func(outcome infraMigrationOutcome, err error) infraMigrationReport {
 		fmt.Fprintf(stderr, "%s: storage class migration: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return infraMigrationReport{Outcome: outcome}
+	}
+
+	if blocked, ok := servedBindingNoteHold(cityPath, target.Binding, config.StorageProviderSQLiteBeads, target.Database); ok {
+		return blocked
 	}
 
 	state, err := readInfraConvergenceState(target)
@@ -850,6 +918,14 @@ func runInfraClassMigration(cityPath string, target infraBindingTarget, logPrefi
 		return infraMigrationReport{Outcome: outcome}
 	}
 
+	// A served-binding note naming any other binding is a hold on this whole
+	// command: a copy of the work store's slice would bless a destination
+	// that silently omits everything the served binding holds. The note's
+	// removal is the operator's attestation, checked before anything opens.
+	if blocked, ok := servedBindingNoteHold(cityPath, target.Binding, config.StorageProviderSQLiteBeads, target.Database); ok {
+		return blocked
+	}
+
 	state, err := readInfraConvergenceState(target)
 	if err != nil {
 		return say(infraMigrationUncheckable, err)
@@ -1036,8 +1112,8 @@ func confirmInfraConvergence(cityPath string, target infraBindingTarget, logPref
 	// What to DO about it is not decided here. This names the defect; the single
 	// revert decision (infraMigrationOperatorAdvice, on evidence read from the
 	// binding) is what follows it.
-	fmt.Fprintf(stderr, "%s: %d infrastructure bead(s) in the retained work store were never carried by the proven copy and are NOT in the converged binding %s: %s%s. A writer this migration could not fence wrote them to the source during or after the cutover. They are intact in the work store. Stop every writer and recover the listed beads into the binding.\n", //nolint:errcheck // best-effort stderr
-		logPrefix, len(gap.Stranded), target.Database, infraStrandedIDList(gap.Stranded), residue)
+	fmt.Fprintf(stderr, "%s: %d infrastructure bead(s) in the retained work store were never carried by the proven copy and are NOT in the converged binding %s: %s%s. A writer this migration could not fence wrote them to the source during or after the cutover. They are intact in the work store. Stop every writer and copy the listed beads into the binding with:  %s\n", //nolint:errcheck // best-effort stderr
+		logPrefix, len(gap.Stranded), target.Database, infraStrandedIDList(gap.Stranded), residue, storageRecoveryInstruction())
 	return infraMigrationReport{Outcome: infraMigrationStranded, Stranded: gap.Stranded}
 }
 

@@ -117,6 +117,13 @@ type TemplateParams struct {
 	// pool_slot metadata without reverse-engineering the slot from the name
 	// (which fails for namepool-themed instances like "fenrir").
 	PoolSlot int
+	// BoundStepID is the work-step bead ID bound to this named/direct
+	// session, resolved during buildDesiredState from the assigned-work-bead
+	// match (namedWorkBeadID). Empty when a named session has no concrete
+	// bound step (e.g. always-mode sessions awake on default demand alone).
+	// syncSessionBeads uses this to seed gc.bound_step_id and the startup
+	// kickoff progress-binding metadata.
+	BoundStepID string
 	// EnvIdentityStamped reports whether setTemplateEnvIdentity has written
 	// an authoritative GC_ALIAS/GC_AGENT identity into Env. resolveTemplate
 	// always seeds GC_ALIAS=qualifiedName, so "Env has GC_ALIAS" is not a
@@ -345,10 +352,19 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if p.city != nil {
 		packDirs = p.city.PackDirsForRig(rigName)
 	}
-	beadsCfg := config.BeadsConfig{}
+	topo := config.QueryTopology{}
 	if p.city != nil {
-		beadsCfg = p.city.Beads
+		topo.Beads = p.city.Beads
 	}
+	// Controller-owned: config.QueryTopology{Beads: ...} and NOT
+	// cityQueryTopology. Resolving the federation fact means asking the
+	// storage routes, and the one-shot funnel that answers for a CLI command
+	// (cliStorageRoutes) is explicitly for the half of the program that
+	// "never builds a CityRuntime" — a controller reaching it would open the
+	// city's binding a second time in a process that already holds it open.
+	// The controller's own routes are the right source; threading them into
+	// this plumbing is a change to controller wiring, not part of swapping
+	// the reader, so it stays with the claim-routing slice (ga-601v2).
 	prompt = renderPrompt(p.fs, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
 		CityRoot:                p.cityPath,
 		AgentName:               qualifiedName,
@@ -360,10 +376,10 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		WorkDir:                 workDir,
 		IssuePrefix:             findRigPrefix(rigName, p.rigs),
 		DefaultBranch:           defaultBranchForRig(rigName, p.rigs, workDir),
-		AssignedInProgressQuery: expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "assigned_in_progress_query", cfgAgent.EffectiveAssignedInProgressQueryForBeads(beadsCfg), p.stderr),
-		AssignedReadyQuery:      expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "assigned_ready_query", cfgAgent.EffectiveAssignedReadyQueryForBeads(beadsCfg), p.stderr),
-		RoutedPoolQuery:         expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "routed_pool_query", cfgAgent.EffectiveRoutedPoolQueryForBeads(beadsCfg), p.stderr),
-		WorkQuery:               expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "work_query", cfgAgent.EffectiveWorkQueryForBeads(beadsCfg), p.stderr),
+		AssignedInProgressQuery: expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "assigned_in_progress_query", cfgAgent.EffectiveAssignedInProgressQueryFor(topo), p.stderr),
+		AssignedReadyQuery:      expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "assigned_ready_query", cfgAgent.EffectiveAssignedReadyQueryFor(topo), p.stderr),
+		RoutedPoolQuery:         expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "routed_pool_query", cfgAgent.EffectiveRoutedPoolQueryFor(topo), p.stderr),
+		WorkQuery:               expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "work_query", cfgAgent.EffectiveWorkQueryFor(topo), p.stderr),
 		SlingQuery:              expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "sling_query", cfgAgent.EffectiveSlingQuery(), p.stderr),
 		ProviderKey:             providerKey,
 		ProviderDisplayName:     providerDisplayName,
@@ -775,46 +791,47 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 	// Explicit empty values let tmux unset stale Dolt vars inherited from
 	// the server environment when the current city/rig does not use them.
 	setProjectedDoltEnvEmpty(env)
-	ensureProjectedPostgresEnvExplicit(env)
 
 	// Session env projection must not trigger provider recovery. Session setup
 	// only publishes the currently resolved target; store operations use the
 	// bd runtime env when recovery is allowed.
 	if rigRoot == "" {
 		if cityUsesBdStoreContract(cityPath) {
-			if usedPostgres, err := applyCityPostgresBackendEnv(env, cityPath); err != nil {
-				// On PG projection errors, keep explicit empty keys so tmux
+			if err := applyHostedBeadsCredentialEnv(env, cityPath); err != nil {
+				return env, err
+			}
+			if bound, err := applyCityStorageBindingEnv(env, cityPath); err != nil {
+				// On projection errors, keep explicit empty keys so tmux
 				// clears stale inherited backend variables for the session.
 				clearProjectedDoltEnv(env)
-				clearProjectedPostgresEnv(env)
 				mirrorBeadsDoltEnv(env)
 				ensureProjectedDoltEnvExplicit(env)
-				ensureProjectedPostgresEnvExplicit(env)
 				return env, err
-			} else if usedPostgres {
+			} else if bound {
 				ensureProjectedDoltEnvExplicit(env)
 				return env, nil
 			}
 		}
 		if err := applyResolvedCityDoltEnv(env, cityPath, false); err != nil {
 			mirrorBeadsDoltEnv(env)
-			ensureProjectedPostgresEnvExplicit(env)
 			if !isRecoverableManagedDoltEnvError(err) {
 				return env, err
 			}
 		}
-		ensureProjectedPostgresEnvExplicit(env)
 		return env, nil
 	}
 
+	if cityUsesBdStoreContract(cityPath) {
+		if err := applyHostedBeadsCredentialEnv(env, cityPath); err != nil {
+			return env, err
+		}
+	}
 	if err := applyResolvedRigDoltEnv(env, cityPath, rigRoot, rigConfigForScopeRoot(cityPath, rigRoot, rigs), false); err != nil {
 		mirrorBeadsDoltEnv(env)
-		ensureProjectedPostgresEnvExplicit(env)
 		if !isRecoverableManagedDoltEnvError(err) {
 			return env, err
 		}
 	}
-	ensureProjectedPostgresEnvExplicit(env)
 	return env, nil
 }
 

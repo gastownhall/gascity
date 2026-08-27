@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 var (
@@ -139,7 +141,20 @@ func validateCanonicalMigrationGuardDirectory(directory string) error {
 	if err != nil {
 		return fmt.Errorf("%w: resolving city directory: %w", ErrInvalidMigrationGuard, err)
 	}
-	if resolved != directory {
+	// The directory must already be canonical, so callers cannot reach one
+	// city under two names. Accept EITHER spelling of a canonical path: macOS
+	// names the same location both as /var/... and as /private/var/... (same
+	// for /tmp and /home), EvalSymlinks reports the /private form while
+	// pathutil collapses to the alias form, and callers here legitimately
+	// produce both. Requiring only the EvalSymlinks form rejected every
+	// legitimate city under /var or /tmp on that host (gas-bsj).
+	//
+	// This stays strict about real symlinks: a directory reached through one
+	// resolves to a path that is neither spelling of what it was given as, so
+	// it still fails here — see
+	// TestAcquireMigrationGuardRejectsNoncanonicalOrSymlinkedCityDirectory.
+	// On Linux the two spellings coincide and this is exactly the old check.
+	if directory != resolved && directory != pathutil.NormalizePathForCompare(resolved) {
 		return ErrInvalidMigrationGuard
 	}
 	return nil

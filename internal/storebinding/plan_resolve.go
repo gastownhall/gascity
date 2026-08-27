@@ -244,14 +244,21 @@ type providerLookup interface {
 // definition, unknown provider, invalid specification, unsupported class
 // capability, or aliased Work pin is rejected before a single provider
 // mutation, with nothing to unwind beyond discarding pure facade values.
-func ResolveStoragePlan(registry *ProviderRegistry, storage config.StorageConfig, work WorkPinInputs) (*StoragePlan, error) {
+//
+// cityRoot is the absolute directory of the city the plan is resolved for, and
+// it is stamped into every binding specification. It is a parameter rather
+// than something read off the Work pins because the pins deliberately carry a
+// DIGEST of each scope's root, not the root: a digest identifies a workspace
+// and cannot be resolved back into a path. An empty cityRoot is legal and
+// leaves the specifications unstamped; a provider that needs one then refuses.
+func ResolveStoragePlan(registry *ProviderRegistry, storage config.StorageConfig, work WorkPinInputs, cityRoot string) (*StoragePlan, error) {
 	if registry == nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidStoragePlan, ErrProviderUnavailable)
 	}
 	if !registryFrozen(registry) {
 		return nil, ErrProviderRegistryNotFrozen
 	}
-	return resolveStoragePlan(registry, storage, work)
+	return resolveStoragePlan(registry, storage, work, cityRoot)
 }
 
 func registryFrozen(registry *ProviderRegistry) bool {
@@ -260,7 +267,7 @@ func registryFrozen(registry *ProviderRegistry) bool {
 	return registry.frozen
 }
 
-func resolveStoragePlan(lookup providerLookup, storage config.StorageConfig, work WorkPinInputs) (*StoragePlan, error) {
+func resolveStoragePlan(lookup providerLookup, storage config.StorageConfig, work WorkPinInputs, cityRoot string) (*StoragePlan, error) {
 	if lookup == nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidStoragePlan, ErrProviderUnavailable)
 	}
@@ -271,7 +278,7 @@ func resolveStoragePlan(lookup providerLookup, storage config.StorageConfig, wor
 	if _, defined := storage.Bindings[string(ReservedWorkBinding)]; defined {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidStoragePlan, ErrReservedBindingDefined)
 	}
-	specs, err := resolveBindingSpecs(storage, assignments)
+	specs, err := resolveBindingSpecs(storage, assignments, cityRoot)
 	if err != nil {
 		return nil, err
 	}
@@ -341,7 +348,7 @@ func resolveAssignments(storage config.StorageConfig) (map[coordclass.Class]Bind
 
 // resolveBindingSpecs validates every defined binding and rejects one no class
 // selects, in lexical binding-name order so failures are deterministic.
-func resolveBindingSpecs(storage config.StorageConfig, assignments map[coordclass.Class]BindingName) ([]BindingSpec, error) {
+func resolveBindingSpecs(storage config.StorageConfig, assignments map[coordclass.Class]BindingName, cityRoot string) ([]BindingSpec, error) {
 	names := make([]string, 0, len(storage.Bindings))
 	for name := range storage.Bindings {
 		names = append(names, name)
@@ -355,6 +362,9 @@ func resolveBindingSpecs(storage config.StorageConfig, assignments map[coordclas
 			Provider:  ProviderID(binding.Provider),
 			Path:      binding.Path,
 			ConfigRef: ConfigRef(binding.ConfigRef),
+			CityRoot:  cityRoot,
+			URL:       binding.URL,
+			Auth:      binding.Auth,
 		}
 		if err := spec.Validate(); err != nil {
 			return nil, fmt.Errorf("%w: binding %q: %w", ErrInvalidStoragePlan, name, err)
@@ -793,6 +803,12 @@ func storageClassFor(class coordclass.Class) config.StorageClass {
 	}
 }
 
+// bindingConfigDigest digests the CONFIGURED facts of one binding: what
+// city.toml says, not where the city is. The city root is deliberately absent.
+// This digest is persisted on the migration manifest wire, so folding a new
+// input into it would change the identity of records already written — and the
+// city is not missing from the plan's identity anyway: the composite digest
+// folds the Work pins' config context, which already hashes the city path.
 func bindingConfigDigest(spec BindingSpec) ConfigRefDigest {
 	var encoded canonicalDescriptorEncoding
 	encoded.string("gascity.storage-binding-config.v1")

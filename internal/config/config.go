@@ -2088,6 +2088,16 @@ type OrdersConfig struct {
 	// timeout only; a condition trigger's check_timeout is a separate probe
 	// deadline and is not capped here.
 	MaxTimeout string `toml:"max_timeout,omitempty"`
+
+	// *int rather than int so an unset value stays out of marshaled config:
+	// BurntSushi's omitempty does not drop a zero int, so a plain int would
+	// emit max_dispatches_per_tick = 0 into every marshaled city.toml.
+
+	// MaxDispatchesPerTick caps how many orders the supervisor dispatches
+	// per tick. Unset keeps the built-in default of 4; set to 1 to drain
+	// overdue cooldown orders one-per-tick at cold start instead of firing
+	// several concurrent goroutines at once.
+	MaxDispatchesPerTick *int `toml:"max_dispatches_per_tick,omitempty"`
 	// Overrides apply per-order field overrides after scanning.
 	// Each override targets an order by name and optionally by rig.
 	Overrides []OrderOverride `toml:"overrides,omitempty"`
@@ -2586,8 +2596,11 @@ type DaemonConfig struct {
 	// AutoReapClosedBeadWorktrees controls whether the reconciler patrol
 	// automatically removes per-bead git worktrees once their associated
 	// work bead reaches closed status. Only worktrees with a clean working
-	// tree, no unpushed commits, and no stashes are removed; unsafe worktrees
-	// are logged as warnings and left in place for operator review. Session
+	// tree, no stashes, and no commits that removal would orphan — commits
+	// reachable from no branch, tag, or remote-tracking ref — are removed;
+	// push state is deliberately not the test, since `git worktree remove`
+	// deletes the checkout and not refs/heads. Unsafe worktrees are logged
+	// as warnings and left in place for operator review. Session
 	// home directories (agent template directories) are never touched.
 	// Defaults to false. Set to true to enable automated worktree cleanup.
 	AutoReapClosedBeadWorktrees *bool `toml:"auto_reap_closed_bead_worktrees,omitempty" jsonschema:"default=false"`
@@ -2598,9 +2611,13 @@ type DaemonConfig struct {
 	// what it protected, without removing anything. This is the safe
 	// staged-rollout surface: an operator enables dry-run first, confirms via
 	// `gc events` that no live worktree appears in the would-reap set, then
-	// enables AutoReapClosedBeadWorktrees for real removal. Dry-run has no
-	// effect when AutoReapClosedBeadWorktrees is already true (real removal
-	// supersedes it). Defaults to false.
+	// enables AutoReapClosedBeadWorktrees for real removal. Those events are
+	// edge-triggered: each worktree is reported when the patrol first
+	// classifies it and again whenever its verdict changes, not once per
+	// tick, so the would-reap set is complete right after dry-run is enabled
+	// rather than reprinted every sweep. Dry-run has no effect when
+	// AutoReapClosedBeadWorktrees is already true (real removal supersedes
+	// it). Defaults to false.
 	AutoReapClosedBeadWorktreesDryRun *bool `toml:"auto_reap_closed_bead_worktrees_dry_run,omitempty" jsonschema:"default=false"`
 	// AutoReapClosedBeadWorktreesMinAgeMinutes is the minimum worktree age,
 	// in minutes, before a closed-bead worktree becomes eligible for reap
@@ -3664,7 +3681,7 @@ func InjectImplicitAgents(cfg *City) {
 	// prompt rendering falls back to the embedded baseline.
 	promptTemplate := ""
 	if coreDir := cfg.PackDirByName("core"); coreDir != "" {
-		promptTemplate = filepath.Join(coreDir, "assets", "prompts", "pool-worker.md")
+		promptTemplate = filepath.Join(coreDir, "assets", "prompts", "pool-worker.template.md")
 	}
 
 	slingFormula := cfg.AgentDefaults.DefaultSlingFormula

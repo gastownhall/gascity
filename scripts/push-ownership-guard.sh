@@ -18,9 +18,10 @@
 # assignment), re-reads its live state from bd, and returns non-zero
 # (blocking the push) unless the bead is still open/in_progress, still
 # assigned to one of this session's identities (any of GC_SESSION_NAME,
-# GC_SESSION_ID, GC_ALIAS, GC_AGENT — mirroring the claim path), still
-# routed to this session's config identity, and not held by the mayor or an
-# external actor.
+# GC_SESSION_ID, GC_ALIAS, GC_AGENT — mirroring the claim path — or
+# GC_TEMPLATE, for work routed to the whole pool rather than claimed by one
+# instance; see ga-kzl21p), still routed to this session's config identity,
+# and not held by the mayor or an external actor.
 #
 # TWO CALL SITES (defense in depth — see ga-fip9ps.1 bead notes):
 #   Layer A — .githooks/pre-push calls this unconditionally for every
@@ -115,6 +116,24 @@ _pog_read_with_retry() {
     return 1
 }
 
+# _pog_branch_id_bead_inactive <id>: true (rc 0) only if a FRESH bd show
+# confirms <id>'s status is neither in_progress nor open -- i.e. the branch-
+# derived bead is no longer the live claim. Fails safe: any read/parse
+# failure returns 1 (treat as still-active / not confirmed inactive), so an
+# unreachable bd never triggers the branch-reuse override below -- it just
+# falls through to the existing branch-id-wins path, which itself blocks
+# safely on the same failure via assert_bead_still_claimed's own read.
+_pog_branch_id_bead_inactive() {
+    local id="$1"
+    local json
+    json="$(_pog_read_with_retry bd show "$id" --json)" || return 1
+    [[ -n "$json" ]] || return 1
+    jq -e '.' <<<"$json" >/dev/null 2>&1 || return 1
+    local st
+    st="$(jq -r '.[0].status // empty' <<<"$json" 2>/dev/null || true)"
+    [[ "$st" != "in_progress" && "$st" != "open" && -n "$st" ]]
+}
+
 # _pog_resolve_bead_id: prints the bead id this push should be checked
 # against; prints nothing if none can be resolved. Resolution order:
 #   1. The current branch name, matched against ga-[0-9a-z]{6}(\.[0-9]+)* —
@@ -137,6 +156,18 @@ _pog_read_with_retry() {
 # legitimately drift from bd's bookkeeping. EXCEPTION: deploy/*-gate
 # branches (see below) embed the id of the bead being gated, not the bead
 # this push is for, so for that branch shape the live assignee wins instead.
+# EXCEPTION (branch reuse, ga-bf39j8): a branch name can be reused across a
+# sequence of beads — a predecessor bead closes and a live successor bead
+# continues the identical work on the identical branch name. When the
+# branch-derived bead is confirmed no longer live (a fresh bd show shows it's
+# not in_progress/open) AND a DIFFERENT in-progress bead in this session's
+# own assignment list declares itself that bead's continuation via
+# metadata.branch (matching the literal branch name) or metadata.build_bead
+# (matching the branch-derived id), that successor id wins instead. This is
+# an explicit declared-link check, not a blind "first in-progress bead"
+# pick — a session identity routinely holds several unrelated in-progress
+# beads at once, so picking one without a relational check would validate
+# this push against a totally unrelated concurrent task.
 #
 # KNOWN LIMITATION of path 2 (confirmed by manual repro, not yet filed as
 # its own bead): the fallback query itself filters on --status=in_progress,
@@ -210,6 +241,24 @@ _pog_resolve_bead_id() {
         return
     fi
 
+    # BRANCH REUSE (ga-bf39j8): see the EXCEPTION note above the function
+    # doc comment. Look for a live in-progress bead that explicitly declares
+    # itself the branch-derived bead's continuation, but only act on it once
+    # the branch-derived bead is confirmed no longer live — an explicit link
+    # to a still-active bead is not this guard's problem to resolve, it just
+    # falls through to the ordinary disagreement warning below.
+    local successor_id=""
+    if [[ -n "$branch_id" ]]; then
+        successor_id="$(jq -r --arg br "$branch" --arg bid "$branch_id" \
+            '[.[] | select(.metadata.branch == $br or .metadata.build_bead == $bid)][0].id // empty' \
+            <<<"${list_json:-[]}" 2>/dev/null || true)"
+    fi
+    if [[ -n "$successor_id" && "$successor_id" != "$branch_id" ]] && _pog_branch_id_bead_inactive "$branch_id"; then
+        echo "push-ownership-guard: NOTE branch $branch was reused after $branch_id closed; this session's in-progress $successor_id declares itself that bead's continuation (metadata.branch/build_bead), using $successor_id instead" >&2
+        printf '%s' "$successor_id"
+        return
+    fi
+
     if [[ -n "$branch_id" && -n "$assignee_id" && "$branch_id" != "$assignee_id" ]]; then
         echo "push-ownership-guard: WARNING branch name resolves to $branch_id but this session's in-progress assignment is $assignee_id; using $branch_id (branch name wins)" >&2
     fi
@@ -275,9 +324,21 @@ assert_bead_still_claimed() {
     # bead is legitimately assigned to the session name/id. Fail-closed
     # semantics preserved: with identities present, an assignee matching none
     # (including empty) still blocks.
+    #
+    # GC_TEMPLATE is also a valid match (ga-kzl21p): it's the bare pool
+    # identity (e.g. "gascity/builder"), stamped by the SDK at session start
+    # for every session shape regardless of which specific pool instance is
+    # running (e.g. "gascity/builder-1") — see internal/session/lifecycle.go.
+    # Work routed to the whole pool, rather than claimed by one instance, can
+    # carry that bare identity as assignee. Without this, a session whose
+    # GC_SESSION_NAME/GC_SESSION_ID/GC_ALIAS/GC_AGENT are all instance-shaped
+    # could never match a pool-level assignee, and completed, gate-verified
+    # work became unpushable with no reassignment and no bypass. This is the
+    # same trust boundary the routed_to check below already applies to
+    # GC_TEMPLATE — extended here to cover assignee too.
     local -a _pog_identities=()
     local _pog_ident
-    for _pog_ident in "${GC_SESSION_NAME:-}" "${GC_SESSION_ID:-}" "${GC_ALIAS:-}" "${GC_AGENT:-}"; do
+    for _pog_ident in "${GC_SESSION_NAME:-}" "${GC_SESSION_ID:-}" "${GC_ALIAS:-}" "${GC_AGENT:-}" "${GC_TEMPLATE:-}"; do
         [[ -n "$_pog_ident" ]] && _pog_identities+=("$_pog_ident")
     done
     if [[ ${#_pog_identities[@]} -gt 0 ]]; then

@@ -209,7 +209,10 @@
               "pack-registry-requests",
               "events-reemit-execution",
               "storage-migrate",
-              "storage-status"
+              "storage-status",
+              "ready",
+              "storage-recover-stranded",
+              "beads-metadata-cas"
             ]
           },
           "event_id": {

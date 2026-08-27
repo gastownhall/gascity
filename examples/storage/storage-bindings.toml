@@ -26,6 +26,24 @@ path = ".gc/store"
 # copy of the compiled provider list and implementing the engine-open seam;
 # nothing in this file changes shape for it.
 #
+# The built-in beads-workspace provider serves a binding from a beads
+# workspace, and it is the one provider whose backing store may itself be
+# remote. Such a binding keeps its config_ref — that names which workspace in
+# this city is asking — and adds where the backend answers plus a reference to
+# the credential for it:
+#
+#   [storage.bindings.shared]
+#   provider = "beads-workspace"
+#   config_ref = "shared"
+#   url = "https://beads.example/workspaces"
+#   auth = "gasworks"
+#
+# `url` is http or https, with a host and an optional path prefix, and never
+# userinfo, a query, or a fragment. `auth` is a REFERENCE, never a credential:
+# "gasworks" mints one through the configured credential-provider command, and
+# "env:NAME" reads one from an environment variable. A credential itself never
+# belongs in a city's config.
+#
 # There is no migration or mode key. Changing an assignment, a provider, or a
 # provider's configuration takes effect on restart, and a city whose data has
 # not moved to match refuses to start rather than serving from the wrong side

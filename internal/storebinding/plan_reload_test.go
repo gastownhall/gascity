@@ -127,7 +127,7 @@ func planResolveForReload(t *testing.T, storage config.StorageConfig, pins WorkP
 	t.Helper()
 	factory := &planCountingFactory{id: "infra-provider"}
 	registry, _ := planRegistry(t, factory, &planCountingFactory{id: "task-beads-provider"})
-	plan, err := ResolveStoragePlan(registry, storage, pins)
+	plan, err := ResolveStoragePlan(registry, storage, pins, "")
 	if err != nil {
 		t.Fatalf("ResolveStoragePlan: %v", err)
 	}

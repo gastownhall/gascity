@@ -90,6 +90,9 @@ func TestInspectGraphLeavesAnyRollbackJournalForFencedInspection(t *testing.T) {
 }
 
 func TestInspectGraphRefusesLiveSourceDescriptorWithoutOpeningWAL(t *testing.T) {
+	if !sqliteSourceDescriptorDetectionSupported() {
+		t.Skip("detecting already-open SQLite source descriptors requires Linux /proc")
+	}
 	root := t.TempDir()
 	graphDir := filepath.Join(root, "graph")
 	writer := openGraphSource(t, graphDir)
@@ -237,6 +240,9 @@ func TestGraphSourceFenceComparisonAllowsOnlyWALIndexReaderMarkChurn(t *testing.
 }
 
 func TestGraphFenceCompletesInspectionFromTemporarySnapshot(t *testing.T) {
+	if !sqliteWriterFencingSupported() {
+		t.Skip("SQLite writer fencing is only available on Linux")
+	}
 	root := t.TempDir()
 	graphDir := filepath.Join(root, "graph")
 	writer := openGraphSource(t, graphDir)
@@ -346,6 +352,9 @@ func TestAcquireGraphFenceRejectsTargetMovedAfterInspection(t *testing.T) {
 }
 
 func TestGraphFenceSnapshotsSQLiteComponentsWithoutCopyingCloneLocalSidecars(t *testing.T) {
+	if !sqliteWriterFencingSupported() {
+		t.Skip("SQLite writer fencing is only available on Linux")
+	}
 	root := t.TempDir()
 	graphDir := filepath.Join(root, "graph")
 	writer := openGraphSource(t, graphDir)
@@ -389,6 +398,9 @@ func TestGraphFenceSnapshotsSQLiteComponentsWithoutCopyingCloneLocalSidecars(t *
 }
 
 func TestGraphInspectorRetainsResolvedBindingPathAcrossFencedInspection(t *testing.T) {
+	if !sqliteWriterFencingSupported() {
+		t.Skip("SQLite writer fencing is only available on Linux")
+	}
 	root := t.TempDir()
 	writer := openGraphSource(t, filepath.Join(root, "graph"))
 	t.Cleanup(func() { _ = writer.CloseStore() })
@@ -437,6 +449,9 @@ func TestGraphInspectorRetainsResolvedBindingPathAcrossFencedInspection(t *testi
 }
 
 func TestGraphFenceRejectsComponentStateChangedDuringSnapshotCopy(t *testing.T) {
+	if !sqliteWriterFencingSupported() {
+		t.Skip("SQLite writer fencing is only available on Linux")
+	}
 	root := t.TempDir()
 	graphDir := filepath.Join(root, "graph")
 	writer := openGraphSource(t, graphDir)
@@ -564,6 +579,9 @@ func TestGraphFencedInspectionCancellationJoinsSnapshotCleanupFailure(t *testing
 }
 
 func TestGraphFenceRejectsMarkerChangesDuringSnapshotCopy(t *testing.T) {
+	if !sqliteWriterFencingSupported() {
+		t.Skip("SQLite writer fencing is only available on Linux")
+	}
 	for _, scenario := range []struct {
 		name       string
 		initial    *string
@@ -740,6 +758,9 @@ func TestGraphFenceInspectionOperationRetainsNoFenceOrCallbackCapability(t *test
 }
 
 func TestGraphFencedInspectionValidatesExactRequestBeforeSnapshot(t *testing.T) {
+	if !sqliteWriterFencingSupported() {
+		t.Skip("SQLite writer fencing is only available on Linux")
+	}
 	rootA := t.TempDir()
 	writerA := openGraphSource(t, filepath.Join(rootA, graphDirectoryName))
 	if _, err := writerA.Create(beads.Bead{Title: "graph A"}); err != nil {

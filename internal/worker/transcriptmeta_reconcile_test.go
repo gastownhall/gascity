@@ -251,8 +251,18 @@ func TestTranscriptMetaReconcilerContinuesAfterPerSidecarWriteFailure(t *testing
 	if err := os.MkdirAll(filepath.Dir(failingPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink("/proc/self/status", failingPath); err != nil {
-		t.Fatalf("Symlink failing transcript: %v", err)
+	if err := os.WriteFile(failingPath, []byte("not parsed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Make this transcript's sidecar write fail by occupying its exact
+	// destination with a directory, which no atomic rename can replace. The
+	// earlier injection symlinked the transcript at /proc/self/status and
+	// relied on procfs rejecting the write; that resolves nowhere on macOS, so
+	// the row was counted as not-yet-on-disk and this test saw zero failures.
+	// A directory in the way fails identically on every platform, and unlike a
+	// read-only parent it still fails when the suite runs as root.
+	if err := os.MkdirAll(failingPath+transcriptmeta.Suffix, 0o755); err != nil {
+		t.Fatalf("occupying sidecar path: %v", err)
 	}
 
 	const secondWorkDir = "/data/projects/working-sidecar"

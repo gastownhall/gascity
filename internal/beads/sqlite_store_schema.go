@@ -107,6 +107,9 @@ var sqliteSchemaIndexStatements = []string{
 }
 
 func sqliteStoreCreationSchemaStatements() []string {
+	// The per-connection pragmas here mirror sqliteStoreDSNWithMode. They have
+	// to: applySchema runs on the store's single write connection, so a value
+	// restated here overrides the DSN for that connection's whole lifetime.
 	statements := []string{
 		`PRAGMA journal_mode=WAL`,
 		`PRAGMA synchronous=FULL`,

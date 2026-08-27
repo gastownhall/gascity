@@ -37,7 +37,8 @@ func (i *AgentPatchGetQualifiedInput) QualifiedName() string {
 type AgentPatchSetInput struct {
 	CityScope
 	Body struct {
-		Dir       string            `json:"dir,omitempty" doc:"Agent directory scope."`
+		Dir       string            `json:"dir,omitempty" doc:"Agent directory scope (legacy targeting key; prefer rig)."`
+		Rig       string            `json:"rig,omitempty" doc:"Rig targeting key. \"*\" matches the agent name across all rigs and city. Mutually exclusive with dir."`
 		Name      string            `json:"name,omitempty" doc:"Agent name."`
 		Provider  *string           `json:"provider,omitempty" doc:"Override the agent's provider."`
 		WorkDir   *string           `json:"work_dir,omitempty" doc:"Override session working directory."`

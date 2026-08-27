@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
@@ -858,5 +859,83 @@ func TestEnsureInfraClassMigratedLeavesAnAllocatorThatCannotCollide(t *testing.T
 	}
 	if got := idSuffix(t, minted.ID); got <= idSuffix(t, highest) {
 		t.Fatalf("the runtime handle minted %s, colliding with the imported slice whose highest id is %s", minted.ID, highest)
+	}
+}
+
+// TestInfraSnapshotLeavesSyntheticConvoysInTheWorkStore is the blast-radius pin
+// for reclassifying synthetic convoys as WORK.
+//
+// readInfraSnapshot is the one selector shared by the copy and by the boot-time
+// containment re-check, so a bead it returns is both carried into the binding
+// and, if it is ever absent from the binding, reported as STRANDED — which
+// refuses the boot. Synthetic convoys are minted in the work store and stay
+// there, so returning them would make every drain a city runs after cutover mint
+// a fresh bead the binding never receives, and the next boot would count them as
+// stranded writes and refuse to serve.
+//
+// The wisp row is the other half and is what makes this a boundary rather than a
+// blanket exemption. Wisp roots stay GRAPH class, so a city whose binding is
+// missing them still reports them stranded exactly as it does today.
+func TestInfraSnapshotLeavesSyntheticConvoysInTheWorkStore(t *testing.T) {
+	source := beads.NewMemStore()
+	seed := func(b beads.Bead) beads.Bead {
+		created, err := source.Create(b)
+		if err != nil {
+			t.Fatalf("seeding %s: %v", b.Title, err)
+		}
+		return created
+	}
+
+	inputConvoy := seed(beads.Bead{
+		Title:    "input convoy for a graph.v2 pour",
+		Type:     "convoy",
+		Metadata: map[string]string{beadmeta.SyntheticMetadataKey: "true"},
+	})
+	unitConvoy := seed(beads.Bead{
+		Title:    "drain unit 0",
+		Type:     "convoy",
+		Metadata: map[string]string{beadmeta.SyntheticKindMetadataKey: "drain-unit-convoy"},
+	})
+	userConvoy := seed(beads.Bead{Title: "a human convoy", Type: "convoy"})
+	member := seed(beads.Bead{Title: "a work bead", Type: "task"})
+
+	// The maintainer-city shape: wisp roots carrying each of the three markers
+	// the wisp arm matches. All three stay graph class.
+	wispByKind := seed(beads.Bead{Title: "wisp root", Type: "molecule", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWisp}})
+	wispByType := seed(beads.Bead{Title: "wisp by type", Type: beadmeta.KindWisp})
+	wispByLabel := seed(beads.Bead{Title: "wisp by label", Type: "task", Labels: []string{"gc:wisp"}})
+	sessionBead := seed(beads.Bead{Title: "a session", Type: "session"})
+
+	rows, err := readInfraSnapshot(source)
+	if err != nil {
+		t.Fatalf("readInfraSnapshot: %v", err)
+	}
+	carried := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		carried[row.ID] = true
+	}
+
+	for _, tc := range []struct {
+		bead beads.Bead
+		why  string
+	}{
+		{inputConvoy, "a graph.v2 input convoy is minted in the work store alongside the members it tracks"},
+		{unitConvoy, "a drain-unit convoy is minted in the work store alongside the member it tracks"},
+		{userConvoy, "a user convoy has always been work"},
+		{member, "an ordinary work bead"},
+	} {
+		if carried[tc.bead.ID] {
+			t.Errorf("readInfraSnapshot carried %s (%s): %s; a work bead the copy carries is one the boot-time containment check will report stranded when the binding does not have it",
+				tc.bead.ID, tc.bead.Title, tc.why)
+		}
+	}
+
+	for _, b := range []beads.Bead{wispByKind, wispByType, wispByLabel, sessionBead} {
+		if !carried[b.ID] {
+			t.Errorf("readInfraSnapshot dropped %s (%s); the synthetic-convoy reclassification must not widen past convoys", b.ID, b.Title)
+		}
+	}
+	if got := len(rows); got != 4 {
+		t.Fatalf("snapshot carried %d rows, want exactly the 4 infra beads; ids=%v", got, carried)
 	}
 }

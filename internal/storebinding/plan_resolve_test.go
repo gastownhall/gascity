@@ -26,7 +26,7 @@ func TestResolveStoragePlanLooksUpEachProviderExactlyOnce(t *testing.T) {
 		"orders":     {Provider: "infra-provider", Path: ".gc/orders"},
 	})
 
-	plan, err := resolveStoragePlan(lookup, storage, planWorkPins())
+	plan, err := resolveStoragePlan(lookup, storage, planWorkPins(), "")
 	if err != nil {
 		t.Fatalf("resolveStoragePlan: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestResolveStoragePlanStopsAtFirstProviderFailure(t *testing.T) {
 		"unknown": {Provider: "zzz-missing-provider", ConfigRef: "missing"},
 	})
 
-	plan, err := resolveStoragePlan(lookup, storage, planWorkPins())
+	plan, err := resolveStoragePlan(lookup, storage, planWorkPins(), "")
 	if plan != nil || !errors.Is(err, ErrUnknownProvider) {
 		t.Fatalf("resolveStoragePlan = %v, %v; want no plan and an unknown-provider error", plan, err)
 	}
@@ -162,7 +162,7 @@ func TestResolveStoragePlanRejectsInexactConfigurationBeforeAnyProviderMutation(
 			if testCase.pins != nil {
 				pins = *testCase.pins
 			}
-			plan, err := resolveStoragePlan(lookup, planStorageConfig(testCase.classes, testCase.binding), pins)
+			plan, err := resolveStoragePlan(lookup, planStorageConfig(testCase.classes, testCase.binding), pins, "")
 			if plan != nil {
 				t.Fatalf("resolveStoragePlan returned a partial plan: %#v", plan)
 			}
@@ -180,7 +180,7 @@ func TestResolveStoragePlanFreezesDefaultAllClassesOnReservedWork(t *testing.T) 
 	registry, _ := planRegistry(t)
 	city := &config.City{}
 
-	plan, err := ResolveStoragePlan(registry, city.EffectiveStorage(), planWorkPins())
+	plan, err := ResolveStoragePlan(registry, city.EffectiveStorage(), planWorkPins(), "")
 	if err != nil {
 		t.Fatalf("ResolveStoragePlan: %v", err)
 	}
@@ -307,10 +307,10 @@ func TestResolveStoragePlanPlansOrdersGraphBindOnlyForSplitAssignments(t *testin
 
 func TestResolveStoragePlanRequiresFrozenRegistry(t *testing.T) {
 	registry := NewProviderRegistry()
-	if _, err := ResolveStoragePlan(registry, (&config.City{}).EffectiveStorage(), planWorkPins()); !errors.Is(err, ErrProviderRegistryNotFrozen) {
+	if _, err := ResolveStoragePlan(registry, (&config.City{}).EffectiveStorage(), planWorkPins(), ""); !errors.Is(err, ErrProviderRegistryNotFrozen) {
 		t.Fatalf("ResolveStoragePlan on an unfrozen registry = %v, want %v", err, ErrProviderRegistryNotFrozen)
 	}
-	if _, err := ResolveStoragePlan(nil, (&config.City{}).EffectiveStorage(), planWorkPins()); !errors.Is(err, ErrInvalidStoragePlan) {
+	if _, err := ResolveStoragePlan(nil, (&config.City{}).EffectiveStorage(), planWorkPins(), ""); !errors.Is(err, ErrInvalidStoragePlan) {
 		t.Fatalf("ResolveStoragePlan without a registry = %v, want an invalid-plan error", err)
 	}
 }
@@ -394,7 +394,7 @@ func planMixedPlan(t *testing.T) *StoragePlan {
 	// The reserved binding still serves Sessions so the mixed plan exercises a
 	// four-participant program.
 	storage.Classes.Sessions = string(ReservedWorkBinding)
-	plan, err := ResolveStoragePlan(registry, storage, planWorkPins())
+	plan, err := ResolveStoragePlan(registry, storage, planWorkPins(), "")
 	if err != nil {
 		t.Fatalf("ResolveStoragePlan: %v", err)
 	}
@@ -420,7 +420,7 @@ func planMovedWorkPlan(t *testing.T) *StoragePlan {
 		"task-beads": {Provider: "task-beads-provider", ConfigRef: "work-production"},
 		"infra":      {Provider: "infra-provider", Path: ".gc/store"},
 	})
-	plan, err := ResolveStoragePlan(registry, storage, planWorkPins())
+	plan, err := ResolveStoragePlan(registry, storage, planWorkPins(), "")
 	if err != nil {
 		t.Fatalf("ResolveStoragePlan: %v", err)
 	}

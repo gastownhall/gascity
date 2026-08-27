@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // Session-bead metadata keys for the stalled-claim backstop. The state machine
@@ -237,12 +238,17 @@ func (p poolContinuationBackstop) revalidate(target backstopTarget) backstopReso
 	if err != nil || root.ID != target.RootID {
 		return backstopResolutionHold
 	}
+	// Mirrors evaluateReadyContinuationClaimCandidate: the root proves the run is
+	// live, not who owns this step. gc.session_name on the root is a dashboard
+	// stamp, last-writer-wins across the molecule's steps, so requiring it to
+	// equal target.Assignee is unsatisfiable for any formula that routes steps to
+	// more than one agent template. current.Assignee above is the authoritative
+	// pin.
 	if !strings.EqualFold(strings.TrimSpace(root.Status), "in_progress") ||
 		!strings.EqualFold(strings.TrimSpace(root.Type), "task") ||
 		strings.TrimSpace(root.Metadata[beadmeta.RootStoreRefMetadataKey]) != target.StoreRef ||
 		strings.TrimSpace(root.Metadata[beadmeta.FormulaContractMetadataKey]) != "graph.v2" ||
-		strings.TrimSpace(root.Metadata[beadmeta.KindMetadataKey]) != "workflow" ||
-		strings.TrimSpace(root.Metadata[beadmeta.SessionNameMetadataKey]) != target.Assignee {
+		strings.TrimSpace(root.Metadata[beadmeta.KindMetadataKey]) != "workflow" {
 		return backstopResolutionClear
 	}
 	return backstopResolutionOutstanding
@@ -474,6 +480,10 @@ func normalizeIdleClaimStoreRef(storeRef string) string {
 	storeRef = strings.TrimSpace(storeRef)
 	switch {
 	case storeRef == "", storeRef == "city", strings.HasPrefix(storeRef, "city:"):
+		return "city"
+	// A class binding is city scope: it is the same store the leading arm used
+	// to record under the city ref, now named as a leg of its own.
+	case storeref.IsClassRef(storeRef):
 		return "city"
 	case strings.HasPrefix(storeRef, "rig:"):
 		return "rig:" + strings.TrimSpace(strings.TrimPrefix(storeRef, "rig:"))

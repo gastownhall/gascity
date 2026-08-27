@@ -57,7 +57,10 @@ func NewBeadsAdapters(store beads.Store, identity BeadsAdapterIdentity, queue ..
 	if len(queue) > 1 {
 		return BeadsAdapters{}, errors.New("adapting canonical beads store: at most one nudge queue is allowed")
 	}
-	graph := &beadsGraphAdapter{store: store}
+	graph, err := NewBeadsGraphStore(store)
+	if err != nil {
+		return BeadsAdapters{}, err
+	}
 	queueFront := NudgeQueue(nil)
 	if len(queue) > 0 {
 		queueFront = queue[0]
@@ -86,6 +89,27 @@ func NewBeadsAdapters(store beads.Store, identity BeadsAdapterIdentity, queue ..
 			Shadows: nudgequeue.NewStore(beads.NudgesStore{Store: store}),
 		},
 	}, nil
+}
+
+// NewBeadsGraphStore projects an already-opened Beads store into the closed
+// graph class front door, and nothing else.
+//
+// It is the single-class half of NewBeadsAdapters, for a caller that holds one
+// resolved class store and has no Work topology to pin: a one-shot CLI command
+// answering a by-ID read from the binding its city serves that class from.
+//
+// It takes no identity, and the omission is the point rather than a relaxation.
+// BeadsAdapterIdentity exists so WorkTopology can deduplicate shared handles
+// across the workspaces an aggregate carries; the graph adapter itself holds
+// none and reads none. Demanding one from a caller with no workspace to
+// deduplicate would force it to invent three strings to satisfy a check —
+// and an invented physical identity is worse than no identity, because it
+// compares equal to nothing and unequal to nothing in particular.
+func NewBeadsGraphStore(store beads.Store) (GraphStore, error) {
+	if nilInterface(store) {
+		return nil, errors.New("adapting canonical beads store: store is required")
+	}
+	return &beadsGraphAdapter{store: store}, nil
 }
 
 // BindBeadsMessaging captures one already-open Beads-backed Messaging
@@ -259,6 +283,14 @@ func (a *beadsOrdersAdapter) graphRootHasOpenWork(root beads.Bead) (bool, error)
 	return a.graphHasOpenDescendants(root.ID)
 }
 
+// graphHasOpenDescendants reports whether the molecule rooted at rootID still
+// has open members. It leads with beads.MembershipDirectRootID — the same
+// gc.root_bead_id scan beads.DirectMembers performs — and only falls back to
+// the parent/dependency walk when that scan finds no open member, so a
+// dependency-isolated member (a gc.kind=spec sidecar has no edges at all) is
+// never the reason an order is reported as finished. The fallback deliberately
+// re-checks the root id on every dependency hop, which keeps the walk from
+// escaping the molecule through an out-of-molecule blocker edge.
 func (a *beadsOrdersAdapter) graphHasOpenDescendants(rootID string) (bool, error) {
 	members, err := a.graph.List(beads.ListQuery{
 		Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},

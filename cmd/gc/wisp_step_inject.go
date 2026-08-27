@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"strings"
@@ -32,7 +33,8 @@ func wispStepInjectionContent(cityPath string) string {
 	if len(assignees) == 0 {
 		return ""
 	}
-	b, err := resolveActiveWispStep(store, assignees)
+	routeCfg, _ := loadCityConfigWithoutBuiltinPackRefresh(effective, io.Discard)
+	b, err := resolveActiveWispStep(store, cliGraphStore(store, routeCfg, effective).Store, assignees)
 	if err != nil || b == nil {
 		return ""
 	}
@@ -43,6 +45,7 @@ func wispStepInjectionContent(cityPath string) string {
 // If GC_RIG_ROOT is set it opens that rig's store (where rig-scoped polecat
 // work lives); otherwise it opens the city store at cityPath.
 // Returns nil on any error — callers treat nil as "no store available".
+// This is the WORK store and stays unrouted; see resolveActiveWispStep.
 func openWispStepStore(cityPath string) beads.Store {
 	if rigRoot := strings.TrimSpace(os.Getenv("GC_RIG_ROOT")); rigRoot != "" {
 		store, err := openStoreAtForCity(rigRoot, cityPath)
@@ -96,12 +99,18 @@ func wispStepAssignees() []string {
 //
 // Returns nil, nil when no bead can be resolved. Never returns an error for
 // not-found conditions — callers treat nil as "nothing to inject".
-func resolveActiveWispStep(store beads.Store, assignees []string) (*beads.Bead, error) {
-	if store == nil || len(assignees) == 0 {
+//
+// Both stores, because the resolution spans two classes: roots and type=step
+// children are ClassGraph, the assignee-owned beads it starts from are work.
+func resolveActiveWispStep(workStore, graphStore beads.Store, assignees []string) (*beads.Bead, error) {
+	if workStore == nil || len(assignees) == 0 {
 		return nil, nil
 	}
+	if graphStore == nil {
+		graphStore = workStore
+	}
 
-	molecule, err := resolveActiveMolecule(store, assignees)
+	molecule, err := resolveActiveMolecule(graphStore, assignees)
 	if err != nil {
 		return nil, err
 	}
@@ -111,8 +120,8 @@ func resolveActiveWispStep(store beads.Store, assignees []string) (*beads.Bead, 
 		// bead, so follow that bridge to the root's active step before the
 		// legacy description fallback. Best-effort: a resolution error or no
 		// bridge drops to legacy.
-		if root := resolveMoleculeRootViaBridge(store, assignees); root != nil {
-			step, stepErr := resolveInProgressStepChild(store, root.ID)
+		if root := resolveMoleculeRootViaBridge(workStore, graphStore, assignees); root != nil {
+			step, stepErr := resolveInProgressStepChild(graphStore, root.ID)
 			if stepErr != nil {
 				log.Printf("wisp step inject: error resolving in-progress step for bridged molecule %s: %v", root.ID, stepErr)
 				return nil, nil
@@ -120,14 +129,14 @@ func resolveActiveWispStep(store beads.Store, assignees []string) (*beads.Bead, 
 			if step != nil {
 				return step, nil
 			}
-			return resolveEntryStepChild(store, root.ID)
+			return resolveEntryStepChild(graphStore, root.ID)
 		}
 		// No molecule bridge; fall back to legacy: any in-progress bead with a description.
-		return resolveBeadWithDescription(store, assignees)
+		return resolveBeadWithDescription(workStore, assignees)
 	}
 
 	// Prefer the in-progress step child (the agent is mid-step).
-	step, err := resolveInProgressStepChild(store, molecule.ID)
+	step, err := resolveInProgressStepChild(graphStore, molecule.ID)
 	if err != nil {
 		log.Printf("wisp step inject: error resolving in-progress step children for molecule %s: %v", molecule.ID, err)
 		return nil, nil
@@ -138,7 +147,7 @@ func resolveActiveWispStep(store beads.Store, assignees []string) (*beads.Bead, 
 
 	// Fall back to the entry step: first open step child.
 	log.Printf("wisp step inject: no in-progress step for molecule %s; resolving entry step", molecule.ID)
-	return resolveEntryStepChild(store, molecule.ID)
+	return resolveEntryStepChild(graphStore, molecule.ID)
 }
 
 // resolveActiveMolecule returns the agent's in-progress molecule bead.
@@ -186,8 +195,11 @@ func resolveActiveMolecule(store beads.Store, assignees []string) (*beads.Bead, 
 //
 // Returns nil on any error or when no bridge bead is found — callers treat nil
 // as "no bridge available" and fall through to the legacy path.
-func resolveMoleculeRootViaBridge(store beads.Store, assignees []string) *beads.Bead {
-	results, err := store.List(beads.ListQuery{
+//
+// The bridge crosses a class boundary: the bead carrying the stamp is work
+// class, the root it names is ClassGraph.
+func resolveMoleculeRootViaBridge(workStore, graphStore beads.Store, assignees []string) *beads.Bead {
+	results, err := workStore.List(beads.ListQuery{
 		Status:    "in_progress",
 		Assignees: assignees,
 		TierMode:  beads.TierBoth,
@@ -201,7 +213,7 @@ func resolveMoleculeRootViaBridge(store beads.Store, assignees []string) *beads.
 		if rootID == "" {
 			continue
 		}
-		root, err := store.Get(rootID)
+		root, err := graphStore.Get(rootID)
 		if err != nil {
 			log.Printf("wisp step inject: molecule_id %q on bead %s did not resolve: %v", rootID, results[i].ID, err)
 			continue

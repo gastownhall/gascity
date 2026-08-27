@@ -15,8 +15,10 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/storebinding"
 	sqlitebinding "github.com/gastownhall/gascity/internal/storebinding/sqlite"
 )
@@ -89,8 +91,9 @@ func TestStorageGateBypassesEverythingWithoutConfig(t *testing.T) {
 	refuseInfraMigrationSource(t)
 
 	for _, cfg := range []*config.City{nil, {}, {Beads: config.BeadsConfig{Provider: "bd"}}} {
+		cityPath := t.TempDir()
 		var stderr bytes.Buffer
-		routes, err := storageBootGate(t.TempDir(), cfg, "gc start", nil, &stderr)
+		routes, err := storageBootGate(cityPath, cfg, "gc start", nil, &stderr)
 		if err != nil {
 			t.Fatalf("a city with no [storage] was refused: %v", err)
 		}
@@ -100,9 +103,94 @@ func TestStorageGateBypassesEverythingWithoutConfig(t *testing.T) {
 		if stderr.Len() != 0 {
 			t.Errorf("a city with no [storage] wrote to stderr: %q", stderr.String())
 		}
+		// The one read the bypass performs must also create nothing: a city
+		// that was never configured is byte-identical after the gate ran.
+		if entries := directoryEntryNames(t, cityPath); len(entries) != 0 {
+			t.Errorf("the bypass left %v in a city that authored no [storage]", entries)
+		}
 	}
 	if *registries != 0 {
 		t.Errorf("the no-config path constructed %d provider registr(ies); the bypass must short-circuit before any of this runs", *registries)
+	}
+}
+
+// directoryEntryNames lists a directory's own names, failing on a directory it
+// cannot read rather than reporting it as empty.
+func directoryEntryNames(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("listing %s: %v", dir, err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	sort.Strings(names)
+	return names
+}
+
+// TestDeletingTheStorageSectionCannotAbandonAServedBinding closes the last way
+// past the served-binding hold.
+//
+// The refusal ladder used to point straight at this edit: pointing the classes
+// back at work refuses while the note stands, so the operator deletes the
+// section the classes live in — and that reached the bypass, served everything
+// from the work store, and left months of session, graph and mail state in a
+// binding nothing would open again. The city has to be held on this edit too,
+// and the hold has to name the note, because deleting the note is the only
+// attestation that says the binding's contents are recovered or abandoned.
+func TestDeletingTheStorageSectionCannotAbandonAServedBinding(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := writeBornSplitServedNote(cityPath, bornSplitServedNote{
+		Binding:  "infra",
+		Provider: "outoftree-engine",
+		Location: filepath.Join(cityPath, ".gc", "storage", "infra"),
+	}); err != nil {
+		t.Fatalf("recording the served binding: %v", err)
+	}
+
+	registries := countStorageRegistryConstructions(t)
+	var stderr bytes.Buffer
+	routes, err := storageBootGate(cityPath, &config.City{}, "gc start", nil, &stderr)
+	if err == nil {
+		_ = routes.close()
+		t.Fatal("a city that served a split booted with its [storage] section deleted")
+	}
+	if !strings.Contains(err.Error(), bornSplitServedNotePath(cityPath)) {
+		t.Errorf("the refusal does not name the note that holds it: %v", err)
+	}
+	if !strings.Contains(err.Error(), "infra") {
+		t.Errorf("the refusal does not name the binding the city served from: %v", err)
+	}
+	// Held, not investigated: the hold is one read of one path, and a city
+	// this build must not serve does not get a registry or a plan built for it.
+	if *registries != 0 {
+		t.Errorf("the held bypass constructed %d provider registr(ies), want none", *registries)
+	}
+}
+
+// TestCorruptNoteHoldsTheDeletedSectionToo keeps the bypass's new question
+// fail-closed in the same way every other reader of the note is: a note that
+// cannot be read withholds exactly what a readable one would, because a corrupt
+// file must not grant what its absence grants.
+func TestCorruptNoteHoldsTheDeletedSectionToo(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatalf("creating the city .gc: %v", err)
+	}
+	if err := os.WriteFile(bornSplitServedNotePath(cityPath), []byte("{not json"), 0o644); err != nil {
+		t.Fatalf("writing the corrupt note: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	routes, err := storageBootGate(cityPath, nil, "gc start", nil, &stderr)
+	if err == nil {
+		_ = routes.close()
+		t.Fatal("a city with an unreadable served-binding note booted through the bypass")
+	}
+	if !strings.Contains(err.Error(), bornSplitServedNotePath(cityPath)) {
+		t.Errorf("the refusal does not name the note it could not read: %v", err)
 	}
 }
 
@@ -383,6 +471,12 @@ func TestStorageGateRefusalNamesTheStrandedIDs(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "see the ids above") {
 		t.Errorf("the refusal defers to output the supervisor never records: %v", err)
+	}
+	// The refusal must also say what recovery looks like: the ids alone tell
+	// the operator what is wrong, not what to do, and this string is the only
+	// output the supervisor records.
+	if !strings.Contains(err.Error(), "gc storage status") {
+		t.Errorf("the refusal names no recovery re-check: %v", err)
 	}
 }
 
@@ -683,6 +777,9 @@ func TestStorageRoutesRefuseAProviderThatOpensNoEngine(t *testing.T) {
 	if !strings.Contains(err.Error(), string(planned.ProviderID)) {
 		t.Errorf("the refusal does not name the provider %q: %v", planned.ProviderID, err)
 	}
+	if !strings.Contains(err.Error(), contract.BackendNotOpenedGuarantee) {
+		t.Errorf("the refusal does not tell the operator their storage is untouched: %v", err)
+	}
 	// Positive evidence that the refusal opened nothing: the binding parent is
 	// listed and the root is not among its entries. A stat of the database
 	// path would report "absent" just as readily for a path typo.
@@ -733,7 +830,7 @@ func TestStorageWorkPinsDescribeEveryBoundScope(t *testing.T) {
 	if err := registry.Freeze(); err != nil {
 		t.Fatalf("freezing an empty registry: %v", err)
 	}
-	plan, err := storebinding.ResolveStoragePlan(registry, (&config.City{}).EffectiveStorage(), pins)
+	plan, err := storebinding.ResolveStoragePlan(registry, (&config.City{}).EffectiveStorage(), pins, "")
 	if err != nil {
 		t.Fatalf("the config-derived pins do not resolve a default plan: %v", err)
 	}
@@ -805,15 +902,29 @@ func TestStorageGateChecksTheRollbackSpelling(t *testing.T) {
 // TestStorageGateRefusesAnUnknownProvider proves the plan's structural refusals
 // reach boot: a binding naming a provider this binary does not compile in stops
 // the city instead of being ignored.
+//
+// The refusal also enumerates the providers this binary does carry. "Provider
+// not found" alone cannot tell an operator whether they typed the ID wrong or
+// are running a build that never had it, and those have different fixes.
 func TestStorageGateRefusesAnUnknownProvider(t *testing.T) {
 	root := t.TempDir()
 	cfg := infraSplitConfig(filepath.Join(root, "store"))
 	cfg.Storage.Bindings["infra"] = config.StorageBindingConfig{Provider: "not-compiled-in", Path: filepath.Join(root, "store")}
 
-	if _, err := storageBootGate(root, cfg, "gc start", nil, io.Discard); err == nil {
+	_, err := storageBootGate(root, cfg, "gc start", nil, io.Discard)
+	if err == nil {
 		t.Fatal("a binding naming an uncompiled provider started the city")
-	} else if !errors.Is(err, storebinding.ErrUnknownProvider) {
-		t.Errorf("the refusal is %v, want an %v", err, storebinding.ErrUnknownProvider)
+	}
+	if !errors.Is(err, storebinding.ErrUnknownProvider) {
+		t.Fatalf("the refusal is %v, want an %v", err, storebinding.ErrUnknownProvider)
+	}
+	if !strings.Contains(err.Error(), `"not-compiled-in"`) {
+		t.Errorf("the refusal does not name the provider: %v", err)
+	}
+	for _, factory := range compiledStorageProviderFactories() {
+		if !strings.Contains(err.Error(), string(factory.ID())) {
+			t.Errorf("the refusal omits compiled provider %q: %v", factory.ID(), err)
+		}
 	}
 }
 
@@ -962,8 +1073,16 @@ func TestStorageCommandTreeIsBuiltFromTheBlessedSpelling(t *testing.T) {
 			t.Errorf("the spelling %q decomposed; it should not", bad)
 		}
 	}
-	if cmd := newStorageCmdFromSpelling("not a command", io.Discard, io.Discard); cmd.RunE == nil {
-		t.Error("an undecomposable spelling built a command that reports nothing")
+	if cmd := newStorageCmdFromSpellings("not a command", storageRecoveryCommand, io.Discard, io.Discard); cmd.RunE == nil {
+		t.Error("an undecomposable migration spelling built a command that reports nothing")
+	}
+	if cmd := newStorageCmdFromSpellings(storageMigrationCommand, "not a command", io.Discard, io.Discard); cmd.RunE == nil {
+		t.Error("an undecomposable recovery spelling built a command that reports nothing")
+	}
+	// Two operator commands under different parents would build one tree and
+	// leave the other spelling naming a command that does not resolve.
+	if cmd := newStorageCmdFromSpellings(storageMigrationCommand, "gc elsewhere recover-stranded --from-work", io.Discard, io.Discard); cmd.RunE == nil {
+		t.Error("spellings under different namespaces built a tree instead of reporting the conflict")
 	}
 }
 
@@ -1052,5 +1171,958 @@ func TestNewCityRuntimeRefusesAnUnconvergedCity(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), storageMigrationCommand) {
 		t.Errorf("the constructor error does not name %q: %v", storageMigrationCommand, err)
+	}
+}
+
+// renamedEngineProviderFactory re-registers this build's own engine factory
+// under a foreign provider ID. A plan resolved against it carries a binding
+// that resolveInfraBindingTarget refuses — the provider is not the built-in
+// engine — while the binding itself still opens a real bead engine. That is
+// the exact shape of an out-of-tree engine provider, built from compiled
+// parts so the test proves the gate, not a mock.
+type renamedEngineProviderFactory struct {
+	inner storebinding.ProviderFactory
+	id    storebinding.ProviderID
+}
+
+func (f renamedEngineProviderFactory) ID() storebinding.ProviderID { return f.id }
+
+func (f renamedEngineProviderFactory) New(spec storebinding.BindingSpec) (storebinding.Provider, error) {
+	spec.Provider = f.inner.ID()
+	provider, err := f.inner.New(spec)
+	if err != nil {
+		return nil, err
+	}
+	return renamedEngineProvider{Provider: provider, innerID: f.inner.ID()}, nil
+}
+
+// renamedEngineProvider forwards the whole provider facade and re-spells the
+// binding spec's provider before delegating OpenEngine, mirroring what a real
+// out-of-tree provider does with its own spec: the inner engine's "refuse a
+// foreign spec" defense stays armed, and the seam under test stays honest.
+type renamedEngineProvider struct {
+	storebinding.Provider
+	innerID storebinding.ProviderID
+}
+
+func (p renamedEngineProvider) OpenEngine(spec storebinding.BindingSpec, classes storebinding.ClassSet) (beads.Store, io.Closer, error) {
+	opener, ok := p.Provider.(storebinding.EngineOpener)
+	if !ok {
+		return nil, nil, errors.New("renamed inner provider opens no engine")
+	}
+	spec.Provider = p.innerID
+	return opener.OpenEngine(spec, classes)
+}
+
+// bornSplitCity configures a city whose infrastructure binding is served by a
+// registered non-built-in engine provider, and returns the in-memory work
+// store the born-split discipline scans.
+func bornSplitCity(t *testing.T) (cityPath string, cfg *config.City, source beads.Store) {
+	t.Helper()
+	cityPath = t.TempDir()
+	cfg, source = bornSplitCityAt(t, cityPath)
+	return cityPath, cfg, source
+}
+
+// bornSplitCityAt is bornSplitCity against a caller-owned city directory, for
+// tests that re-point an existing city rather than starting fresh.
+func bornSplitCityAt(t *testing.T, cityPath string) (cfg *config.City, source beads.Store) {
+	t.Helper()
+	source = stubInfraMigrationSource(t)
+	cfg = infraSplitConfig(filepath.Join(cityPath, ".gc", "store"))
+	binding := cfg.Storage.Bindings["infra"]
+	binding.Provider = "outoftree-engine"
+	cfg.Storage.Bindings["infra"] = binding
+
+	prev := newStorageRegistryForPlan
+	newStorageRegistryForPlan = func() (*storebinding.ProviderRegistry, error) {
+		registry := storebinding.NewProviderRegistry()
+		if err := registry.Register(renamedEngineProviderFactory{
+			inner: sqlitebinding.BeadsProviderFactory{},
+			id:    "outoftree-engine",
+		}); err != nil {
+			return nil, err
+		}
+		if err := registry.Freeze(); err != nil {
+			return nil, err
+		}
+		return registry, nil
+	}
+	t.Cleanup(func() { newStorageRegistryForPlan = prev })
+	return cfg, source
+}
+
+// TestStorageGateServesBornSplitBindingWithCleanWorkStore proves the discipline's
+// serving half: a provider this build cannot migrate onto still serves the
+// split when the work store holds no infrastructure bead, and the routes it
+// returns reach a live engine.
+func TestStorageGateServesBornSplitBindingWithCleanWorkStore(t *testing.T) {
+	cityPath, cfg, source := bornSplitCity(t)
+	mustCreateInfraBead(t, source, beads.Bead{Title: "plain work", Type: "task"})
+
+	var stderr bytes.Buffer
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, &stderr)
+	if err != nil {
+		t.Fatalf("a born-split city with a clean work store refused to serve: %v\nstderr: %s", err, stderr.String())
+	}
+	if routes == nil {
+		t.Fatal("the gate served but returned no routes")
+	}
+	defer routes.close() //nolint:errcheck // test cleanup
+	store, ok := routes.stores[coordclass.ClassSessions]
+	if !ok {
+		t.Fatal("the routes carry no store for the session class")
+	}
+	if _, err := store.Create(beads.Bead{Title: "born on the binding", Type: "session", Labels: []string{"gc:session"}}); err != nil {
+		t.Fatalf("writing through the born-split routes: %v", err)
+	}
+}
+
+// TestStorageGateRefusesBornSplitBindingWhenWorkStoreHoldsInfraBeads proves the
+// refusing half, and pins where the evidence lives: the ids and the advice are
+// in the refusal STRING, because the supervisor records that string and
+// nothing else.
+func TestStorageGateRefusesBornSplitBindingWhenWorkStoreHoldsInfraBeads(t *testing.T) {
+	cityPath, cfg, source := bornSplitCity(t)
+	strayed := mustCreateInfraBead(t, source, beads.Bead{Title: "landed in work", Type: "session", Labels: []string{"gc:session"}})
+
+	var stderr bytes.Buffer
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, &stderr)
+	if err == nil {
+		_ = routes.close()
+		t.Fatal("a born-split city with an infrastructure bead in the work store served")
+	}
+	if !strings.Contains(err.Error(), strayed.ID) {
+		t.Errorf("the refusal does not name the bead %s: %v", strayed.ID, err)
+	}
+	if !strings.Contains(err.Error(), `binding "infra"`) {
+		t.Errorf("the refusal does not name the binding: %v", err)
+	}
+	if !strings.Contains(err.Error(), "Do NOT revert") {
+		t.Errorf("the refusal does not withhold the revert: %v", err)
+	}
+	if !strings.Contains(err.Error(), "then delete them from the work store") {
+		t.Errorf("the refusal does not state the full recovery; the re-check reads only the work store: %v", err)
+	}
+}
+
+// TestStorageGateBornSplitCheckFailureIsUncheckableNotUnconverged proves that a
+// work store that cannot be read decides nothing about the city: the refusal
+// is a fact about the check, and it does not hand the operator a migration
+// this build cannot perform.
+func TestStorageGateBornSplitCheckFailureIsUncheckableNotUnconverged(t *testing.T) {
+	cityPath, cfg, _ := bornSplitCity(t)
+	failInfraMigrationSourceWith(t, func(string) (beads.Store, error) {
+		return nil, errors.New("injected work-store open failure")
+	})
+
+	var stderr bytes.Buffer
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, &stderr)
+	if err == nil {
+		_ = routes.close()
+		t.Fatal("an unprovable born-split invariant served")
+	}
+	if !strings.Contains(err.Error(), "could NOT be verified") {
+		t.Errorf("the refusal does not report an uncheckable city: %v", err)
+	}
+	if strings.Contains(err.Error(), storageMigrationCommand) {
+		t.Errorf("an uncheckable born-split city was handed the migration command this build cannot honor here: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "injected work-store open failure") {
+		t.Errorf("stderr does not carry the check's failure reason: %s", stderr.String())
+	}
+	if strings.Contains(err.Error(), "point [storage.classes] back at") {
+		t.Errorf("an uncheckable city was handed the revert instruction: %v", err)
+	}
+}
+
+// TestStorageGateBornSplitListFailureIsUncheckable proves the same for a work
+// store that opens but cannot be listed.
+func TestStorageGateBornSplitListFailureIsUncheckable(t *testing.T) {
+	cityPath, cfg, _ := bornSplitCity(t)
+	failInfraMigrationSourceWith(t, func(string) (beads.Store, error) {
+		return unlistableInfraSource{Store: beads.NewMemStore(), err: errors.New("injected list failure")}, nil
+	})
+
+	var stderr bytes.Buffer
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, &stderr)
+	if err == nil {
+		_ = routes.close()
+		t.Fatal("an unlistable work store served a born-split binding")
+	}
+	if !strings.Contains(err.Error(), "could NOT be verified") {
+		t.Errorf("the refusal does not report an uncheckable city: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "injected list failure") {
+		t.Errorf("stderr does not carry the check's failure reason: %s", stderr.String())
+	}
+	if strings.Contains(err.Error(), "point [storage.classes] back at") {
+		t.Errorf("an uncheckable city was handed the revert instruction: %v", err)
+	}
+}
+
+// TestStorageGateBornSplitBlocksOnClosedInfraBead pins the scan's closed-tier
+// reach: a closed infrastructure bead is exactly the row a weakened List query
+// (dropping IncludeClosed or TierBoth) would stop seeing, and it must still
+// block the binding.
+func TestStorageGateBornSplitBlocksOnClosedInfraBead(t *testing.T) {
+	cityPath, cfg, source := bornSplitCity(t)
+	closed := mustCreateInfraBead(t, source, beads.Bead{Title: "closed session", Type: "session", Labels: []string{"gc:session"}})
+	if err := source.Close(closed.ID); err != nil {
+		t.Fatalf("closing the infra bead: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, &stderr)
+	if err == nil {
+		_ = routes.close()
+		t.Fatal("a closed infrastructure bead in the work store did not block the born-split binding")
+	}
+	if !strings.Contains(err.Error(), closed.ID) {
+		t.Errorf("the refusal does not name the closed bead %s: %v", closed.ID, err)
+	}
+}
+
+// TestStorageGateBornSplitRecordsOutcomeEvents pins the event stream to the
+// gate's actual decisions: exactly one converged event on a clean serve,
+// exactly one unconverged event on a blocked boot, and nothing else.
+func TestStorageGateBornSplitRecordsOutcomeEvents(t *testing.T) {
+	cityPath, cfg, source := bornSplitCity(t)
+
+	rec := events.NewFake()
+	var stderr bytes.Buffer
+	routes, err := storageBootGate(cityPath, cfg, "gc start", rec, &stderr)
+	if err != nil {
+		t.Fatalf("clean born-split boot refused: %v", err)
+	}
+	defer routes.close() //nolint:errcheck // test cleanup
+	if got := len(rec.Events); got != 1 || rec.Events[0].Type != events.StorageBindingConverged {
+		t.Fatalf("clean serve recorded %d event(s) %+v, want one %s", got, rec.Events, events.StorageBindingConverged)
+	}
+
+	mustCreateInfraBead(t, source, beads.Bead{Title: "stray", Type: "session", Labels: []string{"gc:session"}})
+	blockedRec := events.NewFake()
+	blocked, err := storageBootGate(cityPath, cfg, "gc start", blockedRec, &stderr)
+	if err == nil {
+		_ = blocked.close()
+		t.Fatal("a dirtied work store served")
+	}
+	if got := len(blockedRec.Events); got != 1 || blockedRec.Events[0].Type != events.StorageBindingUnconverged {
+		t.Fatalf("blocked boot recorded %d event(s) %+v, want one %s", got, blockedRec.Events, events.StorageBindingUnconverged)
+	}
+}
+
+// TestStorageGateBornSplitEngineLessProviderRecordsNoConvergedEvent pins the
+// ordering fix: a compiled provider without the engine seam must refuse BEFORE
+// any outcome is recorded, or a permanently unbootable city publishes
+// converged on every boot.
+func TestStorageGateBornSplitEngineLessProviderRecordsNoConvergedEvent(t *testing.T) {
+	cityPath, cfg, _ := bornSplitCity(t)
+	prev := newStorageRegistryForPlan
+	newStorageRegistryForPlan = func() (*storebinding.ProviderRegistry, error) {
+		registry := storebinding.NewProviderRegistry()
+		if err := registry.Register(engineLessProviderFactory{renamedEngineProviderFactory{
+			inner: sqlitebinding.BeadsProviderFactory{},
+			id:    "outoftree-engine",
+		}}); err != nil {
+			return nil, err
+		}
+		if err := registry.Freeze(); err != nil {
+			return nil, err
+		}
+		return registry, nil
+	}
+	t.Cleanup(func() { newStorageRegistryForPlan = prev })
+
+	rec := events.NewFake()
+	var stderr bytes.Buffer
+	routes, err := storageBootGate(cityPath, cfg, "gc start", rec, &stderr)
+	if err == nil {
+		_ = routes.close()
+		t.Fatal("an engine-less binding served")
+	}
+	if !strings.Contains(err.Error(), "does not open a bead engine") {
+		t.Errorf("the refusal does not name the missing engine seam: %v", err)
+	}
+	if len(rec.Events) != 0 {
+		t.Errorf("an unservable binding recorded %d event(s): %+v", len(rec.Events), rec.Events)
+	}
+}
+
+// TestBornSplitServeBlocksLaterBuiltinGenesis pins the served-binding note's
+// whole reason to exist: serve under born-split once, re-point the classes at
+// this build's own engine, and genesis must refuse rather than bless an empty
+// store while the city's infrastructure state lives in a binding this build
+// cannot read. Removing the note is the operator's attestation, and after it
+// genesis proceeds.
+func TestBornSplitServeBlocksLaterBuiltinGenesis(t *testing.T) {
+	cityPath, cfg, _ := bornSplitCity(t)
+
+	var stderr bytes.Buffer
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, &stderr)
+	if err != nil {
+		t.Fatalf("clean born-split boot refused: %v", err)
+	}
+	if err := routes.close(); err != nil {
+		t.Fatalf("closing born-split routes: %v", err)
+	}
+	notePath := bornSplitServedNotePath(cityPath)
+	if _, err := os.Stat(notePath); err != nil {
+		t.Fatalf("serving under born-split left no served-binding note: %v", err)
+	}
+
+	// The operator re-points the infrastructure classes at this build's own
+	// engine. The work store is clean and no marker exists — exactly the
+	// genesis premise — and the note is what proves the premise false.
+	builtin := infraSplitConfig(filepath.Join(cityPath, ".gc", "store"))
+	prev := newStorageRegistryForPlan
+	newStorageRegistryForPlan = newStorageProviderRegistry
+	t.Cleanup(func() { newStorageRegistryForPlan = prev })
+
+	blocked, err := storageBootGate(cityPath, builtin, "gc start", nil, &stderr)
+	if err == nil {
+		_ = blocked.close()
+		t.Fatal("genesis blessed an empty store while the served-binding note stood")
+	}
+	if !strings.Contains(err.Error(), notePath) {
+		t.Errorf("the refusal does not name the note whose removal is the attestation: %v", err)
+	}
+	if !strings.Contains(err.Error(), "outoftree-engine") {
+		t.Errorf("the refusal does not name the previously served provider: %v", err)
+	}
+
+	if err := os.Remove(notePath); err != nil {
+		t.Fatalf("removing the served-binding note: %v", err)
+	}
+	served, err := storageBootGate(cityPath, builtin, "gc start", nil, &stderr)
+	if err != nil {
+		t.Fatalf("genesis still refused after the note was removed: %v", err)
+	}
+	if served == nil {
+		t.Fatal("the gate served but returned no routes")
+	}
+	if err := served.close(); err != nil {
+		t.Fatalf("closing genesis routes: %v", err)
+	}
+}
+
+// TestStorageStatusReportsBornSplitStates pins the diagnosis command to the
+// same discipline boot enforces: a serving born-split city reports clean and
+// exits zero, a blocked one names the ids and exits non-zero — never "every
+// class is served by the work store".
+func TestStorageStatusReportsBornSplitStates(t *testing.T) {
+	cityPath, cfg, source := bornSplitCity(t)
+
+	var stdout, stderr bytes.Buffer
+	if code := doStorageStatus(storageOperatorRequest{CityPath: cityPath, Cfg: cfg}, &stdout, &stderr); code != 0 {
+		t.Fatalf("status on a clean born-split city = %d, want 0\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "born-split: clean") {
+		t.Errorf("status does not report the born-split discipline: %s", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "every class is served by the work store") {
+		t.Errorf("status claims the work store serves classes it does not: %s", stdout.String())
+	}
+
+	strayed := mustCreateInfraBead(t, source, beads.Bead{Title: "stray", Type: "session", Labels: []string{"gc:session"}})
+	stdout.Reset()
+	if code := doStorageStatus(storageOperatorRequest{CityPath: cityPath, Cfg: cfg}, &stdout, &stderr); code == 0 {
+		t.Fatalf("status on a blocked born-split city = 0, want non-zero\nstdout: %s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), strayed.ID) {
+		t.Errorf("status does not name the blocking bead %s: %s", strayed.ID, stdout.String())
+	}
+}
+
+// TestMigrateRefusesWhileServedBindingNoteStands pins the operator command to
+// the same hold boot's genesis honors: a proven copy of the work store's slice
+// would bless a destination that silently omits everything in the previously
+// served binding.
+func TestMigrateRefusesWhileServedBindingNoteStands(t *testing.T) {
+	cityPath := t.TempDir()
+	_ = stubInfraMigrationSource(t)
+	if err := writeBornSplitServedNote(cityPath, bornSplitServedNote{Binding: "infra", Provider: "outoftree-engine"}); err != nil {
+		t.Fatalf("writing the served-binding note: %v", err)
+	}
+	cfg := infraSplitConfig(filepath.Join(cityPath, ".gc", "store"))
+
+	var log bytes.Buffer
+	report := migrateInfraClasses(t, cityPath, cfg, &log)
+	if report.Outcome != infraMigrationGenesisBlocked {
+		t.Fatalf("migrate outcome = %v, want genesis-blocked; log: %s", report.Outcome, log.String())
+	}
+	advice := infraMigrationOperatorAdvice(report, "gc storage migrate")
+	if !strings.Contains(advice, bornSplitServedNotePath(cityPath)) {
+		t.Errorf("the advice does not name the note whose removal is the attestation: %s", advice)
+	}
+	if !strings.Contains(advice, "outoftree-engine") {
+		t.Errorf("the advice does not name the previously served provider: %s", advice)
+	}
+}
+
+// TestBornSplitRepointToOtherBindingRefusesUntilAttested pins the symmetric
+// hold: the note is last-writer-wins only through the operator's attestation,
+// never through a config edit. Re-pointing a born-split city at a different
+// binding must refuse naming the served one, not overwrite the record of it.
+func TestBornSplitRepointToOtherBindingRefusesUntilAttested(t *testing.T) {
+	cityPath, cfg, _ := bornSplitCity(t)
+	var stderr bytes.Buffer
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, &stderr)
+	if err != nil {
+		t.Fatalf("first born-split boot refused: %v", err)
+	}
+	if err := routes.close(); err != nil {
+		t.Fatalf("closing routes: %v", err)
+	}
+
+	repointed := infraSplitConfig(filepath.Join(cityPath, ".gc", "other-store"))
+	other := repointed.Storage.Bindings["infra"]
+	other.Provider = "outoftree-engine"
+	delete(repointed.Storage.Bindings, "infra")
+	repointed.Storage.Bindings["infra2"] = other
+	repointed.Storage.Classes.Graph = "infra2"
+	repointed.Storage.Classes.Sessions = "infra2"
+	repointed.Storage.Classes.Messaging = "infra2"
+	repointed.Storage.Classes.Orders = "infra2"
+	repointed.Storage.Classes.Nudges = "infra2"
+
+	blocked, err := storageBootGate(cityPath, repointed, "gc start", nil, &stderr)
+	if err == nil {
+		_ = blocked.close()
+		t.Fatal("re-pointing at a different binding served while the note named the first")
+	}
+	if !strings.Contains(err.Error(), `"infra"`) {
+		t.Errorf("the refusal does not name the served binding: %v", err)
+	}
+	if !strings.Contains(err.Error(), bornSplitServedNotePath(cityPath)) {
+		t.Errorf("the refusal does not name the note: %v", err)
+	}
+	if strings.Contains(err.Error(), "point [storage.classes] back at") {
+		t.Errorf("a note hold granted the revert instruction: %v", err)
+	}
+
+	note, present, err := readBornSplitServedNote(cityPath)
+	if err != nil || !present || note.Binding != "infra" {
+		t.Fatalf("the refusal overwrote the served-binding note: %+v present=%v err=%v", note, present, err)
+	}
+}
+
+// TestBuiltinGenesisCityRepointToOutOfTreeRefuses pins the outbound leg: a
+// city that genesised on this build's engine holds all its infrastructure
+// state in the binding and none in the work store, so a clean work store
+// alone must not license serving another binding.
+func TestBuiltinGenesisCityRepointToOutOfTreeRefuses(t *testing.T) {
+	cityPath := t.TempDir()
+	_ = stubInfraMigrationSource(t)
+	builtin := infraSplitConfig(filepath.Join(cityPath, ".gc", "store"))
+	var stderr bytes.Buffer
+	routes, err := storageBootGate(cityPath, builtin, "gc start", nil, &stderr)
+	if err != nil {
+		t.Fatalf("genesis boot refused: %v", err)
+	}
+	if err := routes.close(); err != nil {
+		t.Fatalf("closing genesis routes: %v", err)
+	}
+
+	cityCfg, source := bornSplitCityAt(t, cityPath)
+	_ = source
+	blocked, err := storageBootGate(cityPath, cityCfg, "gc start", nil, &stderr)
+	if err == nil {
+		_ = blocked.close()
+		t.Fatal("a genesis city re-pointed at an out-of-tree binding served on a clean work store")
+	}
+	if !strings.Contains(err.Error(), config.StorageProviderSQLiteBeads) {
+		t.Errorf("the refusal does not name the served provider: %v", err)
+	}
+}
+
+// TestConvergedCityWithForeignNoteRefusesOnMarkedPath pins the marked arm: a
+// standing note naming another binding must hold even when the built-in
+// marker and database are intact, or the interim binding's state is orphaned
+// with no refusal.
+func TestConvergedCityWithForeignNoteRefusesOnMarkedPath(t *testing.T) {
+	cityPath, cfg, _, _ := convergedInfraCity(t)
+	if err := writeBornSplitServedNote(cityPath, bornSplitServedNote{Binding: "elsewhere", Provider: "outoftree-engine"}); err != nil {
+		t.Fatalf("writing the note: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, &stderr)
+	if err == nil {
+		_ = routes.close()
+		t.Fatal("a converged city served through the marked path while the note named another binding")
+	}
+	if !strings.Contains(err.Error(), `"elsewhere"`) {
+		t.Errorf("the refusal does not name the served binding: %v", err)
+	}
+	if strings.Contains(err.Error(), "point [storage.classes] back at") {
+		t.Errorf("a note hold granted the revert instruction: %v", err)
+	}
+}
+
+// TestCorruptServedNoteHoldsWithoutGrantingAnything pins the unreadable-note
+// contract end to end: the hold fires, the note path is named, and neither
+// the revert grant nor genesis is reachable.
+func TestCorruptServedNoteHoldsWithoutGrantingAnything(t *testing.T) {
+	cityPath := t.TempDir()
+	_ = stubInfraMigrationSource(t)
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bornSplitServedNotePath(cityPath), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	builtin := infraSplitConfig(filepath.Join(cityPath, ".gc", "store"))
+
+	var stderr bytes.Buffer
+	routes, err := storageBootGate(cityPath, builtin, "gc start", nil, &stderr)
+	if err == nil {
+		_ = routes.close()
+		t.Fatal("a corrupt served-binding note granted genesis")
+	}
+	if !strings.Contains(err.Error(), bornSplitServedNotePath(cityPath)) {
+		t.Errorf("the refusal does not name the note: %v", err)
+	}
+	if strings.Contains(err.Error(), "point [storage.classes] back at") {
+		t.Errorf("a corrupt note granted the revert instruction: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, ".gc", "store")); !os.IsNotExist(err) {
+		t.Errorf("a held boot still created the built-in destination: %v", err)
+	}
+}
+
+// TestStorageStatusBornSplitKeepsDeployGateContract pins the status exit code
+// to what boot decides: an unresolvable provider or a missing engine seam must
+// exit non-zero, never report may-serve.
+func TestStorageStatusBornSplitKeepsDeployGateContract(t *testing.T) {
+	cityPath, cfg, _ := bornSplitCity(t)
+
+	// Unknown provider: same config, stock registry.
+	prev := newStorageRegistryForPlan
+	newStorageRegistryForPlan = newStorageProviderRegistry
+	var stdout, stderr bytes.Buffer
+	if code := doStorageStatus(storageOperatorRequest{CityPath: cityPath, Cfg: cfg}, &stdout, &stderr); code == 0 {
+		t.Fatalf("status = 0 for a provider this build cannot resolve\nstdout: %s", stdout.String())
+	}
+	newStorageRegistryForPlan = prev
+
+	// Engine-less provider: registered but without the seam.
+	newStorageRegistryForPlan = func() (*storebinding.ProviderRegistry, error) {
+		registry := storebinding.NewProviderRegistry()
+		if err := registry.Register(engineLessProviderFactory{renamedEngineProviderFactory{
+			inner: sqlitebinding.BeadsProviderFactory{},
+			id:    "outoftree-engine",
+		}}); err != nil {
+			return nil, err
+		}
+		if err := registry.Freeze(); err != nil {
+			return nil, err
+		}
+		return registry, nil
+	}
+	t.Cleanup(func() { newStorageRegistryForPlan = prev })
+	stdout.Reset()
+	if code := doStorageStatus(storageOperatorRequest{CityPath: cityPath, Cfg: cfg}, &stdout, &stderr); code == 0 {
+		t.Fatalf("status = 0 for a provider without the engine seam\nstdout: %s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "does not open a bead engine") {
+		t.Errorf("status does not name the missing seam: %s", stdout.String())
+	}
+}
+
+// TestRevertToWorkRefusesWhileNoteStands pins the splitNone arm: pointing
+// every class back at work is the exact re-point the note exists to hold, and
+// the natural full edit (binding definition removed too) must refuse.
+func TestRevertToWorkRefusesWhileNoteStands(t *testing.T) {
+	cityPath, cfg, _ := bornSplitCity(t)
+	var stderr bytes.Buffer
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, &stderr)
+	if err != nil {
+		t.Fatalf("born-split boot refused: %v", err)
+	}
+	if err := routes.close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reverted := &config.City{Storage: &config.StorageConfig{
+		Classes: config.StorageClasses{
+			Work:      config.StorageWorkBinding,
+			Graph:     config.StorageWorkBinding,
+			Sessions:  config.StorageWorkBinding,
+			Messaging: config.StorageWorkBinding,
+			Orders:    config.StorageWorkBinding,
+			Nudges:    config.StorageWorkBinding,
+		},
+	}}
+	blocked, err := storageBootGate(cityPath, reverted, "gc start", nil, &stderr)
+	if err == nil {
+		if blocked != nil {
+			_ = blocked.close()
+		}
+		t.Fatal("reverting every class to work served while the note stood")
+	}
+	if !strings.Contains(err.Error(), `"infra"`) {
+		t.Errorf("the refusal does not name the served binding: %v", err)
+	}
+}
+
+// TestBornSplitSameNamePathRepointRefuses pins the location leg of the note:
+// keeping the binding's name and provider while moving its storage is the
+// same outbound orphan, reached through a path edit instead of a name edit.
+func TestBornSplitSameNamePathRepointRefuses(t *testing.T) {
+	cityPath, cfg, _ := bornSplitCity(t)
+	var stderr bytes.Buffer
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, &stderr)
+	if err != nil {
+		t.Fatalf("born-split boot refused: %v", err)
+	}
+	if err := routes.close(); err != nil {
+		t.Fatal(err)
+	}
+
+	moved := cfg
+	binding := moved.Storage.Bindings["infra"]
+	binding.Path = filepath.Join(cityPath, ".gc", "moved-store")
+	moved.Storage.Bindings["infra"] = binding
+
+	blocked, err := storageBootGate(cityPath, moved, "gc start", nil, &stderr)
+	if err == nil {
+		_ = blocked.close()
+		t.Fatal("moving the binding's storage under the same name served while the note recorded the old location")
+	}
+	if !strings.Contains(err.Error(), bornSplitServedNotePath(cityPath)) {
+		t.Errorf("the refusal does not name the note: %v", err)
+	}
+}
+
+// TestBuiltinPathEditRefusesUntilAttested pins the same location leg on the
+// built-in arm: editing the binding's path with the marker left at the old
+// root used to reach genesis at the new root; the note now holds it.
+func TestBuiltinPathEditRefusesUntilAttested(t *testing.T) {
+	cityPath := t.TempDir()
+	_ = stubInfraMigrationSource(t)
+	original := infraSplitConfig(filepath.Join(cityPath, ".gc", "store"))
+	var stderr bytes.Buffer
+	routes, err := storageBootGate(cityPath, original, "gc start", nil, &stderr)
+	if err != nil {
+		t.Fatalf("genesis boot refused: %v", err)
+	}
+	if err := routes.close(); err != nil {
+		t.Fatal(err)
+	}
+
+	moved := infraSplitConfig(filepath.Join(cityPath, ".gc", "moved-store"))
+	blocked, err := storageBootGate(cityPath, moved, "gc start", nil, &stderr)
+	if err == nil {
+		_ = blocked.close()
+		t.Fatal("a path edit reached genesis at the new root while the note recorded the old one")
+	}
+	if !strings.Contains(err.Error(), bornSplitServedNotePath(cityPath)) {
+		t.Errorf("the refusal does not name the note: %v", err)
+	}
+}
+
+// TestStorageStatusHonorsNoteHoldOnBothArms pins the diagnosis command's exit
+// code to the hold on the sqlite arm and the born-split arm alike.
+func TestStorageStatusHonorsNoteHoldOnBothArms(t *testing.T) {
+	cityPath, cfg, _, _ := convergedInfraCity(t)
+	if err := writeBornSplitServedNote(cityPath, bornSplitServedNote{Binding: "elsewhere", Provider: "outoftree-engine", Location: "ref"}); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := doStorageStatus(storageOperatorRequest{CityPath: cityPath, Cfg: cfg}, &stdout, &stderr); code == 0 {
+		t.Fatalf("status = 0 on a converged city whose note names another binding\nstdout: %s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), `"elsewhere"`) {
+		t.Errorf("status does not name the served binding: %s", stdout.String())
+	}
+
+	bornPath, bornCfg, _ := bornSplitCity(t)
+	if err := writeBornSplitServedNote(bornPath, bornSplitServedNote{Binding: "old-binding", Provider: "outoftree-engine", Location: "old-ref"}); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	if code := doStorageStatus(storageOperatorRequest{CityPath: bornPath, Cfg: bornCfg}, &stdout, &stderr); code == 0 {
+		t.Fatalf("status = 0 on a born-split city whose note names another binding\nstdout: %s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), `"old-binding"`) {
+		t.Errorf("status does not name the served binding: %s", stdout.String())
+	}
+}
+
+// TestStoragePlanRefusesACityWithNoPath closes the back door into the defect
+// the city root exists to remove.
+//
+// filepath.Abs("") is the working directory. A caller that reached plan
+// resolution without a city — and there is no such production caller today,
+// which is exactly why nothing would notice — would have stamped that
+// directory into every binding specification, and every provider would have
+// resolved against it as if it were the city.
+func TestStoragePlanRefusesACityWithNoPath(t *testing.T) {
+	cfg := infraSplitConfig(config.DefaultSQLiteStoragePath)
+
+	plan, err := resolveCityStoragePlan("", cfg)
+	if err == nil {
+		t.Fatalf("a plan resolved for no city at all: %+v", plan)
+	}
+	if !strings.Contains(err.Error(), "no city path") {
+		t.Errorf("the refusal does not say what is missing: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	routes, gateErr := storageBootGate("", cfg, "gc start", nil, &stderr)
+	if gateErr == nil {
+		_ = routes.close()
+		t.Fatal("the boot gate served a city it has no path for")
+	}
+}
+
+// TestHalfRevertRefusalCarriesTheNoteThatHoldsIt fixes an operator dead end.
+//
+// Pointing the classes back at work while leaving the binding defined is the
+// obvious half of a revert, and plan resolution rejects it — correctly, and
+// for a reason that says nothing about the hold that actually matters. An
+// operator who reads only "unreferenced storage binding" deletes the binding,
+// gets past that error, and meets the note refusal one edit later. Both
+// refusals are true, so the boot carries both.
+func TestHalfRevertRefusalCarriesTheNoteThatHoldsIt(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := writeBornSplitServedNote(cityPath, bornSplitServedNote{
+		Binding:  "infra",
+		Provider: "outoftree-engine",
+		Location: filepath.Join(cityPath, ".gc", "storage", "infra"),
+	}); err != nil {
+		t.Fatalf("recording the served binding: %v", err)
+	}
+	// Classes reverted to work, binding left behind: what an operator's first
+	// revert edit actually looks like.
+	cfg := &config.City{Storage: &config.StorageConfig{
+		Classes: config.StorageClasses{
+			Work: config.StorageWorkBinding, Graph: config.StorageWorkBinding,
+			Sessions: config.StorageWorkBinding, Messaging: config.StorageWorkBinding,
+			Orders: config.StorageWorkBinding, Nudges: config.StorageWorkBinding,
+		},
+		Bindings: map[string]config.StorageBindingConfig{
+			"infra": {Provider: "outoftree-engine", ConfigRef: "infra"},
+		},
+	}}
+
+	var stderr bytes.Buffer
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, &stderr)
+	if err == nil {
+		_ = routes.close()
+		t.Fatal("a half-reverted city with a standing served-binding note booted")
+	}
+	if !strings.Contains(err.Error(), "unreferenced") {
+		t.Errorf("the refusal drops the configuration error the operator will hit first: %v", err)
+	}
+	if !strings.Contains(err.Error(), bornSplitServedNotePath(cityPath)) {
+		t.Errorf("the refusal does not name the note that holds the revert: %v", err)
+	}
+}
+
+// closeCountingProviderFactory wraps a compiled engine provider and counts every
+// close of the handles it hands out, so a caller's cleanup is observable from
+// outside the provider.
+type closeCountingProviderFactory struct {
+	inner  storebinding.ProviderFactory
+	closes *int
+}
+
+func (f closeCountingProviderFactory) ID() storebinding.ProviderID { return f.inner.ID() }
+
+func (f closeCountingProviderFactory) New(spec storebinding.BindingSpec) (storebinding.Provider, error) {
+	provider, err := f.inner.New(spec)
+	if err != nil {
+		return nil, err
+	}
+	return closeCountingProvider{Provider: provider, closes: f.closes}, nil
+}
+
+type closeCountingProvider struct {
+	storebinding.Provider
+	closes *int
+}
+
+func (p closeCountingProvider) OpenEngine(spec storebinding.BindingSpec, classes storebinding.ClassSet) (beads.Store, io.Closer, error) {
+	opener, ok := p.Provider.(storebinding.EngineOpener)
+	if !ok {
+		return nil, nil, errors.New("wrapped provider opens no engine")
+	}
+	store, closer, err := opener.OpenEngine(spec, classes)
+	if err != nil {
+		return nil, nil, err
+	}
+	return store, countingCloser{inner: closer, closes: p.closes}, nil
+}
+
+type countingCloser struct {
+	inner  io.Closer
+	closes *int
+}
+
+func (c countingCloser) Close() error {
+	*c.closes++
+	return c.inner.Close()
+}
+
+// TestFailedNoteWriteReleasesTheBindingItJustOpened covers the ordering the
+// post-open note write created and nothing else reaches: the engine is open,
+// the durable record fails, and the boot returns an error. A process that
+// refuses to start while still holding the binding's engine is a boot the
+// operator cannot retry.
+func TestFailedNoteWriteReleasesTheBindingItJustOpened(t *testing.T) {
+	cityPath := t.TempDir()
+	stubInfraMigrationSource(t)
+	cfg := infraSplitConfig(filepath.Join(cityPath, ".gc", "store"))
+	binding := cfg.Storage.Bindings["infra"]
+	binding.Provider = "outoftree-engine"
+	cfg.Storage.Bindings["infra"] = binding
+
+	closes := 0
+	prevRegistry := newStorageRegistryForPlan
+	newStorageRegistryForPlan = func() (*storebinding.ProviderRegistry, error) {
+		registry := storebinding.NewProviderRegistry()
+		if err := registry.Register(closeCountingProviderFactory{
+			inner:  renamedEngineProviderFactory{inner: sqlitebinding.BeadsProviderFactory{}, id: "outoftree-engine"},
+			closes: &closes,
+		}); err != nil {
+			return nil, err
+		}
+		if err := registry.Freeze(); err != nil {
+			return nil, err
+		}
+		return registry, nil
+	}
+	t.Cleanup(func() { newStorageRegistryForPlan = prevRegistry })
+
+	prevWrite := writeServedBindingNote
+	writeServedBindingNote = func(string, bornSplitServedNote) error {
+		return errors.New("injected served-binding note failure")
+	}
+	t.Cleanup(func() { writeServedBindingNote = prevWrite })
+
+	var stderr bytes.Buffer
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, &stderr)
+	if err == nil {
+		_ = routes.close()
+		t.Fatal("a boot whose served-binding note could not be written reported success")
+	}
+	if routes != nil {
+		t.Errorf("a failed boot handed back routes %+v the caller would have to close", routes)
+	}
+	if !strings.Contains(err.Error(), "injected served-binding note failure") {
+		t.Errorf("the refusal does not carry the write failure: %v", err)
+	}
+	if closes != 1 {
+		t.Errorf("the opened binding was closed %d time(s), want exactly 1: a boot that refuses must not keep the engine it opened", closes)
+	}
+}
+
+// TestStorageWorkPinsResolveHQPrefixTheSameWayTheCityMintsIt covers the HQ pin
+// for a city that never declares a workspace prefix, which is the ordinary
+// case: [workspace] prefix is not in the default city.toml.
+//
+// HQ then mints under the prefix derived from the city name, and the pin has
+// to state that same value. Pinning a fixed literal instead makes the pin
+// disagree with reality for every such city, and the disagreement is only
+// visible when some rig genuinely holds the literal: two pinned work scopes
+// land on one prefix and the resolver refuses the pair, so a city that boots
+// today cannot boot once it configures [storage].
+//
+// gc is the natural prefix for a rig tracking gascity, so this is not exotic.
+// The rig arm of the same function already resolves through
+// Rig.EffectivePrefix; only HQ read a raw field and a literal.
+func TestStorageWorkPinsResolveHQPrefixTheSameWayTheCityMintsIt(t *testing.T) {
+	root := t.TempDir()
+	cfg := &config.City{
+		// Neither ResolvedWorkspacePrefix nor Workspace.Prefix is set, so the
+		// prefix comes from the city name, exactly as EffectiveHQPrefix's
+		// third step resolves it.
+		ResolvedWorkspaceName: "ds-research",
+		Rigs: []config.Rig{
+			{Name: "gascity", Prefix: "gc", Path: filepath.Join(root, "gascity")},
+		},
+	}
+
+	want := config.EffectiveHQPrefix(cfg)
+	if want == "" {
+		t.Fatal("the city derives no HQ prefix, so this case cannot state what the pin should carry")
+	}
+
+	pins := cityStorageWorkPins(root, cfg)
+	if pins.HQ.Prefix != want {
+		t.Errorf("HQ pinned prefix %q, want %q: the pin disagrees with the prefix HQ mints under",
+			pins.HQ.Prefix, want)
+	}
+
+	// The consequence the operator meets. A pin that repeats the rig's prefix
+	// collides with it, and the resolver refuses any pair where one prefix
+	// selects the other.
+	registry := storebinding.NewProviderRegistry()
+	if err := registry.Freeze(); err != nil {
+		t.Fatalf("freezing an empty registry: %v", err)
+	}
+	if _, err := storebinding.ResolveStoragePlan(registry, cfg.EffectiveStorage(), pins, root); err != nil {
+		t.Fatalf("a city with a rig at prefix %q cannot resolve its storage plan: %v", cfg.Rigs[0].Prefix, err)
+	}
+}
+
+// TestStorageWorkPinsUseADeclaredWorkspacePrefix covers the middle step of the
+// resolution, where a city declares [workspace] prefix but nothing has
+// populated the resolved field. That path reached the pin only after this
+// function stopped reading the resolved field alone; before, such a city was
+// pinned at the fallback while HQ minted under its declared prefix.
+//
+// The pin carries storageWorkPrefix's normalisation of the declared value, not
+// the raw value. That normalisation is older than this resolution and applies
+// equally to the resolved field, so a declared prefix that is not already
+// lower case and dash-free still pins a value the backend does not mint under.
+// Canonicalising prefixes once for both minting and pinning is issue #5204.
+func TestStorageWorkPinsUseADeclaredWorkspacePrefix(t *testing.T) {
+	root := t.TempDir()
+	cfg := &config.City{
+		ResolvedWorkspaceName: "ds-research",
+		Workspace:             config.Workspace{Prefix: "hq"},
+		Rigs: []config.Rig{
+			{Name: "gascity", Prefix: "gc", Path: filepath.Join(root, "gascity")},
+		},
+	}
+
+	pins := cityStorageWorkPins(root, cfg)
+	if pins.HQ.Prefix != "hq" {
+		t.Errorf("HQ pinned prefix %q, want %q: a declared workspace prefix does not reach the pin",
+			pins.HQ.Prefix, "hq")
+	}
+	// The declared value wins over the name-derived one, which is the ordering
+	// EffectiveHQPrefix states.
+	if derived := config.DeriveBeadsPrefix("ds-research"); pins.HQ.Prefix == derived {
+		t.Errorf("HQ pinned the name-derived prefix %q over the declared one", derived)
+	}
+}
+
+// TestStorageWorkConfigContextDistinguishesDerivedHQPrefixes covers the digest
+// that states which configuration a plan was resolved from.
+//
+// Two cities can leave the workspace prefix unset and still pin different HQ
+// prefixes, because the prefix is then derived from the city name. A digest
+// taken over the unset field alone reads those two as the same configuration
+// while their pins disagree, which is the one thing the digest exists to
+// prevent.
+func TestStorageWorkConfigContextDistinguishesDerivedHQPrefixes(t *testing.T) {
+	root := t.TempDir()
+	research := &config.City{ResolvedWorkspaceName: "ds-research"}
+	factory := &config.City{ResolvedWorkspaceName: "gas-town"}
+
+	if config.EffectiveHQPrefix(research) == config.EffectiveHQPrefix(factory) {
+		t.Fatalf("both cities derive prefix %q, so this case cannot tell the digests apart",
+			config.EffectiveHQPrefix(research))
+	}
+	if cityStorageWorkPins(root, research).HQ.Prefix == cityStorageWorkPins(root, factory).HQ.Prefix {
+		t.Fatal("the two cities pin the same HQ prefix, so the digest has nothing to distinguish")
+	}
+
+	if storageWorkConfigContext(root, research) == storageWorkConfigContext(root, factory) {
+		t.Error("two cities with different HQ pins share one config digest, so a plan cannot name the configuration it came from")
 	}
 }

@@ -162,6 +162,7 @@ func TestPSCmdlineIsBounded(t *testing.T) {
 		t.Fatalf("WriteFile(ps): %v", err)
 	}
 	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
+	t.Setenv("GC_PIDUTIL_PS_TIMEOUT", "1s")
 
 	start := time.Now()
 	_, _ = psCmdline(os.Getpid())

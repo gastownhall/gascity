@@ -120,6 +120,57 @@ func TestRequireBdBinaryForCityRejectsWorkspacePinWithoutCompleteBinding(t *test
 	}
 }
 
+// TestRequireBdBinaryForCityErrorText pins the three messages the preflight
+// produces. They are the whole reason errBdNotOnPath is a sentinel rather
+// than a formatted string: an ambient miss gets the remediation hint, while
+// a pin or binding fault the operator can actually act on is returned
+// verbatim instead of being flattened into "bd not found in PATH".
+func TestRequireBdBinaryForCityErrorText(t *testing.T) {
+	newCity := func(t *testing.T, cityTOML, metadata string) string {
+		t.Helper()
+		cityDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityTOML), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if metadata != "" {
+			if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(scopeMetadataJSONPath(cityDir), []byte(metadata), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		t.Setenv("PATH", t.TempDir())
+		return cityDir
+	}
+
+	t.Run("ambient miss keeps the remediation hint", func(t *testing.T) {
+		cityDir := newCity(t, "[workspace]\nname = \"demo\"\n", "")
+		err := requireBdBinaryForCity(cityDir)
+		if err == nil || err.Error() != "bd not found in PATH (install beads or set GC_BEADS=file)" {
+			t.Fatalf("requireBdBinaryForCity() = %v, want the ambient-miss message with its remediation", err)
+		}
+	})
+
+	t.Run("unresolvable pin is returned verbatim", func(t *testing.T) {
+		pinDir := t.TempDir() // configured, but holds no bd
+		cityTOML := "[workspace]\nname = \"demo\"\n[workspace.env]\nPATH = " + strconv.Quote(pinDir) + "\n"
+		cityDir := newCity(t, cityTOML, `{"backend":"postgres","storage_endpoint":"opaque-remote","storage_database":"work"}`)
+		err := requireBdBinaryForCity(cityDir)
+		if err == nil || err.Error() != "workspace.env PATH is configured but contains no executable bd at an absolute path" {
+			t.Fatalf("requireBdBinaryForCity() = %v, want the unresolvable-pin message verbatim", err)
+		}
+	})
+
+	t.Run("partial binding is returned verbatim", func(t *testing.T) {
+		cityDir := newCity(t, "[workspace]\nname = \"demo\"\n", `{"backend":"postgres","storage_endpoint":"opaque-remote"}`)
+		err := requireBdBinaryForCity(cityDir)
+		if err == nil || !strings.Contains(err.Error(), "partial beads storage binding") {
+			t.Fatalf("requireBdBinaryForCity() = %v, want the partial-binding message verbatim", err)
+		}
+	})
+}
+
 func TestBdStoreBackingFindsDirectBdStore(t *testing.T) {
 	store := beads.NewBdStore("/city", noopBdRunner())
 	got, ok := bdStoreBacking(store)

@@ -304,7 +304,7 @@ func TestStoreSetBuilderSkipsTheOrdersGraphBindWhenOrdersAndGraphShareABinding(t
 // are compared, not merely the semantic facts.
 func TestStoreSetBuilderChecksReservedWorkIdentity(t *testing.T) {
 	registry, _ := planRegistry(t)
-	plan, err := ResolveStoragePlan(registry, planStorageConfig(planAllClassesOn(string(ReservedWorkBinding)), nil), planWorkPins())
+	plan, err := ResolveStoragePlan(registry, planStorageConfig(planAllClassesOn(string(ReservedWorkBinding)), nil), planWorkPins(), "")
 	if err != nil {
 		t.Fatalf("ResolveStoragePlan: %v", err)
 	}

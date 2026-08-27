@@ -134,6 +134,29 @@ func TestBDVersionPins(t *testing.T) {
 	// assignment in both .yml and .yaml workflows: a file-level presence check
 	// would let a stale pin ride along beside a correct one.
 	assertWorkflowPins(t, root, "BD_VERSION", bdVersion)
+
+	// The devcontainer README restates the installed version in prose, which
+	// makes it an anchor like any other -- and it was the only one no test read,
+	// so it sat at v1.0.4 through the promotion to v1.1.0. A doc anchor nothing
+	// asserts is how the next bump goes half-applied.
+	assertDocPinAnchor(t, root, ".devcontainer/README.md", "BD_VERSION", bdVersion)
+}
+
+// assertDocPinAnchor fails when a doc restates a deps.env pin as
+// "`KEY` from `deps.env` (currently VALUE)" and VALUE has drifted. The phrasing
+// is the contract: prose that names the variable without restating the value is
+// not an anchor and is not matched, so a doc can always opt out by dropping the
+// parenthetical rather than by going stale.
+func assertDocPinAnchor(t *testing.T, root, rel, key, want string) {
+	t.Helper()
+	re := regexp.MustCompile("`" + regexp.QuoteMeta(key) + "` from `deps\\.env` \\(currently ([^)]+)\\)")
+	m := re.FindStringSubmatch(readFile(t, root, rel))
+	if m == nil {
+		t.Fatalf("%s no longer restates %s as \"`%s` from `deps.env` (currently <value>)\"; either restore that phrasing or drop this assertion with the anchor", rel, key, key)
+	}
+	if got := strings.TrimSpace(m[1]); got != want {
+		t.Errorf("%s says %s is currently %q, want %q (deps.env)", rel, key, got, want)
+	}
 }
 
 // TestScanPinAssignments proves the workflow pin scanner catches the partial

@@ -36,6 +36,9 @@ func TestOpenLegacyCombinedSourceUsesOnlyHistoricalInfraPath(t *testing.T) {
 }
 
 func TestLegacyCombinedSourceClassifiesAndPreservesRecordsWithoutMutatingSource(t *testing.T) {
+	if !sqliteWriterFencingSupported() {
+		t.Skip("SQLite writer fencing is only available on Linux")
+	}
 	city := t.TempDir()
 	source := openLegacyCombinedWriter(t, city)
 	work, err := source.Create(beads.Bead{ID: "gcg-1", Title: "work", Type: "task"})
@@ -124,6 +127,9 @@ func TestLegacyCombinedSourceClassifiesAndPreservesRecordsWithoutMutatingSource(
 }
 
 func TestLegacyCombinedSourceReopensPrivateSnapshotReadOnlyAfterRecovery(t *testing.T) {
+	if !sqliteWriterFencingSupported() {
+		t.Skip("SQLite writer fencing is only available on Linux")
+	}
 	city := t.TempDir()
 	source := openLegacyCombinedWriter(t, city)
 	if _, err := source.Create(beads.Bead{ID: "gcg-read-only-snapshot", Title: "private recovery", Type: "task"}); err != nil {
@@ -202,6 +208,9 @@ func TestLegacyCombinedSourceCloseRetriesStoreCleanupBeforeRemovingSnapshot(t *t
 }
 
 func TestLegacyCombinedFenceSnapshotCancellationCleansPrivateSnapshotRoot(t *testing.T) {
+	if !sqliteWriterFencingSupported() {
+		t.Skip("SQLite writer fencing is only available on Linux")
+	}
 	city := t.TempDir()
 	writer := openLegacyCombinedWriter(t, city)
 	if _, err := writer.Create(beads.Bead{ID: "gcg-cancel", Title: "cancellable snapshot", Type: "task"}); err != nil {
@@ -265,6 +274,9 @@ func TestLegacyCombinedFenceSnapshotCancellationCleansPrivateSnapshotRoot(t *tes
 }
 
 func TestLegacyCombinedSourceRejectsAChangedCopyWindow(t *testing.T) {
+	if !sqliteWriterFencingSupported() {
+		t.Skip("SQLite writer fencing is only available on Linux")
+	}
 	city := t.TempDir()
 	source := openLegacyCombinedWriter(t, city)
 	t.Cleanup(func() { _ = source.CloseStore() })

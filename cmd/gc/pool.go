@@ -132,13 +132,13 @@ type scaleParams struct {
 // decisions and worker claim decisions structurally symmetric. See
 // engdocs/architecture/dispatch.md "scale_check ↔ work_query correspondence".
 func scaleParamsFor(a *config.Agent) scaleParams {
-	return scaleParamsForBeads(a, config.BeadsConfig{})
+	return scaleParamsForTopology(a, config.QueryTopology{})
 }
 
-func scaleParamsForBeads(a *config.Agent, beadsCfg config.BeadsConfig) scaleParams {
+func scaleParamsForTopology(a *config.Agent, topo config.QueryTopology) scaleParams {
 	sp := scaleParams{
 		Min:   a.EffectiveMinActiveSessions(),
-		Check: a.EffectivePoolDemandQueryForBeads(beadsCfg),
+		Check: a.EffectivePoolDemandQueryFor(topo),
 	}
 	if m := a.EffectiveMaxActiveSessions(); m != nil {
 		sp.Max = *m
@@ -405,7 +405,7 @@ func runPoolOnBoot(cfg *config.City, cityPath string, runner ScaleCheckRunner, s
 		if !a.SupportsInstanceExpansion() || a.Implicit {
 			continue
 		}
-		cmd := a.EffectiveOnBootForBeads(cfg.Beads)
+		cmd := a.EffectiveOnBootFor(config.QueryTopology{Beads: cfg.Beads})
 		if cmd == "" {
 			continue
 		}

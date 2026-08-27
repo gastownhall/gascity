@@ -2428,7 +2428,7 @@ func TestRunControlDispatcherReturnsTransientControlErrorWithoutQuarantine(t *te
 
 	var stderr bytes.Buffer
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	err = runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, control, control.ID, cfg, io.Discard, &stderr)
+	err = runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, control.ID, cfg, io.Discard, &stderr)
 	if err == nil {
 		t.Fatal("runControlDispatcherWithStoreAndConfig error = nil, want transient error")
 	}
@@ -2492,7 +2492,7 @@ title = "Review {reviewer}"
 		Workspace:     config.Workspace{Name: "test-city"},
 		FormulaLayers: config.FormulaLayers{City: []string{formulaDir}},
 	}
-	if err := runControlDispatcherWithStoreAndConfig(cityPath, cityPath, store, control, control.ID, cfg, io.Discard, &stderr); err != nil {
+	if err := runControlDispatcherWithStoreAndConfig(cityPath, cityPath, store, control.ID, cfg, io.Discard, &stderr); err != nil {
 		t.Fatalf("runControlDispatcherWithStoreAndConfig: %v", err)
 	}
 
@@ -2542,7 +2542,7 @@ func TestRunControlDispatcherPreservesSuccessfulControlWhenReprojectionFails(t *
 	_, _, control := createProcessedScopeCheckControl(t, store, false)
 
 	var stderr bytes.Buffer
-	if err := runControlDispatcherWithStoreAndConfig(cityPath, cityPath, store, control, control.ID, &config.City{Workspace: config.Workspace{Name: "test-city"}}, io.Discard, &stderr); err != nil {
+	if err := runControlDispatcherWithStoreAndConfig(cityPath, cityPath, store, control.ID, &config.City{Workspace: config.Workspace{Name: "test-city"}}, io.Discard, &stderr); err != nil {
 		t.Fatalf("runControlDispatcherWithStoreAndConfig: %v", err)
 	}
 
@@ -2700,7 +2700,7 @@ func TestRunControlDispatcherQuarantineReconcilesScopedControlFailure(t *testing
 
 	var stderr bytes.Buffer
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	if err := runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, control, control.ID, cfg, io.Discard, &stderr); err != nil {
+	if err := runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, control.ID, cfg, io.Discard, &stderr); err != nil {
 		t.Fatalf("runControlDispatcherWithStoreAndConfig: %v", err)
 	}
 
@@ -3050,7 +3050,7 @@ func TestRunControlDispatcherWithStoreRoutesRalphTraceWarningToStderr(t *testing
 	}
 
 	var stdout, stderr bytes.Buffer
-	if err := runControlDispatcherWithStore(cityDir, cityDir, store, check1, check1.ID, &stdout, &stderr); err != nil {
+	if err := runControlDispatcherWithStore(cityDir, cityDir, store, check1.ID, &stdout, &stderr); err != nil {
 		t.Fatalf("runControlDispatcherWithStore: %v", err)
 	}
 
@@ -3154,7 +3154,7 @@ func TestRunControlDispatcherWithStoreWarnsOnLegacyTracePath(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if err := runControlDispatcherWithStore(cityDir, cityDir, store, check1, check1.ID, &stdout, &stderr); err != nil {
+	if err := runControlDispatcherWithStore(cityDir, cityDir, store, check1.ID, &stdout, &stderr); err != nil {
 		t.Fatalf("runControlDispatcherWithStore: %v", err)
 	}
 
@@ -3285,11 +3285,7 @@ func TestRunWorkflowServeDedupsTraceWarningsAcrossNestedControlDispatch(t *testi
 		return next, nil
 	}
 	controlDispatcherServe = func(cityPath, storePath, beadID string, stdout, stderr io.Writer) error {
-		bead, err := store.Get(beadID)
-		if err != nil {
-			return err
-		}
-		return runControlDispatcherWithStore(cityPath, storePath, store, bead, beadID, stdout, stderr)
+		return runControlDispatcherWithStore(cityPath, storePath, store, beadID, stdout, stderr)
 	}
 
 	var stderr bytes.Buffer
@@ -3421,11 +3417,7 @@ func TestRunWorkflowServeDedupsLegacyTraceWarningsAcrossNestedControlDispatch(t 
 		return next, nil
 	}
 	controlDispatcherServe = func(cityPath, storePath, beadID string, stdout, stderr io.Writer) error {
-		bead, err := store.Get(beadID)
-		if err != nil {
-			return err
-		}
-		return runControlDispatcherWithStore(cityPath, storePath, store, bead, beadID, stdout, stderr)
+		return runControlDispatcherWithStore(cityPath, storePath, store, beadID, stdout, stderr)
 	}
 
 	var stderr bytes.Buffer
@@ -4720,7 +4712,7 @@ func TestRunControlDispatcherReturnsPendingForOpenScopeSubject(t *testing.T) {
 
 	var stderr bytes.Buffer
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	err = runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, control, control.ID, cfg, io.Discard, &stderr)
+	err = runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, control.ID, cfg, io.Discard, &stderr)
 	if !errors.Is(err, dispatch.ErrControlPending) {
 		t.Fatalf("runControlDispatcherWithStoreAndConfig error = %v, want ErrControlPending", err)
 	}
@@ -4904,12 +4896,8 @@ func TestRunWorkflowServeQuarantinesUnexpectedNonControlBead(t *testing.T) {
 		return []hookBead{{ID: nonControl.ID, Metadata: map[string]string{"gc.kind": "workflow"}}}, nil
 	}
 	controlDispatcherServe = func(cityPath, storePath, beadID string, stdout, stderr io.Writer) error {
-		bead, err := store.Get(beadID)
-		if err != nil {
-			return err
-		}
 		cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-		return runControlDispatcherWithStoreAndConfig(cityPath, storePath, store, bead, beadID, cfg, stdout, stderr)
+		return runControlDispatcherWithStoreAndConfig(cityPath, storePath, store, beadID, cfg, stdout, stderr)
 	}
 
 	var stderr bytes.Buffer
@@ -5091,7 +5079,7 @@ func TestRunControlDispatcherQuarantinesMalformedControlGraph(t *testing.T) {
 
 	var stderr bytes.Buffer
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	if err := runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, control, control.ID, cfg, io.Discard, &stderr); err != nil {
+	if err := runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, control.ID, cfg, io.Discard, &stderr); err != nil {
 		t.Fatalf("runControlDispatcherWithStoreAndConfig: %v", err)
 	}
 
@@ -5157,7 +5145,7 @@ func TestRunControlDispatcherQuarantinesMalformedFanoutScopeBody(t *testing.T) {
 
 	var stderr bytes.Buffer
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	if err := runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, fanout, fanout.ID, cfg, io.Discard, &stderr); err != nil {
+	if err := runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, fanout.ID, cfg, io.Discard, &stderr); err != nil {
 		t.Fatalf("runControlDispatcherWithStoreAndConfig: %v", err)
 	}
 
@@ -5223,7 +5211,7 @@ func TestRunControlDispatcherQuarantinesRalphControlMissingIteration(t *testing.
 
 	var stderr bytes.Buffer
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	if err := runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, control, control.ID, cfg, io.Discard, &stderr); err != nil {
+	if err := runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, control.ID, cfg, io.Discard, &stderr); err != nil {
 		t.Fatalf("runControlDispatcherWithStoreAndConfig: %v", err)
 	}
 
@@ -5271,7 +5259,7 @@ func TestRunControlDispatcherQuarantinesGenericControlFailure(t *testing.T) {
 
 	var stderr bytes.Buffer
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	if err := runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, control, control.ID, cfg, io.Discard, &stderr); err != nil {
+	if err := runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, control.ID, cfg, io.Discard, &stderr); err != nil {
 		t.Fatalf("runControlDispatcherWithStoreAndConfig: %v", err)
 	}
 
@@ -6226,15 +6214,15 @@ name = "test-city"
 	}
 	t.Setenv("GC_BEADS", "exec:/definitely/missing/provider")
 
-	_, _, _, err := findBeadAcrossStores(cityPath, "gc-missing", io.Discard)
+	_, _, err := findBeadScopeAcrossStores(cityPath, "gc-missing", io.Discard)
 	if err == nil {
-		t.Fatal("findBeadAcrossStores() error = nil, want provider failure")
+		t.Fatal("findBeadScopeAcrossStores() error = nil, want provider failure")
 	}
 	if !strings.Contains(err.Error(), "getting bead \"gc-missing\" from "+cityPath) {
-		t.Fatalf("findBeadAcrossStores() error = %v, want city store path context", err)
+		t.Fatalf("findBeadScopeAcrossStores() error = %v, want city store path context", err)
 	}
 	if strings.Contains(err.Error(), "bead not found") {
-		t.Fatalf("findBeadAcrossStores() error = %v, want provider failure instead of masked not-found", err)
+		t.Fatalf("findBeadScopeAcrossStores() error = %v, want provider failure instead of masked not-found", err)
 	}
 }
 
@@ -7155,5 +7143,73 @@ func TestFollowSleepDurationHandlesPathologicalInputs(t *testing.T) {
 	}
 	if got := followSleepDuration(-1); got != 1*time.Second {
 		t.Errorf("followSleepDuration(-1) = %v, want base 1s", got)
+	}
+}
+
+// TestAssertDrainRootScopeMatchesDispatch pins the invariant a drain's member
+// resolution depends on: the convoy lives in the root's work scope, so a drain
+// dispatched from a different one would resolve an empty convoy and report
+// success. The matching and unstamped arms are what keep it off today's shapes.
+func TestAssertDrainRootScopeMatchesDispatch(t *testing.T) {
+	drain := func(rootRef string) beads.Bead {
+		b := beads.Bead{ID: "gcg-drain-1", Metadata: map[string]string{}}
+		if rootRef != "" {
+			b.Metadata[beadmeta.RootStoreRefMetadataKey] = rootRef
+		}
+		return b
+	}
+	for _, tc := range []struct {
+		name       string
+		rootRef    string
+		dispatchTo string
+		wantErr    bool
+	}{
+		{name: "rig-rooted drain dispatched at its own rig", rootRef: "rig:gascity", dispatchTo: "rig:gascity"},
+		{name: "city-rooted drain dispatched at the city", rootRef: "city:mc", dispatchTo: "city:mc"},
+		{name: "city-rooted drain dispatched at a rig", rootRef: "city:mc", dispatchTo: "rig:gascity", wantErr: true},
+		{name: "rig-rooted drain dispatched at another rig", rootRef: "rig:beads", dispatchTo: "rig:gascity", wantErr: true},
+		{name: "unstamped root ref is not a mismatch", rootRef: "", dispatchTo: "rig:gascity"},
+		{name: "unrecognized dispatch directory is not a mismatch", rootRef: "city:mc", dispatchTo: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := assertDrainRootScopeMatchesDispatch(drain(tc.rootRef), tc.dispatchTo)
+			if tc.wantErr && err == nil {
+				t.Fatalf("root %q dispatched from %q was accepted; the drain would read the wrong work store and resolve an empty convoy", tc.rootRef, tc.dispatchTo)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("root %q dispatched from %q was rejected: %v", tc.rootRef, tc.dispatchTo, err)
+			}
+			if tc.wantErr && !strings.Contains(err.Error(), tc.rootRef) {
+				t.Errorf("the error must name the root scope so an operator can see which store the convoy is in; got %v", err)
+			}
+		})
+	}
+}
+
+// TestRunControlDispatcherRejectsCrossScopeDrain pins the guard's call site: the
+// unit test above proves the predicate, this proves the drain arm consults it.
+func TestRunControlDispatcherRejectsCrossScopeDrain(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	control, err := store.Create(beads.Bead{
+		Title:  "Drain",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:         "drain",
+			beadmeta.RootStoreRefMetadataKey: "rig:elsewhere",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(control): %v", err)
+	}
+
+	var stderr bytes.Buffer
+	err = runControlDispatcherWithStoreAndConfig(cityPath, cityPath, store, control.ID, &config.City{Workspace: config.Workspace{Name: "test-city"}}, io.Discard, &stderr)
+	if err == nil {
+		t.Fatal("a drain rooted in rig:elsewhere dispatched from city:test-city was accepted; it would drain the wrong store's convoy and report success")
+	}
+	if !strings.Contains(err.Error(), "rig:elsewhere") || !strings.Contains(err.Error(), "city:test-city") {
+		t.Fatalf("error = %v, want both the root and dispatch scopes named", err)
 	}
 }

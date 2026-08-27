@@ -119,7 +119,7 @@ func indirectPersistedType(typ reflect.Type) reflect.Type {
 func persistedProviderValidationCensus() []persistedStructValidationCensus {
 	return []persistedStructValidationCensus{
 		{typ: reflect.TypeOf(BindingSpec{}), fields: map[string]persistedFieldValidationFamily{
-			"Name": persistedFieldIdentifier, "Provider": persistedFieldIdentifier, "Path": persistedFieldSecretFree, "ConfigRef": persistedFieldIdentifier,
+			"Name": persistedFieldIdentifier, "Provider": persistedFieldIdentifier, "Path": persistedFieldSecretFree, "ConfigRef": persistedFieldIdentifier, "CityRoot": persistedFieldSecretFree, "URL": persistedFieldSecretFree, "Auth": persistedFieldSecretFree,
 		}},
 		{typ: reflect.TypeOf(ClassSet{}), fields: map[string]persistedFieldValidationFamily{}},
 		{typ: reflect.TypeOf(ClassCapability{}), fields: map[string]persistedFieldValidationFamily{

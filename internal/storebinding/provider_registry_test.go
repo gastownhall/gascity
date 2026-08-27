@@ -31,6 +31,38 @@ func TestProviderRegistryRequiresExactFrozenRegistration(t *testing.T) {
 	}
 }
 
+// TestProviderRegistryRefusalEnumeratesCompiledProviders pins the second half
+// of an unknown-provider refusal. Naming the ID that was not found tells an
+// operator nothing about whether they typed it wrong or are running a build
+// that never carried it; the list it was not found in is what separates those.
+func TestProviderRegistryRefusalEnumeratesCompiledProviders(t *testing.T) {
+	registry := NewProviderRegistry()
+	for _, id := range []ProviderID{"builtin-two", "builtin-one"} {
+		if err := registry.Register(&recordingFactory{id: id}); err != nil {
+			t.Fatalf("Register(%s): %v", id, err)
+		}
+	}
+	if err := registry.Freeze(); err != nil {
+		t.Fatalf("Freeze(): %v", err)
+	}
+
+	_, err := registry.Lookup(ProviderID("builtin-missing"))
+	if !errors.Is(err, ErrUnknownProvider) {
+		t.Fatalf("Lookup(unknown) error = %v, want ErrUnknownProvider", err)
+	}
+	if want := `unknown storage provider: "builtin-missing" (compiled in: builtin-one, builtin-two)`; err.Error() != want {
+		t.Fatalf("refusal = %q, want %q", err.Error(), want)
+	}
+
+	empty := NewProviderRegistry()
+	if err := empty.Freeze(); err != nil {
+		t.Fatalf("empty Freeze(): %v", err)
+	}
+	if _, err := empty.Lookup(ProviderID("builtin-one")); err == nil || !strings.Contains(err.Error(), "compiled in: none") {
+		t.Fatalf("empty-registry refusal = %v, want it to say nothing is compiled in", err)
+	}
+}
+
 func TestProviderRegistryUsesOneExactFactoryAndHasNoGlobalFallback(t *testing.T) {
 	registry := NewProviderRegistry()
 	wanted := &recordingFactory{id: ProviderID("builtin-wanted"), provider: &recordingProvider{}}

@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	goruntime "runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -1222,10 +1223,38 @@ func notifySdState(stderr io.Writer, state string) {
 	}
 }
 
+// Go enables heap profiling by default (MemProfileRate = 512 KiB), and
+// runtime.mProf_Flush walks the entire mprof bucket list on every GC
+// cycle, at the tail of gcMarkTermination. It runs immediately after the
+// world restarts, not inside the STW pause -- see the Go 1.26.6 runtime
+// (mgc.go): "This is relatively expensive, so we don't do it with the
+// world stopped." So the cost is CPU plus delayed post-GC progress on the
+// mark-termination path, not GC pause time.
+//
+// It is still substantial on a long-lived daemon: a 90s profile of a
+// 7-day-old supervisor found mProf_Flush was ~23% of all on-CPU time and
+// effectively the whole of the gcMarkTermination cost -- building a heap
+// profile nothing reads. Zeroing the rate here stops the bucket set
+// accumulating across the daemon's long-running phase; buckets created
+// during CLI setup are a small fixed set and are still flushed.
+//
+// gc only serves pprof under GC_PPROF=1 (api.StartPprof), so reuse that
+// same gate rather than introducing a second knob.
+
+// configureSupervisorRuntime tunes runtime knobs for the long-lived supervisor
+// daemon. See the comment above for why heap profiling is disabled by default.
+func configureSupervisorRuntime() {
+	if os.Getenv("GC_PPROF") != "1" {
+		goruntime.MemProfileRate = 0
+	}
+}
+
 // runSupervisor is the main supervisor loop. It acquires the lock,
 // starts a control socket, reads the registry, starts CityRuntimes,
 // and runs until canceled.
 func runSupervisor(stdout, stderr io.Writer) int {
+	configureSupervisorRuntime()
+
 	if pid := supervisorAlive(); pid != 0 {
 		fmt.Fprintf(stderr, "gc supervisor: supervisor already running (PID %d)\n", pid) //nolint:errcheck
 		return 1
@@ -1916,7 +1945,22 @@ func reconcileCities(
 			})
 		}
 
-		// recordInitFailure logs the error and records backoff state.
+		// recordInitFailure logs the error, ends the attempt, and records
+		// backoff state.
+		//
+		// Clearing initStatus is part of recording the failure, not a courtesy
+		// each branch performs for itself. reconcileCities selects cities to
+		// start by skipping any with a live initStatus entry, and it consults
+		// that skip BEFORE the backoff and its config-mtime reset. So a branch
+		// that records a failure but leaves the entry behind wedges the city out
+		// of the loop for the life of the process: it logs "next retry in 10s"
+		// and is then never selected again, and neither editing city.toml nor
+		// `gc start` recovers it — only a supervisor restart does.
+		//
+		// Three of the branches below used to clear it and three did not, which
+		// is what the split produced. Every call site either has already cleared
+		// it (the pre-runtime branches, and publishManagedCity for everything
+		// after it) or needs it cleared, so the delete belongs here, once.
 		recordInitFailure := func(cityName, msg string) {
 			fmt.Fprintln(stderr, logutil.FormatFatalLine(msg))                              //nolint:errcheck // best-effort stderr
 			fmt.Fprintf(stderr, "gc supervisor: city '%s': %s (skipping)\n", cityName, msg) //nolint:errcheck
@@ -1926,10 +1970,11 @@ func reconcileCities(
 			}
 			cr.BatchUpdate(func(
 				_ map[string]*managedCity,
-				_ map[string]cityInitProgress,
+				initStatus map[string]cityInitProgress,
 				initFailures map[string]*initFailRecord,
 				_ map[string]*panicRecord,
 			) {
+				delete(initStatus, path)
 				ifrec := initFailures[path]
 				if ifrec == nil {
 					ifrec = &initFailRecord{}
@@ -1995,14 +2040,6 @@ func reconcileCities(
 				initStatus[path] = cityInitProgress{name: cityName, status: status}
 			})
 		}); err != nil {
-			cr.BatchUpdate(func(
-				_ map[string]*managedCity,
-				initStatus map[string]cityInitProgress,
-				_ map[string]*initFailRecord,
-				_ map[string]*panicRecord,
-			) {
-				delete(initStatus, path)
-			})
 			emitPendingCityCreateFailure(cr, path, cityName, "city_init_failed", err, stderr)
 			recordInitFailure(cityName, fmt.Sprintf("init: %v", err))
 			continue
@@ -2044,14 +2081,6 @@ func reconcileCities(
 			return nil
 		})
 		if spErr != nil {
-			cr.BatchUpdate(func(
-				_ map[string]*managedCity,
-				initStatus map[string]cityInitProgress,
-				_ map[string]*initFailRecord,
-				_ map[string]*panicRecord,
-			) {
-				delete(initStatus, path)
-			})
 			emitPendingCityCreateFailure(cr, path, cityName, "session_provider_failed", spErr, stderr)
 			recordInitFailure(cityName, fmt.Sprintf("session provider: %v", spErr))
 			continue
@@ -2061,14 +2090,6 @@ func reconcileCities(
 		if err := runPostPrepareStep("checking_agent_images", func() error {
 			return checkAgentImages(sp, cfg.Agents, stderr)
 		}); err != nil {
-			cr.BatchUpdate(func(
-				_ map[string]*managedCity,
-				initStatus map[string]cityInitProgress,
-				_ map[string]*initFailRecord,
-				_ map[string]*panicRecord,
-			) {
-				delete(initStatus, path)
-			})
 			emitPendingCityCreateFailure(cr, path, cityName, "agent_image_check_failed", err, stderr)
 			recordInitFailure(cityName, err.Error())
 			continue
@@ -2150,7 +2171,7 @@ func reconcileCities(
 		// Wire API state.
 		var cs *controllerState
 		if err := runPostPrepareStep("opening_controller_state", func() error {
-			cs = newControllerState(cityCtx, cfg, sp, eventProv, cityName, path)
+			cs = newControllerStateWithRoutes(cityCtx, cityRuntime.storageRoutes, cfg, sp, eventProv, cityName, path)
 			return nil
 		}); err != nil {
 			// The runtime is already built, and it holds this city's storage
@@ -2257,6 +2278,14 @@ func reconcileCities(
 			recordInitFailure(cityName, fmt.Sprintf("controller lock: %v", lockErr))
 			continue
 		}
+
+		// The lock holder — and only the lock holder — is this process's
+		// residency answer for the city. The runtime above already opened its
+		// binding, but registering it at construction time would let a
+		// replacement that LOSES this lock repoint the live city's release
+		// sweeps at a handle it is about to close. Same reason the socket is
+		// started after the lock rather than before it.
+		registerResidencyRoutes(path, cityRuntime.storageRoutes, cityRuntime.cityBeadStore)
 
 		// Start controller socket AFTER the alreadyRunning check so we
 		// never destroy a live city's socket or leak a listener.

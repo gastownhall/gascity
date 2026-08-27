@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -1879,7 +1880,7 @@ func TestEffectiveWorkQueryDefault(t *testing.T) {
 
 func TestEffectiveWorkQueryBD105CompatibilityOptIn(t *testing.T) {
 	a := Agent{Name: "mayor"}
-	got := a.EffectiveWorkQueryForBeads(BeadsConfig{BDCompatibility: BeadsBDCompatibility105})
+	got := a.EffectiveWorkQueryFor(QueryTopology{Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}})
 	if !strings.Contains(got, `bd ready --include-ephemeral --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json --sort oldest --limit=20`) {
 		t.Errorf("EffectiveWorkQueryForBeads(bd-1.0.5) missing include-ephemeral routed probe: %q", got)
 	}
@@ -1997,7 +1998,7 @@ esac
 
 func TestEffectiveAssignedReadyQueryForBeadsBD105Compatibility(t *testing.T) {
 	a := Agent{Name: "worker", Dir: "hello-world"}
-	got := a.EffectiveAssignedReadyQueryForBeads(BeadsConfig{BDCompatibility: BeadsBDCompatibility105})
+	got := a.EffectiveAssignedReadyQueryFor(QueryTopology{Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}})
 	if !strings.Contains(got, `bd ready --include-ephemeral --assignee="$id" --json --limit=1`) {
 		t.Fatalf("EffectiveAssignedReadyQueryForBeads(bd-1.0.5) missing include-ephemeral assigned-ready tier: %q", got)
 	}
@@ -2779,11 +2780,11 @@ func TestPoolDemandPredicateSharedWithWorkQuery(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			wq := tt.agent.EffectiveWorkQuery()
 			demand := tt.agent.EffectivePoolDemandQuery()
-			workPredicate := bdReadyPoolDemandShell("--sort oldest --limit=20", false)
+			workPredicate := bdReadyPoolDemandShell("--sort oldest --limit=20", QueryTopology{})
 			if !strings.Contains(wq, workPredicate) {
 				t.Errorf("EffectiveWorkQuery() missing shared predicate %q in %q", workPredicate, wq)
 			}
-			migrationWorkPredicate := bdReadyPoolDemandMigrationShell("--limit=20", false)
+			migrationWorkPredicate := bdReadyPoolDemandMigrationShell("--limit=20", QueryTopology{})
 			if !strings.Contains(wq, migrationWorkPredicate) {
 				t.Errorf("EffectiveWorkQuery() missing shared migration predicate %q in %q", migrationWorkPredicate, wq)
 			}
@@ -2792,11 +2793,11 @@ func TestPoolDemandPredicateSharedWithWorkQuery(t *testing.T) {
 					t.Errorf("EffectiveWorkQuery() missing migration filter fragment %q in %q", want, wq)
 				}
 			}
-			countPredicate := bdReadyPoolDemandShell("--limit 0", false)
+			countPredicate := bdReadyPoolDemandShell("--limit 0", QueryTopology{})
 			if !strings.Contains(demand, countPredicate) {
 				t.Errorf("EffectivePoolDemandQuery() missing shared predicate %q in %q", countPredicate, demand)
 			}
-			migrationCountPredicate := bdReadyPoolDemandMigrationShell("--limit 0", false)
+			migrationCountPredicate := bdReadyPoolDemandMigrationShell("--limit 0", QueryTopology{})
 			if !strings.Contains(demand, migrationCountPredicate) {
 				t.Errorf("EffectivePoolDemandQuery() missing shared migration predicate %q in %q", migrationCountPredicate, demand)
 			}
@@ -5743,7 +5744,7 @@ func runEffectiveWorkQuery(t *testing.T, a Agent, env map[string]string, bdScrip
 
 func runEffectiveWorkQueryForBeads(t *testing.T, a Agent, beads BeadsConfig, env map[string]string, bdScript string) string {
 	t.Helper()
-	return runShellWithFakeBd(t, a.EffectiveWorkQueryForBeads(beads), env, bdScript)
+	return runShellWithFakeBd(t, a.EffectiveWorkQueryFor(QueryTopology{Beads: beads}), env, bdScript)
 }
 
 // runShellWithFakeBd executes shellCmd with a fake `bd` script on PATH so
@@ -5758,16 +5759,43 @@ func runShellWithFakeBd(t *testing.T, shellCmd string, env map[string]string, bd
 		t.Fatalf("write fake bd: %v", err)
 	}
 
-	cmd := exec.Command("sh", "-c", shellCmd)
-	cmd.Env = []string{"PATH=" + tmp + ":" + os.Getenv("PATH")}
+	commandEnv := []string{"PATH=" + tmp + ":" + os.Getenv("PATH")}
 	for k, v := range env {
-		cmd.Env = append(cmd.Env, k+"="+v)
+		commandEnv = append(commandEnv, k+"="+v)
 	}
-	out, err := cmd.Output()
+	stdout, stderr, exit := runShellCommandCapture(t, shellCmd, commandEnv)
+	if exit != 0 {
+		t.Fatalf("run shell with fake bd: exit %d: %s", exit, stderr)
+	}
+	return stdout
+}
+
+// runShellCommandCapture is this package's single test seam for EXECUTING a
+// generated command: it runs command through `sh -c` with exactly env and
+// reports stdout, stderr and exit status separately, failing the test only when
+// the process could not be run at all.
+//
+// Every helper in the package that has to execute a generated command routes
+// through here rather than constructing its own process, which is what keeps
+// the package at one subprocess call site per concern instead of one per helper
+// (test/test-resources.toml: "each process-owning test removes or replaces its
+// source call site").
+func runShellCommandCapture(t *testing.T, command string, env []string) (stdout, stderr string, exit int) {
+	t.Helper()
+	cmd := exec.Command("sh", "-c", command)
+	cmd.Env = env
+	var outBuf, errBuf strings.Builder
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	err := cmd.Run()
 	if err != nil {
-		t.Fatalf("run shell with fake bd: %v", err)
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("run shell command: %v", err)
+		}
+		exit = exitErr.ExitCode()
 	}
-	return string(out)
+	return outBuf.String(), errBuf.String(), exit
 }
 
 func runLifecycleHookCommand(t *testing.T, command string, bdScript string) string {
@@ -6359,7 +6387,7 @@ func TestEffectiveOnDeathForBeadsBD105ReopensEphemeralInProgressWork(t *testing.
 		PoolName: "hello-world/dog",
 	}
 
-	log := runLifecycleHookCommand(t, a.EffectiveOnDeathForBeads(BeadsConfig{BDCompatibility: BeadsBDCompatibility105}), `#!/bin/sh
+	log := runLifecycleHookCommand(t, a.EffectiveOnDeathFor(QueryTopology{Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}}), `#!/bin/sh
 set -eu
 case "$1" in
   list)
@@ -6534,7 +6562,7 @@ func TestEffectiveOnBootForBeadsBD105ReopensOwnerlessEphemeralRoutedWork(t *test
 		PoolName: "hello-world/dog",
 	}
 
-	log := runLifecycleHookCommand(t, a.EffectiveOnBootForBeads(BeadsConfig{BDCompatibility: BeadsBDCompatibility105}), `#!/bin/sh
+	log := runLifecycleHookCommand(t, a.EffectiveOnBootFor(QueryTopology{Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}}), `#!/bin/sh
 set -eu
 case "$1" in
   list)

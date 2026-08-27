@@ -132,9 +132,9 @@ func TestManagedDoltLifecycleOwnedStillRejectsIncompleteStorageMetadata(t *testi
 			want:     "partial beads storage binding",
 		},
 		{
-			name:     "ordinary mixed metadata",
+			name:     "a backend this build does not register",
 			metadata: `{"backend":"postgres","dolt_mode":"server","dolt_database":"legacy"}`,
-			want:     "cannot mix dolt and postgres fields",
+			want:     `unsupported backend "postgres"`,
 		},
 	}
 

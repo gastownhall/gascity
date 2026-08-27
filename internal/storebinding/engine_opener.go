@@ -45,6 +45,43 @@ type EngineOpener interface {
 	OpenEngine(spec BindingSpec, classes ClassSet) (beads.Store, io.Closer, error)
 }
 
+// BindingLocator reports WHERE a provider actually serves a binding from.
+//
+// It exists because a city records that location durably — the served-binding
+// note is the one thing that keeps a later boot from silently re-pointing a
+// city's infrastructure classes at a binding that holds none of its state —
+// and the recorded value has to be the place the provider really opens, not
+// the configuration string it was derived from. Two bindings can carry the
+// same opaque reference and resolve to different directories in different
+// cities; a note holding the reference cannot tell them apart.
+//
+// The location is secret-free and absolute, and answering is READ-ONLY: it
+// must create and modify nothing, because the note is written on paths that
+// have deliberately built nothing yet. It may read the filesystem, and both
+// compiled providers do — resolving a location means following the symlinks in
+// it, or two spellings of one path record as two different bindings. What a
+// locator must never do is bring the location into existence.
+//
+// Optional, like the opener beside it. A provider that offers no locator has
+// its configured reference recorded instead, which is what a city did before
+// this seam existed.
+type BindingLocator interface {
+	// BindingLocation returns the absolute location this provider serves the
+	// given specification from. spec is passed rather than assumed so a
+	// stateless factory can implement the seam directly.
+	BindingLocation(spec BindingSpec) (string, error)
+}
+
+// BindingLocatorFor returns the location hook for a planned binding's
+// provider, and whether that provider offers one.
+func BindingLocatorFor(binding PlannedBinding) (BindingLocator, bool) {
+	if isNilInterface(binding.Provider) {
+		return nil, false
+	}
+	locator, ok := binding.Provider.(BindingLocator)
+	return locator, ok
+}
+
 // EngineOpenerFor returns the engine-opening hook for a planned binding's
 // provider, and whether that provider offers one.
 //
