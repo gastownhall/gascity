@@ -93,14 +93,36 @@ func validWorkOutcome(v string) bool {
 	}
 }
 
+// workRecordGatedBeadTypes are the bead types a worker claims, works, and
+// closes by reporting a work outcome. Bug beads belong here alongside tasks:
+// they are equally worker-claimable, and gating only "task" let every bug
+// close bypass the contract silently (gastownhall/gascity#5037 finding 2 — both
+// silent rows in that issue's six-close table were type bug). feature is the
+// same shape — a bd built-in that is claimed, worked, and closed with an
+// outcome exactly as task and bug are, and already grouped with them as an
+// engineering type by internal/runproj/summary.go — so a feature closed as
+// shipped with no commit is this gate's own defect, one type over.
+//
+// The set stays deliberately narrow. epic, story, and milestone are containers
+// whose closes summarize child work rather than report an artifact, and
+// decision records a choice, not delivered work; requiring a commit of any of
+// them would manufacture violations for closes that are correct.
+var workRecordGatedBeadTypes = map[string]bool{
+	"":        true, // an unset type defaults to a work unit
+	"task":    true,
+	"bug":     true,
+	"feature": true,
+}
+
 // isWorkRecordGatedBead reports whether the work-record close contract applies
-// to bead. It applies to worker-claimable work units — plain task beads — and
-// deliberately NOT to control/structural beads (anything carrying gc.kind:
-// workflow roots, scope/run/check/drain steps, etc.) or non-task beads (convoy,
-// message). Those use the disjoint control-plane gc.outcome vocabulary and are
-// closed by the dispatch engine, not by a worker reporting a work outcome.
+// to bead. It applies to worker-claimable work units — the types in
+// workRecordGatedBeadTypes — and deliberately NOT to control/structural beads
+// (anything carrying gc.kind: workflow roots, scope/run/check/drain steps,
+// etc.) or to other bead types (convoy, message). Those use the disjoint
+// control-plane gc.outcome vocabulary and are closed by the dispatch engine,
+// not by a worker reporting a work outcome.
 func isWorkRecordGatedBead(bead beads.Bead) bool {
-	if t := strings.TrimSpace(bead.Type); t != "" && t != "task" {
+	if !workRecordGatedBeadTypes[strings.TrimSpace(bead.Type)] {
 		return false
 	}
 	if strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]) != "" {
@@ -140,6 +162,43 @@ func validateWorkRecordOnClose(bead beads.Bead, commitReachable func(commit, bra
 		violations = append(violations, fmt.Sprintf("%s %s is not reachable on %s %s", beadmeta.WorkCommitMetadataKey, commit, beadmeta.WorkBranchMetadataKey, branch))
 	}
 	return violations
+}
+
+// workRecordRepoDir picks the git repository the reachability probe runs in:
+// the first of the stable scope root (the rig repo) and the bead's gc.work_dir
+// that is a directory on disk.
+//
+// The scope root is preferred because gc.work_dir is a polecat worktree,
+// deleted once the worktree is reaped, so preferring *it* made every
+// post-cleanup probe run in a missing directory: git errors, the fail-closed
+// reading calls the commit unreachable, and a legitimately delivered close is
+// blocked (gastownhall/gascity#5037 finding 3, independently confirmed by the
+// gas-dr5 review with a deputy-close scenario). Worktrees share one object
+// store, so the rig root answers the same question from a directory that
+// usually still exists.
+//
+// "Usually" is why the preference is conditioned on existence rather than on a
+// non-empty string. In production the scope root is never blank —
+// resolveStoreScopeRoot falls back to the city path when the store path is —
+// so an unconditional preference is a priority inversion that makes the
+// gc.work_dir branch unreachable. And nothing upstream proves the root is on
+// disk: resolveBdScopeTarget rejects a rig whose registered Path is empty,
+// never one whose directory has been moved or removed. A stale registration
+// would then reproduce the exact failure this function exists to prevent, with
+// "rig registration stale" substituted for "worktree reaped". Checking the
+// directory keeps the intended preference without opening that case.
+//
+// An empty result is the honest "no repo to consult" that
+// gitCommitReachableOnBranch reads as not reachable rather than probing the
+// process's own working directory.
+func workRecordRepoDir(bead beads.Bead, scopeRoot string) string {
+	workDir := strings.TrimSpace(bead.Metadata[beadmeta.WorkDirMetadataKey])
+	for _, candidate := range []string{strings.TrimSpace(scopeRoot), workDir} {
+		if candidate != "" && isExistingDir(candidate) {
+			return candidate
+		}
+	}
+	return ""
 }
 
 // gitCommitReachableOnBranch reports whether commit is an ancestor of branch in
@@ -275,10 +334,7 @@ func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, preFetched 
 		}
 		var projectionErr error
 		bead, projectionErr = applyWorkRecordUpdateMetadata(bead, bdArgs)
-		repoDir := strings.TrimSpace(bead.Metadata[beadmeta.WorkDirMetadataKey])
-		if repoDir == "" {
-			repoDir = scopeRoot
-		}
+		repoDir := workRecordRepoDir(bead, scopeRoot)
 		var violations []string
 		if projectionErr != nil {
 			violations = []string{projectionErr.Error()}
