@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/pidutil"
+	"github.com/gastownhall/gascity/internal/processgroup"
 )
 
 // Orphaned service processes are survivors of a previous supervisor hard
@@ -239,18 +240,36 @@ func terminateOrphanedProcesses(id orphanIdentity, pids []int) {
 	}
 }
 
-// signalProcessOrGroup signals the process group led by pid, falling back
-// to the process itself when pid is not a group leader. Unsafe targets are
+// orphanKill is syscall.Kill behind an indirection so tests can observe
+// which target the reaper picks without signaling live processes.
+var orphanKill = syscall.Kill
+
+// signalProcessOrGroup signals the process group led by pid, falling back to
+// the process itself when pid does not lead a group. Unsafe targets are
 // refused outright.
+//
+// Leadership is checked up front rather than inferred from a failed group
+// kill. kill(-pid) names the group whose id equals pid, not "the group
+// containing pid": for a scanned orphan that is a group member rather than
+// its leader — a same-argv child that outlived the leader and re-parented to
+// init satisfies every orphan rule while inheriting the dead leader's pgid —
+// -pid resolves to an unrelated live tree that merely holds that number, and
+// signaling it succeeds. Because it succeeds, the fallback never fires and
+// nothing logs the collateral damage. On a host where many agents run the
+// same build, that is indistinguishable from an external pattern-kill: one
+// process tree dies by signal while identically-named neighbors survive
+// (ga-8qmy).
 func signalProcessOrGroup(pid int, sig syscall.Signal) {
 	if unsafeSignalTarget(pid) {
 		log.Printf("workspacesvc: refusing to signal unsafe orphan-reap target pid %d", pid)
 		return
 	}
-	if err := syscall.Kill(-pid, sig); err == nil {
-		return
+	if processgroup.LeadsOwnGroup(pid) {
+		if err := orphanKill(-pid, sig); err == nil {
+			return
+		}
 	}
-	_ = syscall.Kill(pid, sig)
+	_ = orphanKill(pid, sig)
 }
 
 // unsafeSignalTarget reports whether pid must never be signaled: init,

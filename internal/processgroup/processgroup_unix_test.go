@@ -90,3 +90,58 @@ func TestTerminateCommandPreservesGroupFailureAfterDirectKill(t *testing.T) {
 	}
 	_ = cmd.Wait()
 }
+
+// TestLeadsOwnGroupTrueForGroupLeader covers the case in which widening a
+// signal from a process to a process group is sound: a child started via
+// StartCommandInNewGroup leads the group its own pid names, so kill(-pid)
+// reaches that child's tree and nothing else.
+func TestLeadsOwnGroupTrueForGroupLeader(t *testing.T) {
+	processgrouptest.RequireRealProcessSignals(t)
+
+	cmd := exec.Command("sleep", "30")
+	StartCommandInNewGroup(cmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start group leader: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+
+	if !LeadsOwnGroup(cmd.Process.Pid) {
+		t.Fatalf("LeadsOwnGroup(%d) = false for a Setpgid child, want true", cmd.Process.Pid)
+	}
+}
+
+// TestLeadsOwnGroupFalseForGroupMember is the case that makes this check
+// load-bearing. A child started without Setpgid inherits its parent's group,
+// so its pid is a group *member* id, not a group id. kill(-pid) would then
+// name whatever unrelated group happens to hold that number — on a shared
+// host, another agent's build (ga-8qmy).
+func TestLeadsOwnGroupFalseForGroupMember(t *testing.T) {
+	processgrouptest.RequireRealProcessSignals(t)
+
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start group member: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+
+	if LeadsOwnGroup(cmd.Process.Pid) {
+		t.Fatalf("LeadsOwnGroup(%d) = true for a child that inherited its parent's group, want false", cmd.Process.Pid)
+	}
+}
+
+// TestLeadsOwnGroupRefusesUnsafePIDs keeps the guard aligned with
+// Terminate's: init and the nonpositive pids that give kill(2) its broadcast
+// and current-group meanings are never group-signal targets.
+func TestLeadsOwnGroupRefusesUnsafePIDs(t *testing.T) {
+	for _, pid := range []int{-1, 0, 1} {
+		if LeadsOwnGroup(pid) {
+			t.Errorf("LeadsOwnGroup(%d) = true, want false", pid)
+		}
+	}
+}

@@ -50,6 +50,28 @@ func StartCommandInNewGroup(cmd *exec.Cmd) {
 	cmd.SysProcAttr.Setpgid = true
 }
 
+// LeadsOwnGroup reports whether pid leads the process group its own number
+// names — the only condition under which kill(-pid, sig) is scoped to pid's
+// own tree.
+//
+// kill(2)'s negative form selects the group whose *group id* equals the
+// magnitude; it does not mean "the group containing pid". For a pid that is
+// a group member rather than its leader, -pid therefore names an unrelated
+// group that merely happens to hold that number, and signaling it takes
+// down a stranger's processes. The failure is silent both ways: the kill
+// succeeds, so a caller that treats an error as "not a group leader" never
+// reaches its per-process fallback. On a shared host running many identical
+// builds it surfaces as one process tree dying by signal while its
+// identically-named neighbors live (ga-8qmy). Confirm leadership before
+// widening any signal from a process to a group.
+func LeadsOwnGroup(pid int) bool {
+	if pid <= 1 {
+		return false
+	}
+	pgid, err := syscall.Getpgid(pid)
+	return err == nil && pgid == pid
+}
+
 // Terminate sends SIGTERM to pgid, waits for exit, then escalates to SIGKILL.
 func Terminate(pgid int, timeout time.Duration, opts Options) error {
 	if pgid <= 1 || pgid == opts.currentGroupID() {

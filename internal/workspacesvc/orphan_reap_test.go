@@ -1,6 +1,7 @@
 package workspacesvc
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -451,4 +452,114 @@ func TestDetectUserSubreaperPID(t *testing.T) {
 			t.Fatalf("detectUserSubreaperPID = %d, want 0", got)
 		}
 	})
+}
+
+// startGroupLeaderForTest starts a long-lived child that leads its own
+// process group, mirroring the Setpgid spawn path proxy_process uses.
+func startGroupLeaderForTest(t *testing.T) int {
+	t.Helper()
+	cmd := exec.Command("sleep", "30")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start group leader: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	return cmd.Process.Pid
+}
+
+// startGroupMemberForTest starts a long-lived child *without* Setpgid, so it
+// inherits this process's group and its pid is a member id rather than a
+// group id.
+func startGroupMemberForTest(t *testing.T) int {
+	t.Helper()
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start group member: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	return cmd.Process.Pid
+}
+
+// captureOrphanKill swaps the reaper's kill(2) indirection for a recorder, so
+// a test can assert which target the reaper chose without signaling anything.
+func captureOrphanKill(t *testing.T, targets *[]int) {
+	t.Helper()
+	previous := orphanKill
+	orphanKill = func(pid int, _ syscall.Signal) error {
+		*targets = append(*targets, pid)
+		return nil
+	}
+	t.Cleanup(func() { orphanKill = previous })
+}
+
+// TestSignalProcessOrGroupUsesGroupForGroupLeader keeps the reap wide enough
+// to do its job: an orphaned service process that leads its own group is
+// signaled as a group so its own children go with it.
+func TestSignalProcessOrGroupUsesGroupForGroupLeader(t *testing.T) {
+	pid := startGroupLeaderForTest(t)
+	var targets []int
+	captureOrphanKill(t, &targets)
+
+	signalProcessOrGroup(pid, syscall.SIGTERM)
+
+	if len(targets) != 1 || targets[0] != -pid {
+		t.Fatalf("signalProcessOrGroup(%d) targets = %v, want [%d] (the group it leads)", pid, targets, -pid)
+	}
+}
+
+// TestSignalProcessOrGroupNeverGroupSignalsAGroupMember is the ga-8qmy
+// regression guard. kill(-pid) selects the group whose id equals pid, not
+// "the group containing pid", so widening the signal for a pid that does not
+// lead its group aims it at an unrelated tree that happens to hold that
+// number. The mis-aimed kill *succeeds*, so the per-process fallback below it
+// never runs and nothing reports the collateral damage — on this shared host
+// it reads as another agent's test suite dying to a mystery signal.
+func TestSignalProcessOrGroupNeverGroupSignalsAGroupMember(t *testing.T) {
+	pid := startGroupMemberForTest(t)
+	var targets []int
+	captureOrphanKill(t, &targets)
+
+	signalProcessOrGroup(pid, syscall.SIGTERM)
+
+	for _, target := range targets {
+		if target < 0 {
+			t.Fatalf("signalProcessOrGroup(%d) signaled group %d; pid does not lead its group, so that group belongs to an unrelated process tree", pid, target)
+		}
+	}
+	if len(targets) != 1 || targets[0] != pid {
+		t.Fatalf("signalProcessOrGroup(%d) targets = %v, want [%d] (the process itself)", pid, targets, pid)
+	}
+}
+
+// TestSignalProcessOrGroupTerminatesAGroupMember pins the behavior the
+// narrowing must not cost: a non-leader orphan is still reaped, just via a
+// signal aimed at exactly that process. Death is read off the wait status
+// rather than a kill(pid, 0) probe — the child is this process's own, so it
+// lingers as a zombie (and stays signalable) until it is waited for.
+func TestSignalProcessOrGroupTerminatesAGroupMember(t *testing.T) {
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start group member: %v", err)
+	}
+
+	signalProcessOrGroup(cmd.Process.Pid, syscall.SIGKILL)
+
+	err := cmd.Wait()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("group member %d wait error = %v, want a signal exit", cmd.Process.Pid, err)
+	}
+	status, ok := exitErr.Sys().(syscall.WaitStatus)
+	if !ok {
+		t.Fatalf("wait status type = %T, want syscall.WaitStatus", exitErr.Sys())
+	}
+	if !status.Signaled() || status.Signal() != syscall.SIGKILL {
+		t.Fatalf("group member exited with %v, want death by SIGKILL", exitErr)
+	}
 }
