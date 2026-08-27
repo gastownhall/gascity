@@ -39,6 +39,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -72,8 +73,44 @@ import (
 // Shadows list is what keeps the candidate order identical to the pre-seam
 // [class, work].
 func classRoutedStoreForID(cityPath, id string, work beads.Store) (beads.Store, error) {
-	class, relocated := graphClassBinding(cliStorageRoutes(cityPath))
-	if !relocated || class == nil || class == work {
+	return classRoutedStoreForIDIn(cityGraphClassBinding(cityPath), id, work)
+}
+
+// cityGraphClassBinding opens a city's graph class binding, nil when the class
+// is not relocated. Sole derivation point: re-asking is the split-store bug.
+func cityGraphClassBinding(cityPath string) beads.Store {
+	if strings.TrimSpace(cityPath) == "" {
+		return nil
+	}
+	store, relocated := graphClassBinding(cliStorageRoutes(cityPath))
+	if !relocated {
+		return nil
+	}
+	return store
+}
+
+// classBindingForID is the class leg of classRoutedStoreForID, for callers whose
+// work answer is a leg list rather than one store. A nil work leg makes the
+// residual answer nil, so ok=false means "no named leg answered".
+func classBindingForID(cityPath, id string) (beads.Store, bool, error) {
+	class := cityGraphClassBinding(cityPath)
+	if class == nil {
+		return nil, false, nil
+	}
+	store, err := classRoutedStoreForIDIn(class, id, nil)
+	if err != nil {
+		return nil, false, err
+	}
+	if store == nil {
+		return nil, false, nil
+	}
+	return class, true, nil
+}
+
+// classRoutedStoreForIDIn is classRoutedStoreForID with the binding already in
+// hand, for callers that resolve it once per request. Nil class means no relocation.
+func classRoutedStoreForIDIn(class beads.Store, id string, work beads.Store) (beads.Store, error) {
+	if class == nil || class == work {
 		return work, nil
 	}
 	for _, candidate := range classRouteCandidates(id, class, work) {

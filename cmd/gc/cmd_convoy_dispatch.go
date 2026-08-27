@@ -261,6 +261,11 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 			// class actually relocated: on every other city graphStore IS
 			// store, and an empty tail keeps each of those reads on the single
 			// direct call it makes today.
+			// Both readings above assume the drain's convoy lives in the SCOPE
+			// store it is dispatched from. Enforce that (ga-w2mf3).
+			if err := assertDrainRootScopeMatchesDispatch(bead, workflowStoreRefForDir(storePath, cityPath, loadedCityName(cfg, cityPath), cfg)); err != nil {
+				return err
+			}
 			if graphStore != store {
 				opts.MemberStores = []beads.Store{store}
 			}
@@ -2538,4 +2543,15 @@ func workflowBeadIDs(bb []beads.Bead) []string {
 		ids[i] = b.ID
 	}
 	return ids
+}
+
+// assertDrainRootScopeMatchesDispatch fails a drain rooted in a different work
+// scope than it is dispatched from: its members would resolve empty, not absent.
+func assertDrainRootScopeMatchesDispatch(bead beads.Bead, dispatchStoreRef string) error {
+	rootRef := strings.TrimSpace(bead.Metadata[beadmeta.RootStoreRefMetadataKey])
+	dispatchStoreRef = strings.TrimSpace(dispatchStoreRef)
+	if rootRef == "" || dispatchStoreRef == "" || rootRef == dispatchStoreRef {
+		return nil
+	}
+	return fmt.Errorf("drain %s is rooted in %s but dispatched from %s: its convoy members live in the root's work store, so draining from here would resolve an empty convoy and report success (ga-w2mf3)", bead.ID, rootRef, dispatchStoreRef)
 }
