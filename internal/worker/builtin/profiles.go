@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strings"
 )
 
 // BuiltinProviderOption declares one configurable option for a builtin worker.
@@ -16,6 +17,10 @@ type BuiltinProviderOption struct {
 	Type    string
 	Default string
 	Choices []BuiltinOptionChoice
+	// FlagTemplate makes the option open: a pinned value outside Choices is
+	// honored by substituting it for optionValuePlaceholder. Nil means closed.
+	// See config.ProviderOption.FlagTemplate for why model options are open.
+	FlagTemplate []string
 }
 
 // BuiltinOptionChoice is one allowed value for a builtin provider option.
@@ -75,6 +80,122 @@ type BuiltinProviderSpec struct {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+// optionValuePlaceholder mirrors config.OptionValuePlaceholder. This package
+// sits below config and cannot import it, so the token is duplicated here and
+// pinned by config.TestBuiltinTemplatesUseConfigPlaceholder.
+const optionValuePlaceholder = "{value}"
+
+// effortTiers is the canonical, provider-independent effort vocabulary. A
+// provider declares the subset its CLI accepts; every provider draws from this
+// list so "high" means the same thing everywhere and a tier is never invented
+// per-provider. Enforced by TestEffortChoicesUseCanonicalTiers.
+var effortTiers = []string{"low", "medium", "high", "xhigh", "max"}
+
+var effortTierLabels = map[string]string{
+	"low":    "Low",
+	"medium": "Medium",
+	"high":   "High",
+	"xhigh":  "Extra High",
+	"max":    "Max",
+}
+
+// effortOption builds the effort schema option for a provider whose CLI takes
+// the effort tier as the final token of flagPrefix (e.g. {"--effort"}), or
+// substitutes it into an assignment token containing the placeholder (codex's
+// {"-c", "model_reasoning_effort={value}"}).
+//
+// The option is always open: no provider CLI publishes a closed tier set, so a
+// tier this catalog has not caught up to is passed through to the CLI to accept
+// or reject, rather than silently dropped (ga-fyh).
+func effortOption(flagTemplate []string, tiers ...string) BuiltinProviderOption {
+	choices := []BuiltinOptionChoice{{Value: "", Label: "Default"}}
+	for _, tier := range tiers {
+		choices = append(choices, BuiltinOptionChoice{
+			Value:    tier,
+			Label:    effortTierLabels[tier],
+			FlagArgs: renderTemplate(flagTemplate, tier),
+		})
+	}
+	return BuiltinProviderOption{
+		Key:          "effort",
+		Label:        "Effort",
+		Type:         "select",
+		Choices:      choices,
+		FlagTemplate: cloneStrings(flagTemplate),
+	}
+}
+
+// codexEffortOption is effortOption for codex, whose CLI takes the tier as a
+// `-c model_reasoning_effort=<tier>` config assignment rather than a flag.
+// The quoted alias form is what older rendered commands used, so it stays a
+// recognized alias for stripping.
+func codexEffortOption() BuiltinProviderOption {
+	opt := effortOption([]string{"-c", "model_reasoning_effort=" + optionValuePlaceholder}, effortTiers...)
+	for i, choice := range opt.Choices {
+		if choice.Value == "" {
+			continue
+		}
+		opt.Choices[i].FlagAliases = [][]string{{"-c", fmt.Sprintf("model_reasoning_effort=%q", choice.Value)}}
+	}
+	return opt
+}
+
+// modelOption builds an open model option: choices are the curated suggestion
+// list shown in pickers, and any other id is still honored by rendering the
+// template. Model ids move faster than this catalog ever has, which is the
+// whole ga-fyh / ra-jbbv0 failure mode. Every provider CLI in the catalog
+// spells the flag "--model <id>"; the short "-m" form, where a CLI has one,
+// stays on the individual choices as a stripping alias.
+func modelOption(choices ...BuiltinOptionChoice) BuiltinProviderOption {
+	return BuiltinProviderOption{
+		Key:          "model",
+		Label:        "Model",
+		Type:         "select",
+		Choices:      append([]BuiltinOptionChoice{{Value: "", Label: "Default"}}, choices...),
+		FlagTemplate: []string{"--model", optionValuePlaceholder},
+	}
+}
+
+// modelChoice is a curated model suggestion whose flag is the plain
+// "--model <id>" form, with the "-m <id>" alias.
+func modelChoice(value, label string) BuiltinOptionChoice {
+	return BuiltinOptionChoice{
+		Value:       value,
+		Label:       label,
+		FlagArgs:    []string{"--model", value},
+		FlagAliases: [][]string{{"-m", value}},
+	}
+}
+
+// modelAlias is a curated short name that expands to a different canonical id
+// (e.g. "sonnet" -> "claude-sonnet-5"). The expansion is why choices win over
+// the template: the template would emit the short name verbatim.
+func modelAlias(value, label, modelID string) BuiltinOptionChoice {
+	return BuiltinOptionChoice{
+		Value:       value,
+		Label:       label,
+		FlagArgs:    []string{"--model", modelID},
+		FlagAliases: [][]string{{"-m", modelID}},
+	}
+}
+
+// modelChoiceNoAlias is modelChoice for CLIs that define no "-m" short flag.
+func modelChoiceNoAlias(value, label string) BuiltinOptionChoice {
+	return BuiltinOptionChoice{
+		Value:    value,
+		Label:    label,
+		FlagArgs: []string{"--model", value},
+	}
+}
+
+func renderTemplate(template []string, value string) []string {
+	out := make([]string, len(template))
+	for i, tok := range template {
+		out[i] = strings.ReplaceAll(tok, optionValuePlaceholder, value)
+	}
+	return out
+}
 
 // ProfileIdentity captures the explicit production identity for a canonical
 // worker profile.
@@ -152,52 +273,33 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 					{Value: "unrestricted", Label: "Bypass permissions", FlagArgs: []string{"--dangerously-skip-permissions"}},
 				},
 			},
-			{
-				Key:   "effort",
-				Label: "Effort",
-				Type:  "select",
-				Choices: []BuiltinOptionChoice{
-					{Value: "", Label: "Default"},
-					{Value: "low", Label: "Low", FlagArgs: []string{"--effort", "low"}},
-					{Value: "medium", Label: "Medium", FlagArgs: []string{"--effort", "medium"}},
-					{Value: "high", Label: "High", FlagArgs: []string{"--effort", "high"}},
-					{Value: "xhigh", Label: "Extra High", FlagArgs: []string{"--effort", "xhigh"}},
-					{Value: "max", Label: "Max", FlagArgs: []string{"--effort", "max"}},
-				},
-			},
-			{
-				Key:   "model",
-				Label: "Model",
-				Type:  "select",
-				Choices: []BuiltinOptionChoice{
-					{Value: "", Label: "Default"},
-					{Value: "fable-5", Label: "Fable 5", FlagArgs: []string{"--model", "claude-fable-5"}, FlagAliases: [][]string{{"-m", "claude-fable-5"}}},
-					{Value: "opus", Label: "Opus", FlagArgs: []string{"--model", "claude-opus-4-8"}, FlagAliases: [][]string{{"-m", "claude-opus-4-8"}}},
-					{Value: "opus-5", Label: "Opus 5", FlagArgs: []string{"--model", "claude-opus-5"}, FlagAliases: [][]string{{"-m", "claude-opus-5"}}},
-					{Value: "opus-4-7", Label: "Opus 4.7", FlagArgs: []string{"--model", "claude-opus-4-7"}, FlagAliases: [][]string{{"-m", "claude-opus-4-7"}}},
-					{Value: "sonnet", Label: "Sonnet", FlagArgs: []string{"--model", "claude-sonnet-5"}, FlagAliases: [][]string{{"-m", "claude-sonnet-5"}}},
-					{Value: "sonnet-5", Label: "Sonnet 5", FlagArgs: []string{"--model", "claude-sonnet-5"}, FlagAliases: [][]string{{"-m", "claude-sonnet-5"}}},
-					{Value: "sonnet-4-6", Label: "Sonnet 4.6", FlagArgs: []string{"--model", "claude-sonnet-4-6"}, FlagAliases: [][]string{{"-m", "claude-sonnet-4-6"}}},
-					{Value: "haiku", Label: "Haiku", FlagArgs: []string{"--model", "claude-haiku-4-5-20251001"}, FlagAliases: [][]string{{"-m", "claude-haiku-4-5-20251001"}}},
-					// Canonical provider model IDs accepted verbatim. Operators pin the
-					// full "claude-*" id in agent.toml rather than the short alias, and
-					// before these entries existed such a value was not in this enum at
-					// all: the launch path found no FlagArgs and silently emitted NO
-					// --model, while the named-session resolution path hard-errored on
-					// the same value ("invalid value for model: claude-opus-5"). A whole
-					// city ran unpinned for hours on the launch side while four agents
-					// were unwakeable on the resolution side (ra-jbbv0).
-					{Value: "claude-opus-5", Label: "Opus 5 (canonical id)", FlagArgs: []string{"--model", "claude-opus-5"}, FlagAliases: [][]string{{"-m", "claude-opus-5"}}},
-					// The "[1m]" launch suffix is a valid Claude Code model-id form and
-					// operators pin it directly; it is emitted verbatim rather than
-					// normalized down to "claude-opus-5", because silently rewriting an
-					// explicit pin is the same class of surprise these entries exist to
-					// eliminate.
-					{Value: "claude-opus-5[1m]", Label: "Opus 5 1M (canonical id)", FlagArgs: []string{"--model", "claude-opus-5[1m]"}, FlagAliases: [][]string{{"-m", "claude-opus-5[1m]"}}},
-					{Value: "claude-sonnet-5", Label: "Sonnet 5 (canonical id)", FlagArgs: []string{"--model", "claude-sonnet-5"}, FlagAliases: [][]string{{"-m", "claude-sonnet-5"}}},
-					{Value: "claude-fable-5", Label: "Fable 5 (canonical id)", FlagArgs: []string{"--model", "claude-fable-5"}, FlagAliases: [][]string{{"-m", "claude-fable-5"}}},
-				},
-			},
+			effortOption([]string{"--effort", optionValuePlaceholder}, effortTiers...),
+			// Open: an id outside this curated list is honored verbatim rather
+			// than dropped. Before that, a canonical "claude-*" pin was not in
+			// the enum at all — the launch path found no FlagArgs and emitted
+			// NO --model, while named-session resolution hard-errored on the
+			// same value. A whole city ran unpinned for hours while four
+			// agents were unwakeable (ra-jbbv0).
+			modelOption(
+				modelAlias("fable-5", "Fable 5", "claude-fable-5"),
+				modelAlias("opus", "Opus", "claude-opus-4-8"),
+				modelAlias("opus-5", "Opus 5", "claude-opus-5"),
+				modelAlias("opus-4-7", "Opus 4.7", "claude-opus-4-7"),
+				modelAlias("sonnet", "Sonnet", "claude-sonnet-5"),
+				modelAlias("sonnet-5", "Sonnet 5", "claude-sonnet-5"),
+				modelAlias("sonnet-4-6", "Sonnet 4.6", "claude-sonnet-4-6"),
+				modelAlias("haiku", "Haiku", "claude-haiku-4-5-20251001"),
+				// Canonical provider ids, accepted verbatim. Operators pin the
+				// full id rather than the short alias.
+				modelChoice("claude-opus-5", "Opus 5 (canonical id)"),
+				// The "[1m]" launch suffix is a valid Claude Code model-id form
+				// and is emitted verbatim rather than normalized down to
+				// "claude-opus-5": silently rewriting an explicit pin is the
+				// same class of surprise these entries exist to eliminate.
+				modelChoice("claude-opus-5[1m]", "Opus 5 1M (canonical id)"),
+				modelChoice("claude-sonnet-5", "Sonnet 5 (canonical id)"),
+				modelChoice("claude-fable-5", "Fable 5 (canonical id)"),
+			),
 		},
 	},
 	"codex": {
@@ -239,21 +341,15 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 					{Value: "unrestricted", Label: "Bypass all (no sandbox)", FlagArgs: []string{"--dangerously-bypass-approvals-and-sandbox"}},
 				},
 			},
-			{
-				Key:   "model",
-				Label: "Model",
-				Type:  "select",
-				Choices: []BuiltinOptionChoice{
-					{Value: "", Label: "Default"},
-					{Value: "gpt-5.6-sol", Label: "GPT-5.6 Sol", FlagArgs: []string{"--model", "gpt-5.6-sol"}, FlagAliases: [][]string{{"-m", "gpt-5.6-sol"}}},
-					{Value: "gpt-5.6-terra", Label: "GPT-5.6 Terra", FlagArgs: []string{"--model", "gpt-5.6-terra"}, FlagAliases: [][]string{{"-m", "gpt-5.6-terra"}}},
-					{Value: "gpt-5.6-luna", Label: "GPT-5.6 Luna", FlagArgs: []string{"--model", "gpt-5.6-luna"}, FlagAliases: [][]string{{"-m", "gpt-5.6-luna"}}},
-					{Value: "gpt-5.5", Label: "GPT-5.5", FlagArgs: []string{"--model", "gpt-5.5"}, FlagAliases: [][]string{{"-m", "gpt-5.5"}}},
-					{Value: "gpt-5.3-codex", Label: "GPT-5.3 Codex", FlagArgs: []string{"--model", "gpt-5.3-codex"}, FlagAliases: [][]string{{"-m", "gpt-5.3-codex"}}},
-					{Value: "o3", Label: "o3", FlagArgs: []string{"--model", "o3"}, FlagAliases: [][]string{{"-m", "o3"}}},
-					{Value: "o4-mini", Label: "o4-mini", FlagArgs: []string{"--model", "o4-mini"}, FlagAliases: [][]string{{"-m", "o4-mini"}}},
-				},
-			},
+			modelOption(
+				modelChoice("gpt-5.6-sol", "GPT-5.6 Sol"),
+				modelChoice("gpt-5.6-terra", "GPT-5.6 Terra"),
+				modelChoice("gpt-5.6-luna", "GPT-5.6 Luna"),
+				modelChoice("gpt-5.5", "GPT-5.5"),
+				modelChoice("gpt-5.3-codex", "GPT-5.3 Codex"),
+				modelChoice("o3", "o3"),
+				modelChoice("o4-mini", "o4-mini"),
+			),
 			{
 				Key:   "sandbox",
 				Label: "Sandbox",
@@ -264,18 +360,14 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 					{Value: "network-off", Label: "Network Off", FlagArgs: []string{"--sandbox", "network-off"}},
 				},
 			},
-			{
-				Key:   "effort",
-				Label: "Effort",
-				Type:  "select",
-				Choices: []BuiltinOptionChoice{
-					{Value: "", Label: "Default"},
-					{Value: "low", Label: "Low", FlagArgs: []string{"-c", "model_reasoning_effort=low"}, FlagAliases: [][]string{{"-c", "model_reasoning_effort=\"low\""}}},
-					{Value: "medium", Label: "Medium", FlagArgs: []string{"-c", "model_reasoning_effort=medium"}, FlagAliases: [][]string{{"-c", "model_reasoning_effort=\"medium\""}}},
-					{Value: "high", Label: "High", FlagArgs: []string{"-c", "model_reasoning_effort=high"}, FlagAliases: [][]string{{"-c", "model_reasoning_effort=\"high\""}}},
-					{Value: "xhigh", Label: "Extra High", FlagArgs: []string{"-c", "model_reasoning_effort=xhigh"}, FlagAliases: [][]string{{"-c", "model_reasoning_effort=\"xhigh\""}}},
-				},
-			},
+			// codex takes the tier as a config assignment rather than a flag.
+			// The tier set is open for the same reason as every other
+			// provider's: "max" is a canonical tier here and pinning it used
+			// to be dropped on the floor because this enum stopped at xhigh,
+			// even though the value looks blessed by claude's own defaults
+			// (ga-fyh addendum). Passing it through lets codex accept or
+			// reject it; silently ignoring it was never a correct answer.
+			codexEffortOption(),
 		},
 	},
 	"gemini": {
@@ -317,16 +409,10 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 					{Value: "unrestricted", Label: "YOLO (approve all)", FlagArgs: []string{"--approval-mode", "yolo"}},
 				},
 			},
-			{
-				Key:   "model",
-				Label: "Model",
-				Type:  "select",
-				Choices: []BuiltinOptionChoice{
-					{Value: "", Label: "Default"},
-					{Value: "gemini-2.5-pro", Label: "Gemini 2.5 Pro", FlagArgs: []string{"--model", "gemini-2.5-pro"}, FlagAliases: [][]string{{"-m", "gemini-2.5-pro"}}},
-					{Value: "gemini-2.5-flash", Label: "Gemini 2.5 Flash", FlagArgs: []string{"--model", "gemini-2.5-flash"}, FlagAliases: [][]string{{"-m", "gemini-2.5-flash"}}},
-				},
-			},
+			modelOption(
+				modelChoice("gemini-2.5-pro", "Gemini 2.5 Pro"),
+				modelChoice("gemini-2.5-flash", "Gemini 2.5 Flash"),
+			),
 		},
 	},
 	"grok": {
@@ -382,30 +468,19 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 					{Value: "unrestricted", Label: "Bypass permissions", FlagArgs: []string{"--permission-mode", "bypassPermissions"}},
 				},
 			},
-			{
-				Key:   "effort",
-				Label: "Effort",
-				Type:  "select",
-				Choices: []BuiltinOptionChoice{
-					{Value: "", Label: "Default"},
-					{Value: "low", Label: "Low", FlagArgs: []string{"--effort", "low"}},
-					{Value: "medium", Label: "Medium", FlagArgs: []string{"--effort", "medium"}},
-					{Value: "high", Label: "High", FlagArgs: []string{"--effort", "high"}},
-					{Value: "xhigh", Label: "Extra High", FlagArgs: []string{"--effort", "xhigh"}},
-					{Value: "max", Label: "Max", FlagArgs: []string{"--effort", "max"}},
-				},
-			},
-			{
-				Key:   "model",
-				Label: "Model",
-				Type:  "select",
-				Choices: []BuiltinOptionChoice{
-					{Value: "", Label: "Default"},
-					{Value: "grok-build", Label: "Grok Build", FlagArgs: []string{"--model", "grok-build"}, FlagAliases: [][]string{{"-m", "grok-build"}}},
-					{Value: "grok-composer-2.5", Label: "Grok Composer 2.5", FlagArgs: []string{"--model", "grok-composer-2.5"}, FlagAliases: [][]string{{"-m", "grok-composer-2.5"}}},
-					{Value: "grok-composer-2.5-fast", Label: "Grok Composer 2.5 Fast", FlagArgs: []string{"--model", "grok-composer-2.5-fast"}, FlagAliases: [][]string{{"-m", "grok-composer-2.5-fast"}}},
-				},
-			},
+			effortOption([]string{"--effort", optionValuePlaceholder}, effortTiers...),
+			modelOption(
+				modelChoice("grok-build", "Grok Build"),
+				modelChoice("grok-composer-2.5", "Grok Composer 2.5"),
+				modelChoice("grok-composer-2.5-fast", "Grok Composer 2.5 Fast"),
+				// Frontier coding ids. Gasburger pins grok-4.6 on refinery and
+				// gorkcats; this enum had not been touched since grok was added
+				// and carried none of them, so the launch path found no
+				// FlagArgs and silently omitted --model (ga-fyh). grok-4.7 is
+				// listed ahead of its rollout.
+				modelChoice("grok-4.6", "Grok 4.6"),
+				modelChoice("grok-4.7", "Grok 4.7"),
+			),
 		},
 	},
 	"kimi": {
@@ -429,16 +504,10 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		TitleModel:           "kimi-k2.6",
 		ACPArgs:              []string{"--yolo", "--no-thinking", "acp"},
 		OptionsSchema: []BuiltinProviderOption{
-			{
-				Key:   "model",
-				Label: "Model",
-				Type:  "select",
-				Choices: []BuiltinOptionChoice{
-					{Value: "", Label: "Default"},
-					{Value: "kimi-k2.6", Label: "Kimi K2.6", FlagArgs: []string{"--model", "kimi-k2.6"}, FlagAliases: [][]string{{"-m", "kimi-k2.6"}}},
-					{Value: "kimi-k2-thinking-turbo", Label: "Kimi K2 Thinking Turbo", FlagArgs: []string{"--model", "kimi-k2-thinking-turbo"}, FlagAliases: [][]string{{"-m", "kimi-k2-thinking-turbo"}}},
-				},
-			},
+			modelOption(
+				modelChoice("kimi-k2.6", "Kimi K2.6"),
+				modelChoice("kimi-k2-thinking-turbo", "Kimi K2 Thinking Turbo"),
+			),
 		},
 	},
 	"kiro": {
@@ -485,6 +554,22 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 					{Value: "approve", Label: "Approve visible MCP servers", FlagArgs: []string{"--approve-mcps"}},
 				},
 			},
+			// cursor-agent takes --model but publishes no -m short flag, and its
+			// catalog is account-scoped (`cursor-agent --list-models`) and
+			// includes parameterized bracket forms such as
+			// claude-opus-4-8[context=1m,effort=high]. There is no closed set to
+			// enumerate, which is exactly why the option is open: the curated
+			// entries are suggestions and any id the account has reaches the
+			// CLI. Before this option existed a cursor model pin was not in the
+			// schema at all and was dropped without a flag (ga-fyh addendum).
+			modelOption(
+				modelChoiceNoAlias("auto", "Auto (default)"),
+				modelChoiceNoAlias("composer-2.5", "Composer 2.5"),
+				modelChoiceNoAlias("gpt-5.3-codex", "Codex 5.3"),
+				modelChoiceNoAlias("cursor-grok-4.6-high", "Cursor Grok 4.6"),
+				modelChoiceNoAlias("claude-opus-5-thinking-high", "Claude Opus 5 1M Thinking"),
+				modelChoiceNoAlias("claude-sonnet-5-thinking-high", "Claude Sonnet 5 1M Thinking"),
+			),
 		},
 	},
 	"copilot": {
@@ -558,17 +643,11 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ResumeStyle:          "flag",
 		ACPArgs:              []string{"acp"},
 		OptionsSchema: []BuiltinProviderOption{
-			{
-				Key:   "model",
-				Label: "Model",
-				Type:  "select",
-				Choices: []BuiltinOptionChoice{
-					{Value: "", Label: "Default"},
-					{Value: "opencode/deepseek-v4-flash-free", Label: "DeepSeek V4 Flash Free", FlagArgs: []string{"--model", "opencode/deepseek-v4-flash-free"}, FlagAliases: [][]string{{"-m", "opencode/deepseek-v4-flash-free"}}},
-					{Value: "opencode/nemotron-3-super-free", Label: "Nemotron 3 Super Free", FlagArgs: []string{"--model", "opencode/nemotron-3-super-free"}, FlagAliases: [][]string{{"-m", "opencode/nemotron-3-super-free"}}},
-					{Value: "opencode/big-pickle", Label: "Big Pickle", FlagArgs: []string{"--model", "opencode/big-pickle"}, FlagAliases: [][]string{{"-m", "opencode/big-pickle"}}},
-				},
-			},
+			modelOption(
+				modelChoice("opencode/deepseek-v4-flash-free", "DeepSeek V4 Flash Free"),
+				modelChoice("opencode/nemotron-3-super-free", "Nemotron 3 Super Free"),
+				modelChoice("opencode/big-pickle", "Big Pickle"),
+			),
 		},
 	},
 	"mimocode": {
@@ -595,19 +674,13 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ResumeStyle:      "flag",
 		ACPArgs:          []string{"acp"},
 		OptionsSchema: []BuiltinProviderOption{
-			{
-				Key:   "model",
-				Label: "Model",
-				Type:  "select",
-				Choices: []BuiltinOptionChoice{
-					{Value: "", Label: "Default"},
-					{Value: "mimo/mimo-auto", Label: "MiMo Auto (free)", FlagArgs: []string{"--model", "mimo/mimo-auto"}, FlagAliases: [][]string{{"-m", "mimo/mimo-auto"}}},
-					{Value: "xiaomi/mimo-v2.5-pro", Label: "MiMo V2.5 Pro", FlagArgs: []string{"--model", "xiaomi/mimo-v2.5-pro"}, FlagAliases: [][]string{{"-m", "xiaomi/mimo-v2.5-pro"}}},
-					{Value: "xiaomi/mimo-v2.5", Label: "MiMo V2.5", FlagArgs: []string{"--model", "xiaomi/mimo-v2.5"}, FlagAliases: [][]string{{"-m", "xiaomi/mimo-v2.5"}}},
-					{Value: "xiaomi-token-plan-sgp/mimo-v2.5-pro", Label: "MiMo V2.5 Pro (Token Plan SGP)", FlagArgs: []string{"--model", "xiaomi-token-plan-sgp/mimo-v2.5-pro"}, FlagAliases: [][]string{{"-m", "xiaomi-token-plan-sgp/mimo-v2.5-pro"}}},
-					{Value: "xiaomi-token-plan-sgp/mimo-v2.5", Label: "MiMo V2.5 (Token Plan SGP)", FlagArgs: []string{"--model", "xiaomi-token-plan-sgp/mimo-v2.5"}, FlagAliases: [][]string{{"-m", "xiaomi-token-plan-sgp/mimo-v2.5"}}},
-				},
-			},
+			modelOption(
+				modelChoice("mimo/mimo-auto", "MiMo Auto (free)"),
+				modelChoice("xiaomi/mimo-v2.5-pro", "MiMo V2.5 Pro"),
+				modelChoice("xiaomi/mimo-v2.5", "MiMo V2.5"),
+				modelChoice("xiaomi-token-plan-sgp/mimo-v2.5-pro", "MiMo V2.5 Pro (Token Plan SGP)"),
+				modelChoice("xiaomi-token-plan-sgp/mimo-v2.5", "MiMo V2.5 (Token Plan SGP)"),
+			),
 		},
 	},
 	"zcode": {
@@ -657,17 +730,11 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ACPArgs:          []string{"acp"},
 		TitleModel:       "cerebras/gpt-oss-120b",
 		OptionsSchema: []BuiltinProviderOption{
-			{
-				Key:   "model",
-				Label: "Model",
-				Type:  "select",
-				Choices: []BuiltinOptionChoice{
-					{Value: "", Label: "Default"},
-					{Value: "cerebras/gpt-oss-120b", Label: "GPT-OSS 120B", FlagArgs: []string{"--model", "cerebras/gpt-oss-120b"}},
-					{Value: "cerebras/zai-glm-4.7", Label: "GLM 4.7", FlagArgs: []string{"--model", "cerebras/zai-glm-4.7"}},
-					{Value: "cerebras/qwen-3-235b-a22b-instruct-2507", Label: "Qwen 3 235B A22B Instruct", FlagArgs: []string{"--model", "cerebras/qwen-3-235b-a22b-instruct-2507"}},
-				},
-			},
+			modelOption(
+				modelChoiceNoAlias("cerebras/gpt-oss-120b", "GPT-OSS 120B"),
+				modelChoiceNoAlias("cerebras/zai-glm-4.7", "GLM 4.7"),
+				modelChoiceNoAlias("cerebras/qwen-3-235b-a22b-instruct-2507", "Qwen 3 235B A22B Instruct"),
+			),
 		},
 	},
 	"groq": {
@@ -686,20 +753,14 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ACPArgs:          []string{"acp"},
 		TitleModel:       "groq/openai/gpt-oss-20b",
 		OptionsSchema: []BuiltinProviderOption{
-			{
-				Key:   "model",
-				Label: "Model",
-				Type:  "select",
-				Choices: []BuiltinOptionChoice{
-					{Value: "", Label: "Default"},
-					{Value: "groq/openai/gpt-oss-120b", Label: "GPT-OSS 120B", FlagArgs: []string{"--model", "groq/openai/gpt-oss-120b"}},
-					{Value: "groq/openai/gpt-oss-20b", Label: "GPT-OSS 20B", FlagArgs: []string{"--model", "groq/openai/gpt-oss-20b"}},
-					{Value: "groq/llama-3.3-70b-versatile", Label: "Llama 3.3 70B Versatile", FlagArgs: []string{"--model", "groq/llama-3.3-70b-versatile"}},
-					{Value: "groq/llama-3.1-8b-instant", Label: "Llama 3.1 8B Instant", FlagArgs: []string{"--model", "groq/llama-3.1-8b-instant"}},
-					{Value: "groq/qwen/qwen3-32b", Label: "Qwen 3 32B", FlagArgs: []string{"--model", "groq/qwen/qwen3-32b"}},
-					{Value: "groq/meta-llama/llama-4-scout-17b-16e-instruct", Label: "Llama 4 Scout 17B", FlagArgs: []string{"--model", "groq/meta-llama/llama-4-scout-17b-16e-instruct"}},
-				},
-			},
+			modelOption(
+				modelChoiceNoAlias("groq/openai/gpt-oss-120b", "GPT-OSS 120B"),
+				modelChoiceNoAlias("groq/openai/gpt-oss-20b", "GPT-OSS 20B"),
+				modelChoiceNoAlias("groq/llama-3.3-70b-versatile", "Llama 3.3 70B Versatile"),
+				modelChoiceNoAlias("groq/llama-3.1-8b-instant", "Llama 3.1 8B Instant"),
+				modelChoiceNoAlias("groq/qwen/qwen3-32b", "Qwen 3 32B"),
+				modelChoiceNoAlias("groq/meta-llama/llama-4-scout-17b-16e-instruct", "Llama 4 Scout 17B"),
+			),
 		},
 	},
 	"auggie": {
@@ -734,15 +795,15 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ResumeFlag:       "--session",
 		ResumeStyle:      "flag",
 		OptionsSchema: []BuiltinProviderOption{
-			{
-				Key:   "model",
-				Label: "Model",
-				Type:  "select",
-				Choices: []BuiltinOptionChoice{
-					{Value: "", Label: "Default"},
-					{Value: "ollama-cloud-gpt-oss-20b", Label: "Ollama Cloud GPT-OSS 20B", FlagArgs: []string{"--provider", "ollama-cloud", "--model", "gpt-oss:20b"}},
-				},
-			},
+			// The curated entry pairs a model with its --provider, which is why
+			// declared choices win over the template. A bare id still resolves
+			// through the template against pi's configured default provider,
+			// rather than being dropped without a flag (ga-fyh).
+			modelOption(BuiltinOptionChoice{
+				Value:    "ollama-cloud-gpt-oss-20b",
+				Label:    "Ollama Cloud GPT-OSS 20B",
+				FlagArgs: []string{"--provider", "ollama-cloud", "--model", "gpt-oss:20b"},
+			}),
 		},
 	},
 	"omp": {
@@ -794,39 +855,27 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 			// agy < 1.1.10 silently ignores --effort (and --model) on the
 			// --prompt-interactive launch path, so the flag must only ever be
 			// sent when a user opts in explicitly.
-			{
-				Key:   "effort",
-				Label: "Effort",
-				Type:  "select",
-				Choices: []BuiltinOptionChoice{
-					{Value: "", Label: "Default"},
-					{Value: "low", Label: "Low", FlagArgs: []string{"--effort", "low"}},
-					{Value: "medium", Label: "Medium", FlagArgs: []string{"--effort", "medium"}},
-					{Value: "high", Label: "High", FlagArgs: []string{"--effort", "high"}},
-				},
-			},
+			//
+			// The curated tiers stop at high because that is what `agy models`
+			// enumerates; the option is still open, so an xhigh/max pin reaches
+			// agy to accept or reject rather than being dropped (ga-fyh).
+			effortOption([]string{"--effort", optionValuePlaceholder}, "low", "medium", "high"),
 			// Stable slugs + display names as enumerated by `agy models`; agy
-			// defines no -m short alias, so no FlagAliases. Same no-default
-			// rule as effort (agy < 1.1.10 drops --model silently at launch).
-			{
-				Key:   "model",
-				Label: "Model",
-				Type:  "select",
-				Choices: []BuiltinOptionChoice{
-					{Value: "", Label: "Default"},
-					{Value: "gemini-3.6-flash-high", Label: "Gemini 3.6 Flash (High)", FlagArgs: []string{"--model", "gemini-3.6-flash-high"}},
-					{Value: "gemini-3.6-flash-medium", Label: "Gemini 3.6 Flash (Medium)", FlagArgs: []string{"--model", "gemini-3.6-flash-medium"}},
-					{Value: "gemini-3.6-flash-low", Label: "Gemini 3.6 Flash (Low)", FlagArgs: []string{"--model", "gemini-3.6-flash-low"}},
-					{Value: "gemini-3.5-flash-high", Label: "Gemini 3.5 Flash (High)", FlagArgs: []string{"--model", "gemini-3.5-flash-high"}},
-					{Value: "gemini-3.5-flash-medium", Label: "Gemini 3.5 Flash (Medium)", FlagArgs: []string{"--model", "gemini-3.5-flash-medium"}},
-					{Value: "gemini-3.5-flash-low", Label: "Gemini 3.5 Flash (Low)", FlagArgs: []string{"--model", "gemini-3.5-flash-low"}},
-					{Value: "gemini-3.1-pro-high", Label: "Gemini 3.1 Pro (High)", FlagArgs: []string{"--model", "gemini-3.1-pro-high"}},
-					{Value: "gemini-3.1-pro-low", Label: "Gemini 3.1 Pro (Low)", FlagArgs: []string{"--model", "gemini-3.1-pro-low"}},
-					{Value: "claude-sonnet-4-6", Label: "Claude Sonnet 4.6 (Thinking)", FlagArgs: []string{"--model", "claude-sonnet-4-6"}},
-					{Value: "claude-opus-4-6-thinking", Label: "Claude Opus 4.6 (Thinking)", FlagArgs: []string{"--model", "claude-opus-4-6-thinking"}},
-					{Value: "gpt-oss-120b-medium", Label: "GPT-OSS 120B (Medium)", FlagArgs: []string{"--model", "gpt-oss-120b-medium"}},
-				},
-			},
+			// defines no -m short alias. Same no-default rule as effort
+			// (agy < 1.1.10 drops --model silently at launch).
+			modelOption(
+				modelChoiceNoAlias("gemini-3.6-flash-high", "Gemini 3.6 Flash (High)"),
+				modelChoiceNoAlias("gemini-3.6-flash-medium", "Gemini 3.6 Flash (Medium)"),
+				modelChoiceNoAlias("gemini-3.6-flash-low", "Gemini 3.6 Flash (Low)"),
+				modelChoiceNoAlias("gemini-3.5-flash-high", "Gemini 3.5 Flash (High)"),
+				modelChoiceNoAlias("gemini-3.5-flash-medium", "Gemini 3.5 Flash (Medium)"),
+				modelChoiceNoAlias("gemini-3.5-flash-low", "Gemini 3.5 Flash (Low)"),
+				modelChoiceNoAlias("gemini-3.1-pro-high", "Gemini 3.1 Pro (High)"),
+				modelChoiceNoAlias("gemini-3.1-pro-low", "Gemini 3.1 Pro (Low)"),
+				modelChoiceNoAlias("claude-sonnet-4-6", "Claude Sonnet 4.6 (Thinking)"),
+				modelChoiceNoAlias("claude-opus-4-6-thinking", "Claude Opus 4.6 (Thinking)"),
+				modelChoiceNoAlias("gpt-oss-120b-medium", "GPT-OSS 120B (Medium)"),
+			),
 			{
 				Key:   "sandbox",
 				Label: "Sandbox",
@@ -920,11 +969,12 @@ func cloneBuiltinOptions(options []BuiltinProviderOption) []BuiltinProviderOptio
 	out := make([]BuiltinProviderOption, len(options))
 	for i, option := range options {
 		out[i] = BuiltinProviderOption{
-			Key:     option.Key,
-			Label:   option.Label,
-			Type:    option.Type,
-			Default: option.Default,
-			Choices: cloneBuiltinChoices(option.Choices),
+			Key:          option.Key,
+			Label:        option.Label,
+			Type:         option.Type,
+			Default:      option.Default,
+			Choices:      cloneBuiltinChoices(option.Choices),
+			FlagTemplate: cloneStrings(option.FlagTemplate),
 		}
 	}
 	return out

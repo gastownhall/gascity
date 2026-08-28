@@ -2241,6 +2241,13 @@
           "type": "array",
           "description": "Choices are the allowed values; selecting one injects its FlagArgs into the\nagent command line (how the Model axis renders to a harness CLI flag)."
         },
+        "flag_template": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "FlagTemplate makes this option OPEN: a value that is not one of Choices\nis still honored by substituting it for OptionValuePlaceholder in this\ntemplate. Options with no template are CLOSED — an undeclared value\ncannot be turned into flags at all.\n\nModel ids are an open, fast-moving set: every provider ships new ones\nbetween gc releases. Modeling them as a closed enum meant a pin the\ncatalog had not caught up to produced no FlagArgs and the launch path\nsilently omitted the flag, unpinning the agent onto whatever the CLI\ndefaulted to (ra-jbbv0 for claude-opus-5, ga-fyh for grok-4.6).\nChoices stay as the curated suggestion list for pickers; the template\nis what guarantees an explicit pin is never discarded.\n\njson:\"-\" for the same reason as OptionChoice.FlagArgs: CLI flag shapes\nare server-side only and must not reach the public API DTO."
+        },
         "omit": {
           "type": "boolean",
           "description": "Omit is the removal sentinel for options_schema_merge = \"by_key\".\nWhen set on a child layer's entry, the matching Key inherited from\na parent layer is pruned from the resolved schema."

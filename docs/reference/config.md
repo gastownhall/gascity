@@ -653,6 +653,7 @@ ProviderOption declares a single configurable option for a provider.
 | `type` | string | **yes** |  | "select" only (v1) |
 | `default` | string | **yes** |  | Default is the Value of the choice selected when the user makes none. |
 | `choices` | []OptionChoice | **yes** |  | Choices are the allowed values; selecting one injects its FlagArgs into the agent command line (how the Model axis renders to a harness CLI flag). |
+| `flag_template` | []string |  |  | FlagTemplate makes this option OPEN: a value that is not one of Choices is still honored by substituting it for OptionValuePlaceholder in this template. Options with no template are CLOSED — an undeclared value cannot be turned into flags at all.  Model ids are an open, fast-moving set: every provider ships new ones between gc releases. Modeling them as a closed enum meant a pin the catalog had not caught up to produced no FlagArgs and the launch path silently omitted the flag, unpinning the agent onto whatever the CLI defaulted to (ra-jbbv0 for claude-opus-5, ga-fyh for grok-4.6). Choices stay as the curated suggestion list for pickers; the template is what guarantees an explicit pin is never discarded.  json:"-" for the same reason as OptionChoice.FlagArgs: CLI flag shapes are server-side only and must not reach the public API DTO. |
 | `omit` | boolean |  |  | Omit is the removal sentinel for options_schema_merge = "by_key". When set on a child layer's entry, the matching Key inherited from a parent layer is pruned from the resolved schema. |
 
 ## ProviderPatch

@@ -31,6 +31,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`model` and `effort` pins are no longer silently discarded on launch.**
+  Provider model ids were modelled as a closed enum, so any id the builtin
+  catalog had not caught up to produced no flag args and the launch path
+  emitted no `--model` at all — leaving the agent on whatever the CLI
+  defaulted to, with no error. Named-session resolution meanwhile hard-errored
+  on the same value, so the two paths disagreed and the launch path failed
+  open. `gasburger.refinery` and `gasburger.gorkcats` ran unpinned this way for
+  months (ga-fyh); Claude hit the same hole in ra-jbbv0.
+
+  `model` and `effort` are now **open** options across the catalog: the
+  declared choices remain the curated suggestion list, and any other value is
+  honored by rendering the option's flag template. An unreleased id or a newer
+  effort tier reaches the provider CLI to accept or reject, instead of being
+  dropped. Specifically:
+
+  - grok gained `grok-4.6` and `grok-4.7` as curated ids.
+  - `effort = "max"` on codex and `effort = "xhigh"` / `"max"` on antigravity
+    are honored; those enums previously stopped short, so a tier blessed by
+    claude's own defaults was not portable.
+  - cursor gained a model option; it had none, so every cursor model pin was
+    dropped as an unknown key.
+  - Effort tiers now come from one canonical vocabulary shared by every
+    provider rather than a hand-copied per-provider list.
+
+  A pin that still cannot be honored — an unrecognized value for a genuinely
+  closed option such as `permission_mode`, or an option the provider has no
+  concept of (13 of 20 providers have no effort flag) — prints a loud startup
+  warning naming the agent, the rejected value, and the valid set.
+
 - **`gc import add` of a local in-git pack now locks to HEAD, not the repo's
   latest tag.** Per `gc import add --help`, a local path inside a git
   worktree is documented to be "locked to the current commit," but the

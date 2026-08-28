@@ -21,6 +21,22 @@ type ProviderOption struct {
 	// Choices are the allowed values; selecting one injects its FlagArgs into the
 	// agent command line (how the Model axis renders to a harness CLI flag).
 	Choices []OptionChoice `toml:"choices" json:"choices"`
+	// FlagTemplate makes this option OPEN: a value that is not one of Choices
+	// is still honored by substituting it for OptionValuePlaceholder in this
+	// template. Options with no template are CLOSED — an undeclared value
+	// cannot be turned into flags at all.
+	//
+	// Model ids are an open, fast-moving set: every provider ships new ones
+	// between gc releases. Modeling them as a closed enum meant a pin the
+	// catalog had not caught up to produced no FlagArgs and the launch path
+	// silently omitted the flag, unpinning the agent onto whatever the CLI
+	// defaulted to (ra-jbbv0 for claude-opus-5, ga-fyh for grok-4.6).
+	// Choices stay as the curated suggestion list for pickers; the template
+	// is what guarantees an explicit pin is never discarded.
+	//
+	// json:"-" for the same reason as OptionChoice.FlagArgs: CLI flag shapes
+	// are server-side only and must not reach the public API DTO.
+	FlagTemplate []string `toml:"flag_template,omitempty" json:"-"`
 	// Omit is the removal sentinel for options_schema_merge = "by_key".
 	// When set on a child layer's entry, the matching Key inherited from
 	// a parent layer is pruned from the resolved schema.
@@ -385,8 +401,11 @@ func (rp *ResolvedProvider) TitleModelFlagArgs() []string {
 
 // ResolveDefaultArgs produces CLI flag args from EffectiveDefaults.
 // For each schema option with an effective default, the corresponding
-// FlagArgs are emitted. Options with no effective default (or whose
-// default is "") are skipped.
+// flags are emitted. Options with no effective default (or whose default is
+// "") are skipped. A value that is not a declared choice still resolves when
+// the option is open (ProviderOption.FlagTemplate); on a closed option it is
+// skipped — call UnhonoredOptionPins and warn, and do not treat a missing
+// flag as success (ga-fyh).
 // Args are emitted in schema declaration order for deterministic output.
 func (rp *ResolvedProvider) ResolveDefaultArgs() []string {
 	var args []string
@@ -395,9 +414,8 @@ func (rp *ResolvedProvider) ResolveDefaultArgs() []string {
 		if value == "" {
 			continue
 		}
-		choice := findChoice(opt.Choices, value)
-		if choice != nil {
-			args = append(args, choice.FlagArgs...)
+		if flagArgs, ok := OptionFlagArgs(opt, value); ok {
+			args = append(args, flagArgs...)
 		}
 	}
 	return args
@@ -503,11 +521,12 @@ func providerOptionsFromWorker(options []workerbuiltin.BuiltinProviderOption) []
 	out := make([]ProviderOption, len(options))
 	for i, option := range options {
 		out[i] = ProviderOption{
-			Key:     option.Key,
-			Label:   option.Label,
-			Type:    option.Type,
-			Default: option.Default,
-			Choices: providerChoicesFromWorker(option.Choices),
+			Key:          option.Key,
+			Label:        option.Label,
+			Type:         option.Type,
+			Default:      option.Default,
+			Choices:      providerChoicesFromWorker(option.Choices),
+			FlagTemplate: cloneStrings(option.FlagTemplate),
 		}
 	}
 	return out
