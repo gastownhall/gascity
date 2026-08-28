@@ -130,7 +130,10 @@ type harness struct {
 func newHarness(t *testing.T, stubEnv map[string]string) *harness {
 	t.Helper()
 
-	root := t.TempDir()
+	// Resolved so every path derived below already matches the form the
+	// adapter itself reports (bash's `pwd -P`): on macOS, t.TempDir() sits
+	// under /var, itself a symlink to /private/var (ga-uqdim3).
+	root := resolveSymlinks(t.TempDir())
 	home := filepath.Join(root, "home")
 	workDir := filepath.Join(root, "work")
 	mirrorDir := filepath.Join(root, "transcripts")
@@ -181,9 +184,11 @@ func newHarness(t *testing.T, stubEnv map[string]string) *harness {
 
 // resolveSymlinks returns dir with any symlink components resolved, so a
 // caller can compare it against a path the adapter itself reports (bash's
-// `pwd -P`). ga-uqdim3: not yet implemented -- newHarness's root can still
-// contain an unresolved symlink component (e.g. macOS's /var -> /private/var).
+// `pwd -P`). It falls back to dir unchanged if resolution fails.
 func resolveSymlinks(dir string) string {
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		return resolved
+	}
 	return dir
 }
 

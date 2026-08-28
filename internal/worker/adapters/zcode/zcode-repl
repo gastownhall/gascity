@@ -590,7 +590,7 @@ while :; do
             line+=$'\n'"$more"
             continue
         fi
-        if [[ -n "$more" ]]; then line+=$'\n'"$more"; fi
+        if [[ -n "${more-}" ]]; then line+=$'\n'"${more-}"; fi
         break
     done
 
