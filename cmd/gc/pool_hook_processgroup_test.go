@@ -57,7 +57,7 @@ func waitForProcessExit(pid int, within time.Duration) bool {
 // TestHookTimeoutKillsTheWholeProcessGroup pins the containment the on_boot
 // bound depends on.
 //
-// A timed-out hook is cancelled by CommandContext, which kills the `sh` it
+// A timed-out hook is canceled by CommandContext, which kills the `sh` it
 // started and, after WaitDelay, stops waiting on the pipe. It does NOT kill the
 // shell's descendants -- WaitDelay closes I/O, it does not signal a process
 // tree. So a hook that timed out mid-bd left that bd running and holding a

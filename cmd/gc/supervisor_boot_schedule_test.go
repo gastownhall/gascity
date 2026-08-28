@@ -396,7 +396,7 @@ func TestReleaseQueuedCityStartClearsAMarkerLeftMidStart(t *testing.T) {
 // hits TimeoutStopSec and SIGKILLs the supervisor mid-boot, skipping session
 // preservation entirely.
 //
-// In-flight cities are deliberately NOT cancelled: bounding stop latency to the
+// In-flight cities are deliberately NOT canceled: bounding stop latency to the
 // in-flight wave keeps a half-built city from being abandoned with its stores
 // open. Only the not-yet-submitted entries are dropped, and they are returned
 // so the caller can release their queued markers.

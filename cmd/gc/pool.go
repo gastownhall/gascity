@@ -94,12 +94,12 @@ func runShellCommand(command, dir string, timeout time.Duration, env map[string]
 	return string(out), nil
 }
 
-// hookSignalGrace is how long a cancelled hook's process group gets to exit on
+// hookSignalGrace is how long a canceled hook's process group gets to exit on
 // SIGTERM before it is SIGKILLed. Matches the order-exec path's grace.
 const hookSignalGrace = 2 * time.Second
 
 // hookProcessGroupCleanup makes a hook its own process-group leader and
-// terminates that GROUP when the command is cancelled.
+// terminates that GROUP when the command is canceled.
 //
 // Without it, a timed-out hook leaks its descendants. CommandContext kills the
 // `sh` it started, and WaitDelay then stops waiting on the pipe — but WaitDelay

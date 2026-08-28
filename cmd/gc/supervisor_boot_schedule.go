@@ -190,7 +190,7 @@ func sortCityStartOrder(entries []supervisor.CityEntry, priority []string) []sup
 // minutes long, and without this a SIGTERM arriving early in one still booted
 // every remaining city before the supervisor's shutdown case ran — long enough
 // for systemd to hit TimeoutStopSec and SIGKILL the supervisor mid-boot, which
-// skips session preservation entirely. Cancelling the in-flight wave instead
+// skips session preservation entirely. Canceling the in-flight wave instead
 // would abandon half-built cities with their stores open, so stop latency is
 // deliberately bounded to that wave rather than to zero.
 //

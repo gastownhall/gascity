@@ -101,7 +101,7 @@ func TestRunPoolOnBootHooksRespectsConcurrencyBound(t *testing.T) {
 	var mu sync.Mutex
 	inFlight, peak, over := 0, 0, 0
 
-	runner := func(string, string, map[string]string) (string, error) {
+	var runner ScaleCheckRunner = func(string, string, map[string]string) (string, error) {
 		mu.Lock()
 		inFlight++
 		if inFlight > peak {
