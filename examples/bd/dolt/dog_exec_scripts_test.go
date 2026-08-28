@@ -1060,7 +1060,7 @@ case "$query" in
     # same-count-hash-drift defer). A zero count means the flatten commit
     # itself never touched the table's rows.
     case "$mode" in
-      writer_race_same_count_hash_drift_only)
+      writer_race_same_count_hash_drift_only|same_count_hash_drift_with_writer_race)
         print_cell 0
         ;;
       writer_race_same_count_hash_drift_diff_fails)
@@ -5846,7 +5846,7 @@ func TestCompactScriptDefersWhenWriterCommitsCausingSameCountHashDrift(t *testin
 	if err != nil {
 		t.Fatalf("concurrent-UPDATE same-count defer must exit 0 (skip, not failure): %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "same-count table value hash drift is concurrent-writer UPDATE data, not corruption") {
+	if !strings.Contains(out, "same-count table value hash drift proven additive-only via DOLT_DIFF") {
 		t.Fatalf("output missing concurrent-UPDATE same-count defer message:\n%s", out)
 	}
 	if !strings.Contains(out, "deferring, will retry next run") {
