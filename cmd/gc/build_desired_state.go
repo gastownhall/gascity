@@ -137,10 +137,13 @@ type DesiredStateResult struct {
 	// incomplete desired state — a transient failure would cause running
 	// sessions to be falsely orphaned and interrupted via Ctrl-C.
 	StoreQueryPartial bool
-	// SessionQueryPartial is true when session-bead snapshot loading failed.
-	// Orphan-release and drain decisions must treat this like an incomplete
-	// work snapshot because missing live session beads make assigned work look
-	// orphaned.
+	// SessionQueryPartial is true when the session view for this build is
+	// incomplete: either primary session-bead snapshot loading failed, or the
+	// cross-store session census (sessions binding + city work store + rig work
+	// stores) returned a partial result. Orphan-release and drain decisions must
+	// treat this like an incomplete work snapshot because missing live session
+	// beads make assigned work look orphaned; it also gates the stalled-pool
+	// continuation and execution backstops in city_runtime.go.
 	SessionQueryPartial bool
 	// SessionSnapshotComplete is the positive proof used by fresh pool planning;
 	// it is false for a nil/degraded primary snapshot or any partial cross-store
