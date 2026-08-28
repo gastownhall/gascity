@@ -60,7 +60,7 @@ func formulaStep(t *testing.T, f formulaFile, id string) string {
 func TestMolDoWorkDrainClaimsCurrentContinuation(t *testing.T) {
 	step := formulaStep(t, readFormula(t, "mol-do-work.toml"), "drain")
 
-	if !strings.Contains(step, "gc bd ready --json --limit=2") {
+	if !strings.Contains(step, "gc ready --json --limit=2") {
 		t.Fatal("drain must resolve the current continuation from ready work")
 	}
 	if !strings.Contains(step, "--include-ephemeral") {
@@ -78,6 +78,21 @@ func TestMolDoWorkDrainClaimsCurrentContinuation(t *testing.T) {
 	if !strings.Contains(step, "if length == 1") || !strings.Contains(step, "could not resolve one ready continuation bead") {
 		t.Fatal("drain must fail closed unless exactly one matching continuation is ready")
 	}
+	// The current-claim branch must stay gated on gc.step_ref. An unguarded
+	// `gc hook current` re-introduces gh-5141 on the deferred path, where the
+	// claim stamp still names the do-work step rather than the drain step.
+	currentAt := strings.Index(step, "gc hook current --id-only")
+	if currentAt < 0 {
+		t.Fatal("drain must consult the current claim before falling back to a ready query")
+	}
+	readyAt := strings.Index(step, "gc ready --json --limit=2")
+	if readyAt < currentAt {
+		t.Fatal("drain must consult the current claim before the ready query, not after it")
+	}
+	if !strings.Contains(step[currentAt:readyAt], `.metadata["gc.step_ref"] == "mol-do-work.drain"`) {
+		t.Fatal("drain must gate the current-claim branch on gc.step_ref; an unguarded claim restores the stale-identity bug")
+	}
+
 	updateAt := strings.Index(step, "gc bd update")
 	drainAckAt := strings.Index(step, "gc runtime drain-ack")
 	if drainAckAt < 0 {
