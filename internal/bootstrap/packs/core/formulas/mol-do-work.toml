@@ -154,7 +154,7 @@ if [ -z "$ROOT_BEAD_ID" ]; then
   echo "mol-do-work drain could not resolve its workflow root from $STARTUP_BEAD_ID" >&2
   exit 1
 fi
-READY_BEADS=$(gc bd ready --json --limit=2 --metadata-field "gc.root_bead_id=$ROOT_BEAD_ID" --metadata-field "gc.step_ref=mol-do-work.drain") || exit 1
+READY_BEADS=$(gc bd ready --json --limit=2 --include-ephemeral --metadata-field "gc.root_bead_id=$ROOT_BEAD_ID" --metadata-field "gc.step_ref=mol-do-work.drain") || exit 1
 DRAIN_BEAD_ID=$(printf '%s' "$READY_BEADS" | jq -r 'if length == 1 then .[0].id else empty end')
 if [ -z "$DRAIN_BEAD_ID" ]; then
   echo "mol-do-work drain could not resolve one ready continuation bead for root $ROOT_BEAD_ID" >&2

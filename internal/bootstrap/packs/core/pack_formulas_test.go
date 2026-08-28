@@ -63,6 +63,9 @@ func TestMolDoWorkDrainClaimsCurrentContinuation(t *testing.T) {
 	if !strings.Contains(step, "gc bd ready --json --limit=2") {
 		t.Fatal("drain must resolve the current continuation from ready work")
 	}
+	if !strings.Contains(step, "--include-ephemeral") {
+		t.Fatal("drain must include ephemeral rows; a wisp-tier continuation is invisible to bd ready without it")
+	}
 	if !strings.Contains(step, `--metadata-field "gc.root_bead_id=$ROOT_BEAD_ID"`) || !strings.Contains(step, `--metadata-field "gc.step_ref=mol-do-work.drain"`) {
 		t.Fatal("drain must select the ready drain step from the current workflow root")
 	}
