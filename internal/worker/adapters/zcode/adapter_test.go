@@ -179,6 +179,54 @@ func newHarness(t *testing.T, stubEnv map[string]string) *harness {
 	return h
 }
 
+// resolveSymlinks returns dir with any symlink components resolved, so a
+// caller can compare it against a path the adapter itself reports (bash's
+// `pwd -P`). ga-uqdim3: not yet implemented -- newHarness's root can still
+// contain an unresolved symlink component (e.g. macOS's /var -> /private/var).
+func resolveSymlinks(dir string) string {
+	return dir
+}
+
+// TestResolveSymlinksFollowsSymlinkedRoot pins the fix for ga-uqdim3's
+// second, independent failure: on macOS, t.TempDir() sits under /var, itself
+// a symlink to /private/var, while the adapter reports its working directory
+// already resolved (bash's own getcwd via `pwd -P`). An unresolved harness
+// root then produces a workDir that never compares equal to what the adapter
+// prints. newHarness must resolve its root through resolveSymlinks so every
+// path derived from it (workDir included) is already in the form the
+// adapter reports.
+//
+// This is exercised directly against resolveSymlinks rather than through
+// newHarness: on this host, t.TempDir() is pinned under /var/tmp/gotmp by
+// the fleet's Go build-policy shim and ignores TMPDIR entirely, so there is
+// no way to force a symlink into newHarness's own root from a test. Testing
+// the extracted resolver in isolation keeps the test meaningful and
+// host-independent.
+func TestResolveSymlinksFollowsSymlinkedRoot(t *testing.T) {
+	base, err := filepath.EvalSymlinks(os.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", os.TempDir(), err)
+	}
+	realDir, err := os.MkdirTemp(base, "zcode-real-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(realDir) })
+
+	linked := realDir + "-link"
+	if err := os.Symlink(realDir, linked); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(linked) })
+
+	if got := resolveSymlinks(linked); got != realDir {
+		t.Errorf("resolveSymlinks(%q) = %q, want %q -- reproduces macOS's /var -> "+
+			"/private/var (ga-uqdim3): the adapter reports its resolved working "+
+			"directory, so an unresolved harness root never compares equal to what "+
+			"it prints", linked, got, realDir)
+	}
+}
+
 func (h *harness) envList() []string {
 	out := make([]string, 0, len(h.env))
 	for k, v := range h.env {
