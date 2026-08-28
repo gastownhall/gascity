@@ -10,12 +10,14 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"text/template"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/processgroup"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
@@ -67,6 +69,13 @@ const hookTimeout = 30 * time.Second
 // non-nil, it is merged into the subprocess environment after sanitizing
 // inherited GC_DOLT_* and BEADS_* keys.
 func shellCommand(command, dir string, timeout time.Duration, env map[string]string) (string, error) {
+	return runShellCommand(command, dir, timeout, env, nil)
+}
+
+// runShellCommand is the shared `sh -c` body. prepare, when non-nil, adjusts
+// the command before it starts — it is how a caller opts into a cancellation
+// policy stronger than CommandContext's default.
+func runShellCommand(command, dir string, timeout time.Duration, env map[string]string, prepare func(*exec.Cmd)) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
@@ -75,11 +84,36 @@ func shellCommand(command, dir string, timeout time.Duration, env map[string]str
 		cmd.Dir = dir
 	}
 	cmd.Env = mergeRuntimeEnv(os.Environ(), env)
+	if prepare != nil {
+		prepare(cmd)
+	}
 	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("running command %q: %w", command, err)
 	}
 	return string(out), nil
+}
+
+// hookSignalGrace is how long a canceled hook's process group gets to exit on
+// SIGTERM before it is SIGKILLed. Matches the order-exec path's grace.
+const hookSignalGrace = 2 * time.Second
+
+// hookProcessGroupCleanup makes a hook its own process-group leader and
+// terminates that GROUP when the command is canceled.
+//
+// Without it, a timed-out hook leaks its descendants. CommandContext kills the
+// `sh` it started, and WaitDelay then stops waiting on the pipe — but WaitDelay
+// closes I/O, it does not signal a process tree, so the pipeline the hook
+// spawned (bd, and whatever it is piped into) keeps running and keeps holding a
+// store connection. That is worse here than it looks: the hook's semaphore slot
+// is released the moment the shell dies, so the pool admits the next hook while
+// the previous one's bd is still connected, and the bound that exists to stop a
+// boot-time read storm quietly stops bounding anything.
+func hookProcessGroupCleanup(cmd *exec.Cmd) {
+	processgroup.StartCommandInNewGroup(cmd)
+	cmd.Cancel = func() error {
+		return processgroup.TerminateCommand(cmd, 0, hookSignalGrace, processgroup.Options{})
+	}
 }
 
 // parseBDProbeTimeout reads GC_BD_PROBE_TIMEOUT and returns the parsed duration.
@@ -113,8 +147,14 @@ func shellScaleCheck(command, dir string, env map[string]string) (string, error)
 // sh -c with the shorter hookTimeout (30s). Separated from
 // shellScaleCheck so that hung hooks don't stall the reconciler for
 // the full bd probe timeout.
+//
+// Hooks run in their own process group so a timeout reaps the whole pipeline
+// rather than just the shell; see hookProcessGroupCleanup for why the on_boot
+// bound depends on it. shellScaleCheck deliberately keeps the default
+// cancellation policy: those probes run on the reconciler tick under their own
+// bound and timeout, and their signal semantics are not this path's to change.
 func shellRunHook(command, dir string, env map[string]string) (string, error) {
-	return shellCommand(command, dir, hookTimeout, env)
+	return runShellCommand(command, dir, hookTimeout, env, hookProcessGroupCleanup)
 }
 
 // scaleParams holds the resolved scaling parameters for an agent.
@@ -397,10 +437,44 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 	return dst
 }
 
+// poolOnBootConcurrency bounds how many on_boot hooks run at once.
+//
+// Six, because the hooks are light bd probes with their own hookTimeout and the
+// cost being removed here is the SUM of those timeouts: a city with a dozen pool
+// agents paid a dozen sequential probe budgets before it could serve, 3m12s of
+// one maintainer-city boot (ga-1e78j). A bound keeps a city with many pools from
+// turning its own recovery sweep into a store-wide read storm.
+const poolOnBootConcurrency = 6
+
+// poolOnBootHook is one agent's resolved on_boot invocation.
+type poolOnBootHook struct {
+	agent   string
+	command string
+	dir     string
+	env     map[string]string
+}
+
 // runPoolOnBoot runs on_boot commands for all pool agents at controller startup.
 // Errors are logged but not fatal — the controller continues regardless.
+//
+// Planning is serial and execution is parallel, and the split is load-bearing
+// rather than stylistic. Resolving a hook's environment goes through
+// controllerQueryRuntimeEnv, whose recovery-enabled path can restart a managed
+// Dolt server; running that from every agent at once is precisely the read storm
+// the no-recovery variants exist to bound (ga-cdmx6x). Template expansion also
+// reports malformed commands to the shared stderr. So the impure half stays on
+// one goroutine, and only the subprocesses fan out.
 func runPoolOnBoot(cfg *config.City, cityPath string, runner ScaleCheckRunner, stderr io.Writer) {
+	runPoolOnBootHooks(planPoolOnBootHooks(cfg, cityPath, stderr), runner, stderr)
+}
+
+// planPoolOnBootHooks resolves every eligible pool agent's on_boot command,
+// working directory and environment, in config order. An agent whose
+// environment cannot be resolved is reported and dropped, exactly as the serial
+// loop did.
+func planPoolOnBootHooks(cfg *config.City, cityPath string, stderr io.Writer) []poolOnBootHook {
 	cityName := workdirutil.CityName(cityPath, cfg)
+	var hooks []poolOnBootHook
 	for _, a := range cfg.Agents {
 		if !a.SupportsInstanceExpansion() || a.Implicit {
 			continue
@@ -410,24 +484,81 @@ func runPoolOnBoot(cfg *config.City, cityPath string, runner ScaleCheckRunner, s
 			continue
 		}
 		cmd = expandAgentCommandTemplate(cityPath, cityName, &a, cfg.Rigs, "on_boot", cmd, stderr)
-		dir := agentCommandDir(cityPath, &a, cfg.Rigs)
 		env, err := controllerQueryRuntimeEnv(cityPath, cfg, &a)
 		if err != nil {
 			fmt.Fprintf(stderr, "on_boot %s env: %v\n", a.QualifiedName(), err) //nolint:errcheck // best-effort stderr
 			continue
 		}
-		out, err := runner(cmd, dir, env)
-		if err != nil {
-			fmt.Fprintf(stderr, "on_boot %s: %v\n", a.QualifiedName(), err) //nolint:errcheck // best-effort stderr
-		}
-		// Surface only the DEFAULT hook's gc-recovery diagnostic — a bd release
-		// the loop could not complete, which exits 0 (so err is nil and the
-		// diagnostic rides stdout). A user on_boot override is passed through
-		// verbatim and carries no marker, so its arbitrary stdout is left alone.
-		if strings.Contains(out, config.RecoveryHookMarker) {
-			fmt.Fprintf(stderr, "on_boot %s: %s\n", a.QualifiedName(), strings.TrimSpace(out)) //nolint:errcheck // best-effort stderr
-		}
+		hooks = append(hooks, poolOnBootHook{
+			agent:   a.QualifiedName(),
+			command: cmd,
+			dir:     agentCommandDir(cityPath, &a, cfg.Rigs),
+			env:     env,
+		})
 	}
+	return hooks
+}
+
+// runPoolOnBootHooks runs the planned hooks concurrently, bounded by
+// poolOnBootConcurrency, and returns only once every one of them has finished.
+//
+// Each hook's log lines are buffered and written in a single call, so an
+// agent's failure and its recovery diagnostic stay together instead of
+// interleaving with another agent's.
+func runPoolOnBootHooks(hooks []poolOnBootHook, runner ScaleCheckRunner, stderr io.Writer) {
+	if len(hooks) == 0 {
+		return
+	}
+	var logMu sync.Mutex
+	emit := func(block []byte) {
+		if len(block) == 0 {
+			return
+		}
+		logMu.Lock()
+		defer logMu.Unlock()
+		stderr.Write(block) //nolint:errcheck // best-effort stderr
+	}
+
+	sem := make(chan struct{}, poolOnBootConcurrency)
+	var wg sync.WaitGroup
+	for _, hook := range hooks {
+		wg.Add(1)
+		go func(hook poolOnBootHook) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			// Registered last so it runs FIRST on the way out: the panic is
+			// recovered and folded into this hook's block before the slot is
+			// released and before wg.Done. A panic escaping here would take the
+			// whole supervisor down — every city, not just this one — because a
+			// goroutine has nothing above it to recover. Serially these hooks ran
+			// under the per-city recover in startCityWorkers, so containing them
+			// is preserving that, not adding to it. on_boot is best-effort
+			// recovery work, so a panicking hook is logged and skipped exactly
+			// like a failing one.
+			var block bytes.Buffer
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Fprintf(&block, "on_boot %s: hook panicked: %v\n", hook.agent, r) //nolint:errcheck // bytes.Buffer
+				}
+				emit(block.Bytes())
+			}()
+
+			out, err := runner(hook.command, hook.dir, hook.env)
+			if err != nil {
+				fmt.Fprintf(&block, "on_boot %s: %v\n", hook.agent, err) //nolint:errcheck // bytes.Buffer
+			}
+			// Surface only the DEFAULT hook's gc-recovery diagnostic — a bd release
+			// the loop could not complete, which exits 0 (so err is nil and the
+			// diagnostic rides stdout). A user on_boot override is passed through
+			// verbatim and carries no marker, so its arbitrary stdout is left alone.
+			if strings.Contains(out, config.RecoveryHookMarker) {
+				fmt.Fprintf(&block, "on_boot %s: %s\n", hook.agent, strings.TrimSpace(out)) //nolint:errcheck // bytes.Buffer
+			}
+		}(hook)
+	}
+	wg.Wait()
 }
 
 // discoverPoolInstances returns qualified runtime identities for a pool-shaped
