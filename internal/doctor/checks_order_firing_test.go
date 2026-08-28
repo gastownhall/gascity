@@ -761,4 +761,15 @@ func TestOrderFiringCurrent_TimesOutStalledOrderHistory(t *testing.T) {
 	if !strings.Contains(result.Message, "order history lookup timed out after 20ms") {
 		t.Fatalf("message = %q, want timeout diagnostic", result.Message)
 	}
+	// A slow-but-inconclusive lookup must not gate gc doctor red the same way a
+	// confirmed stale/never-fired order does (#4895): the query timing out proves
+	// nothing about whether orders are actually firing, so it must not report as
+	// SeverityBlocking (the CheckSeverity zero value, which this branch silently
+	// fell into before it explicitly set Severity).
+	if result.Severity != SeverityAdvisory {
+		t.Fatalf("severity = %v, want SeverityAdvisory (a timed-out lookup is inconclusive, not proof of a stale order)", result.Severity)
+	}
+	if !result.TimedOut {
+		t.Fatalf("TimedOut = false, want true so callers (JSON output, doctor summary) can distinguish this from a confirmed failure")
+	}
 }

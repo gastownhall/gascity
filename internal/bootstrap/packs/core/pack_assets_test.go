@@ -216,3 +216,21 @@ func TestCoreMaintenanceOrdersCarryLegacySkipAliases(t *testing.T) {
 		}
 	}
 }
+
+// TestClaimProtocolFragmentIsEmbedded pins the go:embed inclusion of
+// template-fragments/. The fragment render tests in cmd/gc read the on-disk
+// source tree, but production cities hydrate the core pack from PackFS —
+// dropping all:template-fragments from the embed directive would ship
+// pool-worker prompts whose {{ template "claim-protocol" . }} degrades to an
+// unexpanded literal while every repo test stayed green.
+func TestClaimProtocolFragmentIsEmbedded(t *testing.T) {
+	data, err := fs.ReadFile(PackFS, "template-fragments/claim-protocol.template.md")
+	if err != nil {
+		t.Fatalf("core PackFS is missing template-fragments/claim-protocol.template.md: %v", err)
+	}
+	for _, want := range []string{`{{ define "claim-protocol" -}}`, "gc hook --claim --drain-ack --json"} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("embedded claim-protocol fragment missing %q", want)
+		}
+	}
+}

@@ -13,10 +13,41 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cenkalti/backoff/v4"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doltorphan"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gastownhall/gascity/test/tmuxtest"
+)
+
+// doltLeakGuardGraceInitialInterval and doltLeakGuardGraceMaxElapsedTime
+// bound how long runWith tolerates a candidate leak surviving past
+// runTests() returning. A dolt sql-server that a test has already signaled
+// to stop still needs a bounded, non-zero amount of wall-clock time to
+// actually leave the process table (flush, close listeners, OS reap); under
+// host contention that ordinary shutdown tail can still be in flight the
+// instant the first final scan fires, which misclassifies a process
+// finishing an already-in-progress clean shutdown as a permanent leak
+// (ga-szv0ge). The guard's real invariant is "no test leaves a dolt server
+// running forever," not "no test leaves a dolt server running for one more
+// scheduler tick after Run() returns" — mirrors the hang-budget framing in
+// ga-f5clwo: this is a hang detector, not a latency SLO, so per ga-f5clwo's
+// own carve-out it gets "one shared generous budget" rather than per-test
+// tuning. Round 2's 5s budget still false-positived under host contention
+// (ga-d5nmtj gate evidence: PID 2911558 outlived the grace window, a later
+// scan found it already gone). Round 3 sets the ceiling to
+// config.DefaultDoltStopTimeout rather than a new arbitrary literal: that
+// constant is this same codebase's existing answer to "how long may a
+// managed dolt server take to actually stop" (its SIGTERM→SIGKILL grace,
+// cmd/gc/dolt_stop_managed.go), so the guard now tolerates exactly the
+// shutdown tail the system itself is already configured to allow — no
+// process the system considers to be stopping normally can trip it. Sized
+// well below normal package test timeouts so a genuine leak (one that never
+// clears, e.g. ga-vltdpl) still fails within tens of seconds, not minutes.
+const (
+	doltLeakGuardGraceInitialInterval = 250 * time.Millisecond
+	doltLeakGuardGraceMaxElapsedTime  = config.DefaultDoltStopTimeout
 )
 
 func canonicalTestPath(path string) string {
@@ -178,7 +209,7 @@ func (g *doltLeakGuardedTestingM) nonEmptyLeakRoots() []string {
 }
 
 func (g *doltLeakGuardedTestingM) Run() int {
-	return g.runWith(g.m.Run, discoverDoltProcesses, g.sweepStaleCmdGCTestDoltProcesses, sweepOrphanDoltStoreDirs, reapManagedDoltTestProcesses, reapDoltLeakProcesses)
+	return g.runWith(g.m.Run, discoverDoltProcesses, g.sweepStaleCmdGCTestDoltProcesses, sweepOrphanDoltStoreDirs, reapManagedDoltTestProcesses, reapDoltLeakProcesses, doltLeakGuardGraceInitialInterval, doltLeakGuardGraceMaxElapsedTime)
 }
 
 func (g *doltLeakGuardedTestingM) runWith(
@@ -188,6 +219,7 @@ func (g *doltLeakGuardedTestingM) runWith(
 	sweepOrphanDirs func(),
 	reapRegistered func(),
 	reapLeaks func([]DoltProcInfo),
+	graceInitialInterval, graceMaxElapsedTime time.Duration,
 ) int {
 	_ = sweepStale("startup")
 	sweepOrphanDirs()
@@ -203,11 +235,11 @@ func (g *doltLeakGuardedTestingM) runWith(
 
 	guardFailed := initialErr != nil
 	if initialErr == nil {
-		final, finalErr := snapshotDoltProcessesForConfigRoots(enumerate, g.leakRoots())
+		leaked, finalErr := g.waitForFinalScanToClear(enumerate, initial, graceInitialInterval, graceMaxElapsedTime)
 		if finalErr != nil {
 			fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: final scan failed: %v\n", finalErr) //nolint:errcheck
 			guardFailed = true
-		} else if leaked := diffDoltProcessSnapshots(initial, final); len(leaked) > 0 {
+		} else if len(leaked) > 0 {
 			fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: leaked %d dolt sql-server process(es) under %s\n", len(leaked), strings.Join(g.nonEmptyLeakRoots(), ", ")) //nolint:errcheck
 			writeDoltLeakReport(os.Stderr, leaked)
 			reapLeaks(leaked)
@@ -224,10 +256,62 @@ func (g *doltLeakGuardedTestingM) runWith(
 	return code
 }
 
+// waitForFinalScanToClear polls the final process-table scan, diffing
+// against initial each time, until it shows no candidates or
+// maxElapsedTime is exhausted. It tolerates the ordinary tail latency of a
+// dolt sql-server's graceful shutdown (already signaled to stop, not yet
+// reaped from the process table) without weakening detection of a process
+// still present when the grace window closes: the last observed diff is
+// what gets reported and reaped in that case, identical to a single
+// immediate scan finding the same result.
+func (g *doltLeakGuardedTestingM) waitForFinalScanToClear(
+	enumerate func() ([]DoltProcInfo, error),
+	initial map[int]DoltProcInfo,
+	initialInterval, maxElapsedTime time.Duration,
+) ([]DoltProcInfo, error) {
+	var leaked []DoltProcInfo
+	var finalScanErr error
+
+	bo := backoff.NewExponentialBackOff()
+	bo.InitialInterval = initialInterval
+	bo.MaxElapsedTime = maxElapsedTime
+
+	// backoff.Retry (v4.3.0) already unwraps a *backoff.PermanentError it
+	// returns internally and hands back the inner error directly, so
+	// type-asserting on Retry's own return value can never see a
+	// *backoff.PermanentError. Capture the scan error directly via this
+	// closure variable instead, mirroring leaked above: set at the same
+	// point backoff.Permanent(finalErr) is returned, read after Retry
+	// returns.
+	_ = backoff.Retry(func() error {
+		final, err := snapshotDoltProcessesForConfigRoots(enumerate, g.leakRoots())
+		if err != nil {
+			finalScanErr = err
+			return backoff.Permanent(err)
+		}
+		leaked = diffDoltProcessSnapshots(initial, final)
+		if len(leaked) == 0 {
+			return nil
+		}
+		return fmt.Errorf("%d dolt sql-server process(es) still present", len(leaked))
+	}, bo)
+	if finalScanErr != nil {
+		return nil, finalScanErr
+	}
+	// Retries exhausted with a non-empty diff on the last poll falls
+	// through here too: leaked already holds that observation, and the
+	// sentinel error returned by Retry in that case carries no
+	// information beyond "still non-empty".
+	return leaked, nil
+}
+
 func (g *doltLeakGuardedTestingM) installSignalHandler() func() {
 	signals := make(chan os.Signal, 2)
 	done := make(chan struct{})
-	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	// SIGQUIT is what `go test -timeout` raises on a hung shard (see
+	// dolttest.Guard, which handles it for the same reason): without it the
+	// binary dies before reaping and every managed dolt server leaks.
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 	go func() {
 		select {
 		case sig := <-signals:
@@ -357,9 +441,29 @@ func isStaleCmdGCTestConfigPathWithPIDCheck(configPath string, activeRoots []str
 	}
 	ownerPID, ok := cmdGCTestConfigOwnerPID(configPath, tempParent)
 	if !ok {
-		return false
+		return isAbandonedGoTempDirConfigPath(configPath, tempParent)
 	}
 	return !pidAliveFn(ownerPID)
+}
+
+// isAbandonedGoTempDirConfigPath classifies configs under a Go t.TempDir()
+// root (Test<Name><rand>/...) that carry no gct<pid>-/gcx<pid>- owner
+// component. Those appear when the config is removed from disk while the
+// dolt server lives on: TestMain's temp-root cleanup on an uncleanly-ended
+// run (timeout or panic), or an external temp wipe (harness/CI/
+// systemd-tmpfiles) after a SIGKILL that TestMain cannot trap. The missing
+// config file is the stale signal — a concurrent live run keeps its config
+// on disk until its servers stop.
+func isAbandonedGoTempDirConfigPath(configPath, tempParent string) bool {
+	if _, ok := activeTestRootUnder(filepath.Clean(configPath), filepath.Clean(tempParent), []string{"Test"}); !ok {
+		return false
+	}
+	// Bounded like statConfigPathState: configPath comes from an arbitrary
+	// host process's argv and may sit on a hung NFS/FUSE mount. A timeout
+	// returns ctx.Err() rather than ErrNotExist, so a stuck mount degrades
+	// to "not stale" (protect) instead of wedging the startup sweep.
+	_, err := statWithTimeout(configPath)
+	return errors.Is(err, os.ErrNotExist)
 }
 
 func cmdGCTestConfigOwnerPID(configPath string, tempParent string) (int, bool) {
@@ -432,7 +536,38 @@ func reapDoltLeakProcessesWithKiller(leaked []DoltProcInfo, killFn func(int, sys
 	return reapDoltLeakPIDsWithKiller(pids, killFn)
 }
 
+// doltLeakReapPollInterval and doltLeakReapDeadline bound how long
+// reapDoltLeakPIDsWithKiller waits for a signaled pid to actually leave the
+// process table after SIGKILL, instead of returning as soon as the signal
+// call itself succeeds. A signal delivered successfully only means the
+// kernel accepted it, not that the process has exited -- callers racing a
+// TempDir RemoveAll (or any cleanup) right behind this reap need the pid to
+// actually be gone (ga-62mu45).
+const (
+	doltLeakReapPollInterval = 20 * time.Millisecond
+	doltLeakReapDeadline     = 5 * time.Second
+)
+
 func reapDoltLeakPIDsWithKiller(pids []int, killFn func(int, syscall.Signal) error) []error {
+	return reapDoltLeakPIDsWithKillerAndWaiter(pids, killFn, processStillAlive, doltLeakReapPollInterval, doltLeakReapDeadline)
+}
+
+// processStillAlive reports whether pid is still present in the process
+// table, probing via signal 0 (delivers no actual signal; ESRCH means the
+// pid is already gone). Mirrors the ESRCH handling killFn callers already
+// use elsewhere in this file.
+func processStillAlive(pid int) bool {
+	err := syscall.Kill(pid, 0)
+	return err == nil || !errors.Is(err, syscall.ESRCH)
+}
+
+// reapDoltLeakPIDsWithKillerAndWaiter is the injectable-liveness form of
+// reapDoltLeakPIDsWithKiller, used directly by unit tests for the reaper
+// itself; production callers go through the two-arg wrapper above. After
+// signaling, it polls aliveFn for each pid until it reports exited or the
+// shared deadline elapses, so the caller gets a confirmed exit rather than
+// a fire-and-forget signal send.
+func reapDoltLeakPIDsWithKillerAndWaiter(pids []int, killFn func(int, syscall.Signal) error, aliveFn func(int) bool, pollInterval, deadline time.Duration) []error {
 	var errs []error
 	for _, pid := range pids {
 		if err := killFn(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
@@ -445,11 +580,106 @@ func reapDoltLeakPIDsWithKiller(pids []int, killFn func(int, syscall.Signal) err
 			errs = append(errs, fmt.Errorf("SIGKILL pid %d: %w", pid, err))
 		}
 	}
+
+	// Shared deadline across all pids so the total wait stays bounded by
+	// deadline, not deadline multiplied by len(pids). Polling goes through
+	// backoff.Retry (mirroring waitForFinalScanToClear above) instead of a
+	// bare time.Sleep loop, so the interval sleep lives inside the already-
+	// imported backoff library rather than in this file's own source.
+	deadlineAt := time.Now().Add(deadline)
+	for _, pid := range pids {
+		remaining := time.Until(deadlineAt)
+		if remaining <= 0 {
+			if aliveFn(pid) {
+				errs = append(errs, fmt.Errorf("pid %d still alive after SIGKILL and %s wait (leak-guard reap timed out)", pid, deadline))
+			}
+			continue
+		}
+
+		bo := backoff.NewExponentialBackOff()
+		bo.InitialInterval = pollInterval
+		bo.MaxElapsedTime = remaining
+
+		// The operation's own error carries no information beyond "still
+		// alive" (mirrors waitForFinalScanToClear's finalScanErr pattern
+		// above) -- the informative error is reconstructed below from
+		// pid+deadline once Retry gives up.
+		if err := backoff.Retry(func() error {
+			if aliveFn(pid) {
+				return fmt.Errorf("pid %d still alive", pid)
+			}
+			return nil
+		}, bo); err != nil {
+			errs = append(errs, fmt.Errorf("pid %d still alive after SIGKILL and %s wait (leak-guard reap timed out)", pid, deadline))
+		}
+	}
 	return errs
 }
 
 func ignoreProcessSignal(int, syscall.Signal) error {
 	return nil
+}
+
+// TestReapDoltLeakPIDsWithKillerAndWaiter_WaitsForConfirmedExit proves the
+// reaper polls for actual exit instead of returning the instant SIGKILL is
+// sent. A killFn call succeeding only means the kernel accepted the signal,
+// not that the process has left the process table -- the caller's
+// t.Cleanup (and any TempDir RemoveAll racing right behind it) needs the
+// pid to actually be gone (ga-62mu45).
+func TestReapDoltLeakPIDsWithKillerAndWaiter_WaitsForConfirmedExit(t *testing.T) {
+	const pid = 4242
+	var aliveCalls int
+	aliveFn := func(gotPID int) bool {
+		if gotPID != pid {
+			t.Fatalf("aliveFn called with unexpected pid %d, want %d", gotPID, pid)
+		}
+		aliveCalls++
+		// Reports alive for the first two polls, then exited -- simulates a
+		// process that takes a couple of poll ticks to actually leave the
+		// process table after SIGKILL is delivered.
+		return aliveCalls <= 2
+	}
+
+	errs := reapDoltLeakPIDsWithKillerAndWaiter([]int{pid}, ignoreProcessSignal, aliveFn, 5*time.Millisecond, 200*time.Millisecond)
+
+	if len(errs) != 0 {
+		t.Fatalf("reapDoltLeakPIDsWithKillerAndWaiter returned unexpected errors: %v", errs)
+	}
+	if aliveCalls < 2 {
+		t.Fatalf("aliveFn called only %d time(s); reaper must poll for confirmed exit, not return after a single check", aliveCalls)
+	}
+}
+
+// TestReapDoltLeakPIDsWithKillerAndWaiter_TimesOutWithClearPIDError proves
+// a pid that never confirms exit produces a clear, pid-naming error within
+// the bounded deadline -- rather than either hanging forever or silently
+// returning success for a process that is still alive.
+func TestReapDoltLeakPIDsWithKillerAndWaiter_TimesOutWithClearPIDError(t *testing.T) {
+	const pid = 4343
+	aliveFn := func(int) bool { return true } // never exits
+
+	const deadline = 40 * time.Millisecond
+	start := time.Now()
+	errs := reapDoltLeakPIDsWithKillerAndWaiter([]int{pid}, ignoreProcessSignal, aliveFn, 5*time.Millisecond, deadline)
+	elapsed := time.Since(start)
+
+	if len(errs) == 0 {
+		t.Fatal("reapDoltLeakPIDsWithKillerAndWaiter returned no error for a pid that never confirmed exit")
+	}
+	found := false
+	for _, err := range errs {
+		if strings.Contains(err.Error(), fmt.Sprintf("%d", pid)) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected an error naming pid %d, got: %v", pid, errs)
+	}
+	// Generous upper bound so host contention can't flake this: the reaper
+	// must not hang well past its own configured deadline.
+	if elapsed > deadline+2*time.Second {
+		t.Fatalf("reapDoltLeakPIDsWithKillerAndWaiter took %s, well beyond its %s deadline -- it must not hang past the bound", elapsed, deadline)
+	}
 }
 
 // requireNoLeakedDoltAfterWith is the testReporter+injectable-enumerator

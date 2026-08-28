@@ -1807,6 +1807,21 @@
       "exclusion": "hook-protocol"
     },
     {
+      "path": "gc hook current",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "classification": "excluded",
+      "notice_policy": "ineligible",
+      "recording_policy": "excluded",
+      "owner": "excluded",
+      "mode": "hook-protocol",
+      "exclusion": "hook-protocol"
+    },
+    {
       "path": "gc hook run",
       "aliases": [],
       "conditional_modes": [],
@@ -2071,6 +2086,21 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "structural",
+      "classification": "excluded",
+      "notice_policy": "ineligible",
+      "recording_policy": "excluded",
+      "owner": "excluded",
+      "mode": "hidden-private",
+      "exclusion": "hidden-private"
+    },
+    {
+      "path": "gc internal beads-credential",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": true,
+      "effective_hidden": true,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
       "classification": "excluded",
       "notice_policy": "ineligible",
       "recording_policy": "excluded",

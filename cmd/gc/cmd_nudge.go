@@ -2453,6 +2453,31 @@ func recordNudgeDispatchSkips(cityPath string, counts map[string]int64) error {
 	})
 }
 
+// runNudgeQueueMaintenanceSweep runs the queue's recover/TTL-expiry/dead-
+// letter-retention passes over the whole queue, independent of whether any
+// pending item currently matches an open session. Every other maintenance
+// call site (claimDueQueuedNudgesMatching, listQueuedNudges,
+// listQueuedNudgesForTarget, ...) only runs these passes as a side effect of
+// an operation scoped to a specific agent/target, so an item whose target
+// never matches never gets swept by any of them. The supervisor dispatch
+// tick is the one path that iterates the whole queue every cycle regardless
+// of match outcome, so it owns running this sweep unconditionally.
+func runNudgeQueueMaintenanceSweep(cityPath string, now time.Time) error {
+	maint := nudgeMaintenanceStore{cityPath: cityPath}
+	defer maint.close() //nolint:errcheck // best-effort
+	return withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+		front := maint.frontForState(state)
+		deadline := noMaintenanceDeadline()
+		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
+			return err
+		}
+		if err := pruneExpiredQueuedNudges(state, front, now, deadline); err != nil {
+			return err
+		}
+		return pruneDeadQueuedNudges(state, front, now, deadline)
+	})
+}
+
 func pruneExpiredQueuedNudges(state *nudgeQueueState, front *nudgequeue.Store, now, deadline time.Time) error {
 	return pruneExpiredQueuedNudgesWithClock(state, front, now, deadline, clock.Real{})
 }
@@ -2560,14 +2585,18 @@ func pruneDeadQueuedNudgesWithClock(state *nudgeQueueState, front *nudgequeue.St
 					filtered = append(filtered, item)
 					continue
 				}
-				shadow, ok, err = front.FindIncludingTerminal(item.ID)
-				if err != nil || !ok || !nudgequeue.IsTerminalState(shadow.State) {
-					filtered = append(filtered, item)
-					continue
-				}
+				// Terminalize's own error return is sufficient confirmation:
+				// nil means either the bead was really terminalized, or it
+				// tolerated a missing bead as a no-op because the bead was
+				// already reaped by an unrelated retention sweep (wisp
+				// compaction etc.). Re-querying FindIncludingTerminal here
+				// would never find a reaped bead again, so entries whose
+				// bead is gone would be retained forever and pay a store
+				// lookup on every sweep (gastownhall/gascity#5278).
 			}
 			if !item.DeadAt.IsZero() && item.DeadAt.Before(cutoff) {
-				// Terminal bead confirmed in store — safe to prune once past retention.
+				// Terminal (or the backing bead is gone entirely) — safe to
+				// prune once past retention.
 				continue
 			}
 		}

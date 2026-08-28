@@ -6474,6 +6474,26 @@ func (s labelFailListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	return s.Store.List(query)
 }
 
+// openWorkFailListStore is a store that cannot answer the OPEN-WORK question,
+// whichever read the gate uses to ask it.
+//
+// The gate used to ask with one `order-run:<scoped>` list per order and now asks
+// once per store, unlabeled, through the per-tick index (ga-l7jdg). A fixture
+// pinned to only one of those two spellings stops simulating the outage the
+// moment the other one is the live path, and the order under test quietly
+// dispatches instead of failing closed — which is what this store exists to
+// prevent.
+type openWorkFailListStore struct {
+	beads.Store
+}
+
+func (s openWorkFailListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if strings.HasPrefix(query.Label, "order-run:") || isOrderGateIndexQuery(query) {
+		return nil, fmt.Errorf("list failed for open work")
+	}
+	return s.Store.List(query)
+}
+
 // --- helpers ---
 
 func successfulExec(context.Context, string, string, []string) ([]byte, error) {
@@ -7222,10 +7242,7 @@ func TestOrderDispatchSkipsRigConditionWhenLegacyOpenWorkReadFails(t *testing.T)
 		t.Fatal(err)
 	}
 	rigStore := beads.NewMemStore()
-	legacyStore := labelFailListStore{
-		Store:     beads.NewMemStore(),
-		failLabel: "order-run:rig-digest:rig:frontend",
-	}
+	legacyStore := openWorkFailListStore{Store: beads.NewMemStore()}
 
 	stderr := &bytes.Buffer{}
 	m := &memoryOrderDispatcher{
@@ -7303,6 +7320,10 @@ func TestOrderDispatchConditionUsesScopedEnv(t *testing.T) {
 
 func TestOrderDispatchSkipsRigCooldownWhenLegacyOpenWorkReadFails(t *testing.T) {
 	rigStore := beads.NewMemStore()
+	// The LAST-RUN read is what fails here, so the fixture fails only the
+	// `order-run:` label query LastRunAcross issues. The gate's own index read
+	// succeeds — that is the point: this test pins the last-run path, and its
+	// sibling above pins the gate path.
 	legacyStore := labelFailListStore{
 		Store:     beads.NewMemStore(),
 		failLabel: "order-run:rig-digest:rig:frontend",
@@ -10177,7 +10198,7 @@ func TestSweepClosedOrderTrackingRetentionAcrossStoresBounded_ZeroLimitDeletesNo
 func TestLastRunFuncGatesFallbackOnIndexMiss(t *testing.T) {
 	store := beads.NewMemStore()
 	const storeKey = "city"
-	idx := newOrderDispatchTrackingIndex()
+	idx := newOrderDispatchTrackingIndex(io.Discard)
 	indexed := time.Now().Add(-time.Hour)
 	// Pre-seed the history index so lastRunForStore reads it without listing
 	// the store. The "\x00history" suffix matches historyEntriesForStore's key.
@@ -10319,4 +10340,170 @@ func TestCountClosedOrderTrackingRetentionEligible(t *testing.T) {
 			t.Fatalf("count = %d, want 0 for empty store", count)
 		}
 	})
+}
+
+func TestOrderDispatchMaxDispatchesPerTickConfig(t *testing.T) {
+	aa := []orders.Order{{
+		Name:         "cap-order",
+		Trigger:      "cooldown",
+		Interval:     "1m",
+		Formula:      "test-formula",
+		Pool:         "worker",
+		FormulaLayer: sharedTestFormulaDir,
+	}}
+
+	// Unset (zero) preserves the historical default of 4.
+	cfgDefault := &config.City{}
+	adDefault := buildOrderDispatcherFromOrderSet(nil, t.TempDir(), cfgDefault, aa, events.Discard, &bytes.Buffer{})
+	mDefault, ok := adDefault.(*memoryOrderDispatcher)
+	if !ok {
+		t.Fatalf("expected *memoryOrderDispatcher, got %T", adDefault)
+	}
+	if mDefault.maxDispatchesPerTick != defaultMaxOrderDispatchesPerTick {
+		t.Errorf("default maxDispatchesPerTick = %d, want %d", mDefault.maxDispatchesPerTick, defaultMaxOrderDispatchesPerTick)
+	}
+
+	// Configured value of 1 overrides the default.
+	one := 1
+	cfgOne := &config.City{}
+	cfgOne.Orders.MaxDispatchesPerTick = &one
+	adOne := buildOrderDispatcherFromOrderSet(nil, t.TempDir(), cfgOne, aa, events.Discard, &bytes.Buffer{})
+	mOne, ok := adOne.(*memoryOrderDispatcher)
+	if !ok {
+		t.Fatalf("expected *memoryOrderDispatcher, got %T", adOne)
+	}
+	if mOne.maxDispatchesPerTick != 1 {
+		t.Errorf("configured maxDispatchesPerTick = %d, want 1", mOne.maxDispatchesPerTick)
+	}
+
+	// Zero or negative values fall back to the default rather than passing
+	// through: inside the dispatch loop a cap <= 0 means UNCAPPED, so honoring
+	// them would silently disable the cap entirely.
+	for _, bad := range []int{0, -3} {
+		v := bad
+		cfgBad := &config.City{}
+		cfgBad.Orders.MaxDispatchesPerTick = &v
+		adBad := buildOrderDispatcherFromOrderSet(nil, t.TempDir(), cfgBad, aa, events.Discard, &bytes.Buffer{})
+		mBad, ok := adBad.(*memoryOrderDispatcher)
+		if !ok {
+			t.Fatalf("expected *memoryOrderDispatcher, got %T", adBad)
+		}
+		if mBad.maxDispatchesPerTick != defaultMaxOrderDispatchesPerTick {
+			t.Errorf("maxDispatchesPerTick with configured %d = %d, want default %d", bad, mBad.maxDispatchesPerTick, defaultMaxOrderDispatchesPerTick)
+		}
+	}
+}
+
+// A failing exec order recorded only the Go error string — "exit status 1" —
+// while the command's own diagnostic went to the controller log and no further.
+// Live proof: pr-intake-sweep failed 94/94 across three cities for two days and
+// every order.failed event said "exit status 1".
+func TestOrderDispatchExecFailureEventCarriesTheCommandsOutput(t *testing.T) {
+	store := beads.NewMemStore()
+	var rec memRecorder
+	var stderr bytes.Buffer
+
+	const diagnostic = "actor evidence is stale: regenerate the canary"
+	aa := []orders.Order{{
+		Name:     "sweep",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Exec:     `printf '%s\n' "` + diagnostic + `" >&2; exit 1`,
+	}}
+
+	m := &memoryOrderDispatcher{
+		aa:      aa,
+		storeFn: func(_ execStoreTarget) (beads.Store, error) { return store, nil },
+		execRun: shellExecRunner,
+		rec:     &rec,
+		stderr:  &stderr,
+		cfg:     &config.City{},
+	}
+	m.dispatch(context.Background(), t.TempDir(), time.Now())
+	m.drain(context.Background())
+
+	var msg string
+	for _, e := range rec.events {
+		if e.Type == events.OrderFailed && e.Subject == "sweep" {
+			msg = e.Message
+		}
+	}
+	if msg == "" {
+		t.Fatalf("no order.failed event for sweep; stderr = %q", stderr.String())
+	}
+	if !strings.Contains(msg, diagnostic) {
+		t.Fatalf("order.failed dropped the command's own reason; message = %q", msg)
+	}
+	// The exit status still has to survive alongside it.
+	if !strings.Contains(msg, "exit status 1") {
+		t.Fatalf("order.failed lost the exit status; message = %q", msg)
+	}
+}
+
+// The output now rides the event bus into events.jsonl and SSE, so a secret the
+// command echoes must be scrubbed on the way in, exactly as the log path does.
+func TestOrderDispatchExecFailureEventRedactsSecretsInOutput(t *testing.T) {
+	const secret = "ghp_projectedControllerToken0123456789"
+	t.Setenv("GITHUB_TOKEN", secret)
+	t.Setenv("GH_TOKEN", secret)
+
+	store := beads.NewMemStore()
+	var rec memRecorder
+	var stderr bytes.Buffer
+
+	aa := []orders.Order{{
+		Name:     "leaky",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Exec:     `printf '%s\n' "$GITHUB_TOKEN" >&2; exit 1`,
+	}}
+
+	m := &memoryOrderDispatcher{
+		aa:      aa,
+		storeFn: func(_ execStoreTarget) (beads.Store, error) { return store, nil },
+		execRun: shellExecRunner,
+		rec:     &rec,
+		stderr:  &stderr,
+		cfg:     &config.City{},
+	}
+	m.dispatch(context.Background(), t.TempDir(), time.Now())
+	m.drain(context.Background())
+
+	for _, e := range rec.events {
+		if e.Type == events.OrderFailed && strings.Contains(e.Message, secret) {
+			t.Fatalf("order.failed leaked a projected token onto the event bus: %q", e.Message)
+		}
+	}
+}
+
+// Output is unbounded — a chatty failing order must not push a megabyte of log
+// into every subscriber's event stream.
+func TestOrderDispatchExecFailureEventBoundsTheOutputItCarries(t *testing.T) {
+	store := beads.NewMemStore()
+	var rec memRecorder
+	var stderr bytes.Buffer
+
+	aa := []orders.Order{{
+		Name:     "chatty",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Exec:     `awk 'BEGIN{for(i=0;i<20000;i++) print "noise line " i}' >&2; exit 1`,
+	}}
+
+	m := &memoryOrderDispatcher{
+		aa:      aa,
+		storeFn: func(_ execStoreTarget) (beads.Store, error) { return store, nil },
+		execRun: shellExecRunner,
+		rec:     &rec,
+		stderr:  &stderr,
+		cfg:     &config.City{},
+	}
+	m.dispatch(context.Background(), t.TempDir(), time.Now())
+	m.drain(context.Background())
+
+	for _, e := range rec.events {
+		if e.Type == events.OrderFailed && len(e.Message) > maxOrderFailureOutputBytes*2 {
+			t.Fatalf("order.failed message = %d bytes, want bounded near %d", len(e.Message), maxOrderFailureOutputBytes)
+		}
+	}
 }

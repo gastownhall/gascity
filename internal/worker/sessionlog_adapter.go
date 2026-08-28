@@ -85,11 +85,27 @@ func (a SessionLogAdapter) TailMeta(path string) (*sessionlog.TailMeta, error) {
 
 // TailMetaForProvider reads model/context metadata using the provider's
 // transcript schema. TailMeta remains the Claude-shaped compatibility path.
+//
+// Whole-file JSON families additionally get the tail-chunk malformed flag
+// dropped: a pretty-printed document's tail always starts mid-line, so the
+// heuristic fires on every healthy mirror. It is documented as a heuristic that
+// full-file parser diagnostics override, and these readers set none, so clearing
+// it removes a false signal rather than a real one.
 func (a SessionLogAdapter) TailMetaForProvider(provider, path string) (*sessionlog.TailMeta, error) {
 	if sessionlog.ProviderFamily(provider) == "codex" {
 		return sessionlog.ExtractCodexTailMetaFromSearchPaths(a.SearchPaths, path)
 	}
-	return a.TailMeta(path)
+	meta, err := a.TailMeta(path)
+	if err != nil || meta == nil {
+		return meta, err
+	}
+	if sessionlog.WholeFileJSONFamily(provider) {
+		clone := *meta
+		clone.MalformedTail = false
+		clone.Activity = ""
+		return &clone, nil
+	}
+	return meta, nil
 }
 
 // TailUsage reads per-invocation token usage entries from the tail of a
@@ -118,6 +134,20 @@ func (a SessionLogAdapter) InvocationUsage(provider, path string) ([]sessionlog.
 		return nil, nil
 	}
 	return invocationUsageSpecs[family].extract(a, path)
+}
+
+// TailActivityForProvider reads tail activity for a provider whose transcript
+// tail cannot be read from a trailing record. Whole-file-JSON mirror families
+// need the normalized history; everything else keeps the cheap tail path.
+func (a SessionLogAdapter) TailActivityForProvider(provider, path string) (TailActivity, error) {
+	if !sessionlog.DerivesActivityFromHistory(provider) {
+		return a.TailActivity(path)
+	}
+	snapshot, err := a.LoadHistory(LoadRequest{Provider: provider, TranscriptPath: path, TailCompactions: 1})
+	if err != nil || snapshot == nil {
+		return TailActivityUnknown, err
+	}
+	return snapshot.TailState.Activity, nil
 }
 
 // TailActivity reads the transcript tail activity without loading full history.
@@ -318,7 +348,7 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 		},
 		Continuity: continuity,
 		TailState: TailState{
-			Activity:              tailActivity(tailMeta),
+			Activity:              snapshotTailActivity(req.Provider, tailMeta, entries),
 			LastEntryID:           lastEntryID,
 			OpenToolUseIDs:        openToolUseIDs,
 			PendingInteractionIDs: pendingIDs,
@@ -858,6 +888,34 @@ func normalizeBlockKind(kind string) BlockKind {
 	default:
 		return BlockKindUnknown
 	}
+}
+
+// snapshotTailActivity resolves tail activity for the provider family.
+//
+// The tail-chunk extractor only understands Claude's JSONL, so a whole-file
+// mirror reported Unknown forever and PhaseBusy was unreachable. Where this
+// repo owns the writer (zcode) the normalized history is the authority and is
+// lossless by construction: the mirror carries a user message from the moment a
+// turn starts, and every turn is closed out — with its reply, or with the
+// failure/interrupt outcome — so a trailing user message means a turn is in
+// flight and a trailing assistant message means idle.
+func snapshotTailActivity(provider string, meta *sessionlog.TailMeta, entries []HistoryEntry) TailActivity {
+	if sessionlog.DerivesActivityFromHistory(provider) {
+		return wholeFileJSONActivity(entries)
+	}
+	return tailActivity(meta)
+}
+
+func wholeFileJSONActivity(entries []HistoryEntry) TailActivity {
+	for i := len(entries) - 1; i >= 0; i-- {
+		switch entries[i].Actor {
+		case ActorUser:
+			return TailActivityInTurn
+		case ActorAssistant:
+			return TailActivityIdle
+		}
+	}
+	return TailActivityUnknown
 }
 
 func tailActivity(meta *sessionlog.TailMeta) TailActivity {

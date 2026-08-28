@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"text/tabwriter"
 
 	"github.com/gastownhall/gascity/internal/api"
@@ -530,7 +531,36 @@ func resolveConvoyStore(convoyID string, cfg *config.City, cityPath string, open
 // contract. A candidate's not-found probe is skipped; any other error is
 // returned immediately. The returned directory maps back to the owning
 // candidate.
+//
+// # The binding leg comes first, and it short-circuits the uniqueness contract
+//
+// A relocated class binding is not one of the city's directories, so the scan
+// below cannot reach it. On a converged city that means an infrastructure bead
+// is answered by the copy `gc storage migrate` RETAINED in the city store —
+// frozen at migration time — and the caller then writes through it. So the
+// binding is resolved first, through the shared residency contract.
+//
+// A binding hit returns without consulting the ambiguity rule, deliberately.
+// Dual residency is not ambiguity: the migration copies with ids preserved and
+// deletes nothing, so a relocated bead is SUPPOSED to exist twice and there is
+// a known winner. Refusing it as ambiguous would break every convoy command on
+// exactly the cities that completed the migration.
+//
+// The directory reported for a binding hit is the CITY's, not the binding's,
+// and that is not a fudge. Callers map this directory to a store-ref
+// ("city:<name>" / "rig:<name>") that scopes molecule-root lookups. These beads
+// lived in the city store and carried the city's ref before the migration moved
+// them; a binding is not a rig and has no ref of its own, and inventing one
+// would strand every root recorded before the move.
 func resolveOwningStoreDir(beadID string, cfg *config.City, cityPath string, openStore func(string) (beads.Store, error)) (beads.Store, string, error) {
+	owner, ownedByBinding, err := cliByIDBindingOwner(cityPath, beadID)
+	if err != nil {
+		return nil, "", err
+	}
+	if ownedByBinding {
+		return owner.Store, cityPath, nil
+	}
+
 	candidates, err := openConvoyStores(cfg, cityPath, beadID, openStore)
 	if err != nil {
 		return nil, "", err
@@ -1796,6 +1826,10 @@ func doConvoyAutoclose(beadID string, stdout, stderr io.Writer) {
 // city config cannot be loaded or no candidate store holds the bead, so the
 // caller can fall back to cwd-rooted resolution. The store directory lets
 // molecule autoclose derive the matching store-ref label.
+//
+// A resolution that FAILED is still ok=false — the hooks cannot be made fatal
+// without wedging every close on a city with a sick store — but it is announced
+// first. See warnAutocloseResolutionFault.
 func autocloseOwningStore(beadID, cityPath string) (beads.Store, string, bool) {
 	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
@@ -1805,9 +1839,37 @@ func autocloseOwningStore(beadID, cityPath string) (beads.Store, string, bool) {
 		return openStoreAtForCity(storeDir, cityPath)
 	})
 	if err != nil {
+		if !errors.Is(err, beads.ErrNotFound) {
+			warnAutocloseResolutionFault(beadID, err)
+		}
 		return nil, "", false
 	}
 	return store, dir, true
+}
+
+// autocloseFaultOnce bounds warnAutocloseResolutionFault to one line per
+// process.
+var autocloseFaultOnce sync.Once
+
+// warnAutocloseResolutionFault announces a by-id resolution that failed rather
+// than missed, once per process.
+//
+// The autoclose hooks are best-effort by design: bd's on_close must not fail
+// because a molecule root could not be found, so every error here is swallowed
+// and the caller falls back to the cwd-rooted store. That is right for absence
+// and wrong for a fault. A binding that cannot be read, or an id the scan
+// refuses as ambiguous, makes the fallback close a root in a ledger that may
+// not hold it — the silent wrong-store write this lane exists to end — and it
+// cannot be made fatal without wedging closes on a city whose binding is sick.
+// So it is made LOUD instead.
+//
+// Once per process, because bd closes beads in bursts: a persistent fault would
+// otherwise print the same line on every close of a drain and bury the hook log
+// it is trying to be seen in.
+func warnAutocloseResolutionFault(beadID string, err error) {
+	autocloseFaultOnce.Do(func() {
+		fmt.Fprintf(cliStorageStderr, "gc autoclose: resolving the store that owns %s failed (%v); falling back to the cwd-rooted store, which may not hold it. Further occurrences this process are not repeated.\n", beadID, err) //nolint:errcheck // best-effort stderr
+	})
 }
 
 func convoyAutocloseStoreRoot(cwd string) string {

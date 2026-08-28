@@ -2,6 +2,7 @@ package storeref
 
 import (
 	"errors"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -254,6 +255,139 @@ func TestReaderAgreement(t *testing.T) {
 			}
 			if _, ok := claimLegFor(t, escalation, ghostID); ok {
 				t.Fatalf("ghost id %q resolved to a leg — fixture rot", ghostID)
+			}
+		})
+	}
+}
+
+// TestSweepAndDemandReadTheSameStores is the S2 half of the property: the
+// surface that COUNTS claimable work and the surface that SWEEPS an identity's
+// claims must read the same leg SET, or a claim lands somewhere no release, gate
+// or re-wake pass looks.
+//
+// It is asserted rather than assumed because the two used to be built by
+// different hands — the demand federation in one file, the retirement sweeps in
+// another, the drain-ack release in a third. Sharing planWorkFederation makes it
+// true by construction; this row is what fails if someone gives one of them its
+// own builder again.
+func TestSweepAndDemandReadTheSameStores(t *testing.T) {
+	for _, f := range allTopologies() {
+		if f.topo.Refused != nil {
+			continue
+		}
+		t.Run(f.name, func(t *testing.T) {
+			demand := mustPlan(t, RoutedWork{}, f.topo)
+			sweep := mustPlan(t, AssignedWork{}, f.topo)
+			if got, want := sweep.String(), demand.String(); got != want {
+				t.Fatalf("the assigned-work sweep reads\n %s\nwhile demand reads\n %s\n— a claim on a leg only one of them has is invisible to the other", got, want)
+			}
+
+			// Claim escalation reads the SAME legs in the SAME order as the
+			// sweep — work first, binding last — and only the mode differs
+			// (FirstOwner vs Union). That agreement is the point: a claim may
+			// only land where the sweep can see it, and it must land on the
+			// copy the sweep would attribute the row to.
+			//
+			// The documented ASYMMETRY of the intent pair is escalation vs
+			// ByID, not escalation vs sweep: ByID leads with the binding
+			// because it is the sole minter, escalation leads with work because
+			// the claim must land where the reader serves from. That row is
+			// pinned in TestReaderAgreement (2b), which is where it belongs —
+			// it needs a co-resident id to be meaningful.
+			escalation := mustPlan(t, AssignedWork{Purpose: AssignedWorkClaimEscalation}, f.topo)
+			if got, want := escalation.Refs(), sweep.Refs(); !slices.Equal(got, want) {
+				t.Fatalf("claim escalation reads legs %v and the sweep reads %v, in that order; a claim may only land where the sweep can see it", got, want)
+			}
+		})
+	}
+}
+
+// TestReaderAgreementHoldsUnderTheRelevanceDescriptor is the property that lets
+// the controller narrow its reads at all.
+//
+// Narrowing is the one change that can break agreement without changing a single
+// leg ORDER: if demand narrows and the claim surface does not, a bead is
+// claimable and never demanded (the stranded claim), and if the claim narrows
+// and demand does not, a bead is demanded and never claimable (the spawn/idle
+// treadmill). Both are D6, so the property is asserted PER PLANE: within one
+// plane, the surface that counts work and the surface that claims it must still
+// name the same beads.
+//
+// The narrowing's COST is asserted too, and deliberately: a work-ledger-resident
+// bead leaves the runtime plane's answer. That is the operator invariant working
+// as specified, not a regression — and it is the reason the convergence lane
+// reads every leg. Pinning it here means the day someone widens or forgets the
+// convergence half, the cost is written down in a test rather than discovered on
+// a city.
+func TestReaderAgreementHoldsUnderTheRelevanceDescriptor(t *testing.T) {
+	for _, f := range allTopologies() {
+		if f.topo.Refused != nil {
+			continue
+		}
+		t.Run(f.name, func(t *testing.T) {
+			seeded, _, _, _, _ := seedAgreementFixture(t, f)
+			fullDemand := mustPlan(t, RoutedWork{}, f.topo)
+			fullClaim := mustPlan(t, AssignedWork{Purpose: AssignedWorkClaimEscalation}, f.topo)
+
+			for _, plane := range []Plane{PlaneRuntime, PlaneReconcile} {
+				demandPlan, err := Narrow(fullDemand, plane)
+				if err != nil {
+					t.Fatalf("%s: narrowing demand: %v", plane, err)
+				}
+				claimPlan, err := Narrow(fullClaim, plane)
+				if err != nil {
+					t.Fatalf("%s: narrowing claim escalation: %v", plane, err)
+				}
+				demand, err := Union(demandPlan, beadID, listOpenLeg)
+				if err != nil {
+					t.Fatalf("%s: demand union: %v", plane, err)
+				}
+				var claimable []string
+				for _, id := range seeded {
+					if _, ok := claimLegFor(t, claimPlan, id); ok {
+						claimable = append(claimable, id)
+					}
+				}
+				sort.Strings(claimable)
+				if got, want := strings.Join(idsOf(demand.Items), ","), strings.Join(claimable, ","); got != want {
+					t.Fatalf("on the %s plane demand and claim disagree:\n demand:    %s\n claimable: %s", plane, got, want)
+				}
+			}
+
+			// The cost, and the control that the narrowing is real. On a split
+			// city the runtime answer is a STRICT subset of the reconcile one,
+			// and the bead it loses is the work-ledger-resident one — the class
+			// the tick's delta lanes count as `dropped` and the convergence lane
+			// repairs.
+			runtimePlan, err := Narrow(fullDemand, PlaneRuntime)
+			if err != nil {
+				t.Fatalf("narrowing demand: %v", err)
+			}
+			runtime, err := Union(runtimePlan, beadID, listOpenLeg)
+			if err != nil {
+				t.Fatalf("runtime demand union: %v", err)
+			}
+			full, err := Union(fullDemand, beadID, listOpenLeg)
+			if err != nil {
+				t.Fatalf("full demand union: %v", err)
+			}
+			for _, id := range idsOf(runtime.Items) {
+				if !slices.Contains(idsOf(full.Items), id) {
+					t.Fatalf("the runtime plane surfaced %q, which the full plan does not: narrowing added a bead", id)
+				}
+			}
+			switch {
+			case len(f.topo.Bindings) == 0:
+				if len(runtime.Items) != len(full.Items) {
+					t.Fatalf("a single-store city narrowed its demand from %d beads to %d; there is no ledger to refuse here", len(full.Items), len(runtime.Items))
+				}
+			default:
+				if containsID(runtime.Items, "ga-work-1") {
+					t.Fatal("the work-ledger-only bead survived the runtime plane; the invariant is not being applied")
+				}
+				if !containsID(full.Items, "ga-work-1") {
+					t.Fatal("the work-ledger-only bead is absent from the FULL plan too — fixture rot, so the cost assertion above proves nothing")
+				}
 			}
 		})
 	}

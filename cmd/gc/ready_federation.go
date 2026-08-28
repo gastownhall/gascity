@@ -76,31 +76,49 @@ package main
 //
 // # Single-store cities take none of this
 //
-// relocatedGraphLegStore gates on STORE IDENTITY, the same rule the API's
-// relocatedGraphStore and cmd/gc's resolveClassStore use. A city that relocates
-// nothing gets no graph leg at all, so its answer is exactly the one leg it
-// always had.
+// The leg set is Plan(RoutedWork) over the city's topology, and a city that
+// relocates nothing has no binding in that topology — so it gets no graph leg at
+// all and its answer is exactly the one leg it always had. The gate is STORE
+// IDENTITY, the same rule the API's relocatedGraphStore and cmd/gc's
+// resolveClassStore use: a binding that resolved back to the work store is
+// deduped by the plan rather than federated twice.
 
 import (
 	"errors"
 	"fmt"
-	"sort"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
-// readyLeg is one federated source: the store plus the name a failure reports
-// it by. The label is what turns "the federation failed" into "the graph store
-// failed", which is the difference between a diagnosable outage and a silent
-// short answer.
+// readyLeg is one federated source: the store, the name a failure reports it by,
+// and the plan's verdict on what that failure MEANS. The label is what turns
+// "the federation failed" into "the graph store failed", which is the difference
+// between a diagnosable outage and a silent short answer.
+//
+// onError is carried rather than consulted, and that is the documented
+// divergence this file's header names: the plan marks a rig leg PartialDegrade,
+// and this reader escalates it to fatal because a CLI array has nowhere to say
+// "this is short". Carrying it keeps the escalation VISIBLE at the point it
+// happens — and lets TestReadyReaderEscalatesThePlansPartialLegs assert that
+// this reader is overriding a policy that really is PartialDegrade, rather than
+// quietly agreeing with a plan that never said so.
 type readyLeg struct {
-	label string
-	store beads.Store
+	label   string
+	store   beads.Store
+	onError storeref.ErrPolicy
 }
 
-// readyFederationLegs assembles the ordered leg list: the city store, the rig
-// stores by name ascending, then the relocated graph store.
+// readyFederationLegs assembles the ordered leg list from Plan(RoutedWork): the
+// city store, the rig stores by name ascending, then the relocated binding.
+//
+// The order is not restated here — it IS the plan's, which is the same plan the
+// controller's demand census resolves over one topology. That is what makes
+// "the reader the hook claims through and the reader the controller counts
+// demand with agree about which stores exist" true by construction rather than
+// by two lists kept in step (the leg-set half of reader agreement; the row half
+// is demand_serve_agreement_test.go).
 //
 // A rig whose name equals the city name is skipped, mirroring the API exactly:
 // State.BeadStores() keys the city store under CityName(), so the API's rig loop
@@ -108,32 +126,90 @@ type readyLeg struct {
 // keeps the two leg sequences identical by construction rather than by
 // coincidence.
 //
-// A nil store is dropped rather than federated: a nil entry would panic on first
-// read, and by the time the legs are assembled a store that could not be opened
-// has already failed the whole query at readyRigLegStores. Dropping here is
-// therefore a guard against a nil, not a silent degrade.
-func readyFederationLegs(cityName string, cityStore beads.Store, rigStores map[string]beads.Store, graph beads.Store) []readyLeg {
-	legs := make([]readyLeg, 0, len(rigStores)+2)
-	if cityStore != nil {
-		legs = append(legs, readyLeg{label: "city", store: cityStore})
+// A nil store is dropped by the plan rather than federated: a nil entry would
+// panic on first read, and by the time the legs are assembled a store that could
+// not be opened has already failed the whole query at readyRigLegStores.
+func readyFederationLegs(cityPath, cityName string, cfg *config.City, cityStore beads.Store, rigStores map[string]beads.Store) ([]readyLeg, error) {
+	return readyLegsForTopology(cliResidencyTopology(cityPath, cfg, cityStore, rigLegsExcludingCityName(cityName, rigStores)))
+}
+
+// readyFederationLegsOverBinding assembles the legs for an EXPLICITLY supplied
+// binding rather than one resolved from the city's routes.
+//
+// It is the seam relocatedGraphLegFrom was — "a caller that resolved the binding
+// from routes it already holds applies the SAME rule instead of restating it" —
+// carried forward now that the leg list comes from a plan. The identity gate is
+// unchanged: a binding that resolved back to the city's own work store is the
+// store already federated as the city leg, so there is no second store.
+func readyFederationLegsOverBinding(cityName string, cityStore beads.Store, rigStores map[string]beads.Store, binding beads.Store) ([]readyLeg, error) {
+	var bindings []storeref.ClassBinding
+	if leg := relocatedGraphLegFrom(binding, binding != nil, cityStore); leg != nil {
+		classes := infrastructureClasses()
+		bindings = []storeref.ClassBinding{{
+			Classes:  classes,
+			Prefixes: reservedPrefixesFor(classes),
+			Leg:      storeref.Leg{Ref: storeref.ClassRef(classes), Store: leg},
+		}}
 	}
-	rigNames := make([]string, 0, len(rigStores))
-	for name := range rigStores {
+	return readyLegsForTopology(assembleResidencyTopology(nil, cityStore, rigLegsExcludingCityName(cityName, rigStores), bindings, nil))
+}
+
+// readyLegsForTopology is the assembly itself: Plan(RoutedWork), enumerated
+// through the resolver and labeled.
+//
+// The leg set is resolved ONCE and read by three different arms (ready, list,
+// list-with-owner), which is why this enumerates rather than executing: the
+// policy travels with each leg to the arm that will read it. A refused city
+// produces no legs at all — Plan refuses first.
+func readyLegsForTopology(topo storeref.Topology) ([]readyLeg, error) {
+	plan, err := storeref.Plan(storeref.RoutedWork{}, topo)
+	if err != nil {
+		return nil, err
+	}
+	var legs []readyLeg
+	storeref.EachLeg(plan, func(leg storeref.Leg, _ storeref.Role, onError storeref.ErrPolicy) {
+		legs = append(legs, readyLeg{label: readyLegLabel(leg.Ref), store: leg.Store, onError: onError})
+	})
+	return legs, nil
+}
+
+// rigLegsExcludingCityName drops a rig keyed under the city's own name; see
+// readyFederationLegs.
+//
+// residency:allow — a constructor INPUT, not a residency answer. It drops a rig
+// keyed under the city's own name so the CLI and the API build the same
+// topology; it consults no binding, no namespace and no leg order, and its
+// result goes nowhere but a topology constructor.
+func rigLegsExcludingCityName(cityName string, rigStores map[string]beads.Store) map[string]beads.Store {
+	if _, collides := rigStores[cityName]; !collides {
+		return rigStores
+	}
+	out := make(map[string]beads.Store, len(rigStores)-1)
+	for name, store := range rigStores {
 		if name == cityName {
 			continue
 		}
-		rigNames = append(rigNames, name)
+		out[name] = store
 	}
-	sort.Strings(rigNames)
-	for _, name := range rigNames {
-		if store := rigStores[name]; store != nil {
-			legs = append(legs, readyLeg{label: "rig " + name, store: store})
-		}
+	return out
+}
+
+// readyLegLabel is the name a failing leg reports itself by. The three spellings
+// are the ones this command's diagnostics have always used, kept because they
+// are what an operator greps for and what the API's partial_errors say.
+func readyLegLabel(ref storeref.StoreRef) string {
+	switch {
+	case ref == storeref.WorkRef:
+		return "city"
+	case storeref.IsClassRef(string(ref)):
+		// Every binding this build serves carries the graph class (storage boot
+		// admits the whole split or nothing), and "graph" is the name the
+		// federation contract and the API's graphPlaneUnavailable already use.
+		return "graph"
+	default:
+		rig, _ := storeref.ScopeRigContext(string(ref))
+		return "rig " + rig
 	}
-	if graph != nil {
-		legs = append(legs, readyLeg{label: "graph", store: graph})
-	}
-	return legs
 }
 
 // readyRigLegStores opens the rig legs, failing the whole query when any BOUND
@@ -162,23 +238,21 @@ func readyRigLegStores(cfg *config.City, cityPath string) (map[string]beads.Stor
 	return nil, errors.Join(errs...)
 }
 
-// relocatedGraphLegStore returns the graph-class store to federate as the final
-// leg, or nil when the city has not relocated the class.
+// relocatedGraphLegFrom is the identity gate over an already-resolved binding:
+// a binding that resolved back to the city's own work store is the same store
+// already federated as the city leg, so there is no second store to add.
 //
-// The gate is store IDENTITY, not a marker file and not a migration flag: the
-// one-shot storage funnel reports whether it relocates the graph class at all,
-// and a binding that resolved back to the city's own work store is the same
-// store already federated as the city leg. Both answers mean "there is no second
-// store", which is what keeps a legacy city's bytes untouched.
-func relocatedGraphLegStore(cityPath string, cityStore beads.Store) beads.Store {
-	binding, relocated := graphClassBinding(cliStorageRoutes(cityPath))
-	return relocatedGraphLegFrom(binding, relocated, cityStore)
-}
-
-// relocatedGraphLegFrom is the identity gate itself, over an already-resolved
-// binding. It is separate from relocatedGraphLegStore so a caller that resolved
-// the binding from routes it already holds — the conformance fixture, and any
-// future in-process caller — applies the SAME rule instead of restating it.
+// The `==` is safe for the same reason residencyBindingsFromRoutes's map key is:
+// both operands are stores a constructor opened, and every one of those is
+// pointer-typed. An interface == on a value-typed store with an uncomparable
+// dynamic type panics — see storeref.storeSet, which is where that stopped being
+// hypothetical.
+//
+// Production no longer calls it — readyFederationLegs resolves the binding from
+// the city's routes and the plan's own dedupe applies the gate — but the
+// EXPLICIT-binding seam (readyFederationLegsOverBinding) still needs it, so a
+// caller that resolved the binding itself applies the same rule rather than
+// restating it.
 func relocatedGraphLegFrom(binding beads.Store, relocated bool, cityStore beads.Store) beads.Store {
 	if !relocated || binding == nil || binding == cityStore {
 		return nil
@@ -244,8 +318,10 @@ func federateListBeadsWithOwner(legs []readyLeg, q beads.ListQuery) ([]beads.Bea
 // deduped by id with the FIRST leg to return an id winning.
 //
 // Any leg error — including a partial read, which beads reports as an error
-// carrying rows — aborts the whole federation. See the file header: a CLI array
-// has nowhere to say "this is short".
+// carrying rows — aborts the whole federation, ESCALATING the plan's
+// PartialDegrade verdict on the rig legs. See the file header: a CLI array has
+// nowhere to say "this is short", so a degraded leg here would be served as a
+// short array indistinguishable from "no work".
 func federateBeadLegs(legs []readyLeg, read func(beads.Store) ([]beads.Bead, error)) ([]beads.Bead, error) {
 	var merged []beads.Bead
 	seen := make(map[string]bool)

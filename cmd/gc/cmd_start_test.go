@@ -656,6 +656,7 @@ func TestReleaseOrphanedPoolAssignmentsWhenSnapshotsComplete_PartialSkipsComplet
 
 	released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 		store,
+		beads.SessionStore{Store: store},
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}}},
 		"",
 		nil,
@@ -679,6 +680,7 @@ func TestReleaseOrphanedPoolAssignmentsWhenSnapshotsComplete_PartialSkipsComplet
 
 	released = releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 		store,
+		beads.SessionStore{Store: store},
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}}},
 		"",
 		nil,
@@ -702,6 +704,7 @@ func TestReleaseOrphanedPoolAssignmentsWhenSnapshotsComplete_PartialSkipsComplet
 
 	released = releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 		store,
+		beads.SessionStore{Store: store},
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}}},
 		"",
 		nil,

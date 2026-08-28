@@ -42,17 +42,37 @@ import (
 // name. Unknown, legacy-bare, and incomplete refs return ok=false so callers
 // can apply an explicit compatibility fallback rather than mistaking them for
 // the city store.
+//
+// A "class:<token>" binding ref is CITY scope. A binding serves the whole
+// city's relocated classes and belongs to no rig, so it answers exactly as
+// "city:<name>" does — which is also what it answered before the census named
+// it as a leg of its own, when the reconciler's leading arm WAS the binding and
+// recorded it under the city ref. Reporting it scope-less instead would make
+// every binding-resident row invisible to the scope comparisons
+// (rootStoreRefMatchesCandidate and its siblings): the census would gain the
+// leg and lose the rows in the same commit.
 func ScopeRigContext(storeRef string) (rigContext string, ok bool) {
 	storeRef = strings.TrimSpace(storeRef)
 	switch {
 	case strings.HasPrefix(storeRef, "city:"):
 		return "", strings.TrimSpace(strings.TrimPrefix(storeRef, "city:")) != ""
+	case strings.HasPrefix(storeRef, classRefPrefix):
+		return "", strings.TrimSpace(strings.TrimPrefix(storeRef, classRefPrefix)) != ""
 	case strings.HasPrefix(storeRef, "rig:"):
 		rigContext = strings.TrimSpace(strings.TrimPrefix(storeRef, "rig:"))
 		return rigContext, rigContext != ""
 	default:
 		return "", false
 	}
+}
+
+// IsClassRef reports whether a store-ref names a relocated class binding. It is
+// the predicate the scope-vocabulary normalizers outside this package key on,
+// so "class:" appears as a literal in exactly one file.
+func IsClassRef(storeRef string) bool {
+	storeRef = strings.TrimSpace(storeRef)
+	return strings.HasPrefix(storeRef, classRefPrefix) &&
+		strings.TrimSpace(strings.TrimPrefix(storeRef, classRefPrefix)) != ""
 }
 
 // HasIDPrefix is the optional accessor a store implements to declare the id

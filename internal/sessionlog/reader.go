@@ -179,6 +179,8 @@ func ReadProviderFile(provider, path string, tailCompactions int) (*Session, err
 		sess, err = ReadMimoCodeFile(path, tailCompactions)
 	case "opencode":
 		sess, err = ReadOpenCodeFile(path, tailCompactions)
+	case "zcode":
+		sess, err = ReadZCodeFile(path, tailCompactions)
 	case "pi":
 		sess, err = ReadPiFile(path, tailCompactions)
 	case "antigravity":
@@ -259,6 +261,8 @@ func ReadProviderFileRaw(provider, path string, tailCompactions int) (*Session, 
 		sess, err = ReadMimoCodeFile(path, tailCompactions)
 	case "opencode":
 		sess, err = ReadOpenCodeFile(path, tailCompactions)
+	case "zcode":
+		sess, err = ReadZCodeFile(path, tailCompactions)
 	case "pi":
 		sess, err = ReadPiFile(path, tailCompactions)
 	case "antigravity":
@@ -572,6 +576,8 @@ func FindSessionFileForProvider(searchPaths []string, provider, workDir string) 
 		return FindMimoCodeSessionFile(searchPaths, workDir)
 	case "opencode":
 		return FindOpenCodeSessionFile(searchPaths, workDir)
+	case "zcode":
+		return FindZCodeSessionFile(searchPaths, workDir)
 	case "pi":
 		return FindPiSessionFile(searchPaths, workDir)
 	case "antigravity":
@@ -611,6 +617,8 @@ func FindProviderFallbackSessionFile(searchPaths []string, provider, workDir str
 		return FindMimoCodeSessionFile(searchPaths, workDir)
 	case "opencode":
 		return FindOpenCodeSessionFile(searchPaths, workDir)
+	case "zcode":
+		return FindZCodeSessionFile(searchPaths, workDir)
 	case "pi":
 		return FindPiSessionFile(searchPaths, workDir)
 	case "antigravity":
@@ -1529,6 +1537,40 @@ func mergePaths(defaults, extras []string) []string {
 	return result
 }
 
+// WholeFileJSONFamily reports whether a provider family stores each session as
+// one whole-file JSON document (an OpenCode-shaped `{info, messages}` export or
+// a mirror of one) rather than as append-only JSONL.
+//
+// The tail-chunk malformed heuristic is meaningless for these families: a tail
+// chunk of a pretty-printed JSON document always "starts mid line", so the flag
+// fires on every healthy file. Suppressing it is behavior-neutral — the flag is
+// documented as a heuristic that full-file parser diagnostics override, and
+// these families' readers set no tail diagnostics of their own, so nothing
+// downstream loses a signal it previously acted on.
+func WholeFileJSONFamily(provider string) bool {
+	switch ProviderFamily(provider) {
+	case "opencode", "mimocode", "zcode":
+		return true
+	default:
+		return false
+	}
+}
+
+// DerivesActivityFromHistory reports whether tail activity for a family must be
+// derived from normalized history rather than read from a trailing record.
+//
+// Deliberately narrower than WholeFileJSONFamily. The derivation is only sound
+// where the mirror is known to record a user message at turn START and close it
+// out when the turn ends — an invariant this repo owns for zcode, because it
+// owns the writer (internal/worker/adapters/zcode). OpenCode and MiMo Code
+// share the file SHAPE but their exports are written by upstream plugins on
+// their own schedule, so the same inference is not established for them and
+// enabling it would silently change their production activity reporting.
+// Extending this set is a per-family exercise, not a shape check.
+func DerivesActivityFromHistory(provider string) bool {
+	return ProviderFamily(provider) == "zcode"
+}
+
 // ProviderFamily returns the canonical transcript provider family for provider.
 func ProviderFamily(provider string) string {
 	p := strings.ToLower(strings.TrimSpace(provider))
@@ -1555,6 +1597,8 @@ func ProviderFamily(provider string) string {
 		return "mimocode"
 	case strings.Contains(p, "opencode") || providerComponent(p, "groq") || providerComponent(p, "cerebras"):
 		return "opencode"
+	case strings.Contains(p, "zcode"):
+		return "zcode"
 	case strings.Contains(p, "antigravity"):
 		return "antigravity"
 	case p == "pi" || strings.HasPrefix(p, "pi/") || strings.HasSuffix(p, "/pi") || strings.HasSuffix(p, "-pi") || strings.Contains(p, "-pi/") ||

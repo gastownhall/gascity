@@ -477,6 +477,17 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 				workflowTracef("serve process-error bead=%s kind=%s err=%v", beadID, kind, err)
 				if dispatch.IsTransientControllerError(err) {
 					pendingCount++
+					// A quiet retry is a verbatim repeat of the failure this
+					// bead already reported. It still gets retried on every
+					// sweep, but it must not count as pending: pendingAny
+					// resets idleSweeps, and a permanently-stuck bead that
+					// resets the backoff every sweep holds the whole loop at
+					// its 1s floor forever. Two such beads consumed 95% of one
+					// city's control dispatches.
+					if dispatch.IsQuietControllerRetry(err) {
+						workflowTracef("serve transient-error-quiet bead=%s kind=%s err=%v", beadID, kind, err)
+						continue
+					}
 					result.pendingAny = true
 					workflowTracef("serve transient-error-pending bead=%s kind=%s err=%v", beadID, kind, err)
 					continue
@@ -610,9 +621,25 @@ func waitForRelevantWorkflowWake(eventCh <-chan workflowWatchResult, sleepDur ti
 	return waitForRelevantWorkflowWakeWithTrace(eventCh, sleepDur, -1)
 }
 
+// workflowServeSelfActor names this process in the event log, and says whether
+// that name is usable as an identity.
+//
+// The serve loop's own control-bead writes append bead.* events now that a
+// relocated class store emits (class_store_emit.go), and waking on those buys
+// an extra heavy ready re-scan and a controller poke per dispatch burst.
+// eventActor's terminal fallback is "human", which every foreign CLI writer
+// shares, so filtering on it would suppress legitimate wakes: an identity is
+// usable only when it is neither empty nor that fallback. It is a variable so a
+// test can pin both arms.
+var workflowServeSelfActor = func() (string, bool) {
+	actor := eventActor()
+	return actor, actor != "" && actor != "human"
+}
+
 func waitForRelevantWorkflowWakeWithTrace(eventCh <-chan workflowWatchResult, sleepDur time.Duration, idleSweeps int) (bool, error) {
 	timer := time.NewTimer(sleepDur)
 	defer timer.Stop()
+	selfActor, selfUsable := workflowServeSelfActor()
 
 	for {
 		select {
@@ -621,6 +648,16 @@ func waitForRelevantWorkflowWakeWithTrace(eventCh <-chan workflowWatchResult, sl
 				return false, res.err
 			}
 			if workflowEventRelevant(res.evt) {
+				if selfUsable && res.evt.Actor == selfActor {
+					// Our own emission. drainWorkflowServeWork already loops
+					// until no control bead is processed, so nothing
+					// discoverable from this loop's own writes can be missed by
+					// ignoring them — while a foreign bead.* event (the worker
+					// close this emission exists to make visible) still wakes
+					// the loop immediately.
+					workflowTracef("serve ignore-self-event type=%s subject=%s", res.evt.Type, res.evt.Subject)
+					continue
+				}
 				if idleSweeps >= 0 {
 					workflowTracef("serve wake-event type=%s subject=%s idle_sweeps=%d sleep=%s", res.evt.Type, res.evt.Subject, idleSweeps, sleepDur)
 				} else {

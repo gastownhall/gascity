@@ -294,6 +294,69 @@ func TestHookClaimWindowExemptsExistingAssignment(t *testing.T) {
 	}
 }
 
+// TestHookClaimSlowWorkQueryStillClaimsWithinDerivedWindow pins the reconciliation
+// of the claim window with the raised work-query budget. A fresh routed claim whose
+// federated work query legitimately runs long — 70s here, the measured loaded worst
+// case and well past the old flat 45s window — must still CLAIM, not trip
+// execution.claim_window_expired. Before hookClaimWindowDefault was derived from
+// hookWorkQueryTimeout + hookClaimMutationTimeout, raising the query budget was
+// inert on the --claim path: the read succeeded but the fence, anchored at
+// invocation start and charged only 45s, refused the claim it had just found.
+//
+// InvokedAt and ClaimWindow are left unset so applyDefaults derives the window from
+// the production hookClaimWindowDefault — the exact value under test. Under the old
+// flat 45s default this claim was refused; the differently-failing control is
+// TestHookClaimWindowExpiredRefusesFreshClaim, which still refuses a claim whose age
+// exceeds an explicit window.
+func TestHookClaimSlowWorkQueryStillClaimsWithinDerivedWindow(t *testing.T) {
+	rec := &turnBoundClaimRecorder{}
+	ops := rec.ops(t, turnBoundRoutedWork)
+	// A controlled clock rather than a real sleep: the work query "spends" 70s
+	// before returning routed work. applyDefaults stamps InvokedAt at the pre-read
+	// clock, so by the time the claim tier checks the window the invocation age is
+	// 70s — past 45s, inside the derived budget.
+	clk := time.Now()
+	ops.Now = func() time.Time { return clk }
+	ops.Runner = func(string, string) (string, error) {
+		clk = clk.Add(70 * time.Second)
+		return turnBoundRoutedWork, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("query", "/rig", hookClaimOptions{
+		Assignee:     "worker-1",
+		RouteTargets: []string{"worker"},
+		JSON:         true,
+	}, ops, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("code = %d, want 0: a slow-but-alive read must still claim; stderr=%s", code, stderr.String())
+	}
+	if len(rec.claims) != 1 || rec.claims[0] != "work-1" {
+		t.Fatalf("claims = %v, want [work-1]: the raised work-query budget must reach the claim", rec.claims)
+	}
+	if len(rec.windowExpired) != 0 {
+		t.Fatalf("claim_window_expired fired for a read inside the derived window: %+v", rec.windowExpired)
+	}
+	result := decodeTurnBoundResult(t, stdout.String())
+	if result.Action != "work" || result.BeadID != "work-1" {
+		t.Fatalf("result = %+v, want action=work bead=work-1", result)
+	}
+}
+
+// TestHookClaimWindowDefaultCoversWorkQueryBudget guards the derivation itself: the
+// default claim window must leave a full claim-mutation margin after an honest
+// full-budget work query, or the fence would again refuse a claim the raised query
+// just surfaced. Pinning the relation (not the literal 160s) keeps it correct if
+// either budget is retuned.
+func TestHookClaimWindowDefaultCoversWorkQueryBudget(t *testing.T) {
+	if hookClaimWindowDefault < hookWorkQueryTimeout+hookClaimMutationTimeout {
+		t.Fatalf("hookClaimWindowDefault = %s, want >= hookWorkQueryTimeout(%s) + hookClaimMutationTimeout(%s); "+
+			"a smaller window refuses a claim the full-budget work query just found",
+			hookClaimWindowDefault, hookWorkQueryTimeout, hookClaimMutationTimeout)
+	}
+}
+
 // TestHookClaimWindowBoundsTheClaimWriteChild pins the ctx half of F-B: the
 // claim-write child's own deadline is the REMAINING window, not the flat
 // mutation timeout. Without it a claim started at second 44 of a 45s window
@@ -486,5 +549,108 @@ func TestHookClaimUnwindFailureIsSurfaced(t *testing.T) {
 	}
 	if len(rec.claimReleased) != 0 {
 		t.Fatalf("bead.claim_released emitted for a release that did not happen: %+v", rec.claimReleased)
+	}
+}
+
+// TestHookClaimClearsSessionCurrentClaimOnUndeliveredUnwind pins the inverse the
+// claim back-channel was missing: when a MINTED claim stamps the session bead's
+// current_claim_bead_id and then its result cannot be delivered (F-C, EPIPE), the
+// undelivered-claim unwind must clear that stamp as well as release the work bead.
+// Without the clear a later `gc hook current --id-only` hands the shell a bead the
+// session no longer owns, and `gc bd close $BEAD_ID` closes another session's
+// in-progress work — the exact "close somebody else's bead" hazard the stamp exists
+// to prevent. The clear routes through the same StampSessionClaim seam as the stamp
+// (an empty id), and it must land BEFORE the release so a freed bead is never both
+// claimable elsewhere and still named here.
+func TestHookClaimClearsSessionCurrentClaimOnUndeliveredUnwind(t *testing.T) {
+	for _, jsonOut := range []bool{true, false} {
+		name := "json"
+		if !jsonOut {
+			name = "plain"
+		}
+		t.Run(name, func(t *testing.T) {
+			rec := &turnBoundClaimRecorder{}
+			ops := rec.ops(t, turnBoundRoutedWork)
+			// A session-run claim (GC_SESSION_ID set) reaches the identity readback;
+			// stub it so the test stays hermetic (the default seam issues a real bd
+			// store read). This test asserts only the session-claim back-channel.
+			ops.ReadWorkMeta = func(_ context.Context, _ string, _ []string, id, assignee string) (beads.Bead, error) {
+				return beads.Bead{ID: id, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.session_id": "mc-sess1"}}, nil
+			}
+			sessSpy := &sessionClaimSpy{}
+			ops.StampSessionClaim = sessSpy.fn
+			// The release override proves clear-before-release: by the time the work
+			// bead is given back, the stamp must already have been cleared.
+			ops.Release = func(_ context.Context, _ string, _ []string, beadID, _ string) (bool, error) {
+				if len(sessSpy.beadIDs) != 2 || sessSpy.beadIDs[1] != "" {
+					t.Errorf("release ran before the session-claim clear; seam writes so far = %v", sessSpy.beadIDs)
+				}
+				rec.releases = append(rec.releases, beadID)
+				return true, nil
+			}
+
+			var stderr bytes.Buffer
+			code := doHookClaim("query", "/rig", hookClaimOptions{
+				Assignee:     "worker-1",
+				RouteTargets: []string{"worker"},
+				Env:          []string{"GC_SESSION_ID=mc-sess1"},
+				JSON:         jsonOut,
+			}, ops, brokenPipeWriter{}, &stderr)
+
+			if code != 1 {
+				t.Fatalf("code = %d, want 1; stderr=%s", code, stderr.String())
+			}
+			if len(rec.releases) != 1 || rec.releases[0] != "work-1" {
+				t.Fatalf("releases = %v, want [work-1]", rec.releases)
+			}
+			// Exactly two seam writes, in order: the stamp of the minted bead, then
+			// the clear (empty id) on the unwind.
+			if len(sessSpy.beadIDs) != 2 || sessSpy.beadIDs[0] != "work-1" || sessSpy.beadIDs[1] != "" {
+				t.Fatalf("session-claim seam writes = %v, want [work-1 \"\"] (stamp then clear)", sessSpy.beadIDs)
+			}
+			if sessSpy.sessionID != "mc-sess1" {
+				t.Fatalf("session-claim seam sessionID = %q, want mc-sess1", sessSpy.sessionID)
+			}
+		})
+	}
+}
+
+// TestHookClaimStraddleLeavesSessionClaimUntouched is the negative control for the
+// undelivered-unwind clear: the straddle path (F-B) returns BEFORE the stamp, so it
+// neither stamps nor clears the session-claim seam. The clear added for F-C must not
+// leak onto this path, where blanking the seam could drop a stamp a different,
+// still-owned bead legitimately left on the session.
+func TestHookClaimStraddleLeavesSessionClaimUntouched(t *testing.T) {
+	rec := &turnBoundClaimRecorder{}
+	ops := rec.ops(t, turnBoundRoutedWork)
+	sessSpy := &sessionClaimSpy{}
+	ops.StampSessionClaim = sessSpy.fn
+	clock := time.Now()
+	ops.Now = func() time.Time { return clock }
+	ops.InvokedAt = clock
+	ops.ClaimWindow = 40 * time.Second
+	baseClaim := ops.Claim
+	ops.Claim = func(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
+		// The CAS commits after the invoking process's window is spent — the straddle.
+		clock = clock.Add(80 * time.Second)
+		return baseClaim(ctx, dir, env, beadID, assignee)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("query", "/rig", hookClaimOptions{
+		Assignee:     "worker-1",
+		RouteTargets: []string{"worker"},
+		Env:          []string{"GC_SESSION_ID=mc-sess1"},
+		JSON:         true,
+	}, ops, &stdout, &stderr)
+
+	if code != 1 {
+		t.Fatalf("code = %d, want 1; stdout=%q stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if len(rec.releases) != 1 || rec.releases[0] != "work-1" {
+		t.Fatalf("releases = %v, want [work-1]: a straddling claim must self-release", rec.releases)
+	}
+	if len(sessSpy.beadIDs) != 0 {
+		t.Fatalf("session-claim seam writes = %v, want none: the straddle path stamps nothing, so it must clear nothing", sessSpy.beadIDs)
 	}
 }

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
@@ -4574,5 +4575,82 @@ func TestApplyBeadEventToStoresTriggersConvoyAutoclose(t *testing.T) {
 	}
 	if got.Status != "closed" {
 		t.Errorf("convoy status = %q after all children closed, want %q", got.Status, "closed")
+	}
+}
+
+// TestBeadEventStoresResolveRelocatedClassPrefixes pins that a bead.closed for a
+// bead in the binding reaches the binding. The assertion is the molecule root's
+// status rather than the resolved store: pinning the reap is what says the hook
+// still does its job on a migrated city.
+func TestBeadEventStoresResolveRelocatedClassPrefixes(t *testing.T) {
+	prev := beadCloseAutocloseDispatch
+	beadCloseAutocloseDispatch = func(fn func()) { fn() } // synchronous in tests
+	t.Cleanup(func() { beadCloseAutocloseDispatch = prev })
+
+	// Distinct prefixes are the point: they make the owning store resolvable by
+	// id, and keep a wrong-store read a miss rather than a collision.
+	binding := &beads.MemStore{IDPrefix: "gcg"}
+	work := beads.NewMemStore()
+
+	root, err := binding.Create(beads.Bead{Title: "Formula: mol-relocated", Type: "molecule"})
+	if err != nil {
+		t.Fatalf("Create molecule root in the binding: %v", err)
+	}
+	step, err := binding.Create(beads.Bead{
+		Title:    "Step 1: implement",
+		Type:     "step",
+		ParentID: root.ID,
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
+	})
+	if err != nil {
+		t.Fatalf("Create step in the binding: %v", err)
+	}
+	if err := binding.Close(step.ID); err != nil {
+		t.Fatalf("Close step: %v", err)
+	}
+
+	payload, err := json.Marshal(beads.Bead{ID: step.ID, Title: step.Title, Type: "step", Status: "closed"})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	cs := &controllerState{
+		cfg: &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Rigs:      []config.Rig{{Name: "alpha", Path: "/tmp/alpha", Prefix: "ra"}},
+		},
+		cityBeadStore: work,
+		beadStores:    map[string]beads.Store{"alpha": beads.NewMemStore()},
+		storageRoutes: splitRoutes(binding),
+		pokeCh:        make(chan struct{}, 1),
+	}
+
+	cs.applyBeadEventToStores(events.Event{
+		Type:    events.BeadClosed,
+		Actor:   "agent",
+		Subject: step.ID,
+		Payload: payload,
+	})
+
+	got, err := binding.Get(root.ID)
+	if err != nil {
+		t.Fatalf("Get molecule root: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Errorf("molecule root %s status = %q after its only step closed, want %q; the close event never resolved to the binding, so autoclose read the bead out of a work store that does not hold it and returned", root.ID, got.Status, "closed")
+	}
+}
+
+// TestBeadEventStoresIgnoreReservedPrefixesWithoutARelocation is the control:
+// on a city that relocates nothing, a reserved-prefix id must not be claimed.
+func TestBeadEventStoresIgnoreReservedPrefixesWithoutARelocation(t *testing.T) {
+	cs := &controllerState{
+		cfg:           &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		cityBeadStore: beads.NewMemStore(),
+		beadStores:    map[string]beads.Store{},
+		storageRoutes: nil, // no [storage] section
+	}
+	if store, known := cs.beadEventConfiguredStoreLocked("gcg-1"); known {
+		t.Errorf("a city that relocates nothing claimed to own %q (store=%v); the reserved-prefix arm must be gated on an actual relocation", "gcg-1", store)
 	}
 }

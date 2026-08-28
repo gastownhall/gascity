@@ -215,7 +215,7 @@ func TestGcReadyInProgressEnrichesBlockedBy(t *testing.T) {
 		t.Fatalf("adding the blocking dep: %v", err)
 	}
 
-	rows := readyRowsForAssignee(t, readyFederationLegs("mycity", work, nil, graph), "worker-1")
+	rows := readyRowsForAssignee(t, mustReadyLegs(t, "mycity", work, nil, graph), "worker-1")
 	if len(rows) != 1 || rows[0].ID != step.ID {
 		t.Fatalf("rows = %+v, want the one graph-resident in_progress step", rows)
 	}
@@ -249,7 +249,7 @@ func TestGcReadyInProgressServesUnblockedResumeRow(t *testing.T) {
 		t.Fatalf("closing the blocker: %v", err)
 	}
 
-	rows := readyRowsForAssignee(t, readyFederationLegs("mycity", work, nil, graph), "worker-1")
+	rows := readyRowsForAssignee(t, mustReadyLegs(t, "mycity", work, nil, graph), "worker-1")
 	if len(rows) != 1 {
 		t.Fatalf("rows = %+v, want the one in_progress step", rows)
 	}
@@ -278,7 +278,7 @@ func TestGcReadyNonInProgressArmsSkipEnrichment(t *testing.T) {
 		t.Fatalf("adding the blocking dep: %v", err)
 	}
 
-	legs := readyFederationLegs("mycity", work, nil, graph)
+	legs := mustReadyLegs(t, "mycity", work, nil, graph)
 	rows, err := readyBeadsForOpts(legs, readyOpts{status: "open"})
 	if err != nil {
 		t.Fatalf("readyBeadsForOpts: %v", err)

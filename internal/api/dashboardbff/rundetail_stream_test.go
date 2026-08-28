@@ -14,7 +14,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runproj"
-	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // sseFrame is one parsed SSE frame: its id (empty when the frame carried none),
@@ -184,12 +183,12 @@ func TestRunDetailStreamFirstFrame(t *testing.T) {
 		if frameOK {
 			t.Fatal("old path-bound detail stream emitted another frame instead of closing")
 		}
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("old path-bound detail stream stayed open after city rebind")
 	}
 	select {
 	case <-oldTailer.doneCh:
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("old path-bound tailer did not stop")
 	}
 	p.runTailers.mu.Lock()
