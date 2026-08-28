@@ -215,11 +215,11 @@ func resolveMoleculeRootViaBridge(workStore, graphStore beads.Store, assignees [
 		Limit:     10,
 	})
 	if err == nil {
-		if root := firstMoleculeRootFrom(store, results); root != nil {
+		if root := firstMoleculeRootFrom(graphStore, results); root != nil {
 			return root
 		}
 	}
-	return resolveMoleculeRootViaRoutedBridge(store, assignees)
+	return resolveMoleculeRootViaRoutedBridge(workStore, graphStore, assignees)
 }
 
 // resolveMoleculeRootViaRoutedBridge finds the molecule root reachable from a
@@ -236,9 +236,9 @@ func resolveMoleculeRootViaBridge(workStore, graphStore beads.Store, assignees [
 // later identity still gets a chance.
 //
 // Returns nil when no routed bridge bead is found for any identity.
-func resolveMoleculeRootViaRoutedBridge(store beads.Store, assignees []string) *beads.Bead {
+func resolveMoleculeRootViaRoutedBridge(workStore, graphStore beads.Store, assignees []string) *beads.Bead {
 	for _, identity := range assignees {
-		results, err := store.List(beads.ListQuery{
+		results, err := workStore.List(beads.ListQuery{
 			Status:   "open",
 			Metadata: map[string]string{beadmeta.RoutedToMetadataKey: identity},
 			TierMode: beads.TierBoth,
@@ -247,7 +247,7 @@ func resolveMoleculeRootViaRoutedBridge(store beads.Store, assignees []string) *
 		if err != nil {
 			continue
 		}
-		if root := firstMoleculeRootFrom(store, results); root != nil {
+		if root := firstMoleculeRootFrom(graphStore, results); root != nil {
 			return root
 		}
 	}
@@ -257,7 +257,7 @@ func resolveMoleculeRootViaRoutedBridge(store beads.Store, assignees []string) *
 // firstMoleculeRootFrom returns the molecule root reachable via molecule_id
 // from the first candidate bead that carries one. Returns nil when no
 // candidate carries a resolvable molecule_id.
-func firstMoleculeRootFrom(store beads.Store, candidates []beads.Bead) *beads.Bead {
+func firstMoleculeRootFrom(graphStore beads.Store, candidates []beads.Bead) *beads.Bead {
 	for i := range candidates {
 		rootID := strings.TrimSpace(candidates[i].Metadata[beadmeta.MoleculeIDMetadataKey])
 		if rootID == "" {
