@@ -198,6 +198,13 @@ func TestEvaluatePullRequestsPrefersConcreteCheckEvidence(t *testing.T) {
 			wantKind:   FailureKindBlocked,
 			wantAction: true,
 		},
+		{
+			name:       "unstable without checks remains actionable",
+			mergeState: "UNSTABLE",
+			wantState:  StateFailed,
+			wantKind:   FailureKindChecksFailed,
+			wantAction: true,
+		},
 	}
 
 	for _, tc := range tests {
