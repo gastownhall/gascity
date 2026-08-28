@@ -10,7 +10,7 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 657
+baseline_calls = 658
 baseline_files = 188
 reported_calls = 495
 reported_files = 135
@@ -51,7 +51,7 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 444
+baseline_calls = 445
 baseline_files = 126
 reported_calls = 380
 reported_files = 98
@@ -315,6 +315,17 @@ resources = ["subprocess"]
 owner_bead = "ga-8pkpor"
 invariant = "doctor custom-types test-owned-HOME dolt-isolation regression proof is a checked Medium owner"
 resource_owner = "the bd subprocess is confined to TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext, which proves bd routes to an embedded, test-owned dolt store rather than a machine-level shared server"
+migration_target = "P0.4b"
+expires = "2026-10-01"
+
+[[medium]]
+package_dir = "internal/doctor"
+package_name = "doctor"
+owner = "TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint"
+resources = ["subprocess"]
+owner_bead = "ga-80po0c.2.1"
+invariant = "doctor custom-types configured-store targeting regression proof is a checked Medium owner"
+resource_owner = "the bd subprocess is confined to TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint, which runs two disposable loopback Dolt servers and proves ambient endpoint variables cannot redirect detection or repair"
 migration_target = "P0.4b"
 expires = "2026-10-01"
 
