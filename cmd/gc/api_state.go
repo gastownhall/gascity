@@ -571,8 +571,9 @@ func (cs *controllerState) startBeadEventWatcher(ctx context.Context) {
 // the chunked, resumable form of this exact pass, with the identical
 // journal-keyed idempotency record, running off-tick and due for
 // backstopReasonStartup on its first poll of every boot. This one-shot form is
-// kept as the unbounded operator primitive: it is what a diagnostic path calls
-// when it wants the whole corpus converged now rather than in chunks.
+// kept as the unbounded operator primitive: it has no production caller today,
+// and is retained for tests and for a future diagnostic path that wants the
+// whole corpus converged now rather than in chunks.
 func (cs *controllerState) reconcileExecutionCompletions() {
 	ep, graphStores := cs.completionReconcileInputs(reconcilePlane)
 	if ep == nil {
