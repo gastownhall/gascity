@@ -867,6 +867,67 @@ test_bead_id_deploy_gate_branch_blocks_when_assignee_lookup_fails() {
     rm -rf "$repo" "$fbd"
 }
 
+# Regression (ga-1qepfl mechanism 2, found by gascity/reviewer 2026-08-18,
+# verified by the mayor): the assignee fallback took .[0] of whatever
+# `bd list --status=in_progress` returned, so a session holding an UNRELATED
+# in-progress bead (e.g. one correctly held open for its own merge-tracking)
+# had that bead's status/assignee/hold-labels checked against a completely
+# different deploy/*-gate push — and could block it, even though the
+# blocking bead was doing exactly what it was told to do (real repro: bead
+# ga-3fw26n, legitimately held for its own merge-tracking, blocked pushes for
+# an unrelated deploy-gate branch). Two or more in-progress beads for this
+# session is not a positive identification of which one (if any) this push
+# is for, so it must resolve the same as finding none: nothing to check,
+# allowed — not the fail-closed ambiguity path above, which is reserved for
+# a failed read, not a successful read with too many answers. `bd show` must
+# never be called on either candidate id — with no show-json configured, the
+# fake exits 1 on any show, which would surface as a BLOCKED line if
+# resolution ever fell back to guessing one of them (same technique as
+# deploy-gate-branch-allows-when-no-live-assignee above).
+test_bead_id_deploy_gate_branch_ignores_ambiguous_inprogress_beads() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "deploy/ga-bucf4p-gate")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    printf '[{"id":"ga-3fw26n"},{"id":"ga-other02"}]' > "$fbd/fake-bd-state/list-json"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]] && ! grep -qi "BLOCKED" <<<"$out"; then
+        record_pass "resolve/deploy-gate-branch-ignores-ambiguous-inprogress-beads (rc=0, two unrelated in-progress beads leave nothing to check)"
+    else
+        record_fail "resolve/deploy-gate-branch-ignores-ambiguous-inprogress-beads" "expected rc=0 and no BLOCKED text (an unrelated in-progress bead must not be checked against a different branch's push), got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+# Companion to the deploy-gate test above, on the GENERAL fallback path: the
+# single-match requirement lives in shared path 2, not in the deploy/*-gate
+# branch shape, so it applies to every branch whose name doesn't encode a
+# bead id (chore/…, docs/…) too. That is a deliberate relaxation — with 2+
+# concurrent in-progress beads this session's push is no longer checked
+# against ANY of them, including past an active hold:mayor. It is the right
+# tradeoff (picking .[0] of an unordered multi-match could just as easily
+# have checked a healthy bead and allowed a push whose real bead was held),
+# but it is a real behavior change and is pinned here so a future edit to
+# path 2 is a visible decision on both branch shapes. The show-json fixture
+# below is deliberately hold:mayor and must never be consulted: if
+# resolution ever falls back to guessing a candidate, this blocks and the
+# assertion catches it.
+test_bead_id_general_branch_ignores_ambiguous_inprogress_beads() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "chore/unrelated-cleanup")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    printf '[{"id":"ga-held01"},{"id":"ga-other9"}]' > "$fbd/fake-bd-state/list-json"
+    write_show_json "$fbd" "ga-held01" "in_progress" "agent-x" "tmpl-x" '["hold:mayor"]'
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]] && ! grep -qi "BLOCKED" <<<"$out"; then
+        record_pass "resolve/general-branch-ignores-ambiguous-inprogress-beads (rc=0, multi-match leaves nothing to check on a non-gate branch too)"
+    else
+        record_fail "resolve/general-branch-ignores-ambiguous-inprogress-beads" "expected rc=0 and no BLOCKED text (2+ in-progress beads is not a positive id of this push's bead on any branch shape), got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
 test_retry_recovers_bead_id_fallback_from_transient_failure() {
     local repo fbd out rc
     repo="$(new_repo_with_branch "chore/unrelated-cleanup")"
@@ -1084,6 +1145,8 @@ run_all() {
     test_bead_id_deploy_gate_branch_prefers_live_assignee
     test_bead_id_deploy_gate_branch_allows_when_no_live_assignee
     test_bead_id_deploy_gate_branch_blocks_when_assignee_lookup_fails
+    test_bead_id_deploy_gate_branch_ignores_ambiguous_inprogress_beads
+    test_bead_id_general_branch_ignores_ambiguous_inprogress_beads
     test_retry_recovers_bead_id_fallback_from_transient_failure
     test_allow_when_no_bead_id_resolvable
     test_fallback_cannot_detect_staleness_after_status_leaves_in_progress
