@@ -403,11 +403,12 @@ func releaseOrphanedPoolAssignments(
 		// probe below reads the same store; the missing-store report stays where
 		// it was, so a bead skipped by a liveness gate never reaches it.
 		ownerStore := assignedWorkOwnerStore(cfg, store, rigStores, assignedWorkStores, i, wb)
-		if assignee == "" {
+		switch {
+		case assignee == "":
 			if wb.Status != "in_progress" {
 				continue
 			}
-		} else if exitedDrainAckHolderOwnsWork(exitedHolders, legacyExitedHolders, assignee, workStoreRef, storeRefAware) {
+		case exitedDrainAckHolderOwnsWork(exitedHolders, legacyExitedHolders, assignee, workStoreRef, storeRefAware):
 			// The assignee is a fungible seat that acknowledged its own drain
 			// while still holding this claim. Its session bead is open and
 			// asleep, so all three liveness gates below would read it as a live
@@ -428,7 +429,7 @@ func releaseOrphanedPoolAssignments(
 			if assigneePreservesNamedSessionRoute(cfg, cityPath, template, assignee, workStoreRef, storeRefAware) {
 				continue
 			}
-		} else {
+		default:
 			if openSessionOwnsWork(legacyOpenIdentifiers, openIdentifiers, assignee, workStoreRef, storeRefAware) {
 				continue
 			}
