@@ -39,18 +39,20 @@ func mustCreateOpen(t *testing.T, store *beads.MemStore, b beads.Bead) beads.Bea
 // bead plainly, closes it, and the molecule leaks with every step untouched
 // (created_at == updated_at).
 func TestResolveActiveWispStep_PreClaimBridgeMisses(t *testing.T) {
-	store := beads.NewMemStore()
+	workStore := beads.NewMemStore()
+	graphStore := beads.NewMemStoreFrom(100, nil, nil)
 
 	// Molecule root: attached formulas deliberately leave it unrouted and
-	// unassigned (sling_core.go:585-594).
-	root := mustCreateOpen(t, store, beads.Bead{
+	// unassigned (sling_core.go:585-594). Keep graph data in a disjoint store
+	// so a same-store fixture cannot hide an inverted bridge lookup.
+	root := mustCreateOpen(t, graphStore, beads.Bead{
 		Title: "mol-deployer-gate",
 		Type:  "molecule",
 	})
 
 	// Step children: open, unassigned, no labels — invisible to every
 	// work_query by design.
-	step := mustCreateOpen(t, store, beads.Bead{
+	step := mustCreateOpen(t, graphStore, beads.Bead{
 		Title:       "Step 1: verify the gate",
 		Description: "Run the deployer gate checks",
 		Type:        "step",
@@ -59,21 +61,21 @@ func TestResolveActiveWispStep_PreClaimBridgeMisses(t *testing.T) {
 
 	// Source work bead in its REAL post-sling, pre-claim state: routed, carrying
 	// molecule_id, but still open and unassigned.
-	source := mustCreateOpen(t, store, beads.Bead{
+	source := mustCreateOpen(t, workStore, beads.Bead{
 		Title:       "needs-deploy: ship the reviewed branch",
 		Description: "Deploy the reviewed work",
 		Type:        "task",
 	})
-	if err := store.SetMetadata(source.ID, beadmeta.MoleculeIDMetadataKey, root.ID); err != nil {
+	if err := workStore.SetMetadata(source.ID, beadmeta.MoleculeIDMetadataKey, root.ID); err != nil {
 		t.Fatalf("SetMetadata(molecule_id): %v", err)
 	}
-	if err := store.SetMetadata(source.ID, beadmeta.RoutedToMetadataKey, "beads/deployer"); err != nil {
+	if err := workStore.SetMetadata(source.ID, beadmeta.RoutedToMetadataKey, "beads/deployer"); err != nil {
 		t.Fatalf("SetMetadata(gc.routed_to): %v", err)
 	}
 
 	// This is the wake: gc nudge --inject calls wispStepInjectionContent, which
 	// resolves against the agent's identities.
-	got, err := resolveActiveWispStep(store, []string{"beads/deployer", "deployer-gm-wisp-sl677d"})
+	got, err := resolveActiveWispStep(workStore, graphStore, []string{"beads/deployer", "deployer-gm-wisp-sl677d"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -99,13 +101,14 @@ func TestResolveActiveWispStep_PreClaimBridgeMisses(t *testing.T) {
 // mechanism: the bridge requires post-claim state to deliver a pre-claim
 // instruction.
 func TestResolveActiveWispStep_PostClaimBridgeResolves(t *testing.T) {
-	store := beads.NewMemStore()
+	workStore := beads.NewMemStore()
+	graphStore := beads.NewMemStoreFrom(100, nil, nil)
 
-	root := mustCreateOpen(t, store, beads.Bead{
+	root := mustCreateOpen(t, graphStore, beads.Bead{
 		Title: "mol-deployer-gate",
 		Type:  "molecule",
 	})
-	step := mustCreateOpen(t, store, beads.Bead{
+	step := mustCreateOpen(t, graphStore, beads.Bead{
 		Title:       "Step 1: verify the gate",
 		Description: "Run the deployer gate checks",
 		Type:        "step",
@@ -113,17 +116,17 @@ func TestResolveActiveWispStep_PostClaimBridgeResolves(t *testing.T) {
 	})
 
 	// Same bead, but claimed: in_progress + assigned.
-	source := mustCreateInProgress(t, store, beads.Bead{
+	source := mustCreateInProgress(t, workStore, beads.Bead{
 		Title:       "needs-deploy: ship the reviewed branch",
 		Description: "Deploy the reviewed work",
 		Type:        "task",
 		Assignee:    "deployer-gm-wisp-sl677d",
 	})
-	if err := store.SetMetadata(source.ID, beadmeta.MoleculeIDMetadataKey, root.ID); err != nil {
+	if err := workStore.SetMetadata(source.ID, beadmeta.MoleculeIDMetadataKey, root.ID); err != nil {
 		t.Fatalf("SetMetadata(molecule_id): %v", err)
 	}
 
-	got, err := resolveActiveWispStep(store, []string{"beads/deployer", "deployer-gm-wisp-sl677d"})
+	got, err := resolveActiveWispStep(workStore, graphStore, []string{"beads/deployer", "deployer-gm-wisp-sl677d"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
