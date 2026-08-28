@@ -117,6 +117,11 @@ type CityRuntime struct {
 	publication             supervisor.PublicationConfig
 	buildFn                 func(*config.City, runtime.Provider, beads.Store) DesiredStateResult
 	buildFnWithSessionBeads func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult
+	// fireRootCook materializes a ready fire-root's declared formula in-process.
+	// nil selects the real molecule-materialization path (cookFireRoot); tests
+	// inject a recorder to exercise the promotion sweep hermetically (mirrors
+	// buildFn). See fire_root_promotion.go.
+	fireRootCook fireRootCookFunc
 
 	dops                    drainOps
 	ct                      crashTracker
@@ -693,6 +698,20 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		return
 	}
 
+	// Auto-cook ready fire-roots (a bead that declares gc.fire_formula whose
+	// blocked-by preconditions have cleared) so a build-from-plan fire-root fires
+	// on its own the moment its gate closes, without a manual `gc sling`
+	// (sc-jrp84z). Judgment-free sibling of startup-route-recovery; same placement,
+	// ahead of the expensive reconcile so declared work is not stranded by drift.
+	startupFireRootPromotionStart := time.Now()
+	cr.safeTick(func() {
+		cr.promoteReadyFireRoots()
+	}, "startup-fire-root-promotion")
+	logPhaseElapsed("startup-fire-root-promotion", startupFireRootPromotionStart)
+	if ctx.Err() != nil {
+		return
+	}
+
 	// Session bead sync BEFORE reconciliation: ensures beads exist for
 	// the reconciler to read/write hashes. Uses ListByLabel (indexed,
 	// fast even before CachingStore is primed).
@@ -1258,6 +1277,17 @@ func (cr *CityRuntime) tick(
 		trace.RecordControllerOperation(TraceSiteControllerTickPhase, TraceReasonRetained, routeReport.outcome(),
 			"recover_unrouted_work_routes", time.Since(phaseStart), routeFields)
 	}
+	if ctx.Err() != nil {
+		return
+	}
+
+	// Auto-cook ready fire-roots on the same cheap dispatch phase: a fire-root
+	// (gc.fire_formula declared) whose blocked-by gate has just closed becomes
+	// bd ready and is cooked here, so the blocked→ready transition alone propels
+	// the build — no manual `gc sling`, no mail in the loop (sc-jrp84z).
+	phaseStart = time.Now()
+	cr.promoteReadyFireRoots()
+	recordPhase(TraceSiteControllerTickPhase, "promote_ready_fire_roots", phaseStart, nil)
 	if ctx.Err() != nil {
 		return
 	}

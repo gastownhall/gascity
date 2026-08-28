@@ -88,6 +88,7 @@ cmd/gc/convergence_tick.go	buildConvergenceScopes	b:graphClassBinding	1
 cmd/gc/dispatch_control_ready.go	controlReadyCacheSources	ast:returns-store-list	1
 cmd/gc/dispatch_control_ready.go	controlReadyCacheSources	c:beads.Store-literal	3
 cmd/gc/doctor_order_tracking_retention.go	Run	c:beads.Store-literal	1
+cmd/gc/fire_root_promotion.go	promoteReadyFireRoots	c:storeref.EachLeg	1
 cmd/gc/formula_cook_attach_class.go	attachGraftClassRefusal	b:graphClassBinding	1
 cmd/gc/order_dispatch.go	gateStoresFor	ast:returns-store-list	1
 cmd/gc/order_dispatch.go	gateStoresFor	c:beads.Store-literal	1
