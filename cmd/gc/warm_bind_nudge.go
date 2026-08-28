@@ -18,7 +18,7 @@ import (
 // which is precisely why that one re-nudge-stormed on every restart (test-5il). A
 // fresh binding writes a different trigger id, so the marker mismatches and the
 // nudge fires again: exactly once per binding.
-const warmBindNudgedForTriggerKey = "warm_bind_nudged_for_trigger"
+const warmBindNudgedForTriggerKey = beadmeta.NudgedForTriggerMetadataKey
 
 // warmBindNudgeIdleTimeout bounds how long the warm-bind claim nudge waits for
 // the slot to reach an idle input prompt before delivering, so it never injects
@@ -160,8 +160,8 @@ func deliverWarmBindClaimNudge(ctx context.Context, sp runtime.Provider, store b
 		return
 	}
 	// Delivered: stamp the marker so this binding never nudges again. Persisted on
-	// the session bead → restart-safe; mirrored in-memory so the rest of this tick
-	// reads the just-written value.
+	// the session bead → restart-safe. The passed-in bead value is updated below
+	// so a caller that keeps using it sees the marker without a re-read.
 	if err := sessionFrontDoor(store).SetMarker(session.ID, warmBindNudgedForTriggerKey, triggerID); err != nil {
 		log.Printf("warm-bind claim nudge: marking %s failed: %v", session.ID, err)
 		return
