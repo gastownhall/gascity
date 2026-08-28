@@ -132,6 +132,103 @@ func GCSweepSessionBeads(cityPath string, store beads.Store, rigStores map[strin
 	return closed
 }
 
+// exitedDrainAckHolderIdentities collects every assignment identity belonging to
+// a fungible seat that acknowledged its own drain while still holding assigned
+// work (drain_ack_stranded_at, written by finalizeDrainAckStoppedSession).
+//
+// Such a seat is not a live claimant even though its session bead is open: a
+// drain-ack is the agent declaring its own exit, and the controller then offers
+// the claim no path back to execution — compute_awake_set's scaled-agent loop
+// skips sessions holding assigned work when choosing wake targets while
+// countAssignedScaleSlots counts them as filled demand slots (so neither this
+// seat nor a replacement is woken), and reusablePoolSessionInfo refuses to
+// wake-reuse a one_shot identity that still holds assigned work. Without this,
+// the three liveness gates in releaseOrphanedPoolAssignments read the asleep
+// holder as alive and the step stays in_progress forever.
+//
+// The gate is SupportsGenericEphemeralSessions — the same fungibility test the
+// reopen lane already applies to the work bead's own template. A named, manual,
+// or singleton session is excluded: it legitimately returns to its own claim.
+//
+// The result is store-ref qualified exactly like makeOpenSessionStoreRefIndex,
+// because pool seat identities recur across rig stores (#3453): a stranded seat
+// must only ever disqualify the claims in the stores IT can reach, never a
+// same-named live seat's claim in another store. The legacy bare-identity set is
+// the pre-store-ref fallback, returned for the !storeRefAware callers.
+func exitedDrainAckHolderIdentities(cityPath string, cfg *config.City, leading beads.Store, openSessionInfos []session.Info, storeRefAware bool) (map[string]map[string]struct{}, map[string]struct{}) {
+	scoped := make(map[string]map[string]struct{})
+	legacy := make(map[string]struct{})
+	var claimRefs []string
+	if storeRefAware {
+		// A property of the CITY, so it is resolved once rather than per session.
+		claimRefs = assignedWorkClaimRefs(cityPath, cfg, leading)
+	}
+	for _, info := range openSessionInfos {
+		if info.Closed || strings.TrimSpace(info.DrainAckStrandedAt) == "" {
+			continue
+		}
+		// Belt and braces with the PreWakePatch clear: only an ASLEEP seat is
+		// stranded. The marker is written by the drain-ack finalize alongside
+		// CompleteDrainPatch (state=asleep), and PreWakePatch clears it on the
+		// next start — but a marker that somehow survived a restart, an
+		// out-of-band metadata write, or a start path that does not route
+		// through PreWakePatch must never make a live/creating seat look dead.
+		// Raw MetadataState is the read here (not the liveness-shaped
+		// Info.State) for the same reason the drained/known-state classifiers
+		// use it: it is the durable persisted value.
+		if strings.TrimSpace(info.MetadataState) != string(session.StateAsleep) {
+			continue
+		}
+		if info.ConfiguredNamedIdentity != "" || info.ConfiguredNamedSession || info.ManualSession {
+			continue
+		}
+		if !findAgentByTemplate(cfg, info.Template).SupportsGenericEphemeralSessions() {
+			continue
+		}
+		var storeRefs []string
+		if storeRefAware {
+			storeRefs = openSessionReachableStoreRefInfo(cityPath, cfg, claimRefs, info)
+		}
+		for _, id := range sessionBeadAssigneeIdentitiesInfo(info) {
+			if id = strings.TrimSpace(id); id == "" {
+				continue
+			}
+			legacy[id] = struct{}{}
+			for _, storeRef := range storeRefs {
+				addOpenSessionStoreRef(scoped, id, storeRef)
+			}
+		}
+	}
+	return scoped, legacy
+}
+
+// exitedDrainAckHolderOwnsWork reports whether the work bead in workStoreRef is
+// held by a stranded drain-ack seat. It is the fail-CLOSED inverse of
+// openSessionOwnsWork: there, an unresolved or cross-store reachability answer
+// means "assume the session owns the work" because the destructive direction is
+// releasing a live claim. Here the answer drives a release, so the same
+// ambiguity must mean "not stranded" and leave the claim alone. Only an exact
+// store-ref hit — this seat demonstrably reaches the store the claim lives in —
+// bypasses the liveness gate.
+func exitedDrainAckHolderOwnsWork(scoped map[string]map[string]struct{}, legacy map[string]struct{}, assignee, workStoreRef string, storeRefAware bool) bool {
+	if !storeRefAware {
+		_, ok := legacy[assignee]
+		return ok
+	}
+	refs := scoped[assignee]
+	if refs == nil {
+		return false
+	}
+	if _, ok := refs[unresolvedOpenSessionStoreRef]; ok {
+		return false
+	}
+	if _, ok := refs[crossStoreOpenSessionStoreRef]; ok {
+		return false
+	}
+	_, ok := refs[workStoreRef]
+	return ok
+}
+
 // releaseOrphanedPoolAssignmentsWhenSnapshotsComplete skips orphan release
 // unless both the assigned-work and open-session snapshots are complete.
 func releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
@@ -206,6 +303,7 @@ func releaseOrphanedPoolAssignments(
 			legacyOpenIdentifiers[id] = struct{}{}
 		}
 	}
+	exitedHolders, legacyExitedHolders := exitedDrainAckHolderIdentities(cityPath, cfg, store, openSessionInfos, storeRefAware)
 
 	var released []releasedPoolAssignment
 	for i, wb := range assignedWorkBeads {
@@ -228,15 +326,36 @@ func releaseOrphanedPoolAssignments(
 		// probe below reads the same store; the missing-store report stays where
 		// it was, so a bead skipped by a liveness gate never reaches it.
 		ownerStore := assignedWorkOwnerStore(cfg, store, rigStores, assignedWorkStores, i, wb)
+		workStoreRef := ""
+		if storeRefAware {
+			workStoreRef = assignedWorkStoreRefs[i]
+		}
 		if assignee == "" {
 			if wb.Status != "in_progress" {
 				continue
 			}
-		} else {
-			workStoreRef := ""
-			if storeRefAware {
-				workStoreRef = assignedWorkStoreRefs[i]
+		} else if exitedDrainAckHolderOwnsWork(exitedHolders, legacyExitedHolders, assignee, workStoreRef, storeRefAware) {
+			// The assignee is a fungible seat that acknowledged its own drain
+			// while still holding this claim. Its session bead is open and
+			// asleep, so all three liveness gates below would read it as a live
+			// claimant — but nothing will ever run this claim again: the awake
+			// set skips assigned-work holders when choosing wake targets (and
+			// counts them as filled demand slots, suppressing a replacement),
+			// and reusablePoolSessionInfo refuses to wake-reuse a one_shot
+			// identity that still holds assigned work. Fall through to the
+			// release below, which still re-validates the claim
+			// (liveWorkAssignmentStillReleasable + the detached probe) and emits
+			// bead.dead_assignee_reopened.
+			//
+			// Only the seat's OWN liveness gates are bypassed. The named-session
+			// route guard still runs: the exclusions above filter the session
+			// carrying the marker, not the assignee string, and a named or
+			// graph-run route that happens to collide on that string must keep
+			// its claim.
+			if assigneePreservesNamedSessionRoute(cfg, cityPath, template, assignee, workStoreRef, storeRefAware) {
+				continue
 			}
+		} else {
 			if openSessionOwnsWork(legacyOpenIdentifiers, openIdentifiers, assignee, workStoreRef, storeRefAware) {
 				continue
 			}
