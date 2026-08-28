@@ -646,6 +646,15 @@ func (idx *CompletedFactIndex) warm(recorder events.Provider) bool {
 	if err != nil {
 		return false
 	}
+	idx.mergeFromJournal(existing, rebuild, fullLoad)
+	return true
+}
+
+// mergeFromJournal folds a journal read into the fact set under the index lock.
+// A rebuild re-floors the set to exactly what the read returned; otherwise the
+// read is a tail merge that extends the set from the high-water. fullLoad (a
+// cold first read or a rebuild) redefines the growth-cap baseline.
+func (idx *CompletedFactIndex) mergeFromJournal(existing []events.Event, rebuild, fullLoad bool) {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 	switch {
@@ -666,11 +675,7 @@ func (idx *CompletedFactIndex) warm(recorder events.Provider) bool {
 		// carrying it as a converged witness forever. A confirmed key is kept: it
 		// sits below the high-water the tail read resumes from and cannot be
 		// re-derived, which is the ga-ftgyl read this index exists to delete.
-		for key, confirmed := range idx.facts {
-			if !confirmed {
-				delete(idx.facts, key)
-			}
-		}
+		idx.dropUnconfirmedLocked()
 	}
 	maxSeq := idx.maxSeq
 	for _, event := range existing {
@@ -689,7 +694,16 @@ func (idx *CompletedFactIndex) warm(recorder events.Provider) bool {
 		idx.baseline = len(idx.facts)
 	}
 	idx.loaded = true
-	return true
+}
+
+// dropUnconfirmedLocked removes every key no journal read has confirmed. The
+// caller holds idx.mu.
+func (idx *CompletedFactIndex) dropUnconfirmedLocked() {
+	for key, confirmed := range idx.facts {
+		if !confirmed {
+			delete(idx.facts, key)
+		}
+	}
 }
 
 // lookup reports whether this exact fact is already recorded (present) and, if
@@ -804,28 +818,7 @@ func (b *CompletionBackstop) Pass(recorder events.Provider, graphStores []beads.
 		result.SweepComplete = true
 		return result
 	}
-	storeSignature := storeFanSignature(graphStores)
-	if b.storeIndex == 0 && b.afterRootID == "" && !b.storeRootsLoaded {
-		// A new sweep re-derives the record. Nothing feeds this index between
-		// sweeps, so a warm one would only know the facts it emitted itself and
-		// would re-emit everything the delta lane or the close path recorded.
-		b.index.Invalidate()
-		b.sweepVisitsStamped = b.VisitStamped
-		b.sweepStoreSignature = storeSignature
-	}
-	if b.sweepStoreSignature != storeSignature {
-		// The store fan changed under a sweep in progress — a store added,
-		// removed, replaced, or reordered, even at unchanged length. The cursor's
-		// store index no longer names the store its held roots came from. Restart
-		// the sweep against the current fan.
-		b.storeIndex = 0
-		b.afterRootID = ""
-		b.storeRoots = nil
-		b.storeRootsLoaded = false
-		b.skippedConverged = 0
-		b.sweepVisitsStamped = b.VisitStamped
-		b.sweepStoreSignature = storeSignature
-	}
+	b.prepareSweep(storeFanSignature(graphStores))
 	if !b.index.warm(recorder) {
 		result.WarmFailed = true
 		return result
@@ -839,51 +832,18 @@ func (b *CompletionBackstop) Pass(recorder events.Provider, graphStores []beads.
 			b.advanceStore()
 			continue
 		}
-		if !b.storeRootsLoaded {
-			roots, err := graphStore.ListByMetadata(
-				map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow},
-				0,
-				beads.IncludeClosed,
-				beads.WithBothTiers,
-			)
-			if err != nil {
-				// A store that cannot be listed does not stall the sweep; the next
-				// sweep retries it. The caller is told, so a lane converging nothing
-				// cannot look like a lane with nothing to converge.
-				result.ListErrors = append(result.ListErrors, fmt.Errorf("listing workflow roots in graph store %d: %w", b.storeIndex, err))
-				b.advanceStore()
-				continue
-			}
-			// Converged roots leave the traversal here: the stamp rides the
-			// listing already in hand, so skipping one costs a map lookup where
-			// visiting it costs a per-root step listing (ga-wevcl).
-			unstamped := roots[:0]
-			skipped := 0
-			for _, root := range roots {
-				// Skip only roots that are STILL converged: closed and stamped. A
-				// stamped root that has REOPENED (root.Status != closed) is no longer
-				// converged -- it can emit again -- so it stays in the traversal to be
-				// revisited and to have its stale stamp cleared below, exactly like any
-				// other open root. Skipping a reopened-but-stamped root would leave the
-				// stamp uncleared forever (the clear branch only runs for visited
-				// roots), permanently voiding the backstop's recovery guarantee for it.
-				if !b.sweepVisitsStamped &&
-					strings.TrimSpace(root.Metadata[beadmeta.CompletionFactsConvergedMetadataKey]) != "" &&
-					strings.EqualFold(strings.TrimSpace(root.Status), "closed") {
-					skipped++
-					continue
-				}
-				unstamped = append(unstamped, root)
-			}
-			sort.Slice(unstamped, func(i, j int) bool { return unstamped[i].ID < unstamped[j].ID })
-			b.storeRoots = unstamped
-			b.storeRootsLoaded = true
-			b.skippedConverged = skipped
+		if err := b.ensureStoreRoots(graphStore); err != nil {
+			// A store that cannot be listed does not stall the sweep; the next
+			// sweep retries it. The caller is told, so a lane converging nothing
+			// cannot look like a lane with nothing to converge.
+			result.ListErrors = append(result.ListErrors, err)
+			b.advanceStore()
+			continue
 		}
-		if b.skippedConverged > 0 {
-			result.RootsSkippedConverged += b.skippedConverged
-			b.skippedConverged = 0
-		}
+		// Report the converged roots the load filtered out once, when the store's
+		// roots are first held; skippedConverged is 0 on the store's later chunks.
+		result.RootsSkippedConverged += b.skippedConverged
+		b.skippedConverged = 0
 		// Resume strictly after the last root this cursor visited, over the
 		// list held for this sweep.
 		remaining := b.storeRoots
@@ -912,9 +872,85 @@ func (b *CompletionBackstop) Pass(recorder events.Provider, graphStores []beads.
 	return result
 }
 
-// reconcileRoots projects the closed steps of the supplied roots and records the
-// completion facts the journal is missing. The index is updated as it goes so
-// one pass cannot emit the same fact twice across stores.
+// prepareSweep readies the sweep for this Pass. At a fresh sweep start it
+// re-derives the completion record — nothing feeds this index between sweeps, so
+// a warm one would only know the facts it emitted itself and would re-emit
+// everything the delta lane or the close path recorded — and latches the sweep's
+// VisitStamped choice and store-fan signature. Mid-sweep, a changed store fan (a
+// store added, removed, replaced, or reordered, even at unchanged length) means
+// the cursor's store index no longer names the store its held roots came from, so
+// the sweep restarts against the current fan.
+func (b *CompletionBackstop) prepareSweep(storeSignature string) {
+	if b.storeIndex == 0 && b.afterRootID == "" && !b.storeRootsLoaded {
+		b.index.Invalidate()
+		b.sweepVisitsStamped = b.VisitStamped
+		b.sweepStoreSignature = storeSignature
+		return
+	}
+	if b.sweepStoreSignature == storeSignature {
+		return
+	}
+	b.storeIndex = 0
+	b.afterRootID = ""
+	b.storeRoots = nil
+	b.storeRootsLoaded = false
+	b.skippedConverged = 0
+	b.sweepVisitsStamped = b.VisitStamped
+	b.sweepStoreSignature = storeSignature
+}
+
+// ensureStoreRoots lists graphStore's graph.v2 workflow roots and holds the ones
+// still owing a completion pass, sorted by ID, for the rest of the sweep. It is a
+// no-op once those roots are held, so the store is listed once per sweep and its
+// later chunks reuse the held list (ga-wevcl). The count of converged roots it
+// filtered out is recorded on the cursor so the caller can report it.
+func (b *CompletionBackstop) ensureStoreRoots(graphStore beads.GraphStore) error {
+	if b.storeRootsLoaded {
+		return nil
+	}
+	roots, err := graphStore.ListByMetadata(
+		map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow},
+		0,
+		beads.IncludeClosed,
+		beads.WithBothTiers,
+	)
+	if err != nil {
+		return fmt.Errorf("listing workflow roots in graph store %d: %w", b.storeIndex, err)
+	}
+	// Converged roots leave the traversal here: the stamp rides the listing
+	// already in hand, so skipping one costs a map lookup where visiting it costs
+	// a per-root step listing (ga-wevcl).
+	unstamped, skipped := partitionUnstampedRoots(roots, b.sweepVisitsStamped)
+	sort.Slice(unstamped, func(i, j int) bool { return unstamped[i].ID < unstamped[j].ID })
+	b.storeRoots = unstamped
+	b.storeRootsLoaded = true
+	b.skippedConverged = skipped
+	return nil
+}
+
+// partitionUnstampedRoots splits roots into the ones a sweep must still visit
+// (returned, filtered in place) and a count of the converged ones it may skip. A
+// root is skipped only when it is STILL converged: closed AND stamped, and only
+// when this is not a visitStamped (per-boot full re-examination) sweep. A stamped
+// root that has REOPENED (Status != closed) is no longer converged — it can emit
+// again — so it stays in the traversal to be revisited and to have its stale
+// stamp cleared, exactly like any other open root. Skipping a reopened-but-stamped
+// root would leave the stamp uncleared forever (the clear branch only runs for
+// visited roots), permanently voiding the backstop's recovery guarantee for it.
+func partitionUnstampedRoots(roots []beads.Bead, visitStamped bool) (unstamped []beads.Bead, skipped int) {
+	unstamped = roots[:0]
+	for _, root := range roots {
+		if !visitStamped &&
+			strings.TrimSpace(root.Metadata[beadmeta.CompletionFactsConvergedMetadataKey]) != "" &&
+			strings.EqualFold(strings.TrimSpace(root.Status), "closed") {
+			skipped++
+			continue
+		}
+		unstamped = append(unstamped, root)
+	}
+	return unstamped, skipped
+}
+
 // advanceStore moves the sweep cursor to the next store and drops the held
 // root list so the next store lists afresh.
 func (b *CompletionBackstop) advanceStore() {
@@ -931,10 +967,13 @@ func (b *CompletionBackstop) advanceStore() {
 // total count is unchanged — must restart the sweep. Pointer identity of each
 // embedded store, taken in slice order, captures exactly that: two fans with the
 // same stores in the same order share a signature, and any reorder or
-// replacement diverges. A nil store and a store whose concrete value is not a
-// pointer (no stable address to compare) get fixed markers, so such a fan is
-// compared by shape and position only and is never silently equated with a
-// materially different one.
+// replacement diverges. This identity guarantee holds for pointer-backed stores,
+// which every production Store is (*BdStore, *CachingStore, *MemStore). A nil
+// store and a store whose concrete value is not a pointer (no stable address to
+// compare) get fixed markers ("nil"/"np"), so such entries are compared by shape
+// and position only: two DISTINCT non-pointer stores at the same index share the
+// "np" marker and would NOT diverge — acceptable only because no production fan
+// holds one.
 func storeFanSignature(graphStores []beads.GraphStore) string {
 	var b strings.Builder
 	for i, graphStore := range graphStores {
@@ -955,6 +994,10 @@ func storeFanSignature(graphStores []beads.GraphStore) string {
 	return b.String()
 }
 
+// reconcileRoots projects the closed steps of the supplied roots and records the
+// completion facts the journal is missing. The index is updated as it goes so
+// one pass cannot emit the same fact twice across stores. Each root's converged
+// stamp is written or cleared from the signals its step pass gathered.
 func reconcileRoots(recorder events.Recorder, graphStore beads.GraphStore, roots []beads.Bead, completed *CompletedFactIndex, actor string) int {
 	emitted := 0
 	for _, root := range roots {
@@ -966,75 +1009,88 @@ func reconcileRoots(recorder events.Recorder, graphStore beads.GraphStore, roots
 		if err != nil {
 			continue
 		}
-		everyStepClosed := true
-		emittedForRoot := 0
-		unconfirmedForRoot := 0
-		for _, row := range rows {
-			// The row the steps List already returned decides the status.
-			// Re-Getting it would only narrow a window the journal-keyed
-			// idempotency record already covers: a step that closes between
-			// the List and the write is repaired by the next pass.
-			step := row.bead
-			if !strings.EqualFold(strings.TrimSpace(step.Status), "closed") {
-				everyStepClosed = false
-				continue
-			}
-			event, ok := LifecycleEvent(events.ExecutionStepCompleted, root, step, actor)
-			if !ok {
-				continue
-			}
-			key := completedFactKeyFor(event)
-			if present, confirmed := completed.lookup(key); present {
-				// Already recorded: dedup on presence. But an UNconfirmed key
-				// (this process's own best-effort add that no journal read has
-				// returned) is not a convergence witness — it may be a dropped
-				// Record that never reached the journal. Count it so the stamp
-				// below withholds until a journal read confirms it.
-				if !confirmed {
-					unconfirmedForRoot++
-				}
-				continue
-			}
-			recorder.Record(event)
-			completed.add(key)
-			emitted++
-			emittedForRoot++
-		}
-		stamped := strings.TrimSpace(root.Metadata[beadmeta.CompletionFactsConvergedMetadataKey]) != ""
-		switch {
-		case emittedForRoot == 0 && unconfirmedForRoot == 0 && everyStepClosed && len(rows) > 0 &&
-			strings.EqualFold(strings.TrimSpace(root.Status), "closed") && !stamped:
-			// VERIFIED convergence only: this pass emitted NOTHING for the root
-			// AND every surviving witness was JOURNAL-CONFIRMED (read back by the
-			// warm index), not a self-added phantom. A key this process merely
-			// add()ed for a best-effort Record that may have been silently
-			// dropped is unconfirmed and blocks the stamp (unconfirmedForRoot >
-			// 0) until a later journal read confirms the fact really landed —
-			// otherwise a dropped append would stamp a PERMANENT fact loss (the
-			// review's critical). A pass that emitted stamps nothing either: its
-			// Record calls are fire-and-forget, so the root converges a sweep
-			// later, forever after. len(rows) > 0 keeps a transiently empty step
-			// listing (a store wedge answering empty-with-nil) from vacuously
-			// proving convergence. Best-effort: a failed stamp re-proves next
-			// sweep.
-			_ = graphStore.SetMetadata(root.ID, beadmeta.CompletionFactsConvergedMetadataKey, time.Now().UTC().Format(time.RFC3339))
-		case stamped && (emittedForRoot > 0 || unconfirmedForRoot > 0 || !everyStepClosed || len(rows) == 0 ||
-			!strings.EqualFold(strings.TrimSpace(root.Status), "closed")):
-			// A stamped root this pass could still emit for — one with an
-			// unconfirmed witness, open steps, or an invisible listing — carries
-			// a STALE stamp (a hand-reopened step, a vacuous stamp from a past
-			// wedge, or a false stamp a since-fixed phantom left behind), OR a
-			// root that has REOPENED (root.Status != closed) while its step rows
-			// stayed closed (a converged root re-driven/retried). The stamp only
-			// ever applies to a closed root, so a stamped non-closed root is
-			// always stale. Clear it so the sweeps resume visiting: the cadence
-			// filter above already keeps a reopened root in the traversal, and a
-			// startup sweep re-examines every stamped root, so both paths reach
-			// here and heal it.
-			_ = graphStore.SetMetadata(root.ID, beadmeta.CompletionFactsConvergedMetadataKey, "")
-		}
+		emittedForRoot, unconfirmedForRoot, everyStepClosed := reconcileRootSteps(recorder, root, rows, completed, actor)
+		emitted += emittedForRoot
+		applyConvergenceStamp(graphStore, root, len(rows), emittedForRoot, unconfirmedForRoot, everyStepClosed)
 	}
 	return emitted
+}
+
+// reconcileRootSteps records the completion facts the journal is missing for one
+// root's closed steps, updating the index as it goes. It reports how many facts
+// this pass emitted, how many present-but-UNCONFIRMED witnesses it saw (a
+// best-effort add this process made that no journal read has returned — possibly
+// a dropped Record), and whether every step row was closed. applyConvergenceStamp
+// turns those three signals into the root's converged stamp.
+func reconcileRootSteps(recorder events.Recorder, root beads.Bead, rows []stepRow, completed *CompletedFactIndex, actor string) (emitted, unconfirmed int, everyStepClosed bool) {
+	everyStepClosed = true
+	for _, row := range rows {
+		// The row the steps List already returned decides the status.
+		// Re-Getting it would only narrow a window the journal-keyed
+		// idempotency record already covers: a step that closes between
+		// the List and the write is repaired by the next pass.
+		step := row.bead
+		if !strings.EqualFold(strings.TrimSpace(step.Status), "closed") {
+			everyStepClosed = false
+			continue
+		}
+		event, ok := LifecycleEvent(events.ExecutionStepCompleted, root, step, actor)
+		if !ok {
+			continue
+		}
+		key := completedFactKeyFor(event)
+		if present, confirmed := completed.lookup(key); present {
+			// Already recorded: dedup on presence. But an UNconfirmed key
+			// (this process's own best-effort add that no journal read has
+			// returned) is not a convergence witness — it may be a dropped
+			// Record that never reached the journal. Count it so the stamp
+			// withholds until a journal read confirms it.
+			if !confirmed {
+				unconfirmed++
+			}
+			continue
+		}
+		recorder.Record(event)
+		completed.add(key)
+		emitted++
+	}
+	return emitted, unconfirmed, everyStepClosed
+}
+
+// applyConvergenceStamp writes or clears root's converged stamp from the signals
+// reconcileRootSteps gathered. Both writes are best-effort: a failed stamp
+// re-proves and a failed clear re-heals on the next sweep.
+func applyConvergenceStamp(graphStore beads.GraphStore, root beads.Bead, rowCount, emittedForRoot, unconfirmedForRoot int, everyStepClosed bool) {
+	stamped := strings.TrimSpace(root.Metadata[beadmeta.CompletionFactsConvergedMetadataKey]) != ""
+	// VERIFIED convergence only: this pass emitted NOTHING for the root AND every
+	// surviving witness was JOURNAL-CONFIRMED (read back by the warm index), not a
+	// self-added phantom. A key this process merely add()ed for a best-effort
+	// Record that may have been silently dropped is unconfirmed and blocks the
+	// stamp (unconfirmedForRoot > 0) until a later journal read confirms the fact
+	// really landed — otherwise a dropped append would stamp a PERMANENT fact loss
+	// (the review's critical). A pass that emitted stamps nothing either: its
+	// Record calls are fire-and-forget, so the root converges a sweep later,
+	// forever after. rowCount > 0 keeps a transiently empty step listing (a store
+	// wedge answering empty-with-nil) from vacuously proving convergence. The stamp
+	// only ever applies to a closed root.
+	converged := emittedForRoot == 0 && unconfirmedForRoot == 0 && everyStepClosed && rowCount > 0 &&
+		strings.EqualFold(strings.TrimSpace(root.Status), "closed")
+	switch {
+	case converged && !stamped:
+		_ = graphStore.SetMetadata(root.ID, beadmeta.CompletionFactsConvergedMetadataKey, time.Now().UTC().Format(time.RFC3339))
+	case stamped && !converged:
+		// A stamped root this pass could still emit for — one with an unconfirmed
+		// witness, open steps, or an invisible listing — carries a STALE stamp (a
+		// hand-reopened step, a vacuous stamp from a past wedge, or a false stamp a
+		// since-fixed phantom left behind), OR a root that has REOPENED
+		// (root.Status != closed) while its step rows stayed closed (a converged
+		// root re-driven/retried). The stamp only ever applies to a closed root, so
+		// a stamped non-closed root is always stale. Clear it so the sweeps resume
+		// visiting: the cadence filter keeps a reopened root in the traversal, and a
+		// startup sweep re-examines every stamped root, so both paths reach here and
+		// heal it.
+		_ = graphStore.SetMetadata(root.ID, beadmeta.CompletionFactsConvergedMetadataKey, "")
+	}
 }
 
 // completedFacts returns the matching completion journal, including a
