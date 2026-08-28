@@ -77,6 +77,7 @@ type AwakeSessionBead struct {
 	RestartRequested          bool      // restart_requested metadata is still active
 	ContinuationResetPending  bool      // continuation_reset_pending metadata is set
 	CurrentlyProcessingBeadID string    // work bead the session is currently processing
+	PostCreateProtected       bool      // fresh successful pool create; preferred for scaled slots during grace
 }
 
 // AwakeWorkBead represents a work bead with an assignee.
@@ -227,7 +228,7 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		if !ok || agent.Suspended {
 			continue
 		}
-		active := collectActiveBeads(input.SessionBeads, template)
+		active := collectActiveBeads(input.SessionBeads, template, input.Now)
 		filled := countAssignedScaleSlots(input.SessionBeads, input.WorkBeads, input.NamedSessions, template)
 		for _, bead := range active {
 			if filled >= count {
@@ -271,7 +272,7 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 			continue // named sessions are handled in the named-session pass
 		}
 		// collectActiveBeads already excludes DependencyOnly and Drained
-		if active := collectActiveBeads(input.SessionBeads, template); len(active) > 0 {
+		if active := collectActiveBeads(input.SessionBeads, template, input.Now); len(active) > 0 {
 			desired[active[0].SessionName] = "work-query"
 			continue
 		}
@@ -680,7 +681,7 @@ func isNamedSessionTemplate(named []AwakeNamedSession, template string) bool {
 	return false
 }
 
-func collectActiveBeads(beads []AwakeSessionBead, template string) []AwakeSessionBead {
+func collectActiveBeads(beads []AwakeSessionBead, template string, now time.Time) []AwakeSessionBead {
 	var result []AwakeSessionBead
 	for _, b := range beads {
 		// Exclude both NamedIdentity-tagged beads AND ConfiguredNamedSession
@@ -692,10 +693,23 @@ func collectActiveBeads(beads []AwakeSessionBead, template string) []AwakeSessio
 		// session getting woken by generic template scale_check demand.
 		if b.Template == template && b.State == "active" &&
 			b.NamedIdentity == "" && !b.ConfiguredNamedSession &&
-			!b.ManualSession && !b.Drained && !b.DependencyOnly {
+			!b.ManualSession && !b.Drained && !b.DependencyOnly &&
+			!minActiveHardBlocked(b, now) {
 			result = append(result, b)
 		}
 	}
+	sort.SliceStable(result, func(i, j int) bool {
+		if result[i].PostCreateProtected != result[j].PostCreateProtected {
+			return result[i].PostCreateProtected
+		}
+		if !result[i].PostCreateProtected {
+			return false
+		}
+		if !result[i].CreatedAt.Equal(result[j].CreatedAt) {
+			return result[i].CreatedAt.Before(result[j].CreatedAt)
+		}
+		return result[i].ID < result[j].ID
+	})
 	return result
 }
 
