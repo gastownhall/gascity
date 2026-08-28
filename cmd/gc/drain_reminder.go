@@ -45,14 +45,16 @@ package main
 // signal HOLDS rather than proceeds — the #312 rule that "we cannot tell" is
 // never "idle".
 //
-// Known bounded exposure: the k8s provider's GetLastActivity shells
+// Known bounded exposure: the k8s and ssh providers' GetLastActivity shell
 // `tmux display-message -p '#{session_activity}'` inside the pod, and
 // session-level activity does not advance on pane I/O for a detached session
 // (see Tmux.rawSessionActivity, which queries per-window activity for exactly
 // this reason). A busy k8s agent therefore reads as idle-since-attach and can
-// be nudged mid-turn. Every other provider is fail-closed. The exposure is
-// capped at drainReminderMaxAttempts informational nudges per drain and is
-// tracked as its own fix rather than papered over here.
+// be nudged mid-turn. The ssh provider has the same exposure for the same
+// reason (internal/runtime/ssh/provider.go reads #{session_activity} and
+// reports CanReportActivity: true). Every other provider is fail-closed. The
+// exposure is capped at drainReminderMaxAttempts informational nudges per drain
+// and is tracked as its own fix rather than papered over here.
 
 import (
 	"fmt"
@@ -110,7 +112,6 @@ const (
 	drainReminderHoldBusy       = "busy"
 	drainReminderHoldAttached   = "attached"
 	drainReminderHoldUnreadable = "activity_unreadable"
-	drainReminderHoldAckUnknown = "ack_unreadable"
 	drainReminderHoldExhausted  = "attempts_exhausted"
 )
 

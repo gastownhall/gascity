@@ -170,8 +170,8 @@ func (e *drainReminderEnv) beadSnapshot() map[string]string {
 	if err != nil {
 		e.t.Fatalf("read session bead: %v", err)
 	}
-	snapshot := make(map[string]string, 4)
-	for _, key := range []string{drainReminderCountKey, drainReminderAtKey, drainReminderDrainKey, drainReminderHoldKey} {
+	snapshot := make(map[string]string, 5)
+	for _, key := range []string{drainReminderCountKey, drainReminderFailedKey, drainReminderAtKey, drainReminderDrainKey, drainReminderHoldKey} {
 		snapshot[key] = got.Metadata[key]
 	}
 	return snapshot
