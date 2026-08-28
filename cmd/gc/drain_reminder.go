@@ -158,114 +158,34 @@ func maybeRemindDrainingSession(
 		stdout = io.Discard
 	}
 	name := strings.TrimSpace(info.SessionNameMetadata)
-	if name == "" || strings.TrimSpace(info.ID) == "" {
-		return drainReminderSkipped
-	}
-	// Only the wedge class. A row that is not durably stop-pending is either
-	// converging normally or belongs to a lane with its own convergence.
-	if !isDrainAckStopPendingInfo(info) {
-		return drainReminderSkipped
-	}
-	// Pool seats only. A named row's acknowledgement lane refuses it
-	// (named_row, policy_unsupported) and converges it through legacy timeout
-	// instead, so a reminder here would talk an agent into minting exactly the
-	// agent provenance that routes its row into a refusal class — making a
-	// named row's outcome WORSE than the behavior it has today.
-	if !isPoolManagedSessionInfo(info) {
+	if !drainReminderEligible(info, name) {
 		return drainReminderSkipped
 	}
 
-	// One store read pays for both the pacing state and the drain identity.
-	bead, err := store.Get(info.ID)
-	if err != nil {
+	// One store read pays for both the pacing state and the drain identity, and
+	// the free cadence wait — the overwhelmingly common answer — returns here
+	// before any provider round-trip.
+	due, ok := loadDrainReminderDue(store, info, clk)
+	if !ok {
 		return drainReminderSkipped
-	}
-	drainID := drainReminderIdentity(bead)
-	if drainID == "" {
-		return drainReminderSkipped // no drain to scope a budget to
-	}
-	attempts, failed, last := drainReminderState(bead, drainID)
-
-	now := clk.Now()
-	exhausted := attempts >= drainReminderMaxAttempts
-	if !exhausted && attempts > 0 && now.Sub(last) < drainReminderInterval {
-		return drainReminderSkipped // waiting out the cadence — free, and the common case
 	}
 
 	// From here something will be written, so the acknowledgement pin runs
-	// first. A landed agent ack is the outcome this whole pass exists to
-	// produce; a reminder that clobbers one — by bumping a counter, by leaving a
-	// breadcrumb over it — converts a success into the refusal that wedges the
-	// row. An UNREADABLE source holds rather than proceeds: this guard stands in
-	// front of writes and a destructive-adjacent lane, so it fails closed.
-	source, sourceErr := sp.GetMeta(name, reconcilerDrainAckSourceKey)
-	if sourceErr != nil {
-		return drainReminderHeld // no breadcrumb: writing one is itself a write
-	}
-	if strings.TrimSpace(source) == drainAckSourceAgentValue {
-		return drainReminderSkipped
+	// first: a reminder that clobbers a landed agent ack converts the success
+	// this pass exists to produce into the refusal that wedges the row.
+	if outcome, proceed := drainReminderAckPin(sp, name); !proceed {
+		return outcome
 	}
 
-	if exhausted {
-		// Budget spent. Say so once — the transition is the observable fact, and
-		// the caller decides whether anything escalates from here.
-		if noteDrainReminderHold(store, info, drainReminderHoldExhausted) {
-			fmt.Fprintf(stdout, //nolint:errcheck // best-effort
-				"%s: drain reminders exhausted for %s after %s (still unacknowledged)\n",
-				drainReminderLabel, name, drainReminderSpendPhrase(attempts, failed))
-		}
-		return drainReminderExhausted
+	if due.exhausted {
+		return announceDrainReminderExhausted(store, info, name, due, stdout)
 	}
 
-	if !sp.IsRunning(name) {
-		return drainReminderSkipped // the stop took after all; the finalizer owns it
-	}
-	// A human at the pane is already handling this row; do not type into their
-	// session.
-	if sp.IsAttached(name) {
-		noteDrainReminderHold(store, info, drainReminderHoldAttached)
-		return drainReminderHeld
-	}
-	// Quiet check. An agent in the middle of a turn is answering its own drain;
-	// an unreadable signal is not evidence that it is not.
-	activity, activityErr := sp.GetLastActivity(name)
-	if activityErr != nil || activity.IsZero() {
-		noteDrainReminderHold(store, info, drainReminderHoldUnreadable)
-		return drainReminderHeld
-	}
-	if now.Sub(activity) < drainReminderGrace {
-		noteDrainReminderHold(store, info, drainReminderHoldBusy)
-		return drainReminderHeld
+	if outcome, proceed := drainReminderQuietHold(sp, store, info, name, due.now); !proceed {
+		return outcome
 	}
 
-	// Write ahead of the delivery, exactly as the sibling backstops do: a crash
-	// or a store failure between here and the nudge can cost one attempt, but it
-	// can never replay an unbounded stream of them.
-	if !writeDrainReminderMarker(store, info, drainID, attempts+1, failed, now, stdout) {
-		return drainReminderSkipped
-	}
-	if err := sp.Nudge(name, runtime.TextContent(drainReminderContent(info))); err != nil {
-		// The attempt is spent either way — the write-ahead above is what bounds
-		// this loop, and unwinding it would let a permanently input-dead pane
-		// re-send forever. Record instead that nothing ARRIVED, so the escalation
-		// that follows reports what actually happened rather than three
-		// conversations that never occurred.
-		//
-		// Limit worth knowing: a nil return is not proof of delivery. The seam
-		// adapter answers nil when it cannot attach, so some failures are
-		// invisible here and are counted as delivered. That is the best knowledge
-		// available at this boundary, and it errs toward the gentler journal line.
-		writeDrainReminderMarker(store, info, drainID, attempts+1, failed+1, now, stdout)
-		fmt.Fprintf(stdout, //nolint:errcheck // best-effort
-			"%s: reminder %d/%d to %s was undeliverable: %v\n",
-			drainReminderLabel, attempts+1, drainReminderMaxAttempts, name, err)
-		return drainReminderSkipped
-	}
-	clearDrainReminderHold(store, info)
-	fmt.Fprintf(stdout, //nolint:errcheck // best-effort
-		"%s: drain reminder %d/%d delivered to %s (stop-pending, unacked)\n",
-		drainReminderLabel, attempts+1, drainReminderMaxAttempts, name)
-	return drainReminderDelivered
+	return deliverDrainReminder(sp, store, info, name, due, stdout)
 }
 
 // remindStopPendingDrain is the reconciler-facing entry point: it is called from
@@ -277,6 +197,145 @@ func remindStopPendingDrain(sp runtime.Provider, store beads.Store, info session
 		clk = clock.Real{}
 	}
 	return maybeRemindDrainingSession(sp, store, info, clk, stdout)
+}
+
+// drainReminderDue is the loaded pacing state for a row that has cleared the
+// cheap eligibility gates and is due for evaluation. now is sampled once so
+// every downstream gate reasons from the same instant.
+type drainReminderDue struct {
+	drainID   string
+	attempts  int
+	failed    int
+	last      time.Time
+	now       time.Time
+	exhausted bool
+}
+
+// drainReminderEligible reports whether info names a row this pass may ever
+// remind: it must carry an id, be durably drain-ack stop-pending (the wedge
+// class), and occupy a pool seat. A row that is not durably stop-pending is
+// converging on its own; a named row's acknowledgement lane refuses the agent
+// provenance a reminder would mint (named_row, policy_unsupported) and converges
+// through legacy timeout, so reminding one makes its outcome WORSE than today.
+func drainReminderEligible(info sessions.Info, name string) bool {
+	if name == "" || strings.TrimSpace(info.ID) == "" {
+		return false
+	}
+	if !isDrainAckStopPendingInfo(info) {
+		return false
+	}
+	return isPoolManagedSessionInfo(info)
+}
+
+// loadDrainReminderDue reads the one bead that carries both the drain identity
+// and the pacing markers, then applies the free cadence gate. ok is false when
+// nothing is owed yet: the row cannot be read, has no drain to scope a budget
+// to, or is still waiting out its interval — the common, zero-provider-cost case.
+func loadDrainReminderDue(store beads.Store, info sessions.Info, clk clock.Clock) (drainReminderDue, bool) {
+	bead, err := store.Get(info.ID)
+	if err != nil {
+		return drainReminderDue{}, false
+	}
+	drainID := drainReminderIdentity(bead)
+	if drainID == "" {
+		return drainReminderDue{}, false // no drain to scope a budget to
+	}
+	attempts, failed, last := drainReminderState(bead, drainID)
+	now := clk.Now()
+	exhausted := attempts >= drainReminderMaxAttempts
+	if !exhausted && attempts > 0 && now.Sub(last) < drainReminderInterval {
+		return drainReminderDue{}, false // waiting out the cadence — free, and the common case
+	}
+	return drainReminderDue{
+		drainID:   drainID,
+		attempts:  attempts,
+		failed:    failed,
+		last:      last,
+		now:       now,
+		exhausted: exhausted,
+	}, true
+}
+
+// drainReminderAckPin reads the acknowledgement source ahead of any write. It
+// stands in front of writes and a destructive-adjacent lane, so it fails closed:
+// proceed is false when an UNREADABLE source holds without a breadcrumb (writing
+// one is itself a write over a row whose state could not be read), and when a
+// landed agent ack — the outcome this whole pass exists to produce — must not be
+// clobbered.
+func drainReminderAckPin(sp runtime.Provider, name string) (drainReminderOutcome, bool) {
+	source, err := sp.GetMeta(name, reconcilerDrainAckSourceKey)
+	if err != nil {
+		return drainReminderHeld, false // no breadcrumb: writing one is itself a write
+	}
+	if strings.TrimSpace(source) == drainAckSourceAgentValue {
+		return drainReminderSkipped, false
+	}
+	return drainReminderSkipped, true
+}
+
+// announceDrainReminderExhausted records the spent-budget transition once — the
+// transition is the observable fact, and the caller decides whether anything
+// escalates from a drain that is still unacknowledged.
+func announceDrainReminderExhausted(store beads.Store, info sessions.Info, name string, due drainReminderDue, stdout io.Writer) drainReminderOutcome {
+	if noteDrainReminderHold(store, info, drainReminderHoldExhausted) {
+		fmt.Fprintf(stdout, //nolint:errcheck // best-effort
+			"%s: drain reminders exhausted for %s after %s (still unacknowledged)\n",
+			drainReminderLabel, name, drainReminderSpendPhrase(due.attempts, due.failed))
+	}
+	return drainReminderExhausted
+}
+
+// drainReminderQuietHold runs the liveness and quiet gates that can still stop a
+// due reminder before delivery: the stop finally took, a human is at the pane,
+// or the activity signal is unreadable or too recent (an agent in the middle of
+// a turn is answering its own drain; an unreadable signal is not evidence it is
+// not). proceed is false when one of those holds, carrying the outcome to return.
+func drainReminderQuietHold(sp runtime.Provider, store beads.Store, info sessions.Info, name string, now time.Time) (drainReminderOutcome, bool) {
+	if !sp.IsRunning(name) {
+		return drainReminderSkipped, false // the stop took after all; the finalizer owns it
+	}
+	if sp.IsAttached(name) {
+		noteDrainReminderHold(store, info, drainReminderHoldAttached)
+		return drainReminderHeld, false
+	}
+	activity, err := sp.GetLastActivity(name)
+	if err != nil || activity.IsZero() {
+		noteDrainReminderHold(store, info, drainReminderHoldUnreadable)
+		return drainReminderHeld, false
+	}
+	if now.Sub(activity) < drainReminderGrace {
+		noteDrainReminderHold(store, info, drainReminderHoldBusy)
+		return drainReminderHeld, false
+	}
+	return drainReminderDelivered, true
+}
+
+// deliverDrainReminder writes the pacing marker ahead of the nudge, exactly as
+// the sibling backstops do: a crash between the two costs one attempt but can
+// never replay an unbounded stream. A nudge error still spends the attempt (the
+// write-ahead is what bounds the loop, and unwinding it would let a permanently
+// input-dead pane re-send forever) and records that nothing ARRIVED, so the
+// escalation reports what actually happened.
+func deliverDrainReminder(sp runtime.Provider, store beads.Store, info sessions.Info, name string, due drainReminderDue, stdout io.Writer) drainReminderOutcome {
+	if !writeDrainReminderMarker(store, info, due.drainID, due.attempts+1, due.failed, due.now, stdout) {
+		return drainReminderSkipped
+	}
+	if err := sp.Nudge(name, runtime.TextContent(drainReminderContent(info))); err != nil {
+		// A nil return is not proof of delivery: the seam adapter answers nil when
+		// it cannot attach, so some failures are invisible here and counted as
+		// delivered. That is the best knowledge available at this boundary, and it
+		// errs toward the gentler journal line.
+		writeDrainReminderMarker(store, info, due.drainID, due.attempts+1, due.failed+1, due.now, stdout)
+		fmt.Fprintf(stdout, //nolint:errcheck // best-effort
+			"%s: reminder %d/%d to %s was undeliverable: %v\n",
+			drainReminderLabel, due.attempts+1, drainReminderMaxAttempts, name, err)
+		return drainReminderSkipped
+	}
+	clearDrainReminderHold(store, info)
+	fmt.Fprintf(stdout, //nolint:errcheck // best-effort
+		"%s: drain reminder %d/%d delivered to %s (stop-pending, unacked)\n",
+		drainReminderLabel, due.attempts+1, drainReminderMaxAttempts, name)
+	return drainReminderDelivered
 }
 
 // drainReminderIdentity names the ONE drain a budget belongs to: this
