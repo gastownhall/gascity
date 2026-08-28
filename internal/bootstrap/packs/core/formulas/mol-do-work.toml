@@ -143,11 +143,6 @@ Work is done. Close this drain step, then signal the controller to reclaim this
 session:
 
 ```bash
-STARTUP_BEAD_ID="${GC_BEAD_ID:-${GC_TRIGGER_BEAD_ID:-}}"
-if [ -z "$STARTUP_BEAD_ID" ]; then
-  echo "mol-do-work drain requires a startup bead id to resolve its workflow root" >&2
-  exit 1
-fi
 DRAIN_BEAD_ID=""
 CURRENT_ID=$(gc hook current --id-only 2>/dev/null || true)
 if [ -n "$CURRENT_ID" ]; then
@@ -155,6 +150,11 @@ if [ -n "$CURRENT_ID" ]; then
   DRAIN_BEAD_ID=$(printf '%s' "$CURRENT" | jq -r '(if type == "array" then .[0] else . end) | select(.status != "closed") | select(.metadata["gc.step_ref"] == "mol-do-work.drain") | .id // empty')
 fi
 if [ -z "$DRAIN_BEAD_ID" ]; then
+  STARTUP_BEAD_ID="${GC_BEAD_ID:-${GC_TRIGGER_BEAD_ID:-}}"
+  if [ -z "$STARTUP_BEAD_ID" ]; then
+    echo "mol-do-work drain resolved no continuation from the current claim and has no startup bead id to fall back on" >&2
+    exit 1
+  fi
   STARTUP_BEAD=$(gc bd show "$STARTUP_BEAD_ID" --json) || exit 1
   ROOT_BEAD_ID=$(printf '%s' "$STARTUP_BEAD" | jq -r '(if type == "array" then .[0] else . end) | .metadata["gc.root_bead_id"] // empty')
   if [ -z "$ROOT_BEAD_ID" ]; then

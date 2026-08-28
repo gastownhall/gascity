@@ -92,6 +92,15 @@ func TestMolDoWorkDrainClaimsCurrentContinuation(t *testing.T) {
 	if !strings.Contains(step[currentAt:readyAt], `.metadata["gc.step_ref"] == "mol-do-work.drain"`) {
 		t.Fatal("drain must gate the current-claim branch on gc.step_ref; an unguarded claim restores the stale-identity bug")
 	}
+	// The startup-bead id is only needed by the ready-query fallback. Requiring
+	// it up front aborts drain on any seat that is not demand-spawned:
+	// GC_BEAD_ID exists only in the dispatch condition environment, never in a
+	// session shell, and GC_TRIGGER_BEAD_ID is pool-seat-only (see
+	// cmd/gc/cmd_hook_current.go). Same shape as ga-2q2r0.
+	startupAt := strings.Index(step, `STARTUP_BEAD_ID="${GC_BEAD_ID`)
+	if startupAt < 0 || startupAt < currentAt {
+		t.Fatal("drain must not require a startup bead id before consulting the current claim")
+	}
 
 	updateAt := strings.Index(step, "gc bd update")
 	drainAckAt := strings.Index(step, "gc runtime drain-ack")
