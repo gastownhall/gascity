@@ -432,6 +432,15 @@ func providerStatusFixHint(probeName, status string) string {
 		case api.ProbeStatusProbeError:
 			return "check ~/.gemini/settings.json and oauth_creds.json"
 		}
+	case "pi":
+		switch status {
+		case api.ProbeStatusNeedsAuth:
+			return "authenticate pi so it writes ~/.pi/agent/auth.json"
+		case api.ProbeStatusNotInstalled:
+			return "install the pi coding agent"
+		case api.ProbeStatusProbeError:
+			return "check ~/.pi/agent/auth.json and the local pi installation"
+		}
 	}
 	return ""
 }

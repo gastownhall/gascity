@@ -118,11 +118,20 @@ func (c *OrderFiringCurrentCheck) Run(ctx *CheckContext) *CheckResult {
 	case result := <-results:
 		return result
 	case <-time.After(timeout):
+		// A timed-out lookup is inconclusive, not proof of a stale/never-fired
+		// order (#4895): the query being slow says nothing about whether orders
+		// are actually firing. SeverityBlocking is CheckSeverity's zero value, so
+		// leaving Severity unset here would silently gate `gc doctor` (and its
+		// exit code) red on a busy-but-healthy city. Mark it advisory and
+		// TimedOut, matching how Doctor.boundedRun reports its own per-check
+		// timeout, so callers can tell "confirmed stale" from "couldn't tell".
 		return &CheckResult{
-			Name:    c.Name(),
-			Status:  StatusError,
-			Message: fmt.Sprintf("order history lookup timed out after %s", timeout),
-			FixHint: orderFiringTimeoutHint,
+			Name:     c.Name(),
+			Status:   StatusError,
+			Severity: SeverityAdvisory,
+			TimedOut: true,
+			Message:  fmt.Sprintf("order history lookup timed out after %s", timeout),
+			FixHint:  orderFiringTimeoutHint,
 		}
 	}
 }

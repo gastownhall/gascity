@@ -1163,7 +1163,7 @@ func TestCollectAndReleaseOrphanPoolStepBead_Issue2793(t *testing.T) {
 
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}
 
-	found, foundStores, foundStoreRefs, _, partial := collectAssignedWorkBeadsWithStores(cfg, store, nil, nil, nil)
+	found, foundStores, foundStoreRefs, _, partial := collectAssignedWorkBeadsWithStores("", cfg, store, nil, nil, nil)
 	if partial {
 		t.Fatal("collectAssignedWorkBeadsWithStores reported partial results")
 	}
@@ -1214,7 +1214,7 @@ func TestCollectAndReleaseOrphanWorkflowRunTargetBead(t *testing.T) {
 
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}
 
-	found, foundStores, foundStoreRefs, _, partial := collectAssignedWorkBeadsWithStores(cfg, store, nil, nil, nil)
+	found, foundStores, foundStoreRefs, _, partial := collectAssignedWorkBeadsWithStores("", cfg, store, nil, nil, nil)
 	if partial {
 		t.Fatal("collectAssignedWorkBeadsWithStores reported partial results")
 	}
@@ -1264,7 +1264,7 @@ func TestCollectAndReleaseNonWorkflowRunTargetBeadStaysAssigned(t *testing.T) {
 
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}
 
-	found, foundStores, foundStoreRefs, _, partial := collectAssignedWorkBeadsWithStores(cfg, store, nil, nil, nil)
+	found, foundStores, foundStoreRefs, _, partial := collectAssignedWorkBeadsWithStores("", cfg, store, nil, nil, nil)
 	if partial {
 		t.Fatal("collectAssignedWorkBeadsWithStores reported partial results")
 	}
@@ -1303,6 +1303,7 @@ func TestCollectAssignedWorkBeadsIncludesUnassignedInProgressPoolWorkForRecovery
 	}
 
 	found, stores, _, _, partial := collectAssignedWorkBeadsWithStores(
+		"",
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		store,
 		nil,
@@ -2277,6 +2278,7 @@ func (s *conditionalReleaseProbeStore) reclaim() {
 func releaseProbeAssignments(store *conditionalReleaseProbeStore, work beads.Bead) []releasedPoolAssignment {
 	return releaseOrphanedPoolAssignments(
 		store,
+		beads.SessionStore{Store: store},
 		testPoolReleaseConfig(),
 		"",
 		nil,
@@ -2484,7 +2486,9 @@ func releaseOrphanedPoolAssignmentsFromBeads(
 	for _, b := range openSessionBeads {
 		infos = append(infos, seedSessionInfo(b))
 	}
-	return releaseOrphanedPoolAssignments(store, cfg, cityPath, infos, assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, rigStores)
+	// Single-store fixtures: the session class resolves to the work store, which
+	// is what a city without a [storage.classes] sessions binding does.
+	return releaseOrphanedPoolAssignments(store, beads.SessionStore{Store: store}, cfg, cityPath, infos, assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, rigStores)
 }
 
 // gcSweepSessionBeadsFromBeads projects raw session beads to session.Info and
@@ -2495,7 +2499,7 @@ func gcSweepSessionBeadsFromBeads(store beads.Store, sessionBeads []beads.Bead) 
 	for _, b := range sessionBeads {
 		infos = append(infos, seedSessionInfo(b))
 	}
-	return GCSweepSessionBeads(store, nil, infos)
+	return GCSweepSessionBeads("", store, nil, infos)
 }
 
 func TestDirectSessionBeadIDCandidates_DerivesModernPoolSessionBeadID(t *testing.T) {
@@ -2576,6 +2580,7 @@ func TestReleaseOrphanedPoolAssignments_SkipsLiveModernPoolSessionWhenLiveListMi
 
 	released := releaseOrphanedPoolAssignments(
 		store,
+		beads.SessionStore{Store: store},
 		&config.City{Agents: []config.Agent{{
 			Name:              "gascity/koolkats.polekitten",
 			MinActiveSessions: intPtr(0),

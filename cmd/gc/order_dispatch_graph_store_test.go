@@ -192,9 +192,13 @@ func TestOrderDispatchSingleFlightGateSeesGraphResidentWisp(t *testing.T) {
 	m.lastRunCache = nil
 	m.cacheMu.Unlock()
 
-	hasOpen, err := m.hasOpenWorkInStoresStrict([]beads.Store{workStore, graphStore}, "reaper")
-	if err != nil {
-		t.Fatalf("open-work gate: %v", err)
+	hasOpen := false
+	for _, store := range []beads.Store{workStore, graphStore} {
+		open, err := m.hasOpenWorkStrict(store, "reaper")
+		if err != nil {
+			t.Fatalf("open-work gate: %v", err)
+		}
+		hasOpen = hasOpen || open
 	}
 	if !hasOpen {
 		t.Fatalf("open-work gate did not see open wisp root %s in the graph store", firstRoot.ID)

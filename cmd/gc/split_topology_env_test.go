@@ -182,6 +182,17 @@ func newSplitEnvWith(t *testing.T, split bool, opts splitEnvOptions) splitEnv {
 		e.routes = splitEnvRoutes(e.class)
 	}
 	writeSplitTopologyCityConfig(t, cityPath, rigPath, split)
+	// The assigned-work spine resolves a city's bindings BY PATH, because its
+	// scans are free functions reached from both planes. Registering the routes
+	// this fixture staged is the same thing newCityRuntime does with the ones
+	// storageBootGate opened, so both subtests answer residency from the routes
+	// the env decided rather than from a second funnel.
+	// The work store is registered with them, for the same reason: the census
+	// arms are handed the SESSIONS store, and on a split city that is the
+	// binding — so without the runtime declaring its work store the census has
+	// no way to name the two apart, which is the E2 dual role itself.
+	registerResidencyRoutes(cityPath, e.routes, func() beads.Store { return e.work })
+	t.Cleanup(func() { unregisterResidencyRoutes(cityPath, e.routes) })
 	if opts.rig {
 		e.attachRigLeg(t, rigPath)
 	}

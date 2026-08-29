@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"testing"
 	"time"
-
-	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func newReadySQLiteStore(t *testing.T) *SQLiteStore {
@@ -272,7 +270,7 @@ func TestSQLiteStoreReadyContextCancelsWhileWaitingForAConnection(t *testing.T) 
 
 	select {
 	case <-ctx.checked: // the entry guard ran and saw a live context
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(beadsHangBudget):
 		t.Fatal("ReadyContext never checked its context")
 	}
 	cancel()
@@ -282,7 +280,7 @@ func TestSQLiteStoreReadyContextCancelsWhileWaitingForAConnection(t *testing.T) 
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("ReadyContext error = %v, want context.Canceled", err)
 		}
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(beadsHangBudget):
 		t.Fatal("ReadyContext kept waiting for a read connection after cancellation")
 	}
 }
