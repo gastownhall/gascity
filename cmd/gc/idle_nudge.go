@@ -46,6 +46,8 @@ const (
 	idleClaimNudgeMaxAttempts = 3                // then give up and log (manual re-nudge remains)
 )
 
+const defaultPoolClaimNudge = "Run gc hook --claim --drain-ack --json now; if it returns work, execute it immediately."
+
 // nudgeStalledPoolClaims is a reconcile-tick backstop that runs for every
 // runtime (herdr AND tmux). It re-delivers the claim nudge to a pool slot that
 // is running but whose assigned trigger bead is still UNCLAIMED (open, not
@@ -409,7 +411,7 @@ func (p poolClaimBackstop) state(s beads.Bead, target backstopTarget) (same bool
 }
 
 func (p poolClaimBackstop) content(s beads.Bead) string {
-	return claimNudgeFor(p.cfg, s)
+	return stalledPoolClaimNudgeFor(p.cfg, s)
 }
 
 func (p poolClaimBackstop) revalidate(_ backstopTarget) backstopResolution {
@@ -512,15 +514,31 @@ func isUnclaimedTrigger(w beads.Bead, sessName string) bool {
 // claimNudgeFor resolves the slot's configured startup nudge (the worker's
 // `gc hook --claim` line) from the agent template behind this session bead.
 func claimNudgeFor(cfg *config.City, session beads.Bead) string {
+	nudge, _ := configuredClaimNudgeFor(cfg, session)
+	return nudge
+}
+
+func stalledPoolClaimNudgeFor(cfg *config.City, session beads.Bead) string {
+	nudge, known := configuredClaimNudgeFor(cfg, session)
+	if !known {
+		return ""
+	}
+	if nudge == "" {
+		return defaultPoolClaimNudge
+	}
+	return nudge
+}
+
+func configuredClaimNudgeFor(cfg *config.City, session beads.Bead) (string, bool) {
 	template := normalizedSessionTemplate(session, cfg)
 	if template == "" {
-		return ""
+		return "", false
 	}
 	agent := findAgentByTemplate(cfg, template)
 	if agent == nil {
-		return ""
+		return "", false
 	}
-	return strings.TrimSpace(agent.Nudge)
+	return strings.TrimSpace(agent.Nudge), true
 }
 
 // writeIdleClaimMarker persists the backstop state machine onto the session
