@@ -1,7 +1,9 @@
 package git
 
 import (
+	"errors"
 	"fmt"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -20,12 +22,24 @@ func validateRefArg(kind, val string) error {
 }
 
 // BranchExists reports whether a local branch with the given name exists.
-func (g *Git) BranchExists(branch string) bool {
+// It fails closed: only git's documented "ref not found" exit status is
+// reported as absence, and every other probe failure is returned as an
+// error. Callers use this to decide whether a branch is theirs to create
+// and later delete, so a transient probe failure reported as "absent"
+// would authorize deleting a branch that already existed.
+func (g *Git) BranchExists(branch string) (bool, error) {
 	if err := validateRefArg("branch", branch); err != nil {
-		return false
+		return false, err
 	}
 	_, err := g.run("show-ref", "--verify", "--quiet", "refs/heads/"+branch)
-	return err == nil
+	if err == nil {
+		return true, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, fmt.Errorf("probing branch %q: %w", branch, err)
 }
 
 // RevParseVerifyCommit resolves ref to a full commit SHA, failing when the

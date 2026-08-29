@@ -380,7 +380,7 @@ func Ensure(spec Spec) (Report, error) {
 	if err := createWorktree(repoGit, spec, branchExists); err != nil {
 		return rep, rollbackResult(err, rollbackAfterFailedCreate(repoGit, spec.Path, spec.Branch, !branchExists))
 	}
-	created, err := verifyCreatedWorktree(repoGit, spec, branchExists, resolvedBase)
+	created, err := verifyCreatedWorktree(spec, branchExists, resolvedBase)
 	if err != nil {
 		return rep, rollbackResult(err, rollbackCreated(repoGit, spec.Path, spec.Branch, !branchExists))
 	}
@@ -523,7 +523,13 @@ func matchingRegisteredWorktrees(repoGit *git.Git, path string) ([]git.Worktree,
 	matches := make([]git.Worktree, 0, 1)
 	for _, entry := range entries {
 		registered, pathErr := canonicalPathAllowMissing(entry.Path)
-		if pathErr == nil && pathutil.SamePath(candidate, registered) {
+		if pathErr != nil {
+			// A registration we cannot canonicalize may be the very entry
+			// we are looking for; reporting "no match" would let a caller
+			// treat a still-registered path as absent.
+			return nil, fmt.Errorf("canonicalizing registered worktree %q: %w", entry.Path, pathErr)
+		}
+		if pathutil.SamePath(candidate, registered) {
 			matches = append(matches, entry)
 		}
 	}
@@ -550,7 +556,10 @@ func resolveCreationState(spec Spec) (*git.Git, bool, string, error) {
 	if !repoGit.IsRepo() {
 		return nil, false, "", fmt.Errorf("ensuring worktree %q: repo dir %q is not a git repository", spec.Path, spec.RepoDir)
 	}
-	branchExists := repoGit.BranchExists(spec.Branch)
+	branchExists, err := repoGit.BranchExists(spec.Branch)
+	if err != nil {
+		return nil, false, "", fmt.Errorf("ensuring worktree %q: %w", spec.Path, err)
+	}
 	if !branchExists && spec.Base == "" {
 		return nil, false, "", fmt.Errorf("ensuring worktree %q: branch %q does not exist and no base was given", spec.Path, spec.Branch)
 	}
@@ -600,16 +609,14 @@ func createWorktree(repoGit *git.Git, spec Spec, branchExists bool) error {
 	return nil
 }
 
-func verifyCreatedWorktree(repoGit *git.Git, spec Spec, branchExists bool, resolvedBase string) (Report, error) {
+func verifyCreatedWorktree(spec Spec, branchExists bool, resolvedBase string) (Report, error) {
 	created, err := verifyGitState(Spec{RepoDir: spec.RepoDir, Path: spec.Path, Branch: spec.Branch})
 	if err != nil {
-		cause := fmt.Errorf("worktree %q failed post-create verification: %w", spec.Path, err)
-		return Report{}, rollbackResult(cause, rollbackCreated(repoGit, spec.Path, spec.Branch, !branchExists))
+		return Report{}, fmt.Errorf("worktree %q failed post-create verification: %w", spec.Path, err)
 	}
 	if !branchExists && created.Head != resolvedBase {
-		cause := fmt.Errorf("worktree %q: new branch %q is at %s, want base %q = %s",
+		return Report{}, fmt.Errorf("worktree %q: new branch %q is at %s, want base %q = %s",
 			spec.Path, spec.Branch, created.Head, spec.Base, resolvedBase)
-		return Report{}, rollbackResult(cause, rollbackCreated(repoGit, spec.Path, spec.Branch, true))
 	}
 	return created, nil
 }
@@ -724,9 +731,17 @@ func rollbackAfterFailedCreate(repoGit *git.Git, path, branch string, branchCrea
 			errs = append(errs, err)
 		}
 	}
-	if branchCreated && repoGit.BranchExists(branch) {
-		if err := repoGit.BranchDeleteIfMerged(branch); err != nil {
-			errs = append(errs, err)
+	if branchCreated {
+		exists, err := repoGit.BranchExists(branch)
+		switch {
+		case err != nil:
+			// Refuse to delete on an inconclusive probe: the branch may
+			// predate this attempt.
+			errs = append(errs, fmt.Errorf("rollback branch probe: %w", err))
+		case exists:
+			if err := repoGit.BranchDeleteIfMerged(branch); err != nil {
+				errs = append(errs, err)
+			}
 		}
 	}
 	return errors.Join(errs...)
@@ -804,7 +819,7 @@ func rejectRegisteredWorktreeAncestor(spec Spec) error {
 	for _, existing := range worktrees {
 		existingPath, pathErr := canonicalPathAllowMissing(existing.Path)
 		if pathErr != nil {
-			continue
+			return fmt.Errorf("worktree spec: canonicalizing registered worktree %q: %w", existing.Path, pathErr)
 		}
 		if pathutil.SamePath(existingPath, candidate) {
 			continue

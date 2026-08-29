@@ -879,3 +879,20 @@ func TestCleanupRequiresManagedSpecAndRefusesMissingRegisteredPath(t *testing.T)
 		}
 	})
 }
+
+// Rollback belongs to Ensure alone. When verifyCreatedWorktree also rolled
+// back, a successful first rollback left the second one removing an absent
+// path, and the caller saw "rollback incomplete" for a workspace that had in
+// fact been cleaned up.
+func TestVerifyCreatedWorktreeLeavesRollbackToEnsure(t *testing.T) {
+	repo, base := initTestRepo(t)
+	missing := filepath.Join(t.TempDir(), "never-created")
+	spec := Spec{RepoDir: repo, Path: missing, Branch: "feature", Base: "main"}
+	_, err := verifyCreatedWorktree(spec, false, base)
+	if err == nil {
+		t.Fatal("verifyCreatedWorktree on a missing path succeeded, want error")
+	}
+	if strings.Contains(err.Error(), "rollback") || strings.Contains(err.Error(), "rolled back") {
+		t.Errorf("verifyCreatedWorktree performed its own rollback: %v", err)
+	}
+}

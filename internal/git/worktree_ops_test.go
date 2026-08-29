@@ -14,11 +14,26 @@ func TestBranchExists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CurrentBranch: %v", err)
 	}
-	if !g.BranchExists(branch) {
-		t.Errorf("BranchExists(%q) = false, want true", branch)
+	exists, err := g.BranchExists(branch)
+	if err != nil || !exists {
+		t.Errorf("BranchExists(%q) = %v, %v; want true, nil", branch, exists, err)
 	}
-	if g.BranchExists("no-such-branch") {
-		t.Error("BranchExists(no-such-branch) = true, want false")
+	exists, err = g.BranchExists("no-such-branch")
+	if err != nil || exists {
+		t.Errorf("BranchExists(no-such-branch) = %v, %v; want false, nil", exists, err)
+	}
+}
+
+// A probe that cannot answer must report an error, never "absent": callers
+// use absence to authorize creating and later deleting the branch.
+func TestBranchExistsFailsClosedOutsideRepo(t *testing.T) {
+	g := New(t.TempDir())
+	exists, err := g.BranchExists("main")
+	if err == nil {
+		t.Fatalf("BranchExists outside a repo = %v, nil; want an error", exists)
+	}
+	if exists {
+		t.Error("BranchExists reported true on a failed probe")
 	}
 }
 
@@ -112,14 +127,14 @@ func TestBranchDelete(t *testing.T) {
 		t.Fatalf("CurrentBranch: %v", err)
 	}
 	runGit(t, dir, "branch", "doomed", base)
-	if !g.BranchExists("doomed") {
-		t.Fatal("setup: branch doomed missing")
+	if exists, err := g.BranchExists("doomed"); err != nil || !exists {
+		t.Fatalf("setup: branch doomed missing (%v, %v)", exists, err)
 	}
 	if err := g.BranchDeleteIfMerged("doomed"); err != nil {
 		t.Fatalf("BranchDeleteIfMerged: %v", err)
 	}
-	if g.BranchExists("doomed") {
-		t.Error("branch doomed still exists after BranchDeleteIfMerged")
+	if exists, err := g.BranchExists("doomed"); err != nil || exists {
+		t.Errorf("branch doomed after BranchDeleteIfMerged = %v, %v; want false, nil", exists, err)
 	}
 }
 
@@ -242,8 +257,8 @@ func TestWorktreeOpsRefuseOptionInjection(t *testing.T) {
 	dir := initTestRepo(t)
 	g := New(dir)
 	// A branch or ref starting with "-" must not be interpreted as a flag.
-	if g.BranchExists("--help") {
-		t.Error("BranchExists(--help) = true")
+	if exists, err := g.BranchExists("--help"); err == nil || exists {
+		t.Errorf("BranchExists(--help) = %v, %v; want false and an error", exists, err)
 	}
 	if _, err := g.RevParseVerifyCommit("--help"); err == nil {
 		t.Error("RevParseVerifyCommit(--help) succeeded, want error")
