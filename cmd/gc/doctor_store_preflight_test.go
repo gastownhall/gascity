@@ -334,3 +334,12 @@ func TestBeadStorePreflightSkipCount(t *testing.T) {
 		t.Fatalf("city name list len %d != doctorCityStoreCheckCount %d", len(doctorCityStoreDependentNames), doctorCityStoreCheckCount)
 	}
 }
+
+// withHealthyStorePreflight stubs the live bd probe so registration tests
+// asserting gated check names do not depend on ambient bd/Dolt state.
+func withHealthyStorePreflight(t *testing.T) {
+	t.Helper()
+	old := doctorBeadStorePreflight
+	doctorBeadStorePreflight = func(string, func(string) (beads.Store, error)) error { return nil }
+	t.Cleanup(func() { doctorBeadStorePreflight = old })
+}
