@@ -918,3 +918,27 @@ func TestRollbackAfterFailedCreateKeepsBranchNotAtOurBase(t *testing.T) {
 		t.Errorf("branch rival = %v, %v after rollback; want it kept", exists, existsErr)
 	}
 }
+
+// A workspace carrying published provenance was completed by some other
+// Ensure: this attempt fails before its own publish step, so a registration
+// with provenance is a rival's and must survive rollback.
+func TestRollbackAfterFailedCreateKeepsWorktreeWithPublishedProvenance(t *testing.T) {
+	repo, base := initTestRepo(t)
+	root := t.TempDir()
+	path := filepath.Join(root, "rival")
+	rep, err := Ensure(managedSpec(repo, root, path, "rival-branch", base))
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if rep.Provenance == nil {
+		t.Fatal("setup: Ensure published no provenance")
+	}
+
+	rollbackErr := rollbackAfterFailedCreate(git.New(repo), path, "rival-branch", false, base)
+	if rollbackErr == nil || !strings.Contains(rollbackErr.Error(), "published provenance") {
+		t.Fatalf("rollback err = %v, want a refusal citing published provenance", rollbackErr)
+	}
+	if _, statErr := os.Stat(path); statErr != nil {
+		t.Errorf("rival worktree removed by rollback: %v", statErr)
+	}
+}

@@ -730,6 +730,13 @@ func rollbackAfterFailedCreate(repoGit *git.Git, path, branch string, branchCrea
 	case err != nil:
 		errs = append(errs, fmt.Errorf("listing worktrees for rollback: %w", err))
 	case len(matches) > 0:
+		// Published provenance means a completed Ensure owns this workspace:
+		// this attempt never reaches the publish step, so the registration
+		// belongs to a rival creator and must survive.
+		if _, provErr := readProvenance(path); provErr == nil {
+			errs = append(errs, fmt.Errorf("refusing to remove worktree %q: it carries published provenance this attempt did not write", path))
+			break
+		}
 		if err := repoGit.WorktreeRemove(path, false); err != nil {
 			errs = append(errs, err)
 		}

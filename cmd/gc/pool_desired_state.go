@@ -556,6 +556,17 @@ func requestWithScaleDemandProvenance(request SessionRequest, demand scaleCheckD
 	request.WorkWorkspace = strings.TrimSpace(demand.Workspaces[workBeadID])
 	request.WorkStoreRef = strings.TrimSpace(demand.StoreRefs[workBeadID])
 	request.BrainParentSID = strings.TrimSpace(demand.ParentSIDs[workBeadID])
+	// Worktree evidence is per-bead like every field above it. Carrying the
+	// previous bead's spec into a rebound request would hand the session a
+	// workspace verified for other work.
+	request.WorktreeSpec = nil
+	request.WorktreeError = ""
+	if demand.WorktreeSpecs != nil {
+		request.WorktreeSpec = demand.WorktreeSpecs[workBeadID]
+	}
+	if demand.WorktreeErrors != nil {
+		request.WorktreeError = strings.TrimSpace(demand.WorktreeErrors[workBeadID])
+	}
 	return request
 }
 

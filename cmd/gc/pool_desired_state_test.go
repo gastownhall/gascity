@@ -2909,3 +2909,30 @@ func TestCanonicalSingletonAliasHeldTemplates_ExcludesFailedCreateHolder(t *test
 		t.Fatalf("drained holder released its alias and must NOT mark mayor held; got held")
 	}
 }
+
+// Rebinding reused capacity to a different bead must rebind its worktree
+// evidence too. Carrying the previous bead's spec forward would hand the
+// session a workspace verified for other work.
+func TestRequestWithScaleDemandProvenanceRebindsWorktreeEvidence(t *testing.T) {
+	stale := &worktree.Spec{BeadID: "gc-old", Path: "/tmp/old"}
+	fresh := &worktree.Spec{BeadID: "gc-new", Path: "/tmp/new"}
+	demand := scaleCheckDemand{
+		WorktreeSpecs:  map[string]*worktree.Spec{"gc-new": fresh},
+		WorktreeErrors: map[string]string{},
+	}
+	got := requestWithScaleDemandProvenance(SessionRequest{WorkBeadID: "gc-old", WorktreeSpec: stale}, demand, "gc-new")
+	if got.WorktreeSpec != fresh {
+		t.Errorf("WorktreeSpec = %+v, want the spec for gc-new", got.WorktreeSpec)
+	}
+
+	got = requestWithScaleDemandProvenance(SessionRequest{WorkBeadID: "gc-old", WorktreeSpec: stale}, demand, "gc-unknown")
+	if got.WorktreeSpec != nil {
+		t.Errorf("WorktreeSpec = %+v for a bead with no evidence, want nil", got.WorktreeSpec)
+	}
+
+	demand.WorktreeErrors["gc-bad"] = " conflicting evidence "
+	got = requestWithScaleDemandProvenance(SessionRequest{WorkBeadID: "gc-old", WorktreeError: "stale"}, demand, "gc-bad")
+	if got.WorktreeError != "conflicting evidence" {
+		t.Errorf("WorktreeError = %q, want the trimmed error for gc-bad", got.WorktreeError)
+	}
+}
