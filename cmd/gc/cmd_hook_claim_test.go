@@ -210,6 +210,21 @@ func TestHookClaimEnvMapUsesOnlyTheQueryEnvironment(t *testing.T) {
 	}
 }
 
+// TestHookClaimRunnerIsTheExactEnvRunner pins the wiring at the top of this
+// file. Every other test in the package replaces
+// hookClaimCommandRunnerWithEnvContext with a stub, so reverting it to the
+// layered ExecCommandRunnerWithEnvContext would silently restore #5142
+// (ambient BEADS_DOLT_* / BEADS_POSTGRES_* selectors reappearing in the claim
+// mutation) with the suite still green.
+func TestHookClaimRunnerIsTheExactEnvRunner(t *testing.T) {
+	got := reflect.ValueOf(hookClaimCommandRunnerWithEnvContext).Pointer()
+	want := reflect.ValueOf(beads.ExecCommandRunnerWithExactEnvContext).Pointer()
+	if got != want {
+		t.Fatal("hookClaimCommandRunnerWithEnvContext must be beads.ExecCommandRunnerWithExactEnvContext; " +
+			"the layered runner re-admits ambient store selectors into the claim mutation (#5142)")
+	}
+}
+
 // TestDoHookClaimSkipsBlockedRoutedHeadAndClaimsReadyBehindIt guards the
 // widened-routed-tier fix: a routed tier's oldest candidate can be
 // is_blocked (e.g. gated on a PR), and the hook must fall through to a
