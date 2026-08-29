@@ -564,10 +564,9 @@ func doEvents(scope eventsAPIScope, typeFilter, sinceFlag string, payloadMatch m
 		return 1
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
 	if scope.isSupervisor() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
 		items, err := fetchSupervisorEvents(ctx, client, typeFilter, sinceFlag)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
@@ -576,6 +575,13 @@ func doEvents(scope eventsAPIScope, typeFilter, sinceFlag string, payloadMatch m
 		items = filterSupervisorEvents(items, typeFilter, payloadMatch)
 		return printJSONLines(items, stdout, stderr)
 	}
+
+	// The city list drains a --since window across as many pages as it takes.
+	// The walk stays bounded in aggregate -- an unbounded walk would trade a
+	// fast failure for a hang -- but running out of budget now truncates the
+	// window and says so, instead of discarding every page already fetched.
+	ctx, cancel := context.WithTimeout(context.Background(), cityEventsWalkBudget)
+	defer cancel()
 
 	items, err := fetchCityEvents(ctx, client, scope.cityName, typeFilter, sinceFlag, stderr)
 	if err != nil {
@@ -1039,6 +1045,40 @@ func probeCityEventsReachable(ctx context.Context, client *genclient.ClientWithR
 // strictly below the page's oldest seq (#4194).
 const cityEventsPageLimit = int64(500)
 
+// The city event list is drained under two separate budgets, because a
+// --since window is walked across however many pages it takes (#4385) and the
+// two failures they catch are not the same failure:
+//
+//   - cityEventsPageTimeout bounds ONE page request. It catches a server that
+//     has stopped answering.
+//   - cityEventsWalkBudget bounds the WHOLE walk. It is the ceiling on how
+//     long `gc events --since ...` may run, so that a wide window degrades
+//     instead of hanging.
+//
+// A single budget cannot do both jobs. Charging the whole walk to one
+// per-request deadline is what made a wide window fail on its size rather
+// than on server health -- and fail having discarded every page it had
+// already fetched. Hitting the walk budget is therefore a truncation, not an
+// error: fetchCityEvents returns the pages it has and labels them.
+//
+// Both are vars so tests can exercise the walk without real-time waits.
+var (
+	cityEventsPageTimeout = 30 * time.Second
+	cityEventsWalkBudget  = 30 * time.Second
+)
+
+// fetchCityEventsPage issues a single page request under its own deadline, so
+// that a multi-page walk is bounded per request rather than in aggregate.
+func fetchCityEventsPage(ctx context.Context, client *genclient.ClientWithResponses, cityName string, params *genclient.GetV0CityByCityNameEventsParams) (*genclient.GetV0CityByCityNameEventsResponse, error) {
+	pageCtx, cancel := context.WithTimeout(ctx, cityEventsPageTimeout)
+	defer cancel()
+	resp, err := client.GetV0CityByCityNameEventsWithResponse(pageCtx, cityName, params)
+	if err != nil {
+		return nil, &eventsAPITransportError{err: err}
+	}
+	return resp, nil
+}
+
 // fetchCityEvents fetches city events matching the type/since filter and
 // returns them chronologically (ascending seq). The endpoint is a keyset,
 // seq-DESC (newest first) paginated list; a truncated page carries a
@@ -1070,9 +1110,17 @@ func fetchCityEvents(ctx context.Context, client *genclient.ClientWithResponses,
 		if cursor != "" {
 			params.Cursor = &cursor
 		}
-		resp, err := client.GetV0CityByCityNameEventsWithResponse(ctx, cityName, params)
+		resp, err := fetchCityEventsPage(ctx, client, cityName, params)
 		if err != nil {
-			return nil, &eventsAPITransportError{err: err}
+			// Out of walk budget mid-drain. Every page already fetched is
+			// good data, and throwing it away is strictly worse than a short
+			// window the caller can see is short -- so report the truncation
+			// the same way the single-page cap below does, and return.
+			if paginate && len(all) > 0 && ctx.Err() != nil {
+				fmt.Fprintf(warn, "gc events: showing the newest %d events in the window; the walk ran out of time before reaching the older end. Use a narrower --since to fetch a full window.\n", len(all)) //nolint:errcheck
+				break
+			}
+			return nil, err
 		}
 		if err := eventsListError(resp.StatusCode(), resp.Body); err != nil {
 			return nil, err
