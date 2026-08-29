@@ -91,11 +91,17 @@ func TestNudgeStalledPoolClaims_NudgesAfterGrace(t *testing.T) {
 }
 
 func TestNudgeStalledPoolClaims_UsesClaimFallbackWhenNudgeIsBlank(t *testing.T) {
-	for _, configuredNudge := range []string{"", " \t "} {
-		t.Run("blank", func(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		nudge string
+	}{
+		{name: "empty", nudge: ""},
+		{name: "whitespace", nudge: " \t "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			sp := runningIdleClaimFake(t, "session-a")
 			cfg := idleClaimTestCfg()
-			cfg.Agents[0].Nudge = configuredNudge
+			cfg.Agents[0].Nudge = tc.nudge
 			session := idleClaimPoolSession()
 			work := []beads.Bead{{ID: "work-a", Status: "open"}}
 			store := beads.NewMemStoreFrom(0, []beads.Bead{session}, nil)

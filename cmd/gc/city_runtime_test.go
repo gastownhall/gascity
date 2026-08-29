@@ -3325,7 +3325,12 @@ func TestCityRuntimeBeadReconcileTick_TransientStoreQueryPartialKeepsRunningPool
 // call-site un-gate this was skipped whenever CanReportActivity was true,
 // leaving tmux warm slots with no wake path. The marker is pre-seeded past the
 // grace window so a single tick nudges (attempt count 0 -> 1).
-func TestCityRuntimeBeadReconcileTick_IdleClaimNudgeFallsBackForBlankNudge(t *testing.T) {
+//
+// This test guards both regressions at once: the call-site un-gate above (the
+// CanReportActivity precondition and the attempt count 0 -> 1 assertion), and
+// the blank-nudge fallback delivery — the agent configures a whitespace-only
+// nudge, so the single delivered Nudge must carry defaultPoolClaimNudge.
+func TestCityRuntimeBeadReconcileTick_IdleClaimNudgeFallsBackForBlankNudgeOnReportActivityRuntime(t *testing.T) {
 	sp := runtime.NewFake()
 	if !sp.Capabilities().CanReportActivity {
 		t.Fatal("precondition: fake runtime must report activity for this un-gate test to be meaningful")
