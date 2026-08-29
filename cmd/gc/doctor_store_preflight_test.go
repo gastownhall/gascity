@@ -343,3 +343,40 @@ func withHealthyStorePreflight(t *testing.T) {
 	doctorBeadStorePreflight = func(string, func(string) (beads.Store, error)) error { return nil }
 	t.Cleanup(func() { doctorBeadStorePreflight = old })
 }
+
+func TestBuildDoctorChecks_SkipStorePreflightSkipsProbe(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_DOLT", "skip")
+
+	called := false
+	old := doctorBeadStorePreflight
+	doctorBeadStorePreflight = func(string, func(string) (beads.Store, error)) error {
+		called = true
+		return fmt.Errorf("connection refused")
+	}
+	t.Cleanup(func() { doctorBeadStorePreflight = old })
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo"},
+		Rigs:      []config.Rig{{Name: "alpha", Path: "alpha", Prefix: "al"}},
+	}
+	names := doctorCheckNames(buildDoctorChecks(cityDir, cfg, nil, buildDoctorChecksOpts{
+		ControllerRunning:    true,
+		SkipCityDoltCheck:    true,
+		SkipManagedDoltCheck: true,
+		SkipRigDoltChecks:    true,
+		SkipStorePreflight:   true,
+	}))
+	if called {
+		t.Fatal("preflight probe ran despite SkipStorePreflight")
+	}
+	if doctorCheckIndex(names, "bead-store-preflight") >= 0 {
+		t.Fatalf("bead-store-preflight registered with SkipStorePreflight; names=%v", names)
+	}
+	if doctorCheckIndex(names, "beads-store") < 0 {
+		t.Fatalf("store checks omitted with SkipStorePreflight; names=%v", names)
+	}
+}

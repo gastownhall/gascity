@@ -142,6 +142,12 @@ type buildDoctorChecksOpts struct {
 	SkipCityDoltCheck    bool
 	SkipManagedDoltCheck bool
 	SkipRigDoltChecks    bool
+	// SkipStorePreflight suppresses the #5064 bead-store probe. Set by the
+	// `gc start` warmup path: every store-dependent check the preflight gates
+	// is WarmupEligible() == false, so warmupEligibleChecks filters all of them
+	// out and the probe's result cannot affect warmup output — it would only
+	// add up to doctorBeadStorePreflightTimeout of startup latency.
+	SkipStorePreflight bool
 	// RolloutFlags is the on-disk rollout-gate snapshot doctor renders; RolloutResolveErr
 	// is set when resolving it failed (an out-of-enum config value).
 	RolloutFlags      rollout.Flags
@@ -293,9 +299,13 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			}
 			activeRigs = append(activeRigs, rig)
 		}
-		if err := doctorBeadStorePreflight(cityPath, storeFactory); isBeadStoreUnreachable(err) {
+		var probeErr error
+		if !opts.SkipStorePreflight {
+			probeErr = doctorBeadStorePreflight(cityPath, storeFactory)
+		}
+		if isBeadStoreUnreachable(probeErr) {
 			storeOK = false
-			storePreflightErr = err
+			storePreflightErr = probeErr
 			// Register early so the preflight error precedes omitted store checks.
 			skipCount := beadStorePreflightSkipCount(len(activeRigs))
 			register(doctor.ErrorCheck("bead-store-preflight", beadStorePreflightSkipMessage(skipCount, len(activeRigs), storePreflightErr)))

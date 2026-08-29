@@ -815,6 +815,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		SkipCityDoltCheck:    skipRigDoltChecks || (!scopeUsesManagedBdStoreContract(warmupCityPath, warmupCityPath) && !workspaceNeedsCityDoltCheck(warmupCityPath, cfg)),
 		SkipManagedDoltCheck: managedDoltOpsCheckSkip(warmupCityPath, cfg, nil),
 		SkipRigDoltChecks:    skipRigDoltChecks,
+		SkipStorePreflight:   true,
 	})
 	warmupOpts := warmup.WarmupOpts{
 		Checks: warmupChecks,

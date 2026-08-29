@@ -37,6 +37,11 @@ func defaultDoctorBeadStorePreflight(cityPath string, _ func(string) (beads.Stor
 }
 
 // True for live store outages (breaker/conn/timeout), not missing/uninitialized stores.
+//
+// Superset of the transport shapes in bdTransportRetryableError
+// (cmd/gc/bd_env.go) plus store-pool exhaustion. Deliberately separate:
+// that list drives retry, this one drives check omission. Keep them from
+// drifting when new bd/Dolt error shapes appear.
 func isBeadStoreUnreachable(err error) bool {
 	if err == nil {
 		return false
