@@ -609,19 +609,21 @@ func (c *OrderFiringCurrentCheck) readEventTail(path string, filter events.Filte
 // latestControllerStartedAt reports the newest controller start. The tail read
 // finds it within a few lines on any city whose controller has started since
 // the log last rotated. Only when the active log holds no controller start at
-// all does it pay for the full read (which also covers archives) — the same
-// cost this always paid, now confined to the case that actually needs it.
+// all does it look in the archives, and then it stops at the newest archive
+// holding one.
+//
+// The archive leg deliberately does not use an unbounded read. That walk
+// gunzips and decodes every retained archive, and its cost grows with every
+// rotation: on a city with 70 archives it measured over 110 seconds of CPU,
+// inside `gc doctor` and inside the supervisor's order-dispatch pass. The
+// condition that reaches this leg — an active log with no controller start —
+// persists for as long as the controller stays up across rotations, so the
+// walk was paid on every invocation rather than rarely.
 func (c *OrderFiringCurrentCheck) latestControllerStartedAt(eventPath string) (time.Time, error) {
 	filter := events.Filter{Type: events.ControllerStarted}
 	startEvents, err := c.readEventTail(eventPath, filter, 1)
 	if err != nil {
 		return time.Time{}, err
-	}
-	if len(startEvents) == 0 {
-		startEvents, err = c.readEventTail(eventPath, filter, 0)
-		if err != nil {
-			return time.Time{}, err
-		}
 	}
 	var latest time.Time
 	for _, event := range startEvents {
@@ -629,7 +631,17 @@ func (c *OrderFiringCurrentCheck) latestControllerStartedAt(eventPath string) (t
 			latest = event.Ts
 		}
 	}
-	return latest, nil
+	if !latest.IsZero() {
+		return latest, nil
+	}
+	archived, found, err := events.LatestArchivedMatch(eventPath, filter)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if !found {
+		return time.Time{}, nil
+	}
+	return archived.Ts, nil
 }
 
 func (c *OrderFiringCurrentCheck) latestOrderFiredAt(evts []events.Event, order orders.Order, expected time.Duration, now time.Time) (time.Time, error) {
