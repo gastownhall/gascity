@@ -1988,16 +1988,44 @@ func hookClaimSessionName(env []string) string {
 	return strings.TrimSpace(sessionName)
 }
 
-// hookDirIsLinkedWorktree is a RED-stage placeholder (ga-k2rurt); the GREEN
-// step replaces this body with the real absolute-git-dir-vs-common-dir check.
-func hookDirIsLinkedWorktree(_ string) bool {
-	return false
+// hookDirIsLinkedWorktree reports whether dir is a linked git worktree
+// (created via `git worktree add`) as opposed to the repository's main
+// worktree. A linked worktree's absolute git-dir is its own
+// `<common>/worktrees/<name>` while its common-dir still points at the
+// shared `<common>` directory the main worktree also reports as its git-dir;
+// the two coincide only in the main worktree. `--git-common-dir` can print a
+// path relative to dir (observed from the main worktree), so it is resolved
+// to absolute against dir before comparing. Any git error (dir is not a
+// repository, git missing, etc.) returns false — fail closed, so a claim
+// never attributes a branch to a worktree it can't positively confirm dir
+// owns (ga-k2rurt: a main/rig-root dir's HEAD branch was being stamped onto
+// every bead claimed through it).
+func hookDirIsLinkedWorktree(dir string) bool {
+	gitDirOut, err := exec.Command("git", "-C", dir, "rev-parse", "--absolute-git-dir").Output()
+	if err != nil {
+		return false
+	}
+	commonDirOut, err := exec.Command("git", "-C", dir, "rev-parse", "--git-common-dir").Output()
+	if err != nil {
+		return false
+	}
+	gitDir := strings.TrimSpace(string(gitDirOut))
+	commonDir := strings.TrimSpace(string(commonDirOut))
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(dir, commonDir)
+	}
+	return filepath.Clean(gitDir) != filepath.Clean(commonDir)
 }
 
 // hookResolveWorkBranch returns the current git branch of dir, or "" when dir
-// is not a worktree or HEAD is detached (no meaningful branch to stamp).
+// is not a linked worktree, HEAD is detached, or dir has no meaningful branch
+// to stamp. The linked-worktree guard keeps a claim from attributing the main
+// worktree's (or a shared rig root's) HEAD branch to the claiming session.
 func hookResolveWorkBranch(dir string) string {
 	if strings.TrimSpace(dir) == "" {
+		return ""
+	}
+	if !hookDirIsLinkedWorktree(dir) {
 		return ""
 	}
 	out, err := exec.Command("git", "-C", dir, "rev-parse", "--abbrev-ref", "HEAD").Output()
