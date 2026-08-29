@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worktree"
 )
 
 func intPtr(n int) *int { return &n }
@@ -846,6 +847,35 @@ func TestComputePoolDesiredStates_ScaleCheckMerge(t *testing.T) {
 		if r.Tier != "new" {
 			t.Errorf("request tier = %q, want new", r.Tier)
 		}
+	}
+}
+
+func TestComputePoolDesiredStatesCarriesWorktreeOwnerEvidence(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "rig", intPtr(1), 0)},
+	}
+	spec := &worktree.Spec{BeadID: "gc-test", Owner: "gc-sling"}
+	result := computePoolDesiredStates(
+		cfg,
+		nil,
+		nil,
+		map[string]int{"rig/claude": 1},
+		map[string]scaleCheckDemand{
+			"rig/claude": {
+				WorkBeadIDs:    []string{"gc-test"},
+				StoreRefs:      map[string]string{"gc-test": "rig:gascity"},
+				WorktreeSpecs:  map[string]*worktree.Spec{"gc-test": spec},
+				WorktreeErrors: map[string]string{"other": "ignored"},
+			},
+		},
+		nil,
+	)
+	if len(result) != 1 || len(result[0].Requests) != 1 {
+		t.Fatalf("result = %+v, want one new request", result)
+	}
+	request := result[0].Requests[0]
+	if request.WorktreeSpec != spec || request.WorktreeError != "" {
+		t.Fatalf("request owner evidence = spec %+v error %q, want exact spec and no error", request.WorktreeSpec, request.WorktreeError)
 	}
 }
 

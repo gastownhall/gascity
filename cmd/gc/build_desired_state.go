@@ -25,6 +25,7 @@ import (
 	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
+	"github.com/gastownhall/gascity/internal/worktree"
 )
 
 // storeScopedBeadKey identifies an assigned-work bead by its store ref and ID.
@@ -175,12 +176,14 @@ type defaultScaleCheckTarget struct {
 }
 
 type scaleCheckDemand struct {
-	Count       int
-	WorkBeadIDs []string
-	Titles      map[string]string
-	Packs       map[string]string
-	Workspaces  map[string]string
-	StoreRefs   map[string]string
+	Count          int
+	WorkBeadIDs    []string
+	Titles         map[string]string
+	Packs          map[string]string
+	Workspaces     map[string]string
+	StoreRefs      map[string]string
+	WorktreeSpecs  map[string]*worktree.Spec
+	WorktreeErrors map[string]string
 	// ParentSIDs maps work-bead id → gc.brain_parent_sid, carrying the fork
 	// parent through to the new pool session bead so the launch path can fork
 	// the warm arm off its pre-built brain.
@@ -1891,6 +1894,18 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 				entry.StoreRefs = make(map[string]string)
 			}
 			entry.StoreRefs[b.ID] = group.storeKey
+			spec, specErr := worktreeSpecForBead(b, group.storeKey)
+			if specErr != nil {
+				if entry.WorktreeErrors == nil {
+					entry.WorktreeErrors = make(map[string]string)
+				}
+				entry.WorktreeErrors[b.ID] = specErr.Error()
+			} else if spec != nil {
+				if entry.WorktreeSpecs == nil {
+					entry.WorktreeSpecs = make(map[string]*worktree.Spec)
+				}
+				entry.WorktreeSpecs[b.ID] = spec
+			}
 			if parentSID := strings.TrimSpace(b.Metadata[beadmeta.BrainParentSIDMetadataKey]); parentSID != "" {
 				if entry.ParentSIDs == nil {
 					entry.ParentSIDs = make(map[string]string)
@@ -1926,6 +1941,12 @@ func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scale
 	if existing.ParentSIDs == nil && len(incoming.ParentSIDs) > 0 {
 		existing.ParentSIDs = make(map[string]string, len(incoming.ParentSIDs))
 	}
+	if existing.WorktreeSpecs == nil && len(incoming.WorktreeSpecs) > 0 {
+		existing.WorktreeSpecs = make(map[string]*worktree.Spec, len(incoming.WorktreeSpecs))
+	}
+	if existing.WorktreeErrors == nil && len(incoming.WorktreeErrors) > 0 {
+		existing.WorktreeErrors = make(map[string]string, len(incoming.WorktreeErrors))
+	}
 	for _, id := range incoming.WorkBeadIDs[:limit] {
 		if strings.TrimSpace(id) == "" {
 			continue
@@ -1946,6 +1967,16 @@ func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scale
 		if incoming.ParentSIDs != nil {
 			if sid := incoming.ParentSIDs[id]; sid != "" {
 				existing.ParentSIDs[id] = sid
+			}
+		}
+		if incoming.WorktreeSpecs != nil {
+			if spec := incoming.WorktreeSpecs[id]; spec != nil {
+				existing.WorktreeSpecs[id] = spec
+			}
+		}
+		if incoming.WorktreeErrors != nil {
+			if worktreeErr := incoming.WorktreeErrors[id]; worktreeErr != "" {
+				existing.WorktreeErrors[id] = worktreeErr
 			}
 		}
 	}
@@ -3333,7 +3364,10 @@ func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qu
 	if info.ID == "" {
 		return info, nil
 	}
-	workDir := poolTriggerWorkDir(bp, cfgAgent, qualifiedName, request)
+	workDir, err := verifiedPoolTriggerWorkDir(bp, cfgAgent, qualifiedName, request)
+	if err != nil {
+		return info, err
+	}
 	patch := computePoolTriggerBindingPatch(info, request, workDir)
 	if len(patch) == 0 {
 		return info, nil
@@ -3430,11 +3464,36 @@ func bindNamedSessionTriggerBead(store beads.Store, info session.Info, cityName 
 	return sessionFrontDoor(store).UpdateMetadataInfo(info, patch)
 }
 
+func verifiedPoolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, request SessionRequest) (string, error) {
+	if strings.TrimSpace(request.WorktreeError) != "" {
+		return "", fmt.Errorf("pool trigger worktree evidence invalid: %s", request.WorktreeError)
+	}
+	if request.WorktreeSpec == nil {
+		return poolTriggerWorkDir(bp, cfgAgent, qualifiedName, request), nil
+	}
+	spec := *request.WorktreeSpec
+	workID := strings.TrimSpace(request.WorkBeadID)
+	if workID == "" || strings.TrimSpace(spec.BeadID) != workID {
+		return "", fmt.Errorf("pool trigger worktree bead %q does not match request bead %q", spec.BeadID, workID)
+	}
+	storeRef := strings.TrimSpace(request.WorkStoreRef)
+	if storeRef != "" && strings.TrimSpace(spec.StoreRef) != storeRef {
+		return "", fmt.Errorf("pool trigger worktree store %q does not match request store %q", spec.StoreRef, storeRef)
+	}
+	report, err := worktree.Verify(spec)
+	if err != nil {
+		return "", fmt.Errorf("pool trigger worktree verification failed: %w", err)
+	}
+	return report.Path, nil
+}
+
 func poolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, request SessionRequest) string {
 	if bp == nil || cfgAgent == nil || strings.TrimSpace(request.WorkBeadID) == "" {
 		return ""
 	}
-	base, err := resolveConfiguredWorkDir(bp.cityPath, bp.cityName, qualifiedName, cfgAgent, bp.rigs)
+	// Pure path computation: this feeds a metadata patch, so it must never
+	// create directories (gc-r9fx dry-run purity).
+	base, err := resolveConfiguredWorkDirPath(bp.cityPath, bp.cityName, qualifiedName, cfgAgent, bp.rigs)
 	if err != nil || strings.TrimSpace(base) == "" {
 		return ""
 	}
@@ -4185,7 +4244,11 @@ func selectOrPlanPoolSessionBead(
 		return session.Info{}, 0, nil, err
 	}
 	_, qualifiedInstance, poolSlot := poolDesiredRequestIdentity(cfgAgent, slot)
-	metadata := poolTriggerMetadata(bp, cfgAgent, qualifiedInstance, request)
+	metadata, err := poolTriggerMetadata(bp, cfgAgent, qualifiedInstance, request)
+	if err != nil {
+		delete(usedSlots, slot)
+		return session.Info{}, 0, nil, err
+	}
 
 	if bp.poolScaleCheckPartialTemplates[template] {
 		delete(usedSlots, slot)
@@ -4421,10 +4484,10 @@ func claimFreshPoolSlotInfo(bp *agentBuildParams, cfgAgent *config.Agent, usedSl
 	return 0, fmt.Errorf("%w: pool template %q has no free concrete slot", errPoolSessionNameUnavailable, cfgAgent.QualifiedName())
 }
 
-func poolTriggerMetadata(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, request SessionRequest) map[string]string {
+func poolTriggerMetadata(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, request SessionRequest) (map[string]string, error) {
 	workID := strings.TrimSpace(request.WorkBeadID)
 	if workID == "" {
-		return nil
+		return nil, nil
 	}
 	metadata := map[string]string{
 		beadmeta.TriggerBeadIDMetadataKey: workID,
@@ -4441,11 +4504,15 @@ func poolTriggerMetadata(bp *agentBuildParams, cfgAgent *config.Agent, qualified
 	if workspace := packWorkspaceSlug(request); workspace != "" {
 		metadata[beadmeta.PackWorkspaceMetadataKey] = workspace
 	}
-	if workDir := poolTriggerWorkDir(bp, cfgAgent, qualifiedName, request); workDir != "" {
+	workDir, err := verifiedPoolTriggerWorkDir(bp, cfgAgent, qualifiedName, request)
+	if err != nil {
+		return nil, err
+	}
+	if workDir != "" {
 		metadata[beadmeta.WorkDirMetadataKey] = workDir
 		metadata[beadmeta.LegacyWorkDirMetadataKey] = workDir
 	}
-	return metadata
+	return metadata, nil
 }
 
 // executePlannedPoolSessionBeadCreate materializes a pool session bead from a
