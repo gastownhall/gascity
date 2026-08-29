@@ -5,6 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -604,5 +607,131 @@ func TestDoHookClaimCurrentClaimStampFailureDoesNotFailClaim(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "recording current claim hw-err on session mc-sess1") {
 		t.Errorf("stderr = %q, want the failed back-channel write surfaced", stderr.String())
+	}
+}
+
+// initGitRepoT creates a real git repository at dir with a single commit on
+// branch, so hookResolveWorkBranch / hookDirIsLinkedWorktree tests exercise
+// actual git plumbing (main-vs-linked worktree detection) instead of a mocked
+// branch string. dir need not exist yet — `git init` creates it.
+func initGitRepoT(t *testing.T, dir, branch string) {
+	t.Helper()
+	if out, err := exec.Command("git", "init", "--quiet", "-b", branch, dir).CombinedOutput(); err != nil {
+		t.Fatalf("git init %s: %v\n%s", dir, err, out)
+	}
+	commit := exec.Command("git", "-C", dir,
+		"-c", "user.email=test@example.com", "-c", "user.name=test",
+		"commit", "--allow-empty", "--quiet", "-m", "init")
+	if out, err := commit.CombinedOutput(); err != nil {
+		t.Fatalf("git -C %s commit: %v\n%s", dir, err, out)
+	}
+}
+
+// addLinkedWorktreeT adds a linked worktree at worktreeDir off repoDir on a
+// new branch. worktreeDir must not already exist — `git worktree add` creates it.
+func addLinkedWorktreeT(t *testing.T, repoDir, worktreeDir, branch string) {
+	t.Helper()
+	cmd := exec.Command("git", "-C", repoDir, "worktree", "add", "--quiet", "-b", branch, worktreeDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git -C %s worktree add %s: %v\n%s", repoDir, worktreeDir, err, out)
+	}
+}
+
+// TestHookDirIsLinkedWorktree pins hookDirIsLinkedWorktree's exact contract:
+// false for the repository's own main worktree, true for a linked worktree
+// added via `git worktree add`, and false (fail closed) when dir is not a git
+// repository at all. A claim must never attribute a branch to dir's worktree
+// unless it can positively confirm dir owns that worktree — ga-k2rurt's bug
+// was exactly this: a main-worktree dir's HEAD branch got stamped as if it
+// were the claiming session's own branch.
+func TestHookDirIsLinkedWorktree(t *testing.T) {
+	base := t.TempDir()
+	repoDir := filepath.Join(base, "repo")
+	initGitRepoT(t, repoDir, "main")
+
+	worktreeDir := filepath.Join(base, "linked")
+	addLinkedWorktreeT(t, repoDir, worktreeDir, "feature-branch")
+
+	notARepo := filepath.Join(base, "not-a-repo")
+	if err := os.Mkdir(notARepo, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", notARepo, err)
+	}
+
+	tests := []struct {
+		name string
+		dir  string
+		want bool
+	}{
+		{"main worktree", repoDir, false},
+		{"linked worktree", worktreeDir, true},
+		{"not a git repository", notARepo, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hookDirIsLinkedWorktree(tt.dir); got != tt.want {
+				t.Fatalf("hookDirIsLinkedWorktree(%q) = %v, want %v", tt.dir, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDoHookClaimSkipsWorkBranchStampForMainWorktree exercises the real
+// hookResolveWorkBranch (not a mocked branch string) with dir pointed at a
+// repository's main worktree. This pins the ga-k2rurt fix: a claim run from
+// the main/rig-root worktree must not stamp gc.work_branch at all, since that
+// worktree's HEAD branch is not the claiming session's own branch.
+func TestDoHookClaimSkipsWorkBranchStampForMainWorktree(t *testing.T) {
+	repoDir := filepath.Join(t.TempDir(), "repo")
+	initGitRepoT(t, repoDir, "test/some-unrelated-branch")
+
+	spy := &stampMetaSpy{}
+	ops := poolClaimOps(
+		`[{"id":"hw-main","status":"open","metadata":{"gc.routed_to":"worker"}}]`,
+		map[string]string{"gc.routed_to": "worker"},
+		"unused-branch-arg", // overridden below with the real resolver
+		spy,
+	)
+	ops.ResolveWorkBranch = hookResolveWorkBranch
+
+	var stdout, stderr bytes.Buffer
+	if code := doHookClaim("bd ready --json", repoDir, poolClaimOpts(), ops, &stdout, &stderr); code != 0 {
+		t.Fatalf("doHookClaim = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if spy.calls != 1 {
+		t.Fatalf("StampWorkMeta calls = %d, want 1", spy.calls)
+	}
+	if branch, ok := spy.patch[beadmeta.WorkBranchMetadataKey]; ok {
+		t.Fatalf("patch[gc.work_branch] = %q, want key absent for a main-worktree dir", branch)
+	}
+}
+
+// TestDoHookClaimStampsWorkBranchForLinkedWorktree is the positive
+// counterpart: a claim run with dir pointed at a real linked worktree still
+// stamps gc.work_branch with that worktree's actual current branch.
+func TestDoHookClaimStampsWorkBranchForLinkedWorktree(t *testing.T) {
+	base := t.TempDir()
+	repoDir := filepath.Join(base, "repo")
+	initGitRepoT(t, repoDir, "main")
+	worktreeDir := filepath.Join(base, "linked")
+	addLinkedWorktreeT(t, repoDir, worktreeDir, "builder/hw-linked")
+
+	spy := &stampMetaSpy{}
+	ops := poolClaimOps(
+		`[{"id":"hw-linked","status":"open","metadata":{"gc.routed_to":"worker"}}]`,
+		map[string]string{"gc.routed_to": "worker"},
+		"unused-branch-arg", // overridden below with the real resolver
+		spy,
+	)
+	ops.ResolveWorkBranch = hookResolveWorkBranch
+
+	var stdout, stderr bytes.Buffer
+	if code := doHookClaim("bd ready --json", worktreeDir, poolClaimOpts(), ops, &stdout, &stderr); code != 0 {
+		t.Fatalf("doHookClaim = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if spy.calls != 1 {
+		t.Fatalf("StampWorkMeta calls = %d, want 1", spy.calls)
+	}
+	if got := spy.patch[beadmeta.WorkBranchMetadataKey]; got != "builder/hw-linked" {
+		t.Fatalf("patch[gc.work_branch] = %q, want %q", got, "builder/hw-linked")
 	}
 }

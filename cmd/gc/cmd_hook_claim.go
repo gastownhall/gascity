@@ -1988,6 +1988,12 @@ func hookClaimSessionName(env []string) string {
 	return strings.TrimSpace(sessionName)
 }
 
+// hookDirIsLinkedWorktree is a RED-stage placeholder (ga-k2rurt); the GREEN
+// step replaces this body with the real absolute-git-dir-vs-common-dir check.
+func hookDirIsLinkedWorktree(_ string) bool {
+	return false
+}
+
 // hookResolveWorkBranch returns the current git branch of dir, or "" when dir
 // is not a worktree or HEAD is detached (no meaningful branch to stamp).
 func hookResolveWorkBranch(dir string) string {
