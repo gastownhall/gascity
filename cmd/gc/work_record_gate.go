@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/workrecord"
 )
 
 // Work-record close gate (ADR-0009). Closing a work bead through the SDK close
@@ -73,16 +74,11 @@ func workRecordEnforceEnabled() bool {
 }
 
 // validWorkOutcome reports whether v is one of the four typed work-record close
-// dispositions. The vocabulary is owned here (the consumer), not in beadmeta,
-// per that package's data-only convention.
+// dispositions. Delegates to internal/workrecord, which also backs
+// `gc analyze work-record`; the vocabulary is owned by the consumer, not by
+// beadmeta, per that package's data-only convention.
 func validWorkOutcome(v string) bool {
-	switch v {
-	case beadmeta.WorkOutcomeShipped, beadmeta.WorkOutcomeNoOp,
-		beadmeta.WorkOutcomeBlocked, beadmeta.WorkOutcomeAbandoned:
-		return true
-	default:
-		return false
-	}
+	return workrecord.ValidOutcome(v)
 }
 
 // isWorkRecordGatedBead reports whether the work-record close contract applies
@@ -91,14 +87,9 @@ func validWorkOutcome(v string) bool {
 // workflow roots, scope/run/check/drain steps, etc.) or non-task beads (convoy,
 // message). Those use the disjoint control-plane gc.outcome vocabulary and are
 // closed by the dispatch engine, not by a worker reporting a work outcome.
+// Delegates to internal/workrecord, which also backs `gc analyze work-record`.
 func isWorkRecordGatedBead(bead beads.Bead) bool {
-	if t := strings.TrimSpace(bead.Type); t != "" && t != "task" {
-		return false
-	}
-	if strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]) != "" {
-		return false
-	}
-	return true
+	return workrecord.IsGatedBead(bead)
 }
 
 // validateWorkRecordOnClose checks bead against the typed work-record contract
