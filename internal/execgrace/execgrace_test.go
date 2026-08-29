@@ -55,6 +55,7 @@ func TestMonitorIdleTimeout(t *testing.T) {
 // deadline with no actual stall, producing a spurious ErrIdle. The bubble
 // removes that dependence on real elapsed time and OS scheduling entirely.
 func TestMonitorOutputResetsIdle(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		m := NewMonitor(context.Background(), 200*time.Millisecond, 0)
 		defer m.Stop()
