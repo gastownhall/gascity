@@ -3384,9 +3384,20 @@ func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qu
 	}
 	boundInfo, err := sessionFrontDoor(bp.beadStore).UpdateMetadataInfo(info, patch)
 	if err != nil {
-		return info, err
+		return info, bindWriteFailure(request, err)
 	}
 	return boundInfo, nil
+}
+
+// bindWriteFailure marks a failed binding write on a managed-worktree
+// request. The verified workspace never reached the session bead, so the
+// stamped binding still names the previous bead's work dir and the caller
+// must skip the item rather than reuse it.
+func bindWriteFailure(request SessionRequest, err error) error {
+	if request.WorktreeSpec == nil {
+		return err
+	}
+	return fmt.Errorf("%w: binding write failed: %w", errPoolTriggerWorktreeEvidence, err)
 }
 
 // namedTriggerRefIsSameStore reports whether a named session's stamped

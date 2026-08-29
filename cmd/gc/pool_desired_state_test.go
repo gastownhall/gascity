@@ -2952,3 +2952,27 @@ func TestVerifiedPoolTriggerWorkDirMarksEvidenceFailures(t *testing.T) {
 		t.Errorf("bead mismatch err = %v, want errPoolTriggerWorktreeEvidence", err)
 	}
 }
+
+// A failed binding write on a managed-worktree request leaves the session
+// bead stamped with the previous bead's work dir, so it is marked as an
+// evidence failure and skipped rather than reused. An unmanaged request
+// keeps the ordinary continue-without-trigger-env path.
+func TestBindWriteFailureMarksManagedRequests(t *testing.T) {
+	cause := errors.New("store write failed")
+
+	managed := bindWriteFailure(SessionRequest{WorktreeSpec: &worktree.Spec{BeadID: "gc-a"}}, cause)
+	if !errors.Is(managed, errPoolTriggerWorktreeEvidence) {
+		t.Errorf("managed bind write failure = %v, want the evidence sentinel", managed)
+	}
+	if !errors.Is(managed, cause) {
+		t.Errorf("managed bind write failure lost its cause: %v", managed)
+	}
+
+	unmanaged := bindWriteFailure(SessionRequest{}, cause)
+	if errors.Is(unmanaged, errPoolTriggerWorktreeEvidence) {
+		t.Errorf("unmanaged bind write failure = %v, want no evidence sentinel", unmanaged)
+	}
+	if !errors.Is(unmanaged, cause) {
+		t.Errorf("unmanaged bind write failure lost its cause: %v", unmanaged)
+	}
+}
