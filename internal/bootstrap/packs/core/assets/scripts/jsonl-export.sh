@@ -462,16 +462,33 @@ clear_pending_spike_alert() {
     )"
 }
 
+# The percentage check below takes the absolute value, so this alert fires on a
+# large drop just as readily as on a large rise. Say which one happened. The
+# old subject called every change a "spike" and printed the delta unsigned, so
+# a 30% drop (prev: 290, current: 202) read as 30% growth and cost a reader
+# real time working out which direction the count had moved. Direction is
+# derived from the counts rather than from the delta, so the retry path — which
+# reloads the delta from state as an unsigned number — words it the same way.
 send_spike_alert() {
     local db="$1"
     local prev_count="$2"
     local current_count="$3"
     local delta="$4"
     local threshold="$5"
+    local direction="change"
+    local signed_delta="$delta"
+
+    if [ "$current_count" -lt "$prev_count" ]; then
+        direction="drop"
+        signed_delta="-$delta"
+    elif [ "$current_count" -gt "$prev_count" ]; then
+        direction="rise"
+        signed_delta="+$delta"
+    fi
 
     "$ESCALATE_SCRIPT" \
-        --subject "ESCALATION: JSONL spike detected [HIGH]" \
-        --message "Database: $db, prev: $prev_count, current: $current_count, delta: ${delta}%, threshold: ${threshold}%" \
+        --subject "ESCALATION: JSONL row-count $direction [HIGH]" \
+        --message "Database: $db, prev: $prev_count, current: $current_count, delta: ${signed_delta}%, threshold: ${threshold}%" \
         2>/dev/null
 }
 
