@@ -920,7 +920,7 @@ func ensureDrainWorkflowBlocksOn(store beads.Store, rootID, blockerID string) er
 	if rootID == "" || blockerID == "" || rootID == blockerID {
 		return nil
 	}
-	workflowBeads, err := listByWorkflowRoot(store, rootID)
+	workflowBeads, err := beads.DirectMembers(store, rootID)
 	if err != nil {
 		return err
 	}
@@ -942,7 +942,7 @@ func ensureDrainWorkflowBlocksOn(store beads.Store, rootID, blockerID string) er
 // ensureDrainRowDependencyProjection before this repair supersedes it.
 func repairDrainWorkflowSourceMemberDeps(store beads.Store, manifest drainManifest, memberID, rootID string) error {
 	manifestMembers := drainManifestMemberIDs(manifest)
-	workflowBeads, err := listByWorkflowRoot(store, rootID)
+	workflowBeads, err := beads.DirectMembers(store, rootID)
 	if err != nil {
 		return err
 	}

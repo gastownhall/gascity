@@ -37,6 +37,7 @@ func TestRelocatedClassRefusalNamesEverythingAnOperatorNeeds(t *testing.T) {
 		"cannot match here",                 // stated as a property of the prefix, not of this query's result
 		"gc beads show <id>",                // the verb that is actually class-routed
 		"GET /v0/city/{cityName}/bead/{id}", // and the route it uses
+		"gc ready --metadata-field",         // the SET-returning escape, for a refused projection
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("refusal is missing %q:\n%v", want, err)
@@ -72,6 +73,50 @@ func TestRelocatedClassRefusalDoesNotRecommendABlindVerb(t *testing.T) {
 func TestRelocatedClassRefusalIsNilWhenNothingMatched(t *testing.T) {
 	if err := RelocatedClassRefusal("bd sql", nil); err != nil {
 		t.Fatalf("RelocatedClassRefusal(nil) = %v, want nil", err)
+	}
+}
+
+// TestRelocatedClassRefusalStatesTheLimitsOfTheSetEscape is the honesty pin on
+// the one line of this message that is steering rather than diagnosis.
+//
+// Naming `gc ready --metadata-field` and stopping there sends an operator to a
+// command that answers a NARROWER question: with no --status it returns only
+// claimable work, so a molecule whose steps are in flight, blocked or closed
+// comes back `[]` — the refused bug, one command over, from the command this
+// message recommended. --status takes exactly one of open/in_progress/blocked/
+// closed (cmd/gc/cmd_ready.go readyKnownStatuses): no --all, no comma list, and
+// `deferred` is not selectable at all, so `bd list --all`'s question has no
+// federated spelling yet.
+//
+// A refusal that oversells its escape is the same failure as the silent empty
+// it exists to remove: a confident answer to a question that was not asked. So
+// the message states the limit, and this test fails if the statement is dropped.
+func TestRelocatedClassRefusalStatesTheLimitsOfTheSetEscape(t *testing.T) {
+	msg := RelocatedClassRefusal("bd list", []RelocatedClass{graphRelocated()}).Error()
+	for _, want := range []string{
+		"with no --status it returns only claimable work",
+		"exactly one of open, in_progress, blocked, closed",
+		"deferred is not selectable",
+		"no federated equivalent of `bd list --all`",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("the steering does not state %q, so it oversells `gc ready` as the way out:\n%s", want, msg)
+		}
+	}
+}
+
+// TestRelocatedClassRefusalLeavesTheOverrideToTheCLI pins where the escape
+// hatch is named, and why it is not named here.
+//
+// This string is also what BdStore's id-scoped guard returns, and that path
+// honors no environment variable. Naming GC_BD_ALLOW_RELOCATED_CLASS_READ in
+// the shared text would advertise an escape that does not work on half the
+// paths that print it — a false statement of the same kind this guard exists to
+// stop. cmd/gc appends it at the one seam where it is true.
+func TestRelocatedClassRefusalLeavesTheOverrideToTheCLI(t *testing.T) {
+	msg := RelocatedClassRefusal("release-if-current gcg-abc123", []RelocatedClass{graphRelocated()}).Error()
+	if strings.Contains(msg, "GC_BD_ALLOW_RELOCATED_CLASS_READ") {
+		t.Errorf("the shared refusal names a `gc bd` override that does not apply to the store guard:\n%s", msg)
 	}
 }
 
@@ -156,6 +201,84 @@ func TestRelocatedClassesInQueryExprMatchesTheValueSide(t *testing.T) {
 	}
 }
 
+// TestRelocatedClassesInSelectorMatchesOnlyThePredicateValue covers the third
+// dialect, and the one that produced the measurement this guard family was
+// opened for: `gc bd list --metadata-field gc.root_bead_id=<gcg root>` answered
+// `[]` with exit 0 on a converged split city. `list` is a PROJECTION — bd runs
+// it successfully against the work ledger and matches nothing, because no gcg-
+// row is there to match — so the empty array is a confident wrong answer about
+// a class the ledger does not serve.
+//
+// The negatives matter MORE than the positives here, and they are the reason
+// this dialect does not reuse atQueryValueStart. `bd list` accepts no
+// positional arguments, so every token this scan sees is some flag's VALUE; an
+// offset-0 anchor would therefore make every free-text selector id-shaped and
+// refuse `--title-contains gcg-abc123`, a LIKE-contains over this ledger's own
+// title column that bd answers correctly and often non-emptily. So the whole
+// negative half of this table is a bare or embedded id in a value with no `=`
+// in front of it, in every spelling an operator produces — including the ones
+// with punctuation before the id, which a prose-only negative would miss.
+func TestRelocatedClassesInSelectorMatchesOnlyThePredicateValue(t *testing.T) {
+	relocated := []RelocatedClass{graphRelocated()}
+	for name, tc := range map[string]struct {
+		selector string
+		want     bool
+	}{
+		"metadata field on the root id": {"gc.root_bead_id=gcg-abc123", true},
+		"metadata field on a step ref":  {"gc.step_ref=gcg-abc123.mol.work", true},
+		"quoted value":                  {`gc.root_bead_id="gcg-abc123"`, true},
+		"single-quoted value":           {"gc.root_bead_id='gcg-abc123'", true},
+		"spaced predicate":              {"gc.root_bead_id= gcg-abc123", true},
+		"uppercase":                     {"gc.root_bead_id=GCG-ABC123", true},
+
+		"metadata field on a work root":  {"gc.root_bead_id=demo-abc123", false},
+		"metadata key with no value":     {"gc.root_bead_id", false},
+		"prefix continuation":            {"gc.root_bead_id=gcgx-1", false},
+		"prefix without the hyphen":      {"gc.root_bead_id=gcgabc", false},
+		"a status the work store serves": {"open", false},
+		"empty":                          {"", false},
+
+		// Every one of these is a whole free-text selector value — the shape a
+		// `--title-contains`/`--label`/`--assignee` search arrives in. All of
+		// them refused before this anchor existed.
+		"bare id as a whole selector value": {"gcg-abc123", false},
+		"bare prefix":                       {"gcg", false},
+		"label glob":                        {"gcg-*", false},
+		"title search mentioning an id":     {"fix gcg-1 regression", false},
+		"prose with a paren before the id":  {"fix (gcg-1) regression", false},
+		"prose with a comma before the id":  {"regressions: gcg-1, gcg-2", false},
+		"prose with a quote before the id":  {"root is 'gcg-1' here", false},
+		"prose with a colon before the id":  {"root: gcg-1", false},
+		"prose with an angle before the id": {"<gcg-1> is stuck", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := len(RelocatedClassesInSelector(relocated, tc.selector)) > 0; got != tc.want {
+				t.Fatalf("RelocatedClassesInSelector(%q) matched = %v, want %v", tc.selector, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRelocatedClassesInSelectorDivergesFromTheQueryDialect states the split
+// between the two dialects as a fact rather than leaving it implied by two
+// tables that happen to disagree.
+//
+// `bd query` takes ONE expression, so a bare term at offset 0 is a value
+// position and `bd query gcg-1` is an id-scoped read. A selector flag has
+// already consumed its own token, so the same text arriving here is one flag's
+// search string. Same characters, different question — and reusing the query
+// anchor for selectors is exactly the bug this pins.
+func TestRelocatedClassesInSelectorDivergesFromTheQueryDialect(t *testing.T) {
+	relocated := []RelocatedClass{graphRelocated()}
+	const bare = "gcg-abc123"
+	if len(RelocatedClassesInQueryExpr(relocated, bare)) == 0 {
+		t.Errorf("RelocatedClassesInQueryExpr(%q) did not match; a bare term IS a value in the query DSL", bare)
+	}
+	if got := RelocatedClassesInSelector(relocated, bare); len(got) != 0 {
+		t.Errorf("RelocatedClassesInSelector(%q) matched %v; a whole-token selector value is a search string, and refusing it breaks `--title-contains`", bare, got)
+	}
+}
+
 // TestRelocatedClassesInSQLIsInertWithoutRelocation is the single-store
 // compatibility proof for the text scanner: the exact query that a split city
 // refuses is not even examined when nothing is relocated.
@@ -165,6 +288,9 @@ func TestRelocatedClassesInSQLIsInertWithoutRelocation(t *testing.T) {
 	}
 	if got := RelocatedClassesInQueryExpr(nil, "id=gcg-abc"); len(got) != 0 {
 		t.Fatalf("RelocatedClassesInQueryExpr with no relocated classes matched %v, want none", got)
+	}
+	if got := RelocatedClassesInSelector(nil, "gc.root_bead_id=gcg-abc"); len(got) != 0 {
+		t.Fatalf("RelocatedClassesInSelector with no relocated classes matched %v, want none", got)
 	}
 }
 

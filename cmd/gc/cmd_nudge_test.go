@@ -2422,6 +2422,46 @@ func TestCmdNudgeStatusJSON(t *testing.T) {
 	}
 }
 
+// TestCmdNudgeStatusSurfacesDispatchSkips verifies `gc nudge status` reads
+// back the dispatch tick's persisted skip-reason counters (recorded by
+// recordNudgeDispatchSkips, called from dispatchAllQueuedNudges) in both
+// --json and text output. Status is city-wide, not agent-scoped — the
+// point is to give an operator a fast signal that the dispatcher IS
+// silently skipping something, before they go digging through GC_DEBUG
+// logs for which agent and why.
+func TestCmdNudgeStatusSurfacesDispatchSkips(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	cityDir := t.TempDir()
+	writeNamedSessionCityTOML(t, cityDir)
+	t.Setenv("GC_CITY", cityDir)
+
+	if err := recordNudgeDispatchSkips(cityDir, map[string]int64{"not-running": 3, "observe-error": 1}); err != nil {
+		t.Fatalf("recordNudgeDispatchSkips: %v", err)
+	}
+
+	var jsonOut, jsonErr bytes.Buffer
+	code := cmdNudgeStatus([]string{"mayor"}, true, &jsonOut, &jsonErr)
+	if code != 0 {
+		t.Fatalf("cmdNudgeStatus --json = %d, want 0; stderr=%s", code, jsonErr.String())
+	}
+	var result nudgeStatusJSON
+	if err := json.Unmarshal(jsonOut.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, jsonOut.String())
+	}
+	if result.DispatchSkips["not-running"] != 3 || result.DispatchSkips["observe-error"] != 1 {
+		t.Fatalf("dispatch_skips = %#v, want not-running=3 observe-error=1", result.DispatchSkips)
+	}
+
+	var textOut, textErr bytes.Buffer
+	code = cmdNudgeStatus([]string{"mayor"}, false, &textOut, &textErr)
+	if code != 0 {
+		t.Fatalf("cmdNudgeStatus = %d, want 0; stderr=%s", code, textErr.String())
+	}
+	if !strings.Contains(textOut.String(), "not-running=3") || !strings.Contains(textOut.String(), "observe-error=1") {
+		t.Fatalf("text status missing skip-reason lines, got: %s", textOut.String())
+	}
+}
+
 func TestTryDeliverQueuedNudgesByPollerDeliversAndAcks(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
@@ -3557,7 +3597,7 @@ func TestExistingPollerPIDRejectsUnrelatedLivePID(t *testing.T) {
 }
 
 func TestExistingPollerPIDAcceptsMatchingCitySession(t *testing.T) {
-	cityPath := t.TempDir()
+	cityPath := filepath.Join(t.TempDir(), "city with spaces")
 	sessionName := "sess-worker"
 	pidPath := nudgePollerPIDPath(cityPath, sessionName, "session-id")
 	cmd := startPollerLikeProcess(t, cityPath, "session-id")
@@ -4292,6 +4332,47 @@ func TestPruneDeadQueuedNudges_RetainsItemsWithoutBeadID(t *testing.T) {
 	}
 	if len(dead) != 1 || dead[0].ID != "n-orphan" {
 		t.Fatalf("dead = %v, want [n-orphan] retained (no bead record)", dead)
+	}
+}
+
+func TestPruneDeadQueuedNudges_PrunesItemsWhoseBeadWasReaped(t *testing.T) {
+	// Regression (gastownhall/gascity#5278): a dead-letter item whose BeadID
+	// once pointed at a real bead, but that bead was later reaped by an
+	// unrelated retention sweep (wisp compaction etc.), must still become
+	// prunable by age. The repair path can never re-confirm "found +
+	// terminal" for a bead that no longer exists, so before the fix such
+	// items were retained forever and paid a store lookup on every sweep.
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	now := time.Now().UTC()
+	item := newQueuedNudgeWithOptions("worker", "stale dead letter", "session", now.Add(-3*time.Hour), queuedNudgeOptions{
+		ID:        "n-dead-reaped",
+		SessionID: "gc-worker",
+	})
+	beadID, created, err := ensureQueuedNudgeBead(store, item)
+	if err != nil {
+		t.Fatalf("ensureQueuedNudgeBead: %v", err)
+	}
+	if !created {
+		t.Fatal("expected backing nudge bead to be created")
+	}
+	item.BeadID = beadID
+	item.LastError = "expired"
+	item.DeadAt = now.Add(-2 * time.Hour) // older than defaultQueuedNudgeDeadRetention (1h)
+
+	// Simulate the backing bead being reaped by an unrelated retention sweep,
+	// independent of the nudge queue's own lifecycle.
+	if err := store.Delete(beadID); err != nil {
+		t.Fatalf("Delete(%s): %v", beadID, err)
+	}
+
+	state := &nudgeQueueState{Dead: []queuedNudge{item}}
+	if err := pruneDeadQueuedNudges(state, nudgeFrontDoor(store), now, noMaintenanceDeadline()); err != nil {
+		t.Fatalf("pruneDeadQueuedNudges: %v", err)
+	}
+	if len(state.Dead) != 0 {
+		t.Fatalf("dead = %d, want 0 -- a dead-letter item whose bead was reaped and is past retention must still be prunable", len(state.Dead))
 	}
 }
 

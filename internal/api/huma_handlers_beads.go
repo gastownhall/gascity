@@ -129,6 +129,13 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 				// map-iteration order, so a bounded read truncated an
 				// arbitrary, per-call-different subset (#3208).
 				Sort: beads.SortCreatedDesc,
+				// Explicit tier, for the same reason as the sort and with the
+				// same failure shape: the zero value is not neutral across these
+				// legs. The work legs' bead-policy layer rewrites it to TierBoth
+				// and the unwrapped graph leg does not, so the relocated store's
+				// ephemeral rows dropped out of an authoritative-looking 200
+				// (ga-8lyxc). See beads.FederatedReadTier.
+				TierMode: beads.FederatedReadTier,
 			}
 			if !query.HasFilter() {
 				query.AllowScan = true
@@ -447,7 +454,9 @@ func beadListLegCount(ctx context.Context, store beads.Store, assignee string, i
 
 // beadListCountQuery builds the count query for the all=true list path. It
 // carries the same filters as the list query so the count matches exactly;
-// Sort and Limit are omitted because they do not affect a count.
+// Sort and Limit are omitted because they do not affect a count. The tier is
+// NOT omitted for the same reason: a count taken over a narrower tier than the
+// list it bounds advertises a Total the walk can never reach.
 func beadListCountQuery(assignee string, input *BeadListInput) beads.ListQuery {
 	q := beads.ListQuery{
 		Status:        input.Status,
@@ -456,11 +465,21 @@ func beadListCountQuery(assignee string, input *BeadListInput) beads.ListQuery {
 		Assignee:      assignee,
 		IncludeClosed: input.All,
 		Live:          input.Status == "in_progress",
+		TierMode:      beads.FederatedReadTier,
 	}
 	if !q.HasFilter() {
 		q.AllowScan = true
 	}
 	return q
+}
+
+// readyFederationQuery is the ready query every leg of the ready federation is
+// read with. It exists so the work legs and the graph leg cannot be given
+// different ones: they are read from two places in the handler below, and the
+// defect this closes was exactly the two places disagreeing about the tier
+// without either of them naming it. See beads.FederatedReadTier.
+func readyFederationQuery() beads.ReadyQuery {
+	return beads.ReadyQuery{TierMode: beads.FederatedReadTier}
 }
 
 // humaHandleBeadReady is the Huma-typed handler for GET /v0/beads/ready.
@@ -493,6 +512,11 @@ func beadListCountQuery(assignee string, input *BeadListInput) beads.ListQuery {
 //   - Failure: a rig degrades (Partial 200 + partial_errors); the graph leg
 //     does not (503, carrying any work-leg errors recorded before it). See
 //     graphPlaneUnavailable.
+//   - Tier: every leg is read at beads.FederatedReadTier, stated explicitly.
+//     A no-argument Ready() left TierMode at its zero value, which the work
+//     legs' bead-policy layer rewrote to TierBoth while the unwrapped graph leg
+//     took literally — so the relocated store's whole ephemeral tier fell out of
+//     a 200 that named no failure (ga-8lyxc).
 func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput) (*ListOutput[beads.Bead], error) {
 	bp := input.toBlockingParams()
 	if bp.isBlocking() {
@@ -509,7 +533,7 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 			return
 		}
 		pa.attempt()
-		ready, err := beads.HandlesFor(store).Live.Ready()
+		ready, err := beads.HandlesFor(store).Live.Ready(readyFederationQuery())
 		if err != nil {
 			if beads.IsPartialResult(err) && len(ready) > 0 {
 				pa.record(label, err)
@@ -554,7 +578,7 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 	// does NOT go through federate(): the graph leg has no partial tier.
 	if graph := relocatedGraphStore(s.state); graph != nil {
 		pa.attempt()
-		ready, err := beads.HandlesFor(graph).Live.Ready()
+		ready, err := beads.HandlesFor(graph).Live.Ready(readyFederationQuery())
 		if err != nil {
 			return nil, graphPlaneUnavailable("ready", err, pa.messages()...)
 		}
@@ -597,25 +621,12 @@ func (s *Server) humaHandleBeadGraph(_ context.Context, input *BeadGraphInput) (
 		return nil, apierr.InvalidRequest.Msg("rootID is required")
 	}
 
-	var root beads.Bead
-	var foundStore beads.Store
-	for _, store := range s.beadStoresForID(rootID) {
-		b, err := store.Get(rootID)
-		if err != nil {
-			if errors.Is(err, beads.ErrNotFound) {
-				continue
-			}
-			return nil, apierr.Internal.Msg(err.Error())
-		}
-		root = b
-		foundStore = store
-		break
-	}
-	if foundStore == nil {
-		return nil, apierr.BeadNotFound.Msg("bead " + rootID + " not found")
+	foundStore, root, err := s.resolveBeadOwner(rootID)
+	if err != nil {
+		return nil, err
 	}
 
-	graphBeads, parentEdges, err := collectBeadGraph(foundStore, root)
+	graphBeads, parentEdges, membership, err := collectBeadGraph(foundStore, root)
 	if err != nil {
 		return nil, apierr.Internal.Msg(err.Error())
 	}
@@ -633,9 +644,10 @@ func (s *Server) humaHandleBeadGraph(_ context.Context, input *BeadGraphInput) (
 	return &IndexOutput[BeadGraphResponse]{
 		Index: s.latestIndex(),
 		Body: BeadGraphResponse{
-			Root:  root,
-			Beads: graphBeads,
-			Deps:  deps,
+			Root:       root,
+			Beads:      graphBeads,
+			Deps:       deps,
+			Membership: membership,
 		},
 	}, nil
 }
@@ -649,51 +661,39 @@ func (s *Server) humaHandleBeadGet(_ context.Context, input *BeadGetInput) (*Ind
 		return nil, err
 	}
 
-	for _, store := range s.beadStoresForID(id) {
-		b, err := store.Get(id)
-		if err != nil {
-			if errors.Is(err, beads.ErrNotFound) {
-				continue
-			}
-			return nil, apierr.Internal.Msg(err.Error())
-		}
-		return &IndexOutput[beads.Bead]{
-			Index:     s.latestIndex(),
-			CacheAgeS: cacheAgeSeconds(cityStore),
-			Body:      b,
-		}, nil
+	_, b, err := s.resolveBeadOwner(id)
+	if err != nil {
+		return nil, err
 	}
-	return nil, apierr.BeadNotFound.Msg("bead " + id + " not found")
+	return &IndexOutput[beads.Bead]{
+		Index:     s.latestIndex(),
+		CacheAgeS: cacheAgeSeconds(cityStore),
+		Body:      b,
+	}, nil
 }
 
 // humaHandleBeadDeps is the Huma-typed handler for GET /v0/bead/{id}/deps.
 func (s *Server) humaHandleBeadDeps(_ context.Context, input *BeadDepsInput) (*IndexOutput[BeadDepsResponse], error) {
 	id := input.ID
-	for _, store := range s.beadStoresForID(id) {
-		parent, err := store.Get(id)
-		if err != nil {
-			if errors.Is(err, beads.ErrNotFound) {
-				continue
-			}
-			return nil, apierr.Internal.Msg(err.Error())
-		}
-		children, err := store.List(beads.ListQuery{
-			ParentID: id,
-			Sort:     beads.SortCreatedAsc,
-		})
-		if err != nil {
-			return nil, apierr.Internal.Msg(err.Error())
-		}
-		children = appendMetadataAttachedChildren(store, parent, children)
-		if children == nil {
-			children = []beads.Bead{}
-		}
-		return &IndexOutput[BeadDepsResponse]{
-			Index: s.latestIndex(),
-			Body:  BeadDepsResponse{Children: children},
-		}, nil
+	store, parent, err := s.resolveBeadOwner(id)
+	if err != nil {
+		return nil, err
 	}
-	return nil, apierr.BeadNotFound.Msg("bead " + id + " not found")
+	children, err := store.List(beads.ListQuery{
+		ParentID: id,
+		Sort:     beads.SortCreatedAsc,
+	})
+	if err != nil {
+		return nil, apierr.Internal.Msg(err.Error())
+	}
+	children = appendMetadataAttachedChildren(store, parent, children)
+	if children == nil {
+		children = []beads.Bead{}
+	}
+	return &IndexOutput[BeadDepsResponse]{
+		Index: s.latestIndex(),
+		Body:  BeadDepsResponse{Children: children},
+	}, nil
 }
 
 // BeadDepsResponse is the response shape for GET /v0/bead/{id}/deps.
@@ -709,25 +709,28 @@ func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInpu
 	// released on any error, so every fallible step lives in the closure.
 	b, err := withIdempotency(s.idem, "/v0/beads", input.IdempotencyKey, input.Body,
 		func() (beads.Bead, error) {
-			store := s.findStore(input.Body.Rig)
-			if store == nil {
-				return beads.Bead{}, apierr.InvalidRequest.Msg("rig is required when multiple rigs are configured")
-			}
-			assignee, err := s.normalizeRawBeadAssignee(ctx, input.Body.Assignee)
-			if err != nil {
-				return beads.Bead{}, apierr.InvalidRequest.Msg(err.Error())
-			}
-			created, err := store.Create(beads.Bead{
+			candidate := beads.Bead{
 				Title:       input.Body.Title,
 				Type:        input.Body.Type,
 				Priority:    input.Body.Priority,
-				Assignee:    assignee,
 				Description: input.Body.Description,
 				Labels:      input.Body.Labels,
 				ParentID:    input.Body.Parent,
 				Metadata:    input.Body.Metadata,
 				DeferUntil:  input.Body.DeferUntil,
-			})
+			}
+			// The store follows from the bead, not from the request: an
+			// infrastructure-class body belongs in this city's class binding
+			// wherever the caller posted it from.
+			store, err := s.createStoreForBead(candidate, input.Body.Rig)
+			if err != nil {
+				return beads.Bead{}, err
+			}
+			candidate.Assignee, err = s.normalizeRawBeadAssignee(ctx, input.Body.Assignee)
+			if err != nil {
+				return beads.Bead{}, apierr.InvalidRequest.Msg(err.Error())
+			}
+			created, err := store.Create(candidate)
 			if err != nil {
 				return beads.Bead{}, apierr.Internal.Msg(err.Error())
 			}
@@ -751,81 +754,65 @@ func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInpu
 // humaHandleBeadClose is the Huma-typed handler for POST /v0/bead/{id}/close.
 func (s *Server) humaHandleBeadClose(_ context.Context, input *BeadCloseInput) (*OKResponse, error) {
 	id := input.ID
-	for _, store := range s.beadStoresForID(id) {
-		if _, err := store.Get(id); err != nil {
-			if errors.Is(err, beads.ErrNotFound) {
-				continue
-			}
-			return nil, apierr.Internal.Msg(err.Error())
-		}
-		if err := store.Close(id); err != nil {
-			if errors.Is(err, beads.ErrNotFound) {
-				return nil, apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
-			}
-			return nil, apierr.Internal.Msg(err.Error())
-		}
-		resp := &OKResponse{}
-		resp.Body.Status = "closed"
-		return resp, nil
+	store, _, err := s.resolveBeadOwner(id)
+	if err != nil {
+		return nil, err
 	}
-	return nil, apierr.BeadNotFound.Msg("bead " + id + " not found")
+	if err := store.Close(id); err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			return nil, apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
+		}
+		return nil, apierr.Internal.Msg(err.Error())
+	}
+	resp := &OKResponse{}
+	resp.Body.Status = "closed"
+	return resp, nil
 }
 
 // humaHandleBeadReopen is the Huma-typed handler for POST /v0/bead/{id}/reopen.
 func (s *Server) humaHandleBeadReopen(_ context.Context, input *BeadReopenInput) (*OKResponse, error) {
 	id := input.ID
 
-	for _, store := range s.beadStoresForID(id) {
-		b, err := store.Get(id)
-		if err != nil {
-			if errors.Is(err, beads.ErrNotFound) {
-				continue
-			}
-			return nil, apierr.Internal.Msg(err.Error())
-		}
-		if b.Status != "closed" {
-			return nil, apierr.ConflictWrongState.Msg("conflict: bead " + id + " is not closed (status: " + b.Status + ")")
-		}
-		if err := store.Reopen(id); err != nil {
-			return nil, apierr.Internal.Msg(err.Error())
-		}
-		resp := &OKResponse{}
-		resp.Body.Status = "reopened"
-		return resp, nil
+	store, b, err := s.resolveBeadOwner(id)
+	if err != nil {
+		return nil, err
 	}
-	return nil, apierr.BeadNotFound.Msg("bead " + id + " not found")
+	if b.Status != "closed" {
+		return nil, apierr.ConflictWrongState.Msg("conflict: bead " + id + " is not closed (status: " + b.Status + ")")
+	}
+	if err := store.Reopen(id); err != nil {
+		return nil, apierr.Internal.Msg(err.Error())
+	}
+	resp := &OKResponse{}
+	resp.Body.Status = "reopened"
+	return resp, nil
 }
 
 // humaHandleBeadAssign is the Huma-typed handler for POST /v0/bead/{id}/assign.
 func (s *Server) humaHandleBeadAssign(ctx context.Context, input *BeadAssignInput) (*IndexOutput[map[string]string], error) {
 	id := input.ID
-	for _, store := range s.beadStoresForID(id) {
-		if _, err := store.Get(id); err != nil {
-			if errors.Is(err, beads.ErrNotFound) {
-				continue
-			}
-			return nil, apierr.Internal.Msg(err.Error())
-		}
-		assignee, err := s.normalizeRawBeadAssignee(ctx, input.Body.Assignee)
-		if err != nil {
-			return nil, apierr.InvalidRequest.Msg(err.Error())
-		}
-		// Once Get succeeded in this store, treat Update-ErrNotFound as a
-		// concurrent-delete race rather than "try the next store" — the bead
-		// was just there; iterating would silently apply to a different store
-		// that happens to share the ID prefix.
-		if err := store.Update(id, beads.UpdateOpts{Assignee: &assignee}); err != nil {
-			if errors.Is(err, beads.ErrNotFound) {
-				return nil, apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
-			}
-			return nil, apierr.Internal.Msg(err.Error())
-		}
-		return &IndexOutput[map[string]string]{
-			Index: s.latestIndex(),
-			Body:  map[string]string{"status": "assigned", "assignee": assignee},
-		}, nil
+	store, _, err := s.resolveBeadOwner(id)
+	if err != nil {
+		return nil, err
 	}
-	return nil, apierr.BeadNotFound.Msg("bead " + id + " not found")
+	assignee, err := s.normalizeRawBeadAssignee(ctx, input.Body.Assignee)
+	if err != nil {
+		return nil, apierr.InvalidRequest.Msg(err.Error())
+	}
+	// Once Get succeeded in the resolved store, treat Update-ErrNotFound as a
+	// concurrent-delete race rather than resolving again — the bead was just
+	// there, and a second resolution could land on a different store that
+	// happens to share the ID prefix.
+	if err := store.Update(id, beads.UpdateOpts{Assignee: &assignee}); err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			return nil, apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
+		}
+		return nil, apierr.Internal.Msg(err.Error())
+	}
+	return &IndexOutput[map[string]string]{
+		Index: s.latestIndex(),
+		Body:  map[string]string{"status": "assigned", "assignee": assignee},
+	}, nil
 }
 
 // humaHandleBeadUpdate is the Huma-typed handler for POST /v0/bead/{id}/update
@@ -861,50 +848,44 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 		opts.ParentID = &parent
 	}
 
-	for _, store := range s.beadStoresForID(id) {
-		current, err := store.Get(id)
-		if err != nil {
-			if errors.Is(err, beads.ErrNotFound) {
-				continue
-			}
-			return nil, apierr.Internal.Msg(err.Error())
-		}
-		if body.Assignee != nil {
-			assignee, err := s.normalizeRawBeadAssignee(ctx, *body.Assignee)
-			if err != nil {
-				return nil, apierr.InvalidRequest.Msg(err.Error())
-			}
-			opts.Assignee = &assignee
-		}
-		waitStatus := current.Status
-		if opts.Status != nil {
-			waitStatus = *opts.Status
-		}
-		// Once Get succeeded in this store, treat Update-ErrNotFound as a
-		// concurrent-delete race (409) rather than iterating to the next
-		// store — otherwise a delete racing with update silently applies
-		// the mutation to a different store that happens to share the ID.
-		if err := store.Update(id, opts); err != nil {
-			if errors.Is(err, beads.ErrNotFound) {
-				return nil, apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
-			}
-			return nil, apierr.Internal.Msg(err.Error())
-		}
-		if opts.ParentID != nil && current.ParentID != *opts.ParentID && waitStatus != "closed" {
-			if waiter, ok := store.(beads.ParentProjectionWaiter); ok {
-				if err := waiter.WaitForParentProjection(ctx, id, current.ParentID, *opts.ParentID); err != nil {
-					if errors.Is(err, beads.ErrParentProjectionSuperseded) {
-						return nil, apierr.ConflictConcurrentModify.Msg("conflict: bead " + id + " was reparented concurrently")
-					}
-					return nil, apierr.Internal.Msg(err.Error())
-				}
-			}
-		}
-		resp := &OKResponse{}
-		resp.Body.Status = "updated"
-		return resp, nil
+	store, current, err := s.resolveBeadOwner(id)
+	if err != nil {
+		return nil, err
 	}
-	return nil, apierr.BeadNotFound.Msg("bead " + id + " not found")
+	if body.Assignee != nil {
+		assignee, err := s.normalizeRawBeadAssignee(ctx, *body.Assignee)
+		if err != nil {
+			return nil, apierr.InvalidRequest.Msg(err.Error())
+		}
+		opts.Assignee = &assignee
+	}
+	waitStatus := current.Status
+	if opts.Status != nil {
+		waitStatus = *opts.Status
+	}
+	// Once Get succeeded in the resolved store, treat Update-ErrNotFound as a
+	// concurrent-delete race (409) rather than resolving again — otherwise a
+	// delete racing with update silently applies the mutation to a different
+	// store that happens to share the ID.
+	if err := store.Update(id, opts); err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			return nil, apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
+		}
+		return nil, apierr.Internal.Msg(err.Error())
+	}
+	if opts.ParentID != nil && current.ParentID != *opts.ParentID && waitStatus != "closed" {
+		if waiter, ok := store.(beads.ParentProjectionWaiter); ok {
+			if err := waiter.WaitForParentProjection(ctx, id, current.ParentID, *opts.ParentID); err != nil {
+				if errors.Is(err, beads.ErrParentProjectionSuperseded) {
+					return nil, apierr.ConflictConcurrentModify.Msg("conflict: bead " + id + " was reparented concurrently")
+				}
+				return nil, apierr.Internal.Msg(err.Error())
+			}
+		}
+	}
+	resp := &OKResponse{}
+	resp.Body.Status = "updated"
+	return resp, nil
 }
 
 // humaHandleBeadDelete is the Huma-typed handler for DELETE /v0/bead/{id}.
@@ -913,22 +894,17 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 // exposed through the API.
 func (s *Server) humaHandleBeadDelete(_ context.Context, input *BeadDeleteInput) (*OKResponse, error) {
 	id := input.ID
-	for _, store := range s.beadStoresForID(id) {
-		if _, err := store.Get(id); err != nil {
-			if errors.Is(err, beads.ErrNotFound) {
-				continue
-			}
-			return nil, apierr.Internal.Msg(err.Error())
-		}
-		if err := store.Close(id); err != nil {
-			if errors.Is(err, beads.ErrNotFound) {
-				return nil, apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
-			}
-			return nil, apierr.Internal.Msg(err.Error())
-		}
-		resp := &OKResponse{}
-		resp.Body.Status = "closed"
-		return resp, nil
+	store, _, err := s.resolveBeadOwner(id)
+	if err != nil {
+		return nil, err
 	}
-	return nil, apierr.BeadNotFound.Msg("bead " + id + " not found")
+	if err := store.Close(id); err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			return nil, apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
+		}
+		return nil, apierr.Internal.Msg(err.Error())
+	}
+	resp := &OKResponse{}
+	resp.Body.Status = "closed"
+	return resp, nil
 }

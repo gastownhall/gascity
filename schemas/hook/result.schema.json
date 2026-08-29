@@ -34,7 +34,8 @@
         "ready_assignment",
         "no_work",
         "claims_errored",
-        "stale_session"
+        "stale_session",
+        "non_turn_context"
       ]
     },
     "bead_id": {
@@ -98,7 +99,8 @@
             "enum": [
               "no_work",
               "claims_errored",
-              "stale_session"
+              "stale_session",
+              "non_turn_context"
             ]
           }
         }

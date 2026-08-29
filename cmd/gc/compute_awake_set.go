@@ -77,6 +77,7 @@ type AwakeSessionBead struct {
 	RestartRequested          bool      // restart_requested metadata is still active
 	ContinuationResetPending  bool      // continuation_reset_pending metadata is set
 	CurrentlyProcessingBeadID string    // work bead the session is currently processing
+	PostCreateProtected       bool      // fresh successful pool create; preferred for scaled slots during grace
 }
 
 // AwakeWorkBead represents a work bead with an assignee.
@@ -227,7 +228,7 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		if !ok || agent.Suspended {
 			continue
 		}
-		active := collectActiveBeads(input.SessionBeads, template)
+		active := collectActiveBeads(input.SessionBeads, template, input.Now)
 		filled := countAssignedScaleSlots(input.SessionBeads, input.WorkBeads, input.NamedSessions, template)
 		for _, bead := range active {
 			if filled >= count {
@@ -271,7 +272,7 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 			continue // named sessions are handled in the named-session pass
 		}
 		// collectActiveBeads already excludes DependencyOnly and Drained
-		if active := collectActiveBeads(input.SessionBeads, template); len(active) > 0 {
+		if active := collectActiveBeads(input.SessionBeads, template, input.Now); len(active) > 0 {
 			desired[active[0].SessionName] = "work-query"
 			continue
 		}
@@ -463,10 +464,11 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 
 		// Idle sleep: desired sessions idle too long should sleep.
 		// Attached, pending, pinned, mode=always named, and sessions with
-		// assigned demand work are exempt. Assigned demand work means either
-		// in_progress ownership or open work with Ready=true; blocked open
-		// assignments do not prevent idle sleep. Manual sessions within their
-		// grace period are also exempt.
+		// assigned demand work are exempt. A claimed in_progress bead also
+		// vetoes idle sleep even when blocked: blocked work does not wake an
+		// asleep owner, but it must not park the live seat that owns the claim.
+		// Blocked open assignments do not prevent idle sleep. Manual sessions
+		// within their grace period are also exempt.
 		//
 		// On_demand named sessions woken by routed/named demand
 		// ("named-demand", "routed-demand", "work-query") are also exempt:
@@ -479,14 +481,15 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		// because it has no idle reference. The "work done, no demand" drain
 		// still fires via the "on-demand:running" reason, which is NOT exempt.
 		// See #3413.
-		if decision.ShouldWake && !input.AttachedSessions[name] && !input.PendingSessions[name] && !bead.Pinned && !bead.IdleSince.IsZero() &&
+		agent, hasAgent := lookupAgent(bead.Template)
+		holdsClaimedWork := hasAgent && !agent.Suspended && sessionHasClaimedInProgressWork(input.WorkBeads, input.NamedSessions, bead)
+		if decision.ShouldWake && !input.AttachedSessions[name] && !input.PendingSessions[name] && !bead.Pinned && !holdsClaimedWork && !bead.IdleSince.IsZero() &&
 			!isAlwaysNamedSession(input.NamedSessions, bead) &&
 			desired[name] != "assigned-work" && desired[name] != "min-active" &&
 			desired[name] != "reset-pending" &&
 			desired[name] != "named-demand" && desired[name] != "routed-demand" &&
 			desired[name] != "work-query" &&
 			!inManualGracePeriod(bead, input.ManualGracePeriod, input.Now) {
-			agent, hasAgent := lookupAgent(bead.Template)
 			var idleTimeout time.Duration
 			switch {
 			case bead.ManualSession && input.ChatIdleTimeout > 0:
@@ -678,7 +681,7 @@ func isNamedSessionTemplate(named []AwakeNamedSession, template string) bool {
 	return false
 }
 
-func collectActiveBeads(beads []AwakeSessionBead, template string) []AwakeSessionBead {
+func collectActiveBeads(beads []AwakeSessionBead, template string, now time.Time) []AwakeSessionBead {
 	var result []AwakeSessionBead
 	for _, b := range beads {
 		// Exclude both NamedIdentity-tagged beads AND ConfiguredNamedSession
@@ -690,10 +693,23 @@ func collectActiveBeads(beads []AwakeSessionBead, template string) []AwakeSessio
 		// session getting woken by generic template scale_check demand.
 		if b.Template == template && b.State == "active" &&
 			b.NamedIdentity == "" && !b.ConfiguredNamedSession &&
-			!b.ManualSession && !b.Drained && !b.DependencyOnly {
+			!b.ManualSession && !b.Drained && !b.DependencyOnly &&
+			!minActiveHardBlocked(b, now) {
 			result = append(result, b)
 		}
 	}
+	sort.SliceStable(result, func(i, j int) bool {
+		if result[i].PostCreateProtected != result[j].PostCreateProtected {
+			return result[i].PostCreateProtected
+		}
+		if !result[i].PostCreateProtected {
+			return false
+		}
+		if !result[i].CreatedAt.Equal(result[j].CreatedAt) {
+			return result[i].CreatedAt.Before(result[j].CreatedAt)
+		}
+		return result[i].ID < result[j].ID
+	})
 	return result
 }
 
@@ -704,6 +720,15 @@ func sessionHasAssignedWork(workBeads []AwakeWorkBead, named []AwakeNamedSession
 			continue
 		}
 		if sessionAssigneeMatches(named, bead, assignee) {
+			return true
+		}
+	}
+	return false
+}
+
+func sessionHasClaimedInProgressWork(workBeads []AwakeWorkBead, named []AwakeNamedSession, bead AwakeSessionBead) bool {
+	for _, wb := range workBeads {
+		if wb.Status == "in_progress" && sessionAssigneeMatches(named, bead, strings.TrimSpace(wb.Assignee)) {
 			return true
 		}
 	}

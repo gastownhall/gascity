@@ -327,6 +327,31 @@ func ReadDoltDatabase(fs fsys.FS, path string) (string, bool, error) {
 	return "", false, nil
 }
 
+// ReadDoltMode reports the dolt_mode recorded in metadata.json at path, if any.
+//
+// It is the tolerant reader ReadDoltDatabase is, for the same reason: a caller
+// that is about to REWRITE this file needs to know what it is replacing even
+// when the file would not survive full validation, and a rejection here would
+// hide the change rather than report it. Malformed JSON and an absent file both
+// report "no recorded mode" rather than an error.
+func ReadDoltMode(fs fsys.FS, path string) (string, bool, error) {
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return "", false, nil
+	}
+	if value := trimmedString(meta["dolt_mode"]); value != "" {
+		return value, true, nil
+	}
+	return "", false, nil
+}
+
 // LoadMetadataState parses .beads/metadata.json at path and returns the
 // canonical MetadataState if the file exists and validates.
 //

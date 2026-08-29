@@ -4,11 +4,61 @@ package beads_test
 
 import (
 	"errors"
+	"fmt"
+	"os"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
+
+// requireConditionalReleaseEnv is set by the one CI cell that installs a bd
+// built from deps.env BD_CURRENT_REF, which carries the flags. There every exit
+// that is not "the CAS ran and passed" is a FAILURE: the cell exists to guard
+// the CAS, so a green run that skipped it has guarded nothing — exactly the
+// state this row was in while every job installed the flagless BD_VERSION
+// release. Unset (every other shard, and local runs on a stock bd) it still
+// skips.
+const requireConditionalReleaseEnv = "GC_REQUIRE_BD_CONDITIONAL_RELEASE"
+
+// conditionalReleaseRequired reports whether this run promised a bd that can
+// prove the CAS. Any set, non-false value counts. An equality test against "1"
+// would make GC_REQUIRE_BD_CONDITIONAL_RELEASE=true quietly mean "not
+// required" — a green path bought with a typo, which is the exact disease this
+// knob exists to cure.
+func conditionalReleaseRequired() bool {
+	value := strings.TrimSpace(os.Getenv(requireConditionalReleaseEnv))
+	if value == "" {
+		return false
+	}
+	if parsed, err := strconv.ParseBool(value); err == nil {
+		return parsed
+	}
+	return true
+}
+
+// conditionalReleaseUnprovable ends the caller at an exit that did NOT prove the
+// CAS — the capability probe itself failed, bd lacks the flags, or a leg is not
+// drivable against this bd. It skips normally and FAILS under
+// requireConditionalReleaseEnv.
+//
+// Every such exit routes through here on purpose. Honoring the promise only on
+// the "flags absent" branch would leave the others green: a bd whose `update`
+// verb disappeared makes the probe ERROR rather than report the flags missing,
+// and skipping there passes a cell that proved nothing while claiming a
+// flag-capable bd. Under the env there is exactly one green path — the row ran
+// end to end. (bd being absent outright needs no branch: the scope builder
+// shells `bd init` and t.Fatals when it cannot, on every run, env or not.)
+func conditionalReleaseUnprovable(t *testing.T, format string, args ...any) {
+	t.Helper()
+	if conditionalReleaseRequired() {
+		t.Fatalf("%s [%s is set: this run promised a bd that can prove the CAS (deps.env "+
+			"BD_CURRENT_REF); either that pin regressed, bd changed under it, or the row is being "+
+			"run somewhere it cannot run]", fmt.Sprintf(format, args...), requireConditionalReleaseEnv)
+	}
+	t.Skipf(format, args...)
+}
 
 // TestBdStoreReleaseIfCurrentAgainstRealBd executes the conditional-release CAS
 // against a REAL bd binary in EMBEDDED mode — the mode where `bd sql` is
@@ -22,12 +72,21 @@ import (
 // fails the capability leg here; a bd that changes the exit status fails the
 // mismatch leg, loudly, instead of silently degrading gascity to "someone else
 // holds it" on every release.
+//
+// It runs on the contract matrix's "current" cell, whose bd is built from
+// deps.env BD_CURRENT_REF. That is not a preference: no PUBLISHED beads release
+// carries the flags, so on every shard that installs BD_VERSION this row can
+// only skip. There the cell sets requireConditionalReleaseEnv and every exit
+// short of a full run is a failure (conditionalReleaseUnprovable).
 func TestBdStoreReleaseIfCurrentAgainstRealBd(t *testing.T) {
 	store, scope := newConditionalIntegrationBdStore(t)
 	if !bdParsesConditionalReleaseFlags(t, scope) {
-		t.Skip("installed bd does not advertise --if-assignee/--if-status (pre-beads#5364): " +
-			"the store latches to the raw-SQL fallback, which embedded mode rejects outright, " +
-			"so this row cannot exercise the verb at all. Move deps.env BD_VERSION past #5364 to run it.")
+		conditionalReleaseUnprovable(t, "installed bd does not advertise --if-assignee/--if-status "+
+			"(pre-beads#5008): the store latches to the raw-SQL fallback, which embedded mode rejects "+
+			"outright, so this row cannot exercise the verb at all. deps.env BD_VERSION is a published "+
+			"release that predates the flags and none has shipped with them yet, so this row runs on the "+
+			"source-built BD_CURRENT_REF cell (make test-bd-conditional-release-contract), not on the "+
+			"shards that install BD_VERSION.")
 	}
 
 	created, err := store.Create(beads.Bead{Title: "conditional release row", Type: "task"})
@@ -146,7 +205,8 @@ func TestBdStoreReleaseIfCurrentAgainstRealBd(t *testing.T) {
 		}
 		truncated := held.ID[:len(held.ID)-1]
 		if _, getErr := store.Get(truncated); !errors.Is(getErr, beads.ErrIDCollision) {
-			t.Skipf("bd did not prefix-resolve %q to another bead (Get: %v); the collision cell is not drivable here", truncated, getErr)
+			conditionalReleaseUnprovable(t, "bd did not prefix-resolve %q to another bead (Get: %v); "+
+				"the collision cell is not drivable here", truncated, getErr)
 		}
 
 		released, err := store.ReleaseIfCurrent(truncated, "worker-1")
@@ -180,7 +240,11 @@ func bdParsesConditionalReleaseFlags(t *testing.T, scope string) bool {
 	t.Helper()
 	out, err := newConditionalIntegrationRunner(scope)(scope, "bd", "update", "--help")
 	if err != nil {
-		t.Skipf("bd update --help failed (bd broken?): %v", err)
+		// The probe's OWN failure is not evidence about the flags — a bd that
+		// dropped the `update` verb errors here rather than reporting the flags
+		// absent — so it is unprovable, not skippable, under the require-env.
+		conditionalReleaseUnprovable(t, "bd update --help failed, so the capability probe could not "+
+			"run at all (bd broken, or the update verb is gone?): %v", err)
 	}
 	help := string(out)
 	return strings.Contains(help, "--if-assignee") && strings.Contains(help, "--if-status")

@@ -2,12 +2,14 @@ package main
 
 // `gc storage` — the operator surface for a city's storage-class layout.
 //
-// The whole tree is built from storageMigrationCommand, the one constant this
-// program spells the operator command in. The boot refusal prints that same
-// constant (infra_class_migrate.go), so building the command from it is what
-// stops the refusal and the command from drifting apart in the one direction
-// that matters: a refusal naming a command the binary does not carry is an
-// operator instruction that fails at the shell.
+// The whole tree is built from the two constants this program spells its
+// operator commands in: storageMigrationCommand for the cutover and
+// storageRecoveryCommand for the stranded-write repair. The refusals print
+// those same constants (infra_class_migrate.go), so building the commands from
+// them is what stops a refusal and a command from drifting apart in the one
+// direction that matters: a refusal naming a command the binary does not carry
+// is an operator instruction that fails at the shell — and a refusal naming no
+// command at all is the defect the repair verb was added to close.
 //
 // The source is stated explicitly rather than detected. `migrate` carries one
 // source shape — the work store this city is running on — and refuses if the
@@ -32,6 +34,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/storebinding"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 const (
@@ -39,6 +42,15 @@ const (
 	// the move. The boot refusal prints it and this file parses it into the
 	// cobra tree, so the two cannot disagree.
 	storageMigrationCommand = "gc storage migrate --from-work"
+
+	// storageRecoveryCommand is the one spelling of the command that repairs a
+	// stranded write. The stranded refusal prints it and this file parses it
+	// into the cobra tree, for the same reason the migration spelling is
+	// handled that way — and because the defect this command closes was
+	// precisely an alarm that named NO verb: a city acquired strands, every
+	// later command carried a permanent refusal, and the refusal's remedy was
+	// a sentence rather than something an operator could run.
+	storageRecoveryCommand = "gc storage recover-stranded --from-work"
 
 	// storageStatusVerb is the read-only sibling of the migrate verb.
 	storageStatusVerb = "status"
@@ -95,17 +107,61 @@ func parseOperatorCommandSpelling(spelling string) (storageCommandSurface, error
 	return storageCommandSurface{Namespace: fields[1], Verb: fields[2], Flag: flag}, nil
 }
 
-// newStorageCmd constructs the `gc storage` tree named by the operator
-// spelling.
-func newStorageCmd(stdout, stderr io.Writer) *cobra.Command {
-	return newStorageCmdFromSpelling(storageMigrationCommand, stdout, stderr)
+// storageRecoveryInstruction renders the recovery command the way an operator
+// types it: the spelling the tree is built from, plus the attestation the
+// repair requires before it writes anything.
+//
+// The attestation is appended here rather than folded into the constant because
+// parseOperatorCommandSpelling decomposes exactly four words into a namespace,
+// a verb and a source flag. --fleet-stopped is a flag on the leaf, not part of
+// the tree, so putting it in the constant would make the spelling
+// undecomposable and the whole tree unbuildable.
+func storageRecoveryInstruction() string {
+	return storageRecoveryCommand + " --" + storageFleetStoppedFlag
 }
 
-// newStorageCmdFromSpelling is the testable body of newStorageCmd.
-func newStorageCmdFromSpelling(spelling string, stdout, stderr io.Writer) *cobra.Command {
-	surface, err := parseOperatorCommandSpelling(spelling)
+// storageStatusInstruction renders the read-only report the way an operator
+// types it. The read verb has no operator-command spelling of its own — it
+// takes no source flag — so its namespace is derived from the one the migrate
+// spelling names, for the reason the file header gives: a message pointing at a
+// command this binary does not carry is an instruction that fails at the shell.
+// An unparseable spelling is already reported by newUnbuildableStorageCmd, so
+// here it degrades to the default namespace rather than swallowing the message
+// that carries it.
+func storageStatusInstruction() string {
+	surface, err := parseOperatorCommandSpelling(storageMigrationCommand)
+	if err != nil {
+		return "gc storage " + storageStatusVerb
+	}
+	return "gc " + surface.Namespace + " " + storageStatusVerb
+}
+
+// newStorageCmd constructs the `gc storage` tree named by the operator
+// spellings.
+func newStorageCmd(stdout, stderr io.Writer) *cobra.Command {
+	return newStorageCmdFromSpellings(storageMigrationCommand, storageRecoveryCommand, stdout, stderr)
+}
+
+// newStorageCmdFromSpellings is the testable body of newStorageCmd.
+//
+// Both spellings are arguments rather than reads of the constants, for the
+// reason parseOperatorCommandSpelling states: the rejections have to be
+// reachable from a test. The namespaces must agree — two operator commands that
+// named different parents would build one tree and leave the other spelling
+// naming a command that does not resolve, which is the exact failure the
+// spelling-derived tree exists to prevent.
+func newStorageCmdFromSpellings(migration, recovery string, stdout, stderr io.Writer) *cobra.Command {
+	surface, err := parseOperatorCommandSpelling(migration)
 	if err != nil {
 		return newUnbuildableStorageCmd(err, stderr)
+	}
+	repair, err := parseOperatorCommandSpelling(recovery)
+	if err != nil {
+		return newUnbuildableStorageCmd(err, stderr)
+	}
+	if repair.Namespace != surface.Namespace {
+		return newUnbuildableStorageCmd(fmt.Errorf("the operator commands %q and %q name different parents (%q and %q); one tree cannot serve both",
+			migration, recovery, surface.Namespace, repair.Namespace), stderr)
 	}
 	cmd := &cobra.Command{
 		Use:   surface.Namespace,
@@ -120,6 +176,7 @@ operator arranges rather than something a program can observe.`,
 	cmd.AddCommand(
 		newStorageMigrateCmd(surface, stdout, stderr),
 		newStorageStatusCmd(surface, stdout, stderr),
+		newStorageRecoverCmd(repair, stdout, stderr),
 	)
 	return cmd
 }
@@ -418,6 +475,7 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 		fmt.Fprintf(stdout, "converged: no\nblocking invariant: boot never migrates; run `%s`\n", storageMigrationCommand) //nolint:errcheck // best-effort stdout
 		return 1
 	}
+	reportBindingRelics(target, logPrefix, stdout, stderr)
 
 	proven, recorded, err := readInfraCopyManifest(target)
 	if err != nil {
@@ -437,9 +495,43 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 		len(proven), len(gap.Stranded), gap.RemovedSinceCutover)
 	if len(gap.Stranded) > 0 {
 		fmt.Fprintf(stdout, "  stranded ids: %s\n", strings.Join(gap.Stranded, ", ")) //nolint:errcheck // best-effort stdout
+		// The exit code is the deploy gate; the remedy is what an operator does
+		// about it. This report used to carry only the ids, so the one command
+		// an operator would reach for after a non-zero `gc storage status` said
+		// nothing about how to make it zero again.
+		fmt.Fprintf(stdout, "blocking invariant: the binding cannot read these beads. Stop every writer and copy them in with `%s`\n", storageRecoveryInstruction()) //nolint:errcheck // best-effort stdout
 		return 1
 	}
 	return 0
+}
+
+// reportBindingRelics prints how many beads the binding still holds under ids
+// no reader can route to it from — the rows the cutover carried across under
+// their original work-shaped ids.
+//
+// That count is the residence probe's retirement condition. While it is
+// non-zero every work-shaped by-id read in the city pays one extra store read
+// to find beads that are reachable no other way, and it falls only as those
+// beads close. An operator draining a migrated city has nothing else to watch.
+//
+// It never changes the exit code. A relic is the migration working as designed,
+// so a status command that failed over one would report every city that ever
+// migrated as broken. A binding that cannot be read is reported and skipped for
+// the same reason: the layout facts above it stand on their own.
+func reportBindingRelics(target infraBindingTarget, logPrefix string, stdout, stderr io.Writer) {
+	binding, err := openInfraDestination(target)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: counting open relics: opening the binding: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return
+	}
+	defer closeBeadStoreHandle(binding) //nolint:errcheck // best-effort close
+
+	relics, err := storeref.OpenLegacyResidents(binding, config.AllReservedClassPrefixes())
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return
+	}
+	fmt.Fprintf(stdout, "open relics: %d (carried across under their original ids; the residence probe retires when the last one closes)\n", len(relics)) //nolint:errcheck // best-effort stdout
 }
 
 // cityMigrationGuardDirectory returns the city .gc directory the migration

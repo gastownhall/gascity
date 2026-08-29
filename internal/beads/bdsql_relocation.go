@@ -9,7 +9,8 @@ import (
 
 // Why this guard exists.
 //
-// `bd sql` and `bd query` run against the bd ledger this scope's .beads/ names,
+// `bd sql`, `bd query` and the selector-flag verbs (`bd list`, `bd ready`,
+// `bd search`) run against the bd ledger this scope's .beads/ names,
 // and nothing else. A relocated coordination class is served from a store that
 // ledger's metadata never mentions — a SQLite file bd has no backend for
 // (storage: Dolt/embedded-Dolt/dbproxy), or a different beads workspace with a
@@ -26,11 +27,12 @@ import (
 //
 // The refusal is deliberately narrow. It fires when a bd-ledger read puts the
 // id namespace of a class this store does not serve in an ID-SHAPED POSITION —
-// a string literal in SQL, the value side of a comparison in bd's query DSL —
-// which is the case where the empty answer is provably wrong. A statement that
-// merely mentions such an id somewhere else (a LIKE-contains over a text
-// column, a JSON metadata comparison, a comment) is a question about the rows
-// THIS ledger holds, and bd answers those correctly and often non-emptily: the
+// a string literal in SQL, the value side of a comparison in bd's query DSL,
+// the value side of a `key=value` selector predicate — which is the case where
+// the empty answer is provably wrong. A statement that merely mentions such an
+// id somewhere else (a LIKE-contains over a text column, a JSON metadata
+// comparison, a comment) is a question about the rows THIS ledger holds, and
+// bd answers those correctly and often non-emptily: the
 // work ledger really does carry gcg- strings in its metadata, because
 // ensureDrainUnitConvoy stamps gc.drain_control_id = <graph control id> onto a
 // convoy coordclass deliberately keeps work-class. Refusing those would be a
@@ -125,6 +127,45 @@ func RelocatedClassesInQueryExpr(relocated []RelocatedClass, expr string) []Relo
 	return relocatedClassesNamedIn(relocated, expr, atQueryValueStart)
 }
 
+// RelocatedClassesInSelector is the same scan for one selector argument of the
+// flag dialect `bd list`, `bd ready` and `bd search` share —
+// `--metadata-field gc.root_bead_id=gcg-abc` and the rest of the key=value
+// predicates those verbs accept.
+//
+// It does NOT share atQueryValueStart with the query DSL, and that is the whole
+// of the dialect. In `bd query` one token is a whole expression, so an id at
+// offset 0 is a value position (`bd query gcg-1` is a bare term). In this
+// dialect the flag has already consumed its own token, so what arrives here is
+// one flag's VALUE — and `bd list` accepts no positionals at all, so there is
+// no argument that is not some flag's value. Anchoring at offset 0 would
+// therefore make EVERY selector value id-shaped: `--title-contains gcg-abc123`
+// would be indistinguishable from `--metadata-field gc.root_bead_id=gcg-abc123`
+// even though the first is a LIKE-contains over this ledger's own title column,
+// which is the first false positive the header above promises to let through.
+//
+// So the anchor is the `=` of a key=value predicate, and nothing else. That is
+// the shape that makes an empty answer provably wrong: the selector asks bd for
+// rows whose field EQUALS an id no row here can carry. A whole-token value is a
+// search term over a column this ledger owns and passes, wherever the id sits
+// in it.
+//
+// The two id-VALUED selectors that look like a hole — `--id`, `--parent`/`-p` —
+// are not one. Ownership of an ADDRESSED id is decided before servability, by
+// the by-id door in cmd/gc/cmd_bd_by_id.go, which already refuses them and
+// names the bead and its binding rather than only the namespace. Anchoring at
+// offset 0 to catch them here would shadow that more specific refusal with a
+// vaguer one and buy no coverage.
+//
+// The dialect is named separately rather than aliased at the call site because
+// these verbs are PROJECTIONS, not ad-hoc reads: bd runs one successfully
+// against the work ledger and answers `[]` with exit 0 for a class that ledger
+// does not serve, which is the same confident empty answer the sql/query guard
+// exists for, and naming the dialect keeps that reason at the definition
+// instead of in a comment on a map entry.
+func RelocatedClassesInSelector(relocated []RelocatedClass, selector string) []RelocatedClass {
+	return relocatedClassesNamedIn(relocated, selector, atSelectorValueStart)
+}
+
 // relocatedClassesNamedIn is the shared scan. anchored decides what counts as
 // an id-shaped position for the dialect being scanned; everything else — the
 // case folding, the trailing-boundary rule, the per-class loop — is common.
@@ -213,6 +254,34 @@ func atQueryValueStart(text string, at int) bool {
 	}
 }
 
+// atSelectorValueStart reports whether at opens the value side of a `key=value`
+// predicate inside one selector-flag token.
+//
+// Quotes are skipped on the way back because a shell can leave them inside the
+// token bd parses (`--metadata-field 'gc.root_bead_id="gcg-1"'`), and the value
+// is the same value either way. Whitespace is skipped for the same reason it is
+// in the query DSL. Everything else — prose, punctuation, the start of the
+// token — is not a predicate, so it does not anchor: `fix (gcg-1) regression`,
+// `regressions: gcg-1, gcg-2` and a bare `gcg-abc123` are all search text.
+func atSelectorValueStart(text string, at int) bool {
+	i := at - 1
+	for i >= 0 && isSelectorValuePadding(text[i]) {
+		i--
+	}
+	return i >= 0 && text[i] == '='
+}
+
+// isSelectorValuePadding reports whether b can sit between a predicate's `=`
+// and the value it compares.
+func isSelectorValuePadding(b byte) bool {
+	switch b {
+	case ' ', '\t', '\'', '"', '`':
+		return true
+	default:
+		return false
+	}
+}
+
 // isIDBodyByte reports whether b can appear inside a bead id, which is what
 // makes a prefix match a continuation rather than a start.
 func isIDBodyByte(b byte) bool {
@@ -249,10 +318,132 @@ func isIDBodyByte(b byte) bool {
 // lane does. `gc bd dep tree <id>` is not served there, and on a relocated id
 // that surface refuses it rather than forwarding it, so it is named as
 // unavailable rather than offered as an escape.
+//
+// The set-returning escape is named too, because a by-ID read is no answer at
+// all to a refused PROJECTION: an operator listing a molecule's members by
+// gc.root_bead_id has no single id to show. `gc ready` federates the city
+// store, the rig stores and the relocated binding as ordered legs and fails
+// loud on any leg it cannot read (cmd/gc/ready_federation.go), so it answers a
+// class-scoped question without a controller.
+//
+// # And it states what that escape does NOT cover
+//
+// Steering is only worth printing if the command it names answers the question
+// that was refused, and `gc ready` answers a NARROWER one. With no --status it
+// issues a ReadyQuery — claimable, unblocked work only — so a molecule whose
+// steps are in flight, blocked or done comes back `[]` from the very command
+// this message sent the operator to, which is the refused bug one command over.
+// --status takes exactly ONE of open, in_progress, blocked, closed
+// (readyKnownStatuses); there is no `--all` and no comma list, and `deferred`
+// is not selectable at all. So the membership question `bd list --all` answers
+// in one invocation has no single federated spelling, and the message says so
+// rather than letting the operator discover it as an empty array. Overstating
+// the escape is the same failure as the silent empty: a confident answer to a
+// question that was not asked.
+//
+// `gc beads list` is deliberately NOT offered, under the same rule that keeps a
+// blind verb out of this message. Its API lane federates, but its fallback lane
+// opens the city and rig stores only (openAllConvoyStoresAt) — so on a city
+// whose controller is down it would return exactly the confident empty answer
+// being refused here, and the operator hitting this at 2am is often hitting it
+// BECAUSE the controller is down.
+//
+// # The override is named by the CLI, not here
+//
+// GC_BD_ALLOW_RELOCATED_CLASS_READ is a `gc bd` pre-flight knob and applies to
+// nothing else. This error is also returned by BdStore's own id-scoped guard,
+// where no override exists, so naming it in this shared string would advertise
+// an escape that does not work on half the paths that print it. cmd/gc appends
+// it where it is true (bdSQLRelocatedClassRefusal).
 func RelocatedClassRefusal(op string, matched []RelocatedClass) error {
 	if len(matched) == 0 {
 		return nil
 	}
+	return fmt.Errorf("%w: %s: %s. This bd ledger does not serve those classes and holds no row under their reserved id "+
+		"prefixes, so a read scoped to one cannot match here — and bd does not fail: it runs the read successfully "+
+		"against this ledger and returns an empty result indistinguishable from a real one. Read these beads with "+
+		"`gc bd show <id>`, which answers a reserved-prefix id in process from the binding its class is served from "+
+		"and needs no controller, or with `gc beads show <id>`, which routes by class through the controller API "+
+		"(GET /v0/city/{cityName}/bead/{id}) and falls back to a work-store scan when no controller is reachable. "+
+		"For a SET of beads rather than one id, `gc ready --metadata-field \"key=value\"` federates the city store, the "+
+		"rig stores and the relocated binding as ordered legs and fails loud on a leg it cannot read — but it answers a "+
+		"NARROWER question than this read did: with no --status it returns only claimable work, and --status takes "+
+		"exactly one of open, in_progress, blocked, closed (no --all, no comma list, and deferred is not selectable), "+
+		"so enumerating a molecule's full membership takes one invocation per status and cannot reach a deferred member "+
+		"at all. There is no federated equivalent of `bd list --all` yet. "+
+		"`gc bd dep tree <id>` is not served in process; on a relocated id it is refused rather than answered from this ledger",
+		ErrBdSQLClassRelocated, op, describeRelocatedClasses(matched))
+}
+
+// RelocatedClassFrontierRefusal is RelocatedClassRefusal for a verb whose whole
+// RESULT SET omits a relocated class, no matter what arguments it is given.
+//
+// # Why this is a different refusal from the selector one
+//
+// RelocatedClassRefusal answers a read whose TEXT named a relocated namespace:
+// the operator asked about beads that are somewhere else, and the empty answer
+// is provably wrong for that predicate. The trigger there is the argv, and it
+// has to be — `bd list --title-contains gcg-1` is a question this ledger really
+// can answer.
+//
+// A frontier read has no such predicate to inspect. `bd ready` — and `bd list
+// --ready`, which bd documents as the same semantics and dispatches to the same
+// store methods — computes "the claimable work in this store" and takes no
+// selector that could reach another one, so on a city that serves a
+// coordination class elsewhere its answer is the WORK-CLASS SUBSET of the
+// city's ready set: short by exactly the beads the split moved, for every
+// invocation, including the bare one with no flags at all. Anchoring on argv
+// would guard the rare call that happens to name a relocated id and leave the
+// common one — the one an operator actually types, and the one the original
+// measurement used — answering a confident short list with exit 0. So the
+// trigger is the TOPOLOGY: the class assignment in [storage.classes], which is
+// a fact about the city and not about the command.
+//
+// # Why it does not offer a by-id escape
+//
+// RelocatedClassRefusal steers to `gc bd show <id>` because the read it refused
+// named an id. A refused frontier has no id to show — the question was "what is
+// ready", and only a federated reader answers it. `gc ready` is that reader:
+// ordered over the city store, the rig stores and the relocated binding, and
+// loud on a leg it cannot open rather than short by that leg's rows.
+//
+// The steer states its LIMITS for the same reason RelocatedClassRefusal states
+// its own: overstating the escape is the same failure as the silent empty — a
+// confident answer to a question that was not asked. `gc ready` is flag
+// compatible with the `bd ready` invocation the generated work query builds,
+// which is a subset of bd's ready surface, and an operator sent to a command
+// that rejects their invocation has been sent to a dead end. The authority for
+// what it takes is the flag set `gc ready` actually registers, so cmd/gc's
+// TestGcReadySteerDescribesTheFlagsItActuallyAccepts derives both sides from
+// cobra and bdflags and fails if this sentence drifts from either.
+//
+// Like its sibling, this message leaves GC_BD_ALLOW_RELOCATED_CLASS_READ to the
+// CLI seam that can honor it.
+func RelocatedClassFrontierRefusal(op string, matched []RelocatedClass) error {
+	if len(matched) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%w: %s: %s. This bd ledger does not serve those classes and holds no row under their reserved id "+
+		"prefixes, so the frontier this read computes is the work-class SUBSET of the city's ready set — and bd does not "+
+		"fail: it runs the read successfully against this ledger and returns that short list with exit 0, "+
+		"indistinguishable from the city's whole ready set. The refusal is decided by the TOPOLOGY and not by the "+
+		"arguments, because this read takes no selector that could reach another store: no argv makes its answer "+
+		"complete. Use `gc ready`, which federates the city store, the rig stores and the relocated binding as ordered "+
+		"legs and fails loud on a leg it cannot read instead of returning a short array. It is flag-compatible with the "+
+		"`bd ready` invocation the generated work query builds — NOT with all of `bd ready`: it takes --assignee, "+
+		"--unassigned, --metadata-field, --exclude-type, --exclude-label, --sort, --limit, --include-ephemeral, --status "+
+		"and --json, and rejects the rest of bd's ready surface (--label, --label-any, --parent, --type, --priority, "+
+		"--offset, --has-metadata-key, --mol, --include-deferred, --gated, --claim, and every single-letter shorthand), "+
+		"with --sort taking oldest|newest rather than bd's priority|hybrid|oldest. A query only bd's surface can express "+
+		"has no federated spelling yet: narrow with --metadata-field, or read the relocated class directly from the "+
+		"binding",
+		ErrBdSQLClassRelocated, op, describeRelocatedClasses(matched))
+}
+
+// describeRelocatedClasses renders the matched classes for an operator: what
+// moved, the id namespace it mints, and where it is served from now. Shared by
+// both refusals so the two cannot describe the same topology differently.
+func describeRelocatedClasses(matched []RelocatedClass) string {
 	sorted := append([]RelocatedClass(nil), matched...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Class < sorted[j].Class })
 
@@ -264,13 +455,5 @@ func RelocatedClassRefusal(op string, matched []RelocatedClass) error {
 		}
 		parts = append(parts, fmt.Sprintf("%s-class beads (id prefix %q) are served from %s", class.Class, class.IDPrefix+"-", where))
 	}
-
-	return fmt.Errorf("%w: %s: %s. This bd ledger does not serve those classes and holds no row under their reserved id "+
-		"prefixes, so a read scoped to one cannot match here — and bd does not fail: it runs the read successfully "+
-		"against this ledger and returns an empty result indistinguishable from a real one. Read these beads with "+
-		"`gc bd show <id>`, which answers a reserved-prefix id in process from the binding its class is served from "+
-		"and needs no controller, or with `gc beads show <id>`, which routes by class through the controller API "+
-		"(GET /v0/city/{cityName}/bead/{id}) and falls back to a work-store scan when no controller is reachable. "+
-		"`gc bd dep tree <id>` is not served in process; on a relocated id it is refused rather than answered from this ledger",
-		ErrBdSQLClassRelocated, op, strings.Join(parts, "; "))
+	return strings.Join(parts, "; ")
 }

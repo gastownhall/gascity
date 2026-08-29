@@ -265,6 +265,11 @@ func (s *seededState) OrdersBeadStore() beads.OrdersStore {
 	return beads.OrdersStore{Store: s.cityStore}
 }
 
+// ClassBindingHasLegacyResidents answers true for everything: a seeded city
+// relocates no class, so it contributes no binding and nothing consults this —
+// and a state that censused nothing has cleared nothing.
+func (s *seededState) ClassBindingHasLegacyResidents(beads.Store) bool { return true }
+
 func (s *seededState) Orders() []orders.Order    { return nil }
 func (s *seededState) OrdersAll() []orders.Order { return nil }
 func (s *seededState) Poke()                     {}

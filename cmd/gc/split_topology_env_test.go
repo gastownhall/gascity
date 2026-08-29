@@ -47,11 +47,15 @@ import (
 //
 //   - work: BdSemantics, minting "gc-" — bd/Dolt, which hard-fails a mismatched
 //     --id and an unresolvable dep endpoint.
-//   - class: SQLiteSemantics, minting the graph class's reserved "gcg-" — the
-//     store internal/storebinding/sqlite's OpenEngine opens for the whole split
-//     (ONE engine serving all five infrastructure classes, opened with
+//   - class: a REAL beads.SQLiteStore behind SQLiteSemantics, minting the graph
+//     class's reserved "gcg-" — the store internal/storebinding/sqlite's
+//     OpenEngine opens for the whole split (ONE engine serving all five
+//     infrastructure classes, opened with
 //     config.ReservedClassPrefix(BeadClassGraph)). It ACCEPTS a residence
-//     violation and records it, because SQLite does.
+//     violation and records it, because SQLite does — and it carries the two
+//     capabilities the binding really has and a MemStore leaf does not: the
+//     compare-and-swap assignment claim a routed claim acquires through, and
+//     the graph applier. See newSplitEnvClassLeaf.
 //
 // The wrapping is asymmetric on purpose, and the asymmetry is production's, not
 // the fixture's: main.go and api_state.go put every WORK store (city and rig)
@@ -68,8 +72,8 @@ import (
 // production no longer serves, because nothing else in cmd/gc asserts the
 // wrapping of the store that function returns.
 //
-// Accepted fidelity gap, the same one every cmd/gc split fixture takes: the
-// leaves are in-memory, not real Dolt/SQLite behind CachingStore. The real
+// Accepted fidelity gap: the WORK leaf is in-memory rather than real bd/Dolt
+// behind CachingStore (the class leaf is a real SQLite store on disk). The real
 // openers are covered by the managed-Dolt and storage-boot integration tests.
 
 // splitEnv is the two-topology store fixture. Every field carries the production
@@ -163,8 +167,7 @@ func newSplitEnvWith(t *testing.T, split bool, opts splitEnvOptions) splitEnv {
 			BDCompatibility: config.BeadsBDCompatibility105,
 		},
 	}
-	workLeaf, classLeaf := splittest.NewSplitStores(t)
-	work := wrapStoreWithBeadPolicies(workLeaf, cfg)
+	work := wrapStoreWithBeadPolicies(splittest.NewWorkStore(t, config.EffectiveHQPrefix(cfg)), cfg)
 	e := splitEnv{cityPath: cityPath, cfg: cfg, work: work, store: work, split: split}
 	if split {
 		// Config and routes state the same relocation. The config half is what
@@ -175,14 +178,60 @@ func newSplitEnvWith(t *testing.T, split bool, opts splitEnvOptions) splitEnv {
 		cfg.Storage = splitEnvStorageConfig()
 		// The class store is NOT policy-wrapped: openStorageRoutes keys the class
 		// map straight to the value OpenEngine returned. See the file header.
-		e.class = classLeaf
-		e.routes = splitEnvRoutes(classLeaf)
+		e.class = newSplitEnvClassLeaf(t)
+		e.routes = splitEnvRoutes(e.class)
 	}
 	writeSplitTopologyCityConfig(t, cityPath, rigPath, split)
+	// The assigned-work spine resolves a city's bindings BY PATH, because its
+	// scans are free functions reached from both planes. Registering the routes
+	// this fixture staged is the same thing newCityRuntime does with the ones
+	// storageBootGate opened, so both subtests answer residency from the routes
+	// the env decided rather than from a second funnel.
+	// The work store is registered with them, for the same reason: the census
+	// arms are handed the SESSIONS store, and on a split city that is the
+	// binding — so without the runtime declaring its work store the census has
+	// no way to name the two apart, which is the E2 dual role itself.
+	registerResidencyRoutes(cityPath, e.routes, func() beads.Store { return e.work })
+	t.Cleanup(func() { unregisterResidencyRoutes(cityPath, e.routes) })
 	if opts.rig {
 		e.attachRigLeg(t, rigPath)
 	}
 	return e
+}
+
+// newSplitEnvClassLeaf opens the class leg on the store a split city is really
+// served from: a real beads.SQLiteStore under the graph class's reserved prefix,
+// which is what internal/storebinding/sqlite's OpenEngine opens, behind the
+// kit's SQLiteSemantics strictness so a residence violation is still recorded.
+//
+// It is the real backend rather than the kit's MemStore leaf because the two
+// differ in exactly the ways this suite exists to catch: the SQLite store has
+// the compare-and-swap assignment claim a routed claim acquires through, and it
+// has the graph applier whose reverse-of-a-parent-child guard is the one thing
+// the binding enforces that a MemStore does not. A suite whose class leaf has
+// neither cannot see a divergence in either.
+//
+// (The claim rows were briefly scoped to a per-row helper because materializing
+// conformanceGraphRecipe on this leaf failed the graph-apply guard. That was the
+// fixture recipe carrying a hand-written parent-child dep no graph.v2 compiler
+// emits — see conformanceGraphRecipe — not a property of graph.v2 on a split
+// city.)
+func newSplitEnvClassLeaf(t *testing.T) beads.Store {
+	t.Helper()
+	prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph)
+	if !ok {
+		t.Fatal("config.ReservedClassPrefix(graph) = ok:false; the fixture has no reserved namespace to open a class store under")
+	}
+	leaf, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix(prefix))
+	if err != nil {
+		t.Fatalf("opening the SQLite class store the split binding serves from: %v", err)
+	}
+	t.Cleanup(func() {
+		if closer, ok := leaf.(interface{ CloseStore() error }); ok {
+			_ = closer.CloseStore()
+		}
+	})
+	return splittest.Strict(t, leaf, splittest.SQLiteSemantics)
 }
 
 // splitEnvStorageConfig is the [storage] section of a converged split city: work
@@ -456,6 +505,57 @@ func (e splitEnv) mintWispWith(t *testing.T, opts wispOpts) beads.Bead {
 		t.Fatalf("reloading staged wisp %s: %v", created.ID, err)
 	}
 	return staged
+}
+
+// mintEphemeralGraphBead creates a graph-class bead that lands on the EPHEMERAL
+// tier of whichever store owns the class on this topology, and fails the test if
+// it did not.
+//
+// It exists because mintWisp lands a DURABLE row on the split leg: the relocated
+// class store carries no bead-policy layer, so the same create that maps onto
+// the ephemeral tier through a work front door lands a plain row there. Every
+// tier invariant built on mintWisp is therefore vacuous on the leg that matters,
+// which is how a whole ephemeral tier went missing from the federated readers
+// unnoticed (ga-8lyxc).
+//
+// The tier is reached the way production reaches it on each leg, not by patching
+// the bead afterwards:
+//
+//   - policy-wrapped front door (the single-store topology's work store): a
+//     gc.kind=wisp create, which defaultBeadStorage maps to "ephemeral" under
+//     bd-1.0.5 — plain mintWisp.
+//   - unwrapped relocated class store (the split topology): the store's own
+//     StorageCreateStore capability, which is the exact call
+//     createWithStoragePolicy makes once a storage class is decided. It is a
+//     real production shape on this leg: internal/mail/beadmail creates its
+//     message beads Ephemeral on whatever store owns the messaging class, and
+//     that class is relocated to this same binding.
+func mintEphemeralGraphBead(t *testing.T, e splitEnv, title string) beads.Bead {
+	t.Helper()
+	front := e.graphStore()
+	if e.policyWrapped(front) {
+		return e.mintWispWith(t, wispOpts{title: title})
+	}
+	store, ok := front.(beads.StorageCreateStore)
+	if !ok {
+		t.Fatalf("the relocated class store (%T) implements no StorageCreateStore, so this fixture cannot reach its ephemeral tier the way createWithStoragePolicy does", front)
+	}
+	created, err := store.CreateWithStorage(beads.Bead{
+		ID:       splitWispID(),
+		Title:    title,
+		Type:     "task", // graph.v2 wisps materialize as issue_type "task"
+		Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWisp},
+	}, beads.StorageEphemeral)
+	if err != nil {
+		t.Fatalf("minting ephemeral graph bead %q on the relocated class store: %v", title, err)
+	}
+	if !created.Ephemeral {
+		t.Fatalf("minted graph bead %s has Ephemeral=false; the fixture is not exercising the relocated store's wisp tier and every tier assertion on it is vacuous", created.ID)
+	}
+	if !coordclass.Classify(created).IsInfrastructure() {
+		t.Fatalf("minted ephemeral graph bead %s classifies as work, want infrastructure (type=%q metadata=%v)", created.ID, created.Type, created.Metadata)
+	}
+	return created
 }
 
 // mintDurableGraphBead creates a DURABLE graph-class bead through the graph

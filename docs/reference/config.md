@@ -213,11 +213,12 @@ AgentOverride modifies a pack-stamped agent for a specific rig.
 
 ## AgentPatch
 
-AgentPatch modifies an existing agent identified by (Dir, Name).
+AgentPatch modifies existing agents identified by rig scope and Name.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `dir` | string | **yes** |  | Dir is the targeting key (required with Name). Identifies the agent's working directory scope. Empty for city-scoped agents. |
+| `dir` | string |  |  | Dir is the legacy targeting key for rig identity. Empty means city-scoped. New configs should set Rig instead; Dir remains the canonical resolved identity that both keys feed into. |
+| `rig` | string |  |  | Rig is new targeting key for rig identity (replaces Dir). "*" matches all rigs + city. Empty means city-scoped unless Dir is set. |
 | `name` | string | **yes** |  | Name is the targeting key (required). Must match an existing agent's name. |
 | `work_dir` | string |  |  | WorkDir overrides the agent's session working directory. |
 | `tmux_alias` | string |  |  | TmuxAlias overrides the tmux session name template (see Agent.TmuxAlias for semantics). |
@@ -597,6 +598,7 @@ OrdersConfig holds order settings for orders discovered from flat TOML files (on
 |-------|------|----------|---------|-------------|
 | `skip` | []string |  |  | Skip lists order names to exclude from scanning. |
 | `max_timeout` | string |  |  | MaxTimeout is an operator hard cap on the per-order dispatch timeout: no order's dispatched exec/formula runs longer than this. Go duration string (e.g., "60s"). Empty means uncapped (no override). This bounds the dispatch timeout only; a condition trigger's check_timeout is a separate probe deadline and is not capped here. |
+| `max_dispatches_per_tick` | integer |  |  | MaxDispatchesPerTick caps how many orders the supervisor dispatches per tick. Unset keeps the built-in default of 4; set to 1 to drain overdue cooldown orders one-per-tick at cold start instead of firing several concurrent goroutines at once. |
 | `overrides` | []OrderOverride |  |  | Overrides apply per-order field overrides after scanning. Each override targets an order by name and optionally by rig. |
 
 ## PackDefaults
@@ -621,7 +623,7 @@ Patches holds all patch blocks from composition.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `agent` | []AgentPatch |  |  | Agents targets agents by (dir, name). |
+| `agent` | []AgentPatch |  |  | Agents targets agents by rig scope + name. |
 | `named_session` | []NamedSessionPatch |  |  | NamedSessions targets configured named sessions by (dir, template). |
 | `rigs` | []RigPatch |  |  | Rigs targets rigs by name. |
 | `providers` | []ProviderPatch |  |  | Providers targets providers by name. |

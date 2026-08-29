@@ -498,15 +498,16 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 		eventRecorder = openCityRecorderAt(cityPath, stderr)
 	}
 	deps := slingDeps{
-		CityName:   cityName,
-		CityPath:   cityPath,
-		Cfg:        cfg,
-		SP:         sp,
-		Runner:     runner,
-		Store:      store,
-		GraphStore: resolveGraphStore(cliStorageRoutes(cityPath), store, cfg, cityPath, eventRecorder),
-		Events:     eventRecorder,
-		StoreRef:   storeRef,
+		CityName:           cityName,
+		CityPath:           cityPath,
+		Cfg:                cfg,
+		SP:                 sp,
+		Runner:             runner,
+		Store:              store,
+		GraphStore:         resolveGraphStore(cliStorageRoutes(cityPath), store, cfg, cityPath, eventRecorder),
+		Events:             eventRecorder,
+		ExecutionWorkStore: executionEmitStore(store, cityPath),
+		StoreRef:           storeRef,
 		SourceWorkflowStores: func() ([]sling.SourceWorkflowStore, error) {
 			stores, skips, err := openSourceWorkflowStoresWithProvider(cfg, cityPath, "", func(scopeRoot string) string {
 				return authoritativeBeadsProviderForScope(scopeRoot, cityPath)
@@ -1670,7 +1671,7 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Stor
 		}
 	}
 
-	if err := enqueueQueuedNudgeWithStore(target.cityPath, beads.NudgesStore{Store: store}, newQueuedNudgeWithOptions(target.agent.QualifiedName(), msg, "sling", now, queuedNudgeOptionsFromTarget(target))); err != nil {
+	if err := enqueueQueuedNudgeWithStore(target.cityPath, cliNudgesStore(store, target.cfg, target.cityPath), newQueuedNudgeWithOptions(target.agent.QualifiedName(), msg, "sling", now, queuedNudgeOptionsFromTarget(target))); err != nil {
 		telemetry.RecordNudge(context.Background(), target.agent.QualifiedName(), err)
 		fmt.Fprintf(stderr, "warning: bead routed but nudge failed: %v\n", err) //nolint:errcheck // best-effort
 		return
@@ -1783,10 +1784,14 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 			}
 			w("")
 		} else if !opts.NoFormula && a.EffectiveDefaultSlingFormula() != "" {
+			// Report-only pre-check: unlike explicit --on, an implicit
+			// default formula no longer hard-fails on a pre-existing
+			// molecule/wisp -- the live path skips the attach and routes
+			// the bead plainly -- so the preview must not predict an
+			// error the real run will not produce.
+			var blockingLabel, blockingID string
 			if preCheck {
-				if rc := dryRunReportBlockingMolecule(opts, deps, querier, stderr); rc != 0 {
-					return rc
-				}
+				blockingLabel, blockingID = sling.FindBlockingMolecule(querier, opts.BeadOrFormula, deps.Store)
 			}
 			w("Default formula:")
 			w("  Formula: " + a.EffectiveDefaultSlingFormula())
@@ -1799,7 +1804,11 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 			}
 			w("  Would run: " + cookCmd)
 			if preCheck {
-				w("  Pre-check: " + opts.BeadOrFormula + " has no existing molecule/wisp children ✓")
+				if blockingLabel != "" {
+					w(fmt.Sprintf("  Pre-check: %s already has attached %s %s — the default formula will be skipped and the bead routed plainly.", opts.BeadOrFormula, blockingLabel, blockingID))
+				} else {
+					w("  Pre-check: " + opts.BeadOrFormula + " has no existing molecule/wisp children ✓")
+				}
 			}
 			w("")
 		}

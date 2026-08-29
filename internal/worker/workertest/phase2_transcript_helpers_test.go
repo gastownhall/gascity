@@ -54,6 +54,12 @@ func writeMalformedHistoryTranscript(t *testing.T, profile Profile) string {
 			t.Fatalf("write malformed mimocode transcript: %v", err)
 		}
 		return path
+	case ProfileZCodeTmuxCLI:
+		path := filepath.Join(t.TempDir(), "session.json")
+		if err := os.WriteFile(path, []byte(`{"info":{"id":"malformed-zcode","directory":"/tmp/gascity/phase2/zcode"},"messages":[`), 0o644); err != nil {
+			t.Fatalf("write malformed zcode transcript: %v", err)
+		}
+		return path
 	case ProfilePiTmuxCLI:
 		return writeLinesFile(t, "session.jsonl", []string{
 			`{"type":"session","version":3,"id":"malformed-pi","timestamp":"2026-04-04T09:00:00Z","cwd":"/tmp/gascity/phase2/pi"}`,
@@ -115,6 +121,11 @@ func writeInteractionHistoryTranscript(t *testing.T, profile Profile) string {
 		return writeMimoCodeExportTranscript(t, "mimocode-interaction-phase2", "/tmp/gascity/phase2/mimocode", []string{
 			`{"info":{"id":"msg_user_1","sessionID":"mimocode-interaction-phase2","role":"user","time":{"created":1770000000000}},"parts":[{"id":"part_user_1","type":"text","text":"run a tool"}]}`,
 			`{"info":{"id":"msg_assistant_1","sessionID":"mimocode-interaction-phase2","role":"assistant","parentID":"msg_user_1","time":{"created":1770000001000}},"parts":[{"id":"part_interaction_1","type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"],"metadata":{"tool_name":"Read"}}]}`,
+		})
+	case ProfileZCodeTmuxCLI:
+		return writeZCodeExportTranscript(t, "zcode-interaction-phase2", "/tmp/gascity/phase2/zcode", []string{
+			`{"info":{"id":"msg_user_1","sessionID":"zcode-interaction-phase2","role":"user","time":{"created":1770000000000}},"parts":[{"id":"part_user_1","type":"text","text":"run a tool"}]}`,
+			`{"info":{"id":"msg_assistant_1","sessionID":"zcode-interaction-phase2","role":"assistant","parentID":"msg_user_1","time":{"created":1770000001000}},"parts":[{"id":"part_interaction_1","type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"],"metadata":{"tool_name":"Read"}}]}`,
 		})
 	case ProfilePiTmuxCLI:
 		return writePiSessionTranscript(t, "pi-interaction-phase2", "/tmp/gascity/phase2/pi", []string{
@@ -181,6 +192,11 @@ func writeInteractionLifecycleTranscript(t *testing.T, profile Profile, finalSta
 		return writeMimoCodeExportTranscript(t, "mimocode-interaction-lifecycle-phase2", "/tmp/gascity/phase2/mimocode", []string{
 			`{"info":{"id":"msg_assistant_1","sessionID":"mimocode-interaction-lifecycle-phase2","role":"assistant","time":{"created":1770000000000}},"parts":[{"id":"part_interaction_1","type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"]}]}`,
 			fmt.Sprintf(`{"info":{"id":"msg_user_1","sessionID":"mimocode-interaction-lifecycle-phase2","role":"user","parentID":"msg_assistant_1","time":{"created":1770000001000}},"parts":[{"id":"part_interaction_2","type":"interaction","request_id":"approval-1","kind":"approval","state":%q,"action":%q}]}`, finalStateText, finalAction),
+		})
+	case ProfileZCodeTmuxCLI:
+		return writeZCodeExportTranscript(t, "zcode-interaction-lifecycle-phase2", "/tmp/gascity/phase2/zcode", []string{
+			`{"info":{"id":"msg_assistant_1","sessionID":"zcode-interaction-lifecycle-phase2","role":"assistant","time":{"created":1770000000000}},"parts":[{"id":"part_interaction_1","type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"]}]}`,
+			fmt.Sprintf(`{"info":{"id":"msg_user_1","sessionID":"zcode-interaction-lifecycle-phase2","role":"user","parentID":"msg_assistant_1","time":{"created":1770000001000}},"parts":[{"id":"part_interaction_2","type":"interaction","request_id":"approval-1","kind":"approval","state":%q,"action":%q}]}`, finalStateText, finalAction),
 		})
 	case ProfilePiTmuxCLI:
 		return writePiSessionTranscript(t, "pi-interaction-lifecycle-phase2", "/tmp/gascity/phase2/pi", []string{
@@ -278,6 +294,17 @@ func writeToolTranscript(t *testing.T, profile Profile, openTail bool) string {
 			`{"info":{"id":"msg_user_1","sessionID":"mimocode-tool-phase2","role":"user","time":{"created":1770000000000}},"parts":[{"id":"part_user_1","type":"text","text":"read the file"}]}`,
 			`{"info":{"id":"msg_assistant_1","sessionID":"mimocode-tool-phase2","role":"assistant","parentID":"msg_user_1","time":{"created":1770000001000}},"parts":[{"id":"part_tool_1","type":"tool","callID":"call-1","tool":"Read","state":` + state + `}]}` + tail,
 		})
+	case ProfileZCodeTmuxCLI:
+		state := `{"status":"running","input":{"path":"README.md"}}`
+		tail := ""
+		if !openTail {
+			state = `{"status":"completed","input":{"path":"README.md"},"output":"file data"}`
+			tail = `,{"info":{"id":"msg_assistant_2","sessionID":"zcode-tool-phase2","role":"assistant","parentID":"msg_assistant_1","time":{"created":1770000002000}},"parts":[{"id":"part_assistant_2","type":"text","text":"done"}]}`
+		}
+		return writeZCodeExportTranscript(t, "zcode-tool-phase2", "/tmp/gascity/phase2/zcode", []string{
+			`{"info":{"id":"msg_user_1","sessionID":"zcode-tool-phase2","role":"user","time":{"created":1770000000000}},"parts":[{"id":"part_user_1","type":"text","text":"read the file"}]}`,
+			`{"info":{"id":"msg_assistant_1","sessionID":"zcode-tool-phase2","role":"assistant","parentID":"msg_user_1","time":{"created":1770000001000}},"parts":[{"id":"part_tool_1","type":"tool","callID":"call-1","tool":"Read","state":` + state + `}]}` + tail,
+		})
 	case ProfilePiTmuxCLI:
 		entries := []string{
 			`{"type":"message","id":"msg_user_1","parentId":null,"timestamp":"2026-04-04T09:00:00Z","message":{"role":"user","content":"read the file"}}`,
@@ -315,6 +342,20 @@ func writeOpenCodeExportTranscript(t *testing.T, sessionID, workDir string, mess
 	body := `{"info":{"id":` + fmt.Sprintf("%q", sessionID) + `,"directory":` + fmt.Sprintf("%q", workDir) + `},"messages":[` + strings.Join(messages, ",") + `]}`
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatalf("write opencode transcript: %v", err)
+	}
+	return path
+}
+
+// writeZCodeExportTranscript writes a ZCode export-mirror file, the layout the
+// zcode-repl adapter appends after every completed turn. ZCode transcripts are
+// authored in OpenCode's `{info, messages}` shape, so the reader delegates.
+func writeZCodeExportTranscript(t *testing.T, sessionID, workDir string, messages []string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), sessionID+".json")
+	body := `{"info":{"id":` + fmt.Sprintf("%q", sessionID) + `,"directory":` + fmt.Sprintf("%q", workDir) + `},"messages":[` + strings.Join(messages, ",") + `]}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write zcode transcript: %v", err)
 	}
 	return path
 }

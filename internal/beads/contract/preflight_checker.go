@@ -7,6 +7,9 @@ import (
 	"runtime/debug"
 	"strings"
 
+	"golang.org/x/mod/module"
+	"golang.org/x/mod/semver"
+
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -41,6 +44,11 @@ type PreflightChecker struct {
 	// BeadsLibraryVersion is the linked github.com/steveyegge/beads module
 	// version. Empty means infer it from build info.
 	BeadsLibraryVersion string
+	// BeadsLibraryReplaced reports whether a go.mod replace directive supplied
+	// the linked beads library, in which case its version identifies the
+	// replacement rather than a beads release. Set together with
+	// BeadsLibraryVersion; leaving both zero infers them from build info.
+	BeadsLibraryReplaced bool
 }
 
 // Check runs the beads backend preflight for scope and returns typed diagnostics.
@@ -234,10 +242,8 @@ func (c PreflightChecker) checkIdentityMatch(scope string, metadata preflightMet
 }
 
 func (c PreflightChecker) checkVersionCompat(ctx PreflightBDContext, err error) PreflightCheckResult {
-	libraryVersion := strings.TrimPrefix(strings.TrimSpace(c.BeadsLibraryVersion), "v")
-	if libraryVersion == "" {
-		libraryVersion = strings.TrimPrefix(beadsModuleVersion(), "v")
-	}
+	library := c.linkedBeadsLibrary()
+	libraryVersion := strings.TrimPrefix(library.Version, "v")
 	details := PreflightDetails{
 		BDVersion:           ctx.BDVersion,
 		BeadsLibraryVersion: libraryVersion,
@@ -255,14 +261,16 @@ func (c PreflightChecker) checkVersionCompat(ctx PreflightBDContext, err error) 
 	if ctx.BDVersion == "" {
 		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckWarn, "bd/beads version compatibility could not be confirmed", details)
 	}
-	if libraryVersion == "" || libraryVersion == "(devel)" {
-		// A local-path/replace (source) build of the linked beads library
-		// reports no module version ("(devel)") even though gc and bd are
-		// built from the same source. The schema version is validated above
-		// and is the real compatibility signal, so an unconfirmable library
-		// version must not take the native store offline — only a *confirmed*
-		// mismatch (below) should.
-		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckPass, "bd/beads schema compatible; linked library version unconfirmed (source build)", details)
+	if reason := library.unconfirmableReason(); reason != "" {
+		// The compare below only means something when both sides name the same
+		// released beads artifact. When the linked library does not — a source
+		// build, a replaced module, or a pseudo-version naming an untagged
+		// commit — the two strings can never be equal, and answering "mismatch"
+		// reports a verdict the check never had the evidence to reach. The
+		// schema version is validated above and is the real compatibility
+		// signal, so an unconfirmable library version must not take the native
+		// store offline; only a *confirmed* mismatch (below) should.
+		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckPass, "bd/beads schema compatible; linked library version unconfirmed ("+reason+")", details)
 	}
 	if strings.TrimPrefix(ctx.BDVersion, "v") != libraryVersion {
 		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckFail, "bd version differs from linked beads library version", details)
@@ -296,20 +304,77 @@ func preflightFallbackReason(checks []PreflightCheckResult) string {
 	return ""
 }
 
-func beadsModuleVersion() string {
+// beadsModulePath is the module path of the beads library gc links.
+const beadsModulePath = "github.com/steveyegge/beads"
+
+// linkedBeadsLibrary resolves the beads library this binary links, preferring
+// the configured override so tests need not depend on their own build info.
+func (c PreflightChecker) linkedBeadsLibrary() beadsLibrary {
+	if version := strings.TrimSpace(c.BeadsLibraryVersion); version != "" || c.BeadsLibraryReplaced {
+		return beadsLibrary{Version: version, Replaced: c.BeadsLibraryReplaced}
+	}
 	info, ok := debug.ReadBuildInfo()
 	if !ok {
+		return beadsLibrary{}
+	}
+	return linkedBeadsLibraryFrom(info)
+}
+
+// beadsLibrary describes the beads library a binary actually links.
+type beadsLibrary struct {
+	// Version is the module version recorded in build info, empty when unknown.
+	Version string
+	// Replaced reports whether a go.mod replace directive supplied the code.
+	// A replacement's version numbers belong to the replacement, not to beads,
+	// so they say nothing about which bd release the library agrees with.
+	Replaced bool
+}
+
+// unconfirmableReason names why the library version cannot be compared to a bd
+// release version, or returns "" when the comparison is meaningful.
+func (b beadsLibrary) unconfirmableReason() string {
+	version := strings.TrimPrefix(strings.TrimSpace(b.Version), "v")
+	switch {
+	case version == "" || version == "(devel)":
+		// A source build reports "(devel)" (or nothing) even though gc and bd
+		// are built from the same tree.
+		return "source build"
+	case b.Replaced:
+		return "replaced module"
+	case !comparableReleaseVersion(version):
+		// A pseudo-version names an untagged commit, not a release. gc pins
+		// beads at one whenever it tracks beads ahead of its last tag.
+		return "pseudo-version"
+	default:
 		return ""
 	}
-	for _, dep := range info.Deps {
-		if dep.Path == "github.com/steveyegge/beads" {
-			if dep.Replace != nil && dep.Replace.Version != "" {
-				return dep.Replace.Version
-			}
-			return dep.Version
-		}
+}
+
+// comparableReleaseVersion reports whether version names a released beads
+// artifact, and can therefore be compared with the version bd reports for
+// itself. Pseudo-versions and non-semver strings cannot.
+func comparableReleaseVersion(version string) bool {
+	canonical := "v" + strings.TrimPrefix(strings.TrimSpace(version), "v")
+	return semver.IsValid(canonical) && !module.IsPseudoVersion(canonical)
+}
+
+// linkedBeadsLibraryFrom extracts the linked beads library from build info.
+func linkedBeadsLibraryFrom(info *debug.BuildInfo) beadsLibrary {
+	if info == nil {
+		return beadsLibrary{}
 	}
-	return ""
+	for _, dep := range info.Deps {
+		if dep == nil || dep.Path != beadsModulePath {
+			continue
+		}
+		if dep.Replace != nil {
+			// Report the replacement's own version — including the empty one a
+			// local-path replace records — never the require line it displaced.
+			return beadsLibrary{Version: dep.Replace.Version, Replaced: true}
+		}
+		return beadsLibrary{Version: dep.Version}
+	}
+	return beadsLibrary{}
 }
 
 type preflightMetadata struct {

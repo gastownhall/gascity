@@ -14,7 +14,7 @@ import (
 // probe (Tier 1/2) stays hold-transparent.
 
 func TestBdReadyPoolDemandShellExcludesDispatchHoldLabels(t *testing.T) {
-	got := bdReadyPoolDemandShell("--limit 0", false)
+	got := bdReadyPoolDemandShell("--limit 0", QueryTopology{})
 	for _, label := range beadmeta.DispatchHoldLabels {
 		want := `--exclude-label "` + label + `"`
 		if !strings.Contains(got, want) {
@@ -24,7 +24,7 @@ func TestBdReadyPoolDemandShellExcludesDispatchHoldLabels(t *testing.T) {
 }
 
 func TestBdReadyPoolDemandMigrationShellExcludesDispatchHoldLabels(t *testing.T) {
-	got := bdReadyPoolDemandMigrationShell("--limit=20", false)
+	got := bdReadyPoolDemandMigrationShell("--limit=20", QueryTopology{})
 	for _, label := range beadmeta.DispatchHoldLabels {
 		want := `--exclude-label "` + label + `"`
 		if !strings.Contains(got, want) {
@@ -34,7 +34,7 @@ func TestBdReadyPoolDemandMigrationShellExcludesDispatchHoldLabels(t *testing.T)
 }
 
 func TestLegacyEphemeralPoolDemandShellRouteScopedExcludesDispatchHoldLabels(t *testing.T) {
-	got := legacyEphemeralPoolDemandShell(20, false, true)
+	got := legacyEphemeralPoolDemandShell(20, QueryTopology{}, true)
 	if !strings.Contains(got, ".labels") {
 		t.Errorf("legacyEphemeralPoolDemandShell() = %q, missing a .labels reference", got)
 	}
@@ -46,7 +46,7 @@ func TestLegacyEphemeralPoolDemandShellRouteScopedExcludesDispatchHoldLabels(t *
 }
 
 func TestEphemeralAssignedReadyProbeScriptDoesNotExcludeDispatchHoldLabels(t *testing.T) {
-	got := ephemeralAssignedReadyProbeScript("cand", false)
+	got := ephemeralAssignedReadyProbeScript("cand", QueryTopology{})
 	if strings.Contains(got, "--exclude-label") || strings.Contains(got, ".labels") {
 		t.Errorf("ephemeralAssignedReadyProbeScript() = %q, assignee-scoped tier must stay hold-transparent", got)
 	}
@@ -64,7 +64,7 @@ func TestEffectiveRoutedPoolQueryCarriesHoldLabelExclusionForLegacyAlias(t *test
 }
 
 func TestPoolDemandCountShellInheritsDispatchHoldLabelExclusion(t *testing.T) {
-	got := poolDemandCountShell("hello-world/worker", false)
+	got := poolDemandCountShell("hello-world/worker", QueryTopology{})
 	for _, label := range beadmeta.DispatchHoldLabels {
 		want := `--exclude-label "` + label + `"`
 		if !strings.Contains(got, want) {

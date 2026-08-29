@@ -331,11 +331,16 @@ func newConvergeListCmd(stdout, stderr io.Writer) *cobra.Command {
 					fmt.Fprintf(stderr, "gc converge list: %v\n", err) //nolint:errcheck
 					return errExit
 				}
+				// --all-rigs builds its own city leg instead of going through
+				// openConvergeStore, so it needs the same graph-class routing;
+				// otherwise `gc converge list --all-rigs` is the one surface that
+				// still reads the city's retained work-store copies.
 				store, err := openStoreAtForCity(rctx.CityPath, rctx.CityPath)
 				if err != nil {
 					fmt.Fprintf(stderr, "gc converge list: %v\n", err) //nolint:errcheck
 					return errExit
 				}
+				store = scopeGraphStore(rctx.CityPath, rctx.CityPath, nil, store)
 				if err := appendEntries("", store); err != nil {
 					fmt.Fprintf(stderr, "gc converge list: %v\n", err) //nolint:errcheck
 					return errExit
@@ -356,6 +361,10 @@ func newConvergeListCmd(stdout, stderr io.Writer) *cobra.Command {
 				}
 				sort.Strings(rigs)
 				for _, rig := range rigs {
+					// Rig scopes stay on their rig work store, matching
+					// buildConvergenceScopes and controlScopeTakesGraphClass:
+					// class routing is city-keyed, so routing rig scopes to the
+					// one graph binding would merge every rig's loops into it.
 					store, err := openStoreAtForCity(rigPathByName[rig], rctx.CityPath)
 					if err != nil {
 						fmt.Fprintf(stderr, "gc converge list: rig %q: %v\n", rig, err) //nolint:errcheck
@@ -810,6 +819,14 @@ type convergeTestGateJSONResult struct {
 // context it opens the city/HQ store; with a rig context it opens that
 // rig's store so rig-scoped convergence loops are visible. It also returns
 // the resolved context for callers that need the city path.
+//
+// The returned store is CLASS-ROUTED for the city scope: convergence beads are
+// graph class, and the controller's city scope reads and writes them in the
+// graph binding (buildConvergenceScopes). A CLI that opened the work store
+// instead would answer "no convergence loops" on a relocated city — a confident
+// empty, at exit 0, about a loop that is running. storePath is returned
+// unrouted on purpose; it is the scope root, and every caller that passes it
+// to a gate command wants the directory, not the database.
 func openConvergeStore(stderr io.Writer, cmdName string) (beads.Store, resolvedContext, string, int) {
 	rctx, err := resolveContext()
 	if err != nil {
@@ -828,7 +845,28 @@ func openConvergeStore(stderr io.Writer, cmdName string) (beads.Store, resolvedC
 		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck
 		return nil, resolvedContext{}, "", 1
 	}
-	return store, rctx, storePath, 0
+	return convergeScopeStore(rctx.CityPath, rctx.RigName, storePath, store), rctx, storePath, 0
+}
+
+// convergeScopeStore returns the store a converge scope reads and writes.
+//
+// Convergence roots are ClassGraph, so a city scope goes through the city's
+// graph binding while a rig scope keeps its own work ledger. The routing itself
+// is scopeGraphStore's, shared with control dispatch, so the two coordination
+// surfaces cannot drift apart.
+//
+// The rig short-circuit is not redundant with scopeGraphStore's own city test.
+// That test is by PATH, and nothing forbids registering a rig at the city root,
+// where its path IS the city path. The controller's convergence scope map keys
+// on rig NAME (buildConvergenceScopes), so such a rig's roots are written to its
+// own store; routing this leg by path would send the CLI to a binding the
+// controller never writes for that rig — the read/write asymmetry this whole
+// change exists to remove.
+func convergeScopeStore(cityPath, rigName, storePath string, store beads.Store) beads.Store {
+	if rigName != "" {
+		return store
+	}
+	return scopeGraphStore(cityPath, storePath, nil, store)
 }
 
 func convergeStorePathForContext(rctx resolvedContext) (string, error) {

@@ -283,6 +283,14 @@ func (a *beadsOrdersAdapter) graphRootHasOpenWork(root beads.Bead) (bool, error)
 	return a.graphHasOpenDescendants(root.ID)
 }
 
+// graphHasOpenDescendants reports whether the molecule rooted at rootID still
+// has open members. It leads with beads.MembershipDirectRootID — the same
+// gc.root_bead_id scan beads.DirectMembers performs — and only falls back to
+// the parent/dependency walk when that scan finds no open member, so a
+// dependency-isolated member (a gc.kind=spec sidecar has no edges at all) is
+// never the reason an order is reported as finished. The fallback deliberately
+// re-checks the root id on every dependency hop, which keeps the walk from
+// escaping the molecule through an out-of-molecule blocker edge.
 func (a *beadsOrdersAdapter) graphHasOpenDescendants(rootID string) (bool, error) {
 	members, err := a.graph.List(beads.ListQuery{
 		Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},

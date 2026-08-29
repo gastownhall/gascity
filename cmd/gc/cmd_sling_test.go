@@ -1320,6 +1320,63 @@ func TestDoSlingNudgePoolUsesCityStoreForSessionBeads(t *testing.T) {
 	}
 }
 
+// TestDoSlingNudgePoolMemberBindingQualifiedCityScope is a regression for
+// #4843: doSlingNudge must deliver a nudge to a running, city-scoped,
+// binding-qualified pool instance (testpack.worker-1). Before the
+// resolveAgentIdentity Step 2b guard fix, doSlingNudge's identity lookup on the
+// dot-qualified ref (cmd_sling.go:1521) failed, so it logged
+// `agent "testpack.worker-1" not found in config` and returned handled
+// without delivering the nudge or poking the controller, leaving routed pool
+// work unclaimed.
+func TestDoSlingNudgePoolMemberBindingQualifiedCityScope(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	sessionName := "testpack__worker-session-test"
+	if err := sp.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	sp.Calls = nil
+	a := config.Agent{
+		Name:              "worker",
+		BindingName:       "testpack",
+		Dir:               "",
+		MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2),
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{a},
+	}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.CityPath = t.TempDir()
+	if _, err := deps.Store.Create(beads.Bead{
+		Title:  "testpack.worker-1",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":     "testpack.worker",
+			"session_name": sessionName,
+			"pool_slot":    "1",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	prev := startNudgePoller
+	startNudgePoller = func(_, _, _ string) error { return nil }
+	t.Cleanup(func() { startNudgePoller = prev })
+
+	doSlingNudge(&a, deps.CityName, deps.CityPath, cfg, sp, deps.Store, stdout, stderr)
+	if strings.Contains(stderr.String(), "not found in config") {
+		t.Fatalf("doSlingNudge logged 'not found in config' for a binding-qualified pool instance (#4843); stderr=%q", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "No running sessions") || strings.Contains(stderr.String(), "poke failed") {
+		t.Fatalf("sling nudge missed live binding-qualified pool session; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "testpack.worker-1") {
+		t.Fatalf("stdout = %q, want nudge delivered to binding-qualified pool instance testpack.worker-1", stdout.String())
+	}
+}
+
 func TestDoSlingNudgePoolNoMembers(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
@@ -6832,6 +6889,48 @@ func TestDryRunOnExistingMolecule(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "already has attached molecule MOL-1") {
 		t.Errorf("stderr = %q, want molecule error", stderr.String())
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("got %d runner calls, want 0: %v", len(runner.calls), runner.calls)
+	}
+}
+
+// TestDryRunDefaultFormulaExistingMolecule pins the dry-run preview to the
+// live behavior for an implicit default_sling_formula: the real run skips the
+// attach and routes the bead plainly (exit 0), so the preview must report the
+// blocking attachment as a note and exit 0 too, rather than predicting the
+// hard failure that only an explicit --on produces
+// (TestDryRunOnExistingMolecule).
+func TestDryRunDefaultFormulaExistingMolecule(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), DefaultSlingFormula: strPtr("code-review")}
+
+	q := newFakeChildQuerier()
+	q.beadsByID["BL-42"] = beads.Bead{ID: "BL-42", Type: "task", Status: "open"}
+	q.childrenOf["BL-42"] = []beads.Bead{
+		{ID: "MOL-1", Type: "molecule", Status: "open"},
+	}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.Store = seededStore("BL-42")
+	opts := testOpts(a, "BL-42")
+	opts.DryRun = true
+	code := doSling(opts, deps, q, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("dry-run returned %d, want 0 (default formula falls back to plain routing); stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "BL-42 already has attached molecule MOL-1") {
+		t.Errorf("stdout = %q, want the blocking-attachment pre-check note", out)
+	}
+	if !strings.Contains(out, "the default formula will be skipped and the bead routed plainly") {
+		t.Errorf("stdout = %q, want the plain-routing skip note", out)
+	}
+	if strings.Contains(out, "has no existing molecule/wisp children") {
+		t.Errorf("stdout = %q, must not claim the bead has no molecule children", out)
 	}
 	if len(runner.calls) != 0 {
 		t.Errorf("got %d runner calls, want 0: %v", len(runner.calls), runner.calls)

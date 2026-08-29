@@ -50,7 +50,19 @@ func standaloneBuildAgentsFnWithSessionBeads(
 		sessionBeads *sessionBeadSnapshot,
 		trace *sessionReconcilerTraceCycle,
 	) DesiredStateResult {
-		return buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, c, currentSP, store, rigStores, sessionBeads, trace, stderr)
+		return buildDesiredStateWithSessionBeadsAt(
+			cityName,
+			cityPath,
+			beaconTime,
+			time.Now(),
+			c,
+			currentSP,
+			store,
+			rigStores,
+			sessionBeads,
+			trace,
+			stderr,
+		)
 	}
 }
 
@@ -155,7 +167,7 @@ func computePoolDeathHandlers(cfg *config.City, cityName, cityPath string, sp ru
 		for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, st, sp) {
 			_, instanceName := config.ParseQualifiedName(qualifiedInstance)
 			instance := deepCopyAgent(&a, instanceName, a.Dir)
-			cmd := instance.EffectiveOnDeathForBeads(cfg.Beads)
+			cmd := instance.EffectiveOnDeathFor(config.QueryTopology{Beads: cfg.Beads})
 			if cmd == "" {
 				continue
 			}
@@ -803,6 +815,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		SkipCityDoltCheck:    skipRigDoltChecks || (!scopeUsesManagedBdStoreContract(warmupCityPath, warmupCityPath) && !workspaceNeedsCityDoltCheck(warmupCityPath, cfg)),
 		SkipManagedDoltCheck: managedDoltOpsCheckSkip(warmupCityPath, cfg, nil),
 		SkipRigDoltChecks:    skipRigDoltChecks,
+		SkipStorePreflight:   true,
 	})
 	warmupOpts := warmup.WarmupOpts{
 		Checks: warmupChecks,
@@ -884,7 +897,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		}
 	}
 
-	sp, err := newSessionProvider()
+	sp, err := newSessionProviderForCity(cfg, cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -980,10 +993,9 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// arm (collectAssignedWorkBeadsWithStores / cold-wake scale-check probes) — a dual
 	// role the daemon routes to the session store today too, tracked as a shared E2
 	// two-store split. Identity to oneShotStore at the single-store backend, so
-	// byte-identical today. releaseOrphanedPoolAssignmentsWhenSnapshotsComplete keeps
-	// the plain oneShotStore, matching the daemon's cityBeadStore() there (its lone
-	// liveOpenSessionAssignmentExists session read is a shared work-release-boundary
-	// follow-up).
+	// byte-identical today. releaseOrphanedPoolAssignmentsWhenSnapshotsComplete takes
+	// both: oneShotStore as the work-class owner fallback and sessStore for its lone
+	// liveOpenSessionAssignmentExists session read (ga-g3pf0).
 	sessStore := cliSessionStore(oneShotStore, cfg, cityPath)
 
 	// One-shot bead reconciliation: same code path as the daemon.
@@ -994,7 +1006,19 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		sessionBeads = nil
 		sessionQueryPartial = true
 	}
-	dsResult := buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, cfg, sp, sessStore, rigStores, sessionBeads, nil, stderr)
+	dsResult := buildDesiredStateWithSessionBeadsAt(
+		cityName,
+		cityPath,
+		beaconTime,
+		time.Now(),
+		cfg,
+		sp,
+		sessStore,
+		rigStores,
+		sessionBeads,
+		nil,
+		stderr,
+	)
 	dsResult.SessionQueryPartial = dsResult.SessionQueryPartial || sessionQueryPartial
 	ds := dsResult.State
 	cfgNames := configuredSessionNamesWithSnapshot(cfg, cityName, sessionBeads)
@@ -1002,14 +1026,26 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		cityPath, beads.SessionStore{Store: sessStore}, rigStores, ds, sp, cfgNames, cfg, clock.Real{}, stderr, true, sessionBeads,
 	)
 
-	if released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(oneShotStore, cfg, cityPath, sessionBeads.OpenInfos(), dsResult, rigStores); len(released) > 0 {
+	if released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(oneShotStore, beads.SessionStore{Store: sessStore}, cfg, cityPath, sessionBeads.OpenInfos(), dsResult, rigStores); len(released) > 0 {
 		for _, r := range released {
 			fmt.Fprintf(stderr, "released orphaned pool work: %s\n", r.ID) //nolint:errcheck
 		}
 		// Standalone start has no follow-up patrol tick, so after reopening
 		// orphaned pool work we must immediately rebuild demand and sync once
 		// more so replacement session beads can be materialized in this run.
-		dsResult = buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, cfg, sp, sessStore, rigStores, sessionBeads, nil, stderr)
+		dsResult = buildDesiredStateWithSessionBeadsAt(
+			cityName,
+			cityPath,
+			beaconTime,
+			time.Now(),
+			cfg,
+			sp,
+			sessStore,
+			rigStores,
+			sessionBeads,
+			nil,
+			stderr,
+		)
 		ds = dsResult.State
 		cfgNames = configuredSessionNamesWithSnapshot(cfg, cityName, sessionBeads)
 		_, sessionBeads = syncSessionBeadsWithSnapshotAndRigStores(
@@ -1019,11 +1055,12 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 
 	dt := newDrainTracker()
 	openInfos := sessionBeads.OpenInfos()
-	poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, openInfos, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
+	poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, oneShotStore, openInfos, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
+	poolDecisionTime := time.Now()
 	poolDesired := retainScaleCheckPartialPoolDesired(
 		cfg,
-		PoolDesiredCounts(ComputePoolDesiredStates(
-			cfg, poolWorkBeads, openInfos, dsResult.ScaleCheckCounts)),
+		PoolDesiredCounts(ComputePoolDesiredStatesAt(
+			cfg, poolWorkBeads, openInfos, dsResult.ScaleCheckCounts, poolDecisionTime)),
 		sessionBeads,
 		effectivePoolPartialRetentionTemplates(dsResult),
 	)
@@ -1031,7 +1068,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		poolDesired = make(map[string]int)
 	}
 	mergeNamedSessionDemand(poolDesired, dsResult.NamedSessionDemand, cfg)
-	awakeAssignedWorkBeads, awakeAssignedStoreRefs := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, openInfos, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
+	awakeAssignedWorkBeads, awakeAssignedStoreRefs := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, oneShotStore, openInfos, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
 	reconcileSessionBeadsAtPathWithNamedDemand(
 		sigCtx, cityPath, sessionBeads.OpenForReconcile(), sessionBeads, ds, cfgNames, cfg, sp, sessStore,
 		nil, awakeAssignedWorkBeads, rigStores, nil, dt, nil, poolDesired,
@@ -1050,7 +1087,19 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "gc start: loading session beads: %v\n", err) //nolint:errcheck
 		sessionBeads = nil
 	}
-	dsResult = buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, cfg, sp, sessStore, rigStores, sessionBeads, nil, stderr)
+	dsResult = buildDesiredStateWithSessionBeadsAt(
+		cityName,
+		cityPath,
+		beaconTime,
+		time.Now(),
+		cfg,
+		sp,
+		sessStore,
+		rigStores,
+		sessionBeads,
+		nil,
+		stderr,
+	)
 	ds = dsResult.State
 	cfgNames = configuredSessionNamesWithSnapshot(cfg, cityName, sessionBeads)
 	syncSessionBeadsWithSnapshotAndRigStores(

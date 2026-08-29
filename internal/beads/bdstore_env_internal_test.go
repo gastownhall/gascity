@@ -79,6 +79,39 @@ func TestExecEnvForNonBd_LeavesEnvAlone(t *testing.T) {
 	}
 }
 
+func TestExecCommandRunnerWithoutAmbientBeadsWithholdsNamespaceBeforeOverrides(t *testing.T) {
+	t.Setenv("BEADS_DB", "ambient-database")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient.example")
+	t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "/ambient/helper")
+
+	runner := ExecCommandRunnerWithEnvWithoutAmbientBeads(map[string]string{
+		"BEADS_DIR":                     "/selected/.beads",
+		"BEADS_DOLT_CREDENTIAL_COMMAND": "/selected/gc internal beads-credential",
+	})
+	out, err := runner(t.TempDir(), "sh", "-c", `env | sort`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(out)
+	for _, forbidden := range []string{
+		"BEADS_DB=",
+		"BEADS_DOLT_SERVER_HOST=",
+		"BEADS_DOLT_CREDENTIAL_COMMAND=/ambient/helper",
+	} {
+		if strings.Contains(got, forbidden) {
+			t.Errorf("child environment contains withheld entry %q", forbidden)
+		}
+	}
+	for _, want := range []string{
+		"BEADS_DIR=/selected/.beads",
+		"BEADS_DOLT_CREDENTIAL_COMMAND=/selected/gc internal beads-credential",
+	} {
+		if !strings.Contains(got, want+"\n") {
+			t.Errorf("child environment does not contain explicit override %q", want)
+		}
+	}
+}
+
 func TestExecCommandRunnerWithEnv_AbsoluteBDBinKeepsLogicalBdPolicy(t *testing.T) {
 	// BD_BIN selects the physical executable for an otherwise logical `bd`
 	// command. The logical identity must remain intact so the runner keeps the

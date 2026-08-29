@@ -695,6 +695,80 @@ func TestScaled_Demand1_TwoActive(t *testing.T) {
 	}
 }
 
+func TestScaled_PostCreateProtectedPreferredOverOlderActive(t *testing.T) {
+	const template = "hello-world/polecat"
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: template}},
+		SessionBeads: []AwakeSessionBead{
+			{
+				ID: "mc-old", SessionName: "polecat-old", Template: template,
+				State: "active", CreatedAt: now.Add(-time.Hour),
+			},
+			{
+				ID: "mc-fresh", SessionName: "polecat-fresh", Template: template,
+				State: "active", CreatedAt: now.Add(-time.Minute), PostCreateProtected: true,
+			},
+		},
+		ScaleCheckCounts: map[string]int{template: 1},
+		Now:              now,
+	})
+
+	assertAsleep(t, result, "polecat-old")
+	assertAwake(t, result, "polecat-fresh")
+	assertReason(t, result, "polecat-fresh", "scaled:demand")
+}
+
+func TestScaled_BlockedPostCreateProtectedDoesNotConsumeSlot(t *testing.T) {
+	const template = "hello-world/polecat"
+	tests := []struct {
+		name   string
+		mutate func(*AwakeSessionBead)
+	}{
+		{
+			name: "wait hold",
+			mutate: func(bead *AwakeSessionBead) {
+				bead.WaitHold = true
+			},
+		},
+		{
+			name: "held",
+			mutate: func(bead *AwakeSessionBead) {
+				bead.HeldUntil = now.Add(time.Minute)
+			},
+		},
+		{
+			name: "quarantined",
+			mutate: func(bead *AwakeSessionBead) {
+				bead.QuarantinedUntil = now.Add(time.Minute)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fresh := AwakeSessionBead{
+				ID: "mc-fresh", SessionName: "polecat-fresh", Template: template,
+				State: "active", CreatedAt: now.Add(-time.Minute), PostCreateProtected: true,
+			}
+			tt.mutate(&fresh)
+			result := ComputeAwakeSet(AwakeInput{
+				Agents: []AwakeAgent{{QualifiedName: template}},
+				SessionBeads: []AwakeSessionBead{
+					{
+						ID: "mc-runnable", SessionName: "polecat-runnable", Template: template,
+						State: "active", CreatedAt: now.Add(-time.Hour),
+					},
+					fresh,
+				},
+				ScaleCheckCounts: map[string]int{template: 1},
+				Now:              now,
+			})
+
+			assertAwake(t, result, "polecat-runnable")
+			assertAsleep(t, result, "polecat-fresh")
+		})
+	}
+}
+
 func TestScaled_Demand0_OneActive(t *testing.T) {
 	result := ComputeAwakeSet(AwakeInput{
 		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
@@ -1400,6 +1474,27 @@ func TestRegression_PoolReadyOpenWorkVetoesIdleSleep(t *testing.T) {
 	})
 	assertAwake(t, result, "polecat-mc-p1")
 	assertReason(t, result, "polecat-mc-p1", "assigned-work")
+}
+
+func TestRegression_ClaimedInProgressWorkVetoesIdleSleep(t *testing.T) {
+	idleTimeout := 10 * time.Minute
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat", SleepAfterIdle: idleTimeout}},
+		SessionBeads: []AwakeSessionBead{
+			{
+				ID: "mc-p1", SessionName: "polecat-mc-p1", Template: "hello-world/polecat", State: "active",
+				IdleSince: now.Add(-(idleTimeout + time.Minute)),
+			},
+		},
+		WorkBeads: []AwakeWorkBead{{
+			ID: "hw-1", Assignee: "mc-p1", Status: "in_progress", Blocked: true,
+		}},
+		ScaleCheckCounts: map[string]int{"hello-world/polecat": 1},
+		RunningSessions:  map[string]bool{"polecat-mc-p1": true},
+		Now:              now,
+	})
+	assertAwake(t, result, "polecat-mc-p1")
+	assertReason(t, result, "polecat-mc-p1", "scaled:demand")
 }
 
 func TestRegression_OpenAssignedWorkWithoutReadySignalDoesNotWake(t *testing.T) {

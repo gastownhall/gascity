@@ -302,7 +302,9 @@ func TestReleaseIfCurrentSurfacesInfraFailuresAsErrors(t *testing.T) {
 
 // TestReleaseIfCurrentFallsBackToSQLOnAnOldBd is the bd 1.0.4 compatibility
 // proof: the minimum supported bd rejects the flags, and the store must reach
-// the raw-SQL statement byte-identically to how it did before the conversion.
+// the raw-SQL statement. The statement mints a fresh revision — a release that
+// left the pre-release token current would keep a stale fence valid — so the
+// token is the one part of it that cannot be pinned.
 func TestReleaseIfCurrentFallsBackToSQLOnAnOldBd(t *testing.T) {
 	runner := &releaseVerbRunner{}
 	runner.reply = func(args []string) ([]byte, error) {
@@ -324,10 +326,12 @@ func TestReleaseIfCurrentFallsBackToSQLOnAnOldBd(t *testing.T) {
 	if len(calls) != 2 {
 		t.Fatalf("calls = %v, want the verb probe then the SQL fallback", calls)
 	}
-	wantQuery := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP" +
+	wantQuery := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP, revision = <revision>" +
 		" WHERE id = 'bd-42' AND status = 'in_progress' AND assignee = 'worker-''1'"
+	got := append([]string(nil), calls[1]...)
+	got[len(got)-1] = normalizeReleaseRevisionQuery(t, got[len(got)-1])
 	want := []string{"bd", "sql", "--json", wantQuery}
-	if strings.Join(calls[1], "\x00") != strings.Join(want, "\x00") {
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("fallback argv = %q\nwant          %q", calls[1], want)
 	}
 }

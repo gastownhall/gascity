@@ -328,7 +328,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 		}
 		var ctx PromptContext
 		if a.PromptTemplate != "" || hookMode || sessionTemplateContext {
-			ctx = buildPrimeContextForBeads(cityPath, cityName, &a, cfg.Rigs, cfg.Beads, stderr)
+			ctx = buildPrimeContextFor(cityPath, cityName, &a, cfg.Rigs, cityQueryTopology(cityPath, cfg), stderr)
 			ctx.ProviderKey, ctx.ProviderDisplayName = providerInfoForAgent(&a, &cfg.Workspace, cfg.Providers)
 			ctx.InstructionsFile = instructionsFileForAgent(&a, &cfg.Workspace, cfg.Providers)
 		}
@@ -354,22 +354,30 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 		// Agents without a prompt_template: read a builtin prompt shipped by
 		// the core bootstrap pack, resolved from the composed pack dirs.
 		// When formula_v2 is enabled, all agents use graph-worker.md.
-		// Otherwise pool agents use pool-worker.md.
+		// Otherwise pool agents use pool-worker.template.md.
 		// Pool instances have Pool=nil after resolution, so also check the
 		// template agent via findAgentByName.
+		//
+		// The read goes through renderPrompt, not os.ReadFile, so a builtin
+		// prompt that composes a core-pack template fragment (pool-worker
+		// pulls in "claim-protocol") resolves it here exactly as it does on
+		// the prompt_template path above. graph-worker.md is a plain .md and
+		// renders verbatim.
 		if a.PromptTemplate == "" {
 			promptFile := ""
 			if coreDir := cfg.PackDirByName("core"); coreDir != "" {
 				if cfg.Daemon.FormulaV2Enabled() {
 					promptFile = filepath.Join(coreDir, "assets", "prompts", "graph-worker.md")
 				} else if a.SupportsInstanceExpansion() || isPoolInstance(cfg, a) {
-					promptFile = filepath.Join(coreDir, "assets", "prompts", "pool-worker.md")
+					promptFile = filepath.Join(coreDir, "assets", "prompts", "pool-worker.template.md")
 				}
 			}
 			if promptFile != "" {
-				if content, fErr := os.ReadFile(promptFile); fErr == nil {
+				content := renderPrompt(fsys.OSFS{}, cityPath, cityName, promptFile, ctx, cfg.Workspace.SessionTemplate, stderr,
+					cfg.PackDirsForRig(ctx.RigName), nil, nil)
+				if content != "" {
 					injection := primeHookContextSuffix(cityPath, hookMode, hookContext, stderr, consumeHandoff)
-					writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, string(content), hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
+					writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, content, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
 					return 0
 				}
 			}
@@ -718,10 +726,13 @@ func persistPrimeHookProviderSessionKey(hookProviderSessionID string, stderr io.
 // their own session id there, so it is the authoritative resume key. Other CLI
 // providers surface it via env instead (GC_PROVIDER_SESSION_ID for the
 // JS-plugin providers, GEMINI_SESSION_ID for gemini) and are handled above,
-// before this stdin gate. Claude cannot be handed an id up front
-// (`--session-id` is unsupported, so the builtin profile sets no
-// session_id_flag); capturing the hook-delivered id is the only way its
-// wake_mode=resume ever has a conversation to resume.
+// before this stdin gate.
+//
+// Claude is belt and braces: `claude --session-id <uuid>` IS accepted by the
+// current CLI, so the builtin profile now sets session_id_flag and gc mints the
+// durable key up front. The empty-key guard below means this stdin capture then
+// no-ops for a session that was minted normally — it stays as the fallback for
+// any session that reached the hook without one.
 func providerAcceptsHookStdinSessionID(family string) bool {
 	switch family {
 	case "codex", "claude":
@@ -782,10 +793,10 @@ func findAgentByName(cfg *config.City, name string) (config.Agent, bool) {
 // environment variables when running inside a managed session, falls back
 // to currentRigContext when run manually.
 func buildPrimeContext(cityPath, cityName string, a *config.Agent, rigs []config.Rig, stderr io.Writer) PromptContext {
-	return buildPrimeContextForBeads(cityPath, cityName, a, rigs, config.BeadsConfig{}, stderr)
+	return buildPrimeContextFor(cityPath, cityName, a, rigs, config.QueryTopology{}, stderr)
 }
 
-func buildPrimeContextForBeads(cityPath, cityName string, a *config.Agent, rigs []config.Rig, beadsCfg config.BeadsConfig, stderr io.Writer) PromptContext {
+func buildPrimeContextFor(cityPath, cityName string, a *config.Agent, rigs []config.Rig, topo config.QueryTopology, stderr io.Writer) PromptContext {
 	ctx := PromptContext{
 		CityRoot:      cityPath,
 		TemplateName:  a.Name,
@@ -824,10 +835,10 @@ func buildPrimeContextForBeads(cityPath, cityName string, a *config.Agent, rigs 
 
 	ctx.Branch = os.Getenv("GC_BRANCH")
 	ctx.DefaultBranch = defaultBranchForRig(ctx.RigName, rigs, ctx.WorkDir)
-	ctx.WorkQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "work_query", a.EffectiveWorkQueryForBeads(beadsCfg), stderr)
-	ctx.AssignedInProgressQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "assigned_in_progress_query", a.EffectiveAssignedInProgressQueryForBeads(beadsCfg), stderr)
-	ctx.AssignedReadyQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "assigned_ready_query", a.EffectiveAssignedReadyQueryForBeads(beadsCfg), stderr)
-	ctx.RoutedPoolQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "routed_pool_query", a.EffectiveRoutedPoolQueryForBeads(beadsCfg), stderr)
+	ctx.WorkQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "work_query", a.EffectiveWorkQueryFor(topo), stderr)
+	ctx.AssignedInProgressQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "assigned_in_progress_query", a.EffectiveAssignedInProgressQueryFor(topo), stderr)
+	ctx.AssignedReadyQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "assigned_ready_query", a.EffectiveAssignedReadyQueryFor(topo), stderr)
+	ctx.RoutedPoolQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "routed_pool_query", a.EffectiveRoutedPoolQueryFor(topo), stderr)
 	ctx.SlingQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "sling_query", a.EffectiveSlingQuery(), stderr)
 	return ctx
 }

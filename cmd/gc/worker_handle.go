@@ -193,14 +193,14 @@ func resolvedRuntimeMCPServersWithConfig(
 		identity = strings.TrimSpace(provider)
 	}
 	if agentCfg := findAgentByTemplate(cfg, template); agentCfg != nil {
-		catalog, err := materialize.EffectiveMCPForSession(cfg, cityPath, agentCfg, identity, workDir)
+		catalog, err := materialize.EffectiveMCPForSession(cfg, cityPath, agentCfg, identity, workDir, config.QueryTopology{})
 		if err != nil {
 			return nil, fmt.Errorf("loading effective MCP: %w", err)
 		}
 		return materialize.RuntimeMCPServers(catalog.Servers), nil
 	}
 	synthetic := &config.Agent{Provider: provider}
-	catalog, err := materialize.EffectiveMCPForSession(cfg, cityPath, synthetic, identity, workDir)
+	catalog, err := materialize.EffectiveMCPForSession(cfg, cityPath, synthetic, identity, workDir, config.QueryTopology{})
 	if err != nil {
 		return nil, fmt.Errorf("loading effective MCP: %w", err)
 	}

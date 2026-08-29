@@ -23,6 +23,39 @@ import (
 // The gate ships warn-only by default — violations are logged but the close
 // proceeds — so existing open beads migrate without breakage. Set
 // GC_WORK_RECORD_ENFORCE to a truthy value to make violations block the close.
+//
+// # Two entry points run this gate: the bd fall-through and the class door
+//
+// doBd runs the by-ID class door (cmd_bd_by_id.go maybeRouteBdByID) BEFORE this
+// gate. A close that falls through to the bd subprocess is gated here against
+// the PREFIX store (the caller's resolved work scope). A close the door SERVES —
+// because the city relocated a coordination class and the bead resides in the
+// class binding — never reaches this fall-through, so the door runs the same
+// evaluateWorkRecordCloseGate against the class bead it is about to write
+// (gateBdByIDClassClose), reusing the row it already resolved. Both spellings
+// the door serves — `gc bd close <id>` and `gc bd update <id> --status closed`
+// — are therefore gated wherever they land; the two entry points cover disjoint
+// stores, and neither trusts the other's read.
+//
+// The DUAL-RESIDENT case is why the split matters rather than being a redundant
+// double-gate. `gc storage migrate` copies every non-work bead with its id
+// preserved and keeps the source (readInfraSnapshot / infra_class_migrate.go),
+// and coordclass.Classify routes ANY bead carrying gc.root_bead_id to ClassGraph
+// (isWorkflowMetadata) — including a plain task-typed molecule work step with no
+// gc.kind, which is exactly isWorkRecordGatedBead's population. On a migrated
+// city those steps exist in BOTH stores. The gate always validates the row the
+// close is about to write: the fall-through path validates the work store's
+// retained copy it is closing, and the door validates the class copy it is
+// closing. Neither validates the other store's stale row, because neither
+// writes it.
+//
+// Which copy a by-id close writes is the residency question, and both planes
+// now answer it the same way: the CLI door resolves a dual resident to the
+// CLASS copy through its own residence probe, and internal/api resolves it
+// through the residency resolver's ByID plan, which leads with the binding for
+// exactly this reason. The retained work copy stays reachable through raw bd
+// against the work scope, and it still has to be drained; that reconciliation
+// is the sweep's job, not this gate's.
 
 // workRecordEnforceEnvVar gates whether work-record violations block the close
 // (enforce) or are logged only (warn-only, the default).
@@ -101,12 +134,60 @@ func validateWorkRecordOnClose(bead beads.Bead, commitReachable func(commit, bra
 	return violations
 }
 
+// preferredReachabilityRef decides which ref gitCommitReachableOnBranch should
+// check commit-reachability against: refs/remotes/origin/<branch> when it
+// resolves, otherwise the bare branch name. gitrevisions precedence puts a
+// local refs/heads/<branch> ahead of any remote-tracking ref, but the
+// worktree named by gc.work_dir is rarely the one whose local branch tip
+// actually moves — a refinery or polecat that merges/pushes from a different
+// worktree advances the remote-tracking ref, never the local one checked out
+// elsewhere. Resolving against the local ref alone reports a landed commit as
+// unreachable until something happens to fast-forward it, which in that
+// topology may be never (gastownhall/gascity#5037).
+//
+// remoteRefResolves is injected so the decision is unit-testable without a
+// real git repository; the only production caller runs
+// `git rev-parse --verify --quiet <ref>`. Kept as a separate probe rather
+// than a fallback on the merge-base exit code so the caller can distinguish
+// "no such ref" from "not reachable"; see commitReachableOnEitherRef.
+func preferredReachabilityRef(branch string, remoteRefResolves func(ref string) bool) string {
+	if remote := "refs/remotes/origin/" + branch; remoteRefResolves(remote) {
+		return remote
+	}
+	return branch
+}
+
+// commitReachableOnEitherRef reports whether a commit is reachable from the
+// branch's remote-tracking ref OR from the branch itself. The remote-tracking
+// ref is probed first (see preferredReachabilityRef) because it is the ref
+// that actually advances in a refinery/polecat topology; the bare branch name
+// is then still checked, because ADR-0009's contract is that the commit is
+// reachable on gc.work_branch — not that it has been pushed. Checking only the
+// remote ref would reject a commit that is genuinely on the local branch but
+// sits ahead of (or was never pushed to) origin, a false negative in the exact
+// mirror image of gastownhall/gascity#5037.
+//
+// Both probes are injected so the decision is unit-testable without a real git
+// repository. The local ref is never probed twice.
+func commitReachableOnEitherRef(branch string, remoteRefResolves, reachableOnRef func(ref string) bool) bool {
+	ref := preferredReachabilityRef(branch, remoteRefResolves)
+	if reachableOnRef(ref) {
+		return true
+	}
+	if ref == branch {
+		return false
+	}
+	return reachableOnRef(branch)
+}
+
 // gitCommitReachableOnBranch reports whether commit is an ancestor of branch in
 // the git repository at repoDir (worktrees share one object store, so any
 // worktree dir resolves refs across the repo). A non-nil error from git — bad
 // repo, unknown ref, unknown commit — reads as "not reachable". A commit/branch
 // that looks like a flag (leading "-") is rejected outright so a malformed
-// metadata value can never be parsed as a git option.
+// metadata value can never be parsed as a git option. See
+// commitReachableOnEitherRef for how branch is resolved to the refs that can
+// prove reachability.
 func gitCommitReachableOnBranch(repoDir, commit, branch string) bool {
 	if strings.TrimSpace(repoDir) == "" || commit == "" || branch == "" {
 		return false
@@ -114,7 +195,13 @@ func gitCommitReachableOnBranch(repoDir, commit, branch string) bool {
 	if strings.HasPrefix(commit, "-") || strings.HasPrefix(branch, "-") {
 		return false
 	}
-	return exec.Command("git", "-C", repoDir, "merge-base", "--is-ancestor", commit, branch).Run() == nil
+	return commitReachableOnEitherRef(branch,
+		func(candidate string) bool {
+			return exec.Command("git", "-C", repoDir, "rev-parse", "--verify", "--quiet", candidate).Run() == nil
+		},
+		func(ref string) bool {
+			return exec.Command("git", "-C", repoDir, "merge-base", "--is-ancestor", commit, ref).Run() == nil
+		})
 }
 
 // workRecordCloseTargets returns the bead IDs a bd invocation closes, and

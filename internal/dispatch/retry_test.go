@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -87,6 +88,125 @@ func TestProcessRetryEvalPassClosesLogical(t *testing.T) {
 	}
 	if logicalAfter.Metadata["gc.output_json"] != `{"ok":true}` {
 		t.Fatalf("logical gc.output_json = %q, want propagated output", logicalAfter.Metadata["gc.output_json"])
+	}
+}
+
+// newRetryEvalOrderingFixture builds the shape every terminal retry-eval branch
+// closes through: a logical bead blocked by its own eval. The eval must close
+// before the logical bead or bd refuses the second close, so each branch that
+// closes both is only correct by ordering — nothing structural enforces it.
+// Returns the logical and eval beads on a store that enforces bd's refusal.
+func newRetryEvalOrderingFixture(t *testing.T, runOutcome map[string]string) (*strictCloseStore, beads.Bead, beads.Bead) {
+	t.Helper()
+
+	store := newStrictCloseStore()
+	root := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	logical := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "review",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "retry",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "demo.review",
+			"gc.max_attempts": "3",
+			"gc.on_exhausted": "hard_fail",
+		},
+	})
+	runMeta := map[string]string{
+		"gc.kind":            "retry-run",
+		"gc.root_bead_id":    root.ID,
+		"gc.step_ref":        "demo.review.run.1",
+		"gc.logical_bead_id": logical.ID,
+		"gc.attempt":         "1",
+		"gc.max_attempts":    "3",
+		"gc.on_exhausted":    "hard_fail",
+	}
+	for k, v := range runOutcome {
+		runMeta[k] = v
+	}
+	run1 := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:    "review attempt 1",
+		Type:     "task",
+		Status:   "closed",
+		Metadata: runMeta,
+	})
+	eval1 := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "review eval 1",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":            "retry-eval",
+			"gc.root_bead_id":    root.ID,
+			"gc.step_ref":        "demo.review.eval.1",
+			"gc.logical_bead_id": logical.ID,
+			"gc.attempt":         "1",
+			"gc.max_attempts":    "3",
+			"gc.on_exhausted":    "hard_fail",
+		},
+	})
+	mustDepAdd(t, store, logical.ID, eval1.ID, "blocks")
+	mustDepAdd(t, store, eval1.ID, run1.ID, "blocks")
+	return store, logical, eval1
+}
+
+func TestProcessRetryEvalHardFailClosesEvalBeforeLogical(t *testing.T) {
+	t.Parallel()
+
+	store, logical, eval1 := newRetryEvalOrderingFixture(t, map[string]string{
+		"gc.outcome":        "fail",
+		"gc.failure_class":  "hard",
+		"gc.failure_reason": "boom",
+	})
+
+	result, err := ProcessControl(store, eval1, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(retry-eval hard): %v", err)
+	}
+	if !result.Processed || result.Action != "hard-fail" {
+		t.Fatalf("result = %+v, want processed hard-fail", result)
+	}
+
+	evalAfter := mustGetBead(t, store, eval1.ID)
+	if evalAfter.Status != "closed" || evalAfter.Metadata["gc.outcome"] != "fail" {
+		t.Fatalf("eval = status %q outcome %q, want closed/fail", evalAfter.Status, evalAfter.Metadata["gc.outcome"])
+	}
+	logicalAfter := mustGetBead(t, store, logical.ID)
+	if logicalAfter.Status != "closed" || logicalAfter.Metadata["gc.outcome"] != "fail" {
+		t.Fatalf("logical = status %q outcome %q, want closed/fail", logicalAfter.Status, logicalAfter.Metadata["gc.outcome"])
+	}
+	if got := logicalAfter.Metadata["gc.final_disposition"]; got != beadmeta.DispositionHardFail {
+		t.Fatalf("logical gc.final_disposition = %q, want %q", got, beadmeta.DispositionHardFail)
+	}
+}
+
+func TestProcessRetryEvalCanceledClosesEvalBeforeLogical(t *testing.T) {
+	t.Parallel()
+
+	store, logical, eval1 := newRetryEvalOrderingFixture(t, map[string]string{
+		"gc.outcome": "canceled",
+	})
+
+	result, err := ProcessControl(store, eval1, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(retry-eval canceled): %v", err)
+	}
+	if !result.Processed || result.Action != "canceled" {
+		t.Fatalf("result = %+v, want processed canceled", result)
+	}
+
+	evalAfter := mustGetBead(t, store, eval1.ID)
+	if evalAfter.Status != "closed" || evalAfter.Metadata["gc.outcome"] != "canceled" {
+		t.Fatalf("eval = status %q outcome %q, want closed/canceled", evalAfter.Status, evalAfter.Metadata["gc.outcome"])
+	}
+	logicalAfter := mustGetBead(t, store, logical.ID)
+	if logicalAfter.Status != "closed" || logicalAfter.Metadata["gc.outcome"] != "canceled" {
+		t.Fatalf("logical = status %q outcome %q, want closed/canceled", logicalAfter.Status, logicalAfter.Metadata["gc.outcome"])
 	}
 }
 
@@ -1904,7 +2024,7 @@ func TestProcessScopeCheckSkipsOpenRetryDescendantsOnAbort(t *testing.T) {
 			"gc.formula_contract": "graph.v2",
 		},
 	})
-	body := mustCreateWorkflowBead(t, store, beads.Bead{
+	mustCreateWorkflowBead(t, store, beads.Bead{
 		Title: "body",
 		Type:  "task",
 		Metadata: map[string]string{
@@ -1965,7 +2085,6 @@ func TestProcessScopeCheckSkipsOpenRetryDescendantsOnAbort(t *testing.T) {
 		},
 	})
 	mustDepAdd(t, store, control.ID, failed.ID, "blocks")
-	mustDepAdd(t, store, body.ID, control.ID, "blocks")
 	mustDepAdd(t, store, logical.ID, eval1.ID, "blocks")
 	mustDepAdd(t, store, eval1.ID, run1.ID, "blocks")
 
@@ -2000,7 +2119,7 @@ func TestProcessScopeCheckSkipsOpenRalphIterationDescendantsOnAbort(t *testing.T
 			"gc.formula_contract": "graph.v2",
 		},
 	})
-	body := mustCreateWorkflowBead(t, store, beads.Bead{
+	mustCreateWorkflowBead(t, store, beads.Bead{
 		Title: "body",
 		Type:  "task",
 		Metadata: map[string]string{
@@ -2070,7 +2189,6 @@ func TestProcessScopeCheckSkipsOpenRalphIterationDescendantsOnAbort(t *testing.T
 		},
 	})
 	mustDepAdd(t, store, control.ID, failed.ID, "blocks")
-	mustDepAdd(t, store, body.ID, control.ID, "blocks")
 	mustDepAdd(t, store, logical.ID, iterationControl.ID, "blocks")
 	mustDepAdd(t, store, iterationControl.ID, iterationChild.ID, "blocks")
 

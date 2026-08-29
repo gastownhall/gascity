@@ -64,12 +64,17 @@ var defaultNudgeSubmitKeySequence = []string{"Enter"}
 // #4706 was filed against a k8s codex agent whose first turn never started:
 // codex's TUI buffers a send-keys burst as a paste, so a lone trailing Enter
 // is swallowed as a composer newline rather than treated as submit — codex's
-// actual submit sequence is Escape then Enter. This fork's tmux carrier does
-// not yet carry that fix; adding it here is left to a follow-up once the
-// change is exercised against a live codex TUI in this repo's own test
-// harness (it is out of scope for this claude-focused patch, but the table
-// exists precisely so that follow-up is a one-line addition, not another
-// pass through the delivery mechanics).
+// actual submit sequence is Escape then Enter, which is the codex entry below.
+//
+// Exactly ONE Escape reaches a codex pane, and that is load-bearing. codex stays
+// in providersSkippingEscapeBeforeEnter, so the pre-submit Escape at step 3 of
+// NudgeSession is skipped and this entry supplies the only one; sending both
+// would put Escape-Escape into the pane, which codex binds to
+// backtrack/edit-previous rather than to submit. Declaring it here (instead of
+// dropping codex from the skip list, which would produce the same two keystrokes
+// today) also keeps the pair RETRYABLE as a unit: sendNudgeSubmitSequence is what
+// the submit-confirm loop and the best-effort fallback re-send, and a re-sent
+// bare Enter would be swallowed exactly like the first one.
 //
 // This table does NOT yet contain an entry for the claude-specific stall
 // this patch was scoped to fix (ra-oudpha finding-3 / gascity#5012, #5013's
@@ -86,7 +91,9 @@ var defaultNudgeSubmitKeySequence = []string{"Enter"}
 // traced, the fix — whatever key sequence or timing claude's TUI turns out
 // to need — is a single entry in this table plus a test, not a rewrite of
 // NudgeSession.
-var nudgeSubmitKeySequences = map[string][]string{}
+var nudgeSubmitKeySequences = map[string][]string{
+	"codex": {"Escape", "Enter"},
+}
 
 // nudgeSubmitKeySequenceForFamily returns the declared submit key sequence
 // for a provider family, or defaultNudgeSubmitKeySequence when the family
@@ -186,6 +193,11 @@ var pasteBufferSeq uint64
 
 // validSessionNameRe validates session names to prevent shell injection
 var validSessionNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+// validEnvNameRe is the identifier grammar accepted by the POSIX env utility.
+// Unset keys are embedded in the pane's shell command, so accepting anything
+// broader would let an inherited map key become shell syntax or an option.
+var validEnvNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // Common errors
 var (
@@ -550,31 +562,45 @@ func sessionEnvUnsetKeys(env map[string]string) []string {
 // execs starts without those vars. This covers the INITIAL exec only — it is a
 // property of one command string, not of the session — which is why
 // markSessionEnvRemoved has to carry the same withholding forward.
-func withEnvUnsetPrefix(command string, unsetKeys []string) string {
+func withEnvUnsetPrefix(command string, unsetKeys []string) (string, error) {
+	for _, key := range unsetKeys {
+		if !validEnvNameRe.MatchString(key) {
+			return "", fmt.Errorf("invalid environment variable name %q for tmux env -u", key)
+		}
+	}
 	if len(unsetKeys) == 0 || command == "" {
-		return command
+		return command, nil
 	}
 	var prefix string
 	for _, k := range unsetKeys {
 		prefix += " -u " + k
 	}
-	return "env" + prefix + " " + command
+	return "env" + prefix + " " + command, nil
+}
+
+func validateUnsetEnvKeys(env map[string]string) error {
+	for key, value := range env {
+		if value == "" && !validEnvNameRe.MatchString(key) {
+			return fmt.Errorf("invalid environment variable name %q for tmux env -u", key)
+		}
+	}
+	return nil
 }
 
 // durableWithholdKeys returns the empty-valued keys whose withholding must
 // SURVIVE into later processes, rather than only applying to the command tmux
 // execs first.
 //
-// That is the controller-scope credentials and nothing else. The other keys a
-// session env pins empty — CLAUDECODE, CLAUDE_CODE_ENTRYPOINT, the CODEX_ pair —
-// are nesting-detection flags, not secrets: the `env -u` prefix already gives
-// them the behavior they need on the launched command, and marking them in the
-// session environment would buy nothing while putting an extra tmux round-trip
-// on every session creation in the repo.
+// That is controller-scope credentials plus the BEADS_ namespace. A selected
+// workspace can pin any current or future BEADS_ key empty to prevent ambient
+// state from redirecting it, and a warm respawn must retain that choice. The
+// other keys a session env pins empty — CLAUDECODE, CLAUDE_CODE_ENTRYPOINT, the
+// CODEX_ pair — are nesting-detection flags, not authority: the `env -u` prefix
+// already gives them the behavior they need on the launched command.
 func durableWithholdKeys(env map[string]string) []string {
 	var keys []string
 	for _, k := range sessionEnvUnsetKeys(env) {
-		if processenv.IsControllerOnlyEnv(k) {
+		if processenv.IsControllerOnlyEnv(k) || strings.HasPrefix(k, "BEADS_") {
 			keys = append(keys, k)
 		}
 	}
@@ -602,6 +628,11 @@ func durableWithholdKeys(env map[string]string) []string {
 // contract. Every other failure is a real failure to apply a security control
 // and is returned.
 func (t *Tmux) markSessionEnvRemoved(session string, keys []string) error {
+	for _, key := range keys {
+		if !validEnvNameRe.MatchString(key) {
+			return fmt.Errorf("invalid environment variable name %q for tmux session removal", key)
+		}
+	}
 	for _, k := range keys {
 		if _, err := t.run("set-environment", "-t", session, "-r", k); err != nil {
 			if alive, probeErr := t.HasSession(session); probeErr == nil && !alive {
@@ -631,8 +662,16 @@ func (t *Tmux) markSessionEnvRemoved(session string, keys []string) error {
 // keys and each was falsified against a real tmux 3.4: new-session starts the
 // command before any follow-up can land, so the marker alone leaves the CREATED
 // pane exposed; the prefix alone leaves the RESPAWNED pane exposed.
+//
+// Non-empty values that are not argv-safe (see [runtime.ArgvSafeEnvKey]) never
+// reach the command line: the whole new-session command is staged through a
+// private file instead — see [Tmux.runNewSession]. The session environment tmux
+// ends up holding is identical either way.
 func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env map[string]string) error {
 	if err := validateSessionName(name); err != nil {
+		return err
+	}
+	if err := validateUnsetEnvKeys(env); err != nil {
 		return err
 	}
 	if err := t.probeServerAlive(); err != nil {
@@ -659,11 +698,14 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 	// pane's shell would otherwise inherit them from the tmux server's global
 	// environment, which holds whatever the controller exported when the server
 	// started. This prefix is a property of THIS command only.
-	command = withEnvUnsetPrefix(command, unsetKeys)
+	var err error
+	command, err = withEnvUnsetPrefix(command, unsetKeys)
+	if err != nil {
+		return err
+	}
 	// Add the command as the last argument
 	args = append(args, t.wrapPaneCommand(command))
-	_, err := t.run(args...)
-	if err != nil {
+	if err := t.runNewSession(args, env); err != nil {
 		return err
 	}
 	// Carry the CREDENTIAL withholding into the session environment, so it
@@ -1323,6 +1365,62 @@ func (s *SessionSet) Names() []string {
 		names = append(names, name)
 	}
 	return names
+}
+
+// SessionRoster returns attributes for every session currently known to
+// tmux, keyed by session name. It satisfies [runtime.SessionRosterProvider]
+// by folding the per-session Attached and LastActivity reads that
+// expandAgent's hot loop otherwise performs one exec at a time into a single
+// list-sessions call plus one list-windows call per session (via
+// GetSessionActivity, in sorted name order for deterministic call
+// sequencing) — attachment state comes for free from list-sessions, but
+// last-activity is intentionally NOT read from that same exec's raw
+// #{session_activity} field, which is documented-stale for detached
+// sessions (see rawSessionActivity).
+//
+// The result is an ATTRIBUTES source, not a liveness source. list-sessions
+// still reports a session whose pane has exited under remain-on-exit, so
+// roster membership does not imply the session is live; callers must use
+// [Provider.IsRunning], whose StateCache snapshot skips panes with
+// pane_dead set. Note also that the ErrNoServer absorption below reports an
+// empty roster when the socket is momentarily unreachable, deliberately
+// without StateCache's last-known-good preservation — one more reason a
+// caller must not read an absent name here as "stopped".
+func (t *Tmux) SessionRoster() (map[string]runtime.SessionRosterEntry, error) {
+	out, err := t.run("list-sessions", "-F", "#{session_name}|#{session_attached}")
+	if err != nil {
+		if errors.Is(err, ErrNoServer) {
+			return map[string]runtime.SessionRosterEntry{}, nil
+		}
+		return nil, err
+	}
+
+	attached := make(map[string]bool)
+	names := make([]string, 0)
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "|", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		name := parts[0]
+		attached[name] = parts[1] == "1"
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	roster := make(map[string]runtime.SessionRosterEntry, len(names))
+	for _, name := range names {
+		entry := runtime.SessionRosterEntry{Attached: attached[name]}
+		if activity, err := t.GetSessionActivity(name); err == nil {
+			entry.LastActivity = activity
+		}
+		roster[name] = entry
+	}
+	return roster, nil
 }
 
 // ListSessionIDs returns a map of session name to session ID.
@@ -2001,14 +2099,43 @@ func (t *Tmux) paneBusy(target string) (bool, error) {
 }
 
 // submitVerifyEligible reports whether the target runs a provider whose busy
-// indicator is reliable enough to confirm a submit. Scoped to the Claude family
-// (the confirmed ga-bwm failure); other providers keep best-effort single
-// delivery so this change cannot regress them.
+// indicator is reliable enough to confirm a submit.
 func (t *Tmux) submitVerifyEligible(target string) bool {
 	if provider := t.providerEnv(target); provider != "" {
-		return sessionlog.ProviderFamily(provider) == "claude"
+		return submitVerifyEligibleFamily(sessionlog.ProviderFamily(provider))
 	}
-	return t.targetLooksLikeProvider(target, "claude")
+	for _, family := range submitVerifyEligibleFamilies {
+		if t.targetLooksLikeProvider(target, family) {
+			return true
+		}
+	}
+	return false
+}
+
+// submitVerifyEligibleFamilies are the provider families whose busy indicator
+// paneContainsBusyIndicator can actually read: claude (its spinner/elapsed-timer
+// footer, the confirmed ga-bwm failure) and codex, whose TUI shows the same
+// "esc to interrupt" string that function has always matched.
+//
+// Eligibility is what makes an unconfirmed submit an ERROR instead of a silent
+// success, and that is the point for codex: the best-effort fallback reports
+// delivery as soon as the keys reach tmux, so the queue acks and DELETES an item
+// whose paste may still be sitting unsubmitted in the composer — the nudge is
+// then gone with nothing to retry. With verification, an unconfirmed submit
+// requeues under the existing attempt cap instead.
+//
+// Adding a family here is a promise about its busy indicator: a provider whose
+// indicator is unreadable would report every delivery as unconfirmed and burn
+// the queue's attempts re-pasting messages that already landed.
+var submitVerifyEligibleFamilies = []string{"claude", "codex"}
+
+func submitVerifyEligibleFamily(family string) bool {
+	for _, eligible := range submitVerifyEligibleFamilies {
+		if family == eligible {
+			return true
+		}
+	}
+	return false
 }
 
 // nudgeSubmitKeySequence resolves target's declared submit key sequence (see
@@ -2106,16 +2233,27 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	// below remains for the submit Enter.
 	t.WakePaneIfDetached(session)
 
-	// 1. Send text in literal mode with retry on transient errors
+	// 1. Clear any pending input already sitting on the line before pasting,
+	// mirroring SendKeysReplace (send-keys C-u). Without this, an earlier
+	// nudge's undelivered draft — e.g. a lost submit Enter (ga-bwm) — stays in
+	// the input box, and this paste concatenates on top of it instead of
+	// replacing it: stacked injections merge into one draft that Claude's TUI
+	// does not treat as a clean single-line submit (ra-3x46cy finding 2).
+	if _, err := t.run("send-keys", "-t", target, "C-u"); err != nil {
+		return err
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	// 2. Send text in literal mode with retry on transient errors
 	if err := t.sendKeysLiteralWithRetry(target, message, t.cfg.NudgeReadyTimeout); err != nil {
 		return err
 	}
 
-	// 2. Wait for paste to complete (tested, required). Kimi's TUI can take
+	// 3. Wait for paste to complete (tested, required). Kimi's TUI can take
 	// longer to accept large pasted prompts in detached panes.
 	time.Sleep(t.nudgeSubmitDebounce(target))
 
-	// 3. Send Escape only for TUIs where it's an insert-mode escape, not a
+	// 4. Send Escape only for TUIs where it's an insert-mode escape, not a
 	// semantic input key. Claude, Codex, Gemini, and OpenCode all treat
 	// Escape as a semantic control key in some busy states, so default submit
 	// must not synthesize it for them.
@@ -2125,11 +2263,11 @@ func (t *Tmux) NudgeSession(session, message string) error {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	// 4. Wake detached panes before Enter. Some TUIs accept pasted input while
+	// 5. Wake detached panes before Enter. Some TUIs accept pasted input while
 	// detached but drop the submit key until a terminal resize wakes their loop.
 	t.WakePaneIfDetached(session)
 
-	// 5. Send the provider's declared submit key sequence (see
+	// 6. Send the provider's declared submit key sequence (see
 	// nudgeSubmitKeySequences — default plain Enter) and, for providers with
 	// a reliable busy indicator, confirm the draft actually submitted —
 	// re-sending the sequence only while the pane stays idle. A lost submit
@@ -2138,6 +2276,17 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	// dependence on an external observer re-kicking the session. Providers
 	// without a reliable indicator keep best-effort delivery.
 	submitKeys := t.nudgeSubmitKeySequence(target)
+	// RE-SEND HAZARD (noted, not redesigned): a submit sequence that leads with
+	// Escape is only safe to repeat while the pane is still idle. If the first
+	// attempt actually submitted and the pane went busy, a re-sent Escape is an
+	// INTERRUPT for the very TUIs that need the Escape (codex reads it as
+	// cancel), so a retry could kill the turn it just started. submitEnterAndConfirm
+	// re-checks busy before every re-send, which is why the verified path is safe
+	// — and why codex is on it (submitVerifyEligibleFamilies). The best-effort
+	// fallback below and NudgePane's retry loop do NOT re-check; they are safe
+	// only for single-key (plain Enter) sequences, which is what every family
+	// without a table entry has. Adding a multi-key entry for a family that is
+	// not submit-verify eligible would need that gap closed first.
 	sendSubmit := func() error { return t.sendNudgeSubmitSequence(target, submitKeys) }
 	wake := func() { t.WakePaneIfDetached(session) }
 	if t.submitVerifyEligible(target) {
@@ -2168,7 +2317,7 @@ func (t *Tmux) NudgeSession(session, message string) error {
 			lastErr = err
 			continue
 		}
-		// 6. Wake again so the submitted turn is processed promptly.
+		// 7. Wake again so the submitted turn is processed promptly.
 		wake()
 		delivered = true
 		return nil
@@ -2910,6 +3059,19 @@ func (t *Tmux) FindSessionByWorkDir(targetDir string, processNames []string) ([]
 func (t *Tmux) CapturePane(session string, lines int) (string, error) {
 	content, err := t.run("capture-pane", "-p", "-t", session, "-S", fmt.Sprintf("-%d", lines))
 	return content, err
+}
+
+// CapturePaneJoined captures the visible content of a pane with wrapped lines
+// rejoined (-J).
+//
+// [Tmux.CapturePane] returns the pane as displayed, which means tmux has
+// inserted a newline at every point a line reached the pane width. A value
+// wider than the pane therefore arrives split, and substring matching over it —
+// redaction, prompt detection — cannot see it whole. Callers that scan captured
+// text for a known string want this variant; callers that reason about the
+// visible layout want the plain one.
+func (t *Tmux) CapturePaneJoined(session string, lines int) (string, error) {
+	return t.run("capture-pane", "-p", "-J", "-t", session, "-S", fmt.Sprintf("-%d", lines))
 }
 
 // CapturePaneAll captures all scrollback history.
@@ -3848,18 +4010,48 @@ func (t *Tmux) SetTownCycleBindings(session string) error {
 	return t.SetCycleBindings(session)
 }
 
+// selectBindingLine returns the line of `tmux list-keys -T <table>` output that
+// binds key, or "" if the key is not bound in that table.
+//
+// The single-key query form (list-keys -T <table> <key>) is not usable: on tmux
+// 3.7b it returns zero bytes with exit code 0 for a binding that demonstrably
+// exists, so an empty result can't be distinguished from "no binding".
+func selectBindingLine(output, key string) string {
+	for _, l := range strings.Split(output, "\n") {
+		fields := strings.Fields(l)
+		for i, f := range fields {
+			if f == "-T" && i+2 < len(fields) {
+				// Skip the table name; the next field is the key.
+				if fields[i+2] == key {
+					return l
+				}
+				break
+			}
+		}
+	}
+	return ""
+}
+
 // isGTBinding checks if the given key already has a Gas Town if-shell binding.
 // Used to skip redundant re-binding on repeated ConfigureGasTownSession calls,
 // preserving the user's original fallback captured on the first call.
 func (t *Tmux) isGTBinding(table, key string) bool {
-	output, err := t.run("list-keys", "-T", table, key)
+	// Table form, not the single-key form — see selectBindingLine.
+	output, err := t.run("list-keys", "-T", table)
 	if err != nil || output == "" {
+		return false
+	}
+	// Scope the check to the row for this key. Against the whole table it would
+	// report "already a Gas Town binding" for every key as soon as any GT
+	// binding existed — do not "simplify" this back to output.
+	line := selectBindingLine(output, key)
+	if line == "" {
 		return false
 	}
 	// GT bindings use if-shell with a run-shell/display-popup invoking "gt ".
 	// Require both "if-shell" and "gt " to avoid false positives on user
 	// bindings that happen to contain "gt " without the if-shell guard.
-	return strings.Contains(output, "if-shell") && strings.Contains(output, "gt ")
+	return strings.Contains(line, "if-shell") && strings.Contains(line, "gt ")
 }
 
 // getKeyBinding returns the current tmux command bound to the given key in the
@@ -3874,16 +4066,29 @@ func (t *Tmux) isGTBinding(table, key string) bool {
 // the presence of both "if-shell" and "gt " in the output), it is treated as
 // no prior binding to avoid recursive wrapping on repeated calls.
 func (t *Tmux) getKeyBinding(table, key string) string {
-	// tmux list-keys -T <table> <key> outputs a line like:
+	// tmux list-keys -T <table> <key> (the single-key query form) outputs a
+	// line like:
 	//   bind-key -T prefix g if-shell "..." "run-shell 'gt agents menu'" ":"
 	// We need to extract just the command portion.
+	//
+	// The single-key form is NOT used here: on tmux 3.7b it returns zero
+	// bytes with exit code 0 for a binding that demonstrably exists (verified
+	// against both a fresh test socket and the default socket), so an
+	// empty-output check can't distinguish "no binding" from "this tmux
+	// version doesn't support the single-key query". Instead, list the whole
+	// table and select the row for our key — confirmed working on 3.7b.
 	//
 	// Assumed format (tested with tmux 3.3+):
 	//   bind-key [-r] -T <table> <key> <command...>
 	// If tmux changes this format, parsing fails safely (returns ""),
 	// which causes the caller to use its default fallback.
-	output, err := t.run("list-keys", "-T", table, key)
+	output, err := t.run("list-keys", "-T", table)
 	if err != nil || output == "" {
+		return ""
+	}
+
+	line := selectBindingLine(output, key)
+	if line == "" {
 		return ""
 	}
 
@@ -3891,15 +4096,14 @@ func (t *Tmux) getKeyBinding(table, key string) string {
 	// don't capture it — we'd end up wrapping our own if-shell in another if-shell.
 	// We check for both "if-shell" and "gt " to avoid false-positiving on user
 	// bindings that happen to contain the substring "gt ".
-	if strings.Contains(output, "if-shell") && strings.Contains(output, "gt ") {
+	if strings.Contains(line, "if-shell") && strings.Contains(line, "gt ") {
 		return ""
 	}
 
-	// Parse the binding command from list-keys output.
+	// Parse the binding command from the selected line.
 	// Format: "bind-key [-r] -T <table> <key> <command...>"
 	// We need everything after the key name.
-	// Find the key in the output and take everything after it.
-	fields := strings.Fields(output)
+	fields := strings.Fields(line)
 	keyIdx := -1
 	for i, f := range fields {
 		if f == "-T" && i+2 < len(fields) {
@@ -3915,11 +4119,11 @@ func (t *Tmux) getKeyBinding(table, key string) string {
 	// Everything after the key is the command
 	// Rejoin from keyIdx+1 onward, but we need to preserve the original spacing.
 	// Find the key token in the original string and take everything after it.
-	idx := strings.Index(output, " "+fields[keyIdx]+" ")
+	idx := strings.Index(line, " "+fields[keyIdx]+" ")
 	if idx < 0 {
 		return ""
 	}
-	cmd := strings.TrimSpace(output[idx+len(" "+fields[keyIdx]+" "):])
+	cmd := strings.TrimSpace(line[idx+len(" "+fields[keyIdx]+" "):])
 	if cmd == "" {
 		return ""
 	}

@@ -140,6 +140,7 @@ var (
 	_ beads.BatchDeleter                     = (*StrictStore)(nil)
 	_ beads.ForeignIDCreator                 = (*StrictStore)(nil)
 	_ beads.Counter                          = (*StrictStore)(nil)
+	_ assignmentClaimer                      = (*StrictStore)(nil)
 	_ beads.GraphApplyHandleProvider         = (*StrictStore)(nil)
 	_ beads.AtomicTxStore                    = (*StrictStore)(nil)
 	_ beads.ParentProjectionWaiter           = (*StrictStore)(nil)
@@ -471,6 +472,39 @@ func (s *StrictStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error
 		return false, beads.ErrConditionalReleaseUnsupported
 	}
 	return releaser.ReleaseIfCurrent(id, expectedAssignee)
+}
+
+// assignmentClaimer is the acquire half of the claim pair, discovered on the
+// leaf the same way beads.ConditionalAssignmentReleaser is. It is declared here
+// rather than in internal/beads because the canonical Store surface deliberately
+// has no claim method — internal/storebinding declares the identical shape for
+// the identical reason (beadsAssignmentClaimer), and only the relocated
+// coordination-class front door reaches it.
+type assignmentClaimer interface {
+	Claim(id, assignee string) (beads.Bead, bool, error)
+}
+
+// Claim forwards the leaf's two-argument assignment claim — the acquire dual of
+// ReleaseIfCurrent, and the CAS the class front door
+// (storebinding.NewBeadsGraphStore) routes a claim through. A leaf without one
+// errors rather than emulating the compare-and-swap with a read-then-write,
+// which would lose the single-winner guarantee the contract promises.
+//
+// FIDELITY GAP, the mirror of Count's. Declaring this method makes every kit
+// store satisfy the claimer assertion, and only the CLASS side of a split
+// matches production there: the relocated binding is a *beads.SQLiteStore, which
+// claims, while the work side is bd, whose BdStore.Claim takes the assignee
+// implicitly (one argument) and does not satisfy this shape at all. So a leaf
+// backed by beads.MemStore satisfies the assertion and then fails the call. A
+// fixture whose subject is a routed CLAIM must therefore use a real SQLite leaf
+// for the class store, not a MemStore one, or it pins the kit's limitation
+// instead of the program's behavior.
+func (s *StrictStore) Claim(id, assignee string) (beads.Bead, bool, error) {
+	claimer, ok := s.Store.(assignmentClaimer)
+	if !ok {
+		return beads.Bead{}, false, fmt.Errorf("strict store: leaf store %T does not support assignment claim", s.Store)
+	}
+	return claimer.Claim(id, assignee)
 }
 
 // DeleteBatch forwards the leaf's orphan-preserving batch delete. A leaf without
