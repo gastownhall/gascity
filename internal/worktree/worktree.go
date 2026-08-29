@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -733,8 +734,15 @@ func rollbackAfterFailedCreate(repoGit *git.Git, path, branch string, branchCrea
 		// Published provenance means a completed Ensure owns this workspace:
 		// this attempt never reaches the publish step, so the registration
 		// belongs to a rival creator and must survive.
-		if _, provErr := readProvenance(path); provErr == nil {
-			errs = append(errs, fmt.Errorf("refusing to remove worktree %q: it carries published provenance this attempt did not write", path))
+		// Only a missing provenance file establishes that no completed Ensure
+		// owns this workspace. A malformed or unreadable one leaves ownership
+		// inconclusive, which is not a license to remove it.
+		if _, provErr := readProvenance(path); !errors.Is(provErr, fs.ErrNotExist) {
+			if provErr == nil {
+				errs = append(errs, fmt.Errorf("refusing to remove worktree %q: it carries published provenance this attempt did not write", path))
+			} else {
+				errs = append(errs, fmt.Errorf("refusing to remove worktree %q: ownership is inconclusive: %w", path, provErr))
+			}
 			break
 		}
 		if err := repoGit.WorktreeRemove(path, false); err != nil {

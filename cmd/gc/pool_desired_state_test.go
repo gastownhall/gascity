@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"io"
 	"strconv"
 	"testing"
@@ -2934,5 +2935,20 @@ func TestRequestWithScaleDemandProvenanceRebindsWorktreeEvidence(t *testing.T) {
 	got = requestWithScaleDemandProvenance(SessionRequest{WorkBeadID: "gc-old", WorktreeError: "stale"}, demand, "gc-bad")
 	if got.WorktreeError != "conflicting evidence" {
 		t.Errorf("WorktreeError = %q, want the trimmed error for gc-bad", got.WorktreeError)
+	}
+}
+
+// Unusable worktree ownership evidence must be distinguishable from an
+// ordinary bind failure: buildDesiredState skips the item on this error
+// rather than continuing without trigger env.
+func TestVerifiedPoolTriggerWorkDirMarksEvidenceFailures(t *testing.T) {
+	req := SessionRequest{WorkBeadID: "gc-a", WorktreeError: "conflicting work dir metadata"}
+	if _, err := verifiedPoolTriggerWorkDir(nil, nil, "rig/pool", req); !errors.Is(err, errPoolTriggerWorktreeEvidence) {
+		t.Errorf("WorktreeError path err = %v, want errPoolTriggerWorktreeEvidence", err)
+	}
+
+	req = SessionRequest{WorkBeadID: "gc-a", WorktreeSpec: &worktree.Spec{BeadID: "gc-b"}}
+	if _, err := verifiedPoolTriggerWorkDir(nil, nil, "rig/pool", req); !errors.Is(err, errPoolTriggerWorktreeEvidence) {
+		t.Errorf("bead mismatch err = %v, want errPoolTriggerWorktreeEvidence", err)
 	}
 }

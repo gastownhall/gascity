@@ -3223,6 +3223,13 @@ func realizePoolDesiredSessionsAt(
 		// (poolTriggerMetadata via selectOrPlanPoolSessionBead), which also
 		// resolves the work dir off the base agent plus the per-slot name.
 		if bound, err := bindPoolSessionTriggerBead(bp, cfgAgent, qualifiedInstance, sbInfo, item.request); err != nil {
+			if errors.Is(err, errPoolTriggerWorktreeEvidence) {
+				// Unusable ownership evidence is not a partial bind: a reused
+				// session left in desired would restart against its previous
+				// binding's work dir.
+				fmt.Fprintf(stderr, "buildDesiredState: pool %q session %s trigger bead %s: %v (skipping)\n", qualifiedName, sbInfo.ID, item.request.WorkBeadID, err) //nolint:errcheck
+				continue
+			}
 			fmt.Fprintf(stderr, "buildDesiredState: pool %q session %s trigger bead %s: %v (continuing without trigger env)\n", qualifiedName, sbInfo.ID, item.request.WorkBeadID, err) //nolint:errcheck
 		} else {
 			sbInfo = bound
@@ -3464,9 +3471,15 @@ func bindNamedSessionTriggerBead(store beads.Store, info session.Info, cityName 
 	return sessionFrontDoor(store).UpdateMetadataInfo(info, patch)
 }
 
+// errPoolTriggerWorktreeEvidence marks a bind failure caused by unusable
+// worktree ownership evidence. The caller must skip such an item rather than
+// continue without trigger env: continuing would restart a reused session
+// against whatever work dir its previous binding left behind.
+var errPoolTriggerWorktreeEvidence = errors.New("pool trigger worktree evidence")
+
 func verifiedPoolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, request SessionRequest) (string, error) {
 	if strings.TrimSpace(request.WorktreeError) != "" {
-		return "", fmt.Errorf("pool trigger worktree evidence invalid: %s", request.WorktreeError)
+		return "", fmt.Errorf("%w invalid: %s", errPoolTriggerWorktreeEvidence, request.WorktreeError)
 	}
 	if request.WorktreeSpec == nil {
 		return poolTriggerWorkDir(bp, cfgAgent, qualifiedName, request), nil
@@ -3474,15 +3487,15 @@ func verifiedPoolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qu
 	spec := *request.WorktreeSpec
 	workID := strings.TrimSpace(request.WorkBeadID)
 	if workID == "" || strings.TrimSpace(spec.BeadID) != workID {
-		return "", fmt.Errorf("pool trigger worktree bead %q does not match request bead %q", spec.BeadID, workID)
+		return "", fmt.Errorf("%w: bead %q does not match request bead %q", errPoolTriggerWorktreeEvidence, spec.BeadID, workID)
 	}
 	storeRef := strings.TrimSpace(request.WorkStoreRef)
 	if storeRef != "" && strings.TrimSpace(spec.StoreRef) != storeRef {
-		return "", fmt.Errorf("pool trigger worktree store %q does not match request store %q", spec.StoreRef, storeRef)
+		return "", fmt.Errorf("%w: store %q does not match request store %q", errPoolTriggerWorktreeEvidence, spec.StoreRef, storeRef)
 	}
 	report, err := worktree.Verify(spec)
 	if err != nil {
-		return "", fmt.Errorf("pool trigger worktree verification failed: %w", err)
+		return "", fmt.Errorf("%w: verification failed: %w", errPoolTriggerWorktreeEvidence, err)
 	}
 	return report.Path, nil
 }

@@ -942,3 +942,29 @@ func TestRollbackAfterFailedCreateKeepsWorktreeWithPublishedProvenance(t *testin
 		t.Errorf("rival worktree removed by rollback: %v", statErr)
 	}
 }
+
+// Ownership is inconclusive when provenance exists but cannot be read.
+// Only its absence licenses removal.
+func TestRollbackAfterFailedCreateKeepsWorktreeWithUnreadableProvenance(t *testing.T) {
+	repo, base := initTestRepo(t)
+	root := t.TempDir()
+	path := filepath.Join(root, "rival")
+	if _, err := Ensure(managedSpec(repo, root, path, "rival-branch", base)); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	manifest, err := provenanceFilePath(path)
+	if err != nil {
+		t.Fatalf("provenanceFilePath: %v", err)
+	}
+	if err := os.WriteFile(manifest, []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("corrupting provenance: %v", err)
+	}
+
+	rollbackErr := rollbackAfterFailedCreate(git.New(repo), path, "rival-branch", false, base)
+	if rollbackErr == nil || !strings.Contains(rollbackErr.Error(), "ownership is inconclusive") {
+		t.Fatalf("rollback err = %v, want an inconclusive-ownership refusal", rollbackErr)
+	}
+	if _, statErr := os.Stat(path); statErr != nil {
+		t.Errorf("rival worktree removed on inconclusive ownership: %v", statErr)
+	}
+}
