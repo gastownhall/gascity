@@ -36,6 +36,17 @@ BACKUP_ARTIFACT_DIR="${GC_BACKUP_ARTIFACT_DIR:-$GC_CITY_PATH/.dolt-backup}"
 # advisory so a persistent condition collapses into one rolling alert instead of
 # a fresh bead every 5-min tick. DOLT_STATE_DIR is set by runtime.sh.
 ADVISORY_STATE_FILE="${GC_DOCTOR_ADVISORY_STATE_FILE:-$DOLT_STATE_DIR/doctor-advisory-state}"
+# Advisory mailbox hygiene: the subject the [MEDIUM] escalation sends under, the
+# prefix the superseded-advisory sweep matches (severity-agnostic on purpose, so
+# it also catches older sends under a different severity tag), and the recipient
+# those sends go to. The recipient is the same env-var-with-default the core
+# escalate.sh resolves (RECIPIENT="${GC_ESCALATION_RECIPIENT:-human}"); a pack
+# that overrides escalate.sh with a different recipient makes the sweep a
+# harmless no-op. The CRITICAL "server unreachable" escalation uses a different
+# subject and is never matched by the prefix, so outage mail is never swept.
+ADVISORY_SUBJECT="Dolt health advisory [MEDIUM]"
+ADVISORY_SUBJECT_PREFIX="Dolt health advisory"
+ADVISORY_RECIPIENT="${GC_ESCALATION_RECIPIENT:-human}"
 
 dolt_sql() {
     DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}" \
@@ -220,8 +231,14 @@ if [ -n "$WARNINGS" ]; then
     if [ -n "$ORPHAN_WARN" ]; then ADVISORY_SIG="${ADVISORY_SIG}orphan "; fi
     if [ -n "$BACKUP_STALE" ]; then ADVISORY_SIG="${ADVISORY_SIG}backup "; fi
     if advisory_changed "$ADVISORY_SIG" "$ADVISORY_STATE_FILE"; then
+        # Sweep superseded advisories before the fresh send: the new advisory
+        # carries the full current status block, so older snapshots (and any
+        # backlog minted before the dedup existed) are stale the moment it
+        # lands. If the send below then fails, the sig stays unrecorded and the
+        # next tick retries both the sweep (a no-op) and the send.
+        advisory_archive_superseded "$ADVISORY_SUBJECT_PREFIX" "$ADVISORY_RECIPIENT"
         if send_escalation \
-            "Dolt health advisory [MEDIUM]" \
+            "$ADVISORY_SUBJECT" \
             "Latency: ${LATENCY_MS}ms${LATENCY_WARN}
 Connections: ${CONN_COUNT}/${CONN_MAX}${CONN_WARN}
 Disk: ${DISK_USAGE}
@@ -230,7 +247,13 @@ Orphan DBs: ${ORPHAN_COUNT}${ORPHAN_WARN}${BACKUP_STALE}"; then
         fi
     fi
 else
-    # Healthy: forget the last advisory so a future condition re-alerts.
+    # Healthy: the condition cleared, so no advisory should stay open. Sweep
+    # only when a prior advisory was recorded (state file present), so steady
+    # healthy ticks cost no extra gc call; then forget the signature so a
+    # future condition re-alerts.
+    if [ -f "$ADVISORY_STATE_FILE" ]; then
+        advisory_archive_superseded "$ADVISORY_SUBJECT_PREFIX" "$ADVISORY_RECIPIENT"
+    fi
     advisory_clear "$ADVISORY_STATE_FILE"
 fi
 

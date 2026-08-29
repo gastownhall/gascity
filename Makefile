@@ -24,7 +24,7 @@ INSTALL_DIR := $(BIN_DIR)
 VERSION    := $(shell tag=$$(git describe --tags --exact-match 2>/dev/null || true); if [ -n "$$tag" ]; then printf '%s' "$$tag" | sed 's/^v//'; else echo "dev"; fi)
 COMMIT     := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 DIRTY      := $(shell test -n "$$(git status --porcelain 2>/dev/null)" && echo "-dirty" || true)
-BUILD_TIME := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
+BUILD_TIME := $(shell git show -s --format=%cI HEAD 2>/dev/null || echo unknown)
 
 LDFLAGS := -X main.version=$(VERSION) \
            -X main.commit=$(COMMIT)$(DIRTY) \
@@ -177,7 +177,7 @@ clean:
 	rm -f $(BUILD_DIR)/$(BINARY)
 
 ## check: run fast quality gates (pre-commit: unit tests only)
-check: fmt-check lint vet check-release-dist-ignore check-routed-test-rows check-split-topology-rows test
+check: fmt-check lint vet check-release-dist-ignore check-routed-test-rows check-split-topology-rows check-residency-boundary test
 
 ## check-release-dist-ignore: keep GoReleaser output from marking release builds dirty
 check-release-dist-ignore:
@@ -209,6 +209,18 @@ check-routed-test-rows:
 ## and that the suite never constructs an env directly.
 check-split-topology-rows:
 	./scripts/check-split-topology-rows.sh
+
+## check-residency-boundary: forbid a new store-enumeration site outside internal/storeref
+## The lookup contract ("which stores answer this question, in what order, with what
+## failure semantics") lives in internal/storeref. Every list assembled elsewhere
+## re-derives the identity gate, the leg order, the dedupe rule and the fail-loud
+## policy, and each restatement is a chance to get one clause wrong (the ~90-site
+## census behind ga-axin6, ga-whzrt, ga-j4ob9). Shrink-only ratchet against
+## scripts/residency-boundary-baseline.txt; the AST half runs as
+## TestResidencyResolverBoundary in ./scripts.
+check-residency-boundary:
+	./scripts/check-residency-boundary.sh --self-test
+	./scripts/check-residency-boundary.sh
 
 ## check-gomod-replace: block unreleased replace directives (pseudo-version, local path, git ref)
 ## Tripwire for the 2026-06-11 incident where PR #3489 shipped a pseudo-version replace
@@ -411,6 +423,13 @@ TEST_ENV = env -i \
 	CLAUDE_CODE_EFFORT_LEVEL="$${CLAUDE_CODE_EFFORT_LEVEL-}" \
 	CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="$${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC-}" \
 	OLLAMA_API_KEY="$${OLLAMA_API_KEY-}" \
+	XIAOMI_API_KEY="$${XIAOMI_API_KEY-}" \
+	ZCODE_API_KEY="$${ZCODE_API_KEY-}" \
+	ZCODE_CJS="$${ZCODE_CJS-}" \
+	ZCODE_MODEL="$${ZCODE_MODEL-}" \
+	ZCODE_BASE_URL="$${ZCODE_BASE_URL-}" \
+	ZCODE_NODE_BIN="$${ZCODE_NODE_BIN-}" \
+	ZCODE_STORAGE_DIR="$${ZCODE_STORAGE_DIR-}" \
 	CGO_CPPFLAGS="$${CGO_CPPFLAGS-}" \
 	CGO_LDFLAGS="$${CGO_LDFLAGS-}" \
 	$(EXTRA_TEST_ENV)
@@ -420,6 +439,7 @@ test-ci-policy:
 	$(TEST_ENV) PYTHONDONTWRITEBYTECODE=1 python3 -S -m unittest discover -s .github/workflows/scripts -p 'test_runner_policy.py'
 	$(TEST_ENV) PYTHONDONTWRITEBYTECODE=1 python3 -S -m unittest discover -s .github/workflows/scripts -p 'test_ci_suite_coverage.py'
 	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 ./scripts/cipolicy
+	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 ./scripts/prwatchdog/...
 	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 -run '^(TestPreflightStaticScopesOrdinaryPRsWithoutWeakeningProtectedRuns|TestFullStaticLintExplicitlyOwnsConfiguredGolangCIGovet|TestChangedStaticTargetsScopeLintAndFormattingToTheDiff|TestCIStaticScopeClassifierFailsClosedOutsideValidatedPullRequestMerge)$$' ./scripts
 
 ## test: run fast unit tests (skip integration-tagged and GC_FAST_UNIT-gated process tests)
@@ -533,8 +553,16 @@ setup-worker-inference:
 	python3 scripts/worker_inference_setup.py install --profile "$(WORKER_INFERENCE_PROFILE)"
 
 ## test-worker-inference: run the live worker inference conformance package
+##
+## GC_HOME is passed through (and declared to internal/testenv, which scrubs it
+## as a leak vector) because this suite edits city.toml IN-PROCESS, and
+## config.ImplicitGCHome() returns "" inside a *.test binary unless GC_HOME is
+## explicitly set. Without it every managed-city leg dies resolving the city's
+## pack imports against the user-global repo cache. It is a cache path, not a
+## credential; the isolation this suite relies on flows through the per-run
+## GC_HOME it hands to the gc subprocesses it spawns.
 test-worker-inference:
-	$(TEST_ENV) PROFILE="$(WORKER_INFERENCE_PROFILE)" GC_WORKER_REPORT_DIR="$(GC_WORKER_REPORT_DIR)" go test -count=1 -tags acceptance_c -timeout 45m -v ./test/acceptance/worker_inference
+	$(TEST_ENV) PROFILE="$(WORKER_INFERENCE_PROFILE)" GC_WORKER_REPORT_DIR="$(GC_WORKER_REPORT_DIR)" GC_HOME="$${GC_HOME:-$$HOME/.gc}" GC_TESTENV_PASSTHROUGH=GC_HOME go test -count=1 -tags acceptance_c -timeout 45m -v ./test/acceptance/worker_inference
 
 ## test-worker-inference-phase3: alias for the live worker inference conformance package
 test-worker-inference-phase3: test-worker-inference

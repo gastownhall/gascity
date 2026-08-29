@@ -70,6 +70,16 @@ type FileRecorder struct {
 	archiveRetainAge      time.Duration
 	recordCount           uint64
 	lastSizeCheck         time.Time
+
+	// skipSweep suppresses the one-shot startup sweep of orphaned rotating-*
+	// files (WithoutStartupSweep). Transient per-open recorders — the
+	// per-mutation class-store emitter is the one in tree — set it so they do
+	// not race the supervisor's long-lived recorder, which owns rotation
+	// recovery. It does NOT make the open scan-free: ReadLatestSeq consults
+	// the archives to continue the sequence, so every open reads the
+	// directory regardless. Crash recovery of orphaned rotating files is
+	// unchanged: the long-lived recorder still sweeps.
+	skipSweep bool
 }
 
 // FileRecorderOption customizes a FileRecorder at construction time.
@@ -105,6 +115,23 @@ func WithRotationCheckInterval(d time.Duration) FileRecorderOption {
 // all archives forever.
 func WithArchiveRetainAge(d time.Duration) FileRecorderOption {
 	return func(r *FileRecorder) { r.archiveRetainAge = d }
+}
+
+// WithoutStartupSweep suppresses the one-shot orphaned-rotating-file sweep that
+// NewFileRecorder otherwise runs on open. Transient per-open recorders — one
+// that opens, writes and closes inside a single mutation — pass it so they do
+// not race the supervisor's long-lived recorder mid-rotation: a concurrent
+// sweep can double-gzip the same in-flight rotating-* file through a shared
+// .tmp path. What it skips is the sweep's RECOVERY WORK — a directory pass that
+// gzips and renames the files a crash stranded — not the open's directory read,
+// which happens either way because ReadLatestSeq consults the archives to
+// continue the sequence.
+//
+// The long-lived recorder keeps the sweep, so crash recovery of orphaned
+// rotating files is unaffected, and stranded rotating files stay readable
+// through the in-flight read path meanwhile.
+func WithoutStartupSweep() FileRecorderOption {
+	return func(r *FileRecorder) { r.skipSweep = true }
 }
 
 // RotationResult is returned by ForceRotate (and B-3's API endpoint)
@@ -164,8 +191,24 @@ func NewFileRecorder(path string, stderr io.Writer, opts ...FileRecorderOption) 
 		return nil, fmt.Errorf("creating event log directory: %w", err)
 	}
 
-	if err := reapOrphanedRotatingFiles(filepath.Dir(path), stderr); err != nil {
-		fmt.Fprintf(stderr, "events: rotation: orphan sweep: %v\n", err) //nolint:errcheck // best-effort stderr
+	// Options are applied before the sweep so WithoutStartupSweep can suppress
+	// it; file and seq are filled in after the (optional) sweep and the open.
+	r := &FileRecorder{
+		path:                  path,
+		stderr:                stderr,
+		maxSize:               0,
+		rotationCheckRecords:  defaultRotationCheckRecords,
+		rotationCheckInterval: defaultRotationCheckInterval,
+		lastSizeCheck:         time.Now(),
+	}
+	for _, opt := range opts {
+		opt(r)
+	}
+
+	if !r.skipSweep {
+		if err := reapOrphanedRotatingFiles(filepath.Dir(path), stderr); err != nil {
+			fmt.Fprintf(stderr, "events: rotation: orphan sweep: %v\n", err) //nolint:errcheck // best-effort stderr
+		}
 	}
 
 	maxSeq, err := ReadLatestSeq(path)
@@ -178,19 +221,8 @@ func NewFileRecorder(path string, stderr io.Writer, opts ...FileRecorderOption) 
 		return nil, fmt.Errorf("opening event log: %w", err)
 	}
 
-	r := &FileRecorder{
-		path:                  path,
-		file:                  file,
-		seq:                   maxSeq,
-		stderr:                stderr,
-		maxSize:               0,
-		rotationCheckRecords:  defaultRotationCheckRecords,
-		rotationCheckInterval: defaultRotationCheckInterval,
-		lastSizeCheck:         time.Now(),
-	}
-	for _, opt := range opts {
-		opt(r)
-	}
+	r.file = file
+	r.seq = maxSeq
 	return r, nil
 }
 

@@ -528,7 +528,9 @@ The v2 compiler must emit a flat, topologically ordered graph:
 - **`workflow-finalize` is appended.** A control step with ID
   `workflow-finalize` (kind `workflow-finalize`) is added depending on
   every sink step, so it becomes Ready exactly when all other work is
-  terminal.
+  terminal. Steps carrying `gc.scope_role = "teardown"` are excluded from
+  the sink set: teardown runs after the workflow settles (section 3.5), so
+  gating settlement on it would deadlock the run.
 - **The root blocks on the finalize step.** The workflow root bead is made
   to depend on `workflow-finalize` (or, when a recipe has no finalize step,
   on every step whose `gc.kind` is not one of the generated `run`, `check`,
@@ -909,6 +911,28 @@ pass/fail, closes the workflow root with that outcome (root first, so a
 crash retries finalization), closes generated spec sidecars, and — on pass
 only — propagates closure across the `gc.source_bead_id` chain. Failures
 intentionally leave parent source beads open for investigation.
+
+**Teardown is post-settlement.** Teardown work
+(`gc.scope_role = "teardown"`) is the one part of a workflow that outlives
+settlement: it never blocks `workflow-finalize`, and finalize's terminal
+close — which skips every other still-open member once the root is
+terminal — leaves the teardown step and its retry attempts open so they
+still run. A teardown step may therefore read the run's final
+`gc.outcome`, which is what makes "clean up on pass, preserve the
+workspace on fail" expressible. Its own outcome never re-grades the root;
+a teardown that fails after settlement is a relic to sweep, not a failed
+run.
+
+**Close-ownership invariant.** A compiled graph never blocks a node on the
+control bead that closes it. A scope body is not blocked by any of its
+scope-checks (the body's authored `needs` keep naming the raw members), and
+a workflow root is not blocked by its `workflow-finalize` (the root reaches
+its finalizer through an informational `tracks` edge instead). Such an edge
+is a permanent deadlock — the store refuses to close a blocked issue, and
+the only bead that could clear the blocker is the one being refused. The
+compiler rejects any recipe that contains one. Downstream ordering is
+unaffected: the scope-check still blocks on its member, and the finalizer
+still blocks on every graph sink including the scope body.
 
 ## 4. Accepted But Inert
 

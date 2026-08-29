@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/storebinding"
 )
 
@@ -355,8 +357,11 @@ func TestInspectRefusesASpecificationOtherThanTheBoundOne(t *testing.T) {
 	elsewhere.ConfigRef = "elsewhere"
 	otherCity := spec
 	otherCity.CityRoot = t.TempDir()
+	remote := spec
+	remote.URL = "https://beads.example/workspaces/infra"
+	remote.Auth = storebinding.AuthCredentialProvider
 
-	for _, other := range []storebinding.BindingSpec{elsewhere, otherCity} {
+	for _, other := range []storebinding.BindingSpec{elsewhere, otherCity, remote} {
 		if _, err := provider.Inspect(context.Background(), other); !errors.Is(err, ErrInvalidWorkspaceBinding) {
 			t.Fatalf("inspecting binding %+v = %v, want %v", other, err, ErrInvalidWorkspaceBinding)
 		}
@@ -449,6 +454,176 @@ func TestOpenEngineRefusesWithoutTouchingTheWorkspace(t *testing.T) {
 	}
 	if entries := treeContents(t, city); len(entries) != 1 {
 		t.Errorf("a refused open left %v in the city directory", entries)
+	}
+}
+
+func TestOpenEngineSelectsCredentialBridgeOnlyForExactHostedBinding(t *testing.T) {
+	selectorErr := errors.New("hosted selector reached the running executable")
+	tests := []struct {
+		name string
+		url  string
+		auth string
+		want bool
+	}{
+		{name: "credential provider", url: "https://beads.example/workspaces/infra", auth: storebinding.AuthCredentialProvider, want: true},
+		{name: "local workspace"},
+		{name: "environment credential", url: "https://beads.example/workspaces/infra", auth: "env:BEADS_TOKEN"},
+		{name: "remote without auth", url: "https://beads.example/workspaces/infra"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			city := t.TempDir()
+			spec := storebinding.BindingSpec{
+				Name: "infra", Provider: ProviderID, ConfigRef: testConfigRef, CityRoot: city,
+				URL: test.url, Auth: test.auth,
+			}
+			provider, err := ProviderFactory{}.New(spec)
+			if err != nil {
+				t.Fatalf("constructing provider: %v", err)
+			}
+			root, err := WorkspaceRoot(city, testConfigRef)
+			if err != nil {
+				t.Fatalf("resolving workspace: %v", err)
+			}
+			provisionWorkspaceConfig(t, root)
+			if err := os.WriteFile(workspaceConfigPath(root), []byte(`{"backend":"selector-test"}`), 0o600); err != nil {
+				t.Fatalf("writing workspace selector fixture: %v", err)
+			}
+			classes, err := workspaceClasses()
+			if err != nil {
+				t.Fatalf("building classes: %v", err)
+			}
+
+			originalExecutable := workspaceExecutable
+			calls := 0
+			workspaceExecutable = func() (string, error) {
+				calls++
+				return "", selectorErr
+			}
+			t.Cleanup(func() { workspaceExecutable = originalExecutable })
+
+			store, closer, openErr := engineOpener(t, provider).OpenEngine(spec, classes)
+			if store != nil || closer != nil {
+				t.Fatal("a refused selector fixture returned a store or closer")
+			}
+			if openErr == nil {
+				t.Fatal("selector fixture unexpectedly opened")
+			}
+			if test.want {
+				if calls != 1 || !errors.Is(openErr, selectorErr) {
+					t.Fatalf("hosted selector calls/error = %d/%v, want one executable resolution and %v", calls, openErr, selectorErr)
+				}
+				return
+			}
+			if calls != 0 {
+				t.Fatalf("non-hosted selector resolved the running executable %d times", calls)
+			}
+			if errors.Is(openErr, selectorErr) {
+				t.Fatalf("non-hosted selector reached the credential bridge: %v", openErr)
+			}
+		})
+	}
+}
+
+func TestOpenEngineHostedCredentialCommandIsInvokedAndAmbientEnvIsWithheld(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the linked beads command runner uses cmd.exe on Windows; this fixture is a POSIX executable")
+	}
+	t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "/poison/credential-command")
+	t.Setenv("BEADS_DB", "/poison/db")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient.example.com")
+
+	helperDir := filepath.Join(t.TempDir(), "running gc path with ' quote")
+	if err := os.MkdirAll(helperDir, 0o700); err != nil {
+		t.Fatalf("creating helper directory: %v", err)
+	}
+	helperPath := filepath.Join(helperDir, "gc")
+	markerPath := filepath.Join(t.TempDir(), "credential-command-invocation")
+	script := "#!/bin/sh\n" +
+		"{\n" +
+		"  printf 'args=%s\\n' \"$*\"\n" +
+		"  printf 'db=%s\\n' \"${BEADS_DB-}\"\n" +
+		"  printf 'host=%s\\n' \"${BEADS_DOLT_SERVER_HOST-}\"\n" +
+		"  printf 'command=%s\\n' \"${BEADS_DOLT_CREDENTIAL_COMMAND-}\"\n" +
+		"} > " + shellquote.Quote(markerPath) + "\n" +
+		"printf '%s\\n' '{\"token\":\"opaque-test\",\"expirationTimestamp\":\"2099-01-02T03:04:05Z\"}'\n"
+	if err := os.WriteFile(helperPath, []byte(script), 0o700); err != nil {
+		t.Fatalf("writing helper executable: %v", err)
+	}
+	originalExecutable := workspaceExecutable
+	workspaceExecutable = func() (string, error) { return helperPath, nil }
+	t.Cleanup(func() { workspaceExecutable = originalExecutable })
+
+	city := t.TempDir()
+	spec := storebinding.BindingSpec{
+		Name: "infra", Provider: ProviderID, ConfigRef: testConfigRef, CityRoot: city,
+		URL: "https://beads.example/workspaces/infra", Auth: storebinding.AuthCredentialProvider,
+	}
+	provider, err := ProviderFactory{}.New(spec)
+	if err != nil {
+		t.Fatalf("constructing provider: %v", err)
+	}
+	root, err := WorkspaceRoot(city, testConfigRef)
+	if err != nil {
+		t.Fatalf("resolving workspace: %v", err)
+	}
+	provisionWorkspaceConfig(t, root)
+	metadata := `{"backend":"dolt","database":"dolt","dolt_mode":"server","dolt_server_host":"127.0.0.1","dolt_server_port":1,"dolt_database":"infra","issue_prefix":"gcg"}`
+	if err := os.WriteFile(workspaceConfigPath(root), []byte(metadata), 0o600); err != nil {
+		t.Fatalf("writing hosted workspace metadata: %v", err)
+	}
+	classes, err := workspaceClasses()
+	if err != nil {
+		t.Fatalf("building classes: %v", err)
+	}
+
+	store, closer, openErr := engineOpener(t, provider).OpenEngine(spec, classes)
+	if openErr == nil {
+		if closer != nil {
+			_ = closer.Close()
+		}
+		t.Fatal("hosted workspace unexpectedly connected to the unreachable test endpoint")
+	}
+	if store != nil || closer != nil {
+		t.Fatal("the failed hosted open returned a store or closer")
+	}
+	if strings.Contains(openErr.Error(), "opaque-test") {
+		t.Fatalf("credential appeared in the open error: %v", openErr)
+	}
+
+	invocation, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatalf("credential command was not invoked: %v (open error: %v)", err, openErr)
+	}
+	wantCommand := shellquote.Quote(helperPath) + " internal beads-credential"
+	wantInvocation := "args=internal beads-credential\n" +
+		"db=\n" +
+		"host=\n" +
+		"command=" + wantCommand + "\n"
+	if got := string(invocation); got != wantInvocation {
+		t.Fatalf("credential command invocation = %q, want %q", got, wantInvocation)
+	}
+	if got := os.Getenv("BEADS_DOLT_CREDENTIAL_COMMAND"); got != "/poison/credential-command" {
+		t.Errorf("ambient credential command after open = %q, want restored", got)
+	}
+	if got := os.Getenv("BEADS_DOLT_SERVER_HOST"); got != "ambient.example.com" {
+		t.Errorf("ambient server host after open = %q, want restored", got)
+	}
+}
+
+func TestHostedWorkspaceOpenWiresCredentialRefreshingReopen(t *testing.T) {
+	data, err := os.ReadFile("engine.go")
+	if err != nil {
+		t.Fatalf("reading engine.go: %v", err)
+	}
+	source := string(data)
+	for _, want := range []string{
+		"beads.WithNativeReopen(reopen)",
+		"beads.OpenNativeStorageAtWithoutAmbientEnvWithCredentialCommand(ctx, p.root, command)",
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("hosted workspace open is missing bounded credential-refresh wiring %q", want)
+		}
 	}
 }
 
