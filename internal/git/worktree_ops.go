@@ -63,7 +63,11 @@ func (g *Git) RevParseVerifyCommit(ref string) (string, error) {
 		return "", fmt.Errorf("resolving ref %q: %w", ref, err)
 	}
 	sha := strings.TrimSpace(out)
-	if len(sha) != 40 {
+	// Object-ID width is repository-dependent: SHA-1 repositories emit 40 hex
+	// characters and SHA-256 repositories emit 64. Pinning either width would
+	// reject every ref in the other kind of repository, so validate the shape
+	// rather than one repository format's length.
+	if !isHexObjectID(sha) {
 		return "", fmt.Errorf("resolving ref %q: unexpected rev-parse output %q", ref, sha)
 	}
 	// When we appended ^{commit}, rev-parse already guaranteed a commit.
@@ -183,4 +187,18 @@ func (g *Git) HeadSymbolicRef() (string, error) {
 		return "", fmt.Errorf("HEAD is not a symbolic ref (detached?): %w", err)
 	}
 	return strings.TrimSpace(out), nil
+}
+
+// isHexObjectID reports whether s is a full git object ID: lowercase hex at
+// one of git's two object-format widths (SHA-1 is 40, SHA-256 is 64).
+func isHexObjectID(s string) bool {
+	if len(s) != 40 && len(s) != 64 {
+		return false
+	}
+	for _, r := range s {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
 }

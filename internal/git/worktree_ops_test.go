@@ -293,3 +293,18 @@ func TestWorktreeAddNeverDetaches(t *testing.T) {
 		t.Errorf("worktree HEAD = %q, want refs/heads/*", ref)
 	}
 }
+
+func TestIsHexObjectIDAcceptsBothObjectFormats(t *testing.T) {
+	sha1 := strings.Repeat("a", 40)
+	sha256ID := strings.Repeat("b", 64)
+	for _, id := range []string{sha1, sha256ID} {
+		if !isHexObjectID(id) {
+			t.Fatalf("isHexObjectID(%d-char id) = false, want true", len(id))
+		}
+	}
+	for _, bad := range []string{"", strings.Repeat("a", 39), strings.Repeat("a", 41), strings.Repeat("A", 40), strings.Repeat("z", 40)} {
+		if isHexObjectID(bad) {
+			t.Fatalf("isHexObjectID(%q) = true, want false", bad)
+		}
+	}
+}
