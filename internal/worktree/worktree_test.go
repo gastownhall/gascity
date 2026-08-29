@@ -896,3 +896,25 @@ func TestVerifyCreatedWorktreeLeavesRollbackToEnsure(t *testing.T) {
 		t.Errorf("verifyCreatedWorktree performed its own rollback: %v", err)
 	}
 }
+
+// Rollback deletes only a branch it can show is its own. A branch that
+// exists at some other commit was created by someone else between this
+// attempt's probe and its failed create, and must survive.
+func TestRollbackAfterFailedCreateKeepsBranchNotAtOurBase(t *testing.T) {
+	repo, base := initTestRepo(t)
+	repoGit := git.New(repo)
+	runGit(t, repo, "commit", "--allow-empty", "-m", "second")
+	other := strings.TrimSpace(runGit(t, repo, "rev-parse", "HEAD"))
+	if other == base {
+		t.Fatal("setup: second commit did not move HEAD")
+	}
+	runGit(t, repo, "branch", "rival", other)
+
+	err := rollbackAfterFailedCreate(repoGit, filepath.Join(t.TempDir(), "absent"), "rival", true, base)
+	if err == nil || !strings.Contains(err.Error(), "refusing to delete branch") {
+		t.Fatalf("rollback err = %v, want a refusal to delete", err)
+	}
+	if exists, existsErr := repoGit.BranchExists("rival"); existsErr != nil || !exists {
+		t.Errorf("branch rival = %v, %v after rollback; want it kept", exists, existsErr)
+	}
+}

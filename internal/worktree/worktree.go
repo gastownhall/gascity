@@ -378,7 +378,7 @@ func Ensure(spec Spec) (Report, error) {
 	}
 
 	if err := createWorktree(repoGit, spec, branchExists); err != nil {
-		return rep, rollbackResult(err, rollbackAfterFailedCreate(repoGit, spec.Path, spec.Branch, !branchExists))
+		return rep, rollbackResult(err, rollbackAfterFailedCreate(repoGit, spec.Path, spec.Branch, !branchExists, resolvedBase))
 	}
 	created, err := verifyCreatedWorktree(spec, branchExists, resolvedBase)
 	if err != nil {
@@ -717,7 +717,13 @@ func RollbackAttempt(spec Spec, report Report) error {
 // would have created it and it now exists. Removal is never forced, so a
 // partial checkout that left real content is retained and reported rather than
 // deleted.
-func rollbackAfterFailedCreate(repoGit *git.Git, path, branch string, branchCreated bool) error {
+// rollbackAfterFailedCreate undoes a failed create. Ensure holds the path
+// lock across the whole observe-then-create window, so a rival Ensure cannot
+// interleave; a git process outside gc still can, and this refuses to delete
+// anything it cannot show is its own. The branch is removed only when it is
+// still at the base this attempt would have created it from, and only when
+// git agrees it is merged.
+func rollbackAfterFailedCreate(repoGit *git.Git, path, branch string, branchCreated bool, wantBaseSHA string) error {
 	var errs []error
 	matches, err := matchingRegisteredWorktrees(repoGit, path)
 	switch {
@@ -739,8 +745,16 @@ func rollbackAfterFailedCreate(repoGit *git.Git, path, branch string, branchCrea
 			// predate this attempt.
 			errs = append(errs, fmt.Errorf("rollback branch probe: %w", err))
 		case exists:
-			if err := repoGit.BranchDeleteIfMerged(branch); err != nil {
-				errs = append(errs, err)
+			head, headErr := repoGit.RevParseVerifyCommit(branch)
+			switch {
+			case headErr != nil:
+				errs = append(errs, fmt.Errorf("rollback branch head: %w", headErr))
+			case wantBaseSHA != "" && head != wantBaseSHA:
+				errs = append(errs, fmt.Errorf("refusing to delete branch %q: head %s is not the base %s this attempt would have created it from", branch, head, wantBaseSHA))
+			default:
+				if err := repoGit.BranchDeleteIfMerged(branch); err != nil {
+					errs = append(errs, err)
+				}
 			}
 		}
 	}
