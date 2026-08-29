@@ -10,8 +10,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 636
-baseline_files = 184
+baseline_calls = 637
+baseline_files = 185
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-80po0c.2"
@@ -51,8 +51,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 429
-baseline_files = 125
+baseline_calls = 430
+baseline_files = 126
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-80po0c.2"
@@ -315,6 +315,17 @@ resources = ["subprocess"]
 owner_bead = "ga-8pkpor"
 invariant = "doctor custom-types test-owned-HOME dolt-isolation regression proof is a checked Medium owner"
 resource_owner = "the bd subprocess is confined to TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext, which proves bd routes to an embedded, test-owned dolt store rather than a machine-level shared server"
+migration_target = "P0.4b"
+expires = "2026-10-01"
+
+[[medium]]
+package_dir = "internal/worker/adapters/zcode"
+package_name = "zcode_test"
+owner = "TestZcodeReplDrainGuardToleratesUnsetMore"
+resources = ["subprocess"]
+owner_bead = "ga-uqdim3"
+invariant = "zcode-repl drain-guard unset-variable regression proof is a checked Medium subprocess owner"
+resource_owner = "the one bash subprocess is confined to TestZcodeReplDrainGuardToleratesUnsetMore, which exists to prove the embedded zcode-repl script's drain-loop guard survives an unset $more under set -u -- the macOS/bash-3.2 divergence (ga-uqdim3) can't be reproduced by timing out a real read on this host's bash 5, so the hazard is forced directly and evaluated by a real bash interpreter"
 migration_target = "P0.4b"
 expires = "2026-10-01"
 
