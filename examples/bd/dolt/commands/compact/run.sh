@@ -1073,6 +1073,12 @@ preflight_counts() {
   tables_tmp=$(mktemp)
   : > "$out"
   preflight_excluded_tables=""
+  # Reset unconditionally, not inside the dolt_ignore branch below: compaction
+  # walks every database in one shell process, so a database with no
+  # dolt_ignore patterns would otherwise inherit the previous database's list.
+  # db_root_drift_within_verified_tables reads this to admit drift, so a stale
+  # value would admit it for the wrong database.
+  preflight_dolt_ignored_tables=""
   if ! user_tables "$db" > "$tables_tmp"; then
     rm -f "$tables_tmp"
     return 1
@@ -1088,7 +1094,6 @@ preflight_counts() {
   dolt_ignore_patterns "$db" > "$ignored_patterns_tmp" || true
   if [ -s "$ignored_patterns_tmp" ]; then
     filtered_committed_tmp=$(mktemp)
-    preflight_dolt_ignored_tables=""
     while IFS= read -r ct; do
       [ -n "$ct" ] || continue
       ct_matched=0
@@ -1351,6 +1356,20 @@ verify_counts() {
 #    rewritten, so a first commit only introduced rows, and an
 #    already-committed table keeps every row it held at <from> intact at <to>.
 #
+#    One shape inside category 2 cannot satisfy that proof, and must not be
+#    asked to: a dolt_ignore'd table that a force-healed store inlined into the
+#    committed root. -Am cannot stage a dolt_ignore'd table, so the flatten's
+#    DOLT_RESET('--soft', root) un-tracks it and the flatten commit DROPS it.
+#    The diff is a deletion by construction, on every flatten of an affected
+#    database, for as long as the table stays inlined -- so it never self-heals
+#    and deferring starves GC exactly as a quarantine does. It is admitted on
+#    preflight's own positive identification (preflight_dolt_ignored_tables)
+#    rather than on a content diff. The rows are not lost: they remain in the
+#    working set, which DOLT_GC keeps reachable, and that is already the steady
+#    state for every database whose ignored tables were never force-inlined.
+#    What the flatten drops is the table's presence in the committed root --
+#    which is the same thing a flatten does to all history by design.
+#
 # Any other table (system tables such as dolt_schemas), a first-committed
 # table whose diff is not added-only or whose diff probe fails, an empty
 # DOLT_DIFF_STAT, or a DIFF_STAT probe failure fails closed. Exports the full
@@ -1362,6 +1381,7 @@ db_root_drift_within_verified_tables() {
   preflight_file="$4"
   db_root_drift_proven_tables=""
   db_root_drift_first_committed_tables=""
+  db_root_drift_dropped_ignored_tables=""
   db_root_drift_stat_tables=""
   [ -n "$from" ] && [ -n "$to" ] || return 1
   stat_tmp=$(mktemp)
@@ -1385,6 +1405,7 @@ db_root_drift_within_verified_tables() {
   fi
   drift_verified_tables=""
   drift_first_committed_tables=""
+  drift_dropped_ignored_tables=""
   drift_unproven_tables=""
   for drift_t in $drift_tables; do
     db_root_drift_stat_tables="$db_root_drift_stat_tables $drift_t"
@@ -1398,11 +1419,23 @@ db_root_drift_within_verified_tables() {
     fi
     case " $preflight_excluded_tables " in
       *" $drift_t "*)
-        if diff_is_additive_only "$db" "$from" "$to" "$drift_t"; then
-          drift_first_committed_tables="$drift_first_committed_tables $drift_t"
-        else
-          drift_unproven_tables="$drift_unproven_tables $drift_t (first-commit diff not added-only or diff probe failed)"
-        fi
+        case " $preflight_dolt_ignored_tables " in
+          *" $drift_t "*)
+            # Category 2, drop direction. -Am cannot stage a dolt_ignore'd
+            # table, so the flatten's DOLT_RESET('--soft') un-tracks it and the
+            # flatten commit DROPS it. The diff is a deletion by construction,
+            # so diff_is_additive_only can never admit it -- see the comment on
+            # this function for why that is not evidence of corruption.
+            drift_dropped_ignored_tables="$drift_dropped_ignored_tables $drift_t"
+            ;;
+          *)
+            if diff_is_additive_only "$db" "$from" "$to" "$drift_t"; then
+              drift_first_committed_tables="$drift_first_committed_tables $drift_t"
+            else
+              drift_unproven_tables="$drift_unproven_tables $drift_t (first-commit diff not added-only or diff probe failed)"
+            fi
+            ;;
+        esac
         ;;
       *)
         drift_unproven_tables="$drift_unproven_tables $drift_t (outside verified set)"
@@ -1417,6 +1450,7 @@ db_root_drift_within_verified_tables() {
   fi
   db_root_drift_proven_tables=${drift_verified_tables# }
   db_root_drift_first_committed_tables=${drift_first_committed_tables# }
+  db_root_drift_dropped_ignored_tables=${drift_dropped_ignored_tables# }
   return 0
 }
 
@@ -2990,8 +3024,8 @@ flatten_database() {
       # belongs to one of those categories; defer exactly as the proven
       # writer-race paths do. Anything else stays quarantined.
       if db_root_drift_within_verified_tables "$db" "$head" "$flatten_head" "$preflight_tmp"; then
-        printf 'compact: db=%s committed-root drift confined to verified table(s) [%s] and first-committed unversioned table(s) [%s] via DOLT_DIFF_STAT(%s..%s) with per-table verification passed — absorbed working-set state committed by the flatten, not corruption; deferring, will retry next run\n' \
-          "$db" "${db_root_drift_proven_tables:-}" "${db_root_drift_first_committed_tables:-}" "$head" "$flatten_head" >&2
+        printf 'compact: db=%s committed-root drift confined to verified table(s) [%s], first-committed unversioned table(s) [%s] and dropped dolt_ignore'"'"'d table(s) [%s] via DOLT_DIFF_STAT(%s..%s) with per-table verification passed — absorbed working-set state committed by the flatten, not corruption; deferring, will retry next run\n' \
+          "$db" "${db_root_drift_proven_tables:-}" "${db_root_drift_first_committed_tables:-}" "${db_root_drift_dropped_ignored_tables:-}" "$head" "$flatten_head" >&2
         if ! defer_writer_race_after_flatten "$db" "$flatten_head" \
           "$remote" "$expected_remote_head" "$expected_remote_head_verified" \
           "$compacted_from_head" "$local_branch" "$remote_branch"; then
