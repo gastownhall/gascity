@@ -137,6 +137,7 @@ jobs:
               - 'cmd/gc/**'
               - 'internal/pathutil/**'
               - 'internal/fsys/**'
+              - '.github/actions/setup-gascity-macos/**'
       - name: Decide which tiers should run
         id: gate
         env:

@@ -147,9 +147,22 @@ _pog_branch_id_bead_inactive() {
 #      wrong (and possibly closed) parent/child bead instead of the actual
 #      grandchild bead the branch is for. The literal 6-char-only pattern
 #      would misresolve to the root bead on any sub-bead's own branch.
-#   2. Falls back to this session's single in-progress assignment
+#   2. Falls back to this session's in-progress assignment
 #      (bd list --assignee="$GC_AGENT" --status=in_progress --json) when
-#      the branch name doesn't match.
+#      the branch name doesn't match. Only resolves when that query returns
+#      EXACTLY one bead — two or more in-progress beads for this session is
+#      not a positive identification of which one (if any) this push is
+#      for, so it resolves the same as finding none (ga-1qepfl mechanism 2:
+#      an unrelated in-progress bead, e.g. one correctly held open for its
+#      own merge-tracking, was blocking pushes for a completely different
+#      deploy/*-gate branch because path 2 took .[0] of the match list
+#      unconditionally). This single-match requirement applies to EVERY
+#      branch shape that falls through to the fallback, not only
+#      deploy/*-gate — a non-gate branch that encodes no bead id and a
+#      session holding 2+ in-progress beads now resolves to nothing and is
+#      not checked at all. Deliberate: .[0] of an unordered multi-match was
+#      never sound enforcement in either direction. Pinned by
+#      test_bead_id_general_branch_ignores_ambiguous_inprogress_beads.
 # If both resolve and disagree, the branch match wins (it's the more
 # specific signal) and a warning goes to stderr — this is a best-effort
 # cross-check, not a hard failure, since branch-naming habits can
@@ -185,10 +198,14 @@ _pog_branch_id_bead_inactive() {
 # Confirmed via manual repro, see
 # test_fallback_cannot_detect_staleness_after_status_leaves_in_progress in
 # scripts/test-push-ownership-guard.sh. The fallback query shape matches
-# ga-fip9ps.1's own spec verbatim; widening it (e.g. dropping the status
-# filter) trades this gap for ambiguous multi-match resolution against an
-# agent's whole bead history, which is a real design decision for whoever
-# owns that tradeoff, not a mechanical fix — left for a follow-up bead.
+# ga-fip9ps.1's own spec verbatim; widening it further (e.g. dropping the
+# status filter) would trade this gap for ambiguous multi-match resolution
+# against an agent's whole bead history, which is a real design decision for
+# whoever owns that tradeoff, not a mechanical fix — left for a follow-up
+# bead. (The narrower multi-match case that --status=in_progress alone can
+# already produce — more than one bead simultaneously in_progress under the
+# same assignee — is handled: see the single-match requirement on path 2
+# above, ga-1qepfl.)
 # Prints nothing (not an error) when neither resolves — the caller treats
 # that as "nothing to check," which is what lets Layer A wire this in
 # unconditionally without blocking every push in the repo.
@@ -214,7 +231,23 @@ _pog_resolve_bead_id() {
         else
             local list_json
             if list_json="$(_pog_read_with_retry bd list --assignee="$GC_AGENT" --status=in_progress --json)"; then
-                assignee_id="$(jq -r '.[0].id // empty' <<<"$list_json" 2>/dev/null || true)"
+                # A single in-progress bead is a positive identity signal;
+                # two or more is not -- picking .[0] from an unordered
+                # multi-match would silently assert ownership of whichever
+                # bead the query happens to list first, which is not
+                # evidence it corresponds to THIS push (ga-1qepfl: an
+                # unrelated in-progress bead, e.g. one correctly held open
+                # for its own merge-tracking, blocked pushes for a
+                # completely different deploy/*-gate branch). Leaving
+                # assignee_id empty here is a clean, successful read that
+                # found no single answer -- the same "nothing to check"
+                # outcome as finding zero, not the read-failure ambiguity
+                # assignee_read_failed exists to catch.
+                local assignee_count
+                assignee_count="$(jq -r 'length' <<<"$list_json" 2>/dev/null || echo 0)"
+                if [[ "$assignee_count" == "1" ]]; then
+                    assignee_id="$(jq -r '.[0].id // empty' <<<"$list_json" 2>/dev/null || true)"
+                fi
             else
                 assignee_read_failed=1
             fi

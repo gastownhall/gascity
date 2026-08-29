@@ -4335,6 +4335,47 @@ func TestPruneDeadQueuedNudges_RetainsItemsWithoutBeadID(t *testing.T) {
 	}
 }
 
+func TestPruneDeadQueuedNudges_PrunesItemsWhoseBeadWasReaped(t *testing.T) {
+	// Regression (gastownhall/gascity#5278): a dead-letter item whose BeadID
+	// once pointed at a real bead, but that bead was later reaped by an
+	// unrelated retention sweep (wisp compaction etc.), must still become
+	// prunable by age. The repair path can never re-confirm "found +
+	// terminal" for a bead that no longer exists, so before the fix such
+	// items were retained forever and paid a store lookup on every sweep.
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	now := time.Now().UTC()
+	item := newQueuedNudgeWithOptions("worker", "stale dead letter", "session", now.Add(-3*time.Hour), queuedNudgeOptions{
+		ID:        "n-dead-reaped",
+		SessionID: "gc-worker",
+	})
+	beadID, created, err := ensureQueuedNudgeBead(store, item)
+	if err != nil {
+		t.Fatalf("ensureQueuedNudgeBead: %v", err)
+	}
+	if !created {
+		t.Fatal("expected backing nudge bead to be created")
+	}
+	item.BeadID = beadID
+	item.LastError = "expired"
+	item.DeadAt = now.Add(-2 * time.Hour) // older than defaultQueuedNudgeDeadRetention (1h)
+
+	// Simulate the backing bead being reaped by an unrelated retention sweep,
+	// independent of the nudge queue's own lifecycle.
+	if err := store.Delete(beadID); err != nil {
+		t.Fatalf("Delete(%s): %v", beadID, err)
+	}
+
+	state := &nudgeQueueState{Dead: []queuedNudge{item}}
+	if err := pruneDeadQueuedNudges(state, nudgeFrontDoor(store), now, noMaintenanceDeadline()); err != nil {
+		t.Fatalf("pruneDeadQueuedNudges: %v", err)
+	}
+	if len(state.Dead) != 0 {
+		t.Fatalf("dead = %d, want 0 -- a dead-letter item whose bead was reaped and is past retention must still be prunable", len(state.Dead))
+	}
+}
+
 func TestEnqueueSupersedes_SameAgentSourceReference(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()

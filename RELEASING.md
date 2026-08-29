@@ -44,10 +44,19 @@ GitHub App (an `Integration` bypass actor on the "Protect release tags"
 ruleset), minted per-run from the `RELEASE_TAGGER_APP_ID` /
 `RELEASE_TAGGER_APP_PRIVATE_KEY` repository secrets — the workflow's default
 `GITHUB_TOKEN` is deliberately NOT a bypass actor, so arbitrary workflows
-cannot create, move, or delete `v*` tags. If the app secrets are missing the
-dispatch path fails with instructions instead of a bare `GH013`; the
-manual-tag path below always works for members of the release-maintainers
-bypass team.
+cannot create, move, or delete `v*` tags. The tagger token is minted **only
+when the dispatch must create a new tag**; re-dispatching an already-existing
+RC tag re-drafts it without the tagger secrets. If the app secrets are missing
+on a create dispatch, the workflow fails with instructions instead of a bare
+`GH013`; the manual-tag path below always works for members of the
+release-maintainers bypass team.
+
+Because the tagger App token is a bypass actor, pushing the newly created tag
+re-fires `rc-release.yml` on that tag push. To avoid drafting the same RC
+twice, a dispatch that creates the tag stops after pushing it, and the
+resulting tag-push run is the one that builds the GoReleaser draft. A dispatch
+for a tag that already exists — and every direct tag push — goes straight to
+the draft build.
 
 You can also push an existing RC tag manually:
 
