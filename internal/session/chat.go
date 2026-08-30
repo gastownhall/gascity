@@ -306,12 +306,6 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 	if sessionIDFlag != "" && freshCmd == beforeSessionIDStrip {
 		freshCmd = stripSessionIDFlagArg(freshCmd, sessionIDFlag)
 	}
-	if err := m.clearStaleResumeMetadata(id, b); err != nil {
-		if unroute != nil {
-			unroute()
-		}
-		return false, err
-	}
 	// An empty resume_flag means the command was never resume-capable
 	// (e.g. a named-always session whose start command carries no
 	// --resume-style flag). stripResumeFlag is intentionally a no-op in
@@ -328,11 +322,20 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 	// killExistingOrphans. If even the generic strip finds nothing, the
 	// command carries no resume flag and is itself a fresh-start command.
 	if resumeFlag != "" && freshCmd == resumeCommand {
+		// With no key on the bead there is nothing a command could have diverged
+		// from, and the decline below returns without starting anything, so the
+		// supervisor re-enters this path once per reconcile tick. Log the
+		// divergence only when a key actually exists to diverge.
+		divergedFromKey := sessionKey != ""
 		if b.Metadata["resume_command"] != "" {
-			log.Printf("session: resume key for %q diverged from explicit resume_command; falling back to stored start command", id)
+			if divergedFromKey {
+				log.Printf("session: resume key for %q diverged from explicit resume_command; falling back to stored start command", id)
+			}
 			freshCmd = freshStartCommandFromMetadata(b.Metadata, resumeCommand)
 		} else {
-			log.Printf("session: resume key for %q diverged from bead metadata; falling back to generated resume strip", id)
+			if divergedFromKey {
+				log.Printf("session: resume key for %q diverged from bead metadata; falling back to generated resume strip", id)
+			}
 			freshCmd = stripResumeFlagArg(resumeCommand, resumeFlag, b.Metadata["resume_style"])
 		}
 	}

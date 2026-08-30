@@ -81,6 +81,40 @@ func newSuspendedResumableSession(t *testing.T) (*Manager, *recordingStartupDeat
 	return mgr, sp, info, sessionKey
 }
 
+// preStartConfigHash is a recognizable started_config_hash seeded before a
+// start that is expected to decline, so a later read can tell "untouched" from
+// "cleared by a recovery that never ran".
+const preStartConfigHash = "pre-start-config-hash"
+
+// seedRecoveryMetadata stamps the started_config_hash a healthy session carries
+// into its next start. Without a value there, an assertion that the decline
+// left the key alone would pass vacuously.
+func seedRecoveryMetadata(t *testing.T, mgr *Manager, id string) {
+	t.Helper()
+	if err := mgr.store.SetMetadata(id, "started_config_hash", preStartConfigHash); err != nil {
+		t.Fatalf("seeding started_config_hash: %v", err)
+	}
+}
+
+// assertRecoveryMetadataUntouched fails if a declined start mutated the
+// stale-resume recovery metadata. The decline performs no recovery, so clearing
+// started_config_hash or arming continuation_reset_pending there would rotate
+// the continuation epoch once per reconcile tick on a session that never
+// started — a per-tick conversation reset for providers that key on the epoch.
+func assertRecoveryMetadataUntouched(t *testing.T, mgr *Manager, id string) {
+	t.Helper()
+	b, err := mgr.store.Get(id)
+	if err != nil {
+		t.Fatalf("Get bead: %v", err)
+	}
+	if got := b.Metadata["continuation_reset_pending"]; got != "" {
+		t.Errorf("decline must not arm a continuation reset, got continuation_reset_pending=%q", got)
+	}
+	if got := b.Metadata["started_config_hash"]; got != preStartConfigHash {
+		t.Errorf("decline must not clear started_config_hash, got %q, want %q", got, preStartConfigHash)
+	}
+}
+
 // TestEnsureRunning_EmptySessionKeyStripsResumeAndStartsFresh is the regression
 // test for the start loop: a resume command whose key the bead no longer holds
 // died during startup, the fresh-start recovery was gated on a non-empty
@@ -129,6 +163,7 @@ func TestEnsureRunning_EmptySessionKeyWithoutResumeShapeDoesNotRelaunch(t *testi
 	mgr, sp, info, _ := newSuspendedResumableSession(t)
 
 	freshCmd := "claude --dangerously"
+	seedRecoveryMetadata(t, mgr, info.ID)
 	sp.commands = nil
 	sp.armed = true
 
@@ -143,6 +178,7 @@ func TestEnsureRunning_EmptySessionKeyWithoutResumeShapeDoesNotRelaunch(t *testi
 	if len(sp.commands) != 1 {
 		t.Fatalf("expected exactly one launch attempt with nothing to strip, got %d: %q", len(sp.commands), sp.commands)
 	}
+	assertRecoveryMetadataUntouched(t, mgr, info.ID)
 }
 
 // TestStartRuntimeOnly_EmptySessionKeyStripsResumeAndStartsFresh covers the
@@ -190,6 +226,7 @@ func TestStartRuntimeOnly_EmptySessionKeyWithoutResumeShapeDoesNotRelaunch(t *te
 	mgr, sp, info, _ := newSuspendedResumableSession(t)
 
 	freshCmd := "claude --dangerously"
+	seedRecoveryMetadata(t, mgr, info.ID)
 	sp.commands = nil
 	sp.armed = true
 
@@ -203,5 +240,44 @@ func TestStartRuntimeOnly_EmptySessionKeyWithoutResumeShapeDoesNotRelaunch(t *te
 
 	if len(sp.commands) != 1 {
 		t.Fatalf("expected exactly one launch attempt with nothing to strip, got %d: %q", len(sp.commands), sp.commands)
+	}
+	assertRecoveryMetadataUntouched(t, mgr, info.ID)
+}
+
+// TestEnsureRunning_EmptySessionKeyStripsDivergedSessionIDAndStartsFresh covers
+// the branch the empty-key recovery newly makes reachable: no key on the bead,
+// and a first-start command carrying a "--session-id <key>" pair the bead no
+// longer holds. The keyed strip cannot match an empty key, so
+// stripSessionIDFlagArg removes the pair value-agnostically — the fresh command
+// diverges from the one we were handed, and the "nothing to strip" decline must
+// not fire.
+func TestEnsureRunning_EmptySessionKeyStripsDivergedSessionIDAndStartsFresh(t *testing.T) {
+	mgr, sp, info, _ := newSuspendedResumableSession(t)
+
+	const divergedKey = "diverged-session-id"
+	firstStartCmd := "claude --dangerously --session-id " + divergedKey
+	sp.commands = nil
+	sp.armed = true
+
+	if err := mgr.Send(context.Background(), info.ID, "hello", firstStartCmd, runtime.Config{WorkDir: "/tmp"}); err != nil {
+		t.Fatalf("Send should strip the diverged session id and start fresh, got: %v", err)
+	}
+
+	if !sp.IsRunning(info.SessionName) {
+		t.Fatal("session should be running after the fresh relaunch")
+	}
+
+	if len(sp.commands) != 2 {
+		t.Fatalf("expected the doomed start plus one fresh relaunch, got %d command(s): %q", len(sp.commands), sp.commands)
+	}
+	relaunch := sp.commands[1]
+	if strings.Contains(relaunch, "--session-id") {
+		t.Errorf("relaunch must not carry the session id flag, got %q", relaunch)
+	}
+	if strings.Contains(relaunch, divergedKey) {
+		t.Errorf("relaunch must not carry the diverged session id, got %q", relaunch)
+	}
+	if relaunch != "claude --dangerously" {
+		t.Errorf("relaunch = %q, want the bare start command %q", relaunch, "claude --dangerously")
 	}
 }
