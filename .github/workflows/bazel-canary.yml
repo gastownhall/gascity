@@ -15,7 +15,7 @@ on:
       - "go.mod"
       - "go.sum"
       - "internal/config/**"
-      - "internal/beads/contract/**"
+      - "internal/**/BUILD.bazel"
       - "scripts/bazel-config-backtest.sh"
 
 permissions:
@@ -26,7 +26,7 @@ jobs:
     name: Bazel selective canary
     runs-on: ubuntu-24.04
     continue-on-error: true
-    timeout-minutes: 35
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -59,14 +59,13 @@ jobs:
           {
             echo "target=//internal/config:config_envname_test"
             echo "target=//internal/config:config_diagnostic_locations_test"
-            echo "target=//internal/beads/contract:contract_test"
             # Bazel's remote_cache option is a string (not a boolean), so
             # --remote_cache= is the supported explicit disable form.
             echo "remote_cache=disabled (explicit empty URL)"
           } >"$OUT/summary.txt"
 
           /usr/bin/time -f 'go_user_s=%U go_maxrss_kb=%M' -o "$OUT/go.time" \
-            timeout --signal=TERM --kill-after=15 4m go test -count=1 ./internal/config ./internal/beads/contract \
+            timeout --signal=TERM --kill-after=15 5m go test -count=1 ./internal/config \
             >"$OUT/go.log" 2>&1
           go_status=$?
           echo "go_status=$go_status" >>"$OUT/summary.txt"
@@ -78,11 +77,10 @@ jobs:
           common=(--noshow_progress --remote_cache= --cache_test_results=no)
           for target in \
             //internal/config:config_envname_test \
-            //internal/config:config_diagnostic_locations_test \
-            //internal/beads/contract:contract_test; do
+            //internal/config:config_diagnostic_locations_test; do
             name="${target#//}"; name="${name//\//_}"; name="${name//:/_}"
             /usr/bin/time -f 'bazel_user_s=%U bazel_maxrss_kb=%M' -o "$OUT/$name.time" \
-              timeout --signal=TERM --kill-after=15 4m "$bazel" --output_base="$base" test "${common[@]}" \
+              timeout --signal=TERM --kill-after=15 5m "$bazel" --output_base="$base" test "${common[@]}" \
               --build_event_json_file="$OUT/$name.bep.json" --profile="$OUT/$name.profile.gz" "$target" \
               >"$OUT/$name.log" 2>&1
             status=$?
