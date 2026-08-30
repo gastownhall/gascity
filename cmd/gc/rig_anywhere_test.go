@@ -876,6 +876,43 @@ func TestRigAnywhere_RigRemove(t *testing.T) {
 		}
 	})
 
+	t.Run("sweeps_rig_keyed_agent_patch", func(t *testing.T) {
+		gcHome := t.TempDir()
+		t.Setenv("GC_HOME", gcHome)
+		resetFlags(t)
+
+		cityPath := setupCity(t, "sweep-city")
+		rigDir := filepath.Join(t.TempDir(), "sweep-rig")
+		if err := os.MkdirAll(rigDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		// The rig is targeted by a [[patches.agent]] via the new rig= key (not
+		// the legacy dir= key). Removing the rig must sweep the patch too; left
+		// behind, a rig-keyed patch dangles and hard-fails the next config
+		// compose. The pre-fix sweep only matched p.Dir == rigName, so a
+		// rig=-keyed patch survived.
+		toml := "[workspace]\nname = \"sweep-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"sweep-rig\"\npath = \"" + rigDir + "\"\n\n[[patches.agent]]\nrig = \"sweep-rig\"\nname = \"worker\"\nsuspended = true\n"
+		writeRigAnywhereCityToml(t, cityPath, toml)
+
+		registerCityForRigResolution(t, gcHome, cityPath, "sweep-city")
+
+		cityFlag = cityPath
+		var stdout, stderr bytes.Buffer
+		code := cmdRigRemove("sweep-rig", &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("cmdRigRemove = %d, stderr: %s", code, stderr.String())
+		}
+
+		cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(cfg.Patches.Agents) != 0 {
+			t.Errorf("patches.agent = %#v, want swept (rig=-keyed patch must be removed with the rig)", cfg.Patches.Agents)
+		}
+	})
+
 	t.Run("removes_from_site_binding_without_cities_toml_rig_entries", func(t *testing.T) {
 		gcHome := t.TempDir()
 		t.Setenv("GC_HOME", gcHome)
@@ -1352,7 +1389,7 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 	t.Run("rig_not_registered_anywhere", func(t *testing.T) {
 		t.Setenv("GC_HOME", t.TempDir())
 
-		_, err := resolveRigToContext("nonexistent-rig")
+		_, err := resolveRigToContext("nonexistent-rig", contextResolutionMode{})
 		if err == nil {
 			t.Fatal("resolveRigToContext should fail for unregistered rig")
 		}
@@ -1373,7 +1410,7 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 
 		registerRigBindingForResolution(t, gcHome, cityPath, "ctx-city", "ctx-rig", rigDir)
 
-		ctx, err := resolveRigToContext("ctx-rig")
+		ctx, err := resolveRigToContext("ctx-rig", contextResolutionMode{})
 		if err != nil {
 			t.Fatalf("resolveRigToContext error: %v", err)
 		}
@@ -1400,7 +1437,7 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 		}
 		registerCityForRigResolution(t, gcHome, badCity, "bad-city")
 
-		_, err := resolveRigToContext("ctx-rig")
+		_, err := resolveRigToContext("ctx-rig", contextResolutionMode{})
 		if err == nil {
 			t.Fatal("resolveRigToContext should fail when any registered city binding cannot load")
 		}
@@ -1424,7 +1461,7 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 
 		registerRigBindingForResolution(t, gcHome, cityPath, "path-city", "path-rig", rigDir)
 
-		ctx, err := resolveRigToContext(rigDir)
+		ctx, err := resolveRigToContext(rigDir, contextResolutionMode{})
 		if err != nil {
 			t.Fatalf("resolveRigToContext error: %v", err)
 		}
@@ -1455,7 +1492,7 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 		}
 		registerCityForRigResolution(t, gcHome, cityPath, "legacy-city")
 
-		_, err := resolveRigToContext("legacy-rig")
+		_, err := resolveRigToContext("legacy-rig", contextResolutionMode{})
 		if err == nil {
 			t.Fatal("resolveRigToContext should not treat legacy city.toml paths as registered bindings")
 		}
@@ -1489,7 +1526,7 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 		writeRigAnywhereCityToml(t, cityPath, toml)
 		setCwd(t, cityPath)
 
-		ctx, err := resolveRigToContext("local-rig")
+		ctx, err := resolveRigToContext("local-rig", contextResolutionMode{})
 		if err != nil {
 			t.Fatalf("resolveRigToContext: %v", err)
 		}
@@ -1523,7 +1560,7 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 		writeRigAnywhereCityToml(t, cityPath, toml)
 		setCwd(t, cityPath)
 
-		ctx, err := resolveRigToContext("local-load-error-rig")
+		ctx, err := resolveRigToContext("local-load-error-rig", contextResolutionMode{})
 		if err != nil {
 			t.Fatalf("resolveRigToContext: %v", err)
 		}
@@ -1558,7 +1595,7 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 		writeRigAnywhereCityToml(t, cityPath, toml)
 		setCwd(t, cityPath)
 
-		ctx, err := resolveRigToContext(nestedDir)
+		ctx, err := resolveRigToContext(nestedDir, contextResolutionMode{})
 		if err != nil {
 			t.Fatalf("resolveRigToContext: %v", err)
 		}
@@ -1592,7 +1629,7 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 		writeRigAnywhereCityToml(t, cityPath, toml)
 		setCwd(t, cityPath)
 
-		_, err := resolveRigToContext("missing-rig")
+		_, err := resolveRigToContext("missing-rig", contextResolutionMode{})
 		if err == nil {
 			t.Fatal("resolveRigToContext should preserve registered load errors when local fallback misses")
 		}
@@ -1623,7 +1660,7 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 		setCwd(t, t.TempDir())
 		cityFlag = cityPath
 
-		ctx, err := resolveRigToContext(nestedDir)
+		ctx, err := resolveRigToContext(nestedDir, contextResolutionMode{})
 		if err != nil {
 			t.Fatalf("resolveRigToContext: %v", err)
 		}
@@ -1652,7 +1689,7 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 		setCwd(t, t.TempDir())
 		cityFlag = cityPath
 
-		ctx, err := resolveRigToContext(targetDir)
+		ctx, err := resolveRigToContext(targetDir, contextResolutionMode{})
 		if err != nil {
 			t.Fatalf("resolveRigToContext: %v", err)
 		}
@@ -1680,7 +1717,7 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 		setCwd(t, cityPath)
 		cityFlag = cityPath
 
-		ctx, err := resolveRigToContext(filepath.Join("rigs", "relative-rig", "child"))
+		ctx, err := resolveRigToContext(filepath.Join("rigs", "relative-rig", "child"), contextResolutionMode{})
 		if err != nil {
 			t.Fatalf("resolveRigToContext: %v", err)
 		}
@@ -1708,7 +1745,7 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 		setCwd(t, t.TempDir())
 		cityFlag = cityPath
 
-		_, err := resolveRigToContext("stale-rig")
+		_, err := resolveRigToContext("stale-rig", contextResolutionMode{})
 		if err == nil {
 			t.Fatal("resolveRigToContext should reject site-only rig bindings not declared in city.toml")
 		}
@@ -1729,7 +1766,7 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 		setCwd(t, t.TempDir())
 		cityFlag = cityPath
 
-		_, err := resolveRigToContext("broken")
+		_, err := resolveRigToContext("broken", contextResolutionMode{})
 		if err == nil {
 			t.Fatal("resolveRigToContext should surface malformed local site binding")
 		}
@@ -1753,7 +1790,7 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 		setCwd(t, t.TempDir())
 		cityFlag = cityPath
 
-		ctx, err := resolveRigToContext("local-flag-rig")
+		ctx, err := resolveRigToContext("local-flag-rig", contextResolutionMode{})
 		if err != nil {
 			t.Fatalf("resolveRigToContext: %v", err)
 		}
@@ -1772,7 +1809,7 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 		setCwd(t, t.TempDir())
 		cityFlag = filepath.Join(t.TempDir(), "not-a-city")
 
-		_, err := resolveRigToContext("missing-rig")
+		_, err := resolveRigToContext("missing-rig", contextResolutionMode{})
 		if err == nil {
 			t.Fatal("resolveRigToContext should surface explicit local city errors")
 		}
@@ -1802,7 +1839,7 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 		t.Setenv("GC_CITY_ROOT", "")
 		t.Setenv("GC_DIR", "")
 
-		ctx, err := resolveRigToContext("local-env-rig")
+		ctx, err := resolveRigToContext("local-env-rig", contextResolutionMode{})
 		if err != nil {
 			t.Fatalf("resolveRigToContext: %v", err)
 		}
@@ -1833,7 +1870,7 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 		t.Setenv("GC_CITY_ROOT", "")
 		t.Setenv("GC_DIR", nestedDir)
 
-		ctx, err := resolveRigToContext("local-gc-dir-rig")
+		ctx, err := resolveRigToContext("local-gc-dir-rig", contextResolutionMode{})
 		if err != nil {
 			t.Fatalf("resolveRigToContext: %v", err)
 		}
@@ -1868,7 +1905,7 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 		}
 		setCwd(t, cityPath)
 
-		_, err := resolveRigToContext("local-legacy-rig")
+		_, err := resolveRigToContext("local-legacy-rig", contextResolutionMode{})
 		if err == nil {
 			t.Fatal("resolveRigToContext should reject a legacy city.toml even via the local-city fallback")
 		}
@@ -2006,7 +2043,7 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 		// data; callers decide whether to emit a user-facing warning. This
 		// asserts the diagnostic is available without coupling the test to
 		// a particular stderr routing scheme.
-		_, stale, err := registeredRigBindingsByPath(rigDir, true)
+		_, stale, err := registeredRigBindingsByPath(rigDir, true, contextResolutionMode{})
 		if err != nil {
 			t.Fatalf("registeredRigBindingsByPath error: %v", err)
 		}
@@ -2068,7 +2105,7 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 		}
 		assertSameTestPath(t, ctx.CityPath, goodCity)
 
-		_, stale, err := registeredRigBindingsByPath(rigDir, true)
+		_, stale, err := registeredRigBindingsByPath(rigDir, true, contextResolutionMode{})
 		if err != nil {
 			t.Fatalf("registeredRigBindingsByPath error: %v", err)
 		}
@@ -2106,7 +2143,7 @@ name = "missing-include-broken"
 		}
 		registerCityForRigResolution(t, gcHome, brokenCity, "missing-include-broken")
 
-		_, stale, err := registeredRigBindingsByPath(rigDir, true)
+		_, stale, err := registeredRigBindingsByPath(rigDir, true, contextResolutionMode{})
 		if err == nil {
 			t.Fatal("registeredRigBindingsByPath should fail closed on missing include")
 		}
@@ -2160,7 +2197,7 @@ includes = ["packs/legacy"]
 		}
 		registerCityForRigResolution(t, gcHome, brokenCity, "legacy-order-broken")
 
-		_, stale, err := registeredRigBindingsByPath(rigDir, true)
+		_, stale, err := registeredRigBindingsByPath(rigDir, true, contextResolutionMode{})
 		if err == nil {
 			t.Fatal("registeredRigBindingsByPath should fail closed on legacy order layout")
 		}
@@ -2210,7 +2247,7 @@ includes = ["packs/legacy"]
 		}
 		registerCityForRigResolution(t, gcHome, badCity, "path-stale-error-bad")
 
-		_, stale, err := registeredRigBindingsByPath(rigDir, true)
+		_, stale, err := registeredRigBindingsByPath(rigDir, true, contextResolutionMode{})
 		if err == nil {
 			t.Fatal("registeredRigBindingsByPath should fail closed on the malformed site binding")
 		}
@@ -2269,7 +2306,7 @@ includes = ["packs/legacy"]
 		registerCityForRigResolution(t, gcHome, city1, "city1")
 		registerCityForRigResolution(t, gcHome, city2, "city2")
 
-		_, err := resolveRigToContext("ambig-rig")
+		_, err := resolveRigToContext("ambig-rig", contextResolutionMode{})
 		if err == nil {
 			t.Fatal("should fail for ambiguous rig")
 		}
@@ -2300,7 +2337,10 @@ func TestRigAnywhere_LookupRigFromCwd(t *testing.T) {
 
 		registerRigBindingForResolution(t, gcHome, cityPath, "lookup-city", "lookup-rig", rigDir)
 
-		ctx, ok := lookupRigFromCwd(rigDir)
+		ctx, ok, err := lookupRigFromCwd(rigDir, contextResolutionMode{})
+		if err != nil {
+			t.Fatalf("lookupRigFromCwd: %v", err)
+		}
 		if !ok {
 			t.Fatal("expected match")
 		}
@@ -2323,7 +2363,10 @@ func TestRigAnywhere_LookupRigFromCwd(t *testing.T) {
 
 		registerRigBindingForResolution(t, gcHome, cityPath, "sub-city", "sub-rig", rigDir)
 
-		ctx, ok := lookupRigFromCwd(subDir)
+		ctx, ok, err := lookupRigFromCwd(subDir, contextResolutionMode{})
+		if err != nil {
+			t.Fatalf("lookupRigFromCwd: %v", err)
+		}
 		if !ok {
 			t.Fatal("expected match for subdirectory")
 		}
@@ -2335,7 +2378,7 @@ func TestRigAnywhere_LookupRigFromCwd(t *testing.T) {
 	t.Run("no_match", func(t *testing.T) {
 		t.Setenv("GC_HOME", t.TempDir())
 
-		_, ok := lookupRigFromCwd("/completely/unrelated/path")
+		_, ok, _ := lookupRigFromCwd("/completely/unrelated/path", contextResolutionMode{})
 		if ok {
 			t.Error("expected no match for unrelated path")
 		}
@@ -2357,7 +2400,7 @@ func TestRigAnywhere_LookupRigFromCwd(t *testing.T) {
 		registerCityForRigResolution(t, gcHome, cityA, "ambig-cwd-a")
 		registerCityForRigResolution(t, gcHome, cityB, "ambig-cwd-b")
 
-		_, ok := lookupRigFromCwd(rigDir)
+		_, ok, _ := lookupRigFromCwd(rigDir, contextResolutionMode{})
 		if ok {
 			t.Error("expected false for ambiguous rig binding")
 		}
@@ -2380,7 +2423,7 @@ func TestRigAnywhere_LookupRigFromCwd(t *testing.T) {
 		}
 		registerCityForRigResolution(t, gcHome, badCity, "lookup-bad")
 
-		_, ok := lookupRigFromCwd(rigDir)
+		_, ok, _ := lookupRigFromCwd(rigDir, contextResolutionMode{})
 		if ok {
 			t.Fatal("lookupRigFromCwd should not choose a match when another registered city cannot load")
 		}
@@ -2401,7 +2444,7 @@ func TestRigAnywhere_RigFromCwdDir(t *testing.T) {
 		toml := "[workspace]\nname = \"cwd-match\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"matchrig\"\npath = \"" + rigDir + "\"\n"
 		writeRigAnywhereCityToml(t, cityPath, toml)
 
-		got := rigFromCwdDir(cityPath, rigDir)
+		got := rigFromCwdDir(cityPath, rigDir, contextResolutionMode{})
 		if got != "matchrig" {
 			t.Errorf("rigFromCwdDir = %q, want %q", got, "matchrig")
 		}
@@ -2417,7 +2460,7 @@ func TestRigAnywhere_RigFromCwdDir(t *testing.T) {
 		toml := "[workspace]\nname = \"cwd-sub\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"subrig\"\npath = \"" + rigDir + "\"\n"
 		writeRigAnywhereCityToml(t, cityPath, toml)
 
-		got := rigFromCwdDir(cityPath, subDir)
+		got := rigFromCwdDir(cityPath, subDir, contextResolutionMode{})
 		if got != "subrig" {
 			t.Errorf("rigFromCwdDir = %q, want %q", got, "subrig")
 		}
@@ -2425,7 +2468,7 @@ func TestRigAnywhere_RigFromCwdDir(t *testing.T) {
 
 	t.Run("no_match_returns_empty", func(t *testing.T) {
 		cityPath := setupCity(t, "cwd-nomatch")
-		got := rigFromCwdDir(cityPath, "/unrelated/path")
+		got := rigFromCwdDir(cityPath, "/unrelated/path", contextResolutionMode{})
 		if got != "" {
 			t.Errorf("rigFromCwdDir = %q, want empty", got)
 		}
@@ -2442,7 +2485,7 @@ func TestRigAnywhere_RigFromCwdDir(t *testing.T) {
 		toml := "[workspace]\nname = \"cwd-rel\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"relrig\"\npath = \"rigs/relrig\"\n"
 		writeRigAnywhereCityToml(t, cityPath, toml)
 
-		got := rigFromCwdDir(cityPath, rigDir)
+		got := rigFromCwdDir(cityPath, rigDir, contextResolutionMode{})
 		if got != "relrig" {
 			t.Errorf("rigFromCwdDir with relative path = %q, want %q", got, "relrig")
 		}
@@ -2454,7 +2497,7 @@ func TestRigAnywhere_RigFromCwdDir(t *testing.T) {
 		toml := "[workspace]\nname = \"cwd-symlink\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"aliasrig\"\npath = \"" + rigDir + "\"\n"
 		writeRigAnywhereCityToml(t, cityPath, toml)
 
-		got := rigFromCwdDir(cityPath, filepath.Join(aliasRigDir, "src"))
+		got := rigFromCwdDir(cityPath, filepath.Join(aliasRigDir, "src"), contextResolutionMode{})
 		if got != "aliasrig" {
 			t.Errorf("rigFromCwdDir via symlink alias = %q, want %q", got, "aliasrig")
 		}

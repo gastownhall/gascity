@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 )
@@ -17,6 +18,11 @@ func TestBuildDoctorChecks_NameSetUnchanged(t *testing.T) {
 	}
 	t.Setenv("GC_DOLT", "skip")
 	cfg := &config.City{Workspace: config.Workspace{Name: "demo"}}
+
+	// Force healthy preflight so ambient bd/dolt cannot change the name-set.
+	old := doctorBeadStorePreflight
+	doctorBeadStorePreflight = func(string, func(string) (beads.Store, error)) error { return nil }
+	t.Cleanup(func() { doctorBeadStorePreflight = old })
 
 	checks := buildDoctorChecks(cityDir, cfg, nil, buildDoctorChecksOpts{
 		ControllerRunning:    false,

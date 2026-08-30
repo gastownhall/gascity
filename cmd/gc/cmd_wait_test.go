@@ -2528,7 +2528,7 @@ func TestDoSessionWait_RegistersReadyWaitForRigDependency(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := doSessionWait(sessionID, []string{depID}, false, "block", false, &stdout, &stderr, sessionWaitDeps{
 		sessions:         sessionFrontDoor(cityStore),
-		dependencies:     newWaitDependencyStoreSet(cityStore, map[string]beads.Store{"frontend": rigStore}),
+		dependencies:     newWaitDependencyStoreSet(cityStore, map[string]beads.Store{"frontend": rigStore}, beads.GraphStore{}),
 		now:              func() time.Time { return now },
 		createdBySession: originID,
 	})
@@ -2752,7 +2752,7 @@ func TestPrepareWaitWakeState_ResolvesRigDependencyBeads(t *testing.T) {
 
 			readyWaitSet, err := prepareWaitWakeStateWithSnapshot(
 				sessionFrontDoor(cityStore),
-				newWaitDependencyStoreSet(cityStore, map[string]beads.Store{"frontend": rigStore}),
+				newWaitDependencyStoreSet(cityStore, map[string]beads.Store{"frontend": rigStore}, beads.GraphStore{}),
 				beads.NudgesStore{Store: cityStore},
 				now,
 				nil,
@@ -3405,5 +3405,144 @@ func TestRouteWaitList_ThreeRungByteIdentical(t *testing.T) {
 	// Sanity: the tie resolved chronologically (oldest wait first in the array).
 	if !strings.Contains(typed, persisted[1].ID) || !strings.Contains(typed, persisted[0].ID) {
 		t.Fatalf("both waits should render: %s", typed)
+	}
+}
+
+// TestPrepareWaitWakeState_ResolvesGraphBindingDependencyBeads pins that a
+// dependency living in the relocated infrastructure binding resolves. Without
+// the graph leg it misses on every leg, and a clean miss is consumed as proof
+// the dependency was deleted — a silent FailWait, with no event and no wake.
+func TestPrepareWaitWakeState_ResolvesGraphBindingDependencyBeads(t *testing.T) {
+	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
+
+	for _, tc := range []struct {
+		name       string
+		depStatus  string
+		wantReady  bool
+		wantState  string
+		wantStatus string
+	}{
+		{name: "closed binding dependency becomes ready", depStatus: "closed", wantReady: true, wantState: waitStateReady, wantStatus: "open"},
+		{name: "open binding dependency remains pending", depStatus: "open", wantState: waitStatePending, wantStatus: "open"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const (
+				sessionID = "hq-session-1"
+				waitID    = "hq-wait-1"
+				// A step bead minted by the graph class: the reserved prefix is
+				// what makes it unreachable from every work scope.
+				depID = "gcg-dep-1"
+			)
+			cityStore := waitPrefixedStore{
+				Store: beads.NewMemStoreFrom(2, []beads.Bead{
+					{
+						ID:        sessionID,
+						Title:     "worker session",
+						Type:      sessionBeadType,
+						Status:    "open",
+						Labels:    []string{sessionBeadLabel},
+						CreatedAt: now.Add(-time.Minute),
+						UpdatedAt: now.Add(-time.Minute),
+						Revision:  1,
+						Metadata: map[string]string{
+							"session_name":       "worker",
+							"agent_name":         "worker",
+							"continuation_epoch": "1",
+						},
+					},
+					{
+						ID:        waitID,
+						Title:     "wait:worker session",
+						Type:      waitBeadType,
+						Status:    "open",
+						Labels:    []string{waitBeadLabel, "session:" + sessionID},
+						CreatedAt: now.Add(-time.Minute),
+						UpdatedAt: now.Add(-time.Minute),
+						Revision:  1,
+						Metadata: map[string]string{
+							"session_id":       sessionID,
+							"session_name":     "worker",
+							"kind":             "deps",
+							"state":            waitStatePending,
+							"dep_ids":          depID,
+							"dep_mode":         "all",
+							"registered_epoch": "1",
+							"delivery_attempt": "1",
+						},
+					},
+				}, nil),
+				prefix: "hq",
+			}
+			binding := waitPrefixedStore{
+				Store: beads.NewMemStoreFrom(1, []beads.Bead{{
+					ID:        depID,
+					Title:     "Step 1: implement",
+					Type:      "step",
+					Status:    tc.depStatus,
+					CreatedAt: now.Add(-time.Minute),
+					UpdatedAt: now.Add(-time.Minute),
+					Revision:  1,
+				}}, nil),
+				prefix: "gcg",
+			}
+			rigStore := waitPrefixedStore{Store: beads.NewMemStore(), prefix: "ga"}
+
+			readyWaitSet, err := prepareWaitWakeStateWithSnapshot(
+				sessionFrontDoor(cityStore),
+				newWaitDependencyStoreSet(cityStore, map[string]beads.Store{"frontend": rigStore}, beads.GraphStore{Store: binding}),
+				beads.NudgesStore{Store: cityStore},
+				now,
+				nil,
+			)
+			if err != nil {
+				t.Fatalf("prepareWaitWakeStateWithSnapshot: %v", err)
+			}
+			if got := readyWaitSet[sessionID]; got != tc.wantReady {
+				t.Fatalf("readyWaitSet[%s] = %v, want %v", sessionID, got, tc.wantReady)
+			}
+
+			updatedWait, getErr := cityStore.Get(waitID)
+			if getErr != nil {
+				t.Fatalf("store.Get(wait): %v", getErr)
+			}
+			if got := updatedWait.Metadata["state"]; got != tc.wantState {
+				t.Fatalf("wait state = %q, want %q; a dependency in the binding that no leg can read is indistinguishable from a deleted one, so the wait fails instead of waking", got, tc.wantState)
+			}
+			if updatedWait.Status != tc.wantStatus {
+				t.Fatalf("wait status = %q, want %q", updatedWait.Status, tc.wantStatus)
+			}
+		})
+	}
+}
+
+// TestLoadWaitDependencyBeadReadsTheBindingOnAMigratedCity is the one-shot CLI
+// twin of the controller-tick case above: `gc session wait` resolves its
+// dependency through loadWaitDependencyBead, whose scope candidates are all work
+// roots, so a binding-resident dependency reads as a bead that does not exist.
+func TestLoadWaitDependencyBeadReadsTheBindingOnAMigratedCity(t *testing.T) {
+	cityPath, cfg := migratedOneShotCLICity(t)
+	captureCLIStorageStderr(t)
+
+	binding := openMigratedDestination(t, mustResolveInfraTarget(t, cityPath, cfg))
+	dep, err := binding.Create(beads.Bead{Title: "Step 1: implement", Type: "step"})
+	if err != nil {
+		t.Fatalf("creating the dependency in the binding: %v", err)
+	}
+	if err := closeBeadStoreHandle(binding); err != nil {
+		t.Fatalf("closing the binding handle: %v", err)
+	}
+
+	cityStore, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("opening the work store: %v", err)
+	}
+	t.Cleanup(func() { _ = closeBeadStoreHandle(cityStore) })
+
+	got, err := loadWaitDependencyBead(cityPath, cityStore, dep.ID)
+	if err != nil {
+		t.Fatalf("loadWaitDependencyBead(%s): %v; a dependency the reader cannot see is consumed as a deleted one, which fails the wait", dep.ID, err)
+	}
+	if got.ID != dep.ID {
+		t.Errorf("resolved %q, want the binding-resident dependency %q", got.ID, dep.ID)
 	}
 }

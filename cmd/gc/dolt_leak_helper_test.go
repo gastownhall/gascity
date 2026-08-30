@@ -8,6 +8,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // testReporter is the subset of *testing.T methods that
@@ -482,6 +483,33 @@ func TestIsStaleCmdGCTestConfigPathSkipsLegacyUnownedRoot(t *testing.T) {
 	}
 }
 
+// A dolt server whose config sits under a Go t.TempDir() root
+// (Test<Name><rand>/...) with the config file gone from disk is the
+// signature of a run killed before its reap ran (timeout, panic, SIGKILL):
+// TestMain's cleanup removed the temp root while the server lived on
+// (observed 2026-08-21: 242 such servers accumulated over five weeks and
+// exhausted a host's gascity-test.slice pids quota). The gone config marks
+// it stale; a config still on disk marks a live concurrent run.
+func TestIsStaleCmdGCTestConfigPathReapsAbandonedGoTempDirRoot(t *testing.T) {
+	tempParent := t.TempDir()
+
+	goneConfig := filepath.Join(tempParent, "TestAbandoned1234", "001", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
+	if !isStaleCmdGCTestConfigPath(goneConfig, nil, tempParent) {
+		t.Fatalf("abandoned go tempdir config path %q (file gone) not classified as stale", goneConfig)
+	}
+
+	liveConfig := filepath.Join(tempParent, "TestLive1234", "001", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
+	if err := os.MkdirAll(filepath.Dir(liveConfig), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(liveConfig, []byte("listener:\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if isStaleCmdGCTestConfigPath(liveConfig, nil, tempParent) {
+		t.Fatalf("live go tempdir config path %q (file on disk) classified as stale", liveConfig)
+	}
+}
+
 // TestSnapshotDoltProcessPIDs_EnumeratorErrorIsFatal pins that a
 // discovery error is reported via Fatalf so test runs surface
 // enumeration failures directly rather than silently treating them
@@ -589,6 +617,8 @@ func TestDoltLeakGuardedTestingMFinalSnapshotRunsBeforeRegistryReap(t *testing.T
 		func() {},
 		func() { registeredReaped = true },
 		func(leaked []DoltProcInfo) { reapedLeaks = append(reapedLeaks, leaked...) },
+		time.Millisecond,
+		5*time.Millisecond,
 	)
 
 	if code != 1 {
@@ -623,6 +653,8 @@ func TestDoltLeakGuardedTestingMRunWithSweepsOrphanDirsAtStartup(t *testing.T) {
 		func() { order = append(order, "sweepOrphanDirs") },
 		func() {},
 		func([]DoltProcInfo) {},
+		time.Millisecond,
+		5*time.Millisecond,
 	)
 
 	if code != 0 {
@@ -630,6 +662,116 @@ func TestDoltLeakGuardedTestingMRunWithSweepsOrphanDirsAtStartup(t *testing.T) {
 	}
 	if len(order) < 3 || order[0] != "sweepStale" || order[1] != "sweepOrphanDirs" || order[2] != "runTests" {
 		t.Fatalf("call order = %v, want [sweepStale sweepOrphanDirs runTests ...]", order)
+	}
+}
+
+// A dolt sql-server that a test already told to stop can still be mid
+// graceful-shutdown the instant runTests() returns; ga-szv0ge found this
+// misclassified as a permanent leak under host contention. This simulates
+// the process clearing partway through the grace window: the final scan
+// reports it present on the first two polls and gone from the third poll
+// onward, well within the injected grace window, so the guard must not
+// fail the run or reap anything for it.
+func TestDoltLeakGuardedTestingMToleratesLeakClearingWithinGraceWindow(t *testing.T) {
+	tempRoot := filepath.Join(t.TempDir(), "gct-current")
+	clearing := DoltProcInfo{
+		PID: 2001,
+		Argv: []string{
+			"dolt",
+			"sql-server",
+			"--config",
+			filepath.Join(tempRoot, "TestCase", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml"),
+		},
+	}
+	var scan int
+	enumerate := func() ([]DoltProcInfo, error) {
+		scan++
+		if scan == 1 {
+			return nil, nil // initial scan: nothing running yet
+		}
+		if scan <= 3 {
+			return []DoltProcInfo{clearing}, nil // first two final-scan polls: still mid shutdown
+		}
+		return nil, nil // cleared by the next poll, well within the grace window
+	}
+	g := newDoltLeakGuardedTestingM(nil, tempRoot)
+
+	var reapedLeaks []DoltProcInfo
+	code := g.runWith(
+		func() int { return 0 },
+		enumerate,
+		func(string) bool { return false },
+		func() {},
+		func() {},
+		func(leaked []DoltProcInfo) { reapedLeaks = append(reapedLeaks, leaked...) },
+		time.Millisecond,
+		200*time.Millisecond,
+	)
+
+	if code != 0 {
+		t.Fatalf("guard returned code %d, want 0: a leak that clears within the grace window must not fail the run", code)
+	}
+	if len(reapedLeaks) != 0 {
+		t.Fatalf("reaped leaks = %#v, want none: the process cleared on its own within the grace window", reapedLeaks)
+	}
+}
+
+// waitForFinalScanToClear must surface a persistent final-scan enumeration
+// failure as its own error rather than dropping it. backoff.Retry (v4.3.0)
+// already unwraps the *backoff.PermanentError it returns internally and
+// hands back the inner error directly, so a later
+// errors.As(err, &permErr) against Retry's return value can never match --
+// ga-7r2h5i found this let a real enumeration failure fall through and get
+// reported as a clean run.
+func TestDoltLeakGuardedTestingMWaitForFinalScanToClearReturnsEnumerationError(t *testing.T) {
+	g := newDoltLeakGuardedTestingM(nil, t.TempDir())
+	scanErr := errors.New("reading /proc: permission denied")
+	enumerate := func() ([]DoltProcInfo, error) { return nil, scanErr }
+
+	leaked, err := g.waitForFinalScanToClear(enumerate, map[int]DoltProcInfo{}, time.Millisecond, 5*time.Millisecond)
+
+	if !errors.Is(err, scanErr) {
+		t.Fatalf("waitForFinalScanToClear err = %v, want it to be the enumeration failure %v", err, scanErr)
+	}
+	if leaked != nil {
+		t.Fatalf("leaked = %#v, want nil alongside a scan error", leaked)
+	}
+}
+
+// Same failure, exercised through runWith: a final-scan enumeration error
+// must fail the guard (code 1) and must not reap anything, since an
+// enumeration failure carries no process list to act on. Pre-fix, this
+// returned code 0 -- the swallowed error read as "no leak found".
+func TestDoltLeakGuardedTestingMRunWithFailsOnFinalScanError(t *testing.T) {
+	tempRoot := filepath.Join(t.TempDir(), "gct-current")
+	scanErr := errors.New("reading /proc: permission denied")
+	var scan int
+	enumerate := func() ([]DoltProcInfo, error) {
+		scan++
+		if scan == 1 {
+			return nil, nil // initial scan succeeds
+		}
+		return nil, scanErr // every final-scan poll fails
+	}
+	g := newDoltLeakGuardedTestingM(nil, tempRoot)
+
+	var reapedLeaks []DoltProcInfo
+	code := g.runWith(
+		func() int { return 0 },
+		enumerate,
+		func(string) bool { return false },
+		func() {},
+		func() {},
+		func(leaked []DoltProcInfo) { reapedLeaks = append(reapedLeaks, leaked...) },
+		time.Millisecond,
+		5*time.Millisecond,
+	)
+
+	if code != 1 {
+		t.Fatalf("guard returned code %d, want 1: a final-scan enumeration failure must fail the run, not be swallowed as a clean result", code)
+	}
+	if len(reapedLeaks) != 0 {
+		t.Fatalf("reaped leaks = %#v, want none: an enumeration failure carries no process list to reap", reapedLeaks)
 	}
 }
 
@@ -732,5 +874,17 @@ func TestSnapshotDoltProcessesForConfigRootsIgnoresEmptyRoots(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("empty roots matched %d process(es), want 0: %#v", len(got), got)
+	}
+}
+
+// The grace ceiling must stay a generous hang budget (ga-f5clwo), not drift
+// back toward round 2's 5s window, which still false-positived under host
+// contention (ga-d5nmtj gate evidence). The floor is picked independent of
+// config.DefaultDoltStopTimeout's exact value, so a future change to that
+// constant can't silently retighten this guard without a test noticing.
+func TestDoltLeakGuardGraceMaxElapsedTimeBudget(t *testing.T) {
+	const floor = 15 * time.Second
+	if doltLeakGuardGraceMaxElapsedTime < floor {
+		t.Fatalf("doltLeakGuardGraceMaxElapsedTime = %s, want >= %s", doltLeakGuardGraceMaxElapsedTime, floor)
 	}
 }

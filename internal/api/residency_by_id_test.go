@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/storeref"
+	"github.com/gastownhall/gascity/internal/storeref/storereftest"
 )
 
 // beadStoresForID renders the by-id PLAN as the ordered store list this
@@ -410,6 +411,12 @@ func TestBeadWriteLandsInClassStoreForWorkPrefixedResident(t *testing.T) {
 // The control is the id the binding does NOT hold: it must still answer from the
 // work store, which is what proves this is about residence and not about the
 // binding winning everything.
+//
+// The clauses themselves live in storereftest because they are only worth
+// anything if BOTH by-id surfaces satisfy them — this one and cmd/gc's class
+// door (TestBdCloseDualResidentWritesServingCopy). Two planes each passing their
+// own well-written pin while answering one id differently is precisely the bug,
+// so the property is written once and this test supplies the HTTP adapter.
 func TestBeadDualResidentAnswersFromTheBinding(t *testing.T) {
 	st, graph, city, _ := relocatedGraphRouteState(t)
 	st.cfg.Workspace.Prefix = "mc"
@@ -418,38 +425,32 @@ func TestBeadDualResidentAnswersFromTheBinding(t *testing.T) {
 	seedWithPinnedID(t, city, "mc-workonly1", "a work bead the binding never held")
 
 	s := New(st)
-	out, err := s.humaHandleBeadGet(context.Background(), &BeadGetInput{ID: id})
-	if err != nil {
-		t.Fatalf("GET bead %s: %v", id, err)
-	}
-	if out.Body.Title != "class-resident under a work prefix" {
-		t.Fatalf("GET served %q, want the binding's copy — the retained work copy is frozen at migration time", out.Body.Title)
-	}
-	if _, err := s.humaHandleBeadClose(context.Background(), &BeadCloseInput{ID: id}); err != nil {
-		t.Fatalf("close %s: %v", id, err)
-	}
-	classCopy, err := graph.Get(id)
-	if err != nil {
-		t.Fatalf("re-reading the class copy: %v", err)
-	}
-	if classCopy.Status != "closed" {
-		t.Errorf("the class copy's status = %q, want closed — the write must follow the read", classCopy.Status)
-	}
-	workCopy, err := city.Get(id)
-	if err != nil {
-		t.Fatalf("re-reading the work copy: %v", err)
-	}
-	if workCopy.Status == "closed" {
-		t.Errorf("the work copy was closed too; one id, one owner, one write")
-	}
-
-	control, err := s.humaHandleBeadGet(context.Background(), &BeadGetInput{ID: "mc-workonly1"})
-	if err != nil {
-		t.Fatalf("GET mc-workonly1: %v — a work bead the binding never held must still answer from work", err)
-	}
-	if control.Body.Title != "a work bead the binding never held" {
-		t.Fatalf("control GET served %q, want the work copy", control.Body.Title)
-	}
+	storereftest.RunBindingWins(t,
+		storereftest.BindingWinsStores{
+			Binding:       graph,
+			Work:          city,
+			DualID:        id,
+			BindingTitle:  "class-resident under a work prefix",
+			WorkOnlyID:    "mc-workonly1",
+			WorkOnlyTitle: "a work bead the binding never held",
+		},
+		storereftest.BindingWinsSurface{
+			Name: "the beads HTTP by-id surface",
+			Get: func(t *testing.T, id string) beads.Bead {
+				t.Helper()
+				out, err := s.humaHandleBeadGet(context.Background(), &BeadGetInput{ID: id})
+				if err != nil {
+					t.Fatalf("GET bead %s: %v", id, err)
+				}
+				return out.Body
+			},
+			Close: func(t *testing.T, id string) {
+				t.Helper()
+				if _, err := s.humaHandleBeadClose(context.Background(), &BeadCloseInput{ID: id}); err != nil {
+					t.Fatalf("POST bead %s close: %v", id, err)
+				}
+			},
+		})
 }
 
 // wholeSplitState builds the shape a relocated city actually serves: ONE

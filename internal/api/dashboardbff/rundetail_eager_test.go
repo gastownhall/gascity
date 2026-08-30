@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runproj"
-	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // seedRunLog writes a minimal one-run event log under dir/.gc/events.jsonl and
@@ -29,7 +28,7 @@ func waitReady(t *testing.T, tl *cityRunTailer) {
 	t.Helper()
 	select {
 	case <-tl.readyCh:
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatalf("cold replay for %q did not complete within deadline", tl.name)
 	}
 }
@@ -139,12 +138,12 @@ func TestPlaneStartDoesNotBlockOnColdLoad(t *testing.T) {
 
 	select {
 	case <-started:
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("background cold replay did not start")
 	}
 	select {
 	case <-startReturned:
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("Plane.Start blocked on the held cold replay")
 	}
 

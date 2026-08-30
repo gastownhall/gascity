@@ -34,6 +34,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/storebinding"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 const (
@@ -474,6 +475,7 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 		fmt.Fprintf(stdout, "converged: no\nblocking invariant: boot never migrates; run `%s`\n", storageMigrationCommand) //nolint:errcheck // best-effort stdout
 		return 1
 	}
+	reportBindingRelics(target, logPrefix, stdout, stderr)
 
 	proven, recorded, err := readInfraCopyManifest(target)
 	if err != nil {
@@ -501,6 +503,35 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 		return 1
 	}
 	return 0
+}
+
+// reportBindingRelics prints how many beads the binding still holds under ids
+// no reader can route to it from — the rows the cutover carried across under
+// their original work-shaped ids.
+//
+// That count is the residence probe's retirement condition. While it is
+// non-zero every work-shaped by-id read in the city pays one extra store read
+// to find beads that are reachable no other way, and it falls only as those
+// beads close. An operator draining a migrated city has nothing else to watch.
+//
+// It never changes the exit code. A relic is the migration working as designed,
+// so a status command that failed over one would report every city that ever
+// migrated as broken. A binding that cannot be read is reported and skipped for
+// the same reason: the layout facts above it stand on their own.
+func reportBindingRelics(target infraBindingTarget, logPrefix string, stdout, stderr io.Writer) {
+	binding, err := openInfraDestination(target)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: counting open relics: opening the binding: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return
+	}
+	defer closeBeadStoreHandle(binding) //nolint:errcheck // best-effort close
+
+	relics, err := storeref.OpenLegacyResidents(binding, config.AllReservedClassPrefixes())
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return
+	}
+	fmt.Fprintf(stdout, "open relics: %d (carried across under their original ids; the residence probe retires when the last one closes)\n", len(relics)) //nolint:errcheck // best-effort stdout
 }
 
 // cityMigrationGuardDirectory returns the city .gc directory the migration

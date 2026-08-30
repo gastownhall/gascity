@@ -74,7 +74,7 @@ func (s *NativeDoltStore) Count(ctx context.Context, query ListQuery, excludeTyp
 //   - Status "open": translated to an exclude-list (closed, in_progress)
 //     while Matches requires status == "open" exactly, so beads in any
 //     other non-excluded status would be overcounted.
-//   - Assignees / ParentIDs / SeekAfter / UpdatedBefore: not translated
+//   - Assignees / ParentIDs / IDs / SeekAfter / UpdatedBefore: not translated
 //     into the filter at all; List narrows them Go-side.
 //   - Metadata / CreatedBefore / ParentID: translated, but List re-applies
 //     them through Matches with Go-side semantics (exact metadata match vs
@@ -100,6 +100,7 @@ func nativeDoltCountSupported(query ListQuery, excludeTypes []string) bool {
 		query.Status != "open" &&
 		len(query.Assignees) == 0 &&
 		len(query.ParentIDs) == 0 &&
+		len(query.IDs) == 0 &&
 		query.SeekAfter == nil &&
 		query.UpdatedBefore.IsZero() &&
 		len(query.Metadata) == 0 &&

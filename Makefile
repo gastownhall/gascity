@@ -24,7 +24,7 @@ INSTALL_DIR := $(BIN_DIR)
 VERSION    := $(shell tag=$$(git describe --tags --exact-match 2>/dev/null || true); if [ -n "$$tag" ]; then printf '%s' "$$tag" | sed 's/^v//'; else echo "dev"; fi)
 COMMIT     := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 DIRTY      := $(shell test -n "$$(git status --porcelain 2>/dev/null)" && echo "-dirty" || true)
-BUILD_TIME := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
+BUILD_TIME := $(shell git show -s --format=%cI HEAD 2>/dev/null || echo unknown)
 
 LDFLAGS := -X main.version=$(VERSION) \
            -X main.commit=$(COMMIT)$(DIRTY) \
@@ -423,6 +423,13 @@ TEST_ENV = env -i \
 	CLAUDE_CODE_EFFORT_LEVEL="$${CLAUDE_CODE_EFFORT_LEVEL-}" \
 	CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="$${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC-}" \
 	OLLAMA_API_KEY="$${OLLAMA_API_KEY-}" \
+	XIAOMI_API_KEY="$${XIAOMI_API_KEY-}" \
+	ZCODE_API_KEY="$${ZCODE_API_KEY-}" \
+	ZCODE_CJS="$${ZCODE_CJS-}" \
+	ZCODE_MODEL="$${ZCODE_MODEL-}" \
+	ZCODE_BASE_URL="$${ZCODE_BASE_URL-}" \
+	ZCODE_NODE_BIN="$${ZCODE_NODE_BIN-}" \
+	ZCODE_STORAGE_DIR="$${ZCODE_STORAGE_DIR-}" \
 	CGO_CPPFLAGS="$${CGO_CPPFLAGS-}" \
 	CGO_LDFLAGS="$${CGO_LDFLAGS-}" \
 	$(EXTRA_TEST_ENV)
@@ -432,6 +439,7 @@ test-ci-policy:
 	$(TEST_ENV) PYTHONDONTWRITEBYTECODE=1 python3 -S -m unittest discover -s .github/workflows/scripts -p 'test_runner_policy.py'
 	$(TEST_ENV) PYTHONDONTWRITEBYTECODE=1 python3 -S -m unittest discover -s .github/workflows/scripts -p 'test_ci_suite_coverage.py'
 	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 ./scripts/cipolicy
+	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 ./scripts/prwatchdog/...
 	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 -run '^(TestPreflightStaticScopesOrdinaryPRsWithoutWeakeningProtectedRuns|TestFullStaticLintExplicitlyOwnsConfiguredGolangCIGovet|TestChangedStaticTargetsScopeLintAndFormattingToTheDiff|TestCIStaticScopeClassifierFailsClosedOutsideValidatedPullRequestMerge)$$' ./scripts
 
 ## test: run fast unit tests (skip integration-tagged and GC_FAST_UNIT-gated process tests)
@@ -545,8 +553,16 @@ setup-worker-inference:
 	python3 scripts/worker_inference_setup.py install --profile "$(WORKER_INFERENCE_PROFILE)"
 
 ## test-worker-inference: run the live worker inference conformance package
+##
+## GC_HOME is passed through (and declared to internal/testenv, which scrubs it
+## as a leak vector) because this suite edits city.toml IN-PROCESS, and
+## config.ImplicitGCHome() returns "" inside a *.test binary unless GC_HOME is
+## explicitly set. Without it every managed-city leg dies resolving the city's
+## pack imports against the user-global repo cache. It is a cache path, not a
+## credential; the isolation this suite relies on flows through the per-run
+## GC_HOME it hands to the gc subprocesses it spawns.
 test-worker-inference:
-	$(TEST_ENV) PROFILE="$(WORKER_INFERENCE_PROFILE)" GC_WORKER_REPORT_DIR="$(GC_WORKER_REPORT_DIR)" go test -count=1 -tags acceptance_c -timeout 45m -v ./test/acceptance/worker_inference
+	$(TEST_ENV) PROFILE="$(WORKER_INFERENCE_PROFILE)" GC_WORKER_REPORT_DIR="$(GC_WORKER_REPORT_DIR)" GC_HOME="$${GC_HOME:-$$HOME/.gc}" GC_TESTENV_PASSTHROUGH=GC_HOME go test -count=1 -tags acceptance_c -timeout 45m -v ./test/acceptance/worker_inference
 
 ## test-worker-inference-phase3: alias for the live worker inference conformance package
 test-worker-inference-phase3: test-worker-inference

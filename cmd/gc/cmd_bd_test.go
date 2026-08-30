@@ -9,10 +9,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
@@ -809,10 +809,19 @@ esac
 	t.Setenv("GC_CITY_PATH", cityDir)
 	t.Setenv("BD_EXPORT_AUTO", "true")
 
-	for _, args := range [][]string{
-		{"show", "gc-1", "--json"},
-		{"update", "gc-1", "--claim", "--json"},
+	for _, tc := range []struct {
+		args       []string
+		wantStderr string // "" means stderr must be empty
+	}{
+		// show is a read-only passthrough verb, so it now carries the
+		// gastownhall/gascity#5170 scope-disclosure line (see
+		// TestGcBdDisclosesAnsweringStore); this test's own concern —
+		// BD_EXPORT_AUTO is suppressed and no auto-export error reaches the
+		// operator — is unaffected by that one additive line.
+		{args: []string{"show", "gc-1", "--json"}, wantStderr: "gc bd: answering from the city store\n"},
+		{args: []string{"update", "gc-1", "--claim", "--json"}, wantStderr: ""},
 	} {
+		args := tc.args
 		var stdout, stderr bytes.Buffer
 		if got := doBd(args, &stdout, &stderr); got != 0 {
 			t.Fatalf("doBd(%v) = %d, want 0; stdout=%q stderr=%q", args, got, stdout.String(), stderr.String())
@@ -820,8 +829,8 @@ esac
 		if strings.TrimSpace(stdout.String()) == "" {
 			t.Fatalf("doBd(%v) produced empty stdout", args)
 		}
-		if stderr.String() != "" {
-			t.Fatalf("doBd(%v) stderr = %q, want empty", args, stderr.String())
+		if stderr.String() != tc.wantStderr {
+			t.Fatalf("doBd(%v) stderr = %q, want %q", args, stderr.String(), tc.wantStderr)
 		}
 	}
 }
@@ -1295,7 +1304,7 @@ func TestBdRigWorktreeStoreConsistentAcrossRawBdGcBdAndProviderStore(t *testing.
 	if err != nil {
 		t.Fatalf("nativeDoltOpenEnvForScope(rig): %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), nativeStorageFixtureBootTimeout)
 	defer cancel()
 	nativeStorage, err := beads.OpenNativeStorage(ctx, rigPath, nativeEnv)
 	if err != nil {
@@ -1455,6 +1464,185 @@ func TestResolveBdScopeTargetUsesEnclosingRig(t *testing.T) {
 	}
 	if got != want {
 		t.Fatalf("resolveBdScopeTarget() = %#v, want %#v", got, want)
+	}
+}
+
+func TestGcBdRejectsUnregisteredRigQualifiedMetadataWrites(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[[rigs]]
+name = "saitoc"
+path = "saitoc"
+prefix = "sa"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	scratchBead := filepath.Join(t.TempDir(), "scratch-bead.json")
+	const original = "{\"id\":\"scratch-1\",\"metadata\":{}}\n"
+	if err := os.WriteFile(scratchBead, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(`#!/bin/sh
+printf '{"id":"scratch-1","metadata":{"written":true}}\n' > "$SCRATCH_BEAD"
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("SCRATCH_BEAD", scratchBead)
+
+	for _, tc := range []struct {
+		name  string
+		verb  string
+		args  []string
+		actor string
+	}{
+		{"lease owner", "update", []string{"--set-metadata", "gc.lease_owner=ghostrig/polecat-01"}, "ghostrig/polecat-01"},
+		{"inline lease owner", "update", []string{"--set-metadata=gc.lease_owner=ghostrig/polecat-01"}, "ghostrig/polecat-01"},
+		{"route target", "update", []string{"--set-metadata", "gc.routed_to=desktop3080saitoc/polecat-01"}, "desktop3080saitoc/polecat-01"},
+		{"whole metadata object", "update", []string{"--metadata", `{"gc.routed_to":"ghostrig/polecat-01"}`}, "ghostrig/polecat-01"},
+		{"inline metadata object", "update", []string{`--metadata={"gc.routed_to":"ghostrig/polecat-01"}`}, "ghostrig/polecat-01"},
+		{"create route target", "create", []string{"--metadata", `{"gc.routed_to":"ghostrig/polecat-01"}`}, "ghostrig/polecat-01"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(scratchBead, []byte(original), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			args := []string{"--city", cityDir, tc.verb}
+			if tc.verb == "update" {
+				args = append(args, "scratch-1")
+			} else {
+				args = append(args, "scratch")
+			}
+			args = append(args, tc.args...)
+			if got := doBd(args, &stdout, &stderr); got == 0 {
+				t.Fatalf("doBd() = 0, want refusal; stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "not configured") || !strings.Contains(stderr.String(), tc.actor) {
+				t.Fatalf("stderr = %q, want unconfigured-rig diagnostic for %q", stderr.String(), tc.actor)
+			}
+			got, err := os.ReadFile(scratchBead)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != original {
+				t.Fatalf("scratch bead changed on refusal:\n got %q\nwant %q", got, original)
+			}
+		})
+	}
+}
+
+func TestGcBdRejectsMetadataItCannotValidateBeforeWrite(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[[rigs]]
+name = "saitoc"
+path = "saitoc"
+prefix = "sa"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	capture := filepath.Join(t.TempDir(), "bd-ran")
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(`#!/bin/sh
+printf 'called' > "$BD_CAPTURE"
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_CAPTURE", capture)
+
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"metadata file", []string{"--metadata", "@metadata.json"}, "@file input"},
+		{"malformed metadata", []string{"--metadata", "{not-json}"}, "malformed --metadata"},
+		{"non-string guarded metadata", []string{"--metadata", `{"gc.routed_to":true}`}, "non-string gc.routed_to"},
+		{"malformed set metadata", []string{"--set-metadata", "gc.routed_to"}, "malformed --set-metadata"},
+		{"missing metadata", []string{"--metadata"}, "without a value"},
+		{"missing set metadata", []string{"--set-metadata"}, "without a value"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.Remove(capture); err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			args := append([]string{"--city", cityDir, "update", "scratch-1"}, tc.args...)
+			if got := doBd(args, &stdout, &stderr); got == 0 {
+				t.Fatalf("doBd() = 0, want refusal; stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stderr.String(), tc.want) {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), tc.want)
+			}
+			if _, err := os.Stat(capture); !os.IsNotExist(err) {
+				t.Fatalf("bd was invoked for unvalidated metadata: %v", err)
+			}
+		})
+	}
+}
+
+func TestGcBdAllowsRegisteredAndLegacyMetadataActors(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[[rigs]]
+name = "saitoc"
+path = "saitoc"
+prefix = "sa"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	capture := filepath.Join(t.TempDir(), "bd-ran")
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(`#!/bin/sh
+printf '%s' "$*" > "$BD_CAPTURE"
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_CAPTURE", capture)
+
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"registered rig", []string{"update", "scratch-1", "--set-metadata", "gc.routed_to=saitoc/polecat-01"}},
+		{"multi-segment route under registered rig", []string{"update", "scratch-1", "--set-metadata", "gc.routed_to=saitoc/sub/polecat-01"}},
+		{"bare actor", []string{"update", "scratch-1", "--set-metadata", "gc.lease_owner=polecat-01"}},
+		{"dotted actor", []string{"update", "scratch-1", "--set-metadata", "gc.lease_owner=gastown.polecat-01"}},
+		{"whole metadata object", []string{"update", "scratch-1", "--metadata", `{"gc.routed_to":"saitoc/polecat-01"}`}},
+		{"unrelated non-string metadata", []string{"update", "scratch-1", "--metadata", `{"attempts":2}`}},
+		{"metadata-looking notes value", []string{"update", "scratch-1", "--notes", "--metadata=not-json"}},
+		{"metadata-looking positional after terminator", []string{"update", "scratch-1", "--", "--metadata=not-json"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.Remove(capture); err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			args := append([]string{"--city", cityDir}, tc.args...)
+			var stdout, stderr bytes.Buffer
+			if got := doBd(args, &stdout, &stderr); got != 0 {
+				t.Fatalf("doBd() = %d, want success; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
+			}
+			if _, err := os.Stat(capture); err != nil {
+				t.Fatalf("bd was not invoked for compatible actor: %v", err)
+			}
+		})
 	}
 }
 
@@ -1791,6 +1979,54 @@ name = "demo"
 	t.Setenv("GC_DOLT_PORT", port)
 }
 
+// managedDoltTestSetup is silentFallbackTestSetup for a Dolt endpoint gc
+// actually manages. The difference is the scope config: managed_city origin
+// with no explicit dolt.host/dolt.port, so the endpoint resolves from the
+// managed runtime state writeReachableManagedDoltState wrote and reports
+// External=false. silentFallbackTestSetup's city_canonical + explicit
+// host/port shape resolves External=true even on 127.0.0.1, which is a
+// server gc does not own.
+func managedDoltTestSetup(t *testing.T, fakeBdScript string) {
+	t.Helper()
+
+	origCityFlag := cityFlag
+	origRigFlag := rigFlag
+	t.Cleanup(func() {
+		cityFlag = origCityFlag
+		rigFlag = origRigFlag
+	})
+	cityFlag = ""
+	rigFlag = ""
+
+	cityDir := t.TempDir()
+	port := strconv.Itoa(writeReachableManagedDoltState(t, cityDir))
+
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := "issue_prefix: demo\n" +
+		"gc.endpoint_origin: managed_city\n" +
+		"gc.endpoint_status: verified\n" +
+		"dolt.auto-start: false\n"
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(fakeBdScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	origPath := os.Getenv("PATH")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+origPath)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_DOLT_PORT", port)
+}
+
 // TestGcBdSurfacesSilentFallbackAsLoudError_UpdatePath pins the #2080 fix:
 // when bd's update path silently falls back to the on-disk store, gc bd must
 // convert that into a non-zero exit with an operator-facing message instead
@@ -1915,6 +2151,115 @@ exit 3
 	}
 }
 
+// doltStartConflictFakeBdScript emits bd's real "managed Dolt unreachable,
+// start it yourself" banner (gastownhall/gascity#1374) and exits 1, the way
+// bd behaves when dolt.auto-start is disabled (as gc always sets it in a
+// managed city) and the managed server has gone down.
+const doltStartConflictFakeBdScript = `#!/bin/sh
+echo "Dolt server unreachable at 127.0.0.1:0: dial tcp 127.0.0.1:0: connect: can't assign requested address" >&2
+echo "" >&2
+echo "Dolt server auto-start is disabled (dolt.auto-start: false)." >&2
+echo "Start the server manually:" >&2
+echo "  bd dolt start" >&2
+exit 1
+`
+
+// TestGcBdSurfacesDoltStartConflictHint pins the #1374 fix: when bd's own
+// error output suggests running "bd dolt start" to recover, gc bd must
+// append a corrective hint pointing at the gc-managed remedy instead,
+// because following bd's own suggestion starts a second, unmanaged Dolt
+// server that conflicts with gc's on the same data directory. bd's original
+// output and exit code must still pass through unchanged. The scope is a
+// gc-managed endpoint — the only topology where gc's own lifecycle commands
+// are the remedy.
+func TestGcBdSurfacesDoltStartConflictHint(t *testing.T) {
+	managedDoltTestSetup(t, doltStartConflictFakeBdScript)
+
+	var stdout, stderr bytes.Buffer
+	got := doBd([]string{"list"}, &stdout, &stderr)
+	if got != 1 {
+		t.Fatalf("doBd(list) = %d, want 1 (bd's own exit code preserved); stderr=%q", got, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "bd dolt start") {
+		t.Fatalf("original bd stderr not passed through; stderr=%q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "gc start") {
+		t.Fatalf("stderr missing corrective hint toward the gc-managed remedy; stderr=%q", stderr.String())
+	}
+}
+
+// TestGcBdNoDoltStartConflictHintOnExternalEndpoint pins the ownership gate:
+// gc bd disables bd's auto-start for every endpoint, so an unreachable
+// external endpoint emits the same "run bd dolt start" banner. gc does not
+// own that server, so `gc start` / `gc dolt restart` cannot recover it and
+// the hint must stay silent — bd's own output and exit code are the whole
+// answer there. silentFallbackTestSetup's city_canonical + explicit
+// host/port config is exactly that topology (External=true even though the
+// host is 127.0.0.1).
+func TestGcBdNoDoltStartConflictHintOnExternalEndpoint(t *testing.T) {
+	silentFallbackTestSetup(t, doltStartConflictFakeBdScript)
+
+	var stdout, stderr bytes.Buffer
+	got := doBd([]string{"list"}, &stdout, &stderr)
+	if got != 1 {
+		t.Fatalf("doBd(list) = %d, want 1 (bd's own exit code preserved); stderr=%q", got, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "bd dolt start") {
+		t.Fatalf("original bd stderr not passed through; stderr=%q", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "gc start") {
+		t.Fatalf("corrective hint fired for an endpoint gc does not manage; stderr=%q", stderr.String())
+	}
+}
+
+// TestGcBdNoDoltStartConflictHintOnUnrelatedError guards against a false
+// positive: a plain bd usage error that happens to share no wording with
+// the "bd dolt start" banner must not trigger the corrective hint.
+func TestGcBdNoDoltStartConflictHintOnUnrelatedError(t *testing.T) {
+	const bdRejectsScript = `#!/bin/sh
+echo "bd: simulated usage error" >&2
+exit 3
+`
+	silentFallbackTestSetup(t, bdRejectsScript)
+
+	var stdout, stderr bytes.Buffer
+	got := doBd([]string{"list"}, &stdout, &stderr)
+	if got != 3 {
+		t.Fatalf("doBd(list) = %d, want 3 (bd's own exit code preserved); stderr=%q", got, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "gc start") {
+		t.Fatalf("corrective hint fired on an unrelated bd error; stderr=%q", stderr.String())
+	}
+}
+
+// TestBdOutputSuggestsConflictingDoltStart covers the marker-detection
+// helper directly with table-driven cases so the source-of-truth for what
+// counts as "bd suggested a conflicting bd dolt start" is unit-pinned.
+func TestBdOutputSuggestsConflictingDoltStart(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{"empty", "", false},
+		{"single marker only auto-start-disabled", "Dolt server auto-start is disabled (dolt.auto-start: false).", false},
+		{"single marker only bd dolt start", "  bd dolt start", false},
+		{"both markers, real bd banner", "Dolt server unreachable at 127.0.0.1:0: dial tcp 127.0.0.1:0: connect: can't assign requested address\n\nDolt server auto-start is disabled (dolt.auto-start: false).\nStart the server manually:\n  bd dolt start\n", true},
+		{"both markers same line", "auto-start is disabled, run bd dolt start", true},
+		{"case insensitive", "DOLT SERVER AUTO-START IS DISABLED. RUN: BD DOLT START", true},
+		{"unrelated transport error", "dial tcp 127.0.0.1:3306: connect: connection refused", false},
+		{"unrelated usage error", "bd: simulated usage error", false},
+		{"bd dolt start mentioned without disabled marker", "see 'bd dolt start --help' for standalone usage", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := bdOutputSuggestsConflictingDoltStart(tt.input); got != tt.want {
+				t.Errorf("bdOutputSuggestsConflictingDoltStart(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestBdOutputIndicatesSilentFallback covers the marker-detection helper
 // directly with table-driven cases so the source-of-truth for what counts
 // as "silent fallback" is unit-pinned.
@@ -1982,19 +2327,13 @@ func TestHeadLimitedWriter(t *testing.T) {
 	})
 }
 
-// TestGcBdHeartbeatRewritesToMetadataUpdate pins the gastownhall/gascity#1855
-// worker-heartbeat write half: `gc bd heartbeat <id>` must forward to bd as
-// `update <id> --set-metadata gc.last_heartbeat_at=<RFC3339 UTC>`. The exact
-// key (with the _at suffix) is what the gas-city-dashboard will read
-// (dashboard #324) to tell a live worker from a dead one, and the stamp must
-// be valid RFC3339 in UTC even when the local clock is in another zone.
-func TestGcBdHeartbeatRewritesToMetadataUpdate(t *testing.T) {
-	origNow := bdHeartbeatNow
-	t.Cleanup(func() { bdHeartbeatNow = origNow })
-	// Pin the clock to a non-UTC zone to prove the rewrite normalizes to UTC.
-	fixed := time.Date(2026, 5, 31, 12, 0, 0, 0, time.FixedZone("PST", -8*3600))
-	bdHeartbeatNow = func() time.Time { return fixed }
-
+// TestGcBdHeartbeatForwardsNativeLeaseRefresh pins the dip-wdt5aq fix:
+// `gc bd heartbeat <id>` must forward to bd's NATIVE heartbeat subcommand,
+// which refreshes lease_expires_at and fails loudly when the caller no longer
+// owns the claim. The old rewrite to `update --set-metadata` reported success
+// while leaving the lease untouched, so a reviewer's claim could be reclaimed
+// mid-review by a command that had just printed success.
+func TestGcBdHeartbeatForwardsNativeLeaseRefresh(t *testing.T) {
 	// The fake bd captures its forwarded args so the assertion can inspect them.
 	capture := filepath.Join(t.TempDir(), "gc-bd-args.txt")
 	silentFallbackTestSetup(t, "#!/bin/sh\nprintf '%s' \"$*\" > \"${CAPTURE_PATH}\"\n")
@@ -2009,21 +2348,8 @@ func TestGcBdHeartbeatRewritesToMetadataUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const prefix = "update demo-abc --set-metadata " + heartbeatMetadataKey + "="
-	gotArgs := string(data)
-	stamp, ok := strings.CutPrefix(gotArgs, prefix)
-	if !ok {
-		t.Fatalf("forwarded args = %q, want prefix %q", gotArgs, prefix)
-	}
-	parsed, err := time.Parse(time.RFC3339, stamp)
-	if err != nil {
-		t.Fatalf("heartbeat stamp %q is not valid RFC3339: %v", stamp, err)
-	}
-	if _, offset := parsed.Zone(); offset != 0 {
-		t.Fatalf("heartbeat stamp %q is not UTC (zone offset %d)", stamp, offset)
-	}
-	if want := fixed.UTC().Format(time.RFC3339); stamp != want {
-		t.Fatalf("heartbeat stamp = %q, want %q", stamp, want)
+	if gotArgs := string(data); gotArgs != "heartbeat demo-abc" {
+		t.Fatalf("forwarded args = %q, want native %q", gotArgs, "heartbeat demo-abc")
 	}
 }
 
@@ -2048,13 +2374,13 @@ func TestRewriteBdHeartbeatArgs(t *testing.T) {
 			}
 		}
 	})
-	t.Run("rewrites a clean id to a set-metadata update", func(t *testing.T) {
+	t.Run("forwards a clean id to bd's native heartbeat", func(t *testing.T) {
 		out, err := rewriteBdHeartbeatArgs([]string{"heartbeat", "demo-abc"})
 		if err != nil {
 			t.Fatalf("rewriteBdHeartbeatArgs unexpected error: %v", err)
 		}
-		if len(out) != 4 || out[0] != "update" || out[1] != "demo-abc" || out[2] != "--set-metadata" {
-			t.Fatalf("rewriteBdHeartbeatArgs = %q, want [update demo-abc --set-metadata ...]", out)
+		if len(out) != 2 || out[0] != "heartbeat" || out[1] != "demo-abc" {
+			t.Fatalf("rewriteBdHeartbeatArgs = %q, want native [heartbeat demo-abc]", out)
 		}
 	})
 	t.Run("passes non-heartbeat args through unchanged", func(t *testing.T) {
@@ -2084,6 +2410,8 @@ func TestBdMutationWriteID(t *testing.T) {
 			{[]string{"reopen", "gcy-dv7"}, "gcy-dv7"},
 			{[]string{"delete", "--force", "gcy-dv7"}, "gcy-dv7"},
 			{[]string{"delete", "--force", "--json", "gcy-dv7"}, "gcy-dv7"},
+			// heartbeat: native lease refresh, guarded like the other writes
+			{[]string{"heartbeat", "gcy-dv7"}, "gcy-dv7"},
 			// double-dash separator
 			{[]string{"update", "--", "gcy-dv7"}, "gcy-dv7"},
 		}
@@ -2261,6 +2589,26 @@ func TestBdMutationWriteIDs(t *testing.T) {
 			name: "unknown short flag triggers fail-closed",
 			args: []string{"update", "-z", "something", "gcy-dv7"},
 			want: result{ok: true, ambiguous: true},
+		},
+
+		// --- heartbeat: native lease refresh under the exact-ID guard ---
+		// gc bd heartbeat forwards to bd's native owner-only lease refresh — a
+		// lease-mutating write — so it must take the same exact-ID collision
+		// preflight as update/close/reopen/delete (synthesis New Findings:
+		// Contract & Interface Fidelity). rewriteBdHeartbeatArgs has already
+		// reduced the argv to exactly ["heartbeat", "<id>"] (a single
+		// pre-validated positional id, no flags) before this scanner runs, so
+		// the id is scanned as a lone positional and returns ok=true, routing it
+		// through the store.Get guard instead of forwarding unguarded (ok=false).
+		{
+			name: "heartbeat is a guarded write with a positional id",
+			args: []string{"heartbeat", "gcy-dv7"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+		{
+			name: "heartbeat returns the exact supplied token (gcy-g4o regression)",
+			args: []string{"heartbeat", "gcy-wisp-abc9"},
+			want: result{ids: []string{"gcy-wisp-abc9"}, ok: true},
 		},
 
 		// --- Non-write subcommands ---
@@ -2473,9 +2821,12 @@ prefix = "fe"
 	if err != nil {
 		t.Fatalf("read SQL log: %v", err)
 	}
-	wantQuery := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP WHERE id = 'fe-abc' AND status = 'in_progress' AND assignee = 'worker-1'"
-	if strings.TrimSpace(string(query)) != wantQuery {
-		t.Fatalf("SQL query = %q, want %q", strings.TrimSpace(string(query)), wantQuery)
+	// The release mints a fresh revision so the pre-release token is stale, so
+	// the token itself is not pinnable — everything around it is.
+	gotQuery := strings.TrimSpace(string(query))
+	wantQuery := regexp.MustCompile(`^UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP, revision = -?\d+ WHERE id = 'fe-abc' AND status = 'in_progress' AND assignee = 'worker-1'$`)
+	if !wantQuery.MatchString(gotQuery) {
+		t.Fatalf("SQL query = %q, want match for %s", gotQuery, wantQuery)
 	}
 }
 
@@ -2690,6 +3041,107 @@ func TestGcBdPassthroughResolvesBdBinary(t *testing.T) {
 		}
 		if want := "partial beads storage binding"; !strings.Contains(stderr.String(), want) {
 			t.Fatalf("stderr = %q, want it to name the %q", stderr.String(), want)
+		}
+	})
+}
+
+// newBdScopeDisclosureTestCity stages a city with one dolt-backed rig
+// ("frontend") and a stub bd on PATH that answers "[]" to anything, for
+// TestGcBdDisclosesAnsweringStore. No [storage] split is configured, so
+// maybeRouteBdByID never intercepts a read here — this is the ordinary
+// single-store shape the issue's repro used.
+func newBdScopeDisclosureTestCity(t *testing.T) {
+	t.Helper()
+	disableManagedDoltRecoveryForTest(t)
+
+	origCityFlag := cityFlag
+	origRigFlag := rigFlag
+	t.Cleanup(func() {
+		cityFlag = origCityFlag
+		rigFlag = origRigFlag
+	})
+	cityFlag = ""
+	rigFlag = ""
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "fe"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "metadata.json"), []byte(`{"backend":"doltlite"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte("#!/bin/sh\necho '[]'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_CITY_PATH", cityDir)
+}
+
+// TestGcBdDisclosesAnsweringStore pins gastownhall/gascity#5170:
+// resolveBdScopeTarget's priority chain (explicit --rig > explicit --city >
+// bead-prefix detect > -C/--directory > GC_RIG env > cwd > city) silently
+// picked a store on every path but the GC_RIG-mismatch warning, so a
+// byte-identical `gc bd list`/`ready`/`search`/`show` invocation could answer
+// "[]"/exit 0 from either of two different stores with no diagnostic
+// distinguishing "this store has no matches" from "a different store
+// answered." doBd now emits one stderr line via scopeLabel naming the store
+// that served the read, for the read-only passthrough verbs only.
+func TestGcBdDisclosesAnsweringStore(t *testing.T) {
+	t.Run("cwd auto-detect discloses the city store", func(t *testing.T) {
+		newBdScopeDisclosureTestCity(t)
+
+		var stdout, stderr bytes.Buffer
+		if got := doBd([]string{"list"}, &stdout, &stderr); got != 0 {
+			t.Fatalf("doBd(list) = %d, want 0; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "gc bd: answering from the city store") {
+			t.Fatalf("stderr = %q, want scope disclosure naming the city store", stderr.String())
+		}
+	})
+
+	for _, verb := range []string{"list", "ready", "search", "show"} {
+		t.Run("explicit --rig discloses the rig store for "+verb, func(t *testing.T) {
+			newBdScopeDisclosureTestCity(t)
+
+			args := []string{"--rig", "frontend", verb}
+			switch verb {
+			case "search":
+				args = append(args, "x")
+			case "show":
+				args = append(args, "fe-1")
+			}
+			var stdout, stderr bytes.Buffer
+			if got := doBd(args, &stdout, &stderr); got != 0 {
+				t.Fatalf("doBd(%v) = %d, want 0; stdout=%q stderr=%q", args, got, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stderr.String(), `gc bd: answering from the rig "frontend" store`) {
+				t.Fatalf("stderr = %q, want scope disclosure naming rig %q", stderr.String(), "frontend")
+			}
+		})
+	}
+
+	t.Run("write verbs stay silent", func(t *testing.T) {
+		newBdScopeDisclosureTestCity(t)
+
+		var stdout, stderr bytes.Buffer
+		if got := doBd([]string{"--rig", "frontend", "create", "--json", "x", "-t", "task"}, &stdout, &stderr); got != 0 {
+			t.Fatalf("doBd(create) = %d, want 0; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
+		}
+		if strings.Contains(stderr.String(), "answering from") {
+			t.Fatalf("stderr = %q, want no scope disclosure for a write verb; stderr=%q", stderr.String(), stderr.String())
 		}
 	})
 }

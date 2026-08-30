@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
@@ -109,9 +111,12 @@ func (cr *CityRuntime) graphBeadStore() beads.GraphStore {
 }
 
 // sessionsBeadStore returns the runtime's session/session-wait bead store: the
-// configured session class store (with the controller recorder so relocated
-// session writes emit bead.*) when [beads.classes.sessions] relocates sessions,
-// else the work store. Byte-identical to cityBeadStore() at the default bd backend.
+// configured session class store when [beads.classes.sessions] relocates
+// sessions, else the work store. The recorder is passed for signature parity
+// and is not what makes a write observable — the controller's emission comes
+// from the CachingStore around its work ledger, and a relocated class store has
+// no such layer on this side (class_store_emit.go covers the one-shot CLI's).
+// Byte-identical to cityBeadStore() at the default bd backend.
 // Returned as the strongly-typed beads.SessionStore so the session class stays
 // statically visible; the wrapper carries the same underlying store value.
 func (cr *CityRuntime) sessionsBeadStore() beads.SessionStore {
@@ -251,7 +256,13 @@ func (s *beadPolicyGraphStore) graphApplierFor(_ coordclass.Class) beads.GraphAp
 // agree.
 //
 // cfg, cityPath and rec stay in the signature for the per-scope work routing
-// that resolves elsewhere; they are not read here.
+// that resolves elsewhere; they are not read here. rec in particular does NOT
+// make a relocated write observable, for any class: a class store is a bare
+// bead engine with no emitting layer, and what a caller passes here changes
+// nothing about that. Emission is decided where the ROUTES are built, once —
+// the one-shot CLI funnel gives its stores an emit target
+// (storageRoutes.withCLIEmission), and the controller's boot does not, because
+// its own emitter already covers it. See class_store_emit.go.
 func resolveClassStore(routes *storageRoutes, workStore beads.Store, cfg *config.City, cityPath, class string, rec events.Recorder) beads.Store {
 	_ = cfg
 	_ = cityPath
@@ -311,11 +322,40 @@ func resolveSessionStore(routes *storageRoutes, workStore beads.Store, cfg *conf
 
 // resolveGraphStore returns the beads.Store backing the GRAPH coordination
 // class. Identity today: the work store. When graph relocates, the dedicated
-// graph-store dispatch plugs in at resolveClassStore (graph uses its own legacy
-// .gc/ location and is event-silent by design, so rec is accepted for signature
-// parity with the other resolve*Store helpers and ignored here).
+// graph-store dispatch plugs in at resolveClassStore. rec is accepted for
+// signature parity with the other resolve*Store helpers and ignored here, as it
+// is for every class: see resolveClassStore.
 func resolveGraphStore(routes *storageRoutes, workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) beads.Store {
 	return resolveClassStore(routes, workStore, cfg, cityPath, config.BeadClassGraph, rec)
+}
+
+// scopeIsCity reports whether a scope store the caller opened at storePath is
+// the city's own store rather than a rig's.
+//
+// This is the predicate behind every graph-class routing decision, and it is
+// deliberately one function. Graph bindings are city-keyed: resolveClassStore
+// holds a single city-level store per class, so there is no per-rig binding to
+// route to, and `gc storage migrate` copies only the city work store. Any
+// coordination surface that answers "does this scope take the graph class?"
+// must answer it the same way, or two sibling surfaces end up reading different
+// databases for beads of one class.
+func scopeIsCity(cityPath, storePath string) bool {
+	return samePath(resolveStoreScopeRoot(cityPath, storePath), cityPath)
+}
+
+// scopeGraphStore routes a scope store to the city's graph-class binding when
+// the scope IS the city, and returns the store it was handed otherwise.
+//
+// Control beads and convergence roots are both ClassGraph and both live under a
+// city-keyed binding, so they share this one rule rather than each spelling it
+// out. When the routes relocate nothing — every city with no [storage] section,
+// and every rig scope — this returns the exact store value it was given, so
+// optional-capability type assertions the callers make against it keep working.
+func scopeGraphStore(cityPath, storePath string, cfg *config.City, scopeStore beads.Store) beads.Store {
+	if !scopeIsCity(cityPath, storePath) {
+		return scopeStore
+	}
+	return resolveGraphStore(cliStorageRoutes(cityPath), scopeStore, cfg, cityPath, nil)
 }
 
 // moleculeClassStore returns the store a compiled recipe's molecule must be
@@ -336,6 +376,26 @@ func moleculeClassStore(recipe *formula.Recipe, workStore, graphStore beads.Stor
 		return graphStore
 	}
 	return workStore
+}
+
+// cookOnClassRouted compiles a formula and instantiates it in the store the
+// compiled recipe's class demands; molecule.Cook picks its store before compiling.
+func cookOnClassRouted(ctx context.Context, workStore, graphStore beads.Store, formulaName string, searchPaths []string, opts molecule.Options) (*molecule.Result, error) {
+	if opts.ParentID == "" {
+		return nil, fmt.Errorf("cookOnClassRouted requires Options.ParentID")
+	}
+	compileVars := opts.Vars
+	if compileVars == nil {
+		compileVars = map[string]string{}
+	}
+	recipe, err := formula.CompileWithoutRuntimeVarValidation(ctx, formulaName, searchPaths, compileVars)
+	if err != nil {
+		return nil, fmt.Errorf("compiling formula %q: %w", formulaName, err)
+	}
+	if err := molecule.ValidateRecipeRuntimeVars(recipe, opts); err != nil {
+		return nil, err
+	}
+	return molecule.Instantiate(ctx, moleculeClassStore(recipe, workStore, graphStore), recipe, opts)
 }
 
 // recipeCoordClass returns the coordination class of the beads that
