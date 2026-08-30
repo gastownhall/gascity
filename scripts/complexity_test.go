@@ -13,11 +13,14 @@ func TestComplexityReportUpdateAndDiffUseStableJSONKeys(t *testing.T) {
 	repoRoot := repoRoot(t)
 	binDir := t.TempDir()
 	fake := filepath.Join(binDir, "gocyclo")
+	argsLog := filepath.Join(t.TempDir(), "args")
 	writeExecutable(t, fake, `#!/bin/sh
+printf '%s\n' "$*" > "$COMPLEXITY_ARGS_LOG"
 printf '%s\n' '23 gc (*Server).Run internal/server.go:10:1' '7 gc helper internal/server.go:30:1' '31 config Load internal/config/load.go:4:1'
+printf '%s\n' '99 gc ignored internal/server_test.go:1:1' '99 gc generated internal/genclient/client.go:1:1'
 `)
 	baseline := filepath.Join(t.TempDir(), "baseline.json")
-	if output, err := runComplexity(t, repoRoot, fake, baseline, "update"); err != nil {
+	if output, err := runComplexity(t, repoRoot, fake, baseline, argsLog, "update"); err != nil {
 		t.Fatalf("update failed: %v\n%s", err, output)
 	}
 	raw, err := os.ReadFile(baseline)
@@ -46,33 +49,41 @@ printf '%s\n' '23 gc (*Server).Run internal/server.go:10:1' '7 gc helper interna
 	if got.Items[0].File != "internal/config/load.go" || got.Items[1].Function != "(*Server).Run" {
 		t.Fatalf("unstable keys = %#v", got.Items)
 	}
+	args, err := os.ReadFile(argsLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(args), "./cmd/gc ./internal ./pkg") || !strings.Contains(string(args), "_test\\.go$") {
+		t.Fatalf("gocyclo invocation did not use explicit production scope: %s", args)
+	}
 
 	// A changed score is reported by diff and rejected by check.
 	writeExecutable(t, fake, `#!/bin/sh
 printf '%s\n' '26 gc (*Server).Run internal/server.go:99:1' '7 gc helper internal/server.go:30:1' '31 config Load internal/config/load.go:4:1'
 `)
-	if output, err := runComplexity(t, repoRoot, fake, baseline, "diff"); err != nil || !strings.Contains(string(output), "regressed") {
+	if output, err := runComplexity(t, repoRoot, fake, baseline, argsLog, "diff"); err != nil || !strings.Contains(string(output), "regressed") {
 		t.Fatalf("diff = %v, output %s", err, output)
 	}
-	if output, err := runComplexity(t, repoRoot, fake, baseline, "check"); err == nil || !strings.Contains(string(output), "regressed") {
+	if output, err := runComplexity(t, repoRoot, fake, baseline, argsLog, "check"); err == nil || !strings.Contains(string(output), "regressed") {
 		t.Fatalf("check = %v, output %s", err, output)
 	}
 }
 
 func TestComplexityReportRejectsInvalidMode(t *testing.T) {
 	root := repoRoot(t)
-	if output, err := runComplexity(t, root, "/does/not/exist", filepath.Join(t.TempDir(), "baseline.json"), "wat"); err == nil || !strings.Contains(string(output), "usage:") {
+	if output, err := runComplexity(t, root, "/does/not/exist", filepath.Join(t.TempDir(), "baseline.json"), filepath.Join(t.TempDir(), "args"), "wat"); err == nil || !strings.Contains(string(output), "usage:") {
 		t.Fatalf("invalid mode = %v, output %s", err, output)
 	}
 }
 
-func runComplexity(t *testing.T, repoRoot, tool, baseline, mode string) ([]byte, error) {
+func runComplexity(t *testing.T, repoRoot, tool, baseline, argsLog, mode string) ([]byte, error) {
 	t.Helper()
 	cmd := exec.Command(filepath.Join(repoRoot, "scripts", "ci", "complexity.sh"), mode)
 	cmd.Dir = repoRoot
 	cmd.Env = append(os.Environ(),
 		"COMPLEXITY_TOOL="+tool,
 		"COMPLEXITY_BASELINE="+baseline,
+		"COMPLEXITY_ARGS_LOG="+argsLog,
 		"COMPLEXITY_THRESHOLD=20",
 		"COMPLEXITY_TOP=50",
 	)

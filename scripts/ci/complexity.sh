@@ -26,7 +26,7 @@ current=$(mktemp)
 trap 'rm -f "$current"' EXIT
 # Keep this allowlist explicit: examples, test harnesses, and code generators
 # are not shipped library/runtime code and would distort the signal.
-"$TOOL" -ignore '(^|/)(_test\.go|genclient|dashboardspa|conformance|testdata|fixtures|generated)(/|$)' ./cmd/gc ./internal ./pkg >"$current"
+"$TOOL" -ignore '(_test\.go$|(^|/)(genclient|dashboardspa|conformance|testdata|fixtures|generated)(/|$))' ./cmd/gc ./internal ./pkg >"$current"
 
 python3 - "$MODE" "$current" "$BASELINE" "$THRESHOLD" "$TOP" <<'PY'
 import json, os, pathlib, sys
@@ -46,6 +46,11 @@ for raw in pathlib.Path(current_path).read_text().splitlines():
         continue
     package, function, location = fields[1:]
     file = location.rsplit(":", 2)[0]
+    # Keep a defensive filter here as well as gocyclo's -ignore expression;
+    # this prevents a tool-version change from pulling non-shipped trees into
+    # the baseline.
+    if file.endswith("_test.go") or any(f"/{part}/" in f"/{file}/" for part in ("genclient", "dashboardspa", "conformance", "testdata", "fixtures", "generated")):
+        continue
     items.append({"package": package, "function": function, "file": file, "ccn": ccn})
 items.sort(key=lambda x: (-x["ccn"], x["package"], x["function"], x["file"]))
 
