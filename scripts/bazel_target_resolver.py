@@ -9,6 +9,7 @@ and build-graph changes as conservative all-target selections.
 from __future__ import annotations
 
 import argparse
+import ast
 import dataclasses
 import json
 import os
@@ -79,6 +80,13 @@ def _fail_closed(error: str) -> Selection:
 
 
 def _normalize_path(path: str) -> str:
+    if len(path) >= 2 and path.startswith('"') and path.endswith('"'):
+        try:
+            decoded = ast.literal_eval(path)
+            if isinstance(decoded, str):
+                path = decoded
+        except (SyntaxError, ValueError):
+            pass
     if not path or "\x00" in path:
         raise ValueError("empty or NUL path")
     normalized = posixpath.normpath(path)
@@ -90,6 +98,21 @@ def _normalize_path(path: str) -> str:
 def _parse_name_status_z(raw: bytes) -> list[tuple[str, tuple[str, ...]]]:
     if not raw:
         raise ValueError("empty name-status input")
+    if b"\0" not in raw:
+        records: list[tuple[str, tuple[str, ...]]] = []
+        for line in raw.splitlines():
+            fields = line.decode(errors="surrogateescape").split("\t")
+            if len(fields) < 2 or not _STATUS.fullmatch(fields[0]):
+                raise ValueError("malformed tab-delimited name-status input")
+            status = fields[0]
+            count = 2 if status[0] in {"R", "C"} else 1
+            paths = fields[1:]
+            if len(paths) != count:
+                raise ValueError(f"{status} needs {count} path(s)")
+            records.append((status, tuple(_normalize_path(path) for path in paths)))
+        if not records:
+            raise ValueError("empty name-status input")
+        return records
     fields = raw.split(b"\0")
     if fields[-1] != b"":
         raise ValueError("unterminated name-status input")
