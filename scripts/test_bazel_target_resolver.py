@@ -76,37 +76,52 @@ class ResolveNameStatusZTest(unittest.TestCase):
 class ParseBEPTest(unittest.TestCase):
     requested = CONFIG_LABELS
 
-    def parse(self, events):
+    def parse(self, events, requested=None):
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as f:
             for event in events:
                 f.write(json.dumps(event) + "\n")
             path = f.name
         self.addCleanup(pathlib.Path(path).unlink, missing_ok=True)
-        return parse_bep_jsonl(path, self.requested)
+        return parse_bep_jsonl(path, self.requested if requested is None else requested)
 
-    def test_dedupes_sorts_and_intersects_configured_and_completed(self):
+    def test_dedupes_id_and_payload_but_rejects_duplicate_events(self):
         result = self.parse([
             {"id": {"targetConfigured": {"label": "//internal/config:config_storage_endpoint_test"}}, "configured": {"targetConfigured": {"label": "//internal/config:config_storage_endpoint_test"}}},
             {"id": {"targetConfigured": {"label": "//internal/config:config_envname_test"}}, "configured": {}},
             {"id": {"targetConfigured": {"label": "//other:ignored"}}, "configured": {}},
-            {"id": {"targetCompleted": {"label": "//internal/config:config_envname_test"}}, "completed": {"success": True}},
-            {"id": {"targetCompleted": {"label": "//internal/config:config_envname_test"}}, "completed": {"success": True}},
+            {"id": {"targetCompleted": {"label": "//internal/config:config_envname_test"}}, "completed": {"targetCompleted": {"label": "//internal/config:config_envname_test"}, "success": True}},
             {"id": {"targetCompleted": {"label": "//internal/config:config_storage_endpoint_test"}}, "completed": {"success": True}},
         ])
-        self.assertEqual(result.configured, (
-            "//internal/config:config_envname_test",
-            "//internal/config:config_storage_endpoint_test",
-        ))
-        self.assertEqual(result.completed, result.configured)
-        self.assertEqual(result.configured_count, 2)
-        self.assertEqual(result.completed_count, 2)
-        self.assertIsNone(result.error)
+        self.assertIsNotNone(result.error)
+        self.assertIsNone(result.completed_count)
+
+    def test_requested_pattern_zero_one_three_and_mismatch(self):
+        zero = self.parse([{"id": {"pattern": {"patterns": []}}, "pattern": {"patterns": []}}])
+        self.assertIsNotNone(zero.error)
+        one = self.parse([
+            {"id": {"pattern": {"pattern": "//internal/config:config_envname_test"}}, "pattern": {"pattern": "//internal/config:config_envname_test"}},
+            {"id": {"targetConfigured": {"label": "//internal/config:config_envname_test"}}, "configured": {}},
+            {"id": {"targetCompleted": {"label": "//internal/config:config_envname_test"}}, "completed": {}},
+        ], ("//internal/config:config_envname_test",))
+        self.assertEqual(one.configured_count, 1)
+        three_events = [{"id": {"pattern": {"pattern": list(self.requested)}}, "pattern": {"patterns": list(self.requested)}}]
+        for label in self.requested:
+            three_events.extend([
+                {"id": {"targetConfigured": {"label": label}}, "configured": {}},
+                {"id": {"targetCompleted": {"label": label}}, "completed": {}},
+            ])
+        three = self.parse(three_events)
+        self.assertEqual(three.configured_count, 3)
+        mismatch = self.parse([
+            {"id": {"pattern": {"pattern": "//other:target"}}, "pattern": {}},
+        ])
+        self.assertIsNotNone(mismatch.error)
 
     def test_nested_fallback_labels_are_accepted(self):
         result = self.parse([
             {"id": {"targetConfigured": {}}, "configured": {"targetConfigured": {"label": "//internal/config:config_diagnostic_locations_test"}}},
             {"id": {"targetCompleted": {}}, "completed": {"targetCompleted": {"label": "//internal/config:config_diagnostic_locations_test"}}},
-        ])
+        ], ("//internal/config:config_diagnostic_locations_test",))
         self.assertEqual(result.configured_count, 1)
         self.assertEqual(result.completed_count, 1)
         self.assertIsNone(result.error)
@@ -124,7 +139,7 @@ class ParseBEPTest(unittest.TestCase):
 
     def test_real_bazel_9_2_fixture(self):
         fixture = pathlib.Path(__file__).with_name("testdata") / "bazel" / "real_bazel_9_2.bep.jsonl"
-        result = parse_bep_jsonl(fixture, self.requested)
+        result = parse_bep_jsonl(fixture, ("//internal/config:config_envname_test",))
         self.assertEqual(result.configured_count, 1)
         self.assertEqual(result.completed_count, 1)
         self.assertEqual(result.configured, ("//internal/config:config_envname_test",))
