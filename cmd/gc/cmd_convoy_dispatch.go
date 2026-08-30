@@ -486,8 +486,15 @@ func quarantineControlFailureBead(store beads.Store, bead beads.Bead, cause erro
 	_, _ = dispatch.ReconcileClosedScopeMember(store, beadID)
 
 	if strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]) == beadmeta.KindWorkflowFinalize {
+		// Best-effort, like the ReconcileClosedScopeMember call above: the
+		// finalizer's own quarantine (closed + labeled, just above) is the
+		// load-bearing action and must stand regardless of what happens next.
+		// A close failure here is expected transiently -- the store may not
+		// yet reflect the finalizer close this root's "blocked by" edge is
+		// waiting on -- and is retried by a later pass rather than unwinding
+		// an already-successful quarantine.
 		if err := settleRootForQuarantinedFinalizer(store, bead); err != nil {
-			return fmt.Errorf("%s: closing root for quarantined finalizer: %w", beadID, err)
+			workflowTracef("control-quarantine bead=%s: closing root for quarantined finalizer failed (will retry later) err=%v", beadID, err)
 		}
 	}
 	return nil

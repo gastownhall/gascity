@@ -2547,6 +2547,63 @@ func TestQuarantineControlFailureBeadNeverDowngradesAlreadySettledRoot(t *testin
 	}
 }
 
+// TestQuarantineControlFailureBeadToleratesRootCloseFailure is the
+// counterpart to control_semantic_retry_test.go's deadlockedFinalizeFixture:
+// that fixture's refusingCloseStore permanently refuses to close a workflow
+// root that is (from the store's point of view) still blocked by its own
+// finalizer. Quarantining the finalizer must still succeed even when the
+// follow-up root close does not -- the finalizer's own quarantine is the
+// load-bearing action here, exactly as emitControlStalled's own event loss is
+// already tolerated by handleControlDispatchError. See ga-japz50.
+func TestQuarantineControlFailureBeadToleratesRootCloseFailure(t *testing.T) {
+	base := beads.NewMemStore()
+	root, err := base.Create(beads.Bead{
+		Title:  "workflow root",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind": "workflow",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	finalizer, err := base.Create(beads.Bead{
+		Title:  "finalizer",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":         "workflow-finalize",
+			"gc.root_bead_id": root.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create finalizer: %v", err)
+	}
+	store := &refusingCloseStore{Store: base, blockedID: root.ID, blockerID: finalizer.ID}
+
+	if err := quarantineControlFailureBead(store, finalizer, errors.New("finalizer exploded")); err != nil {
+		t.Fatalf("quarantineControlFailureBead: %v, want nil -- a root close failure must not undo an already-successful finalizer quarantine", err)
+	}
+
+	gotFinalizer, err := base.Get(finalizer.ID)
+	if err != nil {
+		t.Fatalf("get finalizer: %v", err)
+	}
+	if gotFinalizer.Status != "closed" {
+		t.Fatalf("finalizer status = %q, want closed", gotFinalizer.Status)
+	}
+	if !slices.Contains(gotFinalizer.Labels, "gc:control-quarantined") {
+		t.Fatalf("finalizer labels = %#v, want gc:control-quarantined", gotFinalizer.Labels)
+	}
+
+	gotRoot, err := base.Get(root.ID)
+	if err != nil {
+		t.Fatalf("get root: %v", err)
+	}
+	if gotRoot.Status != "open" {
+		t.Fatalf("root status = %q, want open -- the store refused the close, so the root is left untouched for a later pass", gotRoot.Status)
+	}
+}
+
 func TestRunControlDispatcherReturnsTransientControlErrorWithoutQuarantine(t *testing.T) {
 	clearGCEnv(t)
 
