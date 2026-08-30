@@ -10393,3 +10393,117 @@ func TestOrderDispatchMaxDispatchesPerTickConfig(t *testing.T) {
 		}
 	}
 }
+
+// A failing exec order recorded only the Go error string — "exit status 1" —
+// while the command's own diagnostic went to the controller log and no further.
+// Live proof: pr-intake-sweep failed 94/94 across three cities for two days and
+// every order.failed event said "exit status 1".
+func TestOrderDispatchExecFailureEventCarriesTheCommandsOutput(t *testing.T) {
+	store := beads.NewMemStore()
+	var rec memRecorder
+	var stderr bytes.Buffer
+
+	const diagnostic = "actor evidence is stale: regenerate the canary"
+	aa := []orders.Order{{
+		Name:     "sweep",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Exec:     `printf '%s\n' "` + diagnostic + `" >&2; exit 1`,
+	}}
+
+	m := &memoryOrderDispatcher{
+		aa:      aa,
+		storeFn: func(_ execStoreTarget) (beads.Store, error) { return store, nil },
+		execRun: shellExecRunner,
+		rec:     &rec,
+		stderr:  &stderr,
+		cfg:     &config.City{},
+	}
+	m.dispatch(context.Background(), t.TempDir(), time.Now())
+	m.drain(context.Background())
+
+	var msg string
+	for _, e := range rec.events {
+		if e.Type == events.OrderFailed && e.Subject == "sweep" {
+			msg = e.Message
+		}
+	}
+	if msg == "" {
+		t.Fatalf("no order.failed event for sweep; stderr = %q", stderr.String())
+	}
+	if !strings.Contains(msg, diagnostic) {
+		t.Fatalf("order.failed dropped the command's own reason; message = %q", msg)
+	}
+	// The exit status still has to survive alongside it.
+	if !strings.Contains(msg, "exit status 1") {
+		t.Fatalf("order.failed lost the exit status; message = %q", msg)
+	}
+}
+
+// The output now rides the event bus into events.jsonl and SSE, so a secret the
+// command echoes must be scrubbed on the way in, exactly as the log path does.
+func TestOrderDispatchExecFailureEventRedactsSecretsInOutput(t *testing.T) {
+	const secret = "ghp_projectedControllerToken0123456789"
+	t.Setenv("GITHUB_TOKEN", secret)
+	t.Setenv("GH_TOKEN", secret)
+
+	store := beads.NewMemStore()
+	var rec memRecorder
+	var stderr bytes.Buffer
+
+	aa := []orders.Order{{
+		Name:     "leaky",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Exec:     `printf '%s\n' "$GITHUB_TOKEN" >&2; exit 1`,
+	}}
+
+	m := &memoryOrderDispatcher{
+		aa:      aa,
+		storeFn: func(_ execStoreTarget) (beads.Store, error) { return store, nil },
+		execRun: shellExecRunner,
+		rec:     &rec,
+		stderr:  &stderr,
+		cfg:     &config.City{},
+	}
+	m.dispatch(context.Background(), t.TempDir(), time.Now())
+	m.drain(context.Background())
+
+	for _, e := range rec.events {
+		if e.Type == events.OrderFailed && strings.Contains(e.Message, secret) {
+			t.Fatalf("order.failed leaked a projected token onto the event bus: %q", e.Message)
+		}
+	}
+}
+
+// Output is unbounded — a chatty failing order must not push a megabyte of log
+// into every subscriber's event stream.
+func TestOrderDispatchExecFailureEventBoundsTheOutputItCarries(t *testing.T) {
+	store := beads.NewMemStore()
+	var rec memRecorder
+	var stderr bytes.Buffer
+
+	aa := []orders.Order{{
+		Name:     "chatty",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Exec:     `awk 'BEGIN{for(i=0;i<20000;i++) print "noise line " i}' >&2; exit 1`,
+	}}
+
+	m := &memoryOrderDispatcher{
+		aa:      aa,
+		storeFn: func(_ execStoreTarget) (beads.Store, error) { return store, nil },
+		execRun: shellExecRunner,
+		rec:     &rec,
+		stderr:  &stderr,
+		cfg:     &config.City{},
+	}
+	m.dispatch(context.Background(), t.TempDir(), time.Now())
+	m.drain(context.Background())
+
+	for _, e := range rec.events {
+		if e.Type == events.OrderFailed && len(e.Message) > maxOrderFailureOutputBytes*2 {
+			t.Fatalf("order.failed message = %d bytes, want bounded near %d", len(e.Message), maxOrderFailureOutputBytes)
+		}
+	}
+}

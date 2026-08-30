@@ -17,7 +17,6 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/sessionlog"
-	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func immediateStaleKeyDetectionWaiter(context.Context, string) error { return nil }
@@ -63,7 +62,7 @@ func awaitStaleKeyWaiterEntry(t *testing.T, waiter *manualStaleKeyDetectionWaite
 		if got != want {
 			t.Fatalf("stale-key waiter entered for %q, want %q", got, want)
 		}
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(goroutineHangBudget):
 		t.Fatalf("timed out waiting for stale-key waiter entry for %q", want)
 	}
 }
@@ -73,7 +72,7 @@ func awaitSessionOperation(t *testing.T, result <-chan error, description string
 	select {
 	case err := <-result:
 		return err
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(goroutineHangBudget):
 		t.Fatalf("timed out waiting for %s", description)
 		return nil
 	}
@@ -4534,6 +4533,92 @@ func TestTranscriptPathSkipsAmbiguousWorkDirFallback(t *testing.T) {
 	}
 }
 
+// TestTranscriptPathClassifiedDistinguishesAbsentFromAmbiguous pins the reason
+// codes behind an empty transcript path. TranscriptPath returns ("", nil) for
+// three unrelated situations, so a caller that treats every empty result the same
+// way cannot tell a permanent refusal from a transcript that has not been written
+// yet. TranscriptPathClassified separates them.
+func TestTranscriptPathClassifiedDistinguishesAbsentFromAmbiguous(t *testing.T) {
+	newManagerWithSession := func(t *testing.T, workDir string, titles ...string) (*Manager, []Info) {
+		t.Helper()
+		store := beads.NewMemStore()
+		mgr := NewManagerWithOptions(store, runtime.NewFake())
+		infos := make([]Info, 0, len(titles))
+		for _, title := range titles {
+			info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: title, Command: "claude", WorkDir: workDir, Provider: "claude", Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+			if err != nil {
+				t.Fatalf("Create %s: %v", title, err)
+			}
+			infos = append(infos, info)
+		}
+		return mgr, infos
+	}
+
+	t.Run("absent", func(t *testing.T) {
+		workDir := t.TempDir()
+		searchBase := t.TempDir()
+		mgr, infos := newManagerWithSession(t, workDir, "only")
+
+		// Sole session on the workdir, nothing written to disk yet.
+		path, lookup, err := mgr.TranscriptPathClassified(infos[0].ID, []string{searchBase})
+		if err != nil {
+			t.Fatalf("TranscriptPathClassified: %v", err)
+		}
+		if path != "" {
+			t.Fatalf("path = %q, want empty before any transcript is written", path)
+		}
+		if lookup != TranscriptAbsent {
+			t.Fatalf("lookup = %v, want TranscriptAbsent", lookup)
+		}
+
+		slugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+		if err := os.MkdirAll(slugDir, 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		want := filepath.Join(slugDir, "latest.jsonl")
+		if err := os.WriteFile(want, []byte("{}\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		path, lookup, err = mgr.TranscriptPathClassified(infos[0].ID, []string{searchBase})
+		if err != nil {
+			t.Fatalf("TranscriptPathClassified after write: %v", err)
+		}
+		if path != want {
+			t.Fatalf("path = %q, want %q", path, want)
+		}
+		if lookup != TranscriptFound {
+			t.Fatalf("lookup = %v, want TranscriptFound", lookup)
+		}
+	})
+
+	t.Run("ambiguous", func(t *testing.T) {
+		workDir := t.TempDir()
+		searchBase := t.TempDir()
+		mgr, infos := newManagerWithSession(t, workDir, "one", "two")
+
+		slugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+		if err := os.MkdirAll(slugDir, 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(slugDir, "latest.jsonl"), []byte("{}\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+
+		// Two keyless sessions share the workdir: the refusal is deliberate, not a
+		// missing file — the transcript above exists and is still not resolved.
+		path, lookup, err := mgr.TranscriptPathClassified(infos[1].ID, []string{searchBase})
+		if err != nil {
+			t.Fatalf("TranscriptPathClassified: %v", err)
+		}
+		if path != "" {
+			t.Fatalf("path = %q, want empty when the workdir fallback is ambiguous", path)
+		}
+		if lookup != TranscriptAmbiguous {
+			t.Fatalf("lookup = %v, want TranscriptAmbiguous", lookup)
+		}
+	})
+}
+
 func TestTranscriptPathCodexSessionKeyBeatsAmbiguousWorkDirFallback(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -5183,6 +5268,63 @@ func TestEnsureRunning_RetriesExplicitResumeCommandWhenResumeKeyDiverged(t *test
 	}
 	if want := "claude --dangerously-skip-permissions"; retryCommand != want {
 		t.Fatalf("fresh retry command = %q, want %q", retryCommand, want)
+	}
+}
+
+// A first-start session launched with "claude ... --session-id <key>" carries no
+// resume flag, so the resume fallback in retryFreshStartAfterStaleKey never
+// reaches it. When the embedded session id diverges from the bead's current
+// session_key (a concurrent fresh start minted a new key, or a stale store
+// read), the keyed stripSessionIDFlag is a no-op and — before the
+// stripSessionIDFlagArg fallback — the retry replayed the dead
+// "--session-id <oldkey>" verbatim into the same "id already in use" provider
+// rejection the retry exists to escape. This pins the value-agnostic fallback:
+// the retried Start command must drop the diverged session id.
+func TestEnsureRunning_RetriesWhenSessionIDKeyDiverged(t *testing.T) {
+	store := beads.NewMemStore()
+	base := runtime.NewFake()
+
+	sp := &startupDeathProvider{Fake: base}
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "worker", Title: "", Command: "claude --dangerously-skip-permissions", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{
+		ResumeFlag:    "--resume",
+		SessionIDFlag: "--session-id",
+	}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := store.SetMetadata(info.ID, "session_key", "key-B-current"); err != nil {
+		t.Fatalf("SetMetadata session_key: %v", err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	sp.armed = true
+
+	// A first-start command (no resume flag) whose --session-id carries a
+	// DIVERGED key (KEY_A) while the bead's session_key is KEY_B. The keyed
+	// strip ("--session-id key-B-current") cannot match it; only the
+	// value-agnostic fallback produces a clean fresh start.
+	resumeCommand := "claude --dangerously-skip-permissions --session-id key-A-diverged"
+	err = mgr.Send(context.Background(), info.ID, "hello", resumeCommand, runtime.Config{WorkDir: "/tmp"})
+	if err != nil {
+		t.Fatalf("Send should recover via fresh start when session id key diverged, got: %v", err)
+	}
+
+	var retryCommand string
+	for _, call := range base.Calls {
+		if call.Method == "Start" && call.Name == info.SessionName {
+			retryCommand = call.Config.Command
+		}
+	}
+	if retryCommand == "" {
+		t.Fatalf("fresh retry Start call not recorded: %#v", base.Calls)
+	}
+	if want := "claude --dangerously-skip-permissions"; retryCommand != want {
+		t.Fatalf("fresh retry command = %q, want %q (diverged --session-id must be stripped)", retryCommand, want)
 	}
 }
 

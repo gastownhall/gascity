@@ -27,6 +27,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
+	"github.com/gastownhall/gascity/internal/worktree"
 )
 
 type listFailStore struct {
@@ -880,14 +881,25 @@ func TestDefaultScaleCheckCountsSeesExternalRoutedWorkAfterCachePrime(t *testing
 func TestDefaultScaleCheckDemandCarriesTriggerBeadID(t *testing.T) {
 	const template = "gascity/workflows.codex-min"
 	store := beads.NewMemStore()
+	baseSHA := strings.Repeat("a", 40)
 	work, err := store.Create(beads.Bead{
 		Title:  "manual order run wisp",
 		Type:   "task",
 		Status: "open",
 		Metadata: map[string]string{
-			beadmeta.PackMetadataKey:          "packer",
-			beadmeta.PackWorkspaceMetadataKey: "existing-workspace",
-			"gc.routed_to":                    template,
+			beadmeta.PackMetadataKey:               "packer",
+			beadmeta.PackWorkspaceMetadataKey:      "existing-workspace",
+			beadmeta.WorkDirMetadataKey:            "/worktrees/gc-test",
+			beadmeta.WorkBranchMetadataKey:         "work/gc-test",
+			beadmeta.WorktreeRootMetadataKey:       "/worktrees",
+			beadmeta.WorktreeRepoMetadataKey:       "/repos/gascity",
+			beadmeta.WorktreeBaseRefMetadataKey:    "main",
+			beadmeta.WorktreeBaseSHAMetadataKey:    baseSHA,
+			beadmeta.WorktreeCreatorMetadataKey:    "gc-sling",
+			beadmeta.WorktreeOwnerMetadataKey:      "gc-sling",
+			beadmeta.WorktreeGenerationMetadataKey: "1",
+			beadmeta.WorktreeLifecycleMetadataKey:  worktree.LifecycleActive,
+			"gc.routed_to":                         template,
 		},
 	})
 	if err != nil {
@@ -919,6 +931,11 @@ func TestDefaultScaleCheckDemandCarriesTriggerBeadID(t *testing.T) {
 	}
 	if got := demand[template].StoreRefs[work.ID]; got != "rig:gascity" {
 		t.Fatalf("StoreRefs[%s] = %q, want rig:gascity", work.ID, got)
+	}
+	spec := demand[template].WorktreeSpecs[work.ID]
+	if spec == nil || spec.BeadID != work.ID || spec.StoreRef != "rig:gascity" ||
+		spec.Path != "/worktrees/gc-test" || spec.BaseSHA != baseSHA || spec.Owner != "gc-sling" {
+		t.Fatalf("WorktreeSpecs[%s] = %+v, want complete published owner evidence", work.ID, spec)
 	}
 }
 
@@ -5392,7 +5409,7 @@ func TestBuildDesiredState_NamepoolMaxOneUsesNamepoolIdentity(t *testing.T) {
 	}
 }
 
-func TestBuildDesiredState_NewPoolSessionBeadDefersAliasWhenConcreteAliasTaken(t *testing.T) {
+func TestBuildDesiredState_DoesNotCreateWhenConcreteNamepoolIdentityHeld(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
 
@@ -5421,10 +5438,9 @@ func TestBuildDesiredState_NewPoolSessionBeadDefersAliasWhenConcreteAliasTaken(t
 			StartCommand:      "true",
 			MaxActiveSessions: intPtr(3),
 			ScaleCheck:        "printf 1",
-			// A NAMEPOOL agent: its members are identified by stable pool names
-			// ("furiosa"), which still persist as aliases, so the alias-conflict
-			// deferral lane this test covers is still reachable. Transient numeric
-			// slots never take an alias at all, so they have nothing to defer.
+			// A one-member namepool: the foreign manual row above holds its only
+			// concrete identity, so fresh allocation must fail at capacity rather
+			// than creating another occupant with the alias merely deferred.
 			NamepoolNames: []string{"furiosa"},
 		}},
 	}
@@ -5436,57 +5452,25 @@ func TestBuildDesiredState_NewPoolSessionBeadDefersAliasWhenConcreteAliasTaken(t
 	if err != nil {
 		t.Fatalf("load session beads: %v", err)
 	}
-	var created beads.Bead
+	managed := 0
 	for _, candidate := range sessionBeads {
 		if candidate.Metadata[poolManagedMetadataKey] == boolMetadata(true) {
-			created = candidate
-			break
+			managed++
 		}
 	}
-	if created.ID == "" {
-		t.Fatalf("did not create a managed pool session bead; beads=%#v", sessionBeads)
+	if managed != 0 || len(sessionBeads) != 1 {
+		t.Fatalf("session beads = %#v, want only the manual concrete-identity holder", sessionBeads)
 	}
-	if got := created.Metadata["agent_name"]; got != "rig/furiosa" {
-		t.Fatalf("created agent_name = %q, want namepool identity", got)
+	if len(dsResult.State) != 1 {
+		t.Fatalf("desired state = %#v, want only the manual concrete-identity holder", dsResult.State)
 	}
-	if got := created.Metadata["alias"]; got != "" {
-		t.Fatalf("created alias = %q, want deferred until alias guard accepts it", got)
+	for _, tp := range dsResult.State {
+		if !tp.ManualSession || tp.PoolSlot != 0 {
+			t.Fatalf("desired entry = %+v, want manual holder and no pool occupant", tp)
+		}
 	}
-	if got := created.Metadata["pool_slot"]; got != "1" {
-		t.Fatalf("created pool_slot = %q, want 1", got)
-	}
-	tp, ok := dsResult.State[created.Metadata["session_name"]]
-	if !ok {
-		t.Fatalf("desired state missing created session %q; keys=%v", created.Metadata["session_name"], mapKeys(dsResult.State))
-	}
-	if got := tp.Alias; got != "" {
-		t.Fatalf("deferred pool TemplateParams.Alias = %q, want empty until alias is claimed", got)
-	}
-	if got := tp.Env["GC_ALIAS"]; got != "" {
-		t.Fatalf("deferred pool GC_ALIAS = %q, want empty until alias is claimed", got)
-	}
-	if got := tp.Env["GC_AGENT"]; got != tp.SessionName {
-		t.Fatalf("deferred pool GC_AGENT = %q, want bead session name %q", got, tp.SessionName)
-	}
-	if tp.EnvIdentityStamped {
-		t.Fatal("deferred pool EnvIdentityStamped = true, want false until alias is claimed")
-	}
-
-	clk := &clock.Fake{Time: time.Date(2026, 5, 7, 15, 10, 0, 0, time.UTC)}
-	var syncStderr bytes.Buffer
-	syncSessionBeads(cityPath, store, dsResult.State, runtime.NewFake(), allConfiguredDS(dsResult.State), cfg, clk, &syncStderr, false)
-	got, err := store.Get(created.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Metadata["alias"] != "" {
-		t.Fatalf("synced alias = %q, want still deferred after conflict", got.Metadata["alias"])
-	}
-	if got.Metadata[poolAliasConflictMetadataKey] != "rig/furiosa" {
-		t.Fatalf("pool_alias_conflict = %q, want rig/furiosa", got.Metadata[poolAliasConflictMetadataKey])
-	}
-	if !strings.Contains(syncStderr.String(), "unavailable") {
-		t.Fatalf("sync stderr %q does not mention alias conflict", syncStderr.String())
+	if !strings.Contains(stderr.String(), "no free concrete slot") {
+		t.Fatalf("stderr %q does not report concrete-slot exhaustion", stderr.String())
 	}
 }
 
@@ -5724,7 +5708,7 @@ func TestCreatePoolSessionBeadWithGuardedAliasSerializesResolvedTmuxAlias(t *tes
 	}
 }
 
-func TestCreatePoolSessionBeadWithGuardedAliasDropsTmuxAliasWhenIdentifierLockFails(t *testing.T) {
+func TestCreatePoolSessionBeadWithGuardedAliasFailsClosedWhenIdentifierLockFails(t *testing.T) {
 	store := beads.NewMemStore()
 	cityPath := filepath.Join(t.TempDir(), "not-a-directory")
 	if err := os.WriteFile(cityPath, []byte("city path blocks lock dir creation"), 0o600); err != nil {
@@ -5745,16 +5729,21 @@ func TestCreatePoolSessionBeadWithGuardedAliasDropsTmuxAliasWhenIdentifierLockFa
 	bp.sessionBeads = newSessionBeadSnapshot(nil)
 
 	info, err := createPoolSessionBeadWithGuardedAlias(bp, &cfg.Agents[0], "worker", "worker-1", 1, nil)
-	if err != nil {
-		t.Fatalf("createPoolSessionBeadWithGuardedAlias: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "session identifier lock") {
+		t.Fatalf("createPoolSessionBeadWithGuardedAlias error = %v, want identifier-lock failure", err)
 	}
-
-	want := poolRuntimeSessionName(nil, "worker-1", "worker", true)
-	if got := info.SessionNameMetadata; got != want {
-		t.Fatalf("session_name = %q, want transient pool identity fallback %q when tmux_alias lock fails", got, want)
+	if info.ID != "" {
+		t.Fatalf("lock-refused create returned session %#v", info)
 	}
-	if strings.Contains(stderr.String(), "creating without alias") && strings.Contains(info.SessionNameMetadata, "crew--test-city") {
-		t.Fatalf("lock failure warning emitted but session_name still used tmux_alias: %q", info.SessionNameMetadata)
+	created, listErr := store.ListByLabel(sessionBeadLabel, 0)
+	if listErr != nil {
+		t.Fatalf("listing session beads: %v", listErr)
+	}
+	if len(created) != 0 {
+		t.Fatalf("session beads = %#v, want none after lock failure", created)
+	}
+	if strings.Contains(stderr.String(), "creating without alias") {
+		t.Fatalf("stderr = %q, must not advertise an unguarded fallback", stderr.String())
 	}
 }
 
@@ -5901,7 +5890,7 @@ func TestRealizePoolDesiredSessions_ParallelizesDistinctAliasCreates(t *testing.
 	}
 }
 
-func TestCreatePoolSessionBeadWithGuardedAlias_LogsAliasLockSetupFailure(t *testing.T) {
+func TestCreatePoolSessionBeadWithGuardedAlias_LockSetupFailureNeverCreates(t *testing.T) {
 	store := beads.NewMemStore()
 	cityPath := filepath.Join(t.TempDir(), "city-file")
 	if err := os.WriteFile(cityPath, []byte("not a directory"), 0o644); err != nil {
@@ -5916,14 +5905,21 @@ func TestCreatePoolSessionBeadWithGuardedAlias_LogsAliasLockSetupFailure(t *test
 	}
 
 	bead, err := createPoolSessionBeadWithGuardedAlias(bp, nil, "claude", "claude-1", 1, nil)
-	if err != nil {
-		t.Fatalf("createPoolSessionBeadWithGuardedAlias: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "session identifier lock") {
+		t.Fatalf("createPoolSessionBeadWithGuardedAlias error = %v, want identifier-lock setup failure", err)
 	}
-	if got := bead.Alias; got != "" {
-		t.Fatalf("alias = %q, want empty fallback when alias lock setup fails", got)
+	if bead.ID != "" {
+		t.Fatalf("lock-refused create returned session %#v", bead)
 	}
-	if !strings.Contains(stderr.String(), "locking alias \"claude-1\"") || !strings.Contains(stderr.String(), "creating without alias") {
-		t.Fatalf("stderr = %q, want alias-lock setup failure and unaliased fallback", stderr.String())
+	created, listErr := store.ListByLabel(sessionBeadLabel, 0)
+	if listErr != nil {
+		t.Fatalf("listing session beads: %v", listErr)
+	}
+	if len(created) != 0 {
+		t.Fatalf("session beads = %#v, want none after lock setup failure", created)
+	}
+	if strings.Contains(stderr.String(), "creating without alias") {
+		t.Fatalf("stderr = %q, must not advertise an unguarded fallback", stderr.String())
 	}
 }
 
@@ -8642,7 +8638,7 @@ func TestBuildDesiredState_PoolSessionCoreFingerprintStableAcrossTicks(t *testin
 	}
 }
 
-func TestBuildDesiredState_FallsBackToLegacyPoolDemandWhenListFails(t *testing.T) {
+func TestBuildDesiredState_BlocksFreshPoolDemandWhenSessionListFails(t *testing.T) {
 	cityPath := t.TempDir()
 	memStore := beads.NewMemStore()
 	store := listFailStore{Store: memStore}
@@ -8657,22 +8653,18 @@ func TestBuildDesiredState_FallsBackToLegacyPoolDemandWhenListFails(t *testing.T
 	}
 
 	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
-	desired := dsResult.State
-	// With min=1, max=1: both the singleton path and the pool-floor path
-	// may contribute a session, yielding 1 or 2 desired entries depending
-	// on timing. Accept either.
-	if len(desired) < 1 || len(desired) > 2 {
-		t.Fatalf("desired sessions = %d, want 1 or 2", len(desired))
+	if len(dsResult.State) != 0 {
+		t.Fatalf("desired sessions = %#v, want no fresh row from a partial session census", dsResult.State)
 	}
-	// At least one session should have a worker-prefixed name.
-	found := false
-	for sn := range desired {
-		if strings.HasPrefix(sn, "worker") {
-			found = true
-		}
+	if !dsResult.SessionQueryPartial || dsResult.SessionSnapshotComplete {
+		t.Fatalf("session snapshot flags = partial:%v complete:%v, want partial and incomplete", dsResult.SessionQueryPartial, dsResult.SessionSnapshotComplete)
 	}
-	if !found {
-		t.Fatalf("no worker-prefixed session in desired: %v", desired)
+	rows, err := memStore.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		t.Fatalf("list backing store: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("session rows = %#v, want zero creates on partial census", rows)
 	}
 }
 
@@ -9996,6 +9988,7 @@ func TestSelectOrCreatePoolSessionBead_PreservesPreferredNamepoolSlotAboveReduce
 			SessionBeadID: nux.ID,
 			WorkBeadID:    "work-1",
 		},
+		time.Time{},
 		map[string]bool{},
 		usedSlots,
 	)
@@ -10075,6 +10068,7 @@ func TestSelectOrCreatePoolSessionBead_PreservesPreferredSlotViaAliasHistory(t *
 			SessionBeadID: nux.ID,
 			WorkBeadID:    "work-1",
 		},
+		time.Time{},
 		map[string]bool{},
 		usedSlots,
 	)
@@ -10186,6 +10180,7 @@ func TestSelectOrPlanPoolSessionBead_PreservesTwoAssignedSlotsAcrossCapShrink(t 
 				SessionBeadID: tc.beadID,
 				WorkBeadID:    tc.workBeadID,
 			},
+			time.Time{},
 			usedBeads,
 			usedSlots,
 		)
@@ -10253,6 +10248,7 @@ func TestSelectOrPlanPoolSessionBead_DoesNotPreserveInFlightNewAboveReducedCapac
 		"repo/gastown.polecat",
 		&preferredNux,
 		SessionRequest{Tier: "new", SessionBeadID: nux.ID},
+		time.Time{},
 		map[string]bool{},
 		usedSlots,
 	)

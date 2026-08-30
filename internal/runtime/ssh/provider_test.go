@@ -3,6 +3,7 @@ package ssh
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -561,6 +562,130 @@ func TestProvider_StartRunsPreStartAndAbortsOnFailure(t *testing.T) {
 	}
 	if firstCall(f, isTmux("new-session")) != nil {
 		t.Error("new-session must not run after a PreStart failure")
+	}
+}
+
+// TestProvider_PreStartFailureOmitsCredentials pins that a pre_start failure
+// keeps credentials out of its message. Both halves it renders can carry one:
+// the command may name a credential inline, and the prelude exported the
+// session env to the box, so a `set -x` trace or a failing curl echoes it
+// straight back. Unlike argv, this error is durable — logs, the event bus and
+// bead notes — so a value that lands in it stays there.
+//
+// Only the session env is in scope. The command ran on the far box and
+// inherited that box's environment, not this process's, which is why this path
+// takes runtime.SecretEnvValues rather than the host-side SetupCommandSecrets.
+func TestProvider_PreStartFailureOmitsCredentials(t *testing.T) {
+	const sentinel = "sk-test-NOT-A-REAL-CREDENTIAL-8f3a21"
+	f := &fakeRunner{respond: answerStaging(func(argv []string) ([]byte, int, error) {
+		switch {
+		case isTmux("has-session")(argv):
+			return nil, 1, nil
+		case len(argv) >= 3 && argv[0] == "sh" && argv[1] == "-c" && strings.Contains(argv[2], "curl"):
+			// What a `set -x` trace looks like: the box echoing back the value
+			// the prelude just exported to it.
+			return []byte("+ curl -H 'Authorization: Bearer " + sentinel + "'\ncurl: (22) 401"), 3, nil
+		}
+		return nil, 0, nil
+	})}
+	err := providerWith(f).Start(context.Background(), "s", runtime.Config{
+		Command: "agent",
+		// Both shapes at once: a credential written into the command inline —
+		// pre_start is user-authored config, so nothing stops one landing there
+		// — and a reference to one the prelude exported.
+		PreStart: []string{"curl -H \"Authorization: Bearer " + sentinel + "\" -u \"$ANTHROPIC_AUTH_TOKEN\" https://x"},
+		Env:      map[string]string{"ANTHROPIC_AUTH_TOKEN": sentinel, "GC_RIG": "hauler"},
+	})
+	if err == nil {
+		t.Fatal("Start must abort when a PreStart command fails")
+	}
+	if strings.Contains(err.Error(), sentinel) {
+		t.Errorf("a credential reached the pre_start failure: %v", err)
+	}
+	// The controls. Without these the assertion above passes on an error that
+	// rendered neither the command nor the output — including one where the
+	// command never ran, and one over-redacted into uselessness.
+	if !strings.Contains(err.Error(), "exited 3") {
+		t.Fatalf("the command did not fail as expected: %v", err)
+	}
+	for _, want := range []string{"curl: (22) 401", "Authorization: Bearer " + runtime.RedactedValue} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("failure detail missing %q, so nothing here was scrubbed: %v", want, err)
+		}
+	}
+	// An argv-safe value stays legible: hiding it costs diagnostics and buys
+	// nothing, since it is already readable in /proc/<pid>/cmdline.
+	if !strings.Contains(err.Error(), "$ANTHROPIC_AUTH_TOKEN") {
+		t.Errorf("the command's variable reference was scrubbed, which is the diagnostic: %v", err)
+	}
+}
+
+// TestProvider_PreStartTransportFailureOmitsCredentials covers the other way a
+// pre_start failure arrives, which is not the one it looks like.
+//
+// ssh reserves exit 255 for its own failures and cannot distinguish those from a
+// remote command that genuinely exits 255, so shellRunner.run collapses both
+// into a transport error and folds the box's stderr into its message. That
+// stderr belongs to the pre_start command, written after the prelude exported
+// the session env — so this branch is a credential channel that merely looks
+// like a connectivity one, and it reaches the same durable places.
+func TestProvider_PreStartTransportFailureOmitsCredentials(t *testing.T) {
+	const sentinel = "sk-test-NOT-A-REAL-CREDENTIAL-8f3a21"
+	f := &fakeRunner{respond: answerStaging(func(argv []string) ([]byte, int, error) {
+		switch {
+		case isTmux("has-session")(argv):
+			return nil, 1, nil
+		case len(argv) >= 3 && argv[0] == "sh" && argv[1] == "-c" && strings.Contains(argv[2], "curl"):
+			// Shaped exactly as shellRunner.run's 255 collapse renders it: the
+			// remote stderr verbatim, with no exit code to signal it was the
+			// command's own result.
+			return nil, -1, fmt.Errorf("ssh box: + curl -H 'Authorization: Bearer %s'\nKilled by signal 1", sentinel)
+		}
+		return nil, 0, nil
+	})}
+	err := providerWith(f).Start(context.Background(), "s", runtime.Config{
+		Command:  "agent",
+		PreStart: []string{"curl -u \"$ANTHROPIC_AUTH_TOKEN\" https://x"},
+		Env:      map[string]string{"ANTHROPIC_AUTH_TOKEN": sentinel, "GC_RIG": "hauler"},
+	})
+	if err == nil {
+		t.Fatal("Start must abort when a PreStart command fails at the transport")
+	}
+	if strings.Contains(err.Error(), sentinel) {
+		t.Errorf("a credential reached the pre_start transport failure: %v", err)
+	}
+	// The controls: the failure must still say what broke and where, or this
+	// passes on an error that carried no remote output to leak in the first
+	// place — and on one over-redacted into uselessness.
+	for _, want := range []string{"Killed by signal 1", "Authorization: Bearer " + runtime.RedactedValue, "$ANTHROPIC_AUTH_TOKEN"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the transport failure lost %q: %v", want, err)
+		}
+	}
+}
+
+// TestProvider_PreStartCancellationStaysMatchable pins the one exemption to the
+// rule above. Redacting means rendering rather than wrapping, which costs the
+// error chain — acceptable for a message nothing matches on, but cancellation
+// is matched on, and shellRunner.run returns it before reading any stderr, so
+// that branch has nothing to redact and keeps its %w.
+func TestProvider_PreStartCancellationStaysMatchable(t *testing.T) {
+	f := &fakeRunner{respond: answerStaging(func(argv []string) ([]byte, int, error) {
+		switch {
+		case isTmux("has-session")(argv):
+			return nil, 1, nil
+		case len(argv) >= 3 && argv[0] == "sh" && argv[1] == "-c" && strings.Contains(argv[2], "curl"):
+			return nil, -1, fmt.Errorf("ssh box: %w", context.DeadlineExceeded)
+		}
+		return nil, 0, nil
+	})}
+	err := providerWith(f).Start(context.Background(), "s", runtime.Config{
+		Command:  "agent",
+		PreStart: []string{"curl https://x"},
+		Env:      map[string]string{"GC_RIG": "hauler"},
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("a canceled pre_start must stay matchable, got %v", err)
 	}
 }
 

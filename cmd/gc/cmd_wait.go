@@ -67,8 +67,15 @@ func (s waitDependencyStoreSet) Get(id string) (beads.Bead, error) {
 	return storeref.Resolve(id, []beads.Store(s))
 }
 
-func newWaitDependencyStoreSet(cityStore beads.Store, rigStores map[string]beads.Store) waitDependencyStoreSet {
-	stores := make(waitDependencyStoreSet, 0, 1+len(rigStores))
+// newWaitDependencyStoreSet assembles the legs a wait's dependency ids resolve
+// against. Without the graph leg a binding-resident dependency misses on every
+// leg, and prepareWaitWakeState reads that ErrNotFound as proof the dependency
+// is gone: a silent FailWait. It leads because the binding is authoritative.
+func newWaitDependencyStoreSet(cityStore beads.Store, rigStores map[string]beads.Store, graphStore beads.GraphStore) waitDependencyStoreSet {
+	stores := make(waitDependencyStoreSet, 0, 2+len(rigStores))
+	if graphStore.Store != nil && graphStore.Store != cityStore {
+		stores = append(stores, graphStore.Store)
+	}
 	if cityStore != nil {
 		stores = append(stores, cityStore)
 	}
@@ -950,6 +957,13 @@ func loadWaitDependencyBead(cityPath string, cityStore beads.Store, depID string
 		}
 		return cityStore.Get(depID)
 	}
+	// The binding is not a work scope, so no candidate below covers it. Probed
+	// first for the same retained-copy reason as newWaitDependencyStoreSet.
+	if binding, ok, err := classBindingForID(cityPath, depID); err != nil {
+		return beads.Bead{}, err
+	} else if ok {
+		return binding.Get(depID)
+	}
 	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil {
 		return beads.Bead{}, err
@@ -1087,8 +1101,8 @@ func prepareWaitWakeStateWithSnapshot(sessFront *sessionpkg.Store, dependencies 
 		if wait.Kind != "deps" {
 			continue
 		}
-		// Dependency beads are WORK class and may live in a different scope
-		// from the session/wait coordination store.
+		// The wait bead is session-class; its dependencies can be any class or
+		// scope, so resolution is the caller's, through the legs it assembled.
 		ready, depErr := depsWaitReadyDetailedFrom(dependencies, wait)
 		if depErr != nil {
 			if errors.Is(depErr, beads.ErrNotFound) {

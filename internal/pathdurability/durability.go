@@ -62,10 +62,12 @@ const (
 
 // ephemeralFilesystems maps a superblock magic to the name shown to operators.
 //
-// tmpfs covers /tmp on a systemd host, /dev/shm, and every Kubernetes emptyDir.
-// overlayfs covers the container rootfs, which is what makes an in-pod path
-// like /var/tmp ephemeral even though it is not /tmp — the reason a prefix
-// denylist cannot do this job.
+// tmpfs covers /tmp on a systemd host, /dev/shm, and a Kubernetes emptyDir
+// declared with medium: Memory. A default emptyDir is a kubelet-host directory
+// bind-mounted into the pod, so statfs reports the host filesystem instead and
+// it lands in OtherDevice — warned about, not refused. overlayfs covers the
+// container rootfs, which is what makes an in-pod path like /var/tmp ephemeral
+// even though it is not /tmp — the reason a prefix denylist cannot do this job.
 var ephemeralFilesystems = map[uint32]string{
 	magicTmpfs:     "tmpfs",
 	magicRamfs:     "ramfs",
@@ -83,10 +85,21 @@ var (
 // Classify reports whether path is likely to survive replacement of the process
 // that registered it, judged relative to cityRoot.
 //
+// A relative path is resolved against cityRoot, matching how the rest of the
+// codebase reads a rig path out of city.toml. Resolving it against the process
+// working directory instead would produce a confident verdict about an unrelated
+// directory: probeDevice's ancestor walk terminates at "." rather than running
+// out of ancestors, so such a path reaches Unknown only if stat(".") itself
+// fails, and the fail-open rule below would not catch the mistake.
+//
 // It never returns an error: a probe that cannot reach a conclusion yields
 // Unknown, so a caller on an unsupported platform or an unreadable mount is
 // never blocked by a check that could not run.
 func Classify(cityRoot, path string) Result {
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(cityRoot, path)
+	}
+
 	cityDev, _, cityErr := probeDevice(resolveSymlinks(cityRoot))
 
 	dev, probed, err := probeDevice(resolveSymlinks(path))

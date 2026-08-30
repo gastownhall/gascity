@@ -167,7 +167,7 @@ func TestBuildOrderRunFeedItemsUsesAllOrdersForDisabledExecMetadata(t *testing.T
 		t.Fatalf("create tracking bead: %v", err)
 	}
 
-	got, err := buildOrderRunFeedItems(state, "city", "test-city")
+	got, err := buildOrderRunFeedItems(state, "city", "test-city", 0)
 	if err != nil {
 		t.Fatalf("buildOrderRunFeedItems: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestOrderTrackingUpdatedAtLogsLookupFailure(t *testing.T) {
 	}
 	defer func() { orderFeedLogf = origLogf }()
 
-	got := orderTrackingUpdatedAt(front, run)
+	got := orderTrackingUpdatedAt(front, run, make(map[string]latestOpenRunLookup))
 	if !got.Equal(run.CreatedAt) {
 		t.Fatalf("updatedAt = %s, want %s", got, run.CreatedAt)
 	}

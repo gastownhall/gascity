@@ -203,7 +203,7 @@ type Info struct {
 
 	// --- trigger / brain-parent cluster (controller read surface) ---
 	//
-	// poolInFlightNewRequests stamps these onto the new-tier SessionRequest it
+	// poolNewDemandRequests stamps these onto the new-tier SessionRequest it
 	// emits for a pool-managed creating session. Raw mirrors of the gc.* keys.
 	// Additive, internal-only (absent from the HTTP wire).
 	TriggerBeadID       string // gc.trigger_bead_id (raw)
