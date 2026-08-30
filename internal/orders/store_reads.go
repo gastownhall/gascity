@@ -516,3 +516,82 @@ func (s *Store) HasOpenWork(scoped string, wispHasOpenWork func(store beads.Stor
 	}
 	return false, nil
 }
+
+// WorkBlocker kinds. A blocker is either the order's own in-flight dispatch
+// (its tracking bead) or the work it poured and nobody finished (a wisp or
+// molecule root whose subtree still holds open beads). The distinction is the
+// first thing a reader needs: one says "the previous run has not returned", the
+// other says "the previous run's WORK was never done", and they are acted on
+// differently.
+const (
+	WorkBlockerKindTracking = "order-tracking"
+	WorkBlockerKindWisp     = "wisp"
+)
+
+// WorkBlocker names the bead holding an order's open-work gate shut.
+type WorkBlocker struct {
+	ID        string
+	Title     string
+	Kind      string
+	CreatedAt time.Time
+}
+
+// OpenWorkBlocker returns the OLDEST bead currently holding the scoped order's
+// open-work gate shut, or ok=false when the gate is not held.
+//
+// This is deliberately NOT what the gate calls. HasOpenWork answers the gate's
+// only question — may this order dispatch — and short-circuits on the first
+// blocker it finds, which is the cheapest correct thing for a per-tick hot path
+// and is why only its boolean escapes the edge. This one is for TELEMETRY: it
+// evaluates every candidate so it can report the oldest, which costs one
+// wispHasOpenWork subtree walk per open root instead of stopping at the first.
+// Call it off the hot path — at emission time, behind a rate bound — never per
+// tick.
+//
+// Oldest, not first: when a stalled order has accumulated several open roots,
+// the one that has been open longest is the one that started the stall, and
+// pouring order does not survive a multi-store union (each leg is sorted
+// independently). A reader chasing "why has this order not fired since Tuesday"
+// wants Tuesday's bead.
+func (s *Store) OpenWorkBlocker(scoped string, wispHasOpenWork func(store beads.Store, root beads.Bead) (bool, error)) (WorkBlocker, bool, error) {
+	label := labelOrderRunPrefix + scoped
+	var oldest WorkBlocker
+	found := false
+	consider := func(b beads.Bead, kind string) {
+		if found && !b.CreatedAt.Before(oldest.CreatedAt) {
+			return
+		}
+		oldest = WorkBlocker{ID: b.ID, Title: b.Title, Kind: kind, CreatedAt: b.CreatedAt}
+		found = true
+	}
+	for _, store := range s.mixedLegStores() {
+		results, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
+			Label:    label,
+			Sort:     beads.SortCreatedDesc,
+			TierMode: beads.TierBoth,
+		})
+		if err != nil {
+			return WorkBlocker{}, false, fmt.Errorf("listing order work beads: %w", err)
+		}
+		for _, b := range results {
+			if b.Status == "closed" {
+				continue
+			}
+			if beadLabelsContain(b.Labels, labelOrderTracking) {
+				consider(b, WorkBlockerKindTracking)
+				continue
+			}
+			if wispHasOpenWork == nil {
+				continue
+			}
+			open, err := wispHasOpenWork(store, b)
+			if err != nil {
+				return WorkBlocker{}, false, err
+			}
+			if open {
+				consider(b, WorkBlockerKindWisp)
+			}
+		}
+	}
+	return oldest, found, nil
+}

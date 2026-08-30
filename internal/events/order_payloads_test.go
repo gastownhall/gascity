@@ -34,6 +34,10 @@ func TestOrderSuppressedPayloadRoundTrips(t *testing.T) {
 		Consecutive:     412,
 		FirstSuppressed: "2026-08-11T08:00:47Z",
 		SuppressedForMS: 12_360_000,
+		BlockerID:       "sr-iaq7",
+		BlockerKind:     "wisp",
+		BlockerTitle:    "mol-dog-stale-db",
+		BlockerAgeMS:    26_760_000,
 	}
 	raw := OrderSuppressedPayloadJSON(want)
 
@@ -58,10 +62,42 @@ func TestOrderSuppressedPayloadRoundTrips(t *testing.T) {
 	if err := json.Unmarshal(raw, &shape); err != nil {
 		t.Fatalf("unmarshal payload: %v", err)
 	}
-	for _, key := range []string{"order_name", "consecutive", "first_suppressed", "suppressed_for_ms"} {
+	for _, key := range []string{
+		"order_name", "consecutive", "first_suppressed", "suppressed_for_ms",
+		"blocker_id", "blocker_kind", "blocker_title", "blocker_age_ms",
+	} {
 		if _, ok := shape[key]; !ok {
 			t.Fatalf("payload JSON is missing %q: %s", key, raw)
 		}
+	}
+}
+
+// TestOrderSuppressedPayloadOmitsUnresolvedBlockerFields pins the best-effort
+// half of the wire contract. Blocker resolution is a separate read that can time
+// out or race the blocker closing; when it reports nothing the event still goes
+// out, and its payload must be byte-identical to what a reader saw before these
+// fields existed — an empty blocker_id on the wire would read as "resolved, and
+// the answer is nothing".
+func TestOrderSuppressedPayloadOmitsUnresolvedBlockerFields(t *testing.T) {
+	t.Parallel()
+
+	raw := OrderSuppressedPayloadJSON(OrderSuppressedPayload{
+		OrderName:       "mol-dog-stale-db",
+		Consecutive:     20,
+		FirstSuppressed: "2026-08-24T05:00:23Z",
+		SuppressedForMS: 1_200_000,
+	})
+	var shape map[string]any
+	if err := json.Unmarshal(raw, &shape); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	for _, key := range []string{"blocker_id", "blocker_kind", "blocker_title", "blocker_age_ms"} {
+		if _, ok := shape[key]; ok {
+			t.Fatalf("unresolved %q must be omitted, not emitted empty: %s", key, raw)
+		}
+	}
+	if len(shape) != 4 {
+		t.Fatalf("payload without a blocker has %d keys, want the original 4: %s", len(shape), raw)
 	}
 }
 
