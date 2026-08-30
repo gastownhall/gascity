@@ -456,8 +456,10 @@ Before considering any task complete:
 - Broader process/integration coverage uses the sharded targets documented in
   `TESTING.md` instead of one monolithic `go test ./...` sweep
 - `go vet ./...` clean
-- `.githooks/pre-commit` is active locally (`git config core.hooksPath`
-  prints `.githooks`) and has run for the staged change
+- `.githooks/pre-commit` is active locally (verify with `make check-hooks`)
+  and has run for the staged change. See "Git hook ownership" below — beads'
+  installer silently takes `core.hooksPath` over, and a bypassed hook cannot
+  report its own absence.
 - `make dashboard-ci` passes for any change touching `internal/api/`,
   `internal/api/openapi.json`, `docs/reference/schema/openapi.*`,
   `internal/api/dashboardspa/`, or generated dashboard types
@@ -467,6 +469,32 @@ Before considering any task complete:
 - Every exported function has a doc comment
 - No premature abstractions
 - Tests cover happy path AND edge cases
+
+## Git hook ownership
+
+**`.githooks` is the single owner of `core.hooksPath`.** Install it with
+`make setup`; verify it with `make check-hooks`.
+
+Only one directory can own `core.hooksPath`, and beads' installer claims it
+for `.beads/hooks`. Those hooks exec `bd hooks run <hook>` without chaining
+onward, so while beads owns the path every gate in `.githooks` — staged-Go
+formatting, `lint-changed`, the three codegen+stage steps, `make vet`, and the
+push-time suite — is skipped on every commit. Nothing reports this: git simply
+stops invoking the hooks, so commits look clean while spec-derived drift lands
+on the mainline until a later suite failure surfaces the drift.
+
+Reclaiming the path does not disable beads. Each `.githooks` hook forwards to
+`.githooks/lib/beads-chain.sh`, which runs `bd hooks run <hook>` with the same
+timeout and exit-code carve-outs beads' own integration block used. Adding a
+hook that beads manages means adding its `.githooks` counterpart too —
+`TestGitHooksCoverEveryBeadsManagedHook` in `scripts/` fails otherwise.
+
+Beads' installer can reclaim `core.hooksPath` at any time. When it does,
+`make check-hooks` fails and `make setup` puts it back.
+
+`make spec-ci` (run by the required `preflight-generated` CI job) is the
+backstop for spec/client drift, but it only sees work that reaches a PR —
+locally merged branches depend on the pre-commit gate actually running.
 
 ## Non-Interactive Shell Commands
 

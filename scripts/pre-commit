@@ -1,8 +1,0 @@
-#!/usr/bin/env bash
-# Pre-commit hook: auto-fix formatting only (no tests).
-# Install: run `make setup`
-set -euo pipefail
-
-# Auto-fix formatting and stage the changes.
-make fmt
-git add -u

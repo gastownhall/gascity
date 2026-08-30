@@ -156,6 +156,11 @@ case "$1" in
     printf '[]'
     exit 0
     ;;
+  hooks)
+    # `bd hooks run <hook>`, chained from .githooks. Model a beads install that
+    # accepts the hook and does nothing, so these tests stay about the guard.
+    exit 0
+    ;;
   *)
     exit 1
     ;;
@@ -1013,10 +1018,15 @@ test_fallback_cannot_detect_staleness_after_status_leaves_in_progress() {
 
 install_guard_hook() {
     local repo="$1"
-    mkdir -p "$repo/scripts" "$repo/.githooks"
+    mkdir -p "$repo/scripts" "$repo/.githooks/lib"
     cp "$LIB" "$repo/scripts/push-ownership-guard.sh"
     cp "$REPO_ROOT/.githooks/pre-push" "$repo/.githooks/pre-push"
     chmod +x "$repo/.githooks/pre-push"
+    # .githooks owns core.hooksPath, so pre-push forwards to beads through this
+    # helper before the guard runs. Copy the real one for the same reason the
+    # hook itself is copied rather than re-implemented.
+    cp "$REPO_ROOT/.githooks/lib/beads-chain.sh" "$repo/.githooks/lib/beads-chain.sh"
+    chmod +x "$repo/.githooks/lib/beads-chain.sh"
     printf 'test-fast-parallel:\n\t@true\n' > "$repo/Makefile"
     git -C "$repo" config core.hooksPath .githooks
 }

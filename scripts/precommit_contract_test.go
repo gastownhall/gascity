@@ -294,6 +294,19 @@ func TestPreCommitReachesDashboardBlockWhenOnlySpecFileStaged(t *testing.T) {
 	clientPath := filepath.Join(tmpRepo, "internal", "api", "dashboardspa", "web", "shared", "src", "generated", "gc-supervisor-client")
 	distPath := filepath.Join(tmpRepo, "internal", "api", "dashboardspa", "dist", "placeholder")
 
+	// The hook resolves its beads chain relative to `git rev-parse
+	// --show-toplevel`, which is this temp repo — install the real forwarder
+	// there rather than re-implementing it.
+	chain, err := os.ReadFile(filepath.Join(repoRoot, ".githooks", "lib", "beads-chain.sh"))
+	if err != nil {
+		t.Fatalf("read beads-chain.sh: %v", err)
+	}
+	chainPath := filepath.Join(tmpRepo, ".githooks", "lib", "beads-chain.sh")
+	if err := os.MkdirAll(filepath.Dir(chainPath), 0o755); err != nil {
+		t.Fatalf("mkdir .githooks/lib: %v", err)
+	}
+	writeExecutable(t, chainPath, string(chain))
+
 	runGit("init")
 	writeTestFile(t, specPath, "{}\n")
 	writeTestFile(t, clientPath, "placeholder\n")
@@ -317,6 +330,11 @@ exit 0
 	// block at all (the reviewer's criterion-2 gap), not the real
 	// dashboard-check/dashboard-smoke targets, which need the full repo.
 	writeExecutable(t, filepath.Join(binDir, "make"), `#!/usr/bin/env bash
+exit 0
+`)
+	// Stub bd so the chained beads pre-commit hook is a no-op here; this test
+	// is about the repo hook's own control flow.
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/usr/bin/env bash
 exit 0
 `)
 
@@ -361,6 +379,9 @@ func TestPreCommitFailsClosedWhenSpecStagedButNpmAbsent(t *testing.T) {
 	}
 
 	specPath := filepath.Join(tmpRepo, "internal", "api", "openapi.json")
+
+	// pre-commit resolves beads-chain relative to this temp repo's toplevel.
+	installBeadsChainForTempRepo(t, repoRoot, tmpRepo)
 
 	runGit("init")
 	writeTestFile(t, specPath, "{}\n")
@@ -426,6 +447,9 @@ func TestPreCommitFailsClosedWhenGoBlockStagesSpecAsSideEffectAndNpmAbsent(t *te
 		filepath.Join(tmpRepo, "docs", "reference", "config.md"),
 		filepath.Join(tmpRepo, "docs", "reference", "cli.md"),
 	}
+
+	// pre-commit resolves beads-chain relative to this temp repo's toplevel.
+	installBeadsChainForTempRepo(t, repoRoot, tmpRepo)
 
 	runGit("init")
 	writeTestFile(t, goFilePath, "package main\n\nfunc main() {}\n")
@@ -506,6 +530,9 @@ func TestPreCommitWarnsOnlyWhenNpmAbsentAndSpecNotStaged(t *testing.T) {
 
 	docPath := filepath.Join(tmpRepo, "README.md")
 
+	// pre-commit resolves beads-chain relative to this temp repo's toplevel.
+	installBeadsChainForTempRepo(t, repoRoot, tmpRepo)
+
 	runGit("init")
 	writeTestFile(t, docPath, "hello\n")
 	runGit("add", "-A")
@@ -542,10 +569,17 @@ func TestPreCommitWarnsOnlyWhenNpmAbsentAndSpecNotStaged(t *testing.T) {
 // unreachable regardless of what's installed on the test host -- falling
 // back to the ambient PATH would make these tests flaky on any machine
 // that actually has npm installed.
+//
+// A no-op `bd` stub is always installed so the beads-chain pre-commit
+// forwarder does not fail closed when the ambient PATH has no `bd` (or has
+// a real one that would try to talk to a database).
 func restrictedPathWithoutNpm(t *testing.T, stubs map[string]string) string {
 	t.Helper()
 	binDir := t.TempDir()
-	for _, name := range []string{"bash", "git", "xargs"} {
+	// sh+env are required for beads-chain.sh's `#!/usr/bin/env sh` shebang
+	// under a restricted PATH (env is absolute in the shebang, but then looks
+	// up `sh` on PATH). timeout is optional; without it the chain still runs.
+	for _, name := range []string{"bash", "sh", "env", "git", "xargs"} {
 		realPath, err := exec.LookPath(name)
 		if err != nil {
 			t.Fatalf("resolve real %s on test host PATH: %v", name, err)
@@ -554,10 +588,33 @@ func restrictedPathWithoutNpm(t *testing.T, stubs map[string]string) string {
 			t.Fatalf("symlink %s: %v", name, err)
 		}
 	}
+	if stubs == nil {
+		stubs = map[string]string{}
+	}
+	if _, ok := stubs["bd"]; !ok {
+		stubs["bd"] = "#!/usr/bin/env bash\nexit 0\n"
+	}
 	for name, script := range stubs {
 		writeExecutable(t, filepath.Join(binDir, name), script)
 	}
 	return binDir
+}
+
+// installBeadsChainForTempRepo copies the real beads-chain forwarder into a
+// fixture repo. The real pre-commit hook resolves the chain via
+// `git rev-parse --show-toplevel`, which is the temp repo, so the fixture
+// must ship the lib dependency rather than re-implementing it.
+func installBeadsChainForTempRepo(t *testing.T, repoRoot, tmpRepo string) {
+	t.Helper()
+	chain, err := os.ReadFile(filepath.Join(repoRoot, ".githooks", "lib", "beads-chain.sh"))
+	if err != nil {
+		t.Fatalf("read beads-chain.sh: %v", err)
+	}
+	chainPath := filepath.Join(tmpRepo, ".githooks", "lib", "beads-chain.sh")
+	if err := os.MkdirAll(filepath.Dir(chainPath), 0o755); err != nil {
+		t.Fatalf("mkdir .githooks/lib: %v", err)
+	}
+	writeExecutable(t, chainPath, string(chain))
 }
 
 func TestNativeDoltliteBeadsTargetRunsTaggedSuite(t *testing.T) {

@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# The repo has no prepare-commit-msg gate of its own; this exists so .githooks
+# can own core.hooksPath without dropping the beads prepare-commit-msg hook,
+# which is what stamps bead references into commit messages.
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+exec "$repo_root/.githooks/lib/beads-chain.sh" prepare-commit-msg "$@"
