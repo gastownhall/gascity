@@ -596,7 +596,7 @@ func (s *Store) wakeSessionFromBead(sessionBead beads.Bead, now time.Time) ([]st
 		return nil, err
 	}
 	state := State(strings.TrimSpace(sessionBead.Metadata["state"]))
-	batch := ClearWakeBlockersPatch(state, sessionBead.Metadata["sleep_reason"])
+	batch := ClearWakeBlockersPatch(state, sessionBead.Metadata["sleep_reason"], now)
 	for k, v := range RequestExplicitWakePatch(string(WakeCauseExplicit), now) {
 		batch[k] = v
 	}

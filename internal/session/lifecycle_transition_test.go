@@ -159,6 +159,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"pending_create_started_at": "",
 				"sleep_intent":              "",
 				"slept_at":                  now.Format(time.RFC3339),
+				"suspended_at":              "",
 			},
 		},
 		{
@@ -204,6 +205,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"pending_create_started_at":  "",
 				"sleep_intent":               "",
 				"slept_at":                   now.Format(time.RFC3339),
+				"suspended_at":               "",
 				"session_key":                "",
 				"started_config_hash":        "",
 				"started_live_hash":          "",
@@ -730,6 +732,8 @@ func TestClearWakeBlockersPatchClearsOnlyWakeBlockerMetadata(t *testing.T) {
 				"churn_count":           "0",
 				"state":                 string(StateAsleep),
 				"sleep_reason":          "",
+				"suspended_at":          "",
+				"slept_at":              waitStoreNow.UTC().Format(time.RFC3339),
 			},
 		},
 		{
@@ -746,6 +750,8 @@ func TestClearWakeBlockersPatchClearsOnlyWakeBlockerMetadata(t *testing.T) {
 				"churn_count":           "0",
 				"state":                 string(StateAsleep),
 				"sleep_reason":          "",
+				"suspended_at":          "",
+				"slept_at":              waitStoreNow.UTC().Format(time.RFC3339),
 			},
 		},
 		{
@@ -781,7 +787,7 @@ func TestClearWakeBlockersPatchClearsOnlyWakeBlockerMetadata(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ClearWakeBlockersPatch(tt.state, tt.sleepReason)
+			got := ClearWakeBlockersPatch(tt.state, tt.sleepReason, waitStoreNow)
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("patch = %#v, want %#v", got, tt.want)
 			}
