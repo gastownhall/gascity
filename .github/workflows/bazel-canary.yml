@@ -7,6 +7,13 @@ on:
       - "BUILD.bazel"
       - "MODULE.bazel"
       - "MODULE.bazel.lock"
+      - ".bazelversion"
+      - ".bazelrc"
+      - "**/BUILD.bazel"
+      - "**/BUILD"
+      - "**/*.bzl"
+      - "go.mod"
+      - "go.sum"
       - "internal/config/**"
       - "internal/beads/contract/**"
       - "scripts/bazel-config-backtest.sh"
@@ -19,7 +26,7 @@ jobs:
     name: Bazel selective canary
     runs-on: ubuntu-24.04
     continue-on-error: true
-    timeout-minutes: 10
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -53,11 +60,13 @@ jobs:
             echo "target=//internal/config:config_envname_test"
             echo "target=//internal/config:config_diagnostic_locations_test"
             echo "target=//internal/beads/contract:contract_test"
-            echo "remote_cache=disabled"
+            # Bazel's remote_cache option is a string (not a boolean), so
+            # --remote_cache= is the supported explicit disable form.
+            echo "remote_cache=disabled (explicit empty URL)"
           } >"$OUT/summary.txt"
 
           /usr/bin/time -f 'go_user_s=%U go_maxrss_kb=%M' -o "$OUT/go.time" \
-            timeout --signal=TERM --kill-after=15 8m go test -count=1 ./internal/config ./internal/beads/contract \
+            timeout --signal=TERM --kill-after=15 4m go test -count=1 ./internal/config ./internal/beads/contract \
             >"$OUT/go.log" 2>&1
           go_status=$?
           echo "go_status=$go_status" >>"$OUT/summary.txt"
@@ -73,7 +82,7 @@ jobs:
             //internal/beads/contract:contract_test; do
             name="${target#//}"; name="${name//\//_}"; name="${name//:/_}"
             /usr/bin/time -f 'bazel_user_s=%U bazel_maxrss_kb=%M' -o "$OUT/$name.time" \
-              timeout --signal=TERM --kill-after=15 8m "$bazel" --output_base="$base" test "${common[@]}" \
+              timeout --signal=TERM --kill-after=15 4m "$bazel" --output_base="$base" test "${common[@]}" \
               --build_event_json_file="$OUT/$name.bep.json" --profile="$OUT/$name.profile.gz" "$target" \
               >"$OUT/$name.log" 2>&1
             status=$?
