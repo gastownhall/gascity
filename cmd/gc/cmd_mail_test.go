@@ -3374,6 +3374,66 @@ func TestFormatInjectOutputSubjectEqualToBodyRendersOnce(t *testing.T) {
 	}
 }
 
+// TestPrintMessageSuppressesBodyIdenticalToSubject covers `gc mail read` for
+// the subject==body shape. Printing a Subject line and a Body line carrying
+// the same string reads as duplicated content. This shape predates the
+// subject-only work: every positionally-sent message already has it.
+func TestPrintMessageSuppressesBodyIdenticalToSubject(t *testing.T) {
+	var out bytes.Buffer
+	printMessage(mail.Message{
+		ID: "gc-1", From: "human", To: "mayor",
+		Subject: "Build is green", Body: "Build is green",
+	}, &out)
+
+	got := out.String()
+	if !strings.Contains(got, "Subject:  Build is green") {
+		t.Errorf("missing Subject line:\n%s", got)
+	}
+	if strings.Contains(got, "Body:") {
+		t.Errorf("Body line duplicates the subject:\n%s", got)
+	}
+}
+
+// TestPrintMessageKeepsBodyDifferentFromSubject is the guard on the test
+// above: suppression must be exact-match only, never a general Body drop.
+func TestPrintMessageKeepsBodyDifferentFromSubject(t *testing.T) {
+	var out bytes.Buffer
+	printMessage(mail.Message{
+		ID: "gc-1", From: "human", To: "mayor",
+		Subject: "Build is green", Body: "all 412 packages passed",
+	}, &out)
+
+	got := out.String()
+	if !strings.Contains(got, "Body:     all 412 packages passed") {
+		t.Errorf("distinct body was dropped:\n%s", got)
+	}
+}
+
+// TestMailInboxSuppressesBodyIdenticalToSubject covers the `gc mail inbox`
+// columns, which print the subject and a truncated body side by side. For the
+// subject==body shape that repeats the same string in adjacent columns.
+func TestMailInboxSuppressesBodyIdenticalToSubject(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	if _, err := mp.Send("human", "mayor", "", "Build is green"); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	if code := doMailInbox(mp, "mayor", &stdout, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("doMailInbox = %d, want 0", code)
+	}
+
+	got := stdout.String()
+	if !strings.Contains(got, "Build is green") {
+		t.Fatalf("inbox missing the message:\n%s", got)
+	}
+	if strings.Count(got, "Build is green") != 1 {
+		t.Errorf("subject repeated in the body column (count=%d):\n%s",
+			strings.Count(got, "Build is green"), got)
+	}
+}
+
 // --- gc mail send --from ---
 
 func TestMailSendFromFlag(t *testing.T) {
