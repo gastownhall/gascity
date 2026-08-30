@@ -6,7 +6,7 @@ import "fmt"
 // resources by identity key and modify specific fields. They are applied
 // after fragment merge, before validation.
 type Patches struct {
-	// Agents targets agents by (dir, name).
+	// Agents targets agents by rig scope + name.
 	Agents []AgentPatch `toml:"agent,omitempty"`
 	// NamedSessions targets configured named sessions by (dir, template).
 	NamedSessions []NamedSessionPatch `toml:"named_session,omitempty"`
@@ -18,12 +18,16 @@ type Patches struct {
 	GitHubPRMonitors []GitHubPRMonitorPatch `toml:"github_pr_monitor,omitempty"`
 }
 
-// AgentPatch modifies an existing agent identified by (Dir, Name).
+// AgentPatch modifies existing agents identified by rig scope and Name.
 // Pointer fields distinguish "not set" from "set to zero value."
 type AgentPatch struct {
-	// Dir is the targeting key (required with Name). Identifies the agent's
-	// working directory scope. Empty for city-scoped agents.
-	Dir string `toml:"dir" jsonschema:"required"`
+	// Dir is the legacy targeting key for rig identity. Empty means
+	// city-scoped. New configs should set Rig instead; Dir remains the
+	// canonical resolved identity that both keys feed into.
+	Dir string `toml:"dir,omitempty"`
+	// Rig is new targeting key for rig identity (replaces Dir).
+	// "*" matches all rigs + city. Empty means city-scoped unless Dir is set.
+	Rig string `toml:"rig,omitempty"`
 	// Name is the targeting key (required). Must match an existing agent's name.
 	Name string `toml:"name" jsonschema:"required"`
 	// WorkDir overrides the agent's session working directory.
@@ -407,12 +411,78 @@ func applyNamedSessionPatchFields(s *NamedSession, p *NamedSessionPatch) {
 	}
 }
 
-// applyAgentPatch finds an agent by (dir, name) and applies the patch.
+func agentPatchTargetDir(patch *AgentPatch) (string, error) {
+	if patch.Dir != "" && patch.Rig != "" && patch.Rig != "*" {
+		return "", fmt.Errorf("use only one of dir or rig")
+	}
+	if patch.Rig != "" && patch.Rig != "*" {
+		return patch.Rig, nil
+	}
+	return patch.Dir, nil
+}
+
+// TargetQualifiedName returns the canonical qualified identity this patch
+// targets, folding the legacy Dir key and the newer Rig key into a single
+// string so a patch authored with either key resolves to the same identity
+// ("rigA/name" whether written as dir="rigA" or rig="rigA"). The "*" wildcard
+// is preserved as its own scope ("*/name") so a wildcard patch has a stable
+// identity distinct from a city-scoped one ("name"). The HTTP patch API and
+// the config editor key on this — rather than on Dir alone — so rig- and
+// wildcard-targeted patches can be created, retrieved, and deleted by identity.
+func (p *AgentPatch) TargetQualifiedName() string {
+	dir := p.Dir
+	if p.Rig != "" {
+		dir = p.Rig
+	}
+	return qualifiedNameFromPatch(dir, p.Name)
+}
+
+// Validate reports whether the patch is a well-formed, resolvable target.
+// It enforces the AgentPatch identity contract every write boundary relies on:
+// Name is required, and the legacy Dir key and the newer Rig key (including the
+// "*" wildcard) are mutually exclusive. The HTTP patch API and the config editor
+// call this before persisting so a patch that would hard-fail the next config
+// load — an unresolvable dir+rig combination — can never be written to city.toml
+// and brick config loading. Apply-time resolution (agentPatchTargetDir and
+// applyAgentPatch) enforces the same rule for patches that arrive from other
+// sources, so this is a fail-fast guard at the edge, not the only guard.
+func (p *AgentPatch) Validate() error {
+	if p.Name == "" {
+		return fmt.Errorf("agent patch: name is required")
+	}
+	if p.Dir != "" && p.Rig != "" {
+		return fmt.Errorf("agent patch %q: use only one of dir or rig", p.Name)
+	}
+	return nil
+}
+
+// applyAgentPatch finds agent target(s) and applies patch.
 func applyAgentPatch(cfg *City, patch *AgentPatch) error {
 	if patch.Name == "" {
 		return fmt.Errorf("agent patch: name is required")
 	}
-	target := qualifiedNameFromPatch(patch.Dir, patch.Name)
+	if patch.Rig == "*" {
+		if patch.Dir != "" {
+			return fmt.Errorf("use only one of dir or rig")
+		}
+		matched := false
+		for i := range cfg.Agents {
+			a := &cfg.Agents[i]
+			if a.Name == patch.Name || a.BindingQualifiedName() == patch.Name {
+				applyAgentPatchFields(a, patch)
+				matched = true
+			}
+		}
+		if !matched {
+			return fmt.Errorf("agent %q not found in merged config", qualifiedNameFromPatch("*", patch.Name))
+		}
+		return nil
+	}
+	targetDir, err := agentPatchTargetDir(patch)
+	if err != nil {
+		return err
+	}
+	target := qualifiedNameFromPatch(targetDir, patch.Name)
 	for i := range cfg.Agents {
 		a := &cfg.Agents[i]
 		// V2: match by qualified name so patches targeting "gastown.mayor"
@@ -422,7 +492,7 @@ func applyAgentPatch(cfg *City, patch *AgentPatch) error {
 			return nil
 		}
 		// V1 fallback: direct Dir+Name match.
-		if a.Dir == patch.Dir && a.Name == patch.Name {
+		if a.Dir == targetDir && a.Name == patch.Name {
 			applyAgentPatchFields(a, patch)
 			return nil
 		}

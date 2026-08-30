@@ -128,6 +128,9 @@ func TestCmdline_FailsClosedWhenUnreadable(t *testing.T) {
 	if runtime.GOOS == "linux" {
 		t.Skip("on linux /proc answers directly, so the ps stub cannot make argv unreadable")
 	}
+	if runtime.GOOS == "darwin" {
+		t.Skip("on darwin kern.procargs2 answers directly, so the ps stub cannot make argv unreadable")
+	}
 
 	binDir := t.TempDir()
 	// A ps that produces nothing, so the non-/proc path has no argv to offer.
@@ -162,6 +165,7 @@ func TestPSCmdlineIsBounded(t *testing.T) {
 		t.Fatalf("WriteFile(ps): %v", err)
 	}
 	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
+	t.Setenv("GC_PIDUTIL_PS_TIMEOUT", "1s")
 
 	start := time.Now()
 	_, _ = psCmdline(os.Getpid())

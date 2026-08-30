@@ -37,6 +37,9 @@ func TestDecideMaxSessionAgeLadder(t *testing.T) {
 			reason:  "quarantine",
 			outcome: "deferred_quarantine",
 		},
+		// No "pinned" case here on purpose: the max-session-age caller does
+		// not report the durable pin as a blocker, so this ladder never sees
+		// it. cmd/gc's TestMaxSessionAgeBlockerInfo is what pins that.
 		{
 			name:   "unknown pending interaction must be gathered",
 			facts:  TimerFacts{Triggered: true},
@@ -126,6 +129,15 @@ func TestDecideIdleTimeoutLadder(t *testing.T) {
 			action:  TimerActionDefer,
 			reason:  "quarantine",
 			outcome: "deferred_quarantine",
+		},
+		{
+			// The idle ladder is the only one the durable pin reaches; the
+			// max-session-age caller withholds it (see that ladder's test).
+			name:    "pinned blocks the idle ladder",
+			facts:   TimerFacts{Triggered: true, Blocker: "pinned", Pending: PendingYes},
+			action:  TimerActionDefer,
+			reason:  "pinned",
+			outcome: "deferred_pinned",
 		},
 		{
 			name:   "unknown pending interaction must be gathered",
@@ -331,7 +343,7 @@ func TestTimerDecisionsTerminate(t *testing.T) {
 	pendings := []PendingFact{PendingNo, PendingYes}
 	works := []AssignedWorkFact{AssignedWorkNone, AssignedWorkHas}
 	minfloors := []MinFloorFact{MinFloorNo, MinFloorYes}
-	blockers := []string{"", "user_hold", "quarantine"}
+	blockers := []string{"", "user_hold", "quarantine", "pinned"}
 	for _, b := range blockers {
 		for _, p := range pendings {
 			for _, w := range works {

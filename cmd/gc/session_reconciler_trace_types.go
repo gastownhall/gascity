@@ -194,6 +194,7 @@ const (
 	TraceReasonMaxSessionAge         TraceReasonCode = "max_session_age"
 	TraceReasonUserHold              TraceReasonCode = "user_hold"
 	TraceReasonQuarantine            TraceReasonCode = "quarantine"
+	TraceReasonPinned                TraceReasonCode = "pinned"
 	TraceReasonAssignedWorkExhausted TraceReasonCode = "assigned_work_exhausted"
 )
 
@@ -271,6 +272,7 @@ const (
 	TraceOutcomeStartEnqueued       TraceOutcomeCode = "start_enqueued"
 	TraceOutcomeDeferredUserHold    TraceOutcomeCode = "deferred_user_hold"
 	TraceOutcomeDeferredQuarantine  TraceOutcomeCode = "deferred_quarantine"
+	TraceOutcomeDeferredPinned      TraceOutcomeCode = "deferred_pinned"
 	TraceOutcomeDeferredBusy        TraceOutcomeCode = "deferred_busy"
 	TraceOutcomeStopDeferExhausted  TraceOutcomeCode = "stop_defer_exhausted"
 

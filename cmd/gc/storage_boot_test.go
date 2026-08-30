@@ -2018,3 +2018,111 @@ func TestFailedNoteWriteReleasesTheBindingItJustOpened(t *testing.T) {
 		t.Errorf("the opened binding was closed %d time(s), want exactly 1: a boot that refuses must not keep the engine it opened", closes)
 	}
 }
+
+// TestStorageWorkPinsResolveHQPrefixTheSameWayTheCityMintsIt covers the HQ pin
+// for a city that never declares a workspace prefix, which is the ordinary
+// case: [workspace] prefix is not in the default city.toml.
+//
+// HQ then mints under the prefix derived from the city name, and the pin has
+// to state that same value. Pinning a fixed literal instead makes the pin
+// disagree with reality for every such city, and the disagreement is only
+// visible when some rig genuinely holds the literal: two pinned work scopes
+// land on one prefix and the resolver refuses the pair, so a city that boots
+// today cannot boot once it configures [storage].
+//
+// gc is the natural prefix for a rig tracking gascity, so this is not exotic.
+// The rig arm of the same function already resolves through
+// Rig.EffectivePrefix; only HQ read a raw field and a literal.
+func TestStorageWorkPinsResolveHQPrefixTheSameWayTheCityMintsIt(t *testing.T) {
+	root := t.TempDir()
+	cfg := &config.City{
+		// Neither ResolvedWorkspacePrefix nor Workspace.Prefix is set, so the
+		// prefix comes from the city name, exactly as EffectiveHQPrefix's
+		// third step resolves it.
+		ResolvedWorkspaceName: "ds-research",
+		Rigs: []config.Rig{
+			{Name: "gascity", Prefix: "gc", Path: filepath.Join(root, "gascity")},
+		},
+	}
+
+	want := config.EffectiveHQPrefix(cfg)
+	if want == "" {
+		t.Fatal("the city derives no HQ prefix, so this case cannot state what the pin should carry")
+	}
+
+	pins := cityStorageWorkPins(root, cfg)
+	if pins.HQ.Prefix != want {
+		t.Errorf("HQ pinned prefix %q, want %q: the pin disagrees with the prefix HQ mints under",
+			pins.HQ.Prefix, want)
+	}
+
+	// The consequence the operator meets. A pin that repeats the rig's prefix
+	// collides with it, and the resolver refuses any pair where one prefix
+	// selects the other.
+	registry := storebinding.NewProviderRegistry()
+	if err := registry.Freeze(); err != nil {
+		t.Fatalf("freezing an empty registry: %v", err)
+	}
+	if _, err := storebinding.ResolveStoragePlan(registry, cfg.EffectiveStorage(), pins, root); err != nil {
+		t.Fatalf("a city with a rig at prefix %q cannot resolve its storage plan: %v", cfg.Rigs[0].Prefix, err)
+	}
+}
+
+// TestStorageWorkPinsUseADeclaredWorkspacePrefix covers the middle step of the
+// resolution, where a city declares [workspace] prefix but nothing has
+// populated the resolved field. That path reached the pin only after this
+// function stopped reading the resolved field alone; before, such a city was
+// pinned at the fallback while HQ minted under its declared prefix.
+//
+// The pin carries storageWorkPrefix's normalisation of the declared value, not
+// the raw value. That normalisation is older than this resolution and applies
+// equally to the resolved field, so a declared prefix that is not already
+// lower case and dash-free still pins a value the backend does not mint under.
+// Canonicalising prefixes once for both minting and pinning is issue #5204.
+func TestStorageWorkPinsUseADeclaredWorkspacePrefix(t *testing.T) {
+	root := t.TempDir()
+	cfg := &config.City{
+		ResolvedWorkspaceName: "ds-research",
+		Workspace:             config.Workspace{Prefix: "hq"},
+		Rigs: []config.Rig{
+			{Name: "gascity", Prefix: "gc", Path: filepath.Join(root, "gascity")},
+		},
+	}
+
+	pins := cityStorageWorkPins(root, cfg)
+	if pins.HQ.Prefix != "hq" {
+		t.Errorf("HQ pinned prefix %q, want %q: a declared workspace prefix does not reach the pin",
+			pins.HQ.Prefix, "hq")
+	}
+	// The declared value wins over the name-derived one, which is the ordering
+	// EffectiveHQPrefix states.
+	if derived := config.DeriveBeadsPrefix("ds-research"); pins.HQ.Prefix == derived {
+		t.Errorf("HQ pinned the name-derived prefix %q over the declared one", derived)
+	}
+}
+
+// TestStorageWorkConfigContextDistinguishesDerivedHQPrefixes covers the digest
+// that states which configuration a plan was resolved from.
+//
+// Two cities can leave the workspace prefix unset and still pin different HQ
+// prefixes, because the prefix is then derived from the city name. A digest
+// taken over the unset field alone reads those two as the same configuration
+// while their pins disagree, which is the one thing the digest exists to
+// prevent.
+func TestStorageWorkConfigContextDistinguishesDerivedHQPrefixes(t *testing.T) {
+	root := t.TempDir()
+	research := &config.City{ResolvedWorkspaceName: "ds-research"}
+	factory := &config.City{ResolvedWorkspaceName: "gas-town"}
+
+	if config.EffectiveHQPrefix(research) == config.EffectiveHQPrefix(factory) {
+		t.Fatalf("both cities derive prefix %q, so this case cannot tell the digests apart",
+			config.EffectiveHQPrefix(research))
+	}
+	if cityStorageWorkPins(root, research).HQ.Prefix == cityStorageWorkPins(root, factory).HQ.Prefix {
+		t.Fatal("the two cities pin the same HQ prefix, so the digest has nothing to distinguish")
+	}
+
+	if storageWorkConfigContext(root, research) == storageWorkConfigContext(root, factory) {
+		t.Error("two cities with different HQ pins share one config digest, so a plan cannot name the configuration it came from")
+	}
+}

@@ -89,7 +89,7 @@ Agent defines a configured agent in the city.
 | `suspended` | boolean |  |  | Suspended prevents the reconciler from spawning this agent. Toggle with gc agent suspend/resume. |
 | `pre_start` | []string |  |  | PreStart is a list of shell commands run before session creation. Commands run on the target filesystem: locally for tmux, inside the pod/container for exec providers. Template variables same as session_setup. On failure, the last 4 KiB of the command's stdout/stderr is included in the error and may appear in controller and reconciler logs; avoid set -x or echoing secrets in setup commands. |
 | `prompt_template` | string |  |  | PromptTemplate is the path to this agent's prompt template file. Relative paths resolve against the city directory. |
-| `nudge` | string |  |  | Nudge is text typed into the agent's tmux session after startup. Used for CLI agents that don't accept command-line prompts. |
+| `nudge` | string |  |  | Nudge is text typed into the agent's session after startup. Used for CLI agents that don't accept command-line prompts. For a known pool session whose trigger remains unclaimed after the 90-second recovery grace period, an empty or whitespace-only Nudge does not opt out: it sends "Run gc hook --claim --drain-ack --json now; if it returns work, execute it immediately." This fallback applies only to the initial stalled-claim recovery; continuation-claim recovery remains configured-only. Unknown templates receive no fallback. |
 | `session` | string |  |  | Session overrides the session transport for this agent. "" (default) uses the city-level session provider (typically tmux). "acp" uses the Agent Client Protocol (JSON-RPC over stdio). The agent's resolved provider must have supports_acp = true. Enum: `acp` |
 | `provider` | string |  |  | Provider names the provider preset to use for this agent. |
 | `upstream` | string |  |  | Upstream selects the model-serving endpoint (a key in [upstreams]) for this agent — WHO serves the model. "" (default) falls back to agent_defaults.upstream; if still empty, no upstream env is injected (ambient behavior). Switching it relaunches the agent in the warm box. |
@@ -213,11 +213,12 @@ AgentOverride modifies a pack-stamped agent for a specific rig.
 
 ## AgentPatch
 
-AgentPatch modifies an existing agent identified by (Dir, Name).
+AgentPatch modifies existing agents identified by rig scope and Name.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `dir` | string | **yes** |  | Dir is the targeting key (required with Name). Identifies the agent's working directory scope. Empty for city-scoped agents. |
+| `dir` | string |  |  | Dir is the legacy targeting key for rig identity. Empty means city-scoped. New configs should set Rig instead; Dir remains the canonical resolved identity that both keys feed into. |
+| `rig` | string |  |  | Rig is new targeting key for rig identity (replaces Dir). "*" matches all rigs + city. Empty means city-scoped unless Dir is set. |
 | `name` | string | **yes** |  | Name is the targeting key (required). Must match an existing agent's name. |
 | `work_dir` | string |  |  | WorkDir overrides the agent's session working directory. |
 | `tmux_alias` | string |  |  | TmuxAlias overrides the tmux session name template (see Agent.TmuxAlias for semantics). |
@@ -597,6 +598,7 @@ OrdersConfig holds order settings for orders discovered from flat TOML files (on
 |-------|------|----------|---------|-------------|
 | `skip` | []string |  |  | Skip lists order names to exclude from scanning. |
 | `max_timeout` | string |  |  | MaxTimeout is an operator hard cap on the per-order dispatch timeout: no order's dispatched exec/formula runs longer than this. Go duration string (e.g., "60s"). Empty means uncapped (no override). This bounds the dispatch timeout only; a condition trigger's check_timeout is a separate probe deadline and is not capped here. |
+| `max_dispatches_per_tick` | integer |  |  | MaxDispatchesPerTick caps how many orders the supervisor dispatches per tick. Unset keeps the built-in default of 4; set to 1 to drain overdue cooldown orders one-per-tick at cold start instead of firing several concurrent goroutines at once. |
 | `overrides` | []OrderOverride |  |  | Overrides apply per-order field overrides after scanning. Each override targets an order by name and optionally by rig. |
 
 ## PackDefaults
@@ -621,7 +623,7 @@ Patches holds all patch blocks from composition.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `agent` | []AgentPatch |  |  | Agents targets agents by (dir, name). |
+| `agent` | []AgentPatch |  |  | Agents targets agents by rig scope + name. |
 | `named_session` | []NamedSessionPatch |  |  | NamedSessions targets configured named sessions by (dir, template). |
 | `rigs` | []RigPatch |  |  | Rigs targets rigs by name. |
 | `providers` | []ProviderPatch |  |  | Providers targets providers by name. |

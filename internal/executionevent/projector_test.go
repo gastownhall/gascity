@@ -1,6 +1,7 @@
 package executionevent
 
 import (
+	"errors"
 	"reflect"
 	"sort"
 	"testing"
@@ -41,6 +42,181 @@ func TestProjectCurrentUsesOnlyTracksFromConvoyStore(t *testing.T) {
 	want := []WorkAssociation{{WorkBeadID: tracked.ID, ExecutionRunID: root.ID}}
 	if !reflect.DeepEqual(got.WorkAssociations, want) {
 		t.Fatalf("work associations = %#v, want %#v (metadata=%s parent-child=%s)", got.WorkAssociations, want, metadataOnly.ID, parentChild.ID)
+	}
+}
+
+func TestProjectCurrentAnchorsExactGenericSourceWithoutReplacingWorkAssociation(t *testing.T) {
+	graph := beads.NewMemStore()
+	work := beads.NewMemStore()
+	convoy := mustCreateProjectionBead(t, work, beads.Bead{ID: "mc-convoy", Type: "convoy"})
+	launch := beads.Bead{
+		ID: "ga-k4e47",
+		Metadata: map[string]string{
+			beadmeta.SourceBeadIDMetadataKey: "mc-wkbj",
+		},
+	}
+	root := mustCreateProjectionRoot(t, graph, convoy.ID)
+
+	got, err := ProjectCurrent(beads.GraphStore{Store: graph}, beads.WorkStore{Store: projectionDepStore{
+		Store:    projectionSourceStore{Store: work, requestedID: launch.ID, source: launch},
+		convoyID: convoy.ID,
+		deps:     []beads.Dep{{IssueID: convoy.ID, DependsOnID: launch.ID, Type: "tracks"}},
+	}}, root.ID)
+	if err != nil {
+		t.Fatalf("ProjectCurrent: %v", err)
+	}
+	if want := []WorkAssociation{{WorkBeadID: "ga-k4e47", ExecutionRunID: root.ID}}; !reflect.DeepEqual(got.WorkAssociations, want) {
+		t.Fatalf("work associations = %#v, want %#v", got.WorkAssociations, want)
+	}
+	if want := []RunAnchor{{SourceBeadID: "mc-wkbj", ExecutionRunID: root.ID}}; !reflect.DeepEqual(got.RunAnchors, want) {
+		t.Fatalf("run anchors = %#v, want %#v", got.RunAnchors, want)
+	}
+	if want := []events.Event{
+		{Type: events.ExecutionWorkAssociated, Actor: "graph-projector", Subject: "ga-k4e47", RunID: root.ID},
+		{Type: events.ExecutionRunAnchored, Actor: "graph-projector", Subject: "mc-wkbj", RunID: root.ID},
+	}; !reflect.DeepEqual(got.Events("graph-projector"), want) {
+		t.Fatalf("events = %#v, want %#v", got.Events("graph-projector"), want)
+	}
+}
+
+func TestProjectCurrentAnchorsExactReadableSourceChainWithoutRootDeclaration(t *testing.T) {
+	graph := beads.NewMemStore()
+	work := beads.NewMemStore()
+	convoy := mustCreateProjectionBead(t, work, beads.Bead{ID: "mc-convoy", Type: "convoy"})
+	launch := mustCreateProjectionBead(t, work, beads.Bead{
+		ID: "ga-k4e47",
+		Metadata: map[string]string{
+			beadmeta.SourceBeadIDMetadataKey: "mc-wkbj",
+		},
+	})
+	if err := work.DepAdd(convoy.ID, launch.ID, "tracks"); err != nil {
+		t.Fatalf("add tracks edge: %v", err)
+	}
+	root := mustCreateProjectionRoot(t, graph, convoy.ID)
+
+	got, err := ProjectCurrent(beads.GraphStore{Store: graph}, beads.WorkStore{Store: work}, root.ID)
+	if err != nil {
+		t.Fatalf("ProjectCurrent: %v", err)
+	}
+	want := []RunAnchor{{SourceBeadID: "mc-wkbj", ExecutionRunID: root.ID}}
+	if !reflect.DeepEqual(got.RunAnchors, want) {
+		t.Fatalf("run anchors = %#v, want %#v", got.RunAnchors, want)
+	}
+}
+
+func TestProjectCurrentDoesNotAnchorAmbiguousLaunchAssociations(t *testing.T) {
+	graph := beads.NewMemStore()
+	work := beads.NewMemStore()
+	convoy := mustCreateProjectionBead(t, work, beads.Bead{ID: "mc-convoy", Type: "convoy"})
+	launch := mustCreateProjectionBead(t, work, beads.Bead{ID: "ga-k4e47", Metadata: map[string]string{beadmeta.SourceBeadIDMetadataKey: "mc-wkbj"}})
+	other := mustCreateProjectionBead(t, work, beads.Bead{ID: "ga-other", Metadata: map[string]string{beadmeta.SourceBeadIDMetadataKey: "mc-wkbj"}})
+	for _, member := range []beads.Bead{launch, other} {
+		if err := work.DepAdd(convoy.ID, member.ID, "tracks"); err != nil {
+			t.Fatalf("add tracks edge: %v", err)
+		}
+	}
+	root := mustCreateProjectionRoot(t, graph, convoy.ID)
+	if err := graph.SetMetadata(root.ID, beadmeta.SourceBeadIDMetadataKey, launch.ID); err != nil {
+		t.Fatalf("set root source: %v", err)
+	}
+
+	got, err := ProjectCurrent(beads.GraphStore{Store: graph}, beads.WorkStore{Store: work}, root.ID)
+	if err != nil {
+		t.Fatalf("ProjectCurrent: %v", err)
+	}
+	if len(got.RunAnchors) != 0 {
+		t.Fatalf("run anchors = %#v, want none for ambiguous launch associations", got.RunAnchors)
+	}
+}
+
+func TestProjectCurrentAnchorsEachAssociatedLaunch(t *testing.T) {
+	graph := beads.NewMemStore()
+	work := beads.NewMemStore()
+	convoy := mustCreateProjectionBead(t, work, beads.Bead{ID: "mc-convoy", Type: "convoy"})
+	launchA := mustCreateProjectionBead(t, work, beads.Bead{ID: "ga-a", Metadata: map[string]string{beadmeta.SourceBeadIDMetadataKey: "mc-a"}})
+	launchB := mustCreateProjectionBead(t, work, beads.Bead{ID: "ga-b", Metadata: map[string]string{beadmeta.SourceBeadIDMetadataKey: "mc-b"}})
+	for _, member := range []beads.Bead{launchA, launchB} {
+		if err := work.DepAdd(convoy.ID, member.ID, "tracks"); err != nil {
+			t.Fatalf("add tracks edge: %v", err)
+		}
+	}
+	root := mustCreateProjectionRoot(t, graph, convoy.ID)
+	if err := graph.SetMetadata(root.ID, beadmeta.SourceBeadIDMetadataKey, launchA.ID); err != nil {
+		t.Fatalf("set root source: %v", err)
+	}
+	got, err := ProjectCurrent(beads.GraphStore{Store: graph}, beads.WorkStore{Store: work}, root.ID)
+	if err != nil {
+		t.Fatalf("ProjectCurrent: %v", err)
+	}
+	want := []RunAnchor{{SourceBeadID: "mc-a", ExecutionRunID: root.ID}, {SourceBeadID: "mc-b", ExecutionRunID: root.ID}}
+	if !reflect.DeepEqual(got.RunAnchors, want) {
+		t.Fatalf("run anchors = %#v, want %#v", got.RunAnchors, want)
+	}
+}
+
+func TestProjectCurrentOmitsRunAnchorForInvalidOrAmbiguousSourceLinks(t *testing.T) {
+	const launchID = "ga-k4e47"
+	for _, tc := range []struct {
+		name     string
+		rootLink string
+		launch   beads.Bead
+		getErr   error
+	}{
+		{name: "invalid root link", rootLink: "ga k4e47"},
+		{name: "unreadable launch", rootLink: launchID, getErr: errors.New("store unavailable")},
+		{name: "mismatched launch identity", rootLink: launchID, launch: beads.Bead{ID: "ga-other", Metadata: map[string]string{beadmeta.SourceBeadIDMetadataKey: "mc-wkbj"}}},
+		{name: "missing hosted source", rootLink: launchID, launch: beads.Bead{ID: launchID}},
+		{name: "invalid hosted source", rootLink: launchID, launch: beads.Bead{ID: launchID, Metadata: map[string]string{beadmeta.SourceBeadIDMetadataKey: "mc wkbj"}}},
+		{name: "non-exact hosted source", rootLink: launchID, launch: beads.Bead{ID: launchID, Metadata: map[string]string{beadmeta.SourceBeadIDMetadataKey: " mc-wkbj "}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			graph := beads.NewMemStore()
+			root := mustCreateProjectionRoot(t, graph, "mc-convoy")
+			if err := graph.SetMetadata(root.ID, beadmeta.SourceBeadIDMetadataKey, tc.rootLink); err != nil {
+				t.Fatalf("set root source: %v", err)
+			}
+			got, err := ProjectCurrent(beads.GraphStore{Store: graph}, beads.WorkStore{Store: projectionDepStore{
+				Store: projectionSourceStore{
+					Store:       beads.NewMemStore(),
+					requestedID: launchID,
+					source:      tc.launch,
+					getErr:      tc.getErr,
+				},
+				convoyID: "mc-convoy",
+				deps:     []beads.Dep{{IssueID: "mc-convoy", DependsOnID: launchID, Type: "tracks"}},
+			}}, root.ID)
+			if err != nil {
+				t.Fatalf("ProjectCurrent: %v", err)
+			}
+			if len(got.RunAnchors) != 0 {
+				t.Fatalf("run anchors = %#v, want none", got.RunAnchors)
+			}
+		})
+	}
+}
+
+func TestProjectCurrentDoesNotInterpretPackMetadataAsRunAnchor(t *testing.T) {
+	graph := beads.NewMemStore()
+	work := beads.NewMemStore()
+	convoy := mustCreateProjectionBead(t, work, beads.Bead{ID: "convoy", Type: "convoy"})
+	launch := mustCreateProjectionBead(t, work, beads.Bead{
+		ID: "launch",
+		Metadata: map[string]string{
+			"pr_review.city_source_bead_id": "source-work",
+			"formula":                       "customer-pack-specific-formula",
+		},
+	})
+	if err := work.DepAdd(convoy.ID, launch.ID, "tracks"); err != nil {
+		t.Fatalf("add tracks edge: %v", err)
+	}
+	root := mustCreateProjectionRoot(t, graph, convoy.ID)
+
+	got, err := ProjectCurrent(beads.GraphStore{Store: graph}, beads.WorkStore{Store: work}, root.ID)
+	if err != nil {
+		t.Fatalf("ProjectCurrent: %v", err)
+	}
+	if len(got.RunAnchors) != 0 {
+		t.Fatalf("run anchors = %#v, want none when only pack metadata names a source", got.RunAnchors)
 	}
 }
 
@@ -274,6 +450,20 @@ type projectionDepStore struct {
 	beads.Store
 	convoyID string
 	deps     []beads.Dep
+}
+
+type projectionSourceStore struct {
+	beads.Store
+	requestedID string
+	source      beads.Bead
+	getErr      error
+}
+
+func (s projectionSourceStore) Get(id string) (beads.Bead, error) {
+	if id == s.requestedID {
+		return s.source, s.getErr
+	}
+	return s.Store.Get(id)
 }
 
 func (s projectionDepStore) DepList(id, direction string) ([]beads.Dep, error) {
