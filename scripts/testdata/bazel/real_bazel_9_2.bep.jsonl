@@ -1,3 +1,4 @@
+{"id":{"pattern":{"pattern":"//internal/config:config_envname_test"}},"pattern":{"pattern":"//internal/config:config_envname_test"}}
 {"id":{"targetConfigured":{"label":"//internal/config:config_envname_test"}},"configured":{"targetConfigured":{"label":"//internal/config:config_envname_test"}}}
 {"id":{"targetCompleted":{"label":"//internal/config:config_envname_test"}},"completed":{"targetCompleted":{"label":"//internal/config:config_envname_test"},"success":true}}
 {"id":{"buildMetrics":{}},"buildMetrics":{"actionSummary":{"actionsCreated":2,"actionsExecuted":1,"actionCacheStatistics":{"hitCount":1,"missCount":1}},"timingMetrics":{"analysisPhaseTimeInMs":17,"cpuTimeInMs":23}}}

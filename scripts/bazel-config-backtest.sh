@@ -54,6 +54,11 @@ now_ns() {
   local stamp; stamp="$(date +%s%N)"
   [[ "$stamp" =~ ^[0-9]+$ ]] && printf '%s\n' "$stamp" || printf '%s000000000\n' "$(date +%s)"
 }
+tsv_escape() {
+  local value="$1"
+  value=${value//\\/\\\\}; value=${value//$'\t'/\\t}; value=${value//$'\r'/\\r}; value=${value//$'\n'/\\n}
+  printf '%s' "$value"
+}
 shutdown_bazel() {
   local base="$1"
   if command -v timeout >/dev/null 2>&1; then
@@ -164,7 +169,8 @@ PY
       if [[ "$scenario" == cold || "$scenario" == forced || "$scenario" == no-op ]]; then selection_reason=baseline; conservative=true; fi
       requested_labels="$(IFS=,; echo "${selected_labels[*]}")"
       if ((${#selected_labels[@]} == 0)); then
-        row="$(printf '%s\t%s\t%s\tnot-run\t%s\t%s\t%s\t%s\t\t\tunknown\tunknown\t\t0\t0\t0\t0\t0\t0\t0\tunknown\tunknown' "${resolved:0:12}" "$sample" "$scenario" "$selection_reason" "$conservative" "$selection_error" "$requested_labels")"
+        selection_error_escaped="$(tsv_escape "$selection_error")"
+        row="$(printf '%s\t%s\t%s\tnot-run\t%s\t%s\t%s\t%s\t\t\tunknown\tunknown\t\t0\t0\t0\t0\t0\t0\t0\tunknown\tunknown' "${resolved:0:12}" "$sample" "$scenario" "$selection_reason" "$conservative" "$selection_error_escaped" "$requested_labels")"
         printf '%s\n' "$row" | tee -a "$records"
         continue
       fi
@@ -211,14 +217,18 @@ print(a,e,hi,mi,analysis,cpu,selected)
 PY
       )"; read -r actions executed hits misses analysis bep_cpu _selected <<<"$metrics"
       label_flags=(); for label in "${selected_labels[@]}"; do label_flags+=(--label "$label"); done
-      bep_json="$(python3 "$resolver" bep "$bep" --format json "${label_flags[@]}" 2>/dev/null || true)"
+      bep_stderr="$out.bep.err"; bep_status=0
+      if bep_json="$(python3 "$resolver" bep "$bep" --format json "${label_flags[@]}" 2>"$bep_stderr")"; then :; else bep_status=$?; fi
       bep_payload="$bep_json"; [[ -n "$bep_payload" ]] || bep_payload='{}'
       configured_labels="$(python3 -c 'import json,sys; print(",".join(json.load(sys.stdin).get("configured",[])))' <<<"$bep_payload")"
       completed_labels="$(python3 -c 'import json,sys; print(",".join(json.load(sys.stdin).get("completed",[])))' <<<"$bep_payload")"
       configured_count="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("configured_count") or "unknown")' <<<"$bep_payload")"
       completed_count="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("completed_count") or "unknown")' <<<"$bep_payload")"
       bep_error="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("error") or "")' <<<"$bep_payload")"
-      row="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "${resolved:0:12}" "$sample" "$scenario" "$status" "$selection_reason" "$conservative" "$selection_error" "$requested_labels" "$configured_labels" "$completed_labels" "$configured_count" "$completed_count" "$bep_error" "$wall" "$user" "$rss" "$actions" "$executed" "$hits" "$misses" "$analysis" "$bep_cpu")"
+      [[ "$bep_status" == 0 ]] || bep_error="resolver_failed: $(head -c 256 "$bep_stderr")"
+      if [[ -n "$bep_error" ]]; then row_status='bep-error'; else row_status="$status"; fi
+      selection_error_escaped="$(tsv_escape "$selection_error")"; bep_error_escaped="$(tsv_escape "$bep_error")"
+      row="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "${resolved:0:12}" "$sample" "$scenario" "$row_status" "$selection_reason" "$conservative" "$selection_error_escaped" "$requested_labels" "$configured_labels" "$completed_labels" "$configured_count" "$completed_count" "$bep_error_escaped" "$wall" "$user" "$rss" "$actions" "$executed" "$hits" "$misses" "$analysis" "$bep_cpu")"
       printf '%s\n' "$row" | tee -a "$records"
       [[ "$scenario" == cold ]] && shutdown_bazel "$run_base"
     done
