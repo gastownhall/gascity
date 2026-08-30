@@ -41,6 +41,19 @@ func loadCityConfig(cityPath string, warningWriter ...io.Writer) (*config.City, 
 	return loadCityConfigFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), warningWriter...)
 }
 
+// skipRevisionSnapshot is the load option shared by the loaders in this file.
+//
+// The load-time revision snapshot content-hashes every pack directory so that a
+// later config.Revision() call can compare against the tree as it was loaded.
+// Neither loader here returns the Provenance — both use it to emit warnings and
+// then drop it — so nothing they load can ever observe the snapshot, and
+// building it is pure cost on a one-shot command. Loaders that do hand the
+// Provenance back keep the default.
+//
+// Revision reads from disk for anything the snapshot does not hold, so declining
+// it changes no revision value; see config.LoadOptions.SkipRevisionSnapshot.
+var skipRevisionSnapshot = config.LoadOptions{SkipRevisionSnapshot: true}
+
 // loadCityConfigFS is the testable variant of loadCityConfig that accepts a
 // filesystem implementation. Used by functions that take an fsys.FS parameter
 // for unit testing.
@@ -49,7 +62,7 @@ func loadCityConfigFS(fs fsys.FS, tomlPath string, warningWriter ...io.Writer) (
 	if err := ensureBuiltinPacksForConfigLoad(fs, tomlPath, resolveLoadCityConfigWarningWriter(warningWriter...)); err != nil {
 		return nil, err
 	}
-	cfg, prov, err := config.LoadWithIncludes(fs, tomlPath)
+	cfg, prov, err := config.LoadWithIncludesOptions(fs, tomlPath, skipRevisionSnapshot)
 	if err != nil {
 		return nil, err
 	}
@@ -68,11 +81,23 @@ func loadCityConfigFS(fs fsys.FS, tomlPath string, warningWriter ...io.Writer) (
 // briefly reflect stale builtin-pack content after an upgrade until a normal
 // gc command refreshes the generated packs.
 func loadCityConfigWithoutBuiltinPackRefreshFS(fs fsys.FS, tomlPath string, warningWriter ...io.Writer) (*config.City, error) {
-	cfg, prov, err := config.LoadWithIncludes(fs, tomlPath)
+	return loadPrematerializedCityConfig(fs, tomlPath, skipRevisionSnapshot, resolveLoadCityConfigWarningWriter(warningWriter...))
+}
+
+func loadCityConfigWithoutBuiltinPackRefresh(cityPath string, warningWriter ...io.Writer) (*config.City, error) {
+	return loadCityConfigWithoutBuiltinPackRefreshFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), warningWriter...)
+}
+
+// loadPrematerializedCityConfig is the shared body of the loaders that take
+// builtin packs as they already are on disk. It differs from loadCityConfigFS
+// only in skipping the refresh; opts is what separates a blocking load from an
+// advisory one.
+func loadPrematerializedCityConfig(fs fsys.FS, tomlPath string, opts config.LoadOptions, warnings io.Writer) (*config.City, error) {
+	cfg, prov, err := config.LoadWithIncludesOptions(fs, tomlPath, opts)
 	if err != nil {
 		return nil, err
 	}
-	emitLoadCityConfigWarnings(resolveLoadCityConfigWarningWriter(warningWriter...), prov)
+	emitLoadCityConfigWarnings(warnings, prov)
 	if err := validatePackRuntimeRegistrations(cfg); err != nil {
 		return nil, err
 	}
@@ -80,8 +105,30 @@ func loadCityConfigWithoutBuiltinPackRefreshFS(fs fsys.FS, tomlPath string, warn
 	return cfg, nil
 }
 
-func loadCityConfigWithoutBuiltinPackRefresh(cityPath string, warningWriter ...io.Writer) (*config.City, error) {
-	return loadCityConfigWithoutBuiltinPackRefreshFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), warningWriter...)
+// advisoryLoad is the load option set for a config load nobody asked for.
+//
+// RepoCacheNonBlocking is the load-bearing half: the repo-cache lock is held
+// for the whole of a cache write, which includes its network clone, so a
+// blocking load turns one `gc import install` into a hang for every other gc
+// process on the machine. An advisory load reports config.ErrRepoCacheBusy
+// instead and its caller degrades to "no pack state right now".
+var advisoryLoad = config.LoadOptions{SkipRevisionSnapshot: true, RepoCacheNonBlocking: true}
+
+// loadCityConfigAdvisory loads city config for callers that would rather have
+// no answer than a slow one: eager pack-command discovery and shell
+// completion, both of which run on input the user has not submitted yet. It
+// takes builtin packs as they already are on disk like the completion loader
+// it replaces, and additionally never waits on the repo cache.
+//
+// Nothing an advisory load has to say belongs on the user's terminal — it is
+// reporting on a command they did not type — so both the provenance warnings
+// and the default logger's output are discarded here rather than at each call
+// site.
+func loadCityConfigAdvisory(cityPath string) (cfg *config.City, err error) {
+	quietDefaultLogger(func() {
+		cfg, err = loadPrematerializedCityConfig(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), advisoryLoad, io.Discard)
+	})
+	return cfg, err
 }
 
 var loadCityConfigDefaultWarningWriter = func() io.Writer {
@@ -137,6 +184,9 @@ func isNonFatalLoadConfigWarning(warning string) bool {
 		return true
 	}
 	if config.IsDisabledNamedSessionWarning(warning) {
+		return true
+	}
+	if config.IsSessionSetupTimeoutAdvisory(warning) {
 		return true
 	}
 	if config.IsAlwaysFreshWakeModeWarning(warning) {

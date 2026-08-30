@@ -21,13 +21,13 @@ type fileData struct {
 	// because Bead.Revision is json:"-" and never survives the on-disk []Bead.
 	// Without this, every reloadFromDisk (which runs before each write in
 	// cross-process flock mode) would reset all revisions to 0, breaking the
-	// monotonic-never-reused contract. Absent (legacy files) ≡ all zero.
+	// FileStore's monotonic-never-reused guarantee. Absent (legacy files) ≡ all zero.
 	Revisions map[string]int64 `json:"revisions,omitempty"`
 	// RevisionsSealed marks a file written by a revisions-aware binary. An
 	// OLDER binary's full rewrite drops both this marker and the revisions
 	// map while keeping the beads — the exact state in which fresh-from-zero
 	// revisions would REUSE previously issued tokens and break the
-	// monotonic-never-reused contract. Loading an unsealed file with beads
+	// FileStore's monotonic-never-reused guarantee. Loading an unsealed file with beads
 	// therefore re-seeds every revision at a deterministic floor far above
 	// any counter a prior writer could have issued (see
 	// applyBeadRevisionsSealed).

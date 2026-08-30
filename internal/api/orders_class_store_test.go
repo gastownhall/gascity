@@ -94,7 +94,7 @@ func TestOrderFeedListsTrackingBeadsFromTheOrdersBinding(t *testing.T) {
 
 	tracking := seedOrdersTrackingBead(t, binding, "dolt-health")
 
-	result, err := buildOrderRunFeedItems(st, beadmeta.ScopeKindCity, workflowCityScopeRef(st.CityName()))
+	result, err := buildOrderRunFeedItems(st, beadmeta.ScopeKindCity, workflowCityScopeRef(st.CityName()), 0)
 	if err != nil {
 		t.Fatalf("buildOrderRunFeedItems: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestOrderFeedCountsAStoreServingBothClassesOnce(t *testing.T) {
 
 	tracking := seedOrdersTrackingBead(t, city, "dolt-health")
 
-	result, err := buildOrderRunFeedItems(st, beadmeta.ScopeKindCity, workflowCityScopeRef(st.CityName()))
+	result, err := buildOrderRunFeedItems(st, beadmeta.ScopeKindCity, workflowCityScopeRef(st.CityName()), 0)
 	if err != nil {
 		t.Fatalf("buildOrderRunFeedItems: %v", err)
 	}
@@ -283,7 +283,7 @@ func TestOrderHistoryStoreRefsAllResolveToTheSameStore(t *testing.T) {
 	_, listRef := orderHistoryListStoreRef(t, h, st, "nightly-review")
 	_, detailBody := orderHistoryDetail(t, h, st, tracking.ID, "")
 
-	feed, err := buildOrderRunFeedItems(st, beadmeta.ScopeKindCity, workflowCityScopeRef(st.CityName()))
+	feed, err := buildOrderRunFeedItems(st, beadmeta.ScopeKindCity, workflowCityScopeRef(st.CityName()), 0)
 	if err != nil {
 		t.Fatalf("buildOrderRunFeedItems: %v", err)
 	}

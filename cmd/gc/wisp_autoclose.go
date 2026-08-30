@@ -51,8 +51,11 @@ func doWispAutoclose(beadID string, stdout, _ io.Writer) {
 	// (city) cwd/env, so resolve the store that actually owns the bead across
 	// the city and every rig, so rig-store closes autoclose their attached
 	// wisps instead of silently no-op'ing (#3411).
+	// Attachments are ClassGraph wherever the just-closed bead lives; without
+	// this the hook reads an empty graph on a migrated city and reports success.
+	routeCfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 	if store, _, ok := autocloseOwningStore(beadID, cityPath); ok {
-		doWispAutocloseWith(store, beadID, stdout)
+		doWispAutocloseWith(store, beadID, stdout, cliGraphStore(store, routeCfg, cityPath))
 		return
 	}
 
@@ -60,7 +63,7 @@ func doWispAutoclose(beadID string, stdout, _ io.Writer) {
 	if err != nil {
 		return
 	}
-	doWispAutocloseWith(store, beadID, stdout)
+	doWispAutocloseWith(store, beadID, stdout, cliGraphStore(store, routeCfg, cityPath))
 }
 
 // doWispAutocloseWith closes any open attached molecule/workflow roots and
@@ -77,13 +80,14 @@ func doWispAutoclose(beadID string, stdout, _ io.Writer) {
 // graph-class store. A closed work bead in a rig store can own graph-workflow
 // attachments that live in the graph store, so the attachment collection,
 // parked-checkpoint guard, subtree close, and spec-sidecar close all run on the
-// graph store. The graph store is supplied as an optional trailing argument;
-// when omitted it collapses to store, so single-store CLI and test callers
-// behave exactly as before the per-class seam.
-func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, graphStoreOpt ...beads.Store) {
-	graphStore := store
-	if len(graphStoreOpt) > 0 && graphStoreOpt[0] != nil {
-		graphStore = graphStoreOpt[0]
+// graph store. It is required rather than variadic: as a variadic with a
+// collapse-to-store default, both hook-path callers silently omitted it.
+func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, graphClassStore beads.GraphStore) {
+	// Unwrapped for internal use: the helpers below assert optional store
+	// capabilities, which do not promote through the class wrapper.
+	graphStore := graphClassStore.Store
+	if graphStore == nil {
+		graphStore = store
 	}
 	parent, err := beads.HandlesFor(store).Live.Get(beadID)
 	if err != nil {

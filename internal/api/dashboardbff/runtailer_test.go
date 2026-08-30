@@ -20,7 +20,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runproj"
-	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 type fakeResolver struct {
@@ -52,13 +51,17 @@ func (f fakeResolver) Cities() []CityRef {
 // the markers isRunGroup recognizes plus an active assignee for session joins.
 func runMoleculeEvent(seq uint64, id, formula, assignee string) events.Event {
 	b := beads.Bead{
-		ID:        id,
-		Title:     formula,
-		Status:    "open",
-		Type:      "molecule",
-		Assignee:  assignee,
-		CreatedAt: time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC),
-		UpdatedAt: time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC),
+		ID:       id,
+		Title:    formula,
+		Status:   "open",
+		Type:     "molecule",
+		Assignee: assignee,
+		// Recent so the run is fresh against the summary endpoint's real
+		// time.Now(): EnrichRunSummary marks in-flight runs silent past
+		// staleRunSilenceMs (72h) as stale and drops them from the active count,
+		// so a fixed months-old date would read every fixture run as stale.
+		CreatedAt: time.Now().Add(-2 * time.Hour),
+		UpdatedAt: time.Now().Add(-1 * time.Hour),
 		Metadata: map[string]string{
 			"gc.formula_contract": "graph.v2",
 			"gc.kind":             "run",
@@ -146,7 +149,7 @@ func TestRunTailerColdLoadAndLiveTail(t *testing.T) {
 
 	select {
 	case <-tl.readyCh:
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("cold replay did not complete")
 	}
 	waitForLanes(t, tl, 1)
@@ -178,7 +181,7 @@ func TestRunTailerManagerRebindsChangedEventsPath(t *testing.T) {
 	first := m.ensure("alpha", firstPath)
 	select {
 	case <-first.readyCh:
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("first cold replay did not complete")
 	}
 	waitForLanes(t, first, 1)
@@ -192,12 +195,12 @@ func TestRunTailerManagerRebindsChangedEventsPath(t *testing.T) {
 	}
 	select {
 	case <-first.doneCh:
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("replaced path-bound tailer did not stop")
 	}
 	select {
 	case <-replacement.readyCh:
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("replacement cold replay did not complete")
 	}
 	waitForLanes(t, replacement, 1)
@@ -230,7 +233,7 @@ func TestRunTailerLogsColdLoadFailureOnce(t *testing.T) {
 	tailer := m.ensure("alpha", filepath.Join(t.TempDir(), ".gc", "events.jsonl"))
 	select {
 	case <-tailer.readyCh:
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		cancel()
 		wg.Wait()
 		t.Fatal("cold replay attempt did not complete")

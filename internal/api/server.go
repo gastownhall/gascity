@@ -96,6 +96,12 @@ type Server struct {
 	responseCacheMu      sync.Mutex
 	responseCacheEntries map[string]responseCacheEntry
 
+	// responseRefreshing tracks response-cache keys with a background
+	// stale-while-revalidate refresh already in flight (ra-4u2eqc), guarded
+	// by responseCacheMu alongside responseCacheEntries. See
+	// beginResponseRefresh / endResponseRefresh in response_cache.go.
+	responseRefreshing map[string]bool
+
 	// storeHealth caches the on-disk size walk and maintenance-log read
 	// for /v0/status's StoreHealth block. Refreshed on expiry; missing
 	// store directories produce a zero-value entry so repeated requests

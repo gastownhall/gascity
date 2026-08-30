@@ -50,7 +50,7 @@
         },
         "nudge": {
           "type": "string",
-          "description": "Nudge is text typed into the agent's tmux session after startup.\nUsed for CLI agents that don't accept command-line prompts."
+          "description": "Nudge is text typed into the agent's session after startup.\nUsed for CLI agents that don't accept command-line prompts. For a known\npool session whose trigger remains unclaimed after the 90-second recovery\ngrace period, an empty or whitespace-only Nudge does not opt out: it sends\n\"Run gc hook --claim --drain-ack --json now; if it returns work, execute\nit immediately.\" This fallback applies only to the initial stalled-claim\nrecovery; continuation-claim recovery remains configured-only. Unknown\ntemplates receive no fallback."
         },
         "session": {
           "type": "string",
@@ -368,7 +368,11 @@
       "properties": {
         "dir": {
           "type": "string",
-          "description": "Dir is the targeting key (required with Name). Identifies the agent's\nworking directory scope. Empty for city-scoped agents."
+          "description": "Dir is the legacy targeting key for rig identity. Empty means\ncity-scoped. New configs should set Rig instead; Dir remains the\ncanonical resolved identity that both keys feed into."
+        },
+        "rig": {
+          "type": "string",
+          "description": "Rig is new targeting key for rig identity (replaces Dir).\n\"*\" matches all rigs + city. Empty means city-scoped unless Dir is set."
         },
         "name": {
           "type": "string",
@@ -645,10 +649,9 @@
       "additionalProperties": false,
       "type": "object",
       "required": [
-        "dir",
         "name"
       ],
-      "description": "AgentPatch modifies an existing agent identified by (Dir, Name)."
+      "description": "AgentPatch modifies existing agents identified by rig scope and Name."
     },
     "Import": {
       "properties": {

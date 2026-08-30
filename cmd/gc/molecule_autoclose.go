@@ -76,8 +76,11 @@ func doMoleculeAutoclose(beadID string, stdout, stderr io.Writer) {
 	// the city and every rig, and derive the store-ref from that store, so
 	// rig-store closes autoclose their molecule roots instead of silently
 	// no-op'ing (#3411).
+	// The root is ClassGraph wherever the just-closed bead lives, so the graph
+	// leg routes off the owning store rather than following it.
+	routeCfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 	if store, dir, ok := autocloseOwningStore(beadID, cityPath); ok {
-		doMoleculeAutocloseWith(store, autocloseStoreRef(dir, cityPath), rec, beadID, stdout)
+		doMoleculeAutocloseWith(store, autocloseStoreRef(dir, cityPath), rec, beadID, stdout, cliGraphStore(store, routeCfg, cityPath))
 		return
 	}
 
@@ -85,7 +88,7 @@ func doMoleculeAutoclose(beadID string, stdout, stderr io.Writer) {
 	if err != nil {
 		return
 	}
-	doMoleculeAutocloseWith(store, autocloseStoreRef(storeRoot, cityPath), rec, beadID, stdout)
+	doMoleculeAutocloseWith(store, autocloseStoreRef(storeRoot, cityPath), rec, beadID, stdout, cliGraphStore(store, routeCfg, cityPath))
 }
 
 // autocloseStoreRef resolves the store-ref label ("city:<name>" / "rig:<name>")
@@ -116,14 +119,13 @@ func autocloseStoreRef(storeRoot, cityPath string) string {
 // owns it) and resolves/closes its molecule or graph-workflow root through the
 // graph-class store. A closed bead can be a work/source bead in a rig store
 // while the molecule root it belongs to lives in the graph store, so the
-// source-bead reverse scan and the root walk run on the graph store. The graph
-// store is supplied as an optional trailing argument; when omitted it collapses
-// to store, so single-store CLI and test callers behave exactly as before the
-// per-class seam.
-func doMoleculeAutocloseWith(store beads.Store, storeRef string, rec events.Recorder, beadID string, stdout io.Writer, graphStoreOpt ...beads.Store) {
-	graphStore := store
-	if len(graphStoreOpt) > 0 && graphStoreOpt[0] != nil {
-		graphStore = graphStoreOpt[0]
+// source-bead reverse scan and the root walk run on the graph store. It is a
+// required parameter for the reason given on doWispAutocloseWith.
+func doMoleculeAutocloseWith(store beads.Store, storeRef string, rec events.Recorder, beadID string, stdout io.Writer, graphClassStore beads.GraphStore) {
+	// Unwrapped for internal use; see doWispAutocloseWith.
+	graphStore := graphClassStore.Store
+	if graphStore == nil {
+		graphStore = store
 	}
 	bead, err := store.Get(beadID)
 	if err != nil {

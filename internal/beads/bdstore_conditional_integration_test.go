@@ -14,8 +14,8 @@ import (
 
 // TestBdStoreConditionalWriterConformance is the S2-T12 integration row: the
 // ConditionalWriter conformance suite over a REAL bd binary. It is the
-// authoritative guard for the provisional conditional-write machine codes
-// ("precondition-failed" / "conditional-write-unsupported") and the
+// authoritative guard for the canonical conditional-write machine codes
+// ("precondition_failed" / "conditional_write_unsupported") and the
 // "revision" wire key, all assumed ahead of beads#4682 landing — a rename in
 // the shipped bd fails here loudly instead of drifting silently
 // (bdstore_conditional.go's classifier note points at this row).
@@ -83,6 +83,8 @@ func TestBdStoreConditionalWriterConformance(t *testing.T) {
 				return store
 			},
 			beadstest.ConditionalWriterOptions{
+				RowBackedMutationFlavors: true,
+				RestrictedUpdateFields:   true,
 				// bd's precondition body carries current_revision (#4682);
 				// asserting Current here is part of the wire-key guard.
 				SuppliesCurrent: true,

@@ -12,7 +12,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runproj"
-	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func TestRunCensusSourceServesOnlyWarmAggregateCounts(t *testing.T) {
@@ -71,7 +70,7 @@ func TestRunProjectionSourceReturnsImmediatelyWhileColdLoadIsPending(t *testing.
 	t.Cleanup(p.Stop)
 	select {
 	case <-started:
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("background cold load did not start")
 	}
 
@@ -86,7 +85,7 @@ func TestRunProjectionSourceReturnsImmediatelyWhileColdLoadIsPending(t *testing.
 		if projection.Ready || !projection.Partial || len(projection.Beads) != 0 {
 			t.Fatalf("cold projection = %+v, want empty partial warming snapshot", projection)
 		}
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("RunProjection blocked on the unfinished cold load")
 	}
 }

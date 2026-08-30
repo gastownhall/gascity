@@ -954,6 +954,11 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 				return nil, fmt.Errorf("step %q: bead title contains unresolved variable(s) %s — missing or misspelled --var(s)?", step.ID, strings.Join(residual, ", "))
 			}
 		}
+		// Same guard, extended to routing metadata — see #5060.
+		if err := validateResidualRoutingVars(step.ID, b.Metadata); err != nil {
+			markFailed(store, createdIDs)
+			return nil, err
+		}
 		if err := validateTimeoutMetadataVars(step.ID, b.Metadata); err != nil {
 			markFailed(store, createdIDs)
 			return nil, err
@@ -1185,6 +1190,11 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 				markFailed(store, createdIDs)
 				return nil, fmt.Errorf("step %q: bead title contains unresolved variable(s) %s — missing or misspelled --var(s)?", step.ID, strings.Join(residual, ", "))
 			}
+		}
+		// Same guard, extended to routing metadata — see #5060.
+		if err := validateResidualRoutingVars(step.ID, b.Metadata); err != nil {
+			markFailed(store, createdIDs)
+			return nil, err
 		}
 		if err := validateTimeoutMetadataVars(step.ID, b.Metadata); err != nil {
 			markFailed(store, createdIDs)
