@@ -125,7 +125,14 @@ if mode == "diff":
             parts = file.split("/")
             if any(part in ("genclient", "dashboardspa", "testdata", "fixtures", "generated", "testutil", "testpolicy") or part.lower().endswith("test") for part in parts): continue
             out.append({"package": package, "function": function, "file": file, "ccn": ccn})
-        return {(x["package"], x["function"], x["file"]): x["ccn"] for x in out}
+        result = {}
+        for x in out:
+            key = (x["package"], x["function"], x["file"])
+            if key in result:
+                print(f"complexity: duplicate analyzer key {key} in {path}", file=sys.stderr)
+                raise SystemExit(2)
+            result[key] = x["ccn"]
+        return result
     head, base = parse(current_path), parse(base_path)
     changes = []
     for key in sorted(set(head) | set(base)):

@@ -21,9 +21,10 @@ func TestComplexityWorkflowIsAdvisoryAndPinned(t *testing.T) {
 		Jobs        map[string]struct {
 			ContinueOnError *bool `yaml:"continue-on-error"`
 			Steps           []struct {
-				Uses            string `yaml:"uses"`
-				Run             string `yaml:"run"`
-				ContinueOnError bool   `yaml:"continue-on-error"`
+				Uses            string            `yaml:"uses"`
+				Run             string            `yaml:"run"`
+				ContinueOnError bool              `yaml:"continue-on-error"`
+				With            map[string]string `yaml:"with"`
 			} `yaml:"steps"`
 		} `yaml:"jobs"`
 	}
@@ -40,7 +41,7 @@ func TestComplexityWorkflowIsAdvisoryAndPinned(t *testing.T) {
 	if !ok || job.ContinueOnError != nil {
 		t.Fatalf("report job missing or masks setup failures: %#v", doc.Jobs)
 	}
-	var checkout, setup, artifact, pathSetup, report bool
+	var checkout, setup, artifact, pathSetup, report, diff bool
 	for _, step := range job.Steps {
 		switch {
 		case strings.HasPrefix(step.Uses, "actions/checkout@"):
@@ -56,9 +57,15 @@ func TestComplexityWorkflowIsAdvisoryAndPinned(t *testing.T) {
 		if strings.Contains(step.Run, "make complexity") && step.ContinueOnError {
 			report = true
 		}
+		if strings.Contains(step.Run, "make complexity-diff") && step.ContinueOnError {
+			diff = true
+		}
+		if step.With["fetch-depth"] != "0" && strings.HasPrefix(step.Uses, "actions/checkout@") {
+			checkout = false
+		}
 	}
-	if !checkout || !setup || !artifact || !pathSetup || !report {
-		t.Fatalf("workflow pins/advisory behavior: checkout=%t setup=%t artifact=%t path=%t report=%t", checkout, setup, artifact, pathSetup, report)
+	if !checkout || !setup || !artifact || !pathSetup || !report || !diff {
+		t.Fatalf("workflow pins/advisory behavior: checkout=%t setup=%t artifact=%t path=%t report=%t diff=%t", checkout, setup, artifact, pathSetup, report, diff)
 	}
 	if strings.Contains(text, "needs: report") || strings.Contains(text, "required") {
 		t.Fatalf("complexity workflow must not declare a required-gate dependency")

@@ -180,7 +180,7 @@ clean:
 complexity:
 	@./scripts/ci/complexity.sh report
 
-## complexity-diff: show new or regressed functions against the baseline
+## complexity-diff: compare head with COMPLEXITY_BASE_REF (origin/main by default)
 complexity-diff:
 	@./scripts/ci/complexity.sh diff
 

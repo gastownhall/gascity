@@ -84,6 +84,19 @@ func TestComplexityReportRejectsInvalidMode(t *testing.T) {
 	}
 }
 
+func TestComplexityDiffRejectsMissingBaseRef(t *testing.T) {
+	root := repoRoot(t)
+	fake := filepath.Join(t.TempDir(), "gocyclo")
+	writeExecutable(t, fake, "#!/bin/sh\nprintf '%s\\n' '1 gc helper internal/server.go:1:1'\n")
+	cmd := exec.Command(filepath.Join(root, "scripts", "ci", "complexity.sh"), "diff")
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(), "COMPLEXITY_TOOL="+fake, "COMPLEXITY_BASE_REF=refs/heads/does-not-exist")
+	output, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "unable to archive base ref") {
+		t.Fatalf("missing base ref = %v, output %s", err, output)
+	}
+}
+
 func runComplexity(t *testing.T, repoRoot, tool, baseline, argsLog, mode string) ([]byte, error) {
 	t.Helper()
 	cmd := exec.Command(filepath.Join(repoRoot, "scripts", "ci", "complexity.sh"), mode)

@@ -16,7 +16,7 @@ Run the local experiment with:
 ```sh
 go install github.com/fzipp/gocyclo/cmd/gocyclo@v0.6.0
 make complexity              # advisory report (top 50, threshold 20)
-make complexity-diff         # report new or regressed baseline entries
+make complexity-diff         # compare head with origin/main (set COMPLEXITY_BASE_REF)
 make complexity-check         # fail on new or regressed entries
 make complexity-update        # intentionally refresh threshold offenders
 ```
