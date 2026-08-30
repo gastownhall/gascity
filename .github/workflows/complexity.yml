@@ -18,18 +18,26 @@ jobs:
   report:
     name: Report complexity
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
       - name: Install gocyclo
-        run: GOBIN="$RUNNER_TEMP/bin" go install github.com/fzipp/gocyclo/cmd/gocyclo@v0.6.0
+        continue-on-error: true
+        run: |
+          GOBIN="$RUNNER_TEMP/bin" go install github.com/fzipp/gocyclo/cmd/gocyclo@v0.6.0
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Generate report
-        env:
-          PATH: ${{ runner.temp }}/bin:${{ env.PATH }}
-        run: make complexity > "$RUNNER_TEMP/complexity-report.txt"
+        continue-on-error: true
+        run: |
+          set +e
+          make complexity > "$RUNNER_TEMP/complexity-report.txt" 2>&1
+          status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "WARNING: complexity report unavailable (status $status); see artifact" >&2
+          fi
+          exit 0
       - name: Upload report artifact
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

@@ -26,7 +26,7 @@ current=$(mktemp)
 trap 'rm -f "$current"' EXIT
 # Keep this allowlist explicit: examples, test harnesses, and code generators
 # are not shipped library/runtime code and would distort the signal.
-"$TOOL" -ignore '(_test\.go$|_testhook\.go$|(^|/)(genclient|dashboardspa|conformance|testdata|fixtures|generated|testutil|testpolicy|[[:alnum:]_-]*test)(/|$)|(^|/)[^/]*conformance[^/]*\.go$)' ./cmd/gc ./internal ./pkg >"$current"
+"$TOOL" -ignore '(_test\.go$|_testhook\.go$|_gen\.go$|(^|/)(genclient|dashboardspa|conformance|testdata|fixtures|generated|testutil|testpolicy|[[:alnum:]_-]*test)(/|$)|(^|/)[^/]*conformance[^/]*\.go$)' ./cmd/gc ./internal ./pkg >"$current"
 
 python3 - "$MODE" "$current" "$BASELINE" "$THRESHOLD" "$TOP" <<'PY'
 import json, os, pathlib, sys
@@ -42,15 +42,13 @@ for raw in pathlib.Path(current_path).read_text().splitlines():
         ccn = int(fields[0])
     except ValueError:
         continue
-    if ccn < threshold:
-        continue
     package, function, location = fields[1:]
     file = location.rsplit(":", 2)[0]
     # Keep a defensive filter here as well as gocyclo's -ignore expression;
     # this prevents a tool-version change from pulling non-shipped trees into
     # the baseline.
     path_parts = file.split("/")
-    if (file.endswith("_test.go") or file.endswith("_testhook.go") or "conformance" in file.lower() or
+    if (file.endswith("_test.go") or file.endswith("_testhook.go") or file.endswith("_gen.go") or file.endswith(".generated.go") or "conformance" in file.lower() or
             any(part in ("genclient", "dashboardspa", "testdata", "fixtures", "generated", "testutil", "testpolicy") or part.lower().endswith("test") for part in path_parts)):
         continue
     items.append({"package": package, "function": function, "file": file, "ccn": ccn})
@@ -63,11 +61,13 @@ if mode == "update":
     print(f"complexity: wrote {baseline_path} ({len(items)} functions)")
     raise SystemExit(0)
 
+report_items = [item for item in items if item["ccn"] >= threshold]
+
 if mode == "report":
     print(f"Cyclomatic complexity (threshold >= {threshold}; shipped Go production code)")
-    for item in items[:top]:
+    for item in report_items[:top]:
         print(f"{item['ccn']:>3} {item['package']} {item['function']} {item['file']}")
-    if not items:
+    if not report_items:
         print("(no functions meet threshold)")
     raise SystemExit(0)
 
@@ -79,6 +79,10 @@ old = {(x["package"], x["function"], x["file"]): x["ccn"] for x in baseline.get(
 changes = []
 for item in items:
     key = (item["package"], item["function"], item["file"])
+    # The baseline captures every shipped function, but guards remain focused
+    # on meaningful offenders at/above the report threshold.
+    if item["ccn"] < threshold:
+        continue
     if key not in old:
         changes.append(f"new: {item['ccn']} {item['package']} {item['function']} {item['file']}")
     elif item["ccn"] > old[key]:

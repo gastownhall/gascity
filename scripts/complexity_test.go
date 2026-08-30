@@ -43,8 +43,8 @@ printf '%s\n' '99 gc ignored internal/server_test.go:1:1' '99 gc generated inter
 	if got.Schema != "gascity.complexity/v1" || got.Tool != "gocyclo@v0.6.0" {
 		t.Fatalf("metadata = %#v", got)
 	}
-	if len(got.Items) != 2 || got.Items[0].CCN != 31 || got.Items[1].CCN != 23 {
-		t.Fatalf("items = %#v, want sorted threshold offenders", got.Items)
+	if len(got.Items) != 3 || got.Items[0].CCN != 31 || got.Items[1].CCN != 23 || got.Items[2].CCN != 7 {
+		t.Fatalf("items = %#v, want all functions sorted by complexity", got.Items)
 	}
 	if got.Items[0].File != "internal/config/load.go" || got.Items[1].Function != "(*Server).Run" {
 		t.Fatalf("unstable keys = %#v", got.Items)
