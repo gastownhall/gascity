@@ -88,11 +88,12 @@ class ParseBEPTest(unittest.TestCase):
         result = self.parse([
             {"id": {"targetConfigured": {"label": "//internal/config:config_storage_endpoint_test"}}, "configured": {"targetConfigured": {"label": "//internal/config:config_storage_endpoint_test"}}},
             {"id": {"targetConfigured": {"label": "//internal/config:config_envname_test"}}, "configured": {}},
-            {"id": {"targetConfigured": {"label": "//other:ignored"}}, "configured": {}},
             {"id": {"targetCompleted": {"label": "//internal/config:config_envname_test"}}, "completed": {"targetCompleted": {"label": "//internal/config:config_envname_test"}, "success": True}},
+            {"id": {"targetCompleted": {"label": "//internal/config:config_envname_test"}}, "completed": {"success": True}},
             {"id": {"targetCompleted": {"label": "//internal/config:config_storage_endpoint_test"}}, "completed": {"success": True}},
-        ])
+        ], ("//internal/config:config_envname_test", "//internal/config:config_storage_endpoint_test"))
         self.assertIsNotNone(result.error)
+        self.assertEqual(result.error, "duplicate requested target events")
         self.assertIsNone(result.completed_count)
 
     def test_requested_pattern_zero_one_three_and_mismatch(self):
