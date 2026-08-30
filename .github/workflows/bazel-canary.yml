@@ -1,0 +1,102 @@
+name: Bazel canary
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "BUILD.bazel"
+      - "MODULE.bazel"
+      - "MODULE.bazel.lock"
+      - "internal/config/**"
+      - "internal/beads/contract/**"
+      - "scripts/bazel-config-backtest.sh"
+
+permissions:
+  contents: read
+
+jobs:
+  bazel-canary:
+    name: Bazel selective canary
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+
+      - name: Install pinned Bazelisk
+        env:
+          GOBIN: ${{ runner.temp }}/bazel-bin
+        run: |
+          set -euo pipefail
+          mkdir -p "$GOBIN"
+          go install github.com/bazelbuild/bazelisk@v1.26.0
+          echo "$GOBIN" >> "$GITHUB_PATH"
+
+      - name: Run Go parity and Bazel targets
+        env:
+          OUT: ${{ runner.temp }}/gascity-bazel-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -uo pipefail
+          mkdir -p "$OUT"
+          base="$OUT/output-base"
+          bazel="$(command -v bazelisk)"
+          cleanup() {
+            timeout --signal=TERM --kill-after=3 10 "$bazel" --output_base="$base" shutdown >"$OUT/shutdown.log" 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          {
+            echo "target=//internal/config:config_envname_test"
+            echo "target=//internal/config:config_diagnostic_locations_test"
+            echo "target=//internal/beads/contract:contract_test"
+            echo "remote_cache=disabled"
+          } >"$OUT/summary.txt"
+
+          /usr/bin/time -f 'go_user_s=%U go_maxrss_kb=%M' -o "$OUT/go.time" \
+            timeout --signal=TERM --kill-after=15 8m go test -count=1 ./internal/config ./internal/beads/contract \
+            >"$OUT/go.log" 2>&1
+          go_status=$?
+          echo "go_status=$go_status" >>"$OUT/summary.txt"
+          if [[ "$go_status" != 0 ]]; then
+            echo "Go parity failed; Bazel results are non-comparable." >>"$OUT/summary.txt"
+            exit "$go_status"
+          fi
+
+          common=(--noshow_progress --remote_cache= --cache_test_results=no)
+          for target in \
+            //internal/config:config_envname_test \
+            //internal/config:config_diagnostic_locations_test \
+            //internal/beads/contract:contract_test; do
+            name="${target#//}"; name="${name//\//_}"; name="${name//:/_}"
+            /usr/bin/time -f 'bazel_user_s=%U bazel_maxrss_kb=%M' -o "$OUT/$name.time" \
+              timeout --signal=TERM --kill-after=15 8m "$bazel" --output_base="$base" test "${common[@]}" \
+              --build_event_json_file="$OUT/$name.bep.json" --profile="$OUT/$name.profile.gz" "$target" \
+              >"$OUT/$name.log" 2>&1
+            status=$?
+            echo "${name}_status=$status" >>"$OUT/summary.txt"
+            [[ "$status" == 0 ]] || exit "$status"
+          done
+
+      - name: Summarize canary artifacts
+        if: always()
+        run: |
+          set -u
+          out="${{ runner.temp }}/gascity-bazel-${{ github.run_id }}-${{ github.run_attempt }}"
+          {
+            echo "run_id=${GITHUB_RUN_ID}"
+            echo "run_attempt=${GITHUB_RUN_ATTEMPT}"
+            [[ -f "$out/summary.txt" ]] && cat "$out/summary.txt"
+          } >"$out/summary.final.txt"
+
+      - name: Upload Bazel canary evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bazel-canary-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/gascity-bazel-${{ github.run_id }}-${{ github.run_attempt }}/
+          if-no-files-found: ignore
+          retention-days: 14
