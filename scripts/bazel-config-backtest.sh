@@ -48,7 +48,14 @@ now_ns() {
   local stamp; stamp="$(date +%s%N)"
   [[ "$stamp" =~ ^[0-9]+$ ]] && printf '%s\n' "$stamp" || printf '%s000000000\n' "$(date +%s)"
 }
-shutdown_bazel() { "$bazel_bin" --output_base="$1" shutdown >/dev/null 2>&1 || true; }
+shutdown_bazel() {
+  local base="$1"
+  if command -v timeout >/dev/null 2>&1; then
+    timeout --signal=TERM --kill-after=3 10 "$bazel_bin" --output_base="$base" shutdown >/dev/null 2>&1 || true
+  else
+    gtimeout --signal=TERM --kill-after=3 10 "$bazel_bin" --output_base="$base" shutdown >/dev/null 2>&1 || true
+  fi
+}
 
 tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/gascity-config-backtest.XXXXXX")"
 current_base=""; current_work=""
