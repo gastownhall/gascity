@@ -235,7 +235,7 @@ func ContinuationResetWakePatch(now time.Time) MetadataPatch {
 
 // ClearWakeBlockersPatch clears advisory blockers so a dormant session may be
 // selected by the normal wake path.
-func ClearWakeBlockersPatch(state State, sleepReason string) MetadataPatch {
+func ClearWakeBlockersPatch(state State, sleepReason string, now time.Time) MetadataPatch {
 	patch := MetadataPatch{
 		"held_until":            "",
 		"quarantined_until":     "",
@@ -248,6 +248,8 @@ func ClearWakeBlockersPatch(state State, sleepReason string) MetadataPatch {
 	switch state {
 	case StateSuspended, StateDrained:
 		patch["state"] = string(StateAsleep)
+		patch["suspended_at"] = ""
+		patch["slept_at"] = now.UTC().Format(time.RFC3339)
 	}
 	switch SleepReason(sleepReason) {
 	case SleepReasonUserHold, SleepReasonWaitHold, SleepReasonQuarantine,
@@ -430,6 +432,7 @@ func SleepPatch(now time.Time, reason string) MetadataPatch {
 		"pending_create_started_at": "",
 		"sleep_intent":              "",
 		"slept_at":                  now.UTC().Format(time.RFC3339),
+		"suspended_at":              "",
 	}
 }
 
