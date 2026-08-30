@@ -37,6 +37,10 @@ if ! /usr/bin/time -f '%e' true >/dev/null 2>&1; then echo "/usr/bin/time does n
 [[ "$samples" -le 1000 ]] || { echo "BACKTEST_SAMPLES must be <= 1000" >&2; exit 2; }
 IFS=',' read -r -a target_labels <<<"$target_labels_csv"
 for target in "${target_labels[@]}"; do [[ "$target" == //*:* ]] || { echo "BACKTEST_TARGETS contains invalid label: $target" >&2; exit 2; }; done
+[[ "${#target_labels[@]}" -eq 3 ]] || { echo "BACKTEST_TARGETS must contain the three config pilot labels" >&2; exit 2; }
+for expected in //internal/config:config_envname_test //internal/config:config_diagnostic_locations_test //internal/config:config_storage_endpoint_test; do
+  printf '%s\n' "${target_labels[@]}" | grep -Fxq "$expected" || { echo "BACKTEST_TARGETS missing required label: $expected" >&2; exit 2; }
+done
 
 IFS=',' read -r -a scenarios <<<"$scenario_csv"
 read -r -a graph_array <<<"$graph_files"
