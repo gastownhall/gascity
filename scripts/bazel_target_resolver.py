@@ -37,6 +37,7 @@ _SHARED_INFRA_PATHS = {
     ".github/workflows/bazel-canary.yml",
     "scripts/bazel-canary.sh",
     "scripts/bazel_target_resolver.py",
+    "scripts/bazel_canary_test.go",
     "scripts/bazel-config-backtest.sh",
     "scripts/test_bazel_target_resolver.py",
     "scripts/testdata/bazel/real_bazel_9_2.bep.jsonl",
