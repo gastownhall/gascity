@@ -27,6 +27,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
+	"github.com/gastownhall/gascity/internal/worktree"
 )
 
 type listFailStore struct {
@@ -880,14 +881,25 @@ func TestDefaultScaleCheckCountsSeesExternalRoutedWorkAfterCachePrime(t *testing
 func TestDefaultScaleCheckDemandCarriesTriggerBeadID(t *testing.T) {
 	const template = "gascity/workflows.codex-min"
 	store := beads.NewMemStore()
+	baseSHA := strings.Repeat("a", 40)
 	work, err := store.Create(beads.Bead{
 		Title:  "manual order run wisp",
 		Type:   "task",
 		Status: "open",
 		Metadata: map[string]string{
-			beadmeta.PackMetadataKey:          "packer",
-			beadmeta.PackWorkspaceMetadataKey: "existing-workspace",
-			"gc.routed_to":                    template,
+			beadmeta.PackMetadataKey:               "packer",
+			beadmeta.PackWorkspaceMetadataKey:      "existing-workspace",
+			beadmeta.WorkDirMetadataKey:            "/worktrees/gc-test",
+			beadmeta.WorkBranchMetadataKey:         "work/gc-test",
+			beadmeta.WorktreeRootMetadataKey:       "/worktrees",
+			beadmeta.WorktreeRepoMetadataKey:       "/repos/gascity",
+			beadmeta.WorktreeBaseRefMetadataKey:    "main",
+			beadmeta.WorktreeBaseSHAMetadataKey:    baseSHA,
+			beadmeta.WorktreeCreatorMetadataKey:    "gc-sling",
+			beadmeta.WorktreeOwnerMetadataKey:      "gc-sling",
+			beadmeta.WorktreeGenerationMetadataKey: "1",
+			beadmeta.WorktreeLifecycleMetadataKey:  worktree.LifecycleActive,
+			"gc.routed_to":                         template,
 		},
 	})
 	if err != nil {
@@ -919,6 +931,11 @@ func TestDefaultScaleCheckDemandCarriesTriggerBeadID(t *testing.T) {
 	}
 	if got := demand[template].StoreRefs[work.ID]; got != "rig:gascity" {
 		t.Fatalf("StoreRefs[%s] = %q, want rig:gascity", work.ID, got)
+	}
+	spec := demand[template].WorktreeSpecs[work.ID]
+	if spec == nil || spec.BeadID != work.ID || spec.StoreRef != "rig:gascity" ||
+		spec.Path != "/worktrees/gc-test" || spec.BaseSHA != baseSHA || spec.Owner != "gc-sling" {
+		t.Fatalf("WorktreeSpecs[%s] = %+v, want complete published owner evidence", work.ID, spec)
 	}
 }
 

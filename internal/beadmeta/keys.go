@@ -242,6 +242,14 @@ const (
 	WorkDirMetadataKey             = "gc.work_dir"
 	WorkOutcomeMetadataKey         = "gc.work_outcome"
 	WorkVerificationMetadataKey    = "gc.work_verification"
+	WorktreeBaseRefMetadataKey     = "gc.worktree_base_ref"
+	WorktreeBaseSHAMetadataKey     = "gc.worktree_base_sha"
+	WorktreeCreatorMetadataKey     = "gc.worktree_creator"
+	WorktreeGenerationMetadataKey  = "gc.worktree_generation"
+	WorktreeLifecycleMetadataKey   = "gc.worktree_lifecycle"
+	WorktreeOwnerMetadataKey       = "gc.worktree_owner"
+	WorktreeRepoMetadataKey        = "gc.worktree_repo"
+	WorktreeRootMetadataKey        = "gc.worktree_root"
 	WorkflowIDMetadataKey          = "gc.workflow_id"
 )
 
@@ -522,6 +530,14 @@ var KnownMetadataKeys = []string{
 	WorkDirMetadataKey,
 	WorkOutcomeMetadataKey,
 	WorkVerificationMetadataKey,
+	WorktreeBaseRefMetadataKey,
+	WorktreeBaseSHAMetadataKey,
+	WorktreeCreatorMetadataKey,
+	WorktreeGenerationMetadataKey,
+	WorktreeLifecycleMetadataKey,
+	WorktreeOwnerMetadataKey,
+	WorktreeRepoMetadataKey,
+	WorktreeRootMetadataKey,
 	WorkflowIDMetadataKey,
 }
 
