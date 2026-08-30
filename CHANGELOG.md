@@ -7,7 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`gc pack registry publish` now refuses an unscoped pack name unless you
+  pass `--allow-unscoped-name`.** Registry pack names are scoped as
+  `<github-owner>/<pack>`, and the registry has always reserved bare names for
+  packs it already holds a claim for — but the CLI submitted one anyway, so the
+  refusal arrived only after the request had been created and parked in the
+  review queue as an unapprovable pending row. Publish now checks the name
+  locally, before any credential or publish traffic, and names the exact
+  `[pack].name` edit that fixes it. It also refuses a scope that is not the
+  lowercased GitHub owner of the source repository, which the registry rejects
+  with no override.
+
+  Upgrading: a publisher of a grandfathered bare name must add
+  `--allow-unscoped-name` to keep publishing under it — the registry still
+  accepts a bare name it already holds a claim for, and a local preflight
+  cannot see the claim table. New packs must set
+  `[pack].name = "<github-owner>/<pack>"` in `pack.toml`. `--name` no longer
+  stands in for a missing `[pack].name`, and it can no longer rename a pack at
+  publish time: the registry byte-compares it with `[pack].name`, so it can
+  only restate the name `pack.toml` already declares.
+
 ### Fixed
+
+- **Mail archive and delete now expand whitespace-joined message IDs.** Each
+  positional argument is split into individual IDs before single-versus-batch
+  dispatch, so shell variables containing multiple IDs no longer look like one
+  already-handled message.
 
 - **`gc import add` of a local in-git pack now locks to HEAD, not the repo's
   latest tag.** Per `gc import add --help`, a local path inside a git
@@ -19,6 +46,96 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   even though the pack exists at HEAD. A local-worktree-promoted source now
   always locks to `sha:<HEAD commit>`, matching the documented behavior;
   registry/remote sources are unaffected. Fixes #3659.
+
+- **`gc doctor`'s `order-firing-current` check no longer hard-fails
+  `gc doctor` (exit code, `BlockingFailed`) when its own order-history
+  lookup times out.** The check races a Dolt-backed order-history query
+  against a 15s budget; on timeout it returned `StatusError` with no
+  `Severity` set, silently defaulting to `SeverityBlocking` (the zero
+  value of `CheckSeverity`) — turning a slow-but-healthy city's doctor run
+  red even when scheduled orders were firing normally, since a timed-out
+  lookup proves nothing about actual order staleness. The timeout branch
+  now explicitly sets `Severity: SeverityAdvisory` and `TimedOut: true`,
+  matching how `Doctor.boundedRun`'s own per-check timeout is already
+  reported, so callers (including `--json` output) can distinguish
+  "confirmed stale" from "the query didn't finish in time." (#4895)
+
+- **Wisp GC now reaps rootless leaf plain-task wisps.** The orphan reaper
+  (`reapOrphanedClosedWisps`) previously skipped any closed wisp-tier row
+  with no `gc.root_bead_id` pointer outright, and the root-rooted closure
+  purge never enumerated it either (it matches none of the root selectors:
+  not a molecule, not `gc.kind=wisp`, not a graph.v2 workflow). A closed
+  plain-task wisp that never had an owning root therefore accumulated
+  uncollected in the wisp tier indefinitely. Such a row now reaps on its
+  own closed status when it is a leaf — no parent and no children — since
+  it then has no root to check for collectibility and the single-bead
+  delete strands nothing. Leaf-ness is tested over both ownership links a
+  bead can carry — the `parent_id` column and a `parent-child` dep row —
+  since some step beads are joined to their parent by the dep row alone.
+  A rootless row that owns a subtree, is itself a subtree member, or is
+  not a plain task, remains out of scope, preserving the original safety
+  boundary. The leaf-ness probes are bounded per sweep (including in the
+  dry-run default, where they are the only backend cost) so the scan never
+  does unbounded reads per tick. Fixes #3780.
+
+- **The legacy workspace-identity deprecation warning now caveats that
+  following it can silently break packs pinned to an older revision.**
+  `city.toml`'s `workspace.name`/`workspace.prefix` deprecation hint told
+  operators to move those fields to `.gc/site.toml`, but any installed pack
+  still pinned to a revision that reads `workspace.name` directly (rather
+  than the newer site-binding-aware resolution) would silently lose its
+  identity/routing once the field was removed — reported after one
+  deployment lost inbound Discord messages for ~2 days with zero alarms
+  before anyone checked delivery receipts. The warning now says so
+  explicitly, naming `gc doctor --fix` (which performs the removal) so
+  operators check pack compatibility before running it. (#3887)
+
+- **The dashboard's bead dependency graph preserves relation type on inverse
+  ("Blocks") edges instead of collapsing every downstream relation to a
+  plain, untyped blocker.** `buildBeadGraph`'s inverse-edge pass previously
+  stored only the raw dependent bead, discarding the `dependencies[].type`
+  (or `needs`) that produced the forward edge; the `BeadDependencies` detail
+  view then rendered every downstream relation — `tracks`, `parent-child`,
+  or a genuine `blocks` need alike — under the same unlabeled "Blocks"
+  heading. A `tracks` relation (e.g. a workflow root tracking a finalizer)
+  could therefore read as a second hard dependency. The inverse edge now
+  carries the same `kind` as its forward counterpart, and the detail view
+  labels it the same way the "Needs" section already labels non-`needs`
+  forward edges. (gascity#4365)
+
+- **A named (on-demand) session no longer replays a trigger stamp for a work
+  bead that has since been parked.** The pool session path already clears
+  `gc.trigger_bead_id` when there is no ready work to route
+  (`bindPoolSessionTriggerBead`), but the named path only ever read and
+  replayed whatever was already stamped, with no equivalent check. A
+  singleton tier re-materializing after its dispatched bead was parked kept
+  re-aiming every new seat at the same stale target — one reported case
+  produced 16 seats on a single parked bead over ~19 hours, each re-deriving
+  the same dead-end analysis. The named path now checks the stamped target's
+  live state before resolving its template and clears the stamp (and its
+  dependent `gc.brain_parent_sid`) when the target is no longer workable,
+  mirroring the pool path's clear semantics. "No longer workable" means
+  closed, absent, or dependency-blocked; the blocked case is read off bd's
+  `is_blocked` ready-work projection, because every production store folds
+  bd's raw `blocked` status into `open`. A target in a store that does not
+  publish that projection is left stamped rather than risk a wrong clear, as
+  are cross-store targets this reconciler tick cannot reach. (gascity#4373)
+
+- **The work-record close gate now resolves `gc.work_branch` against its
+  remote-tracking ref, not the local branch alone.** `gitCommitReachableOnBranch`
+  passed the bare branch name (e.g. `main`) straight to
+  `git merge-base --is-ancestor`; gitrevisions precedence resolves a bare name
+  to the local `refs/heads/<branch>` ahead of any remote-tracking ref. In a
+  refinery/polecat topology, merges land via a push from a *different*
+  worktree — advancing `refs/remotes/origin/<branch>` but never the local ref
+  checked out elsewhere — so a genuinely-landed commit read as unreachable
+  until something happened to fast-forward the local branch, which in that
+  topology may be never. The gate now checks `refs/remotes/origin/<branch>`
+  first when it resolves, and still falls back to the bare branch name — so a
+  commit is reachable if it is on either ref. Purely local repos with no
+  `origin` remote are unaffected, and a commit that has been committed locally
+  but not yet pushed continues to satisfy the gate as it did before.
+  (gascity#5037)
 
 - **The dolt pack's `run_bounded` python3 fallback now sends SIGTERM before
   SIGKILL, matching its documented contract.** The fallback (used when

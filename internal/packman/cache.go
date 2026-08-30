@@ -2,11 +2,14 @@
 package packman
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/config"
@@ -20,6 +23,55 @@ var (
 	runNetworkGit            = defaultRunNetworkGit
 	materializeSyntheticRepo = builtinpacks.MaterializeSyntheticRepo
 )
+
+// networkGitTimeout bounds every network git invocation.
+//
+// The bound belongs here rather than at the callers because the invariant it
+// protects is packman-local: EnsureRepoInCache clones while holding
+// WithRepoCacheWriteLock, so a git that never returns holds the machine-wide
+// repo-cache lock forever and every other gc process on the host that touches
+// pack state queues behind it. That is ga-r0epd — one wedged remote taking out
+// `gc help`, `make test` and the pre-push hook for every agent on the machine.
+//
+// Ten minutes is deliberately generous: it is far longer than any healthy pack
+// clone and short enough that a wedge resolves itself within one coffee break
+// instead of never. It is a var so tests can shrink it.
+var networkGitTimeout = 10 * time.Minute
+
+// networkGitWaitDelay caps how long the call may stay blocked in CombinedOutput
+// after the deadline fires. This is not defensive padding: git's helpers
+// (git-remote-http, credential helpers) inherit the output pipes, so a read on
+// those pipes can outlive git itself and the deadline alone buys nothing.
+//
+// WaitDelay closes the parent's ends of those pipes; it does not signal anything
+// but the command's own process. Killing the descendants is
+// configureNetworkGitDeadline's job, and both are needed: the group kill stops the
+// writers, WaitDelay unblocks the reader if one slips through anyway. It is a
+// var so tests can shrink it; the real bound on a call is networkGitTimeout +
+// networkGitWaitDelay.
+var networkGitWaitDelay = 10 * time.Second
+
+// networkGitTerminateGrace is how long git's process group gets to exit on
+// SIGTERM before it is SIGKILLed. git removes a partially cloned directory when
+// it is interrupted, so asking politely first is what keeps a timed-out clone
+// from leaving debris in the repo cache; the escalation is what makes the bound
+// hold when it ignores us.
+//
+// What the grace actually bounds is that removal — an rm -rf of a partial
+// clone, which on a multi-GB pack over slow storage can exceed a second or two.
+// It is sized for that rather than for process teardown. Getting it wrong costs
+// tidiness rather than correctness: debris from a SIGKILL landing mid-removal
+// is reclaimed by the next holder of the cache write lock, which RemoveAll's a
+// checkout with no completion marker. The cost of the larger value is bounded
+// too — worst case 2x this appended to a call that has already waited
+// networkGitTimeout, and it elapses before WaitDelay's clock starts.
+const networkGitTerminateGrace = 5 * time.Second
+
+// errNetworkGitTimeout marks a network git call killed by networkGitTimeout.
+// It is a distinct sentinel because "the deadline fired" and "the remote said
+// no" call for opposite responses, and callers that cannot tell them apart
+// tend to retry the wrong one.
+var errNetworkGitTimeout = errors.New("network git call timed out")
 
 // RepoCacheRoot returns the shared machine-local repo cache root,
 // honoring the GC_HOME override via config.GlobalRepoCacheRoot so the
@@ -307,6 +359,24 @@ func buildNetworkGitArgs(inj gitcred.Injection, args ...string) []string {
 	return cmdArgs
 }
 
+// redactNetworkGitArgs renders a git argv for an error message with any
+// credential masked. git's argv carries the remote verbatim, so a source with
+// userinfo (https://user:token@host/repo) puts the token in every failure line
+// this function's callers build — and those errors are logged and surfaced.
+//
+// The callers' own wraps redact the URL they interpolate, which makes the leak
+// easy to miss: the outer label reads "cloning ***@host/repo" while the inner
+// string still carries the raw token. Only args are rendered, never
+// inj.CfgArgs or inj.Env, which is where the injected credential material
+// actually lives.
+func redactNetworkGitArgs(args []string) string {
+	safe := make([]string, len(args))
+	for i, a := range args {
+		safe[i] = gitcred.RedactUserinfo(a)
+	}
+	return strings.Join(safe, " ")
+}
+
 // defaultRunNetworkGit is defaultRunGit plus per-invocation credential
 // injection and typed auth classification. Every network fetch/clone/ls-remote
 // runs through it so a matched credential rule authenticates the call and an
@@ -319,17 +389,40 @@ func defaultRunNetworkGit(cityRoot, remoteURL, dir string, args ...string) (stri
 		return "", fmt.Errorf("loading git credentials for %s: %w", gitcred.RedactUserinfo(remoteURL), err)
 	}
 	cmdArgs := buildNetworkGitArgs(inj, args...)
-	cmd := exec.Command("git", cmdArgs...)
+	ctx, cancel := context.WithTimeout(context.Background(), networkGitTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
 	cmd.Env = append(gitutil.HermeticEnv(), inj.Env...)
+	// The deadline has to reach git's descendants, not just git. exec's default
+	// cancel kills the command's own process, which leaves git-remote-http and
+	// index-pack alive — still writing into the cache directory this call is
+	// holding the write lock over. The next process to take that lock can then
+	// RemoveAll a tree a live orphan is repopulating.
+	configureNetworkGitDeadline(cmd)
+	cmd.WaitDelay = networkGitWaitDelay
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		// Auth classification runs first, and the deadline is the fallback.
+		// ClassifyAuthError needs an *exec.ExitError with code 128 AND a
+		// recognized auth diagnostic in the output. A killed process usually
+		// exits -1, but a group SIGTERM can also race so that git observes its
+		// dead helper and die()s with 128 ("the remote end hung up") before its
+		// own signal lands — that exit code alone is not enough to misclassify,
+		// because "hung up" matches no auth trigger. So a wedge cannot be read
+		// as an auth failure, while the reverse order would be lossy: a real
+		// rejection landing in the last milliseconds before the deadline would
+		// be reported as a wedge and the credential hint the user needs
+		// suppressed.
 		if authErr := gitcred.ClassifyAuthError(remoteURL, inj, string(out), err); authErr != nil {
 			return "", authErr
 		}
-		return "", fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("git %s: %w after %s: %s", redactNetworkGitArgs(args), errNetworkGitTimeout, networkGitTimeout, gitcred.ScrubSecrets(strings.TrimSpace(string(out)), remoteURL))
+		}
+		return "", fmt.Errorf("git %s: %s: %w", redactNetworkGitArgs(args), gitcred.ScrubSecrets(strings.TrimSpace(string(out)), remoteURL), err)
 	}
 	return strings.TrimSpace(string(out)), nil
 }

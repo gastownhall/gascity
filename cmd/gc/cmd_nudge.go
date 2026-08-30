@@ -2585,14 +2585,18 @@ func pruneDeadQueuedNudgesWithClock(state *nudgeQueueState, front *nudgequeue.St
 					filtered = append(filtered, item)
 					continue
 				}
-				shadow, ok, err = front.FindIncludingTerminal(item.ID)
-				if err != nil || !ok || !nudgequeue.IsTerminalState(shadow.State) {
-					filtered = append(filtered, item)
-					continue
-				}
+				// Terminalize's own error return is sufficient confirmation:
+				// nil means either the bead was really terminalized, or it
+				// tolerated a missing bead as a no-op because the bead was
+				// already reaped by an unrelated retention sweep (wisp
+				// compaction etc.). Re-querying FindIncludingTerminal here
+				// would never find a reaped bead again, so entries whose
+				// bead is gone would be retained forever and pay a store
+				// lookup on every sweep (gastownhall/gascity#5278).
 			}
 			if !item.DeadAt.IsZero() && item.DeadAt.Before(cutoff) {
-				// Terminal bead confirmed in store — safe to prune once past retention.
+				// Terminal (or the backing bead is gone entirely) — safe to
+				// prune once past retention.
 				continue
 			}
 		}

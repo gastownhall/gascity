@@ -265,8 +265,14 @@ func rigScopedHookRig(cfg *config.City, agentIdentity string) string {
 // is selected: every store's query still matches this agent's own identity, so
 // no bead becomes visible that was not already routed or assigned to it.
 //
-// Ties keep the slice order, so an equally-ranked candidate in the agent's own
-// store still wins — the pre-existing behavior whenever ranking is a wash.
+// An exact tie rotates across every store tied for the best rank, using
+// hookTieBreakClock rather than always keeping the first-seen store. Always
+// preferring slice order (in practice, the agent's own store, since it is
+// stores[0]) meant a tie that persisted across calls — the common case for a
+// steady stream of same-tier, same-priority work — starved every other tied
+// store forever: the comparison is deterministic and re-runs identically on
+// every hook invocation (ga-kbbg9a). Rotating only changes WHICH tied store
+// wins; a candidate that is not tied for the best rank is never affected.
 //
 // Two deliberate carve-outs from ranking:
 //   - A tier-0 (in_progress) candidate in the PRIMARY store short-circuits.
@@ -297,9 +303,8 @@ func bestStoreWithWork(command string, stores []hookStore, primary hookStore, ru
 	firstHit := false
 	unrankable := false
 
-	var bestOut string
-	var bestStore hookStore
 	var bestRank hookCandidateRank
+	var bestTied []hookRankedStore
 	haveBest := false
 
 	// When the federated reader is pinned to the primary leg, that leg is the
@@ -340,7 +345,7 @@ func bestStoreWithWork(command string, stores []hookStore, primary hookStore, ru
 		if !firstHit {
 			firstHitOut, firstHitStore, firstHit = out, st, true
 		}
-		rank, ok := bestHookCandidateRank(ready)
+		rank, id, ok := bestHookCandidateRank(ready)
 		if !ok {
 			unrankable = true
 			continue
@@ -349,8 +354,20 @@ func bestStoreWithWork(command string, stores []hookStore, primary hookStore, ru
 		if rank.tier == hookTierInProgress && sameHookStore(st, primary) {
 			return out, st, nil
 		}
-		if !haveBest || rank.less(bestRank) {
-			bestOut, bestStore, bestRank, haveBest = out, st, rank, true
+		switch {
+		case !haveBest || rank.less(bestRank):
+			bestRank, haveBest = rank, true
+			bestTied = append(bestTied[:0], hookRankedStore{out: out, store: st, id: id})
+		case rank == bestRank && !hookTiedIDSeen(bestTied, id):
+			// A migrated bead (`gc storage migrate` copies, never deletes) can be
+			// ready from more than one store under the SAME id: the same row, not
+			// two tied pieces of work. Rotating across a duplicate would put a
+			// later store ahead of the primary for no reason — nothing about the
+			// work differs — and breaks the rig-first-city-last fan-out order the
+			// class-escalation claim loop depends on. An empty id (unidentifiable
+			// row) is never treated as a duplicate, so unranked-id fixtures keep
+			// rotating exactly as before.
+			bestTied = append(bestTied, hookRankedStore{out: out, store: st, id: id})
 		}
 	}
 
@@ -367,7 +384,11 @@ func bestStoreWithWork(command string, stores []hookStore, primary hookStore, ru
 		return firstHitOut, firstHitStore, nil
 	}
 	if haveBest {
-		return bestOut, bestStore, nil
+		winner := bestTied[0]
+		if len(bestTied) > 1 {
+			winner = bestTied[hookTieBreakIndex(len(bestTied), hookTieBreakClock())]
+		}
+		return winner.out, winner.store, nil
 	}
 	if firstHit {
 		return firstHitOut, firstHitStore, nil
@@ -376,6 +397,46 @@ func bestStoreWithWork(command string, stores []hookStore, primary hookStore, ru
 		return ownStoreOut, hookStore{}, ownStoreErr
 	}
 	return lastOut, hookStore{}, nil
+}
+
+// hookRankedStore pairs one store's work-query output with the store it came
+// from and the winning candidate's id. bestStoreWithWork accumulates one per
+// store tied for the best rank, held only long enough to resolve the tie.
+type hookRankedStore struct {
+	out   string
+	store hookStore
+	id    string
+}
+
+// hookTiedIDSeen reports whether id already has an entry in tied. An empty id
+// (a row bestHookCandidateRank could not read an "id" field from) never
+// counts as seen, so unidentifiable rows fall back to the pre-existing
+// rotate-every-entry behavior rather than being silently collapsed.
+func hookTiedIDSeen(tied []hookRankedStore, id string) bool {
+	if id == "" {
+		return false
+	}
+	for _, t := range tied {
+		if t.id == id {
+			return true
+		}
+	}
+	return false
+}
+
+// hookTieBreakClock returns the time bestStoreWithWork uses to rotate an
+// exact-rank tie across stores (see its doc comment). A package-level var so
+// tests can pin it; production always uses the real clock.
+var hookTieBreakClock = time.Now
+
+// hookTieBreakIndex picks which of n exact-rank-tied stores wins, rotating
+// with t so the same tie does not resolve to the same store on every call. A
+// fresh process (gc hook's normal invocation shape) has no in-memory state to
+// round-robin with, so the rotation source has to be something that varies
+// between invocations on its own — wall-clock time — rather than a counter.
+// n must be > 0.
+func hookTieBreakIndex(n int, t time.Time) int {
+	return int(uint64(t.UnixNano()) % uint64(n))
 }
 
 // hookFederationPinnedToPrimary reports whether this store set is the shape
@@ -417,7 +478,7 @@ func hookOwnResumeAnswer(out string, now time.Time) (string, bool) {
 	if !workQueryHasReadyWork(ready) {
 		return "", false
 	}
-	rank, ok := bestHookCandidateRank(ready)
+	rank, _, ok := bestHookCandidateRank(ready)
 	if !ok || rank.tier != hookTierInProgress {
 		return "", false
 	}
@@ -452,8 +513,12 @@ type hookCandidateRank struct {
 }
 
 // less reports whether r should be picked ahead of other. Equal ranks report
-// false in both directions, so callers that only replace on a strict improvement
-// keep the store slice order as the tiebreak.
+// false in both directions: less alone never breaks a tie, so each caller
+// decides how to. bestHookCandidateRank (below) only replaces its incumbent
+// on a strict improvement, so it keeps the first row seen. bestStoreWithWork
+// instead accumulates every candidate tied for the best rank and rotates
+// among them (see its doc comment) — the tie itself is the same regardless of
+// caller; only what happens with it differs.
 func (r hookCandidateRank) less(other hookCandidateRank) bool {
 	if r.tier != other.tier {
 		return r.tier < other.tier
@@ -466,20 +531,22 @@ func (r hookCandidateRank) less(other hookCandidateRank) bool {
 // — not JSON, not a JSON array, or an array holding a non-object — which the
 // caller treats as "do not reorder on a comparison that was not made" rather
 // than as an absence of work.
-func bestHookCandidateRank(ready string) (hookCandidateRank, bool) {
+func bestHookCandidateRank(ready string) (hookCandidateRank, string, bool) {
 	var rows []map[string]any
 	if err := json.Unmarshal([]byte(strings.TrimSpace(ready)), &rows); err != nil {
-		return hookCandidateRank{}, false
+		return hookCandidateRank{}, "", false
 	}
 	best := hookCandidateRank{}
+	bestID := ""
 	found := false
 	for _, row := range rows {
 		rank := hookRankCandidate(row)
 		if !found || rank.less(best) {
 			best, found = rank, true
+			bestID, _ = row["id"].(string)
 		}
 	}
-	return best, found
+	return best, bestID, found
 }
 
 // hookRankCandidate reads one row's tier and priority. An unrecognized status or

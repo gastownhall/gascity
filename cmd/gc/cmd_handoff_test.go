@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -1001,5 +1002,49 @@ func TestCmdHandoffRemoteDefaultSenderFallsBackToGCAliasWhenSessionIDMissing(t *
 	}
 	if msg.Assignee != "recipient" {
 		t.Fatalf("message Assignee = %q, want recipient", msg.Assignee)
+	}
+}
+
+var handoffMailIDPattern = regexp.MustCompile(`sent auto mail (\S+)`)
+
+// TestHandoffMailWritesTheBindingOnAMigratedCity pins that the handoff message
+// bead follows the messaging class. It drives cmdHandoff rather than
+// createHandoffMail because the defect is at the ROOT — which store the command
+// derives — and a test that hands a routed store in would pass unrouted.
+func TestHandoffMailWritesTheBindingOnAMigratedCity(t *testing.T) {
+	cityPath, cfg := migratedOneShotCLICity(t)
+	captureCLIStorageStderr(t)
+	t.Setenv("GC_ALIAS", "worker")
+	t.Setenv("GC_SESSION_NAME", "gc-worker")
+
+	var stdout, stderr bytes.Buffer
+	// --auto: the send without the restart request, so the assertion is about
+	// the message bead and nothing else.
+	if code := cmdHandoff([]string{"context cycle"}, "", true, "", &stdout, &stderr); code != 0 {
+		t.Fatalf("gc handoff --auto exited %d: %s", code, stderr.String())
+	}
+	match := handoffMailIDPattern.FindStringSubmatch(stdout.String())
+	if match == nil {
+		t.Fatalf("could not find the handoff mail id in %q", stdout.String())
+	}
+	msgID := match[1]
+
+	// Close the funnel's handle first, so the assertions read durable bytes.
+	if err := closeCLIStorageRoutes(); err != nil {
+		t.Fatalf("closing the one-shot routes: %v", err)
+	}
+	binding := openMigratedDestination(t, mustResolveInfraTarget(t, cityPath, cfg))
+	if _, err := binding.Get(msgID); err != nil {
+		t.Errorf("the handoff message did not land in the binding: %v", err)
+	}
+	work, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("opening the retained work store: %v", err)
+	}
+	t.Cleanup(func() { _ = closeBeadStoreHandle(work) })
+	if _, err := work.Get(msgID); err == nil {
+		t.Errorf("the handoff message also landed in the work store as %s; a relocated class must be served from its binding only", msgID)
+	} else if !errors.Is(err, beads.ErrNotFound) {
+		t.Errorf("reading the work store for %s: %v", msgID, err)
 	}
 }
