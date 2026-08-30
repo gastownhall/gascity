@@ -338,6 +338,31 @@ server_sql_retry() {
     return 1
 }
 
+# managed_backing_store_exists reports whether a Dolt database directory
+# backing SQL name $1 already exists under DATA_DIR. Catalog invisibility is
+# NOT proof of freshness: CREATE DATABASE IF NOT EXISTS adopts an existing
+# on-disk directory (see ensure_database_registered's header), so only the
+# disk answers "did this invocation create it". Dolt normalizes '-' to '_'
+# when exposing a directory as a SQL database, so compare normalized names.
+# Fails closed (reports "exists") when the server's disk is not ours to
+# inspect — a missing witness only re-arms bd's migration guard, while a
+# wrongly-written one bypasses it.
+managed_backing_store_exists() {
+    local want="$1" d base
+    is_remote && return 0
+    [ -n "$DATA_DIR" ] || return 0
+    [ -d "$DATA_DIR" ] || return 1
+    want=$(printf '%s' "$want" | tr '-' '_')
+    for d in "$DATA_DIR"/*/; do
+        [ -d "$d" ] || continue
+        base=$(basename "$d")
+        if [ "$(printf '%s' "$base" | tr '-' '_')" = "$want" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 # ensure_database_registered creates the database on the running server if
 # it doesn't already exist. Dolt's CREATE DATABASE both creates the on-disk
 # directory and registers it in the server's in-memory catalog. If the
@@ -362,6 +387,13 @@ ensure_database_registered() {
         return 0
     fi
 
+    # Capture disk state BEFORE CREATE: adoption and creation are
+    # indistinguishable from the catalog's point of view.
+    local backing_absent=false
+    if ! managed_backing_store_exists "$db"; then
+        backing_absent=true
+    fi
+
     # Register with the server (use retry for lock contention).
     local reg_err
     if ! reg_err=$(server_sql_retry "CREATE DATABASE IF NOT EXISTS \`$db\`" 2>&1 >/dev/null); then
@@ -374,7 +406,9 @@ ensure_database_registered() {
     backoff_ms=100
     for attempt in 1 2 3 4 5; do
         if server_sql "USE \`$db\`" >/dev/null 2>&1; then
-            GC_DATABASE_CREATED_BY_ENSURE=true
+            if [ "$backing_absent" = true ]; then
+                GC_DATABASE_CREATED_BY_ENSURE=true
+            fi
             return 0
         fi
         sleep_ms "$backoff_ms" 2>/dev/null || sleep 1
@@ -397,10 +431,10 @@ seed_fresh_managed_bd_version_witness() {
 
     [ ! -e "$marker" ] || return 0
 
-    if ! raw=$(bd --version 2>/dev/null); then
+    if ! raw=$(bd version 2>/dev/null); then
         die "failed to read bd version while initializing fresh managed Dolt workspace at $dir"
     fi
-    version=$(printf '%s\n' "$raw" | sed -nE 's/^bd version v?([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' | head -n 1)
+    version=$(printf '%s\n' "$raw" | sed -nE 's/^[Bb][Dd] [Vv]ersion v?([0-9]+(\.[0-9]+)+).*/\1/p' | head -n 1)
     if [ -z "$version" ]; then
         die "unrecognized bd version output while initializing fresh managed Dolt workspace at $dir: $raw"
     fi
@@ -413,7 +447,6 @@ seed_fresh_managed_bd_version_witness() {
     (umask 077 && printf '%s\n' "$version" > "$tmp") || die "failed to write bd version witness at $marker"
     mv "$tmp" "$marker" || die "failed to install bd version witness at $marker"
 }
-
 
 database_exists() {
     local db="$1"
