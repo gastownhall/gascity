@@ -13,6 +13,8 @@ from bazel_target_resolver import (
     resolve_name_status_z,
 )
 
+IDENTITY_LABEL = "//internal/config:config_identity_seam_test"
+
 
 class ResolveNameStatusZTest(unittest.TestCase):
     def resolve(self, *records):
@@ -22,6 +24,7 @@ class ResolveNameStatusZTest(unittest.TestCase):
         selection = self.resolve(
             "M", "internal/config/envname.go",
             "M", "internal/config/diagnostic_locations_test.go",
+            "M", "internal/config/identity_seam.go",
             "M", "internal/config/storage_endpoint.go",
         )
         self.assertEqual(selection.labels, CONFIG_LABELS)
@@ -29,13 +32,43 @@ class ResolveNameStatusZTest(unittest.TestCase):
         self.assertEqual(selection.reason, "mapped")
         self.assertIsNone(selection.error)
 
+    def test_maps_identity_seam_source_and_test(self):
+        for path in (
+            "internal/config/identity_seam.go",
+            "internal/config/identity_seam_bazel_test.go",
+        ):
+            selection = self.resolve("M", path)
+            self.assertEqual(selection.labels, (IDENTITY_LABEL,))
+            self.assertFalse(selection.conservative)
+            self.assertEqual(selection.reason, "mapped")
+
+    def test_mixes_identity_with_existing_target_in_sorted_order(self):
+        selection = self.resolve(
+            "M", "internal/config/identity_seam.go",
+            "M", "internal/config/envname.go",
+        )
+        self.assertEqual(
+            selection.labels,
+            tuple(sorted((IDENTITY_LABEL, "//internal/config:config_envname_test"))),
+        )
+        self.assertFalse(selection.conservative)
+        self.assertEqual(selection.reason, "mapped")
+
     def test_rename_and_delete_of_config_path_fail_closed(self):
         renamed = self.resolve("R100", "internal/config/envname.go", "docs/envname.go")
         deleted = self.resolve("D", "internal/config/storage_binding_validation.go")
-        for selection in (renamed, deleted):
+        identity_renamed = self.resolve("R100", "internal/config/identity_seam.go", "docs/identity_seam.go")
+        identity_deleted = self.resolve("D", "internal/config/identity_seam.go")
+        for selection in (renamed, deleted, identity_renamed, identity_deleted):
             self.assertEqual(selection.labels, CONFIG_LABELS)
             self.assertTrue(selection.conservative)
             self.assertEqual(selection.reason, "config-unmapped")
+
+    def test_unmapped_config_source_fails_closed(self):
+        selection = self.resolve("M", "internal/config/config.go")
+        self.assertEqual(selection.labels, CONFIG_LABELS)
+        self.assertTrue(selection.conservative)
+        self.assertEqual(selection.reason, "config-unmapped")
 
     def test_spaces_tabs_and_tab_delimited_record_are_preserved(self):
         selection = self.resolve("M\tinternal/config/a file\tname.go")
@@ -105,7 +138,7 @@ class ParseBEPTest(unittest.TestCase):
         self.assertEqual(result.error, "duplicate requested target events")
         self.assertIsNone(result.completed_count)
 
-    def test_requested_pattern_zero_one_three_and_mismatch(self):
+    def test_requested_pattern_zero_one_all_and_mismatch(self):
         zero = self.parse([{"id": {"pattern": {"patterns": []}}, "pattern": {"patterns": []}}])
         self.assertIsNotNone(zero.error)
         one = self.parse([
@@ -114,14 +147,14 @@ class ParseBEPTest(unittest.TestCase):
             {"id": {"targetCompleted": {"label": "//internal/config:config_envname_test"}}, "completed": {}},
         ], ("//internal/config:config_envname_test",))
         self.assertEqual(one.configured_count, 1)
-        three_events = [{"id": {"pattern": {"pattern": list(self.requested)}}, "pattern": {"patterns": list(self.requested)}}]
+        all_events = [{"id": {"pattern": {"pattern": list(self.requested)}}, "pattern": {"patterns": list(self.requested)}}]
         for label in self.requested:
-            three_events.extend([
+            all_events.extend([
                 {"id": {"targetConfigured": {"label": label}}, "configured": {}},
                 {"id": {"targetCompleted": {"label": label}}, "completed": {}},
             ])
-        three = self.parse(three_events)
-        self.assertEqual(three.configured_count, 3)
+        all_targets = self.parse(all_events)
+        self.assertEqual(all_targets.configured_count, len(self.requested))
         mismatch = self.parse([
             {"id": {"pattern": {"pattern": "//other:target"}}, "pattern": {}},
         ])
