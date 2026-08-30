@@ -214,7 +214,7 @@ func (c *OrderOutcomeHealthyCheck) Run(ctx *CheckContext) *CheckResult {
 	monitored := 0
 	failing := 0
 	var firstFailingHint string
-	suspendedRigs := orderFiringCurrentSuspendedRigs(c.cfg)
+	suspendedRigs := orderFiringCurrentSuspendedRigs(c.cfg, cityPath)
 
 	for _, order := range allOrders {
 		// Manual and event-triggered orders are out of scope by construction,
