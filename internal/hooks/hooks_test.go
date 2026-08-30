@@ -1761,7 +1761,8 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	}
 	opencodeHooks := string(fs.Files["/work/.opencode/plugins/gascity.js"])
 	for _, want := range []string{
-		"const GC_OPENCODE_HOOK_VERSION = 5",
+		"const GC_OPENCODE_HOOK_VERSION = 6",
+		"drainedTurnID",
 		`process.env.GC_BIN || "gc"`,
 		`/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`,
 		`"experimental.session.compacting"`,
@@ -2167,7 +2168,7 @@ export default async function gascityPlugin() {
 		t.Fatal("stale OpenCode managed plugin was preserved; expected managed upgrade")
 	}
 	for _, want := range []string{
-		"const GC_OPENCODE_HOOK_VERSION = 5",
+		"const GC_OPENCODE_HOOK_VERSION = 6",
 		`process.env.GC_BIN || "gc"`,
 		`/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`,
 		`"experimental.session.compacting"`,
@@ -2189,7 +2190,7 @@ export default async function gascityPlugin() {
 
 func TestOpenCodeHookNeedsUpgradeComparesParsedVersion(t *testing.T) {
 	current := []byte(`// Gas City hooks for OpenCode.
-const GC_OPENCODE_HOOK_VERSION = 5;
+const GC_OPENCODE_HOOK_VERSION = 6;
 const GC_BIN = process.env.GC_BIN || "gc";
 const PATH_PREFIX =
   "/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:";
@@ -2203,10 +2204,12 @@ runWithWarning(directory, "handoff", "--auto", "context cycle");
 output.context.push(handoff);
 GC_PROVIDER_SESSION_ID;
 GC_PROVIDER_SESSION_ID_REQUIRED;
+drainedTurnID;
 `)
-	stale := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 5"), []byte("GC_OPENCODE_HOOK_VERSION = 4"), 1)
-	future := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 5"), []byte("GC_OPENCODE_HOOK_VERSION = 6"), 1)
+	stale := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 6"), []byte("GC_OPENCODE_HOOK_VERSION = 5"), 1)
+	future := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 6"), []byte("GC_OPENCODE_HOOK_VERSION = 7"), 1)
 	missingStderrLog := bytes.Replace(current, []byte("logRunStderr(stderr);\n"), nil, 1)
+	unscopedDrain := bytes.Replace(current, []byte("drainedTurnID;\n"), nil, 1)
 
 	if !opencodeHookNeedsUpgrade(stale) {
 		t.Fatal("stale OpenCode hook version did not request upgrade")
@@ -2219,6 +2222,9 @@ GC_PROVIDER_SESSION_ID_REQUIRED;
 	}
 	if !opencodeHookNeedsUpgrade(missingStderrLog) {
 		t.Fatal("OpenCode hook without child stderr logging did not request upgrade")
+	}
+	if !opencodeHookNeedsUpgrade(unscopedDrain) {
+		t.Fatal("OpenCode hook without turn-scoped queue draining did not request upgrade")
 	}
 }
 
