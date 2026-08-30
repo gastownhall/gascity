@@ -14,7 +14,7 @@ import (
 func TestCompactScriptReconcilesFileBackupRemoteAlongsideOrigin(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 
-	out, err := fixture.run(t, "backup_remote_reconcile", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	out, err := fixture.run(t, "backup_remote_reconcile", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", "GC_DOLT_COMPACT_REMOTE=origin")
 	if err != nil {
 		t.Fatalf("compact should succeed with a reconcilable file:// backup remote: %v\n%s", err, out)
 	}
@@ -50,7 +50,7 @@ func TestCompactScriptReconcilesFileBackupRemoteAlongsideOrigin(t *testing.T) {
 func TestCompactScriptIsolatesBackupPushFailureFromPrimaryPush(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 
-	out, err := fixture.run(t, "backup_remote_push_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	out, err := fixture.run(t, "backup_remote_push_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", "GC_DOLT_COMPACT_REMOTE=origin")
 	if err != nil {
 		t.Fatalf("a failed backup push must not fail the overall compact run: %v\n%s", err, out)
 	}
@@ -87,7 +87,7 @@ func TestCompactScriptIsolatesBackupPushFailureFromPrimaryPush(t *testing.T) {
 func TestCompactScriptExcludesNonFileRemotesAndAuthoritativeFromBackupReconciliation(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 
-	out, err := fixture.run(t, "backup_remote_filters_non_file_and_authoritative", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	out, err := fixture.run(t, "backup_remote_filters_non_file_and_authoritative", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", "GC_DOLT_COMPACT_REMOTE=origin")
 	if err != nil {
 		t.Fatalf("compact should succeed with a mixed-scheme remote set: %v\n%s", err, out)
 	}
