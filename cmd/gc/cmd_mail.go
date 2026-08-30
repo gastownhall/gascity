@@ -832,6 +832,16 @@ func formatInjectOutput(messages []mail.Message) string {
 		subject := extmsg.SanitizeForSystemReminder(rawSubject)
 		rawBody, bodyTruncated := mailInjectBodyPreview(m.Body)
 		body := extmsg.SanitizeForSystemReminder(rawBody)
+		// A message with no body is not a message whose content went missing:
+		// the subject IS the content. `gc mail send <to> -s "text"` and
+		// POST /v0/mail with the optional body omitted both produce this shape.
+		// Without the substitution it renders as "[subject]: " — a subject in
+		// brackets and nothing behind the colon, which reads as lost content
+		// and is what made ga-6eukj0 look like a storage bug. Substituting here
+		// covers every ingress, since all of them converge on this read path.
+		if body == "" {
+			body, bodyTruncated = subject, subjectTruncated
+		}
 		if subject != "" && subject != body {
 			fmt.Fprintf(&sb, "- %s from %s [%s", m.ID, from, subject)
 			if subjectTruncated {
@@ -1865,15 +1875,6 @@ func doMailSendJSON(mp mail.Provider, rec events.Recorder, validRecipients map[s
 		// [to, body] — positional arg, no subject.
 		body = strings.Join(args[1:], " ")
 	}
-	// `-s "text"` with neither -m nor a positional body: the subject IS the
-	// message. Storing the empty body verbatim delivers a subject line with its
-	// content missing — and a bodyless mail does not read as broken, so the
-	// recipient acts on the subject and never learns anything was lost
-	// (ga-6eukj0). The positional form already behaves this way: beadmail.Send
-	// backfills an empty title from the body, and this is the mirror of it.
-	if body == "" {
-		body = subject
-	}
 
 	if validRecipients != nil && !validRecipients[to] {
 		fmt.Fprintf(stderr, "gc mail send: unknown recipient %q\n", to) //nolint:errcheck // best-effort stderr
@@ -1931,11 +1932,6 @@ func doMailSendAllJSON(mp mail.Provider, rec events.Recorder, validRecipients ma
 		body = args[1]
 	} else {
 		body = args[0]
-	}
-	// Same subject-only backfill as doMailSendJSON: `--all -s "text"` arrives
-	// here as [subject, ""] and must not broadcast an empty body (ga-6eukj0).
-	if body == "" {
-		body = subject
 	}
 
 	// Collect recipients in sorted order for deterministic output.

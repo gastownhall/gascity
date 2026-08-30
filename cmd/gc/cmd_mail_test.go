@@ -3309,12 +3309,14 @@ func TestMailSendSubjectAndMessage(t *testing.T) {
 	}
 }
 
-// TestMailSendSubjectOnlyKeepsBody covers `gc mail send <to> -s "text"` with no
-// -m and no positional body. The flag path hands doMailSend [to, subject, ""],
-// and the empty body used to be stored verbatim: the message arrived as a
-// subject line with its content silently gone. The subject IS the message here,
-// exactly as in the positional form.
-func TestMailSendSubjectOnlyKeepsBody(t *testing.T) {
+// TestMailSendSubjectOnlyStoresEmptyBody pins the storage contract for
+// `gc mail send <to> -s "text"` with no -m and no positional body: an empty
+// body is a legal stored state and stays empty. The subject is required
+// (POST /v0/mail marks it minLength:1) and the body is explicitly optional
+// there, so a subject-only message is well-formed rather than a message whose
+// content went missing. What was broken was the rendering, not the storage;
+// see TestFormatInjectOutputSubjectOnlyRendersSubjectAsMessage (ga-6eukj0).
+func TestMailSendSubjectOnlyStoresEmptyBody(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
 	recipients := map[string]bool{"human": true, "mayor": true}
@@ -3332,31 +3334,43 @@ func TestMailSendSubjectOnlyKeepsBody(t *testing.T) {
 	if b.Title != "Build is green" {
 		t.Errorf("bead Title = %q, want %q", b.Title, "Build is green")
 	}
-	if b.Description != "Build is green" {
-		t.Errorf("bead Description = %q, want %q (subject-only mail must not arrive empty)", b.Description, "Build is green")
+	if b.Description != "" {
+		t.Errorf("bead Description = %q, want empty (an omitted body is a legal state, not a lost one)", b.Description)
 	}
 }
 
-// TestMailSendAllSubjectOnlyKeepsBody covers the same defect on the broadcast
-// path: `gc mail send --all -s "text"` reaches doMailSendAllJSON as
-// [subject, ""].
-func TestMailSendAllSubjectOnlyKeepsBody(t *testing.T) {
-	store := beads.NewMemStore()
-	mp := beadmail.New(store)
-	recipients := map[string]bool{"mayor": true}
+// TestFormatInjectOutputSubjectOnlyRendersSubjectAsMessage is the actual
+// ga-6eukj0 defect. A subject-only message reached the agent-facing injection
+// as "[Build is green]: " — a subject in brackets and nothing behind the
+// colon, which reads as a message whose body was lost. The subject IS the
+// message here, so it must render as the message.
+func TestFormatInjectOutputSubjectOnlyRendersSubjectAsMessage(t *testing.T) {
+	out := formatInjectOutput([]mail.Message{
+		{ID: "gc-1", From: "human", To: "mayor", Subject: "Build is green"},
+	})
 
-	var stdout bytes.Buffer
-	code := doMailSendAllJSON(mp, events.Discard, recipients, "human", []string{"Fleet is green", ""}, nil, false, &stdout, &bytes.Buffer{})
-	if code != 0 {
-		t.Fatalf("doMailSendAllJSON = %d, want 0", code)
+	if want := "- gc-1 from human: Build is green"; !strings.Contains(out, want) {
+		t.Errorf("inject output missing %q:\n%s", want, out)
 	}
+	if strings.Contains(out, "[Build is green]: \n") {
+		t.Errorf("subject-only message rendered as an empty-bodied message:\n%s", out)
+	}
+}
 
-	b, err := store.Get("gc-1")
-	if err != nil {
-		t.Fatal(err)
+// TestFormatInjectOutputSubjectEqualToBodyRendersOnce guards the pre-existing
+// subject==body shape produced by the positional form: `gc mail send <to>
+// "text"` arrives with no subject, and beadmail.Send backfills the title from
+// the body, so Title and Description are identical.
+func TestFormatInjectOutputSubjectEqualToBodyRendersOnce(t *testing.T) {
+	out := formatInjectOutput([]mail.Message{
+		{ID: "gc-1", From: "human", To: "mayor", Subject: "Build is green", Body: "Build is green"},
+	})
+
+	if want := "- gc-1 from human: Build is green"; !strings.Contains(out, want) {
+		t.Errorf("inject output missing %q:\n%s", want, out)
 	}
-	if b.Description != "Fleet is green" {
-		t.Errorf("bead Description = %q, want %q (subject-only broadcast must not arrive empty)", b.Description, "Fleet is green")
+	if strings.Contains(out, "[Build is green]") {
+		t.Errorf("identical subject and body rendered twice:\n%s", out)
 	}
 }
 
@@ -4999,11 +5013,7 @@ func TestCmdMailSendFlagBodyWinsOverPositional(t *testing.T) {
 }
 
 func TestCmdMailSendNoBodyStillWorks(t *testing.T) {
-	// No positional body and no -m flag: the send still succeeds, and the
-	// subject is carried into the body rather than stored empty. Completes the
-	// #3331 family (positional body dropped when -s set): the remaining arm was
-	// "no body from any source", which used to persist an empty description and
-	// deliver a subject line with nothing behind it (ga-6eukj0).
+	// No positional body and no -m flag: empty body is valid.
 	cityPath := mailSendTestCity(t, "mayor")
 
 	var stdout, stderr bytes.Buffer
@@ -5016,8 +5026,8 @@ func TestCmdMailSendNoBodyStillWorks(t *testing.T) {
 	if msg.Title != "subject" {
 		t.Errorf("Title = %q, want %q", msg.Title, "subject")
 	}
-	if msg.Description != "subject" {
-		t.Errorf("Description = %q, want %q (subject-only mail must not arrive empty)", msg.Description, "subject")
+	if msg.Description != "" {
+		t.Errorf("Description = %q, want empty", msg.Description)
 	}
 }
 
