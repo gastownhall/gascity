@@ -261,7 +261,12 @@ def main() -> int:
     parser.add_argument("--label", action="append", default=list(CONFIG_LABELS))
     args = parser.parse_args()
     if args.mode == "resolve":
-        result: Selection | BepTargets = resolve_name_status_z(args.input.read_bytes())
+        try:
+            result: Selection | BepTargets = resolve_name_status_z(args.input.read_bytes())
+        except OSError as exc:
+            result = _fail_closed(f"unable to read diff input: {exc}")
+            print(json.dumps(result.as_dict(), sort_keys=True) if args.format == "json" else result.as_tsv())
+            return 2
     else:
         result = parse_bep_jsonl(args.input, args.label)
     print(json.dumps(result.as_dict(), sort_keys=True) if args.format == "json" else result.as_tsv())

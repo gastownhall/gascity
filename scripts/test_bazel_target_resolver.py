@@ -2,6 +2,8 @@
 
 import json
 import pathlib
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -133,6 +135,33 @@ class ParseBEPTest(unittest.TestCase):
         fixture = pathlib.Path(__file__).with_name("testdata") / "bazel" / "real_bazel_9_2.bep.jsonl"
         text = fixture.read_text(encoding="utf-8")
         self.assertNotRegex(text, r"(?i)(api[_-]?key|auth[_-]?token|password|secret|mn_live_|sk-[A-Za-z0-9])")
+
+
+class CLIResilienceTest(unittest.TestCase):
+    def test_unreadable_resolve_input_is_structured_and_nonzero(self):
+        script = pathlib.Path(__file__).with_name("bazel_target_resolver.py")
+        missing = pathlib.Path(tempfile.gettempdir()) / "gascity-resolver-no-such-input"
+        for output_format in ("json", "tsv"):
+            result = subprocess.run(
+                [sys.executable, str(script), "resolve", str(missing), "--format", output_format],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stderr, "")
+            if output_format == "json":
+                payload = json.loads(result.stdout)
+                self.assertEqual(tuple(payload["labels"]), CONFIG_LABELS)
+                self.assertTrue(payload["conservative"])
+                self.assertEqual(payload["reason"], "unavailable")
+                self.assertTrue(payload["error"])
+            else:
+                labels, conservative, reason, error = result.stdout.rstrip("\n").split("\t", 3)
+                self.assertEqual(tuple(labels.split(",")), CONFIG_LABELS)
+                self.assertEqual(conservative, "true")
+                self.assertEqual(reason, "unavailable")
+                self.assertTrue(error)
 
 
 if __name__ == "__main__":
