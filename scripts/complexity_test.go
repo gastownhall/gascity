@@ -97,6 +97,43 @@ func TestComplexityDiffRejectsMissingBaseRef(t *testing.T) {
 	}
 }
 
+func TestComplexityDiffDuplicateKeysRespectThreshold(t *testing.T) {
+	root := repoRoot(t)
+	for _, tt := range []struct {
+		name    string
+		output  string
+		wantErr bool
+	}{
+		{
+			name:   "low complexity duplicates are ignored",
+			output: "1 events init internal/events/payloads.go:1:1\n1 events init internal/events/payloads.go:2:1\n",
+		},
+		{
+			name:    "tracked duplicates fail clearly",
+			output:  "20 events init internal/events/payloads.go:1:1\n20 events init internal/events/payloads.go:2:1\n",
+			wantErr: true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := filepath.Join(t.TempDir(), "gocyclo")
+			writeExecutable(t, fake, "#!/bin/sh\nprintf '%b' '"+strings.ReplaceAll(tt.output, "\n", "\\n")+"'\n")
+			cmd := exec.Command(filepath.Join(root, "scripts", "ci", "complexity.sh"), "diff")
+			cmd.Dir = root
+			cmd.Env = append(os.Environ(), "COMPLEXITY_TOOL="+fake, "COMPLEXITY_BASE_REF=origin/main")
+			output, err := cmd.CombinedOutput()
+			if tt.wantErr {
+				if err == nil || !strings.Contains(string(output), "duplicate analyzer key") {
+					t.Fatalf("duplicate tracked keys = %v, output %s", err, output)
+				}
+				return
+			}
+			if err != nil || !strings.Contains(string(output), "no threshold changes") {
+				t.Fatalf("low duplicate keys = %v, output %s", err, output)
+			}
+		})
+	}
+}
+
 func runComplexity(t *testing.T, repoRoot, tool, baseline, argsLog, mode string) ([]byte, error) {
 	t.Helper()
 	cmd := exec.Command(filepath.Join(repoRoot, "scripts", "ci", "complexity.sh"), mode)

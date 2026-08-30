@@ -119,6 +119,7 @@ if mode == "diff":
                 continue
             try: ccn = int(fields[0])
             except ValueError: continue
+            if ccn < threshold: continue
             package, function, location = fields[1:]
             file = location.rsplit(":", 2)[0]
             if file.endswith(("_test.go", "_testhook.go", "_gen.go", ".generated.go")) or "conformance" in file.lower(): continue
