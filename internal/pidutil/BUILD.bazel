@@ -1,0 +1,35 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "pidutil",
+    srcs = [
+        "cmdline_darwin.go",
+        "cmdline_other.go",
+        "pidutil.go",
+        "procargs2.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/pidutil",
+    visibility = ["//:__subpackages__"],
+    deps = select({
+        "@rules_go//go/platform:darwin": [
+            "@org_golang_x_sys//unix:go_default_library",
+        ],
+        "@rules_go//go/platform:ios": [
+            "@org_golang_x_sys//unix:go_default_library",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+go_test(
+    name = "pidutil_test",
+    srcs = [
+        "cmdline_portable_test.go",
+        "pidutil_test.go",
+        "procargs2_test.go",
+        "starttime_portable_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":pidutil"],
+    deps = ["//internal/testenv"],
+)

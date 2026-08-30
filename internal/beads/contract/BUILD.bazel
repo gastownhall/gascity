@@ -1,0 +1,48 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "contract",
+    srcs = [
+        "backend_bundle.go",
+        "backend_registry.go",
+        "connection.go",
+        "files.go",
+        "identity.go",
+        "metadata.go",
+        "preflight.go",
+        "preflight_checker.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/beads/contract",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/beadmeta",
+        "//internal/fsys",
+        "//internal/pidutil",
+        "@com_github_burntsushi_toml//:go_default_library",
+        "@in_gopkg_yaml_v3//:go_default_library",
+        "@org_golang_x_mod//module:go_default_library",
+        "@org_golang_x_mod//semver:go_default_library",
+    ],
+)
+
+go_test(
+    name = "contract_test",
+    # identity_test.go scans the source checkout via runtime.Caller; retain it
+    # in the Go package suite but defer it from the hermetic Bazel pilot.
+    srcs = [
+        "backend_registry_test.go",
+        "connection_test.go",
+        "files_custom_types_test.go",
+        "files_test.go",
+        "metadata_test.go",
+        "preflight_checker_test.go",
+        "preflight_test.go",
+        "testenv_import_test.go",
+    ],
+    data = glob(["testdata/**"]),
+    embed = [":contract"],
+    deps = [
+        "//internal/fsys",
+        "//internal/testenv",
+    ],
+)

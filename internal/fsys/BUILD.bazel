@@ -1,0 +1,72 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "fsys",
+    srcs = [
+        "atomic.go",
+        "fake.go",
+        "fsys.go",
+        "read_regular_unix.go",
+        "remove_all.go",
+        "resolve_symlinks.go",
+        "scaffold.go",
+        "tree_snapshot.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/fsys",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/pidutil",
+    ] + select({
+        "@rules_go//go/platform:aix": [
+            "@org_golang_x_sys//unix:go_default_library",
+        ],
+        "@rules_go//go/platform:android": [
+            "@org_golang_x_sys//unix:go_default_library",
+        ],
+        "@rules_go//go/platform:darwin": [
+            "@org_golang_x_sys//unix:go_default_library",
+        ],
+        "@rules_go//go/platform:dragonfly": [
+            "@org_golang_x_sys//unix:go_default_library",
+        ],
+        "@rules_go//go/platform:freebsd": [
+            "@org_golang_x_sys//unix:go_default_library",
+        ],
+        "@rules_go//go/platform:ios": [
+            "@org_golang_x_sys//unix:go_default_library",
+        ],
+        "@rules_go//go/platform:linux": [
+            "@org_golang_x_sys//unix:go_default_library",
+        ],
+        "@rules_go//go/platform:netbsd": [
+            "@org_golang_x_sys//unix:go_default_library",
+        ],
+        "@rules_go//go/platform:openbsd": [
+            "@org_golang_x_sys//unix:go_default_library",
+        ],
+        "@rules_go//go/platform:solaris": [
+            "@org_golang_x_sys//unix:go_default_library",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+go_test(
+    name = "fsys_test",
+    srcs = [
+        "atomic_internal_test.go",
+        "atomic_test.go",
+        "conformance_test.go",
+        "fake_test.go",
+        "read_regular_unix_internal_test.go",
+        "remove_all_test.go",
+        "resolve_symlinks_test.go",
+        "testenv_import_test.go",
+        "tree_snapshot_test.go",
+    ],
+    embed = [":fsys"],
+    deps = [
+        "//internal/fsys/fsystest",
+        "//internal/testenv",
+    ],
+)

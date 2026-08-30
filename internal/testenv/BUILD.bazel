@@ -1,0 +1,26 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "testenv",
+    srcs = ["testenv.go"],
+    importpath = "github.com/gastownhall/gascity/internal/testenv",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "testenv_test",
+    srcs = [
+        "gc_env_baseline_test.go",
+        "legacy_flag_freeze_test.go",
+        "lint_test.go",
+        "rollout_leak_vector_test.go",
+        "testenv_internal_test.go",
+        "testenv_test.go",
+    ],
+    data = glob(["testdata/**"]),
+    embed = [":testenv"],
+    deps = [
+        "//internal/beads/contract",
+        "@com_github_gastownhall_gascity//internal/rollout:go_default_library",
+    ],
+)
