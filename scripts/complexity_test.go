@@ -109,6 +109,10 @@ func TestComplexityDiffDuplicateKeysRespectThreshold(t *testing.T) {
 			output: "1 events init internal/events/payloads.go:1:1\n1 events init internal/events/payloads.go:2:1\n",
 		},
 		{
+			name:   "low duplicates stay ignored when a later row is high",
+			output: "1 events init internal/events/payloads.go:1:1\n1 events init internal/events/payloads.go:2:1\n20 events Other internal/events/other.go:3:1\n",
+		},
+		{
 			name:    "tracked duplicates fail clearly",
 			output:  "20 events init internal/events/payloads.go:1:1\n20 events init internal/events/payloads.go:2:1\n",
 			wantErr: true,

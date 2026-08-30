@@ -132,7 +132,7 @@ if mode == "diff":
                 # gocyclo can emit duplicate low-complexity init rows. They
                 # are irrelevant to the guard; duplicate tracked offenders
                 # remain an error so the diff cannot be ambiguous.
-                if result[key] >= threshold or ccn >= threshold:
+                if result[key] >= threshold or x["ccn"] >= threshold:
                     print(f"complexity: duplicate analyzer key {key} in {path}", file=sys.stderr)
                     raise SystemExit(2)
                 continue
