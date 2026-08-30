@@ -119,7 +119,6 @@ if mode == "diff":
                 continue
             try: ccn = int(fields[0])
             except ValueError: continue
-            if ccn < threshold: continue
             package, function, location = fields[1:]
             file = location.rsplit(":", 2)[0]
             if file.endswith(("_test.go", "_testhook.go", "_gen.go", ".generated.go")) or "conformance" in file.lower(): continue
@@ -130,8 +129,13 @@ if mode == "diff":
         for x in out:
             key = (x["package"], x["function"], x["file"])
             if key in result:
-                print(f"complexity: duplicate analyzer key {key} in {path}", file=sys.stderr)
-                raise SystemExit(2)
+                # gocyclo can emit duplicate low-complexity init rows. They
+                # are irrelevant to the guard; duplicate tracked offenders
+                # remain an error so the diff cannot be ambiguous.
+                if result[key] >= threshold or ccn >= threshold:
+                    print(f"complexity: duplicate analyzer key {key} in {path}", file=sys.stderr)
+                    raise SystemExit(2)
+                continue
             result[key] = x["ccn"]
         return result
     head, base = parse(current_path), parse(base_path)
