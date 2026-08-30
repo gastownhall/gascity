@@ -20,19 +20,26 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const GC_OPENCODE_HOOK_VERSION = 5;
+const GC_OPENCODE_HOOK_VERSION = 6;
 const GC_BIN = process.env.GC_BIN || "gc";
+// Every gc call this plugin makes shares one timeout. Optional per-turn
+// injection used to carry a shorter budget of its own, but that was justified
+// only while it blocked the send acknowledgement; it no longer does, and the
+// stalls it was hedging against were an unclosed child stdin rather than slow
+// work.
+const COMMAND_TIMEOUT_MS = 30000;
 // GC_BIN is the explicit override. The fallback order matches Pi hooks so
 // sibling providers resolve the same installed gc before developer-local bins.
 const PATH_PREFIX =
   `/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`;
 
 async function runCommand(directory, args, warnOnFailure, extraEnv = {}) {
+  const startedAt = Date.now();
   try {
     const { stdout, stderr } = await execFileAsync(GC_BIN, args, {
       cwd: directory,
       encoding: "utf-8",
-      timeout: 30000,
+      timeout: COMMAND_TIMEOUT_MS,
       env: {
         ...process.env,
         ...extraEnv,
@@ -43,30 +50,35 @@ async function runCommand(directory, args, warnOnFailure, extraEnv = {}) {
     return stdout.trim();
   } catch (err) {
     if (warnOnFailure) {
-      logRunFailure(args, directory, err);
+      logRunFailure(args, directory, err, Date.now() - startedAt, COMMAND_TIMEOUT_MS);
     }
     return "";
   }
-}
-
-async function run(directory, ...args) {
-  return runCommand(directory, args, false);
 }
 
 async function runWithWarning(directory, ...args) {
   return runCommand(directory, args, true);
 }
 
-function logRunFailure(args, directory, err) {
+// Node reports killed=true and signal=SIGTERM both when our own timeout fires
+// and when something else terminates the child (a supervisor restart, say), so
+// the error alone cannot tell them apart. Report the elapsed time against the
+// budget that was in force: a failure at ~3000ms of a 3000ms budget is our
+// timeout, one at 200ms is not.
+function logRunFailure(args, directory, err, elapsedMs, timeoutMs) {
   try {
     const detail =
       (err && (err.code || err.signal || err.message)) || "unknown error";
+    const timing =
+      Number.isFinite(elapsedMs) && Number.isFinite(timeoutMs)
+        ? ` after ${elapsedMs}ms (budget ${timeoutMs}ms)`
+        : "";
     console.warn(
       "gascity opencode plugin:",
       `${GC_BIN} ${args.join(" ")}`,
       "cwd",
       directory,
-      "failed:",
+      `failed${timing}:`,
       detail,
     );
   } catch {
@@ -158,8 +170,10 @@ export default async function gascityPlugin({ directory, client }) {
 
   async function buildPrefix() {
     const prime = await readPrime();
-    const nudges = await run(directory, "nudge", "drain", "--inject");
-    const mail = await run(directory, "mail", "check", "--inject");
+    const [nudges, mail] = await Promise.all([
+      runWithWarning(directory, "nudge", "drain", "--inject"),
+      runWithWarning(directory, "mail", "check", "--inject"),
+    ]);
     return [prime, nudges, mail].filter(Boolean).join("\n\n");
   }
 
