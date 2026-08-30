@@ -3500,13 +3500,8 @@ func verifiedPoolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qu
 	if workID == "" || strings.TrimSpace(spec.BeadID) != workID {
 		return "", fmt.Errorf("%w: bead %q does not match request bead %q", errPoolTriggerWorktreeEvidence, spec.BeadID, workID)
 	}
-	// The spec carries the bead's canonical gc.root_store_ref ("city:<name>")
-	// while demand records the probe shorthand ("city"), so an exact compare
-	// rejects a workspace that is in fact ours. Normalize both onto the demand
-	// scope: that keeps the cross-store guard closed (rig:a still never matches
-	// rig:b) without failing on two spellings of one store.
 	storeRef := strings.TrimSpace(request.WorkStoreRef)
-	if storeRef != "" && normalizeDemandStoreRef(spec.StoreRef) != normalizeDemandStoreRef(storeRef) {
+	if storeRef != "" && canonicalEvidenceStoreRef(spec.StoreRef) != canonicalEvidenceStoreRef(storeRef) {
 		return "", fmt.Errorf("%w: store %q does not match request store %q", errPoolTriggerWorktreeEvidence, spec.StoreRef, storeRef)
 	}
 	report, err := worktree.Verify(spec)
@@ -3514,6 +3509,29 @@ func verifiedPoolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qu
 		return "", fmt.Errorf("%w: verification failed: %w", errPoolTriggerWorktreeEvidence, err)
 	}
 	return report.Path, nil
+}
+
+// canonicalEvidenceStoreRef collapses the spellings one store answers to, so
+// the evidence guard can compare a request against workspace provenance. The
+// two sides speak different vocabularies: demand records a probe shorthand
+// ("city", or a bare rig name from the cold-wake probe's activeStores) while
+// the worktree spec carries the bead's canonical gc.root_store_ref
+// ("city:<name>", "rig:<name>"). Comparing those literally refuses a workspace
+// that is in fact ours. Collapsing them keeps the cross-store guard closed:
+// two different rigs still never compare equal.
+func canonicalEvidenceStoreRef(storeRef string) string {
+	storeRef = strings.TrimSpace(storeRef)
+	switch {
+	case storeRef == "":
+		return ""
+	case storeRef == "city", strings.HasPrefix(storeRef, "city:"), storeref.IsClassRef(storeRef):
+		return "city"
+	case strings.HasPrefix(storeRef, "rig:"):
+		return "rig:" + strings.TrimSpace(strings.TrimPrefix(storeRef, "rig:"))
+	default:
+		// The only bare names in the demand vocabulary are rig names.
+		return "rig:" + storeRef
+	}
 }
 
 func poolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, request SessionRequest) string {

@@ -2995,6 +2995,20 @@ func TestVerifiedPoolTriggerWorkDirAcceptsCanonicalStoreRefSpelling(t *testing.T
 		t.Errorf("canonical city spelling rejected as a store mismatch: %v", err)
 	}
 
+	req.WorkStoreRef = "alpha"
+	req.WorktreeSpec = &worktree.Spec{BeadID: "gc-a", StoreRef: "rig:alpha"}
+	_, err = verifiedPoolTriggerWorkDir(nil, nil, "rig/pool", req)
+	if err != nil && strings.Contains(err.Error(), mismatch) {
+		t.Errorf("bare rig shorthand rejected as a store mismatch: %v", err)
+	}
+
+	req.WorkStoreRef = "alpha"
+	req.WorktreeSpec = &worktree.Spec{BeadID: "gc-a", StoreRef: "rig:beta"}
+	_, err = verifiedPoolTriggerWorkDir(nil, nil, "rig/pool", req)
+	if err == nil || !strings.Contains(err.Error(), mismatch) {
+		t.Errorf("alpha vs rig:beta err = %v, want a store mismatch", err)
+	}
+
 	req.WorkStoreRef = "rig:a"
 	req.WorktreeSpec = &worktree.Spec{BeadID: "gc-a", StoreRef: "rig:b"}
 	_, err = verifiedPoolTriggerWorkDir(nil, nil, "rig/pool", req)
