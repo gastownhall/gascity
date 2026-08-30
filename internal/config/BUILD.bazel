@@ -1,0 +1,18 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+# Bounded Experiment 3 target over a real production source file. The complete
+# config closure is still decomposing; `go test ./internal/config` remains
+# authoritative for all config behavior.
+go_library(
+    name = "config_envname",
+    srcs = ["envname.go"],
+    importpath = "github.com/gastownhall/gascity/internal/config",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "config_envname_test",
+    srcs = ["config_envname_bazel_test.go"],
+    embed = [":config_envname"],
+    visibility = ["//visibility:public"],
+)
