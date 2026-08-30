@@ -16,7 +16,11 @@ func TestComplexityReportUpdateAndDiffUseStableJSONKeys(t *testing.T) {
 	argsLog := filepath.Join(t.TempDir(), "args")
 	writeExecutable(t, fake, `#!/bin/sh
 printf '%s\n' "$*" > "$COMPLEXITY_ARGS_LOG"
-printf '%s\n' '23 gc (*Server).Run internal/server.go:10:1' '7 gc helper internal/server.go:30:1' '31 config Load internal/config/load.go:4:1'
+if [ "$COMPLEXITY_SCAN_KIND" = base ] || [ "$COMPLEXITY_MODE" != diff ]; then
+  printf '%s\n' '23 gc (*Server).Run internal/server.go:10:1' '7 gc helper internal/server.go:30:1' '31 config Load internal/config/load.go:4:1'
+else
+  printf '%s\n' '26 gc (*Server).Run internal/server.go:99:1' '7 gc helper internal/server.go:30:1' '31 config Load internal/config/load.go:4:1'
+fi
 printf '%s\n' '99 gc ignored internal/server_test.go:1:1' '99 gc generated internal/genclient/client.go:1:1'
 `)
 	baseline := filepath.Join(t.TempDir(), "baseline.json")
@@ -43,8 +47,8 @@ printf '%s\n' '99 gc ignored internal/server_test.go:1:1' '99 gc generated inter
 	if got.Schema != "gascity.complexity/v1" || got.Tool != "gocyclo@v0.6.0" {
 		t.Fatalf("metadata = %#v", got)
 	}
-	if len(got.Items) != 3 || got.Items[0].CCN != 31 || got.Items[1].CCN != 23 || got.Items[2].CCN != 7 {
-		t.Fatalf("items = %#v, want all functions sorted by complexity", got.Items)
+	if len(got.Items) != 2 || got.Items[0].CCN != 31 || got.Items[1].CCN != 23 {
+		t.Fatalf("items = %#v, want threshold offenders sorted by complexity", got.Items)
 	}
 	if got.Items[0].File != "internal/config/load.go" || got.Items[1].Function != "(*Server).Run" {
 		t.Fatalf("unstable keys = %#v", got.Items)
@@ -59,7 +63,11 @@ printf '%s\n' '99 gc ignored internal/server_test.go:1:1' '99 gc generated inter
 
 	// A changed score is reported by diff and rejected by check.
 	writeExecutable(t, fake, `#!/bin/sh
-printf '%s\n' '26 gc (*Server).Run internal/server.go:99:1' '7 gc helper internal/server.go:30:1' '31 config Load internal/config/load.go:4:1'
+if [ "$COMPLEXITY_SCAN_KIND" = base ]; then
+  printf '%s\n' '23 gc (*Server).Run internal/server.go:10:1' '7 gc helper internal/server.go:30:1' '31 config Load internal/config/load.go:4:1'
+else
+  printf '%s\n' '26 gc (*Server).Run internal/server.go:99:1' '7 gc helper internal/server.go:30:1' '31 config Load internal/config/load.go:4:1'
+fi
 `)
 	if output, err := runComplexity(t, repoRoot, fake, baseline, argsLog, "diff"); err != nil || !strings.Contains(string(output), "regressed") {
 		t.Fatalf("diff = %v, output %s", err, output)
