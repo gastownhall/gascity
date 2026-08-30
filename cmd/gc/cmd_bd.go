@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"unicode"
 
 	"github.com/gastownhall/gascity/internal/bdflags"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/spf13/cobra"
@@ -208,6 +210,99 @@ func rewriteBdHeartbeatArgs(bdArgs []string) ([]string, error) {
 	return []string{"heartbeat", rest[0]}, nil
 }
 
+// bdRigQualifiedMetadataRefusal refuses an outgoing lease owner or route target
+// whose rig segment is absent from the loaded city configuration. These values
+// are opaque to bd, so gc bd is the common admission boundary for stale and
+// external writers.
+//
+// Actor names without a slash remain compatible: historic dotted identities
+// are provenance, not rig-qualified routes. Both bd metadata spellings are
+// examined so --metadata cannot bypass the --set-metadata guard. Inputs this
+// preflight cannot interpret exactly are refused before bd can mutate state.
+func bdRigQualifiedMetadataRefusal(cfg *config.City, bdArgs []string) (string, bool) {
+	verb, args := bdflags.SplitGlobalFlags(bdArgs)
+	if verb != "create" && verb != "update" {
+		return "", false
+	}
+	valueFlags := bdflags.ValueFlags(verb)
+	configuredRigs := make(map[string]struct{}, len(cfg.Rigs))
+	for _, rig := range cfg.Rigs {
+		configuredRigs[rig.Name] = struct{}{}
+	}
+
+	validate := func(key, value string) (string, bool) {
+		if key != beadmeta.LeaseOwnerMetadataKey && key != beadmeta.RoutedToMetadataKey {
+			return "", false
+		}
+		rig, _, qualified := strings.Cut(value, "/")
+		if !qualified || rig == "" {
+			return "", false
+		}
+		if _, ok := configuredRigs[rig]; ok {
+			return "", false
+		}
+		return fmt.Sprintf("gc bd: refusing %s=%q: rig %q is not configured in this city\n", key, value, rig), true
+	}
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			break
+		}
+		value := ""
+		switch {
+		case arg == "--set-metadata" || arg == "--metadata":
+			if i+1 >= len(args) {
+				return fmt.Sprintf("gc bd: refusing %s without a value before write\n", arg), true
+			}
+			i++
+			value = args[i]
+		case strings.HasPrefix(arg, "--set-metadata="):
+			value = strings.TrimPrefix(arg, "--set-metadata=")
+		case strings.HasPrefix(arg, "--metadata="):
+			value = strings.TrimPrefix(arg, "--metadata=")
+		default:
+			if !strings.Contains(arg, "=") && valueFlags[arg] && i+1 < len(args) {
+				i++
+			}
+			continue
+		}
+
+		if strings.HasPrefix(arg, "--set-metadata") {
+			key, metadataValue, ok := strings.Cut(value, "=")
+			if !ok || strings.TrimSpace(key) == "" {
+				return fmt.Sprintf("gc bd: refusing malformed --set-metadata value %q before write\n", value), true
+			}
+			if msg, refused := validate(key, metadataValue); refused {
+				return msg, true
+			}
+			continue
+		}
+
+		metadataJSON := strings.TrimSpace(value)
+		if strings.HasPrefix(metadataJSON, "@") {
+			return fmt.Sprintf("gc bd: refusing --metadata %q: @file input cannot be validated before write\n", value), true
+		}
+		var metadata map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(metadataJSON), &metadata); err != nil {
+			return fmt.Sprintf("gc bd: refusing malformed --metadata value before write: %v\n", err), true
+		}
+		for key, rawValue := range metadata {
+			if key != beadmeta.LeaseOwnerMetadataKey && key != beadmeta.RoutedToMetadataKey {
+				continue
+			}
+			var metadataValue string
+			if err := json.Unmarshal(rawValue, &metadataValue); err != nil {
+				return fmt.Sprintf("gc bd: refusing non-string %s before write\n", key), true
+			}
+			if msg, refused := validate(key, metadataValue); refused {
+				return msg, true
+			}
+		}
+	}
+	return "", false
+}
+
 func doBd(args []string, stdout, stderr io.Writer) int {
 	cityName, rigName, bdArgs := extractBdScopeFlags(args)
 
@@ -238,6 +333,10 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: loading config: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if msg, refused := bdRigQualifiedMetadataRefusal(cfg, bdArgs); refused {
+		fmt.Fprint(stderr, msg) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 

@@ -1,8 +1,10 @@
 package main
 
 import (
+	"errors"
 	"io"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worktree"
 )
 
 func intPtr(n int) *int { return &n }
@@ -846,6 +849,35 @@ func TestComputePoolDesiredStates_ScaleCheckMerge(t *testing.T) {
 		if r.Tier != "new" {
 			t.Errorf("request tier = %q, want new", r.Tier)
 		}
+	}
+}
+
+func TestComputePoolDesiredStatesCarriesWorktreeOwnerEvidence(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "rig", intPtr(1), 0)},
+	}
+	spec := &worktree.Spec{BeadID: "gc-test", Owner: "gc-sling"}
+	result := computePoolDesiredStates(
+		cfg,
+		nil,
+		nil,
+		map[string]int{"rig/claude": 1},
+		map[string]scaleCheckDemand{
+			"rig/claude": {
+				WorkBeadIDs:    []string{"gc-test"},
+				StoreRefs:      map[string]string{"gc-test": "rig:gascity"},
+				WorktreeSpecs:  map[string]*worktree.Spec{"gc-test": spec},
+				WorktreeErrors: map[string]string{"other": "ignored"},
+			},
+		},
+		nil,
+	)
+	if len(result) != 1 || len(result[0].Requests) != 1 {
+		t.Fatalf("result = %+v, want one new request", result)
+	}
+	request := result[0].Requests[0]
+	if request.WorktreeSpec != spec || request.WorktreeError != "" {
+		t.Fatalf("request owner evidence = spec %+v error %q, want exact spec and no error", request.WorktreeSpec, request.WorktreeError)
 	}
 }
 
@@ -2877,5 +2909,110 @@ func TestCanonicalSingletonAliasHeldTemplates_ExcludesFailedCreateHolder(t *test
 	// A drained holder released its alias.
 	if _, ok := canonicalSingletonAliasHeldTemplates(cfg, sessionInfosFromBeads([]beads.Bead{holder("drained")}))["mayor"]; ok {
 		t.Fatalf("drained holder released its alias and must NOT mark mayor held; got held")
+	}
+}
+
+// Rebinding reused capacity to a different bead must rebind its worktree
+// evidence too. Carrying the previous bead's spec forward would hand the
+// session a workspace verified for other work.
+func TestRequestWithScaleDemandProvenanceRebindsWorktreeEvidence(t *testing.T) {
+	stale := &worktree.Spec{BeadID: "gc-old", Path: "/tmp/old"}
+	fresh := &worktree.Spec{BeadID: "gc-new", Path: "/tmp/new"}
+	demand := scaleCheckDemand{
+		WorktreeSpecs:  map[string]*worktree.Spec{"gc-new": fresh},
+		WorktreeErrors: map[string]string{},
+	}
+	got := requestWithScaleDemandProvenance(SessionRequest{WorkBeadID: "gc-old", WorktreeSpec: stale}, demand, "gc-new")
+	if got.WorktreeSpec != fresh {
+		t.Errorf("WorktreeSpec = %+v, want the spec for gc-new", got.WorktreeSpec)
+	}
+
+	got = requestWithScaleDemandProvenance(SessionRequest{WorkBeadID: "gc-old", WorktreeSpec: stale}, demand, "gc-unknown")
+	if got.WorktreeSpec != nil {
+		t.Errorf("WorktreeSpec = %+v for a bead with no evidence, want nil", got.WorktreeSpec)
+	}
+
+	demand.WorktreeErrors["gc-bad"] = " conflicting evidence "
+	got = requestWithScaleDemandProvenance(SessionRequest{WorkBeadID: "gc-old", WorktreeError: "stale"}, demand, "gc-bad")
+	if got.WorktreeError != "conflicting evidence" {
+		t.Errorf("WorktreeError = %q, want the trimmed error for gc-bad", got.WorktreeError)
+	}
+}
+
+// Unusable worktree ownership evidence must be distinguishable from an
+// ordinary bind failure: buildDesiredState skips the item on this error
+// rather than continuing without trigger env.
+func TestVerifiedPoolTriggerWorkDirMarksEvidenceFailures(t *testing.T) {
+	req := SessionRequest{WorkBeadID: "gc-a", WorktreeError: "conflicting work dir metadata"}
+	if _, err := verifiedPoolTriggerWorkDir(nil, nil, "rig/pool", req); !errors.Is(err, errPoolTriggerWorktreeEvidence) {
+		t.Errorf("WorktreeError path err = %v, want errPoolTriggerWorktreeEvidence", err)
+	}
+
+	req = SessionRequest{WorkBeadID: "gc-a", WorktreeSpec: &worktree.Spec{BeadID: "gc-b"}}
+	if _, err := verifiedPoolTriggerWorkDir(nil, nil, "rig/pool", req); !errors.Is(err, errPoolTriggerWorktreeEvidence) {
+		t.Errorf("bead mismatch err = %v, want errPoolTriggerWorktreeEvidence", err)
+	}
+}
+
+// A failed binding write on a managed-worktree request leaves the session
+// bead stamped with the previous bead's work dir, so it is marked as an
+// evidence failure and skipped rather than reused. An unmanaged request
+// keeps the ordinary continue-without-trigger-env path.
+func TestBindWriteFailureMarksManagedRequests(t *testing.T) {
+	cause := errors.New("store write failed")
+
+	managed := bindWriteFailure(SessionRequest{WorktreeSpec: &worktree.Spec{BeadID: "gc-a"}}, cause)
+	if !errors.Is(managed, errPoolTriggerWorktreeEvidence) {
+		t.Errorf("managed bind write failure = %v, want the evidence sentinel", managed)
+	}
+	if !errors.Is(managed, cause) {
+		t.Errorf("managed bind write failure lost its cause: %v", managed)
+	}
+
+	unmanaged := bindWriteFailure(SessionRequest{}, cause)
+	if errors.Is(unmanaged, errPoolTriggerWorktreeEvidence) {
+		t.Errorf("unmanaged bind write failure = %v, want no evidence sentinel", unmanaged)
+	}
+	if !errors.Is(unmanaged, cause) {
+		t.Errorf("unmanaged bind write failure lost its cause: %v", unmanaged)
+	}
+}
+
+// Demand records the probe shorthand ("city") while the workspace provenance
+// on the bead carries the canonical spelling ("city:<name>"). Those are one
+// store, so the cross-store guard must not reject the pair; two different rigs
+// still must not match.
+func TestVerifiedPoolTriggerWorkDirAcceptsCanonicalStoreRefSpelling(t *testing.T) {
+	const mismatch = "does not match request store"
+
+	req := SessionRequest{
+		WorkBeadID:   "gc-a",
+		WorkStoreRef: "city",
+		WorktreeSpec: &worktree.Spec{BeadID: "gc-a", StoreRef: "city:test-city"},
+	}
+	_, err := verifiedPoolTriggerWorkDir(nil, nil, "rig/pool", req)
+	if err != nil && strings.Contains(err.Error(), mismatch) {
+		t.Errorf("canonical city spelling rejected as a store mismatch: %v", err)
+	}
+
+	req.WorkStoreRef = "alpha"
+	req.WorktreeSpec = &worktree.Spec{BeadID: "gc-a", StoreRef: "rig:alpha"}
+	_, err = verifiedPoolTriggerWorkDir(nil, nil, "rig/pool", req)
+	if err != nil && strings.Contains(err.Error(), mismatch) {
+		t.Errorf("bare rig shorthand rejected as a store mismatch: %v", err)
+	}
+
+	req.WorkStoreRef = "alpha"
+	req.WorktreeSpec = &worktree.Spec{BeadID: "gc-a", StoreRef: "rig:beta"}
+	_, err = verifiedPoolTriggerWorkDir(nil, nil, "rig/pool", req)
+	if err == nil || !strings.Contains(err.Error(), mismatch) {
+		t.Errorf("alpha vs rig:beta err = %v, want a store mismatch", err)
+	}
+
+	req.WorkStoreRef = "rig:a"
+	req.WorktreeSpec = &worktree.Spec{BeadID: "gc-a", StoreRef: "rig:b"}
+	_, err = verifiedPoolTriggerWorkDir(nil, nil, "rig/pool", req)
+	if err == nil || !strings.Contains(err.Error(), mismatch) {
+		t.Errorf("rig:a vs rig:b err = %v, want a store mismatch", err)
 	}
 }

@@ -83,7 +83,7 @@ var hookClaimNonTurnEnvMarkers = []string{
 	"GC_HOOK_EVENT_NAME",
 }
 
-var hookClaimCommandRunnerWithEnvContext = beads.ExecCommandRunnerWithEnvContext
+var hookClaimCommandRunnerWithEnvContext = beads.ExecCommandRunnerWithExactEnvContext
 
 // hookClaimNonTurnMarker returns the first non-turn marker present in env, or ""
 // when this invocation looks like a real agent turn.
@@ -1921,6 +1921,13 @@ func hookClaimBdStoreContext(ctx context.Context, dir string, env []string, acto
 	return beads.NewBdStore(dir, hookClaimCommandRunnerWithEnvContext(ctx, hookClaimEnvMap(env, dir, actor)))
 }
 
+// hookClaimEnvMap projects the query environment into the exact environment the
+// claim mutation runs in. Because hookClaimCommandRunnerWithEnvContext REPLACES
+// the child environment rather than layering onto the parent, whatever this
+// returns is all the child bd sees: a nil env yields no BEADS_DIR, leaving the
+// child to fall back to cwd discovery. Production never takes that path —
+// claimHookWorkWithRunner always supplies the query env or the selected store's
+// env — but a caller passing nil gets cwd discovery, not the ambient selector.
 func hookClaimEnvMap(env []string, dir string, actor string) map[string]string {
 	env = workQueryEnvForDir(env, dir)
 	out := make(map[string]string, len(env)+1)

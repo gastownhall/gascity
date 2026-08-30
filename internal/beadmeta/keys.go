@@ -150,52 +150,62 @@ const (
 	IterationMetadataKey                 = "gc.iteration"
 	ItemRootKeyMetadataKey               = "gc.item_root_key"
 	KindMetadataKey                      = "gc.kind"
-	LastFailureClassMetadataKey          = "gc.last_failure_class"
-	LastFinalizeErrorMetadataKey         = "gc.last_finalize_error"
-	LogicalBeadIDMetadataKey             = "gc.logical_bead_id"
-	MaxAttemptsMetadataKey               = "gc.max_attempts"
-	MissingRootBeadIDMetadataKey         = "gc.missing_root_bead_id"
-	ModelMetadataKey                     = "gc.model"
-	NativeStepDependenciesMetadataKey    = "gc.native_step_dependencies.v1"
-	NextAttemptMetadataKey               = "gc.next_attempt"
-	OnExhaustedMetadataKey               = "gc.on_exhausted"
-	OnFailMetadataKey                    = "gc.on_fail"
-	OriginalKindMetadataKey              = "gc.original_kind"
-	OutcomeBeadIDMetadataKey             = "gc.outcome_bead_id"
-	OutcomeMetadataKey                   = "gc.outcome"
-	OutputJSONMetadataKey                = "gc.output_json"
-	OutputJSONRequiredMetadataKey        = "gc.output_json_required"
-	ParentBeadIDMetadataKey              = "gc.parent_bead_id"
-	ParentConvoyIDMetadataKey            = "gc.parent_convoy_id"
-	PartialFragmentMetadataKey           = "gc.partial_fragment"
-	PartialRetryMetadataKey              = "gc.partial_retry"
-	PackMetadataKey                      = "gc.pack"
-	PackRootMetadataKey                  = "gc.pack_root"
-	PackWorkspaceMetadataKey             = "gc.pack_workspace"
-	PerDispatchModelMetadataKey          = "gc.per_dispatch_model"
-	RalphStepIDMetadataKey               = "gc.ralph_step_id"
-	ReasoningMetadataKey                 = "gc.reasoning"
-	RequiredArtifactMetadataKey          = "gc.required_artifact"
-	RequiredArtifactsMetadataKey         = "gc.required_artifacts"
-	ReviewGateMetadataKey                = "gc.review_gate"
-	RetryCountMetadataKey                = "gc.retry_count"
-	RetryFromMetadataKey                 = "gc.retry_from"
-	RetrySessionRecycledMetadataKey      = "gc.retry_session_recycled"
-	RetryStateMetadataKey                = "gc.retry_state"
-	RigRootMetadataKey                   = "gc.rig_root"
-	RootBeadIDMetadataKey                = "gc.root_bead_id"
-	RootStoreRefMetadataKey              = "gc.root_store_ref"
-	RouteQuarantineMetadataKey           = "gc.route_recovery_quarantined"
-	RouteQuarantineReasonMetadataKey     = "gc.route_recovery_quarantine_reason"
-	RoutedToMetadataKey                  = "gc.routed_to"
-	RunTargetMetadataKey                 = "gc.run_target"
-	RuntimeVarsMetadataKey               = "gc.graphv2_vars.v1"
-	ScopeKindMetadataKey                 = "gc.scope_kind"
-	ScopeNameMetadataKey                 = "gc.scope_name"
-	ScopeRefMetadataKey                  = "gc.scope_ref"
-	ScopeRoleMetadataKey                 = "gc.scope_role"
-	SessionAffinityMetadataKey           = "gc.session_affinity"
-	SessionIDMetadataKey                 = "gc.session_id"
+	// CompletionFactsConvergedMetadataKey stamps a graph.v2 workflow root whose
+	// completion facts the completions backstop has fully reconciled: the root
+	// is closed, every listed step is closed, and every emittable fact is in
+	// the journal. A closed root's steps never change again, so the stamp is
+	// terminal and the backstop sweep skips stamped roots instead of paying a
+	// per-root step listing to rediscover a converged state every hour
+	// (ga-wevcl). Live closes on stamped roots remain covered by the delta
+	// lane, which reacts to the close events themselves.
+	CompletionFactsConvergedMetadataKey = "gc.completion_facts_converged"
+	LastFailureClassMetadataKey         = "gc.last_failure_class"
+	LastFinalizeErrorMetadataKey        = "gc.last_finalize_error"
+	LeaseOwnerMetadataKey               = "gc.lease_owner"
+	LogicalBeadIDMetadataKey            = "gc.logical_bead_id"
+	MaxAttemptsMetadataKey              = "gc.max_attempts"
+	MissingRootBeadIDMetadataKey        = "gc.missing_root_bead_id"
+	ModelMetadataKey                    = "gc.model"
+	NativeStepDependenciesMetadataKey   = "gc.native_step_dependencies.v1"
+	NextAttemptMetadataKey              = "gc.next_attempt"
+	OnExhaustedMetadataKey              = "gc.on_exhausted"
+	OnFailMetadataKey                   = "gc.on_fail"
+	OriginalKindMetadataKey             = "gc.original_kind"
+	OutcomeBeadIDMetadataKey            = "gc.outcome_bead_id"
+	OutcomeMetadataKey                  = "gc.outcome"
+	OutputJSONMetadataKey               = "gc.output_json"
+	OutputJSONRequiredMetadataKey       = "gc.output_json_required"
+	ParentBeadIDMetadataKey             = "gc.parent_bead_id"
+	ParentConvoyIDMetadataKey           = "gc.parent_convoy_id"
+	PartialFragmentMetadataKey          = "gc.partial_fragment"
+	PartialRetryMetadataKey             = "gc.partial_retry"
+	PackMetadataKey                     = "gc.pack"
+	PackRootMetadataKey                 = "gc.pack_root"
+	PackWorkspaceMetadataKey            = "gc.pack_workspace"
+	PerDispatchModelMetadataKey         = "gc.per_dispatch_model"
+	RalphStepIDMetadataKey              = "gc.ralph_step_id"
+	ReasoningMetadataKey                = "gc.reasoning"
+	RequiredArtifactMetadataKey         = "gc.required_artifact"
+	RequiredArtifactsMetadataKey        = "gc.required_artifacts"
+	ReviewGateMetadataKey               = "gc.review_gate"
+	RetryCountMetadataKey               = "gc.retry_count"
+	RetryFromMetadataKey                = "gc.retry_from"
+	RetrySessionRecycledMetadataKey     = "gc.retry_session_recycled"
+	RetryStateMetadataKey               = "gc.retry_state"
+	RigRootMetadataKey                  = "gc.rig_root"
+	RootBeadIDMetadataKey               = "gc.root_bead_id"
+	RootStoreRefMetadataKey             = "gc.root_store_ref"
+	RouteQuarantineMetadataKey          = "gc.route_recovery_quarantined"
+	RouteQuarantineReasonMetadataKey    = "gc.route_recovery_quarantine_reason"
+	RoutedToMetadataKey                 = "gc.routed_to"
+	RunTargetMetadataKey                = "gc.run_target"
+	RuntimeVarsMetadataKey              = "gc.graphv2_vars.v1"
+	ScopeKindMetadataKey                = "gc.scope_kind"
+	ScopeNameMetadataKey                = "gc.scope_name"
+	ScopeRefMetadataKey                 = "gc.scope_ref"
+	ScopeRoleMetadataKey                = "gc.scope_role"
+	SessionAffinityMetadataKey          = "gc.session_affinity"
+	SessionIDMetadataKey                = "gc.session_id"
 	// SessionIDCamelMetadataKey is the camelCase variant some bead writers stamp
 	// alongside the snake_case SessionIDMetadataKey; both are read when resolving a
 	// bead's session link.
@@ -232,6 +242,14 @@ const (
 	WorkDirMetadataKey             = "gc.work_dir"
 	WorkOutcomeMetadataKey         = "gc.work_outcome"
 	WorkVerificationMetadataKey    = "gc.work_verification"
+	WorktreeBaseRefMetadataKey     = "gc.worktree_base_ref"
+	WorktreeBaseSHAMetadataKey     = "gc.worktree_base_sha"
+	WorktreeCreatorMetadataKey     = "gc.worktree_creator"
+	WorktreeGenerationMetadataKey  = "gc.worktree_generation"
+	WorktreeLifecycleMetadataKey   = "gc.worktree_lifecycle"
+	WorktreeOwnerMetadataKey       = "gc.worktree_owner"
+	WorktreeRepoMetadataKey        = "gc.worktree_repo"
+	WorktreeRootMetadataKey        = "gc.worktree_root"
 	WorkflowIDMetadataKey          = "gc.workflow_id"
 )
 
@@ -440,6 +458,7 @@ var KnownMetadataKeys = []string{
 	KindMetadataKey,
 	LastFailureClassMetadataKey,
 	LastFinalizeErrorMetadataKey,
+	LeaseOwnerMetadataKey,
 	LogicalBeadIDMetadataKey,
 	MaxAttemptsMetadataKey,
 	MissingRootBeadIDMetadataKey,
@@ -511,6 +530,14 @@ var KnownMetadataKeys = []string{
 	WorkDirMetadataKey,
 	WorkOutcomeMetadataKey,
 	WorkVerificationMetadataKey,
+	WorktreeBaseRefMetadataKey,
+	WorktreeBaseSHAMetadataKey,
+	WorktreeCreatorMetadataKey,
+	WorktreeGenerationMetadataKey,
+	WorktreeLifecycleMetadataKey,
+	WorktreeOwnerMetadataKey,
+	WorktreeRepoMetadataKey,
+	WorktreeRootMetadataKey,
 	WorkflowIDMetadataKey,
 }
 

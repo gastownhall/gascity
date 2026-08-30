@@ -88,6 +88,7 @@ gc [flags]
 | [gc version](#gc-version) | Print gc version |
 | [gc wait](#gc-wait) | Inspect and manage durable session waits |
 | [gc whoami](#gc-whoami) | Show the authenticated hosted Gas City account |
+| [gc worktree](#gc-worktree) | Ensure or verify agent workspace worktrees |
 
 ## gc agent
 
@@ -5037,3 +5038,109 @@ gc whoami [flags]
 |------|------|---------|-------------|
 | `--at` | string |  | service base URL; defaults to GC_SERVICE_URL, the stored default, then https://gascity.com |
 | `--token` | string |  | API token to check; defaults to GC_SERVICE_TOKEN or the stored login |
+
+## gc worktree
+
+Ensure or verify agent workspace worktrees.
+
+gc worktree is the single transactional owner for workspace provisioning.
+Postconditions: the path is a direct child of the configured per-rig root and
+the root of a worktree of the given repository, with the bead's uniquely named
+branch checked out on an attached HEAD (never detached). Durable provenance is
+stored in the worktree's private git directory and returned as JSON so callers
+can atomically publish the same evidence on the bead. A new branch is created
+from --base, resolved verbatim against the local repository. Failed creation
+rolls back everything it created; --dry-run plans without mutating anything.
+
+```
+gc worktree
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc worktree cleanup](#gc-worktree-cleanup) | Remove an owned worktree after all safety gates pass |
+| [gc worktree ensure](#gc-worktree-ensure) | Ensure the worktree exists and satisfies all postconditions |
+| [gc worktree verify](#gc-worktree-verify) | Verify the worktree satisfies all postconditions without mutating |
+
+## gc worktree cleanup
+
+Remove an owned worktree after all safety gates pass.
+
+Cleanup verifies the canonical repository, path, branch, and durable ownership
+provenance before acting. It refuses dirty worktrees, commits reachable from no
+branch, tag, or remote-tracking ref, and commits not merged into --base.
+--attempt-id binds the removal to one exact provisioning attempt, so a stale
+request cannot remove a workspace re-created at the same path. There is no
+force mode and no recursive-filesystem fallback. An already-absent,
+unregistered path is an idempotent success. With --json, safety refusals return
+a structured cleanup_pending result for formula automation.
+
+```
+gc worktree cleanup [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--attempt-id` | string |  | attempt id returned by the ensure that created this worktree (required) |
+| `--base` | string |  | exact base ref used for this worktree (required) |
+| `--base-sha` | string |  | recorded base SHA to verify when reusing a worktree |
+| `--bead` | string |  | work bead bound to this worktree (required) |
+| `--branch` | string |  | branch that must be checked out (required) |
+| `--creator` | string |  | mechanism creating the worktree (required) |
+| `--generation` | string |  | provisioning generation fence (required) |
+| `--json` | bool |  | emit the report as JSON |
+| `--lifecycle` | string | `active` | worktree lifecycle state |
+| `--owner` | string |  | single selected provisioning owner (required) |
+| `--path` | string |  | worktree path (required) |
+| `--repo` | string |  | repository directory the worktree belongs to (required) |
+| `--root` | string |  | configured per-rig worktree root; path must be its direct child (required) |
+| `--store-ref` | string |  | work bead store reference (required) |
+
+## gc worktree ensure
+
+Ensure the worktree exists and satisfies all postconditions
+
+```
+gc worktree ensure [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--base` | string |  | exact base ref used for this worktree (required) |
+| `--base-sha` | string |  | recorded base SHA to verify when reusing a worktree |
+| `--bead` | string |  | work bead bound to this worktree (required) |
+| `--branch` | string |  | branch that must be checked out (required) |
+| `--creator` | string |  | mechanism creating the worktree (required) |
+| `-n`, `--dry-run` | bool |  | plan without mutating anything |
+| `--generation` | string |  | provisioning generation fence (required) |
+| `--json` | bool |  | emit the report as JSON |
+| `--lifecycle` | string | `active` | worktree lifecycle state |
+| `--owner` | string |  | single selected provisioning owner (required) |
+| `--path` | string |  | worktree path (required) |
+| `--repo` | string |  | repository directory the worktree belongs to (required) |
+| `--root` | string |  | configured per-rig worktree root; path must be its direct child (required) |
+| `--store-ref` | string |  | work bead store reference (required) |
+
+## gc worktree verify
+
+Verify the worktree satisfies all postconditions without mutating
+
+```
+gc worktree verify [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--base` | string |  | exact base ref used for this worktree (required) |
+| `--base-sha` | string |  | recorded base SHA to verify when reusing a worktree |
+| `--bead` | string |  | work bead bound to this worktree (required) |
+| `--branch` | string |  | branch that must be checked out (required) |
+| `--creator` | string |  | mechanism creating the worktree (required) |
+| `--generation` | string |  | provisioning generation fence (required) |
+| `--json` | bool |  | emit the report as JSON |
+| `--lifecycle` | string | `active` | worktree lifecycle state |
+| `--owner` | string |  | single selected provisioning owner (required) |
+| `--path` | string |  | worktree path (required) |
+| `--repo` | string |  | repository directory the worktree belongs to (required) |
+| `--root` | string |  | configured per-rig worktree root; path must be its direct child (required) |
+| `--store-ref` | string |  | work bead store reference (required) |

@@ -450,6 +450,15 @@ func continuationNudgeCfg() *config.City {
 	}}}
 }
 
+func TestPoolContinuationBackstopContent_SkipsBlankNudge(t *testing.T) {
+	cfg := continuationNudgeCfg()
+	cfg.Agents[0].Nudge = " \t "
+
+	if got := (poolContinuationBackstop{cfg: cfg}).content(continuationPoolSession("session-bead-a", "session-a")); got != "" {
+		t.Fatalf("continuation claim nudge = %q, want empty", got)
+	}
+}
+
 func continuationCandidateBeads(id, assignee string) (beads.Bead, beads.Bead) {
 	root := continuationRoot("rig:fixture")
 	root.Metadata[beadmeta.SessionNameMetadataKey] = assignee

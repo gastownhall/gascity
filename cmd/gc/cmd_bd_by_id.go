@@ -832,10 +832,11 @@ func bdByIDMutationSubjects(bdArgs []string) []string {
 }
 
 // bdIDIsClassReserved reports whether id carries a reserved class id prefix.
-// Those prefixes are minted only by the relocated class stores, so such an id
+// Those namespaces belong to the relocated class stores — whether the store's
+// own sequence minted the id or a subsystem inside it did — so such an id
 // existing anywhere else is not a thing bd can answer for.
 func bdIDIsClassReserved(id string) bool {
-	for _, prefix := range config.ReservedClassPrefixes() {
+	for _, prefix := range config.AllReservedClassPrefixes() {
 		if prefix != "" && strings.HasPrefix(id, prefix+"-") {
 			return true
 		}

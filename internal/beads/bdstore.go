@@ -94,6 +94,20 @@ func ExecCommandRunnerWithEnvContextWithoutAmbientBeads(ctx context.Context, env
 }
 
 func execCommandRunnerWithEnv(parent context.Context, env map[string]string, withoutAmbientBeads bool) CommandRunner {
+	return execCommandRunner(parent, env, withoutAmbientBeads, processEnvSnapshotExcludingNativeDoltOpen)
+}
+
+// ExecCommandRunnerWithExactEnvContext is like ExecCommandRunnerWithEnvContext,
+// but replaces the child environment instead of layering overrides onto the
+// parent process. Use it when env is a complete, already-scrubbed projection
+// (e.g. the hook-claim query env from mergeRuntimeEnv). This is a stronger
+// invariant than the WithoutAmbientBeads pair, which strips only BEADS_*:
+// here the mutation runs in exactly the environment the query ran in.
+func ExecCommandRunnerWithExactEnvContext(ctx context.Context, env map[string]string) CommandRunner {
+	return execCommandRunner(ctx, env, false, func() []string { return nil })
+}
+
+func execCommandRunner(parent context.Context, env map[string]string, withoutAmbientBeads bool, baseEnvFn func() []string) CommandRunner {
 	return func(dir, name string, args ...string) ([]byte, error) {
 		execName := name
 		if name == "bd" {
@@ -125,7 +139,7 @@ func execCommandRunnerWithEnv(parent context.Context, env map[string]string, wit
 		cmd.Cancel = func() error {
 			return killCommandTree(cmd)
 		}
-		baseEnv := processEnvSnapshotExcludingNativeDoltOpen()
+		baseEnv := baseEnvFn()
 		overrides := env
 		if withoutAmbientBeads {
 			baseEnv = envWithoutPrefix(baseEnv, beadsEnvPrefix)
