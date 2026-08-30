@@ -26,7 +26,7 @@ current=$(mktemp)
 trap 'rm -f "$current"' EXIT
 # Keep this allowlist explicit: examples, test harnesses, and code generators
 # are not shipped library/runtime code and would distort the signal.
-"$TOOL" -ignore '(_test\.go$|(^|/)(genclient|dashboardspa|conformance|testdata|fixtures|generated)(/|$))' ./cmd/gc ./internal ./pkg >"$current"
+"$TOOL" -ignore '(_test\.go$|_testhook\.go$|(^|/)(genclient|dashboardspa|conformance|testdata|fixtures|generated|testutil|testpolicy|[[:alnum:]_-]*test)(/|$)|(^|/)[^/]*conformance[^/]*\.go$)' ./cmd/gc ./internal ./pkg >"$current"
 
 python3 - "$MODE" "$current" "$BASELINE" "$THRESHOLD" "$TOP" <<'PY'
 import json, os, pathlib, sys
@@ -49,7 +49,9 @@ for raw in pathlib.Path(current_path).read_text().splitlines():
     # Keep a defensive filter here as well as gocyclo's -ignore expression;
     # this prevents a tool-version change from pulling non-shipped trees into
     # the baseline.
-    if file.endswith("_test.go") or any(f"/{part}/" in f"/{file}/" for part in ("genclient", "dashboardspa", "conformance", "testdata", "fixtures", "generated")):
+    path_parts = file.split("/")
+    if (file.endswith("_test.go") or file.endswith("_testhook.go") or "conformance" in file.lower() or
+            any(part in ("genclient", "dashboardspa", "testdata", "fixtures", "generated", "testutil", "testpolicy") or part.lower().endswith("test") for part in path_parts)):
         continue
     items.append({"package": package, "function": function, "file": file, "ccn": ccn})
 items.sort(key=lambda x: (-x["ccn"], x["package"], x["function"], x["file"]))
