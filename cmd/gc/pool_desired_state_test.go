@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -2974,5 +2975,30 @@ func TestBindWriteFailureMarksManagedRequests(t *testing.T) {
 	}
 	if !errors.Is(unmanaged, cause) {
 		t.Errorf("unmanaged bind write failure lost its cause: %v", unmanaged)
+	}
+}
+
+// Demand records the probe shorthand ("city") while the workspace provenance
+// on the bead carries the canonical spelling ("city:<name>"). Those are one
+// store, so the cross-store guard must not reject the pair; two different rigs
+// still must not match.
+func TestVerifiedPoolTriggerWorkDirAcceptsCanonicalStoreRefSpelling(t *testing.T) {
+	const mismatch = "does not match request store"
+
+	req := SessionRequest{
+		WorkBeadID:   "gc-a",
+		WorkStoreRef: "city",
+		WorktreeSpec: &worktree.Spec{BeadID: "gc-a", StoreRef: "city:test-city"},
+	}
+	_, err := verifiedPoolTriggerWorkDir(nil, nil, "rig/pool", req)
+	if err != nil && strings.Contains(err.Error(), mismatch) {
+		t.Errorf("canonical city spelling rejected as a store mismatch: %v", err)
+	}
+
+	req.WorkStoreRef = "rig:a"
+	req.WorktreeSpec = &worktree.Spec{BeadID: "gc-a", StoreRef: "rig:b"}
+	_, err = verifiedPoolTriggerWorkDir(nil, nil, "rig/pool", req)
+	if err == nil || !strings.Contains(err.Error(), mismatch) {
+		t.Errorf("rig:a vs rig:b err = %v, want a store mismatch", err)
 	}
 }

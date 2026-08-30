@@ -3500,8 +3500,13 @@ func verifiedPoolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qu
 	if workID == "" || strings.TrimSpace(spec.BeadID) != workID {
 		return "", fmt.Errorf("%w: bead %q does not match request bead %q", errPoolTriggerWorktreeEvidence, spec.BeadID, workID)
 	}
+	// The spec carries the bead's canonical gc.root_store_ref ("city:<name>")
+	// while demand records the probe shorthand ("city"), so an exact compare
+	// rejects a workspace that is in fact ours. Normalize both onto the demand
+	// scope: that keeps the cross-store guard closed (rig:a still never matches
+	// rig:b) without failing on two spellings of one store.
 	storeRef := strings.TrimSpace(request.WorkStoreRef)
-	if storeRef != "" && strings.TrimSpace(spec.StoreRef) != storeRef {
+	if storeRef != "" && normalizeDemandStoreRef(spec.StoreRef) != normalizeDemandStoreRef(storeRef) {
 		return "", fmt.Errorf("%w: store %q does not match request store %q", errPoolTriggerWorktreeEvidence, spec.StoreRef, storeRef)
 	}
 	report, err := worktree.Verify(spec)
