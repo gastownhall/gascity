@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"time"
@@ -87,11 +88,24 @@ func worktreeSpecForBead(bead beads.Bead, storeRef string) (*worktree.Spec, erro
 		{beadmeta.WorktreeGenerationMetadataKey, bead.Metadata[beadmeta.WorktreeGenerationMetadataKey]},
 		{beadmeta.WorktreeLifecycleMetadataKey, bead.Metadata[beadmeta.WorktreeLifecycleMetadataKey]},
 	}
+	missing := make([]string, 0, len(values))
 	for _, item := range values {
 		if strings.TrimSpace(item.value) == "" {
-			return nil, fmt.Errorf("work bead %s has %s=%q but is missing %s",
-				bead.ID, beadmeta.WorkDirMetadataKey, path, item.key)
+			missing = append(missing, item.key)
 		}
+	}
+	if len(missing) == len(values) {
+		// gc.work_dir with none of the ownership keys is a pre-#5193 stamp,
+		// not incomplete evidence -- the bead never claimed to publish any.
+		// Treat it as an unmanaged legacy workspace so the seat spawns as it
+		// always did, instead of erroring it into permanent starvation.
+		log.Printf("worktreeSpecForBead: work bead %s has legacy %s=%q with no worktree ownership metadata (pre-#5193); treating as unmanaged",
+			bead.ID, beadmeta.WorkDirMetadataKey, path)
+		return nil, nil
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("work bead %s has %s=%q but is missing %s",
+			bead.ID, beadmeta.WorkDirMetadataKey, path, missing[0])
 	}
 	// The bead's own gc.root_store_ref is the canonical spelling
 	// ("city:<name>", "rig:<name>") and is what the creating side recorded in
