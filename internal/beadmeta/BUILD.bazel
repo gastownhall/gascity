@@ -1,0 +1,34 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "beadmeta",
+    srcs = [
+        "control_close.go",
+        "hold_labels.go",
+        "keys.go",
+        "keyshape.go",
+        "kindsets.go",
+        "path.go",
+        "runid.go",
+        "values.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/beadmeta",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "beadmeta_test",
+    srcs = [
+        "control_close_test.go",
+        "guard_test.go",
+        "hold_labels_test.go",
+        "keys_test.go",
+        "kindsets_test.go",
+        "path_test.go",
+        "runid_test.go",
+        "testenv_import_test.go",
+        "values_test.go",
+    ],
+    embed = [":beadmeta"],
+    deps = ["//internal/testenv"],
+)
