@@ -255,6 +255,35 @@ func bdQueryEphemeralStatusQuietShell(status string) string {
 	return bdQueryEphemeralStatusShell(status) + ` 2>/dev/null`
 }
 
+// ephemeralStatusSnapshotShell emits a memoized read of one ephemeral status
+// tier into shellVar, for the probes that filter it per identity.
+//
+// The scan itself is `bd query --limit=0` — unlimited, so a full-store
+// traversal — and it does not reference the identity the caller filters by:
+// the jq filters below select on `$id` AFTER the whole array is fetched. Both
+// probes are emitted INSIDE the `for id in ...` identity loops, so the same
+// identity-independent traversal ran once per identity, three times in the
+// standard tiers and up to six in the legacy control-dispatcher tiers, for a
+// result that cannot differ between them. On a store grown past a few seconds
+// per scan that is most of `gc hook`'s work-query budget (#5712).
+//
+// Reading it once and filtering the snapshot per identity is what the jq
+// filters were already written against. The read stays LAZY rather than being
+// hoisted to a prelude, which keeps two existing properties exactly: a tier
+// that serves a candidate and exits before reaching the probe still never
+// scans, and a query run with no identity set at all — the reconciler's
+// demand-detection form — still never enters the loop body, so it still never
+// scans.
+//
+// The trade is that identities 2 and 3 read the snapshot taken for identity 1
+// instead of a fresh one. That is the same trade ephemeralAssignedReadyProbeScript
+// already makes internally between its fast and slow filters, and a work query
+// is a point-in-time probe the caller re-runs regardless.
+func ephemeralStatusSnapshotShell(shellVar, status string) string {
+	return `[ -n "${` + shellVar + `_set:-}" ] || { ` + shellVar + `=$(` +
+		bdQueryEphemeralStatusQuietShell(status) + `); ` + shellVar + `_set=1; }; `
+}
+
 // ephemeralReadyBaseSelectorJQ composes the selector clauses shared by every
 // ephemeral ready-tier filter: the caller's own assignee/routing selector,
 // plus the epic exclusion and optional hold-label exclusion every variant
@@ -742,7 +771,8 @@ func ephemeralAssignedInProgressProbeScript(shellVar string, topo QueryTopology)
 	// through to bd show — skip straight to it. checkHold=false: the filter
 	// above already excludes held candidates before the `.[:1]` truncation, so
 	// the post-truncation nheld check here would always read zero.
-	return `r=$(` + bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
+	return ephemeralStatusSnapshotShell("in_progress_ephemeral", "in_progress") +
+		`r=$(printf "%s" "$in_progress_ephemeral" | ` +
 		`jq --arg id "$` + shellVar + `" ` + shellquote.Quote(filter) + ` 2>/dev/null); ` +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
 		inProgressBlockedByEnrichmentScript(false, false) +
@@ -787,7 +817,7 @@ func ephemeralAssignedReadyProbeScript(shellVar string, topo QueryTopology) stri
 	}
 	fastFilter := legacyEphemeralReadyFilterJQ(`select((.assignee // "") == $id)`, 1, false)
 	slowFilter := ephemeralReadyDependencyCandidateFilterJQ(`select((.assignee // "") == $id)`, 1, false)
-	return `open_ephemeral=$(` + bdQueryEphemeralStatusQuietShell("open") + `); ` +
+	return ephemeralStatusSnapshotShell("open_ephemeral", "open") +
 		`r=$(printf "%s" "$open_ephemeral" | jq --arg id "$` + shellVar + `" ` + shellquote.Quote(fastFilter) + ` 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`r=$(printf "%s" "$open_ephemeral" | jq --arg id "$` + shellVar + `" ` + shellquote.Quote(slowFilter) + ` 2>/dev/null); ` +
