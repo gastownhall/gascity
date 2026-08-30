@@ -802,16 +802,23 @@ func (s scopeSnapshot) skipOpenScopeMembers(store beads.Store, skipControlID str
 	}
 
 	skipped := 0
+	// Termination: nothing is ever added to pending below, and every round that
+	// does not return strictly shrinks it — a preserve deletes its member, a skip
+	// wave deletes every id it closed. So the round count is bounded by the
+	// initial member count, and only a round that neither skips nor preserves
+	// (a genuine blocks cycle among the pending members) is a real deadlock.
 	for len(pending) > 0 {
 		ids := sortedPendingIDs(pending)
 		depsByID, err := loadDownDepsForScopeSkip(store, ids)
 		if err != nil {
 			return skipped, err
 		}
+		preserved := 0
 		skippable := make([]string, 0, len(ids))
 		for _, id := range ids {
 			if preserveScopeCheckForSubject(pending[id], depsByID[id], skipControlID) {
 				delete(pending, id)
+				preserved++
 				continue
 			}
 			if !canSkipScopeMemberWithDeps(depsByID[id], pending) {
@@ -823,7 +830,16 @@ func (s scopeSnapshot) skipOpenScopeMembers(store beads.Store, skipControlID str
 			if len(pending) == 0 {
 				break
 			}
-			return skipped, fmt.Errorf("unable to skip remaining scope members: %v", ids)
+			// Preserving a member IS progress: it drops a blocker out of pending,
+			// and members sorted before it were judged against the pre-preserve
+			// set. Re-plan instead of calling the round a deadlock — finalize
+			// scope-checks are minted after the members they block, so a preserve
+			// routinely lands too late in the pass to unblock anything in the
+			// same round.
+			if preserved > 0 {
+				continue
+			}
+			return skipped, fmt.Errorf("unable to skip remaining scope members: %s", describeStuckScopeMembers(pending, depsByID))
 		}
 		closed, err := skipScopeMembers(store, skippable)
 		if err != nil {
@@ -836,6 +852,33 @@ func (s scopeSnapshot) skipOpenScopeMembers(store beads.Store, skipControlID str
 	}
 
 	return skipped, nil
+}
+
+// describeStuckScopeMembers renders the members that are still pending after a
+// round made no progress, each with the pending members blocking it. It reads
+// the CURRENT pending set rather than the round's starting id list: members
+// preserved during the round were deliberately left open and naming them as
+// stuck sends operators hunting for store failures that never happened.
+func describeStuckScopeMembers(pending map[string]beads.Bead, depsByID map[string][]beads.Dep) string {
+	parts := make([]string, 0, len(pending))
+	for _, id := range sortedPendingIDs(pending) {
+		blockers := make([]string, 0, len(depsByID[id]))
+		for _, dep := range depsByID[id] {
+			if dep.Type != "blocks" {
+				continue
+			}
+			if _, blocked := pending[dep.DependsOnID]; blocked {
+				blockers = append(blockers, dep.DependsOnID)
+			}
+		}
+		if len(blockers) == 0 {
+			parts = append(parts, id)
+			continue
+		}
+		sort.Strings(blockers)
+		parts = append(parts, fmt.Sprintf("%s (blocked by %s)", id, strings.Join(blockers, ", ")))
+	}
+	return strings.Join(parts, ", ")
 }
 
 func preserveScopeCheckForSubject(candidate beads.Bead, deps []beads.Dep, subjectID string) bool {
