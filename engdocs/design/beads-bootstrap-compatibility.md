@@ -2,7 +2,7 @@
 title: "Beads Bootstrap Compatibility"
 ---
 
-# Proposed addendum: Beads bootstrap compatibility
+# Proposed companion design: Beads bootstrap compatibility
 
 | Field | Value |
 |---|---|
@@ -10,7 +10,7 @@ title: "Beads Bootstrap Compatibility"
 | Date | 2026-08-30 |
 | Author(s) | [@vishnujayvel](https://github.com/vishnujayvel) |
 | Primary audience | Gas City and Beads maintainers and contributors |
-| Existing decision | [Beads and Dolt contract redesign](beads-dolt-contract-redesign.md) |
+| Companion to | [Beads and Dolt contract redesign](beads-dolt-contract-redesign.md) |
 | Related design | [Beads–Gas City cross-version contract-test system](beads-gascity-contract-test-system.md) |
 | Defect home | [Gas City issue #5348](https://github.com/gastownhall/gascity/issues/5348) |
 
@@ -20,9 +20,9 @@ For a Gas City bootstrap operation on a resolved Beads scope, Gas City must iden
 
 > Resolve the scope through the accepted contract, identify the exact initializer artifact, compare its main-schema migration ceiling with the linked reader, and refuse before any bootstrap publication when the proof fails.
 
-This addendum does not define a new general policy for commands labeled read or write. It does not change endpoint authority or Beads' existing migration gates.
+This companion design does not define a new general policy for commands labeled read or write. It does not change endpoint authority or Beads' existing migration gates.
 
-## Why this is an addendum
+## Relationship to the accepted design
 
 The accepted Beads–Dolt contract redesign already owns:
 
@@ -33,7 +33,7 @@ The accepted Beads–Dolt contract redesign already owns:
 - the topology and migration journal;
 - explicit repair paths and postconditions.
 
-This addendum reuses those decisions. It adds one missing precondition to the existing bootstrap path: the selected initializer must not advance the main schema beyond the linked reader's known main migration ceiling.
+This companion design reuses those decisions. It adds one missing precondition to the existing bootstrap path: the selected initializer must not advance the main schema beyond the linked reader's known main migration ceiling.
 
 ## Verified failure
 
@@ -52,7 +52,7 @@ The issue reports no observed record loss: the earlier embedded store remained p
 | Work                                                                                                                            | Current state        | Relationship                                                                                                |
 | ------------------------------------------------------------------------------------------------------------------------------- | -------------------- | ----------------------------------------------------------------------------------------------------------- |
 | [Accepted Beads–Dolt redesign](beads-dolt-contract-redesign.md) | Accepted | Owns scope, topology, provenance, journal, and lifecycle authority. |
-| [Beads–Gas City cross-version contract-test system](beads-gascity-contract-test-system.md) | Proposed | Defines broader CLI/wire compatibility matrices and schema canaries. It does not define the pre-`bd init` migration-ceiling proof or the no-publication invariant in this addendum. |
+| [Beads–Gas City cross-version contract-test system](beads-gascity-contract-test-system.md) | Proposed | Defines broader CLI/wire compatibility matrices and schema canaries. It does not define the pre-`bd init` migration-ceiling proof or the no-publication invariant in this companion design. |
 | [Gas City PR #5421](https://github.com/gastownhall/gascity/pull/5421)                                                           | Open and conflicting | Includes a related `BD_BIN` projection change. An exact path is necessary but does not prove compatibility. |
 | [Gas City PR #5518](https://github.com/gastownhall/gascity/pull/5518)                                                           | Open and conflicting | Proposes a schema-v65-capable linked dependency. It repairs one snapshot but does not prevent later skew.   |
 | [Beads PR #6048](https://github.com/gastownhall/beads/pull/6048)                                                                | Merged               | Existing shared SQL-server stores refuse version-bump migration without explicit consent.                   |
@@ -101,7 +101,7 @@ Out of scope:
 
 ## Broader execution-context follow-up
 
-This addendum closes one bootstrap invariant; it does not close the broader
+This companion design closes one bootstrap invariant; it does not close the broader
 developer-experience problem. A separate follow-up should make these facts
 observable for each Gas City-managed Beads operation:
 
@@ -220,7 +220,7 @@ The test should fail when the gate is removed. It must use a disposable scope an
 
 ## Important non-decision: command labels
 
-This addendum does not say that reads and ordinary writes always proceed. The merged Beads work demonstrates why: a user-visible read can reach version-bump reconciliation, and a read-labeled proxied path can create and migrate a fresh database.
+This companion design does not say that reads and ordinary writes always proceed. The merged Beads work demonstrates why: a user-visible read can reach version-bump reconciliation, and a read-labeled proxied path can create and migrate a fresh database.
 
 Classify future policy by the storage action actually attempted, not by the CLI command label. Beads' existing migration gates remain authoritative. Any broader reader, writer, migration, repair, or feature protocol requires separate evidence and maintainer design.
 
