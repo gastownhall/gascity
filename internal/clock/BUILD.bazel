@@ -9,7 +9,11 @@ go_library(
 
 go_test(
     name = "clock_test",
-    srcs = ["clock_test.go"],
+    srcs = [
+        "clock_test.go",
+        "testenv_import_test.go",
+    ],
     embed = [":clock"],
+    deps = ["//internal/testenv"],
     visibility = ["//visibility:public"],
 )
