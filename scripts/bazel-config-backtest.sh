@@ -4,9 +4,8 @@
 # This is intentionally a research harness: it does not alter CI or claim
 # that historical revisions carried the current BUILD graph.  The graph files
 # are copied from the checkout under test, while source edits are disposable.
-# Defaults preserve the original contract pilot target. For config runs set
-# BACKTEST_TARGET=//internal/config:config_envname_test and point the source,
-# test, and graph-file variables at the bounded config BUILD slice.
+# Defaults run the three bounded config pilot targets. Set BACKTEST_TARGETS to
+# a comma-separated label list to override the selection set.
 # Linux with GNU `/usr/bin/time -f` and `timeout` (or `gtimeout`) is required.
 # Set BACKTEST_SAMPLES, BACKTEST_TIMEOUT, and BACKTEST_SCENARIOS to tune runs;
 # pass one or more git refs as positional arguments.
@@ -18,15 +17,16 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
 fi
 
 repo_root="$(git rev-parse --show-toplevel)"
+resolver="$repo_root/scripts/bazel_target_resolver.py"
 bazel_bin="${BAZEL_BIN:-$(command -v bazelisk || command -v bazel || true)}"
 samples="${BACKTEST_SAMPLES:-20}"
 timeout_s="${BACKTEST_TIMEOUT:-300}"
-target="${BACKTEST_TARGET:-//internal/beads/contract:contract_test}"
-go_package="${BACKTEST_GO_PACKAGE:-./internal/beads/contract}"
-source_file="${BACKTEST_SOURCE_FILE:-internal/beads/contract/metadata.go}"
-test_file="${BACKTEST_TEST_FILE:-internal/beads/contract/metadata_test.go}"
+target_labels_csv="${BACKTEST_TARGETS:-//internal/config:config_envname_test,//internal/config:config_diagnostic_locations_test,//internal/config:config_storage_endpoint_test}"
+go_package="${BACKTEST_GO_PACKAGE:-./internal/config}"
+source_file="${BACKTEST_SOURCE_FILE:-internal/config/storage_endpoint.go}"
+test_file="${BACKTEST_TEST_FILE:-internal/config/storage_endpoint_bazel_test.go}"
 unrelated_file="${BACKTEST_UNRELATED_FILE:-docs/README.md}"
-graph_files="${BACKTEST_GRAPH_FILES:-MODULE.bazel MODULE.bazel.lock .bazelrc BUILD.bazel internal/beads/contract/BUILD.bazel internal/beadmeta/BUILD.bazel internal/fsys/BUILD.bazel internal/pidutil/BUILD.bazel internal/testenv/BUILD.bazel internal/config/BUILD.bazel internal/config/config_envname_bazel_test.go internal/config/diagnostic_locations_test.go}"
+graph_files="${BACKTEST_GRAPH_FILES:-MODULE.bazel MODULE.bazel.lock .bazelrc BUILD.bazel internal/beads/contract/BUILD.bazel internal/beadmeta/BUILD.bazel internal/fsys/BUILD.bazel internal/pidutil/BUILD.bazel internal/testenv/BUILD.bazel internal/config/BUILD.bazel internal/config/config_envname_bazel_test.go internal/config/diagnostic_locations_test.go internal/config/storage_endpoint_bazel_test.go}"
 scenario_csv="${BACKTEST_SCENARIOS:-cold,forced,no-op,source-edit,test-edit,unrelated-edit,go-mod}"
 if [[ -z "$bazel_bin" ]]; then echo "set BAZEL_BIN or install bazelisk" >&2; exit 127; fi
 [[ "$(uname -s)" == Linux ]] || { echo "Linux is required for this harness (GNU timing semantics)" >&2; exit 2; }
@@ -35,7 +35,8 @@ if ! command -v timeout >/dev/null 2>&1 && ! command -v gtimeout >/dev/null 2>&1
 if ! /usr/bin/time -f '%e' true >/dev/null 2>&1; then echo "/usr/bin/time does not support GNU -f; install GNU time" >&2; exit 127; fi
 [[ "$samples" =~ ^[1-9][0-9]*$ ]] || { echo "BACKTEST_SAMPLES must be positive" >&2; exit 2; }
 [[ "$samples" -le 1000 ]] || { echo "BACKTEST_SAMPLES must be <= 1000" >&2; exit 2; }
-[[ "$target" == //*:* ]] || { echo "BACKTEST_TARGET must look like //pkg:name" >&2; exit 2; }
+IFS=',' read -r -a target_labels <<<"$target_labels_csv"
+for target in "${target_labels[@]}"; do [[ "$target" == //*:* ]] || { echo "BACKTEST_TARGETS contains invalid label: $target" >&2; exit 2; }; done
 
 IFS=',' read -r -a scenarios <<<"$scenario_csv"
 read -r -a graph_array <<<"$graph_files"
@@ -71,9 +72,9 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
-printf 'ref\tsample\tscenario\tstatus\twall_s\tclient_user_s\trss_kb\tactions\texecuted\thits\tmisses\tanalysis_ms\tbep_cpu_ms\tselected\n'
+printf 'ref\tsample\tscenario\tstatus\tselection_reason\tconservative\tselection_error\trequested_labels\tconfigured_labels\tcompleted_labels\tconfigured_count\tcompleted_count\tbep_error\twall_s\tclient_user_s\trss_kb\tactions\texecuted\thits\tmisses\tanalysis_ms\tbep_cpu_ms\n'
 records="$tmp_root/results.tsv"
-printf 'ref\tsample\tscenario\tstatus\twall_s\tclient_user_s\trss_kb\tactions\texecuted\thits\tmisses\tanalysis_ms\tbep_cpu_ms\tselected\n' >"$records"
+printf 'ref\tsample\tscenario\tstatus\tselection_reason\tconservative\tselection_error\trequested_labels\tconfigured_labels\tcompleted_labels\tconfigured_count\tcompleted_count\tbep_error\twall_s\tclient_user_s\trss_kb\tactions\texecuted\thits\tmisses\tanalysis_ms\tbep_cpu_ms\n' >"$records"
 for ref in "${refs[@]}"; do
   resolved="$(git -C "$repo_root" rev-parse --verify "$ref^{commit}")"
   work="$tmp_root/work-${resolved:0:12}"; git -C "$repo_root" worktree add --detach --quiet "$work" "$resolved"; current_work="$work"
@@ -125,15 +126,36 @@ for ref in "${refs[@]}"; do
     [[ "$warm_ready" == 1 ]] && return
     restore_pristine
     if command -v timeout >/dev/null 2>&1; then
-      timeout --signal=TERM --kill-after=15 "$timeout_s" "$bazel_bin" --output_base="$base" test --noshow_progress --cache_test_results=no "$target" >/dev/null 2>&1
+      timeout --signal=TERM --kill-after=15 "$timeout_s" "$bazel_bin" --output_base="$base" test --noshow_progress --cache_test_results=no "${target_labels[@]}" >/dev/null 2>&1
     else
-      gtimeout --signal=TERM --kill-after=15 "$timeout_s" "$bazel_bin" --output_base="$base" test --noshow_progress --cache_test_results=no "$target" >/dev/null 2>&1
+      gtimeout --signal=TERM --kill-after=15 "$timeout_s" "$bazel_bin" --output_base="$base" test --noshow_progress --cache_test_results=no "${target_labels[@]}" >/dev/null 2>&1
     fi
     warm_ready=1
   }
   for ((sample=1; sample<=samples; sample++)); do
     order=("${scenarios[@]}"); if ((sample % 2 == 0)); then order=(); for ((i=${#scenarios[@]}-1;i>=0;i--)); do order+=("${scenarios[$i]}"); done; fi
     for scenario in "${order[@]}"; do
+      diff_input="$tmp_root/${resolved:0:12}-${sample}-${scenario//[^a-zA-Z0-9]/_}.diff"
+      case "$scenario" in
+        cold|forced|no-op) printf 'M\0MODULE.bazel\0' >"$diff_input";;
+        source-edit) printf 'M\0%s\0' "$source_file" >"$diff_input";;
+        test-edit) printf 'M\0%s\0' "$test_file" >"$diff_input";;
+        unrelated-edit) printf 'M\0%s\0' "$unrelated_file" >"$diff_input";;
+        go-mod) printf 'M\0go.mod\0' >"$diff_input";;
+      esac
+      selection_json="$(python3 "$resolver" resolve "$diff_input" --format json)"
+      selection_reason="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["reason"])' <<<"$selection_json")"
+      conservative="$(python3 -c 'import json,sys; print(str(json.load(sys.stdin)["conservative"]).lower())' <<<"$selection_json")"
+      selection_error="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("error") or "")' <<<"$selection_json")"
+      mapfile -t selected_labels < <(python3 -c 'import json,sys; print("\n".join(json.load(sys.stdin)["labels"]))' <<<"$selection_json")
+      if ((${#selected_labels[@]} == 1)) && [[ -z "${selected_labels[0]}" ]]; then selected_labels=(); fi
+      if [[ "$scenario" == cold || "$scenario" == forced || "$scenario" == no-op ]]; then selection_reason=baseline; conservative=true; fi
+      requested_labels="$(IFS=,; echo "${selected_labels[*]}")"
+      if ((${#selected_labels[@]} == 0)); then
+        row="$(printf '%s\t%s\t%s\tnot-run\t%s\t%s\t%s\t%s\t\t\tunknown\tunknown\t\t0\t0\t0\t0\t0\t0\t0\tunknown\tunknown' "${resolved:0:12}" "$sample" "$scenario" "$selection_reason" "$conservative" "$selection_error" "$requested_labels")"
+        printf '%s\n' "$row" | tee -a "$records"
+        continue
+      fi
       [[ "$scenario" == cold ]] || prime_warm_base
       restore_pristine
       case "$scenario" in
@@ -146,7 +168,7 @@ for ref in "${refs[@]}"; do
       run_base="$base"
       if [[ "$scenario" == cold ]]; then run_base="$work/cold-output-$sample"; fi
       cache_results=no; [[ "$scenario" == no-op ]] && cache_results=yes
-      cmd=("$bazel_bin" --output_base="$run_base" test --noshow_progress --build_event_json_file="$bep" --cache_test_results="$cache_results" "$target")
+      cmd=("$bazel_bin" --output_base="$run_base" test --noshow_progress --build_event_json_file="$bep" --cache_test_results="$cache_results" "${selected_labels[@]}")
       start="$(now_ns)"; status=0
       if command -v timeout >/dev/null 2>&1; then
         /usr/bin/time -f 'user=%U rss=%M' -o "$out.time" timeout --signal=TERM --kill-after=15 "$timeout_s" "${cmd[@]}" >"$out" 2>&1 || status=$?
@@ -175,8 +197,16 @@ try:
 except FileNotFoundError: pass
 print(a,e,hi,mi,analysis,cpu,selected)
 PY
-      )"; read -r actions executed hits misses analysis bep_cpu selected <<<"$metrics"
-      row="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "${resolved:0:12}" "$sample" "$scenario" "$status" "$wall" "$user" "$rss" "$actions" "$executed" "$hits" "$misses" "$analysis" "$bep_cpu" "$selected")"
+      )"; read -r actions executed hits misses analysis bep_cpu _selected <<<"$metrics"
+      label_flags=(); for label in "${selected_labels[@]}"; do label_flags+=(--label "$label"); done
+      bep_json="$(python3 "$resolver" bep "$bep" --format json "${label_flags[@]}" 2>/dev/null || true)"
+      bep_payload="$bep_json"; [[ -n "$bep_payload" ]] || bep_payload='{}'
+      configured_labels="$(python3 -c 'import json,sys; print(",".join(json.load(sys.stdin).get("configured",[])))' <<<"$bep_payload")"
+      completed_labels="$(python3 -c 'import json,sys; print(",".join(json.load(sys.stdin).get("completed",[])))' <<<"$bep_payload")"
+      configured_count="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("configured_count") or "unknown")' <<<"$bep_payload")"
+      completed_count="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("completed_count") or "unknown")' <<<"$bep_payload")"
+      bep_error="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("error") or "")' <<<"$bep_payload")"
+      row="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "${resolved:0:12}" "$sample" "$scenario" "$status" "$selection_reason" "$conservative" "$selection_error" "$requested_labels" "$configured_labels" "$completed_labels" "$configured_count" "$completed_count" "$bep_error" "$wall" "$user" "$rss" "$actions" "$executed" "$hits" "$misses" "$analysis" "$bep_cpu")"
       printf '%s\n' "$row" | tee -a "$records"
       [[ "$scenario" == cold ]] && shutdown_bazel "$run_base"
     done
