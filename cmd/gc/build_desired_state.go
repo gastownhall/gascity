@@ -508,9 +508,11 @@ func buildDesiredStateWithSessionBeadsAt(
 			continue
 		}
 		namedSessionMode := ""
+		namedIdentity := ""
 		for j := range cfg.NamedSessions {
 			if cfg.NamedSessions[j].TemplateQualifiedName() == cfg.Agents[i].QualifiedName() {
 				namedSessionMode = cfg.NamedSessions[j].ModeOrDefault()
+				namedIdentity = cfg.NamedSessions[j].QualifiedName()
 				break
 			}
 		}
@@ -584,6 +586,17 @@ func buildDesiredStateWithSessionBeadsAt(
 			// work below; defaultNamedScaleTargets only preserves partial-query
 			// retention for configured named-session beads.
 			poolDir := agentCommandDir(cityPath, &cfg.Agents[i], cfg.Rigs)
+			// A live on-demand named session already claims its routed work. Do not
+			// create a second pool slot beside that resident; retain the existing
+			// pool-demand path when the named session is asleep.
+			residentLive := false
+			if namedSessionMode != "always" && namedIdentity != "" {
+				if spec, ok := findNamedSessionSpec(cfg, cityName, namedIdentity); ok {
+					if info, has := findCanonicalNamedSessionInfo(bp.sessionBeads, spec); has && poolSessionIsLiveInfo(info) {
+						residentLive = true
+					}
+				}
+			}
 			if store != nil && !hasCustomScaleCheck {
 				ownTarget := defaultScaleCheckTargetForAgent(cityPath, cfg, &cfg.Agents[i], store, rigStores)
 				// mode='always': named session is unconditionally desired by the named
@@ -592,7 +605,7 @@ func buildDesiredStateWithSessionBeadsAt(
 				// singleton (namedWorkReady covers only direct Assignee beads, not
 				// gc.routed_to). Leave defaultNamedScaleTargets unchanged for both modes
 				// (partial-query retention).
-				if namedSessionMode != "always" {
+				if namedSessionMode != "always" && !residentLive {
 					defaultScaleTargets = append(defaultScaleTargets, ownTarget)
 					namedOnDemandTemplates[template] = true
 				}
@@ -612,7 +625,7 @@ func buildDesiredStateWithSessionBeadsAt(
 				// mirrors these probes only for partial-query retention bookkeeping.
 				if !storeScopedControlDispatcher && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
 					cityTarget := defaultScaleCheckTarget{template: template, store: store, storeKey: "city"}
-					if namedSessionMode != "always" {
+					if namedSessionMode != "always" && !residentLive {
 						defaultScaleTargets = append(defaultScaleTargets, cityTarget)
 					}
 					defaultNamedScaleTargets = append(defaultNamedScaleTargets, cityTarget)
