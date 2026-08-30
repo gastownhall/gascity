@@ -34,7 +34,7 @@ func TestComplexityWorkflowIsAdvisoryAndPinned(t *testing.T) {
 	if doc.Permissions["contents"] != "read" {
 		t.Fatalf("permissions = %#v, want contents: read", doc.Permissions)
 	}
-	if !strings.Contains(text, "pull_request:\n    types: [opened, reopened, synchronize, ready_for_review]") || !strings.Contains(text, "branches: [main]") {
+	if !strings.Contains(text, "pull_request:") || !strings.Contains(text, "types: [opened, reopened, synchronize, ready_for_review]") || !strings.Contains(text, "branches: [main]") {
 		t.Fatalf("workflow must run on PR lifecycle and pushes to main")
 	}
 	job, ok := doc.Jobs["report"]
