@@ -378,18 +378,44 @@ func TestFileRecorderNormalizesExplicitTsToLocalZone(t *testing.T) {
 		t.Errorf("Ts instant changed: got %v, want %v", events[0].Ts, explicitUTC)
 	}
 
-	// Every row on this host must serialize in the same zone form. The
-	// explicit-UTC row (line 0) must NOT end in "Z" once normalized -- it
-	// must match the zero-Ts row's (line 1) local-with-offset form.
-	if strings.HasSuffix(strings.TrimRight(lines[0], "\r"), `Z"}`) {
-		t.Errorf("caller-supplied UTC Ts was not normalized to local -- log line still ends in \"Z\":\n%s", lines[0])
+	// Every row on this host must serialize in the same zone form. Decode the
+	// ts field itself -- it is the third key in the marshaled line, so a
+	// suffix check against the whole line can never observe it.
+	tsOf := func(line string) string {
+		t.Helper()
+		var row struct {
+			Ts string `json:"ts"`
+		}
+		if err := json.Unmarshal([]byte(strings.TrimRight(line, "\r")), &row); err != nil {
+			t.Fatalf("decoding ts from %q: %v", line, err)
+		}
+		return row.Ts
 	}
-	wantSuffix := "-04:00" // America/New_York, EDT, for the 2026-08-15 test date
-	if !strings.Contains(lines[0], wantSuffix) {
-		t.Errorf("expected the explicit-Ts row normalized to America/New_York's offset (%s), got:\n%s", wantSuffix, lines[0])
+	explicitTs, zeroTs := tsOf(lines[0]), tsOf(lines[1])
+	if strings.HasSuffix(explicitTs, "Z") {
+		t.Errorf("caller-supplied UTC Ts was not normalized to local -- ts is still %q", explicitTs)
 	}
-	if strings.HasSuffix(strings.TrimRight(lines[1], "\r"), `Z"}`) {
-		t.Fatalf("test invariant broken: the zero-Ts row (recorder's own default) unexpectedly serialized as UTC-Z:\n%s", lines[1])
+	if !strings.HasSuffix(explicitTs, "-04:00") {
+		t.Errorf("expected the explicit-Ts row normalized to America/New_York's offset, got ts %q", explicitTs)
+	}
+	if strings.HasSuffix(zeroTs, "Z") {
+		t.Fatalf("test invariant broken: the zero-Ts row (recorder's own default) serialized as UTC-Z: %q", zeroTs)
+	}
+
+	// marshalBatch carries the same normalization on the AppendBatch path.
+	if err := rec.AppendBatch([]Event{{Type: BeadCreated, Actor: "human", Ts: explicitUTC}}); err != nil {
+		t.Fatalf("AppendBatch: %v", err)
+	}
+	raw, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines = strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("got %d lines after AppendBatch, want 3:\n%s", len(lines), raw)
+	}
+	if batchTs := tsOf(lines[2]); strings.HasSuffix(batchTs, "Z") || !strings.HasSuffix(batchTs, "-04:00") {
+		t.Errorf("AppendBatch did not normalize caller-supplied Ts: ts is %q", batchTs)
 	}
 }
 
