@@ -1,169 +1,217 @@
-# Bazel config pilot: experiment 3 results
+# Bazel config pilot: experiment 4b results
 
 ## Decision
 
-Keep Go and Make the authoritative required build/test paths. Land the Bazel
-workflow only as a separate, non-blocking canary and continue the graph in
-small, explicitly reviewed slices. The pilot demonstrates a useful warm
-incremental accelerator, but it does not yet demonstrate package parity,
-reliable changed-target selection, or a safe replacement for the required
-lanes.
+Keep Go and Make as the authoritative required build and test paths. Use Bazel
+as an opt-in local accelerator and as a separate, non-blocking evidence canary.
+The identity slice makes changed-file selection and strict target correlation
+credible for four small hermetic targets, but it does not establish parity for
+the complete `internal/config` package or justify a required-lane migration.
 
-## Scope and graph boundary
+The useful result is the shape of the measurement: after one clean Bazel
+initialization, a focused edit is generally sub-second on this host. That
+benefit is conditional on a warm output base and on the changed code belonging
+to a proven hermetic target.
 
-This experiment overlays a small Bzlmod/rules_go graph on the existing Go
-repository. It adds explicit BUILD files rather than running repository-wide
-Gazelle generation. The current config slice contains two hermetic probes:
+## What this slice proves
+
+The bounded graph now has four canonical test labels, in deterministic order:
 
 ```text
-//internal/config:config_envname_test
 //internal/config:config_diagnostic_locations_test
+//internal/config:config_envname_test
+//internal/config:config_identity_seam_test
+//internal/config:config_storage_endpoint_test
 ```
 
-Both use `internal/config:config_hermetic`, whose production sources are
-`envname.go` and `diagnostic_locations.go`. The surrounding BUILD files retain
-the bounded dependency closure used by the earlier contract pilot. The full
-`internal/config` package has about 48 production files and 85 test files;
-`go list -test -deps ./internal/config` reaches about 32 internal packages.
-Repository-wide Gazelle generation would create roughly 195 BUILD files and was
-therefore rejected for this experiment.
+`internal/config/BUILD.bazel` contains one shared `config_hermetic` library and
+four `go_test` targets. The production sources in that library are the four
+small, explicitly owned seams (`diagnostic_locations.go`, `envname.go`,
+`identity_seam.go`, and `storage_endpoint.go`). The graph is hand-bounded; no
+repository-wide Gazelle conversion is part of this experiment.
 
-The complete config package remains Go-authoritative. The Bazel slice does not
-claim parity for identity tests, testdata or embed behavior, build-tag variants,
-filesystem/process-sensitive tests, tmux, Dolt, CGO, or integration tests.
-Those boundaries stay in the existing Go and integration lanes until a
-real-boundary proof exists.
+The identity target exercises the pure helpers in `identity_seam.go` through
+`identity_seam_bazel_test.go`. The existing `config.go` Agent method path still
+belongs to the full Go package. In other words, the identity target is a
+hermetic seam proof, not a claim that Bazel now covers every identity test or
+the complete production package. A broad or unproven config change therefore
+falls back to all four targets.
 
-## Toolchain and method
+The full `internal/config` package remains Go-authoritative. Testdata/embed,
+build-tag variants, filesystem- and process-sensitive tests, tmux, Dolt, CGO,
+and integration tests are intentionally outside this graph until each has a
+real-boundary proof.
 
-The measurements used Bazel 9.2.0, rules_go 0.63.0, Gazelle 0.53.0, and the
-pinned Go SDK 1.26.6 on a Linux host (`go1.26.6`, 192 logical CPUs). The
-runner is `scripts/bazel-config-backtest.sh`.
+## Changed-file selection contract
 
-Each current-revision run used 20 alternating samples of:
+`scripts/bazel_target_resolver.py` is deliberately fail-closed. It maps only
+these source/test pairs:
 
-| Scenario | Meaning |
+| Files | Target |
 | --- | --- |
-| `cold` | A new Bazel output base and clean action graph. |
-| `forced` | A warm output base with test execution forced. |
-| `no-op` | A warm output base with test-result caching enabled. |
-| `source-edit` | One production-source edit followed by a warm test. |
+| `envname.go`, `config_envname_bazel_test.go` | `config_envname_test` |
+| `diagnostic_locations.go`, `diagnostic_locations_test.go` | `config_diagnostic_locations_test` |
+| `identity_seam.go`, `identity_seam_bazel_test.go` | `config_identity_seam_test` |
+| `storage_endpoint.go`, `storage_endpoint_bazel_test.go` | `config_storage_endpoint_test` |
 
-The harness also supports `test-edit`, `unrelated-edit`, and `go-mod` probes.
-`go-mod` is an invalidation probe, not a normal speed sample. Every run records
-wall time, client user time/RSS, BEP action/cache counts, analysis time, and
-Bazel-reported CPU time. The selected-target count is intentionally reported as
-`unknown`: the current BEP parser sees transitive actions but does not yet
-correlate them reliably to the requested target. The `unrelated-edit` and
-`go-mod` probes are not included in the timing tables below; they are reserved
-for invalidation/selection evidence.
+The resolver unions mapped labels and sorts them canonically. Its decisions are:
 
-“Cold” here means a clean output-base/action-graph sample. The Bazel binary,
-JDK, and external module/download state are shared, so these are not fully
-machine-cold startup measurements.
+| Input | Selection | Conservative? |
+| --- | --- | ---: |
+| One or more mapped files | The owning label(s) | No |
+| Mixed mapped files | Sorted union of owning labels | No |
+| Other `internal/config` file | All four (`config-unmapped`) | Yes |
+| Config rename, delete, or copy | All four (`config-unmapped`) | Yes |
+| `BUILD*`, `.bzl`, `MODULE.bazel*`, `.bazelrc`, `.bazelversion`, `go.mod`, `go.sum`, or canary/resolver files | All four (`shared-build-graph`) | Yes |
+| Empty, malformed, unreadable, or unavailable input | All four (`unavailable`) | Yes |
+| Confidently unrelated path | No targets (`unrelated`) | No |
 
-## Current revision: 20 samples
+The canary writes a normalized selection during its resolve phase and consumes
+that file during execution; it does not recompute the selection after toolchain
+setup. This prevents a changed checkout or a transient resolver failure from
+silently changing what was requested. Unknown and rename/delete/copy cases are
+intentionally over-inclusive because under-testing is the more dangerous error.
 
-The current branch's Go baseline was one diagnostic invocation:
-`go test -count=1 ./internal/config` in 18.036 s. It is not a Go p95
-distribution. Bazel results below are the 20-sample distributions:
+## BEP and canary contract
 
-| Scenario | Bazel p50 | Bazel p95 | Actions (p50) | Executed (p50) | Cache hits/misses (p50) | Analysis p50 | BEP CPU p50 |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| cold | 52.158 s | 53.921 s | 57 | 21 | 0 / 21 | 2.155 s | 166.1 s |
-| forced | 0.549 s | 0.834 s | 5 | 2 | 4.5 / 2 | 0.160 s | 2.1 s |
-| no-op | 0.485 s | 0.640 s | 10 | 1 | 10 / 1 | 0.180 s | 2.1 s |
-| source-edit | 0.475 s | 0.744 s | 5 | 2 | 4.5 / 2 | 0.086 s | 2.3 s |
+The canary and backtest use the same four-label allowlist. The BEP parser now
+correlates requested target patterns strictly: it requires the pattern set to
+equal the requested labels, exactly one configured event and one completed
+event per requested label, and equal configured/completed sets. Duplicate,
+missing, mismatched, or malformed events are errors. The four-target replay
+reported numeric `4/4` correlation for broad runs and `1/1` for the mapped
+source-edit runs; no row had a BEP error.
 
-Relative to the 18.036 s Go invocation, the warm p50s are about 33x faster
-(`forced`), 37x faster (`no-op`), and 38x faster (`source-edit`). The clean
-output-base p50 is about 2.9x slower than that Go invocation. Client-only RSS
-was approximately 10.9 MiB; it excludes the Bazel server and action processes
-and should not be treated as total resource use.
+Action, cache, analysis, and CPU figures are graph-wide metrics from Bazel's
+build metrics, not target-specific counts. The resolver's target counts are the
+authoritative configured/completed correlation; graph-wide action metrics are
+reported separately so they are not mistaken for selected-target work.
 
-An illustrative focused session makes the amortization visible. Using the
-current p50s and one cold initialization, the estimated cumulative wall time
-for *n* source-edit iterations is:
+`.github/workflows/bazel-canary.yml` remains separate from required `ci.yml` and
+uses `continue-on-error: true`. It runs the equivalent Go config parity first,
+uses runner-temporary repository/output caches with remote caching disabled,
+bounds commands and the job (`25` minutes), shuts down only its known Bazel
+output base, and uploads BEP/profile/log/summary artifacts with `if: always()`.
+The Sol review council approved the resolver-driven identity slice at
+`2152144708` (building on `0967b13d43` and `625b1fe227`). That approval is for
+bounded evidence collection, not for making the canary required.
 
-| Focused iterations | Repeated Go (`n × 18.036 s`) | Bazel (`52.158 s + (n−1) × 0.475 s`) |
-| ---: | ---: | ---: |
-| 1 | 18.0 s | 52.2 s |
-| 3 | 54.1 s | 53.1 s |
-| 10 | 180.4 s | 56.4 s |
+## Toolchain and measurement method
 
-This is a directional model, not a promise about an agent's whole workflow:
-it assumes the Bazel server/output base stays warm and that the changed code
-fits this tiny hermetic target.
+Measurements used Bazel 9.2.0, rules_go 0.63.0, Gazelle 0.53.0, and the pinned
+Go SDK 1.26.6 on a Linux host with 192 logical CPUs. The runner is
+`scripts/bazel-config-backtest.sh`. A `cold` sample gets a new Bazel output
+base and action graph; `forced` reuses a warm graph but executes tests;
+`no-op` enables test-result caching; `source-edit` changes one production file
+and runs the warm graph. The harness also supports `test-edit`,
+`unrelated-edit`, and `go-mod` invalidation probes.
 
-## Historical PR backtest
+Cold means a clean output base/action graph, not a fully machine-cold startup:
+the Bazel binary, JDK, and external module downloads are shared. Every row
+records wall time, client user time/RSS, BEP action/cache metrics, analysis
+time, and Bazel CPU time. Historical revisions predate the BUILD graph, so the
+harness copied the graph from the pilot checkout into disposable worktrees.
+Those rows measure source behavior under a fixed graph; they do not claim that
+the historical commits were natively Bazel-buildable.
 
-The harness replayed three samples for four recent PR revisions. The BUILD
-graph was copied from the pilot checkout because those revisions predate the
-graph; therefore these rows are directional source-change measurements, not
-claims that the PRs were natively Bazel-buildable. Each replay explicitly set
-the config target, package, production source, test source, and unrelated-file
-overrides; it did not use the harness's default contract target. The p95 values
-below are descriptive three-sample estimates, not an authoritative tail SLO.
+## Three-target matrix (reference baseline)
+
+Before the identity slice, the three-target matrix used artifact
+`/tmp/gascity-bazel-matrix-20260830211754/stdout.tsv` at
+`5a4fab675054`. It is retained as a separately labeled, non-comparable
+reference rather than mixed with the four-target numbers below. This run used
+20 alternating samples and one uncached Go invocation (`go test -count=1
+./internal/config`).
+
+| Scenario | Go/Bazel reference | Bazel p50 | Bazel p95 |
+| --- | ---: | ---: | ---: |
+| Go package baseline | 16.822 s | — | — |
+| cold | — | 50.998 s | 53.524 s |
+| forced | — | 0.550 s | 0.766 s |
+| no-op | — | 0.474 s | 0.781 s |
+| source-edit | — | 0.479 s | 0.793 s |
+| test-edit | — | 0.387 s | 0.418 s |
+| `go.mod` invalidation probe | — | 0.397 s | 0.492 s |
+
+The unrelated-edit probe was skipped `20/20` times (`reason=unrelated`), with
+zero Bazel invocations. The three-target run's median action shape was 77
+created/41 executed for cold, 15/4 for forced, 30/1 for no-op, and 5/2 for a
+source edit. Those counts are graph-wide and are included only to make the
+cache behavior reproducible.
+
+Using the three-target p50s as a directional amortization model, one cold
+initialization plus repeated source edits costs approximately
+`50.998 + (n-1) * 0.479` seconds, versus `n * 16.822` seconds for repeated Go
+invocations. The curves cross at roughly four focused iterations. This is a
+model of a warm, hermetic loop—not a promise about an entire agent session.
+
+## Four-target historical replay
+
+The completed replay artifact is
+`/tmp/gascity-bazel-four-target-replay-20260830231428/stdout.tsv`. It ran four
+recent revisions, three samples per scenario, with `cold`, `forced`, `no-op`,
+and `source-edit`. All 48 Bazel rows exited successfully, had an empty BEP
+error, and passed strict correlation (36 broad rows were `4/4`; 12 mapped
+source-edit rows were `1/1`). The p95 values below are descriptive estimates
+from three samples, not tail SLOs.
 
 | PR / revision | Go baseline | cold p50 / p95 | forced p50 / p95 | no-op p50 / p95 | source-edit p50 / p95 |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| #5246/#5258 · `7c33f3f7f1` | 18.799 s | 51.940 / 51.965 s | 0.563 / 1.054 s | 0.566 / 0.734 s | 0.711 / 0.773 s |
-| #5252 · `128bd64033` | 18.889 s | 51.694 / 52.379 s | 0.549 / 1.008 s | 0.489 / 0.548 s | 0.708 / 0.733 s |
-| #5193 · `a784438ce0` | 18.150 s | 54.756 / 56.084 s | 0.733 / 1.118 s | 0.491 / 0.749 s | 0.746 / 0.760 s |
-| #5215 · `58a47d6bdc` | 18.964 s | 52.554 / 54.608 s | 0.704 / 1.085 s | 0.513 / 0.576 s | 0.735 / 0.761 s |
+| #5246/#5258 · `7c33f3f7f1` | 17.478 s | 50.980 / 52.055 s | 0.749 / 1.077 s | 0.735 / 0.747 s | 0.704 / 0.718 s |
+| #5164/#5252 · `128bd64033` | 16.991 s | 50.553 / 50.834 s | 0.721 / 1.068 s | 0.524 / 0.699 s | 0.739 / 0.775 s |
+| #5193 · `a784438ce0` | 16.924 s | 52.620 / 57.895 s | 0.791 / 1.235 s | 0.739 / 1.036 s | 0.746 / 1.372 s |
+| #5215 · `58a47d6bdc` | 20.994 s | 60.979 / 62.468 s | 0.737 / 1.170 s | 0.754 / 0.763 s | 0.745 / 0.890 s |
 
-All 48 historical Bazel rows passed. The warm p50s remain in the same
-sub-second band across all four revisions, while cold p50s remain around
-52–55 s. There is no monotonic timing trend to attribute to the PRs: the
-graph, toolchain, and runner were held constant, and the observed differences
-are within the expected host/cache variation. The useful result is the stable
-warm-vs-cold shape, not a claim that one PR made Bazel faster.
+The cold spread is host and initialization variation, not a monotonic PR trend.
+Warm medians stay below one second across the four revisions, while warm p95s
+are roughly 0.7–1.4 seconds. A separate isolated four-target spot check
+(artifact `/tmp/bazel-identity-resolver.ozzcV7/`) measured `58.77 s` cold,
+`6.29 s` forced-warm, and `0.80 s` cached no-op; all four targets passed strict
+`4/4` BEP correlation. Its different cache/setup shape is not combined with
+the replay table.
 
-## CI canary
+Taking the median of the four replay Go baselines (`17.235 s`), cold p50s
+(`51.800 s`), and source-edit p50s (`0.742 s`) gives another directional model:
 
-`.github/workflows/bazel-canary.yml` is deliberately separate from required
-`ci.yml` and remains `continue-on-error: true`. It runs only the two config
-targets, performs equivalent Go config parity first, uses isolated runner-temp
-output/base paths, pins the checkout/setup-go/upload-artifact actions and
-Bazelisk v1.26.0, disables remote caching with Bazel 9.2's supported empty
-`--remote_cache=` value, bounds each command at five minutes, and gives the job
-25 minutes for setup, execution, shutdown, and artifact upload. An EXIT trap
-shuts down the known Bazel output base; BEP, profiles, logs, and a summary are
-uploaded with `if: always()`.
+| Focused iterations | Repeated Go | Four-target Bazel |
+| ---: | ---: | ---: |
+| 1 | 17.2 s | 51.8 s |
+| 3 | 51.7 s | 53.3 s |
+| 4 | 68.9 s | 54.0 s |
+| 10 | 172.3 s | 58.5 s |
 
-The Sol review council approved the final timeout-adjusted canary at commit
-`a37aaf197f`. Approval is for bounded evidence collection only; it is not
-approval to make the workflow required or to remove the Go/Make lanes.
+This is why the experiment is promising for agents that make several focused
+edits in one session, while still being a poor default for a one-off cold run.
 
 ## Gaps and promotion gates
 
-Before considering a required-lane migration, the next slices should establish
-all of the following:
+Before proposing any required-lane migration, the next slice should:
 
-1. Complete config parity in vertical slices: identity, testdata/embed,
-   build-tag variants, and the documented filesystem/process boundaries.
-2. A changed-file-to-target resolver and BEP target correlation, with an
-   unrelated edit proving zero selected test actions (or an explicit,
-   explainable conservative fallback).
-3. At least 20 comparable Go and Bazel samples per representative package,
-   including Go p50/p95 rather than one baseline point, persistent-cache and
-   clean-output-base cells, and failure/timeout samples.
-4. Cache isolation and cleanup evidence on shared CI runners, plus coverage for
-   process, tmux, Dolt, CGO, and integration-sensitive tests in their owning
-   lanes.
-5. A promotion review showing realistic warm p95 and total developer wall time
-   beat the current Go shards, with a documented fallback to Go when Bazel
-   setup or cache state is unavailable.
+1. Prove one `testdata`/embed or build-tag vertical end to end, including its
+   exact Go/Bazel dependency closure and resolver ownership. The identity target
+   must not be treated as full `config.go` parity.
+2. Repeat a 20-sample matrix with the four-target graph, including Go p50/p95,
+   clean-output-base and persistent-cache cells, timeout/failure samples, and
+   `test-edit`, `go.mod`, and unrelated-edit selection evidence.
+3. Exercise the canary on an actual GitHub runner and retain evidence for cache
+   isolation, cleanup, timeout behavior, and the persisted-selection path.
+4. Keep process, tmux, Dolt, CGO, and integration-sensitive tests in their
+   existing Go/integration lanes until equivalent real-boundary proofs exist.
+5. Define a Go fallback when Bazel is unavailable or its cache is cold, and
+   compare realistic warm p95 and total developer wall time against the
+   documented Go shards.
+
+Do not begin a repository-wide Gazelle conversion. Do not replace required
+Go/Make CI on the strength of this four-target graph; the graph is valuable as
+an additive accelerator and as a way to collect the evidence needed for a
+larger, carefully owned slice.
 
 ## Recommendation for the next experiment
 
-Treat this as an opt-in local accelerator and evidence-producing canary. The
-next experiment should expand one adjacent config vertical (preferably
-testdata/embed or identity) with explicit BUILD ownership and parity tests,
-then repeat the same 20-sample matrix plus the unrelated-edit and invalidation
-probes. Do not start a repository-wide Gazelle conversion or replace required
-Go/Make CI yet. If two or three focused iterations are the common agent
-session, the measured warm path is already promising; the engineering question
-now is whether that benefit survives realistic package breadth, cache misses,
-and the non-hermetic test boundaries—not whether the two-file probe itself is
-fast.
+Proceed with the filed follow-up `ga-22kbk.2`: inventory config testdata/embed
+and build-tag consumers, choose one vertical with a demonstrably hermetic
+closure, and add only that target. Run the resolver and strict BEP tests before
+expanding the allowlist, then repeat the matrix and ask the Sol council for a
+fresh slice review. If the next vertical keeps the warm p95 in the same band,
+use Bazel locally for focused edits while leaving Go/Make as the required
+authority.
