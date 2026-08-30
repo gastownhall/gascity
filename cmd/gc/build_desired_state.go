@@ -794,18 +794,18 @@ func buildDesiredStateWithSessionBeadsAt(
 		// correct, and any bead missed by a partial query simply gets stamped
 		// on a later tick.
 		stampRunSessionIdentity(assignedWorkBeads, assignedWorkStores, sessionBeads, stderr)
-		// Re-home work pre-assigned to a legacy bound form of a now-unbound pool
-		// agent onto the canonical identity, so the canonical session the
-		// awake/scale accounting wakes for it can actually surface and claim it
-		// (the agent-side work_query/claim path matches identities by raw string).
+		// Re-home work pre-assigned to a legacy template identity onto the
+		// configured canonical identity, so the canonical session the awake/scale
+		// accounting wakes for it can actually surface and claim it (the
+		// agent-side work_query/claim path matches identities by raw string).
 		canonicalizeLegacyBoundAssignedWork(cfg, assignedWorkBeads, assignedWorkStores, sessionBeads, stderr)
-		// Re-home open, unassigned work still routed to a legacy bound form of a
-		// now-unbound pool agent. This is the demand/claim half of the migration:
-		// empty-assignee open work never enters the assigned-work collection above,
-		// and the canonical pool-demand probe below (defaultScaleCheckCounts) plus
-		// the worker work_query/claim path match gc.routed_to canonically by raw
-		// string, so the route must be canonicalized before demand is counted or
-		// the cold pool never wakes for it.
+		// Re-home open, unassigned work still routed to a legacy template identity.
+		// This is the demand/claim half of the migration: empty-assignee open work
+		// never enters the assigned-work collection above, and the canonical
+		// pool-demand probe below (defaultScaleCheckCounts) plus the worker
+		// work_query/claim path match gc.routed_to canonically by raw string, so
+		// the route must be canonicalized before demand is counted or the cold
+		// pool never wakes for it.
 		subPhaseStart = time.Now()
 		var unassignedRoutedPartial bool
 		unassignedRoutedBeads, unassignedRoutedStores, unassignedRoutedStoreRefs, unassignedRoutedPartial = collectOpenUnassignedRoutedWork(cityPath, cfg, store, rigStores, suspendedRigPaths, stderr)
@@ -5017,19 +5017,21 @@ func stampRunRootFromStep(store beads.Store, step beads.Bead, sessionName, workD
 }
 
 // canonicalizeLegacyBoundAssignedWork re-homes the Assignee and gc.routed_to of
-// actionable pool work that is pre-assigned to a legacy bound form of a
-// configured unbound pool agent (e.g. "dir/binding.name") to that agent's
-// current canonical identity ("dir/name").
+// actionable pool work that is pre-assigned to a legacy template identity to
+// that agent's current canonical identity. It handles both legacy bound forms
+// for a now-unbound agent (e.g. "dir/binding.name" -> "dir/name") and legacy
+// unbound forms for a now-binding-qualified import (e.g.
+// "dir/name" -> "dir/binding.name").
 //
-// Why: after a bound→unbound agent migration, the awake/scale accounting wakes
-// a canonical pool session for work persisted under the legacy bound identity
-// (it normalizes template identities), but the woken session's work_query and
+// Why: after a binding-prefix migration, the awake/scale accounting wakes a
+// canonical pool session for work persisted under the legacy identity (it
+// normalizes template identities), but the woken session's work_query and
 // `gc hook --claim` path match assignees and routes by raw string. A canonical
-// session can derive neither the old binding name nor the legacy assignee, so
-// the triggering bead would surface to no one and stay unclaimed. Re-homing the
-// persisted identity to canonical makes the bead behave exactly like ordinary
-// canonical pool work, which the existing surface/claim machinery already
-// resumes — closing the agent-side half of the migration recovery loop.
+// session cannot derive the old spelling, so the triggering bead would surface
+// to no one and stay unclaimed. Re-homing the persisted identity to canonical
+// makes the bead behave exactly like ordinary canonical pool work, which the
+// existing surface/claim machinery already resumes — closing the agent-side half
+// of the migration recovery loop.
 //
 // The live-session guard preserves the resume tier: work a still-running
 // session already owns under the legacy identity is left untouched so its own
@@ -5101,18 +5103,19 @@ func canonicalizeLegacyBoundAssignedWork(cfg *config.City, workBeads []beads.Bea
 }
 
 // canonicalizeLegacyBoundUnassignedRoutedWork rewrites the gc.routed_to of open,
-// unassigned pool work that is still routed to the legacy bound form of a
-// now-unbound pool agent ("dir/binding.name") onto the agent's current canonical
-// identity ("dir/name").
+// unassigned pool work that is still routed to a legacy template identity onto
+// the agent's current canonical identity. It handles both legacy bound forms for
+// a now-unbound agent ("dir/binding.name" -> "dir/name") and legacy unbound
+// forms for a now-binding-qualified import ("dir/name" -> "dir/binding.name").
 //
-// This closes the demand/claim half of the bound→unbound migration that the
-// assignee-keyed canonicalizeLegacyBoundAssignedWork cannot reach: open work with
-// an empty assignee never enters the assigned-work collection, and the canonical
+// This closes the demand/claim half of the migration that the assignee-keyed
+// canonicalizeLegacyBoundAssignedWork cannot reach: open work with an empty
+// assignee never enters the assigned-work collection, and the canonical
 // pool-demand probe (EffectivePoolDemandQuery), the worker work_query
 // (EffectiveWorkQuery Tier 3), and the claim predicate (hookClaimMatchesRoute)
 // all match gc.routed_to against the canonical target by raw string. A bead still
-// routed to "dir/binding.name" is therefore invisible to the canonical "dir/name"
-// pool — it neither contributes scale demand nor can be claimed — so migration-era
+// routed to the legacy spelling is therefore invisible to the canonical pool —
+// it neither contributes scale demand nor can be claimed — so migration-era
 // ready work stays stuck until its route is canonicalized. Rewriting the route in
 // place lets every existing canonical-only path surface it, keeping the legacy
 // awareness confined to this migration pass instead of spread across the demand,
@@ -5122,10 +5125,9 @@ func canonicalizeLegacyBoundAssignedWork(cfg *config.City, workBeads []beads.Bea
 // unassigned work has no live owner to strand, so rewriting its route can only
 // make it discoverable. Idempotent by design: it writes only when the canonical
 // identity differs from the persisted route, so steady-state reconciles perform
-// no writes, and a route that is already canonical, resolves to no configured
-// agent, or still matches a configured bound agent is left untouched. A write
-// failure is logged and skipped — recovery is best-effort and must never block
-// reconciliation.
+// no writes, and a route that is already canonical or resolves to no configured
+// agent is left untouched. A write failure is logged and skipped — recovery is
+// best-effort and must never block reconciliation.
 func canonicalizeLegacyBoundUnassignedRoutedWork(cfg *config.City, workBeads []beads.Bead, workStores []beads.Store, stderr io.Writer) {
 	if cfg == nil || len(workBeads) != len(workStores) {
 		return
@@ -5142,14 +5144,12 @@ func canonicalizeLegacyBoundUnassignedRoutedWork(cfg *config.City, workBeads []b
 		if routedTo == "" {
 			continue
 		}
-		// Cheap pre-filter: a legacy bound form is "dir/binding.name", so only a
-		// route whose local segment carries the binding-separator dot can be one.
-		// Canonical unbound routes ("dir/name") skip the per-bead agent scan in
-		// normalizeAgentTemplateIdentity, keeping the steady-state cost off the
-		// full open-routed backlog.
-		if _, local := config.ParseQualifiedName(routedTo); !strings.Contains(local, ".") {
-			continue
-		}
+		// No cheap pre-filter here: the import direction's legacy form is a bare
+		// "dir/name" with no binding-separator dot to key on, so every open routed
+		// bead must reach normalizeAgentTemplateIdentity. The former dot filter kept
+		// the per-bead agent scan off the steady-state backlog; if that cost bites,
+		// narrow it by config shape (any agent with a BindingName) rather than by
+		// route spelling.
 		canonicalRouted := normalizeAgentTemplateIdentity(cfg, routedTo)
 		if canonicalRouted == "" || canonicalRouted == routedTo {
 			continue
