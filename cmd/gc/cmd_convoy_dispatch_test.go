@@ -2412,6 +2412,141 @@ func TestQuarantineControlFailureBeadTruncatesReasonAtUTF8Boundary(t *testing.T)
 	}
 }
 
+func TestQuarantineControlFailureBeadSettlesRootWhenFinalizerQuarantined(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{
+		Title:  "workflow root",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind": "workflow",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	finalizer, err := store.Create(beads.Bead{
+		Title:  "finalizer",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":         "workflow-finalize",
+			"gc.root_bead_id": root.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create finalizer: %v", err)
+	}
+
+	if err := quarantineControlFailureBead(store, finalizer.ID, errors.New("finalizer exploded")); err != nil {
+		t.Fatalf("quarantineControlFailureBead: %v", err)
+	}
+
+	gotRoot, err := store.Get(root.ID)
+	if err != nil {
+		t.Fatalf("get root: %v", err)
+	}
+	if gotRoot.Status != "closed" {
+		t.Fatalf("root status = %q, want closed", gotRoot.Status)
+	}
+	if gotRoot.Metadata["gc.outcome"] != "fail" {
+		t.Fatalf("root outcome = %q, want fail", gotRoot.Metadata["gc.outcome"])
+	}
+	if gotRoot.Metadata["gc.final_disposition"] != "control_quarantined" {
+		t.Fatalf("root final_disposition = %q, want control_quarantined", gotRoot.Metadata["gc.final_disposition"])
+	}
+	if gotRoot.Metadata["gc.failure_reason"] != "finalizer_control_quarantined" {
+		t.Fatalf("root failure_reason = %q, want finalizer_control_quarantined", gotRoot.Metadata["gc.failure_reason"])
+	}
+}
+
+func TestQuarantineControlFailureBeadDoesNotTouchRootForNonFinalizerControl(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{
+		Title:  "workflow root",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind": "workflow",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	control, err := store.Create(beads.Bead{
+		Title:  "control",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":         "fanout",
+			"gc.root_bead_id": root.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+
+	if err := quarantineControlFailureBead(store, control.ID, errors.New("fanout exploded")); err != nil {
+		t.Fatalf("quarantineControlFailureBead: %v", err)
+	}
+
+	gotRoot, err := store.Get(root.ID)
+	if err != nil {
+		t.Fatalf("get root: %v", err)
+	}
+	if gotRoot.Status != "open" {
+		t.Fatalf("root status = %q, want open (untouched)", gotRoot.Status)
+	}
+	if gotRoot.Metadata["gc.outcome"] != "" {
+		t.Fatalf("root outcome = %q, want empty (untouched)", gotRoot.Metadata["gc.outcome"])
+	}
+	if gotRoot.Metadata["gc.final_disposition"] != "" {
+		t.Fatalf("root final_disposition = %q, want empty (untouched)", gotRoot.Metadata["gc.final_disposition"])
+	}
+}
+
+func TestQuarantineControlFailureBeadNeverDowngradesAlreadySettledRoot(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{
+		Title: "workflow root",
+		Metadata: map[string]string{
+			"gc.kind": "workflow",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	closedStatus := "closed"
+	if err := store.Update(root.ID, beads.UpdateOpts{
+		Status:   &closedStatus,
+		Metadata: map[string]string{"gc.outcome": "pass"},
+	}); err != nil {
+		t.Fatalf("settle root before test: %v", err)
+	}
+	finalizer, err := store.Create(beads.Bead{
+		Title:  "finalizer",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":         "workflow-finalize",
+			"gc.root_bead_id": root.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create finalizer: %v", err)
+	}
+
+	if err := quarantineControlFailureBead(store, finalizer.ID, errors.New("finalizer exploded")); err != nil {
+		t.Fatalf("quarantineControlFailureBead: %v", err)
+	}
+
+	gotRoot, err := store.Get(root.ID)
+	if err != nil {
+		t.Fatalf("get root: %v", err)
+	}
+	if gotRoot.Status != "closed" {
+		t.Fatalf("root status = %q, want closed (already settled)", gotRoot.Status)
+	}
+	if gotRoot.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("root outcome = %q, want pass (never downgraded)", gotRoot.Metadata["gc.outcome"])
+	}
+}
+
 func TestRunControlDispatcherReturnsTransientControlErrorWithoutQuarantine(t *testing.T) {
 	clearGCEnv(t)
 
