@@ -41,6 +41,12 @@ class ResolveNameStatusZTest(unittest.TestCase):
         self.assertTrue(selection.conservative)
         self.assertEqual(selection.reason, "config-unmapped")
 
+    def test_quoted_and_newline_tab_records(self):
+        quoted = resolve_name_status_z(b'M\t"internal/config/envname.go"\n')
+        renamed = resolve_name_status_z(b"R100\told name\tinternal/config/envname.go\n")
+        self.assertEqual(quoted.labels, ("//internal/config:config_envname_test",))
+        self.assertTrue(renamed.conservative)
+
     def test_shared_graph_files_select_all(self):
         for path in ("MODULE.bazel.lock", ".bazelversion", "go.mod", "internal/clock/BUILD.bazel"):
             selection = self.resolve("M", path)
