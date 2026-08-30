@@ -38,6 +38,7 @@ if ! /usr/bin/time -f '%e' true >/dev/null 2>&1; then echo "/usr/bin/time does n
 [[ "$target" == //*:* ]] || { echo "BACKTEST_TARGET must look like //pkg:name" >&2; exit 2; }
 
 IFS=',' read -r -a scenarios <<<"$scenario_csv"
+read -r -a graph_array <<<"$graph_files"
 allowed=" cold forced no-op source-edit test-edit unrelated-edit go-mod "
 for s in "${scenarios[@]}"; do [[ "$allowed" == *" $s "* ]] || { echo "unknown scenario: $s" >&2; exit 2; }; done
 refs=("$@")
@@ -70,13 +71,13 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
-printf 'ref\tsample\tscenario\tstatus\twall_s\tuser_s\trss_kb\tactions\texecuted\thits\tmisses\tanalysis_ms\tselected\n'
+printf 'ref\tsample\tscenario\tstatus\twall_s\tclient_user_s\trss_kb\tactions\texecuted\thits\tmisses\tanalysis_ms\tbep_cpu_ms\tselected\n'
 records="$tmp_root/results.tsv"
-printf 'ref\tsample\tscenario\tstatus\twall_s\tuser_s\trss_kb\tactions\texecuted\thits\tmisses\tanalysis_ms\tselected\n' >"$records"
+printf 'ref\tsample\tscenario\tstatus\twall_s\tclient_user_s\trss_kb\tactions\texecuted\thits\tmisses\tanalysis_ms\tbep_cpu_ms\tselected\n' >"$records"
 for ref in "${refs[@]}"; do
   resolved="$(git -C "$repo_root" rev-parse --verify "$ref^{commit}")"
   work="$tmp_root/work-${resolved:0:12}"; git -C "$repo_root" worktree add --detach --quiet "$work" "$resolved"; current_work="$work"
-  for rel in $graph_files; do [[ -f "$repo_root/$rel" ]] && { mkdir -p "$work/$(dirname "$rel")"; cp -f "$repo_root/$rel" "$work/$rel"; }; done
+  for rel in "${graph_array[@]}"; do [[ -f "$repo_root/$rel" ]] && { mkdir -p "$work/$(dirname "$rel")"; cp -f "$repo_root/$rel" "$work/$rel"; }; done
   go_log="$tmp_root/${resolved:0:12}-go.log"; go_start="$(now_ns)"; go_status=0
   if command -v timeout >/dev/null 2>&1; then timeout --signal=TERM --kill-after=15 "$timeout_s" go -C "$work" test -count=1 "$go_package" >"$go_log" 2>&1 || go_status=$?; else gtimeout --signal=TERM --kill-after=15 "$timeout_s" go -C "$work" test -count=1 "$go_package" >"$go_log" 2>&1 || go_status=$?; fi
   go_end="$(now_ns)"; go_wall="$(awk -v n="$((go_end-go_start))" 'BEGIN{printf "%.3f",n/1e9}')"
@@ -87,17 +88,54 @@ for ref in "${refs[@]}"; do
     current_work=""
     continue
   fi
-  # Preserve files so each scenario starts from the same source state.
-  for f in "$source_file" "$test_file" "$unrelated_file" go.mod; do [[ -f "$work/$f" ]] && cp -f "$work/$f" "$tmp_root/$(basename "$f").orig"; done
+  # Snapshot every mutable path under its full relative path. This includes
+  # graph files such as MODULE.bazel.lock, which Bazel/module resolution may
+  # rewrite, and records absent paths so no scenario contaminates the next.
+  pristine="$tmp_root/pristine-${resolved:0:12}"
+  mkdir -p "$pristine/files"
+  declare -A snapshot_seen=()
+  snapshot_paths=("${graph_array[@]}" "$source_file" "$test_file" "$unrelated_file" go.mod)
+  : >"$pristine/existing"; : >"$pristine/missing"
+  for f in "${snapshot_paths[@]}"; do
+    [[ -n "${snapshot_seen[$f]:-}" ]] && continue
+    snapshot_seen[$f]=1
+    if [[ -f "$work/$f" ]]; then
+      mkdir -p "$pristine/files/$(dirname "$f")"
+      cp -f "$work/$f" "$pristine/files/$f"
+      printf '%s\n' "$f" >>"$pristine/existing"
+    else
+      printf '%s\n' "$f" >>"$pristine/missing"
+    fi
+  done
+  restore_pristine() {
+    local path
+    while IFS= read -r path; do
+      [[ -n "$path" ]] || continue
+      mkdir -p "$(dirname "$work/$path")"
+      cp -f "$pristine/files/$path" "$work/$path"
+    done <"$pristine/existing"
+    while IFS= read -r path; do
+      [[ -n "$path" ]] || continue
+      rm -f -- "$work/$path"
+    done <"$pristine/missing"
+  }
   base="$work/bazel-output"; current_base="$base"
   warm_ready=0
+  prime_warm_base() {
+    [[ "$warm_ready" == 1 ]] && return
+    restore_pristine
+    if command -v timeout >/dev/null 2>&1; then
+      timeout --signal=TERM --kill-after=15 "$timeout_s" "$bazel_bin" --output_base="$base" test --noshow_progress --cache_test_results=no "$target" >/dev/null 2>&1
+    else
+      gtimeout --signal=TERM --kill-after=15 "$timeout_s" "$bazel_bin" --output_base="$base" test --noshow_progress --cache_test_results=no "$target" >/dev/null 2>&1
+    fi
+    warm_ready=1
+  }
   for ((sample=1; sample<=samples; sample++)); do
     order=("${scenarios[@]}"); if ((sample % 2 == 0)); then order=(); for ((i=${#scenarios[@]}-1;i>=0;i--)); do order+=("${scenarios[$i]}"); done; fi
     for scenario in "${order[@]}"; do
-      cp -f "$tmp_root/$(basename "$source_file").orig" "$work/$source_file" 2>/dev/null || true
-      cp -f "$tmp_root/$(basename "$test_file").orig" "$work/$test_file" 2>/dev/null || true
-      cp -f "$tmp_root/$(basename "$unrelated_file").orig" "$work/$unrelated_file" 2>/dev/null || true
-      cp -f "$tmp_root/go.mod.orig" "$work/go.mod" 2>/dev/null || true
+      [[ "$scenario" == cold ]] || prime_warm_base
+      restore_pristine
       case "$scenario" in
         source-edit) printf '\n// bazel backtest source edit\n' >>"$work/$source_file";;
         test-edit) printf '\n// bazel backtest test edit\n' >>"$work/$test_file";;
@@ -107,11 +145,6 @@ for ref in "${refs[@]}"; do
       out="$tmp_root/${resolved:0:12}-${sample}-${scenario//[^a-zA-Z0-9]/_}.log"; bep="$out.bep.json"; rm -f "$bep"
       run_base="$base"
       if [[ "$scenario" == cold ]]; then run_base="$work/cold-output-$sample"; fi
-      if [[ "$scenario" != cold && "$warm_ready" == 0 ]]; then
-        # Prime the persistent warm server/cache outside measured scenarios.
-        if command -v timeout >/dev/null 2>&1; then timeout --signal=TERM --kill-after=15 "$timeout_s" "$bazel_bin" --output_base="$base" test --noshow_progress --cache_test_results=no "$target" >/dev/null 2>&1; else gtimeout --signal=TERM --kill-after=15 "$timeout_s" "$bazel_bin" --output_base="$base" test --noshow_progress --cache_test_results=no "$target" >/dev/null 2>&1; fi
-        warm_ready=1
-      fi
       cache_results=no; [[ "$scenario" == no-op ]] && cache_results=yes
       cmd=("$bazel_bin" --output_base="$run_base" test --noshow_progress --build_event_json_file="$bep" --cache_test_results="$cache_results" "$target")
       start="$(now_ns)"; status=0
@@ -124,7 +157,7 @@ for ref in "${refs[@]}"; do
       wall="$(awk -v n="$((end-start))" 'BEGIN{printf "%.3f",n/1e9}')"; user="$(sed -n 's/.*user=\([^ ]*\).*/\1/p' "$out.time" | tail -1)"; rss="$(sed -n 's/.*rss=\([^ ]*\).*/\1/p' "$out.time" | tail -1)"; [[ -n "$user" ]] || user=unknown; [[ -n "$rss" ]] || rss=unknown
       metrics="$(python3 - "$bep" <<'PY'
 import json,sys
-a=e=hi=mi=analysis='unknown'; selected='unknown'
+a=e=hi=mi=analysis=cpu='unknown'; selected='unknown'
 try:
   for line in open(sys.argv[1],encoding='utf-8'):
     try: j=json.loads(line)
@@ -132,16 +165,18 @@ try:
     bm=j.get('buildMetrics',{}); s=bm.get('actionSummary',{})
     if s:
       a=s.get('actionsCreated',0); e=s.get('actionsExecuted',0); c=s.get('actionCacheStatistics',{}); hi=c.get('hitCount',c.get('hits',0)); mi=c.get('missCount',c.get('misses',0))
-    am=bm.get('analysisMetrics',{}); analysis=am.get('totalTimeInMs',am.get('analysisTimeInMs',analysis))
+    tm=bm.get('timingMetrics',{})
+    analysis=tm.get('analysisPhaseTimeInMs',analysis)
+    cpu=tm.get('cpuTimeInMs',cpu)
     # BEP configured events include transitive dependencies; without a
     # target-pattern correlation, reporting a numeric selected count would be
     # misleading. Keep this metric explicitly unknown until that mapping is
     # implemented.
 except FileNotFoundError: pass
-print(a,e,hi,mi,analysis,selected)
+print(a,e,hi,mi,analysis,cpu,selected)
 PY
-      )"; read -r actions executed hits misses analysis selected <<<"$metrics"
-      row="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "${resolved:0:12}" "$sample" "$scenario" "$status" "$wall" "$user" "$rss" "$actions" "$executed" "$hits" "$misses" "$analysis" "$selected")"
+      )"; read -r actions executed hits misses analysis bep_cpu selected <<<"$metrics"
+      row="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "${resolved:0:12}" "$sample" "$scenario" "$status" "$wall" "$user" "$rss" "$actions" "$executed" "$hits" "$misses" "$analysis" "$bep_cpu" "$selected")"
       printf '%s\n' "$row" | tee -a "$records"
       [[ "$scenario" == cold ]] && shutdown_bazel "$run_base"
     done
