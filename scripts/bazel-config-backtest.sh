@@ -49,7 +49,8 @@ cleanup() {
     rm -rf -- "$tmp_root" || true
   fi
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT TERM
 
 printf 'ref\tsample\tscenario\tstatus\twall_s\tuser_s\trss_kb\tactions\texecuted\thits\tmisses\tanalysis_ms\tselected\n'
 records="$tmp_root/results.tsv"
