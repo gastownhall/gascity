@@ -1,0 +1,15 @@
+"""Minimal Bzlmod entry point for the incremental Go build pilot."""
+
+module(
+    name = "gascity",
+    version = "0.0.0",
+)
+
+bazel_dep(name = "rules_go", version = "0.63.0")
+
+# Use the SDK already installed on the host. This keeps the pilot hermetic
+# with respect to dependency resolution while avoiding a second Go download;
+# CI can switch to go_sdk.download(...) when a pinned toolchain is available.
+go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
+go_sdk.host(name = "go_sdk")
+use_repo(go_sdk, "go_sdk")
