@@ -60,6 +60,7 @@ class ResolveNameStatusZTest(unittest.TestCase):
             ".github/workflows/bazel-canary.yml",
             "scripts/bazel-canary.sh",
             "scripts/bazel_target_resolver.py",
+            "scripts/bazel_canary_test.go",
         ):
             selection = self.resolve("M", path)
             self.assertEqual(selection.labels, CONFIG_LABELS)
