@@ -1,6 +1,6 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 
-# Bounded Experiment 3 target over a real production source file. The complete
+# Bounded Experiment 4b targets over real production source files. The complete
 # config closure is still decomposing; `go test ./internal/config` remains
 # authoritative for all config behavior.
 go_library(
