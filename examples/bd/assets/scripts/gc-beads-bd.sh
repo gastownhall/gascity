@@ -607,6 +607,45 @@ ensure_bd_runtime_config_value() {
     # bd v1.0.3 rejects `bd config set issue_prefix`; GC still needs raw
     # bd commands to see GC's config in the DB-backed config table.
     server_sql_retry "USE \`$db\`; INSERT INTO config (\`key\`, value) VALUES ('$key', '$value') ON DUPLICATE KEY UPDATE value = VALUES(value)" >/dev/null || die "failed to set bd runtime $key for $db"
+    commit_bd_runtime_config "$db" "$key"
+}
+
+# commit_bd_runtime_config commits the config row written above. Without it the
+# row lives in the Dolt working set forever: `config` is not registered in
+# dolt_ignore, so the database stays permanently dirty. That is not cosmetic.
+#
+#   - beads refuses to run a schema migration that alters a table holding
+#     pre-existing uncommitted changes. Migration 0030 already issues
+#     `DELETE FROM config`, so the next migration touching `config` blocks
+#     every database GC provisioned. Its documented recovery, `bd dolt commit`,
+#     cannot run against an external Dolt server -- gastownhall/beads#4566
+#     fixed that deadlock for embedded mode only -- so there is no in-band way
+#     out short of hand-committing over a raw SQL connection.
+#   - A table that lives only in the working set is later swept into an
+#     unrelated `DOLT_COMMIT -Am`, drifting the database hash and quarantining
+#     GC for that database (the same hazard the read-only probe table is
+#     registered in dolt_ignore to avoid).
+#
+# Staging is scoped to `config` alone: a blanket DOLT_ADD('.') would sweep
+# whatever else happens to be dirty into GC's commit, which is the hash-drift
+# failure above rather than a fix for it.
+#
+# Fail-open: the value itself is already written, so a commit failure leaves
+# the pre-existing (dirty but functional) state rather than breaking
+# provisioning -- notably on a read-only replica. It is always reported, never
+# swallowed, so the operator knows the working set needs attention.
+commit_bd_runtime_config() {
+    local db="$1"
+    local key="$2"
+    local output
+    [ -n "$db" ] || return 0
+    output=$(server_sql "USE \`$db\`; CALL DOLT_ADD('config'); CALL DOLT_COMMIT('-m', 'gc: record beads runtime config', '--author', 'gascity-builder <builder@gascity.local>')" 2>&1) && return 0
+    # An idempotent re-run has nothing to commit; that is success, not failure.
+    case "$output" in
+        *"nothing to commit"*|*"no changes added to commit"*|*"No changes"*) return 0 ;;
+    esac
+    echo "warning: failed to commit bd runtime $key for $db; the Dolt working set is left dirty and a future beads schema migration touching config will refuse to run: $output" >&2
+    return 0
 }
 
 ensure_doltlite_runtime_config_value() {

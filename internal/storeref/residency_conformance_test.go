@@ -26,6 +26,12 @@ const (
 	graphNamespacedID = "gcg-abc" // minted by the binding: inside the reserved namespace
 	workShapedID      = "ga-xyz"  // the migrate-preserved id: outside every namespace
 	rigShapedID       = "ra-7"    // inside a rig's CONFIGURED prefix: the shadow row
+	// queueNamespacedID is a nudge-queue record: inside a namespace the nudges
+	// binding HOLDS but does not mint. Its rows must match graphNamespacedID's
+	// wherever a binding carries the namespace, because "who minted it" is not a
+	// question the resolver asks — and must match the work-shaped rows on T5,
+	// where no binding carries it.
+	queueNamespacedID = "gcnq-abc-q"
 )
 
 // corpusRouter is the routed work axis the ",routed" rows plan over: the shape
@@ -49,6 +55,7 @@ func corpusIntents() []struct {
 		{"ByID(" + graphNamespacedID + ")", ByID{ID: graphNamespacedID}},
 		{"ByID(" + workShapedID + ")", ByID{ID: workShapedID}},
 		{"ByID(" + rigShapedID + ")", ByID{ID: rigShapedID}},
+		{"ByID(" + queueNamespacedID + ")", ByID{ID: queueNamespacedID}},
 		{"ByID(" + workShapedID + ",routed)", ByID{ID: workShapedID, WorkAxis: corpusRouter()}},
 		{"ByID(" + graphNamespacedID + ",routed)", ByID{ID: graphNamespacedID, WorkAxis: corpusRouter()}},
 		{"RoutedWork", RoutedWork{}},
@@ -224,6 +231,217 @@ var residencyCorpus = map[string]string{
 	"Class(work) x T6r":                    `SingleOwner: ""[Authority,Fatal]`,
 	"Class(graph) x T6r":                   `SingleOwner: class:gmnos[Authority,Fatal]`,
 	"Class(sessions) x T6r":                `SingleOwner: class:gmnos[Authority,Fatal]`,
+
+	// ---- The held-not-minted namespace, kept together because the claim is a
+	// comparison rather than a shape. Wherever a binding carries "gcnq" these
+	// rows are character-for-character the gcg-abc rows above: the resolver
+	// grants authority over a namespace the binding HOLDS, and never asks which
+	// sequence minted the id. On T5, where the two bindings carry only "gcg" and
+	// "gcs", they are the ga-xyz rows instead — an unheld namespace is not a
+	// half-claim, it is no claim, and the id gets the same probe order any
+	// unrecognized id gets.
+	"ByID(gcnq-abc-q) x T0":  `FirstOwner: ""[WorkFallback,Fatal]`,
+	"ByID(gcnq-abc-q) x T1":  `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
+	"ByID(gcnq-abc-q) x T2":  `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
+	"ByID(gcnq-abc-q) x T3":  `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
+	"ByID(gcnq-abc-q) x T4":  `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
+	"ByID(gcnq-abc-q) x T5":  `FirstOwner: class:g[ResidenceProbe,RefusalTolerated] > class:s[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal]`,
+	"ByID(gcnq-abc-q) x T6":  `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
+	"ByID(gcnq-abc-q) x T6r": `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
+}
+
+// runtimeCorpusIntents is the intent axis of the RUNTIME-PLANE corpus: the
+// questions a controller tick, a hook or a claim asks. The plane narrows them to
+// the infra binding, and these rows are what a consumer of the relevance
+// descriptor actually reads.
+func runtimeCorpusIntents() []struct {
+	name   string
+	intent Intent
+} {
+	return []struct {
+		name   string
+		intent Intent
+	}{
+		{"RoutedWork", RoutedWork{}},
+		{"AssignedWork(sweep)", AssignedWork{}},
+		{"AssignedWork(claim-escalation)", AssignedWork{Purpose: AssignedWorkClaimEscalation}},
+		{"Session", Session{}},
+		{"Census(all)", Census{}},
+		{"ByID(" + workShapedID + ")", ByID{ID: workShapedID}},
+	}
+}
+
+// residencyRuntimeCorpus pins the SAME plans narrowed to the runtime plane —
+// the operator invariant as a golden table (bd memory
+// gascity-runtime-infra-store-invariant).
+//
+// Read it beside residencyCorpus: every row here is a SUBSEQUENCE of the row
+// above with the same key, never a re-ordering. That is what makes the
+// descriptor a latency decision rather than a residency one, and
+// TestRuntimePlaneCorpus asserts the subsequence relation on every row rather
+// than trusting the two tables to be edited together.
+var residencyRuntimeCorpus = map[string]string{
+	// ---- T0: nothing to narrow. A city that relocates no class has no binding,
+	// and there the work store IS the infra store: the rule degrades to "the only
+	// store there is", never to "no store at all".
+	"RoutedWork@runtime x T0":                     `Union(first-leg-wins): ""[Authority,Fatal]`,
+	"AssignedWork(sweep)@runtime x T0":            `Union(first-leg-wins): ""[Authority,Fatal]`,
+	"AssignedWork(claim-escalation)@runtime x T0": `FirstOwner: ""[Authority,Fatal]`,
+	"Session@runtime x T0":                        `Union(first-leg-wins): ""[Authority,Fatal]`,
+	"Census(all)@runtime x T0":                    `Union(first-leg-wins): ""[Authority,Fatal]`,
+	"ByID(ga-xyz)@runtime x T0":                   `FirstOwner: ""[WorkFallback,Fatal]`,
+
+	// ---- T1: the shape maintainer-city runs. Every runtime question is one
+	// local sqlite read; the remote work ledger is not a leg the tick can be
+	// handed. Note the ROLES are untouched — the binding is still the plan's
+	// FederationTail, because narrowing does not promote a leg it kept.
+	"RoutedWork@runtime x T1":                     `Union(first-leg-wins): class:gmnos[FederationTail,Fatal]`,
+	"AssignedWork(sweep)@runtime x T1":            `Union(first-leg-wins): class:gmnos[FederationTail,Fatal]`,
+	"AssignedWork(claim-escalation)@runtime x T1": `FirstOwner: class:gmnos[FederationTail,Fatal]`,
+	"Session@runtime x T1":                        `Union(first-leg-wins): class:gmnos[Authority,Fatal]`,
+	"Census(all)@runtime x T1":                    `Union(first-leg-wins): class:gmnos[FederationTail,Fatal]`,
+	"ByID(ga-xyz)@runtime x T1":                   `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated]`,
+
+	// ---- T2/T4: the rig legs go too. A rig work store is a work ledger like any
+	// other, and the invariant is about the PLANE, not about which work store.
+	"RoutedWork@runtime x T2":                     `Union(first-leg-wins): class:gmnos[FederationTail,Fatal]`,
+	"AssignedWork(sweep)@runtime x T2":            `Union(first-leg-wins): class:gmnos[FederationTail,Fatal]`,
+	"AssignedWork(claim-escalation)@runtime x T2": `FirstOwner: class:gmnos[FederationTail,Fatal]`,
+	"Session@runtime x T2":                        `Union(first-leg-wins): class:gmnos[Authority,Fatal]`,
+	"Census(all)@runtime x T2":                    `Union(first-leg-wins): class:gmnos[FederationTail,Fatal]`,
+	"ByID(ga-xyz)@runtime x T2":                   `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated]`,
+
+	// ---- T3: a refused city has no plan to narrow. The descriptor is applied
+	// AFTER Plan, so the refusal still arrives first and still names its remedy —
+	// narrowing must never be a way to get a work-only answer out of a refusal.
+	"RoutedWork@runtime x T3":                     "error: storage refused: run `gc storage migrate`",
+	"AssignedWork(sweep)@runtime x T3":            "error: storage refused: run `gc storage migrate`",
+	"AssignedWork(claim-escalation)@runtime x T3": "error: storage refused: run `gc storage migrate`",
+	"Session@runtime x T3":                        "error: storage refused: run `gc storage migrate`",
+	"Census(all)@runtime x T3":                    "error: storage refused: run `gc storage migrate`",
+	"ByID(ga-xyz)@runtime x T3":                   `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated]`,
+
+	"RoutedWork@runtime x T4":                     `Union(first-leg-wins): class:gmnos[FederationTail,Fatal]`,
+	"AssignedWork(sweep)@runtime x T4":            `Union(first-leg-wins): class:gmnos[FederationTail,Fatal]`,
+	"AssignedWork(claim-escalation)@runtime x T4": `FirstOwner: class:gmnos[FederationTail,Fatal]`,
+	"Session@runtime x T4":                        `Union(first-leg-wins): class:gmnos[Authority,Fatal]`,
+	"Census(all)@runtime x T4":                    `Union(first-leg-wins): class:gmnos[FederationTail,Fatal]`,
+	"ByID(ga-xyz)@runtime x T4":                   `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated]`,
+
+	// ---- T5: per-class split. BOTH bindings survive, in the plan's order. The
+	// plane says "the infra stores", not "one infra store" — a runtime reader
+	// that kept only the first would lose the sessions binding's rows.
+	"RoutedWork@runtime x T5":                     `Union(first-leg-wins): class:g[FederationTail,Fatal] > class:s[FederationTail,Fatal]`,
+	"AssignedWork(sweep)@runtime x T5":            `Union(first-leg-wins): class:g[FederationTail,Fatal] > class:s[FederationTail,Fatal]`,
+	"AssignedWork(claim-escalation)@runtime x T5": `FirstOwner: class:g[FederationTail,Fatal] > class:s[FederationTail,Fatal]`,
+	"Session@runtime x T5":                        `Union(first-leg-wins): class:s[Authority,Fatal]`,
+	"Census(all)@runtime x T5":                    `Union(first-leg-wins): class:g[FederationTail,Fatal] > class:s[FederationTail,Fatal]`,
+	"ByID(ga-xyz)@runtime x T5":                   `FirstOwner: class:g[ResidenceProbe,RefusalTolerated] > class:s[ResidenceProbe,RefusalTolerated]`,
+
+	// ---- T6: the retirement shape, and the one row that is a HAZARD rather than
+	// a win. With the residence probe retired, ByID of a work-shaped id plans to
+	// the work leg ALONE — so there is no binding leg to narrow to and the
+	// runtime plane hands back the ledger. That is correct (the bead really is
+	// only reachable there) and it is exactly why the by-id path is not narrowed
+	// in production: on this topology narrowing buys nothing and the ledger read
+	// survives. Retiring it is resolver S5's mint-truthful work, not this
+	// descriptor's.
+	"RoutedWork@runtime x T6":                     `Union(first-leg-wins): class:gmnos[FederationTail,Fatal]`,
+	"AssignedWork(sweep)@runtime x T6":            `Union(first-leg-wins): class:gmnos[FederationTail,Fatal]`,
+	"AssignedWork(claim-escalation)@runtime x T6": `FirstOwner: class:gmnos[FederationTail,Fatal]`,
+	"Session@runtime x T6":                        `Union(first-leg-wins): class:gmnos[Authority,Fatal]`,
+	"Census(all)@runtime x T6":                    `Union(first-leg-wins): class:gmnos[FederationTail,Fatal]`,
+	"ByID(ga-xyz)@runtime x T6":                   `FirstOwner: ""[WorkFallback,Fatal]`,
+
+	"RoutedWork@runtime x T6r":                     `Union(first-leg-wins): class:gmnos[FederationTail,Fatal]`,
+	"AssignedWork(sweep)@runtime x T6r":            `Union(first-leg-wins): class:gmnos[FederationTail,Fatal]`,
+	"AssignedWork(claim-escalation)@runtime x T6r": `FirstOwner: class:gmnos[FederationTail,Fatal]`,
+	"Session@runtime x T6r":                        `Union(first-leg-wins): class:gmnos[Authority,Fatal]`,
+	"Census(all)@runtime x T6r":                    `Union(first-leg-wins): class:gmnos[FederationTail,Fatal]`,
+	"ByID(ga-xyz)@runtime x T6r":                   `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated]`,
+}
+
+// TestRuntimePlaneCorpus is the golden diff for the relevance descriptor, plus
+// the two properties a golden table alone cannot state: every runtime row is a
+// SUBSEQUENCE of its full row, and the reconcile plane changes nothing.
+func TestRuntimePlaneCorpus(t *testing.T) {
+	seen := make(map[string]bool, len(residencyRuntimeCorpus))
+	narrowedSomewhere := false
+	for _, f := range allTopologies() {
+		for _, in := range runtimeCorpusIntents() {
+			key := in.name + "@runtime x " + f.name
+			want, ok := residencyRuntimeCorpus[key]
+			if !ok {
+				t.Errorf("runtime corpus row %q is missing — every intent x topology pair must be pinned", key)
+				continue
+			}
+			seen[key] = true
+
+			full, err := Plan(in.intent, f.topo)
+			if err != nil {
+				if got := "error: " + err.Error(); got != want {
+					t.Errorf("%s\n got: %s\nwant: %s", key, got, want)
+				}
+				continue
+			}
+			narrowed, err := Narrow(full, PlaneRuntime)
+			if err != nil {
+				t.Errorf("%s: Narrow(runtime): %v", key, err)
+				continue
+			}
+			if got := narrowed.String(); got != want {
+				t.Errorf("%s\n got: %s\nwant: %s", key, got, want)
+			}
+			if !isLegSubsequence(narrowed, full) {
+				t.Errorf("%s: the runtime row\n %s\nis not a subsequence of the full row\n %s\n— the descriptor reordered a leg, which is the D6-in-reverse shape it exists to prevent", key, narrowed, full)
+			}
+			if len(narrowed.Legs) < len(full.Legs) {
+				narrowedSomewhere = true
+			}
+			// The reconcile plane is the same plan, always.
+			reconciled, err := Narrow(full, PlaneReconcile)
+			if err != nil {
+				t.Errorf("%s: Narrow(reconcile): %v", key, err)
+				continue
+			}
+			if got, wantFull := reconciled.String(), full.String(); got != wantFull {
+				t.Errorf("%s: the reconcile plane rendered\n %s\nwant the full plan\n %s", key, got, wantFull)
+			}
+		}
+	}
+	// Non-vacuity: if no row narrowed anything, this whole table is asserting
+	// that a no-op is a no-op.
+	if !narrowedSomewhere {
+		t.Fatal("no runtime row dropped a leg; the corpus is pinning a descriptor that narrows nothing")
+	}
+	var stale []string
+	for key := range residencyRuntimeCorpus {
+		if !seen[key] {
+			stale = append(stale, key)
+		}
+	}
+	sort.Strings(stale)
+	if len(stale) > 0 {
+		t.Errorf("runtime corpus rows match no intent x topology pair (stale): %s", strings.Join(stale, ", "))
+	}
+	if len(seen) != len(runtimeCorpusIntents())*len(allTopologies()) {
+		t.Fatalf("runtime corpus covered %d rows, want %d", len(seen), len(runtimeCorpusIntents())*len(allTopologies()))
+	}
+}
+
+// isLegSubsequence reports whether narrowed's legs appear in full, in order,
+// with their roles and policies unchanged.
+func isLegSubsequence(narrowed, full ResolvedPlan) bool {
+	if narrowed.Mode != full.Mode {
+		return false
+	}
+	i := 0
+	for _, l := range full.Legs {
+		if i < len(narrowed.Legs) && narrowed.Legs[i].String() == l.String() {
+			i++
+		}
+	}
+	return i == len(narrowed.Legs)
 }
 
 // TestResidencyCorpus is the golden diff: every (intent, topology) pair the

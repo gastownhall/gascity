@@ -1209,6 +1209,52 @@ func TestProcessDrainPassesParentRuntimeVarsToItemFormula(t *testing.T) {
 	}
 }
 
+func TestProcessDrainPropagatesSourceMemberWorkDirToItemWorkflow(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	store, drain := seedDrainWorkflow(t)
+	root := mustGetBead(t, store, drain.Metadata["gc.root_bead_id"])
+	members, err := convoycore.Members(store, root.Metadata["gc.input_convoy_id"], false)
+	if err != nil {
+		t.Fatalf("convoycore.Members: %v", err)
+	}
+	sourceWorkDir := filepath.Join(t.TempDir(), "source-worktree")
+	if err := store.SetMetadata(members[0].ID, beadmeta.LegacyWorkDirMetadataKey, sourceWorkDir); err != nil {
+		t.Fatalf("SetMetadata(source legacy work dir): %v", err)
+	}
+	if err := store.SetMetadata(root.ID, beadmeta.WorkDirMetadataKey, filepath.Join(t.TempDir(), "launcher")); err != nil {
+		t.Fatalf("SetMetadata(launcher work dir): %v", err)
+	}
+
+	if _, err := ProcessControl(store, drain, ProcessOptions{FormulaSearchPaths: []string{dir}}); err != nil {
+		t.Fatalf("ProcessControl(drain expand): %v", err)
+	}
+	manifest := mustDrainManifest(t, mustGetBead(t, store, drain.ID))
+	var itemRootID string
+	for _, row := range manifest.Rows {
+		if row.MemberID == members[0].ID {
+			itemRootID = row.ItemRootID
+			break
+		}
+	}
+	if itemRootID == "" {
+		t.Fatalf("manifest rows = %+v, want item root for source member %s", manifest.Rows, members[0].ID)
+	}
+	itemRoot := mustGetBead(t, store, itemRootID)
+	for _, key := range []string{beadmeta.WorkDirMetadataKey, beadmeta.LegacyWorkDirMetadataKey} {
+		if got := itemRoot.Metadata[key]; got != sourceWorkDir {
+			t.Fatalf("item root %s = %q, want source member work dir %q", key, got, sourceWorkDir)
+		}
+	}
+	workStep := mustFindDrainItemWorkStep(t, store, itemRootID)
+	for _, key := range []string{beadmeta.WorkDirMetadataKey, beadmeta.LegacyWorkDirMetadataKey} {
+		if got := workStep.Metadata[key]; got != sourceWorkDir {
+			t.Fatalf("item work step %s = %q, want source member work dir %q", key, got, sourceWorkDir)
+		}
+	}
+}
+
 func TestProcessDrainAppliesItemFormulaDefaultsToRootMetadata(t *testing.T) {
 	formulatest.EnableV2ForTest(t)
 	dir := t.TempDir()

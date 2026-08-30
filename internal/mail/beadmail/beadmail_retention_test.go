@@ -62,7 +62,17 @@ func (s listErrStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 type deleteTrackStore struct {
 	*beads.MemStore
 	failDelete map[string]error
-	deleted    []string
+	// getErrors injects a live-read failure for a specific ID so tests can
+	// exercise the pre-delete re-verify's error branch.
+	getErrors map[string]error
+	deleted   []string
+}
+
+func (s *deleteTrackStore) Get(id string) (beads.Bead, error) {
+	if err, ok := s.getErrors[id]; ok {
+		return beads.Bead{}, err
+	}
+	return s.MemStore.Get(id)
 }
 
 func (s *deleteTrackStore) Delete(id string) error {
@@ -298,6 +308,125 @@ func TestPurgeReadMessageWisps_DeletesAgedReadWisps(t *testing.T) {
 		if _, err := store.Get(id); err != nil {
 			t.Errorf("%s should be preserved: %v", id, err)
 		}
+	}
+}
+
+// staleListStore returns a fixed, caller-supplied snapshot from List
+// regardless of the underlying store's current state, modeling a
+// CachingStore whose enumeration answers from a stale cached view while
+// Get/Delete (via the embedded store) stay live. This lets tests put List and
+// Get/Delete out of sync the way a real cache-window race would.
+type staleListStore struct {
+	*deleteTrackStore
+	snapshot []beads.Bead
+}
+
+func (s *staleListStore) List(beads.ListQuery) ([]beads.Bead, error) {
+	return s.snapshot, nil
+}
+
+// TestPurgeReadMessageWisps_SkipsMessageUnreadAfterSnapshot is the regression
+// test for ra-nxppyo: the candidate List() can answer from the CachingStore's
+// stale view. A message the user un-read inside the cache window — after the
+// read:true snapshot was taken but before the purge sweep reaches it — must
+// not be destructively deleted on the strength of that stale snapshot.
+func TestPurgeReadMessageWisps_SkipsMessageUnreadAfterSnapshot(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	cutoff := now.Add(-time.Hour)
+	aged := now.Add(-2 * time.Hour)
+
+	seed := []beads.Bead{
+		{ID: "unread-after-snapshot", Type: "message", Status: "open", CreatedAt: aged, Labels: []string{"read"}, Metadata: map[string]string{mail.ReadMetadataKey: "true"}, Ephemeral: true},
+	}
+	underlying := &deleteTrackStore{MemStore: beads.NewMemStoreFrom(100, seed, nil), failDelete: map[string]error{}}
+	store := &staleListStore{deleteTrackStore: underlying, snapshot: seed}
+
+	// Simulate the user un-reading the message inside the cache window: the
+	// live store now disagrees with the stale read:true snapshot List returns.
+	if err := underlying.Update("unread-after-snapshot", beads.UpdateOpts{
+		RemoveLabels: []string{"read"},
+		Metadata:     map[string]string{mail.ReadMetadataKey: "false"},
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	mailStore := beads.MailStore{Store: store}
+	purged, err := PurgeReadMessageWisps(mailStore, cutoff)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if purged != 0 {
+		t.Fatalf("purged = %d, want 0 (message was un-read after the snapshot)", purged)
+	}
+	if len(underlying.deleted) != 0 {
+		t.Fatalf("deleted = %v, want none", underlying.deleted)
+	}
+	if _, err := underlying.Get("unread-after-snapshot"); err != nil {
+		t.Fatalf("message should be preserved: %v", err)
+	}
+}
+
+// TestPurgeReadMessageWisps_SkipsMessageGoneAfterSnapshot asserts a candidate
+// that no longer exists live (deleted by a concurrent path between the
+// snapshot and this sweep) is skipped rather than erroring the whole sweep.
+func TestPurgeReadMessageWisps_SkipsMessageGoneAfterSnapshot(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	cutoff := now.Add(-time.Hour)
+	aged := now.Add(-2 * time.Hour)
+
+	seed := []beads.Bead{
+		{ID: "gone-after-snapshot", Type: "message", Status: "open", CreatedAt: aged, Labels: []string{"read"}, Metadata: map[string]string{mail.ReadMetadataKey: "true"}, Ephemeral: true},
+	}
+	underlying := &deleteTrackStore{MemStore: beads.NewMemStoreFrom(100, seed, nil), failDelete: map[string]error{}}
+	store := &staleListStore{deleteTrackStore: underlying, snapshot: seed}
+
+	// Simulate a concurrent delete inside the cache window: the live store no
+	// longer has the bead the stale snapshot still lists.
+	if err := underlying.MemStore.Delete("gone-after-snapshot"); err != nil {
+		t.Fatalf("seed delete: %v", err)
+	}
+
+	mailStore := beads.MailStore{Store: store}
+	purged, err := PurgeReadMessageWisps(mailStore, cutoff)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if purged != 0 {
+		t.Fatalf("purged = %d, want 0 (message already gone)", purged)
+	}
+	if len(underlying.deleted) != 0 {
+		t.Fatalf("deleted = %v, want none", underlying.deleted)
+	}
+}
+
+// TestPurgeReadMessageWisps_SurfacesLiveRecheckError asserts that a transient
+// live-read failure during the pre-delete re-verify is reported rather than
+// silently swallowed as "already gone" — and still never deletes.
+func TestPurgeReadMessageWisps_SurfacesLiveRecheckError(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	cutoff := now.Add(-time.Hour)
+	aged := now.Add(-2 * time.Hour)
+
+	seed := []beads.Bead{
+		{ID: "boom", Type: "message", Status: "open", CreatedAt: aged, Labels: []string{"read"}, Metadata: map[string]string{mail.ReadMetadataKey: "true"}, Ephemeral: true},
+	}
+	underlying := &deleteTrackStore{
+		MemStore:   beads.NewMemStoreFrom(100, seed, nil),
+		failDelete: map[string]error{},
+		getErrors:  map[string]error{"boom": errors.New("backend down")},
+	}
+	store := &staleListStore{deleteTrackStore: underlying, snapshot: seed}
+
+	mailStore := beads.MailStore{Store: store}
+	purged, err := PurgeReadMessageWisps(mailStore, cutoff)
+	if err == nil {
+		t.Fatal("PurgeReadMessageWisps: want error, got nil (a live-read failure must not be swallowed)")
+	}
+	if purged != 0 {
+		t.Fatalf("purged = %d, want 0 (live re-verify failed)", purged)
+	}
+	if len(underlying.deleted) != 0 {
+		t.Fatalf("deleted = %v, want none", underlying.deleted)
 	}
 }
 

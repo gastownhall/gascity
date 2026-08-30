@@ -7,15 +7,23 @@ import (
 
 // promptDeliveryResult is the resolved plan for delivering a rendered startup
 // prompt to a freshly launched session: which argv suffix / flag / nudge
-// carries it, and whether any mechanism actually delivered it.
+// carries it, and whether a delivery mechanism was selected for it. This is a
+// pure routing decision — no I/O happens here — so Delivered=true means "a
+// mechanism exists to carry this prompt," not "the runtime received or the
+// agent consumed it."
 type promptDeliveryResult struct {
 	PromptSuffix string
 	PromptFlag   string
 	Nudge        string
 	// Delivered reports whether the startup prompt reached a first-turn
-	// delivery mechanism. Callers stamp the GC_STARTUP_PROMPT_DELIVERED marker
-	// from this so observers can distinguish "primed" from "live but never
-	// primed".
+	// delivery mechanism (routing/selection only). Callers stamp the
+	// GC_STARTUP_PROMPT_DELIVERED marker from this so observers can
+	// distinguish "primed" from "live but never primed" — but "primed" itself
+	// means delivery was selected and attempted for this runtime incarnation,
+	// not that the agent consumed or began acting on the prompt; a live
+	// worker can still be idle if the provider drops submission after this
+	// point. The durable signal that work began is the trigger bead becoming
+	// assigned/in-progress (gastownhall/gascity#5236).
 	Delivered bool
 }
 

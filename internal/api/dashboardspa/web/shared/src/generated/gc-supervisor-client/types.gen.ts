@@ -645,6 +645,18 @@ export type ConfigValidateOutputBody = {
     warnings: Array<string> | null;
 };
 
+export type ControlStalledPayload = {
+    attempts: number;
+    bead_id: string;
+    error: string;
+    error_class: string;
+    first_seen: string;
+    kind?: string;
+    order_name?: string;
+    root_bead_id?: string;
+    store_path?: string;
+};
+
 export type ConversationGroupParticipant = {
     GroupID: string;
     Handle: string;
@@ -870,7 +882,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -2114,6 +2126,13 @@ export type OrderRunOutputBody = {
      * Tracking bead id for the dispatch.
      */
     tracking_id?: string;
+};
+
+export type OrderSuppressedPayload = {
+    consecutive: number;
+    first_suppressed: string;
+    order_name: string;
+    suppressed_for_ms: number;
 };
 
 export type OrdersFeedBody = {
@@ -5186,6 +5205,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeCitySuspended) | ({
     type: 'city.unregister_requested';
 } & TypedEventStreamEnvelopeCityUnregisterRequested) | ({
+    type: 'control.stalled';
+} & TypedEventStreamEnvelopeControlStalled) | ({
     type: 'controller.started';
 } & TypedEventStreamEnvelopeControllerStarted) | ({
     type: 'controller.stopped';
@@ -5202,6 +5223,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeEventsRotated) | ({
     type: 'execution.claim_window_expired';
 } & TypedEventStreamEnvelopeExecutionClaimWindowExpired) | ({
+    type: 'execution.run_anchored';
+} & TypedEventStreamEnvelopeExecutionRunAnchored) | ({
     type: 'execution.step_completed';
 } & TypedEventStreamEnvelopeExecutionStepCompleted) | ({
     type: 'execution.step_defined';
@@ -5258,6 +5281,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeOrderFailed) | ({
     type: 'order.fired';
 } & TypedEventStreamEnvelopeOrderFired) | ({
+    type: 'order.suppressed';
+} & TypedEventStreamEnvelopeOrderSuppressed) | ({
     type: 'project.identity.stamped';
 } & TypedEventStreamEnvelopeProjectIdentityStamped) | ({
     type: 'provider.swapped';
@@ -5608,6 +5633,24 @@ export type TypedEventStreamEnvelopeCityUnregisterRequested = {
 };
 
 /**
+ * TypedEventStreamEnvelope control.stalled
+ */
+export type TypedEventStreamEnvelopeControlStalled = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: ControlStalledPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'control.stalled';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope controller.started
  */
 export type TypedEventStreamEnvelopeControllerStarted = {
@@ -5766,6 +5809,24 @@ export type TypedEventStreamEnvelopeExecutionClaimWindowExpired = {
     subject?: string;
     ts: string;
     type: 'execution.claim_window_expired';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope execution.run_anchored
+ */
+export type TypedEventStreamEnvelopeExecutionRunAnchored = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: NoPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'execution.run_anchored';
     workflow?: WorkflowEventProjection;
 };
 
@@ -6270,6 +6331,24 @@ export type TypedEventStreamEnvelopeOrderFired = {
     subject?: string;
     ts: string;
     type: 'order.fired';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope order.suppressed
+ */
+export type TypedEventStreamEnvelopeOrderSuppressed = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: OrderSuppressedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'order.suppressed';
     workflow?: WorkflowEventProjection;
 };
 
@@ -6993,6 +7072,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeCitySuspended) | ({
     type: 'city.unregister_requested';
 } & TypedTaggedEventStreamEnvelopeCityUnregisterRequested) | ({
+    type: 'control.stalled';
+} & TypedTaggedEventStreamEnvelopeControlStalled) | ({
     type: 'controller.started';
 } & TypedTaggedEventStreamEnvelopeControllerStarted) | ({
     type: 'controller.stopped';
@@ -7009,6 +7090,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeEventsRotated) | ({
     type: 'execution.claim_window_expired';
 } & TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired) | ({
+    type: 'execution.run_anchored';
+} & TypedTaggedEventStreamEnvelopeExecutionRunAnchored) | ({
     type: 'execution.step_completed';
 } & TypedTaggedEventStreamEnvelopeExecutionStepCompleted) | ({
     type: 'execution.step_defined';
@@ -7065,6 +7148,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeOrderFailed) | ({
     type: 'order.fired';
 } & TypedTaggedEventStreamEnvelopeOrderFired) | ({
+    type: 'order.suppressed';
+} & TypedTaggedEventStreamEnvelopeOrderSuppressed) | ({
     type: 'project.identity.stamped';
 } & TypedTaggedEventStreamEnvelopeProjectIdentityStamped) | ({
     type: 'provider.swapped';
@@ -7430,6 +7515,25 @@ export type TypedTaggedEventStreamEnvelopeCityUnregisterRequested = {
 };
 
 /**
+ * TypedTaggedEventStreamEnvelope control.stalled
+ */
+export type TypedTaggedEventStreamEnvelopeControlStalled = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: ControlStalledPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'control.stalled';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedTaggedEventStreamEnvelope controller.started
  */
 export type TypedTaggedEventStreamEnvelopeControllerStarted = {
@@ -7597,6 +7701,25 @@ export type TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired = {
     subject?: string;
     ts: string;
     type: 'execution.claim_window_expired';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope execution.run_anchored
+ */
+export type TypedTaggedEventStreamEnvelopeExecutionRunAnchored = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: NoPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'execution.run_anchored';
     workflow?: WorkflowEventProjection;
 };
 
@@ -8129,6 +8252,25 @@ export type TypedTaggedEventStreamEnvelopeOrderFired = {
     subject?: string;
     ts: string;
     type: 'order.fired';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope order.suppressed
+ */
+export type TypedTaggedEventStreamEnvelopeOrderSuppressed = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: OrderSuppressedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'order.suppressed';
     workflow?: WorkflowEventProjection;
 };
 

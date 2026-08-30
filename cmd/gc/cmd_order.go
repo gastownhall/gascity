@@ -813,7 +813,11 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{}); err != nil {
+	// Validate against the vars the caller supplied. Passing an empty Options here
+	// drops them, and ValidateRecipeRuntimeVars reads opts.Vars — so every
+	// `required = true` var reports as missing however many --var flags were given,
+	// making any formula with a required var unfireable as an order.
+	if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{Vars: vars}); err != nil {
 		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -2088,14 +2092,23 @@ func cmdOrderSweepNudgeMail(nudgeTTL, mailTTL time.Duration, dryRun, quiet bool,
 	statePtr := &nudgeState
 
 	now := time.Now()
+	// Route each phase to its coordination class, the way the controller's
+	// nudge-mail sweep watchdog already does (city_runtime.go, via
+	// nudgesBeadStore/mailBeadStore). Left unrouted, the CLI sweep reads an empty
+	// backlog on a relocated city and reports success while the real one grows.
+	// cfg is nil deliberately: resolveClassStore ignores it, and loading config
+	// here would stomp the process-wide feature-flag globals (see the
+	// resolveCLIStorageRoutes doc).
+	nudges := cliNudgesStore(store, nil, cityPath)
+	mail := cliMailStore(store, nil, cityPath)
 	if dryRun {
-		return cmdOrderSweepNudgeMailDryRun(store, statePtr, now, nudgeTTL, mailTTL, quiet, stdout, stderr)
+		return cmdOrderSweepNudgeMailDryRun(nudges, mail, statePtr, now, nudgeTTL, mailTTL, quiet, stdout, stderr)
 	}
-	return cmdOrderSweepNudgeMailRun(store, statePtr, now, nudgeTTL, mailTTL, quiet, stdout, stderr)
+	return cmdOrderSweepNudgeMailRun(nudges, mail, statePtr, now, nudgeTTL, mailTTL, quiet, stdout, stderr)
 }
 
-func cmdOrderSweepNudgeMailDryRun(store beads.Store, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, quiet bool, stdout, stderr io.Writer) int {
-	counts, err := countStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nudgeState, now, nudgeTTL, mailTTL, nudgeMailSweepCloseBudget)
+func cmdOrderSweepNudgeMailDryRun(nudges beads.NudgesStore, mail beads.MailStore, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, quiet bool, stdout, stderr io.Writer) int {
+	counts, err := countStaleNudgeMail(nudges, mail, nudgeState, now, nudgeTTL, mailTTL, nudgeMailSweepCloseBudget)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order sweep-nudge-mail: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -2112,8 +2125,8 @@ func cmdOrderSweepNudgeMailDryRun(store beads.Store, nudgeState *nudgequeue.Stat
 	return 0
 }
 
-func cmdOrderSweepNudgeMailRun(store beads.Store, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, quiet bool, stdout, stderr io.Writer) int {
-	result, sweepErr := sweepStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nudgeState, now, nudgeTTL, mailTTL, nudgeMailSweepCloseBudget)
+func cmdOrderSweepNudgeMailRun(nudges beads.NudgesStore, mail beads.MailStore, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, quiet bool, stdout, stderr io.Writer) int {
+	result, sweepErr := sweepStaleNudgeMail(nudges, mail, nudgeState, now, nudgeTTL, mailTTL, nudgeMailSweepCloseBudget)
 
 	if sweepErr != nil {
 		// Per-bead errors are joined via errors.Join (Unwrap() []error): print each
