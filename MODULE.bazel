@@ -11,7 +11,10 @@ bazel_dep(name = "gazelle", version = "0.53.0")
 # The pilot uses a pinned SDK so local and CI actions compile with the same
 # toolchain. Update this in lockstep with the `go` directive in go.mod.
 go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
-go_sdk.download(name = "go_sdk", version = "1.26.6")
+go_sdk.download(
+    name = "go_sdk",
+    version = "1.26.6",
+)
 use_repo(go_sdk, "go_sdk")
 
 # Resolve external imports from the canonical Go module graph. Only repos used
@@ -21,7 +24,44 @@ go_deps.from_file(go_mod = "//:go.mod")
 use_repo(
     go_deps,
     "com_github_burntsushi_toml",
+    "com_github_cenkalti_backoff_v4",
+    "com_github_danielgtaylor_huma_v2",
+    "com_github_fsnotify_fsnotify",
+    "com_github_gastownhall_gascity_packs",
+    "com_github_go_jose_go_jose_v4",
+    "com_github_go_sql_driver_mysql",
+    "com_github_golang_jwt_jwt_v5",
+    "com_github_google_shlex",
+    "com_github_google_uuid",
+    "com_github_gorilla_websocket",
+    "com_github_invopop_jsonschema",
+    "com_github_masterminds_semver_v3",
+    "com_github_oapi_codegen_runtime",
+    "com_github_pb33f_libopenapi",
+    "com_github_pb33f_libopenapi_validator",
+    "com_github_rogpeppe_go_internal",
+    "com_github_santhosh_tekuri_jsonschema_v6",
+    "com_github_shirou_gopsutil_v4",
+    "com_github_spf13_cobra",
+    "com_github_spf13_pflag",
+    "com_github_steveyegge_beads",
+    "com_github_stretchr_testify",
     "in_gopkg_yaml_v3",
+    "io_k8s_api",
+    "io_k8s_apimachinery",
+    "io_k8s_client_go",
+    "io_opentelemetry_go_otel",
+    "io_opentelemetry_go_otel_exporters_otlp_otlplog_otlploghttp",
+    "io_opentelemetry_go_otel_exporters_otlp_otlpmetric_otlpmetrichttp",
+    "io_opentelemetry_go_otel_log",
+    "io_opentelemetry_go_otel_metric",
+    "io_opentelemetry_go_otel_sdk",
+    "io_opentelemetry_go_otel_sdk_log",
+    "io_opentelemetry_go_otel_sdk_metric",
+    "net_pgregory_rapid",
     "org_golang_x_mod",
+    "org_golang_x_sync",
     "org_golang_x_sys",
+    "org_golang_x_term",
+    "org_modernc_sqlite",
 )
