@@ -1,0 +1,15 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "clock",
+    srcs = ["clock.go"],
+    importpath = "github.com/gastownhall/gascity/internal/clock",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "clock_test",
+    srcs = ["clock_test.go"],
+    embed = [":clock"],
+    visibility = ["//visibility:public"],
+)
