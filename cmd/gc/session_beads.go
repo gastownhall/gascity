@@ -505,8 +505,9 @@ func reopenClosedConfiguredNamedSessionBead(
 			// tracks that full set (including sleep_intent, wake_attempts, and
 			// churn_count) by construction instead of hand-listing a subset
 			// that drifts from the canonical contract.
-			blockers := session.ClearWakeBlockersPatch(session.State(state), bead.Metadata["sleep_reason"])
-			delete(blockers, "state") // the reopen owns the target state set above.
+			blockers := session.ClearWakeBlockersPatch(session.State(state), bead.Metadata["sleep_reason"], now)
+			delete(blockers, "state")    // the reopen owns the target state set above.
+			delete(blockers, "slept_at") // a respawn is a wake, not a sleep.
 			for k, v := range blockers {
 				batch[k] = v
 			}
