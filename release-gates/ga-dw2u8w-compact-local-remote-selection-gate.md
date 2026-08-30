@@ -4,7 +4,7 @@
 - Build bead: `ga-cr66lk`
 - Review bead: `ga-s40eru`
 - Reviewed commit: `5d06034de2cb7dc5bc5f8af59b97912eee287e91`
-- Base: `origin/main@7cf9c8b3fb0bb03dac7cc89683a5f1883a641c6c`
+- Base: `origin/main@c7a92b25ebb100ccfd0f3a31cf2e865a5d7bfb1c`
 - Deploy mode: remote
 - Deploy branch: `deploy/ga-dw2u8w-gate`
 - Verdict: **PASS**
@@ -21,7 +21,7 @@ authoritative; without one, compact selects only the first name-sorted
 | 3 | Tests pass | PASS | The canonical isolated 40-job run had 38 jobs exit 0 and two non-diff-owned failures attributed below. All seven added/modified behavioral tests passed by exact name. Policy, build, vet, lint, format, docs, and native-DoltLite gates passed. |
 | 4 | No high-severity review findings open | PASS | Review records no findings; security, spec, scope, and consistency checks all passed. |
 | 5 | Final branch is clean | PASS | The detached candidate worktree was clean before this checklist was written. Hooks are active at `/home/jaword/projects/gascity/.githooks`. |
-| 6 | Branch diverges cleanly from main | PASS | Evaluated first. Candidate is exactly 2 commits ahead and 0 behind current `origin/main`; `git merge-tree --write-tree origin/main 5d06034de2cb7dc5bc5f8af59b97912eee287e91` exited 0 with tree `5231172b689f45c05f21472033c46c2674960078`; `git diff --check` passed. No PR already carries the reviewed SHA. |
+| 6 | Branch diverges cleanly from main | PASS | Evaluated first and refreshed before PR creation. Candidate is 2 commits ahead and 1 behind current `origin/main`; `git merge-tree --write-tree origin/main 5d06034de2cb7dc5bc5f8af59b97912eee287e91` exited 0 with tree `7f03ff3f4d0663ad6cb5b19a878d7e5aa2270832`; `git diff --check` passed. The new base commit changes only opencode/hooks files, with no overlap. No PR already carries the reviewed SHA. |
 | 7 | Single feature theme | PASS | Three files, +99/-34, all confined to compact remote selection and its test fixture/coverage under `examples/bd/dolt`. |
 
 ## Criterion 3 evidence
