@@ -112,7 +112,7 @@ copy_pilot_graph() {
 	done
 }
 
-printf 'ref\tgo_test_s\tbazel_cold_s\tbazel_forced_s\tbazel_noop_s\tbazel_incremental_s\tbep_actions/cache_hits(cold/forced/noop/incremental)\n'
+printf 'ref\tgo_test_s\tbazel_cold_s\tbazel_forced_s\tbazel_noop_s\tbazel_incremental_s\tbep_created/executed/hits/misses(cold/forced/noop/incremental)\n'
 current_work=""
 current_bazel_base=""
 cleanup_exit() {
@@ -209,24 +209,29 @@ for ref in "${refs[@]}"; do
 		exit 1
 	fi
 	incremental_seconds="$MEASURE_SECONDS"
-	# Build Event Protocol is newline-delimited JSON. Count completed actions and
-	# cache-hit actions from structured events; human logs differ by Bazel version.
+	# Build Event Protocol is newline-delimited JSON. Read the authoritative
+	# buildMetrics.actionSummary event; human logs differ by Bazel version.
 	bep_metrics() {
 		python3 - "$1" <<'PY'
 import json, sys
-completed = cache_hits = 0
+summary = None
 for line in open(sys.argv[1], encoding="utf-8"):
     try:
         event = json.loads(line)
     except json.JSONDecodeError:
         continue
-    action = event.get("actionCompleted")
-    if not action:
-        continue
-    completed += 1
-    if action.get("recoveredFromCache") or action.get("cacheHit"):
-        cache_hits += 1
-print(f"{completed}/{cache_hits}")
+    metrics = event.get("buildMetrics", {})
+    if metrics.get("actionSummary"):
+        summary = metrics["actionSummary"]
+if summary is None:
+    print("unknown")
+else:
+    cache = summary.get("actionCacheStatistics", {})
+    created = summary.get("actionsCreated", 0)
+    executed = summary.get("actionsExecuted", 0)
+    hits = cache.get("hitCount", cache.get("hits", 0))
+    misses = cache.get("missCount", cache.get("misses", 0))
+    print(f"{created}/{executed}/{hits}/{misses}")
 PY
 	}
 	cold_metrics="$(bep_metrics "$bazel_cold_bep")"
