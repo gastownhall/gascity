@@ -6,11 +6,18 @@
 #
 # The target defaults to the pilot clock package. Set BAZEL_BIN to use a
 # pinned bazelisk/bazel executable (for example, BAZEL_BIN=/opt/bazelisk).
+# Set GO_PACKAGE when the Bazel label's package differs from the Go package
+# path. Test result caching is disabled to compare execution costs directly.
 set -euo pipefail
 
 target="${1:-//internal/clock:clock_test}"
+if [[ "$target" != //*:* ]]; then
+	echo "bazel-backtest: target must be a single //package:name label" >&2
+	exit 2
+fi
 bazel_package="${target#//}"
 bazel_package="${bazel_package%%:*}"
+go_package="${GO_PACKAGE:-./$bazel_package}"
 bazel_bin="${BAZEL_BIN:-}"
 if [[ -z "$bazel_bin" ]]; then
 	if command -v bazelisk >/dev/null 2>&1; then
@@ -41,17 +48,20 @@ run_bazel_cold() {
 	local output_base
 	output_base="$(mktemp -d "${TMPDIR:-/tmp}/gascity-bazel.XXXXXX")"
 	local status=0
-	if "$bazel_bin" test --noshow_progress --output_base="$output_base" "$target"; then
+	if "$bazel_bin" --output_base="$output_base" test --noshow_progress --cache_test_results=no "$target"; then
 		:
 	else
 		status=$?
 	fi
-	"$bazel_bin" shutdown --output_base="$output_base" >/dev/null 2>&1 || true
+	"$bazel_bin" --output_base="$output_base" shutdown >/dev/null 2>&1 || true
+	# rules_go marks SDK artifacts read-only; make the private temp tree
+	# removable before deleting it.
+	chmod -R u+w "$output_base" 2>/dev/null || true
 	rm -rf "$output_base"
 	return "$status"
 }
 
 echo "target: $target"
-run_timed go-test go test -count=1 "./$bazel_package"
+run_timed go-test go test -count=1 "$go_package"
 run_timed bazel-cold run_bazel_cold
-run_timed bazel-warm "$bazel_bin" test --noshow_progress "$target"
+run_timed bazel-warm "$bazel_bin" test --noshow_progress --cache_test_results=no "$target"

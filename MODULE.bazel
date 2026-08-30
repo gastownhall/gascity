@@ -6,8 +6,10 @@ module(
 )
 
 bazel_dep(name = "rules_go", version = "0.63.0")
+bazel_dep(name = "gazelle", version = "0.53.0")
 
 # The pilot uses a pinned SDK so local and CI actions compile with the same
 # toolchain. Update this in lockstep with the `go` directive in go.mod.
 go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
 go_sdk.download(name = "go_sdk", version = "1.26.6")
+use_repo(go_sdk, "go_sdk")
