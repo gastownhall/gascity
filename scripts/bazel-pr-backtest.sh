@@ -4,6 +4,10 @@
 # The pilot BUILD graph is copied into each revision, so this measures source
 # changes under a constant Bazel graph. It is evidence for target selection,
 # not a claim that those revisions were Bazel-buildable in their original form.
+# The contract target intentionally omits identity_test.go: that test scans the
+# source checkout via runtime.Caller, which is unavailable in Bazel runfiles.
+# Rows therefore cover the remaining contract tests only; testdata is copied
+# through the contract BUILD target's declared data glob.
 #
 # Usage:
 #   scripts/bazel-pr-backtest.sh [git-ref ...]
@@ -108,7 +112,7 @@ copy_pilot_graph() {
 	done
 }
 
-printf 'ref\tgo_test_s\tbazel_cold_s\tbazel_forced_s\tbazel_noop_s\tbazel_incremental_s\tprocesses(cold/forced/noop/incremental)\tcache_hits(cold/forced/noop/incremental)\n'
+printf 'ref\tgo_test_s\tbazel_cold_s\tbazel_forced_s\tbazel_noop_s\tbazel_incremental_s\tbep_actions/cache_hits(cold/forced/noop/incremental)\n'
 current_work=""
 current_bazel_base=""
 cleanup_exit() {
@@ -205,18 +209,32 @@ for ref in "${refs[@]}"; do
 		exit 1
 	fi
 	incremental_seconds="$MEASURE_SECONDS"
-	process_count() { grep -Eo '[0-9]+ processes:' "$1" | tail -1 | awk '{print $1}' || true; }
-	cache_count() { grep -Eo '[0-9]+ action cache hit' "$1" | tail -1 | awk '{print $1}' || true; }
-	cold_processes="$(process_count "$bazel_cold_log")"; cold_processes="${cold_processes:-unknown}"
-	forced_processes="$(process_count "$bazel_forced_log")"; forced_processes="${forced_processes:-unknown}"
-	noop_processes="$(process_count "$bazel_noop_log")"; noop_processes="${noop_processes:-unknown}"
-	incremental_processes="$(process_count "$bazel_incremental_log")"; incremental_processes="${incremental_processes:-unknown}"
-	cold_hits="$(cache_count "$bazel_cold_log")"; cold_hits="${cold_hits:-0}"
-	forced_hits="$(cache_count "$bazel_forced_log")"; forced_hits="${forced_hits:-0}"
-	noop_hits="$(cache_count "$bazel_noop_log")"; noop_hits="${noop_hits:-0}"
-	incremental_hits="$(cache_count "$bazel_incremental_log")"; incremental_hits="${incremental_hits:-0}"
+	# Build Event Protocol is newline-delimited JSON. Count completed actions and
+	# cache-hit actions from structured events; human logs differ by Bazel version.
+	bep_metrics() {
+		python3 - "$1" <<'PY'
+import json, sys
+completed = cache_hits = 0
+for line in open(sys.argv[1], encoding="utf-8"):
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    action = event.get("actionCompleted")
+    if not action:
+        continue
+    completed += 1
+    if action.get("recoveredFromCache") or action.get("cacheHit"):
+        cache_hits += 1
+print(f"{completed}/{cache_hits}")
+PY
+	}
+	cold_metrics="$(bep_metrics "$bazel_cold_bep")"
+	forced_metrics="$(bep_metrics "$bazel_forced_bep")"
+	noop_metrics="$(bep_metrics "$bazel_noop_bep")"
+	incremental_metrics="$(bep_metrics "$bazel_incremental_bep")"
 
-	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s/%s/%s/%s\t%s/%s/%s/%s\n' "${resolved:0:12}" "$go_seconds" "$cold_seconds" "$forced_seconds" "$noop_seconds" "$incremental_seconds" "$cold_processes" "$forced_processes" "$noop_processes" "$incremental_processes" "$cold_hits" "$forced_hits" "$noop_hits" "$incremental_hits"
+	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s/%s/%s/%s\n' "${resolved:0:12}" "$go_seconds" "$cold_seconds" "$forced_seconds" "$noop_seconds" "$incremental_seconds" "$cold_metrics" "$forced_metrics" "$noop_metrics" "$incremental_metrics"
 	shutdown_bazel "$bazel_base"
 	current_bazel_base=""
 	cleanup_worktree "$work"
