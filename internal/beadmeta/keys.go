@@ -161,6 +161,7 @@ const (
 	CompletionFactsConvergedMetadataKey = "gc.completion_facts_converged"
 	LastFailureClassMetadataKey         = "gc.last_failure_class"
 	LastFinalizeErrorMetadataKey        = "gc.last_finalize_error"
+	LeaseOwnerMetadataKey               = "gc.lease_owner"
 	LogicalBeadIDMetadataKey            = "gc.logical_bead_id"
 	MaxAttemptsMetadataKey              = "gc.max_attempts"
 	MissingRootBeadIDMetadataKey        = "gc.missing_root_bead_id"
@@ -449,6 +450,7 @@ var KnownMetadataKeys = []string{
 	KindMetadataKey,
 	LastFailureClassMetadataKey,
 	LastFinalizeErrorMetadataKey,
+	LeaseOwnerMetadataKey,
 	LogicalBeadIDMetadataKey,
 	MaxAttemptsMetadataKey,
 	MissingRootBeadIDMetadataKey,
