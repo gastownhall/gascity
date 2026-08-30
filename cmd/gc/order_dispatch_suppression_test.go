@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -527,5 +529,150 @@ func TestOrderOpenWorkSuppressionConstantsMatchTheirDocumentedContract(t *testin
 	}
 	if orderOpenWorkSuppressionRepeat != time.Hour {
 		t.Errorf("repeat window = %s, want 1h", orderOpenWorkSuppressionRepeat)
+	}
+}
+
+// newWispBlockedStore holds the STRICT open-work gate shut with an unworked WISP
+// ROOT rather than an in-flight tracking bead. That is the shape sr-0ens
+// recorded in the wild: a 4h cron poured a wisp, nobody worked it, and the order
+// then did not fire for 63 hours. It reaches the gate by a different path than
+// gateBlockingStore's tracking bead — openRoots plus the wispRootHasOpenWork
+// predicate, not openWorkTracking — so it also pins that the blocker lookup
+// classifies both kinds.
+func newWispBlockedStore(scoped string, createdAt time.Time) *gateBlockingStore {
+	return &gateBlockingStore{
+		Store:   beads.NewMemStore(),
+		blocked: true,
+		corpus: []beads.Bead{{
+			ID:        "sr-iaq7",
+			Title:     "mol-dog-stale-db",
+			Status:    "open",
+			Labels:    []string{"order-run:" + scoped},
+			Metadata:  map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWisp},
+			CreatedAt: createdAt,
+		}},
+	}
+}
+
+// TestOrderSuppressedNamesTheWispHoldingTheGateShut is the sr-0iyy1 assertion.
+// The streak fields say how long the order has been held back; they cannot say
+// by what, and the blocking bead's id is the whole remedy — the gate reopens
+// when it closes. An alert that omits it makes the reader run the query the
+// controller had already run.
+func TestOrderSuppressedNamesTheWispHoldingTheGateShut(t *testing.T) {
+	const scoped = "mol-dog-stale-db"
+	start := time.Date(2030, 8, 21, 9, 0, 0, 0, time.UTC)
+	// Poured 4h before the streak opens: the wisp predates the due tick that
+	// first found the gate shut, which is exactly why its age is not the
+	// streak's duration.
+	pouredAt := start.Add(-4 * time.Hour)
+	store := newWispBlockedStore(scoped, pouredAt)
+	rec := &memRecorder{}
+	m := suppressedOrderDispatcher(t, scoped, store, rec)
+	cityPath := t.TempDir()
+
+	now := start
+	for i := 0; i < orderOpenWorkSuppressionAlertAfter; i++ {
+		m.dispatch(context.Background(), cityPath, now)
+		m.drain(context.Background())
+		if i < orderOpenWorkSuppressionAlertAfter-1 {
+			now = now.Add(time.Minute)
+		}
+	}
+
+	got := rec.suppressedEvents()
+	if len(got) != 1 {
+		t.Fatalf("order.suppressed events = %d, want 1", len(got))
+	}
+	p := decodeSuppressedPayload(t, got[0])
+	if p.BlockerID != "sr-iaq7" {
+		t.Errorf("payload blocker_id = %q, want %q", p.BlockerID, "sr-iaq7")
+	}
+	if p.BlockerKind != orders.WorkBlockerKindWisp {
+		t.Errorf("payload blocker_kind = %q, want %q", p.BlockerKind, orders.WorkBlockerKindWisp)
+	}
+	if p.BlockerTitle != "mol-dog-stale-db" {
+		t.Errorf("payload blocker_title = %q, want %q", p.BlockerTitle, "mol-dog-stale-db")
+	}
+	wantAge := now.Sub(pouredAt).Milliseconds()
+	if p.BlockerAgeMS != wantAge {
+		t.Errorf("payload blocker_age_ms = %d, want %d", p.BlockerAgeMS, wantAge)
+	}
+	// The two durations must not be conflated: the blocker is older than the
+	// streak by the interval that elapsed before the order came due.
+	if p.BlockerAgeMS <= p.SuppressedForMS {
+		t.Errorf("blocker_age_ms = %d must exceed suppressed_for_ms = %d — the wisp predates the first due tick",
+			p.BlockerAgeMS, p.SuppressedForMS)
+	}
+	if !strings.Contains(got[0].Message, "sr-iaq7") {
+		t.Errorf("message does not name the blocker: %q", got[0].Message)
+	}
+}
+
+// TestOrderSuppressedNamesAnInFlightTrackingBead pins the other blocker kind.
+// A gate held by the order's own tracking bead means the previous DISPATCH never
+// returned, which is a different fault from work nobody did, and the event has
+// to be able to tell a reader which one they are looking at.
+func TestOrderSuppressedNamesAnInFlightTrackingBead(t *testing.T) {
+	const scoped = "stuck-order"
+	start := time.Date(2030, 8, 21, 9, 0, 0, 0, time.UTC)
+	store := newGateBlockingStore(scoped, start.Add(-24*time.Hour))
+	rec := &memRecorder{}
+	m := suppressedOrderDispatcher(t, scoped, store, rec)
+	cityPath := t.TempDir()
+
+	now := start
+	for i := 0; i < orderOpenWorkSuppressionAlertAfter; i++ {
+		m.dispatch(context.Background(), cityPath, now)
+		m.drain(context.Background())
+		if i < orderOpenWorkSuppressionAlertAfter-1 {
+			now = now.Add(time.Minute)
+		}
+	}
+
+	got := rec.suppressedEvents()
+	if len(got) != 1 {
+		t.Fatalf("order.suppressed events = %d, want 1", len(got))
+	}
+	p := decodeSuppressedPayload(t, got[0])
+	if p.BlockerID != "gate-blocker" {
+		t.Errorf("payload blocker_id = %q, want %q", p.BlockerID, "gate-blocker")
+	}
+	if p.BlockerKind != orders.WorkBlockerKindTracking {
+		t.Errorf("payload blocker_kind = %q, want %q", p.BlockerKind, orders.WorkBlockerKindTracking)
+	}
+}
+
+// TestOrderSuppressedMessageDegradesToItsPreBlockerText is the best-effort
+// contract. The blocker lookup is a separate read that can time out, race the
+// blocker closing, or fail; when it reports nothing the event must still be
+// emitted and must read exactly as it did before blocker resolution existed —
+// not as a sentence with a hole in it.
+func TestOrderSuppressedMessageDegradesToItsPreBlockerText(t *testing.T) {
+	t.Parallel()
+
+	base := events.OrderSuppressedPayload{
+		OrderName:       "mol-dog-stale-db",
+		Consecutive:     20,
+		FirstSuppressed: "2026-08-24T05:00:23Z",
+		SuppressedForMS: 1200000,
+	}
+	const want = "open-work gate has suppressed this order for 20 consecutive dispatch checks since 2026-08-24T05:00:23Z"
+	if got := orderSuppressedMessage(base); got != want {
+		t.Fatalf("message without a blocker = %q, want %q", got, want)
+	}
+
+	withBlocker := base
+	withBlocker.BlockerID = "sr-iaq7"
+	withBlocker.BlockerKind = orders.WorkBlockerKindWisp
+	withBlocker.BlockerAgeMS = (4 * time.Hour).Milliseconds()
+	got := orderSuppressedMessage(withBlocker)
+	if !strings.HasPrefix(got, want) {
+		t.Fatalf("blocker clause replaced the base message instead of extending it: %q", got)
+	}
+	for _, want := range []string{"sr-iaq7", orders.WorkBlockerKindWisp, "4h0m0s", "reopens when that bead closes"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("message %q does not contain %q", got, want)
+		}
 	}
 }
