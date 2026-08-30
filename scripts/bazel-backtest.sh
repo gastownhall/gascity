@@ -37,7 +37,21 @@ run_timed() {
 	awk -v elapsed="$((end - start))" 'BEGIN { printf "%s\t%.3f s\n", "'"$label"'", elapsed / 1000000000 }'
 }
 
+run_bazel_cold() {
+	local output_base
+	output_base="$(mktemp -d "${TMPDIR:-/tmp}/gascity-bazel.XXXXXX")"
+	local status=0
+	if "$bazel_bin" test --noshow_progress --output_base="$output_base" "$target"; then
+		:
+	else
+		status=$?
+	fi
+	"$bazel_bin" shutdown --output_base="$output_base" >/dev/null 2>&1 || true
+	rm -rf "$output_base"
+	return "$status"
+}
+
 echo "target: $target"
 run_timed go-test go test -count=1 "./$bazel_package"
-run_timed bazel-cold "$bazel_bin" test --noshow_progress "$target"
+run_timed bazel-cold run_bazel_cold
 run_timed bazel-warm "$bazel_bin" test --noshow_progress "$target"
