@@ -25,12 +25,14 @@ const hookClaimCommandName = "hook"
 // Drain-action reasons for the gc hook --claim result contract
 // (schemas/hook/result.schema.json). Every value here is a valid reason when
 // action is "drain": an idle store, an operational claim-write failure, a
-// refused stale session, or a refused non-turn invocation.
+// refused stale session, a refused non-turn invocation, or a seat whose session
+// row is already draining.
 const (
 	hookClaimReasonNoWork         = "no_work"
 	hookClaimReasonClaimsErrored  = "claims_errored"
 	hookClaimReasonStaleSession   = "stale_session"
 	hookClaimReasonNonTurnContext = "non_turn_context"
+	hookClaimReasonDrainPending   = "drain_pending"
 )
 
 // Reasons carried on a bead.claim_released event: which unwind gave the claim
@@ -182,6 +184,12 @@ type hookClaimOps struct {
 	ListContinuation   hookListContinuationFunc
 	AssignContinuation hookAssignContinuationFunc
 	DrainAck           hookDrainAckFunc
+	// DrainPending reports whether the session bead named by sessionID is
+	// already draining, i.e. whether this seat has been told to stop. It is the
+	// F-D fence's only input and is read from the SESSION row rather than from
+	// provider meta: reconciler-tracked drains never set GC_DRAIN, so provider
+	// meta does not cover the population this fence exists for.
+	DrainPending hookDrainPendingFunc
 	// EmitClaimRejected publishes a bead.claim_rejected event when a claim is
 	// lost to a different live claimant (ADR-0009). Best-effort.
 	EmitClaimRejected hookEmitClaimRejectedFunc
@@ -238,6 +246,7 @@ type (
 	hookListContinuationFunc   func(context.Context, string, []string, string, string) ([]beads.Bead, error)
 	hookAssignContinuationFunc func(context.Context, string, []string, string, string) error
 	hookDrainAckFunc           func(io.Writer) error
+	hookDrainPendingFunc       func(sessionID string) (bool, error)
 	hookEmitClaimRejectedFunc  func(beadID, existingClaimant, attemptedClaimant string)
 	hookResolveWorkBranchFunc  func(dir string) string
 	hookStampWorkMetaFunc      func(ctx context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error
@@ -325,6 +334,38 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		return hookClaimResult{terminal: true, code: writeHookClaimNonTurnDrain(marker, *opts, stdout, stderr)}
 	}
 
+	// F-D. A seat whose session row already says `draining` must not take new
+	// work. The hook's drain protocol was "drain only when idle" by
+	// construction — --drain-ack is consumed ONLY on the no-work path — so on a
+	// busy repo a draining seat kept finding claimable work and postponed its
+	// own drain indefinitely. That is the working-while-draining wedge: the
+	// specimen seat claimed and executed a preflight three hours into its drain
+	// while the graph store recorded that step under a fresher seat.
+	//
+	// Refuse before the work query, which also puts this ahead of
+	// hookClaimExistingAssignment. Adoption is deliberately fenced too: letting
+	// a draining seat resume its own in-progress bead re-parks the identical
+	// wedge. That work belongs to the dead-assignee and reopen lanes once the
+	// drain completes.
+	//
+	// The refusal rides the existing "drain" action — the agent protocol already
+	// treats it as "wind down" — and, unlike F-A, it CONSUMES --drain-ack. That
+	// is the entire point: it converts a wedge into a prompt self-drain.
+	if sessionID := hookClaimSessionID(opts.Env); sessionID != "" {
+		pending, err := ops.DrainPending(sessionID)
+		switch {
+		case err != nil:
+			// Fail open. This probe is one store read on every agent turn in the
+			// city, so a store hiccup here must not idle every healthy seat; the
+			// drain lanes remain the backstop exactly as they are today. Name the
+			// fault without the alarming refusal wording, the same shape the
+			// runtime-identity fence's store-unavailable arm uses.
+			fmt.Fprintf(stderr, "gc hook --claim: drain-pending probe unavailable for %s: %v; proceeding to claim\n", sessionID, err) //nolint:errcheck
+		case pending:
+			return hookClaimResult{terminal: true, code: writeHookClaimDrainPending(sessionID, *opts, *ops, stdout, stderr)}
+		}
+	}
+
 	output, err := ops.Runner(workQuery, dir)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck
@@ -382,6 +423,9 @@ func (ops *hookClaimOps) applyDefaults() {
 	}
 	if ops.DrainAck == nil {
 		ops.DrainAck = hookRuntimeDrainAck
+	}
+	if ops.DrainPending == nil {
+		ops.DrainPending = hookSessionDrainPending
 	}
 	if ops.EmitClaimRejected == nil {
 		ops.EmitClaimRejected = hookEmitClaimRejected
@@ -688,6 +732,31 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 			reportHookClaimRejected(candidate, claimed, opts, ops)
 			continue
 		}
+		// Ownership readback, the same invariant the ready tier asserts one
+		// function up. The guarantee already exists inside every production op
+		// (hookClaimThroughStore screens both the mutation projection and the
+		// canonical re-read), so this costs a healthy claim nothing — but it is
+		// the tier that MINTS the receipt, and a receipt is a promise that the
+		// session reading it owns the bead. Leaving the only check in the op
+		// meant a new op, or a regression in the shared one, would ship a
+		// receipt naming another seat's work. Ownership disputes are this
+		// program's recurring bug class; fail closed rather than drain, so a
+		// store that disagrees about ownership is never laundered into no_work.
+		//
+		// Status is deliberately NOT asserted here. The fresh-claim CAS's status
+		// transition is the store op's contract, and the hazard the specimen
+		// exhibited was ownership: a seat executing a step recorded under a
+		// different seat.
+		if !hookClaimHasIdentity(claimed.Assignee, opts.IdentityCandidates) {
+			_, _ = fmt.Fprintf(
+				stderr,
+				"gc hook --claim: %s claim readback returned assignee=%q; want this session (%s)\n",
+				candidate.ID,
+				claimed.Assignee,
+				opts.Assignee,
+			)
+			return hookClaimResult{terminal: true, code: 1}
+		}
 		claimed = mergeHookClaimCandidateMetadata(candidate, claimed)
 		result := hookClaimJSONResult{
 			SchemaVersion: "1",
@@ -952,6 +1021,28 @@ func writeHookClaimNonTurnDrain(marker string, opts hookClaimOptions, stdout, st
 		return 1
 	}
 	return 0
+}
+
+// writeHookClaimDrainPending emits the terminal result for a claim refused
+// because this seat's session row is already draining (F-D).
+//
+// It takes the SHARED writeHookClaimDrain contract rather than F-A's: --drain-ack
+// is consumed, and the exit code is 0 once it is. A callback must not
+// acknowledge a drain on the session's behalf (F-A), but a TURN acknowledging
+// its own session's drain is precisely the outcome this refusal exists to
+// produce — the seat is being told to stop, and the drain-ack is how it says it
+// heard.
+//
+// The stderr line names the EXPLICIT-argument ack command. `gc runtime drain-ack`
+// with no argument binds through the caller's own GC_SESSION_ID/GC_INSTANCE_TOKEN,
+// and an adopted pane whose environment did not survive a restart acks as nobody
+// — which reads downstream as no acknowledgement at all. Naming the id lets the
+// agent run the form that resolves the target from the store instead.
+func writeHookClaimDrainPending(sessionID string, opts hookClaimOptions, ops hookClaimOps, stdout, stderr io.Writer) int {
+	_, _ = fmt.Fprintf(stderr,
+		"gc hook --claim: drain pending for this session; run: gc runtime drain-ack %s — then exit\n",
+		sessionID)
+	return writeHookClaimDrain(hookClaimReasonDrainPending, opts.JSON, opts.DrainAck, ops.DrainAck, stdout, stderr)
 }
 
 // writeHookClaimStaleSessionDrain emits the terminal result for a refused stale
