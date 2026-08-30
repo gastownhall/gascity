@@ -2043,13 +2043,7 @@ func doMailInboxTargetWithJSON(mp mailInboxReader, target resolvedMailTarget, js
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "ID\tFROM\tSUBJECT\tBODY") //nolint:errcheck // best-effort stdout
 	for _, m := range messages {
-		// Same suppression as printMessage: the subject and body columns sit
-		// side by side, so an identical pair prints the string twice.
-		body := m.Body
-		if body == m.Subject {
-			body = ""
-		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", m.ID, m.From, m.Subject, truncate(body, 60)) //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", m.ID, m.From, m.Subject, truncate(m.Body, 60)) //nolint:errcheck // best-effort stdout
 	}
 	tw.Flush() //nolint:errcheck // best-effort stdout
 	return 0
@@ -2734,10 +2728,7 @@ func printMessage(m mail.Message, stdout io.Writer) {
 		w(fmt.Sprintf("Subject:  %s", m.Subject))
 	}
 	w(fmt.Sprintf("Sent:     %s", m.CreatedAt.Format("2006-01-02 15:04:05")))
-	// beadmail.Send backfills an empty title from the body, so every
-	// positionally-sent message already stores an identical Title and
-	// Description. Printing both renders the same string twice.
-	if m.Body != "" && m.Body != m.Subject {
+	if m.Body != "" {
 		w(fmt.Sprintf("Body:     %s", m.Body))
 	}
 }
