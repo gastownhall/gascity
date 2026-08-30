@@ -2338,7 +2338,7 @@ func TestQuarantineControlFailureBeadClosesWithDiagnostics(t *testing.T) {
 		t.Fatalf("create control: %v", err)
 	}
 
-	if err := quarantineControlFailureBead(store, control.ID, fmt.Errorf("%w: bad workflow", dispatch.ErrControlGraphMalformed)); err != nil {
+	if err := quarantineControlFailureBead(store, control, fmt.Errorf("%w: bad workflow", dispatch.ErrControlGraphMalformed)); err != nil {
 		t.Fatalf("quarantineControlFailureBead: %v", err)
 	}
 
@@ -2395,7 +2395,7 @@ func TestQuarantineControlFailureBeadTruncatesReasonAtUTF8Boundary(t *testing.T)
 	}
 	reason := strings.Repeat("a", maxControlQuarantineReasonMetadata-1) + "é tail"
 
-	if err := quarantineControlFailureBead(store, control.ID, errors.New(reason)); err != nil {
+	if err := quarantineControlFailureBead(store, control, errors.New(reason)); err != nil {
 		t.Fatalf("quarantineControlFailureBead: %v", err)
 	}
 
@@ -2436,7 +2436,7 @@ func TestQuarantineControlFailureBeadSettlesRootWhenFinalizerQuarantined(t *test
 		t.Fatalf("create finalizer: %v", err)
 	}
 
-	if err := quarantineControlFailureBead(store, finalizer.ID, errors.New("finalizer exploded")); err != nil {
+	if err := quarantineControlFailureBead(store, finalizer, errors.New("finalizer exploded")); err != nil {
 		t.Fatalf("quarantineControlFailureBead: %v", err)
 	}
 
@@ -2482,7 +2482,7 @@ func TestQuarantineControlFailureBeadDoesNotTouchRootForNonFinalizerControl(t *t
 		t.Fatalf("create control: %v", err)
 	}
 
-	if err := quarantineControlFailureBead(store, control.ID, errors.New("fanout exploded")); err != nil {
+	if err := quarantineControlFailureBead(store, control, errors.New("fanout exploded")); err != nil {
 		t.Fatalf("quarantineControlFailureBead: %v", err)
 	}
 
@@ -2531,7 +2531,7 @@ func TestQuarantineControlFailureBeadNeverDowngradesAlreadySettledRoot(t *testin
 		t.Fatalf("create finalizer: %v", err)
 	}
 
-	if err := quarantineControlFailureBead(store, finalizer.ID, errors.New("finalizer exploded")); err != nil {
+	if err := quarantineControlFailureBead(store, finalizer, errors.New("finalizer exploded")); err != nil {
 		t.Fatalf("quarantineControlFailureBead: %v", err)
 	}
 

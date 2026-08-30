@@ -370,7 +370,7 @@ func handleControlDispatchError(cityPath, storePath string, graphStore beads.Sto
 	// because RecordSemanticControlRetry already persisted first_seen/count/error
 	// on the bead, so `bd show` still explains the stall even when the event is
 	// lost.
-	if quarantineErr := quarantineControlFailureBead(graphStore, beadID, cause); quarantineErr != nil {
+	if quarantineErr := quarantineControlFailureBead(graphStore, bead, cause); quarantineErr != nil {
 		return errors.Join(cause, quarantineErr)
 	}
 	if stalled != nil {
@@ -457,7 +457,8 @@ func emitControlStalled(cityPath, storePath string, store beads.Store, bead bead
 	}
 }
 
-func quarantineControlFailureBead(store beads.Store, beadID string, cause error) error {
+func quarantineControlFailureBead(store beads.Store, bead beads.Bead, cause error) error {
+	beadID := bead.ID
 	failureReason := "control_dispatch_error"
 	if errors.Is(cause, dispatch.ErrControlGraphMalformed) {
 		failureReason = "malformed_control_graph"
@@ -483,6 +484,51 @@ func quarantineControlFailureBead(store beads.Store, beadID string, cause error)
 		return err
 	}
 	_, _ = dispatch.ReconcileClosedScopeMember(store, beadID)
+
+	if strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]) == beadmeta.KindWorkflowFinalize {
+		if err := settleRootForQuarantinedFinalizer(store, bead); err != nil {
+			return fmt.Errorf("%s: closing root for quarantined finalizer: %w", beadID, err)
+		}
+	}
+	return nil
+}
+
+// settleRootForQuarantinedFinalizer closes a workflow root whose
+// workflow-finalize control bead was just quarantined. Quarantine short-
+// circuits the normal finalize path (processWorkflowFinalize closes the root
+// via setOutcomeAndClose before closing the finalizer itself), so without
+// this the root never reaches Status=="closed" and survives every
+// rootSettled-gated check forever even though its finalizer is dead. See
+// ga-japz50 / ga-xn8ml8.
+func settleRootForQuarantinedFinalizer(store beads.Store, finalizer beads.Bead) error {
+	rootID := strings.TrimSpace(finalizer.Metadata[beadmeta.RootBeadIDMetadataKey])
+	if rootID == "" || rootID == finalizer.ID {
+		return nil
+	}
+	root, err := store.Get(rootID)
+	if err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	if root.Status == "closed" {
+		// Already settled elsewhere -- never downgrade a real outcome.
+		return nil
+	}
+	status := "closed"
+	if err := store.Update(rootID, beads.UpdateOpts{
+		Status: &status,
+		Metadata: map[string]string{
+			beadmeta.OutcomeMetadataKey:          beadmeta.OutcomeFail,
+			beadmeta.FailureClassMetadataKey:     beadmeta.FailureClassHard,
+			beadmeta.FailureReasonMetadataKey:    "finalizer_control_quarantined",
+			beadmeta.FinalDispositionMetadataKey: beadmeta.DispositionControlQuarantine,
+		},
+	}); err != nil {
+		return err
+	}
+	_, _ = dispatch.ReconcileClosedScopeMember(store, rootID)
 	return nil
 }
 
