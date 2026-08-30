@@ -30,8 +30,7 @@ var (
 )
 
 func newDoctorCmd(stdout, stderr io.Writer) *cobra.Command {
-	var fix, verbose, jsonOut bool
-	var checkTimeout time.Duration
+	var opts doctorOpts
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Check workspace health",
@@ -45,28 +44,70 @@ requirements (deprecated contract = "graph.v2" opt-ins, missing
 the host's [daemon] formula_v2 setting cannot satisfy), v2 config
 deprecations such as legacy [formulas].dir, and per-rig health. Use
 --fix for the canonical remediation path, including any safe mechanical
-legacy-to-current pack rewrites that are available on this branch.`,
+legacy-to-current pack rewrites that are available on this branch.
+
+--check runs only the checks you name, so a caller after one verdict does
+not pay for the whole sweep. It is repeatable and also accepts a comma
+list, results keep their normal run order rather than the order you asked
+for, and the exit code reflects the selected checks alone. A name that no
+registered check matches fails the run: an empty result set would read as
+a clean bill of health to a caller filtering by name. Which names exist
+depends on the workspace, because doctor registers checks conditionally —
+run without --check to see them, or name a nonexistent check to have them
+listed.`,
 		Example: `  gc doctor
   gc doctor --fix
   gc doctor --verbose
-  gc doctor --json`,
+  gc doctor --json
+  gc doctor --check controller
+  gc doctor --check controller --check events-log
+  gc doctor --check controller,events-log --json`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if doDoctor(fix, verbose, jsonOut, checkTimeout, stdout, stderr) != 0 {
+			if doDoctor(opts, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&fix, "fix", false, "attempt automatic repairs and safe mechanical migrations")
-	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "show extra diagnostic details")
-	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit structured JSON instead of human-readable output")
-	cmd.Flags().DurationVar(&checkTimeout, "check-timeout", 60*time.Second,
+	cmd.Flags().BoolVar(&opts.Fix, "fix", false, "attempt automatic repairs and safe mechanical migrations")
+	cmd.Flags().BoolVarP(&opts.Verbose, "verbose", "v", false, "show extra diagnostic details")
+	cmd.Flags().BoolVar(&opts.JSON, "json", false, "emit structured JSON instead of human-readable output")
+	cmd.Flags().DurationVar(&opts.CheckTimeout, "check-timeout", 60*time.Second,
 		"per-check time budget; a check or its --fix remediation exceeding it is abandoned and reported as timed out (0 disables)")
+	cmd.Flags().StringArrayVar(&opts.Checks, "check", nil,
+		"run only the named check(s); repeatable and comma-separated. A name matching no registered check fails the run rather than reporting an empty result")
 	return cmd
 }
 
-// doDoctor runs all health checks and prints results.
+// doctorOpts carries gc doctor's flag state. It is a struct rather than a
+// parameter list because the flags are mostly booleans, and a fifth one makes
+// the call sites unreadable.
+type doctorOpts struct {
+	Fix          bool
+	Verbose      bool
+	JSON         bool
+	CheckTimeout time.Duration
+	// Checks holds the raw --check values, still unsplit. Empty runs every
+	// registered check, which is what a plain `gc doctor` does.
+	Checks []string
+}
+
+// splitDoctorCheckNames expands the raw --check values into one name each.
+// The flag is a string array rather than pflag's stringSlice, which does the
+// comma splitting itself but reads an empty value as no values at all: that
+// would turn `gc doctor --check "$NAME"` with an unset NAME into the full
+// sweep, and gate its exit code on 91 checks the caller never asked about.
+// Splitting here keeps the comma form working while an empty element survives
+// to fail the run.
+func splitDoctorCheckNames(values []string) []string {
+	var names []string
+	for _, value := range values {
+		names = append(names, strings.Split(value, ",")...)
+	}
+	return names
+}
+
 func doctorSkipsDoltChecks(cityPath string) bool {
 	if gcDoltSkip() {
 		return true
@@ -424,15 +465,17 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	return checks
 }
 
-func doDoctor(fix, verbose, jsonOut bool, checkTimeout time.Duration, stdout, stderr io.Writer) int {
+// doDoctor runs the health checks and prints results. With opts.Checks set it
+// runs only those checks and derives the exit code from them alone.
+func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc doctor: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
-	d := &doctor.Doctor{CheckTimeout: checkTimeout}
-	ctx := &doctor.CheckContext{CityPath: cityPath, Verbose: verbose}
+	d := &doctor.Doctor{CheckTimeout: opts.CheckTimeout}
+	ctx := &doctor.CheckContext{CityPath: cityPath, Verbose: opts.Verbose}
 	cfg, cfgErr := loadCityConfig(cityPath, stderr)
 	if cfgErr == nil {
 		resolveRigPaths(cityPath, cfg.Rigs)
@@ -452,7 +495,7 @@ func doDoctor(fix, verbose, jsonOut bool, checkTimeout time.Duration, stdout, st
 	if cfgErr == nil && cfg != nil {
 		rolloutFlags, rolloutResolveErr = rollout.Resolve(cfg, rollout.ResolveOptions{})
 	}
-	for _, check := range buildDoctorChecks(cityPath, cfg, cfgErr, buildDoctorChecksOpts{
+	registered := buildDoctorChecks(cityPath, cfg, cfgErr, buildDoctorChecksOpts{
 		Stderr:               stderr,
 		ControllerRunning:    controllerRunning,
 		SupervisorRunning:    supervisorRunning,
@@ -461,19 +504,24 @@ func doDoctor(fix, verbose, jsonOut bool, checkTimeout time.Duration, stdout, st
 		SkipRigDoltChecks:    skipRigDoltChecks,
 		RolloutFlags:         rolloutFlags,
 		RolloutResolveErr:    rolloutResolveErr,
-	}) {
+	})
+	selected, unmatched := doctor.SelectChecks(registered, splitDoctorCheckNames(opts.Checks))
+	if len(unmatched) > 0 {
+		return reportUnknownDoctorChecks(unmatched, registered, opts.JSON, stdout, stderr)
+	}
+	for _, check := range selected {
 		d.Register(check)
 	}
 
 	var report *doctor.Report
-	if jsonOut {
-		report = d.RunCollect(ctx, fix)
+	if opts.JSON {
+		report = d.RunCollect(ctx, opts.Fix)
 		if err := writeDoctorJSON(stdout, report); err != nil {
 			fmt.Fprintf(stderr, "gc doctor: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 	} else {
-		report = d.Run(ctx, stdout, fix)
+		report = d.Run(ctx, stdout, opts.Fix)
 		doctor.PrintSummary(stdout, report)
 	}
 
@@ -481,6 +529,162 @@ func doDoctor(fix, verbose, jsonOut bool, checkTimeout time.Duration, stdout, st
 		return 1
 	}
 	return 0
+}
+
+// maxDoctorCheckSuggestions bounds the "did you mean" list so one typo cannot
+// print most of the registry inline. The full list still follows in text mode.
+const maxDoctorCheckSuggestions = 5
+
+// doctorUnknownCheckErrorCode is the error code an unresolvable --check name
+// reports under --json, so a caller can branch on it without parsing prose.
+const doctorUnknownCheckErrorCode = "unknown_check"
+
+// doctorUnknownCheckFailure is the --json payload for an unresolvable --check
+// name. It is the shared failure envelope (schemas/failure.schema.json), not a
+// doctor report, because a report-shaped payload gets ok:true from
+// withDefaultSuccessOK and carries zeroed counts with an empty results array —
+// a run that measured nothing reading clean to exactly the caller this flag
+// exists to protect. registered_checks rides along under the schema's
+// additionalProperties, so the caller learns what it could have asked for
+// without a second invocation.
+type doctorUnknownCheckFailure struct {
+	jsonSchemaErrorPayload
+	RegisteredChecks []string `json:"registered_checks,omitempty"`
+}
+
+// reportUnknownDoctorChecks fails a --check run whose names do not all resolve,
+// and tells the caller what it could have asked for. Running the names that did
+// match would be worse than erroring: a caller filtering doctor output by name
+// reads a short result set as a clean one, so a single typo would report health
+// nobody measured.
+func reportUnknownDoctorChecks(unmatched []string, registered []doctor.Check, jsonOut bool, stdout, stderr io.Writer) int {
+	names := doctor.CheckNames(registered)
+	message := unknownDoctorChecksMessage(unmatched, names)
+	if jsonOut {
+		if err := writeCLIJSONLine(stdout, doctorUnknownCheckFailure{
+			jsonSchemaErrorPayload: jsonSchemaErrorPayload{
+				SchemaVersion: "1",
+				OK:            false,
+				Error: jsonSchemaErrorDetail{
+					Code:     doctorUnknownCheckErrorCode,
+					Message:  message,
+					ExitCode: 1,
+				},
+			},
+			RegisteredChecks: names,
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc doctor: %v\n", err) //nolint:errcheck // best-effort stderr
+		}
+		return 1
+	}
+	fmt.Fprintf(stderr, "gc doctor: %s\n", message)                                //nolint:errcheck // best-effort stderr
+	fmt.Fprintf(stderr, "checks registered in this workspace (%d):\n", len(names)) //nolint:errcheck // best-effort stderr
+	for _, name := range names {
+		fmt.Fprintf(stderr, "  %s\n", name) //nolint:errcheck // best-effort stderr
+	}
+	return 1
+}
+
+func unknownDoctorChecksMessage(unmatched, registered []string) string {
+	var b strings.Builder
+	b.WriteString("--check: no registered check matches ")
+	for i, name := range unmatched {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		fmt.Fprintf(&b, "%q", name)
+	}
+	if suggestions := doctorCheckSuggestions(unmatched, registered); len(suggestions) > 0 {
+		b.WriteString(" (did you mean ")
+		for i, name := range suggestions {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			fmt.Fprintf(&b, "%q", name)
+		}
+		b.WriteString("?)")
+	}
+	// Naming both readings matters because doctor has no static catalog of
+	// every possible check name: a skipped check registers no name at all, so
+	// a correct name and a typo are indistinguishable from here.
+	fmt.Fprintf(&b, ". This workspace registers %d checks; a check it skips —"+
+		" Dolt checks on a file-backed store, or any check belonging to a suspended rig —"+
+		" registers no name to match", len(registered))
+	return b.String()
+}
+
+// maxDoctorCheckNameDistance bounds how far a suggestion may sit from what was
+// typed. Two edits catches the everyday slips — a dropped letter, a
+// transposition, a wrong one — without pairing "controller" with "custom-types".
+const maxDoctorCheckNameDistance = 2
+
+// doctorCheckSuggestions returns registered names worth offering for the
+// unmatched ones. Substring matching in both directions covers a name that is
+// merely incomplete ("dolt-server" against "rig:core:dolt-server"); edit
+// distance covers the misspelling, which substrings miss entirely — "controler"
+// is not a substring of "controller" and does not contain it either.
+func doctorCheckSuggestions(unmatched, registered []string) []string {
+	var suggestions []string
+	seen := make(map[string]bool)
+	for _, miss := range unmatched {
+		lowerMiss := strings.ToLower(strings.TrimSpace(miss))
+		if lowerMiss == "" {
+			continue
+		}
+		for _, name := range registered {
+			if seen[name] || !doctorCheckNameIsNear(lowerMiss, strings.ToLower(name)) {
+				continue
+			}
+			seen[name] = true
+			suggestions = append(suggestions, name)
+			if len(suggestions) == maxDoctorCheckSuggestions {
+				return suggestions
+			}
+		}
+	}
+	return suggestions
+}
+
+func doctorCheckNameIsNear(typed, name string) bool {
+	if strings.Contains(name, typed) || strings.Contains(typed, name) {
+		return true
+	}
+	return editDistanceAtMost(typed, name, maxDoctorCheckNameDistance)
+}
+
+// editDistanceAtMost reports whether a and b are within limit Levenshtein
+// edits, computing only the two rows the recurrence needs and bailing out as
+// soon as the whole row exceeds the limit.
+func editDistanceAtMost(a, b string, limit int) bool {
+	ar, br := []rune(a), []rune(b)
+	if len(ar) > len(br) {
+		ar, br = br, ar
+	}
+	if len(br)-len(ar) > limit {
+		return false
+	}
+	prev := make([]int, len(ar)+1)
+	curr := make([]int, len(ar)+1)
+	for i := range prev {
+		prev[i] = i
+	}
+	for j := 1; j <= len(br); j++ {
+		curr[0] = j
+		rowMin := curr[0]
+		for i := 1; i <= len(ar); i++ {
+			cost := 1
+			if ar[i-1] == br[j-1] {
+				cost = 0
+			}
+			curr[i] = min(min(curr[i-1]+1, prev[i]+1), prev[i-1]+cost)
+			rowMin = min(rowMin, curr[i])
+		}
+		if rowMin > limit {
+			return false
+		}
+		prev, curr = curr, prev
+	}
+	return prev[len(ar)] <= limit
 }
 
 type expandedConfigLoadCheck struct{}

@@ -1373,6 +1373,16 @@ deprecations such as legacy [formulas].dir, and per-rig health. Use
 --fix for the canonical remediation path, including any safe mechanical
 legacy-to-current pack rewrites that are available on this branch.
 
+--check runs only the checks you name, so a caller after one verdict does
+not pay for the whole sweep. It is repeatable and also accepts a comma
+list, results keep their normal run order rather than the order you asked
+for, and the exit code reflects the selected checks alone. A name that no
+registered check matches fails the run: an empty result set would read as
+a clean bill of health to a caller filtering by name. Which names exist
+depends on the workspace, because doctor registers checks conditionally —
+run without --check to see them, or name a nonexistent check to have them
+listed.
+
 ```
 gc doctor [flags]
 ```
@@ -1384,10 +1394,14 @@ gc doctor
 gc doctor --fix
 gc doctor --verbose
 gc doctor --json
+gc doctor --check controller
+gc doctor --check controller --check events-log
+gc doctor --check controller,events-log --json
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--check` | stringArray |  | run only the named check(s); repeatable and comma-separated. A name matching no registered check fails the run rather than reporting an empty result |
 | `--check-timeout` | duration | `1m0s` | per-check time budget; a check or its --fix remediation exceeding it is abandoned and reported as timed out (0 disables) |
 | `--fix` | bool |  | attempt automatic repairs and safe mechanical migrations |
 | `--json` | bool |  | emit structured JSON instead of human-readable output |
