@@ -1008,7 +1008,7 @@ func doHookDiscovery(workQuery, dir string, inject bool, opts hookClaimOptions, 
 			fmt.Fprintf(stderr, "gc hook: drain-pending probe unavailable for %s: %v; proceeding to discovery\n", sessionID, err) //nolint:errcheck
 			hookEmitDrainFenceUnavailable(stderr, sessionID, hookClaimEnvValue(opts.Env, "GC_TEMPLATE"), err)
 		case pending:
-			return writeHookClaimDrainPending("gc hook", sessionID, opts, ops, stdout, stderr)
+			return writeHookClaimDrainPending(hookDiscoveryLabel, sessionID, opts, ops, stdout, stderr)
 		}
 	}
 	return doHook(workQuery, dir, inject, runner, stdout, stderr, visibility)

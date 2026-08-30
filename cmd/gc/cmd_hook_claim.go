@@ -22,6 +22,15 @@ import (
 
 const hookClaimCommandName = "hook"
 
+// The two doors the drain fence guards, as an operator sees them named on a
+// pane. Both refuse through the same writeHookClaimDrain contract and emit the
+// same JSON record (command "hook" either way), so the label is the only thing
+// that says which one answered.
+const (
+	hookClaimLabel     = "gc hook --claim"
+	hookDiscoveryLabel = "gc hook"
+)
+
 // Drain-action reasons for the gc hook --claim result contract
 // (schemas/hook/result.schema.json). Every value here is a valid reason when
 // action is "drain": an idle store, an operational claim-write failure, a
@@ -376,7 +385,7 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 			fmt.Fprintf(stderr, "gc hook --claim: drain-pending probe unavailable for %s: %v; proceeding to claim\n", sessionID, err) //nolint:errcheck
 			hookEmitDrainFenceUnavailable(stderr, sessionID, hookClaimEnvValue(opts.Env, "GC_TEMPLATE"), err)
 		case pending:
-			return hookClaimResult{terminal: true, code: writeHookClaimDrainPending("gc hook --claim", sessionID, *opts, *ops, stdout, stderr)}
+			return hookClaimResult{terminal: true, code: writeHookClaimDrainPending(hookClaimLabel, sessionID, *opts, *ops, stdout, stderr)}
 		}
 	}
 
@@ -1057,7 +1066,7 @@ func writeHookClaimNoWork(opts hookClaimOptions, ops hookClaimOps, claimsErrored
 	if claimsErrored {
 		reason = hookClaimReasonClaimsErrored
 	}
-	code := writeHookClaimDrain(reason, opts.JSON, opts.DrainAck, ops.DrainAck, stdout, stderr)
+	code := writeHookClaimDrain(hookClaimLabel, reason, opts.JSON, opts.DrainAck, ops.DrainAck, stdout, stderr)
 	// Strictly after the result: the drain is already written and its exit code
 	// is already decided, so nothing below can influence either.
 	if reason == hookClaimReasonNoWork {
@@ -1118,7 +1127,7 @@ func writeHookClaimDrainPending(label, sessionID string, opts hookClaimOptions, 
 		"%s: drain pending for this session; run: gc runtime drain-ack %s — then exit\n",
 		label, sessionID)
 
-	return writeHookClaimDrain(hookClaimReasonDrainPending, opts.JSON, opts.DrainAck, ops.DrainAck, stdout, stderr)
+	return writeHookClaimDrain(label, hookClaimReasonDrainPending, opts.JSON, opts.DrainAck, ops.DrainAck, stdout, stderr)
 }
 
 // writeHookClaimStaleSessionDrain emits the terminal result for a refused stale
@@ -1129,7 +1138,7 @@ func writeHookClaimDrainPending(label, sessionID string, opts hookClaimOptions, 
 // acknowledges drain and exits cleanly rather than seeing a bare exit 1 and
 // retrying the refusal forever.
 func writeHookClaimStaleSessionDrain(opts hookCommandOptions, stdout, stderr io.Writer) int {
-	return writeHookClaimDrain(hookClaimReasonStaleSession, opts.JSON, opts.DrainAck, hookRuntimeDrainAck, stdout, stderr)
+	return writeHookClaimDrain(hookClaimLabel, hookClaimReasonStaleSession, opts.JSON, opts.DrainAck, hookRuntimeDrainAck, stdout, stderr)
 }
 
 // writeHookClaimDrain writes the single structured drain result shared by every
@@ -1139,7 +1148,12 @@ func writeHookClaimStaleSessionDrain(opts hookCommandOptions, stdout, stderr io.
 // acknowledged. The exit code mirrors the historical contract — 0 once drain is
 // acknowledged, else 1 — so a non-drain-ack caller still reports action=drain
 // (a completed drain) rather than a bare failure.
-func writeHookClaimDrain(reason string, jsonOut, drainAck bool, drainAckFn hookDrainAckFunc, stdout, stderr io.Writer) int {
+//
+// label names the door that answered ("gc hook --claim" or "gc hook"). Every
+// caller but the drain-pending fence is claim-only, but that fence is reachable
+// through the DISCOVERY door too, and a hardcoded prefix would report the wrong
+// command to the operator reading the pane.
+func writeHookClaimDrain(label, reason string, jsonOut, drainAck bool, drainAckFn hookDrainAckFunc, stdout, stderr io.Writer) int {
 	result := hookClaimJSONResult{
 		SchemaVersion: "1",
 		OK:            true,
@@ -1157,7 +1171,7 @@ func writeHookClaimDrain(reason string, jsonOut, drainAck bool, drainAckFn hookD
 	ackFailed := false
 	if drainAck {
 		if err := drainAckFn(stderr); err != nil {
-			fmt.Fprintf(stderr, "gc hook --claim: drain-ack failed: %v\n", err) //nolint:errcheck
+			fmt.Fprintf(stderr, "%s: drain-ack failed: %v\n", label, err) //nolint:errcheck
 			ackFailed = true
 		} else {
 			result.DrainAcknowledged = true
@@ -1165,7 +1179,7 @@ func writeHookClaimDrain(reason string, jsonOut, drainAck bool, drainAckFn hookD
 	}
 	if jsonOut {
 		if err := writeCLIJSONLine(stdout, result); err != nil {
-			fmt.Fprintf(stderr, "gc hook --claim: writing JSON: %v\n", err) //nolint:errcheck
+			fmt.Fprintf(stderr, "%s: writing JSON: %v\n", label, err) //nolint:errcheck
 			return 1
 		}
 	}
