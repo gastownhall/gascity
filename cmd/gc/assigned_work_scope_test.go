@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -776,5 +777,83 @@ func TestResolveTaskWorkDirIncludesAssignedWisp(t *testing.T) {
 
 	if got := resolveTaskWorkDir("", store, "worker-session"); got != workDir {
 		t.Fatalf("resolveTaskWorkDir = %q, want assigned wisp work_dir %q", got, workDir)
+	}
+}
+
+func TestResolveTaskWorkDirPrefersPreparedDrainSourceAnchor(t *testing.T) {
+	sourceWorkDir := t.TempDir()
+	launcherWorkDir := t.TempDir()
+	store := beads.NewMemStore()
+	source, err := store.Create(beads.Bead{
+		Title: "implementation source anchor",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.LegacyWorkDirMetadataKey: sourceWorkDir,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create source anchor: %v", err)
+	}
+	root, err := store.Create(beads.Bead{
+		Title: "drain item workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.DrainMemberIDMetadataKey: source.ID,
+			beadmeta.LegacyWorkDirMetadataKey: launcherWorkDir,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create item root: %v", err)
+	}
+	step, err := store.Create(beads.Bead{
+		Title:    "implementation step",
+		Type:     "task",
+		Assignee: "worker-session",
+		Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey:    root.ID,
+			beadmeta.WorkDirMetadataKey:       launcherWorkDir,
+			beadmeta.LegacyWorkDirMetadataKey: launcherWorkDir,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create implementation step: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := store.Update(step.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("mark implementation step in progress: %v", err)
+	}
+
+	if got := resolveTaskWorkDir("", store, "worker-session"); got != sourceWorkDir {
+		t.Fatalf("resolveTaskWorkDir = %q, want prepared source work dir %q", got, sourceWorkDir)
+	}
+}
+
+// TestResolveTaskWorkDirPrefersCreatorWorkDirOverStampedCanonical pins the
+// key precedence for non-drain beads: legacy `work_dir` is written by the
+// worktree creator, while `gc.work_dir` is an observability stamp
+// reconciliation mirrors from an observed cwd. The creator's record wins.
+func TestResolveTaskWorkDirPrefersCreatorWorkDirOverStampedCanonical(t *testing.T) {
+	creatorDir := t.TempDir()
+	observedDir := t.TempDir()
+	store := beads.NewMemStore()
+	task, err := store.Create(beads.Bead{
+		Title:    "assigned task",
+		Type:     "task",
+		Assignee: "worker-session",
+		Metadata: map[string]string{
+			beadmeta.LegacyWorkDirMetadataKey: creatorDir,
+			beadmeta.WorkDirMetadataKey:       observedDir,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create assigned task: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := store.Update(task.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("mark assigned task in progress: %v", err)
+	}
+
+	if got := resolveTaskWorkDir("", store, "worker-session"); got != creatorDir {
+		t.Fatalf("resolveTaskWorkDir = %q, want creator work_dir %q (not stamped %q)", got, creatorDir, observedDir)
 	}
 }

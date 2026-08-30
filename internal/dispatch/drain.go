@@ -1518,6 +1518,20 @@ func stampDrainItemRecipe(recipe *formula.Recipe, control, unit, member beads.Be
 	if metadata := graphv2.RuntimeVarsMetadata(vars); metadata != "" {
 		root.Metadata[graphv2.RuntimeVarsMetadataKey] = metadata
 	}
+	workDir := strings.TrimSpace(member.Metadata[beadmeta.WorkDirMetadataKey])
+	if workDir == "" {
+		workDir = strings.TrimSpace(member.Metadata[beadmeta.LegacyWorkDirMetadataKey])
+	}
+	if workDir != "" {
+		for i := range recipe.Steps {
+			step := &recipe.Steps[i]
+			if step.Metadata == nil {
+				step.Metadata = make(map[string]string)
+			}
+			step.Metadata[beadmeta.WorkDirMetadataKey] = workDir
+			step.Metadata[beadmeta.LegacyWorkDirMetadataKey] = workDir
+		}
+	}
 	if strings.TrimSpace(control.Metadata[beadmeta.DrainContextMetadataKey]) == beadmeta.DrainContextShared {
 		group := sharedDrainContinuationGroup(control)
 		for i := range recipe.Steps {
