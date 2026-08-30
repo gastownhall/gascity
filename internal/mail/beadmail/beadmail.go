@@ -693,9 +693,10 @@ func isRemovedMessageBead(b beads.Bead) bool {
 	if b.Type != messageBeadType || b.Status == "open" {
 		return false
 	}
-	// Retention-swept mail is system-aged, not user-removed; it stays
-	// addressable until PurgeReadMessageWisps deletes it. Both the read-mail
-	// and unread-mail retention sweeps stamp one of these two reasons.
+	// Retention-swept mail is system-aged, not user-removed. Read-swept mail
+	// stays addressable until PurgeReadMessageWisps deletes it; unread-swept
+	// mail stays addressable indefinitely (no purge arm collects it). Both
+	// reasons are system-aged, so neither is hidden here.
 	reason := b.Metadata["close_reason"]
 	return reason != RetentionSweepCloseReason && reason != UnreadRetentionSweepCloseReason
 }
@@ -987,6 +988,12 @@ func unreadMessagesBefore(store beads.Store, before time.Time, limit int) ([]bea
 // marks the bead as system-aged rather than user-removed; isRemovedMessageBead
 // recognizes both reasons. The 20-character floor satisfies
 // validation.on-close=error.
+//
+// Unlike [RetentionSweepCloseReason], no purge arm reclaims unread-swept beads
+// today: PurgeReadMessageWisps selects on the mail.read metadata key, which
+// unread mail never carries, and reapOrphanedClosedWisps skips beads without
+// root_bead_id. Such a bead is closed-but-not-reclaimed. Extending reclamation
+// to unread mail is tracked separately.
 const UnreadRetentionSweepCloseReason = "mail gc-swept: unread mail bead past gc retention window"
 
 // SweepUnreadMessagesBefore closes unread message beads created before

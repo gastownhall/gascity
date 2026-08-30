@@ -488,6 +488,56 @@ func TestSweepStaleNudgeMail_BudgetSplitNudgeThenMail(t *testing.T) {
 	}
 }
 
+// TestSweepStaleNudgeMail_BudgetSplitNudgeThenMailThenUnread extends the
+// two-phase budget split to phase 3: the unread-mail phase must consume only
+// what the nudge and read-mail phases left over, not restart the budget.
+func TestSweepStaleNudgeMail_BudgetSplitNudgeThenMailThenUnread(t *testing.T) {
+	// With budget=5 and 2 nudge + 2 read mail + 3 unread mail: expect
+	// 2 nudge + 2 read + 1 unread, so MailClosed (read + unread) = 3.
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	nudgeTTL := 10 * time.Minute
+	mailTTL := 60 * time.Minute
+	unreadMailTTL := 7 * 24 * time.Hour
+
+	seed := make([]beads.Bead, 0, 7)
+	for i := 0; i < 2; i++ {
+		seed = append(seed, nudgeSeed(fmt.Sprintf("nudge-%d", i), fmt.Sprintf("nudge-%d", i), now.Add(-nudgeTTL-time.Second)))
+	}
+	for i := 0; i < 2; i++ {
+		seed = append(seed, mailSeed(fmt.Sprintf("mail-%d", i), now.Add(-mailTTL-time.Second)))
+	}
+	for i := 0; i < 3; i++ {
+		seed = append(seed, unreadMailSeed(fmt.Sprintf("unread-%d", i), now.Add(-unreadMailTTL-time.Second)))
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+
+	result, err := sweepStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeTTL, mailTTL, unreadMailTTL, 5)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.NudgeClosed != 2 {
+		t.Errorf("NudgeClosed = %d, want 2", result.NudgeClosed)
+	}
+	if result.MailClosed != 3 {
+		t.Errorf("MailClosed = %d, want 3 (2 read + 1 unread under the remaining budget)", result.MailClosed)
+	}
+
+	// Exactly one of the three unread beads should have been closed.
+	unreadClosed := 0
+	for i := 0; i < 3; i++ {
+		got, err := store.Get(fmt.Sprintf("unread-%d", i))
+		if err != nil {
+			t.Fatalf("Get(unread-%d): %v", i, err)
+		}
+		if got.Status == "closed" {
+			unreadClosed++
+		}
+	}
+	if unreadClosed != 1 {
+		t.Errorf("closed unread beads = %d, want 1 (budget had 1 left for phase 3)", unreadClosed)
+	}
+}
+
 func TestSweepStaleNudgeMail_MultiplePerBeadErrors(t *testing.T) {
 	// Multiple per-bead errors should all be joined and returned.
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
