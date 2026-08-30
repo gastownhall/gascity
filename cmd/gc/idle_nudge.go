@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // Session-bead metadata keys for the stalled-claim backstop. The state machine
@@ -44,6 +45,8 @@ const (
 	idleClaimNudgeBackoff     = 3 * time.Minute  // between retries when a delivered nudge didn't take
 	idleClaimNudgeMaxAttempts = 3                // then give up and log (manual re-nudge remains)
 )
+
+const defaultPoolClaimNudge = "Run gc hook --claim --drain-ack --json now; if it returns work, execute it immediately."
 
 // nudgeStalledPoolClaims is a reconcile-tick backstop that runs for every
 // runtime (herdr AND tmux). It re-delivers the claim nudge to a pool slot that
@@ -237,12 +240,17 @@ func (p poolContinuationBackstop) revalidate(target backstopTarget) backstopReso
 	if err != nil || root.ID != target.RootID {
 		return backstopResolutionHold
 	}
+	// Mirrors evaluateReadyContinuationClaimCandidate: the root proves the run is
+	// live, not who owns this step. gc.session_name on the root is a dashboard
+	// stamp, last-writer-wins across the molecule's steps, so requiring it to
+	// equal target.Assignee is unsatisfiable for any formula that routes steps to
+	// more than one agent template. current.Assignee above is the authoritative
+	// pin.
 	if !strings.EqualFold(strings.TrimSpace(root.Status), "in_progress") ||
 		!strings.EqualFold(strings.TrimSpace(root.Type), "task") ||
 		strings.TrimSpace(root.Metadata[beadmeta.RootStoreRefMetadataKey]) != target.StoreRef ||
 		strings.TrimSpace(root.Metadata[beadmeta.FormulaContractMetadataKey]) != "graph.v2" ||
-		strings.TrimSpace(root.Metadata[beadmeta.KindMetadataKey]) != "workflow" ||
-		strings.TrimSpace(root.Metadata[beadmeta.SessionNameMetadataKey]) != target.Assignee {
+		strings.TrimSpace(root.Metadata[beadmeta.KindMetadataKey]) != "workflow" {
 		return backstopResolutionClear
 	}
 	return backstopResolutionOutstanding
@@ -403,7 +411,7 @@ func (p poolClaimBackstop) state(s beads.Bead, target backstopTarget) (same bool
 }
 
 func (p poolClaimBackstop) content(s beads.Bead) string {
-	return claimNudgeFor(p.cfg, s)
+	return stalledPoolClaimNudgeFor(p.cfg, s)
 }
 
 func (p poolClaimBackstop) revalidate(_ backstopTarget) backstopResolution {
@@ -475,6 +483,10 @@ func normalizeIdleClaimStoreRef(storeRef string) string {
 	switch {
 	case storeRef == "", storeRef == "city", strings.HasPrefix(storeRef, "city:"):
 		return "city"
+	// A class binding is city scope: it is the same store the leading arm used
+	// to record under the city ref, now named as a leg of its own.
+	case storeref.IsClassRef(storeRef):
+		return "city"
 	case strings.HasPrefix(storeRef, "rig:"):
 		return "rig:" + strings.TrimSpace(strings.TrimPrefix(storeRef, "rig:"))
 	case !strings.Contains(storeRef, ":"):
@@ -502,15 +514,31 @@ func isUnclaimedTrigger(w beads.Bead, sessName string) bool {
 // claimNudgeFor resolves the slot's configured startup nudge (the worker's
 // `gc hook --claim` line) from the agent template behind this session bead.
 func claimNudgeFor(cfg *config.City, session beads.Bead) string {
+	nudge, _ := configuredClaimNudgeFor(cfg, session)
+	return nudge
+}
+
+func stalledPoolClaimNudgeFor(cfg *config.City, session beads.Bead) string {
+	nudge, known := configuredClaimNudgeFor(cfg, session)
+	if !known {
+		return ""
+	}
+	if nudge == "" {
+		return defaultPoolClaimNudge
+	}
+	return nudge
+}
+
+func configuredClaimNudgeFor(cfg *config.City, session beads.Bead) (string, bool) {
 	template := normalizedSessionTemplate(session, cfg)
 	if template == "" {
-		return ""
+		return "", false
 	}
 	agent := findAgentByTemplate(cfg, template)
 	if agent == nil {
-		return ""
+		return "", false
 	}
-	return strings.TrimSpace(agent.Nudge)
+	return strings.TrimSpace(agent.Nudge), true
 }
 
 // writeIdleClaimMarker persists the backstop state machine onto the session

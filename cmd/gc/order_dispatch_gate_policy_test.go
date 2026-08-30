@@ -26,18 +26,45 @@ func countAndDelayGateQuery(mu *sync.Mutex, counter *int, delay time.Duration) {
 	time.Sleep(delay)
 }
 
-// gateTimeoutStore makes the strict open-work gate scan (the
-// `order-run:`-labeled, !IncludeClosed, Limit==0 List that hasOpenWorkStrict
-// issues) block past the per-order gate timeout, reproducing the #2893 hang
-// where storeHasOpenDescendants exceeds its budget under Dolt contention. Only
-// that exact query shape is delayed; every other read stays fast.
+// isOrderGateIndexQuery reports whether q is the per-tick gate INDEX read: one
+// unlabeled non-closed scan per gate store, folded by order-run label, that
+// replaced the per-order label lists (ga-l7jdg).
+//
+// Every #2893 fixture in this file recognizes it as a gate query alongside the
+// two label shapes it replaced. Recognizing only the old spellings would leave
+// the fixtures delaying a query the dispatcher no longer issues — the store
+// would answer instantly, the gate would never time out, and four fail-closed
+// regression tests would pass while testing nothing.
+func isOrderGateIndexQuery(q beads.ListQuery) bool {
+	return q.AllowScan && q.Label == "" && q.Status == "" && q.Assignee == "" &&
+		len(q.IDs) == 0 && len(q.Metadata) == 0 && !q.IncludeClosed && q.Limit == 0
+}
+
+// isOrderGateListQuery reports whether q is a read either open-work gate makes:
+// the per-tick index scan, the strict `order-run:`-labeled fallback, or the
+// open-tracking list.
+func isOrderGateListQuery(q beads.ListQuery) bool {
+	if isOrderGateIndexQuery(q) {
+		return true
+	}
+	if q.IncludeClosed || q.Limit != 0 {
+		return false
+	}
+	return strings.HasPrefix(q.Label, "order-run:") ||
+		(q.Label == labelOrderTracking && q.Status == "open")
+}
+
+// gateTimeoutStore makes the open-work gate's store read block past the
+// per-order gate timeout, reproducing the #2893 hang where
+// storeHasOpenDescendants exceeds its budget under Dolt contention. Only a gate
+// query shape is delayed; every other read stays fast.
 type gateTimeoutStore struct {
 	beads.Store
 	delay time.Duration
 }
 
 func (s *gateTimeoutStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	if strings.HasPrefix(query.Label, "order-run:") && !query.IncludeClosed && query.Limit == 0 {
+	if isOrderGateListQuery(query) {
 		time.Sleep(s.delay)
 	}
 	return s.Store.List(query)
@@ -110,7 +137,7 @@ type openWorkGateCallCountStore struct {
 }
 
 func (s *openWorkGateCallCountStore) List(q beads.ListQuery) ([]beads.Bead, error) {
-	if strings.HasPrefix(q.Label, "order-run:") && !q.IncludeClosed && q.Limit == 0 {
+	if isOrderGateListQuery(q) {
 		countAndDelayGateQuery(&s.mu, &s.gateCalls, s.delay)
 	}
 	return s.Store.List(q)
@@ -231,7 +258,7 @@ type trackingGateTimeoutStore struct {
 }
 
 func (s *trackingGateTimeoutStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	if query.Label == labelOrderTracking && query.Status == "open" && !query.IncludeClosed && query.Limit == 0 {
+	if isOrderGateIndexQuery(query) || (query.Label == labelOrderTracking && query.Status == "open" && !query.IncludeClosed && query.Limit == 0) {
 		s.gateCount.Add(1)
 		time.Sleep(s.delay)
 	}
@@ -369,16 +396,7 @@ func (s *bothGatesCallCountStore) List(q beads.ListQuery) ([]beads.Bead, error) 
 }
 
 func (s *bothGatesCallCountStore) isGateQuery(q beads.ListQuery) bool {
-	if q.IncludeClosed || q.Limit != 0 {
-		return false
-	}
-	if q.Label == labelOrderTracking && q.Status == "open" {
-		return true
-	}
-	if strings.HasPrefix(q.Label, "order-run:") {
-		return true
-	}
-	return false
+	return isOrderGateListQuery(q)
 }
 
 func (s *bothGatesCallCountStore) gateCalls() int {

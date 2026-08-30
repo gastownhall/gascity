@@ -5,6 +5,7 @@ package integration
 import (
 	"bufio"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -591,25 +592,137 @@ func waitForReport(t *testing.T, cityDir, agentName string, timeout time.Duratio
 	return nil // unreachable
 }
 
-func waitForAgentRunning(t *testing.T, cityDir, agentName string, timeout time.Duration) {
+// waitForPoolMemberReports resolves a pool template's live members and returns
+// each member's report keyed by its SLOT identity ("worker-1", "worker-2").
+//
+// A pool member of an expanding pool has no public alias: the slot rebinds to a
+// fresh session whenever a holder dies, so it is bookkeeping rather than
+// identity, and the session's GC_AGENT / BEADS_ACTOR resolve to its runtime
+// session name instead. The report script keys its file on $GC_AGENT, so the
+// filename is the session name and the test cannot construct it in advance.
+//
+// The slot is still stamped on the session bead as agent_name, so
+// `gc session list --json` is the stable channel that maps a slot the test DOES
+// know to the session name it does not. Discovery goes through the same CLI
+// contract sessionAssigneeForTemplate already relies on, and the per-member wait
+// then reuses waitForReport so the container-provider fallback still applies.
+//
+// Non-expanding (max=1) pools keep their canonical identity and alias, so they
+// need none of this — call waitForReport with the agent name directly.
+func waitForPoolMemberReports(t *testing.T, cityDir, template string, slots []string, timeout time.Duration) map[string]*e2eReport {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		out, err := gc(cityDir, "session", "list", "--state", "all")
+
+	sessionNames := waitForPoolMemberSessionNames(t, cityDir, template, slots, timeout)
+	reports := make(map[string]*e2eReport, len(slots))
+	for _, slot := range slots {
+		reports[slot] = waitForReport(t, cityDir, sessionNames[slot], timeout)
+	}
+	return reports
+}
+
+// waitForPoolMemberSessionNames maps each requested slot identity to the runtime
+// session name of the live session currently holding it.
+func waitForPoolMemberSessionNames(t *testing.T, cityDir, template string, slots []string, timeout time.Duration) map[string]string {
+	t.Helper()
+
+	var resolved map[string]string
+	found := pollUntil(timeout, 200*time.Millisecond, func() bool {
+		out, err := gc(cityDir, "session", "list", "--json", "--template", template, "--state", "all")
 		if err == nil {
-			for _, line := range strings.Split(out, "\n") {
-				fields := strings.Fields(line)
-				if len(fields) < 6 {
-					continue
+			var sessionList struct {
+				Sessions []struct {
+					Template    string `json:"template"`
+					Closed      bool   `json:"closed"`
+					State       string `json:"state"`
+					Alias       string `json:"alias"`
+					AgentName   string `json:"agent_name"`
+					SessionName string `json:"session_name"`
+				} `json:"sessions"`
+			}
+			if jsonErr := json.Unmarshal([]byte(strings.TrimSpace(out)), &sessionList); jsonErr == nil {
+				found := make(map[string]string, len(slots))
+				for _, s := range sessionList.Sessions {
+					if s.Closed || strings.TrimSpace(s.Template) != template {
+						continue
+					}
+					name := strings.TrimSpace(s.SessionName)
+					slot := strings.TrimSpace(s.AgentName)
+					if name == "" || slot == "" {
+						continue
+					}
+					// A rebinding slot must not be advertised as an alias. Fail
+					// loudly rather than silently falling back: an alias here means
+					// the unaliasing regressed and the session is claiming work
+					// under a name that outlives it.
+					if alias := strings.TrimSpace(s.Alias); alias != "" {
+						t.Fatalf("pool member %q (template %q) advertises alias %q; expanding-pool slots must stay unaliased", slot, template, alias)
+					}
+					found[slot] = name
 				}
-				state := fields[2]
-				target := fields[4]
-				if target == agentName && state == "active" {
-					return
+				if haveAllSlots(found, slots) {
+					resolved = found
+					return true
 				}
 			}
 		}
-		time.Sleep(500 * time.Millisecond)
+		return false
+	})
+	if found {
+		return resolved
+	}
+
+	out, _ := gc(cityDir, "session", "list", "--json", "--template", template, "--state", "all")
+	t.Fatalf("timed out resolving session names for template %q slots %v within %s\nsessions:\n%s", template, slots, timeout, out)
+	return nil
+}
+
+// pollUntil calls fn on a fixed cadence until it reports success or timeout
+// elapses, returning whether it succeeded. It is the one place the integration
+// helpers spend wall time waiting on a condition they cannot subscribe to, so
+// new waits reuse this cadence instead of open-coding another sleep loop.
+func pollUntil(timeout, interval time.Duration, fn func() bool) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if fn() {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(interval)
+	}
+}
+
+func haveAllSlots(found map[string]string, slots []string) bool {
+	for _, slot := range slots {
+		if found[slot] == "" {
+			return false
+		}
+	}
+	return true
+}
+
+func waitForAgentRunning(t *testing.T, cityDir, agentName string, timeout time.Duration) {
+	t.Helper()
+	if pollUntil(timeout, 500*time.Millisecond, func() bool {
+		out, err := gc(cityDir, "session", "list", "--state", "all")
+		if err != nil {
+			return false
+		}
+		for _, line := range strings.Split(out, "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 6 {
+				continue
+			}
+			state := fields[2]
+			target := fields[4]
+			if target == agentName && state == "active" {
+				return true
+			}
+		}
+		return false
+	}) {
+		return
 	}
 	out, _ := gc(cityDir, "session", "list", "--state", "all")
 	t.Fatalf("agent %q not active within %s\nsessions:\n%s", agentName, timeout, out)

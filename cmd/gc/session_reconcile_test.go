@@ -1448,6 +1448,93 @@ func TestCheckStability_SubprocessProviderSkipsCrashCounting(t *testing.T) {
 	}
 }
 
+// TestRecordWakeFailure_KeepsResumableConversation pins that a wake failure no
+// longer discards a conversation that is provably still on disk. Any single
+// wake failure reaches recordWakeFailure — a transient spawn flake included —
+// and the conversation reset is permanent, so it must require evidence that the
+// conversation is actually unresumable. Attempt accrual is unaffected.
+func TestRecordWakeFailure_KeepsResumableConversation(t *testing.T) {
+	prevProbe := staleResumeKeyProbe
+	staleResumeKeyProbe = func(_, _, _ string) (present, probeable bool) { return true, true }
+	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
+
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	store := newTestStore()
+	session := makeBead("b1", map[string]string{
+		"wake_attempts":       "1",
+		"session_key":         "live-key",
+		"started_config_hash": "hash-1",
+		"provider":            "claude",
+		"work_dir":            "/work",
+	})
+
+	recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	syncBeadFromStore(&session, store)
+
+	if got := session.Metadata["session_key"]; got != "live-key" {
+		t.Errorf("session_key = %q, want it preserved — the transcript is still there", got)
+	}
+	if got := session.Metadata["started_config_hash"]; got != "hash-1" {
+		t.Errorf("started_config_hash = %q, want hash-1 preserved", got)
+	}
+	if got := session.Metadata["wake_attempts"]; got != "2" {
+		t.Errorf("wake_attempts = %q, want 2 (accrual must be unchanged)", got)
+	}
+}
+
+// TestRecordWakeFailure_ClearsUnresumableConversation is the other half: an
+// absent transcript keeps the existing unconditional reset.
+func TestRecordWakeFailure_ClearsUnresumableConversation(t *testing.T) {
+	prevProbe := staleResumeKeyProbe
+	staleResumeKeyProbe = func(_, _, _ string) (present, probeable bool) { return false, true }
+	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
+
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	store := newTestStore()
+	session := makeBead("b1", map[string]string{
+		"wake_attempts":       "1",
+		"session_key":         "dead-key",
+		"started_config_hash": "hash-1",
+		"provider":            "claude",
+		"work_dir":            "/work",
+	})
+
+	recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	syncBeadFromStore(&session, store)
+
+	if got := session.Metadata["session_key"]; got != "" {
+		t.Errorf("session_key = %q, want cleared when the transcript is gone", got)
+	}
+	if got := session.Metadata["started_config_hash"]; got != "" {
+		t.Errorf("started_config_hash = %q, want cleared", got)
+	}
+}
+
+// TestRecordWakeFailure_ClearsWhenProviderUnprobeable pins that a provider we
+// cannot inspect keeps the legacy unconditional reset rather than silently
+// gaining the new keep-the-conversation behavior.
+func TestRecordWakeFailure_ClearsWhenProviderUnprobeable(t *testing.T) {
+	prevProbe := staleResumeKeyProbe
+	staleResumeKeyProbe = func(_, _, _ string) (present, probeable bool) { return false, false }
+	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
+
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	store := newTestStore()
+	session := makeBead("b1", map[string]string{
+		"wake_attempts": "1",
+		"session_key":   "codex-key",
+		"provider":      "codex",
+		"work_dir":      "/work",
+	})
+
+	recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	syncBeadFromStore(&session, store)
+
+	if got := session.Metadata["session_key"]; got != "" {
+		t.Errorf("session_key = %q, want cleared for an unprobeable provider", got)
+	}
+}
+
 func TestRecordWakeFailure_Quarantine(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
@@ -1994,6 +2081,67 @@ func TestHealStatePatchWithRollbackHonorsConfiguredStartupTimeout(t *testing.T) 
 	}
 	if got["pending_create_started_at"] != "" {
 		t.Fatalf("pending_create_started_at clear = %q, want empty after configured lease expiry", got["pending_create_started_at"])
+	}
+}
+
+func TestHealStatePatchWithRollbackUsesOneConfiguredLeaseDecisionAcrossTicks(t *testing.T) {
+	startedAt := time.Date(2026, 5, 19, 9, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: startedAt.Add(90 * time.Second)}
+	startupTimeout := 5 * time.Minute
+	session := makeBead("b1", map[string]string{
+		"state":                     "creating",
+		"pending_create_claim":      "true",
+		"pending_create_started_at": startedAt.Format(time.RFC3339),
+		"last_woke_at":              startedAt.Format(time.RFC3339),
+		"session_key":               "in-flight-key",
+		"started_config_hash":       "in-flight-hash",
+	})
+	session.CreatedAt = startedAt
+
+	applyPatch := func(patch map[string]string) {
+		for key, value := range patch {
+			session.Metadata[key] = value
+		}
+	}
+
+	for _, elapsed := range []time.Duration{90 * time.Second, 306 * time.Second} {
+		clk.Time = startedAt.Add(elapsed)
+		patch := healStatePatchFromBead(session, false, clk, startupTimeout)
+		applyPatch(patch)
+		if len(patch) != 0 {
+			t.Fatalf("heal at %s = %#v, want no mutation before the configured lease expires", elapsed, patch)
+		}
+		if got := session.Metadata["state"]; got != "creating" {
+			t.Fatalf("state at %s = %q, want creating", elapsed, got)
+		}
+		if pendingCreateLeaseExpiredForRollbackInfo(seedSessionInfo(session), clk, startupTimeout) {
+			t.Fatalf("lease reported expired at %s, before the 307s rollback boundary", elapsed)
+		}
+	}
+
+	clk.Time = startedAt.Add(308 * time.Second)
+	if !pendingCreateLeaseExpiredForRollbackInfo(seedSessionInfo(session), clk, startupTimeout) {
+		t.Fatal("lease remained active after the 307s rollback boundary")
+	}
+	patch := healStatePatchFromBead(session, false, clk, startupTimeout)
+	applyPatch(patch)
+	for key, want := range map[string]string{
+		"state":                      "asleep",
+		"sleep_reason":               string(sessionpkg.SleepReasonRuntimeMissing),
+		"pending_create_claim":       "",
+		"pending_create_started_at":  "",
+		"session_key":                "",
+		"started_config_hash":        "",
+		"continuation_reset_pending": "true",
+	} {
+		if got := session.Metadata[key]; got != want {
+			t.Fatalf("rollback %s = %q, want %q; patch=%#v", key, got, want, patch)
+		}
+	}
+
+	clk.Time = clk.Time.Add(time.Second)
+	if got := healStatePatchFromBead(session, false, clk, startupTimeout); len(got) != 0 {
+		t.Fatalf("second post-expiry heal = %#v, want exactly one rollback mutation", got)
 	}
 }
 

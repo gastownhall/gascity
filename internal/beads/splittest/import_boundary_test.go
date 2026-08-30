@@ -101,6 +101,15 @@ func TestSplittestIsNotImportedByProductionCode(t *testing.T) {
 // Mirrors internal/testenv/lint_test.go's skipRepoLintDir plus its nested
 // worktree detection.
 func skipImportScanDir(path, root, name string) bool {
+	// The root escape must come before the name rules, not after them.
+	// filepath.WalkDir calls back on the root itself, so a checkout in a
+	// directory named `.wt-something` matched the dot-prefix rule below and
+	// returned SkipDir on the very first callback, skipping the whole scan.
+	// Only the `scanned == 0` floor in the caller kept that from passing
+	// silently. Whatever the root is named, it is always in scope (ga-xoioq).
+	if path == root {
+		return false
+	}
 	if name == "vendor" || name == "node_modules" || name == "testdata" {
 		return true
 	}
@@ -110,13 +119,27 @@ func skipImportScanDir(path, root, name string) bool {
 	if name == "worktrees" || strings.HasPrefix(name, "worktree-") {
 		return true
 	}
-	if path == root {
-		return false
-	}
 	// A linked worktree has a .git FILE (a "gitdir: ..." pointer) rather than a
 	// .git directory, which catches worktrees whatever they are named.
 	info, err := os.Lstat(filepath.Join(path, ".git"))
 	return err == nil && !info.IsDir()
+}
+
+// TestImportScanRootIsNeverPruned pins the ordering inside skipImportScanDir:
+// the walk root is in scope whatever it is named. See ga-xoioq.
+func TestImportScanRootIsNeverPruned(t *testing.T) {
+	t.Parallel()
+	for _, root := range []string{
+		"/data/projects/.wt-classroute",
+		"/data/projects/_wt-govuln-public",
+		"/data/projects/vendor",
+		"/data/projects/testdata",
+		"/data/projects/worktree-scratch",
+	} {
+		if skipImportScanDir(root, root, filepath.Base(root)) {
+			t.Errorf("skipImportScanDir pruned the walk root %q; the entire import scan would be skipped", root)
+		}
+	}
 }
 
 // repoRoot walks up from the working directory to the module root. It reads the

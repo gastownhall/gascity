@@ -113,7 +113,7 @@ package main
 //
 // # A single-store city takes none of this
 //
-// hookClaimClassRouteForCity gates on graphClassBinding — store identity, the
+// hookClaimClassRouteForCity gates on cliSoleClassBinding — store identity, the
 // same question resolveClassStore asks — and returns nil for a city that
 // relocates nothing. classRoutedHookClaimOps then returns the ops value it was
 // handed, unwrapped, so every claim-time write is the exact call it is today.
@@ -255,12 +255,22 @@ func hookClaimBindingRefusedTheClaim(err error) bool {
 // The funnel is the same one cityQueryTopology already entered to decide whether
 // this invocation's work query federates at all, and it is memoized per city
 // (cli_storage_routes.go), so a hook that reaches here opens no second binding.
+//
+// It resolves the SOLE binding rather than the graph class's, for the reason
+// spelled out on cliSoleClassBinding: a claim escalates to this route for any
+// reserved-prefix id, so a city serving its classes from more than one store
+// would have sessions-class claims routed at the graph binding, which would
+// truthfully report the bead absent. That shape is refused upstream; asking for
+// the sole binding is what makes the refusal load-bearing here too.
 func hookClaimClassRouteForCity(cityPath string) (*hookClaimClassRoute, error) {
-	class, relocated := graphClassBinding(cliStorageRoutes(cityPath))
+	binding, relocated, err := cliSoleClassBinding(cityPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolving the claim-time class route: %w", err)
+	}
 	if !relocated {
 		return nil, nil
 	}
-	return newHookClaimClassRoute(class)
+	return newHookClaimClassRoute(binding.Store)
 }
 
 // knownResident reports whether an earlier probe in THIS invocation already
@@ -557,6 +567,19 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 		default:
 			return err
 		}
+	}
+
+	// The release of an undelivered claim (F-C) must run against the ledger the
+	// claim landed in, or it would clear an assignee in a store that never held
+	// one and leave the real claim parked. Like the lifecycle emission below it
+	// routes on the MEMO alone and never probes: a bead this invocation did not
+	// route is one the work store claimed, and the release is a consequence of
+	// that claim rather than a second opinion about where the bead lives.
+	ops.Release = func(ctx context.Context, dir string, env []string, beadID, assignee string) (bool, error) {
+		if route.knownResident(beadID) {
+			return route.graph.ReleaseIfCurrent(beadID, assignee)
+		}
+		return base.Release(ctx, dir, env, beadID, assignee)
 	}
 
 	// The lifecycle-start emission reads the step's workflow root, so it belongs

@@ -17,11 +17,11 @@ func TestResolveLockedRemoteImportAcceptsBundledSyntheticCache(t *testing.T) {
 	commit := canonicalBundledCommit(source)
 	writeBundledImportLock(t, cityDir, source, commit)
 	cacheDir := bundledRepoCacheDir(home, source, commit)
-	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
+	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, builtinpacks.Repository, commit); err != nil {
 		t.Fatalf("materialize synthetic repo: %v", err)
 	}
 
-	got, ok, err := resolveLockedRemoteImport(source, cityDir)
+	got, ok, err := resolveLockedRemoteImport(source, cityDir, false)
 	if err != nil {
 		t.Fatalf("resolveLockedRemoteImport: %v", err)
 	}
@@ -44,7 +44,7 @@ func TestResolveLockedRemoteImportFastPathToleratesBundledSyntheticContentDrift(
 	commit := canonicalBundledCommit(source)
 	writeBundledImportLock(t, cityDir, source, commit)
 	cacheDir := bundledRepoCacheDir(home, source, commit)
-	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
+	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, builtinpacks.Repository, commit); err != nil {
 		t.Fatalf("materialize synthetic repo: %v", err)
 	}
 	writeTestFile(t, cacheDir, "internal/bootstrap/packs/core/pack.toml", `
@@ -53,7 +53,7 @@ name = "tampered"
 schema = 1
 `)
 
-	_, ok, err := resolveLockedRemoteImport(source, cityDir)
+	_, ok, err := resolveLockedRemoteImport(source, cityDir, false)
 	if err != nil {
 		t.Fatalf("fast-path resolution must not reject content drift: %v", err)
 	}
@@ -73,12 +73,12 @@ func TestResolveLockedRemoteImportFastPathToleratesBundledSyntheticExtraFile(t *
 	commit := canonicalBundledCommit(source)
 	writeBundledImportLock(t, cityDir, source, commit)
 	cacheDir := bundledRepoCacheDir(home, source, commit)
-	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
+	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, builtinpacks.Repository, commit); err != nil {
 		t.Fatalf("materialize synthetic repo: %v", err)
 	}
 	writeTestFile(t, cacheDir, "internal/bootstrap/packs/core/agents/injected/prompt.md", "extra file")
 
-	_, ok, err := resolveLockedRemoteImport(source, cityDir)
+	_, ok, err := resolveLockedRemoteImport(source, cityDir, false)
 	if err != nil {
 		t.Fatalf("fast-path resolution must not reject extra files: %v", err)
 	}
@@ -93,11 +93,11 @@ func TestResolveInstalledRemoteImportAcceptsBundledSyntheticCache(t *testing.T) 
 	commit := canonicalBundledCommit(source)
 	writeBundledImportLock(t, cityDir, source, commit)
 	cacheDir := bundledRepoCacheDir(home, source, commit)
-	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
+	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, builtinpacks.Repository, commit); err != nil {
 		t.Fatalf("materialize synthetic repo: %v", err)
 	}
 
-	got, err := resolveInstalledRemoteImport(source, "", cityDir)
+	got, err := resolveInstalledRemoteImport(source, "", cityDir, false)
 	if err != nil {
 		t.Fatalf("resolveInstalledRemoteImport: %v", err)
 	}
@@ -112,11 +112,11 @@ func TestResolveImportPackRefAcceptsPublicGastownSyntheticCache(t *testing.T) {
 	commit := strings.TrimPrefix(PublicGastownPackVersion, "sha:")
 	writeBundledImportLock(t, cityDir, source, commit)
 	cacheDir := bundledRepoCacheDir(home, source, commit)
-	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
+	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, builtinpacks.PublicRepository, commit); err != nil {
 		t.Fatalf("materialize synthetic repo: %v", err)
 	}
 
-	got, err := resolveImportPackRef(source, "", cityDir, cityDir)
+	got, err := resolveImportPackRef(source, "", cityDir, cityDir, false)
 	if err != nil {
 		t.Fatalf("resolveImportPackRef: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestLoadWithIncludes_RigBundledImportSelfHealsOfflineWithoutLock(t *testing
 	source := PublicGastownPackSource
 	commit := strings.TrimPrefix(PublicGastownPackVersion, "sha:")
 	cacheDir := bundledRepoCacheDir(home, source, commit)
-	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
+	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, builtinpacks.PublicRepository, commit); err != nil {
 		t.Fatalf("materialize synthetic repo: %v", err)
 	}
 
@@ -225,7 +225,7 @@ fetched = "2026-01-01T00:00:00Z"
 	// went to fetchRemoteInclude (which would fail with "not cached at ...").
 	refWithGitRef := source + "#main"
 
-	got, err := resolvePackRef(refWithGitRef, cityDir, cityDir)
+	got, err := resolvePackRef(refWithGitRef, cityDir, cityDir, false)
 	if err != nil {
 		t.Fatalf("resolvePackRef(%q): %v", refWithGitRef, err)
 	}
@@ -247,7 +247,7 @@ commit = "abc123def456abc123def456abc123def456abc123de"
 content_hash = "sha256:deadbeef"
 `)
 
-	_, _, err := resolveLockedRemoteImport(source, cityDir)
+	_, _, err := resolveLockedRemoteImport(source, cityDir, false)
 	if err == nil {
 		t.Fatal("expected invalid marker error")
 	}
@@ -269,7 +269,7 @@ commit = %q
 content_hash = "sha256:deadbeef"
 `, source, commit))
 
-	_, _, err := resolveLockedRemoteImport(source, cityDir)
+	_, _, err := resolveLockedRemoteImport(source, cityDir, false)
 	if err == nil {
 		t.Fatal("expected non-bundled synthetic cache to be rejected")
 	}
@@ -308,7 +308,7 @@ content_hash = "sha256:deadbeef"
 		}
 	}
 
-	_, ok, err := resolveLockedRemoteImport(source, cityDir)
+	_, ok, err := resolveLockedRemoteImport(source, cityDir, false)
 	if err != nil {
 		t.Fatalf("resolveLockedRemoteImport: %v", err)
 	}
@@ -457,7 +457,7 @@ func TestValidateInstalledRemoteCacheRequiresGitForNonCanonicalBundledPin(t *tes
 	writeBundledImportLock(t, cityDir, source, commit)
 	cacheDir := bundledRepoCacheDir(home, source, commit)
 
-	_, _, err := resolveLockedRemoteImport(source, cityDir)
+	_, _, err := resolveLockedRemoteImport(source, cityDir, false)
 	if err == nil {
 		t.Fatal("expected non-canonical bundled pin without cache to fail")
 	}
@@ -480,7 +480,7 @@ func TestResolveInstalledRemoteImportBundledFallbackWithoutLock(t *testing.T) {
 	source := bundledPackSource()
 	commit := strings.TrimPrefix(BundledSourcePinnedVersion(source), "sha:")
 
-	got, err := resolveInstalledRemoteImport(source, "", cityDir)
+	got, err := resolveInstalledRemoteImport(source, "", cityDir, false)
 	if err != nil {
 		t.Fatalf("resolveInstalledRemoteImport without lock: %v", err)
 	}
@@ -488,7 +488,7 @@ func TestResolveInstalledRemoteImportBundledFallbackWithoutLock(t *testing.T) {
 	if got != want {
 		t.Fatalf("cacheDir = %q, want %q", got, want)
 	}
-	if err := builtinpacks.ValidateSyntheticRepo(got, commit); err != nil {
+	if err := builtinpacks.ValidateSyntheticRepo(got, builtinpacks.Repository, commit); err != nil {
 		t.Fatalf("fallback did not hydrate a valid synthetic cache: %v", err)
 	}
 }
@@ -498,7 +498,7 @@ func TestResolveInstalledRemoteImportBundledFallbackWithoutLock(t *testing.T) {
 func TestResolveInstalledRemoteImportNonBundledStillRequiresLock(t *testing.T) {
 	_, cityDir := setupBundledImportTest(t)
 
-	_, err := resolveInstalledRemoteImport("https://github.com/example/other.git", "", cityDir)
+	_, err := resolveInstalledRemoteImport("https://github.com/example/other.git", "", cityDir, false)
 	if err == nil || !strings.Contains(err.Error(), "missing packs.lock") {
 		t.Fatalf("err = %v, want missing packs.lock error", err)
 	}
@@ -525,14 +525,14 @@ func TestResolveInstalledRemoteImportLockedBundledSelfHealsWhenCacheAbsent(t *te
 		t.Fatalf("precondition: cache dir should be absent, stat err = %v", err)
 	}
 
-	got, err := resolveInstalledRemoteImport(source, "", cityDir)
+	got, err := resolveInstalledRemoteImport(source, "", cityDir, false)
 	if err != nil {
 		t.Fatalf("resolveInstalledRemoteImport locked+absent bundled cache: %v", err)
 	}
 	if got != cacheDir {
 		t.Fatalf("cacheDir = %q, want %q", got, cacheDir)
 	}
-	if err := builtinpacks.ValidateSyntheticRepo(got, commit); err != nil {
+	if err := builtinpacks.ValidateSyntheticRepo(got, builtinpacks.Repository, commit); err != nil {
 		t.Fatalf("self-heal did not produce a valid synthetic cache: %v", err)
 	}
 }
@@ -546,13 +546,13 @@ func TestResolveInstalledRemoteImportRejectsDeclaredNonCanonicalPinWithoutLock(t
 	_, cityDir := setupBundledImportTest(t)
 	source := bundledPackSource()
 
-	_, err := resolveInstalledRemoteImport(source, "sha:0123456789abcdef0123456789abcdef01234567", cityDir)
+	_, err := resolveInstalledRemoteImport(source, "sha:0123456789abcdef0123456789abcdef01234567", cityDir, false)
 	if err == nil || !strings.Contains(err.Error(), "missing packs.lock") {
 		t.Fatalf("err = %v, want missing packs.lock error for declared non-canonical pin", err)
 	}
 
 	// The canonical declared pin (and an empty declaration) still falls back.
-	if _, err := resolveInstalledRemoteImport(source, BundledSourcePinnedVersion(source), cityDir); err != nil {
+	if _, err := resolveInstalledRemoteImport(source, BundledSourcePinnedVersion(source), cityDir, false); err != nil {
 		t.Fatalf("canonical declared pin should fall back to embedded content: %v", err)
 	}
 }
@@ -595,20 +595,20 @@ func TestSupersededBundledPinErrorsRecommendDoctorFix(t *testing.T) {
 	t.Run("locked but not cached", func(t *testing.T) {
 		_, cityDir := setupBundledImportTest(t)
 		writeBundledImportLock(t, cityDir, source, strings.TrimPrefix(superseded, "sha:"))
-		_, err := resolveInstalledRemoteImport(source, superseded, cityDir)
+		_, err := resolveInstalledRemoteImport(source, superseded, cityDir, false)
 		assertDoctorFirstRemediation(t, err)
 	})
 
 	t.Run("missing packs.lock", func(t *testing.T) {
 		_, cityDir := setupBundledImportTest(t)
-		_, err := resolveInstalledRemoteImport(source, superseded, cityDir)
+		_, err := resolveInstalledRemoteImport(source, superseded, cityDir, false)
 		assertDoctorFirstRemediation(t, err)
 	})
 
 	t.Run("missing packs.lock entry", func(t *testing.T) {
 		_, cityDir := setupBundledImportTest(t)
 		writeBundledImportLock(t, cityDir, "https://github.com/example/other.git", "0123456789abcdef0123456789abcdef01234567")
-		_, err := resolveInstalledRemoteImport(source, superseded, cityDir)
+		_, err := resolveInstalledRemoteImport(source, superseded, cityDir, false)
 		assertDoctorFirstRemediation(t, err)
 	})
 
@@ -616,7 +616,7 @@ func TestSupersededBundledPinErrorsRecommendDoctorFix(t *testing.T) {
 	// plain install remediation — the doctor re-pin would not honor it.
 	t.Run("non-superseded pin stays plain", func(t *testing.T) {
 		_, cityDir := setupBundledImportTest(t)
-		_, err := resolveInstalledRemoteImport(source, "sha:0123456789abcdef0123456789abcdef01234567", cityDir)
+		_, err := resolveInstalledRemoteImport(source, "sha:0123456789abcdef0123456789abcdef01234567", cityDir, false)
 		if err == nil || !strings.Contains(err.Error(), `run "gc import install"`) {
 			t.Fatalf("err = %v, want the plain gc import install remediation", err)
 		}

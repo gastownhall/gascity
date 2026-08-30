@@ -57,7 +57,7 @@ func TestRepairStrandedPoolWorkerBead_ReopensAfterConfirmationWindow(t *testing.
 	session.Metadata[strandedEventEmittedKey] = now.Add(-strandedRepairConfirmGrace - time.Minute).Format(time.RFC3339)
 
 	var stderr bytes.Buffer
-	repaired := repairStrandedPoolWorkerBead(store, nil, seedSessionInfo(session), "worker", &clock.Fake{Time: now}, &stderr)
+	repaired := repairStrandedPoolWorkerBead("", nil, store, nil, seedSessionInfo(session), "worker", &clock.Fake{Time: now}, &stderr)
 	if !repaired {
 		t.Fatalf("expected repair to close the session bead; stderr=%q", stderr.String())
 	}
@@ -83,7 +83,7 @@ func TestRepairStrandedPoolWorkerBead_DefersInsideConfirmationWindow(t *testing.
 	session.Metadata[strandedEventEmittedKey] = now.Format(time.RFC3339) // just observed
 
 	var stderr bytes.Buffer
-	if repairStrandedPoolWorkerBead(store, nil, seedSessionInfo(session), "worker", &clock.Fake{Time: now}, &stderr) {
+	if repairStrandedPoolWorkerBead("", nil, store, nil, seedSessionInfo(session), "worker", &clock.Fake{Time: now}, &stderr) {
 		t.Fatalf("must not repair inside the confirmation window")
 	}
 	gotWork, _ := store.Get(work.ID)
@@ -119,7 +119,7 @@ func TestRepairStrandedPoolWorkerBead_DefersAndKeepsSessionOpenWhenUnassignFails
 	session.Metadata[strandedEventEmittedKey] = now.Add(-strandedRepairConfirmGrace - time.Minute).Format(time.RFC3339)
 
 	var stderr bytes.Buffer
-	if repairStrandedPoolWorkerBead(store, nil, seedSessionInfo(session), "worker", &clock.Fake{Time: now}, &stderr) {
+	if repairStrandedPoolWorkerBead("", nil, store, nil, seedSessionInfo(session), "worker", &clock.Fake{Time: now}, &stderr) {
 		t.Fatal("repair must return false when an unassign does not land")
 	}
 	gotWork, _ := base.Get(work.ID)
@@ -143,7 +143,7 @@ func TestRepairStrandedPoolWorkerBead_DefersWithoutStrandedMarker(t *testing.T) 
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
 
 	var stderr bytes.Buffer
-	if repairStrandedPoolWorkerBead(store, nil, seedSessionInfo(session), "worker", &clock.Fake{Time: now}, &stderr) {
+	if repairStrandedPoolWorkerBead("", nil, store, nil, seedSessionInfo(session), "worker", &clock.Fake{Time: now}, &stderr) {
 		t.Fatalf("must not repair without a stranded marker")
 	}
 	gotWork, _ := store.Get(work.ID)
@@ -182,6 +182,7 @@ func TestReleaseOrphanedPoolAssignments_SkipsLiveAssigneeStaysAssigned(t *testin
 
 	released := releaseOrphanedPoolAssignments(
 		store,
+		beads.SessionStore{Store: store},
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		"",
 		sessionInfosFromBeads([]beads.Bead{live}),
@@ -194,6 +195,62 @@ func TestReleaseOrphanedPoolAssignments_SkipsLiveAssigneeStaysAssigned(t *testin
 	got, _ := store.Get(work.ID)
 	if got.Assignee == "" {
 		t.Fatalf("live assignee cleared — should stay assigned")
+	}
+}
+
+// releaseOrphanedPoolAssignments takes the session-class store separately from
+// the work store, and falls back to the work store when the caller passes nil.
+// That fallback is the whole safety margin for a caller that has not been
+// threaded through the session front door yet: without it the live re-read runs
+// against a nil store, answers "no live session", and a running agent's work is
+// unassigned out from under it.
+//
+// Reaching that leg takes an empty session snapshot — with the live session in
+// the snapshot, openSessionOwnsWork skips the bead two gates earlier and the
+// re-read never happens. That is the shape a session minted after the snapshot
+// load has, which is the race the re-read exists to close.
+func TestReleaseOrphanedPoolAssignments_NilSessionsStoreFallsBackToWorkStore(t *testing.T) {
+	store := beads.NewMemStore()
+	live, err := store.Create(beads.Bead{
+		Title:    "live worker",
+		Type:     sessionBeadType,
+		Status:   "open",
+		Labels:   []string{sessionBeadLabel},
+		Metadata: map[string]string{"session_name": "worker-mc-live"},
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	work, err := store.Create(beads.Bead{
+		Title:    "routed work",
+		Assignee: live.Metadata["session_name"],
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"},
+	})
+	if err != nil {
+		t.Fatalf("create work: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("set in_progress: %v", err)
+	}
+	work, _ = store.Get(work.ID)
+
+	released := releaseOrphanedPoolAssignments(
+		store,
+		beads.SessionStore{}, // unset session-class store: the work store has to answer the liveness re-read
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		"",
+		nil, // empty snapshot: the two snapshot gates miss, so the live re-read decides
+		[]beads.Bead{work},
+		nil, nil, nil,
+	)
+	if len(released) != 0 {
+		t.Fatalf("a live assignee was released with a nil sessions store, got %v; "+
+			"the nil fallback to the work store is what keeps this re-read able to see the session bead", released)
+	}
+	got, _ := store.Get(work.ID)
+	if got.Assignee != live.Metadata["session_name"] {
+		t.Fatalf("assignee = %q, want %q — the live session's work was unassigned under it", got.Assignee, live.Metadata["session_name"])
 	}
 }
 

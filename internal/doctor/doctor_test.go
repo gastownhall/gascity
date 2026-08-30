@@ -81,6 +81,7 @@ func TestCheckWarmupEligibleDefaultsFalse(t *testing.T) {
 		&NestedWorktreePruneCheck{},
 		&OrphanSessionsCheck{},
 		&OrderFiringCurrentCheck{},
+		&OrderOutcomeHealthyCheck{},
 		&PackCacheCheck{},
 		&PreStartScriptsCheck{},
 		&ProviderParityCheck{},
