@@ -187,3 +187,125 @@ func TestDispatchOneRefusesMissingRequiredParam(t *testing.T) {
 		t.Fatalf("order.failed message = %q, want it to name the missing required param repo", failMsg)
 	}
 }
+
+// requiredVarFormulaDir writes a formula whose only var is `required = true`
+// with NO default, consumed by a step description rather than a compile-time
+// `range`. That distinction is the point: a range var is resolved during
+// COMPILATION, so it fails before the runtime-var validator is ever reached
+// (TestPrepareOrderWispRecipeThreadsVarsToFormula above covers that path and
+// cannot see this bug). Only a plain runtime var survives compile and reaches
+// ValidateRecipeRuntimeVars.
+func requiredVarFormulaDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	body := `
+formula = "e1-var-required"
+version = 1
+
+[vars.target]
+description = "Required, no default — the shape that exposed the dropped-vars bug"
+required = true
+
+[[steps]]
+id = "work"
+title = "Work"
+description = "Operate on {target}."
+`
+	if err := os.WriteFile(filepath.Join(dir, "e1-var-required.toml"), []byte(strings.TrimSpace(body)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// TestOrderRunAcceptsSuppliedRequiredVar drives the real `gc order run`
+// entrypoint and proves a supplied --var satisfies a required formula var.
+//
+// The bug (srvcity sr-p3ov.12): both order paths threaded `vars` into
+// prepareOrderWispRecipe and then validated with an EMPTY molecule.Options{} —
+//
+//	recipe, err := prepareOrderWispRecipe(ctx, store, a, searchPaths, vars)
+//	molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{})   // vars dropped
+//
+// ValidateRecipeRuntimeVars reads opts.Vars, so validation ran against nil and
+// reported every required var missing however many --var flags were passed. Any
+// formula with a required var was unfireable as an order. It stayed hidden
+// because required-with-no-default is rare: the other formulas in that city
+// give every var a default, and 0 of 594 installed order files use one.
+//
+// This asserts through doOrderRunWithJSON rather than calling the validator
+// directly, so it fails if the call site regresses — a test that invoked
+// ValidateRecipeRuntimeVars itself would pass with the bug still in place.
+func TestOrderRunAcceptsSuppliedRequiredVar(t *testing.T) {
+	dir := requiredVarFormulaDir(t)
+	aa := []orders.Order{{Name: "needs-target", Trigger: "manual", Formula: "e1-var-required", FormulaLayer: dir}}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRunWithJSON(aa, "needs-target", "", "/city", beads.OrdersStore{Store: beads.NewMemStore()},
+		nil, false, map[string]string{"target": "srvcity"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRunWithJSON = %d, want 0; stderr: %s\n"+
+			"a required var WAS supplied via --var but the run was rejected (sr-p3ov.12: the "+
+			"order paths validated against an empty Options{}, dropping the caller's vars)",
+			code, stderr.String())
+	}
+
+	// Omitting it must still be refused — the fix must not turn required off.
+	var stdout2, stderr2 bytes.Buffer
+	if code := doOrderRunWithJSON(aa, "needs-target", "", "/city", beads.OrdersStore{Store: beads.NewMemStore()},
+		nil, false, nil, &stdout2, &stderr2); code == 0 {
+		t.Fatal("doOrderRunWithJSON with no vars = 0, want non-zero: a required var with no " +
+			"default must still be refused when omitted")
+	}
+}
+
+// TestDispatchWispAcceptsSuppliedRequiredVar is the same proof for the
+// CONTROLLER's automatic dispatch path (order_dispatch.go), which carried an
+// identical empty-Options{} call.
+//
+// This half matters more than the manual one. `gc order run` fails loudly at an
+// operator's terminal; the controller fires unattended, so a cooldown or cron
+// order using a required var would fail on EVERY TICK, forever, with nobody
+// reading the order.failed events. That is why the srvcity steady-state order
+// carries a do-not-restore-cooldown warning until this ships.
+func TestDispatchWispAcceptsSuppliedRequiredVar(t *testing.T) {
+	dir := requiredVarFormulaDir(t)
+	store := beads.NewMemStore()
+	tracking, err := store.Create(beads.Bead{
+		Title:  "order:needs-target",
+		Labels: []string{"order-run:needs-target", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var rec memRecorder
+	ad := buildOrderDispatcherFromListExec([]orders.Order{{
+		Name:         "needs-target",
+		Trigger:      "cooldown",
+		Interval:     "1h",
+		Formula:      "e1-var-required",
+		FormulaLayer: dir,
+	}}, store, nil, nil, &rec)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+	mad := ad.(*memoryOrderDispatcher)
+
+	mad.addInflight()
+	mad.dispatchOne(context.Background(), store, execStoreTarget{ScopeRoot: t.TempDir()}, mad.aa[0],
+		t.TempDir(), tracking.ID, map[string]string{"target": "srvcity"}, nil)
+
+	if rec.hasType(events.OrderFailed) {
+		rec.mu.Lock()
+		var failMsg string
+		for _, e := range rec.events {
+			if e.Type == events.OrderFailed {
+				failMsg = e.Message
+			}
+		}
+		rec.mu.Unlock()
+		t.Fatalf("order.failed recorded despite the required var being supplied: %q\n"+
+			"sr-p3ov.12 on the controller path: an unattended cooldown order would fail on every tick",
+			failMsg)
+	}
+}
