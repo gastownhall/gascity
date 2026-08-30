@@ -44,8 +44,10 @@ class ResolveNameStatusZTest(unittest.TestCase):
     def test_quoted_and_newline_tab_records(self):
         quoted = resolve_name_status_z(b'M\t"internal/config/envname.go"\n')
         renamed = resolve_name_status_z(b"R100\told name\tinternal/config/envname.go\n")
+        copied = resolve_name_status_z(b"C100\tinternal/config/envname.go\tinternal/config/copy.go\n")
         self.assertEqual(quoted.labels, ("//internal/config:config_envname_test",))
         self.assertTrue(renamed.conservative)
+        self.assertTrue(copied.conservative)
 
     def test_shared_graph_files_select_all(self):
         for path in ("MODULE.bazel.lock", ".bazelversion", "go.mod", "internal/clock/BUILD.bazel"):
@@ -126,6 +128,11 @@ class ParseBEPTest(unittest.TestCase):
         self.assertEqual(result.configured, ("//internal/config:config_envname_test",))
         self.assertEqual(result.completed, result.configured)
         self.assertIsNone(result.error)
+
+    def test_fixture_contains_no_credential_material(self):
+        fixture = pathlib.Path(__file__).with_name("testdata") / "bazel" / "real_bazel_9_2.bep.jsonl"
+        text = fixture.read_text(encoding="utf-8")
+        self.assertNotRegex(text, r"(?i)(api[_-]?key|auth[_-]?token|password|secret|mn_live_|sk-[A-Za-z0-9])")
 
 
 if __name__ == "__main__":
