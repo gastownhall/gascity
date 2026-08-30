@@ -306,6 +306,8 @@ def main() -> int:
     else:
         result = parse_bep_jsonl(args.input, args.label or CONFIG_LABELS)
     print(json.dumps(result.as_dict(), sort_keys=True) if args.format == "json" else result.as_tsv())
+    if isinstance(result, BepTargets) and result.error:
+        return 2
     return 0
 
 
