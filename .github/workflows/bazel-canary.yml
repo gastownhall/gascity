@@ -2,21 +2,15 @@ name: Bazel canary
 
 on:
   workflow_dispatch:
+  # Run every PR so docs-only changes can prove the bounded graph is unrelated;
+  # a trigger-level paths filter would hide that evidence and could hide an
+  # unexpectedly affected config change.
   pull_request:
-    paths:
-      - "BUILD.bazel"
-      - "MODULE.bazel"
-      - "MODULE.bazel.lock"
-      - ".bazelversion"
-      - ".bazelrc"
-      - "**/BUILD.bazel"
-      - "**/BUILD"
-      - "**/*.bzl"
-      - "go.mod"
-      - "go.sum"
-      - "internal/config/**"
-      - "internal/**/BUILD.bazel"
-      - "scripts/bazel-config-backtest.sh"
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
 
 permissions:
   contents: read
@@ -25,16 +19,35 @@ jobs:
   bazel-canary:
     name: Bazel selective canary
     runs-on: ubuntu-24.04
+    # Evidence only; required Go/Make lanes remain authoritative.
     continue-on-error: true
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+      - name: Resolve changed Bazel targets
+        id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          OUT: ${{ runner.temp }}/gascity-bazel-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUT"
+          scripts/bazel-canary.sh resolve
+
+      - name: Set up Go for parity and Bazelisk
+        if: steps.resolve.outputs.run_bazel == 'true'
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
 
       - name: Install pinned Bazelisk
+        if: steps.resolve.outputs.run_bazel == 'true'
         env:
           GOBIN: ${{ runner.temp }}/bazel-bin
         run: |
@@ -43,61 +56,53 @@ jobs:
           go install github.com/bazelbuild/bazelisk@v1.26.0
           echo "$GOBIN" >> "$GITHUB_PATH"
 
-      - name: Run Go parity and Bazel targets
+      - name: Run Go parity and selected Bazel targets
+        if: steps.resolve.outputs.run_bazel == 'true'
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          OUT: ${{ runner.temp }}/gascity-bazel-${{ github.run_id }}-${{ github.run_attempt }}
+          RESOLVER: scripts/bazel_target_resolver.py
+        run: |
+          set -euo pipefail
+          # The resolver phase wrote the selected labels to GITHUB_OUTPUT and
+          # the artifact directory; the execution phase is kept in one script
+          # so local backtests and CI exercise the same bounded command.
+          scripts/bazel-canary.sh
+
+      - name: Shut down Bazel canary server
+        if: always()
         env:
           OUT: ${{ runner.temp }}/gascity-bazel-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
-          set -uo pipefail
-          mkdir -p "$OUT"
-          base="$OUT/output-base"
-          bazel="$(command -v bazelisk)"
-          cleanup() {
-            timeout --signal=TERM --kill-after=3 10 "$bazel" --output_base="$base" shutdown >"$OUT/shutdown.log" 2>&1 || true
-          }
-          trap cleanup EXIT
-
-          {
-            echo "target=//internal/config:config_envname_test"
-            echo "target=//internal/config:config_diagnostic_locations_test"
-            # Bazel's remote_cache option is a string (not a boolean), so
-            # --remote_cache= is the supported explicit disable form.
-            echo "remote_cache=disabled (explicit empty URL)"
-          } >"$OUT/summary.txt"
-
-          /usr/bin/time -f 'go_user_s=%U go_maxrss_kb=%M' -o "$OUT/go.time" \
-            timeout --signal=TERM --kill-after=15 5m go test -count=1 ./internal/config \
-            >"$OUT/go.log" 2>&1
-          go_status=$?
-          echo "go_status=$go_status" >>"$OUT/summary.txt"
-          if [[ "$go_status" != 0 ]]; then
-            echo "Go parity failed; Bazel results are non-comparable." >>"$OUT/summary.txt"
-            exit "$go_status"
+          set -u
+          base="${CACHE_ROOT:-${OUT}.cache}/output-base"
+          bazel="$(command -v bazelisk || command -v bazel || true)"
+          if [[ -n "$bazel" ]]; then
+            timeout --signal=TERM --kill-after=3 10 "$bazel" --output_base="$base" shutdown \
+              >"$OUT/shutdown-final.log" 2>&1 || true
           fi
-
-          common=(--noshow_progress --remote_cache= --cache_test_results=no)
-          for target in \
-            //internal/config:config_envname_test \
-            //internal/config:config_diagnostic_locations_test; do
-            name="${target#//}"; name="${name//\//_}"; name="${name//:/_}"
-            /usr/bin/time -f 'bazel_user_s=%U bazel_maxrss_kb=%M' -o "$OUT/$name.time" \
-              timeout --signal=TERM --kill-after=15 5m "$bazel" --output_base="$base" test "${common[@]}" \
-              --build_event_json_file="$OUT/$name.bep.json" --profile="$OUT/$name.profile.gz" "$target" \
-              >"$OUT/$name.log" 2>&1
-            status=$?
-            echo "${name}_status=$status" >>"$OUT/summary.txt"
-            [[ "$status" == 0 ]] || exit "$status"
-          done
 
       - name: Summarize canary artifacts
         if: always()
+        env:
+          OUT: ${{ runner.temp }}/gascity-bazel-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -u
-          out="${{ runner.temp }}/gascity-bazel-${{ github.run_id }}-${{ github.run_attempt }}"
+          mkdir -p "$OUT"
           {
             echo "run_id=${GITHUB_RUN_ID}"
             echo "run_attempt=${GITHUB_RUN_ATTEMPT}"
-            [[ -f "$out/summary.txt" ]] && cat "$out/summary.txt"
-          } >"$out/summary.final.txt"
+            [[ -f "$OUT/summary.txt" ]] && cat "$OUT/summary.txt"
+          } >"$OUT/summary.final.txt"
+          if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+            {
+              echo "## Bazel canary"
+              echo
+              if [[ -f "$OUT/summary.txt" ]]; then sed 's/^/- /' "$OUT/summary.txt"; else echo "- no summary was produced"; fi
+            } >>"$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Upload Bazel canary evidence
         if: always()

@@ -33,6 +33,14 @@ _MAPPED_PATHS = {
     "internal/config/storage_endpoint.go": "//internal/config:config_storage_endpoint_test",
     "internal/config/storage_endpoint_bazel_test.go": "//internal/config:config_storage_endpoint_test",
 }
+_SHARED_INFRA_PATHS = {
+    ".github/workflows/bazel-canary.yml",
+    "scripts/bazel-canary.sh",
+    "scripts/bazel_target_resolver.py",
+    "scripts/bazel-config-backtest.sh",
+    "scripts/test_bazel_target_resolver.py",
+    "scripts/testdata/bazel/real_bazel_9_2.bep.jsonl",
+}
 _STATUS = re.compile(r"^[A-Z][0-9]*$")
 
 
@@ -147,6 +155,8 @@ def _parse_name_status_z(raw: bytes) -> list[tuple[str, tuple[str, ...]]]:
 def _is_shared_graph_path(path: str) -> bool:
     name = posixpath.basename(path)
     return (
+        path in _SHARED_INFRA_PATHS
+        or
         path in {"MODULE.bazel", "MODULE.bazel.lock", ".bazelrc", ".bazelversion", "go.mod", "go.sum", "BUILD.bazel"}
         or name in {"BUILD", "BUILD.bazel"}
         or path.endswith(".bzl")
