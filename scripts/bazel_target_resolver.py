@@ -195,23 +195,43 @@ def _normalize_label(value: Any) -> str | None:
     return f"//{package}:{target}"
 
 
-def _event_label(event: dict[str, Any], kind: str) -> str | None:
+def _event_labels(event: dict[str, Any], kind: str) -> set[str]:
+    labels: set[str] = set()
     identifier = event.get("id", {})
     if isinstance(identifier, dict):
         node = identifier.get(kind, {})
         if isinstance(node, dict):
             label = _normalize_label(node.get("label"))
             if label:
-                return label
+                labels.add(label)
     payload = event.get("configured" if kind == "targetConfigured" else "completed", {})
     if isinstance(payload, dict):
         label = _normalize_label(payload.get("label"))
         if label:
-            return label
+            labels.add(label)
         node = payload.get(kind, {})
         if isinstance(node, dict):
-            return _normalize_label(node.get("label"))
-    return None
+            label = _normalize_label(node.get("label"))
+            if label:
+                labels.add(label)
+    return labels
+
+
+def _pattern_labels(value: Any) -> set[str]:
+    """Extract normalized target patterns from nested BEP pattern payloads."""
+    labels: set[str] = set()
+    if isinstance(value, str):
+        label = _normalize_label(value)
+        if label:
+            labels.add(label)
+    elif isinstance(value, dict):
+        for key, child in value.items():
+            if key in {"pattern", "patterns"}:
+                labels.update(_pattern_labels(child))
+    elif isinstance(value, list):
+        for child in value:
+            labels.update(_pattern_labels(child))
+    return labels
 
 
 def parse_bep_jsonl(path: str | Path, requested_labels: Iterable[str]) -> BepTargets:
@@ -220,6 +240,10 @@ def parse_bep_jsonl(path: str | Path, requested_labels: Iterable[str]) -> BepTar
     requested.discard(None)
     configured: set[str] = set()
     completed: set[str] = set()
+    configured_events: dict[str, int] = {}
+    completed_events: dict[str, int] = {}
+    bep_patterns: set[str] = set()
+    saw_pattern_event = False
     action_summary: dict[str, Any] | None = None
     try:
         with Path(path).open(encoding="utf-8") as source:
@@ -232,18 +256,30 @@ def parse_bep_jsonl(path: str | Path, requested_labels: Iterable[str]) -> BepTar
                     raise ValueError(f"malformed BEP line {number}: {exc.msg}") from exc
                 if not isinstance(event, dict):
                     raise ValueError(f"malformed BEP line {number}: object required")
-                configured_label = _event_label(event, "targetConfigured")
-                completed_label = _event_label(event, "targetCompleted")
-                if configured_label in requested:
+                if "pattern" in event or isinstance(event.get("id"), dict) and "pattern" in event["id"]:
+                    saw_pattern_event = True
+                    bep_patterns.update(_pattern_labels(event.get("pattern", {})))
+                    bep_patterns.update(_pattern_labels(event.get("id", {}).get("pattern", {})))
+                configured_labels = _event_labels(event, "targetConfigured") & requested
+                completed_labels = _event_labels(event, "targetCompleted") & requested
+                for configured_label in configured_labels:
                     configured.add(configured_label)
-                if completed_label in requested:
+                    configured_events[configured_label] = configured_events.get(configured_label, 0) + 1
+                for completed_label in completed_labels:
                     completed.add(completed_label)
+                    completed_events[completed_label] = completed_events.get(completed_label, 0) + 1
                 metrics = event.get("buildMetrics", {})
                 if isinstance(metrics, dict) and isinstance(metrics.get("actionSummary"), dict):
                     action_summary = metrics["actionSummary"]
     except (OSError, ValueError) as exc:
         return BepTargets((), (), None, None, action_summary, str(exc))
 
+    if saw_pattern_event and bep_patterns != requested:
+        return BepTargets((), (), None, None, action_summary, "BEP requested patterns differ")
+    if any(count != 1 for count in configured_events.values()) or any(count != 1 for count in completed_events.values()):
+        return BepTargets((), (), None, None, action_summary, "duplicate requested target events")
+    if set(configured_events) != requested or set(completed_events) != requested:
+        return BepTargets((), (), None, None, action_summary, "missing requested target events")
     sorted_configured = tuple(sorted(configured))
     sorted_completed = tuple(sorted(completed))
     if not sorted_configured or not sorted_completed:
