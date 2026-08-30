@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fail-closed changed-path selection and Bazel BEP target correlation.
 
-The resolver is deliberately limited to the three bounded config pilot labels.
+The resolver is deliberately limited to the four bounded config pilot labels.
 It treats missing diff data, storage/config changes outside the mapped files,
 and build-graph changes as conservative all-target selections.
 """
@@ -22,6 +22,7 @@ from typing import Any, Iterable
 CONFIG_LABELS = (
     "//internal/config:config_diagnostic_locations_test",
     "//internal/config:config_envname_test",
+    "//internal/config:config_identity_seam_test",
     "//internal/config:config_storage_endpoint_test",
 )
 
@@ -30,6 +31,8 @@ _MAPPED_PATHS = {
     "internal/config/config_envname_bazel_test.go": "//internal/config:config_envname_test",
     "internal/config/diagnostic_locations.go": "//internal/config:config_diagnostic_locations_test",
     "internal/config/diagnostic_locations_test.go": "//internal/config:config_diagnostic_locations_test",
+    "internal/config/identity_seam.go": "//internal/config:config_identity_seam_test",
+    "internal/config/identity_seam_bazel_test.go": "//internal/config:config_identity_seam_test",
     "internal/config/storage_endpoint.go": "//internal/config:config_storage_endpoint_test",
     "internal/config/storage_endpoint_bazel_test.go": "//internal/config:config_storage_endpoint_test",
 }
