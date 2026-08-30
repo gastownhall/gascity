@@ -3530,6 +3530,14 @@ func canonicalEvidenceStoreRef(storeRef string) string {
 		return "rig:" + strings.TrimSpace(strings.TrimPrefix(storeRef, "rig:"))
 	default:
 		// The only bare names in the demand vocabulary are rig names.
+		//
+		// A rig literally named "city" is ambiguous here, because the city
+		// store's own probe ref is the bare string "city". That ambiguity is
+		// older and wider than this guard: the same collision already exists
+		// in every demand key built from the probe vocabulary. Nothing is
+		// reserved at config validation. This guard resolves it fail-closed,
+		// refusing the workspace rather than binding a session to a store it
+		// cannot prove it owns.
 		return "rig:" + storeRef
 	}
 }
