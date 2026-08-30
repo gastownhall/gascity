@@ -52,7 +52,15 @@ class ResolveNameStatusZTest(unittest.TestCase):
         self.assertTrue(copied.conservative)
 
     def test_shared_graph_files_select_all(self):
-        for path in ("MODULE.bazel.lock", ".bazelversion", "go.mod", "internal/clock/BUILD.bazel"):
+        for path in (
+            "MODULE.bazel.lock",
+            ".bazelversion",
+            "go.mod",
+            "internal/clock/BUILD.bazel",
+            ".github/workflows/bazel-canary.yml",
+            "scripts/bazel-canary.sh",
+            "scripts/bazel_target_resolver.py",
+        ):
             selection = self.resolve("M", path)
             self.assertEqual(selection.labels, CONFIG_LABELS)
             self.assertTrue(selection.conservative)
