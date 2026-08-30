@@ -153,3 +153,40 @@ func TestWorktreeSpecForBeadRequiresCompletePublishedEvidence(t *testing.T) {
 		t.Fatalf("bead without work_dir = spec %+v err %v, want no managed workspace", spec, err)
 	}
 }
+
+func TestWorktreeSpecForBeadPrefersCanonicalStoreRef(t *testing.T) {
+	metadata := map[string]string{
+		beadmeta.WorkDirMetadataKey:            "/worktrees/gc-test",
+		beadmeta.WorkBranchMetadataKey:         "work/gc-test",
+		beadmeta.WorktreeRootMetadataKey:       "/worktrees",
+		beadmeta.WorktreeRepoMetadataKey:       "/repos/gascity",
+		beadmeta.WorktreeBaseRefMetadataKey:    "main",
+		beadmeta.WorktreeBaseSHAMetadataKey:    strings.Repeat("a", 40),
+		beadmeta.WorktreeCreatorMetadataKey:    "gc-sling",
+		beadmeta.WorktreeOwnerMetadataKey:      "gc-sling",
+		beadmeta.WorktreeGenerationMetadataKey: "7",
+		beadmeta.WorktreeLifecycleMetadataKey:  worktree.LifecycleActive,
+		beadmeta.RootStoreRefMetadataKey:       "city:test-city",
+	}
+	bead := beads.Bead{ID: "gc-test", Metadata: metadata}
+
+	// The probe shorthand "city" would not match the provenance the creating
+	// side published under the canonical ref, so verification would refuse a
+	// workspace that is ours.
+	spec, err := worktreeSpecForBead(bead, "city")
+	if err != nil {
+		t.Fatalf("worktreeSpecForBead: %v", err)
+	}
+	if spec.StoreRef != "city:test-city" {
+		t.Fatalf("StoreRef = %q, want the bead's canonical %q", spec.StoreRef, "city:test-city")
+	}
+
+	delete(metadata, beadmeta.RootStoreRefMetadataKey)
+	fallback, err := worktreeSpecForBead(beads.Bead{ID: "gc-test", Metadata: metadata}, "city")
+	if err != nil {
+		t.Fatalf("worktreeSpecForBead without canonical ref: %v", err)
+	}
+	if fallback.StoreRef != "city" {
+		t.Fatalf("fallback StoreRef = %q, want the caller's %q", fallback.StoreRef, "city")
+	}
+}

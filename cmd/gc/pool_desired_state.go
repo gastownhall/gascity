@@ -93,7 +93,18 @@ func worktreeSpecForBead(bead beads.Bead, storeRef string) (*worktree.Spec, erro
 				bead.ID, beadmeta.WorkDirMetadataKey, path, item.key)
 		}
 	}
-	if strings.TrimSpace(storeRef) == "" {
+	// The bead's own gc.root_store_ref is the canonical spelling
+	// ("city:<name>", "rig:<name>") and is what the creating side recorded in
+	// the workspace provenance. The caller's storeRef is a probe shorthand
+	// ("city"), so verification against durable provenance compares unequal
+	// strings and refuses a workspace that is in fact ours. Prefer the bead's
+	// value and keep the shorthand only as a fallback for beads that carry no
+	// canonical ref.
+	resolvedStoreRef := strings.TrimSpace(bead.Metadata[beadmeta.RootStoreRefMetadataKey])
+	if resolvedStoreRef == "" {
+		resolvedStoreRef = strings.TrimSpace(storeRef)
+	}
+	if resolvedStoreRef == "" {
 		return nil, fmt.Errorf("work bead %s has %s=%q but no store reference", bead.ID, beadmeta.WorkDirMetadataKey, path)
 	}
 	return &worktree.Spec{
@@ -104,7 +115,7 @@ func worktreeSpecForBead(bead beads.Bead, storeRef string) (*worktree.Spec, erro
 		Base:       strings.TrimSpace(bead.Metadata[beadmeta.WorktreeBaseRefMetadataKey]),
 		BaseSHA:    strings.TrimSpace(bead.Metadata[beadmeta.WorktreeBaseSHAMetadataKey]),
 		BeadID:     strings.TrimSpace(bead.ID),
-		StoreRef:   strings.TrimSpace(storeRef),
+		StoreRef:   resolvedStoreRef,
 		Creator:    strings.TrimSpace(bead.Metadata[beadmeta.WorktreeCreatorMetadataKey]),
 		Owner:      strings.TrimSpace(bead.Metadata[beadmeta.WorktreeOwnerMetadataKey]),
 		Generation: strings.TrimSpace(bead.Metadata[beadmeta.WorktreeGenerationMetadataKey]),
