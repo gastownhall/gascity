@@ -4,6 +4,9 @@
 # This is intentionally a research harness: it does not alter CI or claim
 # that historical revisions carried the current BUILD graph.  The graph files
 # are copied from the checkout under test, while source edits are disposable.
+# Defaults preserve the original contract pilot target. For config runs set
+# BACKTEST_TARGET=//internal/config:config_envname_test and point the source,
+# test, and graph-file variables at the bounded config BUILD slice.
 set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
@@ -29,7 +32,11 @@ for s in "${scenarios[@]}"; do [[ "$allowed" == *" $s "* ]] || { echo "unknown s
 refs=("$@")
 if ((${#refs[@]} == 0)); then refs=("7c33f3f7f1" "128bd64033" "a784438ce0" "58a47d6bdc"); fi
 
-now_ns() { date +%s%N; }
+now_ns() {
+  if command -v perl >/dev/null 2>&1; then perl -MTime::HiRes=time -e 'printf "%.0f\n", time()*1e9'; return; fi
+  local stamp; stamp="$(date +%s%N)"
+  [[ "$stamp" =~ ^[0-9]+$ ]] && printf '%s\n' "$stamp" || printf '%s000000000\n' "$(date +%s)"
+}
 shutdown_bazel() { "$bazel_bin" --output_base="$1" shutdown >/dev/null 2>&1 || true; }
 
 tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/gascity-config-backtest.XXXXXX")"
@@ -92,7 +99,7 @@ for ref in "${refs[@]}"; do
       wall="$(awk -v n="$((end-start))" 'BEGIN{printf "%.3f",n/1e9}')"; user="$(sed -n 's/.*user=\([^ ]*\).*/\1/p' "$out.time" | tail -1)"; rss="$(sed -n 's/.*rss=\([^ ]*\).*/\1/p' "$out.time" | tail -1)"; [[ -n "$user" ]] || user=unknown; [[ -n "$rss" ]] || rss=unknown
       metrics="$(python3 - "$bep" <<'PY'
 import json,sys
-a=e=hi=mi=analysis='unknown'; selected=0
+a=e=hi=mi=analysis='unknown'; selected='unknown'
 try:
   for line in open(sys.argv[1],encoding='utf-8'):
     try: j=json.loads(line)
@@ -101,7 +108,10 @@ try:
     if s:
       a=s.get('actionsCreated',0); e=s.get('actionsExecuted',0); c=s.get('actionCacheStatistics',{}); hi=c.get('hitCount',c.get('hits',0)); mi=c.get('missCount',c.get('misses',0))
     am=bm.get('analysisMetrics',{}); analysis=am.get('totalTimeInMs',am.get('analysisTimeInMs',analysis))
-    if 'configured' in j or 'configuredTarget' in j: selected += 1
+    # BEP configured events include transitive dependencies; without a
+    # target-pattern correlation, reporting a numeric selected count would be
+    # misleading. Keep this metric explicitly unknown until that mapping is
+    # implemented.
 except FileNotFoundError: pass
 print(a,e,hi,mi,analysis,selected)
 PY
