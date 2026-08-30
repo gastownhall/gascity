@@ -213,7 +213,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 		//
 		// Explicit `gc prime` (no --hook) is untouched: a human asking for the
 		// prompt still gets it.
-		if !hookHasManagedIdentity() {
+		if len(args) == 0 && !hookHasManagedIdentity() {
 			writePrimePromptWithFormat(stdout, "", "", "", hookMode, hookFormat, false, "", nil)
 			return 0
 		}
@@ -535,8 +535,11 @@ func primeHookSessionStart(ctx primeHookContext) bool {
 // hookIdentityEnv are the environment markers that show gc, rather than a
 // human, started the process a hook is running inside. gc's session lifecycle
 // sets the session and agent variables and its managed hook wrappers set
-// GC_MANAGED_SESSION_HOOK, so none of them appear in a provider a human
-// launched themselves — even in a directory gc has staged hook overlays into.
+// GC_MANAGED_SESSION_HOOK. The codex and antigravity overlays do bake
+// GC_MANAGED_SESSION_HOOK=1 into their staged `gc prime --hook` command, so a
+// human-launched session there passes this gate — those two also set
+// GC_HOOK_EVENT_NAME=SessionStart and stay covered by the live-session gate
+// below.
 var hookIdentityEnv = []string{
 	"GC_SESSION_ID",
 	"GC_SESSION_NAME",

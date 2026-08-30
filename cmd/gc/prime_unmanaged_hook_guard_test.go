@@ -140,3 +140,19 @@ func TestPersistPrimeHookProviderSessionKeyStillWarnsWithAgentIdentity(t *testin
 		t.Fatalf("an agent identity proves managed intent; the diagnostic must stay.\ngot: %q", got)
 	}
 }
+
+// TestDoPrimeHookExplicitAgentStillServedWhenUnmanaged pins the carve-out the
+// mail and nudge guards already have: naming an agent is a deliberate request,
+// and no staged overlay ever passes one, so it must not be silenced.
+func TestDoPrimeHookExplicitAgentStillServedWhenUnmanaged(t *testing.T) {
+	unmanagedPrimeHookEnv(t)
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithHookFormat([]string{"mayor"}, &stdout, &stderr, true, "", false)
+	if code != 0 {
+		t.Fatalf("doPrimeWithHookFormat() = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if strings.TrimSpace(stdout.String()) == "" {
+		t.Fatal("an explicitly named agent must still be served; the identity guard over-suppressed")
+	}
+}
