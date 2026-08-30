@@ -137,10 +137,7 @@ func ControlDispatcherForScope(cfg *City, rigContext string) (Agent, bool) {
 // BindingQualifiedName returns the binding-qualified agent identity without a
 // rig prefix. Examples: "polecat", "gastown.polecat", or "gastown.mayor".
 func (a *Agent) BindingQualifiedName() string {
-	if a.BindingName == "" {
-		return a.Name
-	}
-	return a.BindingName + "." + a.Name
+	return bindingQualifiedIdentity(a.BindingName, a.Name)
 }
 
 // BindingPrefix returns the import binding prefix for route/template
@@ -157,11 +154,7 @@ func (a *Agent) BindingPrefix() string {
 // prefix when present. Examples: "mayor", "gastown.mayor",
 // "hello-world/polecat", and "hello-world/gastown.polecat".
 func (a *Agent) QualifiedName() string {
-	name := a.BindingQualifiedName()
-	if a.Dir == "" {
-		return name
-	}
-	return a.Dir + "/" + name
+	return qualifiedIdentity(a.Dir, a.BindingName, a.Name)
 }
 
 // ParseQualifiedName splits an agent identity into (dir, name).
@@ -170,10 +163,7 @@ func (a *Agent) QualifiedName() string {
 // "gastown.mayor" → ("", "gastown.mayor").
 // "mayor" → ("", "mayor").
 func ParseQualifiedName(identity string) (dir, name string) {
-	if i := strings.LastIndex(identity, "/"); i >= 0 {
-		return identity[:i], identity[i+1:]
-	}
-	return "", identity
+	return parseQualifiedIdentity(identity)
 }
 
 // QualifiedInstanceName builds a qualified identity for a pool instance
@@ -181,14 +171,7 @@ func ParseQualifiedName(identity string) (dir, name string) {
 // "dir/binding.instanceName" or "binding.instanceName". For V1 agents,
 // produces "dir/instanceName" or just "instanceName".
 func (a *Agent) QualifiedInstanceName(instanceName string) string {
-	name := instanceName
-	if a.BindingName != "" {
-		name = a.BindingName + "." + instanceName
-	}
-	if a.Dir == "" {
-		return name
-	}
-	return a.Dir + "/" + name
+	return qualifiedIdentity(a.Dir, a.BindingName, instanceName)
 }
 
 // AgentMatchesIdentity returns true if the agent's qualified name matches
@@ -199,18 +182,7 @@ func (a *Agent) QualifiedInstanceName(instanceName string) string {
 // without a BindingName — imported V2 agents must be addressed by their
 // qualified name.
 func AgentMatchesIdentity(a *Agent, identity string) bool {
-	// Try V2 qualified name first (includes binding).
-	if a.QualifiedName() == identity {
-		return true
-	}
-	// Fallback: V1-style dir+name match. Only allowed when the agent
-	// has no binding name — imported V2 agents must be addressed by
-	// their qualified name (binding.name), not bare name.
-	if a.BindingName == "" {
-		dir, name := ParseQualifiedName(identity)
-		return a.Dir == dir && a.Name == name
-	}
-	return false
+	return agentIdentityMatches(a.Dir, a.Name, a.BindingName, identity)
 }
 
 // City is the top-level configuration for a Gas City instance.

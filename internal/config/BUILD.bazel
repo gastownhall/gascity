@@ -5,7 +5,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 # authoritative for all config behavior.
 go_library(
     name = "config_hermetic",
-    srcs = ["diagnostic_locations.go", "envname.go", "storage_endpoint.go"],
+    srcs = ["diagnostic_locations.go", "envname.go", "identity_seam.go", "storage_endpoint.go"],
     importpath = "github.com/gastownhall/gascity/internal/config",
     visibility = ["//visibility:public"],
 )
@@ -30,6 +30,13 @@ go_test(
 go_test(
     name = "config_storage_endpoint_test",
     srcs = ["storage_endpoint_bazel_test.go"],
+    embed = [":config_hermetic"],
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "config_identity_seam_test",
+    srcs = ["identity_seam_bazel_test.go"],
     embed = [":config_hermetic"],
     visibility = ["//visibility:public"],
 )
