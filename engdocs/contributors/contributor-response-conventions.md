@@ -41,10 +41,12 @@ has not, and neither has the next person who rewrites it.
 
 The rules below describe what a **maintainer** owes a contributor. An agent
 seat may draft any of these replies and may gather the evidence a verdict rests
-on, but posting a comment, closing an issue or PR, pushing, and merging are
-external actions under the autonomy boundary in `AGENTS.md`. They require
-explicit per-action approval. A verdict existing is not authorization to
-publish it.
+on, but posting a comment, closing an issue or PR, pushing to someone else's
+branch, and merging are external actions that reach a contributor. They require
+explicit per-action authorization from the active user, repository, or
+orchestrator instructions; a verdict existing is not authorization to publish
+it. This is distinct from the session-close push in `AGENTS.md`, which governs
+an agent's own work branch and not someone else's PR.
 
 Where an acknowledgement is agent-drafted and not yet reviewed by a human, it
 says so rather than implying a person has read the code.
@@ -118,9 +120,10 @@ preference:
    preserves their commits and authorship rather than reimplementing the
    change. Link both directions and say in the replacement's body whose work it
    carries. The common cause is a fork opened without maintainer edits enabled,
-   which is the contributor's setting to make and not something to argue about;
-   #1732 and #1742 took this path for a different unpushable-branch reason and
-   are the worked examples of preserving authorship through a replacement.
+   which is the contributor's setting to make and not something to argue about.
+   #1732 and #1742 are the worked examples of preserving authorship through a
+   replacement: #1732's closing note names maintainer edits being disabled, and
+   #1742's names being unable to push commits to the branch.
 
 Never reimplement the change as fresh work and close theirs as a duplicate of
 our own.
