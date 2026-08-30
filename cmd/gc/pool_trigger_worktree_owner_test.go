@@ -154,6 +154,25 @@ func TestWorktreeSpecForBeadRequiresCompletePublishedEvidence(t *testing.T) {
 	}
 }
 
+// TestWorktreeSpecForBeadTreatsWorkDirOnlyAsLegacy covers a pre-#5193 bead:
+// gc.work_dir stamped by an older formula with none of the nine ownership
+// keys. That is not "incomplete evidence" (the bead never claimed to publish
+// any), so the pool must plan the seat unmanaged instead of erroring it into
+// permanent starvation.
+func TestWorktreeSpecForBeadTreatsWorkDirOnlyAsLegacy(t *testing.T) {
+	bead := beads.Bead{ID: "gc-test", Metadata: map[string]string{
+		beadmeta.WorkDirMetadataKey: "/worktrees/gc-test",
+	}}
+
+	spec, err := worktreeSpecForBead(bead, "rig:gascity")
+	if err != nil {
+		t.Fatalf("worktreeSpecForBead: %v, want a legacy work_dir-only bead to be treated as unmanaged, not errored", err)
+	}
+	if spec != nil {
+		t.Fatalf("spec = %+v, want nil so the seat spawns exactly as it did before #5193", spec)
+	}
+}
+
 func TestWorktreeSpecForBeadPrefersCanonicalStoreRef(t *testing.T) {
 	metadata := map[string]string{
 		beadmeta.WorkDirMetadataKey:            "/worktrees/gc-test",
