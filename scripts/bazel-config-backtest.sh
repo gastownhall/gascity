@@ -7,7 +7,15 @@
 # Defaults preserve the original contract pilot target. For config runs set
 # BACKTEST_TARGET=//internal/config:config_envname_test and point the source,
 # test, and graph-file variables at the bounded config BUILD slice.
+# Linux with GNU `/usr/bin/time -f` and `timeout` (or `gtimeout`) is required.
+# Set BACKTEST_SAMPLES, BACKTEST_TIMEOUT, and BACKTEST_SCENARIOS to tune runs;
+# pass one or more git refs as positional arguments.
 set -euo pipefail
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  sed -n '2,12p' "$0"
+  exit 0
+fi
 
 repo_root="$(git rev-parse --show-toplevel)"
 bazel_bin="${BAZEL_BIN:-$(command -v bazelisk || command -v bazel || true)}"
@@ -21,7 +29,10 @@ unrelated_file="${BACKTEST_UNRELATED_FILE:-docs/README.md}"
 graph_files="${BACKTEST_GRAPH_FILES:-MODULE.bazel MODULE.bazel.lock .bazelrc BUILD.bazel internal/beads/contract/BUILD.bazel internal/beadmeta/BUILD.bazel internal/fsys/BUILD.bazel internal/pidutil/BUILD.bazel internal/testenv/BUILD.bazel internal/config/BUILD.bazel internal/config/config_envname_bazel_test.go internal/config/diagnostic_locations_test.go}"
 scenario_csv="${BACKTEST_SCENARIOS:-cold,forced,no-op,source-edit,test-edit,unrelated-edit,go-mod}"
 if [[ -z "$bazel_bin" ]]; then echo "set BAZEL_BIN or install bazelisk" >&2; exit 127; fi
+[[ "$(uname -s)" == Linux ]] || { echo "Linux is required for this harness (GNU timing semantics)" >&2; exit 2; }
 if ! command -v timeout >/dev/null 2>&1 && ! command -v gtimeout >/dev/null 2>&1; then echo "GNU timeout (or gtimeout) is required for bounded runs" >&2; exit 127; fi
+[[ -x /usr/bin/time ]] || { echo "/usr/bin/time is required" >&2; exit 127; }
+if ! /usr/bin/time -f '%e' true >/dev/null 2>&1; then echo "/usr/bin/time does not support GNU -f; install GNU time" >&2; exit 127; fi
 [[ "$samples" =~ ^[1-9][0-9]*$ ]] || { echo "BACKTEST_SAMPLES must be positive" >&2; exit 2; }
 [[ "$samples" -le 1000 ]] || { echo "BACKTEST_SAMPLES must be <= 1000" >&2; exit 2; }
 [[ "$target" == //*:* ]] || { echo "BACKTEST_TARGET must look like //pkg:name" >&2; exit 2; }
@@ -63,6 +74,12 @@ for ref in "${refs[@]}"; do
   if command -v timeout >/dev/null 2>&1; then timeout --signal=TERM --kill-after=15 "$timeout_s" go -C "$work" test -count=1 "$go_package" >"$go_log" 2>&1 || go_status=$?; else gtimeout --signal=TERM --kill-after=15 "$timeout_s" go -C "$work" test -count=1 "$go_package" >"$go_log" 2>&1 || go_status=$?; fi
   go_end="$(now_ns)"; go_wall="$(awk -v n="$((go_end-go_start))" 'BEGIN{printf "%.3f",n/1e9}')"
   printf 'go\t%s\tstatus=%s\twall_s=%s\tpackage=%s\n' "${resolved:0:12}" "$go_status" "$go_wall" "$go_package"
+  if [[ "$go_status" != 0 ]]; then
+    printf 'skip\t%s\tgo baseline failed or timed out; Bazel rows are non-comparable\n' "${resolved:0:12}" >&2
+    git -C "$repo_root" worktree remove --force "$work" >/dev/null 2>&1 || true
+    current_work=""
+    continue
+  fi
   # Preserve files so each scenario starts from the same source state.
   for f in "$source_file" "$test_file" "$unrelated_file" go.mod; do [[ -f "$work/$f" ]] && cp -f "$work/$f" "$tmp_root/$(basename "$f").orig"; done
   base="$work/bazel-output"; current_base="$base"
