@@ -228,15 +228,19 @@ rows = []
 for line in open(sys.argv[1], encoding='utf-8'):
     if line.startswith('ref\t') or not line.strip(): continue
     p = line.rstrip('\n').split('\t')
-    if len(p) >= 5:
-        try: rows.append((p[0], p[2], float(p[4])))
+    if len(p) >= 14:
+        try: rows.append((p[0], p[2], float(p[13])))
         except ValueError: pass
 for ref in sorted({r[0] for r in rows}):
   for scenario in sorted({r[1] for r in rows if r[0] == ref}):
     vals = [r[2] for r in rows if r[0] == ref and r[1] == scenario]
     failures = sum(1 for line in open(sys.argv[1], encoding='utf-8')
-                   if line.startswith(ref+'\t') and ('\t'+scenario+'\t') in line and line.split('\t')[3] != '0')
+                   if line.startswith(ref+'\t') and ('\t'+scenario+'\t') in line
+                   and line.split('\t')[3] not in {'0', 'not-run'})
+    not_run = sum(1 for line in open(sys.argv[1], encoding='utf-8')
+                  if line.startswith(ref+'\t') and ('\t'+scenario+'\t') in line
+                  and line.split('\t')[3] == 'not-run')
     if vals:
       p95 = statistics.quantiles(vals, n=20, method='inclusive')[18] if len(vals)>1 else vals[0]
-      print(f"summary\t{ref}\t{scenario}\tn={len(vals)}\tfailures={failures}\tp50_s={statistics.median(vals):.3f}\tp95_s={p95:.3f}")
+      print(f"summary\t{ref}\t{scenario}\tn={len(vals)}\tfailures={failures}\tnot_run={not_run}\tp50_s={statistics.median(vals):.3f}\tp95_s={p95:.3f}")
 PY
