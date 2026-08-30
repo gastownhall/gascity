@@ -143,7 +143,15 @@ for ref in "${refs[@]}"; do
         unrelated-edit) printf 'M\0%s\0' "$unrelated_file" >"$diff_input";;
         go-mod) printf 'M\0go.mod\0' >"$diff_input";;
       esac
-      selection_json="$(python3 "$resolver" resolve "$diff_input" --format json)"
+      if ! selection_json="$(python3 "$resolver" resolve "$diff_input" --format json)"; then
+        # Resolver/tool failures are fail-closed: run all configured targets
+        # with an explicit unavailable reason rather than silently selecting 0.
+        selection_json="$(python3 - "$target_labels_csv" <<'PY'
+import json,sys
+print(json.dumps({"labels":sys.argv[1].split(","),"conservative":True,"reason":"unavailable","error":"resolver failed"}))
+PY
+        )"
+      fi
       selection_reason="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["reason"])' <<<"$selection_json")"
       conservative="$(python3 -c 'import json,sys; print(str(json.load(sys.stdin)["conservative"]).lower())' <<<"$selection_json")"
       selection_error="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("error") or "")' <<<"$selection_json")"
