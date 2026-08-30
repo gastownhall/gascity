@@ -31,7 +31,14 @@ if [[ -z "$bazel_bin" ]]; then
 fi
 
 now_ns() {
-	date +%s%N
+	local stamp
+	stamp="$(date +%s%N)"
+	if [[ "$stamp" =~ ^[0-9]+$ ]]; then
+		printf '%s\n' "$stamp"
+	else
+		# BSD date (macOS) has no %N; retain second precision there.
+		printf '%s000000000\n' "$(date +%s)"
+	fi
 }
 
 run_timed() {
