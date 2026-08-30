@@ -76,3 +76,9 @@ __pycache__/
 # Beads / Dolt files (added by bd init)
 .beads/proxieddb/
 .beads.backup-*
+
+# Bazel workspace output symlinks; cache lives outside the checkout.
+/bazel-bin
+/bazel-out
+/bazel-testlogs
+/bazel-gascity-bazel-config

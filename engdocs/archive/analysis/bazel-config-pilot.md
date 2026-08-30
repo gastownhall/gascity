@@ -20,3 +20,7 @@ go list -test -deps ./internal/config \
 The resulting list is the review input for the next slice. Until each package
 has explicit deps and declared data, `go test ./internal/config` remains the
 only complete config validation; no partial Bazel config target is claimed.
+
+The pilot includes `//internal/config:config_envname_test`, a deliberately
+small feasibility target over the real `envname.go` production source. It is
+not a replacement for the full config package or its 85-test suite.
