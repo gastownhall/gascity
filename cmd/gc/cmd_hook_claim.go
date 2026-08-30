@@ -342,11 +342,18 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 	// specimen seat claimed and executed a preflight three hours into its drain
 	// while the graph store recorded that step under a fresher seat.
 	//
-	// Refuse before the work query, which also puts this ahead of
-	// hookClaimExistingAssignment. Adoption is deliberately fenced too: letting
-	// a draining seat resume its own in-progress bead re-parks the identical
-	// wedge. That work belongs to the dead-assignee and reopen lanes once the
-	// drain completes.
+	// PRE-MUTATION, NOT PRE-QUERY. In this function the fence precedes
+	// ops.Runner, but the production caller (claimHookWorkWithRunner) has
+	// already run the federated work query to SELECT a store and passes a
+	// pre-captured runner, so on that path the probe runs after the query. The
+	// guarantee this fence actually makes is the one that matters: no claim CAS,
+	// no adoption, no stamp. A draining seat still pays the query it no longer
+	// needs — waste, bounded by its remaining polls, not a correctness gap.
+	//
+	// Refusing here also puts the fence ahead of hookClaimExistingAssignment.
+	// Adoption is deliberately fenced too: letting a draining seat resume its
+	// own in-progress bead re-parks the identical wedge. That work belongs to
+	// the dead-assignee and reopen lanes once the drain completes.
 	//
 	// The refusal rides the existing "drain" action — the agent protocol already
 	// treats it as "wind down" — and, unlike F-A, it CONSUMES --drain-ack. That
@@ -360,9 +367,16 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 			// drain lanes remain the backstop exactly as they are today. Name the
 			// fault without the alarming refusal wording, the same shape the
 			// runtime-identity fence's store-unavailable arm uses.
+			//
+			// The event is what makes failing open survivable. A persistent probe
+			// fault switches this fence AND the runtime-identity fence off
+			// fleet-wide, and stderr inside an agent pane is not an operator
+			// signal; this record is the only thing off-pane that distinguishes
+			// "fence acting" from "fence inert".
 			fmt.Fprintf(stderr, "gc hook --claim: drain-pending probe unavailable for %s: %v; proceeding to claim\n", sessionID, err) //nolint:errcheck
+			hookEmitDrainFenceUnavailable(stderr, sessionID, hookClaimEnvValue(opts.Env, "GC_TEMPLATE"), err)
 		case pending:
-			return hookClaimResult{terminal: true, code: writeHookClaimDrainPending(sessionID, *opts, *ops, stdout, stderr)}
+			return hookClaimResult{terminal: true, code: writeHookClaimDrainPending("gc hook --claim", sessionID, *opts, *ops, stdout, stderr)}
 		}
 	}
 
@@ -390,8 +404,18 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 	}
 
 	if result, bead, ok := hookClaimExistingAssignment(candidates, *opts); ok {
-		// minted=false: adoption returns work this session already owned.
-		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, bead, *opts, *ops, dir, false, stdout, stderr)}
+		// Adoption mints no CAS, so until now it minted its receipt on the word
+		// of the work query alone — and a stale caching-store row survives long
+		// enough to re-serve a bead the dispatcher already gave to a fresher
+		// seat. Certify against the canonical store before promising it.
+		if certifyHookAdoption(bead, *opts, *ops, dir, stderr) != hookAdoptionRefused {
+			// minted=false: adoption returns work this session already owned.
+			return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, bead, *opts, *ops, dir, false, stdout, stderr)}
+		}
+		// Refused: fall through to the claim tiers. The seat is healthy — its
+		// cache was not — and neither tier can match this row anyway (ready
+		// requires open, eligible requires an empty assignee), so this ends in
+		// the shared drain unless there is other work to do.
 	}
 
 	readyResult := claimFirstReadyHookAssignment(candidates, *opts, *ops, dir, stdout, stderr)
@@ -813,6 +837,53 @@ func reportHookClaimRejected(candidate, claimed beads.Bead, opts hookClaimOption
 	ops.EmitClaimRejected(candidate.ID, existing, opts.Assignee)
 }
 
+// hookAdoptionVerdict is what a canonical ownership readback said about a bead
+// the work query offered up for adoption.
+type hookAdoptionVerdict int
+
+const (
+	// hookAdoptionOwned: the canonical store agrees this session holds it.
+	hookAdoptionOwned hookAdoptionVerdict = iota
+	// hookAdoptionUnverified: the readback could not be MADE. Not evidence of
+	// foreign ownership, so the bead is still served.
+	hookAdoptionUnverified
+	// hookAdoptionRefused: the canonical store names a different owner. The
+	// receipt is withheld.
+	hookAdoptionRefused
+)
+
+// certifyHookAdoption checks a bead the work query says this session already
+// holds against the canonical store before an existing_assignment receipt
+// promises it.
+//
+// The two failure arms are deliberately different, and the difference is the
+// whole design. A MISMATCH is positive evidence that someone else owns the bead
+// — the stale-cache shape that re-serves a re-slung step to the seat that lost
+// it — and it is refused. An unreadable readback is evidence of nothing; the
+// stamp path already treats that case as "proceed, but emit no durable
+// lifecycle record", and failing closed here would idle every seat behind one
+// store hiccup, the same trade the F-D probe makes for the same reason.
+func certifyHookAdoption(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) hookAdoptionVerdict {
+	beadID := strings.TrimSpace(bead.ID)
+	if beadID == "" || ops.ReadWorkMeta == nil {
+		return hookAdoptionUnverified
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
+	defer cancel()
+	canonical, err := ops.ReadWorkMeta(ctx, dir, opts.Env, beadID, opts.Assignee)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc hook --claim: adopting %s without a canonical ownership readback: %v\n", beadID, err) //nolint:errcheck
+		return hookAdoptionUnverified
+	}
+	if !hookClaimHasIdentity(canonical.Assignee, opts.IdentityCandidates) {
+		_, _ = fmt.Fprintf(stderr,
+			"gc hook --claim: refusing to re-serve %s: the canonical store records assignee=%q, not this session (%s)\n",
+			beadID, strings.TrimSpace(canonical.Assignee), opts.Assignee)
+		return hookAdoptionRefused
+	}
+	return hookAdoptionOwned
+}
+
 func hookClaimExistingAssignment(candidates []beads.Bead, opts hookClaimOptions) (hookClaimJSONResult, beads.Bead, bool) {
 	for _, candidate := range candidates {
 		if hookClaimCandidateIsMessage(candidate) {
@@ -1038,10 +1109,15 @@ func writeHookClaimNonTurnDrain(marker string, opts hookClaimOptions, stdout, st
 // and an adopted pane whose environment did not survive a restart acks as nobody
 // — which reads downstream as no acknowledgement at all. Naming the id lets the
 // agent run the form that resolves the target from the store instead.
-func writeHookClaimDrainPending(sessionID string, opts hookClaimOptions, ops hookClaimOps, stdout, stderr io.Writer) int {
+// label names the door the refusal came through ("gc hook --claim" or
+// "gc hook"), because both are fenced and an operator reading a pane needs to
+// know which one answered. The JSON record is identical either way: the command
+// is "hook" for both, and a consumer should not have to care.
+func writeHookClaimDrainPending(label, sessionID string, opts hookClaimOptions, ops hookClaimOps, stdout, stderr io.Writer) int {
 	_, _ = fmt.Fprintf(stderr,
-		"gc hook --claim: drain pending for this session; run: gc runtime drain-ack %s — then exit\n",
-		sessionID)
+		"%s: drain pending for this session; run: gc runtime drain-ack %s — then exit\n",
+		label, sessionID)
+
 	return writeHookClaimDrain(hookClaimReasonDrainPending, opts.JSON, opts.DrainAck, ops.DrainAck, stdout, stderr)
 }
 
@@ -1071,12 +1147,21 @@ func writeHookClaimDrain(reason string, jsonOut, drainAck bool, drainAckFn hookD
 		Action:        "drain",
 		Reason:        reason,
 	}
+	// A FAILED ack no longer swallows the drain record.
+	//
+	// Returning here before the JSON write handed a --json caller no action at
+	// all — the bare-exit-1 shape a startup wrapper retries forever, on exactly
+	// the seat that is trying to leave. The exit code still reports that nothing
+	// was acknowledged; the record still reports that the answer was "drain".
+	// Those are different facts and the consumer needs both.
+	ackFailed := false
 	if drainAck {
 		if err := drainAckFn(stderr); err != nil {
 			fmt.Fprintf(stderr, "gc hook --claim: drain-ack failed: %v\n", err) //nolint:errcheck
-			return 1
+			ackFailed = true
+		} else {
+			result.DrainAcknowledged = true
 		}
-		result.DrainAcknowledged = true
 	}
 	if jsonOut {
 		if err := writeCLIJSONLine(stdout, result); err != nil {
@@ -1084,7 +1169,7 @@ func writeHookClaimDrain(reason string, jsonOut, drainAck bool, drainAckFn hookD
 			return 1
 		}
 	}
-	if drainAck {
+	if drainAck && !ackFailed {
 		return 0
 	}
 	return 1

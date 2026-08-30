@@ -90,13 +90,19 @@ func (e *drainPendingClaimEnv) result(t *testing.T) hookClaimJSONResult {
 	return result
 }
 
-// F1, the load-bearing pin. A seat whose session row says `draining` refuses the
-// claim BEFORE the work query — before any read, before any mutation — and
+// F1, the load-bearing pin. A seat whose session row says `draining` refuses
+// the claim before any MUTATION — no claim CAS, no adoption, no stamp — and
 // converts the refusal into the self-drain the row has been waiting for. The
 // specimen (seat gcg-session-904dc4b6bb, parked since 14:28) spent three hours
 // claiming and executing work while its row said draining, because the claim
 // path read the drain state nowhere at all.
-func TestHookClaimRefusesADrainingSessionBeforeAnyWorkQuery(t *testing.T) {
+//
+// The queries==0 assertion below is a property of THIS entry point, where the
+// runner is called inline. Production reaches tryHookClaim through
+// claimHookWorkWithRunner, which has already run the federated query to select
+// a store — so read the assertion as "the fence did not need the query", not as
+// a claim that production never pays for one.
+func TestHookClaimRefusesADrainingSessionBeforeAnyMutation(t *testing.T) {
 	e := newDrainPendingClaimEnv()
 	e.probe.pending = true
 
@@ -106,7 +112,7 @@ func TestHookClaimRefusesADrainingSessionBeforeAnyWorkQuery(t *testing.T) {
 		t.Fatalf("code = %d, want 0 (drain acknowledged); stderr=%s", code, e.stderr.String())
 	}
 	if e.queries != 0 {
-		t.Errorf("work query ran %d times; a draining seat must refuse before the query", e.queries)
+		t.Errorf("work query ran %d times; the fence must not need the query to answer", e.queries)
 	}
 	if len(e.claimed) != 0 {
 		t.Errorf("claim mutations = %v, want none", e.claimed)
@@ -257,6 +263,97 @@ func TestHookClaimDrainPendingWithoutDrainAckExitsOne(t *testing.T) {
 	}
 	if result.DrainAcknowledged {
 		t.Error("result.DrainAcknowledged = true without --drain-ack")
+	}
+}
+
+// Failing open must not be SILENT.
+//
+// The same agent-side store fault that blinds this probe also fails open the
+// runtime-identity fence, so a persistent one switches both drain fences off
+// for every seat in the city while the reconciler keeps marking rows draining —
+// the exact wedge this series closes, restored fleet-wide. stderr inside an
+// agent pane is not an operator signal; this event is the only thing off-pane
+// that says the fence is inert.
+func TestHookClaimDrainPendingProbeErrorEmitsTheFenceUnavailableEvent(t *testing.T) {
+	type emission struct {
+		sessionID string
+		template  string
+		err       error
+	}
+	var emitted []emission
+	old := hookEmitDrainFenceUnavailable
+	hookEmitDrainFenceUnavailable = func(_ io.Writer, sessionID, template string, err error) {
+		emitted = append(emitted, emission{sessionID, template, err})
+	}
+	t.Cleanup(func() { hookEmitDrainFenceUnavailable = old })
+
+	e := newDrainPendingClaimEnv()
+	e.probe.err = errors.New("session store unavailable")
+	opts := e.opts(true)
+	opts.Env = append(opts.Env, "GC_TEMPLATE=beads--gc__run-operator")
+
+	doHookClaim("query", "/rig", opts, e.ops(), &e.stdout, &e.stderr)
+
+	if len(emitted) != 1 {
+		t.Fatalf("emitted %d fence-unavailable events, want 1", len(emitted))
+	}
+	if emitted[0].sessionID != drainPendingTestSessionID {
+		t.Errorf("event session = %q, want %q", emitted[0].sessionID, drainPendingTestSessionID)
+	}
+	if emitted[0].template != "beads--gc__run-operator" {
+		t.Errorf("event template = %q, want the seat's template", emitted[0].template)
+	}
+	if emitted[0].err == nil || !strings.Contains(emitted[0].err.Error(), "session store unavailable") {
+		t.Errorf("event err = %v, want the probe fault carried", emitted[0].err)
+	}
+}
+
+// The control the emission pin needs: a fence that ANSWERED emits nothing, so
+// the event means "inert" and not merely "ran".
+func TestHookClaimDrainPendingEmitsNoEventWhenTheProbeAnswers(t *testing.T) {
+	var emitted int
+	old := hookEmitDrainFenceUnavailable
+	hookEmitDrainFenceUnavailable = func(io.Writer, string, string, error) { emitted++ }
+	t.Cleanup(func() { hookEmitDrainFenceUnavailable = old })
+
+	for _, pending := range []bool{true, false} {
+		e := newDrainPendingClaimEnv()
+		e.probe.pending = pending
+		e.run(true)
+	}
+	if emitted != 0 {
+		t.Fatalf("emitted %d events for probes that answered, want 0", emitted)
+	}
+}
+
+// A failed acknowledgement must still produce a drain RECORD.
+//
+// writeHookClaimDrain used to return 1 before writing the JSON line whenever
+// the ack errored, so a --json caller got no action at all — the bare-exit-1
+// shape a startup wrapper retries forever. That turned a recoverable ack fault
+// into an infinite refusal loop on exactly the seat that was trying to leave.
+// The seat still exits non-zero (nothing was acknowledged), but its consumer
+// now learns that the answer was "drain", not "command failed".
+func TestHookClaimDrainPendingWritesTheDrainRecordEvenWhenTheAckFails(t *testing.T) {
+	e := newDrainPendingClaimEnv()
+	e.probe.pending = true
+	ops := e.ops()
+	ops.DrainAck = func(io.Writer) error { return errors.New("drain-ack refused") }
+
+	code := doHookClaim("query", "/rig", e.opts(true), ops, &e.stdout, &e.stderr)
+
+	if code != 1 {
+		t.Fatalf("code = %d, want 1; a failed ack is not a completed drain", code)
+	}
+	result := e.result(t)
+	if result.Action != "drain" || result.Reason != hookClaimReasonDrainPending {
+		t.Fatalf("result = %+v, want the drain record despite the ack failure", result)
+	}
+	if result.DrainAcknowledged {
+		t.Error("result.DrainAcknowledged = true after a failed ack")
+	}
+	if !strings.Contains(e.stderr.String(), "drain-ack refused") {
+		t.Errorf("stderr = %q, want the ack fault reported", e.stderr.String())
 	}
 }
 
