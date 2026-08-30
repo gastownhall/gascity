@@ -294,7 +294,7 @@ def main() -> int:
     parser.add_argument("mode", choices=("resolve", "bep"))
     parser.add_argument("input", type=Path)
     parser.add_argument("--format", choices=("json", "tsv"), default="json")
-    parser.add_argument("--label", action="append", default=list(CONFIG_LABELS))
+    parser.add_argument("--label", action="append", default=[])
     args = parser.parse_args()
     if args.mode == "resolve":
         try:
@@ -304,7 +304,7 @@ def main() -> int:
             print(json.dumps(result.as_dict(), sort_keys=True) if args.format == "json" else result.as_tsv())
             return 2
     else:
-        result = parse_bep_jsonl(args.input, args.label)
+        result = parse_bep_jsonl(args.input, args.label or CONFIG_LABELS)
     print(json.dumps(result.as_dict(), sort_keys=True) if args.format == "json" else result.as_tsv())
     return 0
 
