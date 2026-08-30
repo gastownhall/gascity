@@ -4,8 +4,8 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 # config closure is still decomposing; `go test ./internal/config` remains
 # authoritative for all config behavior.
 go_library(
-    name = "config_envname",
-    srcs = ["envname.go"],
+    name = "config_hermetic",
+    srcs = ["diagnostic_locations.go", "envname.go"],
     importpath = "github.com/gastownhall/gascity/internal/config",
     visibility = ["//visibility:public"],
 )
@@ -13,6 +13,16 @@ go_library(
 go_test(
     name = "config_envname_test",
     srcs = ["config_envname_bazel_test.go"],
-    embed = [":config_envname"],
+    embed = [":config_hermetic"],
+    visibility = ["//visibility:public"],
+)
+
+# Second hermetic probe: diagnostic line parsing uses only the standard
+# library and has no filesystem/process dependencies. It shares the bounded
+# production library above, while the full config closure remains separate.
+go_test(
+    name = "config_diagnostic_locations_test",
+    srcs = ["diagnostic_locations_test.go"],
+    embed = [":config_hermetic"],
     visibility = ["//visibility:public"],
 )
