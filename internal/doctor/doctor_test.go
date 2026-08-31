@@ -636,6 +636,43 @@ func TestRunCheckTimeoutFlushesCompletedCheckOutput(t *testing.T) {
 	}
 }
 
+func TestRunCheckPanicBecomesReportedError(t *testing.T) {
+	for _, timeout := range []time.Duration{0, time.Second} {
+		t.Run(timeout.String(), func(t *testing.T) {
+			d := &Doctor{CheckTimeout: timeout}
+			d.Register(&panickingCheck{name: "panicking"})
+
+			report := d.RunCollect(&CheckContext{}, false)
+
+			if len(report.Results) != 1 {
+				t.Fatalf("Results = %d, want 1", len(report.Results))
+			}
+			result := report.Results[0]
+			if result.Name != "panicking" || result.Status != StatusError || result.Severity != SeverityBlocking {
+				t.Fatalf("panic result = %+v, want named blocking error", result)
+			}
+			if !strings.Contains(result.Message, "panic: check exploded") {
+				t.Fatalf("panic message = %q, want recovered panic detail", result.Message)
+			}
+			if report.Failed != 1 || report.BlockingFailed != 1 {
+				t.Fatalf("report = %+v, want one blocking failure", report)
+			}
+		})
+	}
+}
+
+type panickingCheck struct {
+	name string
+}
+
+func (c *panickingCheck) Name() string { return c.name }
+func (c *panickingCheck) Run(_ *CheckContext) *CheckResult {
+	panic("check exploded")
+}
+func (c *panickingCheck) CanFix() bool              { return false }
+func (c *panickingCheck) Fix(_ *CheckContext) error { return nil }
+func (c *panickingCheck) WarmupEligible() bool      { return false }
+
 // outputWritingCheck writes to ctx.Output during Run, like checks that
 // surface fix-time diagnostics.
 type outputWritingCheck struct{ mockCheck }
@@ -827,6 +864,43 @@ func TestRunCheckTimeoutIsolatesLateOutputAndSkipsRenderExtras(t *testing.T) {
 	}
 }
 
+func TestDoctorWaitKeepsTimedOutCheckOwnedUntilCompletion(t *testing.T) {
+	d := &Doctor{CheckTimeout: 25 * time.Millisecond}
+	check := &lateWritingCheck{
+		name:      "owned-after-timeout",
+		started:   make(chan struct{}),
+		release:   make(chan struct{}),
+		wroteLate: make(chan struct{}),
+	}
+	d.Register(check)
+
+	runDone := make(chan *Report, 1)
+	go func() { runDone <- d.RunCollect(&CheckContext{}, false) }()
+	<-check.started
+	report := <-runDone
+	if len(report.Results) != 1 || !report.Results[0].TimedOut {
+		t.Fatalf("Results = %+v, want one timed-out result", report.Results)
+	}
+
+	waitStarted := make(chan struct{})
+	waitDone := make(chan struct{})
+	go func() {
+		close(waitStarted)
+		d.Wait()
+		close(waitDone)
+	}()
+	<-waitStarted
+	select {
+	case <-waitDone:
+		t.Fatal("Wait returned while the timed-out check was still running")
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	close(check.release)
+	<-check.wroteLate
+	<-waitDone
+}
+
 // lateWritingCheck blocks inside Run until released, then writes to
 // ctx.Output — modeling an abandoned check whose goroutine keeps running and
 // emits output after the doctor timeout fired. It implements Renderer so the
@@ -934,3 +1008,48 @@ func (c *lateWritingOnFixCheck) Fix(ctx *CheckContext) error {
 	return nil
 }
 func (c *lateWritingOnFixCheck) WarmupEligible() bool { return false }
+
+// panickingFixCheck fails its Run and panics inside Fix, modeling a
+// pack-authored remediation that blows up mid-run.
+type panickingFixCheck struct{}
+
+func (panickingFixCheck) Name() string { return "panicking-fix" }
+func (panickingFixCheck) CanFix() bool { return true }
+func (panickingFixCheck) Fix(*CheckContext) error {
+	panic("fix exploded")
+}
+
+func (panickingFixCheck) Run(*CheckContext) *CheckResult {
+	return &CheckResult{
+		Name:     "panicking-fix",
+		Status:   StatusError,
+		Severity: SeverityBlocking,
+		Message:  "needs fixing",
+	}
+}
+
+// A panicking Fix must fail its own check, not crash the doctor process. Run
+// once unbounded and once timed, because boundedFix takes a different path for
+// each and only one of them was recovered before.
+func TestPanickingFixDoesNotCrashTheRun(t *testing.T) {
+	for _, timeout := range []time.Duration{0, time.Minute} {
+		d := &Doctor{CheckTimeout: timeout}
+		d.Register(panickingFixCheck{})
+		report := d.RunCollect(&CheckContext{}, true)
+		d.Wait()
+		if len(report.Results) != 1 {
+			t.Fatalf("CheckTimeout=%s: Results = %+v, want one result", timeout, report.Results)
+		}
+		if report.Results[0].Status != StatusError {
+			t.Errorf("CheckTimeout=%s: Status = %v, want StatusError", timeout, report.Results[0].Status)
+		}
+		if !report.Results[0].FixAttempted {
+			t.Errorf("CheckTimeout=%s: FixAttempted = false, want the panicking fix recorded as attempted", timeout)
+		}
+		if !strings.Contains(report.Results[0].FixError, "panicked") {
+			t.Errorf("CheckTimeout=%s: FixError = %q, want it to report the panic", timeout, report.Results[0].FixError)
+		}
+	}
+}
+
+func (panickingFixCheck) WarmupEligible() bool { return false }
