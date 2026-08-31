@@ -675,24 +675,41 @@ func (c *client) ensurePlacement(ctx context.Context, wsLabel, tabLabel, cwd str
 // confirmed empirically (`XDG_CONFIG_HOME=X herdr --help` prints
 // "Config: X/herdr/config.toml" regardless of $HOME; with XDG_CONFIG_HOME
 // unset it falls back to "$HOME/.config/herdr/…") to be standard XDG Base
-// Directory precedence, i.e. exactly os.UserConfigDir() on this platform. A
-// plain os.UserHomeDir()+".config" join (the prior implementation) silently
-// ignores XDG_CONFIG_HOME, so it diverges from herdr's own resolution in any
-// environment that sets XDG_CONFIG_HOME while pointing $HOME elsewhere —
-// this fleet's agent sandboxes do exactly that. The result: this client
-// dials a socket no herdr process ever binds, so serverAlive() reads false
-// against a perfectly healthy server ("did not become ready"), and every
-// retry launches a redundant herdr server contending for the same pane
-// ("agent_pane_busy") — ga-nqlb8q.
+// Directory precedence on EVERY platform, macOS included (herdr 0.8.2 on
+// darwin prints "Config: ~/.config/herdr/config.toml" and honors
+// XDG_CONFIG_HOME the same way). That rules out os.UserConfigDir(), which
+// only implements XDG precedence under the unix build tag minus darwin: on
+// darwin it ignores XDG_CONFIG_HOME entirely and answers
+// "$HOME/Library/Application Support" — a directory herdr never uses. It
+// also rules out a plain os.UserHomeDir()+".config" join (the pre-#5459
+// implementation), which silently ignores XDG_CONFIG_HOME on all platforms.
+// Either divergence makes this client dial a socket no herdr process ever
+// binds, so serverAlive() reads false against a perfectly healthy server
+// ("did not become ready"), and every retry launches a redundant herdr
+// server contending for the same pane ("agent_pane_busy") — ga-nqlb8q.
+// herdrConfigRoot below is the one resolution that matches herdr everywhere.
 func (c *client) socketPath() string {
 	if c.sockPath != "" {
 		return c.sockPath
 	}
-	configDir, _ := os.UserConfigDir()
+	configDir := herdrConfigRoot()
 	if c.session == "" || c.session == "default" {
 		return filepath.Join(configDir, "herdr", "herdr.sock")
 	}
 	return filepath.Join(configDir, "herdr", "sessions", c.session, "herdr.sock")
+}
+
+// herdrConfigRoot resolves the base config directory the herdr binary roots
+// its config, state, and session sockets in: $XDG_CONFIG_HOME when set, else
+// $HOME/.config. herdr applies this XDG Base Directory precedence on every
+// platform, so gc must too — see the socketPath comment for why neither
+// os.UserConfigDir() nor a bare $HOME join can substitute.
+func herdrConfigRoot() string {
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		return xdg
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".config")
 }
 
 // serverAlive reports whether the session-server is actually accepting

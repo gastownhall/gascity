@@ -13,11 +13,16 @@ import (
 // Verified empirically against the herdr binary itself: `XDG_CONFIG_HOME=X
 // herdr --help` prints "Config: X/herdr/config.toml" regardless of $HOME,
 // and with XDG_CONFIG_HOME unset it falls back to "$HOME/.config/herdr/…" —
-// standard XDG Base Directory precedence, which os.UserConfigDir()
-// implements and the old os.UserHomeDir()+".config" join did not: a sandbox
-// that sets XDG_CONFIG_HOME to the real user's config dir while redirecting
-// $HOME elsewhere (this fleet's agent sandboxes do exactly that) made the
-// old code compute a path no herdr process ever binds.
+// standard XDG Base Directory precedence, on every platform herdr ships for
+// (macOS included; darwin herdr 0.8.2 behaves identically). Neither stdlib
+// shortcut implements that contract everywhere: os.UserConfigDir() ignores
+// XDG_CONFIG_HOME on darwin and answers "$HOME/Library/Application Support",
+// and the old os.UserHomeDir()+".config" join ignored XDG_CONFIG_HOME on all
+// platforms — a sandbox that sets XDG_CONFIG_HOME to the real user's config
+// dir while redirecting $HOME elsewhere (this fleet's agent sandboxes do
+// exactly that) made the old code compute a path no herdr process ever
+// binds. These tests pin the herdr-matching resolution on every platform,
+// so they must not be skipped per-OS.
 
 func TestSocketPathHonorsXDGConfigHomeOverHome(t *testing.T) {
 	xdg := t.TempDir()

@@ -8,7 +8,7 @@ import (
 )
 
 // shortHome points socketPath()'s config-dir resolution at a short, isolated
-// temp dir via $XDG_CONFIG_HOME — the env var os.UserConfigDir() consults
+// temp dir via $XDG_CONFIG_HOME — the env var herdrConfigRoot() consults
 // before $HOME (see socketPath's doc comment) — so these tests never touch
 // the real user's ~/.config/herdr/sessions/. The default t.TempDir()
 // (/var/folders/… on macOS) blows past the 104-byte unix-socket sun_path
