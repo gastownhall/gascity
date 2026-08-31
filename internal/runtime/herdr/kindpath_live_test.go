@@ -14,8 +14,8 @@ import (
 // against a real herdr AND a real claude binary: Start places a shell pane
 // and has herdr launch + detect claude in it (native claude-detection), the
 // agent is registered under the session name, liveness holds across checks
-// (with a re-issued Start refusing), and Stop tears the pane down. Skipped
-// when herdr or claude is unavailable or in -short mode.
+// (with a re-issued Start refusing), and Stop tears the pane down. Opt-in live
+// tier: see requireLiveHerdr; also skipped when claude is unavailable.
 func TestProviderLiveClaudeKindPath(t *testing.T) {
 	requireLiveHerdr(t)
 	if _, err := exec.LookPath("claude"); err != nil {

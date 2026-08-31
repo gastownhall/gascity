@@ -10,7 +10,7 @@ import (
 )
 
 // TestProviderLive drives the herdr Provider against a real herdr binary in an
-// isolated session. Skipped when herdr is unavailable or in -short mode.
+// isolated session. Opt-in live tier: see requireLiveHerdr.
 func TestProviderLive(t *testing.T) {
 	requireLiveHerdr(t)
 

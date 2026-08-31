@@ -35,10 +35,10 @@ func waitForEvent(t *testing.T, ch <-chan runtime.SessionEvent, timeout time.Dur
 // binary in an isolated session: leading resync, forced agent-status change
 // (herdr pane report-agent), dynamic resubscribe for an agent started after
 // the stream came up, natural process exit, pane close via Stop, and stream
-// re-attach across a full server bounce. Skipped when herdr is unavailable or
-// in -short mode.
+// re-attach across a full server bounce. Opt-in live tier: see requireLiveHerdr.
 func TestSessionEventsLive(t *testing.T) {
 	requireLiveHerdr(t)
+	skipOnDetectionBasedRegistry(t)
 
 	const session = "gctest-events-live"
 	p := New(session, t.TempDir(), t.TempDir(), 0, 0)
