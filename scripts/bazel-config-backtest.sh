@@ -44,10 +44,25 @@ done
 
 IFS=',' read -r -a scenarios <<<"$scenario_csv"
 read -r -a graph_array <<<"$graph_files"
-allowed=" cold forced no-op source-edit test-edit unrelated-edit go-mod "
+allowed=" go cold forced no-op source-edit test-edit unrelated-edit go-mod "
 for s in "${scenarios[@]}"; do [[ "$allowed" == *" $s "* ]] || { echo "unknown scenario: $s" >&2; exit 2; }; done
+# Go is a measured pseudo-scenario, not a selectable Bazel target. Always add
+# it exactly once so every requested scenario has a same-sample Go baseline.
+scenario_order=(go)
+for s in "${scenarios[@]}"; do
+  [[ "$s" == go ]] && continue
+  scenario_order+=("$s")
+done
 refs=("$@")
 if ((${#refs[@]} == 0)); then refs=("7c33f3f7f1" "128bd64033" "a784438ce0" "58a47d6bdc"); fi
+artifact_dir="${BACKTEST_ARTIFACT_DIR:-}"
+
+copy_artifact() {
+  local source="$1" name="$2"
+  [[ -n "$artifact_dir" && -f "$source" ]] || return 0
+  mkdir -p "$artifact_dir"
+  cp -f -- "$source" "$artifact_dir/$name"
+}
 
 now_ns() {
   if command -v perl >/dev/null 2>&1; then perl -MTime::HiRes=time -e 'printf "%.0f\n", time()*1e9'; return; fi
@@ -70,6 +85,23 @@ run_bounded_in_worktree() {
       gtimeout --signal=TERM --kill-after=15 "$timeout_s" "$@"
     fi
   )
+}
+run_timed_in_worktree() {
+  local work="$1"
+  local time_file="$2"
+  shift 2
+  local status=0
+  (
+    cd "$work" || exit 1
+    if command -v timeout >/dev/null 2>&1; then
+      /usr/bin/time -f 'user=%U rss=%M' -o "$time_file" \
+        timeout --signal=TERM --kill-after=15 "$timeout_s" "$@"
+    else
+      /usr/bin/time -f 'user=%U rss=%M' -o "$time_file" \
+        gtimeout --signal=TERM --kill-after=15 "$timeout_s" "$@"
+    fi
+  ) || status=$?
+  return "$status"
 }
 shutdown_bazel() {
   local base="$1"
@@ -103,20 +135,54 @@ trap 'exit 130' INT TERM
 printf 'ref\tsample\tscenario\tstatus\tselection_reason\tconservative\tselection_error\trequested_labels\tconfigured_labels\tcompleted_labels\tconfigured_count\tcompleted_count\tbep_error\twall_s\tclient_user_s\trss_kb\tactions\texecuted\thits\tmisses\tanalysis_ms\tbep_cpu_ms\n'
 records="$tmp_root/results.tsv"
 printf 'ref\tsample\tscenario\tstatus\tselection_reason\tconservative\tselection_error\trequested_labels\tconfigured_labels\tcompleted_labels\tconfigured_count\tcompleted_count\tbep_error\twall_s\tclient_user_s\trss_kb\tactions\texecuted\thits\tmisses\tanalysis_ms\tbep_cpu_ms\n' >"$records"
+emit_row() {
+  local row
+  row="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$@")"
+  printf '%s\n' "$row" | tee -a "$records"
+}
+emit_skip_row() {
+  local ref="$1" sample="$2" scenario="$3" reason="$4" error="$5"
+  emit_skip_row_status "$ref" "$sample" "$scenario" skip-go-failed "$reason" "$error"
+}
+emit_skip_row_status() {
+  local ref="$1" sample="$2" scenario="$3" status="$4" reason="$5" error="$6"
+  emit_row "$ref" "$sample" "$scenario" "$status" "$reason" true "$error" "" "" "" unknown unknown "" 0 unknown unknown unknown unknown unknown unknown unknown unknown
+}
 for ref in "${refs[@]}"; do
   resolved="$(git -C "$repo_root" rev-parse --verify "$ref^{commit}")"
-  work="$tmp_root/work-${resolved:0:12}"; git -C "$repo_root" worktree add --detach --quiet "$work" "$resolved"; current_work="$work"
+  short_ref="${resolved:0:12}"
+  work="$tmp_root/work-$short_ref"; git -C "$repo_root" worktree add --detach --quiet "$work" "$resolved"; current_work="$work"
   for rel in "${graph_array[@]}"; do [[ -f "$repo_root/$rel" ]] && { mkdir -p "$work/$(dirname "$rel")"; cp -f "$repo_root/$rel" "$work/$rel"; }; done
-  go_log="$tmp_root/${resolved:0:12}-go.log"; go_start="$(now_ns)"; go_status=0
-  if command -v timeout >/dev/null 2>&1; then timeout --signal=TERM --kill-after=15 "$timeout_s" go -C "$work" test -count=1 "$go_package" >"$go_log" 2>&1 || go_status=$?; else gtimeout --signal=TERM --kill-after=15 "$timeout_s" go -C "$work" test -count=1 "$go_package" >"$go_log" 2>&1 || go_status=$?; fi
-  go_end="$(now_ns)"; go_wall="$(awk -v n="$((go_end-go_start))" 'BEGIN{printf "%.3f",n/1e9}')"
-  printf 'go\t%s\tstatus=%s\twall_s=%s\tpackage=%s\n' "${resolved:0:12}" "$go_status" "$go_wall" "$go_package"
-  if [[ "$go_status" != 0 ]]; then
-    printf 'skip\t%s\tgo baseline failed or timed out; Bazel rows are non-comparable\n' "${resolved:0:12}" >&2
+  go_cache="$tmp_root/go-cache-$short_ref"
+  mkdir -p "$go_cache"
+  go_prime_log="$tmp_root/${short_ref}-go-prime.log"
+  go_prime_time="$tmp_root/${short_ref}-go-prime.time"
+  go_prime_status=0
+  if run_timed_in_worktree "$work" "$go_prime_time" env GOCACHE="$go_cache" go test -count=1 "$go_package" >"$go_prime_log" 2>&1; then
+    :
+  else
+    go_prime_status=$?
+  fi
+  if [[ "$go_prime_status" != 0 ]]; then
+    printf 'go-prime\t%s\tstatus=%s\tcache=%s\n' "$short_ref" "$go_prime_status" "$go_cache" >&2
+    if [[ -n "$artifact_dir" ]]; then
+      mkdir -p "$artifact_dir"
+      cp -f "$go_prime_log" "$artifact_dir/go-prime-$short_ref.log"
+      if [[ -f "$go_prime_time" ]]; then cp -f "$go_prime_time" "$artifact_dir/go-prime-$short_ref.time"; fi
+    fi
+    # Preserve a row for every requested sample/scenario so the report makes
+    # the non-comparable revision explicit instead of silently dropping it.
+    for ((sample=1; sample<=samples; sample++)); do
+      for scenario in "${scenario_order[@]}"; do
+        emit_skip_row "$short_ref" "$sample" "$scenario" go-prime "go prime failed (status $go_prime_status)"
+      done
+    done
     git -C "$repo_root" worktree remove --force "$work" >/dev/null 2>&1 || true
     current_work=""
     continue
   fi
+  copy_artifact "$go_prime_log" "go-prime-$short_ref.log"
+  copy_artifact "$go_prime_time" "go-prime-$short_ref.time"
   # Snapshot every mutable path under its full relative path. This includes
   # graph files such as MODULE.bazel.lock, which Bazel/module resolution may
   # rewrite, and records absent paths so no scenario contaminates the next.
@@ -150,19 +216,88 @@ for ref in "${refs[@]}"; do
   }
   base="$work/bazel-output"; current_base="$base"
   warm_ready=0
+  warm_prime_log="$tmp_root/${short_ref}-bazel-prime.log"
   prime_warm_base() {
     [[ "$warm_ready" == 1 ]] && return
     restore_pristine
-    if command -v timeout >/dev/null 2>&1; then
-      run_bounded_in_worktree "$work" "$bazel_bin" --output_base="$base" test --noshow_progress --cache_test_results=no "${target_labels[@]}" >/dev/null 2>&1
-    else
-      run_bounded_in_worktree "$work" "$bazel_bin" --output_base="$base" test --noshow_progress --cache_test_results=no "${target_labels[@]}" >/dev/null 2>&1
-    fi
+    local status=0
+    run_bounded_in_worktree "$work" "$bazel_bin" --output_base="$base" test --noshow_progress --cache_test_results=no "${target_labels[@]}" >"$warm_prime_log" 2>&1 || status=$?
+    [[ "$status" == 0 ]] || return "$status"
     warm_ready=1
   }
+  needs_warm=0
+  for scenario in "${scenario_order[@]}"; do
+    case "$scenario" in go|cold|unrelated-edit) ;; *) needs_warm=1 ;; esac
+  done
+  if [[ "$needs_warm" == 1 ]]; then
+    warm_prime_status=0
+    prime_warm_base || warm_prime_status=$?
+    if [[ "$warm_prime_status" != 0 ]]; then
+      printf 'bazel-prime\t%s\tstatus=%s\tlog=%s\n' "$short_ref" "$warm_prime_status" "$warm_prime_log" >&2
+      if [[ -n "$artifact_dir" ]]; then
+        mkdir -p "$artifact_dir"
+        cp -f "$warm_prime_log" "$artifact_dir/bazel-prime-$short_ref.log"
+      fi
+      for ((sample=1; sample<=samples; sample++)); do
+        for scenario in "${scenario_order[@]}"; do
+          emit_skip_row_status "$short_ref" "$sample" "$scenario" skip-bazel-prime bazel-prime "Bazel warm prime failed (status $warm_prime_status)"
+        done
+      done
+      shutdown_bazel "$base" "$work"
+      current_base=""
+      git -C "$repo_root" worktree remove --force "$work" >/dev/null 2>&1 || true
+      current_work=""
+      continue
+    fi
+    copy_artifact "$warm_prime_log" "bazel-prime-$short_ref.log"
+  fi
   for ((sample=1; sample<=samples; sample++)); do
-    order=("${scenarios[@]}"); if ((sample % 2 == 0)); then order=(); for ((i=${#scenarios[@]}-1;i>=0;i--)); do order+=("${scenarios[$i]}"); done; fi
+    # Go is always measured first, so a failed baseline cannot leave earlier
+    # Bazel rows looking comparable. Rotate only the Bazel scenarios to retain
+    # positional bias control for their measurements.
+    order=()
+    order+=(go)
+    bazel_scenarios=("${scenario_order[@]:1}")
+    scenario_count="${#bazel_scenarios[@]}"
+    if ((scenario_count > 0)); then
+      pair="$(((sample - 1) / 2 % scenario_count))"
+      if ((sample % 2 == 1)); then
+        offset="$pair"
+        for ((i=0; i<scenario_count; i++)); do order+=("${bazel_scenarios[$(((offset + i) % scenario_count))]}"); done
+      else
+        offset="$(((scenario_count - 1 - pair + scenario_count) % scenario_count))"
+        for ((i=0; i<scenario_count; i++)); do order+=("${bazel_scenarios[$(((offset - i + scenario_count) % scenario_count))]}"); done
+      fi
+    fi
+    go_failed_sample=0
     for scenario in "${order[@]}"; do
+      restore_pristine
+      if [[ "$scenario" == go ]]; then
+        go_log="$tmp_root/${short_ref}-${sample}-go.log"
+        go_time="$go_log.time"
+        go_start="$(now_ns)"
+        go_status=0
+        if run_timed_in_worktree "$work" "$go_time" env GOCACHE="$go_cache" go test -count=1 "$go_package" >"$go_log" 2>&1; then
+          :
+        else
+          go_status=$?
+          go_failed_sample=1
+        fi
+        go_end="$(now_ns)"
+        go_wall="$(awk -v n="$((go_end-go_start))" 'BEGIN{printf "%.3f",n/1e9}')"
+        go_user="$(sed -n 's/.*user=\([^ ]*\).*/\1/p' "$go_time" | tail -1)"
+        go_rss="$(sed -n 's/.*rss=\([^ ]*\).*/\1/p' "$go_time" | tail -1)"
+        [[ -n "$go_user" ]] || go_user=unknown
+        [[ -n "$go_rss" ]] || go_rss=unknown
+        emit_row "$short_ref" "$sample" go "$go_status" go-baseline false "" "" "" "" unknown unknown "" "$go_wall" "$go_user" "$go_rss" unknown unknown unknown unknown unknown unknown
+        copy_artifact "$go_log" "$short_ref-$sample-go.log"
+        copy_artifact "$go_time" "$short_ref-$sample-go.time"
+        continue
+      fi
+      if [[ "$go_failed_sample" == 1 ]]; then
+        emit_skip_row "$short_ref" "$sample" "$scenario" go-baseline "Go baseline failed for sample $sample"
+        continue
+      fi
       diff_input="$tmp_root/${resolved:0:12}-${sample}-${scenario//[^a-zA-Z0-9]/_}.diff"
       case "$scenario" in
         cold|forced|no-op) printf 'M\0MODULE.bazel\0' >"$diff_input";;
@@ -189,21 +324,20 @@ PY
       requested_labels="$(IFS=,; echo "${selected_labels[*]}")"
       if ((${#selected_labels[@]} == 0)); then
         selection_error_escaped="$(tsv_escape "$selection_error")"
-        row="$(printf '%s\t%s\t%s\tnot-run\t%s\t%s\t%s\t%s\t\t\tunknown\tunknown\t\t0\t0\t0\t0\t0\t0\t0\tunknown\tunknown' "${resolved:0:12}" "$sample" "$scenario" "$selection_reason" "$conservative" "$selection_error_escaped" "$requested_labels")"
-        printf '%s\n' "$row" | tee -a "$records"
+        emit_row "$short_ref" "$sample" "$scenario" not-run "$selection_reason" "$conservative" "$selection_error_escaped" "$requested_labels" "" "" unknown unknown "" 0 0 0 0 0 0 0 unknown unknown
         continue
       fi
       [[ "$scenario" == cold ]] || prime_warm_base
-      restore_pristine
       case "$scenario" in
-        source-edit) printf '\n// bazel backtest source edit\n' >>"$work/$source_file";;
-        test-edit) printf '\n// bazel backtest test edit\n' >>"$work/$test_file";;
-        unrelated-edit) mkdir -p "$(dirname "$work/$unrelated_file")"; printf '\n<!-- bazel backtest unrelated edit -->\n' >>"$work/$unrelated_file";;
-        go-mod) printf '\n// bazel backtest module edit\n' >>"$work/go.mod";;
+        source-edit) printf '\n// bazel backtest source edit sample=%s\n' "$sample" >>"$work/$source_file";;
+        test-edit) printf '\n// bazel backtest test edit sample=%s\n' "$sample" >>"$work/$test_file";;
+        unrelated-edit) mkdir -p "$(dirname "$work/$unrelated_file")"; printf '\n<!-- bazel backtest unrelated edit sample=%s -->\n' "$sample" >>"$work/$unrelated_file";;
+        go-mod) printf '\n// bazel backtest module edit sample=%s\n' "$sample" >>"$work/go.mod";;
       esac
       out="$tmp_root/${resolved:0:12}-${sample}-${scenario//[^a-zA-Z0-9]/_}.log"; bep="$out.bep.json"; rm -f "$bep"
       run_base="$base"
       if [[ "$scenario" == cold ]]; then run_base="$work/cold-output-$sample"; fi
+      current_base="$run_base"
       cache_results=no; [[ "$scenario" == no-op ]] && cache_results=yes
       cmd=("$bazel_bin" --output_base="$run_base" test --noshow_progress --build_event_json_file="$bep" --cache_test_results="$cache_results" "${selected_labels[@]}")
       start="$(now_ns)"; status=0
@@ -250,33 +384,73 @@ PY
       [[ "$bep_status" == 0 ]] || bep_error="resolver_failed: $(head -c 256 "$bep_stderr")"
       if [[ -n "$bep_error" ]]; then row_status='bep-error'; else row_status="$status"; fi
       selection_error_escaped="$(tsv_escape "$selection_error")"; bep_error_escaped="$(tsv_escape "$bep_error")"
-      row="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "${resolved:0:12}" "$sample" "$scenario" "$row_status" "$selection_reason" "$conservative" "$selection_error_escaped" "$requested_labels" "$configured_labels" "$completed_labels" "$configured_count" "$completed_count" "$bep_error_escaped" "$wall" "$user" "$rss" "$actions" "$executed" "$hits" "$misses" "$analysis" "$bep_cpu")"
-      printf '%s\n' "$row" | tee -a "$records"
-      [[ "$scenario" == cold ]] && shutdown_bazel "$run_base" "$work"
+      emit_row "$short_ref" "$sample" "$scenario" "$row_status" "$selection_reason" "$conservative" "$selection_error_escaped" "$requested_labels" "$configured_labels" "$completed_labels" "$configured_count" "$completed_count" "$bep_error_escaped" "$wall" "$user" "$rss" "$actions" "$executed" "$hits" "$misses" "$analysis" "$bep_cpu"
+      artifact_stem="$short_ref-$sample-${scenario//[^a-zA-Z0-9]/_}"
+      copy_artifact "$out" "$artifact_stem.log"
+      copy_artifact "$out.time" "$artifact_stem.time"
+      copy_artifact "$bep" "$artifact_stem.bep.json"
+      copy_artifact "$bep_stderr" "$artifact_stem.bep.err"
+      if [[ "$scenario" == cold ]]; then
+        shutdown_bazel "$run_base" "$work"
+        case "$run_base" in
+          "$work"/cold-output-[0-9]*) rm -rf -- "$run_base" ;;
+        esac
+        current_base="$base"
+      fi
     done
   done
   shutdown_bazel "$base" "$work"; current_base=""; git -C "$repo_root" worktree remove --force "$work" >/dev/null 2>&1 || true; current_work=""
 done
 
-python3 - "$records" <<'PY'
+copy_artifact "$records" results.tsv
+
+summary_records="$tmp_root/summary.tsv"
+python3 - "$records" "$samples" "$scenario_csv" >"$summary_records" <<'PY'
 import statistics, sys
+expected_samples = int(sys.argv[2])
+expected_scenarios = {"go"}
+expected_scenarios.update(filter(None, sys.argv[3].split(",")))
 rows = []
-for line in open(sys.argv[1], encoding='utf-8'):
-    if line.startswith('ref\t') or not line.strip(): continue
-    p = line.rstrip('\n').split('\t')
-    if len(p) >= 14:
-        try: rows.append((p[0], p[2], float(p[13])))
-        except ValueError: pass
-for ref in sorted({r[0] for r in rows}):
-  for scenario in sorted({r[1] for r in rows if r[0] == ref}):
-    vals = [r[2] for r in rows if r[0] == ref and r[1] == scenario]
-    failures = sum(1 for line in open(sys.argv[1], encoding='utf-8')
-                   if line.startswith(ref+'\t') and ('\t'+scenario+'\t') in line
-                   and line.split('\t')[3] not in {'0', 'not-run'})
-    not_run = sum(1 for line in open(sys.argv[1], encoding='utf-8')
-                  if line.startswith(ref+'\t') and ('\t'+scenario+'\t') in line
-                  and line.split('\t')[3] == 'not-run')
-    if vals:
-      p95 = statistics.quantiles(vals, n=20, method='inclusive')[18] if len(vals)>1 else vals[0]
-      print(f"summary\t{ref}\t{scenario}\tn={len(vals)}\tfailures={failures}\tnot_run={not_run}\tp50_s={statistics.median(vals):.3f}\tp95_s={p95:.3f}")
+with open(sys.argv[1], encoding="utf-8") as stream:
+    for line in stream:
+        if line.startswith("ref\t") or not line.strip():
+            continue
+        fields = line.rstrip("\n").split("\t")
+        if len(fields) >= 14:
+            rows.append(fields)
+for ref in sorted({row[0] for row in rows}):
+    for scenario in sorted(expected_scenarios | {row[2] for row in rows if row[0] == ref}):
+        selected = [row for row in rows if row[0] == ref and row[2] == scenario]
+        successful = [float(row[13]) for row in selected if row[3] == "0"]
+        skipped = sum(1 for row in selected if row[3] == "not-run" or row[3].startswith("skip-"))
+        failures = len(selected) - len(successful) - skipped
+        diagnostics = []
+        valid = len(selected) == expected_samples
+        if not valid:
+            diagnostics.append(f"expected {expected_samples} rows, got {len(selected)}")
+        if scenario == "unrelated-edit":
+            if len(selected) != expected_samples or any(row[3] != "not-run" for row in selected):
+                valid = False
+                diagnostics.append("unrelated changes must be skipped")
+        else:
+            if len(successful) != expected_samples:
+                valid = False
+                diagnostics.append(f"expected {expected_samples} successful rows, got {len(successful)}")
+            for row in selected:
+                if row[12]:
+                    valid = False
+                    diagnostics.append("non-empty BEP error")
+                if row[3] == "0" and scenario != "go" and not (row[7] == row[8] == row[9]):
+                    valid = False
+                    diagnostics.append("requested/configured/completed labels differ")
+        if failures:
+            valid = False
+            diagnostics.append(f"{failures} failed rows")
+        p50 = f"{statistics.median(successful):.3f}" if successful else "NA"
+        p95 = (f"{statistics.quantiles(successful, n=20, method='inclusive')[18]:.3f}"
+               if len(successful) > 1 else (f"{successful[0]:.3f}" if successful else "NA"))
+        detail = "; ".join(dict.fromkeys(diagnostics))[:240]
+        print(f"summary\t{ref}\t{scenario}\tattempted={len(successful)+failures}\tsuccess={len(successful)}\tfailure={failures}\tskipped={skipped}\tp50_s={p50}\tp95_s={p95}\tvalid={str(valid).lower()}\tdiagnostics={detail}")
 PY
+cat "$summary_records"
+copy_artifact "$summary_records" summary.tsv
