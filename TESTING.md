@@ -993,8 +993,11 @@ that stays locked past its gate means a leaked descendant is still holding
 the descriptor (`lsof` on the slot file names it), not a stale file to
 delete. The gate needs `flock(1)`, which `docs/getting-started/installation.md`
 already lists as required; if it is absent the run proceeds uncapped with a
-warning rather than blocking. `GC_PUSH_GATE_NO_CAP=1` bypasses the cap
-entirely for one invocation.
+warning rather than blocking. The run likewise proceeds uncapped, with a
+diagnostic, if no descriptor in `[PUSH_GATE_FD_BASE, PUSH_GATE_FD_BASE +
+PUSH_GATE_FD_SPAN)` is free — an environment defect is never misreported as
+contention. `GC_PUSH_GATE_NO_CAP=1` bypasses the cap entirely for one
+invocation.
 
 The slot mechanics are covered by `scripts/test-push-gate-lock.sh`, run
 directly as the `push-gate-lock-selftest` job inside `test-local-parallel`

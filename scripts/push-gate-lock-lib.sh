@@ -70,12 +70,13 @@
 #     or `sleep` unvalidated.
 #   - A timed-out acquire returns 1 (shell-false), and ONLY a timed-out
 #     acquire returns 1 — every degrade case (missing flock(1), a slot dir
-#     that cannot be created) prints its own diagnostic and returns 0 with
-#     an empty fd instead, so callers can trust that a 1 always means a
-#     real wait-bound expiry, never an environment defect misreported as
-#     fleet contention. This library never calls `exit` itself — mapping a
-#     timeout to process exit code 75 is the caller's job
-#     (scripts/test-local-parallel), keeping this file a pure, testable
+#     that cannot be created, no free descriptor in [PUSH_GATE_FD_BASE,
+#     PUSH_GATE_FD_BASE+PUSH_GATE_FD_SPAN)) prints its own diagnostic and
+#     returns 0 with an empty fd instead, so callers can trust that a 1
+#     always means a real wait-bound expiry, never an environment defect
+#     misreported as fleet contention. This library never calls `exit`
+#     itself — mapping a timeout to process exit code 75 is the caller's
+#     job (scripts/test-local-parallel), keeping this file a pure, testable
 #     function library.
 #
 # FUNCTIONS
@@ -108,7 +109,9 @@
 #       ${GC_SESSION_NAME:-${GC_AGENT:-${GC_TEMPLATE:-unknown}}}. If the slot
 #       dir cannot be created (e.g. an unwritable parent), degrades the same
 #       way as a missing flock(1): diagnostic to stderr, empty fd, return 0
-#       — never conflated with a timeout. Otherwise sweeps slots 0..N-1
+#       — never conflated with a timeout. An acquire that finds no free
+#       descriptor in [PUSH_GATE_FD_BASE, PUSH_GATE_FD_BASE +
+#       PUSH_GATE_FD_SPAN) degrades identically. Otherwise sweeps slots 0..N-1
 #       non-blocking; acquires the first free one immediately (fd assigned
 #       to the caller's <fd_out_var>, return 0). If all slots are busy:
 #       prints an immediate unbuffered diagnostic naming current holders
@@ -245,10 +248,10 @@ push_gate_describe_slots() {
     done
 }
 
-# True when file descriptor $1 is already open in this shell. Slot FDs are
-# fixed numbers, so a second acquire in the same process must not re-open a
-# number it already holds: `exec N<>file` on a live N closes the old
-# descriptor and silently drops that slot's lock.
+# True when file descriptor $1 is already open in this shell. A slot FD is
+# chosen per attempt and must never be a number this shell already holds:
+# `exec N<>file` on a live N closes the old descriptor and silently drops
+# that slot's lock.
 _push_gate_fd_in_use() {
     ( true <&"$1" ) 2>/dev/null
 }
