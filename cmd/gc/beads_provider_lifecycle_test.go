@@ -7222,6 +7222,16 @@ esac
 	}
 }
 
+func runGcBeadsBdHQInitForTest(t *testing.T, script, cityPath, binDir string) ([]byte, error) {
+	t.Helper()
+	cmd := exec.Command(script, "init", cityPath, "gc", "hq")
+	cmd.Env = sanitizedBaseEnv(append(gcBeadsBdTestHomeEnv(t),
+		"GC_CITY_PATH="+cityPath,
+		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
+	)...)
+	return cmd.CombinedOutput()
+}
+
 func TestGcBeadsBdInitMetadataOnlyFallsThroughToForcedBdInitWithPinnedDatabaseWhenSchemaMissing(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
@@ -7329,12 +7339,7 @@ esac
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command(script, "init", cityPath, "gc", "hq")
-	cmd.Env = sanitizedBaseEnv(append(gcBeadsBdTestHomeEnv(t),
-		"GC_CITY_PATH="+cityPath,
-		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
-	)...)
-	out, err := cmd.CombinedOutput()
+	out, err := runGcBeadsBdHQInitForTest(t, script, cityPath, binDir)
 	if err != nil {
 		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
 	}
@@ -7479,12 +7484,7 @@ esac
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command(script, "init", cityPath, "gc", "hq")
-	cmd.Env = sanitizedBaseEnv(append(gcBeadsBdTestHomeEnv(t),
-		"GC_CITY_PATH="+cityPath,
-		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
-	)...)
-	out, err := cmd.CombinedOutput()
+	out, err := runGcBeadsBdHQInitForTest(t, script, cityPath, binDir)
 	if err == nil {
 		t.Fatalf("gc-beads-bd init should surface bd's legacy-workspace guard for an adopted pre-existing database:\n%s", out)
 	}
