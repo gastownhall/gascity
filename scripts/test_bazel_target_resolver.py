@@ -14,6 +14,14 @@ from bazel_target_resolver import (
 )
 
 IDENTITY_LABEL = "//internal/config:config_identity_seam_test"
+SESSION_SETUP_LABEL = "//internal/config:config_session_setup_path_test"
+EXPECTED_CONFIG_LABELS = (
+    "//internal/config:config_diagnostic_locations_test",
+    "//internal/config:config_envname_test",
+    "//internal/config:config_identity_seam_test",
+    SESSION_SETUP_LABEL,
+    "//internal/config:config_storage_endpoint_test",
+)
 
 
 class ResolveNameStatusZTest(unittest.TestCase):
@@ -25,9 +33,10 @@ class ResolveNameStatusZTest(unittest.TestCase):
             "M", "internal/config/envname.go",
             "M", "internal/config/diagnostic_locations_test.go",
             "M", "internal/config/identity_seam.go",
+            "M", "internal/config/session_setup_path.go",
             "M", "internal/config/storage_endpoint.go",
         )
-        self.assertEqual(selection.labels, CONFIG_LABELS)
+        self.assertEqual(selection.labels, EXPECTED_CONFIG_LABELS)
         self.assertFalse(selection.conservative)
         self.assertEqual(selection.reason, "mapped")
         self.assertIsNone(selection.error)
@@ -41,6 +50,28 @@ class ResolveNameStatusZTest(unittest.TestCase):
             self.assertEqual(selection.labels, (IDENTITY_LABEL,))
             self.assertFalse(selection.conservative)
             self.assertEqual(selection.reason, "mapped")
+
+    def test_maps_session_setup_path_source_and_test(self):
+        for path in (
+            "internal/config/session_setup_path.go",
+            "internal/config/session_setup_path_test.go",
+        ):
+            selection = self.resolve("M", path)
+            self.assertEqual(selection.labels, (SESSION_SETUP_LABEL,))
+            self.assertFalse(selection.conservative)
+            self.assertEqual(selection.reason, "mapped")
+
+    def test_session_setup_path_mixes_in_canonical_order(self):
+        selection = self.resolve(
+            "M", "internal/config/session_setup_path.go",
+            "M", "internal/config/storage_endpoint.go",
+        )
+        self.assertEqual(
+            selection.labels,
+            tuple(sorted((SESSION_SETUP_LABEL, "//internal/config:config_storage_endpoint_test"))),
+        )
+        self.assertFalse(selection.conservative)
+        self.assertEqual(selection.reason, "mapped")
 
     def test_maps_diagnostic_embed_sources_to_existing_target(self):
         for path in (
@@ -92,19 +123,19 @@ class ResolveNameStatusZTest(unittest.TestCase):
             fixture_deleted,
             fixture_copied,
         ):
-            self.assertEqual(selection.labels, CONFIG_LABELS)
+            self.assertEqual(selection.labels, EXPECTED_CONFIG_LABELS)
             self.assertTrue(selection.conservative)
             self.assertEqual(selection.reason, "config-unmapped")
 
     def test_unmapped_config_source_fails_closed(self):
         selection = self.resolve("M", "internal/config/config.go")
-        self.assertEqual(selection.labels, CONFIG_LABELS)
+        self.assertEqual(selection.labels, EXPECTED_CONFIG_LABELS)
         self.assertTrue(selection.conservative)
         self.assertEqual(selection.reason, "config-unmapped")
 
     def test_spaces_tabs_and_tab_delimited_record_are_preserved(self):
         selection = self.resolve("M\tinternal/config/a file\tname.go")
-        self.assertEqual(selection.labels, CONFIG_LABELS)
+        self.assertEqual(selection.labels, EXPECTED_CONFIG_LABELS)
         self.assertTrue(selection.conservative)
         self.assertEqual(selection.reason, "config-unmapped")
 
@@ -128,7 +159,7 @@ class ResolveNameStatusZTest(unittest.TestCase):
             "scripts/bazel_canary_test.go",
         ):
             selection = self.resolve("M", path)
-            self.assertEqual(selection.labels, CONFIG_LABELS)
+            self.assertEqual(selection.labels, EXPECTED_CONFIG_LABELS)
             self.assertTrue(selection.conservative)
             self.assertEqual(selection.reason, "shared-build-graph")
 
@@ -141,14 +172,14 @@ class ResolveNameStatusZTest(unittest.TestCase):
     def test_empty_and_malformed_input_fail_closed(self):
         for raw in (b"", b"M\0", b"R100\0old-only\0"):
             selection = resolve_name_status_z(raw)
-            self.assertEqual(selection.labels, CONFIG_LABELS)
+            self.assertEqual(selection.labels, EXPECTED_CONFIG_LABELS)
             self.assertTrue(selection.conservative)
             self.assertEqual(selection.reason, "unavailable")
             self.assertIsNotNone(selection.error)
 
 
 class ParseBEPTest(unittest.TestCase):
-    requested = CONFIG_LABELS
+    requested = EXPECTED_CONFIG_LABELS
 
     def parse(self, events, requested=None):
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as f:
@@ -242,13 +273,13 @@ class CLIResilienceTest(unittest.TestCase):
             self.assertEqual(result.stderr, "")
             if output_format == "json":
                 payload = json.loads(result.stdout)
-                self.assertEqual(tuple(payload["labels"]), CONFIG_LABELS)
+                self.assertEqual(tuple(payload["labels"]), EXPECTED_CONFIG_LABELS)
                 self.assertTrue(payload["conservative"])
                 self.assertEqual(payload["reason"], "unavailable")
                 self.assertTrue(payload["error"])
             else:
                 labels, conservative, reason, error = result.stdout.rstrip("\n").split("\t", 3)
-                self.assertEqual(tuple(labels.split(",")), CONFIG_LABELS)
+                self.assertEqual(tuple(labels.split(",")), EXPECTED_CONFIG_LABELS)
                 self.assertEqual(conservative, "true")
                 self.assertEqual(reason, "unavailable")
                 self.assertTrue(error)
