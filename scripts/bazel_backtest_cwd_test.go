@@ -9,6 +9,32 @@ import (
 	"testing"
 )
 
+// TestBazelConfigBacktestOverlaysEveryHermeticProductionSource protects the
+// historical fixture boundary. The copied BUILD graph must never be paired
+// with an older revision's source file when a bounded seam was split after
+// that revision; doing so makes a replay fail for fixture-shape reasons rather
+// than measuring the revision.
+func TestBazelConfigBacktestOverlaysEveryHermeticProductionSource(t *testing.T) {
+	root := repoRoot(t)
+	script, err := os.ReadFile(filepath.Join(root, "scripts", "bazel-config-backtest.sh"))
+	if err != nil {
+		t.Fatalf("read config backtest script: %v", err)
+	}
+	contents := string(script)
+	for _, path := range []string{
+		"internal/config/diagnostic_locations.go",
+		"internal/config/envname.go",
+		"internal/config/identity_seam.go",
+		"internal/config/session_setup_path.go",
+		"internal/config/storage_binding_validation.go",
+		"internal/config/storage_endpoint.go",
+	} {
+		if !strings.Contains(contents, path) {
+			t.Errorf("config backtest graph overlay omits hermetic production source %q", path)
+		}
+	}
+}
+
 // TestBazelConfigBacktestRunsBazelFromHistoricalWorktree protects the
 // historical replay boundary: Bazel must discover the disposable revision,
 // not the checkout that launched the harness. The fake executable also proves
@@ -405,6 +431,47 @@ func TestBazelConfigBacktestUsesUniqueEditPayloadsAndArtifacts(t *testing.T) {
 	}
 }
 
+// TestBazelConfigBacktestRemovesReadOnlyColdOutputs ensures cleanup remains
+// effective when Bazel leaves toolchain/sandbox files without owner-write
+// permission. A failed removal would leak one output base per cold sample and
+// eventually make a long historical replay look like a performance problem.
+func TestBazelConfigBacktestRemovesReadOnlyColdOutputs(t *testing.T) {
+	root := repoRoot(t)
+	binDir := t.TempDir()
+	logDir := t.TempDir()
+	bazelLog := filepath.Join(logDir, "bazel.tsv")
+	baseLog := filepath.Join(logDir, "cold-bases.log")
+	writeExecutable(t, filepath.Join(binDir, "fake-bazel"), fakeBazelScript())
+	writeExecutable(t, filepath.Join(binDir, "go"), fakeGoScript())
+
+	cmd := exec.Command(filepath.Join(root, "scripts", "bazel-config-backtest.sh"), "HEAD")
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(),
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"BAZEL_BIN="+filepath.Join(binDir, "fake-bazel"),
+		"BACKTEST_SAMPLES=1",
+		"BACKTEST_TIMEOUT=30",
+		"BACKTEST_SCENARIOS=cold",
+		"BACKTEST_KEEP_ARTIFACTS=0",
+		"FAKE_BAZEL_LOG="+bazelLog,
+		"FAKE_BAZEL_COLD_BASE_LOG="+baseLog,
+		"FAKE_BAZEL_READONLY=1",
+		"TMPDIR="+t.TempDir(),
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("config backtest failed: %v\n%s", err, output)
+	}
+	bases, err := os.ReadFile(baseLog)
+	if err != nil {
+		t.Fatalf("read cold output-base log: %v", err)
+	}
+	for _, base := range strings.Fields(string(bases)) {
+		if _, err := os.Stat(base); !os.IsNotExist(err) {
+			t.Errorf("read-only cold output base %q remains after cleanup (stat=%v)", base, err)
+		}
+	}
+}
+
 func assertBazelWorktreeLog(t *testing.T, path, callerRoot, editedFile string, minTestRows int) {
 	t.Helper()
 	body, err := os.ReadFile(path)
@@ -470,6 +537,14 @@ done
 work=""
 if [[ -n "$output_base" ]]; then work="$(dirname "$output_base")"; fi
 if [[ -n "$output_base" ]]; then mkdir -p "$output_base"; fi
+if [[ "$mode" == test && "${FAKE_BAZEL_READONLY:-0}" == 1 ]]; then
+  mkdir -p "$output_base/read-only"
+  : >"$output_base/read-only/toolchain.a"
+  chmod a-w "$output_base/read-only/toolchain.a"
+fi
+if [[ "$mode" == test && -n "${FAKE_BAZEL_COLD_BASE_LOG:-}" ]]; then
+  printf '%s\n' "$output_base" >>"$FAKE_BAZEL_COLD_BASE_LOG"
+fi
 marker=missing
 edited_file="${FAKE_EDIT_FILE:?}"
 if [[ -f "$work/$edited_file" ]] && grep -q 'bazel backtest' "$work/$edited_file"; then marker=present; fi

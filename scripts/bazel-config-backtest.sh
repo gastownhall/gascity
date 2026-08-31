@@ -26,7 +26,7 @@ go_package="${BACKTEST_GO_PACKAGE:-./internal/config}"
 source_file="${BACKTEST_SOURCE_FILE:-internal/config/session_setup_path.go}"
 test_file="${BACKTEST_TEST_FILE:-internal/config/session_setup_path_test.go}"
 unrelated_file="${BACKTEST_UNRELATED_FILE:-docs/README.md}"
-graph_files="${BACKTEST_GRAPH_FILES:-MODULE.bazel MODULE.bazel.lock .bazelrc BUILD.bazel internal/beads/contract/BUILD.bazel internal/beadmeta/BUILD.bazel internal/fsys/BUILD.bazel internal/pidutil/BUILD.bazel internal/testenv/BUILD.bazel internal/config/BUILD.bazel internal/config/config_envname_bazel_test.go internal/config/diagnostic_locations_fixture_bazel_test.go internal/config/diagnostic_locations_test.go internal/config/testdata/diagnostic_locator.toml internal/config/identity_seam.go internal/config/identity_seam_bazel_test.go internal/config/session_setup_path.go internal/config/session_setup_path_test.go internal/config/storage_endpoint_bazel_test.go}"
+graph_files="${BACKTEST_GRAPH_FILES:-MODULE.bazel MODULE.bazel.lock .bazelrc BUILD.bazel internal/beads/contract/BUILD.bazel internal/beadmeta/BUILD.bazel internal/fsys/BUILD.bazel internal/pidutil/BUILD.bazel internal/testenv/BUILD.bazel internal/config/BUILD.bazel internal/config/diagnostic_locations.go internal/config/envname.go internal/config/config_envname_bazel_test.go internal/config/diagnostic_locations_fixture_bazel_test.go internal/config/diagnostic_locations_test.go internal/config/testdata/diagnostic_locator.toml internal/config/identity_seam.go internal/config/identity_seam_bazel_test.go internal/config/session_setup_path.go internal/config/session_setup_path_test.go internal/config/storage_binding_validation.go internal/config/storage_endpoint.go internal/config/storage_endpoint_bazel_test.go}"
 scenario_csv="${BACKTEST_SCENARIOS:-cold,forced,no-op,source-edit,test-edit,unrelated-edit,go-mod}"
 if [[ -z "$bazel_bin" ]]; then echo "set BAZEL_BIN or install bazelisk" >&2; exit 127; fi
 [[ "$(uname -s)" == Linux ]] || { echo "Linux is required for this harness (GNU timing semantics)" >&2; exit 2; }
@@ -393,7 +393,14 @@ PY
       if [[ "$scenario" == cold ]]; then
         shutdown_bazel "$run_base" "$work"
         case "$run_base" in
-          "$work"/cold-output-[0-9]*) rm -rf -- "$run_base" ;;
+          "$work"/cold-output-[0-9]*)
+            # Bazel's sandbox/toolchain outputs can be read-only even after
+            # the server exits. Restore owner write permission before removing
+            # this harness-owned, disposable output base; never broaden the
+            # deletion match beyond the validated worktree-local path.
+            chmod -R u+w -- "$run_base" 2>/dev/null || true
+            rm -rf -- "$run_base"
+            ;;
         esac
         current_base="$base"
       fi
