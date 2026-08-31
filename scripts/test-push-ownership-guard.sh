@@ -1006,9 +1006,11 @@ test_fallback_cannot_detect_staleness_after_status_leaves_in_progress() {
 # tests catch a future edit to either file breaking the wiring. A trivial
 # Makefile stands in for the real one: pushing a brand-new branch makes the
 # hook's `go_changed` gate trip (no remote counterpart to diff against) and
-# fall through to `exec make test-fast-parallel`, which these tests don't
+# fall through to `make test-fast-parallel`, which these tests don't
 # want to actually run — only the ownership guard's wiring is under test
-# here.
+# here. (ga-34a: the hook no longer `exec`s make, so it can fail-close
+# SIGPIPE/141 instead of letting that status bubble out as a false-clean
+# hook death.)
 # ---------------------------------------------------------------------------
 
 install_guard_hook() {
@@ -1081,6 +1083,48 @@ test_hook_allows_push_on_clean_claim() {
     rm -rf "$remote" "$work" "$fbd"
 }
 
+# ga-34a: a hook that `exec`s make cannot intercept SIGPIPE (141). The suite
+# (or its teardown) dying with 141 must become an explicit fail-closed
+# decline, not a mysterious hook death that looks like a clean pass.
+# A fake `make` on PATH exits 141 directly so GNU make cannot wrap it as 2.
+test_hook_maps_sigpipe_to_fail_closed() {
+    local remote work fbd branch out rc sha zero fmake_dir
+    read -r remote work fbd branch <<<"$(setup_hook_push_scenario in_progress)"
+    fmake_dir="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakemake.XXXXXX")"
+    printf '#!/bin/bash\nexit 141\n' >"$fmake_dir/make"
+    chmod +x "$fmake_dir/make"
+    zero="0000000000000000000000000000000000000000"
+    sha="$(git -C "$work" rev-parse HEAD)"
+    out="$(cd "$work" && PATH="$fmake_dir:$fbd:$PATH" GC_AGENT="agent-x" GC_TEMPLATE="tmpl-x" \
+        ./.githooks/pre-push <<<"refs/heads/${branch} ${sha} refs/heads/${branch} ${zero}" 2>&1)"; rc=$?
+    if [[ $rc -eq 1 ]] && grep -qi "SIGPIPE" <<<"$out"; then
+        record_pass "hook/maps-sigpipe-to-fail-closed (rc=1, names SIGPIPE)"
+    else
+        record_fail "hook/maps-sigpipe-to-fail-closed" "expected rc=1 with SIGPIPE in output, got rc=$rc output=$out"
+    fi
+    rm -rf "$remote" "$work" "$fbd" "$fmake_dir"
+}
+
+# ga-34a: polecat/* branches already ran formula self-review (and CI will
+# run again). Re-running the 5-10m fast suite inside pre-push idles the
+# remote connection git opened before the hook, so send-pack dies 141 and
+# the branch never lands — then pool-slot retirement orphans the cat.
+# The ownership guard must still run; only the heavy suite is skipped.
+test_hook_skips_fast_suite_on_polecat_branch() {
+    local remote work fbd branch out rc
+    read -r remote work fbd branch <<<"$(setup_hook_push_scenario in_progress)"
+    git -C "$work" branch -m "$branch" "polecat/ga-abc123.1"
+    branch="polecat/ga-abc123.1"
+    printf 'test-fast-parallel:\n\t@echo SUITE_RAN >&2; exit 1\n' >"$work/Makefile"
+    out="$(cd "$work" && PATH="$fbd:$PATH" GC_AGENT="agent-x" GC_TEMPLATE="tmpl-x" GIT_TERMINAL_PROMPT=0 git push origin "HEAD:refs/heads/${branch}" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]] && [[ -n "$(remote_sha "$remote" "refs/heads/$branch")" ]] && ! grep -q "SUITE_RAN" <<<"$out"; then
+        record_pass "hook/skips-fast-suite-on-polecat-branch (push landed, suite not run)"
+    else
+        record_fail "hook/skips-fast-suite-on-polecat-branch" "expected successful push without running the suite, got rc=$rc remote_sha=$(remote_sha "$remote" "refs/heads/$branch") output=$out"
+    fi
+    rm -rf "$remote" "$work" "$fbd"
+}
+
 # ---------------------------------------------------------------------------
 # Static wiring checks — mirrors test-rebase-resolve.sh's style of grepping
 # the real source files rather than re-deriving their behavior.
@@ -1092,6 +1136,31 @@ test_pre_push_hook_sources_and_calls_guard() {
         record_pass "wiring/pre-push-hook-sources-and-calls-guard"
     else
         record_fail "wiring/pre-push-hook-sources-and-calls-guard" "$hook does not source+call assert_bead_still_claimed"
+    fi
+}
+
+test_pre_push_hook_fail_closes_sigpipe_and_skips_polecat_suite() {
+    local hook="$REPO_ROOT/.githooks/pre-push"
+    if grep -qE '^exec make test-fast-parallel$' "$hook" 2>/dev/null; then
+        record_fail "wiring/pre-push-does-not-exec-make" \
+            "$hook still execs make, so it cannot intercept SIGPIPE (141)"
+    else
+        record_pass "wiring/pre-push-does-not-exec-make"
+    fi
+    if grep -q "141" "$hook" 2>/dev/null && grep -qi "SIGPIPE" "$hook" 2>/dev/null; then
+        record_pass "wiring/pre-push-maps-141-sigpipe"
+    else
+        record_fail "wiring/pre-push-maps-141-sigpipe" "$hook does not fail-close SIGPIPE/141"
+    fi
+    if grep -qE 'exec[[:space:]]+</dev/null|make test-fast-parallel[[:space:]]*</dev/null' "$hook" 2>/dev/null; then
+        record_pass "wiring/pre-push-drops-git-stdin-before-make"
+    else
+        record_fail "wiring/pre-push-drops-git-stdin-before-make" "$hook does not redirect stdin away from git's hook protocol before make"
+    fi
+    if grep -q 'polecat/\*' "$hook" 2>/dev/null || grep -q 'polecat/*' "$hook" 2>/dev/null; then
+        record_pass "wiring/pre-push-skips-fast-suite-on-polecat-branch"
+    else
+        record_fail "wiring/pre-push-skips-fast-suite-on-polecat-branch" "$hook does not skip test-fast-parallel on polecat/* branches"
     fi
 }
 
@@ -1153,7 +1222,10 @@ run_all() {
     test_hook_blocks_push_on_stale_claim
     test_hook_no_verify_bypasses_guard
     test_hook_allows_push_on_clean_claim
+    test_hook_maps_sigpipe_to_fail_closed
+    test_hook_skips_fast_suite_on_polecat_branch
     test_pre_push_hook_sources_and_calls_guard
+    test_pre_push_hook_fail_closes_sigpipe_and_skips_polecat_suite
     test_rebase_lib_calls_guard_before_force_with_lease
 
     echo

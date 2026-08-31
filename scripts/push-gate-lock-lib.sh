@@ -30,12 +30,13 @@
 #   scripts/test-local-parallel: the slot FD is closed inside the subshell
 #   that spawns the job fan-out, so no test job — and no daemon a test job
 #   leaks (a tmux server, a dolt sql-server, an escaped `gc`) — ever holds a
-#   copy of it. The consequence for operators is worth stating plainly: a
-#   slot that is still locked when its gate process is gone is NOT a stale
-#   file the kernel forgot to clean up. It means some descendant inherited
-#   the descriptor anyway and outlived the gate. push_gate_describe_slots
-#   flags exactly that case; the fix is to find and kill the leaked
-#   descendant (`lsof <slot-file>`), never to delete the slot file.
+#   copy of it. A slot that is still locked when its stamped gate PID is
+#   gone is NOT a stale file the kernel forgot to clean up. It means some
+#   descendant inherited the descriptor anyway and outlived the gate.
+#   push_gate_describe_slots flags that case. acquire then reaps those
+#   leaked descendants (lsof/fuser + kill) so a dead holder cannot pin a
+#   slot until an operator kills the leak by hand (ga-34a). Never delete
+#   the slot file to "unlock" it — that does not release a live flock.
 #
 #   One deliberate deviation from mpr: mpr's caller is an automatic
 #   cooldown-retry dispatcher, so it fails fast (immediate EX_TEMPFAIL) when
@@ -121,6 +122,14 @@
 #       whose recorded PID no longer exists is flagged as a leaked
 #       descendant (see MECHANISM), since that is the one case where the
 #       holder line alone points at the wrong process.
+#   push_gate_reap_dead_holders <slot_dir> <max_concurrent>
+#       For each occupied slot whose stamped PID is missing or dead, kill
+#       the processes that still have the slot file open (leaked
+#       descendants). Never kills the stamped PID while it is alive, and
+#       never kills this shell ($$). Returns 0 if anything was signalled
+#       (caller should retry acquire immediately), 1 if there was nothing
+#       to reap. Best-effort: if neither lsof nor fuser is available, prints
+#       a diagnostic and returns 1 rather than blocking.
 #   push_gate_release_slot <fd>
 #       Explicit release + close. Normally unnecessary (process exit
 #       releases the flock) — provided for tests and tight loops, mirroring
@@ -231,6 +240,87 @@ push_gate_describe_slots() {
     done
 }
 
+# PIDs that currently have $1 open. Best-effort; empty if neither lsof nor
+# fuser is present.
+_push_gate_slot_holder_pids() {
+    local _pgh_slot="$1"
+    if command -v lsof >/dev/null 2>&1; then
+        lsof -t -- "$_pgh_slot" 2>/dev/null || true
+        return 0
+    fi
+    if command -v fuser >/dev/null 2>&1; then
+        # fuser prints space-separated pids, sometimes with mode suffixes
+        # (e.g. "1234e"). Keep digits only.
+        fuser "$_pgh_slot" 2>/dev/null | tr -cs '0-9' '\n' || true
+        return 0
+    fi
+    return 0
+}
+
+# Reap leaked descendants holding slots whose stamped gate PID is dead.
+# See function comment in the header.
+push_gate_reap_dead_holders() {
+    local _pgr_dir="$1" _pgr_max="$2"
+    local _pgr_i _pgr_slot _pgr_line _pgr_pid _pgr_h _pgr_holders _pgr_killed=0 _pgr_have_probe=0
+
+    if command -v lsof >/dev/null 2>&1 || command -v fuser >/dev/null 2>&1; then
+        _pgr_have_probe=1
+    fi
+
+    for (( _pgr_i = 0; _pgr_i < _pgr_max; _pgr_i++ )); do
+        _pgr_slot="$_pgr_dir/slot-${_pgr_i}.lock"
+        [[ -f "$_pgr_slot" ]] || continue
+        if flock -n "$_pgr_slot" -c 'exit 0' 2>/dev/null; then
+            continue
+        fi
+        _pgr_line=""
+        IFS= read -r _pgr_line <"$_pgr_slot" 2>/dev/null || true
+        _pgr_pid="${_pgr_line%% *}"
+        if [[ "$_pgr_pid" =~ ^[0-9]+$ ]] && kill -0 "$_pgr_pid" 2>/dev/null; then
+            continue
+        fi
+        if [[ "$_pgr_have_probe" -eq 0 ]]; then
+            echo "push-gate: slot-${_pgr_i} holder pid ${_pgr_pid:-unknown} is dead but neither lsof nor fuser is available to reap leaked descendants" >&2
+            continue
+        fi
+        _pgr_holders="$(_push_gate_slot_holder_pids "$_pgr_slot")"
+        for _pgr_h in $_pgr_holders; do
+            [[ "$_pgr_h" =~ ^[0-9]+$ ]] || continue
+            [[ "$_pgr_h" -eq "$$" ]] && continue
+            echo "push-gate: slot-${_pgr_i} holder pid ${_pgr_pid:-unknown} is dead; reaping leaked descendant ${_pgr_h}" >&2
+            kill -TERM "$_pgr_h" 2>/dev/null || true
+            _pgr_killed=1
+        done
+    done
+
+    if [[ "$_pgr_killed" -eq 0 ]]; then
+        return 1
+    fi
+
+    # Give TERM a moment, then SIGKILL anything still pinning a dead-holder slot.
+    sleep 0.2
+    for (( _pgr_i = 0; _pgr_i < _pgr_max; _pgr_i++ )); do
+        _pgr_slot="$_pgr_dir/slot-${_pgr_i}.lock"
+        [[ -f "$_pgr_slot" ]] || continue
+        if flock -n "$_pgr_slot" -c 'exit 0' 2>/dev/null; then
+            continue
+        fi
+        _pgr_line=""
+        IFS= read -r _pgr_line <"$_pgr_slot" 2>/dev/null || true
+        _pgr_pid="${_pgr_line%% *}"
+        if [[ "$_pgr_pid" =~ ^[0-9]+$ ]] && kill -0 "$_pgr_pid" 2>/dev/null; then
+            continue
+        fi
+        _pgr_holders="$(_push_gate_slot_holder_pids "$_pgr_slot")"
+        for _pgr_h in $_pgr_holders; do
+            [[ "$_pgr_h" =~ ^[0-9]+$ ]] || continue
+            [[ "$_pgr_h" -eq "$$" ]] && continue
+            kill -KILL "$_pgr_h" 2>/dev/null || true
+        done
+    done
+    return 0
+}
+
 # True when file descriptor $1 is already open in this shell. Slot FDs are
 # fixed numbers, so a second acquire in the same process must not re-open a
 # number it already holds: `exec N<>file` on a live N closes the old
@@ -315,6 +405,13 @@ push_gate_acquire_slot() {
             fi
             eval "exec ${_pgl_fd}>&-" || true
         done
+
+        # ga-34a: if every slot is pinned by a leaked descendant of a dead
+        # gate process, reap those descendants and retry immediately instead
+        # of burning the wait bound (or waiting for an operator to lsof+kill).
+        if push_gate_reap_dead_holders "$_pgl_slot_dir" "$_pgl_max"; then
+            continue
+        fi
 
         if [[ "$_pgl_announced" -eq 0 ]]; then
             _pgl_announced=1

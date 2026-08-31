@@ -15,12 +15,26 @@ zero="0000000000000000000000000000000000000000"
 
 go_changed=0
 any_non_deletion=0
+any_polecat=0
+any_non_polecat=0
 while read -r _local_ref local_sha _remote_ref remote_sha; do
   # Branch deletion — nothing to test, nothing to guard.
   if [ "$local_sha" = "$zero" ]; then
     continue
   fi
   any_non_deletion=1
+  # Classify the source ref. `git push origin HEAD:refs/heads/polecat/<id>`
+  # feeds local_ref=HEAD, so resolve HEAD against the current branch name.
+  case "$_local_ref" in
+    refs/heads/polecat/*) any_polecat=1 ;;
+    HEAD)
+      case "$(git symbolic-ref --short HEAD </dev/null 2>/dev/null || true)" in
+        polecat/*) any_polecat=1 ;;
+        *) any_non_polecat=1 ;;
+      esac
+      ;;
+    *) any_non_polecat=1 ;;
+  esac
   # New remote branch: no cheap base to diff against — run the suite.
   if [ "$remote_sha" = "$zero" ]; then
     go_changed=1
@@ -50,6 +64,34 @@ if [ "$go_changed" -eq 0 ]; then
   exit 0
 fi
 
+# ga-34a: a 5-10m suite in this hook outlives pool-slot retirement and idles
+# the remote connection git opened before the hook, so the subsequent
+# send-pack dies with SIGPIPE (exit 141) and the branch never lands. Polecat
+# branches are already gated by formula self-review and by CI; skip the heavy
+# suite when this push is polecat/* refs only. The ownership guard above
+# still ran. Key off the refs being pushed, not HEAD, so
+# `git push origin polecat/<id>` from a detached checkout still skips.
+if [ "$any_polecat" -eq 1 ] && [ "$any_non_polecat" -eq 0 ]; then
+  echo "pre-push: skipping test-fast-parallel for polecat/* ref(s) (ga-34a: formula self-review + CI; a long hook SIGPIPEs send-pack and outlives pool retirement)" >&2
+  exit 0
+fi
+
 # The Makefile and direct sharded runner share scripts/test-local-job-count as
 # their default policy. Do not shadow it here; an explicit override still wins.
-exec make test-fast-parallel
+#
+# Drop git's hook-protocol stdin so make/tests cannot consume or SIGPIPE it.
+# Do not `exec make`: a 141 from the suite must be intercepted and fail-closed
+# with a named error, not surfaced as a bare SIGPIPE after "All fast jobs
+# passed" while the pack never lands.
+exec </dev/null
+set +e
+make test-fast-parallel
+status=$?
+set -e
+if [ "$status" -eq 141 ]; then
+  echo "pre-push: test-fast-parallel exited 141 (SIGPIPE)." >&2
+  echo "pre-push: the suite (or its teardown) wrote to a broken pipe, or the remote connection idled out during the long gate." >&2
+  echo "pre-push: treating as failure (fail closed). Retry the push; do not treat a 141 as a successful hook." >&2
+  exit 1
+fi
+exit "$status"

@@ -64,7 +64,10 @@ gc_local_parallel_on_signal() {
   trap - "$sig"
   kill -"$sig" $$
 }
-trap 'gc_harness_terminate_group "${gc_harness_supervised_pgid:-}" "$gc_local_parallel_drain_ticks"; push_gate_release_slot "$gate_fd"' EXIT
+# Ignore SIGPIPE during cleanup: a leftover writer hitting a closed stdout
+# must not convert a successful suite (already printed "All fast jobs passed")
+# into exit 141, which git then reports as a false-clean hook death (ga-34a).
+trap 'trap "" PIPE; gc_harness_terminate_group "${gc_harness_supervised_pgid:-}" "$gc_local_parallel_drain_ticks"; push_gate_release_slot "$gate_fd"' EXIT
 trap 'gc_local_parallel_on_signal INT' INT
 trap 'gc_local_parallel_on_signal TERM' TERM
 trap 'gc_local_parallel_on_signal HUP' HUP

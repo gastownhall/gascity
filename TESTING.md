@@ -982,16 +982,20 @@ wait maps to `exit 75` (`EX_TEMPFAIL`) — distinct from a real test failure
 and from `scripts/push-ownership-guard.sh`'s unrelated `exit 1` contract for
 bead-ownership staleness. That 75 is only visible to callers that invoke
 `scripts/test-local-parallel` directly: the four Makefile targets and
-`.githooks/pre-push` (`exec make test-fast-parallel`) run it under `make`,
+`.githooks/pre-push` (`make test-fast-parallel`, not `exec`) run it under `make`,
 which reports `make: *** [test-fast-parallel] Error 75` and then exits 2.
 Through those paths the distinguishing signal is the stderr text, not the
 process exit code. The kernel releases the lock automatically when the
 holding process exits — success, failure, or crash alike — so a stale slot
-can never survive a dead holder; no PID-file liveness probing is involved.
-FD inheritance into test jobs is severed at the fan-out boundary, so a slot
-that stays locked past its gate means a leaked descendant is still holding
-the descriptor (`lsof` on the slot file names it), not a stale file to
-delete. The gate needs `flock(1)`, which `docs/getting-started/installation.md`
+cannot survive a dead holder that still owns the descriptor. If a descendant
+inherited the FD and outlived the gate (the leak pool-cat retirement
+leaves behind), acquire now reaps those leaked descendants when the stamped
+PID is dead (`lsof`/`fuser` + kill; ga-34a) instead of waiting for an
+operator to clear the slot by hand. Never delete the slot file to "unlock"
+it. The pre-push hook itself skip-runs `test-fast-parallel` on `polecat/*`
+branches (formula self-review + CI already gate that work) and fail-closes
+a 141/SIGPIPE from the suite instead of letting git report a clean hook
+followed by a pack that never lands. The gate needs `flock(1)`, which `docs/getting-started/installation.md`
 already lists as required; if it is absent the run proceeds uncapped with a
 warning rather than blocking. `GC_PUSH_GATE_NO_CAP=1` bypasses the cap
 entirely for one invocation.

@@ -13,8 +13,9 @@
 #
 # Coverage: acquire/hold/deny/release, the bounded wait and its return code,
 # FD inheritance (a detached descendant must not pin a slot), dead-holder
-# diagnostics, the missing-flock degrade path, malformed tunables, the
-# GC_PUSH_GATE_NO_CAP escape hatch, both city-root resolution modes, the
+# diagnostics, automatic reap of leaked descendants when the stamped holder
+# PID is dead (ga-34a), the missing-flock degrade path, malformed tunables,
+# the GC_PUSH_GATE_NO_CAP escape hatch, both city-root resolution modes, the
 # slots-dir fallback, and static assertions that scripts/test-local-parallel
 # wires all of it up — including closing the gate FD before the fan-out.
 
@@ -155,6 +156,53 @@ if push_gate_acquire_slot "$DEAD_SLOTS" FD_DEAD "holder-dead"; then
     push_gate_release_slot "$FD_DEAD"
 else
     record_fail "describe.flags_dead_holder" "could not acquire a slot to set up the case"
+fi
+
+# ---------------- reap: leaked descendant of a dead holder is killed, slot frees (ga-34a) ----------------
+# Production leak: the gate process dies (pool-slot retirement, SIGKILL) while
+# a descendant still holds the slot FD. The stamp PID is dead; flock stays
+# held. Acquire must reap that descendant instead of burning the wait bound
+# until an operator runs lsof + kill by hand.
+REAP_SLOTS="$WORK/reap-slots"
+if command -v setsid >/dev/null 2>&1 && { command -v lsof >/dev/null 2>&1 || command -v fuser >/dev/null 2>&1; }; then
+    REAP_PIDFILE="$WORK/reap-sleeper.pid"
+    rm -f "$REAP_PIDFILE"
+    LIB="$LIB" DIR="$REAP_SLOTS" PIDFILE="$REAP_PIDFILE" PUSH_GATE_MAX_CONCURRENT=1 \
+        bash -c '
+            . "$LIB"
+            fd=""
+            push_gate_acquire_slot "$DIR" fd "leaker" || exit 2
+            # Detach a sleeper that inherits the slot FD, then vanish so the
+            # stamp PID is dead while the sleeper keeps the flock.
+            setsid bash -c "echo \$\$ > \"\$PIDFILE\"; exec sleep 60" &
+            sleep 0.3
+            exit 0
+        '
+    SLEEPER_PID="$(cat "$REAP_PIDFILE" 2>/dev/null || true)"
+    if flock -n "$REAP_SLOTS/slot-0.lock" -c 'exit 0' 2>/dev/null; then
+        record_fail "reap.leaked_descendant_holds_slot_before_acquire" \
+            "slot was free; leak fixture did not pin it (sleeper pid='${SLEEPER_PID:-}')"
+        kill "$SLEEPER_PID" 2>/dev/null || true
+    else
+        record_pass "reap.leaked_descendant_holds_slot_before_acquire"
+        START="$(date +%s)"
+        REAP_OUT="$(LIB="$LIB" DIR="$REAP_SLOTS" PUSH_GATE_MAX_CONCURRENT=1 \
+            PUSH_GATE_MAX_WAIT_SECONDS=6 PUSH_GATE_POLL_SECONDS=1 \
+            bash -c '. "$LIB"; if push_gate_acquire_slot "$DIR" z reaper; then echo ACQUIRED; else echo DENIED; fi' 2>&1)"
+        ELAPSED=$(( $(date +%s) - START ))
+        REAP_TAIL="$(printf '%s\n' "$REAP_OUT" | tail -1)"
+        assert_eq "reap.acquire_succeeds_after_reaping_leak" "$REAP_TAIL" "ACQUIRED"
+        assert_contains "reap.diagnostic_names_leaked_descendant" "$REAP_OUT" "reaping leaked descendant"
+        assert_true "reap.did_not_burn_full_wait_bound" test "$ELAPSED" -le 4
+        if [[ -n "$SLEEPER_PID" ]] && kill -0 "$SLEEPER_PID" 2>/dev/null; then
+            record_fail "reap.leaked_descendant_killed" "sleeper pid $SLEEPER_PID still alive"
+            kill "$SLEEPER_PID" 2>/dev/null || true
+        else
+            record_pass "reap.leaked_descendant_killed"
+        fi
+    fi
+else
+    echo "  skip reap.leaked_descendant_* — need setsid and lsof/fuser"
 fi
 
 # ---------------- missing flock(1): degrade best-effort, never block ----------------
