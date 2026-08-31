@@ -862,6 +862,44 @@ func TestOrderCheckWithStoresResolverUsesBoundedEventTail(t *testing.T) {
 	}
 }
 
+// TestOrderCheckWithStoresResolverNeverFiredIsDue completes the never/recent/old
+// regression matrix for the bounded event-tail read: an order with no
+// order.fired event anywhere in the tail and no order-run history at all is
+// the "never fired" case, and must still resolve to due — the bounded read
+// must not turn "the tail happens to be empty" into a false negative.
+func TestOrderCheckWithStoresResolverNeverFiredIsDue(t *testing.T) {
+	fake := events.NewFake()
+	// Noise for unrelated orders only; "digest" never fires.
+	fake.Record(events.Event{Type: events.OrderFired, Subject: "noise"})
+	ep := &countingTailEventProvider{Fake: fake}
+
+	aa := []orders.Order{{
+		Name:     "digest",
+		Trigger:  "cooldown",
+		Interval: "24h",
+		Formula:  "mol-digest",
+	}}
+	resolver := func(orders.Order) ([]beads.OrdersStore, error) {
+		return []beads.OrdersStore{{Store: beads.NewMemStore()}}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	now := time.Now()
+	code := doOrderCheckWithStoresResolver(aa, now, ep, resolver, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderCheckWithStoresResolver = %d, want 0 (never fired, due); stderr: %s; stdout: %s", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "yes") {
+		t.Fatalf("stdout missing due row:\n%s", stdout.String())
+	}
+	if ep.listCalls != 0 {
+		t.Errorf("List called %d times, want 0 (order check must use the bounded ListTail path)", ep.listCalls)
+	}
+	if ep.tailCalls == 0 {
+		t.Errorf("ListTail was never called")
+	}
+}
+
 func TestOrderCheckWithStoresResolverUsesRigStore(t *testing.T) {
 	cityStore := beads.NewMemStore()
 	rigStore := beads.NewMemStore()

@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -444,6 +445,64 @@ func writeCityEventLog(t *testing.T, name string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+// TestTransientCityEventProviderListTailNeverOpensArchives is the regression
+// guard for gc-zoi5l: transientCityEventProvider.ListTail (used by `gc order
+// check` to read order.fired events) must resolve the latest matching event
+// from the active log alone, with work bounded independently of how many
+// rotated archives sit beside it. The archives here are deliberately not
+// valid gzip, so if ListTail ever opened one, decoding it would fail loudly
+// — this test passing at every archive count is the proof that it doesn't.
+func TestTransientCityEventProviderListTailNeverOpensArchives(t *testing.T) {
+	cityPath := t.TempDir()
+	gcDir := filepath.Join(cityPath, ".gc")
+	if err := os.MkdirAll(gcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(gcDir, "events.jsonl")
+
+	rec, err := events.NewFileRecorder(logPath, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.Record(events.Event{Type: events.OrderFired, Subject: "digest"})
+	if err := rec.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	archiveCounts := []int{0, 1, 50}
+	for _, n := range archiveCounts {
+		for i := 0; i < n; i++ {
+			archive := filepath.Join(gcDir, fmt.Sprintf("events.jsonl.archive-2026073%d0400Z-seq-%d-%d.gz", i%10, i*100, i*100+99))
+			if err := os.WriteFile(archive, []byte("not gzip"), 0o600); err != nil {
+				t.Fatalf("writing archive %d: %v", i, err)
+			}
+		}
+
+		provider := transientCityEventProvider{path: logPath}
+		got, err := provider.ListTail(events.Filter{Type: events.OrderFired}, 2000)
+		if err != nil {
+			t.Fatalf("ListTail with %d archives present: %v (an opened, invalid archive would surface here)", n, err)
+		}
+		if len(got) != 1 || got[0].Subject != "digest" {
+			t.Fatalf("ListTail with %d archives = %+v, want a single digest firing", n, got)
+		}
+
+		entries, err := os.ReadDir(gcDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var archiveCount int
+		for _, e := range entries {
+			if e.Name() != "events.jsonl" {
+				archiveCount++
+			}
+		}
+		if archiveCount != n {
+			t.Fatalf("set up %d archives, found %d", n, archiveCount)
+		}
+	}
 }
 
 func TestCityRegistrySnapshotImmutability(t *testing.T) {
