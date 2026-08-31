@@ -78,6 +78,47 @@ func TestContainsWorkspaceTrustDialog(t *testing.T) {
 	}
 }
 
+func TestContainsClaudeWorkspaceTrustNoExitDialog(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{
+			name:    "claude no-exit default",
+			content: claudeWorkspaceTrustNoExitDialogFixture(),
+			want:    true,
+		},
+		{
+			name:    "claude safe default",
+			content: "Quick safety check\nYes, I trust this folder",
+			want:    false,
+		},
+		{
+			name:    "codex trust dialog",
+			content: "> Do you trust the contents of this directory?",
+			want:    false,
+		},
+		{
+			name:    "normal prompt text",
+			content: "> waiting for input",
+			want:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := containsClaudeWorkspaceTrustNoExitDialog(tt.content); got != tt.want {
+				t.Fatalf("containsClaudeWorkspaceTrustNoExitDialog(%q) = %v, want %v", tt.content, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestAcceptStartupDialogsAcceptsCodexTrustDialog(t *testing.T) {
 	withZeroDialogTimings(t)
 	// Override timeout to allow at least one poll iteration.
@@ -154,6 +195,84 @@ func TestAcceptStartupDialogsAcceptsPiTrustDialog(t *testing.T) {
 	}
 	if !reflect.DeepEqual(sent, []string{"Enter"}) {
 		t.Fatalf("sent keys = %v, want [Enter]", sent)
+	}
+}
+
+func TestAcceptStartupDialogsAcceptsClaudeSafeDefaultTrustDialog(t *testing.T) {
+	withZeroDialogTimings(t)
+	dialogPollTimeout = time.Second
+
+	var sent []string
+	err := AcceptStartupDialogs(
+		context.Background(),
+		func(_ int) (string, error) {
+			if len(sent) == 0 {
+				return "Quick safety check\nYes, I trust this folder", nil
+			}
+			return "❯ ", nil
+		},
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogs() error = %v", err)
+	}
+	if !reflect.DeepEqual(sent, []string{"Enter"}) {
+		t.Fatalf("sent keys = %v, want [Enter]", sent)
+	}
+}
+
+func TestAcceptStartupDialogsSendsDownEnterForClaudeNoExitTrustDialog(t *testing.T) {
+	withZeroDialogTimings(t)
+	dialogPollTimeout = time.Second
+
+	var sent []string
+	err := AcceptStartupDialogs(
+		context.Background(),
+		func(_ int) (string, error) {
+			if len(sent) == 0 {
+				return claudeWorkspaceTrustNoExitDialogFixture(), nil
+			}
+			return "❯ ", nil
+		},
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogs() error = %v", err)
+	}
+	if !reflect.DeepEqual(sent, []string{"Down", "Enter"}) {
+		t.Fatalf("sent keys = %v, want [Down Enter]", sent)
+	}
+}
+
+func TestAcceptStartupDialogsFromStreamSendsDownEnterForClaudeNoExitTrustDialog(t *testing.T) {
+	withZeroDialogTimings(t)
+
+	snapshots := make(chan string, 2)
+	snapshots <- claudeWorkspaceTrustNoExitDialogFixture()
+	snapshots <- "❯ "
+	close(snapshots)
+
+	var sent []string
+	err := AcceptStartupDialogsFromStream(
+		context.Background(),
+		time.Second,
+		snapshots,
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogsFromStream() error = %v", err)
+	}
+	if !reflect.DeepEqual(sent, []string{"Down", "Enter"}) {
+		t.Fatalf("sent keys = %v, want [Down Enter]", sent)
 	}
 }
 
@@ -1247,6 +1366,13 @@ func TestContainsPromptIndicator(t *testing.T) {
 			}
 		})
 	}
+}
+
+func claudeWorkspaceTrustNoExitDialogFixture() string {
+	return "Quick safety check: Is this a project you created or one you trust?\n" +
+		"❯ No, exit\n" +
+		"  Yes, I trust this folder\n" +
+		"Enter to confirm · Esc to cancel"
 }
 
 func codexUpdateDialogFixture() string {

@@ -582,10 +582,15 @@ func containsPostUpdateStartupDialog(content string) bool {
 }
 
 // acceptWorkspaceTrustDialog dismisses workspace trust dialogs for supported
-// agents. Claude shows "Quick safety check"; Codex shows
-// "Do you trust the contents of this directory?"; pi (>= 0.79) shows
-// "Trust project folder?". In all cases the safe continue option is
-// pre-selected, so Enter accepts.
+// agents. Codex shows "Do you trust the contents of this directory?"; pi
+// (>= 0.79) shows "Trust project folder?"; both pre-select the safe continue
+// option, so Enter accepts. Claude shows "Quick safety check", but as of
+// Claude Code 2.1.251 that dialog pre-selects "No, exit" instead of "Yes, I
+// trust this folder" — a bare Enter now confirms exit and kills the session
+// before it claims any work. containsClaudeWorkspaceTrustNoExitDialog detects
+// that unsafe-default screen specifically so it can move the cursor down to
+// the trust option first; every other provider's dialog, and Claude's older
+// safe-default screen, still gets a bare Enter.
 func acceptWorkspaceTrustDialog(
 	ctx context.Context,
 	budget *startupDialogBudget,
@@ -600,6 +605,15 @@ func acceptWorkspaceTrustDialog(
 		content, err := peek(startupDialogPeekLines)
 		if err != nil {
 			return err
+		}
+
+		if containsClaudeWorkspaceTrustNoExitDialog(content) {
+			budget.observe()
+			if err := sendKeys("Down"); err != nil {
+				return err
+			}
+			sleep(ctx, bypassDialogConfirmDelay)
+			return sendKeys("Enter")
 		}
 
 		if containsWorkspaceTrustDialog(content) {
@@ -631,19 +645,41 @@ func acceptWorkspaceTrustDialog(
 	return nil
 }
 
+// acceptWorkspaceTrustDialogFromStream first watches for Claude's unsafe-default
+// "No, exit" screen (Down then Enter) and only then falls through to the
+// shared bare-Enter handling for every other trust dialog, mirroring the
+// branch order in acceptWorkspaceTrustDialog.
 func acceptWorkspaceTrustDialogFromStream(
 	ctx context.Context,
 	timeout time.Duration,
 	snapshots *replayableSnapshotCursor,
 	sendKeys func(keys ...string) error,
 ) (bool, error) {
-	return acceptDialogFromStream(ctx, timeout, snapshots, sendKeys, streamDialogSpec{
+	observed, err := acceptDialogFromStream(ctx, timeout, snapshots, sendKeys, streamDialogSpec{
+		match:       containsClaudeWorkspaceTrustNoExitDialog,
+		matchKeys:   []string{"Down", "Enter"},
+		matchDelay:  bypassDialogConfirmDelay,
+		ready:       containsPromptIndicator,
+		readyOrNext: containsWorkspaceTrustDialogOrPostTrust,
+	})
+	if err != nil {
+		return observed, err
+	}
+	if !observed {
+		return false, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return observed, err
+	}
+
+	phaseObserved, err := acceptDialogFromStream(ctx, timeout, snapshots, sendKeys, streamDialogSpec{
 		match:       containsWorkspaceTrustDialog,
 		matchKeys:   []string{"Enter"},
 		matchDelay:  startupDialogAcceptDelay,
 		ready:       containsPromptIndicator,
 		readyOrNext: containsPostTrustStartupDialog,
 	})
+	return observed || phaseObserved, err
 }
 
 func containsWorkspaceTrustDialog(content string) bool {
@@ -652,6 +688,23 @@ func containsWorkspaceTrustDialog(content string) bool {
 		strings.Contains(content, "Do you trust the contents of this directory?") ||
 		strings.Contains(content, "Do you trust the files in this folder?") ||
 		strings.Contains(content, "Trust project folder?")
+}
+
+// containsClaudeWorkspaceTrustNoExitDialog reports whether content shows
+// Claude's workspace-trust dialog with "No, exit" preselected, the default
+// since Claude Code 2.1.251. Both phrases must be present so ordinary output
+// mentioning either alone cannot false-match and eat a Down.
+func containsClaudeWorkspaceTrustNoExitDialog(content string) bool {
+	return strings.Contains(content, "Quick safety check") &&
+		strings.Contains(content, "No, exit")
+}
+
+// containsWorkspaceTrustDialogOrPostTrust lets the no-exit stream phase hand
+// off to the shared trust-dialog phase below it, whether that means another
+// provider's trust dialog rendered instead or the sequence skipped straight
+// past workspace trust to whatever dialog comes next.
+func containsWorkspaceTrustDialogOrPostTrust(content string) bool {
+	return containsWorkspaceTrustDialog(content) || containsPostTrustStartupDialog(content)
 }
 
 func containsPostTrustStartupDialog(content string) bool {
