@@ -59,19 +59,38 @@ tsv_escape() {
   value=${value//\\/\\\\}; value=${value//$'\t'/\\t}; value=${value//$'\r'/\\r}; value=${value//$'\n'/\\n}
   printf '%s' "$value"
 }
+run_bounded_in_worktree() {
+  local work="$1"
+  shift
+  (
+    cd "$work" || exit 1
+    if command -v timeout >/dev/null 2>&1; then
+      timeout --signal=TERM --kill-after=15 "$timeout_s" "$@"
+    else
+      gtimeout --signal=TERM --kill-after=15 "$timeout_s" "$@"
+    fi
+  )
+}
 shutdown_bazel() {
   local base="$1"
+  local work="${2:-$(dirname "$base")}"
   if command -v timeout >/dev/null 2>&1; then
-    timeout --signal=TERM --kill-after=3 10 "$bazel_bin" --output_base="$base" shutdown >/dev/null 2>&1 || true
+    (
+      cd "$work" || exit 1
+      timeout --signal=TERM --kill-after=3 10 "$bazel_bin" --output_base="$base" shutdown
+    ) >/dev/null 2>&1 || true
   else
-    gtimeout --signal=TERM --kill-after=3 10 "$bazel_bin" --output_base="$base" shutdown >/dev/null 2>&1 || true
+    (
+      cd "$work" || exit 1
+      gtimeout --signal=TERM --kill-after=3 10 "$bazel_bin" --output_base="$base" shutdown
+    ) >/dev/null 2>&1 || true
   fi
 }
 
 tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/gascity-config-backtest.XXXXXX")"
 current_base=""; current_work=""
 cleanup() {
-  [[ -n "$current_base" ]] && shutdown_bazel "$current_base"
+  [[ -n "$current_base" ]] && shutdown_bazel "$current_base" "$current_work"
   [[ -n "$current_work" ]] && { chmod -R u+w "$current_work" 2>/dev/null || true; git -C "$repo_root" worktree remove --force "$current_work" >/dev/null 2>&1 || true; }
   if [[ "${BACKTEST_KEEP_ARTIFACTS:-0}" != 1 ]]; then
     chmod -R u+w "$tmp_root" 2>/dev/null || true
@@ -135,9 +154,9 @@ for ref in "${refs[@]}"; do
     [[ "$warm_ready" == 1 ]] && return
     restore_pristine
     if command -v timeout >/dev/null 2>&1; then
-      timeout --signal=TERM --kill-after=15 "$timeout_s" "$bazel_bin" --output_base="$base" test --noshow_progress --cache_test_results=no "${target_labels[@]}" >/dev/null 2>&1
+      run_bounded_in_worktree "$work" "$bazel_bin" --output_base="$base" test --noshow_progress --cache_test_results=no "${target_labels[@]}" >/dev/null 2>&1
     else
-      gtimeout --signal=TERM --kill-after=15 "$timeout_s" "$bazel_bin" --output_base="$base" test --noshow_progress --cache_test_results=no "${target_labels[@]}" >/dev/null 2>&1
+      run_bounded_in_worktree "$work" "$bazel_bin" --output_base="$base" test --noshow_progress --cache_test_results=no "${target_labels[@]}" >/dev/null 2>&1
     fi
     warm_ready=1
   }
@@ -188,11 +207,14 @@ PY
       cache_results=no; [[ "$scenario" == no-op ]] && cache_results=yes
       cmd=("$bazel_bin" --output_base="$run_base" test --noshow_progress --build_event_json_file="$bep" --cache_test_results="$cache_results" "${selected_labels[@]}")
       start="$(now_ns)"; status=0
-      if command -v timeout >/dev/null 2>&1; then
-        /usr/bin/time -f 'user=%U rss=%M' -o "$out.time" timeout --signal=TERM --kill-after=15 "$timeout_s" "${cmd[@]}" >"$out" 2>&1 || status=$?
-      else
-        /usr/bin/time -f 'user=%U rss=%M' -o "$out.time" gtimeout --signal=TERM --kill-after=15 "$timeout_s" "${cmd[@]}" >"$out" 2>&1 || status=$?
-      fi
+      (
+        cd "$work" || exit 1
+        if command -v timeout >/dev/null 2>&1; then
+          /usr/bin/time -f 'user=%U rss=%M' -o "$out.time" timeout --signal=TERM --kill-after=15 "$timeout_s" "${cmd[@]}"
+        else
+          /usr/bin/time -f 'user=%U rss=%M' -o "$out.time" gtimeout --signal=TERM --kill-after=15 "$timeout_s" "${cmd[@]}"
+        fi
+      ) >"$out" 2>&1 || status=$?
       end="$(now_ns)"
       wall="$(awk -v n="$((end-start))" 'BEGIN{printf "%.3f",n/1e9}')"; user="$(sed -n 's/.*user=\([^ ]*\).*/\1/p' "$out.time" | tail -1)"; rss="$(sed -n 's/.*rss=\([^ ]*\).*/\1/p' "$out.time" | tail -1)"; [[ -n "$user" ]] || user=unknown; [[ -n "$rss" ]] || rss=unknown
       metrics="$(python3 - "$bep" <<'PY'
@@ -230,10 +252,10 @@ PY
       selection_error_escaped="$(tsv_escape "$selection_error")"; bep_error_escaped="$(tsv_escape "$bep_error")"
       row="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "${resolved:0:12}" "$sample" "$scenario" "$row_status" "$selection_reason" "$conservative" "$selection_error_escaped" "$requested_labels" "$configured_labels" "$completed_labels" "$configured_count" "$completed_count" "$bep_error_escaped" "$wall" "$user" "$rss" "$actions" "$executed" "$hits" "$misses" "$analysis" "$bep_cpu")"
       printf '%s\n' "$row" | tee -a "$records"
-      [[ "$scenario" == cold ]] && shutdown_bazel "$run_base"
+      [[ "$scenario" == cold ]] && shutdown_bazel "$run_base" "$work"
     done
   done
-  shutdown_bazel "$base"; current_base=""; git -C "$repo_root" worktree remove --force "$work" >/dev/null 2>&1 || true; current_work=""
+  shutdown_bazel "$base" "$work"; current_base=""; git -C "$repo_root" worktree remove --force "$work" >/dev/null 2>&1 || true; current_work=""
 done
 
 python3 - "$records" <<'PY'

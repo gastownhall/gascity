@@ -81,17 +81,42 @@ run_bounded() {
 	"$@"
 }
 
+run_bounded_in_worktree() {
+	local work="$1"
+	shift
+	(
+		cd "$work" || exit 1
+		if command -v timeout >/dev/null 2>&1; then
+			timeout --signal=TERM --kill-after=15 "$backtest_timeout" "$@"
+		elif command -v gtimeout >/dev/null 2>&1; then
+			gtimeout --signal=TERM --kill-after=15 "$backtest_timeout" "$@"
+		else
+			"$@"
+		fi
+	)
+}
+
 shutdown_bazel() {
 	local base="$1"
+	local work="${2:-$(dirname "$base")}"
 	if [[ -z "$base" || ! -d "$base" ]]; then
 		return 0
 	fi
 	if command -v timeout >/dev/null 2>&1; then
-		timeout --signal=TERM --kill-after=3 10 "$bazel_bin" --output_base="$base" shutdown >/dev/null 2>&1 || true
+		(
+			cd "$work" || exit 1
+			timeout --signal=TERM --kill-after=3 10 "$bazel_bin" --output_base="$base" shutdown
+		) >/dev/null 2>&1 || true
 	elif command -v gtimeout >/dev/null 2>&1; then
-		gtimeout --signal=TERM --kill-after=3 10 "$bazel_bin" --output_base="$base" shutdown >/dev/null 2>&1 || true
+		(
+			cd "$work" || exit 1
+			gtimeout --signal=TERM --kill-after=3 10 "$bazel_bin" --output_base="$base" shutdown
+		) >/dev/null 2>&1 || true
 	else
-		"$bazel_bin" --output_base="$base" shutdown >/dev/null 2>&1 || true
+		(
+			cd "$work" || exit 1
+			"$bazel_bin" --output_base="$base" shutdown
+		) >/dev/null 2>&1 || true
 	fi
 }
 
@@ -117,7 +142,7 @@ current_work=""
 current_bazel_base=""
 cleanup_exit() {
 	if [[ -n "$current_work" && -n "$current_bazel_base" ]]; then
-		shutdown_bazel "$current_bazel_base"
+		shutdown_bazel "$current_bazel_base" "$current_work"
 	fi
 	if [[ -n "$current_work" ]]; then
 		chmod -R u+w "$current_work" 2>/dev/null || true
@@ -177,7 +202,7 @@ for ref in "${refs[@]}"; do
 	bazel_incremental_log="$work/bazel-incremental.log"
 	bazel_base="$work/bazel-output"
 	current_bazel_base="$bazel_base"
-	if ! measure "$bazel_cold_log" run_bounded "$bazel_bin" --output_base="$bazel_base" test \
+	if ! measure "$bazel_cold_log" run_bounded_in_worktree "$work" "$bazel_bin" --output_base="$bazel_base" test \
 		--noshow_progress --cache_test_results=no --profile="$bazel_cold_profile" \
 		--build_event_json_file="$bazel_cold_bep" \
 		//internal/beads/contract:contract_test; then
@@ -186,14 +211,14 @@ for ref in "${refs[@]}"; do
 	fi
 	cold_seconds="$MEASURE_SECONDS"
 
-	if ! measure "$bazel_forced_log" run_bounded "$bazel_bin" --output_base="$bazel_base" test --noshow_progress \
+	if ! measure "$bazel_forced_log" run_bounded_in_worktree "$work" "$bazel_bin" --output_base="$bazel_base" test --noshow_progress \
 		--cache_test_results=no --profile="$bazel_forced_profile" --build_event_json_file="$bazel_forced_bep" \
 		//internal/beads/contract:contract_test; then
 		echo "backtest: Bazel forced run failed for $ref (see $bazel_forced_log)" >&2
 		exit 1
 	fi
 	forced_seconds="$MEASURE_SECONDS"
-	if ! measure "$bazel_noop_log" run_bounded "$bazel_bin" --output_base="$bazel_base" test --noshow_progress \
+	if ! measure "$bazel_noop_log" run_bounded_in_worktree "$work" "$bazel_bin" --output_base="$bazel_base" test --noshow_progress \
 		--cache_test_results=yes --build_event_json_file="$bazel_noop_bep" //internal/beads/contract:contract_test; then
 		echo "backtest: Bazel cached no-op failed for $ref (see $bazel_noop_log)" >&2
 		exit 1
@@ -202,7 +227,7 @@ for ref in "${refs[@]}"; do
 	# A one-line source edit models the common developer loop. The disposable
 	# worktree is discarded after the run, so the historical checkout is safe.
 	printf '\n// bazel backtest edit\n' >> "$work/internal/beads/contract/metadata.go"
-	if ! measure "$bazel_incremental_log" run_bounded "$bazel_bin" --output_base="$bazel_base" test --noshow_progress \
+	if ! measure "$bazel_incremental_log" run_bounded_in_worktree "$work" "$bazel_bin" --output_base="$bazel_base" test --noshow_progress \
 		--cache_test_results=no --profile="$bazel_incremental_profile" \
 		--build_event_json_file="$bazel_incremental_bep" //internal/beads/contract:contract_test; then
 		echo "backtest: Bazel incremental run failed for $ref (see $bazel_incremental_log)" >&2
@@ -240,7 +265,7 @@ PY
 	incremental_metrics="$(bep_metrics "$bazel_incremental_bep")"
 
 	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s/%s/%s/%s\n' "${resolved:0:12}" "$go_seconds" "$cold_seconds" "$forced_seconds" "$noop_seconds" "$incremental_seconds" "$cold_metrics" "$forced_metrics" "$noop_metrics" "$incremental_metrics"
-	shutdown_bazel "$bazel_base"
+	shutdown_bazel "$bazel_base" "$work"
 	current_bazel_base=""
 	cleanup_worktree "$work"
 	current_work=""
