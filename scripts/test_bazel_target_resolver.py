@@ -42,6 +42,19 @@ class ResolveNameStatusZTest(unittest.TestCase):
             self.assertFalse(selection.conservative)
             self.assertEqual(selection.reason, "mapped")
 
+    def test_maps_diagnostic_embed_sources_to_existing_target(self):
+        for path in (
+            "internal/config/diagnostic_locations_fixture_bazel_test.go",
+            "internal/config/testdata/diagnostic_locator.toml",
+        ):
+            selection = self.resolve("M", path)
+            self.assertEqual(
+                selection.labels,
+                ("//internal/config:config_diagnostic_locations_test",),
+            )
+            self.assertFalse(selection.conservative)
+            self.assertEqual(selection.reason, "mapped")
+
     def test_mixes_identity_with_existing_target_in_sorted_order(self):
         selection = self.resolve(
             "M", "internal/config/identity_seam.go",
@@ -59,7 +72,26 @@ class ResolveNameStatusZTest(unittest.TestCase):
         deleted = self.resolve("D", "internal/config/storage_binding_validation.go")
         identity_renamed = self.resolve("R100", "internal/config/identity_seam.go", "docs/identity_seam.go")
         identity_deleted = self.resolve("D", "internal/config/identity_seam.go")
-        for selection in (renamed, deleted, identity_renamed, identity_deleted):
+        fixture_renamed = self.resolve(
+            "R100",
+            "internal/config/testdata/diagnostic_locator.toml",
+            "docs/diagnostic_locator.toml",
+        )
+        fixture_deleted = self.resolve("D", "internal/config/testdata/diagnostic_locator.toml")
+        fixture_copied = self.resolve(
+            "C100",
+            "docs/diagnostic_locator.toml",
+            "internal/config/testdata/diagnostic_locator.toml",
+        )
+        for selection in (
+            renamed,
+            deleted,
+            identity_renamed,
+            identity_deleted,
+            fixture_renamed,
+            fixture_deleted,
+            fixture_copied,
+        ):
             self.assertEqual(selection.labels, CONFIG_LABELS)
             self.assertTrue(selection.conservative)
             self.assertEqual(selection.reason, "config-unmapped")

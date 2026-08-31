@@ -31,6 +31,8 @@ _MAPPED_PATHS = {
     "internal/config/config_envname_bazel_test.go": "//internal/config:config_envname_test",
     "internal/config/diagnostic_locations.go": "//internal/config:config_diagnostic_locations_test",
     "internal/config/diagnostic_locations_test.go": "//internal/config:config_diagnostic_locations_test",
+    "internal/config/diagnostic_locations_fixture_bazel_test.go": "//internal/config:config_diagnostic_locations_test",
+    "internal/config/testdata/diagnostic_locator.toml": "//internal/config:config_diagnostic_locations_test",
     "internal/config/identity_seam.go": "//internal/config:config_identity_seam_test",
     "internal/config/identity_seam_bazel_test.go": "//internal/config:config_identity_seam_test",
     "internal/config/storage_endpoint.go": "//internal/config:config_storage_endpoint_test",
