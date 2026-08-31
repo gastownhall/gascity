@@ -34,7 +34,7 @@ var supported = []string{"claude", "codex", "gemini", "antigravity", "kiro", "op
 
 const (
 	managedPiHookVersion       = 7
-	managedOpenCodeHookVersion = 6
+	managedOpenCodeHookVersion = 7
 	managedMimoCodeHookVersion = 2
 	managedOmpHookVersion      = 2
 )
@@ -299,7 +299,11 @@ func opencodeHookNeedsUpgrade(existing []byte) bool {
 		!strings.Contains(content, "GC_PROVIDER_SESSION_ID") ||
 		!strings.Contains(content, "GC_PROVIDER_SESSION_ID_REQUIRED") ||
 		// The child's stdin must be closed or gc blocks on it (#5562).
-		!strings.Contains(content, "pending.child.stdin?.end();") {
+		!strings.Contains(content, "pending.child.stdin?.end();") ||
+		// OpenCode loads the workdir plugin for human-launched sessions
+		// too; without the identity guard the plugin runs gc lifecycle
+		// commands in sessions gc does not manage.
+		!strings.Contains(content, "managedSessionIdentityPresent()") {
 		return true
 	}
 	for _, marker := range []string{
