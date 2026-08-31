@@ -136,10 +136,24 @@
 # Sourced by scripts/test-local-parallel and directly by
 # scripts/test-push-gate-lock.sh.
 
-# Base file-descriptor number for slot <i>; slot <i> always maps to
-# PUSH_GATE_FD_BASE + i. Fixed numbers rather than bash 4.1's `exec {var}<>`
-# keep the 3.2 floor above.
+# Lowest file-descriptor number the slot locks may use. Fixed numbers rather
+# than bash 4.1's `exec {var}<>` keep the 3.2 floor above.
+#
+# A slot is NOT bound to a fixed descriptor. It used to be — slot <i> always
+# took PUSH_GATE_FD_BASE + i — and that made slot availability depend on the
+# CALLER's descriptor table: a descriptor inherited from any ancestor at that
+# number made the acquire loop skip the slot without ever opening or flocking
+# its lock file, so a free slot was silently counted as busy and the caller
+# burned its whole wait bound (ga-rjj9lm; false FIX-IS-BAD push denial on
+# gastownhall/gascity#5783). Each acquire now takes the first FREE descriptor
+# at or above the base, so descriptor occupancy and slot occupancy are
+# independent facts.
 PUSH_GATE_FD_BASE=200
+# How far above the base to look for a free descriptor before giving up. Only
+# an acquire that is already holding slots consumes these, so the span only has
+# to exceed the largest sane PUSH_GATE_MAX_CONCURRENT plus whatever an ancestor
+# happens to have open in the range.
+PUSH_GATE_FD_SPAN=64
 
 # Resolve the city root, validating any env var before trusting it so a
 # stray GC_CITY_PATH can't redirect the lock directory arbitrarily.
@@ -295,14 +309,30 @@ push_gate_acquire_slot() {
         return 0
     fi
 
-    local _pgl_i _pgl_slot _pgl_fd _pgl_announced=0 _pgl_start=0
+    local _pgl_i _pgl_slot _pgl_fd _pgl_try _pgl_announced=0 _pgl_start=0
 
     while :; do
         for (( _pgl_i = 0; _pgl_i < _pgl_max; _pgl_i++ )); do
             _pgl_slot="$_pgl_slot_dir/slot-${_pgl_i}.lock"
-            _pgl_fd=$(( PUSH_GATE_FD_BASE + _pgl_i ))
-            if _push_gate_fd_in_use "$_pgl_fd"; then
-                continue
+            # Pick a descriptor for THIS attempt. Never let an in-use
+            # descriptor stand in for a busy slot: only flock below may
+            # decide a slot is taken (ga-rjj9lm).
+            _pgl_fd=""
+            for (( _pgl_try = PUSH_GATE_FD_BASE; _pgl_try < PUSH_GATE_FD_BASE + PUSH_GATE_FD_SPAN; _pgl_try++ )); do
+                if ! _push_gate_fd_in_use "$_pgl_try"; then
+                    _pgl_fd="$_pgl_try"
+                    break
+                fi
+            done
+            if [[ -z "$_pgl_fd" ]]; then
+                # Every descriptor in the span is taken, so no slot can be
+                # held no matter how long we wait. Degrade best-effort with a
+                # diagnostic, exactly as the missing-flock and unwritable-dir
+                # paths do — waiting out the bound here would report a
+                # contention timeout for what is not contention.
+                echo "push-gate: no free descriptor in [$PUSH_GATE_FD_BASE,$(( PUSH_GATE_FD_BASE + PUSH_GATE_FD_SPAN - 1 ))] — running without a cross-invocation cap" >&2
+                eval "$_pgl_fd_var="
+                return 0
             fi
             eval "exec ${_pgl_fd}<>\"\$_pgl_slot\"" || continue
             if flock -n "$_pgl_fd"; then

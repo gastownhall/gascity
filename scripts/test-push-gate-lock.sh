@@ -142,6 +142,33 @@ else
     record_fail "inherit.detached_descendant_does_not_pin_slot" "could not acquire a slot to set up the case"
 fi
 
+
+# ---------------- an occupied descriptor must not consume a slot (ga-rjj9lm) ----------------
+# The slot index used to be hardwired to a descriptor number (slot i always
+# took FD PUSH_GATE_FD_BASE + i), and a descriptor already open in the CALLING
+# process — inherited from any ancestor — made the acquire loop `continue` past
+# that slot without ever opening or flocking its lock file. A FREE slot was
+# counted as busy, silently: the caller burned its entire wait bound and then
+# reported "all N slot(s) busy" while describe_slots printed nothing for the
+# skipped slot, because that slot's lock file had never been created. That
+# self-contradicting output is the fingerprint. In production it became a false
+# FIX-IS-BAD push denial on gastownhall/gascity#5783 (47 passed / 4 failed
+# against slots that were in fact free, after a 600s stall).
+# Occupancy of a DESCRIPTOR must never be read as occupancy of a SLOT.
+FDBASE_SLOTS="$WORK/fdbase-slots"
+FDBASE_OUT="$(LIB="$LIB" DIR="$FDBASE_SLOTS" ANCHOR="$WORK/fdbase-anchor" \
+    PUSH_GATE_MAX_CONCURRENT=2 PUSH_GATE_MAX_WAIT_SECONDS=0 PUSH_GATE_POLL_SECONDS=1 \
+    bash -c '
+        . "$LIB"
+        : >"$ANCHOR"
+        # Occupy exactly the descriptor slot-0 would have claimed.
+        eval "exec ${PUSH_GATE_FD_BASE}<>\"\$ANCHOR\"" || { echo SETUP_FAILED; exit 0; }
+        a=""; b=""
+        push_gate_acquire_slot "$DIR" a holder-A || { echo FIRST_DENIED; exit 0; }
+        push_gate_acquire_slot "$DIR" b holder-B || { echo SECOND_DENIED; exit 0; }
+        if [[ "$a" == "$b" ]]; then echo SAME_FD; else echo BOTH; fi
+    ')"
+assert_eq "fd_base.occupied_descriptor_does_not_consume_a_slot" "$FDBASE_OUT" "BOTH"
 # ---------------- describe: a held slot whose recorded PID is gone is flagged ----------------
 # Hold a slot for real, then overwrite its holder line with a PID that cannot
 # exist — the exact shape a leaked descendant leaves behind: lock genuinely
