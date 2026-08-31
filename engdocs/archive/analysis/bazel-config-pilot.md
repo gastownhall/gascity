@@ -166,11 +166,10 @@ The completed replay artifact is
 recent revisions, three samples per scenario, with `cold`, `forced`, `no-op`,
 and `source-edit`. This replay predates the test-only diagnostic embed fixture
 and is retained as a historical four-target baseline; its timings and action
-counts are not a measurement of the post-fixture graph. No new historical
-replay has been run for this slice. All 48 Bazel rows exited successfully, had
-an empty BEP error, and passed strict correlation (36 broad rows were `4/4`; 12
-mapped source-edit rows were `1/1`). The p95 values below are descriptive
-estimates from three samples, not tail SLOs.
+counts are not a measurement of the post-fixture graph. All 48 Bazel rows
+exited successfully, had an empty BEP error, and passed strict correlation (36
+broad rows were `4/4`; 12 mapped source-edit rows were `1/1`). The p95 values
+below are descriptive estimates from three samples, not tail SLOs.
 
 | PR / revision | Go baseline | cold p50 / p95 | forced p50 / p95 | no-op p50 / p95 | source-edit p50 / p95 |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -199,6 +198,52 @@ Taking the median of the four replay Go baselines (`17.235 s`), cold p50s
 
 This is why the experiment is promising for agents that make several focused
 edits in one session, while still being a poor default for a one-off cold run.
+
+## Post-fixture historical replay
+
+The post-fixture replay artifact is
+`/tmp/gascity-bazel-embed-replay-20260831002241/stdout.tsv`. It copied the
+current four-target graph and embedded fixture into disposable worktrees for
+the same four recent revisions. Each revision ran three alternating samples of
+`cold`, `forced`, `no-op`, fixture edit, focused test edit, unrelated edit, and
+`go.mod` invalidation. As with the pre-fixture replay, this measures historical
+source behavior under the current experiment graph; it does not claim those
+revisions natively contained Bazel metadata.
+
+All 72 executed Bazel rows exited successfully with empty BEP errors. The 48
+broad rows (`cold`, `forced`, `no-op`, and `go.mod`) correlated exactly `4/4`;
+all 24 mapped fixture/test edits correlated exactly `1/1`. All 12 unrelated
+edits selected zero targets and did not invoke Bazel. The p95 values remain
+descriptive estimates from three samples, not tail SLOs.
+
+| PR / revision | Go baseline | cold p50 / p95 | forced p50 / p95 | no-op p50 / p95 | fixture-edit p50 / p95 | test-edit p50 / p95 | `go.mod` p50 / p95 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| #5246/#5258 · `7c33f3f7f1` | 19.162 s | 55.392 / 55.618 s | 0.811 / 1.329 s | 0.525 / 0.719 s | 0.701 / 0.791 s | 0.412 / 0.546 s | 0.389 / 0.484 s |
+| #5164/#5252 · `128bd64033` | 18.140 s | 52.038 / 53.160 s | 0.585 / 1.072 s | 0.531 / 0.738 s | 0.717 / 0.872 s | 0.394 / 0.410 s | 0.429 / 0.527 s |
+| #5193 · `a784438ce0` | 17.681 s | 52.092 / 52.446 s | 0.702 / 1.079 s | 0.520 / 0.706 s | 0.707 / 0.722 s | 0.397 / 0.425 s | 0.379 / 0.404 s |
+| #5215 · `58a47d6bdc` | 17.360 s | 52.291 / 52.809 s | 0.727 / 1.064 s | 0.480 / 0.711 s | 0.557 / 0.707 s | 0.379 / 0.402 s | 0.406 / 0.487 s |
+
+Across all 12 samples per Bazel scenario, p50/p95 was `52.191/55.505 s`
+cold, `0.714/1.243 s` forced, `0.522/0.749 s` no-op, `0.704/0.841 s` for a
+fixture edit, `0.396/0.488 s` for a focused test edit, and `0.405/0.515 s` for
+`go.mod`. The fixture did not change the practical conclusion of the earlier
+replay: once the output base is warm, the bounded loop stays sub-second on
+this host; a clean output base costs about three full Go package runs.
+
+Using the median Go baseline (`17.911 s`), cold p50 (`52.191 s`), and fixture
+edit p50 (`0.704 s`) gives this directional iteration model:
+
+| Focused iterations | Repeated Go | Post-fixture Bazel |
+| ---: | ---: | ---: |
+| 1 | 17.9 s | 52.2 s |
+| 3 | 53.7 s | 53.6 s |
+| 4 | 71.6 s | 54.3 s |
+| 10 | 179.1 s | 58.5 s |
+
+That crossover is near the third focused iteration on this host, with a clear
+advantage by the fourth. It is an iterative build/test-time model, not a direct
+measurement of total agent wall time; downloads, reasoning, editing, and
+unmapped tests remain outside it.
 
 ## Gaps and promotion gates
 
