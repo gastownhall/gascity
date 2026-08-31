@@ -437,6 +437,16 @@ func nonNilQueuedNudges(items []queuedNudge) []queuedNudge {
 }
 
 func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdout, stderr io.Writer) int {
+	// --inject writes a <system-reminder> straight into a provider's system
+	// prompt, and gc stages the overlays that call it into the session work
+	// directory — commonly a city or rig root — so a human who opens the same
+	// provider there gets them too. With no gc identity this did not come from
+	// a session gc started, so there is no session to drain for. Naming a
+	// session explicitly is a deliberate request and is still served; the plain
+	// non-inject form is the human-facing one and is untouched (#5304).
+	if inject && len(args) == 0 && !hookHasManagedIdentity() {
+		return 0
+	}
 	// On every prompt, emit a live clock (operator-local + UTC + epoch) and
 	// the agent's active formula step (if any) as UserPromptSubmit hook context.
 	// When a nudge also fires we fold everything into that nudge's single
