@@ -16,6 +16,7 @@ all_labels=(
   //internal/config:config_diagnostic_locations_test
   //internal/config:config_envname_test
   //internal/config:config_identity_seam_test
+  //internal/config:config_session_setup_path_test
   //internal/config:config_storage_endpoint_test
 )
 
@@ -118,7 +119,7 @@ fi
 if ((${#selected[@]} == 0)) && [[ -s "$selection" ]]; then
   # Validate the helper's shape and labels before trusting it. Empty labels are
   # allowed only for the explicit unrelated result; malformed/unknown output
-  # falls back to all four targets.
+  # falls back to all five targets.
   if ! readarray -t parsed < <(python3 - "$selection" <<'PY'
 import json
 import pathlib
@@ -128,6 +129,7 @@ allowed = {
     "//internal/config:config_diagnostic_locations_test",
     "//internal/config:config_envname_test",
     "//internal/config:config_identity_seam_test",
+    "//internal/config:config_session_setup_path_test",
     "//internal/config:config_storage_endpoint_test",
 }
 try:

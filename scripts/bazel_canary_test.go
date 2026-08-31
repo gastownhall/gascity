@@ -83,13 +83,29 @@ func TestBazelCanaryResolveOnlySelectsDiagnosticEmbedTarget(t *testing.T) {
 	}
 }
 
+func TestBazelCanaryResolveOnlySelectsSessionSetupPathTarget(t *testing.T) {
+	root := repoRoot(t)
+	diff := writeDiffFixture(t, "M\tinternal/config/session_setup_path.go\x00")
+	result, code := runBazelCanary(t, root, "", "", "resolve", []string{"CHANGED_PATHS_FILE=" + diff})
+	if code != 0 {
+		t.Fatalf("resolve-only exit = %d, output:\n%s", code, result.output)
+	}
+	want := "//internal/config:config_session_setup_path_test"
+	if result.selection.Reason != "mapped" || result.selection.Conservative || len(result.selection.Labels) != 1 || result.selection.Labels[0] != want {
+		t.Fatalf("selection = %#v, want mapped %s", result.selection, want)
+	}
+	if !strings.Contains(result.outputs, "run_bazel=true\n") {
+		t.Fatalf("GITHUB_OUTPUT missing run decision:\n%s", result.outputs)
+	}
+}
+
 func TestBazelCanaryResolveOnlyFailsClosedWithoutPRObjects(t *testing.T) {
 	result, code := runBazelCanary(t, repoRoot(t), strings.Repeat("a", 40), strings.Repeat("b", 40), "resolve", nil)
 	if code != 0 {
 		t.Fatalf("fail-closed resolve exit = %d, output:\n%s", code, result.output)
 	}
-	if result.selection.Reason != "unavailable" || !result.selection.Conservative || len(result.selection.Labels) != 4 || result.selection.Error == nil {
-		t.Fatalf("selection = %#v, want conservative four-target fallback", result.selection)
+	if result.selection.Reason != "unavailable" || !result.selection.Conservative || len(result.selection.Labels) != 5 || result.selection.Error == nil {
+		t.Fatalf("selection = %#v, want conservative five-target fallback", result.selection)
 	}
 	if !strings.Contains(result.outputs, "run_bazel=true\n") {
 		t.Fatalf("fallback did not request execution:\n%s", result.outputs)
@@ -106,7 +122,7 @@ func TestBazelCanaryRunConsumesPersistedSelection(t *testing.T) {
 
 	// Remove Bazel from PATH and pass deliberately invalid event SHAs. The run
 	// must still reach the Bazel availability check (127) using the persisted
-	// mapped selection; recomputing would instead fail closed to four labels.
+	// mapped selection; recomputing would instead fail closed to five labels.
 	result, code := runBazelCanary(t, root, "bad-base", "bad-head", "run", []string{
 		"OUT=" + resolved.outDir,
 		"BAZEL_BIN=/nonexistent/bazel",
@@ -232,6 +248,7 @@ func TestBazelCanaryWorkflowPolicy(t *testing.T) {
 		"config_diagnostic_locations_test",
 		"config_envname_test",
 		"config_identity_seam_test",
+		"config_session_setup_path_test",
 		"config_storage_endpoint_test",
 	} {
 		if !strings.Contains(combined, label) {
@@ -247,13 +264,14 @@ func TestBazelConfigBacktestIncludesIdentityBaseline(t *testing.T) {
 	}
 	script := string(body)
 	for _, required := range []string{
-		"BACKTEST_TARGETS:-//internal/config:config_diagnostic_locations_test,//internal/config:config_envname_test,//internal/config:config_identity_seam_test,//internal/config:config_storage_endpoint_test",
+		"BACKTEST_TARGETS:-//internal/config:config_diagnostic_locations_test,//internal/config:config_envname_test,//internal/config:config_identity_seam_test,//internal/config:config_session_setup_path_test,//internal/config:config_storage_endpoint_test",
 		"internal/config/identity_seam.go internal/config/identity_seam_bazel_test.go",
 		"internal/config/diagnostic_locations_fixture_bazel_test.go internal/config/diagnostic_locations_test.go internal/config/testdata/diagnostic_locator.toml",
-		`"${#target_labels[@]}" -eq 4`,
+		"internal/config/session_setup_path.go internal/config/session_setup_path_test.go",
+		`"${#target_labels[@]}" -eq 5`,
 	} {
 		if !strings.Contains(script, required) {
-			t.Errorf("backtest script missing four-target identity marker %q", required)
+			t.Errorf("backtest script missing five-target session setup marker %q", required)
 		}
 	}
 }

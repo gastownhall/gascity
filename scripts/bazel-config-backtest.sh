@@ -4,7 +4,7 @@
 # This is intentionally a research harness: it does not alter CI or claim
 # that historical revisions carried the current BUILD graph.  The graph files
 # are copied from the checkout under test, while source edits are disposable.
-# Defaults run the four bounded config pilot targets. Set BACKTEST_TARGETS to
+# Defaults run the five bounded config pilot targets. Set BACKTEST_TARGETS to
 # a comma-separated label list to override the selection set.
 # Linux with GNU `/usr/bin/time -f` and `timeout` (or `gtimeout`) is required.
 # Set BACKTEST_SAMPLES, BACKTEST_TIMEOUT, and BACKTEST_SCENARIOS to tune runs;
@@ -21,12 +21,12 @@ resolver="$repo_root/scripts/bazel_target_resolver.py"
 bazel_bin="${BAZEL_BIN:-$(command -v bazelisk || command -v bazel || true)}"
 samples="${BACKTEST_SAMPLES:-20}"
 timeout_s="${BACKTEST_TIMEOUT:-300}"
-target_labels_csv="${BACKTEST_TARGETS:-//internal/config:config_diagnostic_locations_test,//internal/config:config_envname_test,//internal/config:config_identity_seam_test,//internal/config:config_storage_endpoint_test}"
+target_labels_csv="${BACKTEST_TARGETS:-//internal/config:config_diagnostic_locations_test,//internal/config:config_envname_test,//internal/config:config_identity_seam_test,//internal/config:config_session_setup_path_test,//internal/config:config_storage_endpoint_test}"
 go_package="${BACKTEST_GO_PACKAGE:-./internal/config}"
-source_file="${BACKTEST_SOURCE_FILE:-internal/config/storage_endpoint.go}"
-test_file="${BACKTEST_TEST_FILE:-internal/config/storage_endpoint_bazel_test.go}"
+source_file="${BACKTEST_SOURCE_FILE:-internal/config/session_setup_path.go}"
+test_file="${BACKTEST_TEST_FILE:-internal/config/session_setup_path_test.go}"
 unrelated_file="${BACKTEST_UNRELATED_FILE:-docs/README.md}"
-graph_files="${BACKTEST_GRAPH_FILES:-MODULE.bazel MODULE.bazel.lock .bazelrc BUILD.bazel internal/beads/contract/BUILD.bazel internal/beadmeta/BUILD.bazel internal/fsys/BUILD.bazel internal/pidutil/BUILD.bazel internal/testenv/BUILD.bazel internal/config/BUILD.bazel internal/config/config_envname_bazel_test.go internal/config/diagnostic_locations_fixture_bazel_test.go internal/config/diagnostic_locations_test.go internal/config/testdata/diagnostic_locator.toml internal/config/identity_seam.go internal/config/identity_seam_bazel_test.go internal/config/storage_endpoint_bazel_test.go}"
+graph_files="${BACKTEST_GRAPH_FILES:-MODULE.bazel MODULE.bazel.lock .bazelrc BUILD.bazel internal/beads/contract/BUILD.bazel internal/beadmeta/BUILD.bazel internal/fsys/BUILD.bazel internal/pidutil/BUILD.bazel internal/testenv/BUILD.bazel internal/config/BUILD.bazel internal/config/config_envname_bazel_test.go internal/config/diagnostic_locations_fixture_bazel_test.go internal/config/diagnostic_locations_test.go internal/config/testdata/diagnostic_locator.toml internal/config/identity_seam.go internal/config/identity_seam_bazel_test.go internal/config/session_setup_path.go internal/config/session_setup_path_test.go internal/config/storage_endpoint_bazel_test.go}"
 scenario_csv="${BACKTEST_SCENARIOS:-cold,forced,no-op,source-edit,test-edit,unrelated-edit,go-mod}"
 if [[ -z "$bazel_bin" ]]; then echo "set BAZEL_BIN or install bazelisk" >&2; exit 127; fi
 [[ "$(uname -s)" == Linux ]] || { echo "Linux is required for this harness (GNU timing semantics)" >&2; exit 2; }
@@ -37,8 +37,8 @@ if ! /usr/bin/time -f '%e' true >/dev/null 2>&1; then echo "/usr/bin/time does n
 [[ "$samples" -le 1000 ]] || { echo "BACKTEST_SAMPLES must be <= 1000" >&2; exit 2; }
 IFS=',' read -r -a target_labels <<<"$target_labels_csv"
 for target in "${target_labels[@]}"; do [[ "$target" == //*:* ]] || { echo "BACKTEST_TARGETS contains invalid label: $target" >&2; exit 2; }; done
-[[ "${#target_labels[@]}" -eq 4 ]] || { echo "BACKTEST_TARGETS must contain the four config pilot labels" >&2; exit 2; }
-for expected in //internal/config:config_diagnostic_locations_test //internal/config:config_envname_test //internal/config:config_identity_seam_test //internal/config:config_storage_endpoint_test; do
+[[ "${#target_labels[@]}" -eq 5 ]] || { echo "BACKTEST_TARGETS must contain the five config pilot labels" >&2; exit 2; }
+for expected in //internal/config:config_diagnostic_locations_test //internal/config:config_envname_test //internal/config:config_identity_seam_test //internal/config:config_session_setup_path_test //internal/config:config_storage_endpoint_test; do
   printf '%s\n' "${target_labels[@]}" | grep -Fxq "$expected" || { echo "BACKTEST_TARGETS missing required label: $expected" >&2; exit 2; }
 done
 
