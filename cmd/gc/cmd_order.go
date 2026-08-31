@@ -1175,12 +1175,14 @@ func doOrderCheckWithStoresResolverScoped(cityPath string, cfg *config.City, aa 
 }
 
 // orderCheckFiredEventTailLimit bounds the newest-first order.fired read
-// below (mirrors internal/doctor's orderFiringEventTailLimit). Unlike that
-// doctor check, no archive fallback is needed here: the lastRunFn built
-// below already falls through to the authoritative order-run history
-// (baseLastRunFn) whenever the tail read doesn't have a fresh-enough fired
-// event for an order, so bounding this read cannot produce a false
-// "never fired" the way an unguarded Limit would.
+// below, and mirrors internal/doctor's orderFiringEventTailLimit in both the
+// value and the reason it is safe: the lastRunFn built below already falls
+// through to the authoritative order-run history (baseLastRunFn) whenever the
+// tail does not carry a fresh-enough fired event for an order, so bounding
+// this read can only cost the cooldown fast path, never manufacture a false
+// "never fired" the way an unguarded Limit would. The bound is on the
+// archived event set; the active log is still scanned in full, as it is for
+// the doctor check.
 const orderCheckFiredEventTailLimit = 2000
 
 func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City, aa []orders.Order, now time.Time, ep events.Provider, resolveStores orderStoresResolver, jsonOutput bool, stdout, stderr io.Writer) int {

@@ -819,9 +819,11 @@ func (p *countingTailEventProvider) ListTail(filter events.Filter, limit int) ([
 // falls through to the authoritative order-run history in that case.
 func TestOrderCheckWithStoresResolverUsesBoundedEventTail(t *testing.T) {
 	fake := events.NewFake()
-	// Push more order.fired events than the tail limit, all for an
-	// unrelated order, so "digest"'s only fired event would fall outside
-	// the tail window if the fallback did not kick in.
+	// "digest" fires once, then more unrelated order.fired events than the
+	// tail limit push it out of the newest-first window. The bounded read
+	// therefore cannot see it, so the not-due answer asserted below can only
+	// come from the authoritative order-run fallback.
+	fake.Record(events.Event{Type: events.OrderFired, Subject: "digest"})
 	for i := 0; i < orderCheckFiredEventTailLimit+10; i++ {
 		fake.Record(events.Event{Type: events.OrderFired, Subject: "noise"})
 	}
@@ -851,8 +853,8 @@ func TestOrderCheckWithStoresResolverUsesBoundedEventTail(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("doOrderCheckWithStoresResolver = %d, want 1 (cooldown active via order-run fallback); stderr: %s; stdout: %s", code, stderr.String(), stdout.String())
 	}
-	if !strings.Contains(stdout.String(), "no") {
-		t.Fatalf("stdout missing not-due row:\n%s", stdout.String())
+	if !strings.Contains(stdout.String(), "cooldown: ") {
+		t.Fatalf("stdout missing not-due cooldown row:\n%s", stdout.String())
 	}
 	if ep.listCalls != 0 {
 		t.Errorf("List called %d times, want 0 (order check must use the bounded ListTail path)", ep.listCalls)
@@ -889,8 +891,8 @@ func TestOrderCheckWithStoresResolverNeverFiredIsDue(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("doOrderCheckWithStoresResolver = %d, want 0 (never fired, due); stderr: %s; stdout: %s", code, stderr.String(), stdout.String())
 	}
-	if !strings.Contains(stdout.String(), "yes") {
-		t.Fatalf("stdout missing due row:\n%s", stdout.String())
+	if !strings.Contains(stdout.String(), "never run") {
+		t.Fatalf("stdout missing never-run due row:\n%s", stdout.String())
 	}
 	if ep.listCalls != 0 {
 		t.Errorf("List called %d times, want 0 (order check must use the bounded ListTail path)", ep.listCalls)
