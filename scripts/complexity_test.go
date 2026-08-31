@@ -97,6 +97,23 @@ func TestComplexityDiffRejectsMissingBaseRef(t *testing.T) {
 	}
 }
 
+func TestComplexityDiffIgnoresBaselineContents(t *testing.T) {
+	root := repoRoot(t)
+	fake := filepath.Join(t.TempDir(), "gocyclo")
+	writeExecutable(t, fake, "#!/bin/sh\nprintf '%s\\n' '1 gc helper internal/server.go:1:1'\n")
+	baseline := filepath.Join(t.TempDir(), "malformed.json")
+	if err := os.WriteFile(baseline, []byte("not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(filepath.Join(root, "scripts", "ci", "complexity.sh"), "diff")
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(), "COMPLEXITY_TOOL="+fake, "COMPLEXITY_BASELINE="+baseline, "COMPLEXITY_BASE_REF=origin/main")
+	output, err := cmd.CombinedOutput()
+	if err != nil || !strings.Contains(string(output), "no threshold changes") {
+		t.Fatalf("diff with malformed baseline = %v, output %s", err, output)
+	}
+}
+
 func TestComplexityDiffDuplicateKeysRespectThreshold(t *testing.T) {
 	root := repoRoot(t)
 	for _, tt := range []struct {

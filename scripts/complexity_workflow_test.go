@@ -63,6 +63,9 @@ func TestComplexityWorkflowIsAdvisoryAndPinned(t *testing.T) {
 		if step.With["fetch-depth"] != "0" && strings.HasPrefix(step.Uses, "actions/checkout@") {
 			checkout = false
 		}
+		if strings.HasPrefix(step.Uses, "actions/checkout@") && step.With["persist-credentials"] != "false" {
+			checkout = false
+		}
 	}
 	if !checkout || !setup || !artifact || !pathSetup || !report || !diff {
 		t.Fatalf("workflow pins/advisory behavior: checkout=%t setup=%t artifact=%t path=%t report=%t diff=%t", checkout, setup, artifact, pathSetup, report, diff)

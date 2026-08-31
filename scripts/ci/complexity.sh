@@ -88,27 +88,25 @@ if mode == "report":
         print("(no functions meet threshold)")
     raise SystemExit(0)
 
-if not os.path.exists(baseline_path):
-    if mode != "diff":
+old = {}
+if mode != "diff":
+    if not os.path.exists(baseline_path):
         print(f"complexity: baseline not found: {baseline_path} (run '$0 update')", file=sys.stderr)
         raise SystemExit(1)
-    baseline = {"schema": "gascity.complexity/v1", "tool": "gocyclo@v0.6.0", "items": []}
-else:
     try:
         baseline = json.loads(pathlib.Path(baseline_path).read_text())
     except (OSError, json.JSONDecodeError) as exc:
         print(f"complexity: invalid baseline {baseline_path}: {exc}", file=sys.stderr)
         raise SystemExit(2)
-if baseline.get("schema") != "gascity.complexity/v1" or baseline.get("tool") != "gocyclo@v0.6.0":
-    print(f"complexity: invalid baseline schema/tool in {baseline_path}", file=sys.stderr)
-    raise SystemExit(2)
-old = {}
-for x in baseline.get("items", []):
-    key = (x["package"], x["function"], x["file"])
-    if key in old:
-        print(f"complexity: duplicate baseline key {key}", file=sys.stderr)
+    if baseline.get("schema") != "gascity.complexity/v1" or baseline.get("tool") != "gocyclo@v0.6.0":
+        print(f"complexity: invalid baseline schema/tool in {baseline_path}", file=sys.stderr)
         raise SystemExit(2)
-    old[key] = x["ccn"]
+    for x in baseline.get("items", []):
+        key = (x["package"], x["function"], x["file"])
+        if key in old:
+            print(f"complexity: duplicate baseline key {key}", file=sys.stderr)
+            raise SystemExit(2)
+        old[key] = x["ccn"]
 
 if mode == "diff":
     def parse(path):
@@ -153,8 +151,8 @@ if mode == "diff":
 changes = []
 for item in items:
     key = (item["package"], item["function"], item["file"])
-    # The baseline captures every shipped function, but guards remain focused
-    # on meaningful offenders at/above the report threshold.
+    # The baseline captures threshold offenders; the guard remains focused on
+    # meaningful entries at/above the report threshold.
     if item["ccn"] < threshold:
         continue
     if key not in old:
