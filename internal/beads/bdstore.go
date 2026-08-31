@@ -2730,7 +2730,12 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 }
 
 func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssignees bool) bool {
-	if query.TierMode == TierIssues || query.TierMode == TierWisps {
+	// TierWisps always merges two independently-fetched legs (this bd-list
+	// leg plus the ephemeral leg in listWispsTier) and needs full candidates
+	// from both to union/dedupe/sort/limit correctly; TierIssues is the only
+	// tier reaching this function that reads a single, self-contained result
+	// set, so only it is eligible for a bd-side limit below.
+	if query.TierMode == TierWisps {
 		return true
 	}
 	if serverQuery.Sort == SortCreatedAsc || clientFilteredAssignees {
@@ -2744,6 +2749,12 @@ func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssig
 	// bd-side limit would cut rows before that filter runs — fetch unbounded
 	// and let applyListQuery filter then limit.
 	if serverQuery.SeekAfter != nil {
+		return true
+	}
+	// IDs is a Go-side-only residual filter (see ListQuery.Matches): bd list
+	// has no --id flag, so a bd-side limit could truncate before the
+	// matching IDs are even fetched.
+	if len(serverQuery.IDs) > 0 {
 		return true
 	}
 	return false
