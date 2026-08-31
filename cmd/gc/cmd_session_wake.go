@@ -9,7 +9,9 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/spf13/cobra"
 )
 
@@ -103,7 +105,8 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 		return 1
 	}
 	nudgeIDs := res.NudgeIDs
-	hasRunnableTemplate := sessionWakeHasRunnableTemplateInfo(res.Info, deps.cfg)
+	agent := sessionWakeResolveAgentInfo(res.Info, deps.cfg)
+	hasRunnableTemplate := deps.cfg == nil || agent != nil
 	startupTimeout := time.Duration(0)
 	if deps.cfg != nil {
 		startupTimeout = deps.cfg.Session.StartupTimeoutDuration()
@@ -135,6 +138,14 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 		}
 		fmt.Fprintf(stderr, "gc session wake: session %s has been in state %q since %s without completing its create; the wake request was recorded but cannot complete now. If its runtime is gone, use `gc session close` to release the slot.\n", id, res.Info.MetadataState, since) //nolint:errcheck
 		rejectStuck = true
+	// Same "wake recorded but cannot complete" shape as the createAbandoned arm
+	// above: the reconciler never acts on a suspended rig's sessions, so a
+	// wake here is otherwise silently swallowed with no error and no event.
+	case agent != nil:
+		if rigName, suspended := sessionWakeOwningRigSuspended(agent, deps.cfg, deps.cityPath); suspended {
+			fmt.Fprintf(stderr, "gc session wake: rig %q is suspended -- wake dropped; run `gc rig resume %s`\n", rigName, rigName) //nolint:errcheck
+			rejectStuck = true
+		}
 	}
 	if deps.cityResolved {
 		if err := deps.withdrawQueuedWaitNudges(deps.cityPath, nudgeIDs); err != nil {
@@ -170,11 +181,44 @@ func sessionWakeHasRunnableTemplateInfo(info session.Info, cfg *config.City) boo
 	if cfg == nil {
 		return true
 	}
+	return sessionWakeResolveAgentInfo(info, cfg) != nil
+}
+
+// sessionWakeResolveAgentInfo resolves the config.Agent that owns this
+// session's template, the same lookup sessionWakeHasRunnableTemplateInfo
+// uses to decide runnability. Returns nil when cfg is nil or no agent
+// matches -- callers that also need "is there a runnable template"
+// should treat a nil cfg as runnable themselves, since this helper
+// can't distinguish "no cfg" from "no match" on its own.
+func sessionWakeResolveAgentInfo(info session.Info, cfg *config.City) *config.Agent {
+	if cfg == nil {
+		return nil
+	}
 	template := normalizedSessionTemplateInfo(info, cfg)
 	if template == "" {
 		template = info.Template
 	}
-	return findAgentByTemplate(cfg, template) != nil
+	return findAgentByTemplate(cfg, template)
+}
+
+// sessionWakeOwningRigSuspended reports whether agent's configured rig
+// is effectively suspended (runtime override, else the rig's authored
+// suspended_on_start), returning the rig name for the caller's error
+// message. An agent with no configured rig (city-scoped) is never
+// blocked here.
+func sessionWakeOwningRigSuspended(agent *config.Agent, cfg *config.City, cityPath string) (rigName string, suspended bool) {
+	rigName = configuredRigName(cityPath, agent, cfg.Rigs)
+	if rigName == "" {
+		return "", false
+	}
+	for i := range cfg.Rigs {
+		if cfg.Rigs[i].Name != rigName {
+			continue
+		}
+		suspState, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
+		return rigName, suspensionstate.EffectiveRigSuspended(suspState, rigName, cfg.Rigs[i].EffectiveSuspendedOnStart())
+	}
+	return "", false
 }
 
 func sessionWakeRequestedCreateInfo(info session.Info) bool {
