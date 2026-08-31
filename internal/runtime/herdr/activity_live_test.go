@@ -14,15 +14,10 @@ import (
 // isolated session: synchronous cold seed, forced status transitions (herdr
 // pane report-agent) stamping and freezing, working reading as continuously
 // active, the unknown-status revision leg (quiet pane ages, real output
-// re-stamps), and removal dropping to zero. Skipped when herdr is unavailable
-// or in -short mode.
+// re-stamps), and removal dropping to zero. Opt-in live tier: see
+// requireLiveHerdr.
 func TestActivityLive(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping live herdr test in -short mode")
-	}
-	if _, err := exec.LookPath("herdr"); err != nil {
-		t.Skip("herdr not installed")
-	}
+	requireLiveHerdr(t)
 
 	shrinkActivityKnobs(t)
 
