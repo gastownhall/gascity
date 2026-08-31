@@ -214,7 +214,8 @@ All 72 executed Bazel rows exited successfully with empty BEP errors. The 48
 broad rows (`cold`, `forced`, `no-op`, and `go.mod`) correlated exactly `4/4`;
 all 24 mapped fixture/test edits correlated exactly `1/1`. All 12 unrelated
 edits selected zero targets and did not invoke Bazel. The p95 values remain
-descriptive estimates from three samples, not tail SLOs.
+descriptive estimates from three samples, not tail SLOs. The Sol review council
+approved this post-fixture slice at reviewed head `5999f92d2c52`.
 
 | PR / revision | Go baseline | cold p50 / p95 | forced p50 / p95 | no-op p50 / p95 | fixture-edit p50 / p95 | test-edit p50 / p95 | `go.mod` p50 / p95 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
