@@ -24,10 +24,11 @@ func TestBDVersionPins(t *testing.T) {
 	root := repoRoot(t)
 	env := readDotenv(t, filepath.Join(root, "deps.env"))
 
-	bdVersion := env["BD_VERSION"]         // installable default (v-prefixed release tag)
-	bdPrev := env["BD_PREV_VERSION"]       // min-supported matrix cell (downloadable)
-	bdCurrent := env["BD_CURRENT_VERSION"] // bleeding-edge matrix cell (built from source)
-	bdCurrentRef := env["BD_CURRENT_REF"]  // beads commit the current cell builds from
+	bdVersion := env["BD_VERSION"]                             // installable default (v-prefixed release tag)
+	bdPrev := env["BD_PREV_VERSION"]                           // min-supported matrix cell (downloadable)
+	bdCurrent := env["BD_CURRENT_VERSION"]                     // bleeding-edge matrix cell (built from source)
+	bdCurrentRef := env["BD_CURRENT_REF"]                      // beads commit the current cell builds from
+	bdCurrentSourceVersion := env["BD_CURRENT_SOURCE_VERSION"] // cmd/bd/version.go identity at the current ref
 
 	if bdVersion == "" {
 		t.Fatal("deps.env missing BD_VERSION")
@@ -37,6 +38,9 @@ func TestBDVersionPins(t *testing.T) {
 	}
 	if bdCurrent == "" {
 		t.Fatal("deps.env missing BD_CURRENT_VERSION (the bleeding-edge contract-matrix cell)")
+	}
+	if !regexp.MustCompile(`^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$`).MatchString(bdCurrentSourceVersion) {
+		t.Fatalf("deps.env BD_CURRENT_SOURCE_VERSION = %q, want the unprefixed semver reported by cmd/bd/version.go", bdCurrentSourceVersion)
 	}
 
 	// The current cell has no release tarball, so it is built from a pinned beads
@@ -59,12 +63,19 @@ func TestBDVersionPins(t *testing.T) {
 	if got, want := goModMatch[1], bdCurrentRef[:12]; got != want {
 		t.Fatalf("go.mod beads pseudo-version commit = %q, want BD_CURRENT_REF prefix %q", got, want)
 	}
+	integrationPin := extractGoStringConst(t, root, "test/integration/integration_test.go", "pinnedIntegrationBeadsModuleVersionWant")
+	if integrationPin != bdCurrent {
+		t.Fatalf("test/integration pinned Beads module version = %q, want BD_CURRENT_VERSION %q", integrationPin, bdCurrent)
+	}
 	dockerfile := readFile(t, root, "contrib/k8s/Dockerfile.agent")
 	if !strings.Contains(dockerfile, "ARG BD_SOURCE_REF="+bdCurrentRef) {
 		t.Fatalf("contrib/k8s/Dockerfile.agent BD_SOURCE_REF must equal deps.env BD_CURRENT_REF (%s)", bdCurrentRef)
 	}
 	if !strings.Contains(dockerfile, "ARG BD_BUILD="+bdCurrentRef[:10]) {
 		t.Fatalf("contrib/k8s/Dockerfile.agent BD_BUILD must equal the first 10 characters of BD_CURRENT_REF (%s)", bdCurrentRef[:10])
+	}
+	if !strings.Contains(dockerfile, "ARG BD_SOURCE_VERSION="+bdCurrentSourceVersion) {
+		t.Fatalf("contrib/k8s/Dockerfile.agent BD_SOURCE_VERSION must equal deps.env BD_CURRENT_SOURCE_VERSION (%s)", bdCurrentSourceVersion)
 	}
 
 	// Anchor roles, kept as distinct contracts so a promotion cannot quietly
@@ -140,6 +151,7 @@ func TestBDVersionPins(t *testing.T) {
 	// so it sat at v1.0.4 through the promotion to v1.1.0. A doc anchor nothing
 	// asserts is how the next bump goes half-applied.
 	assertDocPinAnchor(t, root, ".devcontainer/README.md", "BD_VERSION", bdVersion)
+	assertDocPinAnchor(t, root, "docs/reference/specs/identity-separator-contract-v1.md", "BD_CURRENT_VERSION", bdCurrent)
 }
 
 // assertDocPinAnchor fails when a doc restates a deps.env pin as

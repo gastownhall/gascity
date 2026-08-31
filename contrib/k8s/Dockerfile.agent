@@ -19,16 +19,18 @@ ARG BASE_IMAGE=gc-agent-base:latest
 
 FROM golang:1.26.6-bookworm@sha256:433f9dc4f8ea3a1ce4e28f9f15d0f7c056b10475307f886d6f1ac1ccc4abd976 AS bd-builder
 
-ARG BD_VERSION=v1.1.0
-ARG BD_SOURCE_REF=bf97b73749ac3ef2fca2365b54537ac041ad4293
-ARG BD_SOURCE_SHA256=a8b1d8dd85b2c008093615cb85937067a9597e760e8d39f93fe55f5c1cbb4d37
-ARG BD_BUILD=bf97b73749
+ARG BD_SOURCE_VERSION=1.2.2
+ARG BD_SOURCE_REF=d530cddfa64b174930bddc6c5949b127a450fc13
+ARG BD_SOURCE_SHA256=b6ef8eba786ee0e540ec7f184ffa7442195d2e35cb0cc2c5850c77b6562f9bc6
+ARG BD_BUILD=d530cddfa6
 ARG BD_BRANCH=HEAD
-ARG GRPC_VERSION=1.82.1
+ARG GRPC_VERSION=1.83.0
 
-# The published bd 1.1.0 binary embeds vulnerable grpc-go 1.80.0. Rebuild the
-# exact released source with its production CGO/pure-Go-regex configuration and
-# release identity, changing only the patched dependency version.
+# Build the checksum-pinned BD_CURRENT_REF source with its production
+# CGO/pure-Go-regex configuration and upstream-reported version identity,
+# overriding only grpc-go to the patched version. BD_SOURCE_VERSION is not
+# deps.env BD_VERSION: that separate pin remains the published installable
+# default used by the release matrix.
 RUN mkdir -p /src/bd /out \
     && curl -fsSL --retry 3 \
        "https://github.com/gastownhall/beads/archive/${BD_SOURCE_REF}.tar.gz" \
@@ -38,16 +40,15 @@ RUN mkdir -p /src/bd /out \
     && rm -f /tmp/bd-source.tar.gz
 
 WORKDIR /src/bd
-RUN bd_version="${BD_VERSION#v}" \
-    && grep -Fq "Version = \"${bd_version}\"" cmd/bd/version.go \
+RUN grep -Fq "Version = \"${BD_SOURCE_VERSION}\"" cmd/bd/version.go \
     && go get "google.golang.org/grpc@v${GRPC_VERSION}" \
     && CGO_ENABLED=1 go build \
        -tags="gms_pure_go" \
        -trimpath \
-       -ldflags="-s -w -X main.Version=${bd_version} -X main.Build=${BD_BUILD} -X main.Commit=${BD_SOURCE_REF} -X main.Branch=${BD_BRANCH}" \
+       -ldflags="-s -w -X main.Version=${BD_SOURCE_VERSION} -X main.Build=${BD_BUILD} -X main.Commit=${BD_SOURCE_REF} -X main.Branch=${BD_BRANCH}" \
        -o /out/bd \
        ./cmd/bd \
-    && /out/bd --version | grep -Fq "bd version ${bd_version} (${BD_BUILD})" \
+    && /out/bd --version | grep -Fq "bd version ${BD_SOURCE_VERSION} (${BD_BUILD})" \
     && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep google.golang.org/grpc v${GRPC_VERSION} "
 
 FROM ${BASE_IMAGE}
