@@ -800,6 +800,7 @@ type countingTailEventProvider struct {
 	*events.Fake
 	listCalls int
 	tailCalls int
+	tailLimit int
 }
 
 func (p *countingTailEventProvider) List(filter events.Filter) ([]events.Event, error) {
@@ -809,6 +810,7 @@ func (p *countingTailEventProvider) List(filter events.Filter) ([]events.Event, 
 
 func (p *countingTailEventProvider) ListTail(filter events.Filter, limit int) ([]events.Event, error) {
 	p.tailCalls++
+	p.tailLimit = limit
 	return p.Fake.ListTail(filter, limit)
 }
 
@@ -862,6 +864,9 @@ func TestOrderCheckWithStoresResolverUsesBoundedEventTail(t *testing.T) {
 	if ep.tailCalls == 0 {
 		t.Errorf("ListTail was never called")
 	}
+	if ep.tailLimit != orderCheckFiredEventTailLimit {
+		t.Errorf("ListTail limit = %d, want %d (a non-positive limit would read unbounded)", ep.tailLimit, orderCheckFiredEventTailLimit)
+	}
 }
 
 // TestOrderCheckWithStoresResolverNeverFiredIsDue completes the never/recent/old
@@ -899,6 +904,9 @@ func TestOrderCheckWithStoresResolverNeverFiredIsDue(t *testing.T) {
 	}
 	if ep.tailCalls == 0 {
 		t.Errorf("ListTail was never called")
+	}
+	if ep.tailLimit != orderCheckFiredEventTailLimit {
+		t.Errorf("ListTail limit = %d, want %d (a non-positive limit would read unbounded)", ep.tailLimit, orderCheckFiredEventTailLimit)
 	}
 }
 

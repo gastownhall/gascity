@@ -1180,9 +1180,12 @@ func doOrderCheckWithStoresResolverScoped(cityPath string, cfg *config.City, aa 
 // through to the authoritative order-run history (baseLastRunFn) whenever the
 // tail does not carry a fresh-enough fired event for an order, so bounding
 // this read can only cost the cooldown fast path, never manufacture a false
-// "never fired" the way an unguarded Limit would. The bound is on the
-// archived event set; the active log is still scanned in full, as it is for
-// the doctor check.
+// "never fired" the way an unguarded Limit would.
+//
+// The tail read walks the active event log backward and stops at this many
+// matches; it never opens the gzipped archives, which is where the unbounded
+// List spent its time. A log holding fewer than this many order.fired events
+// is still walked to its start.
 const orderCheckFiredEventTailLimit = 2000
 
 func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City, aa []orders.Order, now time.Time, ep events.Provider, resolveStores orderStoresResolver, jsonOutput bool, stdout, stderr io.Writer) int {
