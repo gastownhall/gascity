@@ -314,6 +314,61 @@ $ gc config show --validate
 $ gc config show | rg 'planner'
 ```
 
+### Import Freshness
+
+`gc import install` and `gc import check` are **offline** and answer a question
+about internal consistency: is what you declared installed, pinned, and cached?
+They never contact the source, so they cannot tell you that upstream has moved.
+A pin can be months stale and pass both cleanly.
+
+To ask the other question -- has the source moved since we pinned it? -- run:
+
+```text
+$ gc import status --check-upstream
+```
+
+It resolves each declared remote import's source and compares it against the
+`packs.lock` pin, reporting one verdict per import:
+
+| Verdict | Meaning |
+|---|---|
+| `current` | The pin already names the resolved upstream commit. |
+| `behind` | Upstream resolved to a different commit than the pin. |
+| `unreachable` | Resolution failed, so freshness is unknown -- never assumed current. |
+| `not_applicable` | A local path source, or a remote with no `packs.lock` entry yet. |
+
+The command exits `1` when any import is behind, so it works as a CI gate. Add
+`--fail-on-unreachable` to also fail when a source cannot be resolved; without
+it, an unreachable source is reported but does not fail the run, so a laptop
+offline in a tunnel is not treated the same as a stale pin. Every stale import
+is also named on stderr with both commits, and `--json` carries the same
+verdicts plus a `passed` field mirroring the exit code.
+
+Freshness is measured **per repository**. Two imports of different subpaths of
+one repository share a verdict, so `behind` means the repository moved -- not
+necessarily that this pack's files changed.
+
+Nothing on this path mutates state: no fetch, no re-pin, no cache write. It is
+a read-only report by design, which is also why `gc doctor` does not run it --
+`gc doctor` must keep passing on a machine with no network.
+
+### Re-pinning An Import
+
+`gc import upgrade` moves a pin only as far as its declared constraint allows.
+A `sha:<commit>` constraint names one fixed commit, so upgrade cannot move it
+at all, and says so rather than reporting an upgrade that did not happen:
+
+```text
+$ gc import upgrade gascity
+Import "gascity" is unchanged: constraint "sha:28e2e84e" pins a fixed commit, so there is nothing to upgrade.
+```
+
+To actually move such an import, edit the `version` in the file that declares
+it -- `pack.toml` under `[imports.*]` or `[defaults.rig.imports.*]`,
+`city.toml` under `[imports.*]`, or the rig's own `[imports.*]` -- and then run
+`gc import install`. The declaration is the source of truth; the lockfile
+follows it.
+
 ### Private Packs And Credentials
 
 A pack whose source (or a transitive import) is a **private** repository needs a
@@ -406,6 +461,7 @@ state.
 | Share a chosen dependency with the team | `[imports.<binding>]` in checked-in TOML |
 | Install or repair authored imports | `gc import install` |
 | Check installed import state without mutating | `gc import check` |
+| Check whether pinned imports are behind their sources | `gc import status --check-upstream` |
 | Validate the composed city | `gc config show --validate` |
 
 This separation keeps local discovery flexible without making shared config
@@ -437,3 +493,7 @@ gc pack registry show main:gascity --refresh
 Freshness affects discovery, not authored imports. A stale registry cache can
 hide a newly published pack record from search/show output, but shared
 `pack.toml` still stores durable import `source` and `version` values.
+
+Registry freshness and import freshness are different questions: this window
+governs the cached *catalog*, while `gc import status --check-upstream` (above)
+compares your `packs.lock` pins against the sources they were resolved from.

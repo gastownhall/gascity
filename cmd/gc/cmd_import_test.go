@@ -1520,7 +1520,7 @@ func TestDoImportAddExactLineWhenImportExists(t *testing.T) {
 	if code == 0 {
 		t.Fatal("expected duplicate import add to fail")
 	}
-	want := "gc import add: import already exists: import \"tools\" already exists\n"
+	want := "gc import add: import already exists: import \"tools\" already exists; " + importRePinHint + "\n"
 	if stderr.String() != want {
 		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
 	}
@@ -3458,5 +3458,171 @@ func TestDefaultImportHeadCommitRedactsUserinfo(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "ghp_secret") {
 		t.Fatalf("resolve error leaked the userinfo token: %v", err)
+	}
+}
+
+// upgradeReportFixture writes a city declaring one remote import at the given
+// constraint, pins it in packs.lock at priorCommit, and stubs the selective
+// sync to resolve it to syncedCommit.
+func upgradeReportFixture(t *testing.T, source, constraint, priorCommit, syncedVersion, syncedCommit string) string {
+	t.Helper()
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, fmt.Sprintf(`[pack]
+name = "demo"
+schema = 1
+
+[imports.tools]
+source = %q
+version = %q
+`, source, constraint))
+	if priorCommit != "" {
+		if err := packman.WriteLockfile(fsys.OSFS{}, dir, &packman.Lockfile{
+			Schema: packman.LockfileSchema,
+			Packs: map[string]packman.LockedPack{
+				source: {Version: constraint, Commit: priorCommit},
+			},
+		}); err != nil {
+			t.Fatalf("WriteLockfile: %v", err)
+		}
+	}
+	prevSelective := syncImportsSelective
+	t.Cleanup(func() { syncImportsSelective = prevSelective })
+	syncImportsSelective = func(_ string, _ map[string]config.Import, _ map[string]struct{}) (*packman.Lockfile, error) {
+		return &packman.Lockfile{
+			Schema: packman.LockfileSchema,
+			Packs: map[string]packman.LockedPack{
+				source: {Version: syncedVersion, Commit: syncedCommit},
+			},
+		}, nil
+	}
+	return dir
+}
+
+// TestDoImportUpgradeUnmovedShaPinReportsNoUpgrade is AC-09. A "sha:"
+// constraint names a fixed commit, so `gc import upgrade` over it can never
+// move the pin -- yet the old code printed an unconditional `Upgraded import
+// "x"` and exited 0, which reads as "you are now up to date" to both an
+// operator and a CI log.
+//
+// The bare success line must not survive anywhere in this path, and the output
+// has to say plainly that the commit did not move and where to re-pin.
+func TestDoImportUpgradeUnmovedShaPinReportsNoUpgrade(t *testing.T) {
+	clearGCEnv(t)
+	const source = "https://example.com/tools.git"
+	dir := upgradeReportFixture(t, source, "sha:aaaa", "aaaa", "sha:aaaa", "aaaa")
+
+	var stdout, stderr bytes.Buffer
+	code := doImportUpgrade(dir, "tools", &stdout, &stderr)
+	if code != 0 {
+		// Being already current is not an error; REQ-007 asks only that the
+		// output stop being ambiguous.
+		t.Fatalf("code = %d, want 0; stderr = %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if strings.Contains(out, `Upgraded import "tools"`) {
+		t.Fatalf("unmoved pin still claims an upgrade:\n%s", out)
+	}
+	for _, want := range []string{
+		`Import "tools" is unchanged`,
+		`"sha:aaaa"`,
+		"did not change",
+		"gc import install",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestDoImportUpgradeMovedPinReportsBothCommits keeps the moved case honest in
+// the other direction: a real upgrade still says so, and names what it moved
+// from and to.
+func TestDoImportUpgradeMovedPinReportsBothCommits(t *testing.T) {
+	clearGCEnv(t)
+	const source = "https://example.com/tools.git"
+	dir := upgradeReportFixture(t, source, "^1.4", "aaaaaaaaaaaa", "1.4.9", "bbbbbbbbbbbb")
+
+	var stdout, stderr bytes.Buffer
+	if code := doImportUpgrade(dir, "tools", &stdout, &stderr); code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	want := `Upgraded import "tools": aaaaaaaa -> bbbbbbbb`
+	if !strings.Contains(stdout.String(), want) {
+		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
+	}
+}
+
+// TestDoImportUpgradeUnmovedSemverPinNamesTheVersion covers the semver arm of
+// the unmoved case: already at the highest matching tag is a distinct answer
+// from "a fixed commit cannot move", and the operator should be told which.
+func TestDoImportUpgradeUnmovedSemverPinNamesTheVersion(t *testing.T) {
+	clearGCEnv(t)
+	const source = "https://example.com/tools.git"
+	dir := upgradeReportFixture(t, source, "^1.4", "aaaa", "1.4.7", "aaaa")
+
+	var stdout, stderr bytes.Buffer
+	if code := doImportUpgrade(dir, "tools", &stdout, &stderr); code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if strings.Contains(out, `Upgraded import "tools"`) {
+		t.Fatalf("unmoved pin still claims an upgrade:\n%s", out)
+	}
+	want := `Import "tools" is already at the highest version matching "^1.4" (1.4.7).`
+	if !strings.Contains(out, want) {
+		t.Fatalf("stdout = %q, want %q", out, want)
+	}
+}
+
+// TestDoImportUpgradeAllReportsMovedAndUnchangedCounts pins the all-imports
+// form. "Upgraded 3 remote import(s)" counted the lockfile, not the movement,
+// so it reported three upgrades on a run that moved nothing.
+func TestDoImportUpgradeAllReportsMovedAndUnchangedCounts(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, `[pack]
+name = "demo"
+schema = 1
+
+[imports.tools]
+source = "https://example.com/tools.git"
+version = "^1.4"
+
+[imports.base]
+source = "https://example.com/base.git"
+version = "sha:bbbb"
+`)
+	if err := packman.WriteLockfile(fsys.OSFS{}, dir, &packman.Lockfile{
+		Schema: packman.LockfileSchema,
+		Packs: map[string]packman.LockedPack{
+			"https://example.com/tools.git": {Version: "1.4.2", Commit: "aaaa"},
+			"https://example.com/base.git":  {Version: "sha:bbbb", Commit: "bbbb"},
+		},
+	}); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+
+	prevSync := syncImports
+	t.Cleanup(func() { syncImports = prevSync })
+	syncImports = func(_ string, _ map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
+		return &packman.Lockfile{
+			Schema: packman.LockfileSchema,
+			Packs: map[string]packman.LockedPack{
+				// tools moved; base is a sha: pin and cannot.
+				"https://example.com/tools.git": {Version: "1.4.9", Commit: "cccc"},
+				"https://example.com/base.git":  {Version: "sha:bbbb", Commit: "bbbb"},
+			},
+		}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doImportUpgrade(dir, "", &stdout, &stderr); code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	want := "Upgraded 1 of 2 remote import(s); 1 unchanged."
+	if !strings.Contains(stdout.String(), want) {
+		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
 	}
 }

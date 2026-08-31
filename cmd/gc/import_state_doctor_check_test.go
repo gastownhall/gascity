@@ -1102,3 +1102,48 @@ schema = 1
 		t.Fatalf("status after fix = %v, want OK; result=%#v", after.Status, after)
 	}
 }
+
+// TestImportStateDoctorCheckNeverChecksUpstream is AC-05, the cmd-layer half of
+// the offline contract. `gc doctor` runs on machines with no network and must
+// keep passing there, so the freshness walk stays opt-in behind
+// `gc import status --check-upstream` and this check must never reach it.
+//
+// The seam is stubbed to fail the test if it is called at all, which is a
+// stronger assertion than checking the doctor's verdict: a future refactor that
+// called CheckUpstream and merely ignored a failure would still be caught.
+func TestImportStateDoctorCheckNeverChecksUpstream(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	writeCityToml(t, cityDir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, cityDir, `[pack]
+name = "demo"
+schema = 1
+
+[imports.tools]
+source = "https://example.com/tools.git"
+version = "^1.0"
+`)
+
+	prevCheck := checkInstalledImports
+	t.Cleanup(func() { checkInstalledImports = prevCheck })
+	checkInstalledImports = func(_ string, _ map[string]config.Import) (*packman.CheckReport, error) {
+		return &packman.CheckReport{CheckedSources: 1}, nil
+	}
+
+	called := false
+	prevUpstream := checkUpstreamImports
+	t.Cleanup(func() { checkUpstreamImports = prevUpstream })
+	checkUpstreamImports = func(_ string, _ map[string]config.Import, _ *packman.Lockfile) (*packman.UpstreamReport, error) {
+		called = true
+		t.Fatal("import-state doctor check resolved upstream freshness; it must stay offline")
+		return nil, nil
+	}
+
+	result := newImportStateDoctorCheck(cityDir).Run(&doctor.CheckContext{CityPath: cityDir})
+	if result.Status != doctor.StatusOK {
+		t.Fatalf("status = %v, want OK; result=%#v", result.Status, result)
+	}
+	if called {
+		t.Fatal("checkUpstreamImports was called")
+	}
+}

@@ -84,6 +84,14 @@ $ gc import check
 $ find "$(gc config show --json | jq -r '.pack_dirs[] | select(test("packs/core"))')" -maxdepth 2 -type f | sort
 ```
 
+`gc import check` validates this state offline; it does not tell you whether
+the pinned commit is still the source's head. Use
+`gc import status --check-upstream` for that -- it resolves each declared
+remote import's source and reports `current`, `behind`, `unreachable`, or
+`not_applicable`, exiting `1` when any pin is behind. See
+[Understanding Packs](/guides/understanding-packs) for the full verdict table
+and the re-pin path.
+
 The cached files are implementation assets owned by `gc`. They are useful
 for learning and debugging, but local edits are not a stable customization
 surface (the binary restores its embedded content). Put custom behavior in
@@ -98,6 +106,7 @@ Some commands show the artifacts after the builtin packs are loaded:
 | `gc skill list` | Skills contributed by loaded packs, including `core.gc-*` skills. |
 | `gc formula list` | Available formulas, including formulas from builtin packs. See the [Formula Specification](/reference/specs/formula-spec-v2#11-file-naming-and-layers). |
 | `gc order list` | Available orders, including orders from builtin packs. See [Tutorial 07 - Orders](/tutorials/07-orders). |
+| `gc import status --check-upstream` | Whether each declared remote import's pin is still current with its source. |
 
 `gc pack registry ...` commands discover public registry entries. They do not
 make the built-in `core` pack a registry dependency.

@@ -857,3 +857,52 @@ func markCachedPackDirty(t *testing.T, source, commit string) {
 		t.Fatalf("WriteFile(.packman-test-dirty): %v", err)
 	}
 }
+
+// TestCheckInstalledMakesNoNetworkCall is the offline contract (REQ-003,
+// AC-04). CheckInstalled is what `gc import check` and the import-state doctor
+// check run, and adding a freshness walk to this package must not put a
+// network call on their path.
+//
+// runNetworkGit -- the seam every fetch, clone, and ls-remote in this package
+// goes through -- is stubbed to fail on any call, so reaching the network at
+// all turns the report red rather than merely slow. runGit stays on the local
+// cache stub because CheckInstalled legitimately reads the materialized
+// checkout (rev-parse HEAD, status --porcelain); those are local, and failing
+// them would prove nothing about the network.
+func TestCheckInstalledMakesNoNetworkCall(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	stubCachedPackGit(t)
+
+	networkCalls := 0
+	oldRunNetworkGit := runNetworkGit
+	t.Cleanup(func() { runNetworkGit = oldRunNetworkGit })
+	runNetworkGit = func(_, _, _ string, args ...string) (string, error) {
+		networkCalls++
+		return "", fmt.Errorf("network unavailable for git %s", strings.Join(args, " "))
+	}
+
+	writeTestLockfile(t, city, map[string]LockedPack{
+		"https://example.com/tools.git": {Version: "1.0.0", Commit: "aaaa"},
+	})
+	stageCachedPack(t, "https://example.com/tools.git", "aaaa", `
+[pack]
+name = "tools"
+schema = 1
+`)
+
+	report, err := CheckInstalled(city, map[string]config.Import{
+		"pack:tools": {Source: "https://example.com/tools.git", Version: "^1.0"},
+	})
+	if err != nil {
+		t.Fatalf("CheckInstalled: %v", err)
+	}
+	if report.HasIssues() {
+		t.Fatalf("issues = %#v, want none", report.Issues)
+	}
+	if networkCalls != 0 {
+		t.Fatalf("CheckInstalled made %d network call(s), want 0", networkCalls)
+	}
+}

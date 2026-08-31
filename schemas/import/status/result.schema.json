@@ -90,6 +90,38 @@
                 "description": "RFC 3339 UTC fetch timestamp, when recorded."
               }
             }
+          },
+          "upstream": {
+            "type": "object",
+            "description": "Freshness answer for this import. Present only under --check-upstream.",
+            "additionalProperties": false,
+            "required": [
+              "verdict"
+            ],
+            "properties": {
+              "verdict": {
+                "type": "string",
+                "enum": [
+                  "current",
+                  "behind",
+                  "unreachable",
+                  "not_applicable"
+                ],
+                "description": "Closed freshness vocabulary: \"current\" when the pin names the resolved upstream commit, \"behind\" when upstream resolved to a different commit, \"unreachable\" when resolution failed, and \"not_applicable\" when there is no upstream to compare against."
+              },
+              "resolved_ref": {
+                "type": "string",
+                "description": "What upstream was resolved through: a symbolic ref such as \"refs/heads/main\", or the selected tag for a semver constraint."
+              },
+              "resolved_commit": {
+                "type": "string",
+                "description": "Commit the source resolved to."
+              },
+              "error": {
+                "type": "string",
+                "description": "Explains an unreachable verdict, or why an import has no upstream to compare against."
+              }
+            }
           }
         }
       }
@@ -122,6 +154,45 @@
             "type": "string",
             "description": "RFC 3339 UTC fetch timestamp, when recorded."
           }
+        }
+      }
+    },
+    "upstream": {
+      "type": "object",
+      "description": "Aggregate freshness verdict. Present only under --check-upstream.",
+      "additionalProperties": false,
+      "required": [
+        "passed",
+        "checked",
+        "current",
+        "behind",
+        "unreachable",
+        "not_applicable"
+      ],
+      "properties": {
+        "passed": {
+          "type": "boolean",
+          "description": "Mirrors the process exit code: false when any import is behind, or when any is unreachable and --fail-on-unreachable was passed."
+        },
+        "checked": {
+          "type": "integer",
+          "description": "Number of declared imports examined."
+        },
+        "current": {
+          "type": "integer",
+          "description": "Imports whose pin names the resolved upstream commit."
+        },
+        "behind": {
+          "type": "integer",
+          "description": "Imports whose upstream resolved to a different commit than the pin."
+        },
+        "unreachable": {
+          "type": "integer",
+          "description": "Imports whose upstream could not be resolved."
+        },
+        "not_applicable": {
+          "type": "integer",
+          "description": "Imports with no upstream to compare against."
         }
       }
     }

@@ -2014,7 +2014,17 @@ gc hook run -- <gc args...> [flags]
 
 ## gc import
 
-Manage pack imports
+Manage pack imports.
+
+Freshness: "gc import check" and "gc doctor" validate import state offline --
+they answer "is what I declared installed and consistent?", never "has upstream
+moved?". A pin can be months stale and pass both. To compare each declared
+remote import against its source, run:
+
+  gc import status --check-upstream
+
+Re-pinning: "gc import upgrade" moves a pin only as far as its declared
+constraint allows, so it cannot move a "sha:" pin at all. to re-pin, edit that import's version in the file that declares it (pack.toml [imports.*] or [defaults.rig.imports.*], city.toml [imports.*], or the rig's [imports.*]) and run "gc import install".
 
 ```
 gc import
@@ -2197,17 +2207,31 @@ and rig-scoped [rigs.imports.*]) plus the full packs.lock closure and the
 lockfile content hash. With --json the output is a stable machine-readable
 document for drift checkers.
 
+Without --check-upstream the command is entirely offline and reports only what
+is already on disk: a pin can be years stale and still look healthy. With
+--check-upstream each declared remote import's source is resolved over the
+network and compared against its packs.lock pin, and the command exits 1 if any
+pin is behind.
+
 ```
 gc import status [flags]
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--check-upstream` | bool |  | resolve each remote import's source and compare it against its packs.lock pin (network) |
+| `--fail-on-unreachable` | bool |  | with --check-upstream, also exit 1 when an import's upstream cannot be resolved |
 | `--json` | bool |  | emit JSON result |
 
 ## gc import upgrade
 
-Upgrade imported packs within their constraints
+Upgrade imported packs within their constraints.
+
+Only within them: the declared constraint is not rewritten, so a "sha:&lt;commit&gt;"
+pin names a fixed commit and this command cannot move it. In that case the
+output says so rather than reporting an upgrade that did not happen.
+
+to re-pin, edit that import's version in the file that declares it (pack.toml [imports.*] or [defaults.rig.imports.*], city.toml [imports.*], or the rig's [imports.*]) and run "gc import install".
 
 ```
 gc import upgrade [name]

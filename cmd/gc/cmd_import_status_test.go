@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/packman"
 )
@@ -335,4 +336,398 @@ func TestImportStatusCommandRegistered(t *testing.T) {
 		}
 	}
 	t.Fatal("gc import status subcommand not registered")
+}
+
+// upstreamStatusFixtureCity writes the three-scope import fixture the
+// freshness tests share: a pinned remote, an unlocked remote, and a path
+// import.
+func upstreamStatusFixtureCity(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, `[pack]
+name = "demo"
+schema = 1
+
+[imports.tools]
+source = "https://example.com/tools.git"
+version = "^1.4"
+
+[imports.local]
+source = "./packs/local"
+
+[imports.unlocked]
+source = "https://example.com/unlocked.git"
+version = "^9.9"
+`)
+	importStatusLockFixture(t, dir)
+	return dir
+}
+
+// stubCheckUpstreamImports swaps the freshness seam for a fixed report and
+// returns a pointer to the call count, so a test can assert the seam was not
+// reached at all.
+func stubCheckUpstreamImports(t *testing.T, statuses ...packman.UpstreamStatus) *int {
+	t.Helper()
+	calls := 0
+	prev := checkUpstreamImports
+	t.Cleanup(func() { checkUpstreamImports = prev })
+	checkUpstreamImports = func(_ string, _ map[string]config.Import, _ *packman.Lockfile) (*packman.UpstreamReport, error) {
+		calls++
+		return &packman.UpstreamReport{Checked: len(statuses), Statuses: statuses}, nil
+	}
+	return &calls
+}
+
+func upstreamStatusEntry(t *testing.T, doc *ImportStatusJSON, name string) ImportStatusEntry {
+	t.Helper()
+	for _, entry := range doc.Imports {
+		if entry.Name == name {
+			return entry
+		}
+	}
+	t.Fatalf("no import entry %q in %#v", name, doc.Imports)
+	return ImportStatusEntry{}
+}
+
+func decodeImportStatusDoc(t *testing.T, data []byte) *ImportStatusJSON {
+	t.Helper()
+	var doc ImportStatusJSON
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("decoding status document: %v\n%s", err, data)
+	}
+	return &doc
+}
+
+// TestImportStatusWithoutCheckUpstreamStaysOffline is REQ-003 at the command
+// layer: the default invocation must not resolve anything over the network,
+// and must not emit either new field. The seam is stubbed to fail the test if
+// it is reached.
+func TestImportStatusWithoutCheckUpstreamStaysOffline(t *testing.T) {
+	clearGCEnv(t)
+	dir := upstreamStatusFixtureCity(t)
+
+	prev := checkUpstreamImports
+	t.Cleanup(func() { checkUpstreamImports = prev })
+	checkUpstreamImports = func(_ string, _ map[string]config.Import, _ *packman.Lockfile) (*packman.UpstreamReport, error) {
+		t.Fatal("gc import status resolved upstream freshness without --check-upstream")
+		return nil, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doImportStatus(dir, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "upstream") {
+		t.Fatalf("default document mentions upstream:\n%s", stdout.String())
+	}
+	doc := decodeImportStatusDoc(t, stdout.Bytes())
+	if doc.Upstream != nil {
+		t.Fatalf("Upstream = %#v, want nil", doc.Upstream)
+	}
+	for _, entry := range doc.Imports {
+		if entry.Upstream != nil {
+			t.Fatalf("entry %q carries upstream %#v, want nil", entry.Name, entry.Upstream)
+		}
+	}
+}
+
+// TestImportStatusCheckUpstreamJSONGolden is AC-06: the document under
+// --check-upstream carries, for each import, the fields a drift checker needs
+// to act -- name, source, constraint, the pin it holds, and what upstream
+// resolved to -- and validates against the schema whose verdict is an enum.
+func TestImportStatusCheckUpstreamJSONGolden(t *testing.T) {
+	clearGCEnv(t)
+	dir := upstreamStatusFixtureCity(t)
+	stubCheckUpstreamImports(t,
+		packman.UpstreamStatus{
+			Name: "pack:local", Source: "./packs/local", Verdict: packman.UpstreamNotApplicable,
+		},
+		packman.UpstreamStatus{
+			Name: "pack:tools", Source: "https://example.com/tools.git", Constraint: "^1.4",
+			LockedCommit: "aaaa", ResolvedRef: "1.9.0", ResolvedCommit: "dddd",
+			Verdict: packman.UpstreamBehind,
+		},
+		packman.UpstreamStatus{
+			Name: "pack:unlocked", Source: "https://example.com/unlocked.git", Constraint: "^9.9",
+			Verdict: packman.UpstreamNotApplicable,
+			Err:     fmt.Errorf("no packs.lock entry for %q; run \"gc import install\"", "https://example.com/unlocked.git"),
+		},
+	)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--city", dir, "import", "status", "--json", "--check-upstream"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1 for a behind import; stderr=%s", code, stderr.String())
+	}
+
+	doc := decodeImportStatusDoc(t, stdout.Bytes())
+	tools := upstreamStatusEntry(t, doc, "pack:tools")
+	if tools.Source != "https://example.com/tools.git" || tools.Constraint != "^1.4" {
+		t.Fatalf("tools entry = %#v", tools)
+	}
+	if tools.Pin == nil || tools.Pin.Commit != "aaaa" || tools.Pin.Fetched != "2026-01-02T03:04:05Z" {
+		t.Fatalf("tools pin = %#v, want commit aaaa with a fetched timestamp", tools.Pin)
+	}
+	if tools.Upstream == nil {
+		t.Fatal("tools entry carries no upstream verdict")
+	}
+	if tools.Upstream.Verdict != "behind" || tools.Upstream.ResolvedCommit != "dddd" || tools.Upstream.ResolvedRef != "1.9.0" {
+		t.Fatalf("tools upstream = %#v", tools.Upstream)
+	}
+	unlocked := upstreamStatusEntry(t, doc, "pack:unlocked")
+	if unlocked.Pin != nil {
+		t.Fatalf("unlocked pin = %#v, want nil", unlocked.Pin)
+	}
+	if unlocked.Upstream == nil || unlocked.Upstream.Verdict != "not_applicable" ||
+		!strings.Contains(unlocked.Upstream.Error, "gc import install") {
+		t.Fatalf("unlocked upstream = %#v", unlocked.Upstream)
+	}
+	if local := upstreamStatusEntry(t, doc, "pack:local"); local.Upstream == nil || local.Upstream.Verdict != "not_applicable" {
+		t.Fatalf("local upstream = %#v", local.Upstream)
+	}
+	if doc.Upstream == nil {
+		t.Fatal("document carries no upstream summary")
+	}
+	want := ImportStatusUpstreamSummary{Passed: false, Checked: 3, Current: 0, Behind: 1, Unreachable: 0, NotApplicable: 2}
+	if *doc.Upstream != want {
+		t.Fatalf("summary = %#v, want %#v", *doc.Upstream, want)
+	}
+
+	assertTopLevelOKTrue(t, stdout.Bytes())
+	validateJSONAgainstResultSchema(t, []string{"import", "status"}, stdout.Bytes())
+}
+
+// TestImportStatusCheckUpstreamExitCodeAndStderr is AC-07. A behind import
+// exits 1, an all-current run exits 0, "passed" mirrors the exit code either
+// way, and every stale import is named on stderr with both commits -- a CI log
+// that captures only stderr still says which pin is stale and where it should
+// move to.
+func TestImportStatusCheckUpstreamExitCodeAndStderr(t *testing.T) {
+	t.Run("behind exits 1 and names the import on stderr", func(t *testing.T) {
+		clearGCEnv(t)
+		dir := upstreamStatusFixtureCity(t)
+		stubCheckUpstreamImports(t, packman.UpstreamStatus{
+			Name: "pack:tools", Source: "https://example.com/tools.git", Constraint: "^1.4",
+			LockedCommit: "aaaa", ResolvedRef: "refs/heads/main", ResolvedCommit: "dddd",
+			Verdict: packman.UpstreamBehind,
+		})
+
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"--city", dir, "import", "status", "--json", "--check-upstream"}, &stdout, &stderr)
+		if code != 1 {
+			t.Fatalf("code = %d, want 1", code)
+		}
+		for _, want := range []string{`"pack:tools"`, "aaaa", "dddd", "behind"} {
+			if !strings.Contains(stderr.String(), want) {
+				t.Fatalf("stderr missing %q:\n%s", want, stderr.String())
+			}
+		}
+		if doc := decodeImportStatusDoc(t, stdout.Bytes()); doc.Upstream.Passed {
+			t.Fatalf("passed = true, want false to mirror exit 1")
+		}
+	})
+
+	t.Run("all current exits 0", func(t *testing.T) {
+		clearGCEnv(t)
+		dir := upstreamStatusFixtureCity(t)
+		stubCheckUpstreamImports(t, packman.UpstreamStatus{
+			Name: "pack:tools", Source: "https://example.com/tools.git", Constraint: "^1.4",
+			LockedCommit: "aaaa", ResolvedRef: "refs/heads/main", ResolvedCommit: "aaaa",
+			Verdict: packman.UpstreamCurrent,
+		})
+
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"--city", dir, "import", "status", "--json", "--check-upstream"}, &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("code = %d, want 0; stderr=%s", code, stderr.String())
+		}
+		if strings.Contains(stderr.String(), "behind") {
+			t.Fatalf("stderr names a stale import with none present:\n%s", stderr.String())
+		}
+		if doc := decodeImportStatusDoc(t, stdout.Bytes()); !doc.Upstream.Passed {
+			t.Fatalf("passed = false, want true to mirror exit 0")
+		}
+	})
+}
+
+// TestImportStatusCheckUpstreamUnreachable is AC-08. A source that will not
+// resolve is reported unreachable with its error surfaced -- never current,
+// which would be a false all-clear, and never behind, which would name a
+// commit nothing resolved. --fail-on-unreachable changes only the exit code
+// and "passed", not a single verdict.
+func TestImportStatusCheckUpstreamUnreachable(t *testing.T) {
+	unreachable := packman.UpstreamStatus{
+		Name: "pack:tools", Source: "https://example.com/tools.git", Constraint: "^1.4",
+		LockedCommit: "aaaa", Verdict: packman.UpstreamUnreachable,
+		Err: fmt.Errorf("resolving head for %q: dial tcp: no route to host", "https://example.com/tools.git"),
+	}
+
+	clearGCEnv(t)
+	dir := upstreamStatusFixtureCity(t)
+	stubCheckUpstreamImports(t, unreachable)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--city", dir, "import", "status", "--json", "--check-upstream"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0 without --fail-on-unreachable; stderr=%s", code, stderr.String())
+	}
+	doc := decodeImportStatusDoc(t, stdout.Bytes())
+	tools := upstreamStatusEntry(t, doc, "pack:tools")
+	if tools.Upstream.Verdict != "unreachable" {
+		t.Fatalf("verdict = %q, want unreachable", tools.Upstream.Verdict)
+	}
+	if !strings.Contains(tools.Upstream.Error, "no route to host") {
+		t.Fatalf("error = %q, want the resolution failure surfaced", tools.Upstream.Error)
+	}
+	if tools.Upstream.ResolvedCommit != "" {
+		t.Fatalf("resolved_commit = %q, want empty", tools.Upstream.ResolvedCommit)
+	}
+	if !doc.Upstream.Passed || doc.Upstream.Unreachable != 1 {
+		t.Fatalf("summary = %#v, want passed with 1 unreachable", *doc.Upstream)
+	}
+	if !strings.Contains(stderr.String(), "unreachable") {
+		t.Fatalf("stderr does not name the unresolved import:\n%s", stderr.String())
+	}
+	validateJSONAgainstResultSchema(t, []string{"import", "status"}, stdout.Bytes())
+
+	// Same fixture, same verdicts, one more flag.
+	stubCheckUpstreamImports(t, unreachable)
+	var strictOut, strictErr bytes.Buffer
+	strictCode := run([]string{"--city", dir, "import", "status", "--json", "--check-upstream", "--fail-on-unreachable"}, &strictOut, &strictErr)
+	if strictCode != 1 {
+		t.Fatalf("code = %d, want 1 with --fail-on-unreachable; stderr=%s", strictCode, strictErr.String())
+	}
+	strictDoc := decodeImportStatusDoc(t, strictOut.Bytes())
+	if strictDoc.Upstream.Passed {
+		t.Fatal("passed = true, want false to mirror exit 1")
+	}
+	if got := upstreamStatusEntry(t, strictDoc, "pack:tools").Upstream.Verdict; got != "unreachable" {
+		t.Fatalf("verdict = %q, want unreachable: the flag changes the exit code, not the verdict", got)
+	}
+	strictDoc.Upstream.Passed = true
+	if *strictDoc.Upstream != *doc.Upstream {
+		t.Fatalf("summary changed beyond passed: %#v vs %#v", *strictDoc.Upstream, *doc.Upstream)
+	}
+}
+
+// TestImportStatusFailOnUnreachableRequiresCheckUpstream: a flag that is
+// silently ignored reads as a passing gate, which is the failure mode this
+// command exists to remove.
+func TestImportStatusFailOnUnreachableRequiresCheckUpstream(t *testing.T) {
+	clearGCEnv(t)
+	dir := upstreamStatusFixtureCity(t)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--city", dir, "import", "status", "--fail-on-unreachable"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("code = 0, want non-zero; stdout=%s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "--fail-on-unreachable requires --check-upstream") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+// TestImportStatusCheckUpstreamTextOutput pins the human-readable block: a
+// verdict per import, an aggregate line, and the per-repository note that
+// keeps a subpath import's "behind" from being read as "this pack changed".
+func TestImportStatusCheckUpstreamTextOutput(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, `[pack]
+name = "demo"
+schema = 1
+
+[imports.bd]
+source = "https://example.com/mono.git//examples/bd"
+version = "sha:aaaa"
+`)
+	if err := packman.WriteLockfile(fsys.OSFS{}, dir, &packman.Lockfile{
+		Schema: packman.LockfileSchema,
+		Packs: map[string]packman.LockedPack{
+			"https://example.com/mono.git//examples/bd": {Version: "sha:aaaa", Commit: "aaaa", Fetched: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)},
+		},
+	}); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+	stubCheckUpstreamImports(t, packman.UpstreamStatus{
+		Name: "pack:bd", Source: "https://example.com/mono.git//examples/bd", Constraint: "sha:aaaa",
+		LockedCommit: "aaaa", ResolvedRef: "refs/heads/main", ResolvedCommit: "bbbbbbbbbbbb",
+		Verdict: packman.UpstreamBehind,
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--city", dir, "import", "status", "--check-upstream"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1; stderr=%s", code, stderr.String())
+	}
+	for _, want := range []string{
+		"upstream freshness:",
+		"pack:bd",
+		"behind",
+		"refs/heads/main",
+		"1 checked: 0 current, 1 behind, 0 unreachable, 0 not applicable",
+		"freshness is measured per repository",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("stdout missing %q:\n%s", want, stdout.String())
+		}
+	}
+}
+
+// TestImportStatusJSONProductionRunWithCheckUpstream runs the real command
+// with --check-upstream and validates the emitted document against the
+// schema, so a struct field added without a schema property is a red test
+// rather than a silent pass. The fixture keeps all three entry shapes -- a
+// pinned remote, an unlocked remote, and a path import -- so the shape
+// coverage guard stays meaningful on the freshness path too.
+func TestImportStatusJSONProductionRunWithCheckUpstream(t *testing.T) {
+	clearGCEnv(t)
+	dir := upstreamStatusFixtureCity(t)
+	stubCheckUpstreamImports(t,
+		packman.UpstreamStatus{
+			Name: "pack:local", Source: "./packs/local", Verdict: packman.UpstreamNotApplicable,
+		},
+		packman.UpstreamStatus{
+			Name: "pack:tools", Source: "https://example.com/tools.git", Constraint: "^1.4",
+			LockedCommit: "aaaa", ResolvedRef: "1.4.2", ResolvedCommit: "aaaa",
+			Verdict: packman.UpstreamCurrent,
+		},
+		packman.UpstreamStatus{
+			Name: "pack:unlocked", Source: "https://example.com/unlocked.git", Constraint: "^9.9",
+			Verdict: packman.UpstreamNotApplicable,
+			Err:     fmt.Errorf("no packs.lock entry; run \"gc import install\""),
+		},
+	)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--city", dir, "import", "status", "--json", "--check-upstream"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+
+	doc := decodeImportStatusDoc(t, stdout.Bytes())
+	shapes := map[string]bool{}
+	for _, imp := range doc.Imports {
+		if imp.Upstream == nil {
+			t.Fatalf("entry %q carries no upstream verdict under --check-upstream", imp.Name)
+		}
+		switch {
+		case imp.Kind == "path":
+			shapes["path"] = true
+		case imp.Pin != nil:
+			shapes["pinned remote"] = true
+		default:
+			shapes["unlocked remote"] = true
+		}
+	}
+	for _, shape := range []string{"pinned remote", "unlocked remote", "path"} {
+		if !shapes[shape] {
+			t.Fatalf("fixture emitted no %s import entry, so the schema validation no longer covers that shape:\n%s", shape, stdout.String())
+		}
+	}
+
+	assertTopLevelOKTrue(t, stdout.Bytes())
+	validateJSONAgainstResultSchema(t, []string{"import", "status"}, stdout.Bytes())
 }
