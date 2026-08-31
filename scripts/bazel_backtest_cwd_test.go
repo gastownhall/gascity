@@ -35,7 +35,10 @@ func TestBazelConfigBacktestRunsBazelFromHistoricalWorktree(t *testing.T) {
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("config backtest failed: %v\n%s", err, output)
 	}
-	assertBazelWorktreeLog(t, bazelLog, root, "internal/config/session_setup_path.go")
+	// The config harness must prime a warm graph before the edited scenario,
+	// then run the scenario itself and shut down that graph from the same
+	// disposable worktree.
+	assertBazelWorktreeLog(t, bazelLog, root, "internal/config/session_setup_path.go", 2)
 }
 
 // TestBazelPRBacktestRunsBazelFromHistoricalWorktree applies the same cwd
@@ -62,16 +65,18 @@ func TestBazelPRBacktestRunsBazelFromHistoricalWorktree(t *testing.T) {
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("PR backtest failed: %v\n%s", err, output)
 	}
-	assertBazelWorktreeLog(t, bazelLog, root, "internal/beads/contract/metadata.go")
+	// The PR harness has cold, forced, cached, and incremental test phases;
+	// each phase and the final shutdown must stay in the historical worktree.
+	assertBazelWorktreeLog(t, bazelLog, root, "internal/beads/contract/metadata.go", 4)
 }
 
-func assertBazelWorktreeLog(t *testing.T, path, callerRoot, editedFile string) {
+func assertBazelWorktreeLog(t *testing.T, path, callerRoot, editedFile string, minTestRows int) {
 	t.Helper()
 	body, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read fake Bazel log: %v", err)
 	}
-	var testRows, editedRows int
+	var testRows, editedRows, shutdownRows int
 	for _, line := range strings.Split(strings.TrimSpace(string(body)), "\n") {
 		if line == "" {
 			continue
@@ -93,15 +98,21 @@ func assertBazelWorktreeLog(t *testing.T, path, callerRoot, editedFile string) {
 		if mode == "test" {
 			testRows++
 		}
+		if mode == "shutdown" {
+			shutdownRows++
+		}
 		if mode == "test" && marker == "present" {
 			editedRows++
 		}
 	}
-	if testRows == 0 {
-		t.Fatal("fake Bazel recorded no test invocations")
+	if testRows < minTestRows {
+		t.Fatalf("fake Bazel recorded %d test invocations, want at least %d (warm priming/scenario coverage)", testRows, minTestRows)
 	}
 	if editedRows == 0 {
 		t.Fatalf("fake Bazel never observed edit to %s", editedFile)
+	}
+	if shutdownRows == 0 {
+		t.Fatal("fake Bazel recorded no shutdown invocation")
 	}
 }
 
@@ -123,6 +134,7 @@ for arg in "$@"; do
 done
 work=""
 if [[ -n "$output_base" ]]; then work="$(dirname "$output_base")"; fi
+if [[ -n "$output_base" ]]; then mkdir -p "$output_base"; fi
 marker=missing
 edited_file="${FAKE_EDIT_FILE:?}"
 if [[ -f "$work/$edited_file" ]] && grep -q 'bazel backtest' "$work/$edited_file"; then marker=present; fi
