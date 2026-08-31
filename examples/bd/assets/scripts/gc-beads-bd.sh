@@ -724,6 +724,55 @@ wait_for_bd_runtime_schema() {
     return 1
 }
 
+# bd_runtime_bd_table_count prints how many of bd's own tables exist in the
+# database. It returns 1 without printing when the query itself fails, so a
+# caller can tell "this database is empty" from "the server did not answer" —
+# the distinction bd_runtime_schema_ready collapses by design, because a bare
+# readiness probe has no reason to care why it came back negative.
+#
+# The table names below are bd's, listed literally. That is a known ceiling on
+# how much the guard protects: if bd renames these or adds others, a populated
+# store whose tables all fall outside the list counts 0 and reads as empty, so
+# the force-reinit gets authorized again. The failure lands on the behaviour
+# that shipped before this guard existed rather than on something worse, and
+# widening the list belongs with whatever change renames the tables.
+bd_runtime_bd_table_count() {
+    local db="$1"
+    local host output
+    [ -n "$db" ] || return 1
+    valid_sql_name "$db" || return 1
+    host=$(connect_host)
+    output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+        sql -r csv -q "SELECT COUNT(*) AS cnt FROM information_schema.tables WHERE table_schema = '$db' AND table_name IN ('issues', 'comments', 'events', 'dependencies')" 2>/dev/null) || return 1
+    # Parse CSV: "cnt\n3\n" — take the last non-empty line, as get_connection_count does.
+    echo "$output" | tail -1 | tr -d '[:space:]'
+}
+
+# bd_runtime_store_holds_bd_tables answers whether the database carries bd's own
+# tables, which is what decides whether `bd init --force` would create schema or
+# migrate over live rows. It has three answers and the call site needs all three:
+#
+#   0  yes, tables are present. A forced reinit re-runs bd's migrations over the
+#      existing working set, and beads refuses to migrate any table holding
+#      uncommitted changes (gastownhall/beads#4566), so the reinit aborts city
+#      init instead of repairing anything.
+#   1  no, the database is empty. This is the genuinely-fresh store gc pre-seeds
+#      metadata.json for, and reinitializing it is exactly right.
+#   2  could not tell, because the query did not answer.
+#
+# Collapsing 2 into either of the others is the mistake this exists to prevent.
+# Folding it into 0 turns an unreadable count into a refusal to initialize a
+# fresh city; folding it into 1 re-creates the destructive guess this whole
+# guard was added to stop.
+bd_runtime_store_holds_bd_tables() {
+    local count
+    count=$(bd_runtime_bd_table_count "$1") || return 2
+    case "$count" in
+        ''|*[!0-9]*) return 2 ;;
+    esac
+    [ "$count" -gt 0 ]
+}
+
 # --- Robustness Helpers ---
 
 # save_state writes the private provider runtime state atomically (no jq dependency).
@@ -2836,7 +2885,36 @@ op_init() {
             die "managed Dolt server unreachable while inspecting existing store '$dolt_database'; refusing to force-reinitialize (data-safety). retry once the Dolt server is reachable."
         fi
         if ensure_database_registered "$dolt_database"; then
+            local schema_ready=false
+            local holds_bd_tables=0
             if bd_runtime_schema_ready "$dolt_database"; then
+                schema_ready=true
+            else
+                # The probe found no bd schema, and the only response this branch
+                # offers is a destructive --force reinit. One failed probe cannot
+                # separate "the schema is absent" from "the server hiccuped" or
+                # "a concurrent init has not finished writing it": server_reachable
+                # above only proves a database-less SELECT 1 answered a moment
+                # earlier, on a different connection. Ask the database itself
+                # before acting, and skip the extra work entirely when it says it
+                # is empty, which is the ordinary fresh-init path.
+                bd_runtime_store_holds_bd_tables "$dolt_database" || holds_bd_tables=$?
+                if [ "$holds_bd_tables" -ne 1 ]; then
+                    if wait_for_bd_runtime_schema "$dolt_database"; then
+                        schema_ready=true
+                    elif [ "$holds_bd_tables" -eq 0 ]; then
+                        die "database '$dolt_database' holds bd tables but its bd schema stayed unreadable across retries; refusing to force-reinitialize (data-safety). a forced reinit re-runs migrations over the existing working set, which beads rejects when a table it migrates carries uncommitted changes (gastownhall/beads#4566). inspect the store with 'bd dolt status' before retrying."
+                    else
+                        # Undetermined: the table count never answered, so there is
+                        # no evidence either way. Keep the pre-existing behaviour
+                        # rather than inventing a new way for init to fail, but say
+                        # so, because this is the one path that still reinitializes
+                        # on an unverified negative.
+                        echo "warning: could not determine whether '$dolt_database' holds bd tables; reinitializing on an unverified schema probe" >&2
+                    fi
+                fi
+            fi
+            if [ "$schema_ready" = true ]; then
                 # GC owns canonical metadata/config normalization after this backend
                 # bridge returns. Keep the backend focused on database registration
                 # and bd-specific bootstrap only.
