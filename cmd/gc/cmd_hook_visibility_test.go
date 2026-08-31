@@ -26,10 +26,12 @@ func TestHookRouteIdentitiesEqual(t *testing.T) {
 		{"empty vs non-empty", "", "gascity/builder", false},
 		{"case insensitive", "Gascity/Builder", "gascity/builder", true},
 		{"case insensitive, dash-encoded", "Gascity--Builder", "gascity/builder", true},
-		{"legacy bound-template spelling, bound route", "gascity/gastown.builder", "gascity/builder", true},
-		{"legacy bound-template spelling, bound identity", "gascity/builder", "gascity/gastown.builder", true},
-		{"legacy bound-template spelling, both bound and dash-encoded", "gascity/gastown.builder", "gascity--gastown.builder", true},
-		{"legacy bound-template spelling must not collapse different agents", "gascity/gastown.deployer", "gascity/builder", false},
+		// A legacy bound-template spelling ("dir/binding.name") is deliberately
+		// NOT collapsed onto its unbound form here - that migration is owned by
+		// canonicalizeLegacyBoundUnassignedRoutedWork, which rewrites the
+		// persisted route explicitly rather than treating the two spellings as
+		// always-already-equal at compare time.
+		{"legacy bound-template spelling is not collapsed", "gascity/gastown.builder", "gascity/builder", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
