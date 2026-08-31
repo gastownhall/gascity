@@ -1008,3 +1008,48 @@ func (c *lateWritingOnFixCheck) Fix(ctx *CheckContext) error {
 	return nil
 }
 func (c *lateWritingOnFixCheck) WarmupEligible() bool { return false }
+
+// panickingFixCheck fails its Run and panics inside Fix, modeling a
+// pack-authored remediation that blows up mid-run.
+type panickingFixCheck struct{}
+
+func (panickingFixCheck) Name() string { return "panicking-fix" }
+func (panickingFixCheck) CanFix() bool { return true }
+func (panickingFixCheck) Fix(*CheckContext) error {
+	panic("fix exploded")
+}
+
+func (panickingFixCheck) Run(*CheckContext) *CheckResult {
+	return &CheckResult{
+		Name:     "panicking-fix",
+		Status:   StatusError,
+		Severity: SeverityBlocking,
+		Message:  "needs fixing",
+	}
+}
+
+// A panicking Fix must fail its own check, not crash the doctor process. Run
+// once unbounded and once timed, because boundedFix takes a different path for
+// each and only one of them was recovered before.
+func TestPanickingFixDoesNotCrashTheRun(t *testing.T) {
+	for _, timeout := range []time.Duration{0, time.Minute} {
+		d := &Doctor{CheckTimeout: timeout}
+		d.Register(panickingFixCheck{})
+		report := d.RunCollect(&CheckContext{}, true)
+		d.Wait()
+		if len(report.Results) != 1 {
+			t.Fatalf("CheckTimeout=%s: Results = %+v, want one result", timeout, report.Results)
+		}
+		if report.Results[0].Status != StatusError {
+			t.Errorf("CheckTimeout=%s: Status = %v, want StatusError", timeout, report.Results[0].Status)
+		}
+		if !report.Results[0].FixAttempted {
+			t.Errorf("CheckTimeout=%s: FixAttempted = false, want the panicking fix recorded as attempted", timeout)
+		}
+		if !strings.Contains(report.Results[0].FixError, "panicked") {
+			t.Errorf("CheckTimeout=%s: FixError = %q, want it to report the panic", timeout, report.Results[0].FixError)
+		}
+	}
+}
+
+func (panickingFixCheck) WarmupEligible() bool { return false }

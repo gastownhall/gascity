@@ -58,6 +58,11 @@ func (d *Doctor) Register(c Check) {
 // Wait blocks until every timed execution started by prior Run or RunCollect
 // calls has finished. Callers that release resources used by checks must call
 // Wait after the run returns and before releasing those resources.
+//
+// A Doctor serves one run at a time: Wait must not be called concurrently with
+// Run or RunCollect on another goroutine. Concurrent use would let a run's
+// inFlight.Add race a Wait that has already observed a zero counter, so Wait
+// could return while a timed execution still owns caller resources.
 func (d *Doctor) Wait() {
 	d.inFlight.Wait()
 }
@@ -198,6 +203,18 @@ func runCheckRecoveringPanic(c Check, ctx *CheckContext) (result *CheckResult) {
 	return c.Run(ctx)
 }
 
+// runFixRecoveringPanic converts a panic in a check's Fix into an error. Fix
+// runs pack-authored remediation, so a panic there must fail the one check
+// rather than take down the whole doctor process.
+func runFixRecoveringPanic(c Check, ctx *CheckContext) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("fix for %s panicked: %v", c.Name(), recovered)
+		}
+	}()
+	return c.Fix(ctx)
+}
+
 // fixAndVerify remediates a failing, fixable check and re-runs it to confirm,
 // bounding both the fix and the verifying re-run under the per-check timeout.
 // It returns the result to report (res mutated in place on fix failure, or the
@@ -242,7 +259,7 @@ func (d *Doctor) fixAndVerify(c Check, ctx *CheckContext, res *CheckResult) (*Ch
 // otherwise Fix's own error (or nil) is returned.
 func (d *Doctor) boundedFix(c Check, ctx *CheckContext) error {
 	if d.CheckTimeout <= 0 {
-		return c.Fix(ctx)
+		return runFixRecoveringPanic(c, ctx)
 	}
 	var buf bytes.Buffer
 	fixCtx := *ctx
@@ -251,7 +268,7 @@ func (d *Doctor) boundedFix(c Check, ctx *CheckContext) error {
 	d.inFlight.Add(1)
 	go func() {
 		defer d.inFlight.Done()
-		done <- c.Fix(&fixCtx)
+		done <- runFixRecoveringPanic(c, &fixCtx)
 	}()
 	select {
 	case err := <-done:
