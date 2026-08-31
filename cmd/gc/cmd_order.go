@@ -1182,17 +1182,23 @@ func doOrderCheckWithStoresResolverScoped(cityPath string, cfg *config.City, aa 
 // this read can only cost the cooldown fast path, never manufacture a false
 // "never fired" the way an unguarded Limit would.
 //
-// The fallback is not bit-identical to the event, and the difference is
-// worth stating because it is the one observable effect of the bound. The
-// tracking bead is created before the fired event is recorded
-// (launchResolvedDispatch in order_dispatch.go calls CreateRun, then
-// dispatchOne records events.OrderFired), so the bead's timestamp is the
-// earlier of the two. An order whose fired event has been evicted from the
-// tail therefore resolves against a slightly earlier last-run instant and
-// can be reported due up to that write gap sooner than it would have been.
-// The skew is one-directional: an earlier last-run only ever makes an order
-// look more overdue, so the bound can advance a firing by the write gap but
-// can never suppress one, which is the property a scheduler needs.
+// The safety of that fall-through rests on the shape of the shortcut, not
+// on any timestamp ordering between the event and the order-run history:
+// the fired event is consulted only to return "not due" early, so losing it
+// can only move an order toward due, never away from it. The bound can
+// therefore advance a firing but cannot suppress one, which is the property
+// a scheduler needs. (Do not restate this as a claim that the bead is the
+// older record. orders.LastRunAcross takes the newest order-run evidence,
+// which a wisp root labeled after the event, or a later manual gc order run,
+// can push past the event's own timestamp.)
+//
+// One behavior does change, and it is inherent to bounding rather than
+// incidental. When the shortcut fired, baseLastRunFn was never called, so a
+// failing LastRun read on that order's store stayed masked. An order whose
+// event has been evicted now reaches that read, and lastRunErr aborts the
+// whole check. No bounded read can recover the evicted event, so this is the
+// cost of not walking the archives: a store failure that used to be hidden
+// behind a cached event is now reported.
 //
 // The tail read walks the active event log backward and stops at this many
 // matches; it never opens the gzipped archives, which is where the unbounded
