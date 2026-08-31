@@ -17,12 +17,7 @@ import (
 // re-stamps), and removal dropping to zero. Skipped when herdr is unavailable
 // or in -short mode.
 func TestActivityLive(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping live herdr test in -short mode")
-	}
-	if _, err := exec.LookPath("herdr"); err != nil {
-		t.Skip("herdr not installed")
-	}
+	requireLiveHerdr(t)
 
 	shrinkActivityKnobs(t)
 

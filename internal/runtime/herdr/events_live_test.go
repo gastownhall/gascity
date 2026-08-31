@@ -38,12 +38,7 @@ func waitForEvent(t *testing.T, ch <-chan runtime.SessionEvent, timeout time.Dur
 // re-attach across a full server bounce. Skipped when herdr is unavailable or
 // in -short mode.
 func TestSessionEventsLive(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping live herdr test in -short mode")
-	}
-	if _, err := exec.LookPath("herdr"); err != nil {
-		t.Skip("herdr not installed")
-	}
+	requireLiveHerdr(t)
 
 	const session = "gctest-events-live"
 	p := New(session, t.TempDir(), t.TempDir(), 0, 0)

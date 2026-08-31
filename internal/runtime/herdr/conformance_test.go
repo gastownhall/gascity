@@ -2,7 +2,6 @@ package herdr
 
 import (
 	"fmt"
-	"os/exec"
 	"sync/atomic"
 	"testing"
 
@@ -16,12 +15,7 @@ import (
 // (ListRunning, orphan detection, …) don't observe sibling sessions. Skipped
 // when herdr is unavailable or in -short mode.
 func TestHerdrConformance(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping live herdr conformance in -short mode")
-	}
-	if _, err := exec.LookPath("herdr"); err != nil {
-		t.Skip("herdr not installed")
-	}
+	requireLiveHerdr(t)
 
 	var counter int64
 	runtimetest.RunProviderTests(t, func(t *testing.T) (runtime.Provider, runtime.Config, string) {

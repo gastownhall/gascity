@@ -3,7 +3,6 @@ package herdr
 import (
 	"context"
 	"errors"
-	"os/exec"
 	"testing"
 	"time"
 
@@ -19,12 +18,7 @@ import (
 // (never a second placement — that was the spawn storm), and Stop still tears
 // the pane down. Skipped when herdr is unavailable or in -short mode.
 func TestProviderLiveOccupantSwapKeepsLiveness(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping live herdr test in -short mode")
-	}
-	if _, err := exec.LookPath("herdr"); err != nil {
-		t.Skip("herdr not installed")
-	}
+	requireLiveHerdr(t)
 
 	p := New("gctest-swap", t.TempDir(), t.TempDir(), 0, 0)
 	_ = p.Stop("swap") // clear any leftover from a crashed prior run
