@@ -605,7 +605,7 @@ BD_CLI_CONTRACT_TIMEOUT ?= 10m
 test-bd-cli-contract:
 	@command -v bd >/dev/null 2>&1 || (echo "Error: bd not found; cannot run external CLI contract" >&2; exit 1)
 	$(TEST_ENV) go test -tags acceptance_bd_contract -timeout $(BD_CLI_CONTRACT_TIMEOUT) -count=1 \
-		-run '^(TestBdBasicCRUD|TestBdDependencies|TestBdDestructive|TestBdWorkflow)$$' ./test/acceptance
+		-run '^(TestBdContractHarnessIsolatesInitializedAncestor|TestBdBasicCRUD|TestBdDependencies|TestBdDestructive|TestBdWorkflow)$$' ./test/acceptance
 
 ## test-bd-conditional-release-contract: run the ReleaseIfCurrent CAS contract
 ## against the bd on PATH. Split from test-bd-cli-contract because it is the one
