@@ -22,8 +22,12 @@ go_test(
 # production library above, while the full config closure remains separate.
 go_test(
     name = "config_diagnostic_locations_test",
-    srcs = ["diagnostic_locations_test.go"],
+    srcs = [
+        "diagnostic_locations_fixture_bazel_test.go",
+        "diagnostic_locations_test.go",
+    ],
     embed = [":config_hermetic"],
+    embedsrcs = ["testdata/diagnostic_locator.toml"],
     visibility = ["//visibility:public"],
 )
 
