@@ -232,11 +232,16 @@ func pendingDrainReasonCancelable(reason string) bool {
 }
 
 const (
-	reconcilerDrainAckSourceKey     = "GC_DRAIN_ACK_SOURCE"
-	reconcilerDrainAckSourceValue   = "reconciler"
-	drainAckSourceAgentValue        = "agent"
-	reconcilerDrainAckReasonKey     = "GC_DRAIN_REASON"
-	reconcilerDrainAckGenerationKey = "GC_DRAIN_GENERATION"
+	reconcilerDrainAckSourceKey   = "GC_DRAIN_ACK_SOURCE"
+	reconcilerDrainAckSourceValue = "reconciler"
+	drainAckSourceAgentValue      = "agent"
+	// drainAckRequesterInstanceTokenKey binds an agent acknowledgement to the
+	// incarnation that wrote it. Pane environment is per-CHAIR state and pool
+	// chairs are recycled under the same name, so without this an ack outlives
+	// its author and the next occupant inherits it.
+	drainAckRequesterInstanceTokenKey = "GC_DRAIN_ACK_REQUESTER_INSTANCE_TOKEN"
+	reconcilerDrainAckReasonKey       = "GC_DRAIN_REASON"
+	reconcilerDrainAckGenerationKey   = "GC_DRAIN_GENERATION"
 )
 
 func setReconcilerDrainAckMetadata(sp runtime.Provider, name string, ds *drainState) error {
