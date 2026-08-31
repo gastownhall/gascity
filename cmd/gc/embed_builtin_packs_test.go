@@ -335,7 +335,7 @@ func TestBundledPiHookUsesCurrentExtensionAPI(t *testing.T) {
 		`run(["prime", "--hook"], ctx.cwd, providerSessionEnv(ctx))`,
 		"GC_PROVIDER_SESSION_ID",
 		"GC_PROVIDER_SESSION_ID_REQUIRED",
-		`stdio: ["ignore", "pipe", "inherit"]`,
+		`stdio: ["ignore", "pipe", "pipe"]`,
 		"gc handoff --auto",
 		"mirrorTempCounter",
 		"fs.rmSync(tmp",
@@ -363,14 +363,14 @@ func TestBundledOmpHookPublishesProviderSessionID(t *testing.T) {
 	data := readBundledPackFileForTest(t, "core", "overlay/per-provider/omp/.omp/hooks/gc-hook.ts")
 	for _, want := range []string{
 		`import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent"`,
-		`const GC_OMP_HOOK_VERSION = 2`,
+		`const GC_OMP_HOOK_VERSION = 3`,
 		`export default function gascityOmpExtension(pi: ExtensionAPI)`,
 		`pi.on("session_start"`,
 		`pi.on("session_compact"`,
 		`pi.on("before_agent_start"`,
 		`GC_PROVIDER_SESSION_ID`,
 		`GC_PROVIDER_SESSION_ID_REQUIRED`,
-		`stdio: ["ignore", "pipe", "inherit"]`,
+		`stdio: ["ignore", "pipe", "pipe"]`,
 		`getSessionId`,
 		`logRunFailure`,
 	} {

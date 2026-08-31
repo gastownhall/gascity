@@ -33,10 +33,10 @@ var configFS embed.FS
 var supported = []string{"claude", "codex", "gemini", "antigravity", "kiro", "opencode", "mimocode", "groq", "cerebras", "copilot", "cursor", "pi", "omp", "kimi"}
 
 const (
-	managedPiHookVersion       = 7
+	managedPiHookVersion       = 8
 	managedOpenCodeHookVersion = 6
 	managedMimoCodeHookVersion = 2
-	managedOmpHookVersion      = 2
+	managedOmpHookVersion      = 3
 )
 
 var (
@@ -254,7 +254,7 @@ func piHookNeedsUpgrade(existing []byte) bool {
 		!strings.Contains(content, "mirrorTempCounter") ||
 		!strings.Contains(content, "GC_PROVIDER_SESSION_ID") ||
 		!strings.Contains(content, "GC_PROVIDER_SESSION_ID_REQUIRED") ||
-		!strings.Contains(content, `stdio: ["ignore", "pipe", "inherit"]`) {
+		!strings.Contains(content, `stdio: ["ignore", "pipe", "pipe"]`) {
 		return true
 	}
 	for _, marker := range []string{
@@ -362,7 +362,7 @@ func ompHookNeedsUpgrade(existing []byte) bool {
 		!strings.Contains(content, `pi.on("session_compact"`) ||
 		!strings.Contains(content, `pi.on("before_agent_start"`) ||
 		!strings.Contains(content, "logRunFailure") ||
-		!strings.Contains(content, `stdio: ["ignore", "pipe", "inherit"]`) {
+		!strings.Contains(content, `stdio: ["ignore", "pipe", "pipe"]`) {
 		return true
 	}
 	for _, marker := range []string{

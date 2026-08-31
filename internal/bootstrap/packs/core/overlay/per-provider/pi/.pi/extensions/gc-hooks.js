@@ -16,7 +16,7 @@ const { execFileSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const GC_PI_HOOK_VERSION = 7;
+const GC_PI_HOOK_VERSION = 8;
 const PATH_PREFIX =
   `/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`;
 let mirrorTempCounter = 0;
@@ -27,7 +27,12 @@ function run(args, cwd, extraEnv = {}) {
       cwd: cwd || process.cwd(),
       encoding: "utf-8",
       timeout: 30000,
-      stdio: ["ignore", "pipe", "inherit"],
+      // stderr is piped, not inherited: gc advisory warnings (WARN lines, the
+      // named_session always+fresh notice) must not leak past the host TUI's
+      // screen buffer — inherited stderr paints them around the TUI where they
+      // can't be copied and read as terminal corruption. Failures still surface
+      // through logRunFailure below, which receives stderr in the error object.
+      stdio: ["ignore", "pipe", "pipe"],
       env: {
         ...process.env,
         ...extraEnv,
@@ -44,6 +49,10 @@ function logRunFailure(args, cwd, err) {
   try {
     const detail =
       (err && (err.code || err.signal || err.message)) || "unknown error";
+    // err.stderr is only populated now that stderr is piped (see run()).
+    // Without it a failed gc invocation would report only an exit code and
+    // lose the reason gc printed before exiting.
+    const stderr = err && typeof err.stderr === "string" ? err.stderr.trim() : "";
     console.error(
       "gc-hooks run:",
       `gc ${args.join(" ")}`,
@@ -51,6 +60,7 @@ function logRunFailure(args, cwd, err) {
       cwd || process.cwd(),
       "failed:",
       detail,
+      stderr ? `stderr: ${stderr}` : "",
     );
   } catch {
     // Keep Pi hooks non-fatal even if stderr is unavailable.

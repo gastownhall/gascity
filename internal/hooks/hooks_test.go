@@ -1959,12 +1959,12 @@ func TestInstallPiHookUsesCurrentExtensionAPI(t *testing.T) {
 		`pi.on("session_start"`,
 		`pi.on("session_compact"`,
 		`pi.on("before_agent_start"`,
-		"const GC_PI_HOOK_VERSION = 7",
+		"const GC_PI_HOOK_VERSION = 8",
 		"gc hook --inject",
 		`run(["prime", "--hook"], ctx.cwd, providerSessionEnv(ctx))`,
 		"GC_PROVIDER_SESSION_ID",
 		"GC_PROVIDER_SESSION_ID_REQUIRED",
-		`stdio: ["ignore", "pipe", "inherit"]`,
+		`stdio: ["ignore", "pipe", "pipe"]`,
 		"gc handoff --auto",
 		"mirrorTempCounter",
 		"fs.rmSync(tmp",
@@ -2021,19 +2021,19 @@ func TestPiHookNeedsUpgradeComparesParsedVersion(t *testing.T) {
 // gc prime --hook
 // gc hook --inject
 // gc handoff --auto
-const GC_PI_HOOK_VERSION = 7;
+const GC_PI_HOOK_VERSION = 8;
 run(["prime", "--hook"], ctx.cwd, providerSessionEnv(ctx));
 run(["hook", "--inject"], ctx.cwd);
 run(["handoff", "--auto", "context cycle"], ctx.cwd);
 let mirrorTempCounter = 0;
 GC_PROVIDER_SESSION_ID;
 GC_PROVIDER_SESSION_ID_REQUIRED;
-stdio: ["ignore", "pipe", "inherit"];
+stdio: ["ignore", "pipe", "pipe"];
 function providerSessionEnv(ctx) {}
 `)
-	stale := bytes.Replace(current, []byte("GC_PI_HOOK_VERSION = 7"), []byte("GC_PI_HOOK_VERSION = 6"), 1)
-	future := bytes.Replace(current, []byte("GC_PI_HOOK_VERSION = 7"), []byte("GC_PI_HOOK_VERSION = 8"), 1)
-	missingStderrForward := bytes.Replace(current, []byte(`stdio: ["ignore", "pipe", "inherit"];
+	stale := bytes.Replace(current, []byte("GC_PI_HOOK_VERSION = 8"), []byte("GC_PI_HOOK_VERSION = 7"), 1)
+	future := bytes.Replace(current, []byte("GC_PI_HOOK_VERSION = 8"), []byte("GC_PI_HOOK_VERSION = 9"), 1)
+	missingStdioConfig := bytes.Replace(current, []byte(`stdio: ["ignore", "pipe", "pipe"];
 `), nil, 1)
 
 	if !piHookNeedsUpgrade(stale) {
@@ -2045,8 +2045,8 @@ function providerSessionEnv(ctx) {}
 	if piHookNeedsUpgrade(future) {
 		t.Fatal("newer Pi hook version requested downgrade")
 	}
-	if !piHookNeedsUpgrade(missingStderrForward) {
-		t.Fatal("Pi hook without child stderr forwarding did not request upgrade")
+	if !piHookNeedsUpgrade(missingStdioConfig) {
+		t.Fatal("Pi hook without the managed stdio config did not request upgrade")
 	}
 }
 
@@ -2075,14 +2075,14 @@ export default {
 		t.Fatal("legacy OMP object-export hook was preserved; expected managed upgrade")
 	}
 	for _, want := range []string{
-		"const GC_OMP_HOOK_VERSION = 2",
+		"const GC_OMP_HOOK_VERSION = 3",
 		`export default function gascityOmpExtension(pi: ExtensionAPI)`,
 		`pi.on("session_start"`,
 		`pi.on("session_compact"`,
 		`pi.on("before_agent_start"`,
 		"GC_PROVIDER_SESSION_ID",
 		"GC_PROVIDER_SESSION_ID_REQUIRED",
-		`stdio: ["ignore", "pipe", "inherit"]`,
+		`stdio: ["ignore", "pipe", "pipe"]`,
 		"logRunFailure",
 	} {
 		if !strings.Contains(data, want) {
@@ -2097,7 +2097,7 @@ export default {
 
 func TestOMPHookNeedsUpgradeComparesParsedVersion(t *testing.T) {
 	current := []byte(`// Gas City hooks for Oh My Pi (OMP).
-const GC_OMP_HOOK_VERSION = 2;
+const GC_OMP_HOOK_VERSION = 3;
 function logRunFailure(args: string[], cwd: string | undefined, err: unknown) {}
 function providerSessionEnv(ctx: { sessionManager?: { getSessionId?: () => string } }): Record<string, string> {}
 export default function gascityOmpExtension(pi: ExtensionAPI) {
@@ -2107,10 +2107,10 @@ export default function gascityOmpExtension(pi: ExtensionAPI) {
 }
 GC_PROVIDER_SESSION_ID;
 GC_PROVIDER_SESSION_ID_REQUIRED;
-stdio: ["ignore", "pipe", "inherit"];
+stdio: ["ignore", "pipe", "pipe"];
 `)
-	stale := bytes.Replace(current, []byte("GC_OMP_HOOK_VERSION = 2"), []byte("GC_OMP_HOOK_VERSION = 1"), 1)
-	future := bytes.Replace(current, []byte("GC_OMP_HOOK_VERSION = 2"), []byte("GC_OMP_HOOK_VERSION = 3"), 1)
+	stale := bytes.Replace(current, []byte("GC_OMP_HOOK_VERSION = 3"), []byte("GC_OMP_HOOK_VERSION = 2"), 1)
+	future := bytes.Replace(current, []byte("GC_OMP_HOOK_VERSION = 3"), []byte("GC_OMP_HOOK_VERSION = 4"), 1)
 	missingRequiredProvider := bytes.Replace(current, []byte("GC_PROVIDER_SESSION_ID_REQUIRED;\n"), nil, 1)
 
 	if !ompHookNeedsUpgrade(stale) {

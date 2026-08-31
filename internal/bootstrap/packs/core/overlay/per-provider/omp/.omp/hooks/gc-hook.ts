@@ -11,7 +11,7 @@
 import { execFileSync } from "node:child_process";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
-const GC_OMP_HOOK_VERSION = 2;
+const GC_OMP_HOOK_VERSION = 3;
 const PATH_PREFIX =
   `/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`;
 
@@ -21,7 +21,10 @@ function run(args: string[], cwd?: string, extraEnv: Record<string, string> = {}
       cwd: cwd || process.cwd(),
       encoding: "utf-8",
       timeout: 30000,
-      stdio: ["ignore", "pipe", "inherit"],
+      // stderr piped, not inherited: gc advisory warnings must not leak past
+      // the host TUI's screen buffer. Failures surface via logRunFailure,
+      // which reads the captured stderr off the error object.
+      stdio: ["ignore", "pipe", "pipe"],
       env: {
         ...process.env,
         ...extraEnv,
@@ -36,8 +39,9 @@ function run(args: string[], cwd?: string, extraEnv: Record<string, string> = {}
 
 function logRunFailure(args: string[], cwd: string | undefined, err: unknown): void {
   try {
-    const maybeError = err as { code?: string; signal?: string; message?: string } | undefined;
+    const maybeError = err as { code?: string; signal?: string; message?: string; stderr?: string } | undefined;
     const detail = maybeError?.code || maybeError?.signal || maybeError?.message || "unknown error";
+    const stderr = typeof maybeError?.stderr === "string" ? maybeError.stderr.trim() : "";
     console.error(
       "gc-hooks run:",
       `gc ${args.join(" ")}`,
@@ -45,6 +49,7 @@ function logRunFailure(args: string[], cwd: string | undefined, err: unknown): v
       cwd || process.cwd(),
       "failed:",
       detail,
+      stderr ? `stderr: ${stderr}` : "",
     );
   } catch {
     // Keep OMP hooks non-fatal even if stderr is unavailable.
