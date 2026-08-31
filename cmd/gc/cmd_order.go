@@ -1182,6 +1182,18 @@ func doOrderCheckWithStoresResolverScoped(cityPath string, cfg *config.City, aa 
 // this read can only cost the cooldown fast path, never manufacture a false
 // "never fired" the way an unguarded Limit would.
 //
+// The fallback is not bit-identical to the event, and the difference is
+// worth stating because it is the one observable effect of the bound. The
+// tracking bead is created before the fired event is recorded
+// (launchResolvedDispatch in order_dispatch.go calls CreateRun, then
+// dispatchOne records events.OrderFired), so the bead's timestamp is the
+// earlier of the two. An order whose fired event has been evicted from the
+// tail therefore resolves against a slightly earlier last-run instant and
+// can be reported due up to that write gap sooner than it would have been.
+// The skew is one-directional: an earlier last-run only ever makes an order
+// look more overdue, so the bound can advance a firing by the write gap but
+// can never suppress one, which is the property a scheduler needs.
+//
 // The tail read walks the active event log backward and stops at this many
 // matches; it never opens the gzipped archives, which is where the unbounded
 // List spent its time. A log holding fewer than this many order.fired events
