@@ -385,6 +385,12 @@ func (p transientCityEventProvider) List(filter events.Filter) ([]events.Event, 
 	return events.ReadFiltered(p.path, filter)
 }
 
+// ListTail returns the trailing matching events without scanning the full
+// archived history, implementing events.TailProvider.
+func (p transientCityEventProvider) ListTail(filter events.Filter, limit int) ([]events.Event, error) {
+	return events.ReadFilteredTail(p.path, filter, limit)
+}
+
 func (p transientCityEventProvider) LatestSeq() (uint64, error) {
 	return events.ReadLatestSeq(p.path)
 }

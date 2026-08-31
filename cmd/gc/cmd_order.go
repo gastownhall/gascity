@@ -1174,6 +1174,15 @@ func doOrderCheckWithStoresResolverScoped(cityPath string, cfg *config.City, aa 
 	return doOrderCheckWithStoresResolverScopedJSON(cityPath, cfg, aa, now, ep, resolveStores, false, stdout, stderr)
 }
 
+// orderCheckFiredEventTailLimit bounds the newest-first order.fired read
+// below (mirrors internal/doctor's orderFiringEventTailLimit). Unlike that
+// doctor check, no archive fallback is needed here: the lastRunFn built
+// below already falls through to the authoritative order-run history
+// (baseLastRunFn) whenever the tail read doesn't have a fresh-enough fired
+// event for an order, so bounding this read cannot produce a false
+// "never fired" the way an unguarded Limit would.
+const orderCheckFiredEventTailLimit = 2000
+
 func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City, aa []orders.Order, now time.Time, ep events.Provider, resolveStores orderStoresResolver, jsonOutput bool, stdout, stderr io.Writer) int {
 	if len(aa) == 0 {
 		if jsonOutput {
@@ -1195,7 +1204,12 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 
 	var firedEvents []events.Event
 	if ep != nil {
-		firedEvents, _ = ep.List(events.Filter{Type: events.OrderFired})
+		filter := events.Filter{Type: events.OrderFired}
+		if tp, ok := ep.(events.TailProvider); ok {
+			firedEvents, _ = tp.ListTail(filter, orderCheckFiredEventTailLimit)
+		} else {
+			firedEvents, _ = ep.List(filter)
+		}
 	}
 	latestFired := make(map[string]time.Time)
 	for _, event := range firedEvents {
