@@ -1,11 +1,13 @@
 package herdr
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // liveHerdrSkipReason reports why the live tier should be skipped, or "" when it
@@ -114,15 +116,21 @@ func herdrRegistryIsDetectionBased(version string) bool {
 // these journeys place are never registered and the registry assertions fail.
 // The waiver is version-scoped, so it lifts on its own against 0.7.x and once
 // #5808 re-points the test at the contract 0.8 actually provides.
-func skipOnDetectionBasedRegistry(t *testing.T) {
+//
+// The version probe goes through the provider's own client rather than a fresh
+// exec.Command so the live tier adds no new subprocess call to the untagged
+// test-source census (internal/testpolicy/resourcecensus).
+func skipOnDetectionBasedRegistry(t *testing.T, p *Provider) {
 	t.Helper()
-	out, err := exec.Command("herdr", "--version").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := p.c.runRaw(ctx, "--version")
 	if err != nil {
 		return
 	}
-	if herdrRegistryIsDetectionBased(string(out)) {
+	if herdrRegistryIsDetectionBased(out) {
 		t.Skipf("herdr %q uses a detection-based agent registry; tracked as #5808",
-			strings.TrimSpace(string(out)))
+			strings.TrimSpace(out))
 	}
 }
 
