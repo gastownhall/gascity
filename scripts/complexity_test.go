@@ -3,7 +3,6 @@ package scripts_test
 import (
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -88,10 +87,7 @@ func TestComplexityDiffRejectsMissingBaseRef(t *testing.T) {
 	root := repoRoot(t)
 	fake := filepath.Join(t.TempDir(), "gocyclo")
 	writeExecutable(t, fake, "#!/bin/sh\nprintf '%s\\n' '1 gc helper internal/server.go:1:1'\n")
-	cmd := exec.Command(filepath.Join(root, "scripts", "ci", "complexity.sh"), "diff")
-	cmd.Dir = root
-	cmd.Env = append(os.Environ(), "COMPLEXITY_TOOL="+fake, "COMPLEXITY_BASE_REF=refs/heads/does-not-exist")
-	output, err := cmd.CombinedOutput()
+	output, err := runComplexityEnv(t, root, "diff", "COMPLEXITY_TOOL="+fake, "COMPLEXITY_BASE_REF=refs/heads/does-not-exist")
 	if err == nil || !strings.Contains(string(output), "unable to archive base ref") {
 		t.Fatalf("missing base ref = %v, output %s", err, output)
 	}
@@ -105,10 +101,7 @@ func TestComplexityDiffIgnoresBaselineContents(t *testing.T) {
 	if err := os.WriteFile(baseline, []byte("not json"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(filepath.Join(root, "scripts", "ci", "complexity.sh"), "diff")
-	cmd.Dir = root
-	cmd.Env = append(os.Environ(), "COMPLEXITY_TOOL="+fake, "COMPLEXITY_BASELINE="+baseline, "COMPLEXITY_BASE_REF=origin/main")
-	output, err := cmd.CombinedOutput()
+	output, err := runComplexityEnv(t, root, "diff", "COMPLEXITY_TOOL="+fake, "COMPLEXITY_BASELINE="+baseline, "COMPLEXITY_BASE_REF=origin/main")
 	if err != nil || !strings.Contains(string(output), "no threshold changes") {
 		t.Fatalf("diff with malformed baseline = %v, output %s", err, output)
 	}
@@ -138,10 +131,7 @@ func TestComplexityDiffDuplicateKeysRespectThreshold(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			fake := filepath.Join(t.TempDir(), "gocyclo")
 			writeExecutable(t, fake, "#!/bin/sh\nprintf '%b' '"+strings.ReplaceAll(tt.output, "\n", "\\n")+"'\n")
-			cmd := exec.Command(filepath.Join(root, "scripts", "ci", "complexity.sh"), "diff")
-			cmd.Dir = root
-			cmd.Env = append(os.Environ(), "COMPLEXITY_TOOL="+fake, "COMPLEXITY_BASE_REF=origin/main")
-			output, err := cmd.CombinedOutput()
+			output, err := runComplexityEnv(t, root, "diff", "COMPLEXITY_TOOL="+fake, "COMPLEXITY_BASE_REF=origin/main")
 			if tt.wantErr {
 				if err == nil || !strings.Contains(string(output), "duplicate analyzer key") {
 					t.Fatalf("duplicate tracked keys = %v, output %s", err, output)
@@ -165,10 +155,7 @@ else
   printf '%s\n' '5 events Init internal/events/payloads.go:88:1'
 fi
 `)
-	cmd := exec.Command(filepath.Join(root, "scripts", "ci", "complexity.sh"), "diff")
-	cmd.Dir = root
-	cmd.Env = append(os.Environ(), "COMPLEXITY_TOOL="+fake, "COMPLEXITY_BASE_REF=origin/main")
-	output, err := cmd.CombinedOutput()
+	output, err := runComplexityEnv(t, root, "diff", "COMPLEXITY_TOOL="+fake, "COMPLEXITY_BASE_REF=origin/main")
 	if err != nil || !strings.Contains(string(output), "improved: 5 events Init internal/events/payloads.go (base 25)") {
 		t.Fatalf("high-to-low diff = %v, output %s", err, output)
 	}
@@ -176,14 +163,18 @@ fi
 
 func runComplexity(t *testing.T, repoRoot, tool, baseline, argsLog, mode string) ([]byte, error) {
 	t.Helper()
-	cmd := exec.Command(filepath.Join(repoRoot, "scripts", "ci", "complexity.sh"), mode)
-	cmd.Dir = repoRoot
-	cmd.Env = append(os.Environ(),
+	return runComplexityEnv(t, repoRoot, mode,
 		"COMPLEXITY_TOOL="+tool,
 		"COMPLEXITY_BASELINE="+baseline,
 		"COMPLEXITY_ARGS_LOG="+argsLog,
 		"COMPLEXITY_THRESHOLD=20",
-		"COMPLEXITY_TOP=50",
-	)
+		"COMPLEXITY_TOP=50")
+}
+
+func runComplexityEnv(t *testing.T, repoRoot, mode string, env ...string) ([]byte, error) {
+	t.Helper()
+	cmd := testCommand(filepath.Join(repoRoot, "scripts", "ci", "complexity.sh"), mode)
+	cmd.Dir = repoRoot
+	cmd.Env = append(os.Environ(), env...)
 	return cmd.CombinedOutput()
 }
