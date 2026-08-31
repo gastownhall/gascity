@@ -133,6 +133,13 @@ func TestQuarantinedStartupHealthBlocksProviderStartUntilExpiry(t *testing.T) {
 		t.Fatal("episode not quarantined after reaching the failure threshold; cannot test quarantine gating")
 	}
 
+	// The 5th failure's bead already rolled back to closed/failed-create (like
+	// every prior one), so no open bead remains for this session name.
+	// reconcileTick (unlike production's syncSessionBeads) never materializes a
+	// replacement on its own — simulate the one production would create for a
+	// still-desired name, exactly as the loop above does for failures 2-5, so
+	// there is a live candidate to exercise the quarantine gate against.
+	h.createReplacementPendingCreateBead()
 	delete(h.env.sp.StartErrors, sessionName)
 	startsBefore := h.countRuntimeCalls("Start")
 	for i := 0; i < 5; i++ {

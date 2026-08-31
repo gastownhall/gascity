@@ -534,16 +534,17 @@ func IsMoleculeType(t string) bool {
 // represent internal bookkeeping rather than actionable work. This
 // matches the exclusion list in the bd CLI's GetReadyWork query.
 var readyExcludeTypes = map[string]bool{
-	"merge-request": true, // processed by automation
-	"gate":          true, // async wait conditions
-	"molecule":      true, // workflow containers
-	"step":          true, // non-root formula steps; parent molecule is the actionable unit (#1039)
-	"convoy":        true, // sling-minted container; groups child beads, never actionable Ready work (#3591)
-	"message":       true, // mail/communication items
-	"session":       true, // runtime/session continuity beads, never actionable work
-	"agent":         true, // identity/state tracking beads
-	"role":          true, // agent role definitions
-	"rig":           true, // rig identity beads
+	"merge-request":          true, // processed by automation
+	"gate":                   true, // async wait conditions
+	"molecule":               true, // workflow containers
+	"step":                   true, // non-root formula steps; parent molecule is the actionable unit (#1039)
+	"convoy":                 true, // sling-minted container; groups child beads, never actionable Ready work (#3591)
+	"message":                true, // mail/communication items
+	"session":                true, // runtime/session continuity beads, never actionable work
+	"agent":                  true, // identity/state tracking beads
+	"role":                   true, // agent role definitions
+	"rig":                    true, // rig identity beads
+	"startup-health-episode": true, // per-session-name bookkeeping record, never actionable Ready work (ga-o04bfr.1.1)
 }
 
 var readyBlockingDependencyTypes = map[string]bool{
