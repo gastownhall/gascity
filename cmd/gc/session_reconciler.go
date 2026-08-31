@@ -3668,6 +3668,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if sessionIsQuarantinedInfo(info, clk) {
 				continue // crash-loop protection
 			}
+			if episode, err := sessFront.LoadStartupHealthEpisode(name); err == nil && !episode.QuarantinedUntil.IsZero() && clk.Now().Before(episode.QuarantinedUntil) {
+				continue // startup-health crash-loop protection (pending-create failures)
+			}
 			if pendingCreateStartInFlightInfo(info, clk, startupTimeout) {
 				if trace != nil {
 					trace.RecordDecision(TraceSiteReconcilerWakeDecision, TraceReasonWake, TraceOutcomeStartInFlight, target.tp.TemplateName, name, traceRecordPayload{
