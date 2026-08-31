@@ -98,10 +98,15 @@ func (o *providerDrainOps) drainStartTime(sessionName string) (time.Time, error)
 }
 
 func (o *providerDrainOps) setDrainAck(sessionName string) error {
+	// The acknowledging agent records which incarnation it was. Readers bind
+	// against this rather than trusting a bare source value that a recycled
+	// chair carries over from whoever sat there last.
+	requesterInstanceToken := strings.TrimSpace(os.Getenv("GC_INSTANCE_TOKEN"))
 	return joinDrainAckMutationErrors(
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckReasonKey),
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckGenerationKey),
 		o.sp.SetMeta(sessionName, reconcilerDrainAckSourceKey, drainAckSourceAgentValue),
+		o.sp.SetMeta(sessionName, drainAckRequesterInstanceTokenKey, requesterInstanceToken),
 		o.sp.SetMeta(sessionName, "GC_DRAIN_ACK", "1"),
 	)
 }
