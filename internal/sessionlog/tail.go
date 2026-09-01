@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
@@ -159,10 +160,11 @@ func splitLines(data []byte) [][]byte {
 
 // tailEntry is the minimal structure we decode from each JSONL line.
 type tailEntry struct {
-	Type    string          `json:"type"`
-	Subtype string          `json:"subtype,omitempty"`
-	UUID    string          `json:"uuid"`
-	Message json.RawMessage `json:"message"`
+	Type      string          `json:"type"`
+	Subtype   string          `json:"subtype,omitempty"`
+	UUID      string          `json:"uuid"`
+	Message   json.RawMessage `json:"message"`
+	Timestamp time.Time       `json:"timestamp"`
 }
 
 // messageStopReason extracts stop_reason from an assistant message.

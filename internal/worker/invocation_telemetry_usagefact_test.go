@@ -259,6 +259,37 @@ func TestModelUsageFact(t *testing.T) {
 	}
 }
 
+// TestModelUsageFactPrefersEntryTimestampOverNow pins the At fallback
+// contract: when the extractor populated the transcript entry's own
+// Timestamp, At must use it instead of the wall-clock now the caller passed
+// in — that now is when the FOLLOWING prompt operation happened to observe
+// the completed invocation, not when the invocation itself ran.
+func TestModelUsageFactPrefersEntryTimestampOverNow(t *testing.T) {
+	now := time.Unix(1000, 0).UTC()
+	entryTime := time.Unix(1, 0).UTC()
+	u := sessionlog.TailUsage{
+		EntryUUID:   "entry-1",
+		Model:       "claude-opus-4-7",
+		InputTokens: 100,
+		Timestamp:   entryTime,
+	}
+	bead := beads.Bead{ID: "b1", Metadata: map[string]string{"molecule_id": "mol-7"}}
+
+	f := modelUsageFact(u, bead.Metadata, bead.ID, "session-1", "w", "claude", 0.02, true, now)
+	if f.At != entryTime.UnixMilli() {
+		t.Fatalf("At = %d, want the entry's own timestamp %d, not now (%d)", f.At, entryTime.UnixMilli(), now.UnixMilli())
+	}
+
+	// A zero Timestamp (older transcript format, or a provider whose tail
+	// extraction doesn't populate it) must fall back to now unchanged.
+	uNoTimestamp := u
+	uNoTimestamp.Timestamp = time.Time{}
+	fallback := modelUsageFact(uNoTimestamp, bead.Metadata, bead.ID, "session-1", "w", "claude", 0.02, true, now)
+	if fallback.At != now.UnixMilli() {
+		t.Fatalf("At = %d, want now (%d) when Timestamp is zero", fallback.At, now.UnixMilli())
+	}
+}
+
 func TestModelAndComputeFactsShareSessionIDJoinKey(t *testing.T) {
 	sessionID := "session-1"
 	model := usage.Fact{SessionID: sessionID}

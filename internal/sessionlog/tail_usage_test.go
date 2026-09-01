@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestExtractTailUsageReturnsEntriesInFileOrder(t *testing.T) {
@@ -145,6 +146,49 @@ func TestExtractTailUsageCollapsesContentBlockEntriesByMessageID(t *testing.T) {
 		if usages[i] != w {
 			t.Errorf("usages[%d] = %+v, want %+v", i, usages[i], w)
 		}
+	}
+}
+
+func TestExtractTailUsageCapturesEntryTimestamp(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.jsonl")
+
+	writeTailJSONL(t, path, []map[string]any{
+		{
+			"type":      "assistant",
+			"uuid":      "u1",
+			"timestamp": "2026-08-31T12:34:56.789Z",
+			"message": map[string]any{
+				"role":  "assistant",
+				"model": "claude-opus-4-7",
+				"usage": map[string]any{"input_tokens": 100, "output_tokens": 50},
+			},
+		},
+		// No timestamp field — Timestamp stays zero rather than defaulting to now.
+		{
+			"type": "assistant",
+			"uuid": "u2",
+			"message": map[string]any{
+				"role":  "assistant",
+				"model": "claude-opus-4-7",
+				"usage": map[string]any{"input_tokens": 7, "output_tokens": 3},
+			},
+		},
+	})
+
+	usages, err := ExtractTailUsage(path)
+	if err != nil {
+		t.Fatalf("ExtractTailUsage: %v", err)
+	}
+	if len(usages) != 2 {
+		t.Fatalf("ExtractTailUsage = %d entries, want 2: %+v", len(usages), usages)
+	}
+	want := time.Date(2026, 8, 31, 12, 34, 56, 789000000, time.UTC)
+	if !usages[0].Timestamp.Equal(want) {
+		t.Errorf("usages[0].Timestamp = %v, want %v", usages[0].Timestamp, want)
+	}
+	if !usages[1].Timestamp.IsZero() {
+		t.Errorf("usages[1].Timestamp = %v, want zero", usages[1].Timestamp)
 	}
 }
 

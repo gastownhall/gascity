@@ -3,6 +3,7 @@ package sessionlog
 import (
 	"encoding/json"
 	"os"
+	"time"
 )
 
 // TailUsage is the per-invocation token usage parsed from one
@@ -37,6 +38,9 @@ type TailUsage struct {
 	// ContextWindowTokens is the model context window reported by the
 	// provider for this invocation, when available.
 	ContextWindowTokens int
+	// Timestamp is the transcript entry's own timestamp, when the provider
+	// format carries one. Zero when absent or unparseable.
+	Timestamp time.Time
 }
 
 // ExtractTailUsage reads the tail of a session transcript and returns one
@@ -88,6 +92,7 @@ func ExtractTailUsage(path string) ([]TailUsage, error) {
 			OutputTokens:        msg.Usage.OutputTokens,
 			CacheReadTokens:     msg.Usage.CacheReadInputTokens,
 			CacheCreationTokens: msg.Usage.CacheCreationInputTokens,
+			Timestamp:           entry.Timestamp,
 		}
 		if u.InputTokens <= 0 && u.OutputTokens <= 0 && u.CacheReadTokens <= 0 && u.CacheCreationTokens <= 0 {
 			continue
