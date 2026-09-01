@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "ok",
+    "groups",
+    "total",
+    "skipped"
+  ],
+  "properties": {
+    "ok": {
+      "const": true
+    },
+    "groups": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "key",
+          "opened",
+          "closed"
+        ],
+        "properties": {
+          "key": {
+            "type": "object",
+            "required": [
+              "store",
+              "type",
+              "label"
+            ],
+            "properties": {
+              "store": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": true
+          },
+          "opened": {
+            "type": "integer"
+          },
+          "closed": {
+            "type": "integer"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "total": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "skipped": {
+      "type": "integer"
+    }
+  },
+  "additionalProperties": true
+}
