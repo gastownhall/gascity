@@ -154,7 +154,7 @@ func Analyze(es []events.Event, win Window, now time.Time, threshold time.Durati
 			st = &beadState{}
 			states[subject] = st
 		}
-		if e.Ts.After(st.lastEventAt) || st.lastEventType == "" {
+		if !e.Ts.Before(st.lastEventAt) {
 			st.lastEventAt = e.Ts
 			st.lastEventType = e.Type
 		}
