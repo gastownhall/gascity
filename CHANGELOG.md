@@ -224,6 +224,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bound or explicitly configured endpoints keep bd's own output unchanged
   (gastownhall/gascity#1374).
 
+- **`GET /sessions` gained a cheap `?enrich=false` roster mode.** Per-session
+  runtime enrichment (running state, active bead, peek) ran unconditionally
+  over every session that matched the filter — not just the requested page
+  — via `Manager.ListFromInfos`'s live overlay, serializing behind the
+  runtime provider's own rate limits at fleet scale (a Kubernetes provider's
+  client-go QPS limiter serializing one pod GET per session was the
+  reported case: ~21 active sessions took 40-49s, ~34 took ~70s). A caller
+  that only needs a roster (id/state/alias, e.g. building a recipient list)
+  can now pass `enrich=false` for a read-model-only response with zero
+  runtime calls; the default (omitted) still enriches, unchanged. Split
+  `Manager.ListFromInfos` into a new `FilterInfos` (filter only) plus the
+  existing `EnrichInfos` overlay so the fast path can skip enrichment
+  without duplicating the filter logic. (gascity#4390)
+
 - **ACP activity is now available across process boundaries.** ACP
   `session/update` timestamps are published through an atomic, coalesced
   sidecar, allowing a process other than the session owner to report

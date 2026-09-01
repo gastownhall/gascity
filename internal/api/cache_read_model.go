@@ -36,19 +36,31 @@ func sessionReadModelListings(sessFront *session.Store) ([]session.ListedSession
 	return nil, nil, err
 }
 
-// filterEnrichReadModel filters a typed read-model feed by state and template and
-// applies the runtime overlay (Manager.ListFromInfos), returning the enriched
-// session list paired with a by-id lookup of each session's persisted-response
-// projection. The pair is pre-joined per ListedSession row, so the session
-// response builder re-attaches the persisted facts by id — no bead index and no
-// bead->response projection. Filter-then-enrich order is preserved inside
-// ListFromInfos (the persisted state filter runs before the runtime downgrade).
-func filterEnrichReadModel(mgr *session.Manager, listings []session.ListedSession, stateFilter, templateFilter string) ([]session.Info, map[string]session.PersistedResponse) {
+// filterEnrichReadModel filters a typed read-model feed by state and template and,
+// when enrich is true, applies the runtime overlay (Manager.ListFromInfos),
+// returning the enriched session list paired with a by-id lookup of each
+// session's persisted-response projection. The pair is pre-joined per
+// ListedSession row, so the session response builder re-attaches the persisted
+// facts by id — no bead index and no bead->response projection. Filter-then-enrich
+// order is preserved inside ListFromInfos (the persisted state filter runs before
+// the runtime downgrade).
+//
+// enrich=false skips the runtime overlay via Manager.FilterInfos instead —
+// filter only, zero IsRunning/IsAttached/GetLastActivity calls. This is the
+// fleet-wide (pre-pagination) half of the gascity#4390 cheap-roster path: at
+// fleet scale, EnrichInfos here — not the per-page enrichment loop in
+// humaHandleSessionList — is what serializes behind the runtime provider's own
+// rate limits, since it runs over every session that matches the filter, not
+// just the requested page.
+func filterEnrichReadModel(mgr *session.Manager, listings []session.ListedSession, stateFilter, templateFilter string, enrich bool) ([]session.Info, map[string]session.PersistedResponse) {
 	infos := make([]session.Info, len(listings))
 	responseByID := make(map[string]session.PersistedResponse, len(listings))
 	for i, listing := range listings {
 		infos[i] = listing.Info
 		responseByID[listing.Info.ID] = listing.Response
+	}
+	if !enrich {
+		return mgr.FilterInfos(infos, stateFilter, templateFilter), responseByID
 	}
 	return mgr.ListFromInfos(infos, stateFilter, templateFilter), responseByID
 }

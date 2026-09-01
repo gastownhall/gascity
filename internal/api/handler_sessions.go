@@ -251,7 +251,7 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
-	sessions, responseByID := filterEnrichReadModel(mgr, listings, stateFilter, templateFilter)
+	sessions, responseByID := filterEnrichReadModel(mgr, listings, stateFilter, templateFilter, true)
 
 	// Resolve the legacy offset page before runtime/transcript enrichment so
 	// off-page sessions do not perform filesystem discovery on every list poll.

@@ -9323,7 +9323,8 @@ export const zGetV0CityByCityNameSessionsQuery = z.object({
     limit: z.coerce.bigint().gte(BigInt(0)).lte(BigInt(1000)).optional().default(BigInt(100)),
     state: z.string().optional(),
     template: z.string().optional(),
-    peek: z.boolean().optional()
+    peek: z.boolean().optional(),
+    enrich: z.boolean().optional().default(true)
 });
 
 /**

@@ -872,6 +872,77 @@ func TestHandleSessionListEnrichesOnlyRequestedPage(t *testing.T) {
 	}
 }
 
+// TestHandleSessionListEnrichFalseSkipsAllRuntimeCalls is the regression
+// guard for gascity#4390: per-session runtime enrichment (running state,
+// active bead, peek) is what serializes /sessions behind the runtime's own
+// rate limits at fleet scale (e.g. a Kubernetes provider's client-go QPS
+// limiter serializing pod GETs one request per session). enrich=false must
+// skip it entirely — zero calls into the session runtime provider — and
+// still return the full read-model roster (id/state/etc.), not an empty or
+// truncated page.
+func TestHandleSessionListEnrichFalseSkipsAllRuntimeCalls(t *testing.T) {
+	fs := newSessionFakeState(t)
+	createTestSession(t, fs.cityBeadStore, fs.sp, "S1")
+	createTestSession(t, fs.cityBeadStore, fs.sp, "S2")
+	createTestSession(t, fs.cityBeadStore, fs.sp, "S3")
+	fs.sp.Calls = nil
+
+	h := newTestCityHandler(t, fs)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", cityURL(fs, "/sessions?enrich=false&peek=true"), nil)
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp struct {
+		Items []sessionResponse `json:"items"`
+		Total int               `json:"total"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Items) != 3 || resp.Total != 3 {
+		t.Fatalf("items/total = %d/%d, want 3/3 — the roster itself must still be complete", len(resp.Items), resp.Total)
+	}
+	for _, item := range resp.Items {
+		if item.ID == "" || item.State == "" {
+			t.Fatalf("item %+v missing read-model fields", item)
+		}
+	}
+	if calls := fs.sp.SnapshotCalls(); len(calls) != 0 {
+		t.Fatalf("runtime provider calls = %d, want 0 with enrich=false: %+v", len(calls), calls)
+	}
+}
+
+// TestHandleSessionListEnrichDefaultsTrue confirms the default (no enrich
+// param at all — the pre-gascity#4390 request shape every existing client
+// sends) still performs full enrichment, so adding the opt-out cannot
+// silently change behavior for callers who don't know about it.
+func TestHandleSessionListEnrichDefaultsTrue(t *testing.T) {
+	fs := newSessionFakeState(t)
+	createTestSession(t, fs.cityBeadStore, fs.sp, "S1")
+	fs.sp.Calls = nil
+
+	h := newTestCityHandler(t, fs)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", cityURL(fs, "/sessions?peek=true"), nil)
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	peekCalls := 0
+	for _, call := range fs.sp.SnapshotCalls() {
+		if call.Method == "Peek" {
+			peekCalls++
+		}
+	}
+	if peekCalls != 1 {
+		t.Fatalf("Peek calls = %d, want 1 — default (no enrich param) must still enrich", peekCalls)
+	}
+}
+
 func TestHandleSessionGet(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)

@@ -1969,6 +1969,18 @@ func (m *Manager) PersistedStore() *Store {
 // persisted projection, before the runtime stale-active downgrade), and the
 // IsSessionBeadOrRepairableInfo guard mirrors the old defensive filter.
 func (m *Manager) ListFromInfos(infos []Info, stateFilter, templateFilter string) []Info {
+	return m.EnrichInfos(m.FilterInfos(infos, stateFilter, templateFilter))
+}
+
+// FilterInfos is the filter-only half of ListFromInfos: the persisted-state
+// filter (repairable-bead guard + state/template match) with no runtime
+// overlay. Split out so a caller that doesn't want per-session live-runtime
+// calls (IsRunning/IsAttached/GetLastActivity via EnrichInfos) — e.g. a cheap
+// roster read that skips runtime enrichment entirely, gascity#4390 — can
+// filter without paying for it. ListFromInfos is exactly
+// EnrichInfos(FilterInfos(...)); this split changes no existing caller's
+// behavior.
+func (m *Manager) FilterInfos(infos []Info, stateFilter, templateFilter string) []Info {
 	result := make([]Info, 0, len(infos))
 	for _, info := range infos {
 		if !IsSessionBeadOrRepairableInfo(info) {
@@ -1979,7 +1991,7 @@ func (m *Manager) ListFromInfos(infos []Info, stateFilter, templateFilter string
 		}
 		result = append(result, info)
 	}
-	return m.EnrichInfos(result)
+	return result
 }
 
 // PersistSessionKey stores a provider resume key on an existing session when
