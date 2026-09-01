@@ -511,7 +511,7 @@ func (s *Server) agentActionByName(name, action string) (*OKResponse, error) {
 }
 
 func suspensionBody(state AgentSuspensionState) AgentSuspensionStateBody {
-	return AgentSuspensionStateBody{Suspended: state.Suspended, Token: state.Token}
+	return AgentSuspensionStateBody(state)
 }
 
 func (s *Server) agentSuspensionByName(name string) (*AgentSuspensionOutput, error) {

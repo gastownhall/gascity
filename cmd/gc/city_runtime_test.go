@@ -4621,10 +4621,10 @@ provider = "test"
 		t.Fatal("CAS did not proceed after S0 reload released the mutation boundary")
 	}
 
-	if !agentSuspendedForTest(t, cs.Config(), "worker") {
+	if !workerSuspendedForTest(t, cs.Config()) {
 		t.Fatal("controller lost S1 after the CAS committed")
 	}
-	if agentSuspendedForTest(t, cr.cfg, "worker") {
+	if workerSuspendedForTest(t, cr.cfg) {
 		t.Fatal("pre-CAS S0 reload unexpectedly observed the later CAS")
 	}
 	workerSession := startupSessionName(cr.cityName, "worker", cr.cfg.Workspace.SessionTemplate)
@@ -4640,13 +4640,13 @@ provider = "test"
 	if reply.Outcome != reloadOutcomeApplied {
 		t.Fatalf("S1 reload outcome = %q, want %q (error=%q)", reply.Outcome, reloadOutcomeApplied, reply.Error)
 	}
-	if !agentSuspendedForTest(t, cr.cfg, "worker") {
+	if !workerSuspendedForTest(t, cr.cfg) {
 		t.Fatal("CAS-first reload did not apply S1 to CityRuntime")
 	}
 	if !cr.suspendedNames[workerSession] {
 		t.Fatal("CAS-first reload did not apply S1 to reconciliation-facing suspendedNames")
 	}
-	if !agentSuspendedForTest(t, cs.Config(), "worker") {
+	if !workerSuspendedForTest(t, cs.Config()) {
 		t.Fatal("CAS-first reload did not retain S1 in controller state")
 	}
 	if cs.configMutationPending.Load() {
@@ -4654,17 +4654,17 @@ provider = "test"
 	}
 }
 
-func agentSuspendedForTest(t *testing.T, cfg *config.City, name string) bool {
+func workerSuspendedForTest(t *testing.T, cfg *config.City) bool {
 	t.Helper()
 	if cfg == nil {
-		t.Fatalf("config is nil while looking for agent %q", name)
+		t.Fatal("config is nil while looking for worker agent")
 	}
 	for _, agent := range cfg.Agents {
-		if agent.QualifiedName() == name {
+		if agent.QualifiedName() == "worker" {
 			return agent.Suspended
 		}
 	}
-	t.Fatalf("agent %q is absent", name)
+	t.Fatal("worker agent is absent")
 	return false
 }
 

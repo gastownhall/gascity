@@ -641,11 +641,12 @@ func TestConditionalAgentSuspensionConcurrentOppositesAndRestartAdoption(t *test
 	close(errs)
 	successes, stale := 0, 0
 	for err := range errs {
-		if err == nil {
+		switch {
+		case err == nil:
 			successes++
-		} else if errors.Is(err, configedit.ErrPrecondition) {
+		case errors.Is(err, configedit.ErrPrecondition):
 			stale++
-		} else {
+		default:
 			t.Fatal(err)
 		}
 	}

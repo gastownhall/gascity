@@ -154,37 +154,35 @@ func (e *Editor) SetAgentSuspendedIfTransaction(name, expectedToken string, desi
 			return before, AgentSuspensionState{}, err
 		}
 	}
-	fail := func(forward error) (AgentSuspensionState, AgentSuspensionState, error) {
+	fail := func(forward error) error {
 		if rollback == nil {
-			return before, AgentSuspensionState{}, forward
+			return forward
 		}
 		if restoreErr := rollback(); restoreErr != nil {
-			return before, AgentSuspensionState{}, errors.Join(forward, fmt.Errorf("rolling back conditional agent suspension: %w", restoreErr))
+			return errors.Join(forward, fmt.Errorf("rolling back conditional agent suspension: %w", restoreErr))
 		}
-		return before, AgentSuspensionState{}, forward
+		return forward
 	}
 	if err := mutateAgentSuspended(e.fs, filepath.Dir(e.tomlPath), raw, expanded, name, desired); err != nil && !errors.Is(err, ErrUnmodified) {
-		return fail(err)
+		return before, AgentSuspensionState{}, fail(err)
 	} else if err == nil {
 		if err := validateCityForEdit(raw); err != nil {
-			return fail(err)
+			return before, AgentSuspensionState{}, fail(err)
 		}
 		if err := e.write(raw); err != nil {
-			return fail(err)
+			return before, AgentSuspensionState{}, fail(err)
 		}
 	}
 	_, _, after, err := e.loadAgentSuspension(name)
 	if err != nil {
-		return fail(err)
+		return before, AgentSuspensionState{}, fail(err)
 	}
 	if after.Suspended != desired || after.Token == before.Token {
-		_, _, joined := fail(fmt.Errorf("conditional agent suspension did not produce a distinct desired state"))
-		return before, after, joined
+		return before, after, fail(fmt.Errorf("conditional agent suspension did not produce a distinct desired state"))
 	}
 	if afterChange != nil {
 		if err := afterChange(before, after); err != nil {
-			_, _, joined := fail(err)
-			return before, after, joined
+			return before, after, fail(err)
 		}
 	}
 	return before, after, nil

@@ -154,13 +154,14 @@ func (c Context) Validate() error {
 	if (c.GrantAudience != "" || c.GrantCID != "") && c.GrantCommand == "" {
 		return fmt.Errorf("context %q: grant_audience and grant_cid require grant_command", c.Name)
 	}
-	if c.GrantAudience == citywriteauth.AudienceCityWriteV2 {
+	switch {
+	case c.GrantAudience == citywriteauth.AudienceCityWriteV2:
 		if c.GrantCID == "" {
 			return fmt.Errorf("context %q: grant_cid is required with %s", c.Name, citywriteauth.AudienceCityWriteV2)
 		}
-	} else if c.GrantAudience != "" && c.GrantAudience != citywriteauth.AudienceCityWrite {
+	case c.GrantAudience != "" && c.GrantAudience != citywriteauth.AudienceCityWrite:
 		return fmt.Errorf("context %q: unsupported grant_audience %q", c.Name, c.GrantAudience)
-	} else if c.GrantCID != "" {
+	case c.GrantCID != "":
 		return fmt.Errorf("context %q: grant_cid requires grant_audience %s", c.Name, citywriteauth.AudienceCityWriteV2)
 	}
 	providerConfigured := c.CredentialAudience != "" || len(c.CredentialRequiredScopes) > 0 || c.CredentialOrg != ""
