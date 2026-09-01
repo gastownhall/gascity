@@ -8,8 +8,7 @@
 // The package is a pure-data layer: it parses events.Event slices into a
 // grouped report. The CLI (cmd/gc/cmd_analyze_latency.go) handles IO,
 // filtering, and presentation — the same split reliability
-// (internal/reliability) established for #1254 and beadthroughput
-// (internal/beadthroughput) followed for #5852's first subcommand.
+// (internal/reliability) established for #1254.
 //
 // # Grounding and scope limitations
 //
@@ -67,9 +66,9 @@ import (
 const unknownFormula = "unknown"
 
 // Window restricts the events considered to a time range. Zero-valued
-// fields disable the corresponding bound. Mirrors beadthroughput.Window;
-// kept as a separate type so this package has no dependency on sibling
-// analyze packages and each owns its windowing independently.
+// fields disable the corresponding bound. Kept as a package-local type so
+// this package has no dependency on sibling analyze packages and each owns
+// its windowing independently.
 type Window struct {
 	Since time.Time
 	Until time.Time
@@ -89,7 +88,7 @@ func (w Window) Contains(ts time.Time) bool {
 
 // Filter narrows the report to a specific pool and/or formula. Empty
 // fields disable the corresponding filter. Matching is case-insensitive,
-// consistent with reliability's and beadthroughput's filters.
+// consistent with reliability's filters.
 type Filter struct {
 	Pool    string
 	Formula string
@@ -114,9 +113,10 @@ type DurationStats struct {
 }
 
 // computeDurationStats builds a DurationStats from unsorted millisecond
-// samples. Percentiles use nearest-rank on the sorted sample set — the same
-// method internal/testpolicy/timingsummary uses for build-timing
-// percentiles — which is deterministic and needs no interpolation.
+// samples. Percentiles use nearest-rank on the sorted sample set, rounding
+// the fractional index to the nearest sample — deterministic and free of
+// interpolation, though for very small sample sets (e.g. two samples) P50
+// can round up to the higher sample rather than a true median.
 func computeDurationStats(samplesMs []int64) DurationStats {
 	if len(samplesMs) == 0 {
 		return DurationStats{}
@@ -206,7 +206,7 @@ func Analyze(es []events.Event, win Window, flt Filter) Report {
 
 	report.ClaimWait = analyzeClaimWait(beadEvents, win, flt)
 	report.GateQueueWait = analyzeGateQueueWait(es, win, flt, formulaByRun)
-	report.GateBounce = analyzeGateBounce(es, flt, formulaByRun)
+	report.GateBounce = analyzeGateBounce(es, win, flt, formulaByRun)
 	report.Skipped = skipped
 	return report
 }
@@ -312,6 +312,12 @@ func analyzeClaimWait(beadEvents []decodedBeadEvent, win Window, flt Filter) []C
 				// abandon the pending wait rather than reporting a bogus
 				// duration against a pool the bead no longer targets.
 				havePending = false
+			case havePending && assignee == "" && routedTo != "" && routedTo != pendingPool:
+				// Rerouted to a different pool before ever being claimed —
+				// restart the wait clock against the new pool rather than
+				// attributing the whole span to the stale one.
+				pendingPool = routedTo
+				pendingSince = ts
 			}
 		}
 	}
@@ -398,11 +404,14 @@ func analyzeGateQueueWait(es []events.Event, win Window, flt Filter, formulaByRu
 // one occurrence had its step redefined — bounced — after the first
 // attempt; see the package doc for why this is read as a gate
 // failed-and-retried signal.
-func analyzeGateBounce(es []events.Event, flt Filter, formulaByRun map[string]string) []GateBounceGroup {
+func analyzeGateBounce(es []events.Event, win Window, flt Filter, formulaByRun map[string]string) []GateBounceGroup {
 	definitionsByStep := make(map[stepKey]int)
 	formulaByStep := make(map[stepKey]string)
 	for _, e := range es {
 		if e.Type != events.ExecutionStepDefined {
+			continue
+		}
+		if !win.Contains(e.Ts) {
 			continue
 		}
 		key := stepKey{runID: e.RunID, stepID: e.StepID}

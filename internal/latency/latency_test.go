@@ -115,6 +115,39 @@ func TestAnalyze_ClaimWait_ReopenedBeforeClaimAbandonsWait(t *testing.T) {
 	}
 }
 
+func TestAnalyze_ClaimWait_ReroutedToDifferentPoolAttributesToNewPool(t *testing.T) {
+	now := time.Now().UTC()
+	reroutedAt := now.Add(time.Minute)
+	claimedAt := now.Add(2 * time.Minute)
+	es := []events.Event{
+		beadEvent(t, 1, events.BeadCreated, now, beads.Bead{
+			ID: "b-1", Status: "open",
+			Metadata: beads.StringMap{beadmeta.RoutedToMetadataKey: "pool-a"},
+		}),
+		// Rerouted to a different pool before ever being claimed.
+		beadEvent(t, 2, events.BeadUpdated, reroutedAt, beads.Bead{
+			ID: "b-1", Status: "open",
+			Metadata: beads.StringMap{beadmeta.RoutedToMetadataKey: "pool-b"},
+		}),
+		beadEvent(t, 3, events.BeadUpdated, claimedAt, beads.Bead{
+			ID: "b-1", Status: "in_progress", Assignee: "slot-1",
+			Metadata: beads.StringMap{beadmeta.RoutedToMetadataKey: "pool-b"},
+		}),
+	}
+	report := Analyze(es, Window{}, Filter{})
+	if len(report.ClaimWait) != 1 {
+		t.Fatalf("expected 1 pool group, got %d: %+v", len(report.ClaimWait), report.ClaimWait)
+	}
+	g := report.ClaimWait[0]
+	if g.Pool != "pool-b" {
+		t.Errorf("Pool = %q, want pool-b (the pool that actually claimed the bead)", g.Pool)
+	}
+	wantMs := claimedAt.Sub(reroutedAt).Milliseconds()
+	if g.Stats.MinMs != wantMs {
+		t.Errorf("MinMs = %d, want %d (wait measured from reroute, not original routing)", g.Stats.MinMs, wantMs)
+	}
+}
+
 func TestAnalyze_ClaimWait_PoolFilter(t *testing.T) {
 	now := time.Now().UTC()
 	es := []events.Event{
@@ -287,6 +320,29 @@ func TestAnalyze_GateBounce_SingleDefinitionHasZeroBounces(t *testing.T) {
 	}
 	if report.GateBounce[0].Bounces != 0 || report.GateBounce[0].BounceRate != 0 {
 		t.Errorf("expected zero bounces, got %+v", report.GateBounce[0])
+	}
+}
+
+func TestAnalyze_GateBounce_WindowExcludesDefinitionsOutsideRange(t *testing.T) {
+	now := time.Now().UTC()
+	es := []events.Event{
+		beadEvent(t, 1, events.BeadCreated, now.Add(-48*time.Hour), beads.Bead{
+			ID:       "root-1",
+			Metadata: beads.StringMap{beadmeta.FormulaNameMetadataKey: "mol-verify"},
+		}),
+		// Outside the window below: must not count toward Definitions/Bounces.
+		stepEvent(2, events.ExecutionStepDefined, now.Add(-47*time.Hour), "step-bead-1", "root-1", "check"),
+		stepEvent(3, events.ExecutionStepDefined, now.Add(-46*time.Hour), "step-bead-2", "root-1", "check"),
+		// Inside the window.
+		stepEvent(4, events.ExecutionStepDefined, now, "step-bead-3", "root-1", "check"),
+	}
+	report := Analyze(es, Window{Since: now.Add(-time.Hour)}, Filter{})
+	if len(report.GateBounce) != 1 {
+		t.Fatalf("expected 1 formula group, got %d: %+v", len(report.GateBounce), report.GateBounce)
+	}
+	g := report.GateBounce[0]
+	if g.Definitions != 1 || g.Bounces != 0 {
+		t.Errorf("expected window to exclude the two out-of-range definitions, got %+v", g)
 	}
 }
 
