@@ -783,6 +783,9 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	markReady()
 	fmt.Fprintf(cr.stderr, "%s: startup ready elapsed=%s\n", //nolint:errcheck // best-effort stderr
 		cr.logPrefix, time.Since(startupBegan).Round(time.Millisecond))
+	// Pack-owned services come up once the city is ready, mirroring the
+	// city-stop teardown order in shutdown().
+	runPackLifecycleHooks(cr.cityPath, cr.cfg, config.LifecycleEventCityStart, cr.stdout, cr.stderr)
 	fmt.Fprintln(cr.stdout, "City started.") //nolint:errcheck // best-effort stdout
 	if ctx.Err() != nil {
 		return
@@ -4075,6 +4078,14 @@ func (cr *CityRuntime) shutdown() {
 		// up there is by design, not an omission.
 		if cr.ownedCity.Load() && sweepEnumerated {
 			teardownServerForStop(cr.sp, cr.stderr, fmt.Sprintf("%s: city '%s'", cr.logPrefix, cr.cityName))
+		}
+		// Pack-owned services come down with the city that hosts them, after
+		// its sessions are stopped. The ownedCity guard is the same one the
+		// server teardown uses: a discarded runtime must not stop the live
+		// owner's services. sweepEnumerated does not gate this — it guards
+		// killing sessions we never listed, which pack hooks do not do.
+		if cr.ownedCity.Load() {
+			runPackLifecycleHooks(cr.cityPath, cr.cfg, config.LifecycleEventCityStop, cr.stdout, cr.stderr)
 		}
 	})
 }

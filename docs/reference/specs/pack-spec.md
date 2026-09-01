@@ -85,13 +85,13 @@ A pack may contain the following abstract content:
 | Named sessions | `[[named_session]]` in `pack.toml` | current |
 | Services | `[[service]]` in `pack.toml` | current |
 | Providers | `[providers.<name>]` in `pack.toml` | current |
-| Runtimes | `[runtimes.<name>]` in `pack.toml` | current |
 | Formulas | `formulas/` | preferred |
 | Orders | `orders/<name>.toml` | preferred |
 | Skills | `skills/` | preferred |
 | MCP configuration | `mcp/` | preferred |
 | Pack commands | `commands/<path>/run.sh` with optional `command.toml` | preferred |
 | Doctor checks | `doctor/<name>/run.sh` with optional `doctor.toml` | preferred |
+| Lifecycle hooks | `lifecycle/<event>.sh` | preferred |
 | Agent patches | `[[patches.agent]]` in `pack.toml` | current |
 | Pack globals | `[global]` in `pack.toml` | current |
 | Pricing | `[[pricing]]` in `pack.toml` | current |
@@ -125,6 +125,7 @@ pack-root/
   commands/
   doctor/
   formulas/
+  lifecycle/
   orders/
   skills/
   mcp/
@@ -149,6 +150,7 @@ The following top-level paths are reserved by the pack format:
 | `commands/` | directory | Well-known directory for pack commands. |
 | `doctor/` | directory | Well-known directory for pack doctor checks. |
 | `formulas/` | directory | Well-known formula directory. |
+| `lifecycle/` | directory | Well-known directory for pack lifecycle hooks. |
 | `orders/` | directory | Well-known order definition directory. |
 | `skills/` | directory | Well-known skill catalog directory. |
 | `mcp/` | directory | Well-known MCP configuration directory. |
@@ -182,7 +184,6 @@ Conceptually, the file may contain these tables:
 | `[[named_session]]` | Pack-provided named sessions. | current |
 | `[[service]]` | Pack-provided services. | current |
 | `[providers.<name>]` | Pack-provided provider presets. | current |
-| `[runtimes.<name>]` | Pack-shipped runtime provider executables. | current |
 | `[[patches.agent]]` | Pack-level agent patches. | current |
 | `[global]` | Pack-wide live session commands. | current |
 | `[[pricing]]` | Pack-provided pricing estimates. | current |
@@ -457,49 +458,7 @@ the effective city wins.
 
 Provider fields are the same provider fields accepted in `city.toml`.
 
-### 1.2.8. `[runtimes.<name>]`
-
-The `[runtimes]` table declares pack-shipped runtime provider executables. Each
-`[runtimes.<name>]` entry binds a selection name to a Runtime Provider Protocol
-(RPP) executable:
-
-```toml
-[runtimes.cloudflare]
-command = "gc-runtime-cloudflare"   # bare name, resolved on PATH
-protocol = 0
-```
-
-| Field | Meaning | Status |
-|---|---|---|
-| `command` | Required. The runtime executable. A bare name (no path separator) is resolved on PATH at session start. A relative path (any other value containing a separator) is anchored at the declaring pack directory during load. An absolute path is used as written. | required |
-| `protocol` | The RPP version the executable speaks. `0` is the only version today; any other value fails composition. | current |
-
-`<name>` must not contain `:`, `/`, or whitespace, since `:` is reserved for
-prefix-form selection names (`exec:...`) and `/` and whitespace keep selection
-names shell- and TOML-friendly.
-
-City composition registers declared runtimes into a city-wide selection
-registry (`City.Runtimes`), including runtimes declared by rig-imported packs.
-Selection is city-wide: set `city.toml` `[session].provider` to the declared
-name (`provider = "cloudflare"` for the entry above), or override it for one
-invocation with `GC_SESSION`. An agent's `session` field does not select a
-runtime; it names a session transport (`acp`, `tmux`, or omitted). Name
-collisions with builtin runtimes or other packs are composition errors. The
-only re-declaration that dedupes is the same pack *directory* reached twice
-through a diamond import graph with the same command and protocol; two
-distinct pack directories collide even when their pack name, command, and
-protocol all coincide, so a runtime's provenance is never silently
-re-attributed.
-
-`gc runtime check <name>` and `gc runtime conformance <name>` both accept a
-declared name and run against that pack's executable: `check` is the smoke
-test (handshake, lifecycle round-trip, declared capabilities, optional
-probes), and `conformance` is the full requirement-coded RPP suite. A
-`pack-runtimes` doctor check verifies each declared executable is installed
-and that its RPP handshake works. An executable with no `protocol` op is the
-documented version-0 floor and passes; a present-but-broken handshake fails.
-
-### 1.2.9. Formula Directory
+### 1.2.8. Formula Directory
 
 A pack's formula directory is the well-known `formulas/` directory at the pack
 root. The only formula directory the pack loader collects is `formulas/`.
@@ -510,7 +469,7 @@ directories are collected before higher-priority pack directories.
 > **Compatibility:** Older material may mention `[formulas].dir`. That field is
 > invalid in `pack.toml`; new packs should put formulas under `formulas/`.
 
-### 1.2.10. `[[patches.agent]]`
+### 1.2.9. `[[patches.agent]]`
 
 Agent patches modify an existing agent by identity.
 
@@ -543,7 +502,7 @@ The specified append fields are:
 Pack-level patch paths in `prompt_template`, `session_setup_script`, and
 `overlay_dir` resolve relative to the patching pack directory.
 
-### 1.2.11. Doctor Directory
+### 1.2.10. Doctor Directory
 
 Pack doctor checks are authored under `doctor/`. Each immediate child directory
 under `doctor/` defines one check when it contains a runnable check script.
@@ -574,7 +533,7 @@ metadata:
 > **Compatibility:** Legacy `pack.toml` `[[doctor]]` entries remain loader
 > compatibility for existing packs. New packs should use `doctor/<name>/`.
 
-### 1.2.12. Command Directory
+### 1.2.11. Command Directory
 
 Pack commands are authored under `commands/`. Each directory containing `run.sh`
 defines one command leaf. Nested directories imply nested command words.
@@ -602,7 +561,7 @@ An optional `command.toml` may override the default command words or script:
 > **Compatibility:** Legacy `pack.toml` `[[commands]]` entries remain loader
 > compatibility for existing packs. New packs should use `commands/<path>/`.
 
-### 1.2.13. `[global]`
+### 1.2.12. `[global]`
 
 The `[global]` table declares pack-wide live session commands.
 
@@ -619,7 +578,7 @@ When `[global].session_live` is loaded, `{{.ConfigDir}}` is resolved to the
 concrete pack directory. Other template variables remain for per-agent
 expansion.
 
-### 1.2.14. `[[pricing]]`
+### 1.2.13. `[[pricing]]`
 
 Each `[[pricing]]` table declares an estimated model-pricing entry for one
 provider/model pair.
@@ -652,6 +611,45 @@ Pack pricing entries are lower priority than city-level `[[pricing]]` entries
 and higher priority than the built-in default pricing table. Pricing entries
 are estimates for decision support, not invoice reconciliation.
 
+### 1.2.14. Lifecycle Directory
+
+A pack may own a service the city knows nothing about — a systemd unit, a
+container, an external daemon. **Lifecycle hooks** attach such a service to the
+city's own lifecycle, so `gc start` brings it up and `gc stop` takes it down.
+
+Hooks are authored under `lifecycle/`, one script per event:
+
+```text
+lifecycle/
+├── city-start.sh   # runs after the city is up
+└── city-stop.sh    # runs during teardown, after agent sessions stop
+```
+
+| Event | Script | Fires |
+|---|---|---|
+| `city-start` | `lifecycle/city-start.sh` | After the city has started, once its sessions are running. |
+| `city-stop` | `lifecycle/city-stop.sh` | During `gc stop` (and the stop half of `gc restart`), after agent sessions are stopped and before the bead store shuts down. |
+
+Only these names are executed; other entries under `lifecycle/` are ignored, and
+an entry that is not a regular file is never run. Every pack composed into the
+city — city-level and rig-level — contributes its hooks, city packs first.
+
+A hook runs with the pack directory as its working directory and receives the
+city runtime environment plus:
+
+| Variable | Value |
+|---|---|
+| `GC_CITY_PATH` | Absolute path to the city root. |
+| `GC_PACK_DIR` | Absolute path to the pack directory. |
+| `GC_PACK_STATE_DIR` | The pack's runtime state directory. |
+| `GC_LIFECYCLE_EVENT` | The event that fired the hook, e.g. `city-stop`. |
+
+Hooks are best-effort and bounded: each is given 30 seconds and then killed, and
+a hook that fails, hangs, or is missing is reported on stderr without changing
+the exit status of `gc start` or `gc stop`. A broken pack cannot wedge city
+startup or shutdown. Write hooks to be idempotent — stopping an
+already-stopped service must succeed.
+
 ### 1.2.15. Authoring Summary
 
 New packs should use these authoring constructs:
@@ -663,6 +661,7 @@ New packs should use these authoring constructs:
 | `agents/<name>/` | Agent definitions. |
 | `commands/<path>/` | Pack commands. |
 | `doctor/<name>/` | Pack doctor checks. |
+| `lifecycle/<event>.sh` | Pack lifecycle hooks. |
 | `formulas/` | Pack formulas. |
 | `orders/` | Pack orders. |
 | `skills/` | Pack skills. |
@@ -673,7 +672,6 @@ New packs should use these authoring constructs:
 | `[[named_session]]` | Pack named sessions. |
 | `[[service]]` | Pack services. |
 | `[providers.<name>]` | Pack provider presets. |
-| `[runtimes.<name>]` | Pack-shipped runtime provider executables. |
 | `[[patches.agent]]` | Pack-level agent patches. |
 | `[global]` | Pack-wide live session commands. |
 | `[[pricing]]` | Pack pricing estimates. |
@@ -747,14 +745,15 @@ Use `overlay/` only for pack-level overlay files that should be collected as a
 pack overlay layer. Use `assets/` for private overlay trees referenced by an
 agent's `overlay_dir`.
 
-### 1.3.4. Command And Doctor Directories
+### 1.3.4. Command, Doctor, And Lifecycle Directories
 
-`commands/` and `doctor/` are scanned by convention. Command entrypoint scripts
-belong inside the command directory. Doctor check scripts belong inside the
-doctor check directory.
+`commands/`, `doctor/`, and `lifecycle/` are scanned by convention. Command
+entrypoint scripts belong inside the command directory. Doctor check scripts
+belong inside the doctor check directory. Lifecycle hooks are named for the
+event they handle, directly under `lifecycle/`.
 
-Private helper scripts that are not themselves command or doctor entrypoints
-should live under `assets/`.
+Private helper scripts that are not themselves command, doctor, or lifecycle
+entrypoints should live under `assets/`.
 
 ### 1.3.5. Conventional Directories
 

@@ -342,7 +342,9 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 			fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		// Controller handled the shutdown — still stop bead store below.
+		// Controller handled the shutdown — including the pack city-stop
+		// hooks, which run inside its own runtime teardown. Still stop the
+		// bead store below.
 		if err := shutdownBeadsProviderForStop(cityPath); err != nil {
 			fmt.Fprintf(stderr, "gc stop: bead store: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
@@ -407,6 +409,10 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 	stopOrphans(sp, desired, cfg, sessionFrontDoor(sessStore), graceTimeout, recorder, stdout, stderr)
 
 	teardownServerForStop(sp, stderr, "gc stop")
+
+	// Pack-owned services come down after agent sessions and before the bead
+	// store, so a hook can still reach the ledger while it tears down.
+	runPackLifecycleHooks(cityPath, cfg, config.LifecycleEventCityStop, stdout, stderr)
 
 	// Stop bead store's backing service after agents.
 	if err := shutdownBeadsProviderForStop(cityPath); err != nil {
