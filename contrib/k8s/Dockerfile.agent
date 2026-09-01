@@ -19,16 +19,21 @@ ARG BASE_IMAGE=gc-agent-base:latest
 
 FROM golang:1.26.6-bookworm@sha256:433f9dc4f8ea3a1ce4e28f9f15d0f7c056b10475307f886d6f1ac1ccc4abd976 AS bd-builder
 
-ARG BD_VERSION=v1.1.0
-ARG BD_SOURCE_REF=bf97b73749ac3ef2fca2365b54537ac041ad4293
-ARG BD_SOURCE_SHA256=a8b1d8dd85b2c008093615cb85937067a9597e760e8d39f93fe55f5c1cbb4d37
-ARG BD_BUILD=bf97b73749
+ARG BD_VERSION=v1.3.0-rc.1
+ARG BD_SOURCE_REF=9c6a69ec12350959ec8c495c74eeb02902d629b6
+ARG BD_SOURCE_SHA256=fa981082742b2aef8ceafba8c1f4461e0cd8e79bc7ccbdb4e421a9c030264539
+ARG BD_BUILD=9c6a69ec12
 ARG BD_BRANCH=HEAD
-ARG GRPC_VERSION=1.82.1
+ARG GRPC_VERSION=1.83.0
 
-# The published bd 1.1.0 binary embeds vulnerable grpc-go 1.80.0. Rebuild the
-# exact released source with its production CGO/pure-Go-regex configuration and
-# release identity, changing only the patched dependency version.
+# Rebuild the exact released source with its production CGO/pure-Go-regex
+# configuration and release identity. GRPC_VERSION was an override when the
+# published binary embedded vulnerable grpc-go 1.80.0; beads v1.3.0-rc.1 already
+# requires v1.83.0, so it is now a floor assertion rather than a patch. Keep the
+# `go get` and the trailing `go version -m` check: together they fail the build
+# if a future beads release regresses below this grpc, instead of silently
+# shipping it. Raise GRPC_VERSION with the upstream requirement -- never leave it
+# behind, or the `go get` downgrades the release while the check still passes.
 RUN mkdir -p /src/bd /out \
     && curl -fsSL --retry 3 \
        "https://github.com/gastownhall/beads/archive/${BD_SOURCE_REF}.tar.gz" \

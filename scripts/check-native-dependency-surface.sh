@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-max_modules="${GC_NATIVE_DEP_MAX_MODULES:-727}"
+# max_modules re-baselined 2026-09-01 for beads v1.3.0-rc.1: measured 727 before
+# and 737 after, with ten additions and no removals. Nine are the OpenAPI
+# toolchain behind bd's new `bd serve` HTTP API (kin-openapi, oapi-codegen/v2,
+# speakeasy-api/{openapi,jsonpath}, oasdiff/{yaml,yaml3}, vmware-labs/yaml-jsonpath,
+# dprotaso/go-yit) plus zeebo/errs; the tenth is cloud.google.com/go/pubsub/v2,
+# pulled through by the google.golang.org/api bump MVS forced alongside it. None
+# of the OpenAPI stack links into gc -- only bd's internal/httpapi/apigen imports
+# it, which the root beads package never reaches.
+max_modules="${GC_NATIVE_DEP_MAX_MODULES:-737}"
 # max_binary_bytes re-baselined 2026-08-29 (ga-iuznq2). The build below now
 # adds -trimpath and CGO_ENABLED=0, which removes cross-host path-embedding
 # and native C-object (dolthub/gozstd, ICU) variance that previously made
