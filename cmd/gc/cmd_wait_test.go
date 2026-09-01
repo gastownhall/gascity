@@ -913,6 +913,22 @@ func managedBdWaitTestTemplate(t *testing.T, bdPath, doltPath string) string {
 			managedBdWaitTemplateErr = fmt.Errorf("write template scaffold: %w", err)
 			return
 		}
+		// Mirror initAndHookDir's production ordering. The managed provider
+		// normally receives canonical server-mode metadata before its init
+		// operation; without it, current bd correctly classifies the bare
+		// .beads/dolt root as an ambiguous legacy workspace even when the
+		// provider has just created the database and recorded a current-version
+		// witness. This fixture calls the provider script directly, so seed the
+		// same canonical scope files explicitly instead of exercising a
+		// test-only bootstrap shape.
+		if err := normalizeCanonicalBdScopeFilesForInit(cityPath, cityPath, "gc", "hq"); err != nil {
+			managedBdWaitTemplateErr = fmt.Errorf("normalize template city scope: %w", err)
+			return
+		}
+		if err := normalizeCanonicalBdScopeFilesForInit(cityPath, rigPath, "fe", "fe"); err != nil {
+			managedBdWaitTemplateErr = fmt.Errorf("normalize template rig scope: %w", err)
+			return
+		}
 		if err := EnsureBuiltinRuntimeAssets(cityPath, io.Discard); err != nil {
 			managedBdWaitTemplateErr = fmt.Errorf("EnsureBuiltinRuntimeAssets(template): %w", err)
 			return
