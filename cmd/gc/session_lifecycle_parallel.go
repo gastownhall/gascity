@@ -967,7 +967,10 @@ func buildPreparedStartWithWorkDirResolver(
 	workDirResolver taskWorkDirResolver,
 ) (*preparedStart, sessionpkg.Info, error) {
 	tp := candidate.tp
-	agentCfg, delivery := templateParamsToConfigWithDelivery(tp)
+	agentCfg, delivery, err := templateParamsToConfigWithDelivery(tp)
+	if err != nil {
+		return nil, candidate.info, err
+	}
 
 	// Apply template_overrides from bead metadata. These are per-session
 	// schema option overrides (e.g., {"model":"opus","effort":"high"}) that
