@@ -991,8 +991,28 @@ func (o *tmuxStartOps) recordStartCrash(name, paneContent string) string {
 	return path
 }
 
+func discardPartialStartup(err error, killWithProcesses, killSession func() error) error {
+	if !errors.Is(err, errPartialPasteDelivery) {
+		return err
+	}
+	killErr := killWithProcesses()
+	if killErr == nil || errors.Is(killErr, ErrSessionNotFound) || errors.Is(killErr, ErrNoServer) {
+		return err
+	}
+	fallbackErr := killSession()
+	if fallbackErr == nil || errors.Is(fallbackErr, ErrSessionNotFound) || errors.Is(fallbackErr, ErrNoServer) {
+		return errors.Join(err, fmt.Errorf("discard partial startup session with process cleanup: %w", killErr))
+	}
+	return errors.Join(err, fmt.Errorf("discard partial startup session: process cleanup: %w; fallback kill: %w", killErr, fallbackErr))
+}
+
 func (o *tmuxStartOps) sendKeys(name, text string) error {
-	return o.tm.NudgeSession(name, text)
+	err := o.tm.nudgeStartupSession(name, text)
+	return discardPartialStartup(
+		err,
+		func() error { return o.tm.KillSessionWithProcesses(name) },
+		func() error { return o.tm.KillSession(name) },
+	)
 }
 
 func (o *tmuxStartOps) setRemainOnExit(name string) error {
