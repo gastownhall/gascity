@@ -47,6 +47,7 @@ var allProjectedMetadataKeys = []string{
 	"unknown_state_first_seen", "unknown_state_value", "unknown_state_escalated_at",
 	"session_name_explicit", "wake_request", "restart_requested",
 	"session_id_flag", "template_overrides", "wake_attempts",
+	"wake_refused_event_at",
 	MetadataLastNudgeDeliveredAt, "provider_kind", "builtin_ancestor",
 	"sleep_policy_fingerprint", "requested_sleep_after_idle",
 	"effective_sleep_after_idle", "sleep_policy_source", "sleep_capability",
