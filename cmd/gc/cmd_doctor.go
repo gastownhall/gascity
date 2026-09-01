@@ -331,6 +331,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			register(newBacklogDepthCheck(cityPath, storeFactory))
 			register(newOrderTrackingRetentionCheck(cityPath, storeFactory))
 			register(&sessionModelDoctorCheck{cfg: cfg, cityPath: cityPath, newStore: storeFactory})
+			register(newStartupHealthEpisodesCheck(cfg, cityPath, storeFactory))
 		}
 	}
 	register(newDoctorDoltServerCheck(cityPath, opts.SkipCityDoltCheck))
