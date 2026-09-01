@@ -65,17 +65,25 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 
 func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	const (
-		bdSourceRef    = "bf97b73749ac3ef2fca2365b54537ac041ad4293"
-		bdSourceSHA256 = "a8b1d8dd85b2c008093615cb85937067a9597e760e8d39f93fe55f5c1cbb4d37"
-		bdBuild        = "bf97b73749"
+		bdSourceRef    = "9c6a69ec12350959ec8c495c74eeb02902d629b6"
+		bdSourceSHA256 = "fa981082742b2aef8ceafba8c1f4461e0cd8e79bc7ccbdb4e421a9c030264539"
+		bdBuild        = "9c6a69ec12"
 		bdBranch       = "HEAD"
-		grpcVersion    = "1.82.1"
+		grpcVersion    = "1.83.0"
 	)
 
 	root := repoRoot(t)
-	bdVersion := readDotenv(t, root+"/deps.env")["BD_VERSION"]
-	if bdVersion != "v1.1.0" {
-		t.Fatalf("deps.env BD_VERSION = %q, want v1.1.0 for the pinned source build", bdVersion)
+	env := readDotenv(t, root+"/deps.env")
+	bdVersion := env["BD_VERSION"]
+	// The image stamps -X main.Version=${BD_VERSION} onto source fetched at
+	// BD_SOURCE_REF, and the Dockerfile's own `grep Version = "${bd_version}"
+	// cmd/bd/version.go` fails the build if those two name different releases.
+	// Assert it here rather than discovering it in a docker build CI may not
+	// run: BD_SOURCE_REF tracks BD_CURRENT_REF (TestBDVersionPins), so the
+	// version that source declares is BD_CURRENT_VERSION.
+	if bdCurrent := env["BD_CURRENT_VERSION"]; bdVersion != bdCurrent {
+		t.Fatalf("deps.env BD_VERSION = %q but BD_CURRENT_VERSION = %q; the agent image stamps BD_VERSION onto BD_CURRENT_REF's source, so the two must name the same release or the image build fails its own version grep",
+			bdVersion, bdCurrent)
 	}
 
 	dockerfile := readFile(t, root, "contrib/k8s/Dockerfile.agent")

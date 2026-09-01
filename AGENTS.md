@@ -535,6 +535,13 @@ bd close <id>         # Complete work
    NOTE: gascity Dolt is LOCAL-ONLY (no remote). Do NOT run `bd dolt push`,
    `bd dolt pull`, or `bd dolt remote add` here -- they fail and re-introduce
    a doomed `origin` remote (ga-9wsri). Use `git push` only.
+
+   That same no-remote shape is why bd >= 1.3.0 refuses to auto-apply pending
+   schema migrations to gascity's shared Dolt sql-server: migrating would lock
+   out every co-resident bd still on the old schema. If a bd WRITE fails with a
+   refusal naming pending migrations, the sanctioned fix is `bd migrate schema`
+   run once by a designated migrator after every bd client is upgraded -- NOT
+   `bd dolt pull`, and not an ad-hoc `BD_ALLOW_REMOTE_MIGRATE=1`.
 5. **Clean up** - Clear stashes, prune remote branches
 6. **Verify** - All changes committed AND pushed
 7. **Hand off** - Provide context for next session

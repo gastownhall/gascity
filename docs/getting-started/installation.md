@@ -27,7 +27,7 @@ for you; the other methods require manual installation.
 | jq | Yes | — | `brew install jq` | `apt install jq` | JSON processing |
 | git | Yes | — | (built-in) | (built-in) | Version control |
 | dolt | Yes | 2.1.0 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) | Beads data plane |
-| bd (Beads CLI) | Yes | 1.0.0 | `brew install beads` | [releases](https://github.com/gastownhall/beads/releases) | Issue tracking |
+| bd (Beads CLI) | Yes | 1.0.4 | `brew install beads` (see note) | [releases](https://github.com/gastownhall/beads/releases) | Issue tracking |
 | flock | Yes | — | `brew install flock` | (built-in via util-linux) | File locking |
 | gh | Optional | — | `brew install gh` | [cli.github.com](https://cli.github.com/) | GitHub gate checks |
 | Go 1.26+ | Source only | 1.26 | `brew install go` | [golang.org](https://go.dev/dl/) | Compiler |
@@ -40,6 +40,16 @@ fix in dolthub/dolt commit `ccf7bde206`, which can hang `dolt_backup sync`
 under heavy write load.
 
 The exact versions CI pins are in [`deps.env`](https://github.com/gastownhall/gascity/blob/main/deps.env).
+
+**bd note:** `deps.env` currently pins `BD_VERSION=v1.3.0-rc.1`, a prerelease
+that is deliberately not published to Homebrew, npm or PyPI. `brew install
+beads` gives you the latest stable release instead, which is an OLDER bd than
+the one this gc was built and tested against. To match CI exactly, install the
+pinned tarball:
+
+```bash
+set -a && . ./deps.env && set +a && .github/scripts/install-bd-archive.sh "$BD_VERSION"
+```
 
 ## Homebrew (recommended)
 

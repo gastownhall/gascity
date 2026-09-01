@@ -2301,7 +2301,7 @@ func liveReadyForControllerDemandQuery(store beads.Store, query beads.ReadyQuery
 // unfiltered set is exactly the assignee-filtered set, and taking the first
 // Limit of it matches a per-assignee fetch. NativeDoltStore.Ready filters the
 // assignee server-side, and its wisp sub-query is assignee-aware too: the
-// pinned beads@v1.1.0 readyWorkWispIssueFilter carries filter.Assignee into the
+// pinned beads@v1.3.0-rc.1 readyWorkWispIssueFilter carries filter.Assignee into the
 // wisp filter (internal/storage/issueops/ready_work.go), which emits
 // `assignee = ?` for the wisp table (internal/storage/sqlbuild/filter.go),
 // exactly as the issues leg does. Both legs order by a total order independent

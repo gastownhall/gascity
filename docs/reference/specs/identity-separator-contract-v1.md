@@ -105,14 +105,25 @@ structurally distinct gascity identities (a rig/agent pair and a
 city/agent pair built from the same segment names) can be driven to
 compare equal on the beads side.
 
-This canonicalizer is also newer than the beads version gascity currently
-builds against: it lives in beads >= `v1.1.1-0.20260810093734-d0e612eaf8a4`,
-while gascity's `go.mod` pins `v1.1.1-0.20260805093327-bf97b73749ac`, five
-days earlier — `internal/storage/issueops/identity.go` does not exist at
-gascity's current pin at all. This paragraph describes the nearest
-available upstream behavior, not code gascity has adopted yet; re-verify
-against the pinned version when gascity's `go.mod` moves past
-`v1.1.1-0.20260810093734-d0e612eaf8a4`.
+**Superseded upstream as of beads v1.3.0-rc.1** (gascity's `go.mod` pin
+since 2026-09-01; the description above held at the previous pin
+`v1.1.1-0.20260805093327-bf97b73749ac`, where
+`internal/storage/issueops/identity.go` did not exist at all). Two of the
+claims above are no longer true of the pinned beads:
+
+- `--` no longer collapses to the generic `_`. An exact two-byte `--` run
+  now decodes to a literal `/`, citing gascity's `session_name.go` by name.
+  `__` and every other run still collapses to `_`, so `gastown--mayor` and
+  `gastown__mayor` are now correctly **distinct** — the widening this
+  contract was written to prevent is fixed upstream.
+- The `/` axis is therefore no longer missed. `gastown/mayor` and
+  `gastown--mayor` now canonicalize to the same value, so a `/`-spelled
+  identity *does* compare equal to its `--`-spelled encoding.
+
+That second point is a real behavior change, not just a doc correction:
+two gascity identities differing only in `--` versus `/` now compare equal
+on beads' assignee/actor path. Audit live actor names for such a pair
+before relying on a claim guard to keep them apart.
 
 ## 4. Source of truth
 
