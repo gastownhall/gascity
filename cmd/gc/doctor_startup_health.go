@@ -1,9 +1,13 @@
 package main
 
 import (
+	"fmt"
+	"sort"
+
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // startupHealthEpisodesCheck surfaces active startup-health episodes (a
@@ -29,14 +33,46 @@ func (c *startupHealthEpisodesCheck) CanFix() bool { return false }
 // Fix is a no-op. Detection only.
 func (c *startupHealthEpisodesCheck) Fix(_ *doctor.CheckContext) error { return nil }
 
-// Run is a RED-phase placeholder (ga-o04bfr.1.4): it always reports OK,
-// deliberately failing every new test in doctor_startup_health_test.go via a
-// plain assertion mismatch rather than a panic. cmd/gc is one large shared
-// package, so a panic-stub Run reachable from a Doctor-registered check risks
-// aborting the whole package's test binary mid-run (an unrecovered test panic
-// takes the process down) if it were ever invoked outside this file's own
-// tests; a wrong-but-safe return value keeps RED contained to assertion
-// failures here. Replaced with the real classification logic at GREEN.
+// Run classifies every persisted startup-health episode against the same
+// defaultMaxWakeAttempts threshold session_lifecycle_parallel.go quarantines
+// on, so an operator sees exactly the sessions a provider-start keeps
+// refusing without needing to know the startup_health_* metadata keys. A
+// malformed episode (no session name recorded) is reported on its own since
+// it cannot be attributed to a session. ep.LastDetail is deliberately never
+// copied into the result: provider error text can carry secrets (tokens,
+// credentials) and must stay out of Message/Details/FixHint.
 func (c *startupHealthEpisodesCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
-	return okCheck(c.Name(), "not implemented yet")
+	store, err := c.newStore(c.cityPath)
+	if err != nil {
+		return warnCheck(c.Name(),
+			fmt.Sprintf("skipping startup-health episode scan: opening bead store: %v", err),
+			"fix bead store access, then rerun gc doctor",
+			nil)
+	}
+	episodes, err := session.NewStore(beads.SessionStore{Store: store}).ListStartupHealthEpisodes()
+	if err != nil {
+		return warnCheck(c.Name(),
+			fmt.Sprintf("skipping startup-health episode scan: listing episodes: %v", err),
+			"fix bead store access, then rerun gc doctor",
+			nil)
+	}
+
+	var details []string
+	for _, ep := range episodes {
+		if ep.SessionName == "" {
+			details = append(details, fmt.Sprintf("malformed startup-health episode: missing session name (consecutive=%d)", ep.ConsecutiveCount))
+			continue
+		}
+		if ep.ConsecutiveCount >= defaultMaxWakeAttempts {
+			details = append(details, fmt.Sprintf("%s: %d consecutive startup_death failures", ep.SessionName, ep.ConsecutiveCount))
+		}
+	}
+	if len(details) == 0 {
+		return okCheck(c.Name(), "no active startup-health episodes")
+	}
+	sort.Strings(details)
+	return errorCheck(c.Name(),
+		fmt.Sprintf("%d startup-health episode issue(s) found", len(details)),
+		"investigate the affected session's provider start failures; a malformed episode's bead metadata needs manual repair. The episode clears automatically on the session's next successful start.",
+		details)
 }
