@@ -363,3 +363,93 @@ func TestExecutionBackstopEscalatesWhenTheAgentHasNoNudgeConfigured(t *testing.T
 		t.Fatalf("execution.step_stalled events = %d, want exactly 1", stalled)
 	}
 }
+
+// driveToEscalation exhausts the attempts and confirms exactly one drain.
+func driveToEscalation(t *testing.T, f *executionBackstopFixture) {
+	t.Helper()
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	for i := 0; i < idleClaimNudgeMaxAttempts; i++ {
+		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+		f.idleFor(t, 10*time.Minute)
+		f.tick(t)
+	}
+	f.now = f.now.Add(idleClaimNudgeBackoff)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if len(f.drained) != 1 {
+		t.Fatalf("drives-to-escalation precondition: drains = %v, want 1", f.drained)
+	}
+}
+
+// TestExecutionBackstopReEscalatesForANewIncarnation pins ga-dd3ap: the
+// stalled latch belongs to the incarnation it escalated. When a reset or a
+// boot re-adoption mints a NEW incarnation still holding the same claim, the
+// latch must not keep the backstop silent for the seat's whole remaining
+// life.
+func TestExecutionBackstopReEscalatesForANewIncarnation(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	if err := f.store.SetMetadata(f.session.ID, "instance_token", "incarnation-1"); err != nil {
+		t.Fatal(err)
+	}
+	driveToEscalation(t, f)
+
+	// A fresh incarnation adopts the same row and the same claim.
+	if err := f.store.SetMetadata(f.session.ID, "instance_token", "incarnation-2"); err != nil {
+		t.Fatal(err)
+	}
+	f.now = f.now.Add(2 * time.Minute)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+
+	if len(f.drained) != 2 {
+		t.Fatalf("drains after a new incarnation re-idles on the same claim = %v, want a second escalation", f.drained)
+	}
+}
+
+// TestExecutionBackstopReEscalatesWhenTheLatchedDrainNeverLanded: the latched
+// drain normally lands in seconds; a latch older than the retry bound with the
+// claim still held and the runtime still running means the drain evaporated
+// (a supervisor restart raced it) — escalate again instead of never.
+func TestExecutionBackstopReEscalatesWhenTheLatchedDrainNeverLanded(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	driveToEscalation(t, f)
+
+	// Same incarnation, drain evaporated, latch goes stale.
+	f.now = f.now.Add(executionStalledLatchRetryAfter + time.Minute)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+
+	if len(f.drained) != 2 {
+		t.Fatalf("drains after the latch went stale = %v, want a second escalation", f.drained)
+	}
+
+	// And the fresh latch pauses the cycle again: no third drain immediately.
+	f.now = f.now.Add(2 * time.Minute)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if len(f.drained) != 2 {
+		t.Fatalf("drains right after re-latching = %v, want still 2", f.drained)
+	}
+}
+
+// TestExecutionBackstopRecordsHoldReasons pins ga-gg4mv: a hold names its gate
+// on the session bead, on transition only, and the breadcrumb clears when the
+// backstop can act again.
+func TestExecutionBackstopRecordsHoldReasons(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	// Recent activity: the quiet gate holds.
+	f.idleFor(t, time.Second)
+	f.tick(t)
+	if got := f.sessionMeta(t, executionClaimHoldKey); !strings.HasPrefix(got, "not_quiet ") {
+		t.Fatalf("hold breadcrumb after an active-agent tick = %q, want not_quiet", got)
+	}
+
+	// Quiet long enough: the backstop acts and the breadcrumb clears.
+	f.now = f.now.Add(time.Minute)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if got := f.sessionMeta(t, executionClaimHoldKey); got != "" {
+		t.Fatalf("hold breadcrumb after the backstop acted = %q, want cleared", got)
+	}
+}
