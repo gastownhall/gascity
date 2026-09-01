@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -2228,9 +2229,12 @@ func TestSendKeysLiteralWithRetry_ImmediateSuccess(t *testing.T) {
 	defer func() { _ = tm.KillSession(sessionName) }()
 
 	// Should succeed immediately — no retry needed
-	err := tm.sendKeysLiteralWithRetry(sessionName, "hello", 5*time.Second)
+	written, err := tm.sendKeysLiteralWithRetry(sessionName, "hello", 5*time.Second)
 	if err != nil {
 		t.Errorf("sendKeysLiteralWithRetry() = %v, want nil", err)
+	}
+	if written != len("hello") {
+		t.Errorf("sendKeysLiteralWithRetry() wrote %d bytes, want %d", written, len("hello"))
 	}
 }
 
@@ -2243,7 +2247,7 @@ func TestSendKeysLiteralWithRetry_NonTransientFails(t *testing.T) {
 
 	// Target a session that doesn't exist — should fail immediately, not retry
 	start := time.Now()
-	err := tm.sendKeysLiteralWithRetry("gt-nonexistent-session-xyz", "hello", 5*time.Second)
+	_, err := tm.sendKeysLiteralWithRetry("gt-nonexistent-session-xyz", "hello", 5*time.Second)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -2264,7 +2268,7 @@ func TestSendKeysLiteralWithRetry_NonTransientFailsFast(t *testing.T) {
 	// Use a nonexistent session — tmux returns "session not found" which is
 	// non-transient, so the function should fail fast (well under the timeout).
 	start := time.Now()
-	err := tm.sendKeysLiteralWithRetry("gt-nonexistent-session-fast-fail", "hello", 5*time.Second)
+	_, err := tm.sendKeysLiteralWithRetry("gt-nonexistent-session-fast-fail", "hello", 5*time.Second)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -2276,50 +2280,105 @@ func TestSendKeysLiteralWithRetry_NonTransientFailsFast(t *testing.T) {
 	}
 }
 
-func TestSendKeysLiteralWithRetryFallsBackToPasteBufferOnCommandTooLong(t *testing.T) {
-	fe := &fakeExecutor{
-		errs: []error{errors.New("command too long")},
+// TestSendKeysLiteralWithRetryAlwaysBracketsPaste is the gp-2rq regression
+// test. The send path used to type any payload of 4096 bytes or less as a raw
+// `send-keys -l` burst and reserve the paste buffer for larger ones. Outside a
+// bracketed paste every newline in the payload is an Enter, so a busy TUI
+// submitted the first line and dropped the rest — four founder messages
+// arrived as tails on 2026-08-27/28 (pc_2e2378b9918e).
+//
+// Size is therefore the wrong axis: a one-byte nudge and a 100 KB nudge must
+// both be framed. The sizes below bracket the retired 4096 threshold on both
+// sides, and each case asserts that NO raw literal send-keys is issued — a
+// regression that reinstated the fast path for short payloads would still
+// paste the long ones and pass a large-payload-only test.
+func TestSendKeysLiteralWithRetryAlwaysBracketsPaste(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+	}{
+		{"single byte", "x"},
+		{"multiline reminder well under the retired threshold", "<system-reminder>\nNew message in shared conversation slack/C0A:\n\n- Afik (human): ship it\n</system-reminder>"},
+		{"one byte under the retired threshold", strings.Repeat("x", 4095)},
+		{"exactly the retired threshold", strings.Repeat("x", 4096)},
+		{"one byte over the retired threshold", strings.Repeat("x", 4097)},
 	}
-	tm := NewTmuxWithConfig(DefaultConfig())
-	tm.exec = fe
 
-	err := tm.sendKeysLiteralWithRetry("%1", "large startup prompt", time.Second)
-	if err != nil {
-		t.Fatalf("sendKeysLiteralWithRetry() = %v, want nil", err)
-	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fe := &fakeExecutor{}
+			tm := NewTmuxWithConfig(DefaultConfig())
+			tm.exec = fe
 
-	if len(fe.calls) != 3 {
-		t.Fatalf("tmux calls = %d, want 3: %#v", len(fe.calls), fe.calls)
-	}
-	first := strings.Join(fe.calls[0], " ")
-	if !strings.Contains(first, "send-keys") || !strings.Contains(first, "-l") {
-		t.Fatalf("first call = %v, want literal send-keys", fe.calls[0])
-	}
-	assertTmuxCommand(t, fe.calls[1], "load-buffer")
-	assertTmuxCommand(t, fe.calls[2], "paste-buffer")
-	third := strings.Join(fe.calls[2], "\x00")
-	for _, want := range []string{"\x00-p\x00", "\x00-d\x00", "\x00-t\x00%1"} {
-		if !strings.Contains(third, want) {
-			t.Fatalf("paste-buffer call = %v, missing %q", fe.calls[2], want)
-		}
+			written, err := tm.sendKeysLiteralWithRetry("%1", tc.text, time.Second)
+			if err != nil {
+				t.Fatalf("sendKeysLiteralWithRetry() = %v, want nil", err)
+			}
+			if written != len(tc.text) {
+				t.Fatalf("wrote %d bytes, want %d", written, len(tc.text))
+			}
+
+			if len(fe.calls) != 2 {
+				t.Fatalf("tmux calls = %d, want 2 (load-buffer, paste-buffer): %#v", len(fe.calls), fe.calls)
+			}
+			assertTmuxCommand(t, fe.calls[0], "load-buffer")
+			assertTmuxCommand(t, fe.calls[1], "paste-buffer")
+
+			// -p is the bracketed framing itself; without it the payload
+			// reaches the TUI as bare keystrokes and the bug is back.
+			paste := "\x00" + strings.Join(fe.calls[1], "\x00") + "\x00"
+			for _, want := range []string{"\x00-p\x00", "\x00-d\x00", "\x00-t\x00%1\x00"} {
+				if !strings.Contains(paste, want) {
+					t.Fatalf("paste-buffer call = %v, missing %q", fe.calls[1], want)
+				}
+			}
+
+			for _, call := range fe.calls {
+				joined := "\x00" + strings.Join(call, "\x00") + "\x00"
+				if strings.Contains(joined, "\x00send-keys\x00") && strings.Contains(joined, "\x00-l\x00") {
+					t.Fatalf("payload was typed as a raw literal send-keys burst: %v", call)
+				}
+			}
+		})
 	}
 }
 
-func TestSendKeysLiteralWithRetryUsesPasteBufferForLargeText(t *testing.T) {
-	fe := &fakeExecutor{}
+// TestPasteLiteralTextLoadsTheWholePayload guards the byte accounting the
+// delivery receipt rests on: the receipt claims N bytes were framed, so the
+// buffer file tmux is told to load must hold exactly those N bytes.
+func TestPasteLiteralTextLoadsTheWholePayload(t *testing.T) {
+	text := "<system-reminder>\nline one\nline two\n</system-reminder>"
+
+	var loadedPath string
+	fe := &fakeExecutor{fn: func(args []string) (string, error) {
+		// run() may prepend socket args, so scan rather than index.
+		if slices.Contains(args, "load-buffer") {
+			loadedPath = args[len(args)-1]
+			// Read it here: pasteLiteralText removes the temp file on return.
+			data, err := os.ReadFile(loadedPath)
+			if err != nil {
+				t.Errorf("read staged buffer %q: %v", loadedPath, err)
+				return "", nil
+			}
+			if string(data) != text {
+				t.Errorf("staged buffer = %q, want %q", string(data), text)
+			}
+		}
+		return "", nil
+	}}
 	tm := NewTmuxWithConfig(DefaultConfig())
 	tm.exec = fe
 
-	err := tm.sendKeysLiteralWithRetry("%1", strings.Repeat("x", maxSendKeysLiteralLen+1), time.Second)
+	written, err := tm.pasteLiteralText("%1", text)
 	if err != nil {
-		t.Fatalf("sendKeysLiteralWithRetry() = %v, want nil", err)
+		t.Fatalf("pasteLiteralText() = %v, want nil", err)
 	}
-
-	if len(fe.calls) != 2 {
-		t.Fatalf("tmux calls = %d, want 2: %#v", len(fe.calls), fe.calls)
+	if written != len(text) {
+		t.Fatalf("pasteLiteralText() reported %d bytes, want %d", written, len(text))
 	}
-	assertTmuxCommand(t, fe.calls[0], "load-buffer")
-	assertTmuxCommand(t, fe.calls[1], "paste-buffer")
+	if loadedPath == "" {
+		t.Fatal("load-buffer was never called")
+	}
 }
 
 func assertTmuxCommand(t *testing.T, args []string, want string) {

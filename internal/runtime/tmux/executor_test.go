@@ -18,6 +18,10 @@ type fakeExecutor struct {
 	outs  []string
 	errs  []error
 	idx   int
+	// fn, when set, handles the call instead of the canned out/err tables. It
+	// runs while the command's side effects are still live, which is how a
+	// test inspects a temp file the production code deletes on return.
+	fn func(args []string) (string, error)
 }
 
 func (f *fakeExecutor) execute(args []string) (string, error) {
@@ -25,6 +29,9 @@ func (f *fakeExecutor) execute(args []string) (string, error) {
 	cp := make([]string, len(args))
 	copy(cp, args)
 	f.calls = append(f.calls, cp)
+	if f.fn != nil {
+		return f.fn(cp)
+	}
 	if f.idx < len(f.outs) || f.idx < len(f.errs) {
 		var out string
 		var err error
