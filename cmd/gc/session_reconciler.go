@@ -6373,14 +6373,16 @@ func rebaselineLaunchDriftHashesWithBatch(id string, sessFront *sessionpkg.Store
 
 // resolveSessionCommand returns the command to use when starting a session.
 // Precedence on a first start: fork (parentSID present + provider supports it)
-// > fresh (SessionIDFlag) > resume. The fork form resumes a parent brain
+// > fresh (SessionIDFlag, or the unchanged launch command when the provider
+// cannot bind a session key) > resume. The fork form resumes a parent brain
 // session, forks it into a new conversation, and binds gc's own session key so
 // all downstream tracking treats the child as a normal session. On any
 // subsequent wake (firstStart=false) the fork branch is skipped and the forked
 // child resumes via its own key. wake_mode=fresh still mints a new conversation
-// via SessionIDFlag. Fork preconditions (provider support, parent staleness,
-// wake_mode) are validated upstream in buildPreparedStartWithWorkDirResolver,
-// which fails loud rather than ever silently degrading a fork to a fresh start.
+// via SessionIDFlag when supported, otherwise it retains the launch command.
+// Fork preconditions (provider support, parent staleness, wake_mode) are
+// validated upstream in buildPreparedStartWithWorkDirResolver, which fails
+// loud rather than ever silently degrading a fork to a fresh start.
 func resolveSessionCommand(command, sessionKey, parentSID string, rp *config.ResolvedProvider, firstStart, forceFresh bool) string {
 	// forceFresh is part of the fork guard so this branch is self-contained: a
 	// fork resumes the parent brain, which contradicts the "discard context, start
@@ -6393,6 +6395,9 @@ func resolveSessionCommand(command, sessionKey, parentSID string, rp *config.Res
 	}
 	if (firstStart || forceFresh) && rp.SessionIDFlag != "" {
 		return command + " " + rp.SessionIDFlag + " " + sessionKey
+	}
+	if firstStart || forceFresh {
+		return command
 	}
 	return resolveResumeCommand(command, sessionKey, rp)
 }

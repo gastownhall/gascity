@@ -177,12 +177,21 @@ func TestResolveSessionCommand_ForkLaunch(t *testing.T) {
 			want:       "claude --session-id gc-key",
 		},
 		{
-			name:       "first start without session id flag keeps launch command",
+			name: "first start without session id flag keeps launch command",
 			rp: &config.ResolvedProvider{
 				Name:          "nomad-worker",
 				ResumeCommand: "gc-runtime-nomad provision",
 			},
 			firstStart: true,
+			want:       "gc-runtime-nomad start",
+		},
+		{
+			name: "fresh wake without session id flag keeps launch command",
+			rp: &config.ResolvedProvider{
+				Name:       "nomad-worker",
+				ResumeFlag: "--resume",
+			},
+			forceFresh: true,
 			want:       "gc-runtime-nomad start",
 		},
 		{

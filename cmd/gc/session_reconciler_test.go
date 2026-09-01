@@ -12127,10 +12127,10 @@ func TestResolveSessionCommand(t *testing.T) {
 		}
 	})
 
-	t.Run("first start without SessionIDFlag falls back to resume", func(t *testing.T) {
+	t.Run("first start without SessionIDFlag keeps launch command", func(t *testing.T) {
 		noSessionID := &config.ResolvedProvider{ResumeFlag: "--resume"}
 		got := resolveSessionCommand("agent run", "key-1", "", noSessionID, true, false)
-		want := "agent run --resume key-1"
+		want := "agent run"
 		if got != want {
 			t.Errorf("got %q, want %q", got, want)
 		}
