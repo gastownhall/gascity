@@ -5,6 +5,17 @@
 > *contract*; this defines how we *test and gate* it across versions).
 > **Decision owner:** integration-branch maintainers.
 
+> **Pin state superseded — 2026-09-01.** Every concrete version below (`BD_VERSION=v1.0.4`,
+> the v1.0.5-is-a-Draft question, `BD_CURRENT_VERSION=v1.1.0-rc.1`) describes 2026-06-24
+> and is kept as the design record, not as an operative anchor. The live values are
+> always `deps.env`, enforced by `scripts/bd_version_pin_test.go`. As of the
+> v1.3.0-rc.1 bump: `BD_PREV_VERSION=v1.0.4` (unchanged floor), `BD_VERSION` and
+> `BD_CURRENT_VERSION` are both `v1.3.0-rc.1` — so the matrix's *current* cell and
+> its installable-default cells run the same bd for one cycle. Restore the axis by
+> moving `BD_CURRENT_REF` to a post-RC beads main commit. The **mechanism** this
+> doc specifies is unchanged and was followed by that bump: the corpus re-vendor
+> rides in the same PR as the pin move.
+
 ## Summary
 
 `bd` (beads) and `gc` (Gas City) drift out of sync because gascity drives the

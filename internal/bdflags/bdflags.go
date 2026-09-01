@@ -16,21 +16,25 @@ import (
 // globalValueFlags are accepted by every bd subcommand and consume the next
 // argument as their value.
 var globalValueFlags = map[string]bool{
-	"--actor": true, "--db": true, "-C": true, "--directory": true,
-	"--dolt-auto-commit": true,
+	"--actor": true, "--database": true, "--db": true, "-C": true,
+	"--directory": true, "--dolt-auto-commit": true, "--format": true,
+	"--mem-profile": true,
 }
 
 // globalBoolFlags are accepted by every bd subcommand and take no value.
 var globalBoolFlags = map[string]bool{
-	"--global": true, "--ignore-schema-skew": true, "--json": true,
-	"--profile": true, "-q": true, "--quiet": true, "--readonly": true,
-	"--sandbox": true, "-v": true, "--verbose": true, "-h": true, "--help": true,
+	"--cpu-profile": true, "--global": true, "--ignore-schema-skew": true,
+	"--json": true, "--no-color": true, "-q": true, "--quiet": true,
+	"--readonly": true, "--sandbox": true, "-v": true, "--verbose": true,
+	"-h": true, "--help": true,
 }
 
 // valueFlagsBySub holds each subcommand's value-consuming flags (beyond the
 // global set), keyed by subcommand: a single word ("update") or, for
 // compound bd subcommands, "parent child" ("mol pour"). The key set here
 // defines every subcommand this package knows about — see Known/Subcommands.
+//
+// Sourced from `bd <sub> --help` (bd 1.3.0-rc.1, 2026-09-01).
 var valueFlagsBySub = map[string]map[string]bool{
 	"create": {
 		"--acceptance": true, "--append-notes": true, "-a": true, "--assignee": true,
@@ -42,7 +46,8 @@ var valueFlagsBySub = map[string]map[string]bool{
 		"--id": true, "-l": true, "--labels": true, "--metadata": true,
 		"--mol-type": true, "--notes": true, "--parent": true, "-p": true,
 		"--priority": true, "--repo": true, "--skills": true, "--spec-id": true,
-		"-s": true, "--status": true, "--title": true, "-t": true, "--type": true, "--waits-for": true,
+		"-s": true, "--status": true, "--storage-class": true, "--title": true,
+		"-t": true, "--type": true, "--waits-for": true,
 		"--waits-for-gate": true, "--wisp-type": true,
 	},
 	"update": {
@@ -73,7 +78,8 @@ var valueFlagsBySub = map[string]map[string]bool{
 	"ready": {
 		"-a": true, "--assignee": true, "--exclude-label": true, "--exclude-type": true,
 		"--has-metadata-key": true, "-l": true, "--label": true, "--label-any": true,
-		"-n": true, "--limit": true, "--metadata-field": true, "--mol": true,
+		"--label-pattern": true, "--label-regex": true, "-n": true, "--limit": true,
+		"--max-rows": true, "--metadata-field": true, "--mol": true,
 		"--mol-type": true, "--offset": true, "--parent": true, "-p": true,
 		"--priority": true, "-s": true, "--sort": true, "-t": true, "--type": true,
 	},
@@ -82,11 +88,13 @@ var valueFlagsBySub = map[string]map[string]bool{
 		"--created-after": true, "--created-before": true, "--defer-after": true,
 		"--defer-before": true, "--desc-contains": true, "--due-after": true,
 		"--due-before": true, "--exclude-label": true, "--exclude-type": true,
-		"--format": true, "--has-metadata-key": true, "--id": true, "-l": true,
+		"--external-contains": true, "--external-ref": true, "--format": true,
+		"--has-metadata-key": true, "--id": true, "-l": true,
 		"--label": true, "--label-any": true, "--label-pattern": true,
-		"--label-regex": true, "-n": true, "--limit": true, "--metadata-field": true,
-		"--mol-type": true, "--notes-contains": true, "--offset": true,
-		"--parent": true, "-p": true, "--priority": true, "--priority-max": true,
+		"--label-regex": true, "-n": true, "--limit": true, "--max-rows": true,
+		"--metadata-field": true, "--mol-type": true, "--notes-contains": true,
+		"--offset": true, "--parent": true, "-p": true, "--priority": true,
+		"--priority-max": true,
 		"--priority-min": true, "--sort": true, "--spec": true, "-s": true,
 		"--status": true, "--title": true, "--title-contains": true, "-t": true,
 		"--type": true, "--updated-after": true, "--updated-before": true,
@@ -122,14 +130,21 @@ var valueFlagsBySub = map[string]map[string]bool{
 
 // boolFlagsBySub holds each subcommand's boolean (no-value) flags beyond the
 // global set. Same keying convention as valueFlagsBySub.
+//
+// Sourced from `bd <sub> --help` (bd 1.3.0-rc.1, 2026-09-01). A flag whose
+// help renders as `string[="default"]` — cobra's NoOptDefVal — belongs here,
+// not in valueFlagsBySub: it never consumes the next argv token, so
+// `bd list --deps all` leaves "all" positional.
 var boolFlagsBySub = map[string]map[string]bool{
 	"create": {
-		"--dry-run": true, "--ephemeral": true, "--force": true, "--no-history": true,
-		"--no-inherit-labels": true, "--silent": true, "--stdin": true, "--validate": true,
+		"--allow-empty-description": true, "--dry-run": true, "--ephemeral": true,
+		"--force": true, "--no-history": true, "--no-inherit-labels": true,
+		"--silent": true, "--stdin": true, "--validate": true,
 	},
 	"update": {
 		"--allow-empty-description": true, "--claim": true, "--ephemeral": true,
-		"--history": true, "--no-history": true, "--persistent": true, "--stdin": true,
+		"--force": true, "--history": true, "--no-history": true,
+		"--persistent": true, "--stdin": true,
 	},
 	"close": {
 		"--claim-next": true, "--continue": true, "-f": true, "--force": true,
@@ -140,11 +155,13 @@ var boolFlagsBySub = map[string]map[string]bool{
 		"--cascade": true, "--dry-run": true, "-f": true, "--force": true,
 	},
 	"ready": {
-		"--claim": true, "--explain": true, "--gated": true, "--include-deferred": true,
-		"--include-ephemeral": true, "--plain": true, "--pretty": true, "-u": true, "--unassigned": true,
+		"--brief": true, "--claim": true, "--explain": true, "--gated": true,
+		"--include-deferred": true, "--include-ephemeral": true, "--plain": true,
+		"--pretty": true, "-u": true, "--unassigned": true,
 	},
 	"list": {
-		"--all": true, "--deferred": true, "--empty-description": true, "--flat": true,
+		"--all": true, "--brief": true, "--deferred": true, "--deps": true,
+		"--empty-description": true, "--flat": true,
 		"--include-gates": true, "--include-infra": true, "--include-templates": true,
 		"--long": true, "--no-assignee": true, "--no-labels": true, "--no-pager": true,
 		"--no-parent": true, "--no-pinned": true, "--overdue": true, "--pinned": true,
@@ -152,7 +169,7 @@ var boolFlagsBySub = map[string]map[string]bool{
 		"--skip-labels": true, "--tree": true, "-w": true, "--watch": true,
 	},
 	"show": {
-		"--children": true, "--current": true, "--include-comments": true,
+		"--brief-deps": true, "--children": true, "--current": true, "--include-comments": true,
 		"--include-dependents": true, "--local-time": true, "--long": true,
 		"--refs": true, "--short": true, "--thread": true, "-w": true, "--watch": true,
 	},
