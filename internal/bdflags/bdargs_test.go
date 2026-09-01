@@ -45,15 +45,18 @@ func TestSplitGlobalFlagsSkipsGlobalFlagValues(t *testing.T) {
 // bypass below: SplitGlobalFlags would read that flag's value as the verb, and
 // every guard keyed off the verb stops firing — with no test failing.
 //
-// Sourced from `bd --help` (bd 1.1.0). bd declares exactly four persistent
+// Sourced from `bd --help` (bd 1.3.0-rc.1). bd declares exactly seven persistent
 // flags that consume the next argument; -C and --directory are the two spellings
-// of one of them. Every other persistent flag (--global, --ignore-schema-skew,
-// --json, --profile, -q/--quiet, --readonly, --sandbox, -v/--verbose, -h/--help,
-// -V/--version) is boolean and consumes nothing.
+// of one of them. --format is a hidden alias for --json and still takes a value,
+// so it belongs here, not in the boolean half. Every other persistent flag
+// (--cpu-profile, --global, --ignore-schema-skew, --json, --no-color, -q/--quiet,
+// --readonly, --sandbox, -v/--verbose, -h/--help, -V/--version) is boolean and
+// consumes nothing.
 func TestGlobalValueFlagsIsComplete(t *testing.T) {
 	want := map[string]bool{
-		"--actor": true, "--db": true, "-C": true, "--directory": true,
-		"--dolt-auto-commit": true,
+		"--actor": true, "--database": true, "--db": true, "-C": true,
+		"--directory": true, "--dolt-auto-commit": true, "--format": true,
+		"--mem-profile": true,
 	}
 	if got := GlobalValueFlags(); !reflect.DeepEqual(got, want) {
 		t.Errorf("GlobalValueFlags() = %v, want %v; re-check `bd --help` persistent flags", got, want)
@@ -66,12 +69,15 @@ func TestGlobalValueFlagsIsComplete(t *testing.T) {
 // guard has to fall back — reads a flag missing from this table as unknown, and
 // silently takes the ambiguous branch for an ordinary bd invocation.
 //
-// Sourced from `bd --help` (bd 1.1.0), the same pass as the value-flag table.
+// Sourced from `bd --help` (bd 1.3.0-rc.1), the same pass as the value-flag
+// table. Note --cpu-profile: bd renamed --profile with no alias, so the old
+// spelling is now an unknown flag bd rejects.
 func TestGlobalBoolFlagsIsComplete(t *testing.T) {
 	want := map[string]bool{
-		"--global": true, "--ignore-schema-skew": true, "--json": true,
-		"--profile": true, "-q": true, "--quiet": true, "--readonly": true,
-		"--sandbox": true, "-v": true, "--verbose": true, "-h": true, "--help": true,
+		"--cpu-profile": true, "--global": true, "--ignore-schema-skew": true,
+		"--json": true, "--no-color": true, "-q": true, "--quiet": true,
+		"--readonly": true, "--sandbox": true, "-v": true, "--verbose": true,
+		"-h": true, "--help": true,
 	}
 	if got := GlobalBoolFlags(); !reflect.DeepEqual(got, want) {
 		t.Errorf("GlobalBoolFlags() = %v, want %v; re-check `bd --help` persistent flags", got, want)

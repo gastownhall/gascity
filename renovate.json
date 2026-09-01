@@ -50,11 +50,12 @@
     {
       "customType": "regex",
       "fileMatch": [
-        "/^\\.github/workflows/(ci|nightly|mac-regression|ollama-acceptance-c|rc-gate|review-formulas)\\.yml$/",
+        "/^\\.github/workflows/(ci|fork-verify|nightly|mac-regression|ollama-acceptance-c|rc-gate|review-formulas)\\.yml$/",
         "/^deps\\.env$/"
       ],
       "matchStrings": [
-        "BD_VERSION:\\s*\"(?<currentValue>v?\\d+\\.\\d+\\.\\d+)\""
+        "BD_VERSION:\\s*\"(?<currentValue>v?\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?)\"",
+        "BD_VERSION=(?<currentValue>v?\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?)"
       ],
       "datasourceTemplate": "github-releases",
       "depNameTemplate": "gastownhall/beads"

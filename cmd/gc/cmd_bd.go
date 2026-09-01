@@ -613,7 +613,7 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 
 	// valueFlags is the complete set of flags that consume the next argument as
 	// their value for this subcommand, in both long and short form.
-	// Sourced from `bd <sub> --help` (2026-06-10).
+	// Sourced from `bd <sub> --help` (bd 1.3.0-rc.1, 2026-09-01).
 	valueFlags := bdSubcmdValueFlags(sub)
 
 	// boolFlags is the complete set of boolean (no-value) flags. Unknown flags

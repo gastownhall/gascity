@@ -16,15 +16,17 @@ import (
 // globalValueFlags are accepted by every bd subcommand and consume the next
 // argument as their value.
 var globalValueFlags = map[string]bool{
-	"--actor": true, "--db": true, "-C": true, "--directory": true,
-	"--dolt-auto-commit": true,
+	"--actor": true, "--database": true, "--db": true, "-C": true,
+	"--directory": true, "--dolt-auto-commit": true, "--format": true,
+	"--mem-profile": true,
 }
 
 // globalBoolFlags are accepted by every bd subcommand and take no value.
 var globalBoolFlags = map[string]bool{
-	"--global": true, "--ignore-schema-skew": true, "--json": true,
-	"--profile": true, "-q": true, "--quiet": true, "--readonly": true,
-	"--sandbox": true, "-v": true, "--verbose": true, "-h": true, "--help": true,
+	"--cpu-profile": true, "--global": true, "--ignore-schema-skew": true,
+	"--json": true, "--no-color": true, "-q": true, "--quiet": true,
+	"--readonly": true, "--sandbox": true, "-v": true, "--verbose": true,
+	"-h": true, "--help": true,
 }
 
 // valueFlagsBySub holds each subcommand's value-consuming flags (beyond the
