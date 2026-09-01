@@ -433,7 +433,20 @@ func CloseWorkflowSubtree(store beads.Store, rootID string) (int, error) {
 // signal that completes the wind-down rather than losing the intent. Returns
 // the count of newly closed beads.
 func CloseWorkflowSubtreeAs(store beads.Store, rootID, outcome, reason string, rootExtra map[string]string) (int, error) {
-	ordered, err := orderedOpenWorkflowSubtree(store, rootID)
+	return CloseWorkflowSubtreeAsExcept(store, rootID, outcome, reason, rootExtra, nil)
+}
+
+// CloseWorkflowSubtreeAsExcept is CloseWorkflowSubtreeAs with an exclusion
+// predicate: any member for which exclude reports true is left untouched, even
+// when it is otherwise open. A nil predicate closes the whole subtree, matching
+// CloseWorkflowSubtreeAs.
+//
+// The exclusion exists for members that stay executable after the workflow
+// reaches a terminal state — the teardown tail, which by contract runs after
+// the root settles or is canceled (see molecule.TeardownTailExclusion). Callers
+// own the policy; this function only skips.
+func CloseWorkflowSubtreeAsExcept(store beads.Store, rootID, outcome, reason string, rootExtra map[string]string, exclude func(beads.Bead) bool) (int, error) {
+	ordered, err := orderedOpenWorkflowSubtree(store, rootID, exclude)
 	if err != nil {
 		return 0, err
 	}
@@ -520,8 +533,9 @@ func closeRootWithMarker(store beads.Store, rootID string, rootMeta map[string]s
 // rootID (root included) ordered deepest-descendant-first and then blocker-first
 // via closeorder.Order, so a strict store accepts the close batch and the root
 // sorts last. Closed beads are excluded so an already-terminal member keeps its
-// recorded outcome.
-func orderedOpenWorkflowSubtree(store beads.Store, rootID string) ([]string, error) {
+// recorded outcome. A non-nil exclude also drops any member it reports true
+// for, even though it is open.
+func orderedOpenWorkflowSubtree(store beads.Store, rootID string, exclude func(beads.Bead) bool) ([]string, error) {
 	matched, err := ListWorkflowBeads(store, rootID)
 	if err != nil {
 		return nil, err
@@ -568,6 +582,9 @@ func orderedOpenWorkflowSubtree(store beads.Store, rootID string) ([]string, err
 	ids := make([]string, 0, len(matched))
 	for _, bead := range matched {
 		if bead.ID == "" || bead.Status == "closed" {
+			continue
+		}
+		if exclude != nil && exclude(bead) {
 			continue
 		}
 		ids = append(ids, bead.ID)
