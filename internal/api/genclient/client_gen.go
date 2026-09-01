@@ -1118,8 +1118,10 @@ type AgentSuspensionSetQualifiedInputBody struct {
 
 // AgentSuspensionStateBody defines model for AgentSuspensionStateBody.
 type AgentSuspensionStateBody struct {
-	Suspended bool   `json:"suspended"`
-	Token     string `json:"token"`
+	Suspended bool `json:"suspended"`
+
+	// Token Server-issued exact target-state/config-source token.
+	Token string `json:"token"`
 }
 
 // AgentUpdateInputBody defines model for AgentUpdateInputBody.
@@ -8855,6 +8857,18 @@ type PatchV0CityByCityNameParams struct {
 	XGCRequest string `json:"X-GC-Request"`
 }
 
+// PutV0CityByCityNameAgentSuspensionByBaseParams defines parameters for PutV0CityByCityNameAgentSuspensionByBase.
+type PutV0CityByCityNameAgentSuspensionByBaseParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PutV0CityByCityNameAgentSuspensionByDirByBaseParams defines parameters for PutV0CityByCityNameAgentSuspensionByDirByBase.
+type PutV0CityByCityNameAgentSuspensionByDirByBaseParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // DeleteV0CityByCityNameAgentByBaseParams defines parameters for DeleteV0CityByCityNameAgentByBase.
 type DeleteV0CityByCityNameAgentByBaseParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
@@ -8874,12 +8888,6 @@ type GetV0CityByCityNameAgentByBaseOutputParams struct {
 
 	// Before Message UUID cursor for loading older messages.
 	Before *string `form:"before,omitempty" json:"before,omitempty"`
-}
-
-// PutV0CityByCityNameAgentByBaseSuspensionParams defines parameters for PutV0CityByCityNameAgentByBaseSuspension.
-type PutV0CityByCityNameAgentByBaseSuspensionParams struct {
-	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
-	XGCRequest string `json:"X-GC-Request"`
 }
 
 // PostV0CityByCityNameAgentByBaseByActionParams defines parameters for PostV0CityByCityNameAgentByBaseByAction.
@@ -8910,12 +8918,6 @@ type GetV0CityByCityNameAgentByDirByBaseOutputParams struct {
 
 	// Before Message UUID cursor for loading older messages.
 	Before *string `form:"before,omitempty" json:"before,omitempty"`
-}
-
-// PutV0CityByCityNameAgentByDirByBaseSuspensionParams defines parameters for PutV0CityByCityNameAgentByDirByBaseSuspension.
-type PutV0CityByCityNameAgentByDirByBaseSuspensionParams struct {
-	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
-	XGCRequest string `json:"X-GC-Request"`
 }
 
 // PostV0CityByCityNameAgentByDirByBaseByActionParams defines parameters for PostV0CityByCityNameAgentByDirByBaseByAction.
@@ -9926,17 +9928,17 @@ type PostV0CityJSONRequestBody = CityCreateRequest
 // PatchV0CityByCityNameJSONRequestBody defines body for PatchV0CityByCityName for application/json ContentType.
 type PatchV0CityByCityNameJSONRequestBody = CityPatchInputBody
 
+// PutV0CityByCityNameAgentSuspensionByBaseJSONRequestBody defines body for PutV0CityByCityNameAgentSuspensionByBase for application/json ContentType.
+type PutV0CityByCityNameAgentSuspensionByBaseJSONRequestBody = AgentSuspensionSetInputBody
+
+// PutV0CityByCityNameAgentSuspensionByDirByBaseJSONRequestBody defines body for PutV0CityByCityNameAgentSuspensionByDirByBase for application/json ContentType.
+type PutV0CityByCityNameAgentSuspensionByDirByBaseJSONRequestBody = AgentSuspensionSetQualifiedInputBody
+
 // PatchV0CityByCityNameAgentByBaseJSONRequestBody defines body for PatchV0CityByCityNameAgentByBase for application/json ContentType.
 type PatchV0CityByCityNameAgentByBaseJSONRequestBody = AgentUpdateInputBody
 
-// PutV0CityByCityNameAgentByBaseSuspensionJSONRequestBody defines body for PutV0CityByCityNameAgentByBaseSuspension for application/json ContentType.
-type PutV0CityByCityNameAgentByBaseSuspensionJSONRequestBody = AgentSuspensionSetInputBody
-
 // PatchV0CityByCityNameAgentByDirByBaseJSONRequestBody defines body for PatchV0CityByCityNameAgentByDirByBase for application/json ContentType.
 type PatchV0CityByCityNameAgentByDirByBaseJSONRequestBody = AgentUpdateQualifiedInputBody
-
-// PutV0CityByCityNameAgentByDirByBaseSuspensionJSONRequestBody defines body for PutV0CityByCityNameAgentByDirByBaseSuspension for application/json ContentType.
-type PutV0CityByCityNameAgentByDirByBaseSuspensionJSONRequestBody = AgentSuspensionSetQualifiedInputBody
 
 // CreateAgentJSONRequestBody defines body for CreateAgent for application/json ContentType.
 type CreateAgentJSONRequestBody = AgentCreateInputBody
@@ -18898,6 +18900,22 @@ type ClientInterface interface {
 
 	PatchV0CityByCityName(ctx context.Context, cityName string, params *PatchV0CityByCityNameParams, body PatchV0CityByCityNameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetV0CityByCityNameAgentSuspensionByBase request
+	GetV0CityByCityNameAgentSuspensionByBase(ctx context.Context, cityName string, base string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PutV0CityByCityNameAgentSuspensionByBaseWithBody request with any body
+	PutV0CityByCityNameAgentSuspensionByBaseWithBody(ctx context.Context, cityName string, base string, params *PutV0CityByCityNameAgentSuspensionByBaseParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	PutV0CityByCityNameAgentSuspensionByBase(ctx context.Context, cityName string, base string, params *PutV0CityByCityNameAgentSuspensionByBaseParams, body PutV0CityByCityNameAgentSuspensionByBaseJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetV0CityByCityNameAgentSuspensionByDirByBase request
+	GetV0CityByCityNameAgentSuspensionByDirByBase(ctx context.Context, cityName string, dir string, base string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PutV0CityByCityNameAgentSuspensionByDirByBaseWithBody request with any body
+	PutV0CityByCityNameAgentSuspensionByDirByBaseWithBody(ctx context.Context, cityName string, dir string, base string, params *PutV0CityByCityNameAgentSuspensionByDirByBaseParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	PutV0CityByCityNameAgentSuspensionByDirByBase(ctx context.Context, cityName string, dir string, base string, params *PutV0CityByCityNameAgentSuspensionByDirByBaseParams, body PutV0CityByCityNameAgentSuspensionByDirByBaseJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// DeleteV0CityByCityNameAgentByBase request
 	DeleteV0CityByCityNameAgentByBase(ctx context.Context, cityName string, base string, params *DeleteV0CityByCityNameAgentByBaseParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -18914,14 +18932,6 @@ type ClientInterface interface {
 
 	// StreamAgentOutput request
 	StreamAgentOutput(ctx context.Context, cityName string, base string, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	// GetV0CityByCityNameAgentByBaseSuspension request
-	GetV0CityByCityNameAgentByBaseSuspension(ctx context.Context, cityName string, base string, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	// PutV0CityByCityNameAgentByBaseSuspensionWithBody request with any body
-	PutV0CityByCityNameAgentByBaseSuspensionWithBody(ctx context.Context, cityName string, base string, params *PutV0CityByCityNameAgentByBaseSuspensionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	PutV0CityByCityNameAgentByBaseSuspension(ctx context.Context, cityName string, base string, params *PutV0CityByCityNameAgentByBaseSuspensionParams, body PutV0CityByCityNameAgentByBaseSuspensionJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameAgentByBaseByAction request
 	PostV0CityByCityNameAgentByBaseByAction(ctx context.Context, cityName string, base string, action PostV0CityByCityNameAgentByBaseByActionParamsAction, params *PostV0CityByCityNameAgentByBaseByActionParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -18942,14 +18952,6 @@ type ClientInterface interface {
 
 	// StreamAgentOutputQualified request
 	StreamAgentOutputQualified(ctx context.Context, cityName string, dir string, base string, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	// GetV0CityByCityNameAgentByDirByBaseSuspension request
-	GetV0CityByCityNameAgentByDirByBaseSuspension(ctx context.Context, cityName string, dir string, base string, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	// PutV0CityByCityNameAgentByDirByBaseSuspensionWithBody request with any body
-	PutV0CityByCityNameAgentByDirByBaseSuspensionWithBody(ctx context.Context, cityName string, dir string, base string, params *PutV0CityByCityNameAgentByDirByBaseSuspensionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	PutV0CityByCityNameAgentByDirByBaseSuspension(ctx context.Context, cityName string, dir string, base string, params *PutV0CityByCityNameAgentByDirByBaseSuspensionParams, body PutV0CityByCityNameAgentByDirByBaseSuspensionJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameAgentByDirByBaseByAction request
 	PostV0CityByCityNameAgentByDirByBaseByAction(ctx context.Context, cityName string, dir string, base string, action PostV0CityByCityNameAgentByDirByBaseByActionParamsAction, params *PostV0CityByCityNameAgentByDirByBaseByActionParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -19558,6 +19560,78 @@ func (c *Client) PatchV0CityByCityName(ctx context.Context, cityName string, par
 	return c.Client.Do(req)
 }
 
+func (c *Client) GetV0CityByCityNameAgentSuspensionByBase(ctx context.Context, cityName string, base string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameAgentSuspensionByBaseRequest(c.Server, cityName, base)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PutV0CityByCityNameAgentSuspensionByBaseWithBody(ctx context.Context, cityName string, base string, params *PutV0CityByCityNameAgentSuspensionByBaseParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPutV0CityByCityNameAgentSuspensionByBaseRequestWithBody(c.Server, cityName, base, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PutV0CityByCityNameAgentSuspensionByBase(ctx context.Context, cityName string, base string, params *PutV0CityByCityNameAgentSuspensionByBaseParams, body PutV0CityByCityNameAgentSuspensionByBaseJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPutV0CityByCityNameAgentSuspensionByBaseRequest(c.Server, cityName, base, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetV0CityByCityNameAgentSuspensionByDirByBase(ctx context.Context, cityName string, dir string, base string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameAgentSuspensionByDirByBaseRequest(c.Server, cityName, dir, base)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PutV0CityByCityNameAgentSuspensionByDirByBaseWithBody(ctx context.Context, cityName string, dir string, base string, params *PutV0CityByCityNameAgentSuspensionByDirByBaseParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPutV0CityByCityNameAgentSuspensionByDirByBaseRequestWithBody(c.Server, cityName, dir, base, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PutV0CityByCityNameAgentSuspensionByDirByBase(ctx context.Context, cityName string, dir string, base string, params *PutV0CityByCityNameAgentSuspensionByDirByBaseParams, body PutV0CityByCityNameAgentSuspensionByDirByBaseJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPutV0CityByCityNameAgentSuspensionByDirByBaseRequest(c.Server, cityName, dir, base, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) DeleteV0CityByCityNameAgentByBase(ctx context.Context, cityName string, base string, params *DeleteV0CityByCityNameAgentByBaseParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewDeleteV0CityByCityNameAgentByBaseRequest(c.Server, cityName, base, params)
 	if err != nil {
@@ -19620,42 +19694,6 @@ func (c *Client) GetV0CityByCityNameAgentByBaseOutput(ctx context.Context, cityN
 
 func (c *Client) StreamAgentOutput(ctx context.Context, cityName string, base string, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewStreamAgentOutputRequest(c.Server, cityName, base)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) GetV0CityByCityNameAgentByBaseSuspension(ctx context.Context, cityName string, base string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewGetV0CityByCityNameAgentByBaseSuspensionRequest(c.Server, cityName, base)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) PutV0CityByCityNameAgentByBaseSuspensionWithBody(ctx context.Context, cityName string, base string, params *PutV0CityByCityNameAgentByBaseSuspensionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPutV0CityByCityNameAgentByBaseSuspensionRequestWithBody(c.Server, cityName, base, params, contentType, body)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) PutV0CityByCityNameAgentByBaseSuspension(ctx context.Context, cityName string, base string, params *PutV0CityByCityNameAgentByBaseSuspensionParams, body PutV0CityByCityNameAgentByBaseSuspensionJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPutV0CityByCityNameAgentByBaseSuspensionRequest(c.Server, cityName, base, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -19740,42 +19778,6 @@ func (c *Client) GetV0CityByCityNameAgentByDirByBaseOutput(ctx context.Context, 
 
 func (c *Client) StreamAgentOutputQualified(ctx context.Context, cityName string, dir string, base string, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewStreamAgentOutputQualifiedRequest(c.Server, cityName, dir, base)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) GetV0CityByCityNameAgentByDirByBaseSuspension(ctx context.Context, cityName string, dir string, base string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewGetV0CityByCityNameAgentByDirByBaseSuspensionRequest(c.Server, cityName, dir, base)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) PutV0CityByCityNameAgentByDirByBaseSuspensionWithBody(ctx context.Context, cityName string, dir string, base string, params *PutV0CityByCityNameAgentByDirByBaseSuspensionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPutV0CityByCityNameAgentByDirByBaseSuspensionRequestWithBody(c.Server, cityName, dir, base, params, contentType, body)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) PutV0CityByCityNameAgentByDirByBaseSuspension(ctx context.Context, cityName string, dir string, base string, params *PutV0CityByCityNameAgentByDirByBaseSuspensionParams, body PutV0CityByCityNameAgentByDirByBaseSuspensionJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPutV0CityByCityNameAgentByDirByBaseSuspensionRequest(c.Server, cityName, dir, base, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -22242,6 +22244,236 @@ func NewPatchV0CityByCityNameRequestWithBody(server string, cityName string, par
 	return req, nil
 }
 
+// NewGetV0CityByCityNameAgentSuspensionByBaseRequest generates requests for GetV0CityByCityNameAgentSuspensionByBase
+func NewGetV0CityByCityNameAgentSuspensionByBaseRequest(server string, cityName string, base string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "base", base, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/agent-suspension/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewPutV0CityByCityNameAgentSuspensionByBaseRequest calls the generic PutV0CityByCityNameAgentSuspensionByBase builder with application/json body
+func NewPutV0CityByCityNameAgentSuspensionByBaseRequest(server string, cityName string, base string, params *PutV0CityByCityNameAgentSuspensionByBaseParams, body PutV0CityByCityNameAgentSuspensionByBaseJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPutV0CityByCityNameAgentSuspensionByBaseRequestWithBody(server, cityName, base, params, "application/json", bodyReader)
+}
+
+// NewPutV0CityByCityNameAgentSuspensionByBaseRequestWithBody generates requests for PutV0CityByCityNameAgentSuspensionByBase with any type of body
+func NewPutV0CityByCityNameAgentSuspensionByBaseRequestWithBody(server string, cityName string, base string, params *PutV0CityByCityNameAgentSuspensionByBaseParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "base", base, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/agent-suspension/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("PUT", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
+	return req, nil
+}
+
+// NewGetV0CityByCityNameAgentSuspensionByDirByBaseRequest generates requests for GetV0CityByCityNameAgentSuspensionByDirByBase
+func NewGetV0CityByCityNameAgentSuspensionByDirByBaseRequest(server string, cityName string, dir string, base string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "dir", dir, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam2 string
+
+	pathParam2, err = runtime.StyleParamWithOptions("simple", false, "base", base, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/agent-suspension/%s/%s", pathParam0, pathParam1, pathParam2)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewPutV0CityByCityNameAgentSuspensionByDirByBaseRequest calls the generic PutV0CityByCityNameAgentSuspensionByDirByBase builder with application/json body
+func NewPutV0CityByCityNameAgentSuspensionByDirByBaseRequest(server string, cityName string, dir string, base string, params *PutV0CityByCityNameAgentSuspensionByDirByBaseParams, body PutV0CityByCityNameAgentSuspensionByDirByBaseJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPutV0CityByCityNameAgentSuspensionByDirByBaseRequestWithBody(server, cityName, dir, base, params, "application/json", bodyReader)
+}
+
+// NewPutV0CityByCityNameAgentSuspensionByDirByBaseRequestWithBody generates requests for PutV0CityByCityNameAgentSuspensionByDirByBase with any type of body
+func NewPutV0CityByCityNameAgentSuspensionByDirByBaseRequestWithBody(server string, cityName string, dir string, base string, params *PutV0CityByCityNameAgentSuspensionByDirByBaseParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "dir", dir, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam2 string
+
+	pathParam2, err = runtime.StyleParamWithOptions("simple", false, "base", base, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/agent-suspension/%s/%s", pathParam0, pathParam1, pathParam2)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("PUT", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
+	return req, nil
+}
+
 // NewDeleteV0CityByCityNameAgentByBaseRequest generates requests for DeleteV0CityByCityNameAgentByBase
 func NewDeleteV0CityByCityNameAgentByBaseRequest(server string, cityName string, base string, params *DeleteV0CityByCityNameAgentByBaseParams) (*http.Request, error) {
 	var err error
@@ -22519,114 +22751,6 @@ func NewStreamAgentOutputRequest(server string, cityName string, base string) (*
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
-	}
-
-	return req, nil
-}
-
-// NewGetV0CityByCityNameAgentByBaseSuspensionRequest generates requests for GetV0CityByCityNameAgentByBaseSuspension
-func NewGetV0CityByCityNameAgentByBaseSuspensionRequest(server string, cityName string, base string) (*http.Request, error) {
-	var err error
-
-	var pathParam0 string
-
-	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
-	if err != nil {
-		return nil, err
-	}
-
-	var pathParam1 string
-
-	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "base", base, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
-	if err != nil {
-		return nil, err
-	}
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/v0/city/%s/agent/%s/suspension", pathParam0, pathParam1)
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("GET", queryURL.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-
-	return req, nil
-}
-
-// NewPutV0CityByCityNameAgentByBaseSuspensionRequest calls the generic PutV0CityByCityNameAgentByBaseSuspension builder with application/json body
-func NewPutV0CityByCityNameAgentByBaseSuspensionRequest(server string, cityName string, base string, params *PutV0CityByCityNameAgentByBaseSuspensionParams, body PutV0CityByCityNameAgentByBaseSuspensionJSONRequestBody) (*http.Request, error) {
-	var bodyReader io.Reader
-	buf, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-	bodyReader = bytes.NewReader(buf)
-	return NewPutV0CityByCityNameAgentByBaseSuspensionRequestWithBody(server, cityName, base, params, "application/json", bodyReader)
-}
-
-// NewPutV0CityByCityNameAgentByBaseSuspensionRequestWithBody generates requests for PutV0CityByCityNameAgentByBaseSuspension with any type of body
-func NewPutV0CityByCityNameAgentByBaseSuspensionRequestWithBody(server string, cityName string, base string, params *PutV0CityByCityNameAgentByBaseSuspensionParams, contentType string, body io.Reader) (*http.Request, error) {
-	var err error
-
-	var pathParam0 string
-
-	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
-	if err != nil {
-		return nil, err
-	}
-
-	var pathParam1 string
-
-	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "base", base, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
-	if err != nil {
-		return nil, err
-	}
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/v0/city/%s/agent/%s/suspension", pathParam0, pathParam1)
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("PUT", queryURL.String(), body)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Add("Content-Type", contentType)
-
-	if params != nil {
-
-		var headerParam0 string
-
-		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
-		if err != nil {
-			return nil, err
-		}
-
-		req.Header.Set("X-GC-Request", headerParam0)
-
 	}
 
 	return req, nil
@@ -23005,128 +23129,6 @@ func NewStreamAgentOutputQualifiedRequest(server string, cityName string, dir st
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
-	}
-
-	return req, nil
-}
-
-// NewGetV0CityByCityNameAgentByDirByBaseSuspensionRequest generates requests for GetV0CityByCityNameAgentByDirByBaseSuspension
-func NewGetV0CityByCityNameAgentByDirByBaseSuspensionRequest(server string, cityName string, dir string, base string) (*http.Request, error) {
-	var err error
-
-	var pathParam0 string
-
-	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
-	if err != nil {
-		return nil, err
-	}
-
-	var pathParam1 string
-
-	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "dir", dir, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
-	if err != nil {
-		return nil, err
-	}
-
-	var pathParam2 string
-
-	pathParam2, err = runtime.StyleParamWithOptions("simple", false, "base", base, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
-	if err != nil {
-		return nil, err
-	}
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/v0/city/%s/agent/%s/%s/suspension", pathParam0, pathParam1, pathParam2)
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("GET", queryURL.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-
-	return req, nil
-}
-
-// NewPutV0CityByCityNameAgentByDirByBaseSuspensionRequest calls the generic PutV0CityByCityNameAgentByDirByBaseSuspension builder with application/json body
-func NewPutV0CityByCityNameAgentByDirByBaseSuspensionRequest(server string, cityName string, dir string, base string, params *PutV0CityByCityNameAgentByDirByBaseSuspensionParams, body PutV0CityByCityNameAgentByDirByBaseSuspensionJSONRequestBody) (*http.Request, error) {
-	var bodyReader io.Reader
-	buf, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-	bodyReader = bytes.NewReader(buf)
-	return NewPutV0CityByCityNameAgentByDirByBaseSuspensionRequestWithBody(server, cityName, dir, base, params, "application/json", bodyReader)
-}
-
-// NewPutV0CityByCityNameAgentByDirByBaseSuspensionRequestWithBody generates requests for PutV0CityByCityNameAgentByDirByBaseSuspension with any type of body
-func NewPutV0CityByCityNameAgentByDirByBaseSuspensionRequestWithBody(server string, cityName string, dir string, base string, params *PutV0CityByCityNameAgentByDirByBaseSuspensionParams, contentType string, body io.Reader) (*http.Request, error) {
-	var err error
-
-	var pathParam0 string
-
-	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
-	if err != nil {
-		return nil, err
-	}
-
-	var pathParam1 string
-
-	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "dir", dir, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
-	if err != nil {
-		return nil, err
-	}
-
-	var pathParam2 string
-
-	pathParam2, err = runtime.StyleParamWithOptions("simple", false, "base", base, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
-	if err != nil {
-		return nil, err
-	}
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/v0/city/%s/agent/%s/%s/suspension", pathParam0, pathParam1, pathParam2)
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("PUT", queryURL.String(), body)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Add("Content-Type", contentType)
-
-	if params != nil {
-
-		var headerParam0 string
-
-		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
-		if err != nil {
-			return nil, err
-		}
-
-		req.Header.Set("X-GC-Request", headerParam0)
-
 	}
 
 	return req, nil
@@ -32750,6 +32752,22 @@ type ClientWithResponsesInterface interface {
 
 	PatchV0CityByCityNameWithResponse(ctx context.Context, cityName string, params *PatchV0CityByCityNameParams, body PatchV0CityByCityNameJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameResponse, error)
 
+	// GetV0CityByCityNameAgentSuspensionByBaseWithResponse request
+	GetV0CityByCityNameAgentSuspensionByBaseWithResponse(ctx context.Context, cityName string, base string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameAgentSuspensionByBaseResponse, error)
+
+	// PutV0CityByCityNameAgentSuspensionByBaseWithBodyWithResponse request with any body
+	PutV0CityByCityNameAgentSuspensionByBaseWithBodyWithResponse(ctx context.Context, cityName string, base string, params *PutV0CityByCityNameAgentSuspensionByBaseParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutV0CityByCityNameAgentSuspensionByBaseResponse, error)
+
+	PutV0CityByCityNameAgentSuspensionByBaseWithResponse(ctx context.Context, cityName string, base string, params *PutV0CityByCityNameAgentSuspensionByBaseParams, body PutV0CityByCityNameAgentSuspensionByBaseJSONRequestBody, reqEditors ...RequestEditorFn) (*PutV0CityByCityNameAgentSuspensionByBaseResponse, error)
+
+	// GetV0CityByCityNameAgentSuspensionByDirByBaseWithResponse request
+	GetV0CityByCityNameAgentSuspensionByDirByBaseWithResponse(ctx context.Context, cityName string, dir string, base string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameAgentSuspensionByDirByBaseResponse, error)
+
+	// PutV0CityByCityNameAgentSuspensionByDirByBaseWithBodyWithResponse request with any body
+	PutV0CityByCityNameAgentSuspensionByDirByBaseWithBodyWithResponse(ctx context.Context, cityName string, dir string, base string, params *PutV0CityByCityNameAgentSuspensionByDirByBaseParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutV0CityByCityNameAgentSuspensionByDirByBaseResponse, error)
+
+	PutV0CityByCityNameAgentSuspensionByDirByBaseWithResponse(ctx context.Context, cityName string, dir string, base string, params *PutV0CityByCityNameAgentSuspensionByDirByBaseParams, body PutV0CityByCityNameAgentSuspensionByDirByBaseJSONRequestBody, reqEditors ...RequestEditorFn) (*PutV0CityByCityNameAgentSuspensionByDirByBaseResponse, error)
+
 	// DeleteV0CityByCityNameAgentByBaseWithResponse request
 	DeleteV0CityByCityNameAgentByBaseWithResponse(ctx context.Context, cityName string, base string, params *DeleteV0CityByCityNameAgentByBaseParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameAgentByBaseResponse, error)
 
@@ -32766,14 +32784,6 @@ type ClientWithResponsesInterface interface {
 
 	// StreamAgentOutputWithResponse request
 	StreamAgentOutputWithResponse(ctx context.Context, cityName string, base string, reqEditors ...RequestEditorFn) (*StreamAgentOutputResponse, error)
-
-	// GetV0CityByCityNameAgentByBaseSuspensionWithResponse request
-	GetV0CityByCityNameAgentByBaseSuspensionWithResponse(ctx context.Context, cityName string, base string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameAgentByBaseSuspensionResponse, error)
-
-	// PutV0CityByCityNameAgentByBaseSuspensionWithBodyWithResponse request with any body
-	PutV0CityByCityNameAgentByBaseSuspensionWithBodyWithResponse(ctx context.Context, cityName string, base string, params *PutV0CityByCityNameAgentByBaseSuspensionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutV0CityByCityNameAgentByBaseSuspensionResponse, error)
-
-	PutV0CityByCityNameAgentByBaseSuspensionWithResponse(ctx context.Context, cityName string, base string, params *PutV0CityByCityNameAgentByBaseSuspensionParams, body PutV0CityByCityNameAgentByBaseSuspensionJSONRequestBody, reqEditors ...RequestEditorFn) (*PutV0CityByCityNameAgentByBaseSuspensionResponse, error)
 
 	// PostV0CityByCityNameAgentByBaseByActionWithResponse request
 	PostV0CityByCityNameAgentByBaseByActionWithResponse(ctx context.Context, cityName string, base string, action PostV0CityByCityNameAgentByBaseByActionParamsAction, params *PostV0CityByCityNameAgentByBaseByActionParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameAgentByBaseByActionResponse, error)
@@ -32794,14 +32804,6 @@ type ClientWithResponsesInterface interface {
 
 	// StreamAgentOutputQualifiedWithResponse request
 	StreamAgentOutputQualifiedWithResponse(ctx context.Context, cityName string, dir string, base string, reqEditors ...RequestEditorFn) (*StreamAgentOutputQualifiedResponse, error)
-
-	// GetV0CityByCityNameAgentByDirByBaseSuspensionWithResponse request
-	GetV0CityByCityNameAgentByDirByBaseSuspensionWithResponse(ctx context.Context, cityName string, dir string, base string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameAgentByDirByBaseSuspensionResponse, error)
-
-	// PutV0CityByCityNameAgentByDirByBaseSuspensionWithBodyWithResponse request with any body
-	PutV0CityByCityNameAgentByDirByBaseSuspensionWithBodyWithResponse(ctx context.Context, cityName string, dir string, base string, params *PutV0CityByCityNameAgentByDirByBaseSuspensionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutV0CityByCityNameAgentByDirByBaseSuspensionResponse, error)
-
-	PutV0CityByCityNameAgentByDirByBaseSuspensionWithResponse(ctx context.Context, cityName string, dir string, base string, params *PutV0CityByCityNameAgentByDirByBaseSuspensionParams, body PutV0CityByCityNameAgentByDirByBaseSuspensionJSONRequestBody, reqEditors ...RequestEditorFn) (*PutV0CityByCityNameAgentByDirByBaseSuspensionResponse, error)
 
 	// PostV0CityByCityNameAgentByDirByBaseByActionWithResponse request
 	PostV0CityByCityNameAgentByDirByBaseByActionWithResponse(ctx context.Context, cityName string, dir string, base string, action PostV0CityByCityNameAgentByDirByBaseByActionParamsAction, params *PostV0CityByCityNameAgentByDirByBaseByActionParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameAgentByDirByBaseByActionResponse, error)
@@ -33454,6 +33456,126 @@ func (r PatchV0CityByCityNameResponse) StatusCode() int {
 	return 0
 }
 
+type GetV0CityByCityNameAgentSuspensionByBaseResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *AgentSuspensionStateBody
+	ApplicationproblemJSON400 *ErrorModel
+	ApplicationproblemJSON401 *ErrorModel
+	ApplicationproblemJSON403 *ErrorModel
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON501 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetV0CityByCityNameAgentSuspensionByBaseResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetV0CityByCityNameAgentSuspensionByBaseResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type PutV0CityByCityNameAgentSuspensionByBaseResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *AgentSuspensionSetOutputBody
+	ApplicationproblemJSON400 *ErrorModel
+	ApplicationproblemJSON401 *ErrorModel
+	ApplicationproblemJSON403 *ErrorModel
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
+	ApplicationproblemJSON413 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON501 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r PutV0CityByCityNameAgentSuspensionByBaseResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PutV0CityByCityNameAgentSuspensionByBaseResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetV0CityByCityNameAgentSuspensionByDirByBaseResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *AgentSuspensionStateBody
+	ApplicationproblemJSON400 *ErrorModel
+	ApplicationproblemJSON401 *ErrorModel
+	ApplicationproblemJSON403 *ErrorModel
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON501 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetV0CityByCityNameAgentSuspensionByDirByBaseResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetV0CityByCityNameAgentSuspensionByDirByBaseResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type PutV0CityByCityNameAgentSuspensionByDirByBaseResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *AgentSuspensionSetOutputBody
+	ApplicationproblemJSON400 *ErrorModel
+	ApplicationproblemJSON401 *ErrorModel
+	ApplicationproblemJSON403 *ErrorModel
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
+	ApplicationproblemJSON413 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON501 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r PutV0CityByCityNameAgentSuspensionByDirByBaseResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PutV0CityByCityNameAgentSuspensionByDirByBaseResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type DeleteV0CityByCityNameAgentByBaseResponse struct {
 	Body                      []byte
 	HTTPResponse              *http.Response
@@ -33580,62 +33702,6 @@ func (r StreamAgentOutputResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r StreamAgentOutputResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
-type GetV0CityByCityNameAgentByBaseSuspensionResponse struct {
-	Body                      []byte
-	HTTPResponse              *http.Response
-	JSON200                   *AgentSuspensionStateBody
-	ApplicationproblemJSON404 *ErrorModel
-	ApplicationproblemJSON422 *ErrorModel
-	ApplicationproblemJSON500 *ErrorModel
-	ApplicationproblemJSON501 *ErrorModel
-}
-
-// Status returns HTTPResponse.Status
-func (r GetV0CityByCityNameAgentByBaseSuspensionResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r GetV0CityByCityNameAgentByBaseSuspensionResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
-type PutV0CityByCityNameAgentByBaseSuspensionResponse struct {
-	Body                      []byte
-	HTTPResponse              *http.Response
-	JSON200                   *AgentSuspensionSetOutputBody
-	ApplicationproblemJSON400 *ErrorModel
-	ApplicationproblemJSON401 *ErrorModel
-	ApplicationproblemJSON403 *ErrorModel
-	ApplicationproblemJSON404 *ErrorModel
-	ApplicationproblemJSON409 *ErrorModel
-	ApplicationproblemJSON422 *ErrorModel
-	ApplicationproblemJSON500 *ErrorModel
-	ApplicationproblemJSON501 *ErrorModel
-}
-
-// Status returns HTTPResponse.Status
-func (r PutV0CityByCityNameAgentByBaseSuspensionResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r PutV0CityByCityNameAgentByBaseSuspensionResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -33797,62 +33863,6 @@ func (r StreamAgentOutputQualifiedResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r StreamAgentOutputQualifiedResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
-type GetV0CityByCityNameAgentByDirByBaseSuspensionResponse struct {
-	Body                      []byte
-	HTTPResponse              *http.Response
-	JSON200                   *AgentSuspensionStateBody
-	ApplicationproblemJSON404 *ErrorModel
-	ApplicationproblemJSON422 *ErrorModel
-	ApplicationproblemJSON500 *ErrorModel
-	ApplicationproblemJSON501 *ErrorModel
-}
-
-// Status returns HTTPResponse.Status
-func (r GetV0CityByCityNameAgentByDirByBaseSuspensionResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r GetV0CityByCityNameAgentByDirByBaseSuspensionResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
-type PutV0CityByCityNameAgentByDirByBaseSuspensionResponse struct {
-	Body                      []byte
-	HTTPResponse              *http.Response
-	JSON200                   *AgentSuspensionSetOutputBody
-	ApplicationproblemJSON400 *ErrorModel
-	ApplicationproblemJSON401 *ErrorModel
-	ApplicationproblemJSON403 *ErrorModel
-	ApplicationproblemJSON404 *ErrorModel
-	ApplicationproblemJSON409 *ErrorModel
-	ApplicationproblemJSON422 *ErrorModel
-	ApplicationproblemJSON500 *ErrorModel
-	ApplicationproblemJSON501 *ErrorModel
-}
-
-// Status returns HTTPResponse.Status
-func (r PutV0CityByCityNameAgentByDirByBaseSuspensionResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r PutV0CityByCityNameAgentByDirByBaseSuspensionResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -37935,6 +37945,58 @@ func (c *ClientWithResponses) PatchV0CityByCityNameWithResponse(ctx context.Cont
 	return ParsePatchV0CityByCityNameResponse(rsp)
 }
 
+// GetV0CityByCityNameAgentSuspensionByBaseWithResponse request returning *GetV0CityByCityNameAgentSuspensionByBaseResponse
+func (c *ClientWithResponses) GetV0CityByCityNameAgentSuspensionByBaseWithResponse(ctx context.Context, cityName string, base string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameAgentSuspensionByBaseResponse, error) {
+	rsp, err := c.GetV0CityByCityNameAgentSuspensionByBase(ctx, cityName, base, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetV0CityByCityNameAgentSuspensionByBaseResponse(rsp)
+}
+
+// PutV0CityByCityNameAgentSuspensionByBaseWithBodyWithResponse request with arbitrary body returning *PutV0CityByCityNameAgentSuspensionByBaseResponse
+func (c *ClientWithResponses) PutV0CityByCityNameAgentSuspensionByBaseWithBodyWithResponse(ctx context.Context, cityName string, base string, params *PutV0CityByCityNameAgentSuspensionByBaseParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutV0CityByCityNameAgentSuspensionByBaseResponse, error) {
+	rsp, err := c.PutV0CityByCityNameAgentSuspensionByBaseWithBody(ctx, cityName, base, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePutV0CityByCityNameAgentSuspensionByBaseResponse(rsp)
+}
+
+func (c *ClientWithResponses) PutV0CityByCityNameAgentSuspensionByBaseWithResponse(ctx context.Context, cityName string, base string, params *PutV0CityByCityNameAgentSuspensionByBaseParams, body PutV0CityByCityNameAgentSuspensionByBaseJSONRequestBody, reqEditors ...RequestEditorFn) (*PutV0CityByCityNameAgentSuspensionByBaseResponse, error) {
+	rsp, err := c.PutV0CityByCityNameAgentSuspensionByBase(ctx, cityName, base, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePutV0CityByCityNameAgentSuspensionByBaseResponse(rsp)
+}
+
+// GetV0CityByCityNameAgentSuspensionByDirByBaseWithResponse request returning *GetV0CityByCityNameAgentSuspensionByDirByBaseResponse
+func (c *ClientWithResponses) GetV0CityByCityNameAgentSuspensionByDirByBaseWithResponse(ctx context.Context, cityName string, dir string, base string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameAgentSuspensionByDirByBaseResponse, error) {
+	rsp, err := c.GetV0CityByCityNameAgentSuspensionByDirByBase(ctx, cityName, dir, base, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetV0CityByCityNameAgentSuspensionByDirByBaseResponse(rsp)
+}
+
+// PutV0CityByCityNameAgentSuspensionByDirByBaseWithBodyWithResponse request with arbitrary body returning *PutV0CityByCityNameAgentSuspensionByDirByBaseResponse
+func (c *ClientWithResponses) PutV0CityByCityNameAgentSuspensionByDirByBaseWithBodyWithResponse(ctx context.Context, cityName string, dir string, base string, params *PutV0CityByCityNameAgentSuspensionByDirByBaseParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutV0CityByCityNameAgentSuspensionByDirByBaseResponse, error) {
+	rsp, err := c.PutV0CityByCityNameAgentSuspensionByDirByBaseWithBody(ctx, cityName, dir, base, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePutV0CityByCityNameAgentSuspensionByDirByBaseResponse(rsp)
+}
+
+func (c *ClientWithResponses) PutV0CityByCityNameAgentSuspensionByDirByBaseWithResponse(ctx context.Context, cityName string, dir string, base string, params *PutV0CityByCityNameAgentSuspensionByDirByBaseParams, body PutV0CityByCityNameAgentSuspensionByDirByBaseJSONRequestBody, reqEditors ...RequestEditorFn) (*PutV0CityByCityNameAgentSuspensionByDirByBaseResponse, error) {
+	rsp, err := c.PutV0CityByCityNameAgentSuspensionByDirByBase(ctx, cityName, dir, base, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePutV0CityByCityNameAgentSuspensionByDirByBaseResponse(rsp)
+}
+
 // DeleteV0CityByCityNameAgentByBaseWithResponse request returning *DeleteV0CityByCityNameAgentByBaseResponse
 func (c *ClientWithResponses) DeleteV0CityByCityNameAgentByBaseWithResponse(ctx context.Context, cityName string, base string, params *DeleteV0CityByCityNameAgentByBaseParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameAgentByBaseResponse, error) {
 	rsp, err := c.DeleteV0CityByCityNameAgentByBase(ctx, cityName, base, params, reqEditors...)
@@ -37986,32 +38048,6 @@ func (c *ClientWithResponses) StreamAgentOutputWithResponse(ctx context.Context,
 		return nil, err
 	}
 	return ParseStreamAgentOutputResponse(rsp)
-}
-
-// GetV0CityByCityNameAgentByBaseSuspensionWithResponse request returning *GetV0CityByCityNameAgentByBaseSuspensionResponse
-func (c *ClientWithResponses) GetV0CityByCityNameAgentByBaseSuspensionWithResponse(ctx context.Context, cityName string, base string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameAgentByBaseSuspensionResponse, error) {
-	rsp, err := c.GetV0CityByCityNameAgentByBaseSuspension(ctx, cityName, base, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseGetV0CityByCityNameAgentByBaseSuspensionResponse(rsp)
-}
-
-// PutV0CityByCityNameAgentByBaseSuspensionWithBodyWithResponse request with arbitrary body returning *PutV0CityByCityNameAgentByBaseSuspensionResponse
-func (c *ClientWithResponses) PutV0CityByCityNameAgentByBaseSuspensionWithBodyWithResponse(ctx context.Context, cityName string, base string, params *PutV0CityByCityNameAgentByBaseSuspensionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutV0CityByCityNameAgentByBaseSuspensionResponse, error) {
-	rsp, err := c.PutV0CityByCityNameAgentByBaseSuspensionWithBody(ctx, cityName, base, params, contentType, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParsePutV0CityByCityNameAgentByBaseSuspensionResponse(rsp)
-}
-
-func (c *ClientWithResponses) PutV0CityByCityNameAgentByBaseSuspensionWithResponse(ctx context.Context, cityName string, base string, params *PutV0CityByCityNameAgentByBaseSuspensionParams, body PutV0CityByCityNameAgentByBaseSuspensionJSONRequestBody, reqEditors ...RequestEditorFn) (*PutV0CityByCityNameAgentByBaseSuspensionResponse, error) {
-	rsp, err := c.PutV0CityByCityNameAgentByBaseSuspension(ctx, cityName, base, params, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParsePutV0CityByCityNameAgentByBaseSuspensionResponse(rsp)
 }
 
 // PostV0CityByCityNameAgentByBaseByActionWithResponse request returning *PostV0CityByCityNameAgentByBaseByActionResponse
@@ -38074,32 +38110,6 @@ func (c *ClientWithResponses) StreamAgentOutputQualifiedWithResponse(ctx context
 		return nil, err
 	}
 	return ParseStreamAgentOutputQualifiedResponse(rsp)
-}
-
-// GetV0CityByCityNameAgentByDirByBaseSuspensionWithResponse request returning *GetV0CityByCityNameAgentByDirByBaseSuspensionResponse
-func (c *ClientWithResponses) GetV0CityByCityNameAgentByDirByBaseSuspensionWithResponse(ctx context.Context, cityName string, dir string, base string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameAgentByDirByBaseSuspensionResponse, error) {
-	rsp, err := c.GetV0CityByCityNameAgentByDirByBaseSuspension(ctx, cityName, dir, base, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseGetV0CityByCityNameAgentByDirByBaseSuspensionResponse(rsp)
-}
-
-// PutV0CityByCityNameAgentByDirByBaseSuspensionWithBodyWithResponse request with arbitrary body returning *PutV0CityByCityNameAgentByDirByBaseSuspensionResponse
-func (c *ClientWithResponses) PutV0CityByCityNameAgentByDirByBaseSuspensionWithBodyWithResponse(ctx context.Context, cityName string, dir string, base string, params *PutV0CityByCityNameAgentByDirByBaseSuspensionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutV0CityByCityNameAgentByDirByBaseSuspensionResponse, error) {
-	rsp, err := c.PutV0CityByCityNameAgentByDirByBaseSuspensionWithBody(ctx, cityName, dir, base, params, contentType, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParsePutV0CityByCityNameAgentByDirByBaseSuspensionResponse(rsp)
-}
-
-func (c *ClientWithResponses) PutV0CityByCityNameAgentByDirByBaseSuspensionWithResponse(ctx context.Context, cityName string, dir string, base string, params *PutV0CityByCityNameAgentByDirByBaseSuspensionParams, body PutV0CityByCityNameAgentByDirByBaseSuspensionJSONRequestBody, reqEditors ...RequestEditorFn) (*PutV0CityByCityNameAgentByDirByBaseSuspensionResponse, error) {
-	rsp, err := c.PutV0CityByCityNameAgentByDirByBaseSuspension(ctx, cityName, dir, base, params, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParsePutV0CityByCityNameAgentByDirByBaseSuspensionResponse(rsp)
 }
 
 // PostV0CityByCityNameAgentByDirByBaseByActionWithResponse request returning *PostV0CityByCityNameAgentByDirByBaseByActionResponse
@@ -40002,6 +40012,334 @@ func ParsePatchV0CityByCityNameResponse(rsp *http.Response) (*PatchV0CityByCityN
 	return response, nil
 }
 
+// ParseGetV0CityByCityNameAgentSuspensionByBaseResponse parses an HTTP response from a GetV0CityByCityNameAgentSuspensionByBaseWithResponse call
+func ParseGetV0CityByCityNameAgentSuspensionByBaseResponse(rsp *http.Response) (*GetV0CityByCityNameAgentSuspensionByBaseResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetV0CityByCityNameAgentSuspensionByBaseResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AgentSuspensionStateBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON501 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePutV0CityByCityNameAgentSuspensionByBaseResponse parses an HTTP response from a PutV0CityByCityNameAgentSuspensionByBaseWithResponse call
+func ParsePutV0CityByCityNameAgentSuspensionByBaseResponse(rsp *http.Response) (*PutV0CityByCityNameAgentSuspensionByBaseResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PutV0CityByCityNameAgentSuspensionByBaseResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AgentSuspensionSetOutputBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 413:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON413 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON501 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetV0CityByCityNameAgentSuspensionByDirByBaseResponse parses an HTTP response from a GetV0CityByCityNameAgentSuspensionByDirByBaseWithResponse call
+func ParseGetV0CityByCityNameAgentSuspensionByDirByBaseResponse(rsp *http.Response) (*GetV0CityByCityNameAgentSuspensionByDirByBaseResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetV0CityByCityNameAgentSuspensionByDirByBaseResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AgentSuspensionStateBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON501 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePutV0CityByCityNameAgentSuspensionByDirByBaseResponse parses an HTTP response from a PutV0CityByCityNameAgentSuspensionByDirByBaseWithResponse call
+func ParsePutV0CityByCityNameAgentSuspensionByDirByBaseResponse(rsp *http.Response) (*PutV0CityByCityNameAgentSuspensionByDirByBaseResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PutV0CityByCityNameAgentSuspensionByDirByBaseResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AgentSuspensionSetOutputBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 413:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON413 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON501 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseDeleteV0CityByCityNameAgentByBaseResponse parses an HTTP response from a DeleteV0CityByCityNameAgentByBaseWithResponse call
 func ParseDeleteV0CityByCityNameAgentByBaseResponse(rsp *http.Response) (*DeleteV0CityByCityNameAgentByBaseResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -40280,142 +40618,6 @@ func ParseStreamAgentOutputResponse(rsp *http.Response) (*StreamAgentOutputRespo
 			return nil, err
 		}
 		response.ApplicationproblemJSONDefault = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParseGetV0CityByCityNameAgentByBaseSuspensionResponse parses an HTTP response from a GetV0CityByCityNameAgentByBaseSuspensionWithResponse call
-func ParseGetV0CityByCityNameAgentByBaseSuspensionResponse(rsp *http.Response) (*GetV0CityByCityNameAgentByBaseSuspensionResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &GetV0CityByCityNameAgentByBaseSuspensionResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest AgentSuspensionStateBody
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON404 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON422 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON500 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON501 = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParsePutV0CityByCityNameAgentByBaseSuspensionResponse parses an HTTP response from a PutV0CityByCityNameAgentByBaseSuspensionWithResponse call
-func ParsePutV0CityByCityNameAgentByBaseSuspensionResponse(rsp *http.Response) (*PutV0CityByCityNameAgentByBaseSuspensionResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &PutV0CityByCityNameAgentByBaseSuspensionResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest AgentSuspensionSetOutputBody
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON400 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON401 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON403 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON404 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON409 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON422 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON500 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON501 = &dest
 
 	}
 
@@ -40775,142 +40977,6 @@ func ParseStreamAgentOutputQualifiedResponse(rsp *http.Response) (*StreamAgentOu
 			return nil, err
 		}
 		response.ApplicationproblemJSONDefault = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParseGetV0CityByCityNameAgentByDirByBaseSuspensionResponse parses an HTTP response from a GetV0CityByCityNameAgentByDirByBaseSuspensionWithResponse call
-func ParseGetV0CityByCityNameAgentByDirByBaseSuspensionResponse(rsp *http.Response) (*GetV0CityByCityNameAgentByDirByBaseSuspensionResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &GetV0CityByCityNameAgentByDirByBaseSuspensionResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest AgentSuspensionStateBody
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON404 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON422 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON500 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON501 = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParsePutV0CityByCityNameAgentByDirByBaseSuspensionResponse parses an HTTP response from a PutV0CityByCityNameAgentByDirByBaseSuspensionWithResponse call
-func ParsePutV0CityByCityNameAgentByDirByBaseSuspensionResponse(rsp *http.Response) (*PutV0CityByCityNameAgentByDirByBaseSuspensionResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &PutV0CityByCityNameAgentByDirByBaseSuspensionResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest AgentSuspensionSetOutputBody
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON400 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON401 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON403 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON404 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON409 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON422 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON500 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON501 = &dest
 
 	}
 

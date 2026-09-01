@@ -98,7 +98,7 @@ func TestMint_ProducesVerifiableGrant(t *testing.T) {
 
 func TestMintV2ProducesCIDBoundGrant(t *testing.T) {
 	pub, priv := testKey(t)
-	info := infoFor("PUT", "/v0/city/mc/agent/worker/suspension", "", []byte(`{"expected_token":"x","suspended":false}`))
+	info := infoFor("PUT", "/v0/city/mc/agent-suspension/worker", "", []byte(`{"expected_token":"x","suspended":false}`))
 	info.Aud = citywriteauth.AudienceCityWriteV2
 	info.CID = "city_mc"
 	p := baseParams(priv)

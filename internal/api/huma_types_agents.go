@@ -180,7 +180,7 @@ type AgentSuspensionOutput struct{ Body AgentSuspensionStateBody }
 // AgentSuspensionStateBody is the typed suspension-token response.
 type AgentSuspensionStateBody struct {
 	Suspended bool   `json:"suspended"`
-	Token     string `json:"token"`
+	Token     string `json:"token" minLength:"64" maxLength:"64" pattern:"^[0-9a-f]{64}$" doc:"Server-issued exact target-state/config-source token."`
 }
 
 // AgentSuspensionSetOutput proves the exact before and after states.

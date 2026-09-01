@@ -54,7 +54,7 @@ export const zAgentSuspensionSetQualifiedInputBody = z.object({
 
 export const zAgentSuspensionStateBody = z.object({
     suspended: z.boolean(),
-    token: z.string()
+    token: z.string().length(64).regex(/^[0-9a-f]{64}$/)
 });
 
 export const zAgentSuspensionSetOutputBody = z.object({
@@ -7215,6 +7215,60 @@ export const zPatchV0CityByCityNamePath = z.object({
  */
 export const zPatchV0CityByCityNameResponse = zOkResponseBody;
 
+export const zGetV0CityByCityNameAgentSuspensionByBasePath = z.object({
+    cityName: z.string().min(1).regex(/\S/),
+    base: z.string()
+});
+
+/**
+ * OK
+ */
+export const zGetV0CityByCityNameAgentSuspensionByBaseResponse = zAgentSuspensionStateBody;
+
+export const zPutV0CityByCityNameAgentSuspensionByBaseBody = zAgentSuspensionSetInputBody;
+
+export const zPutV0CityByCityNameAgentSuspensionByBaseHeaders = z.object({
+    'X-GC-Request': z.string().min(1)
+});
+
+export const zPutV0CityByCityNameAgentSuspensionByBasePath = z.object({
+    cityName: z.string().min(1).regex(/\S/),
+    base: z.string()
+});
+
+/**
+ * OK
+ */
+export const zPutV0CityByCityNameAgentSuspensionByBaseResponse = zAgentSuspensionSetOutputBody;
+
+export const zGetV0CityByCityNameAgentSuspensionByDirByBasePath = z.object({
+    cityName: z.string().min(1).regex(/\S/),
+    dir: z.string(),
+    base: z.string()
+});
+
+/**
+ * OK
+ */
+export const zGetV0CityByCityNameAgentSuspensionByDirByBaseResponse = zAgentSuspensionStateBody;
+
+export const zPutV0CityByCityNameAgentSuspensionByDirByBaseBody = zAgentSuspensionSetQualifiedInputBody;
+
+export const zPutV0CityByCityNameAgentSuspensionByDirByBaseHeaders = z.object({
+    'X-GC-Request': z.string().min(1)
+});
+
+export const zPutV0CityByCityNameAgentSuspensionByDirByBasePath = z.object({
+    cityName: z.string().min(1).regex(/\S/),
+    dir: z.string(),
+    base: z.string()
+});
+
+/**
+ * OK
+ */
+export const zPutV0CityByCityNameAgentSuspensionByDirByBaseResponse = zAgentSuspensionSetOutputBody;
+
 export const zDeleteV0CityByCityNameAgentByBaseHeaders = z.object({
     'X-GC-Request': z.string().min(1)
 });
@@ -7291,32 +7345,6 @@ export const zStreamAgentOutputResponse = z.array(z.union([z.object({
         id: z.int().optional(),
         retry: z.int().optional()
     })]));
-
-export const zGetV0CityByCityNameAgentByBaseSuspensionPath = z.object({
-    cityName: z.string().min(1).regex(/\S/),
-    base: z.string()
-});
-
-/**
- * OK
- */
-export const zGetV0CityByCityNameAgentByBaseSuspensionResponse = zAgentSuspensionStateBody;
-
-export const zPutV0CityByCityNameAgentByBaseSuspensionBody = zAgentSuspensionSetInputBody;
-
-export const zPutV0CityByCityNameAgentByBaseSuspensionHeaders = z.object({
-    'X-GC-Request': z.string().min(1)
-});
-
-export const zPutV0CityByCityNameAgentByBaseSuspensionPath = z.object({
-    cityName: z.string().min(1).regex(/\S/),
-    base: z.string()
-});
-
-/**
- * OK
- */
-export const zPutV0CityByCityNameAgentByBaseSuspensionResponse = zAgentSuspensionSetOutputBody;
 
 export const zPostV0CityByCityNameAgentByBaseByActionHeaders = z.object({
     'X-GC-Request': z.string().min(1)
@@ -7414,34 +7442,6 @@ export const zStreamAgentOutputQualifiedResponse = z.array(z.union([z.object({
         id: z.int().optional(),
         retry: z.int().optional()
     })]));
-
-export const zGetV0CityByCityNameAgentByDirByBaseSuspensionPath = z.object({
-    cityName: z.string().min(1).regex(/\S/),
-    dir: z.string(),
-    base: z.string()
-});
-
-/**
- * OK
- */
-export const zGetV0CityByCityNameAgentByDirByBaseSuspensionResponse = zAgentSuspensionStateBody;
-
-export const zPutV0CityByCityNameAgentByDirByBaseSuspensionBody = zAgentSuspensionSetQualifiedInputBody;
-
-export const zPutV0CityByCityNameAgentByDirByBaseSuspensionHeaders = z.object({
-    'X-GC-Request': z.string().min(1)
-});
-
-export const zPutV0CityByCityNameAgentByDirByBaseSuspensionPath = z.object({
-    cityName: z.string().min(1).regex(/\S/),
-    dir: z.string(),
-    base: z.string()
-});
-
-/**
- * OK
- */
-export const zPutV0CityByCityNameAgentByDirByBaseSuspensionResponse = zAgentSuspensionSetOutputBody;
 
 export const zPostV0CityByCityNameAgentByDirByBaseByActionHeaders = z.object({
     'X-GC-Request': z.string().min(1)

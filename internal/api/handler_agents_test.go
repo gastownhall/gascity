@@ -635,6 +635,36 @@ func TestAgentGet(t *testing.T) {
 	}
 }
 
+// The conditional-suspension API deliberately lives outside /agent. If it
+// used /agent/{base}/suspension, chi's literal-segment precedence would route
+// this valid qualified agent name to the suspension handler instead of the
+// long-established agent-detail handler.
+func TestAgentGetQualifiedBaseNamedSuspensionIsNotShadowed(t *testing.T) {
+	state := newFakeState(t)
+	state.cfg.Agents = append(state.cfg.Agents, config.Agent{
+		Name:              "suspension",
+		Dir:               "myrig",
+		Provider:          "test-agent",
+		MaxActiveSessions: intPtr(1),
+	})
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/agent/myrig/suspension"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var resp agentResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Name != "myrig/suspension" {
+		t.Fatalf("Name = %q, want qualified agent detail %q", resp.Name, "myrig/suspension")
+	}
+}
+
 func TestAgentGetActiveBeadUsesSessionIDOwnership(t *testing.T) {
 	state := newFakeState(t)
 	sessionName := "myrig--worker"

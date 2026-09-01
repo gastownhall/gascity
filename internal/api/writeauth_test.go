@@ -550,7 +550,7 @@ func TestConditionalSuspensionThroughRealWriteGrant(t *testing.T) {
 		WithAnyHostAllowed().WithWriteAuth(newTestWriteVerifier(t, pub, now))
 	h := sm.Handler()
 	city := state.CityName()
-	getPath := "/v0/city/" + city + "/agent/mayor/suspension"
+	getPath := "/v0/city/" + city + "/agent-suspension/mayor"
 	getRec := httptest.NewRecorder()
 	h.ServeHTTP(getRec, httptest.NewRequest(http.MethodGet, getPath, nil))
 	if getRec.Code != http.StatusOK {
@@ -622,7 +622,7 @@ func TestConditionalSuspensionThroughRealWriteGrant(t *testing.T) {
 		t.Fatal("concurrent opposite requests did not preserve CAS ordering")
 	}
 
-	qualifiedPath := "/v0/city/" + city + "/agent/myrig/worker/suspension"
+	qualifiedPath := "/v0/city/" + city + "/agent-suspension/myrig/worker"
 	qualifiedGet := httptest.NewRecorder()
 	h.ServeHTTP(qualifiedGet, httptest.NewRequest(http.MethodGet, qualifiedPath, nil))
 	if qualifiedGet.Code != http.StatusOK {

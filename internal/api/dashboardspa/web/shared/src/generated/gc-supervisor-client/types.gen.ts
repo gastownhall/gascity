@@ -210,6 +210,9 @@ export type AgentSuspensionSetQualifiedInputBody = {
 
 export type AgentSuspensionStateBody = {
     suspended: boolean;
+    /**
+     * Server-issued exact target-state/config-source token.
+     */
     token: string;
 };
 
@@ -9765,6 +9768,274 @@ export type PatchV0CityByCityNameResponses = {
 
 export type PatchV0CityByCityNameResponse = PatchV0CityByCityNameResponses[keyof PatchV0CityByCityNameResponses];
 
+export type GetV0CityByCityNameAgentSuspensionByBaseData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Agent name (unqualified).
+         */
+        base: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/agent-suspension/{base}';
+};
+
+export type GetV0CityByCityNameAgentSuspensionByBaseErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Unauthorized
+     */
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Not Implemented
+     */
+    501: ErrorModel;
+};
+
+export type GetV0CityByCityNameAgentSuspensionByBaseError = GetV0CityByCityNameAgentSuspensionByBaseErrors[keyof GetV0CityByCityNameAgentSuspensionByBaseErrors];
+
+export type GetV0CityByCityNameAgentSuspensionByBaseResponses = {
+    /**
+     * OK
+     */
+    200: AgentSuspensionStateBody;
+};
+
+export type GetV0CityByCityNameAgentSuspensionByBaseResponse = GetV0CityByCityNameAgentSuspensionByBaseResponses[keyof GetV0CityByCityNameAgentSuspensionByBaseResponses];
+
+export type PutV0CityByCityNameAgentSuspensionByBaseData = {
+    body: AgentSuspensionSetInputBody;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Agent name (unqualified).
+         */
+        base: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/agent-suspension/{base}';
+};
+
+export type PutV0CityByCityNameAgentSuspensionByBaseErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Unauthorized
+     */
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Request Entity Too Large
+     */
+    413: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Not Implemented
+     */
+    501: ErrorModel;
+};
+
+export type PutV0CityByCityNameAgentSuspensionByBaseError = PutV0CityByCityNameAgentSuspensionByBaseErrors[keyof PutV0CityByCityNameAgentSuspensionByBaseErrors];
+
+export type PutV0CityByCityNameAgentSuspensionByBaseResponses = {
+    /**
+     * OK
+     */
+    200: AgentSuspensionSetOutputBody;
+};
+
+export type PutV0CityByCityNameAgentSuspensionByBaseResponse = PutV0CityByCityNameAgentSuspensionByBaseResponses[keyof PutV0CityByCityNameAgentSuspensionByBaseResponses];
+
+export type GetV0CityByCityNameAgentSuspensionByDirByBaseData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Agent directory (rig name).
+         */
+        dir: string;
+        /**
+         * Agent base name.
+         */
+        base: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/agent-suspension/{dir}/{base}';
+};
+
+export type GetV0CityByCityNameAgentSuspensionByDirByBaseErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Unauthorized
+     */
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Not Implemented
+     */
+    501: ErrorModel;
+};
+
+export type GetV0CityByCityNameAgentSuspensionByDirByBaseError = GetV0CityByCityNameAgentSuspensionByDirByBaseErrors[keyof GetV0CityByCityNameAgentSuspensionByDirByBaseErrors];
+
+export type GetV0CityByCityNameAgentSuspensionByDirByBaseResponses = {
+    /**
+     * OK
+     */
+    200: AgentSuspensionStateBody;
+};
+
+export type GetV0CityByCityNameAgentSuspensionByDirByBaseResponse = GetV0CityByCityNameAgentSuspensionByDirByBaseResponses[keyof GetV0CityByCityNameAgentSuspensionByDirByBaseResponses];
+
+export type PutV0CityByCityNameAgentSuspensionByDirByBaseData = {
+    body: AgentSuspensionSetQualifiedInputBody;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Agent directory (rig name).
+         */
+        dir: string;
+        /**
+         * Agent base name.
+         */
+        base: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/agent-suspension/{dir}/{base}';
+};
+
+export type PutV0CityByCityNameAgentSuspensionByDirByBaseErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Unauthorized
+     */
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Request Entity Too Large
+     */
+    413: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Not Implemented
+     */
+    501: ErrorModel;
+};
+
+export type PutV0CityByCityNameAgentSuspensionByDirByBaseError = PutV0CityByCityNameAgentSuspensionByDirByBaseErrors[keyof PutV0CityByCityNameAgentSuspensionByDirByBaseErrors];
+
+export type PutV0CityByCityNameAgentSuspensionByDirByBaseResponses = {
+    /**
+     * OK
+     */
+    200: AgentSuspensionSetOutputBody;
+};
+
+export type PutV0CityByCityNameAgentSuspensionByDirByBaseResponse = PutV0CityByCityNameAgentSuspensionByDirByBaseResponses[keyof PutV0CityByCityNameAgentSuspensionByDirByBaseResponses];
+
 export type DeleteV0CityByCityNameAgentByBaseData = {
     body?: never;
     headers: {
@@ -10057,120 +10328,6 @@ export type StreamAgentOutputResponses = {
 };
 
 export type StreamAgentOutputResponse = StreamAgentOutputResponses[keyof StreamAgentOutputResponses];
-
-export type GetV0CityByCityNameAgentByBaseSuspensionData = {
-    body?: never;
-    path: {
-        /**
-         * City name.
-         */
-        cityName: string;
-        /**
-         * Agent name (unqualified).
-         */
-        base: string;
-    };
-    query?: never;
-    url: '/v0/city/{cityName}/agent/{base}/suspension';
-};
-
-export type GetV0CityByCityNameAgentByBaseSuspensionErrors = {
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Not Implemented
-     */
-    501: ErrorModel;
-};
-
-export type GetV0CityByCityNameAgentByBaseSuspensionError = GetV0CityByCityNameAgentByBaseSuspensionErrors[keyof GetV0CityByCityNameAgentByBaseSuspensionErrors];
-
-export type GetV0CityByCityNameAgentByBaseSuspensionResponses = {
-    /**
-     * OK
-     */
-    200: AgentSuspensionStateBody;
-};
-
-export type GetV0CityByCityNameAgentByBaseSuspensionResponse = GetV0CityByCityNameAgentByBaseSuspensionResponses[keyof GetV0CityByCityNameAgentByBaseSuspensionResponses];
-
-export type PutV0CityByCityNameAgentByBaseSuspensionData = {
-    body: AgentSuspensionSetInputBody;
-    headers: {
-        /**
-         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
-         */
-        'X-GC-Request': string;
-    };
-    path: {
-        /**
-         * City name.
-         */
-        cityName: string;
-        /**
-         * Agent name (unqualified).
-         */
-        base: string;
-    };
-    query?: never;
-    url: '/v0/city/{cityName}/agent/{base}/suspension';
-};
-
-export type PutV0CityByCityNameAgentByBaseSuspensionErrors = {
-    /**
-     * Bad Request
-     */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Not Implemented
-     */
-    501: ErrorModel;
-};
-
-export type PutV0CityByCityNameAgentByBaseSuspensionError = PutV0CityByCityNameAgentByBaseSuspensionErrors[keyof PutV0CityByCityNameAgentByBaseSuspensionErrors];
-
-export type PutV0CityByCityNameAgentByBaseSuspensionResponses = {
-    /**
-     * OK
-     */
-    200: AgentSuspensionSetOutputBody;
-};
-
-export type PutV0CityByCityNameAgentByBaseSuspensionResponse = PutV0CityByCityNameAgentByBaseSuspensionResponses[keyof PutV0CityByCityNameAgentByBaseSuspensionResponses];
 
 export type PostV0CityByCityNameAgentByBaseByActionData = {
     body?: never;
@@ -10552,128 +10709,6 @@ export type StreamAgentOutputQualifiedResponses = {
 };
 
 export type StreamAgentOutputQualifiedResponse = StreamAgentOutputQualifiedResponses[keyof StreamAgentOutputQualifiedResponses];
-
-export type GetV0CityByCityNameAgentByDirByBaseSuspensionData = {
-    body?: never;
-    path: {
-        /**
-         * City name.
-         */
-        cityName: string;
-        /**
-         * Agent directory (rig name).
-         */
-        dir: string;
-        /**
-         * Agent base name.
-         */
-        base: string;
-    };
-    query?: never;
-    url: '/v0/city/{cityName}/agent/{dir}/{base}/suspension';
-};
-
-export type GetV0CityByCityNameAgentByDirByBaseSuspensionErrors = {
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Not Implemented
-     */
-    501: ErrorModel;
-};
-
-export type GetV0CityByCityNameAgentByDirByBaseSuspensionError = GetV0CityByCityNameAgentByDirByBaseSuspensionErrors[keyof GetV0CityByCityNameAgentByDirByBaseSuspensionErrors];
-
-export type GetV0CityByCityNameAgentByDirByBaseSuspensionResponses = {
-    /**
-     * OK
-     */
-    200: AgentSuspensionStateBody;
-};
-
-export type GetV0CityByCityNameAgentByDirByBaseSuspensionResponse = GetV0CityByCityNameAgentByDirByBaseSuspensionResponses[keyof GetV0CityByCityNameAgentByDirByBaseSuspensionResponses];
-
-export type PutV0CityByCityNameAgentByDirByBaseSuspensionData = {
-    body: AgentSuspensionSetQualifiedInputBody;
-    headers: {
-        /**
-         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
-         */
-        'X-GC-Request': string;
-    };
-    path: {
-        /**
-         * City name.
-         */
-        cityName: string;
-        /**
-         * Agent directory (rig name).
-         */
-        dir: string;
-        /**
-         * Agent base name.
-         */
-        base: string;
-    };
-    query?: never;
-    url: '/v0/city/{cityName}/agent/{dir}/{base}/suspension';
-};
-
-export type PutV0CityByCityNameAgentByDirByBaseSuspensionErrors = {
-    /**
-     * Bad Request
-     */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Not Implemented
-     */
-    501: ErrorModel;
-};
-
-export type PutV0CityByCityNameAgentByDirByBaseSuspensionError = PutV0CityByCityNameAgentByDirByBaseSuspensionErrors[keyof PutV0CityByCityNameAgentByDirByBaseSuspensionErrors];
-
-export type PutV0CityByCityNameAgentByDirByBaseSuspensionResponses = {
-    /**
-     * OK
-     */
-    200: AgentSuspensionSetOutputBody;
-};
-
-export type PutV0CityByCityNameAgentByDirByBaseSuspensionResponse = PutV0CityByCityNameAgentByDirByBaseSuspensionResponses[keyof PutV0CityByCityNameAgentByDirByBaseSuspensionResponses];
 
 export type PostV0CityByCityNameAgentByDirByBaseByActionData = {
     body?: never;

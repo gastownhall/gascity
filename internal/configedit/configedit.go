@@ -114,18 +114,24 @@ func (e *Editor) AgentSuspension(name string) (AgentSuspensionState, error) {
 	return state, err
 }
 
-// SetAgentSuspendedIf atomically compares a server-issued source token and
-// sets desired state under the same lock. Already-desired state is adopted
-// without writing only when the token still matches.
+// SetAgentSuspendedIf compares a server-issued source token and performs the
+// desired-state write under the same Editor lock. Each file replacement is
+// atomic, and already-desired state is adopted without writing only when the
+// token still matches. This convenience form has no cross-file/post-write
+// rollback callback: a caller that requires "error means no durable change"
+// must use SetAgentSuspendedIfTransaction with a rollback function (as the
+// controller does).
 func (e *Editor) SetAgentSuspendedIf(name, expectedToken string, desired bool) (AgentSuspensionState, AgentSuspensionState, error) {
 	return e.SetAgentSuspendedIfTransaction(name, expectedToken, desired, nil, nil, nil)
 }
 
 // SetAgentSuspendedIfTransaction is SetAgentSuspendedIf with transaction hooks
 // that run under the same Editor lock. beforeChange runs only immediately
-// before a real write; afterChange runs immediately after it. Controller code
-// uses these hooks to keep its rollback snapshot and post-write refresh inside
-// the config-writer serialization boundary.
+// before a real write; afterChange runs immediately after it. If a mutation or
+// afterChange fails, rollback is invoked when non-nil and its error is joined
+// with the forward error. Controller code uses these hooks to keep its rollback
+// snapshot and post-write refresh inside the config-writer serialization
+// boundary.
 func (e *Editor) SetAgentSuspendedIfTransaction(name, expectedToken string, desired bool,
 	beforeChange func() error,
 	afterChange func(AgentSuspensionState, AgentSuspensionState) error,

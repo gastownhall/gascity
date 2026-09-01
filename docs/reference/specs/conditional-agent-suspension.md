@@ -1,8 +1,11 @@
 # Conditional agent suspension
 
-`GET /v0/city/{cityName}/agent/{name}/suspension` returns the durable desired
+`GET /v0/city/{cityName}/agent-suspension/{name}` returns the durable desired
 state and a server-issued SHA-256 token. Rig-qualified agents use
-`/agent/{dir}/{base}/suspension`.
+`/agent-suspension/{dir}/{base}`. Suspension has a sibling namespace instead of
+an `/agent/{name}/suspension` suffix because that suffix would shadow the
+established detail URL of a valid rig-qualified agent named
+`{dir}/suspension`.
 
 `PUT` to the same path accepts exactly:
 

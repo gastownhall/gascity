@@ -87,11 +87,22 @@ type capstoneHarness struct {
 }
 
 func newCapstoneHarness(t *testing.T) *capstoneHarness {
+	return newCapstoneHarnessWithCID(t, "")
+}
+
+func newCapstoneHarnessWithCID(t *testing.T, cid string) *capstoneHarness {
 	t.Helper()
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 	t.Setenv("GC_HOME", t.TempDir())
+	// InstallWriteAuth prefers env configuration over the explicit test key.
+	// Clear every unrelated ambient knob and set only the requested tenancy ID
+	// so this harness deterministically exercises legacy or v2 mode.
+	t.Setenv("GC_CITY_WRITE_PUBKEY", "")
+	t.Setenv("GC_CITY_WRITE_REQUIRED", "")
+	t.Setenv("GC_CITY_WRITE_EPOCH_FLOOR", "")
+	t.Setenv("GC_CITY_WRITE_CID", cid)
 
 	cityName := "capstone-city"
 	cityPath := t.TempDir()
