@@ -896,3 +896,110 @@ func TestProcessAliveWrappedPane(t *testing.T) {
 		t.Fatal("processAlive = false for systemd-run pane with claude child, want true (descendant fallback)")
 	}
 }
+
+// The fleet snapshot must carry attachment and window activity alongside
+// liveness so the reconciler can read them without one `display-message` plus
+// one `list-windows` fork per session (gcy-8gwi: 14.2% of supervisor CPU).
+// Activity is the MAX over every one of the session's pane rows — that is the
+// same value the per-session `list-windows -t <s> -F '#{window_activity}'`
+// read returns, because every window has at least one pane and all panes of a
+// window report their window's activity. It must NOT be
+// tmux's #{session_activity}, which does not advance on detached pane I/O and
+// differs from max(window_activity) by hours on real sessions.
+func TestFetchStateCarriesAttachmentAndMaxWindowActivity(t *testing.T) {
+	fe := &fakeExecutor{
+		// Two sessions. "multi" has three windows with differing activity and
+		// a fourth remain-on-exit corpse window holding the NEWEST timestamp;
+		// "solo" is attached.
+		out: strings.Join([]string{
+			"multi\t0\tclaude\t101\t0\t1000",
+			"multi\t0\tclaude\t102\t0\t3000",
+			"multi\t0\tclaude\t103\t0\t2000",
+			"multi\t1\tbash\t104\t0\t4000",
+			"solo\t0\tcodex\t201\t1\t500",
+		}, "\n"),
+	}
+	f := &tmuxFetcher{tm: &Tmux{cfg: DefaultConfig(), exec: fe}}
+
+	state, err := f.FetchState(context.Background())
+	if err != nil {
+		t.Fatalf("FetchState() error = %v", err)
+	}
+
+	multi := state.Sessions["multi"]
+	if !multi.Running {
+		t.Error("multi.Running = false, want true (it has live panes)")
+	}
+	if multi.Attached {
+		t.Error("multi.Attached = true, want false")
+	}
+	// 4000 comes from the dead pane's row: a remain-on-exit corpse window is
+	// still a window, and the per-session list-windows read reports it, so
+	// dropping it here would silently make a session look older than tmux says.
+	if multi.Activity != 4000 {
+		t.Errorf("multi.Activity = %d, want 4000 (max over ALL window rows, corpse window included)", multi.Activity)
+	}
+
+	solo := state.Sessions["solo"]
+	if !solo.Attached {
+		t.Error("solo.Attached = false, want true")
+	}
+	if solo.Activity != 500 {
+		t.Errorf("solo.Activity = %d, want 500", solo.Activity)
+	}
+
+	if len(fe.calls) != 1 {
+		t.Fatalf("tmux calls = %d (%v), want 1: the whole fleet's attachment and activity come from the single list-panes snapshot", len(fe.calls), fe.calls)
+	}
+}
+
+// A session whose only pane is a remain-on-exit corpse is not running, but it
+// still has a real window-activity timestamp. Recording the activity without
+// setting Running keeps IsRunning/ProcessAlive answering exactly as before
+// while letting the activity read be served from the snapshot.
+func TestFetchStateCorpseSessionKeepsActivityWithoutRunning(t *testing.T) {
+	fe := &fakeExecutor{out: "corpse\t1\tbash\t900\t0\t7000"}
+	f := &tmuxFetcher{tm: &Tmux{cfg: DefaultConfig(), exec: fe}}
+
+	state, err := f.FetchState(context.Background())
+	if err != nil {
+		t.Fatalf("FetchState() error = %v", err)
+	}
+	corpse, ok := state.Sessions["corpse"]
+	if !ok {
+		t.Fatal("corpse session missing from snapshot, want an entry carrying its activity")
+	}
+	if corpse.Running {
+		t.Error("corpse.Running = true, want false (its only pane is dead)")
+	}
+	if corpse.Activity != 7000 {
+		t.Errorf("corpse.Activity = %d, want 7000", corpse.Activity)
+	}
+	if cache := NewStateCache(&mockFetcher{state: state}, time.Hour); cache.IsRunning("corpse") {
+		t.Error("IsRunning(corpse) = true, want false: recording activity must not resurrect a dead-pane session")
+	}
+}
+
+// A session the snapshot has never seen must report a MISS, not a zero
+// timestamp or "detached" — the caller falls back to a direct per-session read
+// rather than acting on a fabricated value.
+func TestStateCacheSessionReadsMissForUnknownSession(t *testing.T) {
+	cache := NewStateCache(&mockFetcher{state: runtimeStateSnapshot{
+		Sessions: map[string]sessionRuntimeState{"known": {Running: true, Attached: true, Activity: 42}},
+	}}, time.Hour)
+
+	if _, ok := cache.SessionActivity("ghost"); ok {
+		t.Error("SessionActivity(ghost) ok = true, want false for a session absent from the snapshot")
+	}
+	if _, ok := cache.SessionAttached("ghost"); ok {
+		t.Error("SessionAttached(ghost) ok = true, want false for a session absent from the snapshot")
+	}
+	activity, ok := cache.SessionActivity("known")
+	if !ok || !activity.Equal(time.Unix(42, 0)) {
+		t.Errorf("SessionActivity(known) = %v, %t, want %v, true", activity, ok, time.Unix(42, 0))
+	}
+	attached, ok := cache.SessionAttached("known")
+	if !ok || !attached {
+		t.Errorf("SessionAttached(known) = %t, %t, want true, true", attached, ok)
+	}
+}

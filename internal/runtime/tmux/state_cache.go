@@ -44,6 +44,13 @@ type paneRuntimeState struct {
 type sessionRuntimeState struct {
 	Running bool
 	Panes   []paneRuntimeState
+	// Attached reports whether any client is attached to the session.
+	Attached bool
+	// Activity is the session's most recent window-activity timestamp (unix
+	// seconds), taken as the MAX over every one of its panes' #{window_activity}
+	// — the same value the per-session `list-windows -t <s>` read returns. Zero
+	// means the snapshot carries no activity for the session.
+	Activity int64
 }
 
 type processRuntimeState struct {
@@ -115,6 +122,31 @@ func (c *StateCache) ProcessAlive(name string, processNames []string) bool {
 		return true
 	}
 	return c.currentState().processAlive(name, processNames)
+}
+
+// SessionAttached reports the cached attachment state for the named session.
+// ok is false when the snapshot holds no row for it — never observed, evicted,
+// or the whole snapshot aged past staleTTL — so the caller falls back to a
+// direct per-session read instead of reading "unknown" as "detached".
+func (c *StateCache) SessionAttached(name string) (attached bool, ok bool) {
+	session, ok := c.currentState().Sessions[name]
+	if !ok {
+		return false, false
+	}
+	return session.Attached, true
+}
+
+// SessionActivity reports the cached max window-activity timestamp for the
+// named session. ok is false when the snapshot holds no activity for it, so
+// the caller falls back to a direct per-session read rather than reporting a
+// zero timestamp — "not observed" and "last active at the epoch" drive
+// different reconciler decisions.
+func (c *StateCache) SessionActivity(name string) (time.Time, bool) {
+	session, ok := c.currentState().Sessions[name]
+	if !ok || session.Activity == 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(session.Activity, 0), true
 }
 
 func (c *StateCache) currentState() runtimeStateSnapshot {
@@ -250,7 +282,7 @@ type tmuxFetcher struct {
 // Sessions where remain-on-exit has kept a dead pane (pane_dead=1) are
 // excluded — they represent exited processes, not running ones.
 func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, error) {
-	out, err := f.tm.runCtx(ctx, "list-panes", "-a", "-F", "#{session_name}\t#{pane_dead}\t#{pane_current_command}\t#{pane_pid}")
+	out, err := f.tm.runCtx(ctx, "list-panes", "-a", "-F", "#{session_name}\t#{pane_dead}\t#{pane_current_command}\t#{pane_pid}\t#{session_attached}\t#{window_activity}")
 	if err != nil {
 		if errors.Is(err, ErrNoCurrentTarget) {
 			// The server ANSWERED and holds zero sessions. gc configures
@@ -294,12 +326,31 @@ func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, err
 	}
 
 	for _, line := range strings.Split(out, "\n") {
-		parts := strings.SplitN(line, "\t", 4)
+		parts := strings.SplitN(line, "\t", 6)
 		if len(parts) < 2 || parts[0] == "" {
 			continue
 		}
 		name := parts[0]
+		session := state.Sessions[name]
+		// Attachment and activity are read from EVERY pane row, dead panes
+		// included. A remain-on-exit corpse window is still a window, and the
+		// per-session `list-windows -t <s> -F '#{window_activity}'` read this
+		// replaces reports it, so skipping those rows would make a session look
+		// older than tmux says it is. Every window has at least one pane and all
+		// panes of a window carry their window's activity, so the max over pane
+		// rows is exactly the max over windows.
+		if len(parts) > 4 && parts[4] == "1" {
+			session.Attached = true
+		}
+		if len(parts) > 5 {
+			if activity, convErr := strconv.ParseInt(strings.TrimSpace(parts[5]), 10, 64); convErr == nil && activity > session.Activity {
+				session.Activity = activity
+			}
+		}
 		if parts[1] == "1" {
+			// A dead pane contributes no liveness: Running stays as-is so a
+			// session whose panes are all corpses is still reported not-running.
+			state.Sessions[name] = session
 			continue
 		}
 		var pane paneRuntimeState
@@ -309,7 +360,6 @@ func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, err
 		if len(parts) > 3 {
 			pane.PID = strings.TrimSpace(parts[3])
 		}
-		session := state.Sessions[name]
 		session.Running = true
 		if pane.Command != "" || pane.PID != "" {
 			session.Panes = append(session.Panes, pane)

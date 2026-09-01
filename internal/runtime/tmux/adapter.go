@@ -316,7 +316,16 @@ func (p *Provider) IsDeadRuntimeSession(name string) (bool, error) {
 }
 
 // IsAttached reports whether a user terminal is connected to the named session.
+//
+// Served from the same short-lived fleet snapshot as IsRunning (one
+// `tmux list-panes -a`), not a `display-message` fork per session: a reconcile
+// pass probes attachment for every session it tracks, so the per-session form
+// cost one tmux process per session per pass. A session missing from the
+// snapshot falls back to the direct read.
 func (p *Provider) IsAttached(name string) bool {
+	if attached, ok := p.cache.SessionAttached(name); ok {
+		return attached
+	}
 	return p.tm.IsSessionAttached(name)
 }
 
@@ -653,8 +662,18 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 }
 
 // GetLastActivity returns the time of the last I/O activity in the named
-// session. Delegates to [Tmux.GetSessionActivity].
+// session.
+//
+// The raw timestamp comes from the same fleet snapshot as IsRunning rather than
+// a `list-windows` fork per session, and the poke discount
+// ([Tmux.discountedActivity]) is applied to it exactly as
+// [Tmux.GetSessionActivity] would. The snapshot carries max(#{window_activity})
+// per session — NOT #{session_activity}, which does not advance on detached
+// pane I/O. A session missing from the snapshot falls back to the direct read.
 func (p *Provider) GetLastActivity(name string) (time.Time, error) {
+	if activity, ok := p.cache.SessionActivity(name); ok {
+		return p.tm.discountedActivity(name, activity), nil
+	}
 	return p.tm.GetSessionActivity(name)
 }
 

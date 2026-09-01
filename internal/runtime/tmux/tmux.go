@@ -2747,13 +2747,22 @@ func (t *Tmux) GetSessionActivity(session string) (time.Time, error) {
 	if err != nil {
 		return time.Time{}, err
 	}
+	return t.discountedActivity(session, wa), nil
+}
+
+// discountedActivity applies the poke discount to an already-read raw window
+// activity. Callers that obtained wa from a batched fleet snapshot instead of a
+// per-session read get the same answer GetSessionActivity would give, so
+// batching cannot silently drop the discount and make every parked agent look
+// freshly active.
+func (t *Tmux) discountedActivity(session string, wa time.Time) time.Time {
 	t.pokeMu.Lock()
 	pk, ok := t.pokes[session]
 	t.pokeMu.Unlock()
 	if !ok {
-		return wa, nil
+		return wa
 	}
-	return discountPokeActivity(wa, pk, time.Now()), nil
+	return discountPokeActivity(wa, pk, time.Now())
 }
 
 // rawSessionActivity returns the most recent tmux per-window activity timestamp.
