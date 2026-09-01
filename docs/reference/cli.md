@@ -224,6 +224,7 @@ gc analyze
 | Subcommand | Description |
 |------------|-------------|
 | [gc analyze reliability](#gc-analyze-reliability) | Correlate session-lifecycle events with model/version/rig |
+| [gc analyze sessions](#gc-analyze-sessions) | Session-start outcomes by template/provider over time |
 
 ## gc analyze reliability
 
@@ -257,6 +258,37 @@ gc analyze reliability [flags]
 | `--model` | string |  | filter to a specific model |
 | `--rig` | string |  | filter to a specific rig |
 | `--since` | string | `7d` | start of the analysis window — duration (1h, 7d) or RFC3339 timestamp |
+| `--until` | string |  | end of the analysis window — duration (0s = now, 30m = 30 minutes ago) or RFC3339 timestamp |
+
+## gc analyze sessions
+
+Sessions reports worker.operation session-start attempts
+(the "start" and "start_resolved" operations), bucketed by time and
+grouped by template and provider, with succeeded/failed/other counts
+and duration_ms statistics per bucket.
+
+The report flags a bucket as a possible provider outage when every
+attempt in it failed and duration_ms is clustered tight — the signature
+of every session-start attempt dying at the same broken stage (e.g. an
+auth handshake) rather than failing independently. Today that signature
+only shows up if someone eyeballs worker.operation events for it; this
+computes it directly.
+
+Read-only: this command never writes events or beads.
+
+```
+gc analyze sessions [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--bucket` | string | `1h` | time-bucket width for the over-time grouping (e.g. 15m, 1h, 1d) |
+| `--city` | string |  | city directory (default: discover from cwd) |
+| `--events` | string |  | explicit events.jsonl path (overrides city discovery) |
+| `--json` | bool |  | emit JSON instead of a table |
+| `--provider` | string |  | filter to a specific provider |
+| `--since` | string | `24h` | start of the analysis window — duration (1h, 7d) or RFC3339 timestamp |
+| `--template` | string |  | filter to a specific template |
 | `--until` | string |  | end of the analysis window — duration (0s = now, 30m = 30 minutes ago) or RFC3339 timestamp |
 
 ## gc bd

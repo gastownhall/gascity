@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "ok",
+    "groups",
+    "total",
+    "skipped",
+    "instrumentation"
+  ],
+  "properties": {
+    "ok": {
+      "const": true
+    },
+    "groups": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "key",
+          "started",
+          "succeeded",
+          "failed",
+          "other",
+          "min_duration_ms",
+          "max_duration_ms",
+          "avg_duration_ms",
+          "possible_outage"
+        ],
+        "properties": {
+          "key": {
+            "type": "object",
+            "required": [
+              "template",
+              "provider",
+              "bucket_start"
+            ],
+            "properties": {
+              "template": {
+                "type": "string"
+              },
+              "provider": {
+                "type": "string"
+              },
+              "bucket_start": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": true
+          },
+          "started": {
+            "type": "integer"
+          },
+          "succeeded": {
+            "type": "integer"
+          },
+          "failed": {
+            "type": "integer"
+          },
+          "other": {
+            "type": "integer"
+          },
+          "min_duration_ms": {
+            "type": "integer"
+          },
+          "max_duration_ms": {
+            "type": "integer"
+          },
+          "avg_duration_ms": {
+            "type": "number"
+          },
+          "possible_outage": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "total": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "skipped": {
+      "type": "integer"
+    },
+    "instrumentation": {
+      "type": "object",
+      "required": [
+        "start_attempts",
+        "missing_template",
+        "missing_provider"
+      ],
+      "properties": {
+        "start_attempts": {
+          "type": "integer"
+        },
+        "missing_template": {
+          "type": "integer"
+        },
+        "missing_provider": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}
