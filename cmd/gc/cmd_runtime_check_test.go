@@ -236,9 +236,9 @@ func TestRuntimeCheckCmd_WarnsAndPassesThroughWhenCityConfigFailsToLoad(t *testi
 	t.Setenv("GC_CITY", cityDir)
 
 	var stderr bytes.Buffer
-	target, note := resolveRuntimeCheckTarget("someruntime", &stderr)
-	if target != "someruntime" || note != "" {
-		t.Fatalf("target, note = %q, %q; want passthrough with no resolution note", target, note)
+	target, note, promptDelivery := resolveRuntimeCheckTarget("someruntime", &stderr)
+	if target != "someruntime" || note != "" || promptDelivery != "" {
+		t.Fatalf("target, note, promptDelivery = %q, %q, %q; want passthrough with no resolution note", target, note, promptDelivery)
 	}
 	if !strings.Contains(stderr.String(), "warning: city config not loaded") {
 		t.Errorf("stderr = %q, want the config-load warning", stderr.String())
@@ -250,9 +250,9 @@ func TestRuntimeCheckCmd_UndeclaredBareNamePassesThrough(t *testing.T) {
 	t.Setenv("GC_CITY", cityDir)
 
 	var stderr bytes.Buffer
-	target, note := resolveRuntimeCheckTarget("undeclared", &stderr)
-	if target != "undeclared" || note != "" {
-		t.Fatalf("target, note = %q, %q; want silent passthrough to PATH resolution", target, note)
+	target, note, promptDelivery := resolveRuntimeCheckTarget("undeclared", &stderr)
+	if target != "undeclared" || note != "" || promptDelivery != "" {
+		t.Fatalf("target, note, promptDelivery = %q, %q, %q; want silent passthrough to PATH resolution", target, note, promptDelivery)
 	}
 	if got := stderr.String(); got != "" {
 		t.Errorf("stderr = %q, want empty for a cleanly-loaded city without the name", got)

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime/rppcheck"
 	"github.com/spf13/cobra"
 )
@@ -47,13 +48,14 @@ The protocol contract is docs/reference/exec-session-provider.md.`,
 			ctx, stopSignals := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stopSignals()
 
-			target, note := resolveRuntimeCheckTarget(args[0], stderr)
+			target, note, promptDelivery := resolveRuntimeCheckTarget(args[0], stderr)
 			if note != "" {
 				fmt.Fprintln(stdout, note) //nolint:errcheck // best-effort stdout
 			}
 			res, err := rppcheck.Run(ctx, target, rppcheck.Options{
-				Command:     command,
-				SessionName: sessionName,
+				Command:      command,
+				SessionName:  sessionName,
+				RequireNudge: promptDelivery == config.PromptDeliveryNudgeFallback,
 			})
 			if err != nil {
 				fmt.Fprintf(stderr, "gc runtime check: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -92,29 +94,32 @@ The protocol contract is docs/reference/exec-session-provider.md.`,
 
 // resolveRuntimeCheckTarget maps a pack-declared runtime name to its
 // declared command via the current city's config (RUNTIME-RPP-010), and
-// returns a note announcing the resolution. Path-like arguments and
-// existing files are the executable itself; without a resolvable city, or
-// when the name is not declared, the argument passes through unchanged
-// (the checker PATH-resolves bare names like the exec provider does).
-func resolveRuntimeCheckTarget(arg string, stderr io.Writer) (target, note string) {
+// returns a note announcing the resolution plus the runtime's declared
+// PromptDelivery strategy (empty unless resolution succeeds), so the
+// caller can require the nudge-fallback smoke test (FR5, ga-s5y62b.2) when
+// the pack claims it. Path-like arguments and existing files are the
+// executable itself; without a resolvable city, or when the name is not
+// declared, the argument passes through unchanged (the checker
+// PATH-resolves bare names like the exec provider does).
+func resolveRuntimeCheckTarget(arg string, stderr io.Writer) (target, note, promptDelivery string) {
 	if strings.Contains(arg, "/") {
-		return arg, ""
+		return arg, "", ""
 	}
 	if _, err := os.Stat(arg); err == nil {
-		return arg, ""
+		return arg, "", ""
 	}
 	cityPath, err := resolveCity()
 	if err != nil {
-		return arg, ""
+		return arg, "", ""
 	}
 	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc runtime check: warning: city config not loaded (%v); treating %q as an executable\n", err, arg) //nolint:errcheck // best-effort stderr
-		return arg, ""
+		return arg, "", ""
 	}
 	rt, ok := cfg.Runtimes[arg]
 	if !ok {
-		return arg, ""
+		return arg, "", ""
 	}
-	return rt.Command, fmt.Sprintf("resolved runtime %q from pack %q: %s", arg, rt.PackName, rt.Command)
+	return rt.Command, fmt.Sprintf("resolved runtime %q from pack %q: %s", arg, rt.PackName, rt.Command), rt.PromptDelivery
 }
