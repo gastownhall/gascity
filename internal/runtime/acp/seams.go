@@ -101,14 +101,10 @@ func (pl *acpPlace) Exec(context.Context, runtime.ExecRequest) (runtime.ExecResu
 	return runtime.ExecResult{}, runtime.ErrExecUnsupported
 }
 
-// Stage copies entries into the session workdir via CopyTo (←CopyTo). Best-effort.
+// Stage copies the complete batch into the session workdir via one CopyTo
+// preflight (←CopyTo). Best-effort.
 func (pl *acpPlace) Stage(_ context.Context, files []runtime.CopyEntry) error {
-	for _, f := range files {
-		if err := pl.p.CopyTo(pl.name, f.Src, f.RelDst); err != nil {
-			return err
-		}
-	}
-	return nil
+	return pl.p.CopyBatchTo(pl.name, files)
 }
 
 func (pl *acpPlace) IsRunning(_ context.Context) (bool, error) {

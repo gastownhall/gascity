@@ -114,7 +114,11 @@ func newProvider(dir string) *Provider {
 // Returns an error if a session with that name is already running.
 // Startup hints (ReadyPromptPrefix, ProcessNames, etc.) are ignored —
 // all sessions are fire-and-forget.
-func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) error {
+func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := runtime.ValidateCopyEntries(cfg.CopyFiles); err != nil {
+		return fmt.Errorf("starting session %q: %w", name, err)
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	euid := os.Geteuid()
@@ -140,10 +144,12 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 		delete(p.workDirs, name)
 	}
 
-	if err := runtime.StageSessionWorkDir(cfg); err != nil {
+	preparedCfg, err := runtime.PrepareSessionWorkDir(ctx, cfg)
+	if err != nil {
 		clearWorkDir()
-		return fmt.Errorf("staging workdir for %q: %w", name, err)
+		return fmt.Errorf("preparing workdir for %q: %w", name, err)
 	}
+	cfg = preparedCfg
 
 	command := cfg.Command
 	if command == "" {
@@ -468,20 +474,29 @@ func (p *Provider) ClearScrollback(_ string) error {
 // CopyTo copies src into the named session's working directory at relDst.
 // Best-effort: returns nil if session unknown or src missing.
 func (p *Provider) CopyTo(name, src, relDst string) error {
+	return p.CopyBatchTo(name, []runtime.CopyEntry{{Src: src, RelDst: relDst}})
+}
+
+// CopyBatchTo copies a complete batch through one local staging preflight.
+// This prevents Place.Stage from writing early entries before a later
+// malformed or symlink-escaping destination is rejected.
+func (p *Provider) CopyBatchTo(name string, files []runtime.CopyEntry) error {
+	if len(files) == 0 {
+		return nil
+	}
+	if err := runtime.ValidateCopyEntries(files); err != nil {
+		return err
+	}
 	p.mu.Lock()
 	wd := p.workDirs[name]
 	p.mu.Unlock()
 	if wd == "" {
 		return nil
 	}
-	if _, err := os.Stat(src); err != nil {
-		return nil
+	if err := runtime.StageWorkDir(wd, "", files); err != nil {
+		return fmt.Errorf("copying into session %q: %w", name, err)
 	}
-	dst := wd
-	if relDst != "" {
-		dst = filepath.Join(wd, relDst)
-	}
-	return runtime.StagePath(src, dst)
+	return nil
 }
 
 // ListRunning returns the names of all running sessions whose names

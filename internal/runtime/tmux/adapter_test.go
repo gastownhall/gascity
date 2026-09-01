@@ -130,6 +130,40 @@ func TestProvider_StartWithEnv(t *testing.T) {
 	}
 }
 
+func TestProvider_StartStagesFilesAfterPreStartCreatesWorkDir(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	cfg := DefaultConfig()
+	cfg.SocketName = testSocketName
+	p := NewProviderWithConfig(cfg)
+	name := "gc-test-prestart-staging"
+	_ = p.Stop(name)
+	t.Cleanup(func() { _ = p.Stop(name) })
+
+	root := t.TempDir()
+	workDir := filepath.Join(root, "per-bead-worktree")
+	src := filepath.Join(root, "seed.txt")
+	if err := os.WriteFile(src, []byte("seed"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	err := p.Start(context.Background(), name, runtime.Config{
+		Command:   "sleep 300",
+		WorkDir:   workDir,
+		PreStart:  []string{"mkdir -p " + shellquote.Quote(workDir)},
+		CopyFiles: []runtime.CopyEntry{{Src: src, RelDst: "seed.txt"}},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(workDir, "seed.txt")); err != nil {
+		t.Fatalf("read staged file: %v", err)
+	} else if string(data) != "seed" {
+		t.Fatalf("staged file = %q, want seed", data)
+	}
+}
+
 func TestProvider_StartUnsetsControllerColorEnvironment(t *testing.T) {
 	if !hasTmux() {
 		t.Skip("tmux not installed")

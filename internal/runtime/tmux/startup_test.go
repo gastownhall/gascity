@@ -1662,10 +1662,11 @@ func TestDoRelaunchSession_PreStartRunsBeforeRespawn(t *testing.T) {
 	ops := &fakeStartOps{
 		hasSessionResult: true,
 	}
+	workDir := t.TempDir()
 
 	cfg := runtime.Config{
 		Command:  "claude",
-		WorkDir:  "/proj",
+		WorkDir:  workDir,
 		PreStart: []string{"setup-worktree"},
 	}
 
@@ -1686,6 +1687,41 @@ func TestDoRelaunchSession_PreStartRunsBeforeRespawn(t *testing.T) {
 	}
 	if pre.timeout != DefaultConfig().SetupTimeout {
 		t.Errorf("pre_start timeout = %v, want %v", pre.timeout, DefaultConfig().SetupTimeout)
+	}
+}
+
+func TestDoRelaunchSessionRejectsNestedSymlinkBeforeRespawn(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(root, "work")
+	outside := filepath.Join(root, "outside")
+	src := filepath.Join(root, "seed.txt")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll workdir: %v", err)
+	}
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatalf("MkdirAll outside: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(workDir, "nested")); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+	if err := os.WriteFile(src, []byte("seed"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	ops := &fakeStartOps{hasSessionResult: true}
+	err := doRelaunchSession(context.Background(), ops, "test", runtime.Config{
+		Command: "claude",
+		WorkDir: workDir,
+		CopyFiles: []runtime.CopyEntry{{
+			Src:    src,
+			RelDst: filepath.Join("nested", "seed.txt"),
+		}},
+	}, DefaultConfig().SetupTimeout)
+	if err == nil {
+		t.Fatal("relaunch succeeded, want symlink destination rejection")
+	}
+	if containsMethod(ops.callMethods(), "respawnAgent") {
+		t.Fatalf("respawnAgent called after unsafe preflight: %v", ops.callMethods())
 	}
 }
 
@@ -1964,9 +2000,10 @@ func TestDoStartSession_SetupEnvPassthrough(t *testing.T) {
 // disableMouseAndActivity (those are box/provision-half, already applied).
 func TestDoRelaunchSession_RespawnsThenOrchestrates(t *testing.T) {
 	ops := &fakeStartOps{hasSessionResult: true}
+	workDir := t.TempDir()
 
 	cfg := runtime.Config{
-		WorkDir:           "/proj",
+		WorkDir:           workDir,
 		Command:           "claude",
 		ReadyPromptPrefix: "> ",
 		ReadyDelayMs:      5000,
@@ -1992,8 +2029,8 @@ func TestDoRelaunchSession_RespawnsThenOrchestrates(t *testing.T) {
 	if respawn.name != "gc-city-agent-a" {
 		t.Errorf("respawnAgent name = %q, want %q", respawn.name, "gc-city-agent-a")
 	}
-	if respawn.workDir != "/proj" {
-		t.Errorf("respawnAgent workDir = %q, want %q", respawn.workDir, "/proj")
+	if respawn.workDir != workDir {
+		t.Errorf("respawnAgent workDir = %q, want %q", respawn.workDir, workDir)
 	}
 	if respawn.command != "env -u CI -u NO_COLOR claude" {
 		t.Errorf("respawnAgent command = %q, want %q", respawn.command, "env -u CI -u NO_COLOR claude")

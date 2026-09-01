@@ -92,6 +92,31 @@ func (p *Provider) TeardownServer() error { return p.c.stopServer() }
 // placed workspace/tab, runs session_setup, and delivers the startup nudge
 // once the agent reaches idle.
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	// Herdr starts a shared server before its per-session staging path. Do the
+	// complete local, symlink-aware preflight first so malformed input cannot
+	// mutate that server. A missing workdir is the one valid deferred case: run
+	// its host-side pre_start before configuring the server, then validate the
+	// newly materialized directory again.
+	if err := runtime.ValidateStageSessionWorkDir(cfg); err != nil {
+		if !errors.Is(err, runtime.ErrWorkDirPendingPreStart) {
+			return fmt.Errorf("herdr: staging preflight: %w", err)
+		}
+		// Refuse an already-running session before the deferred pre_start path
+		// can run. This preserves Start's idempotence even when the requested
+		// workdir does not exist yet. Malformed input has already returned above,
+		// so this lookup cannot weaken the no-infrastructure-before-validation
+		// boundary.
+		if p.IsRunning(name) {
+			return runtime.ErrSessionExists
+		}
+		if err := p.runPreStart(ctx, cfg); err != nil {
+			return fmt.Errorf("herdr: running pre_start: %w", err)
+		}
+		cfg.PreStart = nil
+		if err := runtime.ValidateStageSessionWorkDir(cfg); err != nil {
+			return fmt.Errorf("herdr: staging preflight after pre_start: %w", err)
+		}
+	}
 	if err := p.ConfigureServer(); err != nil {
 		return fmt.Errorf("herdr: configure server: %w", err)
 	}
@@ -118,11 +143,23 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 	// Before this, herdr never staged or ran pre_start — per-bead worktrees were
 	// never materialized and effectiveWorkDir silently dropped agents in the city
 	// root.
+	stagingDeferred := false
 	if err := runtime.StageSessionWorkDir(cfg); err != nil {
-		return fmt.Errorf("herdr: staging workdir for %q: %w", name, err)
+		if !errors.Is(err, runtime.ErrWorkDirPendingPreStart) {
+			if errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("herdr: workdir unavailable after staging/pre_start for %q: %w", name, err)
+			}
+			return fmt.Errorf("herdr: staging workdir for %q: %w", name, err)
+		}
+		stagingDeferred = true
 	}
 	if err := p.runPreStart(ctx, cfg); err != nil {
 		return fmt.Errorf("herdr: running pre_start: %w", err)
+	}
+	if stagingDeferred {
+		if err := runtime.StageSessionWorkDir(cfg); err != nil {
+			return fmt.Errorf("herdr: staging workdir for %q after pre_start: %w", name, err)
+		}
 	}
 	workDir, err := effectiveWorkDir(cfg, p.c.cityRoot)
 	if err != nil {
@@ -936,6 +973,9 @@ func (p *Provider) RunLive(_ string, _ runtime.Config) error { return nil }
 
 // CopyTo copies a local path into the agent's working directory (best-effort).
 func (p *Provider) CopyTo(name, src, relDst string) error {
+	if err := runtime.ValidateCopyRelDst(relDst); err != nil {
+		return err
+	}
 	if _, err := os.Stat(src); err != nil {
 		return nil // best-effort: missing src
 	}
@@ -949,7 +989,10 @@ func (p *Provider) CopyTo(name, src, relDst string) error {
 	if relDst == "" {
 		relDst = filepath.Base(src)
 	}
-	return copyPath(src, filepath.Join(a.Cwd, relDst))
+	if err := runtime.StageWorkDir(a.Cwd, "", []runtime.CopyEntry{{Src: src, RelDst: relDst}}); err != nil {
+		return fmt.Errorf("herdr: copying into session %q: %w", name, err)
+	}
+	return nil
 }
 
 // ── metadata sidecar (herdr has no per-session KV) ───────────────────────────
@@ -1186,7 +1229,7 @@ func lastSegment(s string) string {
 // server cwd (itself pinned to the city root in startServer).
 func effectiveWorkDir(cfg runtime.Config, cityRoot string) (string, error) {
 	if cfg.WorkDir != "" {
-		if _, err := os.Stat(cfg.WorkDir); err != nil {
+		if err := runtime.ValidateLocalWorkDir(cfg.WorkDir); err != nil {
 			return "", fmt.Errorf("workdir %q unavailable after staging/pre_start (refusing fallback launch dir): %w", cfg.WorkDir, err)
 		}
 		return cfg.WorkDir, nil
@@ -1236,35 +1279,4 @@ func translateKey(k string) string {
 // sanitize makes a string safe as a single path segment.
 func sanitize(s string) string {
 	return strings.NewReplacer("/", "_", " ", "_", ":", "_", "..", "_").Replace(s)
-}
-
-// copyPath copies a file or directory tree from src to dst.
-func copyPath(src, dst string) error {
-	info, err := os.Stat(src)
-	if err != nil {
-		return err
-	}
-	if info.IsDir() {
-		entries, err := os.ReadDir(src)
-		if err != nil {
-			return err
-		}
-		if err := os.MkdirAll(dst, 0o755); err != nil {
-			return err
-		}
-		for _, e := range entries {
-			if err := copyPath(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name())); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	b, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(dst, b, info.Mode().Perm())
 }

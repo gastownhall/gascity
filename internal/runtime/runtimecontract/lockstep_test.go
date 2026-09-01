@@ -67,6 +67,9 @@ var contractCoverage = map[string]classification{
 	"GetLastActivity_NoError": {Deferred: "observation group not yet ported"},
 	"ClearScrollback_NoError": {Deferred: "observation group not yet ported"},
 	"CopyTo_NoError":          {Deferred: "observation group not yet ported"},
+	"CopyTo_RejectsEscapingRelDst": {
+		Deferred: "controller-side destination validation; no unsafe path reaches the RPP wire",
+	},
 
 	// --- Signaling group (deferred) ---
 	"SendKeys_RunningSession":  {Deferred: "signaling group not yet ported"},

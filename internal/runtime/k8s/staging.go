@@ -46,7 +46,10 @@ func stageFiles(ctx context.Context, ops k8sOps, podName string, cfg runtime.Con
 	}
 
 	// Copy each copy_files entry.
-	for _, entry := range cfg.CopyFiles {
+	for i, entry := range cfg.CopyFiles {
+		if err := runtime.ValidateCopyRelDst(entry.RelDst); err != nil {
+			return fmt.Errorf("copy_files[%d] destination %q: %w", i, entry.RelDst, err)
+		}
 		dst := "/workspace"
 		if entry.RelDst != "" {
 			dst = "/workspace/" + entry.RelDst

@@ -38,6 +38,42 @@ func TestFake_StartStop(t *testing.T) {
 	}
 }
 
+func TestFake_StartRejectsEscapingCopyBeforeRecording(t *testing.T) {
+	f := NewFake()
+	err := f.Start(context.Background(), "unsafe", Config{
+		CopyFiles: []CopyEntry{{RelDst: "../outside"}},
+	})
+	if err == nil {
+		t.Fatal("Start() succeeded, want copy destination validation error")
+	}
+	if got := f.CountCalls("Start", "unsafe"); got != 0 {
+		t.Fatalf("Start calls recorded before validation = %d, want 0", got)
+	}
+	if f.IsRunning("unsafe") {
+		t.Fatal("invalid Start created a fake session")
+	}
+}
+
+func TestFake_RelaunchRejectsEscapingCopyBeforeRecording(t *testing.T) {
+	f := NewFake()
+	if err := f.Start(context.Background(), "warm", Config{}); err != nil {
+		t.Fatalf("seed Start: %v", err)
+	}
+	before := len(f.SnapshotCalls())
+	err := f.Relaunch(context.Background(), "warm", Config{
+		CopyFiles: []CopyEntry{{RelDst: "../outside"}},
+	})
+	if err == nil {
+		t.Fatal("Relaunch() succeeded, want copy destination validation error")
+	}
+	if got := len(f.SnapshotCalls()); got != before {
+		t.Fatalf("calls recorded before Relaunch validation = %d, want %d", got, before)
+	}
+	if !f.IsRunning("warm") {
+		t.Fatal("invalid Relaunch removed the warm session")
+	}
+}
+
 func TestFake_Attach(t *testing.T) {
 	f := NewFake()
 

@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // PreserveExistingWarningPrefix prefixes nonfatal warnings for provider overlay
@@ -262,6 +264,9 @@ func CopyDirForProvider(srcDir, dstDir, providerName string, stderr io.Writer) e
 	if !info.IsDir() {
 		return fmt.Errorf("overlay: %q is not a directory", srcDir)
 	}
+	if err := ValidateCopyDirForProvidersDestination(srcDir, dstDir, []string{providerName}, nil); err != nil {
+		return err
+	}
 
 	// Step 1: copy universal files (skip per-provider/ and the runtime mirror).
 	if err := CopyDirWithSkip(srcDir, dstDir, universalOverlaySkip(nil), stderr); err != nil {
@@ -321,6 +326,9 @@ func CopyDirForProvidersWithSkip(srcDir, dstDir string, providers []string, skip
 	if !info.IsDir() {
 		return fmt.Errorf("overlay: %q is not a directory", srcDir)
 	}
+	if err := ValidateCopyDirForProvidersDestination(srcDir, dstDir, providers, skip); err != nil {
+		return err
+	}
 
 	// Step 1: copy universal files (skip per-provider/, the runtime mirror, and
 	// caller-skipped paths).
@@ -342,6 +350,106 @@ func CopyDirForProvidersWithSkip(srcDir, dstDir string, providers []string, skip
 		}
 	}
 	return nil
+}
+
+// ValidateCopyDirForProvidersDestination preflights every selected universal
+// and provider-specific destination without changing dstDir.
+func ValidateCopyDirForProvidersDestination(srcDir, dstDir string, providers []string, skip SkipFunc) error {
+	dstAbs, root, err := resolveCopyDestinationRoot(dstDir)
+	if err != nil {
+		return err
+	}
+
+	if err := validateCopyTreeDestination(srcDir, dstDir, dstAbs, root, universalOverlaySkip(skip)); err != nil {
+		return err
+	}
+	seen := make(map[string]bool, len(providers))
+	for _, provider := range providers {
+		if provider == "" || seen[provider] {
+			continue
+		}
+		seen[provider] = true
+		providerSkip := func(relPath string, isDir bool) bool {
+			return skipRuntimeMirror(relPath) || skip != nil && skip(relPath, isDir)
+		}
+		if err := validateCopyTreeDestination(filepath.Join(srcDir, PerProviderDir, provider), dstDir, dstAbs, root, providerSkip); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ValidateCopyDirDestination preflights every destination written by CopyDir
+// without changing dstDir.
+func ValidateCopyDirDestination(srcDir, dstDir string) error {
+	return validateCopyDirDestinationWithSkip(srcDir, dstDir, func(relPath string, _ bool) bool {
+		return skipRuntimeMirror(relPath)
+	})
+}
+
+func validateCopyDirDestinationWithSkip(srcDir, dstDir string, skip SkipFunc) error {
+	dstAbs, root, err := resolveCopyDestinationRoot(dstDir)
+	if err != nil {
+		return err
+	}
+	return validateCopyTreeDestination(srcDir, dstDir, dstAbs, root, skip)
+}
+
+func resolveCopyDestinationRoot(dstDir string) (string, string, error) {
+	dstAbs, err := filepath.Abs(dstDir)
+	if err != nil {
+		return "", "", fmt.Errorf("overlay: resolve destination root %q: %w", dstDir, err)
+	}
+	root, err := fsys.ResolveSymlinks(fsys.OSFS{}, dstAbs)
+	if err != nil {
+		return "", "", fmt.Errorf("overlay: resolve destination root %q: %w", dstDir, err)
+	}
+	return dstAbs, root, nil
+}
+
+func validateCopyTreeDestination(srcRoot, dstDir, dstAbs, root string, treeSkip SkipFunc) error {
+	info, err := os.Stat(srcRoot)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("overlay: stat %q: %w", srcRoot, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("overlay: %q is not a directory", srcRoot)
+	}
+	walkRoot, err := filepath.EvalSymlinks(srcRoot)
+	if err != nil {
+		return fmt.Errorf("overlay: resolve source directory %q: %w", srcRoot, err)
+	}
+	return filepath.WalkDir(walkRoot, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(walkRoot, path)
+		if err != nil {
+			return err
+		}
+		if rel != "." && treeSkip != nil && treeSkip(rel, entry.IsDir()) {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		candidate := dstAbs
+		if rel != "." {
+			candidate = filepath.Join(dstAbs, rel)
+		}
+		resolved, err := fsys.ResolveSymlinks(fsys.OSFS{}, candidate)
+		if err != nil {
+			return fmt.Errorf("overlay: resolve destination %q: %w", candidate, err)
+		}
+		containedRel, err := filepath.Rel(root, resolved)
+		if err != nil || filepath.IsAbs(containedRel) || containedRel == ".." || strings.HasPrefix(containedRel, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("overlay: destination %q escapes %q through symlink", candidate, dstDir)
+		}
+		return nil
+	})
 }
 
 func providerPreserveExisting(providerName string) preserveExistingFunc {

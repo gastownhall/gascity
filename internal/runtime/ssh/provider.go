@@ -106,6 +106,9 @@ const defaultRemoteShell = "/bin/sh"
 // AcceptStartupDialogs), CopyTo, and live SessionLive re-apply on drift (RunLive
 // is a no-op, matching k8s; SessionLive is applied once at startup).
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := runtime.ValidateCopyEntries(cfg.CopyFiles); err != nil {
+		return fmt.Errorf("ssh start %q: %w", name, err)
+	}
 	if !validTmuxName.MatchString(name) {
 		return fmt.Errorf("%w %q: must match %s", ErrInvalidSessionName, name, validTmuxName.String())
 	}
@@ -266,6 +269,9 @@ func (p *Provider) runPostLaunchSetup(ctx context.Context, name string, cfg runt
 func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if err := runtime.ValidateCopyEntries(cfg.CopyFiles); err != nil {
+		return fmt.Errorf("ssh relaunch %q: staging preflight: %w", name, err)
 	}
 	if !validTmuxName.MatchString(name) {
 		return fmt.Errorf("%w %q: must match %s", ErrInvalidSessionName, name, validTmuxName.String())
@@ -481,8 +487,11 @@ func (p *Provider) GetLastActivity(name string) (time.Time, error) {
 	return time.Unix(secs, 0), nil
 }
 
-// CopyTo is not yet supported by the v0 ssh provider (best-effort no-op).
-func (p *Provider) CopyTo(_, _, _ string) error { return nil }
+// CopyTo is not yet supported by the v0 ssh provider (best-effort no-op), but
+// the shared destination contract is still enforced before returning.
+func (p *Provider) CopyTo(_, _, relDst string) error {
+	return runtime.ValidateCopyRelDst(relDst)
+}
 
 // RunLive is a no-op for the ssh provider (session_live re-apply unsupported).
 func (p *Provider) RunLive(_ string, _ runtime.Config) error { return nil }

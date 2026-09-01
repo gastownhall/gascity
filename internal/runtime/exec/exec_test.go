@@ -156,6 +156,24 @@ func TestSeparableLaunch_ProvisionsThenLaunchesAgent(t *testing.T) {
 	}
 }
 
+func TestSeparableLaunchRejectsEscapingCopyDestinationBeforeProvision(t *testing.T) {
+	dir := t.TempDir()
+	logf := filepath.Join(dir, "ops.log")
+	p := NewProvider(writeScript(t, dir, separableScript(logf)))
+	prov := runtime.NewProviderFromSeams(p.Seams())
+
+	err := prov.Start(context.Background(), "s", runtime.Config{
+		Command:   "agent --serve",
+		CopyFiles: []runtime.CopyEntry{{Src: filepath.Join(dir, "seed"), RelDst: filepath.Join("..", "outside")}},
+	})
+	if err == nil {
+		t.Fatal("Start() succeeded, want escaping copy destination error")
+	}
+	if log := readLog(t, logf); log != "" {
+		t.Fatalf("provider operations ran before destination validation:\n%s", log)
+	}
+}
+
 // A welded pack (no proc.provision) keeps the old behavior: the `start` op
 // provisions+launches, and the controller issues no provision/launch.
 func TestSeparableLaunch_WeldedPackUsesStartOnly(t *testing.T) {
@@ -201,6 +219,48 @@ func TestRelaunch_SeparablePackLaunchesOverExec(t *testing.T) {
 	}
 	if strings.Contains(log, "provision s") || strings.Contains(log, "start s") {
 		t.Errorf("separable Relaunch must not reprovision the box:\n%s", log)
+	}
+}
+
+func TestLaunchAgentRejectsEscapingCopyDestinationBeforeExec(t *testing.T) {
+	dir := t.TempDir()
+	logf := filepath.Join(dir, "ops.log")
+	p := NewProvider(writeScript(t, dir, separableScript(logf)))
+
+	err := p.launchAgent(context.Background(), "s", runtime.Config{
+		Command:   "agent --resume",
+		CopyFiles: []runtime.CopyEntry{{Src: filepath.Join(dir, "seed"), RelDst: filepath.Join("..", "outside")}},
+	})
+	if err == nil {
+		t.Fatal("launchAgent() succeeded, want escaping copy destination error")
+	}
+	if log := readLog(t, logf); log != "" {
+		t.Fatalf("exec operations ran before destination validation:\n%s", log)
+	}
+}
+
+func TestRelaunchRejectsEscapingCopyDestinationBeforeWeldedStop(t *testing.T) {
+	dir := t.TempDir()
+	logf := filepath.Join(dir, "ops.log")
+	p := NewProvider(writeScript(t, dir, `
+op="$1"; name="$2"
+echo "$op $name" >> "`+logf+`"
+case "$op" in
+  protocol) echo '{"version":0,"capabilities":["proc.exec"]}' ;;
+  start)    cat >/dev/null ;;
+  stop)     ;;
+  *)        exit 2 ;;
+esac
+`))
+
+	err := p.Relaunch(context.Background(), "s", runtime.Config{
+		CopyFiles: []runtime.CopyEntry{{RelDst: filepath.Join("..", "outside")}},
+	})
+	if err == nil {
+		t.Fatal("Relaunch() succeeded, want escaping copy destination error")
+	}
+	if log := readLog(t, logf); log != "" {
+		t.Fatalf("provider operations ran before destination validation:\n%s", log)
 	}
 }
 

@@ -108,16 +108,11 @@ func (pl *t3Place) Exec(context.Context, runtime.ExecRequest) (runtime.ExecResul
 	return runtime.ExecResult{}, runtime.ErrExecUnsupported
 }
 
-// Stage copies entries via CopyTo (←CopyTo). t3bridge's CopyTo returns nil on
-// all its internal errors, so Stage is effectively a no-op today; a future
-// non-nil CopyTo would abort the batch at that entry.
+// Stage copies the complete batch through one local CopyTo preflight
+// (←CopyTo). T3 treats an unavailable bridge or unknown session as a
+// best-effort no-op, while local staging errors remain visible.
 func (pl *t3Place) Stage(_ context.Context, files []runtime.CopyEntry) error {
-	for _, f := range files {
-		if err := pl.p.CopyTo(pl.name, f.Src, f.RelDst); err != nil {
-			return err
-		}
-	}
-	return nil
+	return pl.p.CopyBatchTo(pl.name, files)
 }
 
 func (pl *t3Place) IsRunning(_ context.Context) (bool, error) {

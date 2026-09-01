@@ -560,108 +560,6 @@ func removeMetaValue(name, key string) error {
 	return err
 }
 
-func resolveContainedPath(baseDir, relPath string) (string, error) {
-	baseDir = strings.TrimSpace(baseDir)
-	if baseDir == "" {
-		return "", fmt.Errorf("empty base dir")
-	}
-	baseAbs, err := filepath.Abs(filepath.Clean(baseDir))
-	if err != nil {
-		return "", err
-	}
-	relPath = strings.TrimSpace(relPath)
-	if relPath == "" || relPath == "." {
-		return baseAbs, nil
-	}
-	if filepath.IsAbs(relPath) {
-		return "", fmt.Errorf("absolute relative path: %s", relPath)
-	}
-	cleanRel := filepath.Clean(relPath)
-	if cleanRel == ".." || strings.HasPrefix(cleanRel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("path escapes base dir: %s", relPath)
-	}
-	target := filepath.Join(baseAbs, cleanRel)
-	targetRel, err := filepath.Rel(baseAbs, target)
-	if err != nil {
-		return "", err
-	}
-	if targetRel == ".." || strings.HasPrefix(targetRel, ".."+string(filepath.Separator)) || filepath.IsAbs(targetRel) {
-		return "", fmt.Errorf("path escapes base dir: %s", relPath)
-	}
-	return target, nil
-}
-
-func copyFileToPath(src, dstRoot, relDst string) error {
-	src = filepath.Clean(strings.TrimSpace(src))
-	if src == "" || src == "." {
-		return fmt.Errorf("empty source path")
-	}
-	dst, err := resolveContainedPath(dstRoot, relDst)
-	if err != nil {
-		return err
-	}
-
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = in.Close() }()
-
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
-	}
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = out.Close() }()
-
-	if _, err := io.Copy(out, in); err != nil {
-		return err
-	}
-	if err := out.Close(); err != nil {
-		return err
-	}
-	if info, err := os.Stat(src); err == nil {
-		_ = os.Chmod(dst, info.Mode())
-	}
-	return nil
-}
-
-func copyDirContents(srcDir, dstDir string) error {
-	srcDir = filepath.Clean(strings.TrimSpace(srcDir))
-	if srcDir == "" || srcDir == "." {
-		return fmt.Errorf("empty source dir")
-	}
-	dstRoot, err := resolveContainedPath(dstDir, "")
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(dstRoot, 0o755); err != nil {
-		return err
-	}
-	return filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if path == srcDir {
-			return nil
-		}
-		rel, err := filepath.Rel(srcDir, path)
-		if err != nil {
-			return err
-		}
-		target, err := resolveContainedPath(dstRoot, rel)
-		if err != nil {
-			return err
-		}
-		if info.IsDir() {
-			return os.MkdirAll(target, info.Mode())
-		}
-		return copyFileToPath(path, dstRoot, rel)
-	})
-}
-
 func parseMetadataValue(value interface{}) string {
 	switch typed := value.(type) {
 	case string:
@@ -2031,7 +1929,10 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 
 // Start creates or reuses a T3 thread for the named session and dispatches the
 // startup prompt and any nudge.
-func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) error {
+func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := runtime.ValidateCopyEntries(cfg.CopyFiles); err != nil {
+		return fmt.Errorf("t3bridge: staging preflight: %w", err)
+	}
 	fmt.Fprintf(os.Stderr, "t3bridge: Start(%s) called, wsURL=%s\n", name, resolveWsURL())
 
 	var envelope StartupEnvelope
@@ -2129,6 +2030,17 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 			cfg.Env["GC_STARTUP_ENVELOPE"] = string(updated)
 		}
 	}
+
+	// T3 is a local bridge: stage and validate the target workdir before the
+	// snapshot/project/thread mutations below. A worktree requested in the
+	// startup envelope is created first so its returned path can be checked;
+	// any subsequent local staging failure rolls that worktree back through
+	// fail.
+	preparedCfg, err := runtime.PrepareSessionWorkDir(ctx, cfg)
+	if err != nil {
+		return fail(fmt.Errorf("t3bridge: prepare workdir: %w", err))
+	}
+	cfg = preparedCfg
 
 	envelopeJSON, err := json.Marshal(envelope)
 	if err != nil {
@@ -2605,7 +2517,20 @@ func (p *Provider) ClearScrollback(_ string) error {
 
 // CopyTo copies a file or directory tree into the session's working directory.
 func (p *Provider) CopyTo(name, src, relDst string) error {
-	if strings.TrimSpace(name) == "" || strings.TrimSpace(src) == "" {
+	return p.CopyBatchTo(name, []runtime.CopyEntry{{Src: src, RelDst: relDst}})
+}
+
+// CopyBatchTo resolves the thread workdir once and stages the complete batch
+// through one local preflight. This prevents Place.Stage from partially
+// mutating a workdir before a later destination is rejected.
+func (p *Provider) CopyBatchTo(name string, files []runtime.CopyEntry) error {
+	if len(files) == 0 {
+		return nil
+	}
+	if err := runtime.ValidateCopyEntries(files); err != nil {
+		return err
+	}
+	if strings.TrimSpace(name) == "" {
 		return nil
 	}
 	snapshot, err := p.rpcSnapshot()
@@ -2629,35 +2554,8 @@ func (p *Provider) CopyTo(name, src, relDst string) error {
 		return nil
 	}
 
-	info, err := os.Stat(src)
-	if err != nil {
-		return nil
-	}
-	if info.IsDir() {
-		dstRoot := workDir
-		if strings.TrimSpace(relDst) != "" {
-			var err error
-			dstRoot, err = resolveContainedPath(workDir, relDst)
-			if err != nil {
-				return nil
-			}
-		}
-		if err := copyDirContents(src, dstRoot); err != nil {
-			return nil
-		}
-		return nil
-	}
-
-	fileRelDst := strings.TrimSpace(relDst)
-	if strings.TrimSpace(relDst) != "" {
-		if _, err := resolveContainedPath(workDir, fileRelDst); err != nil {
-			return nil
-		}
-	} else {
-		fileRelDst = filepath.Base(src)
-	}
-	if err := copyFileToPath(src, workDir, fileRelDst); err != nil {
-		return nil
+	if err := runtime.StageWorkDir(workDir, "", files); err != nil {
+		return fmt.Errorf("t3bridge: copying into session %q: %w", name, err)
 	}
 	return nil
 }
