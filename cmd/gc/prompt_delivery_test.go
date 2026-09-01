@@ -292,6 +292,35 @@ func TestPromptDeliveryOversized(t *testing.T) {
 		}
 	})
 
+	t.Run("empty runtime name (stock default) routes through nudge, not hard-fail", func(t *testing.T) {
+		prompt := repeatToBytes("a", maxPromptSuffixRawBytes)
+		got, err := promptDelivery(prompt, false, arg, "wake", "")
+		if err != nil {
+			t.Fatalf("promptDelivery() unexpected error for the stock default (empty) runtime name: %v", err)
+		}
+		if got.PromptSuffix != "" || got.PromptFlag != "" {
+			t.Errorf("promptDelivery() default-runtime oversized must carry zero argv bytes, got PromptSuffix len=%d PromptFlag=%q", len(got.PromptSuffix), got.PromptFlag)
+		}
+		if !got.Delivered || !got.OversizedFallback {
+			t.Errorf("promptDelivery() default-runtime oversized = %+v, want Delivered=true OversizedFallback=true", promptDeliveryResultLens(got))
+		}
+	})
+
+	t.Run("legacy t3bridge exec spelling stays argv-safe", func(t *testing.T) {
+		prompt := repeatToBytes("a", maxPromptSuffixRawBytes)
+		quoted := shellquote.Quote(prompt)
+		got, err := promptDelivery(prompt, false, arg, "wake", "exec:/usr/lib/gc/gc-session-t3")
+		if err != nil {
+			t.Fatalf("promptDelivery() unexpected error for the legacy t3bridge exec spelling: %v", err)
+		}
+		if got.PromptSuffix != quoted {
+			t.Errorf("promptDelivery() legacy t3bridge exec spelling PromptSuffix len=%d, want len=%d", len(got.PromptSuffix), len(quoted))
+		}
+		if got.OversizedFallback {
+			t.Errorf("promptDelivery() OversizedFallback = true for the legacy t3bridge exec spelling, want false: it is the same argv-safe native runtime as %q", "t3bridge")
+		}
+	})
+
 	t.Run("unsupported runtime (subprocess) hard-fails before Start", func(t *testing.T) {
 		prompt := repeatToBytes("a", maxPromptSuffixRawBytes)
 		got, err := promptDelivery(prompt, false, arg, "wake", "subprocess")
@@ -345,13 +374,15 @@ func TestPromptDeliverySupportFor(t *testing.T) {
 	}{
 		{"tmux", promptDeliverySupportNudgeFallback},
 		{"t3bridge", promptDeliverySupportArgvSafe},
+		{"exec:/usr/lib/gc/gc-session-t3", promptDeliverySupportArgvSafe},
 		{"subprocess", promptDeliverySupportUnsupported},
-		{"", promptDeliverySupportUnsupported},
-		{"herdr", promptDeliverySupportUnsupported},
-		{"k8s", promptDeliverySupportUnsupported},
+		{"", promptDeliverySupportNudgeFallback},
+		{" tmux", promptDeliverySupportNudgeFallback},
+		{"herdr", promptDeliverySupportNudgeFallback},
+		{"k8s", promptDeliverySupportNudgeFallback},
 		{"exec:./run.sh", promptDeliverySupportUnsupported},
 		{"ssh:host", promptDeliverySupportUnsupported},
-		{"hybrid", promptDeliverySupportUnsupported},
+		{"hybrid", promptDeliverySupportNudgeFallback},
 		{"auto", promptDeliverySupportUnsupported},
 		{"totally-unknown-custom-runtime", promptDeliverySupportUnsupported},
 	}

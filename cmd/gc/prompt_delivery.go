@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -76,8 +77,29 @@ const (
 // positively classified return a non-default value; every other name —
 // including future/custom runtimes — hard-fails via the zero value.
 func promptDeliverySupportFor(runtimeName string) promptDeliverySupport {
-	switch runtimeName {
-	case "tmux":
+	name := strings.TrimSpace(runtimeName)
+	// The legacy exec spelling constructs the same native t3bridge provider
+	// (runtime_registry.go RegisterPrefix("exec:")), so it is argv-safe too.
+	if strings.HasPrefix(name, "exec:") && isLegacyT3BridgeExecScript(strings.TrimPrefix(name, "exec:")) {
+		return promptDeliverySupportArgvSafe
+	}
+	switch name {
+	// "" is the default session provider: effectiveSessionProvider returns it
+	// when neither the agent nor [session] provider is set, and the registry's
+	// SetFallback(tmuxFactory) constructs tmux for it.
+	case "", "tmux":
+		return promptDeliverySupportNudgeFallback
+	// herdr launches via exec argv with no shell-arg slot, and already routes
+	// the prime through its post-idle delivery path (herdr/provider.go:246).
+	case "herdr":
+		return promptDeliverySupportNudgeFallback
+	// k8s never reads cfg.PromptSuffix and delivers cfg.Nudge post-start
+	// (k8s/provider.go:310,409).
+	case "k8s":
+		return promptDeliverySupportNudgeFallback
+	// hybrid routes per session name to tmux or k8s and delegates Nudge to
+	// whichever it routed to (hybrid/hybrid.go:97); both legs are nudge-capable.
+	case "hybrid":
 		return promptDeliverySupportNudgeFallback
 	case "t3bridge":
 		return promptDeliverySupportArgvSafe
