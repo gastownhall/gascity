@@ -11907,6 +11907,10 @@ export type GetV0CityByCityNameEventsData = {
          * Filter events since duration ago (Go duration string, e.g. 5m).
          */
         since?: string;
+        /**
+         * Only return events with sequence number greater than this value. Omit to include events from the beginning (0 = no filter).
+         */
+        after_seq?: string;
     };
     url: '/v0/city/{cityName}/events';
 };

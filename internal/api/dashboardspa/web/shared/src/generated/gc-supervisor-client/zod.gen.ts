@@ -7700,7 +7700,8 @@ export const zGetV0CityByCityNameEventsQuery = z.object({
     limit: z.coerce.bigint().gte(BigInt(0)).lte(BigInt(1000)).optional().default(BigInt(100)),
     type: z.string().optional(),
     actor: z.string().optional(),
-    since: z.string().optional()
+    since: z.string().optional(),
+    after_seq: z.string().optional()
 });
 
 /**
