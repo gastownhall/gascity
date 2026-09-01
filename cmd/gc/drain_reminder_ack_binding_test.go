@@ -114,3 +114,31 @@ func TestSetDrainAckStampsTheAcknowledgingIncarnation(t *testing.T) {
 		t.Errorf("ack source = %q, want %q", got, drainAckSourceAgentValue)
 	}
 }
+
+// The stamp has the acknowledgement's lifetime, so both erasers must take it.
+// A requester token left on the pane outlives every drain it described and
+// waits to be paired with some later ack's source — and that pairing is exactly
+// the "proven stale" evidence class, manufactured out of two unrelated writes.
+func TestDrainAckClearPathsRemoveTheIncarnationStamp(t *testing.T) {
+	for name, clear := range map[string]func(*providerDrainOps, string) error{
+		"clearDrain": (*providerDrainOps).clearDrain,
+		"clearReconcilerDrainAckMetadata": func(o *providerDrainOps, session string) error {
+			return clearReconcilerDrainAckMetadata(o.sp, session)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			sp := runtime.NewFake()
+			ops := &providerDrainOps{sp: sp}
+			mustSetMeta(t, sp, "worker", reconcilerDrainAckSourceKey, drainAckSourceAgentValue)
+			mustSetMeta(t, sp, "worker", drainAckRequesterInstanceTokenKey, "tok-a")
+
+			if err := clear(ops, "worker"); err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+
+			if got, _ := sp.GetMeta("worker", drainAckRequesterInstanceTokenKey); got != "" {
+				t.Errorf("%s = %q, want cleared with the acknowledgement it belongs to", drainAckRequesterInstanceTokenKey, got)
+			}
+		})
+	}
+}
