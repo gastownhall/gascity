@@ -1121,6 +1121,16 @@ type PackRuntimeEntry struct {
 	// the only version today; the declaration exists so future protocol
 	// bumps fail at composition instead of at session start.
 	Protocol int `toml:"protocol,omitempty"`
+	// PromptDelivery opts this runtime into a non-default oversized-prompt
+	// delivery strategy (cmd/gc promptDeliverySupportFor). Unset (the zero
+	// value) keeps today's behavior: an oversized prompt hard-fails for any
+	// runtime this package cannot positively classify. The only other
+	// accepted value is "nudge-fallback", asserting the runtime has a
+	// working post-start Nudge path an oversized prompt can reroute
+	// through. This is a pack-composition-time assertion, not something gc
+	// verifies against the runtime executable — see
+	// docs/reference/specs/pack-spec.md sec 1.2.8.
+	PromptDelivery string `toml:"prompt_delivery,omitempty" jsonschema:"enum=nudge-fallback"`
 }
 
 // PackCommandEntry declares a CLI subcommand provided by a pack.

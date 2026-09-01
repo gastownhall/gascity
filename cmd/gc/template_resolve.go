@@ -106,6 +106,12 @@ type TemplateParams struct {
 	// EffectiveSessionProvider is the actual session provider after applying
 	// city-level defaults.
 	EffectiveSessionProvider string
+	// CityRuntimes is the city's pack-declared runtime registry
+	// (config.City.Runtimes), keyed by selection name. Consulted by
+	// promptDelivery's oversized-prompt guard so a pack-declared runtime
+	// (EffectiveSessionProvider naming one not in the builtin switch) can opt
+	// into nudge-fallback delivery. Nil when no city is bound (p.city == nil).
+	CityRuntimes map[string]config.DiscoveredRuntime
 	// DependencyOnly marks a realized cold slot kept only so dependency wake
 	// has something concrete to wake even when pool check wants zero.
 	DependencyOnly bool
@@ -720,6 +726,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	}
 	params.SessionOverride = cfgAgent.Session
 	params.EffectiveSessionProvider = effectiveSessionProvider(cfgAgent.Session, p.sessionProvider)
+	if p.city != nil {
+		params.CityRuntimes = p.city.Runtimes
+	}
 	return params, nil
 }
 
@@ -864,7 +873,7 @@ func templateParamsToConfigWithDelivery(tp TemplateParams) (runtime.Config, prom
 	// a first-turn delivery mechanism. Without argv/flag/nudge delivery, freshly
 	// spawned workers sit idle at the provider prompt. The routing policy lives
 	// in the pure promptDelivery derivation.
-	delivery, err := promptDelivery(tp.Prompt, tp.IsACP, tp.ResolvedProvider, tp.Hints.Nudge, tp.EffectiveSessionProvider)
+	delivery, err := promptDelivery(tp.Prompt, tp.IsACP, tp.ResolvedProvider, tp.Hints.Nudge, tp.EffectiveSessionProvider, tp.CityRuntimes)
 	configuredMode := "arg"
 	switch {
 	case tp.IsACP:

@@ -1028,6 +1028,13 @@
         "protocol": {
           "type": "integer",
           "description": "Protocol is the RPP version the executable speaks. Version 0 is\nthe only version today; the declaration exists so future protocol\nbumps fail at composition instead of at session start."
+        },
+        "prompt_delivery": {
+          "type": "string",
+          "enum": [
+            "nudge-fallback"
+          ],
+          "description": "PromptDelivery opts this runtime into a non-default oversized-prompt\ndelivery strategy (cmd/gc promptDeliverySupportFor). Unset (the zero\nvalue) keeps today's behavior: an oversized prompt hard-fails for any\nruntime this package cannot positively classify. The only other\naccepted value is \"nudge-fallback\", asserting the runtime has a\nworking post-start Nudge path an oversized prompt can reroute\nthrough. This is a pack-composition-time assertion, not something gc\nverifies against the runtime executable — see\ndocs/reference/specs/pack-spec.md sec 1.2.8."
         }
       },
       "additionalProperties": false,
