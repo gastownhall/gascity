@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
@@ -963,6 +964,48 @@ func newEventsProviderForNameWithConfig(v, eventsPath string, stderr io.Writer, 
 	default:
 		return newFileEventsRecorder(eventsPath, eventsCfg, stderr)
 	}
+}
+
+var (
+	cliFactoryRecordersMu sync.Mutex
+	cliFactoryRecorders   = map[string]events.Recorder{}
+)
+
+// cliFactoryEventsRecorder resolves a live events.Recorder for cityPath,
+// memoized per city path for the process lifetime. worker.Factory is built
+// on every session-reconciliation tick (cmd/gc/session_reconciler.go) as
+// well as per CLI invocation, so opening a fresh events.FileRecorder on
+// every call would leak a file handle and spawn a rotation goroutine each
+// tick; memoizing keeps that a one-time cost per city. This gives the CLI
+// factory path the live recorder the API server already gets for free from
+// its long-lived controllerState.EventProvider() (internal/api/worker_factory.go:21).
+// Falls back to events.Discard when cityPath is empty or the provider
+// cannot be opened — telemetry must never block session lifecycle.
+func cliFactoryEventsRecorder(cityPath string, cfg *config.City) events.Recorder {
+	cityPath = strings.TrimSpace(cityPath)
+	if cityPath == "" {
+		return events.Discard
+	}
+	cliFactoryRecordersMu.Lock()
+	defer cliFactoryRecordersMu.Unlock()
+	if r, ok := cliFactoryRecorders[cityPath]; ok {
+		return r
+	}
+	eventsCfg := config.EventsConfig{}
+	if cfg != nil {
+		eventsCfg = cfg.Events
+	}
+	if v := os.Getenv("GC_EVENTS"); v != "" {
+		eventsCfg.Provider = v
+	}
+	eventsPath := filepath.Join(cityPath, ".gc", "events.jsonl")
+	provider, err := newEventsProviderForNameWithConfig(eventsCfg.Provider, eventsPath, io.Discard, eventsCfg)
+	if err != nil || provider == nil {
+		cliFactoryRecorders[cityPath] = events.Discard
+		return events.Discard
+	}
+	cliFactoryRecorders[cityPath] = provider
+	return provider
 }
 
 // newUsageSinkByName returns a usage.Sink for the resolved provider name.
