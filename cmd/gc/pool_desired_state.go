@@ -2,8 +2,10 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
@@ -55,6 +57,13 @@ func beadPriority(b beads.Bead) int {
 	return 0
 }
 
+// legacyWorkDirNoticeSeen deduplicates the unmanaged-workspace notice keyed by
+// work bead ID. worktreeSpecForBead runs for every ready bead on every
+// scale-check tick and nothing backfills ownership metadata onto beads that
+// never published it, so an unguarded log line would repeat for the life of
+// the process.
+var legacyWorkDirNoticeSeen sync.Map // work bead ID -> struct{}
+
 // worktreeSpecForBead reconstructs the exact single-owner verification input
 // from metadata published after gc worktree ensure succeeds. A work_dir with
 // incomplete or conflicting evidence is an error, never permission to launch
@@ -67,8 +76,10 @@ func worktreeSpecForBead(bead beads.Bead, storeRef string) (*worktree.Spec, erro
 			bead.ID, beadmeta.WorkDirMetadataKey, canonicalPath, beadmeta.LegacyWorkDirMetadataKey, legacyPath)
 	}
 	path := canonicalPath
+	pathKey := beadmeta.WorkDirMetadataKey
 	if path == "" {
 		path = legacyPath
+		pathKey = beadmeta.LegacyWorkDirMetadataKey
 	}
 	if path == "" {
 		return nil, nil
@@ -87,11 +98,29 @@ func worktreeSpecForBead(bead beads.Bead, storeRef string) (*worktree.Spec, erro
 		{beadmeta.WorktreeGenerationMetadataKey, bead.Metadata[beadmeta.WorktreeGenerationMetadataKey]},
 		{beadmeta.WorktreeLifecycleMetadataKey, bead.Metadata[beadmeta.WorktreeLifecycleMetadataKey]},
 	}
+	missing := make([]string, 0, len(values))
 	for _, item := range values {
 		if strings.TrimSpace(item.value) == "" {
-			return nil, fmt.Errorf("work bead %s has %s=%q but is missing %s",
-				bead.ID, beadmeta.WorkDirMetadataKey, path, item.key)
+			missing = append(missing, item.key)
 		}
+	}
+	if len(missing) == len(values) {
+		// A bead carrying work_dir without any ownership evidence is not
+		// incomplete evidence -- it never claimed to publish any. Recipe steps
+		// are still minted this way (stampDrainItemRecipe in
+		// internal/dispatch/drain.go copies both work_dir spellings and none
+		// of the nine ownership keys), so treat it as an unmanaged workspace
+		// and let the seat spawn as it always did, instead of erroring it into
+		// permanent starvation.
+		if _, dup := legacyWorkDirNoticeSeen.LoadOrStore(bead.ID, struct{}{}); !dup {
+			log.Printf("worktreeSpecForBead: work bead %s has %s=%q with no worktree ownership metadata; treating as unmanaged",
+				bead.ID, pathKey, path)
+		}
+		return nil, nil
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("work bead %s has %s=%q but is missing %s",
+			bead.ID, beadmeta.WorkDirMetadataKey, path, missing[0])
 	}
 	// The bead's own gc.root_store_ref is the canonical spelling
 	// ("city:<name>", "rig:<name>") and is what the creating side recorded in
