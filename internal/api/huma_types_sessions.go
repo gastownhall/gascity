@@ -21,6 +21,19 @@ type SessionListInput struct {
 	// WakeReasons asks for each open session's wake reasons. They cost a
 	// runtime probe per session, so only a caller that renders them asks.
 	WakeReasons bool `query:"wake_reasons" required:"false" doc:"Include wake_reasons on each open session: why the controller keeps it awake, as gc session list's REASON column shows them. Costs runtime probes per session."`
+	// Enrich defaults to true (unchanged historical behavior: running state,
+	// active bead, and peek/model enrichment per row). enrich=false skips all
+	// per-session runtime enrichment and returns the read-model roster only —
+	// no runtime probe calls at all. At fleet scale, per-row enrichment is
+	// serialized behind the runtime's own rate limits (e.g. a Kubernetes
+	// provider's client-go QPS limiter serializing pod GETs), so a caller that
+	// only needs a roster (id/state/alias, e.g. building a recipient list)
+	// pays minutes instead of milliseconds without this escape hatch
+	// (gascity#4390). Skipping the overlay also skips the runtime
+	// stale-active downgrade, so State is the persisted value: a
+	// state=active&enrich=false roster can include a session whose runtime
+	// is no longer alive.
+	Enrich bool `query:"enrich" required:"false" default:"true" doc:"Include per-session runtime enrichment (running state, active bead, peek/model info). Defaults to true; set false for a cheap read-model-only roster with zero runtime calls. With enrich=false the runtime stale-active downgrade is skipped too, so state is the persisted value and an active session whose runtime is no longer alive is still reported as active."`
 }
 
 // CityPendingInput is the Huma input for GET /v0/city/{cityName}/pending.
