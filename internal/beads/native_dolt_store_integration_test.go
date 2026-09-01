@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -18,6 +19,98 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	beadslib "github.com/steveyegge/beads"
 )
+
+func TestNativeDoltStoreReadyWakesExpiredDatedDefer(t *testing.T) {
+	ctx := context.Background()
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	storage, err := beadslib.OpenBestAvailable(ctx, beadsDir)
+	if err != nil {
+		t.Fatalf("open upstream native beads storage: %v", err)
+	}
+	cleanupStorage := storage
+	t.Cleanup(func() {
+		if cleanupStorage == nil {
+			return
+		}
+		if err := cleanupStorage.Close(); err != nil {
+			t.Errorf("close upstream storage: %v", err)
+		}
+	})
+	if err := storage.SetConfig(ctx, "issue_prefix", "gc"); err != nil {
+		t.Fatalf("set issue prefix: %v", err)
+	}
+	store := newNativeDoltStoreWithStorageAndPrefix(storage, "defer-wake-regression", "gc")
+
+	past := time.Now().UTC().Add(-time.Hour)
+	expired, err := store.Create(Bead{Title: "expired dated defer"})
+	if err != nil {
+		t.Fatalf("create expired control: %v", err)
+	}
+	// Upstream exposes no defer verb on Storage; bd defer --until reaches this
+	// UpdateIssue seam with exactly status=deferred plus defer_until.
+	if err := storage.UpdateIssue(ctx, expired.ID, map[string]any{
+		"status":      string(beadslib.StatusDeferred),
+		"defer_until": past,
+	}, "expired-dated-defer-fixture"); err != nil {
+		t.Fatalf("apply expired dated defer: %v", err)
+	}
+
+	future := time.Now().UTC().Add(time.Hour)
+	deferred, err := store.Create(Bead{Title: "future dated defer"})
+	if err != nil {
+		t.Fatalf("create future control: %v", err)
+	}
+	if err := storage.UpdateIssue(ctx, deferred.ID, map[string]any{
+		"status":      string(beadslib.StatusDeferred),
+		"defer_until": future,
+	}, "future-dated-defer-fixture"); err != nil {
+		t.Fatalf("apply future dated defer: %v", err)
+	}
+
+	ready, err := store.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	if !slices.ContainsFunc(ready, func(bead Bead) bool { return bead.ID == expired.ID }) {
+		t.Errorf("Ready = %+v, want expired dated defer %q", ready, expired.ID)
+	}
+	if slices.ContainsFunc(ready, func(bead Bead) bool { return bead.ID == deferred.ID }) {
+		t.Errorf("Ready = %+v, future dated defer %q must stay hidden", ready, deferred.ID)
+	}
+
+	closeErr := storage.Close()
+	cleanupStorage = nil
+	if closeErr != nil {
+		t.Fatalf("close upstream storage before durable readback: %v", closeErr)
+	}
+	reopened, err := beadslib.OpenBestAvailable(ctx, beadsDir)
+	if err != nil {
+		t.Fatalf("reopen upstream native beads storage: %v", err)
+	}
+	cleanupStorage = reopened
+
+	rawExpired, err := reopened.GetIssue(ctx, expired.ID)
+	if err != nil {
+		t.Fatalf("GetIssue expired after reopen: %v", err)
+	}
+	if rawExpired.Status != beadslib.StatusOpen {
+		t.Errorf("expired status after reopen = %q, want open", rawExpired.Status)
+	}
+	if rawExpired.DeferUntil != nil {
+		t.Errorf("expired defer_until after reopen = %v, want nil", rawExpired.DeferUntil)
+	}
+
+	rawFuture, err := reopened.GetIssue(ctx, deferred.ID)
+	if err != nil {
+		t.Fatalf("GetIssue future after reopen: %v", err)
+	}
+	if rawFuture.Status != beadslib.StatusDeferred {
+		t.Errorf("future status after reopen = %q, want deferred", rawFuture.Status)
+	}
+	if rawFuture.DeferUntil == nil {
+		t.Error("future defer_until after reopen = nil, want dated defer retained")
+	}
+}
 
 // TestNativeDoltStoreRegularUpdateEventRecording verifies that calling
 // SetMetadata on a non-ephemeral bead succeeds. This exercises
