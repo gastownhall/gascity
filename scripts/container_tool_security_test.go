@@ -185,8 +185,9 @@ func TestRebuiltToolsAssertPatchedGRPCArtifact(t *testing.T) {
 // source tools (bd, dolt, gh) carry no Go-stdlib CVE waiver. The image build rebuilds
 // them with the Go 1.26.5 toolchain, which fixes every stdlib CVE listed, so a waiver
 // on those paths would let the scan gate keep masking a regressed rebuild instead of
-// proving the fix holds. CVE-2026-56852 is the one explicit non-stdlib exception:
-// the pinned gh and Dolt sources, plus external kubectl, still select vulnerable x/text
+// proving the fix holds. CVE-2026-56852 (x/text) and CVE-2026-46600 (x/net
+// dns/dnsmessage) are the explicit non-stdlib exceptions: the pinned gh and Dolt
+// sources, plus (for CVE-2026-56852) external kubectl, still select vulnerable module
 // versions. The residual
 // x/net / x/crypto module waivers that bd and dolt legitimately keep (external binaries
 // the grpc-only rebuild does not touch) are out of scope here; gc's x/net / x/crypto
@@ -215,11 +216,15 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 		"CVE-2026-39826": true, "CVE-2026-39836": true, "CVE-2026-42499": true,
 		"CVE-2026-42504": true, "CVE-2026-27145": true,
 	}
-	allowedXTextWaivers := map[string]map[string]bool{
+	allowedModuleWaivers := map[string]map[string]bool{
 		"CVE-2026-56852": {
 			"usr/bin/gh":            true,
 			"usr/local/bin/dolt":    true,
 			"usr/local/bin/kubectl": true,
+		},
+		"CVE-2026-46600": {
+			"usr/bin/gh":         true,
+			"usr/local/bin/dolt": true,
 		},
 	}
 	foundAllowed := map[string]map[string]bool{}
@@ -229,7 +234,7 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 			if stdlibCVEs[v.ID] && rebuiltPaths[p] {
 				t.Errorf("%s still waives rebuilt tool %q for a Go-stdlib CVE the 1.26.5 rebuild clears; drop the path so the scan proves the fix stays effective", v.ID, p)
 			}
-			if allowedPaths, ok := allowedXTextWaivers[v.ID]; ok && allowedPaths[p] {
+			if allowedPaths, ok := allowedModuleWaivers[v.ID]; ok && allowedPaths[p] {
 				if foundAllowed[v.ID] == nil {
 					foundAllowed[v.ID] = map[string]bool{}
 				}
@@ -241,10 +246,10 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 			}
 		}
 	}
-	for cve, paths := range allowedXTextWaivers {
+	for cve, paths := range allowedModuleWaivers {
 		for path := range paths {
 			if !foundAllowed[cve][path] {
-				t.Errorf(".trivyignore.yaml must retain the reviewed %s waiver for %s until that source updates golang.org/x/text", cve, path)
+				t.Errorf(".trivyignore.yaml must retain the reviewed %s waiver for %s until that module version is fixed upstream", cve, path)
 			}
 		}
 	}
