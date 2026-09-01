@@ -4,6 +4,7 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"os"
 	"os/exec"
@@ -32,6 +33,7 @@ import (
 func TestDoltConfigWiringExternalHost(t *testing.T) {
 	requireDoltIntegration(t)
 	env := newIsolatedToolEnv(t, true)
+	const sharedDatabase = "dc"
 
 	hostname, err := os.Hostname()
 	if err != nil {
@@ -77,7 +79,8 @@ func TestDoltConfigWiringExternalHost(t *testing.T) {
 		"GC_DOLT_PORT="+port,
 	)
 
-	runBDInitCompat(t, env, wsDir, "dc", port)
+	runBDInitCompat(t, env, wsDir, "dc", sharedDatabase, port)
+	firstProjectID := readWorkspaceProjectID(t, wsDir)
 
 	bdCreate := exec.Command(bdBinary, "create", "config-wired-bead", "--json",
 		"--description=Integration test for issue 011", "-t", "task", "-p", "3")
@@ -117,9 +120,14 @@ func TestDoltConfigWiringExternalHost(t *testing.T) {
 		t.Fatalf("git init: %v\n%s", err, out)
 	}
 
-	// Init with same prefix and server — simulates a second machine's
-	// agent sharing the same bead store.
-	runBDInitCompat(t, env, wsDir2, "dc", port)
+	// Name the same database explicitly so bd adopts the first workspace's
+	// server-authoritative project identity. A second machine that merely reuses
+	// the prefix must not mint a competing identity for that database.
+	runBDInitCompat(t, env, wsDir2, "dc", sharedDatabase, port)
+	secondProjectID := readWorkspaceProjectID(t, wsDir2)
+	if secondProjectID != firstProjectID {
+		t.Fatalf("workspace 2 project identity = %q, want workspace 1 identity %q", secondProjectID, firstProjectID)
+	}
 
 	bdList2 := exec.Command(bdBinary, "list", "--json")
 	bdList2.Dir = wsDir2
@@ -136,15 +144,35 @@ func TestDoltConfigWiringExternalHost(t *testing.T) {
 	t.Logf("SUCCESS: all phases passed — hostname reachable, config port wired, cross-workspace sharing works")
 }
 
-// runBDInitCompat initializes beads against a shared server, compatible
-// with bd v0.60.0 (which lacks --skip-agents).
-func runBDInitCompat(t *testing.T, env []string, dir, prefix, port string) {
+func readWorkspaceProjectID(t *testing.T, dir string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, ".beads", "metadata.json"))
+	if err != nil {
+		t.Fatalf("reading workspace metadata: %v", err)
+	}
+	var metadata struct {
+		ProjectID string `json:"project_id"`
+	}
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		t.Fatalf("parsing workspace metadata: %v", err)
+	}
+	if metadata.ProjectID == "" {
+		t.Fatal("workspace metadata has no project_id")
+	}
+	return metadata.ProjectID
+}
+
+// runBDInitCompat initializes beads against a named database on a shared
+// server, compatible with bd v0.60.0 (which lacks --skip-agents). Naming the
+// database is also the explicit signal that a later workspace must adopt the
+// existing database's project identity instead of minting an unrelated one.
+func runBDInitCompat(t *testing.T, env []string, dir, prefix, database, port string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), bdInitTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bdBinary, "init", "--server",
 		"--server-host", "127.0.0.1", "--server-port", port,
-		"-p", prefix, "--skip-hooks")
+		"--database", database, "-p", prefix, "--skip-hooks")
 	cmd.Dir = dir
 	cmd.Env = env
 	out, err := cmd.CombinedOutput()

@@ -542,7 +542,7 @@ func TestAcceptanceTargetsSeparateTierAFromExternalBdContracts(t *testing.T) {
 	if !strings.Contains(makeText, "test-bd-cli-contract:") {
 		t.Fatal("Makefile has no focused test-bd-cli-contract target")
 	}
-	wantTests := []string{"TestBdBasicCRUD", "TestBdDependencies", "TestBdDestructive", "TestBdWorkflow"}
+	wantTests := []string{"TestBdContractHarnessIsolatesInitializedAncestor", "TestBdBasicCRUD", "TestBdDependencies", "TestBdDestructive", "TestBdWorkflow"}
 	for _, testName := range wantTests {
 		if !strings.Contains(makeText, testName) {
 			t.Errorf("focused bd contract target does not name %s", testName)
@@ -552,7 +552,7 @@ func TestAcceptanceTargetsSeparateTierAFromExternalBdContracts(t *testing.T) {
 		"command -v bd",
 		"-tags acceptance_bd_contract",
 		"-count=1",
-		"-run '^(TestBdBasicCRUD|TestBdDependencies|TestBdDestructive|TestBdWorkflow)$$'",
+		"-run '^(TestBdContractHarnessIsolatesInitializedAncestor|TestBdBasicCRUD|TestBdDependencies|TestBdDestructive|TestBdWorkflow)$$'",
 		"./test/acceptance",
 	} {
 		if !strings.Contains(makeText, marker) {

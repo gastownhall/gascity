@@ -448,14 +448,15 @@ func pinnedIntegrationBeadsModuleVersion() (string, error) {
 	return version, nil
 }
 
+const pinnedIntegrationBeadsModuleVersionWant = "v1.1.1-0.20260831020517-d530cddfa64b"
+
 func TestPinnedIntegrationBeadsModuleVersion(t *testing.T) {
 	version, err := pinnedIntegrationBeadsModuleVersion()
 	if err != nil {
 		t.Fatalf("pinnedIntegrationBeadsModuleVersion() error = %v", err)
 	}
-	const want = "v1.1.1-0.20260805093327-bf97b73749ac"
-	if version != want {
-		t.Errorf("pinnedIntegrationBeadsModuleVersion() = %q, want %q", version, want)
+	if version != pinnedIntegrationBeadsModuleVersionWant {
+		t.Errorf("pinnedIntegrationBeadsModuleVersion() = %q, want %q", version, pinnedIntegrationBeadsModuleVersionWant)
 	}
 }
 

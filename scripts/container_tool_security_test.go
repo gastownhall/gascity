@@ -65,22 +65,26 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 
 func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	const (
-		bdSourceRef    = "bf97b73749ac3ef2fca2365b54537ac041ad4293"
-		bdSourceSHA256 = "a8b1d8dd85b2c008093615cb85937067a9597e760e8d39f93fe55f5c1cbb4d37"
-		bdBuild        = "bf97b73749"
-		bdBranch       = "HEAD"
-		grpcVersion    = "1.82.1"
+		bdSourceVersion = "1.2.2"
+		bdSourceRef     = "d530cddfa64b174930bddc6c5949b127a450fc13"
+		bdSourceSHA256  = "b6ef8eba786ee0e540ec7f184ffa7442195d2e35cb0cc2c5850c77b6562f9bc6"
+		bdBuild         = "d530cddfa6"
+		bdBranch        = "HEAD"
+		grpcVersion     = "1.83.0"
 	)
 
 	root := repoRoot(t)
-	bdVersion := readDotenv(t, root+"/deps.env")["BD_VERSION"]
-	if bdVersion != "v1.1.0" {
-		t.Fatalf("deps.env BD_VERSION = %q, want v1.1.0 for the pinned source build", bdVersion)
+	deps := readDotenv(t, root+"/deps.env")
+	if got := deps["BD_VERSION"]; got != "v1.1.0" {
+		t.Fatalf("deps.env BD_VERSION = %q, want unchanged published installable default v1.1.0", got)
+	}
+	if got := deps["BD_CURRENT_SOURCE_VERSION"]; got != bdSourceVersion {
+		t.Fatalf("deps.env BD_CURRENT_SOURCE_VERSION = %q, want %q", got, bdSourceVersion)
 	}
 
 	dockerfile := readFile(t, root, "contrib/k8s/Dockerfile.agent")
 	for _, want := range []string{
-		"ARG BD_VERSION=" + bdVersion,
+		"ARG BD_SOURCE_VERSION=" + bdSourceVersion,
 		"ARG BD_SOURCE_REF=" + bdSourceRef,
 		"ARG BD_SOURCE_SHA256=" + bdSourceSHA256,
 		"ARG BD_BUILD=" + bdBuild,
@@ -88,11 +92,11 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		"ARG GRPC_VERSION=" + grpcVersion,
 		`https://github.com/gastownhall/beads/archive/${BD_SOURCE_REF}.tar.gz`,
 		`echo "${BD_SOURCE_SHA256}  /tmp/bd-source.tar.gz" | sha256sum --check --strict`,
-		`grep -Fq "Version = \"${bd_version}\"" cmd/bd/version.go`,
+		`grep -Fq "Version = \"${BD_SOURCE_VERSION}\"" cmd/bd/version.go`,
 		`go get "google.golang.org/grpc@v${GRPC_VERSION}"`,
 		`CGO_ENABLED=1 go build`,
 		`-tags="gms_pure_go"`,
-		`-X main.Version=${bd_version}`,
+		`-X main.Version=${BD_SOURCE_VERSION}`,
 		`-X main.Build=${BD_BUILD}`,
 		`-X main.Commit=${BD_SOURCE_REF}`,
 		`-X main.Branch=${BD_BRANCH}`,

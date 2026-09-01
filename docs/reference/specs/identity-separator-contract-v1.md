@@ -6,7 +6,7 @@ description: Authoritative specification for the qualified-identity encoding sha
 | Field | Value |
 |---|---|
 | Status | Authoritative specification |
-| Last verified | 2026-08-25 |
+| Last verified | 2026-08-31 |
 | Primary implementation | `internal/agent/session_name.go` |
 | Mints identities | gascity |
 | Compares identities | beads |
@@ -82,37 +82,25 @@ composes `rig/agent` and `city.agent` strings when constructing an agent's
 qualified name, and it is the only codebase that calls the encode direction
 (§4) to produce a tmux-safe session name from one.
 
-**beads** never mints and has no equivalent of the encode direction, and it
-does not implement the *decode* direction described in §4 at all. What it
-has instead is `issueops.ActorMatches` (beads repo,
+**beads** never mints and exposes no general-purpose equivalent of gascity's
+encode or best-effort decode functions. With gascity's
+`BD_CURRENT_VERSION` from `deps.env` (currently v1.1.1-0.20260831020517-d530cddfa64b),
+beads instead uses `issueops.ActorMatches` (beads repo,
 `internal/storage/issueops/identity.go`, backed by the unexported
-`canonicalActor` at lines 29-49; package-local-duplicated as
-`validation.ActorMatches`/`CanonicalActor` in `internal/validation/issue.go`
-because storage may not import validation) — a narrower, dot-axis-only
-canonicalizer used purely for assignee/actor comparison. It collapses any
-run of `.`, `_`, or `-` down to a single `_`. Per its own doc comment, this
-exists to reconcile the different *contextual spellings of a dot* that the
-same identity can arrive in — `__` in a session name, `_` in a Dolt
-table/database name, an unspecified `-` "elsewhere" — not to decode the `/`
-rig-boundary. It MISSES the slash axis entirely: `/` is not one of its
-cases, so a raw `/` always passes through untouched, and a `/`-spelled
-identity does NOT compare equal to its `--`-spelled encoding under this
-function (see the architecture ruling this contract implements,
-`ga-qv1d2d`, which measures exactly this: beads' matcher never reconciles
-the `/` axis). What it *does* do is collapse `--` and `__` to that same
-generic `_` — the widening this contract exists to prevent, since two
-structurally distinct gascity identities (a rig/agent pair and a
-city/agent pair built from the same segment names) can be driven to
-compare equal on the beads side.
+`canonicalActor`; package-local-duplicated as
+`validation.ActorMatches`/`CanonicalActor` in `internal/validation/issue.go`)
+for assignee/actor comparison. That comparison-only canonicalizer recognizes
+both axes: an exact `--` run becomes `/`, a raw `/` passes through unchanged,
+and every other run of `.`, `_`, or `-` (including `__`) collapses to `_`.
+Consequently, `gastown--mayor` compares equal to `gastown/mayor` but remains
+distinct from `gastown__mayor`; the slash and dot axes no longer widen to the
+same actor identity.
 
-This canonicalizer is also newer than the beads version gascity currently
-builds against: it lives in beads >= `v1.1.1-0.20260810093734-d0e612eaf8a4`,
-while gascity's `go.mod` pins `v1.1.1-0.20260805093327-bf97b73749ac`, five
-days earlier — `internal/storage/issueops/identity.go` does not exist at
-gascity's current pin at all. This paragraph describes the nearest
-available upstream behavior, not code gascity has adopted yet; re-verify
-against the pinned version when gascity's `go.mod` moves past
-`v1.1.1-0.20260810093734-d0e612eaf8a4`.
+This is deliberately not a claim of lossless decoding. The ambiguity in §2
+still applies to legal name segments containing `--` or `__`; beads only uses
+the rule to compare actor spellings. Its pinned source also carries a parity
+test between the storage and validation copies so their separator behavior
+cannot drift silently.
 
 ## 4. Source of truth
 

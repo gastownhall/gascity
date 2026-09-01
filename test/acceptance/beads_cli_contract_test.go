@@ -20,11 +20,121 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
+
+const bdContractConfigYAML = `dolt:
+  mode: embedded
+  shared-server: false
+`
+
+// bdContractChildEnv returns a child environment that cannot inherit a live
+// Gas City/Beads/Dolt selector. The external CLI contract intentionally runs
+// bd, so package-level testenv scrubbing protects the Go test process but not
+// selectors a test (or wrapper) adds before runBD executes. Preserve unrelated
+// toolchain/platform variables for portability, replace every config/home/temp
+// root with a test-owned path, and pin the CLI's Viper config to embedded mode.
+func bdContractChildEnv(t *testing.T, dir string) []string {
+	t.Helper()
+
+	var env []string
+	for _, entry := range os.Environ() {
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		upper := strings.ToUpper(key)
+		if strings.HasPrefix(upper, "BEADS_") ||
+			strings.HasPrefix(upper, "BD_") ||
+			strings.HasPrefix(upper, "GC_") ||
+			strings.HasPrefix(upper, "DOLT_") {
+			continue
+		}
+		switch upper {
+		case "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
+			"TMPDIR", "TMP", "TEMP", "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR",
+			"PWD", "OLDPWD", "DO_NOT_TRACK", "NO_COLOR":
+			continue
+		}
+		env = append(env, entry)
+	}
+
+	home := filepath.Join(dir, ".bd-contract-home")
+	tmp := filepath.Join(dir, ".bd-contract-tmp")
+	xdgConfig := filepath.Join(home, ".config")
+	xdgRuntime := filepath.Join(dir, ".bd-contract-runtime")
+	for _, path := range []string{home, tmp, xdgConfig, xdgRuntime} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatalf("create bd contract environment directory %s: %v", path, err)
+		}
+	}
+
+	return append(env,
+		"HOME="+home,
+		"USERPROFILE="+home,
+		"TMPDIR="+tmp,
+		"TMP="+tmp,
+		"TEMP="+tmp,
+		"XDG_CONFIG_HOME="+xdgConfig,
+		"XDG_RUNTIME_DIR="+xdgRuntime,
+		"PWD="+dir,
+		"BEADS_DIR="+filepath.Join(dir, ".beads"),
+		"BD_DOLT_MODE=embedded",
+		"BD_DOLT_SHARED_SERVER=false",
+		"BD_DISABLE_METRICS=1",
+		"BD_DISABLE_EVENT_FLUSH=1",
+		"BD_OTEL_METRICS_URL=",
+		"BD_OTEL_STDOUT=false",
+		"DO_NOT_TRACK=1",
+		"NO_COLOR=1",
+	)
+}
+
+// snapshotBDContractTree records every path, type, mode and regular-file byte
+// under root without following symlinks. Comparing snapshots catches not only
+// an overwritten sentinel but any unexpected file or directory that a nested
+// bd invocation creates in its initialized ancestor.
+func snapshotBDContractTree(t *testing.T, root string) map[string]string {
+	t.Helper()
+	snapshot := make(map[string]string)
+	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		description := info.Mode().String()
+		switch {
+		case info.Mode().IsRegular():
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			description += "\x00" + string(data)
+		case info.Mode()&os.ModeSymlink != 0:
+			target, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			description += "\x00" + target
+		}
+		snapshot[rel] = description
+		return nil
+	}); err != nil {
+		t.Fatalf("snapshot bd contract tree %s: %v", root, err)
+	}
+	return snapshot
+}
 
 // runBD executes a bd command in dir with BEADS_DIR set to dir/.beads.
 // Returns combined output and any error.
@@ -33,7 +143,7 @@ func runBD(t *testing.T, dir string, args ...string) (string, error) {
 	bdPath := helpers.RequireBD(t)
 	cmd := exec.Command(bdPath, args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "BEADS_DIR="+filepath.Join(dir, ".beads"))
+	cmd.Env = bdContractChildEnv(t, dir)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
@@ -48,14 +158,61 @@ func requireBD(t *testing.T, dir string, args ...string) string {
 	return out
 }
 
+// initBeadsDirAt initializes a fenced, test-owned embedded beads database.
+// Pre-creating config.yaml is load-bearing: current bd accepts an explicit
+// BEADS_DIR only when that directory already has a project marker. Without the
+// marker, bd walks CWD ancestry and can replace BEADS_DIR with an initialized
+// outer workspace before init runs.
+func initBeadsDirAt(t *testing.T, dir string) string {
+	t.Helper()
+	helpers.RequireBD(t)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("create bd contract workspace: %v", err)
+	}
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatalf("create bd contract .beads: %v", err)
+	}
+	metadataPath := filepath.Join(beadsDir, "metadata.json")
+	if _, err := os.Lstat(metadataPath); !os.IsNotExist(err) {
+		t.Fatalf("bd contract target metadata must be absent before init: %s: %v", metadataPath, err)
+	}
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte(bdContractConfigYAML), 0o600); err != nil {
+		t.Fatalf("write bd contract config fence: %v", err)
+	}
+
+	requireBD(t, dir, "init", "-p", "ct", "--skip-hooks", "--skip-agents", "-q")
+
+	data, err := os.ReadFile(metadataPath)
+	if err != nil {
+		t.Fatalf("read test-owned metadata after bd init: %v", err)
+	}
+	var metadata struct {
+		Backend  string `json:"backend"`
+		DoltMode string `json:"dolt_mode"`
+	}
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		t.Fatalf("parse test-owned metadata after bd init: %v", err)
+	}
+	if metadata.Backend != "dolt" || metadata.DoltMode != "embedded" {
+		t.Fatalf("bd init escaped isolated embedded target: backend=%q dolt_mode=%q, want dolt/embedded", metadata.Backend, metadata.DoltMode)
+	}
+	configAfter, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read bd contract config fence after init: %v", err)
+	}
+	if !strings.Contains(string(configAfter), "mode: embedded") || !strings.Contains(string(configAfter), "shared-server: false") {
+		t.Fatalf("bd init did not preserve embedded config fence:\n%s", configAfter)
+	}
+	return dir
+}
+
 // initBeadsDir creates a temp directory and initializes a beads database.
 // Returns the directory path.
 func initBeadsDir(t *testing.T) string {
 	t.Helper()
-	helpers.RequireBD(t)
-	dir := t.TempDir()
-	requireBD(t, dir, "init", "-p", "ct", "--skip-hooks", "-q")
-	return dir
+	return initBeadsDirAt(t, t.TempDir())
 }
 
 // createBead creates a bead with the given title and returns its ID
@@ -89,6 +246,50 @@ func extractBeadID(t *testing.T, jsonOut string) string {
 }
 
 // --- Contract tests ---
+
+// TestBdContractHarnessIsolatesInitializedAncestor proves the contract cannot
+// fall through a not-yet-marked BEADS_DIR to an initialized ancestor. The
+// ancestor is a disposable embedded-workspace-shaped fixture: no server is
+// contacted, and its bytes must remain unchanged across the nested init.
+func TestBdContractHarnessIsolatesInitializedAncestor(t *testing.T) {
+	outer := t.TempDir()
+	outerBeads := filepath.Join(outer, ".beads")
+	outerDoltMarker := filepath.Join(outerBeads, "embeddeddolt", "outer", ".dolt")
+	if err := os.MkdirAll(outerDoltMarker, 0o700); err != nil {
+		t.Fatalf("create initialized ancestor fixture: %v", err)
+	}
+	outerConfig := []byte("issue-prefix: outer\n" + bdContractConfigYAML)
+	outerMetadata := []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"embedded","dolt_database":"outer"}`)
+	outerSentinel := []byte("outer-workspace-must-not-change\n")
+	outerFiles := map[string][]byte{
+		filepath.Join(outerBeads, "config.yaml"):   outerConfig,
+		filepath.Join(outerBeads, "metadata.json"): outerMetadata,
+		filepath.Join(outerBeads, "sentinel"):      outerSentinel,
+	}
+	for path, data := range outerFiles {
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatalf("write initialized ancestor fixture %s: %v", path, err)
+		}
+	}
+	outerBefore := snapshotBDContractTree(t, outerBeads)
+
+	// Reintroduce representative live selectors after package-level testenv
+	// scrubbing. runBD must remove them instead of relying on its caller.
+	t.Setenv("BEADS_DIR", outerBeads)
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "1")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+	t.Setenv("BD_DOLT_MODE", "server")
+	t.Setenv("GC_BEADS", "bd")
+
+	nested := filepath.Join(outer, "nested", "contract")
+	initBeadsDirAt(t, nested)
+
+	outerAfter := snapshotBDContractTree(t, outerBeads)
+	if !reflect.DeepEqual(outerAfter, outerBefore) {
+		t.Fatalf("nested bd init modified initialized ancestor tree:\n before: %#v\n after:  %#v", outerBefore, outerAfter)
+	}
+}
 
 // TestBdBasicCRUD exercises all basic CRUD operations against a single
 // shared beads directory. Subtests run sequentially.
