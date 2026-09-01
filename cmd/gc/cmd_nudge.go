@@ -89,6 +89,21 @@ const (
 
 var errNudgeSessionFenceMismatch = errors.New("queued nudge session fence mismatch")
 
+// nudgeManualDropCause is the failure cause `gc nudge drop` passes to
+// recordQueuedNudgeFailureWithStore. Its Is method reports equivalence to
+// errNudgeSessionFenceMismatch so failedQueuedNudge's unconditional
+// dead-letter branch fires on the first call, the same branch drain already
+// relies on for a nudge whose target fence no longer matches, rather than
+// the attempts/TTL branch, which would just requeue a fresh item instead of
+// dropping it.
+type nudgeManualDropCause struct{}
+
+func (nudgeManualDropCause) Error() string { return "dropped by operator (gc nudge drop)" }
+
+func (nudgeManualDropCause) Is(target error) bool { return target == errNudgeSessionFenceMismatch }
+
+var errNudgeManualDrop error = nudgeManualDropCause{}
+
 var (
 	// Test seams for cmd_nudge_test.go. Tests that replace these package
 	// variables must stay serial; do not use t.Parallel in those tests.
@@ -254,6 +269,7 @@ was asleep or was not at a safe interactive boundary yet.`,
 		newNudgeStatusCmd(stdout, stderr),
 		newNudgeDrainCmd(stdout, stderr),
 		newNudgePollCmd(stdout, stderr),
+		newNudgeDropCmd(stdout, stderr),
 	)
 	return cmd
 }
@@ -319,6 +335,31 @@ func newNudgePollCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd.Flags().StringVar(&sessionName, "session", "", "runtime session name (defaults to $GC_SESSION_NAME)")
 	cmd.Flags().DurationVar(&interval, "interval", defaultNudgePollInterval, "poll interval (overrides [session] nudge_poll_interval)")
 	cmd.Flags().DurationVar(&quiescence, "quiescence", defaultNudgePollQuiescence, "minimum inactivity before injecting")
+	return cmd
+}
+
+func newNudgeDropCmd(stdout, stderr io.Writer) *cobra.Command {
+	var jsonOutput bool
+	cmd := &cobra.Command{
+		Use:   "drop <id>...",
+		Short: "Dead-letter one or more pending or in-flight nudges",
+		Long: `Dead-letter one or more pending or in-flight nudges by ID.
+
+Each dropped nudge is terminalized through the same dead-letter path a
+failed delivery attempt uses, so it lands in "gc nudge status" as dead
+rather than disappearing silently. Find IDs with "gc nudge status".
+
+This only accepts explicit nudge IDs; it does not do bulk or age-based
+selection.`,
+		Args: cobra.MinimumNArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			if cmdNudgeDrop(args, jsonOutput, stdout, stderr) != 0 {
+				return errExit
+			}
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON")
 	return cmd
 }
 
@@ -434,6 +475,160 @@ func nonNilQueuedNudges(items []queuedNudge) []queuedNudge {
 		return []queuedNudge{}
 	}
 	return items
+}
+
+// nudgeDropStatus classifies an ID passed to `gc nudge drop` against the
+// current queue state, before the drop's write pass runs.
+type nudgeDropStatus int
+
+const (
+	nudgeDropStatusNotFound nudgeDropStatus = iota
+	nudgeDropStatusDroppable
+	nudgeDropStatusAlreadyDead
+)
+
+type nudgeDropResult struct {
+	ID      string `json:"id"`
+	OK      bool   `json:"ok"`
+	Outcome string `json:"outcome,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+type nudgeDropJSON struct {
+	SchemaVersion string            `json:"schema_version"`
+	OK            bool              `json:"ok"`
+	Command       string            `json:"command"`
+	CityPath      string            `json:"city_path"`
+	Results       []nudgeDropResult `json:"results"`
+}
+
+func cmdNudgeDrop(args []string, jsonOutput bool, stdout, stderr io.Writer) int {
+	var ids []string
+	for _, arg := range args {
+		id := strings.TrimSpace(arg)
+		if id == "" {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		fmt.Fprintln(stderr, "gc nudge drop: no nudge ID given") //nolint:errcheck
+		return 1
+	}
+
+	cityPath, err := resolveCity()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc nudge drop: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	return doNudgeDrop(cityPath, ids, jsonOutput, stdout, stderr)
+}
+
+func doNudgeDrop(cityPath string, ids []string, jsonOutput bool, stdout, stderr io.Writer) int {
+	now := time.Now()
+	statuses, err := classifyQueuedNudgeIDs(cityPath, ids, now)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc nudge drop: %v\n", err) //nolint:errcheck
+		return 1
+	}
+
+	var droppable []string
+	for _, id := range ids {
+		if statuses[id] == nudgeDropStatusDroppable {
+			droppable = append(droppable, id)
+		}
+	}
+	if len(droppable) > 0 {
+		store, err := openNudgeBeadStoreErr(cityPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc nudge drop: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		defer closeBeadStoreHandle(store.Store) //nolint:errcheck // best-effort
+		if err := recordQueuedNudgeFailureWithStore(cityPath, store, droppable, errNudgeManualDrop, now); err != nil {
+			fmt.Fprintf(stderr, "gc nudge drop: %v\n", err) //nolint:errcheck
+			return 1
+		}
+	}
+
+	exit := 0
+	results := make([]nudgeDropResult, 0, len(ids))
+	for _, id := range ids {
+		switch statuses[id] {
+		case nudgeDropStatusDroppable:
+			results = append(results, nudgeDropResult{ID: id, OK: true, Outcome: "dropped"})
+			if !jsonOutput {
+				fmt.Fprintf(stdout, "Dropped nudge %s\n", id) //nolint:errcheck
+			}
+		case nudgeDropStatusAlreadyDead:
+			exit = 1
+			results = append(results, nudgeDropResult{ID: id, OK: false, Error: "already dead-lettered"})
+			fmt.Fprintf(stderr, "gc nudge drop %s: already dead-lettered\n", id) //nolint:errcheck
+		default:
+			exit = 1
+			results = append(results, nudgeDropResult{ID: id, OK: false, Error: "no such queued nudge"})
+			fmt.Fprintf(stderr, "gc nudge drop %s: no such queued nudge\n", id) //nolint:errcheck
+		}
+	}
+
+	if jsonOutput {
+		if err := writeCLIJSONLine(stdout, nudgeDropJSON{
+			SchemaVersion: "1",
+			OK:            exit == 0,
+			Command:       "nudge drop",
+			CityPath:      cityPath,
+			Results:       results,
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc nudge drop: writing JSON: %v\n", err) //nolint:errcheck
+			return 1
+		}
+	}
+	return exit
+}
+
+// classifyQueuedNudgeIDs reports, for each of the given IDs, whether it is
+// currently droppable (pending or in-flight), already dead-lettered, or not
+// found in the queue at all. It runs the same maintenance sweep every other
+// queue read does, so a since-expired or since-recovered item is classified
+// against current state rather than a stale snapshot.
+func classifyQueuedNudgeIDs(cityPath string, ids []string, now time.Time) (map[string]nudgeDropStatus, error) {
+	maint := nudgeMaintenanceStore{cityPath: cityPath}
+	defer maint.close() //nolint:errcheck // best-effort
+	want := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		want[id] = true
+	}
+	statuses := make(map[string]nudgeDropStatus, len(ids))
+	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+		front := maint.frontForState(state)
+		deadline := noMaintenanceDeadline()
+		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
+			return err
+		}
+		if err := pruneExpiredQueuedNudges(state, front, now, deadline); err != nil {
+			return err
+		}
+		if err := pruneDeadQueuedNudges(state, front, now, deadline); err != nil {
+			return err
+		}
+		for _, item := range state.Pending {
+			if want[item.ID] {
+				statuses[item.ID] = nudgeDropStatusDroppable
+			}
+		}
+		for _, item := range state.InFlight {
+			if want[item.ID] {
+				statuses[item.ID] = nudgeDropStatusDroppable
+			}
+		}
+		for _, item := range state.Dead {
+			if want[item.ID] {
+				statuses[item.ID] = nudgeDropStatusAlreadyDead
+			}
+		}
+		return nil
+	})
+	return statuses, err
 }
 
 func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdout, stderr io.Writer) int {

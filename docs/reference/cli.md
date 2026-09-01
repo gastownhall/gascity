@@ -2725,7 +2725,27 @@ gc nudge
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc nudge drop](#gc-nudge-drop) | Dead-letter one or more pending or in-flight nudges |
 | [gc nudge status](#gc-nudge-status) | Show queued and dead-letter nudges for a session |
+
+## gc nudge drop
+
+Dead-letter one or more pending or in-flight nudges by ID.
+
+Each dropped nudge is terminalized through the same dead-letter path a
+failed delivery attempt uses, so it lands in "gc nudge status" as dead
+rather than disappearing silently. Find IDs with "gc nudge status".
+
+This only accepts explicit nudge IDs; it does not do bulk or age-based
+selection.
+
+```
+gc nudge drop <id>... [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | Output as JSON |
 
 ## gc nudge status
 
