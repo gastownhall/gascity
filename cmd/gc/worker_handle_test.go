@@ -1369,9 +1369,24 @@ session_id_flag = "--session-id"
 	if err := handle.Kill(context.Background()); err != nil {
 		t.Fatalf("handle.Kill: %v", err)
 	}
-	if stop := sp.Calls[len(sp.Calls)-1]; stop.Method != "Stop" || stop.Name != info.SessionName {
-		t.Fatalf("last runtime call = %#v, want Stop %q", stop, info.SessionName)
+	// The live event recorder now wired into the CLI factory (#5859) makes
+	// Kill's worker.operation telemetry re-enrich session identity after the
+	// runtime mutation, which issues a trailing IsRunning probe — so the Stop
+	// call is no longer guaranteed to be last. Find it instead of assuming it.
+	stop, ok := lastRuntimeCallByMethod(sp.Calls, "Stop")
+	if !ok || stop.Name != info.SessionName {
+		t.Fatalf("runtime calls = %#v, want a Stop %q", sp.Calls, info.SessionName)
 	}
+}
+
+// lastRuntimeCallByMethod returns the last call matching method, if any.
+func lastRuntimeCallByMethod(calls []runtime.Call, method string) (runtime.Call, bool) {
+	for i := len(calls) - 1; i >= 0; i-- {
+		if calls[i].Method == method {
+			return calls[i], true
+		}
+	}
+	return runtime.Call{}, false
 }
 
 // TestWorkerObserveSessionTargetWithConfigDoesNotFetchSessionBeadMoreThanTwice
@@ -1514,9 +1529,12 @@ command = "/bin/echo"
 	if err := workerKillSessionTargetWithConfig(cityDir, store, sp, cfg, info.SessionName); err != nil {
 		t.Fatalf("workerKillSessionTargetWithConfig: %v", err)
 	}
-	last := sp.Calls[len(sp.Calls)-1]
-	if last.Method != "Stop" || last.Name != info.SessionName {
-		t.Fatalf("last runtime call = %#v, want Stop %q", last, info.SessionName)
+	// See TestWorkerHandleForSessionTargetWithConfigResolvesSessionName: the
+	// live recorder wired into the CLI factory (#5859) adds a trailing
+	// IsRunning enrichment probe after Kill, so Stop is no longer last.
+	stop, ok := lastRuntimeCallByMethod(sp.Calls, "Stop")
+	if !ok || stop.Name != info.SessionName {
+		t.Fatalf("runtime calls = %#v, want a Stop %q", sp.Calls, info.SessionName)
 	}
 }
 
