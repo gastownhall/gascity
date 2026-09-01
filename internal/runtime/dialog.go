@@ -1440,6 +1440,25 @@ func ContainsModelSwitchModal(content string) bool {
 		strings.Contains(content, "Switch to ")
 }
 
+// ContainsFeedbackSurveyModal reports whether pane content shows Claude
+// Code's post-turn "how did I do?" feedback survey (bundle 2.1.251,
+// component DT: option row built from HL = [{1,Bad},{2,Fine},{3,Good}] plus
+// optional ffe = {4,Unsure}, and WL = {0,Dismiss}). The survey has two
+// variants — session feedback and memory recollection — with different,
+// unstable titles, so the option row is the only sound anchor. The dismiss
+// key is "0".
+//
+// This requires all four cells on a single line, matching lineContainsAll's
+// same-line-co-occurrence reasoning used elsewhere in this file: testing the
+// whole pane blob would let the labels land on unrelated scrollback (e.g.
+// prose that merely discusses the survey) and send spurious keystrokes into
+// a working agent's composer. "4: Unsure" is deliberately excluded from the
+// required set — it is present only in the memory-recollection variant, and
+// requiring it would miss the session-feedback variant entirely.
+func ContainsFeedbackSurveyModal(content string) bool {
+	return lineContainsAll(content, "1: Bad", "2: Fine", "3: Good", "0: Dismiss")
+}
+
 // ContainsProviderRateLimitScreen reports whether pane content has
 // high-confidence provider rate-limit screen evidence.
 func ContainsProviderRateLimitScreen(content string) bool {
