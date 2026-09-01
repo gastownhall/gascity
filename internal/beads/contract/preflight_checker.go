@@ -58,13 +58,14 @@ func (c PreflightChecker) Check(scope string) (PreflightResult, error) {
 		return PreflightResult{}, err
 	}
 	bdCtx, bdCtxErr := c.readBDContext(scope)
+	proxiedServer := isProxiedServerMode(metadata, bdCtx, bdCtxErr)
 
 	checks := []PreflightCheckResult{
 		c.checkProvider(),
 		c.checkMetadataBackend(metadata),
 		c.checkBDContextAgreement(metadata, bdCtx, bdCtxErr),
 		c.checkDoltModeSafe(metadata, bdCtx, bdCtxErr),
-		c.checkIdentityMatch(scope, metadata),
+		c.checkIdentityMatchForMode(scope, metadata, proxiedServer),
 		c.checkVersionCompat(bdCtx, bdCtxErr),
 		c.checkContractShape(metadata),
 	}
@@ -86,12 +87,16 @@ func (c PreflightChecker) Check(scope string) (PreflightResult, error) {
 		Scope:                             scope,
 		Checks:                            checks,
 		RepairSteps:                       preflightRepairSteps(checks),
-		NativeStoreEligible:               verdict == PreflightVerdictEligible,
+		NativeStoreEligible:               verdict == PreflightVerdictEligible && !proxiedServer,
 		NativeEligibleViaIdentityFallback: eligibleViaIdentityFallback,
 	}
-	if verdict != PreflightVerdictEligible {
+	if verdict != PreflightVerdictEligible || proxiedServer {
 		result.Fallback = PreflightFallbackBdStore
-		result.FallbackReason = preflightFallbackReason(checks)
+		if proxiedServer {
+			result.FallbackReason = "dolt_mode=proxied-server; beads owns storage through its UOW/proxy path"
+		} else {
+			result.FallbackReason = preflightFallbackReason(checks)
+		}
 	}
 	return NewPreflightResult(result), nil
 }
@@ -197,14 +202,45 @@ func (c PreflightChecker) checkDoltModeSafe(metadata preflightMetadata, ctx Pref
 	if metadata.Backend != "dolt" || ctx.Backend != "dolt" {
 		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckPass, "Dolt mode check is not required for non-dolt backend", details)
 	}
-	switch ctx.DoltMode {
+	switch strings.ToLower(ctx.DoltMode) {
 	case "server":
 		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckPass, "bd context reports dolt server mode", details)
+	case "proxied-server":
+		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckPass, "bd context reports proxied-server mode; storage is owned by the beads UOW/proxy path", details)
 	case "embedded":
 		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckFail, "dolt_mode=embedded; native store requires Dolt server mode (bd context must report dolt_mode=server) — falling back to per-call bd. See troubleshooting.", details)
 	default:
 		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckFail, "bd context reports unsupported dolt mode", details)
 	}
+}
+
+// isProxiedServerMode reports whether either authoritative mode input names
+// proxied-server. A persisted marker is enough to exclude the native opener:
+// bd context can be temporarily unavailable, stale, or pointed at a different
+// scope, and none of those conditions makes a proxied store safe to open as a
+// native Dolt database. A readable bd context independently has the same force
+// because it describes the path bd will actually use for this invocation.
+func isProxiedServerMode(metadata preflightMetadata, ctx PreflightBDContext, err error) bool {
+	// Treat the mode marker itself as authoritative.  Backend labels are a
+	// separate agreement check and may be stale or malformed; requiring them
+	// here would allow a readable proxied context to fall through to a native
+	// SQL identity probe before that disagreement is handled.  Failing closed
+	// is safer: any proxied marker means the beads UOW/proxy path owns storage.
+	metadataProxied := strings.EqualFold(strings.TrimSpace(metadata.DoltMode), "proxied-server")
+	contextProxied := err == nil && strings.EqualFold(strings.TrimSpace(ctx.DoltMode), "proxied-server")
+	return metadataProxied || contextProxied
+}
+
+func (c PreflightChecker) checkIdentityMatchForMode(scope string, metadata preflightMetadata, proxiedServer bool) PreflightCheckResult {
+	if proxiedServer {
+		return NewPreflightCheckResult(
+			PreflightCheckIdentityMatch,
+			PreflightCheckWarn,
+			"proxied-server identity is not independently verified by gc; beads owns storage through its UOW/proxy path",
+			PreflightDetails{MetadataProjectID: metadata.ProjectID},
+		)
+	}
+	return c.checkIdentityMatch(scope, metadata)
 }
 
 func (c PreflightChecker) checkIdentityMatch(scope string, metadata preflightMetadata) PreflightCheckResult {

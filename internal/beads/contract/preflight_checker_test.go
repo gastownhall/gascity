@@ -228,6 +228,128 @@ func TestPreflightPassesOnHealthyDolt(t *testing.T) {
 	}
 }
 
+// Proxied-server metadata is a valid beads contract, but its store is owned by
+// beads' UOW/proxy path rather than by Gas City's native Dolt opener. Preflight
+// keeps the mode check at PASS while explicitly declining native-store
+// activation. The direct SQL identity probe is not a valid probe for a proxied
+// workspace and must not be required merely to select the bd-backed path; the
+// identity result therefore remains WARN/unknown, as the existing contract
+// uses WARN whenever gc cannot independently confirm the database identity.
+func TestPreflightRecognizesProxiedServerWithoutNativeEligibility(t *testing.T) {
+	scope := "/city"
+	checker := testPreflightChecker(preflightMetadataJSON(`{
+		"backend": "dolt",
+		"dolt_mode": "proxied-server",
+		"dolt_database": "gascity",
+		"project_id": "gc-local"
+	}`), PreflightBDContext{Backend: "dolt", DoltMode: "proxied-server"}, "")
+	checker.DatabaseProjectID = func(string) (string, bool, error) {
+		t.Fatal("DatabaseProjectID called for proxied-server mode")
+		return "", false, nil
+	}
+
+	result, err := checker.Check(scope)
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+
+	// The mode and contract are valid, but identity is deliberately unknown to
+	// gc's control-plane probe. That WARN makes the aggregate verdict DEGRADED;
+	// NativeStoreEligible remains false because the proxied UOW path is the only
+	// supported route regardless of the aggregate verdict.
+	assertPreflightVerdict(t, result, PreflightVerdictDegraded, false)
+	for _, check := range result.Checks {
+		want := PreflightCheckPass
+		if check.ID == PreflightCheckIdentityMatch {
+			want = PreflightCheckWarn
+		}
+		if check.State != want {
+			t.Fatalf("check %s state = %s, want %s for proxied mode: %+v", check.ID, check.State, want, result.Checks)
+		}
+	}
+	identityCheck := findPreflightCheck(t, result, PreflightCheckIdentityMatch)
+	if !strings.Contains(strings.ToLower(identityCheck.Summary), "not independently verified") {
+		t.Fatalf("identity summary = %q, want explicit unknown/deferred guidance", identityCheck.Summary)
+	}
+	modeCheck := findPreflightCheck(t, result, PreflightCheckDoltModeSafe)
+	if !strings.Contains(strings.ToLower(modeCheck.Summary), "prox") || !strings.Contains(strings.ToLower(modeCheck.Summary), "uow") {
+		t.Fatalf("dolt mode summary = %q, want proxied/UOW guidance", modeCheck.Summary)
+	}
+	if result.Fallback != PreflightFallbackBdStore {
+		t.Fatalf("Fallback = %q, want %q for proxied mode", result.Fallback, PreflightFallbackBdStore)
+	}
+	if !strings.Contains(strings.ToLower(result.FallbackReason), "prox") {
+		t.Fatalf("FallbackReason = %q, want proxied-mode explanation", result.FallbackReason)
+	}
+}
+
+// A persisted proxied-server mode must remain on the bd/UOW path even when
+// `bd context` is temporarily unavailable.  Requiring a readable context to
+// recognize the mode would let the identity-fallback upgrade below turn a
+// proxied scope into a native-open candidate (or run a direct SQL probe
+// against the wrong endpoint).
+func TestPreflightNeverEnablesNativeForProxiedMetadataWhenContextUnavailable(t *testing.T) {
+	scope := "/city"
+	fs := fsys.NewFake()
+	fs.Dirs[filepath.Join(scope, ".beads")] = true
+	fs.Files[filepath.Join(scope, ".beads", "metadata.json")] = []byte(`{"backend":"dolt","dolt_mode":"proxied-server","dolt_database":"gascity","project_id":"gc-local"}`)
+	checker := PreflightChecker{
+		FS:                  fs,
+		Provider:            "bd",
+		BeadsLibraryVersion: "1.0.4",
+		BDContext: func(string) (PreflightBDContext, error) {
+			return PreflightBDContext{}, errors.New("bd context unavailable")
+		},
+		DatabaseProjectID: func(string) (string, bool, error) {
+			t.Fatal("DatabaseProjectID called for persisted proxied-server mode")
+			return "", false, nil
+		},
+	}
+
+	result, err := checker.Check(scope)
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if result.NativeStoreEligible {
+		t.Fatal("NativeStoreEligible = true for proxied metadata with unavailable bd context")
+	}
+	if result.Fallback != PreflightFallbackBdStore {
+		t.Fatalf("Fallback = %q, want %q", result.Fallback, PreflightFallbackBdStore)
+	}
+	if !strings.Contains(strings.ToLower(result.FallbackReason), "prox") {
+		t.Fatalf("FallbackReason = %q, want proxied-mode explanation", result.FallbackReason)
+	}
+}
+
+// A readable proxied marker is authoritative even when the backend fields are
+// stale or disagree.  The mode identifies the storage lifecycle that bd will
+// use; allowing a native SQL probe merely because a backend label is malformed
+// could open the wrong database before the disagreement gate rejects it.
+func TestPreflightContextProxiedMarkerSkipsIdentityProbeOnBackendDisagreement(t *testing.T) {
+	scope := "/city"
+	checker := testPreflightChecker(preflightMetadataJSON(`{
+		"backend": "dolt",
+		"dolt_mode": "server",
+		"dolt_database": "gascity",
+		"project_id": "gc-local"
+	}`), PreflightBDContext{Backend: "postgres", DoltMode: " PROXIED-SERVER "}, "")
+	checker.DatabaseProjectID = func(string) (string, bool, error) {
+		t.Fatal("DatabaseProjectID called when readable context reports proxied-server mode")
+		return "", false, nil
+	}
+
+	result, err := checker.Check(scope)
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if result.NativeStoreEligible {
+		t.Fatal("NativeStoreEligible = true for a readable proxied-server context")
+	}
+	if result.Fallback != PreflightFallbackBdStore {
+		t.Fatalf("Fallback = %q, want %q", result.Fallback, PreflightFallbackBdStore)
+	}
+}
+
 func TestPreflightAcceptsExecGcBeadsBdProviderPath(t *testing.T) {
 	scope := "/city"
 	checker := testPreflightChecker(preflightMetadataJSON(`{
