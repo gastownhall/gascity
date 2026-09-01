@@ -2007,6 +2007,12 @@ fi
 if [ "$*" = "bd show $ORPHAN_SWEEP_ORPHAN_ASSIGNEE --json" ]; then
   exit 1
 fi
+if [ "$*" = "bd update $ORPHAN_SWEEP_ORPHAN_ID --append-notes orphan-sweep: reset from assignee $ORPHAN_SWEEP_ORPHAN_ASSIGNEE -- no live session matched" ]; then
+  exit 0
+fi
+case "$*" in
+  "mail send mayor/ "*) exit 0 ;;
+esac
 printf 'UNEXPECTED: %s\n' "$*" >> "$GC_CALL_LOG"
 printf 'UNEXPECTED: %s\n' "$*" >&2
 exit 2
