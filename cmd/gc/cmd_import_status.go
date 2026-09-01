@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/packman"
+	"github.com/gastownhall/gascity/internal/remotesource"
 	"github.com/spf13/cobra"
 )
 
@@ -397,8 +398,12 @@ func writeImportStatusUpstreamText(stdout io.Writer, status *ImportStatusJSON) {
 		if entry.Upstream == nil {
 			continue
 		}
-		if entry.Upstream.Verdict == string(packman.UpstreamBehind) && strings.Contains(entry.Source, "//") &&
-			!strings.HasSuffix(entry.Source, "//") {
+		// Ask the source parser whether this import names a subpath rather
+		// than matching "//" by hand: every https://, ssh:// and file://
+		// source contains "//" in its scheme, so a hand-rolled test prints
+		// the caveat for every behind import.
+		if entry.Upstream.Verdict == string(packman.UpstreamBehind) &&
+			remotesource.Parse(entry.Source).Subpath != "" {
 			subpathBehind = true
 		}
 		fmt.Fprintf(stdout, "  %-*s  %-14s %s\n", //nolint:errcheck

@@ -676,6 +676,51 @@ version = "sha:aaaa"
 	}
 }
 
+// TestImportStatusCheckUpstreamTextNoSubpathOmitsNote is the negative half of
+// TestImportStatusCheckUpstreamTextOutput: a behind import whose source names
+// no subpath must not carry the per-repository caveat. That sibling test's
+// fixture has a real subpath, so it passes whether the note is gated on the
+// parsed subpath or on any "//" in the source -- including the "//" every
+// scheme contributes.
+func TestImportStatusCheckUpstreamTextNoSubpathOmitsNote(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, `[pack]
+name = "demo"
+schema = 1
+
+[imports.tools]
+source = "https://example.com/tools.git"
+version = "sha:aaaa"
+`)
+	if err := packman.WriteLockfile(fsys.OSFS{}, dir, &packman.Lockfile{
+		Schema: packman.LockfileSchema,
+		Packs: map[string]packman.LockedPack{
+			"https://example.com/tools.git": {Version: "sha:aaaa", Commit: "aaaa", Fetched: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)},
+		},
+	}); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+	stubCheckUpstreamImports(t, packman.UpstreamStatus{
+		Name: "pack:tools", Source: "https://example.com/tools.git", Constraint: "sha:aaaa",
+		LockedCommit: "aaaa", ResolvedRef: "refs/heads/main", ResolvedCommit: "bbbbbbbbbbbb",
+		Verdict: packman.UpstreamBehind,
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--city", dir, "import", "status", "--check-upstream"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "1 checked: 0 current, 1 behind, 0 unreachable, 0 not applicable") {
+		t.Fatalf("stdout missing the aggregate line:\n%s", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "freshness is measured per repository") {
+		t.Fatalf("per-repository note printed for a source with no subpath:\n%s", stdout.String())
+	}
+}
+
 // TestImportStatusJSONProductionRunWithCheckUpstream runs the real command
 // with --check-upstream and validates the emitted document against the
 // schema, so a struct field added without a schema property is a red test
