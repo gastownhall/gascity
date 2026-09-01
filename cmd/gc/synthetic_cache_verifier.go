@@ -48,14 +48,32 @@ func newSyntheticCacheVerifier() *syntheticCacheVerifier {
 
 // warmSyntheticCacheVerdicts memoizes POSITIVE full-validation verdicts across
 // readiness passes in this process, gated by a cheap stat fingerprint of the
-// materialized cache tree (per-file size+mtime, no content reads).
+// materialized cache tree (per-file size+mtime+mode and every directory path,
+// no content reads).
 //
 // The ready fast path must still notice a cached pack file that was corrupted
 // in place after the city was readied. Re-reading and comparing every cached
 // file on every config load is what made that guarantee cost O(pack files) per
 // gc command. Any ordinary write to a cached file changes its size or mtime and
 // therefore the fingerprint, which forces the full validator to run again and
-// repair the cache — the same invalidation contract packContentHashCache uses.
+// repair the cache.
+//
+// packContentHashCache is the closest sibling, but the analogy needs stating
+// carefully in both directions, because the two memos gate different verdicts.
+//
+// What it memoizes is a content hash, which depends on paths and bytes alone,
+// so a size+mtime+ctime fingerprint covers its verdict entirely bar a triple
+// collision. What this memoizes is a ValidateSyntheticRepo verdict, which also
+// depends on permission bits and on the set of directories — so the sibling's
+// fingerprint, applied here unchanged, would leave two gaps it does not have.
+// Hashing mode and every directory path closes those two.
+//
+// One gap remains, and here it is wider than the sibling's rather than equal to
+// it: this fingerprint does not hash ctime, so a content edit that preserves
+// size and mtime (cp -p, rsync --checksum --times) can still ride a stale
+// positive verdict, which #5367 closed for packContentHashCache. Adopting it
+// here needs internal/config's statCtimeNanos to be shared rather than
+// duplicated, so it is deliberately left as follow-up work.
 var warmSyntheticCacheVerdicts sync.Map // key(string) -> uint64 fingerprint
 
 // newWarmSyntheticCacheVerifier returns a verifier for the ALREADY-READY fast
@@ -85,26 +103,50 @@ func newWarmSyntheticCacheVerifier() *syntheticCacheVerifier {
 	}
 }
 
-// syntheticCacheStatFingerprint hashes every file path under dir with its size
-// and modification time, reading no file contents.
+// syntheticCacheStatFingerprint hashes the shape of the tree under dir --
+// every entry's path, plus each file's size, modification time and permission
+// bits -- reading no file contents.
+//
+// The entries mirror what ValidateSyntheticRepo rejects, because anything it
+// rejects that this cannot see would ride a stale positive verdict:
+//
+//   - Permission bits are hashed because validatePackFiles fails a file whose
+//     mode differs from the embedded copy, and chmod moves ctime rather than
+//     mtime or size. The bundled bd shim (gc-beads-bd.sh) is materialized
+//     0o755 and exec'd, so a cleared executable bit is a real breakage.
+//   - Directories are hashed by path alone because
+//     validateSyntheticRepoFileSet rejects an unexpected directory whatever
+//     its timestamps, and an added directory need contain no files at all. Its
+//     own mtime is deliberately not hashed: it moves whenever a child is
+//     written, which that child's own entry already covers, so hashing it
+//     would invalidate the memo spuriously.
+//
+// Entries are tagged "f"/"d" so a file and a directory sharing a path across
+// materializations cannot hash alike. This remains stat-only, so the cost is
+// unchanged from hashing size and mtime.
 func syntheticCacheStatFingerprint(dir string) (uint64, error) {
 	h := fnv.New64a()
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() {
-			return nil
-		}
 		rel, relErr := filepath.Rel(dir, path)
 		if relErr != nil {
 			return relErr
+		}
+		if rel == "." {
+			return nil
+		}
+		slash := filepath.ToSlash(rel)
+		if d.IsDir() {
+			fmt.Fprintf(h, "d\x00%s\x00", slash) //nolint:errcheck
+			return nil
 		}
 		info, infoErr := d.Info()
 		if infoErr != nil {
 			return infoErr
 		}
-		fmt.Fprintf(h, "%s\x00%d\x00%d\x00", filepath.ToSlash(rel), info.Size(), info.ModTime().UnixNano()) //nolint:errcheck
+		fmt.Fprintf(h, "f\x00%s\x00%d\x00%d\x00%04o\x00", slash, info.Size(), info.ModTime().UnixNano(), info.Mode().Perm()) //nolint:errcheck
 		return nil
 	})
 	if err != nil {

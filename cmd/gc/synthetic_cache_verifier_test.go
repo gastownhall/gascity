@@ -201,9 +201,13 @@ fetched = "2026-01-01T00:00:00Z"
 // corruption the stat fingerprint cannot see is one that preserves BOTH size
 // and mtime, so that is what proves the memo was consulted rather than the
 // tree re-read. It is also the contract's documented blind spot, stated here
-// as a test rather than left to a comment: packContentHashCache makes the same
-// trade, and no pack tooling rewrites a file to the same size and then
-// restores its mtime.
+// as a test rather than left to a comment.
+//
+// packContentHashCache used to make the same trade, but #5367 closed it there
+// by adding ctime to that fingerprint — precisely because mtime-preserving
+// tooling does exist (cp -p, rsync --checksum --times). So this assertion now
+// pins a gap the sibling no longer has, and it should be inverted into a
+// self-healing assertion when the ctime follow-up lands here too.
 //
 // Half two is the self-healing contract that blind spot must not swallow. Any
 // ordinary write moves size or mtime, so a later pass still re-runs the full
@@ -270,5 +274,110 @@ func TestWarmSyntheticCacheVerifierReusesPositiveVerdictsAcrossPasses(t *testing
 
 	if newWarmSyntheticCacheVerifier().Valid(cacheDir, builtinpacks.Repository, commit) {
 		t.Error("a corrupted cache reported valid; the ready path would never repair it")
+	}
+}
+
+// firstExecutableCachedFile returns a cached file materialized 0o755, plus its
+// pre-modification stat. builtinpacks.MaterializedFileMode gives .sh/.py/.bash
+// files that mode, and the bundled bd shim (gc-beads-bd.sh) is exec'd through
+// it — so a cache whose executable bit was cleared is a real breakage, not a
+// hypothetical one. Located by walk rather than by name so renaming a bundled
+// script cannot silently turn this regression test into a no-op.
+func firstExecutableCachedFile(t *testing.T, cacheDir string) (string, os.FileInfo) {
+	t.Helper()
+	var found string
+	var info os.FileInfo
+	err := filepath.WalkDir(cacheDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || found != "" || d.IsDir() {
+			return err
+		}
+		fi, statErr := d.Info()
+		if statErr != nil {
+			return statErr
+		}
+		if fi.Mode().Perm() == 0o755 {
+			found, info = path, fi
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking cache for an executable file: %v", err)
+	}
+	if found == "" {
+		t.Fatal("no 0o755 file in the materialized cache; MaterializedFileMode should give .sh/.py/.bash files that mode")
+	}
+	return found, info
+}
+
+// TestWarmSyntheticCacheVerifierNoticesAModeChange pins the first of the two
+// gaps between the stat fingerprint and what ValidateSyntheticRepo actually
+// rejects.
+//
+// validatePackFiles fails a cached file whose permission bits differ from the
+// embedded copy, but chmod moves ctime — NOT mtime — and leaves size untouched.
+// A fingerprint over path+size+mtime alone therefore cannot see it, so a
+// stale positive verdict would let the ready path keep serving a cache whose
+// bd shim is no longer executable. The memo must not outlive a chmod.
+func TestWarmSyntheticCacheVerifierNoticesAModeChange(t *testing.T) {
+	clearGCEnv(t) // isolated GC_HOME, so this cache path is unique to this test
+	source, ok := builtinpacks.Source("core")
+	if !ok {
+		t.Fatal(`builtinpacks.Source("core") is not registered`)
+	}
+	commit := bundledPackImportCommit()
+	cacheDir := materializeSyntheticCacheForTest(t, source, commit)
+
+	if !newWarmSyntheticCacheVerifier().Valid(cacheDir, builtinpacks.Repository, commit) {
+		t.Fatal("freshly materialized cache reported invalid by the warm verifier")
+	}
+
+	target, before := firstExecutableCachedFile(t, cacheDir)
+	if err := os.Chmod(target, 0o644); err != nil {
+		t.Fatalf("chmod cached executable: %v", err)
+	}
+	after, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("stat after chmod: %v", err)
+	}
+	// Guard the premise: if chmod ever moved size or mtime, the existing
+	// fingerprint would catch this for the wrong reason and the assertion
+	// below would pass vacuously.
+	if after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) {
+		t.Fatalf("chmod changed size/mtime (%d/%v -> %d/%v); this test no longer isolates the mode gap",
+			before.Size(), before.ModTime(), after.Size(), after.ModTime())
+	}
+
+	if newWarmSyntheticCacheVerifier().Valid(cacheDir, builtinpacks.Repository, commit) {
+		t.Errorf("a cache whose %s lost its executable bit reported valid; the stat fingerprint ignores mode, so the ready path would never repair it", filepath.Base(target))
+	}
+}
+
+// TestWarmSyntheticCacheVerifierNoticesAnUnexpectedDirectory pins the second
+// gap. validateSyntheticRepoFileSet rejects any directory outside the layout's
+// allowed set, but the fingerprint walk skips directory entries entirely, so an
+// added directory changes no hashed entry — it contains no files, and a parent
+// directory's own mtime is never hashed. The memo must not outlive it.
+func TestWarmSyntheticCacheVerifierNoticesAnUnexpectedDirectory(t *testing.T) {
+	clearGCEnv(t) // isolated GC_HOME, so this cache path is unique to this test
+	source, ok := builtinpacks.Source("core")
+	if !ok {
+		t.Fatal(`builtinpacks.Source("core") is not registered`)
+	}
+	commit := bundledPackImportCommit()
+	cacheDir := materializeSyntheticCacheForTest(t, source, commit)
+
+	if !newWarmSyntheticCacheVerifier().Valid(cacheDir, builtinpacks.Repository, commit) {
+		t.Fatal("freshly materialized cache reported invalid by the warm verifier")
+	}
+
+	// Empty on purpose: a directory holding a file would move that file's
+	// entry into the hash and pass for the wrong reason.
+	stray := filepath.Join(cacheDir, "unexpected-dir")
+	if err := os.Mkdir(stray, 0o755); err != nil {
+		t.Fatalf("creating unexpected directory: %v", err)
+	}
+
+	if newWarmSyntheticCacheVerifier().Valid(cacheDir, builtinpacks.Repository, commit) {
+		t.Error("a cache containing an unexpected directory reported valid; the stat fingerprint skips directories, so the ready path would never repair it")
 	}
 }
