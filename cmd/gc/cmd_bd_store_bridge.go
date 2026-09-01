@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/spf13/cobra"
 )
 
@@ -132,11 +134,14 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 	if strings.TrimSpace(dir) == "" {
 		return fmt.Errorf("missing --dir")
 	}
-	if strings.TrimSpace(host) == "" {
-		return fmt.Errorf("missing --host")
-	}
-	if strings.TrimSpace(port) == "" {
-		return fmt.Errorf("missing --port")
+	proxied := bdStoreBridgeUsesProxiedBackend(dir)
+	if !proxied {
+		if strings.TrimSpace(host) == "" {
+			return fmt.Errorf("missing --host")
+		}
+		if strings.TrimSpace(port) == "" {
+			return fmt.Errorf("missing --port")
+		}
 	}
 	password := bdStoreBridgePassword()
 	store := beads.NewBdStore(dir, beads.ExecCommandRunnerWithEnv(bdStoreBridgeEnv(dir, host, port, user, password)))
@@ -306,6 +311,7 @@ func bdStoreBridgeEnv(dir, host, port, user, password string) map[string]string 
 		"BEADS_DIR",
 		"BEADS_CREDENTIALS_FILE",
 		"BEADS_DOLT_AUTO_START",
+		"BEADS_DOLT_PROXIED_SERVER",
 		"BEADS_DOLT_DATABASE",
 		"BEADS_DOLT_PASSWORD",
 		"BEADS_DOLT_SERVER_DATABASE",
@@ -329,18 +335,73 @@ func bdStoreBridgeEnv(dir, host, port, user, password string) map[string]string 
 		env["GC_BEADS_BACKEND"] = "doltlite"
 		env["BEADS_BACKEND"] = "doltlite"
 	} else {
-		env["GC_DOLT_HOST"] = host
-		env["BEADS_DOLT_SERVER_HOST"] = host
-		env["GC_DOLT_PORT"] = port
-		env["BEADS_DOLT_SERVER_PORT"] = port
-		env["GC_DOLT_USER"] = user
-		env["BEADS_DOLT_SERVER_USER"] = user
-		env["GC_DOLT_PASSWORD"] = password
-		env["BEADS_DOLT_PASSWORD"] = password
-		env["BEADS_DOLT_AUTO_START"] = "0"
+		if bdStoreBridgeUsesProxiedBackend(dir) {
+			env["BEADS_DOLT_PROXIED_SERVER"] = "1"
+			delete(env, "BEADS_DOLT_AUTO_START")
+		} else {
+			env["GC_DOLT_HOST"] = host
+			env["BEADS_DOLT_SERVER_HOST"] = host
+			env["GC_DOLT_PORT"] = port
+			env["BEADS_DOLT_SERVER_PORT"] = port
+			env["GC_DOLT_USER"] = user
+			env["BEADS_DOLT_SERVER_USER"] = user
+			env["GC_DOLT_PASSWORD"] = password
+			env["BEADS_DOLT_PASSWORD"] = password
+			env["BEADS_DOLT_AUTO_START"] = "0"
+		}
 	}
 	env["BD_EXPORT_AUTO"] = "false"
 	return env
+}
+
+// bdStoreBridgeUsesProxiedBackend reads the same canonical mode markers as
+// the provider/lifecycle paths. Avoid substring matching YAML: comments,
+// quoted values, or unrelated keys must not switch a direct endpoint onto the
+// proxied UOW path.
+func bdStoreBridgeUsesProxiedBackend(dir string) bool {
+	backend := bdStoreBridgeEffectiveBackend(dir)
+	if mode, ok, err := contract.ReadDoltMode(fsys.OSFS{}, filepath.Join(dir, ".beads", "metadata.json")); err == nil && ok && strings.TrimSpace(mode) != "" {
+		return contract.IsProxiedDoltMode(backend, mode)
+	}
+	if state, ok, err := contract.ReadConfigState(fsys.OSFS{}, filepath.Join(dir, ".beads", "config.yaml")); err == nil && ok {
+		if strings.TrimSpace(state.DoltMode) != "" {
+			return contract.IsProxiedDoltMode(backend, state.DoltMode)
+		}
+		if strings.TrimSpace(string(state.EndpointOrigin)) != "" || strings.TrimSpace(state.DoltHost) != "" || strings.TrimSpace(state.DoltPort) != "" {
+			return false
+		}
+	}
+	return contract.IsDoltBackend(backend) &&
+		strings.EqualFold(strings.TrimSpace(os.Getenv("BEADS_DOLT_PROXIED_SERVER")), "1")
+}
+
+// bdStoreBridgeEffectiveBackend resolves the backend namespace in which a
+// scope's dolt.mode marker is interpreted. Metadata is scope-local authority;
+// the environment is the fallback for fresh/legacy scopes. A missing backend
+// is the historical managed-Dolt shape. In particular, a stale proxied marker
+// on a DoltLite scope must never switch this bridge to Beads' Dolt proxy path.
+func bdStoreBridgeEffectiveBackend(dir string) string {
+	metadataPath := filepath.Join(dir, ".beads", "metadata.json")
+	if data, err := os.ReadFile(metadataPath); err == nil {
+		var meta struct {
+			Backend  string `json:"backend"`
+			Database string `json:"database"`
+		}
+		if json.Unmarshal(data, &meta) == nil {
+			if backend := strings.TrimSpace(meta.Backend); backend != "" {
+				return backend
+			}
+			if strings.EqualFold(strings.TrimSpace(meta.Database), "doltlite") {
+				return "doltlite"
+			}
+		}
+	}
+	for _, key := range []string{"GC_BEADS_BACKEND", "BEADS_BACKEND"} {
+		if backend := strings.TrimSpace(os.Getenv(key)); backend != "" {
+			return backend
+		}
+	}
+	return "dolt"
 }
 
 func bdStoreBridgeUsesDoltliteBackend(dir string) bool {

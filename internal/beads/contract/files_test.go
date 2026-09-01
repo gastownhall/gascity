@@ -1407,6 +1407,22 @@ func TestReadDoltDatabase(t *testing.T) {
 	}
 }
 
+func TestReadConfigStatePreservesDoltMode(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := fs.WriteFile(path, []byte("issue_prefix: gc\ndolt.mode: proxied-server\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	state, ok, err := ReadConfigState(fs, path)
+	if err != nil {
+		t.Fatalf("ReadConfigState() error = %v", err)
+	}
+	if !ok || state.DoltMode != "proxied-server" {
+		t.Fatalf("ReadConfigState() = (%+v, %v), want proxied-server", state, ok)
+	}
+}
+
 func countLineOccurrences(text, needle string) int {
 	count := 0
 	for _, line := range strings.Split(text, "\n") {

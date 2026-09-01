@@ -668,6 +668,15 @@ func applyCanonicalScopeBackendEnv(env map[string]string, cityPath, scopeRoot st
 	if metaErr != nil {
 		return true, metaErr
 	}
+	// A mode marker is interpreted only in the namespace of the effective
+	// backend. Metadata is scope-local authority; when it has no backend marker,
+	// use the configured city backend (empty means the legacy Dolt backend).
+	// This keeps stale dolt.mode values on DoltLite scopes inert even before
+	// metadata is emitted.
+	effectiveBackend := strings.TrimSpace(meta.Backend)
+	if effectiveBackend == "" {
+		effectiveBackend = strings.TrimSpace(beadsBackend(cityPath))
+	}
 	if resolved.State.EndpointOrigin == contract.EndpointOriginInheritedCity && meta.Backend == "" {
 		if inherited, err := applyCityStorageBindingEnv(env, cityPath); err != nil {
 			return true, err
@@ -684,7 +693,16 @@ func applyCanonicalScopeBackendEnv(env map[string]string, cityPath, scopeRoot st
 		mirrorBeadsDoltEnv(env)
 		return true, nil
 	}
-	switch meta.Backend {
+	// A mode marker is meaningful only for the Dolt backend.  In particular,
+	// stale dolt_mode metadata on a doltlite scope must not switch the child to
+	// Dolt's proxied environment.
+	resolvedProxied := contract.IsProxiedDoltMode(effectiveBackend, resolved.State.DoltMode)
+	metadataProxied := contract.IsProxiedDoltMode(effectiveBackend, meta.DoltMode)
+	if resolvedProxied || metadataProxied {
+		applyProxiedDoltEnv(env)
+		return true, nil
+	}
+	switch strings.ToLower(strings.TrimSpace(effectiveBackend)) {
 	case "", "dolt":
 		clearProjectedBeadsBackendEnv(env)
 		target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, cityPath, scopeRoot)
@@ -702,7 +720,7 @@ func applyCanonicalScopeBackendEnv(env map[string]string, cityPath, scopeRoot st
 		mirrorBeadsDoltEnv(env)
 		return true, nil
 	default:
-		return true, unprojectableBackendError(meta.Backend, scopeRoot)
+		return true, unprojectableBackendError(effectiveBackend, scopeRoot)
 	}
 }
 
@@ -960,9 +978,37 @@ func ensureProjectedDoltEnvExplicit(env map[string]string) {
 }
 
 func clearProjectedDoltEnv(env map[string]string) {
+	delete(env, "BEADS_DOLT_PROXIED_SERVER")
 	for _, key := range projectedDoltEnvKeys {
 		delete(env, key)
 	}
+}
+
+// clearManagedDoltLifecycleEnv removes Gas City's direct sql-server control
+// plane from an environment. Proxied-server mode is owned entirely by beads;
+// leaking these variables lets an RC bd child rediscover the obsolete direct
+// lifecycle or connect to a stale server.
+func clearManagedDoltLifecycleEnv(env map[string]string) {
+	for _, key := range []string{
+		"GC_PACK_STATE_DIR", "GC_DOLT_DATA_DIR", "GC_DOLT_LOG_FILE",
+		"GC_DOLT_STATE_FILE", "GC_DOLT_PID_FILE", "GC_DOLT_LOCK_FILE",
+		"GC_DOLT_CONFIG_FILE", "GC_DOLT_ARCHIVE_LEVEL", "GC_DOLT_AUTO_GC_ENABLED",
+		"GC_DOLT_MAX_CONNECTIONS", "GC_DOLT_READ_TIMEOUT_MILLIS",
+		"GC_DOLT_WRITE_TIMEOUT_MILLIS", "GC_DOLT_LOCK_RELEASE_TIMEOUT_MS",
+		"GC_DOLT_WAIT_TIMEOUT", "GC_DOLT_CONCURRENT_START_READY_TIMEOUT_MS", "BEADS_DOLT_AUTO_START",
+		"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_SERVER_USER",
+		"BEADS_DOLT_SERVER_DATABASE", "BEADS_DOLT_SERVER_MODE",
+	} {
+		delete(env, key)
+	}
+}
+
+func applyProxiedDoltEnv(env map[string]string) {
+	clearProjectedDoltEnv(env)
+	clearManagedDoltLifecycleEnv(env)
+	env["GC_BEADS_BACKEND"] = "dolt"
+	env["BEADS_BACKEND"] = "dolt"
+	env["BEADS_DOLT_PROXIED_SERVER"] = "1"
 }
 
 var projectedBeadsBackendEnvKeys = []string{
@@ -1008,6 +1054,12 @@ func externalDoltEnvOverrideTarget() (contract.DoltConnectionTarget, bool) {
 // contract package's lighter published-state validation because callers may
 // mirror or publish this value into user-visible runtime files.
 func currentResolvableManagedDoltPort(cityPath string) string {
+	// Proxied-server mode has no Gas City-managed listener. Ignore stale
+	// provider/runtime state so callers never publish or stop a direct server
+	// for a scope whose proxy owns the child lifecycle.
+	if scopeUsesProxiedDoltMode(cityPath, cityPath) {
+		return ""
+	}
 	if port := currentManagedDoltPort(cityPath); port != "" {
 		return port
 	}
@@ -1030,6 +1082,9 @@ func readValidProviderManagedDoltState(cityPath string) (doltRuntimeState, bool)
 }
 
 func currentPublishedOrRecoveredManagedDoltPort(cityPath string, allowRecovery bool) (string, error) {
+	if scopeUsesProxiedDoltMode(cityPath, cityPath) {
+		return "", nil
+	}
 	if port := currentManagedDoltPort(cityPath); port != "" {
 		return port, nil
 	}
@@ -1499,6 +1554,10 @@ func bdRuntimeEnvForRigWithErrorRecoveryContext(ctx context.Context, cityPath st
 			env["GC_RIG"] = explicitRig.Name
 		}
 	}
+	if scopeUsesProxiedDoltMode(cityPath, rigPath) || (!scopeOverridesCityBackend(cityPath, rigPath) && scopeUsesProxiedDoltMode(cityPath, cityPath)) {
+		applyProxiedDoltEnv(env)
+		return env, nil
+	}
 	rigDoltlite := scopeBackendIsDoltlite(cityPath, rigPath)
 	cityDoltlite := scopeBackendIsDoltlite(cityPath, cityPath)
 	if rigDoltlite || (cityDoltlite && !scopeOverridesCityBackend(cityPath, rigPath)) {
@@ -1597,6 +1656,10 @@ func bdRuntimeEnvWithErrorRecoveryContext(ctx context.Context, cityPath string, 
 	// (ga-0eq); managed backups run through mol-dog-backup, not this path.
 	applyBdAutoBackupOptOut(env)
 	if !cityUsesBdStoreContract(cityPath) {
+		return env, nil
+	}
+	if scopeUsesProxiedDoltMode(cityPath, cityPath) {
+		applyProxiedDoltEnv(env)
 		return env, nil
 	}
 	if err := applyHostedBeadsCredentialEnv(env, cityPath); err != nil {
@@ -1934,6 +1997,7 @@ func mergeRuntimeEnv(environ []string, overrides map[string]string) []string {
 		"BEADS_DIR",
 		"BEADS_DOLT_AUTO_START",
 		"BEADS_DOLT_PASSWORD",
+		"BEADS_DOLT_PROXIED_SERVER",
 		"BEADS_DOLT_SERVER_HOST",
 		"BEADS_DOLT_SERVER_PORT",
 		"BEADS_DOLT_SERVER_USER",

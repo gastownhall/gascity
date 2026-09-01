@@ -4900,6 +4900,22 @@ func TestMergeRuntimeEnvStripsInheritedBeadsBackend(t *testing.T) {
 	}
 }
 
+func TestMergeRuntimeEnvStripsInheritedProxiedDoltMode(t *testing.T) {
+	result := mergeRuntimeEnv([]string{
+		"BEADS_DOLT_PROXIED_SERVER=1",
+		"PATH=/usr/bin",
+	}, nil)
+
+	for _, entry := range result {
+		if strings.HasPrefix(entry, "BEADS_DOLT_PROXIED_SERVER=") {
+			t.Fatalf("BEADS_DOLT_PROXIED_SERVER leaked into merged runtime env: %v", result)
+		}
+	}
+	if !slices.Contains(result, "PATH=/usr/bin") {
+		t.Fatalf("PATH was not preserved in merged runtime env: %v", result)
+	}
+}
+
 func projectedKeyStripped(key string) bool {
 	out := mergeRuntimeEnv([]string{key + "=PARENT"}, nil)
 	for _, entry := range out {
@@ -4937,6 +4953,77 @@ dolt.auto-start: false
 	var parseErr *contract.MetadataParseError
 	if !errors.As(err, &parseErr) {
 		t.Errorf("errors.As(*MetadataParseError) = false, want true; err=%v", err)
+	}
+}
+
+func TestApplyCanonicalScopeBackendEnvDoesNotTreatStaleDoltliteModeAsProxied(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.mode: proxied-server
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"backend":"doltlite","dolt_mode":"proxied-server"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"demo\"\n[beads]\nprovider = \"bd\"\nbackend = \"doltlite\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	env := map[string]string{}
+	used, err := applyCanonicalScopeBackendEnv(env, cityPath, cityPath)
+	if err != nil {
+		t.Fatalf("applyCanonicalScopeBackendEnv: %v", err)
+	}
+	if !used {
+		t.Fatal("used = false, want true")
+	}
+	if env["BEADS_BACKEND"] != "doltlite" || env["GC_BEADS_BACKEND"] != "doltlite" {
+		t.Fatalf("backend projection = GC_BEADS_BACKEND=%q BEADS_BACKEND=%q, want doltlite", env["GC_BEADS_BACKEND"], env["BEADS_BACKEND"])
+	}
+	if env["BEADS_DOLT_PROXIED_SERVER"] != "" {
+		t.Fatalf("BEADS_DOLT_PROXIED_SERVER = %q, want empty for doltlite", env["BEADS_DOLT_PROXIED_SERVER"])
+	}
+}
+
+// A freshly canonicalized DoltLite scope can briefly have config.yaml before
+// its backend initializer emits metadata.json. The backend configured by the
+// city still owns the projection in that window; a Dolt mode marker must not
+// make the env projector fall through to the managed-Dolt path.
+func TestApplyCanonicalScopeBackendEnvUsesConfiguredDoltliteWithoutMetadata(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"demo\"\n[beads]\nprovider = \"bd\"\nbackend = \"doltlite\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.mode: proxied-server
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	env := map[string]string{}
+	used, err := applyCanonicalScopeBackendEnv(env, cityPath, cityPath)
+	if err != nil {
+		t.Fatalf("applyCanonicalScopeBackendEnv: %v", err)
+	}
+	if !used {
+		t.Fatal("used = false, want true")
+	}
+	if env["GC_BEADS_BACKEND"] != "doltlite" || env["BEADS_BACKEND"] != "doltlite" {
+		t.Fatalf("backend projection = GC_BEADS_BACKEND=%q BEADS_BACKEND=%q, want doltlite", env["GC_BEADS_BACKEND"], env["BEADS_BACKEND"])
+	}
+	if env["BEADS_DOLT_PROXIED_SERVER"] != "" {
+		t.Fatalf("BEADS_DOLT_PROXIED_SERVER = %q, want empty for doltlite", env["BEADS_DOLT_PROXIED_SERVER"])
 	}
 }
 

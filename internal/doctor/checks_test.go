@@ -1595,6 +1595,83 @@ func TestDoltServerCheck_ManagedCityUsesRuntimeState(t *testing.T) {
 	}
 }
 
+func TestDoltServerCheck_ManagedCityProxiedModeDoesNotRequireDirectServer(t *testing.T) {
+	dir := setupCity(t, "[workspace]\nname = \"test\"\n")
+	fs := fsys.OSFS{}
+	writeDoctorCanonicalConfig(t, fs, dir, contract.ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: contract.EndpointOriginManagedCity,
+		EndpointStatus: contract.EndpointStatusVerified,
+		DoltMode:       "proxied-server",
+	})
+	if _, err := contract.EnsureCanonicalMetadata(fs, filepath.Join(dir, ".beads", "metadata.json"), contract.MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "proxied-server",
+		DoltDatabase: "hq",
+	}); err != nil {
+		t.Fatalf("EnsureCanonicalMetadata: %v", err)
+	}
+
+	// No managed runtime state or listening TCP endpoint is created. Proxied
+	// beads owns both the proxy and child Dolt process, so this check should not
+	// attempt a direct dial.
+	c := NewDoltServerCheck(dir, false)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(strings.ToLower(r.Message), "proxied") || !strings.Contains(strings.ToLower(r.Message), "not required") {
+		t.Fatalf("message = %q, want proxied/not-required explanation", r.Message)
+	}
+}
+
+func TestDoctorScopeUsesProxiedDoltModeRejectsStaleDoltliteMode(t *testing.T) {
+	dir := setupCity(t, "[workspace]\nname = \"test\"\n[beads]\nprovider = \"bd\"\nbackend = \"doltlite\"\n")
+	fs := fsys.OSFS{}
+	if err := fs.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte("gc.endpoint_origin: managed_city\ndolt.mode: proxied-server\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.WriteFile(filepath.Join(dir, ".beads", "metadata.json"), []byte(`{"backend":"doltlite","dolt_mode":"proxied-server"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if doctorScopeUsesProxiedDoltMode(dir, dir) {
+		t.Fatal("doctorScopeUsesProxiedDoltMode classified doltlite scope as proxied Dolt")
+	}
+}
+
+func TestDoctorScopeUsesProxiedDoltModeUsesCityMetadataBackendForInheritedRig(t *testing.T) {
+	cityDir := setupCity(t, "[workspace]\nname = \"test\"\n[beads]\nprovider = \"bd\"\nbackend = \"dolt\"\n")
+	rigDir := filepath.Join(cityDir, "demo")
+	fs := fsys.OSFS{}
+	if err := fs.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Metadata is the effective backend authority for the city. The city.toml
+	// value intentionally disagrees to ensure an inherited rig does not reuse
+	// its configured fallback when classifying the city's mode.
+	if err := fs.WriteFile(filepath.Join(cityDir, ".beads", "metadata.json"), []byte(`{"backend":"doltlite","dolt_mode":"proxied-server"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte("gc.endpoint_origin: managed_city\ndolt.mode: proxied-server\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte("gc.endpoint_origin: inherited_city\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if doctorScopeUsesProxiedDoltMode(cityDir, rigDir) {
+		t.Fatal("doctorScopeUsesProxiedDoltMode reused city.toml dolt backend over city metadata for inherited rig")
+	}
+}
+
 func TestDoltServerCheck_ManagedCityReportsStartHint(t *testing.T) {
 	dir := t.TempDir()
 	fs := fsys.OSFS{}
@@ -1924,6 +2001,137 @@ func TestRigDoltServerCheck_InheritedRigIsSkipped(t *testing.T) {
 	}
 	if !strings.Contains(r.Message, "inherits city") {
 		t.Fatalf("message = %q, want inherited-city skip message", r.Message)
+	}
+}
+
+func TestRigDoltServerCheck_RigLocalDirectModeOverridesProxiedCity(t *testing.T) {
+	for _, mode := range []string{"server", "embedded"} {
+		t.Run(mode, func(t *testing.T) {
+			cityDir := setupCity(t, "[workspace]\nname = \"test\"\n")
+			rigDir := filepath.Join(cityDir, "demo")
+			fs := fsys.OSFS{}
+
+			writeDoctorCanonicalConfig(t, fs, cityDir, contract.ConfigState{
+				IssuePrefix:    "gc",
+				EndpointOrigin: contract.EndpointOriginManagedCity,
+				EndpointStatus: contract.EndpointStatusVerified,
+				DoltMode:       "proxied-server",
+			})
+			if _, err := contract.EnsureCanonicalMetadata(fs, filepath.Join(cityDir, ".beads", "metadata.json"), contract.MetadataState{
+				Database:     "dolt",
+				Backend:      "dolt",
+				DoltMode:     "proxied-server",
+				DoltDatabase: "hq",
+			}); err != nil {
+				t.Fatalf("EnsureCanonicalMetadata(city): %v", err)
+			}
+			writeDoctorCanonicalConfig(t, fs, rigDir, contract.ConfigState{
+				IssuePrefix:    "de",
+				EndpointOrigin: contract.EndpointOriginInheritedCity,
+				EndpointStatus: contract.EndpointStatusVerified,
+				DoltMode:       mode,
+			})
+
+			c := NewRigDoltServerCheck(cityDir, config.Rig{Name: "demo", Path: rigDir}, false)
+			r := c.Run(&CheckContext{})
+			if r.Status != StatusOK {
+				t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)
+			}
+			if strings.Contains(strings.ToLower(r.Message), "proxied") {
+				t.Fatalf("message = %q, local %s mode was overwritten by proxied city", r.Message, mode)
+			}
+			if !strings.Contains(r.Message, "inherits city") {
+				t.Fatalf("message = %q, want ordinary inherited-city result", r.Message)
+			}
+		})
+	}
+}
+
+func TestRigDoltServerCheck_InheritsMetadataOnlyProxiedCity(t *testing.T) {
+	cityDir := setupCity(t, "[workspace]\nname = \"test\"\n")
+	rigDir := filepath.Join(cityDir, "demo")
+	fs := fsys.OSFS{}
+
+	if err := fs.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := contract.EnsureCanonicalMetadata(fs, filepath.Join(cityDir, ".beads", "metadata.json"), contract.MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "proxied-server",
+		DoltDatabase: "hq",
+	}); err != nil {
+		t.Fatalf("EnsureCanonicalMetadata(city): %v", err)
+	}
+	writeDoctorCanonicalConfig(t, fs, rigDir, contract.ConfigState{
+		IssuePrefix:    "de",
+		EndpointOrigin: contract.EndpointOriginInheritedCity,
+		EndpointStatus: contract.EndpointStatusVerified,
+	})
+
+	c := NewRigDoltServerCheck(cityDir, config.Rig{Name: "demo", Path: rigDir}, false)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(strings.ToLower(r.Message), "proxied") {
+		t.Fatalf("message = %q, want metadata-only inherited proxied result", r.Message)
+	}
+}
+
+func TestRigDoltServerCheck_MissingConfigUsesExplicitCompatEndpoint(t *testing.T) {
+	cityDir := setupCity(t, "[workspace]\nname = \"test\"\n")
+	rigDir := filepath.Join(cityDir, "demo")
+	fs := fsys.OSFS{}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	port := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+	cityTOML := fmt.Sprintf(`[workspace]
+name = "test"
+
+[[rigs]]
+name = "demo"
+path = %q
+dolt_host = "127.0.0.1"
+dolt_port = %q
+`, rigDir, port)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeDoctorCanonicalConfig(t, fs, cityDir, contract.ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: contract.EndpointOriginManagedCity,
+		EndpointStatus: contract.EndpointStatusVerified,
+		DoltMode:       "proxied-server",
+	})
+	if _, err := contract.EnsureCanonicalMetadata(fs, filepath.Join(cityDir, ".beads", "metadata.json"), contract.MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "proxied-server",
+		DoltDatabase: "hq",
+	}); err != nil {
+		t.Fatalf("EnsureCanonicalMetadata(city): %v", err)
+	}
+
+	// The fresh/legacy rig has no local .beads metadata or config. Its
+	// config.Rig compatibility endpoint is nevertheless an explicit direct
+	// endpoint and must win over the city's proxied default.
+	rig := config.Rig{Name: "demo", Path: rigDir, DoltHost: "127.0.0.1", DoltPort: port}
+	if doctorScopeUsesProxiedDoltModeForRig(cityDir, rigDir, &rig) {
+		t.Fatal("doctorScopeUsesProxiedDoltMode classified explicit compat rig as proxied")
+	}
+	c := NewRigDoltServerCheck(cityDir, rig, false)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "127.0.0.1:"+port) {
+		t.Fatalf("message = %q, want explicit compat endpoint %s", r.Message, port)
 	}
 }
 

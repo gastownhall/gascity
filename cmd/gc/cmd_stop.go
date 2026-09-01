@@ -472,6 +472,9 @@ func stopCityManagedBeadsProvider(cityPath string) (bool, error) {
 	if rawBeadsProvider(cityPath) != "bd" {
 		return false, nil
 	}
+	if scopeUsesProxiedDoltMode(cityPath, cityPath) {
+		return false, nil
+	}
 	if currentResolvableManagedDoltPort(cityPath) == "" {
 		return false, nil
 	}

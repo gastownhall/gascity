@@ -2136,6 +2136,32 @@ func TestOpenNativeDoltStoreAtProjectsScopedEnvDuringOpen(t *testing.T) {
 	}
 }
 
+func TestOpenNativeDoltStoreAtWithDirectEnvWithholdsAmbientProxiedMode(t *testing.T) {
+	t.Setenv("BEADS_DOLT_PROXIED_SERVER", "1")
+	oldOpen := nativeDoltOpenBestAvailable
+	t.Cleanup(func() {
+		nativeDoltOpenBestAvailable = oldOpen
+	})
+	nativeDoltOpenBestAvailable = func(context.Context, string) (beadslib.Storage, error) {
+		if got := os.Getenv("BEADS_DOLT_PROXIED_SERVER"); got != "" {
+			t.Fatalf("BEADS_DOLT_PROXIED_SERVER during direct native open = %q, want withheld", got)
+		}
+		return &nativeDoltStorageSpy{
+			getConfig: func(context.Context, string) (string, error) { return "gc", nil },
+		}, nil
+	}
+
+	if _, err := OpenNativeDoltStoreAt(context.Background(), filepath.Join(t.TempDir(), "scope"), map[string]string{
+		"BEADS_DOLT_SERVER_HOST": "direct.example.com",
+		"BEADS_DOLT_SERVER_PORT": "4407",
+	}); err != nil {
+		t.Fatalf("OpenNativeDoltStoreAt: %v", err)
+	}
+	if got := os.Getenv("BEADS_DOLT_PROXIED_SERVER"); got != "1" {
+		t.Fatalf("BEADS_DOLT_PROXIED_SERVER after direct native open = %q, want ambient restored", got)
+	}
+}
+
 // TestOpenNativeDoltStoreAtPersistsLocalStringsAcrossReopen exercises the
 // real newNativeDoltStoreAt wiring (not the in-memory-only default used by
 // newNativeDoltStoreForTest / the conformance factory): it swaps only the

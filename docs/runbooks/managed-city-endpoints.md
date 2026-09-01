@@ -3,8 +3,11 @@ title: Operate Managed-City Dolt Endpoints
 description: Mental model, forbidden edits, sanctioned escape hatches, and recovery recipe for the city-level Dolt endpoint architecture.
 ---
 
-This runbook is for mayors and operators. It covers the endpoint
-architecture introduced in the
+This runbook is for mayors and operators. It covers explicit and legacy
+managed-city endpoint configurations. Fresh managed-local cities use Beads'
+`proxied-server` mode by default; the direct managed-server topology described
+below remains available for existing scopes and explicit direct configuration.
+The endpoint architecture introduced in the
 [beads-and-Dolt contract redesign](https://github.com/gastownhall/gascity/blob/main/engdocs/design/beads-dolt-contract-redesign.md)
 — specifically the case where rigs **inherit** their Dolt endpoint
 from a single city-managed server. If you came here because `gc sling`
@@ -16,10 +19,12 @@ edits keep reverting, you are in the right place.
 
 ## Mental model
 
-A city runs **one** Dolt SQL server. Every rig is a **logical
+A direct managed city runs **one** Dolt SQL server. Every rig is a **logical
 database** inside that Dolt. Each rig's `.beads/dolt-server.port` is
 a **compatibility mirror** that lets raw `bd` commands reach the
-city Dolt — it is not the rig's own server.
+city Dolt — it is not the rig's own server. In the fresh default
+`proxied-server` topology, Beads owns a per-scope proxy and child Dolt
+lifecycle instead, so Gas City does not publish or manage a city listener.
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
@@ -45,9 +50,9 @@ Two TOML fields, one per scope, describe endpoint ownership:
 | City | `gc.endpoint_origin` | `managed_city`, `city_canonical` |
 | Rig  | `gc.endpoint_origin` | `inherited_city`, `explicit` |
 
-- **`managed_city`** — The city owns the Dolt lifecycle. `gc start`
-  launches it; `gc stop` shuts it down. This is the default for
-  fresh `bd`-backed cities.
+- **`managed_city`** — The city owns the Dolt lifecycle for a direct
+  managed-server scope. `gc start` launches it; `gc stop` shuts it down.
+  Fresh `bd`-backed cities use Beads' `proxied-server` mode under this origin.
 - **`city_canonical`** — The city declares an explicit, externally
   managed Dolt. GC does not launch or manage the server.
 - **`inherited_city`** — The rig reuses its parent city's endpoint.

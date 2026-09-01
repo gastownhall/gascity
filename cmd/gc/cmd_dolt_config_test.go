@@ -335,7 +335,7 @@ prefix = "fe"
 		t.Fatalf("ReadFile(metadata.json): %v", err)
 	}
 	metaText := string(metaData)
-	for _, want := range []string{`"database": "dolt"`, `"backend": "dolt"`, `"dolt_mode": "server"`, `"dolt_database": "fe"`} {
+	for _, want := range []string{`"database": "dolt"`, `"backend": "dolt"`, `"dolt_mode": "proxied-server"`, `"dolt_database": "fe"`} {
 		if !strings.Contains(metaText, want) {
 			t.Fatalf("metadata missing %q:\n%s", want, metaText)
 		}

@@ -45,16 +45,35 @@ import (
 // path-and-JSON disagreement would test Dolt, not this.
 func embeddedScopeWithBeads(t *testing.T, database string) string {
 	t.Helper()
+	// These tests exercise the legacy embedded→direct-server reconciliation
+	// warning. Pin an explicit external endpoint so the new fresh-scope
+	// proxied default is not the variable under test.
+	t.Setenv("GC_DOLT_HOST", "db.example.test")
+	t.Setenv("GC_DOLT_PORT", "3306")
 	scope := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(scope, ".beads", "embeddeddolt", database, ".dolt"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	writeScopeMetadata(t, scope, map[string]string{
-		"database":      "dolt",
-		"backend":       "dolt",
+		"database": "dolt",
+		// Legacy metadata without an authoritative backend marker models the
+		// pre-canonicalization workspace these tests exercise. Explicit modern
+		// embedded metadata is preserved by the new default migration.
+		"backend":       "legacy",
 		"dolt_mode":     "embedded",
 		"dolt_database": database,
 	})
+	// The cases below exercise the legacy embedded→direct-server rewrite.
+	// Make that endpoint authority explicit in the scope itself: ambient
+	// GC_DOLT_HOST/PORT values are intentionally not canonical state and must
+	// not turn a fresh managed scope into direct-server mode.
+	if err := os.WriteFile(filepath.Join(scope, ".beads", "config.yaml"), []byte(
+		"issue_prefix: "+database+"\n"+
+			"gc.endpoint_origin: managed_city\n"+
+			"gc.endpoint_status: verified\n"+
+			"dolt.mode: server\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	return scope
 }
 

@@ -23,7 +23,7 @@ expires = "2026-10-01"
 [[audit_baseline]]
 scope = "all"
 resource = "fixed_sleep"
-baseline_calls = 476
+baseline_calls = 475
 baseline_files = 171
 reported_calls = 447
 reported_files = 157
@@ -142,7 +142,7 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "net_listen"
-baseline_calls = 96
+baseline_calls = 97
 baseline_files = 37
 reported_calls = 92
 reported_files = 34
@@ -446,7 +446,7 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "net_listen"
-baseline_calls = 94
+baseline_calls = 95
 baseline_files = 36
 reported_calls = 92
 reported_files = 34

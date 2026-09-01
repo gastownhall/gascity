@@ -43,6 +43,29 @@ func TestResolveDoltConnectionTargetManagedCity(t *testing.T) {
 	}
 }
 
+func TestResolveDoltConnectionTargetProxiedManagedCityNeedsNoRuntime(t *testing.T) {
+	fs := fsys.OSFS{}
+	city := t.TempDir()
+	writeCanonicalConfig(t, fs, city, ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: EndpointOriginManagedCity,
+		EndpointStatus: EndpointStatusVerified,
+		DoltMode:       "proxied-server",
+	})
+	writeCanonicalMetadata(t, fs, city, "hq")
+
+	target, err := ResolveDoltConnectionTarget(fs, city, city)
+	if err != nil {
+		t.Fatalf("ResolveDoltConnectionTarget() error = %v", err)
+	}
+	if target.DoltMode != "proxied-server" {
+		t.Fatalf("target.DoltMode = %q, want proxied-server", target.DoltMode)
+	}
+	if target.Host != "" || target.Port != "" {
+		t.Fatalf("proxied target carries direct endpoint: %+v", target)
+	}
+}
+
 func TestResolveDoltConnectionTargetLegacyManagedCity(t *testing.T) {
 	fs := fsys.OSFS{}
 	city := t.TempDir()

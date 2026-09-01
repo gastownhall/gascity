@@ -4,6 +4,7 @@ package integration
 
 import (
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -158,14 +159,38 @@ func initCityWithManagedDoltRecovery(t *testing.T, env []string, configPath, cit
 }
 
 func waitForManagedDoltCityReady(env []string, cityDir string, timeout time.Duration) (string, error) {
+	// Fresh managed-local scopes now use beads' proxied-server topology. That
+	// path has no Gas City-managed listener or dolt-server.port mirror, so probe
+	// it through bd with the persisted workspace metadata instead of waiting for
+	// the legacy controller-owned port. Existing direct-server scopes retain the
+	// port probe below because their lifecycle is still owned by gc.
+	proxied, _ := proxiedDoltScopeForTest(cityDir)
 	deadline := time.Now().Add(timeout)
 	var (
 		lastOut string
 		lastErr error
 	)
 	for time.Now().Before(deadline) {
-		if port, ok := currentManagedDoltPortForTest(cityDir); ok {
-			probeEnv := filterEnvMany(env,
+		var probeEnv []string
+		if proxied {
+			probeEnv = filterEnvMany(env,
+				"GC_DOLT_HOST",
+				"GC_DOLT_PORT",
+				"BEADS_DOLT_SERVER_HOST",
+				"BEADS_DOLT_SERVER_PORT",
+				"BEADS_DOLT_PROXIED_SERVER",
+			)
+			probeEnv = append(probeEnv,
+				"GC_CITY="+cityDir,
+				"GC_CITY_PATH="+cityDir,
+				"GC_CITY_RUNTIME_DIR="+filepath.Join(cityDir, ".gc", "runtime"),
+				"BEADS_DIR="+filepath.Join(cityDir, ".beads"),
+				"GC_BEADS_BACKEND=dolt",
+				"BEADS_BACKEND=dolt",
+				"BEADS_DOLT_PROXIED_SERVER=1",
+			)
+		} else if port, ok := currentManagedDoltPortForTest(cityDir); ok {
+			probeEnv = filterEnvMany(env,
 				"GC_CITY",
 				"GC_CITY_PATH",
 				"GC_CITY_ROOT",
@@ -178,17 +203,36 @@ func waitForManagedDoltCityReady(env []string, cityDir string, timeout time.Dura
 				"GC_CITY_RUNTIME_DIR="+filepath.Join(cityDir, ".gc", "runtime"),
 			)
 			probeEnv = appendManagedDoltEndpointEnv(probeEnv, port)
+		}
+		if probeEnv != nil {
 			lastOut, lastErr = runCommand(cityDir, probeEnv, integrationBDCommandTimeout, bdBinary, "list", "--all", "--json", "--limit=0")
 			if lastErr == nil {
 				return lastOut, nil
 			}
 		}
-		time.Sleep(500 * time.Millisecond)
+		timer := time.NewTimer(500 * time.Millisecond)
+		<-timer.C
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("timed out after %s waiting for managed Dolt city readiness", timeout)
 	}
 	return lastOut, lastErr
+}
+
+func proxiedDoltScopeForTest(cityDir string) (bool, error) {
+	data, err := os.ReadFile(filepath.Join(cityDir, ".beads", "metadata.json"))
+	if err != nil {
+		return false, err
+	}
+	var metadata struct {
+		Backend  string `json:"backend"`
+		DoltMode string `json:"dolt_mode"`
+	}
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return false, err
+	}
+	return strings.EqualFold(strings.TrimSpace(metadata.Backend), "dolt") &&
+		strings.EqualFold(strings.TrimSpace(metadata.DoltMode), "proxied-server"), nil
 }
 
 func isTransientManagedDoltInitFailure(out string) bool {

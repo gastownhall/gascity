@@ -1111,6 +1111,127 @@ func scopeUsesBDDoltliteStore(cityPath, scopePath string) bool {
 	return strings.EqualFold(strings.TrimSpace(cfg.Beads.Backend), "doltlite")
 }
 
+// doctorScopeUsesProxiedDoltMode reports whether the effective beads scope is
+// persisted in Beads' proxied-server mode. A proxied scope is served by the
+// beads UOW/proxy path, so there is no Gas City-managed direct Dolt listener
+// for DoltServerCheck to probe.
+//
+// Metadata is consulted first because it is emitted by the backend initializer
+// and is the strongest persisted statement of the mode. A non-proxied marker
+// is authoritative too: an older direct-server scope must not inherit a newer
+// city's proxied default. For inherited rigs, a missing local marker falls
+// back to the city's persisted mode.
+func doctorScopeUsesProxiedDoltMode(cityPath, scopePath string) bool {
+	return doctorScopeUsesProxiedDoltModeForRig(cityPath, scopePath, nil)
+}
+
+// doctorScopeUsesProxiedDoltModeForRig is the rig-aware form used by the
+// per-rig doctor check. A non-nil configured rig supplies compatibility
+// endpoint evidence even when city.toml cannot be reloaded (the caller may be
+// using an already-expanded config snapshot).
+func doctorScopeUsesProxiedDoltModeForRig(cityPath, scopePath string, configuredRig *config.Rig) bool {
+	backend := doctorScopeBackend(cityPath, scopePath)
+	if mode, ok, err := contract.ReadDoltMode(fsys.OSFS{}, filepath.Join(scopePath, ".beads", "metadata.json")); err == nil && ok {
+		return contract.IsProxiedDoltMode(backend, mode)
+	}
+
+	// A local persisted config mode is authoritative for the scope. Inspect it
+	// before resolving inherited topology; otherwise an inherited rig with no
+	// metadata can have its explicit direct mode replaced by the city's proxied
+	// default during target resolution.
+	if cfg, ok, err := contract.ReadConfigState(fsys.OSFS{}, filepath.Join(scopePath, ".beads", "config.yaml")); err == nil && ok {
+		if mode := strings.TrimSpace(cfg.DoltMode); mode != "" {
+			return contract.IsProxiedDoltMode(backend, mode)
+		}
+	}
+
+	// A configured rig can carry a legacy explicit endpoint in city.toml while
+	// its local .beads files are still absent (for example immediately after
+	// registration). That endpoint is direct-scope ownership and must take
+	// precedence over the city's proxied default during classification.
+	if !sameDoctorScope(cityPath, scopePath) {
+		if configuredRig != nil && doctorRigHasExplicitEndpoint(*configuredRig) {
+			return false
+		}
+		if configuredRig == nil && doctorConfiguredRigHasExplicitEndpoint(cityPath, scopePath) {
+			return false
+		}
+	}
+
+	// Let the shared connection contract derive inherited-rig state and preserve
+	// explicit endpoints. Resolution is best-effort here: a direct managed scope
+	// with no live runtime remains a normal doctor error below, not a proxied
+	// short-circuit.
+	if target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, cityPath, scopePath); err == nil {
+		return contract.IsProxiedDoltMode(backend, target.DoltMode)
+	}
+
+	if cfg, ok, err := contract.ReadConfigState(fsys.OSFS{}, filepath.Join(scopePath, ".beads", "config.yaml")); err == nil && ok {
+		// Explicit and managed-city configs without a mode are legacy direct
+		// scopes. Only inherited rigs may derive their mode from the city.
+		if cfg.EndpointOrigin != contract.EndpointOriginInheritedCity || sameDoctorScope(cityPath, scopePath) {
+			return false
+		}
+	}
+
+	if !sameDoctorScope(cityPath, scopePath) {
+		if mode, ok, err := contract.ReadDoltMode(fsys.OSFS{}, filepath.Join(cityPath, ".beads", "metadata.json")); err == nil && ok {
+			cityBackend := doctorScopeBackend(cityPath, cityPath)
+			return contract.IsProxiedDoltMode(cityBackend, mode)
+		}
+		if cfg, ok, err := contract.ReadConfigState(fsys.OSFS{}, filepath.Join(cityPath, ".beads", "config.yaml")); err == nil && ok {
+			return contract.IsProxiedDoltMode(doctorScopeBackend(cityPath, cityPath), cfg.DoltMode)
+		}
+	}
+
+	return false
+}
+
+func doctorRigHasExplicitEndpoint(rig config.Rig) bool {
+	return strings.TrimSpace(rig.DoltHost) != "" || strings.TrimSpace(rig.DoltPort) != ""
+}
+
+// doctorConfiguredRigHasExplicitEndpoint reports whether city.toml declares a
+// compatibility endpoint for the rig at scopePath. It intentionally reads
+// only the configured rig shape; canonical local files, when present, are
+// handled first by doctorScopeUsesProxiedDoltMode.
+func doctorConfiguredRigHasExplicitEndpoint(cityPath, scopePath string) bool {
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil || cfg == nil {
+		return false
+	}
+	for _, rig := range cfg.Rigs {
+		rigPath := rig.Path
+		if !filepath.IsAbs(rigPath) {
+			rigPath = filepath.Join(cityPath, rigPath)
+		}
+		if !sameDoctorScope(rigPath, scopePath) {
+			continue
+		}
+		return strings.TrimSpace(rig.DoltHost) != "" || strings.TrimSpace(rig.DoltPort) != ""
+	}
+	return false
+}
+
+// doctorScopeBackend resolves the backend namespace for a persisted mode. A
+// scope-local metadata marker wins; inherited scopes then use the city's
+// metadata marker before falling back to city.toml. This keeps stale Dolt mode
+// values on a DoltLite city out of the Dolt server check for inherited rigs.
+func doctorScopeBackend(cityPath, scopePath string) string {
+	if value, ok, err := contract.ReadMetadataBackend(fsys.OSFS{}, filepath.Join(scopePath, ".beads", "metadata.json")); err == nil && ok && strings.TrimSpace(value) != "" {
+		return value
+	}
+	if !sameDoctorScope(cityPath, scopePath) {
+		if value, ok, err := contract.ReadMetadataBackend(fsys.OSFS{}, filepath.Join(cityPath, ".beads", "metadata.json")); err == nil && ok && strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	if cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); err == nil && cfg != nil {
+		return cfg.Beads.Backend
+	}
+	return ""
+}
+
 func doctorExecProviderBase(provider string) string {
 	script := strings.TrimSpace(strings.TrimPrefix(provider, "exec:"))
 	return strings.TrimSuffix(filepath.Base(script), ".sh")
@@ -1222,6 +1343,11 @@ func (c *DoltServerCheck) Run(_ *CheckContext) *CheckResult {
 		r.Message = "not required (bd backend=doltlite)"
 		return r
 	}
+	if doctorScopeUsesProxiedDoltMode(c.cityPath, c.cityPath) {
+		r.Status = StatusOK
+		r.Message = "not required (bd backend=dolt proxied-server)"
+		return r
+	}
 
 	target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, c.cityPath, c.cityPath)
 	if err != nil {
@@ -1286,6 +1412,11 @@ func (c *RigDoltServerCheck) Run(_ *CheckContext) *CheckResult {
 		r.Message = "not required (bd backend=doltlite)"
 		return r
 	}
+	if doctorScopeUsesProxiedDoltModeForRig(c.cityPath, rigPath, &c.rig) {
+		r.Status = StatusOK
+		r.Message = "not required (bd backend=dolt proxied-server)"
+		return r
+	}
 	if err := contract.ValidateInheritedCityEndpointMirror(fsys.OSFS{}, c.cityPath, rigPath); err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("inherited city endpoint drift: %v", err)
@@ -1299,17 +1430,29 @@ func (c *RigDoltServerCheck) Run(_ *CheckContext) *CheckResult {
 		r.FixHint = "reconcile the canonical external Dolt endpoint"
 		return r
 	}
-	if !explicit {
-		r.Status = StatusOK
-		r.Message = "inherits city dolt endpoint"
-		return r
-	}
-	target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, c.cityPath, rigPath)
-	if err != nil {
-		r.Status = StatusError
-		r.Message = fmt.Sprintf("resolve dolt target: %v", err)
-		r.FixHint = "reconcile the canonical external Dolt endpoint"
-		return r
+	var target contract.DoltConnectionTarget
+	if explicit {
+		target, err = contract.ResolveDoltConnectionTarget(fsys.OSFS{}, c.cityPath, rigPath)
+		if err != nil {
+			r.Status = StatusError
+			r.Message = fmt.Sprintf("resolve dolt target: %v", err)
+			r.FixHint = "reconcile the canonical external Dolt endpoint"
+			return r
+		}
+	} else {
+		var compat bool
+		target, compat, err = doctorRigCompatibilityDoltTarget(c.rig)
+		if err != nil {
+			r.Status = StatusError
+			r.Message = fmt.Sprintf("resolve dolt target: %v", err)
+			r.FixHint = "reconcile the configured rig Dolt endpoint"
+			return r
+		}
+		if !compat {
+			r.Status = StatusOK
+			r.Message = "inherits city dolt endpoint"
+			return r
+		}
 	}
 	addr := net.JoinHostPort(target.Host, target.Port)
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
@@ -1324,6 +1467,27 @@ func (c *RigDoltServerCheck) Run(_ *CheckContext) *CheckResult {
 	r.Status = StatusOK
 	r.Message = fmt.Sprintf("reachable on %s", addr)
 	return r
+}
+
+func doctorRigCompatibilityDoltTarget(rig config.Rig) (contract.DoltConnectionTarget, bool, error) {
+	if !doctorRigHasExplicitEndpoint(rig) {
+		return contract.DoltConnectionTarget{}, false, nil
+	}
+	port := strings.TrimSpace(rig.DoltPort)
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber <= 0 || portNumber > 65535 {
+		return contract.DoltConnectionTarget{}, true, fmt.Errorf("invalid configured rig dolt_port %q", port)
+	}
+	host := strings.TrimSpace(rig.DoltHost)
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	return contract.DoltConnectionTarget{
+		Host:           host,
+		Port:           port,
+		EndpointOrigin: contract.EndpointOriginExplicit,
+		External:       true,
+	}, true, nil
 }
 
 // CanFix returns false.

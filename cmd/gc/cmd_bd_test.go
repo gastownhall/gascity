@@ -664,9 +664,23 @@ prefix = "repo"
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// This test exercises projection of a live Gas City-managed SQL server.
+	// Mark the fixture as an existing direct-server scope explicitly; a fresh
+	// managed scope now defaults to beads' proxied-server mode and has no
+	// Gas City-owned port to project.
+	writeScopeMetadata(t, cityDir, map[string]string{
+		"database":      "dolt",
+		"backend":       "dolt",
+		"dolt_mode":     "server",
+		"dolt_database": "hq",
+	})
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte("issue_prefix: gc\ngc.endpoint_origin: managed_city\ngc.endpoint_status: verified\ndolt.mode: server\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: repo
 gc.endpoint_origin: inherited_city
 gc.endpoint_status: verified
+dolt.mode: server
 dolt.auto-start: false
 `), 0o644); err != nil {
 		t.Fatal(err)

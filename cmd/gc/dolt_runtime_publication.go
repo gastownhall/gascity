@@ -67,6 +67,9 @@ func readPublishedDoltRuntimeStateHint(cityPath string) (doltRuntimeState, bool,
 }
 
 func managedDoltLifecycleOwned(cityPath string) (bool, error) {
+	if scopeUsesProxiedDoltMode(cityPath, cityPath) {
+		return false, nil
+	}
 	if cityUsesBdStoreContract(cityPath) {
 		if cityUsesDoltliteBeadsBackend(cityPath) {
 			return false, nil

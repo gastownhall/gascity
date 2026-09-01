@@ -5,9 +5,10 @@ description: How a city and its rigs share one Dolt server while keeping each ri
 
 A Gas City workspace can hold beads in several places at once — at the city
 root and inside every rig. From the outside that looks like several separate
-databases. Underneath it is the opposite: one shared Dolt server, with each
-scope's beads tagged by an `issue_prefix` that the `bd` CLI uses as a hard
-query filter.
+databases. Existing direct managed-server scopes share one Dolt server, with
+each scope's beads tagged by an `issue_prefix` that the `bd` CLI uses as a hard
+query filter. Fresh managed-local scopes default to Beads' `proxied-server`
+topology, where each scope's Beads UOW owns its proxy and child Dolt lifecycle.
 
 This page explains that topology so the on-disk layout, the contents of each
 `.beads/` directory, and the output of `bd list` from different working
@@ -17,8 +18,8 @@ directories all line up with one mental model.
 
 When you run `gc init`, Gas City lays down a city root with a `.beads/`
 directory inside it. When you run `gc rig add <path>`, the target directory
-gets its own `.beads/` directory too. So a two-rig city looks like this on
-disk:
+gets its own `.beads/` directory too. In the direct managed-server topology, a
+two-rig city looks like this on disk:
 
 ```
 my-city/
@@ -36,7 +37,7 @@ repo-b/                     # added with: gc rig add ../repo-b
     └── config.yaml         # issue_prefix: rigb · gc.endpoint_origin: inherited_city
 ```
 
-There is **one** Dolt server process for the whole city. The city's
+There is **one** Dolt server process for the whole city in this direct mode. The city's
 `.beads/dolt-server.port` records the port it listens on. Every rig's
 `.beads/config.yaml` declares `gc.endpoint_origin: inherited_city`, which means
 "use whatever endpoint the city is using." Rigs do not run their own Dolt.
@@ -65,13 +66,13 @@ flowchart TB
 
 `gc.endpoint_origin` is the canonical key that records who owns the endpoint
 declaration. The four legal values are documented in
-`internal/beads/contract/files.go`; for a default `gc init` city you will only
-ever see two of them:
+`internal/beads/contract/files.go`; for a direct managed-server city you will
+only ever see two of them:
 
 | Value | Meaning |
 |---|---|
-| `managed_city` | This city runs its own local Dolt; the port lives in `.beads/dolt-server.port`. |
-| `inherited_city` | This rig has no endpoint of its own; resolve through the city. |
+| `managed_city` | This city uses a direct managed Dolt; the port lives in `.beads/dolt-server.port`. Fresh cities use Beads' proxied mode under this origin. |
+| `inherited_city` | This rig has no direct endpoint of its own; resolve through the city, or inherit the city's proxied Beads path. |
 
 The two remaining values, `city_canonical` and `explicit`, are for cities and
 rigs that point at an external Dolt server. See the [Beads Dolt Contract

@@ -597,6 +597,9 @@ func workflowSQLStoreCandidates(state State, requestedScopeKind, requestedScopeR
 	if requestedScopeKind != "" && requestedScopeRef != "" {
 		if info, ok := workflowStoreByRef(state, requestedScopeKind+":"+requestedScopeRef); ok {
 			if path, ok := workflowStorePath(state, info); ok {
+				if workflowSQLScopeUsesProxiedDoltMode(state, info, path) {
+					return nil
+				}
 				return []workflowSQLStoreCandidate{{info: info, path: path}}
 			}
 		}
@@ -607,6 +610,9 @@ func workflowSQLStoreCandidates(state State, requestedScopeKind, requestedScopeR
 	candidates := make([]workflowSQLStoreCandidate, 0, len(stores))
 	for _, info := range stores {
 		if path, ok := workflowStorePath(state, info); ok {
+			if workflowSQLScopeUsesProxiedDoltMode(state, info, path) {
+				continue
+			}
 			candidates = append(candidates, workflowSQLStoreCandidate{
 				info: info,
 				path: path,
@@ -614,6 +620,133 @@ func workflowSQLStoreCandidates(state State, requestedScopeKind, requestedScopeR
 		}
 	}
 	return candidates
+}
+
+// workflowSQLScopeUsesProxiedDoltMode reports whether a persisted scope is
+// owned by beads' proxied-server/UOW path. The workflow SQL fast path opens a
+// native MySQL connection and therefore cannot serve such a scope; callers
+// must leave it to the bd-backed store scan instead.
+//
+// Metadata is checked before config, matching the precedence used by the
+// beads lifecycle projector: a persisted metadata mode is the result of the
+// backend initialization and remains authoritative even when an older config
+// file disagrees. A rig that has no own mode inherits the city's mode.
+func workflowSQLScopeUsesProxiedDoltMode(state State, info workflowStoreInfo, scopePath string) bool {
+	backend := workflowSQLScopeBackend(state, info, scopePath)
+	if mode, ok, err := contract.ReadDoltMode(fsys.OSFS{}, filepath.Join(scopePath, ".beads", "metadata.json")); err == nil && ok {
+		return contract.IsProxiedDoltMode(backend, mode)
+	}
+
+	// A local config mode is an explicit persisted choice for this scope. Check
+	// it before asking the shared resolver for the effective target: inherited
+	// rig resolution starts from the city and would otherwise replace a local
+	// direct mode with the city's proxied default when the rig has not emitted
+	// metadata yet.
+	if cfg, ok, err := contract.ReadConfigState(fsys.OSFS{}, filepath.Join(scopePath, ".beads", "config.yaml")); err == nil && ok {
+		if mode := strings.TrimSpace(cfg.DoltMode); mode != "" {
+			return contract.IsProxiedDoltMode(backend, mode)
+		}
+	}
+
+	// A legacy rig may still carry its explicit endpoint only in the city
+	// declaration (config.Rig{DoltHost,DoltPort}) while its local .beads files
+	// have not been created yet. That endpoint is an ownership signal: do not
+	// replace it with the city's proxied default merely because the local
+	// inherited marker is absent.
+	if strings.EqualFold(strings.TrimSpace(info.scopeKind), beadmeta.ScopeKindRig) &&
+		workflowSQLConfiguredRigHasExplicitEndpoint(state, scopePath) {
+		return false
+	}
+
+	// Resolve the effective target through the shared beads contract. Besides
+	// reading the local marker, this derives inherited-rig state from the city
+	// and distinguishes a legacy explicit rig endpoint from an inherited one.
+	// It is intentionally best-effort: a direct managed scope with no live
+	// runtime cannot be resolved here, but that failure must not turn it into a
+	// proxied candidate; the SQL path will report the normal connection error.
+	if target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, state.CityPath(), scopePath); err == nil {
+		return contract.IsProxiedDoltMode(backend, target.DoltMode)
+	}
+
+	if cfg, ok, err := contract.ReadConfigState(fsys.OSFS{}, filepath.Join(scopePath, ".beads", "config.yaml")); err == nil && ok {
+		// An existing endpoint-origin marker without dolt.mode is a legacy
+		// direct-server scope. Do not let a newer city default rewrite that
+		// scope's SQL eligibility.
+		if cfg.EndpointOrigin != contract.EndpointOriginInheritedCity && strings.TrimSpace(string(cfg.EndpointOrigin)) != "" {
+			return false
+		}
+	}
+
+	// Inherited rigs may have no local marker in older layouts. Their effective
+	// mode is the city mode, so inspect the city only after the rig-local files
+	// above have had a chance to override it.
+	if strings.EqualFold(strings.TrimSpace(info.scopeKind), beadmeta.ScopeKindRig) {
+		cityPath := strings.TrimSpace(state.CityPath())
+		if cityPath != "" {
+			if mode, ok, err := contract.ReadDoltMode(fsys.OSFS{}, filepath.Join(cityPath, ".beads", "metadata.json")); err == nil && ok {
+				cityBackend := backend
+				if value, backendOK, backendErr := contract.ReadMetadataBackend(fsys.OSFS{}, filepath.Join(cityPath, ".beads", "metadata.json")); backendErr == nil && backendOK {
+					cityBackend = value
+				}
+				return contract.IsProxiedDoltMode(cityBackend, mode)
+			}
+			if cfg, ok, err := contract.ReadConfigState(fsys.OSFS{}, filepath.Join(cityPath, ".beads", "config.yaml")); err == nil && ok {
+				return contract.IsProxiedDoltMode(workflowSQLScopeBackend(state, workflowStoreInfo{scopeKind: beadmeta.ScopeKindCity}, cityPath), cfg.DoltMode)
+			}
+		}
+	}
+
+	return false
+}
+
+// workflowSQLConfiguredRigHasExplicitEndpoint reports whether the configured
+// rig owning scopePath declares a compatibility Dolt endpoint. The declaration
+// is consulted only after scope-local metadata/config markers, so persisted
+// local mode remains authoritative once a rig has been initialized.
+func workflowSQLConfiguredRigHasExplicitEndpoint(state State, scopePath string) bool {
+	cfg := state.Config()
+	if cfg == nil {
+		return false
+	}
+	scopePath = resolveScopeRoot(state.CityPath(), scopePath)
+	for _, rig := range cfg.Rigs {
+		if !sameWorkflowSQLScopePath(resolveScopeRoot(state.CityPath(), rig.Path), scopePath) {
+			continue
+		}
+		return strings.TrimSpace(rig.DoltHost) != "" || strings.TrimSpace(rig.DoltPort) != ""
+	}
+	return false
+}
+
+func sameWorkflowSQLScopePath(a, b string) bool {
+	a = filepath.Clean(strings.TrimSpace(a))
+	b = filepath.Clean(strings.TrimSpace(b))
+	if a == b {
+		return true
+	}
+	resolvedA, errA := filepath.EvalSymlinks(a)
+	resolvedB, errB := filepath.EvalSymlinks(b)
+	return errA == nil && errB == nil && filepath.Clean(resolvedA) == filepath.Clean(resolvedB)
+}
+
+// workflowSQLScopeBackend resolves the backend namespace for a scope's mode
+// marker. A scope-local metadata backend is authoritative; an inherited rig
+// with no own marker inherits the city's persisted backend before falling back
+// to the in-memory city config. This prevents a stale Dolt mode on a DoltLite
+// city from being interpreted as a Dolt proxy for an inherited rig.
+func workflowSQLScopeBackend(state State, _ workflowStoreInfo, scopePath string) string {
+	if value, ok, err := contract.ReadMetadataBackend(fsys.OSFS{}, filepath.Join(scopePath, ".beads", "metadata.json")); err == nil && ok && strings.TrimSpace(value) != "" {
+		return value
+	}
+	if cityPath := strings.TrimSpace(state.CityPath()); cityPath != "" && filepath.Clean(cityPath) != filepath.Clean(scopePath) {
+		if value, ok, err := contract.ReadMetadataBackend(fsys.OSFS{}, filepath.Join(cityPath, ".beads", "metadata.json")); err == nil && ok && strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	if cfg := state.Config(); cfg != nil {
+		return cfg.Beads.Backend
+	}
+	return ""
 }
 
 func workflowSQLRouteCandidate(state State, prefix string) (workflowSQLStoreCandidate, bool) {

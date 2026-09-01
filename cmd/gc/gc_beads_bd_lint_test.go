@@ -138,6 +138,27 @@ func TestNoBashCleanupProjectIDGuard(t *testing.T) {
 	}
 }
 
+func TestGcBeadsBdScopeIsProxiedPersistedModeOverridesAmbientMarker(t *testing.T) {
+	root := repoRootForLint(t)
+	scriptPath := filepath.Join(root, "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
+	data, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatalf("read script: %v", err)
+	}
+	fn := extractShellFunction(t, string(data), "scope_is_proxied")
+	metadataIdx := strings.Index(fn, "metadata_mode=")
+	ambientIdx := strings.Index(fn, "BEADS_DOLT_PROXIED_SERVER")
+	if metadataIdx < 0 || ambientIdx < 0 {
+		t.Fatalf("scope_is_proxied must inspect persisted metadata and ambient proxy marker:\n%s", fn)
+	}
+	if metadataIdx > ambientIdx {
+		t.Fatalf("scope_is_proxied must resolve persisted metadata before ambient proxy marker:\n%s", fn)
+	}
+	if !strings.Contains(fn, "return 1") {
+		t.Fatalf("scope_is_proxied must stop on an explicit non-proxied persisted mode:\n%s", fn)
+	}
+}
+
 func TestDoltliteRuntimeConfigUsesSQLiteParameters(t *testing.T) {
 	root := repoRootForLint(t)
 	scriptPath := filepath.Join(root, "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")

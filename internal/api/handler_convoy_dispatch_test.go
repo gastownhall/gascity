@@ -693,6 +693,8 @@ func TestWorkflowStorePathSkipsClassRefs(t *testing.T) {
 	state.cityName = "bright-lights"
 	state.cityPath = t.TempDir()
 	state.cityBeadStore = beads.NewMemStore()
+	state.cfg.Rigs = nil
+	state.stores = map[string]beads.Store{}
 
 	for _, ref := range []string{"graph:bright-lights", "orders:bright-lights"} {
 		info := workflowStoreInfo{
@@ -782,6 +784,210 @@ func TestWorkflowStorePathResolvesCityAndRigPaths(t *testing.T) {
 	wantBetaPath := filepath.Join(state.cityPath, "repos/beta")
 	if betaPath != wantBetaPath {
 		t.Fatalf("betaPath = %q, want %q", betaPath, wantBetaPath)
+	}
+}
+
+// A persisted proxied-server scope is served through beads' UOW/proxy path.
+// The API SQL fast path has no proxy client and must not resolve a direct
+// managed-Dolt endpoint for it; the normal store fallback remains available.
+func TestWorkflowSQLStoreCandidatesSkipPersistedProxiedCity(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "bright-lights"
+	state.cityPath = t.TempDir()
+	state.cityBeadStore = beads.NewMemStore()
+	if err := os.MkdirAll(filepath.Join(state.cityPath, ".beads"), 0o700); err != nil {
+		t.Fatalf("MkdirAll(.beads): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(state.cityPath, ".beads", "config.yaml"), []byte("gc.endpoint_origin: managed_city\ndolt.mode: proxied-server\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(config.yaml): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(state.cityPath, ".beads", "metadata.json"), []byte(`{"backend":"dolt","database":"dolt","dolt_mode":"proxied-server"}`), 0o600); err != nil {
+		t.Fatalf("WriteFile(metadata.json): %v", err)
+	}
+
+	if candidates := workflowSQLStoreCandidates(state, "", ""); len(candidates) != 0 {
+		t.Fatalf("workflowSQLStoreCandidates() returned %d proxied candidates (%+v), want none", len(candidates), candidates)
+	}
+}
+
+func TestWorkflowSQLStoreCandidatesSkipPersistedProxiedRig(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "bright-lights"
+	state.cityPath = t.TempDir()
+	state.cityBeadStore = beads.NewMemStore()
+	rigPath := filepath.Join(state.cityPath, "rigs", "alpha")
+	state.cfg.Rigs = []config.Rig{{Name: "alpha", Path: rigPath}}
+	state.stores = map[string]beads.Store{"alpha": beads.NewMemStore()}
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o700); err != nil {
+		t.Fatalf("MkdirAll(rig .beads): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte("gc.endpoint_origin: inherited_city\ndolt.mode: proxied-server\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(rig config.yaml): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "metadata.json"), []byte(`{"backend":"dolt","database":"dolt","dolt_mode":"proxied-server"}`), 0o600); err != nil {
+		t.Fatalf("WriteFile(rig metadata.json): %v", err)
+	}
+
+	candidates := workflowSQLStoreCandidates(state, "rig", "alpha")
+	if len(candidates) != 0 {
+		t.Fatalf("workflowSQLStoreCandidates() returned %d proxied rig candidates (%+v), want none", len(candidates), candidates)
+	}
+}
+
+func TestWorkflowSQLStoreCandidatesKeepRigLocalDirectModeUnderProxiedCity(t *testing.T) {
+	for _, mode := range []string{"server", "embedded"} {
+		t.Run(mode, func(t *testing.T) {
+			state := newFakeState(t)
+			state.cityName = "bright-lights"
+			state.cityPath = t.TempDir()
+			state.cityBeadStore = beads.NewMemStore()
+			rigPath := filepath.Join(state.cityPath, "rigs", "alpha")
+			state.cfg.Rigs = []config.Rig{{Name: "alpha", Path: rigPath}}
+			state.stores = map[string]beads.Store{"alpha": beads.NewMemStore()}
+
+			if err := os.MkdirAll(filepath.Join(state.cityPath, ".beads"), 0o700); err != nil {
+				t.Fatalf("MkdirAll(city .beads): %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(state.cityPath, ".beads", "config.yaml"), []byte("gc.endpoint_origin: managed_city\ndolt.mode: proxied-server\n"), 0o644); err != nil {
+				t.Fatalf("WriteFile(city config.yaml): %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(state.cityPath, ".beads", "metadata.json"), []byte(`{"backend":"dolt","database":"dolt","dolt_mode":"proxied-server"}`), 0o600); err != nil {
+				t.Fatalf("WriteFile(city metadata.json): %v", err)
+			}
+			if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o700); err != nil {
+				t.Fatalf("MkdirAll(rig .beads): %v", err)
+			}
+			rigConfig := "gc.endpoint_origin: inherited_city\ndolt.mode: " + mode + "\n"
+			if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte(rigConfig), 0o644); err != nil {
+				t.Fatalf("WriteFile(rig config.yaml): %v", err)
+			}
+
+			candidates := workflowSQLStoreCandidates(state, "rig", "alpha")
+			if len(candidates) != 1 || candidates[0].info.ref != "rig:alpha" {
+				t.Fatalf("workflowSQLStoreCandidates() = %+v, want rig candidate with local %s mode", candidates, mode)
+			}
+		})
+	}
+}
+
+func TestWorkflowSQLStoreCandidatesSkipRigInheritingMetadataOnlyProxiedCity(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "bright-lights"
+	state.cityPath = t.TempDir()
+	state.cityBeadStore = beads.NewMemStore()
+	rigPath := filepath.Join(state.cityPath, "rigs", "alpha")
+	state.cfg.Rigs = []config.Rig{{Name: "alpha", Path: rigPath}}
+	state.stores = map[string]beads.Store{"alpha": beads.NewMemStore()}
+
+	if err := os.MkdirAll(filepath.Join(state.cityPath, ".beads"), 0o700); err != nil {
+		t.Fatalf("MkdirAll(city .beads): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(state.cityPath, ".beads", "metadata.json"), []byte(`{"backend":"dolt","database":"dolt","dolt_mode":"proxied-server"}`), 0o600); err != nil {
+		t.Fatalf("WriteFile(city metadata.json): %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o700); err != nil {
+		t.Fatalf("MkdirAll(rig .beads): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte("gc.endpoint_origin: inherited_city\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(rig config.yaml): %v", err)
+	}
+
+	if candidates := workflowSQLStoreCandidates(state, "rig", "alpha"); len(candidates) != 0 {
+		t.Fatalf("workflowSQLStoreCandidates() returned metadata-only inherited proxied candidates: %+v", candidates)
+	}
+}
+
+func TestWorkflowSQLStoreCandidatesKeepDoltliteScopeOutOfProxiedClassification(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "bright-lights"
+	state.cityPath = t.TempDir()
+	state.cityBeadStore = beads.NewMemStore()
+	state.cfg.Beads.Backend = "doltlite"
+	state.stores = map[string]beads.Store{}
+	if err := os.MkdirAll(filepath.Join(state.cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(state.cityPath, ".beads", "config.yaml"), []byte("gc.endpoint_origin: managed_city\ndolt.mode: proxied-server\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(state.cityPath, ".beads", "metadata.json"), []byte(`{"backend":"doltlite"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	info := workflowStoreInfo{ref: "city:" + state.cityName, scopeKind: beadmeta.ScopeKindCity, scopeRef: state.cityName}
+	if workflowSQLScopeUsesProxiedDoltMode(state, info, state.cityPath) {
+		t.Fatal("workflowSQLScopeUsesProxiedDoltMode classified doltlite scope as proxied Dolt")
+	}
+}
+
+func TestWorkflowSQLScopeUsesProxiedDoltModeRejectsInheritedRigWithStaleDoltliteCityMode(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "bright-lights"
+	state.cityPath = t.TempDir()
+	state.cityBeadStore = beads.NewMemStore()
+	rigPath := filepath.Join(state.cityPath, "rigs", "alpha")
+	state.cfg.Rigs = []config.Rig{{Name: "alpha", Path: rigPath}}
+	state.stores = map[string]beads.Store{"alpha": beads.NewMemStore()}
+
+	if err := os.MkdirAll(filepath.Join(state.cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(state.cityPath, "city.toml"), []byte("[workspace]\nname = \"bright-lights\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(state.cityPath, ".beads", "metadata.json"), []byte(`{"backend":"doltlite"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(state.cityPath, ".beads", "config.yaml"), []byte("gc.endpoint_origin: managed_city\ndolt.mode: proxied-server\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte("gc.endpoint_origin: inherited_city\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	info := workflowStoreInfo{ref: "rig:alpha", scopeKind: beadmeta.ScopeKindRig, scopeRef: "alpha"}
+	if workflowSQLScopeUsesProxiedDoltMode(state, info, rigPath) {
+		t.Fatal("workflowSQLScopeUsesProxiedDoltMode classified inherited rig as proxied Dolt from stale doltlite city mode")
+	}
+}
+
+func TestWorkflowSQLStoreCandidatesKeepMissingConfigRigWithExplicitCompatEndpoint(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "bright-lights"
+	state.cityPath = t.TempDir()
+	state.cityBeadStore = beads.NewMemStore()
+	rigPath := filepath.Join(state.cityPath, "rigs", "alpha")
+	state.cfg.Rigs = []config.Rig{{
+		Name:     "alpha",
+		Path:     rigPath,
+		DoltHost: "rig-db.example.com",
+		DoltPort: "4406",
+	}}
+	state.stores = map[string]beads.Store{"alpha": beads.NewMemStore()}
+
+	if err := os.MkdirAll(filepath.Join(state.cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(state.cityPath, ".beads", "config.yaml"), []byte("gc.endpoint_origin: managed_city\ndolt.mode: proxied-server\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(state.cityPath, ".beads", "metadata.json"), []byte(`{"backend":"dolt","database":"dolt","dolt_mode":"proxied-server"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// The rig is fresh/legacy: neither canonical file exists yet. The
+	// city.toml compatibility endpoint still makes it a direct rig, so the
+	// SQL candidate must not be discarded as an inherited proxied scope.
+	info := workflowStoreInfo{ref: "rig:alpha", scopeKind: beadmeta.ScopeKindRig, scopeRef: "alpha"}
+	if workflowSQLScopeUsesProxiedDoltMode(state, info, rigPath) {
+		t.Fatal("workflowSQLScopeUsesProxiedDoltMode classified explicit compat rig as proxied")
+	}
+	candidates := workflowSQLStoreCandidates(state, "rig", "alpha")
+	if len(candidates) != 1 || candidates[0].info.ref != "rig:alpha" {
+		t.Fatalf("workflowSQLStoreCandidates() = %+v, want the explicit rig candidate", candidates)
 	}
 }
 

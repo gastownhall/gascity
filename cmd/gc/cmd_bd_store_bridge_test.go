@@ -45,6 +45,7 @@ BEADS_DOLT_SERVER_PORT=%s
 BEADS_DOLT_SERVER_USER=%s
 BEADS_DOLT_PASSWORD=%s
 BEADS_DOLT_SERVER_DATABASE=%s
+BEADS_DOLT_PROXIED_SERVER=%s
 BEADS_CREDENTIALS_FILE=%s
 GC_BEADS=%s
 GC_BEADS_BACKEND=%s
@@ -54,7 +55,7 @@ BD_EXPORT_AUTO=%s
 ' \
   "${BEADS_DIR:-}" "${GC_DOLT_HOST:-}" "${GC_DOLT_PORT:-}" "${GC_DOLT_USER:-}" "${GC_DOLT_PASSWORD:-}" \
   "${BEADS_DOLT_SERVER_HOST:-}" "${BEADS_DOLT_SERVER_PORT:-}" "${BEADS_DOLT_SERVER_USER:-}" "${BEADS_DOLT_PASSWORD:-}" \
-  "${BEADS_DOLT_SERVER_DATABASE:-}" "${BEADS_CREDENTIALS_FILE:-}" "${GC_BEADS:-}" "${GC_BEADS_BACKEND:-}" "${BEADS_BACKEND:-}" "${GC_BEADS_PREFIX:-}" \
+  "${BEADS_DOLT_SERVER_DATABASE:-}" "${BEADS_DOLT_PROXIED_SERVER:-}" "${BEADS_CREDENTIALS_FILE:-}" "${GC_BEADS:-}" "${GC_BEADS_BACKEND:-}" "${BEADS_BACKEND:-}" "${GC_BEADS_PREFIX:-}" \
   "${BD_EXPORT_AUTO:-}" > "` + envFile + `"
 printf '%s
 ' "$*" > "` + argsFile + `"
@@ -262,6 +263,80 @@ func TestBdStoreBridgeDoltliteClearsDoltServerEnv(t *testing.T) {
 		if got := envMap[key]; got != "" {
 			t.Fatalf("%s = %q, want empty for doltlite bridge", key, got)
 		}
+	}
+}
+
+func TestBdStoreBridgeProxiedModeNeedsNoDirectEndpoint(t *testing.T) {
+	scopeDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(scopeDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scopeDir, ".beads", "config.yaml"), []byte("dolt.mode: proxied-server\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	envFile := filepath.Join(t.TempDir(), "bridge.env")
+	argsFile := filepath.Join(t.TempDir(), "bridge.args")
+	writeFakeBdBridgeScript(t, binDir, envFile, argsFile)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	var stdout, stderr bytes.Buffer
+	withTestStdin(t, `{"title":"proxied","type":"task"}`+"\n", func() {
+		code := run([]string{"bd-store-bridge", "--dir", scopeDir, "create"}, &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
+		}
+	})
+	env := readExecCaptureEnv(t, envFile)
+	if env["BEADS_DOLT_PROXIED_SERVER"] != "1" {
+		t.Fatalf("BEADS_DOLT_PROXIED_SERVER = %q, want 1", env["BEADS_DOLT_PROXIED_SERVER"])
+	}
+	for _, key := range []string{"GC_DOLT_HOST", "GC_DOLT_PORT", "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT"} {
+		if env[key] != "" {
+			t.Fatalf("%s = %q, want empty in proxied mode", key, env[key])
+		}
+	}
+}
+
+func TestBdStoreBridgeExplicitDirectModeOverridesAmbientProxiedEnv(t *testing.T) {
+	scopeDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(scopeDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scopeDir, ".beads", "config.yaml"), []byte("issue_prefix: gc\ngc.endpoint_origin: city_canonical\ngc.endpoint_status: verified\ndolt.mode: server\ndolt.host: db.example.test\ndolt.port: 3307\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DOLT_PROXIED_SERVER", "1")
+	if got := bdStoreBridgeUsesProxiedBackend(scopeDir); got {
+		t.Fatal("explicit direct canonical mode was overridden by ambient proxied env")
+	}
+}
+
+func TestBdStoreBridgeStaleDoltliteMetadataDoesNotSelectProxiedPath(t *testing.T) {
+	scopeDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(scopeDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scopeDir, ".beads", "metadata.json"), []byte(`{"backend":"doltlite","dolt_mode":"proxied-server"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DOLT_PROXIED_SERVER", "1")
+	if got := bdStoreBridgeUsesProxiedBackend(scopeDir); got {
+		t.Fatal("bdStoreBridgeUsesProxiedBackend classified stale doltlite metadata as proxied Dolt")
+	}
+}
+
+func TestBdStoreBridgeStaleDoltliteConfigDoesNotSelectProxiedPath(t *testing.T) {
+	scopeDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(scopeDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scopeDir, ".beads", "config.yaml"), []byte("dolt.mode: proxied-server\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS_BACKEND", "doltlite")
+	t.Setenv("BEADS_DOLT_PROXIED_SERVER", "1")
+	if got := bdStoreBridgeUsesProxiedBackend(scopeDir); got {
+		t.Fatal("bdStoreBridgeUsesProxiedBackend classified stale doltlite config as proxied Dolt")
 	}
 }
 

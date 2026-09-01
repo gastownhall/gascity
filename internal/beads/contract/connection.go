@@ -63,10 +63,14 @@ func managedCityHostRequiresLocalPID(host string) bool {
 
 // DoltConnectionTarget is the resolved connection info for a beads scope.
 type DoltConnectionTarget struct {
-	Host           string
-	Port           string
-	Database       string
-	User           string
+	Host     string
+	Port     string
+	Database string
+	User     string
+	// DoltMode records the beads storage mode. proxied-server targets are
+	// intentionally returned without a direct host/port because beads owns
+	// the proxy and child Dolt lifecycle.
+	DoltMode       string
 	EndpointOrigin EndpointOrigin
 	EndpointStatus EndpointStatus
 	External       bool
@@ -136,6 +140,7 @@ func ResolveDoltConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string) (DoltCo
 		EndpointStatus: cfg.EndpointStatus,
 		Database:       "beads",
 		User:           strings.TrimSpace(cfg.DoltUser),
+		DoltMode:       strings.TrimSpace(cfg.DoltMode),
 	}
 	if db, ok, err := ReadDoltDatabase(fs, filepath.Join(scopeRoot, ".beads", "metadata.json")); err != nil {
 		return DoltConnectionTarget{}, err
@@ -145,6 +150,9 @@ func ResolveDoltConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string) (DoltCo
 
 	switch cfg.EndpointOrigin {
 	case EndpointOriginManagedCity:
+		if strings.EqualFold(strings.TrimSpace(cfg.DoltMode), "proxied-server") {
+			return target, nil
+		}
 		port, err := readManagedRuntimePort(fs, cityRoot)
 		if err != nil {
 			return DoltConnectionTarget{}, err
@@ -391,6 +399,7 @@ func inheritedAuthoritativeRigConfigState(prefix string, cityState ConfigState) 
 	state := ConfigState{
 		IssuePrefix:    prefix,
 		EndpointOrigin: EndpointOriginInheritedCity,
+		DoltMode:       cityState.DoltMode,
 	}
 	if cityState.EndpointOrigin == EndpointOriginCityCanonical {
 		state.DoltHost = cityState.DoltHost
@@ -526,6 +535,10 @@ func resolveInheritedCityConnectionTarget(fs fsys.FS, cityRoot string, target Do
 		}
 		return populateExternalTarget(target, cityState)
 	case EndpointOriginManagedCity:
+		if strings.EqualFold(strings.TrimSpace(cityState.DoltMode), "proxied-server") {
+			target.DoltMode = "proxied-server"
+			return target, nil
+		}
 		if cityState.EndpointStatus != "" {
 			target.EndpointStatus = cityState.EndpointStatus
 		}
@@ -629,6 +642,7 @@ func configStateFromDoltTarget(target DoltConnectionTarget) ConfigState {
 	return ConfigState{
 		EndpointOrigin: EndpointOriginManagedCity,
 		EndpointStatus: target.EndpointStatus,
+		DoltMode:       target.DoltMode,
 	}
 }
 
