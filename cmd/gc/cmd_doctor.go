@@ -431,6 +431,12 @@ func doDoctor(fix, verbose, jsonOut bool, checkTimeout time.Duration, stdout, st
 		return 1
 	}
 
+	// Deliberately no d.Wait() here: gc doctor's whole point in bounding a check
+	// is that a wedged one cannot stall the command, and waiting on an abandoned
+	// goroutine would restore exactly that hang. Nothing this function owns
+	// outlives the process, and ctx holds no handle a late writer can corrupt --
+	// an abandoned check writes only to its own private buffer. A future caller
+	// that reuses a Doctor in-process must call Wait before releasing ctx.
 	d := &doctor.Doctor{CheckTimeout: checkTimeout}
 	ctx := &doctor.CheckContext{CityPath: cityPath, Verbose: verbose}
 	cfg, cfgErr := loadCityConfig(cityPath, stderr)

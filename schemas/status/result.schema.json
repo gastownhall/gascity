@@ -229,6 +229,10 @@
         "running_agents": {
           "type": "integer"
         },
+        "unknown_agents": {
+          "type": "integer",
+          "description": "How many of total_agents the runtime probe never answered for. Omitted unless the result is partial. running_agents counts only agents observed running, so during a partial result total_agents minus running_agents is not a count of stopped agents, and this is the part of that difference nothing was learned about."
+        },
         "active_sessions": {
           "type": "integer"
         },

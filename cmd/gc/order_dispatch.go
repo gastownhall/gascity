@@ -2142,7 +2142,12 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
 		return
 	}
-	if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{}); err != nil {
+	// Same fix as `gc order run` (cmd_order.go): validate against the supplied vars.
+	// An empty Options drops them and reports every required var as missing. On this
+	// path that is worse than on the manual one — the controller fires unattended, so
+	// a cooldown/cron order using a required var would fail on every tick with nobody
+	// reading the order.failed events.
+	if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{Vars: vars}); err != nil {
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,
 			Actor:   "controller",

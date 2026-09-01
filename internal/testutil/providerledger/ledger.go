@@ -220,7 +220,7 @@ func Catalog() []Entry {
 			waivedRuntime(
 				repoSymbol("internal/runtime/herdr", "New"),
 				time.Date(2026, time.September, 24, 0, 0, 0, 0, time.UTC),
-				"the existing full conformance run skips in short mode or when the herdr executable is absent",
+				"the full conformance run is an opt-in live journey (make test-herdr-live, or GC_FAST_UNIT=0) and skips in the unit lane, in short mode, and when the herdr executable is absent",
 			),
 		),
 		builtin(
