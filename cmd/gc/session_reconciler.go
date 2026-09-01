@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"time"
 
@@ -3637,6 +3638,23 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			}
 		}
 
+		// A durable explicit wake request refused before the session reached a
+		// live runtime -- held, quarantined, or asleep past its idle-sleep
+		// window -- is a distinct, visible outcome from a post-start wake
+		// failure. Gated on the RAW decision.ShouldWake/decision.Reason (not
+		// the loop-local shouldWake, which the ConfigSuppressed and
+		// heartbeat-crash-recovery overrides above can diverge from) so a
+		// policy override never masks or fabricates a refusal. See
+		// emitSessionWakeRefused, gastownhall/gascity#5739, ga-fxvdit.
+		if info.WakeRequest == string(sessionpkg.WakeCauseExplicit) && hasDec && !decision.ShouldWake && !target.alive {
+			switch decision.Reason {
+			case "held", "quarantined", "idle-sleep":
+				if fold := emitSessionWakeRefused(store, infoByID[target.info.ID], snapshot, target.tp.TemplateName, decision.Reason, rec, clk, stderr); fold != nil {
+					tick.apply(target.info.ID, fold)
+				}
+			}
+		}
+
 		if shouldWake && !target.alive {
 			// Session should be awake but isn't — wake it.
 			if isFailedCreateSessionInfo(info) {
@@ -4675,6 +4693,73 @@ func clearStrandedEventMarker(store beads.Store, info sessionpkg.Info, snapshot 
 	}
 	fold := sessionpkg.MetadataPatch{strandedEventEmittedKey: ""}
 	snapshot.ApplyOpenInfoPatch(info.ID, fold)
+	return fold
+}
+
+// wakeRefusedEventAtKey is the once-per-wake-request emission-guard marker
+// for session.wake_refused, mirroring strandedEventEmittedKey. Set on first
+// emission; cleared by ClearWakeBlockersPatch alongside wake_attempts=0 so a
+// fresh explicit wake request gets its own emission.
+const wakeRefusedEventAtKey = "wake_refused_event_at"
+
+// formatWakeRefusedMessage builds the human-readable session.wake_refused
+// message body. Mirrors formatStrandedMessage's empty-template placeholder.
+func formatWakeRefusedMessage(template, sessionName, reason string) string {
+	if template == "" {
+		template = "<unknown-template>"
+	}
+	name := sessionName
+	if name == "" {
+		name = "(unnamed)"
+	}
+	return fmt.Sprintf("wake refused for %s (template %s): %s", name, template, reason)
+}
+
+// emitSessionWakeRefused records a session.wake_refused event when a durable
+// explicit wake request (wake_request=explicit) is refused before the
+// session ever reaches a live runtime -- held, quarantined, or asleep past
+// its idle-sleep window. wake_attempts is bumped via a direct marker write
+// (never WakeFailureAccrualPatch) so a persistent refusal remains visible
+// without risking self-quarantine at defaultMaxWakeAttempts -- see
+// TestEmitSessionWakeRefused_HeldSessionNotQuarantinedAtThreshold. Throttled
+// per session bead via wakeRefusedEventAtKey so repeated reconciler ticks on
+// the same unserved wake request emit only once, mirroring
+// emitSessionStrandedDiagnostic's StrandedEventEmittedAt guard.
+func emitSessionWakeRefused(
+	store beads.Store,
+	info sessionpkg.Info,
+	snapshot *sessionBeadSnapshot,
+	template string,
+	reason string,
+	rec events.Recorder,
+	clk clock.Clock,
+	stderr io.Writer,
+) sessionpkg.MetadataPatch {
+	if rec == nil {
+		return nil
+	}
+	if strings.TrimSpace(info.WakeRefusedEventAt) != "" {
+		return nil
+	}
+	now := clk.Now().UTC()
+	newAttempts := info.WakeAttempts + 1
+	rec.Record(events.Event{
+		Type:      events.SessionWakeRefused,
+		Ts:        now,
+		Actor:     "gc",
+		Subject:   info.ID,
+		Message:   formatWakeRefusedMessage(template, info.SessionNameMetadata, reason),
+		SessionID: info.ID,
+		Payload:   api.SessionWakeRefusedPayloadJSON(info.ID, info.SessionNameMetadata, template, reason, info.WakeRequest, newAttempts),
+	})
+	fold := sessionpkg.MetadataPatch{
+		"wake_attempts":       strconv.Itoa(newAttempts),
+		wakeRefusedEventAtKey: now.Format(time.RFC3339),
+	}
+	snapshot.ApplyOpenInfoPatch(info.ID, fold)
+	if _, err := sessionFrontDoor(store).ApplyPatchInfo(info, fold); err != nil {
+		fmt.Fprintf(stderr, "session reconciler: recording wake refusal for %s: %v\n", info.ID, err) //nolint:errcheck
+	}
 	return fold
 }
 
