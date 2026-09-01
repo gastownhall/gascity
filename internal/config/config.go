@@ -799,6 +799,9 @@ type AgentOverride struct {
 	// ScaleCheck overrides the shell command whose output reports new
 	// unassigned session demand for bead-backed reconciliation.
 	ScaleCheck *string `toml:"scale_check,omitempty"`
+	// ScaleCheckAuthoritative overrides whether this pool's ScaleCheck is the
+	// last word on new demand, its zeros included. See Agent.
+	ScaleCheckAuthoritative *bool `toml:"scale_check_authoritative,omitempty"`
 	// OptionDefaults adds or overrides provider option defaults for this agent.
 	// Keys are option keys, values are choice values. Merges additively
 	// (override keys win over existing agent keys).

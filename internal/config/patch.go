@@ -164,6 +164,9 @@ type AgentPatch struct {
 	// unassigned session demand for bead-backed reconciliation. Supports the
 	// same Go template placeholders as Agent.scale_check.
 	ScaleCheck *string `toml:"scale_check,omitempty"`
+	// ScaleCheckAuthoritative overrides whether this pool's ScaleCheck is the
+	// last word on new demand, its zeros included. See Agent.
+	ScaleCheckAuthoritative *bool `toml:"scale_check_authoritative,omitempty"`
 	// OptionDefaults adds or overrides provider option defaults for this agent.
 	// Keys are option keys, values are choice values. Merges additively
 	// (patch keys win over existing agent keys).
@@ -680,6 +683,9 @@ func applyAgentMutation(a *Agent, p *AgentPatch, sleepSource string) {
 	}
 	if p.ScaleCheck != nil {
 		a.ScaleCheck = *p.ScaleCheck
+	}
+	if p.ScaleCheckAuthoritative != nil {
+		a.ScaleCheckAuthoritative = *p.ScaleCheckAuthoritative
 	}
 	// OptionDefaults: additive merge (patch keys win).
 	if len(p.OptionDefaults) > 0 {
