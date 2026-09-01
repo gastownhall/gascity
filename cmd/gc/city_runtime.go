@@ -948,7 +948,12 @@ func (cr *CityRuntime) safeTick(fn func(), trigger string) (panicked bool) {
 // if startup has not signaled ready within delay. delay is normally
 // half of [daemon].start_ready_timeout, giving operators a snapshot of
 // which goroutines are blocked while the client-side probe still has
-// budget left. It exits silently when ready is signaled, when ctx is
+// budget left. Deliberately anchored to start_ready_timeout rather than
+// the larger start_ready_absolute_ceiling (see DaemonConfig): the
+// ceiling is sized well above the timeout by design, so firing at half
+// the ceiling would dump goroutines only after the client-side wait had
+// already given up, defeating the "still has budget left" diagnostic
+// value. It exits silently when ready is signaled, when ctx is
 // canceled, or after firing once. Run as its own goroutine.
 func (cr *CityRuntime) startupReadinessWatchdog(ctx context.Context, ready <-chan struct{}, delay, total time.Duration) {
 	timer := time.NewTimer(delay)

@@ -26,6 +26,13 @@ var (
 	// wake budget; cities with more sessions bump it via
 	// [daemon].start_ready_timeout. Tests override this variable directly.
 	supervisorCityReadyTimeout = config.DefaultStartReadyTimeout
+	// supervisorCityAbsoluteCeiling bounds the outer wall-clock wait for
+	// `gc start` and `gc register`, measured once and never renewed —
+	// a hard backstop layered on top of supervisorCityReadyTimeout's
+	// per-tick budget. Cities needing a larger ceiling bump it via
+	// [daemon].start_ready_absolute_ceiling. Tests override this variable
+	// directly.
+	supervisorCityAbsoluteCeiling = config.DefaultStartReadyAbsoluteCeiling
 	// supervisorCityStopTimeoutFloor preserves the historical default
 	// stop/unregister wait floor independently of start-ready sizing.
 	supervisorCityStopTimeoutFloor = 180 * time.Second
@@ -101,6 +108,27 @@ func supervisorCityStartTimeout(cityPath string) time.Duration {
 		timeout = startup
 	}
 	return timeout
+}
+
+// supervisorCityStartAbsoluteCeiling returns the outer wall-clock backstop
+// for `gc start` and `gc register`'s readiness wait. Unlike
+// supervisorCityStartTimeout, it is never extended by
+// [session].startup_timeout: it is meant as a hard ceiling that catches a
+// wedged start regardless of cause, so one slow session escape-hatching the
+// per-tick budget must not also stretch the ceiling.
+func supervisorCityStartAbsoluteCeiling(cityPath string) time.Duration {
+	ceiling := supervisorCityAbsoluteCeiling
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err != nil {
+		return ceiling
+	}
+	// daemon.start_ready_absolute_ceiling is the canonical operator knob.
+	// Only honor an explicit value so tests can shrink the ceiling via the
+	// package variable without the daemon default silently dominating.
+	if cfg.Daemon.StartReadyAbsoluteCeiling != "" {
+		ceiling = cfg.Daemon.StartReadyAbsoluteCeilingDuration()
+	}
+	return ceiling
 }
 
 func supervisorCityStopTimeout(cityPath string) time.Duration {
@@ -578,14 +606,23 @@ func keepRegisteredCity(entry supervisor.CityEntry, stderr io.Writer, commandNam
 
 func waitForSupervisorCity(cityPath string, wantRunning bool, timeout time.Duration, stdout io.Writer) error {
 	deadline := time.Now().Add(timeout)
+	// The absolute ceiling is a hard wall-clock backstop scoped to the
+	// start/register wait only: it is computed once, up front, and never
+	// renewed, independently of the per-tick deadline above. The
+	// wantRunning=false stop/unregister wait is governed solely by the
+	// per-tick deadline.
+	var absDeadline time.Time
+	var absCeiling time.Duration
+	if wantRunning {
+		absCeiling = supervisorCityStartAbsoluteCeiling(cityPath)
+		absDeadline = time.Now().Add(absCeiling)
+	}
 	var lastStatus string
 	for {
 		running, status, known := supervisorCityRunningHook(cityPath)
 		switch {
 		case known && running == wantRunning:
 			return nil
-		case known && !wantRunning:
-			return fmt.Errorf("city is still running under supervisor")
 		case known && wantRunning && status == "init_failed":
 			// If the supervisor reports an init failure, surface the
 			// error immediately instead of polling until timeout.
@@ -601,6 +638,9 @@ func waitForSupervisorCity(cityPath string, wantRunning bool, timeout time.Durat
 		if stdout != nil && status != "" && status != lastStatus {
 			fmt.Fprintf(stdout, "  %s\n", statusDisplayText(status)) //nolint:errcheck // best-effort stdout
 			lastStatus = status
+		}
+		if wantRunning && time.Now().After(absDeadline) {
+			return fmt.Errorf("city did not become ready under supervisor within the %s absolute start ceiling (last known status %q; run 'gc trace' to inspect what stalled)", absCeiling, status)
 		}
 		if time.Now().After(deadline) {
 			if wantRunning {

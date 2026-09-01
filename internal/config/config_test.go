@@ -4384,6 +4384,56 @@ name = "mayor"
 	}
 }
 
+// --- StartReadyAbsoluteCeiling tests ---
+
+func TestDaemonStartReadyAbsoluteCeilingDefault(t *testing.T) {
+	d := DaemonConfig{}
+	got := d.StartReadyAbsoluteCeilingDuration()
+	if got != DefaultStartReadyAbsoluteCeiling {
+		t.Errorf("StartReadyAbsoluteCeilingDuration() = %v, want %v", got, DefaultStartReadyAbsoluteCeiling)
+	}
+}
+
+func TestDaemonStartReadyAbsoluteCeilingCustom(t *testing.T) {
+	d := DaemonConfig{StartReadyAbsoluteCeiling: "45m"}
+	got := d.StartReadyAbsoluteCeilingDuration()
+	if got != 45*time.Minute {
+		t.Errorf("StartReadyAbsoluteCeilingDuration() = %v, want 45m", got)
+	}
+}
+
+func TestDaemonStartReadyAbsoluteCeilingInvalid(t *testing.T) {
+	d := DaemonConfig{StartReadyAbsoluteCeiling: "not-a-duration"}
+	got := d.StartReadyAbsoluteCeilingDuration()
+	if got != DefaultStartReadyAbsoluteCeiling {
+		t.Errorf("StartReadyAbsoluteCeilingDuration() = %v, want %v (default for invalid)", got, DefaultStartReadyAbsoluteCeiling)
+	}
+}
+
+func TestParseStartReadyAbsoluteCeiling(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test"
+
+[daemon]
+start_ready_absolute_ceiling = "30m"
+
+[[agent]]
+name = "mayor"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Daemon.StartReadyAbsoluteCeiling != "30m" {
+		t.Errorf("Daemon.StartReadyAbsoluteCeiling = %q, want %q", cfg.Daemon.StartReadyAbsoluteCeiling, "30m")
+	}
+	got := cfg.Daemon.StartReadyAbsoluteCeilingDuration()
+	if got != 30*time.Minute {
+		t.Errorf("StartReadyAbsoluteCeilingDuration() = %v, want 30m", got)
+	}
+}
+
 // --- ProbeConcurrency tests ---
 
 func TestDaemonProbeConcurrencyDefault(t *testing.T) {

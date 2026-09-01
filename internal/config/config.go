@@ -2667,8 +2667,27 @@ type DaemonConfig struct {
 	// need ~4 minutes. Duration string (e.g., "5m", "10m"). Defaults to
 	// DefaultStartReadyTimeout (5m). When set, this value replaces the
 	// default start/register budget; [session].startup_timeout may still
-	// extend the effective wait for a slow single session.
+	// extend the effective wait for a slow single session. This is a
+	// per-tick budget, not a hard cap on the overall wait: once renewal
+	// semantics land (#5332), each observed progress tick can extend it
+	// further. StartReadyAbsoluteCeiling is the wall-clock backstop that
+	// bounds the wait regardless of renewal.
 	StartReadyTimeout string `toml:"start_ready_timeout,omitempty" jsonschema:"default=5m"`
+	// StartReadyAbsoluteCeiling is the outer wall-clock budget `gc start`
+	// and `gc register` allow for the supervisor to report the city as
+	// Running, measured once from the start of the wait and never
+	// renewed — a hard backstop layered on top of StartReadyTimeout's
+	// per-tick budget (which, once #5332 lands, can renew on each
+	// observed progress tick and would otherwise have no fixed end).
+	// Duration string (e.g., "20m", "45m"). Defaults to
+	// DefaultStartReadyAbsoluteCeiling (20m). Scale it the same way as
+	// StartReadyTimeout: at the default wake budget (5 wakes / 30s), a
+	// city with ~150 sessions needs roughly ceil(150/5)*30s = 15m just to
+	// wake everyone, so the ceiling should stay comfortably above the
+	// largest StartReadyTimeout value the city is expected to reach.
+	// Unlike StartReadyTimeout, [session].startup_timeout never extends
+	// this value — it is a hard ceiling, not a per-session budget.
+	StartReadyAbsoluteCeiling string `toml:"start_ready_absolute_ceiling,omitempty" jsonschema:"default=20m"`
 	// TickDebounce coalesces bursty event-driven ticks (pokeCh,
 	// controlDispatcherCh) within this window. A first event in a quiet
 	// period arms a timer; subsequent events arriving before the timer
@@ -2908,11 +2927,26 @@ func (d *DaemonConfig) DriftDrainTimeoutDuration() time.Duration {
 // [daemon].start_ready_timeout.
 const DefaultStartReadyTimeout = 5 * time.Minute
 
+// DefaultStartReadyAbsoluteCeiling is the default outer wall-clock backstop
+// for `gc start` and `gc register`'s readiness wait — see
+// StartReadyAbsoluteCeiling. Sized well above DefaultStartReadyTimeout so it
+// does not bind for cities within the per-tick budget's normal range;
+// operators with larger cities override via
+// [daemon].start_ready_absolute_ceiling.
+const DefaultStartReadyAbsoluteCeiling = 20 * time.Minute
+
 // StartReadyTimeoutDuration returns the start-ready wait budget as a
 // time.Duration. Defaults to DefaultStartReadyTimeout when empty or
 // unparseable.
 func (d *DaemonConfig) StartReadyTimeoutDuration() time.Duration {
 	return durationOr(d.StartReadyTimeout, DefaultStartReadyTimeout)
+}
+
+// StartReadyAbsoluteCeilingDuration returns the absolute start-ready
+// ceiling as a time.Duration. Defaults to DefaultStartReadyAbsoluteCeiling
+// when empty or unparseable.
+func (d *DaemonConfig) StartReadyAbsoluteCeilingDuration() time.Duration {
+	return durationOr(d.StartReadyAbsoluteCeiling, DefaultStartReadyAbsoluteCeiling)
 }
 
 // WispGCIntervalDuration returns the wisp GC interval as a time.Duration.

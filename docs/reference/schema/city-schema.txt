@@ -1397,8 +1397,13 @@
         },
         "start_ready_timeout": {
           "type": "string",
-          "description": "StartReadyTimeout is how long `gc start` and `gc register` wait for\nthe supervisor to report the city as Running. Cities with many\nregistered or adopted sessions take longer to start because the\nper-tick wake budget (max_wakes_per_tick) throttles startup: wall\ntime to wake N sessions is roughly ceil(N / max_wakes_per_tick) *\npatrol_interval. At the defaults (5 wakes / 30s), ~40 sessions\nneed ~4 minutes. Duration string (e.g., \"5m\", \"10m\"). Defaults to\nDefaultStartReadyTimeout (5m). When set, this value replaces the\ndefault start/register budget; [session].startup_timeout may still\nextend the effective wait for a slow single session.",
+          "description": "StartReadyTimeout is how long `gc start` and `gc register` wait for\nthe supervisor to report the city as Running. Cities with many\nregistered or adopted sessions take longer to start because the\nper-tick wake budget (max_wakes_per_tick) throttles startup: wall\ntime to wake N sessions is roughly ceil(N / max_wakes_per_tick) *\npatrol_interval. At the defaults (5 wakes / 30s), ~40 sessions\nneed ~4 minutes. Duration string (e.g., \"5m\", \"10m\"). Defaults to\nDefaultStartReadyTimeout (5m). When set, this value replaces the\ndefault start/register budget; [session].startup_timeout may still\nextend the effective wait for a slow single session. This is a\nper-tick budget, not a hard cap on the overall wait: once renewal\nsemantics land (#5332), each observed progress tick can extend it\nfurther. StartReadyAbsoluteCeiling is the wall-clock backstop that\nbounds the wait regardless of renewal.",
           "default": "5m"
+        },
+        "start_ready_absolute_ceiling": {
+          "type": "string",
+          "description": "StartReadyAbsoluteCeiling is the outer wall-clock budget `gc start`\nand `gc register` allow for the supervisor to report the city as\nRunning, measured once from the start of the wait and never\nrenewed — a hard backstop layered on top of StartReadyTimeout's\nper-tick budget (which, once #5332 lands, can renew on each\nobserved progress tick and would otherwise have no fixed end).\nDuration string (e.g., \"20m\", \"45m\"). Defaults to\nDefaultStartReadyAbsoluteCeiling (20m). Scale it the same way as\nStartReadyTimeout: at the default wake budget (5 wakes / 30s), a\ncity with ~150 sessions needs roughly ceil(150/5)*30s = 15m just to\nwake everyone, so the ceiling should stay comfortably above the\nlargest StartReadyTimeout value the city is expected to reach.\nUnlike StartReadyTimeout, [session].startup_timeout never extends\nthis value — it is a hard ceiling, not a per-session budget.",
+          "default": "20m"
         },
         "tick_debounce": {
           "type": "string",

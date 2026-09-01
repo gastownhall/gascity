@@ -2685,6 +2685,238 @@ func TestSupervisorCityReadyTimeoutDefaultMatchesConfigDefault(t *testing.T) {
 	}
 }
 
+// --- StartReadyAbsoluteCeiling tests (ga-r1l8y2.2) ---
+//
+// The absolute ceiling is a belt-and-suspenders hard outer backstop on top
+// of the renewable per-tick wait (the renewal itself is PR #5332, unmerged
+// as of this bead — see ga-r1l8y2.2 notes). These tests exercise the
+// ceiling as an independent mechanism that does not require the renewal to
+// exist: they prove it fires on its own schedule, not that it interacts
+// with renewal.
+
+func TestSupervisorCityStartAbsoluteCeilingHonorsDaemonStartReadyAbsoluteCeiling(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`
+[workspace]
+name = "big-city"
+
+[daemon]
+start_ready_absolute_ceiling = "40m"
+
+[[agent]]
+name = "mayor"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldCeiling := supervisorCityAbsoluteCeiling
+	supervisorCityAbsoluteCeiling = 20 * time.Minute
+	t.Cleanup(func() { supervisorCityAbsoluteCeiling = oldCeiling })
+
+	got := supervisorCityStartAbsoluteCeiling(cityPath)
+	if got != 40*time.Minute {
+		t.Errorf("supervisorCityStartAbsoluteCeiling = %v, want 40m (daemon.start_ready_absolute_ceiling override)", got)
+	}
+}
+
+func TestSupervisorCityStartAbsoluteCeilingHonorsExplicitDaemonCeilingBelowPackageDefault(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`
+[workspace]
+name = "small-ci-city"
+
+[daemon]
+start_ready_absolute_ceiling = "2m"
+
+[[agent]]
+name = "worker"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldCeiling := supervisorCityAbsoluteCeiling
+	supervisorCityAbsoluteCeiling = 20 * time.Minute
+	t.Cleanup(func() { supervisorCityAbsoluteCeiling = oldCeiling })
+
+	got := supervisorCityStartAbsoluteCeiling(cityPath)
+	if got != 2*time.Minute {
+		t.Errorf("supervisorCityStartAbsoluteCeiling = %v, want 2m (explicit daemon.start_ready_absolute_ceiling)", got)
+	}
+}
+
+func TestSupervisorCityStartAbsoluteCeilingWithoutExplicitKnobUsesPackageDefault(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`
+[workspace]
+name = "default-city"
+
+[[agent]]
+name = "mayor"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldCeiling := supervisorCityAbsoluteCeiling
+	supervisorCityAbsoluteCeiling = 25 * time.Minute
+	t.Cleanup(func() { supervisorCityAbsoluteCeiling = oldCeiling })
+
+	got := supervisorCityStartAbsoluteCeiling(cityPath)
+	if got != 25*time.Minute {
+		t.Errorf("supervisorCityStartAbsoluteCeiling = %v, want 25m (package default, no daemon override)", got)
+	}
+}
+
+func TestSupervisorCityStartAbsoluteCeilingIgnoresSessionStartupTimeout(t *testing.T) {
+	// Unlike supervisorCityStartTimeout, the absolute ceiling must NOT be
+	// extended by [session].startup_timeout: it is meant as a hard outer
+	// backstop that catches a wedged start regardless of cause, so one
+	// slow session escape-hatching the per-tick budget must not also
+	// stretch the ceiling.
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`
+[workspace]
+name = "patient-city"
+
+[session]
+startup_timeout = "90m"
+
+[[agent]]
+name = "mayor"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldCeiling := supervisorCityAbsoluteCeiling
+	supervisorCityAbsoluteCeiling = 20 * time.Minute
+	t.Cleanup(func() { supervisorCityAbsoluteCeiling = oldCeiling })
+
+	got := supervisorCityStartAbsoluteCeiling(cityPath)
+	if got != 20*time.Minute {
+		t.Errorf("supervisorCityStartAbsoluteCeiling = %v, want 20m (session.startup_timeout must not extend the absolute ceiling)", got)
+	}
+}
+
+func TestSupervisorCityAbsoluteCeilingDefaultMatchesConfigDefault(t *testing.T) {
+	// The package-level default must track config.DefaultStartReadyAbsoluteCeiling
+	// so production cities get the configured ceiling when no explicit
+	// override is set.
+	if supervisorCityAbsoluteCeiling != config.DefaultStartReadyAbsoluteCeiling {
+		t.Errorf("supervisorCityAbsoluteCeiling = %v, want %v (config.DefaultStartReadyAbsoluteCeiling)",
+			supervisorCityAbsoluteCeiling, config.DefaultStartReadyAbsoluteCeiling)
+	}
+}
+
+func TestWaitForSupervisorCityAbsoluteCeilingFiresIndependentlyOfPerTickDeadline(t *testing.T) {
+	oldRunning := supervisorCityRunningHook
+	oldAlive := supervisorAliveHook
+	oldPoll := supervisorCityPollInterval
+	oldCeiling := supervisorCityAbsoluteCeiling
+	t.Cleanup(func() {
+		supervisorCityRunningHook = oldRunning
+		supervisorAliveHook = oldAlive
+		supervisorCityPollInterval = oldPoll
+		supervisorCityAbsoluteCeiling = oldCeiling
+	})
+
+	// The hook keeps reporting fresh progress on every call. Once #5332's
+	// renewal lands, that would keep renewing the per-tick deadline
+	// forever; a large per-tick timeout models the same "never expires on
+	// its own" case today. Only the absolute ceiling should stop the wait.
+	calls := 0
+	supervisorCityRunningHook = func(string) (bool, string, bool) {
+		calls++
+		return false, fmt.Sprintf("running_pool_on_boot:%d/9:agent-%d", calls, calls), true
+	}
+	supervisorAliveHook = func() int { return 4242 }
+	supervisorCityPollInterval = time.Millisecond
+	supervisorCityAbsoluteCeiling = 10 * time.Millisecond
+
+	start := time.Now()
+	err := waitForSupervisorCity(t.TempDir(), true, time.Hour, io.Discard)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("waitForSupervisorCity returned nil, want absolute-ceiling error")
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("waitForSupervisorCity took %v, want it to stop near the 10ms absolute ceiling, not the 1h per-tick timeout", elapsed)
+	}
+	got := err.Error()
+	for _, want := range []string{"10ms", "gc trace"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("error = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestWaitForSupervisorCityAbsoluteCeilingErrorNamesStalledPhaseAndPoolBootCounts(t *testing.T) {
+	oldRunning := supervisorCityRunningHook
+	oldAlive := supervisorAliveHook
+	oldPoll := supervisorCityPollInterval
+	oldCeiling := supervisorCityAbsoluteCeiling
+	t.Cleanup(func() {
+		supervisorCityRunningHook = oldRunning
+		supervisorAliveHook = oldAlive
+		supervisorCityPollInterval = oldPoll
+		supervisorCityAbsoluteCeiling = oldCeiling
+	})
+
+	supervisorCityRunningHook = func(string) (bool, string, bool) {
+		return false, "running_pool_on_boot:3/9:brief-shuffler", true
+	}
+	supervisorAliveHook = func() int { return 4242 }
+	supervisorCityPollInterval = time.Millisecond
+	supervisorCityAbsoluteCeiling = 5 * time.Millisecond
+
+	err := waitForSupervisorCity(t.TempDir(), true, time.Hour, io.Discard)
+	if err == nil {
+		t.Fatal("waitForSupervisorCity returned nil, want absolute-ceiling error")
+	}
+	got := err.Error()
+	for _, want := range []string{"5ms", "running_pool_on_boot", "3/9", "brief-shuffler", "gc trace"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("error = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestWaitForSupervisorCityAbsoluteCeilingNotAppliedToStopWait(t *testing.T) {
+	// wantRunning=false is the stop-wait path and must remain governed
+	// only by the existing per-tick timeout — the ceiling is scoped to
+	// start/register waits only (exit_contract item 2).
+	oldRunning := supervisorCityRunningHook
+	oldAlive := supervisorAliveHook
+	oldPoll := supervisorCityPollInterval
+	oldCeiling := supervisorCityAbsoluteCeiling
+	t.Cleanup(func() {
+		supervisorCityRunningHook = oldRunning
+		supervisorAliveHook = oldAlive
+		supervisorCityPollInterval = oldPoll
+		supervisorCityAbsoluteCeiling = oldCeiling
+	})
+
+	supervisorCityRunningHook = func(string) (bool, string, bool) {
+		return true, "", true // still running, so the stop-wait never succeeds
+	}
+	supervisorAliveHook = func() int { return 4242 }
+	supervisorCityPollInterval = time.Millisecond
+	supervisorCityAbsoluteCeiling = 5 * time.Millisecond
+
+	start := time.Now()
+	err := waitForSupervisorCity(t.TempDir(), false, 30*time.Millisecond, io.Discard)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("waitForSupervisorCity returned nil, want stop-timeout error")
+	}
+	if strings.Contains(err.Error(), "gc trace") {
+		t.Fatalf("error = %q, stop-wait path must not use the absolute-ceiling message", err.Error())
+	}
+	if elapsed < 25*time.Millisecond {
+		t.Fatalf("waitForSupervisorCity(wantRunning=false) returned after %v, want it to honor the 30ms per-tick timeout rather than the 5ms absolute ceiling", elapsed)
+	}
+}
+
 func TestStartupSessionComputationsDoNotQueryBeadStore(t *testing.T) {
 	logFile := filepath.Join(t.TempDir(), "ops.log")
 	script := writeSpyScript(t, logFile)
