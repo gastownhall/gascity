@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 )
 
@@ -24,17 +25,8 @@ func FormatTable(w io.Writer, r Report) error {
 			formatBool(e.Stalled),
 		})
 	}
-	widths := columnWidths(headers, rows)
-	if err := writeRow(w, headers, widths); err != nil {
+	if err := renderTable(w, headers, rows); err != nil {
 		return err
-	}
-	if err := writeSeparator(w, widths); err != nil {
-		return err
-	}
-	for _, row := range rows {
-		if err := writeRow(w, row, widths); err != nil {
-			return err
-		}
 	}
 
 	if _, err := fmt.Fprintln(w); err != nil {
@@ -69,11 +61,17 @@ func formatPoolSummary(w io.Writer, pools []PoolSummary) error {
 	for _, p := range pools {
 		rows = append(rows, []string{
 			or(p.Pool),
-			itoa(p.InProgress),
-			itoa(p.Stalled),
+			strconv.Itoa(p.InProgress),
+			strconv.Itoa(p.Stalled),
 			formatAge(p.OldestAgeSeconds),
 		})
 	}
+	return renderTable(w, headers, rows)
+}
+
+// renderTable writes headers, a separator, and rows as an aligned
+// plain-text table. Shared by FormatTable and formatPoolSummary.
+func renderTable(w io.Writer, headers []string, rows [][]string) error {
 	widths := columnWidths(headers, rows)
 	if err := writeRow(w, headers, widths); err != nil {
 		return err
@@ -103,8 +101,6 @@ func or(s string) string {
 	}
 	return s
 }
-
-func itoa(n int) string { return fmt.Sprintf("%d", n) }
 
 func formatBool(b bool) string {
 	if b {
