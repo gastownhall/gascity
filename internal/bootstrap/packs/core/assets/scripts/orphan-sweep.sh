@@ -38,8 +38,23 @@ fi
 
 append_session_list() {
     local session_fetch_tmp
+    local row_count
     session_fetch_tmp=$(mktemp) || return 1
     if "$@" >"$session_fetch_tmp" 2>/dev/null; then
+        # An exit-0 response that parses to zero session rows carries no
+        # liveness evidence at all. A city always has at least the calling
+        # session live, so zero rows is never a legitimate steady state --
+        # treat it the same as a hard failure so the caller skips this
+        # scope's beads instead of staging them with no evidence to check
+        # against.
+        row_count=$(jq -r '.sessions // [] | length' "$session_fetch_tmp" 2>/dev/null) || row_count=""
+        case "$row_count" in
+            '' | *[!0-9]*) row_count=0 ;;
+        esac
+        if [ "$row_count" -eq 0 ]; then
+            rm -f "$session_fetch_tmp"
+            return 1
+        fi
         cat "$session_fetch_tmp" >>"$SESSION_TMP"
         rm -f "$session_fetch_tmp"
         return 0
@@ -201,7 +216,8 @@ session_bead_candidates() {
     printf '%s\n' "$work_json" | jq -r "$first_bead_jq | [
         .metadata[\"gc.session_id\"],
         .metadata[\"gc.session_bead_id\"],
-        .metadata[\"session_id\"]
+        .metadata[\"session_id\"],
+        .metadata[\"gc.session_name\"]
     ] | .[]? | select(. != null and . != \"\")" 2>/dev/null || true
 
     printf '%s\n' "$assignee" | grep -Eo '[[:alnum:]]+-wisp-[[:alnum:]][[:alnum:]-]*$' || true
@@ -213,6 +229,11 @@ session_probe_failure_is_unverifiable() {
 
     [ "$session_id" != "$assignee" ] && return 0
     [[ "$session_id" == mc-* ]] && return 0
+    # A session-name-shaped self-probe (e.g. "beads--deployer-pool") has
+    # nothing else resolvable to ask about -- bead ids never contain a
+    # double dash, so this shape means the probe could not be performed,
+    # not that the candidate resolved and came back dead.
+    [[ "$session_id" == *--* ]] && return 0
     return 1
 }
 
@@ -273,7 +294,12 @@ reset_orphan_if_current() {
     reset_output=$(gc bd release-if-current "$bead_id" "$expected_assignee" 2>/dev/null) || return 1
     reset_state=$(printf '%s\n' "$reset_output" | awk 'NF { print $1; exit }')
     case "$reset_state" in
-        released) return 0 ;;
+        released)
+            if ! gc bd update "$bead_id" --append-notes "orphan-sweep: reset from assignee $expected_assignee -- no live session matched" >/dev/null 2>&1; then
+                echo "orphan-sweep: failed to record cause note on $bead_id" >&2
+            fi
+            return 0
+            ;;
         skipped) return 2 ;;
         *) return 1 ;;
     esac
@@ -375,4 +401,15 @@ if [ "$ORPHANED" -gt 0 ] || [ "$UNVERIFIABLE" -gt 0 ]; then
         SUMMARY="$SUMMARY, skipped $UNVERIFIABLE unverifiable"
     fi
     echo "$SUMMARY"
+    if [ "$ORPHANED" -gt 0 ]; then
+        gc mail send mayor/ \
+            -s "orphan-sweep: reset $ORPHANED orphaned beads" \
+            -m "$SUMMARY
+
+orphan-sweep resets in-progress beads whose assignee has no live session or
+known agent. Each reset bead now carries a one-line cause note (see its
+history). Repeated resets of the same bead may indicate a stuck or
+misidentified live session -- inspect via gc bd show <id> --json." \
+            2>/dev/null || true
+    fi
 fi
