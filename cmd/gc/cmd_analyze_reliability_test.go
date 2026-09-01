@@ -396,10 +396,7 @@ func TestAnalyzeReliabilityCommand_SubcommandCityFlagWins(t *testing.T) {
 }
 
 func TestResolveEventsPath_ExplicitWins(t *testing.T) {
-	got, err := resolveEventsPath(reliabilityCmdOptions{
-		eventPath: "/explicit/events.jsonl",
-		cityPath:  "/some/city",
-	})
+	got, err := resolveEventsPath("/some/city", "/explicit/events.jsonl")
 	if err != nil {
 		t.Fatalf("resolveEventsPath: %v", err)
 	}
@@ -413,7 +410,7 @@ func TestResolveEventsPath_CityFlagComputesPath(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"test\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
-	got, err := resolveEventsPath(reliabilityCmdOptions{cityPath: dir})
+	got, err := resolveEventsPath(dir, "")
 	if err != nil {
 		t.Fatalf("resolveEventsPath: %v", err)
 	}
@@ -446,7 +443,7 @@ func TestResolveEventsPath_NoSourceReturnsError(t *testing.T) {
 	t.Cleanup(func() {
 		_ = os.Chdir(origCwd) //nolint:errcheck
 	})
-	_, err = resolveEventsPath(reliabilityCmdOptions{})
+	_, err = resolveEventsPath("", "")
 	if err == nil {
 		t.Fatal("expected error when no city is findable")
 	}
