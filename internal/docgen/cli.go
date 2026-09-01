@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -191,6 +192,7 @@ func renderGlobalFlags(w io.Writer, root *cobra.Command) error {
 
 // flagInfo holds rendered flag metadata.
 type flagInfo struct {
+	SortKey string
 	Name    string
 	Type    string
 	Default string
@@ -210,6 +212,7 @@ func newFlagInfo(f *pflag.Flag) flagInfo {
 	}
 
 	return flagInfo{
+		SortKey: f.Name,
 		Name:    name,
 		Type:    f.Value.Type(),
 		Default: defVal,
@@ -250,6 +253,13 @@ func renderFlagsTable(w io.Writer, fs *pflag.FlagSet) error {
 
 // writeFlagTable writes the markdown table for a slice of flags.
 func writeFlagTable(w io.Writer, flags []flagInfo) error {
+	// pflag's VisitAll honors FlagSet.SortFlags. Some command constructors
+	// disable it to preserve terminal-help registration order, but generated
+	// reference docs must not depend on that command-local presentation choice.
+	// Sort by the canonical long name rather than the rendered shorthand.
+	sort.Slice(flags, func(i, j int) bool {
+		return flags[i].SortKey < flags[j].SortKey
+	})
 	if _, err := fmt.Fprintf(w, "| Flag | Type | Default | Description |\n"); err != nil {
 		return err
 	}
