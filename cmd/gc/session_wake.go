@@ -271,7 +271,16 @@ func clearReconcilerDrainAckMetadata(sp runtime.Provider, name string) error {
 		return fmt.Errorf("session provider is nil")
 	}
 	var errs []error
-	for _, key := range []string{"GC_DRAIN_ACK", reconcilerDrainAckSourceKey, reconcilerDrainAckReasonKey, reconcilerDrainAckGenerationKey} {
+	for _, key := range []string{
+		"GC_DRAIN_ACK",
+		reconcilerDrainAckSourceKey,
+		// Cleared with the source it belongs to: a requester stamp that outlives
+		// its acknowledgement is residue waiting for a later source to make it
+		// look like evidence.
+		drainAckRequesterInstanceTokenKey,
+		reconcilerDrainAckReasonKey,
+		reconcilerDrainAckGenerationKey,
+	} {
 		if err := sp.RemoveMeta(name, key); err != nil {
 			log.Printf("session wake: clearing reconciler drain ack metadata %s for %s: %v", key, name, err)
 			errs = append(errs, fmt.Errorf("removing %s: %w", key, err))

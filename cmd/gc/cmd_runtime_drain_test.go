@@ -950,6 +950,7 @@ func TestProviderDrainOpsClearDrainAttemptsAllMetadataRemovals(t *testing.T) {
 	want := []string{
 		"GC_DRAIN_ACK",
 		reconcilerDrainAckSourceKey,
+		drainAckRequesterInstanceTokenKey,
 		reconcilerDrainAckReasonKey,
 		reconcilerDrainAckGenerationKey,
 		"GC_DRAIN",

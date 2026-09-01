@@ -68,6 +68,10 @@ func (o *providerDrainOps) clearDrain(sessionName string) error {
 	return errors.Join(
 		o.sp.RemoveMeta(sessionName, "GC_DRAIN_ACK"),
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckSourceKey),
+		// The incarnation stamp has exactly the acknowledgement's lifetime. Left
+		// behind, it outlives every drain it described and waits on the pane to be
+		// paired with some later ack's source.
+		o.sp.RemoveMeta(sessionName, drainAckRequesterInstanceTokenKey),
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckReasonKey),
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckGenerationKey),
 		o.sp.RemoveMeta(sessionName, "GC_DRAIN"),
