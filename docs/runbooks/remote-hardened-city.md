@@ -247,3 +247,9 @@ operating constraints, not bugs.
   git re-resolves at fetch. Redirects are refused and rebind-to-SERVFAIL is
   blocked, but a fast A-record flip between fence and fetch remains
   theoretically open — the host's egress firewall is the backstop.
+
+For a tenant-scoped verifier, pin both sides to the reviewed deployment CID:
+add `--grant-audience gc-city-write.v2 --grant-cid <CID>` to `gc context add`,
+and add `--aud gc-city-write.v2 --cid <CID>` to the `gc-write-mint` command.
+The context rejects incomplete or mixed v1/v2 settings before making an HTTP
+request; the minter independently verifies the CID supplied in `GC_GRANT_INFO`.

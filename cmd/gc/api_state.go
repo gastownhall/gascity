@@ -1829,6 +1829,7 @@ func (cs *controllerState) AgentSuspension(name string) (api.AgentSuspensionStat
 func (cs *controllerState) SetAgentSuspendedIf(name, expectedToken string, desired bool) (api.AgentSuspensionState, api.AgentSuspensionState, error) {
 	var before, after configedit.AgentSuspensionState
 	var snapshot *configMutationSnapshot
+	var revision string
 	var err error
 	before, after, err = cs.editor.SetAgentSuspendedIfTransaction(
 		name, expectedToken, desired,
@@ -1844,23 +1845,28 @@ func (cs *controllerState) SetAgentSuspendedIf(name, expectedToken string, desir
 			return nil
 		},
 		func(_, _ configedit.AgentSuspensionState) error {
-			revision, refreshErr := cs.refreshConfigSnapshot()
-			if refreshErr != nil {
-				if snapshot != nil {
-					if restoreErr := snapshot.restore(); restoreErr != nil {
-						return fmt.Errorf("refreshing updated city config: %w", errors.Join(refreshErr, fmt.Errorf("restoring previous city config: %w", restoreErr)))
-					}
-				}
-				return fmt.Errorf("refreshing updated city config: %w", refreshErr)
+			var refreshErr error
+			revision, refreshErr = cs.refreshConfigSnapshot()
+			return refreshErr
+		},
+		func() error {
+			if snapshot == nil {
+				return nil
 			}
-			cs.markConfigMutationPending(revision)
-			if cs.configDirty != nil {
-				cs.configDirty.Store(true)
+			if restoreErr := snapshot.restore(); restoreErr != nil {
+				return restoreErr
 			}
-			cs.Poke()
-			return nil
+			_, refreshErr := cs.refreshConfigSnapshot()
+			return refreshErr
 		},
 	)
+	if err == nil && before.Token != after.Token {
+		cs.markConfigMutationPending(revision)
+		if cs.configDirty != nil {
+			cs.configDirty.Store(true)
+		}
+		cs.Poke()
+	}
 	return suspensionAPIState(before), suspensionAPIState(after), err
 }
 

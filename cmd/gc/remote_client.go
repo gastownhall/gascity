@@ -112,6 +112,10 @@ func buildRemoteWriteClient(target *remoteTarget) (*api.Client, error) {
 		return nil, err
 	}
 	if ctx := target.Ctx; ctx != nil && ctx.GrantCommand != "" {
+		audience := ctx.GrantAudience
+		if audience == "" {
+			audience = citywriteauth.AudienceCityWrite
+		}
 		gs, err := clientgrant.NewGrantSource(ctx.GrantCommand)
 		if err != nil {
 			return nil, err
@@ -119,7 +123,8 @@ func buildRemoteWriteClient(target *remoteTarget) (*api.Client, error) {
 		city := target.CityName
 		opts.Grant = func(b api.GrantBinding) (string, error) {
 			return gs.Mint(clientgrant.GrantInfo{
-				Aud:            citywriteauth.AudienceCityWrite,
+				Aud:            audience,
+				CID:            ctx.GrantCID,
 				City:           city,
 				Method:         b.Method,
 				Path:           b.Path,

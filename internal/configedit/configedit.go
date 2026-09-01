@@ -118,7 +118,7 @@ func (e *Editor) AgentSuspension(name string) (AgentSuspensionState, error) {
 // sets desired state under the same lock. Already-desired state is adopted
 // without writing only when the token still matches.
 func (e *Editor) SetAgentSuspendedIf(name, expectedToken string, desired bool) (AgentSuspensionState, AgentSuspensionState, error) {
-	return e.SetAgentSuspendedIfTransaction(name, expectedToken, desired, nil, nil)
+	return e.SetAgentSuspendedIfTransaction(name, expectedToken, desired, nil, nil, nil)
 }
 
 // SetAgentSuspendedIfTransaction is SetAgentSuspendedIf with transaction hooks
@@ -129,6 +129,7 @@ func (e *Editor) SetAgentSuspendedIf(name, expectedToken string, desired bool) (
 func (e *Editor) SetAgentSuspendedIfTransaction(name, expectedToken string, desired bool,
 	beforeChange func() error,
 	afterChange func(AgentSuspensionState, AgentSuspensionState) error,
+	rollback func() error,
 ) (AgentSuspensionState, AgentSuspensionState, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -147,26 +148,37 @@ func (e *Editor) SetAgentSuspendedIfTransaction(name, expectedToken string, desi
 			return before, AgentSuspensionState{}, err
 		}
 	}
+	fail := func(forward error) (AgentSuspensionState, AgentSuspensionState, error) {
+		if rollback == nil {
+			return before, AgentSuspensionState{}, forward
+		}
+		if restoreErr := rollback(); restoreErr != nil {
+			return before, AgentSuspensionState{}, errors.Join(forward, fmt.Errorf("rolling back conditional agent suspension: %w", restoreErr))
+		}
+		return before, AgentSuspensionState{}, forward
+	}
 	if err := mutateAgentSuspended(e.fs, filepath.Dir(e.tomlPath), raw, expanded, name, desired); err != nil && !errors.Is(err, ErrUnmodified) {
-		return before, AgentSuspensionState{}, err
+		return fail(err)
 	} else if err == nil {
 		if err := validateCityForEdit(raw); err != nil {
-			return before, AgentSuspensionState{}, err
+			return fail(err)
 		}
 		if err := e.write(raw); err != nil {
-			return before, AgentSuspensionState{}, err
+			return fail(err)
 		}
 	}
 	_, _, after, err := e.loadAgentSuspension(name)
 	if err != nil {
-		return before, AgentSuspensionState{}, err
+		return fail(err)
 	}
 	if after.Suspended != desired || after.Token == before.Token {
-		return before, after, fmt.Errorf("conditional agent suspension did not produce a distinct desired state")
+		_, _, joined := fail(fmt.Errorf("conditional agent suspension did not produce a distinct desired state"))
+		return before, after, joined
 	}
 	if afterChange != nil {
 		if err := afterChange(before, after); err != nil {
-			return before, after, err
+			_, _, joined := fail(err)
+			return before, after, joined
 		}
 	}
 	return before, after, nil

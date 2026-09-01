@@ -1,6 +1,7 @@
 package configedit_test
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -697,11 +698,59 @@ func TestConditionalAgentSuspensionTransactionHooksHoldEditorLock(t *testing.T) 
 			}
 			return nil
 		},
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	<-writerDone
+}
+
+func TestConditionalAgentSuspensionTransactionRollsBackAfterChangeFailure(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, minimalCity())
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+	initial, err := ed.AgentSuspension("mayor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = ed.SetAgentSuspendedIfTransaction("mayor", initial.Token, true,
+		func() error { return nil },
+		func(_, _ configedit.AgentSuspensionState) error { return errors.New("refresh failed") },
+		func() error { return os.WriteFile(path, original, 0o600) },
+	)
+	if err == nil || !strings.Contains(err.Error(), "refresh failed") {
+		t.Fatalf("error = %v", err)
+	}
+	restored, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(restored, original) {
+		t.Fatalf("durable bytes not restored\n got: %s\nwant: %s", restored, original)
+	}
+}
+
+func TestConditionalAgentSuspensionTransactionJoinsRollbackFailure(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, minimalCity())
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+	initial, err := ed.AgentSuspension("mayor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = ed.SetAgentSuspendedIfTransaction("mayor", initial.Token, true,
+		func() error { return nil },
+		func(_, _ configedit.AgentSuspensionState) error { return errors.New("refresh failed") },
+		func() error { return errors.New("restore failed") },
+	)
+	if err == nil || !strings.Contains(err.Error(), "refresh failed") || !strings.Contains(err.Error(), "restore failed") {
+		t.Fatalf("joined error = %v", err)
+	}
 }
 
 func TestConditionalAgentSuspensionPackAndDiscoveredOrigins(t *testing.T) {

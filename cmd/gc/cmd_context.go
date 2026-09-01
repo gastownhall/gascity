@@ -51,6 +51,8 @@ type contextJSON struct {
 	CredentialRequiredScopes []string `json:"credential_required_scopes,omitempty"`
 	CredentialOrg            string   `json:"credential_org,omitempty"`
 	GrantCommand             string   `json:"grant_command,omitempty"`
+	GrantAudience            string   `json:"grant_audience,omitempty"`
+	GrantCID                 string   `json:"grant_cid,omitempty"`
 }
 
 func newContextAddCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -86,6 +88,8 @@ remote city name (defaults to <name>). At most one credential technique applies:
 	f.StringVar(&c.URL, "url", "", "remote city base URL (https required for non-loopback)")
 	f.StringVar(&c.City, "city", "", "remote city name (default: <name>)")
 	f.StringVar(&c.GrantCommand, "grant-command", "", "command that mints an X-GC-City-Write grant (direct hardened self-host)")
+	f.StringVar(&c.GrantAudience, "grant-audience", "", "city-write grant audience (gc-city-write default or gc-city-write.v2)")
+	f.StringVar(&c.GrantCID, "grant-cid", "", "reviewed deployment CID (required with gc-city-write.v2)")
 	f.StringVar(&c.CredentialCommand, "credential-command", "", "command that mints a transport bearer (edge/proxy fronted)")
 	f.StringVar(&credentialAudience, "credential-audience", "", "credential provider audience (provider mode)")
 	f.StringVar(&requiredScopesJSON, "credential-required-scopes", "", "JSON array of required credential scopes (provider mode)")
@@ -442,5 +446,7 @@ func contextToJSON(c clientcontext.Context, isDefault bool) contextJSON {
 		CredentialRequiredScopes: append([]string(nil), c.CredentialRequiredScopes...),
 		CredentialOrg:            c.CredentialOrg,
 		GrantCommand:             c.GrantCommand,
+		GrantAudience:            c.GrantAudience,
+		GrantCID:                 c.GrantCID,
 	}
 }
