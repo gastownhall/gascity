@@ -154,6 +154,61 @@ func TestWorktreeSpecForBeadRequiresCompletePublishedEvidence(t *testing.T) {
 	}
 }
 
+// TestWorktreeSpecForBeadTreatsWorkDirOnlyAsLegacy covers a bead carrying
+// work_dir without ownership evidence -- the shape stampDrainItemRecipe still
+// mints for every drain recipe step. That is not "incomplete evidence" (the
+// bead never claimed to publish any), so the pool must plan the seat unmanaged
+// instead of erroring it into permanent starvation. Both work_dir spellings
+// are covered: old beads carry the bare key, not the gc.-prefixed one.
+func TestWorktreeSpecForBeadTreatsWorkDirOnlyAsLegacy(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		key  string
+	}{
+		{name: "canonical", key: beadmeta.WorkDirMetadataKey},
+		{name: "legacy", key: beadmeta.LegacyWorkDirMetadataKey},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bead := beads.Bead{ID: "gc-test", Metadata: map[string]string{
+				tc.key: "/worktrees/gc-test",
+			}}
+
+			spec, err := worktreeSpecForBead(bead, "rig:gascity")
+			if err != nil {
+				t.Fatalf("worktreeSpecForBead: %v, want a work_dir-only bead to be treated as unmanaged, not errored", err)
+			}
+			if spec != nil {
+				t.Fatalf("spec = %+v, want nil so the seat spawns exactly as it did before #5193", spec)
+			}
+		})
+	}
+}
+
+// TestWorktreeSpecForBeadRejectsSingleOwnershipKey pins the boundary the
+// unmanaged branch creates: nine missing ownership keys is "never published",
+// but eight missing is partial evidence and must still fail closed. An
+// off-by-one in the len(missing) == len(values) test would silently launch a
+// seat into a directory whose ownership was only half-published.
+func TestWorktreeSpecForBeadRejectsSingleOwnershipKey(t *testing.T) {
+	bead := beads.Bead{ID: "gc-test", Metadata: map[string]string{
+		beadmeta.WorkDirMetadataKey: "/worktrees/gc-test",
+		// Exactly one of the nine, and deliberately the last one checked, so
+		// the reported missing key is the first of the remaining eight.
+		beadmeta.WorktreeLifecycleMetadataKey: worktree.LifecycleActive,
+	}}
+
+	spec, err := worktreeSpecForBead(bead, "rig:gascity")
+	if err == nil {
+		t.Fatalf("spec = %+v err = nil, want partial ownership evidence to fail closed", spec)
+	}
+	if spec != nil {
+		t.Fatalf("spec = %+v, want nil alongside the error", spec)
+	}
+	if !strings.Contains(err.Error(), beadmeta.WorktreeRepoMetadataKey) {
+		t.Fatalf("error = %v, want it to name the first missing key %q", err, beadmeta.WorktreeRepoMetadataKey)
+	}
+}
+
 func TestWorktreeSpecForBeadPrefersCanonicalStoreRef(t *testing.T) {
 	metadata := map[string]string{
 		beadmeta.WorkDirMetadataKey:            "/worktrees/gc-test",
