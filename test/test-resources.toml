@@ -10,8 +10,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 645
-baseline_files = 186
+baseline_calls = 646
+baseline_files = 187
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-80po0c.2"
@@ -23,8 +23,8 @@ expires = "2026-10-01"
 [[audit_baseline]]
 scope = "all"
 resource = "fixed_sleep"
-baseline_calls = 475
-baseline_files = 171
+baseline_calls = 477
+baseline_files = 172
 reported_calls = 447
 reported_files = 157
 owner_bead = "ga-80po0c.2"
