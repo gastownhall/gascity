@@ -370,3 +370,78 @@ func TestTrivyIgnoreDropsGCModuleWaiversPastThreshold(t *testing.T) {
 		}
 	}
 }
+
+// TestTrivyIgnoreRefreshesBridgeHorizonAndWaivesXNetDNSMessageCVE enforces the
+// 2026-09-01 mayor-ruled bridge (ga-wb9e3a): every existing waiver's expired_at
+// moves from the lapsed 2026-08-07 horizon to the short 2026-09-21 bridge, and
+// exactly one new entry waives CVE-2026-46600 (golang.org/x/net dns/dnsmessage,
+// DoS via invalid DNS record parsing, fixed upstream in x/net 0.56.0) on the
+// vendored gh and dolt binaries only. The ruling explicitly forbids trimming or
+// removing any existing entry, so the total entry count must grow by exactly one.
+func TestTrivyIgnoreRefreshesBridgeHorizonAndWaivesXNetDNSMessageCVE(t *testing.T) {
+	root := repoRoot(t)
+
+	var doc struct {
+		Vulnerabilities []struct {
+			ID        string   `yaml:"id"`
+			Paths     []string `yaml:"paths"`
+			ExpiredAt string   `yaml:"expired_at"`
+			Statement string   `yaml:"statement"`
+		} `yaml:"vulnerabilities"`
+	}
+	if err := yaml.Unmarshal([]byte(readFile(t, root, ".trivyignore.yaml")), &doc); err != nil {
+		t.Fatalf("parsing .trivyignore.yaml: %v", err)
+	}
+
+	const bridgeHorizon = "2026-09-21"
+	const newCVE = "CVE-2026-46600"
+	wantNewPaths := map[string]bool{
+		"usr/bin/gh":         true,
+		"usr/local/bin/dolt": true,
+	}
+
+	if got, want := len(doc.Vulnerabilities), 46; got != want {
+		t.Errorf(".trivyignore.yaml has %d entries, want %d (45 existing + exactly 1 new); the bridge must not trim, remove, or duplicate entries", got, want)
+	}
+
+	newCVECount := 0
+	for _, v := range doc.Vulnerabilities {
+		if v.ExpiredAt != bridgeHorizon {
+			t.Errorf("%s expired_at = %q, want the refreshed bridge horizon %q", v.ID, v.ExpiredAt, bridgeHorizon)
+		}
+		if strings.TrimSpace(v.Statement) == "" {
+			t.Errorf("%s has no statement; every waived entry must keep or gain a comment naming its durable fix path", v.ID)
+		}
+		if v.ID != newCVE {
+			continue
+		}
+		newCVECount++
+		gotPaths := map[string]bool{}
+		for _, p := range v.Paths {
+			gotPaths[p] = true
+		}
+		if len(gotPaths) != len(wantNewPaths) {
+			t.Errorf("%s paths = %v, want exactly %v", v.ID, v.Paths, wantNewPaths)
+		}
+		for p := range wantNewPaths {
+			if !gotPaths[p] {
+				t.Errorf("%s missing required path %q", v.ID, p)
+			}
+		}
+		for p := range gotPaths {
+			if !wantNewPaths[p] {
+				t.Errorf("%s waives unexpected path %q; scope is gh and dolt only (no kubectl)", v.ID, p)
+			}
+		}
+		statement := strings.ToLower(v.Statement)
+		if !strings.Contains(statement, "x/net") {
+			t.Errorf("%s statement %q does not name golang.org/x/net as the durable fix path", v.ID, v.Statement)
+		}
+		if !strings.Contains(statement, "0.56.0") {
+			t.Errorf("%s statement %q does not name the fixed x/net version 0.56.0", v.ID, v.Statement)
+		}
+	}
+	if newCVECount != 1 {
+		t.Errorf(".trivyignore.yaml has %d entries for %s, want exactly 1", newCVECount, newCVE)
+	}
+}
