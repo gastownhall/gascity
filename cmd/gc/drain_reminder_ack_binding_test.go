@@ -142,3 +142,28 @@ func TestDrainAckClearPathsRemoveTheIncarnationStamp(t *testing.T) {
 		})
 	}
 }
+
+// The write side of the degraded-pane arm. A pane whose GC_INSTANCE_TOKEN did
+// not survive adoption acknowledges with an empty stamp, and that empty value
+// must LAND — overwriting whatever a prior occupant left — rather than leaving
+// the old token beside the new source. Left in place, those two unrelated
+// writes pair into "proven stale" evidence about an acknowledgement that was
+// never bound at all; overwritten, the ack reads as unprovable and the reminder
+// keeps asking, which is the direction this reader is meant to fail in.
+func TestSetDrainAckOverwritesPriorStampWhenIncarnationUnknown(t *testing.T) {
+	t.Setenv("GC_INSTANCE_TOKEN", "")
+	sp := runtime.NewFake()
+	ops := &providerDrainOps{sp: sp}
+	mustSetMeta(t, sp, "gc-city-worker-1", drainAckRequesterInstanceTokenKey, "stale-prior-incarnation-token")
+
+	if err := ops.setDrainAck("gc-city-worker-1"); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+
+	if got, _ := sp.GetMeta("gc-city-worker-1", drainAckRequesterInstanceTokenKey); got != "" {
+		t.Errorf("%s = %q, want empty: a degraded pane must not inherit a dead incarnation's stamp", drainAckRequesterInstanceTokenKey, got)
+	}
+	if got, _ := sp.GetMeta("gc-city-worker-1", reconcilerDrainAckSourceKey); got != drainAckSourceAgentValue {
+		t.Errorf("ack source = %q, want %q", got, drainAckSourceAgentValue)
+	}
+}
