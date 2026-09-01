@@ -79,6 +79,13 @@ type Options struct {
 	// StartTimeout bounds the start op, which may include readiness
 	// work. Default: 120s.
 	StartTimeout time.Duration
+	// RequireNudge escalates the optional nudge probe (checkSessionOps)
+	// from an absence-tolerant SKIP to a hard FAIL: set by a caller that
+	// has independently determined nudge support is required, e.g.
+	// cmd/gc for a runtime declaring prompt_delivery = "nudge-fallback"
+	// (FR5, ga-s5y62b.2). Default: false — today's SKIP-on-absence
+	// behavior, unchanged.
+	RequireNudge bool
 }
 
 func (o *Options) applyDefaults() {
