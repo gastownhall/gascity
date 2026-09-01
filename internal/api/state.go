@@ -228,6 +228,13 @@ type AgentUpdate struct {
 	Suspended *bool
 }
 
+// AgentSuspensionState identifies the exact config-source snapshot governing
+// one agent's desired suspension state.
+type AgentSuspensionState struct {
+	Suspended bool
+	Token     string
+}
+
 // RigUpdate holds optional fields for a partial rig update. Pointer fields
 // distinguish "not set" from "set to zero value."
 type RigUpdate struct {
@@ -322,6 +329,13 @@ type StateMutator interface {
 
 	// ResumeAgent marks an agent as no longer suspended.
 	ResumeAgent(name string) error
+
+	// AgentSuspension returns a server-issued target-state/config-source token.
+	AgentSuspension(name string) (AgentSuspensionState, error)
+
+	// SetAgentSuspendedIf sets desired state only if expectedToken still names
+	// the exact current target configuration sources.
+	SetAgentSuspendedIf(name, expectedToken string, desired bool) (AgentSuspensionState, AgentSuspensionState, error)
 
 	// SuspendRig suspends a rig in the config.
 	SuspendRig(name string) error

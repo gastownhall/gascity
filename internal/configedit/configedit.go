@@ -8,6 +8,9 @@ package configedit
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -51,8 +54,123 @@ var (
 	// entirely outside city.toml (e.g., a write to
 	// agents/<name>/agent.toml) so that we don't churn city.toml's
 	// mtime or risk losing comments on a no-op rewrite.
-	ErrUnmodified = errors.New("configedit: raw config unmodified")
+	ErrUnmodified   = errors.New("configedit: raw config unmodified")
+	ErrPrecondition = errors.New("configedit: precondition failed")
 )
+
+// AgentSuspensionState is a server-issued snapshot of the exact configuration
+// sources that determine one agent's suspended state.
+type AgentSuspensionState struct {
+	Suspended bool
+	Token     string
+}
+
+type agentSuspensionToken struct {
+	Version  int          `json:"version"`
+	Name     string       `json:"name"`
+	Origin   Origin       `json:"origin"`
+	Raw      *config.City `json:"raw"`
+	Expanded config.Agent `json:"expanded"`
+}
+
+func suspensionState(raw, expanded *config.City, name string) (AgentSuspensionState, error) {
+	origin := AgentOrigin(raw, expanded, name)
+	if origin == OriginNotFound {
+		return AgentSuspensionState{}, fmt.Errorf("%w: agent %q", ErrNotFound, name)
+	}
+	var target config.Agent
+	for _, a := range expanded.Agents {
+		if config.AgentMatchesIdentity(&a, name) {
+			target = a
+			break
+		}
+	}
+	body, err := json.Marshal(agentSuspensionToken{Version: 1, Name: name, Origin: origin, Raw: raw, Expanded: target})
+	if err != nil {
+		return AgentSuspensionState{}, fmt.Errorf("encoding agent suspension token: %w", err)
+	}
+	sum := sha256.Sum256(body)
+	return AgentSuspensionState{Suspended: target.Suspended, Token: hex.EncodeToString(sum[:])}, nil
+}
+
+func (e *Editor) loadAgentSuspension(name string) (*config.City, *config.City, AgentSuspensionState, error) {
+	raw, err := e.loadForEdit()
+	if err != nil {
+		return nil, nil, AgentSuspensionState{}, err
+	}
+	expanded, _, err := config.LoadWithIncludes(e.fs, e.tomlPath)
+	if err != nil {
+		return nil, nil, AgentSuspensionState{}, fmt.Errorf("loading expanded config: %w", err)
+	}
+	state, err := suspensionState(raw, expanded, name)
+	return raw, expanded, state, err
+}
+
+// AgentSuspension returns a target-specific source token under the config lock.
+func (e *Editor) AgentSuspension(name string) (AgentSuspensionState, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	_, _, state, err := e.loadAgentSuspension(name)
+	return state, err
+}
+
+// SetAgentSuspendedIf atomically compares a server-issued source token and
+// sets desired state under the same lock. Already-desired state is adopted
+// without writing only when the token still matches.
+func (e *Editor) SetAgentSuspendedIf(name, expectedToken string, desired bool) (AgentSuspensionState, AgentSuspensionState, error) {
+	return e.SetAgentSuspendedIfTransaction(name, expectedToken, desired, nil, nil)
+}
+
+// SetAgentSuspendedIfTransaction is SetAgentSuspendedIf with transaction hooks
+// that run under the same Editor lock. beforeChange runs only immediately
+// before a real write; afterChange runs immediately after it. Controller code
+// uses these hooks to keep its rollback snapshot and post-write refresh inside
+// the config-writer serialization boundary.
+func (e *Editor) SetAgentSuspendedIfTransaction(name, expectedToken string, desired bool,
+	beforeChange func() error,
+	afterChange func(AgentSuspensionState, AgentSuspensionState) error,
+) (AgentSuspensionState, AgentSuspensionState, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	raw, expanded, before, err := e.loadAgentSuspension(name)
+	if err != nil {
+		return AgentSuspensionState{}, AgentSuspensionState{}, err
+	}
+	if expectedToken == "" || before.Token != expectedToken {
+		return before, before, fmt.Errorf("%w: agent %q suspension token is stale", ErrPrecondition, name)
+	}
+	if before.Suspended == desired {
+		return before, before, nil
+	}
+	if beforeChange != nil {
+		if err := beforeChange(); err != nil {
+			return before, AgentSuspensionState{}, err
+		}
+	}
+	if err := mutateAgentSuspended(e.fs, filepath.Dir(e.tomlPath), raw, expanded, name, desired); err != nil && !errors.Is(err, ErrUnmodified) {
+		return before, AgentSuspensionState{}, err
+	} else if err == nil {
+		if err := validateCityForEdit(raw); err != nil {
+			return before, AgentSuspensionState{}, err
+		}
+		if err := e.write(raw); err != nil {
+			return before, AgentSuspensionState{}, err
+		}
+	}
+	_, _, after, err := e.loadAgentSuspension(name)
+	if err != nil {
+		return before, AgentSuspensionState{}, err
+	}
+	if after.Suspended != desired || after.Token == before.Token {
+		return before, after, fmt.Errorf("conditional agent suspension did not produce a distinct desired state")
+	}
+	if afterChange != nil {
+		if err := afterChange(before, after); err != nil {
+			return before, after, err
+		}
+	}
+	return before, after, nil
+}
 
 // Origin describes where an agent or rig is defined in the config.
 type Origin int

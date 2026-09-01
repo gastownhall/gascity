@@ -14,6 +14,7 @@
 // Usage:
 //
 //	grant_command = "gc-write-mint --kid k1 --key ~/.gc/keys/city.ed25519 --city example-city"
+//	grant_command = "gc-write-mint --kid k1 --key ~/.gc/keys/city.ed25519 --city example-city --aud gc-city-write.v2 --cid city_example"
 package main
 
 import (
@@ -61,6 +62,7 @@ type mintParams struct {
 	Epoch int64              // epoch counter; must be >= the server's floor
 	TTL   time.Duration      // grant lifetime (iat..exp); capped at maxTTL
 	City  string             // if non-empty, refuse a request for a different city
+	CID   string             // tenancy identity stamped into a v2 grant
 	Aud   string             // expected audience; refuse a different one
 	Key   ed25519.PrivateKey // the signing key; never leaves this process
 	Now   func() time.Time   // injectable clock
@@ -73,6 +75,7 @@ func main() {
 	epoch := flag.Int64("epoch", 0, "epoch counter stamped into the grant (must be >= the server's floor)")
 	ttl := flag.Duration("ttl", maxTTL, "grant lifetime; must be in ["+minTTL.String()+", "+maxTTL.String()+"]")
 	city := flag.String("city", "", "if set, refuse to mint unless the request's city matches")
+	cid := flag.String("cid", "", "tenancy city ID (cid) stamped into a gc-city-write.v2 grant")
 	aud := flag.String("aud", defaultAud, "expected audience; refuse to mint a request with a different audience")
 	flag.Parse()
 
@@ -96,6 +99,7 @@ func main() {
 		Epoch: *epoch,
 		TTL:   *ttl,
 		City:  *city,
+		CID:   *cid,
 		Aud:   *aud,
 		Key:   priv,
 		Now:   time.Now,
@@ -133,6 +137,12 @@ func mint(p mintParams, info clientgrant.GrantInfo) (string, error) {
 	if info.Aud != aud {
 		return "", fmt.Errorf("gc-write-mint: audience %q != expected %q", info.Aud, aud)
 	}
+	if p.CID != "" && aud != citywriteauth.AudienceCityWriteV2 {
+		return "", fmt.Errorf("gc-write-mint: --cid requires --aud %s", citywriteauth.AudienceCityWriteV2)
+	}
+	if info.CID != p.CID {
+		return "", fmt.Errorf("gc-write-mint: request cid %q != pinned --cid %q", info.CID, p.CID)
+	}
 	if strings.TrimSpace(info.City) == "" {
 		return "", errors.New("gc-write-mint: grant info missing city")
 	}
@@ -167,6 +177,7 @@ func mint(p mintParams, info clientgrant.GrantInfo) (string, error) {
 		Kid:   p.Kid,
 		Aud:   aud,
 		City:  info.City,
+		CID:   p.CID,
 		Epoch: p.Epoch,
 		IAT:   now.Unix(),
 		Exp:   now.Add(p.TTL).Unix(),

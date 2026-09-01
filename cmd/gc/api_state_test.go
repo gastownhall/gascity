@@ -1669,6 +1669,68 @@ func TestControllerStateMutationRestoresSymlinkedCityTomlWhenRefreshFails(t *tes
 	}
 }
 
+func TestMutateAndPokeChangedNoOpHasNoReconcileSideEffects(t *testing.T) {
+	var dirty atomic.Bool
+	cs := &controllerState{configDirty: &dirty, pokeCh: make(chan struct{}, 1)}
+	called := false
+	if err := cs.mutateAndPokeChanged(func() (bool, error) {
+		called = true
+		return false, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("mutation callback was not called")
+	}
+	if dirty.Load() || cs.configMutationPending.Load() || len(cs.pokeCh) != 0 {
+		t.Fatal("already-desired mutation dirtied config or poked reconciliation")
+	}
+}
+
+func TestControllerSetAgentSuspendedIfAlreadyDesiredHasNoSideEffects(t *testing.T) {
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "city.toml")
+	content := []byte(`[workspace]
+name = "test-city"
+
+[providers.test]
+command = "true"
+
+[[agent]]
+name = "worker"
+provider = "test"
+suspended = true
+`)
+	if err := os.WriteFile(cityPath, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	editor := configedit.NewEditor(fsys.OSFS{}, cityPath)
+	state, err := editor.AgentSuspension("worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dirty atomic.Bool
+	cs := &controllerState{cityPath: dir, editor: editor, configDirty: &dirty, pokeCh: make(chan struct{}, 1)}
+	before, after, err := cs.SetAgentSuspendedIf("worker", state.Token, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before != after {
+		t.Fatalf("already desired changed state: %#v -> %#v", before, after)
+	}
+	afterInfo, err := os.Stat(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !afterInfo.ModTime().Equal(info.ModTime()) || dirty.Load() || cs.configMutationPending.Load() || len(cs.pokeCh) != 0 {
+		t.Fatal("already-desired controller mutation changed mtime, dirty state, pending state, or poke channel")
+	}
+}
+
 func TestControllerStateMutationAllowsSymlinkedAgentAssets(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 

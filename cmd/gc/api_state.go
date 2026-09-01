@@ -1814,6 +1814,56 @@ func (cs *controllerState) ResumeAgent(name string) error {
 	})
 }
 
+func suspensionAPIState(state configedit.AgentSuspensionState) api.AgentSuspensionState {
+	return api.AgentSuspensionState{Suspended: state.Suspended, Token: state.Token}
+}
+
+// AgentSuspension returns the exact durable desired-state source token.
+func (cs *controllerState) AgentSuspension(name string) (api.AgentSuspensionState, error) {
+	state, err := cs.editor.AgentSuspension(name)
+	return suspensionAPIState(state), err
+}
+
+// SetAgentSuspendedIf performs a conditional desired-state mutation and pokes
+// reconciliation only when the durable state changed.
+func (cs *controllerState) SetAgentSuspendedIf(name, expectedToken string, desired bool) (api.AgentSuspensionState, api.AgentSuspensionState, error) {
+	var before, after configedit.AgentSuspensionState
+	var snapshot *configMutationSnapshot
+	var err error
+	before, after, err = cs.editor.SetAgentSuspendedIfTransaction(
+		name, expectedToken, desired,
+		func() error {
+			if cs.cityPath == "" {
+				return nil
+			}
+			var captureErr error
+			snapshot, captureErr = captureConfigMutationSnapshot(cs.cityPath)
+			if captureErr != nil {
+				return fmt.Errorf("snapshotting current city config: %w", captureErr)
+			}
+			return nil
+		},
+		func(_, _ configedit.AgentSuspensionState) error {
+			revision, refreshErr := cs.refreshConfigSnapshot()
+			if refreshErr != nil {
+				if snapshot != nil {
+					if restoreErr := snapshot.restore(); restoreErr != nil {
+						return fmt.Errorf("refreshing updated city config: %w", errors.Join(refreshErr, fmt.Errorf("restoring previous city config: %w", restoreErr)))
+					}
+				}
+				return fmt.Errorf("refreshing updated city config: %w", refreshErr)
+			}
+			cs.markConfigMutationPending(revision)
+			if cs.configDirty != nil {
+				cs.configDirty.Store(true)
+			}
+			cs.Poke()
+			return nil
+		},
+	)
+	return suspensionAPIState(before), suspensionAPIState(after), err
+}
+
 // SuspendRig writes suspended=true on the rig in city.toml.
 func (cs *controllerState) SuspendRig(name string) error {
 	return cs.mutateAndPoke(func() error {
@@ -2844,6 +2894,14 @@ func (s *configMutationSnapshot) restore() error {
 }
 
 func (cs *controllerState) mutateAndPoke(mutate func() error) error {
+	return cs.mutateAndPokeChanged(func() (bool, error) {
+		return true, mutate()
+	})
+}
+
+// mutateAndPokeChanged refreshes and wakes reconciliation only when mutate
+// reports that durable configuration changed.
+func (cs *controllerState) mutateAndPokeChanged(mutate func() (bool, error)) error {
 	var snapshot *configMutationSnapshot
 	if cs.cityPath != "" {
 		var err error
@@ -2852,8 +2910,12 @@ func (cs *controllerState) mutateAndPoke(mutate func() error) error {
 			return fmt.Errorf("snapshotting current city config: %w", err)
 		}
 	}
-	if err := mutate(); err != nil {
+	changed, err := mutate()
+	if err != nil {
 		return err
+	}
+	if !changed {
+		return nil
 	}
 	revision, err := cs.refreshConfigSnapshot()
 	if err != nil {

@@ -62,6 +62,10 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityGet(sm, "/agent/{base}/output", (*Server).humaHandleAgentOutput, errorStatuses(http.StatusNotFound))
 	cityGet(sm, "/agent/{dir}/{base}", (*Server).humaHandleAgentQualified, errorStatuses(http.StatusNotFound))
 	cityGet(sm, "/agent/{base}", (*Server).humaHandleAgent, errorStatuses(http.StatusNotFound))
+	cityGet(sm, "/agent/{dir}/{base}/suspension", (*Server).humaHandleAgentSuspensionQualified, errorStatuses(http.StatusNotFound, http.StatusNotImplemented))
+	cityGet(sm, "/agent/{base}/suspension", (*Server).humaHandleAgentSuspension, errorStatuses(http.StatusNotFound, http.StatusNotImplemented))
+	cityPut(sm, "/agent/{dir}/{base}/suspension", (*Server).humaHandleAgentSuspensionSetQualified, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusNotImplemented))
+	cityPut(sm, "/agent/{base}/suspension", (*Server).humaHandleAgentSuspensionSet, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusNotImplemented))
 	cityRegister(sm, huma.Operation{
 		OperationID:   "create-agent",
 		Method:        http.MethodPost,
