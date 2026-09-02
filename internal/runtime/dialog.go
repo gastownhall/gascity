@@ -654,6 +654,13 @@ func containsWorkspaceTrustDialog(content string) bool {
 		strings.Contains(content, "Trust project folder?")
 }
 
+// workspaceTrustConfirmKeys is not yet implemented: it always reports no
+// confirmation available. TODO(GREEN): inspect the cursor row and compute
+// the keys needed to move onto the trust option before confirming.
+func workspaceTrustConfirmKeys(_ string) ([]string, bool) {
+	return nil, false
+}
+
 func containsPostTrustStartupDialog(content string) bool {
 	return containsExternalImportsDialog(content) ||
 		containsMCPTrustDialog(content) ||
