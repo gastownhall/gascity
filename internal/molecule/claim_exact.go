@@ -32,8 +32,10 @@ type ClaimExactPreconditions struct {
 // with a nil error; a non-nil error means the call could not be confirmed as a
 // clean win (unknown bead, store without conditional-write support, an
 // unsupported onSuccess field) and the outcome is "". On error the returned
-// bead is still the best available snapshot (a best-effort re-Get), not
-// necessarily empty — inspect it before deciding whether to retry.
+// bead is the freshest snapshot this call held: a re-Get after a failed
+// write, or the pre-write Get snapshot. It is the zero Bead only when the
+// reserved-key guard rejected the call before any read, or when the initial
+// Get itself failed — check for that before inspecting it.
 type ClaimExactOutcome string
 
 const (
@@ -54,6 +56,11 @@ const (
 	// advanced to. That case is deliberately NOT treated as an idempotent success:
 	// this primitive cannot tell "I already won this" from "a different
 	// caller landed on the same next value", so it fails closed either way.
+	// Stale is a definitive statement that this call's write did NOT apply,
+	// not a conclusion that another claimant won: per the ConditionalWriter
+	// revision contract, a derived-column rewrite driven by an unrelated
+	// bead's write may bump the revision on some backends. Callers must
+	// treat Stale as a re-read trigger and may need a bounded retry.
 	// A caller that needs crash-retry idempotency must inspect the returned
 	// bead (e.g. compare its own execution identity against what's there)
 	// rather than rely on ClaimExact to re-apply effects silently.
