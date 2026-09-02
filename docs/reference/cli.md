@@ -3752,6 +3752,11 @@ operations that are absent (exit 2) are reported but never fail the
 run; everything else that misbehaves does. Exits non-zero if any check
 fails, so a runtime pack's CI can gate on it directly.
 
+One exception: when the argument resolves to a pack-declared runtime whose
+[runtimes.&lt;name&gt;] entry declares prompt_delivery = "nudge-fallback", the
+nudge probe is reported as "required: nudge" and an absent or broken nudge
+op fails the run — the declaration is smoke-tested, not trusted.
+
 The argument is an executable (path or PATH name) or a pack-declared
 runtime name: when it names a [runtimes.&lt;name&gt;] entry from the current
 city's packs, the check runs against that pack's declared command.
