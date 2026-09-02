@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/runproj"
 )
 
 var errWorkflowNotFound = errors.New("workflow not found")
@@ -412,13 +413,25 @@ func parseOptionalWorkflowRequestScope(rawScopeKind, rawScopeRef string) (string
 	return parseWorkflowRequestScope(scopeKind, scopeRef)
 }
 
+// workflowRootScope reports the scope a workflow root itself names: the
+// explicit gc.scope_kind + gc.scope_ref stamps when both are present,
+// otherwise the scope its gc.root_store_ref names. The store leg a root was
+// read through is where it lives, not the scope it belongs to — a
+// sling-launch root stamps only gc.root_store_ref, and serving it through a
+// class binding (a city-scoped leg) would otherwise present a rig-rooted
+// workflow as city-scoped and 404 the rig-scoped read (ga-dezas). A ref that
+// names no scope (a class binding, empty, malformed) still returns ("", ""),
+// so callers fall back to the leg exactly as before.
 func workflowRootScope(root beads.Bead) (string, string) {
 	scopeKind := strings.TrimSpace(root.Metadata[beadmeta.ScopeKindMetadataKey])
 	scopeRef := strings.TrimSpace(root.Metadata[beadmeta.ScopeRefMetadataKey])
-	if scopeKind == "" || scopeRef == "" {
-		return "", ""
+	if scopeKind != "" && scopeRef != "" {
+		return scopeKind, scopeRef
 	}
-	return scopeKind, scopeRef
+	if parsedKind, parsedRef, ok := runproj.ScopeFromRootStoreRef(root.Metadata[beadmeta.RootStoreRefMetadataKey]); ok {
+		return parsedKind, parsedRef
+	}
+	return "", ""
 }
 
 // collectWorkflowDeps returns the physical bead-to-bead dependencies.

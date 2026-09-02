@@ -212,6 +212,142 @@ func TestWorkflowGetRejectsMismatchedRigScopeForUniqueCrossStoreWorkflow(t *test
 	}
 }
 
+// TestWorkflowRootScopeFallsBackToRootStoreRef pins the root-ref fallback
+// (ga-dezas): sling-launch roots stamp only gc.root_store_ref, so the scope a
+// workflow is presented in comes from the ref its root names, not from the
+// store leg the root happened to be read through. Mirrors runproj's
+// ScopeFromRootStoreRef, which already resolves the run projection this way.
+func TestWorkflowRootScopeFallsBackToRootStoreRef(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata map[string]string
+		wantKind string
+		wantRef  string
+	}{
+		{
+			name: "explicit stamps win over the root store ref",
+			metadata: map[string]string{
+				"gc.scope_kind":     "rig",
+				"gc.scope_ref":      "alpha",
+				"gc.root_store_ref": "city:test-city",
+			},
+			wantKind: "rig",
+			wantRef:  "alpha",
+		},
+		{
+			name:     "rig root store ref",
+			metadata: map[string]string{"gc.root_store_ref": "rig:beads"},
+			wantKind: "rig",
+			wantRef:  "beads",
+		},
+		{
+			name:     "city root store ref",
+			metadata: map[string]string{"gc.root_store_ref": "city:test-city"},
+			wantKind: "city",
+			wantRef:  "test-city",
+		},
+		{
+			name:     "class root store ref is not a scope",
+			metadata: map[string]string{"gc.root_store_ref": "class:gmnos"},
+		},
+		{
+			name:     "empty root store ref",
+			metadata: map[string]string{"gc.root_store_ref": ""},
+		},
+		{
+			name: "no metadata at all",
+		},
+		{
+			name:     "malformed root store ref",
+			metadata: map[string]string{"gc.root_store_ref": "rig:"},
+		},
+		{
+			name:     "kindless root store ref",
+			metadata: map[string]string{"gc.root_store_ref": ":beads"},
+		},
+		{
+			name:     "half-stamped root falls through",
+			metadata: map[string]string{"gc.scope_kind": "rig"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotKind, gotRef := workflowRootScope(beads.Bead{Metadata: tc.metadata})
+			if gotKind != tc.wantKind || gotRef != tc.wantRef {
+				t.Fatalf("workflowRootScope = %q:%q, want %q:%q", gotKind, gotRef, tc.wantKind, tc.wantRef)
+			}
+		})
+	}
+}
+
+// TestWorkflowScopeMatchesBindingLegRigRootedRoot covers the maintainer-city
+// shape behind ga-dezas: a rig-rooted graph.v2 root served through the graph
+// class binding, whose leg carries the city scope. The request scope the root
+// ref names must match; the leg's scope must not.
+func TestWorkflowScopeMatchesBindingLegRigRootedRoot(t *testing.T) {
+	info := workflowStoreInfo{ref: "graph:test-city", scopeKind: "city", scopeRef: "test-city"}
+	root := beads.Bead{Metadata: map[string]string{"gc.root_store_ref": "rig:beads"}}
+
+	if !workflowScopeMatches(info, root, "rig", "beads") {
+		t.Fatal("workflowScopeMatches(rig, beads) = false, want true for a rig-rooted root read through the binding leg")
+	}
+	if workflowScopeMatches(info, root, "city", "test-city") {
+		t.Fatal("workflowScopeMatches(city, test-city) = true, want false: the binding leg is where the root lives, not the scope it belongs to")
+	}
+}
+
+// TestWorkflowGetResolvesRigScopeFromRootStoreRefOnBindingLeg is the
+// handler-level half of ga-dezas: GET /v0/city/{city}/workflow/{id} with the
+// rig scope resolves a rig-rooted root that physically lives on the graph
+// class binding, and reports that rig scope while root_store_ref still names
+// the physical leg.
+func TestWorkflowGetResolvesRigScopeFromRootStoreRefOnBindingLeg(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "test-city"
+	state.cityBeadStore = beads.NewMemStore()
+	graphStore := beads.NewMemStore()
+	state.graphBeadStore = graphStore
+	state.stores = map[string]beads.Store{}
+
+	root, err := graphStore.Create(beads.Bead{
+		Title: "Sling-launched workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.workflow_id":      "wf_rig_rooted",
+			"gc.root_store_ref":   "rig:beads",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/workflow/wf_rig_rooted?scope_kind=rig&scope_ref=beads"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+
+	var snapshot workflowSnapshotResponse
+	if err := json.NewDecoder(rec.Body).Decode(&snapshot); err != nil {
+		t.Fatalf("Decode(snapshot): %v", err)
+	}
+	if snapshot.RootBeadID != root.ID {
+		t.Fatalf("root_bead_id = %q, want %q", snapshot.RootBeadID, root.ID)
+	}
+	if snapshot.ScopeKind != "rig" || snapshot.ScopeRef != "beads" {
+		t.Fatalf("scope = %s:%s, want rig:beads", snapshot.ScopeKind, snapshot.ScopeRef)
+	}
+	if snapshot.RootStoreRef != "graph:test-city" {
+		t.Fatalf("root_store_ref = %q, want graph:test-city (the physical leg)", snapshot.RootStoreRef)
+	}
+}
+
 func TestWorkflowGetMarksSnapshotPartialWhenDepListFails(t *testing.T) {
 	state := newFakeState(t)
 	state.cityName = "test-city"
