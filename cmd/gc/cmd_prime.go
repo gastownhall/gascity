@@ -125,12 +125,28 @@ to empty output from valid conditional logic, or on suspended states
 }
 
 type primeJSONResult struct {
-	SchemaVersion string `json:"schema_version"`
-	Agent         string `json:"agent,omitempty"`
-	Hook          bool   `json:"hook"`
-	HookFormat    string `json:"hook_format,omitempty"`
-	Content       string `json:"content"`
-	Bytes         int    `json:"bytes"`
+	SchemaVersion string            `json:"schema_version"`
+	Agent         string            `json:"agent,omitempty"`
+	Hook          bool              `json:"hook"`
+	HookFormat    string            `json:"hook_format,omitempty"`
+	Content       string            `json:"content"`
+	Bytes         int               `json:"bytes"`
+	PromptBudget  *promptBudgetJSON `json:"prompt_budget,omitempty"`
+}
+
+// promptBudgetJSON is the --strict --json report of the promptDelivery
+// budget decision (ga-q8wgom.1.2). Populated by doPrimeWithHookFormatOpts;
+// left nil until that wiring lands.
+type promptBudgetJSON struct {
+	RawBytes          int    `json:"raw_bytes"`
+	RawLimit          int    `json:"raw_limit"`
+	ArgvBytes         int    `json:"argv_bytes"`
+	ArgvLimit         int    `json:"argv_limit"`
+	ConfiguredMode    string `json:"configured_mode"`
+	EffectiveMode     string `json:"effective_mode"`
+	Runtime           string `json:"runtime"`
+	OversizedFallback bool   `json:"oversized_fallback"`
+	HardFail          bool   `json:"hard_fail"`
 }
 
 // doPrime exists as the public non-strict entry point so callers don't
