@@ -688,6 +688,19 @@ func (fs *FileStore) DepListBatch(ids []string) (map[string][]Dep, error) {
 	return fs.MemStore.DepListBatch(ids)
 }
 
+// IssueGraphSnapshot refreshes the file-backed cache once, then reads issues
+// and dependencies under the embedded MemStore's single mutex. A concurrent
+// writer may make this snapshot stale immediately after the read, but it can
+// never mix issue rows from one file image with edges from another.
+func (fs *FileStore) IssueGraphSnapshot(query ListQuery) ([]Bead, map[string][]Dep, error) {
+	fs.fmu.Lock()
+	defer fs.fmu.Unlock()
+	if err := fs.refreshReadStateLocked(); err != nil {
+		return nil, nil, err
+	}
+	return fs.MemStore.IssueGraphSnapshot(query)
+}
+
 // memSnapshot holds a snapshot of MemStore state for rollback.
 type memSnapshot struct {
 	seq   int

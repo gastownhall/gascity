@@ -216,7 +216,8 @@
               "worktree-cleanup",
               "worktree-ensure",
               "worktree-verify",
-              "beads-update-cas"
+              "beads-update-cas",
+              "beads-snapshot"
             ]
           },
           "event_id": {

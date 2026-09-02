@@ -11,8 +11,9 @@ import (
 
 type recordingPolicyReadStore struct {
 	*beads.MemStore
-	listQueries  []beads.ListQuery
-	readyQueries []beads.ReadyQuery
+	listQueries     []beads.ListQuery
+	readyQueries    []beads.ReadyQuery
+	snapshotQueries []beads.ListQuery
 }
 
 func (s *recordingPolicyReadStore) List(query beads.ListQuery) ([]beads.Bead, error) {
@@ -34,6 +35,33 @@ func (s *recordingPolicyReadStore) ReadyContext(ctx context.Context, query ...be
 		return nil, err
 	}
 	return s.Ready(query...)
+}
+
+func (s *recordingPolicyReadStore) IssueGraphSnapshot(query beads.ListQuery) ([]beads.Bead, map[string][]beads.Dep, error) {
+	s.snapshotQueries = append(s.snapshotQueries, query)
+	return s.MemStore.IssueGraphSnapshot(query)
+}
+
+func TestBeadPolicyStoreForwardsAtomicIssueGraphSnapshotWithoutTierExpansion(t *testing.T) {
+	t.Parallel()
+
+	backing := &recordingPolicyReadStore{MemStore: beads.NewMemStore()}
+	store := wrapStoreWithBeadPolicies(backing, &config.City{})
+	reader, ok := store.(interface {
+		IssueGraphSnapshot(beads.ListQuery) ([]beads.Bead, map[string][]beads.Dep, error)
+	})
+	if !ok {
+		t.Fatal("policy store hides atomic issue graph snapshots")
+	}
+	if _, _, err := reader.IssueGraphSnapshot(beads.ListQuery{
+		AllowScan: true,
+		TierMode:  beads.TierIssues,
+	}); err != nil {
+		t.Fatalf("IssueGraphSnapshot: %v", err)
+	}
+	if len(backing.snapshotQueries) != 1 || backing.snapshotQueries[0].TierMode != beads.TierIssues {
+		t.Fatalf("snapshot queries = %+v, want exact TierIssues", backing.snapshotQueries)
+	}
 }
 
 func TestBeadPolicyStoreReadHelperTierConformance(t *testing.T) {
