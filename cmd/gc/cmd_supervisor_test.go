@@ -6771,3 +6771,67 @@ func TestRunSupervisorNoWarningForLowAPIPort(t *testing.T) {
 		t.Errorf("stdout = %q, want API listening message for low port", stdout.String())
 	}
 }
+
+func TestEnsureSupervisorRunningAliveWithoutServiceManagerStaysQuiet(t *testing.T) {
+	if goruntime.GOOS != "linux" && goruntime.GOOS != "darwin" {
+		t.Skip("platform supervisor only applies on linux/darwin")
+	}
+	if _, blocked := platformSupervisorHomeOverrideError(); blocked {
+		t.Skip("HOME differs from the account home; the override guard fires first")
+	}
+	t.Setenv(supervisorSystemdUnitEnv, "")
+	oldAlive := supervisorAliveHook
+	oldGOOS := supervisorRuntimeGOOS
+	oldAvailable := supervisorSystemctlUserAvailable
+	oldRun := supervisorSystemctlRun
+	t.Cleanup(func() {
+		supervisorAliveHook = oldAlive
+		supervisorRuntimeGOOS = oldGOOS
+		supervisorSystemctlUserAvailable = oldAvailable
+		supervisorSystemctlRun = oldRun
+	})
+	supervisorAliveHook = func() int { return 4242 }
+	supervisorRuntimeGOOS = "linux"
+	supervisorSystemctlUserAvailable = func() bool { return false }
+	var calls []string
+	supervisorSystemctlRun = func(args ...string) error {
+		calls = append(calls, strings.Join(args, " "))
+		return errors.New("no user manager")
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := ensureSupervisorRunning(&stdout, &stderr); code != 0 {
+		t.Fatalf("ensureSupervisorRunning code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Fatalf("expected no output for a supervisor that is already serving; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if len(calls) != 0 {
+		t.Fatalf("systemctl calls = %v, want none", calls)
+	}
+}
+
+func TestSupervisorServiceManagerAvailable(t *testing.T) {
+	oldGOOS := supervisorRuntimeGOOS
+	oldAvailable := supervisorSystemctlUserAvailable
+	t.Cleanup(func() {
+		supervisorRuntimeGOOS = oldGOOS
+		supervisorSystemctlUserAvailable = oldAvailable
+	})
+	for _, tc := range []struct {
+		goos        string
+		userManager bool
+		want        bool
+	}{
+		{goos: "linux", userManager: true, want: true},
+		{goos: "linux", userManager: false, want: false},
+		{goos: "darwin", userManager: false, want: true},
+		{goos: "windows", userManager: true, want: false},
+	} {
+		supervisorRuntimeGOOS = tc.goos
+		supervisorSystemctlUserAvailable = func() bool { return tc.userManager }
+		if got := supervisorServiceManagerAvailable(); got != tc.want {
+			t.Errorf("%s with user manager %v: got %v, want %v", tc.goos, tc.userManager, got, tc.want)
+		}
+	}
+}
