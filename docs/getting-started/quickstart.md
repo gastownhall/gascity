@@ -60,8 +60,11 @@ outside your session. See [Formulas](/tutorials/05-formulas) and
 ## 4. Watch an Agent Work
 
 ```bash
-bd show <bead-id> --watch
+gc events --follow --type bead.updated
 ```
+
+The event stream is the proxy-compatible way to watch progress. When the
+event arrives, inspect the final bead with `gc bd show <bead-id>`.
 
 For a fuller walkthrough of cities and rigs, continue to
 [Tutorial 01](/tutorials/01-cities-and-rigs). To see Gas City do the thing it

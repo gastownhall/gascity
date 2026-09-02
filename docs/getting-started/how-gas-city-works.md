@@ -124,9 +124,9 @@ event carries a monotonically increasing sequence number, so a watcher can repla
 the stream from any point. Beads
 fire `bead.created` / `bead.closed`, sessions fire `session.woke` /
 `session.crashed`, convoys fire `convoy.created` / `convoy.closed`, and orders
-fire `order.fired` / `order.completed`. Humans watch the stream with `bd show
---watch`, the `gc events --follow` CLI, or the dashboard; agents and bd hooks
-observe and emit too. Events also close the automation loop: an event-triggered
+fire `order.fired` / `order.completed`. Humans watch the stream with the
+`gc events --follow` CLI or the dashboard; agents and bd hooks observe and emit
+too. Events also close the automation loop: an event-triggered
 order *reads* the stream to decide when its formula runs — so the same
 notifications humans watch can drive the fleet, with no specific agent role
 required.

@@ -59,6 +59,9 @@ stdout 'Closed bead: gc-1'
 exec bd show gc-1
 stdout 'closed'
 
+# The tutorial's event-stream replacement is covered by the command harness.
+exec gc events
+
 # Closed beads don't appear in ready
 exec bd ready
 ! stdout 'gc-1'
@@ -76,6 +79,7 @@ cd $WORK/bright-lights
 # in acceptance-style paths, simplify Tutorial 01 back to `gc sling claude ...`.
 # exec gc sling my-project/claude
 # exec gc bd show mp-ff9 --watch
+# exec gc events --follow --type bead.updated
 
 # Tutorial 01 also covers city-wide lifecycle and suspension verbs.
 # exec gc restart

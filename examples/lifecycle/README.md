@@ -41,6 +41,10 @@ a feature branch, commits a file, and hands off to the refinery.
 ### 4. Watch it run
 
 ```bash
-bd show <bead-id> --watch
+gc events --follow --type bead.updated
 gc session list
 ```
+
+The event stream works with the default proxied Beads store. To inspect the
+final row after the event arrives, run `gc bd show <bead-id>` without
+`--watch`.

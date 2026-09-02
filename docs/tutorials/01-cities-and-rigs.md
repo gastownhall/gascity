@@ -301,26 +301,18 @@ One command set the whole loop in motion: sling created a work bead, attached
 a workflow from the agent's default formula (`mol-do-work` — read the bead, do
 the work, close it), and the orchestrator spawned a session to run it.
 
-![Work lifecycle after a sling: you run gc sling, the beads store creates a work bead and route, the orchestrator's reconcile tick spawns a session, the agent receives a primed prompt and finds its hooked work, edits the rig and runs commands, then updates the bead's progress and closes it when done — while the event bus records every step and gc bd show --watch streams live status back to you.](/diagrams/excalidraw-rendered/work-lifecycle.svg)
+![Work lifecycle after a sling: you run gc sling, the beads store creates a work bead and route, the orchestrator's reconcile tick spawns a session, the agent receives a primed prompt and finds its hooked work, edits the rig and runs commands, then updates the bead's progress and closes it when done — while the event bus records every step and gc events --follow streams live status back to you.](/diagrams/excalidraw-rendered/work-lifecycle.svg)
 
-Watch the bead progress with `--watch`:
+Watch bead progress through the event stream:
 
 ```shell
 ~/my-project
-$ gc bd show mp-ff9 --watch
-○ mp-ff9 · Write hello world in python to the file hello.py   [P2 · OPEN]
-Owner: Chris Sells · Type: task
-Created: 2026-04-07 · Updated: 2026-04-07
-
-BLOCKS
-  ← ○ mp-4tl: input convoy for mp-ff9 P2
-
-Watching for changes... (Press Ctrl+C to exit)
+$ gc events --follow --type bead.updated
+{"type":"bead.updated","subject":"mp-ff9", ...}
 ```
 
-The `BLOCKS` line is the input convoy sling created to track your bead. When
-the agent finishes, the status flips from `OPEN` to `CLOSED` — and the file is
-there:
+Each matching update is emitted as one JSONL event. When the agent finishes,
+inspect the final bead with `gc bd show mp-ff9` — and the file is there:
 
 ```shell
 ~/my-project

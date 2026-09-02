@@ -17,7 +17,7 @@
 #
 #   # Route work to the polecat pool:
 #   gc sling demo-repo/polecat "Write hello world"
-#   bd show <bead-id> --watch
+#   gc events --follow --type bead.updated
 
 [workspace]
 name = "lifecycle-demo"
