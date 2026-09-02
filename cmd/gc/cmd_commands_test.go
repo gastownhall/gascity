@@ -315,6 +315,72 @@ func runPackCommandProcessWithEnv(t *testing.T, cityPath, scenario string, extra
 	return packCommandProcessResult{exitCode: exitCode, stdout: stdout.String(), stderr: stderr.String()}
 }
 
+// stripTmuxLeakGuardNoise is a placeholder pending the green step; it does
+// not yet strip anything.
+func stripTmuxLeakGuardNoise(s string) string {
+	return s
+}
+
+// TestStripTmuxLeakGuardNoise expresses the acceptance criteria for isolating
+// captured subprocess stderr from the tmux leak guard's own harness-level
+// diagnostics (cmd/gc/tmux_leak_guard_test.go): stripTmuxLeakGuardNoise must
+// remove exactly the guard's startup-sweep and teardown-leak lines, in any
+// position, while leaving real CLI stderr output (and its line order)
+// untouched. Without this, TestPackCommandCobraHelpAndUnknownParity's
+// eager/lazy stderr-equality assertion — and the several exact-empty-stderr
+// assertions elsewhere in this file — are vulnerable to a concurrent sibling
+// suite's teardown racing exactly one of the two subprocess launches' startup
+// sweep (ga-5pe5xv gate evidence: "a concurrent tmux leak-guard stderr line
+// captured by one parity side only").
+func TestStripTmuxLeakGuardNoise(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "no guard output left untouched",
+			in:   "Error: unknown command \"missing\" for \"gc backstage\"\n",
+			want: "Error: unknown command \"missing\" for \"gc backstage\"\n",
+		},
+		{
+			name: "empty stays empty",
+			in:   "",
+			want: "",
+		},
+		{
+			name: "strips a leading startup-sweep block, keeps real stderr after it",
+			in: "cmd/gc tmux leak guard: startup sweep reaping 1 stale test tmux server(s) whose socket root is gone\n" +
+				"  pid=12345 argv=\"tmux -u -L test-city new-session -s mayor\"\n" +
+				"Error: unknown command \"missing\" for \"gc backstage\"\n",
+			want: "Error: unknown command \"missing\" for \"gc backstage\"\n",
+		},
+		{
+			name: "strips a trailing teardown-leak block, keeps real stderr before it",
+			in: "Error: unknown command \"missing\" for \"gc backstage\"\n" +
+				"cmd/gc tmux leak guard: 1 tmux server(s) leaked by this run under /tmp/gct-1-a\n" +
+				"  socket=/tmp/gct-1-a/tmux-1000/test-city (killed)\n" +
+				"cmd/gc tmux leak guard: a test created a real tmux session without tearing its server down; city-name sockets (e.g. -L test-city) have exit-empty off and live forever unless killed (dip-73cr05)\n",
+			want: "Error: unknown command \"missing\" for \"gc backstage\"\n",
+		},
+		{
+			name: "strips a guard block sandwiched between two real stderr lines",
+			in: "Usage:\n" +
+				"cmd/gc tmux leak guard: startup sweep reaping 1 stale test tmux server(s) whose socket root is gone\n" +
+				"  pid=999 argv=\"tmux -u -L test-city new-session -s mayor\"\n" +
+				"  gc backstage repo\n",
+			want: "Usage:\n  gc backstage repo\n",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := stripTmuxLeakGuardNoise(test.in); got != test.want {
+				t.Fatalf("stripTmuxLeakGuardNoise(%q) = %q, want %q", test.in, got, test.want)
+			}
+		})
+	}
+}
+
 const testTmuxSocketParentRootEnv = "GC_TEST_TMUX_SOCKET_PARENT_ROOT"
 
 func createAgedFreeTmuxSocketParent(t *testing.T) (string, string) {
