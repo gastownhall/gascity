@@ -74,9 +74,12 @@ const (
 // promptDeliverySupportFor confirms oversized-prompt support from the
 // runtime's own identity rather than assuming any given transport (including
 // ACP-style protocols) is argv-bound. Only runtimes this package has
-// positively classified return a non-default value; every other name —
-// including future/custom runtimes — hard-fails via the zero value.
-func promptDeliverySupportFor(runtimeName string) promptDeliverySupport {
+// positively classified, plus a pack-declared runtime whose
+// [runtimes.<name>] entry opts in via prompt_delivery (packRuntimes, keyed
+// by name — see config.DiscoveredRuntime.PromptDelivery), return a
+// non-default value; every other name — including future/custom runtimes —
+// hard-fails via the zero value.
+func promptDeliverySupportFor(runtimeName string, packRuntimes map[string]config.DiscoveredRuntime) promptDeliverySupport {
 	name := strings.TrimSpace(runtimeName)
 	// The legacy exec spelling constructs the same native t3bridge provider
 	// (runtime_registry.go RegisterPrefix("exec:")), so it is argv-safe too.
@@ -104,6 +107,9 @@ func promptDeliverySupportFor(runtimeName string) promptDeliverySupport {
 	case "t3bridge":
 		return promptDeliverySupportArgvSafe
 	default:
+		if packRuntimes[name].PromptDelivery == config.PromptDeliveryNudgeFallback {
+			return promptDeliverySupportNudgeFallback
+		}
 		return promptDeliverySupportUnsupported
 	}
 }
@@ -136,7 +142,13 @@ var errOversizedPromptUnsupportedRuntime = errors.New("startup prompt exceeds ar
 // An empty prompt delivers nothing. Judgment about prompt *content* stays in
 // templates; this function only routes an already-rendered prompt and reports
 // delivered/not-delivered.
-func promptDelivery(prompt string, isACP bool, rp *config.ResolvedProvider, nudge string, runtimeName string) (promptDeliveryResult, error) {
+//
+// packRuntimes is the city's pack-declared runtime registry
+// (config.City.Runtimes), consulted only for the oversized-prompt guard's
+// promptDeliverySupportFor classification; nil is fine when runtimeName is a
+// builtin runtime. promptDelivery remains pure/I-O-free: no provider
+// construction, handshake, or subprocess spawn happens here.
+func promptDelivery(prompt string, isACP bool, rp *config.ResolvedProvider, nudge string, runtimeName string, packRuntimes map[string]config.DiscoveredRuntime) (promptDeliveryResult, error) {
 	res := promptDeliveryResult{Nudge: nudge}
 	if prompt == "" {
 		return res, nil
@@ -154,7 +166,7 @@ func promptDelivery(prompt string, isACP bool, rp *config.ResolvedProvider, nudg
 
 	suffix := shellquote.Quote(prompt)
 	if len(prompt) >= maxPromptSuffixRawBytes || len(suffix) >= maxPromptSuffixQuotedBytes {
-		switch promptDeliverySupportFor(runtimeName) {
+		switch promptDeliverySupportFor(runtimeName, packRuntimes) {
 		case promptDeliverySupportArgvSafe:
 			// Falls through to normal argv delivery below: this runtime
 			// never carries the prompt through a size-limited argv, so the

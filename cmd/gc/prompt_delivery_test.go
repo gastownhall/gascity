@@ -92,7 +92,7 @@ func TestPromptDelivery(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := promptDelivery(tt.promp, tt.isACP, tt.rp, tt.nudge, tt.runtime)
+			got, err := promptDelivery(tt.promp, tt.isACP, tt.rp, tt.nudge, tt.runtime, nil)
 			if err != nil {
 				t.Fatalf("promptDelivery() unexpected error: %v", err)
 			}
@@ -143,7 +143,7 @@ func TestPromptDeliveryOversized(t *testing.T) {
 		if len(quoted) >= maxPromptSuffixQuotedBytes {
 			t.Fatalf("fixture invalid: quoted len %d already at/above quoted threshold %d", len(quoted), maxPromptSuffixQuotedBytes)
 		}
-		got, err := promptDelivery(prompt, false, arg, "wake", "tmux")
+		got, err := promptDelivery(prompt, false, arg, "wake", "tmux", nil)
 		if err != nil {
 			t.Fatalf("promptDelivery() unexpected error: %v", err)
 		}
@@ -158,7 +158,7 @@ func TestPromptDeliveryOversized(t *testing.T) {
 		if len(prompt) < maxPromptSuffixRawBytes {
 			t.Fatalf("fixture invalid: raw len %d below raw threshold %d", len(prompt), maxPromptSuffixRawBytes)
 		}
-		got, err := promptDelivery(prompt, false, arg, "wake", "tmux")
+		got, err := promptDelivery(prompt, false, arg, "wake", "tmux", nil)
 		if err != nil {
 			t.Fatalf("promptDelivery() unexpected error: %v", err)
 		}
@@ -187,7 +187,7 @@ func TestPromptDeliveryOversized(t *testing.T) {
 		if len(quoted) < maxPromptSuffixQuotedBytes {
 			t.Fatalf("fixture invalid: quoted len %d below quoted threshold %d", len(quoted), maxPromptSuffixQuotedBytes)
 		}
-		got, err := promptDelivery(prompt, false, arg, "wake", "tmux")
+		got, err := promptDelivery(prompt, false, arg, "wake", "tmux", nil)
 		if err != nil {
 			t.Fatalf("promptDelivery() unexpected error: %v", err)
 		}
@@ -207,7 +207,7 @@ func TestPromptDeliveryOversized(t *testing.T) {
 		if len(prompt) < maxPromptSuffixRawBytes {
 			t.Fatalf("fixture invalid: expected >= %d raw bytes from UTF-8 repeats, got %d", maxPromptSuffixRawBytes, len(prompt))
 		}
-		got, err := promptDelivery(prompt, false, arg, "wake", "tmux")
+		got, err := promptDelivery(prompt, false, arg, "wake", "tmux", nil)
 		if err != nil {
 			t.Fatalf("promptDelivery() unexpected error: %v", err)
 		}
@@ -222,7 +222,7 @@ func TestPromptDeliveryOversized(t *testing.T) {
 	t.Run("flag mode is also guarded", func(t *testing.T) {
 		flag := &config.ResolvedProvider{PromptMode: "flag", PromptFlag: "--prompt"}
 		prompt := repeatToBytes("a", maxPromptSuffixRawBytes)
-		got, err := promptDelivery(prompt, false, flag, "wake", "tmux")
+		got, err := promptDelivery(prompt, false, flag, "wake", "tmux", nil)
 		if err != nil {
 			t.Fatalf("promptDelivery() unexpected error: %v", err)
 		}
@@ -236,7 +236,7 @@ func TestPromptDeliveryOversized(t *testing.T) {
 
 	t.Run("ACP is unaffected by size", func(t *testing.T) {
 		prompt := repeatToBytes("a", maxPromptSuffixRawBytes*2)
-		got, err := promptDelivery(prompt, true, arg, "wake", "subprocess")
+		got, err := promptDelivery(prompt, true, arg, "wake", "subprocess", nil)
 		if err != nil {
 			t.Fatalf("promptDelivery() unexpected error for ACP: %v", err)
 		}
@@ -252,7 +252,7 @@ func TestPromptDeliveryOversized(t *testing.T) {
 	t.Run("prompt_mode none is unaffected by size", func(t *testing.T) {
 		none := &config.ResolvedProvider{PromptMode: "none"}
 		prompt := repeatToBytes("a", maxPromptSuffixRawBytes*2)
-		got, err := promptDelivery(prompt, false, none, "wake", "subprocess")
+		got, err := promptDelivery(prompt, false, none, "wake", "subprocess", nil)
 		if err != nil {
 			t.Fatalf("promptDelivery() unexpected error for prompt_mode=none: %v", err)
 		}
@@ -267,7 +267,7 @@ func TestPromptDeliveryOversized(t *testing.T) {
 	t.Run("argv-safe runtime (t3bridge) is unaffected by size", func(t *testing.T) {
 		prompt := repeatToBytes("a", maxPromptSuffixRawBytes*2)
 		quoted := shellquote.Quote(prompt)
-		got, err := promptDelivery(prompt, false, arg, "wake", "t3bridge")
+		got, err := promptDelivery(prompt, false, arg, "wake", "t3bridge", nil)
 		if err != nil {
 			t.Fatalf("promptDelivery() unexpected error for t3bridge: %v", err)
 		}
@@ -280,7 +280,7 @@ func TestPromptDeliveryOversized(t *testing.T) {
 
 	t.Run("nudge-fallback runtime (tmux) routes through nudge with no argv bytes", func(t *testing.T) {
 		prompt := repeatToBytes("a", maxPromptSuffixRawBytes)
-		got, err := promptDelivery(prompt, false, arg, "wake", "tmux")
+		got, err := promptDelivery(prompt, false, arg, "wake", "tmux", nil)
 		if err != nil {
 			t.Fatalf("promptDelivery() unexpected error for tmux: %v", err)
 		}
@@ -294,7 +294,7 @@ func TestPromptDeliveryOversized(t *testing.T) {
 
 	t.Run("empty runtime name (stock default) routes through nudge, not hard-fail", func(t *testing.T) {
 		prompt := repeatToBytes("a", maxPromptSuffixRawBytes)
-		got, err := promptDelivery(prompt, false, arg, "wake", "")
+		got, err := promptDelivery(prompt, false, arg, "wake", "", nil)
 		if err != nil {
 			t.Fatalf("promptDelivery() unexpected error for the stock default (empty) runtime name: %v", err)
 		}
@@ -309,7 +309,7 @@ func TestPromptDeliveryOversized(t *testing.T) {
 	t.Run("legacy t3bridge exec spelling stays argv-safe", func(t *testing.T) {
 		prompt := repeatToBytes("a", maxPromptSuffixRawBytes)
 		quoted := shellquote.Quote(prompt)
-		got, err := promptDelivery(prompt, false, arg, "wake", "exec:/usr/lib/gc/gc-session-t3")
+		got, err := promptDelivery(prompt, false, arg, "wake", "exec:/usr/lib/gc/gc-session-t3", nil)
 		if err != nil {
 			t.Fatalf("promptDelivery() unexpected error for the legacy t3bridge exec spelling: %v", err)
 		}
@@ -321,9 +321,40 @@ func TestPromptDeliveryOversized(t *testing.T) {
 		}
 	})
 
+	t.Run("pack-declared nudge-fallback runtime routes through nudge with no argv bytes", func(t *testing.T) {
+		prompt := repeatToBytes("a", maxPromptSuffixRawBytes)
+		packRuntimes := map[string]config.DiscoveredRuntime{
+			"acme-runtime": {Name: "acme-runtime", PromptDelivery: "nudge-fallback"},
+		}
+		got, err := promptDelivery(prompt, false, arg, "wake", "acme-runtime", packRuntimes)
+		if err != nil {
+			t.Fatalf("promptDelivery() unexpected error for a pack-declared nudge-fallback runtime: %v", err)
+		}
+		if got.PromptSuffix != "" || got.PromptFlag != "" {
+			t.Errorf("promptDelivery() pack-declared nudge-fallback oversized must carry zero argv bytes, got PromptSuffix len=%d PromptFlag=%q", len(got.PromptSuffix), got.PromptFlag)
+		}
+		if !got.Delivered || !got.OversizedFallback {
+			t.Errorf("promptDelivery() pack-declared nudge-fallback oversized = %+v, want Delivered=true OversizedFallback=true", promptDeliveryResultLens(got))
+		}
+	})
+
+	t.Run("pack-declared runtime without prompt_delivery still hard-fails", func(t *testing.T) {
+		prompt := repeatToBytes("a", maxPromptSuffixRawBytes)
+		packRuntimes := map[string]config.DiscoveredRuntime{
+			"acme-runtime": {Name: "acme-runtime"},
+		}
+		_, err := promptDelivery(prompt, false, arg, "wake", "acme-runtime", packRuntimes)
+		if err == nil {
+			t.Fatalf("promptDelivery() error = nil, want a hard-fail error for a pack runtime with no prompt_delivery declared")
+		}
+		if !errors.Is(err, errOversizedPromptUnsupportedRuntime) {
+			t.Errorf("promptDelivery() error = %v, want errors.Is(err, errOversizedPromptUnsupportedRuntime)", err)
+		}
+	})
+
 	t.Run("unsupported runtime (subprocess) hard-fails before Start", func(t *testing.T) {
 		prompt := repeatToBytes("a", maxPromptSuffixRawBytes)
-		got, err := promptDelivery(prompt, false, arg, "wake", "subprocess")
+		got, err := promptDelivery(prompt, false, arg, "wake", "subprocess", nil)
 		if err == nil {
 			t.Fatalf("promptDelivery() error = nil, want a hard-fail error for subprocess with an oversized prompt")
 		}
@@ -337,7 +368,7 @@ func TestPromptDeliveryOversized(t *testing.T) {
 
 	t.Run("unknown/unclassified runtime name defaults to hard-fail, not silent argv passthrough", func(t *testing.T) {
 		prompt := repeatToBytes("a", maxPromptSuffixRawBytes)
-		_, err := promptDelivery(prompt, false, arg, "wake", "some-future-custom-runtime")
+		_, err := promptDelivery(prompt, false, arg, "wake", "some-future-custom-runtime", nil)
 		if err == nil {
 			t.Fatalf("promptDelivery() error = nil, want a hard-fail error for an unclassified runtime with an oversized prompt")
 		}
@@ -350,7 +381,7 @@ func TestPromptDeliveryOversized(t *testing.T) {
 		const marker = "TESTMARKERMUSTNOTLEAK"
 		prompt := marker + repeatToBytes("a", maxPromptSuffixRawBytes)
 		quoted := shellquote.Quote(prompt)
-		_, err := promptDelivery(prompt, false, arg, "wake", "subprocess")
+		_, err := promptDelivery(prompt, false, arg, "wake", "subprocess", nil)
 		if err == nil {
 			t.Fatalf("promptDelivery() error = nil, want hard-fail error")
 		}
@@ -369,26 +400,47 @@ func TestPromptDeliveryOversized(t *testing.T) {
 
 func TestPromptDeliverySupportFor(t *testing.T) {
 	tests := []struct {
-		runtime string
-		want    promptDeliverySupport
+		runtime  string
+		runtimes map[string]config.DiscoveredRuntime
+		want     promptDeliverySupport
 	}{
-		{"tmux", promptDeliverySupportNudgeFallback},
-		{"t3bridge", promptDeliverySupportArgvSafe},
-		{"exec:/usr/lib/gc/gc-session-t3", promptDeliverySupportArgvSafe},
-		{"subprocess", promptDeliverySupportUnsupported},
-		{"", promptDeliverySupportNudgeFallback},
-		{" tmux", promptDeliverySupportNudgeFallback},
-		{"herdr", promptDeliverySupportNudgeFallback},
-		{"k8s", promptDeliverySupportNudgeFallback},
-		{"exec:./run.sh", promptDeliverySupportUnsupported},
-		{"ssh:host", promptDeliverySupportUnsupported},
-		{"hybrid", promptDeliverySupportNudgeFallback},
-		{"auto", promptDeliverySupportUnsupported},
-		{"totally-unknown-custom-runtime", promptDeliverySupportUnsupported},
+		{runtime: "tmux", want: promptDeliverySupportNudgeFallback},
+		{runtime: "t3bridge", want: promptDeliverySupportArgvSafe},
+		{runtime: "exec:/usr/lib/gc/gc-session-t3", want: promptDeliverySupportArgvSafe},
+		{runtime: "subprocess", want: promptDeliverySupportUnsupported},
+		{runtime: "", want: promptDeliverySupportNudgeFallback},
+		{runtime: " tmux", want: promptDeliverySupportNudgeFallback},
+		{runtime: "herdr", want: promptDeliverySupportNudgeFallback},
+		{runtime: "k8s", want: promptDeliverySupportNudgeFallback},
+		{runtime: "exec:./run.sh", want: promptDeliverySupportUnsupported},
+		{runtime: "ssh:host", want: promptDeliverySupportUnsupported},
+		{runtime: "hybrid", want: promptDeliverySupportNudgeFallback},
+		{runtime: "auto", want: promptDeliverySupportUnsupported},
+		{runtime: "totally-unknown-custom-runtime", want: promptDeliverySupportUnsupported},
+		{
+			runtime:  "acme-runtime",
+			runtimes: map[string]config.DiscoveredRuntime{"acme-runtime": {Name: "acme-runtime", PromptDelivery: "nudge-fallback"}},
+			want:     promptDeliverySupportNudgeFallback,
+		},
+		{
+			runtime:  " acme-runtime",
+			runtimes: map[string]config.DiscoveredRuntime{"acme-runtime": {Name: "acme-runtime", PromptDelivery: "nudge-fallback"}},
+			want:     promptDeliverySupportNudgeFallback,
+		},
+		{
+			runtime:  "acme-runtime-unset",
+			runtimes: map[string]config.DiscoveredRuntime{"acme-runtime-unset": {Name: "acme-runtime-unset"}},
+			want:     promptDeliverySupportUnsupported,
+		},
+		{
+			runtime:  "acme-runtime-missing",
+			runtimes: map[string]config.DiscoveredRuntime{"other-runtime": {Name: "other-runtime", PromptDelivery: "nudge-fallback"}},
+			want:     promptDeliverySupportUnsupported,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.runtime, func(t *testing.T) {
-			if got := promptDeliverySupportFor(tt.runtime); got != tt.want {
+			if got := promptDeliverySupportFor(tt.runtime, tt.runtimes); got != tt.want {
 				t.Errorf("promptDeliverySupportFor(%q) = %v, want %v", tt.runtime, got, tt.want)
 			}
 		})
