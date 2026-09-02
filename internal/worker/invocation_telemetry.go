@@ -144,7 +144,11 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 			slog.String("session_id", id), slog.String("provider", providerFamily))
 		return
 	}
-	usages, err := spec.extract(h.adapter, path)
+	// Read the cursor BEFORE extracting: it bounds how far back the scan
+	// window must reach, so invocations appended since the last pass are not
+	// lost to the fixed tail window.
+	cursor := strings.TrimSpace(pr.Metadata[sessionpkg.MetadataKeyInvocationUsageCursor])
+	usages, err := spec.extract(h.adapter, path, cursor)
 	if err != nil {
 		slog.Debug("invocation telemetry: usage extraction failed; skipping",
 			slog.String("session_id", id), slog.String("provider", providerFamily), slog.Any("error", err))
@@ -155,7 +159,6 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 			slog.String("session_id", id), slog.String("provider", providerFamily))
 		return
 	}
-	cursor := strings.TrimSpace(pr.Metadata[sessionpkg.MetadataKeyInvocationUsageCursor])
 	pending := usagesAfterCursor(usages, cursor)
 	if len(pending) == 0 {
 		slog.Debug("invocation telemetry: no new invocations since cursor; skipping",
@@ -267,7 +270,7 @@ func modelUsageFact(u sessionlog.TailUsage, meta map[string]string, beadID, sess
 // are swallowed so telemetry never affects operations.
 type invocationUsageSpec struct {
 	discover func(h *SessionHandle, id string, createdAt time.Time, meta map[string]string) string
-	extract  func(a SessionLogAdapter, path string) ([]sessionlog.TailUsage, error)
+	extract  func(a SessionLogAdapter, path, cursorID string) ([]sessionlog.TailUsage, error)
 }
 
 // codexInvocationDiscoveryWindow bounds how far after the wake anchor a
@@ -601,14 +604,17 @@ func (f *Factory) SweepSessionModelUsageAtPath(ctx context.Context, id string, m
 // the discovery-driven and already-resolved entry points.
 func (f *Factory) sweepResolvedTranscript(ctx context.Context, family, id string, meta map[string]string, path string, now time.Time) (emitted int, settled bool, err error) {
 	sink := f.usageSink
-	usages, extractErr := f.Adapter().InvocationUsage(family, path)
+	// Read the cursor BEFORE extracting: it bounds how far back the scan
+	// window must reach, so a sweep that falls more than one window behind
+	// still recovers the whole backlog instead of the tail's last few entries.
+	cursor := strings.TrimSpace(meta[sessionpkg.MetadataKeyInvocationUsageCursor])
+	usages, extractErr := f.Adapter().InvocationUsage(family, path, cursor)
 	if extractErr != nil {
 		// Transient: a torn mid-write tail can fail the parse; retry on a later tick.
 		slog.Debug("model-usage sweep: usage extraction failed; will retry",
 			slog.String("session_id", id), slog.String("provider", family), slog.Any("error", extractErr))
 		return 0, false, nil
 	}
-	cursor := strings.TrimSpace(meta[sessionpkg.MetadataKeyInvocationUsageCursor])
 	pending := usagesSinceCursor(usages, cursor)
 	if len(pending) == 0 {
 		// Swept: the transcript was read and the cursor is already current.

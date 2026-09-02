@@ -1,8 +1,10 @@
 package sessionlog
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -296,5 +298,118 @@ func TestExtractTailUsageFromSearchPathsRejectsEscapedPath(t *testing.T) {
 	}
 	if len(usages) != 1 || usages[0].EntryUUID != "u1" {
 		t.Fatalf("ExtractTailUsageFromSearchPaths = %+v, want one u1 entry", usages)
+	}
+}
+
+// buildUsageEntry returns one assistant entry whose padding makes the encoded
+// line large enough that a handful of entries exceed the fixed tail window.
+func buildUsageEntry(id string, padBytes int) map[string]any {
+	return map[string]any{
+		"type": "assistant",
+		"uuid": "uuid-" + id,
+		"message": map[string]any{
+			"role":  "assistant",
+			"id":    id,
+			"model": "claude-opus-4-8",
+			"usage": map[string]any{
+				"input_tokens":                10,
+				"output_tokens":               20,
+				"cache_read_input_tokens":     30,
+				"cache_creation_input_tokens": 40,
+			},
+			"content": strings.Repeat("x", padBytes),
+		},
+	}
+}
+
+// TestExtractTailUsageSinceReachesBackPastTheFixedWindow pins the defect that
+// the fixed 64KB window drops every invocation that scrolled past it between
+// two extractions. The transcript below is many windows long, so the fixed
+// extractor cannot see the cursor entry or anything after it up to the last
+// window; the cursor-aware extractor must return them.
+func TestExtractTailUsageSinceReachesBackPastTheFixedWindow(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.jsonl")
+
+	const entries = 60
+	const pad = 20 * 1024 // ~20KB per entry: 60 entries ≈ 1.2MB, ~19 windows
+	rows := make([]map[string]any, 0, entries)
+	for i := range entries {
+		rows = append(rows, buildUsageEntry(fmt.Sprintf("msg_%02d", i), pad))
+	}
+	writeTailJSONL(t, path, rows)
+
+	// The cursor is the FIRST invocation: everything after it is owed.
+	cursor := "msg_00"
+
+	fixed, err := ExtractTailUsage(path)
+	if err != nil {
+		t.Fatalf("ExtractTailUsage: %v", err)
+	}
+	if containsCursor(fixed, cursor) {
+		t.Fatalf("test is not exercising the defect: fixed window still reaches the cursor (%d entries)", len(fixed))
+	}
+
+	got, err := ExtractTailUsageSince(path, cursor)
+	if err != nil {
+		t.Fatalf("ExtractTailUsageSince: %v", err)
+	}
+	if !containsCursor(got, cursor) {
+		t.Fatalf("cursor %q not reached: got %d entries, want the window grown to include it", cursor, len(got))
+	}
+	if len(got) != entries {
+		t.Errorf("got %d invocations, want all %d from the cursor onward", len(got), entries)
+	}
+	if len(got) <= len(fixed) {
+		t.Errorf("cursor-aware scan returned %d entries, fixed window returned %d; want strictly more",
+			len(got), len(fixed))
+	}
+}
+
+// TestExtractTailUsageSinceEmptyCursorMatchesFixedWindow pins that a session
+// with no prior extraction keeps the old bounded behavior.
+func TestExtractTailUsageSinceEmptyCursorMatchesFixedWindow(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.jsonl")
+
+	rows := make([]map[string]any, 0, 40)
+	for i := range 40 {
+		rows = append(rows, buildUsageEntry(fmt.Sprintf("msg_%02d", i), 20*1024))
+	}
+	writeTailJSONL(t, path, rows)
+
+	fixed, err := ExtractTailUsage(path)
+	if err != nil {
+		t.Fatalf("ExtractTailUsage: %v", err)
+	}
+	got, err := ExtractTailUsageSince(path, "")
+	if err != nil {
+		t.Fatalf("ExtractTailUsageSince: %v", err)
+	}
+	if len(got) != len(fixed) {
+		t.Errorf("empty cursor returned %d entries, want the fixed-window %d", len(got), len(fixed))
+	}
+}
+
+// TestExtractTailUsageSinceUnreachableCursorDegradesToBoundedWindow pins that a
+// stale or absent cursor returns the widest scanned window rather than nothing.
+func TestExtractTailUsageSinceUnreachableCursorDegradesToBoundedWindow(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.jsonl")
+
+	rows := make([]map[string]any, 0, 30)
+	for i := range 30 {
+		rows = append(rows, buildUsageEntry(fmt.Sprintf("msg_%02d", i), 20*1024))
+	}
+	writeTailJSONL(t, path, rows)
+
+	got, err := ExtractTailUsageSince(path, "msg_does_not_exist")
+	if err != nil {
+		t.Fatalf("ExtractTailUsageSince: %v", err)
+	}
+	// The whole file (~600KB) is well under the cap, so the window grows to
+	// cover it and returns everything instead of failing.
+	if len(got) != 30 {
+		t.Errorf("got %d entries, want all 30 once the window covers the file", len(got))
 	}
 }

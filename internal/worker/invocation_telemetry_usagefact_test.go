@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -1431,5 +1432,118 @@ func TestFactorySweepSessionModelUsageKeylessCodexDirtySingletonRetries(t *testi
 	}
 	if facts[0].OutputTokens != 50 {
 		t.Fatalf("OutputTokens = %d, want 50 (proves the cwd==work_dir rollout recorded, not the sibling)", facts[0].OutputTokens)
+	}
+}
+
+// paddedUsageEntry returns a usage-bearing assistant entry inflated to roughly
+// padBytes so a modest number of entries exceeds the extractor's fixed tail
+// window, reproducing a real transcript's bytes-per-invocation.
+func paddedUsageEntry(uuid, messageID string, padBytes int) map[string]any {
+	entry := usageEntryWithMessageID(uuid, messageID, 100, 50, 0, 0)
+	entry["message"].(map[string]any)["content"] = strings.Repeat("x", padBytes)
+	return entry
+}
+
+// TestFactorySweepRecoversBacklogBeyondFixedTailWindow is the end-to-end guard
+// for the defect: when more than one tail window of transcript accumulates
+// between sweeps, every invocation past the window used to be dropped
+// permanently, because the persisted cursor is a message identity with no byte
+// offset to resume from. The sweep must now recover the whole backlog.
+func TestFactorySweepRecoversBacklogBeyondFixedTailWindow(t *testing.T) {
+	searchBase := t.TempDir()
+	workDir := t.TempDir()
+	sinkPath := filepath.Join(t.TempDir(), "usage.jsonl")
+
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	factory, err := NewFactory(FactoryConfig{
+		Store:       store,
+		Provider:    sp,
+		SearchPaths: []string{searchBase},
+		UsageSink:   usage.NewLocalSink(sinkPath),
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+
+	h, err := factory.Session(SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  workDir,
+		Provider: "claude",
+		Metadata: map[string]string{"agent_name": "myrig/polecat-1"},
+	})
+	if err != nil {
+		t.Fatalf("Session: %v", err)
+	}
+	if err := h.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	id := h.sessionID
+
+	info, err := h.manager.Get(id)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", id, err)
+	}
+	slugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+	if err := os.MkdirAll(slugDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", slugDir, err)
+	}
+	transcriptPath := filepath.Join(slugDir, info.SessionKey+".jsonl")
+
+	// 40 entries at ~20KB each ≈ 800KB: over a dozen fixed windows.
+	const backlog = 40
+	rows := make([]map[string]any, 0, backlog+1)
+	rows = append(rows, usageEntryWithMessageID("u0", "msg-cursor", 1, 1, 0, 0))
+	for i := range backlog {
+		rows = append(rows, paddedUsageEntry(fmt.Sprintf("u%d", i+1), fmt.Sprintf("msg-%02d", i), 20*1024))
+	}
+	writeWorkerTestJSONL(t, transcriptPath, rows)
+
+	// The session was last recorded at the very first entry, so all 40 that
+	// follow are owed. Under the fixed window only the last handful are visible.
+	if err := store.SetMetadata(id, sessionpkg.MetadataKeyInvocationUsageCursor, "msg-cursor"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetMetadata(id, "molecule_id", "run-Z"); err != nil {
+		t.Fatal(err)
+	}
+	b, err := store.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Guard: the fixed window genuinely cannot reach the cursor, so this test
+	// keeps exercising the defect rather than quietly becoming a tautology.
+	fixed, err := sessionlog.ExtractTailUsage(transcriptPath)
+	if err != nil {
+		t.Fatalf("ExtractTailUsage: %v", err)
+	}
+	if len(fixed) >= backlog {
+		t.Fatalf("fixed tail window saw %d of %d entries; test no longer reproduces the backlog", len(fixed), backlog)
+	}
+
+	emitted, settled, err := factory.SweepSessionModelUsage(context.Background(), id, b.Metadata, time.Unix(1, 0).UTC())
+	if err != nil {
+		t.Fatalf("SweepSessionModelUsage: %v", err)
+	}
+	if !settled {
+		t.Fatal("a fully-recorded sweep must report settled")
+	}
+	if emitted != backlog {
+		t.Fatalf("emitted = %d, want %d (the whole backlog past the fixed window)", emitted, backlog)
+	}
+
+	facts, warnings, err := usage.ReadFacts(sinkPath)
+	if err != nil {
+		t.Fatalf("ReadFacts: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected sink warnings: %v", warnings)
+	}
+	if len(facts) != backlog {
+		t.Fatalf("sink holds %d facts, want %d", len(facts), backlog)
 	}
 }
