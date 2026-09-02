@@ -1308,6 +1308,18 @@ func effectiveStorageFlags(b Bead, storage StorageClass) (ephemeral bool, noHist
 
 // Get retrieves a bead by ID via bd show.
 func (s *BdStore) Get(id string) (Bead, error) {
+	return s.get(id, false)
+}
+
+// getPreservingUpstreamStatus is the BdStore counterpart to the native exact
+// CAS readback. Ordinary Gas City reads keep their scheduler-oriented status
+// normalization; the exact conditional projection path compares the persisted
+// Beads status vocabulary instead.
+func (s *BdStore) getPreservingUpstreamStatus(id string) (Bead, error) {
+	return s.get(id, true)
+}
+
+func (s *BdStore) get(id string, preserveUpstreamStatus bool) (Bead, error) {
 	// Read via the transient-retry wrapper so a Get that races a managed-Dolt
 	// restart (SIGKILL + port rebind) recovers instead of surfacing a one-shot
 	// "invalid connection"/"i/o timeout" transport error. The runner performs a
@@ -1327,7 +1339,7 @@ func (s *BdStore) Get(id string) (Bead, error) {
 		// non-bead names (e.g. slash-qualified session recipients), which
 		// must not leak into a supplemental wisp query.
 		if isWispQueryableID(id) {
-			wisps, queryErr := s.getEphemeralByID(id)
+			wisps, queryErr := s.getEphemeralByID(id, preserveUpstreamStatus)
 			if queryErr == nil {
 				for _, b := range wisps {
 					if b.ID == id {
@@ -1346,6 +1358,9 @@ func (s *BdStore) Get(id string) (Bead, error) {
 		return Bead{}, fmt.Errorf("getting bead %q: %w", id, ErrNotFound)
 	}
 	bead := issues[0].toBead()
+	if preserveUpstreamStatus {
+		bead.Status = issues[0].Status
+	}
 	// Guard against bd's fuzzy/substring ID resolution silently returning a
 	// different bead than requested (gascity#gcy-g4o). bd may resolve a short
 	// ID like "gcy-dv7" to an unrelated bead whose ID contains "dv7" as a
@@ -2896,7 +2911,7 @@ func isWispQueryableID(id string) bool {
 	return true
 }
 
-func (s *BdStore) getEphemeralByID(id string) ([]Bead, error) {
+func (s *BdStore) getEphemeralByID(id string, preserveUpstreamStatus bool) ([]Bead, error) {
 	clause := "ephemeral=true AND id=" + id
 	args := []string{"query", "--json", clause, "--all", "--limit", "1"}
 	out, err := s.runner(s.dir, "bd", args...)
@@ -2910,6 +2925,9 @@ func (s *BdStore) getEphemeralByID(id string) ([]Bead, error) {
 	result := make([]Bead, len(issues))
 	for i := range issues {
 		result[i] = issues[i].toBead()
+		if preserveUpstreamStatus {
+			result[i].Status = issues[i].Status
+		}
 		result[i].Ephemeral = true
 	}
 	if parseErr != nil {

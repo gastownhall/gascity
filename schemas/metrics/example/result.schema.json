@@ -216,7 +216,8 @@
               "worktree-cleanup",
               "worktree-ensure",
               "worktree-verify",
-              "storage-preflight"
+              "storage-preflight",
+              "beads-update-cas"
             ]
           },
           "event_id": {

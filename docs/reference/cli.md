@@ -324,8 +324,8 @@ gc bd release-if-current my-project-abc worker-1
 Manage the beads provider (backing store for issue tracking).
 
 Subcommands for topology operations, health checking, diagnostics, exact-store
-metadata compare-and-set, and read-only list/show routed through the supervisor
-API with transparent fallback to direct bd reads.
+conditional writes, and read-only list/show routed through the supervisor API
+with transparent fallback to direct bd reads.
 
 ```
 gc beads
@@ -338,6 +338,7 @@ gc beads
 | [gc beads list](#gc-beads-list) | List beads (API-routed with bd fallback) |
 | [gc beads metadata-cas](#gc-beads-metadata-cas) | Atomically compare and set one metadata key in an exact local store |
 | [gc beads show](#gc-beads-show) | Show a single bead (API-routed with bd fallback) |
+| [gc beads update-cas](#gc-beads-update-cas) | Atomically update row-backed fields in an exact local store |
 
 ## gc beads city
 
@@ -507,6 +508,43 @@ gc beads show ga-abc --format=json
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--format` | string | `text` | output format: text or json |
+
+## gc beads update-cas
+
+Atomically update row-backed fields in one exact local bead store.
+
+The store must be selected explicitly with --store-ref=city:&lt;name&gt; or
+--store-ref=rig:&lt;name&gt;. The JSON patch is read from --request-file; use - for
+stdin so title and description do not appear in process arguments. Supported
+fields are title, description, status, priority, type, and metadata. Unknown or
+empty patches fail before the store opens.
+
+The command never scans another store or falls back to an unconditional write.
+A stale revision is a zero-exit conflict outcome. Capability, transport,
+readback, close, and validation failures are non-zero. Results contain only the
+identity, outcome, and revisions; patch content is never echoed.
+
+```
+gc beads update-cas <bead-id> [flags]
+```
+
+**Example:**
+
+```
+gc beads update-cas tr-123 \
+  --store-ref=rig:tributary \
+  --expected-revision=42 \
+  --request-file=- \
+  --json < patch.json
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--expected-revision` | int64 |  | opaque revision returned by bd show --json |
+| `--format` | string | `text` | output format: text or json |
+| `--json` | bool |  | emit the canonical JSON result |
+| `--request-file` | string |  | JSON patch file, or - for stdin |
+| `--store-ref` | string |  | exact local store: city:&lt;name&gt; or rig:&lt;name&gt; |
 
 ## gc build-image
 

@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gc://schemas/beads/update-cas/result.schema.json",
+  "title": "gc beads update-cas result",
+  "description": "Result of an exact-store revision-guarded whole-row update.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "ok",
+    "bead_id",
+    "store_ref",
+    "outcome",
+    "expected_revision",
+    "revision"
+  ],
+  "properties": {
+    "schema_version": {
+      "description": "Schema version for this result.",
+      "const": "1"
+    },
+    "ok": {
+      "description": "True when the CAS attempt completed and was classified.",
+      "const": true
+    },
+    "bead_id": {
+      "description": "Exact bead identifier supplied by the caller.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "store_ref": {
+      "description": "Canonical exact local store selected for the operation.",
+      "type": "string",
+      "maxLength": 260,
+      "pattern": "^(city|rig):[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "outcome": {
+      "description": "Durable classification of the CAS attempt.",
+      "type": "string",
+      "enum": [
+        "updated",
+        "already_applied",
+        "conflict"
+      ]
+    },
+    "expected_revision": {
+      "description": "Opaque revision supplied by the caller.",
+      "type": "integer",
+      "not": {"const": 0}
+    },
+    "revision": {
+      "description": "Opaque authoritative revision observed after classification.",
+      "type": "integer",
+      "not": {"const": 0}
+    }
+  }
+}

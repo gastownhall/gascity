@@ -1004,6 +1004,19 @@ func (s *NativeDoltStore) Create(b Bead) (Bead, error) {
 
 // Get retrieves a bead by ID from the upstream beads storage layer.
 func (s *NativeDoltStore) Get(id string) (Bead, error) {
+	return s.get(id, false)
+}
+
+// getPreservingUpstreamStatus is the narrow exact-store readback used by the
+// revision-guarded projection command. Gas City's ordinary Store view
+// intentionally normalizes blocked/deferred/hooked statuses for scheduler
+// semantics; a whole-row CAS must instead compare the exact persisted status
+// or it cannot distinguish a successful write from a conflict.
+func (s *NativeDoltStore) getPreservingUpstreamStatus(id string) (Bead, error) {
+	return s.get(id, true)
+}
+
+func (s *NativeDoltStore) get(id string, preserveUpstreamStatus bool) (Bead, error) {
 	var out Bead
 	err := s.withReadRetry(func(ctx context.Context, storage beadslib.Storage) error {
 		issues, err := storage.SearchIssues(ctx, "", beadslib.IssueFilter{
@@ -1018,6 +1031,9 @@ func (s *NativeDoltStore) Get(id string) (Bead, error) {
 				bead, err := beadFromNativeIssue(issue)
 				if err != nil {
 					return err
+				}
+				if preserveUpstreamStatus {
+					bead.Status = string(issue.Status)
 				}
 				out = bead
 				return nil
