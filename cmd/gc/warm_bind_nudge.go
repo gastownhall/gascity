@@ -30,57 +30,53 @@ const warmBindNudgeIdleTimeout = 30 * time.Second
 
 // warmClaimTriggerProbe reports whether a pool slot's bound trigger bead is still
 // unclaimed — open and not yet claimed by this slot — read live from the store
-// named by the session's gc.trigger_bead_store_ref. It is built by the reconciler
-// where the cached rig stores are in scope (buildWarmClaimTriggerProbe) and
-// threaded to the warm-reuse branch of startPreparedStartCandidate via the start
-// execution options. A nil probe (tests, and any start path that never builds one)
-// suppresses the nudge entirely; a probe that returns false suppresses it for that
-// session — the claim nudge fires only against a genuinely-unclaimed trigger, so it
-// is structurally invisible to a slot that has already begun its work (fail-closed
-// on any resolution uncertainty).
+// that holds it. It is built by the reconciler, where the city's opened routes and
+// rig stores are in scope (buildWarmClaimTriggerProbe over
+// CityRuntime.newWarmClaimTriggerResolver), and threaded to the warm-reuse branch
+// of startPreparedStartCandidate via the start execution options. A nil probe
+// (tests, and any start path that never builds one) suppresses the nudge entirely;
+// a probe that returns false suppresses it for that session — the claim nudge fires
+// only against a genuinely-unclaimed trigger, so it is structurally invisible to a
+// slot that has already begun its work (fail-closed on any resolution uncertainty).
 type warmClaimTriggerProbe func(session beads.Bead) bool
 
-// buildWarmClaimTriggerProbe returns a probe that resolves a session bead's bound
-// trigger from the store named by its gc.trigger_bead_store_ref (empty / city:*
-// → the city store; rig:<name> → the cached rig store) and reports whether that
-// trigger is still unclaimed. Reading the trigger directly from its owning store
-// — rather than the assignee-gated assigned-work snapshot the reverted poller
-// consulted — is what lets the warm-bind path see a freshly bound, not-yet-claimed
-// trigger at all: that snapshot omits an unassigned trigger, so the old poller was
-// blind to exactly this case. Any unresolved store or read error yields false:
-// never nudge on uncertainty.
-func buildWarmClaimTriggerProbe(cityStore beads.Store, rigStores map[string]beads.Store) warmClaimTriggerProbe {
+// warmClaimTriggerResolver reads one bound trigger bead by id, from wherever it
+// lives. It is the residency contract's answer, handed to the probe already
+// resolved: the probe's job is the claim question, not the store question.
+type warmClaimTriggerResolver func(triggerID string) (beads.Bead, error)
+
+// buildWarmClaimTriggerProbe returns a probe that reads a session bead's bound
+// trigger through resolve and reports whether that trigger is still unclaimed.
+//
+// Reading the trigger live — rather than consulting the assignee-gated
+// assigned-work snapshot the reverted poller used — is what lets the warm-bind
+// path see a freshly bound, not-yet-claimed trigger at all: that snapshot omits an
+// unassigned trigger, so the old poller was blind to exactly this case.
+//
+// The session's gc.trigger_bead_store_ref is NOT consulted. It records the demand
+// LEG the row was counted under, which on a split city is a work ledger even when
+// the bound step lives only in the class binding — so parsing it as a store
+// selector resolved every such trigger to a store that misses, and the probe failed
+// closed on work the slot was holding (ga-bmfmt). The stamp is still written, and
+// other readers still use it; residency is the resolver's question.
+//
+// A read error — a resolution the topology cannot answer, a refused city, a dark
+// leg — yields false: never nudge on uncertainty.
+func buildWarmClaimTriggerProbe(resolve warmClaimTriggerResolver) warmClaimTriggerProbe {
 	return func(session beads.Bead) bool {
+		if resolve == nil {
+			return false
+		}
 		triggerID := strings.TrimSpace(session.Metadata[beadmeta.TriggerBeadIDMetadataKey])
 		if triggerID == "" {
 			return false
 		}
-		store := warmClaimTriggerStore(session, cityStore, rigStores)
-		if store == nil {
-			return false
-		}
-		wb, err := store.Get(triggerID)
+		wb, err := resolve(triggerID)
 		if err != nil {
 			return false
 		}
 		return isUnclaimedTrigger(wb, strings.TrimSpace(session.Metadata["session_name"]))
 	}
-}
-
-// warmClaimTriggerStore resolves the store holding a session's trigger bead from
-// its gc.trigger_bead_store_ref marker: rig:<name> selects the cached rig store;
-// an empty or city:<name> ref falls back to the city store. Returns nil when a rig
-// ref names a store absent from the cache (fail-closed — the probe then declines
-// to nudge rather than guess).
-func warmClaimTriggerStore(session beads.Bead, cityStore beads.Store, rigStores map[string]beads.Store) beads.Store {
-	ref := strings.TrimSpace(session.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey])
-	if strings.HasPrefix(ref, "rig:") {
-		if store := rigStores[strings.TrimPrefix(ref, "rig:")]; store != nil {
-			return store
-		}
-		return nil
-	}
-	return cityStore
 }
 
 // deliverWarmBindClaimNudge delivers a pool slot's claim nudge to an already

@@ -6,6 +6,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -209,54 +210,141 @@ func TestIsUnclaimedTrigger(t *testing.T) {
 	}
 }
 
-// The probe resolves the trigger from the store named by gc.trigger_bead_store_ref
-// (rig:<name> → the cached rig store; empty → the city store) and reports its
-// live claim state — the resolution the reverted poller's assignee-gated snapshot
-// could not do.
-func TestBuildWarmClaimTriggerProbe_ResolvesFromStoreRef(t *testing.T) {
-	cityStore := beads.NewMemStoreFrom(0, []beads.Bead{
-		{ID: "c-1", Status: "open"},
+// warmClaimProbeFor builds the probe the reconciler installs, through the same
+// controller topology constructor the tick uses. Building it from a real
+// CityRuntime rather than from a hand-assembled storeref.Topology is what makes
+// these tests assert the production wiring: a topology written out here would
+// keep passing after the controller stopped building one.
+func warmClaimProbeFor(cfg *config.City, work beads.Store, rigs map[string]beads.Store, routes *storageRoutes) warmClaimTriggerProbe {
+	cr := &CityRuntime{
+		cfg:                 cfg,
+		standaloneCityStore: work,
+		standaloneRigStores: rigs,
+		storageRoutes:       routes,
+	}
+	return buildWarmClaimTriggerProbe(cr.newWarmClaimTriggerResolver(cr.rigBeadStores()))
+}
+
+// warmBindStampedSession is a pool slot bound to trigger, carrying the
+// demand-leg stamp the binder wrote.
+func warmBindStampedSession(trigger, storeRef string) beads.Bead {
+	return beads.Bead{Metadata: map[string]string{
+		"session_name":                          "worker-1",
+		beadmeta.TriggerBeadIDMetadataKey:       trigger,
+		beadmeta.TriggerBeadStoreRefMetadataKey: storeRef,
+	}}
+}
+
+// warmBindDemandLegStamps are gc.trigger_bead_store_ref values a live city
+// writes for one and the same binding-resident trigger. Each names the demand
+// LEG the row was counted under — the group key build_desired_state carried into
+// the bind — and none of them is a statement about where the bead lives, so all
+// of them must resolve to the same row.
+var warmBindDemandLegStamps = []string{"", "city", "city:test-city", "class:gmnos", "rig:alpha"}
+
+// A split city keeps its graph-class step beads in the class binding, which is
+// in no work ledger at all. The probe resolves the trigger through the residency
+// contract, so every demand-leg stamp answers from the binding.
+func TestBuildWarmClaimTriggerProbe_ResolvesBindingResidentTrigger(t *testing.T) {
+	binding := beads.NewMemStoreFrom(0, []beads.Bead{{ID: "gcg-1", Status: "open"}}, nil)
+	work := beads.NewMemStore()
+	alpha := beads.NewMemStore()
+	probe := warmClaimProbeFor(residencyTestConfig(), work, map[string]beads.Store{"alpha": alpha}, splitRoutes(binding))
+
+	for _, stamp := range warmBindDemandLegStamps {
+		if !probe(warmBindStampedSession("gcg-1", stamp)) {
+			t.Errorf("stamp %q: want unclaimed=true — the binding holds the row, and no stamp value names a store that does", stamp)
+		}
+	}
+
+	// The churn invariant still holds on the binding row: the instant the slot
+	// claims, the probe goes quiet under every stamp.
+	claimed, assignee := "in_progress", "worker-1"
+	if err := binding.Update("gcg-1", beads.UpdateOpts{Status: &claimed, Assignee: &assignee}); err != nil {
+		t.Fatalf("claiming gcg-1 in the binding: %v", err)
+	}
+	for _, stamp := range warmBindDemandLegStamps {
+		if probe(warmBindStampedSession("gcg-1", stamp)) {
+			t.Errorf("stamp %q: a claimed trigger must read unclaimed=false", stamp)
+		}
+	}
+}
+
+// `gc storage migrate` PRESERVES ids, so a migrated city can hold a frozen
+// same-id copy of a relocated bead in its work ledger. That relic stays open
+// forever and reads as unclaimed; the binding is the authority, so the probe
+// answers from it and never from the relic.
+func TestBuildWarmClaimTriggerProbe_BindingShadowsRelicCopy(t *testing.T) {
+	relic := beads.Bead{ID: "gcg-2", Status: "open"}
+	binding := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "gcg-2", Status: "in_progress", Assignee: "worker-1"},
 	}, nil)
+	probe := warmClaimProbeFor(
+		residencyTestConfig(),
+		beads.NewMemStoreFrom(0, []beads.Bead{relic}, nil),
+		nil,
+		splitRoutes(binding),
+	)
+	if probe(warmBindStampedSession("gcg-2", "city:test-city")) {
+		t.Fatal("the work-ledger relic answered: a claimed binding row must shadow the frozen pre-migration copy")
+	}
+
+	// Control: the SAME relic on a city that relocates nothing is the only copy
+	// there is, and it answers — so the assertion above is the binding winning
+	// rather than the probe having gone blind to work.
+	legacy := warmClaimProbeFor(
+		residencyTestConfig(),
+		beads.NewMemStoreFrom(0, []beads.Bead{relic}, nil),
+		nil,
+		nil,
+	)
+	if !legacy(warmBindStampedSession("gcg-2", "city:test-city")) {
+		t.Fatal("a legacy city lost its own work-ledger trigger")
+	}
+}
+
+// The legacy answer, unchanged: on a city with no bindings a by-id plan is the
+// work ledger plus the rig legs whose configured prefix covers the id, which is
+// the store set the pre-resolver parser reached through the stamp.
+//
+// This is the adapted TestBuildWarmClaimTriggerProbe_ResolvesFromStoreRef. The
+// one case that could not survive is the unknown-rig fail-closed: there is no
+// hand parser left to feed a bad stamp to, so it is inverted below into the
+// assertion that a wrong stamp no longer decides anything.
+func TestBuildWarmClaimTriggerProbe_LegacyCityResolvesWorkAndRigLegs(t *testing.T) {
+	cityStore := beads.NewMemStoreFrom(0, []beads.Bead{{ID: "c-1", Status: "open"}}, nil)
 	rigStore := beads.NewMemStoreFrom(0, []beads.Bead{
-		{ID: "w-1", Status: "open"},
+		{ID: "ra-1", Status: "open"},
+		{ID: "ra-2", Status: "open"},
 	}, nil)
-	rigStores := map[string]beads.Store{"webapp": rigStore}
-	probe := buildWarmClaimTriggerProbe(cityStore, rigStores)
+	probe := warmClaimProbeFor(residencyTestConfig(), cityStore, map[string]beads.Store{"alpha": rigStore}, nil)
 
-	rigSession := func(trigger, ref string) beads.Bead {
-		return beads.Bead{Metadata: map[string]string{
-			"session_name":                          "worker-1",
-			beadmeta.TriggerBeadIDMetadataKey:       trigger,
-			beadmeta.TriggerBeadStoreRefMetadataKey: ref,
-		}}
+	// The rig leg: ra-1 is inside rig alpha's configured prefix and open.
+	if !probe(warmBindStampedSession("ra-1", "rig:alpha")) {
+		t.Fatal("rig-resident open trigger: want unclaimed=true")
 	}
-
-	// rig:<name> → rig store; w-1 is open → unclaimed.
-	if !probe(rigSession("w-1", "rig:webapp")) {
-		t.Fatal("rig-ref open trigger: want unclaimed=true")
-	}
-	// Claim it in the rig store → probe flips to false.
+	// Claim it in the rig store → the probe flips.
 	claimed := "in_progress"
-	if err := rigStore.Update("w-1", beads.UpdateOpts{Status: &claimed}); err != nil {
-		t.Fatalf("update w-1: %v", err)
+	if err := rigStore.Update("ra-1", beads.UpdateOpts{Status: &claimed}); err != nil {
+		t.Fatalf("claiming ra-1: %v", err)
 	}
-	if probe(rigSession("w-1", "rig:webapp")) {
-		t.Fatal("rig-ref claimed trigger: want unclaimed=false")
+	if probe(warmBindStampedSession("ra-1", "rig:alpha")) {
+		t.Fatal("rig-resident claimed trigger: want unclaimed=false")
 	}
-	// Empty ref → city store; c-1 open → unclaimed.
-	if !probe(rigSession("c-1", "")) {
-		t.Fatal("empty-ref open trigger: want unclaimed=true (city store)")
+	// The work leg: c-1 is outside every rig prefix and lives in the city ledger.
+	if !probe(warmBindStampedSession("c-1", "")) {
+		t.Fatal("empty-stamp open trigger: want unclaimed=true (city work store)")
 	}
-	// rig ref naming an unknown store → fail-closed (nil store → false).
-	if probe(rigSession("w-1", "rig:ghost")) {
-		t.Fatal("unknown rig store: want fail-closed unclaimed=false")
+	// A stamp naming a store the bead is not in no longer decides anything.
+	if !probe(warmBindStampedSession("ra-2", "rig:ghost")) {
+		t.Fatal("a stamp naming an unknown store must not suppress a resolvable trigger")
 	}
-	// Missing trigger bead → read error → fail-closed.
-	if probe(rigSession("missing", "rig:webapp")) {
+	// A trigger no leg holds is a miss, and a miss never nudges.
+	if probe(warmBindStampedSession("missing", "")) {
 		t.Fatal("missing trigger bead: want fail-closed unclaimed=false")
 	}
 	// No bound trigger id → nothing to probe.
-	if probe(rigSession("", "rig:webapp")) {
+	if probe(warmBindStampedSession("", "rig:alpha")) {
 		t.Fatal("no trigger id: want unclaimed=false")
 	}
 }

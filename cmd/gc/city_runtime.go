@@ -2403,6 +2403,37 @@ func (cr *CityRuntime) stopConfigWatcher() {
 	}
 }
 
+// newWarmClaimTriggerResolver returns the reader the warm-bind claim probe asks
+// for one bound trigger bead, resolved over this controller's own topology: the
+// binding it opened at boot, its city work ledger, and the rig legs it is handed.
+//
+// It is the controller-side mirror of the CLI's by-id door (cliByIDOwner) — plan
+// ByID, execute it, and take the row the winning probe already read — for the same
+// reason that door exists. The binding LEADS for an id inside its reserved
+// namespace, so a graph-class step that lives only in the binding is found at all,
+// and a same-id relic that `gc storage migrate` left behind in the work ledger
+// (ids are preserved) is shadowed rather than answered: that relic is frozen open
+// forever, so answering from it would read as unclaimed on every tick.
+//
+// The topology is built once per reconcile tick, alongside the probe. Resolution
+// errors — a refused city, a dark leg, an id no leg could answer — reach the probe
+// as errors and it declines to nudge; nothing here converts a failed read into
+// absence.
+func (cr *CityRuntime) newWarmClaimTriggerResolver(servingRigs map[string]beads.Store) warmClaimTriggerResolver {
+	topo := cr.residencyTopology(servingRigs)
+	return func(triggerID string) (beads.Bead, error) {
+		plan, err := storeref.Plan(storeref.ByID{ID: triggerID}, topo)
+		if err != nil {
+			return beads.Bead{}, err
+		}
+		owner, err := storeref.ResolveOwnerRow(plan, triggerID)
+		if err != nil {
+			return beads.Bead{}, err
+		}
+		return beadForOwner(owner, triggerID)
+	}
+}
+
 // beadReconcileTick runs one bead-driven reconciliation pass. bootReconcile is
 // true only for the synchronous pass on the startup path: that pass must flip
 // readiness quickly, so it skips the undesired-pool-session sweep (a heavy
@@ -2604,14 +2635,15 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		// Warm-bind claim nudge: deliver a pool slot's claim instruction to an
 		// already-running, idle slot that had on-demand work bound to it after it
 		// last Started (bindPoolSessionTriggerBead), which cold Start's nudge cannot
-		// cover. The probe resolves the bound trigger from its owning store (via the
-		// cached rig stores) to confirm it is still unclaimed; the delivery + the
-		// once-per-binding marker live in startPreparedStartCandidate's warm-reuse
-		// branch. Provider-agnostic (not CanReportActivity-gated): on herdr this is
-		// the only closer of the warm-bind gap; on tmux it is the fast primary nudge
-		// ahead of the idle-timeout relaunch backstop, deduped by the marker + the
+		// cover. The probe resolves the bound trigger through the residency contract
+		// — the binding, then the work ledger, then the covering rig legs — to
+		// confirm it is still unclaimed; the delivery + the once-per-binding marker
+		// live in startPreparedStartCandidate's warm-reuse branch. Provider-agnostic
+		// (not CanReportActivity-gated): on herdr this is the only closer of the
+		// warm-bind gap; on tmux it is the fast primary nudge ahead of the
+		// idle-timeout relaunch backstop, deduped by the marker + the
 		// unclaimed-trigger gate.
-		withWarmClaimProbe(buildWarmClaimTriggerProbe(store, rigStores)),
+		withWarmClaimProbe(buildWarmClaimTriggerProbe(cr.newWarmClaimTriggerResolver(rigStores))),
 	}
 	if bootReconcile {
 		// #3288: skip the per-session orphan/failed-create session-bead closes on
