@@ -212,8 +212,9 @@ const scopeAbortSkippedCloseReason = "scope member skipped: an earlier member of
 // workflow root is in a state that makes further work invalid. Three states
 // qualify — the root is gone (orphan), the root was canceled, or the root has
 // already settled. The finalizer is exempt because it is the bead that settles
-// the root, and the teardown tail is exempt because it runs after settlement by
-// contract.
+// the root, and the teardown tail is exempt from both the canceled- and
+// settled-root closes because it runs after the root reaches a terminal state
+// by contract — cancellation is one such terminal state, not an exception to it.
 func closeOrphanedControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (ControlResult, bool, error) {
 	if bead.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflowFinalize {
 		return ControlResult{}, false, nil
@@ -233,7 +234,14 @@ func closeOrphanedControl(store beads.Store, bead beads.Bead, opts ProcessOption
 		// the dispatcher, and is the consumer that gives gc.cancel_requested
 		// teeth.
 		if rootCanceled(root) {
-			return closeCanceledControl(store, bead, opts, rootID, rootStoreRef)
+			teardown, err := isTeardownTailControl(store, bead, rootID)
+			if err != nil {
+				return ControlResult{}, false, fmt.Errorf("%s: resolving teardown tail under canceled root %s: %w", bead.ID, rootID, err)
+			}
+			if !teardown {
+				return closeCanceledControl(store, bead, opts, rootID, rootStoreRef)
+			}
+			return ControlResult{}, false, nil
 		}
 		// A settled (closed) root is equally durable a stop signal. The
 		// finalizer closes the root BEFORE its bulk
@@ -299,11 +307,12 @@ func rootSettled(root beads.Bead) bool {
 }
 
 // isTeardownTailControl reports whether a control belongs to the teardown tail,
-// which runs AFTER the root settles by contract — its pass condition may branch
-// on ROOT_OUTCOME, which only finalize produces (#5271). teardownTailExclusion
-// keeps that tail out of the finalizer's own terminal sweep for the same
-// reason, and it is the authoritative definition, so the settled-root gate
-// defers to it rather than restating the rule.
+// which runs AFTER the root reaches a terminal state by contract — its pass
+// condition may branch on ROOT_OUTCOME, which only finalize produces (#5271).
+// molecule.TeardownTailExclusion keeps that tail out of the finalizer's own
+// terminal sweep for the same reason, and it is the authoritative definition,
+// so both the canceled-root and settled-root gates defer to it rather than
+// restating the rule.
 //
 // The cheap arm answers for retry and ralph controls, which expandRetry /
 // expandRalph mint with cloneStep and so inherit the host step's
@@ -319,7 +328,7 @@ func isTeardownTailControl(store beads.Store, bead beads.Bead, rootID string) (b
 	if strings.TrimSpace(bead.Metadata[beadmeta.StepIDMetadataKey]) == "" {
 		return false, nil
 	}
-	exclude, err := teardownTailExclusion(store, rootID)
+	exclude, err := molecule.TeardownTailExclusion(store, rootID)
 	if err != nil {
 		return false, err
 	}
@@ -995,7 +1004,7 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 	// before completing the finalizer. This also repairs partially materialized
 	// workflows whose unused steps were never reached by ordinary dependency
 	// progression.
-	excludeTeardown, err := teardownTailExclusion(store, rootID)
+	excludeTeardown, err := molecule.TeardownTailExclusion(store, rootID)
 	if err != nil {
 		return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: resolving teardown members: %w", rootID, err))
 	}
@@ -1027,41 +1036,6 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 	}
 
 	return ControlResult{Processed: true, Action: "workflow-" + outcome}, nil
-}
-
-// teardownTailExclusion builds the predicate that keeps the teardown tail out
-// of the terminal sweep. Teardown work runs after the root settles by contract
-// (its pass condition may branch on the run outcome), so force-closing it at
-// settlement would skip the very step that releases the workflow's resources.
-//
-// The tail is the teardown-scoped members plus every attempt of the same step:
-// retry expansion strips gc.scope_role from the first attempt, leaving gc.step_id
-// as the only durable link back to the teardown step.
-func teardownTailExclusion(store beads.Store, rootID string) (func(beads.Bead) bool, error) {
-	members, err := molecule.ListSubtree(store, rootID)
-	if err != nil {
-		return nil, err
-	}
-	teardownStepIDs := make(map[string]struct{})
-	for _, member := range members {
-		if member.Metadata[beadmeta.ScopeRoleMetadataKey] != beadmeta.ScopeRoleTeardown {
-			continue
-		}
-		if stepID := strings.TrimSpace(member.Metadata[beadmeta.StepIDMetadataKey]); stepID != "" {
-			teardownStepIDs[stepID] = struct{}{}
-		}
-	}
-	return func(member beads.Bead) bool {
-		if member.Metadata[beadmeta.ScopeRoleMetadataKey] == beadmeta.ScopeRoleTeardown {
-			return true
-		}
-		stepID := strings.TrimSpace(member.Metadata[beadmeta.StepIDMetadataKey])
-		if stepID == "" {
-			return false
-		}
-		_, ok := teardownStepIDs[stepID]
-		return ok
-	}, nil
 }
 
 func preflightSourceBeadChain(rootStore beads.Store, rootID string, opts ProcessOptions) error {
