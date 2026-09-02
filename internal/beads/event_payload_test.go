@@ -6,9 +6,9 @@ import (
 	"time"
 )
 
-// TestDecodeBeadEventPayloadRawCanonical proves the canonical raw-bead shape —
-// what CachingStore.notifyChange actually marshals (json.Marshal(b)) and what
-// every .gc/events.jsonl row holds — decodes with full field fidelity.
+// TestDecodeBeadEventPayloadRawCanonical proves the canonical raw-bead shape
+// emitted by EncodeBeadEventPayload and stored in .gc/events.jsonl decodes with
+// full field fidelity.
 func TestDecodeBeadEventPayloadRawCanonical(t *testing.T) {
 	prio := 3
 	created := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
@@ -62,6 +62,95 @@ func TestDecodeBeadEventPayloadRawCanonical(t *testing.T) {
 	}
 	if len(got.Dependencies) != 1 || got.Dependencies[0].DependsOnID != "gcg-dep" {
 		t.Errorf("dependencies = %v, want one dep on gcg-dep", got.Dependencies)
+	}
+}
+
+func TestEncodeBeadEventPayloadPreservesOnlyActiveStatusBasedDeferral(t *testing.T) {
+	tests := []struct {
+		name string
+		bead Bead
+		want string
+	}{
+		{
+			name: "active status-based deferral",
+			bead: Bead{ID: "gcg-deferred", Status: "open", Type: "task", IndefinitelyDeferred: true},
+			want: "deferred",
+		},
+		{
+			name: "ordinary open bead",
+			bead: Bead{ID: "gcg-open", Status: "open", Type: "task"},
+			want: "open",
+		},
+		{
+			name: "explicit close wins over stale marker",
+			bead: Bead{ID: "gcg-closed", Status: "closed", Type: "task", IndefinitelyDeferred: true},
+			want: "closed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload, err := EncodeBeadEventPayload(tt.bead)
+			if err != nil {
+				t.Fatalf("EncodeBeadEventPayload: %v", err)
+			}
+			var wire struct {
+				Status string `json:"status"`
+			}
+			if err := json.Unmarshal(payload, &wire); err != nil {
+				t.Fatalf("decode encoded payload: %v", err)
+			}
+			if wire.Status != tt.want {
+				t.Fatalf("wire status = %q, want %q; payload=%s", wire.Status, tt.want, payload)
+			}
+		})
+	}
+}
+
+func TestMemStoreReopenClearsStatusBasedDeferral(t *testing.T) {
+	store := NewMemStore()
+	created, err := store.Create(Bead{
+		Title:                "deferred",
+		Status:               "open",
+		IndefinitelyDeferred: true,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.Reopen(created.ID); err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	reopened, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if IsDeferred(reopened, time.Now()) {
+		t.Fatalf("Reopen left bead deferred: %+v", reopened)
+	}
+}
+
+func TestDecodeBeadEventPayloadPreservesStatusBasedDeferral(t *testing.T) {
+	got, ok := DecodeBeadEventPayload([]byte(`{"id":"gcg-deferred","status":"deferred","issue_type":"task"}`))
+	if !ok {
+		t.Fatal("deferred decode returned ok=false")
+	}
+	if got.Status != "open" {
+		t.Fatalf("Status = %q, want normalized open", got.Status)
+	}
+	if !IsDeferred(got, time.Now()) {
+		t.Fatal("status-based indefinite deferral was not preserved")
+	}
+
+	past := time.Now().Add(-time.Minute).Format(time.RFC3339Nano)
+	expired, ok := DecodeBeadEventPayload([]byte(`{"id":"gcg-expired","status":"deferred","issue_type":"task","defer_until":"` + past + `"}`))
+	if !ok {
+		t.Fatal("expired deferred decode returned ok=false")
+	}
+	if expired.Status != "open" {
+		t.Fatalf("expired Status = %q, want normalized open", expired.Status)
+	}
+	if IsDeferred(expired, time.Now()) {
+		t.Fatal("expired time-bound deferral remained deferred")
 	}
 }
 

@@ -653,6 +653,48 @@ func TestClassStoreEmissionHydratesDependencyEdges(t *testing.T) {
 	}
 }
 
+func TestClassStoreEmissionPreservesStatusBasedDeferralUntilClose(t *testing.T) {
+	cityPath := t.TempDir()
+	leaf := beads.NewMemStore()
+	store := resolveGraphStore(splitClassRoutes(leaf).withCLIEmission(cityPath), beads.NewMemStore(), nil, cityPath, nil)
+
+	deferred, ok := beads.DecodeBeadEventPayload(
+		json.RawMessage(`{"id":"source-deferred","title":"deferred","status":"deferred","issue_type":"task"}`),
+	)
+	if !ok {
+		t.Fatal("deferred fixture did not decode")
+	}
+	created, err := leaf.Create(deferred)
+	if err != nil {
+		t.Fatalf("seeding deferred bead: %v", err)
+	}
+
+	if err := store.SetMetadata(created.ID, "gc.note", "still deferred"); err != nil {
+		t.Fatalf("metadata write: %v", err)
+	}
+	if err := store.Close(created.ID); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	got := beadEvents(readCityJournal(t, cityPath))
+	if len(got) != 2 {
+		t.Fatalf("got %s, want one update and one close", eventSummary(got))
+	}
+	var updateWire struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(got[0].Payload, &updateWire); err != nil {
+		t.Fatalf("decode update payload: %v", err)
+	}
+	if got[0].Type != events.BeadUpdated || updateWire.Status != "deferred" {
+		t.Errorf("first event = %s status=%q, want bead.updated status=deferred", got[0].Type, updateWire.Status)
+	}
+	closed, ok := beads.DecodeBeadEventPayload(got[1].Payload)
+	if !ok || got[1].Type != events.BeadClosed || closed.Status != "closed" {
+		t.Errorf("second event = %s payload=%s, want bead.closed with closed snapshot", got[1].Type, got[1].Payload)
+	}
+}
+
 // A post-write read miss must never produce a bare-id payload. An empty
 // snapshot does not say less than a full one — it CLOBBERS the fold, because a
 // projection applying it overwrites title, status and run membership with

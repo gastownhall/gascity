@@ -110,6 +110,10 @@ func beadCopyFieldMutations() map[string]func(beads.Bead) beads.Bead {
 			b.IsBlocked = &blocked
 			return b
 		},
+		"IndefinitelyDeferred": func(b beads.Bead) beads.Bead {
+			b.IndefinitelyDeferred = true
+			return b
+		},
 	}
 }
 

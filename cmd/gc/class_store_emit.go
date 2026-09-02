@@ -51,9 +51,9 @@ package main
 //
 // # What it emits, and what it deliberately does not
 //
-// The payload is the canonical bead snapshot CachingStore.notifyChange emits —
-// json.Marshal of the post-write bead, decodable by beads.DecodeBeadEventPayload
-// and foldable by the run projection — with the run/session/step correlation
+// The payload is the canonical bead snapshot from
+// beads.EncodeBeadEventPayload, decodable by beads.DecodeBeadEventPayload and
+// foldable by the run projection, with the run/session/step correlation
 // resolved onto the typed envelope from the same metadata keys and through the
 // same helpers. bead.closed rides only a genuine open→closed transition, because
 // the export boundary drops bead.updated and a metadata write to a closed bead
@@ -74,7 +74,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -165,7 +164,7 @@ func (s *emittingClassStore) emit(emissions ...classStoreEmission) {
 		if strings.TrimSpace(emission.bead.ID) == "" {
 			continue
 		}
-		payload, err := json.Marshal(emission.bead)
+		payload, err := beads.EncodeBeadEventPayload(emission.bead)
 		if err != nil {
 			warnClassStoreEmit(fmt.Errorf("marshaling the %s payload of %s: %w", emission.eventType, emission.bead.ID, err))
 			continue

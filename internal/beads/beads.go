@@ -100,10 +100,15 @@ type Bead struct {
 	// nil or past means ready). Create paths preserve it; UpdateOpts does not
 	// mutate it.
 	DeferUntil *time.Time `json:"defer_until,omitempty"`
-	// IsBlocked carries bd's denormalized ready-work projection. Nil means the
-	// store did not provide the projection and cached ready falls back to
+	// IsBlocked carries bd's denormalized dependency-ready projection. Nil
+	// means the store did not provide it and cached ready falls back to
 	// dependency-derived readiness for backward compatibility.
 	IsBlocked *bool `json:"is_blocked,omitempty"`
+	// IndefinitelyDeferred preserves bd's status-based indefinite deferral
+	// after richer statuses normalize to Gas City's three-state model. Cache
+	// notifications restore status="deferred" on the event wire so another
+	// process can reconstruct it; other JSON surfaces remain unchanged.
+	IndefinitelyDeferred bool `json:"-"`
 	// Revision is the store-internal optimistic-concurrency token for
 	// ConditionalWriter. It is deliberately json:"-" so it stays off every HTTP
 	// and SSE wire path (beads.Bead is both the Huma response type and the SSE
@@ -575,11 +580,18 @@ func HasReadyExcludedLabel(b Bead) bool {
 	return false
 }
 
-// IsDeferred reports whether a bead is hidden by a future defer_until,
-// mirroring bd ready's server-side filter (defer_until IS NULL OR <= now is
-// ready) and cmd_hook.isFutureDeferredHookCandidate.
+// IsDeferred reports whether a bead is hidden indefinitely by bd's deferred
+// status or temporarily by a future defer_until.
 func IsDeferred(b Bead, now time.Time) bool {
-	return b.DeferUntil != nil && b.DeferUntil.After(now)
+	return b.IndefinitelyDeferred ||
+		(b.DeferUntil != nil && b.DeferUntil.After(now))
+}
+
+// setBeadStatus applies an explicit Gas City status transition. Any such
+// transition supersedes richer source status that was normalized on read.
+func setBeadStatus(b *Bead, status string) {
+	b.Status = status
+	b.IndefinitelyDeferred = false
 }
 
 func isReadyBlockingDependencyType(t string) bool {

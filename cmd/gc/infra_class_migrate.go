@@ -1512,6 +1512,8 @@ func beadCopyDifference(want, got beads.Bead) string {
 		return fmt.Sprintf("title %q != %q", want.Title, got.Title)
 	case want.Status != got.Status:
 		return fmt.Sprintf("status %q != %q", want.Status, got.Status)
+	case want.IndefinitelyDeferred != got.IndefinitelyDeferred:
+		return fmt.Sprintf("indefinitely_deferred %v != %v", want.IndefinitelyDeferred, got.IndefinitelyDeferred)
 	case want.Type != got.Type:
 		return fmt.Sprintf("type %q != %q", want.Type, got.Type)
 	case want.Description != got.Description:

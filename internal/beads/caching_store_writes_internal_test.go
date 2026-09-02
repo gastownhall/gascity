@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 )
 
 // countingBackingStore wraps a Store and counts SetMetadata /
@@ -1247,6 +1248,36 @@ func TestCachingStoreReopenAdoptsFreshBackingRead(t *testing.T) {
 	if got.Revision != fresh.Revision {
 		t.Fatalf("cached revision after Reopen = %d, backing = %d; the successful refresh read must be adopted",
 			got.Revision, fresh.Revision)
+	}
+}
+
+func TestCachingStoreReopenClearsStatusBasedDeferralWhenRefreshFails(t *testing.T) {
+	t.Parallel()
+
+	backing := &releaseRefreshFailOnceStore{Store: NewMemStore()}
+	created, err := backing.Create(Bead{
+		Title:                "deferred",
+		Status:               "open",
+		IndefinitelyDeferred: true,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	backing.failNextGet = true
+	if err := cache.Reopen(created.ID); err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	reopened, err := cache.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if IsDeferred(reopened, time.Now()) {
+		t.Fatalf("failed refresh fallback retained status-based deferral: %+v", reopened)
 	}
 }
 
