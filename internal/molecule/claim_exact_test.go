@@ -3,6 +3,7 @@ package molecule
 import (
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"sync"
 	"testing"
@@ -329,64 +330,99 @@ func TestClaimExact_ConcurrentExactClaimsExactlyOneWinner(t *testing.T) {
 	}
 }
 
-// raceOnFirstUpdateStore wraps a *beads.MemStore and, on the first call to
-// Update for the watched bead, injects a second full ClaimExact-shaped claim
-// (its own generation CAS plus its own unconditional effects write) before
-// letting the real caller's Update proceed. It simulates a second caller that
-// observed the just-advanced generation and raced in during the window
-// between this call's CAS and its own effects write.
-type raceOnFirstUpdateStore struct {
+// raceBeforeUpdateIfMatchStore wraps a *beads.MemStore and, on the first call
+// to UpdateIfMatch for the watched bead, injects a second full claim (its own
+// ClaimExact call, winning from the same fromGeneration this call observed)
+// before letting the real caller's UpdateIfMatch proceed. It simulates a
+// second, later claimant B racing in between this call's (A's) Get and its
+// UpdateIfMatch.
+type raceBeforeUpdateIfMatchStore struct {
 	*beads.MemStore
 	targetID     string
 	racedFromGen string
-	racedToGen   string
 	raced        bool
 }
 
-func (s *raceOnFirstUpdateStore) Update(id string, opts beads.UpdateOpts) error {
+func (s *raceBeforeUpdateIfMatchStore) UpdateIfMatch(id string, expectedRevision int64, opts beads.UpdateOpts) error {
 	if !s.raced && id == s.targetID {
 		s.raced = true
-		outcome, err := beads.ApplyMetadataCAS(s.MemStore, id, beadmeta.ClaimGenerationMetadataKey, s.racedFromGen, s.racedToGen)
+		_, outcome, err := ClaimExact(s.MemStore, id, ClaimExactPreconditions{}, s.racedFromGen, beads.UpdateOpts{Assignee: strp("worker-B")})
 		if err != nil {
-			return fmt.Errorf("test setup: racer CAS: %w", err)
+			return fmt.Errorf("test setup: racer B claim: %w", err)
 		}
-		if outcome != beads.MetadataCASSwapped {
-			return fmt.Errorf("test setup: racer CAS did not swap: %s", outcome)
-		}
-		if err := s.MemStore.Update(id, beads.UpdateOpts{Assignee: strp("worker-racer")}); err != nil {
-			return fmt.Errorf("test setup: racer effects write: %w", err)
+		if outcome != ClaimExactClaimed {
+			return fmt.Errorf("test setup: racer B claim did not win: %s", outcome)
 		}
 	}
-	return s.MemStore.Update(id, opts)
+	return s.MemStore.UpdateIfMatch(id, expectedRevision, opts)
 }
 
-// TestClaimExact_EffectsRaceAfterGenerationCASIsDetected proves the
-// documented, narrower guarantee: ClaimExact cannot make its own CAS-then-
-// Update sequence fully atomic, but it does detect (and refuse to falsely
-// report ClaimExactClaimed for) the case where a second claimant's CAS lands
-// during the window between this call's own CAS and its effects write.
-func TestClaimExact_EffectsRaceAfterGenerationCASIsDetected(t *testing.T) {
+// TestClaimExact_StaleWriterCannotOverwriteLaterWinnersEffects is the atomicity
+// regression this fix exists for: a stale caller A observes fromGeneration,
+// then before A's own UpdateIfMatch runs, a second caller B independently wins
+// a full claim from that same fromGeneration (its ClaimExact call reads the
+// bead, matches preconditions, and its own UpdateIfMatch commits first). A's
+// UpdateIfMatch is fenced on the revision A observed at its own Get, so B's
+// intervening commit must make A's write lose the fence (PreconditionFailed),
+// not silently overwrite B's assignee/generation with A's stale effects.
+func TestClaimExact_StaleWriterCannotOverwriteLaterWinnersEffects(t *testing.T) {
 	inner := beads.NewMemStore()
 	b := mustCreateExactClaimBead(t, inner)
 
-	racer := &raceOnFirstUpdateStore{
+	racer := &raceBeforeUpdateIfMatchStore{
 		MemStore:     inner,
 		targetID:     b.ID,
-		racedFromGen: "1", // the generation this call's own CAS will advance to
-		racedToGen:   "2",
+		racedFromGen: "", // the generation both A and B observe before either writes
 	}
 
-	got, outcome, err := ClaimExact(racer, b.ID, ClaimExactPreconditions{}, "", beads.UpdateOpts{Assignee: strp("worker-A")})
-	if !errors.Is(err, ErrClaimEffectsRaced) {
-		t.Fatalf("err = %v, want ErrClaimEffectsRaced", err)
+	gotA, outcomeA, errA := ClaimExact(racer, b.ID, ClaimExactPreconditions{}, "", beads.UpdateOpts{Assignee: strp("worker-A")})
+	if errA != nil {
+		t.Fatalf("ClaimExact (A): %v", errA)
+	}
+	if outcomeA != ClaimExactStale {
+		t.Fatalf("A outcome = %q, want %q (B's commit must fence A out)", outcomeA, ClaimExactStale)
+	}
+
+	final, err := inner.Get(b.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if final.Assignee != "worker-B" {
+		t.Fatalf("assignee = %q, want worker-B: A's stale write overwrote B's committed effects", final.Assignee)
+	}
+	if final.Metadata[beadmeta.ClaimGenerationMetadataKey] != "1" {
+		t.Fatalf("generation = %q, want 1 (B's own advance, untouched by A)", final.Metadata[beadmeta.ClaimGenerationMetadataKey])
+	}
+	if gotA.Assignee != "worker-B" {
+		t.Fatalf("A's returned bead assignee = %q, want worker-B (A must see B's committed state, not its own)", gotA.Assignee)
+	}
+}
+
+func TestClaimExact_MaxInt64GenerationFailsClosed(t *testing.T) {
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{
+		Title:  "exact claim target",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.ClaimGenerationMetadataKey: strconv.FormatInt(math.MaxInt64, 10),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create bead: %v", err)
+	}
+
+	got, outcome, err := ClaimExact(store, b.ID, ClaimExactPreconditions{}, strconv.FormatInt(math.MaxInt64, 10), beads.UpdateOpts{Assignee: strp("worker-9")})
+	if err == nil {
+		t.Fatal("expected an error advancing math.MaxInt64")
 	}
 	if outcome != "" {
-		t.Fatalf("outcome = %q, want empty on race detection", outcome)
+		t.Fatalf("outcome = %q, want empty on error", outcome)
 	}
-	if got.ID == "" {
-		t.Fatal("returned bead is the zero value; caller cannot inspect the raced state")
+	if got.Assignee != "" {
+		t.Fatalf("assignee mutated despite overflow rejection: %q", got.Assignee)
 	}
-	if got.Metadata[beadmeta.ClaimGenerationMetadataKey] != "2" {
-		t.Fatalf("generation = %q, want 2 (the racer's own further advance)", got.Metadata[beadmeta.ClaimGenerationMetadataKey])
+	if got.Metadata[beadmeta.ClaimGenerationMetadataKey] != strconv.FormatInt(math.MaxInt64, 10) {
+		t.Fatalf("generation mutated: got %q", got.Metadata[beadmeta.ClaimGenerationMetadataKey])
 	}
 }
