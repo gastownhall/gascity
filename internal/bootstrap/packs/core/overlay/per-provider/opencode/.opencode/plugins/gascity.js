@@ -13,6 +13,13 @@
 //     and inject the handoff confirmation into the compaction context
 //   - experimental.chat.system.transform → inject gc prime --hook, queued
 //     nudges, and unread mail into the system prompt for each turn
+//
+// OpenCode auto-discovers this file for EVERY OpenCode launch in the work
+// dir, including a developer's personal session started by hand. The plugin
+// therefore registers hooks only when gc's session identity is present in
+// the environment; otherwise every lifecycle call it would make is
+// guaranteed to fail (gc's session-facing commands require that identity)
+// and the failures surface as warnings in a session Gas City does not own.
 
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
@@ -20,7 +27,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const GC_OPENCODE_HOOK_VERSION = 6;
+const GC_OPENCODE_HOOK_VERSION = 7;
 const GC_BIN = process.env.GC_BIN || "gc";
 // GC_BIN is the explicit override. The fallback order matches Pi hooks so
 // sibling providers resolve the same installed gc before developer-local bins.
@@ -113,6 +120,22 @@ function sessionIDFromEvent(event) {
   );
 }
 
+// Mirrors gc's own hookHasManagedIdentity (cmd/gc/cmd_prime.go): the session
+// lifecycle seeds GC_SESSION_ID, GC_SESSION_NAME and GC_ALIAS into every
+// managed session's environment, and GC_AGENT/GC_TEMPLATE come from templated
+// starts. A process with none of these was not started by gc, so gc handoff
+// would exit 1 ("not in session context") and the injection commands would
+// return nothing.
+function managedSessionIdentityPresent() {
+  return [
+    "GC_SESSION_ID",
+    "GC_SESSION_NAME",
+    "GC_ALIAS",
+    "GC_AGENT",
+    "GC_TEMPLATE",
+  ].some((key) => String(process.env[key] || "").trim() !== "");
+}
+
 function providerSessionEnv(sessionID) {
   sessionID = String(sessionID || "");
   const env = { GC_PROVIDER_SESSION_ID_REQUIRED: "opencode" };
@@ -151,6 +174,14 @@ async function mirrorTranscript(directory, client, sessionID) {
 }
 
 export default async function gascityPlugin({ directory, client }) {
+  if (!managedSessionIdentityPresent()) {
+    // One line so an operator can tell "plugin inactive" from "plugin
+    // missing", then stay silent: this OpenCode instance is not gc-managed.
+    console.warn(
+      "gascity opencode plugin: no Gas City session identity in the environment; hooks disabled for this OpenCode instance",
+    );
+    return {};
+  }
   let cachedPrime = null;
 
   async function readPrime(force = false, extraEnv = {}) {
