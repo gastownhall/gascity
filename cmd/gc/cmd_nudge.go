@@ -1467,6 +1467,16 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 			bookkeepErr = errors.Join(bookkeepErr, fmt.Errorf("withdrawing blocked nudges: %w", termErr))
 		}
 	}
+	var staleMail []queuedNudge
+	items, staleMail, err = splitStaleMailQueuedNudges(target, deliveryStore, deliverySessStore, items)
+	if err != nil && nudgeWarningWriter != nil {
+		fmt.Fprintf(nudgeWarningWriter, "gc nudge: warning: checking mail staleness for %s: %v\n", target.agentKey(), err) //nolint:errcheck
+	}
+	if len(staleMail) > 0 {
+		if termErr := terminalizeBlockedQueuedNudges(target.cityPath, map[string][]queuedNudge{"mail-already-read": staleMail}); termErr != nil {
+			bookkeepErr = errors.Join(bookkeepErr, fmt.Errorf("withdrawing stale mail nudges: %w", termErr))
+		}
+	}
 	if len(items) == 0 {
 		return false, bookkeepErr
 	}
@@ -1711,6 +1721,68 @@ func terminalizeBlockedQueuedNudges(cityPath string, blocked map[string][]queued
 		}
 	}
 	return nil
+}
+
+// targetHasUnreadMail reports whether target's own mailbox still has at
+// least one unread message. It re-verifies unread state at nudge-delivery
+// time for a deferred "you have mail" reminder: ga-vtxkj5 found the queue
+// replaying that reminder long after the mail had already been read, because
+// nothing re-checked unread state between enqueue and delivery.
+//
+// The check is deliberately coarse: it looks at aggregate unread count for
+// the target, not the specific message that produced the reminder, because
+// queued mail nudges carry no message ID to check individually. Treating
+// "still has unread mail" as the safe default (on ambiguity or error, report
+// unread) preserves the TestSendMailNotifyQueuesIndependentRemindersForEachMail
+// guarantee from PR #2968 that independent mail arrivals never get silently
+// dropped -- this only withdraws a reminder when unread count is truly zero.
+func targetHasUnreadMail(target nudgeTarget, msgStore, sessStore beads.Store) (bool, error) {
+	if target.sessionID == "" {
+		return true, nil
+	}
+	resolved, err := resolveMailTargetsWithConfig(target.cityPath, target.cfg, sessStore, target.sessionID)
+	if err != nil {
+		return true, err
+	}
+	mp := newMailProviderWithSessionStore(msgStore, sessStore)
+	messages, err := collectMailMessages(mp.Check, resolved.recipients)
+	if err != nil {
+		return true, err
+	}
+	return len(messages) > 0, nil
+}
+
+// splitStaleMailQueuedNudges partitions items into ones that should still be
+// delivered (keep) and mail-sourced ones whose target has since read all
+// mail and so must be withdrawn instead of replayed as a stale reminder
+// (stale). Non-mail items always pass through into keep untouched.
+func splitStaleMailQueuedNudges(target nudgeTarget, msgStore, sessStore beads.Store, items []queuedNudge) (keep, stale []queuedNudge, err error) {
+	hasMailItem := false
+	for _, item := range items {
+		if item.Source == "mail" {
+			hasMailItem = true
+			break
+		}
+	}
+	if !hasMailItem {
+		return items, nil, nil
+	}
+	unread, err := targetHasUnreadMail(target, msgStore, sessStore)
+	if err != nil {
+		return items, nil, err
+	}
+	if unread {
+		return items, nil, nil
+	}
+	keep = make([]queuedNudge, 0, len(items))
+	for _, item := range items {
+		if item.Source == "mail" {
+			stale = append(stale, item)
+			continue
+		}
+		keep = append(keep, item)
+	}
+	return keep, stale, nil
 }
 
 func ensureNudgePoller(cityPath, agentName, sessionName string) error {

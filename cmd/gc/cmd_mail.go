@@ -745,15 +745,11 @@ func doMailCheckTargetWithFormat(mp mail.Provider, target resolvedMailTarget, in
 				fmt.Fprintf(stderr, "gc mail check: writing hook output: %v\n", err) //nolint:errcheck // best-effort stderr
 				return 0
 			}
-			// Archive the SAME messages that were injected: priority-sort
-			// before the clamp so the archived set matches formatInjectOutput's
-			// displayed set (a priority:1 handoff that floats into the window is
-			// injected AND archived, never injected-but-not-archived).
-			injectedMessages := sortMailByPriority(messages)
-			if len(injectedMessages) > mailInjectMaxMessages {
-				injectedMessages = injectedMessages[:mailInjectMaxMessages]
-			}
-			archiveInjectedAutoHandoffMessages(mp, injectedMessages, stderr)
+			// Archive the SAME messages that were injected: select the same
+			// window formatInjectOutput displays so the archived set matches
+			// (a priority:1 handoff that floats into the window is injected
+			// AND archived, never injected-but-not-archived).
+			archiveInjectedAutoHandoffMessages(mp, selectMailInjectWindow(messages), stderr)
 		}
 		return 0 // --inject always exits 0
 	}
@@ -807,22 +803,50 @@ func sortMailByPriority(messages []mail.Message) []mail.Message {
 	return sorted
 }
 
+// selectMailInjectWindow returns the at-most mailInjectMaxMessages messages
+// that formatInjectOutput displays. Any caller archiving "the injected
+// messages" (doMailCheckTargetWithFormat, sessionStartAutoHandoffInjection)
+// must select the same window so the archived set never diverges from the
+// displayed set (see the "Archive the SAME messages" comments at both call
+// sites).
+//
+// It keeps sortMailByPriority's contract (higher priority first) but, within
+// a priority tier, keeps the NEWEST arrivals rather than the oldest: without
+// this, a backlog of stale same-priority mail permanently fills the
+// mailInjectMaxMessages window and a newly arrived message is never surfaced
+// (gastownhall/gascity ga-18f84o). The returned window is re-sorted ascending
+// by CreatedAt so the rendered block still reads oldest-to-newest.
+func selectMailInjectWindow(messages []mail.Message) []mail.Message {
+	windowed := sortMailByPriority(messages)
+	if len(windowed) > mailInjectMaxMessages {
+		sort.SliceStable(windowed, func(i, j int) bool {
+			if windowed[i].Priority != windowed[j].Priority {
+				return windowed[i].Priority > windowed[j].Priority
+			}
+			return windowed[i].CreatedAt.After(windowed[j].CreatedAt)
+		})
+		windowed = windowed[:mailInjectMaxMessages]
+	}
+	sort.SliceStable(windowed, func(i, j int) bool {
+		return windowed[i].CreatedAt.Before(windowed[j].CreatedAt)
+	})
+	return windowed
+}
+
 // formatInjectOutput formats messages as a <system-reminder> block for
-// injection into an agent's prompt via a UserPromptSubmit hook. It priority-
-// sorts before the display clamp so both inject render paths
+// injection into an agent's prompt via a UserPromptSubmit hook. It selects the
+// display window via selectMailInjectWindow so both inject render paths
 // (renderMailCheckFromAPI and doMailCheckTargetWithFormat) surface higher-
-// priority unread first.
+// priority, then most-recent, unread mail first.
 func formatInjectOutput(messages []mail.Message) string {
-	messages = sortMailByPriority(messages)
+	windowed := selectMailInjectWindow(messages)
 	var sb strings.Builder
 	sb.WriteString("<system-reminder>\n")
 	fmt.Fprintf(&sb, "You have %d unread message(s).\n\n", len(messages))
-	limit := len(messages)
-	if limit > mailInjectMaxMessages {
-		limit = mailInjectMaxMessages
-		fmt.Fprintf(&sb, "Showing the first %d message(s) here; run 'gc mail inbox' for the full list.\n\n", limit)
+	if len(windowed) < len(messages) {
+		fmt.Fprintf(&sb, "Showing the %d most recent message(s) here; run 'gc mail inbox' for the full list.\n\n", len(windowed))
 	}
-	for _, m := range messages[:limit] {
+	for _, m := range windowed {
 		// Sanitize attacker-controllable fields (sender identity, subject,
 		// body) before interpolating into the <system-reminder> block.
 		// Without this, a sender can inject </system-reminder> sequences

@@ -3583,13 +3583,16 @@ func TestMailCheckInjectLimitsMessageCount(t *testing.T) {
 	}
 
 	out := stdout.String()
-	for _, want := range []string{"4 unread message(s)", "gc-1 from sender-a", "gc-2 from sender-b", "gc-3 from sender-c", "Showing the first 3 message(s)"} {
+	// selectMailInjectWindow keeps the NEWEST arrivals within a priority tier
+	// (ga-18f84o): among 4 equal-priority (all priority-0) messages, the oldest
+	// (first/gc-1) is the one clamped out, not the newest.
+	for _, want := range []string{"4 unread message(s)", "gc-2 from sender-b", "gc-3 from sender-c", "gc-4 from sender-d", "Showing the 3 most recent message(s)"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("stdout missing %q:\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, "gc-4") || strings.Contains(out, "fourth") {
-		t.Errorf("stdout should not include the fourth message:\n%s", out)
+	if strings.Contains(out, "gc-1") || strings.Contains(out, "first") {
+		t.Errorf("stdout should not include the first message:\n%s", out)
 	}
 }
 
@@ -3819,11 +3822,12 @@ func TestMailCheckInjectArchivesEphemeralAutoHandoffMessages(t *testing.T) {
 // That test pinned the bug: a priority-tagged restart handoff arriving BEHIND a
 // full window of ordinary mail was clamped out of the injection preview (never
 // surfaced, never archived). With the priority-sort-before-clamp patch (handoff
-// mail tagged priority:1 at the cmd_handoff send sites + sortMailByPriority run
-// before both the display and archive clamps), a priority:1 handoff now floats
-// into the window: it is injected AND archived, while a lower-priority ordinary
-// message is the one clamped out and left open. mail.Message.Priority is
-// otherwise unwritten, so ordinary all-priority-0 mail keeps arrival order.
+// mail tagged priority:1 at the cmd_handoff send sites + selectMailInjectWindow
+// run before both the display and archive clamps), a priority:1 handoff now
+// floats into the window: it is injected AND archived, while a lower-priority
+// ordinary message is the one clamped out and left open. Among the equal-
+// priority ordinary mail, selectMailInjectWindow keeps the NEWEST arrivals
+// (ga-18f84o) and evicts the oldest one, not "arrival order" as before.
 func TestMailCheckInjectFloatsPriorityAutoHandoffIntoWindow(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
@@ -3859,8 +3863,9 @@ func TestMailCheckInjectFloatsPriorityAutoHandoffIntoWindow(t *testing.T) {
 	}
 	// ...and is retired (mark-read+closed, retain-addressable) after injection.
 	assertAutoHandoffRetainedAddressable(t, store, auto.ID)
-	// The lowest-ranked ordinary message is the one clamped out — still open.
-	clampedOut := ordinaryIDs[len(ordinaryIDs)-1]
+	// The oldest ordinary message is the one clamped out (selectMailInjectWindow
+	// keeps the newest arrivals within a priority tier) — still open.
+	clampedOut := ordinaryIDs[0]
 	b, err := store.Get(clampedOut)
 	if err != nil {
 		t.Fatalf("clamped-out ordinary mail should remain: %v", err)

@@ -15,6 +15,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/nudgepoller"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/pidutil"
@@ -2541,6 +2542,165 @@ func TestTryDeliverQueuedNudgesByPollerDeliversAndAcks(t *testing.T) {
 	}
 	if len(dead) != 0 {
 		t.Fatalf("dead = %d, want 0", len(dead))
+	}
+}
+
+// TestTryDeliverQueuedNudgesByPollerDropsStaleMailReminder reproduces the
+// second half of ga-vtxkj5: a deferred "[mail] you have mail from X" reminder
+// must re-verify unread state at fire time and drop itself if the recipient
+// has already read the mail, instead of replaying a stale notification.
+func TestTryDeliverQueuedNudgesByPollerDropsStaleMailReminder(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	now := time.Now().Add(-1 * time.Minute)
+	const nudgeID = "stale-mail-reminder-1"
+	if err := enqueueQueuedNudge(dir, newQueuedNudgeWithOptions("worker", "[mail] You have mail from human", "mail", now, queuedNudgeOptions{ID: nudgeID})); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	idleSince := time.Now().Add(-10 * time.Second)
+	fake.Activity = map[string]time.Time{info.SessionName: idleSince}
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		agent:       config.Agent{Name: "worker"},
+		sessionID:   info.ID,
+		resolved:    &config.ResolvedProvider{Name: "codex"},
+		sessionName: info.SessionName,
+	}
+	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+
+	// No mail sent -- the recipient has nothing unread, so the deferred
+	// reminder is already stale and must not be delivered.
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
+	if err != nil {
+		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
+	}
+	if delivered {
+		t.Fatal("delivered = true, want false (stale mail reminder must not deliver)")
+	}
+
+	for _, call := range fake.Calls {
+		if call.Method == "Nudge" {
+			t.Fatalf("unexpected Nudge call for a stale mail reminder: %#v", call)
+		}
+	}
+
+	// The withdrawn item is fully drained from the live queue -- it must not
+	// stay pending/in-flight for a later retry. It is not dead-lettered
+	// either: terminalizeBlockedQueuedNudges (shared with the pre-existing
+	// blocked-wait-nudge withdrawal path) withdraws a stale item by closing
+	// its shadow bead via ackQueuedNudgesWithOutcome, which never appends to
+	// state.Dead -- that bucket is reserved for recordQueuedNudgeFailure's
+	// hard-delivery-failure path. So the withdrawal is only observable on
+	// the nudge's own shadow bead, not in listQueuedNudges' dead bucket.
+	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("pending = %d, want 0", len(pending))
+	}
+	if len(inFlight) != 0 {
+		t.Fatalf("inFlight = %d, want 0", len(inFlight))
+	}
+	if len(dead) != 0 {
+		t.Fatalf("dead = %d, want 0 (withdrawal closes the shadow bead instead of dead-lettering); dead=%#v", len(dead), dead)
+	}
+
+	shadow, ok, err := nudgeFrontDoor(store).FindIncludingTerminal(nudgeID)
+	if err != nil {
+		t.Fatalf("FindIncludingTerminal: %v", err)
+	}
+	if !ok {
+		t.Fatal("shadow bead not found, want a closed shadow recording the withdrawal")
+	}
+	if shadow.State != "failed" {
+		t.Errorf("shadow.State = %q, want %q", shadow.State, "failed")
+	}
+	if shadow.TerminalReason != "mail-already-read" {
+		t.Errorf("shadow.TerminalReason = %q, want %q", shadow.TerminalReason, "mail-already-read")
+	}
+}
+
+// TestTryDeliverQueuedNudgesByPollerKeepsFreshMailReminder guards the fix
+// above against over-dropping: when the recipient still has unread mail, the
+// deferred reminder must still fire normally.
+func TestTryDeliverQueuedNudgesByPollerKeepsFreshMailReminder(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	now := time.Now().Add(-1 * time.Minute)
+	if err := enqueueQueuedNudge(dir, newQueuedNudgeWithOptions("worker", "[mail] You have mail from human", "mail", now, queuedNudgeOptions{})); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	idleSince := time.Now().Add(-10 * time.Second)
+	fake.Activity = map[string]time.Time{info.SessionName: idleSince}
+
+	mp := beadmail.New(store.Store)
+	if _, err := mp.Send("human", info.ID, "", "still unread"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		agent:       config.Agent{Name: "worker"},
+		sessionID:   info.ID,
+		resolved:    &config.ResolvedProvider{Name: "codex"},
+		sessionName: info.SessionName,
+	}
+	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
+	if err != nil {
+		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
+	}
+	if !delivered {
+		t.Fatal("delivered = false, want true (mail is still unread, reminder must still fire)")
+	}
+
+	var nudgeCalls []runtime.Call
+	for _, call := range fake.Calls {
+		if call.Method == "Nudge" {
+			nudgeCalls = append(nudgeCalls, call)
+		}
+	}
+	if len(nudgeCalls) != 1 {
+		t.Fatalf("nudge calls = %d, want 1", len(nudgeCalls))
+	}
+
+	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("pending = %d, want 0", len(pending))
+	}
+	if len(inFlight) != 0 {
+		t.Fatalf("inFlight = %d, want 0", len(inFlight))
+	}
+	if len(dead) != 0 {
+		t.Fatalf("dead = %d, want 0 (fresh reminder must not be withdrawn); dead=%#v", len(dead), dead)
 	}
 }
 
