@@ -176,11 +176,16 @@ func TestBindingRefNormalizesOntoTheCityScope(t *testing.T) {
 	// A class binding is a genuinely distinct physical store, not a duplicate
 	// view of a rig or city work store — `gc storage migrate` relocates rows
 	// INTO it, it never aliases a rig's own file. So it is authoritative for a
-	// RIG-scoped root too: on the runtime plane it is the only leg Narrow
-	// leaves once a plan touches a binding (no rig leg survives to defer to),
-	// and on the reconcile plane the binding still holds the row no rig store
-	// does post-migration. Rejecting it here is exactly the duplicate-view
-	// rejection this filter is FOR — the binding is never a duplicate view.
+	// RIG-scoped root too, on the strength of the filter's one call site:
+	// collectOpenUnassignedRoutedWork resolves its legs through
+	// routedWorkStoreCandidates on the RUNTIME plane, and storeref.Narrow drops
+	// every leg but the binding once a plan touches one — no rig leg survives
+	// to defer to. Rejecting it here is exactly the duplicate-view rejection
+	// this filter is FOR, and the binding is never a duplicate view.
+	//
+	// That holds for runtime-plane callers only: `gc storage migrate` retains
+	// the source, so an un-narrowed reconcile-plane leg set would still offer a
+	// relocated row through both the binding and the legacy leg.
 	if !rootStoreRefMatchesCandidate("rig:alpha", ref) {
 		t.Error("a rig-scoped root_store_ref did not match the binding candidate; a migrated rig-rooted control row would be permanently invisible to demand and route repair")
 	}

@@ -5389,18 +5389,28 @@ func normalizeDemandStoreRef(storeRef string) string {
 // unscoped file-store mode, where two DIFFERENT store handles alias the same
 // physical file; a relocated class binding is never that — it is a distinct
 // physical store `gc storage migrate` moves rows INTO, and `gc storage status`
-// proves it converged. So a row the binding physically serves is never also
-// visible through a second candidate to defer to, city- or rig-logical alike:
-// on the runtime plane Narrow (internal/storeref/relevance.go) drops every
-// leg but the binding once a plan touches one, so it is the only leg that will
-// ever offer the row; on the reconcile plane the binding still holds the row
-// no legacy rig/city store does post-migration. Gating it on rootRig the way a
-// legacy-store candidate is gated would silently drop every rig-logical row a
-// migration relocated into the binding — the row is real, open, routed, and
-// permanently invisible to demand and route repair. The binding's OWN ref
-// reads as city scope (storeref.ScopeRigContext) because it belongs to no rig;
-// that says where a row lives, not who owns it, which is why the route repair
-// downstream (repairBead) takes the owner from the row's gc.root_store_ref.
+// proves it converged. Admitting it here is safe because of this filter's ONE
+// call site: collectOpenUnassignedRoutedWork resolves its legs through
+// routedWorkStoreCandidates, which plans on the RUNTIME plane, and Narrow
+// (internal/storeref/relevance.go) drops every leg but the binding once a plan
+// touches one — so the binding is the only leg that will ever offer the row and
+// there is no second candidate to defer to.
+//
+// That is a property of the CALL SITE, not of the stores. `gc storage migrate`
+// never mutates the source (infra_class_migrate.go, "Retained source": the work
+// store keeps its infrastructure rows verbatim), so a reconcile-plane leg set —
+// which is not narrowed — would offer a relocated row through BOTH the binding
+// and the retained legacy leg, and this caller's seen key ({StoreRef, ID}) does
+// not dedupe across differing refs. Do not extend this carve-out to a
+// reconcile-plane caller without solving that first.
+//
+// Gating it on rootRig the way a legacy-store candidate is gated would
+// silently drop every rig-logical row a migration relocated into the binding —
+// the row is real, open, routed, and permanently invisible to demand and route
+// repair. The binding's OWN ref reads as city scope
+// (storeref.ScopeRigContext) because it belongs to no rig; that says where a
+// row lives, not who owns it, which is why the route repair downstream
+// (repairBead) takes the owner from the row's gc.root_store_ref.
 func rootStoreRefMatchesCandidate(rootStoreRef, candidateStoreRef string) bool {
 	rootRig, rootScoped := storeref.ScopeRigContext(rootStoreRef)
 	if !rootScoped {
