@@ -1007,12 +1007,12 @@ func (s *NativeDoltStore) Get(id string) (Bead, error) {
 	return s.get(id, false)
 }
 
-// getPreservingUpstreamStatus is the narrow exact-store readback used by the
+// ReadUpdateCASBead is the narrow exact-store readback used by the
 // revision-guarded projection command. Gas City's ordinary Store view
 // intentionally normalizes blocked/deferred/hooked statuses for scheduler
 // semantics; a whole-row CAS must instead compare the exact persisted status
 // or it cannot distinguish a successful write from a conflict.
-func (s *NativeDoltStore) getPreservingUpstreamStatus(id string) (Bead, error) {
+func (s *NativeDoltStore) ReadUpdateCASBead(id string) (Bead, error) {
 	return s.get(id, true)
 }
 

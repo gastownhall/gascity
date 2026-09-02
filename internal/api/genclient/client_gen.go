@@ -1157,26 +1157,28 @@ type BackendCredentialResolvedPayload struct {
 
 // Bead defines model for Bead.
 type Bead struct {
-	Assignee     *string            `json:"assignee,omitempty"`
-	CreatedAt    time.Time          `json:"created_at"`
-	DeferUntil   *time.Time         `json:"defer_until,omitempty"`
-	Dependencies *[]Dep             `json:"dependencies,omitempty"`
-	Description  *string            `json:"description,omitempty"`
-	Ephemeral    *bool              `json:"ephemeral,omitempty"`
-	From         *string            `json:"from,omitempty"`
-	Id           string             `json:"id"`
-	IsBlocked    *bool              `json:"is_blocked,omitempty"`
-	IssueType    string             `json:"issue_type"`
-	Labels       *[]string          `json:"labels,omitempty"`
-	Metadata     *map[string]string `json:"metadata,omitempty"`
-	Needs        *[]string          `json:"needs,omitempty"`
-	NoHistory    *bool              `json:"no_history,omitempty"`
-	Parent       *string            `json:"parent,omitempty"`
-	Priority     *int64             `json:"priority,omitempty"`
-	Ref          *string            `json:"ref,omitempty"`
-	Status       string             `json:"status"`
-	Title        string             `json:"title"`
-	UpdatedAt    *time.Time         `json:"updated_at,omitempty"`
+	AcceptanceCriteria *string            `json:"acceptance_criteria,omitempty"`
+	Assignee           *string            `json:"assignee,omitempty"`
+	CreatedAt          time.Time          `json:"created_at"`
+	DeferUntil         *time.Time         `json:"defer_until,omitempty"`
+	Dependencies       *[]Dep             `json:"dependencies,omitempty"`
+	Description        *string            `json:"description,omitempty"`
+	Ephemeral          *bool              `json:"ephemeral,omitempty"`
+	ExternalRef        *string            `json:"external_ref,omitempty"`
+	From               *string            `json:"from,omitempty"`
+	Id                 string             `json:"id"`
+	IsBlocked          *bool              `json:"is_blocked,omitempty"`
+	IssueType          string             `json:"issue_type"`
+	Labels             *[]string          `json:"labels,omitempty"`
+	Metadata           *map[string]string `json:"metadata,omitempty"`
+	Needs              *[]string          `json:"needs,omitempty"`
+	NoHistory          *bool              `json:"no_history,omitempty"`
+	Parent             *string            `json:"parent,omitempty"`
+	Priority           *int64             `json:"priority,omitempty"`
+	Ref                *string            `json:"ref,omitempty"`
+	Status             string             `json:"status"`
+	Title              string             `json:"title"`
+	UpdatedAt          *time.Time         `json:"updated_at,omitempty"`
 }
 
 // BeadAssignInputBody defines model for BeadAssignInputBody.

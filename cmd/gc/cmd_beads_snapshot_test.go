@@ -156,7 +156,7 @@ func TestCollectBeadsSnapshotFailsClosedWithoutAtomicIssueGraphReader(t *testing
 func TestCollectBeadsSnapshotFailsClosedOnZeroRevisionOrDependencyError(t *testing.T) {
 	t.Parallel()
 
-	for name, revision := range map[string]int64{"zero": 0, "negative": -1} {
+	for name, revision := range map[string]int64{"zero": 0} {
 		t.Run(name, func(t *testing.T) {
 			store := &snapshotFailureStore{
 				Store: beads.NewMemStore(),
@@ -176,6 +176,33 @@ func TestCollectBeadsSnapshotFailsClosedOnZeroRevisionOrDependencyError(t *testi
 	}
 	if _, err := collectBeadsSnapshot(broken, "rig:tributary"); err == nil || !strings.Contains(err.Error(), "dependency") {
 		t.Fatalf("dependency error = %v", err)
+	}
+}
+
+func TestCollectBeadsSnapshotAcceptsSignedOpaqueRevision(t *testing.T) {
+	t.Parallel()
+	priority := 1
+	store := &atomicSnapshotStore{
+		Store: beads.NewMemStore(),
+		rows:  []beads.Bead{{ID: "ga-1", Title: "work", Type: "task", Status: "open", Priority: &priority, Revision: -1}},
+		deps:  map[string][]beads.Dep{"ga-1": {}},
+	}
+	result, err := collectBeadsSnapshot(store, "rig:tributary")
+	if err != nil || len(result.Beads) != 1 || result.Beads[0].Revision != -1 {
+		t.Fatalf("snapshot=%+v err=%v, want opaque revision -1 unchanged", result, err)
+	}
+	raw, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validateJSONAgainstResultSchema(t, []string{"beads", "snapshot"}, raw)
+	result.Beads[0].Revision = 0
+	raw, err = json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateJSONAgainstResultSchemaE([]string{"beads", "snapshot"}, raw); err == nil {
+		t.Fatal("snapshot schema accepted the zero revision sentinel")
 	}
 }
 

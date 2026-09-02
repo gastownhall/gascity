@@ -176,6 +176,47 @@ func TestNativeDoltStoreIssueGraphSnapshotReturnsNoPartialGraphOnFailure(t *test
 	}
 }
 
+func TestNativeDoltStoreIssueGraphSnapshotPreservesPersistedStatus(t *testing.T) {
+	t.Parallel()
+	for _, status := range []beadslib.Status{"blocked", "deferred", "hooked"} {
+		t.Run(string(status), func(t *testing.T) {
+			tx := issueGraphSnapshotTransaction{
+				search: func(context.Context, string, beadslib.IssueFilter) ([]*beadslib.Issue, error) {
+					return []*beadslib.Issue{{ID: "ga-1", Title: "work", Status: status, IssueType: beadslib.TypeTask, Metadata: []byte(`{}`), RowVersion: 9}}, nil
+				},
+				dependencies: func(context.Context, string) ([]*beadslib.Dependency, error) { return nil, nil },
+			}
+			store := newNativeDoltStoreForTest(&nativeDoltStorageSpy{
+				runInTransaction: func(_ context.Context, _ string, fn func(beadslib.Transaction) error) error { return fn(tx) },
+			})
+			rows, _, err := store.IssueGraphSnapshot(ListQuery{AllowScan: true, IncludeClosed: true, TierMode: TierIssues})
+			if err != nil || len(rows) != 1 || rows[0].Status != string(status) {
+				t.Fatalf("snapshot rows=%+v err=%v, want persisted status %q", rows, err, status)
+			}
+		})
+	}
+}
+
+func TestNativeDoltStoreIssueGraphSnapshotPushesExactStatusBeforeLimit(t *testing.T) {
+	t.Parallel()
+	tx := issueGraphSnapshotTransaction{
+		search: func(_ context.Context, _ string, filter beadslib.IssueFilter) ([]*beadslib.Issue, error) {
+			if filter.Status == nil || *filter.Status != beadslib.StatusOpen || len(filter.ExcludeStatus) != 0 || filter.Limit != 1 {
+				t.Fatalf("filter=%+v, want exact open predicate before limit=1", filter)
+			}
+			return []*beadslib.Issue{{ID: "ga-open", Title: "work", Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Metadata: []byte(`{}`), RowVersion: 9}}, nil
+		},
+		dependencies: func(context.Context, string) ([]*beadslib.Dependency, error) { return nil, nil },
+	}
+	store := newNativeDoltStoreForTest(&nativeDoltStorageSpy{
+		runInTransaction: func(_ context.Context, _ string, fn func(beadslib.Transaction) error) error { return fn(tx) },
+	})
+	rows, _, err := store.IssueGraphSnapshot(ListQuery{Status: "open", Limit: 1, Sort: SortCreatedAsc, TierMode: TierIssues})
+	if err != nil || len(rows) != 1 || rows[0].ID != "ga-open" {
+		t.Fatalf("snapshot rows=%+v err=%v, want one exact open row", rows, err)
+	}
+}
+
 type issueGraphSnapshotTransaction struct {
 	beadslib.Transaction
 	search       func(context.Context, string, beadslib.IssueFilter) ([]*beadslib.Issue, error)

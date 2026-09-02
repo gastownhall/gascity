@@ -13,8 +13,16 @@ import (
 type IssueGraphSnapshotReader interface {
 	// IssueGraphSnapshot returns the ListQuery result and every returned issue's
 	// DOWN edges. The dependency map contains an entry for every returned issue,
-	// including issues with no edges. On any read failure both results are nil.
+	// including issues with no edges. Persisted statuses and nonzero opaque
+	// revisions are preserved, not normalized to a scheduler view. On any read
+	// failure both results are nil.
 	IssueGraphSnapshot(query ListQuery) ([]Bead, map[string][]Dep, error)
+}
+
+// IssueGraphSnapshotHandleProvider lets wrappers expose only an atomic
+// snapshot capability actually supported by the resolved backing store.
+type IssueGraphSnapshotHandleProvider interface {
+	IssueGraphSnapshotHandle() (IssueGraphSnapshotReader, bool)
 }
 
 // ErrIssueGraphSnapshotUnsupported reports that a store cannot read issues and
@@ -23,6 +31,9 @@ var ErrIssueGraphSnapshotUnsupported = errors.New("atomic issue graph snapshot u
 
 // IssueGraphSnapshotFor returns the atomic graph reader implemented by store.
 func IssueGraphSnapshotFor(store Store) (IssueGraphSnapshotReader, bool) {
+	if provider, ok := store.(IssueGraphSnapshotHandleProvider); ok {
+		return provider.IssueGraphSnapshotHandle()
+	}
 	reader, ok := store.(IssueGraphSnapshotReader)
 	return reader, ok
 }

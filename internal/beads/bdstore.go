@@ -1288,11 +1288,11 @@ func (s *BdStore) Get(id string) (Bead, error) {
 	return s.get(id, false)
 }
 
-// getPreservingUpstreamStatus is the BdStore counterpart to the native exact
+// ReadUpdateCASBead is the BdStore counterpart to the native exact
 // CAS readback. Ordinary Gas City reads keep their scheduler-oriented status
 // normalization; the exact conditional projection path compares the persisted
 // Beads status vocabulary instead.
-func (s *BdStore) getPreservingUpstreamStatus(id string) (Bead, error) {
+func (s *BdStore) ReadUpdateCASBead(id string) (Bead, error) {
 	return s.get(id, true)
 }
 

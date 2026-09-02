@@ -53,26 +53,28 @@ var readyKnownStatuses = []string{"open", readyStatusInProgress, "blocked", "clo
 // surfaces stay comparable. `parent` looks absent in a live capture only because
 // it is omitempty and most beads have no parent — it is part of the contract.
 type readyBead struct {
-	ID           string            `json:"id"`
-	Title        string            `json:"title"`
-	Status       string            `json:"status"`
-	Type         string            `json:"issue_type"`
-	Priority     *int              `json:"priority,omitempty"`
-	CreatedAt    time.Time         `json:"created_at"`
-	UpdatedAt    time.Time         `json:"updated_at,omitempty,omitzero"`
-	Assignee     string            `json:"assignee,omitempty"`
-	From         string            `json:"from,omitempty"`
-	ParentID     string            `json:"parent,omitempty"`
-	Ref          string            `json:"ref,omitempty"`
-	Needs        []string          `json:"needs,omitempty"`
-	Description  string            `json:"description,omitempty"`
-	Labels       []string          `json:"labels,omitempty"`
-	Metadata     map[string]string `json:"metadata,omitempty"`
-	Dependencies []readyBeadDep    `json:"dependencies,omitempty"`
-	Ephemeral    bool              `json:"ephemeral,omitempty"`
-	NoHistory    bool              `json:"no_history,omitempty"`
-	DeferUntil   *time.Time        `json:"defer_until,omitempty"`
-	IsBlocked    *bool             `json:"is_blocked,omitempty"`
+	ID                 string            `json:"id"`
+	Title              string            `json:"title"`
+	Status             string            `json:"status"`
+	Type               string            `json:"issue_type"`
+	Priority           *int              `json:"priority,omitempty"`
+	CreatedAt          time.Time         `json:"created_at"`
+	UpdatedAt          time.Time         `json:"updated_at,omitempty,omitzero"`
+	Assignee           string            `json:"assignee,omitempty"`
+	From               string            `json:"from,omitempty"`
+	ParentID           string            `json:"parent,omitempty"`
+	Ref                string            `json:"ref,omitempty"`
+	Needs              []string          `json:"needs,omitempty"`
+	Description        string            `json:"description,omitempty"`
+	AcceptanceCriteria string            `json:"acceptance_criteria,omitempty"`
+	ExternalRef        string            `json:"external_ref,omitempty"`
+	Labels             []string          `json:"labels,omitempty"`
+	Metadata           map[string]string `json:"metadata,omitempty"`
+	Dependencies       []readyBeadDep    `json:"dependencies,omitempty"`
+	Ephemeral          bool              `json:"ephemeral,omitempty"`
+	NoHistory          bool              `json:"no_history,omitempty"`
+	DeferUntil         *time.Time        `json:"defer_until,omitempty"`
+	IsBlocked          *bool             `json:"is_blocked,omitempty"`
 	// BlockedBy carries the row's OPEN-or-not blocking dependencies, in bd's
 	// `bd ready --json` shape. It is populated only on the --status in_progress
 	// arm, which is the crash-recovery read: a resumed holder must be told
@@ -121,26 +123,28 @@ func toReadyBeads(items []beads.Bead, blockers map[string][]readyBeadBlocker) []
 
 func toReadyBead(b beads.Bead) readyBead {
 	return readyBead{
-		ID:           b.ID,
-		Title:        b.Title,
-		Status:       b.Status,
-		Type:         b.Type,
-		Priority:     b.Priority,
-		CreatedAt:    b.CreatedAt,
-		UpdatedAt:    b.UpdatedAt,
-		Assignee:     b.Assignee,
-		From:         b.From,
-		ParentID:     b.ParentID,
-		Ref:          b.Ref,
-		Needs:        b.Needs,
-		Description:  b.Description,
-		Labels:       b.Labels,
-		Metadata:     b.Metadata,
-		Dependencies: toReadyBeadDeps(b.Dependencies),
-		Ephemeral:    b.Ephemeral,
-		NoHistory:    b.NoHistory,
-		DeferUntil:   b.DeferUntil,
-		IsBlocked:    b.IsBlocked,
+		ID:                 b.ID,
+		Title:              b.Title,
+		Status:             b.Status,
+		Type:               b.Type,
+		Priority:           b.Priority,
+		CreatedAt:          b.CreatedAt,
+		UpdatedAt:          b.UpdatedAt,
+		Assignee:           b.Assignee,
+		From:               b.From,
+		ParentID:           b.ParentID,
+		Ref:                b.Ref,
+		Needs:              b.Needs,
+		Description:        b.Description,
+		AcceptanceCriteria: b.AcceptanceCriteria,
+		ExternalRef:        b.ExternalRef,
+		Labels:             b.Labels,
+		Metadata:           b.Metadata,
+		Dependencies:       toReadyBeadDeps(b.Dependencies),
+		Ephemeral:          b.Ephemeral,
+		NoHistory:          b.NoHistory,
+		DeferUntil:         b.DeferUntil,
+		IsBlocked:          b.IsBlocked,
 	}
 }
 

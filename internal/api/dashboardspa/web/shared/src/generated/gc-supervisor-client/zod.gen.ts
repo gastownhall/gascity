@@ -373,12 +373,14 @@ export const zDep = z.object({
 });
 
 export const zBead = z.object({
+    acceptance_criteria: z.string().optional(),
     assignee: z.string().optional(),
     created_at: z.iso.datetime(),
     defer_until: z.iso.datetime().optional(),
     dependencies: z.array(zDep).nullish(),
     description: z.string().optional(),
     ephemeral: z.boolean().optional(),
+    external_ref: z.string().optional(),
     from: z.string().optional(),
     id: z.string(),
     is_blocked: z.boolean().optional(),

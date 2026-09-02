@@ -7,13 +7,18 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/spf13/cobra"
 )
 
-const beadsUpdateCASMaxPatchBytes = 256 * 1024
+const (
+	beadsUpdateCASMaxPatchBytes = 256 * 1024
+	beadsUpdateCASMaxComments   = 1000
+	beadsUpdateCASCommentAuthor = "github-human"
+)
 
 type beadsUpdateCASRequest struct {
 	beadID           string
@@ -30,14 +35,46 @@ type beadsUpdateCASRequest struct {
 }
 
 type beadsUpdateCASPatch struct {
-	Title       *string           `json:"title,omitempty"`
-	Status      *string           `json:"status,omitempty"`
-	Type        *string           `json:"type,omitempty"`
-	Priority    *int              `json:"priority,omitempty"`
-	Description *string           `json:"description,omitempty"`
-	Acceptance  *string           `json:"acceptance,omitempty"`
-	ExternalRef *string           `json:"external_ref,omitempty"`
-	Metadata    map[string]string `json:"metadata,omitempty"`
+	Title       *string                 `json:"title,omitempty"`
+	Status      *string                 `json:"status,omitempty"`
+	Type        *string                 `json:"type,omitempty"`
+	Priority    *int                    `json:"priority,omitempty"`
+	Description *string                 `json:"description,omitempty"`
+	Acceptance  *string                 `json:"acceptance,omitempty"`
+	ExternalRef *string                 `json:"external_ref,omitempty"`
+	Metadata    map[string]string       `json:"metadata,omitempty"`
+	Comments    []beadsUpdateCASComment `json:"comments,omitempty"`
+}
+
+type beadsUpdateCASComment struct {
+	ExternalID string    `json:"external_id"`
+	Body       string    `json:"body"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+func (comment *beadsUpdateCASComment) UnmarshalJSON(raw []byte) error {
+	var wire struct {
+		ExternalID string `json:"external_id"`
+		Body       string `json:"body"`
+		CreatedAt  string `json:"created_at"`
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&wire); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return fmt.Errorf("comment must contain one JSON object")
+	}
+	createdAt, err := time.Parse(time.RFC3339Nano, wire.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("comment created_at must be RFC3339: %w", err)
+	}
+	comment.ExternalID = wire.ExternalID
+	comment.Body = wire.Body
+	comment.CreatedAt = createdAt
+	return nil
 }
 
 type beadsUpdateCASResult struct {
@@ -61,7 +98,10 @@ The store must be selected explicitly with --store-ref=city:<name> or
 --store-ref=rig:<name>. The JSON patch is read from --request-file; use - for
 stdin so title and description do not appear in process arguments. Supported
 fields are title, description, acceptance, external_ref, status, priority,
-type, and metadata. Unknown or empty patches fail before the store opens.
+type, metadata, and comments. Comments require external_id, body, and an RFC3339
+created_at; they import with the fixed github-human author and update the
+github.imported_comment_ids receipt in the same native transaction. Unknown or
+empty patches fail before the store opens.
 
 The command never scans another store or falls back to an unconditional write.
 A stale revision is a zero-exit conflict outcome. Capability, transport,
@@ -204,8 +244,32 @@ func decodeBeadsUpdateCASPatch(reader io.Reader) (beadsUpdateCASPatch, error) {
 func validateBeadsUpdateCASPatch(patch beadsUpdateCASPatch) error {
 	if patch.Title == nil && patch.Status == nil && patch.Type == nil && patch.Priority == nil &&
 		patch.Description == nil && patch.Acceptance == nil && patch.ExternalRef == nil &&
-		len(patch.Metadata) == 0 {
+		len(patch.Metadata) == 0 && len(patch.Comments) == 0 {
 		return fmt.Errorf("patch must set at least one supported field")
+	}
+	if len(patch.Comments) > beadsUpdateCASMaxComments {
+		return fmt.Errorf("comments exceed maximum of %d", beadsUpdateCASMaxComments)
+	}
+	if len(patch.Comments) > 0 {
+		if _, collision := patch.Metadata[beads.ImportedCommentIDsMetadataKey]; collision {
+			return fmt.Errorf("metadata %q is managed by comments", beads.ImportedCommentIDsMetadataKey)
+		}
+		seen := make(map[string]struct{}, len(patch.Comments))
+		for index, comment := range patch.Comments {
+			if !validMetadataCASToken(comment.ExternalID, metadataCASMaxValueBytes) {
+				return fmt.Errorf("comment %d has invalid external_id %q", index, comment.ExternalID)
+			}
+			if _, duplicate := seen[comment.ExternalID]; duplicate {
+				return fmt.Errorf("duplicate comment external_id %q", comment.ExternalID)
+			}
+			seen[comment.ExternalID] = struct{}{}
+			if strings.TrimSpace(comment.Body) == "" {
+				return fmt.Errorf("comment %q body must not be empty", comment.ExternalID)
+			}
+			if comment.CreatedAt.IsZero() {
+				return fmt.Errorf("comment %q created_at must be RFC3339", comment.ExternalID)
+			}
+		}
 	}
 	for key, value := range patch.Metadata {
 		if !validMetadataCASToken(key, metadataCASMaxKeyBytes) {
@@ -216,6 +280,19 @@ func validateBeadsUpdateCASPatch(patch beadsUpdateCASPatch) error {
 		}
 	}
 	return nil
+}
+
+func (patch beadsUpdateCASPatch) importedComments() []beads.ImportedComment {
+	comments := make([]beads.ImportedComment, 0, len(patch.Comments))
+	for _, comment := range patch.Comments {
+		comments = append(comments, beads.ImportedComment{
+			ExternalID: comment.ExternalID,
+			Author:     beadsUpdateCASCommentAuthor,
+			Text:       comment.Body,
+			CreatedAt:  comment.CreatedAt.UTC(),
+		})
+	}
+	return comments
 }
 
 func (patch beadsUpdateCASPatch) updateOpts() beads.UpdateOpts {
@@ -273,7 +350,17 @@ func cmdBeadsUpdateCAS(request beadsUpdateCASRequest, patch beadsUpdateCASPatch,
 }
 
 func applyBeadsUpdateCAS(store beads.Store, request beadsUpdateCASRequest, patch beadsUpdateCASPatch) (beadsUpdateCASResult, error) {
-	result, err := beads.ApplyUpdateCAS(store, request.beadID, request.expectedRevision, patch.updateOpts())
+	var (
+		result beads.UpdateCASResult
+		err    error
+	)
+	if len(patch.Comments) > 0 {
+		result, err = beads.ApplyUpdateCASWithComments(
+			store, request.beadID, request.expectedRevision, patch.updateOpts(), patch.importedComments(),
+		)
+	} else {
+		result, err = beads.ApplyUpdateCAS(store, request.beadID, request.expectedRevision, patch.updateOpts())
+	}
 	if err != nil {
 		return beadsUpdateCASResult{}, err
 	}

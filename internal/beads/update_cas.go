@@ -55,7 +55,7 @@ func ApplyUpdateCAS(store Store, id string, expectedRevision int64, opts UpdateO
 		return UpdateCASResult{}, fmt.Errorf("conditional update for %q: %w", id, ErrConditionalWriteUnsupported)
 	}
 
-	current, err := readUpdateCASBead(target, id)
+	current, err := ReadUpdateCASBead(target, id)
 	if err != nil {
 		return UpdateCASResult{}, fmt.Errorf("read conditional update base for %q: %w", id, err)
 	}
@@ -67,14 +67,14 @@ func ApplyUpdateCAS(store Store, id string, expectedRevision int64, opts UpdateO
 		if !IsPreconditionFailed(err) {
 			return UpdateCASResult{}, fmt.Errorf("conditional update for %q: %w", id, err)
 		}
-		current, readErr := readUpdateCASBead(target, id)
+		current, readErr := ReadUpdateCASBead(target, id)
 		if readErr != nil {
 			return UpdateCASResult{}, fmt.Errorf("read conditional update conflict for %q: %w", id, readErr)
 		}
 		return classifyUpdateCASReadback(current, expectedRevision, opts), nil
 	}
 
-	updated, err := readUpdateCASBead(target, id)
+	updated, err := ReadUpdateCASBead(target, id)
 	if err != nil {
 		return UpdateCASResult{}, fmt.Errorf("read conditional update result for %q: %w", id, err)
 	}
@@ -91,15 +91,21 @@ func ApplyUpdateCAS(store Store, id string, expectedRevision int64, opts UpdateO
 	}, nil
 }
 
-func readUpdateCASBead(store Store, id string) (Bead, error) {
-	switch exact := store.(type) {
-	case *NativeDoltStore:
-		return exact.getPreservingUpstreamStatus(id)
-	case *BdStore:
-		return exact.getPreservingUpstreamStatus(id)
-	default:
-		return store.Get(id)
+// UpdateCASReader preserves persisted row values that ordinary scheduler reads
+// may normalize. Wrappers must forward this capability without bypassing their
+// mutation side effects.
+type UpdateCASReader interface {
+	ReadUpdateCASBead(string) (Bead, error)
+}
+
+// ReadUpdateCASBead reads the authoritative whole-row CAS comparison view.
+// Stores without a distinct scheduler view can use their ordinary Get method.
+func ReadUpdateCASBead(store Store, id string) (Bead, error) {
+	target := followConditionalWritesResolveTarget(store)
+	if exact, ok := target.(UpdateCASReader); ok {
+		return exact.ReadUpdateCASBead(id)
 	}
+	return target.Get(id)
 }
 
 func classifyUpdateCASReadback(current Bead, expectedRevision int64, opts UpdateOpts) UpdateCASResult {

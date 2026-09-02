@@ -15,6 +15,14 @@ func (s *NativeDoltStore) IssueGraphSnapshot(query ListQuery) ([]Bead, map[strin
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, nil, fmt.Errorf("reading native issue graph snapshot: %w", ErrQueryRequiresScan)
 	}
+	filter := nativeIssueFilterFromListQuery(query)
+	if query.Status != "" {
+		// Snapshot statuses are exact. In particular, open must not include
+		// scheduler-normalized blocked rows before a pushed-down limit.
+		status := beadslib.Status(query.Status)
+		filter.Status = &status
+		filter.ExcludeStatus = nil
+	}
 
 	var rows []Bead
 	var depsByID map[string][]Dep
@@ -22,7 +30,7 @@ func (s *NativeDoltStore) IssueGraphSnapshot(query ListQuery) ([]Bead, map[strin
 		var candidateRows []Bead
 		var candidateDeps map[string][]Dep
 		if err := storage.RunInTransaction(ctx, "", func(tx beadslib.Transaction) error {
-			issues, err := tx.SearchIssues(ctx, "", nativeIssueFilterFromListQuery(query))
+			issues, err := tx.SearchIssues(ctx, "", filter)
 			if err != nil {
 				return err
 			}
@@ -32,6 +40,9 @@ func (s *NativeDoltStore) IssueGraphSnapshot(query ListQuery) ([]Bead, map[strin
 				if err != nil {
 					return err
 				}
+				// This is an exact synchronization snapshot, not the scheduler
+				// view that folds blocked/deferred/hooked into open.
+				bead.Status = string(issue.Status)
 				converted = append(converted, bead)
 			}
 			candidateRows = ApplyListQuery(converted, query)

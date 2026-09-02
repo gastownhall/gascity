@@ -72,7 +72,9 @@
           "revision": {
             "description": "Opaque authoritative CAS revision.",
             "type": "integer",
-            "minimum": 1
+            "not": {
+              "const": 0
+            }
           },
           "external_ref": {
             "type": "string"

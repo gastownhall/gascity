@@ -170,7 +170,7 @@ func collectBeadsSnapshot(store beads.Store, storeRef string) (beadsSnapshotResu
 		Beads:         make([]beadsSnapshotRow, 0, len(rows)),
 	}
 	for _, bead := range rows {
-		if strings.TrimSpace(bead.ID) == "" || bead.Revision <= 0 {
+		if strings.TrimSpace(bead.ID) == "" || bead.Revision == 0 {
 			return beadsSnapshotResult{}, fmt.Errorf("bead %q has no usable authoritative revision", bead.ID)
 		}
 		deps, present := depsByID[bead.ID]
