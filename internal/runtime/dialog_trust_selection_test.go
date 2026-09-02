@@ -82,9 +82,12 @@ func TestWorkspaceTrustConfirmKeysNoExitSelected(t *testing.T) {
 }
 
 func TestWorkspaceTrustConfirmKeysUnrecognizedLayoutSendsNothing(t *testing.T) {
-	const content = ` Do you trust the contents of this directory?
+	const content = ` Quick safety check: Is this a project you created or one you trust?
 
- (layout not yet fully rendered)`
+ ❯ Some future option we don't recognize
+   Another unrecognized option
+
+ Enter to confirm · Esc to cancel`
 
 	keys, ok := workspaceTrustConfirmKeys(content)
 	if ok {
