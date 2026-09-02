@@ -728,30 +728,34 @@ func mergeHookClaimCandidateMetadata(candidate, claimed beads.Bead) beads.Bead {
 }
 
 // hookCandidateClaimable reports whether a work-query candidate is eligible for a
-// fresh claim: it has an id, is currently unassigned, and matches one of this
-// session's route targets.
-//
-// TODO(ga-818ery, GREEN): also refuse a candidate whose gc.budget_deferred_until
-// (via hookCandidateBudgetDeferred) is still in the future, using the caller's
-// injected now (threaded through in RED but not yet consulted here — hence the
-// blank parameter name).
-func hookCandidateClaimable(candidate beads.Bead, routeTargets []string, _ time.Time) bool {
+// fresh claim: it has an id, is currently unassigned, matches one of this
+// session's route targets, and is not still within a build-budget deferral
+// window (see hookCandidateBudgetDeferred).
+func hookCandidateClaimable(candidate beads.Bead, routeTargets []string, now time.Time) bool {
 	return strings.TrimSpace(candidate.ID) != "" &&
 		strings.TrimSpace(candidate.Assignee) == "" &&
-		hookClaimMatchesRoute(candidate, routeTargets)
+		hookClaimMatchesRoute(candidate, routeTargets) &&
+		!hookCandidateBudgetDeferred(candidate, now)
 }
 
 // hookCandidateBudgetDeferred reports whether a candidate is still within a
 // build-budget deferral window stamped by the sling boundary (host/bin/gc, in
 // the outer city repo) via gc.budget_deferred_until, an RFC3339 timestamp
 // cleared by deacon-dispatch.sh on successful dispatch. Callers inject now
-// (ops.nowOrWallClock) so behavior stays deterministic under test.
-//
-// TODO(ga-818ery, GREEN): this always reports "not deferred" — implement the
-// actual metadata read/parse/compare against the candidate and now arguments
-// (both blank for now since the RED stub body ignores them).
-func hookCandidateBudgetDeferred(_ beads.Bead, _ time.Time) bool {
-	return false
+// (ops.nowOrWallClock) so behavior stays deterministic under test. Mirrors
+// isFutureDeferredHookCandidate's fail-open shape: an absent or malformed
+// timestamp is never treated as deferred, so a bad stamp cannot wedge a
+// candidate forever.
+func hookCandidateBudgetDeferred(candidate beads.Bead, now time.Time) bool {
+	raw := strings.TrimSpace(candidate.Metadata[beadmeta.BudgetDeferredUntilMetadataKey])
+	if raw == "" {
+		return false
+	}
+	deferAt, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return false
+	}
+	return deferAt.After(now)
 }
 
 // reportHookClaimRejected publishes a bead.claim_rejected event (ADR-0009) when a
