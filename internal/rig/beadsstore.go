@@ -14,13 +14,15 @@ import (
 // in the given rig directory. Returns the prefix and true if found, or empty
 // string and false if the file doesn't exist or has no prefix. Checks both
 // the underscore form (issue_prefix) and dash form (issue-prefix) since the
-// lifecycle code writes both.
+// lifecycle code writes both. The prefix is returned verbatim: Beads matches
+// prefixes case-sensitively, so callers that only need a lookup key lowercase
+// it themselves.
 func ReadBeadsPrefix(fs fsys.FS, rigPath string) (string, bool) {
 	prefix, ok, err := contract.ReadIssuePrefix(fs, filepath.Join(rigPath, ".beads", "config.yaml"))
 	if err != nil || !ok {
 		return "", false
 	}
-	return strings.ToLower(prefix), true
+	return strings.TrimSpace(prefix), true
 }
 
 // beadsDirContainsStore reports whether beadsPath contains evidence that it

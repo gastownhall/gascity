@@ -212,8 +212,13 @@ func planRigMutation(deps Deps, req ProvisionRequest, rigPath, resolvedDefaultBr
 		return rigMutationPlan{}, err
 	}
 
-	// Step 7: prefix resolution + collision checks.
-	prefix, err := resolveRigPrefix(cfg, req, name, reAdd, existingRig)
+	// Step 7: prefix resolution + collision checks. An adopted store's own
+	// prefix is read verbatim so the resolved prefix preserves its case.
+	adoptedPrefix := ""
+	if req.Adopt {
+		adoptedPrefix, _ = ReadBeadsPrefix(deps.FS, rigPath)
+	}
+	prefix, err := resolveRigPrefix(cfg, req, name, reAdd, existingRig, adoptedPrefix)
 	if err != nil {
 		return rigMutationPlan{}, err
 	}
@@ -225,7 +230,7 @@ func planRigMutation(deps Deps, req ProvisionRequest, rigPath, resolvedDefaultBr
 
 	// Step 8: build nextCfg.
 	needsValidation := !reAdd || reAddNeedsConfigWrite
-	nextCfg, defaultRigImports, commitRigImports, err := buildNextRigConfig(deps, req, rigPath, resolvedDefaultBranch, reAdd, reAddNeedsConfigWrite, existingRigIdx, explicitRigImports, commitRigImports)
+	nextCfg, defaultRigImports, commitRigImports, err := buildNextRigConfig(deps, req, rigPath, resolvedDefaultBranch, prefix, reAdd, reAddNeedsConfigWrite, existingRigIdx, explicitRigImports, commitRigImports)
 	if err != nil {
 		return rigMutationPlan{}, err
 	}
@@ -277,14 +282,21 @@ func detectRigReAdd(cfg *config.City, name, cityPath, rigPath string) (reAdd, ne
 }
 
 // resolveRigPrefix derives the rig's bead prefix — the existing rig's on a
-// re-add, the lowercased --prefix override, or one derived from the name — and,
-// for a fresh add, rejects a prefix that collides with HQ or another rig with
-// the byte-identical CLI text.
-func resolveRigPrefix(cfg *config.City, req ProvisionRequest, name string, reAdd bool, existingRig *config.Rig) (string, error) {
+// re-add, the adopted store's own prefix when --prefix names it (byte-for-byte:
+// Beads prefix matching is case-sensitive, so lowercasing a mixed-case store
+// would fork its id series), the lowercased --prefix override, or one derived
+// from the name — and, for a fresh add, rejects a prefix that collides with HQ
+// or another rig with the byte-identical CLI text. On --adopt, a --prefix that
+// differs from the store's prefix other than by case falls through to the
+// lowercased override so validateAdoptAndBeadsStore reports the mismatch as
+// before.
+func resolveRigPrefix(cfg *config.City, req ProvisionRequest, name string, reAdd bool, existingRig *config.Rig, adoptedPrefix string) (string, error) {
 	var prefix string
 	switch {
 	case reAdd:
 		prefix = existingRig.EffectivePrefix()
+	case req.Adopt && req.Prefix != "" && strings.EqualFold(req.Prefix, adoptedPrefix):
+		prefix = adoptedPrefix
 	case req.Prefix != "":
 		prefix = strings.ToLower(req.Prefix)
 	default:
@@ -311,7 +323,7 @@ func resolveRigPrefix(cfg *config.City, req ProvisionRequest, name string, reAdd
 // --include set them, which may reassign commitRigImports). A plain re-add
 // returns the caller's config unchanged. It returns the next config, any
 // default-rig imports it resolved, and the (possibly updated) packs.lock commit.
-func buildNextRigConfig(deps Deps, req ProvisionRequest, rigPath, resolvedDefaultBranch string, reAdd, reAddNeedsConfigWrite bool, existingRigIdx int, explicitRigImports []config.BoundImport, commitRigImports func() error) (*config.City, []config.BoundImport, func() error, error) {
+func buildNextRigConfig(deps Deps, req ProvisionRequest, rigPath, resolvedDefaultBranch, resolvedPrefix string, reAdd, reAddNeedsConfigWrite bool, existingRigIdx int, explicitRigImports []config.BoundImport, commitRigImports func() error) (*config.City, []config.BoundImport, func() error, error) {
 	fs := deps.FS
 	cfg := deps.Cfg
 	cityPath := deps.CityPath
@@ -330,9 +342,11 @@ func buildNextRigConfig(deps Deps, req ProvisionRequest, rigPath, resolvedDefaul
 		}
 		nextCfg = &next
 	} else if !reAdd {
+		// Store the resolved prefix when --prefix was given (on --adopt it
+		// carries the store's own case); a derived prefix stays implicit.
 		storedPrefix := ""
 		if req.Prefix != "" {
-			storedPrefix = strings.ToLower(req.Prefix)
+			storedPrefix = resolvedPrefix
 		}
 		addedRig := config.Rig{
 			Name:             name,
@@ -450,7 +464,9 @@ func validateAdoptAndBeadsStore(deps Deps, req ProvisionRequest, rigPath string,
 		}
 	}
 
-	if existingPrefix, ok := ReadBeadsPrefix(fs, rigPath); ok && existingPrefix != prefix {
+	// --adopt compares byte-for-byte (the store's prefix is the rig's prefix);
+	// re-add and fresh add keep their historical case-insensitive comparison.
+	if existingPrefix, ok := ReadBeadsPrefix(fs, rigPath); ok && (existingPrefix != prefix && (req.Adopt || !strings.EqualFold(existingPrefix, prefix))) {
 		switch {
 		case plan.reAdd:
 			// On re-add, --prefix is ignored (we use the existing rig's
@@ -541,7 +557,7 @@ func emitRigBannerAndWarnings(deps Deps, req ProvisionRequest, plan rigMutationP
 				emit(ProvisionStep{Name: "include-ignored", Warn: true, Detail: fmt.Sprintf("warning: --include flags %v ignored (existing imports: %s); edit city.toml to change", includes, formatBoundImports(existingRigImports))})
 			}
 		}
-		if req.Prefix != "" && strings.ToLower(req.Prefix) != plan.existingRig.EffectivePrefix() {
+		if req.Prefix != "" && !strings.EqualFold(req.Prefix, plan.existingRig.EffectivePrefix()) {
 			emit(ProvisionStep{Name: "prefix-ignored", Warn: true, Detail: fmt.Sprintf("warning: --prefix=%s ignored (existing: %s); edit city.toml to change", req.Prefix, plan.existingRig.EffectivePrefix())})
 		}
 		if defaultBranchOverride != "" &&
