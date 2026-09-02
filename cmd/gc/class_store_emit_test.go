@@ -1190,3 +1190,85 @@ func TestControllerRoutesFromOpenStorageRoutesCarryNoEmitTarget(t *testing.T) {
 		t.Fatalf("the controller's class routes appended %d bead event(s), want 0: %s", len(got), eventSummary(got))
 	}
 }
+
+func TestEmittingClassStoreForwardsAtomicCommentImportAndSnapshot(t *testing.T) {
+	cityPath := t.TempDir()
+	leaf := &updateCASAtomicCommentStore{MemStore: beads.NewMemStore()}
+	created := seedClassBead(t, leaf, "comment-step")
+	wrapped := splitClassRoutes(leaf).withCLIEmission(cityPath).stores[coordclass.ClassGraph]
+	reader, ok := beads.IssueGraphSnapshotFor(wrapped)
+	if !ok {
+		t.Fatal("emitting wrapper dropped atomic graph snapshot")
+	}
+	rows, edges, err := reader.IssueGraphSnapshot(beads.ListQuery{AllowScan: true})
+	if err != nil || len(rows) != 1 || rows[0].ID != created.ID || len(edges) != 1 {
+		t.Fatalf("snapshot = (%v, %v, %v), want exact backing graph", rows, edges, err)
+	}
+	importer, ok := beads.AtomicCommentImporterFor(wrapped)
+	if !ok {
+		t.Fatal("emitting wrapper dropped atomic comment import")
+	}
+	comments := []beads.ImportedComment{{ExternalID: "IC_1", Author: "github-human", Text: "comment", CreatedAt: time.Now().UTC()}}
+	if err := importer.UpdateWithCommentsIfMatch(created.ID, created.Revision, beads.UpdateOpts{}, comments); err != nil {
+		t.Fatal(err)
+	}
+	if len(leaf.imported) != 1 {
+		t.Fatalf("imported %d comments, want 1", len(leaf.imported))
+	}
+	if got := beadEvents(readCityJournal(t, cityPath)); len(got) != 1 || got[0].Type != events.BeadUpdated {
+		t.Fatalf("events = %v, want exactly one committed update", got)
+	}
+}
+
+func TestEmittingClassStoreDoesNotAdvertiseUnsupportedSyncCapabilities(t *testing.T) {
+	leaf := &struct{ beads.Store }{Store: beads.NewMemStore()}
+	wrapped := splitClassRoutes(leaf).withCLIEmission(t.TempDir()).stores[coordclass.ClassGraph]
+	if _, ok := beads.IssueGraphSnapshotFor(wrapped); ok {
+		t.Fatal("advertised snapshot over an unsupported backing")
+	}
+	if _, ok := beads.AtomicCommentImporterFor(wrapped); ok {
+		t.Fatal("advertised atomic comment import over an unsupported backing")
+	}
+}
+
+type exactStatusCommentStore struct{ *updateCASAtomicCommentStore }
+
+func (s *exactStatusCommentStore) Get(id string) (beads.Bead, error) {
+	row, err := s.MemStore.Get(id)
+	if row.Status == "blocked" {
+		row.Status = "open"
+	}
+	return row, err
+}
+
+func (s *exactStatusCommentStore) ReadUpdateCASBead(id string) (beads.Bead, error) {
+	return s.MemStore.Get(id)
+}
+
+func TestEmittingClassStorePreservesExactStatusForCommentCASReadback(t *testing.T) {
+	cityPath := t.TempDir()
+	leaf := &exactStatusCommentStore{&updateCASAtomicCommentStore{MemStore: beads.NewMemStore()}}
+	created := seedClassBead(t, leaf, "exact-status")
+	wrapped := splitClassRoutes(leaf).withCLIEmission(cityPath).stores[coordclass.ClassGraph]
+	comments := []beads.ImportedComment{{ExternalID: "IC_1", Author: "github-human", Text: "comment", CreatedAt: time.Now().UTC()}}
+	blocked := "blocked"
+	result, err := beads.ApplyUpdateCASWithComments(wrapped, created.ID, created.Revision, beads.UpdateOpts{Status: &blocked}, comments)
+	if err != nil || result.Outcome != beads.UpdateCASUpdated {
+		t.Fatalf("blocked update = %+v, %v; want exact committed readback", result, err)
+	}
+	replay, err := beads.ApplyUpdateCASWithComments(wrapped, created.ID, created.Revision, beads.UpdateOpts{Status: &blocked}, comments)
+	if err != nil || replay.Outcome != beads.UpdateCASAlreadyApplied {
+		t.Fatalf("blocked replay = %+v, %v", replay, err)
+	}
+	open := "open"
+	conflict, err := beads.ApplyUpdateCASWithComments(wrapped, created.ID, created.Revision, beads.UpdateOpts{Status: &open}, comments)
+	if err != nil || conflict.Outcome != beads.UpdateCASConflict {
+		t.Fatalf("stale open request = %+v, %v; must not normalize blocked to open", conflict, err)
+	}
+	if len(leaf.imported) != 1 {
+		t.Fatalf("imported %d comments, want one", len(leaf.imported))
+	}
+	if got := beadEvents(readCityJournal(t, cityPath)); len(got) != 1 || got[0].Type != events.BeadUpdated {
+		t.Fatalf("events = %v, want one committed update", got)
+	}
+}

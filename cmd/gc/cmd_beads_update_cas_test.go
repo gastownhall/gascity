@@ -6,9 +6,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/rogpeppe/go-internal/testscript"
@@ -29,7 +31,12 @@ func TestDecodeBeadsUpdateCASPatchIsStrictAndBounded(t *testing.T) {
   "status":"in_progress",
   "priority":1,
   "type":"feature",
-  "metadata":{"github.projection_hash":"sha256:abc"}
+  "metadata":{"github.projection_hash":"sha256:abc"},
+  "comments":[{
+    "external_id":"IC_1",
+    "body":"human comment",
+    "created_at":"2026-09-02T12:34:56Z"
+  }]
 }`))
 	if err != nil {
 		t.Fatalf("decode valid patch: %v", err)
@@ -41,7 +48,11 @@ func TestDecodeBeadsUpdateCASPatchIsStrictAndBounded(t *testing.T) {
 		patch.Status == nil || *patch.Status != "in_progress" ||
 		patch.Priority == nil || *patch.Priority != 1 ||
 		patch.Type == nil || *patch.Type != "feature" ||
-		patch.Metadata["github.projection_hash"] != "sha256:abc" {
+		patch.Metadata["github.projection_hash"] != "sha256:abc" ||
+		len(patch.Comments) != 1 ||
+		patch.Comments[0].ExternalID != "IC_1" ||
+		patch.Comments[0].Body != "human comment" ||
+		patch.Comments[0].CreatedAt.UTC().Format("2006-01-02T15:04:05Z07:00") != "2026-09-02T12:34:56Z" {
 		t.Fatalf("decoded patch = %+v", patch)
 	}
 
@@ -55,6 +66,9 @@ func TestDecodeBeadsUpdateCASPatchIsStrictAndBounded(t *testing.T) {
 		{name: "unknown field", body: `{"title":"x","labels":["unsafe"]}`, want: "unknown field"},
 		{name: "trailing value", body: `{"title":"x"} {"title":"y"}`, want: "single JSON object"},
 		{name: "oversized", body: `{"description":"` + strings.Repeat("x", beadsUpdateCASMaxPatchBytes) + `"}`, want: "exceeds"},
+		{name: "duplicate comment id", body: `{"comments":[{"external_id":"IC_1","body":"one","created_at":"2026-09-02T12:34:56Z"},{"external_id":"IC_1","body":"two","created_at":"2026-09-02T12:35:56Z"}]}`, want: "duplicate comment external_id"},
+		{name: "invalid comment timestamp", body: `{"comments":[{"external_id":"IC_1","body":"one","created_at":"not-a-time"}]}`, want: "created_at"},
+		{name: "comment receipt metadata collision", body: `{"comments":[{"external_id":"IC_1","body":"one","created_at":"2026-09-02T12:34:56Z"}],"metadata":{"github.imported_comment_ids":"[]"}}`, want: "managed by comments"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := decodeBeadsUpdateCASPatch(strings.NewReader(tc.body))
@@ -202,6 +216,60 @@ func TestBeadsUpdateCASCanonicalJSONOutcomesDoNotLeakPatchContent(t *testing.T) 
 				}
 			}
 		})
+	}
+}
+
+func TestBeadsUpdateCASImportsCommentsThroughExactAtomicStore(t *testing.T) {
+	clearGCEnv(t)
+	configureIsolatedRuntimeEnv(t)
+
+	cityPath := writeMetadataCASTestCity(t)
+	store := &updateCASAtomicCommentStore{MemStore: beads.NewMemStore()}
+	bead, err := store.Create(beads.Bead{Title: "base"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	installUpdateCASStoreSeams(t, func(_, _ string) (beads.Store, error) {
+		return wrapStoreWithBeadPolicies(store, nil), nil
+	}, func(beads.Store) error { return nil })
+	patchPath := filepath.Join(t.TempDir(), "comments.json")
+	if err := os.WriteFile(patchPath, []byte(`{
+		"title":"human title",
+		"comments":[{"external_id":"IC_1","body":"private human comment","created_at":"2026-09-02T12:34:56Z"}]
+	}`), 0o600); err != nil {
+		t.Fatalf("WriteFile patch: %v", err)
+	}
+
+	stdout, stderr, code := runUpdateCASTestCommand(cityPath, bead.ID, bead.Revision, patchPath)
+	if code != 0 || stderr != "" {
+		t.Fatalf("code=%d stderr=%q stdout=%q", code, stderr, stdout)
+	}
+	var result beadsUpdateCASResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("Unmarshal: %v\n%s", err, stdout)
+	}
+	if result.Outcome != beads.UpdateCASUpdated || len(store.imported) != 1 {
+		t.Fatalf("result=%+v imported=%#v", result, store.imported)
+	}
+	comment := store.imported[0]
+	if comment.ExternalID != "IC_1" || comment.Author != beadsUpdateCASCommentAuthor ||
+		comment.Text != "private human comment" ||
+		comment.CreatedAt.Format(time.RFC3339) != "2026-09-02T12:34:56Z" {
+		t.Fatalf("imported comment = %+v", comment)
+	}
+	if strings.Contains(stdout, "private human comment") {
+		t.Fatalf("stdout leaked comment body: %s", stdout)
+	}
+
+	stdout, stderr, code = runUpdateCASTestCommand(cityPath, bead.ID, bead.Revision, patchPath)
+	if code != 0 || stderr != "" {
+		t.Fatalf("replay code=%d stderr=%q stdout=%q", code, stderr, stdout)
+	}
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("Unmarshal replay: %v\n%s", err, stdout)
+	}
+	if result.Outcome != beads.UpdateCASAlreadyApplied || len(store.imported) != 1 {
+		t.Fatalf("replay result=%+v imported=%#v", result, store.imported)
 	}
 }
 
@@ -403,6 +471,61 @@ type updateCASUnsupportedCommandStore struct {
 type updateCASCommandFailureStore struct {
 	*beads.MemStore
 	updateErr error
+}
+
+type updateCASAtomicCommentStore struct {
+	*beads.MemStore
+	imported []beads.ImportedComment
+}
+
+func (s *updateCASAtomicCommentStore) UpdateWithCommentsIfMatch(
+	id string,
+	expectedRevision int64,
+	opts beads.UpdateOpts,
+	comments []beads.ImportedComment,
+) error {
+	current, err := s.Get(id)
+	if err != nil {
+		return err
+	}
+	if current.Revision != expectedRevision {
+		return &beads.PreconditionFailedError{ID: id, Expected: expectedRevision, Current: current.Revision}
+	}
+	var ids []string
+	if raw := current.Metadata[beads.ImportedCommentIDsMetadataKey]; raw != "" {
+		if err := json.Unmarshal([]byte(raw), &ids); err != nil {
+			return err
+		}
+	}
+	seen := make(map[string]struct{}, len(ids)+len(comments))
+	for _, externalID := range ids {
+		seen[externalID] = struct{}{}
+	}
+	missing := make([]beads.ImportedComment, 0, len(comments))
+	for _, comment := range comments {
+		if _, ok := seen[comment.ExternalID]; ok {
+			continue
+		}
+		seen[comment.ExternalID] = struct{}{}
+		ids = append(ids, comment.ExternalID)
+		missing = append(missing, comment)
+	}
+	sort.Strings(ids)
+	raw, err := json.Marshal(ids)
+	if err != nil {
+		return err
+	}
+	metadata := make(map[string]string, len(opts.Metadata)+1)
+	for key, value := range opts.Metadata {
+		metadata[key] = value
+	}
+	metadata[beads.ImportedCommentIDsMetadataKey] = string(raw)
+	opts.Metadata = metadata
+	if err := s.UpdateIfMatch(id, expectedRevision, opts); err != nil {
+		return err
+	}
+	s.imported = append(s.imported, missing...)
+	return nil
 }
 
 func (s *updateCASCommandFailureStore) UpdateIfMatch(string, int64, beads.UpdateOpts) error {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 
 	beadslib "github.com/steveyegge/beads"
 )
@@ -13,8 +14,185 @@ var (
 	_ ConditionalWriter                = (*NativeDoltStore)(nil)
 	_ AtomicConditionalCloser          = (*NativeDoltStore)(nil)
 	_ MetadataCASWriter                = (*NativeDoltStore)(nil)
+	_ AtomicCommentImporter            = (*NativeDoltStore)(nil)
 	_ conditionalWriteCapabilityProber = (*NativeDoltStore)(nil)
 )
+
+// UpdateWithCommentsIfMatch imports external comments and their durable
+// idempotency IDs together with any row-backed update inside one upstream Dolt
+// transaction. It deliberately has no fallback to storage-level comment
+// writes: a backend whose Transaction cannot import/read comments fails and
+// rolls the transaction back.
+func (s *NativeDoltStore) UpdateWithCommentsIfMatch(
+	id string,
+	expectedRevision int64,
+	opts UpdateOpts,
+	comments []ImportedComment,
+) error {
+	if err := validateImportedComments(comments); err != nil {
+		return fmt.Errorf("atomic comment import %s: %w", id, err)
+	}
+	if _, collision := opts.Metadata[ImportedCommentIDsMetadataKey]; collision {
+		return fmt.Errorf("atomic comment import %s: metadata %q is managed by comments", id, ImportedCommentIDsMetadataKey)
+	}
+	if !isEmptyUpdateOpts(opts) {
+		if err := validateConditionalUpdateOpts(opts); err != nil {
+			return fmt.Errorf("atomic comment import %s: %w", id, err)
+		}
+	}
+
+	storage, release, err := s.acquireStorage()
+	if err != nil {
+		return err
+	}
+	defer release()
+	commitMsg := fmt.Sprintf("gc: import %d comments on bead %s at revision %d", len(comments), id, expectedRevision)
+	err = retryOnNativeDoltSerializationConflict(func() error {
+		ctx, cancel := nativeDoltOperationContext(context.TODO())
+		defer cancel()
+		return storage.RunInTransaction(ctx, commitMsg, func(tx beadslib.Transaction) error {
+			issue, err := tx.GetIssue(ctx, id)
+			if err != nil {
+				return nativeStoreError(id, err)
+			}
+			if issue == nil {
+				return fmt.Errorf("bead %q: %w", id, ErrNotFound)
+			}
+			if issue.RowVersion != expectedRevision {
+				return &PreconditionFailedError{
+					ID:       id,
+					Expected: expectedRevision,
+					Current:  issue.RowVersion,
+					Raw:      "native row-version mismatch",
+				}
+			}
+
+			metadata, err := metadataMapFromNative(issue.Metadata)
+			if err != nil {
+				return fmt.Errorf("parsing metadata for bead %q: %w", id, err)
+			}
+			existing, err := importedCommentIDSet(metadata[ImportedCommentIDsMetadataKey])
+			if err != nil {
+				return fmt.Errorf("parsing comment receipt for bead %q: %w", id, err)
+			}
+			missing := make([]ImportedComment, 0, len(comments))
+			for _, comment := range comments {
+				if _, ok := existing[comment.ExternalID]; ok {
+					continue
+				}
+				existing[comment.ExternalID] = struct{}{}
+				missing = append(missing, comment)
+			}
+
+			ids := make([]string, 0, len(existing))
+			for externalID := range existing {
+				ids = append(ids, externalID)
+			}
+			sort.Strings(ids)
+			rawIDs, err := json.Marshal(ids)
+			if err != nil {
+				return fmt.Errorf("marshaling imported comment ids: %w", err)
+			}
+			transactionOpts := opts
+			transactionOpts.Metadata = cloneStringMap(opts.Metadata)
+			transactionOpts.Metadata[ImportedCommentIDsMetadataKey] = string(rawIDs)
+
+			updates, err := s.nativeUpdatesPreservingRawMetadata(ctx, tx, id, issue.Metadata, transactionOpts)
+			if err != nil {
+				return err
+			}
+			if len(updates) > 0 {
+				if err := tx.UpdateIssue(ctx, id, updates, s.actor); err != nil {
+					return nativeStoreError(id, err)
+				}
+			}
+
+			imported := make(map[string]ImportedComment, len(missing))
+			for _, comment := range missing {
+				created, err := tx.ImportIssueComment(
+					ctx, id, comment.Author, comment.Text, comment.CreatedAt.UTC(),
+				)
+				if err != nil {
+					return fmt.Errorf("importing comment %q on bead %q: %w", comment.ExternalID, id, err)
+				}
+				if created == nil || created.ID == "" {
+					return fmt.Errorf("importing comment %q on bead %q: transaction returned no durable comment identity", comment.ExternalID, id)
+				}
+				imported[created.ID] = comment
+			}
+			if len(imported) > 0 {
+				readback, err := tx.GetIssueComments(ctx, id)
+				if err != nil {
+					return fmt.Errorf("reading imported comments on bead %q in transaction: %w", id, err)
+				}
+				for _, got := range readback {
+					want, ok := imported[got.ID]
+					if !ok {
+						continue
+					}
+					if got.IssueID != id || got.Author != want.Author || got.Text != want.Text || !got.CreatedAt.Equal(want.CreatedAt.UTC()) {
+						return fmt.Errorf("imported comment %q on bead %q failed in-transaction readback", want.ExternalID, id)
+					}
+					delete(imported, got.ID)
+				}
+				if len(imported) != 0 {
+					return fmt.Errorf("imported comments on bead %q are absent from in-transaction readback", id)
+				}
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return nativeStoreError(id, err)
+	}
+	return nil
+}
+
+func (s *NativeDoltStore) nativeUpdatesPreservingRawMetadata(
+	ctx context.Context,
+	storage nativeIssueGetter,
+	id string,
+	rawMetadata json.RawMessage,
+	opts UpdateOpts,
+) (map[string]interface{}, error) {
+	withoutMetadata := opts
+	withoutMetadata.Metadata = nil
+	updates, err := s.nativeUpdates(ctx, storage, id, withoutMetadata)
+	if err != nil {
+		return nil, err
+	}
+	if len(opts.Metadata) == 0 {
+		return updates, nil
+	}
+	rawValues, err := metadataRawValuesFromNative(rawMetadata)
+	if err != nil {
+		return nil, fmt.Errorf("parsing raw metadata for bead %q: %w", id, err)
+	}
+	if rawValues == nil {
+		rawValues = make(map[string]json.RawMessage, len(opts.Metadata))
+	}
+	for key, value := range opts.Metadata {
+		rawValue, err := json.Marshal(value)
+		if err != nil {
+			return nil, fmt.Errorf("marshaling metadata value %q: %w", key, err)
+		}
+		rawValues[key] = rawValue
+	}
+	rawBytes, err := json.Marshal(rawValues)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling metadata: %w", err)
+	}
+	updates["metadata"] = json.RawMessage(rawBytes)
+	return updates, nil
+}
+
+func cloneStringMap(source map[string]string) map[string]string {
+	clone := make(map[string]string, len(source)+1)
+	for key, value := range source {
+		clone[key] = value
+	}
+	return clone
+}
 
 // CloseWithMetadataIfMatch merges metadata and closes id inside one native
 // transaction, but only while the exact opaque row version still matches.

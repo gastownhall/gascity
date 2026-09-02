@@ -1173,8 +1173,10 @@ func TestResolveDoltConnectionTargetManagedCity_EnvOverride(t *testing.T) {
 // If the probe were still hardcoded to 127.0.0.1, it would succeed (the
 // listener is on loopback) and this test would fail.
 func TestResolveDoltConnectionTargetManagedCity_EnvOverrideAppliesToReachability(t *testing.T) {
-	// Use a non-routable TEST-NET-1 address so DialTimeout fails fast.
-	t.Setenv(ManagedCityHostEnv, "192.0.2.1")
+	// The listener below is bound to 127.0.0.1 only. A second loopback address
+	// therefore proves the override reaches DialTimeout without depending on an
+	// external route that a VPN or transparent network agent may intercept.
+	t.Setenv(ManagedCityHostEnv, "127.0.0.2")
 	fs := fsys.OSFS{}
 	city := t.TempDir()
 	writeCanonicalConfig(t, fs, city, ConfigState{

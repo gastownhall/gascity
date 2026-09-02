@@ -543,7 +543,10 @@ The store must be selected explicitly with --store-ref=city:&lt;name&gt; or
 --store-ref=rig:&lt;name&gt;. The JSON patch is read from --request-file; use - for
 stdin so title and description do not appear in process arguments. Supported
 fields are title, description, acceptance, external_ref, status, priority,
-type, and metadata. Unknown or empty patches fail before the store opens.
+type, metadata, and comments. Comments require external_id, body, and an RFC3339
+created_at; they import with the fixed github-human author and update the
+github.imported_comment_ids receipt in the same native transaction. Unknown or
+empty patches fail before the store opens.
 
 The command never scans another store or falls back to an unconditional write.
 A stale revision is a zero-exit conflict outcome. Capability, transport,
