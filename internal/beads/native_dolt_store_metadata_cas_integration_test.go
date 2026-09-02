@@ -187,15 +187,19 @@ func TestApplyUpdateCASAgainstRealDolt(t *testing.T) {
 	priority := 1
 	title := "projected title"
 	description := "projected body"
+	acceptance := "projected acceptance"
+	externalRef := "https://github.com/owner/repo/issues/42"
 	status := "in_progress"
 	issueType := "feature"
 	opts := UpdateOpts{
-		Title:       &title,
-		Description: &description,
-		Status:      &status,
-		Type:        &issueType,
-		Priority:    &priority,
-		Metadata:    map[string]string{"github.projection_hash": "sha256:abc"},
+		Title:              &title,
+		Description:        &description,
+		AcceptanceCriteria: &acceptance,
+		ExternalRef:        &externalRef,
+		Status:             &status,
+		Type:               &issueType,
+		Priority:           &priority,
+		Metadata:           map[string]string{"github.projection_hash": "sha256:abc"},
 	}
 
 	result, err := ApplyUpdateCAS(store, created.ID, created.Revision, opts)
@@ -204,6 +208,13 @@ func TestApplyUpdateCASAgainstRealDolt(t *testing.T) {
 	}
 	if result.Outcome != UpdateCASUpdated || result.Revision == created.Revision {
 		t.Fatalf("result = %+v, want updated with a fresh revision", result)
+	}
+	bound, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get bound issue: %v", err)
+	}
+	if bound.AcceptanceCriteria != acceptance || bound.ExternalRef != externalRef {
+		t.Fatalf("binding fields = acceptance %q external_ref %q", bound.AcceptanceCriteria, bound.ExternalRef)
 	}
 
 	replay, err := ApplyUpdateCAS(store, created.ID, created.Revision, opts)

@@ -21,15 +21,19 @@ func TestApplyUpdateCASUpdatesAndReplaysWithoutAnotherWrite(t *testing.T) {
 	priority := 1
 	title := "new title"
 	description := "new description"
+	acceptance := "new acceptance"
+	externalRef := "https://github.com/owner/repo/issues/42"
 	status := "in_progress"
 	issueType := "feature"
 	opts := UpdateOpts{
-		Title:       &title,
-		Description: &description,
-		Status:      &status,
-		Type:        &issueType,
-		Priority:    &priority,
-		Metadata:    map[string]string{"github.projection_hash": "new"},
+		Title:              &title,
+		Description:        &description,
+		AcceptanceCriteria: &acceptance,
+		ExternalRef:        &externalRef,
+		Status:             &status,
+		Type:               &issueType,
+		Priority:           &priority,
+		Metadata:           map[string]string{"github.projection_hash": "new"},
 	}
 
 	result, err := ApplyUpdateCAS(store, bead.ID, bead.Revision, opts)
@@ -44,6 +48,13 @@ func TestApplyUpdateCASUpdatesAndReplaysWithoutAnotherWrite(t *testing.T) {
 	}
 	if result.Revision == bead.Revision {
 		t.Fatalf("revision did not move after update: %d", result.Revision)
+	}
+	updated, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get after update: %v", err)
+	}
+	if updated.AcceptanceCriteria != acceptance || updated.ExternalRef != externalRef {
+		t.Fatalf("binding fields = acceptance %q external_ref %q", updated.AcceptanceCriteria, updated.ExternalRef)
 	}
 
 	replay, err := ApplyUpdateCAS(store, bead.ID, bead.Revision, opts)

@@ -238,6 +238,12 @@ func (m *MemStore) applyUpdateLocked(i int, opts UpdateOpts) {
 	if opts.Description != nil {
 		m.beads[i].Description = *opts.Description
 	}
+	if opts.AcceptanceCriteria != nil {
+		m.beads[i].AcceptanceCriteria = *opts.AcceptanceCriteria
+	}
+	if opts.ExternalRef != nil {
+		m.beads[i].ExternalRef = *opts.ExternalRef
+	}
 	if opts.Priority != nil {
 		m.beads[i].Priority = cloneIntPtr(opts.Priority)
 	}

@@ -878,22 +878,24 @@ func (r *bdRevision) UnmarshalJSON(data []byte) error {
 // bdIssue is the JSON shape returned by bd CLI commands. We decode only the
 // fields Gas City cares about; all others are silently ignored.
 type bdIssue struct {
-	ID           string       `json:"id"`
-	Title        string       `json:"title"`
-	Status       string       `json:"status"`
-	IssueType    string       `json:"issue_type"`
-	Priority     *int         `json:"priority,omitempty"`
-	CreatedAt    time.Time    `json:"created_at"`
-	UpdatedAt    time.Time    `json:"updated_at"`
-	Assignee     string       `json:"assignee"`
-	From         string       `json:"from"`
-	ParentID     string       `json:"parent"`
-	Ref          string       `json:"ref"`
-	Needs        []string     `json:"needs"`
-	Description  string       `json:"description"`
-	Labels       []string     `json:"labels"`
-	Metadata     StringMap    `json:"metadata,omitempty"`
-	Dependencies []bdIssueDep `json:"dependencies,omitempty"`
+	ID                 string       `json:"id"`
+	Title              string       `json:"title"`
+	Status             string       `json:"status"`
+	IssueType          string       `json:"issue_type"`
+	Priority           *int         `json:"priority,omitempty"`
+	CreatedAt          time.Time    `json:"created_at"`
+	UpdatedAt          time.Time    `json:"updated_at"`
+	Assignee           string       `json:"assignee"`
+	From               string       `json:"from"`
+	ParentID           string       `json:"parent"`
+	Ref                string       `json:"ref"`
+	Needs              []string     `json:"needs"`
+	Description        string       `json:"description"`
+	AcceptanceCriteria string       `json:"acceptance_criteria,omitempty"`
+	ExternalRef        string       `json:"external_ref,omitempty"`
+	Labels             []string     `json:"labels"`
+	Metadata           StringMap    `json:"metadata,omitempty"`
+	Dependencies       []bdIssueDep `json:"dependencies,omitempty"`
 	// DependencyCount is bd's own count of this row's BLOCKING edges,
 	// projected from the same dependency table and the same query as
 	// Dependencies. It is the control that turns "bd carried edges inline"
@@ -1054,6 +1056,8 @@ func (b *bdIssue) toBead() Bead {
 		Ref:                  b.Ref,
 		Needs:                b.Needs,
 		Description:          b.Description,
+		AcceptanceCriteria:   b.AcceptanceCriteria,
+		ExternalRef:          b.ExternalRef,
 		Labels:               b.Labels,
 		Metadata:             b.Metadata,
 		Dependencies:         deps,
@@ -1399,6 +1403,12 @@ func bdUpdateArgs(id string, opts UpdateOpts) []string {
 	}
 	if opts.Description != nil {
 		args = append(args, "--description", *opts.Description)
+	}
+	if opts.AcceptanceCriteria != nil {
+		args = append(args, "--acceptance", *opts.AcceptanceCriteria)
+	}
+	if opts.ExternalRef != nil {
+		args = append(args, "--external-ref", *opts.ExternalRef)
 	}
 	if opts.ParentID != nil {
 		args = append(args, "--parent", *opts.ParentID)
