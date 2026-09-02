@@ -5,7 +5,8 @@
 # active databases. Falls back to CLI mode only when no server is running.
 # Pulls the configured remote's `main` branch in both SQL and CLI modes.
 #
-# Environment: GC_CITY_PATH, GC_DOLT_PORT, GC_DOLT_USER, GC_DOLT_PASSWORD
+# Environment: GC_CITY_PATH, GC_DOLT_PORT, GC_DOLT_USER, GC_DOLT_PASSWORD,
+# GC_DOLT_REMOTE_<DB> (select among multiple remotes), GC_DOLT_PULL_ALLOW_REMOTE_<DB>=1 (permit a non-file:// pull)
 set -e
 
 : "${GC_DOLT_USER:=root}"
@@ -25,6 +26,10 @@ while [ $# -gt 0 ]; do
       echo ""
       echo "Flags:"
       echo "  --db NAME   Pull only the named database"
+      echo ""
+      echo "Environment:"
+      echo "  GC_DOLT_REMOTE_<DB>                Select which remote to pull from when a database has several"
+      echo "  GC_DOLT_PULL_ALLOW_REMOTE_<DB>=1   Permit pulling from a non-file:// remote"
       exit 0
       ;;
     *) echo "gc dolt pull: unknown flag: $1" >&2; exit 1 ;;
@@ -138,7 +143,8 @@ find_remote_sql() {
   db="$1"
   remote_csv=$(dolt_sql "USE \`$db\`; SELECT name, url FROM dolt_remotes ORDER BY name") || return 1
   candidates=$(printf '%s\n' "$remote_csv" | awk -F, 'NR > 1 && $1 != "" {print $1 "," $2}')
-  chosen=$(select_remote "$db" "$candidates") || return 1
+  # 2 = select_remote already printed a specific policy refusal; 1 = lookup failed.
+  chosen=$(select_remote "$db" "$candidates") || return 2
   [ -z "$chosen" ] && return 0
   printf '%s\n' "$chosen" | awk -F, '{print $1 "|" $2}'
 }
@@ -151,7 +157,8 @@ pull_database_sql() {
   fi
 
   remote_pair=$(find_remote_sql "$name") || {
-    echo "  $name: ERROR: failed to query remotes" >&2
+    find_rc=$?
+    [ "$find_rc" -eq 2 ] || echo "  $name: ERROR: failed to query remotes" >&2
     return 1
   }
   if [ -z "$remote_pair" ]; then

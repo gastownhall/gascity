@@ -94,6 +94,9 @@ func TestPullSQLMultipleRemotesRefusesWithoutOverride(t *testing.T) {
 	if !strings.Contains(output, "internal") || !strings.Contains(output, "public") {
 		t.Fatalf("expected the refusal to list both candidate remote names:\n%s", output)
 	}
+	if strings.Contains(output, "failed to query remotes") {
+		t.Fatalf("a policy refusal must not be reported as a query failure:\n%s", output)
+	}
 
 	log := readLog(t, doltLog)
 	if strings.Contains(log, "DOLT_PULL") {
