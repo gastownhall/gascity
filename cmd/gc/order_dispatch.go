@@ -2213,7 +2213,12 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		return
 	}
 
-	cookResult, err := molecule.Instantiate(ctx, graphStore, recipe, molecule.Options{})
+	// Same fix as `gc order run` (cmd_order.go): thread the caller vars used
+	// for validation above into instantiation. An empty Options here falls
+	// back to formula defaults only, so every {{var}} referencing a
+	// caller-supplied value renders empty (or its default) on the created
+	// bead text instead of the caller's value (#4668).
+	cookResult, err := molecule.Instantiate(ctx, graphStore, recipe, molecule.Options{Vars: vars})
 	if err != nil {
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,

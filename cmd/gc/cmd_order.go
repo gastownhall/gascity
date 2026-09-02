@@ -857,7 +857,11 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 		return 1
 	}
 
-	cookResult, err := molecule.Instantiate(context.Background(), moleculeStore, recipe, molecule.Options{})
+	// Thread the same caller vars used for validation above into instantiation.
+	// An empty Options here falls back to formula defaults only, so every
+	// {{var}} referencing a caller-supplied value renders empty (or its
+	// default) on the created bead text instead of the caller's value (#4668).
+	cookResult, err := molecule.Instantiate(context.Background(), moleculeStore, recipe, molecule.Options{Vars: vars})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
