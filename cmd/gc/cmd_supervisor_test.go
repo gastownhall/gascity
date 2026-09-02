@@ -7443,7 +7443,7 @@ func TestRunSupervisorWarnsOnEphemeralAPIPort(t *testing.T) {
 	if err := os.WriteFile(supervisor.ConfigPath(), []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	sockPath := filepath.Join(supervisor.RuntimeDir(), "supervisor.sock")
+	sockPath := supervisorSocketPath()
 	if err := os.MkdirAll(sockPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -7471,7 +7471,7 @@ func TestRunSupervisorNoWarningForLowAPIPort(t *testing.T) {
 	if err := os.WriteFile(supervisor.ConfigPath(), []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	sockPath := filepath.Join(supervisor.RuntimeDir(), "supervisor.sock")
+	sockPath := supervisorSocketPath()
 	if err := os.MkdirAll(sockPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
