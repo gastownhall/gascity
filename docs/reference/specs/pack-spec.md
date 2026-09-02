@@ -489,9 +489,14 @@ Nudge operation builtin nudge-fallback runtimes like `tmux` use) that an
 oversized prompt can reroute through instead of argv. Like `command`, this
 is a pack-composition-time assertion: `gc` accepts the declaration as
 written and does not verify it against the runtime executable, at compose
-time or via the `pack-runtimes` doctor check below — a pack declaring
-`nudge-fallback` for an executable with no real Nudge support will not fail
-until an oversized prompt actually reaches that runtime at session start.
+time or via the `pack-runtimes` doctor check below. Pack authors can
+self-verify ahead of production: `gc runtime check <name>` resolves the
+declaration and smoke-tests it by invoking the runtime's `nudge` operation
+against a throwaway conformance session, failing the run (`required: nudge`)
+when nudge is absent or broken. That smoke-tests the operation, not that an
+oversized prompt reroutes end to end — a pack that never runs it and
+declares `nudge-fallback` falsely still will not fail until an oversized
+prompt actually reaches that runtime at session start.
 
 City composition registers declared runtimes into a city-wide selection
 registry (`City.Runtimes`), including runtimes declared by rig-imported packs.

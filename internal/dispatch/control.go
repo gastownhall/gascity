@@ -520,6 +520,13 @@ var transientNeedles = []transientNeedle{
 	{needle: "dolt circuit breaker is open", tier: TierAvailability},
 	{needle: "server appears down, failing fast", tier: TierAvailability},
 	{needle: "dolt server unreachable", tier: TierAvailability},
+	// A store read that times out never answered, so it is Tier A wherever it
+	// is raised. isTransientWorkQueryFailure already said so for the drain
+	// work-query path (6d74360fc5); scoping it to that one message prefix left
+	// every other caller quarantining on the first refusal — most visibly
+	// processWorkflowFinalize's outcome read, whose wrapper is "resolving
+	// workflow outcome" (gastownhall/gascity#5729).
+	{needle: "timed out after", tier: TierAvailability},
 }
 
 // ClassifyControllerError is the dispatch/store transient classifier for
