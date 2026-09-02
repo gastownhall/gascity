@@ -336,6 +336,7 @@ func TestBundledPiHookUsesCurrentExtensionAPI(t *testing.T) {
 		`run(["prime", "--hook"], ctx.cwd, hookEnv(ctx, "PreCompact"))`,
 		"GC_MANAGED_SESSION_HOOK",
 		"GC_HOOK_EVENT_NAME",
+		"pendingPrimeContext",
 		"GC_PROVIDER_SESSION_ID",
 		"GC_PROVIDER_SESSION_ID_REQUIRED",
 		`stdio: ["ignore", "pipe", "inherit"]`,

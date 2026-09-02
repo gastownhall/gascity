@@ -16,10 +16,16 @@ const { execFileSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const GC_PI_HOOK_VERSION = 8;
+const GC_PI_HOOK_VERSION = 9;
 const PATH_PREFIX =
   `/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`;
 let mirrorTempCounter = 0;
+// `gc prime --hook` writes the session's startup context to stdout. pi has no
+// session_start hook surface that can inject into the model's context, so the
+// SessionStart output is parked here and drained into the system prompt by the
+// next before_agent_start. Dropping it would consume auto-handoff mail (gc
+// archives it once the write succeeds) without ever delivering it.
+let pendingPrimeContext = "";
 
 function run(args, cwd, extraEnv = {}) {
   try {
@@ -164,7 +170,7 @@ function appendSystemPrompt(systemPrompt, additions) {
 
 module.exports = function gascityPiExtension(pi) {
   pi.on("session_start", (_event, ctx) => {
-    run(["prime", "--hook"], ctx.cwd, hookEnv(ctx, "SessionStart"));
+    pendingPrimeContext = run(["prime", "--hook"], ctx.cwd, hookEnv(ctx, "SessionStart"));
     mirrorTranscript(ctx);
   });
 
@@ -175,10 +181,12 @@ module.exports = function gascityPiExtension(pi) {
   });
 
   pi.on("before_agent_start", (event, ctx) => {
+    const prime = pendingPrimeContext;
+    pendingPrimeContext = "";
     const work = run(["hook", "--inject"], ctx.cwd);
     const nudges = run(["nudge", "drain", "--inject"], ctx.cwd);
     const mail = run(["mail", "check", "--inject"], ctx.cwd);
-    const systemPrompt = appendSystemPrompt(event.systemPrompt, [work, nudges, mail]);
+    const systemPrompt = appendSystemPrompt(event.systemPrompt, [prime, work, nudges, mail]);
     if (systemPrompt !== event.systemPrompt) {
       return { systemPrompt };
     }
