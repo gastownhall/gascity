@@ -86,8 +86,16 @@ type StatusRigJSON struct {
 
 // StatusSummaryJSON is the agent count summary in JSON output.
 type StatusSummaryJSON struct {
-	TotalAgents       int          `json:"total_agents"`
-	RunningAgents     int          `json:"running_agents"`
+	TotalAgents   int `json:"total_agents"`
+	RunningAgents int `json:"running_agents"`
+	// UnknownAgents is how many of TotalAgents the runtime probe never
+	// answered for. It is zero unless the status is partial. RunningAgents
+	// stays a count of agents observed running, so during partial status
+	// TotalAgents-RunningAgents is not a count of stopped agents and
+	// UnknownAgents is the part of that difference nothing was learned
+	// about. Without it a consumer reads running_agents=0 out of a probe
+	// that reached nobody and cannot tell it from a genuinely idle city.
+	UnknownAgents     int          `json:"unknown_agents,omitempty"`
 	ActiveSessions    int          `json:"active_sessions,omitempty"`
 	SuspendedSessions int          `json:"suspended_sessions,omitempty"`
 	StoreHealth       *StoreHealth `json:"store_health,omitempty"`
@@ -208,12 +216,17 @@ func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int
 // or (nil, reason) when the caller should fall back. Indirected through a
 // var so tests inject a client pointed at httptest.Server or force a
 // specific fallback reason without spinning up a real controller.
-var cityStatusAPIClient = func(cityPath string) (*api.Client, string) {
-	if c := apiClient(cityPath); c != nil {
-		return c, ""
-	}
-	return nil, apiClientFallbackReason(cityPath)
-}
+//
+// Uses the shared supervisorFallthroughAPIClient helper (gascity ga-tp7,
+// ra-r9hm6v) rather than plain apiClient: a supervisor-managed city with no
+// standalone [api] port in city.toml — the common case — otherwise falls
+// straight to nil here even though the supervisor is reachable, and
+// `gc status`'s local fallback re-opens the full local bead/dolt store and
+// rescans event archives to rebuild store health, which measured ~9.5s of
+// CPU on a 26-agent/1.2GB city versus ~0.35s for the supervisor's cached
+// response. Status has a local fallback (unlike maintenance), so this
+// change only affects the ROUTE picked, not the correctness of either path.
+var cityStatusAPIClient = supervisorFallthroughAPIClient
 
 // routeCityStatus dispatches `gc status` to the supervisor API when a
 // controller is up; otherwise falls back to the local snapshot builder.

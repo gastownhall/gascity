@@ -23,8 +23,8 @@ import (
 // `agent prompt --wait`, so herdr verifies the submission actually started a
 // turn instead of reporting ok the instant the text is typed.
 func TestStartupDeliveryPromptsWithConfirmation(t *testing.T) {
-	p, session, state := newFakeHerdrProvider(t)
-	listenHerdrSocket(t, session)
+	p, state := newFakeHerdrProvider(t)
+	listenHerdrSocket(t, p)
 
 	cfg := runtime.Config{Command: "claude", Nudge: "Run gc hook --claim --json now."}
 	if err := p.Start(context.Background(), "gastown__witness", cfg); err != nil {
@@ -49,8 +49,8 @@ func TestStartupDeliveryPromptsWithConfirmation(t *testing.T) {
 // bare Enter cannot do anything else — followed by a confirming wait. No
 // re-prompt: retyping would double the text in the box.
 func TestStartupDeliveryStallRecoversWithEnter(t *testing.T) {
-	p, session, state := newFakeHerdrProvider(t)
-	listenHerdrSocket(t, session)
+	p, state := newFakeHerdrProvider(t)
+	listenHerdrSocket(t, p)
 	setState(t, state, "prompt_stalled")
 
 	cfg := runtime.Config{Command: "claude", Nudge: "Run gc hook --claim --json now."}
@@ -80,8 +80,8 @@ func TestStartupDeliveryStallRecoversWithEnter(t *testing.T) {
 // strand must be recorded durably on the sidecar so it is machine-visible
 // and countable — stderr alone is discarded in daemon contexts.
 func TestStartupDeliveryUnconfirmedRecordsSidecarMarker(t *testing.T) {
-	p, session, state := newFakeHerdrProvider(t)
-	listenHerdrSocket(t, session)
+	p, state := newFakeHerdrProvider(t)
+	listenHerdrSocket(t, p)
 	setState(t, state, "prompt_stalled")
 	setState(t, state, "wait_times_out")
 
@@ -110,8 +110,8 @@ func TestStartupDeliveryUnconfirmedRecordsSidecarMarker(t *testing.T) {
 // the Enter is withheld, because there it would answer the dialog rather than
 // no-op on an empty input box.
 func TestStartupDeliveryStallOnBlockedAgentWithholdsEnter(t *testing.T) {
-	p, session, state := newFakeHerdrProvider(t)
-	listenHerdrSocket(t, session)
+	p, state := newFakeHerdrProvider(t)
+	listenHerdrSocket(t, p)
 	setState(t, state, "prompt_stalled")
 	setState(t, state, "agent_blocked")
 
@@ -143,8 +143,8 @@ func TestStartupDeliveryStallOnBlockedAgentWithholdsEnter(t *testing.T) {
 // recorded, because "submitted but unsettled" is not proof the turn is
 // running.
 func TestStartupDeliveryTimeoutNeverBlindEnters(t *testing.T) {
-	p, session, state := newFakeHerdrProvider(t)
-	listenHerdrSocket(t, session)
+	p, state := newFakeHerdrProvider(t)
+	listenHerdrSocket(t, p)
 	setState(t, state, "prompt_times_out")
 
 	cfg := runtime.Config{Command: "claude", Nudge: "Run gc hook --claim --json now."}
@@ -175,8 +175,8 @@ func TestStartupDeliveryTimeoutNeverBlindEnters(t *testing.T) {
 // the requested states, so dropping "blocked" from startupConfirmStates fails
 // this test.
 func TestStartupDeliveryBlockedConfirmsWithoutRecovery(t *testing.T) {
-	p, session, state := newFakeHerdrProvider(t)
-	listenHerdrSocket(t, session)
+	p, state := newFakeHerdrProvider(t)
+	listenHerdrSocket(t, p)
 	setState(t, state, "prompt_blocked")
 
 	cfg := runtime.Config{Command: "claude", Nudge: "Run gc hook --claim --json now."}
@@ -196,8 +196,8 @@ func TestStartupDeliveryBlockedConfirmsWithoutRecovery(t *testing.T) {
 // to confirm against: the legacy paste+settle+Enter path stays, best-effort
 // by construction, and must not record an unconfirmed marker.
 func TestStartupDeliveryUnregisteredPaneFallsBackToPaste(t *testing.T) {
-	p, session, state := newFakeHerdrProvider(t)
-	listenHerdrSocket(t, session)
+	p, state := newFakeHerdrProvider(t)
+	listenHerdrSocket(t, p)
 
 	cfg := runtime.Config{Command: "python3 worker.py", Nudge: "Read your brief."}
 	if err := p.Start(context.Background(), "gastown__worker", cfg); err != nil {
@@ -219,8 +219,8 @@ func TestStartupDeliveryUnregisteredPaneFallsBackToPaste(t *testing.T) {
 // sidecar) must not outlive a life whose delivery confirms — a stale marker
 // would false-positive the named-session delivery backstop built on it.
 func TestStartupDeliveryConfirmedClearsStaleMarker(t *testing.T) {
-	p, session, _ := newFakeHerdrProvider(t)
-	listenHerdrSocket(t, session)
+	p, _ := newFakeHerdrProvider(t)
+	listenHerdrSocket(t, p)
 	if err := p.SetMeta("gastown__witness", metaStartupUnconfirmed, "stale prior-life record"); err != nil {
 		t.Fatal(err)
 	}
@@ -241,8 +241,8 @@ func TestStartupDeliveryConfirmedClearsStaleMarker(t *testing.T) {
 // exactly the false positive the delivery backstop reading this key would
 // act on.
 func TestStartupDeliveryClearsStaleMarkerOnAdopt(t *testing.T) {
-	p, session, state := newFakeHerdrProvider(t)
-	listenHerdrSocket(t, session)
+	p, state := newFakeHerdrProvider(t)
+	listenHerdrSocket(t, p)
 	setState(t, state, "name_taken")
 	if err := p.SetMeta("gastown__witness", metaStartupUnconfirmed, "stale prior-life record"); err != nil {
 		t.Fatal(err)
@@ -265,8 +265,8 @@ func TestStartupDeliveryClearsStaleMarkerOnAdopt(t *testing.T) {
 // delivered, so nothing in this life can justify a marker, and a prior life's
 // must not be inherited.
 func TestStartupDeliveryClearsStaleMarkerWithNoStartupText(t *testing.T) {
-	p, session, state := newFakeHerdrProvider(t)
-	listenHerdrSocket(t, session)
+	p, state := newFakeHerdrProvider(t)
+	listenHerdrSocket(t, p)
 	if err := p.SetMeta("gastown__witness", metaStartupUnconfirmed, "stale prior-life record"); err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +288,7 @@ func TestStartupDeliveryClearsStaleMarkerWithNoStartupText(t *testing.T) {
 // The interface-facing WaitForIdle keeps its proceed-either-way contract; the
 // outcome lets Start record WHY a strand happened.
 func TestWaitForIdleOutcomeMapping(t *testing.T) {
-	p, _, state := newFakeHerdrProvider(t)
+	p, state := newFakeHerdrProvider(t)
 
 	if got := p.waitForIdleOutcome(context.Background(), "gastown__witness", time.Second); got != idleWaitNoAgent {
 		t.Fatalf("unregistered agent outcome = %q; want %q", got, idleWaitNoAgent)

@@ -1121,6 +1121,16 @@ type PackRuntimeEntry struct {
 	// the only version today; the declaration exists so future protocol
 	// bumps fail at composition instead of at session start.
 	Protocol int `toml:"protocol,omitempty"`
+	// PromptDelivery opts this runtime into a non-default oversized-prompt
+	// delivery strategy (cmd/gc promptDeliverySupportFor). Unset (the zero
+	// value) keeps today's behavior: an oversized prompt hard-fails for any
+	// runtime this package cannot positively classify. The only other
+	// accepted value is "nudge-fallback", asserting the runtime has a
+	// working post-start Nudge path an oversized prompt can reroute
+	// through. This is a pack-composition-time assertion, not something gc
+	// verifies against the runtime executable — see
+	// docs/reference/specs/pack-spec.md sec 1.2.8.
+	PromptDelivery string `toml:"prompt_delivery,omitempty" jsonschema:"enum=nudge-fallback"`
 }
 
 // PackCommandEntry declares a CLI subcommand provided by a pack.
@@ -1909,21 +1919,31 @@ const (
 	// DefaultDoltMaxConnections is the managed Dolt listener connection cap.
 	DefaultDoltMaxConnections = 256
 	// DefaultDoltReadTimeoutMillis is the managed Dolt listener read timeout.
-	// Managed multi-agent cities open a short-lived bd/dolt-sql client
-	// connection per operation and frequently SIGKILL it on a client-side
-	// deadline (e.g. agents wrap `gc hook` in `timeout 10`), so the server
-	// orphans the socket in Sleep until read_timeout fires. Lowering this from
-	// the former 30s reaps those dead per-call connections sooner, before they
-	// accumulate into a store-wide read collapse under load. read_timeout is the
-	// listener socket idle/produce timeout: it reaps idle (Sleep) connections
-	// and bounds the inter-row produce gap (go-mysql-server ErrRowTimeout
-	// re-arms per row), not total query wall-clock — so it does not cut a long
-	// but steadily-producing query. Do NOT drop it to/below the client kill
-	// budget (`timeout 10`) on the assumption it is purely idle-reaping. Cities
-	// with slower live operations raise it via city.toml [dolt]
-	// read_timeout_millis. See #3022 (5m->30s) and the scale_check storm RCA
-	// (30s->15s).
-	DefaultDoltReadTimeoutMillis = 15000
+	// read_timeout is go-mysql-server's ONLY idle-connection reaper:
+	// wait_timeout (DefaultDoltWaitTimeoutSeconds) is accepted, stored, and
+	// reported by the server, but reaps nothing on dolt 2.2.3 (measured for
+	// #5383). In code ErrRowTimeout re-arms per row, but plan shapes that
+	// produce no rows until they finish — recursive CTEs, aggregates, large
+	// UPDATEs — never re-arm it, so in practice read_timeout behaves as a
+	// wall-clock cap on the whole result-production phase, not merely an
+	// inter-row gap bound. It is fixed at handler construction: neither SET
+	// SESSION nor SET GLOBAL changes the effective value at runtime, only the
+	// server config file plus a restart.
+	//
+	// Raised from 15000 to 120000 after #5383 (the Reaper's own maintenance
+	// query was killed mid-production by the old 15s bound). #5053 introduced
+	// the wait_timeout config knob believing it would take over
+	// idle-connection reaping so read_timeout could be freed for long
+	// queries; #5383's measurements found that belief false, so this value
+	// instead stays at less than half of DefaultDoltWriteTimeoutMillis
+	// (300000, the prior emergency-workaround value) to preserve headroom
+	// for #3101's independent outer wall-clock deadline to catch a genuine
+	// connection pile-up (#3626) first. Cities with slower live operations
+	// can raise it further via city.toml [dolt] read_timeout_millis. See
+	// #3022 (5m->30s), the scale_check storm RCA (30s->15s), #5053
+	// (wait_timeout knob added), #5383 (Reaper false positive; wait_timeout
+	// measured inert), #3626 (read collapse incident).
+	DefaultDoltReadTimeoutMillis = 120000
 	// DefaultDoltWriteTimeoutMillis is the managed Dolt listener write timeout.
 	DefaultDoltWriteTimeoutMillis = 300000
 )
@@ -1951,19 +1971,20 @@ type DoltConfig struct {
 	MaxConnections int `toml:"max_connections,omitempty" jsonschema:"default=256"`
 	// ReadTimeoutMillis overrides the managed Dolt listener read_timeout_millis.
 	// 0 means use the managed default.
-	ReadTimeoutMillis int `toml:"read_timeout_millis,omitempty" jsonschema:"default=15000"`
+	ReadTimeoutMillis int `toml:"read_timeout_millis,omitempty" jsonschema:"default=120000"`
 	// WriteTimeoutMillis overrides the managed Dolt listener write_timeout_millis.
 	// 0 means use the managed default.
 	WriteTimeoutMillis int `toml:"write_timeout_millis,omitempty" jsonschema:"default=300000"`
 	// WaitTimeoutSeconds overrides the managed server's wait_timeout system
-	// variable, which is how long Dolt keeps an idle connection before reaping
-	// it. Cities that raise ReadTimeoutMillis above the reconcile tick gap
-	// generally need this raised with it, or the controller's long-lived
-	// dispatch-pool connections are still reaped between ticks. Before this
-	// field existed the only way to set it was GC_DOLT_WAIT_TIMEOUT in the
-	// supervisor's process environment, which no city.toml could express and
-	// no shell-invoked restart inherited — so a restart from an operator shell
-	// silently rewrote the value. 0 (omitted) means use the managed default.
+	// variable. Despite the name, wait_timeout does not currently reap idle
+	// connections -- measured inert on dolt 2.2.3 for #5383 (see
+	// DefaultDoltWaitTimeoutSeconds); read_timeout is the only reaper. The
+	// knob is kept and still emitted regardless: it is harmless, and becomes
+	// correct the moment dolt implements it. Before this field existed the
+	// only way to set it was GC_DOLT_WAIT_TIMEOUT in the supervisor's process
+	// environment, which no city.toml could express and no shell-invoked
+	// restart inherited — so a restart from an operator shell silently
+	// rewrote the value. 0 (omitted) means use the managed default.
 	WaitTimeoutSeconds int `toml:"wait_timeout_seconds,omitempty" jsonschema:"default=30"`
 	// DoltLockReleaseTimeout is how long managed-dolt lifecycle operations
 	// wait for dolt's on-disk exclusive store locks (the root-level
@@ -2037,8 +2058,14 @@ func (d DoltConfig) EffectiveWriteTimeoutMillis() int {
 	return DefaultDoltWriteTimeoutMillis
 }
 
-// DefaultDoltWaitTimeoutSeconds is the managed server's idle-connection reap
-// window when neither city.toml nor the environment configures one.
+// DefaultDoltWaitTimeoutSeconds is the managed default for the server's
+// wait_timeout system variable when neither city.toml nor the environment
+// configures one. Despite the name this is not an idle-connection reap
+// window: measured inert on dolt 2.2.3 for #5383 (accepted, stored, and
+// reported by the server, but nothing reads it in go-mysql-server's
+// server/ package -- see DefaultDoltReadTimeoutMillis, the actual reaper).
+// Kept and still emitted because it is harmless and becomes correct if a
+// future dolt version implements it.
 //
 // Deliberately not paired with an Effective* accessor like the other [dolt]
 // fields: wait_timeout resolves three ways, not two. An unset field must fall
@@ -3182,8 +3209,14 @@ type Agent struct {
 	// PromptTemplate is the path to this agent's prompt template file.
 	// Relative paths resolve against the city directory.
 	PromptTemplate string `toml:"prompt_template,omitempty"`
-	// Nudge is text typed into the agent's tmux session after startup.
-	// Used for CLI agents that don't accept command-line prompts.
+	// Nudge is text typed into the agent's session after startup.
+	// Used for CLI agents that don't accept command-line prompts. For a known
+	// pool session whose trigger remains unclaimed after the 90-second recovery
+	// grace period, an empty or whitespace-only Nudge does not opt out: it sends
+	// "Run gc hook --claim --drain-ack --json now; if it returns work, execute
+	// it immediately." This fallback applies only to the initial stalled-claim
+	// recovery; continuation-claim recovery remains configured-only. Unknown
+	// templates receive no fallback.
 	Nudge string `toml:"nudge,omitempty"`
 	// Session overrides the session transport for this agent.
 	// "" (default) uses the city-level session provider (typically tmux).
@@ -3681,7 +3714,7 @@ func InjectImplicitAgents(cfg *City) {
 	// prompt rendering falls back to the embedded baseline.
 	promptTemplate := ""
 	if coreDir := cfg.PackDirByName("core"); coreDir != "" {
-		promptTemplate = filepath.Join(coreDir, "assets", "prompts", "pool-worker.md")
+		promptTemplate = filepath.Join(coreDir, "assets", "prompts", "pool-worker.template.md")
 	}
 
 	slingFormula := cfg.AgentDefaults.DefaultSlingFormula

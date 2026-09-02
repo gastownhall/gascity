@@ -188,11 +188,17 @@ func cliStorageRoutesEntryFor(cityPath string) *cliStorageRoutesEntry {
 // The memo is detached under the lock before anything is closed, so a second
 // call closes nothing and a call that races the first cannot hand out a closed
 // store: the next resolution starts from an empty memo and opens again.
+//
+// The DERIVED memo goes with it. cliResidencyBindings caches the class-to-store
+// grouping it read out of these routes, so leaving it behind would let the next
+// by-id resolution plan legs over stores this call just closed — the memo one
+// layer up outliving the one it was derived from.
 func closeCLIStorageRoutes() error {
 	cliStorageRoutesMu.Lock()
 	entries := cliStorageRoutesByCity
 	cliStorageRoutesByCity = nil
 	cliStorageRoutesMu.Unlock()
+	resetCLIResidencyBindings()
 
 	var errs []error
 	for _, entry := range entries {

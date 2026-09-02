@@ -224,11 +224,30 @@ func agentHasPoolControls(agentCfg config.Agent) bool {
 	if agentPoolExplicitlyDisabled(agentCfg) {
 		return false
 	}
+	if agentIsNamedSessionSingleton(agentCfg) {
+		return false
+	}
 	return agentCfg.MinActiveSessions != nil ||
 		agentCfg.MaxActiveSessions != nil ||
 		strings.TrimSpace(agentCfg.ScaleCheck) != "" ||
 		strings.TrimSpace(agentCfg.Namepool) != "" ||
 		len(agentCfg.NamepoolNames) > 0
+}
+
+// agentIsNamedSessionSingleton reports whether agentCfg is the named-session
+// flavor of max_active_sessions=1 documented by
+// (*config.Agent).SupportsInstanceExpansion: max=1 with no
+// min_active_sessions, no scale_check, and no namepool is a singleton with a
+// stable canonical identity, not a pool — a [[named_session]] targeting it is
+// the supported configuration, not a conflict. Pool flavors of max=1 (an
+// explicit MinActiveSessions or a ScaleCheck) keep pool semantics and stay
+// flagged.
+func agentIsNamedSessionSingleton(agentCfg config.Agent) bool {
+	return agentCfg.MaxActiveSessions != nil && *agentCfg.MaxActiveSessions == 1 &&
+		agentCfg.MinActiveSessions == nil &&
+		strings.TrimSpace(agentCfg.ScaleCheck) == "" &&
+		strings.TrimSpace(agentCfg.Namepool) == "" &&
+		len(agentCfg.NamepoolNames) == 0
 }
 
 // agentPoolExplicitlyDisabled reports whether agentCfg uses the documented
