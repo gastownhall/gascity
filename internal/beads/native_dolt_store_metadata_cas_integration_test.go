@@ -170,6 +170,101 @@ func TestNativeDoltStoreConditionalWriterRequireAgainstRealOpenBestAvailable(t *
 	}
 }
 
+// TestApplyUpdateCASAgainstRealDolt proves the exact-store operation composes
+// over the production NativeDoltStore and upstream UpdateIssueChecked path.
+// Unit tests own classification edge cases; this is the one real-storage
+// boundary for mixed row-backed fields plus metadata and revision readback.
+func TestApplyUpdateCASAgainstRealDolt(t *testing.T) {
+	store := openRealNativeDoltStoreForCAS(t, "whole-row-update-cas")
+	created, err := store.Create(Bead{Title: "base", Description: "base body"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	created, err = store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get after create: %v", err)
+	}
+	priority := 1
+	title := "projected title"
+	description := "projected body"
+	acceptance := "projected acceptance"
+	externalRef := "https://github.com/owner/repo/issues/42"
+	status := "in_progress"
+	issueType := "feature"
+	opts := UpdateOpts{
+		Title:              &title,
+		Description:        &description,
+		AcceptanceCriteria: &acceptance,
+		ExternalRef:        &externalRef,
+		Status:             &status,
+		Type:               &issueType,
+		Priority:           &priority,
+		Metadata:           map[string]string{"github.projection_hash": "sha256:abc"},
+	}
+
+	result, err := ApplyUpdateCAS(store, created.ID, created.Revision, opts)
+	if err != nil {
+		t.Fatalf("ApplyUpdateCAS: %v", err)
+	}
+	if result.Outcome != UpdateCASUpdated || result.Revision == created.Revision {
+		t.Fatalf("result = %+v, want updated with a fresh revision", result)
+	}
+	bound, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get bound issue: %v", err)
+	}
+	if bound.AcceptanceCriteria != acceptance || bound.ExternalRef != externalRef {
+		t.Fatalf("binding fields = acceptance %q external_ref %q", bound.AcceptanceCriteria, bound.ExternalRef)
+	}
+
+	replay, err := ApplyUpdateCAS(store, created.ID, created.Revision, opts)
+	if err != nil {
+		t.Fatalf("replay ApplyUpdateCAS: %v", err)
+	}
+	if replay.Outcome != UpdateCASAlreadyApplied || replay.Revision != result.Revision {
+		t.Fatalf("replay = %+v, want already_applied at revision %d", replay, result.Revision)
+	}
+
+	other := "concurrent title"
+	if err := store.Update(created.ID, UpdateOpts{Title: &other}); err != nil {
+		t.Fatalf("concurrent Update: %v", err)
+	}
+	desired := "stale desired title"
+	conflict, err := ApplyUpdateCAS(store, created.ID, result.Revision, UpdateOpts{Title: &desired})
+	if err != nil {
+		t.Fatalf("conflicting ApplyUpdateCAS: %v", err)
+	}
+	if conflict.Outcome != UpdateCASConflict {
+		t.Fatalf("conflict = %+v, want %q", conflict, UpdateCASConflict)
+	}
+
+	// Exact-store projection CAS must preserve Beads' full status vocabulary.
+	// NativeDoltStore.Get intentionally normalizes blocked/deferred to open for
+	// Gas City scheduler semantics, so the operation needs its own raw
+	// authoritative readback rather than mistaking a successful write for a
+	// mismatch.
+	blocked := "blocked"
+	blockedResult, err := ApplyUpdateCAS(store, created.ID, conflict.Revision, UpdateOpts{Status: &blocked})
+	if err != nil {
+		t.Fatalf("blocked ApplyUpdateCAS: %v", err)
+	}
+	if blockedResult.Outcome != UpdateCASUpdated || blockedResult.Revision == conflict.Revision {
+		t.Fatalf("blocked result = %+v, want updated with a fresh revision", blockedResult)
+	}
+	storage, release, err := store.acquireStorage()
+	if err != nil {
+		t.Fatalf("acquire storage for raw status readback: %v", err)
+	}
+	raw, err := storage.GetIssue(context.Background(), created.ID)
+	release()
+	if err != nil {
+		t.Fatalf("raw GetIssue after blocked CAS: %v", err)
+	}
+	if raw == nil || raw.Status != beadslib.StatusBlocked {
+		t.Fatalf("raw status after blocked CAS = %+v, want %q", raw, beadslib.StatusBlocked)
+	}
+}
+
 // TestNativeDoltStoreMetadataCASSequentialAgainstRealDolt exercises the
 // sequential value-CAS contract — both pinned traps — against real storage.
 func TestNativeDoltStoreMetadataCASSequentialAgainstRealDolt(t *testing.T) {

@@ -47,28 +47,30 @@ func infraEqualityFixture() beads.Bead {
 	priority := 2
 	blocked := false
 	return beads.Bead{
-		ID:           "gcg-41",
-		Title:        "session lifecycle",
-		Status:       "open",
-		Type:         "session",
-		Priority:     &priority,
-		CreatedAt:    created,
-		UpdatedAt:    created.Add(time.Hour),
-		Assignee:     "worker-1",
-		From:         "dispatcher",
-		ParentID:     "gcg-40",
-		Ref:          "step-3",
-		Needs:        []string{"gcg-39"},
-		Description:  "the bead body, which is durable domain state",
-		Labels:       []string{"gc:session"},
-		Metadata:     beads.StringMap{"gc.session_name": "worker-1"},
-		Dependencies: []beads.Dep{{IssueID: "gcg-41", DependsOnID: "gcg-40", Type: "blocks"}},
-		Ephemeral:    true,
-		NoHistory:    true,
-		DeferUntil:   &deferred,
-		IsBlocked:    &blocked,
-		Revision:     7,
-		ClaimFence:   3,
+		ID:                 "gcg-41",
+		Title:              "session lifecycle",
+		Status:             "open",
+		Type:               "session",
+		Priority:           &priority,
+		CreatedAt:          created,
+		UpdatedAt:          created.Add(time.Hour),
+		Assignee:           "worker-1",
+		From:               "dispatcher",
+		ParentID:           "gcg-40",
+		Ref:                "step-3",
+		Needs:              []string{"gcg-39"},
+		Description:        "the bead body, which is durable domain state",
+		AcceptanceCriteria: "the copy preserves its acceptance contract",
+		ExternalRef:        "https://github.com/example/project/issues/41",
+		Labels:             []string{"gc:session"},
+		Metadata:           beads.StringMap{"gc.session_name": "worker-1"},
+		Dependencies:       []beads.Dep{{IssueID: "gcg-41", DependsOnID: "gcg-40", Type: "blocks"}},
+		Ephemeral:          true,
+		NoHistory:          true,
+		DeferUntil:         &deferred,
+		IsBlocked:          &blocked,
+		Revision:           7,
+		ClaimFence:         3,
 	}
 }
 
@@ -93,10 +95,15 @@ func beadCopyFieldMutations() map[string]func(beads.Bead) beads.Bead {
 			b.Description = ""
 			return b
 		},
-		"Labels":    func(b beads.Bead) beads.Bead { b.Labels = nil; return b },
-		"Metadata":  func(b beads.Bead) beads.Bead { b.Metadata = nil; return b },
-		"Ephemeral": func(b beads.Bead) beads.Bead { b.Ephemeral = false; return b },
-		"NoHistory": func(b beads.Bead) beads.Bead { b.NoHistory = false; return b },
+		"AcceptanceCriteria": func(b beads.Bead) beads.Bead {
+			b.AcceptanceCriteria = ""
+			return b
+		},
+		"ExternalRef": func(b beads.Bead) beads.Bead { b.ExternalRef = ""; return b },
+		"Labels":      func(b beads.Bead) beads.Bead { b.Labels = nil; return b },
+		"Metadata":    func(b beads.Bead) beads.Bead { b.Metadata = nil; return b },
+		"Ephemeral":   func(b beads.Bead) beads.Bead { b.Ephemeral = false; return b },
+		"NoHistory":   func(b beads.Bead) beads.Bead { b.NoHistory = false; return b },
 		"DeferUntil": func(b beads.Bead) beads.Bead {
 			b.DeferUntil = nil
 			return b

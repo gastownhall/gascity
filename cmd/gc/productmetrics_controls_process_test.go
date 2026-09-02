@@ -104,7 +104,7 @@ func validateProductMetricsJSONSchemaE(command []string, data []byte) error {
 	}
 	compiler := jsonschema.NewCompiler()
 	compiler.AssertFormat()
-	schemaURL := strings.Join(command, "/") + "/result.schema.json"
+	schemaURL := "gc://schemas/" + strings.Join(command, "/") + "/result.schema.json"
 	if err := compiler.AddResource(schemaURL, schemaDocument); err != nil {
 		return err
 	}

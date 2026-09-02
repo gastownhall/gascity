@@ -164,7 +164,8 @@ func (s *SQLiteStore) conditionalWrite(id string, expectedRevision int64, apply 
 // caller's revision).
 func updateOptsEmpty(opts UpdateOpts) bool {
 	return opts.Title == nil && opts.Status == nil && opts.Type == nil &&
-		opts.Priority == nil && opts.Description == nil && opts.ParentID == nil &&
+		opts.Priority == nil && opts.Description == nil && opts.AcceptanceCriteria == nil &&
+		opts.ExternalRef == nil && opts.ParentID == nil &&
 		opts.Assignee == nil && len(opts.Metadata) == 0 &&
 		len(opts.Labels) == 0 && len(opts.RemoveLabels) == 0
 }

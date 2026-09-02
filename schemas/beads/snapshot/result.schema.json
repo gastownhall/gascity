@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gc://schemas/beads/snapshot/result.schema.json",
+  "title": "gc beads snapshot result",
+  "description": "Private CAS-ready snapshot from one exact local bead store.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "ok",
+    "store_ref",
+    "beads"
+  ],
+  "properties": {
+    "schema_version": {
+      "description": "Schema version for this result.",
+      "const": "1"
+    },
+    "ok": {
+      "description": "True only when the exact-store read completed without partial rows.",
+      "const": true
+    },
+    "store_ref": {
+      "description": "Canonical exact local store selected for the snapshot.",
+      "type": "string",
+      "maxLength": 260,
+      "pattern": "^(city|rig):[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "beads": {
+      "description": "Durable issue rows sorted by bead identifier.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "title",
+          "description",
+          "acceptance_criteria",
+          "issue_type",
+          "status",
+          "revision",
+          "dependency_count",
+          "dependencies",
+          "metadata"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "acceptance_criteria": {
+            "type": "string"
+          },
+          "issue_type": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "integer"
+          },
+          "revision": {
+            "description": "Opaque authoritative CAS revision.",
+            "type": "integer",
+            "not": {
+              "const": 0
+            }
+          },
+          "external_ref": {
+            "type": "string"
+          },
+          "dependency_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "dependencies": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "dependency_type"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512,
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+                },
+                "dependency_type": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          },
+          "metadata": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  }
+}

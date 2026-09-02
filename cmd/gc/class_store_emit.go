@@ -493,6 +493,45 @@ func (s *emittingClassStore) UpdateIfMatch(id string, revision int64, opts beads
 	return nil
 }
 
+func (s *emittingClassStore) IssueGraphSnapshot(query beads.ListQuery) ([]beads.Bead, map[string][]beads.Dep, error) {
+	reader, ok := beads.IssueGraphSnapshotFor(s.Store)
+	if !ok {
+		return nil, nil, beads.ErrIssueGraphSnapshotUnsupported
+	}
+	return reader.IssueGraphSnapshot(query)
+}
+
+func (s *emittingClassStore) IssueGraphSnapshotHandle() (beads.IssueGraphSnapshotReader, bool) {
+	if _, ok := beads.IssueGraphSnapshotFor(s.Store); !ok {
+		return nil, false
+	}
+	return s, true
+}
+
+func (s *emittingClassStore) UpdateWithCommentsIfMatch(id string, revision int64, opts beads.UpdateOpts, comments []beads.ImportedComment) error {
+	importer, ok := beads.AtomicCommentImporterFor(s.Store)
+	if !ok {
+		return beads.ErrAtomicCommentImportUnsupported
+	}
+	wasClosed := s.closedBefore(id)
+	if err := importer.UpdateWithCommentsIfMatch(id, revision, opts, comments); err != nil {
+		return err
+	}
+	s.emitAfterUpdate(id, opts, wasClosed)
+	return nil
+}
+
+func (s *emittingClassStore) AtomicCommentImporterHandle() (beads.AtomicCommentImporter, bool) {
+	if _, ok := beads.AtomicCommentImporterFor(s.Store); !ok {
+		return nil, false
+	}
+	return s, true
+}
+
+func (s *emittingClassStore) ReadUpdateCASBead(id string) (beads.Bead, error) {
+	return beads.ReadUpdateCASBead(s.Store, id)
+}
+
 func (s *emittingClassStore) CloseIfMatch(id string, revision int64) error {
 	writer, ok := beads.ConditionalWriterFor(s.Store)
 	if !ok {
