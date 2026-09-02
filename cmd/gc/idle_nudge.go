@@ -227,6 +227,11 @@ func (p poolContinuationBackstop) revalidate(target backstopTarget) backstopReso
 	if err != nil || current.ID != target.ID {
 		return backstopResolutionHold
 	}
+	// target.StoreRef is the OWNER scope selectReadyContinuationClaimCandidates
+	// proved for this row, not the leg it was read from: inside a class binding a
+	// rig-scoped workflow's steps carry gc.root_store_ref=rig:<name> (ga-erfca).
+	// Both re-reads below compare against that owner, so this mirror of the
+	// evaluator cannot disqualify a row the evaluator admitted.
 	if !strings.EqualFold(strings.TrimSpace(current.Status), "open") ||
 		!strings.EqualFold(strings.TrimSpace(current.Type), "task") ||
 		strings.TrimSpace(current.Assignee) != target.Assignee ||

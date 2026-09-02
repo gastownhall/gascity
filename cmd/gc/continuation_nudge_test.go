@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 func continuationPoolSession(id, sessionName string) beads.Bead {
@@ -376,6 +377,189 @@ func TestSelectReadyContinuationClaimCandidates_DuplicateAgreementRequired(t *te
 			t.Fatalf("unreadable duplicate = {%#v partial:%v}, want no candidate and partial", got, partial)
 		}
 	})
+}
+
+// A class binding is a city-scope STORE but a many-scope CONTAINER: the same
+// doctrine PR #5918 (ga-oytw9) established for control-route repair. The leg
+// canonicalizes to the city because that is the scope it serves, but the rows
+// inside it keep their own owner — a rig-scoped workflow's steps are minted
+// with gc.root_store_ref=rig:<name>. Comparing such a row against the
+// leg-derived city ref answers "absent" for every rig-rooted successor on a
+// split city, which silently retires the continuation backstop for that whole
+// class of rows (ga-erfca).
+func TestEvaluateReadyContinuationClaimCandidate_BindingLegTakesOwnerFromRootRef(t *testing.T) {
+	const cityName = "split-city"
+	classLeg := string(storeref.ClassRef(wholeSplitClasses()))
+
+	tests := []struct {
+		name           string
+		rawStoreRef    string
+		stepOwnerRef   string
+		rootOwnerRef   string
+		wantOwnerRef   string
+		wantResolution continuationCandidateResolution
+	}{
+		{
+			name:           "binding leg rig rooted row",
+			rawStoreRef:    classLeg,
+			stepOwnerRef:   "rig:fixture",
+			rootOwnerRef:   "rig:fixture",
+			wantOwnerRef:   "rig:fixture",
+			wantResolution: continuationCandidateValid,
+		},
+		{
+			name:           "binding leg city rooted row",
+			rawStoreRef:    classLeg,
+			stepOwnerRef:   "city:" + cityName,
+			rootOwnerRef:   "city:" + cityName,
+			wantOwnerRef:   "city:" + cityName,
+			wantResolution: continuationCandidateValid,
+		},
+		{
+			name:           "legacy rig leg rig rooted row",
+			rawStoreRef:    "fixture",
+			stepOwnerRef:   "rig:fixture",
+			rootOwnerRef:   "rig:fixture",
+			wantOwnerRef:   "rig:fixture",
+			wantResolution: continuationCandidateValid,
+		},
+		{
+			name:           "binding leg row owned by the leg itself",
+			rawStoreRef:    classLeg,
+			stepOwnerRef:   classLeg,
+			rootOwnerRef:   classLeg,
+			wantResolution: continuationCandidateAbsent,
+		},
+		{
+			name:           "binding leg row owned by another city",
+			rawStoreRef:    classLeg,
+			stepOwnerRef:   "city:other-city",
+			rootOwnerRef:   "city:other-city",
+			wantResolution: continuationCandidateAbsent,
+		},
+		{
+			name:           "binding leg row with a malformed rig owner",
+			rawStoreRef:    classLeg,
+			stepOwnerRef:   "rig:",
+			rootOwnerRef:   "rig:",
+			wantResolution: continuationCandidateAbsent,
+		},
+		{
+			name:           "binding leg row with a non canonical owner",
+			rawStoreRef:    classLeg,
+			stepOwnerRef:   "fixture",
+			rootOwnerRef:   "fixture",
+			wantResolution: continuationCandidateAbsent,
+		},
+		{
+			name:           "binding leg root disagrees with the step owner",
+			rawStoreRef:    classLeg,
+			stepOwnerRef:   "rig:fixture",
+			rootOwnerRef:   "city:" + cityName,
+			wantResolution: continuationCandidateAbsent,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			canonicalStoreRef, ok := canonicalContinuationClaimStoreRef(cityName, tt.rawStoreRef)
+			if !ok {
+				t.Fatalf("leg %q did not canonicalize", tt.rawStoreRef)
+			}
+			root := continuationRoot(tt.rootOwnerRef)
+			step := continuationStep(root.ID, tt.stepOwnerRef)
+			binding := beads.NewMemStoreFrom(0, []beads.Bead{root, step}, nil)
+			readyAssigned := map[storeScopedBeadKey]bool{{StoreRef: tt.rawStoreRef, ID: step.ID}: true}
+
+			got, resolution := evaluateReadyContinuationClaimCandidate(
+				step,
+				binding,
+				tt.rawStoreRef,
+				canonicalStoreRef,
+				readyAssigned,
+			)
+			if resolution != tt.wantResolution {
+				t.Fatalf("resolution = %v, want %v (candidate %#v)", resolution, tt.wantResolution, got)
+			}
+			if tt.wantResolution != continuationCandidateValid {
+				return
+			}
+			if got.StoreRef != tt.wantOwnerRef {
+				t.Fatalf("candidate store ref = %q, want the row's own owner %q", got.StoreRef, tt.wantOwnerRef)
+			}
+			if got.WorkBeadID != step.ID || got.RootBeadID != root.ID || got.Assignee != step.Assignee {
+				t.Fatalf("candidate = %#v, want exact work/root/assignee provenance", got)
+			}
+			if got.Store != binding {
+				t.Fatalf("candidate store = %#v, want the binding leg the row was read from", got.Store)
+			}
+		})
+	}
+}
+
+// The selector must hand the backstop a rig-rooted binding row with its own
+// owner ref, not the city ref the binding leg groups under.
+func TestSelectReadyContinuationClaimCandidates_BindingRigRootedRowIsACandidate(t *testing.T) {
+	classLeg := string(storeref.ClassRef(wholeSplitClasses()))
+	root := continuationRoot("rig:fixture")
+	step := continuationStep(root.ID, "rig:fixture")
+
+	got, partial := continuationCandidateFixture(t, "split-city", classLeg, root, step, true)
+	if partial || len(got) != 1 {
+		t.Fatalf("binding rig-rooted candidates = {%#v partial:%v}, want exactly one candidate", got, partial)
+	}
+	if got[0].StoreRef != "rig:fixture" ||
+		got[0].WorkBeadID != step.ID ||
+		got[0].RootBeadID != root.ID ||
+		got[0].Assignee != step.Assignee {
+		t.Fatalf("candidate = %#v, want the row's own rig owner and exact provenance", got[0])
+	}
+}
+
+// End to end through the backstop: a rig-rooted successor living in a class
+// binding must still be re-delivered its claim nudge, and the durable marker
+// must record the owner ref the revalidation reads back.
+func TestNudgeStalledPoolContinuations_BindingRigRootedCandidateIsNudged(t *testing.T) {
+	const sessionName = "session-a"
+	now := time.Date(2026, 1, 1, 0, 5, 0, 0, time.UTC)
+	classLeg := string(storeref.ClassRef(wholeSplitClasses()))
+
+	root, step := continuationCandidateBeads("step-a", sessionName)
+	binding := beads.NewMemStoreFrom(0, []beads.Bead{root, step}, nil)
+	candidates, partial := selectReadyContinuationClaimCandidates(
+		"split-city",
+		[]beads.Bead{step},
+		[]beads.Store{binding},
+		[]string{classLeg},
+		map[storeScopedBeadKey]bool{{StoreRef: classLeg, ID: step.ID}: true},
+	)
+	if partial || len(candidates) != 1 {
+		t.Fatalf("binding candidates = {%#v partial:%v}, want exactly one candidate", candidates, partial)
+	}
+
+	sp := continuationRunningFake(t, sessionName)
+	session := continuationPoolSession("session-bead-a", sessionName)
+	backing := beads.NewMemStoreFrom(0, []beads.Bead{session}, nil)
+	seedContinuationMarker(t, backing, session, candidates[0], 0, now.Add(-idleClaimNudgeGrace-time.Second))
+	session = mustGetTestBead(t, backing, session.ID)
+
+	nudgeStalledPoolContinuations(
+		sp,
+		continuationNudgeCfg(),
+		&continuationMetadataCountingStore{Store: backing},
+		[]beads.Bead{session},
+		candidates,
+		false,
+		now,
+		&bytes.Buffer{},
+	)
+	if got := sp.CountCalls("Nudge", sessionName); got != 1 {
+		t.Fatalf("Nudge calls = %d, want 1 for a rig-rooted row inside the binding", got)
+	}
+	session = mustGetTestBead(t, backing, session.ID)
+	if got := session.Metadata[continuationClaimNudgeStoreRefKey]; got != "rig:fixture" {
+		t.Fatalf("marker store ref = %q, want the row's own owner rig:fixture", got)
+	}
 }
 
 type continuationMetadataCountingStore struct {

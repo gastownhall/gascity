@@ -42,10 +42,12 @@ type storeScopedBeadKey struct {
 // ContinuationClaimCandidate is a ready graph-v2 successor that may need a
 // bounded claim nudge after its current pool session completed the preceding
 // step but did not start another turn. All fields are exact provenance:
-// StoreRef is canonical (city:<name> or rig:<name>), RootBeadID was verified
-// through Store, and Assignee is the bead's persisted preassignment. Store is
-// retained for immediate pre-delivery revalidation; session identity
-// resolution happens later against the post-reconcile session snapshot.
+// StoreRef is the canonical ref of the scope that OWNS the row (city:<name> or
+// rig:<name>), which for a class binding is not the leg the row was read from;
+// RootBeadID was verified through Store, and Assignee is the bead's persisted
+// preassignment. Store is retained for immediate pre-delivery revalidation;
+// session identity resolution happens later against the post-reconcile session
+// snapshot.
 type ContinuationClaimCandidate struct {
 	WorkBeadID string
 	RootBeadID string
@@ -5531,8 +5533,12 @@ func evaluateReadyContinuationClaimCandidate(
 	}
 
 	rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
-	rootStoreRef := strings.TrimSpace(bead.Metadata[beadmeta.RootStoreRefMetadataKey])
-	if rootID == "" || rootStoreRef == "" || rootStoreRef != canonicalStoreRef {
+	ownerStoreRef, owned := continuationClaimOwnerStoreRef(
+		rawStoreRef,
+		bead.Metadata[beadmeta.RootStoreRefMetadataKey],
+		canonicalStoreRef,
+	)
+	if rootID == "" || !owned {
 		return ContinuationClaimCandidate{}, continuationCandidateAbsent
 	}
 	if store == nil {
@@ -5555,7 +5561,7 @@ func evaluateReadyContinuationClaimCandidate(
 	if root.ID != rootID ||
 		!strings.EqualFold(strings.TrimSpace(root.Status), "in_progress") ||
 		!strings.EqualFold(strings.TrimSpace(root.Type), "task") ||
-		strings.TrimSpace(root.Metadata[beadmeta.RootStoreRefMetadataKey]) != canonicalStoreRef ||
+		strings.TrimSpace(root.Metadata[beadmeta.RootStoreRefMetadataKey]) != ownerStoreRef ||
 		strings.TrimSpace(root.Metadata[beadmeta.FormulaContractMetadataKey]) != "graph.v2" ||
 		strings.TrimSpace(root.Metadata[beadmeta.KindMetadataKey]) != "workflow" {
 		return ContinuationClaimCandidate{}, continuationCandidateAbsent
@@ -5563,10 +5569,41 @@ func evaluateReadyContinuationClaimCandidate(
 	return ContinuationClaimCandidate{
 		WorkBeadID: strings.TrimSpace(bead.ID),
 		RootBeadID: rootID,
-		StoreRef:   canonicalStoreRef,
+		StoreRef:   ownerStoreRef,
 		Assignee:   strings.TrimSpace(bead.Assignee),
 		Store:      store,
 	}, continuationCandidateValid
+}
+
+// continuationClaimOwnerStoreRef answers which canonical store ref OWNS one
+// candidate row, which is not always the scope its leg serves. A class binding
+// is a city-scope store but a many-scope container — the same distinction PR
+// #5918 (ga-oytw9) drew for control-route repair. A rig-scoped workflow's steps
+// are minted into the binding carrying gc.root_store_ref=rig:<name>, so on a
+// split city the row's own root ref is the owner and the leg-derived city ref
+// is only the grouping key. It is accepted only when canonical and local to
+// this city: exactly the city ref, or a well-formed rig ref. A blank, class, or
+// legacy value fails closed. Every other leg is single-scope, so there the
+// leg-derived canonical ref stays the comparator.
+func continuationClaimOwnerStoreRef(rawStoreRef, rootStoreRef, canonicalStoreRef string) (string, bool) {
+	rootStoreRef = strings.TrimSpace(rootStoreRef)
+	if rootStoreRef == "" {
+		return "", false
+	}
+	if !storeref.IsClassRef(rawStoreRef) {
+		if rootStoreRef != canonicalStoreRef {
+			return "", false
+		}
+		return canonicalStoreRef, true
+	}
+	if rootStoreRef == canonicalStoreRef {
+		return canonicalStoreRef, true
+	}
+	rigName, scoped := storeref.ScopeRigContext(rootStoreRef)
+	if !scoped || rigName == "" || rootStoreRef != "rig:"+rigName {
+		return "", false
+	}
+	return rootStoreRef, true
 }
 
 func sameContinuationClaimCandidate(a, b ContinuationClaimCandidate) bool {
@@ -5593,7 +5630,9 @@ func canonicalContinuationClaimStoreRef(cityName, storeRef string) (string, bool
 	// census named it separately, a binding-resident continuation row arrived
 	// under the city ref and was a candidate; answering "not canonical" here
 	// would silently retire the continuation backstop for every graph-class step
-	// on a split city.
+	// on a split city. This is the GROUPING key and the city-rooted comparator
+	// only: the binding holds rows from many scopes, and each row's own owner is
+	// taken from its gc.root_store_ref by continuationClaimOwnerStoreRef.
 	case storeref.IsClassRef(storeRef):
 		if cityName == "" {
 			return "", false
