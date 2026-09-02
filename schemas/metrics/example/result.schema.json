@@ -217,7 +217,8 @@
               "worktree-ensure",
               "worktree-verify",
               "storage-preflight",
-              "beads-update-cas"
+              "beads-update-cas",
+              "beads-snapshot"
             ]
           },
           "event_id": {

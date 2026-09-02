@@ -38,6 +38,7 @@ type beadPolicyGraphStore struct {
 var (
 	_ beads.ConditionalAssignmentReleaser    = (*beadPolicyStore)(nil)
 	_ beads.ConditionalWritesResolveTargeter = (*beadPolicyStore)(nil)
+	_ beads.IssueGraphSnapshotReader         = (*beadPolicyStore)(nil)
 )
 
 // ConditionalWritesResolveTarget declares the wrapped store as the
@@ -140,6 +141,18 @@ func (s *beadPolicyStore) Count(ctx context.Context, query beads.ListQuery, excl
 		return 0, fmt.Errorf("counting beads: policy-wrapped store: %w", beads.ErrCountUnsupported)
 	}
 	return counter.Count(ctx, expandPolicyReadTier(query), excludeTypes...)
+}
+
+// IssueGraphSnapshot forwards the exact tier requested by the private graph
+// snapshot caller. Unlike general policy reads, this must not expand the
+// durable TierIssues selection to TierBoth: doing so would project ephemeral
+// wisps into GitHub work management.
+func (s *beadPolicyStore) IssueGraphSnapshot(query beads.ListQuery) ([]beads.Bead, map[string][]beads.Dep, error) {
+	reader, ok := beads.IssueGraphSnapshotFor(s.Store)
+	if !ok {
+		return nil, nil, beads.ErrIssueGraphSnapshotUnsupported
+	}
+	return reader.IssueGraphSnapshot(query)
 }
 
 // DeleteBatch implements beads.BatchDeleter by forwarding to the wrapped store

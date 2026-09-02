@@ -338,6 +338,7 @@ gc beads
 | [gc beads list](#gc-beads-list) | List beads (API-routed with bd fallback) |
 | [gc beads metadata-cas](#gc-beads-metadata-cas) | Atomically compare and set one metadata key in an exact local store |
 | [gc beads show](#gc-beads-show) | Show a single bead (API-routed with bd fallback) |
+| [gc beads snapshot](#gc-beads-snapshot) | Read a CAS-ready private snapshot from one exact local store |
 | [gc beads update-cas](#gc-beads-update-cas) | Atomically update row-backed fields in an exact local store |
 
 ## gc beads city
@@ -508,6 +509,31 @@ gc beads show ga-abc --format=json
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--format` | string | `text` | output format: text or json |
+
+## gc beads snapshot
+
+Read durable issues and their typed dependencies from one exact local
+bead store. The command promotes the same authoritative store revision used by
+gc beads update-cas and never scans another store. Output is JSON-only because
+it contains private Issue title/body content intended for a captured runtime
+pipe into the Agent Platform planner, not terminal logs. Any partial read,
+dependency failure, or zero revision fails closed.
+
+```
+gc beads snapshot [flags]
+```
+
+**Example:**
+
+```
+gc beads snapshot --store-ref=rig:tributary --json
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--format` | string | `text` | output format: json |
+| `--json` | bool |  | emit the canonical JSON snapshot |
+| `--store-ref` | string |  | exact local store: city:&lt;name&gt; or rig:&lt;name&gt; |
 
 ## gc beads update-cas
 
