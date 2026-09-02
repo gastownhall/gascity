@@ -1,5 +1,7 @@
 package doctor
 
+import "fmt"
+
 // SupervisorUnitOwnership is the caller-gathered relationship between a live
 // supervisor PID and gc's own systemd user unit (if any). Callers (cmd/gc)
 // compute this once per doctor run — mirroring how supervisorRunning is
@@ -55,5 +57,29 @@ func (c *SupervisorUnitOwnershipCheck) Fix(_ *CheckContext) error { return nil }
 
 // Run compares the live supervisor PID against gc's own systemd user unit.
 func (c *SupervisorUnitOwnershipCheck) Run(_ *CheckContext) *CheckResult {
-	return &CheckResult{Name: c.Name(), Status: StatusOK}
+	r := &CheckResult{Name: c.Name()}
+	if !c.supervisorRunning {
+		r.Status = StatusOK
+		r.Message = "supervisor is not running"
+		return r
+	}
+	switch c.ownership.Status {
+	case "no_unit":
+		r.Status = StatusOK
+		r.Message = "no systemd unit installed for the supervisor"
+	case "owned":
+		r.Status = StatusOK
+		r.Message = fmt.Sprintf("supervisor (PID %d) is owned by systemd unit %s", c.supervisorPID, c.ownership.Unit)
+	default:
+		r.Status = StatusError
+		r.Message = fmt.Sprintf(
+			"supervisor is running (PID %d) outside its systemd unit %s (unit PID %d, unit active=%v) — systemd's Restart=always is not protecting it",
+			c.supervisorPID, c.ownership.Unit, c.ownership.UnitPID, c.ownership.UnitActive,
+		)
+		r.FixHint = fmt.Sprintf(
+			"run 'systemctl --user reset-failed %s && systemctl --user start %s' to let the unit reclaim the process, or 'gc supervisor install' to reinstall it",
+			c.ownership.Unit, c.ownership.Unit,
+		)
+	}
+	return r
 }

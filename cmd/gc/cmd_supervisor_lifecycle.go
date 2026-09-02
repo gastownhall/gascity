@@ -556,8 +556,12 @@ func doSupervisorStartJSON(stdout, stderr io.Writer, jsonOut bool) int {
 	child.Stdin = nil
 	child.Stdout = logFile
 	child.Stderr = logFile
-	child.Env = os.Environ()
+	child.Env = supervisorForkEnv(os.Environ())
 	disableProductMetricsForChild(child)
+
+	if warning := supervisorPreForkOwnershipWarning(); warning != "" {
+		fmt.Fprintln(stderr, warning) //nolint:errcheck // best-effort stderr
+	}
 
 	if err := child.Start(); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor start: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -601,7 +605,23 @@ func doSupervisorStartJSON(stdout, stderr io.Writer, jsonOut bool) int {
 // `systemctl restart` still preserves agent sessions on SIGTERM, matching
 // the systemd-managed path's contract.
 func supervisorForkEnv(parent []string) []string {
-	return parent
+	env := make([]string, 0, len(parent)+1)
+	preserveSet := false
+	for _, kv := range parent {
+		if strings.HasPrefix(kv, "GC_SESSION_ID=") {
+			continue
+		}
+		if strings.HasPrefix(kv, supervisorPreserveSessionsOnSignalEnv+"=") {
+			env = append(env, supervisorPreserveSessionsOnSignalEnv+"=1")
+			preserveSet = true
+			continue
+		}
+		env = append(env, kv)
+	}
+	if !preserveSet {
+		env = append(env, supervisorPreserveSessionsOnSignalEnv+"=1")
+	}
+	return env
 }
 
 // supervisorPreForkOwnershipWarning inspects whether a systemd user unit for
@@ -615,7 +635,17 @@ func supervisorForkEnv(parent []string) []string {
 // alternative that lets systemd own the process instead. Returns "" when no
 // unit is installed, or the unit is already active.
 func supervisorPreForkOwnershipWarning() string {
-	return ""
+	if _, err := os.Stat(supervisorSystemdServicePath()); err != nil {
+		return ""
+	}
+	unit := supervisorSystemdServiceName()
+	if supervisorSystemctlActive(unit) {
+		return ""
+	}
+	return fmt.Sprintf(
+		"warning: gc's systemd unit %s is installed but not active; the supervisor being started now will NOT be owned by it and systemd's Restart=always will not apply. Run 'systemctl --user reset-failed %s && systemctl --user start %s' to let the unit take over, or run 'gc supervisor install' to reinstall it.",
+		unit, unit, unit,
+	)
 }
 
 // supervisorUnitOwnershipStatus reports how a live supervisor PID relates to
@@ -635,8 +665,22 @@ type supervisorUnitOwnershipStatus struct {
 	UnitPID    int
 }
 
-func supervisorDetermineUnitOwnership(_ int) supervisorUnitOwnershipStatus {
-	return supervisorUnitOwnershipStatus{Status: "no_unit"}
+func supervisorDetermineUnitOwnership(livePID int) supervisorUnitOwnershipStatus {
+	if _, err := os.Stat(supervisorSystemdServicePath()); err != nil {
+		return supervisorUnitOwnershipStatus{Status: "no_unit"}
+	}
+	unit := supervisorSystemdServiceName()
+	if !supervisorSystemctlActive(unit) {
+		return supervisorUnitOwnershipStatus{Status: "outside_unit", Unit: unit}
+	}
+	pid, ok := supervisorSystemctlMainPID(unit)
+	if !ok {
+		pid = 0
+	}
+	if ok && pid != 0 && pid == livePID {
+		return supervisorUnitOwnershipStatus{Status: "owned", Unit: unit, UnitActive: true, UnitPID: pid}
+	}
+	return supervisorUnitOwnershipStatus{Status: "outside_unit", Unit: unit, UnitActive: true, UnitPID: pid}
 }
 
 func ensureSupervisorRunning(stdout, stderr io.Writer) int {
