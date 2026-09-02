@@ -3325,7 +3325,12 @@ func TestCityRuntimeBeadReconcileTick_TransientStoreQueryPartialKeepsRunningPool
 // call-site un-gate this was skipped whenever CanReportActivity was true,
 // leaving tmux warm slots with no wake path. The marker is pre-seeded past the
 // grace window so a single tick nudges (attempt count 0 -> 1).
-func TestCityRuntimeBeadReconcileTick_IdleClaimNudgeRunsForReportActivityRuntime(t *testing.T) {
+//
+// This test guards both regressions at once: the call-site un-gate above (the
+// CanReportActivity precondition and the attempt count 0 -> 1 assertion), and
+// the blank-nudge fallback delivery — the agent configures a whitespace-only
+// nudge, so the single delivered Nudge must carry defaultPoolClaimNudge.
+func TestCityRuntimeBeadReconcileTick_IdleClaimNudgeFallsBackForBlankNudgeOnReportActivityRuntime(t *testing.T) {
 	sp := runtime.NewFake()
 	if !sp.Capabilities().CanReportActivity {
 		t.Fatal("precondition: fake runtime must report activity for this un-gate test to be meaningful")
@@ -3364,7 +3369,7 @@ func TestCityRuntimeBeadReconcileTick_IdleClaimNudgeRunsForReportActivityRuntime
 	cr := &CityRuntime{
 		cityPath:            t.TempDir(),
 		cityName:            "maintainer-city",
-		cfg:                 &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5), Nudge: "Run gc hook --claim --json now."}}},
+		cfg:                 &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5), Nudge: " \t "}}},
 		sp:                  sp,
 		standaloneCityStore: store,
 		sessionDrains:       newDrainTracker(),
@@ -3394,6 +3399,19 @@ func TestCityRuntimeBeadReconcileTick_IdleClaimNudgeRunsForReportActivityRuntime
 	if c := got.Metadata[idleClaimNudgeCountKey]; c != "1" {
 		t.Fatalf("idle-claim nudge did not fire for a report-activity runtime: attempt count = %q, want 1", c)
 	}
+	var nudges []runtime.Call
+	for _, call := range sp.SnapshotCalls() {
+		if call.Method == "Nudge" {
+			nudges = append(nudges, call)
+		}
+	}
+	if len(nudges) != 1 {
+		t.Fatalf("runtime Nudge calls = %#v, want exactly one fallback delivery", nudges)
+	}
+	if got, want := nudges[0].Message, defaultPoolClaimNudge; got != want {
+		t.Fatalf("fallback nudge payload = %q, want %q", got, want)
+	}
+	t.Logf("controller recovery delivered %q to running pool session %q; persisted attempt=%s", nudges[0].Message, nudges[0].Name, got.Metadata[idleClaimNudgeCountKey])
 }
 
 // A warm pool slot can finish its startup turn before work is routed. When the
@@ -4351,13 +4369,21 @@ func TestControlDispatcherTickRepairsRigRouteAndRestartsRuntimeMissingDispatcher
 	// materializing its replacement, so allow its bounded multi-tick convergence
 	// path without relying on the targeted dispatcher signal. Wait after each
 	// pass so the next tick observes committed async-start state instead of racing
-	// four reconciles ahead of their completion.
+	// several reconciles ahead of their completion.
+	//
+	// The replacement's runtime name is the dead session's name — it is derived
+	// from the dispatcher identity, not from a bead ID (ga-vcjr9) — so the retire
+	// must commit before the create can claim it, and the create before the
+	// start. The main ticks drive retire + re-materialize; the targeted
+	// dispatcher signal then starts the replacement the same way it started the
+	// original above.
 	for tick := range 4 {
 		runMainTick()
 		if !cr.waitForAsyncStarts() {
 			t.Fatalf("replacement async starts did not settle after recovery tick %d", tick+1)
 		}
 	}
+	cr.controlDispatcherTick(context.Background())
 	recoveryDeadline := time.NewTimer(testutil.GoroutineRaceTimeout)
 	recoveryTicker := time.NewTicker(10 * time.Millisecond)
 	defer recoveryDeadline.Stop()

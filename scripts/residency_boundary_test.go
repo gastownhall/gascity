@@ -6,6 +6,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -433,6 +434,24 @@ func eleventh() map[string]beads.Store { return nil }
 		}
 	})
 
+	t.Run("a subpackage is not a hiding place", func(t *testing.T) {
+		writeResidencyFixture(t, root, "internal/api/dashboardbff/nested.go", `package dashboardbff
+
+import "github.com/gastownhall/gascity/internal/beads"
+
+func nested() []beads.Store { return nil }
+`)
+		defer func() {
+			if err := os.Remove(filepath.Join(root, "internal/api/dashboardbff/nested.go")); err != nil {
+				t.Fatalf("remove: %v", err)
+			}
+		}()
+		v := scan(t, base)
+		if len(v) == 0 || !strings.Contains(strings.Join(v, " "), "dashboardbff/nested.go") {
+			t.Fatalf("the AST guard accepted a store-list signature one directory down: %v", v)
+		}
+	})
+
 	t.Run("stale baseline forces a shrink", func(t *testing.T) {
 		if err := os.Remove(filepath.Join(root, "cmd/gc/eleventh.go")); err != nil {
 			t.Fatalf("remove: %v", err)
@@ -450,30 +469,49 @@ func eleventh() map[string]beads.Store { return nil }
 
 // scanStoreListSignatures counts, per file, the non-test functions whose
 // results include a raw []beads.Store or map[string]beads.Store.
+//
+// The walk RECURSES, because the grep half does (`find "${present[@]}" -type f
+// -name '*.go'`). A flat read here left every subpackage of a governed
+// directory — internal/api/dashboardbff, internal/api/genclient — outside this
+// half entirely: a store-list constructor added there was caught only if its
+// body also spelled the grep half's vocabulary, which a hand-rolled probe list
+// need not do. The halves are supposed to cover the same tree by different
+// means, not different trees.
 func scanStoreListSignatures(root string, dirs []string, allowlist map[string]bool) (map[string]int, error) {
 	found := map[string]int{}
 	fset := token.NewFileSet()
 	for _, dir := range dirs {
 		abs := filepath.Join(root, filepath.FromSlash(dir))
-		entries, err := os.ReadDir(abs)
-		if os.IsNotExist(err) {
+		if _, err := os.Stat(abs); os.IsNotExist(err) {
 			continue
 		}
-		if err != nil {
-			return nil, err
-		}
-		for _, entry := range entries {
-			name := entry.Name()
-			if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-				continue
-			}
-			rel := dir + "/" + name
-			if allowlist[rel] {
-				continue
-			}
-			file, err := parser.ParseFile(fset, filepath.Join(abs, name), nil, parser.ParseComments)
+		walkErr := filepath.WalkDir(abs, func(path string, entry fs.DirEntry, err error) error {
 			if err != nil {
-				return nil, fmt.Errorf("%s: %w", rel, err)
+				return err
+			}
+			name := entry.Name()
+			if entry.IsDir() {
+				// node_modules and the built dashboard bundle hold no Go and
+				// are large enough that walking them is a real cost.
+				if path != abs && (name == "node_modules" || name == "dist") {
+					return fs.SkipDir
+				}
+				return nil
+			}
+			if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+				return nil
+			}
+			relPath, err := filepath.Rel(root, path)
+			if err != nil {
+				return err
+			}
+			rel := filepath.ToSlash(relPath)
+			if allowlist[rel] {
+				return nil
+			}
+			file, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
+			if err != nil {
+				return fmt.Errorf("%s: %w", rel, err)
 			}
 			for _, decl := range file.Decls {
 				fn, ok := decl.(*ast.FuncDecl)
@@ -490,6 +528,10 @@ func scanStoreListSignatures(root string, dirs []string, allowlist map[string]bo
 					}
 				}
 			}
+			return nil
+		})
+		if walkErr != nil {
+			return nil, walkErr
 		}
 	}
 	return found, nil

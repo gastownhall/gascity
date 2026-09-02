@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 )
 
@@ -35,7 +36,8 @@ type Report struct {
 
 // Doctor runs registered health checks and reports results.
 type Doctor struct {
-	checks []Check
+	checks   []Check
+	inFlight sync.WaitGroup
 	// CheckTimeout bounds each individual check's Run, its --fix remediation,
 	// and the post-fix verification re-run. Zero (the default) preserves the
 	// historical unbounded behavior. When one of those exceeds the bound it is
@@ -43,13 +45,26 @@ type Doctor struct {
 	// data plane, or a fix script blocked on I/O) cannot stall the entire
 	// doctor run and hide every check registered after it. A timed-out Run is
 	// reported as a timed-out advisory error; a timed-out fix is reported as an
-	// unconfirmed remediation.
+	// unconfirmed remediation. Call Wait before releasing resources that a
+	// timed execution may still be using.
 	CheckTimeout time.Duration
 }
 
 // Register adds a check to the doctor's check list.
 func (d *Doctor) Register(c Check) {
 	d.checks = append(d.checks, c)
+}
+
+// Wait blocks until every timed execution started by prior Run or RunCollect
+// calls has finished. Callers that release resources used by checks must call
+// Wait after the run returns and before releasing those resources.
+//
+// A Doctor serves one run at a time: Wait must not be called concurrently with
+// Run or RunCollect on another goroutine. Concurrent use would let a run's
+// inFlight.Add race a Wait that has already observed a zero counter, so Wait
+// could return while a timed execution still owns caller resources.
+func (d *Doctor) Wait() {
+	d.inFlight.Wait()
 }
 
 // Run executes all registered checks, streaming results to w as each
@@ -146,13 +161,17 @@ func (r *Report) tally(result *CheckResult) {
 // can never interleave writes with — or race against — the rest of the run.
 func (d *Doctor) boundedRun(c Check, ctx *CheckContext) *CheckResult {
 	if d.CheckTimeout <= 0 {
-		return c.Run(ctx)
+		return runCheckRecoveringPanic(c, ctx)
 	}
 	var buf bytes.Buffer
 	checkCtx := *ctx
 	checkCtx.Output = &buf
 	done := make(chan *CheckResult, 1)
-	go func() { done <- c.Run(&checkCtx) }()
+	d.inFlight.Add(1)
+	go func() {
+		defer d.inFlight.Done()
+		done <- runCheckRecoveringPanic(c, &checkCtx)
+	}()
 	select {
 	case result := <-done:
 		if buf.Len() > 0 && ctx.Output != nil {
@@ -168,6 +187,32 @@ func (d *Doctor) boundedRun(c Check, ctx *CheckContext) *CheckResult {
 			Message:  fmt.Sprintf("timed out after %s and was abandoned (outcome unknown); re-run alone or raise --check-timeout", d.CheckTimeout),
 		}
 	}
+}
+
+func runCheckRecoveringPanic(c Check, ctx *CheckContext) (result *CheckResult) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			result = &CheckResult{
+				Name:     c.Name(),
+				Status:   StatusError,
+				Severity: SeverityBlocking,
+				Message:  fmt.Sprintf("panic: %v", recovered),
+			}
+		}
+	}()
+	return c.Run(ctx)
+}
+
+// runFixRecoveringPanic converts a panic in a check's Fix into an error. Fix
+// runs pack-authored remediation, so a panic there must fail the one check
+// rather than take down the whole doctor process.
+func runFixRecoveringPanic(c Check, ctx *CheckContext) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("fix for %s panicked: %v", c.Name(), recovered)
+		}
+	}()
+	return c.Fix(ctx)
 }
 
 // fixAndVerify remediates a failing, fixable check and re-runs it to confirm,
@@ -214,13 +259,17 @@ func (d *Doctor) fixAndVerify(c Check, ctx *CheckContext, res *CheckResult) (*Ch
 // otherwise Fix's own error (or nil) is returned.
 func (d *Doctor) boundedFix(c Check, ctx *CheckContext) error {
 	if d.CheckTimeout <= 0 {
-		return c.Fix(ctx)
+		return runFixRecoveringPanic(c, ctx)
 	}
 	var buf bytes.Buffer
 	fixCtx := *ctx
 	fixCtx.Output = &buf
 	done := make(chan error, 1)
-	go func() { done <- c.Fix(&fixCtx) }()
+	d.inFlight.Add(1)
+	go func() {
+		defer d.inFlight.Done()
+		done <- runFixRecoveringPanic(c, &fixCtx)
+	}()
 	select {
 	case err := <-done:
 		if buf.Len() > 0 && ctx.Output != nil {

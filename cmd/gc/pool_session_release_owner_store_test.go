@@ -78,6 +78,7 @@ func TestReleaseOrphanedPoolAssignmentsReadsLivenessFromWorkOwnerStore(t *testin
 
 	released := releaseOrphanedPoolAssignments(
 		primaryStore,
+		beads.SessionStore{Store: primaryStore},
 		testPoolReleaseConfig(),
 		"",
 		nil,
@@ -128,6 +129,7 @@ func TestReleaseOrphanedPoolAssignmentsReleasesWhenNoStoreHoldsTheSession(t *tes
 
 	released := releaseOrphanedPoolAssignments(
 		primaryStore,
+		beads.SessionStore{Store: primaryStore},
 		testPoolReleaseConfig(),
 		"",
 		nil,

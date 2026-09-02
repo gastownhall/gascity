@@ -1,14 +1,19 @@
 package main
 
 import (
+	"fmt"
+	"log"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worktree"
 )
 
 // SessionRequest represents a single session the reconciler should start.
@@ -25,6 +30,14 @@ type SessionRequest struct {
 	WorkPack      string // pack route key from the work bead, when known
 	WorkWorkspace string // explicit pack workspace route key from the work bead, when known
 	WorkStoreRef  string // city or rig:<name> store reference for WorkBeadID when known
+	// WorktreeSpec is the single-owner evidence published by the provisioner.
+	// When present, the pool path verifies it before publishing work_dir on a
+	// session bead; a mismatch fails the whole atomic metadata update.
+	WorktreeSpec *worktree.Spec
+	// WorktreeError carries incomplete/conflicting worktree evidence discovered
+	// while building demand. The realization path fails closed before creating
+	// or updating a session bead.
+	WorktreeError string
 	// BrainParentSID is gc.brain_parent_sid from the driving work bead, when
 	// set: the parent session to fork this launch off of (warm-arm fork-launch).
 	BrainParentSID string
@@ -42,6 +55,101 @@ func beadPriority(b beads.Bead) int {
 		return *b.Priority
 	}
 	return 0
+}
+
+// legacyWorkDirNoticeSeen deduplicates the unmanaged-workspace notice keyed by
+// work bead ID. worktreeSpecForBead runs for every ready bead on every
+// scale-check tick and nothing backfills ownership metadata onto beads that
+// never published it, so an unguarded log line would repeat for the life of
+// the process.
+var legacyWorkDirNoticeSeen sync.Map // work bead ID -> struct{}
+
+// worktreeSpecForBead reconstructs the exact single-owner verification input
+// from metadata published after gc worktree ensure succeeds. A work_dir with
+// incomplete or conflicting evidence is an error, never permission to launch
+// a session into an unverified directory.
+func worktreeSpecForBead(bead beads.Bead, storeRef string) (*worktree.Spec, error) {
+	canonicalPath := strings.TrimSpace(bead.Metadata[beadmeta.WorkDirMetadataKey])
+	legacyPath := strings.TrimSpace(bead.Metadata[beadmeta.LegacyWorkDirMetadataKey])
+	if canonicalPath != "" && legacyPath != "" && canonicalPath != legacyPath {
+		return nil, fmt.Errorf("work bead %s has conflicting %s=%q and %s=%q",
+			bead.ID, beadmeta.WorkDirMetadataKey, canonicalPath, beadmeta.LegacyWorkDirMetadataKey, legacyPath)
+	}
+	path := canonicalPath
+	pathKey := beadmeta.WorkDirMetadataKey
+	if path == "" {
+		path = legacyPath
+		pathKey = beadmeta.LegacyWorkDirMetadataKey
+	}
+	if path == "" {
+		return nil, nil
+	}
+	values := []struct {
+		key   string
+		value string
+	}{
+		{beadmeta.WorktreeRepoMetadataKey, bead.Metadata[beadmeta.WorktreeRepoMetadataKey]},
+		{beadmeta.WorktreeRootMetadataKey, bead.Metadata[beadmeta.WorktreeRootMetadataKey]},
+		{beadmeta.WorkBranchMetadataKey, bead.Metadata[beadmeta.WorkBranchMetadataKey]},
+		{beadmeta.WorktreeBaseRefMetadataKey, bead.Metadata[beadmeta.WorktreeBaseRefMetadataKey]},
+		{beadmeta.WorktreeBaseSHAMetadataKey, bead.Metadata[beadmeta.WorktreeBaseSHAMetadataKey]},
+		{beadmeta.WorktreeCreatorMetadataKey, bead.Metadata[beadmeta.WorktreeCreatorMetadataKey]},
+		{beadmeta.WorktreeOwnerMetadataKey, bead.Metadata[beadmeta.WorktreeOwnerMetadataKey]},
+		{beadmeta.WorktreeGenerationMetadataKey, bead.Metadata[beadmeta.WorktreeGenerationMetadataKey]},
+		{beadmeta.WorktreeLifecycleMetadataKey, bead.Metadata[beadmeta.WorktreeLifecycleMetadataKey]},
+	}
+	missing := make([]string, 0, len(values))
+	for _, item := range values {
+		if strings.TrimSpace(item.value) == "" {
+			missing = append(missing, item.key)
+		}
+	}
+	if len(missing) == len(values) {
+		// A bead carrying work_dir without any ownership evidence is not
+		// incomplete evidence -- it never claimed to publish any. Recipe steps
+		// are still minted this way (stampDrainItemRecipe in
+		// internal/dispatch/drain.go copies both work_dir spellings and none
+		// of the nine ownership keys), so treat it as an unmanaged workspace
+		// and let the seat spawn as it always did, instead of erroring it into
+		// permanent starvation.
+		if _, dup := legacyWorkDirNoticeSeen.LoadOrStore(bead.ID, struct{}{}); !dup {
+			log.Printf("worktreeSpecForBead: work bead %s has %s=%q with no worktree ownership metadata; treating as unmanaged",
+				bead.ID, pathKey, path)
+		}
+		return nil, nil
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("work bead %s has %s=%q but is missing %s",
+			bead.ID, beadmeta.WorkDirMetadataKey, path, missing[0])
+	}
+	// The bead's own gc.root_store_ref is the canonical spelling
+	// ("city:<name>", "rig:<name>") and is what the creating side recorded in
+	// the workspace provenance. The caller's storeRef is a probe shorthand
+	// ("city"), so verification against durable provenance compares unequal
+	// strings and refuses a workspace that is in fact ours. Prefer the bead's
+	// value and keep the shorthand only as a fallback for beads that carry no
+	// canonical ref.
+	resolvedStoreRef := strings.TrimSpace(bead.Metadata[beadmeta.RootStoreRefMetadataKey])
+	if resolvedStoreRef == "" {
+		resolvedStoreRef = strings.TrimSpace(storeRef)
+	}
+	if resolvedStoreRef == "" {
+		return nil, fmt.Errorf("work bead %s has %s=%q but no store reference", bead.ID, beadmeta.WorkDirMetadataKey, path)
+	}
+	return &worktree.Spec{
+		RepoDir:    strings.TrimSpace(bead.Metadata[beadmeta.WorktreeRepoMetadataKey]),
+		Root:       strings.TrimSpace(bead.Metadata[beadmeta.WorktreeRootMetadataKey]),
+		Path:       path,
+		Branch:     strings.TrimSpace(bead.Metadata[beadmeta.WorkBranchMetadataKey]),
+		Base:       strings.TrimSpace(bead.Metadata[beadmeta.WorktreeBaseRefMetadataKey]),
+		BaseSHA:    strings.TrimSpace(bead.Metadata[beadmeta.WorktreeBaseSHAMetadataKey]),
+		BeadID:     strings.TrimSpace(bead.ID),
+		StoreRef:   resolvedStoreRef,
+		Creator:    strings.TrimSpace(bead.Metadata[beadmeta.WorktreeCreatorMetadataKey]),
+		Owner:      strings.TrimSpace(bead.Metadata[beadmeta.WorktreeOwnerMetadataKey]),
+		Generation: strings.TrimSpace(bead.Metadata[beadmeta.WorktreeGenerationMetadataKey]),
+		Lifecycle:  strings.TrimSpace(bead.Metadata[beadmeta.WorktreeLifecycleMetadataKey]),
+	}, nil
 }
 
 // PoolDesiredState holds the desired state for a single agent template.
@@ -85,6 +193,19 @@ func ComputePoolDesiredStates(
 	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, nil)
 }
 
+// ComputePoolDesiredStatesAt computes pool demand at a caller-supplied
+// decision time so post-create retention is consistent with its session
+// snapshot.
+func ComputePoolDesiredStatesAt(
+	cfg *config.City,
+	assignedWorkBeads []beads.Bead,
+	sessionInfos []sessionpkg.Info,
+	scaleCheckCounts map[string]int,
+	decisionTime time.Time,
+) []PoolDesiredState {
+	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, decisionTime, nil)
+}
+
 func ComputePoolDesiredStatesTraced(
 	cfg *config.City,
 	assignedWorkBeads []beads.Bead,
@@ -93,6 +214,19 @@ func ComputePoolDesiredStatesTraced(
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
 	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, trace)
+}
+
+// ComputePoolDesiredStatesTracedAt is ComputePoolDesiredStatesAt with
+// reconciler decision tracing.
+func ComputePoolDesiredStatesTracedAt(
+	cfg *config.City,
+	assignedWorkBeads []beads.Bead,
+	sessionInfos []sessionpkg.Info,
+	scaleCheckCounts map[string]int,
+	decisionTime time.Time,
+	trace *sessionReconcilerTraceCycle,
+) []PoolDesiredState {
+	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, decisionTime, trace)
 }
 
 func ComputePoolDesiredStatesWithDemandTraced(
@@ -106,12 +240,38 @@ func ComputePoolDesiredStatesWithDemandTraced(
 	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, trace)
 }
 
+// ComputePoolDesiredStatesWithDemandTracedAt computes traced pool demand at a
+// caller-supplied decision time while preserving per-work demand provenance.
+func ComputePoolDesiredStatesWithDemandTracedAt(
+	cfg *config.City,
+	assignedWorkBeads []beads.Bead,
+	sessionInfos []sessionpkg.Info,
+	scaleCheckCounts map[string]int,
+	scaleCheckDemand map[string]scaleCheckDemand,
+	decisionTime time.Time,
+	trace *sessionReconcilerTraceCycle,
+) []PoolDesiredState {
+	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, decisionTime, trace)
+}
+
 func computePoolDesiredStates(
 	cfg *config.City,
 	assignedWorkBeads []beads.Bead,
 	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
 	scaleCheckDemand map[string]scaleCheckDemand,
+	trace *sessionReconcilerTraceCycle,
+) []PoolDesiredState {
+	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, time.Time{}, trace)
+}
+
+func computePoolDesiredStatesAt(
+	cfg *config.City,
+	assignedWorkBeads []beads.Bead,
+	sessionInfos []sessionpkg.Info,
+	scaleCheckCounts map[string]int,
+	scaleCheckDemand map[string]scaleCheckDemand,
+	decisionTime time.Time,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
 	// Build reverse lookup: any identifier → session bead ID.
@@ -250,95 +410,204 @@ func computePoolDesiredStates(
 	}
 
 	limits := newNestedCapLimits(cfg)
-	usage := acceptedNestedCapUsage(limits, resumeRequests)
-	allRequests := append([]SessionRequest(nil), resumeRequests...)
 	resumeSessionBeadIDs := make(map[string]struct{}, len(resumeRequests))
 	for _, req := range resumeRequests {
 		if req.SessionBeadID != "" {
 			resumeSessionBeadIDs[req.SessionBeadID] = struct{}{}
 		}
 	}
-	inFlightNewRequests := poolInFlightNewRequests(cfg, sessionInfos, resumeSessionBeadIDs)
+	protectedNewRequests, inFlightNewRequests := poolNewDemandRequests(cfg, sessionInfos, resumeSessionBeadIDs, decisionTime)
+	// A wake-known request has assigned work but no surviving concrete session
+	// identity. Freshly completed unassigned pool sessions are valid concrete
+	// capacity for that request. Bind them before calculating residual protected
+	// demand so wake-known + protection cannot materialize the same capacity
+	// twice.
+	for i := range resumeRequests {
+		req := &resumeRequests[i]
+		if req.Tier != "wake-known-identity" || req.SessionBeadID != "" {
+			continue
+		}
+		candidates := protectedNewRequests[req.Template]
+		if len(candidates) == 0 {
+			continue
+		}
+		req.SessionBeadID = candidates[0].SessionBeadID
+		protectedNewRequests[req.Template] = candidates[1:]
+	}
+	usage := acceptedNestedCapUsage(limits, resumeRequests)
+	allRequests := append([]SessionRequest(nil), resumeRequests...)
 
 	// Merge scale_check demand. In bead-backed reconciliation, scale_check is
 	// the authoritative signal for new unassigned demand only; resume requests
 	// are calculated independently from assigned work and must not be deducted
 	// from that count. Pool-created sessions that have not claimed work yet
 	// represent already-spent new demand, so they occupy the first new-demand
-	// slots explicitly before anonymous creates are materialized.
-	if len(scaleCheckCounts) > 0 {
-		for i := range cfg.Agents {
-			agent := &cfg.Agents[i]
-			if agent.Suspended {
-				continue
-			}
-			template := agent.QualifiedName()
-			scaleCount, ok := scaleCheckCounts[template]
-			if !ok {
-				continue
-			}
-			if _, ok := aliasHeldTemplates[template]; ok {
-				continue
-			}
-			newCount := capNewDemandCount(limits, usage, agent, scaleCount)
-			recordNewDemandCapTrace(trace, template, agent, limits, usage, scaleCount, newCount)
-			inFlight := inFlightNewRequests[template]
-			inFlightCount := minInt(len(inFlight), newCount)
-			if scaleCount > 0 && len(inFlight) > 0 && trace != nil {
-				trace.RecordDecision(TraceSitePoolInFlightReuse, TraceReasonInFlightReuse, TraceOutcomeAccepted, template, "", traceRecordPayload{
-					"scale_check":   scaleCount,
-					"in_flight":     len(inFlight),
-					"reused":        inFlightCount,
-					"anonymous_new": newCount - inFlightCount,
-				})
-			}
-			for j := 0; j < inFlightCount; j++ {
-				req := inFlight[j]
-				allRequests = append(allRequests, req)
-				usage.accept(req, limits)
-			}
-			for j := inFlightCount; j < newCount; j++ {
-				workBeadID := ""
-				workBeadTitle := ""
-				workPack := ""
-				workWorkspace := ""
-				workStoreRef := ""
-				workParentSID := ""
-				if demand := scaleCheckDemand[template]; len(demand.WorkBeadIDs) > j {
-					workBeadID = strings.TrimSpace(demand.WorkBeadIDs[j])
-					if demand.Titles != nil {
-						workBeadTitle = strings.TrimSpace(demand.Titles[workBeadID])
-					}
-					if demand.Packs != nil {
-						workPack = strings.TrimSpace(demand.Packs[workBeadID])
-					}
-					if demand.Workspaces != nil {
-						workWorkspace = strings.TrimSpace(demand.Workspaces[workBeadID])
-					}
-					if demand.StoreRefs != nil {
-						workStoreRef = strings.TrimSpace(demand.StoreRefs[workBeadID])
-					}
-					if demand.ParentSIDs != nil {
-						workParentSID = strings.TrimSpace(demand.ParentSIDs[workBeadID])
-					}
+	// slots explicitly before anonymous creates are materialized. Freshly
+	// completed sessions also establish a short-lived demand floor so a sibling
+	// startup is not drained merely because another worker claimed first.
+	for i := range cfg.Agents {
+		agent := &cfg.Agents[i]
+		if agent.Suspended {
+			continue
+		}
+		template := agent.QualifiedName()
+		scaleCount, hasScaleCount := scaleCheckCounts[template]
+		protected := protectedNewRequests[template]
+		if !hasScaleCount && len(protected) == 0 {
+			continue
+		}
+		if _, ok := aliasHeldTemplates[template]; ok {
+			continue
+		}
+		effectiveDemand := max(scaleCount, len(protected))
+		newCount := capNewDemandCount(limits, usage, agent, effectiveDemand)
+		recordNewDemandCapTrace(trace, template, agent, limits, usage, effectiveDemand, newCount)
+		inFlight := inFlightNewRequests[template]
+		protectedCount := minInt(len(protected), newCount)
+		inFlightCount := minInt(len(inFlight), newCount-protectedCount)
+		reusedCount := protectedCount + inFlightCount
+		selectedConcrete := make([]SessionRequest, 0, reusedCount)
+		selectedConcrete = append(selectedConcrete, protected[:protectedCount]...)
+		selectedConcrete = append(selectedConcrete, inFlight[:inFlightCount]...)
+		demand := scaleCheckDemand[template]
+		selectedConcrete, residualWorkBeadIDs := allocateScaleDemandToConcrete(demand, selectedConcrete)
+		if scaleCount > 0 && len(protected)+len(inFlight) > 0 && trace != nil {
+			trace.RecordDecision(TraceSitePoolInFlightReuse, TraceReasonInFlightReuse, TraceOutcomeAccepted, template, "", traceRecordPayload{
+				"scale_check":   scaleCount,
+				"in_flight":     len(inFlight),
+				"protected":     len(protected),
+				"reused":        reusedCount,
+				"anonymous_new": newCount - reusedCount,
+			})
+		}
+		for _, req := range selectedConcrete {
+			allRequests = append(allRequests, req)
+			usage.accept(req, limits)
+		}
+		for j := 0; j < newCount-reusedCount; j++ {
+			workBeadID := ""
+			workBeadTitle := ""
+			workPack := ""
+			workWorkspace := ""
+			workStoreRef := ""
+			workParentSID := ""
+			var worktreeSpec *worktree.Spec
+			worktreeError := ""
+			if len(residualWorkBeadIDs) > j {
+				workBeadID = residualWorkBeadIDs[j]
+				if demand.Titles != nil {
+					workBeadTitle = strings.TrimSpace(demand.Titles[workBeadID])
 				}
-				req := SessionRequest{
-					Template:       template,
-					Tier:           "new",
-					WorkBeadID:     workBeadID,
-					WorkBeadTitle:  workBeadTitle,
-					WorkPack:       workPack,
-					WorkWorkspace:  workWorkspace,
-					WorkStoreRef:   workStoreRef,
-					BrainParentSID: workParentSID,
+				if demand.Packs != nil {
+					workPack = strings.TrimSpace(demand.Packs[workBeadID])
 				}
-				allRequests = append(allRequests, req)
-				usage.accept(req, limits)
+				if demand.Workspaces != nil {
+					workWorkspace = strings.TrimSpace(demand.Workspaces[workBeadID])
+				}
+				if demand.StoreRefs != nil {
+					workStoreRef = strings.TrimSpace(demand.StoreRefs[workBeadID])
+				}
+				if demand.ParentSIDs != nil {
+					workParentSID = strings.TrimSpace(demand.ParentSIDs[workBeadID])
+				}
+				if demand.WorktreeSpecs != nil {
+					worktreeSpec = demand.WorktreeSpecs[workBeadID]
+				}
+				if demand.WorktreeErrors != nil {
+					worktreeError = strings.TrimSpace(demand.WorktreeErrors[workBeadID])
+				}
 			}
+			req := SessionRequest{
+				Template:       template,
+				Tier:           "new",
+				WorkBeadID:     workBeadID,
+				WorkBeadTitle:  workBeadTitle,
+				WorkPack:       workPack,
+				WorkWorkspace:  workWorkspace,
+				WorkStoreRef:   workStoreRef,
+				BrainParentSID: workParentSID,
+				WorktreeSpec:   worktreeSpec,
+				WorktreeError:  worktreeError,
+			}
+			allRequests = append(allRequests, req)
+			usage.accept(req, limits)
 		}
 	}
 
 	return applyNestedCaps(cfg, allRequests, aliasHeldTemplates, trace)
+}
+
+// allocateScaleDemandToConcrete matches concrete reused capacity against scale
+// demand by identity, then rebinds unmatched concrete capacity to the earliest
+// unclaimed demand. A concrete request carrying B covers B even when demand is
+// ordered [A, B]; a stale X (or blank trigger) is rebound to A rather than
+// silently consuming A while remaining pointed at X. Surplus concrete capacity
+// with no residual demand keeps its prior trigger because its protection floor
+// is independent of scale demand.
+func allocateScaleDemandToConcrete(demand scaleCheckDemand, concrete []SessionRequest) ([]SessionRequest, []string) {
+	allocated := append([]SessionRequest(nil), concrete...)
+	uniqueDemand := make([]string, 0, len(demand.WorkBeadIDs))
+	demandSet := make(map[string]struct{}, len(demand.WorkBeadIDs))
+	for _, rawID := range demand.WorkBeadIDs {
+		id := strings.TrimSpace(rawID)
+		if id == "" {
+			continue
+		}
+		if _, seen := demandSet[id]; seen {
+			continue
+		}
+		demandSet[id] = struct{}{}
+		uniqueDemand = append(uniqueDemand, id)
+	}
+
+	matched := make(map[string]struct{}, len(allocated))
+	unmatchedConcrete := make([]int, 0, len(allocated))
+	for i, request := range allocated {
+		id := strings.TrimSpace(request.WorkBeadID)
+		if _, demanded := demandSet[id]; demanded {
+			if _, alreadyMatched := matched[id]; !alreadyMatched {
+				matched[id] = struct{}{}
+				allocated[i] = requestWithScaleDemandProvenance(request, demand, id)
+				continue
+			}
+		}
+		unmatchedConcrete = append(unmatchedConcrete, i)
+	}
+
+	remaining := make([]string, 0, len(uniqueDemand)-len(matched))
+	for _, id := range uniqueDemand {
+		if _, covered := matched[id]; !covered {
+			remaining = append(remaining, id)
+		}
+	}
+	rebound := minInt(len(unmatchedConcrete), len(remaining))
+	for i := 0; i < rebound; i++ {
+		idx := unmatchedConcrete[i]
+		allocated[idx] = requestWithScaleDemandProvenance(allocated[idx], demand, remaining[i])
+	}
+	return allocated, remaining[rebound:]
+}
+
+func requestWithScaleDemandProvenance(request SessionRequest, demand scaleCheckDemand, workBeadID string) SessionRequest {
+	workBeadID = strings.TrimSpace(workBeadID)
+	request.WorkBeadID = workBeadID
+	request.WorkBeadTitle = strings.TrimSpace(demand.Titles[workBeadID])
+	request.WorkPack = strings.TrimSpace(demand.Packs[workBeadID])
+	request.WorkWorkspace = strings.TrimSpace(demand.Workspaces[workBeadID])
+	request.WorkStoreRef = strings.TrimSpace(demand.StoreRefs[workBeadID])
+	request.BrainParentSID = strings.TrimSpace(demand.ParentSIDs[workBeadID])
+	// Worktree evidence is per-bead like every field above it. Carrying the
+	// previous bead's spec into a rebound request would hand the session a
+	// workspace verified for other work.
+	request.WorktreeSpec = nil
+	request.WorktreeError = ""
+	if demand.WorktreeSpecs != nil {
+		request.WorktreeSpec = demand.WorktreeSpecs[workBeadID]
+	}
+	if demand.WorktreeErrors != nil {
+		request.WorktreeError = strings.TrimSpace(demand.WorktreeErrors[workBeadID])
+	}
+	return request
 }
 
 func canonicalSingletonAliasHeldTemplates(cfg *config.City, sessionInfos []sessionpkg.Info) map[string]struct{} {
@@ -383,8 +652,14 @@ func canonicalSingletonAliasHeldTemplates(cfg *config.City, sessionInfos []sessi
 	return held
 }
 
-func poolInFlightNewRequests(cfg *config.City, sessionInfos []sessionpkg.Info, resumeSessionBeadIDs map[string]struct{}) map[string][]SessionRequest {
-	requests := make(map[string][]SessionRequest)
+func poolNewDemandRequests(
+	cfg *config.City,
+	sessionInfos []sessionpkg.Info,
+	resumeSessionBeadIDs map[string]struct{},
+	decisionTime time.Time,
+) (map[string][]SessionRequest, map[string][]SessionRequest) {
+	protected := make(map[string][]SessionRequest)
+	inFlight := make(map[string][]SessionRequest)
 	sortedSessionInfos := append([]sessionpkg.Info(nil), sessionInfos...)
 	sort.SliceStable(sortedSessionInfos, func(i, j int) bool {
 		if !sortedSessionInfos[i].CreatedAt.Equal(sortedSessionInfos[j].CreatedAt) {
@@ -414,20 +689,68 @@ func poolInFlightNewRequests(cfg *config.City, sessionInfos []sessionpkg.Info, r
 			if normalizedSessionTemplateInfo(sb, cfg) != template {
 				continue
 			}
-			if !poolSessionConsumesNewDemandInfo(sb) {
-				continue
-			}
-			requests[template] = append(requests[template], SessionRequest{
+			req := SessionRequest{
 				Template:       template,
 				Tier:           "new",
 				SessionBeadID:  sb.ID,
 				WorkBeadID:     strings.TrimSpace(sb.TriggerBeadID),
+				WorkPack:       strings.TrimSpace(sb.Pack),
+				WorkWorkspace:  strings.TrimSpace(sb.PackWorkspace),
 				WorkStoreRef:   strings.TrimSpace(sb.TriggerBeadStoreRef),
 				BrainParentSID: strings.TrimSpace(sb.BrainParentSID),
-			})
+			}
+			if poolSessionEligibleForProtectedDemand(sb, decisionTime) {
+				protected[template] = append(protected[template], req)
+				continue
+			}
+			if poolSessionConsumesNewDemandInfo(sb) {
+				inFlight[template] = append(inFlight[template], req)
+			}
 		}
 	}
-	return requests
+	return protected, inFlight
+}
+
+// poolSessionWithinPostCreateProtection reports whether a successfully-created,
+// reusable pool session is still in the same grace window used by the
+// steady-state sweep. decisionTime is injected by the desired-state build so all
+// decisions in a tick share one clock observation. A future marker fails
+// closed: the writer and reader share a host clock, so negative age indicates
+// corrupt metadata rather than a legitimate grace window.
+func poolSessionWithinPostCreateProtection(info sessionpkg.Info, decisionTime time.Time) bool {
+	if decisionTime.IsZero() {
+		return false
+	}
+	if info.Closed || isDrainedSessionInfo(info) || isFailedCreateSessionInfo(info) ||
+		sessionHasProviderTerminalErrorInfo(info) {
+		return false
+	}
+	state := strings.TrimSpace(info.MetadataState)
+	if state != "active" && state != "awake" {
+		return false
+	}
+	if strings.TrimSpace(info.StateReason) != "creation_complete" {
+		return false
+	}
+	creationCompleteAt, ok := parseRFC3339Metadata(info.CreationCompleteAt)
+	if !ok {
+		return false
+	}
+	age := decisionTime.Sub(creationCompleteAt)
+	return age >= 0 && age < postCreateProtectionTimeout
+}
+
+// poolSessionEligibleForProtectedDemand is intentionally narrower than the
+// sweep-retention predicate above. A fresh dependency-only or lifecycle-blocked
+// session should survive the post-create sweep window, but it is not runnable
+// generic capacity and therefore must neither establish a demand floor nor bind
+// a wake-known request.
+func poolSessionEligibleForProtectedDemand(info sessionpkg.Info, decisionTime time.Time) bool {
+	return poolSessionWithinPostCreateProtection(info, decisionTime) &&
+		!info.DependencyOnly &&
+		strings.TrimSpace(info.WaitHold) == "" &&
+		!metadataTimeInFuture(info.HeldUntil, decisionTime) &&
+		!metadataTimeInFuture(info.QuarantinedUntil, decisionTime)
 }
 
 // poolSessionConsumesNewDemandInfo reports whether a pool session already

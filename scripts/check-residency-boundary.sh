@@ -29,6 +29,12 @@
 #       (ResolveOwner/Union) is the only place leg order and per-leg error policy
 #       are applied; a literal list skips both, and so does a consumer that runs
 #       a plan's legs itself. Zero hits today, so the first one is a violation.
+#       WorkLegsForID is the same idea one level up: a plane that implements
+#       storeref.WorkAxisRouter tells the resolver to use the plane's leg order
+#       instead of its own, so a second implementation is a second answer to the
+#       same question. The rule governing that — one axis per plane, and a
+#       cross-plane agreement pin the day a second appears — is stated in
+#       scripts/residency-boundary-patterns.txt beside the row.
 #   (d) bespoke residence probes — IDInNamespace(, bdIDIsClassReserved(,
 #       ReservedClassPrefix(. The namespace gate is the resolver's, and a site
 #       that re-derives it is one `gc storage migrate` away from ga-axin6.
@@ -205,6 +211,18 @@ run_self_test() {
 	fixture "$tmp/rogue-baselined" $'cmd/gc/existing.go\ta\ta:BeadStores\t1\ncmd/gc/rogue.go\trogue\tc:storeref.EachLeg\t1\n'
 	printf 'package main\n\nfunc rogue(p storeref.ResolvedPlan) {\n\tstoreref.EachLeg(p, func(leg storeref.Leg, _ storeref.Role, _ storeref.ErrPolicy) {\n\t\t_, _ = leg.Store.Get("ga-1")\n\t})\n}\n' >"$tmp/rogue-baselined/cmd/gc/rogue.go"
 	expect 0 "a BASELINED storeref.EachLeg consumer must pass" "$tmp/rogue-baselined"
+
+	# THE SECOND WORK AXIS. A plane that implements storeref.WorkAxisRouter
+	# replaces the resolver's own by-id work rule with its own leg order. One
+	# such plane exists; a second written silently is two answers to one
+	# question, which is this guard's whole subject wearing the resolver's API.
+	fixture "$tmp/axis" $'cmd/gc/existing.go\ta\ta:BeadStores\t1\n'
+	printf 'package main\n\ntype rogueAxis struct{}\n\nfunc (rogueAxis) WorkLegsForID(id string) []storeref.Leg { return nil }\n' >"$tmp/axis/internal/api/axis.go"
+	expect 1 "a SECOND WorkAxisRouter implementation must fail" "$tmp/axis"
+
+	fixture "$tmp/axis-baselined" $'cmd/gc/existing.go\ta\ta:BeadStores\t1\ninternal/api/axis.go\tWorkLegsForID\tc:WorkAxisRouter\t1\n'
+	printf 'package main\n\ntype rogueAxis struct{}\n\nfunc (rogueAxis) WorkLegsForID(id string) []storeref.Leg { return nil }\n' >"$tmp/axis-baselined/internal/api/axis.go"
+	expect 0 "a BASELINED WorkAxisRouter must pass" "$tmp/axis-baselined"
 
 	return $rc
 }

@@ -3795,7 +3795,7 @@ func TestDiscoveredNamespace_UnknownSubcommandErrors(t *testing.T) {
 // silent-config-drift bug: a pack command invoked from an operator shell used to
 // inherit NONE of the city's [dolt] block, so `gc dolt restart` regenerated
 // dolt-config.yaml from the pack script's own defaults (auto-GC on,
-// read_timeout 15000) and silently reverted the city's configured values. The
+// read_timeout 120000) and silently reverted the city's configured values. The
 // provider-lifecycle path has always projected these; the directly-invoked path
 // must agree with it, or a shell restart writes a different server config than
 // the supervisor would.

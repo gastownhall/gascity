@@ -7,17 +7,27 @@ import (
 	"time"
 )
 
-// Priming markers record that a session's launch path delivered the rendered
-// startup prompt (S19 §2 confirmation signal 1). They share the exact lifetime
-// of started_config_hash: written only by CommitStartedPatch (both-or-neither,
-// launch-confirmed) and cleared at every started_config_hash clear site, so a
-// fresh incarnation re-primes and a resumed/churned incarnation keeps its
-// markers. S19 Stage 2 is WRITE-ONLY: they are stamped/cleared but read by no
-// decision path (Stage 3 shadows them, Stage 4 acts on them).
+// Priming markers record that a session's launch path attempted delivery of
+// the rendered startup prompt (S19 §2 confirmation signal 1). They share the
+// exact lifetime of started_config_hash: written only by CommitStartedPatch
+// (both-or-neither, launch-confirmed) and cleared at every started_config_hash
+// clear site, so a fresh incarnation re-primes and a resumed/churned
+// incarnation keeps its markers. S19 Stage 2 is WRITE-ONLY: they are
+// stamped/cleared but read by no decision path (Stage 3 shadows them, Stage 4
+// acts on them).
 const (
-	// PrimedAtMetadataKey records when the startup prompt was confirmed
-	// delivered (RFC3339). Written only by CommitStartedPatch (and, from Stage 4,
-	// the post-Nudge stamp) — never a write-ahead attempt marker.
+	// PrimedAtMetadataKey records when this incarnation's startup-prompt
+	// delivery was attempted (RFC3339): a delivery mechanism was selected and
+	// the runtime start returned success. It is not proof the runtime received
+	// the prompt — herdr's Start records GC_HERDR_STARTUP_DELIVERY_UNCONFIRMED
+	// and still returns nil when first-turn submission cannot be confirmed
+	// (internal/runtime/herdr/provider.go) — and certainly not that the agent
+	// consumed or began acting on it. A live worker can still be
+	// idle if the provider drops submission after this stamp; the durable
+	// signal that work actually began is the trigger bead becoming
+	// assigned/in-progress, not this key (gastownhall/gascity#5236). Written
+	// only by CommitStartedPatch (and, from Stage 4, the post-Nudge stamp) —
+	// never a write-ahead attempt marker.
 	PrimedAtMetadataKey = "primed_at"
 	// PrimingAttemptedAtMetadataKey is the write-ahead attempt marker. Defined
 	// (constant + clear sites) in Stage 2 but NEVER written here; its writer is
@@ -227,12 +237,13 @@ func ContinuationResetWakePatch(now time.Time) MetadataPatch {
 // selected by the normal wake path.
 func ClearWakeBlockersPatch(state State, sleepReason string) MetadataPatch {
 	patch := MetadataPatch{
-		"held_until":        "",
-		"quarantined_until": "",
-		"wait_hold":         "",
-		"sleep_intent":      "",
-		"wake_attempts":     "0",
-		"churn_count":       "0",
+		"held_until":            "",
+		"quarantined_until":     "",
+		"wait_hold":             "",
+		"sleep_intent":          "",
+		"wake_attempts":         "0",
+		"wake_refused_event_at": "",
+		"churn_count":           "0",
 	}
 	switch state {
 	case StateSuspended, StateDrained:
@@ -322,11 +333,12 @@ type CommitStartedPatchInput struct {
 	StartsAwakeInterval bool
 	Now                 time.Time
 	// PrimedAt, when non-zero and PromptHash is non-empty, records that this
-	// start's launch path delivered the rendered startup prompt (S19 §2
-	// confirmation signal 1). Emitted atomically with started_config_hash so
-	// priming inherits the start path's crash semantics. Zero PrimedAt (or an
-	// empty PromptHash) ⇒ no priming keys, so a resume/recovery that delivered
-	// nothing stamps nothing. priming_attempted_at is never emitted here.
+	// start's launch path attempted delivery of the rendered startup prompt
+	// (S19 §2 confirmation signal 1). Emitted atomically with
+	// started_config_hash so priming inherits the start path's crash
+	// semantics. Zero PrimedAt (or an empty PromptHash) ⇒ no priming keys, so
+	// a resume/recovery that delivered nothing stamps nothing.
+	// priming_attempted_at is never emitted here.
 	PrimedAt   time.Time
 	PromptHash string
 }
