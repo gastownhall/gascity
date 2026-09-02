@@ -71,7 +71,7 @@ func TestResolveRigPrefix(t *testing.T) {
 
 // validateAdoptAndBeadsStore compares byte-for-byte on --adopt (a --prefix
 // that differs from the store's is rejected with the existing text) and keeps
-// the historical case-insensitive comparison on a fresh add.
+// the historical lowercased comparison and message text on re-add.
 func TestValidateAdoptAndBeadsStorePrefixCase(t *testing.T) {
 	fs := fsys.NewFake()
 	writeBeadsConfig(t, fs, "/rig", "issue_prefix: KitFlowApp\n")
@@ -95,6 +95,10 @@ func TestValidateAdoptAndBeadsStorePrefixCase(t *testing.T) {
 	reAdd := ProvisionRequest{Name: "contentbuild", Path: "/rig"}
 	if err := validateAdoptAndBeadsStore(deps, reAdd, "/rig", rigMutationPlan{prefix: "kitflowapp", reAdd: true, existingRig: existing}); err != nil {
 		t.Fatalf("re-add keeps case-insensitive prefix comparison: %v", err)
+	}
+	err = validateAdoptAndBeadsStore(deps, reAdd, "/rig", rigMutationPlan{prefix: "other", reAdd: true, existingRig: existing})
+	if err == nil || !strings.Contains(err.Error(), `has bead prefix "kitflowapp" but city.toml has "other"`) {
+		t.Fatalf("re-add mismatch keeps the lowercased presentation: error = %v", err)
 	}
 }
 

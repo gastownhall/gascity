@@ -465,8 +465,13 @@ func validateAdoptAndBeadsStore(deps Deps, req ProvisionRequest, rigPath string,
 	}
 
 	// --adopt compares byte-for-byte (the store's prefix is the rig's prefix);
-	// re-add and fresh add keep their historical case-insensitive comparison.
-	if existingPrefix, ok := ReadBeadsPrefix(fs, rigPath); ok && (existingPrefix != prefix && (req.Adopt || !strings.EqualFold(existingPrefix, prefix))) {
+	// re-add and fresh add keep their historical lowercased comparison and
+	// presentation.
+	existingPrefix, ok := ReadBeadsPrefix(fs, rigPath)
+	if ok && !req.Adopt {
+		existingPrefix = strings.ToLower(existingPrefix)
+	}
+	if ok && existingPrefix != prefix {
 		switch {
 		case plan.reAdd:
 			// On re-add, --prefix is ignored (we use the existing rig's
@@ -557,7 +562,7 @@ func emitRigBannerAndWarnings(deps Deps, req ProvisionRequest, plan rigMutationP
 				emit(ProvisionStep{Name: "include-ignored", Warn: true, Detail: fmt.Sprintf("warning: --include flags %v ignored (existing imports: %s); edit city.toml to change", includes, formatBoundImports(existingRigImports))})
 			}
 		}
-		if req.Prefix != "" && !strings.EqualFold(req.Prefix, plan.existingRig.EffectivePrefix()) {
+		if req.Prefix != "" && strings.ToLower(req.Prefix) != plan.existingRig.EffectivePrefix() {
 			emit(ProvisionStep{Name: "prefix-ignored", Warn: true, Detail: fmt.Sprintf("warning: --prefix=%s ignored (existing: %s); edit city.toml to change", req.Prefix, plan.existingRig.EffectivePrefix())})
 		}
 		if defaultBranchOverride != "" &&
