@@ -35,6 +35,8 @@ type beadsUpdateCASPatch struct {
 	Type        *string           `json:"type,omitempty"`
 	Priority    *int              `json:"priority,omitempty"`
 	Description *string           `json:"description,omitempty"`
+	Acceptance  *string           `json:"acceptance,omitempty"`
+	ExternalRef *string           `json:"external_ref,omitempty"`
 	Metadata    map[string]string `json:"metadata,omitempty"`
 }
 
@@ -58,8 +60,8 @@ func newBeadsUpdateCASCmd(stdout, stderr io.Writer) *cobra.Command {
 The store must be selected explicitly with --store-ref=city:<name> or
 --store-ref=rig:<name>. The JSON patch is read from --request-file; use - for
 stdin so title and description do not appear in process arguments. Supported
-fields are title, description, status, priority, type, and metadata. Unknown or
-empty patches fail before the store opens.
+fields are title, description, acceptance, external_ref, status, priority,
+type, and metadata. Unknown or empty patches fail before the store opens.
 
 The command never scans another store or falls back to an unconditional write.
 A stale revision is a zero-exit conflict outcome. Capability, transport,
@@ -201,7 +203,8 @@ func decodeBeadsUpdateCASPatch(reader io.Reader) (beadsUpdateCASPatch, error) {
 
 func validateBeadsUpdateCASPatch(patch beadsUpdateCASPatch) error {
 	if patch.Title == nil && patch.Status == nil && patch.Type == nil && patch.Priority == nil &&
-		patch.Description == nil && len(patch.Metadata) == 0 {
+		patch.Description == nil && patch.Acceptance == nil && patch.ExternalRef == nil &&
+		len(patch.Metadata) == 0 {
 		return fmt.Errorf("patch must set at least one supported field")
 	}
 	for key, value := range patch.Metadata {
@@ -217,12 +220,14 @@ func validateBeadsUpdateCASPatch(patch beadsUpdateCASPatch) error {
 
 func (patch beadsUpdateCASPatch) updateOpts() beads.UpdateOpts {
 	return beads.UpdateOpts{
-		Title:       patch.Title,
-		Status:      patch.Status,
-		Type:        patch.Type,
-		Priority:    patch.Priority,
-		Description: patch.Description,
-		Metadata:    patch.Metadata,
+		Title:              patch.Title,
+		Status:             patch.Status,
+		Type:               patch.Type,
+		Priority:           patch.Priority,
+		Description:        patch.Description,
+		AcceptanceCriteria: patch.Acceptance,
+		ExternalRef:        patch.ExternalRef,
+		Metadata:           patch.Metadata,
 	}
 }
 

@@ -24,6 +24,8 @@ func TestDecodeBeadsUpdateCASPatchIsStrictAndBounded(t *testing.T) {
 	patch, err := decodeBeadsUpdateCASPatch(strings.NewReader(`{
   "title":"human title",
   "description":"human description",
+  "acceptance":"machine acceptance",
+  "external_ref":"https://github.com/owner/repo/issues/42",
   "status":"in_progress",
   "priority":1,
   "type":"feature",
@@ -34,6 +36,8 @@ func TestDecodeBeadsUpdateCASPatchIsStrictAndBounded(t *testing.T) {
 	}
 	if patch.Title == nil || *patch.Title != "human title" ||
 		patch.Description == nil || *patch.Description != "human description" ||
+		patch.Acceptance == nil || *patch.Acceptance != "machine acceptance" ||
+		patch.ExternalRef == nil || *patch.ExternalRef != "https://github.com/owner/repo/issues/42" ||
 		patch.Status == nil || *patch.Status != "in_progress" ||
 		patch.Priority == nil || *patch.Priority != 1 ||
 		patch.Type == nil || *patch.Type != "feature" ||

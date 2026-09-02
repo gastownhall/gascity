@@ -130,6 +130,12 @@ func updateOptsMatchBead(bead Bead, opts UpdateOpts) bool {
 	if opts.Description != nil && bead.Description != *opts.Description {
 		return false
 	}
+	if opts.AcceptanceCriteria != nil && bead.AcceptanceCriteria != *opts.AcceptanceCriteria {
+		return false
+	}
+	if opts.ExternalRef != nil && bead.ExternalRef != *opts.ExternalRef {
+		return false
+	}
 	if opts.Assignee != nil && bead.Assignee != *opts.Assignee {
 		return false
 	}

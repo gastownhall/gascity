@@ -1117,6 +1117,12 @@ func applySQLiteUpdateOpts(b Bead, opts UpdateOpts) Bead {
 	if opts.Description != nil {
 		b.Description = *opts.Description
 	}
+	if opts.AcceptanceCriteria != nil {
+		b.AcceptanceCriteria = *opts.AcceptanceCriteria
+	}
+	if opts.ExternalRef != nil {
+		b.ExternalRef = *opts.ExternalRef
+	}
 	if opts.ParentID != nil {
 		b.ParentID = *opts.ParentID
 	}
