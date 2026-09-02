@@ -1188,6 +1188,33 @@
         ],
         "type": "object"
       },
+      "BeadRedispatchCapHeldPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "bead_id": {
+            "description": "ID of the auto-held work bead (also the envelope Subject).",
+            "type": "string"
+          },
+          "cycles": {
+            "description": "Number of consecutive drain-acked-with-assigned-work cycles observed inside the window before the cap tripped.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "routed_to": {
+            "description": "The gc.routed_to pool BeadID was stuck looping against, when set.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Session bead ID whose drain-ack cycle tripped the cap.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "bead_id",
+          "cycles"
+        ],
+        "type": "object"
+      },
       "BeadUpdateBody": {
         "additionalProperties": false,
         "properties": {
@@ -2476,6 +2503,9 @@
             "$ref": "#/components/schemas/BeadEventPayload"
           },
           {
+            "$ref": "#/components/schemas/BeadRedispatchCapHeldPayload"
+          },
+          {
             "$ref": "#/components/schemas/BeadWorktreeReapSkippedPayload"
           },
           {
@@ -2528,6 +2558,9 @@
           },
           {
             "$ref": "#/components/schemas/OutboundEventPayload"
+          },
+          {
+            "$ref": "#/components/schemas/PoolSpawnChurnCoolingDownPayload"
           },
           {
             "$ref": "#/components/schemas/ProjectIdentityStampedPayload"
@@ -5686,6 +5719,30 @@
           "DrainTimeout",
           "OnDeath",
           "OnBoot"
+        ],
+        "type": "object"
+      },
+      "PoolSpawnChurnCoolingDownPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "consecutive": {
+            "description": "Number of consecutive blind-spawned sessions observed to claim no work before the breaker tripped.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "cooldown_until": {
+            "description": "RFC3339 timestamp until which blind (unverified) spawns are suppressed for this template.",
+            "type": "string"
+          },
+          "template": {
+            "description": "Agent template whose blind spawns are being suppressed (also the envelope Subject).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "template",
+          "consecutive",
+          "cooldown_until"
         ],
         "type": "object"
       },
@@ -12155,6 +12212,7 @@
             "bead.created": "#/components/schemas/TypedEventStreamEnvelopeBeadCreated",
             "bead.dead_assignee_reopened": "#/components/schemas/TypedEventStreamEnvelopeBeadDeadAssigneeReopened",
             "bead.deleted": "#/components/schemas/TypedEventStreamEnvelopeBeadDeleted",
+            "bead.redispatch_cap_held": "#/components/schemas/TypedEventStreamEnvelopeBeadRedispatchCapHeld",
             "bead.updated": "#/components/schemas/TypedEventStreamEnvelopeBeadUpdated",
             "bead.worktree.reap_skipped": "#/components/schemas/TypedEventStreamEnvelopeBeadWorktreeReapSkipped",
             "bead.worktree.reaped": "#/components/schemas/TypedEventStreamEnvelopeBeadWorktreeReaped",
@@ -12219,6 +12277,7 @@
             "session.draining": "#/components/schemas/TypedEventStreamEnvelopeSessionDraining",
             "session.idle_killed": "#/components/schemas/TypedEventStreamEnvelopeSessionIdleKilled",
             "session.max_age_killed": "#/components/schemas/TypedEventStreamEnvelopeSessionMaxAgeKilled",
+            "session.pool_spawn_churn_cooling_down": "#/components/schemas/TypedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown",
             "session.quarantined": "#/components/schemas/TypedEventStreamEnvelopeSessionQuarantined",
             "session.reset_stalled": "#/components/schemas/TypedEventStreamEnvelopeSessionResetStalled",
             "session.stopped": "#/components/schemas/TypedEventStreamEnvelopeSessionStopped",
@@ -12265,6 +12324,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadDeleted"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadRedispatchCapHeld"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadUpdated"
@@ -12457,6 +12519,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionMaxAgeKilled"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionQuarantined"
@@ -12927,6 +12992,63 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope bead.deleted",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeBeadRedispatchCapHeld": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/BeadRedispatchCapHeldPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "bead.redispatch_cap_held",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope bead.redispatch_cap_held",
         "type": "object"
       },
       "TypedEventStreamEnvelopeBeadUpdated": {
@@ -13722,12 +13844,14 @@
                 "session.updated",
                 "session.drain_acked_with_assigned_work",
                 "session.stranded",
+                "bead.redispatch_cap_held",
                 "session.unknown_state",
                 "session.wake_refused",
                 "session.reset_stalled",
                 "session.work_query_failed",
                 "session.demand_claim_divergence",
                 "session.cold_start_timeout",
+                "session.pool_spawn_churn_cooling_down",
                 "bead.created",
                 "bead.closed",
                 "bead.deleted",
@@ -16728,6 +16852,63 @@
         "title": "TypedEventStreamEnvelope session.max_age_killed",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/PoolSpawnChurnCoolingDownPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.pool_spawn_churn_cooling_down",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.pool_spawn_churn_cooling_down",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSessionQuarantined": {
         "additionalProperties": false,
         "properties": {
@@ -17993,6 +18174,7 @@
             "bead.created": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadCreated",
             "bead.dead_assignee_reopened": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadDeadAssigneeReopened",
             "bead.deleted": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadDeleted",
+            "bead.redispatch_cap_held": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadRedispatchCapHeld",
             "bead.updated": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadUpdated",
             "bead.worktree.reap_skipped": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadWorktreeReapSkipped",
             "bead.worktree.reaped": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadWorktreeReaped",
@@ -18057,6 +18239,7 @@
             "session.draining": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDraining",
             "session.idle_killed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionIdleKilled",
             "session.max_age_killed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled",
+            "session.pool_spawn_churn_cooling_down": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown",
             "session.quarantined": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionQuarantined",
             "session.reset_stalled": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionResetStalled",
             "session.stopped": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionStopped",
@@ -18103,6 +18286,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadDeleted"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadRedispatchCapHeld"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadUpdated"
@@ -18295,6 +18481,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionQuarantined"
@@ -18793,6 +18982,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope bead.deleted",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeBeadRedispatchCapHeld": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/BeadRedispatchCapHeldPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "bead.redispatch_cap_held",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope bead.redispatch_cap_held",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeBeadUpdated": {
@@ -19643,12 +19893,14 @@
                 "session.updated",
                 "session.drain_acked_with_assigned_work",
                 "session.stranded",
+                "bead.redispatch_cap_held",
                 "session.unknown_state",
                 "session.wake_refused",
                 "session.reset_stalled",
                 "session.work_query_failed",
                 "session.demand_claim_divergence",
                 "session.cold_start_timeout",
+                "session.pool_spawn_churn_cooling_down",
                 "bead.created",
                 "bead.closed",
                 "bead.deleted",
@@ -22852,6 +23104,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope session.max_age_killed",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/PoolSpawnChurnCoolingDownPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.pool_spawn_churn_cooling_down",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.pool_spawn_churn_cooling_down",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeSessionQuarantined": {

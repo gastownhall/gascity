@@ -564,6 +564,62 @@ func BeadDeadAssigneeReopenedPayloadJSON(beadID, deadAssignee, routedTo string) 
 	return b
 }
 
+// BeadRedispatchCapHeldPayload is the typed payload for
+// bead.redispatch_cap_held events. Emitted when the dispatch redispatch-cap
+// guard (ra-3y4okc) auto-holds a work bead that accumulated too many
+// consecutive session.drain_acked_with_assigned_work cycles without any
+// dispatch-visible field changing — the escalate-and-drain livelock
+// signature. Mirrors BeadDeadAssigneeReopenedPayload's shape for a sibling
+// auto-repair action.
+type BeadRedispatchCapHeldPayload struct {
+	BeadID    string `json:"bead_id" doc:"ID of the auto-held work bead (also the envelope Subject)."`
+	SessionID string `json:"session_id,omitempty" doc:"Session bead ID whose drain-ack cycle tripped the cap."`
+	RoutedTo  string `json:"routed_to,omitempty" doc:"The gc.routed_to pool BeadID was stuck looping against, when set."`
+	Cycles    int    `json:"cycles" doc:"Number of consecutive drain-acked-with-assigned-work cycles observed inside the window before the cap tripped."`
+}
+
+// IsEventPayload marks BeadRedispatchCapHeldPayload as an events.Payload variant.
+func (BeadRedispatchCapHeldPayload) IsEventPayload() {}
+
+// BeadRedispatchCapHeldPayloadJSON builds the JSON wire form for attachment
+// to an events.Event.Payload field. SessionID and RoutedTo are emitted only
+// when non-empty.
+func BeadRedispatchCapHeldPayloadJSON(beadID, sessionID, routedTo string, cycles int) json.RawMessage {
+	b, _ := json.Marshal(BeadRedispatchCapHeldPayload{
+		BeadID:    beadID,
+		SessionID: sessionID,
+		RoutedTo:  routedTo,
+		Cycles:    cycles,
+	})
+	return b
+}
+
+// PoolSpawnChurnCoolingDownPayload is the typed payload for
+// session.pool_spawn_churn_cooling_down events. Emitted when the pool
+// spawn-churn breaker (ra-co9epr) suppresses further blind spawns for a
+// template after consecutive pool sessions spawned for scale_check-only
+// demand closed having claimed no work — the "46 sessions in 18 minutes, 0%
+// useful" signature.
+type PoolSpawnChurnCoolingDownPayload struct {
+	Template      string `json:"template" doc:"Agent template whose blind spawns are being suppressed (also the envelope Subject)."`
+	Consecutive   int    `json:"consecutive" doc:"Number of consecutive blind-spawned sessions observed to claim no work before the breaker tripped."`
+	CooldownUntil string `json:"cooldown_until" doc:"RFC3339 timestamp until which blind (unverified) spawns are suppressed for this template."`
+}
+
+// IsEventPayload marks PoolSpawnChurnCoolingDownPayload as an events.Payload variant.
+func (PoolSpawnChurnCoolingDownPayload) IsEventPayload() {}
+
+// PoolSpawnChurnCoolingDownPayloadJSON builds the JSON wire form for
+// attachment to an events.Event.Payload field.
+func PoolSpawnChurnCoolingDownPayloadJSON(template string, consecutive int, cooldownUntil time.Time) json.RawMessage {
+	b, _ := json.Marshal(PoolSpawnChurnCoolingDownPayload{
+		Template:      template,
+		Consecutive:   consecutive,
+		CooldownUntil: cooldownUntil.UTC().Format(time.RFC3339),
+	})
+	return b
+}
+
 // SessionUnknownStatePayload carries the machine-readable context for a
 // session.unknown_state event: a session bead whose metadata state the
 // reconciler does not recognize and therefore skips (forward-compatible
@@ -643,6 +699,8 @@ func init() {
 	events.RegisterPayload(events.BeadClosed, BeadEventPayload{})
 	events.RegisterPayload(events.BeadDeleted, BeadEventPayload{})
 	events.RegisterPayload(events.BeadDeadAssigneeReopened, BeadDeadAssigneeReopenedPayload{})
+	events.RegisterPayload(events.BeadRedispatchCapHeld, BeadRedispatchCapHeldPayload{})
+	events.RegisterPayload(events.PoolSpawnChurnCoolingDown, PoolSpawnChurnCoolingDownPayload{})
 
 	// session.* / convoy.* / controller.* / city.* / order.* /
 	// provider.* — these events carry no structured payload today;

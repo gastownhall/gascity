@@ -98,22 +98,36 @@ const (
 	DeferredRoutedToMetadataKey          = "gc.deferred_routed_to"
 	DeferredTypeMetadataKey              = "gc.deferred_type"
 	DetachedMetadataKey                  = "gc.detached"
-	DrainContextMetadataKey              = "gc.drain_context"
-	DrainContinuationGroupMetadataKey    = "gc.drain_continuation_group"
-	DrainControlIDMetadataKey            = "gc.drain_control_id"
-	DrainCountMetadataKey                = "gc.drain_count"
-	DrainFormulaMetadataKey              = "gc.drain_formula"
-	DrainIndexMetadataKey                = "gc.drain_index"
-	DrainItemSingleLaneMetadataKey       = "gc.drain_item_single_lane"
-	DrainManifestMetadataKey             = "gc.drain_manifest.v1"
-	DrainMaxUnitsMetadataKey             = "gc.drain_max_units"
-	DrainMemberAccessMetadataKey         = "gc.drain_member_access"
-	DrainMemberIDMetadataKey             = "gc.drain_member_id"
-	DrainMemberUnresolvedMetadataKey     = "gc.drain_member_unresolved"
-	DrainOnItemFailureMetadataKey        = "gc.drain_on_item_failure"
-	DrainParentConvoyIDMetadataKey       = "gc.drain_parent_convoy_id"
-	DrainStateMetadataKey                = "gc.drain_state"
-	DrainUnitKeyMetadataKey              = "gc.drain_unit_key"
+	// DrainAckAssignedWorkCycleCountMetadataKey persists, on a work bead, how
+	// many consecutive session.drain_acked_with_assigned_work cycles it has
+	// accumulated inside the current
+	// DrainAckAssignedWorkCycleWindowStartMetadataKey window — the
+	// redispatch-livelock guard's counter (ra-3y4okc,
+	// enforceDrainAckAssignedWorkCycleCap). Cleared once the cap trips and
+	// the bead is auto-held.
+	DrainAckAssignedWorkCycleCountMetadataKey = "gc.drain_ack_assigned_work_cycle_count"
+	// DrainAckAssignedWorkCycleWindowStartMetadataKey anchors the window
+	// DrainAckAssignedWorkCycleCountMetadataKey counts within (RFC3339). A
+	// cycle observed after the window has elapsed starts a fresh streak
+	// instead of accumulating, so occasional legitimate multi-turn
+	// drain-acks spread across a bead's lifetime never trip the cap.
+	DrainAckAssignedWorkCycleWindowStartMetadataKey = "gc.drain_ack_assigned_work_cycle_window_start"
+	DrainContextMetadataKey                         = "gc.drain_context"
+	DrainContinuationGroupMetadataKey               = "gc.drain_continuation_group"
+	DrainControlIDMetadataKey                       = "gc.drain_control_id"
+	DrainCountMetadataKey                           = "gc.drain_count"
+	DrainFormulaMetadataKey                         = "gc.drain_formula"
+	DrainIndexMetadataKey                           = "gc.drain_index"
+	DrainItemSingleLaneMetadataKey                  = "gc.drain_item_single_lane"
+	DrainManifestMetadataKey                        = "gc.drain_manifest.v1"
+	DrainMaxUnitsMetadataKey                        = "gc.drain_max_units"
+	DrainMemberAccessMetadataKey                    = "gc.drain_member_access"
+	DrainMemberIDMetadataKey                        = "gc.drain_member_id"
+	DrainMemberUnresolvedMetadataKey                = "gc.drain_member_unresolved"
+	DrainOnItemFailureMetadataKey                   = "gc.drain_on_item_failure"
+	DrainParentConvoyIDMetadataKey                  = "gc.drain_parent_convoy_id"
+	DrainStateMetadataKey                           = "gc.drain_state"
+	DrainUnitKeyMetadataKey                         = "gc.drain_unit_key"
 	// DrainUnprojectedBlockersMetadataKey records, on a drain item root, the
 	// out-of-convoy blockers of its source member that the item workflow could
 	// not depend on because they live in another class store. The item workflow
@@ -411,6 +425,8 @@ var KnownMetadataKeys = []string{
 	DeferredRoutedToMetadataKey,
 	DeferredTypeMetadataKey,
 	DetachedMetadataKey,
+	DrainAckAssignedWorkCycleCountMetadataKey,
+	DrainAckAssignedWorkCycleWindowStartMetadataKey,
 	DrainContextMetadataKey,
 	DrainContinuationGroupMetadataKey,
 	DrainControlIDMetadataKey,

@@ -190,7 +190,7 @@ func ComputePoolDesiredStates(
 	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
 ) []PoolDesiredState {
-	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, nil)
+	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, nil, nil)
 }
 
 // ComputePoolDesiredStatesAt computes pool demand at a caller-supplied
@@ -203,7 +203,7 @@ func ComputePoolDesiredStatesAt(
 	scaleCheckCounts map[string]int,
 	decisionTime time.Time,
 ) []PoolDesiredState {
-	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, decisionTime, nil)
+	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, nil, decisionTime, nil)
 }
 
 func ComputePoolDesiredStatesTraced(
@@ -213,7 +213,7 @@ func ComputePoolDesiredStatesTraced(
 	scaleCheckCounts map[string]int,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, trace)
+	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, nil, trace)
 }
 
 // ComputePoolDesiredStatesTracedAt is ComputePoolDesiredStatesAt with
@@ -226,7 +226,7 @@ func ComputePoolDesiredStatesTracedAt(
 	decisionTime time.Time,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, decisionTime, trace)
+	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, nil, decisionTime, trace)
 }
 
 func ComputePoolDesiredStatesWithDemandTraced(
@@ -237,7 +237,26 @@ func ComputePoolDesiredStatesWithDemandTraced(
 	scaleCheckDemand map[string]scaleCheckDemand,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, trace)
+	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, nil, trace)
+}
+
+// ComputePoolDesiredStatesWithDemandChurnTraced is
+// ComputePoolDesiredStatesWithDemandTraced plus the ra-co9epr spawn-churn
+// breaker's cooldown set: templates present (true) in churnCooldownTemplates
+// have recently had consecutive blind ("new" tier, no identified candidate
+// work bead) pool spawns close having claimed no work, so the new-demand loop
+// below stops materializing further blind requests for them until the
+// cooldown clears. Bound requests (an identified WorkBeadID) are unaffected.
+func ComputePoolDesiredStatesWithDemandChurnTraced(
+	cfg *config.City,
+	assignedWorkBeads []beads.Bead,
+	sessionInfos []sessionpkg.Info,
+	scaleCheckCounts map[string]int,
+	scaleCheckDemand map[string]scaleCheckDemand,
+	churnCooldownTemplates map[string]bool,
+	trace *sessionReconcilerTraceCycle,
+) []PoolDesiredState {
+	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, churnCooldownTemplates, trace)
 }
 
 // ComputePoolDesiredStatesWithDemandTracedAt computes traced pool demand at a
@@ -251,7 +270,23 @@ func ComputePoolDesiredStatesWithDemandTracedAt(
 	decisionTime time.Time,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, decisionTime, trace)
+	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, nil, decisionTime, trace)
+}
+
+// ComputePoolDesiredStatesWithDemandChurnTracedAt is
+// ComputePoolDesiredStatesWithDemandTracedAt plus the ra-co9epr spawn-churn
+// breaker's cooldown set (see ComputePoolDesiredStatesWithDemandChurnTraced).
+func ComputePoolDesiredStatesWithDemandChurnTracedAt(
+	cfg *config.City,
+	assignedWorkBeads []beads.Bead,
+	sessionInfos []sessionpkg.Info,
+	scaleCheckCounts map[string]int,
+	scaleCheckDemand map[string]scaleCheckDemand,
+	churnCooldownTemplates map[string]bool,
+	decisionTime time.Time,
+	trace *sessionReconcilerTraceCycle,
+) []PoolDesiredState {
+	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, churnCooldownTemplates, decisionTime, trace)
 }
 
 func computePoolDesiredStates(
@@ -260,9 +295,10 @@ func computePoolDesiredStates(
 	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
 	scaleCheckDemand map[string]scaleCheckDemand,
+	churnCooldownTemplates map[string]bool,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, time.Time{}, trace)
+	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, churnCooldownTemplates, time.Time{}, trace)
 }
 
 func computePoolDesiredStatesAt(
@@ -271,6 +307,7 @@ func computePoolDesiredStatesAt(
 	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
 	scaleCheckDemand map[string]scaleCheckDemand,
+	churnCooldownTemplates map[string]bool,
 	decisionTime time.Time,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
@@ -516,6 +553,22 @@ func computePoolDesiredStatesAt(
 				if demand.WorktreeErrors != nil {
 					worktreeError = strings.TrimSpace(demand.WorktreeErrors[workBeadID])
 				}
+			}
+			if workBeadID == "" && churnCooldownTemplates[template] {
+				// ra-co9epr spawn-churn breaker: scaleCount (the raw
+				// scale_check demand) outran the identified candidate
+				// WorkBeadIDs for this template, so every remaining j in
+				// this loop is also blind (demand.WorkBeadIDs is a fixed
+				// length, exhausted at this j). Spawning blind for
+				// unverified demand is exactly the pattern that churned
+				// 46 sessions in 18 minutes for zero useful work
+				// (nicola/novices, overnight). Once consecutive blind
+				// spawns have been observed to claim no work, stop
+				// materializing further blind requests for this template
+				// until the cooldown clears — bound requests already
+				// materialized above (j < len(demand.WorkBeadIDs)) are
+				// unaffected.
+				break
 			}
 			req := SessionRequest{
 				Template:       template,
