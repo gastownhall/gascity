@@ -4,8 +4,10 @@ package integration
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,7 +34,7 @@ func TestBeadsFrontDoorDirectAndProxiedParity(t *testing.T) {
 
 	direct := newFrontDoorFixture(t, baseEnv, "direct")
 	directSnapshot := exerciseFrontDoor(t, direct)
-	for _, mode := range []string{"proxied-managed", "proxied-external-host"} {
+	for _, mode := range []string{"proxied-managed", "proxied-external-host", "proxied-external-socket"} {
 		t.Run(mode, func(t *testing.T) {
 			proxied := newFrontDoorFixture(t, baseEnv, mode)
 			proxiedSnapshot := exerciseFrontDoor(t, proxied)
@@ -125,6 +127,12 @@ func newFrontDoorFixture(t *testing.T, baseEnv []string, mode string) *frontDoor
 			"--proxied-server-external-host", "127.0.0.1",
 			"--proxied-server-external-port", port,
 			"-p", "parity", "--skip-hooks", "--skip-agents", "--non-interactive", "--quiet")
+	case "proxied-external-socket":
+		socketPath := startSharedDoltSocketServer(t, baseEnv, filepath.Join(root, "dolt"))
+		runFrontDoorMust(t, &frontDoorFixture{dir: dir, env: env},
+			"init", "--proxied-server", "--database", "parity_proxy",
+			"--proxied-server-external-socket-path", socketPath,
+			"-p", "parity", "--skip-hooks", "--skip-agents", "--non-interactive", "--quiet")
 	default:
 		t.Fatalf("unknown front-door fixture mode %q", mode)
 	}
@@ -133,6 +141,87 @@ func newFrontDoorFixture(t *testing.T, baseEnv []string, mode string) *frontDoor
 		t.Fatalf("%s init did not create metadata.json: %v", mode, err)
 	}
 	return fixture
+}
+
+// startSharedDoltSocketServer starts an explicit Dolt SQL server on a Unix
+// socket and returns the socket path. It is the socket counterpart to the
+// TCP helper in bdstore_test.go and proves that a proxy can front a remote
+// (externally managed) SQL server without changing the bd front door.
+func startSharedDoltSocketServer(t *testing.T, env []string, dataDir string) string {
+	t.Helper()
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("creating dolt data dir: %v", err)
+	}
+	socketPath := filepath.Join(dataDir, "dolt.sock")
+	logPath := filepath.Join(dataDir, "sql-server.log")
+	logFile, err := os.Create(logPath)
+	if err != nil {
+		t.Fatalf("creating dolt log file: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cmd := exec.CommandContext(ctx, doltBinary, "sql-server", "--socket", socketPath, "--data-dir", dataDir)
+	cmd.Env = env
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	if err := cmd.Start(); err != nil {
+		_ = logFile.Close()
+		t.Fatalf("starting dolt socket server: %v", err)
+	}
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
+
+	startupCtx, startupCancel := context.WithTimeout(context.Background(), doltServerStartupLimit)
+	defer startupCancel()
+	if err := waitForUnixSocket(startupCtx, socketPath); err == nil {
+		t.Cleanup(func() {
+			cancel()
+			<-waitCh
+			_ = logFile.Close()
+		})
+		return socketPath
+	}
+
+	cancel()
+	<-waitCh
+	_ = logFile.Close()
+	logBytes, _ := os.ReadFile(logPath)
+	t.Fatalf("dolt sql-server did not become ready on unix socket %s within %s:\n%s", socketPath, doltServerStartupLimit, logBytes)
+	return ""
+}
+
+// waitForUnixSocket waits for a black-box SQL listener to accept a connection.
+// The listener has no readiness notification, so this shared, bounded helper
+// uses a context-aware ticker and reports the final dial error to its caller.
+func waitForUnixSocket(ctx context.Context, socketPath string) error {
+	var lastErr error
+	probe := func() bool {
+		conn, err := net.DialTimeout("unix", socketPath, 200*time.Millisecond)
+		if err != nil {
+			lastErr = err
+			return false
+		}
+		_ = conn.Close()
+		return true
+	}
+	if probe() {
+		return nil
+	}
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			if lastErr != nil {
+				return fmt.Errorf("waiting for Unix socket %s: %w", socketPath, lastErr)
+			}
+			return ctx.Err()
+		case <-ticker.C:
+			if probe() {
+				return nil
+			}
+		}
+	}
 }
 
 func exerciseFrontDoor(t *testing.T, fixture *frontDoorFixture) map[string]any {
