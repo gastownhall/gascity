@@ -312,13 +312,45 @@ func runPackCommandProcessWithEnv(t *testing.T, cityPath, scenario string, extra
 	if got, err := os.ReadFile(afterRun); err != nil || string(got) != "reached\n" {
 		t.Fatalf("post-run marker = %q, err=%v; run did not return through deferred lifecycle", got, err)
 	}
-	return packCommandProcessResult{exitCode: exitCode, stdout: stdout.String(), stderr: stderr.String()}
+	return packCommandProcessResult{exitCode: exitCode, stdout: stdout.String(), stderr: stripTmuxLeakGuardNoise(stderr.String())}
 }
 
-// stripTmuxLeakGuardNoise is a placeholder pending the green step; it does
-// not yet strip anything.
+// stripTmuxLeakGuardNoise removes the tmux leak guard's own diagnostic lines
+// (cmd/gc/tmux_leak_guard_test.go: sweepStaleTmuxTestServers,
+// writeTmuxLeakReport, and tmuxLeakGuardedTestingM.runWith's teardown report)
+// from captured subprocess stderr. TestMain re-runs in every re-exec'd
+// subprocess, so its startup sweep or teardown leak check can emit these
+// lines nondeterministically depending on unrelated concurrent sibling
+// suites' teardown timing — real CLI stderr assertions must not depend on
+// that timing.
 func stripTmuxLeakGuardNoise(s string) string {
-	return s
+	if s == "" {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	trailingNewline := false
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		trailingNewline = true
+		lines = lines[:len(lines)-1]
+	}
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		switch {
+		case strings.HasPrefix(line, "cmd/gc tmux leak guard: "):
+		case strings.HasPrefix(line, "  pid="):
+		case strings.HasPrefix(line, "  socket="):
+		default:
+			kept = append(kept, line)
+		}
+	}
+	if len(kept) == 0 {
+		return ""
+	}
+	out := strings.Join(kept, "\n")
+	if trailingNewline {
+		out += "\n"
+	}
+	return out
 }
 
 // TestStripTmuxLeakGuardNoise expresses the acceptance criteria for isolating
