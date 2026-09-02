@@ -2452,6 +2452,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	rigStores := cr.rigBeadStores()
 	assignedWorkBeads := result.AssignedWorkBeads
 	assignedWorkStoreRefs := result.AssignedWorkStoreRefs
+	assignedWorkStores := result.AssignedWorkStores
 	phaseStart := time.Now()
 	released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(store, sessStore, cr.cfg, cr.cityPath, sessionBeads.OpenInfos(), result, rigStores)
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.release_orphaned_pool_assignments", phaseStart, map[string]any{
@@ -2466,7 +2467,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		// gated on confirmed non-liveness; emit the event BEFORE the snapshot
 		// filter so the dead assignee and route can still be read off the beads.
 		emitDeadAssigneeReopenedEvents(cr.rec, assignedWorkBeads, released, time.Now())
-		assignedWorkBeads, assignedWorkStoreRefs = filterReleasedAssignedWorkSnapshot(assignedWorkBeads, assignedWorkStoreRefs, released)
+		assignedWorkBeads, assignedWorkStoreRefs, assignedWorkStores = filterReleasedAssignedWorkSnapshot(assignedWorkBeads, assignedWorkStoreRefs, assignedWorkStores, released)
 	}
 	// Detached handoff orphans: the tick repairs only the beads the journal named
 	// since the last pass. The whole-corpus scan this replaced was a live
@@ -2586,7 +2587,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	cr.recordReconcileTraceInputs(trace, openInfos, desiredState, poolDesired, workSet, traceWorkRequested, readyWaitSet, result, recordPhase)
 
 	phaseStart = time.Now()
-	awakeAssignedWorkBeads, awakeAssignedStoreRefs := filterAssignedWorkBeadsForSessionWake(cr.cfg, cr.cityPath, store, openInfos, assignedWorkBeads, assignedWorkStoreRefs)
+	awakeAssignedWorkBeads, awakeAssignedStoreRefs, awakeAssignedStores := filterAssignedWorkBeadsForSessionWakeWithStores(cr.cfg, cr.cityPath, store, openInfos, assignedWorkBeads, assignedWorkStoreRefs, assignedWorkStores)
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.filter_assigned_work_for_wake", phaseStart, map[string]any{
 		"assigned_work_bead_count":       len(assignedWorkBeads),
 		"awake_assigned_work_bead_count": len(awakeAssignedWorkBeads),
@@ -2601,6 +2602,11 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		withMaxSessionAgeTracker(cr.mat),
 		withAssignedWorkDeferTracker(cr.adt),
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(result.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs)),
+		// The legs this tick read the surviving assigned work through. The
+		// orphan-close tie-break releases a held claim through its own leg
+		// instead of re-deriving a work ledger from gc.routed_to, which on a
+		// split city does not hold the graph-class row at all (ga-b0o6a).
+		withAssignedWorkStores(awakeAssignedStores),
 		// Warm-bind claim nudge: deliver a pool slot's claim instruction to an
 		// already-running, idle slot that had on-demand work bound to it after it
 		// last Started (bindPoolSessionTriggerBead), which cold Start's nudge cannot
@@ -2884,13 +2890,13 @@ func (cr *CityRuntime) recordReconcileTraceResults(
 }
 
 func filterReleasedAssignedWorkBeads(assignedWorkBeads []beads.Bead, released []releasedPoolAssignment) []beads.Bead {
-	filtered, _ := filterReleasedAssignedWorkSnapshot(assignedWorkBeads, nil, released)
+	filtered, _, _ := filterReleasedAssignedWorkSnapshot(assignedWorkBeads, nil, nil, released)
 	return filtered
 }
 
-func filterReleasedAssignedWorkSnapshot(assignedWorkBeads []beads.Bead, assignedWorkStoreRefs []string, released []releasedPoolAssignment) ([]beads.Bead, []string) {
+func filterReleasedAssignedWorkSnapshot(assignedWorkBeads []beads.Bead, assignedWorkStoreRefs []string, assignedWorkStores []beads.Store, released []releasedPoolAssignment) ([]beads.Bead, []string, []beads.Store) {
 	if len(assignedWorkBeads) == 0 || len(released) == 0 {
-		return assignedWorkBeads, assignedWorkStoreRefs
+		return assignedWorkBeads, assignedWorkStoreRefs, assignedWorkStores
 	}
 	releasedIndexes := make(map[int]struct{}, len(released))
 	for _, r := range released {
@@ -2903,14 +2909,20 @@ func filterReleasedAssignedWorkSnapshot(assignedWorkBeads []beads.Bead, assigned
 		}
 	}
 	if len(releasedIndexes) == 0 {
-		return assignedWorkBeads, assignedWorkStoreRefs
+		return assignedWorkBeads, assignedWorkStoreRefs, assignedWorkStores
 	}
 	filtered := make([]beads.Bead, 0, len(assignedWorkBeads)-len(releasedIndexes))
 	var filteredStoreRefs []string
+	var filteredStores []beads.Store
 	// Preserve AssignedWorkBeads/AssignedWorkStoreRefs index alignment when
-	// both slices are complete; otherwise drop refs rather than guess.
+	// both slices are complete; otherwise drop refs rather than guess. The
+	// owner stores carry the same rule: a partial store slice released through
+	// the wrong index is a write to a store that never held the row.
 	if len(assignedWorkStoreRefs) == len(assignedWorkBeads) {
 		filteredStoreRefs = make([]string, 0, len(assignedWorkStoreRefs)-len(releasedIndexes))
+	}
+	if len(assignedWorkStores) == len(assignedWorkBeads) {
+		filteredStores = make([]beads.Store, 0, len(assignedWorkStores)-len(releasedIndexes))
 	}
 	for i, wb := range assignedWorkBeads {
 		if _, ok := releasedIndexes[i]; ok {
@@ -2920,11 +2932,14 @@ func filterReleasedAssignedWorkSnapshot(assignedWorkBeads []beads.Bead, assigned
 		if filteredStoreRefs != nil {
 			filteredStoreRefs = append(filteredStoreRefs, assignedWorkStoreRefs[i])
 		}
+		if filteredStores != nil {
+			filteredStores = append(filteredStores, assignedWorkStores[i])
+		}
 	}
 	if filteredStoreRefs == nil {
 		filteredStoreRefs = assignedWorkStoreRefs
 	}
-	return filtered, filteredStoreRefs
+	return filtered, filteredStoreRefs, filteredStores
 }
 
 func traceWorkRequestedByTemplate(scaleCheckCounts map[string]int, namedDemand map[string]bool, workSet map[string]bool, cfg *config.City) map[string]bool {

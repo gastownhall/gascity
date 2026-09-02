@@ -1428,6 +1428,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	if startupTimeout <= 0 && cfg != nil {
 		startupTimeout = cfg.Session.StartupTimeoutDuration()
 	}
+	// The orphan-close tie-break releases a held claim through the leg the census
+	// read it through. Alignment is the whole contract: a slice that does not
+	// describe this tick's snapshot is a different truth, not a smaller one, so a
+	// mismatch drops to the routed fallback rather than indexing it (ga-b0o6a).
+	orphanReleaseStores := reconcileOpts.assignedWorkStores
+	assignedWorkStoresMisaligned := len(orphanReleaseStores) > 0 && len(orphanReleaseStores) != len(assignedWorkBeads)
+	if assignedWorkStoresMisaligned {
+		log.Printf("reconcileSessionBeads: assigned work/store length mismatch: work=%d stores=%d", len(assignedWorkBeads), len(orphanReleaseStores))
+		orphanReleaseStores = nil
+	}
 	maxAgeTr := reconcileOpts.maxSessionAgeTr
 	assignedWorkDeferTr := reconcileOpts.assignedWorkDeferTr
 	asyncStopTracker := reconcileOpts.asyncStopTracker
@@ -2235,7 +2245,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						//
 						// Restricted to "orphaned": a "suspended" seat is configured and
 						// merely scaled down, so its work stays put for its return.
-						if released := releaseConfirmedOrphanSessionWork(cfg, store, rigStores, assignedWorkBeads, infoByID[id]); len(released) > 0 {
+						if released := releaseConfirmedOrphanSessionWork(cfg, store, rigStores, assignedWorkBeads, orphanReleaseStores, infoByID[id]); len(released) > 0 {
 							emitDeadAssigneeReopenedEvents(rec, assignedWorkBeads, released, clk.Now().UTC())
 							closed = closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, infoByID[id], reason, clk.Now().UTC(), stderr, false)
 						}
@@ -2261,7 +2271,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							// for as long as the seat stays wedged (ga-jrnou).
 							outcome = TraceOutcomeNoChange
 						}
-						trace.RecordDecision(TraceSiteReconcilerCloseOrphan, TraceReasonCode(reason), outcome, template, name, nil)
+						var payload traceRecordPayload
+						if assignedWorkStoresMisaligned {
+							payload = traceRecordPayload{
+								"assigned_work_stores_misaligned": true,
+								"assigned_work_bead_cnt":          len(assignedWorkBeads),
+								"assigned_work_store_cnt":         len(reconcileOpts.assignedWorkStores),
+							}
+						}
+						trace.RecordDecision(TraceSiteReconcilerCloseOrphan, TraceReasonCode(reason), outcome, template, name, payload)
 					}
 				}
 				continue
