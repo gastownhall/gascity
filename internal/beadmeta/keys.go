@@ -60,19 +60,17 @@ const (
 	// claimed→started latency-watch transitions (OBS-001).
 	ClaimedAtMetadataKey = "gc.claimed_at"
 	// ClaimGenerationMetadataKey is the scheduler-owned generation-fencing
-	// token for molecule.ClaimExact. It is a CAS counter over
-	// MetadataCASWriter (gc.claimed_at's write-once and gc.control_epoch's
-	// compare-and-overwrite are different mechanisms): a caller reads the
-	// current value, computes the next generation, and CASes only this key
-	// from the observed value to the next one. A stale or racing claimant
-	// fails that CAS and gets no fallback. The claim's effects (assignee,
-	// status, session identity) are then applied in a second, separate,
-	// unconditional write — ClaimExact re-verifies this key immediately
-	// afterward and fails loud if it moved again in the interim, but that
-	// check cannot undo an effects write already clobbered by a second
-	// accurate-generation caller landing its own effects in the same window.
-	// See molecule.ClaimExact's doc for the exact guarantee this does and
-	// does not provide.
+	// token for molecule.ClaimExact. It is a counter fenced through
+	// beads.ConditionalWriter.UpdateIfMatch on the bead's revision (distinct
+	// from gc.claimed_at's write-once and gc.control_epoch's
+	// compare-and-overwrite mechanisms): a caller reads the current value,
+	// computes the next generation, and applies a single UpdateIfMatch call
+	// that advances this key AND commits the claim's effects (assignee,
+	// status, session identity) together in one atomic, revision-fenced
+	// write. A stale or racing claimant loses that write outright
+	// (*beads.PreconditionFailedError) with no fallback and no partial
+	// effect ever lands. See molecule.ClaimExact's doc for the exact
+	// guarantee this does and does not provide.
 	ClaimGenerationMetadataKey           = "gc.claim_generation"
 	ClosedByAttemptMetadataKey           = "gc.closed_by_attempt"
 	ContinuationGroupMetadataKey         = "gc.continuation_group"

@@ -12,8 +12,9 @@ import (
 
 // ErrClaimGenerationReserved is returned when onSuccess.Metadata passed to
 // ClaimExact tries to set beadmeta.ClaimGenerationMetadataKey directly. That
-// key is owned by ClaimExact's own CAS; a caller-supplied value would desync
-// the fence from the effects write that is supposed to follow it.
+// key is owned by ClaimExact's own generation fence; a caller-supplied value
+// would desync it from the single revision-fenced UpdateIfMatch call that
+// commits the generation bump and onSuccess's effects together.
 var ErrClaimGenerationReserved = errors.New("claim exact: onSuccess.Metadata must not set the reserved claim generation key")
 
 // ClaimExactPreconditions is the set of caller-observed facts a scheduler-bound
@@ -46,10 +47,11 @@ const (
 	// attempted.
 	ClaimExactPreconditionFailed ClaimExactOutcome = "precondition_failed"
 	// ClaimExactStale means the bead's claim generation was not exactly
-	// fromGeneration when the CAS ran, so this call did not win the
-	// transition and onSuccess was never applied — including when the
-	// current generation already equals what this call would have advanced
-	// to. That case is deliberately NOT treated as an idempotent success:
+	// fromGeneration (checked before the write), or the bead's revision had
+	// moved by the time the single UpdateIfMatch call ran, so this call did
+	// not win the transition and onSuccess was never applied — including
+	// when the current generation already equals what this call would have
+	// advanced to. That case is deliberately NOT treated as an idempotent success:
 	// this primitive cannot tell "I already won this" from "a different
 	// caller landed on the same next value", so it fails closed either way.
 	// A caller that needs crash-retry idempotency must inspect the returned
