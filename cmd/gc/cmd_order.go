@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/executionevent"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/orderdiscovery"
@@ -2081,27 +2082,40 @@ per invocation prevents runaway sweeps under load.
 Use --dry-run to log what would be closed without making any changes.
 The controller watchdog also runs this sweep automatically every 5 minutes.`,
 		Args: cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
-			if cmdOrderSweepNudgeMail(nudgeTTL, mailTTL, dryRun, quiet, stdout, stderr) != 0 {
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			mailTTLExplicit := cmd.Flags().Changed("mail-ttl")
+			if cmdOrderSweepNudgeMail(nudgeTTL, mailTTL, mailTTLExplicit, dryRun, quiet, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
 	cmd.Flags().DurationVar(&nudgeTTL, "nudge-ttl", nudgeMailSweepDefaultNudgeTTL, "min age before a delivered nudge bead is GC'd")
-	cmd.Flags().DurationVar(&mailTTL, "mail-ttl", nudgeMailSweepDefaultMailTTL, "min age before a read mail bead is GC'd")
+	cmd.Flags().DurationVar(&mailTTL, "mail-ttl", nudgeMailSweepDefaultMailTTL, "min age before a read mail bead is GC'd; 0 disables the mail-close phase (default: cfg.Mail.RetentionTTL when set, else "+nudgeMailSweepDefaultMailTTL.String()+")")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "log what would be closed; make no changes")
 	cmd.Flags().BoolVar(&quiet, "quiet", false, "suppress success output")
 	return cmd
 }
 
-func cmdOrderSweepNudgeMail(nudgeTTL, mailTTL time.Duration, dryRun, quiet bool, stdout, stderr io.Writer) int {
+// validateNudgeMailSweepFlags checks the sweep-nudge-mail flags before any
+// city is resolved. --nudge-ttl must stay positive (there is no "disabled"
+// meaning for it). --mail-ttl may be an explicit 0 -- that is the CLI's way
+// to disable the mail-close phase (see nudgeMailSweepMailTTLForConfig /
+// sweepStaleNudgeMail) -- but a negative value is rejected either way, and an
+// unset flag is left for config resolution rather than validated here.
+func validateNudgeMailSweepFlags(nudgeTTL, mailTTL time.Duration, mailTTLExplicit bool) error {
 	if nudgeTTL <= 0 {
-		fmt.Fprintln(stderr, "gc order sweep-nudge-mail: --nudge-ttl must be positive") //nolint:errcheck // best-effort stderr
-		return 1
+		return fmt.Errorf("--nudge-ttl must be positive")
 	}
-	if mailTTL <= 0 {
-		fmt.Fprintln(stderr, "gc order sweep-nudge-mail: --mail-ttl must be positive") //nolint:errcheck // best-effort stderr
+	if mailTTLExplicit && mailTTL < 0 {
+		return fmt.Errorf("--mail-ttl must not be negative")
+	}
+	return nil
+}
+
+func cmdOrderSweepNudgeMail(nudgeTTL, mailTTL time.Duration, mailTTLExplicit, dryRun, quiet bool, stdout, stderr io.Writer) int {
+	if err := validateNudgeMailSweepFlags(nudgeTTL, mailTTL, mailTTLExplicit); err != nil {
+		fmt.Fprintf(stderr, "gc order sweep-nudge-mail: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	cityPath, err := resolveCity()
@@ -2127,6 +2141,15 @@ func cmdOrderSweepNudgeMail(nudgeTTL, mailTTL time.Duration, dryRun, quiet bool,
 		return 1
 	}
 	statePtr := &nudgeState
+
+	if !mailTTLExplicit {
+		// Lightweight, side-effect-free config read purely for the TTL default --
+		// same LoadWithIncludes call resolveCLIStorageRoutes uses, not the heavier
+		// loadCityConfigWithoutBuiltinPackRefresh path openStoreAtForCity took above.
+		if cfg, _, cfgErr := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); cfgErr == nil {
+			mailTTL = nudgeMailSweepMailTTLForConfig(cfg, stderr)
+		}
+	}
 
 	now := time.Now()
 	// Route each phase to its coordination class, the way the controller's
