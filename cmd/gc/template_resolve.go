@@ -394,8 +394,14 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		Env:                     cfgAgent.Env,
 	}, p.sessionTemplate, p.stderr, packDirs, fragments, p.beadStore)
 	hasHooks := config.AgentHasHooks(cfgAgent, p.workspace, resolved.Name, p.providers)
-	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, !hasHooks, p.beaconTime)
 	suppressStartupPrompt := suppressStartupPromptForAgent(cfgAgent)
+	// The prime instruction tells a non-hook agent to go fetch its context.
+	// That is only meaningful when the beacon ships alone (the default branch
+	// below): when the rendered prompt is inlined under the beacon, the agent
+	// already holds the exact bytes `gc prime` would hand back, so the
+	// instruction costs a turn and duplicates the context it just received.
+	includePrimeInstruction := !hasHooks && prompt == ""
+	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, includePrimeInstruction, p.beaconTime)
 	switch {
 	case suppressStartupPrompt:
 		prompt = ""
