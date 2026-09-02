@@ -673,23 +673,41 @@ func ephemeralAssignedReadyProbeScript(shellVar string, topo QueryTopology) stri
 		`fi; `
 }
 
-func poolDemandOriginGateScript() string {
+// poolDemandOriginGateScript gates the routed (Tier 3) pool-demand read on
+// the session's origin. Ephemeral pool members and controller probes (empty
+// origin) always consume routed demand. Manual sessions never do. Named
+// sessions are admitted only when the backing template is a canonical
+// singleton — the one shape on which the controller mints no pool standby
+// and instead wakes the named holder itself for routed demand
+// (NamedSessionRoutedDemand / the "routed-demand" wake reason, #4644,
+// ga-jl73y2). On that shape the holder IS the session the controller woke
+// for the bead; gating it out left the wake with nothing to serve and the
+// bead stranded behind an infinite woke -> no_work -> idle_killed loop
+// (#5884). On a multi-instance pool a standby serves the demand, so a named
+// session there must not steal it and stays gated — the same reasoning the
+// controller applies when it scopes the routed-demand wake to canonical
+// singletons only.
+func poolDemandOriginGateScript(a *Agent) string {
+	admitted := `ephemeral|""`
+	if a.UsesCanonicalSingletonPoolIdentity() {
+		admitted = `ephemeral|named|""`
+	}
 	return `case "$GC_SESSION_ORIGIN" in ` +
-		`ephemeral|"") ;; ` +
+		admitted + `) ;; ` +
 		`*) exit 0 ;; ` +
 		`esac; `
 }
 
-func routedPoolWorkQueryProbeScript(topo QueryTopology, targetCount int) string {
-	script := poolDemandOriginGateScript() + poolDemandFirstRowFunctionScript(topo)
+func routedPoolWorkQueryProbeScript(a *Agent, topo QueryTopology, targetCount int) string {
+	script := poolDemandOriginGateScript(a) + poolDemandFirstRowFunctionScript(topo)
 	for i := 1; i <= targetCount; i++ {
 		script += fmt.Sprintf(`probe_pool_demand "$%d"; `, i)
 	}
 	return script + `printf "[]"`
 }
 
-func routedPoolWorkQueryCommand(topo QueryTopology, targets ...string) string {
-	args := []string{"sh", "-c", routedPoolWorkQueryProbeScript(topo, len(targets)), "--"}
+func routedPoolWorkQueryCommand(a *Agent, topo QueryTopology, targets ...string) string {
+	args := []string{"sh", "-c", routedPoolWorkQueryProbeScript(a, topo, len(targets)), "--"}
 	args = append(args, targets...)
 	return shellquote.Join(args)
 }
@@ -798,14 +816,14 @@ func buildWorkQuery(a *Agent, topo QueryTopology) string {
 	legacyTarget := legacyWorkflowControlQualifiedName(target)
 	if legacyTarget == "" {
 		script := standardAssignedWorkQueryScript(topo) +
-			poolDemandOriginGateScript() +
+			poolDemandOriginGateScript(a) +
 			poolDemandFirstRowFunctionScript(topo) +
 			`probe_pool_demand "$1"; ` +
 			`printf "[]"`
 		return shellquote.Join([]string{"sh", "-c", script, "--", target})
 	}
 	script := legacyControlAssignedWorkQueryScript(topo) +
-		poolDemandOriginGateScript() +
+		poolDemandOriginGateScript(a) +
 		poolDemandFirstRowFunctionScript(topo) +
 		`probe_pool_demand "$1"; ` +
 		`probe_pool_demand "$2"; ` +
@@ -877,9 +895,9 @@ func buildRoutedPoolQuery(a *Agent, topo QueryTopology) string {
 	target := a.poolDemandTarget()
 	legacyTarget := legacyWorkflowControlQualifiedName(target)
 	if legacyTarget == "" {
-		return routedPoolWorkQueryCommand(topo, target)
+		return routedPoolWorkQueryCommand(a, topo, target)
 	}
-	return routedPoolWorkQueryCommand(topo, target, legacyTarget)
+	return routedPoolWorkQueryCommand(a, topo, target, legacyTarget)
 }
 
 func legacyWorkflowControlQualifiedName(target string) string {
