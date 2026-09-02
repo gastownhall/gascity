@@ -133,14 +133,10 @@ func sessionStartAutoHandoffInjection(stderr io.Writer) (primeHookContextInjecti
 	for _, m := range messages {
 		ids[m.ID] = true
 	}
-	injectedMessages := sortMailByPriority(messages)
-	if len(injectedMessages) > mailInjectMaxMessages {
-		injectedMessages = injectedMessages[:mailInjectMaxMessages]
-	}
 	return primeHookContextInjection{
 		text: formatInjectOutput(messages),
 		afterDelivery: func() {
-			archiveInjectedAutoHandoffMessages(mp, injectedMessages, stderr)
+			archiveInjectedAutoHandoffMessages(mp, selectMailInjectWindow(messages), stderr)
 		},
 	}, ids
 }
