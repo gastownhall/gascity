@@ -12,7 +12,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citywriteauth"
 	"github.com/gastownhall/gascity/internal/clientcontext"
 	"github.com/google/uuid"
 )
@@ -22,7 +24,9 @@ import (
 // gc-write-mint binary through the REAL operator path — a ~/.gc/contexts.toml
 // (isolated GC_HOME) with a grant_command, resolved by resolveWriteTarget() with
 // GC_CITY_CONTEXT=prod, built into a client by buildRemoteWriteClient, minting via
-// the clientgrant env-exec chain. Only the git-fetch (rigCloneGit) and the SSRF
+// the clientgrant env-exec chain. The stock Context carries the v2 audience and
+// CID, the real minter is pinned to the same pair, and the live verifier is
+// CID-configured. Only the git-fetch (rigCloneGit) and the SSRF
 // resolver stay stubbed (no real network); the grant, the resolver, the TLS
 // handshake, and the writeAuthMiddleware are all real.
 //
@@ -30,11 +34,12 @@ import (
 // it (via sh -c) once per mutation — the same reason cmd/gc-write-mint/e2e_test.go
 // is integration-tagged.
 func TestCapstoneIntegrationRealMinter(t *testing.T) {
-	h := newCapstoneHarness(t)
+	const cid = "city_capstone"
+	h := newCapstoneHarnessWithCID(t, cid)
 
 	// Build the real minter. The test cwd is cmd/gc, so build by import path.
 	bin := filepath.Join(t.TempDir(), "gc-write-mint")
-	if out, err := exec.Command("go", "build", "-o", bin, "github.com/gastownhall/gascity/cmd/gc-write-mint").CombinedOutput(); err != nil {
+	if out, err := exec.Command("go", "build", "-buildvcs=false", "-o", bin, "github.com/gastownhall/gascity/cmd/gc-write-mint").CombinedOutput(); err != nil {
 		t.Fatalf("build gc-write-mint: %v\n%s", err, out)
 	}
 
@@ -53,13 +58,16 @@ func TestCapstoneIntegrationRealMinter(t *testing.T) {
 
 	// Write the operator's contexts.toml through the real `gc context add` path
 	// (city-pinned grant_command). GC_HOME is already the harness temp dir.
-	grantCmd := bin + " --kid k1 --key " + keyFile + " --city " + h.cityName
+	grantCmd := bin + " --kid k1 --key " + keyFile + " --city " + h.cityName +
+		" --aud " + citywriteauth.AudienceCityWriteV2 + " --cid " + cid
 	if code := doContextAdd(clientcontext.Context{
-		Name:         "prod",
-		URL:          h.srv.URL,
-		City:         h.cityName,
-		GrantCommand: grantCmd,
-		CAFile:       h.caPath,
+		Name:          "prod",
+		URL:           h.srv.URL,
+		City:          h.cityName,
+		GrantCommand:  grantCmd,
+		GrantAudience: citywriteauth.AudienceCityWriteV2,
+		GrantCID:      cid,
+		CAFile:        h.caPath,
 	}, io.Discard, os.Stderr); code != 0 {
 		t.Fatal("gc context add prod failed")
 	}
@@ -114,5 +122,64 @@ func TestCapstoneIntegrationRealMinter(t *testing.T) {
 	// built gc-write-mint binary via the contexts.toml grant_command.
 	if got := h.grantCount.Load(); got != 0 {
 		t.Errorf("the in-process signer minted %d grants; the real gc-write-mint binary should have minted every grant", got)
+	}
+
+	// A stock context/minter pair pinned to a different CID can mint a
+	// cryptographically valid v2 token, but this city's CID-configured verifier
+	// must reject it before the handler runs.
+	wrongCID := "city_other"
+	wrongCIDCmd := bin + " --kid k1 --key " + keyFile + " --city " + h.cityName +
+		" --aud " + citywriteauth.AudienceCityWriteV2 + " --cid " + wrongCID
+	wrongCIDClient, err := buildRemoteWriteClient(&remoteTarget{
+		BaseURL:  h.srv.URL,
+		CityName: h.cityName,
+		Ctx: &clientcontext.Context{
+			Name:          "wrong-cid",
+			URL:           h.srv.URL,
+			City:          h.cityName,
+			GrantCommand:  wrongCIDCmd,
+			GrantAudience: citywriteauth.AudienceCityWriteV2,
+			GrantCID:      wrongCID,
+			CAFile:        h.caPath,
+		},
+	})
+	if err != nil {
+		t.Fatalf("build wrong-CID stock client: %v", err)
+	}
+	_, err = wrongCIDClient.RigCreate(api.RigCreateRequest{
+		Name: "wrong-cid", Prefix: "wc", DefaultBranch: "main",
+		GitURL: capstonePublicGitURL(), RequestID: uuid.NewString(),
+	}, nil)
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "grant") {
+		t.Fatalf("wrong-CID grant error = %v, want verifier refusal", err)
+	}
+
+	// If the context says v2 but its external signer is pinned to the legacy
+	// audience, gc-write-mint itself refuses the mismatched GrantInfo and no HTTP
+	// mutation is attempted.
+	wrongAudCmd := bin + " --kid k1 --key " + keyFile + " --city " + h.cityName +
+		" --aud " + citywriteauth.AudienceCityWrite
+	wrongAudClient, err := buildRemoteWriteClient(&remoteTarget{
+		BaseURL:  h.srv.URL,
+		CityName: h.cityName,
+		Ctx: &clientcontext.Context{
+			Name:          "wrong-audience",
+			URL:           h.srv.URL,
+			City:          h.cityName,
+			GrantCommand:  wrongAudCmd,
+			GrantAudience: citywriteauth.AudienceCityWriteV2,
+			GrantCID:      cid,
+			CAFile:        h.caPath,
+		},
+	})
+	if err != nil {
+		t.Fatalf("build wrong-audience stock client: %v", err)
+	}
+	_, err = wrongAudClient.RigCreate(api.RigCreateRequest{
+		Name: "wrong-audience", Prefix: "wa", DefaultBranch: "main",
+		GitURL: capstonePublicGitURL(), RequestID: uuid.NewString(),
+	}, nil)
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "audience") {
+		t.Fatalf("wrong-audience minter error = %v, want local audience refusal", err)
 	}
 }

@@ -1,6 +1,7 @@
 package configedit_test
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -546,6 +547,264 @@ func TestSuspendAgent_Inline(t *testing.T) {
 	cfg := readTOML(t, path)
 	if !cfg.Agents[0].Suspended {
 		t.Error("expected mayor to be suspended")
+	}
+}
+
+func TestConditionalAgentSuspensionInlineCASAndAdoption(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, minimalCity())
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+	initial, err := ed.AgentSuspension("mayor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, _ := os.Stat(path)
+	before, after, err := ed.SetAgentSuspendedIf("mayor", initial.Token, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.Suspended || !after.Suspended || before.Token == after.Token {
+		t.Fatalf("unexpected transition: %#v -> %#v", before, after)
+	}
+	changed, _ := os.Stat(path)
+	if !changed.ModTime().After(info.ModTime()) && changed.Size() == info.Size() {
+		t.Fatal("mutation did not change city.toml")
+	}
+	mtime := changed.ModTime()
+	adoptBefore, adoptAfter, err := ed.SetAgentSuspendedIf("mayor", after.Token, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adoptBefore != adoptAfter {
+		t.Fatalf("adoption changed token: %#v %#v", adoptBefore, adoptAfter)
+	}
+	unchanged, _ := os.Stat(path)
+	if !unchanged.ModTime().Equal(mtime) {
+		t.Fatal("already-desired adoption changed mtime")
+	}
+	staleMtime := unchanged.ModTime()
+	if _, _, err := ed.SetAgentSuspendedIf("mayor", initial.Token, false); !errors.Is(err, configedit.ErrPrecondition) {
+		t.Fatalf("stale token error = %v", err)
+	}
+	staleAfter, _ := os.Stat(path)
+	if !staleAfter.ModTime().Equal(staleMtime) {
+		t.Fatal("stale token changed city.toml mtime")
+	}
+	still, _ := ed.AgentSuspension("mayor")
+	if !still.Suspended {
+		t.Fatal("stale mutation changed state")
+	}
+}
+
+func TestConditionalAgentSuspensionDetectsRelevantSourceDrift(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, minimalCity())
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+	state, err := ed.AgentSuspension("mayor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := strings.Replace(string(mustReadFile(t, path)), `provider = "claude"`, "provider = \"claude\"\nsuspended = true", 1)
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ed.SetAgentSuspendedIf("mayor", state.Token, false); !errors.Is(err, configedit.ErrPrecondition) {
+		t.Fatalf("source drift error = %v", err)
+	}
+}
+
+func TestConditionalAgentSuspensionConcurrentOppositesAndRestartAdoption(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, minimalCity())
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+	initial, err := ed.AgentSuspension("mayor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// First establish the opposite of one contender so both requests are real.
+	_, suspended, err := ed.SetAgentSuspendedIf("mayor", initial.Token, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	errs := make(chan error, 2)
+	for _, desired := range []bool{false, true} {
+		desired := desired
+		go func() {
+			defer wg.Done()
+			_, _, err := ed.SetAgentSuspendedIf("mayor", suspended.Token, desired)
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	successes, stale := 0, 0
+	for err := range errs {
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, configedit.ErrPrecondition):
+			stale++
+		default:
+			t.Fatal(err)
+		}
+	}
+	if successes+stale != 2 || successes < 1 {
+		t.Fatalf("successes=%d stale=%d", successes, stale)
+	}
+	current, err := ed.AgentSuspension("mayor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Suspended {
+		t.Fatal("opposite desired-state request did not converge to the only changing state")
+	}
+	// A lost response is recovered by observing the new token and adopting the
+	// exact desired state through a new Editor (server restart model).
+	restarted := configedit.NewEditor(fsys.OSFS{}, path)
+	before, after, err := restarted.SetAgentSuspendedIf("mayor", current.Token, current.Suspended)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before != after {
+		t.Fatalf("restart adoption wrote state: %#v %#v", before, after)
+	}
+}
+
+func TestConditionalAgentSuspensionTransactionHooksHoldEditorLock(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, minimalCity())
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+	initial, err := ed.AgentSuspension("mayor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writerStarted, writerDone := make(chan struct{}), make(chan struct{})
+	_, _, err = ed.SetAgentSuspendedIfTransaction("mayor", initial.Token, true,
+		func() error {
+			go func() {
+				close(writerStarted)
+				_ = ed.ResumeAgent("mayor")
+				close(writerDone)
+			}()
+			return nil
+		},
+		func(_, _ configedit.AgentSuspensionState) error {
+			<-writerStarted
+			select {
+			case <-writerDone:
+				t.Fatal("supported writer interleaved before transaction hook completed")
+			default:
+			}
+			return nil
+		},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-writerDone
+}
+
+func TestConditionalAgentSuspensionTransactionRollsBackAfterChangeFailure(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, minimalCity())
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+	initial, err := ed.AgentSuspension("mayor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = ed.SetAgentSuspendedIfTransaction("mayor", initial.Token, true,
+		func() error { return nil },
+		func(_, _ configedit.AgentSuspensionState) error { return errors.New("refresh failed") },
+		func() error { return os.WriteFile(path, original, 0o600) },
+	)
+	if err == nil || !strings.Contains(err.Error(), "refresh failed") {
+		t.Fatalf("error = %v", err)
+	}
+	restored, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(restored, original) {
+		t.Fatalf("durable bytes not restored\n got: %s\nwant: %s", restored, original)
+	}
+}
+
+func TestConditionalAgentSuspensionTransactionJoinsRollbackFailure(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, minimalCity())
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+	initial, err := ed.AgentSuspension("mayor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = ed.SetAgentSuspendedIfTransaction("mayor", initial.Token, true,
+		func() error { return nil },
+		func(_, _ configedit.AgentSuspensionState) error { return errors.New("refresh failed") },
+		func() error { return errors.New("restore failed") },
+	)
+	if err == nil || !strings.Contains(err.Error(), "refresh failed") || !strings.Contains(err.Error(), "restore failed") {
+		t.Fatalf("joined error = %v", err)
+	}
+}
+
+func TestConditionalAgentSuspensionPackAndDiscoveredOrigins(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		packAgent bool
+	}{{"pack", true}, {"discovered", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := writeTOML(t, dir, `[workspace]
+name = "test-city"
+`)
+			pack := `[pack]
+name = "test-city"
+schema = 2
+`
+			if tc.packAgent {
+				pack += `
+[[agent]]
+name = "worker"
+provider = "claude"
+`
+			}
+			if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte(pack), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			agentDir := filepath.Join(dir, "agents", "worker")
+			if err := os.MkdirAll(agentDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(agentDir, "prompt.template.md"), []byte("worker\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			ed := configedit.NewEditor(fsys.OSFS{}, path)
+			state, err := ed.AgentSuspension("worker")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, after, err := ed.SetAgentSuspendedIf("worker", state.Token, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !after.Suspended {
+				t.Fatal("worker not suspended")
+			}
+			_, agentErr := os.Stat(filepath.Join(agentDir, "agent.toml"))
+			if tc.packAgent && agentErr == nil {
+				t.Fatal("pack origin wrote agent.toml")
+			}
+			if !tc.packAgent && agentErr != nil {
+				t.Fatalf("discovered origin did not write agent.toml: %v", agentErr)
+			}
+		})
 	}
 }
 

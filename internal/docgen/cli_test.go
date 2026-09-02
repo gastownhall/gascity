@@ -139,6 +139,24 @@ func TestRenderCLIMarkdown_HiddenFlagSkipped(t *testing.T) {
 	}
 }
 
+func TestRenderCLIMarkdown_FlagsSortedWhenCobraPreservesRegistrationOrder(t *testing.T) {
+	root := &cobra.Command{Use: "app", Short: "test"}
+	root.Flags().SortFlags = false
+	root.Flags().String("zeta", "", "registered first")
+	root.Flags().String("alpha", "", "registered second")
+
+	var buf bytes.Buffer
+	if err := RenderCLIMarkdown(&buf, root); err != nil {
+		t.Fatalf("RenderCLIMarkdown: %v", err)
+	}
+
+	alpha := strings.Index(buf.String(), "`--alpha`")
+	zeta := strings.Index(buf.String(), "`--zeta`")
+	if alpha < 0 || zeta < 0 || alpha > zeta {
+		t.Fatalf("flags are not sorted by canonical long name:\n%s", buf.String())
+	}
+}
+
 func TestRenderCLIMarkdown_LongDescription(t *testing.T) {
 	root := testTree()
 	var buf bytes.Buffer

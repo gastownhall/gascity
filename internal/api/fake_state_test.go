@@ -215,7 +215,8 @@ func (f *fakeState) RawConfig() *config.City {
 // fakeMutatorState extends fakeState with StateMutator for testing mutations.
 type fakeMutatorState struct {
 	*fakeState
-	suspended map[string]bool
+	suspended    map[string]bool
+	suspensionMu sync.Mutex
 
 	// serializeMu + serializeCalls make fakeMutatorState a ConfigWriteSerializer
 	// so pack handler tests exercise the real per-city write-lock seam and can
@@ -261,6 +262,31 @@ func (f *fakeMutatorState) SerializeConfigWrite(fn func() error) error {
 
 func (f *fakeMutatorState) SuspendAgent(name string) error { f.suspended[name] = true; return nil }
 func (f *fakeMutatorState) ResumeAgent(name string) error  { delete(f.suspended, name); return nil }
+func (f *fakeMutatorState) AgentSuspension(name string) (AgentSuspensionState, error) {
+	f.suspensionMu.Lock()
+	defer f.suspensionMu.Unlock()
+	return AgentSuspensionState{Suspended: f.suspended[name], Token: fmt.Sprintf("%064x", len(f.suspended)+1)}, nil
+}
+
+func (f *fakeMutatorState) SetAgentSuspendedIf(name, token string, desired bool) (AgentSuspensionState, AgentSuspensionState, error) {
+	f.suspensionMu.Lock()
+	defer f.suspensionMu.Unlock()
+	before := AgentSuspensionState{Suspended: f.suspended[name], Token: fmt.Sprintf("%064x", len(f.suspended)+1)}
+	if token != before.Token {
+		return before, before, fmt.Errorf("%w: stale", configedit.ErrPrecondition)
+	}
+	if desired {
+		f.suspended[name] = true
+	} else {
+		delete(f.suspended, name)
+	}
+	after := AgentSuspensionState{Suspended: f.suspended[name], Token: fmt.Sprintf("%064x", len(f.suspended)+1)}
+	if before.Suspended == desired {
+		after = before
+	}
+	return before, after, nil
+}
+
 func (f *fakeMutatorState) EnableOrder(name, rig string) error {
 	enabled := true
 	return f.SetOrderOverrideEnabled(name, rig, &enabled)

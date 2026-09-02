@@ -4510,6 +4510,164 @@ func TestCityRuntimeReloadProviderSwapPreservesDrainTracker(t *testing.T) {
 	}
 }
 
+// TestCityRuntimeReloadSerializesLoadThroughApplyWithCAS pins the full runtime
+// side of the config mutation boundary. A reload that has already loaded S0
+// must finish applying S0 to every CityRuntime/controller component before a
+// suspension CAS can commit S1; after the CAS commits, the next reload must
+// load and apply S1. Without the outer reloadConfigTraced lock, the CAS can
+// return success while the in-flight reload subsequently installs its stale S0
+// into cr.cfg, pools/orders, or controller state.
+func TestCityRuntimeReloadSerializesLoadThroughApplyWithCAS(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+	f, err := os.OpenFile(tomlPath, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`
+[providers.test]
+command = "true"
+
+[[agent]]
+name = "worker"
+provider = "test"
+`); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, _ := loadCityRuntimeControllerConfig(t, cityPath)
+	sp := runtime.NewFake()
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath:  cityPath,
+		CityName:  "test-city",
+		TomlPath:  tomlPath,
+		ConfigRev: "force-full-reload",
+		Cfg:       cfg,
+		SP:        sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	})
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs.cityBeadStore = beads.NewMemStore()
+	cs.pokeCh = make(chan struct{}, 1)
+	cs.configDirty = &atomic.Bool{}
+	cr.setControllerState(cs)
+	cr.sessionDrains = newDrainTracker()
+
+	initial, err := cs.AgentSuspension("worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	loadedS0 := make(chan struct{})
+	allowS0Apply := make(chan struct{})
+	var allowOnce sync.Once
+	allowApply := func() { allowOnce.Do(func() { close(allowS0Apply) }) }
+	t.Cleanup(allowApply)
+	cr.reloadAfterLoad = func() {
+		close(loadedS0)
+		<-allowS0Apply
+	}
+
+	lastProviderName := "fake"
+	reloadDone := make(chan reloadControlReply, 1)
+	go func() {
+		reloadDone <- cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceManual)
+	}()
+	select {
+	case <-loadedS0:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("reload did not reach the post-load S0 interleaving seam")
+	}
+
+	casStarted := make(chan struct{})
+	casDone := make(chan error, 1)
+	go func() {
+		close(casStarted)
+		_, _, setErr := cs.SetAgentSuspendedIf("worker", initial.Token, true)
+		casDone <- setErr
+	}()
+	<-casStarted
+	select {
+	case err := <-casDone:
+		t.Fatalf("CAS committed while reload still held a pre-CAS snapshot: %v", err)
+	case <-time.After(10 * time.Millisecond):
+	}
+
+	allowApply()
+	select {
+	case reply := <-reloadDone:
+		if reply.Outcome != reloadOutcomeApplied {
+			t.Fatalf("S0 reload outcome = %q, want %q (error=%q)", reply.Outcome, reloadOutcomeApplied, reply.Error)
+		}
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("S0 reload did not complete")
+	}
+	select {
+	case err := <-casDone:
+		if err != nil {
+			t.Fatalf("CAS after S0 reload: %v", err)
+		}
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("CAS did not proceed after S0 reload released the mutation boundary")
+	}
+
+	if !workerSuspendedForTest(t, cs.Config()) {
+		t.Fatal("controller lost S1 after the CAS committed")
+	}
+	if workerSuspendedForTest(t, cr.cfg) {
+		t.Fatal("pre-CAS S0 reload unexpectedly observed the later CAS")
+	}
+	workerSession := startupSessionName(cr.cityName, "worker", cr.cfg.Workspace.SessionTemplate)
+	if cr.suspendedNames[workerSession] {
+		t.Fatal("reconciliation-facing suspendedNames did not retain S0 before the next reload")
+	}
+
+	// CAS-first ordering: after S1 is durable, a fresh reload must load S1 and
+	// apply it to the rest of CityRuntime, then acknowledge the pending
+	// controller mutation revision.
+	cr.reloadAfterLoad = nil
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceManual)
+	if reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("S1 reload outcome = %q, want %q (error=%q)", reply.Outcome, reloadOutcomeApplied, reply.Error)
+	}
+	if !workerSuspendedForTest(t, cr.cfg) {
+		t.Fatal("CAS-first reload did not apply S1 to CityRuntime")
+	}
+	if !cr.suspendedNames[workerSession] {
+		t.Fatal("CAS-first reload did not apply S1 to reconciliation-facing suspendedNames")
+	}
+	if !workerSuspendedForTest(t, cs.Config()) {
+		t.Fatal("CAS-first reload did not retain S1 in controller state")
+	}
+	if cs.configMutationPending.Load() {
+		t.Fatal("CAS-first reload did not acknowledge the pending S1 revision")
+	}
+}
+
+func workerSuspendedForTest(t *testing.T, cfg *config.City) bool {
+	t.Helper()
+	if cfg == nil {
+		t.Fatal("config is nil while looking for worker agent")
+	}
+	for _, agent := range cfg.Agents {
+		if agent.QualifiedName() == "worker" {
+			return agent.Suspended
+		}
+	}
+	t.Fatal("worker agent is absent")
+	return false
+}
+
 func TestCityRuntimeReloadProviderSwapFailsOnPartialSessionListing(t *testing.T) {
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")

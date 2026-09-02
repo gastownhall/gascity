@@ -20,6 +20,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/citywriteauth"
 )
 
 // validName constrains a context name and a remote city name to characters
@@ -43,6 +44,8 @@ type Context struct {
 	CredentialRequiredScopes []string `toml:"credential_required_scopes,omitempty"`
 	CredentialOrg            string   `toml:"credential_org,omitempty"`
 	GrantCommand             string   `toml:"grant_command,omitempty"`
+	GrantAudience            string   `toml:"grant_audience,omitempty"`
+	GrantCID                 string   `toml:"grant_cid,omitempty"`
 	CAFile                   string   `toml:"ca_file,omitempty"`
 	TLSServerName            string   `toml:"tls_server_name,omitempty"`
 	InsecureSkipVerify       bool     `toml:"insecure_skip_verify,omitempty"`
@@ -147,6 +150,19 @@ func (c Context) Validate() error {
 	}
 	if c.City != "" && !validName.MatchString(c.City) {
 		return fmt.Errorf("context %q: city %q must match %s (no control characters or path separators)", c.Name, c.City, validName)
+	}
+	if (c.GrantAudience != "" || c.GrantCID != "") && c.GrantCommand == "" {
+		return fmt.Errorf("context %q: grant_audience and grant_cid require grant_command", c.Name)
+	}
+	switch {
+	case c.GrantAudience == citywriteauth.AudienceCityWriteV2:
+		if c.GrantCID == "" {
+			return fmt.Errorf("context %q: grant_cid is required with %s", c.Name, citywriteauth.AudienceCityWriteV2)
+		}
+	case c.GrantAudience != "" && c.GrantAudience != citywriteauth.AudienceCityWrite:
+		return fmt.Errorf("context %q: unsupported grant_audience %q", c.Name, c.GrantAudience)
+	case c.GrantCID != "":
+		return fmt.Errorf("context %q: grant_cid requires grant_audience %s", c.Name, citywriteauth.AudienceCityWriteV2)
 	}
 	providerConfigured := c.CredentialAudience != "" || len(c.CredentialRequiredScopes) > 0 || c.CredentialOrg != ""
 	if providerConfigured {

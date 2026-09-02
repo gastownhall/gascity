@@ -510,6 +510,56 @@ func (s *Server) agentActionByName(name, action string) (*OKResponse, error) {
 	return resp, nil
 }
 
+func suspensionBody(state AgentSuspensionState) AgentSuspensionStateBody {
+	return AgentSuspensionStateBody(state)
+}
+
+func (s *Server) agentSuspensionByName(name string) (*AgentSuspensionOutput, error) {
+	sm, ok := s.state.(StateMutator)
+	if !ok {
+		return nil, errMutationsNotSupported
+	}
+	state, err := sm.AgentSuspension(name)
+	if err != nil {
+		return nil, mutationError(err)
+	}
+	return &AgentSuspensionOutput{Body: suspensionBody(state)}, nil
+}
+
+func (s *Server) humaHandleAgentSuspension(_ context.Context, input *AgentSuspensionInput) (*AgentSuspensionOutput, error) {
+	return s.agentSuspensionByName(input.Name)
+}
+
+func (s *Server) humaHandleAgentSuspensionQualified(_ context.Context, input *AgentSuspensionQualifiedInput) (*AgentSuspensionOutput, error) {
+	return s.agentSuspensionByName(input.QualifiedName())
+}
+
+func (s *Server) setAgentSuspensionByName(name, token string, desired bool) (*AgentSuspensionSetOutput, error) {
+	sm, ok := s.state.(StateMutator)
+	if !ok {
+		return nil, errMutationsNotSupported
+	}
+	before, after, err := sm.SetAgentSuspendedIf(name, token, desired)
+	if err != nil {
+		return nil, mutationError(err)
+	}
+	response := &AgentSuspensionSetOutput{}
+	response.Body.Status = "updated"
+	if before.Token == after.Token {
+		response.Body.Status = "already_desired"
+	}
+	response.Body.Before, response.Body.After = suspensionBody(before), suspensionBody(after)
+	return response, nil
+}
+
+func (s *Server) humaHandleAgentSuspensionSet(_ context.Context, input *AgentSuspensionSetInput) (*AgentSuspensionSetOutput, error) {
+	return s.setAgentSuspensionByName(input.Name, input.Body.ExpectedToken, input.Body.Suspended)
+}
+
+func (s *Server) humaHandleAgentSuspensionSetQualified(_ context.Context, input *AgentSuspensionSetQualifiedInput) (*AgentSuspensionSetOutput, error) {
+	return s.setAgentSuspensionByName(input.QualifiedName(), input.Body.ExpectedToken, input.Body.Suspended)
+}
+
 // humaHandleAgentOutput is the Huma-typed handler for GET /v0/agent/{base}/output
 // (unqualified agent name, no rig prefix).
 func (s *Server) humaHandleAgentOutput(_ context.Context, input *AgentOutputInput) (*struct {

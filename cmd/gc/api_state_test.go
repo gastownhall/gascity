@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -183,6 +184,24 @@ type failAgentTomlRenameOSFS struct {
 func (f *failAgentTomlRenameOSFS) Rename(oldpath, newpath string) error {
 	if canonicalTestPath(newpath) == canonicalTestPath(f.target) {
 		return errors.New("injected agent.toml write failure")
+	}
+	return f.OSFS.Rename(oldpath, newpath)
+}
+
+type blockingCityRenameOSFS struct {
+	fsys.OSFS
+	target  string
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (f *blockingCityRenameOSFS) Rename(oldpath, newpath string) error {
+	if canonicalTestPath(newpath) == canonicalTestPath(f.target) {
+		f.once.Do(func() {
+			close(f.entered)
+			<-f.release
+		})
 	}
 	return f.OSFS.Rename(oldpath, newpath)
 }
@@ -1666,6 +1685,416 @@ func TestControllerStateMutationRestoresSymlinkedCityTomlWhenRefreshFails(t *tes
 	}
 	if string(restored) != string(original) {
 		t.Fatalf("repo city.toml = %q, want restored original %q", restored, original)
+	}
+}
+
+func TestMutateAndPokeChangedNoOpHasNoReconcileSideEffects(t *testing.T) {
+	var dirty atomic.Bool
+	cs := &controllerState{configDirty: &dirty, pokeCh: make(chan struct{}, 1)}
+	called := false
+	if err := cs.mutateAndPokeChanged(func() (bool, error) {
+		called = true
+		return false, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("mutation callback was not called")
+	}
+	if dirty.Load() || cs.configMutationPending.Load() || len(cs.pokeCh) != 0 {
+		t.Fatal("already-desired mutation dirtied config or poked reconciliation")
+	}
+}
+
+func TestControllerMutationPreWriteErrorDoesNotRestoreSnapshot(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "city.toml")
+	content := []byte(`[workspace]
+name = "test-city"
+
+[providers.test]
+command = "true"
+
+[[agent]]
+name = "worker"
+provider = "test"
+`)
+	if err := os.WriteFile(cityPath, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	agentsDir := filepath.Join(dir, "agents")
+	assetPath := filepath.Join(agentsDir, "keep", "notes.txt")
+	if err := os.MkdirAll(filepath.Dir(assetPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(assetPath, []byte("keep\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", dir)
+	cs.pokeCh = make(chan struct{}, 1)
+	cs.configDirty = &atomic.Bool{}
+
+	beforeCity, err := os.Stat(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeAgents, err := os.Stat(agentsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeAsset, err := os.Stat(assetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = cs.DeleteAgent("missing")
+	if !errors.Is(err, configedit.ErrNotFound) {
+		t.Fatalf("DeleteAgent error = %v, want ErrNotFound", err)
+	}
+	for path, before := range map[string]os.FileInfo{
+		cityPath:  beforeCity,
+		agentsDir: beforeAgents,
+		assetPath: beforeAsset,
+	} {
+		after, statErr := os.Stat(path)
+		if statErr != nil {
+			t.Fatalf("stat %s after pre-write error: %v", path, statErr)
+		}
+		if !os.SameFile(before, after) || !before.ModTime().Equal(after.ModTime()) {
+			t.Fatalf("pre-write error replaced or changed mtime for %s", path)
+		}
+	}
+	if got, readErr := os.ReadFile(cityPath); readErr != nil || !bytes.Equal(got, content) {
+		t.Fatalf("city.toml after pre-write error = %q, %v", got, readErr)
+	}
+	if cs.configDirty.Load() || cs.configMutationPending.Load() || len(cs.pokeCh) != 0 {
+		t.Fatal("pre-write error dirtied config, marked pending, or poked reconciliation")
+	}
+}
+
+func TestControllerSetAgentSuspendedIfAlreadyDesiredHasNoSideEffects(t *testing.T) {
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "city.toml")
+	content := []byte(`[workspace]
+name = "test-city"
+
+[providers.test]
+command = "true"
+
+[[agent]]
+name = "worker"
+provider = "test"
+suspended = true
+`)
+	if err := os.WriteFile(cityPath, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	editor := configedit.NewEditor(fsys.OSFS{}, cityPath)
+	state, err := editor.AgentSuspension("worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dirty atomic.Bool
+	cs := &controllerState{cityPath: dir, editor: editor, configDirty: &dirty, pokeCh: make(chan struct{}, 1)}
+	before, after, err := cs.SetAgentSuspendedIf("worker", state.Token, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before != after {
+		t.Fatalf("already desired changed state: %#v -> %#v", before, after)
+	}
+	afterInfo, err := os.Stat(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !afterInfo.ModTime().Equal(info.ModTime()) || dirty.Load() || cs.configMutationPending.Load() || len(cs.pokeCh) != 0 {
+		t.Fatal("already-desired controller mutation changed mtime, dirty state, pending state, or poke channel")
+	}
+}
+
+func TestControllerSetAgentSuspendedIfPublishesReconcileStateInsideEditorLock(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "city.toml")
+	content := []byte(`[workspace]
+name = "test-city"
+
+[providers.test]
+command = "true"
+
+[[agent]]
+name = "worker"
+provider = "test"
+`)
+	if err := os.WriteFile(cityPath, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	blockingFS := &blockingCityRenameOSFS{
+		target:  cityPath,
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", dir)
+	cs.editor = configedit.NewEditor(blockingFS, cityPath)
+	cs.pokeCh = make(chan struct{}, 1)
+	cs.configDirty = &atomic.Bool{}
+	initial, err := cs.editor.AgentSuspension("worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	casDone := make(chan error, 1)
+	go func() {
+		_, _, setErr := cs.SetAgentSuspendedIf("worker", initial.Token, true)
+		casDone <- setErr
+	}()
+	<-blockingFS.entered
+
+	type observation struct {
+		dirty   bool
+		pending bool
+		pokes   int
+	}
+	observed := make(chan observation, 1)
+	writerStarted := make(chan struct{})
+	go func() {
+		close(writerStarted)
+		_ = cs.editor.Do(func() error {
+			observed <- observation{
+				dirty:   cs.configDirty.Load(),
+				pending: cs.configMutationPending.Load(),
+				pokes:   len(cs.pokeCh),
+			}
+			return nil
+		})
+	}()
+	<-writerStarted
+	select {
+	case got := <-observed:
+		t.Fatalf("second writer entered while CAS write was blocked: %+v", got)
+	case <-time.After(10 * time.Millisecond):
+		// The second writer is queued on the Editor lock before the CAS is
+		// allowed to publish its atomic rename.
+	}
+	close(blockingFS.release)
+	if err := <-casDone; err != nil {
+		t.Fatal(err)
+	}
+	got := <-observed
+	if !got.dirty || !got.pending || got.pokes != 1 {
+		t.Fatalf("next writer observed reconcile publication %+v, want dirty, pending, and one poke", got)
+	}
+}
+
+func TestControllerConfigMutationRollbackCannotEraseConcurrentCAS(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "city.toml")
+	content := []byte(`[workspace]
+name = "test-city"
+
+[providers.test]
+command = "true"
+
+[[agent]]
+name = "worker"
+provider = "test"
+`)
+	if err := os.WriteFile(cityPath, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", dir)
+	cs.pokeCh = make(chan struct{}, 2)
+	cs.configDirty = &atomic.Bool{}
+	initial, err := cs.editor.AgentSuspension("worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Writer B has already captured S0 when its callback starts. It then waits
+	// before making a change whose refresh will fail and restore S0.
+	snapshotTaken := make(chan struct{})
+	allowFailure := make(chan struct{})
+	bDone := make(chan error, 1)
+	go func() {
+		bDone <- cs.mutateAndPoke(func() error {
+			close(snapshotTaken)
+			<-allowFailure
+			return os.WriteFile(cityPath, []byte("["), 0o644)
+		})
+	}()
+	<-snapshotTaken
+
+	// CAS A must wait at the outer mutation boundary. Without that boundary it
+	// can commit here, after B's S0 snapshot, and B's rollback erases A while A
+	// has already returned success.
+	aStarted := make(chan struct{})
+	aDone := make(chan error, 1)
+	go func() {
+		close(aStarted)
+		_, _, setErr := cs.SetAgentSuspendedIf("worker", initial.Token, true)
+		aDone <- setErr
+	}()
+	<-aStarted
+	select {
+	case err := <-aDone:
+		t.Fatalf("CAS interleaved after another writer's rollback snapshot: %v", err)
+	case <-time.After(10 * time.Millisecond):
+	}
+
+	close(allowFailure)
+	if err := <-bDone; err == nil || !strings.Contains(err.Error(), "refreshing updated city config") {
+		t.Fatalf("writer B error = %v, want injected refresh failure", err)
+	}
+	if err := <-aDone; err != nil {
+		t.Fatalf("CAS after rollback: %v", err)
+	}
+	final, err := cs.editor.AgentSuspension("worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !final.Suspended || final.Token == initial.Token {
+		t.Fatalf("final state = %+v, want committed CAS after B rollback", final)
+	}
+}
+
+func TestControllerRuntimeUpdateCannotSwapPreCASSnapshotAfterRevisionCheck(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "city.toml")
+	content := []byte(`[workspace]
+name = "test-city"
+
+[providers.test]
+command = "true"
+
+[[agent]]
+name = "worker"
+provider = "test"
+`)
+	if err := os.WriteFile(cityPath, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	initialCfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := newControllerState(context.Background(), initialCfg, runtime.NewFake(), events.NewFake(), "test-city", dir)
+	cs.pokeCh = make(chan struct{}, 1)
+	cs.configDirty = &atomic.Bool{}
+	preCAS, preCASRevision, err := cs.loadCurrentConfigSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialState, err := cs.editor.AgentSuspension("worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	revisionAccepted := make(chan struct{})
+	allowRuntimeSwap := make(chan struct{})
+	cs.runtimeUpdateAfterRevisionCheck = func() {
+		close(revisionAccepted)
+		<-allowRuntimeSwap
+	}
+	runtimeDone := make(chan struct{})
+	go func() {
+		cs.updateFromRuntime(preCAS, runtime.NewFake(), preCASRevision)
+		close(runtimeDone)
+	}()
+	<-revisionAccepted
+
+	casStarted := make(chan struct{})
+	casDone := make(chan error, 1)
+	go func() {
+		close(casStarted)
+		_, _, setErr := cs.SetAgentSuspendedIf("worker", initialState.Token, true)
+		casDone <- setErr
+	}()
+	<-casStarted
+	select {
+	case err := <-casDone:
+		t.Fatalf("CAS entered after runtime revision check but before its swap: %v", err)
+	case <-time.After(10 * time.Millisecond):
+	}
+
+	close(allowRuntimeSwap)
+	<-runtimeDone
+	if err := <-casDone; err != nil {
+		t.Fatal(err)
+	}
+	got := cs.Config()
+	for _, agent := range got.Agents {
+		if agent.QualifiedName() == "worker" {
+			if !agent.Suspended {
+				t.Fatal("accepted pre-CAS runtime snapshot overwrote the committed suspension")
+			}
+			return
+		}
+	}
+	t.Fatal("worker missing from controller config after CAS")
+}
+
+func TestRestoreConfigMutationSnapshotRefreshesAfterRestoreFailure(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "city.toml")
+	original := []byte(`[workspace]
+name = "test-city"
+
+[providers.test]
+command = "true"
+
+[[agent]]
+name = "worker"
+provider = "test"
+`)
+	if err := os.WriteFile(cityPath, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", dir)
+
+	updated := append(append([]byte(nil), original...), []byte("suspended = true\n")...)
+	if err := os.WriteFile(cityPath, updated, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	badRestorePath := filepath.Join(dir, "missing-parent", "unrestorable.toml")
+	snapshot := &configMutationSnapshot{
+		files:   map[string][]byte{badRestorePath: []byte("old")},
+		existed: map[string]bool{badRestorePath: true},
+	}
+	err = cs.restoreAndRefreshConfigMutationSnapshot(snapshot)
+	if err == nil || !strings.Contains(err.Error(), "restoring config mutation snapshot") {
+		t.Fatalf("rollback error = %v, want restore failure", err)
+	}
+	state, err := cs.AgentSuspension("worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.Suspended {
+		t.Fatal("controller snapshot did not refresh to the loadable disk state after restore failure")
 	}
 }
 

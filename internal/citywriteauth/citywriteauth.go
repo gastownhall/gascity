@@ -20,6 +20,10 @@ import (
 // single-source it rather than repeating the literal.
 const AudienceCityWrite = "gc-city-write"
 
+// AudienceCityWriteV2 is the tenancy-bound audience. A verifier configured
+// with a CID accepts this audience and requires the grant's CID to match.
+const AudienceCityWriteV2 = "gc-city-write.v2"
+
 // Grant is the claim set carried by an X-GC-City-Write token: a single-use,
 // request-bound authorization for exactly one city mutation, minted by a
 // configured trusted authority and verified here.

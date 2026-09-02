@@ -96,6 +96,55 @@ func TestMint_ProducesVerifiableGrant(t *testing.T) {
 	}
 }
 
+func TestMintV2ProducesCIDBoundGrant(t *testing.T) {
+	pub, priv := testKey(t)
+	info := infoFor("PUT", "/v0/city/mc/agent-suspension/worker", "", []byte(`{"expected_token":"x","suspended":false}`))
+	info.Aud = citywriteauth.AudienceCityWriteV2
+	info.CID = "city_mc"
+	p := baseParams(priv)
+	p.Aud = citywriteauth.AudienceCityWriteV2
+	p.CID = "city_mc"
+	token, err := mint(p, info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := citywriteauth.New(citywriteauth.Options{
+		Aud: citywriteauth.AudienceCityWriteV2, CID: "city_mc",
+		Keys: map[string]ed25519.PublicKey{"k1": pub}, MaxTTL: 2 * time.Minute,
+		Skew: 30 * time.Second, Now: func() time.Time { return time.Date(2026, 7, 7, 12, 0, 30, 0, time.UTC) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := v.Verify(token, citywriteauth.Expect{City: "mc", ReqDigest: info.ReqDigest})
+	if err != nil {
+		t.Fatalf("v2 CID grant did not verify: %v", err)
+	}
+	if g.Aud != citywriteauth.AudienceCityWriteV2 || g.CID != "city_mc" {
+		t.Fatalf("claims = %+v", g)
+	}
+}
+
+func TestMintCIDRequiresV2Audience(t *testing.T) {
+	_, priv := testKey(t)
+	p := baseParams(priv)
+	p.CID = "city_mc"
+	if _, err := mint(p, infoFor("POST", "/v0/city/mc/sling", "", []byte(`{}`))); err == nil || !strings.Contains(err.Error(), "requires --aud") {
+		t.Fatalf("legacy CID mint error = %v", err)
+	}
+}
+
+func TestMintRefusesCIDMismatch(t *testing.T) {
+	_, priv := testKey(t)
+	info := infoFor("POST", "/v0/city/mc/sling", "", []byte(`{}`))
+	info.Aud, info.CID = citywriteauth.AudienceCityWriteV2, "city_other"
+	p := baseParams(priv)
+	p.Aud, p.CID = citywriteauth.AudienceCityWriteV2, "city_mc"
+	if _, err := mint(p, info); err == nil || !strings.Contains(err.Error(), "cid") {
+		t.Fatalf("CID mismatch error = %v", err)
+	}
+}
+
 // A query-bearing mutation round-trips: the grant binds the query, so the server
 // verifying with the same digest accepts it and a query-less digest would not.
 func TestMint_QueryBearingRoundTrip(t *testing.T) {

@@ -80,27 +80,38 @@ type controllerState struct {
 	// built from it there. Nil for every city that authors no [storage] section,
 	// and for an API state built without a runtime — both route every class at
 	// the work store.
-	storageRoutes          *storageRoutes
-	cityBeadsDiagnostic    *beads.BeadsDiagnostic
-	cityMailProv           mail.Provider // city-level mail provider (all mail is city-scoped)
-	eventProv              events.Provider
-	usageSink              usage.Sink
-	editor                 *configedit.Editor
-	cityName               string
-	cityPath               string
-	version                string
-	startedAt              time.Time
-	storeMetadataSignature string
-	ct                     crashTracker  // nil if crash tracking disabled
-	pokeCh                 chan struct{} // nil when poke is not available; triggers immediate reconciler tick
-	configDirty            *atomic.Bool  // optional dirty flag shared with the reconciler reload path
-	services               workspacesvc.Registry
-	extmsgSvc              *extmsg.Services
-	adapterReg             *extmsg.AdapterRegistry
-	maintenanceLoop        *supervisor.StoreMaintenanceLoop // nil when [maintenance.dolt] enabled=false
-	updateMu               sync.Mutex                       // serializes rebuild+swap so stale reloads cannot overtake newer mutations
-	beadEventStartSeq      uint64
-	beadEventStartSeqOK    bool // false when LatestSeq errored at construction; 0+true = genuinely empty log
+	storageRoutes       *storageRoutes
+	cityBeadsDiagnostic *beads.BeadsDiagnostic
+	cityMailProv        mail.Provider // city-level mail provider (all mail is city-scoped)
+	eventProv           events.Provider
+	usageSink           usage.Sink
+	editor              *configedit.Editor
+	// configMutationMu is the outer per-city config transaction boundary. It
+	// covers snapshot/prior reads through mutation, refresh, rollback, and
+	// pending/dirty/poke publication. Always acquire it before Editor.mu; the
+	// reverse order is forbidden. This prevents one writer's rollback snapshot
+	// from erasing a different writer that committed in the former gap between
+	// captureConfigMutationSnapshot and the Editor lock.
+	configMutationMu sync.Mutex
+	// runtimeUpdateAfterRevisionCheck is a test-only interleaving seam. When
+	// non-nil it runs after a runtime snapshot's revision is accepted but before
+	// the controller swap, while configMutationMu is still held.
+	runtimeUpdateAfterRevisionCheck func()
+	cityName                        string
+	cityPath                        string
+	version                         string
+	startedAt                       time.Time
+	storeMetadataSignature          string
+	ct                              crashTracker  // nil if crash tracking disabled
+	pokeCh                          chan struct{} // nil when poke is not available; triggers immediate reconciler tick
+	configDirty                     *atomic.Bool  // optional dirty flag shared with the reconciler reload path
+	services                        workspacesvc.Registry
+	extmsgSvc                       *extmsg.Services
+	adapterReg                      *extmsg.AdapterRegistry
+	maintenanceLoop                 *supervisor.StoreMaintenanceLoop // nil when [maintenance.dolt] enabled=false
+	updateMu                        sync.Mutex                       // serializes rebuild+swap so stale reloads cannot overtake newer mutations
+	beadEventStartSeq               uint64
+	beadEventStartSeqOK             bool // false when LatestSeq errored at construction; 0+true = genuinely empty log
 
 	// completionsDeltaIndex is the tick delta pass's warm completion-fact
 	// idempotency record: loaded from the journal once, then kept current by the
@@ -1067,23 +1078,31 @@ func storePointerKey(store beads.Store) (uintptr, bool) {
 }
 
 func (cs *controllerState) updateFromRuntime(cfg *config.City, sp runtime.Provider, revision string) {
+	cs.configMutationMu.Lock()
+	defer cs.configMutationMu.Unlock()
+	cs.updateFromRuntimeLocked(cfg, sp, revision)
+}
+
+// updateFromRuntimeLocked applies a reload snapshot while configMutationMu is
+// held. CityRuntime uses this form because it holds the same boundary across
+// its entire load/validate/runtime-apply transaction; the public wrapper above
+// is for callers that only hand off an already-built snapshot.
+func (cs *controllerState) updateFromRuntimeLocked(cfg *config.City, sp runtime.Provider, revision string) {
+	matchesPending := false
 	if cs.configMutationPending.Load() {
-		matchesPending, stale := cs.runtimeUpdateStatusForPendingMutation(revision)
+		var stale bool
+		matchesPending, stale = cs.runtimeUpdateStatusForPendingMutation(revision)
 		if stale {
 			return
 		}
-		if matchesPending {
-			if cs.runtimeUpdateDropsPendingRigs(cfg) {
-				return
-			}
-			if cs.runtimeUpdateCanReuseCurrentStores(cfg) {
-				cs.updateConfigAndProviderOnly(cfg, sp)
-				cs.clearConfigMutationPending()
-				return
-			}
+		if matchesPending && cs.runtimeUpdateDropsPendingRigs(cfg) {
+			return
 		}
 	} else if cs.runtimeUpdateRevisionIsStale(revision) {
 		return
+	}
+	if cs.runtimeUpdateAfterRevisionCheck != nil {
+		cs.runtimeUpdateAfterRevisionCheck()
 	}
 	if cs.runtimeUpdateCanReuseCurrentStores(cfg) {
 		cs.updateConfigAndProviderOnly(cfg, sp)
@@ -1794,6 +1813,8 @@ func (cs *controllerState) DisableOrder(name, rig string) error {
 // shared lock keeps concurrent config writers from interleaving and losing an
 // update or desyncing the manifest and lockfile.
 func (cs *controllerState) SerializeConfigWrite(fn func() error) error {
+	cs.configMutationMu.Lock()
+	defer cs.configMutationMu.Unlock()
 	return cs.editor.Do(fn)
 }
 
@@ -1812,6 +1833,63 @@ func (cs *controllerState) ResumeAgent(name string) error {
 	return cs.mutateAndPoke(func() error {
 		return cs.editor.ResumeAgent(name)
 	})
+}
+
+func suspensionAPIState(state configedit.AgentSuspensionState) api.AgentSuspensionState {
+	return api.AgentSuspensionState{Suspended: state.Suspended, Token: state.Token}
+}
+
+// AgentSuspension returns the exact durable desired-state source token.
+func (cs *controllerState) AgentSuspension(name string) (api.AgentSuspensionState, error) {
+	state, err := cs.editor.AgentSuspension(name)
+	return suspensionAPIState(state), err
+}
+
+// SetAgentSuspendedIf performs a conditional desired-state mutation and pokes
+// reconciliation only when the durable state changed.
+func (cs *controllerState) SetAgentSuspendedIf(name, expectedToken string, desired bool) (api.AgentSuspensionState, api.AgentSuspensionState, error) {
+	cs.configMutationMu.Lock()
+	defer cs.configMutationMu.Unlock()
+
+	var before, after configedit.AgentSuspensionState
+	var snapshot *configMutationSnapshot
+	var err error
+	before, after, err = cs.editor.SetAgentSuspendedIfTransaction(
+		name, expectedToken, desired,
+		func() error {
+			if cs.cityPath == "" {
+				return nil
+			}
+			var captureErr error
+			snapshot, captureErr = captureConfigMutationSnapshot(cs.cityPath)
+			if captureErr != nil {
+				return fmt.Errorf("snapshotting current city config: %w", captureErr)
+			}
+			return nil
+		},
+		func(_, _ configedit.AgentSuspensionState) error {
+			revision, refreshErr := cs.refreshConfigSnapshot()
+			if refreshErr != nil {
+				return refreshErr
+			}
+			// Publish every controller-visible side effect before releasing the
+			// Editor lock. Otherwise another writer could commit between the
+			// durable CAS write and its pending/dirty/poke publication.
+			cs.markConfigMutationPending(revision)
+			if cs.configDirty != nil {
+				cs.configDirty.Store(true)
+			}
+			cs.Poke()
+			return nil
+		},
+		func() error {
+			if snapshot == nil {
+				return nil
+			}
+			return cs.restoreAndRefreshConfigMutationSnapshot(snapshot)
+		},
+	)
+	return suspensionAPIState(before), suspensionAPIState(after), err
 }
 
 // SuspendRig writes suspended=true on the rig in city.toml.
@@ -1877,11 +1955,9 @@ func (cs *controllerState) FormulaSource(name string) ([]byte, bool, error) {
 // never silent. If a prior source exists but cannot be read, the mutation aborts
 // before any write, since rollback would have no basis to restore it.
 func (cs *controllerState) UpsertFormula(name string, content []byte) error {
-	// The read-prior -> write -> refresh -> rollback sequence is not atomic across
-	// concurrent editor ops (the pre-existing mutateAndPoke rollback race class):
-	// a same-name racing upsert could see this rollback's delete-on-no-prior erase
-	// its committed file. Very low risk on a single-operator control plane; a
-	// coarse per-city mutation lock is deferred as out of scope for this change.
+	cs.configMutationMu.Lock()
+	defer cs.configMutationMu.Unlock()
+
 	prior, hadPrior, readErr := cs.editor.FormulaSource(name)
 	if readErr != nil {
 		// FormulaSource reports a missing source as (nil, false, nil); a non-nil
@@ -1890,10 +1966,7 @@ func (cs *controllerState) UpsertFormula(name string, content []byte) error {
 		// restorable copy, so abort before mutating.
 		return fmt.Errorf("reading prior formula %q before upsert: %w", name, readErr)
 	}
-	err := cs.mutateAndPoke(func() error {
-		return cs.editor.UpsertFormula(name, content)
-	})
-	if err != nil {
+	rollback := func() error {
 		var rollbackErr error
 		if hadPrior {
 			rollbackErr = cs.editor.UpsertFormula(name, prior)
@@ -1910,10 +1983,13 @@ func (cs *controllerState) UpsertFormula(name string, content []byte) error {
 			}
 		}
 		if rollbackErr != nil {
-			return errors.Join(err, fmt.Errorf("rolling back formula %q write: %w", name, rollbackErr))
+			rollbackErr = fmt.Errorf("rolling back formula %q write: %w", name, rollbackErr)
 		}
+		return rollbackErr
 	}
-	return err
+	return cs.mutateAndPokeWithRollbackLocked(func() error {
+		return cs.editor.UpsertFormula(name, content)
+	}, rollback)
 }
 
 // DeleteFormula removes a city-local formula source and refreshes state. A failed
@@ -1922,19 +1998,24 @@ func (cs *controllerState) UpsertFormula(name string, content []byte) error {
 // be read, the delete aborts before mutating, since rollback would have no basis
 // to restore it.
 func (cs *controllerState) DeleteFormula(name string) error {
+	cs.configMutationMu.Lock()
+	defer cs.configMutationMu.Unlock()
+
 	prior, hadPrior, readErr := cs.editor.FormulaSource(name)
 	if readErr != nil {
 		return fmt.Errorf("reading prior formula %q before delete: %w", name, readErr)
 	}
-	err := cs.mutateAndPoke(func() error {
-		return cs.editor.DeleteFormula(name)
-	})
-	if err != nil && hadPrior {
-		if rollbackErr := cs.editor.UpsertFormula(name, prior); rollbackErr != nil {
-			return errors.Join(err, fmt.Errorf("rolling back formula %q delete: %w", name, rollbackErr))
+	rollback := func() error {
+		if hadPrior {
+			if restoreErr := cs.editor.UpsertFormula(name, prior); restoreErr != nil {
+				return fmt.Errorf("rolling back formula %q delete: %w", name, restoreErr)
+			}
 		}
+		return nil
 	}
-	return err
+	return cs.mutateAndPokeWithRollbackLocked(func() error {
+		return cs.editor.DeleteFormula(name)
+	}, rollback)
 }
 
 // WaitForAgentVisibility blocks until findAgent in the controller's hot-reloaded
@@ -2066,11 +2147,11 @@ func realPathForContainment(target string) (string, error) {
 //
 // Provision runs AS the mutateAndPoke mutate closure: a mid-provision failure
 // rolls back through Provision's own topology snapshot (mutateAndPoke returns
-// the mutate error without touching its config snapshot), while a post-write
-// refresh failure rolls back through mutateAndPoke's config snapshot. The two
-// restore layers never overlap. The whole handshake runs under
-// SerializeConfigWrite so a concurrent config edit cannot interleave with
-// Provision's read-modify-append of city.toml.
+// the mutate error without restoring its generic config snapshot), while a
+// post-write refresh failure rolls back through mutateAndPoke's config
+// snapshot. The two restore layers never overlap. The whole handshake runs
+// under configMutationMu and Editor.mu so a concurrent config edit cannot
+// interleave with Provision's read-modify-append of city.toml.
 func (cs *controllerState) CreateRig(r config.Rig) error {
 	rigPath := strings.TrimSpace(r.Path)
 	if rigPath == "" {
@@ -2422,7 +2503,7 @@ func (cs *controllerState) sweepOrphanRigProvisions(ctx context.Context) error {
 }
 
 // provisionRigLocked runs the config-write half of a rig add under the per-city
-// guard (SerializeConfigWrite → mutateAndPoke). r.Path must already be resolved
+// outer mutation guard and then Editor.mu. r.Path must already be resolved
 // absolute. onStep, when non-nil, wires rig.Deps.OnStep so the caller can
 // project provisioning progress onto events; nil onStep produces the exact
 // git-blind behavior CreateRig has always had. It returns the provisioned rig.
@@ -2441,8 +2522,10 @@ func (cs *controllerState) provisionRigLocked(r config.Rig, onStep func(step, de
 	}
 
 	var provisionedRig config.Rig
-	if err := cs.SerializeConfigWrite(func() error {
-		return cs.mutateAndPoke(func() error {
+	cs.configMutationMu.Lock()
+	defer cs.configMutationMu.Unlock()
+	if err := cs.editor.Do(func() error {
+		return cs.mutateAndPokeLocked(func() error {
 			var err error
 			provisionedRig, err = cs.provisionRigWrite(r, depOnStep)
 			return err
@@ -2481,8 +2564,8 @@ func rigConfigHasRigNamed(cfg *config.City, name string) bool {
 }
 
 // provisionRigWrite performs the config-mutating half of a git_url rig add. It
-// MUST run inside cs.SerializeConfigWrite → cs.mutateAndPoke (the per-city write
-// lock plus refresh/poke): it loads the raw for-edit config, re-asserts the
+// MUST run inside configMutationMu → Editor.mu → mutateAndPokeLocked (the
+// per-city write lock plus refresh/poke): it loads the raw for-edit config, re-asserts the
 // duplicate-name guard authoritatively under the lock, registers the city dolt
 // config for the beads-init path, and runs rig.Provision. A best-effort
 // PostProvision failure is logged, not returned, so mutateAndPoke still commits
@@ -2843,7 +2926,72 @@ func (s *configMutationSnapshot) restore() error {
 	return restoreErr
 }
 
+// restoreAndRefreshConfigMutationSnapshot always attempts both halves of
+// rollback. A partial filesystem restore must not skip the coherence refresh:
+// the surviving on-disk state may still be loadable, in which case controller
+// memory must follow it. When either half fails, preserve both diagnoses.
+func (cs *controllerState) restoreAndRefreshConfigMutationSnapshot(snapshot *configMutationSnapshot) error {
+	if snapshot == nil {
+		return nil
+	}
+	restoreErr := snapshot.restore()
+	_, refreshErr := cs.refreshConfigSnapshot()
+	if restoreErr != nil {
+		restoreErr = fmt.Errorf("restoring config mutation snapshot: %w", restoreErr)
+	}
+	if refreshErr != nil {
+		refreshErr = fmt.Errorf("refreshing config after rollback: %w", refreshErr)
+	}
+	return errors.Join(restoreErr, refreshErr)
+}
+
 func (cs *controllerState) mutateAndPoke(mutate func() error) error {
+	cs.configMutationMu.Lock()
+	defer cs.configMutationMu.Unlock()
+	return cs.mutateAndPokeLocked(mutate)
+}
+
+// mutateAndPokeLocked is mutateAndPoke for callers that already hold
+// configMutationMu. It must not be called without that lock.
+func (cs *controllerState) mutateAndPokeLocked(mutate func() error) error {
+	return cs.mutateAndPokeWithRollbackLocked(mutate, nil)
+}
+
+// mutateAndPokeWithRollbackLocked is mutateAndPokeLocked with an additional
+// rollback for durable state outside the generic city snapshot (currently
+// formula source files). The caller holds configMutationMu across the prior
+// read, mutation, every rollback component, any coherence refresh, and
+// publication.
+func (cs *controllerState) mutateAndPokeWithRollbackLocked(mutate func() error, rollback func() error) error {
+	return cs.mutateAndPokeChangedWithRollbackLocked(func() (bool, error) {
+		return true, mutate()
+	}, rollback)
+}
+
+// mutateAndPokeChanged refreshes and wakes reconciliation only when mutate
+// reports that durable configuration changed.
+func (cs *controllerState) mutateAndPokeChanged(mutate func() (bool, error)) error {
+	cs.configMutationMu.Lock()
+	defer cs.configMutationMu.Unlock()
+	return cs.mutateAndPokeChangedLocked(mutate)
+}
+
+// mutateAndPokeChangedLocked performs the complete snapshot-to-publication
+// transaction while its caller holds configMutationMu.
+func (cs *controllerState) mutateAndPokeChangedLocked(mutate func() (bool, error)) error {
+	return cs.mutateAndPokeChangedWithRollbackLocked(mutate, nil)
+}
+
+// mutateAndPokeChangedWithRollbackLocked performs the complete
+// snapshot-to-publication transaction while its caller holds configMutationMu.
+// If a mutation or its validation refresh fails, all rollback components are
+// attempted. A fully successful rollback leaves the existing in-memory config
+// pointer intact; a partial rollback triggers one best-effort refresh so memory
+// follows whatever coherent state survived on disk.
+func (cs *controllerState) mutateAndPokeChangedWithRollbackLocked(
+	mutate func() (bool, error),
+	rollback func() error,
+) error {
 	var snapshot *configMutationSnapshot
 	if cs.cityPath != "" {
 		var err error
@@ -2852,16 +3000,27 @@ func (cs *controllerState) mutateAndPoke(mutate func() error) error {
 			return fmt.Errorf("snapshotting current city config: %w", err)
 		}
 	}
-	if err := mutate(); err != nil {
+	changed, err := mutate()
+	if err != nil {
+		// A mutate error is not proof that the generic city snapshot changed.
+		// Editor validation/not-found paths are pre-write, and restoring that
+		// snapshot here would rewrite city.toml and remove/recreate the agents
+		// tree for a no-write error. Only the operation-specific rollback knows
+		// whether its own out-of-snapshot state may need repair. The generic
+		// snapshot is reserved for a successful changed mutation whose
+		// subsequent coherence refresh fails below.
+		if rollbackErr := cs.rollbackConfigMutation(nil, rollback); rollbackErr != nil {
+			return errors.Join(err, rollbackErr)
+		}
 		return err
+	}
+	if !changed {
+		return nil
 	}
 	revision, err := cs.refreshConfigSnapshot()
 	if err != nil {
-		if snapshot != nil {
-			if restoreErr := snapshot.restore(); restoreErr != nil {
-				restoreFailure := fmt.Errorf("restoring previous city config: %w", restoreErr)
-				return fmt.Errorf("refreshing updated city config: %w", errors.Join(err, restoreFailure))
-			}
+		if rollbackErr := cs.rollbackConfigMutation(snapshot, rollback); rollbackErr != nil {
+			return fmt.Errorf("refreshing updated city config: %w", errors.Join(err, rollbackErr))
 		}
 		return fmt.Errorf("refreshing updated city config: %w", err)
 	}
@@ -2871,6 +3030,31 @@ func (cs *controllerState) mutateAndPoke(mutate func() error) error {
 	}
 	cs.Poke()
 	return nil
+}
+
+// rollbackConfigMutation attempts the generic city snapshot and any
+// operation-specific rollback independently. If either is incomplete, it then
+// attempts a refresh even after the failure so controller memory can converge
+// on the surviving on-disk state. Errors from all phases are retained.
+func (cs *controllerState) rollbackConfigMutation(snapshot *configMutationSnapshot, rollback func() error) error {
+	var snapshotErr error
+	if snapshot != nil {
+		if err := snapshot.restore(); err != nil {
+			snapshotErr = fmt.Errorf("restoring previous city config: %w", err)
+		}
+	}
+	var operationErr error
+	if rollback != nil {
+		operationErr = rollback()
+	}
+	if snapshotErr == nil && operationErr == nil {
+		return nil
+	}
+	_, refreshErr := cs.refreshConfigSnapshot()
+	if refreshErr != nil {
+		refreshErr = fmt.Errorf("refreshing config after partial rollback: %w", refreshErr)
+	}
+	return errors.Join(snapshotErr, operationErr, refreshErr)
 }
 
 func (cs *controllerState) refreshConfigSnapshot() (string, error) {

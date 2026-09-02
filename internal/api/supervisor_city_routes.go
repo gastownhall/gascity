@@ -62,6 +62,15 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityGet(sm, "/agent/{base}/output", (*Server).humaHandleAgentOutput, errorStatuses(http.StatusNotFound))
 	cityGet(sm, "/agent/{dir}/{base}", (*Server).humaHandleAgentQualified, errorStatuses(http.StatusNotFound))
 	cityGet(sm, "/agent/{base}", (*Server).humaHandleAgent, errorStatuses(http.StatusNotFound))
+	// Conditional suspension has its own namespace. A suffix route such as
+	// /agent/{base}/suspension is ambiguous with the established qualified-agent
+	// detail route /agent/{dir}/{base} for the valid agent name
+	// "{dir}/suspension"; chi's literal-segment precedence would make that agent
+	// impossible to read. Different path depths are unambiguous here.
+	cityGet(sm, "/agent-suspension/{dir}/{base}", (*Server).humaHandleAgentSuspensionQualified, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusNotImplemented))
+	cityGet(sm, "/agent-suspension/{base}", (*Server).humaHandleAgentSuspension, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusNotImplemented))
+	cityPut(sm, "/agent-suspension/{dir}/{base}", (*Server).humaHandleAgentSuspensionSetQualified, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusRequestEntityTooLarge, http.StatusNotImplemented))
+	cityPut(sm, "/agent-suspension/{base}", (*Server).humaHandleAgentSuspensionSet, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusRequestEntityTooLarge, http.StatusNotImplemented))
 	cityRegister(sm, huma.Operation{
 		OperationID:   "create-agent",
 		Method:        http.MethodPost,

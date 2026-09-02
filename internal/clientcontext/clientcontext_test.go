@@ -253,3 +253,28 @@ func TestFileValidate(t *testing.T) {
 		}
 	})
 }
+
+func TestContextGrantAudienceCIDValidation(t *testing.T) {
+	base := Context{Name: "prod", URL: "https://example.com", GrantCommand: "mint"}
+	for _, tc := range []struct {
+		name, aud, cid string
+		wantErr        bool
+	}{
+		{"legacy default", "", "", false},
+		{"legacy explicit", "gc-city-write", "", false},
+		{"scoped", "gc-city-write.v2", "deployment-42", false},
+		{"scoped missing cid", "gc-city-write.v2", "", true},
+		{"cid with legacy", "gc-city-write", "deployment-42", true},
+		{"invented v1", "gc-city-write.v1", "", true},
+		{"cid without audience", "", "deployment-42", true},
+		{"unknown audience", "other", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := base
+			c.GrantAudience, c.GrantCID = tc.aud, tc.cid
+			if got := c.Validate(); (got != nil) != tc.wantErr {
+				t.Fatalf("Validate() error = %v, wantErr %v", got, tc.wantErr)
+			}
+		})
+	}
+}

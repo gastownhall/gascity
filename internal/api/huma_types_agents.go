@@ -130,6 +130,68 @@ type AgentActionQualifiedInput struct {
 	Action string `path:"action" enum:"suspend,resume" doc:"Action to perform."`
 }
 
+// AgentSuspensionInput reads the conditional suspension state of an agent.
+type AgentSuspensionInput struct {
+	CityScope
+	Name string `path:"base" doc:"Agent name (unqualified)."`
+}
+
+// AgentSuspensionQualifiedInput is the rig-qualified read form.
+type AgentSuspensionQualifiedInput struct {
+	CityScope
+	Dir  string `path:"dir" doc:"Agent directory (rig name)."`
+	Base string `path:"base" doc:"Agent base name."`
+}
+
+// QualifiedName returns the canonical agent identity.
+func (i *AgentSuspensionQualifiedInput) QualifiedName() string {
+	return joinAgentQualifiedName(i.Dir, i.Base)
+}
+
+// AgentSuspensionSetInput conditionally sets desired suspension state.
+type AgentSuspensionSetInput struct {
+	CityScope
+	Name string `path:"base" doc:"Agent name (unqualified)."`
+	Body struct {
+		ExpectedToken string `json:"expected_token" minLength:"64" maxLength:"64" pattern:"^[0-9a-f]{64}$" doc:"Server-issued exact target-state/config-source token."`
+		Suspended     bool   `json:"suspended" doc:"Desired durable suspension state."`
+	}
+}
+
+// AgentSuspensionSetQualifiedInput is the rig-qualified mutation form.
+type AgentSuspensionSetQualifiedInput struct {
+	CityScope
+	Dir  string `path:"dir" doc:"Agent directory (rig name)."`
+	Base string `path:"base" doc:"Agent base name."`
+	Body struct {
+		ExpectedToken string `json:"expected_token" minLength:"64" maxLength:"64" pattern:"^[0-9a-f]{64}$" doc:"Server-issued exact target-state/config-source token."`
+		Suspended     bool   `json:"suspended" doc:"Desired durable suspension state."`
+	}
+}
+
+// QualifiedName returns the canonical agent identity.
+func (i *AgentSuspensionSetQualifiedInput) QualifiedName() string {
+	return joinAgentQualifiedName(i.Dir, i.Base)
+}
+
+// AgentSuspensionOutput is the current server-issued desired-state snapshot.
+type AgentSuspensionOutput struct{ Body AgentSuspensionStateBody }
+
+// AgentSuspensionStateBody is the typed suspension-token response.
+type AgentSuspensionStateBody struct {
+	Suspended bool   `json:"suspended"`
+	Token     string `json:"token" minLength:"64" maxLength:"64" pattern:"^[0-9a-f]{64}$" doc:"Server-issued exact target-state/config-source token."`
+}
+
+// AgentSuspensionSetOutput proves the exact before and after states.
+type AgentSuspensionSetOutput struct {
+	Body struct {
+		Status string                   `json:"status" enum:"updated,already_desired"`
+		Before AgentSuspensionStateBody `json:"before"`
+		After  AgentSuspensionStateBody `json:"after"`
+	}
+}
+
 // QualifiedName joins dir and base into a canonical agent name.
 func (i *AgentActionQualifiedInput) QualifiedName() string {
 	return joinAgentQualifiedName(i.Dir, i.Base)

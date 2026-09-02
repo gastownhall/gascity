@@ -41,7 +41,7 @@ const (
 	// that enforces cid (this one) may expect the v2 audience. There is NO env
 	// override for the audience and none may be added: a verifier code deploy
 	// IS the forcing function.
-	writeAuthAudience = "gc-city-write.v2"
+	writeAuthAudience = citywriteauth.AudienceCityWriteV2
 	// writeAuthLegacyAudience is the pre-cid audience, still accepted so
 	// grants minted by an operator's own v1 authority keep verifying — but
 	// ONLY on an untenanted deployment. On a tenancy-scoped deployment

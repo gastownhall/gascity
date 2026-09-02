@@ -156,6 +156,10 @@ type CityRuntime struct {
 	rec events.Recorder
 	cs  *controllerState // nil when controller-managed bead stores are unavailable
 	svc *workspacesvc.Manager
+	// reloadAfterLoad is a test-only interleaving seam. It runs after a config
+	// snapshot is loaded and before any runtime component applies it, while the
+	// controller's outer config-mutation lock is held.
+	reloadAfterLoad func()
 
 	poolSessions      map[string]time.Duration
 	poolDeathHandlers map[string]poolDeathInfo
@@ -1948,6 +1952,24 @@ func (cr *CityRuntime) reloadConfigTraced(
 	trace *sessionReconcilerTraceCycle,
 	source reloadSource,
 ) reloadControlReply {
+	if cr.cs != nil {
+		cr.cs.configMutationMu.Lock()
+		defer cr.cs.configMutationMu.Unlock()
+	}
+	return cr.reloadConfigTracedLocked(ctx, lastProviderName, cityRoot, trace, source)
+}
+
+// reloadConfigTracedLocked is the reload implementation. When cr.cs is
+// present, its caller holds configMutationMu from before tryReloadConfig through
+// every CityRuntime and controllerState swap, so no config mutation can commit
+// between loading S0 and installing S0 into provider/pool/order/runtime state.
+func (cr *CityRuntime) reloadConfigTracedLocked(
+	ctx context.Context,
+	lastProviderName *string,
+	cityRoot string,
+	trace *sessionReconcilerTraceCycle,
+	source reloadSource,
+) reloadControlReply {
 	var warnings []string
 	appendWarning := func(message string) {
 		warnings = append(warnings, message)
@@ -1983,6 +2005,9 @@ func (cr *CityRuntime) reloadConfigTraced(
 	for _, warning := range result.Warnings {
 		appendWarning(warning)
 	}
+	if cr.reloadAfterLoad != nil {
+		cr.reloadAfterLoad()
+	}
 	if cr.configRev != "" && result.Revision == cr.configRev {
 		ordersChanged, orderSummary, orderErr := cr.rescanOrderDispatcher(ctx, cityRoot, result.Cfg, "gc reload: order scan", time.Now())
 		if orderErr != nil {
@@ -2000,7 +2025,11 @@ func (cr *CityRuntime) reloadConfigTraced(
 			}
 		}
 		if cr.cs != nil && cr.cs.storeMetadataChanged(result.Cfg) {
-			cr.cs.update(result.Cfg, cr.sp)
+			// result.Cfg was loaded before this branch. Route it through the
+			// revision-fenced controller update so a CAS/config mutation that lands
+			// between load and apply cannot be overwritten by this same-revision
+			// metadata refresh.
+			cr.cs.updateFromRuntimeLocked(result.Cfg, cr.sp, result.Revision)
 			message := fmt.Sprintf("Config reloaded: bead store metadata changed (rev %s)", shortRev(result.Revision))
 			if ordersChanged {
 				message = fmt.Sprintf("Config reloaded: bead store metadata changed; orders reloaded: %s (rev %s)", orderSummary, shortRev(result.Revision))
@@ -2253,7 +2282,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 	cr.demandSnapshot = nil
 
 	if cr.cs != nil {
-		cr.cs.updateFromRuntime(nextCfg, nextSp, result.Revision)
+		cr.cs.updateFromRuntimeLocked(nextCfg, nextSp, result.Revision)
 	}
 	if cr.svc != nil {
 		if err := cr.svc.Reload(); err != nil {

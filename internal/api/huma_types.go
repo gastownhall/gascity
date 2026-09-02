@@ -243,6 +243,8 @@ func mutationError(err error) error {
 		return huma.Error409Conflict(msg)
 	case errors.Is(err, configedit.ErrPackDerived):
 		return huma.Error409Conflict(msg)
+	case errors.Is(err, configedit.ErrPrecondition):
+		return huma.Error409Conflict(msg)
 	case errors.Is(err, configedit.ErrValidation):
 		return huma.Error400BadRequest(msg)
 	default:

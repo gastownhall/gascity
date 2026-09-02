@@ -52,6 +52,7 @@ type GrantInfo struct {
 	Version string `json:"version"`
 	Aud     string `json:"aud"`
 	City    string `json:"city"`
+	CID     string `json:"cid,omitempty"`
 	Method  string `json:"method"`
 	Path    string `json:"path"`
 	// CanonicalQuery MUST be the request's RAW URL query (r.URL.RawQuery) — the

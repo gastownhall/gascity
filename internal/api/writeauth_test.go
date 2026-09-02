@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -538,6 +539,123 @@ func TestSupervisorMux_WriteAuthGuardsMutation(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("mutation without grant: status=%d want 401", resp.StatusCode)
+	}
+}
+
+func TestConditionalSuspensionThroughRealWriteGrant(t *testing.T) {
+	now := time.Now()
+	pub, priv := mustKeypair(t)
+	state := newFakeMutatorState(t)
+	sm := NewSupervisorMux(&stateCityResolver{state: state}, nil, false, "test", "", now).
+		WithAnyHostAllowed().WithWriteAuth(newTestWriteVerifier(t, pub, now))
+	h := sm.Handler()
+	city := state.CityName()
+	getPath := "/v0/city/" + city + "/agent-suspension/mayor"
+	getRec := httptest.NewRecorder()
+	h.ServeHTTP(getRec, httptest.NewRequest(http.MethodGet, getPath, nil))
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("GET status=%d body=%s", getRec.Code, getRec.Body.String())
+	}
+	var current struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(getRec.Body.Bytes(), &current); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(fmt.Sprintf(`{"expected_token":%q,"suspended":true}`, current.Token))
+	putPath := getPath
+	req := httptest.NewRequest(http.MethodPut, putPath, bytes.NewReader(body))
+	req.Header.Set(csrfHeaderName, "1")
+	req.Header.Set(writeAuthHeader, mintToken(t, priv, grantFor(now, city, http.MethodPut, putPath, body, "conditional-suspension-1")))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !state.suspended["mayor"] {
+		t.Fatal("signed conditional request did not set desired state")
+	}
+
+	// A second request needs a fresh grant but the stale source token still
+	// loses with 409 and cannot reverse the completed mutation.
+	body = []byte(fmt.Sprintf(`{"expected_token":%q,"suspended":false}`, current.Token))
+	req = httptest.NewRequest(http.MethodPut, putPath, bytes.NewReader(body))
+	req.Header.Set(csrfHeaderName, "1")
+	req.Header.Set(writeAuthHeader, mintToken(t, priv, grantFor(now, city, http.MethodPut, putPath, body, "conditional-suspension-2")))
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("stale PUT status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !state.suspended["mayor"] {
+		t.Fatal("stale opposite request changed state")
+	}
+
+	fresh, _ := state.AgentSuspension("mayor")
+	var wg sync.WaitGroup
+	codes := make(chan int, 2)
+	for i, desired := range []bool{false, true} {
+		i, desired := i, desired
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			requestBody := []byte(fmt.Sprintf(`{"expected_token":%q,"suspended":%t}`, fresh.Token, desired))
+			request := httptest.NewRequest(http.MethodPut, putPath, bytes.NewReader(requestBody))
+			request.Header.Set(csrfHeaderName, "1")
+			request.Header.Set(writeAuthHeader, mintToken(t, priv, grantFor(now, city, http.MethodPut, putPath, requestBody, fmt.Sprintf("conditional-concurrent-%d", i))))
+			response := httptest.NewRecorder()
+			h.ServeHTTP(response, request)
+			codes <- response.Code
+		}()
+	}
+	wg.Wait()
+	close(codes)
+	for code := range codes {
+		if code != http.StatusOK && code != http.StatusConflict {
+			t.Fatalf("concurrent status=%d", code)
+		}
+	}
+	state.suspensionMu.Lock()
+	finallySuspended := state.suspended["mayor"]
+	state.suspensionMu.Unlock()
+	if finallySuspended {
+		t.Fatal("concurrent opposite requests did not preserve CAS ordering")
+	}
+
+	qualifiedPath := "/v0/city/" + city + "/agent-suspension/myrig/worker"
+	qualifiedGet := httptest.NewRecorder()
+	h.ServeHTTP(qualifiedGet, httptest.NewRequest(http.MethodGet, qualifiedPath, nil))
+	if qualifiedGet.Code != http.StatusOK {
+		t.Fatalf("qualified GET status=%d body=%s", qualifiedGet.Code, qualifiedGet.Body.String())
+	}
+	var qualified struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(qualifiedGet.Body.Bytes(), &qualified); err != nil {
+		t.Fatal(err)
+	}
+	qualifiedBody := []byte(fmt.Sprintf(`{"expected_token":%q,"suspended":true}`, qualified.Token))
+	qualifiedRequest := httptest.NewRequest(http.MethodPut, qualifiedPath, bytes.NewReader(qualifiedBody))
+	qualifiedRequest.Header.Set(csrfHeaderName, "1")
+	qualifiedRequest.Header.Set(writeAuthHeader, mintToken(t, priv, grantFor(now, city, http.MethodPut, qualifiedPath, qualifiedBody, "conditional-qualified-1")))
+	qualifiedResponse := httptest.NewRecorder()
+	h.ServeHTTP(qualifiedResponse, qualifiedRequest)
+	if qualifiedResponse.Code != http.StatusOK {
+		t.Fatalf("qualified PUT status=%d body=%s", qualifiedResponse.Code, qualifiedResponse.Body.String())
+	}
+	unknownState, _ := state.AgentSuspension("myrig/worker")
+	unknownBody := []byte(fmt.Sprintf(`{"expected_token":%q,"suspended":false,"unexpected":true}`, unknownState.Token))
+	unknownRequest := httptest.NewRequest(http.MethodPut, qualifiedPath, bytes.NewReader(unknownBody))
+	unknownRequest.Header.Set(csrfHeaderName, "1")
+	unknownRequest.Header.Set(writeAuthHeader, mintToken(t, priv, grantFor(now, city, http.MethodPut, qualifiedPath, unknownBody, "conditional-qualified-unknown")))
+	unknownResponse := httptest.NewRecorder()
+	h.ServeHTTP(unknownResponse, unknownRequest)
+	if unknownResponse.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("unknown-field PUT status=%d body=%s", unknownResponse.Code, unknownResponse.Body.String())
+	}
+	unknownAfter, _ := state.AgentSuspension("myrig/worker")
+	if !unknownAfter.Suspended || unknownAfter.Token != unknownState.Token {
+		t.Fatal("unknown-field request mutated state")
 	}
 }
 
