@@ -214,17 +214,21 @@ func (p poolExecutionBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, se
 	default:
 		return backstopTarget{}, backstopResolutionHold
 	}
-	if !p.sessionIsQuiet(sessName) {
-		return backstopTarget{}, backstopResolutionHold
-	}
 	claim := claims[0]
-	return backstopTarget{
+	target := backstopTarget{
 		ID:       claim.BeadID,
 		RootID:   claim.RootID,
 		StoreRef: claim.StoreRef,
 		Assignee: claim.Assignee,
 		Store:    claim.Store,
-	}, backstopResolutionOutstanding
+	}
+	if p.sessionIsQuiet(sessName) {
+		return target, backstopResolutionOutstanding
+	}
+	if p.sessionShowsRetryableOverload(sessName) {
+		return target, backstopResolutionImmediate
+	}
+	return backstopTarget{}, backstopResolutionHold
 }
 
 // sessionIsQuiet reports whether the runtime has observed no activity for at
@@ -237,6 +241,14 @@ func (p poolExecutionBackstop) sessionIsQuiet(sessName string) bool {
 		return false
 	}
 	return p.now.Sub(last) >= idleClaimNudgeGrace
+}
+
+// sessionShowsRetryableOverload distinguishes recent activity caused by the
+// provider rejecting a turn from recent activity caused by the agent working.
+// Peek failures are uncertainty and therefore hold through the ordinary path.
+func (p poolExecutionBackstop) sessionShowsRetryableOverload(sessName string) bool {
+	content, err := p.sp.Peek(sessName, rateLimitPeekLines)
+	return err == nil && runtime.ContainsProviderRetryableOverloadScreen(content)
 }
 
 func (p poolExecutionBackstop) state(s beads.Bead, target backstopTarget) (same bool, attempts int, last time.Time) {
