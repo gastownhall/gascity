@@ -11,8 +11,10 @@
 // hyphens, underscores, or dots — no path separators, so the segment stays
 // inert as a path component and as a Map key, and a leading-alphanumeric
 // requirement means it can never resolve to a bare "." or ".." segment.
-// Keeping it in `shared` makes the two sides provably identical; a drift
-// would otherwise be a runtime 404, not a compile error.
+// Keeping it in `shared` makes the character class provably identical on
+// both sides; a drift would otherwise be a runtime 404, not a compile error.
+// The 64-character length cap is enforced Go-side only (dashboardbff.
+// ValidCityName), so an over-long name passes this gate and 404s at /api.
 export const CITY_NAME_RE = /^[a-z0-9][a-z0-9._-]*$/i;
 
 /** True when `cityName` is a safe city path segment + dispatch key. */

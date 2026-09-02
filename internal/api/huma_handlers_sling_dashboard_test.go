@@ -69,6 +69,15 @@ func TestSlingDashboardURLResolver(t *testing.T) {
 			want:       "http://127.0.0.1:8372/city/test-city/runs/gcg-run-1",
 		},
 		{
+			// gascity#5316: the registry grammar allows dots, so a dotted
+			// city name is servable and must mint a link, not be dropped.
+			name:       "dotted city name mints a link",
+			base:       "http://127.0.0.1:8372",
+			cityName:   "bright.lights",
+			workflowID: "gcg-run-1",
+			want:       "http://127.0.0.1:8372/city/bright.lights/runs/gcg-run-1",
+		},
+		{
 			// The registry has no length cap, but dashboardbff.ValidCityName
 			// caps at 64 chars — a registry-valid name can still exceed the
 			// BFF's own limit.
