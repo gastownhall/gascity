@@ -12,7 +12,7 @@ Deploy mode: `remote` (push remote: `fork`)
 | # | Criterion | Result | Evidence |
 |---|---|---|---|
 | 1 | Review PASS present | PASS | Review bead `ga-7hlgl0` is closed with verdict `pass` at the resolved reviewed commit. The review records no blocker or major findings. |
-| 2 | Acceptance criteria met | PASS | `workspaceTrustConfirmKeys` derives cursor movement for Claude, Gemini, and pi layouts, preserves unconditional confirmation for Codex's non-list prompt, and refuses to send keys for unrecognized layouts. Both polling and stream paths use the derived keys. The source bead's four selection cases exist and pass. |
+| 2 | Acceptance criteria met | PASS | `workspaceTrustConfirmKeys` derives cursor movement for Claude, Gemini, and pi layouts, preserves unconditional confirmation for Codex's non-list prompt, and refuses to send keys for unrecognized layouts. Both polling and stream paths use the derived keys. Committed selection cases cover the trust row pre-selected (Enter alone), the cursor on `No, exit` (Down then Enter), the cursor below the trust row (Up then Enter), an unrecognized layout (no keys), a dialog preceded by pane scrollback, and a box-bordered rendering. |
 | 3 | Tests pass | PASS | The documented full local sweep executed 40 unit, process, formula, bead-store, runtime/tmux, and REST jobs. Raw result: 48,304 PASS / 4 FAIL / 208 SKIP. All four failures are pre-existing, tracked, non-diff-owned conditions with mechanism proof and no path overlap; attribution is detailed below. Every diff-owned test passed in both the unit and integration-tagged runtime sweeps. |
 | 4 | No high-severity review findings open | PASS | The reviewer recorded zero blocker/major findings and one informational Gemini hardening observation that is no worse than the pre-existing behavior. Unresolved HIGH findings: 0. |
 | 5 | Final branch is clean | PASS | The reviewed tree was clean before gate generation; the isolated deploy branch was rechecked clean after committing this checklist. Ignored dashboard `node_modules/` and the advisory `.worktree-stale` marker are not candidate changes. |
@@ -39,6 +39,9 @@ Deploy mode: `remote` (push remote: `fork`)
   - `TestWorkspaceTrustConfirmKeysNoExitSelected`: PASS in both sweeps
   - `TestWorkspaceTrustConfirmKeysUnrecognizedLayoutSendsNothing`: PASS in both sweeps
   - `TestAcceptStartupDialogsWithTimeoutRefreshesBudgetOnProgress`: PASS in both sweeps
+  - `TestWorkspaceTrustConfirmKeysIgnoresScrollbackCursor`: PASS in `go test ./internal/runtime/ -run Trust -count=1`
+  - `TestWorkspaceTrustConfirmKeysBorderedLayout`: PASS in `go test ./internal/runtime/ -run Trust -count=1`
+  - `TestWorkspaceTrustConfirmKeysUpwardMovement`: PASS in `go test ./internal/runtime/ -run Trust -count=1`
 - `waiver_ref: none`
 - `ci_lane_run: n/a (no CI configuration change in this diff)`
 - Raw logs: `/var/tmp/gascity-gate-ga-g3ynzz.Kqwxsj`

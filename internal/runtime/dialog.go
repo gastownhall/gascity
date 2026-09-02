@@ -588,7 +588,9 @@ func containsPostUpdateStartupDialog(content string) bool {
 // stale Claude Code build can default the cursor to "No, exit" — so the
 // handler locates the cursor and the trust option in the rendered content
 // and moves the selection before confirming; it never blind-sends a fixed
-// key sequence, and sends nothing at all when it can't locate both rows.
+// key sequence. When it can't locate both rows it sends no keys, and the
+// snapshot falls through to the existing readiness check, which hands the
+// phase off. Holding the phase open instead is tracked separately.
 func acceptWorkspaceTrustDialog(
 	ctx context.Context,
 	budget *startupDialogBudget,
@@ -669,7 +671,10 @@ type trustDialogLayout struct {
 }
 
 var claudeTrustDialogLayout = trustDialogLayout{
-	markers: []string{"❯", ">"},
+	// Only "❯": a bare ">" is the most common false cursor in terminal
+	// scrollback (shell prompts, quoted text, diff context), and the real
+	// captured pane uses "❯".
+	markers: []string{"❯"},
 	isTrustRow: func(label string) bool {
 		return strings.Contains(strings.ToLower(label), "trust this folder") && !strings.HasPrefix(label, "No")
 	},
@@ -708,11 +713,18 @@ var piTrustDialogLayout = trustDialogLayout{
 func workspaceTrustConfirmKeys(content string) ([]string, bool) {
 	switch {
 	case strings.Contains(content, "trust this folder") || strings.Contains(content, "Quick safety check"):
-		return deriveTrustDialogKeys(content, claudeTrustDialogLayout)
+		// "Quick safety check" is the dialog's header line, so it anchors the
+		// scan above every option row. "trust this folder" is itself an option
+		// label, so it only anchors when the header isn't rendered.
+		question := "Quick safety check"
+		if !strings.Contains(content, question) {
+			question = "trust this folder"
+		}
+		return deriveTrustDialogKeys(content, question, claudeTrustDialogLayout)
 	case strings.Contains(content, "Do you trust the files in this folder?"):
-		return deriveTrustDialogKeys(content, geminiTrustDialogLayout)
+		return deriveTrustDialogKeys(content, "Do you trust the files in this folder?", geminiTrustDialogLayout)
 	case strings.Contains(content, "Trust project folder?"):
-		return deriveTrustDialogKeys(content, piTrustDialogLayout)
+		return deriveTrustDialogKeys(content, "Trust project folder?", piTrustDialogLayout)
 	case strings.Contains(content, "Do you trust the contents of this directory?"):
 		return []string{"Enter"}, true
 	default:
@@ -720,13 +732,23 @@ func workspaceTrustConfirmKeys(content string) ([]string, bool) {
 	}
 }
 
-func deriveTrustDialogKeys(content string, layout trustDialogLayout) ([]string, bool) {
+// deriveTrustDialogKeys locates the cursor row and the trust row in a
+// rendered option-list trust dialog and returns the keys that move the
+// selection onto the trust row and confirm it. question is the literal that
+// identified the dialog; the scan is scoped to the dialog itself so
+// scrollback can't supply a false cursor row.
+func deriveTrustDialogKeys(content, question string, layout trustDialogLayout) ([]string, bool) {
+	content = trustDialogWindow(content, question)
 	lines := strings.Split(content, "\n")
 	cutset := strings.Join(layout.markers, "") + " "
 
 	cursorIdx, trustIdx := -1, -1
 	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
+		// Strip a leading box-drawing border the same way
+		// containsPromptIndicator does, so a trust dialog a TUI renders inside
+		// a bordered box ("│ ❯ Yes, I trust this folder") still yields both a
+		// cursor row and a label instead of no keys at all.
+		trimmed := stripLeadingBoxBorder(strings.TrimSpace(line))
 		if trimmed == "" {
 			continue
 		}
@@ -768,6 +790,21 @@ func deriveTrustDialogKeys(content string, layout trustDialogLayout) ([]string, 
 	default:
 		return []string{"Enter"}, true
 	}
+}
+
+// trustDialogWindow narrows content to the rendered dialog by starting at the
+// line carrying the last occurrence of question. peek returns the whole pane
+// (capture-pane -S -120), so index 0 is up to 120 lines of scrollback above
+// the dialog, any of which could otherwise be mistaken for the cursor row.
+func trustDialogWindow(content, question string) string {
+	i := strings.LastIndex(content, question)
+	if i < 0 {
+		return content
+	}
+	if start := strings.LastIndexByte(content[:i], '\n'); start >= 0 {
+		return content[start+1:]
+	}
+	return content
 }
 
 func containsPostTrustStartupDialog(content string) bool {
@@ -1308,8 +1345,9 @@ type streamDialogSpec struct {
 	// content instead of using the static matchKeys — e.g. deriving the
 	// cursor movement needed for a dialog whose safe option isn't always
 	// pre-selected. A false second return means the content matched but
-	// the correct keys couldn't be determined yet; the match is treated
-	// as not found so the caller keeps waiting rather than guessing.
+	// the correct keys couldn't be determined; no keys are sent for that
+	// snapshot rather than guessing, and it falls through to the spec's
+	// readiness checks like any unmatched snapshot.
 	matchKeysFor func(string) ([]string, bool)
 	matchDelay   time.Duration
 }
