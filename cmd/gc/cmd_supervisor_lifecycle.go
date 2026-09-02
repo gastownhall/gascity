@@ -69,6 +69,22 @@ var (
 	supervisorSystemctlActive = func(service string) bool {
 		return exec.Command("systemctl", "--user", "is-active", "--quiet", service).Run() == nil
 	}
+	// supervisorSystemctlMainPID reads the MainPID systemd tracks for a user
+	// unit, so ownership checks can compare it against the live supervisor
+	// PID without re-deriving process-tree membership. Returns (0, false)
+	// when the unit is unknown to systemd or the property can't be read
+	// (mirrors supervisorLingerEnabled's exec.Command(...).Output() shape).
+	supervisorSystemctlMainPID = func(service string) (int, bool) {
+		out, err := exec.Command("systemctl", "--user", "show", service, "--property=MainPID", "--value").Output()
+		if err != nil {
+			return 0, false
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(out)))
+		if err != nil {
+			return 0, false
+		}
+		return pid, true
+	}
 	// supervisorSystemctlUserAvailable probes whether a per-user systemd
 	// instance is reachable. `systemctl --user show-environment` exits
 	// non-zero when there is no user manager (e.g. running as a service
@@ -568,6 +584,59 @@ func doSupervisorStartJSON(stdout, stderr io.Writer, jsonOut bool) int {
 
 	fmt.Fprintf(stderr, "gc supervisor start: supervisor did not become ready; see %s\n", logPath) //nolint:errcheck // best-effort stderr
 	return 1
+}
+
+// supervisorForkEnv derives the environment for a forked `gc supervisor run`
+// child from the parent's own environment (typically an agent's tmux pane).
+//
+// The child must not inherit GC_SESSION_ID: once the launcher exits, the
+// forked supervisor is reparented and proctable's orphan scan classifies any
+// reparented process carrying an agent's GC_SESSION_ID as that agent's own
+// runtime (ga-s434i0) — a bare `gc supervisor run` with no session of its own
+// then becomes a kill target the next time that session bead pre-starts.
+//
+// The child DOES carry supervisorPreserveSessionsOnSignalEnv=1 (added if
+// absent, replaced in place if already present with a different value) so
+// that if this process later ends up running under the systemd unit, a
+// `systemctl restart` still preserves agent sessions on SIGTERM, matching
+// the systemd-managed path's contract.
+func supervisorForkEnv(parent []string) []string {
+	return parent
+}
+
+// supervisorPreForkOwnershipWarning inspects whether a systemd user unit for
+// gc's own supervisor is already installed and, if so, whether it is
+// currently active. When the unit exists but is inactive, forking a bare
+// supervisor process here silently stands the process up outside systemd's
+// Restart= policy — this returns operator-facing text naming the unit,
+// mentioning its Restart=always contract, and pointing at
+// `systemctl --user reset-failed <unit>` (the standard remedy for a unit
+// stuck inactive/failed) as well as `gc supervisor install` as the
+// alternative that lets systemd own the process instead. Returns "" when no
+// unit is installed, or the unit is already active.
+func supervisorPreForkOwnershipWarning() string {
+	return ""
+}
+
+// supervisorUnitOwnershipStatus reports how a live supervisor PID relates to
+// gc's own systemd user unit, for `gc supervisor status` and the doctor
+// check. Status is one of:
+//   - "owned": the unit is installed and active, and its MainPID equals the
+//     live supervisor PID — systemd's Restart=always is protecting it.
+//   - "outside_unit": the unit is installed but does not own the live PID
+//     (inactive, or a MainPID mismatch) — the ga-s434i0 defect shape.
+//   - "no_unit": no unit is installed; the supervisor is intentionally
+//     unmanaged (e.g. `gc supervisor start` on a workstation that never ran
+//     `gc supervisor install`).
+type supervisorUnitOwnershipStatus struct {
+	Status     string
+	Unit       string
+	UnitActive bool
+	UnitPID    int
+}
+
+func supervisorDetermineUnitOwnership(_ int) supervisorUnitOwnershipStatus {
+	return supervisorUnitOwnershipStatus{Status: "no_unit"}
 }
 
 func ensureSupervisorRunning(stdout, stderr io.Writer) int {
