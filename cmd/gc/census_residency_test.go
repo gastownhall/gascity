@@ -190,6 +190,15 @@ func TestBindingRefNormalizesOntoTheCityScope(t *testing.T) {
 	if rootStoreRefMatchesCandidate("rig:alpha", "rig:bravo") {
 		t.Error("a rig-scoped root_store_ref matched an unrelated rig candidate")
 	}
+	// Control: the carve-out is for the BINDING, not for city scope. A legacy
+	// city candidate reads as the same scope as a binding (storeref.ScopeRigContext
+	// answers "" for both), but it is a duplicate view of a rig file store in
+	// legacy unscoped mode, so it must keep deferring to the named rig. Widening
+	// the carve-out to "any city-scope candidate" would pass every other
+	// assertion here and re-collapse that duplicate view.
+	if rootStoreRefMatchesCandidate("rig:alpha", "city:test-city") {
+		t.Error("a rig-scoped root_store_ref matched the legacy city candidate; the class-binding carve-out leaked onto city scope")
+	}
 }
 
 // wholeSplitClasses is the class set this build's storage boot admits: all five
