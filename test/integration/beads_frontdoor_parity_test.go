@@ -103,7 +103,7 @@ func TestGasCityGcBdExternalUnixSocketFrontDoor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out, err := runCommand(fixture.dir, env, 20*time.Second, gcBinary, "doctor", "--readonly", "--json"); err != nil {
+	if out, err := runCommand(fixture.dir, env, 20*time.Second, gcBinary, "doctor", "--json"); err != nil {
 		t.Fatalf("gc doctor: %v\n%s", err, out)
 	}
 	for _, args := range [][]string{{"bd", "create", "front door", "-t", "task", "--json"}, {"bd", "list", "--json"}} {
@@ -111,7 +111,7 @@ func TestGasCityGcBdExternalUnixSocketFrontDoor(t *testing.T) {
 			t.Fatalf("gc %s: %v\n%s", strings.Join(args, " "), err, out)
 		}
 	}
-	if out, err := runCommand(fixture.dir, env, 20*time.Second, gcBinary, "doctor", "--readonly", "--json"); err != nil {
+	if out, err := runCommand(fixture.dir, env, 20*time.Second, gcBinary, "doctor", "--json"); err != nil {
 		t.Fatalf("gc doctor: %v\n%s", err, out)
 	} else if !strings.Contains(out, "dolt-server") {
 		t.Fatalf("doctor output missing dolt-server check: %s", out)
