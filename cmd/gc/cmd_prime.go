@@ -964,6 +964,7 @@ func buildPrimeContextFor(cityPath, cityName string, a *config.Agent, rigs []con
 		TemplateName:  a.Name,
 		BindingName:   a.BindingName,
 		BindingPrefix: a.BindingPrefix(),
+		ConfigDir:     resolveConfigDir(cityPath, a.SourceDir),
 		Env:           a.Env,
 	}
 

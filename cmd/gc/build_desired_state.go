@@ -502,6 +502,10 @@ func buildDesiredStateWithSessionBeadsAt(
 			activeStores = append(activeStores, activeStore{store: s, ref: rig.Name})
 		}
 	}
+	// The store a control dispatcher's rows actually live in, asked once per
+	// build from the residency plan rather than guessed from config. Non-nil
+	// only on a city converged onto a class binding; see its doc comment.
+	controlBinding := convergedRoutedWorkBinding(cityPath, cfg, store, rigStores, suspendedRigPaths)
 
 	for i := range cfg.Agents {
 		if cfg.Agents[i].Suspended {
@@ -585,7 +589,7 @@ func buildDesiredStateWithSessionBeadsAt(
 			// retention for configured named-session beads.
 			poolDir := agentCommandDir(cityPath, &cfg.Agents[i], cfg.Rigs)
 			if store != nil && !hasCustomScaleCheck {
-				ownTarget := defaultScaleCheckTargetForAgent(cityPath, cfg, &cfg.Agents[i], store, rigStores)
+				ownTarget := ownScaleCheckTarget(cityPath, cfg, &cfg.Agents[i], store, rigStores, controlBinding, storeScopedControlDispatcher)
 				// mode='always': named session is unconditionally desired by the named
 				// pass; pool demand is redundant and creates {name}-N phantoms when N
 				// routed beads arrive. mode='on_demand': pool demand wakes the sleeping
@@ -661,7 +665,7 @@ func buildDesiredStateWithSessionBeadsAt(
 		// new unassigned demand while assigned work drives resume requests.
 		poolDir := agentCommandDir(cityPath, &cfg.Agents[i], cfg.Rigs)
 		if store != nil && !hasCustomScaleCheck {
-			ownTarget := defaultScaleCheckTargetForAgent(cityPath, cfg, &cfg.Agents[i], store, rigStores)
+			ownTarget := ownScaleCheckTarget(cityPath, cfg, &cfg.Agents[i], store, rigStores, controlBinding, storeScopedControlDispatcher)
 			defaultScaleTargets = append(defaultScaleTargets, ownTarget)
 			// Cross-store demand (FR-S0.1 / vp-s37): a rig pool's routed demand
 			// may live in the city store (vp-kvp cross-store delivery), which
@@ -1743,6 +1747,85 @@ func readyAssignedWorkAssignees(cfg *config.City, sessionBeads *sessionBeadSnaps
 	return result
 }
 
+// convergedRoutedWorkBinding reports the one class binding a city serves ALL
+// its routed work from, or nil when it serves any of it from a work ledger.
+//
+// The question is answered from the residency plan, not from config: the legs
+// come from routedWorkStoreCandidates, the same set collectOpenUnassignedRoutedWork
+// reads, so demand and collection cannot disagree about where routed work is.
+// A converged split narrows (storeref.Narrow, runtime plane) to nothing but its
+// binding legs, so "every leg is a class ref" IS "this city is converged"; a
+// city that relocates nothing keeps its work leg and answers nil.
+//
+// Two bindings would mean a per-class fan-out no constructor in this build
+// produces (TestTopologyConstructorsServeOnlyTheWholeSplit); until one can,
+// a plan that named more than one store gets the same conservative nil as a
+// legacy city rather than a guess about which one holds control work.
+func convergedRoutedWorkBinding(
+	cityPath string,
+	cfg *config.City,
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	suspendedRigPaths map[string]bool,
+) beads.Store {
+	legs, err := routedWorkStoreCandidates(cityPath, cfg, store, rigStores, suspendedRigPaths, censusRefScoped)
+	// An unresolvable topology takes the same conservative nil as a legacy city:
+	// fall back to the legacy target rather than guess a store. The error is not
+	// swallowed — collectOpenUnassignedRoutedWork resolves this same leg set later
+	// in this build and reports it there.
+	if err != nil || len(legs) == 0 {
+		return nil
+	}
+	var binding beads.Store
+	for _, leg := range legs {
+		if leg.store == nil || !storeref.IsClassRef(leg.ref) {
+			return nil
+		}
+		if binding != nil && leg.store != binding {
+			return nil
+		}
+		binding = leg.store
+	}
+	return binding
+}
+
+// ownScaleCheckTarget picks the store a pool's default demand probe reads.
+//
+// It is its own scope's ledger — except for a store-scoped control dispatcher
+// on a city converged onto a class binding, where every scope's control rows
+// live in the binding and the rig work ledger the dispatcher is named after
+// holds none of them. There the target is the binding under the CITY store key,
+// byte-for-byte the target the city's own dispatcher already gets: the binding
+// is a city-scope store serving every scope, demand keys normalize class refs
+// onto "city" anyway (normalizeDemandStoreRef), and one store key means one
+// store group, listed once per tick for every dispatcher template — rows are
+// attributed to templates by route, not by store.
+//
+// This does not widen anyone's probe. A dispatcher still reads exactly one
+// store; it is just the one its rows live in.
+func ownScaleCheckTarget(
+	cityPath string,
+	cfg *config.City,
+	agentCfg *config.Agent,
+	cityStore beads.Store,
+	rigStores map[string]beads.Store,
+	controlBinding beads.Store,
+	storeScopedControlDispatcher bool,
+) defaultScaleCheckTarget {
+	if storeScopedControlDispatcher && controlBinding != nil {
+		return defaultScaleCheckTarget{
+			template: agentCfg.QualifiedName(),
+			storeKey: "city",
+			store:    controlBinding,
+		}
+	}
+	return defaultScaleCheckTargetForAgent(cityPath, cfg, agentCfg, cityStore, rigStores)
+}
+
+// defaultScaleCheckTargetForAgent points a pool at its own scope's ledger: the
+// rig store for a Dir-scoped agent, the city store otherwise. A control
+// dispatcher on a split city is the documented exception — see
+// ownScaleCheckTarget, which is what the agent loop calls.
 func defaultScaleCheckTargetForAgent(
 	cityPath string,
 	cfg *config.City,

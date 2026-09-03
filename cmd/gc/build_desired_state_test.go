@@ -13510,3 +13510,188 @@ func TestBuildDesiredStateRecordsDemandSubPhases(t *testing.T) {
 		}
 	}
 }
+
+// rigDispatcherBindingCityConfig is the two-dispatcher shape a split city
+// really runs: the city's own control dispatcher, and one bound to the
+// "fixture" rig. Both are deterministic, singleton, store-scoped pools.
+func rigDispatcherBindingCityConfig(rigPath string) *config.City {
+	return &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "fixture", Path: rigPath, Prefix: "fx"}},
+		Agents: []config.Agent{
+			{
+				Name:              config.ControlDispatcherAgentName,
+				BindingName:       "core",
+				StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(1),
+			},
+			{
+				Name:              config.ControlDispatcherAgentName,
+				BindingName:       "core",
+				Dir:               "fixture",
+				StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(1),
+			},
+		},
+	}
+}
+
+// registerSplitCityRoutes gives cityPath the shape a controller serving a
+// converged split really registers: one class binding for every infrastructure
+// class, and a city WORK store that is a DISTINCT ledger beside it. The store
+// buildDesiredState is then handed is the binding, because that is what the
+// sessions class resolves to.
+func registerSplitCityRoutes(t *testing.T, cityPath string, binding beads.Store) {
+	t.Helper()
+	routes := splitRoutes(binding)
+	work := beads.NewMemStore()
+	registerResidencyRoutes(cityPath, routes, func() beads.Store { return work })
+	t.Cleanup(func() { unregisterResidencyRoutes(cityPath, routes) })
+}
+
+// createRigRootedControlRow seeds one open, ready, unassigned control row owned
+// by the "fixture" rig and routed to that rig's dispatcher.
+func createRigRootedControlRow(t *testing.T, store beads.Store) beads.Bead {
+	t.Helper()
+	row, err := store.Create(beads.Bead{
+		Title:  "Finalize workflow",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:         beadmeta.KindWorkflowFinalize,
+			beadmeta.RoutedToMetadataKey:     "fixture/core.control-dispatcher",
+			beadmeta.RootStoreRefMetadataKey: "rig:fixture",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create rig-rooted control row: %v", err)
+	}
+	return row
+}
+
+// poolSessionBeadForTemplate returns the single pool session bead a build
+// created for one template, so a test can read the provenance the launch path
+// actually persists.
+func poolSessionBeadForTemplate(t *testing.T, store beads.Store, template string) beads.Bead {
+	t.Helper()
+	all, err := store.List(beads.ListQuery{Type: sessionBeadType, IncludeClosed: true})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	var found []beads.Bead
+	for _, b := range all {
+		if b.Metadata["template"] == template {
+			found = append(found, b)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("pool session beads for %s = %d, want exactly 1 (beads: %v)", template, len(found), ids(all))
+	}
+	return found[0]
+}
+
+// A rig control dispatcher on a split city must probe the class binding it
+// serves, not the rig WORK ledger it is named after.
+//
+// On a converged split every scope's control rows live in ONE binding; the
+// rig's own work store holds none. The default probe pointed a Dir-scoped
+// dispatcher at rigStores[<rig>] anyway, so the row was counted by nobody and
+// the template's demand carried no per-bead provenance: the pool request went
+// out with an empty WorkBeadID, the spawned session bead carried no
+// gc.trigger_bead_id, and every backstop keyed on that stamp was inert for the
+// one dispatcher that had real work. A dispatcher probes the store its rows
+// live in; on a split city that is the binding for every scope.
+//
+// The demand probe is the half this asserts. The COLLECTION half —
+// collectOpenUnassignedRoutedWork admitting a rig-rooted row through the
+// binding leg, which is what feeds ReadyUnassignedRoutedWorkBeads and the
+// openControlDispatcherDemand floor — is #5918's, so the count here is 0
+// without the probe fix rather than a provenance-less 1.
+func TestBuildDesiredState_RigDispatcherOnSplitCityProbesTheBinding(t *testing.T) {
+	cityPath := t.TempDir()
+	binding := beads.NewMemStore()
+	registerSplitCityRoutes(t, cityPath, binding)
+	cfg := rigDispatcherBindingCityConfig(t.TempDir())
+	row := createRigRootedControlRow(t, binding)
+
+	got := buildDesiredStateWithSessionBeads(
+		"test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), binding,
+		map[string]beads.Store{"fixture": beads.NewMemStore()}, newSessionBeadSnapshot(nil), nil, io.Discard,
+	)
+
+	const rigDispatcher = "fixture/core.control-dispatcher"
+	if got.ScaleCheckCounts[rigDispatcher] != 1 {
+		t.Fatalf("ScaleCheckCounts = %v, want 1 for %s: the binding holds its only control row", got.ScaleCheckCounts, rigDispatcher)
+	}
+	// The city dispatcher shares the store group and must not also claim the
+	// row: rows are attributed to templates by route, not by store.
+	if got.ScaleCheckCounts["core.control-dispatcher"] != 0 {
+		t.Fatalf("ScaleCheckCounts = %v, want 0 for the city dispatcher: %s owns the route", got.ScaleCheckCounts, rigDispatcher)
+	}
+
+	session := poolSessionBeadForTemplate(t, binding, rigDispatcher)
+	if trigger := session.Metadata[beadmeta.TriggerBeadIDMetadataKey]; trigger != row.ID {
+		t.Fatalf("gc.trigger_bead_id = %q, want %q: a bare count floor spawns a dispatcher with no idea which bead woke it", trigger, row.ID)
+	}
+	if ref := session.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey]; ref != "city" {
+		t.Fatalf("gc.trigger_bead_store_ref = %q, want %q: the binding is a city-scope store", ref, "city")
+	}
+}
+
+// The rig dispatcher's create must not be gated on the health of a store that
+// holds none of its work. Pointing the probe at rigStores[<rig>] made an absent
+// rig WORK store mark the template partial, and errPoolSessionCreatePartial
+// then suppressed the create even though the binding had already proved demand.
+func TestBuildDesiredState_RigDispatcherOnSplitCityIgnoresRigWorkStoreHealth(t *testing.T) {
+	cityPath := t.TempDir()
+	binding := beads.NewMemStore()
+	registerSplitCityRoutes(t, cityPath, binding)
+	cfg := rigDispatcherBindingCityConfig(t.TempDir())
+	createRigRootedControlRow(t, binding)
+
+	got := buildDesiredStateWithSessionBeads(
+		"test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), binding,
+		nil, newSessionBeadSnapshot(nil), nil, io.Discard,
+	)
+
+	const rigDispatcher = "fixture/core.control-dispatcher"
+	if got.PoolScaleCheckPartialTemplates[rigDispatcher] {
+		t.Fatalf("PoolScaleCheckPartialTemplates = %v, want %s healthy: its work is in the binding, not the rig work store", got.PoolScaleCheckPartialTemplates, rigDispatcher)
+	}
+	for _, desired := range got.State {
+		if desired.TemplateName == rigDispatcher {
+			return
+		}
+	}
+	t.Fatalf("desired state = %v, want %s created on binding-proved demand", mapKeys(got.State), rigDispatcher)
+}
+
+// The legacy city is untouched: with nothing relocated, a rig dispatcher still
+// probes its own rig work store and stamps the rig ref on the session it spawns.
+func TestBuildDesiredState_RigDispatcherOnLegacyCityStillProbesRigStore(t *testing.T) {
+	cityPath := t.TempDir()
+	seedNoRoutes(t, cityPath)
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	cfg := rigDispatcherBindingCityConfig(t.TempDir())
+	row := createRigRootedControlRow(t, rigStore)
+
+	got := buildDesiredStateWithSessionBeads(
+		"test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), cityStore,
+		map[string]beads.Store{"fixture": rigStore}, newSessionBeadSnapshot(nil), nil, io.Discard,
+	)
+
+	const rigDispatcher = "fixture/core.control-dispatcher"
+	if got.ScaleCheckCounts[rigDispatcher] != 1 {
+		t.Fatalf("ScaleCheckCounts = %v, want 1 for %s from its own rig store", got.ScaleCheckCounts, rigDispatcher)
+	}
+	session := poolSessionBeadForTemplate(t, cityStore, rigDispatcher)
+	if trigger := session.Metadata[beadmeta.TriggerBeadIDMetadataKey]; trigger != row.ID {
+		t.Fatalf("gc.trigger_bead_id = %q, want %q", trigger, row.ID)
+	}
+	if ref := session.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey]; ref != "rig:fixture" {
+		t.Fatalf("gc.trigger_bead_store_ref = %q, want %q: a city that relocates nothing keeps the rig probe", ref, "rig:fixture")
+	}
+}
