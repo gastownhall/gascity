@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 )
 
@@ -41,11 +42,38 @@ var openNudgeBeadStore = func(cityPath string) beads.NudgesStore {
 // use this form and print the reason; the seam above stays for the poll/drain
 // helpers whose contract is already "a nil store means do nothing".
 func openNudgeBeadStoreErr(cityPath string) (beads.NudgesStore, error) {
+	routes := cliStorageRoutes(cityPath)
+	if relocated, ok := routes.storeFor(coordclass.ClassNudges); ok {
+		// The routes own this handle for the life of the process. Opening a work
+		// store here would only be discarded by resolveNudgesStore below, and it
+		// is what makes the returned store un-closable by the caller: see
+		// closeOwnedNudgeStore.
+		return beads.NudgesStore{Store: relocated}, nil
+	}
 	store, err := openStoreAtForCity(cityPath, cityPath)
 	if err != nil {
 		return beads.NudgesStore{}, fmt.Errorf("opening the city store at %q: %w", cityPath, err)
 	}
-	return beads.NudgesStore{Store: resolveNudgesStore(cliStorageRoutes(cityPath), store, nil, cityPath, nil)}, nil
+	return beads.NudgesStore{Store: resolveNudgesStore(routes, store, nil, cityPath, nil)}, nil
+}
+
+// closeOwnedNudgeStore closes a nudges-class handle only when the caller opened
+// it, and is the close half of every "own the store I opened" nudge frame.
+//
+// A frame that opens its own store cannot tell from the value alone whether it
+// holds a handle of its own: when the NUDGES class is relocated onto a storage
+// binding, openNudgeBeadStore hands back the storage routes' process-shared
+// engine, and closeCLIStorageRoutes (main.go, at the end of the invocation) is
+// the only thing entitled to close that. Closing it from a per-tick frame does
+// not detach the routes' memo, so the memo goes on serving the engine the frame
+// just closed and every later class read in the process — nudge delivery, and
+// the controller's own socket handlers — fails with ErrStoreClosed until the
+// process exits.
+func closeOwnedNudgeStore(cityPath string, store beads.Store) error {
+	if _, relocated := cliStorageRoutes(cityPath).storeFor(coordclass.ClassNudges); relocated {
+		return nil
+	}
+	return closeBeadStoreHandle(store)
 }
 
 // nudgeFrontDoor wraps a strongly-typed nudges store as the nudge object's

@@ -1923,9 +1923,11 @@ func queuedNudgeClaimableForTarget(target nudgeTarget, item queuedNudge) bool {
 // main pool + a SHOW DATABASES init probe) every 2s. See
 // TestNudgePollHelpersSkipDoltOpenOnEmptyQueue.
 //
-// It owns the handle it opens and closes exactly that handle (and only if it
-// opened one), preserving the closeBeadStoreHandle ownership contract the
-// …WithStore variants model.
+// It closes exactly the handle it opened, and only if it opened one, preserving
+// the ownership contract the …WithStore variants model. "The handle it opened"
+// is not the same as "the store it holds": on a city that has relocated the
+// NUDGES class, the store is the storage routes' process-shared engine, which
+// this frame must not close. closeOwnedNudgeStore is the predicate.
 type nudgeMaintenanceStore struct {
 	cityPath string
 	opened   bool
@@ -1961,12 +1963,13 @@ func (m *nudgeMaintenanceStore) ensureOpen() beads.NudgesStore {
 }
 
 // close releases the store this frame opened (if any). It never touches a
-// caller-passed store because this type only ever holds a store it opened.
+// caller-passed store because this type only ever holds a store it opened — nor
+// the storage routes' shared engine, which it holds but does not own.
 func (m *nudgeMaintenanceStore) close() error {
 	if !m.opened {
 		return nil
 	}
-	return closeBeadStoreHandle(m.store.Store)
+	return closeOwnedNudgeStore(m.cityPath, m.store.Store)
 }
 
 // nudgeQueueHasWork reports whether the queue holds any item a maintenance pass
@@ -2158,7 +2161,7 @@ func enqueueQueuedNudgeWithStoreAndClock(cityPath string, store beads.NudgesStor
 		ownStore = true
 	}
 	if ownStore {
-		defer closeBeadStoreHandle(store.Store) //nolint:errcheck // best-effort
+		defer closeOwnedNudgeStore(cityPath, store.Store) //nolint:errcheck // best-effort
 	}
 	var front *nudgequeue.Store
 	if store.Store != nil {
@@ -2380,7 +2383,7 @@ func recordQueuedNudgeFailureDetailed(cityPath string, store beads.NudgesStore, 
 		ownStore = true
 	}
 	if ownStore {
-		defer closeBeadStoreHandle(store.Store) //nolint:errcheck // best-effort
+		defer closeOwnedNudgeStore(cityPath, store.Store) //nolint:errcheck // best-effort
 	}
 	var front *nudgequeue.Store
 	if store.Store != nil {
