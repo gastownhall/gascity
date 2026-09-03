@@ -4144,6 +4144,15 @@ func TestInitBeadsForDirBuildsCanonicalBdInitProviderOp(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cityDir := t.TempDir()
+			pinnedBD := filepath.Join(t.TempDir(), "bd")
+			if err := os.WriteFile(pinnedBD, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			// Fresh gc init reaches this provider operation before it can
+			// persist workspace.env. The process-scoped pin must still reach
+			// the lifecycle script so initialization cannot select an ambient
+			// schema-incompatible bd.
+			t.Setenv("BD_BIN", pinnedBD)
 			cityConfig := fmt.Sprintf(`[workspace]
 name = "demo"
 
@@ -4187,6 +4196,7 @@ provider = %q
 				"GC_PACK_STATE_DIR":   citylayout.PackStateDir(cityDir, "dolt"),
 				"GC_DOLT_DATA_DIR":    filepath.Join(cityDir, ".beads", "dolt"),
 				"BEADS_DIR":           filepath.Join(cityDir, ".beads"),
+				"BD_BIN":              pinnedBD,
 			} {
 				if got := env[key]; got != want {
 					t.Errorf("%s = %q, want %q", key, got, want)

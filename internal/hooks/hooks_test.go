@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/bootstrap/packs/core"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -1717,8 +1718,8 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 			`gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject`,
 		},
 		"/work/.cursor/hooks.json": {
-			`gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject`,
-			`gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject`,
+			`hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject`,
+			`hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject`,
 		},
 		"/work/.kiro/agents/gascity.json": {
 			`gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject`,
@@ -1731,6 +1732,22 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 				t.Errorf("%s prompt hooks missing bounded command %q:\n%s", path, want, data)
 			}
 		}
+	}
+	cursorHooks := string(fs.Files["/work/.cursor/hooks.json"])
+	if !strings.Contains(cursorHooks, `\"${GC_BIN:-gc}\" prime --hook`) {
+		t.Errorf("Cursor sessionStart hook must use GC_BIN before PATH fallback:\n%s", cursorHooks)
+	}
+	if !strings.Contains(cursorHooks, `export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\"`) {
+		t.Errorf("Cursor hooks must preserve the inherited workspace PATH ahead of user tool fallbacks:\n%s", cursorHooks)
+	}
+	if strings.Contains(cursorHooks, `export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\"`) {
+		t.Errorf("Cursor hooks must not select ambient user tools ahead of the inherited workspace PATH:\n%s", cursorHooks)
+	}
+	if !strings.Contains(cursorHooks, `if [ -n \"${BD_BIN:-}\" ]; then export PATH=\"${BD_BIN%/*}:$PATH\"; fi`) {
+		t.Errorf("Cursor hooks must put the configured bd binary directory ahead of provider PATH entries:\n%s", cursorHooks)
+	}
+	if strings.Contains(cursorHooks, ` && gc `) {
+		t.Errorf("Cursor hooks must use GC_BIN so provider PATH changes cannot select another gc:\n%s", cursorHooks)
 	}
 	// Copilot CLI documents preCompact (camelCase). The hook fires before
 	// context compaction starts so handoff can capture state; without it,
@@ -2345,6 +2362,91 @@ func TestWriteEmbeddedManagedDoesNotClobberExistingBackup(t *testing.T) {
 	}
 	if got := string(fs.Files[dst+".bak.1"]); got != string(existing) {
 		t.Fatalf("second backup = %q, want existing hook", got)
+	}
+}
+
+// TestInstallCursorHookUpgradesHistoricalManagedFile pins the most recently
+// released managed .cursor/hooks.json shape (#3457): bare gc commands with
+// provider tool paths prepended by &&. Documents released before #3457 differ
+// in the command body, so no transformation of today's document reproduces
+// them; they are intentionally left un-upgraded, which makes this the only
+// shape Install adopts today.
+func TestInstallCursorHookUpgradesHistoricalManagedFile(t *testing.T) {
+	desired, err := core.PackFS.ReadFile("overlay/per-provider/cursor/.cursor/hooks.json")
+	if err != nil {
+		t.Fatalf("read embedded Cursor hooks: %v", err)
+	}
+	variants := cursorHookLegacyVariants(desired)
+	if len(variants) != 1 {
+		t.Fatalf("cursorHookLegacyVariants() = %d, want exactly the most recent released shape (#3457); adopting an older released shape is a deliberate widening, not a bug fix", len(variants))
+	}
+	legacy := variants[0]
+	if bytes.Contains(legacy, []byte("BD_BIN")) {
+		t.Fatalf("legacy variant carries a BD_BIN clause no released managed hook contains:\n%s", legacy)
+	}
+
+	fs := fsys.NewFake()
+	const dst = "/work/.cursor/hooks.json"
+	fs.Files[dst] = legacy
+	if err := Install(fs, "/city", "/work", []string{"cursor"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if got := string(fs.Files[dst]); !strings.Contains(got, `\"${GC_BIN:-gc}\" prime --hook`) {
+		t.Fatalf("historical Cursor hook was not upgraded:\n%s", got)
+	}
+	if got := fs.Files[dst+".bak"]; !bytes.Equal(got, legacy) {
+		t.Fatalf("historical Cursor hook backup = %q, want original managed content", got)
+	}
+}
+
+// TestInstallCursorHookPreservesUnreleasedIntermediateShapes guards the
+// narrowing above: documents that only ever existed mid-development are not
+// managed content, so Install must leave them alone rather than silently
+// overwrite whatever a user has on disk.
+func TestInstallCursorHookPreservesUnreleasedIntermediateShapes(t *testing.T) {
+	desired, err := core.PackFS.ReadFile("overlay/per-provider/cursor/.cursor/hooks.json")
+	if err != nil {
+		t.Fatalf("read embedded Cursor hooks: %v", err)
+	}
+	const (
+		workspaceFirst = `export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\"`
+		ambientFirst   = `export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\"`
+	)
+	unreleased := map[string][]byte{
+		"bare sessionStart with the pin clause": bytes.Replace(desired,
+			[]byte(`\"${GC_BIN:-gc}\" prime --hook`), []byte(`gc prime --hook`), 1),
+		"ambient-first PATH with the pin clause": bytes.ReplaceAll(desired,
+			[]byte(workspaceFirst), []byte(ambientFirst)),
+	}
+	for name, existing := range unreleased {
+		t.Run(name, func(t *testing.T) {
+			if bytes.Equal(existing, desired) {
+				t.Fatal("embedded Cursor hook no longer differs from this intermediate shape")
+			}
+			fs := fsys.NewFake()
+			const dst = "/work/.cursor/hooks.json"
+			fs.Files[dst] = existing
+			if err := Install(fs, "/city", "/work", []string{"cursor"}); err != nil {
+				t.Fatalf("Install: %v", err)
+			}
+			if got := fs.Files[dst]; !bytes.Equal(got, existing) {
+				t.Fatalf("unreleased Cursor hook shape was overwritten:\n%s", got)
+			}
+		})
+	}
+}
+
+func TestInstallCursorHookPreservesUserAuthoredFile(t *testing.T) {
+	fs := fsys.NewFake()
+	const dst = "/work/.cursor/hooks.json"
+	custom := []byte(`{"version":1,"hooks":{"sessionStart":[{"command":"my-cursor-hook"}]}}`)
+	fs.Files[dst] = custom
+
+	if err := Install(fs, "/city", "/work", []string{"cursor"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if got := fs.Files[dst]; !bytes.Equal(got, custom) {
+		t.Fatalf("user-authored Cursor hook was overwritten:\n%s", got)
 	}
 }
 

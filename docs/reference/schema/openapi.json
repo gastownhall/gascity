@@ -12216,6 +12216,7 @@
             "session.crashed": "#/components/schemas/TypedEventStreamEnvelopeSessionCrashed",
             "session.demand_claim_divergence": "#/components/schemas/TypedEventStreamEnvelopeSessionDemandClaimDivergence",
             "session.drain_acked_with_assigned_work": "#/components/schemas/TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork",
+            "session.drain_fence_unavailable": "#/components/schemas/TypedEventStreamEnvelopeSessionDrainFenceUnavailable",
             "session.draining": "#/components/schemas/TypedEventStreamEnvelopeSessionDraining",
             "session.idle_killed": "#/components/schemas/TypedEventStreamEnvelopeSessionIdleKilled",
             "session.max_age_killed": "#/components/schemas/TypedEventStreamEnvelopeSessionMaxAgeKilled",
@@ -12448,6 +12449,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionDrainFenceUnavailable"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionDraining"
@@ -13726,6 +13730,7 @@
                 "session.wake_refused",
                 "session.reset_stalled",
                 "session.work_query_failed",
+                "session.drain_fence_unavailable",
                 "session.demand_claim_divergence",
                 "session.cold_start_timeout",
                 "bead.created",
@@ -16557,6 +16562,63 @@
         "title": "TypedEventStreamEnvelope session.drain_acked_with_assigned_work",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeSessionDrainFenceUnavailable": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionLifecyclePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.drain_fence_unavailable",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.drain_fence_unavailable",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSessionDraining": {
         "additionalProperties": false,
         "properties": {
@@ -18054,6 +18116,7 @@
             "session.crashed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionCrashed",
             "session.demand_claim_divergence": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence",
             "session.drain_acked_with_assigned_work": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork",
+            "session.drain_fence_unavailable": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable",
             "session.draining": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDraining",
             "session.idle_killed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionIdleKilled",
             "session.max_age_killed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled",
@@ -18286,6 +18349,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDraining"
@@ -19647,6 +19713,7 @@
                 "session.wake_refused",
                 "session.reset_stalled",
                 "session.work_query_failed",
+                "session.drain_fence_unavailable",
                 "session.demand_claim_divergence",
                 "session.cold_start_timeout",
                 "bead.created",
@@ -22669,6 +22736,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope session.drain_acked_with_assigned_work",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionLifecyclePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.drain_fence_unavailable",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.drain_fence_unavailable",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeSessionDraining": {

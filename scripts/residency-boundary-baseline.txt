@@ -32,7 +32,7 @@ cmd/gc/api_state.go	beadEventStoresLocked	ast:returns-store-list	1
 cmd/gc/api_state.go	beadEventStoresLocked	c:beads.Store-literal	1
 cmd/gc/api_state.go	buildStores	ast:returns-store-list	1
 cmd/gc/api_state.go	completionReconcileInputs	c:beads.Store-literal	1
-cmd/gc/bd_relocated_classes.go	relocatedBeadClasses	d:ReservedClassPrefix	1
+cmd/gc/bd_relocated_classes.go	relocatedBeadClasses	d:ReservedClassPrefixesFor	1
 cmd/gc/build_desired_state.go	collectAssignedWorkBeadsWithStores	ast:returns-store-list	1
 cmd/gc/build_desired_state.go	collectOpenUnassignedRoutedWork	ast:returns-store-list	1
 cmd/gc/by_id_store_route.go	cityGraphClassBinding	b:graphClassBinding	1
@@ -61,6 +61,7 @@ cmd/gc/class_store.go	workBeadStores	a:BeadStores	1
 cmd/gc/class_store.go	workBeadStores	a:rigBeadStores	1
 cmd/gc/cmd_bd_by_id.go	bdByIDRefusedVerb	d:bdIDIsClassReserved	1
 cmd/gc/cmd_bd_by_id.go	bdFirstReservedClassID	d:bdIDIsClassReserved	1
+cmd/gc/cmd_bd_by_id.go	bdIDIsClassReserved	d:AllReservedClassPrefixes	1
 cmd/gc/cmd_bd_by_id.go	bdIDIsClassReserved	d:bdIDIsClassReserved	1
 cmd/gc/cmd_bd_by_id.go	openBdByIDClassFrontDoor	b:cliSoleClassBinding	1
 cmd/gc/cmd_bd_by_id.go	resolve	d:bdIDIsClassReserved	1
@@ -95,6 +96,7 @@ cmd/gc/order_store.go	appendOrdersSweepStore	ast:returns-store-list	1
 cmd/gc/order_store.go	orderTrackingSweepStoresForConfigTargets	ast:returns-store-list	1
 cmd/gc/order_store.go	orderTrackingSweepStoresFromTargets	ast:returns-store-list	1
 cmd/gc/order_store.go	rawOrderStores	ast:returns-store-list	1
+cmd/gc/ready_federation.go	readyFederationLegsOverBinding	d:ReservedPrefixesFor	1
 cmd/gc/ready_federation.go	readyLegsForTopology	c:storeref.EachLeg	1
 cmd/gc/ready_federation.go	readyRigLegStores	ast:returns-store-list	1
 internal/api/dashport_support.go	BeadStores	a:BeadStores	1

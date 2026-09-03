@@ -535,3 +535,84 @@ func TestPathContextRigScopedAgentPrefersStampedDir(t *testing.T) {
 		t.Fatalf("ctx.RigRoot = %q, want %q", ctx.RigRoot, rigPath)
 	}
 }
+
+// TestPathContextCarriesConfiguredDefaultBranch proves work_dir /
+// session_setup / pre_start templates can hand the rig's configured mainline
+// to setup scripts, so they stop re-probing origin/HEAD and silently anchoring
+// on a stale local HEAD.
+func TestPathContextCarriesConfiguredDefaultBranch(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "rigs", "thriva")
+	rigs := []config.Rig{{Name: "thriva", Path: rigPath, DefaultBranch: "develop"}}
+	a := config.Agent{Name: "polecat", Dir: "thriva", Scope: "rig"}
+
+	ctx := PathContextForQualifiedName(cityPath, "city", "thriva/polecat", a, rigs)
+	if ctx.DefaultBranch != "develop" {
+		t.Fatalf("ctx.DefaultBranch = %q, want %q", ctx.DefaultBranch, "develop")
+	}
+}
+
+// TestPathContextDefaultBranchEmptyWhenUnconfigured pins the deliberate
+// no-probe contract: an unset default_branch expands to "" rather than a live
+// origin/HEAD lookup. Path expansion runs on reconciler hot paths.
+func TestPathContextDefaultBranchEmptyWhenUnconfigured(t *testing.T) {
+	cityPath := t.TempDir()
+	rigs := []config.Rig{{Name: "thriva", Path: filepath.Join(cityPath, "rigs", "thriva")}}
+
+	rigScoped := PathContextForQualifiedName(cityPath, "city", "thriva/polecat",
+		config.Agent{Name: "polecat", Dir: "thriva", Scope: "rig"}, rigs)
+	if rigScoped.DefaultBranch != "" {
+		t.Fatalf("rig without default_branch: DefaultBranch = %q, want empty", rigScoped.DefaultBranch)
+	}
+
+	cityScoped := PathContextForQualifiedName(cityPath, "city", "mayor",
+		config.Agent{Name: "mayor", Scope: "city"}, rigs)
+	if cityScoped.DefaultBranch != "" {
+		t.Fatalf("city-scoped agent: DefaultBranch = %q, want empty", cityScoped.DefaultBranch)
+	}
+}
+
+func TestExpandTemplateRendersDefaultBranch(t *testing.T) {
+	cityPath := t.TempDir()
+	rigs := []config.Rig{
+		{Name: "thriva", Path: filepath.Join(cityPath, "rigs", "thriva"), DefaultBranch: "release/v2"},
+		{Name: "bare", Path: filepath.Join(cityPath, "rigs", "bare")},
+	}
+
+	for _, tc := range []struct {
+		name string
+		rig  string
+		want string
+	}{
+		{name: "configured", rig: "thriva", want: "setup.sh release/v2"},
+		{name: "unset", rig: "bare", want: "setup.sh "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := config.Agent{Name: "polecat", Dir: tc.rig, Scope: "rig"}
+			got, err := ExpandCommandTemplate("setup.sh {{.DefaultBranch}}", cityPath, "city", a, rigs)
+			if err != nil {
+				t.Fatalf("ExpandCommandTemplate: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDefaultBranchForRigName(t *testing.T) {
+	rigs := []config.Rig{
+		{Name: "padded", DefaultBranch: "  develop  "},
+		{Name: "plain", DefaultBranch: "main"},
+	}
+	for _, tc := range []struct{ rig, want string }{
+		{rig: "padded", want: "develop"},
+		{rig: "plain", want: "main"},
+		{rig: "missing", want: ""},
+		{rig: "", want: ""},
+	} {
+		if got := DefaultBranchForRigName(tc.rig, rigs); got != tc.want {
+			t.Errorf("DefaultBranchForRigName(%q) = %q, want %q", tc.rig, got, tc.want)
+		}
+	}
+}

@@ -488,12 +488,13 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	warnExternalBdOverrideDrift(stderr, cityPath, target)
 
 	// Resolve the same binary every other bd path in the tree resolves for
-	// this scope: a scope bound to a complete storage binding pins the bd
-	// build that speaks that backend, and the passthrough must honor the pin
-	// or it hands the command to an ambient bd that rejects the bound
-	// backend. Keying on the target scope rather than the city keeps a rig
-	// that owns its binding on its pin, and keeps a rig that overrides the
-	// city backend on the ambient bd its runtime env already implies.
+	// this scope: the city scope, any rig that inherits the city backend, and
+	// any scope bound to a complete storage binding all pin the bd build that
+	// speaks that backend, and the passthrough must honor the pin or it hands
+	// the command to an ambient bd that rejects the bound backend. Keying on
+	// the target scope rather than the city keeps a rig that overrides the
+	// city backend, and owns no binding of its own, on the ambient bd its
+	// runtime env already implies.
 	bdPath, err := resolveBdBinaryForScope(cityPath, target.ScopeRoot)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
