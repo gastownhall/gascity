@@ -42,6 +42,7 @@ type ConfigState struct {
 	EndpointStatus EndpointStatus
 	DoltHost       string
 	DoltPort       string
+	DoltSocket     string
 	DoltUser       string
 	// DoltMode is the beads dolt.mode value to write to config.yaml.
 	// When non-empty, EnsureCanonicalConfig writes dolt.mode to the canonical config.
@@ -492,6 +493,12 @@ func EnsureCanonicalConfig(fs fsys.FS, path string, state ConfigState) (bool, er
 	} else {
 		changed = deleteKeys(root, "dolt.port") || changed
 	}
+	socket := strings.TrimSpace(state.DoltSocket)
+	if socket != "" {
+		changed = setString(root, "dolt.socket", socket) || changed
+	} else {
+		changed = deleteKeys(root, "dolt.socket") || changed
+	}
 	if user != "" {
 		changed = setString(root, "dolt.user", user) || changed
 	} else {
@@ -713,6 +720,7 @@ func ensureCanonicalConfigFallback(fs fsys.FS, path string, state ConfigState) (
 		"gc.endpoint_status",
 		"dolt.host",
 		"dolt.port",
+		"dolt.socket",
 		"dolt.user",
 		"dolt.mode",
 		"types.custom",
@@ -951,6 +959,7 @@ func readConfigStateFromData(data []byte) ConfigState {
 		EndpointStatus: endpointStatusValue(scanConfigValueFromData(data, "gc.endpoint_status:")),
 		DoltHost:       scanConfigValueFromData(data, "dolt.host:"),
 		DoltPort:       scanConfigValueFromData(data, "dolt.port:"),
+		DoltSocket:     scanConfigValueFromData(data, "dolt.socket:"),
 		DoltUser:       scanConfigValueFromData(data, "dolt.user:"),
 		Dolt:           readDoltConfigFromDataOrEmpty(data),
 	}
@@ -963,6 +972,7 @@ func readConfigStateFromRoot(root *yaml.Node) ConfigState {
 		EndpointStatus: endpointStatusValue(configValue(root, "gc.endpoint_status")),
 		DoltHost:       configValue(root, "dolt.host"),
 		DoltPort:       configValue(root, "dolt.port"),
+		DoltSocket:     configValue(root, "dolt.socket"),
 		DoltUser:       configValue(root, "dolt.user"),
 		Dolt:           readDoltConfigFromRoot(root),
 	}
