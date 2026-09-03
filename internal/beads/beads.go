@@ -83,12 +83,21 @@ type Bead struct {
 	// should — a create that moved the child to reach its parent would mint it
 	// under the wrong prefix, which is unfixable afterwards.
 	//
-	// Weak, therefore, is the contract and not an admission: a store persists
+	// Weak, therefore, is the contract and not an admission. A store persists
 	// and filters this verbatim (Children and ListQuery.ParentID are string
-	// matches), and NEVER resolves it, validates it, or places a bead to
-	// co-locate with it. A store that started rejecting an id it cannot see
-	// would break every cross-store molecule at once, and a store that started
-	// placing by it would strand the child in the parent's namespace.
+	// matches), and for any id OUTSIDE the namespace it mints it must never
+	// resolve, validate, rewrite, or place by it. A store that started
+	// rejecting an id it cannot see would break every cross-store molecule at
+	// once, and a store that started placing by it would strand the child in
+	// the parent's namespace, where no later copy can move it.
+	//
+	// The boundary is drawn at the namespace, not at the field, because that is
+	// where the backends can actually agree. A dangling id INSIDE a store's own
+	// namespace is a row that store can see the absence of, and the strong
+	// backends refuse it before writing anything; the weak ones cannot detect
+	// it at all. That divergence is left explicit rather than papered over —
+	// what every backend owes, and what the conformance suite pins, is that a
+	// foreign parent is carried without question.
 	ParentID    string   `json:"parent,omitempty"`
 	Ref         string   `json:"ref,omitempty"`         // formula step ID or formula name
 	Needs       []string `json:"needs,omitempty"`       // dependency step refs

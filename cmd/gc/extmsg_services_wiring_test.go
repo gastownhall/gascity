@@ -3,10 +3,14 @@ package main
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/splittest"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -34,6 +38,82 @@ func TestCityExtMsgServicesCannotReachTheRefusalPath(t *testing.T) {
 	}
 	if _, err := extmsg.NewServicesWithSessionDirectory(work, nil); err == nil {
 		t.Fatal("extmsg accepted a nil session directory; the pin above proves nothing")
+	}
+}
+
+// TestCityExtMsgServicesRouteEachClassToItsOwnStore pins WHICH store each half
+// of the split reaches, on a city that relocates messaging and sessions to two
+// different ledgers.
+//
+// The test above pins only that a call of this shape succeeds, and that is not
+// the property the caller depends on: newCityExtMsgServices could hand extmsg
+// the work store for both halves and every assertion there would still pass.
+// That edit is precisely the residency bug the function's own doc comment
+// describes in prose — bindings and transcripts written where the messaging
+// class's readers never look, identity resolved out of a ledger holding no
+// session beads — so it is the one thing worth pinning here.
+//
+// The fixture gives the two classes genuinely different stores and reads the
+// answer off the single record a bind produces: the binding bead's id carries
+// the mint prefix of whichever store created it, and SessionName is non-empty
+// only if the directory found the session bead, which exists in the sessions
+// store alone. cfg, cityPath and rec are the arguments resolveClassStore
+// documents as unread, and are passed empty here to keep that visible.
+func TestCityExtMsgServicesRouteEachClassToItsOwnStore(t *testing.T) {
+	work := splittest.NewWorkStore(t, "hq")
+	messaging := splittest.NewClassStore(t, config.BeadClassMessaging)
+	sessions := splittest.NewClassStore(t, config.BeadClassSessions)
+	routes := &storageRoutes{stores: map[coordclass.Class]beads.Store{
+		coordclass.ClassMessaging: messaging,
+		coordclass.ClassSessions:  sessions,
+	}}
+
+	const sessionName = "gc-extmsg-pin"
+	sessionBead, err := sessions.Create(beads.Bead{
+		Title:    "session " + sessionName,
+		Type:     session.BeadType,
+		Labels:   []string{session.LabelSession},
+		Metadata: map[string]string{"session_name": sessionName},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	svc := newCityExtMsgServices(routes, work, nil, "", nil)
+	record, err := svc.Bindings.Bind(context.Background(), extmsg.Caller{Kind: extmsg.CallerController, ID: "tester"}, extmsg.BindInput{
+		Conversation: extmsg.ConversationRef{
+			ScopeID:        "city-1",
+			Provider:       "discord",
+			AccountID:      "acct-1",
+			ConversationID: "thread-1",
+			Kind:           extmsg.ConversationThread,
+		},
+		SessionID: sessionBead.ID,
+		Now:       time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("Bind through the city services: %v", err)
+	}
+
+	msgPrefix, ok := config.ReservedClassPrefix(config.BeadClassMessaging)
+	if !ok {
+		t.Fatal("the messaging class declares no reserved prefix; the id assertions below would compare nothing")
+	}
+	if !strings.HasPrefix(record.ID, msgPrefix+"-") {
+		t.Errorf("the binding minted as %q, want a %q- id; extmsg persisted outside the messaging class's store", record.ID, msgPrefix)
+	}
+	if _, err := messaging.Get(record.ID); err != nil {
+		t.Errorf("the messaging store does not hold binding %q: %v", record.ID, err)
+	}
+	if _, err := work.Get(record.ID); err == nil {
+		t.Errorf("the work store holds binding %q; a relocated class's records must not land in the work ledger", record.ID)
+	}
+	// The sessions half. An unresolvable selector is NOT an error — extmsg keeps
+	// legacy pure-ID behavior for it — so a directory pointed at the wrong ledger
+	// reports a successful bind carrying an empty stable name, and nothing but
+	// this assertion notices.
+	if record.SessionName != sessionName {
+		t.Errorf("the binding recorded SessionName %q, want %q; the session directory read a ledger that does not hold the session bead", record.SessionName, sessionName)
 	}
 }
 

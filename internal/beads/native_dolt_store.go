@@ -1058,7 +1058,7 @@ func (s *NativeDoltStore) Update(id string, opts UpdateOpts) error {
 // Store.Tx path (many ops, one commit) so both routes have identical semantics.
 func (s *NativeDoltStore) applyUpdateInTx(ctx context.Context, tx beadslib.Transaction, id string, opts UpdateOpts) error {
 	if opts.ParentID != nil {
-		if err := s.validateUpdateParent(ctx, tx, *opts.ParentID); err != nil {
+		if err := s.validateUpdateParent(ctx, tx, id, *opts.ParentID); err != nil {
 			return err
 		}
 	}
@@ -1880,8 +1880,20 @@ func (s *NativeDoltStore) nativeUpdates(ctx context.Context, storage nativeIssue
 	return updates, nil
 }
 
-func (s *NativeDoltStore) validateUpdateParent(ctx context.Context, storage nativeIssueGetter, parentID string) error {
+// validateUpdateParent resolves a reparent target, for the ids this store could
+// have minted.
+//
+// A foreign one is left alone for the same reason Create leaves it alone: it is
+// a weak reference (beads.Bead.ParentID) and this store cannot see the row, so
+// resolving it reports not-found for a bead that exists. Create and Update have
+// to agree here — a store that admits a cross-store parent and then refuses to
+// write the same value back is worse than one that refuses both, because the
+// refusal only appears on the reparent, long after the shape was accepted.
+func (s *NativeDoltStore) validateUpdateParent(ctx context.Context, storage nativeIssueGetter, id, parentID string) error {
 	if strings.TrimSpace(parentID) == "" {
+		return nil
+	}
+	if !nativeParentIsLocal(id, parentID, s.idPrefix) {
 		return nil
 	}
 	issue, err := storage.GetIssue(ctx, parentID)
@@ -1895,7 +1907,9 @@ func (s *NativeDoltStore) validateUpdateParent(ctx context.Context, storage nati
 }
 
 func (s *NativeDoltStore) updateParentInTransaction(ctx context.Context, tx beadslib.Transaction, id, parentID string) error {
-	if strings.TrimSpace(parentID) != "" {
+	// Same rule as validateUpdateParent, on the transactional path: resolve the
+	// parents this store could have minted, leave a foreign one weak.
+	if strings.TrimSpace(parentID) != "" && nativeParentIsLocal(id, parentID, s.idPrefix) {
 		issue, err := tx.GetIssue(ctx, parentID)
 		if err != nil {
 			return nativeStoreError(parentID, err)
@@ -1964,19 +1978,21 @@ func (s *NativeDoltStore) validateCreatedDependencies(ctx context.Context, stora
 			return fmt.Errorf("validating native create dependency for %q: depends_on_id is empty", issueID)
 		}
 		// A parent-child edge is nativeIssueFromBead's rendering of
-		// Bead.ParentID, which is a WEAK city-scoped reference: a split city
+		// Bead.ParentID, which is a WEAK reference for every id this store
+		// could not have minted (see beads.Bead.ParentID): a split city
 		// routinely hangs a graph-class molecule's steps off a work-class bead
 		// in another ledger, and this store cannot see that row. Resolving it
 		// refuses the create with a not-found naming a bead that exists.
 		//
-		// The prefix hatch below already declined to enforce this whenever the
-		// two ids carried different prefixes, so parent existence was never
-		// actually guaranteed — it was enforced on same-prefix cities and
-		// skipped on split ones, which is the worst of both. Declaring the
-		// reference weak (beads.Bead.ParentID) and enforcing that uniformly is
-		// what the conformance suite pins. Every other dependency type stays
-		// strong and is still resolved.
-		if dep.Type == beadslib.DepParentChild {
+		// Deliberately narrower than "skip every parent-child edge". Inside its
+		// OWN namespace this store CAN see the row, and refusing here is the
+		// only place it can refuse without writing: the upstream library
+		// resolves a same-namespace dependency target itself, after the issue
+		// is committed, so skipping would turn a clean refusal into a create
+		// followed by a compensating delete. Foreign ids the library already
+		// classifies as external and never resolves, so this skip and the
+		// library agree on exactly one line.
+		if dep.Type == beadslib.DepParentChild && !nativeParentIsLocal(issueID, targetID, s.idPrefix) {
 			continue
 		}
 		if !shouldPrevalidateNativeDependency(issueID, targetID, s.idPrefix) {
@@ -2033,6 +2049,25 @@ func shouldPrevalidateNativeDependency(issueID, targetID, storePrefix string) bo
 	}
 	targetPrefix := nativeBeadIDPrefix(targetID)
 	return sourcePrefix == "" || targetPrefix == "" || sourcePrefix == targetPrefix
+}
+
+// nativeParentIsLocal reports whether a parent id is one THIS store could have
+// minted — the only case in which resolving it is a legitimate refusal rather
+// than a blind spot.
+//
+// A store that declares no namespace answers false for every id. That is not a
+// technicality: such a store cannot tell its own rows from another ledger's, so
+// every id it is handed might be foreign, and the weak reading is the only one
+// that cannot refuse a bead that exists.
+func nativeParentIsLocal(issueID, parentID, storePrefix string) bool {
+	source := nativeBeadIDPrefix(issueID)
+	if source == "" {
+		source = normalizeIDPrefix(storePrefix)
+	}
+	if source == "" {
+		return false
+	}
+	return source == nativeBeadIDPrefix(parentID)
 }
 
 func nativeBeadIDPrefix(id string) string {

@@ -6,6 +6,7 @@ package beadstest
 import (
 	"errors"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -691,12 +692,31 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		s := newStore()
 		// Not merely absent: an id in a reserved namespace this store could not
 		// have minted, which is the actual cross-store shape.
-		const foreign = "gcg-70b1e5f2-a"
+		foreign := "gcg-70b1e5f2-a"
+
+		// The control for the placement assertion below: what an id minted by
+		// this store looks like when no parent is named at all.
+		control, err := s.Create(beads.Bead{Title: "control"})
+		if err != nil {
+			t.Fatal(err)
+		}
 
 		child, err := s.Create(beads.Bead{Title: "step", ParentID: foreign})
 		if err != nil {
 			t.Fatalf("Create with an unresolvable parent was refused: %v — a store must not validate ParentID, and this breaks every cross-store molecule", err)
 		}
+		// Placement is by class, never by parent. A store that minted the child
+		// into the parent's namespace to keep the pair together would satisfy
+		// every other assertion here and still be wrong in the one way that
+		// cannot be undone: an id is fixed at create, so no later copy moves the
+		// bead back to the ledger its class routes to.
+		if beadIDNamespace(control.ID) == "" {
+			t.Fatalf("this store mints ids like %q, with no namespace segment; the placement assertion below would compare nothing", control.ID)
+		}
+		if beadIDNamespace(child.ID) != beadIDNamespace(control.ID) {
+			t.Errorf("a child naming a %q parent was minted as %q, but this store mints %q-shaped ids; placement followed ParentID instead of class", foreign, child.ID, control.ID)
+		}
+
 		got, err := s.Get(child.ID)
 		if err != nil {
 			t.Fatal(err)
@@ -719,6 +739,22 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		}
 		if len(listed) != 1 || listed[0].ID != child.ID {
 			t.Errorf("List{ParentID: %q} returned %d beads, want 1 — it must agree with Children", foreign, len(listed))
+		}
+
+		// Update has to agree with Create. A store that admits a foreign parent
+		// at create and then refuses to write the same value back fails only on
+		// the reparent — long after the shape was accepted, and on a path
+		// (convoy re-anchor, molecule restore) whose caller has no reason to
+		// expect a not-found for a bead it just read from the other ledger.
+		if err := s.Update(control.ID, beads.UpdateOpts{ParentID: &foreign}); err != nil {
+			t.Fatalf("Update reparenting onto an unresolvable parent was refused: %v — Create admitted the same value", err)
+		}
+		reparented, err := s.Get(control.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if reparented.ParentID != foreign {
+			t.Errorf("after reparenting, ParentID is %q, want %q verbatim", reparented.ParentID, foreign)
 		}
 	})
 
@@ -1349,6 +1385,17 @@ func RunDepTests(t *testing.T, newStore func() beads.Store) {
 			t.Fatalf("Ping on fresh store should succeed: %v", err)
 		}
 	})
+}
+
+// beadIDNamespace returns the leading namespace segment of a bead id — what a
+// store's mint prefix looks like from the outside. An id with no separator has
+// no namespace, which compares equal only to another such id.
+func beadIDNamespace(id string) string {
+	before, _, ok := strings.Cut(id, "-")
+	if !ok {
+		return ""
+	}
+	return strings.ToLower(before)
 }
 
 // titlesOf extracts titles from a slice of beads.

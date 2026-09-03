@@ -26,35 +26,81 @@ import (
 // that started supplying a census where it holds none, or stopped, would report
 // a different retirement verdict for the same store without either package
 // changing the rule.
+//
+// Which is why the entry point here is residencyBindingsFromRoutes and not
+// residencyBindingsFor. The latter takes the options as arguments, so a test
+// calling it pins the shared rule a second time and says nothing about this
+// plane: the line that decides the drift — passing routes.hasLegacyResidents
+// rather than nil — is in the caller, and only the caller reaches it.
 func TestCLIBindingReportsBothHalvesOfTheRetirementCondition(t *testing.T) {
 	graphPrefix, ok := config.ReservedClassPrefix(config.BeadClassGraph)
 	if !ok {
 		t.Fatal("graph has no reserved mint prefix")
 	}
+	censusSays := func(verdict bool) *bool { return &verdict }
 	tests := []struct {
-		name  string
+		name string
+		// store is the one binding store the routes relocate the graph class to.
 		store beads.Store
-		mints bool
+		// censused is the boot census's verdict for that store, or nil for a
+		// process that never censused it — the case the pessimistic default is
+		// for.
+		censused *bool
+		mints    bool
+		legacy   bool
 	}{
-		{"store declaring the binding's namespace", newPrefixDeclaringStore(graphPrefix), true},
-		{"store minting work ids", newPrefixDeclaringStore("ga"), false},
-		{"store declaring nothing", beads.NewMemStore(), false},
+		{
+			name:   "store declaring the binding's namespace, uncensused",
+			store:  newPrefixDeclaringStore(graphPrefix),
+			mints:  true,
+			legacy: true,
+		},
+		{
+			name:   "store minting work ids, uncensused",
+			store:  newPrefixDeclaringStore("ga"),
+			mints:  false,
+			legacy: true,
+		},
+		{
+			name:   "store declaring nothing, uncensused",
+			store:  beads.NewMemStore(),
+			mints:  false,
+			legacy: true,
+		},
+		{
+			// The row the plane's own line is answerable to: only a caller that
+			// hands over its census can report a store clean, so a
+			// residencyBindingsFromRoutes that passed nil options reads this as
+			// "relics" and retires nothing it was entitled to retire.
+			name:     "censused clean",
+			store:    newPrefixDeclaringStore(graphPrefix),
+			censused: censusSays(false),
+			mints:    true,
+			legacy:   false,
+		},
+		{
+			name:     "censused with relics",
+			store:    newPrefixDeclaringStore(graphPrefix),
+			censused: censusSays(true),
+			mints:    true,
+			legacy:   true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			bindings, _ := residencyBindingsFor(
-				[]beads.Store{tt.store},
-				map[beads.Store][]coordclass.Class{tt.store: {coordclass.ClassGraph}},
-				nil,
-			)
+			routes := &storageRoutes{stores: map[coordclass.Class]beads.Store{coordclass.ClassGraph: tt.store}}
+			if tt.censused != nil {
+				routes.relics = map[beads.Store]bool{tt.store: *tt.censused}
+			}
+			bindings, _ := residencyBindingsFromRoutes(routes)
 			if len(bindings) != 1 {
 				t.Fatalf("got %d bindings, want 1", len(bindings))
 			}
 			if bindings[0].MintsReserved != tt.mints {
 				t.Errorf("MintsReserved = %v, want %v", bindings[0].MintsReserved, tt.mints)
 			}
-			if !bindings[0].HasLegacyResidents {
-				t.Error("HasLegacyResidents = false for a caller that supplied no census; an unasked question is not a clean answer, and the probe would retire over every id the migration preserved")
+			if bindings[0].HasLegacyResidents != tt.legacy {
+				t.Errorf("HasLegacyResidents = %v, want %v", bindings[0].HasLegacyResidents, tt.legacy)
 			}
 		})
 	}

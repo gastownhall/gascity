@@ -79,17 +79,27 @@ c:WorkAxisRouter	(^|[^A-Za-z0-9_])WorkLegsForID\(
 # (d) bespoke residence probes. The namespace gate is the resolver's, and a site
 #     that re-derives it is one `gc storage migrate` away from ga-axin6.
 #
-#     The reserved-prefix table has FIVE accessors, and the family names all of
-#     them. It named one, and the gap was not theoretical: a site counted here
-#     retired by switching from ReservedClassPrefix( to the plural
-#     ReservedClassPrefixesFor(, which asks the same question about more
-#     namespaces. The baseline shrank and nothing moved. A pattern that sees one
-#     spelling of a question does not guard the question, it guards the spelling
-#     — and the spelling is the cheapest thing in the file to change.
+#     The reserved-prefix table exports SIX accessors and one constant, and the
+#     family names every one. It named a single accessor once, and the gap was
+#     not theoretical: a site counted here retired by switching from
+#     ReservedClassPrefix( to the plural ReservedClassPrefixesFor(, which asks
+#     the same question about more namespaces. The baseline shrank and nothing
+#     moved. A pattern that sees one spelling of a question does not guard the
+#     question, it guards the spelling — and the spelling is the cheapest thing
+#     in the file to change.
+#
+#     Two of the rows below have no call sites today, which is the point. A
+#     pattern that only ever guards a non-zero count is a pattern that arrives
+#     after the site does; these are the two shapes a new bespoke probe would
+#     most naturally reach for — the whole table (ReservedClassPrefixes) and the
+#     one auxiliary namespace by name (NudgeQueueIDPrefix, which has no call
+#     parenthesis at all, so every other row in this family is blind to it).
 d:IDInNamespace	(^|[^A-Za-z0-9_])IDInNamespace\(
 d:bdIDIsClassReserved	(^|[^A-Za-z0-9_])bdIDIsClassReserved\(
 d:ReservedClassPrefix	(^|[^A-Za-z0-9_])ReservedClassPrefix\(
+d:ReservedClassPrefixes	(^|[^A-Za-z0-9_])ReservedClassPrefixes\(
 d:ReservedClassPrefixesFor	(^|[^A-Za-z0-9_])ReservedClassPrefixesFor\(
 d:AllReservedClassPrefixes	(^|[^A-Za-z0-9_])AllReservedClassPrefixes\(
 d:IsReservedClassPrefix	(^|[^A-Za-z0-9_])IsReservedClassPrefix\(
 d:ReservedPrefixesFor	(^|[^A-Za-z0-9_])ReservedPrefixesFor\(
+d:NudgeQueueIDPrefix	(^|[^A-Za-z0-9_])NudgeQueueIDPrefix($|[^A-Za-z0-9_])

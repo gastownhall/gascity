@@ -90,9 +90,6 @@ func BuildBindings(order []beads.Store, byStore map[beads.Store][]coordclass.Cla
 			refused = refusing.StorageRefusal()
 		}
 	}
-	if len(bindings) == 0 {
-		return nil, nil
-	}
 	sort.SliceStable(bindings, func(i, j int) bool { return bindings[i].Leg.Ref < bindings[j].Leg.Ref })
 	return bindings, refused
 }
