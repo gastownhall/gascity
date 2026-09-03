@@ -15,17 +15,15 @@ import (
 // default and only select Beads' proxied init when city.toml opts in.
 func TestGasCityBeadsModeSelectorFrontDoor(t *testing.T) {
 	for _, tc := range []struct {
-		name, mode, wantArg string
+		name, mode string
 	}{
-		{name: "direct default", wantArg: "--server"},
-		{name: "explicit proxied", mode: "proxied-server", wantArg: "--proxied-server"},
+		{name: "direct default"},
+		{name: "explicit proxied", mode: "proxied-server"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cityDir := t.TempDir()
 			if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte("[pack]\nname=\"mode-frontdoor\"\nschema=2\n"), 0o644); err != nil {
 				t.Fatal(err)
-			}
-			if tc.mode != "" {
 			}
 			logPath := filepath.Join(cityDir, "provider.log")
 			provider := filepath.Join(cityDir, "provider.sh")
@@ -46,6 +44,9 @@ func TestGasCityBeadsModeSelectorFrontDoor(t *testing.T) {
 			data = append(data, []byte("[beads]\nprovider = \"exec:"+provider+"\"\n")...)
 			env := commandEnvForDir(cityDir, false)
 			env = append(env, "GC_DOLT=skip")
+			if tc.mode == "" {
+				env = append(env, "BEADS_DOLT_PROXIED_SERVER=1")
+			}
 			sourcePath := filepath.Join(t.TempDir(), "city.toml")
 			if err := os.WriteFile(sourcePath, data, 0o644); err != nil {
 				t.Fatal(err)
@@ -74,6 +75,13 @@ func TestGasCityBeadsModeSelectorFrontDoor(t *testing.T) {
 			}
 			if got["dolt_mode"] != wantMode {
 				t.Fatalf("metadata dolt_mode = %v, want %s", got["dolt_mode"], wantMode)
+			}
+			if tc.mode == "proxied-server" {
+				for _, path := range []string{filepath.Join(cityDir, ".beads", "dolt-server.port"), filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt")} {
+					if _, err := os.Stat(path); err == nil {
+						t.Fatalf("proxied init created GC-owned Dolt artifact %s", path)
+					}
+				}
 			}
 		})
 	}
