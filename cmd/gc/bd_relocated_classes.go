@@ -112,10 +112,11 @@ func bdRelocatedClassOverrideEnabled() bool {
 // gcg- row. The value named an id but the VERB is a PROJECTION over a class
 // this ledger cannot see, and a projection that cannot see a class must fail
 // loudly rather than answer with the empty set. That is the whole of ga-iaj7k's
-// Invariant 0, and it is what makes `list` COHERENT with `dep tree`, which
-// already refuses a relocated id — two projections over the same data with
-// opposite failure semantics is worse than either one alone, because an
-// operator who learned the loud one trusts the quiet one.
+// Invariant 0, and it is what makes `list` COHERENT with `dep tree` — which
+// answers a relocated id from the store that holds it, rather than emptily from
+// the one that does not. Two projections over the same data with opposite
+// failure semantics is worse than either one alone, because an operator who
+// learned the loud one trusts the quiet one.
 //
 // `search` is the same projection over the same flag: bd registers
 // --metadata-field for it too, and it answers no-match with `[]` and exit 0.
@@ -134,13 +135,15 @@ func bdRelocatedClassOverrideEnabled() bool {
 // The other verbs are unguarded because they are no longer blind, not because
 // they were ever safe:
 //
-//   - `show`, `update` (including `--claim`), `release-if-current` and
-//     `dep list` are answered IN PROCESS from the binding their class is served
-//     from — cmd_bd_by_id.go, wired into doBd immediately after this scan — so
-//     they never reach the subprocess for a class-owned bead.
-//   - `dep tree` is not served in process, and on a class-owned id that same
-//     surface REFUSES it (exit 1, naming the bead and the binding) rather than
-//     forwarding it.
+//   - `show`, `update` (including `--claim`), `release-if-current`, `dep list`
+//     and `dep tree` are answered IN PROCESS from the binding their class is
+//     served from — cmd_bd_by_id.go, wired into doBd immediately after this
+//     scan — so they never reach the subprocess for a class-owned bead.
+//   - Spellings of those verbs the in-process arm does not implement — `dep tree
+//     --show-all-paths`, `--status`, `--format`, `--direction=both` — are
+//     REFUSED there (exit 1, naming the bead and the binding) rather than
+//     forwarded, because serving them by dropping the flag would answer a
+//     different question than the one asked.
 //   - Every other bd subcommand that ADDRESSES a reserved-prefix id — in a
 //     positional or an id-valued flag — is refused there too, by ownership
 //     rather than by servability.

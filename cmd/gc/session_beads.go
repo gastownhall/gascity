@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -564,6 +565,34 @@ func reopenClosedConfiguredNamedSessionBead(
 	return reopened, strings.TrimSpace(reopened.Metadata["session_name"]), true
 }
 
+// startupKickoffReopenMetadata builds the extraMeta batch that
+// reopenClosedConfiguredNamedSessionBead merges into a reopened bead's
+// startup-kickoff keys. A closed bead can carry a prior binding's state
+// (e.g. startup_kickoff_state=confirmed against an old bound step): when
+// boundStepID is set, this seeds the same 4 keys the fresh-create path seeds
+// so the backstop starts clean against the new step; when boundStepID is
+// empty, it clears all 5 keys — including startupKickoffLastNudgeAtKey,
+// which the create path deliberately leaves unseeded but a reopen can still
+// be carrying a stale value for — so no stale progress/give-up state survives
+// onto a session with nothing bound.
+func startupKickoffReopenMetadata(boundStepID string, now time.Time) map[string]string {
+	if boundStepID == "" {
+		return map[string]string{
+			beadmeta.BoundStepIDMetadataKey: "",
+			startupKickoffStateKey:          "",
+			startupKickoffStartedAtKey:      "",
+			startupKickoffAttemptsKey:       "",
+			startupKickoffLastNudgeAtKey:    "",
+		}
+	}
+	return map[string]string{
+		beadmeta.BoundStepIDMetadataKey: boundStepID,
+		startupKickoffStateKey:          startupKickoffStatePending,
+		startupKickoffStartedAtKey:      now.UTC().Format(time.RFC3339),
+		startupKickoffAttemptsKey:       "0",
+	}
+}
+
 func retireDuplicateConfiguredNamedSessionBeads(
 	cityPath string,
 	store beads.Store,
@@ -1067,6 +1096,14 @@ func unclaimWorkAssignedToRetiredSessionBead(
 	if stderr == nil {
 		stderr = io.Discard
 	}
+	// The retired session is losing every bead it owns, so its claim
+	// back-channel must stop naming one. Cleared BEFORE the releases: a stale
+	// stamp is only dangerous once the work is detached, and clearing first
+	// means a release that fails mid-fan-out still leaves no session pointing at
+	// a bead it may no longer own.
+	if err := clearSessionCurrentClaim(store, sessionBead.ID); err != nil {
+		fmt.Fprintf(stderr, "session beads: clearing current claim on retired session %s: %v\n", sessionBead.ID, err) //nolint:errcheck
+	}
 	identifiers := sessionAssignmentIdentifiers(sessionBead)
 	seen := make(map[string]struct{})
 	sweepAssignedWorkLegs(cityPath, cfg, store, rigStores, identifiers, stderr, func(storeIndex int, ownerStore beads.Store) {
@@ -1206,6 +1243,14 @@ func reassignWorkAssignedToRetiredSessionBead(
 	if stderr == nil {
 		stderr = io.Discard
 	}
+	// The work moves to newSessionID, which stamps its own claim back-channel on
+	// its next hook tick. The RETIRED session must stop naming the bead now:
+	// `gc hook current` is how a formula step names the bead it closes, and a
+	// retired session left pointing at reassigned work would close the successor's
+	// bead out from under it.
+	if err := clearSessionCurrentClaim(store, retiredSession.ID); err != nil {
+		fmt.Fprintf(stderr, "session beads: clearing current claim on retired session %s: %v\n", retiredSession.ID, err) //nolint:errcheck
+	}
 	identifiers := sessionAssignmentIdentifiers(retiredSession)
 	seen := make(map[string]struct{})
 	sweepAssignedWorkLegs(cityPath, cfg, store, rigStores, identifiers, stderr, func(storeIndex int, ownerStore beads.Store) {
@@ -1254,6 +1299,11 @@ func reassignWorkAssignedToRetiredSessionInfo(
 	}
 	if stderr == nil {
 		stderr = io.Discard
+	}
+	// Same claim back-channel clear as the raw reassignment form above, so the
+	// two stay byte-identical in the bead writes they emit.
+	if err := clearSessionCurrentClaim(store, retiredSession.ID); err != nil {
+		fmt.Fprintf(stderr, "session beads: clearing current claim on retired session %s: %v\n", retiredSession.ID, err) //nolint:errcheck
 	}
 	identifiers := sessionAssignmentIdentifiersInfo(retiredSession)
 	seen := make(map[string]struct{})
@@ -1310,6 +1360,11 @@ func unclaimWorkAssignedToRetiredSessionInfo(
 	}
 	if stderr == nil {
 		stderr = io.Discard
+	}
+	// Same claim back-channel clear as the raw retirement form above, so the two
+	// stay byte-identical in the bead writes they emit.
+	if err := clearSessionCurrentClaim(store, retiredSession.ID); err != nil {
+		fmt.Fprintf(stderr, "session beads: clearing current claim on retired session %s: %v\n", retiredSession.ID, err) //nolint:errcheck
 	}
 	identifiers := sessionAssignmentIdentifiersInfo(retiredSession)
 	seen := make(map[string]struct{})
@@ -1774,7 +1829,8 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		}
 		state := syncSessionCachedState(sn, b, exists, sp)
 		if !exists && isConfiguredNamed {
-			if reopened, _, ok := reopenClosedConfiguredNamedSessionBead(cityPath, store, cfg, cityName, tp.ConfiguredNamedIdentity, sn, state, now, nil, stderr); ok {
+			extraMeta := startupKickoffReopenMetadata(tp.BoundStepID, now)
+			if reopened, _, ok := reopenClosedConfiguredNamedSessionBead(cityPath, store, cfg, cityName, tp.ConfiguredNamedIdentity, sn, state, now, extraMeta, stderr); ok {
 				b = reopened
 				exists = true
 				state = syncSessionCachedState(sn, b, exists, sp)
@@ -1852,6 +1908,16 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				meta[namedSessionMetadataKey] = boolMetadata(true)
 				meta[namedSessionIdentityMetadata] = tp.ConfiguredNamedIdentity
 				meta[namedSessionModeMetadata] = tp.ConfiguredNamedMode
+				// Only seed the kickoff backstop's state when we have a
+				// concrete bound step to track progress against (AC4): an
+				// always-mode session awake on default demand alone has no
+				// per-turn signal yet, so it stays out of scope for v1.
+				if tp.BoundStepID != "" {
+					meta[beadmeta.BoundStepIDMetadataKey] = tp.BoundStepID
+					meta[startupKickoffStateKey] = startupKickoffStatePending
+					meta[startupKickoffStartedAtKey] = now.UTC().Format(time.RFC3339)
+					meta[startupKickoffAttemptsKey] = "0"
+				}
 			}
 			// Store the qualified template name so the API can derive the
 			// rig from it (e.g., "tower-of-hanoi/polecat" not just "polecat").
@@ -1881,6 +1947,9 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				if tp.ResolvedProvider.ResumeCommand != "" {
 					meta["resume_command"] = tp.ResolvedProvider.ResumeCommand
 				}
+				if tp.ResolvedProvider.SessionIDFlag != "" {
+					meta["session_id_flag"] = tp.ResolvedProvider.SessionIDFlag
+				}
 			}
 			createBead := func() (beads.Bead, error) {
 				beadID, err := sessionFrontDoor(store).CreateSession(session.CreateSpec{
@@ -1904,7 +1973,11 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			finalizeCreatedSessionName := func() {
 				createdSessionName = strings.TrimSpace(newBead.Metadata["session_name"])
 				if isPoolInstance {
-					createdSessionName = PoolSessionName(qualifiedTemplate, newBead.ID)
+					// Derived from the pool identity, never the bead ID: a
+					// bead-ID name is a fresh runtime box per attempt, which is
+					// the ga-vcjr9 leak. Same derivation as the planner's
+					// create path (derivePoolSessionName).
+					createdSessionName = poolRuntimeSessionName(cfg, agentName, qualifiedTemplate, transientPoolSlot)
 					if err := sessFront.SetMarker(newBead.ID, "session_name", createdSessionName); err != nil {
 						finalizeErr = err
 						fmt.Fprintf(stderr, "session beads: setting pool session_name for %s: %v\n", agentName, err) //nolint:errcheck
@@ -2147,6 +2220,16 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			}
 			if tp.ResolvedProvider.ResumeCommand != "" && b.Metadata["resume_command"] != tp.ResolvedProvider.ResumeCommand {
 				queueMeta("resume_command", tp.ResolvedProvider.ResumeCommand)
+			}
+			// session_id_flag is a peer projection field of resume_flag: the
+			// reactive startup-death strip (stripSessionIDFlag via
+			// retryFreshStartAfterStaleKey) reads it from persisted bead
+			// metadata, so a legacy bead backfilled with session_key (above)
+			// but no session_id_flag would replay a rejected first-start
+			// `--session-id <key>` command. Project it diff-gated so upgraded
+			// beads gain the flag in the same tick the key is backfilled.
+			if tp.ResolvedProvider.SessionIDFlag != "" && b.Metadata["session_id_flag"] != tp.ResolvedProvider.SessionIDFlag {
+				queueMeta("session_id_flag", tp.ResolvedProvider.SessionIDFlag)
 			}
 		}
 
@@ -3250,6 +3333,13 @@ func releaseWorkFromClosedSessionBead(store beads.Store, sessionBead beads.Bead,
 	}
 	if stderr == nil {
 		stderr = io.Discard
+	}
+
+	// The closing session is losing every bead it owns, so its claim
+	// back-channel must stop naming one — otherwise a later reader of
+	// `gc hook current` for this id would be handed a bead it no longer owns.
+	if err := clearSessionCurrentClaim(store, sessionBead.ID); err != nil {
+		fmt.Fprintf(stderr, "session beads: clearing current claim on closing session %s: %v\n", sessionBead.ID, err) //nolint:errcheck
 	}
 
 	// The owning pool/agent route, recovered from the closing session's own

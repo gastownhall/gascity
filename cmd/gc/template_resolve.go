@@ -17,6 +17,7 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"maps"
 	"os"
 	"path"
@@ -105,6 +106,12 @@ type TemplateParams struct {
 	// EffectiveSessionProvider is the actual session provider after applying
 	// city-level defaults.
 	EffectiveSessionProvider string
+	// CityRuntimes is the city's pack-declared runtime registry
+	// (config.City.Runtimes), keyed by selection name. Consulted by
+	// promptDelivery's oversized-prompt guard so a pack-declared runtime
+	// (EffectiveSessionProvider naming one not in the builtin switch) can opt
+	// into nudge-fallback delivery. Nil when no city is bound (p.city == nil).
+	CityRuntimes map[string]config.DiscoveredRuntime
 	// DependencyOnly marks a realized cold slot kept only so dependency wake
 	// has something concrete to wake even when pool check wants zero.
 	DependencyOnly bool
@@ -117,6 +124,13 @@ type TemplateParams struct {
 	// pool_slot metadata without reverse-engineering the slot from the name
 	// (which fails for namepool-themed instances like "fenrir").
 	PoolSlot int
+	// BoundStepID is the work-step bead ID bound to this named/direct
+	// session, resolved during buildDesiredState from the assigned-work-bead
+	// match (namedWorkBeadID). Empty when a named session has no concrete
+	// bound step (e.g. always-mode sessions awake on default demand alone).
+	// syncSessionBeads uses this to seed gc.bound_step_id and the startup
+	// kickoff progress-binding metadata.
+	BoundStepID string
 	// EnvIdentityStamped reports whether setTemplateEnvIdentity has written
 	// an authoritative GC_ALIAS/GC_AGENT identity into Env. resolveTemplate
 	// always seeds GC_ALIAS=qualifiedName, so "Env has GC_ALIAS" is not a
@@ -380,8 +394,14 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		Env:                     cfgAgent.Env,
 	}, p.sessionTemplate, p.stderr, packDirs, fragments, p.beadStore)
 	hasHooks := config.AgentHasHooks(cfgAgent, p.workspace, resolved.Name, p.providers)
-	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, !hasHooks, p.beaconTime)
 	suppressStartupPrompt := suppressStartupPromptForAgent(cfgAgent)
+	// The prime instruction tells a non-hook agent to go fetch its context.
+	// That is only meaningful when the beacon ships alone (the default branch
+	// below): when the rendered prompt is inlined under the beacon, the agent
+	// already holds the exact bytes `gc prime` would hand back, so the
+	// instruction costs a turn and duplicates the context it just received.
+	includePrimeInstruction := !hasHooks && prompt == ""
+	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, includePrimeInstruction, p.beaconTime)
 	switch {
 	case suppressStartupPrompt:
 		prompt = ""
@@ -712,6 +732,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	}
 	params.SessionOverride = cfgAgent.Session
 	params.EffectiveSessionProvider = effectiveSessionProvider(cfgAgent.Session, p.sessionProvider)
+	if p.city != nil {
+		params.CityRuntimes = p.city.Runtimes
+	}
 	return params, nil
 }
 
@@ -790,6 +813,9 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 	// bd runtime env when recovery is allowed.
 	if rigRoot == "" {
 		if cityUsesBdStoreContract(cityPath) {
+			if err := applyHostedBeadsCredentialEnv(env, cityPath); err != nil {
+				return env, err
+			}
 			if bound, err := applyCityStorageBindingEnv(env, cityPath); err != nil {
 				// On projection errors, keep explicit empty keys so tmux
 				// clears stale inherited backend variables for the session.
@@ -811,6 +837,11 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 		return env, nil
 	}
 
+	if cityUsesBdStoreContract(cityPath) {
+		if err := applyHostedBeadsCredentialEnv(env, cityPath); err != nil {
+			return env, err
+		}
+	}
 	if err := applyResolvedRigDoltEnv(env, cityPath, rigRoot, rigConfigForScopeRoot(cityPath, rigRoot, rigs), false); err != nil {
 		mirrorBeadsDoltEnv(env)
 		if !isRecoverableManagedDoltEnvError(err) {
@@ -825,7 +856,7 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 // launch or nudge path, it marks the runtime env so SessionStart hooks can add
 // context without repeating the full startup prompt.
 func templateParamsToConfig(tp TemplateParams) runtime.Config {
-	cfg, _ := templateParamsToConfigWithDelivery(tp)
+	cfg, _, _ := templateParamsToConfigWithDelivery(tp)
 	return cfg
 }
 
@@ -836,13 +867,37 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 // buildPreparedStartWithWorkDirResolver re-sets that env marker to "1" for hook
 // consumption even when nothing is delivered that incarnation. Threading the
 // result avoids that trap. templateParamsToConfig is the wrapper that discards
-// the second value; all other call sites are unchanged.
-func templateParamsToConfigWithDelivery(tp TemplateParams) (runtime.Config, promptDeliveryResult) {
+// the second and third values; all other call sites are unchanged.
+//
+// The error return is non-nil only when the rendered prompt is oversized (see
+// maxPromptSuffixRawBytes / maxPromptSuffixQuotedBytes in prompt_delivery.go)
+// and its effective runtime has no confirmed post-start delivery path — the
+// caller must not construct a runtime.Config or call Provider.Start in that
+// case (gastownhall/gascity ga-q8wgom.1.1).
+func templateParamsToConfigWithDelivery(tp TemplateParams) (runtime.Config, promptDeliveryResult, error) {
 	// SessionStart hooks can enrich context, but the startup prompt still needs
 	// a first-turn delivery mechanism. Without argv/flag/nudge delivery, freshly
 	// spawned workers sit idle at the provider prompt. The routing policy lives
 	// in the pure promptDelivery derivation.
-	delivery := promptDelivery(tp.Prompt, tp.IsACP, tp.ResolvedProvider, tp.Hints.Nudge)
+	delivery, err := promptDelivery(tp.Prompt, tp.IsACP, tp.ResolvedProvider, tp.Hints.Nudge, tp.EffectiveSessionProvider, tp.CityRuntimes)
+	configuredMode := "arg"
+	switch {
+	case tp.IsACP:
+		configuredMode = "acp"
+	case tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode != "":
+		configuredMode = tp.ResolvedProvider.PromptMode
+	}
+	if err != nil {
+		logOversizedPromptDelivery(slog.Default().Error,
+			"startup prompt exceeds argv-safety threshold; no fallback delivery available",
+			tp, configuredMode, "hard-fail")
+		return runtime.Config{}, promptDeliveryResult{}, fmt.Errorf("template %q (session %q): %w", tp.TemplateName, tp.SessionName, err)
+	}
+	if delivery.OversizedFallback {
+		logOversizedPromptDelivery(slog.Default().Warn,
+			"startup prompt exceeds argv-safety threshold; falling back to nudge delivery",
+			tp, configuredMode, "nudge-fallback")
+	}
 	promptSuffix := delivery.PromptSuffix
 	promptFlag := delivery.PromptFlag
 	nudge := delivery.Nudge
@@ -884,7 +939,29 @@ func templateParamsToConfigWithDelivery(tp TemplateParams) (runtime.Config, prom
 	// Ephemeral pool agents are likewise mouse-off (controller-poll safety).
 	cfg.MouseOn = tp.Hints.MouseOn || templateParamsSessionOrigin(tp) == "manual"
 	applyT3BridgeRuntimeConfig(tp, env)
-	return cfg, delivery
+	return cfg, delivery, nil
+}
+
+// logOversizedPromptDelivery emits the one structured launch-log record
+// required for every automatic oversized-prompt fallback or hard failure
+// (gastownhall/gascity ga-q8wgom.1.1 exit criterion 5): agent/session
+// identity, configured and effective delivery mode, effective runtime, raw
+// and argv-encoded byte counts, and the threshold values — never prompt
+// content. log is *slog.Logger's Warn or Error method, passed as a value so
+// the fallback (Warn) and hard-fail (Error) call sites can share one record
+// shape.
+func logOversizedPromptDelivery(log func(msg string, args ...any), msg string, tp TemplateParams, configuredMode, effectiveMode string) {
+	log(msg,
+		slog.String("session", tp.SessionName),
+		slog.String("agent", tp.InstanceName),
+		slog.String("configured_mode", configuredMode),
+		slog.String("effective_mode", effectiveMode),
+		slog.String("runtime", tp.EffectiveSessionProvider),
+		slog.Int("raw_bytes", len(tp.Prompt)),
+		slog.Int("argv_bytes", len(shellquote.Quote(tp.Prompt))),
+		slog.Int("raw_threshold", maxPromptSuffixRawBytes),
+		slog.Int("argv_threshold", maxPromptSuffixQuotedBytes),
+	)
 }
 
 func prependStartupPromptToNudge(prompt, nudge string) string {

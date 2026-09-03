@@ -99,6 +99,7 @@ func expandRalph(step *Step) ([]*Step, error) {
 	// formula syntax, so they intentionally retain legacy ralph naming.
 	iteration.Metadata = withMetadata(iteration.Metadata, map[string]string{
 		beadmeta.AttemptMetadataKey:     strconv.Itoa(attempt),
+		beadmeta.IterationMetadataKey:   strconv.Itoa(attempt),
 		beadmeta.StepIDMetadataKey:      step.ID,
 		beadmeta.RalphStepIDMetadataKey: step.ID,
 		beadmeta.StepRefMetadataKey:     iterationID,
@@ -145,6 +146,7 @@ func expandNestedRalph(step, control, specStep *Step, iterationID string, attemp
 		beadmeta.StepIDMetadataKey:      step.ID,
 		beadmeta.RalphStepIDMetadataKey: step.ID,
 		beadmeta.AttemptMetadataKey:     strconv.Itoa(attempt),
+		beadmeta.IterationMetadataKey:   strconv.Itoa(attempt),
 		beadmeta.StepRefMetadataKey:     iterationID,
 		// gc.control_for on the scope root only (body children hang off it via
 		// gc.scope_ref and are not attempt roots — they must not be stamped).
@@ -159,6 +161,36 @@ func expandNestedRalph(step, control, specStep *Step, iterationID string, attemp
 	out := []*Step{control, specStep, iteration}
 	out = append(out, flattenedBody...)
 	return out, nil
+}
+
+// RalphBodyChildAttempt answers which attempt of ITSELF a ralph body child is
+// on, which is not the iteration index it sits inside. A body child is a step in
+// its own right, and when it carries a retry control that control's counter
+// starts at 1 and is bounded by the child's own gc.max_attempts. Stamping the
+// outer iteration here makes processRetryEval read N off a child that has run
+// once and spawn attempt N+1, so a step first reached in iteration 3 is born
+// exhausted and hard-fails having never retried. A census of the maintainer-city
+// graph store found 81 of 382 retry beads (21%) at or past their own max,
+// including 10 at attempt 5 against a max of 3 — a value no counter that starts
+// at 1 can reach (ga-v7pu5).
+//
+// Children whose spec already carries an attempt keep it: retry expansion has
+// run by the time a ralph body is namespaced or frozen, so a first attempt bead
+// arrives stamped 1 and its own ref says attempt.1. Fresh nested controls start
+// at 1. Everything else is a plain body step with no counter of its own, where
+// inheriting the iteration is both harmless and long-standing.
+//
+// Both the compile-time expansion (namespaceRalphBodySteps) and the runtime
+// re-spawn (dispatch.buildAttemptRecipe) route through here so iteration 1 and
+// iterations 2+ cannot disagree about what a child's attempt number means.
+func RalphBodyChildAttempt(child *Step, iterationNum int) string {
+	if spec := strings.TrimSpace(child.Metadata[beadmeta.AttemptMetadataKey]); spec != "" {
+		return spec
+	}
+	if child.Retry != nil || child.Ralph != nil {
+		return "1"
+	}
+	return strconv.Itoa(iterationNum)
 }
 
 func collectRalphBodyStepIDs(steps []*Step) map[string]bool {
@@ -206,7 +238,8 @@ func namespaceRalphBodySteps(steps []*Step, iterationID string, owner *Step, att
 				beadmeta.ScopeRoleMetadataKey:   metadataDefault(node.Metadata, beadmeta.ScopeRoleMetadataKey, beadmeta.ScopeRoleMember),
 				beadmeta.StepIDMetadataKey:      childStepID,
 				beadmeta.RalphStepIDMetadataKey: owner.ID,
-				beadmeta.AttemptMetadataKey:     strconv.Itoa(attempt),
+				beadmeta.AttemptMetadataKey:     RalphBodyChildAttempt(node, attempt),
+				beadmeta.IterationMetadataKey:   strconv.Itoa(attempt),
 				beadmeta.StepRefMetadataKey:     clone.ID,
 			}
 			// A nested control's attempt/iteration root carries gc.control_for as

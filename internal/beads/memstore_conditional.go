@@ -35,8 +35,8 @@ func (m *MemStore) probeConditionalWriteCapability() (bool, string) {
 // expectedRevision, otherwise it returns *PreconditionFailedError. When the
 // instance has DisableConditionalWrites set it returns ErrConditionalWriteUnsupported.
 func (m *MemStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {
-	if isEmptyUpdateOpts(opts) {
-		return fmt.Errorf("conditional update %s: %w", id, ErrEmptyConditionalUpdate)
+	if err := validateConditionalUpdateOpts(opts); err != nil {
+		return fmt.Errorf("conditional update %s: %w", id, err)
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()

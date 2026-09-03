@@ -303,6 +303,11 @@ func TestMain(m *testing.M) {
 	configureFSPressureForTests()
 	configureSupervisorHooksForTests()
 	var testRunner testscript.TestingM = newDoltLeakGuardedTestingM(m, testTempRoot, testTempRoot, gcHome, runtimeDir, providerStubDir, sharedTestFixtureRoot)
+	// The tmux leak guard wraps outside the dolt guard and inside
+	// cleanupTestingM: it must observe and kill leaked tmux servers while the
+	// per-run socket root still exists (dip-73cr05 — city-name sockets like
+	// -L test-city have exit-empty off and outlive their sessions forever).
+	testRunner = newTmuxLeakGuardedTestingM(testRunner, tmuxSocketRoot)
 	if tmuxSocketCleanupRoot != "" {
 		testRunner = cleanupTestingM{m: testRunner, paths: []string{tmuxSocketCleanupRoot}}
 	}

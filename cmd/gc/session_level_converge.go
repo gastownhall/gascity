@@ -153,15 +153,25 @@ const (
 // behavior-preserving until they opt in to probing the transcript. The TrimSpace
 // variant is adopted deliberately at Stage 4 with its own test.
 //
-// S19 intent: firstStart is "no durable hash AND/OR no runtime transcript". A
-// present hash whose transcript is known-absent is the #3849 crash-loop shape —
-// the bead claims a prior start but the conversation a resume would target is
-// gone, so --resume hard-fails and the pane dies every tick. Classifying it as a
-// first start makes the launch use --session-id and breaks the loop by
-// construction. That branch is inert until a real probe is passed (Stage 4).
+// S19 intent: firstStart is "no durable hash AND no runtime transcript". Each
+// signal alone is unreliable, and the two failure shapes are mirror images:
+//
+//   - present hash, known-absent transcript (#3849): the bead claims a prior
+//     start but the conversation a resume would target is gone, so --resume
+//     hard-fails and the pane dies every tick. Treat it as a first start.
+//   - absent hash, known-present transcript: the crash window between launching
+//     the provider with --session-id X and committing started_config_hash. The
+//     conversation X already exists, so re-launching with --session-id X is
+//     rejected by the provider (claude 2.1.233 exits 1 with "Session ID <uuid>
+//     is already in use") and the session crash-loops. Treat it as a resume.
+//
+// Both branches are inert for callers that pass sessTranscriptUnknown, which
+// still reproduces the durable-only legacy signal byte-for-byte.
 func deriveFirstStart(startedConfigHash string, transcript sessTranscriptState) bool {
 	if startedConfigHash == "" {
-		return true
+		// A keyed transcript proves the conversation was already created under
+		// this session key, whatever the durable hash says.
+		return transcript != sessTranscriptPresent
 	}
 	if transcript == sessTranscriptAbsent {
 		return true

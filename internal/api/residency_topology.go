@@ -27,8 +27,9 @@ import (
 //
 // A class accessor that returns the city store, or nil, relocates nothing and
 // contributes no binding — the identity gate that keeps a single-store city
-// byte-identical. MintsReserved stays false: nothing in this build verifies a
-// binding's mint prefix, so every plan keeps its residence probe.
+// byte-identical. A plan's residence probe retires only when both halves say
+// so: the mint bit observed from the store, the relic bit carried across the
+// State surface from the boot that censused the binding.
 func (s *Server) residencyTopology() storeref.Topology {
 	cfg := s.state.Config()
 	city := s.state.CityBeadStore()
@@ -49,7 +50,7 @@ func (s *Server) residencyTopology() storeref.Topology {
 	topo := storeref.Topology{
 		Work: storeref.Leg{Ref: storeref.WorkRef, Store: city, Prefix: strings.TrimSpace(config.EffectiveHQPrefix(cfg))},
 	}
-	topo.Bindings, topo.Refused = apiResidencyBindings(order, byStore)
+	topo.Bindings, topo.Refused = apiResidencyBindings(order, byStore, s.state.ClassBindingHasLegacyResidents)
 
 	if cfg != nil {
 		for _, rig := range cfg.Rigs {
@@ -137,7 +138,11 @@ func containsClass(classes []coordclass.Class, want coordclass.Class) bool {
 }
 
 // apiResidencyBindings groups the relocated classes by the store serving them.
-func apiResidencyBindings(order []beads.Store, byStore map[beads.Store][]coordclass.Class) ([]storeref.ClassBinding, error) {
+//
+// relics is the boot census's verdict, read across the State surface. A nil one
+// is the pessimistic answer for every store: a caller with no census to offer
+// has not cleared anything.
+func apiResidencyBindings(order []beads.Store, byStore map[beads.Store][]coordclass.Class, relics func(beads.Store) bool) ([]storeref.ClassBinding, error) {
 	if len(order) == 0 {
 		return nil, nil
 	}
@@ -145,20 +150,38 @@ func apiResidencyBindings(order []beads.Store, byStore map[beads.Store][]coordcl
 	bindings := make([]storeref.ClassBinding, 0, len(order))
 	for _, store := range order {
 		classes := completeObservedClasses(byStore[store])
+		// Every namespace the store HOLDS, not only the one each class mints
+		// under: a namespace the binding does not declare is one the resolver
+		// gives it no authority over, and the id falls through to the work
+		// ledger that never had it.
 		prefixes := make([]string, 0, len(classes))
 		for _, class := range classes {
-			if prefix, ok := config.ReservedClassPrefix(class.String()); ok {
-				prefixes = append(prefixes, prefix)
-			}
+			prefixes = append(prefixes, config.ReservedClassPrefixesFor(class.String())...)
 		}
 		bindings = append(bindings, storeref.ClassBinding{
 			Classes:  classes,
 			Prefixes: prefixes,
 			Leg:      storeref.Leg{Ref: storeref.ClassRef(classes), Store: store},
+			// Both bits are observations: the mint bit from the store's own
+			// declaration, the relic bit from the boot that opened this binding
+			// and counted. Neither is ever optimistic by default — see the
+			// ClassBinding docs for why the optimistic pairing is the one shape
+			// that must never ship.
+			MintsReserved:      storeref.MintsInsideNamespace(store, prefixes),
+			HasLegacyResidents: apiHasLegacyResidents(relics, store),
 		})
 		if refusing, ok := store.(storeref.RefusingStore); ok && refused == nil {
 			refused = refusing.StorageRefusal()
 		}
 	}
 	return bindings, refused
+}
+
+// apiHasLegacyResidents applies the census verdict, or the pessimistic default
+// when there is no census to ask.
+func apiHasLegacyResidents(relics func(beads.Store) bool, store beads.Store) bool {
+	if relics == nil {
+		return true
+	}
+	return relics(store)
 }

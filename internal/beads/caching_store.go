@@ -29,18 +29,19 @@ type CachingStore struct {
 	backing  Store // runtime: usually *BdStore; tests and projections may use any Store
 	idPrefix string
 
-	mu              sync.RWMutex
-	beads           map[string]Bead
-	deps            map[string][]Dep
-	depsComplete    bool
-	dirty           map[string]struct{}
-	beadSeq         map[string]uint64
-	localBeadAt     map[string]time.Time
-	deletedSeq      map[string]uint64
-	state           cacheState
-	lastFreshAt     time.Time
-	mutationSeq     uint64
-	primePartialErr error
+	mu                  sync.RWMutex
+	beads               map[string]Bead
+	deps                map[string][]Dep
+	depsComplete        bool
+	dirty               map[string]struct{}
+	beadSeq             map[string]uint64
+	localBeadAt         map[string]time.Time
+	deletedSeq          map[string]uint64
+	state               cacheState
+	lastFreshAt         time.Time
+	mutationSeq         uint64
+	observationRevision uint64
+	primePartialErr     error
 
 	// readyProjectionDegraded latches when the backing store reported it cannot
 	// serve the ready projection at all. It is deliberately NOT primePartialErr:
@@ -93,6 +94,13 @@ type CachingStore struct {
 	latencyDriverActive bool
 
 	applyEventBeforeCommitForTest func()
+}
+
+// CacheObservation is an opaque, process-local stamp returned with a cached
+// active-bead census. It is valid only with its originating CachingStore.
+type CacheObservation struct {
+	owner    *CachingStore
+	revision uint64
 }
 
 var (
@@ -361,6 +369,7 @@ func (c *CachingStore) WaitForParentProjection(ctx context.Context, id, oldParen
 }
 
 func (c *CachingStore) noteMutationLocked(ids ...string) uint64 {
+	c.advanceObservationLocked()
 	c.mutationSeq++
 	seq := c.mutationSeq
 	for _, id := range ids {
@@ -370,6 +379,16 @@ func (c *CachingStore) noteMutationLocked(ids ...string) uint64 {
 		c.beadSeq[id] = seq
 	}
 	return seq
+}
+
+// advanceObservationLocked invalidates cache observations without changing the
+// mutation-sequence fences used by reconciliation. Caller must hold c.mu.
+func (c *CachingStore) advanceObservationLocked() {
+	if c.observationRevision == ^uint64(0) {
+		c.observationRevision = 1
+		return
+	}
+	c.observationRevision++
 }
 
 func (c *CachingStore) noteLocalMutationLocked(ids ...string) uint64 {
@@ -463,6 +482,7 @@ type absorbOpts struct {
 // state. now is the caller's clock read for the whole pass; it is consulted
 // only by seqClearGuarded. Caller must hold c.mu in write mode.
 func (c *CachingStore) absorbFreshLocked(id string, bead Bead, now time.Time, opts absorbOpts) {
+	c.advanceObservationLocked()
 	bead = c.absorbReadyProjectionLocked(id, bead, opts)
 	c.beads[id] = cloneBead(bead)
 	switch opts.depsMode {
@@ -632,6 +652,7 @@ func (c *CachingStore) readyProjectionUnknownLocked(id string) bool {
 // not touch mutationSeq, depsComplete, state, or stats. Caller must hold c.mu
 // in write mode.
 func (c *CachingStore) evictLocked(id string) {
+	c.advanceObservationLocked()
 	delete(c.beads, id)
 	delete(c.deps, id)
 	delete(c.dirty, id)
@@ -652,6 +673,7 @@ func (c *CachingStore) tombstoneLocked(id string, seq uint64) {
 // markDirtyLocked flags id as known-stale so reads bypass the cache until a
 // refresh clears the mark. Caller must hold c.mu in write mode.
 func (c *CachingStore) markDirtyLocked(id string) {
+	c.advanceObservationLocked()
 	c.dirty[id] = struct{}{}
 }
 
@@ -948,6 +970,7 @@ func (c *CachingStore) PrimeActive() error {
 		c.state = cachePartial
 	}
 	c.primePartialErr = partialErr
+	c.advanceObservationLocked()
 	c.markFreshLocked(now)
 	c.updateStatsLocked()
 	return nil
@@ -1111,6 +1134,7 @@ func (c *CachingStore) prime(ctx context.Context) error {
 	c.circuitTripped = false
 	c.stats.SyncFailures = 0
 	c.primePartialErr = partialErr
+	c.advanceObservationLocked()
 	c.markFreshLocked(now)
 	c.updateStatsLocked()
 	return nil

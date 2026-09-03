@@ -134,7 +134,10 @@ func TestLooksLikeDoltSQLServer(t *testing.T) {
 }
 
 func TestParseDoltPSLine_DoltSQLServer(t *testing.T) {
-	line := "  78306  65392 Sun May 17 09:31:24 2026 /usr/local/bin/dolt sql-server --config /tmp/TestGcBeadsBdStartUsesRootBeadsDataDir802378814/001/.gc/runtime/packs/dolt/dolt-config.yaml --host 127.0.0.1"
+	// No rss= token: gastownhall/gascity#5201 dropped it from the requested ps
+	// fields, since some macOS hosts reject the whole ps invocation when it
+	// asks for resource-usage fields on other sessions' processes.
+	line := "  78306  Sun May 17 09:31:24 2026 /usr/local/bin/dolt sql-server --config /tmp/TestGcBeadsBdStartUsesRootBeadsDataDir802378814/001/.gc/runtime/packs/dolt/dolt-config.yaml --host 127.0.0.1"
 	got, ok := parseDoltPSLine(line, map[int][]int{78306: {3306}})
 	if !ok {
 		t.Fatal("parseDoltPSLine did not recognize dolt sql-server")
@@ -142,8 +145,8 @@ func TestParseDoltPSLine_DoltSQLServer(t *testing.T) {
 	if got.PID != 78306 {
 		t.Fatalf("PID = %d, want 78306", got.PID)
 	}
-	if got.RSSBytes != 65392*1024 {
-		t.Fatalf("RSSBytes = %d, want %d", got.RSSBytes, int64(65392*1024))
+	if got.RSSBytes != 0 {
+		t.Fatalf("RSSBytes = %d, want 0 (rss= is no longer requested from ps, gastownhall/gascity#5201)", got.RSSBytes)
 	}
 	if !reflect.DeepEqual(got.Ports, []int{3306}) {
 		t.Fatalf("Ports = %v, want [3306]", got.Ports)
@@ -157,7 +160,7 @@ func TestParseDoltPSLine_DoltSQLServer(t *testing.T) {
 }
 
 func TestParseDoltPSLine_PreservesSpacedConfigPath(t *testing.T) {
-	line := "12345 1024 Sun May 17 09:31:24 2026 dolt sql-server --config /tmp/Test With Space/config.yaml --port 3306"
+	line := "12345 Sun May 17 09:31:24 2026 dolt sql-server --config /tmp/Test With Space/config.yaml --port 3306"
 	got, ok := parseDoltPSLine(line, nil)
 	if !ok {
 		t.Fatal("parseDoltPSLine did not recognize dolt sql-server")
@@ -168,9 +171,23 @@ func TestParseDoltPSLine_PreservesSpacedConfigPath(t *testing.T) {
 }
 
 func TestParseDoltPSLine_IgnoresNonDolt(t *testing.T) {
-	line := "12345 1024 Sun May 17 09:31:24 2026 mysqld --config /tmp/TestX/config.yaml"
+	line := "12345 Sun May 17 09:31:24 2026 mysqld --config /tmp/TestX/config.yaml"
 	if got, ok := parseDoltPSLine(line, nil); ok {
 		t.Fatalf("parseDoltPSLine = %+v, want ignored", got)
+	}
+}
+
+// TestPSOutputFormatExcludesRSS pins gastownhall/gascity#5201: some macOS
+// hosts require an entitlement to report resource-usage fields (%mem/vsz/
+// rss/time) for processes outside the caller's own session, and `ps` exits
+// non-zero for the *entire* invocation when it can't — turning a clean,
+// zero-orphan scan into a reported dolt-cleanup reap-stage error. RSSBytes
+// is cosmetic-only downstream (planOrphanReap classifies purely on
+// ConfigPath/DataDir/CWDState, never on RSS), so requesting rss= here is not
+// worth trading away the whole scan for.
+func TestPSOutputFormatExcludesRSS(t *testing.T) {
+	if strings.Contains(psOutputFormat, "rss=") {
+		t.Fatalf("psOutputFormat = %q, must not request rss= (gastownhall/gascity#5201)", psOutputFormat)
 	}
 }
 
