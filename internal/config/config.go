@@ -1553,6 +1553,19 @@ func (p BeadPolicyConfig) DeleteAfterCloseDuration() time.Duration {
 // loop cannot spin faster than the storm-protection backstops can observe.
 const ProgressStallTimeoutMinimum = 5 * time.Minute
 
+// DefaultStatusProbeTimeout is the default per-call budget for a single runtime
+// status probe raced by `gc status` and `gc rig status`. Each probe is one
+// tmux/ps subprocess pair, and a single agent observation chains several of
+// them, so the budget is per sub-probe, not per agent.
+const DefaultStatusProbeTimeout = 50 * time.Millisecond
+
+// DefaultStatusObservationTimeout is the default budget for observing one
+// agent in `gc status` and `gc rig status`. It is the outer bound on the whole
+// observation, which chains several individual probes, each separately bounded
+// by DefaultStatusProbeTimeout. Raising the per-probe budget past this ceiling
+// has no effect, so the two move together.
+const DefaultStatusObservationTimeout = 750 * time.Millisecond
+
 // SessionConfig holds session provider settings.
 type SessionConfig struct {
 	// Provider selects the session backend: "fake", "fail", "subprocess",
@@ -1599,6 +1612,30 @@ type SessionConfig struct {
 	// StartupTimeout is how long to wait for each agent's Start() call before
 	// treating it as failed. Duration string (e.g., "60s", "2m"). Defaults to "60s".
 	StartupTimeout string `toml:"startup_timeout,omitempty" jsonschema:"default=60s"`
+	// StatusProbeTimeout is the per-call budget for a single runtime status
+	// probe issued by `gc status` and `gc rig status`. Each probe is one
+	// tmux/ps subprocess pair and a single agent observation chains several of
+	// them, so this bounds a sub-probe, not a whole agent. When a probe blows
+	// the budget the agent's runtime state is unobserved for that run and the
+	// command reports partial status rather than a stopped agent. On a loaded
+	// host — many sessions, a busy tmux server, or CPU contention from
+	// unrelated processes — the default is too tight and a healthy city renders
+	// as rows of `unknown (partial status)`; raise it there. Values that are
+	// too large cost wall time on a genuinely wedged runtime, because every
+	// unresponsive probe waits the full budget. Duration string (e.g., "400ms",
+	// "2s"). Defaults to "50ms". A non-positive value disables the bound and
+	// lets each probe run to completion.
+	StatusProbeTimeout string `toml:"status_probe_timeout,omitempty" jsonschema:"default=50ms"`
+	// StatusObservationTimeout is the budget for observing one agent in
+	// `gc status` and `gc rig status`. One observation chains several
+	// individually-bounded probes, so this is the ceiling the whole chain must
+	// fit inside: raising status_probe_timeout past this value cannot help,
+	// because the outer budget fires first and the agent still renders as
+	// `unknown (partial status)`. Raise both together when widening the probe
+	// budget on a loaded host. Duration string (e.g., "2s", "5s"). Defaults to
+	// "750ms". A non-positive value disables the bound and lets the
+	// observation run to completion.
+	StatusObservationTimeout string `toml:"status_observation_timeout,omitempty" jsonschema:"default=750ms"`
 	// ProgressStallTimeout, when set, enables progress-aware session recycling:
 	// a desired, alive, claim-less session on a healthy provider whose last
 	// provider-reported activity is older than this duration is restarted fresh.
@@ -1706,6 +1743,22 @@ func (s *SessionConfig) NudgeLockTimeoutDuration() time.Duration {
 // Defaults to 60s if empty or unparseable.
 func (s *SessionConfig) StartupTimeoutDuration() time.Duration {
 	return durationOr(s.StartupTimeout, 60*time.Second)
+}
+
+// StatusProbeTimeoutDuration returns the per-call runtime status probe budget
+// as a time.Duration. Unset or unparseable falls back to
+// DefaultStatusProbeTimeout; a non-positive configured value is returned as-is
+// and disables the bound at the call site.
+func (s *SessionConfig) StatusProbeTimeoutDuration() time.Duration {
+	return durationOr(s.StatusProbeTimeout, DefaultStatusProbeTimeout)
+}
+
+// StatusObservationTimeoutDuration returns the per-agent status observation
+// budget as a time.Duration. Unset or unparseable falls back to
+// DefaultStatusObservationTimeout; a non-positive configured value is returned
+// as-is and disables the bound at the call site.
+func (s *SessionConfig) StatusObservationTimeoutDuration() time.Duration {
+	return durationOr(s.StatusObservationTimeout, DefaultStatusObservationTimeout)
 }
 
 // ProgressStallTimeoutDuration returns the progress-stall recycle timeout, or

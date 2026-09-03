@@ -126,9 +126,18 @@ var (
 
 var (
 	controllerStatusStandaloneFallbackTimeout = 250 * time.Millisecond
-	statusObservationTimeout                  = 750 * time.Millisecond
 	statusSessionSnapshotTimeout              = 3 * time.Second
 )
+
+// statusObservationTimeoutForCity resolves the per-agent observation budget for
+// cfg. A nil city — the callers that observe before any config is loaded — gets
+// the built-in default.
+func statusObservationTimeoutForCity(cfg *config.City) time.Duration {
+	if cfg == nil {
+		return config.DefaultStatusObservationTimeout
+	}
+	return cfg.Session.StatusObservationTimeoutDuration()
+}
 
 // newStatusCmd creates the "gc status [path]" command.
 func newStatusCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -396,6 +405,18 @@ func observeSessionTargetWithWarning(
 		done <- observeResult{observation: obs, err: err}
 	}()
 
+	timeout := statusObservationTimeoutForCity(cfg)
+	if timeout <= 0 {
+		result := <-done
+		if result.err != nil {
+			markStatusProviderPartial(sp)
+			if stderr != nil {
+				fmt.Fprintf(stderr, "%s: observing %q: %v\n", cmdName, target.runtimeSessionName, result.err) //nolint:errcheck // best-effort stderr
+			}
+		}
+		return result.observation
+	}
+
 	select {
 	case result := <-done:
 		if result.err != nil {
@@ -405,10 +426,10 @@ func observeSessionTargetWithWarning(
 			}
 		}
 		return result.observation
-	case <-time.After(statusObservationTimeout):
+	case <-time.After(timeout):
 		markStatusProviderPartial(sp)
 		if stderr != nil {
-			fmt.Fprintf(stderr, "%s: observing %q timed out after %s\n", cmdName, target.runtimeSessionName, statusObservationTimeout) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: observing %q timed out after %s\n", cmdName, target.runtimeSessionName, timeout) //nolint:errcheck // best-effort stderr
 		}
 		return worker.LiveObservation{}
 	}
