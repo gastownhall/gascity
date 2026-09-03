@@ -153,6 +153,9 @@ func ResolveDoltConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string) (DoltCo
 	switch cfg.EndpointOrigin {
 	case EndpointOriginManagedCity:
 		if strings.EqualFold(strings.TrimSpace(cfg.DoltMode), "proxied-server") {
+			if strings.TrimSpace(cfg.DoltSocket) != "" || strings.TrimSpace(cfg.DoltHost) != "" || strings.TrimSpace(cfg.DoltPort) != "" {
+				return populateExternalTarget(target, cfg)
+			}
 			return target, nil
 		}
 		port, err := readManagedRuntimePort(fs, cityRoot)
@@ -440,7 +443,7 @@ func ValidateConnectionConfigState(fs fsys.FS, cityRoot, scopeRoot string, cfg C
 	if sameScope(scopeRoot, cityRoot) {
 		switch cfg.EndpointOrigin {
 		case EndpointOriginManagedCity:
-			if hasTrackedEndpoint {
+			if hasTrackedEndpoint && !strings.EqualFold(strings.TrimSpace(cfg.DoltMode), "proxied-server") {
 				return fmt.Errorf("managed city config must not track dolt.host, dolt.port, or dolt.user")
 			}
 		case EndpointOriginCityCanonical:
