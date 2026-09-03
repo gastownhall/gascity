@@ -319,6 +319,15 @@ func poolInstanceBaseNames(local string) []string {
 // would also accept "+1" and "0007", which no generator produces; letting them
 // through would make this predicate a claim about arbitrary strings rather than
 // about minted identities.
+//
+// Deliberately STRICTER than routeHasSlotSuffixShape
+// (demand_serve_predicate.go), which accepts any digit run ("007") because it
+// is a fail-open pre-filter on ROUTE shape. This one is a fail-closed claim
+// about minted IDENTITIES, and on "polecat-007" the two disagree by design:
+// here the unminted shape is PROTECTED AND NAMED in the sweep summary rather
+// than silently stripped to a base name — the safe direction for a suffix no
+// generator produces. Unifying them would force one predicate to answer the
+// other's question.
 func isPoolSlotNumber(s string) bool {
 	if s == "" || s == "0" || s[0] == '0' {
 		return false
