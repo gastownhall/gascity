@@ -480,15 +480,26 @@ func TestByIDPlanUsesTheRegisteredControllerRoutes(t *testing.T) {
 				t.Errorf("the by-id plan resolved %s through %p, want %p", resident.ID, owner.Store, wantStore)
 			}
 
-			// The production caller, with a scan that fails the test if it runs:
-			// a binding hit must return before the directory scan, so the funnel
-			// is never reached by this arm either.
+			// The production caller. The scan's opener DOES run on a binding
+			// hit now — refuseBindingRigCollision probes the scan's candidates
+			// so a rig holding the same id is refused rather than silently
+			// losing to the binding — so what this pins is narrower than "the
+			// scan never runs": the probe stays inside the directories the scan
+			// would have walked, and the binding is still what answers. The
+			// binding is not one of those directories, so no probe of it can be
+			// planned and the funnel's errStore is never reached.
+			var probed []string
 			store, dir, err := resolveOwningStoreDir(resident.ID, nil, cityPath, func(storeDir string) (beads.Store, error) {
-				t.Errorf("the convoy scan opened %q for an id the binding owns", storeDir)
-				return nil, errors.New("the scan must not run for a binding hit")
+				probed = append(probed, storeDir)
+				return splittest.NewWorkStore(t, "hq"), nil
 			})
 			if err != nil {
 				t.Fatalf("resolveOwningStoreDir(%s): %v", resident.ID, err)
+			}
+			for _, storeDir := range probed {
+				if !samePath(storeDir, cityPath) {
+					t.Errorf("the collision probe opened %q; this city configures no rigs, so its own directory is the only candidate", storeDir)
+				}
 			}
 			if store != wantStore {
 				t.Errorf("the convoy resolver served %s from %p, want the binding %p", resident.ID, store, wantStore)
