@@ -28,6 +28,7 @@ import (
 	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/gastownhall/gascity/internal/worker"
 	"github.com/spf13/cobra"
@@ -2107,10 +2108,47 @@ func resolveInlineBeadAction(cfg *config.City, beadOrFormula string, dryRun bool
 			return false, false, nil
 		}
 	}
+	// A reserved coordination-class prefix ("gcg-", "gcm-", "gcs-", "gco-",
+	// "gcn-") is minted only by a relocated class binding — workflow steps,
+	// mail, sessions, orders, nudges — and is never prose someone meant as a
+	// bead title. Falling through to store.Create() here would mint a task bead
+	// whose TITLE is the id string, silently fabricating a duplicate of whatever
+	// the caller meant to route with no error and no warning (westlands
+	// cr-ahjgr: five `gc sling <target> gcg--…` calls, five duplicate beads).
+	// Refuse loudly instead, the way multi-line inline text does above.
+	//
+	// This sits AFTER the store probe deliberately. A reserved prefix is only an
+	// ADVISORY on work stores (config.ReservedPrefixWarnings warns;
+	// config.ValidateRigs does not reject), so a work store can legitimately
+	// hold an id inside the class namespace — and when the probe above found it
+	// there, it is routed, exactly as before. Only an id that no reachable store
+	// holds reaches this refusal.
+	if prefix, ok := reservedClassPrefixForID(beadOrFormula); ok && isBeadIDCandidate(beadOrFormula) {
+		return false, false, fmt.Errorf("%q is in the reserved %q coordination-class namespace, which only a relocated class binding mints (workflow steps, mail, sessions, orders, nudges) — refusing to create a bead titled %q; gc sling routes work-ledger beads, and a coordination bead is driven by its own machinery rather than slung by hand", beadOrFormula, prefix+"-", beadOrFormula)
+	}
 	if dryRun {
 		return false, true, nil
 	}
 	return true, false, nil
+}
+
+// reservedClassPrefixForID returns the reserved coordination-class id prefix
+// whose namespace holds id (e.g. "gcg" for "gcg--9223372036854775645"), and
+// whether any does.
+//
+// Membership is storeref.IDInNamespace — the same predicate
+// storeref.ClassCandidates gates the by-id class route on — so this answers for
+// exactly the id set a class binding could own. Re-deriving the prefix with the
+// sling.BeadPrefix heuristic instead would answer the question a second time and
+// disagree: that heuristic only recovers "gcg" from a numeric or hash-shaped
+// suffix, so a descriptive id in the same namespace would slip past.
+func reservedClassPrefixForID(id string) (string, bool) {
+	for _, prefix := range config.ReservedClassPrefixes() {
+		if storeref.IDInNamespace(id, prefix) {
+			return prefix, true
+		}
+	}
+	return "", false
 }
 
 // isBeadIDCandidate reports whether s has the shape of a potential bead ID:
