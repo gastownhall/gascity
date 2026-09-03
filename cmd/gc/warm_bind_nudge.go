@@ -2,8 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -62,7 +66,16 @@ type warmClaimTriggerResolver func(triggerID string) (beads.Bead, error)
 //
 // A read error — a resolution the topology cannot answer, a refused city, a dark
 // leg — yields false: never nudge on uncertainty.
-func buildWarmClaimTriggerProbe(resolve warmClaimTriggerResolver) warmClaimTriggerProbe {
+//
+// That silence is safe but not free to operate: a declined nudge and a healthy
+// fleet where every trigger happens to be claimed look identical from outside. So
+// a fault — anything that is not the ordinary beads.ErrNotFound miss — is reported
+// to faults ONCE per probe. The reconciler builds one probe per tick, which makes
+// that once per tick rather than once per pool slot: a refused city or a dark
+// binding suppresses the nudge for every slot at once, so a per-session line would
+// be a fleet-sized burst of a single fact. A nil faults writer discards.
+func buildWarmClaimTriggerProbe(resolve warmClaimTriggerResolver, faults io.Writer) warmClaimTriggerProbe {
+	var reported sync.Once // the probe runs from async start goroutines too
 	return func(session beads.Bead) bool {
 		if resolve == nil {
 			return false
@@ -73,6 +86,11 @@ func buildWarmClaimTriggerProbe(resolve warmClaimTriggerResolver) warmClaimTrigg
 		}
 		wb, err := resolve(triggerID)
 		if err != nil {
+			if faults != nil && !errors.Is(err, beads.ErrNotFound) {
+				reported.Do(func() {
+					fmt.Fprintf(faults, "warm-bind claim nudge: resolving trigger %s failed, suppressing the nudge: %v\n", triggerID, err) //nolint:errcheck
+				})
+			}
 			return false
 		}
 		return isUnclaimedTrigger(wb, strings.TrimSpace(session.Metadata["session_name"]))

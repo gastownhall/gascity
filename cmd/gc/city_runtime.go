@@ -2419,6 +2419,60 @@ func (cr *CityRuntime) stopConfigWatcher() {
 // errors — a refused city, a dark leg, an id no leg could answer — reach the probe
 // as errors and it declines to nudge; nothing here converts a failed read into
 // absence.
+//
+// # The plan shape, and the two consequences of adopting it
+//
+// Plan(ByID) is: the binding that reserves the id's namespace under RoleAuthority,
+// else every unretired binding as a residence probe; then the city work ledger as
+// RoleWorkFallback; then each rig leg whose CONFIGURED prefix covers the id, as a
+// shadow. The work leg is the unprobed residual only when it is last, so as soon
+// as a rig shadow follows it, WORK IS PROBED FIRST and answers on a hit.
+//
+// That is the house by-id order — cliByIDOwner and the API's by-id resolver read
+// the same way — and taking it whole is deliberate, but it is the REVERSE of
+// controlBeadLedger's rig-scope-first order, which
+// TestControlDispatchRigScopePrefersItsOwnStore pins on purpose. The two lanes are
+// asking different questions: that one is HANDED a rig scope, so the rig's own
+// store leads by construction, while a pool slot's bound trigger arrives with no
+// scope at all and nothing licenses a rig leg to lead. So on a same-id collision
+// between the work ledger and a rig store, the CITY copy decides the nudge.
+// TestBuildWarmClaimTriggerProbe_SameIDCollisionResolvesToCityCopy pins it so a
+// future migration that mints a co-resident id changes a test rather than the
+// nudge. The stamp is not the tie-breaker for it: gc.trigger_bead_store_ref is the
+// demand LEG the row was counted under, chosen from the agent's configured rig
+// (build_desired_state.go:1755,1762), so it is not a residency statement and would
+// break ties toward a store the bead need not be in.
+//
+// Second consequence: shadowLegsCovering is IDInNamespace-gated, so a rig-resident
+// trigger whose id falls OUTSIDE its rig's EffectivePrefix — a rig whose prefix
+// changed in city.toml after those beads were minted — is out of the plan by
+// construction, where the deleted rig:<name> stamp parser reached it. It fails
+// closed to a lost warm-bind nudge
+// (TestBuildWarmClaimTriggerProbe_RigTriggerOutsideRigPrefixIsOutOfPlan).
+//
+// # Why servingRigs is the unfiltered rig map here
+//
+// residencyTopology's contract asks its caller to hand it the rigs it decided are
+// SERVING, because a suspended rig is routinely dark and a census over it comes
+// back Partial — and Partial means retain-don't-reap, so one suspended rig would
+// pin the whole fleet. A ByID plan has no Partial: a dark rig leg is PolicyFatal,
+// which surfaces as a resolution error, which the probe answers with the same
+// false it already gives a miss. The ANSWER is the same either way, and
+// beadReconcileTick holds no suspension frame — filtering here would buy it a
+// loadSuspensionState read per tick for a set that answer cannot use.
+//
+// The REPORTING is NOT the same either way, and that is an accepted cost here
+// rather than an equivalence. buildWarmClaimTriggerProbe reports every
+// non-ErrNotFound failure once per probe, and a dark leg is exactly that class,
+// where a filtered serving set would contribute no leg and leave a silent
+// ErrNotFound miss (TestBuildWarmClaimTriggerProbe_ReportsResolutionFaultOncePerTick
+// pins the dark-rig line). Nor does it converge on its own: the once-per-binding
+// marker is stamped only after a delivered nudge, so a probe that declines
+// re-faults on the next tick for as long as a slot keeps a binding into a
+// suspended rig — a configured steady state reported in the words of a transient
+// fault. That is accepted because the line is the only outside evidence the nudge
+// was declined at all. If the noise ever outweighs that evidence, hand this caller
+// servingRigStores as readyDemandSnapshotFingerprint does and delete this section.
 func (cr *CityRuntime) newWarmClaimTriggerResolver(servingRigs map[string]beads.Store) warmClaimTriggerResolver {
 	topo := cr.residencyTopology(servingRigs)
 	return func(triggerID string) (beads.Bead, error) {
@@ -2643,7 +2697,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		// warm-bind gap; on tmux it is the fast primary nudge ahead of the
 		// idle-timeout relaunch backstop, deduped by the marker + the
 		// unclaimed-trigger gate.
-		withWarmClaimProbe(buildWarmClaimTriggerProbe(cr.newWarmClaimTriggerResolver(rigStores))),
+		withWarmClaimProbe(buildWarmClaimTriggerProbe(cr.newWarmClaimTriggerResolver(rigStores), cr.stderr)),
 	}
 	if bootReconcile {
 		// #3288: skip the per-session orphan/failed-create session-bead closes on

@@ -317,9 +317,9 @@ type startExecutionOptions struct {
 	deferSessionClosesOnBoot bool
 	readyAssignedFlags       []bool
 	// warmClaimProbe, when set, enables the warm-bind claim nudge: it reports
-	// whether a pool slot's newly-bound trigger bead is still unclaimed, read from
-	// the store named by the session's gc.trigger_bead_store_ref. Built by the
-	// reconciler where the cached rig stores are in scope and consumed in
+	// whether a pool slot's newly-bound trigger bead is still unclaimed, resolved
+	// through the city's residency contract (newWarmClaimTriggerResolver). Built by
+	// the reconciler where the cached rig stores are in scope and consumed in
 	// startPreparedStartCandidate's warm-reuse branch. Nil disables the nudge.
 	warmClaimProbe warmClaimTriggerProbe
 }

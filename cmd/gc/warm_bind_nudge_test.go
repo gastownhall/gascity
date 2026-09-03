@@ -1,13 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"io"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 const warmClaimText = "Run gc hook --claim --json now; if it returns work, execute the claimed formula immediately."
@@ -210,19 +215,40 @@ func TestIsUnclaimedTrigger(t *testing.T) {
 	}
 }
 
-// warmClaimProbeFor builds the probe the reconciler installs, through the same
-// controller topology constructor the tick uses. Building it from a real
-// CityRuntime rather than from a hand-assembled storeref.Topology is what makes
-// these tests assert the production wiring: a topology written out here would
-// keep passing after the controller stopped building one.
-func warmClaimProbeFor(cfg *config.City, work beads.Store, rigs map[string]beads.Store, routes *storageRoutes) warmClaimTriggerProbe {
-	cr := &CityRuntime{
+// warmClaimRuntimeFor builds the controller the warm-bind lane reads through.
+// Going through a real CityRuntime rather than a hand-assembled storeref.Topology
+// is what makes these tests assert the production wiring: a topology written out
+// here would keep passing after the controller stopped building one.
+func warmClaimRuntimeFor(cfg *config.City, work beads.Store, rigs map[string]beads.Store, routes *storageRoutes) *CityRuntime {
+	return &CityRuntime{
 		cfg:                 cfg,
 		standaloneCityStore: work,
 		standaloneRigStores: rigs,
 		storageRoutes:       routes,
 	}
-	return buildWarmClaimTriggerProbe(cr.newWarmClaimTriggerResolver(cr.rigBeadStores()))
+}
+
+// warmClaimResolverFor builds the reader the reconciler hands the probe.
+func warmClaimResolverFor(cfg *config.City, work beads.Store, rigs map[string]beads.Store, routes *storageRoutes) warmClaimTriggerResolver {
+	cr := warmClaimRuntimeFor(cfg, work, rigs, routes)
+	return cr.newWarmClaimTriggerResolver(cr.rigBeadStores())
+}
+
+// warmClaimProbeFor builds the probe the reconciler installs over that resolver.
+func warmClaimProbeFor(cfg *config.City, work beads.Store, rigs map[string]beads.Store, routes *storageRoutes) warmClaimTriggerProbe {
+	return buildWarmClaimTriggerProbe(warmClaimResolverFor(cfg, work, rigs, routes), io.Discard)
+}
+
+// warmClaimByIDPlan is the by-id plan the warm-bind resolver executes for id.
+// Read alongside the probe assertions, it is what keeps a "the city copy won"
+// result from also passing on a plan that quietly lost the rig leg.
+func warmClaimByIDPlan(t *testing.T, cr *CityRuntime, id string) string {
+	t.Helper()
+	plan, err := storeref.Plan(storeref.ByID{ID: id}, cr.residencyTopology(cr.rigBeadStores()))
+	if err != nil {
+		t.Fatalf("Plan(ByID{%s}): %v", id, err)
+	}
+	return plan.String()
 }
 
 // warmBindStampedSession is a pool slot bound to trigger, carrying the
@@ -346,5 +372,182 @@ func TestBuildWarmClaimTriggerProbe_LegacyCityResolvesWorkAndRigLegs(t *testing.
 	// No bound trigger id → nothing to probe.
 	if probe(warmBindStampedSession("", "rig:alpha")) {
 		t.Fatal("no trigger id: want unclaimed=false")
+	}
+}
+
+// A same-id collision between the city work ledger and a rig store — on an id
+// INSIDE that rig's configured prefix, so the rig leg is genuinely in the plan —
+// resolves to the city copy, because Plan(ByID) probes the work fallback ahead of
+// the prefix-gated rig shadows.
+//
+// This pins the order, which is what makes it a decision rather than an accident.
+// It is deliberately the OPPOSITE of TestControlDispatchRigScopePrefersItsOwnStore:
+// that lane is HANDED a rig scope and pins the rig's own store first, while a pool
+// slot's trigger arrives with no scope at all, so nothing licenses a rig leg to
+// lead and the house by-id order (cliByIDOwner, internal/api's by-id resolver)
+// applies unchanged. newWarmClaimTriggerResolver's doc records the divergence.
+//
+// The two ledgers hold disjoint ids today, so the order cannot change a live
+// answer; pinning it means a future migration that does mint a co-resident id
+// changes THIS test rather than silently flipping every warm-bind nudge decision.
+func TestBuildWarmClaimTriggerProbe_SameIDCollisionResolvesToCityCopy(t *testing.T) {
+	// ra-1 is inside rig alpha's configured prefix, and both ledgers hold it.
+	collide := func(cityStatus, rigStatus string) *CityRuntime {
+		return warmClaimRuntimeFor(
+			residencyTestConfig(),
+			beads.NewMemStoreFrom(0, []beads.Bead{{ID: "ra-1", Status: cityStatus}}, nil),
+			map[string]beads.Store{"alpha": beads.NewMemStoreFrom(0, []beads.Bead{{ID: "ra-1", Status: rigStatus}}, nil)},
+			nil,
+		)
+	}
+	probeOf := func(cr *CityRuntime) warmClaimTriggerProbe {
+		return buildWarmClaimTriggerProbe(cr.newWarmClaimTriggerResolver(cr.rigBeadStores()), io.Discard)
+	}
+
+	// Precondition: BOTH ledgers are in the plan and the work leg leads. Without
+	// it, "the city copy decided" would also pass on a plan that lost the rig leg.
+	const wantPlan = `FirstOwner: ""[WorkFallback,Fatal] > rig:alpha[Shadow,Fatal]`
+	if got := warmClaimByIDPlan(t, collide("open", "open"), "ra-1"); got != wantPlan {
+		t.Fatalf("by-id plan = %q, want %q", got, wantPlan)
+	}
+
+	if probeOf(collide("in_progress", "open"))(warmBindStampedSession("ra-1", "rig:alpha")) {
+		t.Error("a claimed city copy must decide the nudge: the work leg is probed before the rig shadow")
+	}
+	if !probeOf(collide("open", "in_progress"))(warmBindStampedSession("ra-1", "rig:alpha")) {
+		t.Error("an open city copy must decide the nudge: the work leg is probed before the rig shadow")
+	}
+
+	// And the rig shadow is a live leg, not a decoration: with no city copy it
+	// answers, so the assertions above are leg ORDER and nothing else.
+	rigOnly := warmClaimProbeFor(
+		residencyTestConfig(),
+		beads.NewMemStore(),
+		map[string]beads.Store{"alpha": beads.NewMemStoreFrom(0, []beads.Bead{{ID: "ra-1", Status: "open"}}, nil)},
+		nil,
+	)
+	if !rigOnly(warmBindStampedSession("ra-1", "rig:alpha")) {
+		t.Error("rig shadow leg lost: a rig-resident open trigger must still read unclaimed")
+	}
+}
+
+// A rig-resident trigger whose id falls OUTSIDE that rig's effective prefix is out
+// of the by-id plan by construction — shadowLegsCovering is IDInNamespace-gated —
+// so it fails closed to no nudge. Pinned because it is the one population the
+// deleted rig:<name> stamp parser reached and the resolver does not.
+func TestBuildWarmClaimTriggerProbe_RigTriggerOutsideRigPrefixIsOutOfPlan(t *testing.T) {
+	outside := beads.Bead{ID: "zz-1", Status: "open"}
+	rigs := map[string]beads.Store{"alpha": beads.NewMemStoreFrom(0, []beads.Bead{outside}, nil)}
+
+	// "by construction" is the claim, so assert the construction: rig alpha holds
+	// zz-1 and is still absent from the plan, which is a work-only leg list.
+	cr := warmClaimRuntimeFor(residencyTestConfig(), beads.NewMemStore(), rigs, nil)
+	const wantPlan = `FirstOwner: ""[WorkFallback,Fatal]`
+	if got := warmClaimByIDPlan(t, cr, "zz-1"); got != wantPlan {
+		t.Fatalf("by-id plan = %q, want %q", got, wantPlan)
+	}
+
+	probe := warmClaimProbeFor(residencyTestConfig(), beads.NewMemStore(), rigs, nil)
+	if probe(warmBindStampedSession("zz-1", "rig:alpha")) {
+		t.Error("a rig bead outside its rig's prefix has no shadow leg; the probe must fail closed rather than answer from it")
+	}
+
+	// Control: the same id in the work ledger resolves, so the miss above is the
+	// prefix gate and not a probe that stopped reading anything.
+	inWork := warmClaimProbeFor(
+		residencyTestConfig(),
+		beads.NewMemStoreFrom(0, []beads.Bead{outside}, nil),
+		rigs,
+		nil,
+	)
+	if !inWork(warmBindStampedSession("zz-1", "rig:alpha")) {
+		t.Error("an open work-ledger trigger must read unclaimed")
+	}
+}
+
+// A resolution the topology cannot answer reaches the probe as an ERROR, not as a
+// miss, and the probe declines: never nudge on uncertainty. Asserting both halves
+// is the point — a future change to Plan's refusal gate or to PolicyFatal handling
+// that turned either case into beads.ErrNotFound would leave the probe's false
+// intact while quietly demoting a fault to an absence.
+func TestBuildWarmClaimTriggerProbe_ResolutionErrorsNeverNudge(t *testing.T) {
+	cases := map[string]struct {
+		trigger  string
+		resolver warmClaimTriggerResolver
+	}{
+		// A refused city routes its relocated classes at a store that answers
+		// every read with the standing refusal. gcg- is inside the binding's
+		// reserved namespace, so that binding LEADS the plan under PolicyFatal.
+		"refused binding": {
+			trigger: "gcg-1",
+			resolver: warmClaimResolverFor(
+				residencyTestConfig(),
+				beads.NewMemStore(),
+				nil,
+				splitRoutes(refusedClassStore{err: standingStorageRefusal{err: errStorageRefusedForTest{}}}),
+			),
+		},
+		// A suspended rig is routinely DARK: its store returns the open error on
+		// every read. ra-1 is inside alpha's prefix, so that dark leg is planned.
+		"dark rig leg": {
+			trigger: "ra-1",
+			resolver: warmClaimResolverFor(
+				residencyTestConfig(),
+				beads.NewMemStore(),
+				map[string]beads.Store{"alpha": unavailableStore{err: errors.New("open rig store alpha: no such file or directory")}},
+				nil,
+			),
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := tc.resolver(tc.trigger)
+			if err == nil {
+				t.Fatalf("resolving %s: want an error, got a resolved bead", tc.trigger)
+			}
+			if errors.Is(err, beads.ErrNotFound) {
+				t.Fatalf("resolving %s: an unreadable leg reported absence (%v); a fault must never read as a miss", tc.trigger, err)
+			}
+			if buildWarmClaimTriggerProbe(tc.resolver, io.Discard)(warmBindStampedSession(tc.trigger, "")) {
+				t.Errorf("%s: the probe nudged on an unresolvable trigger", name)
+			}
+		})
+	}
+}
+
+// A resolution fault is reported ONCE per probe — the probe is built once per
+// beadReconcileTick, so that is once per tick — rather than once per pool slot: a
+// refused city or a dark binding suppresses the nudge for every slot at once, and
+// a per-session line would be a fleet-sized log burst of one fact. An expected
+// miss stays silent, because a trigger no leg holds is ordinary.
+func TestBuildWarmClaimTriggerProbe_ReportsResolutionFaultOncePerTick(t *testing.T) {
+	var log bytes.Buffer
+	dark := warmClaimResolverFor(
+		residencyTestConfig(),
+		beads.NewMemStore(),
+		map[string]beads.Store{"alpha": unavailableStore{err: errors.New("open rig store alpha: no such file or directory")}},
+		nil,
+	)
+	probe := buildWarmClaimTriggerProbe(dark, &log)
+	for range 3 {
+		if probe(warmBindStampedSession("ra-1", "rig:alpha")) {
+			t.Fatal("dark rig leg: the probe must decline")
+		}
+	}
+	if got := strings.Count(log.String(), "\n"); got != 1 {
+		t.Fatalf("reported %d lines for one standing fault across 3 slots, want 1:\n%s", got, log.String())
+	}
+	if !strings.Contains(log.String(), "ra-1") {
+		t.Errorf("the report names no trigger, so it cannot be acted on: %q", log.String())
+	}
+
+	// An ordinary miss is not a fault and stays silent.
+	var quiet bytes.Buffer
+	miss := buildWarmClaimTriggerProbe(warmClaimResolverFor(residencyTestConfig(), beads.NewMemStore(), nil, nil), &quiet)
+	if miss(warmBindStampedSession("nobody-holds-me", "")) {
+		t.Fatal("missing trigger: the probe must decline")
+	}
+	if quiet.Len() != 0 {
+		t.Errorf("a trigger no leg holds logged %q; only faults are worth a line", quiet.String())
 	}
 }
