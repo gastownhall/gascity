@@ -670,6 +670,51 @@ MY_CUSTOM_VAR = "/path/to/thing"
 MY_CUSTOM_VAR = "$MY_CUSTOM_VAR"
 ```
 
+## Rotating a Provider API Key
+
+Symptom: an upstream key was rotated and you need the fleet on the new one,
+but it is not obvious which variable to change — a provider's credential is
+usually reached through two indirections.
+
+Use `gc provider credentials <provider>` to resolve it. The command reads the
+provider's `upstream_env` binding to find which env var carries the credential
+(`api_key` and `auth_token`; never `base_url`), resolves that name the way
+session start does, and follows the value's `$VAR` reference to the variable
+that actually holds the secret:
+
+```bash
+gc provider credentials zai
+```
+
+It is read-only, and it reports what would stop a change from taking effect:
+
+- a source variable the supervisor does not forward into its service
+  environment, which is dropped when the service file is regenerated — the
+  fleet then starts with a **blank** credential, not the old one;
+- a later config layer that overrides the credential for particular agents.
+  Session start merges `[workspace.env]` < provider < agent `env` and injects
+  the selected `[upstreams.<name>]` serving env last, so an agent that selects
+  an upstream reads a different variable than the provider names;
+- a malformed secrets file, which the supervisor abandons entirely rather than
+  skipping the bad line, dropping every credential in it.
+
+Then change the value at its source and apply it with the procedure in
+[Provider Credentials Dropped When the Supervisor Starts](#provider-credentials-dropped-when-the-supervisor-starts),
+followed by `gc restart` to cycle the agents.
+
+<Warning>
+Changing a credential does not apply itself. A credential change moves no
+config fingerprint, so no agent restarts on its own, and the supervisor
+resolves session environment from its own environment, fixed when it exec'd.
+Until the supervisor re-execs, every running session keeps the old credential.
+`gc restart` cycles agents only — it does not re-exec the supervisor.
+</Warning>
+
+One hazard the command cannot check for you: a value exported in the shell
+that regenerates the service file wins over the secrets file, which fills only
+names that shell left unset. If that shell exports the variable, the file entry
+is ignored and nothing changes.
+
 ## Supervisor Log Written Twice (journald + supervisor.log)
 
 `gc supervisor run` tees its output into `${GC_HOME}/supervisor.log`
