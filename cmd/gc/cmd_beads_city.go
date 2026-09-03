@@ -270,7 +270,7 @@ func validateExplicitExternalHost(host string) error {
 func validateCityEndpointOptions(opts cityEndpointOptions) error {
 	if !opts.External {
 		if strings.TrimSpace(opts.Host) != "" || strings.TrimSpace(opts.Port) != "" || strings.TrimSpace(opts.User) != "" {
-			return fmt.Errorf("use-managed does not accept --host, --port, or --user")
+			return fmt.Errorf("%s does not accept --host, --port, or --user", cityEndpointCommandName(opts))
 		}
 		if opts.AdoptUnverified {
 			return fmt.Errorf("--adopt-unverified is only valid with use-external")
@@ -302,6 +302,7 @@ func requestedCityEndpointState(cfg *config.City, currentState contract.ConfigSt
 			IssuePrefix:    prefix,
 			EndpointOrigin: contract.EndpointOriginManagedCity,
 			EndpointStatus: contract.EndpointStatusVerified,
+			DoltMode:       "server",
 		}
 	}
 	user := strings.TrimSpace(opts.User)

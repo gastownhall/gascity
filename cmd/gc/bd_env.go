@@ -2021,6 +2021,7 @@ func mergeRuntimeEnv(environ []string, overrides map[string]string) []string {
 		"BEADS_DOLT_PROXIED_SERVER",
 		"BEADS_DOLT_SERVER_HOST",
 		"BEADS_DOLT_SERVER_PORT",
+		"BEADS_DOLT_SERVER_SOCKET",
 		"BEADS_DOLT_SERVER_USER",
 		"GC_CITY",
 		"GC_CITY_ROOT", // kept for stripping: no code emits this anymore, but inherited values must be cleaned
