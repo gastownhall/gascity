@@ -609,6 +609,11 @@ type doctorJSONResult struct {
 }
 
 type doctorJSONReport struct {
+	// OK mirrors the blocking-failure gate the plain-text/exit-code path
+	// already uses (report.BlockingFailed == 0), so it must be set
+	// explicitly here -- writeCLIJSONLine's generic envelope only injects a
+	// hardcoded ok:true when the payload doesn't already carry an "ok" key.
+	OK             bool               `json:"ok"`
 	Passed         int                `json:"passed"`
 	Warned         int                `json:"warned"`
 	Failed         int                `json:"failed"`
@@ -642,6 +647,7 @@ func doctorSeverityString(s doctor.CheckSeverity) string {
 
 func writeDoctorJSON(w io.Writer, report *doctor.Report) error {
 	out := doctorJSONReport{
+		OK:             report.BlockingFailed == 0,
 		Passed:         report.Passed,
 		Warned:         report.Warned,
 		Failed:         report.Failed,
