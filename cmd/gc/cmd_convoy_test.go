@@ -2504,10 +2504,7 @@ func relocatedConvoyCity(t *testing.T) (cityPath, convoyID string, work, binding
 		t.Fatalf("seeding the frozen copy's open child: %v", err)
 	}
 
-	binding, relocated := cliSoleClassBindingStore(cityPath)
-	if !relocated {
-		t.Fatal("the fixture city resolved no class binding; it is not split")
-	}
+	binding = soleClassBindingStore(t, cityPath)
 	if _, err := migrationSeed(binding, beads.Bead{ID: frozen.ID, Title: "the binding's live convoy", Type: "convoy"}); err != nil {
 		t.Fatalf("carrying %s across to the class binding: %v", frozen.ID, err)
 	}
@@ -2693,9 +2690,8 @@ func TestBeadsListKeepsARigBeadThatCollidesWithABindingID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seeding the retained copy in the work store: %v", err)
 	}
-	if _, classStore := classResidentWorkShapedBead(t, cityPath, frozen.ID, "the binding's live row"); classStore == nil {
-		t.Fatal("seeding the binding's row returned no class store")
-	}
+	classResidentWorkShapedBead(t, soleClassBindingStore(t, cityPath), frozen.ID, "the binding's live row")
+	recensusAfterSeedingARelic(t, cityPath)
 	rigHoldingID(t, cityPath, frozen.ID, "the rig's own row", "task")
 
 	var stdout, stderr bytes.Buffer
@@ -2730,7 +2726,8 @@ func TestBeadsListFilteredByStatusDropsTheFrozenCopy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seeding the retained copy in the work store: %v", err)
 	}
-	_, classStore := classResidentWorkShapedBead(t, cityPath, frozen.ID, "the binding's live row")
+	classResidentWorkShapedBead(t, soleClassBindingStore(t, cityPath), frozen.ID, "the binding's live row")
+	classStore := recensusAfterSeedingARelic(t, cityPath)
 	if err := classStore.Close(frozen.ID); err != nil {
 		t.Fatalf("closing the binding's row: %v", err)
 	}
@@ -2799,9 +2796,8 @@ func TestBeadsListRefusesWhenTheOwnershipProbeFaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seeding the retained copy in the work store: %v", err)
 	}
-	if _, classStore := classResidentWorkShapedBead(t, cityPath, frozen.ID, "the binding's live row"); classStore == nil {
-		t.Fatal("seeding the binding's row returned no class store")
-	}
+	classResidentWorkShapedBead(t, soleClassBindingStore(t, cityPath), frozen.ID, "the binding's live row")
+	recensusAfterSeedingARelic(t, cityPath)
 	var probe *idsFaultingClassStore
 	installWrappedClassBinding(t, cityPath, func(previous beads.Store) beads.Store {
 		probe = &idsFaultingClassStore{Store: previous, err: errors.New("the id index is corrupt")}

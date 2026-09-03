@@ -7258,10 +7258,7 @@ func relocatedWorkflowCity(t *testing.T) (cityPath, rootID, bindingOnlyID string
 		t.Fatalf("seeding the retained workflow step in the work store: %v", err)
 	}
 
-	binding, relocated := cliSoleClassBindingStore(cityPath)
-	if !relocated {
-		t.Fatal("the fixture city resolved no class binding; it is not split")
-	}
+	binding = soleClassBindingStore(t, cityPath)
 	carried := rootShape
 	carried.ID = root.ID
 	carried.Title = "the binding's live workflow"
@@ -7486,10 +7483,7 @@ func TestWorkflowReopenSourceSeesTheRelocatedRoot(t *testing.T) {
 		t.Fatalf("the seeded source bead is %q, want closed", seeded.Status)
 	}
 
-	binding, relocated := cliSoleClassBindingStore(cityPath)
-	if !relocated {
-		t.Fatal("the fixture city resolved no class binding; it is not split")
-	}
+	binding := soleClassBindingStore(t, cityPath)
 	root, err := binding.Create(beads.Bead{
 		Title:  "the binding's live workflow",
 		Type:   "task",
@@ -7722,10 +7716,7 @@ func TestWorkflowDeleteReportsAFailedCloseInTheBinding(t *testing.T) {
 // which leg the walk is on.
 func TestWorkflowDeleteSourceRefusesWhenTheBindingFaultsOnARigLeg(t *testing.T) {
 	cityPath, rootID, _, work, _ := relocatedWorkflowCity(t)
-	binding, relocated := cliSoleClassBindingStore(cityPath)
-	if !relocated {
-		t.Fatal("the fixture city resolved no class binding")
-	}
+	binding := soleClassBindingStore(t, cityPath)
 	const sourceID = "rig-src-1"
 	rig := rigHoldingID(t, cityPath, sourceID, "the rig's source bead", "task")
 	for _, store := range []beads.Store{work, binding} {

@@ -779,11 +779,7 @@ func TestBeadsListFallbackReadsTheRelocatedBinding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seeding the retained copy in the work store: %v", err)
 	}
-	binding, relocated := cliSoleClassBindingStore(cityPath)
-	if !relocated {
-		t.Fatal("the fixture city resolved no class binding; it is not split")
-	}
-	classResidentWorkShapedBead(t, binding, frozen.ID, "the binding's live row")
+	classResidentWorkShapedBead(t, soleClassBindingStore(t, cityPath), frozen.ID, "the binding's live row")
 	classStore := recensusAfterSeedingARelic(t, cityPath)
 	mustCreateClassBead(t, classStore, beads.Bead{Title: "minted in the binding after the migration", Type: "task"})
 	if _, err := work.Create(beads.Bead{Title: "a work bead the binding never held", Type: "task"}); err != nil {

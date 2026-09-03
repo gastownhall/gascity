@@ -152,22 +152,22 @@ func foreignProviderCity(t *testing.T) (cityPath string, classStore beads.Store)
 	return cityPath, store
 }
 
-// cliSoleClassBindingStore resolves the city's sole relocated class binding as
-// a STORE, for fixtures that seed both sides of a migration and have no error
-// channel of their own.
+// soleClassBindingStore resolves the city's sole relocated class binding as a
+// STORE, for the fixtures that seed both sides of a migration.
 //
-// The fan-out — the only error cliSoleClassBinding returns — is a topology this
+// A fan-out — the only error cliSoleClassBinding returns — is a topology this
 // build refuses to serve, so a fixture that met one has not built the city it
 // meant to build and says so here rather than seeding half of it.
-func cliSoleClassBindingStore(cityPath string) (beads.Store, bool) {
+func soleClassBindingStore(t *testing.T, cityPath string) beads.Store {
+	t.Helper()
 	binding, relocated, err := cliSoleClassBinding(cityPath)
 	if err != nil {
-		return refusedClassStore{err: standingStorageRefusal{err: err}}, true
+		t.Fatalf("resolving the city's class binding: %v", err)
 	}
 	if !relocated {
-		return nil, false
+		t.Fatal("the fixture city resolved no class binding; it is not split")
 	}
-	return binding.Store, true
+	return binding.Store
 }
 
 // recensusAfterSeedingARelic reopens the funnel so the binding's relic census
@@ -194,21 +194,18 @@ func recensusAfterSeedingARelic(t *testing.T, cityPath string) beads.Store {
 	if err := closeCLIStorageRoutes(); err != nil {
 		t.Fatalf("closing the funnel so the binding is censused again: %v", err)
 	}
-	store, relocated := cliSoleClassBindingStore(cityPath)
-	if !relocated {
-		t.Fatal("the reopened funnel resolved no class binding; the fixture's city stopped being split across the reopen")
-	}
-	return store
+	return soleClassBindingStore(t, cityPath)
 }
 
-// dropDerivedResidencyMemo drops one city's memoized binding grouping, for the
-// fixtures that swap a route's store out from under it.
+// dropDerivedResidencyMemo invalidates the grouping derived from these routes.
 //
-// The grouping is DERIVED from the routes, and nothing recomputes it when a
-// test reaches into routes.stores directly. Without this a fault-injecting row
-// holds a store captured before the swap and passes against a healthy one,
-// which is the failure mode a fault-injection row exists to rule out. Dropped
-// again on cleanup so the swap does not outlive the test that made it.
+// Swapping routes.stores in place is invisible to cliResidencyBindings, which
+// caches the class-to-store grouping it read out of those routes: anything that
+// already resolved the grouping keeps handing out the stores that were there
+// BEFORE the swap. A test that routed one command before installing its failing
+// store would then exercise a healthy store while asserting on a fault path,
+// and pass for the wrong reason. Dropping the memo here makes that ordering bug
+// unwritable rather than merely currently absent.
 func dropDerivedResidencyMemo(t *testing.T, cityPath string) {
 	t.Helper()
 	dropCLIResidencyBindings(filepath.Clean(cityPath))
@@ -740,6 +737,7 @@ func failClassBindingReads(t *testing.T, cityPath string, cause error) {
 		restore[class] = previous
 		routes.stores[class] = store
 	}
+	dropDerivedResidencyMemo(t, cityPath)
 	t.Cleanup(func() {
 		for class, previous := range restore {
 			routes.stores[class] = previous
@@ -1885,6 +1883,7 @@ func stubClassBindingStore(t *testing.T, cityPath string, store beads.Store) {
 		restore[class] = previous
 		routes.stores[class] = store
 	}
+	dropDerivedResidencyMemo(t, cityPath)
 	t.Cleanup(func() {
 		for class, previous := range restore {
 			routes.stores[class] = previous
