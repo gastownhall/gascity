@@ -49,12 +49,18 @@ type primeHookInput struct {
 	Source        string `json:"source"`
 	SessionID     string `json:"session_id"`
 	HookEventName string `json:"hook_event_name"`
+	// Cwd is the working directory the provider reports for the session the
+	// hook is firing for. It is the only field in the payload that does not
+	// come from this process's (possibly foreign) environment, so it is what
+	// the identity guard checks the ambient GC_* identity against.
+	Cwd string `json:"cwd"`
 }
 
 type primeHookContext struct {
 	Source            string
 	HookEventName     string
 	ProviderSessionID string
+	Cwd               string
 }
 
 // newPrimeCmd creates the "gc prime [agent-name]" command.
@@ -360,6 +366,28 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 	cityName := loadedCityName(cfg, cityPath)
 	if hookMode && strings.TrimSpace(agentName) == "" {
 		agentName = primeHookAgentFromWorkDir(cfg)
+	}
+
+	// Identity guard: the hook payload's cwd is the one field that does not
+	// come from this process's environment. If it proves the ambient GC_*
+	// identity belongs to a different rig's session, refuse to render a role
+	// prompt — a wrong prompt here sends every later gc/bd command in the
+	// session at the wrong ledger and the wrong mail identity.
+	if hookMode {
+		verdict, owner := classifyPrimeHookCwd(hookContext.Cwd, primeIdentityRootsFromEnv(cfg, cityPath, os.Getenv))
+		switch verdict {
+		case primeIdentityForeign:
+			refusal := primeIdentityMismatchPrompt(agentName, os.Getenv("GC_RIG"), hookContext.Cwd, owner)
+			// suppressPrompt is deliberately false: a managed session that
+			// already got its startup prompt still needs to see this.
+			// No hook context suffix and no afterDelivery callback: a refusal
+			// must not consume a pending handoff, which belongs to whichever
+			// session legitimately owns this identity.
+			writePrimePromptWithFormat(stdout, cityName, agentName, refusal, hookMode, hookFormat, false, "", nil)
+			return 0
+		case primeIdentityUnknown:
+			warnPrimeIdentityUnknown(stderr, agentName, hookContext.Cwd)
+		}
 	}
 
 	// Look up agent in config. First try qualified identity resolution
@@ -742,6 +770,9 @@ func readPrimeHookContext() primeHookContext {
 		}
 		if providerSessionID := strings.TrimSpace(input.SessionID); providerSessionID != "" {
 			ctx.ProviderSessionID = providerSessionID
+		}
+		if cwd := strings.TrimSpace(input.Cwd); cwd != "" {
+			ctx.Cwd = cwd
 		}
 	}
 	return ctx
