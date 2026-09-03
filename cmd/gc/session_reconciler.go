@@ -3668,7 +3668,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if sessionIsQuarantinedInfo(info, clk) {
 				continue // crash-loop protection
 			}
-			if episode, err := sessFront.LoadStartupHealthEpisode(name); err == nil && !episode.QuarantinedUntil.IsZero() && clk.Now().Before(episode.QuarantinedUntil) {
+			if episode, err := sessFront.LoadStartupHealthEpisode(name); err != nil {
+				// Fail open: proceed as if no quarantine episode exists rather
+				// than block every session start on a transient store-read
+				// error. Logged (matching the two LoadStartupHealthEpisode
+				// call sites in session_lifecycle_parallel.go) so the miss is
+				// observable instead of silent.
+				fmt.Fprintf(stderr, "session reconciler: loading startup-health episode for %s: %v\n", name, err) //nolint:errcheck
+			} else if !episode.QuarantinedUntil.IsZero() && clk.Now().Before(episode.QuarantinedUntil) {
 				continue // startup-health crash-loop protection (pending-create failures)
 			}
 			if pendingCreateStartInFlightInfo(info, clk, startupTimeout) {
