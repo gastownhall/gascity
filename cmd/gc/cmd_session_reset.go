@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/spf13/cobra"
@@ -100,9 +101,21 @@ func cmdSessionReset(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 		}
 	}
 
-	if err := handle.Reset(context.Background()); err != nil {
+	// A session whose create never committed cannot be rescued by a restart:
+	// handle.Reset only refreshes provider conversation state, leaving the
+	// pending-create claim, the stale persisted command and the alias in place,
+	// so the controller re-enters the identical drift compare on the next tick.
+	// Roll it back instead and let the controller recreate it (ga-6wkhl).
+	rescued, err := rescuePendingCreateForReset(sessStore, sessionID, time.Now().UTC(), stderr)
+	if err != nil {
 		fmt.Fprintf(stderr, "gc session reset: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	if !rescued {
+		if err := handle.Reset(context.Background()); err != nil {
+			fmt.Fprintf(stderr, "gc session reset: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 	}
 
 	_ = pokeController(cityPath)
@@ -116,6 +129,10 @@ func cmdSessionReset(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 			fmt.Fprintf(stderr, "gc session reset: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
+		return 0
+	}
+	if rescued {
+		fmt.Fprintf(stdout, "Session %s had a create that never completed; rolled it back and released its identifiers. Controller will recreate it.\n", sessionID) //nolint:errcheck // best-effort stdout
 		return 0
 	}
 	fmt.Fprintf(stdout, "Session %s reset requested. Controller will restart it fresh.\n", sessionID) //nolint:errcheck // best-effort stdout
