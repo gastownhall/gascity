@@ -149,10 +149,38 @@ func ResolveDoltConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string) (DoltCo
 	} else if ok && strings.TrimSpace(db) != "" {
 		target.Database = strings.TrimSpace(db)
 	}
+	if strings.TrimSpace(target.DoltMode) == "" {
+		if mode, ok, err := ReadDoltMode(fs, filepath.Join(scopeRoot, ".beads", "metadata.json")); err != nil {
+			return DoltConnectionTarget{}, err
+		} else if ok {
+			target.DoltMode = strings.TrimSpace(mode)
+		}
+	}
+	// Beads persists externally-owned proxied upstreams in its provider
+	// sidecar. This authority applies to city and inherited rig scopes alike;
+	// do not force inherited scopes through the city's managed runtime path.
+	if strings.EqualFold(target.DoltMode, "proxied-server") {
+		if sidecar, ok, err := readProxiedClientInfo(fs, filepath.Join(scopeRoot, ".beads", "proxied_server_client_info.json")); err != nil {
+			return DoltConnectionTarget{}, err
+		} else if ok {
+			target.Host, target.Port, target.Socket, target.User = sidecar.External.Host, strconv.Itoa(sidecar.External.Port), sidecar.External.Socket, sidecar.External.User
+			target.External = true
+			target.EndpointStatus = EndpointStatusVerified
+			if sameScope(scopeRoot, cityRoot) {
+				target.EndpointOrigin = EndpointOriginCityCanonical
+			} else {
+				target.EndpointOrigin = EndpointOriginExplicit
+			}
+			return target, nil
+		}
+	}
 
 	switch cfg.EndpointOrigin {
 	case EndpointOriginManagedCity:
-		if strings.EqualFold(strings.TrimSpace(cfg.DoltMode), "proxied-server") {
+		if strings.EqualFold(strings.TrimSpace(target.DoltMode), "proxied-server") {
+			if strings.TrimSpace(cfg.DoltSocket) != "" || strings.TrimSpace(cfg.DoltHost) != "" || strings.TrimSpace(cfg.DoltPort) != "" {
+				return populateExternalTarget(target, cfg)
+			}
 			return target, nil
 		}
 		port, err := readManagedRuntimePort(fs, cityRoot)
@@ -169,6 +197,44 @@ func ResolveDoltConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string) (DoltCo
 	default:
 		return DoltConnectionTarget{}, fmt.Errorf("unsupported endpoint origin %q for %s", cfg.EndpointOrigin, cfgPath)
 	}
+}
+
+type proxiedClientInfo struct {
+	External *struct {
+		Host   string `json:"host"`
+		Port   int    `json:"port"`
+		Socket string `json:"socket"`
+		User   string `json:"user"`
+	} `json:"external"`
+}
+
+func readProxiedClientInfo(fs fsys.FS, path string) (proxiedClientInfo, bool, error) {
+	b, err := fs.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return proxiedClientInfo{}, false, nil
+		}
+		return proxiedClientInfo{}, false, err
+	}
+	var info proxiedClientInfo
+	if err := json.Unmarshal(b, &info); err != nil {
+		return proxiedClientInfo{}, false, fmt.Errorf("read proxied client info: %w", err)
+	}
+	if info.External == nil {
+		// Managed-local proxied scopes persist the same sidecar with only
+		// proxy lifecycle fields. The absence of an external block is valid and
+		// means Beads owns the upstream locally.
+		return proxiedClientInfo{}, false, nil
+	}
+	e := info.External
+	if strings.TrimSpace(e.Socket) != "" {
+		if e.Host != "" || e.Port != 0 || !filepath.IsAbs(e.Socket) {
+			return proxiedClientInfo{}, false, fmt.Errorf("invalid proxied client info socket target")
+		}
+	} else if e.Host == "" || e.Port < 1 || e.Port > 65535 {
+		return proxiedClientInfo{}, false, fmt.Errorf("invalid proxied client info host/port target")
+	}
+	return proxiedClientInfo{External: e}, true, nil
 }
 
 // ValidateCanonicalConfigState validates canonical scope config invariants.
