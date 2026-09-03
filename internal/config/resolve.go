@@ -423,11 +423,37 @@ func MergeProviderOverBuiltin(base, city ProviderSpec) ProviderSpec {
 // covers schema-managed args that normalization folded into that layer's
 // defaults): explicit wins.
 //
-// Known caveat (accepted): in a leaf -> custom -> builtin:codex chain the
-// gate runs on the leaf-most merge, so an intermediate layer's explicit
-// model pin is already folded into the merged map by the time the
-// profile-carrying leaf merges over it, and that pin is suppressed as
-// well - the profile owns model/effort for the whole chain.
+// Known limitations (all accepted; pinned by the characterization tests in
+// profile_optiondefaults_limits_test.go):
+//
+//  1. Chain flattening. In a leaf -> custom -> builtin:codex chain the gate
+//     runs on the leaf-most merge, so an intermediate layer's explicit model
+//     pin is already folded into the merged map by the time the
+//     profile-carrying leaf merges over it, and that pin is suppressed as
+//     well - the profile owns model/effort for the whole chain.
+//
+//  2. Wrapper outer-flag false positive. argsRouteThroughProfile scans the
+//     merged argv flatly and has no notion of which side of a wrapper
+//     separator a flag sits on, so a wrapper whose OUTER tool takes its own
+//     --profile trips the gate even when the codex command line past "--"
+//     carries no profile. The direction is fail-safe - the launch loses the
+//     preset pins and codex falls back to its own config, rather than
+//     clobbering a profile that does not exist - and it is recoverable:
+//     naming model/effort in the layer's own option_defaults is explicit, so
+//     the gate exempts them.
+//
+//  3. agent.args bypasses the gate. The gate is a resolution-time decision
+//     over the provider spec's args, but mergeAgentOverrides replaces
+//     rp.Args wholesale afterwards and does not recompute EffectiveDefaults.
+//     An agent that supplies the --profile in agent.args therefore never
+//     reaches the gate and still gets the preset --model / reasoning-effort
+//     injected next to it - the very clobber this gate exists to prevent.
+//     The mirror also holds: when the provider layer routed through a
+//     profile and agent.args replaces those args with a profile-free command
+//     line, the suppression outlives the args it was decided from
+//     (fail-safe). Closing this would mean re-evaluating the gate against
+//     the post-override argv, which is a change to the resolution contract
+//     rather than to this function; it is deliberately out of scope here.
 //
 // Only model and effort are suppressed: their schema entries carry no
 // `Default`, so ComputeEffectiveDefaults cannot resurrect them.
@@ -469,7 +495,9 @@ func suppressPresetModelEffortForProfile(builtinAncestor string, city, merged Pr
 // "--profile=<name>" token with a non-empty name. A bare "--profile" with
 // no value (or an empty "--profile=") is not treated as profile-routed —
 // such a command is malformed — and short/other flag forms are out of
-// scope.
+// scope. The scan is flat: it does not know which side of a wrapper
+// separator a flag sits on. See limitation 2 on
+// suppressPresetModelEffortForProfile.
 func argsRouteThroughProfile(args []string) bool {
 	for i, a := range args {
 		if a == "--profile" {
