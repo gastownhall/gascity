@@ -2365,44 +2365,28 @@ func TestWriteEmbeddedManagedDoesNotClobberExistingBackup(t *testing.T) {
 	}
 }
 
-func TestInstallCursorHookUpgradesPreviousManagedFile(t *testing.T) {
-	desired, err := core.PackFS.ReadFile("overlay/per-provider/cursor/.cursor/hooks.json")
-	if err != nil {
-		t.Fatalf("read embedded Cursor hooks: %v", err)
-	}
-	legacy := bytes.Replace(desired, []byte(`\"${GC_BIN:-gc}\" prime --hook`), []byte(`gc prime --hook`), 1)
-	if bytes.Equal(legacy, desired) {
-		t.Fatal("embedded Cursor hook does not contain the GC_BIN-aware sessionStart command")
-	}
-
-	fs := fsys.NewFake()
-	const dst = "/work/.cursor/hooks.json"
-	fs.Files[dst] = legacy
-	if err := Install(fs, "/city", "/work", []string{"cursor"}); err != nil {
-		t.Fatalf("Install: %v", err)
-	}
-
-	if got := string(fs.Files[dst]); !strings.Contains(got, `\"${GC_BIN:-gc}\" prime --hook`) {
-		t.Fatalf("previous managed Cursor hook was not upgraded:\n%s", got)
-	}
-	if got := fs.Files[dst+".bak"]; !bytes.Equal(got, legacy) {
-		t.Fatalf("legacy Cursor hook backup = %q, want original managed content", got)
-	}
-}
-
+// TestInstallCursorHookUpgradesHistoricalManagedFile pins the most recently
+// released managed .cursor/hooks.json shape (#3457): bare gc commands with
+// provider tool paths prepended by &&. Documents released before #3457 differ
+// in the command body, so no transformation of today's document reproduces
+// them; they are intentionally left un-upgraded, which makes this the only
+// shape Install adopts today.
 func TestInstallCursorHookUpgradesHistoricalManagedFile(t *testing.T) {
 	desired, err := core.PackFS.ReadFile("overlay/per-provider/cursor/.cursor/hooks.json")
 	if err != nil {
 		t.Fatalf("read embedded Cursor hooks: %v", err)
 	}
 	variants := cursorHookLegacyVariants(desired)
-	if len(variants) < 3 {
-		t.Fatalf("cursorHookLegacyVariants() = %d, want historical variant", len(variants))
+	if len(variants) != 1 {
+		t.Fatalf("cursorHookLegacyVariants() = %d, want exactly the most recent released shape (#3457); adopting an older released shape is a deliberate widening, not a bug fix", len(variants))
+	}
+	legacy := variants[0]
+	if bytes.Contains(legacy, []byte("BD_BIN")) {
+		t.Fatalf("legacy variant carries a BD_BIN clause no released managed hook contains:\n%s", legacy)
 	}
 
 	fs := fsys.NewFake()
 	const dst = "/work/.cursor/hooks.json"
-	legacy := variants[len(variants)-1]
 	fs.Files[dst] = legacy
 	if err := Install(fs, "/city", "/work", []string{"cursor"}); err != nil {
 		t.Fatalf("Install: %v", err)
@@ -2415,7 +2399,11 @@ func TestInstallCursorHookUpgradesHistoricalManagedFile(t *testing.T) {
 	}
 }
 
-func TestInstallCursorHookUpgradesManagedPrependingPathFile(t *testing.T) {
+// TestInstallCursorHookPreservesUnreleasedIntermediateShapes guards the
+// narrowing above: documents that only ever existed mid-development are not
+// managed content, so Install must leave them alone rather than silently
+// overwrite whatever a user has on disk.
+func TestInstallCursorHookPreservesUnreleasedIntermediateShapes(t *testing.T) {
 	desired, err := core.PackFS.ReadFile("overlay/per-provider/cursor/.cursor/hooks.json")
 	if err != nil {
 		t.Fatalf("read embedded Cursor hooks: %v", err)
@@ -2424,22 +2412,27 @@ func TestInstallCursorHookUpgradesManagedPrependingPathFile(t *testing.T) {
 		workspaceFirst = `export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\"`
 		ambientFirst   = `export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\"`
 	)
-	legacy := bytes.ReplaceAll(desired, []byte(workspaceFirst), []byte(ambientFirst))
-	if bytes.Equal(legacy, desired) {
-		t.Fatal("embedded Cursor hook does not preserve the inherited workspace PATH")
+	unreleased := map[string][]byte{
+		"bare sessionStart with the pin clause": bytes.Replace(desired,
+			[]byte(`\"${GC_BIN:-gc}\" prime --hook`), []byte(`gc prime --hook`), 1),
+		"ambient-first PATH with the pin clause": bytes.ReplaceAll(desired,
+			[]byte(workspaceFirst), []byte(ambientFirst)),
 	}
-
-	fs := fsys.NewFake()
-	const dst = "/work/.cursor/hooks.json"
-	fs.Files[dst] = legacy
-	if err := Install(fs, "/city", "/work", []string{"cursor"}); err != nil {
-		t.Fatalf("Install: %v", err)
-	}
-	if got := string(fs.Files[dst]); !strings.Contains(got, workspaceFirst) {
-		t.Fatalf("managed Cursor hook with ambient-first PATH was not upgraded:\n%s", got)
-	}
-	if got := fs.Files[dst+".bak"]; !bytes.Equal(got, legacy) {
-		t.Fatalf("legacy Cursor hook backup = %q, want original managed content", got)
+	for name, existing := range unreleased {
+		t.Run(name, func(t *testing.T) {
+			if bytes.Equal(existing, desired) {
+				t.Fatal("embedded Cursor hook no longer differs from this intermediate shape")
+			}
+			fs := fsys.NewFake()
+			const dst = "/work/.cursor/hooks.json"
+			fs.Files[dst] = existing
+			if err := Install(fs, "/city", "/work", []string{"cursor"}); err != nil {
+				t.Fatalf("Install: %v", err)
+			}
+			if got := fs.Files[dst]; !bytes.Equal(got, existing) {
+				t.Fatalf("unreleased Cursor hook shape was overwritten:\n%s", got)
+			}
+		})
 	}
 }
 

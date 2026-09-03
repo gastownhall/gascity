@@ -81,9 +81,12 @@ func bdContextCommandRunnerForCity(cityPath string) beads.CommandRunner {
 	}
 }
 
-// workspacePinnedBdBinary resolves bd only from an explicitly configured
-// workspace PATH. An unconfigured workspace retains the ambient executable
-// lookup performed by the caller.
+// workspacePinnedBdBinary resolves the pinned bd executable in the order
+// workspace.env BD_BIN, then workspace.env PATH, then an ambient BD_BIN. It
+// adds one strictness to workspacePinnedBdBinaryOptional: a workspace PATH
+// that resolves no bd is a configuration error rather than an empty pin.
+// Returning "" means no pin was configured anywhere, and the caller keeps its
+// own ambient executable lookup.
 func workspacePinnedBdBinary(cityPath string) (string, error) {
 	pinned, err := workspacePinnedBdBinaryOptional(cityPath)
 	if err != nil {
@@ -92,6 +95,14 @@ func workspacePinnedBdBinary(cityPath string) (string, error) {
 	if pinned != "" {
 		return pinned, nil
 	}
+	// This re-stats and re-parses the city.toml that
+	// workspacePinnedBdBinaryOptional already read, solely to re-answer whether
+	// workspace.env configured a PATH at all. The duplicate is deliberate: it
+	// keeps the optional resolver's contract to a single answer ("which bd is
+	// pinned") rather than returning an intermediate signal that exists only
+	// for this one strict caller. Both loads use the no-refresh loader, which
+	// omits the managed-provider-shim rewrite the full loader performs, so what
+	// repeats here is a parse and not a side effect.
 	if _, err := os.Stat(filepath.Join(cityPath, "city.toml")); errors.Is(err, os.ErrNotExist) {
 		return "", nil
 	} else if err != nil {
@@ -112,6 +123,18 @@ func workspacePinnedBdBinary(cityPath string) (string, error) {
 // bd. The strict workspacePinnedBdBinary wrapper uses the same resolution for
 // externally bound stores, while managed-city process environments use this
 // optional form to carry a valid pin when one exists.
+//
+// A BD_BIN that is set but not an absolute executable is an error here, in
+// both the workspace.env and the ambient branch. This layer answers "which bd
+// did the operator pin", so a value that cannot be a pin is a configuration
+// fault to report, not a value to quietly drop — reporting it names the stale
+// pin instead of running a different bd against a Dolt store. That is a
+// deliberately narrower contract than execCommandRunner in
+// internal/beads/bdstore.go, which reads BD_BIN off an already-resolved child
+// environment as a last-mile executable override and treats a non-absolute
+// value as "no override" so it falls back to PATH. Keep both sides in mind
+// when changing either: this function decides whether a pin exists, that one
+// only applies a pin already decided here.
 func workspacePinnedBdBinaryOptional(cityPath string) (string, error) {
 	if _, err := os.Stat(filepath.Join(cityPath, "city.toml")); errors.Is(err, os.ErrNotExist) {
 		return "", nil

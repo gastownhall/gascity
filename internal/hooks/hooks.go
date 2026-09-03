@@ -261,31 +261,30 @@ func cursorHookNeedsUpgrade(existing, desired []byte) bool {
 	return false
 }
 
+// cursorHookLegacyVariants regenerates the most recently released managed
+// .cursor/hooks.json (#3457), derived from today's desired document so the
+// match stays independent of JSON formatting. Documents released before #3457
+// differ in the command body, not just the PATH prologue, so no transformation
+// of today's document reproduces them; they are intentionally left
+// un-upgraded rather than nonexistent, and adopting one is a deliberate
+// widening decision rather than a correction. Only released shapes belong
+// here: each variant widens the set of on-disk files installOverlayManaged
+// silently overwrites as managed, so a variant no workspace can be holding
+// costs safety and buys nothing.
 func cursorHookLegacyVariants(desired []byte) [][]byte {
 	const (
 		gcAware       = `\"${GC_BIN:-gc}\"`
 		gcBare        = `gc`
 		workspacePath = `export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\"; if [ -n \"${BD_BIN:-}\" ]; then export PATH=\"${BD_BIN%/*}:$PATH\"; fi; `
-		pinnedPath    = `export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\"; if [ -n \"${BD_BIN:-}\" ]; then export PATH=\"${BD_BIN%/*}:$PATH\"; fi; `
 		oldPath       = `export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\"`
 	)
-	variants := make([][]byte, 0, 3)
-	// The immediately previous managed hook only used the GC_BIN-aware
-	// session-start command. Keep its narrow upgrade path for existing
-	// workspaces without treating arbitrary user-authored JSON as managed.
-	if legacy := bytes.Replace(desired, []byte(gcAware+` prime --hook`), []byte(gcBare+` prime --hook`), 1); !bytes.Equal(legacy, desired) {
-		variants = append(variants, legacy)
-	}
-	// The pin-aware managed hook still put ambient user tool directories ahead
-	// of workspace.env PATH. Cursor does not preserve GC_BIN/BD_BIN for every
-	// hook process, so that ordering could select an incompatible installed gc
-	// or bd instead of the workspace-pinned toolchain.
-	if legacy := bytes.ReplaceAll(desired, []byte(workspacePath), []byte(pinnedPath)); !bytes.Equal(legacy, desired) {
-		variants = append(variants, legacy)
-	}
-	// Older releases used a bare gc command and prepended provider tool paths
-	// with &&. Generate that exact managed document from today's desired data so
-	// the migration remains byte-shape independent of JSON formatting.
+	variants := make([][]byte, 0, 1)
+	// Every managed hooks.json released to date uses a bare gc command and
+	// prepends provider tool paths with &&. The BD_BIN clause and the
+	// GC_BIN-aware commands are introduced by this change, so no released
+	// document carries them and no unreleased intermediate shape needs its
+	// own variant. Pre-#3457 released documents are out of scope here by
+	// choice, not because they do not exist.
 	legacy := bytes.ReplaceAll(desired, []byte(workspacePath), []byte(oldPath+` && `))
 	legacy = bytes.ReplaceAll(legacy, []byte(gcAware), []byte(gcBare))
 	if !bytes.Equal(legacy, desired) {

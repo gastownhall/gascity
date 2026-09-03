@@ -420,10 +420,13 @@ ensure_database_registered() {
 }
 
 # seed_fresh_managed_bd_version_witness records the bd version that is about
-# to initialize a database created by this invocation. bd 1.2+ uses this
-# bounded witness to distinguish current server-mode workspaces from legacy
-# .beads/dolt layouts. Never create or replace it for a pre-existing database:
-# doing so would bypass bd's explicit cross-era migration guard.
+# to initialize a database created by this invocation. It probes the same
+# "${BD_BIN:-bd}" that run_bd_pinned runs, so the witness names the binary that
+# actually initializes the workspace rather than whichever bd happens to be on
+# PATH. bd 1.2+ uses this bounded witness to distinguish current server-mode
+# workspaces from legacy .beads/dolt layouts. Never create or replace it for a
+# pre-existing database: doing so would bypass bd's explicit cross-era
+# migration guard.
 seed_fresh_managed_bd_version_witness() {
     local dir="$1"
     local marker="$dir/.beads/.local_version"
@@ -431,7 +434,7 @@ seed_fresh_managed_bd_version_witness() {
 
     [ ! -e "$marker" ] || return 0
 
-    if ! raw=$(bd version 2>/dev/null); then
+    if ! raw=$("${BD_BIN:-bd}" version 2>/dev/null); then
         die "failed to read bd version while initializing fresh managed Dolt workspace at $dir"
     fi
     version=$(printf '%s\n' "$raw" | sed -nE 's/^[Bb][Dd] [Vv]ersion v?([0-9]+(\.[0-9]+)+).*/\1/p' | head -n 1)
@@ -2587,73 +2590,12 @@ run_bd_pinned() {
     )
 }
 
-# bd_witness_is_current mirrors bd's currentVersionWitness
-# (cmd/bd/legacy_upgrade_guard.go): a clean X.Y.Z where every field is numeric
-# and the major is >= 1. It reports whether an existing .beads/.local_version
-# already proves a current-era (post-1.0) workspace.
-bd_witness_is_current() {
-    local _v _major _minor _rest _patch
-    _v="${1#v}"
-    case "$_v" in
-        ''|*[!0-9.]*) return 1 ;;
-    esac
-    _major="${_v%%.*}"
-    _rest="${_v#*.}"
-    [ "$_rest" != "$_v" ] || return 1
-    _minor="${_rest%%.*}"
-    _patch="${_rest#*.}"
-    [ "$_patch" != "$_rest" ] || return 1
-    case "$_patch" in *.*) return 1 ;; esac
-    [ -n "$_major" ] && [ -n "$_minor" ] && [ -n "$_patch" ] || return 1
-    [ "$_major" -ge 1 ] 2>/dev/null || return 1
-    return 0
-}
-
-# seed_bd_current_era_witness writes .beads/.local_version with a current-era
-# version marker before `bd init --server` runs. beads v63's legacy-upgrade
-# guard (cmd/bd/legacy_upgrade_guard.go) refuses a server-mode workspace whose
-# .beads/dolt data root carries no current-era witness (a major >= 1 version):
-# it cannot tell a freshly server-created root from a legacy pre-migration one,
-# so it fails closed. gc's managed Dolt keeps its data under .beads/dolt and
-# marks metadata dolt_mode=server — exactly the shape the guard refuses — so we
-# assert, truthfully (gc created the root with the running bd), that the
-# workspace is current era. The guard honors a major >= 1 witness and returns
-# clean; bd overwrites the marker with its own version on the first tracked
-# command, so a witness that already proves a current era is left untouched.
-# Only seeds into an EXISTING .beads: when .beads is absent there is no
-# .beads/dolt root for the guard to trip on, and creating .beads here would
-# race the fresh-init permission tightening (ensure_beads_dir_permissions).
-seed_bd_current_era_witness() {
-    local dir="$1"
-    local beads_dir="$dir/.beads"
-    local witness="$beads_dir/.local_version"
-    [ -d "$beads_dir" ] || return 0
-    if [ -f "$witness" ]; then
-        local existing
-        existing=$(tr -d '[:space:]' < "$witness" 2>/dev/null)
-        if bd_witness_is_current "$existing"; then
-            return 0
-        fi
-    fi
-    local version
-    version=$("${BD_BIN:-bd}" version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
-    if ! bd_witness_is_current "$version"; then
-        version="1.0.0"
-    fi
-    local tmp="$witness.tmp.$$"
-    if printf '%s\n' "$version" > "$tmp" 2>/dev/null; then
-        mv -f "$tmp" "$witness" 2>/dev/null || rm -f "$tmp" 2>/dev/null
-    fi
-    return 0
-}
-
 run_bd_init_pinned() {
     local dir="$1"
     local prefix="$2"
     local dolt_database="$3"
     local host="$4"
     local force_init="${5:-false}"
-    seed_bd_current_era_witness "$dir"
     if [ "$force_init" = "true" ]; then
         run_bd_pinned "$dir" init --force --quiet --server -p "$prefix" --database "$dolt_database" --skip-hooks --skip-agents \
             --server-host "$host" --server-port "$DOLT_PORT" "$dir" || die "bd init failed for $dir"
