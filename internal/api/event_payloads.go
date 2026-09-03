@@ -310,6 +310,29 @@ func SessionLifecyclePayloadJSON(sessionID, template, reason string) json.RawMes
 	return b
 }
 
+// SessionAsyncStartRefreshPayload is the typed payload for the async-start
+// pre-commit refresh events (session.async_start_drift_rolled_back,
+// session.async_start_refresh_stalled).
+//
+// It deliberately carries command FINGERPRINTS rather than the commands
+// themselves: a resolved session command is an argv that routinely carries
+// provider credentials, and this payload lands in events.jsonl, the SSE stream,
+// and the dashboard. The fingerprints are enough to tell "the command changed"
+// from "the same drift is repeating" without putting a secret on the wire.
+type SessionAsyncStartRefreshPayload struct {
+	SessionID string `json:"session_id" doc:"Canonical session bead ID. Always present."`
+	Template  string `json:"template,omitempty" doc:"Session template name when known at the emission site."`
+	Outcome   string `json:"outcome" doc:"Lifecycle outcome recorded for the discarded start."`
+	// PreparedCommandFingerprint and CurrentCommandFingerprint are short
+	// SHA-256 prefixes of the template-resolved and persisted commands.
+	PreparedCommandFingerprint string `json:"prepared_command_fingerprint,omitempty" doc:"Short SHA-256 prefix of the template-resolved command."`
+	CurrentCommandFingerprint  string `json:"current_command_fingerprint,omitempty" doc:"Short SHA-256 prefix of the command persisted on the session bead."`
+	ConsecutiveFailures        int    `json:"consecutive_failures,omitempty" doc:"Consecutive async-start refresh failures for this session; set on the escalation event."`
+}
+
+// IsEventPayload marks SessionAsyncStartRefreshPayload as an events.Payload variant.
+func (SessionAsyncStartRefreshPayload) IsEventPayload() {}
+
 // MoleculeResolvedPayload is the typed payload for molecule.resolved events.
 // It records a molecule root's state transition at its auto-close site and
 // joins it to the resolving session resolved from the root's stamped
@@ -667,6 +690,8 @@ func init() {
 	events.RegisterPayload(events.SessionResetStalled, events.SessionResetStalledPayload{})
 	events.RegisterPayload(events.SessionWorkQueryFailed, SessionLifecyclePayload{})
 	events.RegisterPayload(events.SessionColdStartTimeout, events.NoPayload{})
+	events.RegisterPayload(events.SessionAsyncStartDriftRolledBack, SessionAsyncStartRefreshPayload{})
+	events.RegisterPayload(events.SessionAsyncStartRefreshStalled, SessionAsyncStartRefreshPayload{})
 	events.RegisterPayload(events.ConvoyCreated, events.NoPayload{})
 	events.RegisterPayload(events.ConvoyClosed, events.NoPayload{})
 	events.RegisterPayload(events.ControllerStarted, events.NoPayload{})

@@ -4230,6 +4230,12 @@ work remain attached to the existing session bead. For named sessions, reset
 also clears any tripped named-session respawn circuit breaker before requesting
 the fresh restart.
 
+One case is not an in-place restart: a session whose create never completed and
+is no longer in flight cannot be restarted, because its stale identity is what
+blocks it. Reset rolls that session back instead — closing the bead and
+releasing its alias so the controller can build a replacement. A create that is
+still spawning, or one whose runtime is alive, is never rolled back.
+
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 
 ```

@@ -3735,7 +3735,16 @@ func TestCommitAsyncStartResult_GenerationDriftWithMatchingTokenCommits(t *testi
 	}
 }
 
-func TestCommitAsyncStartResult_IgnoresCommandChangedDuringStartup(t *testing.T) {
+// TestCommitAsyncStartResult_RollsBackPendingCreateWhenCommandChangedDuringStartup
+// replaces the former ..._IgnoresCommandChangedDuringStartup, whose
+// "pending_create_claim = true, want true for pending-create retry" assertion
+// encoded the ga-6wkhl defect as a contract. Retrying is exactly what cannot
+// work here: the drifted side of the compare is the persisted command, only a
+// completed create rewrites it, so every retry re-derives the same discard while
+// the row keeps its claim and its alias. The start is still discarded and the
+// stale runtime still stopped; what changes is that the pending create is now
+// rolled back instead of retained.
+func TestCommitAsyncStartResult_RollsBackPendingCreateWhenCommandChangedDuringStartup(t *testing.T) {
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 28, 13, 6, 0, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -3807,8 +3816,11 @@ func TestCommitAsyncStartResult_IgnoresCommandChangedDuringStartup(t *testing.T)
 	if got := updated.Metadata["last_woke_at"]; got != "" {
 		t.Fatalf("last_woke_at = %q, want cleared so the new command can retry next tick", got)
 	}
-	if got := updated.Metadata["pending_create_claim"]; got != "true" {
-		t.Fatalf("pending_create_claim = %q, want true for pending-create retry", got)
+	if got := updated.Metadata["pending_create_claim"]; got == "true" {
+		t.Fatalf("pending_create_claim = %q, want cleared: a drifted pending create must be rolled back, not retried against a command only a completed create could rewrite", got)
+	}
+	if updated.Status != "closed" {
+		t.Fatalf("status = %q, want closed so the row surrenders its identifiers and the next tick recreates it against the current command", updated.Status)
 	}
 	if got := updated.Metadata["command"]; got != "CUSTOM_VERSION=v2 report" {
 		t.Fatalf("command = %q, want current config preserved", got)

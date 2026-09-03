@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/spf13/cobra"
 )
 
@@ -23,6 +24,12 @@ fresh provider conversation state. Session identity, alias, mail, and queued
 work remain attached to the existing session bead. For named sessions, reset
 also clears any tripped named-session respawn circuit breaker before requesting
 the fresh restart.
+
+One case is not an in-place restart: a session whose create never completed and
+is no longer in flight cannot be restarted, because its stale identity is what
+blocks it. Reset rolls that session back instead — closing the bead and
+releasing its alias so the controller can build a replacement. A create that is
+still spawning, or one whose runtime is alive, is never rolled back.
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		Args: cobra.ExactArgs(1),
@@ -100,22 +107,48 @@ func cmdSessionReset(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 		}
 	}
 
-	if err := handle.Reset(context.Background()); err != nil {
+	// A session whose create never committed cannot be rescued by a restart:
+	// handle.Reset only refreshes provider conversation state, leaving the
+	// pending-create claim, the stale persisted command and the alias in place,
+	// so the controller re-enters the identical drift compare on the next tick.
+	// Roll it back instead and let the controller recreate it (ga-6wkhl).
+	rescued, err := rescuePendingCreateForReset(sessStore, sp, sessionResetRescueBudget(cfg), sessionID, clock.Real{}, stderr)
+	if err != nil {
 		fmt.Fprintf(stderr, "gc session reset: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	if !rescued {
+		if err := handle.Reset(context.Background()); err != nil {
+			fmt.Fprintf(stderr, "gc session reset: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 	}
 
 	_ = pokeController(cityPath)
 
+	// Mode distinguishes the two outcomes on the wire. They are not
+	// interchangeable to a caller: "restart" keeps the bead and the session ID,
+	// while "rollback" closed the bead as failed-create and released the alias,
+	// so the ID is terminal and the replacement row will have a different one. A
+	// script polling the original ID after a rollback would wait forever.
+	mode := "restart"
+	if rescued {
+		mode = "rollback"
+	}
 	if asJSON {
 		if err := writeSessionActionJSON(stdout, sessionActionResult{
 			Action:    "reset",
+			Mode:      mode,
 			SessionID: sessionID,
 			Identity:  identity,
 		}); err != nil {
 			fmt.Fprintf(stderr, "gc session reset: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
+		return 0
+	}
+	if rescued {
+		fmt.Fprintf(stdout, "Session %s had a create that never completed; rolled it back and released its identifiers. Controller will recreate it.\n", sessionID) //nolint:errcheck // best-effort stdout
 		return 0
 	}
 	fmt.Fprintf(stdout, "Session %s reset requested. Controller will restart it fresh.\n", sessionID) //nolint:errcheck // best-effort stdout

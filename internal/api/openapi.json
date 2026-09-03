@@ -2548,6 +2548,9 @@
             "$ref": "#/components/schemas/RotatedPayload"
           },
           {
+            "$ref": "#/components/schemas/SessionAsyncStartRefreshPayload"
+          },
+          {
             "$ref": "#/components/schemas/SessionCreateSucceededPayload"
           },
           {
@@ -7257,6 +7260,41 @@
         },
         "required": [
           "agents"
+        ],
+        "type": "object"
+      },
+      "SessionAsyncStartRefreshPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "consecutive_failures": {
+            "description": "Consecutive async-start refresh failures for this session; set on the escalation event.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "current_command_fingerprint": {
+            "description": "Short SHA-256 prefix of the command persisted on the session bead.",
+            "type": "string"
+          },
+          "outcome": {
+            "description": "Lifecycle outcome recorded for the discarded start.",
+            "type": "string"
+          },
+          "prepared_command_fingerprint": {
+            "description": "Short SHA-256 prefix of the template-resolved command.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Canonical session bead ID. Always present.",
+            "type": "string"
+          },
+          "template": {
+            "description": "Session template name when known at the emission site.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "outcome"
         ],
         "type": "object"
       },
@@ -12212,6 +12250,8 @@
             "request.result.session.message": "#/components/schemas/TypedEventStreamEnvelopeRequestResultSessionMessage",
             "request.result.session.submit": "#/components/schemas/TypedEventStreamEnvelopeRequestResultSessionSubmit",
             "rig.provision.progress": "#/components/schemas/TypedEventStreamEnvelopeRigProvisionProgress",
+            "session.async_start_drift_rolled_back": "#/components/schemas/TypedEventStreamEnvelopeSessionAsyncStartDriftRolledBack",
+            "session.async_start_refresh_stalled": "#/components/schemas/TypedEventStreamEnvelopeSessionAsyncStartRefreshStalled",
             "session.cold_start_timeout": "#/components/schemas/TypedEventStreamEnvelopeSessionColdStartTimeout",
             "session.crashed": "#/components/schemas/TypedEventStreamEnvelopeSessionCrashed",
             "session.demand_claim_divergence": "#/components/schemas/TypedEventStreamEnvelopeSessionDemandClaimDivergence",
@@ -12436,6 +12476,12 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeRigProvisionProgress"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionAsyncStartDriftRolledBack"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionAsyncStartRefreshStalled"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionColdStartTimeout"
@@ -13728,6 +13774,8 @@
                 "session.work_query_failed",
                 "session.demand_claim_divergence",
                 "session.cold_start_timeout",
+                "session.async_start_drift_rolled_back",
+                "session.async_start_refresh_stalled",
                 "bead.created",
                 "bead.closed",
                 "bead.deleted",
@@ -16329,6 +16377,120 @@
         "title": "TypedEventStreamEnvelope rig.provision.progress",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeSessionAsyncStartDriftRolledBack": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionAsyncStartRefreshPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.async_start_drift_rolled_back",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.async_start_drift_rolled_back",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeSessionAsyncStartRefreshStalled": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionAsyncStartRefreshPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.async_start_refresh_stalled",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.async_start_refresh_stalled",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSessionColdStartTimeout": {
         "additionalProperties": false,
         "properties": {
@@ -18050,6 +18212,8 @@
             "request.result.session.message": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultSessionMessage",
             "request.result.session.submit": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit",
             "rig.provision.progress": "#/components/schemas/TypedTaggedEventStreamEnvelopeRigProvisionProgress",
+            "session.async_start_drift_rolled_back": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionAsyncStartDriftRolledBack",
+            "session.async_start_refresh_stalled": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionAsyncStartRefreshStalled",
             "session.cold_start_timeout": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionColdStartTimeout",
             "session.crashed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionCrashed",
             "session.demand_claim_divergence": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence",
@@ -18274,6 +18438,12 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeRigProvisionProgress"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionAsyncStartDriftRolledBack"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionAsyncStartRefreshStalled"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionColdStartTimeout"
@@ -19649,6 +19819,8 @@
                 "session.work_query_failed",
                 "session.demand_claim_divergence",
                 "session.cold_start_timeout",
+                "session.async_start_drift_rolled_back",
+                "session.async_start_refresh_stalled",
                 "bead.created",
                 "bead.closed",
                 "bead.deleted",
@@ -22425,6 +22597,128 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope rig.provision.progress",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSessionAsyncStartDriftRolledBack": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionAsyncStartRefreshPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.async_start_drift_rolled_back",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.async_start_drift_rolled_back",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSessionAsyncStartRefreshStalled": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionAsyncStartRefreshPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.async_start_refresh_stalled",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.async_start_refresh_stalled",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeSessionColdStartTimeout": {

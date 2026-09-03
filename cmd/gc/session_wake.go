@@ -69,6 +69,10 @@ func preWakeCommit(
 		Now:               clk.Now(),
 		SleepReason:       sleepReason,
 		FreshWake:         freshWake,
+		// Carry the episode's existing start marker so a retried start does not
+		// renew the stale-create bound, but only while the row is still IN that
+		// episode — waking a row that left creating opens a new one (ga-6wkhl).
+		ExistingPendingCreateStartedAt: pendingCreateStartedAtForWake(info),
 	})
 	if writeErr := sessFront.ApplyPatch(info.ID, batch); writeErr != nil {
 		return 0, "", nil, fmt.Errorf("pre-wake metadata commit: %w", writeErr)

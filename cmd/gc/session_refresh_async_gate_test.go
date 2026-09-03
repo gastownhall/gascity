@@ -79,15 +79,18 @@ func TestRefreshAsyncStartRejectsNonSessionBead(t *testing.T) {
 			},
 			outcome: "success",
 		}
-		_, ok, cleanupRuntime, releaseInFlight := refreshAsyncStartResult(result, store, ioDiscard{})
-		if ok {
-			t.Fatal("refreshAsyncStartResult ok=true for a bead that failed the front-door session gate; want refresh-failed")
+		_, verdict := refreshAsyncStartResult(result, store, ioDiscard{})
+		if verdict.commit {
+			t.Fatal("refreshAsyncStartResult commit=true for a bead that failed the front-door session gate; want refresh-failed")
 		}
-		if cleanupRuntime {
+		if verdict.cleanupRuntime {
 			t.Error("cleanupRuntime=true; the refresh-failed (front-door reject) path must not request runtime cleanup")
 		}
-		if !releaseInFlight {
+		if !verdict.releaseInFlight {
 			t.Error("releaseInFlight=false; the refresh-failed path must release the in-flight lease so the next tick retries")
+		}
+		if verdict.rollbackPendingCreate {
+			t.Error("rollbackPendingCreate=true; a front-door reject is not a drift rollback")
 		}
 	})
 
@@ -116,9 +119,9 @@ func TestRefreshAsyncStartRejectsNonSessionBead(t *testing.T) {
 			},
 			outcome: "success",
 		}
-		refreshed, ok, _, _ := refreshAsyncStartResult(result, store, ioDiscard{})
-		if !ok {
-			t.Fatal("refreshAsyncStartResult ok=false for a valid session bead; want proceed")
+		refreshed, verdict := refreshAsyncStartResult(result, store, ioDiscard{})
+		if !verdict.commit {
+			t.Fatal("refreshAsyncStartResult commit=false for a valid session bead; want proceed")
 		}
 		if refreshed.prepared.candidate.info.ID != bead.ID {
 			t.Errorf("candidate.info.ID = %q, want %q (twin not refreshed from the front-door read)", refreshed.prepared.candidate.info.ID, bead.ID)

@@ -173,10 +173,25 @@ const (
 	// Emitted by the session reconciler's start-result commit path; the
 	// envelope's Subject carries the session name.
 	SessionColdStartTimeout = "session.cold_start_timeout"
-	ConvoyCreated           = "convoy.created"
-	ConvoyClosed            = "convoy.closed"
-	ControllerStarted       = "controller.started"
-	ControllerStopped       = "controller.stopped"
+	// SessionAsyncStartDriftRolledBack fires when an async start is discarded
+	// because the desired command drifted during startup AND the session's
+	// create had not committed yet, so the discard is rolled back rather than
+	// treated as superseded. Without the rollback the row keeps its
+	// pending-create claim and its alias while never converging (ga-6wkhl).
+	// Emitted once per transition — the rolled-back row is closed and recreated
+	// — so a stuck session is one event, not one per retry.
+	SessionAsyncStartDriftRolledBack = "session.async_start_drift_rolled_back"
+	// SessionAsyncStartRefreshStalled fires when a session's async start
+	// commit has failed its pre-commit refresh
+	// asyncStartFailureEscalationThreshold times in a row. It is the
+	// escalation half of the drift-rollback observability: a run of identical
+	// failures that never reaches the rollback arm still becomes visible
+	// instead of scrolling past as stderr (ga-6wkhl, ga-gg4mv).
+	SessionAsyncStartRefreshStalled = "session.async_start_refresh_stalled"
+	ConvoyCreated                   = "convoy.created"
+	ConvoyClosed                    = "convoy.closed"
+	ControllerStarted               = "controller.started"
+	ControllerStopped               = "controller.stopped"
 	// ControlStalled fires once, when a control bead's bounded semantic-refusal
 	// retry budget expires and the control dispatcher quarantines it. Before
 	// this event the control plane had no control.* vocabulary at all, so a
@@ -360,6 +375,8 @@ var KnownEventTypes = []string{
 	SessionWorkQueryFailed,
 	SessionDemandClaimDivergence,
 	SessionColdStartTimeout,
+	SessionAsyncStartDriftRolledBack,
+	SessionAsyncStartRefreshStalled,
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
 	BeadClaimRejected, BeadClaimReleased,
