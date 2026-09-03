@@ -51,8 +51,17 @@ func (t *idemCreateRecorderTx) Create(b beads.Bead) (beads.Bead, error) {
 // grows an arm that claims it, the write becomes a stranded one: the record
 // lands in the work ledger while the class's own readers look at the relocated
 // binding, and the rig-create idempotency axis silently stops converging on a
-// split city. Nothing else in the tree would notice, which is why the hazard
-// gets a pin instead of a seam.
+// split city. The one thing that would notice is confirmInfraConvergence
+// (cmd/gc/infra_class_migrate.go), which re-checks containment on every boot
+// of a converged split city and refuses to serve while naming the stranded
+// ids — but only after the writes are already stranded, and not at all on a
+// city that converged before its copy manifest was recorded, where
+// stranded-write detection is off. Failing at build time instead is why the
+// hazard gets a pin rather than a seam.
+//
+// The pin's scope is createIdemRecord's create-time literal: the post-create
+// SetMetadataBatch writers are trusted to stay within gc.idem.*, a namespace
+// no classifier arm keys on.
 func TestRigIdemRecordsStayWorkClass(t *testing.T) {
 	rec := &idemCreateRecorder{Store: beads.NewMemStore()}
 	if _, err := createIdemRecord(rec, "c1", "req-classpin1", "digestval", "7", "web", idemStateInFlight); err != nil {
