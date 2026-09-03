@@ -148,10 +148,21 @@ func reapClosedBeadWorktrees(
 		}
 		rigWorktreeDir := filepath.Join(wtRoot, rigName)
 
-		worktrees, err := git.New(rigRoot).WorktreeList()
+		// discoverWorktreeLiveness is the single shared scan: it enumerates
+		// every worktree git knows about for this rig — including ones
+		// outside .gc/worktrees entirely — and computes liveness for each
+		// against the pass's authoritative live set. Pass 1 below still
+		// narrows to gc-owned candidates before anything is ever reaped;
+		// pass 2 reuses the liveness already computed here instead of
+		// re-scanning per candidate.
+		worktreeLivenessResults, err := discoverWorktreeLiveness(rigRoot, live, liveSessionDirs)
 		if err != nil {
 			fmt.Fprintf(stderr, "reapClosedBeadWorktrees: listing worktrees for rig %s (%s): %v\n", rigName, rigRoot, err) //nolint:errcheck
 			continue
+		}
+		livenessByPath := make(map[string]worktreeLiveness, len(worktreeLivenessResults))
+		for _, wl := range worktreeLivenessResults {
+			livenessByPath[wl.Path] = wl
 		}
 
 		// Pass 1: discover reap-eligible candidates — closed bead, and old
@@ -160,7 +171,7 @@ func reapClosedBeadWorktrees(
 		// borrow-veto scan below can run as a single batched query per rig
 		// (FR-3) instead of once per worktree.
 		var candidates []reapCandidate
-		for _, wt := range worktrees {
+		for _, wt := range worktreeLivenessResults {
 			worktreePath := wt.Path
 
 			// Only per-bead worktrees under this rig's .gc/worktrees/<rig>/
@@ -270,14 +281,15 @@ func reapClosedBeadWorktrees(
 
 			// Liveness gate (fail closed). Protect the tree when a live process
 			// or active session is working in it, or when liveness could not be
-			// determined at all.
+			// determined at all. Reuses the liveness already computed by
+			// discoverWorktreeLiveness above rather than re-scanning.
 			if reason == "" {
 				switch {
 				case !live.scanned:
 					reason = "liveness scan unavailable (failing closed, protecting all)"
 				default:
-					if isLive, why := worktreeIsLive(worktreePath, live, liveSessionDirs); isLive {
-						reason = "live: " + why
+					if wl := livenessByPath[worktreePath]; wl.Live {
+						reason = "live: " + wl.Reason
 					}
 				}
 			}

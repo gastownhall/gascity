@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
@@ -327,6 +329,35 @@ func resolveGraphStore(routes *storageRoutes, workStore beads.Store, cfg *config
 	return resolveClassStore(routes, workStore, cfg, cityPath, config.BeadClassGraph, rec)
 }
 
+// scopeIsCity reports whether a scope store the caller opened at storePath is
+// the city's own store rather than a rig's.
+//
+// This is the predicate behind every graph-class routing decision, and it is
+// deliberately one function. Graph bindings are city-keyed: resolveClassStore
+// holds a single city-level store per class, so there is no per-rig binding to
+// route to, and `gc storage migrate` copies only the city work store. Any
+// coordination surface that answers "does this scope take the graph class?"
+// must answer it the same way, or two sibling surfaces end up reading different
+// databases for beads of one class.
+func scopeIsCity(cityPath, storePath string) bool {
+	return samePath(resolveStoreScopeRoot(cityPath, storePath), cityPath)
+}
+
+// scopeGraphStore routes a scope store to the city's graph-class binding when
+// the scope IS the city, and returns the store it was handed otherwise.
+//
+// Control beads and convergence roots are both ClassGraph and both live under a
+// city-keyed binding, so they share this one rule rather than each spelling it
+// out. When the routes relocate nothing — every city with no [storage] section,
+// and every rig scope — this returns the exact store value it was given, so
+// optional-capability type assertions the callers make against it keep working.
+func scopeGraphStore(cityPath, storePath string, cfg *config.City, scopeStore beads.Store) beads.Store {
+	if !scopeIsCity(cityPath, storePath) {
+		return scopeStore
+	}
+	return resolveGraphStore(cliStorageRoutes(cityPath), scopeStore, cfg, cityPath, nil)
+}
+
 // moleculeClassStore returns the store a compiled recipe's molecule must be
 // materialized in: graphStore when the beads instantiating it produces are
 // graph class, and the caller's own scope/work store otherwise.
@@ -345,6 +376,26 @@ func moleculeClassStore(recipe *formula.Recipe, workStore, graphStore beads.Stor
 		return graphStore
 	}
 	return workStore
+}
+
+// cookOnClassRouted compiles a formula and instantiates it in the store the
+// compiled recipe's class demands; molecule.Cook picks its store before compiling.
+func cookOnClassRouted(ctx context.Context, workStore, graphStore beads.Store, formulaName string, searchPaths []string, opts molecule.Options) (*molecule.Result, error) {
+	if opts.ParentID == "" {
+		return nil, fmt.Errorf("cookOnClassRouted requires Options.ParentID")
+	}
+	compileVars := opts.Vars
+	if compileVars == nil {
+		compileVars = map[string]string{}
+	}
+	recipe, err := formula.CompileWithoutRuntimeVarValidation(ctx, formulaName, searchPaths, compileVars)
+	if err != nil {
+		return nil, fmt.Errorf("compiling formula %q: %w", formulaName, err)
+	}
+	if err := molecule.ValidateRecipeRuntimeVars(recipe, opts); err != nil {
+		return nil, err
+	}
+	return molecule.Instantiate(ctx, moleculeClassStore(recipe, workStore, graphStore), recipe, opts)
 }
 
 // recipeCoordClass returns the coordination class of the beads that
@@ -475,20 +526,38 @@ func newCityMailProvider(routes *storageRoutes, workStore beads.Store, cfg *conf
 // single-store bd backend, so this is byte-identical to the prior
 // extmsg.NewServices(workStore) and diverges only once a class relocates.
 //
-// A nil session directory is the one thing extmsg refuses, and it cannot happen
-// here: resolveSessionStore returns the work store when sessions are not
-// relocated. On the impossible path the error is reported and the unrouted
-// services are returned rather than dropping external messaging entirely.
+// A nil session directory is the one and only thing extmsg refuses, and it
+// cannot happen here: session.NewStore always returns a non-nil *session.Store,
+// whatever store it was handed, so the directory this passes is never nil.
+// TestCityExtMsgServicesCannotReachTheRefusalPath pins that, with a control
+// that a genuinely nil directory IS refused so the pin cannot pass vacuously.
+//
+// The unreachable path therefore refuses rather than falling back to the work
+// store. Falling back was the residency bug in miniature: on a city that
+// relocated the messaging class it would persist bindings, groups and
+// transcripts in the work ledger, where the class's own readers never look —
+// external messaging would appear to work and deliver nothing, which is worse
+// than not having it. Refusing surfaces the cause on every operation instead.
 func newCityExtMsgServices(routes *storageRoutes, workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) *extmsg.Services {
 	msgStore := resolveMailMessagesStore(routes, workStore, cfg, cityPath, rec)
 	sessStore := resolveSessionStore(routes, workStore, cfg, cityPath, rec)
 	svc, err := extmsg.NewServicesWithSessionDirectory(msgStore, session.NewStore(beads.SessionStore{Store: sessStore}))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "api: external messaging services: %v\n", err) //nolint:errcheck // best-effort stderr
-		unrouted := extmsg.NewServices(workStore)
-		return &unrouted
+		return refusedExtMsgServices(err)
 	}
 	return &svc
+}
+
+// refusedExtMsgServices builds external-messaging services whose every store
+// operation reports why messaging could not be wired, so a caller that reaches
+// them fails where it stands instead of reading and writing a store that does
+// not serve the messaging class.
+func refusedExtMsgServices(cause error) *extmsg.Services {
+	refused := extmsg.NewServices(refusedClassStore{
+		err: fmt.Errorf("external messaging is not available on this city: %w", cause),
+	})
+	return &refused
 }
 
 // warnFederationBlindOverrides tells an operator that this agent's own

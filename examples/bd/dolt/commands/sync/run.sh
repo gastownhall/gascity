@@ -351,11 +351,13 @@ sync_database_sql() {
   name="$1"
   if ! valid_database_name "$name"; then
     echo "  $name: ERROR: invalid database name" >&2
+    last_fail_reason="invalid database name"
     return 1
   fi
 
   remote_pair=$(find_remote_sql "$name") || {
     echo "  $name: ERROR: failed to query remotes" >&2
+    last_fail_reason="failed to query remotes"
     return 1
   }
   if [ -z "$remote_pair" ]; then
@@ -366,10 +368,11 @@ sync_database_sql() {
   remote_url=${remote_pair#*|}
   if ! valid_remote_name "$remote_name"; then
     echo "  $name: ERROR: invalid remote name: $remote_name" >&2
+    last_fail_reason="invalid remote name: $remote_name"
     return 1
   fi
 
-  refspec_pair=$(resolve_refspec_sql "$name") || return 1
+  refspec_pair=$(resolve_refspec_sql "$name") || { last_fail_reason="refspec resolution failed"; return 1; }
   local_branch=$(printf '%s\n' "$refspec_pair" | sed -n '1p')
   remote_branch=$(printf '%s\n' "$refspec_pair" | sed -n '2p')
 
@@ -386,6 +389,7 @@ sync_database_sql() {
     remote_tracking="remotes/$remote_name/$remote_branch"
     fetch_err_tmp=$(mktemp) || {
       echo "  $name: ERROR: cannot create temp file for fetch diagnostics" >&2
+      last_fail_reason="cannot create temp file for fetch diagnostics"
       return 1
     }
     fetch_rc=0
@@ -401,6 +405,7 @@ sync_database_sql() {
     elif [ "$fetch_rc" -eq 124 ]; then
       rm -f "$fetch_err_tmp"
       echo "  $name: fetch timed out after ${fetch_timeout}s — skipped (NOT pushed)" >&2
+      last_fail_reason="fetch timed out after ${fetch_timeout}s"
       return 1
     elif [ "$fetch_rc" -ne 0 ]; then
       echo "  $name: fetch failed (exit $fetch_rc) — skipped (NOT pushed)" >&2
@@ -410,6 +415,7 @@ sync_database_sql() {
         done < "$fetch_err_tmp"
       fi
       rm -f "$fetch_err_tmp"
+      last_fail_reason="fetch failed (exit $fetch_rc)"
       return 1
     else
       rm -f "$fetch_err_tmp"
@@ -455,6 +461,7 @@ sync_database_sql() {
       diverged*)  echo "  $name: $ff_status — manual reconcile" >&2 ;;
       *)          echo "  $name: skipped [$ff_status]" ;;
     esac
+    last_fail_reason="$ff_status"
     return "$ff_rc"
   fi
 
@@ -477,6 +484,7 @@ sync_database_sql() {
   # on rather than killing the run.
   push_err_tmp=$(mktemp) || {
     echo "  $name: ERROR: cannot create temp file for push diagnostics" >&2
+    last_fail_reason="cannot create temp file for push diagnostics"
     return 1
   }
   # Route push under push_timeout (not dolt_sql's 120s metadata ceiling) and
@@ -498,8 +506,10 @@ sync_database_sql() {
     # "cannot run bounded command" marker, so the stderr replay below
     # disambiguates the two at zero extra mechanism.
     echo "  $name: TIMEOUT after ${push_timeout}s — push manually or increase timeout (GC_DOLT_SYNC_PUSH_TIMEOUT_SECS)" >&2
+    last_fail_reason="TIMEOUT after ${push_timeout}s"
   else
     echo "  $name: ERROR: push failed (exit $push_rc)" >&2
+    last_fail_reason="push failed (exit $push_rc)"
   fi
 
   # Replay the captured dolt stderr, prefixed with the db name for scannable
@@ -540,10 +550,11 @@ sync_database_cli() {
   fi
   if ! valid_remote_name "$remote_name"; then
     echo "  $name: ERROR: invalid remote name: $remote_name" >&2
+    last_fail_reason="invalid remote name: $remote_name"
     return 1
   fi
 
-  refspec_pair=$(resolve_refspec_cli "$d" "$name") || return 1
+  refspec_pair=$(resolve_refspec_cli "$d" "$name") || { last_fail_reason="refspec resolution failed"; return 1; }
   local_branch=$(printf '%s\n' "$refspec_pair" | sed -n '1p')
   remote_branch=$(printf '%s\n' "$refspec_pair" | sed -n '2p')
 
@@ -575,6 +586,7 @@ sync_database_cli() {
   fi
 
   echo "  $name: ERROR: push failed (exit $cli_rc)" >&2
+  last_fail_reason="push failed (exit $cli_rc)"
   return 1
 }
 
@@ -607,6 +619,9 @@ fi
 
 # Sync each database.
 exit_code=0
+fail_count=0
+total_count=0
+failed_summary=""
 server_running=false
 is_running && server_running=true
 if [ -d "$data_dir" ]; then
@@ -620,12 +635,27 @@ if [ -d "$data_dir" ]; then
       continue
     fi
 
+    total_count=$((total_count + 1))
+    last_fail_reason=""
+    call_rc=0
     if [ "$server_running" = true ]; then
-      sync_database_sql "$name" || exit_code=1
+      sync_database_sql "$name" || call_rc=$?
     else
-      sync_database_cli "$d" "$name" || exit_code=1
+      sync_database_cli "$d" "$name" || call_rc=$?
+    fi
+    if [ "$call_rc" -ne 0 ]; then
+      exit_code=1
+      fail_count=$((fail_count + 1))
+      failed_summary="$failed_summary$name (${last_fail_reason:-unknown error}); "
     fi
   done
+fi
+
+# Positioned as the last line of output: an OrderFailed event built from this
+# script's output (tailForOrderFailureEvent, cmd/gc/order_dispatch.go) keeps
+# only a bounded tail, so this summary must survive that truncation window.
+if [ "$exit_code" -ne 0 ]; then
+  echo "sync: $fail_count/$total_count database(s) failed: $failed_summary" >&2
 fi
 
 exit $exit_code

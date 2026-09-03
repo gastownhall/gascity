@@ -3,6 +3,8 @@ package beads
 import (
 	"context"
 	"errors"
+	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -96,6 +98,83 @@ func TestNativeDoltStoreListReconnectsAfterTransientConnError(t *testing.T) {
 	}
 	if n := atomic.LoadInt32(&reopens); n == 0 {
 		t.Fatalf("expected the reopen hook to fire; got %d", n)
+	}
+}
+
+func TestNativeDoltStoreHostedReopenProjectsCredentialCommandAgain(t *testing.T) {
+	t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "/ambient/poison")
+	oldOpen := nativeDoltOpenBestAvailable
+	t.Cleanup(func() { nativeDoltOpenBestAvailable = oldOpen })
+
+	selectedCommand := "/selected/credential-provider"
+	var openCalls int
+	var projectedCommands []string
+	var resolvedTokens []string
+	nativeDoltOpenBestAvailable = func(ctx context.Context, _ string) (beadslib.Storage, error) {
+		openCalls++
+		command := os.Getenv("BEADS_DOLT_CREDENTIAL_COMMAND")
+		projectedCommands = append(projectedCommands, command)
+		if command != selectedCommand {
+			return nil, errors.New("unexpected credential command projection")
+		}
+		var token string
+		switch openCalls {
+		case 1:
+			token = "token-1"
+		case 2:
+			token = "token-2"
+		default:
+			return nil, errors.New("unexpected extra native open")
+		}
+		resolvedTokens = append(resolvedTokens, token)
+		if openCalls == 1 {
+			return &nativeDoltStorageSpy{
+				getConfig: func(context.Context, string) (string, error) { return "gcg", nil },
+				searchIssues: func(context.Context, string, beadslib.IssueFilter) ([]*beadslib.Issue, error) {
+					return nil, errors.New("expired hosted credential: invalid connection")
+				},
+			}, nil
+		}
+		if _, ok := ctx.Deadline(); !ok {
+			t.Fatal("credential-refresh reopen context has no deadline")
+		}
+		return healthySearchStorage(&beadslib.Issue{
+			ID: "gcg-1", Title: token, Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 2,
+		}), nil
+	}
+
+	root := t.TempDir()
+	reopen := func(ctx context.Context) (NativeStorage, error) {
+		return OpenNativeStorageAtWithoutAmbientEnvWithCredentialCommand(ctx, root, selectedCommand)
+	}
+	store, err := OpenNativeDoltStoreAtWithoutAmbientEnvWithCredentialCommand(
+		context.Background(), root, selectedCommand, WithNativeReopen(reopen))
+	if err != nil {
+		t.Fatalf("initial hosted open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.CloseStore() })
+
+	got, err := store.Get("gcg-1")
+	if err != nil {
+		t.Fatalf("Get after hosted credential expiry: %v", err)
+	}
+	if got.ID != "gcg-1" {
+		t.Fatalf("Get ID = %q, want gcg-1", got.ID)
+	}
+	if got.Title != "token-2" {
+		t.Fatalf("Get title = %q, want the credential resolved by the reopen", got.Title)
+	}
+	if openCalls != 2 {
+		t.Fatalf("native opens = %d, want initial open plus one bounded reopen", openCalls)
+	}
+	if want := []string{selectedCommand, selectedCommand}; !slices.Equal(projectedCommands, want) {
+		t.Fatalf("projected credential commands = %q, want %q", projectedCommands, want)
+	}
+	if want := []string{"token-1", "token-2"}; !slices.Equal(resolvedTokens, want) {
+		t.Fatalf("resolved credentials = %q, want %q", resolvedTokens, want)
+	}
+	if got := os.Getenv("BEADS_DOLT_CREDENTIAL_COMMAND"); got != "/ambient/poison" {
+		t.Fatalf("ambient credential command after reopen = %q, want restored", got)
 	}
 }
 

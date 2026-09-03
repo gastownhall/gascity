@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
@@ -115,6 +117,34 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 		if body, ok := cachedResponseWithinAgeAs[StatusBody](s, cacheKey, statusResponseTTLFloor); ok {
 			return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: body}, nil
 		}
+		// Stale-while-revalidate (ra-4u2eqc): the bucket and TTL-floor caches
+		// both missed, so any entry that exists is older than
+		// statusResponseTTLFloor. buildStatusBody's fan-out (per-rig work
+		// counts, the session snapshot, StoreHealth's closed-history scan)
+		// measured ~3.65s on a 26-agent/1.2GB city — the same failure class
+		// that used to 503 the legacy runs/census endpoint at its internal
+		// budget. Rather than let a request pay that cost inline, serve the
+		// stale body immediately and refresh in the background so the next
+		// poll gets a fresh body. A genuine cold cache (nothing ever built)
+		// has nothing to serve here and falls through to the synchronous
+		// build below, same as before this change.
+		//
+		// CacheAgeS reports the GREATER of the two staleness signals: how
+		// long ago this response entry was built, and cacheAgeSeconds(store)
+		// — the age of the CachingStore snapshot the body was built from.
+		// Reporting only the response-entry age would let a recently built
+		// entry sitting on top of a lagging reconciler under-report true
+		// staleness and suppress the banner `gc status` renders above
+		// cacheAgeBannerThresholdSeconds; reporting only the store age would
+		// hide the SWR delay. The max preserves both.
+		if body, age, ok := staleResponseAs[StatusBody](s, cacheKey); ok {
+			s.refreshStatusResponseInBackground(cacheKey, input.Lite)
+			return &IndexOutput[StatusBody]{
+				Index:     index,
+				CacheAgeS: max(age.Seconds(), cacheAgeSeconds(store)),
+				Body:      body,
+			}, nil
+		}
 	}
 
 	resp := s.buildStatusBody(ctx, input.Lite)
@@ -123,6 +153,35 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	}
 
 	return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: resp}, nil
+}
+
+// refreshStatusResponseInBackground kicks a detached rebuild of the /status
+// body for cacheKey and stores the result under the time bucket current at
+// completion, so the next poll (bucket or TTL-floor lookup) is served a
+// fresh body without any caller paying the rebuild cost inline (ra-4u2eqc).
+// Coalesced via beginResponseRefresh: a refresh already in flight for
+// cacheKey is not duplicated. Uses runBackground's detached context (bounded
+// by extmsgNotifyTimeout) rather than the triggering request's context,
+// since the refresh must outlive the request that happened to trigger it and
+// benefits every subsequent poller, not just this one.
+func (s *Server) refreshStatusResponseInBackground(cacheKey string, lite bool) {
+	if !s.beginResponseRefresh(cacheKey) {
+		return
+	}
+	s.runBackground(func(ctx context.Context) {
+		defer func() {
+			if r := recover(); r != nil {
+				// The background refresh is best-effort: a panic here must not
+				// take the controller down. The request path's recover
+				// (withRecovery, middleware.go) does not cover detached
+				// goroutines, and the next poll simply rebuilds.
+				log.Printf("api: panic in background /status refresh: %v\n%s", r, debug.Stack())
+			}
+		}()
+		defer s.endResponseRefresh(cacheKey)
+		resp := s.buildStatusBody(ctx, lite)
+		s.storeResponse(cacheKey, responseCacheTimeBucket(time.Now()), resp)
+	})
 }
 
 // buildStatusBody constructs the status response body. ctx bounds the
@@ -169,6 +228,10 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	}
 	perRigAgentTotals := make(map[string]int, len(cfg.Rigs))
 	perRigAgentsSuspended := make(map[string]int, len(cfg.Rigs))
+	// Active graph-resident work, indexed once per request by agent session
+	// name. On a single-store city this is nil, so every lookup below misses
+	// and the counts stay byte-identical to the provider-only behavior.
+	graphWork := s.graphActiveWorkBySession()
 	for _, a := range cfg.Agents {
 		rigName := workdirutil.ConfiguredRigName(s.state.CityPath(), a, cfg.Rigs)
 		scope := "city"
@@ -188,7 +251,12 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 			sessName := agentSessionName(cityName, ea.qualifiedName, sessTmpl)
 			info, hasInfo := sessionSnapshot.bySessionName[sessName]
 			running := statusProviderRunning(sp, sessName)
-			if running {
+			// An agent whose work runs under a relocated-graph wisp session is
+			// effectively running even when its named provider session is down.
+			// hasGraphWork is always false on a single-store city.
+			_, hasGraphWork := graphWork[sessName]
+			effectiveRunning := running || hasGraphWork
+			if effectiveRunning {
 				rawRunning++
 			}
 			suspended := ea.suspended || a.Suspended || (rigName != "" && suspendedRigs[rigName]) || (hasInfo && info.state == session.StateSuspended)
@@ -200,14 +268,14 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 				ac.Suspended++
 			case s.state.IsQuarantined(sessName):
 				ac.Quarantined++
-			case running:
+			case effectiveRunning:
 				ac.Running++
 			}
 
 			detail := StatusAgentDetail{
 				QualifiedName: ea.qualifiedName,
 				Scope:         scope,
-				Running:       running,
+				Running:       effectiveRunning,
 				Suspended:     suspended,
 				SessionName:   sessName,
 				GroupName:     groupName,

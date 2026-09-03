@@ -226,9 +226,27 @@ func checkNoMoleculeChildren(q BeadQuerier, beadID string, store beads.Store, re
 				continue
 			}
 		}
-		return fmt.Errorf("bead %s already has attached %s %s", beadID, AttachmentLabel(attached), attached.ID)
+		return &MoleculeAttachedError{BeadID: beadID, Label: AttachmentLabel(attached), AttachmentID: attached.ID}
 	}
 	return nil
+}
+
+// MoleculeAttachedError reports that a bead already has a live, non-workflow
+// molecule/wisp attachment blocking a new formula attach. It is distinct from
+// sourceworkflow.ConflictError (a live graph.v2 workflow attachment) so
+// callers can use errors.As to tell the two conflict kinds apart: an implicit
+// default-formula sling may choose to fall back to plain routing on this
+// error, but must keep hard-failing on a workflow conflict or any other
+// error, since neither is the "unrelated molecule already attached" case the
+// fallback exists for.
+type MoleculeAttachedError struct {
+	BeadID       string
+	Label        string // AttachmentLabel(attached), e.g. "molecule" or "wisp"
+	AttachmentID string
+}
+
+func (e *MoleculeAttachedError) Error() string {
+	return fmt.Sprintf("bead %s already has attached %s %s", e.BeadID, e.Label, e.AttachmentID)
 }
 
 // CheckNoMoleculeChildren returns an error if the bead already has an attached
@@ -452,8 +470,18 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 	}
 
 	target := agentutil.RoutedToIdentity(&a)
+	isMulti := agentutil.IsMultiSessionAgent(&a)
 	if strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) == target {
-		if b.Assignee == "" || b.Assignee == target {
+		// A pool session claims routed work under its own session identity
+		// ("<target>-<session bead id>"), not under the bare pool target, so
+		// bare equality reads already-claimed pool work as un-slung and mints a
+		// second attempt for it. The original keeps gc.routed_to once wrapped,
+		// so both it and its do-work step satisfy the pool work_query: one unit
+		// of work, two dispatchable rows, two sessions. Treat a claim by any of
+		// this pool's own sessions as idempotent. Anchored to target+"-", so a
+		// claim by a different pool still falls through to the warning below.
+		claimedByOwnPoolSession := isMulti && strings.HasPrefix(b.Assignee, target+"-")
+		if b.Assignee == "" || b.Assignee == target || claimedByOwnPoolSession {
 			return resolveConvoyRecovery(q, b, deps, opts, beadID)
 		}
 		return BeadCheckResult{
@@ -461,7 +489,6 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 		}
 	}
 
-	isMulti := agentutil.IsMultiSessionAgent(&a)
 	if !isMulti {
 		if b.Assignee == target {
 			return resolveConvoyRecovery(q, b, deps, opts, beadID)

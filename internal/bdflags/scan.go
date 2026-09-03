@@ -164,8 +164,8 @@ func skipLeadingScopeFlags(tokens []string, i int) int {
 // should resume. viaGC additionally allows the gc-owned scope flags in the
 // trailing position ("gc bd list --rig <name>").
 func scanInvocationFlags(tokens []string, flagStart int, key string, viaGC bool, lineNo int) (findings []Finding, resume int) {
-	valueFlags := ValueFlags(key)
-	boolFlags := BoolFlags(key)
+	valueFlags := ValueFlagsWithDiscovery(key)
+	boolFlags := BoolFlagsWithDiscovery(key)
 	if viaGC {
 		// Safe to mutate in place: ValueFlags returns a freshly allocated map
 		// per call (mergeFlagSets), so this never leaks scope flags into

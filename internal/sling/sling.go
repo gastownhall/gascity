@@ -127,8 +127,14 @@ type SlingDeps struct {
 	GraphStore beads.Store
 	// Events records best-effort current execution facts after graph workflow
 	// materialization. Nil leaves sling event-silent.
-	Events   events.Recorder
-	StoreRef string
+	Events events.Recorder
+	// ExecutionWorkStore, when set, is the work-store leg execution-fact
+	// projection reads through instead of Store. On a split-store city the
+	// launch beads a convoy tracks may be resident in a per-rig store, so the
+	// caller supplies a read leg that routes a primary miss to the owning
+	// store. Nil keeps the single-store behavior of reading Store.
+	ExecutionWorkStore beads.Store
+	StoreRef           string
 	// ValidationQuerier overrides Store for existence checks when a caller has
 	// already resolved the bead through a narrower view.
 	ValidationQuerier BeadQuerier
@@ -1411,7 +1417,11 @@ func materializeCompiledSlingFormula(ctx context.Context, recipe *formula.Recipe
 }
 
 func emitCurrentExecutionFacts(deps SlingDeps, graphStore beads.Store, rootID, actor, formulaName string) {
-	if err := executionevent.EmitCurrent(deps.Events, beads.GraphStore{Store: graphStore}, beads.WorkStore{Store: deps.Store}, rootID, actor); err != nil {
+	workStore := deps.Store
+	if deps.ExecutionWorkStore != nil {
+		workStore = deps.ExecutionWorkStore
+	}
+	if err := executionevent.EmitCurrent(deps.Events, beads.GraphStore{Store: graphStore}, beads.WorkStore{Store: workStore}, rootID, actor); err != nil {
 		depsTracef(deps, "execution snapshot projection failed formula=%s root=%s err=%v", formulaName, rootID, err)
 	}
 }

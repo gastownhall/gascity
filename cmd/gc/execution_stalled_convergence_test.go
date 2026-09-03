@@ -177,7 +177,7 @@ func TestExecutionStalledDrainConvergesToAReclaimableRow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-reading the claim: %v", err)
 	}
-	released := releaseOrphanedPoolAssignments(h.env.store, h.env.cfg, "", nil,
+	released := releaseOrphanedPoolAssignments(h.env.store, beads.SessionStore{Store: h.env.store}, h.env.cfg, "", nil,
 		[]beads.Bead{claimed}, []beads.Store{h.env.store}, []string{""}, nil)
 	if len(released) != 1 || released[0].ID != h.work.ID {
 		t.Fatalf("released = %+v, want the stalled claim reopened", released)
@@ -307,7 +307,7 @@ func TestExecutionStalledDrainDoesNotStrandAMidDrainWake(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-reading the claim: %v", err)
 	}
-	released := releaseOrphanedPoolAssignments(h.env.store, h.env.cfg, "", nil,
+	released := releaseOrphanedPoolAssignments(h.env.store, beads.SessionStore{Store: h.env.store}, h.env.cfg, "", nil,
 		[]beads.Bead{claimed}, []beads.Store{h.env.store}, []string{""}, nil)
 	if len(released) != 1 {
 		t.Fatalf("released = %+v, want the claim released once its holder is gone", released)

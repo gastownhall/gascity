@@ -8,11 +8,11 @@ func TestBuiltinProvidersAndOrder(t *testing.T) {
 	providers := BuiltinProviders()
 	order := BuiltinProviderOrder()
 
-	if len(providers) != 17 {
-		t.Fatalf("len(BuiltinProviders()) = %d, want 17", len(providers))
+	if len(providers) != 18 {
+		t.Fatalf("len(BuiltinProviders()) = %d, want 18", len(providers))
 	}
-	if len(order) != 17 {
-		t.Fatalf("len(BuiltinProviderOrder()) = %d, want 17", len(order))
+	if len(order) != 18 {
+		t.Fatalf("len(BuiltinProviderOrder()) = %d, want 18", len(order))
 	}
 
 	for _, name := range order {
@@ -75,6 +75,66 @@ func TestBuiltinProviderMimoCodeSpec(t *testing.T) {
 	}
 	if mimocodeIdx != opencodeIdx+1 {
 		t.Errorf("mimocode order index = %d, want immediately after opencode (%d)", mimocodeIdx, opencodeIdx)
+	}
+}
+
+func TestBuiltinProviderZCodeSpec(t *testing.T) {
+	spec, ok := BuiltinProviders()["zcode"]
+	if !ok {
+		t.Fatal("BuiltinProviders() missing zcode")
+	}
+	if spec.Command != "zcode-repl" {
+		t.Errorf("zcode Command = %q, want zcode-repl", spec.Command)
+	}
+	if spec.DisplayName != "ZCode (Z.ai GLM harness)" {
+		t.Errorf("zcode DisplayName = %q", spec.DisplayName)
+	}
+	if spec.PromptMode != "none" {
+		t.Errorf("zcode PromptMode = %q, want none (the adapter is a REPL)", spec.PromptMode)
+	}
+	if spec.PromptFlag != "" {
+		t.Errorf("zcode PromptFlag = %q, want empty under PromptMode none", spec.PromptFlag)
+	}
+	if spec.ReadyPromptPrefix != "zcode-repl ready" {
+		t.Errorf("zcode ReadyPromptPrefix = %q, want the adapter marker", spec.ReadyPromptPrefix)
+	}
+	if spec.ReadyDelayMs <= 0 {
+		t.Errorf("zcode ReadyDelayMs = %d, want a positive probe budget", spec.ReadyDelayMs)
+	}
+	if len(spec.ProcessNames) != 2 || spec.ProcessNames[0] != "bash" || spec.ProcessNames[1] != "node" {
+		t.Errorf("zcode ProcessNames = %v, want [bash node]", spec.ProcessNames)
+	}
+	// Restart continuity is adapter-internal (persisted provider session id
+	// replayed with --resume), so gc must not compose any resume flag.
+	if spec.ResumeFlag != "" || spec.ResumeStyle != "" || spec.ResumeCommand != "" || spec.SessionIDFlag != "" {
+		t.Errorf("zcode declares resume wiring (%q,%q,%q,%q); continuity is adapter-internal",
+			spec.ResumeFlag, spec.ResumeStyle, spec.ResumeCommand, spec.SessionIDFlag)
+	}
+	if spec.AcceptStartupDialogs == nil || *spec.AcceptStartupDialogs {
+		t.Errorf("zcode AcceptStartupDialogs = %v, want an explicit false", spec.AcceptStartupDialogs)
+	}
+	if spec.SupportsHooks {
+		t.Error("zcode SupportsHooks = true, want false")
+	}
+	if spec.SupportsACP {
+		t.Error("zcode SupportsACP = true, want false")
+	}
+	// Evidence: the bundle's NodeContextSourceAdapter context-source list is
+	// ["AGENTS.md"], and /init writes AGENTS.md.
+	if spec.InstructionsFile != "AGENTS.md" {
+		t.Errorf("zcode InstructionsFile = %q, want AGENTS.md", spec.InstructionsFile)
+	}
+	if spec.UpstreamBaseURLEnv != "ZCODE_BASE_URL" || spec.UpstreamAPIKeyEnv != "ZCODE_API_KEY" {
+		t.Errorf("zcode upstream binding = (%q, %q), want (ZCODE_BASE_URL, ZCODE_API_KEY)",
+			spec.UpstreamBaseURLEnv, spec.UpstreamAPIKeyEnv)
+	}
+
+	identity, ok := CanonicalProfileIdentity("zcode/tmux-cli")
+	if !ok {
+		t.Fatal("CanonicalProfileIdentity(zcode/tmux-cli) not registered")
+	}
+	if identity.ProviderFamily != "zcode" {
+		t.Errorf("zcode/tmux-cli family = %q, want zcode", identity.ProviderFamily)
 	}
 }
 

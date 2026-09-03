@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/gastownhall/gascity/internal/clientcontext"
@@ -40,16 +42,20 @@ a context per-invocation with --context <name>, or set a sticky default with
 
 // contextJSON is the wire shape for `gc context list/show -o json`.
 type contextJSON struct {
-	Name              string `json:"name"`
-	URL               string `json:"url"`
-	City              string `json:"city"`
-	Default           bool   `json:"default"`
-	CredentialCommand string `json:"credential_command,omitempty"`
-	GrantCommand      string `json:"grant_command,omitempty"`
+	Name                     string   `json:"name"`
+	URL                      string   `json:"url"`
+	City                     string   `json:"city"`
+	Default                  bool     `json:"default"`
+	CredentialCommand        string   `json:"credential_command,omitempty"`
+	CredentialAudience       string   `json:"credential_audience,omitempty"`
+	CredentialRequiredScopes []string `json:"credential_required_scopes,omitempty"`
+	CredentialOrg            string   `json:"credential_org,omitempty"`
+	GrantCommand             string   `json:"grant_command,omitempty"`
 }
 
 func newContextAddCmd(stdout, stderr io.Writer) *cobra.Command {
 	var c clientcontext.Context
+	var credentialAudience, credentialOrg, requiredScopesJSON string
 	cmd := &cobra.Command{
 		Use:   "add <name>",
 		Short: "Add a named remote city",
@@ -62,6 +68,14 @@ remote city name (defaults to <name>). At most one credential technique applies:
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			c.Name = args[0]
+			c.CredentialAudience = credentialAudience
+			c.CredentialOrg = credentialOrg
+			if strings.TrimSpace(requiredScopesJSON) != "" {
+				if err := json.Unmarshal([]byte(requiredScopesJSON), &c.CredentialRequiredScopes); err != nil {
+					fmt.Fprintf(stderr, "gc context add: --credential-required-scopes must be a JSON array: %v\n", err) //nolint:errcheck
+					return errExit
+				}
+			}
 			if doContextAdd(c, stdout, stderr) != 0 {
 				return errExit
 			}
@@ -73,6 +87,9 @@ remote city name (defaults to <name>). At most one credential technique applies:
 	f.StringVar(&c.City, "city", "", "remote city name (default: <name>)")
 	f.StringVar(&c.GrantCommand, "grant-command", "", "command that mints an X-GC-City-Write grant (direct hardened self-host)")
 	f.StringVar(&c.CredentialCommand, "credential-command", "", "command that mints a transport bearer (edge/proxy fronted)")
+	f.StringVar(&credentialAudience, "credential-audience", "", "credential provider audience (provider mode)")
+	f.StringVar(&requiredScopesJSON, "credential-required-scopes", "", "JSON array of required credential scopes (provider mode)")
+	f.StringVar(&credentialOrg, "credential-org", "", "optional credential provider organization (provider mode)")
 	f.StringVar(&c.CAFile, "ca-file", "", "PEM CA bundle to verify the server certificate")
 	f.StringVar(&c.TLSServerName, "tls-server-name", "", "override the TLS SNI / certificate name")
 	f.BoolVar(&c.InsecureSkipVerify, "insecure-skip-verify", false, "skip TLS verification (dev only)")
@@ -403,6 +420,8 @@ func formatRemoteTarget(t *remoteTarget) string {
 // credLabel summarizes which credential technique a context configures.
 func credLabel(c clientcontext.Context) string {
 	switch {
+	case c.CredentialAudience != "":
+		return "provider:" + c.CredentialAudience
 	case c.GrantCommand != "":
 		return "grant:" + c.GrantCommand
 	case c.CredentialCommand != "":
@@ -414,11 +433,14 @@ func credLabel(c clientcontext.Context) string {
 
 func contextToJSON(c clientcontext.Context, isDefault bool) contextJSON {
 	return contextJSON{
-		Name:              c.Name,
-		URL:               c.URL,
-		City:              c.EffectiveCity(),
-		Default:           isDefault,
-		CredentialCommand: c.CredentialCommand,
-		GrantCommand:      c.GrantCommand,
+		Name:                     c.Name,
+		URL:                      c.URL,
+		City:                     c.EffectiveCity(),
+		Default:                  isDefault,
+		CredentialCommand:        c.CredentialCommand,
+		CredentialAudience:       c.CredentialAudience,
+		CredentialRequiredScopes: append([]string(nil), c.CredentialRequiredScopes...),
+		CredentialOrg:            c.CredentialOrg,
+		GrantCommand:             c.GrantCommand,
 	}
 }

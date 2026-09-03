@@ -88,6 +88,7 @@ gc [flags]
 | [gc version](#gc-version) | Print gc version |
 | [gc wait](#gc-wait) | Inspect and manage durable session waits |
 | [gc whoami](#gc-whoami) | Show the authenticated hosted Gas City account |
+| [gc worktree](#gc-worktree) | Ensure or verify agent workspace worktrees |
 
 ## gc agent
 
@@ -291,12 +292,12 @@ invocation the generated work query builds, not with all of "bd ready" —
 "gc ready --help" lists what it takes. A city that relocates no class is
 unaffected.
 
-All arguments after "gc bd" are forwarded to bd unchanged, except the
-gc-only "heartbeat &lt;issue-id&gt;" subcommand, which rewrites to
-"update &lt;issue-id&gt; --set-metadata gc.last_heartbeat_at=&lt;RFC3339 UTC now&gt;"
-so long-running workers can signal liveness to the dashboard, and
-"release-if-current &lt;issue-id&gt; &lt;assignee&gt;", which conditionally resets an
-in-progress assignment only when the bead still has that assignee.
+All arguments after "gc bd" are forwarded to bd unchanged. "heartbeat
+&lt;issue-id&gt;" forwards to bd's native heartbeat, which refreshes the claim's
+lease and fails loudly when the caller no longer owns it. gc adds one
+subcommand of its own: "release-if-current &lt;issue-id&gt; &lt;assignee&gt;", which
+conditionally resets an in-progress assignment only when the bead still has
+that assignee.
 
 gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
 from wedging the wrapper after printing command output. If you need
@@ -314,7 +315,7 @@ gc bd --rig my-project create "New task"
 gc bd show my-project-abc          # auto-detects rig from bead prefix
 gc bd list --rig my-project -s open
 gc bd --city /path/to/city list    # pins the city (HQ) store, no rig auto-detect
-gc bd heartbeat my-project-abc     # stamp gc.last_heartbeat_at=now
+gc bd heartbeat my-project-abc     # refresh the claim lease you hold
 gc bd release-if-current my-project-abc worker-1
 ```
 
@@ -821,7 +822,10 @@ gc context add <name> [flags]
 |------|------|---------|-------------|
 | `--ca-file` | string |  | PEM CA bundle to verify the server certificate |
 | `--city` | string |  | remote city name (default: &lt;name&gt;) |
+| `--credential-audience` | string |  | credential provider audience (provider mode) |
 | `--credential-command` | string |  | command that mints a transport bearer (edge/proxy fronted) |
+| `--credential-org` | string |  | optional credential provider organization (provider mode) |
+| `--credential-required-scopes` | string |  | JSON array of required credential scopes (provider mode) |
 | `--grant-command` | string |  | command that mints an X-GC-City-Write grant (direct hardened self-host) |
 | `--insecure-skip-verify` | bool |  | skip TLS verification (dev only) |
 | `--timeout` | string |  | REST request timeout, e.g. 120s (never applied to SSE streams) |
@@ -1956,11 +1960,40 @@ gc hook [agent] [flags]
 | `--claim` | bool |  | atomically claim one routed work item for the current session |
 | `--drain-ack` | bool |  | with --claim, acknowledge runtime drain when no work is available |
 | `--inject` | bool |  | silent legacy Stop-hook compatibility; skip work query and exit 0 |
-| `--json` | bool |  | with --claim, emit a JSON protocol result |
+| `--json` | bool |  | emit a JSON protocol result (always with --claim; on the discovery door only for a drain refusal) |
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc hook current](#gc-hook-current) | Print the work bead this session most recently claimed |
 | [gc hook run](#gc-hook-run) | Run a managed hook command with a hard timeout |
+
+## gc hook current
+
+Prints the work bead this session most recently claimed with gc hook --claim.
+
+The claim protocol stamps the claimed bead id onto the calling session's own
+bead, because the environment alone cannot reliably name it: $GC_BEAD_ID exists
+only in the controller's dispatch condition environment, never in a session
+shell, and $GC_TRIGGER_BEAD_ID — exported to demand-spawned pool seats as a
+pool-level spawn marker — is absent on other seats (e.g. a warm seat bound
+after start) and never decides what a session claims; the pool is pull. It
+appears in the chain below only as a name fallback for work already claimed:
+for a vapor wisp the trigger IS the work bead. A formula step that must close
+the bead it is running reads the stamp back here:
+
+    BEAD_ID="$&#123;GC_BEAD_ID:-$&#123;GC_TRIGGER_BEAD_ID:-$(gc hook current --id-only)&#125;&#125;"
+
+The calling session is taken from $GC_SESSION_ID. Exits 1 when there is no
+session identity and when the session has claimed nothing, so a caller that
+cannot name its bead fails loudly instead of skipping its own work.
+
+```
+gc hook current [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--id-only` | bool |  | print only the bead id, with no surrounding context |
 
 ## gc hook run
 
@@ -3005,6 +3038,12 @@ The command requires a clean Git checkout whose current HEAD matches its
 configured upstream branch, then submits the GitHub repository, commit, pack
 path, pack name, and version to the registry API.
 
+Registry pack names are scoped as &lt;github-owner&gt;/&lt;pack&gt;, where &lt;github-owner&gt;
+is the lowercased GitHub owner of the source repository. [pack].name must
+already carry that scoped name: the registry compares it byte-for-byte with the
+requested name, and reserves unscoped names for packs it already holds a claim
+for. --allow-unscoped-name submits such a legacy unscoped name anyway.
+
 --dev-auth (localhost only) replaces all other credentials. Otherwise,
 authentication precedence is --token, GC_REGISTRY_TOKEN, a complete session
 cookie and CSRF-token pair from flags or the environment, a stored native
@@ -3018,12 +3057,13 @@ gc pack registry publish <path-to-pack-root> [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--allow-unscoped-name` | bool |  | submit an unscoped (bare) pack name; the registry accepts these only for names it already holds a claim for |
 | `--csrf-token` | string |  | registry CSRF token; defaults to GC_REGISTRY_CSRF_TOKEN |
 | `--description` | string |  | release description; defaults to [pack].description |
 | `--dev-auth` | bool |  | create a local dev-auth session before submitting; localhost only |
 | `--dev-auth-handle` | string | `local-cli` | dev-auth handle when --dev-auth is used |
 | `--dry-run` | bool |  | print the publish request without submitting |
-| `--name` | string |  | registry pack name; defaults to [pack].name |
+| `--name` | string |  | registry pack name; must equal [pack].name (the registry rejects a mismatch) |
 | `--ref` | string |  | release ref label; defaults to the upstream branch name |
 | `--registry-url` | string |  | registry app base URL; defaults to GC_REGISTRY_URL, the stored login default, then https://registry.gascity.com |
 | `--session-cookie` | string |  | registry_session cookie value or Cookie header; defaults to GC_REGISTRY_SESSION |
@@ -3494,9 +3534,11 @@ same name.
 Use --name to set the rig name explicitly (default: directory basename).
 Use --prefix to set the bead ID prefix explicitly (default: derived from name).
 Use --default-branch to set the rig's mainline branch explicitly. By default,
-gc rig add probes the repo's origin/HEAD (and falls back to the currently
-checked-out branch) and stores the result in city.toml so polecats and the
-refinery target the right branch without manual metadata patching.
+gc rig add probes the repo's remote HEADs — origin first, then any other
+configured remote — and falls back to the currently checked-out branch, then
+stores the result in city.toml so polecats and the refinery target the right
+branch without manual metadata patching. The banner reports which remote
+answered, or says the branch was inferred when no remote HEAD is set.
 Use --start-suspended to add the rig in a suspended state (dormant-by-default).
 The rig's agents won't spawn until explicitly resumed with "gc rig resume".
 
@@ -3527,7 +3569,8 @@ gc rig add /path/to/existing --adopt
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--adopt` | bool |  | adopt existing .beads/ directory (skip init) |
-| `--default-branch` | string |  | mainline branch (default: auto-detect from origin/HEAD or current branch) |
+| `--allow-ephemeral` | bool |  | register the rig even though its path is on a filesystem that does not survive a restart |
+| `--default-branch` | string |  | mainline branch (default: auto-detect from a remote HEAD — origin preferred — or the current branch) |
 | `--git-url` | string |  | git URL to clone into a new rig on a REMOTE city (server-side provisioning) |
 | `--include` | stringArray |  | pack source or pack name for rig agents (repeatable; writes canonical rig imports) |
 | `--json` | bool |  | Output in JSONL format |
@@ -3708,6 +3751,11 @@ the handshake declares, and probes optional operations. Optional
 operations that are absent (exit 2) are reported but never fail the
 run; everything else that misbehaves does. Exits non-zero if any check
 fails, so a runtime pack's CI can gate on it directly.
+
+One exception: when the argument resolves to a pack-declared runtime whose
+[runtimes.&lt;name&gt;] entry declares prompt_delivery = "nudge-fallback", the
+nudge probe is reported as "required: nudge" and an absent or broken nudge
+op fails the run — the declaration is smoke-tested, not trusted.
 
 The argument is an executable (path or PATH name) or a pack-declared
 runtime name: when it names a [runtimes.&lt;name&gt;] entry from the current
@@ -4995,3 +5043,109 @@ gc whoami [flags]
 |------|------|---------|-------------|
 | `--at` | string |  | service base URL; defaults to GC_SERVICE_URL, the stored default, then https://gascity.com |
 | `--token` | string |  | API token to check; defaults to GC_SERVICE_TOKEN or the stored login |
+
+## gc worktree
+
+Ensure or verify agent workspace worktrees.
+
+gc worktree is the single transactional owner for workspace provisioning.
+Postconditions: the path is a direct child of the configured per-rig root and
+the root of a worktree of the given repository, with the bead's uniquely named
+branch checked out on an attached HEAD (never detached). Durable provenance is
+stored in the worktree's private git directory and returned as JSON so callers
+can atomically publish the same evidence on the bead. A new branch is created
+from --base, resolved verbatim against the local repository. Failed creation
+rolls back everything it created; --dry-run plans without mutating anything.
+
+```
+gc worktree
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc worktree cleanup](#gc-worktree-cleanup) | Remove an owned worktree after all safety gates pass |
+| [gc worktree ensure](#gc-worktree-ensure) | Ensure the worktree exists and satisfies all postconditions |
+| [gc worktree verify](#gc-worktree-verify) | Verify the worktree satisfies all postconditions without mutating |
+
+## gc worktree cleanup
+
+Remove an owned worktree after all safety gates pass.
+
+Cleanup verifies the canonical repository, path, branch, and durable ownership
+provenance before acting. It refuses dirty worktrees, commits reachable from no
+branch, tag, or remote-tracking ref, and commits not merged into --base.
+--attempt-id binds the removal to one exact provisioning attempt, so a stale
+request cannot remove a workspace re-created at the same path. There is no
+force mode and no recursive-filesystem fallback. An already-absent,
+unregistered path is an idempotent success. With --json, safety refusals return
+a structured cleanup_pending result for formula automation.
+
+```
+gc worktree cleanup [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--attempt-id` | string |  | attempt id returned by the ensure that created this worktree (required) |
+| `--base` | string |  | exact base ref used for this worktree (required) |
+| `--base-sha` | string |  | recorded base SHA to verify when reusing a worktree |
+| `--bead` | string |  | work bead bound to this worktree (required) |
+| `--branch` | string |  | branch that must be checked out (required) |
+| `--creator` | string |  | mechanism creating the worktree (required) |
+| `--generation` | string |  | provisioning generation fence (required) |
+| `--json` | bool |  | emit the report as JSON |
+| `--lifecycle` | string | `active` | worktree lifecycle state |
+| `--owner` | string |  | single selected provisioning owner (required) |
+| `--path` | string |  | worktree path (required) |
+| `--repo` | string |  | repository directory the worktree belongs to (required) |
+| `--root` | string |  | configured per-rig worktree root; path must be its direct child (required) |
+| `--store-ref` | string |  | work bead store reference (required) |
+
+## gc worktree ensure
+
+Ensure the worktree exists and satisfies all postconditions
+
+```
+gc worktree ensure [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--base` | string |  | exact base ref used for this worktree (required) |
+| `--base-sha` | string |  | recorded base SHA to verify when reusing a worktree |
+| `--bead` | string |  | work bead bound to this worktree (required) |
+| `--branch` | string |  | branch that must be checked out (required) |
+| `--creator` | string |  | mechanism creating the worktree (required) |
+| `-n`, `--dry-run` | bool |  | plan without mutating anything |
+| `--generation` | string |  | provisioning generation fence (required) |
+| `--json` | bool |  | emit the report as JSON |
+| `--lifecycle` | string | `active` | worktree lifecycle state |
+| `--owner` | string |  | single selected provisioning owner (required) |
+| `--path` | string |  | worktree path (required) |
+| `--repo` | string |  | repository directory the worktree belongs to (required) |
+| `--root` | string |  | configured per-rig worktree root; path must be its direct child (required) |
+| `--store-ref` | string |  | work bead store reference (required) |
+
+## gc worktree verify
+
+Verify the worktree satisfies all postconditions without mutating
+
+```
+gc worktree verify [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--base` | string |  | exact base ref used for this worktree (required) |
+| `--base-sha` | string |  | recorded base SHA to verify when reusing a worktree |
+| `--bead` | string |  | work bead bound to this worktree (required) |
+| `--branch` | string |  | branch that must be checked out (required) |
+| `--creator` | string |  | mechanism creating the worktree (required) |
+| `--generation` | string |  | provisioning generation fence (required) |
+| `--json` | bool |  | emit the report as JSON |
+| `--lifecycle` | string | `active` | worktree lifecycle state |
+| `--owner` | string |  | single selected provisioning owner (required) |
+| `--path` | string |  | worktree path (required) |
+| `--repo` | string |  | repository directory the worktree belongs to (required) |
+| `--root` | string |  | configured per-rig worktree root; path must be its direct child (required) |
+| `--store-ref` | string |  | work bead store reference (required) |

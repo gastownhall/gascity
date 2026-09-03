@@ -293,7 +293,7 @@ func TestOrphanReleaseSparesALiveHoldersBindingResidentClaim(t *testing.T) {
 
 	infos := sessionInfosFromBeads([]beads.Bead{sess})
 	released := releaseOrphanedPoolAssignments(
-		work, cfg, cityPath, infos,
+		work, beads.SessionStore{Store: work}, cfg, cityPath, infos,
 		[]beads.Bead{claim}, []beads.Store{work}, []string{""}, nil,
 	)
 	if len(released) != 0 {

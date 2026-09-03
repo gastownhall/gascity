@@ -21,6 +21,16 @@ var ErrNotFound = errors.New("bead not found")
 // absent bead should check errors.Is(err, ErrIDCollision).
 var ErrIDCollision = fmt.Errorf("bd resolved a different bead ID (substring collision): %w", ErrNotFound)
 
+// ErrPinnedIDOutsideNamespace is returned by a namespace-fenced store when a
+// create pins an id in a namespace that store does not serve. It is distinct
+// from a duplicate-id error, which says the store DOES serve the namespace and
+// already holds the row.
+//
+// A fenced store must wrap this rather than rely on its message: a provider
+// contract cannot demand error prose of an out-of-tree store, only a sentinel
+// it can wrap. See beadstest.RunPinnedIDFenceConformance.
+var ErrPinnedIDOutsideNamespace = errors.New("pinned id outside this store's namespaces")
+
 // ErrMetadataParse is returned when a bead exists but its stored metadata
 // cannot be decoded into the Store object model.
 var ErrMetadataParse = errors.New("bead metadata parse")
@@ -69,14 +79,43 @@ type Bead struct {
 	Priority  *int      `json:"priority,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	// UpdatedAt is zero for legacy beads; UpdatedBefore falls back to CreatedAt.
-	UpdatedAt   time.Time `json:"updated_at,omitempty,omitzero"`
-	Assignee    string    `json:"assignee,omitempty"`
-	From        string    `json:"from,omitempty"`
-	ParentID    string    `json:"parent,omitempty"`      // step → molecule; matches bd wire format
-	Ref         string    `json:"ref,omitempty"`         // formula step ID or formula name
-	Needs       []string  `json:"needs,omitempty"`       // dependency step refs
-	Description string    `json:"description,omitempty"` // step instructions
-	Labels      []string  `json:"labels,omitempty"`
+	UpdatedAt time.Time `json:"updated_at,omitempty,omitzero"`
+	Assignee  string    `json:"assignee,omitempty"`
+	From      string    `json:"from,omitempty"`
+	// ParentID is a CITY-SCOPED bead id held as a WEAK reference: step →
+	// molecule, matching bd's wire format.
+	//
+	// City-scoped, not store-scoped. A split city routes by CLASS, so a parent
+	// and its child are co-resident only when they classify the same way, and
+	// the cases where they do not are ordinary: a graph.v2 workflow whose root
+	// is a graph-class molecule in the binding hangs its steps off a work-class
+	// bead in a rig ledger. Nothing reconciles the two ledgers, and nothing
+	// should — a create that moved the child to reach its parent would mint it
+	// under the wrong prefix, which is unfixable afterwards.
+	//
+	// Weak, therefore, is the contract and not an admission. A store persists
+	// and filters this verbatim (Children and ListQuery.ParentID are string
+	// matches), and for any id OUTSIDE the namespace it mints it must never
+	// resolve, validate, rewrite, or place by it. A store that started
+	// rejecting an id it cannot see would break every cross-store molecule at
+	// once, and a store that started placing by it would strand the child in
+	// the parent's namespace, where no later copy can move it.
+	//
+	// The boundary is drawn at the namespace, not at the field, because that is
+	// where the backends can actually agree. A dangling id INSIDE a store's own
+	// namespace is a row that store can see the absence of, and the strong
+	// backends refuse it before writing anything; the weak ones cannot detect
+	// it at all. That divergence is left explicit rather than papered over —
+	// what every backend owes is that a foreign parent is carried without
+	// question. The conformance suite pins that owing for the providers that
+	// execute it (SQLite, native Dolt, mem, file, exec); it is not yet verified
+	// against the bd provider, whose RunStoreTests row is skipped pending a
+	// version bump (ga-e7z613), so there the contract holds by convention.
+	ParentID    string   `json:"parent,omitempty"`
+	Ref         string   `json:"ref,omitempty"`         // formula step ID or formula name
+	Needs       []string `json:"needs,omitempty"`       // dependency step refs
+	Description string   `json:"description,omitempty"` // step instructions
+	Labels      []string `json:"labels,omitempty"`
 	// Metadata uses StringMap (not map[string]string) so decode tolerates the
 	// non-string JSON values the external bd CLI emits — `--set-metadata
 	// key=true` is type-inferred to a JSON boolean, and a strict decode of a
@@ -162,12 +201,18 @@ type ConditionalAssignmentReleaser interface {
 // table against every implementing store, including real bd under the
 // integration build tag):
 //
-//   - Every bead carries an opaque int64 revision. Callers may test it only for
-//     equality; arithmetic, ordering across beads, and gap inference are all
-//     undefined.
-//   - Every USER-VISIBLE mutation of this bead bumps the revision: field
-//     updates, label add/remove, metadata writes (any key), assign, close,
-//     reopen, delete. Reads never bump.
+//   - Every mutated bead carries a nonzero opaque int64 revision. Callers may
+//     test it only for equality; arithmetic, ordering across beads, and gap
+//     inference are undefined. A token is never intentionally reused during one
+//     bead's observed lifetime. A never-mutated bead may read back as zero on a
+//     counter-backed store, so zero means "no usable token", not "revisions
+//     unsupported".
+//   - Every successful mutation of revision-guarded whole-row content —
+//     conditional or unconditional — mints a fresh nonzero revision. This
+//     covers row-backed Update fields, metadata writes, Close, and Reopen;
+//     reads never change it.
+//     Separate label/parent persistence and derived or heartbeat fields are
+//     outside this guarantee.
 //   - Denormalized/derived projection columns are OUTSIDE this guarantee. bd
 //     maintains a denormalized is_blocked column on the issue row that other
 //     beads' dependency/close/route writes recompute (the same reason bd pins
@@ -175,8 +220,9 @@ type ConditionalAssignmentReleaser interface {
 //     bumps the revision is backend-dependent and callers must not rely on
 //     either answer. This is why every consumer treats PreconditionFailedError
 //     as a re-read trigger, never as a conclusion about what changed.
-//   - A bead's revision is monotonically increasing for the lifetime of the bead
-//     and is never reused.
+//   - The immediately prior token is stale after a whole-row mutation and is
+//     rejected; concurrent writes with the same observed revision have exactly
+//     one winner. Backends may generate either counters or random tokens.
 //
 // GRANULARITY CONTRACT: consumers may assume NEITHER value-level nor
 // revision-level conflict semantics. Backends differ — sqlite and the native
@@ -186,8 +232,13 @@ type ConditionalAssignmentReleaser interface {
 // the value-CAS RESULT either way, but must not build timing or interference
 // assumptions on top of it.
 type ConditionalWriter interface {
-	// UpdateIfMatch applies opts only if the bead's revision equals
-	// expectedRevision; otherwise it returns *PreconditionFailedError.
+	// UpdateIfMatch applies row-backed opts only if the bead's revision equals
+	// expectedRevision; otherwise it returns *PreconditionFailedError. A store
+	// that persists ParentID, Labels, or RemoveLabels through separate writes
+	// cannot fold them into the guarded update and rejects them with
+	// *ConditionalUpdateFieldUnsupportedError; bd-backed and Dolt-backed stores
+	// do. Callers must therefore handle that error rather than assume the
+	// fields applied.
 	UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error
 	// CloseIfMatch closes the bead only if its revision equals expectedRevision;
 	// otherwise it returns *PreconditionFailedError.
@@ -205,12 +256,77 @@ type ConditionalWriter interface {
 	CompareAndSetMetadataKey(id, key, expected, next string) (bool, error)
 }
 
+// AtomicConditionalCloser closes a bead and merges metadata only when the
+// bead's revision still equals expectedRevision. Implementations commit the
+// metadata and close together, or neither change persists.
+//
+// This is deliberately narrower than ConditionalWriter: it is needed only by
+// terminal-state writers that cannot tolerate a metadata/close split, and is
+// exposed only by stores that can prove both operations share one transaction.
+type AtomicConditionalCloser interface {
+	CloseWithMetadataIfMatch(id string, expectedRevision int64, metadata map[string]string) (Bead, error)
+}
+
+// AtomicConditionalCloserHandleProvider lets a wrapper expose the atomic
+// terminal-write capability of its resolved backing without claiming it when
+// that backing cannot provide it.
+type AtomicConditionalCloserHandleProvider interface {
+	AtomicConditionalCloserHandle() (AtomicConditionalCloser, bool)
+}
+
+// AtomicConditionalCloserFor returns the atomic terminal-write capability when
+// store implements it. Unlike ConditionalWriterFor, this is not a rollout
+// policy seam: callers must refuse when the underlying store cannot provide
+// this all-or-nothing operation.
+func AtomicConditionalCloserFor(store Store) (AtomicConditionalCloser, bool) {
+	if store == nil {
+		return nil, false
+	}
+	store = followConditionalWritesResolveTarget(store)
+	if provider, ok := store.(AtomicConditionalCloserHandleProvider); ok {
+		return provider.AtomicConditionalCloserHandle()
+	}
+	closer, ok := store.(AtomicConditionalCloser)
+	return closer, ok
+}
+
 // ErrEmptyConditionalUpdate reports an UpdateIfMatch with no fields to apply.
 // The three in-tree implementations diverged here (bd cannot express an empty
 // fenced update; the native stores validated-and-bumped), so the contract is
 // pinned as invalid input: an empty fenced update neither evaluates the fence
 // nor bumps the revision on ANY store.
 var ErrEmptyConditionalUpdate = errors.New("conditional update: empty UpdateOpts (nothing to apply)")
+
+// ConditionalUpdateFieldUnsupportedError reports an UpdateIfMatch option that
+// is not row-backed across every ConditionalWriter implementation.
+type ConditionalUpdateFieldUnsupportedError struct {
+	Field string
+}
+
+// Error reports the conditional-update field that cannot be revision-guarded.
+func (e *ConditionalUpdateFieldUnsupportedError) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("conditional update: %s is not supported with revision matching", e.Field)
+}
+
+// validateConditionalUpdateOpts rejects the fields bd must persist separately
+// before any store evaluates a revision fence or mutates state.
+func validateConditionalUpdateOpts(o UpdateOpts) error {
+	switch {
+	case o.ParentID != nil:
+		return &ConditionalUpdateFieldUnsupportedError{Field: "parent_id"}
+	case len(o.Labels) > 0:
+		return &ConditionalUpdateFieldUnsupportedError{Field: "labels"}
+	case len(o.RemoveLabels) > 0:
+		return &ConditionalUpdateFieldUnsupportedError{Field: "remove_labels"}
+	case isEmptyUpdateOpts(o):
+		return ErrEmptyConditionalUpdate
+	default:
+		return nil
+	}
+}
 
 // isEmptyUpdateOpts reports whether opts carries no mutation at all.
 func isEmptyUpdateOpts(o UpdateOpts) bool {
@@ -595,6 +711,16 @@ type Store interface {
 	// Legacy helper; prefer List with ListQuery in new code.
 	// Children returns all beads whose ParentID matches the given ID,
 	// in creation order. Pass IncludeClosed to include closed children.
+	//
+	// The match is a string comparison against THIS store's rows, and
+	// parentID's own row is never read. A parent that lives in another store
+	// is neither an error nor an empty answer: its children here still come
+	// back, because ParentID is a weak city-scoped reference (see Bead.ParentID)
+	// and the alternative — resolving the parent first — would make every
+	// cross-store molecule's step list depend on a lookup the store cannot do.
+	// The corollary is that a caller wanting EVERY child of a city-scoped
+	// parent must ask every store, which is the residency resolver's job, not
+	// this method's.
 	Children(parentID string, opts ...QueryOpt) ([]Bead, error)
 
 	// Legacy helper; prefer List with ListQuery in new code.
