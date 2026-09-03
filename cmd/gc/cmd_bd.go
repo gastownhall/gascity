@@ -221,6 +221,17 @@ func rewriteBdHeartbeatArgs(bdArgs []string) ([]string, error) {
 // preflight cannot interpret exactly are refused before bd can mutate state.
 func bdRigQualifiedMetadataRefusal(cfg *config.City, bdArgs []string) (string, bool) {
 	verb, args := bdflags.SplitGlobalFlags(bdArgs)
+	// bd registers `new` as an alias for `create` (bd create --help: "Aliases:
+	// create, new"), so the alias has to reach the same admission check AND the
+	// same flag manifest. Normalizing here covers both, because those are the
+	// only two things verb is read for. The gate alone would not: bdflags keys
+	// its manifests under the canonical verb only and performs no alias
+	// normalization, so ValueFlags("new") is nil, and an empty manifest steps
+	// over no value — the failure mode globalValueFlags' doc comment calls
+	// load-bearing.
+	if verb == "new" {
+		verb = "create"
+	}
 	if verb != "create" && verb != "update" {
 		return "", false
 	}
@@ -383,7 +394,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// prospective bead's CLASS and never an addressed id, so a create that names
 	// a relocated bead in --parent still reaches the ownership refusal, which
 	// names that bead. When both are true the mint is what has to be stopped.
-	if msg, stranded := bdRelocatedClassCreateRefusal(cfg, bdArgs); stranded {
+	if msg, stranded := bdRelocatedClassCreateRefusal(cfg, target.ScopeRoot, bdArgs); stranded {
 		fmt.Fprintf(stderr, "gc bd: %s\n", msg) //nolint:errcheck // best-effort stderr
 		return 1
 	}

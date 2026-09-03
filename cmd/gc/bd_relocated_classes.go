@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -508,11 +509,19 @@ func bdRelocatedClassCreateAddLabels(shape *beads.Bead, value string) {
 // a JSON number or boolean reads here exactly as it reads back off the wire.
 //
 // A body this cannot decode — malformed JSON, or the `@file.json` spelling
-// whose object is not in argv at all — contributes nothing, and that is not a
-// swallowed error: bd applies the identical parse and exits non-zero WITHOUT
-// writing when it fails, so a token unreadable here cannot become a bead
-// either. The `@file.json` case is a real limit and is documented on
-// bdRelocatedClassCreateShape with the other file-borne shapes.
+// whose object is not in argv at all — contributes nothing to the shape. Under
+// `gc bd` that is not a swallowed error, but the shield is a gc guard rather
+// than bd: bdRigQualifiedMetadataRefusal (cmd_bd.go) runs unconditionally ahead
+// of this one and refuses both spellings on every verb it admits — create, its
+// `new` alias, and update. `q`, the third mint verb here, has no --metadata
+// flag at all (bd q --help), so every mint verb that can carry one is refused
+// before this function is reached.
+//
+// Attributing that to bd instead would be wrong, because bd's own behavior
+// differs by spelling: it rejects a malformed inline body (identical parse,
+// exit non-zero, no write) but it RESOLVES `@file.json` — that spelling states
+// its object in a file, so a token unreadable here is one bd would read and
+// mint from.
 func bdRelocatedClassCreateAddMetadata(shape *beads.Bead, value string) {
 	var fields beads.StringMap
 	if err := json.Unmarshal([]byte(value), &fields); err != nil {
@@ -551,10 +560,21 @@ func bdRelocatedClassCreateAddMetadata(shape *beads.Bead, value string) {
 // decomposing one needs to know which letters take values — bdflags pins that
 // per FLAG, not per letter. (A `--metadata` value this cannot read as the inline
 // JSON object bd expects likewise contributes nothing to the shape rather than a
-// wrong guess.) The guard is a floor on stranded mints, not a proof of their
-// impossibility: the file-backed forms above close the two highest-value doors,
-// and the migration's containment check only REPORTS strays already on disk — it
-// detects them, it does not move them.
+// wrong guess.)
+//
+// Three MINT VERBS are outside the guard entirely, because
+// bdRelocatedClassCreateVerbs holds only create/new/q: `bd import` replays a
+// JSONL export with issue_type and labels carried verbatim, `bd batch` reads a
+// create grammar from stdin or a file, and `bd create-form` mints from a form.
+// Each can still land a relocated-class bead in the work ledger at exit 0. None
+// of them was ever guarded, so this is a limit of the floor rather than a
+// regression — but it is a limit, and `import` in particular is the natural
+// restore path, since JSONL is what `bd export` emits.
+//
+// The guard is a floor on stranded mints, not a proof of their impossibility:
+// the file-backed forms above close the two highest-value doors on the create
+// verbs it covers, and the migration's containment check only REPORTS strays
+// already on disk — it detects them, it does not move them.
 func bdRelocatedClassCreateShape(manifest string, verbArgs []string) beads.Bead {
 	values := bdflags.ValueFlags(manifest)
 	var shape beads.Bead
@@ -662,11 +682,35 @@ func fileCreateFormForFlag(name string) fileCreateForm {
 // coordclass.ClassifyGraphPlan is the same decision the router and the migration
 // make, not a reparse of bd's format.
 //
+// A RELATIVE path is resolved against scopeRoot, because that is the directory
+// bd will read it from: doBd runs the subprocess with cmd.Dir = target.ScopeRoot.
+// Reading it in the wrapper's own cwd instead resolved the same token against two
+// different roots, and the damaging direction is silent — the plan exists under
+// the scope root but not under cwd, this read fails, parsed=false forwards the
+// create, and bd finds the plan and mints the relocated-class bead. Two roots for
+// one path is also how a plan could be classified against a DIFFERENT file that
+// happens to sit at the same relative path under cwd.
+//
+// bd's own `-C/--directory` does not disturb this. Despite its help text
+// ("Change to this directory before running the command (like git -C)"), `-C`
+// selects the beads PROJECT bd opens — it is validated as such, with
+// `cannot use -C directory "...": no beads project found` — and is not the base
+// for a relative path argument. bd resolves `--graph <path>` against its process
+// cwd, and doBd pins that cwd with a single unconditional
+// `cmd.Dir = target.ScopeRoot` (cmd_bd.go), the same root threaded here, so this
+// read and bd's read name the same file with or without `-C`. Probed against bd
+// 1.1.0 in both directions: with the plan present in cwd only, bd parses it even
+// under `-C <other project>`; with the plan present under the `-C` directory
+// only, bd reports it missing.
+//
 // parsed=false is not a swallowed error: bd applies the identical json.Unmarshal
 // and exits non-zero WITHOUT writing when it fails, so a plan unreadable here
 // cannot become a bead either. The caller forwards it to fail at bd rather than
 // refusing a create that would mint nothing.
-func bdRelocatedClassGraphPlanClass(path string) (class coordclass.Class, parsed bool) {
+func bdRelocatedClassGraphPlanClass(scopeRoot, path string) (class coordclass.Class, parsed bool) {
+	if scopeRoot != "" && path != "" && !filepath.IsAbs(path) {
+		path = filepath.Join(scopeRoot, path)
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return coordclass.ClassWork, false
@@ -682,12 +726,15 @@ func bdRelocatedClassGraphPlanClass(path string) (class coordclass.Class, parsed
 // a bead of a class this city serves from a storage binding, and returns the
 // operator-facing refusal when it would.
 //
-// This is the write side of the same split the read guard above covers, and it
-// fails differently: a blind READ answers emptily and can be re-run once the
-// operator knows better, while a blind CREATE leaves a row in the wrong ledger
-// under the wrong prefix — a bead no later read finds, and no migration moves,
-// because renaming it into the class namespace afterwards is not something any
-// backend can do.
+// This is the write side of the same split the read guard above covers, over
+// the create verbs that state their beads in argv — not over every way bd can
+// mint: `import`, `batch` and `create-form` remain unguarded, as documented on
+// bdRelocatedClassCreateShape. Where it does fire it fails differently from the
+// read guard: a blind READ answers emptily and can be re-run once the operator
+// knows better, while a blind CREATE leaves a row in the wrong ledger under the
+// wrong prefix — a bead no later read finds, and no migration moves, because
+// renaming it into the class namespace afterwards is not something any backend
+// can do.
 //
 // It refuses rather than reroutes because rerouting is impossible on this seam:
 // only argv crosses to the bd subprocess, and the binding is opened in process.
@@ -700,11 +747,28 @@ func bdRelocatedClassGraphPlanClass(path string) (class coordclass.Class, parsed
 // is a type=chore bead, so any table written here would have to relearn the
 // boundary and would drift from it.
 //
-// An undecidable verb (a subcommand hidden behind an unrecognized root flag)
-// returns no refusal, unlike the read scan's fail-closed judgment of every
-// remaining token: there is nothing to fail closed ABOUT, because bd rejects
-// the unknown flag before creating anything, so no mint can occur either way.
-func bdRelocatedClassCreateRefusal(cfg *config.City, bdArgs []string) (string, bool) {
+// scopeRoot is the directory doBd will run bd in (target.ScopeRoot), and it is
+// threaded here for the file-backed arms: a relative `--graph` path names a file
+// relative to THAT root, not to the wrapper's cwd. An empty scopeRoot means no
+// root is known and relative paths resolve as the process sees them.
+//
+// An undecidable verb — a subcommand hidden behind a root flag that is in
+// NEITHER global manifest — returns no refusal, unlike the read scan's
+// fail-closed judgment of every remaining token. The premise is that a flag this
+// package does not know is one bd does not know either, so bd rejects it and
+// exits before creating anything. That premise holds only while the manifests in
+// internal/bdflags track bd's real persistent flags, and it did not hold once:
+// --profile was filed as a bool and --database, --server-url and --mem-profile
+// were in neither map, so four flags bd accepts and mints behind reached this arm
+// and switched the guard off. The manifests are pinned exactly — value and bool
+// sets compared separately by TestGlobalValueFlagsIsComplete and
+// TestGlobalBoolFlagsIsComplete — so restoring that premise is a build failure
+// away rather than a silent fail-open, and
+// TestBdCreateRefusesAnInfraShapedCreateBehindABdRootFlag pins the composition
+// from this end. Failing closed here instead is not the cheaper answer: with no
+// verb there is no dialect either, so judging the remaining tokens under the
+// create dialect would refuse `gc bd <unknown-flag> list --type message`, a READ.
+func bdRelocatedClassCreateRefusal(cfg *config.City, scopeRoot string, bdArgs []string) (string, bool) {
 	relocated := relocatedBeadClasses(cfg)
 	if len(relocated) == 0 {
 		return "", false
@@ -727,7 +791,7 @@ func bdRelocatedClassCreateRefusal(cfg *config.City, bdArgs []string) (string, b
 		// unreadable or malformed plan is left to fall through to bd, which
 		// applies the identical parse and mints nothing when it fails, so there
 		// is nothing for this guard to strand.
-		if class, parsed := bdRelocatedClassGraphPlanClass(path); parsed {
+		if class, parsed := bdRelocatedClassGraphPlanClass(scopeRoot, path); parsed {
 			return bdRelocatedClassMatch(verb, relocated, class)
 		}
 	case fileCreateBulk:
