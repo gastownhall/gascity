@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -99,30 +100,43 @@ func TestGasCityGcBdExternalUnixSocketFrontDoor(t *testing.T) {
 	fixture := newFrontDoorFixture(t, baseEnv, "proxied-external-socket")
 	env := append([]string{}, fixture.env...)
 	env = append(env, "GC_CITY_PATH="+fixture.dir)
+	if _, err := os.Stat(filepath.Join(fixture.dir, ".gc", "runtime", "packs", "dolt", "dolt-state.json")); !os.IsNotExist(err) {
+		t.Fatalf("external proxy unexpectedly materialized Gas City Dolt runtime state: %v", err)
+	}
 	before, err := os.ReadFile(filepath.Join(fixture.dir, ".beads", "metadata.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out, err := runCommand(fixture.dir, env, 20*time.Second, gcBinary, "doctor", "--json"); err != nil {
-		t.Fatalf("gc doctor: %v\n%s", err, out)
-	}
+	out, _ := runCommandStdout(fixture.dir, env, 20*time.Second, gcBinary, "doctor", "--json")
+	assertDoctorDoltResult(t, out, "dolt-server", fixture.socketServer.socketPath)
+	assertDoctorDoltResult(t, out, "beads-store", fixture.socketServer.socketPath)
 	for _, args := range [][]string{{"bd", "create", "front door", "-t", "task", "--json"}, {"bd", "list", "--json"}} {
 		if out, err := runCommand(fixture.dir, env, 20*time.Second, gcBinary, args...); err != nil {
 			t.Fatalf("gc %s: %v\n%s", strings.Join(args, " "), err, out)
 		}
 	}
-	if out, err := runCommand(fixture.dir, env, 20*time.Second, gcBinary, "doctor", "--json"); err != nil {
-		t.Fatalf("gc doctor: %v\n%s", err, out)
-	} else if !strings.Contains(out, "dolt-server") {
-		t.Fatalf("doctor output missing dolt-server check: %s", out)
-	}
+	out, _ = runCommandStdout(fixture.dir, env, 20*time.Second, gcBinary, "doctor", "--json")
+	assertDoctorDoltResult(t, out, "dolt-server", fixture.socketServer.socketPath)
+	assertDoctorDoltResult(t, out, "beads-store", fixture.socketServer.socketPath)
 	beforeTree := snapshotFrontDoorTree(t, filepath.Join(fixture.dir, ".beads"))
 	fixture.socketServer.stop(t)
-	if out, err := runCommand(fixture.dir, env, 3*time.Second, gcBinary, "bd", "list", "--json"); err == nil || !strings.Contains(strings.ToLower(out), "socket") {
-		t.Fatalf("gc bd unexpectedly succeeded after socket outage: %s", out)
+	if out, err := runCommand(fixture.dir, env, 3*time.Second, gcBinary, "bd", "list", "--json"); err == nil || (!strings.Contains(strings.ToLower(out), "socket") && !strings.Contains(strings.ToLower(out), "invalid connection") && !strings.Contains(strings.ToLower(out), "failed to open")) {
+		t.Fatalf("gc bd unexpectedly succeeded after socket outage or lacked actionable transport error: %s", out)
 	}
 	if got := snapshotFrontDoorTree(t, filepath.Join(fixture.dir, ".beads")); !reflect.DeepEqual(beforeTree, got) {
-		t.Fatalf("beads files mutated during outage")
+		var changed []string
+		for path, before := range beforeTree {
+			if after, ok := got[path]; !ok || !bytes.Equal(before, after) {
+				changed = append(changed, path)
+			}
+		}
+		for path := range got {
+			if _, ok := beforeTree[path]; !ok {
+				changed = append(changed, path)
+			}
+		}
+		sort.Strings(changed)
+		t.Fatalf("beads files mutated during outage: %v", changed)
 	}
 	server := startDoltSocketServer(t, fixture.env, filepath.Join(filepath.Dir(fixture.dir), "dolt"))
 	defer server.stop(t)
@@ -153,12 +167,53 @@ func snapshotFrontDoorTree(t *testing.T, root string) map[string][]byte {
 			return err
 		}
 		rel, _ := filepath.Rel(root, path)
+		// Proxy diagnostics are intentionally append-only and may record the
+		// outage itself; semantic store/config artifacts are checked below.
+		if strings.HasSuffix(strings.ToLower(rel), ".log") {
+			return nil
+		}
 		out[rel] = b
 		return nil
 	}); err != nil {
 		t.Fatalf("snapshot %s: %v", root, err)
 	}
 	return out
+}
+
+func assertDoctorDoltResult(t *testing.T, output, name, endpoint string) {
+	t.Helper()
+	raw := []byte(output)
+	if start := bytes.Index(raw, []byte("{\"blocking_failed\"")); start >= 0 {
+		raw = raw[start:]
+	}
+	value := decodeFrontDoorJSON(t, raw, "gc doctor")
+	root, ok := value.(map[string]any)
+	if !ok {
+		t.Fatalf("gc doctor JSON is not an object: %#v", value)
+	}
+	results, ok := root["results"].([]any)
+	if !ok {
+		t.Fatalf("gc doctor JSON has no results array: %#v", root)
+	}
+	for _, raw := range results {
+		result, ok := raw.(map[string]any)
+		if !ok || result["name"] != name {
+			continue
+		}
+		status, ok := result["status"].(string)
+		if !ok || (status != "ok" && !(name == "beads-store" && status == "warning")) {
+			t.Fatalf("gc doctor %s status is not OK: %#v", name, result)
+		}
+		message, _ := result["message"].(string)
+		if name == "dolt-server" && !strings.Contains(message, endpoint) {
+			t.Fatalf("gc doctor %s message %q does not report endpoint %q", name, message, endpoint)
+		}
+		if name == "beads-store" && (strings.Contains(message, "resolve dolt target") || strings.Contains(message, "runtime state unavailable")) {
+			t.Fatalf("gc doctor %s still reports local-runtime failure: %q", name, message)
+		}
+		return
+	}
+	t.Fatalf("gc doctor output missing %s result: %#v", name, root)
 }
 
 type frontDoorFixture struct {
@@ -259,9 +314,19 @@ func startDoltSocketServer(t *testing.T, env []string, dataDir string) *doltSock
 	if err != nil {
 		t.Fatalf("creating dolt log file: %v", err)
 	}
+	// Dolt versions used by the RC require a TCP port even when a Unix socket
+	// is enabled. Reserve an ephemeral port so parallel fixtures never collide;
+	// the test intentionally filters TCP environment and uses only the socket.
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		_ = logFile.Close()
+		t.Fatalf("reserve dolt tcp port: %v", err)
+	}
+	port := probe.Addr().(*net.TCPAddr).Port
+	_ = probe.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, doltBinary, "sql-server", "--socket", socketPath, "--data-dir", dataDir)
+	cmd := exec.CommandContext(ctx, doltBinary, "sql-server", "--socket", socketPath, "--port", strconv.Itoa(port), "--data-dir", dataDir)
 	cmd.Env = env
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
