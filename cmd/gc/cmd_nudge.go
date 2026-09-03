@@ -775,22 +775,59 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 		if delivered {
 			continue
 		}
-		// Mirror dispatchAllQueuedNudges' skip accounting (nudge_dispatcher.go):
-		// a live, running target that didn't get a delivery this tick is the
-		// same "not-delivered" class the supervisor dispatcher already counts
-		// into State.DispatchSkips -- most commonly tryDeliverQueuedNudgesByPoller's
-		// quiescence gate rejecting a continuously busy session. Without this,
-		// the legacy per-session poll loop (the common deployment shape) left
-		// that skip with no trace at all; see #5317.
-		skipReason := "not-delivered"
-		if pollErr != nil {
-			skipReason = "not-delivered-error"
-		}
-		if recErr := recordNudgeDispatchSkips(target.cityPath, map[string]int64{skipReason: 1}); recErr != nil {
-			fmt.Fprintf(stderr, "gc nudge poll: recording dispatch skip counter: %v\n", recErr) //nolint:errcheck
+		// Mirror dispatchAllQueuedNudges' skip accounting (nudge_dispatcher.go),
+		// gate included: "not-delivered" means this target HAD due queued work
+		// and still got nothing this tick -- most commonly
+		// tryDeliverQueuedNudgesByPoller's quiescence gate rejecting a
+		// continuously busy session. A running session with nothing queued is
+		// the dispatcher's separate "not-matched" class and is deliberately not
+		// counted here: the poll loop never exits while the session runs, so
+		// counting it would turn this into a tick counter and take the queue
+		// flock every interval. See #5317.
+		if nudgePollTargetHasDueWork(target, time.Now()) {
+			skipReason := "not-delivered"
+			if pollErr != nil {
+				skipReason = "not-delivered-error"
+			}
+			if recErr := recordNudgeDispatchSkips(target.cityPath, map[string]int64{skipReason: 1}); recErr != nil {
+				fmt.Fprintf(stderr, "gc nudge poll: recording dispatch skip counter: %v\n", recErr) //nolint:errcheck
+			}
 		}
 		time.Sleep(interval)
 	}
+}
+
+// nudgePollTargetHasDueWork reports whether the queue currently holds work
+// this target could have received on this tick: a due pending item, or an
+// in-flight item whose lease has expired (recoverable on the next claim).
+// It mirrors the dispatcher's pendingAgents gate (nudge_dispatcher.go) so the
+// poll loop's "not-delivered" means the same thing the dispatcher's does.
+// Read-only on purpose: the skip counter must not take the queue flock on
+// every tick.
+func nudgePollTargetHasDueWork(target nudgeTarget, now time.Time) bool {
+	state, err := nudgequeue.LoadState(target.cityPath)
+	if err != nil {
+		return false
+	}
+	for _, item := range state.Pending {
+		if !target.matchesQueueAgent(item.Agent) {
+			continue
+		}
+		if !item.DeliverAfter.IsZero() && item.DeliverAfter.After(now) {
+			continue
+		}
+		return true
+	}
+	for _, item := range state.InFlight {
+		if !target.matchesQueueAgent(item.Agent) {
+			continue
+		}
+		if item.LeaseUntil.IsZero() || !item.LeaseUntil.Before(now) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func shouldKeepNudgePollerAlive(target nudgeTarget, missingSince, now time.Time) bool {
