@@ -2258,8 +2258,15 @@ func commitStartResultTraced(
 	if prior, loadErr := sessFront.LoadStartupHealthEpisode(name); loadErr != nil {
 		fmt.Fprintf(stderr, "session reconciler: loading startup-health episode for %s: %v\n", name, loadErr) //nolint:errcheck
 	} else if prior.ConsecutiveCount != 0 || !prior.QuarantinedUntil.IsZero() {
-		if saveErr := sessFront.SaveStartupHealthEpisode(sessionpkg.ClearStartupHealthEpisode(name)); saveErr != nil {
+		cleared := sessionpkg.ClearStartupHealthEpisode(name)
+		if saveErr := sessFront.SaveStartupHealthEpisode(cleared); saveErr != nil {
 			fmt.Fprintf(stderr, "session reconciler: clearing startup-health episode for %s: %v\n", name, saveErr) //nolint:errcheck
+		}
+		// Clear the mirrored count/kind alongside the episode itself so a
+		// recovered session does not keep showing stale "quarantined"
+		// metadata on its visible row (ga-em8g4o).
+		if mirrorErr := mirrorStartupHealthEpisodeMetadata(sessFront, info.ID, cleared); mirrorErr != nil {
+			fmt.Fprintf(stderr, "session reconciler: clearing mirrored startup-health metadata for %s: %v\n", name, mirrorErr) //nolint:errcheck
 		}
 	}
 	// Announce the wake only after the metadata batch has durably landed.
@@ -2367,7 +2374,11 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 			fmt.Fprintf(stderr, "session reconciler: loading startup-health episode for %s: %v\n", name, loadErr) //nolint:errcheck
 		} else {
 			prior.SessionName = name
-			episode := sessionpkg.RecordStartupFailure(prior, result.err.Error(), clk.Now(), defaultMaxWakeAttempts, defaultQuarantineDuration)
+			kind := sessionpkg.FailureKindOther
+			if errors.Is(result.err, context.DeadlineExceeded) {
+				kind = sessionpkg.FailureKindTimeout
+			}
+			episode := sessionpkg.RecordStartupFailure(prior, kind, result.err.Error(), clk.Now(), defaultMaxWakeAttempts, defaultQuarantineDuration)
 			if saveErr := sessFront.SaveStartupHealthEpisode(episode); saveErr != nil {
 				fmt.Fprintf(stderr, "session reconciler: saving startup-health episode for %s: %v\n", name, saveErr) //nolint:errcheck
 			}

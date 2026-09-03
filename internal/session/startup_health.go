@@ -19,6 +19,7 @@ const (
 	StartupHealthFirstFailureMetadataKey     = "startup_health_first_failure_at"
 	StartupHealthLastFailureMetadataKey      = "startup_health_last_failure_at"
 	StartupHealthLastDetailMetadataKey       = "startup_health_last_detail"
+	StartupHealthKindMetadataKey             = "startup_health_kind"
 	StartupHealthAlertMetadataKey            = "startup_health_alert_disposition"
 	StartupHealthQuarantinedUntilMetadataKey = "startup_health_quarantined_until"
 )
@@ -37,6 +38,18 @@ const (
 	AlertDispositionSent    AlertDisposition = "sent"
 )
 
+// FailureKind classifies why a startup attempt failed, so a caller (such as
+// the visible session row mirror) can distinguish a hung/slow provider from
+// any other failure without parsing LastDetail.
+type FailureKind string
+
+// FailureKind values.
+const (
+	FailureKindUnspecified FailureKind = ""
+	FailureKindTimeout     FailureKind = "timeout"
+	FailureKindOther       FailureKind = "other"
+)
+
 // StartupHealthEpisode is a bookkeeping record of consecutive startup
 // failures for one session name, used to escalate and quarantine a session
 // whose provider start keeps failing.
@@ -46,6 +59,7 @@ type StartupHealthEpisode struct {
 	FirstFailureAt   time.Time
 	LastFailureAt    time.Time
 	LastDetail       string
+	Kind             FailureKind
 	AlertDisposition AlertDisposition
 	QuarantinedUntil time.Time
 }
@@ -59,6 +73,7 @@ func StartupHealthEpisodeFromMetadata(meta map[string]string) StartupHealthEpiso
 	ep := StartupHealthEpisode{
 		SessionName:      meta[StartupHealthSessionNameMetadataKey],
 		LastDetail:       meta[StartupHealthLastDetailMetadataKey],
+		Kind:             FailureKind(meta[StartupHealthKindMetadataKey]),
 		AlertDisposition: AlertDisposition(meta[StartupHealthAlertMetadataKey]),
 	}
 	if n, err := strconv.Atoi(meta[StartupHealthConsecutiveMetadataKey]); err == nil {
@@ -90,6 +105,7 @@ func startupHealthEpisodeToMetadata(ep StartupHealthEpisode) map[string]string {
 		StartupHealthFirstFailureMetadataKey:     formatStartupHealthTime(ep.FirstFailureAt),
 		StartupHealthLastFailureMetadataKey:      formatStartupHealthTime(ep.LastFailureAt),
 		StartupHealthLastDetailMetadataKey:       ep.LastDetail,
+		StartupHealthKindMetadataKey:             string(ep.Kind),
 		StartupHealthAlertMetadataKey:            string(ep.AlertDisposition),
 		StartupHealthQuarantinedUntilMetadataKey: formatStartupHealthTime(ep.QuarantinedUntil),
 	}
@@ -104,12 +120,13 @@ func formatStartupHealthTime(t time.Time) string {
 
 // RecordStartupFailure returns the episode transition for one more
 // consecutive startup failure. ConsecutiveCount always increments;
-// FirstFailureAt is stamped only once (preserved across accrual);
+// FirstFailureAt is stamped only once (preserved across accrual); LastDetail
+// and Kind are overwritten on every call (no accrual, no stickiness);
 // QuarantinedUntil is set once ConsecutiveCount reaches threshold; and
 // AlertDisposition escalates to pending on entering quarantine but never
 // regresses away from AlertDispositionSent (an already-sent escalation stays
 // sent through further accrual).
-func RecordStartupFailure(prior StartupHealthEpisode, detail string, now time.Time, threshold int, quarantineDuration time.Duration) StartupHealthEpisode {
+func RecordStartupFailure(prior StartupHealthEpisode, kind FailureKind, detail string, now time.Time, threshold int, quarantineDuration time.Duration) StartupHealthEpisode {
 	firstFailureAt := prior.FirstFailureAt
 	if firstFailureAt.IsZero() {
 		firstFailureAt = now
@@ -124,6 +141,7 @@ func RecordStartupFailure(prior StartupHealthEpisode, detail string, now time.Ti
 		FirstFailureAt:   firstFailureAt,
 		LastFailureAt:    now,
 		LastDetail:       string(detailRunes),
+		Kind:             kind,
 		AlertDisposition: prior.AlertDisposition,
 		QuarantinedUntil: prior.QuarantinedUntil,
 	}

@@ -3746,8 +3746,21 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				// call sites in session_lifecycle_parallel.go) so the miss is
 				// observable instead of silent.
 				fmt.Fprintf(stderr, "session reconciler: loading startup-health episode for %s: %v\n", name, err) //nolint:errcheck
-			} else if !episode.QuarantinedUntil.IsZero() && clk.Now().Before(episode.QuarantinedUntil) {
-				continue // startup-health crash-loop protection (pending-create failures)
+			} else if !episode.QuarantinedUntil.IsZero() {
+				// Mirror the active episode onto the visible session row
+				// (ga-em8g4o) so a caller can see why a start is being held
+				// back through the typed front door alone, without a separate
+				// startup-health-episode bead lookup. Written whenever the
+				// episode has reached quarantine threshold, independent of
+				// whether "now" is still before QuarantinedUntil, so the
+				// mirrored state stays visible through the tick that lets the
+				// quarantine expire.
+				if mirrorErr := mirrorStartupHealthEpisodeMetadata(sessFront, target.info.ID, episode); mirrorErr != nil {
+					fmt.Fprintf(stderr, "session reconciler: mirroring startup-health episode for %s: %v\n", name, mirrorErr) //nolint:errcheck
+				}
+				if clk.Now().Before(episode.QuarantinedUntil) {
+					continue // startup-health crash-loop protection (pending-create failures)
+				}
 			}
 			if pendingCreateStartInFlightInfo(info, clk, startupTimeout) {
 				if trace != nil {
@@ -4842,6 +4855,34 @@ func emitSessionWakeRefused(
 		fmt.Fprintf(stderr, "session reconciler: recording wake refusal for %s: %v\n", info.ID, err) //nolint:errcheck
 	}
 	return fold
+}
+
+// startupHealthActiveCountMetadataKey and startupHealthActiveKindMetadataKey
+// mirror a startup-health episode's ConsecutiveCount and Kind onto the
+// visible session row (ga-em8g4o) once the episode reaches quarantine
+// threshold, so a caller can see why a start is being held back through the
+// typed session front door alone. Cleared back to their zero-value
+// representations ("0" and "") alongside the episode itself on a successful,
+// durably-committed start (session_lifecycle_parallel.go).
+const (
+	startupHealthActiveCountMetadataKey = "startup_health_active_count"
+	startupHealthActiveKindMetadataKey  = "startup_health_active_kind"
+)
+
+// mirrorStartupHealthEpisodeMetadata writes episode's ConsecutiveCount and
+// Kind onto the session bead id through the typed front door. Callers decide
+// WHEN to mirror (the quarantine gate above only calls this once the episode
+// has reached threshold; the success-path clear in
+// session_lifecycle_parallel.go calls it with the zero-value cleared
+// episode); this helper only knows how to encode one episode as a patch.
+func mirrorStartupHealthEpisodeMetadata(sessFront *sessionpkg.Store, id string, episode sessionpkg.StartupHealthEpisode) error {
+	if sessFront == nil || strings.TrimSpace(id) == "" {
+		return nil
+	}
+	return sessFront.ApplyPatch(id, sessionpkg.MetadataPatch{
+		startupHealthActiveCountMetadataKey: strconv.Itoa(episode.ConsecutiveCount),
+		startupHealthActiveKindMetadataKey:  string(episode.Kind),
+	})
 }
 
 type strandedAssignedWork struct {

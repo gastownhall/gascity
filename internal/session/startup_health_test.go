@@ -85,6 +85,7 @@ func TestStartupHealthEpisodeFromMetadataProjectsVerbatim(t *testing.T) {
 				StartupHealthFirstFailureMetadataKey:     firstFailure.Format(time.RFC3339),
 				StartupHealthLastFailureMetadataKey:      lastFailure.Format(time.RFC3339),
 				StartupHealthLastDetailMetadataKey:       "exit status 1",
+				StartupHealthKindMetadataKey:             string(FailureKindTimeout),
 				StartupHealthAlertMetadataKey:            string(AlertDispositionPending),
 				StartupHealthQuarantinedUntilMetadataKey: quarantinedUntil.Format(time.RFC3339),
 			},
@@ -94,6 +95,7 @@ func TestStartupHealthEpisodeFromMetadataProjectsVerbatim(t *testing.T) {
 				FirstFailureAt:   firstFailure,
 				LastFailureAt:    lastFailure,
 				LastDetail:       "exit status 1",
+				Kind:             FailureKindTimeout,
 				AlertDisposition: AlertDispositionPending,
 				QuarantinedUntil: quarantinedUntil,
 			},
@@ -106,6 +108,7 @@ func TestStartupHealthEpisodeFromMetadataProjectsVerbatim(t *testing.T) {
 				StartupHealthFirstFailureMetadataKey:     "not-a-time",
 				StartupHealthLastFailureMetadataKey:      "",
 				StartupHealthLastDetailMetadataKey:       "garbled\x00detail",
+				StartupHealthKindMetadataKey:             "unrecognized-kind",
 				StartupHealthAlertMetadataKey:            "unrecognized-disposition",
 				StartupHealthQuarantinedUntilMetadataKey: "also-not-a-time",
 			},
@@ -115,6 +118,7 @@ func TestStartupHealthEpisodeFromMetadataProjectsVerbatim(t *testing.T) {
 				FirstFailureAt:   time.Time{},
 				LastFailureAt:    time.Time{},
 				LastDetail:       "garbled\x00detail",
+				Kind:             FailureKind("unrecognized-kind"),
 				AlertDisposition: AlertDisposition("unrecognized-disposition"),
 				QuarantinedUntil: time.Time{},
 			},
@@ -137,9 +141,12 @@ func TestStartupHealthEpisodeFromMetadataProjectsVerbatim(t *testing.T) {
 func TestRecordStartupFailureBelowThreshold(t *testing.T) {
 	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
 	prior := StartupHealthEpisode{SessionName: "w", ConsecutiveCount: 1}
-	got := RecordStartupFailure(prior, "boom", now, 5, 5*time.Minute)
+	got := RecordStartupFailure(prior, FailureKindOther, "boom", now, 5, 5*time.Minute)
 	if got.ConsecutiveCount != 2 {
 		t.Errorf("ConsecutiveCount = %d, want 2", got.ConsecutiveCount)
+	}
+	if got.Kind != FailureKindOther {
+		t.Errorf("Kind = %q, want %q", got.Kind, FailureKindOther)
 	}
 	if !got.QuarantinedUntil.IsZero() {
 		t.Errorf("QuarantinedUntil = %v, want zero (below threshold)", got.QuarantinedUntil)
@@ -159,7 +166,7 @@ func TestRecordStartupFailurePreservesFirstFailureAcrossAccrual(t *testing.T) {
 	first := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
 	prior := StartupHealthEpisode{SessionName: "w", ConsecutiveCount: 1, FirstFailureAt: first}
 	later := first.Add(10 * time.Minute)
-	got := RecordStartupFailure(prior, "boom again", later, 5, 5*time.Minute)
+	got := RecordStartupFailure(prior, FailureKindOther, "boom again", later, 5, 5*time.Minute)
 	if !got.FirstFailureAt.Equal(first) {
 		t.Errorf("FirstFailureAt = %v, want unchanged %v", got.FirstFailureAt, first)
 	}
@@ -171,7 +178,7 @@ func TestRecordStartupFailurePreservesFirstFailureAcrossAccrual(t *testing.T) {
 func TestRecordStartupFailureAtThreshold(t *testing.T) {
 	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
 	prior := StartupHealthEpisode{SessionName: "w", ConsecutiveCount: 4}
-	got := RecordStartupFailure(prior, "boom", now, 5, 5*time.Minute)
+	got := RecordStartupFailure(prior, FailureKindOther, "boom", now, 5, 5*time.Minute)
 	if got.ConsecutiveCount != 5 {
 		t.Fatalf("ConsecutiveCount = %d, want 5", got.ConsecutiveCount)
 	}
@@ -185,7 +192,7 @@ func TestRecordStartupFailureBelowThresholdLeavesQuarantineUnset(t *testing.T) {
 	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
 	prior := StartupHealthEpisode{SessionName: "w"}
 	for i := 0; i < 4; i++ { //nolint:staticcheck // SA4008 false positive: RecordStartupFailure is a RED-phase panic stub (ga-o04bfr.1.1); staticcheck sees the body as unconditionally terminating and misreports i++ as dead. Resolves at GREEN.
-		prior = RecordStartupFailure(prior, "boom", now, 5, 5*time.Minute)
+		prior = RecordStartupFailure(prior, FailureKindOther, "boom", now, 5, 5*time.Minute)
 		if !prior.QuarantinedUntil.IsZero() {
 			t.Fatalf("iteration %d: QuarantinedUntil = %v, want zero below threshold", i, prior.QuarantinedUntil)
 		}
@@ -198,7 +205,7 @@ func TestRecordStartupFailureBelowThresholdLeavesQuarantineUnset(t *testing.T) {
 func TestRecordStartupFailureSetsAlertDispositionPendingOnQuarantine(t *testing.T) {
 	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
 	prior := StartupHealthEpisode{SessionName: "w", ConsecutiveCount: 4}
-	got := RecordStartupFailure(prior, "boom", now, 5, 5*time.Minute)
+	got := RecordStartupFailure(prior, FailureKindOther, "boom", now, 5, 5*time.Minute)
 	if got.AlertDisposition != AlertDispositionPending {
 		t.Errorf("AlertDisposition = %q, want %q", got.AlertDisposition, AlertDispositionPending)
 	}
@@ -207,7 +214,7 @@ func TestRecordStartupFailureSetsAlertDispositionPendingOnQuarantine(t *testing.
 func TestRecordStartupFailureAlertDispositionNeverRegressesFromSent(t *testing.T) {
 	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
 	prior := StartupHealthEpisode{SessionName: "w", ConsecutiveCount: 4, AlertDisposition: AlertDispositionSent}
-	got := RecordStartupFailure(prior, "boom", now, 5, 5*time.Minute)
+	got := RecordStartupFailure(prior, FailureKindOther, "boom", now, 5, 5*time.Minute)
 	if got.AlertDisposition != AlertDispositionSent {
 		t.Errorf("AlertDisposition = %q, want %q (must not regress from sent)", got.AlertDisposition, AlertDispositionSent)
 	}
@@ -216,9 +223,27 @@ func TestRecordStartupFailureAlertDispositionNeverRegressesFromSent(t *testing.T
 func TestRecordStartupFailureTruncatesDetail(t *testing.T) {
 	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
 	huge := strings.Repeat("boom", 200) // 800 runes
-	got := RecordStartupFailure(StartupHealthEpisode{SessionName: "w"}, huge, now, 5, 5*time.Minute)
+	got := RecordStartupFailure(StartupHealthEpisode{SessionName: "w"}, FailureKindOther, huge, now, 5, 5*time.Minute)
 	if n := len([]rune(got.LastDetail)); n != startupHealthLastDetailMaxRunes {
 		t.Errorf("len(LastDetail) = %d, want %d", n, startupHealthLastDetailMaxRunes)
+	}
+}
+
+func TestRecordStartupFailureSetsKind(t *testing.T) {
+	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+	prior := StartupHealthEpisode{SessionName: "w"}
+	got := RecordStartupFailure(prior, FailureKindTimeout, "boom", now, 5, 5*time.Minute)
+	if got.Kind != FailureKindTimeout {
+		t.Errorf("Kind = %q, want %q", got.Kind, FailureKindTimeout)
+	}
+}
+
+func TestRecordStartupFailureKindOverwritesOnEachFailure(t *testing.T) {
+	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+	prior := StartupHealthEpisode{SessionName: "w", ConsecutiveCount: 1, Kind: FailureKindTimeout}
+	got := RecordStartupFailure(prior, FailureKindOther, "boom", now, 5, 5*time.Minute)
+	if got.Kind != FailureKindOther {
+		t.Errorf("Kind = %q, want %q (must overwrite like LastDetail, not stick like AlertDisposition)", got.Kind, FailureKindOther)
 	}
 }
 
@@ -239,6 +264,7 @@ func TestStoreSaveAndLoadStartupHealthEpisodeRoundTrip(t *testing.T) {
 		FirstFailureAt:   time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC),
 		LastFailureAt:    time.Date(2026, 8, 20, 12, 5, 0, 0, time.UTC),
 		LastDetail:       "exit status 1",
+		Kind:             FailureKindTimeout,
 		AlertDisposition: AlertDispositionNone,
 	}
 	if err := s.SaveStartupHealthEpisode(ep); err != nil {

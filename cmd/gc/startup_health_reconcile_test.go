@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -157,6 +158,52 @@ func TestQuarantinedStartupHealthBlocksProviderStartUntilExpiry(t *testing.T) {
 	}
 }
 
+func TestQuarantinedStartupHealthMirrorsCountAndKindOntoVisibleSessionRow(t *testing.T) {
+	h := newSessionChaosHarness(t, 20260830005)
+	h.createSessionIntent()
+	h.assertCreatingIntent()
+	sessionName := h.sessionName
+
+	h.env.sp.StartErrors[sessionName] = errors.New("provider start failure")
+	for i := 0; i < defaultMaxWakeAttempts; i++ {
+		if i > 0 {
+			h.createReplacementPendingCreateBead()
+		}
+		if tick := runDesiredPendingCreateTicks(t, h, 30); tick == -1 {
+			t.Fatalf("failure %d: pending-create claim never released within 30 ticks", i+1)
+		}
+	}
+
+	is := sessionpkg.NewStore(beads.SessionStore{Store: h.env.store})
+	episode, err := is.LoadStartupHealthEpisode(sessionName)
+	if err != nil {
+		t.Fatalf("LoadStartupHealthEpisode: %v", err)
+	}
+	if episode.QuarantinedUntil.IsZero() {
+		t.Fatal("episode not quarantined after reaching the failure threshold; cannot test the mirror")
+	}
+	if episode.Kind != sessionpkg.FailureKindOther {
+		t.Fatalf("test precondition: episode.Kind = %q, want %q (a plain injected error classifies as \"other\", not \"timeout\")", episode.Kind, sessionpkg.FailureKindOther)
+	}
+
+	// The 5th failure's bead already rolled back to closed/failed-create (like
+	// every prior one), so no open bead remains for this session name. Create
+	// a live candidate for the quarantine gate to evaluate and mirror onto,
+	// exactly as the expiry test above does for the same reason.
+	h.createReplacementPendingCreateBead()
+	delete(h.env.sp.StartErrors, sessionName)
+	h.reconcileTick()
+
+	bead := h.mustBead()
+	wantCount := strconv.Itoa(episode.ConsecutiveCount)
+	if got := bead.Metadata[startupHealthActiveCountMetadataKey]; got != wantCount {
+		t.Errorf("%s = %q, want %q (mirrored episode ConsecutiveCount)", startupHealthActiveCountMetadataKey, got, wantCount)
+	}
+	if got := bead.Metadata[startupHealthActiveKindMetadataKey]; got != string(episode.Kind) {
+		t.Errorf("%s = %q, want %q (mirrored episode Kind)", startupHealthActiveKindMetadataKey, got, string(episode.Kind))
+	}
+}
+
 func TestStartupHealthEpisodeClearsOnFirstSuccessfulStart(t *testing.T) {
 	h := newSessionChaosHarness(t, 20260830003)
 	h.createSessionIntent()
@@ -203,6 +250,62 @@ func TestStartupHealthEpisodeClearsOnFirstSuccessfulStart(t *testing.T) {
 	}
 	if after.ConsecutiveCount != 0 {
 		t.Errorf("ConsecutiveCount after successful start = %d, want 0 (episode must clear on recovery)", after.ConsecutiveCount)
+	}
+}
+
+func TestQuarantinedStartupHealthMirrorClearsOnSuccessfulRecovery(t *testing.T) {
+	h := newSessionChaosHarness(t, 20260830006)
+	h.createSessionIntent()
+	h.assertCreatingIntent()
+	sessionName := h.sessionName
+
+	h.env.sp.StartErrors[sessionName] = errors.New("provider start failure")
+	for i := 0; i < defaultMaxWakeAttempts; i++ {
+		if i > 0 {
+			h.createReplacementPendingCreateBead()
+		}
+		if tick := runDesiredPendingCreateTicks(t, h, 30); tick == -1 {
+			t.Fatalf("failure %d: pending-create claim never released within 30 ticks", i+1)
+		}
+	}
+
+	is := sessionpkg.NewStore(beads.SessionStore{Store: h.env.store})
+	episode, err := is.LoadStartupHealthEpisode(sessionName)
+	if err != nil {
+		t.Fatalf("LoadStartupHealthEpisode: %v", err)
+	}
+	if episode.QuarantinedUntil.IsZero() {
+		t.Fatal("episode not quarantined after reaching the failure threshold; cannot test the mirror clear")
+	}
+
+	// A live candidate for the gate to mirror onto while still quarantined,
+	// exactly as the mirror-write test above does for the same reason.
+	h.createReplacementPendingCreateBead()
+	delete(h.env.sp.StartErrors, sessionName)
+	h.reconcileTick()
+	if got := h.mustBead().Metadata[startupHealthActiveCountMetadataKey]; got == "" {
+		t.Fatalf("test precondition: %s empty before quarantine expiry, want it mirrored first", startupHealthActiveCountMetadataKey)
+	}
+
+	h.env.clk.Advance(episode.QuarantinedUntil.Add(time.Second).Sub(h.env.clk.Now()))
+	started := false
+	for i := 0; i < 10; i++ {
+		h.reconcileTick()
+		if h.countRuntimeCalls("Start") > 0 {
+			started = true
+			break
+		}
+	}
+	if !started {
+		t.Fatal("Start was never attempted after quarantine expiry")
+	}
+
+	after := h.mustBead()
+	if got := after.Metadata[startupHealthActiveCountMetadataKey]; got != "0" {
+		t.Errorf("%s = %q after successful recovery, want \"0\" (mirror must clear alongside the episode)", startupHealthActiveCountMetadataKey, got)
+	}
+	if got := after.Metadata[startupHealthActiveKindMetadataKey]; got != "" {
+		t.Errorf("%s = %q after successful recovery, want empty (mirror must clear alongside the episode)", startupHealthActiveKindMetadataKey, got)
 	}
 }
 
