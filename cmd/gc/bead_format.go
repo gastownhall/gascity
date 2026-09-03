@@ -34,15 +34,24 @@ func parseBeadFormat(args []string) (string, []string) {
 	return format, rest
 }
 
-// beadFilters holds optional --label and --status flags parsed from args.
+// beadFilters holds optional --label, --status, and --assignee flags parsed
+// from args.
 type beadFilters struct {
 	label  string
 	status string
-	all    bool
+	// assignee restricts the listing to beads whose assignee matches exactly.
+	// It is the cross-ledger counterpart to `bd list --assignee`: bare bd reads
+	// one ledger, so a bead living on a RIG ledger but assigned to a
+	// city-scoped agent (e.g. gastown.mayor) is invisible to it. `gc beads
+	// list` already sweeps every rig store plus the city store, so pairing that
+	// sweep with an assignee filter answers "what work is assigned to me
+	// anywhere in town" in one command (ga-rp4k).
+	assignee string
+	all      bool
 }
 
-// parseBeadFilters extracts --label, --status, and --all from args, returning
-// the filters and the remaining args with those flags removed. Like
+// parseBeadFilters extracts --label, --status, --assignee, and --all from args,
+// returning the filters and the remaining args with those flags removed. Like
 // parseBeadFormat it backs the testscript fake-bd harness; the gc `beads list`
 // command parses these flags through cobra.
 func parseBeadFilters(args []string) (beadFilters, []string) {
@@ -60,6 +69,11 @@ func parseBeadFilters(args []string) (beadFilters, []string) {
 		case args[i] == "--status" && i+1 < len(args):
 			f.status = args[i+1]
 			i++
+		case strings.HasPrefix(args[i], "--assignee="):
+			f.assignee = strings.TrimPrefix(args[i], "--assignee=")
+		case args[i] == "--assignee" && i+1 < len(args):
+			f.assignee = args[i+1]
+			i++
 		case args[i] == "--all":
 			f.all = true
 		default:
@@ -71,13 +85,21 @@ func parseBeadFilters(args []string) (beadFilters, []string) {
 
 // filterBeads returns beads matching the given filters. Empty filter fields
 // match everything.
+//
+// The empty-filter fast path must name every filter field: omitting one makes
+// that filter silently match everything when it is the ONLY filter supplied
+// (`gc beads list --assignee=X` with no --status/--label), which reads as "this
+// agent owns every bead in town" rather than a filtered listing.
 func filterBeads(bs []beads.Bead, f beadFilters) []beads.Bead {
-	if f.label == "" && f.status == "" {
+	if f.label == "" && f.status == "" && f.assignee == "" {
 		return bs
 	}
 	var out []beads.Bead
 	for _, b := range bs {
 		if f.status != "" && b.Status != f.status {
+			continue
+		}
+		if f.assignee != "" && b.Assignee != f.assignee {
 			continue
 		}
 		if f.label != "" {

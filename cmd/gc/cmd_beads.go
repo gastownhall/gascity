@@ -42,8 +42,8 @@ API with transparent fallback to direct bd reads.`,
 
 func newBeadsListCmd(stdout, stderr io.Writer) *cobra.Command {
 	var (
-		label, status, format string
-		all                   bool
+		label, status, assignee, format string
+		all                             bool
 	)
 	cmd := &cobra.Command{
 		Use:   "list",
@@ -52,16 +52,26 @@ func newBeadsListCmd(stdout, stderr io.Writer) *cobra.Command {
 the controller is alive and falling back to a direct multi-store read
 otherwise.
 
-Supports --label, --status, --all, and --format. --format=json emits
-JSON (API-path JSON includes _cache_age_s; fallback-path JSON omits
-it). The bare --json flag is reserved by the CLI's JSON-contract layer
-and is not wired for this command; use --format=json.`,
+Supports --label, --status, --assignee, --all, and --format.
+--format=json emits JSON (API-path JSON includes _cache_age_s;
+fallback-path JSON omits it). The bare --json flag is reserved by the
+CLI's JSON-contract layer and is not wired for this command; use
+--format=json.
+
+--assignee is the cross-ledger form of "bd list --assignee". Bare bd
+reads a single ledger, so a bead that lives on a RIG ledger but is
+assigned to a city-scoped agent is invisible to it; this command sweeps
+every rig store plus the city store, so it answers "what is assigned to
+this agent anywhere in town" in one call. Use it when an agent's own
+startup work check comes back empty but work is genuinely assigned to
+it.`,
 		Example: `  gc beads list
   gc beads list --label ready-to-build
-  gc beads list --status open --format=json`,
+  gc beads list --status open --format=json
+  gc beads list --assignee gastown.mayor --status in_progress`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if cmdBeadsList(format, beadFilters{label: label, status: status, all: all}, stdout, stderr) != 0 {
+			if cmdBeadsList(format, beadFilters{label: label, status: status, assignee: assignee, all: all}, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -69,6 +79,7 @@ and is not wired for this command; use --format=json.`,
 	}
 	cmd.Flags().StringVar(&label, "label", "", "filter to beads carrying this label")
 	cmd.Flags().StringVar(&status, "status", "", "filter to beads in this status")
+	cmd.Flags().StringVar(&assignee, "assignee", "", "filter to beads assigned to this identity (across every rig and the city)")
 	cmd.Flags().BoolVar(&all, "all", false, "include closed beads (default: open only)")
 	cmd.Flags().StringVar(&format, "format", "text", "output format: text or json")
 	return cmd
@@ -134,6 +145,13 @@ var beadsListAPIClient = func(cityPath string) (*api.Client, string) {
 // routeBeadsList dispatches `beads list` to the supervisor API when a
 // controller is up; otherwise falls back to the local multi-store iterator.
 // Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
+//
+// --assignee is deliberately NOT sent as a query parameter: the endpoint has no
+// assignee filter, and renderBeadsListFromAPI re-applies every filter through
+// filterBeads anyway. The API lane therefore over-fetches and narrows on the
+// client, which is exact because ListBeads follows next_cursor to completion
+// rather than truncating to page 1. Adding a server-side assignee filter is a
+// pure efficiency change and must keep filterBeads as the authority.
 func routeBeadsList(cityPath string, c *api.Client, nilReason, format string, filters beadFilters, stdout, stderr io.Writer) int {
 	var cr api.CachedRead[[]beads.Bead]
 	return routeRead(c, "beads list", nilReason, stderr,
@@ -310,10 +328,18 @@ func doBeadsShowFallback(cityPath, beadID, format string, stdout, stderr io.Writ
 // for sorting. --all maps to IncludeClosed (matching `bd list --all`); the
 // CLI always opts into AllowScan because an unfiltered list is a valid
 // default UX.
+//
+// Assignee is pushed down into the per-store query rather than filtered after
+// the merge: every backend honors ListQuery.Assignee (the bd store forwards it
+// as `--assignee`, the native and caching stores match it in memory), so the
+// stores return only the caller's rows instead of every bead in town. Because
+// the store set spans each rig plus the city, this is the cross-ledger assignee
+// read that bare `bd list --assignee` cannot do (ga-rp4k).
 func collectBeadsAcrossStores(stores []convoyStoreView, filters beadFilters) ([]beads.Bead, error) {
 	q := beads.ListQuery{
 		Label:         filters.label,
 		Status:        filters.status,
+		Assignee:      filters.assignee,
 		IncludeClosed: filters.all,
 		AllowScan:     true,
 	}

@@ -416,10 +416,19 @@ List beads across all rigs, routed through the supervisor API when
 the controller is alive and falling back to a direct multi-store read
 otherwise.
 
-Supports --label, --status, --all, and --format. --format=json emits
-JSON (API-path JSON includes _cache_age_s; fallback-path JSON omits
-it). The bare --json flag is reserved by the CLI's JSON-contract layer
-and is not wired for this command; use --format=json.
+Supports --label, --status, --assignee, --all, and --format.
+--format=json emits JSON (API-path JSON includes _cache_age_s;
+fallback-path JSON omits it). The bare --json flag is reserved by the
+CLI's JSON-contract layer and is not wired for this command; use
+--format=json.
+
+--assignee is the cross-ledger form of "bd list --assignee". Bare bd
+reads a single ledger, so a bead that lives on a RIG ledger but is
+assigned to a city-scoped agent is invisible to it; this command sweeps
+every rig store plus the city store, so it answers "what is assigned to
+this agent anywhere in town" in one call. Use it when an agent's own
+startup work check comes back empty but work is genuinely assigned to
+it.
 
 ```
 gc beads list [flags]
@@ -431,11 +440,13 @@ gc beads list [flags]
 gc beads list
 gc beads list --label ready-to-build
 gc beads list --status open --format=json
+gc beads list --assignee gastown.mayor --status in_progress
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--all` | bool |  | include closed beads (default: open only) |
+| `--assignee` | string |  | filter to beads assigned to this identity (across every rig and the city) |
 | `--format` | string | `text` | output format: text or json |
 | `--label` | string |  | filter to beads carrying this label |
 | `--status` | string |  | filter to beads in this status |
