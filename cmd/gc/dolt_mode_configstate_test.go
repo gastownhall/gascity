@@ -150,7 +150,7 @@ func TestScopeUsesProxiedDoltModePersistedMetadataWinsOverConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := scopeUsesProxiedDoltMode(cityPath, cityPath); got {
-		t.Fatal("persisted direct metadata was overridden by proxied config default")
+		t.Fatal("persisted direct metadata was overridden by proxied config selection")
 	}
 }
 
