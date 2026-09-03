@@ -365,8 +365,16 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 	// the dead-assignee and reopen lanes once the drain completes.
 	//
 	// The refusal rides the existing "drain" action — the agent protocol already
-	// treats it as "wind down" — and, unlike F-A, it CONSUMES --drain-ack. That
-	// is the entire point: it converts a wedge into a prompt self-drain.
+	// treats it as "wind down" — and it CONSUMES --drain-ack. That is the entire
+	// point: it converts a wedge into a prompt self-drain. F-A's stale-session
+	// refusal honors --drain-ack too (writeHookClaimStaleSessionDrain), so that
+	// is not the delta. On this door the delta is the population covered — a seat
+	// carrying GC_SESSION_ID without GC_INSTANCE_TOKEN, where
+	// fenceHookClaimSession returns handled=false and never classifies the row —
+	// plus the distinct drain_pending reason reported for it. A seat carrying
+	// both already reports stale_session from F-A, which classifies `draining`
+	// through the default arm of hookClaimSessionEligibility; here F-D is
+	// redundant defense in depth.
 	if sessionID := hookClaimSessionID(opts.Env); sessionID != "" {
 		pending, err := ops.DrainPending(sessionID)
 		switch {

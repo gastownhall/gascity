@@ -23,10 +23,12 @@ var hookEmitDrainFenceUnavailable = emitDrainFenceUnavailable
 // exactly the wedge this series closes, and the only trace would be stderr
 // inside agent panes.
 //
-// Cadence is one event per refused-to-answer poll, matching
-// emitCityWorkQueryFailure's per-failure shape. That is bounded by agent-turn
+// Cadence is one event per store leg that reaches the fence, matching
+// emitCityWorkQueryFailure's per-failure shape. On a federated city that is more
+// than one per poll: claimHookWorkWithRunner calls tryHookClaim — and so the
+// probe — once per leg inside its reselect loop. That is bounded by agent-turn
 // frequency, not the reconcile hot path, and a fence that is inert on every poll
-// is a fact worth one record per poll — the volume IS the signal.
+// is a fact worth a record every time it is — the volume IS the signal.
 //
 // Best-effort and silent on every failure: a diagnostics counter must never
 // become a second failure mode on a path that has already decided to proceed.

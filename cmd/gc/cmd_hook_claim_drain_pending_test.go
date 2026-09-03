@@ -94,8 +94,11 @@ func (e *drainPendingClaimEnv) result(t *testing.T) hookClaimJSONResult {
 // the claim before any MUTATION — no claim CAS, no adoption, no stamp — and
 // converts the refusal into the self-drain the row has been waiting for. The
 // specimen (seat gcg-session-904dc4b6bb, parked since 14:28) spent three hours
-// claiming and executing work while its row said draining, because the claim
-// path read the drain state nowhere at all.
+// claiming and executing work while its row said draining: it kept re-entering
+// through the un-fenced DISCOVERY door — plain `gc hook`, which
+// fenceHookClaimSession never reaches because that fence is scoped to --claim —
+// and on the claim door that fence is a no-op for a seat carrying
+// GC_SESSION_ID without GC_INSTANCE_TOKEN.
 //
 // The queries==0 assertion below is a property of THIS entry point, where the
 // runner is called inline. Production reaches tryHookClaim through
