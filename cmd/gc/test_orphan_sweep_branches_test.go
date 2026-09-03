@@ -569,6 +569,147 @@ func TestSweepOrphanLogsRemovalReason(t *testing.T) {
 	}
 }
 
+// TestSweepOrphanAgeFenceBySentinelState verifies the sentinel probe gates
+// removal before any age fence applies, with each sentinel state carrying
+// its own age threshold (ga-lygcyb): a held sentinel is never removed
+// regardless of age; a free (unlocked) sentinel proves the creator is gone
+// and only needs a short grace window, not the full legacy fence; a dir
+// with no sentinel at all (the legacy shape) keeps the existing hour-long
+// fence. Today the age check runs before the sentinel probe, so the "free
+// sentinel, 5 minutes old" case wrongly survives — this must fail until the
+// sentinel probe is checked first.
+func TestSweepOrphanAgeFenceBySentinelState(t *testing.T) {
+	tests := []struct {
+		name       string
+		age        time.Duration
+		setup      func(t *testing.T, dir string) (cleanup func())
+		wantRemove bool
+	}{
+		{
+			name: "held sentinel, 5 minutes old",
+			age:  5 * time.Minute,
+			setup: func(t *testing.T, dir string) func() {
+				sentinel, err := holdAliveSentinel(dir)
+				if err != nil {
+					t.Fatalf("holdAliveSentinel: %v", err)
+				}
+				return func() { _ = sentinel.Close() }
+			},
+			wantRemove: false,
+		},
+		{
+			name: "free sentinel, 90 seconds old",
+			age:  90 * time.Second,
+			setup: func(t *testing.T, dir string) func() {
+				if err := os.WriteFile(filepath.Join(dir, testAliveSentinelName), nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return func() {}
+			},
+			wantRemove: false,
+		},
+		{
+			name: "free sentinel, 5 minutes old",
+			age:  5 * time.Minute,
+			setup: func(t *testing.T, dir string) func() {
+				if err := os.WriteFile(filepath.Join(dir, testAliveSentinelName), nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return func() {}
+			},
+			wantRemove: true,
+		},
+		{
+			name:       "no sentinel (legacy), over an hour old",
+			age:        2 * testOrphanSweepMinAge,
+			setup:      func(_ *testing.T, _ string) func() { return func() {} },
+			wantRemove: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			pid := nonLivePID(t)
+			dir := pidPrefixedTestDir(root, "pfx", pid)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			cleanup := tt.setup(t, dir)
+			defer cleanup()
+			old := time.Now().Add(-tt.age)
+			if err := os.Chtimes(dir, old, old); err != nil {
+				t.Fatalf("Chtimes(%s): %v", dir, err)
+			}
+
+			sweepOrphanPIDPrefixedDirs(root, "pfx")
+
+			_, err := os.Stat(dir)
+			removed := os.IsNotExist(err)
+			if removed != tt.wantRemove {
+				t.Errorf("dir removed = %v, want %v", removed, tt.wantRemove)
+			}
+		})
+	}
+}
+
+// TestAdoptPerRunTMPDIRCapturesHostRootBeforeOverride is a focused
+// regression test for the main_test.go TMPDIR bug (ga-lygcyb): os.TempDir()
+// re-reads TMPDIR on every call, so the host root used to find legacy
+// fixture dirs from prior runs must be captured before TMPDIR is overridden
+// to the fresh, empty per-run root — capturing it afterward silently
+// returns the per-run root instead, and every legacy-dir sweep keyed off it
+// finds nothing.
+func TestAdoptPerRunTMPDIRCapturesHostRootBeforeOverride(t *testing.T) {
+	hostRoot := t.TempDir()
+	t.Setenv("TMPDIR", hostRoot)
+
+	newRoot := t.TempDir() // simulates the per-run testTempRoot, distinct from hostRoot
+
+	got, err := adoptPerRunTMPDIR(newRoot)
+	if err != nil {
+		t.Fatalf("adoptPerRunTMPDIR: %v", err)
+	}
+	if got != hostRoot {
+		t.Errorf("adoptPerRunTMPDIR(%q) host root = %q, want %q (TMPDIR in effect before the override)", newRoot, got, hostRoot)
+	}
+	if gotEnv := os.Getenv("TMPDIR"); gotEnv != newRoot {
+		t.Errorf("TMPDIR after adoptPerRunTMPDIR = %q, want %q", gotEnv, newRoot)
+	}
+}
+
+// TestSweepLegacyCmdGCFixtureDirsSweepsAllFivePrefixesUnderGivenRoot guards
+// against a copy-paste mistake reintroducing the ga-lygcyb bug for just one
+// of the five prefixes (e.g. reusing the per-run root for one call instead
+// of the host root passed in).
+func TestSweepLegacyCmdGCFixtureDirsSweepsAllFivePrefixesUnderGivenRoot(t *testing.T) {
+	root := t.TempDir()
+	pid := nonLivePID(t)
+	prefixes := []string{
+		testGCHomeDirPrefix,
+		testRuntimeDirPrefix,
+		testProviderStubDirPrefix,
+		testSlingFormulaDirPrefix,
+		testSlingCityDirPrefix,
+	}
+	var dirs []string
+	for _, pfx := range prefixes {
+		dir := pidPrefixedTestDir(root, pfx, pid)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		backdatePastSweepAge(t, dir)
+		dirs = append(dirs, dir)
+	}
+
+	sweepLegacyCmdGCFixtureDirs(root)
+
+	for _, dir := range dirs {
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Errorf("sweepLegacyCmdGCFixtureDirs did not remove %s", dir)
+		}
+	}
+}
+
 func TestSweepOrphanRemovesStaleCmdGCTempRootInSystemTmp(t *testing.T) {
 	prefix := fmt.Sprintf("%s%d-test-", testCmdGCTempRootPrefix, os.Getpid())
 	pid := nonLivePID(t)
