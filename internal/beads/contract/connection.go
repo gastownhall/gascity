@@ -224,6 +224,9 @@ func ValidateCanonicalConfigState(fs fsys.FS, cityRoot, scopeRoot string, cfg Co
 				if strings.TrimSpace(cityState.DoltSocket) != strings.TrimSpace(cfg.DoltSocket) {
 					return fmt.Errorf("canonical inherited rig config must mirror the city endpoint")
 				}
+				if strings.TrimSpace(cityState.DoltUser) != strings.TrimSpace(cfg.DoltUser) {
+					return fmt.Errorf("canonical inherited rig config must mirror the city endpoint user")
+				}
 				return nil
 			}
 			if strings.TrimSpace(cfg.DoltHost) == "" || strings.TrimSpace(cfg.DoltPort) == "" {
@@ -251,6 +254,7 @@ func ResolveAuthoritativeConfigState(fs fsys.FS, cityRoot, scopeRoot, issuePrefi
 	}
 
 	port := strings.TrimSpace(existing.DoltPort)
+	socket := strings.TrimSpace(existing.DoltSocket)
 	rawHost := strings.TrimSpace(existing.DoltHost)
 	host := canonicalExternalHost(existing.DoltHost, port)
 	if sameScope(scopeRoot, cityRoot) {
@@ -269,7 +273,7 @@ func ResolveAuthoritativeConfigState(fs fsys.FS, cityRoot, scopeRoot, issuePrefi
 			}
 			return existing, true, nil
 		case "":
-			if host == "" && port == "" {
+			if host == "" && port == "" && socket == "" {
 				return ConfigState{}, false, nil
 			}
 			existing.EndpointOrigin = EndpointOriginCityCanonical
@@ -312,7 +316,7 @@ func ResolveAuthoritativeConfigState(fs fsys.FS, cityRoot, scopeRoot, issuePrefi
 		}
 		return existing, true, nil
 	case "":
-		if rawHost == "" && port == "" {
+		if rawHost == "" && port == "" && socket == "" {
 			return ConfigState{}, false, nil
 		}
 		if rawHost == "" && port != "" {

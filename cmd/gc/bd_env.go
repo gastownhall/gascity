@@ -1171,6 +1171,9 @@ func resolvedRuntimeCityDoltTargetContext(ctx context.Context, cityPath string, 
 	}
 
 	if target, ok := externalDoltEnvOverrideTarget(); ok {
+		if target.Socket != "" {
+			return target, true, nil
+		}
 		return target, true, nil
 	}
 
