@@ -2542,10 +2542,23 @@ func providerLifecycleProcessEnvFromBase(cityPath, provider string, env []string
 	}
 	if target, ok := externalDoltEnvOverrideTarget(); ok {
 		envMap := runtimeEnvEntriesToMap(env)
-		envMap["GC_DOLT_HOST"] = target.Host
-		envMap["GC_DOLT_PORT"] = target.Port
-		envMap["BEADS_DOLT_SERVER_HOST"] = target.Host
-		envMap["BEADS_DOLT_SERVER_PORT"] = target.Port
+		// An explicit external endpoint owns the child bd connection. Clear
+		// every inherited host/port/socket variant before projecting the
+		// canonical target so stale values cannot override a Unix socket.
+		for _, key := range []string{
+			"GC_DOLT_HOST", "GC_DOLT_PORT",
+			"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_SERVER_SOCKET",
+		} {
+			delete(envMap, key)
+		}
+		if target.Socket != "" {
+			envMap["BEADS_DOLT_SERVER_SOCKET"] = target.Socket
+		} else {
+			envMap["GC_DOLT_HOST"] = target.Host
+			envMap["GC_DOLT_PORT"] = target.Port
+			envMap["BEADS_DOLT_SERVER_HOST"] = target.Host
+			envMap["BEADS_DOLT_SERVER_PORT"] = target.Port
+		}
 		return mergeRuntimeEnv(nil, envMap)
 	}
 	if cityUsesDoltliteBeadsBackend(cityPath) {
@@ -2555,13 +2568,6 @@ func providerLifecycleProcessEnvFromBase(cityPath, provider string, env []string
 		envMap := runtimeEnvEntriesToMap(env)
 		clearProjectedDoltEnv(envMap)
 		return mergeRuntimeEnv(nil, envMap)
-	}
-	if target, ok := externalDoltEnvOverrideTarget(); ok && target.Socket != "" {
-		env = removeEnvKey(env, "GC_DOLT_HOST")
-		env = removeEnvKey(env, "GC_DOLT_PORT")
-		env = removeEnvKey(env, "BEADS_DOLT_SERVER_HOST")
-		env = removeEnvKey(env, "BEADS_DOLT_SERVER_PORT")
-		env = append(env, "BEADS_DOLT_SERVER_SOCKET="+target.Socket)
 	}
 	for _, key := range []string{
 		"GC_PACK_STATE_DIR",

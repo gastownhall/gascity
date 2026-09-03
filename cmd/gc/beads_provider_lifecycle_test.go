@@ -563,6 +563,31 @@ func TestProviderLifecycleProcessEnvPreservesAmbientWaitTimeout(t *testing.T) {
 	}
 }
 
+func TestProviderLifecycleProcessEnvProjectsExternalUnixSocketOverride(t *testing.T) {
+	cityPath := t.TempDir()
+	socket := filepath.Join(cityPath, "dolt.socket")
+	t.Setenv("BEADS_DOLT_SERVER_SOCKET", socket)
+	t.Setenv("GC_DOLT_HOST", "")
+	t.Setenv("GC_DOLT_PORT", "")
+
+	env := providerLifecycleProcessEnvFromBase(cityPath, "exec:"+gcBeadsBdScriptPath(cityPath), []string{
+		"GC_DOLT_HOST=stale-host",
+		"GC_DOLT_PORT=4406",
+		"BEADS_DOLT_SERVER_HOST=stale-host",
+		"BEADS_DOLT_SERVER_PORT=4406",
+		"BEADS_DOLT_SERVER_SOCKET=stale.socket",
+	})
+	got := runtimeEnvEntriesToMap(env)
+	if got["BEADS_DOLT_SERVER_SOCKET"] != socket {
+		t.Fatalf("BEADS_DOLT_SERVER_SOCKET = %q, want %q; env=%v", got["BEADS_DOLT_SERVER_SOCKET"], socket, env)
+	}
+	for _, key := range []string{"GC_DOLT_HOST", "GC_DOLT_PORT", "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT"} {
+		if _, ok := got[key]; ok {
+			t.Fatalf("%s should be cleared for socket target, env=%v", key, env)
+		}
+	}
+}
+
 func TestProviderLifecycleProcessEnvPropagatesDoltLockReleaseTimeout(t *testing.T) {
 	cityPath := t.TempDir()
 	normPath := normalizePathForCompare(cityPath)

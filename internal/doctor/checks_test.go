@@ -1776,6 +1776,23 @@ func TestDoltServerCheck_ExternalCityUsesCanonicalTarget(t *testing.T) {
 	}
 }
 
+func TestDoltServerCheck_ExternalCityUnixSocketReachable(t *testing.T) {
+	dir := t.TempDir()
+	socket := filepath.Join(dir, "dolt.socket")
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("listen unix: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close(); _ = os.Remove(socket) })
+	fs := fsys.OSFS{}
+	writeDoctorCanonicalConfig(t, fs, dir, contract.ConfigState{IssuePrefix: "gc", EndpointOrigin: contract.EndpointOriginCityCanonical, EndpointStatus: contract.EndpointStatusVerified, DoltSocket: socket})
+	writeDoctorCanonicalMetadata(t, fs, dir, "hq")
+	r := NewDoltServerCheck(dir, false).Run(&CheckContext{})
+	if r.Status != StatusOK || !strings.Contains(r.Message, socket) {
+		t.Fatalf("status=%d msg=%q, want reachable unix socket", r.Status, r.Message)
+	}
+}
+
 func TestDoltServerCheck_LegacyExternalCityUsesExternalHint(t *testing.T) {
 	dir := t.TempDir()
 	fs := fsys.OSFS{}
@@ -1969,6 +1986,29 @@ func TestRigDoltServerCheck_ExplicitRigReachable(t *testing.T) {
 	}
 	if !strings.Contains(r.Message, "127.0.0.1:"+port) {
 		t.Fatalf("message = %q, want reachable explicit rig target", r.Message)
+	}
+}
+
+func TestRigDoltServerCheck_ExplicitRigUnixSocketReachable(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "demo")
+	socket := filepath.Join(rigDir, "dolt.socket")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("listen unix: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close(); _ = os.Remove(socket) })
+	fs := fsys.OSFS{}
+	writeDoctorCanonicalConfig(t, fs, cityDir, contract.ConfigState{IssuePrefix: "gc", EndpointOrigin: contract.EndpointOriginManagedCity, EndpointStatus: contract.EndpointStatusVerified})
+	writeDoctorCanonicalMetadata(t, fs, cityDir, "hq")
+	writeDoctorCanonicalConfig(t, fs, rigDir, contract.ConfigState{IssuePrefix: "de", EndpointOrigin: contract.EndpointOriginExplicit, EndpointStatus: contract.EndpointStatusVerified, DoltSocket: socket})
+	writeDoctorCanonicalMetadata(t, fs, rigDir, "de")
+	r := NewRigDoltServerCheck(cityDir, config.Rig{Name: "demo", Path: rigDir}, false).Run(&CheckContext{})
+	if r.Status != StatusOK || !strings.Contains(r.Message, socket) {
+		t.Fatalf("status=%d msg=%q, want reachable unix socket", r.Status, r.Message)
 	}
 }
 
