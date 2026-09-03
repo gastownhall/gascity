@@ -1778,7 +1778,8 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	}
 	opencodeHooks := string(fs.Files["/work/.opencode/plugins/gascity.js"])
 	for _, want := range []string{
-		"const GC_OPENCODE_HOOK_VERSION = 5",
+		"const GC_OPENCODE_HOOK_VERSION = 6",
+		"pending.child.stdin?.end();",
 		`process.env.GC_BIN || "gc"`,
 		`/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`,
 		`"experimental.session.compacting"`,
@@ -1975,9 +1976,13 @@ func TestInstallPiHookUsesCurrentExtensionAPI(t *testing.T) {
 		`pi.on("session_start"`,
 		`pi.on("session_compact"`,
 		`pi.on("before_agent_start"`,
-		"const GC_PI_HOOK_VERSION = 7",
+		"const GC_PI_HOOK_VERSION = 9",
 		"gc hook --inject",
-		`run(["prime", "--hook"], ctx.cwd, providerSessionEnv(ctx))`,
+		`run(["prime", "--hook"], ctx.cwd, hookEnv(ctx, "SessionStart"))`,
+		`run(["prime", "--hook"], ctx.cwd, hookEnv(ctx, "PreCompact"))`,
+		"GC_MANAGED_SESSION_HOOK",
+		"GC_HOOK_EVENT_NAME",
+		"pendingPrimeContext",
 		"GC_PROVIDER_SESSION_ID",
 		"GC_PROVIDER_SESSION_ID_REQUIRED",
 		`stdio: ["ignore", "pipe", "inherit"]`,
@@ -2037,20 +2042,25 @@ func TestPiHookNeedsUpgradeComparesParsedVersion(t *testing.T) {
 // gc prime --hook
 // gc hook --inject
 // gc handoff --auto
-const GC_PI_HOOK_VERSION = 7;
-run(["prime", "--hook"], ctx.cwd, providerSessionEnv(ctx));
+const GC_PI_HOOK_VERSION = 9;
+pendingPrimeContext = run(["prime", "--hook"], ctx.cwd, hookEnv(ctx, "SessionStart"));
 run(["hook", "--inject"], ctx.cwd);
 run(["handoff", "--auto", "context cycle"], ctx.cwd);
 let mirrorTempCounter = 0;
 GC_PROVIDER_SESSION_ID;
 GC_PROVIDER_SESSION_ID_REQUIRED;
+GC_MANAGED_SESSION_HOOK;
+GC_HOOK_EVENT_NAME;
 stdio: ["ignore", "pipe", "inherit"];
 function providerSessionEnv(ctx) {}
 `)
-	stale := bytes.Replace(current, []byte("GC_PI_HOOK_VERSION = 7"), []byte("GC_PI_HOOK_VERSION = 6"), 1)
-	future := bytes.Replace(current, []byte("GC_PI_HOOK_VERSION = 7"), []byte("GC_PI_HOOK_VERSION = 8"), 1)
+	stale := bytes.Replace(current, []byte("GC_PI_HOOK_VERSION = 9"), []byte("GC_PI_HOOK_VERSION = 8"), 1)
+	future := bytes.Replace(current, []byte("GC_PI_HOOK_VERSION = 9"), []byte("GC_PI_HOOK_VERSION = 10"), 1)
 	missingStderrForward := bytes.Replace(current, []byte(`stdio: ["ignore", "pipe", "inherit"];
 `), nil, 1)
+	missingManagedHookMarkers := bytes.Replace(current, []byte(`GC_MANAGED_SESSION_HOOK;
+`), nil, 1)
+	missingPendingPrimeContext := bytes.Replace(current, []byte("pendingPrimeContext = "), nil, 1)
 
 	if !piHookNeedsUpgrade(stale) {
 		t.Fatal("stale Pi hook version did not request upgrade")
@@ -2063,6 +2073,12 @@ function providerSessionEnv(ctx) {}
 	}
 	if !piHookNeedsUpgrade(missingStderrForward) {
 		t.Fatal("Pi hook without child stderr forwarding did not request upgrade")
+	}
+	if !piHookNeedsUpgrade(missingManagedHookMarkers) {
+		t.Fatal("Pi hook without managed-session hook markers did not request upgrade")
+	}
+	if !piHookNeedsUpgrade(missingPendingPrimeContext) {
+		t.Fatal("Pi hook that discards the SessionStart prime output did not request upgrade")
 	}
 }
 
@@ -2184,7 +2200,8 @@ export default async function gascityPlugin() {
 		t.Fatal("stale OpenCode managed plugin was preserved; expected managed upgrade")
 	}
 	for _, want := range []string{
-		"const GC_OPENCODE_HOOK_VERSION = 5",
+		"const GC_OPENCODE_HOOK_VERSION = 6",
+		"pending.child.stdin?.end();",
 		`process.env.GC_BIN || "gc"`,
 		`/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`,
 		`"experimental.session.compacting"`,
@@ -2206,7 +2223,7 @@ export default async function gascityPlugin() {
 
 func TestOpenCodeHookNeedsUpgradeComparesParsedVersion(t *testing.T) {
 	current := []byte(`// Gas City hooks for OpenCode.
-const GC_OPENCODE_HOOK_VERSION = 5;
+const GC_OPENCODE_HOOK_VERSION = 6;
 const GC_BIN = process.env.GC_BIN || "gc";
 const PATH_PREFIX =
   "/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:";
@@ -2220,10 +2237,12 @@ runWithWarning(directory, "handoff", "--auto", "context cycle");
 output.context.push(handoff);
 GC_PROVIDER_SESSION_ID;
 GC_PROVIDER_SESSION_ID_REQUIRED;
+pending.child.stdin?.end();
 `)
-	stale := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 5"), []byte("GC_OPENCODE_HOOK_VERSION = 4"), 1)
-	future := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 5"), []byte("GC_OPENCODE_HOOK_VERSION = 6"), 1)
+	stale := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 6"), []byte("GC_OPENCODE_HOOK_VERSION = 5"), 1)
+	future := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 6"), []byte("GC_OPENCODE_HOOK_VERSION = 7"), 1)
 	missingStderrLog := bytes.Replace(current, []byte("logRunStderr(stderr);\n"), nil, 1)
+	openStdin := bytes.Replace(current, []byte("pending.child.stdin?.end();\n"), nil, 1)
 
 	if !opencodeHookNeedsUpgrade(stale) {
 		t.Fatal("stale OpenCode hook version did not request upgrade")
@@ -2236,6 +2255,9 @@ GC_PROVIDER_SESSION_ID_REQUIRED;
 	}
 	if !opencodeHookNeedsUpgrade(missingStderrLog) {
 		t.Fatal("OpenCode hook without child stderr logging did not request upgrade")
+	}
+	if !opencodeHookNeedsUpgrade(openStdin) {
+		t.Fatal("OpenCode hook leaving child stdin open did not request upgrade")
 	}
 }
 

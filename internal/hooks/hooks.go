@@ -33,8 +33,8 @@ var configFS embed.FS
 var supported = []string{"claude", "codex", "gemini", "antigravity", "kiro", "opencode", "mimocode", "groq", "cerebras", "copilot", "cursor", "pi", "omp", "kimi"}
 
 const (
-	managedPiHookVersion       = 7
-	managedOpenCodeHookVersion = 5
+	managedPiHookVersion       = 9
+	managedOpenCodeHookVersion = 6
 	managedMimoCodeHookVersion = 2
 	managedOmpHookVersion      = 2
 )
@@ -306,6 +306,9 @@ func piHookNeedsUpgrade(existing []byte) bool {
 		!strings.Contains(content, "mirrorTempCounter") ||
 		!strings.Contains(content, "GC_PROVIDER_SESSION_ID") ||
 		!strings.Contains(content, "GC_PROVIDER_SESSION_ID_REQUIRED") ||
+		!strings.Contains(content, "GC_MANAGED_SESSION_HOOK") ||
+		!strings.Contains(content, "GC_HOOK_EVENT_NAME") ||
+		!strings.Contains(content, "pendingPrimeContext") ||
 		!strings.Contains(content, `stdio: ["ignore", "pipe", "inherit"]`) {
 		return true
 	}
@@ -349,7 +352,9 @@ func opencodeHookNeedsUpgrade(existing []byte) bool {
 		!strings.Contains(content, "logRunFailure") ||
 		!strings.Contains(content, "logRunStderr(stderr);") ||
 		!strings.Contains(content, "GC_PROVIDER_SESSION_ID") ||
-		!strings.Contains(content, "GC_PROVIDER_SESSION_ID_REQUIRED") {
+		!strings.Contains(content, "GC_PROVIDER_SESSION_ID_REQUIRED") ||
+		// The child's stdin must be closed or gc blocks on it (#5562).
+		!strings.Contains(content, "pending.child.stdin?.end();") {
 		return true
 	}
 	for _, marker := range []string{

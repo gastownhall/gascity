@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
@@ -82,7 +83,7 @@ var hookClaimNonTurnEnvMarkers = []string{
 	"GC_HOOK_EVENT_NAME",
 }
 
-var hookClaimCommandRunnerWithEnvContext = beads.ExecCommandRunnerWithEnvContext
+var hookClaimCommandRunnerWithEnvContext = beads.ExecCommandRunnerWithExactEnvContext
 
 // hookClaimNonTurnMarker returns the first non-turn marker present in env, or ""
 // when this invocation looks like a real agent turn.
@@ -133,12 +134,46 @@ type hookClaimReleaseRecord struct {
 }
 
 type hookClaimOptions struct {
-	Assignee           string
+	Assignee string
+	// SessionID is this session's durable bead ID. Assignee is deliberately the
+	// alias/agent form that read paths query through GC_AGENT, but a continuation
+	// pin means "run this on THIS session", which only a session identity can
+	// express. See continuationPinAssignee.
+	SessionID          string
 	IdentityCandidates []string
 	RouteTargets       []string
 	Env                []string
 	DrainAck           bool
 	JSON               bool
+}
+
+// continuationPinAssignee returns the identity a continuation sibling is pinned
+// to. It prefers the session's durable bead ID because that is the only value
+// the consumers of an assignee agree on: ComputeAwakeSet matches it via
+// sessionAssigneeMatches (assignee == bead.ID), and the session's own re-poll
+// queries $GC_SESSION_ID first.
+//
+// Assignee cannot serve here. With no alias or agent in the environment it falls
+// through to the runtime session-name form — GC_SESSION_NAME, resolved via
+// hookSessionAgentForQuery in the pool-worker path where this fix is load-bearing
+// (gascity--gc__implementation-worker-5-pool) — which is not what a session bead
+// records as session_name
+// (gc__implementation-worker-gcs-session-<id>). Beads pinned to that form matched
+// no session identity at all, so wake demand could never reach them and the
+// molecule stalled permanently.
+//
+// The reconciler's continuation-claim CANDIDATE gate is NOT one of those
+// consumers: evaluateReadyContinuationClaimCandidate (build_desired_state.go)
+// admits a row only when the root's gc.session_name equals the sibling's
+// assignee, and that key only ever holds a session name / alias
+// (sessionBeadIdentifier), never a bead ID — so a bead-ID pin is absent
+// before currentSessionAssigneeIdentities is ever consulted. That is
+// follow-up, not a regression: the slot-label form failed the same gate.
+func continuationPinAssignee(opts hookClaimOptions) string {
+	if id := strings.TrimSpace(opts.SessionID); id != "" {
+		return id
+	}
+	return opts.Assignee
 }
 
 type hookClaimOps struct {
@@ -976,6 +1011,7 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 	if err != nil {
 		return nil, err
 	}
+	pinAssignee := continuationPinAssignee(opts)
 	assigned := make([]string, 0, len(siblings))
 	for _, sibling := range siblings {
 		if strings.TrimSpace(sibling.ID) == "" ||
@@ -985,7 +1021,7 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 			!hookClaimMatchesRoute(sibling, opts.RouteTargets) {
 			continue
 		}
-		if err := ops.AssignContinuation(ctx, dir, opts.Env, sibling.ID, opts.Assignee); err != nil {
+		if err := ops.AssignContinuation(ctx, dir, opts.Env, sibling.ID, pinAssignee); err != nil {
 			return assigned, fmt.Errorf("assigning %s: %w", sibling.ID, err)
 		}
 		assigned = append(assigned, sibling.ID)
@@ -1186,11 +1222,14 @@ func hookEmitExecutionStepStarted(step beads.Bead, dir string, env []string, ass
 // direction from stampHookClaimIdentity's work-bead back-reference.
 //
 // It exists because a claimed step id is otherwise UNREACHABLE from the step's
-// own shell: GC_BEAD_ID / GC_TRIGGER_BEAD_ID are set only in the dispatch
-// condition-script environment (internal/convergence/condition.go), never in a
-// pool session, so a formula step that must close the bead it is running had no
-// way to name it and silently skipped its own close — work that did nothing
-// reported green. `gc hook current` reads this stamp back and closes that gap.
+// own shell: GC_BEAD_ID is set only in the dispatch condition-script
+// environment (internal/convergence/condition.go), and GC_TRIGGER_BEAD_ID —
+// exported to demand-spawned pool seats as a pool-level spawn marker
+// (build_desired_state.go) — is absent on other seats and is a presence
+// signal, not a claim directive, so a formula step that must close the bead it
+// is running had no reliable way to name it and silently skipped its own close
+// — work that did nothing reported green. `gc hook current` reads this stamp
+// back and closes that gap.
 //
 // Unlike the work-bead session back-reference this is stamped for CONTROL beads
 // too: that exclusion exists because a control step must stay session-free by
@@ -1882,6 +1921,13 @@ func hookClaimBdStoreContext(ctx context.Context, dir string, env []string, acto
 	return beads.NewBdStore(dir, hookClaimCommandRunnerWithEnvContext(ctx, hookClaimEnvMap(env, dir, actor)))
 }
 
+// hookClaimEnvMap projects the query environment into the exact environment the
+// claim mutation runs in. Because hookClaimCommandRunnerWithEnvContext REPLACES
+// the child environment rather than layering onto the parent, whatever this
+// returns is all the child bd sees: a nil env yields no BEADS_DIR, leaving the
+// child to fall back to cwd discovery. Production never takes that path —
+// claimHookWorkWithRunner always supplies the query env or the selected store's
+// env — but a caller passing nil gets cwd discovery, not the ambient selector.
 func hookClaimEnvMap(env []string, dir string, actor string) map[string]string {
 	env = workQueryEnvForDir(env, dir)
 	out := make(map[string]string, len(env)+1)
@@ -1999,6 +2045,32 @@ func hookClaimHasIdentity(assignee string, identities []string) bool {
 	return false
 }
 
+// hookRouteIdentitiesEqual reports whether two route/identity strings refer
+// to the same qualified agent, tolerating the tmux-safe session-name
+// encoding (/ -> --, . -> __) alongside the canonical slash-qualified form,
+// and case (config-sourced and session-derived spellings of the same agent
+// are not guaranteed identical case - ga-lmy6yj). This is the single
+// route-spelling matcher shared by the claim path (hookClaimMatchesRoute)
+// and the display path (hookCandidateVisible) per ga-1xaqgo.2 - do not fork
+// a second one.
+//
+// This deliberately does NOT collapse the legacy bound-template spelling
+// ("dir/binding.name") onto its unbound form ("dir/name"): that migration is
+// owned by canonicalizeLegacyBoundUnassignedRoutedWork (build_desired_state.go),
+// which rewrites the bead's persisted route as an explicit, auditable step.
+// Treating the two spellings as always-already-equal here would let a claim
+// bypass that migration instead of triggering it (see
+// TestCanonicalizeLegacyBoundUnassignedRoutedWorkCanonicalWorkerClaims).
+func hookRouteIdentitiesEqual(a, b string) bool {
+	if a == b {
+		return true
+	}
+	return strings.EqualFold(
+		agent.UnsanitizeQualifiedNameFromSession(a),
+		agent.UnsanitizeQualifiedNameFromSession(b),
+	)
+}
+
 func hookClaimMatchesRoute(candidate beads.Bead, routeTargets []string) bool {
 	if len(routeTargets) == 0 {
 		return false
@@ -2011,14 +2083,34 @@ func hookClaimMatchesRoute(candidate beads.Bead, routeTargets []string) bool {
 		if target == "" {
 			continue
 		}
-		if routedTo == target {
+		if hookRouteIdentitiesEqual(routedTo, target) {
 			return true
 		}
-		if routedTo == "" && kind == beadmeta.KindWorkflow && runTarget == target {
+		if routedTo == "" && kind == beadmeta.KindWorkflow && hookRouteIdentitiesEqual(runTarget, target) {
 			return true
 		}
 	}
 	return false
+}
+
+// hookCandidateVisible reports whether a work_query candidate should be
+// shown to this identity at all. An already-assigned candidate is visible
+// only when the assignee is one of this session's own identities. An
+// unassigned candidate is visible when it carries no route at all (legacy
+// and unrouted work is always claimable - the fail-open default the legacy
+// workflow-target path depends on) or when its route matches one of
+// routeTargets. This is deliberately more permissive than the claim path's
+// eligibility check, which additionally requires a positive route match
+// even for unrouted work; that stricter rule is correct for claiming but
+// would wrongly hide legitimately unrouted display candidates (ga-1xaqgo.2).
+func hookCandidateVisible(candidate beads.Bead, identities, routeTargets []string) bool {
+	if assignee := strings.TrimSpace(candidate.Assignee); assignee != "" {
+		return hookClaimHasIdentity(assignee, identities)
+	}
+	if hookClaimRoute(candidate) == "" {
+		return true
+	}
+	return hookClaimMatchesRoute(candidate, routeTargets)
 }
 
 func hookClaimRoute(candidate beads.Bead) string {

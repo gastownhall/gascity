@@ -692,7 +692,13 @@ func (r bdByIDResolution) Owned() bool { return r.Reserved || r.Found }
 // reads one database rather than two, and a routed read cannot close a handle
 // another call site is still using.
 type bdByIDClassDoor struct {
-	Graph   storebinding.GraphStore
+	Graph storebinding.GraphStore
+	// Store is the same class binding Graph wraps, kept in its beads.Store shape
+	// so the work-record close gate — which is store-driven, not graph-driven —
+	// can evaluate the resolved class bead this door is about to write. It is a
+	// second view of the one handle the funnel owns, not a second handle: nothing
+	// here is released.
+	Store   beads.Store
 	Binding string
 }
 
@@ -734,17 +740,24 @@ func (d bdByIDClassDoor) bindingName() string {
 // stops holding, this door has to resolve per class — the graph store would
 // otherwise be asked for a sessions-class id it does not hold, and would
 // truthfully answer that it is absent.
+//
+// cliSoleClassBinding is how that condition is CHECKED rather than assumed: it
+// reports the city's relocated bindings grouped by store and refuses to name a
+// sole one when there is more than one. Asking the graph class specifically
+// (graphClassBinding) could not tell the two shapes apart.
 func openBdByIDClassFrontDoor(cityPath string) (bdByIDClassDoor, bool, error) {
-	routes := cliStorageRoutes(cityPath)
-	store, relocated := graphClassBinding(routes)
+	binding, relocated, err := cliSoleClassBinding(cityPath)
+	if err != nil {
+		return bdByIDClassDoor{}, false, fmt.Errorf("resolving the class front door: %w", err)
+	}
 	if !relocated {
 		return bdByIDClassDoor{}, false, nil
 	}
-	graph, err := storebinding.NewBeadsGraphStore(store)
+	graph, err := storebinding.NewBeadsGraphStore(binding.Store)
 	if err != nil {
-		return bdByIDClassDoor{}, false, fmt.Errorf("projecting the class front door of binding %q: %w", routes.binding, err)
+		return bdByIDClassDoor{}, false, fmt.Errorf("projecting the class front door of binding %q: %w", binding.Name, err)
 	}
-	return bdByIDClassDoor{Graph: graph, Binding: routes.binding}, true, nil
+	return bdByIDClassDoor{Graph: graph, Store: binding.Store, Binding: binding.Name}, true, nil
 }
 
 // resolve asks the open front door whether it owns id.
@@ -819,10 +832,11 @@ func bdByIDMutationSubjects(bdArgs []string) []string {
 }
 
 // bdIDIsClassReserved reports whether id carries a reserved class id prefix.
-// Those prefixes are minted only by the relocated class stores, so such an id
+// Those namespaces belong to the relocated class stores — whether the store's
+// own sequence minted the id or a subsystem inside it did — so such an id
 // existing anywhere else is not a thing bd can answer for.
 func bdIDIsClassReserved(id string) bool {
-	for _, prefix := range config.ReservedClassPrefixes() {
+	for _, prefix := range config.AllReservedClassPrefixes() {
 		if prefix != "" && strings.HasPrefix(id, prefix+"-") {
 			return true
 		}
@@ -866,29 +880,44 @@ func maybeRouteBdByID(cityPath, rigName string, bdArgs []string, stdout, stderr 
 		return 0, false
 	}
 	if !served {
-		if !namesClassBead {
-			// No reserved prefix to lean on, so ownership is proven by
-			// RESIDENCE: this is an unserved mutation, and if the class binding
-			// holds any of its subjects the work store cannot answer for it.
-			resident, err := door.firstResident(mutationIDs)
-			if err != nil {
-				fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
-				return 1, true
-			}
-			if resident == "" {
-				// Every subject is a work bead. bd is still their truth and the
-				// passthrough answers byte-identically — including doBd's own
-				// exact-ID collision guard, which this arm must not displace.
-				return 0, false
-			}
-			named = resident
-		}
-		// The invocation addresses a bead the class binding owns, in a spelling
-		// this surface does not serve. Forwarding it would run the command
-		// against the one ledger that cannot hold the bead.
-		return refuseClassOwnedTarget(door, bdByIDRefusedVerb(bdArgs), named, bdByIDUnservedFlag(bdArgs), stderr)
+		return refuseUnservedClassMutation(door, bdArgs, named, namesClassBead, mutationIDs, stderr)
 	}
+	return serveBdByIDResolved(door, op, bdArgs, rigName, cityPath, stdout, stderr)
+}
 
+// refuseUnservedClassMutation answers a by-ID invocation that addresses a bead
+// the class binding owns in a spelling this surface does not serve. Ownership
+// is proven from a reserved prefix (namesClassBead) or, failing that, from
+// RESIDENCE: an unserved mutation whose subjects the class binding actually
+// holds cannot be answered by the work store. Returning (0, false) means every
+// subject is an ordinary work bead — bd is still their truth and the caller's
+// passthrough answers byte-identically, including doBd's own exact-ID collision
+// guard, which this arm must not displace.
+func refuseUnservedClassMutation(door bdByIDClassDoor, bdArgs []string, named string, namesClassBead bool, mutationIDs []string, stderr io.Writer) (int, bool) {
+	if !namesClassBead {
+		resident, err := door.firstResident(mutationIDs)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1, true
+		}
+		if resident == "" {
+			return 0, false
+		}
+		named = resident
+	}
+	// The invocation addresses a bead the class binding owns, in a spelling
+	// this surface does not serve. Forwarding it would run the command against
+	// the one ledger that cannot hold the bead.
+	return refuseClassOwnedTarget(door, bdByIDRefusedVerb(bdArgs), named, bdByIDUnservedFlag(bdArgs), stderr)
+}
+
+// serveBdByIDResolved answers a served by-ID op from the class front door. It
+// resolves the id against the class binding, refuses the cases this surface
+// must not serve (a work-store id it does not own, a reserved-prefix id with no
+// row, an explicit --rig work scope), runs the ADR-0009 work-record close gate,
+// and dispatches the verb against the class graph. repoFallback is the git repo
+// the close gate falls back to when a closing bead carries no gc.work_dir.
+func serveBdByIDResolved(door bdByIDClassDoor, op bdByIDOp, bdArgs []string, rigName, repoFallback string, stdout, stderr io.Writer) (int, bool) {
 	resolution, err := door.resolve(op.ID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -919,6 +948,9 @@ func maybeRouteBdByID(cityPath, rigName string, bdArgs []string, stdout, stderr 
 		// So neither is taken. See refuseRigScopedClassOwnedTarget.
 		return refuseRigScopedClassOwnedTarget(door, op.ID, rig, stderr)
 	}
+	if gateBdByIDClassClose(door, op, bdArgs, resolution, repoFallback, stderr) {
+		return 1, true
+	}
 	switch op.Verb {
 	case bdByIDShow:
 		return printBdByIDBead(resolution.Bead, op.JSON, door.bindingName(), stdout, stderr), true
@@ -943,6 +975,25 @@ func maybeRouteBdByID(cityPath, rigName string, bdArgs []string, stdout, stderr 
 	// so the passthrough would run a verb this build recognized against the one
 	// ledger that cannot hold the bead.
 	return refuseClassOwnedTarget(door, string(op.Verb), op.ID, "", stderr)
+}
+
+// gateBdByIDClassClose runs the ADR-0009 work-record close gate against the
+// resolved class bead before the door serves a close or a closing update. The
+// class door writes the class copy, so — unlike the fall-through path in
+// cmd_bd.go — the prefix-store gate never saw these closes; this is where the
+// contract is enforced for them. It is a no-op for every non-closing op:
+// evaluateWorkRecordCloseGate consults workRecordCloseTargets, which reports
+// not-a-close for show/claim/release/dep/reopen and for updates that do not set
+// status closed. The resolved bead is handed in as the preFetched value so the
+// gate reuses it rather than re-reading the class store, and door.Store answers
+// any other id the argv might name. Returns true only when the close must be
+// blocked (enforcement on and the work record invalid).
+func gateBdByIDClassClose(door bdByIDClassDoor, op bdByIDOp, bdArgs []string, resolution bdByIDResolution, repoFallback string, stderr io.Writer) bool {
+	if op.Verb != bdByIDClose && op.Verb != bdByIDUpdate {
+		return false
+	}
+	preFetched := map[string]beads.Bead{op.ID: resolution.Bead}
+	return evaluateWorkRecordCloseGate(bdArgs, door.Store, preFetched, repoFallback, workRecordEnforceEnabled(), stderr)
 }
 
 // refuseRigScopedClassOwnedTarget refuses a by-ID invocation that pins a rig

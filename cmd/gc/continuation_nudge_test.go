@@ -189,18 +189,22 @@ func TestSelectReadyContinuationClaimCandidates_RequiresReadyOpenExactProvenance
 			b.Type = "session"
 			return b
 		}(), step: baseStep, ready: true},
-		{name: "missing root session", root: func() beads.Bead {
+		// The root's gc.session_name is a dashboard back-fill from the most
+		// recent in_progress step, not an ownership record, so it never gates
+		// candidacy. A multi-agent molecule's root can only ever name one of its
+		// templates; gating on it stranded every cross-template successor.
+		{name: "root session stamp absent", root: func() beads.Bead {
 			b := baseRoot
 			b.Metadata = cloneStringMap(baseRoot.Metadata)
 			delete(b.Metadata, beadmeta.SessionNameMetadataKey)
 			return b
-		}(), step: baseStep, ready: true},
-		{name: "wrong root session", root: func() beads.Bead {
+		}(), step: baseStep, ready: true, want: 1},
+		{name: "root session stamp names another template", root: func() beads.Bead {
 			b := baseRoot
 			b.Metadata = cloneStringMap(baseRoot.Metadata)
 			b.Metadata[beadmeta.SessionNameMetadataKey] = "other-session"
 			return b
-		}(), step: baseStep, ready: true},
+		}(), step: baseStep, ready: true, want: 1},
 		{name: "not graph v2 root", root: func() beads.Bead {
 			b := baseRoot
 			b.Metadata = cloneStringMap(baseRoot.Metadata)
@@ -444,6 +448,15 @@ func continuationNudgeCfg() *config.City {
 		Name:  "agent-a",
 		Nudge: "Run gc hook --claim --drain-ack --json once and continue the assigned graph.",
 	}}}
+}
+
+func TestPoolContinuationBackstopContent_SkipsBlankNudge(t *testing.T) {
+	cfg := continuationNudgeCfg()
+	cfg.Agents[0].Nudge = " \t "
+
+	if got := (poolContinuationBackstop{cfg: cfg}).content(continuationPoolSession("session-bead-a", "session-a")); got != "" {
+		t.Fatalf("continuation claim nudge = %q, want empty", got)
+	}
 }
 
 func continuationCandidateBeads(id, assignee string) (beads.Bead, beads.Bead) {
@@ -877,6 +890,55 @@ func TestNudgeStalledPoolContinuations_RevalidatesImmediatelyBeforeDelivery(t *t
 			t.Fatalf("persisted attempt count = %q, want preserved 1", got)
 		}
 	})
+}
+
+func TestNudgeStalledPoolContinuations_RevalidationIgnoresRootSessionStamp(t *testing.T) {
+	const sessionName = "session-a"
+	now := time.Date(2026, 1, 1, 0, 5, 0, 0, time.UTC)
+
+	for _, tt := range []struct {
+		name  string
+		stamp string // "" = key deleted
+	}{
+		{name: "root session stamp absent"},
+		{name: "root session stamp names another template", stamp: "other-session"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root, step := continuationCandidateBeads("step-a", sessionName)
+			if tt.stamp == "" {
+				delete(root.Metadata, beadmeta.SessionNameMetadataKey)
+			} else {
+				root.Metadata[beadmeta.SessionNameMetadataKey] = tt.stamp
+			}
+			candidate := ContinuationClaimCandidate{
+				WorkBeadID: step.ID,
+				RootBeadID: root.ID,
+				StoreRef:   "rig:fixture",
+				Assignee:   sessionName,
+				Store:      beads.NewMemStoreFrom(0, []beads.Bead{root, step}, nil),
+			}
+
+			sp := continuationRunningFake(t, sessionName)
+			session := continuationPoolSession("session-bead-a", sessionName)
+			backing := beads.NewMemStoreFrom(0, []beads.Bead{session}, nil)
+			seedContinuationMarker(t, backing, session, candidate, 0, now.Add(-idleClaimNudgeGrace-time.Second))
+			session = mustGetTestBead(t, backing, session.ID)
+
+			nudgeStalledPoolContinuations(
+				sp,
+				continuationNudgeCfg(),
+				&continuationMetadataCountingStore{Store: backing},
+				[]beads.Bead{session},
+				[]ContinuationClaimCandidate{candidate},
+				false,
+				now,
+				&bytes.Buffer{},
+			)
+			if got := sp.CountCalls("Nudge", sessionName); got != 1 {
+				t.Fatalf("Nudge calls = %d, want 1 — the root stamp must not gate delivery", got)
+			}
+		})
+	}
 }
 
 func TestNudgeStalledPoolContinuations_RevalidationBypassesPrimedCache(t *testing.T) {

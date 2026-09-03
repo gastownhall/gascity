@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -186,5 +187,27 @@ func TestExecCommandRunnerWithEnv_RelativeBDBinUsesAmbientBd(t *testing.T) {
 	}
 	if got, want := string(out), "ambient:false\n"; got != want {
 		t.Fatalf("ambient bd output = %q, want %q", got, want)
+	}
+}
+
+func TestExecCommandRunnerWithExactEnvContextExcludesParentValues(t *testing.T) {
+	t.Setenv("BEADS_DB", "ambient.db")
+	t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "ambient-credential-helper")
+
+	pinned := filepath.Join(t.TempDir(), "workspace-bd")
+	if err := os.WriteFile(pinned, []byte("#!/bin/sh\nprintf '%s|%s|%s\\n' \"${BEADS_DB-unset}\" \"${BEADS_DOLT_CREDENTIAL_COMMAND-unset}\" \"$BEADS_DIR\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := ExecCommandRunnerWithExactEnvContext(context.Background(), map[string]string{
+		"BD_BIN":    pinned,
+		"BEADS_DIR": "/selected/.beads",
+	})
+	out, err := runner(t.TempDir(), "bd")
+	if err != nil {
+		t.Fatalf("run workspace-pinned bd: %v", err)
+	}
+	if got, want := string(out), "unset|unset|/selected/.beads\n"; got != want {
+		t.Fatalf("exact runner output = %q, want %q", got, want)
 	}
 }

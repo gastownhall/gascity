@@ -2,6 +2,7 @@ package main
 
 import (
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -120,11 +121,58 @@ func assignedWorkIndexReachableFromAgent(cityPath string, cfg *config.City, agen
 	return storeRefs[index] == assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg)
 }
 
+// assignedWorkIndexReachableFromAgentOnClaimRefs extends the rig-equality test
+// with the refs a claim can be RECORDED under whatever the holder's rig scope:
+// the leading work arm plus every relocated class binding (assignedWorkClaimRefs).
+//
+// This is the demand-side twin of the widening filterAssignedWorkBeadsForSessionWake
+// already applies (ga-whzrt). The two filters answer one question from opposite
+// ends — "is this holder still working?" and "does this work still need a
+// worker?" — so a ref the wake side accepts and the demand side rejects is a city
+// that drains a slot and then refuses to refill it.
+//
+// Relocating a coordination class is what made that reachable. The equality test
+// is against the agent's configured RIG, so once graph-resident work carries a
+// "class:*" ref no rig name can equal, in-progress demand for a rig-scoped pool
+// agent became structurally invisible. It stayed hidden because scale_check
+// supplies demand independently while the work is still ready; only once the
+// work is CLAIMED is the resume tier the sole remaining source, which is why the
+// symptom is a session that dies holding a claim and is never replaced.
+//
+// claimRefs must come from assignedWorkRelocatedClaimRefs, which answers empty
+// for a city that relocates nothing: the widening covers relocated class
+// bindings only, never another rig's ref, so rig isolation and every
+// single-store city are exactly what they were.
+func assignedWorkIndexReachableFromAgentOnClaimRefs(
+	cityPath string,
+	cfg *config.City,
+	agentCfg *config.Agent,
+	storeRefs []string,
+	index int,
+	claimRefs []string,
+) bool {
+	if assignedWorkIndexReachableFromAgent(cityPath, cfg, agentCfg, storeRefs, index) {
+		return true
+	}
+	if index < 0 || index >= len(storeRefs) {
+		return false
+	}
+	for _, ref := range claimRefs {
+		if storeRefs[index] == ref {
+			return true
+		}
+	}
+	return false
+}
+
 // filterAssignedWorkBeadsForPoolDemand resolves work through the routed
 // backing template because pool scale decisions are per agent template.
+// leading is the store this arm was handed; it resolves the claim refs, and is
+// a property of the CITY so it is read once rather than per bead.
 func filterAssignedWorkBeadsForPoolDemand(
 	cfg *config.City,
 	cityPath string,
+	leading beads.Store,
 	sessionInfos []sessionpkg.Info,
 	assignedWorkBeads []beads.Bead,
 	assignedWorkStoreRefs []string,
@@ -135,6 +183,7 @@ func filterAssignedWorkBeadsForPoolDemand(
 	if cfg == nil {
 		return assignedWorkBeads
 	}
+	claimRefs := assignedWorkRelocatedClaimRefs(cityPath, cfg, leading)
 	assigneeToSessionBeadID := make(map[string]string)
 	sessionBeadTemplate := make(map[string]string)
 	for _, sb := range sessionInfos {
@@ -152,8 +201,22 @@ func filterAssignedWorkBeadsForPoolDemand(
 			assigneeToSessionBeadID[id] = sb.ID
 		}
 	}
+	now := time.Now().UTC()
 	filtered := make([]beads.Bead, 0, len(assignedWorkBeads))
 	for i, wb := range assignedWorkBeads {
+		// A deferred bead is deliberately parked (future defer_until) and is
+		// invisible to bd ready, so scale_check reports zero demand for it.
+		// But this pool-demand pass draws from a raw List(status=open) that
+		// still returns deferred beads. A deferred bead that retains a stale
+		// gc.routed_to would otherwise count as poolDesired=1 with no matching
+		// ready work, driving the reconciler to spawn an ephemeral session that
+		// immediately orphan-drains — a spawn/drain loop that only ends when
+		// the bead's defer elapses or the route is stripped by hand. Excluding
+		// deferred beads here mirrors bd ready's server-side filter so gc's
+		// internal demand agrees with the shim.
+		if beads.IsDeferred(wb, now) {
+			continue
+		}
 		template := routedToOrLegacyWorkflowTarget(wb)
 		if template == "" {
 			if sessionBeadID := assigneeToSessionBeadID[strings.TrimSpace(wb.Assignee)]; sessionBeadID != "" {
@@ -171,7 +234,7 @@ func filterAssignedWorkBeadsForPoolDemand(
 		if agentCfg == nil {
 			continue
 		}
-		if assignedWorkIndexReachableFromAgent(cityPath, cfg, agentCfg, assignedWorkStoreRefs, i) {
+		if assignedWorkIndexReachableFromAgentOnClaimRefs(cityPath, cfg, agentCfg, assignedWorkStoreRefs, i, claimRefs) {
 			filtered = append(filtered, wb)
 		}
 	}

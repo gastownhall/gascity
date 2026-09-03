@@ -145,8 +145,10 @@ func FindZCodeSessionFileByScope(searchPaths []string, workDir, sessionName, con
 		return ""
 	}
 	var (
-		bestPath string
-		bestTime time.Time
+		bestPath        string
+		bestTime        time.Time
+		bestPending     string
+		bestPendingTime time.Time
 	)
 	for _, root := range mergeZCodeSearchPaths(searchPaths) {
 		dir := filepath.Join(root, scope)
@@ -159,17 +161,26 @@ func FindZCodeSessionFileByScope(searchPaths []string, workDir, sessionName, con
 			if entry.IsDir() || !strings.HasSuffix(name, ".json") {
 				continue
 			}
-			// The placeholder holds turns canceled before a session existed;
-			// it is adopted by the first real mirror and is never the answer.
-			if strings.HasPrefix(name, "pending-") {
-				continue
-			}
 			path := filepath.Join(dir, name)
+			// The placeholder embeds its work dir (written through load_export
+			// when a boot turn is canceled), so it is scoped like a real mirror.
 			if cleanOpenCodeWorkDir(openCodeExportDirectory(path)) != workDir {
 				continue
 			}
 			info, err := entry.Info()
 			if err != nil {
+				continue
+			}
+			// The placeholder holds turns canceled before a session id existed.
+			// A real mirror always wins — it adopts the placeholder on the first
+			// successful turn — but a first-turn failure leaves ONLY the
+			// placeholder, and it is then the sole record of what happened, so
+			// it must stay resolvable instead of the scope reading as empty.
+			if strings.HasPrefix(name, "pending-") {
+				if bestPending == "" || info.ModTime().After(bestPendingTime) {
+					bestPending = path
+					bestPendingTime = info.ModTime()
+				}
 				continue
 			}
 			if bestPath == "" || info.ModTime().After(bestTime) {
@@ -178,7 +189,10 @@ func FindZCodeSessionFileByScope(searchPaths []string, workDir, sessionName, con
 			}
 		}
 	}
-	return bestPath
+	if bestPath != "" {
+		return bestPath
+	}
+	return bestPending
 }
 
 // sanitizeZCodeComponent mirrors the adapter's path-component sanitization

@@ -2985,7 +2985,7 @@ func TestBdStoreListInfersParentFromParentChildDependency(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd list --json --label=real-world-app-contract --include-infra --include-gates --limit 0`: {
+		`bd list --json --label=real-world-app-contract --include-infra --include-gates --limit 50`: {
 			out: []byte(`[
 				{
 					"id":"bd-child",
@@ -3016,6 +3016,94 @@ func TestBdStoreListInfersParentFromParentChildDependency(t *testing.T) {
 	}
 	if got[0].ParentID != "bd-parent" {
 		t.Fatalf("ParentID = %q, want bd-parent", got[0].ParentID)
+	}
+}
+
+// TestBdStoreListPushesCallerLimitForIssuesTierDefaultSort pins the gc-i4j3y
+// fix: an issues-tier query with default ordering and none of the residual
+// Go-side filters must forward the caller's real Limit to bd list instead of
+// forcing an unbounded --limit 0 scan.
+func TestBdStoreListPushesCallerLimitForIssuesTierDefaultSort(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd list --json --label=bounded-caller --include-infra --include-gates --limit 7`: {
+			out: []byte(`[{"id":"bd-a","title":"a","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:00Z","labels":["bounded-caller"]}]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.List(beads.ListQuery{Label: "bounded-caller", Limit: 7})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "bd-a" {
+		t.Fatalf("got = %+v, want single bd-a", got)
+	}
+}
+
+// TestBdStoreListForcesUnboundedForIDs pins that ListQuery.IDs — a Go-side-
+// only residual filter bd list has no flag for — still forces --limit 0 so a
+// bd-side limit can never truncate before the ID match runs.
+func TestBdStoreListForcesUnboundedForIDs(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd list --json --label=bounded-caller --include-infra --include-gates --limit 0`: {
+			out: []byte(`[
+				{"id":"bd-a","title":"a","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:00Z","labels":["bounded-caller"]},
+				{"id":"bd-b","title":"b","status":"open","issue_type":"task","created_at":"2026-05-02T00:00:00Z","labels":["bounded-caller"]}
+			]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.List(beads.ListQuery{Label: "bounded-caller", Limit: 1, IDs: []string{"bd-b"}})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "bd-b" {
+		t.Fatalf("got = %+v, want single bd-b matched Go-side after unbounded fetch", got)
+	}
+}
+
+// TestBdStoreListPushesCallerLimitForSortCreatedDesc pins that a bare
+// SortCreatedDesc issues-tier query (no SeekAfter/Metadata/etc.) pushes the
+// caller's real Limit to bd list. Only paginated (SeekAfter-bearing) reads
+// need the unbounded fetch — see TestSeekGatesForceClientSideLimit, which
+// pins the same baseline at the gate-function level.
+func TestBdStoreListPushesCallerLimitForSortCreatedDesc(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd list --json --label=bounded-caller --include-infra --include-gates --limit 3`: {
+			out: []byte(`[{"id":"bd-a","title":"a","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:00Z","labels":["bounded-caller"]}]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	_, err := s.List(beads.ListQuery{Label: "bounded-caller", Limit: 3, Sort: beads.SortCreatedDesc})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+}
+
+// TestBdStoreListForcesUnboundedForSortCreatedAsc is the SortCreatedAsc twin
+// of TestBdStoreListForcesUnboundedForSortCreatedDesc, confirming the
+// pre-existing guard still holds under the relaxed TierIssues condition.
+func TestBdStoreListForcesUnboundedForSortCreatedAsc(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd list --json --label=bounded-caller --include-infra --include-gates --limit 0`: {
+			out: []byte(`[{"id":"bd-a","title":"a","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:00Z","labels":["bounded-caller"]}]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	_, err := s.List(beads.ListQuery{Label: "bounded-caller", Limit: 1, Sort: beads.SortCreatedAsc})
+	if err != nil {
+		t.Fatalf("List: %v", err)
 	}
 }
 
@@ -3856,7 +3944,7 @@ func TestBdStoreListByLabel(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd list --json --label=order-run:digest --include-infra --include-gates --limit 0`: {
+		`bd list --json --label=order-run:digest --include-infra --include-gates --limit 5`: {
 			out: []byte(`[{"id":"bd-aaa","title":"digest wisp","status":"open","issue_type":"task","created_at":"2026-02-27T10:00:00Z","labels":["order-run:digest"]}]`),
 		},
 	})
@@ -3909,7 +3997,7 @@ func TestBdStoreListByLabelEmpty(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd list --json --label=order-run:none --include-infra --include-gates --limit 0`: {out: []byte(`[]`)},
+		`bd list --json --label=order-run:none --include-infra --include-gates --limit 1`: {out: []byte(`[]`)},
 	})
 	s := beads.NewBdStore("/city", runner)
 	got, err := s.ListByLabel("order-run:none", 1)

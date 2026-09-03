@@ -9400,9 +9400,29 @@ func TestOrderExecEnvRejectsReservedOrderEnvKeys(t *testing.T) {
 	}
 }
 
+// TestOrderExecEnvReservedKeysCoverProjectedEnv catches a key that the exec-env
+// projection emits but nobody added to the reserved guard. Such a key is
+// controller-owned in practice while `[order.env]` can still silently shadow it.
+//
+// The invariant is "reserved, or deliberately overridable" rather than plain
+// "reserved". projectGitHubTokenExecEnv projects the controller's ambient `gh`
+// credentials, and those keys are deliberately kept out of the reserved guard so
+// an order can scope its own token; TestOrderExecEnvGitHubTokenOrderEnvOverrideWins
+// asserts that capability. Reading the exception straight from the production
+// githubTokenExecEnvKeys list keeps the two halves from drifting apart, which is
+// how this guard went stale in the first place: it was written when every
+// projected key really was reserved, and the token projection later added the
+// first projected-but-overridable keys without updating it.
+//
+// Both tokens are pinned with t.Setenv so the projected key set never depends on
+// the ambient environment. Without that pin this test passed in CI, which
+// carries no `gh` token, and failed for every developer and agent authenticated
+// with gh.
 func TestOrderExecEnvReservedKeysCoverProjectedEnv(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GH_TOKEN", "ghs_controller_token")
+	t.Setenv("GITHUB_TOKEN", "github_pat_controller")
 
 	cityDir := t.TempDir()
 	packDir := filepath.Join(cityDir, "packs", "maintenance")
@@ -9421,10 +9441,20 @@ func TestOrderExecEnvReservedKeysCoverProjectedEnv(t *testing.T) {
 		t.Fatalf("orderExecEnvWithError() error = %v", err)
 	}
 
+	overridable := make(map[string]bool, len(githubTokenExecEnvKeys))
+	for _, key := range githubTokenExecEnvKeys {
+		overridable[key] = true
+	}
+
 	var unreserved []string
+	projectedOverridable := 0
 	for _, entry := range envSlice {
 		key, _, ok := strings.Cut(entry, "=")
 		if !ok {
+			continue
+		}
+		if overridable[key] {
+			projectedOverridable++
 			continue
 		}
 		if !isReservedOrderExecEnvKey(key) {
@@ -9433,6 +9463,18 @@ func TestOrderExecEnvReservedKeysCoverProjectedEnv(t *testing.T) {
 	}
 	if len(unreserved) > 0 {
 		t.Fatalf("projected order exec env keys missing from reserved guard: %v", unreserved)
+	}
+	// The exception above is only sound while those keys really are projected.
+	// Assert they were, so that dropping the projection surfaces as a failure
+	// here instead of being absorbed by the allowlist as an empty set.
+	//
+	// Two different mistakes land here. Either the projection stopped emitting a
+	// key it used to emit, or a key joined githubTokenExecEnvKeys without a
+	// matching t.Setenv at the top of this test, so it was never in the ambient
+	// environment to project. The env dump below tells them apart.
+	if projectedOverridable != len(githubTokenExecEnvKeys) {
+		t.Fatalf("projected %d of %d deliberately-overridable keys %v; either the projection dropped one, which the allowlist would otherwise mask, or a key was added to that list without a t.Setenv in this test. env=%v",
+			projectedOverridable, len(githubTokenExecEnvKeys), githubTokenExecEnvKeys, envSlice)
 	}
 }
 

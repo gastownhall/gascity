@@ -137,6 +137,15 @@ const (
 	// threshold), never as a recovery action — pack-level subscribers or
 	// operators own recovery. See gastownhall/gascity#1497, #2085, #2389.
 	SessionUnknownState = "session.unknown_state"
+	// SessionWakeRefused fires when a durable explicit wake request
+	// (wake_request=explicit) is refused before the session ever reaches a
+	// live runtime — held, quarantined, or asleep past its idle-sleep
+	// window. Distinguishes a policy-suppressed wake from
+	// recordWakeFailure's post-start failure accrual; wake_attempts still
+	// increments (via a direct marker write, not the accrual path) so a
+	// persistent refusal remains visible without risking self-quarantine.
+	// See gastownhall/gascity#5739, ga-fxvdit.
+	SessionWakeRefused = "session.wake_refused"
 	// SessionResetStalled fires when a session reset was committed but
 	// the follow-up wake remains pending past the configured startup
 	// timeout. Operators use the typed payload to correlate the stuck
@@ -346,6 +355,7 @@ var KnownEventTypes = []string{
 	SessionDrainAckedWithAssignedWork,
 	SessionStranded,
 	SessionUnknownState,
+	SessionWakeRefused,
 	SessionResetStalled,
 	SessionWorkQueryFailed,
 	SessionDemandClaimDivergence,

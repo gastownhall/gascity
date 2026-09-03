@@ -261,6 +261,11 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 			// class actually relocated: on every other city graphStore IS
 			// store, and an empty tail keeps each of those reads on the single
 			// direct call it makes today.
+			// Both readings above assume the drain's convoy lives in the SCOPE
+			// store it is dispatched from. Enforce that (ga-w2mf3).
+			if err := assertDrainRootScopeMatchesDispatch(bead, workflowStoreRefForDir(storePath, cityPath, loadedCityName(cfg, cityPath), cfg)); err != nil {
+				return err
+			}
 			if graphStore != store {
 				opts.MemberStores = []beads.Store{store}
 			}
@@ -700,17 +705,19 @@ func controlGraphRelocated(cityPath, storePath string) bool {
 // the standing refusal — so federating it would turn a city-level storage
 // misconfiguration into a hard scan error on EVERY rig dispatcher, and a scan
 // error is fatal to the drain loop, so all rig control dispatch would crash-loop
-// on a city that is otherwise still serving work. classRoutedStoreForID states
-// the governing rule for exactly this error: a standing refusal "is a fact about
-// the city and none about a particular bead — and a refused city still serves
-// WORK from its work ledger." A rig's own control beads are that case, so the
-// refusal establishes nothing about them and its own store still answers. The
+// on a city that is otherwise still serving work. cliByIDOwner states the
+// governing rule for exactly this error: the standing refusal "is a verdict
+// about a CITY's storage configuration and says nothing about a bead, and a
+// refused city still serves WORK from its work ledger." A rig's own control
+// beads are that case, so the refusal establishes nothing about them and its
+// own store still answers. The
 // beads the skipped leg would have carried belong to a graph plane that is down
 // by this build's own verdict, already reported by the boot gate, and equally
 // unreachable to the CITY dispatcher.
 //
-// The identity gate the sibling surfaces apply (relocatedGraphLegFrom, and
-// classRoutedStoreForID's `class == work`) is deliberately not restated here:
+// The identity gate the sibling surfaces apply (relocatedGraphLegFrom's
+// `binding == cityStore`, and storeref's own dedupeLegs, which folds a binding
+// that IS the caller's work store into one probed leg) is not restated here:
 // this arm runs only for a RIG scope, whose store is that rig's own bd/Dolt
 // handle and never the city's binding, and the scan-side caller holds no store
 // handle to compare against at all — it shells `bd` for its scope leg.
@@ -1101,6 +1108,12 @@ func decorateDynamicFragmentRecipe(fragment *formula.FragmentRecipe, source bead
 		if err != nil {
 			return err
 		}
+		// Capture the formula-declared continuation group from the authored
+		// (freshly-cloned) step metadata so the pool opt-in is sourced immutably
+		// through the binding, matching DecorateGraphWorkflowRecipeWithDefaultBinding.
+		// The leaf now clears any group the binding does not carry, so omitting
+		// this on the dynamic-fragment path would drop every declared group.
+		binding.ContinuationGroup = strings.TrimSpace(step.Metadata[beadmeta.ContinuationGroupMetadataKey])
 		if graphroute.IsControlDispatcherKind(step.Metadata[beadmeta.KindMetadataKey]) {
 			controlRigContext := graphRouteBindingRigContext(binding)
 			if storeScoped {
@@ -2538,4 +2551,15 @@ func workflowBeadIDs(bb []beads.Bead) []string {
 		ids[i] = b.ID
 	}
 	return ids
+}
+
+// assertDrainRootScopeMatchesDispatch fails a drain rooted in a different work
+// scope than it is dispatched from: its members would resolve empty, not absent.
+func assertDrainRootScopeMatchesDispatch(bead beads.Bead, dispatchStoreRef string) error {
+	rootRef := strings.TrimSpace(bead.Metadata[beadmeta.RootStoreRefMetadataKey])
+	dispatchStoreRef = strings.TrimSpace(dispatchStoreRef)
+	if rootRef == "" || dispatchStoreRef == "" || rootRef == dispatchStoreRef {
+		return nil
+	}
+	return fmt.Errorf("drain %s is rooted in %s but dispatched from %s: its convoy members live in the root's work store, so draining from here would resolve an empty convoy and report success (ga-w2mf3)", bead.ID, rootRef, dispatchStoreRef)
 }

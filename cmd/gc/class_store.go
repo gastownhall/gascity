@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
@@ -374,6 +376,26 @@ func moleculeClassStore(recipe *formula.Recipe, workStore, graphStore beads.Stor
 		return graphStore
 	}
 	return workStore
+}
+
+// cookOnClassRouted compiles a formula and instantiates it in the store the
+// compiled recipe's class demands; molecule.Cook picks its store before compiling.
+func cookOnClassRouted(ctx context.Context, workStore, graphStore beads.Store, formulaName string, searchPaths []string, opts molecule.Options) (*molecule.Result, error) {
+	if opts.ParentID == "" {
+		return nil, fmt.Errorf("cookOnClassRouted requires Options.ParentID")
+	}
+	compileVars := opts.Vars
+	if compileVars == nil {
+		compileVars = map[string]string{}
+	}
+	recipe, err := formula.CompileWithoutRuntimeVarValidation(ctx, formulaName, searchPaths, compileVars)
+	if err != nil {
+		return nil, fmt.Errorf("compiling formula %q: %w", formulaName, err)
+	}
+	if err := molecule.ValidateRecipeRuntimeVars(recipe, opts); err != nil {
+		return nil, err
+	}
+	return molecule.Instantiate(ctx, moleculeClassStore(recipe, workStore, graphStore), recipe, opts)
 }
 
 // recipeCoordClass returns the coordination class of the beads that

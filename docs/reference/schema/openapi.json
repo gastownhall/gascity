@@ -2575,6 +2575,9 @@
             "$ref": "#/components/schemas/SessionUnknownStatePayload"
           },
           {
+            "$ref": "#/components/schemas/SessionWakeRefusedPayload"
+          },
+          {
             "$ref": "#/components/schemas/StorageBindingOutcomePayload"
           },
           {
@@ -10864,6 +10867,43 @@
         ],
         "type": "object"
       },
+      "SessionWakeRefusedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "attempts": {
+            "description": "wake_attempts recorded after this refusal.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "reason": {
+            "description": "Refusal reason: held, quarantined, or idle-sleep.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Session bead ID.",
+            "type": "string"
+          },
+          "session_name": {
+            "description": "Session display name, if known.",
+            "type": "string"
+          },
+          "template": {
+            "description": "Resolved session template.",
+            "type": "string"
+          },
+          "wake_request": {
+            "description": "The wake_request metadata value that triggered this check (explicit).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "reason",
+          "wake_request",
+          "attempts"
+        ],
+        "type": "object"
+      },
       "SlingInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -12187,6 +12227,7 @@
             "session.undrained": "#/components/schemas/TypedEventStreamEnvelopeSessionUndrained",
             "session.unknown_state": "#/components/schemas/TypedEventStreamEnvelopeSessionUnknownState",
             "session.updated": "#/components/schemas/TypedEventStreamEnvelopeSessionUpdated",
+            "session.wake_refused": "#/components/schemas/TypedEventStreamEnvelopeSessionWakeRefused",
             "session.woke": "#/components/schemas/TypedEventStreamEnvelopeSessionWoke",
             "session.work_query_failed": "#/components/schemas/TypedEventStreamEnvelopeSessionWorkQueryFailed",
             "storage.binding.converged": "#/components/schemas/TypedEventStreamEnvelopeStorageBindingConverged",
@@ -12440,6 +12481,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionUpdated"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionWakeRefused"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionWoke"
@@ -13679,6 +13723,7 @@
                 "session.drain_acked_with_assigned_work",
                 "session.stranded",
                 "session.unknown_state",
+                "session.wake_refused",
                 "session.reset_stalled",
                 "session.work_query_failed",
                 "session.demand_claim_divergence",
@@ -17139,6 +17184,63 @@
         "title": "TypedEventStreamEnvelope session.updated",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeSessionWakeRefused": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionWakeRefusedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.wake_refused",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.wake_refused",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSessionWoke": {
         "additionalProperties": false,
         "properties": {
@@ -17963,6 +18065,7 @@
             "session.undrained": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionUndrained",
             "session.unknown_state": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionUnknownState",
             "session.updated": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionUpdated",
+            "session.wake_refused": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionWakeRefused",
             "session.woke": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionWoke",
             "session.work_query_failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionWorkQueryFailed",
             "storage.binding.converged": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageBindingConverged",
@@ -18216,6 +18319,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionUpdated"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionWakeRefused"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionWoke"
@@ -19538,6 +19644,7 @@
                 "session.drain_acked_with_assigned_work",
                 "session.stranded",
                 "session.unknown_state",
+                "session.wake_refused",
                 "session.reset_stalled",
                 "session.work_query_failed",
                 "session.demand_claim_divergence",
@@ -23233,6 +23340,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope session.updated",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSessionWakeRefused": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionWakeRefusedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.wake_refused",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.wake_refused",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeSessionWoke": {
@@ -27620,6 +27788,7 @@
     },
     "/v0/city/{cityName}/bead/{id}": {
       "delete": {
+        "description": "Closes the bead. This is a soft delete: the bead remains readable and retains its history, with status \"closed\". The API exposes no hard delete, so a caller that needs the record actually removed must not rely on this endpoint.",
         "operationId": "delete-v0-city-by-city-name-bead-by-id",
         "parameters": [
           {

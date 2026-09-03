@@ -94,8 +94,22 @@ func ExecCommandRunnerWithEnvContextWithoutAmbientBeads(ctx context.Context, env
 }
 
 func execCommandRunnerWithEnv(parent context.Context, env map[string]string, withoutAmbientBeads bool) CommandRunner {
+	return execCommandRunner(parent, env, withoutAmbientBeads, processEnvSnapshotExcludingNativeDoltOpen)
+}
+
+// ExecCommandRunnerWithExactEnvContext is like ExecCommandRunnerWithEnvContext,
+// but replaces the child environment instead of layering overrides onto the
+// parent process. Use it when env is a complete, already-scrubbed projection
+// (e.g. the hook-claim query env from mergeRuntimeEnv). This is a stronger
+// invariant than the WithoutAmbientBeads pair, which strips only BEADS_*:
+// here the mutation runs in exactly the environment the query ran in.
+func ExecCommandRunnerWithExactEnvContext(ctx context.Context, env map[string]string) CommandRunner {
+	return execCommandRunner(ctx, env, false, func() []string { return nil })
+}
+
+func execCommandRunner(parent context.Context, env map[string]string, withoutAmbientBeads bool, baseEnvFn func() []string) CommandRunner {
 	return func(dir, name string, args ...string) ([]byte, error) {
-		baseEnv := processEnvSnapshotExcludingNativeDoltOpen()
+		baseEnv := baseEnvFn()
 		execName := name
 		if name == "bd" {
 			pinned, _ := effectiveEnvValue(baseEnv, env, "BD_BIN")
@@ -1414,10 +1428,11 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 // preconditions server-side and reports a failed one as exit 13 having written
 // nothing (bdstore_conditional_release.go). The raw `bd sql` path below is the
 // fallback for any bd predating the flags (beads#5008) — which today is the LIVE
-// path, not a floor nobody runs: no published beads release carries them, so the
-// installable default (deps.env BD_VERSION) lands here, and that is what every
-// CI job and every operator install obtains. The contract-tested minimum
-// (BD_PREV_VERSION, 1.0.4) lands here too, but it is not what makes the fallback
+// path, not a floor nobody runs: the only release carrying them is a prerelease
+// (v1.2.1), below the published bar this pin holds, so the installable default
+// (deps.env BD_VERSION) lands here, and that is what every CI job and every
+// operator install obtains. The contract-tested minimum (BD_PREV_VERSION, 1.0.4)
+// lands here too, but it is not what makes the fallback
 // load-bearing. On that path the sqlite backend refuses raw DB access, so that
 // rejection — and embedded dolt WITHOUT a configured dolt directory — surface
 // ErrConditionalReleaseUnsupported (the latter via the
@@ -2734,7 +2749,12 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 }
 
 func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssignees bool) bool {
-	if query.TierMode == TierIssues || query.TierMode == TierWisps {
+	// TierWisps always merges two independently-fetched legs (this bd-list
+	// leg plus the ephemeral leg in listWispsTier) and needs full candidates
+	// from both to union/dedupe/sort/limit correctly; TierIssues is the only
+	// tier reaching this function that reads a single, self-contained result
+	// set, so only it is eligible for a bd-side limit below.
+	if query.TierMode == TierWisps {
 		return true
 	}
 	if serverQuery.Sort == SortCreatedAsc || clientFilteredAssignees {
@@ -2748,6 +2768,12 @@ func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssig
 	// bd-side limit would cut rows before that filter runs — fetch unbounded
 	// and let applyListQuery filter then limit.
 	if serverQuery.SeekAfter != nil {
+		return true
+	}
+	// IDs is a Go-side-only residual filter (see ListQuery.Matches): bd list
+	// has no --id flag, so a bd-side limit could truncate before the
+	// matching IDs are even fetched.
+	if len(serverQuery.IDs) > 0 {
 		return true
 	}
 	return false

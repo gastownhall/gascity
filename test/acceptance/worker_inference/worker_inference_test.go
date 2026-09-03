@@ -1859,7 +1859,7 @@ max_active_sessions = 2
 	if err := os.MkdirAll(filepath.Dir(agentPath), 0o755); err != nil {
 		return err
 	}
-	promptPath := filepath.Join(helpers.FindModuleRoot(), "internal", "bootstrap", "packs", "core", "assets", "prompts", "pool-worker.md")
+	promptPath := filepath.Join(helpers.FindModuleRoot(), "internal", "bootstrap", "packs", "core", "assets", "prompts", "pool-worker.template.md")
 	prompt, err := os.ReadFile(promptPath)
 	if err != nil {
 		return fmt.Errorf("reading canonical pool-worker prompt: %w", err)

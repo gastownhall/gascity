@@ -18,9 +18,10 @@
 # assignment), re-reads its live state from bd, and returns non-zero
 # (blocking the push) unless the bead is still open/in_progress, still
 # assigned to one of this session's identities (any of GC_SESSION_NAME,
-# GC_SESSION_ID, GC_ALIAS, GC_AGENT — mirroring the claim path), still
-# routed to this session's config identity, and not held by the mayor or an
-# external actor.
+# GC_SESSION_ID, GC_ALIAS, GC_AGENT — mirroring the claim path — or
+# GC_TEMPLATE, for work routed to the whole pool rather than claimed by one
+# instance; see ga-kzl21p), still routed to this session's config identity,
+# and not held by the mayor or an external actor.
 #
 # TWO CALL SITES (defense in depth — see ga-fip9ps.1 bead notes):
 #   Layer A — .githooks/pre-push calls this unconditionally for every
@@ -133,6 +134,68 @@ _pog_branch_id_bead_inactive() {
     [[ "$st" != "in_progress" && "$st" != "open" && -n "$st" ]]
 }
 
+# _pog_ownership_violation <json>: pure predicate over an already-fetched
+# `bd show <id> --json` payload (parsed here, not re-read). Prints nothing
+# and returns 0 when the bead reads as currently owned by this session;
+# otherwise prints a short, undecorated reason and returns 1. Checks, in
+# order: status open/in_progress, assignee among this session's live
+# identities, gc.routed_to unset-or-matching, no hold:mayor/hold:external
+# label. Shared by assert_bead_still_claimed (the public push gate, which
+# wraps the reason into its own BLOCKED/--no-verify message below) and
+# _pog_resolve_bead_id's undeclared-single-match tier (ga-0ywrmy.1, which
+# discards the reason and uses only the pass/fail to decide whether an
+# undeclared in-progress bead may stand in for a closed branch-derived one).
+#
+# NOTE: never name a local here 'status' — it is a zsh special parameter
+# (linked to $?, alongside $pipestatus) and this file is sourced into the
+# deployer's ambient zsh shell (ga-xi7wi6); binding a local named 'status'
+# there is a read-only-variable error, not a shadow.
+_pog_ownership_violation() {
+    local json="$1"
+    local bead_status assignee routed_to labels
+    bead_status="$(jq -r '.[0].status // empty' <<<"$json")"
+    assignee="$(jq -r '.[0].assignee // empty' <<<"$json")"
+    routed_to="$(jq -r '.[0].metadata."gc.routed_to" // empty' <<<"$json")"
+    labels="$(jq -r '.[0].labels[]? // empty' <<<"$json")"
+
+    if [[ "$bead_status" != "in_progress" && "$bead_status" != "open" ]]; then
+        printf "status is '%s', not in_progress/open; the claim behind this push is stale" "$bead_status"
+        return 1
+    fi
+
+    local -a _pog_identities=()
+    local _pog_ident
+    for _pog_ident in "${GC_SESSION_NAME:-}" "${GC_SESSION_ID:-}" "${GC_ALIAS:-}" "${GC_AGENT:-}" "${GC_TEMPLATE:-}"; do
+        [[ -n "$_pog_ident" ]] && _pog_identities+=("$_pog_ident")
+    done
+    if [[ ${#_pog_identities[@]} -gt 0 ]]; then
+        local _pog_owned=0
+        for _pog_ident in "${_pog_identities[@]}"; do
+            if [[ -n "$assignee" && "$assignee" == "$_pog_ident" ]]; then _pog_owned=1; break; fi
+        done
+        if [[ $_pog_owned -eq 0 ]]; then
+            printf "assignee is '%s', not any current-session identity (%s); it was reassigned since this push began" "$assignee" "${_pog_identities[*]}"
+            return 1
+        fi
+    fi
+
+    if [[ -n "${GC_TEMPLATE:-}" && -n "$routed_to" && "$routed_to" != "$GC_TEMPLATE" ]]; then
+        printf "gc.routed_to is '%s', not this session's config identity (%s); it was rerouted since this push began" "$routed_to" "$GC_TEMPLATE"
+        return 1
+    fi
+
+    if grep -qx 'hold:mayor' <<<"$labels"; then
+        printf 'is held (hold:mayor); a mayor ruling is pending'
+        return 1
+    fi
+    if grep -qx 'hold:external' <<<"$labels"; then
+        printf 'is held (hold:external)'
+        return 1
+    fi
+
+    return 0
+}
+
 # _pog_resolve_bead_id: prints the bead id this push should be checked
 # against; prints nothing if none can be resolved. Resolution order:
 #   1. The current branch name, matched against ga-[0-9a-z]{6}(\.[0-9]+)* —
@@ -146,9 +209,22 @@ _pog_branch_id_bead_inactive() {
 #      wrong (and possibly closed) parent/child bead instead of the actual
 #      grandchild bead the branch is for. The literal 6-char-only pattern
 #      would misresolve to the root bead on any sub-bead's own branch.
-#   2. Falls back to this session's single in-progress assignment
+#   2. Falls back to this session's in-progress assignment
 #      (bd list --assignee="$GC_AGENT" --status=in_progress --json) when
-#      the branch name doesn't match.
+#      the branch name doesn't match. Only resolves when that query returns
+#      EXACTLY one bead — two or more in-progress beads for this session is
+#      not a positive identification of which one (if any) this push is
+#      for, so it resolves the same as finding none (ga-1qepfl mechanism 2:
+#      an unrelated in-progress bead, e.g. one correctly held open for its
+#      own merge-tracking, was blocking pushes for a completely different
+#      deploy/*-gate branch because path 2 took .[0] of the match list
+#      unconditionally). This single-match requirement applies to EVERY
+#      branch shape that falls through to the fallback, not only
+#      deploy/*-gate — a non-gate branch that encodes no bead id and a
+#      session holding 2+ in-progress beads now resolves to nothing and is
+#      not checked at all. Deliberate: .[0] of an unordered multi-match was
+#      never sound enforcement in either direction. Pinned by
+#      test_bead_id_general_branch_ignores_ambiguous_inprogress_beads.
 # If both resolve and disagree, the branch match wins (it's the more
 # specific signal) and a warning goes to stderr — this is a best-effort
 # cross-check, not a hard failure, since branch-naming habits can
@@ -184,10 +260,14 @@ _pog_branch_id_bead_inactive() {
 # Confirmed via manual repro, see
 # test_fallback_cannot_detect_staleness_after_status_leaves_in_progress in
 # scripts/test-push-ownership-guard.sh. The fallback query shape matches
-# ga-fip9ps.1's own spec verbatim; widening it (e.g. dropping the status
-# filter) trades this gap for ambiguous multi-match resolution against an
-# agent's whole bead history, which is a real design decision for whoever
-# owns that tradeoff, not a mechanical fix — left for a follow-up bead.
+# ga-fip9ps.1's own spec verbatim; widening it further (e.g. dropping the
+# status filter) would trade this gap for ambiguous multi-match resolution
+# against an agent's whole bead history, which is a real design decision for
+# whoever owns that tradeoff, not a mechanical fix — left for a follow-up
+# bead. (The narrower multi-match case that --status=in_progress alone can
+# already produce — more than one bead simultaneously in_progress under the
+# same assignee — is handled: see the single-match requirement on path 2
+# above, ga-1qepfl.)
 # Prints nothing (not an error) when neither resolves — the caller treats
 # that as "nothing to check," which is what lets Layer A wire this in
 # unconditionally without blocking every push in the repo.
@@ -213,7 +293,23 @@ _pog_resolve_bead_id() {
         else
             local list_json
             if list_json="$(_pog_read_with_retry bd list --assignee="$GC_AGENT" --status=in_progress --json)"; then
-                assignee_id="$(jq -r '.[0].id // empty' <<<"$list_json" 2>/dev/null || true)"
+                # A single in-progress bead is a positive identity signal;
+                # two or more is not -- picking .[0] from an unordered
+                # multi-match would silently assert ownership of whichever
+                # bead the query happens to list first, which is not
+                # evidence it corresponds to THIS push (ga-1qepfl: an
+                # unrelated in-progress bead, e.g. one correctly held open
+                # for its own merge-tracking, blocked pushes for a
+                # completely different deploy/*-gate branch). Leaving
+                # assignee_id empty here is a clean, successful read that
+                # found no single answer -- the same "nothing to check"
+                # outcome as finding zero, not the read-failure ambiguity
+                # assignee_read_failed exists to catch.
+                local assignee_count
+                assignee_count="$(jq -r 'length' <<<"$list_json" 2>/dev/null || echo 0)"
+                if [[ "$assignee_count" == "1" ]]; then
+                    assignee_id="$(jq -r '.[0].id // empty' <<<"$list_json" 2>/dev/null || true)"
+                fi
             else
                 assignee_read_failed=1
             fi
@@ -256,6 +352,49 @@ _pog_resolve_bead_id() {
         echo "push-ownership-guard: NOTE branch $branch was reused after $branch_id closed; this session's in-progress $successor_id declares itself that bead's continuation (metadata.branch/build_bead), using $successor_id instead" >&2
         printf '%s' "$successor_id"
         return
+    fi
+
+    # UNDECLARED SINGLE MATCH (ga-0ywrmy.1): reached only once the declared-
+    # successor check above found nothing. Requires the SAME freshness gate
+    # (branch-derived bead confirmed inactive) plus one more condition: this
+    # session's in-progress list (already fetched above, not re-queried) has
+    # EXACTLY one entry -- no declared link required, cardinality alone is
+    # the safety bound, mirroring path 2's own single-match discipline. The
+    # sole candidate still has to pass a fresh live-ownership check below; an
+    # unrelated bead that happens to be this session's only other
+    # in-progress claim but reads back not-owned (closed, reassigned, held,
+    # ...) on its own fresh bd show must still not validate this push -- this
+    # tier only ever widens *resolution*, never *verification*.
+    #
+    # Cheap conditions (branch_id present, exactly one candidate already sitting
+    # in ${list_json} from the assignee-fallback fetch above, that candidate
+    # isn't literally branch_id) are checked FIRST, purely from data already in
+    # hand -- no I/O. _pog_branch_id_bead_inactive is deliberately the LAST
+    # link in this && chain, short-circuited so it only runs (and only pays for
+    # its own bd show + retries) once every cheap prerequisite already holds.
+    # The ordinary push -- branch_id resolves, no reuse in play at all -- must
+    # cost exactly the one bd show that assert_bead_still_claimed's own final
+    # check already makes; putting the I/O check first would double that cost
+    # on every push through this guard, not just the rare reuse case (caught
+    # by test_retry_exhausted_still_blocks's exact-call-count assertion).
+    if [[ -n "$branch_id" ]]; then
+        local undeclared_count
+        undeclared_count="$(jq -r 'length' <<<"${list_json:-[]}" 2>/dev/null || echo 0)"
+        if [[ "$undeclared_count" == "1" ]]; then
+            local undeclared_id
+            undeclared_id="$(jq -r '.[0].id // empty' <<<"${list_json:-[]}" 2>/dev/null || true)"
+            if [[ -n "$undeclared_id" && "$undeclared_id" != "$branch_id" ]] && _pog_branch_id_bead_inactive "$branch_id"; then
+                local undeclared_json
+                if undeclared_json="$(_pog_read_with_retry bd show "$undeclared_id" --json)" \
+                    && [[ -n "$undeclared_json" ]] \
+                    && jq -e '.' <<<"$undeclared_json" >/dev/null 2>&1 \
+                    && _pog_ownership_violation "$undeclared_json" >/dev/null 2>&1; then
+                    echo "push-ownership-guard: NOTE branch $branch was reused after $branch_id closed; this session has exactly one other in-progress bead ($undeclared_id) with no declared continuation link, using it as the undeclared single match" >&2
+                    printf '%s' "$undeclared_id"
+                    return
+                fi
+            fi
+        fi
     fi
 
     if [[ -n "$branch_id" && -n "$assignee_id" && "$branch_id" != "$assignee_id" ]]; then
@@ -301,57 +440,10 @@ assert_bead_still_claimed() {
         return 1
     fi
 
-    # NOTE: never name this local 'status' — it is a zsh special parameter
-    # (linked to $?, alongside $pipestatus) and this function is sourced
-    # into the deployer's ambient zsh shell (ga-xi7wi6); binding a local
-    # named 'status' there is a read-only-variable error, not a shadow.
-    local bead_status assignee routed_to labels
-    bead_status="$(jq -r '.[0].status // empty' <<<"$json")"
-    assignee="$(jq -r '.[0].assignee // empty' <<<"$json")"
-    routed_to="$(jq -r '.[0].metadata."gc.routed_to" // empty' <<<"$json")"
-    labels="$(jq -r '.[0].labels[]? // empty' <<<"$json")"
-
-    if [[ "$bead_status" != "in_progress" && "$bead_status" != "open" ]]; then
-        echo "push-ownership-guard: BLOCKED — $id status is '$bead_status', not in_progress/open; the claim behind this push is stale. Bypass with: git push --no-verify" >&2
+    local reason
+    if ! reason="$(_pog_ownership_violation "$json")"; then
+        echo "push-ownership-guard: BLOCKED — $id $reason. Bypass with: git push --no-verify" >&2
         return 1
     fi
-
-    # A session-run claim sets bead.assignee from the first non-empty of
-    # GC_SESSION_NAME, GC_SESSION_ID, GC_ALIAS, GC_AGENT (see
-    # cmd/gc/cmd_hook.go's firstNonEmptyHookValue). Accept ANY of this
-    # session's live identities — GC_AGENT alone falsely blocks a push whose
-    # bead is legitimately assigned to the session name/id. Fail-closed
-    # semantics preserved: with identities present, an assignee matching none
-    # (including empty) still blocks.
-    local -a _pog_identities=()
-    local _pog_ident
-    for _pog_ident in "${GC_SESSION_NAME:-}" "${GC_SESSION_ID:-}" "${GC_ALIAS:-}" "${GC_AGENT:-}"; do
-        [[ -n "$_pog_ident" ]] && _pog_identities+=("$_pog_ident")
-    done
-    if [[ ${#_pog_identities[@]} -gt 0 ]]; then
-        local _pog_owned=0
-        for _pog_ident in "${_pog_identities[@]}"; do
-            if [[ -n "$assignee" && "$assignee" == "$_pog_ident" ]]; then _pog_owned=1; break; fi
-        done
-        if [[ $_pog_owned -eq 0 ]]; then
-            echo "push-ownership-guard: BLOCKED — $id assignee is '$assignee', not any current-session identity (${_pog_identities[*]}); it was reassigned since this push began. Bypass with: git push --no-verify" >&2
-            return 1
-        fi
-    fi
-
-    if [[ -n "${GC_TEMPLATE:-}" && -n "$routed_to" && "$routed_to" != "$GC_TEMPLATE" ]]; then
-        echo "push-ownership-guard: BLOCKED — $id gc.routed_to is '$routed_to', not this session's config identity ($GC_TEMPLATE); it was rerouted since this push began. Bypass with: git push --no-verify" >&2
-        return 1
-    fi
-
-    if grep -qx 'hold:mayor' <<<"$labels"; then
-        echo "push-ownership-guard: BLOCKED — $id is held (hold:mayor); a mayor ruling is pending. Bypass with: git push --no-verify" >&2
-        return 1
-    fi
-    if grep -qx 'hold:external' <<<"$labels"; then
-        echo "push-ownership-guard: BLOCKED — $id is held (hold:external). Bypass with: git push --no-verify" >&2
-        return 1
-    fi
-
     return 0
 }

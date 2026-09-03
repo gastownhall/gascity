@@ -186,6 +186,9 @@ func isNonFatalLoadConfigWarning(warning string) bool {
 	if config.IsDisabledNamedSessionWarning(warning) {
 		return true
 	}
+	if config.IsSessionSetupTimeoutAdvisory(warning) {
+		return true
+	}
 	if config.IsAlwaysFreshWakeModeWarning(warning) {
 		return true
 	}

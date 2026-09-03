@@ -40,6 +40,21 @@ func runGit(t *testing.T, dir string, args ...string) {
 	}
 }
 
+// runGitAllowFail runs a git command in dir and returns its combined output
+// and error instead of failing the test. Use it where the command is expected
+// to fail (deleting a symref that may not exist) or where the failure IS the
+// assertion (a precondition that origin/HEAD is unset). It strips git env vars
+// exactly like runGit, so a leaked GIT_DIR cannot make such an assertion read
+// the wrong repository.
+func runGitAllowFail(t *testing.T, dir string, args ...string) (string, error) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = sanitizeGitEnv(os.Environ())
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
 func TestSanitizeGitEnvStripsGitLocatingVariables(t *testing.T) {
 	in := []string{
 		"PATH=/usr/bin",
@@ -259,7 +274,7 @@ func TestDefaultBranch_OriginHEADUnsetWithMasterRef(t *testing.T) {
 				runGit(t, clone, "update-ref", "refs/remotes/origin/"+ref, "HEAD")
 			}
 			// Defensive: ensure no origin/HEAD symref lingers from clone.
-			_ = exec.Command("git", "-C", clone, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD").Run()
+			_, _ = runGitAllowFail(t, clone, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
 
 			g := New(clone)
 			got, err := g.DefaultBranch()
@@ -292,6 +307,119 @@ func TestProbeDefaultBranch_FromOriginHEAD(t *testing.T) {
 	got := g.ProbeDefaultBranch()
 	if got != "master" {
 		t.Errorf("ProbeDefaultBranch() = %q, want %q", got, "master")
+	}
+}
+
+// gas-4cu: a repo whose remote is not named "origin" still has a mainline.
+// Probing only origin/HEAD silently registered the checked-out feature branch
+// as the rig's default branch, pointing every worktree at the wrong target.
+func TestProbeDefaultBranch_FromNonOriginRemoteHEAD(t *testing.T) {
+	bare := t.TempDir()
+	runGit(t, bare, "init", "--bare")
+
+	clone := t.TempDir()
+	runGit(t, clone, "clone", bare, ".")
+	runGit(t, clone, "config", "user.email", "test@test.com")
+	runGit(t, clone, "config", "user.name", "Test")
+	runGit(t, clone, "commit", "--allow-empty", "-m", "init")
+	// The real-world shape: the remote is named "ajb", not "origin", and the
+	// checked-out branch is a feature branch.
+	runGit(t, clone, "remote", "rename", "origin", "ajb")
+	runGit(t, clone, "checkout", "-b", "fix/some-feature")
+
+	target := "refs/remotes/ajb/main"
+	runGit(t, clone, "update-ref", target, "HEAD")
+	runGit(t, clone, "symbolic-ref", "refs/remotes/ajb/HEAD", target)
+
+	g := New(clone)
+	branch, remote := g.ProbeDefaultBranchFrom()
+	if branch != "main" {
+		t.Errorf("ProbeDefaultBranchFrom() branch = %q, want %q", branch, "main")
+	}
+	if remote != "ajb" {
+		t.Errorf("ProbeDefaultBranchFrom() remote = %q, want %q", remote, "ajb")
+	}
+	if got := g.ProbeDefaultBranch(); got != "main" {
+		t.Errorf("ProbeDefaultBranch() = %q, want %q", got, "main")
+	}
+}
+
+// The multi-remote probe consults every remote's HEAD, not just origin's, so
+// a repo whose origin has no HEAD set but which also tracks an upstream reads
+// the mainline from upstream rather than guessing from the checked-out
+// branch. This is the arm that widened: before, an unset origin/HEAD fell
+// straight through to the current branch and would have registered
+// "fix/some-feature" as the rig's mainline.
+func TestProbeDefaultBranchFrom_UsesUpstreamHEADWhenOriginHEADIsUnset(t *testing.T) {
+	bare := t.TempDir()
+	runGit(t, bare, "init", "--bare")
+
+	clone := t.TempDir()
+	runGit(t, clone, "clone", bare, ".")
+	runGit(t, clone, "config", "user.email", "test@test.com")
+	runGit(t, clone, "config", "user.name", "Test")
+	runGit(t, clone, "commit", "--allow-empty", "-m", "init")
+	runGit(t, clone, "remote", "add", "upstream", bare)
+	runGit(t, clone, "checkout", "-b", "fix/some-feature")
+
+	// origin exists and has a tracking ref, but no HEAD symref.
+	runGit(t, clone, "update-ref", "refs/remotes/origin/main", "HEAD")
+	_, _ = runGitAllowFail(t, clone, "symbolic-ref", "-d", "refs/remotes/origin/HEAD")
+	if out, err := runGitAllowFail(t, clone, "symbolic-ref", "refs/remotes/origin/HEAD"); err == nil {
+		t.Fatalf("precondition: origin/HEAD must be unset, got %q", out)
+	}
+
+	// upstream does have a HEAD, pointing at its own mainline.
+	runGit(t, clone, "update-ref", "refs/remotes/upstream/trunk", "HEAD")
+	runGit(t, clone, "symbolic-ref", "refs/remotes/upstream/HEAD", "refs/remotes/upstream/trunk")
+
+	g := New(clone)
+	branch, remote := g.ProbeDefaultBranchFrom()
+	if branch != "trunk" {
+		t.Errorf("ProbeDefaultBranchFrom() branch = %q, want %q (upstream/HEAD, not the checked-out feature branch)", branch, "trunk")
+	}
+	if remote != "upstream" {
+		t.Errorf("ProbeDefaultBranchFrom() remote = %q, want %q", remote, "upstream")
+	}
+}
+
+// origin stays the preferred remote when several are configured.
+func TestProbeDefaultBranch_PrefersOriginOverOtherRemotes(t *testing.T) {
+	bare := t.TempDir()
+	runGit(t, bare, "init", "--bare")
+
+	clone := t.TempDir()
+	runGit(t, clone, "clone", bare, ".")
+	runGit(t, clone, "config", "user.email", "test@test.com")
+	runGit(t, clone, "config", "user.name", "Test")
+	runGit(t, clone, "commit", "--allow-empty", "-m", "init")
+	runGit(t, clone, "remote", "add", "ajb", bare)
+
+	runGit(t, clone, "update-ref", "refs/remotes/origin/master", "HEAD")
+	runGit(t, clone, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/master")
+	runGit(t, clone, "update-ref", "refs/remotes/ajb/trunk", "HEAD")
+	runGit(t, clone, "symbolic-ref", "refs/remotes/ajb/HEAD", "refs/remotes/ajb/trunk")
+
+	g := New(clone)
+	branch, remote := g.ProbeDefaultBranchFrom()
+	if branch != "master" || remote != "origin" {
+		t.Errorf("ProbeDefaultBranchFrom() = (%q, %q), want (master, origin)", branch, remote)
+	}
+}
+
+// The current-branch fallback reports no remote, so callers can tell the
+// operator the mainline was guessed rather than read from a remote HEAD.
+func TestProbeDefaultBranchFrom_CurrentBranchFallbackHasNoRemote(t *testing.T) {
+	repo := initTestRepo(t)
+	runGit(t, repo, "checkout", "-b", "develop")
+
+	g := New(repo)
+	branch, remote := g.ProbeDefaultBranchFrom()
+	if branch != "develop" {
+		t.Errorf("ProbeDefaultBranchFrom() branch = %q, want develop", branch)
+	}
+	if remote != "" {
+		t.Errorf("ProbeDefaultBranchFrom() remote = %q, want empty for the current-branch fallback", remote)
 	}
 }
 
@@ -778,5 +906,19 @@ func TestUntrustedRemoteGitConfigArgs(t *testing.T) {
 		if args[i] != "-c" {
 			t.Fatalf("arg %d = %q, want -c; full: %v", i, args[i], args)
 		}
+	}
+}
+
+// git quotes paths containing non-ASCII or control characters in porcelain
+// output. Consuming the quoted text verbatim makes a live registration
+// unmatchable, which the worktree safety scans read as "absent".
+func TestParseWorktreeListUnquotesCQuotedPaths(t *testing.T) {
+	out := "worktree \"/tmp/caf\\303\\251\"\nHEAD abc123\nbranch refs/heads/main\n\n"
+	got := parseWorktreeList(out)
+	if len(got) != 1 {
+		t.Fatalf("parseWorktreeList returned %d entries, want 1", len(got))
+	}
+	if got[0].Path != "/tmp/café" {
+		t.Errorf("Path = %q, want %q", got[0].Path, "/tmp/café")
 	}
 }
