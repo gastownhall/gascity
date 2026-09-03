@@ -93,10 +93,39 @@ func TestBeadsFrontDoorProxiedRefusalsAreSafe(t *testing.T) {
 	}
 }
 
+func TestGasCityGcBdExternalUnixSocketFrontDoor(t *testing.T) {
+	requireDoltIntegration(t)
+	baseEnv := filterEnvMany(newIsolatedToolEnv(t, true), "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT", "GC_DOLT_HOST", "GC_DOLT_PORT")
+	fixture := newFrontDoorFixture(t, baseEnv, "proxied-external-socket")
+	env := append([]string{}, fixture.env...)
+	env = append(env, "GC_CITY_PATH="+fixture.dir)
+	before, err := os.ReadFile(filepath.Join(fixture.dir, ".beads", "metadata.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"bd", "create", "front door", "-t", "task", "--json"}, {"bd", "list", "--json"}} {
+		if out, err := runCommand(fixture.dir, env, 20*time.Second, gcBinary, args...); err != nil {
+			t.Fatalf("gc %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	fixture.socketServer.stop(t)
+	if out, err := runCommand(fixture.dir, env, 3*time.Second, gcBinary, "bd", "list", "--json"); err == nil {
+		t.Fatalf("gc bd unexpectedly succeeded after socket outage: %s", out)
+	}
+	got, err := os.ReadFile(filepath.Join(fixture.dir, ".beads", "metadata.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before, got) {
+		t.Fatalf("metadata mutated during outage")
+	}
+}
+
 type frontDoorFixture struct {
-	dir  string
-	env  []string
-	mode string
+	dir          string
+	env          []string
+	mode         string
+	socketServer *doltSocketServer
 }
 
 func newFrontDoorFixture(t *testing.T, baseEnv []string, mode string) *frontDoorFixture {
@@ -107,8 +136,12 @@ func newFrontDoorFixture(t *testing.T, baseEnv []string, mode string) *frontDoor
 		t.Fatalf("create %s workspace: %v", mode, err)
 	}
 	gitInitWorkspace(t, dir)
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"frontdoor\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
 	env := append([]string(nil), baseEnv...)
 	env = append(env, "HOME="+filepath.Join(root, "home"), "BEADS_DIR="+filepath.Join(dir, ".beads"))
+	var socketServer *doltSocketServer
 	switch mode {
 	case "direct":
 		port := startSharedDoltServer(t, baseEnv, filepath.Join(root, "dolt"))
@@ -128,7 +161,8 @@ func newFrontDoorFixture(t *testing.T, baseEnv []string, mode string) *frontDoor
 			"--proxied-server-external-port", port,
 			"-p", "parity", "--skip-hooks", "--skip-agents", "--non-interactive", "--quiet")
 	case "proxied-external-socket":
-		socketPath := startSharedDoltSocketServer(t, baseEnv, filepath.Join(root, "dolt"))
+		socketServer = startDoltSocketServer(t, baseEnv, filepath.Join(root, "dolt"))
+		socketPath := socketServer.socketPath
 		runFrontDoorMust(t, &frontDoorFixture{dir: dir, env: env},
 			"init", "--proxied-server", "--database", "parity_proxy",
 			"--proxied-server-external-socket-path", socketPath,
@@ -136,7 +170,7 @@ func newFrontDoorFixture(t *testing.T, baseEnv []string, mode string) *frontDoor
 	default:
 		t.Fatalf("unknown front-door fixture mode %q", mode)
 	}
-	fixture := &frontDoorFixture{dir: dir, env: env, mode: mode}
+	fixture := &frontDoorFixture{dir: dir, env: env, mode: mode, socketServer: socketServer}
 	if _, err := os.Stat(filepath.Join(dir, ".beads", "metadata.json")); err != nil {
 		t.Fatalf("%s init did not create metadata.json: %v", mode, err)
 	}
@@ -148,6 +182,33 @@ func newFrontDoorFixture(t *testing.T, baseEnv []string, mode string) *frontDoor
 // TCP helper in bdstore_test.go and proves that a proxy can front a remote
 // (externally managed) SQL server without changing the bd front door.
 func startSharedDoltSocketServer(t *testing.T, env []string, dataDir string) string {
+	return startDoltSocketServer(t, env, dataDir).socketPath
+}
+
+type doltSocketServer struct {
+	socketPath string
+	cancel     context.CancelFunc
+	waitCh     <-chan error
+	logFile    *os.File
+	stopped    bool
+}
+
+func (s *doltSocketServer) stop(t *testing.T) {
+	t.Helper()
+	if s.stopped {
+		return
+	}
+	s.stopped = true
+	s.cancel()
+	if err := <-s.waitCh; err != nil && !strings.Contains(err.Error(), "signal: killed") {
+		t.Fatalf("stop dolt socket server: %v", err)
+	}
+	if err := s.logFile.Close(); err != nil {
+		t.Fatalf("close dolt socket log: %v", err)
+	}
+}
+
+func startDoltSocketServer(t *testing.T, env []string, dataDir string) *doltSocketServer {
 	t.Helper()
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		t.Fatalf("creating dolt data dir: %v", err)
@@ -174,12 +235,9 @@ func startSharedDoltSocketServer(t *testing.T, env []string, dataDir string) str
 	startupCtx, startupCancel := context.WithTimeout(context.Background(), doltServerStartupLimit)
 	defer startupCancel()
 	if err := waitForUnixSocket(startupCtx, socketPath); err == nil {
-		t.Cleanup(func() {
-			cancel()
-			<-waitCh
-			_ = logFile.Close()
-		})
-		return socketPath
+		server := &doltSocketServer{socketPath: socketPath, cancel: cancel, waitCh: waitCh, logFile: logFile}
+		t.Cleanup(func() { server.stop(t) })
+		return server
 	}
 
 	cancel()
@@ -187,7 +245,7 @@ func startSharedDoltSocketServer(t *testing.T, env []string, dataDir string) str
 	_ = logFile.Close()
 	logBytes, _ := os.ReadFile(logPath)
 	t.Fatalf("dolt sql-server did not become ready on unix socket %s within %s:\n%s", socketPath, doltServerStartupLimit, logBytes)
-	return ""
+	return nil
 }
 
 // waitForUnixSocket waits for a black-box SQL listener to accept a connection.
